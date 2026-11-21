@@ -4,6 +4,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { chromium, type Browser, type Page } from "@playwright/test";
 import { build } from "esbuild";
 import { formatLineReference } from "../code-selection";
+import { PLACEMENTS } from "../code-editor/__tests__/editable-diff-browser-fixture";
 
 const tabsDir = path.resolve("apps/desktop/src/renderer/shell/workbench/tabs");
 const CSS = ["styles/zeros-tokens.css", "styles/semantic-tokens.css", "styles/global/document.css"]
@@ -30,8 +31,8 @@ const editable = [...lines.slice(0, 4), "line 5 changed;", ...lines.slice(5, 10)
 
 declare global {
   interface Window {
-    appends: Array<{ text: string; chatId: string | null }>;
-    mount(kind: "editable" | "source" | "split"): void;
+    appends: Array<{ text: string; chatId: string | null; preserveFocus?: boolean }>;
+    mount(kind: "editable" | "source" | "split", cwd: string): void;
   }
 }
 
@@ -51,9 +52,9 @@ beforeAll(async () => {
         import { AddToChatPopup } from "./add-to-chat-popup";
         import { zerosCodeViewOptions } from "../../../shared/theme/diff-theme";
         window.appends = [];
-        function Host({ kind }) {
+        function Host({ kind, cwd }) {
           const [root, setRoot] = useState(null);
-          const query = { workspaceId: "workspace", cwd: "/personal/a", path: "file.ts", filter: "all" };
+          const query = { workspaceId: "workspace", cwd, path: "file.ts", filter: "all" };
           return <div ref={setRoot} style={{ height: 400, width: 760, marginTop: kind === "source" ? 200 : 0, position: "relative", overflow: "hidden" }}>
             {kind === "editable" ? <EditableDiffEditor query={query} value={${JSON.stringify(editable)}}
               savedContent={${JSON.stringify(editable)}} isNewFile={false} active revision={0} refreshKey={0}
@@ -64,7 +65,7 @@ beforeAll(async () => {
           </div>;
         }
         const app = createRoot(document.getElementById("root"));
-        window.mount = kind => app.render(<Host kind={kind} />);
+        window.mount = (kind, cwd) => app.render(<Host kind={kind} cwd={cwd} />);
       `,
     },
     bundle: true,
@@ -105,13 +106,13 @@ beforeAll(async () => {
 }, 90_000);
 afterAll(async () => { await browser?.close(); });
 
-async function open(kind: "editable" | "source" | "split"): Promise<Page> {
+async function open(kind: "editable" | "source" | "split", cwd: string = PLACEMENTS[0][1]): Promise<Page> {
   const page = await browser.newPage({ viewport: { width: 900, height: 640 } });
   await page.setContent(`<style>${CSS} body { margin: 0; background: var(--bg1); }
     .h-full { height: 100%; } .min-h-0 { min-height: 0; } .overflow-y-auto { overflow-y: auto; }
     .select-text { -webkit-user-select: text; user-select: text; }</style><div id="root"></div>`);
   await page.addScriptTag({ content: source });
-  await page.evaluate((kind) => window.mount(kind), kind);
+  await page.evaluate(([kind, cwd]) => window.mount(kind, cwd), [kind, cwd] as const);
   await page.waitForFunction((kind) => kind === "source"
     ? !!document.querySelector(".cm-content")
     : [...document.querySelectorAll("diffs-container")].some((host) => host.shadowRoot?.querySelector("[data-line]")), kind);
@@ -142,13 +143,14 @@ describe("Add to Chat", () => {
     expect(formatLineReference("src/a.ts", { start: 11, end: 12, removed: true })).toBe("src/a.ts:L11-12 (removed)");
   });
 
-  it("adds the editable diff's selected lines with ⌘L, leaving out removed lines", async () => {
-    const page = await open("editable");
+  it.each(PLACEMENTS)("adds the editable diff's selected lines with ⌘L (%s), leaving out removed lines", async (_placement, cwd) => {
+    const page = await open("editable", cwd);
     try {
       await dragDiff(page, '[data-line="2"]', '[data-line="6"]:not([data-line-type="change-deletion"])');
       await expect.poll(() => popup(page).isVisible()).toBe(true);
       await page.keyboard.press("ControlOrMeta+l");
       expect(await appends(page)).toEqual(["src/file.ts:L2-6"]);
+      expect(await page.evaluate(() => window.appends[0].preserveFocus)).toBe(true);
       await expect.poll(() => popup(page).isVisible()).toBe(false);
 
       await dragDiff(page, '[data-line="5"][data-line-type="change-deletion"]', '[data-line="5"][data-line-type="change-deletion"]', 120);
@@ -179,6 +181,8 @@ describe("Add to Chat", () => {
       // Scrolled above the viewer but still inside the window.
       await page.evaluate(() => { document.querySelector(".cm-scroller")!.scrollTop = 120; });
       await expect.poll(() => popup(page).isVisible()).toBe(false);
+      await page.keyboard.press("ControlOrMeta+l");
+      expect(await appends(page)).toEqual(["src/file.ts:L3-4"]);
       await page.evaluate(() => { document.querySelector(".cm-scroller")!.scrollTop = 0; });
       await expect.poll(() => popup(page).isVisible()).toBe(true);
 
@@ -193,6 +197,38 @@ describe("Add to Chat", () => {
       await dragDiff(page, '[data-deletions] [data-line="13"]', '[data-deletions] [data-line="14"]');
       await popup(page).click();
       expect(await appends(page)).toEqual(["src/file.ts:L11-12"]);
+    } finally { await page.close(); }
+  });
+
+  it("offers lines again once their added or dismissed selection ends", async () => {
+    const page = await open("source");
+    try {
+      const line = (n: number) => page.evaluate((n) => {
+        const { x, y, height } = document.querySelectorAll(".cm-line")[n - 1].getBoundingClientRect();
+        return { x, y: y + height / 2 };
+      }, n);
+      const select = async () => {
+        const second = await line(2), fourth = await line(4);
+        await page.mouse.move(second.x + 2, second.y);
+        await page.mouse.down();
+        await page.mouse.move(fourth.x + 40, fourth.y, { steps: 4 });
+        await page.mouse.up();
+      };
+      const clear = async () => { const eighth = await line(8); await page.mouse.click(eighth.x + 2, eighth.y); };
+      await select();
+      await expect.poll(() => popup(page).isVisible()).toBe(true);
+      await page.keyboard.press("Escape");
+      await expect.poll(() => popup(page).isVisible()).toBe(false);
+      await clear();
+      await select();
+      await expect.poll(() => popup(page).isVisible()).toBe(true);
+      await page.keyboard.press("ControlOrMeta+l");
+      await expect.poll(() => popup(page).isVisible()).toBe(false);
+      await clear();
+      await select();
+      await expect.poll(() => popup(page).isVisible()).toBe(true);
+      await page.keyboard.press("ControlOrMeta+l");
+      expect(await appends(page)).toEqual(["src/file.ts:L2-4", "src/file.ts:L2-4"]);
     } finally { await page.close(); }
   });
 });

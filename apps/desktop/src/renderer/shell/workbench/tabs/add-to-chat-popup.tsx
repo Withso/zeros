@@ -28,8 +28,10 @@ export function AddToChatPopup({
 }) {
   const dispatch = useWorkspaceDispatch();
   const [selection, setSelection] = useState<CodeSelection | null>(null);
-  const [dismissed, setDismissed] = useState<CodeSelection | null>(null);
-  const shown = selection && !sameLines(selection, dismissed) ? selection : null;
+  // Added or dismissed lines stay hidden only until that selection ends.
+  const [dismissed, setDismissed] = useState<{ path: string; lines: CodeSelection } | null>(null);
+  const shown =
+    selection && !(dismissed?.path === path && sameLines(selection, dismissed.lines)) ? selection : null;
   const latest = useRef({ shown, path, root });
   latest.current = { shown, path, root };
   const content = useRef<HTMLDivElement | null>(null);
@@ -45,6 +47,7 @@ export function AddToChatPopup({
       frame = 0;
       if (pointerDown) return;
       const next = readCodeSelection(root);
+      if (!next) setDismissed(null);
       setSelection((current) => (sameLines(current, next) ? current : next));
     };
     const schedule = () => {
@@ -55,6 +58,7 @@ export function AddToChatPopup({
       if (content.current?.contains(event.target as Node)) return;
       pointerDown = true;
       setSelection(null);
+      setDismissed(null);
     };
     const up = () => {
       if (!pointerDown) return;
@@ -78,7 +82,7 @@ export function AddToChatPopup({
   const add = useCallback(() => {
     const { shown: current, path: file } = latest.current;
     if (!current) return;
-    setDismissed(current);
+    setDismissed({ path: file, lines: current });
     const chatId = useWorkspaceStore.getState().activeChatId;
     if (!chatId) {
       toast.error("No active chat to add this to.", { description: "Open or create a chat first." });
@@ -87,42 +91,42 @@ export function AddToChatPopup({
     appendCounter += 1;
     dispatch({
       type: "ENQUEUE_COMPOSER_APPEND",
-      append: { id: `code-reference-${appendCounter}`, text: formatLineReference(file, current), chatId, source: "manual" },
+      append: {
+        id: `code-reference-${appendCounter}`,
+        text: formatLineReference(file, current),
+        chatId,
+        source: "manual",
+        preserveFocus: true,
+      },
     });
   }, [dispatch]);
+
+  // Off screen once the selection scrolls out of the viewer, so
+  // hideWhenDetached hides the popup instead of leaving it behind.
+  const anchorRect = useCallback(() => {
+    const rect = latest.current.shown?.rect();
+    const bounds = latest.current.root?.getBoundingClientRect();
+    return rect && bounds && rect.bottom > bounds.top && rect.top < bounds.bottom ? rect : OFF_SCREEN;
+  }, []);
 
   // Capture so the editors' own Mod-L (CodeMirror selects a line) never runs.
   useEffect(() => {
     if (!active || !root || !shown) return;
     const keydown = (event: KeyboardEvent) => {
-      if (!isAddToChatKey(event)) return;
+      // A selection scrolled out of view leaves ⌘L to the editor.
+      if (!isAddToChatKey(event) || anchorRect() === OFF_SCREEN) return;
       event.preventDefault();
       event.stopPropagation();
       add();
     };
     root.addEventListener("keydown", keydown, true);
     return () => root.removeEventListener("keydown", keydown, true);
-  }, [active, root, shown, add]);
+  }, [active, root, shown, add, anchorRect]);
 
-  const anchor = useMemo(
-    () => ({
-      current: {
-        // Off screen once the selection scrolls out of the viewer, so
-        // hideWhenDetached hides the popup instead of leaving it behind.
-        getBoundingClientRect: () => {
-          const rect = latest.current.shown?.rect();
-          const bounds = latest.current.root?.getBoundingClientRect();
-          return rect && bounds && rect.bottom > bounds.top && rect.top < bounds.bottom
-            ? rect
-            : OFF_SCREEN;
-        },
-      },
-    }),
-    [],
-  );
+  const anchor = useMemo(() => ({ current: { getBoundingClientRect: anchorRect } }), [anchorRect]);
 
   return (
-    <Popover open={!!shown} onOpenChange={(open) => { if (!open) setDismissed(selection); }}>
+    <Popover open={!!shown} onOpenChange={(open) => { if (!open && selection) setDismissed({ path, lines: selection }); }}>
       <PopoverAnchor virtualRef={anchor} />
       <PopoverContent
         ref={content}
