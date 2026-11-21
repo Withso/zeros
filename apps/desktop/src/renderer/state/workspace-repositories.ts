@@ -39,7 +39,9 @@ export function repositoryWorkspace(workspace: Workspace, repository: WorkspaceR
   if (!byRepository) views.set(workspace, byRepository = new Map());
   let view = byRepository.get(repository);
   if (!view) {
-    view = { ...workspace, id: repository.target, path: repository.target, branch: repository.branch, baseBranch: repository.baseBranch,
+    // One repository: without the workspace's list, so totals never count the others as its own.
+    const { repositories: _repositories, ...one } = workspace;
+    view = { ...one, id: repository.target, path: repository.target, branch: repository.branch, baseBranch: repository.baseBranch,
       prNumber: repository.prNumber, prState: repository.prState, prUrl: repository.prUrl };
     byRepository.set(repository, view);
   }

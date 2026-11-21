@@ -70,6 +70,9 @@ describe("a workspace's current repository", () => {
     const web = workspace.repositories![1]!;
     const view = repositoryWorkspace(workspace, web);
     expect(view).toMatchObject({ id: `${key}/web`, path: `${key}/web`, repoRoot: key, baseBranch: "release", prNumber: 9, prState: "draft" });
+    // It is one repository: its counts and has-changes are its own, never the workspace's total.
+    expect(view.repositories).toBeUndefined();
+    expect(workspaceRepositories(view)).toEqual([expect.objectContaining({ target: `${key}/web` })]);
     expect(repositoryWorkspace(workspace, web)).toBe(view);
     expect(repositoryWorkspace(workspace, workspace.repositories![0]!)).not.toBe(view);
   });
