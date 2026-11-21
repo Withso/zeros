@@ -19,6 +19,8 @@ import { createCloudV2AgentLogins, createCloudV2CodexRefresh } from "./agent-log
 import { BoatCloudV2Compute } from "./boat.js";
 import type { CloudV2ControlFrame } from "./contract.js";
 import { CloudV2ComputerBuilder, CloudV2Computers } from "./computer.js";
+import { CloudV2ReadyCopies, CloudV2ReadyCopyBuilder, CloudV2ReadyCopyForks } from "./ready-copies.js";
+import { CloudV2ReadyCopySecrets } from "./ready-copy-secrets.js";
 import { createCloudGithubServices } from "./github-composition.js";
 import { CLOUD_V2_READY_CHANNEL, CLOUD_V2_BOOT_CHANNEL, WorkerReadySignals, notifyCloudV2WorkerBoot } from "./worker-ready.js";
 import { hydrateCloudRepository, type CloudSourceProof, type CloudSourceTarget } from "./source-authority.js";
@@ -154,7 +156,11 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
   const environments = new CloudEnvironments(pool, keys, github.connections.authorizeRepositoryConfiguration.bind(github.connections));
   const githubToken = (workspace: CloudV2Workspace, purpose: "git" | "gh" = "git", failedTokenSha256?: string) => github.workspaceToken(workspace, "user", purpose, failedTokenSha256);
   const proxyBase = `${v2.apiUrl}${CLOUD_V2_PROXY_PREFIX}`;
-  const computers = new CloudV2Computers(pool, lockPool, github.resolveRepository, github.resolveRecentRepository);
+  const computers = new CloudV2Computers(pool, lockPool, github.resolveRepository, github.resolveRecentRepository,
+    { readyCopies: v2.readyCopies === true, ...(v2.sharedBaseSnapshot ? { sharedBaseSnapshot: v2.sharedBaseSnapshot } : {}) });
+  // Ready copies (CLOUD_V2_READY_COPIES_ENABLED): absent while off, so creates and builds run as before.
+  const readyCopies = v2.readyCopies === true ? new CloudV2ReadyCopies(pool) : null;
+  const readyCopySecrets = readyCopies ? new CloudV2ReadyCopySecrets(pool, keys) : null;
   const source = github.source;
   const authorizeRepository = async (org: string, user: string, repository: string) => {
     await source.repository(org, user, repository);
@@ -313,6 +319,7 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
     computers,
     ...(v2.asyncCreate !== false ? { asyncCreate: () => Date.now() >= asyncCreateFrom } : {}),
     installedRepositories: organizationId => store.installedRepositories(organizationId),
+    ...(readyCopies && readyCopySecrets ? { readyCopies: { status: (organizationId: string) => readyCopies.status(organizationId), secrets: readyCopySecrets } } : {}),
     authorizeRepository, authorizeRepositories, authorizeSourceTargets, authorizeBuildRepository, authorizeSource, continueSource,
     remoteHead: (org, user, target, branch) => github.remoteHead(org, user, target.repository, branch, target.repositoryId),
     github: { service: github.service, documents: github.documents },
@@ -562,6 +569,25 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
     },
     ...(remoteHeads ? { remoteHead: (org: string, user: string, target: CloudSourceTarget, branch: string) =>
       remoteHeads(org, user, target.repository, branch, target.repositoryId) } : {}),
+    ...(readyCopies ? { onActivated: async ({ organizationId, reason }: { organizationId: string; reason: string }) => {
+      if (readyCopyBuilder) await readyCopyBuilder.baseActivated(organizationId, reason);
+      else await readyCopies.markStale(organizationId);
+    } } : {}),
+    logger: console,
+  }) : null;
+  const copyCloneToken = async (organizationId: string, userId: string, target: CloudSourceTarget) =>
+    (await github.token({ organizationId, userId }, target, "read", "computer",
+      () => authorizeSourceTargets(organizationId, userId, [target]))).token;
+  const readyCopyBuilder = roles.lifecycle && readyCopies ? new CloudV2ReadyCopyBuilder({
+    copies: readyCopies, compute, channel: config.deploymentChannel, localOwner, runtime, publicKeys: signer.publicKeys,
+    cloneToken: copyCloneToken,
+    ...(readyCopySecrets ? { secrets: (organizationId: string, repository: string) => readyCopySecrets.open(organizationId, repository) } : {}),
+    logger: console,
+  }) : null;
+  const readyCopyForks = roles.lifecycle && readyCopies ? new CloudV2ReadyCopyForks({
+    copies: readyCopies, compute,
+    ...(readyCopyBuilder ? { queueFirst: (organizationId: string, repository: string) => readyCopyBuilder.queueFirstCopies(organizationId, repository) } : {}),
+    githubToken: async (workspace: CloudV2LifecycleWorkspace) => (await lifecycleSource(workspace, "computer"))?.credential ?? github.workspaceToken(workspace),
     logger: console,
   }) : null;
   const lifecycle = roles.lifecycle ? new CloudV2Lifecycle({
@@ -577,6 +603,8 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
       resolve: (id, input) => store.resolvePendingSource(id, input),
     }),
     ...(builder ? { builds: builder } : {}),
+    ...(readyCopyForks ? { readyCopies: readyCopyForks } : {}),
+    ...(readyCopyBuilder ? { readyCopyBuilds: readyCopyBuilder } : {}),
     store,
     timing,
     compute,

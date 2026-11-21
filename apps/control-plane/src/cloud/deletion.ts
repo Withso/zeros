@@ -16,6 +16,10 @@ export async function scheduleCloudDeletion(
           state=CASE WHEN state IN ('queued','building') THEN 'cancelled' ELSE state END
       WHERE org_id=$1`, [organizationId]);
     await tx.query(`UPDATE cloud_v2_computers SET active_build_id=NULL,snapshot_name=NULL WHERE org_id=$1`, [organizationId]);
+    // Ready copies are provider receipts: retired here, their machines deleted by the copy builder's cleanup.
+    await tx.query(`UPDATE cloud_v2_ready_copies SET state=CASE WHEN state='building' THEN 'failed' ELSE 'retired' END,
+      failure_reason=CASE WHEN state='building' THEN 'organization_deleted' ELSE failure_reason END, updated_at=clock_timestamp()
+      WHERE org_id=$1 AND state IN ('building','ready')`, [organizationId]);
   }
   await tx.query(
     `UPDATE cloud_v2_workspaces SET state='deleting', worker_token_hash=NULL,

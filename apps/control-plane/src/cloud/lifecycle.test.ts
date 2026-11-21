@@ -56,7 +56,8 @@ function setup(claimed: (CloudV2LifecycleWorkspace & { attempts: number })[], op
   checkpoints?: ReturnType<typeof checkpointsFake>; remoteHead?: CloudV2LifecycleDeps["remoteHead"]; githubToken?: CloudV2LifecycleDeps["githubToken"]; uploadHorizon?: string;
   checkpointRetry?: boolean; retries?: RetryRow[]; prepareRepository?: CloudV2LifecycleDeps["prepareRepository"]; pruneEnvironments?: () => Promise<void>;
   runtimeForWorkspace?: CloudV2LifecycleDeps["runtimeForWorkspace"]; bootEnv?: CloudV2LifecycleDeps["bootEnv"]; builds?: CloudV2LifecycleDeps["builds"]; recovery?: CloudV2LifecycleDeps["recovery"];
-  authorizeWorkspace?: CloudV2LifecycleDeps["authorizeWorkspace"]; resolvePendingSource?: CloudV2LifecycleDeps["resolvePendingSource"]; previousRuntimeSha256?: string; logs?: true } = {}) {
+  authorizeWorkspace?: CloudV2LifecycleDeps["authorizeWorkspace"]; resolvePendingSource?: CloudV2LifecycleDeps["resolvePendingSource"]; previousRuntimeSha256?: string; logs?: true;
+  readyCopies?: CloudV2LifecycleDeps["readyCopies"] } = {}) {
   const retries = [...options.retries ?? []];
   const compute: CloudV2Compute = {
     create: vi.fn(async () => ({ sandboxId: "bx_new1" })),
@@ -135,6 +136,7 @@ function setup(claimed: (CloudV2LifecycleWorkspace & { attempts: number })[], op
     ...(options.builds ? { builds: options.builds } : {}),
     ...(options.authorizeWorkspace ? { authorizeWorkspace: options.authorizeWorkspace } : {}),
     ...(options.resolvePendingSource ? { resolvePendingSource: options.resolvePendingSource } : {}),
+    ...(options.readyCopies ? { readyCopies: options.readyCopies } : {}),
   });
   return { lifecycle, compute, store, stopWorker, logs };
 }
@@ -242,6 +244,35 @@ it("ends a clone failure with its typed cause before worker hello instead of ret
   expect(f.store.rotateWorkerToken).not.toHaveBeenCalled();
   expect(f.store.defer).not.toHaveBeenCalledWith(w.id, "creating", expect.any(Number), expect.objectContaining({ failure: true }));
   expect(f.compute.delete).not.toHaveBeenCalled();
+});
+
+describe("ready copies at create", () => {
+  const copies = (outcome: Awaited<ReturnType<NonNullable<CloudV2LifecycleDeps["readyCopies"]>["prepare"]>>) =>
+    ({ prepare: vi.fn(async () => outcome), fetchBase: vi.fn(async () => true) });
+
+  it("forks the ready copy instead of creating, keeps its checkout and fetches the base branch", async () => {
+    const w = workspace("creating"), readyCopies = copies({ sandboxId: "bx_copyfork1" }), prepareRepository = vi.fn(async () => {});
+    const f = setup([w], { readyCopies, prepareRepository, stock: true });
+    await f.lifecycle.tick();
+    expect(f.compute.create).not.toHaveBeenCalled();
+    expect(f.store.recordInitialSandbox).toHaveBeenCalledWith(w.id, w.stopGeneration, "bx_copyfork1", expect.any(Date));
+    expect(readyCopies.fetchBase).toHaveBeenCalledWith(w, "bx_copyfork1");
+    // The copy already holds the checkout and its setup: no clone, no image preparation.
+    expect(prepareRepository).not.toHaveBeenCalled();
+    expect(vi.mocked(f.compute.exec).mock.calls.some(([, command]) => command.includes("git-lfs"))).toBe(false);
+    expect(f.store.rotateWorkerToken).toHaveBeenCalled();
+  });
+
+  it("waits a bounded time for a copy still building, then clones directly when none is ready", async () => {
+    const w = workspace("creating"), waiting = setup([w], { readyCopies: copies({ waitMs: 3_000 }) });
+    await waiting.lifecycle.tick();
+    expect(waiting.store.defer).toHaveBeenCalledWith(w.id, "creating", 3_000);
+    expect(waiting.compute.create).not.toHaveBeenCalled();
+    const direct = setup([w], { readyCopies: copies(null) });
+    await direct.lifecycle.tick();
+    expect(direct.compute.create).toHaveBeenCalledWith(expect.objectContaining({ key: w.id, from: "cv2-alpha-org-1" }));
+    expect(direct.compute.fork).not.toHaveBeenCalled();
+  });
 });
 
 type RetryRow = CloudV2LifecycleWorkspace & { retry: CloudV2CheckpointRetry };
@@ -1640,5 +1671,17 @@ describe("cloud v2 checkpoint retries", () => {
     expect(old.compute.fork).not.toHaveBeenCalled();
     expect(old.compute.findSandbox).toHaveBeenCalledWith(lost.name, new Date(NOW - 86_400_000 - 10 * 60_000));
     expect(vi.mocked(old.compute.delete).mock.calls).toEqual([["bx_fork7"], ["bx_abc1"]]);
+  });
+
+  it("with ready copies, recovers a lost retry fork by its key only, never by a name other forks share", async () => {
+    // Forks of one ready copy are all named "<copy> fork", and their own forks "<copy> fork fork".
+    const readyCopies = { prepare: vi.fn(async () => null), fetchBase: vi.fn(async () => true) };
+    const lost = { attempt: PENDING, name: "zeros-alpha-copy-1a2b3c4d fork fork", source: "bx_abc1", requestedAt: new Date(NOW - 86_400_000).toISOString(), sandboxId: null };
+    const old = setup([workspace("deleting", { boatSandboxId: "bx_abc1", checkpointRetryFork: lost })], { checkpoints: checkpointsFake(), readyCopies });
+    vi.mocked(old.compute.findSandbox).mockResolvedValue("bx_other_workspace_fork");
+    await old.lifecycle.tick();
+    expect(old.compute.findSandbox).not.toHaveBeenCalled();
+    expect(vi.mocked(old.compute.delete).mock.calls).toEqual([["bx_abc1"]]);
+    expect(old.store.checkpointForkGone).toHaveBeenCalledWith(WS, PENDING);
   });
 });

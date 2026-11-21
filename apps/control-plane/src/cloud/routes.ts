@@ -1,5 +1,7 @@
 // Cloud workspace v2 HTTP API under /v1, so the normal authentication
 // middleware always sets c.get("user"). Execution authority belongs to the persisted rollout mode.
+import { CloudV2InstallScriptSchema } from "./computer.js";
+import { ReadyCopySecretsSchema, type CloudV2ReadyCopySecrets } from "./ready-copy-secrets.js";
 import type { CloudExecutionContexts } from "./execution/store.js";
 import { CloudWorkspaceCreateSchema, createCloudWorkspaceOperations } from "./workspace-create.js";
 import { rateLimit } from "../ratelimit.js";
@@ -69,7 +71,13 @@ export type CloudV2RouteDeps = {
   store: Pick<CloudV2Store, "activeComputer" | "createWorkspace" | "createWorkspaceOnce" | "readCreateReceipt" | "get" | "promptContext" | "list" | "requestLifecycle" | "transition" | "issueToken" | "listChats" | "messageWindow" | "searchMessages" | "messageRange" | "messageSince" | "markActive"> & Partial<Pick<CloudV2Store, "prompts" | "getByNumber" | "chatEdits" | "requestExecutionLifecycle">>;
   /** Roll out only with a runtime that advertises durable prompt delivery. */
   promptOutbox?: boolean;
-  computers: Pick<CloudV2Computers, "requireMember" | "requireAdmin" | "overview" | "enqueue" | "buildConfigured" | "buildSourceTargets" | "saveRecipe" | "discardRecipe" | "reactivate" | "log" | "logRepositories">;
+  computers: Pick<CloudV2Computers, "requireMember" | "requireAdmin" | "overview" | "enqueue" | "buildConfigured" | "buildSourceTargets" | "saveRecipe" | "discardRecipe" | "reactivate" | "log" | "logRepositories">
+    & Partial<Pick<CloudV2Computers, "saveInstallScript">>;
+  /** Present only when ready copies are on (CloudV2Config.readyCopies). */
+  readyCopies?: {
+    status(organizationId: string): Promise<ReadonlyMap<string, "ready" | "building" | null>>;
+    secrets: Pick<CloudV2ReadyCopySecrets, "names" | "save" | "clear">;
+  };
   /** Repositories the organization's active Cloud Computer has installed; null without one. */
   installedRepositories(organizationId: string): Promise<readonly CloudV2InstalledRepository[] | null>;
   authorizeRepository?(organizationId: string, userId: string, repository: string): Promise<void>;
@@ -339,7 +347,10 @@ export function createCloudV2Routes(deps: CloudV2RouteDeps): Hono {
       }
       catch (error) { if (!(error instanceof HttpError) || ![403,404].includes(error.status)) throw error; }
     }
-    return c.json({ repositories: repositories === null ? null : allowed });
+    // With ready copies, Create says a repository is still getting ready while its first copy builds.
+    const status = deps.readyCopies && allowed.length ? await deps.readyCopies.status(organizationId) : null;
+    return c.json({ repositories: repositories === null ? null : status
+      ? allowed.map(entry => ({ ...entry, readyCopy: status.get(entry.repository.toLowerCase()) ?? null })) : allowed });
   });
 
   // The Create page calls this on intent for its selected repository, so the
@@ -361,6 +372,47 @@ export function createCloudV2Routes(deps: CloudV2RouteDeps): Hono {
     const organizationId = org(c.req.param("org"));
     await deps.computers.requireAdmin(organizationId, c.get("user").id);
     return c.json(await deps.computers.overview(organizationId));
+  });
+
+  /** Ready copies: members read the install script; owners and admins edit it. */
+  app.get("/v1/cloud-v2/organizations/:org/computer/install-script", async c => {
+    const organizationId = org(c.req.param("org"));
+    if (!deps.readyCopies) throw new HttpError(404, "not_found", "Not found");
+    await deps.computers.requireMember(organizationId, c.get("user").id);
+    const overview = await deps.computers.overview(organizationId);
+    return c.json({ installScript: overview.installScript ?? null, recipeRevision: overview.recipeRevision });
+  });
+
+  app.put("/v1/cloud-v2/organizations/:org/computer/install-script", json, async c => {
+    const organizationId = org(c.req.param("org"));
+    if (!deps.readyCopies || !deps.computers.saveInstallScript) throw new HttpError(404, "not_found", "Not found");
+    await deps.computers.requireAdmin(organizationId, c.get("user").id);
+    const parsed = z.object({ installScript: CloudV2InstallScriptSchema.nullable(), revision }).strict().safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) throw new HttpError(400, "invalid_request", "Invalid install script");
+    return c.json(await deps.computers.saveInstallScript(organizationId, c.get("user").id, parsed.data.installScript, parsed.data.revision));
+  });
+
+  /** Build secrets for a shared repository's ready copy. Values are write-only. */
+  const secretRepository = (owner: string, name: string) => {
+    const value = `${owner}/${name}`;
+    if (!/^[A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100}$/.test(value)) throw new HttpError(404, "not_found", "Repository not found");
+    return value;
+  };
+  app.get("/v1/cloud-v2/organizations/:org/computer/repositories/:owner/:name/build-secrets", async c => {
+    const organizationId = org(c.req.param("org"));
+    if (!deps.readyCopies) throw new HttpError(404, "not_found", "Not found");
+    await deps.computers.requireAdmin(organizationId, c.get("user").id);
+    c.header("Cache-Control", "no-store");
+    return c.json({ names: await deps.readyCopies.secrets.names(organizationId, secretRepository(c.req.param("owner"), c.req.param("name"))) });
+  });
+  app.put("/v1/cloud-v2/organizations/:org/computer/repositories/:owner/:name/build-secrets", json, async c => {
+    const organizationId = org(c.req.param("org")), userId = c.get("user").id;
+    if (!deps.readyCopies) throw new HttpError(404, "not_found", "Not found");
+    await deps.computers.requireAdmin(organizationId, userId);
+    const parsed = z.object({ secrets: ReadyCopySecretsSchema }).strict().safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) throw new HttpError(400, "invalid_request", "Invalid build secrets");
+    c.header("Cache-Control", "no-store");
+    return c.json({ names: await deps.readyCopies.secrets.save(organizationId, secretRepository(c.req.param("owner"), c.req.param("name")), userId, parsed.data.secrets) });
   });
 
   app.post("/v1/cloud-v2/organizations/:org/computer/builds", json, async c => {
