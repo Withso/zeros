@@ -25,6 +25,10 @@ export const CLOUD_V2_CHECKPOINT_SECONDS = 540;
 /** Paths under the VM user's home; the worker keeps its state in the first. */
 export const CLOUD_V2_WORKER_STATE = ".local/share/zeros/cloud-worker";
 const SESSION_PATHS = [CLOUD_V2_WORKER_STATE, ".claude/projects", ".codex/sessions", ".codex/archived_sessions", ".cursor/chats", ".cursor/projects"];
+/** A retention backup keeps the worker's own state (each chat and its native-session
+ * binding) but not the providers' session files: after a restore, a chat whose native
+ * session is not on disk starts a fresh one, and its transcript comes from history. */
+const BACKUP_SESSION_PATHS = [CLOUD_V2_WORKER_STATE];
 /** Written after a restore; the worker then runs the setup once more. */
 export const CLOUD_V2_RESTORED_MARKER = `${CLOUD_V2_WORKER_STATE}/restored-from-checkpoint`;
 /** Never saved from the session paths: setup status, partial uploads, the
@@ -287,8 +291,8 @@ function prologue(kind: "checkpoint" | "restore", lines: string[], activeRestore
 export type CheckpointReuse = { fingerprint: string; base: string | null };
 type ArchiveInput = CheckpointPaths & { baseBranch: string; key: Buffer; maxBytes?: number; reuse?: CheckpointReuse | null;
   /** A retention backup (CLOUD_V2_RETENTION_ENABLED): the same archive without
-   * agent session files and ignored chat attachments. Restore applies only the
-   * parts an archive holds, so it reads either kind unchanged. */
+   * the providers' agent session files and ignored chat attachments. Restore
+   * applies only the parts an archive holds, so it reads either kind unchanged. */
   backup?: boolean;
   /** A workspace of several repositories: every one after the first. Absent, the archive is exactly a one-repository checkpoint's. */
   repositories?: readonly CheckpointRepository[] };
@@ -325,13 +329,11 @@ function archiveSteps(input: ArchiveInput, revision: string): string[] {
     ...repositoryCapture(true, !input.backup),
     // Before the fingerprint, which then covers every repository.
     ...otherRepositoriesCapture(input.repositories ?? [], !input.backup),
-    ...(input.backup ? [] : [
-      "step=sessions",
-      "cd \"$home\"; set --",
-      `for p in ${SESSION_PATHS.map(quote).join(" ")}; do if [ -e "$p" ] && [ ! -L "$p" ]; then set -- "$@" "$p"; fi; done`,
-      "step=fingerprint",
-      `if [ $# -gt 0 ]; then printf 'home ' >> "$work/parts"; node "$work/digest.mjs" tree "$home" ${[...SESSION_EXCLUDED_PATHS.map(path => `path:${path}`), ...SESSION_EXCLUDED_NAMES.map(name => `name:${name}`)].map(quote).join(" ")} -- "$@" >> "$work/parts" || digests=''; fi`,
-    ]),
+    "step=sessions",
+    "cd \"$home\"; set --",
+    `for p in ${(input.backup ? BACKUP_SESSION_PATHS : SESSION_PATHS).map(quote).join(" ")}; do if [ -e "$p" ] && [ ! -L "$p" ]; then set -- "$@" "$p"; fi; done`,
+    "step=fingerprint",
+    `if [ $# -gt 0 ]; then printf 'home ' >> "$work/parts"; node "$work/digest.mjs" tree "$home" ${[...SESSION_EXCLUDED_PATHS.map(path => `path:${path}`), ...SESSION_EXCLUDED_NAMES.map(name => `name:${name}`)].map(quote).join(" ")} -- "$@" >> "$work/parts" || digests=''; fi`,
     // The Git part is the manifest with the index and worktree commits, whose
     // times change on every run, replaced by their trees.
     "fingerprint=''",
@@ -347,14 +349,12 @@ function archiveSteps(input: ArchiveInput, revision: string): string[] {
       "fi",
     ] : []),
     ...repositoryBundle(),
-    ...(input.backup ? [] : [
-      "step=sessions",
-      "cd \"$home\"",
-      "if [ $# -gt 0 ]; then",
-      `  tar -cf "$c/home.tar" ${[...SESSION_EXCLUDED_PATHS, ...SESSION_EXCLUDED_NAMES].map(path => `--exclude=${quote(path)}`).join(" ")} \\`,
-      "    --warning=no-file-changed --warning=no-file-removed --ignore-failed-read \"$@\" || [ $? -eq 1 ]",
-      "fi",
-    ]),
+    "step=sessions",
+    "cd \"$home\"",
+    "if [ $# -gt 0 ]; then",
+    `  tar -cf "$c/home.tar" ${[...SESSION_EXCLUDED_PATHS, ...SESSION_EXCLUDED_NAMES].map(path => `--exclude=${quote(path)}`).join(" ")} \\`,
+    "    --warning=no-file-changed --warning=no-file-removed --ignore-failed-read \"$@\" || [ $? -eq 1 ]",
+    "fi",
     "step=pack",
     "(cd \"$c\" && tar -cf - .) | gzip -1 > \"$work/plain\"; rm -rf \"$c\"",
     `if [ "$(stat -c %s "$work/plain")" -gt ${maxBytes} ]; then fail checkpoint_too_large; fi`,

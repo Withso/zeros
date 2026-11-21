@@ -1354,7 +1354,7 @@ describe("retention backups and the stop probe", () => {
       expect(command.indexOf(WORKER_SERVICE_OFF[1])).toBeLessThan(command.indexOf("git"));
   });
 
-  it("saves every repository's work and small ignored files but no sessions or ignored attachments, and today's restore applies it", () => {
+  it("saves every repository's work, small ignored files and the worker's chats, but no provider sessions or ignored attachments, and today's restore applies it", () => {
     const w = workspaces(), key = randomBytes(32), archive = join(w.root, "backup.zck");
     const other = join(w.oldHome, "acme", "api"), otherNew = join(w.newHome, "acme", "api");
     w.git(w.root, "clone", "-q", w.origin, other);
@@ -1380,7 +1380,8 @@ describe("retention backups and the stop probe", () => {
     expect(readFileSync(join(otherNew, "a.txt"), "utf8")).toBe("second repository's edit\n");
     expect(existsSync(join(w.newRepo, ".context/attachments/upload-1/photo.png"))).toBe(false);
     expect(existsSync(join(w.newHome, ".claude/projects"))).toBe(false);
-    expect(existsSync(join(w.newHome, ".local/share/zeros/cloud-worker/sessions"))).toBe(false);
+    // The worker's own chat metadata stays, so each conversation still opens.
+    expect(readFileSync(join(w.newHome, ".local/share/zeros/cloud-worker/sessions/chats.db"), "utf8")).toBe("rows\n");
   });
 
   it("is never judged unchanged against a full checkpoint of the same files", () => {
