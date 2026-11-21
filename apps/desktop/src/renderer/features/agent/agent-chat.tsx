@@ -1380,6 +1380,12 @@ function AgentChatBody({
   const applyStagedPick = useCallback(async () => {
     if (!chatThread || !chatId || !stagedPick) return;
     const pick = stagedPick;
+    // Closing the session drops its unsent queue, so queued follow-ups must be
+    // sent or removed before the agent changes.
+    if (isHarnessChange(chatThread.agentId, pick.agentId) && queuedMessages.length > 0) {
+      toast.warning("Send or remove queued messages before switching agent.");
+      return;
+    }
     setStagedPickState(null);
     const from = { agentId: chatThread.agentId, model: chatThread.model };
     const row = buildHarnessSwitchMessage({
@@ -1450,7 +1456,7 @@ function AgentChatBody({
       continueAfterSwitchRef.current = { chatId, agentId: pick.agentId };
       void delivery.then(() => setContinueAfterSwitch((n) => n + 1));
     }
-  }, [chatThread, chatId, stagedPick, cloudChat, session.status, agentSessions, applyModelInPlace, recordSwitchRow, updateChatSettings]);
+  }, [chatThread, chatId, stagedPick, queuedMessages.length, cloudChat, session.status, agentSessions, applyModelInPlace, recordSwitchRow, updateChatSettings]);
 
   const stagePick = useCallback(
     (pick: AgentModelPick) => {
@@ -3851,6 +3857,15 @@ function AgentChatBody({
     const pending = continueAfterSwitchRef.current;
     if (!pending || pending.chatId !== chatId || chatThread?.agentId !== pending.agentId) return;
     continueAfterSwitchRef.current = null;
+    // Continue only with the seeded transcript; a draft the user is still
+    // writing is theirs to send.
+    const composer = serializeComposerState();
+    const onlyTranscript = !composer?.displayText.trim() &&
+      (composer?.attachments.length ?? 0) === 1;
+    if (!onlyTranscript) {
+      toast.info("The conversation is attached. Send to continue with the new agent.");
+      return;
+    }
     void handleSend();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [continueAfterSwitch, chatId, chatThread?.agentId]);
