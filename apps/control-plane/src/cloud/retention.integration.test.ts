@@ -10,7 +10,7 @@ import { CloudProviderError } from "./provider-error.js";
 import { resetMigratedTestDatabase } from "../test-database.js";
 import { grantTestPro } from "../test-pro.js";
 import { FakeBoat } from "./__fixtures__/boat-fake.js";
-import { CLOUD_V2_BACKUP_DELAY_MS, CLOUD_V2_CHECKPOINT_RETRY_WINDOW_MS, CLOUD_V2_LOSS_CONFIRM_MS, CloudV2Lifecycle, type CloudV2LifecycleDeps, type CloudV2TimingRecord } from "./lifecycle.js";
+import { CLOUD_V2_BACKUP_DELAY_MS, CLOUD_V2_CHECKPOINT_RETRY_WINDOW_MS, CLOUD_V2_LOSS_CONFIRM_MS, CLOUD_V2_LOSS_UNCONFIRMED_ALERT, CloudV2Lifecycle, type CloudV2LifecycleDeps, type CloudV2TimingRecord } from "./lifecycle.js";
 import { CloudV2Store } from "./store.js";
 
 const d = process.env.TEST_DATABASE_URL ? describe : describe.skip;
@@ -248,6 +248,38 @@ d("cloud v2 retention", () => {
     expect(errors.some(line => line.startsWith("[cloud-v2] rebuilt a workspace whose machine is gone without a backup"))).toBe(true);
     // The old machine's id is never shown to clients.
     expect(JSON.stringify(await store.get(id, user))).not.toContain(vm);
+  });
+
+  it("rebuilds a machine Boat expired (archived, no snapshot left) after two reads, with the note and no delete", async () => {
+    boat.write(vm, `${path("api")}/UNPUSHED`, "api work");
+    await stop();
+    boat.machine(vm)!.expired = true;
+    await expect(boat.inspect(vm)).resolves.toMatchObject({ state: "archived", snapshotAvailable: false, dataExpiredAt: expect.any(Date) });
+    await store.transition(id, ["stopped"], "starting");
+    await lifecycle().tick();
+    const restored = await row();
+    expect(restored.boat_sandbox_id).not.toBe(vm);
+    expect((await lostWork())?.restored).toBe("none");
+    expect(deletes()).not.toContain(vm);
+    expect((await pool.query("SELECT lost_work_machine FROM cloud_v2_workspaces WHERE id=$1", [id])).rows[0].lost_work_machine).toBe(vm);
+  });
+
+  it("never rebuilds a machine Boat still has on a failed resume, and alerts once the attempts pass the bound", async () => {
+    boat.write(vm, `${path("api")}/UNPUSHED`, "api work");
+    await stop();
+    await store.transition(id, ["stopped"], "starting");
+    const resume = vi.spyOn(boat, "resume").mockRejectedValue(notFound());
+    for (let attempt = 1; attempt <= CLOUD_V2_LOSS_UNCONFIRMED_ALERT; attempt++) {
+      await pool.query("UPDATE cloud_v2_workspaces SET next_attempt_at=NULL WHERE id=$1", [id]);
+      await lifecycle().tick();
+      const alerted = errors.some(line => line.startsWith("[cloud-v2] resume keeps failing but Boat still has the machine"));
+      expect(alerted).toBe(attempt >= CLOUD_V2_LOSS_UNCONFIRMED_ALERT);
+    }
+    expect(resume).toHaveBeenCalledTimes(CLOUD_V2_LOSS_UNCONFIRMED_ALERT);
+    expect((await row()).boat_sandbox_id).toBe(vm);
+    expect(deletes()).toEqual([]);
+    expect(await lostWork()).toBeUndefined();
+    expect(boat.machine(vm)!.files.get(`${path("api")}/UNPUSHED`)).toBe("api work");
   });
 
   it("keeps the clean rebuild immediate, and deletes the old machine there", async () => {
