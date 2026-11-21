@@ -29,6 +29,7 @@ function render(project: SettingsProject, options: { cloudAvailable?: boolean; c
   })));
   return container.textContent ?? "";
 }
+const headings = (selector: string) => [...container.querySelectorAll(selector)].map(node => node.textContent);
 const button = (name: string) => [...container.querySelectorAll("button")].find(node => node.textContent === name);
 
 beforeEach(() => {
@@ -72,11 +73,22 @@ describe("project page", () => {
     const text = render(both);
     expect(text).toContain("/Users/me/zeros");
     expect(text).toContain("On the Cloud Computer");
-    for (const part of ["local-setup:zeros", "cloud-setup:withso/zeros", "local-git:zeros", "cloud-git:withso/zeros", "local-environment:zeros", "local-more:zeros"])
+    for (const part of ["local-scripts:zeros", "cloud-setup:withso/zeros", "local-git:zeros", "cloud-git:withso/zeros", "local-environment:zeros",
+      "local-run-actions:zeros", "local-actions:zeros", "local-files:zeros", "local-paths:zeros"])
       expect(text).toContain(part);
     expect(button("Edit")).toBeDefined();
     expect(button("Add to cloud")).toBeUndefined();
     expect(button("Clone to this Mac")).toBeUndefined();
+  });
+
+  it("gives the page one level of sections and names a side only where both appear", () => {
+    render(both);
+    expect(headings("h2")).toEqual(["Where it runs", "Scripts", "Git", "Environment", "Run actions", "Actions", "Files to copy", "Folder"]);
+    expect(headings("h3")).toEqual(["This Mac", "Cloud", "This Mac", "Cloud", "This Mac"]);
+    expect(container.textContent).toContain("Setup runs when a workspace is created; Archive runs before one is archived.");
+    const [local] = settingsProjects([folder("app", "https://github.com/acme/app.git")], []);
+    render(local);
+    expect(headings("h3")).toEqual([]);
   });
 
   it("gives members a read-only cloud row instead of the editors", () => {
@@ -91,6 +103,7 @@ describe("project page", () => {
     let text = render(local);
     expect(text).toContain("Not in cloud");
     expect(text).not.toMatch(/cloud-(setup|git)|Managed by admins|Defaults for cloud/);
+    expect(headings("h3")).toEqual([]);
     act(() => button("Add to cloud")!.click());
     expect(handlers.onAddToCloud).toHaveBeenCalledOnce();
     text = render(local, { cloudAvailable: false });
@@ -108,7 +121,9 @@ describe("project page", () => {
     const [cloudOnly] = settingsProjects([], ["withso/billing-api"]);
     const text = render(cloudOnly);
     expect(text).toContain("Not on this Mac");
-    expect(text).not.toMatch(/local-(setup|git|environment|more)/);
+    expect(text).not.toMatch(/local-/);
+    expect(headings("h2")).toEqual(["Where it runs", "Scripts", "Git", "Environment"]);
+    expect(headings("h3")).toEqual([]);
     act(() => button("Clone to this Mac")!.click());
     expect(s.openGithubProject).toHaveBeenCalledWith({ placement: "local", url: "https://github.com/withso/billing-api.git" });
     s.addProject = false;

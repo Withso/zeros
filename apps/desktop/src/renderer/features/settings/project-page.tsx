@@ -1,3 +1,4 @@
+import type { ReactNode } from "react";
 import { Button } from "../../shared/ui";
 import type { Project } from "../../state/projects-store";
 import { joinProjects, registeredProjectSide, type ProjectSide } from "../../state/project-identity";
@@ -6,7 +7,7 @@ import { parseRemote } from "../../shell/pr/github-url";
 import { useOptionalAddProject } from "../../shell/add-project-provider";
 import { ProjectLocalPart } from "../repositories/repositories-panel";
 import { CloudRepositoryPanel } from "./cloud-repository-panel";
-import { PlaceLabel, SettingsGroup, SettingsRow, SettingsSection } from "./settings-ui";
+import { PlaceLabel, SettingsGroup, SettingsPageSection, SettingsRow, SettingsSection } from "./settings-ui";
 
 /** One GitHub repository's sides as Settings lists them. */
 export interface SettingsProject {
@@ -24,8 +25,9 @@ export interface SettingsProject {
 
 /**
  * A project is complete with one side or both: rows that do not apply are left
- * out, not shown disabled. Every section is an existing repository section or
- * the existing cloud repository editor; this page only arranges them.
+ * out, not shown disabled, and a section names its side only when it shows
+ * both. Every section is an existing repository section or the existing cloud
+ * repository editor; this page only arranges them.
  */
 export function ProjectPage({
   project,
@@ -50,85 +52,86 @@ export function ProjectPage({
   const onCloneToMac = addProject
     ? (github: string) => addProject.openGithubProject({ placement: "local", url: `https://github.com/${github}.git` })
     : null;
-  const [main, ...clones] = project.local;
+  const main = project.local[0];
   const cloud = project.cloudRepository;
+  const both = Boolean(main && cloud);
+  const side = (place: "mac" | "cloud", content: ReactNode) =>
+    both ? <SettingsSection title={<PlaceLabel place={place} />}>{content}</SettingsSection> : content;
   const cloudPart = (part: "git" | "setup") =>
     canManageCloud ? (
-      <SettingsSection title={<PlaceLabel place="cloud" />}>
-        <CloudRepositoryPanel repository={cloud!} tab="git" onTabChange={() => {}} onOpenComputer={onOpenCloudComputer}
-          surfaceActive={surfaceActive} part={part} />
-      </SettingsSection>
+      side("cloud", <CloudRepositoryPanel repository={cloud!} tab="git" onTabChange={() => {}}
+        onOpenComputer={onOpenCloudComputer} surfaceActive={surfaceActive} part={part} />)
     ) : (
       <SettingsGroup>
-        <SettingsRow label={<PlaceLabel place="cloud" />} hint="Managed by admins" />
+        <SettingsRow label={both ? <PlaceLabel place="cloud" /> : part === "git" ? "Cloud branch" : "Cloud setup"} hint="Managed by admins" />
       </SettingsGroup>
     );
   return (
-    <div className="flex flex-col gap-8" data-project-page={project.key}>
-      <SettingsGroup title="Where it runs">
-        {main ? (
-          [main, ...clones].map((folder, index) => (
-            <SettingsRow key={folder.id} label={<PlaceLabel place="mac" />}
-              hint={clones.length > 0 && index === 0 ? `${folder.repoRoot} · Default for new workspaces` : folder.repoRoot} />
-          ))
-        ) : (
-          <SettingsRow label={<PlaceLabel place="mac" />} hint="Not on this Mac">
-            {project.github && onCloneToMac && (
-              <Button variant="secondary" size="sm" onClick={() => onCloneToMac(project.github!)}>Clone to this Mac</Button>
-            )}
-          </SettingsRow>
-        )}
-        {cloud ? (
-          <SettingsRow label={<PlaceLabel place="cloud" />} hint="On the Cloud Computer" />
-        ) : project.github && cloudAvailable ? (
-          <SettingsRow label={<PlaceLabel place="cloud" />} hint="Not in cloud">
-            <Button variant="secondary" size="sm" onClick={onAddToCloud}>Add to cloud</Button>
-          </SettingsRow>
-        ) : null}
-      </SettingsGroup>
+    <div className="flex flex-col gap-10" data-project-page={project.key}>
+      <SettingsPageSection title="Where it runs">
+        <SettingsGroup>
+          {main ? (
+            project.local.map((folder, index) => (
+              <SettingsRow key={folder.id} label={<PlaceLabel place="mac" />}
+                hint={project.local.length > 1 && index === 0 ? `${folder.repoRoot} · Default for new workspaces` : folder.repoRoot} />
+            ))
+          ) : (
+            <SettingsRow label={<PlaceLabel place="mac" />} hint="Not on this Mac">
+              {project.github && onCloneToMac && (
+                <Button variant="secondary" size="sm" onClick={() => onCloneToMac(project.github!)}>Clone to this Mac</Button>
+              )}
+            </SettingsRow>
+          )}
+          {cloud ? (
+            <SettingsRow label={<PlaceLabel place="cloud" />} hint="On the Cloud Computer" />
+          ) : project.github && cloudAvailable ? (
+            <SettingsRow label={<PlaceLabel place="cloud" />} hint="Not in cloud">
+              <Button variant="secondary" size="sm" onClick={onAddToCloud}>Add to cloud</Button>
+            </SettingsRow>
+          ) : null}
+        </SettingsGroup>
+      </SettingsPageSection>
 
-      {(main || cloud) && (
-        <SettingsSection title="Setup" description="Runs when a workspace is created.">
-          <div className="flex flex-col gap-6">
-            {main && main.isGitRepository !== false && (
-              <SettingsSection title={<PlaceLabel place="mac" />}>
-                <ProjectLocalPart project={main} part="setup" surfaceActive={surfaceActive} />
-              </SettingsSection>
-            )}
-            {cloud && cloudPart("setup")}
-          </div>
-        </SettingsSection>
+      {((main && main.isGitRepository !== false) || cloud) && (
+        <SettingsPageSection title="Scripts"
+          description={main ? "Setup runs when a workspace is created; Archive runs before one is archived." : "Runs when a workspace is created."}>
+          {main && main.isGitRepository !== false && side("mac", <ProjectLocalPart key={main.id} project={main} part="scripts" surfaceActive={surfaceActive} />)}
+          {cloud && cloudPart("setup")}
+        </SettingsPageSection>
       )}
 
-      <SettingsSection title="Git">
-        <div className="flex flex-col gap-6">
-          {main && (
-            <SettingsSection title={<PlaceLabel place="mac" />}>
-              <ProjectLocalPart project={main} part="git" surfaceActive={surfaceActive} />
-            </SettingsSection>
-          )}
-          {cloud && cloudPart("git")}
-        </div>
-      </SettingsSection>
+      <SettingsPageSection title="Git">
+        {main && side("mac", <ProjectLocalPart key={main.id} project={main} part="git" surfaceActive={surfaceActive} />)}
+        {cloud && cloudPart("git")}
+      </SettingsPageSection>
 
-      <SettingsSection title="Environment" description="Private to you.">
-        <div className="flex flex-col gap-6">
-          {main && (
-            <SettingsSection title={<PlaceLabel place="mac" />}>
-              <ProjectLocalPart project={main} part="environment" surfaceActive={surfaceActive} />
-            </SettingsSection>
-          )}
-          {cloud && (
-            <SettingsGroup>
-              <SettingsRow label={<PlaceLabel place="cloud" />} hint="Defaults for cloud workspaces you create.">
-                <Button variant="ghost" size="sm" onClick={onOpenEnvironment}>Edit</Button>
-              </SettingsRow>
-            </SettingsGroup>
-          )}
-        </div>
-      </SettingsSection>
+      <SettingsPageSection title="Environment" description="Private to you.">
+        {main && side("mac", <ProjectLocalPart key={main.id} project={main} part="environment" surfaceActive={surfaceActive} />)}
+        {cloud && (
+          <SettingsGroup>
+            <SettingsRow label={both ? <PlaceLabel place="cloud" /> : "Cloud environment"} hint="Defaults for cloud workspaces you create.">
+              <Button variant="ghost" size="sm" onClick={onOpenEnvironment}>Edit</Button>
+            </SettingsRow>
+          </SettingsGroup>
+        )}
+      </SettingsPageSection>
 
-      {main && <ProjectLocalPart project={main} part="more" surfaceActive={surfaceActive} />}
+      {main && (
+        <>
+          <SettingsPageSection title="Run actions">
+            <ProjectLocalPart key={main.id} project={main} part="run-actions" surfaceActive={surfaceActive} />
+          </SettingsPageSection>
+          <SettingsPageSection title="Actions">
+            <ProjectLocalPart key={main.id} project={main} part="actions" surfaceActive={surfaceActive} />
+          </SettingsPageSection>
+          <SettingsPageSection title="Files to copy">
+            <ProjectLocalPart key={main.id} project={main} part="files" surfaceActive={surfaceActive} />
+          </SettingsPageSection>
+          <SettingsPageSection title="Folder">
+            <ProjectLocalPart key={main.id} project={main} part="paths" surfaceActive={surfaceActive} />
+          </SettingsPageSection>
+        </>
+      )}
     </div>
   );
 }

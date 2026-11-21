@@ -431,26 +431,25 @@ export function ProjectLocalPart({
   surfaceActive = true,
 }: {
   project: Project;
-  part: "setup" | "git" | "environment" | "more";
+  part: "scripts" | "git" | "environment" | "run-actions" | "actions" | "files" | "paths";
   surfaceActive?: boolean;
 }) {
   const root = project.repoRoot;
   switch (part) {
-    case "setup":
+    case "scripts":
       return project.isGitRepository !== false ? <ScriptsSection project={project} layer="repo-local" root={root} /> : null;
     case "git":
       return <GitSection project={project} layer="repo-local" root={root} surfaceActive={surfaceActive} />;
     case "environment":
       return <EnvironmentSection project={project} layer="repo-local" root={root} />;
-    case "more":
-      return (
-        <div className="flex flex-col gap-8">
-          <RunActionsSection project={project} layer="repo-local" root={root} />
-          <ActionsSection project={project} layer="repo-local" root={root} />
-          <FilesToCopySection project={project} layer="repo-local" root={root} surfaceActive={surfaceActive} />
-          <PathsSection project={project} />
-        </div>
-      );
+    case "run-actions":
+      return <RunActionsSection project={project} layer="repo-local" root={root} />;
+    case "actions":
+      return <ActionsSection project={project} layer="repo-local" root={root} />;
+    case "files":
+      return <FilesToCopySection project={project} layer="repo-local" root={root} surfaceActive={surfaceActive} />;
+    case "paths":
+      return <PathsSection project={project} />;
   }
 }
 
