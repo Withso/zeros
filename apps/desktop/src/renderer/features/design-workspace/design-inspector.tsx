@@ -467,6 +467,7 @@ export function InspectorEditField({
   const commitIntentRef = useRef(0);
   const scrubCancelRef = useRef<(() => void) | null>(null);
   const mixedScrubRef = useRef(false);
+  const pendingMixedCommitRef = useRef<{ commit: () => void; cancel: () => void } | null>(null);
   const scrubRef = useRef<{
     pointerId: number;
     originX: number;
@@ -742,6 +743,12 @@ export function InspectorEditField({
   };
   commitRef.current = commit;
   useLayoutEffect(() => {
+    const mixedCommit = pendingMixedCommitRef.current;
+    if (mixedCommit && !revalidating) {
+      pendingMixedCommitRef.current = null;
+      if (disabled) mixedCommit.cancel();
+      else mixedCommit.commit();
+    }
     const pending = pendingCommitRef.current;
     if (pending === null || revalidating) return;
     pendingCommitRef.current = null;
@@ -838,8 +845,16 @@ export function InspectorEditField({
                 },
                 onFinish: () => {
                   end();
-                  if (sent !== 0) showMixedMessage(mixedSteps.commit(sent, fine));
-                  else mixedSteps.cancel();
+                  if (sent === 0) {
+                    mixedSteps.cancel();
+                    return;
+                  }
+                  const commit = () => showMixedMessage(mixedSteps.commit(sent, fine));
+                  // Released while the layers read back: save once they do,
+                  // as a typed commit waits, rather than skip the save.
+                  if (disabledRef.current && revalidatingRef.current)
+                    pendingMixedCommitRef.current = { commit, cancel: () => mixedSteps.cancel() };
+                  else commit();
                 },
                 onCancel: () => {
                   end();
@@ -2378,7 +2393,19 @@ export const DesignInspector = React.memo(function DesignInspector({
       const request: DesignStylePreviewRequest = { styles, perNode };
       const generation = context.active ? context.elementDetails?.sourceVersion ?? null : null;
       styleOwner.gesturePreview.ask(request, generation);
-      if (!context.active) return;
+      if (!context.active) {
+        // Waiting for the layers to read back: the live preview holds it so
+        // it shows once they do.
+        if (context.workspaceId && context.frame)
+          for (const nodeId of context.styleNodeIds)
+            publishDesignLivePreviewStyles(
+              context.workspaceId,
+              context.frame.file,
+              nodeId,
+              stylesForNode(nodeId, perNode ? perNode(nodeId) : styles, context),
+            );
+        return;
+      }
       if (
         !context.workspaceId ||
         !context.folder ||

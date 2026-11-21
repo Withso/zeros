@@ -943,6 +943,44 @@ describe("an inspector field scrub", () => {
       await release();
     });
 
+    const enterReadbackGap = () => showRuntime(card, false, sourceVersion, { ...selection, frameVersion: nextVersion });
+    const leaveReadbackGap = async () => {
+      useDesignRuntimeStore.getState().publishNodeDetails("w", "/repo", "home.html", { ...other, sourceVersion: nextVersion }, nextVersion);
+      return showRuntime({ ...card, sourceVersion: nextVersion }, false, nextVersion, { ...selection, frameVersion: nextVersion });
+    };
+
+    it("saves a Mixed scrub released during the readback gap once the layers read back", async () => {
+      await beginMixedScrub();
+      await enterReadbackGap();
+      const before = writes();
+      await release();
+      expect(writes()).toBe(before);
+      await leaveReadbackGap();
+      await settle();
+      await vi.waitFor(() => expect(writes()).toBe(before + 1));
+      expect(lastWrite()).toContain('"opacity"');
+    });
+
+    it("shows a Mixed scrub that first moves during the readback gap once the layers read back", async () => {
+      useDesignRuntimeStore.getState().publishNodeDetails("w", "/repo", "home.html", other, sourceVersion);
+      await showRuntime(card, false, sourceVersion, selection);
+      act(() => {
+        container.querySelector<HTMLButtonElement>('button[aria-label="Scrub Opacity"]')!
+          .dispatchEvent(pointer("pointerdown", 0));
+      });
+      await enterReadbackGap();
+      for (let tick = 1; tick <= 4; tick += 1) {
+        act(() => { window.dispatchEvent(pointer("pointermove", tick * 2)); });
+        await settle();
+      }
+      const next = await leaveReadbackGap();
+      await settle();
+      await vi.waitFor(() => expect(next.previewStyles).toHaveBeenCalled());
+      const before = writes();
+      await release();
+      await vi.waitFor(() => expect(writes()).toBe(before + 1));
+    });
+
     it("keeps a Mixed scrub through the readback gap and saves it", async () => {
       await beginMixedScrub();
       // The frame is at the new generation before its layers read back.
