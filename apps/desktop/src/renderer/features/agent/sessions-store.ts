@@ -1,5 +1,5 @@
 import { trackAgentTurnUsage } from "@/renderer/platform/observability/analytics/agent-events";
-import { turnRowCache, turnRowKey } from "@/renderer/state/read-caches";
+import { refreshChatTurnRows, turnRowCache, turnRowKey } from "@/renderer/state/read-caches";
 // Per-chat session slots in Zustand, so a subscriber re-renders only when its
 // own slice changes: chat A's stream never re-renders chat B. Bridge actions
 // (sendPrompt, ensureSession) live in AgentSessionsProvider.
@@ -1168,6 +1168,7 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
             ? withoutPendingLocalTurn(state.pendingLocalTurns, chatId)
             : state.pendingLocalTurns,
         }));
+        refreshChatTurnRows(chatId, true);
       }
       return;
     }

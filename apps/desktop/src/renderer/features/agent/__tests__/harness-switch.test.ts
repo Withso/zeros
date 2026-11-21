@@ -16,6 +16,8 @@ import { metaForEvent } from "../renderers/event-meta";
 import { isProviderWorkEvent } from "../transcript-notices";
 import { buildForkTranscriptAttachment } from "../fork-chat";
 import type { AgentMessage } from "../use-agent-session";
+import { refreshChatTurnRows, turnRowCache, turnRowKey } from "../../../state/read-caches";
+import type { TurnInfo } from "../../../platform/turns";
 
 const row = (to = { agentId: "codex", model: "gpt-5.1-codex" }) =>
   buildHarnessSwitchMessage({
@@ -169,5 +171,22 @@ describe("commit harness switch", () => {
       updateSettings: update,
     })).resolves.toBe("stale");
     expect(update).not.toHaveBeenCalled();
+  });
+
+  it("marks only the switched chat's cached turn rows stale", () => {
+    const row = (status: string) => ({ status }) as unknown as TurnInfo;
+    const stopped = turnRowKey("c1", "user-1");
+    const settled = turnRowKey("c1", "user-0");
+    const other = turnRowKey("c10", "user-1");
+    turnRowCache.setData(stopped, row("running"));
+    turnRowCache.setData(settled, row("completed"));
+    turnRowCache.setData(other, row("running"));
+    const seen: string[] = [];
+    const offs = [stopped, settled, other].map((key) => turnRowCache.subscribe(key, () => seen.push(key)));
+    refreshChatTurnRows("c1", true);
+    expect(seen).toEqual([stopped]);
+    refreshChatTurnRows("c1");
+    expect(seen).toEqual([stopped, stopped, settled]);
+    offs.forEach((off) => off());
   });
 });

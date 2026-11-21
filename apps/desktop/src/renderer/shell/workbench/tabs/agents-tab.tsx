@@ -1,7 +1,9 @@
 import { useMemo, useState } from "react";
+import { Bot } from "lucide-react";
 import { AgentAwaitingIcon } from "../../../features/agent/agent-awaiting-indicator";
 import { chatAgentActivity } from "../../../features/agent/agent-activity";
 import { AgentIcon } from "../../../features/agent/agent-icon";
+import { useNativeSubagents, type NativeSubagent } from "../../../features/agent/native-subagents";
 import { awaitingKindOfSlot, useSessionsStore } from "../../../features/agent/sessions-store";
 import { RunStream } from "../../../shared/ui/loading";
 import { ListRow, Tabs, TabsContent, TabsList, TabsTrigger } from "../../../shared/ui/primitives";
@@ -69,6 +71,18 @@ function SessionListRow({ chat, folder, status, active, onSelect }: {
   );
 }
 
+/** Provider-native subagents are icon-only and read-only; choosing one opens
+ *  the session whose turn started it. */
+function NativeSubagentRow({ agent, onSelect }: { agent: NativeSubagent; onSelect: (id: string) => void }) {
+  return (
+    <ListRow variant="panel" onClick={() => onSelect(agent.ownerChatId)} data-native-subagent={agent.id}>
+      <Bot className="text-fg2 size-3.5 shrink-0" strokeWidth={1.5} aria-label="Agent" />
+      <span className="text-fg1 min-w-0 flex-1 truncate text-xs">{agent.title}</span>
+      {agent.running && <RunStream size={12} className="text-blue-primary shrink-0" />}
+    </ListRow>
+  );
+}
+
 export function AgentsTab({ active, scope }: { tab: WorkbenchTab; active: boolean; scope?: string }) {
   const activeFolder = useWorkspaceStore(selectActiveFolder);
   const folder = scope ?? activeFolder ?? "";
@@ -91,6 +105,8 @@ export function AgentsTab({ active, scope }: { tab: WorkbenchTab; active: boolea
   const childIds = useMemo(() => children.map((chat) => chat.id), [children]);
   // Hidden retained tabs stay inert: no status scans while inactive.
   const statuses = useSessionStatuses(active ? childIds : NO_IDS);
+  const ownerIds = useMemo(() => (parentId ? [parentId, ...childIds] : NO_IDS), [parentId, childIds]);
+  const natives = useNativeSubagents(active ? ownerIds : NO_IDS);
   // Stored chats stay browsable while a cloud runtime sleeps.
   useWorkbenchStatusSource({ pending: false, primary: true, hasContent: chats.length > 0 });
   const select = (id: string) => openSession(dispatch, id);
@@ -110,15 +126,16 @@ export function AgentsTab({ active, scope }: { tab: WorkbenchTab; active: boolea
         </TabsList>
       )}
       <TabsContent value={parentId ?? ""} forceMount className="mt-0 min-h-0 flex-1 overflow-y-auto py-2">
-        {parent && children.length === 0 && (
+        {parent && children.length === 0 && natives.length === 0 && (
           <p className="text-fg3 px-3 py-2 text-xs">No child sessions</p>
         )}
         {GROUPS.map((group) => {
           const rows = children.filter((_, index) => group.has(statuses[index] ?? "idle"));
-          if (rows.length === 0) return null;
+          const nativeRows = natives.filter((agent) => group.has(agent.running ? "running" : "idle"));
+          if (rows.length === 0 && nativeRows.length === 0) return null;
           return (
             <section key={group.id} aria-label={group.label} className="pb-2" data-agents-group={group.id}>
-              <h3 className="text-fg3 px-3 pb-1 text-xxs font-medium">{group.label} · {rows.length}</h3>
+              <h3 className="text-fg3 px-3 pb-1 text-xxs font-medium">{group.label} · {rows.length + nativeRows.length}</h3>
               {rows.map((chat) => (
                 <SessionListRow
                   key={chat.id}
@@ -129,6 +146,7 @@ export function AgentsTab({ active, scope }: { tab: WorkbenchTab; active: boolea
                   onSelect={select}
                 />
               ))}
+              {nativeRows.map((agent) => <NativeSubagentRow key={agent.id} agent={agent} onSelect={select} />)}
             </section>
           );
         })}

@@ -1,5 +1,5 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
-import { ChevronRight, Cloud, Columns2, Ellipsis, GitBranchPlus, Laptop, PencilLine, Plus, Rows2, X } from "lucide-react";
+import { Bot, ChevronRight, Cloud, Columns2, Ellipsis, GitBranchPlus, Laptop, PencilLine, Plus, Rows2, X } from "lucide-react";
 import { leafIds } from "../../state/chat-panes";
 import { useChatPanesStore } from "../../state/chat-panes-store";
 import { IconButton } from "@/renderer/shared/ui/primitives/icon-button";
@@ -8,6 +8,7 @@ import { AgentAwaitingIcon } from "../../features/agent/agent-awaiting-indicator
 import { AgentIcon } from "../../features/agent/agent-icon";
 import { useAnyChatAgentActivity, useAnyChatAwaitingKind } from "../../features/agent/sessions-store";
 import { useOptionalAgentSessions } from "../../features/agent/sessions-hooks";
+import { useNativeSubagents } from "../../features/agent/native-subagents";
 import { RunStream } from "../../shared/ui/loading";
 import { Button } from "../../shared/ui/primitives";
 import { Input } from "../../shared/ui/primitives/input";
@@ -36,6 +37,8 @@ import type { WorkspacePlacement } from "./workspace-identity";
 export function sessionName(chat: ChatThread): string {
   return chat.title.trim() || "New session";
 }
+
+const NO_OWNER_IDS: readonly string[] = [];
 
 const ROW_INDENT_CLS = ["pl-2", "pl-6", "pl-8", "pl-10", "pl-12"] as const;
 
@@ -85,7 +88,9 @@ function SessionRow({ node, depth, folder, activeId, expanded, onToggle, onSelec
   onSelect: (id: string) => void;
 }) {
   const ids = useMemo(() => [node.chat.id, ...sessionDescendantIds(node)], [node]);
-  const hasChildren = node.children.length > 0;
+  const ownIds = useMemo(() => (onToggle ? [node.chat.id] : NO_OWNER_IDS), [onToggle, node.chat.id]);
+  const hasNative = useNativeSubagents(ownIds).length > 0;
+  const hasChildren = node.children.length > 0 || hasNative;
   return (
     <DropdownMenuItem
       onSelect={() => onSelect(node.chat.id)}
@@ -133,11 +138,39 @@ function SubtreeRows({ node, depth, ...rest }: {
 }) {
   return (
     <>
+      <NativeSubagentRows ownerId={node.chat.id} depth={depth} onSelect={rest.onSelect} />
       {node.children.map((child) => (
         <Fragment key={child.chat.id}>
           <SessionRow node={child} depth={depth} {...rest} />
           <SubtreeRows node={child} depth={depth + 1} {...rest} />
         </Fragment>
+      ))}
+    </>
+  );
+}
+
+/** Provider-native subagents are icon-only and read-only: choosing one opens
+ *  the session whose turn started it. */
+function NativeSubagentRows({ ownerId, depth, onSelect }: {
+  ownerId: string;
+  depth: number;
+  onSelect: (id: string) => void;
+}) {
+  const ids = useMemo(() => [ownerId], [ownerId]);
+  const agents = useNativeSubagents(ids);
+  return (
+    <>
+      {agents.map((agent) => (
+        <DropdownMenuItem
+          key={agent.id}
+          onSelect={() => onSelect(agent.ownerChatId)}
+          data-native-subagent={agent.id}
+          className={ROW_INDENT_CLS[Math.min(depth, ROW_INDENT_CLS.length - 1)]}
+        >
+          <Bot className="text-fg2 size-3.5 shrink-0" strokeWidth={1.5} aria-label="Agent" />
+          <span className="min-w-0 flex-1 truncate">{agent.title}</span>
+          {agent.running && <RunStream size={12} className="text-blue-primary shrink-0" />}
+        </DropdownMenuItem>
       ))}
     </>
   );
