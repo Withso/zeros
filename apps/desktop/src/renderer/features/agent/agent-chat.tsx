@@ -4137,9 +4137,10 @@ function AgentChatBody({
     // Append only targets this chat. (chatId null = EmptyComposer
     // case, handled separately in EmptyComposer.tsx.)
     if (pendingAppend.chatId !== chatId) return;
-    appendComposerText(`\n\n${pendingAppend.text}`);
+    const focus = !pendingAppend.preserveFocus;
+    appendComposerText(`\n\n${pendingAppend.text}`, { focus });
     dispatch({ type: "CONSUME_COMPOSER_APPEND", id: pendingAppend.id });
-    if (interactive) queueMicrotask(() => focusComposer());
+    if (interactive && focus) queueMicrotask(() => focusComposer());
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pendingAppend, chatId, interactive, readOnly]);
 
