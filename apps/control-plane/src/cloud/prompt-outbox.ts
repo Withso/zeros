@@ -64,6 +64,7 @@ export class CloudV2PromptOutbox {
         SELECT 1 FROM organization_members m JOIN users u ON u.id=m.user_id WHERE m.org_id=w.org_id AND m.user_id=$2
           AND u.auth_status='active' AND u.deleted_at IS NULL AND NOT ${memberOnHoldSql("m.org_id", "m.user_id")})) AND state NOT IN ('deleting','deleted')
         AND ${CLOUD_V2_LIVE_ACCESS} ${lock ? "FOR UPDATE OF w" : ""}`, [id, userId]);
+        AND (private_owner_user_id IS NULL OR private_owner_user_id=$2)
     if (!rows[0]) throw notFound();
     // READ COMMITTED can wait on the workspace row after evaluating a member
     // subquery in its old statement snapshot. Use a fresh statement after the

@@ -5,6 +5,7 @@ import type { AuthedUser } from "../../auth.js";
 import { withSystemTx } from "../../db.js";
 import { teamSharingFixture, type TeamSharingFixture } from "./test-fixture.js";
 import { cloudV2ActorAccess } from "../workspace-access.js";
+import { CloudExecutionAuthority } from "../execution/authority.js";
 
 const database = process.env.TEST_DATABASE_URL ? describe : describe.skip;
 database("a personal project's workspace on every team route", () => {
@@ -99,5 +100,17 @@ database("a personal project's workspace on every team route", () => {
     for (const user of [f.creator, f.admin]) expect(await allowed(user.id, f.own.id)).toBe(false);
     await withSystemTx(pool, tx => tx.query("DELETE FROM organization_members WHERE org_id=$1 AND user_id=$2", [f.organizationId, f.viewer.id]));
     for (const user of [f.creator, f.viewer, f.admin, f.outsider]) expect([user.id, await allowed(user.id, f.own.id)]).toEqual([user.id, false]);
+  });
+
+  it("admits nobody else to it under shared execution: no execution admission and no prompt outbox access", async () => {
+    await pool.query("UPDATE cloud_v2_workspaces SET execution_mode='active', state='running', access_epoch=1 WHERE id = ANY($1::uuid[])", [[f.own.id, f.workspace.id]]);
+    const authority = new CloudExecutionAuthority(pool, f.github.source, f.github.connections.store);
+    const admitted = (workspaceId: string, userId: string) => withSystemTx(pool, tx => authority.snapshot(tx, workspaceId, userId)).then(() => true, () => false);
+    for (const user of [f.creator, f.admin]) {
+      expect([user.id, await admitted(f.own.id, user.id)]).toEqual([user.id, false]);
+      expect(await admitted(f.workspace.id, user.id)).toBe(true);
+      await expect(f.store.prompts!.retireLocalSender(f.own.id, user.id, "1", null)).rejects.toMatchObject({ status: 404 });
+    }
+    expect(await admitted(f.own.id, f.viewer.id)).toBe(true);
   });
 });

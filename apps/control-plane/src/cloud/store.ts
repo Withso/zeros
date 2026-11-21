@@ -828,7 +828,9 @@ export class CloudV2Store {
         terminal_at=clock_timestamp(),updated_at=clock_timestamp() WHERE workspace_id=$1 AND state IN ('dispatching','accepted')`, [binding.workspaceId]);
       // Only a message whose sender still has access may carry the wake: wakePending takes the intent from the oldest one.
       const waking = `workspace_id=$1 AND state IN ('queued','inboxed') AND access_epoch=$2::bigint AND NOT cancel_requested AND payload IS NOT NULL
-        AND EXISTS (SELECT 1 FROM cloud_v2_workspaces w WHERE w.id=$1 AND (cloud_v2_prompt_outbox.creator_user_id=w.creator_user_id OR w.execution_mode='active' AND EXISTS (
+        AND EXISTS (SELECT 1 FROM cloud_v2_workspaces w WHERE w.id=$1
+          AND (w.private_owner_user_id IS NULL OR w.private_owner_user_id=cloud_v2_prompt_outbox.creator_user_id)
+          AND (cloud_v2_prompt_outbox.creator_user_id=w.creator_user_id OR w.execution_mode='active' AND EXISTS (
           SELECT 1 FROM organization_members m JOIN users u ON u.id=m.user_id WHERE m.org_id=w.org_id AND m.user_id=cloud_v2_prompt_outbox.creator_user_id
             AND u.auth_status='active' AND u.deleted_at IS NULL AND NOT ${memberOnHoldSql("m.org_id", "m.user_id")})))`;
       const waiting = (await tx.query<{ n: number }>(`SELECT count(*)::int AS n FROM cloud_v2_prompt_outbox WHERE ${waking}`,
