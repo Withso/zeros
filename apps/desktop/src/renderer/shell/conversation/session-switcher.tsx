@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useMemo, useState } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { ChevronRight, Cloud, Columns2, Ellipsis, GitBranchPlus, Laptop, PencilLine, Plus, Rows2, X } from "lucide-react";
 import { leafIds } from "../../state/chat-panes";
 import { useChatPanesStore } from "../../state/chat-panes-store";
@@ -189,11 +189,17 @@ export function ParentMenu({ tree, folder, activeId, onSelect, onNewParent }: {
 }
 
 /** The open session's name, editable at the top of its crumb's menu. */
-function RenameRow({ chat }: { chat: ChatThread }) {
+export function RenameRow({ chat }: { chat: ChatThread }) {
   const dispatch = useWorkspaceDispatch();
   const [draft, setDraft] = useState(chat.title);
   useEffect(() => setDraft(chat.title), [chat.title]);
+  const cancelled = useRef(false);
   const commit = () => {
+    if (cancelled.current) {
+      cancelled.current = false;
+      setDraft(chat.title);
+      return;
+    }
     const next = draft.trim();
     if (next && next !== chat.title) editChat(dispatch, chat.id, { title: next });
     else setDraft(chat.title);
@@ -212,8 +218,13 @@ function RenameRow({ chat }: { chat: ChatThread }) {
           onBlur={commit}
           onKeyDown={(event) => {
             // Keep typing out of the menu's typeahead and arrow navigation.
-            if (event.key !== "Escape") event.stopPropagation();
-            if (event.key === "Enter") { event.preventDefault(); commit(); event.currentTarget.blur(); }
+            if (event.key === "Escape") {
+              cancelled.current = true;
+              setDraft(chat.title);
+              return;
+            }
+            event.stopPropagation();
+            if (event.key === "Enter") { event.preventDefault(); event.currentTarget.blur(); }
           }}
           className="min-w-0 flex-1"
         />

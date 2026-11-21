@@ -6,7 +6,10 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuTrigger } from "../../../shared/ui/primitives/dropdown-menu";
 import { buildSessionTree } from "../../../state/session-tree";
 import type { ChatThread } from "../../../state/store";
-import { ParentMenu, workspaceBadgeLabel } from "../session-switcher";
+import { editChat } from "../../../state/cloud-chat-edits";
+import { ParentMenu, RenameRow, workspaceBadgeLabel } from "../session-switcher";
+
+vi.mock("../../../state/cloud-chat-edits", () => ({ editChat: vi.fn() }));
 import type { Workspace } from "../../../platform/git";
 
 const chat = (id: string, extra: Partial<ChatThread> = {}): ChatThread => ({
@@ -53,5 +56,51 @@ describe("workspace badge label", () => {
     expect(workspaceBadgeLabel("/ws/w-2-2", [], [annex])).toBe("Orchard Annex");
     expect(workspaceBadgeLabel("/ws/w-2-2", [annex], [])).toBe("Orchard Annex");
     expect(workspaceBadgeLabel("/ws/gone", [], [annex])).toBe("gone");
+  });
+});
+
+describe("rename row", () => {
+  function mount(title: string) {
+    const node = document.body.appendChild(document.createElement("div"));
+    root = createRoot(node);
+    act(() => root!.render(createElement(DropdownMenu, { open: true },
+      createElement(DropdownMenuTrigger, null, "open"),
+      createElement(DropdownMenuContent, null, createElement(RenameRow, { chat: chat("c1", { title }) })))));
+    return document.querySelector<HTMLInputElement>("[data-session-rename]")!;
+  }
+  function type(input: HTMLInputElement, value: string) {
+    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!;
+    act(() => { setter.call(input, value); input.dispatchEvent(new Event("input", { bubbles: true })); });
+  }
+  const key = (input: HTMLInputElement, k: string) =>
+    act(() => { input.dispatchEvent(new KeyboardEvent("keydown", { key: k, bubbles: true, cancelable: true })); });
+  const blur = (input: HTMLInputElement) => act(() => { input.focus(); input.blur(); });
+
+  it("saves a trimmed name once on Enter", () => {
+    vi.mocked(editChat).mockClear();
+    const input = mount("Old");
+    act(() => input.focus());
+    type(input, "  New name ");
+    key(input, "Enter");
+    expect(editChat).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(editChat).mock.calls[0]?.[2]).toEqual({ title: "New name" });
+  });
+
+  it("Escape discards the draft", () => {
+    vi.mocked(editChat).mockClear();
+    const input = mount("Old");
+    type(input, "Discard me");
+    key(input, "Escape");
+    blur(input);
+    expect(editChat).not.toHaveBeenCalled();
+  });
+
+  it("ignores an empty name", () => {
+    vi.mocked(editChat).mockClear();
+    const input = mount("Old");
+    type(input, "   ");
+    blur(input);
+    expect(editChat).not.toHaveBeenCalled();
+    expect(input.value).toBe("Old");
   });
 });
