@@ -154,6 +154,41 @@ d("cloud v2 ready copies", () => {
     expect(await copies.cleanupCandidates(new Date(clock + 2 * DAY))).toEqual([]);
   });
 
+  it("concurrent creates fork one ready copy without a database deadlock", async () => {
+    await liveBase();
+    await copyBuilder().tick();
+    for (let round = 0; round < 6; round++) {
+      const batch = Array.from({ length: 4 }, () => workspace());
+      const results = await Promise.allSettled(batch.map(item => forks().prepare(item)));
+      expect(results.filter(r => r.status === "rejected").map(r => String((r as PromiseRejectedResult).reason))).toEqual([]);
+    }
+  });
+
+  it("forks, a promote, stale marking and expiry race on one repository without a deadlock or a lost machine", async () => {
+    await liveBase();
+    await copyBuilder().tick();
+    for (let round = 0; round < 4; round++) {
+      const base = (await copies.base(org))!, ready = (await copies.list(org)).find(copy => copy.state === "ready")!;
+      const next = await copies.request({ organizationId: org, repository: "withso/zeros", repositoryId: repositoryId("withso/zeros"),
+        createdBy: admin, computerBuildId: base.buildId, builtFromBase: `snapshot:${base.snapshot}`, refresh: true });
+      await copies.machineCreated(next.id, boat.stopped(`copy-${round}`));
+      const batch = Array.from({ length: 4 }, () => workspace());
+      const results = await Promise.allSettled([
+        ...batch.map(item => forks().prepare(item)),
+        copies.promote(next.id, { branch: "main", commit: null, stoppedAt: new Date(clock) }),
+        copies.markStale(org), copies.markExpiring(new Date(clock)),
+      ]);
+      expect(results.filter(r => r.status === "rejected").map(r => String((r as PromiseRejectedResult).reason))).toEqual([]);
+      // Every fork that began holds its copy until cleanup may delete it.
+      for (const item of batch) {
+        const fork = await copies.forkOf(item.id);
+        if (fork) expect(boat.machine(fork.sandboxId!)!.source).toBe(fork.copyId === ready.id ? ready.machineId : (await copies.get(fork.copyId))!.machineId);
+      }
+      await copies.markStale(org).then(() => pool.query("UPDATE cloud_v2_ready_copies SET stale=false WHERE state='ready'"));
+    }
+    expect((await pool.query("SELECT count(*)::int AS n FROM cloud_v2_ready_copies WHERE org_id=$1 AND state='ready'", [org])).rows[0].n).toBe(1);
+  });
+
   it("recovers two forks of one ready copy made close together, one reply lost, each by its own key", async () => {
     await liveBase();
     await copyBuilder().tick();

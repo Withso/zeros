@@ -9,6 +9,11 @@ export async function scheduleCloudDeletion(
   const userId = "userId" in scope ? scope.userId : null;
   if (userId) await tx.query("SELECT clear_cloud_creator_ownership(NULL,$1,'account_revoked')", [userId]);
   if (organizationId) {
+    // Ready copies are provider receipts: retired here, their machines deleted by the copy builder's
+    // cleanup. Locked before the builds, in id order (CloudV2ReadyCopies lock order).
+    await tx.query(`UPDATE cloud_v2_ready_copies SET state=CASE WHEN state='building' THEN 'failed' ELSE 'retired' END,
+      failure_reason=CASE WHEN state='building' THEN 'organization_deleted' ELSE failure_reason END, updated_at=clock_timestamp()
+      WHERE id IN (SELECT id FROM cloud_v2_ready_copies WHERE org_id=$1 AND state IN ('building','ready') ORDER BY id FOR UPDATE)`, [organizationId]);
     // Build completion is conditional on state/cleanup_requested_at. A provider
     // reply already in flight keeps its durable intent and is cleaned up later.
     await tx.query(`UPDATE cloud_v2_computer_builds
@@ -16,10 +21,6 @@ export async function scheduleCloudDeletion(
           state=CASE WHEN state IN ('queued','building') THEN 'cancelled' ELSE state END
       WHERE org_id=$1`, [organizationId]);
     await tx.query(`UPDATE cloud_v2_computers SET active_build_id=NULL,snapshot_name=NULL WHERE org_id=$1`, [organizationId]);
-    // Ready copies are provider receipts: retired here, their machines deleted by the copy builder's cleanup.
-    await tx.query(`UPDATE cloud_v2_ready_copies SET state=CASE WHEN state='building' THEN 'failed' ELSE 'retired' END,
-      failure_reason=CASE WHEN state='building' THEN 'organization_deleted' ELSE failure_reason END, updated_at=clock_timestamp()
-      WHERE org_id=$1 AND state IN ('building','ready')`, [organizationId]);
   }
   await tx.query(
     `UPDATE cloud_v2_workspaces SET state='deleting', worker_token_hash=NULL,

@@ -78,6 +78,12 @@ export type ReadyCopyBase = {
 
 export type ReadyCopyFork = { copyId: string; key: string; machineId: string; sandboxId: string | null; requestedAt: Date };
 
+/** Lock order, for every transaction that touches these rows: the
+ * organization row (Cloud Computer and deletion paths), then ready copy rows
+ * in ascending id, then Cloud Computer build rows. A transaction takes the
+ * strongest lock it will need on a row the first time it touches it and never
+ * upgrades one (a shared lock followed by a write to the same row deadlocks two
+ * creates); multi-row writes lock through an id-ordered subquery. */
 export class CloudV2ReadyCopies {
   constructor(private readonly pool: pg.Pool) {}
 
@@ -197,9 +203,13 @@ export class CloudV2ReadyCopies {
    * same transaction this one becomes ready. */
   async promote(id: string, result: { branch: string | null; commit: string | null; stoppedAt: Date }): Promise<boolean> {
     return this.tx(async tx => {
-      const row = (await tx.query<Row>("SELECT * FROM cloud_v2_ready_copies WHERE id=$1 FOR UPDATE", [id])).rows[0];
+      // This generation and the ready one it replaces, locked together in id order.
+      const target = (await tx.query<{ org_id: string; repository: string }>("SELECT org_id, repository FROM cloud_v2_ready_copies WHERE id=$1", [id])).rows[0];
+      if (!target) return false;
+      const locked = (await tx.query<Row>(`SELECT * FROM cloud_v2_ready_copies WHERE org_id=$1 AND repository=$2
+        AND (id=$3 OR state='ready') ORDER BY id FOR UPDATE`, [target.org_id, target.repository, id])).rows;
+      const row = locked.find(candidate => candidate.id === id);
       if (!row || row.state !== "building" || !row.machine_id) return false;
-      await tx.query(`SELECT 1 FROM cloud_v2_ready_copies WHERE org_id=$1 AND repository=$2 AND state='ready' FOR UPDATE`, [row.org_id, row.repository]);
       await tx.query(`UPDATE cloud_v2_ready_copies SET state='retired', updated_at=clock_timestamp()
         WHERE org_id=$1 AND repository=$2 AND state='ready' AND id<>$3`, [row.org_id, row.repository, id]);
       await tx.query(`UPDATE cloud_v2_ready_copies SET state='ready', stale=false, branch=$2, commit_sha=$3, stopped_at=$4,
@@ -226,15 +236,16 @@ export class CloudV2ReadyCopies {
   /** A new Cloud Computer base: every ready copy is rebuilt from it. */
   async markStale(organizationId: string): Promise<number> {
     const { rowCount } = await this.tx(tx => tx.query(
-      "UPDATE cloud_v2_ready_copies SET stale=true, updated_at=clock_timestamp() WHERE org_id=$1 AND state='ready' AND NOT stale", [organizationId]));
+      `UPDATE cloud_v2_ready_copies SET stale=true, updated_at=clock_timestamp() WHERE id IN (SELECT id FROM cloud_v2_ready_copies
+        WHERE org_id=$1 AND state='ready' AND NOT stale ORDER BY id FOR UPDATE)`, [organizationId]));
     return rowCount ?? 0;
   }
 
   /** Copies near Boat's deletion of their stopped disk are never forked again. */
   async markExpiring(now: Date): Promise<number> {
     const { rowCount } = await this.tx(tx => tx.query(
-      `UPDATE cloud_v2_ready_copies SET stale=true, updated_at=$1 WHERE state='ready' AND NOT stale
-         AND stopped_at <= $1::timestamptz - make_interval(secs => $2::double precision / 1000)`, [now, READY_COPY_EXPIRY_MS]));
+      `UPDATE cloud_v2_ready_copies SET stale=true, updated_at=$1 WHERE id IN (SELECT id FROM cloud_v2_ready_copies WHERE state='ready' AND NOT stale
+         AND stopped_at <= $1::timestamptz - make_interval(secs => $2::double precision / 1000) ORDER BY id FOR UPDATE)`, [now, READY_COPY_EXPIRY_MS]));
     return rowCount ?? 0;
   }
 
@@ -242,7 +253,8 @@ export class CloudV2ReadyCopies {
   async failInterrupted(now: Date): Promise<number> {
     const { rowCount } = await this.tx(tx => tx.query(
       `UPDATE cloud_v2_ready_copies SET state='failed', failure_reason='ready_copy_interrupted', finished_at=$1, updated_at=$1
-       WHERE state='building' AND started_at IS NOT NULL AND coalesce(heartbeat_at, started_at) < $1::timestamptz - interval '5 minutes'`, [now]));
+       WHERE id IN (SELECT id FROM cloud_v2_ready_copies WHERE state='building' AND started_at IS NOT NULL
+         AND coalesce(heartbeat_at, started_at) < $1::timestamptz - interval '5 minutes' ORDER BY id FOR UPDATE)`, [now]));
     return rowCount ?? 0;
   }
 
@@ -310,13 +322,15 @@ export class CloudV2ReadyCopies {
     return { copyId: row.copy_id, key: row.fork_key, machineId: row.machine_id, sandboxId: row.sandbox_id, requestedAt: row.requested_at };
   }
 
-  /** Records the fork before Boat is asked, holding the copy against a
-   * concurrent retire, and stamps the copy's own use. Never the workspace's
+  /** Records the fork before Boat is asked, holding the copy row against a
+   * concurrent retire or promote until the fork row commits (both need that
+   * row's lock, and a retired copy is never forked anew), and stamps the copy's own use. Never the workspace's
    * activity: active_at belongs to people. Null when it is no longer ready. */
   async beginFork(workspaceId: string, organizationId: string, copyId: string, now: Date): Promise<ReadyCopyFork | null> {
     return this.tx(async tx => {
       const row = (await tx.query<{ machine_id: string | null }>(
-        `SELECT machine_id FROM cloud_v2_ready_copies WHERE id=$1 AND org_id=$2 AND state='ready' AND NOT stale FOR SHARE`, [copyId, organizationId])).rows[0];
+        // The write below needs this lock anyway; taking a weaker one first deadlocks concurrent creates.
+        `SELECT machine_id FROM cloud_v2_ready_copies WHERE id=$1 AND org_id=$2 AND state='ready' AND NOT stale FOR NO KEY UPDATE`, [copyId, organizationId])).rows[0];
       if (!row?.machine_id) return null;
       const key = `ready-copy-fork:${workspaceId}`;
       const inserted = await tx.query<{ requested_at: Date }>(
