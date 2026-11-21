@@ -54,9 +54,9 @@ d("GitHub at two levels", () => {
       await expectCode(levels.share(org, viewer, entry.id), viewer === other ? "forbidden" : "not_found");
       await expectCode(levels.remove(org, viewer, entry.id), "not_found");
     }
-    for (const action of [levels.repositories(org, member), levels.connections(org, member), levels.remove(org, member, entry.id),
-      levels.add(org, member, { repository: "member-gh/more", repositoryId: "9002", level: "private" })])
-      await expectCode(action, "not_found");
+    for (const action of [() => levels.repositories(org, member), () => levels.connections(org, member), () => levels.remove(org, member, entry.id),
+      () => levels.add(org, member, { repository: "member-gh/more", repositoryId: "9002", level: "private" })])
+      await expectCode(action(), "not_found");
   });
 
   it("lets owners and admins add shared repositories through an organization connection only", async () => {
