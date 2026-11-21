@@ -6,7 +6,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuTrigger } from "../../../shared/ui/primitives/dropdown-menu";
 import { buildSessionTree } from "../../../state/session-tree";
 import type { ChatThread } from "../../../state/store";
-import { ParentMenu } from "../session-switcher";
+import { ParentMenu, workspaceBadgeLabel } from "../session-switcher";
+import type { Workspace } from "../../../platform/git";
 
 const chat = (id: string, extra: Partial<ChatThread> = {}): ChatThread => ({
   id, title: id, folder: "/repo", createdAt: 1, ...extra,
@@ -43,5 +44,14 @@ describe("parent session menu", () => {
     act(() => press(arrow!));
     expect(onSelect).not.toHaveBeenCalled();
     expect(document.querySelector('[data-session-row="kid"]')).not.toBeNull();
+  });
+});
+
+describe("workspace badge label", () => {
+  const annex = { id: "ws_annex", path: "/ws/w-2-2", branch: "zeros/w-2-2", title: "Orchard Annex", parentWorkspaceId: "ws_parent" } as Workspace;
+  it("names an archived child workspace by its title", () => {
+    expect(workspaceBadgeLabel("/ws/w-2-2", [], [annex])).toBe("Orchard Annex");
+    expect(workspaceBadgeLabel("/ws/w-2-2", [annex], [])).toBe("Orchard Annex");
+    expect(workspaceBadgeLabel("/ws/gone", [], [annex])).toBe("gone");
   });
 });

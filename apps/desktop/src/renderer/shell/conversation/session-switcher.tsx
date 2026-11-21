@@ -27,7 +27,8 @@ import type { ChatThread } from "../../state/store";
 import { useWorkspaceDispatch, useWorkspaceStore } from "../../state/store";
 import { buildSessionTree, sessionDescendantIds, sessionLineage, type SessionNode, type SessionTree } from "../../state/session-tree";
 import { useActiveChatId, useChats } from "../../state/workspace-store";
-import { useLiveWorkspaces } from "../../state/use-projects";
+import { useArchivedWorkspaces, useLiveWorkspaces } from "../../state/use-projects";
+import type { Workspace } from "../../platform/git";
 import { findWorkspaceForFolder } from "../../state/workspace-resolution";
 import { workspaceLabel } from "../workspace-tabs";
 import type { WorkspacePlacement } from "./workspace-identity";
@@ -53,13 +54,23 @@ function folderName(folder: string): string {
   return folder.split(/[\\/]/).filter(Boolean).pop() ?? folder;
 }
 
-/** Names the workspace a child session lives in, as the sidebar does. */
+export function workspaceBadgeLabel(
+  folder: string,
+  live: readonly Workspace[],
+  archived: readonly Workspace[],
+): string {
+  const workspace = findWorkspaceForFolder(folder, live) ?? findWorkspaceForFolder(folder, archived);
+  return workspace ? workspaceLabel(workspace) : folderName(folder);
+}
+
+/** Names the workspace a child session lives in, as the sidebar does. Archived
+ *  child workspaces leave the sidebar but their sessions stay listed. */
 export function WorkspaceBadge({ folder }: { folder: string }) {
   const { workspaces } = useLiveWorkspaces();
-  const workspace = findWorkspaceForFolder(folder, workspaces);
+  const { workspaces: archived } = useArchivedWorkspaces();
   return (
     <span className="text-fg3 border-border1 shrink-0 rounded-sm border px-1 text-xxs leading-4" data-session-workspace="">
-      {workspace ? workspaceLabel(workspace) : folderName(folder)}
+      {workspaceBadgeLabel(folder, workspaces, archived)}
     </span>
   );
 }
