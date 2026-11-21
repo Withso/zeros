@@ -4,19 +4,20 @@ import type { CloudV2CommandResult, CloudV2Compute } from "../boat.js";
 import { BoatForkRefusedError, BoatSnapshotExpiredError } from "../boat-client.js";
 import { CloudProviderError } from "../provider-error.js";
 
+/** Measured on Boat (PLAN.md, "Measured on Boat") or unverified, awaiting a live check. */
 export const BOAT_FAKE_ASSUMPTIONS = [
-  "create and fork are idempotent per key for 24 hours: a replay returns the machine the first request made",
-  "a reply can be lost after Boat acted, so the caller sees an error although the machine exists",
-  "Boat names every fork \"<source name> fork\", whatever name the request asks for",
-  "a fork copies its source's disk, gets no environment of its own, and leaves the source stopped with its stoppedAt unchanged",
-  "Boat forks only a machine whose stop has finished archiving; otherwise it refuses before making anything",
-  "stop moves a machine to archiving and then archived, recording stoppedAt when the stop is accepted",
-  "Boat deletes the disk of a machine stopped for 14 days; resume, inspect and fork then fail as expired",
-  "a machine created from a named snapshot starts with that snapshot's disk; a create's env is the only environment a machine has",
-  "execLong input reaches the command on standard input through a private file removed before the command runs",
-  "delete succeeds when the machine is already gone",
-  "findSandbox returns the newest machine with exactly that name",
-  "a stopped machine keeps only its disk: a fork boots with none of its source's processes or memory",
+  { verified: true, assumption: "Boat names every fork \"<source name> fork\"" },
+  { verified: true, assumption: "a fork of a stopped machine works and copies its disk; the source's stoppedAt is unchanged" },
+  { verified: true, assumption: "Boat deletes the disk of a machine stopped for 14 days; resume, inspect and fork then fail as expired" },
+  { verified: false, assumption: "fork is idempotent per key for 24 hours: a replay returns the machine the first request made (measured for create only)" },
+  { verified: false, assumption: "the name a fork request asks for is ignored" },
+  { verified: false, assumption: "Boat refuses a fork of a machine still archiving before making anything" },
+  { verified: false, assumption: "stoppedAt is recorded when the stop is accepted, not when archiving finishes" },
+  { verified: false, assumption: "a reply can be lost after Boat acted, so the caller sees an error although the machine exists" },
+  { verified: false, assumption: "a fork gets no environment of its own; a create's env is the only environment a machine has" },
+  { verified: false, assumption: "a stopped machine keeps only its disk: a fork boots with none of its source's processes or memory" },
+  { verified: false, assumption: "execLong input reaches only the last simple command, through a private file removed before it runs" },
+  { verified: false, assumption: "delete succeeds when the machine is already gone; findSandbox returns the newest machine with that exact name" },
 ] as const;
 
 type Machine = {
