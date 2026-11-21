@@ -24,7 +24,7 @@ import { cursorSearchOutput } from "./search-output";
 // has its own EventRow-based record (QuestionRecordCard).
 // ──────────────────────────────────────────────────────────
 
-import { memo, useState } from "react";
+import { memo, useMemo, useState } from "react";
 import { useTurnDisclosure } from "../turn-disclosures";
 import {
   FileText,
@@ -55,6 +55,8 @@ import {
   type BrowserToolActivity,
 } from "../../browser/browser-tool-activity";
 import { CodeWithGutter, HighlightedCode } from "./highlighted-code";
+import { printedFile, splitCommandOutput } from "./command-output";
+import { DiffHoverPreview } from "./diff-hover-preview";
 import { parseReadBody } from "./read-lines";
 import { readLabel, readLineCount, readToolText } from "./read-output";
 import {
@@ -77,7 +79,12 @@ import type { Renderer, RendererContext } from "./types";
  *  source code, and `bash`-coloring them reads as noisy. */
 function langForTool(tool: AgentToolMessage): string {
   const kind = tool.toolKind;
-  if (tool.status === "failed" || (kind !== "read" && kind !== "edit")) return "text";
+  if (tool.status === "failed") return "text";
+  if (kind === "execute") {
+    const printed = printedFile(tool.rawInput);
+    return printed ? getLang(printed.path) : "text";
+  }
+  if (kind !== "read" && kind !== "edit") return "text";
   const input = (
     tool.rawInput && typeof tool.rawInput === "object" ? tool.rawInput : {}
   ) as Record<string, unknown>;
@@ -687,13 +694,7 @@ function renderToolBody(
                 className="mb-2 max-w-full"
               />
             ))}
-          {texts.length > 0 && (
-            <HighlightedCode
-              code={texts.join("\n")}
-              lang={langForTool(tool)}
-              className={OUTPUT_CLASS}
-            />
-          )}
+          {texts.length > 0 && <ToolText tool={tool} text={texts.join("\n")} />}
         </div>
       );
     }
@@ -711,14 +712,30 @@ function renderToolBody(
   const hasArtifacts = generatedImagePath(tool) || tool.content?.some(block => block.type === "content" && (block.content.type === "resource_link" || block.content.type === "resource"));
   const outStr = asDisplayString(hasArtifacts && tool.status !== "failed" && captured && typeof captured === "object" && !Array.isArray(captured)
     ? structuredToolOutput(captured) : captured);
-  if (outStr) {
-    return (
-      <HighlightedCode
-        code={outStr}
-        lang={langForTool(tool)}
-        className={OUTPUT_CLASS}
-      />
-    );
-  }
+  if (outStr) return <ToolText tool={tool} text={outStr} />;
   return null;
+}
+
+/** A tool's text result. A command's unified diffs render as diffs, like an
+ *  Edit's, and a file it prints reads in that file's language. */
+function ToolText({ tool, text }: { tool: AgentToolMessage; text: string }) {
+  const command = tool.toolKind === "execute" && tool.status !== "failed";
+  const parts = useMemo(() => (command ? splitCommandOutput(text) : null), [command, text]);
+  if (parts?.some((part) => part.kind === "diff"))
+    return (
+      <div className="min-w-0">
+        {parts.map((part, index) =>
+          part.kind === "diff" ? (
+            <DiffHoverPreview key={index} path={part.path} patch={part.patch} showPath embedded />
+          ) : (
+            <HighlightedCode key={index} code={part.text} lang="text" className={OUTPUT_CLASS} />
+          ),
+        )}
+      </div>
+    );
+  const printed = command ? printedFile(tool.rawInput) : null;
+  const lang = langForTool(tool);
+  if (printed?.startLine != null && lang !== "text")
+    return <CodeWithGutter code={text} lang={lang} startLine={printed.startLine} />;
+  return <HighlightedCode code={text} lang={lang} className={OUTPUT_CLASS} />;
 }
