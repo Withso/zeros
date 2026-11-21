@@ -5,7 +5,7 @@ import { getOrganizationStoreGeneration } from "../../features/team/team-store";
 import { cloudCatalogGeneration, cloudWorkspaceDocument, subscribeCloudWorkspaces } from "../../state/cloud-workspace-catalog";
 import { isLocalMainWorkspace } from "../../state/local-main-workspace";
 import { useActiveWorkspace } from "../../state/use-active-workspace";
-import { useWorkspaceStore } from "../../state/workspace-store";
+import { selectActiveFolder, useWorkspaceStore } from "../../state/workspace-store";
 import { PanelHeader } from "../../shared/ui/primitives";
 import { workspaceLabel } from "../workspace-tabs";
 import {
@@ -55,12 +55,21 @@ export function WorkspaceHeader({ folder, ...props }: {
   trailing?: ReactNode;
   onRevealWorkbench?: () => void;
 }) {
+  const sessionFolder = useSessionFolder(folder, props.readOnly);
   return folder && parseCloudWorkspaceKey(folder)
     ? <CloudHeader key={`${getOrganizationStoreGeneration()}:${cloudCatalogGeneration()}:${folder}`} {...props} folder={folder} />
-    : <WorkspaceHeaderView {...props} sessionFolder={folder} identity={folder
-      ? <SessionSwitcher folder={folder} placement="local" readOnly={props.readOnly}
+    : <WorkspaceHeaderView {...props} sessionFolder={sessionFolder} identity={folder && sessionFolder
+      ? <SessionSwitcher folder={sessionFolder} placement="local" readOnly={props.readOnly}
           fallback={<LocalWorkspaceDetails key={folder} folder={folder} name={props.name} title={props.title} branch={props.branch} />} />
       : <WorkspaceIdentityLabel name={props.name} title={props.title} placement="local" />} />;
+}
+
+/** Panes key chats by the exact folder, which may be a subdirectory of the
+ * owning workspace; the session row follows the same identity. */
+function useSessionFolder(folder: string | null, readOnly?: boolean): string | null {
+  const active = useWorkspaceStore(selectActiveFolder);
+  if (readOnly || !folder || !active || active === folder) return folder;
+  return active.startsWith(`${folder}/`) || active.startsWith(`${folder}\\`) ? active : folder;
 }
 
 function CloudHeader({ folder, ...props }: Parameters<typeof WorkspaceHeader>[0] & { folder: string }) {
