@@ -18,6 +18,7 @@ declare global {
     mount(active: boolean, ownsKeyboard?: boolean): void;
     deferSend?: boolean;
     addResult?: boolean;
+    focusComposerOnActivate?: boolean;
   }
 }
 
@@ -29,7 +30,7 @@ beforeAll(async () => {
       resolveDir: agentDir,
       loader: "tsx",
       contents: `
-        import { useState } from "react";
+        import { useEffect, useState } from "react";
         import { createRoot } from "react-dom/client";
         import { ChatSelectionPopup } from "./chat-selection-popup";
         window.calls = [];
@@ -38,6 +39,11 @@ beforeAll(async () => {
         const filler = Array.from({ length: 30 }, (_, i) => "Filler paragraph " + i + " keeps the transcript long enough to scroll.");
         function Host({ active, ownsKeyboard }) {
           const [root, setRoot] = useState(null);
+          // AgentChat focuses its composer from its own effect as the chat
+          // becomes active, after its children's effects in the same commit.
+          useEffect(() => {
+            if (active && window.focusComposerOnActivate) document.getElementById("composer").focus();
+          }, [active]);
           return <div id="fixture" data-zeros-root="">
             <div ref={setRoot} id="transcript">
               <div className="select-text" id="user">What do you want to work on?</div>
@@ -458,13 +464,29 @@ describe("chat selection popup", { timeout: 15_000 }, () => {
       await frames(page);
       expect(await page.evaluate(() => document.activeElement?.id)).toBe("tab");
 
-      // Moving on to the composer first means the chat's return leaves focus there.
+      // Moving on to the composer, even when the field no longer had focus,
+      // means the chat's return leaves focus there.
+      expect(await page.evaluate(() => document.activeElement?.id)).toBe("tab");
       await page.locator("#composer").click();
       await page.evaluate(() => window.mount(false));
       await page.evaluate(() => window.mount(true));
       await expect.poll(() => replyBox(page).isVisible()).toBe(true);
       await frames(page);
       expect(await page.evaluate(() => document.activeElement?.id)).toBe("composer");
+    } finally { await page.close(); }
+  });
+
+  it("retakes focus from the chat's own composer focus on its return", async () => {
+    const page = await open();
+    try {
+      await select(page, "#p2", "#p2");
+      await page.getByRole("button", { name: "Reply", exact: true }).click();
+      await page.getByRole("textbox", { name: "Reply" }).fill("mid-reply");
+      await page.evaluate(() => window.mount(false));
+      // The chat focuses its composer as it becomes active, as AgentChat does.
+      await page.evaluate(() => { window.focusComposerOnActivate = true; window.mount(true); });
+      await expect.poll(() => replyBox(page).isVisible()).toBe(true);
+      await expect.poll(() => page.getByRole("textbox", { name: "Reply" }).evaluate((element) => element === document.activeElement)).toBe(true);
     } finally { await page.close(); }
   });
 
