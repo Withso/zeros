@@ -71,16 +71,18 @@ export function cloudRepositoryRoute(op: string, params: Params, layout: (target
     return { kind: "one", params: { ...params, workspaceId, repository: entry.repository, path: rest } };
   }
   // A Git request about paths in the project folder: the repository that holds them, relative to it.
-  if (op.startsWith("git.") && (typeof params.path === "string" || Array.isArray(params.paths))) {
-    const paths = typeof params.path === "string" ? [params.path] : (params.paths as unknown[]).filter((value): value is string => typeof value === "string");
-    const folders = new Set(paths.map(path => split(path).folder));
+  const single = ["path", "filePath", "oldFilePath"].filter(field => typeof params[field] === "string");
+  const lists = ["paths", "files"].filter(field => Array.isArray(params[field]));
+  if (op.startsWith("git.") && (single.length || lists.length)) {
+    const named = [...single.map(field => params[field] as string),
+      ...lists.flatMap(field => (params[field] as unknown[]).filter((value): value is string => typeof value === "string"))];
+    const folders = new Set(named.map(path => split(path).folder));
     const entry = folders.size === 1 ? byFolder([...folders][0]!) : undefined;
-    if (!entry || paths.some(path => !split(path).rest)) throw new Error("Choose files inside one of the workspace's repositories.");
+    if (!entry || named.some(path => !split(path).rest)) throw new Error("Choose files inside one of the workspace's repositories.");
     const strip = (path: string) => split(path).rest;
     return { kind: "one", params: { ...params, workspaceId, repository: entry.repository,
-      ...(typeof params.path === "string" ? { path: strip(params.path) } : {}),
-      ...(Array.isArray(params.paths) ? { paths: paths.map(strip) } : {}),
-      ...(typeof params.oldPath === "string" && split(params.oldPath).folder === entry.folder ? { oldPath: strip(params.oldPath) } : {}) } };
+      ...Object.fromEntries(single.map(field => [field, strip(params[field] as string)])),
+      ...Object.fromEntries(lists.map(field => [field, (params[field] as unknown[]).map(value => typeof value === "string" ? strip(value) : value)])) } };
   }
   // The project folder's status: every repository's, each path under its folder.
   if (op === "git.status") {

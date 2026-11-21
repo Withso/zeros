@@ -44,6 +44,11 @@ describe("requests on a workspace of several repositories", () => {
     expect(cloudRepositoryRoute("git.stage", { workspaceId: key, paths: ["api/a.ts", "api/b/c.ts"] }, several))
       .toEqual({ kind: "one", params: { workspaceId: key, repository: "withso/api", paths: ["a.ts", "b/c.ts"] } });
     expect(() => cloudRepositoryRoute("git.stage", { workspaceId: key, paths: ["api/a.ts", "web/b.ts"] }, several)).toThrow();
+    // The Diff view names its file filePath (and a rename's oldFilePath); commit names files.
+    expect(cloudRepositoryRoute("git.diff", { workspaceId: key, filePath: "web/new.ts", oldFilePath: "web/old.ts", against: "HEAD" }, several))
+      .toEqual({ kind: "one", params: { workspaceId: key, repository: "withso/web", filePath: "new.ts", oldFilePath: "old.ts", against: "HEAD" } });
+    expect(cloudRepositoryRoute("git.commit", { workspaceId: key, message: "m", files: ["api/a.ts"] }, several))
+      .toEqual({ kind: "one", params: { workspaceId: key, repository: "withso/api", message: "m", files: ["a.ts"] } });
     const status = cloudRepositoryRoute("git.status", { workspaceId: key }, several);
     if (status.kind !== "each") throw new Error("expected a fan-out");
     expect(status.merge([
