@@ -34,7 +34,7 @@ export function designComponentSlotLabel(name: string): string {
 
 export class DesignComponentPartWriteError extends Error {
   constructor() {
-    super("That layer is part of a component instance. Change its style here, its text with the instance's Options, and anything else on the main component.");
+    super("That layer is part of a component instance. Change its style here, its text with the instance's Controls, and anything else on the main component.");
     this.name = "DesignComponentPartWriteError";
   }
 }
@@ -93,7 +93,7 @@ export function designComponentTextLock(
   const options = frame.component?.boundText?.[nodeId];
   if (!options || !frame.component) return null;
   return { kind: "option", message: options.length
-    ? `Set by option ${options.map((name) => optionLabel(frame.component!, name)).join(", ")}`
+    ? `Set by control ${options.map((name) => optionLabel(frame.component!, name)).join(", ")}`
     : "Set by the component's template" };
 }
 
@@ -295,7 +295,7 @@ const optionsProblemByInstances = new WeakMap<DesignFrameInstances, string | nul
  * those frames answers here before anything is selected. */
 export function designFrameOptionsProblem(frame: { component?: DesignFrameComponent; instances?: DesignFrameInstances }): string | null {
   const own = frame.component?.notApplied;
-  if (own) return `These options could not be applied. ${DESIGN_OPTIONS_NOT_APPLIED_MESSAGES[own]}`;
+  if (own) return `These controls could not be applied. ${DESIGN_OPTIONS_NOT_APPLIED_MESSAGES[own]}`;
   const instances = frame.instances;
   if (!instances) return null;
   const known = optionsProblemByInstances.get(instances);
@@ -304,7 +304,7 @@ export function designFrameOptionsProblem(frame: { component?: DesignFrameCompon
   // As the instance's Options section reads it: a failed host with nothing
   // named shows the defaults.
   const problem = names.length
-    ? `The options of ${names.join(", ")} could not be applied. ${DESIGN_OPTIONS_NOT_APPLIED_MESSAGES[instances.notApplied ?? "defaults"]}`
+    ? `The controls of ${names.join(", ")} could not be applied. ${DESIGN_OPTIONS_NOT_APPLIED_MESSAGES[instances.notApplied ?? "defaults"]}`
     : null;
   optionsProblemByInstances.set(instances, problem);
   return problem;

@@ -1,13 +1,14 @@
 // PURPOSE: The frame info panel at the foot of the Style panel, above Layers:
-// a selected frame's changes made by hand and Tidy. Mounted only while a
-// frame (not a layer in it) is selected; it renders nothing until that frame
-// has changes, a Tidy running or a Tidy just done. Nothing else in Design
-// shows Tidy: no toast, no canvas mark.
+// one row with a selected frame's count of changes made by hand and Tidy; the
+// detail is the title's tooltip. Mounted only while a frame (not a layer in
+// it) is selected; it renders nothing until that frame has changes, a Tidy
+// running or a Tidy just done. Nothing else in Design shows Tidy: no toast,
+// no canvas mark.
 
 import { useEffect } from "react";
 import { Sparkles } from "lucide-react";
 
-import { Button } from "../../shared/ui/primitives";
+import { Button, Tooltip } from "../../shared/ui/primitives";
 import { openFilePill, warmFilePill } from "../../shell/workbench/file-pill-navigation";
 import { useWorkspaceDispatch } from "../../state/workspace-store";
 import { designTidyBrief, type DesignAgentBrief } from "./design-agent-brief";
@@ -88,7 +89,7 @@ export function DesignFrameChangesPanel({
       <DesignFrameInfo
         state="running"
         title={`Tidying ${count} ${count === 1 ? "change" : "changes"}`}
-        body="The agent is moving them into tokens, classes or the component."
+        detail="The agent is moving them into tokens, classes or the component."
         action={
           <Button
             type="button"
@@ -114,7 +115,7 @@ export function DesignFrameChangesPanel({
       <DesignFrameInfo
         state="done"
         title="Tidied"
-        body={tidy.outcome}
+        detail={tidy.outcome}
         action={
           <Button
             type="button"
@@ -139,7 +140,7 @@ export function DesignFrameChangesPanel({
     <DesignFrameInfo
       state="waiting"
       title={summary.title}
-      body={summary.body}
+      detail={summary.detail}
       action={
         <Button
           type="button"
@@ -168,26 +169,26 @@ export function DesignFrameChangesPanel({
 function DesignFrameInfo({
   state,
   title,
-  body,
+  detail,
   action,
 }: {
   state: "waiting" | "running" | "done";
   title: string;
-  body: string;
+  detail: string;
   action: React.ReactNode;
 }) {
   return (
     <section
       aria-label="Frame changes"
       data-design-frame-info={state}
-      className="border-border1 flex shrink-0 flex-col gap-1.5 border-t pt-2.5 pr-2 pb-3 pl-3"
+      className="border-border1 text-fg1 flex shrink-0 items-center gap-2 border-t py-2 pr-2 pl-3 text-xs leading-4.5 font-medium"
     >
-      <div className="text-fg1 flex min-h-6 items-center gap-2 text-xs leading-4.5 font-medium">
-        {state === "waiting" ? <span aria-hidden="true" className="bg-blue-primary size-1.25 shrink-0 rounded-full" /> : null}
-        <span className="min-w-0 truncate">{title}</span>
-        <span className="ml-auto shrink-0">{action}</span>
-      </div>
-      <p className="text-fg3 pr-1 text-3xxs leading-4">{body}</p>
+      {state === "waiting" ? <span aria-hidden="true" className="bg-blue-primary size-1.25 shrink-0 rounded-full" /> : null}
+      <Tooltip label={detail}>
+        {/* Focusable so the detail reaches keyboard users too. */}
+        <span data-design-frame-info-title="" tabIndex={0} aria-description={detail} className="min-w-0 truncate">{title}</span>
+      </Tooltip>
+      <span className="ml-auto shrink-0">{action}</span>
     </section>
   );
 }

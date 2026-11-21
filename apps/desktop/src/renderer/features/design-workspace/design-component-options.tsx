@@ -242,7 +242,7 @@ export function DesignComponentOptions({
     ? () => {
         if (!active) return;
         const removed: Record<string, null> = Object.fromEntries([...instanceState.overridden].map((name) => [name, null]));
-        void commitDesignInstanceAttributes(workspaceId, frame, instance.nodeId, removed, `Reset ${instance.title}`).catch(failed("the options"));
+        void commitDesignInstanceAttributes(workspaceId, frame, instance.nodeId, removed, `Reset ${instance.title}`).catch(failed("the controls"));
       }
     : undefined;
   const overridden = instance ? Object.keys(instance.host.overrides ?? {}) : [];
@@ -387,12 +387,12 @@ export function DesignComponentOptions({
   return (
     <>
       <InspectorSection
-      title="Options"
+      title="Controls"
       data-design-component-options={instance ? "instance" : "main"}
       bodyClassName="gap-1.5"
       actions={instance ? (
         <>
-          <InspectorIconButton label="Reset options" data-design-options-reset="" disabled={actionDisabled || !reset} onClick={reset}>
+          <InspectorIconButton label="Reset controls" data-design-options-reset="" disabled={actionDisabled || !reset} onClick={reset}>
             <RotateCcw />
           </InspectorIconButton>
           <DropdownMenu>
@@ -413,7 +413,7 @@ export function DesignComponentOptions({
     >
       {notApplied ? (
         <OptionsNotice tone="error" role="alert" data-design-options-not-applied={notApplied}>
-          <p>These options could not be applied. {DESIGN_OPTIONS_NOT_APPLIED_MESSAGES[notApplied]}</p>
+          <p>These controls could not be applied. {DESIGN_OPTIONS_NOT_APPLIED_MESSAGES[notApplied]}</p>
           <Button type="button" variant="secondary" size="compact" disabled={actionDisabled || !askToFix} onClick={askToFix}>
             <Sparkles aria-hidden="true" />
             Ask agent to fix
@@ -443,17 +443,9 @@ export function DesignComponentOptions({
           onSave={creatable ? () => setNaming(true) : undefined}
         />
       ) : null}
-      {instance && variant ? (
-        <div className="flex justify-end">
-          <Button type="button" variant="secondary" size="compact" data-design-options-use-default=""
-            disabled={actionDisabled} onClick={() => chooseVariant(null)}>
-            Use Default
-          </Button>
-        </div>
-      ) : null}
       {instance && !tooLarge && declaration.options.length === 0 && variants.length === 0 ? (
         <p className="text-fg3 px-2 py-1 text-3xxs" data-design-options-empty="" role="status">
-          This component has no declared options or variants.
+          This component has no declared controls or variants.
         </p>
       ) : null}
       {naming && !tooLarge ? <OptionEntryRow label="Name" inputLabel="Variant name" placeholder="Compact" onSubmit={saveVariant} onCancel={() => setNaming(false)} /> : null}
@@ -486,11 +478,11 @@ export function DesignComponentOptions({
           </Tooltip>
         </div>
       ) : null}
-      {/* Options are the main's to change, so an instance does not offer it. */}
+      {/* Controls are the main's to change, so an instance does not offer it. */}
       {instance ? null : (
         <OptionActionRow disabled={actionDisabled || !askToChange} onClick={askToChange} data-design-options-ask="">
           <Sparkles aria-hidden="true" />
-          Ask agent to change options
+          Ask agent to change controls
         </OptionActionRow>
       )}
       </InspectorSection>
@@ -499,7 +491,7 @@ export function DesignComponentOptions({
           <DialogHeader>
             <DialogTitle>Reset all overrides?</DialogTitle>
             <DialogDescription>
-              This removes supplied slot layers and text from this instance, and resets its declared options and visual styles. The main component and other instances are unchanged.
+              This removes supplied slot layers and text from this instance, and resets its controls and visual styles. The main component and other instances are unchanged.
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>

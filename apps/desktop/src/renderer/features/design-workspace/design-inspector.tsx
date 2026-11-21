@@ -222,8 +222,8 @@ import {
 } from "./state/design-selection";
 import { designComponentPartOf, designComponentSlotOf } from "@zeros/protocol/design-runtime";
 import { useDesignHistoryPresentation } from "./state/design-history-presentation";
-import { designComponentDisplayTitle, designComponentIdentityLabel, designComponentInstanceIdentity, designComponentInstanceVariant, designComponentSlotLabel, designFrameComponentPresentation,
-  designComponentTextLock, designMissingComponentOf, designPartOverrideAttribute, designPartOverrideKey } from "./state/design-component-parts";
+import { designComponentDisplayTitle, designComponentIdentityLabel, designComponentInstanceIdentity, designComponentInstanceVariant, designFrameComponentPresentation,
+  designComponentTextLock, designMissingComponentOf } from "./state/design-component-parts";
 import { commitDesignInstanceOverridesReset, designInstanceVisualStyleProperties } from "./state/design-component-options";
 import { MessageRow } from "../../shared/ui/primitives/message-row";
 import type { DesignComponentOptionsTarget } from "./design-component-options";
@@ -3421,8 +3421,9 @@ export const DesignInspector = React.memo(function DesignInspector({
   const missingComponent = frame && instanceNodeId && !selectedPart && !selectedSlot && styleNodeIds.length <= 1
     ? designMissingComponentOf(frame, instanceNodeId)
     : null;
-  // As in Layers, the header names the instance by its component; the line
-  // under it says what it is, and a part's line offers its instance too.
+  // As in Layers, the header names the instance by its component, and a part
+  // or slot by its instance's component and its own name; Escape selects the
+  // instance from either.
   const componentHeader = instanceTitle && instanceComponent && instanceNodeId && (selectedPart || selectedSlot || optionsTarget?.kind === "instance")
     ? { title: instanceTitle, identity: instanceIdentity ?? designComponentIdentityLabel(instanceTitle, null), component: instanceComponent,
         host: instanceNodeId, part: selectedPart?.part ?? null, slot: selectedSlot?.name ?? null }
@@ -3451,24 +3452,6 @@ export const DesignInspector = React.memo(function DesignInspector({
     void moveDesignComponentCached(workspaceId, instanceHost.component, activePageId ?? undefined)
       .then((moved) => openMain(moved.frame.file, part, moved.frame.pageId))
       .catch((error) => toast.error("Couldn't move the main to the canvas", { description: errorMessage(error) }));
-  };
-  const partOverridden = !!(componentHeader?.part && instanceHost?.overrides &&
-    Object.hasOwn(instanceHost.overrides, designPartOverrideKey(componentHeader.part)));
-  const resetPart = () => {
-    if (!workspaceId || !frame || !componentHeader?.part) return;
-    void applyDesignEditCached(workspaceId, frame, {
-      schemaVersion: 1,
-      transactionId: `desktop:${crypto.randomUUID()}`,
-      actor: { kind: "human", id: "desktop" },
-      intent: "Reset part",
-      createdAt: Date.now(),
-      operations: [{ operationId: "reset-part", type: "node.set-attribute", nodeId: componentHeader.host,
-        attribute: designPartOverrideAttribute(componentHeader.part), value: null }],
-    }).catch((error) => toast.error("Couldn't reset the part", { description: errorMessage(error) }));
-  };
-  const selectInstance = () => {
-    if (!workspaceId || !folder || !frame || !componentHeader) return;
-    void selectDesignTargets({ workspaceId, folder, targets: [{ frame: frame.file, nodeId: componentHeader.host }] }).catch(() => {});
   };
   const SelectionGlyph =
     styleNodeIds.length > 1
@@ -3505,6 +3488,7 @@ export const DesignInspector = React.memo(function DesignInspector({
       <div
         data-design-inspector-header=""
         data-design-selection-type={selectionName}
+        data-design-component-of={componentHeader ? componentHeader.slot !== null ? "slot" : componentHeader.part ? "part" : "instance" : undefined}
         className="flex h-9 min-w-0 items-center gap-2 pr-1.5 pl-3"
       >
         {selectionName === "Page" && workspaceId && pages?.length ? (
@@ -3521,7 +3505,7 @@ export const DesignInspector = React.memo(function DesignInspector({
               ? headerInner ? `${componentHeader.identity} · ${selectionTitle ?? selectionName}` : componentHeader.identity
               : optionsTarget?.kind === "main" ? componentIdentity : missingComponent ? `zd-${missingComponent}` : selectionTitle ?? selectionName}
           </span>
-          {componentHeader && !headerInner ? (
+          {componentHeader ? (
             <Button type="button" variant="ghost" size="compact" data-design-edit-main="" disabled={!componentHeader.component.frame && !active} onClick={editMain}>
               {componentHeader.component.frame ? "Edit main" : "Move main to canvas"}
             </Button>
@@ -3547,36 +3531,6 @@ export const DesignInspector = React.memo(function DesignInspector({
           ) : null}
         </>}
       </div>
-      {componentHeader ? (
-        <div data-design-component-of={componentHeader.slot !== null ? "slot" : componentHeader.part ? "part" : "instance"}
-          className="border-border1 text-fg3 flex min-h-7 min-w-0 flex-wrap items-center gap-x-1.5 gap-y-1 border-t py-1 pr-1.5 pl-3 text-xs leading-4">
-          <Diamond className="text-violet-primary size-3 shrink-0" aria-hidden="true" />
-          {/* Its own width first, so a narrow panel moves the buttons to a line of their own. */}
-          <span className="min-w-0 grow basis-auto truncate">
-            {componentHeader.slot !== null
-              ? `${designComponentSlotLabel(componentHeader.slot)} slot of ${componentHeader.identity}. Drop or draw layers into it.`
-              : componentHeader.part ? `Part of ${componentHeader.identity}${partOverridden ? ", overridden" : ""}.`
-                : `Instance · ${selectedNode?.layerName?.trim() || elementDetails?.name?.trim() || "edits apply only here"}`}
-          </span>
-          {headerInner ? (
-            <span className="flex shrink-0 items-center gap-1">
-              {partOverridden ? (
-                <Button type="button" variant="secondary" size="compact" data-design-part-reset="" disabled={editsDisabled} onClick={resetPart}>Reset</Button>
-              ) : null}
-              <Button type="button" variant="secondary" size="compact" data-design-select-instance="" onClick={selectInstance}>Select instance</Button>
-              <Button type="button" variant="secondary" size="compact" data-design-edit-main="" disabled={!componentHeader.component.frame && !active} onClick={editMain}>
-                {componentHeader.component.frame ? "Edit main" : "Move main to canvas"}
-              </Button>
-            </span>
-          ) : null}
-        </div>
-      ) : null}
-      {optionsTarget?.kind === "main" && componentIdentity ? (
-        <div data-design-component-scope="main" className="border-border1 text-fg3 flex min-h-7 items-center gap-1.5 border-t py-1 pr-1.5 pl-3 text-xs leading-4">
-          <ComponentGlyph className="text-violet-primary fill-current size-3 shrink-0" aria-hidden="true" />
-          <span>Main component · changes update inheriting instances</span>
-        </div>
-      ) : null}
       {missingComponent ? (
         <MessageRow
           tone="error"
@@ -3651,7 +3605,7 @@ export const DesignInspector = React.memo(function DesignInspector({
         {inspectorSelectionHeader}
         <PanelHeader data-design-style-panel-header="" size="window">
           <TabsList aria-label="Inspector" className="h-7">
-            {optionsTarget ? <TabsTrigger value="options">Options</TabsTrigger> : null}
+            {optionsTarget ? <TabsTrigger value="options">Controls</TabsTrigger> : null}
             <TabsTrigger value="style">Style</TabsTrigger>
             <TabsTrigger value="css" disabled={!styleContext && !cssActive}>CSS</TabsTrigger>
           </TabsList>

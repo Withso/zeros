@@ -34,8 +34,8 @@ describe("component selection identity", () => {
 
 describe("what a person may not type over in a component", () => {
   it("names the option that sets a layer's text on the main", () => {
-    expect(designComponentTextLock({ component }, "cc-send")).toEqual({ kind: "option", message: "Set by option Label" });
-    expect(designComponentTextLock({ component }, "cc-mode")).toEqual({ kind: "option", message: "Set by option Mode" });
+    expect(designComponentTextLock({ component }, "cc-send")).toEqual({ kind: "option", message: "Set by control Label" });
+    expect(designComponentTextLock({ component }, "cc-mode")).toEqual({ kind: "option", message: "Set by control Mode" });
     expect(designComponentTextLock({ component }, "cc-chip")).toEqual({ kind: "option", message: "Set by the component's template" });
     expect(designComponentTextLock({ component }, "cc-prompt")).toBeNull();
     expect(designComponentTextLock({}, "cc-send")).toBeNull();

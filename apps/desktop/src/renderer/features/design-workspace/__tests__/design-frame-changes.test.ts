@@ -38,20 +38,20 @@ describe("changes made by hand, as the panel names them", () => {
     const list = designFrameChangeList(SIGN_IN);
     expect(list.map((entry) => `${entry.oid}:${entry.field}`)).toEqual(["send:Corner radius", "send:Fill", "card:Gap"]);
     expect(designFrameChangesSummary(list, false)).toEqual({
-      title: "3 changes made by hand",
-      body: "Corner radius, Fill and Gap, on 2 layers.",
+      title: "3 changes by hand",
+      detail: "Corner radius, Fill and Gap, on 2 layers.",
     });
   });
 
   it("says one change and one layer in the singular, and nothing at all for none", () => {
     const one = designFrameChangeList(frame([{ oid: "card", name: "Card", changes: [change("gap", "4px", "2px")] }]));
-    expect(designFrameChangesSummary(one, false)).toEqual({ title: "1 change made by hand", body: "Gap, on 1 layer." });
+    expect(designFrameChangesSummary(one, false)).toEqual({ title: "1 change by hand", detail: "Gap, on 1 layer." });
     expect(designFrameChangesSummary([], false)).toBeNull();
   });
 
   it("says when only some layers were looked at", () => {
     const list = designFrameChangeList(SIGN_IN);
-    expect(designFrameChangesSummary(list, true)?.body).toBe("Corner radius, Fill and Gap, on 2 layers. Not every layer was checked, so there may be more.");
+    expect(designFrameChangesSummary(list, true)?.detail).toBe("Corner radius, Fill and Gap, on 2 layers. Not every layer was checked, so there may be more.");
   });
 });
 
