@@ -627,6 +627,7 @@ function ActiveDispatcherPage({
     computerRequired: cloud.computerRequired,
     computerReason: cloud.computerReason,
     canManageComputer: cloud.canManageComputer,
+    readyCopyBuilding: cloud.computerMode && cloud.computerRepository?.readyCopy === "building",
   }) : null;
   const trayAction = tray?.action === "cloud-computer-settings"
     ? { label: "Open Cloud Computer settings", onClick: openCloudComputerSettings, onIntent: cloud.warmComputer }

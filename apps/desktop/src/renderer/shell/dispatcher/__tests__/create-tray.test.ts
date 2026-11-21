@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { cloudComputerV2BuildRequired, cloudComputerV2CheckFailed } from "../../../features/settings/cloud-computer-v2-create-gate";
-import { ADD_CLOUD_REPOSITORY_REASON, createTrayState } from "../create-tray";
+import { ADD_CLOUD_REPOSITORY_REASON, READY_COPY_BUILDING, createTrayState } from "../create-tray";
 
 const base = {
   notice: null,
@@ -12,6 +12,13 @@ const base = {
 };
 
 describe("Create tray", () => {
+  it("says a repository is still getting ready while its first ready copy builds, below any blocking reason", () => {
+    expect(createTrayState({ ...base, readyCopyBuilding: true })).toEqual({ message: READY_COPY_BUILDING, action: null });
+    expect(createTrayState({ ...base, readyCopyBuilding: true, checking: true })).toBeNull();
+    expect(createTrayState({ ...base, readyCopyBuilding: true, reason: "Creating a cloud workspace requires Pro." }))
+      .toEqual({ message: "Creating a cloud workspace requires Pro.", action: null });
+  });
+
   it("is empty when Create can proceed or is still checking", () => {
     expect(createTrayState(base)).toBeNull();
     expect(createTrayState({ ...base, reason: "Checking Cloud availability…", checking: true })).toBeNull();

@@ -16,6 +16,11 @@ vi.mock("../../team/team-store", () => ({
 vi.mock("../../../state/use-cached-read", () => ({
   useCachedRead: () => ({ data: state.data, error: state.error, loading: false, refresh: () => {} }),
 }));
+vi.mock("../../../shared/ui/primitives", async (original) => ({
+  ...(await original<typeof import("../../../shared/ui/primitives")>()),
+  CodeTextarea: ({ value, readOnly, "aria-label": label }: { value: string; readOnly?: boolean; "aria-label": string }) =>
+    createElement("pre", { "aria-label": label, "data-read-only": readOnly ? "" : undefined }, value),
+}));
 vi.mock("../cloud-repository-chooser", () => ({
   CloudRepositoryChooser: ({ chosenCount }: { chosenCount: number }) =>
     createElement("span", { "data-chooser": "" }, `${chosenCount} repositories selected`),
@@ -45,6 +50,28 @@ beforeEach(() => {
 });
 
 describe("Cloud Computer settings panel", () => {
+  it("with ready copies, offers build, history and the install script, and no repository list", () => {
+    state.data = { ...state.data!, readyCopies: true, installScript: "sudo -n apt-get install -y jq" };
+    const html = render(), page = text(html);
+    expect(page).toContain("Build computer");
+    expect(page).toContain("History (2)");
+    expect(page).toContain("Install script");
+    expect(html).toContain("sudo -n apt-get install -y jq");
+    expect(html).not.toContain("data-chooser");
+    expect(page).not.toContain("Repositories");
+  });
+
+  it("shows members the install script read-only, managed by admins", () => {
+    state.role = "member";
+    state.data = { installScript: "sudo -n apt-get install -y jq", recipeRevision: 2 } as unknown as CloudV2Computer;
+    const html = render(), page = text(html);
+    expect(page).toContain("Managed by admins");
+    expect(html).toMatch(/<pre aria-label="Install script" data-read-only="">sudo -n apt-get install -y jq<\/pre>/);
+    expect(page).not.toContain("Build computer");
+    state.data = undefined;
+    expect(text(render())).toContain("Only owners and admins manage it.");
+  });
+
   it("lists chosen repositories as links to their own settings, not inline setup fields", () => {
     state.data = { ...state.data!, recipe: { repositories: [{ repository: "fixture/repo", setup: "pnpm install", setupScript: "scripts/bootstrap.sh" }] } };
     const html = render();

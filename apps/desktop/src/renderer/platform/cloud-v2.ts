@@ -316,16 +316,22 @@ export const CloudV2ComputerReplySchema = z.object({
   /** If recipe and revision are absent, the app keeps edits locally and sends the selection at build time. */
   recipe: RecipeSchema.optional(),
   recipeRevision: z.number().int().nonnegative().optional(),
+  /** Ready copies are on: builds make the base, and repositories are not listed. */
+  readyCopies: z.literal(true).optional(),
+  installScript: z.string().max(16_000).nullable().optional(),
 });
 export type CloudV2Computer = z.infer<typeof CloudV2ComputerReplySchema>;
 const SavedRecipeSchema = z.object({ recipe: RecipeSchema, recipeRevision: z.number().int().nonnegative() });
 
 /** Lowercase owner/name is the repository ID across builds. */
-export type CloudV2InstalledRepository = { id: string; owner: string; name: string; defaultBranch: string | null };
+export type CloudV2InstalledRepository = { id: string; owner: string; name: string; defaultBranch: string | null;
+  /** Ready copies only: "building" while the repository's first copy is being made. */
+  readyCopy?: "ready" | "building" | null };
 export const CloudV2InstalledRepositoriesReplySchema = z.object({
   repositories: z.array(z.object({
     repository: CloudV2RepositorySchema.shape.repository.max(200),
     defaultBranch: z.string().min(1).max(255).nullable().optional(),
+    readyCopy: z.enum(["ready", "building"]).nullable().optional().catch(undefined),
   }).passthrough()).max(200).nullable(),
 });
 
@@ -335,7 +341,8 @@ export async function getCloudV2InstalledRepositories(organizationId: string): P
     `/v1/cloud-v2/organizations/${uuid.parse(organizationId)}/computer/repositories`, CloudV2InstalledRepositoriesReplySchema);
   return repositories?.map(row => {
     const [owner, name] = row.repository.split("/") as [string, string];
-    return { id: row.repository.toLowerCase(), owner, name, defaultBranch: row.defaultBranch ?? null };
+    return { id: row.repository.toLowerCase(), owner, name, defaultBranch: row.defaultBranch ?? null,
+      ...(row.readyCopy !== undefined ? { readyCopy: row.readyCopy } : {}) };
   }) ?? null;
 }
 
@@ -372,6 +379,17 @@ export async function saveCloudV2ComputerRecipe(organizationId: string, reposito
 export async function discardCloudV2ComputerRecipe(organizationId: string, revision: number) {
   return cloudAccountRequest(`/v1/cloud-v2/organizations/${uuid.parse(organizationId)}/computer/recipe/discard`,
     SavedRecipeSchema, { body: { revision }, idempotencyKey: key() });
+}
+
+const InstallScriptSchema = z.object({ installScript: z.string().max(16_000).nullable(), recipeRevision: z.number().int().nonnegative() });
+/** Ready copies: every member reads the install script. */
+export async function getCloudV2InstallScript(organizationId: string) {
+  return cloudAccountRequest(`/v1/cloud-v2/organizations/${uuid.parse(organizationId)}/computer/install-script`, InstallScriptSchema);
+}
+/** Owners and admins; the next build runs it. */
+export async function saveCloudV2InstallScript(organizationId: string, installScript: string | null, revision: number) {
+  return cloudAccountRequest(`/v1/cloud-v2/organizations/${uuid.parse(organizationId)}/computer/install-script`,
+    InstallScriptSchema, { body: { installScript, revision }, idempotencyKey: key(), method: "PUT" });
 }
 
 export async function activateCloudV2Build(organizationId: string, buildId: string) {

@@ -2,18 +2,19 @@ import { useCallback, useState } from "react";
 import { IconButton } from "@/renderer/shared/ui/primitives/icon-button";
 import { ChevronDown, ChevronUp, CircleCheck, CircleMinus, CircleX, LoaderCircle, TriangleAlert, X } from "lucide-react";
 import { Button } from "../../shared/ui";
-import { Badge, Pill } from "../../shared/ui/primitives";
+import { Badge, CodeTextarea, Pill } from "../../shared/ui/primitives";
 import { MessageRow } from "../../shared/ui/primitives/message-row";
 import { useRecoveringRead } from "../../state/use-recovering-read";
 import { useActiveOrganization, useTeams } from "../team/team-store";
 import { assertComputerOwner, computerKey, computers, MAX_REPOSITORIES, message, publishRecipe, useRecipeDraft } from "./cloud-computer-store";
-import { SettingsGroup, SettingsSection } from "./settings-ui";
+import { SettingsGroup, SettingsRow, SettingsSection } from "./settings-ui";
 import { CloudRepositoryChooser } from "./cloud-repository-chooser";
 import type { ChooserRepository } from "./cloud-repository-chooser-model";
 import {
   activateCloudV2Build, buildCloudV2Computer, buildConfiguredCloudV2Computer, discardCloudV2ComputerRecipe,
-  getCloudV2Computer, type CloudV2Build, type CloudV2RepositoryDraft,
+  getCloudV2Computer, getCloudV2InstallScript, saveCloudV2InstallScript, type CloudV2Build, type CloudV2RepositoryDraft,
 } from "../../platform/cloud-v2";
+import { KeyedAsyncCache } from "../../shared/lib/keyed-async-cache";
 import { computerChanges, computerStatus, editableRepositories, historyNote, relativeAge, type ComputerStatus } from "./cloud-computer-model";
 import { useFocusRefresh } from "./use-focus-refresh";
 export { prefetchCloudComputer } from "./cloud-computer-store";
@@ -102,8 +103,17 @@ function CloudComputerScope({ userId, organizationId, canManage, active, openRep
   };
 
   if (!canManage)
-    return <SettingsSection title="Cloud Computer" description="Only owners and admins manage it." />;
+    return <MemberComputer userId={userId} organizationId={organizationId} active={active} />;
   const locked = busy || running;
+  const saveScript = (script: string) => run(async () => {
+    await draft.settle();
+    assertComputerOwner(key, organizationId);
+    const revision = draft.revision();
+    if (revision === undefined) return;
+    const saved = await saveCloudV2InstallScript(organizationId, script, revision);
+    assertComputerOwner(key, organizationId);
+    if (data) computers.setData(key, { ...data, installScript: saved.installScript, recipeRevision: saved.recipeRevision });
+  });
   return (
     <div className="flex flex-col gap-8" {...(!active ? { inert: "" } : {})} aria-hidden={!active || undefined}>
       {error && <MessageRow tone="error" role="alert" flush>{error}</MessageRow>}
@@ -140,7 +150,13 @@ function CloudComputerScope({ userId, organizationId, canManage, active, openRep
         )}
       </SettingsGroup>
 
-      <SettingsGroup title="Repositories" description="Changes apply after the next build.">
+      {data?.readyCopies && (
+        <InstallScript key={data.recipeRevision ?? 0} saved={data.installScript ?? ""} disabled={locked} active={active}
+          onSave={script => void saveScript(script)} />
+      )}
+
+      {/* With ready copies each repository is set up in its own copy, from its project page. */}
+      {!data?.readyCopies && <SettingsGroup title="Repositories" description="Changes apply after the next build.">
         <CloudRepositoryChooser userId={userId} organizationId={organizationId} active={active}
           disabled={locked || data === undefined} chosenCount={configured.length} isChosen={isChosen}
           onToggle={toggle} onChooseAll={chooseAll} />
@@ -158,8 +174,39 @@ function CloudComputerScope({ userId, organizationId, canManage, active, openRep
             ))}
           </ul>
         )}
-      </SettingsGroup>
+      </SettingsGroup>}
     </div>
+  );
+}
+
+const INSTALL_SCRIPT_HINT = "Runs once in each build, as the workspace user, before the Cloud Computer is saved. Changes apply after the next build.";
+
+function InstallScript({ saved, disabled, active, onSave }: { saved: string; disabled: boolean; active: boolean; onSave(script: string): void }) {
+  const [value, setValue] = useState(saved);
+  return (
+    <SettingsGroup title="Install script" description={INSTALL_SCRIPT_HINT}>
+      <CodeTextarea aria-label="Install script" value={value} readOnly={disabled} offscreen={!active} onChange={setValue} />
+      <div className="flex justify-end">
+        <Button variant="secondary" onClick={() => onSave(value)} disabled={disabled || value === saved}>Save</Button>
+      </div>
+    </SettingsGroup>
+  );
+}
+
+const installScripts = new KeyedAsyncCache<{ installScript: string | null } | null>({ maxEntries: 16 });
+
+/** Members see what every build installs; only owners and admins change it. */
+function MemberComputer({ userId, organizationId, active }: { userId: string; organizationId: string; active: boolean }) {
+  const read = useRecoveringRead(installScripts, computerKey(userId, organizationId),
+    // An older control plane, or ready copies off, has no install script to show.
+    () => getCloudV2InstallScript(organizationId).catch(() => null), { enabled: active, maxAgeMs: 30_000 });
+  const script = read.data;
+  if (script?.installScript === undefined) return <SettingsSection title="Cloud Computer" description="Only owners and admins manage it." />;
+  return (
+    <SettingsGroup title="Install script" description={INSTALL_SCRIPT_HINT}>
+      <SettingsRow label="Install script" hint="Managed by admins" />
+      {script.installScript && <CodeTextarea aria-label="Install script" value={script.installScript} readOnly offscreen={!active} />}
+    </SettingsGroup>
   );
 }
 

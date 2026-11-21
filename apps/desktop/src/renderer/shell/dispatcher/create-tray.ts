@@ -1,6 +1,7 @@
 import { cloudComputerV2BuildRequired, cloudComputerV2CheckFailed } from "../../features/settings/cloud-computer-v2-create-gate";
 
 export const ADD_CLOUD_REPOSITORY_REASON = "Add a repository to your Cloud Computer.";
+export const READY_COPY_BUILDING = "This repository is still getting ready in the cloud. New workspaces take a little longer until it is.";
 
 export type CreateTrayAction = "cloud-computer-settings" | "manage-repositories";
 
@@ -19,8 +20,12 @@ export function createTrayState(input: {
   computerRequired: boolean;
   computerReason: string | null;
   canManageComputer: boolean;
+  /** Ready copies: the selected repository's first copy is still being made. */
+  readyCopyBuilding?: boolean;
 }): CreateTrayState | null {
   if (input.notice) return { message: input.notice, action: null };
+  // Creating still works meanwhile; it just starts from a direct clone.
+  if (!input.reason && !input.checking && input.readyCopyBuilding) return { message: READY_COPY_BUILDING, action: null };
   if (!input.reason || input.checking) return null;
   if (input.computerRequired) {
     const reason = input.computerReason;
