@@ -245,7 +245,7 @@ export function requestCloudGithubPr(
       if (write || op === "gh.prSync")
         await import("../state/cloud-workspace-catalog")
           .then(({ refreshCloudWorkspace, cloudWorkspaceDocument }) =>
-            write || prSyncChangesDocument(cloudWorkspaceDocument(target)?.github, result) ? refreshCloudWorkspace(target) : undefined)
+            write || prSyncChangesDocument(documentPullRequest(cloudWorkspaceDocument(target), repository), result) ? refreshCloudWorkspace(target) : undefined)
           .catch(() => {});
       if (!current() && !write) throw changed();
       return result;
@@ -306,3 +306,11 @@ function prSyncChangesDocument(github: { prNumber: number | null; prState: strin
   const pr = result as { number?: unknown; url?: unknown; state?: unknown };
   return pr.number !== github.prNumber || pr.url !== github.prUrl || pr.state !== github.prState;
 }
+
+/** The pull request the document shows for this request's repository: its own entry for one of several. */
+function documentPullRequest(document: { github?: Parameters<typeof prSyncChangesDocument>[0]; repositories?: { repository: string; github?: Parameters<typeof prSyncChangesDocument>[0] }[] } | undefined,
+  repository: CloudGithubPrRepository | undefined): Parameters<typeof prSyncChangesDocument>[0] {
+  if (!repository) return document?.github;
+  return document?.repositories?.find(entry => entry.repository.toLowerCase() === repository.repository.toLowerCase())?.github;
+}
+
