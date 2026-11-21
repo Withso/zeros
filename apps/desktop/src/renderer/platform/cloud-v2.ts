@@ -1,6 +1,9 @@
 import { z } from "zod";
 import { CloudGithubUnavailableReasonSchema } from "@zeros/protocol/cloud-github-connection";
-import { CloudV2AgentCostSchema, CloudV2SetupStatusSchema, RepositorySetupPathSchema } from "@zeros/protocol/cloud-v2-relay";
+import { CloudV2AgentCostSchema, CloudV2SetupStatusSchema, RepositorySetupPathSchema, WORKSPACE_REPOSITORIES_FEATURE } from "@zeros/protocol/cloud-v2-relay";
+
+/** Declared on connect: the control plane refuses a workspace of several repositories to a desktop without it. */
+export const WORKSPACE_REPOSITORIES_CLIENT_FEATURE = WORKSPACE_REPOSITORIES_FEATURE;
 import { ownershipOf, sharingOf } from "./team-sharing-schema";
 import { sharingFor } from "./team-sharing-registry";
 import { isCloudWorkspacePageOwner } from "@zeros/protocol/cloud-workspace-link";
@@ -286,6 +289,8 @@ export async function connectCloudV2Workspace(target: CloudWorkspaceTarget, opti
 }) {
   return cloudAccountRequest(`/v1/cloud-v2/workspaces/${uuid.parse(target.workspaceId)}/connect?wakePolicy=explicit`, CloudV2ConnectSchema,
     { body: { wake: options.wake }, idempotencyKey: key() }, { ...sharingFor(target.workspaceId), signal: options.signal,
+      // This desktop opens a workspace of several repositories at its project folder.
+      clientFeatures: [WORKSPACE_REPOSITORIES_CLIENT_FEATURE],
       ...(options.clientInstance ? { clientInstance: options.clientInstance } : {}),
       ...(options.notExpiringBefore ? { notExpiringBefore: options.notExpiringBefore } : {}),
       ...(options.presentedTokenExpiry ? { presentedTokenExpiry: options.presentedTokenExpiry } : {}) });

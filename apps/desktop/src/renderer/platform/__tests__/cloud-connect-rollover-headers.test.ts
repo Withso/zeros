@@ -22,17 +22,17 @@ describe("§14.7: POST connect for a rolling-over peer", () => {
     const seen: Array<number | null> = [];
     await connectCloudV2Workspace(target, { wake: false, clientInstance: instance, notExpiringBefore: 1_234_567, presentedTokenExpiry: value => seen.push(value) });
     const headers = new Headers(fetch.mock.calls[0]![1].headers);
-    expect([headers.get("x-zeros-client-features"), headers.get("x-zeros-client-instance")]).toEqual(["client-token-rollover-v1", instance]);
+    expect([headers.get("x-zeros-client-features"), headers.get("x-zeros-client-instance")]).toEqual(["workspace-repositories-v1,client-token-rollover-v1", instance]);
     expect(auth.getSession).toHaveBeenCalledWith({ notExpiringBefore: 1_234_567 });
     expect(seen).toEqual([1_900_000_000_000]);
   });
 
-  it("an ordinary connect sends neither header nor a bound, and an unreadable bearer reports null", async () => {
+  it("an ordinary connect declares only several repositories, with no instance or bound, and an unreadable bearer reports null", async () => {
     auth.getSession.mockResolvedValue({ access_token: "opaque", user: { sub: "u" } });
     const fetch = vi.fn(async (_url: string, _init: RequestInit) => Response.json(reply)); vi.stubGlobal("fetch", fetch);
     await connectCloudV2Workspace(target, { wake: true });
     const headers = new Headers(fetch.mock.calls[0]![1].headers);
-    expect([headers.get("x-zeros-client-features"), headers.get("x-zeros-client-instance")]).toEqual([null, null]);
+    expect([headers.get("x-zeros-client-features"), headers.get("x-zeros-client-instance")]).toEqual(["workspace-repositories-v1", null]);
     expect(auth.getSession).toHaveBeenCalledWith(undefined);
     const seen: Array<number | null> = [];
     await connectCloudV2Workspace(target, { wake: false, clientInstance: "not-a-uuid", presentedTokenExpiry: value => seen.push(value) });
@@ -52,10 +52,13 @@ describe("§14.7: POST connect for a rolling-over peer", () => {
     expect(fetch.mock.calls.map(([, init]) => rolloverHeaders(init))).toEqual([instance, null]);
     await connectCloudV2Workspace(target, { wake: false, clientInstance: instance });
     expect(fetch).toHaveBeenCalledTimes(3); expect(rolloverHeaders(fetch.mock.calls[2]![1])).toBeNull();
+    // An ordinary connect after the refusal offers no feature header either.
+    await connectCloudV2Workspace(target, { wake: true });
+    expect(new Headers(fetch.mock.calls[3]![1].headers).get("x-zeros-client-features")).toBeNull();
     // Bounded memory: a later control plane gets the headers offered again.
     vi.advanceTimersByTime(30 * 60_000);
     await connectCloudV2Workspace(target, { wake: false, clientInstance: instance });
-    expect(fetch.mock.calls.slice(3).map(([, init]) => rolloverHeaders(init))).toEqual([instance, null]);
+    expect(fetch.mock.calls.slice(4).map(([, init]) => rolloverHeaders(init))).toEqual([instance, null]);
   });
 
   it("never loops: offline fails after one header-less retry and is not remembered; an HTTP refusal is not retried", async () => {
