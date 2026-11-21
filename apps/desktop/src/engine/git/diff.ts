@@ -375,7 +375,7 @@ export async function status(
     // destructive Reset/Clean guards read it. Never join a shared summary
     // snapshot that may predate a file the caller can already see; run one
     // fresh porcelain v2 read, in the foreground lane.
-    const { remote } = resolveRepoGit(ws.repoRoot);
+    const { remote } = resolveRepoGit(ws.repoRoot, ws);
     const snapshot = new LocalChangeSnapshot(ws, remote);
     return withGitReadLane(new GitReadLane(false), async () => {
       const observed = await snapshot.readStatus(options.includeTracking !== false);
@@ -540,7 +540,7 @@ export async function changeCounts(
   includePath: ChangePathFilter = () => true,
 ): Promise<ChangeCounts> {
   const ws = await resolveRepoForGitOp(workspaceId);
-  const { remote } = resolveRepoGit(ws.repoRoot);
+  const { remote } = resolveRepoGit(ws.repoRoot, ws);
   const read = async (snapshot?: LocalChangeSnapshot): Promise<ChangeCounts> => {
     const { parsed, resolvedFloor } = await (snapshot ? snapshot.inputs() : changeSummaryInputs(ws, remote));
     const head = snapshot ? await snapshot.head() : resolvedFloor ? "HEAD" : await headOrEmptyTree(ws.path);
@@ -748,7 +748,7 @@ export async function changeLineCounts(
   includePath: ChangePathFilter = () => true,
 ): Promise<ChangeLineCounts> {
   const ws = await resolveRepoForGitOp(workspaceId);
-  const { remote } = resolveRepoGit(ws.repoRoot);
+  const { remote } = resolveRepoGit(ws.repoRoot, ws);
   const read = async (snapshot?: LocalChangeSnapshot): Promise<ChangeLineCounts> => {
     snapshot?.requestLines();
     const { parsed, resolvedFloor } = await (snapshot ? snapshot.inputs() : changeSummaryInputs(ws, remote));
@@ -783,7 +783,7 @@ export async function hasWorkspaceChanges(
 ): Promise<boolean> {
   try {
     const ws = await resolveRepoForGitOp(workspaceId);
-    const { remote } = resolveRepoGit(ws.repoRoot);
+    const { remote } = resolveRepoGit(ws.repoRoot, ws);
     const read = async (snapshot?: LocalChangeSnapshot) => {
       const { parsed, resolvedFloor } = await (snapshot ? snapshot.inputs() : changeSummaryInputs(ws, remote));
       const range = [resolvedFloor ?? (snapshot ? await snapshot.head() : await headOrEmptyTree(ws.path))];
@@ -1404,7 +1404,7 @@ export async function diff(opts: DiffOptions): Promise<DiffResult> {
     opts.base !== undefined
       ? assertSafeGitRef(opts.base, "diff.base")
       : ws.baseBranch;
-  const { remote } = resolveRepoGit(ws.repoRoot);
+  const { remote } = resolveRepoGit(ws.repoRoot, ws);
   if (mode === "refs" && opts.base) {
     rangeOpts = {
       ...opts,
@@ -1604,7 +1604,7 @@ export async function showCommit(
   const ws = await resolveRepoForGitOp(workspaceId);
   // The commit may not be in the local store (force-push / behind) — fetch it
   // (or fail with a clear message) before diffing.
-  await ensureCommitPresent(ws.path, sha, resolveRepoGit(ws.repoRoot).remote);
+  await ensureCommitPresent(ws.path, sha, resolveRepoGit(ws.repoRoot, ws).remote);
   // core.quotePath=false so a non-ASCII path appears UNQUOTED in the
   // `diff --git` header → the remote secret filter's a/…b/ parser matches it
   // (a quoted header fails closed = the file is dropped, never rendered).
@@ -1679,7 +1679,7 @@ export async function log(opts: LogOptions): Promise<Commit[]> {
       ws,
       opts.base,
       limit,
-      resolveRepoGit(ws.repoRoot).remote,
+      resolveRepoGit(ws.repoRoot, ws).remote,
       opts.since,
       skip,
       opts.ref,

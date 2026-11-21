@@ -1217,7 +1217,7 @@ async function workspaceRemote(workspaceId: string): Promise<{
   // The repo's configured `git.remote` (the "Remote origin" setting, default
   // "origin") — every PR op targets the same remote as push/pull/create.
   // Settings-sourced, so guard it before it reaches git as a positional.
-  const { remote } = resolveRepoGit(ws.repoRoot);
+  const { remote } = resolveRepoGit(ws.repoRoot, ws);
   assertSafeGitRef(remote, "workspaceRemote.remote");
   let stdout: string;
   try {

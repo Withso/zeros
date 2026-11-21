@@ -1,6 +1,6 @@
 import { useCallback, useLayoutEffect } from "react";
 import { getActiveOrganizationSnapshot } from "../features/team/team-store";
-import { filterRowsForOrganization } from "../features/team/organization-capabilities";
+import { filterRowsForOrganization, localWorkShowsEverywhere } from "../features/team/organization-capabilities";
 import type { OrganizationSummary } from "../features/team/control-plane";
 import { isCloudWorkspace, parseCloudWorkspaceKey } from "../platform/bridge/cloud-workspace-key";
 import { canReadCloudWorkspace, cloudWorkspaceCatalogConfirmed, cloudWorkspaceDocument } from "./cloud-workspace-catalog";
@@ -25,7 +25,8 @@ function knownDestination(organization: OrganizationSummary, folder: string): { 
     (!project || normalizeProjectRoot(project.repoRoot) === normalizeProjectRoot(workspace.repoRoot))) {
     return { repoRoot: workspace.repoRoot, validationPending: peekWorkspacesFor(workspace.repoSlug) === undefined };
   }
-  return organization.isPersonal && project && normalizeProjectRoot(folder) === normalizeProjectRoot(project.repoRoot)
+  return (organization.isPersonal || localWorkShowsEverywhere()) && project &&
+    normalizeProjectRoot(folder) === normalizeProjectRoot(project.repoRoot)
     ? { repoRoot: project.repoRoot, validationPending: false } : null;
 }
 

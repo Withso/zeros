@@ -245,6 +245,7 @@ export function useTeamEngineSync(): void {
           return;
         }
         const write = ++contextWrite;
+        // Only the selected organization's document is loaded, so another organization's historical Local workspaces get no organization layer meanwhile.
         await bridgeTeamSetContext(bridge, {
           teamId: team.id,
           doc: settings.doc ?? null,

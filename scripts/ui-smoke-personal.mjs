@@ -6,9 +6,11 @@ import net from "node:net";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
+// These checks cover today's owner rules ("Local", owner-isolated lists); dev
+// runs unified-workspaces, so they pin it off.
 export async function runPersonalOrganizationSmoke({ page, check }) {
   await page.goto(
-    `${new URL(page.url()).origin}/apps/desktop/src/renderer/harnesses/harness-personal-organization.html`,
+    `${new URL(page.url()).origin}/apps/desktop/src/renderer/harnesses/harness-personal-organization.html?feature-off=unified-workspaces`,
   );
   const switcher = page.getByRole("button", { name: "Switch organization", includeHidden: true });
   const rows = page
@@ -172,7 +174,7 @@ export async function runPersonalOrganizationSmoke({ page, check }) {
   check("offline reload restores the selected organization and full list without account authority, retaining Sign in", true);
   await page.keyboard.press("Escape");
 
-  await page.goto(`${new URL(page.url()).origin}/apps/desktop/src/renderer/harnesses/harness-app-sidebar.html?organizations`);
+  await page.goto(`${new URL(page.url()).origin}/apps/desktop/src/renderer/harnesses/harness-app-sidebar.html?organizations&feature-off=unified-workspaces`);
   await page.locator('[data-workspace-id="ws-boston"]').click();
   const destination = { page: "workspace", folder: "/fixture-workspaces/zeros/boston", chatId: "chat-ws-boston" };
   const selected = () => page.evaluate(() => window.appSidebarState());

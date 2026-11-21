@@ -1,7 +1,8 @@
 import { expect } from "@playwright/test";
 
 export async function runSidebarWorkspaceFilters({ page, check, harnessBase }) {
-  const harness = `${harnessBase}/harness-app-sidebar.html`;
+  // Owner isolation below is the stable sidebar; the unified section follows.
+  const harness = `${harnessBase}/harness-app-sidebar.html?feature-off=unified-workspaces`;
   await page.evaluate(() => sessionStorage.clear());
   await page.goto(harness, { waitUntil: "networkidle" });
   const trigger = page.getByRole("button", {
@@ -242,6 +243,41 @@ export async function runSidebarWorkspaceFilters({ page, check, harnessBase }) {
   await expectFilterIndicator(true);
   check(
     "Local and cloud repository filters restore independently through owner switches, closing stale menus",
+    true,
+  );
+
+  // unified-workspaces (on in dev): Local work shows under every owner, cloud
+  // rows carry one trailing mark, and This Mac / Cloud filter the list.
+  await page.evaluate(() => { localStorage.clear(); sessionStorage.clear(); });
+  await page.goto(`${harnessBase}/harness-app-sidebar.html`, { waitUntil: "networkidle" });
+  await expect(row("ws-atlanta")).toBeVisible();
+  const seeded = await page.evaluate(() => window.appSidebarSeedCloud());
+  await page.evaluate((id) => window.appSidebarSelectOwner(id), seeded.organizationId);
+  await expect(row(seeded.keys[0])).toBeVisible();
+  await expect(row("ws-atlanta")).toBeVisible();
+  await expect(row(seeded.keys[2])).toHaveCount(0);
+  await expect(row(seeded.keys[0]).locator('[data-cloud-mark="stopped"]')).toHaveCount(1);
+  await expect(row("ws-atlanta").locator("[data-cloud-mark]")).toHaveCount(0);
+  const placement = async (name) => {
+    await trigger.click();
+    await page.getByRole("menuitem", { name: /^Filter/ }).hover();
+    await page.getByRole("menuitemcheckbox", { name, exact: true }).click();
+    await page.keyboard.press("Escape");
+    await expect(page.getByRole("menu", { includeHidden: true })).toHaveCount(0);
+  };
+  await placement("Cloud");
+  await expect(row(seeded.keys[0])).toHaveCount(0);
+  await expect(row("ws-atlanta")).toBeVisible();
+  await expect(trigger).toHaveAccessibleDescription("Placement filter active");
+  await page.evaluate((id) => window.appSidebarSelectOwner(id), seeded.otherOrganizationId);
+  await expect(row(seeded.keys[2])).toBeVisible();
+  await page.evaluate((id) => window.appSidebarSelectOwner(id), seeded.organizationId);
+  await expect(row(seeded.keys[0])).toHaveCount(0);
+  await placement("Cloud");
+  await expect(row(seeded.keys[0])).toBeVisible();
+  await expect(trigger).toHaveAccessibleDescription("");
+  check(
+    "Unified sidebar lists Local work under an organization, marks cloud rows, and filters This Mac / Cloud per owner",
     true,
   );
 }

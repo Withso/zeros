@@ -14,8 +14,10 @@ import {
   useExperimentalFeature,
 } from "../features/settings/experimental-features";
 import { requestUserSettingsSection } from "../features/settings/settings-navigation";
-import { canCreateWorkspaceIn } from "../features/team/organization-capabilities";
+import { canCreateWorkspaceIn, localWorkShowsEverywhere } from "../features/team/organization-capabilities";
 import { hasCloudWorkspaceAccountAccess } from "../features/team/cloud-workspace-account-access";
+import { unifiedOrganizationGeneralSections } from "../features/settings/organization-general";
+import { projectGroupLookup } from "../state/project-identity";
 import {
   getActiveOrganizationIdSnapshot,
   getOrganizationStoreGeneration,
@@ -214,13 +216,21 @@ function CommandPaletteSession({
     native: isNativeRuntime(),
     cloudCanEdit: canEdit,
     cloudStatus,
-    createWorkspace: localOwner || canCreateWorkspaceIn(organization, "cloud"),
+    createWorkspace: localOwner || localWorkShowsEverywhere() || canCreateWorkspaceIn(organization, "cloud"),
     terminalAgents,
     activeFile: !!activeFile,
     feedback: isFeedbackConfigured(),
   };
   const capabilities = paletteCapabilities(capabilityInput);
+  const unifiedSettings = isFeatureEnabled("unified-workspaces");
   const settingsAvailability = {
+    unified: unifiedSettings,
+    organizationGeneral:
+      unifiedSettings &&
+      unifiedOrganizationGeneralSections(
+        organization,
+        !!organization && hasCloudWorkspaceAccountAccess(organization.id),
+      ).length > 0,
     local: localOwner,
     cloudEnabled: isFeatureEnabled("cloud-workspaces"),
     terminalAgentsEnabled: terminalAgents,
@@ -242,6 +252,7 @@ function CommandPaletteSession({
         visible,
         projects,
         category === "workspaces" ? workspaceFilter : "active",
+        localWorkShowsEverywhere() ? projectGroupLookup(projects) : undefined,
       ),
     [visible, projects, category, workspaceFilter],
   );

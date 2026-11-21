@@ -331,6 +331,32 @@ export function getWorkspaceByPath(p: string): Workspace | null {
   return row ? rowToWorkspace(row) : null;
 }
 
+/** The owner of the most specific registered Local workspace containing `p`,
+ *  or null when `p` is not inside one (a main checkout or an unregistered folder). */
+export function getLocalWorkspaceOwnerForPath(
+  p: string,
+): { organizationId: string | null } | null {
+  const candidates = new Set<string>();
+  for (const start of [path.resolve(p), canonicalizePath(p)]) {
+    for (let cur = start; ; cur = path.dirname(cur)) {
+      candidates.add(cur);
+      if (path.dirname(cur) === cur) break;
+    }
+  }
+  const list = [...candidates];
+  const rows = open()
+    .prepare<string[], { path: string; organization_id: string | null }>(
+      `SELECT path, organization_id FROM workspaces
+        WHERE placement = 'local' AND path IN (${list.map(() => "?").join(", ")})`,
+    )
+    .all(...list);
+  let best: { path: string; organization_id: string | null } | undefined;
+  for (const row of rows) {
+    if (!best || row.path.length > best.path.length) best = row;
+  }
+  return best ? { organizationId: best.organization_id?.trim() || null } : null;
+}
+
 export function getWorkspaceByBranch(
   repoSlug: string,
   branch: string,

@@ -42,7 +42,7 @@ import { subscribeProviderAuth } from "../../platform/provider-auth-state";
 import { AgentIcon } from "../agent/agent-icon";
 import { InlineLoginTerminal } from "./inline-login-terminal";
 import { ProviderConnectionDialog } from "./provider-connection-dialog";
-import { CloudProviderConnections } from "./cloud-provider-connections";
+import { CloudAgentConnection, CloudProviderConnections } from "./cloud-provider-connections";
 import { getActiveOrganizationIdSnapshot, useActiveOrganization, useTeams } from "../team/team-store";
 import {
   connectionLabel,
@@ -50,8 +50,11 @@ import {
   rememberConnectionMethod,
   type ConnectionMethod,
 } from "./connection-methods";
-import { subscribeProviderSettingsTab } from "./settings-navigation";
-import { SettingsSection, SettingsField } from "./settings-ui";
+import { activeSettingsOwner, subscribeProviderSettingsTab } from "./settings-navigation";
+import { PlaceLabel, SettingsSection, SettingsField } from "./settings-ui";
+import { readScopedSettingsSelection, writeScopedSettingsSelection } from "./settings-scope";
+import { TerminalAgentsSection } from "./terminal-agents-section";
+import { useExperimentalFeature } from "./experimental-features";
 import { ProviderInformation } from "./provider-information";
 import { SubscriptionConnectionPanel } from "./subscription-connection-panel";
 import {
@@ -211,11 +214,14 @@ function loadInitialProviderTab(): string {
 
 export function ProvidersPanel({
   surfaceActive = true,
+  unified = false,
 }: {
   surfaceActive?: boolean;
+  unified?: boolean;
 }) {
   const organization = useActiveOrganization();
   const { me } = useTeams();
+  if (unified) return <AgentsPanel surfaceActive={surfaceActive} />;
   if (!isFeatureEnabled("cloud-workspaces")) return <LocalProvidersPanel surfaceActive={surfaceActive} />;
   if (!organization && getActiveOrganizationIdSnapshot())
     return <p className="text-fg2 text-xs">Loading organization agent settings…</p>;
@@ -224,14 +230,68 @@ export function ProvidersPanel({
     : <LocalProvidersPanel surfaceActive={surfaceActive} />;
 }
 
-function LocalProvidersPanel({ surfaceActive }: { surfaceActive: boolean }) {
+const CLOUD_AGENT_NAMES: Record<(typeof PROVIDER_ORDER)[number], string> = {
+  claude: "Claude Code",
+  codex: "Codex",
+  cursor: "Cursor",
+};
+
+/** One tab per agent with its This Mac part and, in a cloud organization, its Cloud part; Terminal Agents follows. */
+function AgentsPanel({ surfaceActive }: { surfaceActive: boolean }) {
+  const organization = useActiveOrganization();
+  const { me } = useTeams();
+  const [terminalAgents] = useExperimentalFeature("terminalAgents");
+  const [owner] = useState(activeSettingsOwner);
+  const cloudOrganizationId =
+    isFeatureEnabled("cloud-workspaces") && organization && !organization.isPersonal && me
+      ? organization.id
+      : null;
+  return (
+    <LocalProvidersPanel
+      surfaceActive={surfaceActive}
+      owner={owner}
+      cloud={
+        cloudOrganizationId && me
+          ? (agentId) => (
+              <CloudAgentConnection
+                key={`${me.user.id}:${cloudOrganizationId}:${agentId}`}
+                organizationId={cloudOrganizationId}
+                userId={me.user.id}
+                agentId={agentId}
+                surfaceActive={surfaceActive}
+                title={<PlaceLabel place="cloud" />}
+              />
+            )
+          : undefined
+      }
+      after={terminalAgents ? <SettingsSection title="Terminal Agents"><TerminalAgentsSection /></SettingsSection> : null}
+    />
+  );
+}
+
+function LocalProvidersPanel({
+  surfaceActive,
+  owner,
+  cloud,
+  after,
+}: {
+  surfaceActive: boolean;
+  /** Unified page: the Settings owner whose saved agent tab this is. */
+  owner?: string;
+  /** Unified page: the agent's cloud part, shown after its This Mac part. */
+  cloud?: (agentId: string) => React.ReactNode;
+  after?: React.ReactNode;
+}) {
   const bridge = useBridge();
   const agents = useAgentsSnapshot();
   const visible = useDocumentActive(surfaceActive);
-  const [activeId, setActiveIdState] = useState<string>(loadInitialProviderTab);
+  const [activeId, setActiveIdState] = useState<string>(() =>
+    owner ? readScopedSettingsSelection(owner, "provider", "claude") : loadInitialProviderTab(),
+  );
   const setActiveId = (next: string) => {
     setActiveIdState(next);
-    setSetting(PROVIDERS_ACTIVE_TAB_KEY, next);
+    if (owner) writeScopedSettingsSelection(owner, "provider", next);
+    else setSetting(PROVIDERS_ACTIVE_TAB_KEY, next);
   };
 
   const listAgents = useCallback(
@@ -317,14 +377,56 @@ function LocalProvidersPanel({ surfaceActive }: { surfaceActive: boolean }) {
     );
   }, [agents]);
 
-  useEffect(() => subscribeProviderSettingsTab(setActiveIdState), []);
+  useEffect(() => subscribeProviderSettingsTab(setActiveIdState, owner), [owner]);
 
   const active = ordered.find((a) => a.id === activeId) ?? ordered[0];
+  // A cloud organization lists every agent so its cloud part shows before this Mac's registry loads.
+  const tabs: Pick<BridgeRegistryAgent, "id" | "name" | "beta">[] = cloud
+    ? PROVIDER_ORDER.map((id) => ordered.find((a) => a.id === id) ?? { id, name: CLOUD_AGENT_NAMES[id] })
+    : ordered;
+  const activeTab = tabs.find((a) => a.id === activeId) ?? tabs[0];
+  const activeAgent = activeTab ? ordered.find((a) => a.id === activeTab.id) : undefined;
 
   const handleRefresh = useCallback(
     () => refreshAgents(listAgents),
     [listAgents],
   );
+
+  if (owner) {
+    return (
+      <div className="flex flex-col gap-8">
+        {tabs.length === 0 ? (
+          <div className="min-h-24" aria-busy="true" />
+        ) : (
+          <Tabs
+            value={activeTab?.id ?? tabs[0].id}
+            onValueChange={setActiveId}
+            className="flex flex-col gap-8"
+          >
+            <ProviderTabs providers={tabs} />
+            {activeTab && (
+              <TabsContent value={activeTab.id} className="mt-0 flex flex-col gap-8">
+                <SettingsSection title={<PlaceLabel place="mac" />}>
+                  {activeAgent ? (
+                    <ProviderCard
+                      key={activeAgent.id}
+                      agent={activeAgent}
+                      surfaceActive={surfaceActive}
+                      onRefresh={handleRefresh}
+                    />
+                  ) : (
+                    <div className="min-h-24" aria-busy="true" />
+                  )}
+                </SettingsSection>
+                {cloud?.(activeTab.id)}
+              </TabsContent>
+            )}
+          </Tabs>
+        )}
+        {after}
+      </div>
+    );
+  }
 
   return (
     <div className="flex flex-col gap-8">

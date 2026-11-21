@@ -4,7 +4,8 @@ import { expect } from "@playwright/test";
 export async function runCommandPaletteSmoke({ page, check }) {
   const origin = new URL(page.url()).origin;
   await page.goto(
-    `${origin}/apps/desktop/src/renderer/harnesses/harness-command-palette.html`,
+    // Owner isolation below is today's rule; dev runs unified-workspaces.
+    `${origin}/apps/desktop/src/renderer/harnesses/harness-command-palette.html?feature-off=unified-workspaces`,
   );
   const dialog = page.getByRole("dialog", {
     name: "Command palette",

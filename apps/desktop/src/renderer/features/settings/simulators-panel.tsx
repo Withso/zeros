@@ -65,8 +65,10 @@ const OPENS_OUTSIDE_ZEROS: ReadonlySet<SimulatorSetupAction["kind"]> = new Set([
   "open-android-studio",
 ]);
 
-export function SimulatorsPanel({ surfaceActive = true }: { surfaceActive?: boolean }) {
+/** `unified`: a device page, so this Mac's controls show under every owner. */
+export function SimulatorsPanel({ surfaceActive = true, unified = false }: { surfaceActive?: boolean; unified?: boolean }) {
   const organization = useActiveOrganization();
+  if (unified) return <LocalSimulatorsPanel surfaceActive={surfaceActive} />;
   if (!organization && getActiveOrganizationIdSnapshot())
     return <p className="text-fg2 text-xs">Loading organization settings…</p>;
   if (organization && !organization.isPersonal)

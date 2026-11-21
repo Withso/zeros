@@ -35,6 +35,24 @@ describe("WorkspaceService settings ops", () => {
     fs.rmSync(userDir, { recursive: true, force: true });
   });
 
+  it("applies the organization layer to a no-workspace resolve only when the local caller names that owner", async () => {
+    const { setTeamContext, clearTeamContext } = await import("../../settings/team-context");
+    setTeamContext({ teamId: "org-a", doc: { env: { TEAM_VALUE: "1" } } });
+    try {
+      type Resolved = { effective: { env?: Record<string, string> } };
+      const personal = (await svc.handle("settings.resolve")) as Resolved;
+      expect(personal.effective.env?.TEAM_VALUE).toBeUndefined();
+      const owned = (await svc.handle("settings.resolve", { ownerOrganizationId: "org-a" })) as Resolved;
+      expect(owned.effective.env?.TEAM_VALUE).toBe("1");
+      const other = (await svc.handle("settings.resolve", { ownerOrganizationId: "org-b" })) as Resolved;
+      expect(other.effective.env?.TEAM_VALUE).toBeUndefined();
+      const remote = (await svc.handle("settings.resolve", { ownerOrganizationId: "org-a" }, { remote: true })) as Resolved;
+      expect(remote.effective.env?.TEAM_VALUE).toBeUndefined();
+    } finally {
+      clearTeamContext();
+    }
+  });
+
   it("uses workspace script overrides for Setup and Run without rewriting repository settings", async () => {
     const git = (...args: string[]) =>
       execFileSync("git", args, { cwd: dir, stdio: "pipe" });

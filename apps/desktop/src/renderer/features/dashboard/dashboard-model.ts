@@ -34,6 +34,8 @@ export function dashboardRowBuilder(
   projects: readonly Project[],
   chats: readonly Pick<ChatThread, "folder" | "title" | "updatedAt">[],
   activity: ReadonlyMap<string, number>,
+  /** unified-workspaces: a repository's sides read as its default folder. */
+  projectGroupOf?: (projectId: string) => readonly Project[] | undefined,
 ): (workspace: Workspace) => DashboardRow {
   const projectBySlug = new Map(
     projects.map((project) => [project.repoSlug, project]),
@@ -51,7 +53,8 @@ export function dashboardRowBuilder(
   }
   return (workspace) => {
     const branch = branchDisplayName(workspace.branch);
-    const project = projectBySlug.get(workspace.repoSlug) ?? null;
+    const own = projectBySlug.get(workspace.repoSlug) ?? null;
+    const project = own ? (projectGroupOf?.(own.id)?.[0] ?? own) : null;
     return {
       workspace,
       project,

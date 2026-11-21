@@ -24,7 +24,7 @@ export async function resolveWorkspaceTargetRef(
   try {
     const ws = getWorkspaceById(workspaceId);
     if (!ws?.baseBranch || !ws.repoRoot) return null;
-    const { remote } = resolveRepoGit(ws.repoRoot);
+    const { remote } = resolveRepoGit(ws.repoRoot, ws);
     const remoteRef = `${remote}/${ws.baseBranch}`;
     return (await refExists(ws.repoRoot, `refs/remotes/${remoteRef}`))
       ? remoteRef

@@ -11,6 +11,7 @@
 // Mounted around MainShellBody and Settings. All the hooks it needs are stores or
 // providers that live above the main shell, so it can sit at that level.
 
+import { localWorkShowsEverywhere } from "../features/team/organization-capabilities";
 import React, {
   createContext,
   useCallback,
@@ -76,9 +77,13 @@ export interface AddProjectOptions {
   /** Return the registered project to Create's picker without opening a
    * workspace. Omit for the usual first-workspace flow. */
   onSelect?: (project: Project) => void;
+  /** unified-workspaces: Create's This Mac side clones onto this Mac under any owner. */
+  placement?: "local";
+  /** Prefills Open GitHub project with this repository URL. */
+  url?: string;
 }
 
-interface AddProjectActions {
+export interface AddProjectActions {
   /** Open the native folder picker and register the chosen folder as a project.
    *  A foreign linked-worktree is routed through the Add-local-project
    *  confirmation first. */
@@ -122,6 +127,14 @@ export function useAddProject(): AddProjectActions {
     throw new Error("useAddProject must be used within <AddProjectProvider>");
   }
   return ctx;
+}
+
+/** Harness pages supply recorded actions instead of the real flows. */
+export const AddProjectFixtureProvider = AddProjectContext.Provider;
+
+/** For surfaces that can also render outside the provider (harness pages). */
+export function useOptionalAddProject(): AddProjectActions | null {
+  return useContext(AddProjectContext);
 }
 
 export function AddProjectProvider({
@@ -206,7 +219,7 @@ export function AddProjectProvider({
       const { onSelect } = opts;
       const autoCreate = !onSelect && (opts.autoCreate ?? true);
       const organization = getActiveOrganizationSnapshot();
-      if (autoCreate && organization && !organization.isPersonal) {
+      if (autoCreate && organization && !organization.isPersonal && !localWorkShowsEverywhere()) {
         pendingOpens.current.delete(repoRoot);
         setPendingProject(null);
         setOpenGithubTarget({ onSelect });
@@ -362,7 +375,7 @@ export function AddProjectProvider({
   const openProject = useCallback(
     async ({ onSelect }: AddProjectOptions = {}) => {
       const organization = getActiveOrganizationSnapshot();
-      if (organization && !organization.isPersonal) {
+      if (organization && !organization.isPersonal && !localWorkShowsEverywhere()) {
         setOpenGithubTarget({ onSelect });
         return;
       }
@@ -421,7 +434,7 @@ export function AddProjectProvider({
 
   const quickStart = useCallback((options: AddProjectOptions = {}) => {
     const organization = getActiveOrganizationSnapshot();
-    if (organization && !organization.isPersonal) {
+    if (organization && !organization.isPersonal && !localWorkShowsEverywhere()) {
       setOpenGithubTarget(options);
       return;
     }
@@ -502,6 +515,8 @@ export function AddProjectProvider({
       />
       <OpenGithubProjectDialog
         open={openGithubTarget !== null}
+        local={openGithubTarget?.placement === "local" && localWorkShowsEverywhere()}
+        initialUrl={openGithubTarget?.url}
         onOpenChange={(open) => {
           if (!open) setOpenGithubTarget(null);
         }}

@@ -7,45 +7,52 @@ import { useActiveOrganization, useTeams, getOrganizationStoreGeneration } from 
 import { isFeatureEnabled } from "../../config/release-channel";
 import { useRecoveringRead } from "../../state/use-recovering-read";
 import { CloudRepositoryPicker, type CloudRepositorySelection } from "./cloud-repository-picker";
-import { SettingsActions, SettingsField, SettingsGroup, SettingsRow, SettingsSection } from "./settings-ui";
+import { PlaceLabel, SettingsActions, SettingsField, SettingsGroup, SettingsRow, SettingsSection } from "./settings-ui";
 import { cloudEnvironmentCache, cloudEnvironmentError, cloudEnvironmentKey, readCloudEnvironment,
   saveCloudEnvironment, saveCloudEnvironmentFile } from "./cloud-environment-api";
 import { readEnvironmentSelection, saveEnvironmentSelection } from "./environment-selection";
 
-export function EnvironmentPanel({ surfaceActive = true }: { surfaceActive?: boolean }) {
+/** `unified` shows this Mac and the cloud as two groups on one page instead of two tabs. */
+export function EnvironmentPanel({ surfaceActive = true, unified = false }: { surfaceActive?: boolean; unified?: boolean }) {
   const organization = useActiveOrganization(), { me } = useTeams();
   const member = (me?.organizations ?? me?.teams ?? []).find(row => row.id === organization?.id);
   if (!isFeatureEnabled("cloud-workspaces") || !organization || organization.isPersonal || !me || !member?.workspaceCapabilities.cloud)
-    return <UserEnvironmentPanel />;
+    return unified ? <SettingsSection title={<PlaceLabel place="mac" />}><UserEnvironmentPanel /></SettingsSection> : <UserEnvironmentPanel />;
   return surfaceActive ? <EnvironmentScope key={`${me.user.id}:${getOrganizationStoreGeneration()}:${organization.id}`}
-    userId={me.user.id} organizationId={organization.id} active={surfaceActive} /> : null;
+    userId={me.user.id} organizationId={organization.id} active={surfaceActive} unified={unified} /> : null;
 }
 
-function EnvironmentScope({ userId, organizationId, active }: { userId: string; organizationId: string; active: boolean }) {
+function EnvironmentScope({ userId, organizationId, active, unified }: { userId: string; organizationId: string; active: boolean; unified: boolean }) {
   const [selection, setSelection] = useState(() => readEnvironmentSelection(userId, organizationId));
   const lifetime = useRef(new AbortController());
   useLayoutEffect(() => {
     if (lifetime.current.signal.aborted) { lifetime.current = new AbortController(); setSelection(current => ({ ...current })); }
     return () => lifetime.current.abort();
   }, []);
+  // The unified page has no tabs; keep the saved tab so the tabbed page reopens where it was.
   const select = (scope: "local" | "cloud", repository = selection.repository) => {
     lifetime.current.abort(); lifetime.current = new AbortController();
-    const next = { scope, repository }; saveEnvironmentSelection(userId, organizationId, next); setSelection(next);
+    const next = { scope: unified ? selection.scope : scope, repository }; saveEnvironmentSelection(userId, organizationId, next); setSelection(next);
   };
+  const cloudShown = active && (unified || selection.scope === "cloud");
+  const cloud = <div className="flex flex-col gap-6">
+    <SettingsSection title={unified ? <PlaceLabel place="cloud" /> : "Cloud environment"} description="Private defaults for cloud workspaces you create. Changes apply to new workspaces; existing workspaces keep their saved version.">
+      <CloudRepositoryPicker userId={userId} organizationId={organizationId} active={cloudShown}
+        value={selection.repository ? [selection.repository] : []} onChange={rows => select("cloud", rows[0] ?? null)} />
+    </SettingsSection>
+    {cloudShown && selection.repository && <CloudEnvironmentEditor
+      key={`${selection.repository.id}:${selection.repository.owner}/${selection.repository.name}`}
+      organizationId={organizationId} repository={selection.repository} signal={lifetime.current.signal} />}
+  </div>;
+  if (unified) return <div className="flex flex-col gap-8">
+    <SettingsSection title={<PlaceLabel place="mac" />}><UserEnvironmentPanel /></SettingsSection>
+    {cloud}
+  </div>;
   return <Tabs value={selection.scope} onValueChange={value => select(value === "cloud" ? "cloud" : "local")}>
     <TabsList aria-label="Environment location"><TabsTrigger value="local">Local</TabsTrigger><TabsTrigger value="cloud">Cloud</TabsTrigger></TabsList>
-    <TabsContent value="local"><UserEnvironmentPanel /></TabsContent>
-    <TabsContent value="cloud" className="mt-6">
-      <div className="flex flex-col gap-6">
-        <SettingsSection title="Cloud environment" description="Private defaults for cloud workspaces you create. Changes apply to new workspaces; existing workspaces keep their saved version.">
-          <CloudRepositoryPicker userId={userId} organizationId={organizationId} active={active && selection.scope === "cloud"}
-            value={selection.repository ? [selection.repository] : []} onChange={rows => select("cloud", rows[0] ?? null)} />
-        </SettingsSection>
-        {active && selection.scope === "cloud" && selection.repository && <CloudEnvironmentEditor
-          key={`${selection.repository.id}:${selection.repository.owner}/${selection.repository.name}`}
-          organizationId={organizationId} repository={selection.repository} signal={lifetime.current.signal} />}
-      </div>
-    </TabsContent>
+    {/* The old rail showed this organization's values read-only here; stable keeps that. */}
+    <TabsContent value="local"><UserEnvironmentPanel ownerOrganizationId={organizationId} /></TabsContent>
+    <TabsContent value="cloud" className="mt-6">{cloud}</TabsContent>
   </Tabs>;
 }
 

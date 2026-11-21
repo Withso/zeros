@@ -2,7 +2,7 @@ import { defaultFilter } from "cmdk";
 import type { Workspace } from "../platform/git";
 import { isCloudWorkspace } from "../platform/bridge/cloud-workspace-key";
 import type { OrganizationSummary } from "../features/team/control-plane";
-import { filterRowsForOrganization } from "../features/team/organization-capabilities";
+import { filterRowsForOrganization, localWorkShowsEverywhere } from "../features/team/organization-capabilities";
 import { PERSONAL_ORGANIZATION } from "../features/team/personal-organization";
 import {
   isSettingsSectionAvailable,
@@ -99,7 +99,7 @@ export function paletteCapabilities(input: {
   return {
     createWorkspace: input.createWorkspace,
     localOwner: input.localOwner,
-    localNative: input.localOwner && input.native,
+    localNative: (input.localOwner || localWorkShowsEverywhere()) && input.native,
     workspace,
     codeWorkspace,
     terminalAgent: codeWorkspace && input.terminalAgents,
@@ -287,6 +287,7 @@ const SETTINGS = [
       "screen recording",
       "privacy",
     ],
+    unifiedKeywords: ["startup", "updates", "notifications", "privacy", "usage data", "keep awake"],
   },
   {
     id: "appearance",
@@ -307,6 +308,7 @@ const SETTINGS = [
     id: "providers",
     label: "Agents",
     keywords: ["claude", "codex", "cursor", "providers", "login"],
+    unifiedKeywords: ["claude", "codex", "cursor", "providers", "login", "cloud", "terminal agents", "shell", "cli"],
   },
   {
     id: "cloud-computer",
@@ -328,6 +330,7 @@ const SETTINGS = [
     id: "environment",
     label: "Environment",
     keywords: ["variables", "secrets", "env"],
+    unifiedKeywords: ["variables", "secrets", "env", "cloud"],
   },
   {
     id: "git",
@@ -337,7 +340,19 @@ const SETTINGS = [
   {
     id: "integrations",
     label: "Integrations",
+    unifiedLabel: "GitHub",
     keywords: ["github", "account", "connect"],
+    unifiedKeywords: ["github", "account", "connect", "integrations", "cloud"],
+  },
+  {
+    id: "computer-use",
+    label: "Computer use",
+    keywords: ["blocked apps", "agent cursor", "accessibility", "screen recording", "full disk access", "privacy"],
+  },
+  {
+    id: "org-general",
+    label: "Organization",
+    keywords: ["general", "workspace api access", "local commands"],
   },
   { id: "account", label: "Profile", keywords: ["account", "name"] },
   { id: "experimental", label: "Experimental", keywords: ["features"] },
@@ -379,8 +394,11 @@ export function paletteWorkspacesForOwner(
   confirmedId: string | null,
 ): Workspace[] {
   if (!organization && confirmedId) {
+    const everywhere = localWorkShowsEverywhere();
     return filterRowsForOrganization(rows, null).filter(
-      (row) => row.organizationId === confirmedId,
+      (row) =>
+        row.organizationId === confirmedId ||
+        (everywhere && row.organizationId == null && row.placement !== "cloud"),
     );
   }
   return filterRowsForOrganization(rows, organization ?? PERSONAL_ORGANIZATION);
@@ -390,6 +408,8 @@ export function workspacePaletteEntries(
   rows: Workspace[],
   projects: readonly Project[],
   filter: PaletteWorkspaceFilter,
+  /** unified-workspaces: a repository's sides read as its default folder. */
+  projectGroupOf?: (projectId: string) => readonly Project[] | undefined,
 ): PaletteEntry[] {
   return [...new Map(rows.map((row) => [row.id, row])).values()]
     .filter(
@@ -411,9 +431,10 @@ export function workspacePaletteEntries(
         : "Workspaces",
       detail: [
         workspaceNumberName(workspace),
-        projects.find((project) => project.repoSlug === workspace.repoSlug)
-          ?.name ?? workspace.repoSlug,
-        isCloudWorkspace(workspace.path) ? "Cloud" : "Local",
+        ((project) => (project && projectGroupOf?.(project.id)?.[0]) || project)(
+          projects.find((project) => project.repoSlug === workspace.repoSlug),
+        )?.name ?? workspace.repoSlug,
+        isCloudWorkspace(workspace.path) ? "Cloud" : localWorkShowsEverywhere() ? "This Mac" : "Local",
         workspace.present === false
           ? "Folder missing"
           : workspace.archivedAt != null
@@ -553,7 +574,14 @@ export function settingsPaletteEntries(
   const entries: PaletteEntry[] = SETTINGS.filter((section) =>
     isSettingsSectionAvailable(section.id, context),
   ).map((section) => ({
-    ...section,
+    label:
+      context.unified && "unifiedLabel" in section
+        ? section.unifiedLabel
+        : section.label,
+    keywords:
+      context.unified && "unifiedKeywords" in section
+        ? section.unifiedKeywords
+        : section.keywords,
     id: `settings:${section.id}`,
     category: "settings",
     group: "Settings",

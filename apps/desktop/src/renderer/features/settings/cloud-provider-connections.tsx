@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Ellipsis } from "lucide-react";
 import { Button, Input } from "../../shared/ui";
 import { toast } from "../../shared/ui/primitives/elements";
@@ -96,20 +96,7 @@ export function CloudProviderConnections({
   }, [surfaceActive, request]);
   return (
     <div className="flex flex-col gap-4">
-      {snapshot.error && (
-        <MessageRow
-          tone="error"
-          role="alert"
-          flush
-          actions={
-            <Button variant="ghost" size="compact" onClick={() => void snapshot.refresh()}>
-              Retry
-            </Button>
-          }
-        >
-          {connectionErrorMessage(snapshot.error)}
-        </MessageRow>
-      )}
+      <CloudConnectionsError error={snapshot.error} onRetry={() => void snapshot.refresh()} />
       <div className="flex flex-col gap-8">
         {me &&
           PROVIDERS.map((agent) => (
@@ -130,6 +117,32 @@ export function CloudProviderConnections({
             </div>
           ))}
       </div>
+      <CloudConnectionsFootnotes />
+    </div>
+  );
+}
+
+function CloudConnectionsError({ error, onRetry }: { error: unknown; onRetry: () => void }) {
+  if (!error) return null;
+  return (
+    <MessageRow
+      tone="error"
+      role="alert"
+      flush
+      actions={
+        <Button variant="ghost" size="compact" onClick={onRetry}>
+          Retry
+        </Button>
+      }
+    >
+      {connectionErrorMessage(error)}
+    </MessageRow>
+  );
+}
+
+function CloudConnectionsFootnotes() {
+  return (
+    <>
       <p className="text-fg3 m-0 text-3xxs leading-4">
         {NATIVE_BROWSER_UNAVAILABLE}
       </p>
@@ -137,6 +150,43 @@ export function CloudProviderConnections({
       <p className="text-fg3 m-0 text-3xxs leading-4" data-creator-pays-hint="">
         Your login runs every turn in cloud workspaces you created.
       </p>
+    </>
+  );
+}
+
+/** One agent's cloud connection, for a page that shows each agent's Mac and cloud parts together. */
+export function CloudAgentConnection({
+  organizationId,
+  userId,
+  agentId,
+  surfaceActive,
+  title,
+}: {
+  organizationId: string;
+  userId: string;
+  agentId: string;
+  surfaceActive: boolean;
+  title: ReactNode;
+}) {
+  const agent = PROVIDERS.find((row) => row.id === agentId);
+  const snapshot = useRecoveringRead(
+    cloudOrganizationConnectionsCache,
+    settingsOwnerKey(userId, organizationId),
+    () => readCloudOrganizationConnections(organizationId),
+    { enabled: surfaceActive, maxAgeMs: 30_000 },
+  );
+  if (!agent) return null;
+  return (
+    <div className="flex flex-col gap-4">
+      <CloudConnectionsError error={snapshot.error} onRetry={() => void snapshot.refresh()} />
+      <CloudProviderConnection
+        organizationId={organizationId}
+        userId={userId}
+        agent={agent}
+        surfaceActive={surfaceActive}
+        title={title}
+      />
+      <CloudConnectionsFootnotes />
     </div>
   );
 }
@@ -147,11 +197,13 @@ function CloudProviderConnection({
   userId,
   agent,
   surfaceActive,
+  title = agent.name,
 }: {
   organizationId: string;
   userId: string;
   agent: Provider;
   surfaceActive: boolean;
+  title?: ReactNode;
 }) {
   const key = settingsOwnerKey(userId, organizationId);
   const snapshot = useRecoveringRead(
@@ -346,7 +398,7 @@ function CloudProviderConnection({
   };
   return (
     <>
-      <SettingsGroup title={agent.name} aria-label={agent.name}>
+      <SettingsGroup title={title} aria-label={agent.name}>
         {matching.map((credential) => {
           const isSelected = connection?.credentialId === credential.id;
           const health = isSelected ? connection?.health : undefined;

@@ -180,6 +180,24 @@ export class CreateComposerDraftStore {
     this.changed(key);
     return pending.record;
   }
+  /** Create's placement control moves the unsent draft to the destination it
+   * now shows. An existing draft there wins and the source stays where it was. */
+  carry(from: string, to: string): boolean {
+    const fromScope = parseCreateComposerDraftKey(from);
+    const toScope = parseCreateComposerDraftKey(to);
+    const source = this.records.get(from);
+    if (from === to || !fromScope || !toScope || !source || !hasPayload(source.record.draft)) return false;
+    if (hasPayload(this.records.get(to)?.record.draft)) return false;
+    this.records.delete(from);
+    this.records.set(to, source);
+    if (fromScope.owner !== toScope.owner) {
+      this.changePresence(fromScope.owner, -1);
+      this.changePresence(toScope.owner, 1);
+    }
+    this.changed(from);
+    this.changed(to);
+    return true;
+  }
   subscribe(listener: (key: string) => void): () => void {
     this.listeners.add(listener);
     return () => { this.listeners.delete(listener); };

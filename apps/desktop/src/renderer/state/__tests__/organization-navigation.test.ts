@@ -1,4 +1,9 @@
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
+// These cases cover today's owners; organization-capabilities-unified.test.ts covers unified-workspaces.
+vi.mock("../../config/release-channel", async (original) => ({
+  ...(await original<typeof import("../../config/release-channel")>()),
+  isFeatureEnabled: (feature: string) => feature !== "unified-workspaces",
+}));
 import type { OrganizationSummary } from "../../features/team/control-plane";
 import type { CloudWorkspaceDocument } from "../../platform/cloud-workspace-contract";
 import type { Workspace } from "../../platform/git";

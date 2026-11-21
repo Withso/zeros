@@ -7,7 +7,7 @@ import { expect } from "@playwright/test";
  *  or the cloud details, which close on Escape and when the workspace page is
  *  hidden, and stay closed when it returns. */
 export async function runWorkspaceHeaderSmoke({ page, check, harnessBase }) {
-  const harness = `${harnessBase}/harness-app-sidebar.html?shortcuts&settings`;
+  const harness = `${harnessBase}/harness-app-sidebar.html?shortcuts&settings&feature-off=unified-workspaces`;
   await page.goto(harness, { waitUntil: "networkidle" });
   await page.evaluate(() => {
     localStorage.clear();

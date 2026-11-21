@@ -49,6 +49,10 @@ interface OpenGithubProjectDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   onCloned?: (args: { repoRoot: string }) => void;
+  /** Create's This Mac side: clone onto this Mac under any owner. */
+  local?: boolean;
+  /** A project's "Clone to this Mac" names its repository. */
+  initialUrl?: string;
 }
 
 // Same renderer-side constraint as quick-start.tsx — node:os isn't
@@ -88,6 +92,8 @@ function ScopedOpenGithubProjectDialog({
   open,
   onOpenChange,
   onCloned,
+  local = false,
+  initialUrl = "",
 }: OpenGithubProjectDialogProps) {
   const [url, setUrl] = useState("");
   const [repositories, setRepositories] = useState<CloudRepositorySelection[]>([]);
@@ -97,7 +103,7 @@ function ScopedOpenGithubProjectDialog({
   const [parentFolder, setParentFolder] = useState(defaultParentFolder());
   const [busy, setBusy] = useState(false);
   const organization = useActiveOrganization();
-  const cloud = Boolean(organization && !organization.isPersonal);
+  const cloud = Boolean(organization && !organization.isPersonal) && !local;
   const source = useMemo(() => parseRemote(url.trim()), [url]);
   const availability = useCloudCreateAvailability(open && cloud);
   const computer = useCloudComputerV2CreateGate(open && cloud);
@@ -115,11 +121,11 @@ function ScopedOpenGithubProjectDialog({
 
   useEffect(() => {
     if (!open) return;
-    setUrl("");
+    setUrl(initialUrl);
     setRepositories([]);
     setParentFolder(defaultParentFolder());
     setBusy(false);
-  }, [open]);
+  }, [open, initialUrl]);
 
   const urlIsValid = cloud ? parseRemote(url.trim())?.host === "github.com" : URL_HINT_RE.test(url.trim());
   const dirName = useMemo(() => previewDirName(url.trim()), [url]);
@@ -140,7 +146,7 @@ function ScopedOpenGithubProjectDialog({
     if (owner?.id !== organization?.id) return;
     setBusy(true);
     try {
-      if (owner && !owner.isPersonal) {
+      if (owner && !owner.isPersonal && !local) {
         const epoch = getOrganizationStoreGeneration();
         if (source?.host !== "github.com") throw new Error("Choose a GitHub repository.");
         const fingerprint = JSON.stringify([epoch, owner.id, source.owner.toLowerCase(), source.repo.toLowerCase()]);

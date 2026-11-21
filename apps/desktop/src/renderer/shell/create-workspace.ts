@@ -61,7 +61,7 @@ import {
   getActiveOrganizationIdSnapshot,
   getActiveOrganizationSnapshot,
 } from "../features/team/team-store";
-import { localWorkspaceOwner } from "../features/team/organization-capabilities";
+import { localWorkShowsEverywhere, localWorkspaceOwner } from "../features/team/organization-capabilities";
 
 type Dispatch = ReturnType<typeof useWorkspaceDispatch>;
 
@@ -79,7 +79,9 @@ export async function createWorkspaceForProject(args: {
   const kind = args.kind === "design" ? "design" : "code";
   const baseBranch = args.baseBranch?.trim() || undefined;
   const organization = getActiveOrganizationSnapshot();
-  if (organization && !organization.isPersonal) {
+  // Local projects create on this Mac under every owner once Local work shows everywhere.
+  const createsHere = localWorkShowsEverywhere() && !isCloudWorkspace(project.repoRoot);
+  if (organization && !organization.isPersonal && !createsHere) {
     dispatch({ type: "OPEN_CREATE_PAGE", projectId: project.id });
     return true;
   }

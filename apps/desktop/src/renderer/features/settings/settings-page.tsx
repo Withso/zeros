@@ -1,4 +1,9 @@
-import { isSettingsSectionAvailable } from "./settings-section-availability";
+import {
+  isSettingsSectionAvailable,
+  settingsSectionForRail,
+  UNIFIED_ORGANIZATION_SECTIONS,
+  UNIFIED_PERSONAL_SECTIONS,
+} from "./settings-section-availability";
 import { LocalStoragePanel } from "./local-storage-panel";
 import {
   cancelLocalStorageMeasurement,
@@ -45,6 +50,10 @@ import {
   HardDrive,
   Smartphone,
   Trash2,
+  Building2,
+  MousePointerClick,
+  Users,
+  ArrowUpRight,
   type LucideIcon,
 } from "lucide-react";
 import {
@@ -58,7 +67,7 @@ import {
   providerMemorySettingsCache,
   PROVIDER_DIAGNOSTIC_MAX_AGE_MS,
 } from "../../state/read-caches";
-import { Button } from "../../shared/ui";
+import { Button, GithubIcon } from "../../shared/ui";
 import { isLocalDevelopment, useNativeRuntime } from "../../platform/runtime";
 import { toast } from "@/renderer/shared/ui/primitives/elements";
 import { cn } from "@/renderer/shared/ui/cn";
@@ -134,7 +143,7 @@ import { TRAFFIC_LIGHT_RESERVE_CLS } from "../../shell/sidebar-toggle";
 import { getActiveOrganizationIdSnapshot, useActiveOrganization, useTeams } from "../team/team-store";
 import { WorkspaceApiAccessSetting } from "./workspace-api-access-setting";
 import { AlwaysAllowLocalCommands } from "./local-commands-settings";
-import { organizationGeneralSections } from "./organization-general";
+import { organizationGeneralSections, unifiedOrganizationGeneralSections } from "./organization-general";
 import { hasCloudWorkspaceAccountAccess } from "../team/cloud-workspace-account-access";
 import { readScopedSettingsSelection, writeScopedSettingsSelection, settingsOwnerKey } from "./settings-scope";
 import { retainedDialogOpen } from "./retained-surface";
@@ -187,9 +196,16 @@ import type { AgentMemorySettings } from "@zeros/protocol/agent-events";
 
 import { popoverBoundaryProps } from "@/renderer/shared/ui/popover-boundary";
 import { CHANNEL, isFeatureEnabled } from "../../config/release-channel";
+import { PlaceLabel } from "./settings-ui";
+import { ProjectPage, settingsProjects, type SettingsProject } from "./project-page";
+import { useCloudComputerV2CreateGate } from "./cloud-computer-v2-create-gate";
+import { shellOpenUrl } from "../../platform/app";
+import { APP_BASE_URL, organizationDashboardUrl } from "../team/organization-links";
 import { CloudWorkspacePausedNotice } from "../team/cloud-workspace-pause";
 type SectionId =
   | "general"
+  | "computer-use"
+  | "org-general"
   | "appearance"
   | "models"
   | "local-storage"
@@ -206,15 +222,24 @@ type SectionId =
   | "experimental"
   | "internal";
 
+type NavIcon = LucideIcon | typeof GithubNavIcon;
+
 type SectionDef = {
   id: SectionId;
   label: string;
+  /** The unified rail's name for a page whose content changed. */
+  unifiedLabel?: string;
   /** One line under the title for every owner. */
   description?: string;
-  icon: LucideIcon;
+  icon: NavIcon;
+  unifiedIcon?: NavIcon;
   navClassName?: string;
-  Panel: ComponentType<{ surfaceActive?: boolean; openCloudRepository?(repository: string): void }>;
+  Panel: ComponentType<{ surfaceActive?: boolean; unified?: boolean; openCloudRepository?(repository: string): void }>;
 };
+
+function GithubNavIcon({ size }: { size?: number }) {
+  return <GithubIcon width={size} height={size} />;
+}
 
 // Override every state modifier; twMerge does not replace across modifiers.
 const INTERNAL_NAV_CLS =
@@ -286,9 +311,19 @@ const SECTIONS: SectionDef[] = [
   {
     id: "integrations",
     label: "Integrations",
+    unifiedLabel: "GitHub",
     icon: Blocks,
+    unifiedIcon: GithubNavIcon,
     Panel: IntegrationsPanel,
   },
+  {
+    id: "computer-use",
+    label: "Computer use",
+    description: "Only in local workspaces.",
+    icon: MousePointerClick,
+    Panel: ComputerUsePanel,
+  },
+  { id: "org-general", label: "General", icon: Building2, Panel: OrganizationGeneralPanel },
   {
     id: "account",
     label: "Profile",
@@ -338,7 +373,8 @@ type RepoPage = RepoSectionId | typeof REPO_OVERVIEW;
 type Selection =
   | { scope: "user"; section: SectionId }
   | { scope: "repo"; repoId: string; section: RepoPage }
-  | { scope: "cloud-repo"; repository: string; tab: CloudRepositoryTab };
+  | { scope: "cloud-repo"; repository: string; tab: CloudRepositoryTab }
+  | { scope: "project"; key: string };
 
 function userSelection(section: SectionId): string {
   return `user:${section}`;
@@ -361,7 +397,12 @@ function isStaticSection(value: string): value is SectionId {
 }
 
 // Older installs saved bare section IDs and sectionless repo links.
-function parseSelection(active: string, fallback: SectionId = "general"): Selection {
+function parseSelection(active: string, fallback: SectionId = "general", unified = false): Selection {
+  // The unified rail's joined project page; the old rail shows its fallback without rewriting the save.
+  if (active.startsWith("project:")) {
+    const key = active.slice("project:".length);
+    return unified && key ? { scope: "project", key } : { scope: "user", section: fallback };
+  }
   if (active.startsWith("cloud-repo:")) {
     const rest = active.slice("cloud-repo:".length), colon = rest.indexOf(":");
     const tab = rest.slice(0, colon), repository = rest.slice(colon + 1);
@@ -396,12 +437,14 @@ function parseSelection(active: string, fallback: SectionId = "general"): Select
   const rawBare = active.startsWith("user:")
     ? active.slice("user:".length)
     : active;
-  // Honor selections saved before Computer Use moved to General.
-  if (rawBare === "computer-use") return { scope: "user", section: "general" };
-  return { scope: "user", section: isStaticSection(rawBare) ? rawBare : fallback };
+  // Computer use lives in General outside the unified rail; mapping on read keeps the saved ID for either rail.
+  const bare = settingsSectionForRail(rawBare, unified);
+  return { scope: "user", section: isStaticSection(bare) ? bare : fallback };
 }
 
 const PAGE_HEADING_CLS = "m-0 text-lg leading-6 font-medium text-fg1";
+const NO_CLOUD_REPOSITORIES: readonly string[] = [];
+const NO_SETTINGS_PROJECTS: SettingsProject[] = [];
 
 const HINT_CLS = "m-0 text-3xxs leading-4 text-fg3";
 
@@ -412,16 +455,19 @@ const USER_SETTINGS_SEED = `# Zeros user settings (this Mac).
 # Values you set in Settings are saved here.
 `;
 
-function loadInitialSection(owner: string): string {
+function loadInitialSection(owner: string, unified: boolean): string {
   const sel = parseSelection(
     readScopedSettingsSelection(owner, "section", owner === "local" ? "user:general" : "user:providers"),
     owner === "local" ? "general" : "providers",
+    unified,
   );
   return sel.scope === "user"
     ? userSelection(sel.section)
     : sel.scope === "repo"
       ? repoSelection(sel.repoId, sel.section)
-      : cloudRepoSelection(sel.repository, sel.tab);
+      : sel.scope === "project"
+        ? `project:${sel.key}`
+        : cloudRepoSelection(sel.repository, sel.tab);
 }
 
 const SIDEBAR_ENTRY_CLS =
@@ -448,18 +494,19 @@ export function SettingsPage() {
 function ScopedSettingsPage({ owner }: { owner: string }) {
   const local = owner === "local";
   const cloudEnabled = isFeatureEnabled("cloud-workspaces");
+  const unified = isFeatureEnabled("unified-workspaces");
   const organization = useActiveOrganization();
   const { me } = useTeams();
   const pageSurfaceRef = useRef<HTMLDivElement | null>(null);
   const dispatch = useWorkspaceDispatch();
   const pageActive = useActivePage() === "settings";
   const { projects } = useOrganizationProjects();
-  const [active, setActiveState] = useState<string>(() => loadInitialSection(owner));
+  const [active, setActiveState] = useState<string>(() => loadInitialSection(owner, unified));
   const setActive = useCallback((next: string) => {
     setActiveState(next);
     writeScopedSettingsSelection(owner, "section", next);
   }, [owner]);
-  const selection = parseSelection(active, local ? "general" : "providers");
+  const selection = parseSelection(active, local ? "general" : "providers", unified);
   useInstantViewSwitch(`settings:${owner}:${active}`, pageSurfaceRef);
 
   // A retained page will not reread persisted selection when a deep link opens it.
@@ -491,15 +538,16 @@ function ScopedSettingsPage({ owner }: { owner: string }) {
   const bridge = useBridge();
   useEffect(() => {
     // The engine guards this legacy import and preserves existing TOML values.
-    if (local) void ensureSettingsTomlMigrated(bridge);
-  }, [bridge, local]);
+    if (local || unified) void ensureSettingsTomlMigrated(bridge);
+  }, [bridge, local, unified]);
 
   const prevProjectsLenRef = useRef(projects.length);
   useEffect(() => {
     const prevLen = prevProjectsLenRef.current;
     prevProjectsLenRef.current = projects.length;
-    const sel = parseSelection(active);
-    if (sel.scope !== "repo" || !local) return;
+    const sel = parseSelection(active, "general", unified);
+    // The unified rail opens a saved repository on its project page instead.
+    if (sel.scope !== "repo" || !local || unified) return;
     // Keep a saved repo route until the project list can resolve it.
     if (projects.length === 0 && prevLen === 0) return;
     const project = projects.find((p) => p.id === sel.repoId);
@@ -511,7 +559,7 @@ function ScopedSettingsPage({ owner }: { owner: string }) {
       });
     }
     setActive(userSelection("general"));
-  }, [projects, active, dispatch, local, setActive]);
+  }, [projects, active, dispatch, local, setActive, unified]);
 
   // Startup restore normalizes legacy MCP to the owner's fallback; only raw routes can redirect.
   useEffect(() => {
@@ -534,41 +582,70 @@ function ScopedSettingsPage({ owner }: { owner: string }) {
   useEffect(() => {
     if (!pageActive) cancelLocalStorageMeasurement();
   }, [pageActive]);
+  const organizationGeneral =
+    unified &&
+    unifiedOrganizationGeneralSections(
+      organization,
+      !!organization && hasCloudWorkspaceAccountAccess(organization.id),
+    ).length > 0;
   // Enforce feature gates on restored and deep-linked routes, not just sidebar rows.
   const availableSections = useMemo(
     () =>
       SECTIONS.filter((section) => isSettingsSectionAvailable(section.id, {
         local, cloudEnabled, terminalAgentsEnabled, computerUseSectionActive,
-        simulatorsActive, internalUser, localStorageSupported,
+        simulatorsActive, internalUser, localStorageSupported, unified, organizationGeneral,
       })),
     [
       terminalAgentsEnabled, internalUser, local, cloudEnabled,
-      computerUseSectionActive, simulatorsActive, localStorageSupported,
+      computerUseSectionActive, simulatorsActive, localStorageSupported, unified, organizationGeneral,
     ],
   );
   const fallbackSection =
     availableSections.find((s) => s.id === (local ? "general" : "providers")) ??
     availableSections[0];
-  const activeSection: SectionDef | null =
-    selection.scope === "user"
-      ? (availableSections.find((s) => s.id === selection.section) ??
-        fallbackSection)
-      : local || selection.scope === "cloud-repo" ? null : fallbackSection;
-  // Persist the fallback so reopening a gate cannot restore a retired selection.
-  const selectedSection = selection.scope === "cloud-repo" ? null : selection.section;
-  useEffect(() => {
-    if (selection.scope === "repo" && local) return;
-    if (selection.scope === "user" && availableSections.some((s) => s.id === selectedSection)) return;
-    if (selection.scope === "cloud-repo" && availableSections.some((s) => s.id === "cloud-computer")) return;
-    const fallback = fallbackSection?.id;
-    if (fallback) setActive(userSelection(fallback));
-  }, [availableSections, fallbackSection, selection.scope, selectedSection, local, setActive]);
   const availableSectionIds = useMemo(
     () => new Set(availableSections.map((section) => section.id)),
     [availableSections],
   );
   const cloudRepositories = useCloudComputerRepositories(me?.user.id ?? null,
     !local && availableSectionIds.has("cloud-computer") ? organization : null, pageActive);
+  // unified-workspaces: one page per joined project. Members read the installed
+  // repositories; owners and admins also see what their recipe adds.
+  const installedCloud = useCloudComputerV2CreateGate(pageActive && unified && !local).repositories;
+  const projectCloudKey = unified && !local
+    ? [...new Set([...cloudRepositories, ...(installedCloud ?? []).map(row => `${row.owner}/${row.name}`)])].join("\n")
+    : "";
+  const projectCloudNames = useMemo(() => (projectCloudKey ? projectCloudKey.split("\n") : NO_CLOUD_REPOSITORIES), [projectCloudKey]);
+  const joinedProjects = useMemo(
+    () => (unified ? settingsProjects(projects, projectCloudNames) : NO_SETTINGS_PROJECTS),
+    [unified, projects, projectCloudNames],
+  );
+  const currentProject: SettingsProject | undefined = !unified ? undefined
+    : selection.scope === "project" ? joinedProjects.find(project => project.key === selection.key)
+    : selection.scope === "repo" ? joinedProjects.find(project => project.local.some(folder => folder.id === selection.repoId))
+    : selection.scope === "cloud-repo"
+      ? joinedProjects.find(project => project.cloudRepository?.toLowerCase() === selection.repository.toLowerCase())
+      : undefined;
+  // A non-default clone is chosen by its folder selection, so a link or a saved choice reopens it.
+  const projectFolderId = currentProject && selection.scope === "repo" ? selection.repoId : null;
+  const activeSection: SectionDef | null =
+    selection.scope === "user"
+      ? (availableSections.find((s) => s.id === selection.section) ??
+        fallbackSection)
+      : currentProject ? null
+      : unified ? fallbackSection
+      : local || selection.scope === "cloud-repo" ? null : fallbackSection;
+  // Persist the fallback so reopening a gate cannot restore a retired selection.
+  const selectedSection = selection.scope === "cloud-repo" || selection.scope === "project" ? null : selection.section;
+  useEffect(() => {
+    // A saved project may resolve once its lists load; keep it rather than rewrite it.
+    if (unified && selection.scope !== "user") return;
+    if (selection.scope === "repo" && local) return;
+    if (selection.scope === "user" && availableSections.some((s) => s.id === selectedSection)) return;
+    if (selection.scope === "cloud-repo" && availableSections.some((s) => s.id === "cloud-computer")) return;
+    const fallback = fallbackSection?.id;
+    if (fallback) setActive(userSelection(fallback));
+  }, [availableSections, fallbackSection, selection.scope, selectedSection, local, setActive, unified]);
   const openCloudRepository = useCallback((repository: string) => setActive(cloudRepoSelection(repository, "git")), [setActive]);
   // Keep visited panels mounted to preserve drafts across navigation.
   const sectionIdsToRender = useRetainedViewKeys(
@@ -586,7 +663,43 @@ function ScopedSettingsPage({ owner }: { owner: string }) {
     dispatch({ type: "SET_ACTIVE_PAGE", page: "dashboard" });
   };
 
-  const fileScopeControls = local ? (
+  const renderSectionNav = (section: SectionDef) => (
+    <SectionNavButton
+      key={section.id}
+      icon={(unified && section.unifiedIcon) || section.icon}
+      label={(unified && section.unifiedLabel) || section.label}
+      className={section.navClassName}
+      isActive={
+        selection.scope === "user" &&
+        selection.section === section.id
+      }
+      onClick={() => setActive(userSelection(section.id))}
+      onIntent={
+        section.id === "integrations"
+          ? prefetchGithubAuthSnapshot
+          : section.id === "local-storage"
+            ? warmLocalStorage
+          : section.id === "cloud-computer" && organization && me
+            ? () => prefetchCloudComputer(me.user.id, organization)
+          : undefined
+      }
+    />
+  );
+  const renderCloudRepositoryNav = (repository: string) => {
+    const current = selection.scope === "cloud-repo" && selection.repository === repository;
+    return (
+      <SectionNavButton key={repository} icon={FolderGit2} label={repository} isActive={current}
+        onClick={() => setActive(cloudRepoSelection(repository, current ? selection.tab : "git"))} />
+    );
+  };
+  const unifiedGroups: Array<{ key: string; label: string; ids: readonly string[] }> = [
+    { key: "personal", label: "Personal", ids: UNIFIED_PERSONAL_SECTIONS },
+    ...(local
+      ? []
+      : [{ key: "organization", label: organization?.name ?? "Organization", ids: UNIFIED_ORGANIZATION_SECTIONS }]),
+  ];
+
+  const fileScopeControls = local || unified ? (
     <OpenSettingsFileButton
       layer="user"
       label="Open settings.toml"
@@ -623,62 +736,75 @@ function ScopedSettingsPage({ owner }: { owner: string }) {
             aria-label="Settings sections"
           >
             <OrganizationSwitcher />
-            {SECTION_GROUPS.map((group, groupIndex) => {
-              const sections = group.ids.flatMap((id) => {
-                const section = availableSections.find((s) => s.id === id);
-                return section ? [section] : [];
-              });
-              if (sections.length === 0) return null;
-              return (
-                <React.Fragment key={group.label}>
-                  {groupIndex === 0 || sections.length === 1 ? (
-                    <div className={SETTINGS_GROUP_RULE_CLS} aria-hidden="true" />
-                  ) : (
-                    <div className={SETTINGS_GROUP_HEADER_CLS}>{group.label}</div>
-                  )}
-                  <div className="flex flex-col gap-0.5">
-                    {sections.map((section) => (
-                      <SectionNavButton
-                        key={section.id}
-                        icon={section.icon}
-                        label={section.label}
-                        className={section.navClassName}
-                        isActive={
-                          selection.scope === "user" &&
-                          selection.section === section.id
-                        }
-                        onClick={() => setActive(userSelection(section.id))}
-                        onIntent={
-                          section.id === "integrations"
-                            ? prefetchGithubAuthSnapshot
-                            : section.id === "local-storage"
-                              ? warmLocalStorage
-                            : section.id === "cloud-computer" && organization && me
-                              ? () => prefetchCloudComputer(me.user.id, organization)
-                            : undefined
-                        }
-                      />
-                    ))}
-                  </div>
-                </React.Fragment>
-              );
-            })}
-            {cloudRepositories.length > 0 && (
+            {unified ? (
               <>
-                {cloudRepositories.length === 1 ? (
-                  <div className={SETTINGS_GROUP_RULE_CLS} aria-hidden="true" />
-                ) : (
-                  <div className={SETTINGS_GROUP_HEADER_CLS}>Repositories</div>
+                {unifiedGroups.map((group) => {
+                  const sections = group.ids.flatMap((id) => {
+                    const section = availableSections.find((s) => s.id === id);
+                    return section ? [section] : [];
+                  });
+                  const members = group.key === "organization" && organization && !organization.isPersonal;
+                  if (sections.length === 0 && !members) return null;
+                  return (
+                    <React.Fragment key={group.key}>
+                      <div className={SETTINGS_GROUP_HEADER_CLS}>{group.label}</div>
+                      <div className="flex flex-col gap-0.5">
+                        {sections.filter((section) => section.id === "org-general").map((section) => renderSectionNav(section))}
+                        {members && (
+                          <SectionNavButton icon={Users} label="Members" isActive={false} external
+                            onClick={() => void shellOpenUrl(organizationDashboardUrl(APP_BASE_URL, { organizationId: organization.id, section: "members" }))} />
+                        )}
+                        {sections.filter((section) => section.id !== "org-general").map((section) => renderSectionNav(section))}
+                      </div>
+                    </React.Fragment>
+                  );
+                })}
+                {joinedProjects.length > 0 && (
+                  <>
+                    <div className={SETTINGS_GROUP_HEADER_CLS}>Projects</div>
+                    <div className="flex flex-col gap-0.5">
+                      {joinedProjects.map((project) => (
+                        <SectionNavButton key={project.key} icon={FolderGit2} label={project.label}
+                          isActive={currentProject?.key === project.key}
+                          onClick={() => setActive(`project:${project.key}`)} />
+                      ))}
+                    </div>
+                  </>
                 )}
-                <div className="flex flex-col gap-0.5">
-                  {cloudRepositories.map((repository) => {
-                    const current = selection.scope === "cloud-repo" && selection.repository === repository;
-                    return (
-                      <SectionNavButton key={repository} icon={FolderGit2} label={repository} isActive={current}
-                        onClick={() => setActive(cloudRepoSelection(repository, current ? selection.tab : "git"))} />
-                    );
-                  })}
-                </div>
+              </>
+            ) : (
+              <>
+                {SECTION_GROUPS.map((group, groupIndex) => {
+                  const sections = group.ids.flatMap((id) => {
+                    const section = availableSections.find((s) => s.id === id);
+                    return section ? [section] : [];
+                  });
+                  if (sections.length === 0) return null;
+                  return (
+                    <React.Fragment key={group.label}>
+                      {groupIndex === 0 || sections.length === 1 ? (
+                        <div className={SETTINGS_GROUP_RULE_CLS} aria-hidden="true" />
+                      ) : (
+                        <div className={SETTINGS_GROUP_HEADER_CLS}>{group.label}</div>
+                      )}
+                      <div className="flex flex-col gap-0.5">
+                        {sections.map((section) => renderSectionNav(section))}
+                      </div>
+                    </React.Fragment>
+                  );
+                })}
+                {cloudRepositories.length > 0 && (
+                  <>
+                    {cloudRepositories.length === 1 ? (
+                      <div className={SETTINGS_GROUP_RULE_CLS} aria-hidden="true" />
+                    ) : (
+                      <div className={SETTINGS_GROUP_HEADER_CLS}>Repositories</div>
+                    )}
+                    <div className="flex flex-col gap-0.5">
+                      {cloudRepositories.map((repository) => renderCloudRepositoryNav(repository))}
+                    </div>
+                  </>
+                )}
               </>
             )}
           </nav>
@@ -696,7 +822,23 @@ function ScopedSettingsPage({ owner }: { owner: string }) {
               className="settings-type-scale mx-auto w-full max-w-160 pb-12"
             >
               {/* Legacy Local repo links redirect without mounting a Settings panel. */}
-              {selection.scope === "cloud-repo" && (
+              {currentProject && (
+                <div className="flex flex-col gap-8">
+                  <header className="flex min-w-0 flex-col gap-1">
+                    <h1 className={PAGE_HEADING_CLS}>{currentProject.label}</h1>
+                    <p className="text-fg2 m-0 truncate text-xs leading-4.5">{currentProject.subtitle}</p>
+                  </header>
+                  <ProjectPage key={`${currentProject.key}|${projectFolderId ?? ""}`} project={currentProject} surfaceActive={pageActive}
+                    initialFolderId={projectFolderId}
+                    onFolderChange={folderId => setActive(repoSelection(folderId, REPO_OVERVIEW))}
+                    cloudAvailable={!local && availableSectionIds.has("cloud-computer")}
+                    canManageCloud={organization?.role === "owner" || organization?.role === "admin"}
+                    onAddToCloud={() => setActive(userSelection("cloud-computer"))}
+                    onOpenCloudComputer={() => setActive(userSelection("cloud-computer"))}
+                    onOpenEnvironment={() => setActive(userSelection("environment"))} />
+                </div>
+              )}
+              {!unified && selection.scope === "cloud-repo" && (
                 <div className="flex flex-col gap-8">
                   <header className="flex min-w-0 flex-col gap-1">
                     <h1 className={PAGE_HEADING_CLS}>{selection.repository}</h1>
@@ -715,8 +857,10 @@ function ScopedSettingsPage({ owner }: { owner: string }) {
                   selection.scope === "user" &&
                   activeSection?.id === section.id;
                 const Panel = section.Panel;
+                const organizationPage = (UNIFIED_ORGANIZATION_SECTIONS as readonly string[]).includes(section.id);
                 const description =
-                  (!local && cloudEnabled && ORGANIZATION_SECTION_DESCRIPTIONS[section.id]) ||
+                  (unified && section.id === "org-general" && organization?.name) ||
+                  ((unified || (!local && cloudEnabled)) && ORGANIZATION_SECTION_DESCRIPTIONS[section.id]) ||
                   section.description;
                 return (
                   <div
@@ -727,15 +871,15 @@ function ScopedSettingsPage({ owner }: { owner: string }) {
                   >
                     <header className="flex items-start justify-between gap-4">
                       <div className="flex min-w-0 flex-col gap-1">
-                        <h1 className={PAGE_HEADING_CLS}>{section.label}</h1>
+                        <h1 className={PAGE_HEADING_CLS}>{(unified && section.unifiedLabel) || section.label}</h1>
                         {description && (
                           <p className="text-fg2 m-0 text-xs leading-4.5">{description}</p>
                         )}
                       </div>
-                      {fileScopeControls}
+                      {!(unified && organizationPage) && fileScopeControls}
                     </header>
                     {!local && !cloudEnabled && <CloudWorkspacePausedNotice />}
-                    <Panel surfaceActive={pageActive && isActive} openCloudRepository={openCloudRepository} />
+                    <Panel surfaceActive={pageActive && isActive} unified={unified} openCloudRepository={openCloudRepository} />
                   </div>
                 );
               })}
@@ -761,19 +905,23 @@ function SectionNavButton({
   className,
   onClick,
   onIntent,
+  external = false,
 }: {
-  icon: LucideIcon;
+  icon: NavIcon;
   label: string;
   isActive: boolean;
   className?: string;
   onClick: () => void;
   onIntent?: () => void;
+  /** Opens a page outside the app. */
+  external?: boolean;
 }) {
   return (
     <Button
       variant="ghost"
       role="tab"
       aria-selected={isActive}
+      aria-description={external ? "Opens in your browser" : undefined}
       data-state={isActive ? "active" : "inactive"}
       className={cn(SIDEBAR_ENTRY_CLS, className)}
       onClick={onClick}
@@ -783,14 +931,16 @@ function SectionNavButton({
     >
       <Icon size={14} />
       <span className="truncate">{label}</span>
+      {external && <ArrowUpRight className="ml-auto" aria-hidden />}
     </Button>
   );
 }
 
-function GeneralPanel({ surfaceActive = true }: { surfaceActive?: boolean }) {
+function GeneralPanel({ surfaceActive = true, unified = false }: { surfaceActive?: boolean; unified?: boolean }) {
   const organization = useActiveOrganization();
   // useActiveOrganization re-renders this panel on every team-store change.
   const cloudAccess = !!organization && hasCloudWorkspaceAccountAccess(organization.id);
+  if (unified) return <PersonalGeneralPanel />;
   if (organization ? !organization.isPersonal : Boolean(getActiveOrganizationIdSnapshot())) {
     const sections = organizationGeneralSections(organization, cloudAccess);
     return (
@@ -805,37 +955,94 @@ function GeneralPanel({ surfaceActive = true }: { surfaceActive?: boolean }) {
 }
 
 function LocalGeneralPanel({ surfaceActive }: { surfaceActive: boolean }) {
-  const showHidden = useShowHiddenWorkspaces();
-  const restartAutomatically = useRestartAutomaticallyOnUpdate();
   return (
     <div className="flex flex-col gap-8">
       <SettingsGroup>
         <FollowUpBehaviorSetting />
         <KeepAwakeSetting />
-        <SettingsRow
-          label="Show hidden workspaces in dashboard"
-          hint="In the Archived list."
-        >
-          <Switch
-            checked={showHidden}
-            onCheckedChange={setShowHiddenWorkspaces}
-            aria-label="Show hidden workspaces in dashboard"
-          />
-        </SettingsRow>
-        <SettingsRow
-          label="Restart automatically on update"
-          hint="Restarts to install updates after 10 minutes away."
-          htmlFor="restart-automatically-on-update"
-        >
-          <Switch
-            id="restart-automatically-on-update"
-            checked={restartAutomatically}
-            onCheckedChange={setRestartAutomaticallyOnUpdate}
-          />
-        </SettingsRow>
+        <ShowHiddenWorkspacesRow />
+        <RestartOnUpdateRow />
       </SettingsGroup>
       <ComputerUseSettingsSection surfaceActive={surfaceActive} />
       <PrivacyGroup surfaceActive={surfaceActive} />
+    </div>
+  );
+}
+
+/** The same page under every owner: personal rows, then this Mac's. */
+function PersonalGeneralPanel() {
+  return (
+    <div className="flex flex-col gap-8">
+      <SettingsGroup>
+        <FollowUpBehaviorSetting />
+        <ShowHiddenWorkspacesRow />
+      </SettingsGroup>
+      <SettingsGroup title={<PlaceLabel place="mac" />}>
+        <KeepAwakeSetting />
+        <RestartOnUpdateRow />
+        <AnalyticsRow />
+      </SettingsGroup>
+    </div>
+  );
+}
+
+function ShowHiddenWorkspacesRow() {
+  const showHidden = useShowHiddenWorkspaces();
+  return (
+    <SettingsRow
+      label="Show hidden workspaces in dashboard"
+      hint="In the Archived list."
+    >
+      <Switch
+        checked={showHidden}
+        onCheckedChange={setShowHiddenWorkspaces}
+        aria-label="Show hidden workspaces in dashboard"
+      />
+    </SettingsRow>
+  );
+}
+
+function RestartOnUpdateRow() {
+  const restartAutomatically = useRestartAutomaticallyOnUpdate();
+  return (
+    <SettingsRow
+      label="Restart automatically on update"
+      hint="Restarts to install updates after 10 minutes away."
+      htmlFor="restart-automatically-on-update"
+    >
+      <Switch
+        id="restart-automatically-on-update"
+        checked={restartAutomatically}
+        onCheckedChange={setRestartAutomaticallyOnUpdate}
+      />
+    </SettingsRow>
+  );
+}
+
+function ComputerUsePanel({ surfaceActive = true }: { surfaceActive?: boolean }) {
+  const native = useNativeRuntime().ready;
+  return (
+    <div className="flex flex-col gap-8">
+      <ComputerUseSettingsSection surfaceActive={surfaceActive} device />
+      {native && (
+        <SettingsGroup title="Privacy">
+          <FullDiskAccessRow surfaceActive={surfaceActive} />
+          <ComputerPermissionRows surfaceActive={surfaceActive} device />
+        </SettingsGroup>
+      )}
+    </div>
+  );
+}
+
+function OrganizationGeneralPanel({ surfaceActive = true }: { surfaceActive?: boolean }) {
+  const organization = useActiveOrganization();
+  const cloudAccess = !!organization && hasCloudWorkspaceAccountAccess(organization.id);
+  const sections = unifiedOrganizationGeneralSections(organization, cloudAccess);
+  if (!organization) return null;
+  return (
+    <div className="flex flex-col gap-8">
+      {sections.includes("workspace-api-access") && <WorkspaceApiAccessSetting organizationId={organization.id} surfaceActive={surfaceActive} />}
+      {sections.includes("always-allow-local-commands") && <AlwaysAllowLocalCommands surfaceActive={surfaceActive} />}
     </div>
   );
 }
@@ -1069,6 +1276,16 @@ function AccountPanel() {
 
 // Privacy controls are device-scoped; analytics is metadata-only and macOS owns Full Disk Access.
 function PrivacyGroup({ surfaceActive }: { surfaceActive: boolean }) {
+  return (
+    <SettingsGroup title="Privacy">
+      <FullDiskAccessRow surfaceActive={surfaceActive} />
+      <ComputerPermissionRows surfaceActive={surfaceActive} />
+      <AnalyticsRow />
+    </SettingsGroup>
+  );
+}
+
+function AnalyticsRow() {
   const [optedOut, setOptedOut] = useState<boolean>(() =>
     isAnalyticsOptedOut(),
   );
@@ -1076,29 +1293,31 @@ function PrivacyGroup({ surfaceActive }: { surfaceActive: boolean }) {
     setOptedOut(!enabled);
     void setAnalyticsEnabled(enabled);
   };
-
   return (
-    <SettingsGroup title="Privacy">
-      <FullDiskAccessRow surfaceActive={surfaceActive} />
-      <ComputerPermissionRows surfaceActive={surfaceActive} />
-      <SettingsRow
-        label="Share anonymous usage data"
-        hint="Never your code, prompts or keys."
-      >
-        <Switch
-          checked={!optedOut}
-          onCheckedChange={toggle}
-          aria-label="Share anonymous usage data"
-        />
-      </SettingsRow>
-    </SettingsGroup>
+    <SettingsRow
+      label="Share anonymous usage data"
+      hint="Never your code, prompts or keys."
+    >
+      <Switch
+        checked={!optedOut}
+        onCheckedChange={toggle}
+        aria-label="Share anonymous usage data"
+      />
+    </SettingsRow>
   );
 }
 
-function IntegrationsPanel({ surfaceActive = true }: { surfaceActive?: boolean }) {
+function IntegrationsPanel({ surfaceActive = true, unified = false }: { surfaceActive?: boolean; unified?: boolean }) {
   const organization = useActiveOrganization();
   const { me } = useTeams();
   const organizationId = organization?.isPersonal ? null : organization?.id ?? getActiveOrganizationIdSnapshot();
+  if (unified) {
+    return <div className="flex flex-col gap-8">
+      <GitHubSection surfaceActive={surfaceActive} title={<PlaceLabel place="mac" />} />
+      {organizationId && isFeatureEnabled("cloud-workspaces") && me && <CloudGithubSection key={`${me.user.id}:${organizationId}`}
+        userId={me.user.id} organizationId={organizationId} surfaceActive={surfaceActive} title={<PlaceLabel place="cloud" />} />}
+    </div>;
+  }
   return <div className="flex flex-col gap-8">
     {organizationId && isFeatureEnabled("cloud-workspaces") ? me && <CloudGithubSection key={`${me.user.id}:${organizationId}`} userId={me.user.id} organizationId={organizationId} surfaceActive={surfaceActive} />
       : <GitHubSection surfaceActive={surfaceActive} />}

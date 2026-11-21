@@ -7,7 +7,13 @@ type TeamContext = {
   doc: RawSettingsDoc | null;
 };
 
+/** The owner a resolve is for: an organization id, or null for Personal. */
+export type SettingsOwner = { organizationId?: string | null };
+
+type SettingsOwnerLookup = (workspacePath: string) => SettingsOwner | null;
+
 let context: TeamContext = { teamId: null, doc: null };
+let ownerLookup: SettingsOwnerLookup | null = null;
 
 export function setTeamContext(next: {
   teamId?: string | null;
@@ -29,4 +35,31 @@ export function getTeamDoc(): RawSettingsDoc | null {
 
 export function getTeamContextMeta(): { teamId: string | null } {
   return { teamId: context.teamId };
+}
+
+/** The engine registers its workspace registry here; without it every workspace path resolves as Personal. */
+export function configureSettingsOwnerLookup(
+  lookup: SettingsOwnerLookup | null,
+): void {
+  ownerLookup = lookup;
+}
+
+/** A workspace receives the organization layer only when that organization owns it; a resolve with no workspace is Personal. */
+export function teamDocFor(
+  workspacePath: string | undefined,
+  owner?: SettingsOwner,
+): RawSettingsDoc | null {
+  const { teamId, doc } = context;
+  if (!doc) return null;
+  if (!owner && !workspacePath) return null;
+  let resolvedOwner = owner ?? null;
+  if (!owner && workspacePath) {
+    try {
+      resolvedOwner = ownerLookup?.(workspacePath) ?? null;
+    } catch {
+      return null;
+    }
+  }
+  const organizationId = resolvedOwner?.organizationId?.trim() || null;
+  return teamId !== null && organizationId === teamId ? doc : null;
 }

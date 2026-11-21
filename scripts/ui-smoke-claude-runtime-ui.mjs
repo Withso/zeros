@@ -183,40 +183,36 @@ export async function runClaudeRuntimeUiSmoke({ page, check, harnessBase }) {
     check(`${placement} Idle compaction Off remains explicit after reload`, off === "0");
   }
 
-  // The organization-owned Browser use panel must be reachable by the same
-  // Chrome notice action, including its honest cloud availability explanation
-  // on each agent row (Codex, Claude and Cursor).
+  // Dev runs the unified Settings rail, where Browser is a device page: the
+  // Chrome notice opens this Mac's controls under every owner and placement.
+  // The old rail's organization availability panel is covered by
+  // browser-availability.test.ts.
   await page.goto(`${transcript}?owner=organization&placement=cloud`);
-  await page.getByRole("button", { name: "Open Settings", exact: true }).click();
-  await expect(page.getByText("Native browser is unavailable in cloud workspaces.", { exact: true })).toHaveCount(3);
-  await expect(page.locator("#browser-use-claude-enabled")).toHaveCount(0);
-  check("Cloud Chrome setup opens the existing organization Browser use availability panel", true);
-
-  await page.goto(`${transcript}?owner=organization&placement=local`);
   await page.getByRole("button", { name: "Open Settings", exact: true }).click();
   const localChrome = page.locator("#browser-use-claude-enabled");
   const cloudGuidance = page.getByText("Native browser is unavailable in cloud workspaces.", { exact: true });
   await expect(localChrome).toBeVisible();
+  await expect(cloudGuidance).toHaveCount(0);
+  check("Cloud Chrome setup opens this Mac's Browser controls in the unified rail", true);
+
+  await page.goto(`${transcript}?owner=organization&placement=local`);
+  await page.getByRole("button", { name: "Open Settings", exact: true }).click();
+  await expect(localChrome).toBeVisible();
   await expect(page.getByRole("button", { name: "Install the Claude in Chrome extension", exact: true })).toBeVisible();
   await expect(cloudGuidance).toHaveCount(0);
   check("Organization-local Chrome setup opens the device controls and extension action", true);
-  await page.evaluate(() => window.claudeRuntimeUi.selectPlacement("cloud"));
-  await expect(localChrome).toHaveCount(0);
-  await expect(cloudGuidance).toHaveCount(3);
-  await page.evaluate(() => window.claudeRuntimeUi.selectPlacement("local"));
-  await expect(localChrome).toBeVisible();
-  await expect(cloudGuidance).toHaveCount(0);
-  await page.evaluate(() => window.claudeRuntimeUi.selectOwner("other"));
-  await expect(localChrome).toHaveCount(0);
-  await expect(cloudGuidance).toHaveCount(3);
-  await page.evaluate(() => window.claudeRuntimeUi.selectOwner("personal"));
-  await expect(localChrome).toBeVisible();
-  await page.evaluate(() => window.claudeRuntimeUi.selectOwner("organization"));
-  await expect(localChrome).toBeVisible();
-  await page.evaluate(() => window.claudeRuntimeUi.selectPlacement(null));
-  await expect(localChrome).toHaveCount(0);
-  await expect(cloudGuidance).toHaveCount(3);
-  check("Browser settings follow placement and exact owner through Local, cloud, Personal and cleared workspace selections", true);
+  for (const step of [
+    () => window.claudeRuntimeUi.selectPlacement("cloud"),
+    () => window.claudeRuntimeUi.selectOwner("other"),
+    () => window.claudeRuntimeUi.selectOwner("personal"),
+    () => window.claudeRuntimeUi.selectOwner("organization"),
+    () => window.claudeRuntimeUi.selectPlacement(null),
+  ]) {
+    await page.evaluate(step);
+    await expect(localChrome).toBeVisible();
+    await expect(cloudGuidance).toHaveCount(0);
+  }
+  check("Browser settings keep this Mac's controls through Local, cloud, Personal and cleared workspace selections", true);
 
   for (const theme of ["dark", "light"]) {
     await page.goto(transcript);

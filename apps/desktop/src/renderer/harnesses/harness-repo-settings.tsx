@@ -29,7 +29,13 @@ import { acceptOrganizationSnapshot } from "../features/team/team-store";
 import { setActiveOrganizationSelection } from "../features/team/active-team";
 import type { OrganizationSummary } from "../features/team/control-plane";
 import { SettingsPage } from "../features/settings/settings-page";
-import { writeScopedSettingsSelection } from "../features/settings/settings-scope";
+import { AddProjectFixtureProvider, type AddProjectActions } from "../shell/add-project-provider";
+import { settingsOwnerKey, writeScopedSettingsSelection } from "../features/settings/settings-scope";
+import { computerKey, computers } from "../features/settings/cloud-computer-store";
+import {
+  cloudComputerRepositoriesCache,
+  cloudComputerRepositoriesKey,
+} from "../features/settings/cloud-computer-v2-create-gate";
 import {
   AuthContext,
   type AuthContextValue,
@@ -102,6 +108,44 @@ const projects = [
   getCloudProjects()[0],
 ];
 
+// A repository on this Mac and on the Cloud Computer, and one only in the cloud.
+// The organization's computer reads are seeded; a revalidation failure keeps them.
+const BOTH = "example/cloud-settings";
+const CLOUD_ONLY = "example/cloud-only";
+upsertProject({ repoRoot: "/fixture/cloud-settings", name: "cloud-settings", originUrl: `https://github.com/${BOTH}.git` });
+const BUILD_ID = "33333333-3333-4333-8333-333333333333";
+const recipe = [{ repository: BOTH, setup: "pnpm install" }, { repository: CLOUD_ONLY }];
+// Seeded after the organization snapshot, whose generation scopes the computer key.
+function seedCloudComputer() {
+  cloudComputerRepositoriesCache.setData(cloudComputerRepositoriesKey(membership.user.id, organization.id),
+    [BOTH, CLOUD_ONLY].map(repository => {
+      const [owner, name] = repository.split("/") as [string, string];
+      return { id: repository, owner, name, defaultBranch: "main" };
+    }));
+  computers.setData(computerKey(membership.user.id, organization.id), {
+    activeBuildId: BUILD_ID, snapshotName: "fixture", recipe: { repositories: recipe }, recipeRevision: 1,
+    builds: [{ id: BUILD_ID, organizationId: organization.id, version: 1, recipe: { repositories: recipe }, state: "succeeded",
+      snapshotId: "fixture", errorCode: null, createdAt: "2026-10-15T00:00:00Z", startedAt: "2026-10-15T00:00:00Z",
+      finishedAt: "2026-10-15T00:05:00Z", reason: "manual" }],
+  });
+}
+
+/** Opens a joined project page in Settings as an organization owner or member. */
+async function openProjectState(state: "both-admin" | "both-member" | "cloud-only") {
+  const role = state === "both-member" ? "member" : "owner";
+  const next = { ...organization, role } as OrganizationSummary;
+  acceptOrganizationSnapshot({ ...membership, organizations: [next], teams: [next] });
+  setActiveOrganizationSelection(organization.id, false);
+  seedCloudComputer();
+  writeScopedSettingsSelection(settingsOwnerKey(membership.user.id, organization.id), "section",
+    `project:github:${state === "cloud-only" ? CLOUD_ONLY : BOTH}`);
+  // Settings reads its saved selection when it mounts, so leave it for a frame first.
+  const { dispatch } = useWorkspaceStore.getState();
+  dispatch({ type: "SET_ACTIVE_PAGE", page: "repo" });
+  await new Promise(resolve => requestAnimationFrame(resolve));
+  dispatch({ type: "SET_ACTIVE_PAGE", page: "settings" });
+}
+
 function openProject(projectId: string) {
   const personal = projectId === projects[0].id;
   setActiveOrganizationSelection(personal ? null : organization.id, personal);
@@ -109,13 +153,18 @@ function openProject(projectId: string) {
 }
 
 const requests: string[] = [];
+// Only Clone to this Mac reaches the add-project flows from this fixture; it records the request.
+const cloneRequests: unknown[] = [];
+const addProject = { openGithubProject: (options: unknown) => cloneRequests.push(options) } as unknown as AddProjectActions;
 Object.assign(window, {
   repoSettingsOpenApp: () => useWorkspaceStore.getState().dispatch({ type: "SET_ACTIVE_PAGE", page: "settings" }),
   repoSettingsSetInternal: (internal: boolean) => acceptOrganizationSnapshot({
     ...membership,
     user: { ...membership.user, staffRole: internal ? "developer" : null },
   }),
+  repoSettingsOpenProject: openProjectState,
   repoSettingsRequests: requests,
+  repoSettingsCloneRequests: cloneRequests,
   repoSettingsProjects: projects,
   openRepoSettingsSection: (section: string) => {
     const state = useWorkspaceStore.getState();
@@ -188,6 +237,13 @@ RuntimeClient.prototype.request = async function <
       path: `${root}/.zeros/settings.local.toml`,
     };
   if (request.op === "workspace.list") result = { workspaces: [] };
+  // The unified project page mounts these sections together; answer with the engine's empty shapes.
+  if (request.op === "filesToCopy.preview")
+    result = { source: "default", rootPath: root, patterns: [], files: [], totalCount: 0, totalBytes: 0,
+      truncated: false, trackedMatches: [], candidates: [], warnings: [] };
+  if (request.op === "git.repoBranchCatalog")
+    result = { remotes: [], effectiveRemote: "origin", remoteExists: false, baseExplicit: false, effectiveBase: "main",
+      detectedDefault: null, listedRemote: null, branchSource: "local", branches: [] };
   return {
     type: "WORKSPACE_RESPONSE",
     requestId: request.requestId ?? "fixture",
@@ -224,7 +280,9 @@ function Harness() {
             </nav>
             {page === "settings" ? (
               <AuthContext.Provider value={auth}>
-                <SettingsPage />
+                <AddProjectFixtureProvider value={addProject}>
+                  <SettingsPage />
+                </AddProjectFixtureProvider>
               </AuthContext.Provider>
             ) : (
               <RepoPage project={project} />

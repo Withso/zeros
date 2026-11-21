@@ -809,7 +809,7 @@ export async function push(opts: PushOptions): Promise<PushResult> {
   const branch = await checkedOutBranch(ws.path, "push");
   // No explicit remote → the repo's configured `git.remote` (default origin),
   // so push honors the same "Remote origin" setting as create/fetch/PR.
-  const remote = opts.remote ?? resolveRepoGit(ws.repoRoot).remote;
+  const remote = opts.remote ?? resolveRepoGit(ws.repoRoot, ws).remote;
   assertSafeGitRef(remote, "push.remote");
   const args = ["push"];
   if (opts.setUpstream !== false) args.push("-u");
@@ -870,7 +870,7 @@ export async function pull(opts: PullOptions): Promise<PullResult> {
   const branch = await checkedOutBranch(ws.path, "pull");
   const expectedHead = await currentHead(ws.path);
   // Same setting-aware default as push.
-  const remote = opts.remote ?? resolveRepoGit(ws.repoRoot).remote;
+  const remote = opts.remote ?? resolveRepoGit(ws.repoRoot, ws).remote;
   assertSafeGitRef(remote, "pull.remote");
   // Pin the network result first. Fetch mutates refs only, so it cannot
   // overwrite a live Design draft. The preflight below then decides whether
@@ -1191,7 +1191,7 @@ export async function changeTargetBranch(
     // with "invalid upstream". We still PERSIST the plain name (baseBranch is
     // stored unqualified — see resolveBaseRef in diff.ts).
     const ws = getWorkspace(opts.workspaceId);
-    const { remote } = resolveRepoGit(ws.repoRoot);
+    const { remote } = resolveRepoGit(ws.repoRoot, ws);
     const ontoBranch = (await refExists(
       ws.path,
       `refs/heads/${opts.newTarget}`,

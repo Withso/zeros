@@ -1,4 +1,4 @@
-import { ChevronDown, Plus } from "lucide-react";
+import { ChevronDown, Plus, Settings } from "lucide-react";
 import type { CloudComputerRepository } from "../../features/settings/cloud-computer-v2-create-gate";
 import { Button, GithubIcon } from "../../shared/ui";
 import {
@@ -21,6 +21,7 @@ export function CloudComputerRepositoryPicker({
   onSelect,
   warm,
   rememberedId,
+  manage = false,
 }: {
   repositories: readonly CloudComputerRepository[];
   selected: CloudComputerRepository | null;
@@ -31,6 +32,8 @@ export function CloudComputerRepositoryPicker({
   onSelect: (id: string) => void;
   warm: (repository: CloudComputerRepository) => void;
   rememberedId?: string | null;
+  /** unified-workspaces: repositories are managed in Settings, never added from Create. */
+  manage?: boolean;
 }) {
   const dispatch = useWorkspaceDispatch();
   return (
@@ -87,8 +90,8 @@ export function CloudComputerRepositoryPicker({
             dispatch({ type: "SET_ACTIVE_PAGE", page: "settings" });
           }}
         >
-          <Plus className="text-fg2" strokeWidth={1.5} />
-          <span>Add repository</span>
+          {manage ? <Settings className="text-fg2" strokeWidth={1.5} /> : <Plus className="text-fg2" strokeWidth={1.5} />}
+          <span>{manage ? "Manage repositories" : "Add repository"}</span>
         </DropdownMenuItem>
       </DropdownMenuContent>
     </DropdownMenu>

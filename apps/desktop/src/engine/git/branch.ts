@@ -80,7 +80,7 @@ export async function listRemoteBranches(
   const ws = getWorkspace(workspaceId);
   // Settings-sourced (a paired device can write `git.remote`) — guard before
   // it reaches git inside a ref pattern. Same treatment as repoHasRemote.
-  const { remote } = resolveRepoGit(ws.repoRoot);
+  const { remote } = resolveRepoGit(ws.repoRoot, ws);
   assertSafeGitRef(remote, "listRemoteBranches.remote");
   // for-each-ref (subprocess) rather than isomorphic-git: it yields the tip SHA
   // + commit date in one pass and never hits the network. Mirrors listAllBranches.
@@ -514,7 +514,7 @@ export async function continueOnNewBranch(
   opts: ContinueOnNewBranchOptions,
 ): Promise<ContinueOnNewBranchResult> {
   const ws = getWorkspace(opts.workspaceId);
-  const { remote } = resolveRepoGit(ws.repoRoot);
+  const { remote } = resolveRepoGit(ws.repoRoot, ws);
   const baseBranch = opts.baseBranch ?? ws.baseBranch;
   assertSafeGitRef(remote, "continueOnNewBranch.remote");
   assertSafeGitRef(baseBranch, "continueOnNewBranch.baseBranch");

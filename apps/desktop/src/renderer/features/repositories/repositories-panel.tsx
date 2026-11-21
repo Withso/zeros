@@ -423,6 +423,36 @@ export function RepoDetail({
   }
 }
 
+/** The unified project page's This Mac parts, composed from the repository
+ * sections with the same layer and root the repository page uses. */
+export function ProjectLocalPart({
+  project,
+  part,
+  surfaceActive = true,
+}: {
+  project: Project;
+  part: "scripts" | "git" | "environment" | "run-actions" | "actions" | "files" | "paths";
+  surfaceActive?: boolean;
+}) {
+  const root = project.repoRoot;
+  switch (part) {
+    case "scripts":
+      return project.isGitRepository !== false ? <ScriptsSection project={project} layer="repo-local" root={root} /> : null;
+    case "git":
+      return <GitSection project={project} layer="repo-local" root={root} surfaceActive={surfaceActive} />;
+    case "environment":
+      return <EnvironmentSection project={project} layer="repo-local" root={root} />;
+    case "run-actions":
+      return <RunActionsSection project={project} layer="repo-local" root={root} />;
+    case "actions":
+      return <ActionsSection project={project} layer="repo-local" root={root} />;
+    case "files":
+      return <FilesToCopySection project={project} layer="repo-local" root={root} surfaceActive={surfaceActive} />;
+    case "paths":
+      return <PathsSection project={project} />;
+  }
+}
+
 /** A script field that edits the repo layer while surfacing inheritance. The
  *  editor holds only what THIS repo sets; empty + save means inherit. */
 function OverrideField({
@@ -645,13 +675,16 @@ export function EnvironmentSection({
   layer,
   root,
   mainRepoRoot,
+  ownerOrganizationId,
 }: {
   project?: Project;
   layer: EditableRepoLayer | "user";
   root?: string;
   mainRepoRoot?: string;
+  /** The old rail's organization view of the user-level list. */
+  ownerOrganizationId?: string;
 }) {
-  const resolved = useResolvedSettings(root, mainRepoRoot);
+  const resolved = useResolvedSettings(root, mainRepoRoot, true, ownerOrganizationId);
   const scope = useMemo<EnvVaultScope>(
     () =>
       layer === "user"
@@ -975,8 +1008,8 @@ export function EnvironmentSection({
 /** The User-scope Environment section (Settings → Environment) — the same editor
  *  as the per-repo layers, bound to the global user layer (~/.zeros/settings.local.toml)
  *  that every project inherits. A no-props Panel for the Settings page. */
-export function UserEnvironmentPanel() {
-  return <EnvironmentSection layer="user" />;
+export function UserEnvironmentPanel({ ownerOrganizationId }: { ownerOrganizationId?: string } = {}) {
+  return <EnvironmentSection layer="user" ownerOrganizationId={ownerOrganizationId} />;
 }
 
 // Two pickers over the layered `git.base_branch` and `git.remote` keys. The base

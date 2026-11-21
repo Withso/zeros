@@ -1,4 +1,5 @@
 import { useOrganizationProjects } from "../state/use-organization-projects";
+import { projectGroupLookup } from "../state/project-identity";
 import { IconButton } from "@/renderer/shared/ui/primitives/icon-button";
 // ============================================
 // COMPONENT: AppSidebar
@@ -53,7 +54,7 @@ import {
   prefetchSettingsForRepo,
   usePrefetchSettings,
 } from "../features/settings/use-settings";
-import { filterRowsForOrganization } from "../features/team/organization-capabilities";
+import { filterRowsForOrganization, localWorkShowsEverywhere } from "../features/team/organization-capabilities";
 import { OrganizationSwitcher } from "../features/team/organization-switcher";
 import { getActiveOrganizationIdSnapshot, getTeamStoreState, useActiveOrganization } from "../features/team/team-store";
 import { useMyUserId, useSharingOrganization } from "../platform/team-sharing-state";
@@ -92,8 +93,8 @@ import { useActiveWorkspace } from "../state/use-active-workspace";
 import { useOpenWorkspace } from "../state/use-open-workspace";
 import { useOrganizationDestination } from "../state/organization-navigation";
 import {
-  setSidebarRepositoryIds, setSidebarStatusCollapsed, setSidebarWorkspaceSort,
-  sidebarRepositoryFilterOwner, sidebarRepositoryIds, useSidebarListPreferences,
+  setSidebarHiddenPlacements, setSidebarRepositoryIds, setSidebarStatusCollapsed, setSidebarWorkspaceSort,
+  sidebarHiddenPlacements, sidebarRepositoryFilterOwner, sidebarRepositoryIds, useSidebarListPreferences,
 } from "../state/sidebar-list-preferences";
 import {
   notifyProjectsChanged,
@@ -138,6 +139,7 @@ import {
 import {
   buildSidebarSharingSections,
   buildSidebarWorkspaceEntries,
+  rowsShownForPlacements,
   type SidebarWorkspaceEntry,
   sidebarItemSelectionKey,
   sidebarScrollTopToReveal,
@@ -254,6 +256,8 @@ function useNativeRuntimeNotice(): void {
 
 // --- ROOT COMPONENT ---
 
+const NO_HIDDEN_PLACEMENTS: readonly ("local" | "cloud")[] = [];
+
 export function AppSidebar({ hidden = false }: { hidden?: boolean }) {
   const activeResolution = useActiveWorkspace();
   const chats = useChats();
@@ -283,10 +287,16 @@ export function AppSidebar({ hidden = false }: { hidden?: boolean }) {
     userId: userId ?? getTeamStoreState().me?.user.id,
     organizationId: getActiveOrganizationIdSnapshot(),
   });
-  const hasCreateDraft = useCreateComposerHasDraft(createDraftOwner);
+  // unified-workspaces: Create's This Mac drafts belong to the device under every owner.
+  const hasLocalCreateDraft = useCreateComposerHasDraft(
+    localWorkShowsEverywhere() && createDraftOwner !== "local" ? "local" : null,
+  );
+  const hasCreateDraft = useCreateComposerHasDraft(createDraftOwner) || hasLocalCreateDraft;
   const showCreateDraft = activePage !== "create" && hasCreateDraft;
   const preferences = useSidebarListPreferences();
   const repositoryIds = sidebarRepositoryIds(filterOwner);
+  const unifiedPlacements = localWorkShowsEverywhere();
+  const hiddenPlacements = unifiedPlacements ? sidebarHiddenPlacements(filterOwner) : NO_HIDDEN_PLACEMENTS;
 
   usePruneLegacyPhantomProjects();
   useSyncProjectsToEngine();
@@ -426,13 +436,14 @@ export function AppSidebar({ hidden = false }: { hidden?: boolean }) {
       repositoryIds,
       activity: { activeAtByWorkspaceId },
       projects,
-      workspaces: realWorkspaces,
-      pending: dedupedPendingCreates,
+      workspaces: rowsShownForPlacements(realWorkspaces, hiddenPlacements),
+      pending: rowsShownForPlacements(dedupedPendingCreates, hiddenPlacements),
+      ...(unifiedPlacements ? { projectGroupOf: projectGroupLookup(projects) } : {}),
     };
     return sharing
       ? buildSidebarSharingSections({ ...args, sectionOf })
       : [{ id: null, label: "", entries: buildSidebarWorkspaceEntries(args) }];
-  }, [dedupedPendingCreates, listFilter, preferences.sort, repositoryIds, activeAtByWorkspaceId, projects, realWorkspaces, sharing, sectionOf]);
+  }, [dedupedPendingCreates, listFilter, preferences.sort, repositoryIds, hiddenPlacements, activeAtByWorkspaceId, projects, realWorkspaces, sharing, sectionOf, unifiedPlacements]);
   const entries = useMemo(() => sections.flatMap(section => section.entries), [sections]);
   const listedItems = useMemo(() => sidebarWorkspaceItems(entries), [entries]);
   const navigableWorkspaces = useMemo(
@@ -946,6 +957,10 @@ export function AppSidebar({ hidden = false }: { hidden?: boolean }) {
             onGroupingChange={handleSelectFilter}
             onSortChange={setSidebarWorkspaceSort}
             onRepositoryIdsChange={ids => setSidebarRepositoryIds(filterOwner, ids)}
+            {...(unifiedPlacements ? {
+              hiddenPlacements,
+              onHiddenPlacementsChange: (hidden: readonly ("local" | "cloud")[]) => setSidebarHiddenPlacements(filterOwner, hidden),
+            } : {})}
           />}
         </div>
 

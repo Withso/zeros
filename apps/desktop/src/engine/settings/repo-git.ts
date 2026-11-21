@@ -1,6 +1,7 @@
 
 import { normalizeBranchPrefix } from "../git/naming";
 import { opSettingsResolve } from "./ops";
+import type { SettingsOwner } from "./team-context";
 import {
   BRANCH_PREFIX_TYPES,
   DEFAULT_BRANCH_PREFIX_TYPE,
@@ -32,10 +33,14 @@ function readBranchPrefixType(value: unknown): BranchPrefixType {
     : DEFAULT_BRANCH_PREFIX_TYPE;
 }
 
-export function resolveRepoGit(repoRoot: string): RepoGitConfig {
+/** Pass the workspace as `owner` when `repoRoot` is its shared main checkout. */
+export function resolveRepoGit(
+  repoRoot: string,
+  owner?: SettingsOwner,
+): RepoGitConfig {
   if (!repoRoot) return DEFAULTS;
   try {
-    const resolved = opSettingsResolve(repoRoot);
+    const resolved = opSettingsResolve(repoRoot, undefined, owner);
     const git = resolved.effective.git;
     if (git && typeof git === "object" && !Array.isArray(git)) {
       const g = git as Record<string, unknown>;

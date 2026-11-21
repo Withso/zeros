@@ -1,12 +1,49 @@
 
 import React from "react";
-import { Lock, Plus } from "lucide-react";
+import { Cloud, Laptop, Lock, Plus } from "lucide-react";
 import { cn } from "@/renderer/shared/ui/cn";
 import { badgeVariants } from "@/renderer/shared/ui/primitives/badge";
 import { Button } from "@/renderer/shared/ui/primitives/button";
 
 const NAME_CLS = "text-fg1 text-xs leading-4.5 font-medium";
 const HINT_CLS = "text-fg3 text-3xxs leading-4";
+const PAGE_SECTION_NAME_CLS = "text-fg1 text-sm leading-5 font-medium";
+
+/** Inside a page section, section titles are one level down, and a title that
+ * only repeats the page section's is left out. */
+const PageSectionContext = React.createContext<string | null>(null);
+
+function useSectionTitle(title: React.ReactNode): React.ReactNode {
+  const pageSection = React.useContext(PageSectionContext);
+  if (!title) return null;
+  if (pageSection === null) return <h2 className={cn(NAME_CLS, "m-0")}>{title}</h2>;
+  if (typeof title === "string" && title.trim().toLowerCase() === pageSection.toLowerCase()) return null;
+  return <h3 className={cn(NAME_CLS, "m-0")}>{title}</h3>;
+}
+
+/** A long settings page's top level: one heading per section, larger than the
+ * groups and sections it contains, with a rule between sections. */
+export function SettingsPageSection({
+  title,
+  description,
+  children,
+}: {
+  title: string;
+  description?: React.ReactNode;
+  children: React.ReactNode;
+}) {
+  return (
+    <section className="border-border1 flex flex-col gap-4 border-t pt-8 first:border-t-0 first:pt-0">
+      <div className="flex flex-col gap-0.5 px-0.5">
+        <h2 className={cn(PAGE_SECTION_NAME_CLS, "m-0")}>{title}</h2>
+        {description && <p className={cn(HINT_CLS, "m-0")}>{description}</p>}
+      </div>
+      <PageSectionContext.Provider value={title}>
+        <div className="flex flex-col gap-6">{children}</div>
+      </PageSectionContext.Provider>
+    </section>
+  );
+}
 
 
 export function SettingsSection({
@@ -22,12 +59,13 @@ export function SettingsSection({
   children?: React.ReactNode;
   className?: string;
 }) {
+  const heading = useSectionTitle(title);
   return (
     <section className={cn("flex flex-col gap-2", className)}>
-      {(title || action || description) && (
+      {(heading || action || description) && (
         <div className="flex items-start justify-between gap-4">
           <div className="flex min-w-0 flex-col gap-0.5">
-            {title && <h2 className={cn(NAME_CLS, "m-0")}>{title}</h2>}
+            {heading}
             {description && <p className={cn(HINT_CLS, "m-0")}>{description}</p>}
           </div>
           {action && <div className="shrink-0">{action}</div>}
@@ -35,6 +73,17 @@ export function SettingsSection({
       )}
       {children}
     </section>
+  );
+}
+
+/** Titles the part of a page that applies on this Mac or in cloud workspaces. */
+export function PlaceLabel({ place }: { place: "mac" | "cloud" }) {
+  const Icon = place === "mac" ? Laptop : Cloud;
+  return (
+    <span className="text-fg2 inline-flex items-center gap-1.5">
+      <Icon className="text-fg3 size-3.5" strokeWidth={1.5} aria-hidden />
+      {place === "mac" ? "This Mac" : "Cloud"}
+    </span>
   );
 }
 
@@ -58,11 +107,12 @@ export function SettingsGroup({
   className?: string;
   "aria-label"?: string;
 }) {
+  const heading = useSectionTitle(title);
   return (
     <section aria-label={ariaLabel} className={cn("flex flex-col gap-2", className)}>
-      {(title || description) && (
+      {(heading || description) && (
         <div className="flex flex-col gap-0.5 px-0.5">
-          {title && <h2 className={cn(NAME_CLS, "m-0")}>{title}</h2>}
+          {heading}
           {description && <p className={cn(HINT_CLS, "m-0")}>{description}</p>}
         </div>
       )}

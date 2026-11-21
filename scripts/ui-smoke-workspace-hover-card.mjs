@@ -1,7 +1,7 @@
 import { expect } from "@playwright/test";
 
 export async function runWorkspaceHoverCards({ page, check, harnessBase, capture }) {
-  await page.goto(`${harnessBase}/harness-app-sidebar.html?hover-cards`, { waitUntil: "networkidle" });
+  await page.goto(`${harnessBase}/harness-app-sidebar.html?hover-cards&feature-off=unified-workspaces`, { waitUntil: "networkidle" });
   await page.evaluate(() => { localStorage.clear(); sessionStorage.clear(); });
   await page.reload({ waitUntil: "networkidle" });
   const row = id => page.locator(`[data-workspace-id="${id}"]`);

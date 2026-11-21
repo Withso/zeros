@@ -52,8 +52,10 @@ function scheduleSettingsRefresh(id: string, refresh: () => void): void {
   });
 }
 
-function resolvedSettingsKey(repoRoot?: string, mainRepoRoot?: string): string {
-  return JSON.stringify([repoRoot ?? null, mainRepoRoot ?? null]);
+function resolvedSettingsKey(repoRoot?: string, mainRepoRoot?: string, ownerOrganizationId?: string): string {
+  return JSON.stringify(ownerOrganizationId
+    ? [repoRoot ?? null, mainRepoRoot ?? null, ownerOrganizationId]
+    : [repoRoot ?? null, mainRepoRoot ?? null]);
 }
 
 function settingsLayerKey(layerName: SettingsLayer, repoRoot?: string): string {
@@ -160,24 +162,26 @@ export function useResolvedSettings(
   repoRoot?: string,
   mainRepoRoot?: string,
   enabled = true,
+  /** The old rail's organization view of user-level settings. */
+  ownerOrganizationId?: string,
 ): UseResolvedSettings {
   const bridge = useBridge();
   const bridgeStatus = useBridgeStatus(repoRoot);
   const active = useDocumentActive(enabled);
-  const key = resolvedSettingsKey(repoRoot, mainRepoRoot);
+  const key = resolvedSettingsKey(repoRoot, mainRepoRoot, ownerOrganizationId);
   const snapshot = useSettingsSnapshot(resolvedSettingsCache, key);
 
   // A forced refresh must not clear the last confirmed document.
   const refresh = useCallback(() => {
     if (!enabled || !bridge || bridgeStatus !== "connected") return;
     return resolvedSettingsCache
-      .load(key, () => bridgeSettingsResolve(bridge, repoRoot, mainRepoRoot), {
+      .load(key, () => bridgeSettingsResolve(bridge, repoRoot, mainRepoRoot, ownerOrganizationId), {
         force: true,
       })
       .catch(() => {
         // Error lives in the shared snapshot; confirmed data remains visible.
       });
-  }, [enabled, bridge, bridgeStatus, key, repoRoot, mainRepoRoot]);
+  }, [enabled, bridge, bridgeStatus, key, repoRoot, mainRepoRoot, ownerOrganizationId]);
 
   const refreshFromBroadcast = useCallback(() => {
     if (!enabled || !bridge || bridgeStatus !== "connected") return;
@@ -186,12 +190,12 @@ export function useResolvedSettings(
       void resolvedSettingsCache
         .load(
           key,
-          () => bridgeSettingsResolve(bridge, repoRoot, mainRepoRoot),
+          () => bridgeSettingsResolve(bridge, repoRoot, mainRepoRoot, ownerOrganizationId),
           { maxAgeMs: -1 },
         )
         .catch(() => {});
     });
-  }, [enabled, bridge, bridgeStatus, key, repoRoot, mainRepoRoot]);
+  }, [enabled, bridge, bridgeStatus, key, repoRoot, mainRepoRoot, ownerOrganizationId]);
 
   useEffect(() => {
     if (!active) return;
@@ -199,7 +203,7 @@ export function useResolvedSettings(
       void resolvedSettingsCache
         .load(
           key,
-          () => bridgeSettingsResolve(client, repoRoot, mainRepoRoot),
+          () => bridgeSettingsResolve(client, repoRoot, mainRepoRoot, ownerOrganizationId),
           {
             maxAgeMs: bridgeConnectionCacheMaxAge(
               initial,
@@ -209,7 +213,7 @@ export function useResolvedSettings(
         )
         .catch(() => {});
     }, repoRoot);
-  }, [active, key, repoRoot, mainRepoRoot]);
+  }, [active, key, repoRoot, mainRepoRoot, ownerOrganizationId]);
   useSettingsChanged(refreshFromBroadcast);
   const recovery = useReadRecovery(`settings-resolved:${key}`, {
     error: snapshot.error,

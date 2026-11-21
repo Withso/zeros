@@ -51,6 +51,7 @@ function subscribeVisibility(listener: () => void) {
 }
 
 export const cloudComputerV2BuildRequired = "Build your Cloud Computer first";
+export const cloudComputerV2CheckFailed = "Cloud Computer could not be checked. Open Settings to retry.";
 function rebuildRequired(error: Error | null): error is ControlPlaneError {
   return error instanceof ControlPlaneError && error.status === 409 && error.code === "cloud_computer_rebuild_required";
 }
@@ -61,7 +62,7 @@ export function cloudComputerV2CreateReason(
   if (rebuildRequired(error)) return error.message;
   if (repositories === undefined)
     return error
-      ? "Cloud Computer could not be checked. Open Settings to retry."
+      ? cloudComputerV2CheckFailed
       : "Checking Cloud Computer…";
   return repositories === null ? cloudComputerV2BuildRequired : null;
 }

@@ -13,6 +13,7 @@
 //   • Restore adapts the path/branch (occupied / checked-out-elsewhere / deleted)
 //     and can leave checkpoint conflicts — both are surfaced.
 
+import { projectGroupLookup } from "./project-identity";
 import { useCallback } from "react";
 import { unstable_batchedUpdates } from "react-dom";
 import { forgetAdoptedWorktree, recordAdoptedWorktree } from "./adopted-worktrees";
@@ -75,10 +76,10 @@ import {
   folderIsWithinRoot,
 } from "./workspace-resolution";
 import { getActiveOrganizationSnapshot, getActiveOrganizationIdSnapshot, getTeamStoreState } from "../features/team/team-store";
-import { filterRowsForOrganization, filterProjectsForOrganization } from "../features/team/organization-capabilities";
-import { buildSidebarWorkspaceEntries, sidebarNeighborAfterRemoval, sidebarWorkspaceListFilter } from "../shell/sidebar-workspace-model";
+import { filterRowsForOrganization, filterProjectsForOrganization, localWorkShowsEverywhere } from "../features/team/organization-capabilities";
+import { buildSidebarWorkspaceEntries, rowsShownForPlacements, sidebarNeighborAfterRemoval, sidebarWorkspaceListFilter } from "../shell/sidebar-workspace-model";
 import { sidebarWorkspaceActivity } from "../shell/sidebar-workspace-activity";
-import { getSidebarListPreferences, sidebarRepositoryFilterOwner, sidebarRepositoryIds } from "./sidebar-list-preferences";
+import { getSidebarListPreferences, sidebarHiddenPlacements, sidebarRepositoryFilterOwner, sidebarRepositoryIds } from "./sidebar-list-preferences";
 import {
   dedupePendingCreates,
   selectLiveVisible,
@@ -142,12 +143,15 @@ function pickRepointTarget(leaving: Workspace): {
     ),
     confirmed,
   );
+  const filterOwner = sidebarRepositoryFilterOwner(getTeamStoreState().me?.user.id, organizationId);
+  const hidden = localWorkShowsEverywhere() ? sidebarHiddenPlacements(filterOwner) : [];
   const entries = buildSidebarWorkspaceEntries({
     filter: sidebarWorkspaceListFilter(state.workspaceListFilter),
     sort: getSidebarListPreferences().sort,
-    repositoryIds: sidebarRepositoryIds(sidebarRepositoryFilterOwner(getTeamStoreState().me?.user.id, organizationId)),
-    workspaces: cached,
-    pending,
+    repositoryIds: sidebarRepositoryIds(filterOwner),
+    workspaces: rowsShownForPlacements(cached, hidden),
+    pending: rowsShownForPlacements(pending, hidden),
+    ...(localWorkShowsEverywhere() ? { projectGroupOf: projectGroupLookup(projects) } : {}),
     projects,
     activity: { activeAtByWorkspaceId: sidebarWorkspaceActivity(cached, state.chats, state.workspaceActivityByFolder) },
   });

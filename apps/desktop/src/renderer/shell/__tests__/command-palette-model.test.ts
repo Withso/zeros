@@ -16,7 +16,8 @@ import {
 
 vi.mock("../../config/release-channel", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../config/release-channel")>()),
-  isFeatureEnabled: () => true,
+  // Today's owners; organization-capabilities-unified.test.ts covers unified-workspaces.
+  isFeatureEnabled: (feature: string) => feature !== "unified-workspaces",
 }));
 
 function workspace(id: string, overrides: Partial<Workspace> = {}): Workspace {

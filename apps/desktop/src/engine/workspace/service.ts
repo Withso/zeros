@@ -3268,8 +3268,12 @@ export class WorkspaceService {
         const mainRepoRoot = optStr(params, "mainRepoRoot");
         if (repoRoot) this.assertSettingsRepoRoot(repoRoot, remote);
         if (mainRepoRoot) this.assertSettingsRepoRoot(mainRepoRoot, remote);
+        // The Local renderer may name the organization a user-level view is
+        // for; a paired remote device never selects the organization layer.
+        const ownerOrganizationId = remote ? undefined : optStr(params, "ownerOrganizationId");
         const resolved = this.settingsOp(() =>
-          opSettingsResolve(repoRoot, mainRepoRoot),
+          opSettingsResolve(repoRoot, mainRepoRoot,
+            ownerOrganizationId ? { organizationId: ownerOrganizationId } : undefined),
         );
         return remote ? redactResolvedForRemote(resolved) : resolved;
       }

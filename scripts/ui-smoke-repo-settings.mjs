@@ -1,3 +1,4 @@
+import { join } from "node:path";
 import { expect } from "@playwright/test";
 import { runCloudEnvironmentSmoke } from "./ui-smoke-cloud-environment.mjs";
 
@@ -130,12 +131,15 @@ export async function runRepoSettingsSmoke({ page, check }) {
   );
 
   for (const section of ["design", "design-preferences"]) {
+    await selectRepo("Local");
     await tab("Actions").click();
     await page.evaluate(
       (section) => window.openRepoSettingsSection(section),
       section,
     );
     await expect(tab("Environment")).toHaveAttribute("aria-selected", "true");
+    // Dev runs unified-workspaces: a saved repository selection opens its
+    // joined project page in Settings instead of the repository page.
     await page.evaluate(
       (section) => window.openLegacyRepoSettingsSection(section),
       section,
@@ -143,7 +147,10 @@ export async function runRepoSettingsSmoke({ page, check }) {
     await expect(
       page.getByRole("heading", { level: 1, name: "Local", exact: true }),
     ).toBeVisible();
-    await expect(tab("Environment")).toHaveAttribute("aria-selected", "true");
+    await expect(page.locator("[data-project-page]")).toBeVisible();
+    await expect(
+      page.getByRole("tablist", { name: "Settings sections" }).getByRole("tab", { name: "Local", exact: true }),
+    ).toHaveAttribute("aria-selected", "true");
   }
   await expectNoDesignRequests();
   check(
@@ -172,10 +179,11 @@ export async function runRepoSettingsSmoke({ page, check }) {
       expect(backBox.y + backBox.height).toBeLessThanOrEqual(bandBox.y + bandBox.height);
       expect(orgBox.y).toBeGreaterThanOrEqual(bandBox.y + bandBox.height);
       expect(await back.evaluate(node => getComputedStyle(node).getPropertyValue("-webkit-app-region"))).toBe("no-drag");
-      // Computer use lives in General for every owner; it has no page of its own.
-      for (const feature of ["General", "Browser", "Simulators"])
-        await expect(sections.getByRole("tab", { name: feature, exact: true })).toBeVisible();
-      await expect(sections.getByRole("tab", { name: "Computer use", exact: true })).toHaveCount(0);
+      // Dev runs the unified rail: Computer use, Browser and Simulators are
+      // Personal device pages for every owner.
+      // An organization adds its own General after the Personal one.
+      for (const feature of ["General", "Computer use", "Browser", "Simulators"])
+        await expect(sections.getByRole("tab", { name: feature, exact: true }).first()).toBeVisible();
       await expect(sections.getByRole("tab", { name: "Internal", exact: true })).toHaveCount(0);
       await back.focus();
       await page.keyboard.press("Enter");
@@ -205,5 +213,47 @@ export async function runRepoSettingsSmoke({ page, check }) {
   await expect(internal).toHaveCount(0);
   await expect(resourceSummary).toHaveCount(0);
   check("Internal offers Copy logs, default-on Resource summary and default-off Recorded Design canvas, preserves the toggle and closes on staff revocation", true);
+
+  // A joined project page as an owner and a member of an organization with the
+  // repository in both places, and for a repository only on the Cloud Computer.
+  const shots = process.env.ZEROS_SMOKE_SHOTS;
+  await page.evaluate(() => { document.documentElement.dataset.theme = "dark"; });
+  const projectPage = page.locator("[data-project-page]");
+  const text = (value) => projectPage.getByText(value, { exact: true });
+  const button = (name) => projectPage.getByRole("button", { name, exact: true });
+  const sideHeadings = () => projectPage.locator("h3").allTextContents();
+  for (const state of ["both-admin", "both-member", "cloud-only"]) {
+    await page.evaluate((state) => window.repoSettingsOpenProject(state), state);
+    const key = state === "cloud-only" ? "github:example/cloud-only" : "github:example/cloud-settings";
+    await expect(projectPage).toHaveAttribute("data-project-page", key);
+    await expect(projectPage.locator("h2")).toHaveText(state === "cloud-only"
+      ? ["Where it runs", "Scripts", "Git", "Environment"]
+      : ["Where it runs", "Scripts", "Git", "Environment", "Run actions", "Actions", "Files to copy", "Folder"]);
+    await expect(text("On the Cloud Computer")).toBeVisible();
+    if (shots) await page.screenshot({ path: join(shots, `p3-${state}.png`), fullPage: true, animations: "disabled" });
+    await expect(button("Add to cloud")).toHaveCount(0);
+    if (state === "cloud-only") {
+      await expect(text("Not on this Mac")).toBeVisible();
+      await expect(text("/fixture/cloud-settings")).toHaveCount(0);
+      await expect(text("Managed by admins")).toHaveCount(0);
+      expect(await sideHeadings()).not.toContain("This Mac");
+      await button("Clone to this Mac").click();
+      expect(await page.evaluate(() => window.repoSettingsCloneRequests.at(-1)))
+        .toEqual({ placement: "local", url: "https://github.com/example/cloud-only.git" });
+    } else {
+      await expect(text("/fixture/cloud-settings").first()).toBeVisible();
+      await expect(text("Not on this Mac")).toHaveCount(0);
+      await expect(button("Clone to this Mac")).toHaveCount(0);
+      const admin = state === "both-admin";
+      // Owners edit both sides under This Mac and Cloud; members read the cloud side as rows.
+      const headings = await sideHeadings();
+      expect(headings).toContain("This Mac");
+      expect(headings.includes("Cloud")).toBe(admin);
+      await expect(text("Managed by admins")).toHaveCount(admin ? 0 : 2);
+      await expect(projectPage.getByRole("textbox", { name: "example/cloud-settings branch" })).toHaveCount(admin ? 1 : 0);
+      await expect(projectPage.getByRole("textbox", { name: "example/cloud-settings setup command" })).toHaveCount(admin ? 1 : 0);
+    }
+  }
+  check("A joined project page shows both places to owners, a read-only cloud side to members, and Clone to this Mac for a cloud-only repository", true);
   await runCloudEnvironmentSmoke({ page, check });
 }
