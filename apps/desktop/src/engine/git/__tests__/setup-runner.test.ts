@@ -805,4 +805,30 @@ describe("SetupManager", () => {
     mgr.handleExit(setupSessionId(wsId, 3), 0);
     expect(fired).toBe(1);
   });
+
+  it("shows a post-create note above the setup output, with or without a setup run", async () => {
+    const wsId = "ws_note11-fern";
+    insertWorkspace(sampleWorkspace(wsId));
+    const { svc } = fakePty();
+    const changes: Array<string | null> = [];
+    const mgr = new SetupManager(svc, (id) => changes.push(id), undefined, testBoundaryFactory);
+
+    mgr.recordNote(wsId, "Submodules: 0 fetched, 1 skipped, 0 failed.\r\n\r\n");
+    expect(changes).toEqual([wsId]);
+    expect(mgr.info(wsId)).toMatchObject({
+      state: null,
+      command: null,
+      log: "Submodules: 0 fetched, 1 skipped, 0 failed.\r\n\r\n",
+    });
+
+    await mgr.start({ workspaceId: wsId, command: "pnpm i" });
+    const session = setupSessionId(wsId, 1);
+    mgr.appendData(session, "installed\r\n");
+    // The renderer appends only exact extensions; the note stays a stable prefix.
+    expect(mgr.info(wsId).log).toBe(
+      "Submodules: 0 fetched, 1 skipped, 0 failed.\r\n\r\ninstalled\r\n",
+    );
+    mgr.handleExit(session, 1);
+    expect(mgr.info(wsId)).toMatchObject({ state: "failed", command: "pnpm i" });
+  });
 });
