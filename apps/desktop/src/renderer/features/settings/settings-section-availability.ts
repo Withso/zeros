@@ -12,6 +12,9 @@ export interface SettingsSectionAvailability {
   unified?: boolean;
   /** Unified only: the organization has General rows of its own. */
   organizationGeneral?: boolean;
+  /** Unified only: the control plane keeps GitHub at two levels and the
+   * organization has more than one member (one member sees one page). */
+  organizationGithub?: boolean;
 }
 
 /** Personal pages are the same under every owner. Order is the rail order. */
@@ -34,11 +37,12 @@ export const UNIFIED_PERSONAL_SECTIONS = [
 
 export const UNIFIED_ORGANIZATION_SECTIONS = [
   "org-general",
+  "org-github",
   "cloud-computer",
 ] as const;
 
 /** Section IDs that exist only in the unified rail. */
-const UNIFIED_ONLY_SECTIONS = new Set<string>(["computer-use", "org-general"]);
+const UNIFIED_ONLY_SECTIONS = new Set<string>(["computer-use", "org-general", "org-github"]);
 
 /**
  * Saved selections and deep links keep their IDs whichever rail is showing;
@@ -86,6 +90,8 @@ export function isSettingsSectionAvailable(
       return !context.local && context.cloudEnabled;
     case "org-general":
       return !context.local && context.organizationGeneral === true;
+    case "org-github":
+      return !context.local && context.cloudEnabled && context.organizationGithub === true;
     case "simulators":
       return context.simulatorsActive;
     case "internal":

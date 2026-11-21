@@ -11,6 +11,7 @@ import { installRuntimeCommand, prepareRuntimeCommand, type CloudV2Runtime } fro
 import { GIT_LFS_INSTALL_COMMAND } from "./computer.js";
 import { pruneCloudRepositories } from "./source-authority.js";
 import type { PendingSourceOutcome } from "./pending-create.js";
+import type { CloudV2ReadyCopyForks } from "./ready-copies.js";
 import type { CloudV2CheckpointFork, CloudV2CheckpointReuse, CloudV2CheckpointRetry, CloudV2CheckpointScope, CloudV2Store, CloudV2Workspace,
   CloudV2LifecycleWorkspace, CloudV2RestoreCreate } from "./store.js";
 import { CLOUD_V2_WORKER_PORT, type CloudV2WorkerTiming, type CloudV2WorkerBootTiming } from "./contract.js";
@@ -142,6 +143,10 @@ export type CloudV2LifecycleDeps = {
   prepareRepository?(workspace: CloudV2LifecycleWorkspace, sandboxId: string): Promise<void>;
   /** Cloud Computer builds share this loop; one runs at a time. */
   builds?: { tick(): Promise<void>; cleanup?(): Promise<void>; close?(): void };
+  /** Ready copies (CloudV2Config.readyCopies): creates fork a repository's
+   * stopped, set-up machine; their builds run beside Cloud Computer builds. */
+  readyCopies?: Pick<CloudV2ReadyCopyForks<CloudV2LifecycleWorkspace>, "prepare" | "fetchBase">;
+  readyCopyBuilds?: { tick(): Promise<void>; close?(): void };
   runtimeUpdates?: { tick(): Promise<void>; close(): void };
   recovery?: { start(): () => Promise<void> };
   executionActivations?: { tick(): Promise<void> };
@@ -238,6 +243,7 @@ export class CloudV2Lifecycle {
       const recoveryStopped = stopRecovery?.();
       this.deps.runtimeUpdates?.close();
       this.deps.builds?.close?.();
+      this.deps.readyCopyBuilds?.close?.();
       if (this.timer) clearTimeout(this.timer);
       this.timer = null;
       await this.running;
@@ -245,6 +251,7 @@ export class CloudV2Lifecycle {
       await this.renewing;
       await this.retrying;
       await this.building;
+      await this.copying;
       await this.cleaning;
       await recoveryStopped;
     };
@@ -273,7 +280,7 @@ export class CloudV2Lifecycle {
     this.sweeping = true;
     let next = this.intervalMs;
     try {
-      const running = new Set([this.building, this.cleaning, this.retrying, this.renewing]);
+      const running = new Set([this.building, this.copying, this.cleaning, this.retrying, this.renewing]);
       await this.poll();
       next = await this.nextSweep(running);
     } catch (error) {
@@ -286,18 +293,19 @@ export class CloudV2Lifecycle {
   /** Work in progress keeps the fast cadence; otherwise the next due deferral,
    * bounded by the idle sweep, decides. */
   private async nextSweep(running: ReadonlySet<Promise<void> | null>): Promise<number> {
-    const background = [this.building, this.cleaning, this.retrying, this.renewing].filter(task => task !== null && !running.has(task));
+    const background = [this.building, this.copying, this.cleaning, this.retrying, this.renewing].filter(task => task !== null && !running.has(task));
     if (background.length) {
       let timer: NodeJS.Timeout | undefined;
       await Promise.race([Promise.allSettled(background), new Promise(resolve => { timer = setTimeout(resolve, BACKGROUND_SETTLE_MS); })]);
       clearTimeout(timer);
     }
-    if (this.inFlight.size || this.building || this.cleaning || this.retrying || this.renewing) return this.intervalMs;
+    if (this.inFlight.size || this.building || this.copying || this.cleaning || this.retrying || this.renewing) return this.intervalMs;
     const due = await this.deps.store.nextLifecycleDue();
     return due === null ? IDLE_SWEEP_MS : Math.min(IDLE_SWEEP_MS, Math.max(this.intervalMs, due));
   }
 
   private building: Promise<void> | null = null;
+  private copying: Promise<void> | null = null;
   private cleaning: Promise<void> | null = null;
   private lastPromptPrune = 0;
   private renewing: Promise<void> | null = null;
@@ -332,6 +340,9 @@ export class CloudV2Lifecycle {
     // A build can take many minutes; it never blocks workspace lifecycle steps.
     if (this.deps.builds && !this.building)
       this.building = this.deps.builds.tick().catch(() => {}).finally(() => { this.building = null; });
+    // A ready copy clones and sets up a whole repository; it never waits for, or holds up, a Cloud Computer build.
+    if (this.deps.readyCopyBuilds && !this.copying)
+      this.copying = this.deps.readyCopyBuilds.tick().catch(() => {}).finally(() => { this.copying = null; });
     // Idle stop skips a workspace with pending messages; this finds the ones whose VM Boat stopped underneath them.
     if (this.deps.providerStop && !this.providerStopScan && now - this.lastProviderStopScan >= 60_000) {
       this.lastProviderStopScan = now;
@@ -450,10 +461,25 @@ export class CloudV2Lifecycle {
         const boot = await this.boot(workspace);
         const baseCommit = workspace.baseCommit || !this.deps.remoteHead ? null : this.lookupBaseCommit(workspace);
         let sandboxId = workspace.boatSandboxId;
-        const image = await store.workspaceImage(workspace.id);
+        let image = await store.workspaceImage(workspace.id);
         if (!image) {
           await store.transition(workspace.id, ["creating"], "failed", { errorCode: "cloud_computer_build_required" });
           return;
+        }
+        // A fork of the repository's ready copy already holds the base, the
+        // checkout and its setup. Without one the create clones directly.
+        const forked = this.deps.readyCopies ? await this.deps.readyCopies.prepare(workspace) : null;
+        if (forked && "waitMs" in forked) { await store.defer(workspace.id, "creating", forked.waitMs); return; }
+        if (forked) {
+          image = { from: image.from, prune: [], checkout: true };
+          if (!sandboxId) {
+            const recorded = await store.recordInitialSandbox(workspace.id, workspace.stopGeneration, forked.sandboxId, new Date(this.deps.now?.() ?? Date.now()));
+            if (!recorded || recorded.state !== "creating") {
+              if (recorded?.state === "deleting") await this.runStep(recorded, now);
+              return;
+            }
+            sandboxId = forked.sandboxId;
+          }
         }
         if (!sandboxId) {
           const renewedAt = new Date(this.deps.now?.() ?? Date.now());
@@ -476,7 +502,8 @@ export class CloudV2Lifecycle {
         // Still unawaited so a slow or failed launch cannot hold up worker startup.
         const warmup = image.checkout ? checkoutWarmupCommand(`${CLOUD_V2_HOME}/${workspace.repository}`) : null;
         if (warmup) void this.deps.compute.exec(sandboxId, warmup, 30).catch(() => undefined);
-        if (image.prune.length || !image.from) await this.measure(workspace, "image_prepare", () => this.prepareImage(sandboxId, image));
+        if (!forked && (image.prune.length || !image.from)) await this.measure(workspace, "image_prepare", () => this.prepareImage(sandboxId, image));
+        if (forked) await this.measure(workspace, "repository_prepare", () => this.deps.readyCopies!.fetchBase(workspace, sandboxId));
         // An active create obtains the initiator's repository material through
         // its bootstrap lease, after the worker has proved boot cleanup.
         if (this.deps.prepareRepository && !image.checkout && !workspace.executionIntent) {
@@ -822,7 +849,9 @@ export class CloudV2Lifecycle {
         // The same key returns the fork it made, if it made one.
         try { ({ sandboxId } = await compute.fork(fork.source, { key: forkKey(workspace.id, fork.attempt), ...(fork.name ? { name: fork.name } : {}), ttlSeconds: FORK_TTL_SECONDS })); }
         catch (error) { if (!neverCreated(error)) throw error; }
-      } else if (fork.name) sandboxId = await compute.findSandbox(fork.name, new Date(Date.parse(fork.requestedAt) - 10 * 60_000));
+      // With ready copies many VMs share one fork name, so a name could find
+      // another workspace's fork; only its key is trusted, and its lease ends it.
+      } else if (fork.name && !this.deps.readyCopies) sandboxId = await compute.findSandbox(fork.name, new Date(Date.parse(fork.requestedAt) - 10 * 60_000));
       // Without a name nothing can find it; its lease stops it within the hour.
       else this.deps.logger?.warn("[cloud-v2] checkpoint fork unrecoverable (provider_not_found)");
     }

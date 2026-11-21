@@ -34,6 +34,19 @@ it("checks the requested repository first with renewal, the rest fresh in order,
   expect(f.deps.resolve).toHaveBeenCalledWith("w", { sourceRepositoryId: "42", readableRepositoryIds: ["42", "41", "43"], baseCommit: "c".repeat(40) });
 });
 
+it("checks only the requested repository on a base for ready copies, which holds no other source", async () => {
+  const f = fixture();
+  f.deps.activeComputer.mockResolvedValue({ buildId: "build", baseOnly: true, repositories: [
+    { repository: "example/docs", defaultBranch: "main" }, { repository: "example/project", defaultBranch: "main" }] });
+  f.deps.authorizeBuildRepository.mockImplementation(async (_o, _u, _b, repository) => {
+    if (repository === "example/docs") throw new HttpError(404, "github_repository_unavailable", "Unavailable");
+    return { repository, repositoryId: ids[repository]! };
+  });
+  expect(await f.resolve(workspace)).toEqual({ baseCommit: "c".repeat(40) });
+  expect(f.deps.authorizeBuildRepository.mock.calls).toEqual([["org", "user", "build", "example/project", { renew: true }]]);
+  expect(f.deps.resolve).toHaveBeenCalledWith("w", { sourceRepositoryId: "42", readableRepositoryIds: ["42"], baseCommit: "c".repeat(40) });
+});
+
 it("leaves another repository the creator can't read out of the readable set", async () => {
   const f = fixture();
   f.deps.authorizeBuildRepository.mockImplementation(async (_o, _u, _b, repository) => {

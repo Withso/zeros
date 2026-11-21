@@ -65,7 +65,7 @@ export class CloudTeamSharing {
           ...(enriched.github ? { github: enriched.github } : {}) } : {}),
           teamSharing: 1 as const,createdByUserId: view.createdByUserId,viewerRole: view.role,
           ...(ownership ? { teamOwnership: 1 as const,creatorRevision: view.creatorRevision,noCreatorReason: view.noCreatorReason,
-            canReassign: this.ownership.enabled && view.executionMode === "active" && view.role !== "member" } : {}),
+            canReassign: this.ownership.enabled && view.executionMode === "active" && view.role !== "member" && !view.workspace.privateOwnerUserId } : {}),
           ...(row.execution_mode === "active" ? { teamWriting: 1 as const, canExecute: row.can_execute } : {}),
           readOnly: row.execution_mode === "active" ? !row.can_execute : view.role !== "creator",canManage: view.role !== "member",
           following: row.following,pinned: row.pinned,followerIds: row.follower_ids,followerCount: Number(row.follower_count) };
@@ -106,7 +106,8 @@ export class CloudTeamSharing {
   async byNumber(organization: string, number: number, user: AuthedUser, ownership = false) {
     const row = (await withSystemTx(this.pool,tx => tx.query<{ id: string }>(`SELECT w.id FROM cloud_v2_workspaces w
       JOIN organizations o ON o.id=w.org_id JOIN organization_members m ON ${TEAM_MEMBER}
-      WHERE o.slug=$1 AND w.number=$3 AND w.state<>'deleted' AND ${CLOUD_V2_LIVE_ACCESS}`, [organization,user.id,number]))).rows[0];
+      WHERE o.slug=$1 AND w.number=$3 AND w.state<>'deleted' AND ${CLOUD_V2_LIVE_ACCESS}
+        AND (w.private_owner_user_id IS NULL OR w.private_owner_user_id=$2)`, [organization,user.id,number]))).rows[0];
     if (!row) throw teamNotFound();
     return this.get(row.id,user,ownership);
   }
@@ -124,6 +125,7 @@ export class CloudTeamSharing {
         FROM cloud_v2_workspaces w JOIN organization_members m ON ${TEAM_MEMBER}
         WHERE w.org_id=$1 AND w.state<>'deleted' AND ${CLOUD_V2_LIVE_ACCESS}
           AND (NOT w.source_pending OR w.creator_user_id=$2)
+          AND (w.private_owner_user_id IS NULL OR w.private_owner_user_id=$2)
           AND ($11::boolean OR w.creator_user_id IS NOT NULL)
           AND (NOT $12::boolean OR w.creator_user_id IS NULL)
           AND ($3::uuid IS NULL OR w.creator_user_id=$3)

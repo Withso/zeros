@@ -20,6 +20,8 @@ export const CloudWorkspaceDocumentSchema = z.object({
   createdBy: z.string().uuid(),
   // A team-owned workspace can have no Creator.
   ownerUserId: z.string().uuid().nullable().optional(),
+  /** A private repository's workspace: its member's alone; never shared or reassigned. */
+  privateOwnerUserId: z.string().uuid().optional(),
   placement: z.literal("cloud"),
   githubUnavailableReason: CloudGithubUnavailableReasonSchema.optional(),
   status: z.string().min(1).max(64),

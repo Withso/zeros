@@ -11,5 +11,13 @@ project, so an app-only typecheck never saw the dangling import.
 protocol export the engine imports), run the full `pnpm typecheck`, not a
 single project, before the adjacent suites.
 
-**Encoded in.** The root `typecheck` script, which runs both projects.
+**Control-plane database suites run alone.** Two `pnpm test:control-plane`
+runs on one Postgres cluster, on separate databases, broke each other's
+migration-ladder tests (both reset `public` and create the cluster-wide
+`zeros_app` role), and a run started before later edits mixed revisions.
+Run one suite per cluster at a time on a checkout nobody edits; for a base
+comparison, run a `git worktree` at the base after the head run.
+
+**Encoded in.** The root `typecheck` script, which runs both projects, and the
+serial-file comment in `apps/control-plane/vitest.config.ts`.
 Target: `agents/zstack/skills/zstack-verify/SKILL.md`.

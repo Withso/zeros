@@ -15,6 +15,7 @@ import {
 } from "../platform/bridge/cloud-workspace-key";
 import type { Workspace } from "../platform/git";
 import { copyToClipboardWithFallback } from "../shared/lib/clipboard";
+import { cloudWorkspaceDocument } from "./cloud-workspace-catalog";
 import { toast } from "../shared/ui/primitives/elements";
 
 function cloudTarget(workspace: Pick<Workspace, "path"> | null): CloudWorkspaceTarget | null {
@@ -29,7 +30,8 @@ function cloudTarget(workspace: Pick<Workspace, "path"> | null): CloudWorkspaceT
 export function useCanCopyCloudWorkspaceLink(workspace: Workspace | null): boolean {
   const target = cloudTarget(workspace);
   const access = useCloudWorkspaceAccountAccess(target?.organizationId);
-  return target !== null && access;
+  // Nobody else can open a private repository's workspace, so it has no link to share.
+  return target !== null && access && !cloudWorkspaceDocument(target)?.privateOwnerUserId;
 }
 
 type AccountSnapshot = ReturnType<typeof getTeamStoreState>["me"];

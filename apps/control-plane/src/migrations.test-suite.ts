@@ -345,6 +345,53 @@ partitioned(d)("migration ladder", { timeout: 30_000 }, () => {
     return pending;
   };
 
+  it("reads every existing Cloud Computer row unchanged once projects exist, and guards the new receipts", async () => {
+    await reset();
+    const boundary = LADDER.indexOf("0257_cloud_projects.sql");
+    expect(boundary).toBeGreaterThan(0);
+    await applyThrough(boundary);
+    const user = randomUUID(), org = randomUUID(), build = randomUUID(), workspace = randomUUID();
+    const recipe = { repositories: [{ repository: "former/project", setup: "echo fixture", commit: "a".repeat(40), branch: "main" }] };
+    await pool.query("INSERT INTO users(id,email) VALUES($1,'migration-ready-copies@example.test')", [user]);
+    await pool.query("INSERT INTO organizations(id,slug,name,created_by,is_personal,cloud_workspaces_allowed) VALUES($1,$2,'Migration ready copies',$3,false,true)", [org, `copies-${org}`, user]);
+    await pool.query(`INSERT INTO cloud_v2_computer_builds(id,org_id,version,recipe,state,snapshot_id,created_by,source_policy_version)
+      VALUES($1,$2,1,$3,'succeeded','retained-snapshot',$4,3)`, [build, org, JSON.stringify(recipe), user]);
+    await pool.query("INSERT INTO cloud_v2_computers(org_id,active_build_id,snapshot_name,recipe_revision) VALUES($1,$2,'retained-snapshot',4)", [org, build]);
+    await pool.query(`INSERT INTO cloud_v2_workspaces(id,org_id,creator_user_id,name,repository,branch,base_branch,state)
+      VALUES($1,$2,$3,'Existing','former/project','zeros/existing','main','running')`, [workspace, org, user]);
+    const previousBuild = (await pool.query("SELECT * FROM cloud_v2_computer_builds WHERE id=$1", [build])).rows[0];
+    const previousComputer = (await pool.query("SELECT * FROM cloud_v2_computers WHERE org_id=$1", [org])).rows[0];
+    const previousOrganization = (await pool.query("SELECT * FROM organizations WHERE id=$1", [org])).rows[0];
+    const previousWorkspace = (await pool.query("SELECT * FROM cloud_v2_workspaces WHERE id=$1", [workspace])).rows[0];
+    await applyAndRecord(LADDER[boundary]!);
+    expect((await pool.query("SELECT * FROM cloud_v2_computer_builds WHERE id=$1", [build])).rows[0])
+      .toEqual({ ...previousBuild, install_script: null, base_only: false, base_shared: false });
+    expect((await pool.query("SELECT * FROM cloud_v2_computers WHERE org_id=$1", [org])).rows[0]).toEqual({ ...previousComputer, install_script: null });
+    expect((await pool.query("SELECT * FROM organizations WHERE id=$1", [org])).rows[0]).toEqual({ ...previousOrganization, cloud_personal_projects_allowed: true });
+    // Existing workspaces belong to no project and stay visible to the team.
+    expect((await pool.query("SELECT * FROM cloud_v2_workspaces WHERE id=$1", [workspace])).rows[0])
+      .toEqual({ ...previousWorkspace, private_owner_user_id: null, project_id: null });
+    const project = randomUUID();
+    await pool.query("INSERT INTO cloud_projects(id,org_id,name,level) VALUES($1,$2,'Project','organization')", [project, org]);
+    // A personal project has its member; an organization project has none. Names are unique per level and member.
+    await expect(pool.query("INSERT INTO cloud_projects(id,org_id,name,level) VALUES($1,$2,'Mine','personal')", [randomUUID(), org])).rejects.toThrow();
+    await expect(pool.query("INSERT INTO cloud_projects(id,org_id,name,level) VALUES($1,$2,'project','organization')", [randomUUID(), org])).rejects.toThrow();
+    await pool.query("INSERT INTO cloud_projects(id,org_id,name,level,owner_user_id) VALUES($1,$2,'project','personal',$3)", [randomUUID(), org, user]);
+    await pool.query("INSERT INTO cloud_project_repositories(project_id,position,repository,repository_id) VALUES($1,0,'former/project','42')", [project]);
+    await expect(pool.query("INSERT INTO cloud_project_repositories(project_id,position,repository,repository_id) VALUES($1,1,'Former/Other','43')", [project])).rejects.toThrow();
+    const copy = (generation: number, state: string, projectId = project) => pool.query(
+      `INSERT INTO cloud_v2_ready_copies(id,org_id,project_id,generation,state,idempotency_key) VALUES($1,$2,$3,$4,$5,$6)`,
+      [randomUUID(), org, projectId, generation, state, `ready-copy:${randomUUID()}`]);
+    await copy(1, "ready");
+    // One ready and one building generation per project.
+    await expect(copy(2, "ready")).rejects.toThrow();
+    await copy(2, "building");
+    await expect(copy(3, "building")).rejects.toThrow();
+    for (const table of ["cloud_github_installations", "cloud_projects", "cloud_project_repositories", "cloud_v2_ready_copies", "cloud_v2_ready_copy_forks", "cloud_v2_ready_copy_secrets"])
+      expect((await pool.query("SELECT relrowsecurity AS rls, relforcerowsecurity AS forced FROM pg_class WHERE relname=$1", [table])).rows[0])
+        .toEqual({ rls: true, forced: true });
+  });
+
   it("retains existing Computer logs and recipes without inventing source IDs during the provenance upgrade", async () => {
     const boundary = LADDER.indexOf("0212_cloud_computer_source_provenance.sql");
     await applyThrough(boundary);

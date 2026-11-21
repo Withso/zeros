@@ -99,6 +99,30 @@ export function createCloudWorkspaceOperations(deps: CloudV2RouteDeps) {
       const workspace = await deps.store.createWorkspace(create);
       return { status: 201 as const, response: await options.document(workspace) };
     };
+    // Ready copies: the Cloud Computer is tools only and a create is answered
+    // from the one-repository project for this repository, the organization's
+    // first, then the caller's own. Access is checked as the caller's own GitHub.
+    if (deps.projects) {
+      const project = await deps.projects.forRepository(input.organizationId, userId, input.repository);
+      if (!project) throw new HttpError(409, "repository_not_in_project", "Add this repository to a project first.");
+      if (!computer.baseOnly) throw await computerUnavailable(input.organizationId, userId);
+      if (!deps.resolveMemberRepository) throw new HttpError(503, "github_unavailable", "Repository access could not be verified.");
+      const entry = project.repositories[0]!;
+      const resolved = await deps.resolveMemberRepository(input.organizationId, userId, entry.repository);
+      if (resolved.repositoryId !== entry.repositoryId) throw new HttpError(409, "cloud_source_review_required", "The repository's identity changed.");
+      const target = { repository: resolved.repository, repositoryId: resolved.repositoryId };
+      if (runtimeCanary && runtimeCanary.repositoryId !== target.repositoryId) throw refuseRuntimeCanary();
+      const baseBranch = input.baseBranch ?? entry.defaultBranch ?? resolved.defaultBranch;
+      if (await deps.remoteHead(input.organizationId, userId, target, baseBranch) === null)
+        throw new HttpError(404, "repository_branch_not_found", `Branch ${baseBranch} does not exist in ${target.repository}.`);
+      const executionRuntime = deps.actingUserDefault ? await deps.activeCreateRuntime?.(runtimeCanary) : undefined;
+      if (deps.actingUserDefault && !executionRuntime) throw executionWorkerRequired();
+      const id = randomUUID(), name = input.name ?? input.repository.split("/")[1]!;
+      return record({ id, organizationId: input.organizationId, creatorUserId: userId, name, repository: entry.repository,
+        branch: input.branch ?? `${prefix}${slug(name)}-${id.slice(0, 8)}`, baseBranch, computerBuildId: computer.buildId,
+        sourceRepositoryId: target.repositoryId, projectId: project.id,
+        ...(runtimeCanary ? { runtimeCanary } : {}), ...(executionRuntime ? { executionRuntime } : {}) });
+    }
     const named = (entry: CloudV2InstalledRepository) => entry.repository.toLowerCase() === input.repository.toLowerCase();
     // Returns before its GitHub checks, which the lifecycle runs before any VM
     // exists. A canary binds a repository ID, and a renamed repository's name

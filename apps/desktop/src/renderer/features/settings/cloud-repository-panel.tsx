@@ -9,6 +9,8 @@ import { useActiveOrganization, useTeams } from "../team/team-store";
 import { editableRepositories } from "./cloud-computer-model";
 import { computers, computerKey, patchRepository, TYPING_SAVE_MS, useRecipeDraft } from "./cloud-computer-store";
 import { SettingsGroup, SettingsSection } from "./settings-ui";
+import { BuildSecretsSection } from "./build-secrets-section";
+import { useCloudProjectFor } from "./cloud-github-levels";
 
 export type CloudRepositoryTab = "git" | "environment";
 export const CLOUD_REPOSITORY_TABS: ReadonlyArray<{ id: CloudRepositoryTab; label: string }> = [
@@ -50,6 +52,8 @@ function RepositoryScope({ userId, organizationId, canManage, repository, tab, o
   const row = configured.find(candidate => candidate.repository === repository);
   const locked = builds[0]?.state === "queued" || builds[0]?.state === "building";
   const liveBranch = activeBuild?.recipe.repositories.find(candidate => candidate.repository.toLowerCase() === repository.toLowerCase())?.branch;
+  // Projects: build secrets belong to the repository's one-repository project.
+  const project = useCloudProjectFor(userId, organizationId, data?.readyCopies ? repository : null, active);
   const update = (patch: { ref?: string; setup?: string; setupScript?: string }) =>
     draft.edit(patchRepository(configured, repository, patch), TYPING_SAVE_MS);
 
@@ -63,14 +67,16 @@ function RepositoryScope({ userId, organizationId, canManage, repository, tab, o
         </div>
       </SettingsGroup>
     );
+  // With ready copies a save rebuilds just this repository's copy.
+  const applyHint = data?.readyCopies ? "Saving rebuilds this repository's ready copy." : "Changes apply after the next build.";
   const branch = (
-    <SettingsGroup title="Branch" description="Changes apply after the next build.">
+    <SettingsGroup title="Branch" description={applyHint}>
       <Input aria-label={`${repository} branch`} placeholder={`Branch or tag (default: ${liveBranch ?? "the repository's default"})`}
         value={row?.ref ?? ""} onChange={event => update({ ref: event.target.value })} disabled={locked || !row} />
     </SettingsGroup>
   );
   const setup = (
-    <SettingsGroup title="Setup" description="Changes apply after the next build.">
+    <SettingsGroup title="Setup" description={applyHint}>
       <CodeTextarea aria-label={`${repository} setup command`} value={row?.setup ?? ""} readOnly={locked || !row}
         offscreen={!active} onChange={value => update({ setup: value })}
         description={row?.setupScript ? "Build validation command (e.g. pnpm install). Workspaces use the selected script below."
@@ -92,6 +98,9 @@ function RepositoryScope({ userId, organizationId, canManage, repository, tab, o
       <div className="flex flex-col gap-4" {...(!active ? { inert: "" } : {})} aria-hidden={!active || undefined}>
         {notices}
         {part === "git" ? branch : setup}
+        {part === "setup" && data?.readyCopies && row && project?.canEdit && (
+          <BuildSecretsSection ownerKey={key} organizationId={organizationId} projectId={project.id} active={active} disabled={locked} />
+        )}
       </div>
     );
   return (

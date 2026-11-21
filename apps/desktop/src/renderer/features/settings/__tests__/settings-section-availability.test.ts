@@ -109,6 +109,15 @@ describe("settings sections with unified-workspaces", () => {
     );
   });
 
+  it("shows the organization's GitHub page only with two GitHub levels and more than one member", () => {
+    const context = { local: false, cloudEnabled: true, terminalAgentsEnabled: true, computerUseSectionActive: true, simulatorsActive: true,
+      internalUser: false, localStorageSupported: true, unified: true };
+    expect(isSettingsSectionAvailable("org-github", { ...context, organizationGithub: true })).toBe(true);
+    expect(isSettingsSectionAvailable("org-github", { ...context, organizationGithub: false })).toBe(false);
+    expect(isSettingsSectionAvailable("org-github", { ...context, organizationGithub: true, local: true })).toBe(false);
+    expect(isSettingsSectionAvailable("org-github", { ...context, organizationGithub: true, unified: false })).toBe(false);
+  });
+
   it("omits organization pages under the Personal owner and when the organization has none", () => {
     expect(isSettingsSectionAvailable("org-general", { ...unified, organizationGeneral: true })).toBe(false);
     expect(isSettingsSectionAvailable("cloud-computer", unified)).toBe(false);

@@ -39,6 +39,9 @@ export interface CloudV2Compute {
   /** Saves the sandbox's disk under a name and returns once it can deploy. */
   saveSnapshot(sandboxId: string, name: string): Promise<void>;
   deleteSnapshot(name: string): Promise<void>;
+  /** Whether a named snapshot exists and can start a machine. Checked before
+   * an organization is pointed at a snapshot it did not save itself. */
+  snapshotExists?(name: string): Promise<boolean>;
   hostPort(sandboxId: string, input: { port: number; localhost: true; title: string; key?: string; signal?: AbortSignal }): Promise<{ url: string; token: string }>;
   /** A sandbox with exactly this name created at or after `since`, newest first. */
   findSandbox(name: string, since: Date): Promise<string | null>;
@@ -224,6 +227,19 @@ export class BoatCloudV2Compute implements CloudV2Compute {
       await this.sleep(5000);
     }
     throw Object.assign(new Error("snapshot save timed out"), { code: "computer_snapshot_timeout" });
+  }
+
+  /** Assumed Boat call: GET /named-snapshots/<name>, "ready" when it can
+   * start a machine, 404 when it does not exist (unverified for a snapshot
+   * another Boat organization saved). */
+  async snapshotExists(name: string): Promise<boolean> {
+    if (!SNAPSHOT_NAME.test(name)) throw new Error("Invalid Boat snapshot name");
+    try {
+      return NamedSnapshot.parse(await this.client.request(`/named-snapshots/${name}`, { method: "GET" })).snapshot.status === "ready";
+    } catch (error) {
+      if (notFound(error)) return false;
+      throw error;
+    }
   }
 
   async deleteSnapshot(name: string): Promise<void> {

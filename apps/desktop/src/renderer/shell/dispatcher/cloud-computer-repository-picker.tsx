@@ -5,6 +5,7 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuLabel,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "../../shared/ui/primitives/dropdown-menu";
@@ -22,6 +23,8 @@ export function CloudComputerRepositoryPicker({
   warm,
   rememberedId,
   manage = false,
+  organizationName,
+  manageSection,
 }: {
   repositories: readonly CloudComputerRepository[];
   selected: CloudComputerRepository | null;
@@ -34,8 +37,30 @@ export function CloudComputerRepositoryPicker({
   rememberedId?: string | null;
   /** unified-workspaces: repositories are managed in Settings, never added from Create. */
   manage?: boolean;
+  /** Two GitHub levels: the shared list's heading, and where Manage repositories opens. */
+  organizationName?: string;
+  manageSection?: "cloud-computer" | "org-github" | "integrations";
 }) {
   const dispatch = useWorkspaceDispatch();
+  const leveled = repositories.some(repository => repository.level);
+  const groups = leveled
+    ? [{ label: organizationName ?? "Organization", rows: repositories.filter(repository => repository.level !== "private") },
+      { label: "Only you", rows: repositories.filter(repository => repository.level === "private") }].filter(group => group.rows.length)
+    : [{ label: null, rows: repositories }];
+  const item = (repository: CloudComputerRepository) => (
+    <DropdownMenuItem
+      key={repository.id}
+      data-selected={repository.id === selected?.id || undefined}
+      onPointerEnter={() => warm(repository)}
+      onFocus={() => warm(repository)}
+      onSelect={() => onSelect(repository.id)}
+    >
+      <GithubIcon className="text-fg2 size-3.5" aria-hidden="true" />
+      <span className="truncate">
+        {repository.owner}/{repository.name}
+      </span>
+    </DropdownMenuItem>
+  );
   return (
     <DropdownMenu
       open={active && !disabled && open}
@@ -69,24 +94,17 @@ export function CloudComputerRepositoryPicker({
         sideOffset={4}
         className="min-w-[220px]"
       >
-        {repositories.map((repository) => (
-          <DropdownMenuItem
-            key={repository.id}
-            data-selected={repository.id === selected?.id || undefined}
-            onPointerEnter={() => warm(repository)}
-            onFocus={() => warm(repository)}
-            onSelect={() => onSelect(repository.id)}
-          >
-            <GithubIcon className="text-fg2 size-3.5" aria-hidden="true" />
-            <span className="truncate">
-              {repository.owner}/{repository.name}
-            </span>
-          </DropdownMenuItem>
+        {groups.map((group, index) => (
+          <div key={group.label ?? "all"} role="group" aria-label={group.label ?? undefined}>
+            {index > 0 && <DropdownMenuSeparator />}
+            {group.label && <DropdownMenuLabel>{group.label}</DropdownMenuLabel>}
+            {group.rows.map(item)}
+          </div>
         ))}
         {repositories.length > 0 && <DropdownMenuSeparator />}
         <DropdownMenuItem
           onSelect={() => {
-            requestUserSettingsSection("cloud-computer");
+            requestUserSettingsSection(manageSection ?? "cloud-computer");
             dispatch({ type: "SET_ACTIVE_PAGE", page: "settings" });
           }}
         >

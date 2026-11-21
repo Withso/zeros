@@ -50,6 +50,7 @@ const FAILURE: Record<string, string> = {
   computer_base_missing: "The previous computer was missing, so the next build starts fresh.",
   computer_build_creator_missing: "The person who built it no longer has access.",
   computer_remove_failed: "A removed repository could not be deleted.",
+  computer_shared_base_missing: "Zeros's shared base is not available right now, so nothing changed. Build again later, or add an install script to build your own base.",
   worker_runtime_install_failed: "The workspace runtime could not be installed.",
 };
 export const buildFailure = (code: string | null) => (code && FAILURE[code]) ?? "The build failed.";

@@ -64,6 +64,17 @@ it("keeps checkpoint retries off until a deployment enables them, and refuses am
   expect(() => loadConfig({ ...base, CLOUD_V2_CHECKPOINT_RETRY_ENABLED: "1" })).toThrow("CLOUD_V2_CHECKPOINT_RETRY_ENABLED");
 });
 
+it("keeps ready copies off until a deployment enables them, and validates the shared base", () => {
+  const key = generateKeyPairSync("ed25519").privateKey.export({ format: "der", type: "pkcs8" }).toString("base64");
+  const base = { ...env, CLOUD_V2_WORKER_SIGNING_KEY: key };
+  expect(loadConfig(base).cloudV2).toMatchObject({ readyCopies: false });
+  expect(loadConfig(base).cloudV2).not.toHaveProperty("sharedBaseSnapshot");
+  expect(loadConfig({ ...base, CLOUD_V2_READY_COPIES_ENABLED: " TRUE ", CLOUD_V2_SHARED_BASE_SNAPSHOT: "zeros-base-1" }).cloudV2)
+    .toMatchObject({ readyCopies: true, sharedBaseSnapshot: "zeros-base-1" });
+  expect(() => loadConfig({ ...base, CLOUD_V2_READY_COPIES_ENABLED: "1" })).toThrow("CLOUD_V2_READY_COPIES_ENABLED");
+  expect(() => loadConfig({ ...base, CLOUD_V2_SHARED_BASE_SNAPSHOT: "Not A Name" })).toThrow("CLOUD_V2_SHARED_BASE_SNAPSHOT");
+});
+
 it("uses only a dedicated public canary key on Alpha and never accepts the worker signing key for that authority", () => {
   const worker = generateKeyPairSync("ed25519"), canary = generateKeyPairSync("ed25519"), previous = generateKeyPairSync("ed25519");
   const key = worker.privateKey.export({ format: "der", type: "pkcs8" }).toString("base64");
