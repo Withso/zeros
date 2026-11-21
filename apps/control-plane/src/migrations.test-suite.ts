@@ -392,6 +392,42 @@ partitioned(d)("migration ladder", { timeout: 30_000 }, () => {
         .toEqual({ rls: true, forced: true });
   });
 
+  it("backfills each existing workspace as its first repository and keeps that row current for writers that know only the workspace", async () => {
+    await reset();
+    const boundary = LADDER.indexOf("0258_cloud_workspace_repositories.sql");
+    expect(boundary).toBeGreaterThan(0);
+    await applyThrough(boundary);
+    const user = randomUUID(), org = randomUUID(), bound = randomUUID(), unbound = randomUUID();
+    await pool.query("INSERT INTO users(id,email) VALUES($1,'migration-workspace-repositories@example.test')", [user]);
+    await pool.query("INSERT INTO organizations(id,slug,name,created_by,is_personal,cloud_workspaces_allowed) VALUES($1,$2,'Repositories',$3,false,true)", [org, `repos-${org}`, user]);
+    for (const [id, repository] of [[bound, "Withso/Zeros"], [unbound, "withso/web"]] as const)
+      await pool.query(`INSERT INTO cloud_v2_workspaces(id,org_id,creator_user_id,name,repository,branch,base_branch,state,base_commit)
+        VALUES($1,$2,$3,'w',$4,'zeros/w','main','running',$5)`, [id, org, user, repository, id === bound ? "a".repeat(40) : null]);
+    await pool.query("INSERT INTO cloud_v2_github_sources(workspace_id,source_repository,repository_id) VALUES($1,'withso/zeros',42)", [bound]);
+    const before = (await pool.query("SELECT * FROM cloud_v2_workspaces WHERE org_id=$1 ORDER BY id", [org])).rows;
+    await applyAndRecord(LADDER[boundary]!);
+    expect((await pool.query("SELECT * FROM cloud_v2_workspaces WHERE org_id=$1 ORDER BY id", [org])).rows).toEqual(before.map(row => ({ ...row, folder: null, checkout_path: null })));
+    const rows = async () => (await pool.query(`SELECT workspace_id, position, repository, repository_id::text, folder, branch, base_branch, base_commit
+      FROM cloud_v2_workspace_repositories ORDER BY workspace_id, position`)).rows;
+    expect(await rows()).toEqual([
+      { workspace_id: bound, position: 0, repository: "Withso/Zeros", repository_id: "42", folder: null, branch: "zeros/w", base_branch: "main", base_commit: "a".repeat(40) },
+      { workspace_id: unbound, position: 0, repository: "withso/web", repository_id: null, folder: null, branch: "zeros/w", base_branch: "main", base_commit: null },
+    ].sort((a, b) => a.workspace_id.localeCompare(b.workspace_id)));
+    // The previous release only writes the workspace row; its first repository follows.
+    const later = randomUUID();
+    await pool.query(`INSERT INTO cloud_v2_workspaces(id,org_id,creator_user_id,name,repository,branch,base_branch,state)
+      VALUES($1,$2,$3,'w','withso/api','zeros/a','main','creating')`, [later, org, user]);
+    await pool.query("UPDATE cloud_v2_workspaces SET repository='withso/api-renamed', base_branch='next', base_commit=$2 WHERE id=$1", [later, "b".repeat(40)]);
+    expect((await pool.query("SELECT repository, branch, base_branch, base_commit FROM cloud_v2_workspace_repositories WHERE workspace_id=$1", [later])).rows)
+      .toEqual([{ repository: "withso/api-renamed", branch: "zeros/a", base_branch: "next", base_commit: "b".repeat(40) }]);
+    // One repository once per workspace, by name and by folder.
+    await expect(pool.query(`INSERT INTO cloud_v2_workspace_repositories(workspace_id,position,repository,branch,base_branch) VALUES($1,1,'WITHSO/API-RENAMED','b','main')`, [later]))
+      .rejects.toThrow();
+    for (const table of ["cloud_v2_workspace_repositories", "cloud_v2_github_workspace_repositories", "cloud_workspace_environment_repository_pins"])
+      expect((await pool.query("SELECT relrowsecurity AS rls, relforcerowsecurity AS forced FROM pg_class WHERE relname=$1", [table])).rows[0])
+        .toEqual({ rls: true, forced: true });
+  });
+
   it("retains existing Computer logs and recipes without inventing source IDs during the provenance upgrade", async () => {
     const boundary = LADDER.indexOf("0212_cloud_computer_source_provenance.sql");
     await applyThrough(boundary);
