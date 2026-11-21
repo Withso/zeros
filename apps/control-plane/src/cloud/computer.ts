@@ -62,7 +62,9 @@ export const CloudV2RecipeSchema = z.object({
     commit: z.string().regex(/^[0-9a-f]{40}$/).optional(),
     /** Verified remote branch observed after cloning, or origin's default for a tag. */
     branch: z.string().min(1).max(255).optional(),
-  }).strict()).min(1).max(CLOUD_V2_RECIPE_STORED_MAX).refine(unique, "Each repository can be installed once"),
+  // Empty only for a base-only build (ready copies): the Cloud Computer is tools
+  // only and projects hold the repositories. Other builds refuse it (enqueue).
+  }).strict()).max(CLOUD_V2_RECIPE_STORED_MAX).refine(unique, "Each repository can be installed once"),
   rebuiltFrom: z.number().int().positive().optional(),
 }).strict();
 export type CloudV2Recipe = z.infer<typeof CloudV2RecipeSchema>;
@@ -357,7 +359,9 @@ export class CloudV2Computers {
     options: { reason?: CloudV2BuildReason; configure?: boolean; runtimeSha256?: string } = {}): Promise<CloudV2Build> {
     const parsed = CloudV2RecipeSchema.parse(recipe);
     this.limitRepositories(parsed.repositories.length);
+    if (!this.options.readyCopies && !parsed.repositories.length) throw new HttpError(400, "invalid_request", "Invalid Cloud Computer build");
     await this.requireAdmin(organizationId, userId);
+    if (this.options.readyCopies) return withSystemTx(this.pool, tx => this.insertBuild(tx, organizationId, userId, { repositories: [] }, [], options));
     const previous = await withSystemTx(this.pool, tx => this.configuredSources(tx, organizationId));
     const sources = await this.admitSources(organizationId, userId, parsed.repositories, previous);
     return withSystemTx(this.pool, tx => this.insertBuild(tx, organizationId, userId, parsed, sources, options, previous.key));
@@ -383,6 +387,8 @@ export class CloudV2Computers {
     // With ready copies a build is the base only: its image holds no source,
     // the source policy that captures before any repository (2).
     const baseOnly = this.options.readyCopies === true;
+    // It never holds a repository: a refresh of an older live build drops its list.
+    if (baseOnly) { recipe = { ...recipe, repositories: [] }; sources = []; }
     const installScript = baseOnly ? (await tx.query<{ install_script: string | null }>(
       "SELECT install_script FROM cloud_v2_computers WHERE org_id=$1", [organizationId])).rows[0]?.install_script ?? null : null;
     const { rows } = await tx.query<Row>(
@@ -394,7 +400,7 @@ export class CloudV2Computers {
         JSON.stringify(readComputerSourceTargets(recipe.repositories, sources)), options.automaticBaseBuildId ?? null,
         options.automaticBaseBuildId ? revision : null, options.retryOf ?? null, options.retryAttempt ?? 1, baseOnly ? 2 : 3, baseOnly, installScript],
     );
-    if (options.configure) await this.writeConfigured(tx, organizationId, userId, editableRepositories(recipe), revision + 1, sources);
+    if (options.configure && !baseOnly) await this.writeConfigured(tx, organizationId, userId, editableRepositories(recipe), revision + 1, sources);
     return build(rows[0]!);
   }
 
@@ -403,6 +409,9 @@ export class CloudV2Computers {
     await this.requireAdmin(organizationId, userId);
     const previous = await withSystemTx(this.pool, tx => this.configuredSources(tx, organizationId));
     if (previous.revision !== revision) throw recipeChanged();
+    // Ready copies: the Cloud Computer is tools only; projects hold the repositories.
+    if (this.options.readyCopies)
+      return withSystemTx(this.pool, tx => this.insertBuild(tx, organizationId, userId, { repositories: [] }, [], { revision }, previous.key));
     if (!previous.repositories.length) throw new HttpError(409, "computer_recipe_empty", "Add a repository to the Cloud Computer first");
     const sources = await this.admitSources(organizationId, userId, previous.repositories, previous);
     return withSystemTx(this.pool, tx => this.insertBuild(tx, organizationId, userId,
@@ -416,6 +425,8 @@ export class CloudV2Computers {
       `SELECT ${COLUMNS} FROM cloud_v2_computer_builds WHERE id = $1 AND org_id = $2 AND state = 'succeeded'`, [buildId, organizationId]));
     const source = rows[0];
     if (!source) throw new HttpError(404, "not_found", "Cloud Computer build not found");
+    if (this.options.readyCopies) return withSystemTx(this.pool, tx => this.insertBuild(tx, organizationId, userId,
+      { repositories: [], rebuiltFrom: source.version }, [], { reason: "reactivate" }));
     const targets = await this.buildSourceTargets(organizationId, buildId);
     await this.resolveSourceTargets(organizationId, userId, targets);
     return withSystemTx(this.pool, tx => this.insertBuild(tx, organizationId, userId,
@@ -720,41 +731,39 @@ export class CloudV2Computers {
     return { baseOnly: row?.base_only ?? false, installScript: row?.install_script ?? null };
   }
 
-  /** A base-only build keeps each repository's verified branch from the live
-   * build, so released desktops and creates still read a default branch; a
-   * new repository's comes from its first ready copy. No commit is pinned. */
-  async carriedRecipe(organizationId: string, recipe: CloudV2Recipe): Promise<CloudV2Recipe["repositories"]> {
-    const live = (await withSystemTx(this.pool, tx => tx.query<{ recipe: CloudV2Recipe }>(
-      `SELECT b.recipe FROM cloud_v2_computers c JOIN cloud_v2_computer_builds b ON b.id=c.active_build_id AND b.org_id=c.org_id
-       WHERE c.org_id=$1`, [organizationId]))).rows[0]?.recipe.repositories ?? [];
-    return recipe.repositories.map(({ commit: _commit, branch: _branch, ...entry }) => {
-      const previous = live.find(old => old.repository.toLowerCase() === entry.repository.toLowerCase() && (old.ref ?? null) === (entry.ref ?? null));
-      return { ...entry, ...(previous?.branch ? { branch: previous.branch } : {}) };
-    });
-  }
-
   /** Organizations without an install script share Zeros's base: no machine
    * is made, and no cleanup ever deletes that snapshot. */
-  async activateShared(buildId: string, snapshotName: string, runtimeSha256: string, repositories: CloudV2Recipe["repositories"]): Promise<void> {
+  async activateShared(buildId: string, snapshotName: string, runtimeSha256: string): Promise<void> {
     // The shared name is every such organization's; each stores its own reference.
     const reference = cloudV2SharedSnapshotReference(snapshotName, buildId);
     await withSystemTx(this.pool, async tx => {
-      const actor = (await tx.query<{ org_id: string; created_by: string | null; recipe: CloudV2Recipe }>(
-        "SELECT org_id,created_by,recipe FROM cloud_v2_computer_builds WHERE id=$1", [buildId])).rows[0];
+      const actor = (await tx.query<{ org_id: string; created_by: string | null }>(
+        "SELECT org_id,created_by FROM cloud_v2_computer_builds WHERE id=$1", [buildId])).rows[0];
       if (!actor?.created_by) throw new HttpError(403, "forbidden", "Build creator is unavailable");
       await this.lockOrganization(tx, actor.org_id, actor.created_by);
       await this.cancelSupersededRetries(tx, buildId);
       const { rows } = await tx.query<{ org_id: string }>(
-        `UPDATE cloud_v2_computer_builds SET state='succeeded', snapshot_id=$2, base_shared=true, runtime_sha256=$3, recipe=$4,
+        `UPDATE cloud_v2_computer_builds SET state='succeeded', snapshot_id=$2, base_shared=true, runtime_sha256=$3,
            finished_at=clock_timestamp()
          WHERE id=$1 AND state='building' AND base_only AND cleanup_requested_at IS NULL AND source_targets IS NOT NULL
            AND EXISTS (SELECT 1 FROM organizations o WHERE o.id=org_id AND o.deleted_at IS NULL)
-         RETURNING org_id`, [buildId, reference, runtimeSha256, JSON.stringify({ ...actor.recipe, repositories })]);
+         RETURNING org_id`, [buildId, reference, runtimeSha256]);
       if (!rows[0]) throw new Error("build is not running");
       await tx.query(
         `INSERT INTO cloud_v2_computers (org_id, active_build_id, snapshot_name) VALUES ($1, $2, $3)
          ON CONFLICT (org_id) DO UPDATE SET active_build_id = EXCLUDED.active_build_id, snapshot_name = EXCLUDED.snapshot_name,
            updated_at = clock_timestamp()`, [rows[0].org_id, buildId, reference]);
+    });
+  }
+
+  /** Zeros's shared base is gone at Boat: an organization whose live base is
+   * that snapshot has no live base, so creates say to build instead of failing at Boat. */
+  async sharedBaseMissing(organizationId: string, snapshotName: string): Promise<void> {
+    await withSystemTx(this.pool, async tx => {
+      await this.lockOrganization(tx, organizationId);
+      await tx.query(`UPDATE cloud_v2_computers c SET active_build_id=NULL, snapshot_name=NULL, updated_at=clock_timestamp()
+        FROM cloud_v2_computer_builds b WHERE c.org_id=$1 AND b.id=c.active_build_id AND b.org_id=c.org_id AND b.base_shared
+          AND position('@' in c.snapshot_name) > 0 AND split_part(c.snapshot_name, '@', 1)=$2`, [organizationId, snapshotName]);
     });
   }
 
@@ -1162,7 +1171,14 @@ export class CloudV2ComputerBuilder {
       // Nothing of the organization's own to install: no machine at all.
       assertHeld();
       if (!await computers.running(job.id)) return;
-      await computers.activateShared(job.id, shared, job.runtimeSha256 ?? this.deps.runtime.sha256, await computers.carriedRecipe(job.organizationId, job.recipe));
+      // Never made live unless Boat has it, and an organization already on a
+      // base that is gone loses it, so no create starts from a missing snapshot.
+      if (!(compute.snapshotExists ? await compute.snapshotExists(shared) : false)) {
+        await computers.sharedBaseMissing(job.organizationId, shared);
+        await log("[zeros] Zeros's shared base is not available right now, so nothing changed. Build again later, or add an install script to build this organization's own base.\n");
+        throw Object.assign(new Error("shared base missing"), { code: "computer_shared_base_missing" });
+      }
+      await computers.activateShared(job.id, shared, job.runtimeSha256 ?? this.deps.runtime.sha256);
       await log(`[zeros] Cloud Computer v${job.version} uses the shared Zeros base\n`);
       await this.activated(job);
       return;
@@ -1226,10 +1242,9 @@ export class CloudV2ComputerBuilder {
     // disk. v3 captures after them; only a workspace whose source scope covers
     // the whole recipe may start from it (CloudV2Store.workspaceImage).
     if (policy === 2 && !await capture()) return;
-    // A base for ready copies holds no repository; each gets its own copy.
-    const pinned = base.baseOnly ? await computers.carriedRecipe(job.organizationId, job.recipe)
-      : await this.installRepositories({ ...job, baseSnapshot: null }, sandboxId, assertHeld, policy === 3);
-    if (!pinned.length) return;
+    // A base for ready copies holds no repository; each project gets its own copy.
+    const pinned = base.baseOnly ? [] : await this.installRepositories({ ...job, baseSnapshot: null }, sandboxId, assertHeld, policy === 3);
+    if (!base.baseOnly && !pinned.length) return;
     assertHeld();
     if (!await computers.running(job.id)) return;
     if (policy === 3) {

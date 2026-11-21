@@ -166,6 +166,8 @@ export class FakeBoat implements CloudV2Compute {
 
   async deleteSnapshot(name: string) { this.record("deleteSnapshot", name); this.snapshots.delete(name); }
 
+  async snapshotExists(name: string) { this.record("snapshotExists", name); return this.snapshots.has(name); }
+
   async hostPort(sandboxId: string, input: { port: number }) {
     this.record("hostPort", sandboxId, input);
     this.live(sandboxId);
