@@ -3,7 +3,8 @@ import { expect } from "@playwright/test";
 import { openLayersDrawer } from "./ui-smoke-design-helpers.mjs";
 
 // The frame info panel above Layers: one row with a selected frame's count of
-// changes made by hand and Tidy, the detail on the title's tooltip. It shows
+// changes made by hand and Tidy, the detail on the title's tooltip and the
+// button's description. It shows
 // only for a frame (not a layer in it) with such changes,
 // follows edits and undo, sends exactly one brief and writes nothing, and
 // nothing appears on the canvas or as a toast. Runs after the field marks
@@ -29,7 +30,8 @@ export async function runDesignFrameChangesSmoke({ page, check }) {
       ).length,
     );
   const prompts = () => page.evaluate(() => (window.__zerosHarnessAgentPrompts ?? []).slice());
-  const detail = () => info.locator("[data-design-frame-info-title]").getAttribute("aria-description");
+  // The detail is the title's hover tooltip and the row's button's description.
+  const detail = () => info.getByRole("button").getAttribute("aria-description");
   // After an undo and then a layer click, a click on a frame's row is
   // sometimes dropped (also without this panel, at the base commit); clicking
   // again selects it.

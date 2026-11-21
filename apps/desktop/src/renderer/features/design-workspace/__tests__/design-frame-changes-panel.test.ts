@@ -62,7 +62,14 @@ describe("the frame changes panel", () => {
     expect(info.querySelector("p")).toBeNull();
     expect(info.textContent).not.toContain("Corner radius");
     expect(buttons(info)).toEqual(["Tidy"]);
+    // The title carries the hover tooltip; keyboard and screen-reader users
+    // get the same detail from the row's one button, not a focusable span.
     expect(title.getAttribute("data-state")).toBe("closed");
+    expect(title.hasAttribute("tabindex")).toBe(false);
+    expect(title.hasAttribute("aria-description")).toBe(false);
+    const button = info.querySelector("button")!;
+    expect(button.getAttribute("aria-description")).toBe("Corner radius and Gap, on 2 layers. Not every layer was checked, so there may be more.");
+    expect(button.getAttribute("data-state")).toBe("closed");
   });
 
   it("shows a title and View chat while Tidy runs, and a title and Review when it is done", () => {
@@ -72,6 +79,7 @@ describe("the frame changes panel", () => {
     expect(info.querySelector("[data-design-frame-info-title]")?.textContent).toBe("Tidying 2 changes");
     expect(info.querySelector("p")).toBeNull();
     expect(buttons(info)).toEqual(["View chat"]);
+    expect(info.querySelector("button")!.getAttribute("aria-description")).toBe("The agent is moving them into tokens, classes or the component.");
 
     tidy({ phase: "done", chatId: "chat-1", before: CHANGES, outcome: "2 stay on their layer. Nothing is committed." });
     info = render();
@@ -80,5 +88,6 @@ describe("the frame changes panel", () => {
     expect(info.querySelector("p")).toBeNull();
     expect(info.textContent).not.toContain("Nothing is committed");
     expect(buttons(info)).toEqual(["Review"]);
+    expect(info.querySelector("button")!.getAttribute("aria-description")).toBe("2 stay on their layer. Nothing is committed.");
   });
 });

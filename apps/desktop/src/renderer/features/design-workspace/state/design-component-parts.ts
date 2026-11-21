@@ -279,7 +279,7 @@ export function designFrameMissingComponents(frame: { instances?: DesignFrameIns
   return result;
 }
 
-/** What a frame shows when options did not apply, as its Options section
+/** What a frame shows when options did not apply, as its Controls section
  * and its canvas mark say it. */
 export const DESIGN_OPTIONS_NOT_APPLIED_MESSAGES = Object.freeze({
   "last-good": "The frame shows its last good render.",
@@ -301,7 +301,7 @@ export function designFrameOptionsProblem(frame: { component?: DesignFrameCompon
   const known = optionsProblemByInstances.get(instances);
   if (known !== undefined) return known;
   const names = [...new Set(Object.values(instances.hosts).filter((host) => host.failed).map((host) => `zd-${host.component}`))];
-  // As the instance's Options section reads it: a failed host with nothing
+  // As the instance's Controls section reads it: a failed host with nothing
   // named shows the defaults.
   const problem = names.length
     ? `The controls of ${names.join(", ")} could not be applied. ${DESIGN_OPTIONS_NOT_APPLIED_MESSAGES[instances.notApplied ?? "defaults"]}`

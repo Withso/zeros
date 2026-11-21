@@ -3342,7 +3342,7 @@ export const DesignInspector = React.memo(function DesignInspector({
           : elementDetails
             ? designRuntimeLayerDisplayName(elementDetails)
             : null;
-  // A frame whose file declares options is a component: its Options section
+  // A frame whose file declares options is a component: its Controls section
   // mounts only while the frame itself is selected and the panel is shown.
   // One selected instance in another frame shows that instance's; a part of
   // one names the instance and shows nothing to edit.
@@ -3500,11 +3500,19 @@ export const DesignInspector = React.memo(function DesignInspector({
               ? <Diamond className="text-violet-primary size-3.5 shrink-0" aria-hidden="true" />
               : <ComponentGlyph className="text-violet-primary fill-current size-3.5 shrink-0" aria-hidden="true" />
             : <SelectionGlyph className="text-fg2 size-3.5 shrink-0" aria-hidden="true" />}
-          <span data-design-inspector-title="" className={cn(componentHeader || optionsTarget?.kind === "main" ? "text-violet-primary" : "text-fg1", "min-w-0 flex-1 truncate text-xs font-medium")}>
-            {componentHeader
-              ? headerInner ? `${componentHeader.identity} · ${selectionTitle ?? selectionName}` : componentHeader.identity
-              : optionsTarget?.kind === "main" ? componentIdentity : missingComponent ? `zd-${missingComponent}` : selectionTitle ?? selectionName}
-          </span>
+          {componentHeader && headerInner ? (
+            // The identity gives way first, so the layer's name always shows.
+            <span data-design-inspector-title="" className="text-violet-primary flex min-w-0 flex-1 gap-1 text-xs font-medium">
+              <span data-design-inspector-title-identity="" className="min-w-0 truncate">{componentHeader.identity}</span>
+              <span data-design-inspector-title-layer="" className="max-w-1/2 shrink-0 truncate">{`· ${selectionTitle ?? selectionName}`}</span>
+            </span>
+          ) : (
+            <span data-design-inspector-title="" className={cn(componentHeader || optionsTarget?.kind === "main" ? "text-violet-primary" : "text-fg1", "min-w-0 flex-1 truncate text-xs font-medium")}>
+              {componentHeader
+                ? componentHeader.identity
+                : optionsTarget?.kind === "main" ? componentIdentity : missingComponent ? `zd-${missingComponent}` : selectionTitle ?? selectionName}
+            </span>
+          )}
           {componentHeader ? (
             <Button type="button" variant="ghost" size="compact" data-design-edit-main="" disabled={!componentHeader.component.frame && !active} onClick={editMain}>
               {componentHeader.component.frame ? "Edit main" : "Move main to canvas"}

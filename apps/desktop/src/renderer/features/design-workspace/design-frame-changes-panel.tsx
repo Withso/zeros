@@ -26,6 +26,8 @@ import {
 } from "./state/design-frame-changes";
 import { useDesignRuntimeStore } from "./state/design-runtime-store";
 
+const TIDY_RUNNING_DETAIL = "The agent is moving them into tokens, classes or the component.";
+
 export function DesignFrameChangesPanel({
   workspaceId,
   folder,
@@ -89,12 +91,13 @@ export function DesignFrameChangesPanel({
       <DesignFrameInfo
         state="running"
         title={`Tidying ${count} ${count === 1 ? "change" : "changes"}`}
-        detail="The agent is moving them into tokens, classes or the component."
+        detail={TIDY_RUNNING_DETAIL}
         action={
           <Button
             type="button"
             variant="secondary"
             size="compact"
+            aria-description={TIDY_RUNNING_DETAIL}
             disabled={!tidy.chatId}
             onClick={() => {
               if (tidy.chatId) dispatch({ type: "SET_ACTIVE_CHAT", id: tidy.chatId });
@@ -121,6 +124,7 @@ export function DesignFrameChangesPanel({
             type="button"
             variant="secondary"
             size="compact"
+            aria-description={tidy.outcome}
             disabled={!path}
             onPointerEnter={warm}
             onFocus={warm}
@@ -146,6 +150,7 @@ export function DesignFrameChangesPanel({
           type="button"
           variant="secondary"
           size="compact"
+          aria-description={summary.detail}
           disabled={!onAskAgent || !active}
           onClick={() => {
             if (!onAskAgent) return;
@@ -185,10 +190,13 @@ function DesignFrameInfo({
     >
       {state === "waiting" ? <span aria-hidden="true" className="bg-blue-primary size-1.25 shrink-0 rounded-full" /> : null}
       <Tooltip label={detail}>
-        {/* Focusable so the detail reaches keyboard users too. */}
-        <span data-design-frame-info-title="" tabIndex={0} aria-description={detail} className="min-w-0 truncate">{title}</span>
+        <span data-design-frame-info-title="" className="min-w-0 truncate">{title}</span>
       </Tooltip>
-      <span className="ml-auto shrink-0">{action}</span>
+      {/* The row's one control carries the detail too, for keyboard and
+          screen-reader users, who never hover the title. */}
+      <span className="ml-auto shrink-0">
+        <Tooltip label={detail}>{action}</Tooltip>
+      </span>
     </section>
   );
 }

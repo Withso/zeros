@@ -267,13 +267,20 @@ describe("the Options section across new generations of the same target", () => 
     await show({ file: "home/page.html", nodeId: designComponentPartNodeId("chip-1", "cc-label"), sourceVersion: V1,
       instances: overridden, componentIdentity: { kind: "instance", nodeId: "chip-1" } });
     expect(header().getAttribute("data-design-component-of")).toBe("part");
-    expect(container.querySelector("[data-design-inspector-title]")?.textContent).toMatch(/^Chip\/Default · /);
+    // The identity truncates; the layer's name has its own span that does not.
+    const title = container.querySelector<HTMLElement>("[data-design-inspector-title]")!;
+    expect(title.querySelector("[data-design-inspector-title-identity]")?.textContent).toBe("Chip/Default");
+    const layerName = title.querySelector<HTMLElement>("[data-design-inspector-title-layer]")!;
+    expect(layerName.textContent).toMatch(/^· \S/);
+    expect(layerName.className).toContain("shrink-0");
+    expect(title.querySelector("[data-design-inspector-title-identity]")!.className).toContain("truncate");
     once();
     expect(container.textContent).not.toContain("Part of");
 
     await show({ file: "home/page.html", nodeId: designComponentSlotNodeId("chip-1", "extras"), sourceVersion: V1,
       instances: overridden, componentIdentity: { kind: "instance", nodeId: "chip-1" } });
     expect(header().getAttribute("data-design-component-of")).toBe("slot");
+    expect(container.querySelector("[data-design-inspector-title-layer]")?.textContent).toMatch(/^· \S/);
     once();
     expect(container.textContent).not.toContain("Drop or draw layers");
   });

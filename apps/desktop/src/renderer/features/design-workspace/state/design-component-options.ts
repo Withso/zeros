@@ -52,7 +52,7 @@ export function readDesignFrameComponent(component: DesignFrameComponent): Desig
   return view;
 }
 
-/** Why a component's Options cannot be listed: its declaration is past a
+/** Why a component's Controls cannot be listed: its declaration is past a
  * limit of the record, so the engine reported it without one. Null when the
  * declaration arrived. */
 export function designComponentRecordProblem(

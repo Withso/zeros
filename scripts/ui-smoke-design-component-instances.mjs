@@ -337,8 +337,11 @@ export async function runDesignComponentInstancesSmoke({ page, check }) {
   await at(sendPart, "dblclick");
   await expect(line).toHaveAttribute("data-design-component-of", "part");
   const partHeader = await header.innerText();
+  // At the default inspector width the identity gives way, never the layer's name.
+  const layerName = header.locator("[data-design-inspector-title-layer]");
+  const layerNameShown = await layerName.evaluate((element) => element.scrollWidth <= element.clientWidth + 1 && element.getBoundingClientRect().width > 0);
   check("a double-click enters the instance and selects the part under the pointer, named in one header row with Edit main",
-    /Chat composer\/[^·]+ · /.test(partHeader) && (await page.locator("[data-design-component-of]").count()) === 1 &&
+    /Chat composer\/[^·]+·\s*\S/.test(partHeader) && layerNameShown && (await page.locator("[data-design-component-of]").count()) === 1 &&
       (await page.locator("[data-design-select-instance]").count()) === 0 &&
       (await header.locator("[data-design-edit-main]").count()) === 1 && (await header.getByRole("button").count()) === 1, partHeader);
   check("a part shows no Controls", (await section.count()) === 0);
