@@ -14,6 +14,8 @@ export async function scheduleCloudDeletion(
     await tx.query(`UPDATE cloud_v2_ready_copies SET state=CASE WHEN state='building' THEN 'failed' ELSE 'retired' END,
       failure_reason=CASE WHEN state='building' THEN 'organization_deleted' ELSE failure_reason END, updated_at=clock_timestamp()
       WHERE id IN (SELECT id FROM cloud_v2_ready_copies WHERE org_id=$1 AND state IN ('building','ready') ORDER BY id FOR UPDATE)`, [organizationId]);
+    // Build secrets are only ever read by a ready copy build.
+    await tx.query("DELETE FROM cloud_v2_ready_copy_secrets WHERE org_id=$1", [organizationId]);
     // Build completion is conditional on state/cleanup_requested_at. A provider
     // reply already in flight keeps its durable intent and is cleaned up later.
     await tx.query(`UPDATE cloud_v2_computer_builds

@@ -10,6 +10,8 @@ import { CloudV2Lifecycle } from "./lifecycle.js";
 import { CloudV2ReadyCopies, CloudV2ReadyCopyBuilder, CloudV2ReadyCopyForks, READY_COPY_REFRESH_STARTS, type ReadyCopyWorkspace } from "./ready-copies.js";
 import { CloudV2ReadyCopySecrets } from "./ready-copy-secrets.js";
 import { CloudV2Store } from "./store.js";
+import { scheduleCloudDeletion } from "./deletion.js";
+import { withSystemTx } from "../db.js";
 
 const d = process.env.TEST_DATABASE_URL ? describe : describe.skip;
 const DAY = 24 * 60 * 60_000;
@@ -176,7 +178,7 @@ d("cloud v2 ready copies", () => {
       const results = await Promise.allSettled([
         ...batch.map(item => forks().prepare(item)),
         copies.promote(next.id, { branch: "main", commit: null, stoppedAt: new Date(clock) }),
-        copies.markStale(org), copies.markExpiring(new Date(clock)),
+        copies.markStale(org), copies.markExpiring(new Date(clock)), copies.retireUnavailable(),
       ]);
       expect(results.filter(r => r.status === "rejected").map(r => String((r as PromiseRejectedResult).reason))).toEqual([]);
       // Every fork that began holds its copy until cleanup may delete it.
@@ -320,6 +322,28 @@ d("cloud v2 ready copies", () => {
     expect(boat.machine(copy.machineId!)!.state).toBe("deleted");
   });
 
+  it("removes build secrets with the organization and with their repository, and copies when cloud access ends", async () => {
+    const keys = { keys: { 1: randomBytes(32).toString("base64url") }, currentKeyVersion: 1 };
+    const secrets = new CloudV2ReadyCopySecrets(pool, keys);
+    const secretRows = async () => (await pool.query("SELECT repository FROM cloud_v2_ready_copy_secrets WHERE org_id=$1 ORDER BY repository", [org])).rows;
+    await liveBase(computersWith(), copyBuilder(), { repositories: [{ repository: "withso/zeros" }, { repository: "withso/other" }] });
+    await secrets.save(org, "withso/zeros", admin, { NPM_TOKEN: "fixture-value-1" });
+    await secrets.save(org, "withso/other", admin, { NPM_TOKEN: "fixture-value-2" });
+    // A build without withso/other removes it from the Cloud Computer, and its secrets with it.
+    await liveBase(computersWith(), copyBuilder(), RECIPE);
+    expect(await secretRows()).toEqual([{ repository: "withso/zeros" }]);
+    await copyBuilder().tick();
+    const copy = (await copies.list(org)).find(row => row.state === "ready")!;
+    // Losing cloud access retires the copy; cleanup deletes its machine.
+    await pool.query("UPDATE organizations SET cloud_workspaces_allowed=false WHERE id=$1", [org]);
+    await copyBuilder().tick();
+    expect((await copies.get(copy.id))!.state).toBe("retired");
+    expect(boat.machine(copy.machineId!)!.state).toBe("deleted");
+    await pool.query("UPDATE organizations SET cloud_workspaces_allowed=true WHERE id=$1", [org]);
+    await withSystemTx(pool, tx => scheduleCloudDeletion(tx, { organizationId: org }));
+    expect(await secretRows()).toEqual([]);
+  });
+
   it("starts organizations without an install script from the shared base, and gives one its own base once it adds a script", async () => {
     const computers = computersWith({ readyCopies: true, sharedBaseSnapshot: "zeros-base-1" });
     const shared = await liveBase(computers);
@@ -355,6 +379,26 @@ d("cloud v2 ready copies", () => {
     expect(await store.installedRepositories(org)).toEqual(before.installed);
     const overview = await computersWith().overview(org);
     expect(overview.activeBuildId).toBe(before.active!.buildId);
+  });
+
+  it("clones a copy as the base creator without saving a credential, and fetches a fork's branch as its own creator", async () => {
+    const cloneToken = vi.fn(async () => "synthetic-base-token");
+    await liveBase();
+    await copyBuilder({ cloneToken }).tick();
+    expect(cloneToken).toHaveBeenCalledWith(org, admin, expect.objectContaining({ repository: "withso/zeros" }));
+    const copy = await row(1);
+    const clone = boat.commands.find(command => command.machineId === copy.machineId && command.command.includes(" clone "))!;
+    expect(clone.command).not.toMatch(/synthetic-base-token|credential\.helper|insteadOf|x-access-token/);
+    expect(clone.command).toContain("--config-env=http.extraHeader=ZEROS_GITHUB_AUTH_HEADER");
+    expect(clone.input).toContain(Buffer.from("x-access-token:synthetic-base-token").toString("base64"));
+    const creator = workspace(), githubToken = vi.fn(async () => ({ token: "synthetic-creator-token" }));
+    const forked = await new CloudV2ReadyCopyForks({ copies, compute: boat, now: () => clock, githubToken }).prepare(creator) as { sandboxId: string };
+    expect(await new CloudV2ReadyCopyForks({ copies, compute: boat, now: () => clock, githubToken }).fetchBase(creator, forked.sandboxId)).toBe(true);
+    expect(githubToken).toHaveBeenCalledWith(creator);
+    const fetch = boat.commands.find(command => command.machineId === forked.sandboxId && command.command.includes(" fetch "))!;
+    expect(fetch.command).not.toContain("synthetic-creator-token");
+    expect(fetch.input).toContain(Buffer.from("x-access-token:synthetic-creator-token").toString("base64"));
+    expect(fetch.input).not.toContain(Buffer.from("x-access-token:synthetic-base-token").toString("base64"));
   });
 
   it("never stamps a workspace's activity when a copy is built or forked", async () => {

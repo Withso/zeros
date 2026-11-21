@@ -263,6 +263,15 @@ describe("ready copies at create", () => {
     expect(f.store.rotateWorkerToken).toHaveBeenCalled();
   });
 
+  it("still opens a fork whose base branch could not be fetched", async () => {
+    const w = workspace("creating"), readyCopies = { prepare: vi.fn(async () => ({ sandboxId: "bx_copyfork1" })), fetchBase: vi.fn(async () => false) };
+    const f = setup([w], { readyCopies, stock: true });
+    await f.lifecycle.tick();
+    expect(readyCopies.fetchBase).toHaveBeenCalledOnce();
+    expect(f.store.transition).not.toHaveBeenCalledWith(w.id, ["creating"], "failed", expect.anything());
+    expect(f.store.rotateWorkerToken).toHaveBeenCalled();
+  });
+
   it("waits a bounded time for a copy still building, then clones directly when none is ready", async () => {
     const w = workspace("creating"), waiting = setup([w], { readyCopies: copies({ waitMs: 3_000 }) });
     await waiting.lifecycle.tick();

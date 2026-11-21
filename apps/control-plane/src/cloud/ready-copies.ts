@@ -233,6 +233,24 @@ export class CloudV2ReadyCopies {
     await this.tx(tx => tx.query("UPDATE cloud_v2_ready_copies SET state='retired', updated_at=clock_timestamp() WHERE id=$1 AND state='ready'", [id]));
   }
 
+  /** Copies of organizations deleted or without cloud access: retired, or
+   * failed while building, so cleanup deletes their machines. */
+  async retireUnavailable(): Promise<number> {
+    const { rowCount } = await this.tx(tx => tx.query(`UPDATE cloud_v2_ready_copies SET
+        state=CASE WHEN state='building' THEN 'failed' ELSE 'retired' END,
+        failure_reason=CASE WHEN state='building' THEN 'organization_unavailable' ELSE failure_reason END, updated_at=clock_timestamp()
+      WHERE id IN (SELECT c.id FROM cloud_v2_ready_copies c
+        LEFT JOIN organizations o ON o.id=c.org_id AND o.deleted_at IS NULL AND o.lifecycle_status='active' AND o.cloud_workspaces_allowed
+        WHERE c.state IN ('building','ready') AND o.id IS NULL ORDER BY c.id FOR UPDATE OF c)`));
+    return rowCount ?? 0;
+  }
+
+  /** Build secrets of repositories the live base no longer has. */
+  async pruneSecrets(organizationId: string, repositories: readonly string[]): Promise<void> {
+    await this.tx(tx => tx.query("DELETE FROM cloud_v2_ready_copy_secrets WHERE org_id=$1 AND NOT (repository = ANY($2::text[]))",
+      [organizationId, repositories.map(repository => repository.toLowerCase())]));
+  }
+
   /** A new Cloud Computer base: every ready copy is rebuilt from it. */
   async markStale(organizationId: string): Promise<number> {
     const { rowCount } = await this.tx(tx => tx.query(
@@ -410,6 +428,8 @@ export class CloudV2ReadyCopyBuilder {
    * copy holds; workspaces install the runtime they need when they start. */
   async baseActivated(organizationId: string, reason: string): Promise<void> {
     if (reason !== "runtime") await this.deps.copies.markStale(organizationId);
+    const base = await this.deps.copies.base(organizationId);
+    if (base) await this.deps.copies.pruneSecrets(organizationId, base.repositories.map(entry => entry.repository));
     await this.queueFirstCopies(organizationId);
   }
 
@@ -438,6 +458,7 @@ export class CloudV2ReadyCopyBuilder {
   /** Staleness, refresh queueing and interrupted builds, from the database alone. */
   async maintain(): Promise<void> {
     const { copies } = this.deps, now = this.now();
+    await copies.retireUnavailable();
     await copies.markExpiring(now);
     await copies.failInterrupted(now);
     for (const ready of await copies.refreshCandidates(now)) {
