@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
   buildHarnessSwitchMessage,
+  canAutoContinueAfterSwitch,
+  harnessSwitchBlockedByQueue,
   harnessSwitchTranscriptMode,
   isHarnessChange,
   isHarnessSwitchMessage,
@@ -71,5 +73,22 @@ describe("harness switch", () => {
     expect(mid.working.map((m) => m.id)).not.toContain("switch-1");
     const settled = partitionTurn([tool, answer, row()], { live: false });
     expect(settled.finalOutput.map((m) => m.id)).toEqual(["a1", "switch-1"]);
+  });
+});
+
+describe("harness switch guards", () => {
+  it("waits for queued follow-ups only when the harness changes", () => {
+    expect(harnessSwitchBlockedByQueue(true, 1)).toBe(true);
+    expect(harnessSwitchBlockedByQueue(true, 0)).toBe(false);
+    expect(harnessSwitchBlockedByQueue(false, 2)).toBe(false);
+  });
+
+  it("auto-continues only with the seeded transcript alone", () => {
+    const transcript = { name: "transcript.md" };
+    expect(canAutoContinueAfterSwitch({ displayText: "  ", attachments: [transcript] })).toBe(true);
+    expect(canAutoContinueAfterSwitch({ displayText: "half a thought", attachments: [transcript] })).toBe(false);
+    expect(canAutoContinueAfterSwitch({ displayText: "", attachments: [transcript, { name: "a.png" }] })).toBe(false);
+    expect(canAutoContinueAfterSwitch({ displayText: "", attachments: [] })).toBe(false);
+    expect(canAutoContinueAfterSwitch(null)).toBe(false);
   });
 });

@@ -79,3 +79,18 @@ export function buildHarnessSwitchMessage(input: {
 export function isHarnessSwitchMessage(message: { kind: string; toolKind?: string }): boolean {
   return message.kind === "tool" && message.toolKind === HARNESS_SWITCH_TOOL_KIND;
 }
+
+/** Closing a session drops its unsent queue, so a harness change waits for it. */
+export function harnessSwitchBlockedByQueue(
+  harnessChanged: boolean,
+  queuedCount: number,
+): boolean {
+  return harnessChanged && queuedCount > 0;
+}
+
+/** Continue a stopped turn only when the composer holds just the seeded transcript. */
+export function canAutoContinueAfterSwitch(
+  composer: { displayText: string; attachments: readonly unknown[] } | null | undefined,
+): boolean {
+  return !!composer && !composer.displayText.trim() && composer.attachments.length === 1;
+}

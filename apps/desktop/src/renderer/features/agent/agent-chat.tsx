@@ -318,7 +318,9 @@ import {
 } from "./agent-history-client";
 import {
   buildHarnessSwitchMessage,
+  canAutoContinueAfterSwitch,
   HARNESS_SWITCH_CONTINUE_NOTE,
+  harnessSwitchBlockedByQueue,
   harnessSwitchTranscriptMode,
   isHarnessChange,
   isPendingPick,
@@ -1380,9 +1382,10 @@ function AgentChatBody({
   const applyStagedPick = useCallback(async () => {
     if (!chatThread || !chatId || !stagedPick) return;
     const pick = stagedPick;
-    // Closing the session drops its unsent queue, so queued follow-ups must be
-    // sent or removed before the agent changes.
-    if (isHarnessChange(chatThread.agentId, pick.agentId) && queuedMessages.length > 0) {
+    if (harnessSwitchBlockedByQueue(
+      isHarnessChange(chatThread.agentId, pick.agentId),
+      queuedMessages.length,
+    )) {
       toast.warning("Send or remove queued messages before switching agent.");
       return;
     }
@@ -3857,12 +3860,8 @@ function AgentChatBody({
     const pending = continueAfterSwitchRef.current;
     if (!pending || pending.chatId !== chatId || chatThread?.agentId !== pending.agentId) return;
     continueAfterSwitchRef.current = null;
-    // Continue only with the seeded transcript; a draft the user is still
-    // writing is theirs to send.
-    const composer = serializeComposerState();
-    const onlyTranscript = !composer?.displayText.trim() &&
-      (composer?.attachments.length ?? 0) === 1;
-    if (!onlyTranscript) {
+    // A draft the user is still writing is theirs to send.
+    if (!canAutoContinueAfterSwitch(serializeComposerState())) {
       toast.info("The conversation is attached. Send to continue with the new agent.");
       return;
     }
