@@ -692,8 +692,13 @@ export function ConversationPaneLayout({
   );
 
   useEffect(() => onFocusedPaneSplitRequest((dir) => {
-    if (!readOnly) handleSplit(focusedPaneId, dir);
-  }), [focusedPaneId, readOnly, handleSplit]);
+    if (readOnly || !activeWorkspacePath) return;
+    if (dir !== "merge") { handleSplit(focusedPaneId, dir); return; }
+    // Moving a pane's last chat out collapses it.
+    const target = leafIds(layout.root).find(id => id !== focusedPaneId);
+    if (!target) return;
+    for (const chat of chatsByPane.get(focusedPaneId) ?? EMPTY_CHATS) moveChatToPane(activeWorkspacePath, chat.id, target);
+  }), [focusedPaneId, readOnly, handleSplit, activeWorkspacePath, layout, chatsByPane, moveChatToPane]);
 
   const handleDropOnPane = useCallback(
     (paneId: string, zone: DropZone, chatId: string) => {

@@ -1,5 +1,7 @@
 import { Fragment, useMemo, useState } from "react";
-import { ChevronRight, Cloud, Columns2, Ellipsis, Laptop, Plus, Rows2 } from "lucide-react";
+import { ChevronRight, Cloud, Columns2, Ellipsis, Laptop, Plus, Rows2, X } from "lucide-react";
+import { leafIds } from "../../state/chat-panes";
+import { useChatPanesStore } from "../../state/chat-panes-store";
 import { IconButton } from "@/renderer/shared/ui/primitives/icon-button";
 import { requestFocusedPaneSplit } from "./pane-split-requests";
 import { AgentAwaitingIcon } from "../../features/agent/agent-awaiting-indicator";
@@ -228,7 +230,11 @@ export function SessionSwitcher({ folder, placement, showPlacement = true, fallb
 }
 
 /** The ⋯ menu at the end of the session row. */
-export function SessionActionsMenu({ readOnly = false }: { readOnly?: boolean }) {
+export function SessionActionsMenu({ folder, readOnly = false }: { folder: string; readOnly?: boolean }) {
+  const split = useChatPanesStore((state) => {
+    const layout = state.byFolder[folder];
+    return layout ? leafIds(layout.root).length > 1 : false;
+  });
   if (readOnly) return null;
   return (
     <DropdownMenu>
@@ -246,6 +252,12 @@ export function SessionActionsMenu({ readOnly = false }: { readOnly?: boolean })
           <Rows2 className="size-4" strokeWidth={1.5} />
           Split down
         </DropdownMenuItem>
+        {split && (
+          <DropdownMenuItem onSelect={() => requestFocusedPaneSplit("merge")} data-session-close-split="">
+            <X className="size-4" strokeWidth={1.5} />
+            Close split
+          </DropdownMenuItem>
+        )}
       </DropdownMenuContent>
     </DropdownMenu>
   );
