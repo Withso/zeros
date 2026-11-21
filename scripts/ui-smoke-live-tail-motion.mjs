@@ -235,7 +235,11 @@ async function sampleOpenGroupGrowth(page, frameId) {
     const before = live.getAttribute("aria-label");
     if (!/, 2 tool calls$/.test(before)) throw new Error(`the arrival window closed before the group opened: ${before}`);
     live.click();
-    if (live.getAttribute("aria-expanded") !== "true") throw new Error("the live group did not open");
+    // The open state commits on React's schedule: wait for it, briefly.
+    for (let frame = 0; live.getAttribute("aria-expanded") !== "true"; frame++) {
+      if (frame > 30) throw new Error("the live group did not open");
+      await new Promise((resolve) => requestAnimationFrame(resolve));
+    }
     const frames = [];
     const started = performance.now();
     await new Promise((resolve) => {
