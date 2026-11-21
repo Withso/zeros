@@ -72,7 +72,7 @@ export function cloudGithubPrAuthority(
   repository?: CloudGithubPrRepository,
 ): CloudGithubPrAuthority | undefined {
   const snapshot = snapshots.get(repository?.key ?? cloudWorkspaceKey(target));
-  const authority = snapshot?.catalog === cloudGithubPrCatalogContext(target) ? snapshot?.authority : undefined;
+  const authority = snapshot?.catalog === cloudGithubPrCatalogContext(target, repository?.key) ? snapshot?.authority : undefined;
   return authority ? { ...authority } : undefined;
 }
 
@@ -142,19 +142,23 @@ export function cloudGithubPrAuthorityFor(workspaceId: unknown, op = "gh.repoAcc
   try { scope = cloudGithubPrRoute(workspaceId, op); } catch { return undefined; }
   return scope ? cloudGithubPrAuthority(scope.target, scope.repository) : undefined;
 }
-function forgetPresentation(key: string): void {
+/** `exact`: only this key, not the repositories of a workspace of several under it. */
+function forgetPresentation(key: string, exact = false): void {
   forgetPrCachesForWorkspace(key);
   forgetReviewCachesForFolders(
-    (folder) => folder === key || folder.startsWith(`${key}/`),
+    (folder) => folder === key || (!exact && folder.startsWith(`${key}/`)),
   );
   invalidateCloudGithubPrScope(key);
 }
 onCloudGithubPrContextChange((key, retainPresentation) => {
   // A new HEAD invalidates request authority, not the same branch's last confirmed presentation.
   if (retainPresentation) return;
+  // Each repository of a workspace of several has its own context and change;
+  // the workspace's own change reaches them only when the workspace is gone.
+  const repositories = [...cloudGithubPrCatalogKeys()].some(each => each.startsWith(`${key}/`));
   for (const each of [...snapshots.keys()])
-    if (each === key || each.startsWith(`${key}/`)) { snapshots.delete(each); if (each !== key) forgetPresentation(each); }
-  forgetPresentation(key);
+    if (each === key || (!repositories && each.startsWith(`${key}/`))) { snapshots.delete(each); if (each !== key) forgetPresentation(each); }
+  forgetPresentation(key, repositories);
 });
 export function clearCloudGithubPr(organizationId?: string): void {
   if (organizationId)
@@ -196,12 +200,12 @@ export function requestCloudGithubPr(
     account = getOrganizationStoreGeneration(),
     startEpoch = epoch,
     scopeEpoch = scopeEpochs.get(target.organizationId) ?? 0;
-  const context = cloudGithubPrCatalogContext(target);
+  const context = cloudGithubPrCatalogContext(target, repository?.key);
   const current = () =>
     account === getOrganizationStoreGeneration() &&
     epoch === startEpoch &&
     scopeEpoch === (scopeEpochs.get(target.organizationId) ?? 0) &&
-    context === cloudGithubPrCatalogContext(target);
+    context === cloudGithubPrCatalogContext(target, repository?.key);
   const captured = snapshots.get(key),
     write = CLOUD_GITHUB_PR_WRITES.has(op);
   const { workspaceId: _workspaceId, repository: _repository, ...params } = input;
