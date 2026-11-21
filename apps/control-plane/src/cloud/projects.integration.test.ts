@@ -219,4 +219,17 @@ d("cloud projects and GitHub at two levels", () => {
     expect((await projects.list(org, member)).map(row => row.name)).toEqual(["Web app"]);
     expect((await levels.connections(org, admin)).map(row => row.accountLogin)).toEqual(["withso"]);
   });
+
+  it("reverts every migrated project nobody edited, however many there are", async () => {
+    // Many rows, so two timestamps taken a microsecond apart would show.
+    const count = 60, build = randomUUID();
+    const repositories = Array.from({ length: count }, (_, index) => ({ repository: `withso/r${index}` }));
+    await pool.query(`INSERT INTO cloud_v2_computer_builds (id, org_id, version, recipe, state, snapshot_id, created_by, source_policy_version, source_targets)
+      VALUES ($1,$2,1,$3,'succeeded','zeros-alpha-org-v1',$4,3,$5)`, [build, org, JSON.stringify({ repositories }), admin,
+      JSON.stringify(repositories.map((entry, index) => ({ repository: entry.repository, repositoryId: String(1000 + index) })))]);
+    await pool.query("INSERT INTO cloud_v2_computers (org_id, active_build_id, snapshot_name) VALUES ($1,$2,'zeros-alpha-org-v1')", [org, build]);
+    expect(await migrateProjects(pool)).toEqual({ organizations: 1, connections: 1, projects: count });
+    expect(await revertProjectsMigration(pool)).toEqual({ connections: 1, projects: count });
+    expect((await pool.query("SELECT count(*)::int AS n FROM cloud_projects")).rows[0].n).toBe(0);
+  });
 });

@@ -380,7 +380,9 @@ export async function migrateProjects(pool: pg.Pool, options: { dryRun?: boolean
         const [repoOwner, repoName] = target.repository.toLowerCase().split("/") as [string, string];
         const taken = (await tx.query("SELECT 1 FROM cloud_projects WHERE org_id=$1 AND level='organization' AND lower(name)=$2", [row.org_id, repoName])).rowCount;
         const id = randomUUID();
-        await tx.query(`INSERT INTO cloud_projects (id, org_id, name, level, created_by, migrated) VALUES ($1,$2,$3,'organization',$4,true)`,
+        // One timestamp for both: revertProjectsMigration reads updated_at=created_at as "nobody edited it".
+        await tx.query(`INSERT INTO cloud_projects (id, org_id, name, level, created_by, migrated, created_at, updated_at)
+          VALUES ($1,$2,$3,'organization',$4,true,now(),now())`,
           [id, row.org_id, taken ? `${repoOwner}/${repoName}` : repoName, row.created_by]);
         const connection = (await tx.query<{ id: string }>(`SELECT id FROM cloud_github_installations WHERE org_id=$1 AND level='organization'
           AND lower(account_login)=$2 ORDER BY (installation_id IS NOT NULL) DESC LIMIT 1`, [row.org_id, repoOwner])).rows[0];
