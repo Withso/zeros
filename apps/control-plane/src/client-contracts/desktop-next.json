@@ -1474,6 +1474,21 @@
             "type": "integer",
             "minimum": 0,
             "maximum": 9007199254740991
+          },
+          "readyCopies": {
+            "type": "boolean",
+            "const": true
+          },
+          "installScript": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 16000
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "required": [
@@ -1511,6 +1526,20 @@
                           "type": "string",
                           "minLength": 1,
                           "maxLength": 255
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "readyCopy": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "enum": [
+                            "ready",
+                            "building"
+                          ]
                         },
                         {
                           "type": "null"
