@@ -891,6 +891,18 @@ describe("formatTranscript — handoff", () => {
     expect(concise).not.toContain("### Files changed");
   });
 
+  it("lists files from a Codex apply_patch changes[] payload", () => {
+    const out = formatTranscript([
+      text("user", "write the file"),
+      tool({ title: "Editing /repo/notes.txt", toolKind: "edit", rawInput: { changes: [{ path: "/repo/notes.txt", kind: { type: "add" }, diff: "PLUM\n" }, { path: "/repo/b.txt", kind: { type: "update" }, diff: "@@" }] }, rawOutput: { status: "completed" } }),
+      text("agent", "Done."),
+    ], "handoff", { folder: "/repo" }).text;
+    expect(out).toContain("### Files changed");
+    expect(out).toContain("- notes.txt");
+    expect(out).toContain("- b.txt");
+    expect(out).not.toContain("PLUM");
+  });
+
   it("omits a turn with nothing to hand off", () => {
     expect(formatTranscript([tool({ title: "Read" })], "handoff").count).toBe(0);
   });
