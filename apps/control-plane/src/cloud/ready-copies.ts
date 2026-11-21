@@ -12,6 +12,7 @@
 import { randomUUID } from "node:crypto";
 import type pg from "pg";
 import { withSystemTx, type Tx } from "../db.js";
+import { HttpError } from "../authz.js";
 import { CLOUD_V2_LEASE_SECONDS, type CloudV2Compute } from "./boat.js";
 import { BoatCreateRejectedError, BoatForkRefusedError, BoatSnapshotExpiredError } from "./boat-client.js";
 import { CloudProviderError } from "./provider-error.js";
@@ -28,6 +29,8 @@ export const READY_COPY_REFRESH_MS = 7 * DAY_MS;
 export const READY_COPY_EXPIRY_MS = 13 * DAY_MS;
 /** Copies no workspace forked for this long are no longer refreshed; the row stays. */
 export const READY_COPY_UNUSED_MS = 60 * DAY_MS;
+/** A private repository's copy is no longer refreshed after this unforked. */
+export const READY_COPY_PRIVATE_UNUSED_MS = 14 * DAY_MS;
 /** Refresh starts across the deployment; first copies are never held back. */
 export const READY_COPY_REFRESH_STARTS = { perMinute: 12, perHour: 60 } as const;
 /** A create waits this long for a copy that is building, then clones directly. */
@@ -47,6 +50,8 @@ const MAX_LOG_BYTES = 64 * 1024;
 export type ReadyCopyState = "building" | "ready" | "failed" | "retired";
 export type CloudV2ReadyCopy = {
   id: string; organizationId: string; repository: string; repositoryId: string; generation: number; state: ReadyCopyState;
+  /** A private repository's member; null for a shared repository. */
+  ownerUserId: string | null;
   idempotencyKey: string; machineId: string | null; machinePending: boolean; builtFromBase: string | null;
   computerBuildId: string | null; createdBy: string | null; branch: string | null; commit: string | null;
   failureReason: string | null; failureDetail: string | null; stale: boolean; refresh: boolean; machineDeletedAt: Date | null;
@@ -54,14 +59,14 @@ export type CloudV2ReadyCopy = {
 };
 type Row = {
   id: string; org_id: string; repository: string; repository_id: string; generation: number; state: ReadyCopyState;
-  idempotency_key: string; machine_id: string | null; machine_pending: boolean; built_from_base: string | null;
+  owner_user_id: string | null; idempotency_key: string; machine_id: string | null; machine_pending: boolean; built_from_base: string | null;
   computer_build_id: string | null; created_by: string | null; branch: string | null; commit_sha: string | null;
   failure_reason: string | null; failure_detail: string | null; stale: boolean; refresh: boolean; machine_deleted_at: Date | null;
   stopped_at: Date | null; last_forked_at: Date | null; created_at: Date; started_at: Date | null; finished_at: Date | null;
 };
 const copy = (row: Row): CloudV2ReadyCopy => ({
   id: row.id, organizationId: row.org_id, repository: row.repository, repositoryId: row.repository_id, generation: row.generation,
-  state: row.state, idempotencyKey: row.idempotency_key, machineId: row.machine_id, machinePending: row.machine_pending,
+  state: row.state, ownerUserId: row.owner_user_id, idempotencyKey: row.idempotency_key, machineId: row.machine_id, machinePending: row.machine_pending,
   builtFromBase: row.built_from_base, computerBuildId: row.computer_build_id, createdBy: row.created_by, branch: row.branch,
   commit: row.commit_sha, failureReason: row.failure_reason, failureDetail: row.failure_detail, stale: row.stale, refresh: row.refresh,
   machineDeletedAt: row.machine_deleted_at, stoppedAt: row.stopped_at,
@@ -104,19 +109,20 @@ export class CloudV2ReadyCopies {
 
   /** Queues a generation, or joins the one already building for this repository. */
   async request(input: { organizationId: string; repository: string; repositoryId: string; createdBy: string; computerBuildId: string;
-    builtFromBase: string; refresh?: boolean; now?: Date }): Promise<CloudV2ReadyCopy> {
-    const repository = input.repository.toLowerCase(), id = randomUUID();
+    builtFromBase: string; refresh?: boolean; now?: Date; ownerUserId?: string | null }): Promise<CloudV2ReadyCopy> {
+    const repository = input.repository.toLowerCase(), id = randomUUID(), owner = input.ownerUserId ?? null;
     return this.tx(async tx => {
       await tx.query(
         `INSERT INTO cloud_v2_ready_copies (id, org_id, repository, repository_id, generation, state, idempotency_key, built_from_base,
-           computer_build_id, created_by, refresh, created_at, updated_at)
-         VALUES ($1,$2,$3,$4,coalesce((SELECT max(generation) FROM cloud_v2_ready_copies WHERE org_id=$2 AND repository=$3),0)+1,
-           'building',$5,$6,$7,$8,$9,coalesce($10,clock_timestamp()),coalesce($10,clock_timestamp()))
-         ON CONFLICT (org_id, repository) WHERE state='building' DO NOTHING`,
+           computer_build_id, created_by, refresh, created_at, updated_at, owner_user_id)
+         VALUES ($1,$2,$3,$4,coalesce((SELECT max(generation) FROM cloud_v2_ready_copies
+             WHERE org_id=$2 AND repository=$3 AND owner_user_id IS NOT DISTINCT FROM $11::uuid),0)+1,
+           'building',$5,$6,$7,$8,$9,coalesce($10,clock_timestamp()),coalesce($10,clock_timestamp()),$11)
+         ON CONFLICT (org_id, repository, owner_user_id) WHERE state='building' DO NOTHING`,
         [id, input.organizationId, repository, input.repositoryId, `ready-copy:${id}`, input.builtFromBase, input.computerBuildId,
-          input.createdBy, input.refresh === true, input.now ?? null]);
-      return copy((await tx.query<Row>(`SELECT * FROM cloud_v2_ready_copies WHERE org_id=$1 AND repository=$2 AND state='building'`,
-        [input.organizationId, repository])).rows[0]!);
+          input.createdBy, input.refresh === true, input.now ?? null, owner]);
+      return copy((await tx.query<Row>(`SELECT * FROM cloud_v2_ready_copies WHERE org_id=$1 AND repository=$2 AND state='building'
+        AND owner_user_id IS NOT DISTINCT FROM $3::uuid`, [input.organizationId, repository, owner])).rows[0]!);
     });
   }
 
@@ -136,9 +142,10 @@ export class CloudV2ReadyCopies {
    * one, for the Cloud Computer page. Detail is a path at most. */
   async failures(organizationId: string): Promise<{ repository: string; generation: number; reason: string; detail: string | null; finishedAt: string }[]> {
     const { rows } = await this.tx(tx => tx.query<{ repository: string; generation: number; failure_reason: string; failure_detail: string | null; finished_at: Date }>(
+      // Shared copies only: a member's private copy never reaches the admin's page.
       `SELECT DISTINCT ON (f.repository) f.repository, f.generation, f.failure_reason, f.failure_detail, f.finished_at
-       FROM cloud_v2_ready_copies f WHERE f.org_id=$1 AND f.state='failed' AND f.failure_reason IS NOT NULL AND f.finished_at IS NOT NULL
-         AND NOT EXISTS (SELECT 1 FROM cloud_v2_ready_copies n WHERE n.org_id=f.org_id AND n.repository=f.repository
+       FROM cloud_v2_ready_copies f WHERE f.org_id=$1 AND f.owner_user_id IS NULL AND f.state='failed' AND f.failure_reason IS NOT NULL AND f.finished_at IS NOT NULL
+         AND NOT EXISTS (SELECT 1 FROM cloud_v2_ready_copies n WHERE n.org_id=f.org_id AND n.repository=f.repository AND n.owner_user_id IS NULL
            AND n.generation>f.generation AND n.state IN ('ready','retired'))
        ORDER BY f.repository, f.generation DESC`, [organizationId]));
     return rows.map(row => ({ repository: row.repository, generation: row.generation, reason: row.failure_reason, detail: row.failure_detail,
@@ -146,25 +153,28 @@ export class CloudV2ReadyCopies {
   }
 
   /** Per repository: whether its first copy is still being made. */
-  async status(organizationId: string): Promise<Map<string, "ready" | "building" | null>> {
+  async status(organizationId: string, viewerUserId: string | null = null): Promise<Map<string, "ready" | "building" | null>> {
+    // Shared copies, and the viewer's own private ones; nobody else's.
     const { rows } = await this.tx(tx => tx.query<{ repository: string; ready: boolean; building: boolean }>(
       `SELECT repository, bool_or(state='ready') AS ready, bool_or(state='building') AS building
-       FROM cloud_v2_ready_copies WHERE org_id=$1 GROUP BY repository`, [organizationId]));
+       FROM cloud_v2_ready_copies WHERE org_id=$1 AND (owner_user_id IS NULL OR owner_user_id=$2::uuid) GROUP BY repository`, [organizationId, viewerUserId]));
     return new Map(rows.map(row => [row.repository, row.ready ? "ready" : row.building ? "building" : null]));
   }
 
   /** The generation a workspace may fork now: ready, not stale, stopped recently enough. */
-  async forkable(organizationId: string, repository: string, now: Date): Promise<CloudV2ReadyCopy | null> {
+  async forkable(organizationId: string, repository: string, now: Date, ownerUserId: string | null = null): Promise<CloudV2ReadyCopy | null> {
     const row = (await this.tx(tx => tx.query<Row>(
       `SELECT * FROM cloud_v2_ready_copies WHERE org_id=$1 AND repository=$2 AND state='ready' AND NOT stale
+         AND owner_user_id IS NOT DISTINCT FROM $5::uuid
          AND machine_id IS NOT NULL AND stopped_at > $3::timestamptz - make_interval(secs => $4::double precision / 1000)`,
-      [organizationId, repository.toLowerCase(), now, READY_COPY_EXPIRY_MS]))).rows[0];
+      [organizationId, repository.toLowerCase(), now, READY_COPY_EXPIRY_MS, ownerUserId]))).rows[0];
     return row ? copy(row) : null;
   }
 
-  async building(organizationId: string, repository: string): Promise<CloudV2ReadyCopy | null> {
+  async building(organizationId: string, repository: string, ownerUserId: string | null = null): Promise<CloudV2ReadyCopy | null> {
     const row = (await this.tx(tx => tx.query<Row>(
-      "SELECT * FROM cloud_v2_ready_copies WHERE org_id=$1 AND repository=$2 AND state='building'", [organizationId, repository.toLowerCase()]))).rows[0];
+      "SELECT * FROM cloud_v2_ready_copies WHERE org_id=$1 AND repository=$2 AND state='building' AND owner_user_id IS NOT DISTINCT FROM $3::uuid",
+      [organizationId, repository.toLowerCase(), ownerUserId]))).rows[0];
     return row ? copy(row) : null;
   }
 
@@ -217,14 +227,17 @@ export class CloudV2ReadyCopies {
   async promote(id: string, result: { branch: string | null; commit: string | null; stoppedAt: Date }): Promise<boolean> {
     return this.tx(async tx => {
       // This generation and the ready one it replaces, locked together in id order.
-      const target = (await tx.query<{ org_id: string; repository: string }>("SELECT org_id, repository FROM cloud_v2_ready_copies WHERE id=$1", [id])).rows[0];
+      const target = (await tx.query<{ org_id: string; repository: string; owner_user_id: string | null }>(
+        "SELECT org_id, repository, owner_user_id FROM cloud_v2_ready_copies WHERE id=$1", [id])).rows[0];
       if (!target) return false;
       const locked = (await tx.query<Row>(`SELECT * FROM cloud_v2_ready_copies WHERE org_id=$1 AND repository=$2
-        AND (id=$3 OR state='ready') ORDER BY id FOR UPDATE`, [target.org_id, target.repository, id])).rows;
+        AND owner_user_id IS NOT DISTINCT FROM $4::uuid AND (id=$3 OR state='ready') ORDER BY id FOR UPDATE`,
+        [target.org_id, target.repository, id, target.owner_user_id])).rows;
       const row = locked.find(candidate => candidate.id === id);
       if (!row || row.state !== "building" || !row.machine_id) return false;
       await tx.query(`UPDATE cloud_v2_ready_copies SET state='retired', updated_at=clock_timestamp()
-        WHERE org_id=$1 AND repository=$2 AND state='ready' AND id<>$3`, [row.org_id, row.repository, id]);
+        WHERE org_id=$1 AND repository=$2 AND owner_user_id IS NOT DISTINCT FROM $4::uuid AND state='ready' AND id<>$3`,
+        [row.org_id, row.repository, id, row.owner_user_id]);
       await tx.query(`UPDATE cloud_v2_ready_copies SET state='ready', stale=false, branch=$2, commit_sha=$3, stopped_at=$4,
         finished_at=clock_timestamp(), updated_at=clock_timestamp() WHERE id=$1`, [id, result.branch, result.commit, result.stoppedAt]);
       // A base build pins no branch for a repository it never had: the first
@@ -255,7 +268,22 @@ export class CloudV2ReadyCopies {
       WHERE id IN (SELECT c.id FROM cloud_v2_ready_copies c
         LEFT JOIN organizations o ON o.id=c.org_id AND o.deleted_at IS NULL AND o.lifecycle_status='active' AND o.cloud_workspaces_allowed
         WHERE c.state IN ('building','ready') AND o.id IS NULL ORDER BY c.id FOR UPDATE OF c)`));
-    return rowCount ?? 0;
+    // A private copy whose entry was removed or folded into a shared one.
+    const orphans = await this.tx(tx => tx.query(`UPDATE cloud_v2_ready_copies SET state=CASE WHEN state='building' THEN 'failed' ELSE 'retired' END,
+        failure_reason=CASE WHEN state='building' THEN 'private_repository_removed' ELSE failure_reason END, updated_at=clock_timestamp()
+      WHERE id IN (SELECT c.id FROM cloud_v2_ready_copies c WHERE c.owner_user_id IS NOT NULL AND c.state IN ('building','ready')
+        AND NOT EXISTS (SELECT 1 FROM cloud_repositories p WHERE p.org_id=c.org_id AND p.level='private' AND p.owner_user_id=c.owner_user_id
+          AND p.repository_id=c.repository_id AND p.folded_at IS NULL) ORDER BY c.id FOR UPDATE OF c)`));
+    return (rowCount ?? 0) + (orphans.rowCount ?? 0);
+  }
+
+  /** A member's standing private entry for a repository, while members may keep repositories. */
+  async privateEntry(organizationId: string, ownerUserId: string, repository: string): Promise<{ id: string; repositoryId: string } | null> {
+    const row = (await this.tx(tx => tx.query<{ id: string; repository_id: string }>(
+      `SELECT p.id, p.repository_id FROM cloud_repositories p JOIN organizations o ON o.id=p.org_id AND o.cloud_personal_repositories_allowed
+       WHERE p.org_id=$1 AND p.owner_user_id=$2 AND p.repository=$3 AND p.level='private' AND p.folded_at IS NULL`,
+      [organizationId, ownerUserId, repository.toLowerCase()]))).rows[0];
+    return row ? { id: row.id, repositoryId: row.repository_id } : null;
   }
 
   /** Build secrets of repositories the live base no longer has. */
@@ -297,20 +325,28 @@ export class CloudV2ReadyCopies {
        JOIN organizations o ON o.id=r.org_id AND o.deleted_at IS NULL AND o.lifecycle_status='active' AND o.cloud_workspaces_allowed
        WHERE r.state='ready'
          AND (r.stale OR r.stopped_at <= $1::timestamptz - make_interval(secs => $2::double precision / 1000))
-         AND coalesce(r.last_forked_at, r.created_at) > $1::timestamptz - make_interval(secs => $3::double precision / 1000)
-         AND NOT EXISTS (SELECT 1 FROM cloud_v2_ready_copies b WHERE b.org_id=r.org_id AND b.repository=r.repository AND b.state='building')
-         AND NOT EXISTS (SELECT 1 FROM cloud_v2_ready_copies f WHERE f.org_id=r.org_id AND f.repository=r.repository AND f.state='failed'
+         -- Shared copies stop refreshing after 60 days unforked, private ones after 14.
+         AND coalesce(r.last_forked_at, r.created_at) > $1::timestamptz - make_interval(secs =>
+           (CASE WHEN r.owner_user_id IS NULL THEN $3 ELSE $6 END)::double precision / 1000)
+         -- A private copy refreshes only while its entry stands and members may keep repositories.
+         AND (r.owner_user_id IS NULL OR (o.cloud_personal_repositories_allowed AND EXISTS (SELECT 1 FROM cloud_repositories p
+           WHERE p.org_id=r.org_id AND p.level='private' AND p.owner_user_id=r.owner_user_id AND p.repository_id=r.repository_id AND p.folded_at IS NULL)))
+         AND NOT EXISTS (SELECT 1 FROM cloud_v2_ready_copies b WHERE b.org_id=r.org_id AND b.repository=r.repository
+           AND b.owner_user_id IS NOT DISTINCT FROM r.owner_user_id AND b.state='building')
+         AND NOT EXISTS (SELECT 1 FROM cloud_v2_ready_copies f WHERE f.org_id=r.org_id AND f.repository=r.repository
+           AND f.owner_user_id IS NOT DISTINCT FROM r.owner_user_id AND f.state='failed'
            AND f.finished_at > $1::timestamptz - make_interval(secs => $4::double precision / 1000))
-       ORDER BY r.stale DESC, r.stopped_at, r.id LIMIT $5`, [now, READY_COPY_REFRESH_MS, READY_COPY_UNUSED_MS, FAILURE_BACKOFF_MS, limit]));
+       ORDER BY r.stale DESC, r.stopped_at, r.id LIMIT $5`, [now, READY_COPY_REFRESH_MS, READY_COPY_UNUSED_MS, FAILURE_BACKOFF_MS, limit, READY_COPY_PRIVATE_UNUSED_MS]));
     return rows.map(copy);
   }
 
   /** Whether a first copy for this repository may be queued now. */
-  async mayQueueFirst(organizationId: string, repository: string, now: Date): Promise<boolean> {
+  async mayQueueFirst(organizationId: string, repository: string, now: Date, ownerUserId: string | null = null): Promise<boolean> {
     const { rows } = await this.tx(tx => tx.query<{ blocked: boolean }>(
-      `SELECT EXISTS (SELECT 1 FROM cloud_v2_ready_copies WHERE org_id=$1 AND repository=$2 AND (state IN ('building','ready')
+      `SELECT EXISTS (SELECT 1 FROM cloud_v2_ready_copies WHERE org_id=$1 AND repository=$2 AND owner_user_id IS NOT DISTINCT FROM $5::uuid
+         AND (state IN ('building','ready')
          OR (state='failed' AND finished_at > $3::timestamptz - make_interval(secs => $4::double precision / 1000)))) AS blocked`,
-      [organizationId, repository.toLowerCase(), now, FAILURE_BACKOFF_MS]));
+      [organizationId, repository.toLowerCase(), now, FAILURE_BACKOFF_MS, ownerUserId]));
     return !rows[0]?.blocked;
   }
 
@@ -359,10 +395,17 @@ export class CloudV2ReadyCopies {
    * activity: active_at belongs to people. Null when it is no longer ready. */
   async beginFork(workspaceId: string, organizationId: string, copyId: string, now: Date): Promise<ReadyCopyFork | null> {
     return this.tx(async tx => {
-      const row = (await tx.query<{ machine_id: string | null }>(
+      const row = (await tx.query<{ machine_id: string | null; owner_user_id: string | null }>(
         // The write below needs this lock anyway; taking a weaker one first deadlocks concurrent creates.
-        `SELECT machine_id FROM cloud_v2_ready_copies WHERE id=$1 AND org_id=$2 AND state='ready' AND NOT stale FOR NO KEY UPDATE`, [copyId, organizationId])).rows[0];
+        `SELECT machine_id, owner_user_id FROM cloud_v2_ready_copies WHERE id=$1 AND org_id=$2 AND state='ready' AND NOT stale FOR NO KEY UPDATE`, [copyId, organizationId])).rows[0];
       if (!row?.machine_id) return null;
+      // A private copy is its member's alone: only a workspace that member creates may fork it.
+      if (row.owner_user_id !== null) {
+        const workspace = (await tx.query<{ creator_user_id: string | null; private_owner_user_id: string | null }>(
+          "SELECT creator_user_id, private_owner_user_id FROM cloud_v2_workspaces WHERE id=$1 AND org_id=$2", [workspaceId, organizationId])).rows[0];
+        if (!workspace || workspace.private_owner_user_id !== row.owner_user_id || workspace.creator_user_id !== row.owner_user_id)
+          throw new HttpError(403, "private_repository_owner_only", "Only the member who added this repository can use its ready copy.");
+      }
       const key = `ready-copy-fork:${workspaceId}`;
       const inserted = await tx.query<{ requested_at: Date }>(
         `INSERT INTO cloud_v2_ready_copy_forks (workspace_id, org_id, copy_id, fork_key, requested_at) VALUES ($1,$2,$3,$4,$5)
@@ -448,8 +491,10 @@ export type ReadyCopyBuilderDeps = {
   localOwner?: string | undefined;
   runtime: CloudV2Runtime;
   publicKeys?: readonly string[];
-  /** A short-lived token able to clone one repository, as the base build's creator. */
+  /** A short-lived token able to clone one repository, as one member (a private copy's). */
   cloneToken(organizationId: string, userId: string, target: CloudSourceTarget): Promise<string>;
+  /** Two GitHub levels: a shared copy's token from the organization's installation. */
+  sharedCloneToken?(organizationId: string, target: CloudSourceTarget): Promise<string>;
   /** Admin build secrets for a shared repository; empty when none. */
   secrets?(organizationId: string, repository: string): Promise<ReadyCopySecrets>;
   now?: () => number;
@@ -473,6 +518,15 @@ export class CloudV2ReadyCopyBuilder {
     const base = await this.deps.copies.base(organizationId);
     if (base) await this.deps.copies.pruneSecrets(organizationId, base.repositories.map(entry => entry.repository));
     await this.queueFirstCopies(organizationId);
+  }
+
+  /** A private repository's first copy, cloned as its member. */
+  async queuePrivateCopy(organizationId: string, ownerUserId: string, repository: string): Promise<void> {
+    const { copies } = this.deps;
+    const base = await copies.base(organizationId), entry = await copies.privateEntry(organizationId, ownerUserId, repository);
+    if (!base || !entry || !await copies.mayQueueFirst(organizationId, repository, this.now(), ownerUserId)) return;
+    await copies.request({ organizationId, repository, repositoryId: entry.repositoryId, createdBy: ownerUserId, ownerUserId,
+      computerBuildId: base.buildId, builtFromBase: `snapshot:${base.snapshot}` });
   }
 
   async queueFirstCopies(organizationId: string, only?: string): Promise<void> {
@@ -506,6 +560,14 @@ export class CloudV2ReadyCopyBuilder {
     for (const ready of await copies.refreshCandidates(now)) {
       if (this.closed) return;
       const base = await copies.base(ready.organizationId);
+      if (ready.ownerUserId) {
+        // A private copy: its entry still stands (refreshCandidates checks); rebuilt as its member.
+        if (!base) continue;
+        await copies.request({ organizationId: ready.organizationId, repository: ready.repository, repositoryId: ready.repositoryId,
+          createdBy: ready.ownerUserId, ownerUserId: ready.ownerUserId, computerBuildId: base.buildId, refresh: true,
+          builtFromBase: ready.stale || !ready.machineId || ready.computerBuildId !== base.buildId ? `snapshot:${base.snapshot}` : `copy:${ready.id}` });
+        continue;
+      }
       const target = base?.sources.find(source => source.repository.toLowerCase() === ready.repository);
       if (!base) continue;
       // Removed from the Cloud Computer: retired, so cleanup deletes its machine.
@@ -562,8 +624,12 @@ export class CloudV2ReadyCopyBuilder {
   private async build(job: CloudV2ReadyCopy): Promise<void> {
     const { compute, copies } = this.deps;
     const base = await copies.base(job.organizationId);
-    const entry = base?.repositories.find(candidate => candidate.repository.toLowerCase() === job.repository);
-    const target = base?.sources.find(source => source.repository.toLowerCase() === job.repository && source.repositoryId === job.repositoryId);
+    // A private repository has no admin setup or secrets: it is cloned as its member only.
+    const privateEntry = job.ownerUserId ? await copies.privateEntry(job.organizationId, job.ownerUserId, job.repository) : null;
+    const entry = job.ownerUserId ? (privateEntry ? { repository: job.repository } as ReadyCopyBase["repositories"][number] : undefined)
+      : base?.repositories.find(candidate => candidate.repository.toLowerCase() === job.repository);
+    const target = job.ownerUserId ? (privateEntry?.repositoryId === job.repositoryId ? { repository: job.repository, repositoryId: job.repositoryId } : undefined)
+      : base?.sources.find(source => source.repository.toLowerCase() === job.repository && source.repositoryId === job.repositoryId);
     if (!base || !entry || !target) throw failure("ready_copy_base_changed");
     if (!await copies.machinePending(job.id)) return;
     const machineId = await this.machine(job);
@@ -577,7 +643,10 @@ export class CloudV2ReadyCopyBuilder {
       if (installed.exitCode !== 0 || installed.timedOut) throw failure("worker_runtime_install_failed");
     }
     const dir = `/home/user/${entry.repository}`;
-    const token = await this.deps.cloneToken(job.organizationId, base.createdBy, target);
+    // Shared copies clone through the organization's GitHub connection, never an admin's own login.
+    const token = job.ownerUserId ? await this.deps.cloneToken(job.organizationId, job.ownerUserId, target)
+      : this.deps.sharedCloneToken ? await this.deps.sharedCloneToken(job.organizationId, target)
+      : await this.deps.cloneToken(job.organizationId, base.createdBy, target);
     const header = `Authorization: Basic ${Buffer.from(`x-access-token:${token}`).toString("base64")}\n`;
     // Always a full clone; a refresh fetches into the previous generation's.
     const clone = await compute.execLong(machineId, asZeros(checkoutScript({ repository: entry.repository, ...(entry.ref ? { ref: entry.ref } : {}) },
@@ -649,7 +718,7 @@ export class CloudV2ReadyCopyForks<W extends ReadyCopyWorkspace = ReadyCopyWorks
     copies: CloudV2ReadyCopies;
     compute: CloudV2Compute;
     /** Queues the repository's first copy when it has none. */
-    queueFirst?(organizationId: string, repository: string): Promise<void>;
+    queueFirst?(organizationId: string, repository: string, ownerUserId: string | null): Promise<void>;
     /** A repository token for the creator, to fetch the base branch. */
     githubToken?(workspace: W): Promise<{ token: string }>;
     now?: () => number;
@@ -674,10 +743,11 @@ export class CloudV2ReadyCopyForks<W extends ReadyCopyWorkspace = ReadyCopyWorks
       return this.fork(workspace, existing);
     }
     if (workspace.boatSandboxId) return null;
-    const ready = await copies.forkable(workspace.organizationId, workspace.repository, now);
+    const owner = workspace.privateOwnerUserId ?? null;
+    const ready = await copies.forkable(workspace.organizationId, workspace.repository, now, owner);
     if (!ready) {
-      const building = await copies.building(workspace.organizationId, workspace.repository);
-      if (!building) await this.deps.queueFirst?.(workspace.organizationId, workspace.repository).catch(() => undefined);
+      const building = await copies.building(workspace.organizationId, workspace.repository, owner);
+      if (!building) await this.deps.queueFirst?.(workspace.organizationId, workspace.repository, owner).catch(() => undefined);
       if (building && now.getTime() - Date.parse(workspace.createdAt) < READY_COPY_FORK_WAIT_MS) return { waitMs: FORK_WAIT_POLL_MS };
       this.deps.logger?.warn(`[cloud-v2] ready copy unavailable; cloning directly (${building ? "still_building" : "none_ready"})`);
       return null;
@@ -720,4 +790,6 @@ export class CloudV2ReadyCopyForks<W extends ReadyCopyWorkspace = ReadyCopyWorks
   }
 }
 
-export type ReadyCopyWorkspace = { id: string; organizationId: string; repository: string; baseBranch: string; createdAt: string; boatSandboxId: string | null };
+export type ReadyCopyWorkspace = { id: string; organizationId: string; repository: string; baseBranch: string; createdAt: string; boatSandboxId: string | null;
+  /** Set for a workspace of a private repository: its member. */
+  privateOwnerUserId?: string | null };

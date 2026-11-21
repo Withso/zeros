@@ -39,6 +39,10 @@ const BUILD_CONCURRENCY = 1;
 /** How often the builder looks for snapshots to refresh by themselves. */
 const REFRESH_SCAN_MS = 10 * 60_000;
 
+/** Up to 10 repositories while ready copies are off; with them the organization
+ * level has no practical limit, so stored recipes read up to this many. */
+export const CLOUD_V2_RECIPE_STORED_MAX = 200;
+export const CLOUD_V2_RECIPE_LIMIT = 10;
 const repository = z.string().max(200).regex(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/)
   // Each part names a directory under /home/user; "." and ".." would leave it.
   .refine(value => value.split("/").every(part => part !== "." && part !== ".."), "Invalid repository");
@@ -58,7 +62,7 @@ export const CloudV2RecipeSchema = z.object({
     commit: z.string().regex(/^[0-9a-f]{40}$/).optional(),
     /** Verified remote branch observed after cloning, or origin's default for a tag. */
     branch: z.string().min(1).max(255).optional(),
-  }).strict()).min(1).max(10).refine(unique, "Each repository can be installed once"),
+  }).strict()).min(1).max(CLOUD_V2_RECIPE_STORED_MAX).refine(unique, "Each repository can be installed once"),
   rebuiltFrom: z.number().int().positive().optional(),
 }).strict();
 export type CloudV2Recipe = z.infer<typeof CloudV2RecipeSchema>;
@@ -67,7 +71,7 @@ type RecipeEntry = CloudV2Recipe["repositories"][number];
 /** What an admin edits: repositories and how to set them up, never build outputs. */
 export const CloudV2RepositoryDraftSchema = z.object(editable).strict();
 export type CloudV2RepositoryDraft = z.infer<typeof CloudV2RepositoryDraftSchema>;
-export const CloudV2DraftSchema = z.array(CloudV2RepositoryDraftSchema).max(10).refine(unique, "Each repository can be installed once");
+export const CloudV2DraftSchema = z.array(CloudV2RepositoryDraftSchema).max(CLOUD_V2_RECIPE_STORED_MAX).refine(unique, "Each repository can be installed once");
 
 /** The editable part of a recipe, in its order. */
 export function editableRepositories(recipe: { repositories?: readonly Partial<RecipeEntry>[] } | null | undefined): CloudV2RepositoryDraft[] {
@@ -166,6 +170,29 @@ export class CloudV2Computers {
        WHERE m.org_id = $1 AND m.user_id = $2 AND NOT o.is_personal AND o.cloud_workspaces_allowed`, [organizationId, userId]));
     if (!rows[0]) throw new HttpError(404, "not_found", "Organization not found");
     return rows[0].role;
+  }
+
+  private limitRepositories(count: number): void {
+    if (!this.options.readyCopies && count > CLOUD_V2_RECIPE_LIMIT)
+      throw new HttpError(400, "invalid_request", "Invalid Cloud Computer repositories");
+  }
+
+  /** Two GitHub levels: a shared repository joins the configured repositories
+   * (the next build makes it live). Retried when the editor's revision moved. */
+  async addConfigured(organizationId: string, userId: string, repository: string): Promise<void> {
+    for (let attempt = 0; ; attempt++) {
+      const previous = await withSystemTx(this.pool, tx => this.configuredSources(tx, organizationId));
+      if (previous.repositories.some(entry => entry.repository.toLowerCase() === repository.toLowerCase())) return;
+      try { await this.saveRecipe(organizationId, userId, [...previous.repositories, { repository }], previous.revision); return; }
+      catch (error) { if (!(error instanceof HttpError && error.code === "computer_recipe_changed") || attempt >= 2) throw error; }
+    }
+  }
+
+  /** The configured repositories' admitted identities; empty when none were recorded. */
+  async configuredTargets(organizationId: string): Promise<CloudSourceTarget[]> {
+    const configured = await withSystemTx(this.pool, tx => this.configuredSources(tx, organizationId));
+    try { return configured.sources === null ? [] : readComputerSourceTargets(configured.repositories, configured.sources); }
+    catch { return []; }
   }
 
   async requireMember(organizationId: string, userId: string): Promise<void> {
@@ -295,6 +322,7 @@ export class CloudV2Computers {
   async saveRecipe(organizationId: string, userId: string, repositories: readonly CloudV2RepositoryDraft[], revision: number):
     Promise<{ recipe: { repositories: CloudV2RepositoryDraft[] }; recipeRevision: number }> {
     const parsed = CloudV2DraftSchema.parse(repositories);
+    this.limitRepositories(parsed.length);
     await this.requireAdmin(organizationId, userId);
     const previous = await withSystemTx(this.pool, tx => this.configuredSources(tx, organizationId));
     if (previous.revision !== revision) throw recipeChanged();
@@ -328,6 +356,7 @@ export class CloudV2Computers {
   async enqueue(organizationId: string, userId: string, recipe: CloudV2Recipe,
     options: { reason?: CloudV2BuildReason; configure?: boolean; runtimeSha256?: string } = {}): Promise<CloudV2Build> {
     const parsed = CloudV2RecipeSchema.parse(recipe);
+    this.limitRepositories(parsed.repositories.length);
     await this.requireAdmin(organizationId, userId);
     const previous = await withSystemTx(this.pool, tx => this.configuredSources(tx, organizationId));
     const sources = await this.admitSources(organizationId, userId, parsed.repositories, previous);

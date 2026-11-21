@@ -2,6 +2,8 @@
 // middleware always sets c.get("user"). Execution authority belongs to the persisted rollout mode.
 import { CloudV2InstallScriptSchema } from "./computer.js";
 import { ReadyCopySecretsSchema, type CloudV2ReadyCopySecrets } from "./ready-copy-secrets.js";
+import type { CloudRepositoryLevels } from "./repository-levels.js";
+import { createRepositoryLevelRoutes, type RepositoryLevelRouteDeps } from "./repository-level-routes.js";
 import type { CloudExecutionContexts } from "./execution/store.js";
 import { CloudWorkspaceCreateSchema, createCloudWorkspaceOperations } from "./workspace-create.js";
 import { rateLimit } from "../ratelimit.js";
@@ -73,9 +75,17 @@ export type CloudV2RouteDeps = {
   promptOutbox?: boolean;
   computers: Pick<CloudV2Computers, "requireMember" | "requireAdmin" | "overview" | "enqueue" | "buildConfigured" | "buildSourceTargets" | "saveRecipe" | "discardRecipe" | "reactivate" | "log" | "logRepositories">
     & Partial<Pick<CloudV2Computers, "saveInstallScript">>;
+  /** Two GitHub levels (ready copies on): which level a repository lives at for the caller. */
+  repositoryLevels?: Pick<CloudRepositoryLevels, "levelFor" | "repositories">;
+  /** The caller's own GitHub reading a repository: its identity and default branch. */
+  resolveMemberRepository?(organizationId: string, userId: string, repository: string): Promise<{ repository: string; repositoryId: string; defaultBranch: string }>;
+  /** Two GitHub levels' own routes. */
+  repositoryLevelRoutes?: RepositoryLevelRouteDeps;
+  /** After an admin saves or builds the Cloud Computer's repositories, they are shared repositories. */
+  syncSharedRepositories?(organizationId: string, userId: string): Promise<void>;
   /** Present only when ready copies are on (CloudV2Config.readyCopies). */
   readyCopies?: {
-    status(organizationId: string): Promise<ReadonlyMap<string, "ready" | "building" | null>>;
+    status(organizationId: string, viewerUserId?: string | null): Promise<ReadonlyMap<string, "ready" | "building" | null>>;
     failures(organizationId: string): Promise<{ repository: string; generation: number; reason: string; detail: string | null; finishedAt: string }[]>;
     secrets: Pick<CloudV2ReadyCopySecrets, "names" | "save" | "clear" | "update">;
   };
@@ -138,6 +148,7 @@ export function createCloudV2Routes(deps: CloudV2RouteDeps): Hono {
   if (deps.workspaceGithubReadTokens) app.route("/", createCloudWorkspaceGithubReadTokenRoutes(deps.workspaceGithubReadTokens));
   if (deps.environments) app.route("/", createCloudEnvironmentRoutes(deps.environments));
   if (deps.githubConnections) app.route("/",createCloudGithubConnectionRoutes(deps.githubConnections));
+  if (deps.repositoryLevelRoutes) app.route("/", createRepositoryLevelRoutes(deps.repositoryLevelRoutes));
   const documents = async (workspaces: readonly CloudV2Workspace[]) =>
     (deps.github ? await deps.github.documents(workspaces) : workspaces).map(workspace => workspaceDocument(workspace, deps.promptOutbox === true, !!chatEdits));
   const document = async (workspace: CloudV2Workspace) => {
@@ -348,10 +359,18 @@ export function createCloudV2Routes(deps: CloudV2RouteDeps): Hono {
       }
       catch (error) { if (!(error instanceof HttpError) || ![403,404].includes(error.status)) throw error; }
     }
+    // Two levels: the caller's own private repositories join the shared ones, marked;
+    // no other member's ever does. A released desktop reads the same list.
+    const levels = deps.repositoryLevels && repositories !== null ? await deps.repositoryLevels.repositories(organizationId, c.get("user").id) : null;
+    const listed: (CloudV2InstalledRepository & { level?: "shared" | "private" })[] = levels
+      ? [...allowed.map(entry => ({ ...entry, level: "shared" as const })),
+        ...(levels.personalAllowed ? levels.private.filter(own => !allowed.some(entry => entry.repository.toLowerCase() === own.repository))
+          .map(own => ({ repository: own.repository, defaultBranch: null, level: "private" as const })) : [])]
+      : allowed;
     // With ready copies, Create says a repository is still getting ready while its first copy builds.
-    const status = deps.readyCopies && allowed.length ? await deps.readyCopies.status(organizationId) : null;
+    const status = deps.readyCopies && listed.length ? await deps.readyCopies.status(organizationId, c.get("user").id) : null;
     return c.json({ repositories: repositories === null ? null : status
-      ? allowed.map(entry => ({ ...entry, readyCopy: status.get(entry.repository.toLowerCase()) ?? null })) : allowed });
+      ? listed.map(entry => ({ ...entry, readyCopy: status.get(entry.repository.toLowerCase()) ?? null })) : listed });
   });
 
   // The Create page calls this on intent for its selected repository, so the
@@ -437,6 +456,7 @@ export function createCloudV2Routes(deps: CloudV2RouteDeps): Hono {
     const build = "revision" in parsed.data
       ? await deps.computers.buildConfigured(organizationId, c.get("user").id, parsed.data.revision)
       : await deps.computers.enqueue(organizationId, c.get("user").id, { repositories: parsed.data.repositories }, { configure: true });
+    await deps.syncSharedRepositories?.(organizationId, c.get("user").id);
     return c.json({ build }, 202);
   });
 
@@ -446,7 +466,9 @@ export function createCloudV2Routes(deps: CloudV2RouteDeps): Hono {
     await deps.computers.requireAdmin(organizationId, c.get("user").id);
     const parsed = RecipeSchema.safeParse(await c.req.json().catch(() => null));
     if (!parsed.success) throw new HttpError(400, "invalid_request", "Invalid Cloud Computer repositories");
-    return c.json(await deps.computers.saveRecipe(organizationId, c.get("user").id, parsed.data.repositories, parsed.data.revision));
+    const saved = await deps.computers.saveRecipe(organizationId, c.get("user").id, parsed.data.repositories, parsed.data.revision);
+    await deps.syncSharedRepositories?.(organizationId, c.get("user").id);
+    return c.json(saved);
   });
 
   /** Discards unbuilt changes: the configured repositories return to the live build's. */

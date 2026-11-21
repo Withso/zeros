@@ -50,7 +50,9 @@ export class CloudTeamAuthority {
         AND p.provider_session_id=$5 AND p.access_epoch=w.access_epoch AND p.expires_at>clock_timestamp()) AS ongoing
       FROM cloud_v2_workspaces w JOIN organization_members m ON ${TEAM_MEMBER.replace("$2","$1")}
       WHERE w.id=ANY($7::uuid[]) AND w.state<>'deleted' AND ${CLOUD_V2_LIVE_ACCESS} AND ${SECURITY_STREAM_AUTHORITY}
-        AND (NOT w.source_pending OR w.creator_user_id=$1)`, [...securityStreamParameters(user),ids])).rows;
+        AND (NOT w.source_pending OR w.creator_user_id=$1)
+        -- A private repository's workspace exists for its member only, admins included.
+        AND (w.private_owner_user_id IS NULL OR w.private_owner_user_id=$1)`, [...securityStreamParameters(user),ids])).rows;
     if (!rows.length && !await securityStreamAuthority(tx,user)) throw new HttpError(401,"session_revoked","Authentication is no longer current");
     return new Map(rows.map(row => {
       const targets = z.array(CloudSourceTargetSchema).max(100).safeParse(row.sources);

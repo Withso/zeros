@@ -10,6 +10,7 @@ import { CloudV2Lifecycle } from "./lifecycle.js";
 import { CloudV2ReadyCopies, CloudV2ReadyCopyBuilder, CloudV2ReadyCopyForks, READY_COPY_REFRESH_STARTS, type ReadyCopyWorkspace } from "./ready-copies.js";
 import { CloudV2ReadyCopySecrets } from "./ready-copy-secrets.js";
 import { CloudV2Store } from "./store.js";
+import { CloudRepositoryLevels } from "./repository-levels.js";
 import { scheduleCloudDeletion } from "./deletion.js";
 import { withSystemTx } from "../db.js";
 
@@ -430,6 +431,60 @@ d("cloud v2 ready copies", () => {
     expect(fetch.command).not.toContain("synthetic-creator-token");
     expect(fetch.input).toContain(Buffer.from("x-access-token:synthetic-creator-token").toString("base64"));
     expect(fetch.input).not.toContain(Buffer.from("x-access-token:synthetic-base-token").toString("base64"));
+  });
+
+  it("builds a private repository's copy as its member, forks it only for that member, and stops with the setting", async () => {
+    await liveBase();
+    const levels = new CloudRepositoryLevels(pool);
+    const other = randomUUID();
+    await pool.query("INSERT INTO users (id, email, display_name) VALUES ($1, $2, 'U')", [other, `u-${other}@example.test`]);
+    await grantTestPro(pool, other);
+    await pool.query("INSERT INTO organization_members (org_id, user_id, role) VALUES ($1, $2, 'member')", [org, other]);
+    const entry = await levels.add(org, member, { repository: "withso/notes", repositoryId: "9001", level: "private" });
+    const cloneToken = vi.fn(async () => "synthetic-member-token");
+    await copyBuilder({ cloneToken }).queuePrivateCopy(org, member, "withso/notes");
+    // One build a tick: the shared repository's first copy, then this one.
+    await copyBuilder({ cloneToken }).tick();
+    await copyBuilder({ cloneToken }).tick();
+    expect(await copies.list(org, "withso/notes")).toMatchObject([{ state: "ready" }]);
+    expect(cloneToken).toHaveBeenCalledWith(org, member, { repository: "withso/notes", repositoryId: "9001" });
+    const copy = (await copies.list(org, "withso/notes"))[0]!;
+    expect(copy).toMatchObject({ state: "ready", ownerUserId: member });
+    // Not the admin's page, not another member's status.
+    expect(await copies.failures(org)).toEqual([]);
+    expect([...(await copies.status(org, other)).keys()]).not.toContain("withso/notes");
+    expect((await copies.status(org, member)).get("withso/notes")).toBe("ready");
+
+    const store = new CloudV2Store(pool), base = (await copies.base(org))!, id = randomUUID();
+    const created = await store.createWorkspace({ id, organizationId: org, creatorUserId: member, name: "notes", repository: "withso/notes",
+      branch: "zeros/n", baseBranch: "main", computerBuildId: base.buildId, privateRepositoryId: entry.id });
+    expect(created).toMatchObject({ privateOwnerUserId: member });
+    await expect(store.createWorkspace({ id: randomUUID(), organizationId: org, creatorUserId: other, name: "notes", repository: "withso/notes",
+      branch: "zeros/o", baseBranch: "main", computerBuildId: base.buildId, privateRepositoryId: entry.id })).rejects.toMatchObject({ code: "private_repository_unavailable" });
+    const forked = await forks().prepare(workspace({ id, privateOwnerUserId: member, repository: "withso/notes" })) as { sandboxId: string };
+    expect(boat.machine(forked.sandboxId)!.source).toBe(copy.machineId);
+    // Another member's workspace never reaches the private copy, even asked directly.
+    const theirs = randomUUID();
+    await pool.query(`INSERT INTO cloud_v2_workspaces (id, org_id, creator_user_id, name, repository, branch, base_branch, state)
+      VALUES ($1,$2,$3,'notes','withso/notes','zeros/t','main','creating')`, [theirs, org, other]);
+    expect(await forks().prepare(workspace({ id: theirs, repository: "withso/notes" }))).toBeNull();
+    await expect(copies.beginFork(theirs, org, copy.id, new Date(clock))).rejects.toMatchObject({ code: "private_repository_owner_only" });
+
+    // Forbidden for one member: no refresh, no create; the copy and its workspace stay.
+    await levels.setPersonalAllowed(org, admin, false);
+    clock += 8 * DAY;
+    await copyBuilder({ cloneToken }).maintain();
+    expect(await copies.list(org, "withso/notes")).toHaveLength(1);
+    await expect(store.createWorkspace({ id: randomUUID(), organizationId: org, creatorUserId: member, name: "notes", repository: "withso/notes",
+      branch: "zeros/m", baseBranch: "main", computerBuildId: base.buildId, privateRepositoryId: entry.id })).rejects.toMatchObject({ code: "private_repository_unavailable" });
+    // Allowed again but unforked for 14 days: no longer refreshed either.
+    await levels.setPersonalAllowed(org, admin, true);
+    await pool.query("UPDATE cloud_v2_ready_copies SET last_forked_at=$2 WHERE id=$1", [copy.id, new Date(clock - 15 * DAY)]);
+    await copyBuilder({ cloneToken }).maintain();
+    expect(await copies.list(org, "withso/notes")).toHaveLength(1);
+    await pool.query("UPDATE cloud_v2_ready_copies SET last_forked_at=$2 WHERE id=$1", [copy.id, new Date(clock - DAY)]);
+    await copyBuilder({ cloneToken }).maintain();
+    expect(await copies.list(org, "withso/notes")).toMatchObject([{ state: "ready" }, { state: "building", refresh: true, ownerUserId: member }]);
   });
 
   it("never stamps a workspace's activity when a copy is built or forked", async () => {

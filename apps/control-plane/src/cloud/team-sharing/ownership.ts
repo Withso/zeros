@@ -1,3 +1,4 @@
+import { privateWorkspaceRefused } from "../repository-levels.js";
 import { createHash } from "node:crypto";
 import { z } from "zod";
 import type { AuthedUser } from "../../auth.js";
@@ -70,6 +71,7 @@ export class CloudTeamOwnership {
 
   async candidates(id: string, user: AuthedUser, page: TeamCandidatesQuery) {
     const proof = await this.sharing.authority.admit(id, user);
+    if (proof.view.workspace.privateOwnerUserId) throw privateWorkspaceRefused();
     this.requireEnabled(proof.view); this.manager(proof.view);
     const key = teamCursorKey(["reassign", id, user.id]), revision = proof.view.creatorRevision;
     const self = "self" in page, limit = self ? 1 : page.limit;
@@ -150,6 +152,8 @@ export class CloudTeamOwnership {
 
   async reassign(id: string, user: AuthedUser, body: TeamReassign) {
     const proof = await this.sharing.authority.admit(id, user);
+    // A private repository's workspace stays its member's: refused here, whatever the client shows.
+    if (proof.view.workspace.privateOwnerUserId) throw privateWorkspaceRefused();
     this.requireEnabled(proof.view);
     const hash = createHash("sha256").update(JSON.stringify(body)).digest("hex");
     const previous = await withSystemTx(this.sharing.pool, async tx => {

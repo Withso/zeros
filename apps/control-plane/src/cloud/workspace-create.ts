@@ -6,6 +6,7 @@ import type { CloudV2InstalledRepository, CloudV2Workspace } from "./store.js";
 import { CloudSourceTargetSchema } from "./source-authority.js";
 import { refuseRuntimeCanary } from "./runtime-canary.js";
 import { executionWorkerRequired } from "./execution/errors.js";
+import { personalRepositoriesForbidden } from "./repository-levels.js";
 
 const uuid = z.string().uuid();
 const branchName = z.string().min(1).max(255).regex(/^(?!-)(?!.*\.\.)(?!.*\/\/)(?!.*\.lock$)[A-Za-z0-9._/-]+$/);
@@ -99,6 +100,25 @@ export function createCloudWorkspaceOperations(deps: CloudV2RouteDeps) {
       const workspace = await deps.store.createWorkspace(create);
       return { status: 201 as const, response: await options.document(workspace) };
     };
+    // Two GitHub levels: a repository only the caller keeps is created from its own entry,
+    // checked against the caller's own GitHub access alone. Shared wins (levelFor).
+    const level = deps.repositoryLevels ? await deps.repositoryLevels.levelFor(input.organizationId, userId, input.repository) : null;
+    if (level?.level === "private") {
+      if (!level.allowed) throw personalRepositoriesForbidden();
+      if (!computer.baseOnly) throw await computerUnavailable(input.organizationId, userId);
+      if (!deps.resolveMemberRepository || runtimeCanary || deps.actingUserDefault)
+        throw new HttpError(409, "private_repository_unavailable", "This repository can't be used for this workspace.");
+      const resolved = await deps.resolveMemberRepository(input.organizationId, userId, level.entry.repository);
+      if (resolved.repositoryId !== level.entry.repositoryId) throw new HttpError(409, "cloud_source_review_required", "The repository's identity changed.");
+      const target = { repository: resolved.repository, repositoryId: resolved.repositoryId };
+      const baseBranch = input.baseBranch ?? resolved.defaultBranch;
+      if (await deps.remoteHead(input.organizationId, userId, target, baseBranch) === null)
+        throw new HttpError(404, "repository_branch_not_found", `Branch ${baseBranch} does not exist in ${target.repository}.`);
+      const id = randomUUID(), name = input.name ?? input.repository.split("/")[1]!;
+      return record({ id, organizationId: input.organizationId, creatorUserId: userId, name, repository: level.entry.repository,
+        branch: input.branch ?? `${prefix}${slug(name)}-${id.slice(0, 8)}`, baseBranch, computerBuildId: computer.buildId,
+        sourceRepositoryId: target.repositoryId, privateRepositoryId: level.entry.id });
+    }
     const named = (entry: CloudV2InstalledRepository) => entry.repository.toLowerCase() === input.repository.toLowerCase();
     // Returns before its GitHub checks, which the lifecycle runs before any VM
     // exists. A canary binds a repository ID, and a renamed repository's name
