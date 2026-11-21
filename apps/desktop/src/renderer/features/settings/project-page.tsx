@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 import { Button } from "../../shared/ui";
 import type { Project } from "../../state/projects-store";
 import { joinProjects, registeredProjectSide, type ProjectSide } from "../../state/project-identity";
@@ -8,6 +8,7 @@ import { useOptionalAddProject } from "../../shell/add-project-provider";
 import { ProjectLocalPart } from "../repositories/repositories-panel";
 import { CloudRepositoryPanel } from "./cloud-repository-panel";
 import { PlaceLabel, SettingsGroup, SettingsPageSection, SettingsRow, SettingsSection } from "./settings-ui";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../../shared/ui/primitives/select";
 
 /** One GitHub repository's sides as Settings lists them. */
 export interface SettingsProject {
@@ -34,6 +35,8 @@ export function ProjectPage({
   surfaceActive,
   cloudAvailable,
   canManageCloud,
+  initialFolderId,
+  onFolderChange,
   onAddToCloud,
   onOpenEnvironment,
   onOpenCloudComputer,
@@ -43,6 +46,10 @@ export function ProjectPage({
   /** This owner can have cloud repositories (an organization with cloud). */
   cloudAvailable: boolean;
   canManageCloud: boolean;
+  /** A saved or linked folder of this project; otherwise its default folder. */
+  initialFolderId?: string | null;
+  /** Remembers a folder chosen on the page. */
+  onFolderChange?(folderId: string): void;
   onAddToCloud(): void;
   onOpenEnvironment(): void;
   onOpenCloudComputer(): void;
@@ -52,7 +59,10 @@ export function ProjectPage({
   const onCloneToMac = addProject
     ? (github: string) => addProject.openGithubProject({ placement: "local", url: `https://github.com/${github}.git` })
     : null;
-  const main = project.local[0];
+  const [folderId, setFolderId] = useState(
+    () => project.local.find(folder => folder.id === initialFolderId)?.id ?? project.local[0]?.id ?? null,
+  );
+  const main = project.local.find(folder => folder.id === folderId) ?? project.local[0];
   const cloud = project.cloudRepository;
   const both = Boolean(main && cloud);
   const side = (place: "mac" | "cloud", content: ReactNode) =>
@@ -89,6 +99,20 @@ export function ProjectPage({
               <Button variant="secondary" size="sm" onClick={onAddToCloud}>Add to cloud</Button>
             </SettingsRow>
           ) : null}
+          {main && project.local.length > 1 && (
+            <SettingsRow label="Folder these settings apply to" hint="Each folder keeps its own settings on this Mac.">
+              <Select value={main.id} onValueChange={id => { setFolderId(id); onFolderChange?.(id); }}>
+                <SelectTrigger width="fixed" aria-label="Folder these settings apply to"><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  {project.local.map((folder, index) => (
+                    <SelectItem key={folder.id} value={folder.id}>
+                      {index === 0 ? `${folder.repoRoot} (default)` : folder.repoRoot}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </SettingsRow>
+          )}
         </SettingsGroup>
       </SettingsPageSection>
 

@@ -97,7 +97,9 @@ vi.mock("../local-commands-settings", () => ({
 vi.mock("../migrate-legacy", () => ({ ensureSettingsTomlMigrated: vi.fn() }));
 vi.mock("../project-page", async (original) => ({
   ...(await original<typeof import("../project-page")>()),
-  ProjectPage: ({ project }: { project: { key: string } }) => `project-page-fixture:${project.key}`,
+  ProjectPage: ({ project, initialFolderId, onFolderChange }: { project: { key: string }; initialFolderId?: string | null; onFolderChange?(id: string): void }) =>
+    createElement("button", { "data-project-fixture": "", onClick: () => onFolderChange?.("project-zeros-second") },
+      `project-page-fixture:${project.key}`, initialFolderId ? ` folder:${initialFolderId}` : ""),
 }));
 vi.mock("../../../shell/add-project-provider", () => ({
   useAddProject: () => ({ openProject: vi.fn(), openGithubProject: vi.fn(), quickStart: vi.fn() }),
@@ -217,6 +219,26 @@ describe("unified Settings rail", () => {
     }
     expect(state.writes).toEqual([]);
     expect(state.dispatch).not.toHaveBeenCalled();
+  });
+
+  it("opens the clone a saved or linked folder names, and remembers a folder chosen on the page", () => {
+    state.organization = ORGANIZATION;
+    state.projects = [
+      { id: "project-zeros", name: "Zeros", repoRoot: "/Users/me/zeros", originUrl: "git@github.com:withso/zeros.git", addedAt: 1 },
+      { id: "project-zeros-second", name: "Zeros", repoRoot: "/Users/me/zeros-2", originUrl: "https://github.com/withso/zeros.git", addedAt: 5 },
+    ];
+    state.saved.set(`${ORGANIZATION_OWNER}:section`, "repo:project-zeros-second:git");
+    render();
+    expect(rail().slice(-2)).toEqual(["Projects", "Zeros"]);
+    expect(container.textContent).toContain("project-page-fixture:github:withso/zeros folder:project-zeros-second");
+
+    state.saved.set(`${ORGANIZATION_OWNER}:section`, "project:github:withso/zeros");
+    render();
+    expect(container.textContent).toContain("project-page-fixture:github:withso/zeros");
+    expect(container.textContent).not.toContain("folder:");
+    act(() => (container.querySelector("[data-project-fixture]") as HTMLElement).click());
+    expect(state.writes.at(-1)).toEqual([ORGANIZATION_OWNER, "section", "repo:project-zeros-second:overview"]);
+    expect(container.textContent).toContain("folder:project-zeros-second");
   });
 
   it("shows this Mac's projects under the Personal owner with no cloud side", () => {

@@ -626,6 +626,8 @@ function ScopedSettingsPage({ owner }: { owner: string }) {
     : selection.scope === "cloud-repo"
       ? joinedProjects.find(project => project.cloudRepository?.toLowerCase() === selection.repository.toLowerCase())
       : undefined;
+  // A non-default clone is chosen by its folder selection, so a link or a saved choice reopens it.
+  const projectFolderId = currentProject && selection.scope === "repo" ? selection.repoId : null;
   const activeSection: SectionDef | null =
     selection.scope === "user"
       ? (availableSections.find((s) => s.id === selection.section) ??
@@ -826,7 +828,9 @@ function ScopedSettingsPage({ owner }: { owner: string }) {
                     <h1 className={PAGE_HEADING_CLS}>{currentProject.label}</h1>
                     <p className="text-fg2 m-0 truncate text-xs leading-4.5">{currentProject.subtitle}</p>
                   </header>
-                  <ProjectPage key={currentProject.key} project={currentProject} surfaceActive={pageActive}
+                  <ProjectPage key={`${currentProject.key}|${projectFolderId ?? ""}`} project={currentProject} surfaceActive={pageActive}
+                    initialFolderId={projectFolderId}
+                    onFolderChange={folderId => setActive(repoSelection(folderId, REPO_OVERVIEW))}
                     cloudAvailable={!local && availableSectionIds.has("cloud-computer")}
                     canManageCloud={organization?.role === "owner" || organization?.role === "admin"}
                     onAddToCloud={() => setActive(userSelection("cloud-computer"))}

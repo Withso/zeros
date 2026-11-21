@@ -23,9 +23,10 @@ const folder = (id: string, originUrl: string | null, addedAt = 1): Project =>
 let container: HTMLDivElement;
 let root: Root;
 const handlers = { onAddToCloud: vi.fn(), onOpenEnvironment: vi.fn(), onOpenCloudComputer: vi.fn() };
-function render(project: SettingsProject, options: { cloudAvailable?: boolean; canManageCloud?: boolean } = {}) {
+function render(project: SettingsProject, options: { cloudAvailable?: boolean; canManageCloud?: boolean; initialFolderId?: string } = {}) {
   act(() => root.render(createElement(ProjectPage, {
-    project, surfaceActive: true, cloudAvailable: options.cloudAvailable ?? true, canManageCloud: options.canManageCloud ?? true, ...handlers,
+    key: options.initialFolderId, project, surfaceActive: true, cloudAvailable: options.cloudAvailable ?? true,
+    canManageCloud: options.canManageCloud ?? true, initialFolderId: options.initialFolderId, ...handlers,
   })));
   return container.textContent ?? "";
 }
@@ -131,9 +132,24 @@ describe("project page", () => {
     expect(button("Clone to this Mac")).toBeUndefined();
   });
 
-  it("marks the default of two clones", () => {
+  it("marks the default of two clones and edits the default unless another is chosen", () => {
     const [two] = settingsProjects([folder("second", "withso/zeros", 9), folder("first", "withso/zeros", 2)], []);
     expect(two.local.map(row => row.id)).toEqual(["first", "second"]);
-    expect(render(two)).toContain("/Users/me/first · Default for new workspaces");
+    let text = render(two);
+    expect(text).toContain("/Users/me/first · Default for new workspaces");
+    expect(container.querySelector('[aria-label="Folder these settings apply to"]')?.textContent).toBe("/Users/me/first (default)");
+    expect(text).toContain("local-git:first");
+    expect(text).not.toContain("local-git:second");
+    text = render(two, { initialFolderId: "second" });
+    expect(container.querySelector('[aria-label="Folder these settings apply to"]')?.textContent).toBe("/Users/me/second");
+    expect(text).toContain("local-git:second");
+    expect(text).not.toContain("local-git:first");
+    text = render(two, { initialFolderId: "gone" });
+    expect(text).toContain("local-git:first");
+  });
+
+  it("offers no folder choice for one clone", () => {
+    render(both);
+    expect(container.querySelector('[aria-label="Folder these settings apply to"]')).toBeNull();
   });
 });
