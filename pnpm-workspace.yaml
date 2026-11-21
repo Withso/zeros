@@ -90,3 +90,6 @@ patchedDependencies:
   "app-builder-lib@26.15.4": patches/app-builder-lib@26.15.4.patch
   # Retire the thumb animation loop when its viewport or surface is removed.
   "@radix-ui/react-scroll-area@1.2.10": patches/@radix-ui__react-scroll-area@1.2.10.patch
+  # Editor selection fixes, listed in THIRD-PARTY-NOTICES.md: whole-line
+  # line-number drags, fresh removed-line selections and Cut after them.
+  "@pierre/diffs@1.4.1": patches/@pierre__diffs@1.4.1.patch

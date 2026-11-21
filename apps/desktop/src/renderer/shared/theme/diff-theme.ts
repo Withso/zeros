@@ -202,6 +202,10 @@ const WORKBENCH_DIFF_CSS = `
   [data-column-number] { padding-inline: 12px; border-right-width: 0; }
   [data-line] { padding-inline: 4px 6px; }
   ::selection { background-color: color-mix(in srgb, var(--fg1) 18%, transparent); }
+  /* The editor hides native selection and paints its own from the theme's
+     editor.selectionBackground, else the row colour, which leaves it invisible.
+     Set below :host so it wins over the editor's own :host rule. */
+  pre { --diffs-editor-selection-bg: color-mix(in srgb, var(--fg1) 18%, transparent); }
 ${CHANGE_GUTTER_CSS}${CARET_LINE_CSS}`;
 
 /** For a single-file diff whose base is empty (the Files Diff view of a new
