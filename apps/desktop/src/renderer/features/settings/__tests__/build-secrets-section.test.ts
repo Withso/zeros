@@ -15,7 +15,8 @@ describe("build secrets", () => {
     expect(html).toContain("NPM_TOKEN");
     expect(html).toContain('aria-label="Remove NPM_TOKEN"');
     expect(html).toMatch(/type="password"[^>]*aria-label="Build secret value"|aria-label="Build secret value"[^>]*type="password"/);
-    expect(html).toContain("Values shorter than 4 characters are not searched for.");
+    expect(html).toContain("Values shorter than 4 characters are not checked for on the disk.");
+    expect(html).toContain("Given to setup scripts while the project is built. Workspaces never get them.");
     expect(html).toContain("Don&#x27;t write a value to a file");
   });
 });
