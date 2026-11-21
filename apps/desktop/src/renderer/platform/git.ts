@@ -265,6 +265,8 @@ export interface Workspace {
   present?: boolean;
   /** Known only for withChanges reads; counts the All Changes net comparison. */
   hasChanges?: boolean;
+  /** Local only: the workspace whose agent created this one (`zeros local`). */
+  parentWorkspaceId?: string | null;
 }
 
 export interface WorkspaceSetupInfo {

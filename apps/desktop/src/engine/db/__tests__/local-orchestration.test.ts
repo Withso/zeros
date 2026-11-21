@@ -208,3 +208,51 @@ describe("local orchestration store", () => {
     expect(isHumanStopped("c")).toBe(true);
   });
 });
+
+describe("local orchestration lineage reads", () => {
+  it("indexes every link by child with its parent and root", async () => {
+    useTmpDb();
+    const { localLineageIndex } = await import("../local-orchestration");
+    insertLocalLink({ chatId: "child", parentChatId: "root", now: 1 });
+    insertLocalLink({ chatId: "grandchild", parentChatId: "child", now: 2 });
+    const index = localLineageIndex();
+    expect(index.get("child")).toEqual({ parentChatId: "root", rootChatId: "root" });
+    expect(index.get("grandchild")).toEqual({ parentChatId: "child", rootChatId: "root" });
+    expect(index.has("root")).toBe(false);
+  });
+
+  it("resolves an agent-created workspace to the workspace of the chat that created it", async () => {
+    useTmpDb();
+    const { localWorkspaceOrigins } = await import("../local-orchestration");
+    const { openZerosDb } = await import("../index");
+    const { upsertChat, setChatWorkspaceResolver } = await import("../chats");
+    setChatWorkspaceResolver((folder) => (folder === "/repo/.zeros/w-13" ? "ws-13" : null));
+    upsertChat({
+      id: "creator", folder: "/repo/.zeros/w-13", agentId: "claude", agentName: null, model: null, effort: "high",
+      permissionMode: "default", lastModeId: null, prePlanModeId: null, fast: false, additionalDirectories: [],
+      title: "Creator", createdAt: 1, updatedAt: 1, sessionId: null, pinned: false, archived: false, sourceChatId: null, kind: null,
+    });
+    recordFamilyWorkspace({ rootChatId: "creator", workspaceId: "ws-14", createdByChatId: "creator", now: 2 });
+    recordFamilyWorkspace({ rootChatId: "elsewhere", workspaceId: "ws-15", createdByChatId: "missing-chat", now: 3 });
+    const origins = localWorkspaceOrigins();
+    expect(origins.get("ws-14")).toEqual({ createdByChatId: "creator", parentWorkspaceId: "ws-13" });
+    expect(origins.get("ws-15")).toEqual({ createdByChatId: "missing-chat", parentWorkspaceId: null });
+    expect(openZerosDb()).toBeTruthy();
+    setChatWorkspaceResolver(null);
+  });
+
+  it("stamps lineage onto chat rows without touching unlinked chats", async () => {
+    useTmpDb();
+    const { withChatLineage } = await import("../chats");
+    insertLocalLink({ chatId: "child", parentChatId: "root", now: 1 });
+    const base = {
+      folder: "/repo", agentId: "claude", agentName: null, model: null, effort: "high", permissionMode: "default",
+      lastModeId: null, prePlanModeId: null, fast: false, additionalDirectories: [], title: "t", createdAt: 1,
+      updatedAt: 1, sessionId: null, pinned: false, archived: false, sourceChatId: null, kind: null,
+    };
+    const root = { ...base, id: "root" };
+    const [stampedRoot, stampedChild] = withChatLineage([root, { ...base, id: "child" }]);
+    expect(stampedRoot).toBe(root);
+    expect(stampedChild).toMatchObject({ id: "child", parentChatId: "root", rootChatId: "root" });
+  });
+});

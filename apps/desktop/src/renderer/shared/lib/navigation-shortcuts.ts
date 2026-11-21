@@ -3,7 +3,7 @@ export type MessageNavigation = "previous" | "next" | "first" | "last";
 
 export type NavigationShortcut =
   | { kind: "workspace-number"; index: number }
-  | { kind: "workspace" | "chat-tab" | "side-tab"; direction: NavigationDirection }
+  | { kind: "workspace" | "chat-tab" | "side-tab" | "parent-session"; direction: NavigationDirection }
   | { kind: "create-workspace" }
   | { kind: "agent-panel-scroll"; direction: "top" | "bottom" }
   | { kind: "message"; direction: MessageNavigation };
@@ -43,6 +43,9 @@ export function resolveNavigationShortcut(event: NavigationKey): NavigationShort
     return { kind: "workspace-number", index: Number(event.code.slice(-1)) - 1 };
   }
   if (event.code === "KeyN") return { kind: "create-workspace" };
+  if (event.code === "BracketLeft" || event.code === "BracketRight") {
+    return { kind: "parent-session", direction: event.code === "BracketLeft" ? -1 : 1 };
+  }
   if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
     return { kind: "chat-tab", direction: event.key === "ArrowLeft" ? -1 : 1 };
   }

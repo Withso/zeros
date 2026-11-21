@@ -338,6 +338,28 @@ describe("immediate archive presentation", () => {
     expect(useWorkspaceStore.getState().activePage).toBe("create");
   });
 
+  it.each([
+    ["confirmed", false],
+    ["timed-out then confirmed", true],
+  ] as const)("archives agent-created child workspaces with a %s parent archive", async (_label, timedOut) => {
+    const child = { ...workspace("child", 4), parentWorkspaceId: target.id };
+    setWorkspaceRowsForTesting(target.repoSlug, [left, target, right, child]);
+    vi.useFakeTimers();
+    vi.stubGlobal("window", { setTimeout, clearTimeout });
+    if (timedOut) {
+      vi.mocked(workspaceArchive).mockRejectedValueOnce(new Error("Request timeout: WORKSPACE_REQUEST"));
+      vi.mocked(workspaceGet).mockResolvedValue(result().workspace!);
+      vi.mocked(workspaceLifecycleStatus).mockResolvedValue({ active: false, operation: null, phase: null, startedAt: null });
+    } else {
+      vi.mocked(workspaceArchive).mockResolvedValueOnce(result());
+    }
+    vi.mocked(workspaceArchive).mockResolvedValueOnce(result(child));
+    await archiveWorkspaceWithFeedback(target, dispatch);
+    await vi.advanceTimersByTimeAsync(3_000);
+    const archived = vi.mocked(workspaceArchive).mock.calls.map(([input]) => input.workspaceId);
+    expect(archived).toEqual([target.id, child.id]);
+  });
+
   it("keeps a timed-out archive hidden through stale reads until exact confirmation, without a toast", async () => {
     vi.useFakeTimers();
     vi.stubGlobal("window", { setTimeout, clearTimeout });

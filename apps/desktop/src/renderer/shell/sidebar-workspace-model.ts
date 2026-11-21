@@ -58,6 +58,12 @@ export type SidebarWorkspaceItem =
       key: string;
       project: Project;
       workspace: Workspace;
+      /** Child-workspace nesting (`zeros local`): 0 for a top-level row. */
+      depth?: number;
+      /** Child workspaces listed under this row, shown or not. */
+      childCount?: number;
+      /** Whether this row's child workspaces are shown. */
+      expanded?: boolean;
     }
   | {
       kind: "pending";
@@ -149,7 +155,44 @@ export function rowsShownForPlacements<T extends { placement?: "local" | "cloud"
   return rows.filter((row) => !hidden.includes(cloud(row) ? "cloud" : "local"));
 }
 
+/** Move each agent-created workspace under the workspace whose chat created
+ * it. Children stay hidden until their parent is in `expanded`. */
+export function nestChildWorkspaces(
+  items: readonly SidebarWorkspaceItem[],
+  expanded: ReadonlySet<string>,
+): SidebarWorkspaceItem[] {
+  const ids = new Set(items.flatMap(item => item.kind === "workspace" ? [item.workspace.id] : []));
+  const childrenOf = new Map<string, SidebarWorkspaceItem[]>();
+  const top: SidebarWorkspaceItem[] = [];
+  for (const item of items) {
+    const parent = item.kind === "workspace" ? item.workspace.parentWorkspaceId : null;
+    if (item.kind === "workspace" && parent && parent !== item.workspace.id && ids.has(parent)) {
+      const rows = childrenOf.get(parent);
+      if (rows) rows.push(item);
+      else childrenOf.set(parent, [item]);
+    } else top.push(item);
+  }
+  if (childrenOf.size === 0) return [...items];
+  const out: SidebarWorkspaceItem[] = [];
+  const seen = new Set<string>();
+  const visit = (item: SidebarWorkspaceItem, depth: number) => {
+    if (seen.has(item.key)) return;
+    seen.add(item.key);
+    if (item.kind !== "workspace") { out.push(item); return; }
+    const children = childrenOf.get(item.workspace.id) ?? [];
+    const open = children.length > 0 && expanded.has(item.workspace.id);
+    out.push(children.length || depth ? { ...item, depth, childCount: children.length, expanded: open } : item);
+    if (open) for (const child of children) visit(child, depth + 1);
+  };
+  for (const item of top) visit(item, 0);
+  return out;
+}
+
+const NO_EXPANDED: ReadonlySet<string> = new Set();
+
 export function buildSidebarWorkspaceEntries(args: {
+  /** Workspaces whose child workspaces are shown; others start collapsed. */
+  expandedWorkspaceIds?: ReadonlySet<string>;
   filter: SidebarWorkspaceListFilter;
   sort?: SidebarWorkspaceSort;
   repositoryIds?: readonly string[];
@@ -161,6 +204,7 @@ export function buildSidebarWorkspaceEntries(args: {
   projectGroupOf?: (projectId: string) => readonly Project[] | undefined;
 }): SidebarWorkspaceEntry[] {
   const { filter, sort = "updated", activity, projectGroupOf } = args;
+  const nest = (items: SidebarWorkspaceItem[]) => nestChildWorkspaces(items, args.expandedWorkspaceIds ?? NO_EXPANDED);
   // Selecting any side of a joined project selects the whole project.
   const selectedIds = new Set(projectGroupOf
     ? (args.repositoryIds ?? []).flatMap(id => projectGroupOf(id)?.map(project => project.id) ?? [id])
@@ -220,9 +264,10 @@ export function buildSidebarWorkspaceEntries(args: {
       // projection so a filtered-out cloud repository cannot enter mixed rows.
       if (project && visibleProjectIds.has(project.id)) workspaces.push(workspaceItem(project, workspace));
     }
-    const items = [...unregisteredCloudCreates, ...pending]
+    const mixed = [...unregisteredCloudCreates, ...pending]
       .sort((a, b) => (b.kind === "pending" ? finiteTimestamp(b.pending.startedAt) : 0) - (a.kind === "pending" ? finiteTimestamp(a.pending.startedAt) : 0))
       .concat(workspaces);
+    const items = filter === "status" ? mixed : nest(mixed);
     const representedProjects = new Set(items.map((item) => item.project.id));
     const entries: SidebarWorkspaceEntry[] = filter === "status"
       ? LIFECYCLE_STATUSES.map(status => ({
@@ -272,7 +317,7 @@ export function buildSidebarWorkspaceEntries(args: {
         ...orderWorkspaces(members.flatMap(member => workspacesByProject.get(member.id) ?? []))
           .map(workspace => workspaceItem(memberOf.get(workspace.id)!, workspace)),
       ];
-      return [{ kind: "repository" as const, key: `project:${head.id}`, project: head, items }];
+      return [{ kind: "repository" as const, key: `project:${head.id}`, project: head, items: nest(items) }];
     }
     const items = [
       ...(pendingByProject.get(project.id) ?? []).map((pending) =>
@@ -297,7 +342,7 @@ export function buildSidebarWorkspaceEntries(args: {
         kind: "repository" as const,
         key: `project:${project.id}`,
         project,
-        items,
+        items: nest(items),
       },
     ];
   });

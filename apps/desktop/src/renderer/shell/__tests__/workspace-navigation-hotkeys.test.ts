@@ -129,6 +129,7 @@ describe("workspace navigation from the current sidebar projection", () => {
 describe("arrow shortcut ownership", () => {
   it.each([
     ["ArrowLeft", false, "chat-tab", -1], ["ArrowRight", false, "chat-tab", 1],
+    ["BracketLeft", false, "parent-session", -1], ["BracketRight", false, "parent-session", 1],
     ["ArrowLeft", true, "side-tab", -1], ["ArrowRight", true, "side-tab", 1],
     ["ArrowUp", true, "workspace", -1], ["ArrowDown", true, "workspace", 1],
     ["ArrowUp", false, "message", "previous"], ["ArrowDown", false, "message", "next"],
