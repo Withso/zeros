@@ -14,7 +14,7 @@ export const computerSourceReviewRequired = () => new HttpError(409, "cloud_sour
 /** Position and original path bind each recipe/setup to its admitted source.
  * This never consults GitHub to fill missing historical provenance. */
 export function readComputerSourceTargets(repositories: readonly { repository: string }[], value: unknown): CloudSourceTarget[] {
-  const parsed = z.array(CloudSourceTargetSchema).max(10).safeParse(value);
+  const parsed = z.array(CloudSourceTargetSchema).max(200).safeParse(value);
   if (!parsed.success || parsed.data.length !== repositories.length ||
     new Set(parsed.data.map(target => target.repositoryId)).size !== parsed.data.length ||
     parsed.data.some((target, index) => target.repository.toLowerCase() !== repositories[index]!.repository.toLowerCase()))

@@ -8,6 +8,9 @@ const s = vi.hoisted(() => ({ openGithubProject: vi.fn(), addProject: true }));
 vi.mock("../../repositories/repositories-panel", () => ({
   ProjectLocalPart: ({ part, project }: { part: string; project: { id: string } }) => `local-${part}:${project.id}`,
 }));
+vi.mock("../ready-copy-section", () => ({
+  ReadyCopySection: ({ projectId }: { projectId: string }) => `ready-copy:${projectId}`,
+}));
 vi.mock("../cloud-repository-panel", () => ({
   CloudRepositoryPanel: ({ part, repository }: { part: string; repository: string }) => `cloud-${part}:${repository}`,
 }));
@@ -23,10 +26,14 @@ const folder = (id: string, originUrl: string | null, addedAt = 1): Project =>
 let container: HTMLDivElement;
 let root: Root;
 const handlers = { onAddToCloud: vi.fn(), onOpenEnvironment: vi.fn(), onOpenCloudComputer: vi.fn() };
-function render(project: SettingsProject, options: { cloudAvailable?: boolean; canManageCloud?: boolean; initialFolderId?: string } = {}) {
+type Sharing = NonNullable<Parameters<typeof ProjectPage>[0]["sharing"]>;
+function render(project: SettingsProject, options: { cloudAvailable?: boolean; canManageCloud?: boolean; initialFolderId?: string; sharing?: Sharing;
+  readyCopy?: { organizationId: string; projectId: string } } = {}) {
   act(() => root.render(createElement(ProjectPage, {
     key: options.initialFolderId, project, surfaceActive: true, cloudAvailable: options.cloudAvailable ?? true,
     canManageCloud: options.canManageCloud ?? true, initialFolderId: options.initialFolderId, ...handlers,
+    ...(options.sharing ? { sharing: options.sharing } : {}),
+    ...(options.readyCopy ? { readyCopy: options.readyCopy } : {}),
   })));
   return container.textContent ?? "";
 }
@@ -146,6 +153,32 @@ describe("project page", () => {
     expect(text).not.toContain("local-git:first");
     text = render(two, { initialFolderId: "gone" });
     expect(text).toContain("local-git:first");
+  });
+
+  it("shows who a cloud repository is for: shared, or only you with Share for admins and Ask an admin for members", () => {
+    const sharing = (level: "shared" | "private", canShare: boolean) =>
+      ({ level, organizationName: "Withso", canShare, onShare: vi.fn(), onAskAdmin: vi.fn() });
+    expect(render(both, { sharing: sharing("shared", true) })).toContain("Shared with Withso");
+    expect(button("Share with Withso")).toBeUndefined();
+    const admin = sharing("private", true);
+    expect(render(both, { sharing: admin })).toContain("Only you");
+    act(() => button("Share with Withso")!.click());
+    expect(admin.onShare).toHaveBeenCalledOnce();
+    // A private repository has no organization setup to edit.
+    expect(container.textContent).not.toContain("cloud-setup:");
+    const member = sharing("private", false);
+    render(both, { sharing: member, canManageCloud: false });
+    expect(button("Share with Withso")).toBeUndefined();
+    act(() => button("Ask an admin to share")!.click());
+    expect(member.onAskAdmin).toHaveBeenCalledOnce();
+  });
+
+  it("shows the cloud repository's build in a Cloud build section, and nothing new for a local-only project", () => {
+    expect(render(both, { readyCopy: { organizationId: "11111111-1111-4111-8111-111111111111", projectId: "88888888-8888-4888-8888-888888888881" } })).toContain("ready-copy:88888888-8888-4888-8888-888888888881");
+    expect([...container.querySelectorAll("h2")].map(node => node.textContent)).toContain("Cloud build");
+    const [local] = settingsProjects([folder("app", "https://github.com/acme/app.git")], []);
+    expect(render(local, { readyCopy: { organizationId: "11111111-1111-4111-8111-111111111111", projectId: "88888888-8888-4888-8888-888888888881" } })).not.toContain("ready-copy:");
+    expect(render(both)).not.toContain("ready-copy:");
   });
 
   it("offers no folder choice for one clone", () => {

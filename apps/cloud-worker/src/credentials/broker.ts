@@ -12,7 +12,7 @@ export const executionContext = (source: NodeJS.ProcessEnv = process.env): strin
   return value && UUID.test(value) ? value : undefined;
 };
 export function brokerRequest(socketPath: string, kind: "token" | "user-token" | "changed" | "report-failure",
-  failure?: { purpose: "git" | "gh"; rejectedToken: string }): Promise<Record<string, unknown>> {
+  failure?: { purpose: "git" | "gh"; rejectedToken: string }, repository?: string): Promise<Record<string, unknown>> {
   return new Promise((resolve, reject) => {
     const validatedPath = /^\/tmp\/zeros-github-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\/github\.sock$/.exec(socketPath)?.[0];
     // A JavaScript end anchor can match before a final newline.
@@ -40,7 +40,7 @@ export function brokerRequest(socketPath: string, kind: "token" | "user-token" |
       attempt.once("connect", () => {
         if (settled || socket !== attempt) return;
         const contextId = executionContext();
-        connected = true; attempt.write(JSON.stringify({ kind, ...failure, ...(contextId ? { contextId } : {}) }) + "\n");
+        connected = true; attempt.write(JSON.stringify({ kind, ...failure, ...(contextId ? { contextId } : {}), ...(repository ? { repository } : {}) }) + "\n");
       });
       attempt.on("data", (data: string) => {
         if (settled || socket !== attempt) return;
@@ -58,8 +58,8 @@ export function brokerRequest(socketPath: string, kind: "token" | "user-token" |
   });
 }
 
-export async function token(socketPath: string, kind: "token" | "user-token" = "token"): Promise<string> {
-  const result = await brokerRequest(socketPath, kind);
+export async function token(socketPath: string, kind: "token" | "user-token" = "token", repository?: string): Promise<string> {
+  const result = await brokerRequest(socketPath, kind, undefined, repository);
   if (typeof result.token !== "string" || !result.token || result.token.length > 8192 || /[\0\r\n]/.test(result.token) || typeof result.expiresAt !== "number" || result.expiresAt <= Date.now()) throw unavailable();
   return result.token;
 }
@@ -85,10 +85,13 @@ export async function gitCredential(operation: string, input: string, socketPath
     fields.set(name, line.slice(equals + 1));
   }
   if (fields.get("protocol") !== "https" || fields.get("host") !== "github.com") return "";
-  if (operation === "get") return `username=x-access-token\npassword=${await token(socketPath)}\n\n`;
+  // credential.useHttpPath: Git names the repository, owner/name[.git]; anything else names none.
+  const named = /^([A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100}?)(?:\.git)?\/?$/.exec(fields.get("path") ?? "")?.[1];
+  const repository = named?.split("/").some(part => /^\.+$/.test(part)) ? undefined : named;
+  if (operation === "get") return `username=x-access-token\npassword=${await token(socketPath, "token", repository)}\n\n`;
   if (operation === "erase") {
     const rejected = fields.get("password");
-    if (rejected) await brokerRequest(socketPath, "report-failure", { purpose: "git", rejectedToken: rejected });
+    if (rejected) await brokerRequest(socketPath, "report-failure", { purpose: "git", rejectedToken: rejected }, repository);
   } else if (operation !== "store") throw unavailable();
   return "";
 }

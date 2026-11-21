@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { HttpError } from "../../authz.js";
 import { CLOUD_V2_MAX_PROMPT_BYTES, CloudV2PromptIdSchema, CloudV2SessionNameSchema } from "../prompt-contract.js";
-import { CloudWorkspaceCreateSchema } from "../workspace-create.js";
+import { CloudWorkspaceRepositoryCreateSchema } from "../workspace-create.js";
 import { CloudEnvironmentMaterialSchema } from "../environment-contract.js";
 
 export const ApiPageSchema = z.object({
@@ -11,7 +11,7 @@ export const ApiPageSchema = z.object({
 const includeArchived = z.union([z.boolean(), z.enum(["true", "false"])]).default(false).transform(value => value === true || value === "true");
 export const ApiWorkspaceListSchema = ApiPageSchema.extend({
   state: z.enum(["creating", "starting", "running", "stopping", "stopped", "failed", "deleting", "deleted"]).optional(),
-  repository: CloudWorkspaceCreateSchema.shape.repository.optional(),
+  repository: CloudWorkspaceRepositoryCreateSchema.shape.repository.optional(),
   name: z.string().max(200).optional(), includeArchived,
 }).strict();
 export const ApiSessionListSchema = ApiPageSchema.extend({ includeArchived }).strict();
@@ -32,7 +32,7 @@ const environment = z.unknown().superRefine((value, ctx) => {
     ctx.addIssue({ code: "custom", message: "Workspace environment exceeds its limits" });
 }).transform(value => Object.fromEntries(Object.entries(value as Record<string, string>).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)))
   .meta({ type: "object", maxProperties: environmentLimits.entries, additionalProperties: { type: "string", maxLength: environmentLimits.valueBytes } });
-export const ApiWorkspaceCreateSchema = CloudWorkspaceCreateSchema.omit({ organizationId: true }).extend({
+export const ApiWorkspaceCreateSchema = CloudWorkspaceRepositoryCreateSchema.omit({ organizationId: true }).extend({
   ...selection, agent: selection.agent.optional(), message: message.optional(), messageId: CloudV2PromptIdSchema.optional(),
   sessionName: sessionName.optional(), env: environment.optional(),
 }).strict().refine(value => value.message === undefined || value.agent !== undefined)

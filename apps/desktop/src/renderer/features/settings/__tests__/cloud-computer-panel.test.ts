@@ -16,6 +16,11 @@ vi.mock("../../team/team-store", () => ({
 vi.mock("../../../state/use-cached-read", () => ({
   useCachedRead: () => ({ data: state.data, error: state.error, loading: false, refresh: () => {} }),
 }));
+vi.mock("../../../shared/ui/primitives", async (original) => ({
+  ...(await original<typeof import("../../../shared/ui/primitives")>()),
+  CodeTextarea: ({ value, readOnly, "aria-label": label }: { value: string; readOnly?: boolean; "aria-label": string }) =>
+    createElement("pre", { "aria-label": label, "data-read-only": readOnly ? "" : undefined }, value),
+}));
 vi.mock("../cloud-repository-chooser", () => ({
   CloudRepositoryChooser: ({ chosenCount }: { chosenCount: number }) =>
     createElement("span", { "data-chooser": "" }, `${chosenCount} repositories selected`),
@@ -45,6 +50,43 @@ beforeEach(() => {
 });
 
 describe("Cloud Computer settings panel", () => {
+  it("with projects, offers build, history and the install script, and says it holds tools only", () => {
+    state.data = { ...state.data!, readyCopies: true, installScript: "sudo -n apt-get install -y jq" };
+    const html = render(), page = text(html);
+    expect(page).toContain("Build computer");
+    expect(page).toContain("History (2)");
+    expect(page).toContain("Install script");
+    expect(html).toContain("sudo -n apt-get install -y jq");
+    expect(html).not.toContain("data-chooser");
+    expect(page).toContain("The Cloud Computer holds tools only: the runtime, Git LFS and your install script. Repositories belong to projects, each with its own ready copy.");
+  });
+
+  it("names where a ready copy kept a build secret and how to avoid it", () => {
+    state.data = { ...state.data!, readyCopies: true, installScript: null, readyCopyFailures: [
+      { projectId: "88888888-8888-4888-8888-888888888881", project: "zeros", repository: "withso/zeros", step: "secret_search", generation: 2,
+        reason: "ready_copy_secret_left", detail: "/home/user/withso/zeros/.npmrc", finishedAt: ago(day),
+        failures: 2, nextRetryAt: new Date(Date.now() + 2 * 60 * 60_000).toISOString() },
+      { projectId: "88888888-8888-4888-8888-888888888882", project: "app", repository: "withso/web", step: "setup", generation: 5,
+        reason: "ready_copy_setup_failed", detail: null, finishedAt: ago(day), failures: 5, nextRetryAt: null }] };
+    const page = text(render()).replace(/&#x27;/g, "'");
+    expect(page).toContain("Ready copies");
+    expect(page).toContain("withso/zeros: A build secret was left on the disk. In /home/user/withso/zeros/.npmrc. Read it from the environment in setup; don't write it to a file. Next try in 2 hours.");
+    expect(page).toContain("withso/web: Setup failed. Check the setup command and its output, then save it or build again. Automatic retries stopped; change something or retry now.");
+    expect(page).not.toMatch(/ready_copy_/);
+    expect(page.match(/Retry now/g)).toHaveLength(2);
+  });
+
+  it("shows members the install script read-only, managed by admins", () => {
+    state.role = "member";
+    state.data = { installScript: "sudo -n apt-get install -y jq", recipeRevision: 2 } as unknown as CloudV2Computer;
+    const html = render(), page = text(html);
+    expect(page).toContain("Managed by admins");
+    expect(html).toMatch(/<pre aria-label="Install script" data-read-only="">sudo -n apt-get install -y jq<\/pre>/);
+    expect(page).not.toContain("Build computer");
+    state.data = undefined;
+    expect(text(render())).toContain("Only owners and admins manage it.");
+  });
+
   it("lists chosen repositories as links to their own settings, not inline setup fields", () => {
     state.data = { ...state.data!, recipe: { repositories: [{ repository: "fixture/repo", setup: "pnpm install", setupScript: "scripts/bootstrap.sh" }] } };
     const html = render();

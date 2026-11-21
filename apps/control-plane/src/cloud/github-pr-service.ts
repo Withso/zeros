@@ -12,6 +12,8 @@ import type { Tx } from "../db.js";
 
 export interface CloudGithubPrContext {
   workspaceId: string;
+  /** A repository after the first of a workspace of several: its state is keyed by (workspace, repository id). */
+  other?: { repository: string; repositoryId: string };
   organizationId: string;
   creatorUserId: string;
   actorUserId?: string;
@@ -33,7 +35,8 @@ export interface CloudGithubPrAccess {
 }
 export interface CloudGithubPrDependencies {
   /** Reads and verifies creator, membership, source access and current metadata. */
-  open(workspaceId: string, userId: string): Promise<{ context: CloudGithubPrContext; access: CloudGithubPrAccess }>;
+  /** `repository`: one of a workspace of several's repositories; the first without one. */
+  open(workspaceId: string, userId: string, options?: { checkout: boolean }, repository?: string): Promise<{ context: CloudGithubPrContext; access: CloudGithubPrAccess }>;
   /** Reconciles canonical metadata only; original checkout and source scope stay fixed. */
   repository(
     context: CloudGithubPrContext,
@@ -71,7 +74,12 @@ export class CloudGithubPrService {
   constructor(private readonly deps: CloudGithubPrDependencies) {}
 
   async execute(workspaceId: string, userId: string, value: unknown) {
-    const parsed = CloudGithubPrRequestSchema.safeParse(value);
+    // A workspace of several repositories names the repository a request is for.
+    const named = value && typeof value === "object" && "repository" in value ? (value as { repository: unknown }).repository : undefined;
+    if (named !== undefined && (typeof named !== "string" || !/^[A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100}$/.test(named)))
+      throw new HttpError(422, "invalid_input", "Invalid cloud pull request action.");
+    const { repository: _named, ...rest } = (named === undefined ? value : value) as Record<string, unknown>;
+    const parsed = CloudGithubPrRequestSchema.safeParse(named === undefined ? value : rest);
     if (!parsed.success)
       throw new HttpError(
         422,
@@ -81,17 +89,19 @@ export class CloudGithubPrService {
     const request = parsed.data;
     return CLOUD_GITHUB_PR_WRITES.has(request.op)
       ? this.deps.mutate(workspaceId, userId, () =>
-          this.run(workspaceId, userId, request),
+          this.run(workspaceId, userId, request, named),
         )
-      : this.run(workspaceId, userId, request);
+      : this.run(workspaceId, userId, request, named);
   }
 
   private async run(
     workspaceId: string,
     userId: string,
     request: CloudGithubPrRequest,
+    repository?: string,
   ) {
-    const initial = await this.deps.open(workspaceId, userId);
+    const open = () => repository ? this.deps.open(workspaceId, userId, { checkout: true }, repository) : this.deps.open(workspaceId, userId);
+    const initial = await open();
     try {
       return await this.perform(workspaceId, userId, request, initial);
     } catch (error) {
@@ -99,7 +109,7 @@ export class CloudGithubPrService {
         error.status !== 503 || error.code !== "github_verification_expired") throw error;
       // A new admission can restart a read, never extend the failed attempt's
       // deadline or publish its bytes under a different checkout or credential.
-      const current = await this.deps.open(workspaceId, userId);
+      const current = await open();
       assertCloudGithubPrContext(initial.context, current.context);
       if (current.access.generation !== initial.access.generation ||
         current.context.repositoryId !== initial.context.repositoryId) throw changed();

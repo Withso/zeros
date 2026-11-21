@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { OrganizationSummary } from "../../team/control-plane";
 
 const state = vi.hoisted(() => ({
+  githubLevels: null as null | { solo: boolean },
   unified: true,
   organization: null as OrganizationSummary | null,
   saved: new Map<string, string>(),
@@ -95,6 +96,12 @@ vi.mock("../local-commands-settings", () => ({
   AlwaysAllowLocalCommands: () => "local-commands-fixture",
 }));
 vi.mock("../migrate-legacy", () => ({ ensureSettingsTomlMigrated: vi.fn() }));
+vi.mock("../cloud-github-levels", () => ({
+  useGithubLevels: () => ({ connections: state.githubLevels && { organization: [], personal: [], solo: state.githubLevels.solo },
+    repositories: state.githubLevels && { shared: [], private: [], personalAllowed: true }, refresh: () => {} }),
+  GithubConnectionsSection: ({ title, level }: { title: string; level: string }) => `github-levels-fixture:${level}:${title}`,
+  PersonalProjectsSetting: () => "personal-repositories-fixture",
+}));
 vi.mock("../project-page", async (original) => ({
   ...(await original<typeof import("../project-page")>()),
   ProjectPage: ({ project, initialFolderId, onFolderChange }: { project: { key: string }; initialFolderId?: string | null; onFolderChange?(id: string): void }) =>
@@ -137,6 +144,7 @@ const activeEntry = () =>
 
 beforeEach(() => {
   (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+  state.githubLevels = null;
   container = document.createElement("div");
   document.body.append(container);
   state.unified = true;
@@ -246,6 +254,28 @@ describe("unified Settings rail", () => {
     state.cloudRepositories = ["withso/zeros"];
     render();
     expect(rail().slice(-2)).toEqual(["Projects", "Zeros"]);
+  });
+
+  it("gives the organization its own GitHub page, and a one-person organization one page under Personal", () => {
+    state.organization = ORGANIZATION;
+    state.githubLevels = { solo: false };
+    state.saved.set(`${ORGANIZATION_OWNER}:section`, "user:integrations");
+    render();
+    const githubEntries = () => rail().join(" ").split("GitHub").length - 1;
+    expect(githubEntries()).toBe(2);
+    expect(container.textContent).toContain("github-levels-fixture:personal:Only you");
+    expect(container.textContent).not.toContain("github-levels-fixture:organization");
+    state.saved.set(`${ORGANIZATION_OWNER}:section`, "user:org-github");
+    render();
+    expect(container.textContent).toContain("github-levels-fixture:organization:Connections");
+    expect(container.textContent).toContain("personal-repositories-fixture");
+    state.githubLevels = { solo: true };
+    state.saved.set(`${ORGANIZATION_OWNER}:section`, "user:integrations");
+    render();
+    expect(githubEntries()).toBe(1);
+    expect(container.textContent).toContain("github-levels-fixture:organization:Shared with Withso");
+    expect(container.textContent).toContain("github-levels-fixture:personal:Only you");
+    state.githubLevels = null;
   });
 
   it("splits General: personal rows, then This Mac; organization rows on their own page", () => {

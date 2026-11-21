@@ -230,7 +230,8 @@ export class HybridTransport implements Transport {
       // may already be waiting on this very credential request.
       // Activated: the context names whose credential this is; without it the control plane can answer for nobody.
       void this.request("github-token", { ...(frame.purpose ? { purpose: frame.purpose } : {}),
-        ...(frame.failedTokenSha256 ? { failedTokenSha256: frame.failedTokenSha256 } : {}), ...(frame.contextId ? { contextId: frame.contextId } : {}) }, undefined,
+        ...(frame.failedTokenSha256 ? { failedTokenSha256: frame.failedTokenSha256 } : {}), ...(frame.contextId ? { contextId: frame.contextId } : {}),
+        ...(frame.repository ? { repository: frame.repository } : {}) }, undefined,
         Math.min(GITHUB_HTTP_TIMEOUT_MS, options?.timeoutMs ?? GITHUB_HTTP_TIMEOUT_MS)).then(value => {
         const reply = CloudV2ControlFrameSchema.safeParse({ t: "reply", id: frame.id, ...value });
         return this.handlers!.frame(reply.success ? reply.data : { t: "refusal", id: frame.id, code: "github_token_unavailable" });

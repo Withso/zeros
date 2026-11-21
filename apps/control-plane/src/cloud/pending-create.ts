@@ -9,7 +9,7 @@ import { requireWorkspaceCreator } from "./workspace-access.js";
 export type PendingSourceOutcome = { baseCommit: string | null } | { errorCode: string } | { skipped: true };
 
 export type PendingSourceDeps = {
-  activeComputer(organizationId: string): Promise<{ buildId: string; repositories: readonly CloudV2InstalledRepository[] } | null>;
+  activeComputer(organizationId: string): Promise<{ buildId: string; repositories: readonly CloudV2InstalledRepository[]; baseOnly?: true } | null>;
   authorizeBuildRepository(organizationId: string, userId: string, buildId: string, repository: string,
     options: { fresh?: boolean; renew?: boolean }): Promise<CloudSourceTarget>;
   remoteHead(organizationId: string, userId: string, target: CloudSourceTarget, branch: string): Promise<string | null>;
@@ -40,7 +40,8 @@ export function createPendingSourceResolver(deps: PendingSourceDeps) {
     // One verification per creator at a time, and a denial invalidates the
     // ones queued behind it: the requested repository first, then the rest
     // in order. Only its branch read overlaps them.
-    const order = [named, ...[...computer.repositories.keys()].filter(index => index !== named)];
+    // A base for ready copies holds no repository: only the requested one is checked.
+    const order = [named, ...[...computer.repositories.keys()].filter(index => index !== named && !computer.baseOnly)];
     const readable: string[] = [];
     let target: CloudSourceTarget | undefined, head: Promise<string | null> | undefined;
     for (const index of order) {

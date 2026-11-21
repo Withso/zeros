@@ -32,6 +32,14 @@ describe("fresh checkpoint recovery coordinator", () => {
     await f.recovery.run(f.attempt.id);
     expect(f.store.fence).not.toHaveBeenCalled(); expect(f.githubToken).not.toHaveBeenCalled(); expect(f.compute.exec).not.toHaveBeenCalled();
   });
+  it("keeps a workspace of several repositories on its own VM: a replacement could restore only one", async () => {
+    const f = fixture();
+    f.store.workspace.mockResolvedValue({ id: f.attempt.workspace_id, repository: "fixture/project", baseBranch: "main", state: "running", stopGeneration: "0",
+      folder: "zeros-app", checkoutFolder: "zeros-app/project" } as never);
+    await f.recovery.run(f.attempt.id);
+    expect(f.store.fail).toHaveBeenCalledWith(f.attempt.id, "recovery_unsupported", f.attempt.lease_id);
+    expect(f.store.fence).not.toHaveBeenCalled(); expect(f.compute.stop).not.toHaveBeenCalled(); expect(f.compute.exec).not.toHaveBeenCalled();
+  });
   it("keeps the source running when the initiator lacks restore GitHub authority", async () => {
     const f = fixture(); f.githubToken.mockRejectedValue({ code: "github_access_required" });
     await f.recovery.run(f.attempt.id);

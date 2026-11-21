@@ -35,11 +35,12 @@ describe("the broker's Git config entries survive a context's identity include",
       ["include.path", f.identity.GIT_CONFIG_VALUE_0],
       ["credential.helper", ""],
       ["credential.https://github.com.helper", f.broker.GIT_CONFIG_VALUE_1],
+      ["credential.https://github.com.useHttpPath", "true"],
     ]);
-    expect(merged.GIT_CONFIG_COUNT).toBe("3");
+    expect(merged.GIT_CONFIG_COUNT).toBe("4");
     // An environment without entries changes nothing; a malformed count adds nothing.
     expect(mergeGitEnvironment(f.broker, {})).toEqual(f.broker);
-    expect(pairs(mergeGitEnvironment(f.broker, { GIT_CONFIG_COUNT: "x", GIT_CONFIG_KEY_0: "a", GIT_CONFIG_VALUE_0: "b" }))).toHaveLength(2);
+    expect(pairs(mergeGitEnvironment(f.broker, { GIT_CONFIG_COUNT: "x", GIT_CONFIG_KEY_0: "a", GIT_CONFIG_VALUE_0: "b" }))).toHaveLength(3);
     expect(mergeGitEnvironment({ GIT_AUTHOR_NAME: "A" }, { GIT_AUTHOR_NAME: "B" })).toEqual({ GIT_AUTHOR_NAME: "B" });
   });
 
@@ -47,8 +48,8 @@ describe("the broker's Git config entries survive a context's identity include",
     const f = await fixture();
     const env = workerChildEnvironment({ PATH: process.env.PATH, HOME: f.home }, mergeGitEnvironment(f.broker, f.identity));
     expect(pairs(env)).toEqual([["include.path", f.identity.GIT_CONFIG_VALUE_0], ["credential.helper", ""],
-      ["credential.https://github.com.helper", f.broker.GIT_CONFIG_VALUE_1]]);
-    expect(env.GIT_CONFIG_COUNT).toBe("3");
+      ["credential.https://github.com.helper", f.broker.GIT_CONFIG_VALUE_1], ["credential.https://github.com.useHttpPath", "true"]]);
+    expect(env.GIT_CONFIG_COUNT).toBe("4");
   });
 
   it("real Git: a stored credential helper is never consulted, and the context identity still applies", async () => {

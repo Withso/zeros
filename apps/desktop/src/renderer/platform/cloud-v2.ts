@@ -51,6 +51,8 @@ export const CloudV2WorkspaceSchema = z.object({
   checkoutPath: z.string().optional(),
   /** Keep chat-edit opt-in at the top level for older strict capability decoders. */
   chatEdits: z.literal(1).optional().catch(undefined),
+  /** A private repository's workspace: its member's alone; never shared or reassigned. */
+  privateOwnerUserId: uuid.optional().catch(undefined),
 }).passthrough()
   // A missing Creator is never accepted without well-formed team ownership and a known creator of record.
   .refine(value => value.creatorUserId !== null || (!!ownershipOf(value) && typeof value.createdByUserId === "string" && uuid.safeParse(value.createdByUserId).success),
@@ -108,6 +110,7 @@ export function cloudV2Document(workspace: CloudV2Workspace): CloudWorkspaceDocu
     ...(workspace.title !== undefined ? { title: workspace.title } : {}),
     createdBy: workspace.creatorUserId ?? String(workspace.createdByUserId),
     ownerUserId: workspace.creatorUserId,
+    ...(workspace.privateOwnerUserId ? { privateOwnerUserId: workspace.privateOwnerUserId } : {}),
     placement: "cloud",
     // Archiving a failed workspace marks it without a stop; both read as archived.
     status: workspace.archivedAt && (workspace.state === "stopped" || workspace.state === "failed") ? "archived" : STATUS[workspace.state],
@@ -316,16 +319,33 @@ export const CloudV2ComputerReplySchema = z.object({
   /** If recipe and revision are absent, the app keeps edits locally and sends the selection at build time. */
   recipe: RecipeSchema.optional(),
   recipeRevision: z.number().int().nonnegative().optional(),
+  /** Ready copies are on: builds make the base, and repositories are not listed. */
+  readyCopies: z.literal(true).optional(),
+  installScript: z.string().max(16_000).nullable().optional(),
+  /** Ready copies: each organization project's latest failed copy, the repository and step; detail is a path at most. */
+  readyCopyFailures: z.array(z.object({ projectId: uuid, project: z.string().max(100), repository: z.string().max(201).nullable(),
+    step: z.string().max(32).nullable(), generation: z.number().int(), reason: z.string().max(64),
+    detail: z.string().max(1100).nullable(), finishedAt: z.string(), failures: z.number().int().optional(),
+    nextRetryAt: z.string().nullable().optional() }).passthrough()).max(200).optional().catch(undefined),
 });
 export type CloudV2Computer = z.infer<typeof CloudV2ComputerReplySchema>;
 const SavedRecipeSchema = z.object({ recipe: RecipeSchema, recipeRevision: z.number().int().nonnegative() });
 
 /** Lowercase owner/name is the repository ID across builds. */
-export type CloudV2InstalledRepository = { id: string; owner: string; name: string; defaultBranch: string | null };
+export type CloudV2InstalledRepository = { id: string; owner: string; name: string; defaultBranch: string | null;
+  /** Ready copies only: "building" while the repository's first copy is being made. */
+  readyCopy?: "ready" | "building" | null;
+  /** Two GitHub levels: the organization's, or only the caller's. */
+  level?: "shared" | "private";
+  /** Its organization connection's GitHub edge state, when not healthy. */
+  connection?: "suspended" | "uninstalled" };
 export const CloudV2InstalledRepositoriesReplySchema = z.object({
   repositories: z.array(z.object({
     repository: CloudV2RepositorySchema.shape.repository.max(200),
     defaultBranch: z.string().min(1).max(255).nullable().optional(),
+    readyCopy: z.enum(["ready", "building"]).nullable().optional().catch(undefined),
+    level: z.enum(["shared", "private"]).optional().catch(undefined),
+    connection: z.enum(["suspended", "uninstalled"]).optional().catch(undefined),
   }).passthrough()).max(200).nullable(),
 });
 
@@ -335,7 +355,9 @@ export async function getCloudV2InstalledRepositories(organizationId: string): P
     `/v1/cloud-v2/organizations/${uuid.parse(organizationId)}/computer/repositories`, CloudV2InstalledRepositoriesReplySchema);
   return repositories?.map(row => {
     const [owner, name] = row.repository.split("/") as [string, string];
-    return { id: row.repository.toLowerCase(), owner, name, defaultBranch: row.defaultBranch ?? null };
+    return { id: row.repository.toLowerCase(), owner, name, defaultBranch: row.defaultBranch ?? null,
+      ...(row.readyCopy !== undefined ? { readyCopy: row.readyCopy } : {}), ...(row.level ? { level: row.level } : {}),
+      ...(row.connection ? { connection: row.connection } : {}) };
   }) ?? null;
 }
 
@@ -372,6 +394,17 @@ export async function saveCloudV2ComputerRecipe(organizationId: string, reposito
 export async function discardCloudV2ComputerRecipe(organizationId: string, revision: number) {
   return cloudAccountRequest(`/v1/cloud-v2/organizations/${uuid.parse(organizationId)}/computer/recipe/discard`,
     SavedRecipeSchema, { body: { revision }, idempotencyKey: key() });
+}
+
+const InstallScriptSchema = z.object({ installScript: z.string().max(16_000).nullable(), recipeRevision: z.number().int().nonnegative() });
+/** Ready copies: every member reads the install script. */
+export async function getCloudV2InstallScript(organizationId: string) {
+  return cloudAccountRequest(`/v1/cloud-v2/organizations/${uuid.parse(organizationId)}/computer/install-script`, InstallScriptSchema);
+}
+/** Owners and admins; the next build runs it. */
+export async function saveCloudV2InstallScript(organizationId: string, installScript: string | null, revision: number) {
+  return cloudAccountRequest(`/v1/cloud-v2/organizations/${uuid.parse(organizationId)}/computer/install-script`,
+    InstallScriptSchema, { body: { installScript, revision }, idempotencyKey: key(), method: "PUT" });
 }
 
 export async function activateCloudV2Build(organizationId: string, buildId: string) {

@@ -255,6 +255,8 @@ export const CloudGithubCheckoutSchema = z
     branch: branch.nullable(),
     baseBranch: branch,
     headSha: sha.nullable(),
+    /** workspace-repositories-v1: a repository after the first of a workspace of several. */
+    repository: z.string().regex(/^[A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100}$/).optional(),
   })
   .strict();
 

@@ -31,10 +31,12 @@ export const CLOUD_V2_LIVE_ACCESS = CLOUD_V2_LIVE_ACCESS_SQL.text;
 /** Workspace access is membership-based. GitHub operations separately check
  * the acting person's repository authority at the token broker. */
 export function cloudV2ActorAccess(parameter: "$1" | "$2" | "$3") {
-  return `(w.execution_mode<>'active' AND w.creator_user_id=${parameter} OR w.execution_mode='active' AND EXISTS (
+  // A private repository's workspace is its member's alone, in shared execution too.
+  return `((w.execution_mode<>'active' AND w.creator_user_id=${parameter} OR w.execution_mode='active' AND EXISTS (
     SELECT 1 FROM organization_members am JOIN users au ON au.id=am.user_id
     WHERE am.org_id=w.org_id AND am.user_id=${parameter} AND au.auth_status='active' AND au.deleted_at IS NULL
-      AND NOT ${memberOnHoldSql("am.org_id", "am.user_id")}))`;
+      AND NOT ${memberOnHoldSql("am.org_id", "am.user_id")}))
+    AND (w.private_owner_user_id IS NULL OR w.private_owner_user_id=${parameter}))`;
 }
 
 /** Live access fails only because the creator is on Hold. */

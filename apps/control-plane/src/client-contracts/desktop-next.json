@@ -267,6 +267,11 @@
                 "chatEdits": {
                   "type": "number",
                   "const": 1
+                },
+                "privateOwnerUserId": {
+                  "type": "string",
+                  "format": "uuid",
+                  "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
                 }
               },
               "required": [
@@ -558,6 +563,11 @@
               "chatEdits": {
                 "type": "number",
                 "const": 1
+              },
+              "privateOwnerUserId": {
+                "type": "string",
+                "format": "uuid",
+                "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
               }
             },
             "required": [
@@ -1474,6 +1484,106 @@
             "type": "integer",
             "minimum": 0,
             "maximum": 9007199254740991
+          },
+          "readyCopies": {
+            "type": "boolean",
+            "const": true
+          },
+          "installScript": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 16000
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "readyCopyFailures": {
+            "maxItems": 200,
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "projectId": {
+                  "type": "string",
+                  "format": "uuid",
+                  "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                },
+                "project": {
+                  "type": "string",
+                  "maxLength": 100
+                },
+                "repository": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "maxLength": 201
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "step": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "maxLength": 32
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "generation": {
+                  "type": "integer",
+                  "minimum": -9007199254740991,
+                  "maximum": 9007199254740991
+                },
+                "reason": {
+                  "type": "string",
+                  "maxLength": 64
+                },
+                "detail": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "maxLength": 1100
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "finishedAt": {
+                  "type": "string"
+                },
+                "failures": {
+                  "type": "integer",
+                  "minimum": -9007199254740991,
+                  "maximum": 9007199254740991
+                },
+                "nextRetryAt": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                }
+              },
+              "required": [
+                "projectId",
+                "project",
+                "repository",
+                "step",
+                "generation",
+                "reason",
+                "detail",
+                "finishedAt"
+              ],
+              "additionalProperties": {}
+            }
           }
         },
         "required": [
@@ -1515,6 +1625,34 @@
                         {
                           "type": "null"
                         }
+                      ]
+                    },
+                    "readyCopy": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "enum": [
+                            "ready",
+                            "building"
+                          ]
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "level": {
+                      "type": "string",
+                      "enum": [
+                        "shared",
+                        "private"
+                      ]
+                    },
+                    "connection": {
+                      "type": "string",
+                      "enum": [
+                        "suspended",
+                        "uninstalled"
                       ]
                     }
                   },

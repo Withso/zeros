@@ -1,3 +1,4 @@
+import { cloudV2BoatSnapshotName } from "./resource-names.js";
 import { executionIntentAuthority, type ExecutionAdmission, type ExecutionIntentAuthority } from "./execution/authority.js";
 import { assertNoExecutionTransition, cancelExecutionActivation, clearStoppedExecutionTransition, confirmExecutionStop, failExecutionActivation, needsExecutionStopConfirmation } from "./execution/activation-state.js";
 import { bindExecutionActivationBoot } from "./execution/activation.js";
@@ -56,7 +57,16 @@ type CreateWorkspace = {
   /** The lifecycle runs the GitHub checks and sets the source scope before
    * any VM exists; until then the row has no scope (resolvePendingSource). */
   pendingSource?: true;
+  /** The project it is created from (ready copies on); a personal project's workspace is its member's alone. */
+  projectId?: string;
+  /** A project create: every repository of the project in position order, the
+   * first equal to repository/branch/baseBranch, each with its folder and verified id. */
+  repositories?: readonly CloudV2CreateRepository[];
+  /** workspace-layout.ts: the first checkout under /home/user, and the project folder for several repositories. */
+  checkoutFolder?: string;
+  folder?: string;
 };
+export type CloudV2CreateRepository = { repository: string; repositoryId: string; folder: string; branch: string; baseBranch: string; baseCommit?: string | null };
 type CreateReceipt = { status: 201; response: Record<string, unknown> };
 type HistoryInput = {
   chats?: readonly { id: string }[] | undefined; chatDeletions?: readonly string[] | undefined;
@@ -107,6 +117,13 @@ export type CloudV2Workspace = {
   /** Created before its GitHub checks: no source scope, sandbox or worker
    * yet. Only the lifecycle's resolvePendingSource may end it. */
   sourcePending?: true;
+  /** A personal project's workspace: its member's alone, never shared or reassigned. */
+  privateOwnerUserId?: string;
+  /** The project it was created from; none for workspaces made before projects. */
+  projectId?: string;
+  /** workspace-layout.ts: the first checkout under /home/user, and the project folder when it holds several repositories. */
+  checkoutFolder?: string;
+  folder?: string;
 };
 
 /** What a checkpoint is compared by at the next stop: the fingerprint of what
@@ -158,7 +175,7 @@ export type CloudV2WorkspaceImage = { from: string | null; prune: string[]; chec
  * other checkouts before its worker starts. Any other starts from Boat's
  * stock image and clones its own repository. A v2 image holds no source. */
 export function cloudV2WorkspaceImage(input: { policy: number; snapshot: string; recipe: unknown; scope: readonly string[]; repository: string }): CloudV2WorkspaceImage {
-  if (input.policy !== 3) return { from: input.snapshot, prune: [], checkout: false };
+  if (input.policy !== 3) return { from: cloudV2BoatSnapshotName(input.snapshot), prune: [], checkout: false };
   const entries = (input.recipe as { repositories?: { repository?: unknown }[] } | null)?.repositories ?? [];
   const names = entries.flatMap(entry => typeof entry.repository === "string" ? [entry.repository] : []);
   const scope = new Set(input.scope.map(name => name.toLowerCase()));
@@ -180,12 +197,16 @@ export type CloudV2WorkspaceRow = {
   created_by_session_id: string | null;
   setup_status: CloudV2SetupStatus | null;
   agent_cost_usd: string; agent_cost_turns: string; agent_cost_estimated_turns: string;
+  private_owner_user_id?: string | null;
+  project_id?: string | null;
+  checkout_path?: string | null;
+  folder?: string | null;
 };
 type Row = CloudV2WorkspaceRow;
 
 const WORKSPACE_COLUMNS_SQL = sql`id, org_id, creator_user_id, name, number, title, repository, branch, base_branch, state, boat_sandbox_id,
   computer_build_id, error_code, active_at, archived_at, created_at, updated_at, source_pending, created_by_session_id, setup_status,
-  agent_cost_usd, agent_cost_turns, agent_cost_estimated_turns`;
+  agent_cost_usd, agent_cost_turns, agent_cost_estimated_turns, private_owner_user_id, project_id, checkout_path, folder`;
 const COLUMNS = WORKSPACE_COLUMNS_SQL.text;
 export const CLOUD_V2_WORKSPACE_COLUMNS = COLUMNS.split(",").map(value => value.trim());
 
@@ -283,6 +304,10 @@ function workspace(row: Row): CloudV2Workspace {
     ...(row.setup_status ? { setup: row.setup_status } : {}),
     ...(Number(row.agent_cost_turns) > 0 ? { agentCost: { totalUsd: Number(row.agent_cost_usd), estimated: Number(row.agent_cost_estimated_turns) > 0 } } : {}),
     ...(row.source_pending ? { sourcePending: true as const } : {}),
+    ...(row.private_owner_user_id ? { privateOwnerUserId: row.private_owner_user_id } : {}),
+    ...(row.project_id ? { projectId: row.project_id } : {}),
+    ...(row.checkout_path ? { checkoutFolder: row.checkout_path } : {}),
+    ...(row.folder ? { folder: row.folder } : {}),
   };
 }
 export { workspace as cloudV2WorkspaceFromRow };
@@ -430,21 +455,57 @@ export class CloudV2Store {
       if (budget.count >= 10) throw new HttpError(429, "workspace_create_limit", "Workspace token creation limit reached for this user and organization",
         { retryAfterSeconds: budget.retry_after });
     }
-    if (input.computerBuildId)
+    let privateOwner: string | null = null, projectId: string | null = null;
+    if (input.projectId) {
+      // Checked under the create's own transaction: a project the creator may use
+      // (the organization's, or their own while personal projects are allowed),
+      // holding exactly these repositories in this order, and a live base that holds no repository's source.
+      const requested = input.repositories ?? [];
+      const project = (await tx.query<{ level: "organization" | "personal"; repositories: { repository: string; repositoryId: string }[] }>(`SELECT p.level,
+          (SELECT jsonb_agg(jsonb_build_object('repository', r.repository, 'repositoryId', r.repository_id) ORDER BY r.position)
+             FROM cloud_project_repositories r WHERE r.project_id=p.id) AS repositories
+        FROM cloud_projects p JOIN organizations o ON o.id=p.org_id
+        JOIN cloud_v2_computers c ON c.org_id=p.org_id AND c.active_build_id=$4
+        JOIN cloud_v2_computer_builds b ON b.id=c.active_build_id AND b.base_only AND b.state='succeeded'
+        WHERE p.id=$1 AND p.org_id=$2 AND (p.level='organization' OR (p.owner_user_id=$3 AND o.cloud_personal_projects_allowed))
+        FOR SHARE OF p`, [input.projectId, input.organizationId, input.creatorUserId, input.computerBuildId])).rows[0];
+      const matches = !!project?.repositories && project.repositories.length === requested.length && requested.length > 0
+        && requested.every((entry, index) => entry.repositoryId === project.repositories[index]!.repositoryId
+          && entry.repository.toLowerCase() === project.repositories[index]!.repository)
+        && requested[0]!.repository.toLowerCase() === input.repository.toLowerCase();
+      if (!project || !matches || pending || (input.sourceRepositoryId !== undefined && input.sourceRepositoryId !== requested[0]!.repositoryId))
+        throw new HttpError(409, "project_unavailable", "This project is no longer available to you in the cloud.");
+      sourceRepositoryId = requested[0]!.repositoryId;
+      scope = requested.map(entry => ({ repository: entry.repository.toLowerCase(), repositoryId: entry.repositoryId }));
+      projectId = input.projectId;
+      // Private for good: sharing the project later never shares this workspace.
+      if (project.level === "personal") privateOwner = input.creatorUserId;
+    } else if (input.computerBuildId)
       ({ sourceRepositoryId, scope } = await this.computerScope(tx, input.organizationId, input.computerBuildId, input.repository,
         input.sourceRepositoryId, input.readableRepositoryIds));
     if (Object.keys(input.env ?? {}).length && sourceRepositoryId === undefined)
       throw new HttpError(409, "cloud_source_review_required", "A workspace environment requires a verified repository identity.");
     const row = (await tx.query<Row>(
-      `INSERT INTO cloud_v2_workspaces (id, org_id, creator_user_id, name, repository, branch, base_branch, state, computer_build_id, source_repositories, source_pending, api_access, created_by_session_id, execution_initiator_user_id, execution_intent_id, execution_mode)
+      `INSERT INTO cloud_v2_workspaces (id, org_id, creator_user_id, name, repository, branch, base_branch, state, computer_build_id, source_repositories, source_pending, api_access, created_by_session_id, execution_initiator_user_id, execution_intent_id, execution_mode, private_owner_user_id, project_id, checkout_path, folder, base_commit)
        VALUES ($1, $2, $3, $4, $5, $6, $7, 'creating', $8, $9::text[], $10,
-         coalesce((SELECT workspace_api_access FROM cloud_api_access_settings WHERE org_id=$2 AND user_id=$3),true), $11, $3, gen_random_uuid(), $12) RETURNING ${COLUMNS}`,
+         coalesce((SELECT workspace_api_access FROM cloud_api_access_settings WHERE org_id=$2 AND user_id=$3),true), $11, $3, gen_random_uuid(), $12, $13, $14,
+         $15, $16, $17) RETURNING ${COLUMNS}`,
       [input.id, input.organizationId, input.creatorUserId, input.name, input.repository, input.branch,
         input.baseBranch, input.computerBuildId,
         pending ? null : (scope ?? [{ repository: input.repository }]).map(source => source.repository.toLowerCase()), pending, input.createdBySessionId ?? null,
-        input.executionRuntime ? "active" : "legacy"],
+        input.executionRuntime ? "active" : "legacy", privateOwner, projectId,
+        projectId ? input.checkoutFolder ?? null : null, projectId && (input.repositories?.length ?? 0) > 1 ? input.folder ?? null : null,
+        projectId ? input.repositories?.[0]?.baseCommit ?? null : null],
     )).rows[0]!;
     if (!pending && sourceRepositoryId !== undefined) await this.bindSources(tx, workspace(row), sourceRepositoryId, scope, input.env);
+    // The trigger made the first repository's row from the workspace's; it gets
+    // its folder and id here, and the project's others follow it.
+    if (projectId) for (const [position, entry] of (input.repositories ?? []).entries()) {
+      if (position === 0) await tx.query("UPDATE cloud_v2_workspace_repositories SET folder=$2, repository_id=$3 WHERE workspace_id=$1 AND position=0",
+        [row.id, entry.folder, entry.repositoryId]);
+      else await tx.query(`INSERT INTO cloud_v2_workspace_repositories (workspace_id, position, repository, repository_id, folder, branch, base_branch, base_commit)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`, [row.id, position, entry.repository, entry.repositoryId, entry.folder, entry.branch, entry.baseBranch, entry.baseCommit ?? null]);
+    }
     if (input.runtimeCanary) await consumeRuntimeCanary(tx, workspace(row), input.runtimeCanary, sourceRepositoryId, createKey);
     let promptAdmission;
     if (input.executionRuntime) {
@@ -798,7 +859,9 @@ export class CloudV2Store {
         terminal_at=clock_timestamp(),updated_at=clock_timestamp() WHERE workspace_id=$1 AND state IN ('dispatching','accepted')`, [binding.workspaceId]);
       // Only a message whose sender still has access may carry the wake: wakePending takes the intent from the oldest one.
       const waking = `workspace_id=$1 AND state IN ('queued','inboxed') AND access_epoch=$2::bigint AND NOT cancel_requested AND payload IS NOT NULL
-        AND EXISTS (SELECT 1 FROM cloud_v2_workspaces w WHERE w.id=$1 AND (cloud_v2_prompt_outbox.creator_user_id=w.creator_user_id OR w.execution_mode='active' AND EXISTS (
+        AND EXISTS (SELECT 1 FROM cloud_v2_workspaces w WHERE w.id=$1
+          AND (w.private_owner_user_id IS NULL OR w.private_owner_user_id=cloud_v2_prompt_outbox.creator_user_id)
+          AND (cloud_v2_prompt_outbox.creator_user_id=w.creator_user_id OR w.execution_mode='active' AND EXISTS (
           SELECT 1 FROM organization_members m JOIN users u ON u.id=m.user_id WHERE m.org_id=w.org_id AND m.user_id=cloud_v2_prompt_outbox.creator_user_id
             AND u.auth_status='active' AND u.deleted_at IS NULL AND NOT ${memberOnHoldSql("m.org_id", "m.user_id")})))`;
       const waiting = (await tx.query<{ n: number }>(`SELECT count(*)::int AS n FROM cloud_v2_prompt_outbox WHERE ${waking}`,
@@ -1572,19 +1635,20 @@ export class CloudV2Store {
     const { rows } = await withSystemTx(this.pool, tx => tx.query<{ snapshot_name: string | null }>(
       `SELECT c.snapshot_name FROM cloud_v2_computers c JOIN cloud_v2_computer_builds b ON b.id=c.active_build_id
        WHERE c.org_id = $1 AND b.source_policy_version=2`, [organizationId]));
-    return rows[0]?.snapshot_name ?? null;
+    return rows[0]?.snapshot_name ? cloudV2BoatSnapshotName(rows[0].snapshot_name) : null;
   }
 
   /** One selection supplies the build pin and its installed repositories. */
-  async activeComputer(organizationId: string): Promise<{ buildId: string; repositories: CloudV2InstalledRepository[] } | null> {
-    const { rows } = await withSystemTx(this.pool, tx => tx.query<{ id: string; recipe: { repositories?: { repository?: unknown; branch?: unknown }[] } }>(
-      `SELECT build.id, build.recipe FROM cloud_v2_computers computer
+  async activeComputer(organizationId: string): Promise<{ buildId: string; repositories: CloudV2InstalledRepository[]; baseOnly?: true } | null> {
+    const { rows } = await withSystemTx(this.pool, tx => tx.query<{ id: string; base_only: boolean; recipe: { repositories?: { repository?: unknown; branch?: unknown }[] } }>(
+      `SELECT build.id, build.base_only, build.recipe FROM cloud_v2_computers computer
        JOIN cloud_v2_computer_builds build ON build.id = computer.active_build_id AND build.org_id = computer.org_id
        WHERE computer.org_id = $1 AND computer.snapshot_name IS NOT NULL AND build.state = 'succeeded' AND build.source_policy_version IN (2,3)`,
       [organizationId],
     ));
     if (!rows[0]) return null;
-    return { buildId: rows[0].id, repositories: (rows[0].recipe.repositories ?? []).flatMap(entry => typeof entry.repository === "string" ? [{
+    return { buildId: rows[0].id, ...(rows[0].base_only ? { baseOnly: true as const } : {}),
+      repositories: (rows[0].recipe.repositories ?? []).flatMap(entry => typeof entry.repository === "string" ? [{
       repository: entry.repository,
       // A recipe ref can be a tag. Only the build's verified branch is a
       // supported source for the worker's origin/<baseBranch> checkout.

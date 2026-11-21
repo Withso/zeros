@@ -10,6 +10,16 @@ export function cloudV2SnapshotName(channel: string, organizationId: string, ver
   return `${prefix(channel, localOwner)}-${organizationId.replace(/-/g, "").slice(0, 12)}-v${version}`;
 }
 
-export function cloudV2SandboxName(channel: string, kind: "build" | "ws", id: string, localOwner?: string): string {
+export function cloudV2SandboxName(channel: string, kind: "build" | "ws" | "copy", id: string, localOwner?: string): string {
   return `${prefix(channel, localOwner)}-${kind}-${id.slice(0, 8)}`;
+}
+
+/** Organizations on Zeros's shared base store it as "<snapshot>@<build>", so
+ * each one's computer row stays unique. Boat only ever sees the snapshot. */
+export function cloudV2SharedSnapshotReference(snapshot: string, buildId: string): string {
+  return `${snapshot}@${buildId}`;
+}
+export function cloudV2BoatSnapshotName(stored: string): string {
+  const at = stored.indexOf("@");
+  return at < 0 ? stored : stored.slice(0, at);
 }

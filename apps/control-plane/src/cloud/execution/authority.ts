@@ -81,6 +81,8 @@ export class CloudExecutionAuthority {
       FROM cloud_v2_workspaces w JOIN organization_members m ON m.org_id=w.org_id AND m.user_id=$2
       JOIN users u ON u.id=m.user_id JOIN organizations o ON o.id=w.org_id
       WHERE w.id=$1 AND w.state NOT IN ('deleting','deleted') AND ${CLOUD_V2_LIVE_ACCESS}
+        -- A personal project's workspace is its member's alone, in shared execution too.
+        AND (w.private_owner_user_id IS NULL OR w.private_owner_user_id=$2)
         AND u.auth_status='active' AND u.deleted_at IS NULL AND NOT ${memberOnHoldSql("m.org_id", "m.user_id")}`,
     [workspaceId, userId, fingerprint ?? null, contextId ?? null])).rows[0];
     if (!row) throw memberAccessRevoked();

@@ -176,11 +176,13 @@ const quote = (value: string) => `'${value.replace(/'/g, "'\\''")}'`;
 const b64 = (value: string | Buffer) => Buffer.from(value).toString("base64");
 
 export type CheckpointPaths = {
-  /** The workspace repository, /home/user/<owner>/<name>. */
+  /** The workspace repository, /home/user/<owner>/<name>, or a project workspace's first. */
   checkoutPath: string;
   /** The VM user's home, /home/user. */
   home: string;
 };
+/** A repository after the first of a workspace of several, captured in its own part of the archive. */
+export type CheckpointRepository = { checkoutPath: string; baseBranch: string };
 
 function paths(input: CheckpointPaths) {
   for (const value of [input.checkoutPath, input.home])
@@ -283,7 +285,9 @@ function prologue(kind: "checkpoint" | "restore", lines: string[], activeRestore
 /** What an existing checkpoint is compared by: the fingerprint of what it
  * holds, and the base commit whose objects it left out (null if none). */
 export type CheckpointReuse = { fingerprint: string; base: string | null };
-type ArchiveInput = CheckpointPaths & { baseBranch: string; key: Buffer; maxBytes?: number; reuse?: CheckpointReuse | null };
+type ArchiveInput = CheckpointPaths & { baseBranch: string; key: Buffer; maxBytes?: number; reuse?: CheckpointReuse | null;
+  /** A workspace of several repositories: every one after the first. Absent, the archive is exactly a one-repository checkpoint's. */
+  repositories?: readonly CheckpointRepository[] };
 const FINGERPRINT = /^[0-9a-f]{64}$/, COMMIT = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/;
 
 /** Builds `$work/checkpoint.zck` and sets `bytes`, `sha`, `fingerprint` and
@@ -314,6 +318,49 @@ function archiveSteps(input: ArchiveInput, revision: string): string[] {
     "c=\"$work/c\"; mkdir \"$c\"; m=\"$c/manifest\"; printf 'zeros-checkpoint 1\\n' > \"$m\"",
     // Digests of the parts outside Git; a part that cannot be read disables reuse.
     "have_repo='' tree='' staged_tree='' base_commit='' digests=1; : > \"$work/parts\"",
+    ...repositoryCapture(true),
+    // Before the fingerprint, which then covers every repository.
+    ...otherRepositoriesCapture(input.repositories ?? []),
+    "step=sessions",
+    "cd \"$home\"; set --",
+    `for p in ${SESSION_PATHS.map(quote).join(" ")}; do if [ -e "$p" ] && [ ! -L "$p" ]; then set -- "$@" "$p"; fi; done`,
+    "step=fingerprint",
+    `if [ $# -gt 0 ]; then printf 'home ' >> "$work/parts"; node "$work/digest.mjs" tree "$home" ${[...SESSION_EXCLUDED_PATHS.map(path => `path:${path}`), ...SESSION_EXCLUDED_NAMES.map(name => `name:${name}`)].map(quote).join(" ")} -- "$@" >> "$work/parts" || digests=''; fi`,
+    // The Git part is the manifest with the index and worktree commits, whose
+    // times change on every run, replaced by their trees.
+    "fingerprint=''",
+    "if [ -n \"$digests\" ]; then",
+    `  { printf 'zeros-checkpoint-fingerprint 1\\nrevision %s\\n' ${revision}; grep -v -E '^(index|worktree) ' "$m" || true; printf 'index-tree %s\\nworktree-tree %s\\n' "\${staged_tree:--}" "\${tree:--}"; cat "$work/parts"; } > "$work/fingerprint"`,
+    "  fingerprint=$(sha256sum \"$work/fingerprint\" | cut -c1-64)",
+    "fi",
+    // Same contents, and everything the old checkpoint left out is still
+    // reachable from this base: restoring it gives back exactly this workspace.
+    ...(reuse ? [
+      `if [ "$fingerprint" = ${reuse.fingerprint} ] && { ${reuse.base === null ? "true" : `[ -n "$base_commit" ] && git -C "$repo" merge-base --is-ancestor ${reuse.base} "$base_commit"`}; }; then`,
+      "  report \"zeros-checkpoint-unchanged fingerprint=$fingerprint\"; exit 0",
+      "fi",
+    ] : []),
+    ...repositoryBundle(),
+    "step=sessions",
+    "cd \"$home\"",
+    "if [ $# -gt 0 ]; then",
+    `  tar -cf "$c/home.tar" ${[...SESSION_EXCLUDED_PATHS, ...SESSION_EXCLUDED_NAMES].map(path => `--exclude=${quote(path)}`).join(" ")} \\`,
+    "    --warning=no-file-changed --warning=no-file-removed --ignore-failed-read \"$@\" || [ $? -eq 1 ]",
+    "fi",
+    "step=pack",
+    "(cd \"$c\" && tar -cf - .) | gzip -1 > \"$work/plain\"; rm -rf \"$c\"",
+    `if [ "$(stat -c %s "$work/plain")" -gt ${maxBytes} ]; then fail checkpoint_too_large; fi`,
+    "step=encrypt",
+    "node \"$work/stream.mjs\" encrypt \"$work/key\" \"$work/plain\" \"$work/checkpoint.zck\"; rm -f \"$work/plain\" \"$work/key\"",
+    "bytes=$(stat -c %s \"$work/checkpoint.zck\"); sha=$(sha256sum \"$work/checkpoint.zck\" | cut -c1-64)",
+  ];
+}
+
+/** One checkout's capture: its Git state, refs, stashes, remotes and what Git
+ * ignores, into "$m" and "$work"; the first repository also captures its seeded
+ * environment. Leaves have_repo, tree, staged_tree, base_commit and digests set. */
+function repositoryCapture(environment: boolean): string[] {
+  return [
     "step=repository",
     "if [ -d \"$repo\" ] && top=$(git -C \"$repo\" rev-parse --show-toplevel) && [ \"$(cd \"$repo\" && pwd -P)\" = \"$(cd \"$top\" && pwd -P)\" ]; then",
     "  cd \"$repo\"; cleanup_refs=1; have_repo=1",
@@ -431,33 +478,22 @@ function archiveSteps(input: ArchiveInput, revision: string): string[] {
     `      if [ "$size" -le ${IGNORED_FILE_BYTES} ] && [ $((total + size)) -le ${IGNORED_TOTAL_BYTES} ]; then total=$((total + size)); printf '%s\\0' "$path" >> "$work/ignored"; fi`,
     "    fi",
     "  done < <(git ls-files -z --others --ignored --exclude-standard --directory)",
+    ...(environment ? [
     "  step=environment",
     `  node "$work/environment.mjs" capture "$repo" "$home/${CLOUD_V2_WORKER_STATE}/environment-seed/manifest.json" "$work/environment" || { status=$?; if [ "$status" = 3 ]; then fail checkpoint_too_large; else fail checkpoint_failed; fi; }`,
     "  if [ -d \"$work/environment\" ]; then printf 'environment ' >> \"$work/parts\"; node \"$work/digest.mjs\" tree \"$work/environment\" -- . >> \"$work/parts\" || digests=''; fi",
+    ] : []),
     "  step=fingerprint",
     "  for part in attachments ignored; do",
     "    if [ -s \"$work/$part\" ]; then printf '%s ' \"$part\" >> \"$work/parts\"; node \"$work/digest.mjs\" files \"$repo\" \"$work/$part\" >> \"$work/parts\" || digests=''; fi",
     "  done",
     "fi",
-    "step=sessions",
-    "cd \"$home\"; set --",
-    `for p in ${SESSION_PATHS.map(quote).join(" ")}; do if [ -e "$p" ] && [ ! -L "$p" ]; then set -- "$@" "$p"; fi; done`,
-    "step=fingerprint",
-    `if [ $# -gt 0 ]; then printf 'home ' >> "$work/parts"; node "$work/digest.mjs" tree "$home" ${[...SESSION_EXCLUDED_PATHS.map(path => `path:${path}`), ...SESSION_EXCLUDED_NAMES.map(name => `name:${name}`)].map(quote).join(" ")} -- "$@" >> "$work/parts" || digests=''; fi`,
-    // The Git part is the manifest with the index and worktree commits, whose
-    // times change on every run, replaced by their trees.
-    "fingerprint=''",
-    "if [ -n \"$digests\" ]; then",
-    `  { printf 'zeros-checkpoint-fingerprint 1\\nrevision %s\\n' ${revision}; grep -v -E '^(index|worktree) ' "$m" || true; printf 'index-tree %s\\nworktree-tree %s\\n' "\${staged_tree:--}" "\${tree:--}"; cat "$work/parts"; } > "$work/fingerprint"`,
-    "  fingerprint=$(sha256sum \"$work/fingerprint\" | cut -c1-64)",
-    "fi",
-    // Same contents, and everything the old checkpoint left out is still
-    // reachable from this base: restoring it gives back exactly this workspace.
-    ...(reuse ? [
-      `if [ "$fingerprint" = ${reuse.fingerprint} ] && { ${reuse.base === null ? "true" : `[ -n "$base_commit" ] && git -C "$repo" merge-base --is-ancestor ${reuse.base} "$base_commit"`}; }; then`,
-      "  report \"zeros-checkpoint-unchanged fingerprint=$fingerprint\"; exit 0",
-      "fi",
-    ] : []),
+  ];
+}
+
+/** One checkout's bundle, attachments and ignored files, into "$c". */
+function repositoryBundle(): string[] {
+  return [
     "step=bundle",
     "if [ -n \"$have_repo\" ]; then",
     "  cd \"$repo\"",
@@ -469,19 +505,41 @@ function archiveSteps(input: ArchiveInput, revision: string): string[] {
     "  if [ -s \"$work/ignored\" ]; then tar --null --verbatim-files-from --no-recursion -T \"$work/ignored\" -cf \"$c/ignored.tar\"; fi",
     "  if [ -d \"$work/environment\" ]; then tar -cf \"$c/environment.tar\" -C \"$work/environment\" .; fi",
     "fi",
-    "step=sessions",
-    "cd \"$home\"",
-    "if [ $# -gt 0 ]; then",
-    `  tar -cf "$c/home.tar" ${[...SESSION_EXCLUDED_PATHS, ...SESSION_EXCLUDED_NAMES].map(path => `--exclude=${quote(path)}`).join(" ")} \\`,
-    "    --warning=no-file-changed --warning=no-file-removed --ignore-failed-read \"$@\" || [ $? -eq 1 ]",
-    "fi",
-    "step=pack",
-    "(cd \"$c\" && tar -cf - .) | gzip -1 > \"$work/plain\"; rm -rf \"$c\"",
-    `if [ "$(stat -c %s "$work/plain")" -gt ${maxBytes} ]; then fail checkpoint_too_large; fi`,
-    "step=encrypt",
-    "node \"$work/stream.mjs\" encrypt \"$work/key\" \"$work/plain\" \"$work/checkpoint.zck\"; rm -f \"$work/plain\" \"$work/key\"",
-    "bytes=$(stat -c %s \"$work/checkpoint.zck\"); sha=$(sha256sum \"$work/checkpoint.zck\" | cut -c1-64)",
   ];
+}
+
+/** A workspace of several repositories: each repository after the first is
+ * captured and bundled exactly as the first is, in its own subshell, into
+ * repositories/<i>/ of the same archive. What it holds (its manifest, trees and
+ * base commit) joins the fingerprint, so a checkpoint is reused only when every
+ * repository is unchanged. It cleans its own refs and reports its own failure. */
+function otherRepositoriesCapture(repositories: readonly CheckpointRepository[]): string[] {
+  return repositories.flatMap((entry, index) => {
+    const i = index + 1;
+    if (!/^[^\0\r\n]{1,255}$/.test(entry.baseBranch) || entry.baseBranch.startsWith("-")) throw new Error("Invalid checkpoint base branch");
+    return [
+      `step=repository-${i}`,
+      "(",
+      `  repo=${quote(checkedPath(entry.checkoutPath))} base=${quote(entry.baseBranch)} cleanup_refs='' reported=''`,
+      "  trap 'code=$?; if [ -n \"$cleanup_refs\" ]; then git -C \"$repo\" for-each-ref --format=\"%(refname)\" refs/zeros-checkpoint/ 2>/dev/null | while read -r ref; do git -C \"$repo\" update-ref -d \"$ref\" || true; done; fi; if [ \"$code\" -ne 0 ] && [ -z \"$reported\" ]; then printf \"zeros-checkpoint-error checkpoint_failed %s\\n\" \"$step\" >&3; fi' EXIT",
+      // outer_work: names the capture itself uses (parent, scratch, own, keep) must not be taken here.
+      `  outer_work=$work; work="$outer_work/r${i}"; mkdir "$work"; cp "$outer_work/digest.mjs" "$outer_work/environment.mjs" "$work/"`,
+      `  c="$outer_work/c/repositories/${i}"; mkdir -p "$c"; m="$c/manifest"; printf 'zeros-checkpoint 1\\n' > "$m"`,
+      "  have_repo='' tree='' staged_tree='' base_commit='' digests=1; : > \"$work/parts\"",
+      ...repositoryCapture(false).map(line => `  ${line}`),
+      ...repositoryBundle().map(line => `  ${line}`),
+      `  { printf 'repository ${i}\\n'; grep -v -E '^(index|worktree) ' "$m" || true; printf 'index-tree %s\\nworktree-tree %s\\nbase %s\\n' "\${staged_tree:--}" "\${tree:--}" "\${base_commit:--}";`,
+      `    cat "$work/parts"; [ -n "$digests" ] || printf 'undigested\\n'; } > "$outer_work/repository-${i}"`,
+      ") || { reported=1; exit 3; }",
+      `if grep -qx undigested "$work/repository-${i}"; then digests=''; fi`,
+      `cat "$work/repository-${i}" >> "$work/parts"`,
+    ];
+  });
+}
+
+function checkedPath(path: string): string {
+  if (!path.startsWith("/") || path.includes("\n") || path.includes("\0") || path.split("/").some(part => part === "..")) throw new Error("Invalid checkpoint path");
+  return path;
 }
 
 /** A saved checkpoint's result line: its size and digest, and what a later
@@ -506,7 +564,9 @@ export function checkpointCommand(input: ArchiveInput & { uploadUrl: string }): 
     "sudo -n systemctl disable zeros-worker.service >/dev/null 2>&1 || true", ...script].join("\n"))}`;
 }
 
-export type RestoreInput = CheckpointPaths & { key: Buffer; sha256: string; githubToken?: string; repositoryUrl?: string; active?: boolean; recovery?: boolean };
+export type RestoreInput = CheckpointPaths & { key: Buffer; sha256: string; githubToken?: string; repositoryUrl?: string; active?: boolean; recovery?: boolean;
+  /** A workspace of several repositories: every one after the first, each with its own token and clone URL. */
+  repositories?: readonly { checkoutPath: string; githubToken?: string; repositoryUrl?: string }[] };
 
 /** Verifies and applies the checkpoint that `fetch` places at
  * `$work/checkpoint.zck`, before the worker starts. */
@@ -548,6 +608,18 @@ export function checkpointRestoreSteps(input: RestoreInput, fetch: readonly stri
     "}",
     "step=sessions",
     "if [ -f \"$c/home.tar\" ]; then tar -xf \"$c/home.tar\" -C \"$home\" --no-same-owner; fi",
+    ...repositoryRestore(input, remote),
+    ...otherRepositoriesRestore(input),
+    "step=marker",
+    "mkdir -p \"$home/$state\"",
+    `printf %s ${quote(input.recovery ? "recovery" : "")} > "$home/$state/restored-from-checkpoint"`,
+  ];
+}
+
+/** One checkout's restore from "$m" and "$c": objects, refs, HEAD, files,
+ * the index, ignored files, attachments, stashes, remotes and upstreams. */
+function repositoryRestore(input: RestoreInput, remote: string): string[] {
+  return [
     "if grep -q '^worktree ' \"$m\"; then",
     "  step=repository",
     "  if ! { [ -d \"$repo\" ] && top=$(git -C \"$repo\" rev-parse --show-toplevel) && [ \"$(cd \"$repo\" && pwd -P)\" = \"$(cd \"$top\" && pwd -P)\" ]; }; then",
@@ -655,10 +727,36 @@ export function checkpointRestoreSteps(input: RestoreInput, fetch: readonly stri
     "    git config \"branch.${name#refs/heads/}.remote\" \"$remote\"; git config \"branch.${name#refs/heads/}.merge\" \"$merge\"",
     "  done < <(grep '^upstream ' \"$m\" || true)",
     "fi",
-    "step=marker",
-    "mkdir -p \"$home/$state\"",
-    `printf %s ${quote(input.recovery ? "recovery" : "")} > "$home/$state/restored-from-checkpoint"`,
   ];
+}
+
+/** A workspace of several repositories: each repository after the first is
+ * restored from its own part of the archive exactly as the first is, in its
+ * own subshell, fetching what its base lacks (or cloning it) with its own
+ * token. A checkpoint made before it had that repository leaves it as it is. */
+function otherRepositoriesRestore(input: RestoreInput): string[] {
+  if (input.active && input.repositories?.length) throw new Error("A shared-execution restore holds one repository");
+  return (input.repositories ?? []).flatMap((entry, index) => {
+    const i = index + 1, token = entry.githubToken;
+    if (token !== undefined && !/^[\x21-\x7e]{16,4096}$/.test(token)) throw new Error("Invalid GitHub token");
+    const remote = entry.repositoryUrl === undefined ? "" : https(entry.repositoryUrl);
+    return [
+      `step=repository-${i}`,
+      `if [ -f "$c/repositories/${i}/manifest" ]; then (`,
+      `  repo=${quote(checkedPath(entry.checkoutPath))} c="$c/repositories/${i}" reported=''`,
+      "  trap 'code=$?; if [ \"$code\" -ne 0 ] && [ -z \"$reported\" ]; then printf \"zeros-checkpoint-error checkpoint_restore_failed %s\\n\" \"$step\" >&3; fi' EXIT",
+      "  m=\"$c/manifest\"; [ \"$(head -n 1 \"$m\")\" = 'zeros-checkpoint 1' ] || fail checkpoint_corrupt",
+      ...(token ? [
+        `  printf %s ${quote(b64(token))} | base64 -d > "$work/token-${i}"`,
+        `  printf '#!/bin/sh\\ncase "$1" in Username*) echo x-access-token ;; *) cat "%s" ;; esac\\n' "$work/token-${i}" > "$work/askpass-${i}"; chmod 700 "$work/askpass-${i}"`,
+        `  remote_git() { GIT_ASKPASS="$work/askpass-${i}" git -c credential.helper= "$@"; }`,
+      ] : ["  remote_git() { git -c credential.helper= \"$@\"; }"]),
+      "  fetched=''",
+      ...repositoryRestore(input, remote).map(line => `  ${line}`),
+      ") || { reported=1; exit 3; }; fi",
+      `rm -f "$work/token-${i}" "$work/askpass-${i}"`,
+    ];
+  });
 }
 
 /** Downloads, verifies and applies a checkpoint before the worker starts. */
