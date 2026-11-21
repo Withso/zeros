@@ -46,7 +46,8 @@ const LISTINGS = new Set(["file.tree", "file.ignored"]);
 
 /** A relative path that stays where it starts: no root, backslash, control character, or empty, `.` or `..` part. */
 function contained(path: string): boolean {
-  return !path.startsWith("/") && !/[\\\u0000-\u001f]/.test(path) && path.split("/").every(part => part !== "" && part !== "." && part !== "..");
+  return !path.startsWith("/") && !path.includes("\\") && !Array.from(path).some(char => char.charCodeAt(0) < 32)
+    && path.split("/").every(part => part !== "" && part !== "." && part !== "..");
 }
 const PATH_FIELDS = ["path", "filePath", "oldFilePath", "dir"] as const;
 const PATH_LISTS = ["paths", "files"] as const;
