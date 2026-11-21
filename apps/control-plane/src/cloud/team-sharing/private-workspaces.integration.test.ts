@@ -4,16 +4,20 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import type { AuthedUser } from "../../auth.js";
 import { withSystemTx } from "../../db.js";
 import { teamSharingFixture, type TeamSharingFixture } from "./test-fixture.js";
+import { cloudV2ActorAccess } from "../workspace-access.js";
 
 const database = process.env.TEST_DATABASE_URL ? describe : describe.skip;
-database("a private repository's workspace on every team route", () => {
+database("a personal project's workspace on every team route", () => {
   let pool: pg.Pool, f: TeamSharingFixture;
   beforeAll(() => { pool = new pg.Pool({ connectionString: process.env.TEST_DATABASE_URL, max: 8, statement_timeout: 5000 }); });
   afterAll(() => pool.end());
   beforeEach(async () => {
     f = await teamSharingFixture(pool, { ownership: true });
-    // The viewer's workspace is of a repository only the viewer keeps.
-    await pool.query("UPDATE cloud_v2_workspaces SET private_owner_user_id=creator_user_id WHERE id=$1", [f.own.id]);
+    // The viewer's workspace is of a project only the viewer keeps.
+    const project = randomUUID();
+    await pool.query("INSERT INTO cloud_projects (id, org_id, name, level, owner_user_id, created_by) VALUES ($1,$2,'Notes','personal',$3,$3)",
+      [project, f.organizationId, f.viewer.id]);
+    await pool.query("UPDATE cloud_v2_workspaces SET private_owner_user_id=creator_user_id, project_id=$2 WHERE id=$1", [f.own.id, project]);
   });
   const call = (path: string, user: AuthedUser, method = "GET", body?: unknown) => f.app.request(path, {
     method, headers: { "x-test-actor": user.id, "x-zeros-team-sharing": "1", "x-zeros-team-ownership": "1",
@@ -80,5 +84,20 @@ database("a private repository's workspace on every team route", () => {
     expect((await call(path, f.viewer)).status).toBe(404);
     expect((await pool.query("SELECT creator_user_id FROM cloud_v2_workspaces WHERE id=$1", [f.own.id])).rows[0].creator_user_id).toBeNull();
     expect((await pool.query("SELECT count(*)::int AS n FROM cloud_v2_reassignments WHERE workspace_id=$1", [f.own.id])).rows[0].n).toBe(0);
+  });
+
+  it("keeps it to its member under shared execution in every actor-access check, and lets nobody in once they leave", async () => {
+    const allowed = async (userId: string, workspaceId: string) => (await withSystemTx(pool, tx => tx.query(
+      `SELECT 1 FROM cloud_v2_workspaces w WHERE w.id=$2 AND ${cloudV2ActorAccess("$1")}`, [userId, workspaceId]))).rowCount === 1;
+    await pool.query("UPDATE cloud_v2_workspaces SET execution_mode='active' WHERE id = ANY($1::uuid[])", [[f.own.id, f.workspace.id]]);
+    // Shared execution opens an organization's workspace to every member, and a personal project's to its member alone.
+    for (const user of [f.creator, f.viewer, f.admin]) expect([user.id, await allowed(user.id, f.workspace.id)]).toEqual([user.id, true]);
+    for (const user of [f.creator, f.admin, f.outsider]) expect([user.id, await allowed(user.id, f.own.id)]).toEqual([user.id, false]);
+    expect(await allowed(f.viewer.id, f.own.id)).toBe(true);
+    // The project shared later: the workspace made before stays private.
+    await pool.query("UPDATE cloud_projects SET level='organization', owner_user_id=NULL WHERE id=(SELECT project_id FROM cloud_v2_workspaces WHERE id=$1)", [f.own.id]);
+    for (const user of [f.creator, f.admin]) expect(await allowed(user.id, f.own.id)).toBe(false);
+    await withSystemTx(pool, tx => tx.query("DELETE FROM organization_members WHERE org_id=$1 AND user_id=$2", [f.organizationId, f.viewer.id]));
+    for (const user of [f.creator, f.viewer, f.admin, f.outsider]) expect([user.id, await allowed(user.id, f.own.id)]).toEqual([user.id, false]);
   });
 });
