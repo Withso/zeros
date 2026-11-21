@@ -140,6 +140,8 @@ export async function runDesignFieldStatesSmoke({ page, check }) {
   const radii = async () => [await computed("home-cancel", "border-top-left-radius"), await computed("home-drawn", "border-top-left-radius")];
   const start = await radii();
   const scrub = field("border-radius").locator("button.zd-field-scrub");
+  // The scrub takes a press only once both layers' details are current.
+  await expect(scrub).toBeEnabled();
   const box = await scrub.boundingBox();
   await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
   await page.mouse.down();

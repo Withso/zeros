@@ -376,6 +376,32 @@ function inspectorFieldDraftWithUnit(text: string, unit: string): string {
   return text;
 }
 
+/** Which node a selection styles. A selected frame styles its root, named by
+ *  the root's details whatever their generation: after an edit the frame's
+ *  generation advances before its details are read again, and dropping the
+ *  target then would remount every field and discard a value being typed.
+ *  Edits still wait for details at the current generation. */
+export function designStyleTargetNodeId({
+  selectedNodeId,
+  frameSelected,
+  explicitFrameIdentityNodeId,
+  legacyExactInstanceNodeId,
+  layoutRootId,
+  details,
+}: {
+  selectedNodeId: string | null;
+  frameSelected: boolean;
+  explicitFrameIdentityNodeId: string | null;
+  legacyExactInstanceNodeId: string | null;
+  layoutRootId: string | undefined;
+  details: { oid: string } | null | undefined;
+}): string | null {
+  if (selectedNodeId) return selectedNodeId;
+  if (!frameSelected) return null;
+  return explicitFrameIdentityNodeId ?? legacyExactInstanceNodeId ??
+    (details && details.oid === layoutRootId ? details.oid : null);
+}
+
 export function InspectorEditField({
   numericValue,
   icon,
@@ -1729,11 +1755,14 @@ export const DesignInspector = React.memo(function DesignInspector({
   const explicitFrameIdentityNodeId = frame?.componentIdentity?.kind === "instance"
     ? frame.componentIdentity.nodeId
     : null;
-  const styleTargetNodeId =
-    selectedNodeId ?? (frameSelected
-      ? explicitFrameIdentityNodeId ?? legacyExactInstanceNodeId ??
-        (details && details.oid === layoutRootId && currentReadback(details.sourceVersion) ? details.oid : null)
-      : null);
+  const styleTargetNodeId = designStyleTargetNodeId({
+    selectedNodeId,
+    frameSelected,
+    explicitFrameIdentityNodeId,
+    legacyExactInstanceNodeId,
+    layoutRootId,
+    details,
+  });
   const frameStyleTarget =
     frameSelected && !selectedNodeId && styleTargetNodeId !== null;
   const elementDetails = styleTargetNodeId && details?.oid === styleTargetNodeId && currentReadback(details.sourceVersion)

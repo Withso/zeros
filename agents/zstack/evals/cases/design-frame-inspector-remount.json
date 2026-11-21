@@ -1,0 +1,9 @@
+{
+  "id": "design-frame-inspector-remount",
+  "kind": "replay",
+  "area": "desktop-design",
+  "fixedBy": "pr:1213",
+  "symptom": "Typing W then H right after moving a canvas frame saved 10 × 110 in about half of runs: the frame's generation advanced before its root details were read again, the selected frame lost its style target for that moment and the whole style editor remounted, discarding the typed W.",
+  "rule": "A selected frame's style target follows its root's identity across a readback; only edits wait for details at the current generation (renderer invariant: retain the last confirmed snapshot while revalidating).",
+  "check": "pnpm exec vitest run --config vitest.config.ts apps/desktop/src/renderer/features/design-workspace/__tests__/design-inspector-style-target.test.ts"
+}
