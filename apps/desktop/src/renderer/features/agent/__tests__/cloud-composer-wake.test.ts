@@ -222,6 +222,17 @@ describe("cloud composer readiness queue", () => {
     expect(h.dispatch).not.toHaveBeenCalledWith({ type: "CLEAR_CHAT_DRAFT", chatId: "chat" });
     expect(h.clear).not.toHaveBeenCalled();
   });
+  it("closes a Local transcript reply only once the session retains it", async () => {
+    const h = harness(false, "ready");
+    Object.assign(h.store.sessions.chat, { status: "ready" });
+    h.composer.session.status = "ready";
+    // No bridge yet: the send settles without retaining anything.
+    h.composer.session.sendPrompt = vi.fn(async () => {});
+    expect(await deliverReply((onCommitted) => h.composer.actions.handleSend("> quote\n\nreply", { keepDraft: true, onCommitted }))).toBe(false);
+    h.composer.session.sendPrompt = vi.fn(async (...args: unknown[]) => { (args[5] as () => void)(); });
+    expect(await deliverReply((onCommitted) => h.composer.actions.handleSend("> quote\n\nreply", { keepDraft: true, onCommitted }))).toBe(true);
+    expect(h.dispatch).not.toHaveBeenCalledWith({ type: "CLEAR_CHAT_DRAFT", chatId: "chat" });
+  });
   it("does not report a refused transcript reply as committed", async () => {
     const h = harness(true, "ready");
     h.provider.cloudPrompts.available = () => true;

@@ -103,6 +103,9 @@ function Chat({ cwd }: { cwd: string }) {
           <div data-testid="assistant-message">
             <TextMessage message={{ id: "assistant", kind: "text", role: "agent", text: answer, createdAt: 22 }} ctx={ctx} />
           </div>
+          <div data-testid="short-reply" className="bg-bg2 w-fit max-w-7/8 min-w-0 self-end rounded-lg px-3 py-2">
+            <TextMessage message={{ id: "short-reply", kind: "text", role: "user", text: formatReply("The demo repository is left untouched.", "Why?"), createdAt: 23 }} ctx={ctx} />
+          </div>
           {sent.map((text, index) => (
             <div key={index} data-testid="sent-reply" className="bg-bg2 w-fit max-w-7/8 min-w-0 self-end rounded-lg px-3 py-2">
               <TextMessage message={{ id: `sent-${index}`, kind: "text", role: "user", text, createdAt: 30 + index }} ctx={ctx} />

@@ -107,5 +107,18 @@ export async function runChatSelectionSmoke({ page, check, harnessBase }) {
     await page.getByTestId("composer").locator("[aria-label^='Remove chat-']").first().click();
     await expect(pills).toHaveCount(0);
   }
+  // A short one-line quote folds only when a narrow pane actually clips it.
+  const short = page.getByTestId("short-reply");
+  const toggle = short.getByRole("button", { name: "Show the whole quote" });
+  await short.scrollIntoViewIfNeeded();
+  check("A short quote that fits offers no toggle", (await toggle.count()) === 0);
+  const viewport = page.viewportSize();
+  await page.setViewportSize({ width: 320, height: viewport.height });
+  await expect(toggle).toBeVisible();
+  await toggle.click();
+  check("A short quote clipped by a narrow pane expands to its words",
+    (await short.locator("[data-reply-quote]").textContent()) === "“The demo repository is left untouched.”");
+  await page.setViewportSize(viewport);
+
   check("Chat selection harness raised no page errors", errors.length === 0, errors.join("; "));
 }

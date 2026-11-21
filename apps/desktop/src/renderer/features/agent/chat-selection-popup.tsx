@@ -81,6 +81,11 @@ function useReplyHighlight(range: Range | null) {
   }, [range]);
 }
 
+/** The chat around the transcript: its pane when split, else its surface. */
+function chatSurface(root: HTMLElement | null): Element | null {
+  return root?.closest("[data-pane-root]") ?? root?.closest("[data-zeros-root]") ?? root;
+}
+
 function visibleBounds(root: HTMLElement): DOMRect {
   const rect = root.getBoundingClientRect();
   const view = root.ownerDocument.documentElement;
@@ -281,14 +286,18 @@ export function ChatSelectionPopup({ root, active, ownsKeyboard = active, onAddS
     const frame = requestAnimationFrame(() => {
       const element = field.current;
       if (!element) return;
+      // Never from something outside this chat: a focused tab strip, another
+      // pane or the workbench keeps the keyboard it was given.
+      const held = element.ownerDocument.activeElement;
+      if (held && held !== element.ownerDocument.body && !chatSurface(root)?.contains(held)) return;
       element.focus({ preventScroll: true });
       element.setSelectionRange(element.value.length, element.value.length);
     });
     return () => cancelAnimationFrame(frame);
-  }, [active, ownsKeyboard, reply]);
+  }, [active, ownsKeyboard, reply, root]);
   const fieldBlur = (event: ReactFocusEvent<HTMLTextAreaElement>) => {
     const to = event.relatedTarget;
-    const surface = root?.closest("[data-zeros-root]") ?? root;
+    const surface = chatSurface(root);
     // Leaving for the composer or another control in this chat is a choice;
     // a press outside the chat (a tab, another pane) is a switch, and the
     // popup's own buttons keep the reply in hand.

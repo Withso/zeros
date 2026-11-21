@@ -443,6 +443,21 @@ describe("chat selection popup", { timeout: 15_000 }, () => {
       await page.evaluate(() => window.mount(true, true));
       await expect.poll(() => page.getByRole("textbox", { name: "Reply" }).evaluate((element) => element === document.activeElement)).toBe(true);
 
+      // A tab outside the chat that took focus (keyboard tab navigation) keeps it.
+      await page.evaluate(() => {
+        const tab = document.createElement("button");
+        tab.id = "tab";
+        tab.textContent = "Other chat";
+        document.body.prepend(tab);
+      });
+      await page.evaluate(() => window.mount(false));
+      await page.locator("#tab").focus();
+      await page.evaluate(() => window.mount(true, true));
+      await expect.poll(() => replyBox(page).isVisible()).toBe(true);
+      await frames(page);
+      await frames(page);
+      expect(await page.evaluate(() => document.activeElement?.id)).toBe("tab");
+
       // Moving on to the composer first means the chat's return leaves focus there.
       await page.locator("#composer").click();
       await page.evaluate(() => window.mount(false));

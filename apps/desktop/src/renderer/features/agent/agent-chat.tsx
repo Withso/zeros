@@ -3830,11 +3830,24 @@ function AgentChatBody({
     // Arm the send-jump after every early return, so slash commands and refused
     // sends never leave a stale count.
     pendingSendScrollCountRef.current += 1;
-    extras?.onCommitted?.();
-    submit().catch(() => {
-      /* error surfaces via session.error */
+    const onCommitted = extras?.onCommitted;
+    if (!onCommitted) {
+      submit().catch(() => {
+        /* error surfaces via session.error */
+      });
+      return true;
+    }
+    // A caller that holds the only copy of the text (a transcript reply) waits
+    // until the session retains the prompt. A send that settles without being
+    // retained (no bridge yet) leaves the text with that caller.
+    return new Promise<boolean>((resolve) => {
+      let retained = false;
+      submit(() => {
+        retained = true;
+        onCommitted();
+        resolve(true);
+      }).then(() => resolve(retained), () => resolve(retained));
     });
-    return true;
   };
 
   /** Single-flight entry point for every send. runSend clears the composer only
