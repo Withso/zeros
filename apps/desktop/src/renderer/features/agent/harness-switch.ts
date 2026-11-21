@@ -10,7 +10,7 @@ export const HARNESS_SWITCH_TOOL_KIND = "harness_switch";
 /** Appended to the seeded transcript when a running turn was stopped for the
  * switch, so the new agent resumes the work instead of summarizing it. */
 export const HARNESS_SWITCH_CONTINUE_NOTE =
-  "The previous agent was stopped mid-turn by an agent switch. Continue the task from where it stopped.";
+  "The previous agent was stopped mid-turn by an agent switch. Continue the task from where it stopped without asking the user to confirm first.";
 
 export interface AgentModelPick {
   agentId: string;

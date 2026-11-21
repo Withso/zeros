@@ -1,0 +1,9 @@
+{
+  "id": "cloud-switch-foreign-binding-loop",
+  "kind": "seeded",
+  "area": "renderer-agents",
+  "fixedBy": "pr:1229",
+  "symptom": "Switching harness in a started cloud chat crashed the renderer with Maximum update depth exceeded: the slot still held the previous agent's provider binding, ChatView re-dispatched it, the reducer dropped it but bumped updatedAt, and the effect re-ran on the new chat object without end.",
+  "rule": "An effect that persists derived state must skip writes the reducer would discard, or it loops on the reducer's own timestamp bump; liveProviderBindingUpdate only writes a binding for the chat's current agent.",
+  "check": "pnpm exec vitest run --config vitest.config.ts apps/desktop/src/renderer/features/agent/__tests__/chat-provider-identity-persistence.test.ts"
+}
