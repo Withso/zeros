@@ -446,7 +446,7 @@ export function SourceEditor({
           offscreen={offscreen}
           additionalExtensions={editorExtensions}
           onCreateView={createView}
-          ariaLabel={`Source editor for ${path}. Press Command or Control Shift M to comment.`}
+          ariaLabel={review.commentsAvailable === false ? `Source editor for ${path}` : `Source editor for ${path}. Press Command or Control Shift M to comment.`}
           scrollMemoryKey={JSON.stringify(["editor", cwd, editorId, path])}
         />
         {editorReview.portals}

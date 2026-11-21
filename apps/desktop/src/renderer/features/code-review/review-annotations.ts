@@ -224,6 +224,18 @@ export class ReviewAnnotationCache {
   }
 }
 
+/** Threads on files a comparison doesn't list. File tabs show no
+ *  discussions, so Changes is where they stay reachable. */
+export function reviewThreadsOutside(
+  paths: Iterable<string>,
+  threads: readonly CodeReviewThreadItem[],
+): ReviewAnnotationThread[] {
+  const listed = new Set(paths);
+  return threads
+    .filter((thread) => !listed.has(thread.anchor.path))
+    .map((thread) => ({ thread, state: "unavailable" as const }));
+}
+
 export function reviewUnplacedThreads(
   snapshot: ReviewCodeSnapshot,
   threads: readonly CodeReviewThreadItem[],
