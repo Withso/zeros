@@ -36,6 +36,7 @@ import { statusForGeneration } from "../../git-status-reads";
 import { fileStatusesForFolder } from "./file-status";
 import { isLocalMainWorkspace } from "@/renderer/state/local-main-workspace";
 import { relativeWorkspaceFilePath } from "@/renderer/platform/workspace-file-path";
+import { repositoryForPath } from "@/renderer/state/workspace-repositories";
 import { useWorkspaceDispatch } from "@/renderer/state/store";
 import { Tooltip } from "@/renderer/shared/ui/primitives";
 import { cn } from "@/renderer/shared/ui/cn";
@@ -125,6 +126,10 @@ const WorkspaceFilesTab = React.memo(function WorkspaceFilesTab({
   const hasDesignSection = useHasDesignSection(cwd, gitRefresh, active);
 
   const filePath = tab.filePath ?? "";
+  const gitPath = cwd && workspace ? relativeWorkspaceFilePath(gitRoot ?? workspace.path,
+    `${cwd.replace(/\/+$/, "")}/${filePath}`) ?? filePath : filePath;
+  // A workspace of several repositories: the base branch of the repository holding the file.
+  const diffBaseBranch = workspace ? (repositoryForPath(workspace, gitPath) ?? workspace).baseBranch : undefined;
   // Blank tabs start with a full-width tree. A filled tab restores its own
   // persisted tree visibility synchronously from the tab object.
   const layout = resolveFilesTabLayout(tab.filePath, tab.fileTreeVisible);
@@ -408,17 +413,14 @@ const WorkspaceFilesTab = React.memo(function WorkspaceFilesTab({
             active={active}
             cwd={cwd}
             path={filePath}
-            gitPath={cwd && workspace ? relativeWorkspaceFilePath(
-              isTrunk ? workspace.repoRoot : workspace.path,
-              `${cwd.replace(/\/+$/, "")}/${filePath}`,
-            ) ?? filePath : filePath}
+            gitPath={gitPath}
             fileEditor
             workspaceId={workspaceId}
             diff={tab.diff ?? false}
             diffScope={tab.diffScope}
             diffSha={tab.diffSha}
             diffHistory={tab.diffHistory}
-            diffBaseBranch={workspace?.baseBranch}
+            diffBaseBranch={diffBaseBranch}
             turnChatId={tab.turnChatId}
             turnId={tab.turnId}
             discardable={tab.discardable ?? false}

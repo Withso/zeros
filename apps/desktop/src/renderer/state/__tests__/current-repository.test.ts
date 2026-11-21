@@ -5,7 +5,8 @@ import { beforeEach, describe, expect, it } from "vitest";
 import type { Workspace, WorkspaceRepository } from "../../platform/git";
 import { loadPersistedUiState } from "../persist-ui-state";
 import { selectCurrentRepository, useWorkspaceStore } from "../store";
-import { combinedPullRequest, repositoryWorkspace, workspaceRepositories } from "../workspace-repositories";
+import { readFileSync } from "node:fs";
+import { combinedPullRequest, repositoryForPath, repositoryWorkspace, workspaceRepositories } from "../workspace-repositories";
 
 const key = "cloud://11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222";
 const entry = (repository: string, folder: string, extra: Partial<WorkspaceRepository> = {}): WorkspaceRepository => ({
@@ -87,5 +88,20 @@ describe("the one pull request mark of a workspace of several repositories", () 
     expect(combinedPullRequest([pr("closed", 4), pr("draft", 5)])).toMatchObject({ prState: "draft", prNumber: 5 });
     expect(combinedPullRequest([pr("merged", 4), pr(null), pr("merged", 7)])).toMatchObject({ prState: "merged", prNumber: 4 });
     expect(combinedPullRequest([pr("merged", 4), pr("closed", 7)])).toMatchObject({ prState: "closed", prNumber: 7 });
+  });
+});
+
+describe("the repository holding a project-folder path", () => {
+  it("is the repository whose folder the path starts with, so a Files diff uses that repository's base branch", () => {
+    expect(repositoryForPath(workspace, "web/src/app.ts")?.baseBranch).toBe("release");
+    expect(repositoryForPath(workspace, "api/server.ts")?.baseBranch).toBe("main");
+    expect(repositoryForPath(workspace, "webapp/x.ts")).toBeUndefined();
+    // A workspace of one repository: always itself.
+    const { repositories: _repositories, ...one } = workspace;
+    expect(repositoryForPath(one, "web/src/app.ts")?.target).toBe(key);
+    // The Files tab's diff takes its base branch from here, not the workspace's first repository.
+    const filesTab = readFileSync(new URL("../../shell/workbench/tabs/files-tab.tsx", import.meta.url), "utf8");
+    expect(filesTab).toContain("diffBaseBranch = workspace ? (repositoryForPath(workspace, gitPath) ?? workspace).baseBranch");
+    expect(filesTab).toContain("diffBaseBranch={diffBaseBranch}");
   });
 });

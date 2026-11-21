@@ -67,3 +67,13 @@ export function combinedPullRequest(repositories: readonly Pick<WorkspaceReposit
   const chosen = state ? withPr.find(entry => entry.prState === state) : undefined;
   return chosen ? { prNumber: chosen.prNumber, prState: state, prUrl: chosen.prUrl } : { prNumber: null, prState: null, prUrl: null };
 }
+
+/** The repository holding a project-folder path (`<folder>/…`) of a workspace
+ * of several, or the only repository of every other workspace; undefined for a
+ * path outside every repository folder. */
+export function repositoryForPath(workspace: Workspace, path: string): WorkspaceRepository | undefined {
+  const list = workspaceRepositories(workspace);
+  if (list.length < 2) return list[0];
+  const folder = path.replace(/^\/+/, "").split("/")[0];
+  return list.find(entry => entry.folder === folder);
+}
