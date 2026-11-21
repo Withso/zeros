@@ -97,11 +97,12 @@ export class CloudV2SourceAuthority {
   }
   /** renew is for a create's requested repository, whose lifecycle and hello
    * follow within seconds, and for the Create page's intent to create. */
-  async targets(organizationId: string, userId: string, targets: readonly CloudSourceTarget[], renew = false, options: { nameDenied?: boolean } = {}): Promise<void> {
+  /** `parallel` (a project's create): check its repositories together, a few at a time; others keep their order. */
+  async targets(organizationId: string, userId: string, targets: readonly CloudSourceTarget[], renew = false, options: { nameDenied?: boolean; parallel?: boolean } = {}): Promise<void> {
     const parsed = z.array(CloudSourceTargetSchema).min(1).max(100).safeParse(targets);
     if (!parsed.success) throw new HttpError(409, "cloud_source_review_required", "The original source identities could not be verified. Existing data has been retained.");
     await this.observeSources(organizationId, userId, parsed.data.map(target => target.repository), parsed.data.map(target => target.repositoryId), false, renew,
-      0, false, options.nameDenied === true);
+      0, false, options.nameDenied === true, options.parallel === true);
   }
 
   /** A reader uses their own connection, independently of the VM's Creator.
@@ -136,7 +137,7 @@ export class CloudV2SourceAuthority {
   }
 
   private async observeSources(organizationId: string, userId: string, repositories: readonly string[], ids?: readonly string[], continuation = false, renew = false, minimumRemainingMs = 0, requireFresh = false,
-    nameDenied = false): Promise<SourceObservation[]> {
+    nameDenied = false, parallel = false): Promise<SourceObservation[]> {
     const sources = z.array(repositorySchema).min(1).max(100).safeParse(repositories);
     if (!sources.success || ids && (ids.length !== repositories.length || !z.array(repositoryIdSchema).safeParse(ids).success))
       throw new HttpError(403, "github_repository_invalid", "Repository access could not be verified.");
@@ -145,15 +146,17 @@ export class CloudV2SourceAuthority {
     // Repositories of one owner share a connection: read its fingerprint once
     // before the observations and once after, not once per repository.
     const before = new Map<string, Promise<string>>(), after = new Map<string, Promise<string>>();
-    // A create's repositories are checked together, a few at a time.
-    observations.push(...await mapBounded(sources.data, CLOUD_SOURCE_PARALLEL, (repository, index) =>
+    // A project create's repositories are checked together, a few at a time, each denial naming its
+    // repository. Every other caller keeps its exact order and timing: an earlier source that ends the
+    // shared deadline, or a background renewal's denial, still decides the later ones.
+    if (parallel || nameDenied) observations.push(...await mapBounded(sources.data, parallel ? CLOUD_SOURCE_PARALLEL : 1, (repository, index) =>
       this.observeRepository(organizationId, userId, repository, ids?.[index], continuation, deadline, before, renew, minimumRemainingMs, requireFresh)
         .catch(error => {
-          // A project's create names the repository the member can't read.
           if (nameDenied && error instanceof HttpError && [403, 404].includes(error.status))
             throw new HttpError(error.status, error.code, `You can't read ${repository} on GitHub, so this workspace can't be created. Ask for access or remove it from the project.`);
           throw error;
         })));
+    else for (const [index, repository] of sources.data.entries()) observations.push(await this.observeRepository(organizationId, userId, repository, ids?.[index], continuation, deadline, before, renew, minimumRemainingMs,requireFresh));
     const assertLifetime = () => {
       if (observations.some(observation => observation.until - this.now() < minimumRemainingMs || observation.until <= this.now()))
         throw new SourceLifetimeUnavailable();

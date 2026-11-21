@@ -280,7 +280,7 @@ export function createCloudGithubServices(
     repositories: readonly { repository: string; repositoryId: string; baseBranch?: string | null | undefined }[]) =>
     withGithubReadScope(async () => {
       await source.targets(organizationId, userId, repositories.map((entry) => ({ repository: entry.repository, repositoryId: entry.repositoryId })),
-        true, { nameDenied: true });
+        true, { nameDenied: true, parallel: true });
       const access = await connections.access({ organizationId, userId });
       const checked = await mapBounded(repositories, CLOUD_SOURCE_PARALLEL, async (entry) => {
         // The repository's own default only when neither the request nor the project names a branch.
