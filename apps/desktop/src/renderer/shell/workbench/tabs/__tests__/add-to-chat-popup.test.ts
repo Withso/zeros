@@ -32,7 +32,7 @@ const editable = [...lines.slice(0, 4), "line 5 changed;", ...lines.slice(5, 10)
 declare global {
   interface Window {
     appends: Array<{ text: string; chatId: string | null; preserveFocus?: boolean }>;
-    mount(kind: "editable" | "source" | "split", cwd: string): void;
+    mount(kind: "editable" | "source" | "split" | "wide", cwd: string): void;
   }
 }
 
@@ -59,6 +59,7 @@ beforeAll(async () => {
             {kind === "editable" ? <EditableDiffEditor query={query} value={${JSON.stringify(editable)}}
               savedContent={${JSON.stringify(editable)}} isNewFile={false} active revision={0} refreshKey={0}
               onChange={() => {}} onSave={() => {}} scrollMemoryKey="fixture" />
+            : kind === "wide" ? <CodeEditor compact value={"start " + "x".repeat(600) + "\\nsecond line"} filePath="file.ts" onChange={() => {}} />
             : kind === "source" ? <CodeEditor value={${JSON.stringify(draft + "\n".repeat(80))}} filePath="file.ts" onChange={() => {}} />
             : <PatchDiff patch={${JSON.stringify(patch)}} options={zerosCodeViewOptions({ diffStyle: "split", codeThemeId: "default" })} />}
             <AddToChatPopup root={root} active path="src/file.ts" />
@@ -106,14 +107,14 @@ beforeAll(async () => {
 }, 90_000);
 afterAll(async () => { await browser?.close(); });
 
-async function open(kind: "editable" | "source" | "split", cwd: string = PLACEMENTS[0][1]): Promise<Page> {
+async function open(kind: "editable" | "source" | "split" | "wide", cwd: string = PLACEMENTS[0][1]): Promise<Page> {
   const page = await browser.newPage({ viewport: { width: 900, height: 640 } });
   await page.setContent(`<style>${CSS} body { margin: 0; background: var(--bg1); }
     .h-full { height: 100%; } .min-h-0 { min-height: 0; } .overflow-y-auto { overflow-y: auto; }
     .select-text { -webkit-user-select: text; user-select: text; }</style><div id="root"></div>`);
   await page.addScriptTag({ content: source });
   await page.evaluate(([kind, cwd]) => window.mount(kind, cwd), [kind, cwd] as const);
-  await page.waitForFunction((kind) => kind === "source"
+  await page.waitForFunction((kind) => kind === "source" || kind === "wide"
     ? !!document.querySelector(".cm-content")
     : [...document.querySelectorAll("diffs-container")].some((host) => host.shadowRoot?.querySelector("[data-line]")), kind);
   return page;
@@ -229,6 +230,24 @@ describe("Add to Chat", () => {
       await expect.poll(() => popup(page).isVisible()).toBe(true);
       await page.keyboard.press("ControlOrMeta+l");
       expect(await appends(page)).toEqual(["src/file.ts:L2-4", "src/file.ts:L2-4"]);
+    } finally { await page.close(); }
+  });
+
+  it.each(PLACEMENTS)("leaves ⌘L to the editor once the selection scrolls out of view sideways (%s)", async (_placement, cwd) => {
+    const page = await open("wide", cwd);
+    try {
+      const first = await page.evaluate(() => {
+        const { x, y, height } = document.querySelector(".cm-line")!.getBoundingClientRect();
+        return { x, y: y + height / 2 };
+      });
+      await page.mouse.click(first.x + 2, first.y);
+      await page.keyboard.press("Home");
+      for (let index = 0; index < 5; index++) await page.keyboard.press("Shift+ArrowRight");
+      await expect.poll(() => popup(page).isVisible()).toBe(true);
+      await page.evaluate(() => { document.querySelector(".cm-scroller")!.scrollLeft = 100_000; });
+      await expect.poll(() => popup(page).isVisible()).toBe(false);
+      await page.keyboard.press("ControlOrMeta+l");
+      expect(await appends(page)).toEqual([]);
     } finally { await page.close(); }
   });
 });
