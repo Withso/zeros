@@ -4,6 +4,7 @@ import {
   canAutoContinueAfterSwitch,
   switchContinuation,
   commitHarnessSwitch,
+  refreshChatTurnRows,
   type HarnessSwitchCommit,
   harnessSwitchBlockedByQueue,
   harnessSwitchTranscriptMode,
@@ -16,6 +17,8 @@ import { metaForEvent } from "../renderers/event-meta";
 import { isProviderWorkEvent } from "../transcript-notices";
 import { buildForkTranscriptAttachment } from "../fork-chat";
 import type { AgentMessage } from "../use-agent-session";
+import { turnRowKey } from "../../../state/read-caches";
+import { KeyedAsyncCache } from "../../../shared/lib/keyed-async-cache";
 
 const row = (to = { agentId: "codex", model: "gpt-5.1-codex" }) =>
   buildHarnessSwitchMessage({
@@ -169,5 +172,18 @@ describe("commit harness switch", () => {
       updateSettings: update,
     })).resolves.toBe("stale");
     expect(update).not.toHaveBeenCalled();
+  });
+
+  it("marks only the switched chat's cached turn rows stale", () => {
+    const cache = new KeyedAsyncCache<{ status: string } | null>(8);
+    const stopped = turnRowKey("c1", "user-1");
+    const other = turnRowKey("c10", "user-1");
+    cache.setData(stopped, { status: "running" });
+    cache.setData(other, { status: "running" });
+    const seen: string[] = [];
+    cache.subscribe(stopped, () => seen.push(stopped));
+    cache.subscribe(other, () => seen.push(other));
+    refreshChatTurnRows(cache, "c1");
+    expect(seen).toEqual([stopped]);
   });
 });
