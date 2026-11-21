@@ -44,10 +44,10 @@ export async function workerRepositories(tx: Tx, workspace: CloudV2Workspace, op
 
 /** The repositories after the first, as the direct clone path prepares them:
  * each with its verified identity and its folder inside the project folder. */
-export async function otherRepositories(tx: Tx, workspace: CloudV2Workspace): Promise<{ repository: string; repositoryId: string; checkoutFolder: string }[]> {
+export async function otherRepositories(tx: Tx, workspace: CloudV2Workspace): Promise<{ repository: string; repositoryId: string; checkoutFolder: string; baseBranch: string }[]> {
   if (!workspace.projectId || !workspace.folder) return [];
-  const { rows } = await tx.query<{ repository: string; repository_id: string; folder: string }>(`SELECT r.repository, s.repository_id::text, r.folder
+  const { rows } = await tx.query<{ repository: string; repository_id: string; folder: string; base_branch: string }>(`SELECT r.repository, s.repository_id::text, r.folder, r.base_branch
     FROM cloud_v2_workspace_repositories r JOIN cloud_v2_github_sources s ON s.workspace_id=r.workspace_id AND s.source_repository=lower(r.repository)
     WHERE r.workspace_id=$1 AND r.position > 0 AND r.folder IS NOT NULL ORDER BY r.position`, [workspace.id]);
-  return rows.map(row => ({ repository: row.repository, repositoryId: row.repository_id, checkoutFolder: `${workspace.folder}/${row.folder}` }));
+  return rows.map(row => ({ repository: row.repository, repositoryId: row.repository_id, checkoutFolder: `${workspace.folder}/${row.folder}`, baseBranch: row.base_branch }));
 }

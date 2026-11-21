@@ -57,7 +57,7 @@ function setup(claimed: (CloudV2LifecycleWorkspace & { attempts: number })[], op
   checkpointRetry?: boolean; retries?: RetryRow[]; prepareRepository?: CloudV2LifecycleDeps["prepareRepository"]; pruneEnvironments?: () => Promise<void>;
   runtimeForWorkspace?: CloudV2LifecycleDeps["runtimeForWorkspace"]; bootEnv?: CloudV2LifecycleDeps["bootEnv"]; builds?: CloudV2LifecycleDeps["builds"]; recovery?: CloudV2LifecycleDeps["recovery"];
   authorizeWorkspace?: CloudV2LifecycleDeps["authorizeWorkspace"]; resolvePendingSource?: CloudV2LifecycleDeps["resolvePendingSource"]; previousRuntimeSha256?: string; logs?: true;
-  readyCopies?: CloudV2LifecycleDeps["readyCopies"] } = {}) {
+  readyCopies?: CloudV2LifecycleDeps["readyCopies"]; repositories?: CloudV2LifecycleDeps["repositories"] } = {}) {
   const retries = [...options.retries ?? []];
   const compute: CloudV2Compute = {
     create: vi.fn(async () => ({ sandboxId: "bx_new1" })),
@@ -137,6 +137,7 @@ function setup(claimed: (CloudV2LifecycleWorkspace & { attempts: number })[], op
     ...(options.authorizeWorkspace ? { authorizeWorkspace: options.authorizeWorkspace } : {}),
     ...(options.resolvePendingSource ? { resolvePendingSource: options.resolvePendingSource } : {}),
     ...(options.readyCopies ? { readyCopies: options.readyCopies } : {}),
+    ...(options.repositories ? { repositories: options.repositories } : {}),
   });
   return { lifecycle, compute, store, stopWorker, logs };
 }
@@ -516,6 +517,25 @@ describe("cloud v2 lifecycle", () => {
     expect(f.compute.hostPort).toHaveBeenCalledWith("bx_new1", expect.anything());
     expect(f.store.transition).not.toHaveBeenCalled();
     expect(f.store.defer).toHaveBeenLastCalledWith(waking.id, "starting", 30_000);
+  });
+
+  it("checkpoints every repository of a workspace of several, and restores each with its own token", async () => {
+    const repositories = vi.fn(async () => [{ repository: "withso/web", checkoutFolder: "zeros-app/web", baseBranch: "next" }]);
+    const stopping = workspace("stopping", { boatSandboxId: "bx_abc1", checkpoint: SAVED });
+    const f = setup([stopping], { checkpoints: checkpointsFake(), repositories });
+    vmCommands(f);
+    await f.lifecycle.tick();
+    const [, command] = vmCommand(f, "zeros-checkpoint-saved")!;
+    expect(command).toContain("step=repository-1");
+    expect(command).toContain("repo='\\''/home/user/zeros-app/web'\\'' base='\\''next'\\''");
+    const githubToken = vi.fn(async (_workspace: unknown, repository?: string) => ({ token: `synthetic-token-for-${repository ?? "first"}-0123` }));
+    const restoring = setup([workspace("starting", { checkpoint: SAVED })], { checkpoints: checkpointsFake(), repositories, githubToken });
+    vmCommands(restoring);
+    await restoring.lifecycle.tick();
+    const [, restore] = vmCommand(restoring, "zeros-checkpoint-restored")!;
+    expect(githubToken).toHaveBeenCalledWith(expect.anything(), "withso/web");
+    expect(restore).toContain("https://github.com/withso/web.git");
+    expect(restore).toContain(Buffer.from("synthetic-token-for-withso/web-0123").toString("base64"));
   });
 
   it("continues a pending restore under the same key, and retries a failed apply without losing the checkpoint", async () => {

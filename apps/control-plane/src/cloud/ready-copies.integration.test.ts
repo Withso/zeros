@@ -851,8 +851,8 @@ d("cloud v2 ready copies", () => {
         github: { repositoryId: repositoryId("acme/web"), repository: "acme/web", previousRepositories: ["acme/web"] } }] });
     // The direct clone path prepares the others, each in its folder.
     expect(await withSystemTx(pool, tx => otherRepositories(tx, workspace))).toEqual([
-      { repository: "withso/web", repositoryId: repositoryId("withso/web"), checkoutFolder: "zeros-app/web" },
-      { repository: "acme/web", repositoryId: repositoryId("acme/web"), checkoutFolder: "zeros-app/web-acme" }]);
+      { repository: "withso/web", repositoryId: repositoryId("withso/web"), checkoutFolder: "zeros-app/web", baseBranch: "main" },
+      { repository: "acme/web", repositoryId: repositoryId("acme/web"), checkoutFolder: "zeros-app/web-acme", baseBranch: "main" }]);
     // The copy's build already ran them: a fork gets no setup.
     const forked = await withSystemTx(pool, tx => workerRepositories(tx, workspace, { forked: true }));
     expect(forked.firstSetup).toEqual({});

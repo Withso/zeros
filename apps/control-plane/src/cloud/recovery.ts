@@ -105,6 +105,9 @@ export class CloudRecovery {
       if (terminal(a)) { delay = await this.cleanup(a); return; }
       if (a.deadline_at.getTime() <= this.now()) throw fail("recovery_deadline");
       const w = await this.current(a);
+      // A replacement restores in shared execution, which holds one repository: a workspace of
+      // several keeps its own VM rather than lose a repository's changes.
+      if (w.folder) throw fail("recovery_unsupported");
       switch (a.phase) {
         case "waiting":
           if (this.now() - a.created_at.getTime() >= RECOVERY_WAIT_MS) throw fail("recovery_busy");

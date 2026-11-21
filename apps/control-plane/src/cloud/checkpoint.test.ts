@@ -1224,3 +1224,114 @@ it.each(["namespace", "type", "extra-field"])("refuses a corrupted private snaps
   expect(parseRestoreResult(result.stdout)).toEqual({ ok: false, code: "checkpoint_corrupt" });
   expect(spawnSync("git", ["show-ref", "--verify", reference], { cwd: w.newRepo, env: w.env }).status).not.toBe(0);
 });
+
+describe("a workspace of several repositories", () => {
+  /** Two repositories of one project, each with its own origin, in /home/user/<project>/<repository>. */
+  function project() {
+    const f = fixture();
+    const make = (name: string) => {
+      const origin = join(f.root, `${name}.git`), seed = join(f.root, `seed-${name}`);
+      f.git(f.root, "init", "-q", "--bare", "-b", "main", origin);
+      f.git(f.root, "clone", "-q", origin, seed);
+      f.write(join(seed, "README.md"), `${name}\n`); f.write(join(seed, ".gitignore"), "*.log\n");
+      f.git(seed, "add", "-A"); f.git(seed, "commit", "-q", "-m", "base"); f.git(seed, "push", "-q", "origin", "main");
+      return origin;
+    };
+    const origins = { api: make("api"), web: make("web") };
+    const oldHome = join(f.root, "old-home"), newHome = join(f.root, "new-home");
+    const folder = (home: string, name: string) => join(home, "zeros-app", name);
+    for (const name of ["api", "web"] as const) {
+      mkdirSync(join(oldHome, "zeros-app"), { recursive: true });
+      f.git(f.root, "clone", "-q", origins[name], folder(oldHome, name));
+      f.git(folder(oldHome, name), "switch", "-q", "-c", "zeros/app");
+    }
+    return { ...f, origins, oldHome, newHome, folder };
+  }
+  const save = (p: ReturnType<typeof project>, key: Buffer, out: string) => {
+    const result = run([
+      ...checkpointArchiveSteps({ checkoutPath: p.folder(p.oldHome, "api"), home: p.oldHome, baseBranch: "main", key,
+        repositories: [{ checkoutPath: p.folder(p.oldHome, "web"), baseBranch: "main" }] }),
+      `cp "$work/checkpoint.zck" '${out}'`, CHECKPOINT_SAVED_REPORT,
+    ], p.env);
+    return { ...result, parsed: parseCheckpointResult(result.stdout) };
+  };
+  const load = (p: ReturnType<typeof project>, key: Buffer, from: string, sha256: string, extra: Partial<RestoreInput> = {}) => {
+    const result = run([...checkpointRestoreSteps({ checkoutPath: p.folder(p.newHome, "api"), home: p.newHome, key, sha256,
+      repositoryUrl: undefined, repositories: [{ checkoutPath: p.folder(p.newHome, "web"), repositoryUrl: undefined }], ...extra },
+      [`cp '${from}' "$work/checkpoint.zck"`]), "report zeros-checkpoint-restored"], p.env);
+    return { ...result, parsed: parseRestoreResult(result.stdout) };
+  };
+
+  it("brings back every repository's branch, commits, index and edits, a change in only one of them included", () => {
+    const p = project(), key = randomBytes(32), out = join(p.root, "checkpoint.zck");
+    const web = p.folder(p.oldHome, "web"), api = p.folder(p.oldHome, "api");
+    // Work in the second repository only: a commit, a staged change and an unstaged one.
+    p.write(join(web, "page.html"), "<p>committed</p>\n"); p.git(web, "add", "page.html"); p.git(web, "commit", "-q", "-m", "page");
+    p.write(join(web, "staged.txt"), "staged\n"); p.git(web, "add", "staged.txt");
+    p.write(join(web, "README.md"), "web edited\n");
+    const saved = save(p, key, out);
+    expect(saved.parsed).toMatchObject({ ok: true });
+    // Nothing temporary stays in either checkout.
+    for (const repo of [api, web]) expect(p.git(repo, "for-each-ref", "refs/zeros-checkpoint/")).toBe("");
+    // A new VM: fresh clones of both on main, as the base gives them.
+    mkdirSync(join(p.newHome, "zeros-app"), { recursive: true });
+    for (const name of ["api", "web"] as const) p.git(p.root, "clone", "-q", p.origins[name], p.folder(p.newHome, name));
+    const restored = load(p, key, out, sha(out));
+    expect(restored.parsed).toEqual({ ok: true });
+    const newWeb = p.folder(p.newHome, "web"), newApi = p.folder(p.newHome, "api");
+    expect(p.git(newWeb, "symbolic-ref", "HEAD")).toBe("refs/heads/zeros/app");
+    expect(p.git(newWeb, "log", "-1", "--format=%s")).toBe("page");
+    expect(readFileSync(join(newWeb, "README.md"), "utf8")).toBe("web edited\n");
+    expect(sorted(p.git(newWeb, "diff", "--cached", "--name-only"))).toEqual(["staged.txt"]);
+    expect(sorted(p.git(newWeb, "diff", "--name-only"))).toEqual(["README.md"]);
+    // The untouched repository comes back on its branch, unchanged.
+    expect(p.git(newApi, "symbolic-ref", "HEAD")).toBe("refs/heads/zeros/app");
+    expect(p.git(newApi, "status", "--porcelain")).toBe("");
+    expect(readFileSync(join(newApi, "README.md"), "utf8")).toBe("api\n");
+  });
+
+  it("is reused only while every repository is unchanged", () => {
+    const p = project(), key = randomBytes(32), out = join(p.root, "checkpoint.zck");
+    const first = save(p, key, out);
+    expect(first.parsed).toMatchObject({ ok: true, reuse: { fingerprint: expect.stringMatching(/^[0-9a-f]{64}$/) } });
+    const reuse = (first.parsed as { reuse: CheckpointReuse }).reuse;
+    const again = (extra: () => void) => {
+      extra();
+      return parseCheckpointResult(run([...checkpointArchiveSteps({ checkoutPath: p.folder(p.oldHome, "api"), home: p.oldHome, baseBranch: "main", key, reuse,
+        repositories: [{ checkoutPath: p.folder(p.oldHome, "web"), baseBranch: "main" }] }), `cp "$work/checkpoint.zck" '${out}'`, CHECKPOINT_SAVED_REPORT], p.env).stdout);
+    };
+    expect(again(() => {})).toMatchObject({ unchanged: true });
+    // An edit in the second repository alone makes a new checkpoint.
+    expect(again(() => p.write(join(p.folder(p.oldHome, "web"), "new.txt"), "new\n"))).toMatchObject({ ok: true, bytes: expect.any(Number) });
+  });
+
+  it("clones a repository the new VM lacks with its own token, and reports a failing one by its step", () => {
+    const p = project(), key = randomBytes(32), out = join(p.root, "checkpoint.zck");
+    p.write(join(p.folder(p.oldHome, "web"), "work.txt"), "work\n");
+    expect(save(p, key, out).parsed).toMatchObject({ ok: true });
+    mkdirSync(join(p.newHome, "zeros-app"), { recursive: true });
+    p.git(p.root, "clone", "-q", p.origins.api, p.folder(p.newHome, "api"));
+    // No second checkout and no way to fetch it: refused, naming the repository's step.
+    const refused = load(p, key, out, sha(out));
+    expect(refused.parsed).toEqual({ ok: false, code: "checkpoint_repository_missing" });
+    expect(refused.stdout.trim()).toBe("zeros-checkpoint-error checkpoint_repository_missing repository");
+    const restored = run([...checkpointRestoreSteps({ checkoutPath: p.folder(p.newHome, "api"), home: p.newHome, key, sha256: sha(out),
+      repositories: [{ checkoutPath: p.folder(p.newHome, "web"), githubToken: "synthetic-token-0123456789", repositoryUrl: "https://example.invalid/withso/web.git" }] },
+      [`cp '${out}' "$work/checkpoint.zck"`]), "report zeros-checkpoint-restored"].join("\n").replaceAll("https://example.invalid/withso/web.git", p.origins.web).split("\n"), p.env);
+    expect(parseRestoreResult(restored.stdout)).toEqual({ ok: true });
+    expect(readFileSync(join(p.folder(p.newHome, "web"), "work.txt"), "utf8")).toBe("work\n");
+  });
+
+  it("restores a checkpoint made before the workspace had a repository, and an older one-repository checkpoint, unchanged", () => {
+    const w = workspaces(), key = randomBytes(32), out = join(w.root, "checkpoint.zck");
+    w.write(join(w.oldRepo, "a.txt"), "edited\n");
+    expect(checkpoint({ home: w.oldHome, repo: w.oldRepo, key, out }, w.env).parsed).toMatchObject({ ok: true });
+    w.git(w.root, "clone", "-q", w.origin, w.newRepo);
+    const second = join(w.newHome, "acme", "other");
+    w.git(w.root, "clone", "-q", w.origin, second);
+    const restored = restore({ home: w.newHome, repo: w.newRepo, from: out, key, sha256: sha(out), repositories: [{ checkoutPath: second }] }, w.env);
+    expect(restored.parsed).toEqual({ ok: true });
+    expect(readFileSync(join(w.newRepo, "a.txt"), "utf8")).toBe("edited\n");
+    expect(w.git(second, "status", "--porcelain")).toBe("");
+  });
+});

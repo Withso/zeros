@@ -600,6 +600,17 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
   } };
   void loginChanges?.start().catch(() => {}); // The shared listener retries and re-reads onReady.
   const remoteHeads = github.remoteHead;
+  /** A token for one of a workspace of several's repositories after the first: as its initiator
+   * in shared execution, else as its creator; only ever one of the workspace's own sources. */
+  const otherRepositoryToken = async (workspace: CloudV2LifecycleWorkspace, repository: string) => {
+    const actor = await lifecycleExecution(execution, workspace);
+    if (!actor) return githubToken(workspace, "git", undefined, repository);
+    const target = (await withSystemTx(pool, tx => tx.query<{ repository: string; repositoryId: string }>(
+      `SELECT source_repository AS repository, repository_id::text AS "repositoryId" FROM cloud_v2_github_sources WHERE workspace_id=$1 AND source_repository=lower($2)`,
+      [workspace.id, repository]))).rows[0];
+    if (!target) throw new HttpError(403, "github_repository_access_required", "This repository is not part of this workspace.");
+    return github.token({ organizationId: workspace.organizationId, userId: actor.userId }, target, "read", "computer", actor.check);
+  };
   const lifecycleSource = async (workspace: CloudV2LifecycleWorkspace, purpose: "git" | "computer" = "git", recoveryId?: string) => {
     const actor = await lifecycleExecution(execution, workspace, recoveryId ? { recoveryId } : undefined);
     if (!actor) return null;
@@ -674,17 +685,8 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
   const readyCopyForks = roles.lifecycle && readyCopies ? new CloudV2ReadyCopyForks({
     copies: readyCopies, compute,
     ...(readyCopyBuilder ? { queueFirst: (organizationId: string, projectId: string) => readyCopyBuilder.queueFirst(organizationId, projectId) } : {}),
-    githubToken: async (workspace: CloudV2LifecycleWorkspace, repository?: string) => {
-      if (!repository) return (await lifecycleSource(workspace, "computer"))?.credential ?? github.workspaceToken(workspace);
-      // Another repository of the fork: as its initiator in shared execution, else as its creator; only one of the workspace's sources.
-      const actor = await lifecycleExecution(execution, workspace);
-      if (!actor) return githubToken(workspace, "git", undefined, repository);
-      const target = (await withSystemTx(pool, tx => tx.query<{ repository: string; repositoryId: string }>(
-        `SELECT source_repository AS repository, repository_id::text AS "repositoryId" FROM cloud_v2_github_sources WHERE workspace_id=$1 AND source_repository=lower($2)`,
-        [workspace.id, repository]))).rows[0];
-      if (!target) throw new HttpError(403, "github_repository_access_required", "This repository is not part of this workspace.");
-      return github.token({ organizationId: workspace.organizationId, userId: actor.userId }, target, "read", "computer", actor.check);
-    },
+    githubToken: async (workspace: CloudV2LifecycleWorkspace, repository?: string) => repository ? otherRepositoryToken(workspace, repository)
+      : (await lifecycleSource(workspace, "computer"))?.credential ?? github.workspaceToken(workspace),
     logger: console,
   }) : null;
   // Data only and idempotent, so it runs whether or not ready copies are on:
@@ -760,7 +762,9 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
       const head = await remoteHeads(workspace.organizationId, userId, workspace.repository, workspace.baseBranch, target.repositoryId);
       await actor?.check(); return head;
     },
-    githubToken: async workspace => (await lifecycleSource(workspace,"computer"))?.credential ?? github.workspaceToken(workspace),
+    githubToken: async (workspace, repository) => repository ? otherRepositoryToken(workspace, repository)
+      : (await lifecycleSource(workspace,"computer"))?.credential ?? github.workspaceToken(workspace),
+    repositories: workspace => withSystemTx(pool, tx => otherRepositories(tx, workspace)),
     logger: console,
   }) : null;
   // Lifecycle rows notify on change. Reconnecting sweeps once, covering any

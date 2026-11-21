@@ -135,13 +135,16 @@ export type CloudV2LifecycleDeps = {
   /** The base branch's GitHub head, recorded at creation; null when unknown. */
   remoteHead?(workspace: CloudV2LifecycleWorkspace): Promise<string | null>;
   /** A repository token, for a restore that must fetch or clone from GitHub. */
-  githubToken?(workspace: CloudV2LifecycleWorkspace): Promise<{ token: string }>;
+  /** `repository`: one of a workspace of several's repositories; the first without one. */
+  githubToken?(workspace: CloudV2LifecycleWorkspace, repository?: string): Promise<{ token: string }>;
   authorizeWorkspace?(workspace: CloudV2LifecycleWorkspace): Promise<void>;
   assertExecution?(workspace: CloudV2LifecycleWorkspace): Promise<void>;
   claimExecutionRestore?(workspace: CloudV2LifecycleWorkspace, sandboxId: string): Promise<boolean>;
   /** A pending create's GitHub checks and its one-time source scope. */
   resolvePendingSource?(workspace: CloudV2Workspace): Promise<PendingSourceOutcome>;
   prepareRepository?(workspace: CloudV2LifecycleWorkspace, sandboxId: string): Promise<void>;
+  /** A workspace of several repositories: every one after the first, for its checkpoint and restore. */
+  repositories?(workspace: CloudV2LifecycleWorkspace): Promise<{ repository: string; checkoutFolder: string; baseBranch: string }[]>;
   /** Cloud Computer builds share this loop; one runs at a time. */
   builds?: { tick(): Promise<void>; cleanup?(): Promise<void>; close?(): void };
   /** Ready copies (CloudV2Config.readyCopies): creates fork a repository's
@@ -708,8 +711,11 @@ export class CloudV2Lifecycle {
       // instance once deletion began, issues no upload at all.
       if (!await store.checkpointUpload(workspace.id, owner, generation, object, uploadUntil, ...scoped)) return "fenced";
       const reuse = await this.reusable(workspace);
+      // Every repository of a workspace of several, each in its own part of the archive.
+      const others = await this.deps.repositories?.(workspace) ?? [];
       const command = checkpointCommand({ checkoutPath: workspaceCheckoutPath(workspace), home: CLOUD_V2_HOME,
-        baseBranch: workspace.baseBranch, key, uploadUrl: await checkpoints.storage.uploadUrl(workspace.id, object), ...(reuse ? { reuse } : {}) });
+        baseBranch: workspace.baseBranch, key, uploadUrl: await checkpoints.storage.uploadUrl(workspace.id, object), ...(reuse ? { reuse } : {}),
+        ...(others.length ? { repositories: others.map(entry => ({ checkoutPath: `${CLOUD_V2_HOME}/${entry.checkoutFolder}`, baseBranch: entry.baseBranch })) } : {}) });
       const { result, saved } = await this.measure(workspace, "checkpoint", async () => {
         const result = await this.deps.compute.exec(vm, command, CLOUD_V2_CHECKPOINT_SECONDS);
         return { result, saved: parseCheckpointResult(result.stdout) };
@@ -894,11 +900,20 @@ export class CloudV2Lifecycle {
     const active = workspace.executionIntent !== undefined;
     if (active && !await this.deps.claimExecutionRestore?.(workspace, sandboxId)) throw checkpointError("checkpoint_restore_failed");
     const github = await this.deps.githubToken?.(workspace) ?? null;
+    // Each repository after the first is restored with its own token and clone URL.
+    const others = await this.deps.repositories?.(workspace) ?? [];
+    if (active && others.length) throw checkpointError("checkpoint_restore_failed");
+    const repositories = await Promise.all(others.map(async entry => {
+      const token = await this.deps.githubToken?.(workspace, entry.repository) ?? null;
+      return { checkoutPath: `${CLOUD_V2_HOME}/${entry.checkoutFolder}`, repositoryUrl: `https://github.com/${entry.repository}.git`,
+        ...(token ? { githubToken: token.token } : {}) };
+    }));
     const key = checkpoints.open(checkpoint.key, workspace.id, checkpoint.object);
     try {
       const command = restoreCommand({ checkoutPath: workspaceCheckoutPath(workspace), home: CLOUD_V2_HOME, key,
         sha256: checkpoint.sha256, downloadUrl: await checkpoints.storage.downloadUrl(workspace.id, checkpoint.object),
-        repositoryUrl: `https://github.com/${workspace.repository}.git`, ...(github ? { githubToken: github.token } : {}), ...(active ? { active: true } : {}) });
+        repositoryUrl: `https://github.com/${workspace.repository}.git`, ...(github ? { githubToken: github.token } : {}), ...(active ? { active: true } : {}),
+        ...(repositories.length ? { repositories } : {}) });
       await this.deps.store.defer(workspace.id, "starting", CHECKPOINT_LEASE_MS, { failure: true });
       await this.deps.assertExecution?.(workspace);
       const result = await this.deps.compute.exec(sandboxId, command, CLOUD_V2_CHECKPOINT_SECONDS);
