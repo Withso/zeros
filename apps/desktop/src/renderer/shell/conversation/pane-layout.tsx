@@ -76,7 +76,6 @@ import {
   CHAT_STRIP_LEADING_CLS,
   CHAT_STRIP_SHELL_CLS,
   CHAT_STRIP_TRAILING_CLS,
-  ChatTabs,
 } from "./chat-tabs";
 import {
   chatCloseConfirmation,
@@ -91,6 +90,8 @@ import {
   restoreScrollWithin,
 } from "../scroll-memory";
 import { prepareChatView } from "./chat-intent";
+import { onFocusedPaneSplitRequest } from "./pane-split-requests";
+import { PaneSessionBar } from "./session-switcher";
 import { warmCloudWorkspaceDestination } from "../../state/cloud-workspace-warmup";
 import { useInstantViewSwitch } from "../../shared/ui/use-instant-view-switch";
 import { useWorkspaceProvisioning } from "../../state/pending-workspaces";
@@ -688,6 +689,10 @@ export function ConversationPaneLayout({
       dispatch,
     ],
   );
+
+  useEffect(() => onFocusedPaneSplitRequest((dir) => {
+    if (!readOnly) handleSplit(focusedPaneId, dir);
+  }), [focusedPaneId, readOnly, handleSplit]);
 
   const handleDropOnPane = useCallback(
     (paneId: string, zone: DropZone, chatId: string) => {
@@ -1314,26 +1319,6 @@ function ChatPane({ paneId, ctx }: { paneId: string; ctx: PaneCtx }) {
     return () => root.removeEventListener("keydown", handler, true);
   }, [onSelectChat, paneChats]);
 
-  // Show the synthetic Untitled tab only while the whole WORKSPACE has
-  // no chats (the keeper is mid-spawn) — and only in the FIRST pane,
-  // where the keeper's spawn will land; a persisted split revisited
-  // with all chats archived would otherwise show one pill per pane.
-  const isFirstPane = paneId === firstLeafId(ctx.layout.root);
-  const showSyntheticUntitled =
-    !ctx.readOnly &&
-    paneChats.length === 0 &&
-    !ctx.workspaceHasChats &&
-    isFirstPane;
-
-  // The column's own controls belong to ONE strip each, or a split would
-  // duplicate them: the mode toggle rides the first pane (the column's
-  // top-left corner) and the workbench expand control the top-right pane, the
-  // seat it already occupies inside Workbench's header while that panel is
-  // open.
-  const stripLeading = isFirstPane ? ctx.stripLeading : null;
-  const stripTrailing =
-    paneId === topRightLeafId(ctx.layout.root) ? ctx.stripTrailing : null;
-
   const splitRightAllowed = !ctx.readOnly && canSplit.right && !atPaneCap;
   const splitDownAllowed = !ctx.readOnly && canSplit.down && !atPaneCap;
 
@@ -1353,25 +1338,12 @@ function ChatPane({ paneId, ctx }: { paneId: string; ctx: PaneCtx }) {
         split && !isFocused && "*:opacity-80",
       )}
     >
-      <ChatTabs
-        readOnly={ctx.readOnly}
-        workspaceFolder={ctx.folder}
-        paneId={paneId}
-        chats={paneChats}
-        activeChatId={paneActiveChatId}
-        historyChats={ctx.historyChats}
-        showSyntheticUntitled={showSyntheticUntitled}
-        onSelectUntitled={ctx.onSelectUntitled}
-        onSelectChat={ctx.onSelectChat}
-        onPrefetchChat={ctx.onPrefetchChat}
-        onCloseTab={(chat, e) => ctx.onCloseTab(paneId, chat, e)}
-        onRestoreChat={(chat) => ctx.onRestoreChat(paneId, chat)}
-        onSplit={(dir) => ctx.onSplit(paneId, dir)}
-        canSplitRight={splitRightAllowed}
-        canSplitDown={splitDownAllowed}
-        leading={stripLeading}
-        trailing={stripTrailing}
-      />
+      {split && (
+        <PaneSessionBar
+          chat={paneChats.find((chat) => chat.id === paneActiveChatId) ?? null}
+          focused={isFocused}
+        />
+      )}
       <div className={cn("relative flex min-h-0 min-w-0 flex-1", CHAT_ASIDE_INSET_HOST_CLS)}>
         <div className="relative min-h-0 min-w-0 flex-1">
           {!paneActiveChatId && ctx.emptyContent && (

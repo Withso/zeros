@@ -290,15 +290,9 @@ describe("Code seats its column controls above the chat strips", () => {
     expect(chatTabsSource).not.toContain("<ConversationSummaryTrigger");
   });
 
-  it("gives each control to exactly one pane, at the corner it belongs to", () => {
-    expect(paneLayoutSource).toContain(
-      "const stripLeading = isFirstPane ? ctx.stripLeading : null;",
-    );
-    expect(paneLayoutSource).toContain(
-      "paneId === topRightLeafId(ctx.layout.root) ? ctx.stripTrailing : null",
-    );
-    expect(paneLayoutSource).toContain("leading={stripLeading}");
-    expect(paneLayoutSource).toContain("trailing={stripTrailing}");
+  it("names each split pane's session instead of mounting a tab strip", () => {
+    expect(paneLayoutSource).not.toContain("<ChatTabs");
+    expect(paneLayoutSource).toContain("{split && (\n        <PaneSessionBar");
   });
 
   it("orders the strip: toggle, tabs, +, history, pane menu, expand", () => {
