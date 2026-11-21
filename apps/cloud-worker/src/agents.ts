@@ -42,6 +42,9 @@ interface Runtime {
   interactions?: AgentInteractions; tools?: Map<string, { nativeId?: string; parentId?: string; active: boolean }>;
   preparing?: Promise<void>;
   retiring?: Promise<void>; pendingNative?: string; admitting: number;
+  /** The native session was not on disk and a fresh one opened: the client replays the
+   * conversation to it (resumedFresh), once, on the load reply or the next binding update. */
+  resumedFresh?: boolean;
   cancelling?: Promise<"succeeded" | "failed" | "cancelled">;
   active?: InboxEntry; nativeRunning?: boolean; background?: BackgroundTasksUpdate;
   pumping?: Promise<void>; events: Promise<void>; stopping: number; closed: boolean;
@@ -716,11 +719,14 @@ export class Agents {
     if (!this.acting) { await this.ensureDriver(route, timing); this.assertCurrent(route); }
     timing.mark("driver_ready");
     const chat = this.store.metadata(chatId)!.chat!;
-    const session = { sessionId: route.id, executionId: route.id, ...(this.config.agentInteractions === 1 ? { modes: cloudSessionModes(agentId, route.permissionMode ?? "bypass") } : {}), ...(chat.providerBinding ? { providerBinding: chat.providerBinding } : {}), ...(route.background ? { backgroundTasks: route.background } : {}) };
+    const session = { sessionId: route.id, executionId: route.id, ...(this.config.agentInteractions === 1 ? { modes: cloudSessionModes(agentId, route.permissionMode ?? "bypass") } : {}), ...(chat.providerBinding ? { providerBinding: chat.providerBinding } : {}), ...(route.background ? { backgroundTasks: route.background } : {}),
+      ...(route.resumedFresh && message.type !== "AGENT_NEW_SESSION" ? { resumedFresh: true } : {}) };
     if (message.type === "AGENT_NEW_SESSION") await client.send(createMessage({ type: "AGENT_SESSION_CREATED", source: "engine", requestId: message.id, agentId, session, initialize: this.initialized(agentId) }));
     else await client.send(createMessage({ type: "AGENT_SESSION_LOADED", source: "engine", requestId: message.id, agentId,
       sessionId: route.id, executionId: route.id, response: session, promptActive: !!route.active,
       ...(route.active ? { activeTurnStartedAt: route.active.startedAt, promptId: route.active.promptId } : {}) }));
+    // Delivered once: a later binding update must not ask for the replay again.
+    if ("resumedFresh" in session) route.resumedFresh = false;
     await route.interactions?.replay(frame => client.send(frame));
     if (route.active) await this.turnState(route, route.active, "running");
   }
@@ -821,6 +827,7 @@ export class Agents {
             if (binding.providerId !== route.agentId || binding.kind !== "native") throw new Error("Invalid native provider binding.");
             if (this.store.canRebind(route.chatId)) { route.pendingNative = binding.resumeId; return; }
             await this.store.bind(route.chatId, route.agentId, binding.resumeId);
+            if (route.resumedFresh) { route.resumedFresh = false; notification.update = { ...notification.update, resumedFresh: true }; }
           }
           if (notification.update.sessionUpdate === "current_mode_update") {
             const mode = cloudPermissionMode(route.agentId, notification.update.currentModeId);
@@ -869,6 +876,7 @@ export class Agents {
           ...("oauthToken" in login ? { oauthToken: login.oauthToken } : "apiKey" in login
             ? { apiKey: login.apiKey } : { proxy: { baseUrl: login.baseUrl, token: login.token } }) });
         if (route.closed) { await driver.dispose(); throw new WorkspaceError("session-expired", "This execution has ended."); }
+        if (native.resumedFresh) route.resumedFresh = true;
         // Codex and Cursor can reserve a native session during open. Until a
         // user turn exists it must not pin an otherwise empty chat to an agent.
         if (!native.provisional) {
@@ -1117,7 +1125,9 @@ export class Agents {
             if (route.pendingNative) {
               await this.store.bind(route.chatId, route.agentId, route.pendingNative);
               route.pendingNative = undefined;
-              await this.update(route, { sessionId: route.id, update: { sessionUpdate: "provider_binding_update", providerBinding: this.store.metadata(route.chatId)!.chat!.providerBinding! } });
+              const resumedFresh = route.resumedFresh === true; route.resumedFresh = false;
+              await this.update(route, { sessionId: route.id, update: { sessionUpdate: "provider_binding_update", providerBinding: this.store.metadata(route.chatId)!.chat!.providerBinding!,
+                ...(resumedFresh ? { resumedFresh: true } : {}) } });
             }
             if (route.closed || stopping !== route.stopping) response = { stopReason: "cancelled" };
             else if (!response) {
