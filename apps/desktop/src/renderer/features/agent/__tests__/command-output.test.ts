@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { printedFile, splitCommandOutput } from "../renderers/command-output";
+import { comparisonCommand, printedFile, splitCommandOutput } from "../renderers/command-output";
 
 const gitDiff = [
   "diff --git a/apps/a.ts b/apps/a.ts",
@@ -36,6 +36,13 @@ describe("splitCommandOutput", () => {
     expect(splitCommandOutput(created)[0]).toMatchObject({ kind: "diff", path: "n.ts" });
   });
 
+  it("names a Git-quoted file by its decoded path", () => {
+    const quoted = 'diff --git "a/caf\\303\\251.ts" "b/caf\\303\\251.ts"\n--- "a/caf\\303\\251.ts"\n+++ "b/caf\\303\\251.ts"\n@@ -1 +1 @@\n-a\n+b';
+    expect(splitCommandOutput(quoted)[0]).toMatchObject({ kind: "diff", path: "café.ts" });
+    const escaped = '--- "a/say \\"hi\\".txt"\n+++ "b/say \\"hi\\".txt"\n@@ -1 +1 @@\n-a\n+b';
+    expect(splitCommandOutput(escaped)[0]).toMatchObject({ kind: "diff", path: 'say "hi".txt' });
+  });
+
   it("leaves output alone when a diff is truncated or only looks like one", () => {
     const truncated = "diff --git a/a.ts b/a.ts\n--- a/a.ts\n+++ b/a.ts\n@@ -1,5 +1,5 @@\n a\n-b";
     expect(splitCommandOutput(truncated)).toEqual([{ kind: "text", text: truncated }]);
@@ -70,5 +77,19 @@ describe("printedFile", () => {
     "cat $FILE",
   ])("prints no single file for %j", (command) => {
     expect(printedFile({ command })).toBeNull();
+  });
+});
+
+describe("comparisonCommand", () => {
+  it.each([
+    ["diff -u old.txt new.txt", true],
+    ["git diff --no-index a.ts b.ts", true],
+    ["git diff --exit-code", true],
+    [["bash", "-lc", "diff -ru a b"], true],
+    ["git diff", false],
+    ["cat a.ts", false],
+    ["diff a b | head", false],
+  ])("%j reports differences through exit code 1: %s", (command, expected) => {
+    expect(comparisonCommand({ command })).toBe(expected);
   });
 });

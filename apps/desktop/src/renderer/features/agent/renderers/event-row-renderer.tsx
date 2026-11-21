@@ -55,7 +55,7 @@ import {
   type BrowserToolActivity,
 } from "../../browser/browser-tool-activity";
 import { CodeWithGutter, HighlightedCode } from "./highlighted-code";
-import { printedFile, splitCommandOutput } from "./command-output";
+import { comparisonCommand, printedFile, splitCommandOutput } from "./command-output";
 import { DiffHoverPreview } from "./diff-hover-preview";
 import { parseReadBody } from "./read-lines";
 import { readLabel, readLineCount, readToolText } from "./read-output";
@@ -716,11 +716,19 @@ function renderToolBody(
   return null;
 }
 
-/** A tool's text result. A command's unified diffs render as diffs, like an
- *  Edit's, and a file it prints reads in that file's language. */
+/** Diffs come first: a print of a .diff or .patch file reads better as the
+ *  diff it contains than highlighted as patch text. */
 function ToolText({ tool, text }: { tool: AgentToolMessage; text: string }) {
   const command = tool.toolKind === "execute" && tool.status !== "failed";
-  const parts = useMemo(() => (command ? splitCommandOutput(text) : null), [command, text]);
+  const comparison =
+    tool.toolKind === "execute" &&
+    tool.status === "failed" &&
+    toolRecord(commandResultOutput(tool.rawOutput)).exitCode === 1 &&
+    comparisonCommand(tool.rawInput);
+  const parts = useMemo(
+    () => (command || comparison ? splitCommandOutput(text) : null),
+    [command, comparison, text],
+  );
   if (parts?.some((part) => part.kind === "diff"))
     return (
       <div className="min-w-0">
@@ -735,7 +743,7 @@ function ToolText({ tool, text }: { tool: AgentToolMessage; text: string }) {
     );
   const printed = command ? printedFile(tool.rawInput) : null;
   const lang = langForTool(tool);
-  if (printed?.startLine != null && lang !== "text")
+  if (printed?.startLine != null)
     return <CodeWithGutter code={text} lang={lang} startLine={printed.startLine} />;
   return <HighlightedCode code={text} lang={lang} className={OUTPUT_CLASS} />;
 }
