@@ -83,6 +83,9 @@ export class CloudGithubPrStore {
       throw new HttpError(404, "not_found", "Cloud workspace not found.");
     const g = row.metadata,
       observed = !!g?.checkout_boot_id;
+    // A named repository that is neither a later one nor the first is refused, never served as the first.
+    if (repository !== undefined && ![row.repository, g?.canonical_repository].some(name => name?.toLowerCase() === repository.toLowerCase()))
+      throw new HttpError(404, "not_found", "This repository is not part of this workspace.");
     return {
       workspaceId: row.id,
       organizationId: row.org_id,
@@ -98,7 +101,9 @@ export class CloudGithubPrStore {
     };
   }
 
-  /** A repository after the first of a workspace of several, by name; null for the first (or none). */
+  /** A repository after the first of a workspace of several, by its name or its current
+   * GitHub name (GitHub compares names case-insensitively; names are ASCII by schema);
+   * null otherwise, and readContext then accepts only the first's own name. */
   private async readOtherContext(tx: Tx, workspaceId: string, userId: string, lock: boolean, repository: string): Promise<CloudGithubPrContext | null> {
     const row = (await tx.query<{ id: string; org_id: string; creator_user_id: string; worker_boot_id: string | null; execution_mode: string;
       authority_revision: string; position: number; repository: string; repository_id: string; branch: string; base_branch: string; metadata: Metadata | null }>(
@@ -107,12 +112,14 @@ export class CloudGithubPrStore {
         r.position,r.repository,coalesce(r.repository_id,s.repository_id)::text AS repository_id,r.branch,r.base_branch,row_to_json(g.*) AS metadata
       FROM cloud_v2_workspaces w
       JOIN organization_members m ON m.org_id=w.org_id AND m.user_id=$2 JOIN users u ON u.id=m.user_id JOIN organizations o ON o.id=m.org_id
-      JOIN cloud_v2_workspace_repositories r ON r.workspace_id=w.id AND lower(r.repository)=lower($3)
+      JOIN cloud_v2_workspace_repositories r ON r.workspace_id=w.id
       LEFT JOIN cloud_v2_github_sources s ON s.workspace_id=w.id AND s.source_repository=lower(r.repository)
       LEFT JOIN cloud_v2_github_workspace_repositories g ON g.workspace_id=w.id AND g.repository_id=coalesce(r.repository_id,s.repository_id)
       WHERE w.id=$1 AND ${cloudV2ActorAccess("$2")} AND w.state NOT IN ('deleting','deleted') AND ${CLOUD_V2_LIVE_ACCESS}
+        AND r.position > 0 AND (lower(r.repository)=lower($3) OR lower(g.canonical_repository)=lower($3))
+      ORDER BY r.position LIMIT 1
       ${lock ? "FOR UPDATE OF w" : ""}`, [workspaceId, userId, repository])).rows[0];
-    if (!row || row.position === 0) return null;
+    if (!row) return null;
     if (!row.repository_id) throw new HttpError(409, "github_repository_changed", "The saved GitHub repository identity changed.");
     const g = row.metadata, observed = !!g?.checkout_boot_id;
     return {
@@ -230,14 +237,16 @@ export class CloudGithubPrStore {
     const input = CloudGithubCheckoutSchema.parse(value);
     return withSystemTx(this.pool, async (tx) => {
       const row = (
-        await tx.query<{ id: string; worker_boot_id: string | null }>(
-          `SELECT w.id,w.worker_boot_id FROM cloud_v2_workspaces w
+        await tx.query<{ id: string; worker_boot_id: string | null; repository: string }>(
+          `SELECT w.id,w.worker_boot_id,w.repository FROM cloud_v2_workspaces w
         WHERE w.worker_token_hash=$1 AND w.state IN ('running','stopping') AND ${CLOUD_V2_LIVE_ACCESS} FOR UPDATE OF w`,
           [hashCloudV2Token(token)],
         )
       ).rows[0];
       if (!row || row.worker_boot_id !== bootId) throw unauthorized();
-      if (input.repository) {
+      // The worker reports a repository after the first by its configured name, exactly;
+      // the first's own name is the same report as one without a name.
+      if (input.repository !== undefined && input.repository !== row.repository) {
         await this.checkoutOther(tx, row.id, bootId, input);
         return;
       }
@@ -289,12 +298,14 @@ export class CloudGithubPrStore {
     });
   }
 
-  /** A checkout report for a repository after the first, into its own row. */
+  /** A checkout report for a repository after the first, into its own row. Any
+   * other name (another workspace's, a case variant, one never configured) is
+   * refused before anything is written. */
   private async checkoutOther(tx: Tx, workspaceId: string, bootId: string, input: CloudGithubCheckout): Promise<void> {
     const target = (await tx.query<{ repository: string; repository_id: string | null }>(
       `SELECT r.repository, coalesce(r.repository_id, s.repository_id)::text AS repository_id FROM cloud_v2_workspace_repositories r
        LEFT JOIN cloud_v2_github_sources s ON s.workspace_id=r.workspace_id AND s.source_repository=lower(r.repository)
-       WHERE r.workspace_id=$1 AND r.position > 0 AND lower(r.repository)=lower($2)`, [workspaceId, input.repository])).rows[0];
+       WHERE r.workspace_id=$1 AND r.position > 0 AND r.repository=$2`, [workspaceId, input.repository])).rows[0];
     if (!target?.repository_id) throw new HttpError(404, "not_found", "This repository is not part of this workspace.");
     const previous = (await tx.query<Metadata>("SELECT * FROM cloud_v2_github_workspace_repositories WHERE workspace_id=$1 AND repository_id=$2 FOR UPDATE",
       [workspaceId, target.repository_id])).rows[0];

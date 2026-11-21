@@ -51,3 +51,18 @@ export async function otherRepositories(tx: Tx, workspace: CloudV2Workspace): Pr
     WHERE r.workspace_id=$1 AND r.position > 0 AND r.folder IS NOT NULL ORDER BY r.position`, [workspace.id]);
   return rows.map(row => ({ repository: row.repository, repositoryId: row.repository_id, checkoutFolder: `${workspace.folder}/${row.folder}`, baseBranch: row.base_branch }));
 }
+
+/** The source a workspace's GitHub token is minted for: its first repository
+ * without a name, else the named one, which must be one of the workspace's own
+ * repositories and one of its sources (GitHub compares names case-insensitively;
+ * names are ASCII by schema). Null for anything else, so a token request never
+ * reaches another workspace's repository or a source outside its repositories. */
+export async function workspaceTokenSource(tx: Tx, workspaceId: string, repository: string | null): Promise<{ repository: string; repositoryId: string } | null> {
+  const { rows } = await tx.query<{ repository: string; repositoryId: string }>(`SELECT s.source_repository AS repository, s.repository_id::text AS "repositoryId"
+    FROM cloud_v2_workspaces w JOIN cloud_v2_github_sources s ON s.workspace_id=w.id
+    WHERE w.id=$1 AND s.source_repository=lower(coalesce($2::text, w.repository))
+      AND ($2::text IS NULL OR lower($2::text)=lower(w.repository)
+        OR EXISTS (SELECT 1 FROM cloud_v2_workspace_repositories r WHERE r.workspace_id=w.id AND lower(r.repository)=lower($2::text)))`,
+    [workspaceId, repository]);
+  return rows[0] ?? null;
+}

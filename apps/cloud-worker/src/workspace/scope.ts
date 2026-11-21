@@ -69,12 +69,15 @@ export class WorkspaceScope {
 
   /** The repository a request names (`repository`), or whose checkout its repoRoot, cwd or folder is; undefined for the first. */
   repositoryFor(params: Record<string, unknown>): WorkerRepository | undefined {
-    if (!this.several) return undefined;
-    if (typeof params.repository === "string") {
-      const named = this.repositories.find(entry => entry.repository.toLowerCase() === (params.repository as string).toLowerCase());
+    // A named repository must be one of this workspace's own (GitHub compares names
+    // case-insensitively), with one repository as with several: never served by another.
+    if (params.repository !== undefined) {
+      const name = typeof params.repository === "string" ? params.repository.toLowerCase() : null;
+      const named = this.repositories.find(entry => entry.repository.toLowerCase() === name);
       if (!named) throw new WorkspaceError("WORKSPACE_NOT_FOUND", "This request belongs to another workspace.");
-      return named;
+      return this.several ? named : undefined;
     }
+    if (!this.several) return undefined;
     for (const key of ["repoRoot", "cwd", "folder"]) {
       const value = params[key];
       if (typeof value !== "string" || !isAbsolute(value)) continue;
