@@ -121,7 +121,10 @@ describe("group threshold, span and gated rows", () => {
     [[tool("a"), tool("agent", { toolKind: "subagent", rawInput: { description: "Review" } })], true],
     // Setting off: one call plus an in-between message is two foldable items.
     [[tool("a"), text("m", "Next.")], true],
-    [[text("m", "Next."), text("n", "Then.")], false],
+    // Setting off: a run of in-between messages alone folds too (commentary
+    // followed directly by the answer), as "Worked for …" with no icons.
+    [[text("m", "Next.")], true],
+    [[text("m", "Next."), text("n", "Then.")], true],
     [[text("t", "Hmm", { role: "thought" }), text("m", "Next.")], true],
   ] as [AgentMessage[], boolean][])("%#: %j is a group: %s", (events, group) => {
     expect(isWorkingGroup(events)).toBe(group);

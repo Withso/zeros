@@ -91,6 +91,12 @@ describe("tool presentation contract", () => {
     expect(html).not.toContain("data-agent-effort");
   });
 
+  it("names an Agent by its task when that is all its input says", () => {
+    const html = renderToStaticMarkup(createElement(SubagentCard, { ctx, message: tool({ title: "Agent", toolKind: "subagent", rawInput: { task: "Inspect the repository" } }) }));
+    expect(html).toContain("Inspect the repository");
+    expect(html).toContain('aria-label="Agent Inspect the repository"');
+  });
+
   it("presents Chrome setup with its reason and no result bookkeeping", () => {
     const value = tool({ title: "Chrome setup", toolKind: "other", rawInput: { reason: "Test checkout in your browser" }, rawOutput: {} });
     expect(metaForEvent(value)).toMatchObject({ Icon: ChromeIcon, label: "Chrome setup", target: "Test checkout in your browser", expandable: false });
@@ -160,11 +166,14 @@ describe("tool presentation contract", () => {
     expect(html).toContain("text-red-primary");
   });
   it("keeps current streaming narration bright until the next activity", () => {
+    // A sub-agent's own narration streams inside its feed (top-level
+    // in-between messages sit outside the runs while live).
     const text = {
       kind: "text" as const,
       role: "agent" as const,
       id: "text",
       text: "Inspecting source",
+      parentToolId: "agent",
       createdAt: 1,
     };
     const html = (events: Parameters<typeof EventStripe>[0]["events"]) =>

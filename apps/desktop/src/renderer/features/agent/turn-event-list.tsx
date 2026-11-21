@@ -248,16 +248,20 @@ function heldOnArrival(message: AgentTextMessage, ctx: RendererContext): boolean
  * to its timer rather than keep naming a call that has finished. */
 const HELD_LINE_MS = 2_000;
 function useHeldTooLong(id: string | null): boolean {
-  const since = useRef<{ id: string; at: number } | null>(null);
-  if (id === null) since.current = null;
-  else if (since.current?.id !== id) since.current = { id, at: Date.now() };
+  // When the committed tail message started being held: recorded at commit,
+  // so a render React discards cannot restart the deadline.
+  const [held, setHeld] = useState<{ id: string; at: number } | null>(null);
+  useLayoutEffect(() => {
+    setHeld((previous) => id === null ? null : previous?.id === id ? previous : { id, at: Date.now() });
+  }, [id]);
+  const since = held?.id === id ? held.at : null;
   const [, wake] = useState(0);
-  const long = !!since.current && Date.now() - since.current.at >= HELD_LINE_MS;
+  const long = since !== null && Date.now() - since >= HELD_LINE_MS;
   useEffect(() => {
-    if (!since.current || long) return;
-    const timer = setTimeout(() => wake((value) => value + 1), since.current.at + HELD_LINE_MS - Date.now() + 1);
+    if (since === null || long) return;
+    const timer = setTimeout(() => wake((value) => value + 1), since + HELD_LINE_MS - Date.now() + 1);
     return () => clearTimeout(timer);
-  }, [id, long]);
+  }, [since, long]);
   return long;
 }
 
@@ -323,7 +327,9 @@ function TurnSequenceFeed({ sequence, ctx, live, tailLive, loaderVisible, workfl
   const previousLone = useRef(loneCallId);
   const handedOff = useRef<string | undefined>(undefined);
   const handoff = handedOffCall(previousLone.current, loneCallId, shown);
-  handedOff.current = handoff ?? handedOff.current;
+  // This render's key; it is kept only once the render commits.
+  const reenterKey = handoff ?? handedOff.current;
+  useLayoutEffect(() => { if (handoff) handedOff.current = handoff; });
   // The lone call joined a new group: its header takes the line's row.
   const tucked = !!previousLone.current && !loneCallId && !handoff && last?.kind === "working" &&
     isWorkingGroup(workingFeedEvents(last.events));
@@ -352,13 +358,13 @@ function TurnSequenceFeed({ sequence, ctx, live, tailLive, loaderVisible, workfl
           a little lower, so it reads as the turn's rail, not one more row. */}
       <LiveTailLine present={lineShown} active={ctx.attachmentImagesActive !== false} growth={sequence}
         readerOwned={tailOpen && last?.kind === "working" && isWorkingGroup(workingFeedEvents(last.events))}
-        reenterKey={handedOff.current} className={above ? "mt-2" : undefined}>
+        reenterKey={reenterKey} className={above ? "mt-2" : undefined}>
         {shimmer && (
           <ActivityShimmer
             startedAt={shimmer.startedAt}
             gibberish={shimmer.gibberish}
             bare={subject.kind === "bare"}
-            resetKey={handedOff.current}
+            resetKey={reenterKey}
             tucked={tucked}
             subject={subject.kind === "tool" || subject.kind === "thinking" || subject.kind === "status"
               ? { key: loaderLineKey(subject), label: <LoaderLineLabel subject={subject}

@@ -120,30 +120,47 @@ async function runThinkingSmoke({ page, check }) {
   check("The loader line shows a streaming thought with its description; a lone thought is not also a row", true);
 }
 
+/** The loader line's minimum dwell (shared/ui/loading/loader-ticker.ts
+ * LOADER_TICK_DWELL_MS). */
+const DWELL_MS = 550;
+
 async function runBurstSmoke({ page, check }) {
   const burst = page.locator("#live-burst");
   await expect(loader(burst)).toContainText("package.json");
   const seen = await burst.evaluate(async (root) => {
     const line = root.querySelector('div[role="status"][aria-live="polite"]');
     const log = [];
+    let delivered = null;
+    let done;
+    const finished = new Promise((resolve) => { done = resolve; });
     const sample = () => {
+      const now = performance.now();
+      // The fixture's third call has arrived once the group counts four.
+      if (delivered === null && /, 4 tool calls/.test(root.querySelector("[data-working-group]")?.getAttribute("aria-label") ?? "")) delivered = now;
       const current = line.querySelector('[data-loader-tick="in"]')?.textContent ?? "";
-      if (log.at(-1)?.text !== current) log.push({ text: current, at: performance.now() });
+      if (log.at(-1)?.text !== current) log.push({ text: current, at: now });
+      if (current.includes("burst-three.ts")) done();
     };
     const observer = new MutationObserver(sample);
-    observer.observe(line, { subtree: true, childList: true, characterData: true, attributes: true });
+    observer.observe(root, { subtree: true, childList: true, characterData: true, attributes: true });
     [...root.querySelectorAll("button")].find((button) => button.textContent === "Three quick calls").click();
-    await new Promise((resolve) => setTimeout(resolve, 1_500));
+    // Until the newest call is on the line; a hang fails the check below.
+    await Promise.race([finished, new Promise((resolve) => setTimeout(resolve, 3_000))]);
     observer.disconnect();
-    return log;
+    return { log, delivered };
   });
-  const shown = seen.map((entry) => entry.text);
-  const one = seen.find((entry) => entry.text.includes("burst-one.ts"));
-  const three = seen.find((entry) => entry.text.includes("burst-three.ts"));
+  const shown = seen.log.map((entry) => entry.text);
+  const one = seen.log.find((entry) => entry.text.includes("burst-one.ts"));
+  const three = seen.log.find((entry) => entry.text.includes("burst-three.ts"));
+  // The race window: the newer calls arrived while the first still dwelt.
+  const windowOpen = !!one && seen.delivered !== null && seen.delivered < one.at + DWELL_MS;
+  const due = one && seen.delivered !== null ? Math.max(one.at + DWELL_MS, seen.delivered) : null;
   check(
     "Calls faster than the hand-off skip the middle one and dwell before the newest",
-    !!one && !!three && !shown.some((text) => text.includes("burst-two.ts")) && three.at - one.at >= 450 && three.at - one.at <= 800,
-    JSON.stringify(shown.map((text, index) => `${Math.round(seen[index].at - (one?.at ?? 0))}ms ${text}`)),
+    windowOpen && !!three && !shown.some((text) => text.includes("burst-two.ts")) &&
+      three.at - one.at >= DWELL_MS - 50 && three.at - due <= 200,
+    JSON.stringify({ windowOpen, delivered: seen.delivered && one ? Math.round(seen.delivered - one.at) : null,
+      log: shown.map((text, index) => `${Math.round(seen.log[index].at - (one?.at ?? 0))}ms ${text}`) }),
   );
 }
 
@@ -179,6 +196,20 @@ async function runDoneSmoke({ page, check }) {
   expect(await fg(folded)).toBe(await fg(answer));
   check("Setting off: one group folds the messages; opened, they read at the answer's fg1", true);
   await header(open).click();
+  // A run with no calls folds too: commentary followed directly by the
+  // answer reads as one group with its time and no tool icons.
+  const prose = page.locator("#done-prose");
+  const proseGroup = prose.locator("[data-working-group]");
+  await expect(proseGroup).toHaveCount(1);
+  await expect(proseGroup).toHaveAttribute("aria-label", /^Worked for \d+s, 1 message$/);
+  await expect(proseGroup.locator("svg")).toHaveCount(1);
+  await expect(prose.getByText(/^Typecheck passes\./)).toHaveCount(0);
+  await expect(prose.getByText(/^In-between messages now sit/)).toBeVisible();
+  await page.getByRole("button", { name: "Turn the setting on", exact: true }).click();
+  await expect(proseGroup).toHaveCount(0);
+  await expect(prose.getByText(/^Typecheck passes\./)).toBeVisible();
+  await page.getByRole("button", { name: "Turn the setting off", exact: true }).click();
+  check("Setting off: a prose-only run folds as a group with its time and no icons; on, the message stays visible", true);
   await page.getByRole("button", { name: "Turn the setting on", exact: true }).click();
   await expect(groups).toHaveCount(2);
 }

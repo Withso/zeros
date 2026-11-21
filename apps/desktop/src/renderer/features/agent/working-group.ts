@@ -34,11 +34,12 @@ export function workingRows(events: AgentMessage[]): number {
   return workingToolCalls(events) + events.filter(isThought).length;
 }
 
-/** Two work rows make a group. A run that also folds in-between messages
- * (setting off) is a group once it has a work row and two foldable items. */
+/** Two work rows make a group. A run that folds in-between messages
+ * (setting off) is a group whenever it holds one, even with no work row
+ * (commentary followed directly by the answer): its header shows the time
+ * and no icons. A lone call stays a plain row. */
 export function isWorkingGroup(events: AgentMessage[]): boolean {
-  const rows = workingRows(events);
-  return rows >= 2 || (rows >= 1 && rows + events.filter(isInBetweenMessage).length >= 2);
+  return workingRows(events) >= 2 || events.some(isInBetweenMessage);
 }
 
 function endTime(event: AgentMessage): number {

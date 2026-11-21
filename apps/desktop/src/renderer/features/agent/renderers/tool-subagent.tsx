@@ -38,6 +38,7 @@ export const SubagentCard: Renderer<AgentToolMessage> = memo(
       readString(info?.description) ??
       readString(input.description) ??
       readString(input.prompt) ??
+      readString(input.task) ??
       readString(input.agentPath)?.split("/").at(-1) ??
       // A placeholder title ("Agent", "spawnAgent") is never a description.
       (placeholderTitle(tool.title) ? "" : tool.title);

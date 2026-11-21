@@ -481,6 +481,9 @@ function Harness() {
         <Frame id="done" title="Done"><Turn id="done" events={done} live={false} /></Frame>
         <Frame id="done-thinking" title="Done: Thinking, Bash, Thinking"><Turn id="done-thinking" events={doneThinking} live={false} /></Frame>
         <Frame id="done-open" title="Done: a group opened"><Turn id="done-open" events={done} live={false} /></Frame>
+        <Frame id="done-prose" title="Done: commentary, then the answer (no calls)">
+          <Turn id="done-prose" events={[say("prose-m", M2, 1_000, "commentary"), say("prose-answer", ANSWER, 4_000, "final_answer")]} live={false} />
+        </Frame>
         <Frame id="stopped" title="Stopped by you: the badge under a group, a row, a message">
           <StoppedTurn id="group" events={liveGroup.map((event) => ({ ...event, status: "completed" as const, settledAt: event.createdAt }))} />
           <StoppedTurn id="row" events={[tool({ id: "stop-row", t: "read", d: "package.json", at: ago(9_000), end: ago(8_000) })]} />
