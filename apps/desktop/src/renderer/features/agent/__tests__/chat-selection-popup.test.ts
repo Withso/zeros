@@ -44,7 +44,7 @@ beforeAll(async () => {
           useEffect(() => {
             if (active && window.focusComposerOnActivate) document.getElementById("composer").focus();
           }, [active]);
-          return <div id="fixture" data-zeros-root="">
+          return <div data-pane-root=""><div id="fixture" data-zeros-root="">
             <div ref={setRoot} id="transcript">
               <div className="select-text" id="user">What do you want to work on?</div>
               <div className="select-text" id="answer">
@@ -69,6 +69,9 @@ beforeAll(async () => {
                 if (!window.deferSend) return window.sendResult;
                 return new Promise((resolve) => { window.pendingSend = resolve; });
               }} />
+          </div>
+            {/* Another chat retained in the same pane. */}
+            <div id="other-chat" data-zeros-root=""><textarea id="other-composer" aria-label="Other composer" /></div>
           </div>;
         }
         const app = createRoot(document.getElementById("root"));
@@ -486,6 +489,19 @@ describe("chat selection popup", { timeout: 15_000 }, () => {
       // The chat focuses its composer as it becomes active, as AgentChat does.
       await page.evaluate(() => { window.focusComposerOnActivate = true; window.mount(true); });
       await expect.poll(() => replyBox(page).isVisible()).toBe(true);
+      await expect.poll(() => page.getByRole("textbox", { name: "Reply" }).evaluate((element) => element === document.activeElement)).toBe(true);
+    } finally { await page.close(); }
+  });
+
+  it("keeps its focus claim while another chat in the same pane is shown", async () => {
+    const page = await open();
+    try {
+      await select(page, "#p2", "#p2");
+      await page.getByRole("button", { name: "Reply", exact: true }).click();
+      await page.getByRole("textbox", { name: "Reply" }).fill("still mine");
+      await page.evaluate(() => window.mount(false));
+      await page.locator("#other-composer").click();
+      await page.evaluate(() => window.mount(true));
       await expect.poll(() => page.getByRole("textbox", { name: "Reply" }).evaluate((element) => element === document.activeElement)).toBe(true);
     } finally { await page.close(); }
   });

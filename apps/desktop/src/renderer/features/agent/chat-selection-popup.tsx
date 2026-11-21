@@ -81,9 +81,14 @@ function useReplyHighlight(range: Range | null) {
   }, [range]);
 }
 
-/** The chat around the transcript: its pane when split, else its surface. */
-function chatSurface(root: HTMLElement | null): Element | null {
-  return root?.closest("[data-pane-root]") ?? root?.closest("[data-zeros-root]") ?? root;
+/** This chat's own surface. A pane can retain several chats' layers. */
+function chatOwnSurface(root: HTMLElement | null): Element | null {
+  return root?.closest("[data-zeros-root]") ?? root;
+}
+
+/** The pane holding the chat, where a returning reply may take focus from. */
+function chatPane(root: HTMLElement | null): Element | null {
+  return root?.closest("[data-pane-root]") ?? chatOwnSurface(root);
 }
 
 function visibleBounds(root: HTMLElement): DOMRect {
@@ -293,7 +298,7 @@ export function ChatSelectionPopup({ root, active, ownsKeyboard = active, onAddS
       // Never from something outside this chat: a focused tab strip, another
       // pane or the workbench keeps the keyboard it was given.
       const held = element.ownerDocument.activeElement;
-      if (held && held !== element.ownerDocument.body && !chatSurface(root)?.contains(held)) return;
+      if (held && held !== element.ownerDocument.body && !chatPane(root)?.contains(held)) return;
       element.focus({ preventScroll: true });
       element.setSelectionRange(element.value.length, element.value.length);
     });
@@ -305,17 +310,19 @@ export function ChatSelectionPopup({ root, active, ownsKeyboard = active, onAddS
   // Focus landing anywhere else in this chat (the composer, a control) is a
   // choice, whether or not the field held it; landing outside the chat (a tab,
   // another pane) is a switch, and the popup's own buttons keep the reply.
+  // Listened to only while the chat shows: a retained hidden chat sees none of
+  // the focus moves made in the chat shown over it.
   useEffect(() => {
-    if (!reply || !root) return;
+    if (!active || !reply || !root) return;
     const doc = root.ownerDocument;
     const focusin = (event: FocusEvent) => {
       const target = event.target;
       if (restoring.current || !(target instanceof Node) || content.current?.contains(target)) return;
-      if (chatSurface(root)?.contains(target)) fieldOwnsFocus.current = false;
+      if (chatOwnSurface(root)?.contains(target)) fieldOwnsFocus.current = false;
     };
     doc.addEventListener("focusin", focusin, true);
     return () => doc.removeEventListener("focusin", focusin, true);
-  }, [reply, root]);
+  }, [active, reply, root]);
 
   // ⌘L adds the selection. Capture, so an editor's own Mod-L never runs, and
   // only while the popup shows: a field elsewhere keeps its own selection.
