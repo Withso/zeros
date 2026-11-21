@@ -27,6 +27,8 @@ import {
 } from "./state/store";
 import { resolveBootActiveChatId } from "./state/boot-active-chat";
 import { sanitizeChatDirectories } from "./state/chat-boot-cache";
+import { threadToRow } from "./state/chat-row-wire";
+import { useAddChildSessionHotkey } from "./shell/use-add-child-session-hotkey";
 import {
   canMirrorChat,
   reconcileChatSnapshot,
@@ -312,34 +314,6 @@ function HydrateAiApiKey() {
     };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
   return null;
-}
-
-/** ChatThread → SQLite wire row. Every field stays JSON-safe, so IPC needs no
- *  custom serializer. */
-function threadToRow(c: ChatThread): ChatRowWire {
-  return {
-    id: c.id,
-    folder: c.folder ?? "",
-    agentId: c.agentId ?? null,
-    agentName: c.agentName ?? null,
-    model: c.model ?? null,
-    effort: c.effort,
-    permissionMode: c.permissionMode,
-    lastModeId: c.lastModeId ?? null,
-    prePlanModeId: c.prePlanModeId ?? null,
-    fast: !!c.fast,
-    additionalDirectories: sanitizeChatDirectories(c.additionalDirectories),
-    title: c.title ?? "",
-    createdAt: c.createdAt,
-    updatedAt: c.updatedAt,
-    sessionId: c.sessionId ?? null,
-    providerBinding: c.providerBinding ?? null,
-    providerMetadata: c.providerMetadata ?? null,
-    pinned: !!c.pinned,
-    archived: !!c.archived,
-    sourceChatId: c.sourceChatId ?? null,
-    kind: c.kind ?? null,
-  };
 }
 
 function rowToThread(r: ChatRowWire): ChatThread {
@@ -834,12 +808,12 @@ function ShellRouter() {
     return () => window.removeEventListener("keydown", handler);
   }, [toggleWorkbench]);
 
-  // ⌥⌘T flips the resolved variant, not the stored mode: with the OS in dark
+  // ⇧⌥⌘T flips the resolved variant, not the stored mode: with the OS in dark
   // mode, "system" and "dark" look identical, so cycling modes could look dead.
   // `e.code` for the same Option reason as ⌥⌘B.
   React.useEffect(() => {
     const handler = (e: KeyboardEvent) => {
-      if (!(e.metaKey || e.ctrlKey) || !e.altKey || e.shiftKey) return;
+      if (!(e.metaKey || e.ctrlKey) || !e.altKey || !e.shiftKey) return;
       if (e.code !== "KeyT") return;
       // Skipped inside editable surfaces, but pass through a focused
       // terminal (see apps/desktop/src/renderer/shell/editable-target.ts).
@@ -983,6 +957,7 @@ function MainShellBody({
   // ⌘T opens a chat; ⌘⇧T opens a terminal-agent tab when that feature is
   // enabled. Mounted here so neither shortcut fires from Settings.
   useNewTabHotkeys(activePage === "workspace" && workspaceToolsAvailable);
+  useAddChildSessionHotkey(activePage === "workspace" && workspaceToolsAvailable);
   // With no repositories, Home and the workspace page open the Create page
   // beside the sidebar (its start banners add the first repository); so does
   // the workspace page with nothing chosen. Routing only: the saved page is

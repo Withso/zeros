@@ -18,10 +18,10 @@ export interface AgentModelPick {
   model: string | null;
 }
 
-/** The transcript the next harness is seeded with. Phase 3's "handoff" mode
- * replaces "full" here. */
+/** The transcript the next harness is seeded with: the conversation and
+ * reasoning without tool noise. */
 export function harnessSwitchTranscriptMode(): TranscriptMode {
-  return "full";
+  return "handoff";
 }
 
 /** A pick that changes provider family needs a new adapter; anything else is

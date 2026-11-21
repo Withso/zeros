@@ -37,10 +37,10 @@ describe("harness switch", () => {
     expect(isPendingPick({ agentId: "codex", model: "opus" }, active)).toBe(true);
   });
 
-  it("seeds the next harness from the full transcript until handoff lands", () => {
-    expect(harnessSwitchTranscriptMode()).toBe("full");
+  it("seeds the next harness from the handoff transcript", () => {
+    expect(harnessSwitchTranscriptMode()).toBe("handoff");
     expect(buildForkTranscriptAttachment({
-      sourceChatId: "chat-1", sourceLabel: "Fix login", text: "t", mode: "full",
+      sourceChatId: "chat-1", sourceLabel: "Fix login", text: "t", mode: "handoff",
     }).name).not.toBe(buildForkTranscriptAttachment({
       sourceChatId: "chat-1", sourceLabel: "Fix login", text: "t",
     }).name);

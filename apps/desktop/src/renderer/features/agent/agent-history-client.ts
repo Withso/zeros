@@ -29,6 +29,7 @@ import {
   bridgeChatDelete,
   bridgeChatClearProviderIdentity,
   bridgeChatBulkUpsert,
+  bridgeChatCreateChild,
   bridgeMessageWindow,
   bridgeMessageWindowSnapshot,
   bridgeMessageWindowOlder,
@@ -591,6 +592,14 @@ export async function dbClearChatProviderIdentity(input: {
     requireBridge("clear a stale chat provider binding"),
     input,
   );
+}
+
+/** Local only: persist `chat` linked as a child of `parentChatId`. */
+export async function dbCreateChildChat(
+  chat: ChatRowWire,
+  parentChatId: string,
+): Promise<{ parentChatId: string; rootChatId: string }> {
+  return bridgeChatCreateChild(requireBridge("add a child session"), chat, parentChatId);
 }
 
 export async function dbReplaceAllChats(chats: ChatRowWire[]): Promise<void> {

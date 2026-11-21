@@ -604,6 +604,22 @@ export async function bridgeChatUpsert(
   await workspaceOp(bridge, "chats.upsert", { chat });
 }
 
+/** Local only: persist `chat` as a child of `parentChatId` (Add child
+ *  session) and return the recorded lineage. */
+export async function bridgeChatCreateChild(
+  bridge: RuntimeClient,
+  chat: ChatRowWire,
+  parentChatId: string,
+): Promise<{ parentChatId: string; rootChatId: string }> {
+  const r = (await workspaceOp(bridge, "chats.createChild", { chat, parentChatId })) as
+    | { parentChatId?: unknown; rootChatId?: unknown }
+    | undefined;
+  if (typeof r?.parentChatId !== "string" || typeof r.rootChatId !== "string") {
+    throw new Error("Could not link the child session");
+  }
+  return { parentChatId: r.parentChatId, rootChatId: r.rootChatId };
+}
+
 export async function bridgeChatDelete(
   bridge: RuntimeClient,
   id: string,
