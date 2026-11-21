@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
-  CHECKPOINT_SAVED_REPORT, checkpointArchiveSteps, checkpointCommand, checkpointRestoreSteps, cloudV2CheckpointObject, openCheckpointKey,
+  CHECKPOINT_SAVED_REPORT, WORKER_SERVICE_OFF, backupProbeCommand, checkpointArchiveSteps, checkpointCommand, parseBackupProbe, checkpointRestoreSteps, cloudV2CheckpointObject, openCheckpointKey,
   parseCheckpointResult, parseRestoreResult, restoreCommand, sealCheckpointKey, type CheckpointReuse, type RestoreInput,
 } from "./checkpoint.js";
 
@@ -1333,5 +1333,122 @@ describe("a workspace of several repositories", () => {
     expect(restored.parsed).toEqual({ ok: true });
     expect(readFileSync(join(w.newRepo, "a.txt"), "utf8")).toBe("edited\n");
     expect(w.git(second, "status", "--porcelain")).toBe("");
+  });
+});
+
+describe("retention backups and the stop probe", () => {
+  const PIN = { checkoutPath: "/home/user/acme/app", home: "/home/user", baseBranch: "main", key: Buffer.alloc(32, 7), uploadUrl: "https://r2.example.test/upload?sig=1" };
+  const digest = (value: string) => createHash("sha256").update(value).digest("hex");
+
+  it("keeps the stop checkpoint command byte for byte without the backup option, for one repository and for several", () => {
+    // Digests of the command as it was before retention backups existed.
+    expect(digest(checkpointCommand(PIN))).toBe("fefc12a759c38abc8217d209ec18ef24a3e34bf6860b2f17a726b7ca64039a56");
+    expect(digest(checkpointCommand({ ...PIN, checkoutPath: "/home/user/project/app", repositories: [
+      { checkoutPath: "/home/user/project/api", baseBranch: "trunk" }, { checkoutPath: "/home/user/project/docs", baseBranch: "main" }] })))
+      .toBe("dce572aee2e8c6da9ee3778b55b33843908f02525475187237a97bfa0eb37d16");
+    expect(digest(checkpointCommand({ ...PIN, reuse: { fingerprint: "f".repeat(64), base: "a".repeat(40) } })))
+      .toBe("b6e28ffb57f9b435ae69b616cecb9e09827b66a39ccca776f78b57fd87d5a524");
+    expect(checkpointCommand({ ...PIN, backup: false })).toBe(checkpointCommand(PIN));
+    // The worker is switched off before anything is read, by both commands.
+    for (const command of [checkpointCommand(PIN), backupProbeCommand([PIN.checkoutPath])])
+      expect(command.indexOf(WORKER_SERVICE_OFF[1])).toBeLessThan(command.indexOf("git"));
+  });
+
+  it("saves every repository's work and small ignored files but no sessions or ignored attachments, and today's restore applies it", () => {
+    const w = workspaces(), key = randomBytes(32), archive = join(w.root, "backup.zck");
+    const other = join(w.oldHome, "acme", "api"), otherNew = join(w.newHome, "acme", "api");
+    w.git(w.root, "clone", "-q", w.origin, other);
+    w.write(join(w.oldRepo, "notes.md"), "first repository's work\n");
+    w.write(join(w.oldRepo, ".env.local"), "SMALL=ignored\n");
+    w.write(join(other, "a.txt"), "second repository's edit\n");
+    w.write(join(w.oldRepo, ".gitignore"), "node_modules/\n.env*\n*.log\n.context/\n");
+    w.write(join(w.oldRepo, ".context/attachments/upload-1/photo.png"), "attachment\n");
+    w.write(join(w.oldHome, ".claude/projects/-home-user-acme-app/session.jsonl"), "{}\n");
+    w.write(join(w.oldHome, ".local/share/zeros/cloud-worker/sessions/chats.db"), "rows\n");
+    const saved = run([
+      ...checkpointArchiveSteps({ checkoutPath: w.oldRepo, home: w.oldHome, baseBranch: "main", key, backup: true,
+        repositories: [{ checkoutPath: other, baseBranch: "main" }] }),
+      `cp "$work/checkpoint.zck" '${archive}'`, CHECKPOINT_SAVED_REPORT,
+    ], w.env);
+    expect(parseCheckpointResult(saved.stdout)).toMatchObject({ ok: true });
+    w.git(w.root, "clone", "-q", w.origin, w.newRepo); w.git(w.root, "clone", "-q", w.origin, otherNew);
+    const restored = run([...checkpointRestoreSteps({ checkoutPath: w.newRepo, home: w.newHome, key, sha256: sha(archive),
+      repositories: [{ checkoutPath: otherNew }] }, [`cp '${archive}' "$work/checkpoint.zck"`]), "report zeros-checkpoint-restored"], w.env);
+    expect(parseRestoreResult(restored.stdout)).toEqual({ ok: true });
+    expect(readFileSync(join(w.newRepo, "notes.md"), "utf8")).toBe("first repository's work\n");
+    expect(readFileSync(join(w.newRepo, ".env.local"), "utf8")).toBe("SMALL=ignored\n");
+    expect(readFileSync(join(otherNew, "a.txt"), "utf8")).toBe("second repository's edit\n");
+    expect(existsSync(join(w.newRepo, ".context/attachments/upload-1/photo.png"))).toBe(false);
+    expect(existsSync(join(w.newHome, ".claude/projects"))).toBe(false);
+    expect(existsSync(join(w.newHome, ".local/share/zeros/cloud-worker/sessions"))).toBe(false);
+  });
+
+  it("is never judged unchanged against a full checkpoint of the same files", () => {
+    const w = workspaces(), key = randomBytes(32);
+    const fingerprint = (backup: boolean) => /fingerprint=([0-9a-f]{64})/.exec(run([
+      ...checkpointArchiveSteps({ checkoutPath: w.oldRepo, home: w.oldHome, baseBranch: "main", key, backup }), CHECKPOINT_SAVED_REPORT], w.env).stdout)?.[1];
+    const full = fingerprint(false), backup = fingerprint(true);
+    expect(full).toMatch(/^[0-9a-f]{64}$/);
+    expect(backup).toMatch(/^[0-9a-f]{64}$/);
+    expect(backup).not.toBe(full);
+  });
+
+  describe("the probe", () => {
+    const probe = (paths: string[], env: NodeJS.ProcessEnv) => {
+      const result = spawnSync("bash", ["-c", `eval "$1"`, "probe", backupProbeCommand(paths)], { env, encoding: "utf8" });
+      expect(result.status).toBe(0);
+      return parseBackupProbe(result.stdout);
+    };
+
+    it("is clean for a fresh checkout, a new branch with no commits, ignored files and pushed commits", () => {
+      const w = workspaces();
+      expect(probe([w.oldRepo], w.env)).toBe("clean");
+      w.git(w.oldRepo, "switch", "-q", "-c", "zeros/new");
+      w.write(join(w.oldRepo, ".env.local"), "IGNORED=1\n");
+      w.write(join(w.oldRepo, "node_modules/pkg/index.js"), "ignored\n");
+      expect(probe([w.oldRepo], w.env)).toBe("clean");
+      w.write(join(w.oldRepo, "pushed.txt"), "x\n"); w.git(w.oldRepo, "add", "pushed.txt"); w.git(w.oldRepo, "commit", "-q", "-m", "pushed");
+      w.git(w.oldRepo, "push", "-q", "origin", "zeros/new");
+      expect(probe([w.oldRepo], w.env)).toBe("clean");
+    });
+
+    it.each([
+      ["an untracked file Git does not ignore", (w: ReturnType<typeof workspaces>) => w.write(join(w.oldRepo, "todo.md"), "x\n")],
+      ["a tracked edit", (w: ReturnType<typeof workspaces>) => w.write(join(w.oldRepo, "a.txt"), "edited\n")],
+      ["a staged deletion", (w: ReturnType<typeof workspaces>) => w.git(w.oldRepo, "rm", "-q", "b.txt")],
+      ["a stash", (w: ReturnType<typeof workspaces>) => { w.write(join(w.oldRepo, "a.txt"), "stashed\n"); w.git(w.oldRepo, "stash", "push", "-q"); }],
+      ["an unpushed commit", (w: ReturnType<typeof workspaces>) => { w.write(join(w.oldRepo, "c.txt"), "c2\n"); w.git(w.oldRepo, "commit", "-q", "-am", "local"); }],
+      ["a commit only on another local branch", (w: ReturnType<typeof workspaces>) => {
+        w.git(w.oldRepo, "switch", "-q", "-c", "side"); w.write(join(w.oldRepo, "c.txt"), "side\n"); w.git(w.oldRepo, "commit", "-q", "-am", "side");
+        w.git(w.oldRepo, "switch", "-q", "main");
+      }],
+      ["a detached commit", (w: ReturnType<typeof workspaces>) => {
+        w.git(w.oldRepo, "switch", "-q", "--detach"); w.write(join(w.oldRepo, "c.txt"), "detached\n"); w.git(w.oldRepo, "commit", "-q", "-am", "detached");
+      }],
+    ])("is dirty for %s", (_name, change) => {
+      const w = workspaces();
+      change(w);
+      expect(probe([w.oldRepo], w.env)).toBe("dirty");
+    });
+
+    it("is dirty when any one of several repositories has work, and unknown when one cannot be read", () => {
+      const w = workspaces(), second = join(w.oldHome, "acme", "api");
+      w.git(w.root, "clone", "-q", w.origin, second);
+      expect(probe([w.oldRepo, second], w.env)).toBe("clean");
+      w.write(join(second, "todo.md"), "x\n");
+      expect(probe([w.oldRepo, second], w.env)).toBe("dirty");
+      expect(probe([w.oldRepo, join(w.oldHome, "acme", "missing")], w.env)).toBe("unknown");
+      mkdirSync(join(w.oldHome, "plain"));
+      expect(probe([join(w.oldHome, "plain")], w.env)).toBe("unknown");
+    });
+
+    it("reads nothing but its own single result line", () => {
+      expect(parseBackupProbe("zeros-backup-probe clean\n")).toBe("clean");
+      expect(parseBackupProbe("zeros-backup-probe dirty")).toBe("dirty");
+      for (const output of ["", "zeros-backup-probe maybe\n", "zeros-backup-probe clean\nzeros-backup-probe clean\n", "clean\n"])
+        expect(parseBackupProbe(output)).toBe("unknown");
+      expect(() => backupProbeCommand([])).toThrow();
+      expect(() => backupProbeCommand(["relative/path"])).toThrow();
+    });
   });
 });
