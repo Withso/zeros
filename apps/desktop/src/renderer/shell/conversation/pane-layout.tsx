@@ -7,6 +7,7 @@
 
 import { toast } from "../../shared/ui/primitives/elements";
 import { editChat } from "../../state/cloud-chat-edits";
+import { openSession } from "../../state/open-session";
 import React, {
   useCallback,
   useEffect,
@@ -432,9 +433,10 @@ export function ConversationPaneLayout({
 
   const handleSelectChat = useCallback(
     (chatId: string) => {
-      dispatch({ type: "SET_ACTIVE_CHAT", id: chatId });
+      if (readOnly) dispatch({ type: "SET_ACTIVE_CHAT", id: chatId });
+      else openSession(dispatch, chatId);
     },
-    [dispatch],
+    [dispatch, readOnly],
   );
 
   const handleSelectUntitled = useCallback(() => {
@@ -1306,7 +1308,7 @@ function ChatPane({ paneId, ctx }: { paneId: string; ctx: PaneCtx }) {
       if (shortcut?.kind === "parent-session") {
         const state = useWorkspaceStore.getState();
         if (state.activePage !== "workspace" || !state.activeChatId) return;
-        const tree = buildSessionTree(state.chats, paneFolder);
+        const tree = buildSessionTree(state.chats, paneFolder, { includeArchived: true });
         const parents = tree.roots.map(node => node.chat.id);
         const current = parents.indexOf(sessionRootId(tree, state.activeChatId) ?? "");
         if (current < 0) return;

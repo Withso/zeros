@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   buildHarnessSwitchMessage,
   canAutoContinueAfterSwitch,
+  switchContinuation,
   commitHarnessSwitch,
   type HarnessSwitchCommit,
   harnessSwitchBlockedByQueue,
@@ -92,6 +93,20 @@ describe("harness switch guards", () => {
     expect(canAutoContinueAfterSwitch({ displayText: "", attachments: [transcript, { name: "a.png" }] })).toBe(false);
     expect(canAutoContinueAfterSwitch({ displayText: "", attachments: [] })).toBe(false);
     expect(canAutoContinueAfterSwitch(null)).toBe(false);
+  });
+
+  it("waits for the seeded transcript to reach the composer before deciding", () => {
+    const pending = { chatId: "c1", agentId: "cursor", sourceKey: "transcript:c1" };
+    const empty = { displayText: "", attachments: [] };
+    const seeded = { displayText: " ", attachments: [{ name: "c1.handoff.txt" }] };
+    const at = (over: Partial<Parameters<typeof switchContinuation>[1]> = {}) =>
+      switchContinuation(pending, { chatId: "c1", agentId: "cursor", stagedSourceKeys: [], composer: empty, ...over });
+    expect(at()).toBe("wait");
+    expect(at({ agentId: "codex", stagedSourceKeys: ["transcript:c1"], composer: seeded })).toBe("wait");
+    expect(at({ chatId: "c2", stagedSourceKeys: ["transcript:c1"], composer: seeded })).toBe("wait");
+    expect(at({ stagedSourceKeys: ["transcript:c1"], composer: seeded })).toBe("send");
+    expect(at({ stagedSourceKeys: ["transcript:c1"], composer: { ...seeded, displayText: "mine" } })).toBe("ask");
+    expect(switchContinuation(null, { chatId: "c1", agentId: "cursor", stagedSourceKeys: [], composer: empty })).toBe("wait");
   });
 });
 

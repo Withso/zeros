@@ -5,10 +5,11 @@ import { AgentIcon } from "../../../features/agent/agent-icon";
 import { awaitingKindOfSlot, useSessionsStore } from "../../../features/agent/sessions-store";
 import { RunStream } from "../../../shared/ui/loading";
 import { ListRow, Tabs, TabsContent, TabsList, TabsTrigger } from "../../../shared/ui/primitives";
+import { openSession } from "../../../state/open-session";
 import { buildSessionTree, sessionRootId, type SessionNode } from "../../../state/session-tree";
 import { selectActiveFolder, useWorkspaceDispatch, useWorkspaceStore, type ChatThread } from "../../../state/store";
 import { useActiveChatId, useChats } from "../../../state/workspace-store";
-import { sessionName } from "../../conversation/session-switcher";
+import { sessionName, WorkspaceBadge } from "../../conversation/session-switcher";
 import type { WorkbenchTab } from "../tab-model";
 import { useWorkbenchStatusSource } from "../tab-status";
 
@@ -38,10 +39,6 @@ function descendants(node: SessionNode): ChatThread[] {
   return node.children.flatMap((child) => [child.chat, ...descendants(child)]);
 }
 
-function folderName(folder: string): string {
-  return folder.split(/[\\/]/).filter(Boolean).pop() ?? folder;
-}
-
 function StatusMark({ status }: { status: SessionStatus }) {
   if (status === "input" || status === "plan") {
     return <AgentAwaitingIcon kind={status} className="size-3.5 shrink-0" strokeWidth={1.25} />;
@@ -66,11 +63,7 @@ function SessionListRow({ chat, folder, status, active, onSelect }: {
     >
       <AgentIcon agentId={chat.agentId ?? ""} iconUrl={null} size={14} />
       <span className="text-fg1 min-w-0 flex-1 truncate text-xs">{sessionName(chat)}</span>
-      {chat.folder !== folder && (
-        <span className="text-fg3 border-border1 shrink-0 rounded-sm border px-1 text-xxs leading-4" data-session-workspace="">
-          {folderName(chat.folder)}
-        </span>
-      )}
+      {chat.folder !== folder && <WorkspaceBadge folder={chat.folder} />}
       <StatusMark status={status} />
     </ListRow>
   );
@@ -82,7 +75,7 @@ export function AgentsTab({ active, scope }: { tab: WorkbenchTab; active: boolea
   const chats = useChats();
   const activeId = useActiveChatId();
   const dispatch = useWorkspaceDispatch();
-  const tree = useMemo(() => buildSessionTree(chats, folder), [chats, folder]);
+  const tree = useMemo(() => buildSessionTree(chats, folder, { includeArchived: true }), [chats, folder]);
   const [picked, setPicked] = useState<string | null>(null);
   const activeRoot = activeId ? sessionRootId(tree, activeId) : null;
   const parentId = (picked && tree.byId.has(picked) ? picked : null)
@@ -100,7 +93,7 @@ export function AgentsTab({ active, scope }: { tab: WorkbenchTab; active: boolea
   const statuses = useSessionStatuses(active ? childIds : NO_IDS);
   // Stored chats stay browsable while a cloud runtime sleeps.
   useWorkbenchStatusSource({ pending: false, primary: true, hasContent: chats.length > 0 });
-  const select = (id: string) => dispatch({ type: "SET_ACTIVE_CHAT", id });
+  const select = (id: string) => openSession(dispatch, id);
 
   if (tree.roots.length === 0 && terminals.length === 0) {
     return <div className="text-fg3 flex h-full items-center justify-center text-xs" data-agents-empty="">No sessions yet</div>;

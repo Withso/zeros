@@ -520,7 +520,13 @@ function changedPaths(tool: AgentToolMessage): string[] {
     .flatMap((c) => (c.type === "diff" && typeof c.path === "string" && c.path ? [c.path] : []));
   if (diffs.length) return diffs;
   if (tool.toolKind !== "edit" && tool.toolKind !== "delete" && tool.toolKind !== "move") return [];
-  return (tool.locations ?? []).flatMap((l) => (typeof l?.path === "string" && l.path ? [l.path] : []));
+  const located = (tool.locations ?? []).flatMap((l) => (typeof l?.path === "string" && l.path ? [l.path] : []));
+  if (located.length) return located;
+  // Codex apply_patch carries its paths only in rawInput.changes[].
+  const changes = (tool.rawInput as { changes?: unknown } | null | undefined)?.changes;
+  return Array.isArray(changes)
+    ? changes.flatMap((c) => (typeof c?.path === "string" && c.path ? [c.path as string] : []))
+    : [];
 }
 
 /** Prose the model or user wrote in a turn's feed. Zeros and runtime notices

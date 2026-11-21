@@ -1,5 +1,5 @@
-import { Fragment, useMemo, useState } from "react";
-import { ChevronRight, Cloud, Columns2, Ellipsis, GitBranchPlus, Laptop, Plus, Rows2, X } from "lucide-react";
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
+import { ChevronRight, Cloud, Columns2, Ellipsis, GitBranchPlus, Laptop, PencilLine, Plus, Rows2, X } from "lucide-react";
 import { leafIds } from "../../state/chat-panes";
 import { useChatPanesStore } from "../../state/chat-panes-store";
 import { IconButton } from "@/renderer/shared/ui/primitives/icon-button";
@@ -10,6 +10,7 @@ import { useAnyChatAgentActivity, useAnyChatAwaitingKind } from "../../features/
 import { useOptionalAgentSessions } from "../../features/agent/sessions-hooks";
 import { RunStream } from "../../shared/ui/loading";
 import { Button } from "../../shared/ui/primitives";
+import { Input } from "../../shared/ui/primitives/input";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -20,10 +21,16 @@ import {
 } from "../../shared/ui/primitives/dropdown-menu";
 import { addChildSession, canAddChildSession } from "../../features/agent/add-child-session";
 import { spawnNewChatTab } from "../../state/spawn-default-chat";
+import { editChat } from "../../state/cloud-chat-edits";
+import { openSession } from "../../state/open-session";
 import type { ChatThread } from "../../state/store";
 import { useWorkspaceDispatch, useWorkspaceStore } from "../../state/store";
 import { buildSessionTree, sessionDescendantIds, sessionLineage, type SessionNode, type SessionTree } from "../../state/session-tree";
 import { useActiveChatId, useChats } from "../../state/workspace-store";
+import { useArchivedWorkspaces, useLiveWorkspaces } from "../../state/use-projects";
+import type { Workspace } from "../../platform/git";
+import { findWorkspaceForFolder } from "../../state/workspace-resolution";
+import { workspaceLabel } from "../workspace-tabs";
 import type { WorkspacePlacement } from "./workspace-identity";
 
 export function sessionName(chat: ChatThread): string {
@@ -47,6 +54,27 @@ function folderName(folder: string): string {
   return folder.split(/[\\/]/).filter(Boolean).pop() ?? folder;
 }
 
+export function workspaceBadgeLabel(
+  folder: string,
+  live: readonly Workspace[],
+  archived: readonly Workspace[],
+): string {
+  const workspace = findWorkspaceForFolder(folder, live) ?? findWorkspaceForFolder(folder, archived);
+  return workspace ? workspaceLabel(workspace) : folderName(folder);
+}
+
+/** Names the workspace a child session lives in, as the sidebar does. Archived
+ *  child workspaces leave the sidebar but their sessions stay listed. */
+export function WorkspaceBadge({ folder }: { folder: string }) {
+  const { workspaces } = useLiveWorkspaces();
+  const { workspaces: archived } = useArchivedWorkspaces();
+  return (
+    <span className="text-fg3 border-border1 shrink-0 rounded-sm border px-1 text-xxs leading-4" data-session-workspace="">
+      {workspaceBadgeLabel(folder, workspaces, archived)}
+    </span>
+  );
+}
+
 function SessionRow({ node, depth, folder, activeId, expanded, onToggle, onSelect }: {
   node: SessionNode;
   depth: number;
@@ -61,6 +89,13 @@ function SessionRow({ node, depth, folder, activeId, expanded, onToggle, onSelec
   return (
     <DropdownMenuItem
       onSelect={() => onSelect(node.chat.id)}
+      onKeyDown={onToggle && hasChildren ? (event) => {
+        if ((event.key === "ArrowRight" && !expanded) || (event.key === "ArrowLeft" && expanded)) {
+          event.preventDefault();
+          onToggle();
+        }
+      } : undefined}
+      aria-expanded={onToggle && hasChildren ? !!expanded : undefined}
       data-session-row={node.chat.id}
       aria-current={node.chat.id === activeId ? "true" : undefined}
       className={`aria-[current=true]:bg-bg2-highlight ${ROW_INDENT_CLS[Math.min(depth, ROW_INDENT_CLS.length - 1)]}`}
@@ -72,7 +107,10 @@ function SessionRow({ node, depth, folder, activeId, expanded, onToggle, onSelec
           aria-label={expanded ? "Collapse" : "Expand"}
           aria-expanded={expanded}
           className={`text-fg3 -ml-1 flex size-4 shrink-0 items-center justify-center ${hasChildren ? "" : "invisible"}`}
+          // The item selects on a pointerup it did not see go down, so keep
+          // both halves of the press on the arrow.
           onPointerDown={(event) => { event.preventDefault(); event.stopPropagation(); }}
+          onPointerUp={(event) => { event.preventDefault(); event.stopPropagation(); }}
           onClick={(event) => { event.preventDefault(); event.stopPropagation(); onToggle(); }}
         >
           <ChevronRight className={`size-3.5 transition-transform ${expanded ? "rotate-90" : ""}`} strokeWidth={1.5} />
@@ -80,11 +118,7 @@ function SessionRow({ node, depth, folder, activeId, expanded, onToggle, onSelec
       ) : null}
       <AgentIcon agentId={node.chat.agentId ?? ""} iconUrl={null} size={14} />
       <span className="min-w-0 flex-1 truncate">{sessionName(node.chat)}</span>
-      {node.chat.folder !== folder && (
-        <span className="text-fg3 border-border1 shrink-0 rounded-sm border px-1 text-xxs leading-4" data-session-workspace="">
-          {folderName(node.chat.folder)}
-        </span>
-      )}
+      {node.chat.folder !== folder && <WorkspaceBadge folder={node.chat.folder} />}
       <SessionStatus ids={ids} />
     </DropdownMenuItem>
   );
@@ -110,7 +144,7 @@ function SubtreeRows({ node, depth, ...rest }: {
 }
 
 /** Every parent session, collapsed, with New parent session. */
-function ParentMenu({ tree, folder, activeId, onSelect, onNewParent }: {
+export function ParentMenu({ tree, folder, activeId, onSelect, onNewParent }: {
   tree: SessionTree;
   folder: string;
   activeId: string | null;
@@ -154,8 +188,73 @@ function ParentMenu({ tree, folder, activeId, onSelect, onNewParent }: {
   );
 }
 
-function Crumb({ chat, leading, identity, children }: {
+export function RenameRow({ chat }: { chat: ChatThread }) {
+  const dispatch = useWorkspaceDispatch();
+  const [draft, setDraft] = useState(chat.title);
+  useEffect(() => setDraft(chat.title), [chat.title]);
+  const cancelled = useRef(false);
+  const pending = useRef<{ draft: string; title: string } | null>(null);
+  const save = (next: string, title: string) => {
+    pending.current = null;
+    const name = next.trim();
+    if (name && name !== title) editChat(dispatch, chat.id, { title: name });
+  };
+  const commit = () => {
+    if (cancelled.current) cancelled.current = false;
+    else save(draft, chat.title);
+    setDraft(chat.title);
+  };
+  pending.current = cancelled.current || draft === chat.title ? null : { draft, title: chat.title };
+  useEffect(() => {
+    // The menu's own Escape handler (document, capture) closes it before the
+    // field sees the key, so mark the cancel earlier, on window.
+    const onEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape" && event.target instanceof Element && event.target.closest("[data-session-rename]"))
+        cancelled.current = true;
+    };
+    window.addEventListener("keydown", onEscape, true);
+    return () => window.removeEventListener("keydown", onEscape, true);
+  }, []);
+  // Dismissing the menu by clicking outside unmounts the field without a blur.
+  const saveOnUnmount = useRef(save);
+  saveOnUnmount.current = save;
+  useEffect(() => () => {
+    const last = pending.current;
+    if (last && !cancelled.current) saveOnUnmount.current(last.draft, last.title);
+  }, []);
+  return (
+    <>
+      <label className="text-fg2 flex items-center gap-2 px-2 py-1.5">
+        <PencilLine className="size-4 shrink-0" strokeWidth={1.5} aria-hidden="true" />
+        <Input
+          appearance="inline"
+          aria-label="Rename session"
+          data-session-rename=""
+          value={draft}
+          placeholder={sessionName(chat)}
+          onChange={(event) => setDraft(event.target.value)}
+          onBlur={commit}
+          onKeyDown={(event) => {
+            // Keep typing out of the menu's typeahead and arrow navigation.
+            if (event.key === "Escape") {
+              cancelled.current = true;
+              setDraft(chat.title);
+              return;
+            }
+            event.stopPropagation();
+            if (event.key === "Enter") { event.preventDefault(); event.currentTarget.blur(); }
+          }}
+          className="min-w-0 flex-1"
+        />
+      </label>
+      <DropdownMenuSeparator />
+    </>
+  );
+}
+
+function Crumb({ chat, leading, identity, rename, children }: {
   chat: ChatThread;
+  rename?: boolean;
   leading?: React.ReactNode;
   /** The first crumb is the workspace's identity: placement, then name. */
   identity?: WorkspacePlacement;
@@ -179,6 +278,7 @@ function Crumb({ chat, leading, identity, children }: {
         </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="start" sideOffset={6} className="max-h-96 min-w-64 max-w-96 overflow-y-auto">
+        {rename && <RenameRow chat={chat} />}
         {children}
       </DropdownMenuContent>
     </DropdownMenu>
@@ -200,13 +300,13 @@ export function SessionSwitcher({ folder, placement, showPlacement = true, fallb
   const activeId = useActiveChatId();
   const dispatch = useWorkspaceDispatch();
   const sessions = useOptionalAgentSessions();
-  const tree = useMemo(() => buildSessionTree(chats, folder, { includeArchived: readOnly }), [chats, folder, readOnly]);
+  const tree = useMemo(() => buildSessionTree(chats, folder, { includeArchived: true }), [chats, folder]);
   const lineage = useMemo(() => {
     const path = activeId ? sessionLineage(tree, activeId) : [];
     return path.length ? path : tree.roots[0] ? [tree.roots[0].chat] : [];
   }, [tree, activeId]);
   if (lineage.length === 0) return <>{fallback}</>;
-  const select = (id: string) => dispatch({ type: "SET_ACTIVE_CHAT", id });
+  const select = (id: string) => readOnly ? dispatch({ type: "SET_ACTIVE_CHAT", id }) : openSession(dispatch, id);
   const newParent = readOnly || !sessions ? undefined : () => {
     void spawnNewChatTab({ folder, sessions, dispatch }).then((chat) => select(chat.id)).catch(() => {});
   };
@@ -220,6 +320,7 @@ export function SessionSwitcher({ folder, placement, showPlacement = true, fallb
             {index > 0 && <ChevronRight className="text-fg3 size-3.5 shrink-0" strokeWidth={1.5} aria-hidden="true" />}
             <Crumb
               chat={chat}
+              rename={!readOnly && chat.id === activeId}
               identity={index === 0 && showPlacement ? placement : undefined}
               leading={index === 0 && showPlacement
                 ? <Icon className="text-fg2 size-4 shrink-0" strokeWidth={1.5} aria-hidden="true" data-workspace-placement={placement} />

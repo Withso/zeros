@@ -888,6 +888,16 @@ describe("archived workspace filtering", () => {
     ).toBe("feature/plain");
   });
 
+  it("names an untitled agent-created workspace by its branch", () => {
+    expect(
+      workspaceLabel(workspace("annex", { branch: "zeros/orchard-annex", title: null, parentWorkspaceId: "ws_parent" })),
+    ).toBe("orchard-annex");
+    expect(workspaceLabel(workspace("fresh", { title: null }))).toBe("Untitled");
+    expect(
+      workspaceLabel(workspace("named", { title: "Annex chat", parentWorkspaceId: "ws_parent" })),
+    ).toBe("Annex chat");
+  });
+
   it("keeps only archived rows from the selected repo, newest first", () => {
     expect(
       filterArchivedWorkspaces(rows, "zeros", "").map((row) => row.id),
