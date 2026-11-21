@@ -1,6 +1,5 @@
 import { useState } from "react";
 import { Button } from "../../shared/ui";
-import { Badge } from "../../shared/ui/primitives";
 import { Switch } from "../../shared/ui/primitives/switch";
 import { MessageRow } from "../../shared/ui/primitives/message-row";
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "../../shared/ui/primitives/sheet";
@@ -12,7 +11,7 @@ import { ControlPlaneError } from "../team/control-plane";
 import {
   connectCloudGithubInstallation, disconnectCloudGithubConnection, getCloudGithubConnectionRepositories,
   getCloudGithubLevelConnections, getCloudGithubVisibleInstallations, getCloudProjects, projectForRepository, setCloudPersonalProjectsAllowed,
-  type CloudGithubLevelConnection, type CloudGithubLevelConnections, type CloudGithubVisibleInstallation, type CloudProjects,
+  type CloudGithubLevelConnection, type CloudGithubLevelConnections, type CloudGithubVisibleInstallation, type CloudProject, type CloudProjects,
 } from "../../platform/cloud-github-levels";
 import { message } from "./cloud-computer-store";
 import { SettingsGroup, SettingsRow } from "./settings-ui";
@@ -32,6 +31,14 @@ export function useGithubLevels(userId: string, organizationId: string, active: 
     { enabled: active && connections.data !== null, maxAgeMs: 30_000 });
   return { key, connections: connections.data, projects: projects.data,
     refresh: () => { connections.refresh(); projects.refresh(); } };
+}
+
+/** A saved or created project, shown at once while the list is read again. */
+export function patchCloudProject(key: string, project: CloudProject): void {
+  const current = cloudProjects.peekSnapshot(key).data;
+  if (!current) return;
+  const known = current.projects.some(row => row.id === project.id);
+  cloudProjects.setData(key, { ...current, projects: known ? current.projects.map(row => row.id === project.id ? project : row) : [...current.projects, project] });
 }
 
 /** The one-repository project whose cloud settings a repository's page shows; null until known or when none. */
@@ -113,30 +120,40 @@ export function ConnectionRepositories({ organizationId, connection, onClose }: 
   organizationId: string; connection: CloudGithubLevelConnection | null; onClose(): void;
 }) {
   const key = connection ? JSON.stringify([organizationId, connection.id]) : null;
-  const read = useRecoveringRead(drawers, key, () => getCloudGithubConnectionRepositories(organizationId, connection!.id), { enabled: !!connection, maxAgeMs: 15_000 });
+  const read = useRecoveringRead(connectionRepositoriesCache, key, () => getCloudGithubConnectionRepositories(organizationId, connection!.id), { enabled: !!connection, maxAgeMs: 15_000 });
   return (
     <Sheet open={!!connection} onOpenChange={value => { if (!value) onClose(); }}>
-      <SheetContent side="right" className="p-6">
+      <SheetContent side="right" className="flex flex-col gap-6 overflow-y-auto p-6">
         <SheetHeader>
           <SheetTitle>{connection?.accountLogin ?? ""}</SheetTitle>
-          <SheetDescription>Repositories this connection can read. Projects pick their repositories from these.</SheetDescription>
+          <SheetDescription>{connection?.level === "personal" ? "Your own connection. Nobody else sees it, admins included." : "Connected for the organization."}</SheetDescription>
         </SheetHeader>
         {read.error && <MessageRow tone="error" role="alert" flush>{message(read.error)}</MessageRow>}
-        <ul className="m-0 flex list-none flex-col gap-2 overflow-y-auto p-0" aria-label="Repositories">
+        <SettingsGroup title="Repositories" description="Everything this connection can read. Nothing to add here: pick them when you create a project."
+          aria-label="Repositories">
           {(read.data?.repositories ?? []).map(row => (
-            <li key={row.id} className="flex items-center justify-between gap-2">
-              <span className="text-fg1 truncate text-xs">{row.repository}</span>
-              {row.projects.length > 0 && <Badge>{row.projects.length === 1 ? `In ${row.projects[0]!.name}` : `In ${row.projects.length} projects`}</Badge>}
-            </li>
+            <SettingsRow key={row.id} label={row.repository} hint={row.private ? "Private" : "Public"}>
+              {row.projects.length > 0 && (
+                <span className="text-fg3 text-xs">{row.projects.length === 1 ? `In ${row.projects[0]!.name}` : `In ${row.projects.length} projects`}</span>
+              )}
+            </SettingsRow>
           ))}
-        </ul>
+        </SettingsGroup>
+        {connection && (
+          <SettingsGroup title="On GitHub">
+            <SettingsRow label="Add or remove repositories" hint="Choose which repositories Zeros can see.">
+              <Button variant="secondary" size="sm" onClick={() => void shellOpenUrl(installationSettingsUrl(connection.accountLogin))}>Manage</Button>
+            </SettingsRow>
+          </SettingsGroup>
+        )}
       </SheetContent>
     </Sheet>
   );
 }
-const drawers = new KeyedAsyncCache<Awaited<ReturnType<typeof getCloudGithubConnectionRepositories>>>({ maxEntries: 16 });
+/** One connection's drawer, by (organization, connection). */
+export const connectionRepositoriesCache = new KeyedAsyncCache<Awaited<ReturnType<typeof getCloudGithubConnectionRepositories>>>({ maxEntries: 16 });
 
-export const PERSONAL_PROJECTS_HINT = "Members may keep projects only they can use. Turning this off stops their copies from refreshing and new workspaces of them; existing workspaces keep working.";
+export const PERSONAL_PROJECTS_HINT = "Members can create projects only they can use. Turning this off stops building and creating from them; existing workspaces keep working.";
 
 /** Owners and admins allow or forbid projects for one member. */
 export function PersonalProjectsSetting({ userId, organizationId, canManage, active }: { userId: string; organizationId: string; canManage: boolean; active: boolean }) {
@@ -147,7 +164,7 @@ export function PersonalProjectsSetting({ userId, organizationId, canManage, act
   return (
     <SettingsGroup>
       {error && <MessageRow tone="error" role="alert" flush>{error}</MessageRow>}
-      <SettingsRow label="Projects for one member" hint={canManage ? PERSONAL_PROJECTS_HINT : "Managed by admins"}>
+      <SettingsRow label="Personal projects" hint={canManage ? PERSONAL_PROJECTS_HINT : "Managed by admins"}>
         <Switch checked={allowed} disabled={!canManage} aria-label="Projects for one member"
           onCheckedChange={value => void setCloudPersonalProjectsAllowed(organizationId, value).then(levels.refresh, cause => setError(message(cause)))} />
       </SettingsRow>

@@ -63,3 +63,49 @@ it("returns Local summary rows in creation order, includes archived chats, and h
   await store.delete("first");
   expect(await service.handle("chats.titleSeeds", { chatIds: ["first"] })).toEqual({ seeds: [] });
 });
+
+it("switches an established chat to another agent in place and clears the old provider identity", async () => {
+  const closed: string[] = [];
+  const { state, scope, root } = await repositoryFixture();
+  const store = await SessionStore.open(state, scope.key);
+  const service = new ChatService(store, scope, async (id) => { closed.push(id); });
+  await store.upsert({ id: "chat", folder: root, createdAt: 100, agentId: "claude", model: "opus" });
+  await store.importMessages("chat", [row("prompt", "user", "Build the feature")]);
+  await store.bind("chat", "claude", "native-claude");
+  await store.update("chat", (draft) => { draft.executionId = "claude-execution"; });
+  const switchAgent = (params = {}) => service.handle("chats.switchAgent",
+    { chatId: "chat", fromAgentId: "claude", agentId: "codex", model: "gpt-5", effort: "high", fast: true, ...params });
+
+  await expect(store.upsert({ id: "chat", folder: root, createdAt: 100, agentId: "codex" })).rejects.toThrow(/different agent/);
+  await expect(switchAgent({ agentId: "other" })).rejects.toMatchObject({ code: "VALIDATION_FAILED" });
+  expect(await switchAgent({ fromAgentId: "codex" })).toEqual({ ok: false });
+  expect(closed).toEqual([]);
+
+  await expect(switchAgent({ message: { msgId: "" } })).rejects.toMatchObject({ code: "VALIDATION_FAILED" });
+  const marker = row("switch", "assistant", "", { kind: "tool", toolKind: "harness_switch", title: "Switched to GPT-5" });
+  expect(await switchAgent({ message: { ...marker, kind: "tool" } })).toEqual({ ok: true });
+  expect(closed).toEqual(["chat"]);
+  expect(store.metadata("chat")?.executionId).toBeUndefined();
+  expect(store.metadata("chat")).toMatchObject({ nativeSessionId: undefined, chat: { agentId: "codex", agentName: "Codex", model: "gpt-5",
+    effort: "high", fast: true, sessionId: null, providerBinding: null, providerMetadata: null } });
+  expect(store.snapshot("chat")?.rows.map((value) => value.msgId)).toEqual(["prompt", "switch"]);
+  expect(store.snapshot("chat")?.messages.map((value) => value.id)).toEqual(["prompt", "switch"]);
+  // The renderer's settings upsert and the next provider bind now match the chat's agent.
+  await store.upsert({ id: "chat", folder: root, createdAt: 100, agentId: "codex", model: "gpt-5" });
+  await store.bind("chat", "codex", "native-codex");
+  expect(store.metadata("chat")?.chat).toMatchObject({ agentId: "codex", sessionId: "native-codex" });
+  expect(await switchAgent()).toEqual({ ok: false });
+});
+
+it("refuses an agent switch while input is still queued for the old agent", async () => {
+  const { store, service, chat } = await setup();
+  await chat("chat", { agentId: "claude" });
+  await store.update("chat", (draft) => {
+    draft.inbox.push({ state: "queued" } as (typeof draft.inbox)[number]);
+  });
+  await expect(service.handle("chats.switchAgent", { chatId: "chat", fromAgentId: "claude", agentId: "codex" }))
+    .rejects.toMatchObject({ code: "VALIDATION_FAILED" });
+  expect(store.metadata("chat")?.chat?.agentId).toBe("claude");
+  await expect(service.handle("chats.switchAgent", { chatId: "missing", fromAgentId: "claude", agentId: "codex" }))
+    .rejects.toMatchObject({ code: "WORKSPACE_NOT_FOUND" });
+});

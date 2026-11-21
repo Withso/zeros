@@ -78,6 +78,9 @@ import {
 } from "./composer-editor";
 import { QueuedMessagesCard } from "./queued-messages-card";
 import { cloudQueuedPrompt } from "./cloud-queued-prompt";
+import { textFileAttachment } from "./composer-editor/attachment-io";
+import { chatAttachmentName, deliverReply, formatReply, replyMessage, replySendBlocker } from "./chat-selection";
+import { ChatSelectionPopup, stageChatText } from "./chat-selection-popup";
 import { agentActivity, chatAgentActivity } from "./agent-activity";
 import { EmbeddedTerminalCommand } from "./embedded-terminal-command";
 import { AddedDirectories } from "./added-directories";
@@ -108,16 +111,16 @@ import { readPlan, isPlanReviewRequest } from "./renderers/plan-body";
 import { WorkspaceDirectoryPicker } from "./workspace-directory-picker";
 import { useProjects } from "../../state/use-projects";
 import { turnGet } from "../../platform/turns";
-import { turnRowCache, turnRowKey } from "../../state/read-caches";
+import { refreshChatTurnRows, turnRowCache, turnRowKey } from "../../state/read-caches";
 import { useCachedRead } from "../../state/use-cached-read";
 import { findProjectForFolder } from "../../state/workspace-resolution";
-import { Bot, Square, ArrowLeft, Check } from "lucide-react";
+import { Bot, Square, ArrowLeft, Check, GitBranch, RotateCw } from "lucide-react";
 import {
   encodeAttachments,
   reportSkippedAttachments,
 } from "./encode-attachments";
 import type { ComposerAttachment } from "./composer-attachments";
-import { isSubmittedComposerDocument } from "./composer-submission";
+import { isSubmittedComposerDocument, sendClearsChatDraft } from "./composer-submission";
 import { useCloudWorkspaceAccountAccess } from "../team/cloud-workspace-account-access";
 import {
   COMPOSER_DRAG_CLS,
@@ -162,6 +165,7 @@ import {
 } from "./composer-text-attachment-delivery";
 import { registerLiveChatFileStager } from "./composer-file-attachment-delivery";
 import { buildForkTranscriptAttachment, createForkedChat } from "./fork-chat";
+import { hasParentContext } from "./add-child-session";
 import { resolveComposerPlaceholder } from "./composer-placeholder";
 import {
   composerCardDock,
@@ -314,7 +318,23 @@ import {
   windowOlderMessages as ipcWindowOlderMessages,
   cachedWindowOlderMessages as ipcCachedWindowOlderMessages,
   truncateMessagesFrom as ipcTruncateMessagesFrom,
+  persistTranscriptRow,
+  switchCloudChatAgent,
 } from "./agent-history-client";
+import {
+  buildHarnessSwitchMessage,
+  switchContinuation,
+  type PendingSwitchContinuation,
+  HARNESS_SWITCH_CONTINUE_NOTE,
+  harnessSwitchBlockedByQueue,
+  harnessSwitchTranscriptMode,
+  isHarnessChange,
+  isPendingPick,
+  commitHarnessSwitch,
+  type HarnessSwitchCommit,
+  pickLabel,
+  type AgentModelPick,
+} from "./harness-switch";
 
 /** How long an empty chat waits for its folder's transcript list before it
  * shows the workspace rows instead of nothing. */
@@ -1189,9 +1209,8 @@ function AgentChatBody({
     currentPermissionModeId,
   );
 
-  // A started chat is its agent's session, so other agents' models open a new
-  // tab. In-memory messages or a promoted title (which survives a respawn) mean
-  // it has started.
+  // In-memory messages or a promoted title (which survives a respawn) mean the
+  // chat has started.
   const hasSessionMessages = useSessionsStore((s) => {
     if (!chatId) return false;
     const slot = s.sessions[chatId];
@@ -1222,8 +1241,9 @@ function AgentChatBody({
   );
 
   // A fresh chat switches agent in place, clearing the native mode ids and engine
-  // session id, which don't translate across agents. A started chat opens a new
-  // tab for the picked agent and carries the draft across.
+  // session id, which don't translate across agents. A started chat stages the
+  // pick (applyStagedPick); this opens a new tab for it only when an older cloud
+  // worker can't switch in place, carrying the draft across.
   const agentSwitchRef = useRef(0);
   const switchAgentModel = useCallback(
     function selectAgentModel(sel: AgentModelSelection) {
@@ -1316,6 +1336,170 @@ function AgentChatBody({
     [chatThread, chatId, dispatch, agentSessions, updateChatSettings],
   );
 
+  const applyModelInPlace = useCallback(
+    (v: string | null) => {
+      if (!chatThread) return;
+      if (chatId) {
+        const store = useSessionsStore.getState();
+        store.patchSession(chatId, { modelSelectionRevision: (store.sessions[chatId]?.modelSelectionRevision ?? 0) + 1 });
+      }
+      const configuration = resolveModelConfiguration(
+        chatThread.agentId,
+        v,
+        session.initialize,
+      );
+      updateChatSettings({ model: v, ...configuration });
+      // Apply to the LIVE session too, so the change takes effect on the
+      // next turn instead of only on a rebuild.
+      if (v) session.setModel?.(v);
+      // After setModel: updateConfig pushes the whole env, carrying the effort and
+      // Fast resets and stamping appliedChatEnvKey so sendPrompt does not respawn.
+      session.updateConfig?.();
+      // Once per chat, a mid-conversation model change is a
+      // cache miss on the next reply (slower + more tokens).
+      if (v && v !== chatThread.model) maybeShowCostBumpToast("model");
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [chatThread, chatId, session.initialize, session.setModel, session.updateConfig, updateChatSettings, maybeShowCostBumpToast],
+  );
+
+  // A started chat stages agent/model picks; nothing changes until the user
+  // applies the staged pick with the rotate button.
+  const [stagedPickState, setStagedPickState] = useState<{ chatId: string; pick: AgentModelPick } | null>(null);
+  const stagedPick = stagedPickState && stagedPickState.chatId === chatId && chatThread &&
+    isPendingPick(stagedPickState.pick, chatThread) ? stagedPickState.pick : null;
+  const cloudChat = isCloudWorkspace(chatThread?.folder);
+  const continueAfterSwitchRef = useRef<PendingSwitchContinuation | null>(null);
+  const [continueAfterSwitch, setContinueAfterSwitch] = useState(0);
+
+  const recordSwitchRow = useCallback(
+    (targetChatId: string, row: ReturnType<typeof buildHarnessSwitchMessage>, durable: boolean) => {
+      const store = useSessionsStore.getState();
+      const slot = store.sessions[targetChatId];
+      if (slot && !slot.messages.some((message) => message.id === row.id)) {
+        store.patchSession(targetChatId, { messages: [...slot.messages, row] });
+      }
+      if (!durable || !capabilitiesBridge) return Promise.resolve();
+      return persistTranscriptRow(capabilitiesBridge, targetChatId, row).catch((error) => {
+        console.warn("[Zeros] agent switch row was not saved:", error);
+      });
+    },
+    [capabilitiesBridge],
+  );
+
+  const applyStagedPick = useCallback(async () => {
+    if (!chatThread || !chatId || !stagedPick) return;
+    const pick = stagedPick;
+    if (harnessSwitchBlockedByQueue(
+      isHarnessChange(chatThread.agentId, pick.agentId),
+      queuedMessages.length,
+    )) {
+      toast.warning("Send or remove queued messages before switching agent.");
+      return;
+    }
+    setStagedPickState(null);
+    const from = { agentId: chatThread.agentId, model: chatThread.model };
+    const row = buildHarnessSwitchMessage({
+      id: `harness-switch-${crypto.randomUUID()}`,
+      from,
+      to: pick,
+      now: Date.now(),
+    });
+    if (!isHarnessChange(chatThread.agentId, pick.agentId)) {
+      applyModelInPlace(pick.model);
+      void recordSwitchRow(chatId, row, true);
+      return;
+    }
+    const wasRunning = session.status === "streaming";
+    // A cloud worker stops the running turn itself as part of its switch.
+    if (wasRunning && !cloudChat) {
+      try { await agentSessions.cancel(chatId); } catch { /* Local cancellation remains best-effort. */ }
+    }
+    const sourceLabel = transcriptPillLabel({ title: chatThread.title, summary: "" });
+    const mode = harnessSwitchTranscriptMode();
+    const transcript = loadTranscriptSnapshot({
+      chatId,
+      mode,
+      lastMessageAt: Date.now(),
+      meta: { title: sourceLabel, folder: chatThread.folder },
+    });
+    const born = newChatBornDefaults(pick.agentId);
+    const { effort, fast } = resolveModelConfiguration(pick.agentId, pick.model, null);
+    // The read above observes the engine before the row is written, so the
+    // seeded transcript is the conversation the previous agent saw.
+    await transcript.catch(() => null);
+    const fromAgentId = chatThread.agentId;
+    let committed: HarnessSwitchCommit;
+    try {
+      committed = await commitHarnessSwitch({
+        cloud: cloudChat,
+        switchCloudAgent: () => capabilitiesBridge
+          ? switchCloudChatAgent(capabilitiesBridge, {
+            chatId, fromAgentId: fromAgentId ?? "", agentId: pick.agentId, model: pick.model, effort, fast, message: row,
+          })
+          : Promise.reject(new Error("Not connected to the cloud workspace yet.")),
+        recordRow: () => recordSwitchRow(chatId, row, !cloudChat),
+        closeSession: () => agentSessions.closeSession(chatId),
+        stillCurrent: () => {
+          const current = useWorkspaceStore.getState().chats.find((candidate) => candidate.id === chatId);
+          // The worker's chat change can reach the renderer before this step.
+          return !!current && (current.agentId === fromAgentId || (cloudChat && current.agentId === pick.agentId));
+        },
+        // Clearing sessionId drops the old provider's binding; the same chat id,
+        // lineage and attribution carry over to the new agent.
+        updateSettings: () => updateChatSettings({
+          agentId: pick.agentId,
+          agentName: pick.agentName || null,
+          model: pick.model,
+          effort,
+          fast,
+          permissionMode: born.permissionMode,
+          lastModeId: born.lastModeId,
+          prePlanModeId: undefined,
+          sessionId: undefined,
+        }),
+      });
+    } catch (error) {
+      console.error("[Zeros] agent switch failed:", error);
+      toast.error(error instanceof Error && error.message ? error.message : "Couldn't switch agent.");
+      setStagedPickState({ chatId, pick });
+      return;
+    }
+    // An older cloud worker can't switch in place: open the picked agent in a new tab.
+    if (committed === "unsupported") switchAgentModel({ ...pick, agentName: pick.agentName ?? "" });
+    if (committed !== "switched") return;
+    if (wasRunning) refreshChatTurnRows(chatId);
+    const delivery = transcript.then((snapshot) => {
+      if (snapshot.count === 0) return;
+      const attachment = buildForkTranscriptAttachment({
+        sourceChatId: chatId,
+        sourceLabel,
+        text: wasRunning
+          ? `${snapshot.text.trimEnd()}\n\n${HARNESS_SWITCH_CONTINUE_NOTE}\n`
+          : snapshot.text,
+        complete: snapshot.complete,
+        mode,
+      });
+      deliverTextAttachmentToChat(chatId, attachment);
+    }).catch((error) => {
+      console.error("[Zeros] agent switch transcript failed:", error);
+      toast.error("Couldn't attach the conversation for the new agent.");
+    });
+    trackPendingTextAttachmentDelivery(chatId, delivery);
+    if (wasRunning) {
+      continueAfterSwitchRef.current = { chatId, agentId: pick.agentId, sourceKey: transcriptSourceKey(chatId) };
+      void delivery.then(() => setContinueAfterSwitch((n) => n + 1));
+    }
+  }, [chatThread, chatId, stagedPick, queuedMessages.length, cloudChat, session.status, agentSessions, applyModelInPlace, recordSwitchRow, updateChatSettings, capabilitiesBridge, switchAgentModel]);
+
+  const stagePick = useCallback(
+    (pick: AgentModelPick) => {
+      if (!chatId) return;
+      setStagedPickState({ chatId, pick });
+    },
+    [chatId],
+  );
+
   // Shared with TurnPromptHeader's edit mode so editing a past prompt has the
   // same pills.
   const editToolbarPills = useMemo(() => {
@@ -1330,8 +1514,10 @@ function AgentChatBody({
           value={chatThread.model}
           effort={chatThread.effort}
           fast={!!chatThread.fast}
-          onSelectAgentModel={switchAgentModel}
-          redirectCrossAgent={conversationStarted}
+          onSelectAgentModel={(sel) => {
+            if (conversationStarted) stagePick(sel);
+            else switchAgentModel(sel);
+          }}
           onConfigure={({ effort, fast }) => {
             const effortChanged = effort !== chatThread.effort;
             updateChatSettings({ effort, fast });
@@ -1339,27 +1525,26 @@ function AgentChatBody({
             if (effortChanged) maybeShowCostBumpToast("effort");
           }}
           onChange={(v) => {
-            if (chatId) {
-              const store = useSessionsStore.getState();
-              store.patchSession(chatId, { modelSelectionRevision: (store.sessions[chatId]?.modelSelectionRevision ?? 0) + 1 });
+            if (conversationStarted && v && chatThread.agentId) {
+              stagePick({ agentId: chatThread.agentId, agentName: chatThread.agentName, model: v });
+            } else {
+              applyModelInPlace(v);
             }
-            const configuration = resolveModelConfiguration(
-              chatThread.agentId,
-              v,
-              session.initialize,
-            );
-            updateChatSettings({ model: v, ...configuration });
-            // Apply to the LIVE session too, so the change takes effect on the
-            // next turn instead of only on a rebuild.
-            if (v) session.setModel?.(v);
-            // After setModel: updateConfig pushes the whole env, carrying the effort and
-            // Fast resets and stamping appliedChatEnvKey so sendPrompt does not respawn.
-            session.updateConfig?.();
-            // Once per chat, a mid-conversation model change is a
-            // cache miss on the next reply (slower + more tokens).
-            if (v && v !== chatThread.model) maybeShowCostBumpToast("model");
           }}
         />
+        {stagedPick && (
+          <Tooltip label={`Switch to ${pickLabel(stagedPick)}`}>
+            <IconButton
+              type="button"
+              size="compact"
+              label={`Switch to ${pickLabel(stagedPick)}`}
+              data-composer-switch-pick=""
+              onClick={() => void applyStagedPick()}
+            >
+              <RotateCw />
+            </IconButton>
+          </Tooltip>
+        )}
         {showPermissionToggle && (
           <PermissionToggle
             agentId={chatAgentId}
@@ -1384,6 +1569,11 @@ function AgentChatBody({
     updateChatSettings,
     switchAgentModel,
     conversationStarted,
+    cloudChat,
+    stagePick,
+    stagedPick,
+    applyStagedPick,
+    applyModelInPlace,
     chatAgentId,
     showPermissionToggle,
     cloudModes,
@@ -3293,6 +3483,13 @@ function AgentChatBody({
     override?: string,
     extras?: {
       followUpBehavior?: FollowUpBehavior;
+      /** The override is sent beside the composer, not from it: keep the
+       *  chat's saved draft, which still matches what the composer shows. */
+      keepDraft?: boolean;
+      /** Called once the message is durable (the cloud outbox holds it) or
+       *  handed to the local session. A failure after this is retried by its
+       *  owner, so the caller must not send the same text again. */
+      onCommitted?: () => void;
       /** Summary imports from prior chats, prepended as <from_previous_chat> blocks. */
       imports?: import("../../state/store").SummaryImport[];
       /** Attachments from another surface (browser capture), encoded like paste and
@@ -3438,11 +3635,12 @@ function AgentChatBody({
       const releaseSubmittedComposer = () => {
         if (composerReleased) return;
         composerReleased = true;
+        extras?.onCommitted?.();
         const unchanged = override === undefined && snapshot && isSubmittedComposerDocument(snapshot.json, serializeComposerState()?.json);
         if (unchanged) {
           clearComposerEditor(); designFrameContext.consume(submittedDesignFrame);
         }
-        if (override !== undefined || unchanged)
+        if (sendClearsChatDraft({ override: override !== undefined, keepDraft: !!extras?.keepDraft, submittedUnchanged: !!unchanged }))
           dispatch({ type: "CLEAR_CHAT_DRAFT", chatId });
       };
       await session.sendPrompt(queued.text, queued.displayText, queued.attachments, queued.bubbleAttachments, queued.segments, undefined, queued.cloudQueue, wakeIntent,
@@ -3652,16 +3850,30 @@ function AgentChatBody({
     // Drop any stashed draft for this chat —
     // the user just sent it. Defensive against the cleanup-on-unmount
     // path racing the post-send empty state.
-    if (chatId && (override !== undefined || submittedDraftUnchanged)) {
+    if (chatId && sendClearsChatDraft({ override: override !== undefined, keepDraft: !!extras?.keepDraft, submittedUnchanged: !!submittedDraftUnchanged })) {
       dispatch({ type: "CLEAR_CHAT_DRAFT", chatId });
     }
     // Arm the send-jump after every early return, so slash commands and refused
     // sends never leave a stale count.
     pendingSendScrollCountRef.current += 1;
-    submit().catch(() => {
-      /* error surfaces via session.error */
+    const onCommitted = extras?.onCommitted;
+    if (!onCommitted) {
+      submit().catch(() => {
+        /* error surfaces via session.error */
+      });
+      return true;
+    }
+    // A caller that holds the only copy of the text (a transcript reply) waits
+    // until the session retains the prompt. A send that settles without being
+    // retained (no bridge yet) leaves the text with that caller.
+    return new Promise<boolean>((resolve) => {
+      let retained = false;
+      submit(() => {
+        retained = true;
+        onCommitted();
+        resolve(true);
+      }).then(() => resolve(retained), () => resolve(retained));
     });
-    return true;
   };
 
   /** Single-flight entry point for every send. runSend clears the composer only
@@ -3672,27 +3884,50 @@ function AgentChatBody({
     override?: string,
     extras?: Parameters<typeof runSend>[1],
     recordActivity = true,
-  ): Promise<void> => {
-    if (readOnly || sendInFlightRef.current) return;
+  ): Promise<boolean> => {
+    if (readOnly || sendInFlightRef.current) return false;
     const folder = chatThread?.folder ?? session.cwd;
     const attemptId = `send-${crypto.randomUUID()}`;
     sendInFlightRef.current = true;
     const generation = chatId ? agentSessions.getSendGeneration(chatId) : undefined;
     try {
-      await runSend(override, extras, recordActivity);
+      // True once the message is handed to the session; every refusal returns
+      // early, after saying why.
+      return (await runSend(override, extras, recordActivity)) === true;
     } catch (error) {
-      if (chatId && generation !== agentSessions.getSendGeneration(chatId)) return;
+      if (chatId && generation !== agentSessions.getSendGeneration(chatId)) return false;
       if (chatId && isCloudWorkspace(folder)) {
         notifyAgentSendFailure({ folder, chatId, attemptId, agentId: chatThread?.agentId ?? session.agentId, model: chatThread?.model, error });
-        return;
+        return false;
       }
       toast.error("Message wasn't sent", {
         description: error instanceof Error ? error.message : String(error),
       });
+      return false;
     } finally {
       sendInFlightRef.current = false;
     }
   };
+
+  // A turn stopped by an agent switch continues under the new agent once the
+  // chat row names it and the seeded transcript is staged.
+  useEffect(() => {
+    const decision = switchContinuation(continueAfterSwitchRef.current, {
+      chatId,
+      agentId: chatThread?.agentId,
+      stagedSourceKeys,
+      composer: serializeComposerState(),
+    });
+    if (decision === "wait") return;
+    continueAfterSwitchRef.current = null;
+    // A draft the user is still writing is theirs to send.
+    if (decision === "ask") {
+      toast.info("The conversation is attached. Send to continue with the new agent.");
+      return;
+    }
+    void handleSend();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [continueAfterSwitch, chatId, chatThread?.agentId, stagedSourceKeys]);
 
   /** Leave queued-edit mode. Restores the stashed pre-edit draft, releases
    *  the provider-side queue hold, and hands focus back to the composer. */
@@ -4271,6 +4506,25 @@ function AgentChatBody({
     ],
   );
 
+  // A reply sent at once, beside the composer's draft rather than with it.
+  const sendChatReply = async (quote: string, reply: string): Promise<boolean> => {
+    const blocker = replySendBlocker({
+      sendInFlight: sendInFlightRef.current,
+      provisioning: workspaceProvisioning,
+      permission: sendPastPermission({ permissionPending: !!session.pendingPermission, planReview: !!planReview, status: session.status }),
+    });
+    if (blocker) {
+      toast.info(blocker.title, { description: blocker.description });
+      return false;
+    }
+    const message = replyMessage(quote, reply);
+    // A refused send keeps the reply open with its text, so nothing is lost.
+    return deliverReply((onCommitted) => handleSend(message.text, {
+      keepDraft: true,
+      onCommitted,
+      ...(message.attachQuote ? { stagedAttachments: [textFileAttachment(chatAttachmentName("selection"), quote)] } : {}),
+    }));
+  };
 
   return (
     <div
@@ -4393,6 +4647,12 @@ function AgentChatBody({
                   />
                 </ChatProvenance>
               )}
+            {hasParentContext(chatThread) && (
+              <p className={TRANSCRIPT_STATUS_ROW_CLS} data-parent-context-banner="">
+                <GitBranch className="size-3.5 shrink-0" strokeWidth={1.5} aria-hidden="true" />
+                Includes context from parent
+              </p>
+            )}
             {turns.map((turn, i) => {
               // A steer starts a new VISUAL prompt segment but remains inside
               // the same provider turn. Only the visual tail owns sticky/tail
@@ -4494,6 +4754,16 @@ function AgentChatBody({
           // under the strip. It stops short of the scrollbar, or of a docked
           // summary island, so neither fades.
           className="pointer-events-none absolute top-0 left-0 right-[max(var(--scrollbar-size),var(--chat-aside-inset,0px))] z-1 h-8 bg-gradient-to-b from-(--pane-bg) to-transparent"
+        />
+        <ChatSelectionPopup
+          // A quote never crosses chats, even if this body is reused for another.
+          key={chatId ?? "new-chat"}
+          root={scrollEl}
+          active={interactive}
+          ownsKeyboard={interactive && !!chatId && activeChatId === chatId}
+          onAddSelection={(text) => stageChatText(stageTextAttachment, "selection", text, text)}
+          onAddReply={(quote, reply) => stageChatText(stageTextAttachment, "reply", formatReply(quote, reply), reply)}
+          onSendReply={sendChatReply}
         />
         {/* A sibling of the scroller so the rail stays pinned; z-2 paints above
             the top mask. */}

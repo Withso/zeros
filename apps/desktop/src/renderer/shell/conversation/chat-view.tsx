@@ -57,11 +57,8 @@ import {
   takeProvisionalBinding,
   type PriorChatIdentity,
 } from "./auto-bind-chat";
-import {
-  legacyProviderBinding,
-  sameProviderBinding,
-  sameProviderMetadata,
-} from "@zeros/protocol/identities";
+import { legacyProviderBinding } from "@zeros/protocol/identities";
+import { liveProviderBindingUpdate } from "../../features/agent/chat-provider-identity-persistence";
 import { usePaneComposerCollapsed } from "./pane-portal-store";
 
 export function ChatView({
@@ -613,28 +610,8 @@ function ChatBody({
   // live session store and is intentionally absent from durable chat state.
   useEffect(() => {
     if (readOnly || !chat) return;
-    const binding = liveProviderBinding;
-    const providerMetadataChanged =
-      liveProviderMetadata !== null &&
-      !sameProviderMetadata(liveProviderMetadata, chat.providerMetadata);
-    if (
-      binding &&
-      (!sameProviderBinding(binding, chat.providerBinding) ||
-        providerMetadataChanged)
-    ) {
-      dispatch({
-        type: "UPDATE_CHAT_SETTINGS",
-        id: chatId,
-        updates: {
-          providerBinding: binding,
-          ...(liveProviderMetadata
-            ? { providerMetadata: liveProviderMetadata }
-            : {}),
-          // Downgrade mirror only. Current code never reads it as a route.
-          sessionId: binding.legacySessionId ?? binding.resumeId,
-        },
-      });
-    }
+    const updates = liveProviderBindingUpdate(chat, liveProviderBinding, liveProviderMetadata);
+    if (updates) dispatch({ type: "UPDATE_CHAT_SETTINGS", id: chatId, updates });
   }, [
     readOnly,
     chatId,

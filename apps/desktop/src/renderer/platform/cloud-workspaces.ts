@@ -74,6 +74,8 @@ export async function cloudAccountRequest<T>(
     teamSharing?: true;
     /** Bind rollover tickets to this open peer's in-memory instance. */
     clientInstance?: string;
+    /** Features this desktop declares on the request (X-Zeros-Client-Features), beside rollover's. */
+    clientFeatures?: readonly string[];
     /** Renewal requires a bearer that outlives the previous one's expiry. */
     notExpiringBefore?: number;
     /** Report only expiry so a retry can request a newer bearer without seeing the token. */
@@ -90,10 +92,13 @@ export async function cloudAccountRequest<T>(
     throw new Error("Your account changed while loading cloud workspaces");
   if (!session) throw new Error("Sign in to use cloud workspaces");
   options?.presentedTokenExpiry?.(bearerExpiry(session.access_token));
-  // Older control planes can reject rollover during CORS preflight; cache a successful headerless fallback briefly.
-  const rollover = !!options?.clientInstance && /^[0-9a-f-]{36}$/i.test(options.clientInstance) &&
-    !((rolloverRefused.get(CONTROL_PLANE_URL) ?? -Infinity) > Date.now());
-  const send = (withRollover: boolean) => controlPlaneFetch(`${CONTROL_PLANE_URL}${path}`, {
+  // Older control planes can reject the client-feature headers (rollover's or declared
+  // features) during CORS preflight; cache a successful headerless fallback briefly.
+  const refused = (rolloverRefused.get(CONTROL_PLANE_URL) ?? -Infinity) > Date.now();
+  const rollover = !!options?.clientInstance && /^[0-9a-f-]{36}$/i.test(options.clientInstance) && !refused;
+  const features = refused ? [] : options?.clientFeatures ?? [];
+  const offered = rollover || features.length > 0;
+  const send = (withHeaders: boolean) => controlPlaneFetch(`${CONTROL_PLANE_URL}${path}`, {
     method: input?.method ?? (input ? "POST" : "GET"),
     redirect: "error",
     cache: "no-store",
@@ -105,7 +110,9 @@ export async function cloudAccountRequest<T>(
       ...(options?.syncField ? SYNC_FIELD_HEADERS : {}),
       // Ask for team ownership with sharing so creatorless workspaces can be decoded.
       ...(options?.teamSharing ? TEAM_SHARING_HEADERS : {}),
-      ...(withRollover ? { "X-Zeros-Client-Features": CLIENT_TOKEN_ROLLOVER_FEATURE, "X-Zeros-Client-Instance": options!.clientInstance! } : {}),
+      ...(withHeaders && offered
+        ? { "X-Zeros-Client-Features": [...features, ...(rollover ? [CLIENT_TOKEN_ROLLOVER_FEATURE] : [])].join(",") } : {}),
+      ...(withHeaders && rollover ? { "X-Zeros-Client-Instance": options!.clientInstance! } : {}),
       ...(input
         ? {
             "content-type": "application/json",
@@ -118,10 +125,10 @@ export async function cloudAccountRequest<T>(
     if (epoch !== getOrganizationStoreGeneration()) throw new Error("Your account changed while loading cloud workspaces");
   });
   let response: Response;
-  try { response = await send(rollover); }
+  try { response = await send(offered); }
   catch (error) {
     // A preflight refusal is indistinguishable from other fetch TypeErrors.
-    if (!rollover || !(error instanceof TypeError) || options?.signal?.aborted) throw error;
+    if (!offered || !(error instanceof TypeError) || options?.signal?.aborted) throw error;
     response = await send(false);
     rolloverRefused.set(CONTROL_PLANE_URL, Date.now() + ROLLOVER_REFUSED_MS);
   }
@@ -220,6 +227,11 @@ export async function createCloudWorkspaceDocument(input: {
   repository: { owner: string; name: string };
   /** A plain branch name; omitted, the server uses its Cloud Computer's branch. */
   baseBranch?: string;
+  /** Projects: the project to create from, and a base branch for any of its other repositories. */
+  projectId?: string;
+  repositories?: readonly { repository: string; baseBranch: string }[];
+  /** Client-only: the project holds several repositories, so its pending row is grouped under the project. Never sent. */
+  severalRepositories?: boolean;
   idempotencyKey: string;
 }): Promise<CloudWorkspaceDocument> {
   const epoch = getOrganizationStoreGeneration();
@@ -228,6 +240,8 @@ export async function createCloudWorkspaceDocument(input: {
     organizationId: input.organizationId,
     repository: `${input.repository.owner}/${input.repository.name}`,
     ...(input.baseBranch !== undefined ? { baseBranch: input.baseBranch } : {}),
+    ...(input.projectId ? { projectId: input.projectId } : {}),
+    ...(input.repositories?.length ? { repositories: input.repositories } : {}),
     ...(input.name ? { name: input.name } : {}),
   }, input.idempotencyKey);
   if (epoch !== getOrganizationStoreGeneration())

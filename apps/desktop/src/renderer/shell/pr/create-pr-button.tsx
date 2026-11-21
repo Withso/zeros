@@ -74,7 +74,7 @@ import {
   cloudTargetForValue,
   isCloudWorkspace,
 } from "../../platform/bridge/cloud-workspace-key";
-import { cloudGithubPrAuthority } from "../../platform/cloud-github-pr";
+import { cloudGithubPrAuthorityFor } from "../../platform/cloud-github-pr";
 import { cloudGithubPrScope } from "../../platform/cloud-github-pr-scope";
 import { retryWorkspacePrDiscovery } from "./use-workspace-pr-sync";
 
@@ -205,7 +205,8 @@ function GithubCreatePrButton({
           return;
         }
         const cloud = cloudTargetForValue(workspace.id);
-        const authority = cloud ? cloudGithubPrAuthority(cloud) : undefined;
+        // A repository of a workspace of several: that repository's own authority.
+        const authority = cloud ? cloudGithubPrAuthorityFor(workspace.id) : undefined;
         const scope = cloud ? cloudGithubPrScope(workspace.id) : undefined;
         // Cloud's repository is selected by its immutable server identity.
         // A restored or deliberately customized remote cannot replace it.
@@ -264,7 +265,7 @@ function GithubCreatePrButton({
         }
         if (cloud && (
           scope !== cloudGithubPrScope(workspace.id) ||
-          JSON.stringify(authority) !== JSON.stringify(cloudGithubPrAuthority(cloud))
+          JSON.stringify(authority) !== JSON.stringify(cloudGithubPrAuthorityFor(workspace.id))
         )) {
           showBlockToast(CLOUD_PR_REFRESH_MESSAGE);
           return;
@@ -410,7 +411,7 @@ function GithubCreatePrButton({
         showBlockToast(describePrAccessBlock(access));
         return;
       }
-      const authority = cloudGithubPrAuthority(cloud);
+      const authority = cloudGithubPrAuthorityFor(workspace.id);
       if (access.state !== "ok" || !authority ||
         authority.branch !== workspace.branch || authority.baseBranch !== workspace.baseBranch) {
         showBlockToast(CLOUD_PR_REFRESH_MESSAGE);

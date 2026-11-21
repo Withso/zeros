@@ -92,6 +92,7 @@ import { IconButton } from "@/renderer/shared/ui/primitives/icon-button";
 import { Popover, PopoverAnchor, PopoverContent } from "../shared/ui/primitives/popover";
 import { SidebarWorkspaceHoverCard } from "./sidebar-workspace-hover-card";
 import { useSidebarWorkspacePreview } from "./use-sidebar-workspace-preview";
+import { pullRequestTarget } from "../state/workspace-repositories";
 
 // --- CONSTANTS ---
 
@@ -247,7 +248,7 @@ export function SidebarWorkspaceRow({
   const activity = useAnyChatWorkingActivity(chatIds);
   const working = activity !== null;
   const awaitingKind = useAnyChatAwaitingKind(chatIds);
-  const islandKind = usePrIslandKind(workspace.id, workspace.prNumber);
+  const islandKind = usePrIslandKind(pullRequestTarget(workspace), workspace.prNumber);
   const runActionRunning = useAnyRunActionRunning(workspace.path);
   const localFolder = isLocalMainWorkspace(workspace);
   const changeLines = useWorkspaceChangeLines(

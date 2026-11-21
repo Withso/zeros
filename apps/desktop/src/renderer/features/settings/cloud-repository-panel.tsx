@@ -68,7 +68,7 @@ function RepositoryScope({ userId, organizationId, canManage, repository, tab, o
       </SettingsGroup>
     );
   // With ready copies a save rebuilds just this repository's copy.
-  const applyHint = data?.readyCopies ? "Saving rebuilds this repository's ready copy." : "Changes apply after the next build.";
+  const applyHint = data?.readyCopies ? "Saving builds this repository's project again." : "Changes apply after the next build.";
   const branch = (
     <SettingsGroup title="Branch" description={applyHint}>
       <Input aria-label={`${repository} branch`} placeholder={`Branch or tag (default: ${liveBranch ?? "the repository's default"})`}

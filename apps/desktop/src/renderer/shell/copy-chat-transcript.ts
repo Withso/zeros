@@ -37,6 +37,7 @@ const inFlight = new Set<string>();
 const LABEL: Record<TranscriptMode, string> = {
   full: "Full transcript",
   concise: "Concise transcript",
+  handoff: "Handoff transcript",
 };
 
 /** Human size for the success toast, matching the app-logs copy convention. */

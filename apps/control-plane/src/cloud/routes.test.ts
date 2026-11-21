@@ -418,6 +418,39 @@ describe("cloud v2 connect wake intent", () => {
     return { app, store };
   }
 
+  describe("a workspace of several repositories", () => {
+    const several = () => ({ id, state: "stopped", archivedAt: null, folder: "zeros-app", checkoutFolder: "zeros-app/api" });
+    const connect = (app: Hono, features?: string) => app.request(path, { method: "POST", headers: { "content-type": "application/json",
+      ...(features ? { "X-Zeros-Client-Features": features } : {}) }, body: JSON.stringify({ wake: true }) });
+
+    it("refuses a desktop that does not declare several repositories, before any wake or ticket", async () => {
+      for (const features of [undefined, "client-token-rollover-v1", "workspace-repositories-v0"]) {
+        const { app, store } = setup();
+        store.get.mockResolvedValue(several() as never);
+        const response = await connect(app, features);
+        expect([features, response.status]).toEqual([features, 409]);
+        expect(await response.json()).toEqual({ error: { code: "client_update_required" } });
+        expect(store.transition).not.toHaveBeenCalled();
+        expect(store.issueToken).not.toHaveBeenCalled();
+      }
+    });
+
+    it("admits a desktop that declares several repositories, alone or beside other features", async () => {
+      for (const features of ["workspace-repositories-v1", "client-token-rollover-v1, workspace-repositories-v1"]) {
+        const { app, store } = setup();
+        store.get.mockResolvedValue(several() as never);
+        expect((await connect(app, features)).status).toBe(200);
+        expect(store.issueToken).toHaveBeenCalledOnce();
+      }
+    });
+
+    it("changes nothing for a workspace of one repository", async () => {
+      const { app, store } = setup();
+      expect((await connect(app)).status).toBe(200);
+      expect(store.transition).toHaveBeenCalledWith(id, ["stopped"], "starting");
+    });
+  });
+
   it("issues a pending create's ticket without a source check", async () => {
     const store = {
       get: vi.fn(async () => ({ id, state: "creating", archivedAt: null, sourcePending: true })),

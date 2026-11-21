@@ -3,7 +3,7 @@
 // ──────────────────────────────────────────────────────────
 //
 // The app's global window-level chord handlers (⌥⌘B toggle Workbench,
-// ⌥⌘T cycle theme, ⌘N new chat, …) stand down when focus is inside a
+// ⇧⌥⌘T cycle theme, ⌘N new chat, …) stand down when focus is inside a
 // text-entry surface so they don't clobber typing in the chat
 // composer or a rename input.
 //

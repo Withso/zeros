@@ -6,6 +6,7 @@ import {
   parseCloudScopedId,
   parseCloudWorkspaceKey,
   isCloudRepositorySlug,
+  isCloudOwnedSlug,
 } from "../cloud-workspace-key";
 
 const target = {
@@ -59,5 +60,15 @@ describe("cloud workspace UI identity", () => {
         `cloud:${target.organizationId}:${target.workspaceId}:%`,
       ),
     ).toThrow();
+  });
+});
+
+describe("a cloud-owned slug", () => {
+  const org = "11111111-1111-4111-8111-111111111111";
+  it("is a repository's or a project group's, never a Local slug or a malformed project", () => {
+    expect(isCloudOwnedSlug(`cloud-${org}:github:owner/repo`)).toBe(true);
+    expect(isCloudOwnedSlug(`cloud-${org}:project:77777777-7777-4777-8777-777777777777`)).toBe(true);
+    expect(isCloudOwnedSlug(`cloud-${org}:project:..`)).toBe(false);
+    expect(isCloudOwnedSlug("owner/repo")).toBe(false);
   });
 });

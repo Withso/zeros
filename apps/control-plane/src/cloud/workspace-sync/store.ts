@@ -22,7 +22,9 @@ const unavailable = () => new HttpError(503, "cloud_sync_unavailable", "Workspac
 type Route = { access_epoch: string; login_revision: string; stop_generation: string; worker_boot_id: string | null;
   boat_sandbox_id: string | null; worker_route_url: string | null; worker_port_token: unknown; worker_token_hash: string | null;
   state: string; archived: boolean; source_pending: boolean; capable: boolean | null; context_capable: boolean; blocked: boolean;
-  connected: boolean; connected_at: string | null; device_current: boolean; session_current: boolean; execution_mode: string };
+  connected: boolean; connected_at: string | null; device_current: boolean; session_current: boolean; execution_mode: string;
+  /** Set for a workspace of several repositories. */
+  folder: string | null };
 
 export class CloudWorkspaceSync {
   execution?: CloudExecutionContexts;
@@ -36,7 +38,7 @@ export class CloudWorkspaceSync {
       await this.devices.verify(tx, user, binding);
       // Recheck session and device in the route's statement snapshot too: the
       // earlier device read can have waited while either was revoked.
-      const row = (await tx.query<Route>(`SELECT w.access_epoch::text,w.login_revision::text,w.stop_generation::text,
+      const row = (await tx.query<Route>(`SELECT w.access_epoch::text,w.login_revision::text,w.stop_generation::text,w.folder,
         w.worker_boot_id,w.boat_sandbox_id,w.worker_route_url,w.worker_port_token,encode(w.worker_token_hash,'hex') AS worker_token_hash,
         w.state,w.execution_mode,w.archived_at IS NOT NULL AS archived,w.source_pending,w.worker_boot_id=ANY(w.sync_boot_ids) AS capable,
         w.worker_boot_id=ANY(w.sync_context_boot_ids) AND w.worker_boot_id=ANY(w.acting_user_boot_ids) AS context_capable,
@@ -59,6 +61,8 @@ export class CloudWorkspaceSync {
       if (!row.session_current) throw new HttpError(401, "session_revoked", "Authentication is no longer current");
       if (!row.device_current) throw new HttpError(409, "device_registration_changed", "This desktop registration is no longer current");
       if (!row.connected) throw new HttpError(403, "mac_not_connected", "Connect this Mac to the workspace before syncing");
+      // Sync covers one checkout; a workspace of several repositories would sync only its first.
+      if (row.folder) throw new HttpError(409, "sync_unsupported", "Syncing to this Mac isn't available yet for a workspace of several repositories.");
       if (row.state !== "running" || row.archived || row.source_pending || row.blocked || !row.worker_boot_id || !row.worker_token_hash || !row.boat_sandbox_id)
         throw notRunning();
       if (!row.capable || row.execution_mode === "active" && !row.context_capable) throw new HttpError(409, "worker_update_required", "Update the workspace runtime before syncing");

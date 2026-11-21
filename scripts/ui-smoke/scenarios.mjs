@@ -59,6 +59,7 @@ export const scenarioRegistry = [
   fresh("local-storage", "local-storage", "runLocalStorageSmoke", 1200, 1240),
   fresh("local-links", "local-links", "runLocalLinksSmoke", 1080, 1000),
   fresh("text-selection", "text-selection", "runTextSelectionSmoke", 1440, 1100),
+  fresh("chat-selection", "chat-selection", "runChatSelectionSmoke", 1100, 760),
   fresh(
     "git-review-actions",
     "git-review-actions",
@@ -322,6 +323,7 @@ export const scenarioRegistry = [
     800,
   ),
   shared("pr-actions", "pr-actions", "runPrActionsSmoke", 1100, 800),
+  shared("cloud-projects", "cloud-projects", "runCloudProjectsSmoke", 1440, 900),
   shared(
     "activity-disclosure",
     "activity-disclosure",

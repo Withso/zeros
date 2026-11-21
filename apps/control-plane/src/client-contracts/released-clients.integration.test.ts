@@ -118,3 +118,45 @@ for (const { name, contract } of clientContracts("worker")) {
     });
   });
 }
+
+// A workspace of several repositories stays listed for every kept desktop, and
+// only a desktop that declares several repositories may open it. A release
+// sends no client features on an ordinary connect, so it gets the one refusal
+// it shows as its open failure.
+for (const { name, contract } of clientContracts("desktop")) {
+  database(`${name} lists a workspace of several repositories, and opens it only if it declares them`, () => {
+    let pool: pg.Pool, f: ExecutionFixture;
+    beforeAll(() => { pool = new pg.Pool({ connectionString: process.env.TEST_DATABASE_URL, max: 8, statement_timeout: 5000 }); });
+    beforeEach(async () => {
+      f = await executionFixture(pool);
+      await pool.query("UPDATE cloud_v2_workspaces SET checkout_path='zeros-app/api', folder='zeros-app' WHERE id=$1", [f.workspace.id]);
+      await pool.query(`INSERT INTO cloud_v2_workspace_repositories (workspace_id, position, repository, folder, branch, base_branch)
+        VALUES ($1, 0, $2, 'api', $3, $4) ON CONFLICT (workspace_id, position) DO UPDATE SET folder='api'`,
+        [f.workspace.id, f.workspace.repository, f.workspace.branch, f.workspace.baseBranch]);
+      await pool.query(`INSERT INTO cloud_v2_workspace_repositories (workspace_id, position, repository, folder, branch, base_branch)
+        VALUES ($1, 1, 'example/web', 'web', $2, 'main')`, [f.workspace.id, f.workspace.branch]);
+    });
+    afterEach(async () => { await f?.close(); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
+    afterAll(() => pool.end());
+
+    it.each(contract.entries.filter(entry => entry.id.startsWith("cloud-v2.workspaces.")).map(entry => [entry.id, entry] as const))("%s parses it", async (_id, entry) => {
+      const values = { organizationId: f.organizationId, workspaceId: f.workspace.id, chatId: "contract-chat" };
+      const response = await f.call(fill(entry.path, values, entry.id, encodeURIComponent), entry.method, undefined, f.creator, entry.headers);
+      const body: unknown = await response.json().catch(() => null);
+      expect(response.status).toBeLessThan(300);
+      expect(rejected(entry.response, body), `${name} would reject ${entry.id}`).toEqual([]);
+    });
+
+    it(name === "desktop-next" ? "opens it, declaring several repositories" : "is refused, with the message it shows, before any ticket", async () => {
+      const headers = name === "desktop-next" ? { "X-Zeros-Client-Features": "workspace-repositories-v1" } : {};
+      const response = await f.call(`/v1/cloud-v2/workspaces/${f.workspace.id}/connect?wakePolicy=explicit`, "POST", { wake: false }, f.creator, headers);
+      const body = await response.json() as { error?: { code: string; message: string } };
+      if (name === "desktop-next") expect(response.status).toBe(200);
+      else {
+        expect(response.status).toBe(409);
+        expect(body.error).toEqual(expect.objectContaining({ code: "client_update_required", message: "Update Zeros to open this workspace." }));
+        expect((await pool.query("SELECT count(*)::int AS n FROM cloud_v2_tokens WHERE workspace_id=$1 AND kind='connect'", [f.workspace.id])).rows[0].n).toBe(0);
+      }
+    });
+  });
+}

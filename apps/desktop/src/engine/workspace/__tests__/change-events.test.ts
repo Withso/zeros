@@ -20,6 +20,7 @@ describe("dbChangedKinds", () => {
   });
   it.each([
     "chats.upsert",
+    "chats.createChild",
     "chats.delete",
     "chats.bulkUpsert",
     "chats.clearProviderIdentity",

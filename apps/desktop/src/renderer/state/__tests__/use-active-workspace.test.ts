@@ -26,7 +26,7 @@ vi.mock("react", async (importOriginal) => ({ ...await importOriginal<typeof imp
 vi.mock("../store", () => ({
   selectActiveFolder: () => fixture.folder,
   useWorkspaceStore: (selector: (state: Partial<WorkspaceState>) => unknown) =>
-    selector({ localLinkNavigation: fixture.linked }),
+    selector({ localLinkNavigation: fixture.linked, currentRepositoryByWorkspace: {} }),
 }));
 vi.mock("../use-projects", () => ({
   useProjects: () => ({ projects: [fixture.project] }),

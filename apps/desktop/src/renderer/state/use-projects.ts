@@ -2,7 +2,7 @@ import { cloudProjectForFolder, isCloudWorkspaceCatalogOnlyRow } from "./cloud-w
 import { WorkspaceRuntimeClient } from "../platform/bridge/workspace-runtime-client";
 import { useBridgeStatus } from "../platform/bridge/use-bridge";
 import { useReadRecovery } from "./use-read-recovery";
-import { isCloudRepositorySlug, isCloudWorkspace } from "../platform/bridge/cloud-workspace-key";
+import { isCloudOwnedSlug, isCloudWorkspace } from "../platform/bridge/cloud-workspace-key";
 // React bindings for the persisted projects registry and per-project workspace
 // lists. Projects use a small publish bus over localStorage, since they are
 // small and change rarely; workspace lists are one keyed renderer-wide cache, so
@@ -334,7 +334,7 @@ async function fetchLiveWorkspaceRows(repoSlug: string): Promise<Workspace[]> {
     archived: false,
     includeDesign: true,
   });
-  const cloudOwner = isCloudRepositorySlug(repoSlug) || [...fresh, ...(prior ?? [])]
+  const cloudOwner = isCloudOwnedSlug(repoSlug) || [...fresh, ...(prior ?? [])]
     .some(row => isCloudWorkspace(row.path));
   if (cloudOwner ? confirmedCloudWorkspaces === false : !confirmedLocalWorkspaces)
     throw new Error("Workspace list owner is not confirmed");
@@ -483,7 +483,7 @@ export function beginLocalWorkspaceRead(): (
     const { repoSlug, repoRoot } = project;
     if (
       !repoSlug ||
-      isCloudRepositorySlug(repoSlug) ||
+      isCloudOwnedSlug(repoSlug) ||
       isCloudWorkspace(repoRoot) ||
       !bridge ||
       bridge !== getActiveBridge() ||

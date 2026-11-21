@@ -54,7 +54,8 @@ export function ProjectPage({
   /** Remembers a folder chosen on the page. */
   onFolderChange?(folderId: string): void;
   /** Two GitHub levels: who the cloud repository is for, and how to share it. */
-  sharing?: { level: "shared" | "private"; organizationName: string; canShare: boolean; onShare(): void; onAskAdmin(): void } | null;
+  /** Two GitHub levels: who the project is for, and whether "Share with" can succeed now. */
+  sharing?: { level: "shared" | "private"; organizationName: string; canShare: boolean; onShare(): void } | null;
   /** Ready copies: the organization whose copy of this repository the Cloud build section shows. */
   /** The ready copy of this repository's one-repository project, when projects are on. */
   readyCopy?: { organizationId: string; projectId: string } | null;
@@ -115,10 +116,10 @@ export function ProjectPage({
           ) : null}
           {cloud && sharing && (
             <SettingsRow label="Sharing" hint={sharing.level === "shared" ? `Shared with ${sharing.organizationName}` : "Only you"}>
-              {sharing.level === "private" && (sharing.canShare
-                ? <Button variant="secondary" size="sm" onClick={sharing.onShare}>Share with {sharing.organizationName}</Button>
-                : <Button variant="ghost" size="sm" onClick={sharing.onAskAdmin}
-                    title="Only owners and admins can share a repository with the organization.">Ask an admin to share</Button>)}
+              {/* A project kept for one member only says "Only you": nobody else can reach its repositories to share it. */}
+              {sharing.level === "private" && sharing.canShare && (
+                <Button variant="secondary" size="sm" onClick={sharing.onShare}>Share with {sharing.organizationName}</Button>
+              )}
             </SettingsRow>
           )}
           {main && project.local.length > 1 && (
@@ -139,7 +140,7 @@ export function ProjectPage({
       </SettingsPageSection>
 
       {cloud && readyCopy && (
-        <SettingsPageSection title="Cloud build" description="The ready copy new cloud workspaces start from.">
+        <SettingsPageSection title="Cloud build" description="The build new cloud workspaces start from.">
           <ReadyCopySection organizationId={readyCopy.organizationId} projectId={readyCopy.projectId} active={surfaceActive} />
         </SettingsPageSection>
       )}

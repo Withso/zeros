@@ -1,4 +1,5 @@
 import {
+  Bot,
   File,
   FileDiff,
   GitPullRequestArrow,
@@ -53,6 +54,16 @@ export const WORKBENCH_STATUS_ADAPTERS = {
       unavailable: "The review isn't available.",
     },
     icon: GitPullRequestArrow,
+  },
+  agents: {
+    noun: "the sessions",
+    subject: "The sessions",
+    empty: {
+      pending: "Sessions appear when the workspace is ready.",
+      retryable: "Retry to load the sessions.",
+      unavailable: "Sessions aren't available.",
+    },
+    icon: Bot,
   },
   design: {
     noun: "Design",

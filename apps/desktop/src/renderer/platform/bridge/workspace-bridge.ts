@@ -6,11 +6,12 @@ import type {
 } from "@zeros/protocol/changes-history";
 
 import type { RuntimeClient } from "./ws-client";
-import { cloudTargetForValue, cloudWorkspaceKey, isCloudWorkspace, parseCloudScopedId } from "./cloud-workspace-key";
+import { cloudWorkspaceKey, isCloudWorkspace, parseCloudScopedId } from "./cloud-workspace-key";
 import { DESIGN_INSTANCE_SLOT_TEXT_CAPABILITY, DESIGN_INSTANCE_SLOT_TEXT_PARAM, DESIGN_OPTIONS_SHOW_NOTHING_CAPABILITY, DESIGN_OPTIONS_SHOW_NOTHING_PARAM } from "@zeros/protocol/design-catalog";
 import { CLOUD_GITHUB_PR_OPERATIONS } from "@zeros/protocol/cloud-github-pr";
 import { isWorkspaceNumber } from "@zeros/protocol/local-orchestration";
-import { requestCloudGithubPr, cloudGithubPrAuthority } from "../cloud-github-pr";
+import { requestCloudGithubPr, cloudGithubPrAuthority, cloudGithubPrRoute } from "../cloud-github-pr";
+import { cloudRepositoryRoute } from "./cloud-repository-routing";
 import { prepareCloudPromptErasure } from "../cloud-prompt-erasure";
 import { WorkspaceRuntimeClient, type ChatSnapshotRefresh } from "./workspace-runtime-client";
 import type {
@@ -113,23 +114,30 @@ export async function workspaceOp(
   timeoutMs = 10_000,
   connectedOnly = false,
 ): Promise<unknown> {
+  // A cloud pull request request: the repository it is for comes from one place.
   if (CLOUD_GITHUB_PR_OPERATIONS.has(op)) {
-    const target = cloudTargetForValue(params.workspaceId);
-    if (target) {
+    const scope = cloudGithubPrRoute(params.workspaceId, op, params);
+    if (scope) {
+      const named = scope.repository ? [scope.repository] as const : [] as const;
       if (op === "gh.prCreate") {
-        await requestCloudGithubPr(target, "gh.repoAccess", {});
-        const before = cloudGithubPrAuthority(target);
+        await requestCloudGithubPr(scope.target, "gh.repoAccess", {}, ...named);
+        const before = cloudGithubPrAuthority(scope.target, ...named);
         if (!before) throw new Error("Refresh this workspace's GitHub connection before publishing.");
-        await workspaceOp(bridge, "workspace.prepareGithub", { workspaceId: params.workspaceId, branch: before.branch, baseBranch: before.baseBranch }, 150_000);
-        await requestCloudGithubPr(target, "gh.repoAccess", {});
-        const after = cloudGithubPrAuthority(target);
+        await workspaceOp(bridge, "workspace.prepareGithub", { workspaceId: scope.repository?.key ?? params.workspaceId, branch: before.branch, baseBranch: before.baseBranch }, 150_000);
+        await requestCloudGithubPr(scope.target, "gh.repoAccess", {}, ...named);
+        const after = cloudGithubPrAuthority(scope.target, ...named);
         if (!after || before.connectionGeneration !== after.connectionGeneration || before.repositoryId !== after.repositoryId ||
           before.repository !== after.repository || before.branch !== after.branch || before.baseBranch !== after.baseBranch)
           throw new Error("Your GitHub connection or branch changed after publishing. Refresh before creating the pull request.");
       }
-      return requestCloudGithubPr(target, op, params);
+      return requestCloudGithubPr(scope.target, op, params, ...named);
     }
   }
+  // A workspace of several repositories: name the repository a request is for.
+  const route = cloudRepositoryRoute(op, params);
+  if (route.kind === "one") params = route.params;
+  else if (route.kind === "each")
+    return route.merge(await Promise.all(route.requests.map(request => workspaceOp(bridge, op, request.params, timeoutMs, connectedOnly))));
   const tracked = GIT_OP_ANALYTICS[op];
   const request = { type: "WORKSPACE_REQUEST" as const, op, params };
   const resp = (await (connectedOnly
@@ -604,6 +612,22 @@ export async function bridgeChatUpsert(
   await workspaceOp(bridge, "chats.upsert", { chat });
 }
 
+/** Local only: persist `chat` as a child of `parentChatId` (Add child
+ *  session) and return the recorded lineage. */
+export async function bridgeChatCreateChild(
+  bridge: RuntimeClient,
+  chat: ChatRowWire,
+  parentChatId: string,
+): Promise<{ parentChatId: string; rootChatId: string }> {
+  const r = (await workspaceOp(bridge, "chats.createChild", { chat, parentChatId })) as
+    | { parentChatId?: unknown; rootChatId?: unknown }
+    | undefined;
+  if (typeof r?.parentChatId !== "string" || typeof r.rootChatId !== "string") {
+    throw new Error("Could not link the child session");
+  }
+  return { parentChatId: r.parentChatId, rootChatId: r.rootChatId };
+}
+
 export async function bridgeChatDelete(
   bridge: RuntimeClient,
   id: string,
@@ -625,6 +649,30 @@ export async function bridgeChatClearProviderIdentity(
     input,
   )) as { ok?: boolean } | undefined;
   return result?.ok === true;
+}
+
+/** `unsupported`: a pinned older cloud worker without in-place agent switching. */
+export type ChatSwitchAgentOutcome = "switched" | "stale" | "unsupported";
+
+export async function bridgeChatSwitchAgent(
+  bridge: RuntimeClient,
+  input: {
+    chatId: string;
+    fromAgentId: string;
+    agentId: string;
+    model: string | null;
+    effort: string;
+    fast: boolean;
+    message?: { msgId: string; kind: string; payload: string; createdAt: number };
+  },
+): Promise<ChatSwitchAgentOutcome> {
+  try {
+    const result = (await workspaceOp(bridge, "chats.switchAgent", input, 30_000)) as { ok?: boolean } | undefined;
+    return result?.ok === true ? "switched" : "stale";
+  } catch (error) {
+    if (error instanceof WorkspaceOpError && error.code === "CLOUD_V2_UNSUPPORTED") return "unsupported";
+    throw error;
+  }
 }
 
 export async function bridgeChatBulkUpsert(

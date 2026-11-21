@@ -13,7 +13,9 @@
 //   • running                 → live output + a "Stop setup" button.
 //   • finished (live log)     → output + a filled outcome badge ("Setup
 //                               complete" / "Setup failed" / "Setup stopped")
-//                               + "Rerun setup". The complete/failed badge
+//                               + "Rerun setup" (only with a setup command;
+//                               the submodule fetch logs here without one).
+//                               The complete/failed badge
 //                               auto-dismisses 15s after the user has VIEWED
 //                               the tab (the countdown waits for the visit).
 //   • finished (no log — an   → the empty layout with "Run setup again", a
@@ -72,6 +74,7 @@ import { ZerosSpinner } from "@/renderer/shared/ui/loading";
 import { createTerminalResizeScheduler } from "../../terminal/terminal-resize-scheduler";
 import { isUsableTerminalDimensions } from "../../terminal/terminal-dimensions";
 import { useWorkbenchStatusSource } from "../tab-status";
+import { setupStatusAction } from "./setup-status-action";
 import { Stack } from "@/renderer/shared/ui/layout/stack";
 import { EmptyState } from "@/renderer/shared/ui/layout/empty-state";
 
@@ -495,6 +498,7 @@ function WorkspaceSetup({
 
   const state = info?.state ?? null;
   const hasLog = !!info && info.log.length > 0;
+  const action = setupStatusAction({ state, hasLog, hasCommand: info?.hasCommand });
   const outcome: SetupOutcome | null = isSetupOutcome(state) ? state : null;
 
   // A NEW run resets this workspace's badge dismissal — its outcome deserves
@@ -561,7 +565,7 @@ function WorkspaceSetup({
           finished log gets the outcome badge + "Rerun setup". */}
       {(hasLog || state === "running") && (
         <div className="absolute right-3 bottom-3 flex items-center gap-2">
-          {state === "running" ? (
+          {action === "stop" ? (
             <SetupActionButton
               busy={busy}
               onClick={() => void stop()}
@@ -573,12 +577,14 @@ function WorkspaceSetup({
               {outcome && (outcome === "stopped" || badgeVisible) && (
                 <SetupStatusBadge outcome={outcome} />
               )}
-              <SetupActionButton
-                busy={busy}
-                onClick={() => void run()}
-                label="Rerun setup"
-                icon="rerun"
-              />
+              {action === "rerun" && (
+                <SetupActionButton
+                  busy={busy}
+                  onClick={() => void run()}
+                  label="Rerun setup"
+                  icon="rerun"
+                />
+              )}
             </>
           )}
         </div>

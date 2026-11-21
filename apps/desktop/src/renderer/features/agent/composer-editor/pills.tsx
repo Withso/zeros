@@ -23,7 +23,7 @@ import {
   useSyncExternalStore,
   type ReactNode,
 } from "react";
-import { Book, Download, Files, Film, MoreHorizontal, X } from "lucide-react";
+import { Book, Download, Files, Film, MessageSquare, MoreHorizontal, TextQuote, X } from "lucide-react";
 
 import { cn } from "../../../shared/ui/cn";
 import { FileTypeIcon } from "./file-type-icon";
@@ -62,6 +62,7 @@ import {
   getFileAttachmentProgress,
   subscribeFileAttachmentProgress,
 } from "../file-attachment-transfer";
+import { CHAT_REPLY_SOURCE, CHAT_SELECTION_SOURCE } from "../chat-selection";
 
 function PillRemoveButton({
   label,
@@ -256,9 +257,13 @@ function SingleAttachmentPill(props: NodeViewProps) {
     name: string;
     mimeType: string;
     kind: "image" | "text" | "file";
+    sourceKey?: string;
+    label?: string;
   };
   const ctx = useComposerEditorContext();
   const att = ctx.getAttachment(attrs.attachmentId);
+  const chatQuote = attrs.sourceKey?.startsWith(CHAT_SELECTION_SOURCE) ? "selection"
+    : attrs.sourceKey?.startsWith(CHAT_REPLY_SOURCE) ? "reply" : null;
   const download = useRef<AbortController | null>(null);
   const [downloading, setDownloading] = useState(false);
   useEffect(() => () => { download.current?.abort(); download.current = null; setDownloading(false); }, [ctx.cwd, ctx.attachmentImagesActive, att]);
@@ -346,11 +351,13 @@ function SingleAttachmentPill(props: NodeViewProps) {
           removePill(props);
         }}
       >
-        <FileTypeIcon
-          name={attrs.name}
-          kind={isImage ? "image" : "file"}
-          size={13}
-        />
+        {chatQuote === "selection" ? <TextQuote size={13} aria-hidden="true" />
+          : chatQuote === "reply" ? <MessageSquare size={13} aria-hidden="true" />
+            : <FileTypeIcon
+              name={attrs.name}
+              kind={isImage ? "image" : "file"}
+              size={13}
+            />}
       </PillRemoveButton>
       <Button
         variant="ghost"
@@ -372,7 +379,7 @@ function SingleAttachmentPill(props: NodeViewProps) {
       >
         {/* Transfer status belongs in the tooltip: adding/removing inline
             text resizes this pill and rewraps every later file in a drop. */}
-        <span className="max-w-[16rem] truncate">{attrs.name}</span>
+        <span className="max-w-[16rem] truncate">{attrs.label || attrs.name}</span>
       </Button>
       {att && isVideoFile({ name: att.name, mimeType: att.mimeType }) && <DropdownMenu>
         <DropdownMenuTrigger asChild><Button variant="ghost" aria-label={`Actions for ${att.name}`}

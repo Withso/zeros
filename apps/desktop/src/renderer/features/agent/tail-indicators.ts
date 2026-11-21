@@ -93,7 +93,7 @@ export function tailIndicators({
 }
 
 /** Not a call the agent made: bookkeeping rows that may follow its text. */
-const NOT_A_CALL = new Set(["model_switch", "mode_switch", "compaction", "budget_stop"]);
+const NOT_A_CALL = new Set(["model_switch", "mode_switch", "compaction", "budget_stop", "harness_switch"]);
 
 /** The live tail: the newest drawn event, unless the agent has since started
  * a call the feed does not draw (a native Sleep). Then nothing drawn is

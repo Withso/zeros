@@ -28,7 +28,7 @@ vi.mock("../../shell/pr/pr-cache-forget", () => ({
 vi.mock("../../features/code-review/review-cache-forget", () => ({
   forgetReviewCachesForFolders: f.forget,
 }));
-import { clearCloudGithubPr, requestCloudGithubPr } from "../cloud-github-pr";
+import { clearCloudGithubPr, cloudGithubPrAuthority, requestCloudGithubPr } from "../cloud-github-pr";
 import {
   cloudGithubPrScope,
   subscribeCloudGithubPrScope,
@@ -250,5 +250,37 @@ describe("cloud PR transport", () => {
         method: "squash",
       }),
     ).rejects.toThrow(/refresh/i);
+  });
+});
+
+describe("a repository of a workspace of several", () => {
+  const key = `cloud://${target.organizationId}/${target.workspaceId}`;
+  const web = { key: `${key}/web`, repository: "withso/web" };
+  const webAuthority = { ...authority, repositoryId: "44", repository: "withso/web" };
+
+  it("names its repository on the request and keeps its own authority, apart from the first repository's", async () => {
+    f.request.mockResolvedValueOnce({ authority: webAuthority, result: null });
+    await requestCloudGithubPr(target, "gh.repoAccess", {}, web);
+    expect(f.request.mock.calls[0]![2].body).toMatchObject({ op: "gh.repoAccess", repository: "withso/web" });
+    expect(cloudGithubPrAuthority(target, web)).toEqual(webAuthority);
+    expect(cloudGithubPrAuthority(target)).toBeUndefined();
+    f.request.mockResolvedValueOnce({ authority, result: null });
+    await requestCloudGithubPr(target, "gh.repoAccess", {});
+    expect(f.request.mock.calls[1]![2].body).not.toHaveProperty("repository");
+    expect([cloudGithubPrAuthority(target)?.repository, cloudGithubPrAuthority(target, web)?.repository]).toEqual(["example/project", "withso/web"]);
+  });
+
+  it("refuses a write until that repository's own status was read, whatever the first repository's", async () => {
+    await requestCloudGithubPr(target, "gh.repoAccess", {});
+    await expect(requestCloudGithubPr(target, "gh.prCreate", { title: "t", body: "b" }, web)).rejects.toThrow(/Refresh GitHub status/);
+  });
+
+  it("compares a pull request sync with that repository's own entry in the document", async () => {
+    const found = { ...pr, url: "https://github.com/withso/web/pull/7", state: "ready" };
+    f.doc = { github: { prNumber: null, prState: null, prUrl: null },
+      repositories: [{ repository: "withso/api" }, { repository: "withso/web", github: { prNumber: 7, prState: "ready", prUrl: found.url } }] } as never;
+    f.request.mockResolvedValue({ authority: webAuthority, result: found });
+    await requestCloudGithubPr(target, "gh.prSync", {}, web);
+    expect(f.refresh).not.toHaveBeenCalled();
   });
 });

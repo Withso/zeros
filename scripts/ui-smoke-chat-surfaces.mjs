@@ -86,7 +86,7 @@ export async function runChatSurfacesSmoke({ page, check, harnessBase }) {
   const sidePanels = page
     .locator("[data-zeros-column-3]")
     .getByRole("tablist", { name: "Workspace panels" });
-  for (const name of ["Files", "Design", "Changes", "Review"]) {
+  for (const name of ["Files", "Design", "Changes", "Review", "Agents"]) {
     const tab = sidePanels.getByRole("tab", { name, exact: true });
     await expect(tab).toHaveCount(1);
     await expect(tab.locator("svg, img")).toHaveCount(0);

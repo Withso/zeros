@@ -74,7 +74,12 @@ describe("GitHub at two levels in Settings", () => {
     await act(async () => { [...container.querySelectorAll("button")].find(node => node.textContent === "Repositories")!.click(); });
     await act(async () => { await new Promise(resolve => setTimeout(resolve, 0)); });
     const drawer = document.body.textContent ?? "";
-    expect(drawer).toContain("Repositories this connection can read. Projects pick their repositories from these.");
+    // Said once: what the list is, and that nothing is added here.
+    expect(drawer.match(/can read/g)).toHaveLength(1);
+    expect(drawer).toContain("Everything this connection can read. Nothing to add here: pick them when you create a project.");
+    expect(drawer).toContain("Connected for the organization.");
+    expect(drawer).toContain("Private");
+    expect(drawer).toContain("Public");
     expect(drawer).toContain("withso/zeros");
     expect(drawer).toContain("withso/web");
     expect(drawer).toContain("In zeros");

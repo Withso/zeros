@@ -11,7 +11,7 @@ vi.mock("../../../platform/cloud-github-levels", async original => ({
   getCloudReadyCopyOutput: fixture.output,
 }));
 
-import { ReadyCopySection, readyCopyStatusLine } from "../ready-copy-section";
+import { ReadyCopySection, readyCopyStatus } from "../ready-copy-section";
 
 const ORG = "11111111-1111-4111-8111-111111111111";
 const hour = 3_600_000, day = 24 * hour, iso = (offset: number) => new Date(Date.now() + offset).toISOString();
@@ -42,7 +42,12 @@ describe("a project's ready copy on its project page", () => {
           repositories: [{ repository: "withso/zeros", branch: "main", commit: "c".repeat(40) }, { repository: "withso/web", branch: "next", commit: "d".repeat(40) }],
           trigger: "repositories_changed", startedBy: null, failure: null, output: false },
       ] });
-    expect(text).toContain("Update failed. New workspaces still use the copy from 3d ago.");
+    expect(text).toContain("Update failed");
+    expect(text).toContain("New workspaces still use the build from 3d ago.");
+    // One vocabulary: builds, never copies.
+    expect(text).not.toMatch(/\bcop(y|ies)\b/i);
+    // Why each build ran comes first, after its number.
+    expect(container.querySelector('[aria-label="Builds"]')?.textContent).toMatch(/Build #4.*Started by Alice/);
     expect(text).toContain("withso/zeros: A build secret was left on the disk. In /home/user/withso/zeros/.npmrc. Read it from the environment in setup; don't write it to a file.");
     expect(text).toMatch(/Next try in (59|60) minutes/);
     expect(text).toContain("Started by Alice");
@@ -51,6 +56,8 @@ describe("a project's ready copy on its project page", () => {
     expect(text).toContain("withso/zeros main @ ccccccc");
     expect(text).toContain("withso/web next @ ddddddd");
     expect(text).not.toMatch(/ready_copy_/);
+    // Output only on the failed build; the successful one stored none.
+    expect([...container.querySelectorAll("button")].filter(node => node.textContent === "Output")).toHaveLength(1);
     await act(async () => { button("Output")!.click(); });
     expect(fixture.output).toHaveBeenCalledWith(ORG, expect.stringMatching(/^88888888-/), 4);
     await act(async () => { button("Retry now")!.click(); });
@@ -59,17 +66,20 @@ describe("a project's ready copy on its project page", () => {
 
   it("shows members the status line only", async () => {
     const text = await render({ status: { state: "ready", updatedAt: iso(-day), nextUpdateAt: iso(6 * day) } });
-    expect(text).toContain("Ready · updated 1d ago · next update in 6 days");
+    expect(text).toContain("Ready");
+    expect(text).toContain("Updated 1d ago · next update in 6 days");
     expect(button("Build now")).toBeUndefined();
-    expect(container.querySelector('[aria-label="Ready copy builds"]')).toBeNull();
+    expect(container.querySelector('[aria-label="Builds"]')).toBeNull();
     expect(await render({ status: { state: "none", updatedAt: null, nextUpdateAt: null } })).toBe("");
   });
 
   it("names every state", () => {
     const now = Date.now();
-    expect(readyCopyStatusLine({ state: "updating", updatedAt: null, nextUpdateAt: null }, now)).toBe("Updating… The previous copy still serves new workspaces.");
-    expect(readyCopyStatusLine({ state: "getting_ready", updatedAt: null, nextUpdateAt: null }, now)).toBe("Getting ready…");
-    expect(readyCopyStatusLine({ state: "failed", updatedAt: null, nextUpdateAt: null }, now)).toContain("clone directly");
-    expect(readyCopyStatusLine({ state: "none", updatedAt: null, nextUpdateAt: null }, now)).toBeNull();
+    expect(readyCopyStatus({ state: "updating", updatedAt: null, nextUpdateAt: null }, now))
+      .toEqual({ label: "Updating…", hint: "New workspaces use the last build until this one is ready." });
+    expect(readyCopyStatus({ state: "getting_ready", updatedAt: null, nextUpdateAt: null }, now)?.label).toBe("Getting ready…");
+    expect(readyCopyStatus({ state: "failed", updatedAt: null, nextUpdateAt: null }, now)).toMatchObject({ label: "Update failed" });
+    expect(readyCopyStatus({ state: "failed", updatedAt: null, nextUpdateAt: null }, now)?.hint).toContain("clone directly");
+    expect(readyCopyStatus({ state: "none", updatedAt: null, nextUpdateAt: null }, now)).toBeNull();
   });
 });

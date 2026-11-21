@@ -11,17 +11,14 @@
 // model's remembered effort/Fast state, and one global star matches Settings'
 // default identity.
 //
-// Universal search spans every connected agent. Picking another agent in a
-// started chat redirects to a new chat; a fresh chat/dispatcher switches in
-// place. See `redirectCrossAgent` below.
+// Universal search spans every connected agent.
 //   - Picking a model under a DIFFERENT agent emits the full selection —
 //     the host decides what an agent switch means (the dispatcher swaps the
-//     pending selection; the chat composer moves the chat to a tab bound to
-//     that agent).
-//   - `redirectCrossAgent`: once a chat has its first prompt it IS that agent's
-//     session. Other-agent rows announce the new-chat action in their accessible
-//     name without adding another glyph to the requested row anatomy. A fresh
-//     chat (nothing sent) and the dispatcher switch freely.
+//     pending selection; a started Local chat stages it for an in-place
+//     switch; a started cloud chat opens a tab bound to that agent).
+//   - `redirectCrossAgent`: other-agent rows announce the new-chat action in
+//     their accessible name without adding another glyph to the requested row
+//     anatomy.
 //
 // Pre-session, `modelsForAgent(agentId, null)` returns the stable curated rows
 // that do not require account discovery. Account-qualified compatibility rows
@@ -197,8 +194,8 @@ export function AgentModelMenu({
   onOpenChange: (open: boolean) => void;
   /** Tooltip label on the trigger (empty ⇒ no tooltip). */
   triggerTooltip?: string;
-  /** When true (a chat whose session already started), picking a model under a
-   *  DIFFERENT agent opens a new chat tab instead of switching in place. */
+  /** When true (a started cloud chat), picking a model under a DIFFERENT
+   *  agent opens a new chat tab instead of switching in place. */
   redirectCrossAgent?: boolean;
   footer?: React.ReactNode;
   /** The trigger element (rendered via PopoverTrigger asChild). */

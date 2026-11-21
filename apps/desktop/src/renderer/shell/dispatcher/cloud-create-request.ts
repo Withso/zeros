@@ -4,20 +4,31 @@ import {
 } from "../../features/team/control-plane";
 import type { createCloudWorkspaceDocument } from "../../platform/cloud-workspaces";
 
-/** Submit the visible repository. The server forks its live Cloud Computer. */
+/** Submit the visible repository, or the visible project whose first repository
+ * it is, with a base branch for any other repository chosen on Create. */
 export function cloudCreateRequest(source: {
   organization: Pick<OrganizationSummary, "id"> | null;
   repository: { owner: string; repo: string } | null;
   baseBranch: string | null;
+  project?: { id: string; repositories: readonly { repository: string }[] } | null;
+  /** Lowercased `owner/name` → branch, for repositories after the first. */
+  projectBases?: Readonly<Record<string, string>>;
 }): Omit<
   Parameters<typeof createCloudWorkspaceDocument>[0],
   "idempotencyKey"
 > | null {
   if (!source.organization || !source.repository) return null;
+  const others = source.project?.repositories.slice(1).flatMap(entry => {
+    const branch = source.projectBases?.[entry.repository.toLowerCase()];
+    return branch ? [{ repository: entry.repository, baseBranch: branch }] : [];
+  }) ?? [];
   return {
     organizationId: source.organization.id,
     repository: { owner: source.repository.owner, name: source.repository.repo },
     ...(source.baseBranch ? { baseBranch: source.baseBranch } : {}),
+    ...(source.project ? { projectId: source.project.id } : {}),
+    ...(others.length ? { repositories: others } : {}),
+    ...(source.project && source.project.repositories.length > 1 ? { severalRepositories: true } : {}),
   };
 }
 export function refreshChangedCloudComputer(
