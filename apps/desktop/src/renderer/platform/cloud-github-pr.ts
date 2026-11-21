@@ -57,10 +57,15 @@ const errorCodes: Record<string, string> = {
 export function cloudGithubPrAvailable(target: CloudWorkspaceTarget): boolean {
   return hasCloudGithubPrCapability(target);
 }
+/** `repository`: one repository of a workspace of several, by its key and name; its
+ * authority and revisions are its own. The first repository of a workspace of one
+ * keeps the workspace's key. */
+export type CloudGithubPrRepository = { key: string; repository: string };
 export function cloudGithubPrAuthority(
   target: CloudWorkspaceTarget,
+  repository?: CloudGithubPrRepository,
 ): CloudGithubPrAuthority | undefined {
-  const snapshot = snapshots.get(cloudWorkspaceKey(target));
+  const snapshot = snapshots.get(repository?.key ?? cloudWorkspaceKey(target));
   const authority = snapshot?.catalog === cloudGithubPrCatalogContext(target) ? snapshot?.authority : undefined;
   return authority ? { ...authority } : undefined;
 }
@@ -74,7 +79,8 @@ function forgetPresentation(key: string): void {
 onCloudGithubPrContextChange((key, retainPresentation) => {
   // A new HEAD invalidates request authority, not the same branch's last confirmed presentation.
   if (retainPresentation) return;
-  snapshots.delete(key);
+  for (const each of [...snapshots.keys()])
+    if (each === key || each.startsWith(`${key}/`)) { snapshots.delete(each); if (each !== key) forgetPresentation(each); }
   forgetPresentation(key);
 });
 export function clearCloudGithubPr(organizationId?: string): void {
@@ -105,6 +111,7 @@ export function requestCloudGithubPr(
   target: CloudWorkspaceTarget,
   op: string,
   input: Record<string, unknown>,
+  repository?: CloudGithubPrRepository,
 ): Promise<unknown> {
   if (!CLOUD_GITHUB_PR_OPERATIONS.has(op) || !cloudGithubPrAvailable(target))
     return Promise.reject(
@@ -112,7 +119,7 @@ export function requestCloudGithubPr(
         "Pull requests are not available for this cloud workspace. Update its cloud runtime and try again.",
       ),
     );
-  const key = cloudWorkspaceKey(target),
+  const key = repository?.key ?? cloudWorkspaceKey(target),
     account = getOrganizationStoreGeneration(),
     startEpoch = epoch,
     scopeEpoch = scopeEpochs.get(target.organizationId) ?? 0;
@@ -124,7 +131,7 @@ export function requestCloudGithubPr(
     context === cloudGithubPrCatalogContext(target);
   const captured = snapshots.get(key),
     write = CLOUD_GITHUB_PR_WRITES.has(op);
-  const { workspaceId: _workspaceId, ...params } = input;
+  const { workspaceId: _workspaceId, repository: _repository, ...params } = input;
   // A caller's remote is only a Local hint; cloud uses the server-pinned repository.
   if (op === "gh.prList") {
     delete params.owner;
@@ -177,7 +184,7 @@ export function requestCloudGithubPr(
       return cloudAccountRequest(
         `/v1/cloud-v2/workspaces/${target.workspaceId}/github`,
         CloudGithubPrResponseSchema,
-        { body: parsed.data, idempotencyKey: crypto.randomUUID() },
+        { body: repository ? { ...parsed.data, repository: repository.repository } : parsed.data, idempotencyKey: crypto.randomUUID() },
         {
           ...sharingFor(target.workspaceId),
           githubPullRequest: true,

@@ -53,6 +53,15 @@ export const CloudV2WorkspaceSchema = z.object({
   chatEdits: z.literal(1).optional().catch(undefined),
   /** A private repository's workspace: its member's alone; never shared or reassigned. */
   privateOwnerUserId: uuid.optional().catch(undefined),
+  /** The project it was created from, by its current name. */
+  project: z.object({ id: uuid, name: z.string().min(1).max(100) }).optional().catch(undefined),
+  /** A workspace of several repositories: the project folder, and each repository with its checkout and pull request. */
+  root: z.string().optional().catch(undefined),
+  repositories: z.array(z.object({
+    repository: z.string().regex(/^[^/]+\/[^/]+$/), checkoutPath: z.string(), branch: z.string().min(1).max(255), baseBranch: z.string().min(1).max(255),
+    github: z.object({ repositoryId: z.string().regex(/^[1-9][0-9]*$/), branch: z.string().nullable(), baseBranch: z.string(), headSha: z.string().nullable(),
+      prNumber: z.number().int().positive().nullable(), prState: z.enum(["draft", "ready", "merged", "closed"]).nullable(), prUrl: z.string().url().nullable() }).optional(),
+  })).min(2).max(10).optional().catch(undefined),
 }).passthrough()
   // A missing Creator is never accepted without well-formed team ownership and a known creator of record.
   .refine(value => value.creatorUserId !== null || (!!ownershipOf(value) && typeof value.createdByUserId === "string" && uuid.safeParse(value.createdByUserId).success),
@@ -126,6 +135,8 @@ export function cloudV2Document(workspace: CloudV2Workspace): CloudWorkspaceDocu
     ...(workspace.github ? { github: workspace.github } : {}),
     ...(workspace.githubUnavailableReason ? { githubUnavailableReason: workspace.githubUnavailableReason } : {}),
     ...(workspace.checkoutPath ? { checkoutPath: workspace.checkoutPath } : {}),
+    ...(workspace.project ? { project: workspace.project } : {}),
+    ...(workspace.root && workspace.repositories ? { root: workspace.root, repositories: workspace.repositories } : {}),
     // Malformed optional setup or agent cost must not invalidate the workspace document.
     ...(sharing ? { sharing } : {}),
     ...topLevel("setup", CloudV2SetupStatusSchema, (workspace as Record<string, unknown>).setup),

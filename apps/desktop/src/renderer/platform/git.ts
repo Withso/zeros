@@ -265,6 +265,29 @@ export interface Workspace {
   present?: boolean;
   /** Known only for withChanges reads; counts the All Changes net comparison. */
   hasChanges?: boolean;
+  /** The cloud project it was created from, by its current name. */
+  project?: { id: string; name: string };
+  /** A cloud workspace of several repositories, the first being this row's own
+   * branch and pull request; absent with one (a Local workspace always has
+   * one). Read through `workspaceRepositories()`. */
+  repositories?: readonly WorkspaceRepository[];
+}
+
+/** One repository of a workspace. */
+export interface WorkspaceRepository {
+  /** `owner/name`, as GitHub names it. */
+  repository: string;
+  /** Its folder's name inside the workspace's project folder. */
+  folder: string;
+  /** What Git, pull request and file requests for this repository target: its
+   * folder's key inside the workspace (`<workspace key>/<folder>`), or the
+   * workspace's own key when the workspace has one repository. */
+  target: string;
+  branch: string;
+  baseBranch: string;
+  prNumber: number | null;
+  prState: PrState | null;
+  prUrl: string | null;
 }
 
 export interface WorkspaceSetupInfo {
