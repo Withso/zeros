@@ -81,7 +81,7 @@ describe("Cloud Computer settings panel", () => {
       { projectId: "88888888-8888-4888-8888-888888888882", project: "app", repository: "withso/web", step: "setup", generation: 5,
         reason: "ready_copy_setup_failed", detail: null, finishedAt: ago(day), failures: 5, nextRetryAt: null }] };
     const page = text(render()).replace(/&#x27;/g, "'");
-    expect(page).toContain("Ready copies");
+    expect(page).toContain("Project builds");
     expect(page).toContain("withso/zeros: A build secret was left on the disk. In /home/user/withso/zeros/.npmrc. Read it from the environment in setup; don't write it to a file. Next try in 2 hours.");
     expect(page).toContain("withso/web: Setup failed. Check the setup command and its output, then save it or build again. Automatic retries stopped; change something or retry now.");
     expect(page).not.toMatch(/ready_copy_/);

@@ -14,7 +14,7 @@ import { readyCopyFailureLine } from "./ready-copy-copy";
 import { retryCloudReadyCopy } from "../../platform/cloud-github-levels";
 
 /** With projects on, the Cloud Computer holds tools only. */
-export const CLOUD_COMPUTER_TOOLS_ONLY = "The Cloud Computer holds tools only: the runtime, Git LFS and your install script. Repositories belong to projects, each with its own ready copy.";
+export const CLOUD_COMPUTER_TOOLS_ONLY = "The Cloud Computer holds tools only: the runtime, Git LFS and your install script. Repositories belong to projects, each built on its own.";
 import { CloudRepositoryChooser } from "./cloud-repository-chooser";
 import type { ChooserRepository } from "./cloud-repository-chooser-model";
 import {
@@ -161,7 +161,7 @@ function CloudComputerScope({ userId, organizationId, organizationName, canManag
       </SettingsGroup>
 
       {data?.readyCopies && (data.readyCopyFailures?.length ?? 0) > 0 && (
-        <SettingsGroup title="Ready copies" description="A project whose ready copy failed keeps the previous one; new workspaces clone directly until one is ready.">
+        <SettingsGroup title="Project builds" description="A project whose build failed keeps its last build; new workspaces clone directly until one succeeds.">
           {data.readyCopyFailures!.map(failure => (
             <SettingsRow key={failure.projectId} label={failure.project} hint={readyCopyFailureLine(failure, Date.now())}>
               <Button variant="ghost" size="sm" disabled={busy}
@@ -281,7 +281,7 @@ function CloudComputerProjects({ userId, organizationId, organizationName, activ
   return (
     <SettingsGroup title="Projects">
       <SettingsRow label={count === undefined ? "Projects" : `${count} ${count === 1 ? "project" : "projects"} in ${organizationName}`}
-        hint={`${CLOUD_COMPUTER_TOOLS_ONLY.split(": ")[0]}. Repositories, setup scripts and build secrets belong to projects.`}>
+        hint="The Cloud Computer holds tools only. Repositories, setup scripts and build secrets belong to projects.">
         {onNewProject && projects && (projects.canCreateOrganization || projects.personalAllowed) && (
           <Button variant="ghost" size="sm" onClick={onNewProject}>New project</Button>
         )}

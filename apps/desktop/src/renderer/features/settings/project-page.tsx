@@ -140,7 +140,7 @@ export function ProjectPage({
       </SettingsPageSection>
 
       {cloud && readyCopy && (
-        <SettingsPageSection title="Cloud build" description="The ready copy new cloud workspaces start from.">
+        <SettingsPageSection title="Cloud build" description="The build new cloud workspaces start from.">
           <ReadyCopySection organizationId={readyCopy.organizationId} projectId={readyCopy.projectId} active={surfaceActive} />
         </SettingsPageSection>
       )}
