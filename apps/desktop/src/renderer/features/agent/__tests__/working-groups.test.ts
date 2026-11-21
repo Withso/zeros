@@ -440,3 +440,16 @@ describe("settledLoaderLine", () => {
     expect(settledLoaderLine({ kind: "hidden" }, { heldLong: true, pendingCall: { since: 1, long: true } })).toEqual({ kind: "hidden" });
   });
 });
+
+describe("creation card on the loader line", () => {
+  it("keeps the timer so the card row stays in the feed with its link", () => {
+    const tail: TurnSegment = {
+      kind: "working",
+      standalone: true,
+      key: "c",
+      events: [{ kind: "tool", id: "c", toolCallId: "c", title: "Bash", toolKind: "execute", status: "in_progress",
+        createdAt: 1, rawInput: { command: "zeros local chat create --message Hi" } } as unknown as AgentMessage],
+    };
+    expect(loaderLineSubject({ visible: true, tail, groupOpen: false })).toEqual({ kind: "timer" });
+  });
+});

@@ -95,7 +95,8 @@ export function loaderLineSubject({ visible, tail, groupOpen, thoughtReady = str
   thoughtReady?: (event: AgentMessage) => boolean;
 }): LoaderLine {
   if (!visible) return { kind: "hidden" };
-  if (tail?.kind !== "working") return { kind: "timer" };
+  // A creation card keeps its own row so its link stays clickable.
+  if (tail?.kind !== "working" || tail.standalone) return { kind: "timer" };
   const events = workingFeedEvents(tail.events);
   const latest = events.at(-1);
   // Until a streaming thought's description has settled, the line keeps what

@@ -1,10 +1,12 @@
 import { toolPresentationReady, withoutRedundantAgentTasks } from "./renderers/tool-readiness";
+import { isHarnessSwitchMessage } from "./harness-switch";
 import { isTurnFailureNotice } from "./turn-failure";
 import { isLegacyAuthenticationNotice, isProviderWorkEvent, isUsageNotice, usageStatusChanges } from "./transcript-notices";
 // Split working narration/tools from provider-declared partial/final answers.
 // Live events retain their source order and become inspectable immediately.
 
 import type { AgentMessage, AgentToolMessage } from "./use-agent-session";
+import { localCliPresentation } from "./renderers/local-cli-presentation";
 
 export interface TurnPartition {
   /** Tools, thinking, in-between narration, sub-agents — the reasoning
@@ -116,7 +118,7 @@ function isBackgroundTask(e: AgentMessage): boolean {
  *  compacted an idle chat — and must stay visible, not fold into the
  *  chip). */
 function isFinalOutputEvent(e: AgentMessage): boolean {
-  return isOutputText(e) || isManualCompaction(e) || isBudgetStop(e);
+  return isOutputText(e) || isManualCompaction(e) || isBudgetStop(e) || isHarnessSwitchMessage(e);
 }
 
 export function partitionTurn(
@@ -170,6 +172,8 @@ function partitionVisible(
     ) {
       finalOutputIndexes.add(index);
     }
+    // A user-applied switch stays visible wherever it lands, even mid-turn.
+    if (isHarnessSwitchMessage(event)) finalOutputIndexes.add(index);
   });
   // Legacy providers have no phase. Keep their settled trailing-answer
   // convention, while explicit answers survive further work and bookkeeping.
@@ -197,8 +201,18 @@ function partitionVisible(
   return { events, working, finalOutput };
 }
 
+/** A `zeros local` call that created a chat or workspace. It stays a plain
+ * row between working runs so the creation is visible while groups collapse. */
+export function isCreationCard(event: AgentMessage): boolean {
+  if (event.kind !== "tool" || event.status === "failed") return false;
+  const command = localCliPresentation(event, "zeros")?.command;
+  return command === "chat.create" || command === "workspace.create";
+}
+
 export interface TurnSegment {
   kind: "working" | "output";
+  /** A creation card: a working segment that never absorbs neighbours. */
+  standalone?: true;
   /** An output segment holding an in-between message rather than an answer.
    * It shares the output kind so settling it as the answer keeps its key. */
   inBetween?: true;
@@ -225,8 +239,11 @@ export function partitionTurnSequence(
     const between = !output.has(event) && !!options?.inBetweenOutside && isInBetweenMessage(event);
     const kind = output.has(event) || between ? "output" : "working";
     const previous = segments.at(-1);
-    if (kind === "working" && previous?.kind === kind) previous.events.push(event);
-    else segments.push({ kind, key: event.id, events: [event], ...(between ? { inBetween: true as const } : {}) });
+    const standalone = kind === "working" && isCreationCard(event);
+    if (kind === "working" && !standalone && previous?.kind === kind && !previous.standalone) previous.events.push(event);
+    else segments.push({ kind, key: event.id, events: [event],
+      ...(between ? { inBetween: true as const } : {}),
+      ...(standalone ? { standalone: true as const } : {}) });
   }
   // Prepending within a working run must not remount EventStripe or its
   // nested tool/Agent disclosures. Match durable rows only, and let at most

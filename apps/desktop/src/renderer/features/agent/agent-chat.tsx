@@ -111,7 +111,7 @@ import { turnGet } from "../../platform/turns";
 import { turnRowCache, turnRowKey } from "../../state/read-caches";
 import { useCachedRead } from "../../state/use-cached-read";
 import { findProjectForFolder } from "../../state/workspace-resolution";
-import { Bot, Square, ArrowLeft, Check, GitBranch } from "lucide-react";
+import { Bot, Square, ArrowLeft, Check, GitBranch, RotateCw } from "lucide-react";
 import {
   encodeAttachments,
   reportSkippedAttachments,
@@ -315,7 +315,19 @@ import {
   windowOlderMessages as ipcWindowOlderMessages,
   cachedWindowOlderMessages as ipcCachedWindowOlderMessages,
   truncateMessagesFrom as ipcTruncateMessagesFrom,
+  persistTranscriptRow,
 } from "./agent-history-client";
+import {
+  buildHarnessSwitchMessage,
+  canAutoContinueAfterSwitch,
+  HARNESS_SWITCH_CONTINUE_NOTE,
+  harnessSwitchBlockedByQueue,
+  harnessSwitchTranscriptMode,
+  isHarnessChange,
+  isPendingPick,
+  pickLabel,
+  type AgentModelPick,
+} from "./harness-switch";
 
 /** How long an empty chat waits for its folder's transcript list before it
  * shows the workspace rows instead of nothing. */
@@ -1190,9 +1202,8 @@ function AgentChatBody({
     currentPermissionModeId,
   );
 
-  // A started chat is its agent's session, so other agents' models open a new
-  // tab. In-memory messages or a promoted title (which survives a respawn) mean
-  // it has started.
+  // In-memory messages or a promoted title (which survives a respawn) mean the
+  // chat has started.
   const hasSessionMessages = useSessionsStore((s) => {
     if (!chatId) return false;
     const slot = s.sessions[chatId];
@@ -1223,8 +1234,9 @@ function AgentChatBody({
   );
 
   // A fresh chat switches agent in place, clearing the native mode ids and engine
-  // session id, which don't translate across agents. A started chat opens a new
-  // tab for the picked agent and carries the draft across.
+  // session id, which don't translate across agents. A started Local chat
+  // stages the pick (applyStagedPick); a started cloud chat opens a new tab for
+  // the picked agent and carries the draft across.
   const agentSwitchRef = useRef(0);
   const switchAgentModel = useCallback(
     function selectAgentModel(sel: AgentModelSelection) {
@@ -1317,6 +1329,147 @@ function AgentChatBody({
     [chatThread, chatId, dispatch, agentSessions, updateChatSettings],
   );
 
+  const applyModelInPlace = useCallback(
+    (v: string | null) => {
+      if (!chatThread) return;
+      if (chatId) {
+        const store = useSessionsStore.getState();
+        store.patchSession(chatId, { modelSelectionRevision: (store.sessions[chatId]?.modelSelectionRevision ?? 0) + 1 });
+      }
+      const configuration = resolveModelConfiguration(
+        chatThread.agentId,
+        v,
+        session.initialize,
+      );
+      updateChatSettings({ model: v, ...configuration });
+      // Apply to the LIVE session too, so the change takes effect on the
+      // next turn instead of only on a rebuild.
+      if (v) session.setModel?.(v);
+      // After setModel: updateConfig pushes the whole env, carrying the effort and
+      // Fast resets and stamping appliedChatEnvKey so sendPrompt does not respawn.
+      session.updateConfig?.();
+      // Once per chat, a mid-conversation model change is a
+      // cache miss on the next reply (slower + more tokens).
+      if (v && v !== chatThread.model) maybeShowCostBumpToast("model");
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [chatThread, chatId, session.initialize, session.setModel, session.updateConfig, updateChatSettings, maybeShowCostBumpToast],
+  );
+
+  // A started chat stages agent/model picks; nothing changes until the user
+  // applies the staged pick with the rotate button.
+  const [stagedPickState, setStagedPickState] = useState<{ chatId: string; pick: AgentModelPick } | null>(null);
+  const stagedPick = stagedPickState && stagedPickState.chatId === chatId && chatThread &&
+    isPendingPick(stagedPickState.pick, chatThread) ? stagedPickState.pick : null;
+  const cloudChat = isCloudWorkspace(chatThread?.folder);
+  const continueAfterSwitchRef = useRef<{ chatId: string; agentId: string } | null>(null);
+  const [continueAfterSwitch, setContinueAfterSwitch] = useState(0);
+
+  const recordSwitchRow = useCallback(
+    (targetChatId: string, row: ReturnType<typeof buildHarnessSwitchMessage>, durable: boolean) => {
+      const store = useSessionsStore.getState();
+      const slot = store.sessions[targetChatId];
+      if (slot && !slot.messages.some((message) => message.id === row.id)) {
+        store.patchSession(targetChatId, { messages: [...slot.messages, row] });
+      }
+      if (!durable || !capabilitiesBridge) return Promise.resolve();
+      return persistTranscriptRow(capabilitiesBridge, targetChatId, row).catch((error) => {
+        console.warn("[Zeros] agent switch row was not saved:", error);
+      });
+    },
+    [capabilitiesBridge],
+  );
+
+  const applyStagedPick = useCallback(async () => {
+    if (!chatThread || !chatId || !stagedPick) return;
+    const pick = stagedPick;
+    if (harnessSwitchBlockedByQueue(
+      isHarnessChange(chatThread.agentId, pick.agentId),
+      queuedMessages.length,
+    )) {
+      toast.warning("Send or remove queued messages before switching agent.");
+      return;
+    }
+    setStagedPickState(null);
+    const from = { agentId: chatThread.agentId, model: chatThread.model };
+    const row = buildHarnessSwitchMessage({
+      id: `harness-switch-${crypto.randomUUID()}`,
+      from,
+      to: pick,
+      now: Date.now(),
+    });
+    if (!isHarnessChange(chatThread.agentId, pick.agentId)) {
+      applyModelInPlace(pick.model);
+      void recordSwitchRow(chatId, row, !cloudChat);
+      return;
+    }
+    if (cloudChat) return;
+    const wasRunning = session.status === "streaming";
+    if (wasRunning) {
+      try { await agentSessions.cancel(chatId); } catch { /* Local cancellation remains best-effort. */ }
+    }
+    const sourceLabel = transcriptPillLabel({ title: chatThread.title, summary: "" });
+    const mode = harnessSwitchTranscriptMode();
+    const transcript = loadTranscriptSnapshot({
+      chatId,
+      mode,
+      lastMessageAt: Date.now(),
+      meta: { title: sourceLabel, folder: chatThread.folder },
+    });
+    const born = newChatBornDefaults(pick.agentId);
+    const { effort, fast } = resolveModelConfiguration(pick.agentId, pick.model, null);
+    // The read above observes the engine before the row is written, so the
+    // seeded transcript is the conversation the previous agent saw.
+    await transcript.catch(() => null);
+    await recordSwitchRow(chatId, row, true);
+    const closing = agentSessions.closeSession(chatId);
+    if (closing) await closing.catch(() => false);
+    const current = useWorkspaceStore.getState().chats.find((candidate) => candidate.id === chatId);
+    if (!current || current.agentId !== chatThread.agentId) return;
+    // Clearing sessionId drops the old provider's binding; the same chat id,
+    // lineage and attribution carry over to the new agent.
+    updateChatSettings({
+      agentId: pick.agentId,
+      agentName: pick.agentName || null,
+      model: pick.model,
+      effort,
+      fast,
+      permissionMode: born.permissionMode,
+      lastModeId: born.lastModeId,
+      prePlanModeId: undefined,
+      sessionId: undefined,
+    });
+    const delivery = transcript.then((snapshot) => {
+      if (snapshot.count === 0) return;
+      const attachment = buildForkTranscriptAttachment({
+        sourceChatId: chatId,
+        sourceLabel,
+        text: wasRunning
+          ? `${snapshot.text.trimEnd()}\n\n${HARNESS_SWITCH_CONTINUE_NOTE}\n`
+          : snapshot.text,
+        complete: snapshot.complete,
+        mode,
+      });
+      deliverTextAttachmentToChat(chatId, attachment);
+    }).catch((error) => {
+      console.error("[Zeros] agent switch transcript failed:", error);
+      toast.error("Couldn't attach the conversation for the new agent.");
+    });
+    trackPendingTextAttachmentDelivery(chatId, delivery);
+    if (wasRunning) {
+      continueAfterSwitchRef.current = { chatId, agentId: pick.agentId };
+      void delivery.then(() => setContinueAfterSwitch((n) => n + 1));
+    }
+  }, [chatThread, chatId, stagedPick, queuedMessages.length, cloudChat, session.status, agentSessions, applyModelInPlace, recordSwitchRow, updateChatSettings]);
+
+  const stagePick = useCallback(
+    (pick: AgentModelPick) => {
+      if (!chatId) return;
+      setStagedPickState({ chatId, pick });
+    },
+    [chatId],
+  );
+
   // Shared with TurnPromptHeader's edit mode so editing a past prompt has the
   // same pills.
   const editToolbarPills = useMemo(() => {
@@ -1331,8 +1484,11 @@ function AgentChatBody({
           value={chatThread.model}
           effort={chatThread.effort}
           fast={!!chatThread.fast}
-          onSelectAgentModel={switchAgentModel}
-          redirectCrossAgent={conversationStarted}
+          onSelectAgentModel={(sel) => {
+            if (conversationStarted && !cloudChat) stagePick(sel);
+            else switchAgentModel(sel);
+          }}
+          redirectCrossAgent={conversationStarted && cloudChat}
           onConfigure={({ effort, fast }) => {
             const effortChanged = effort !== chatThread.effort;
             updateChatSettings({ effort, fast });
@@ -1340,27 +1496,26 @@ function AgentChatBody({
             if (effortChanged) maybeShowCostBumpToast("effort");
           }}
           onChange={(v) => {
-            if (chatId) {
-              const store = useSessionsStore.getState();
-              store.patchSession(chatId, { modelSelectionRevision: (store.sessions[chatId]?.modelSelectionRevision ?? 0) + 1 });
+            if (conversationStarted && v && chatThread.agentId) {
+              stagePick({ agentId: chatThread.agentId, agentName: chatThread.agentName, model: v });
+            } else {
+              applyModelInPlace(v);
             }
-            const configuration = resolveModelConfiguration(
-              chatThread.agentId,
-              v,
-              session.initialize,
-            );
-            updateChatSettings({ model: v, ...configuration });
-            // Apply to the LIVE session too, so the change takes effect on the
-            // next turn instead of only on a rebuild.
-            if (v) session.setModel?.(v);
-            // After setModel: updateConfig pushes the whole env, carrying the effort and
-            // Fast resets and stamping appliedChatEnvKey so sendPrompt does not respawn.
-            session.updateConfig?.();
-            // Once per chat, a mid-conversation model change is a
-            // cache miss on the next reply (slower + more tokens).
-            if (v && v !== chatThread.model) maybeShowCostBumpToast("model");
           }}
         />
+        {stagedPick && (
+          <Tooltip label={`Switch to ${pickLabel(stagedPick)}`}>
+            <IconButton
+              type="button"
+              size="compact"
+              label={`Switch to ${pickLabel(stagedPick)}`}
+              data-composer-switch-pick=""
+              onClick={() => void applyStagedPick()}
+            >
+              <RotateCw />
+            </IconButton>
+          </Tooltip>
+        )}
         {showPermissionToggle && (
           <PermissionToggle
             agentId={chatAgentId}
@@ -1385,6 +1540,11 @@ function AgentChatBody({
     updateChatSettings,
     switchAgentModel,
     conversationStarted,
+    cloudChat,
+    stagePick,
+    stagedPick,
+    applyStagedPick,
+    applyModelInPlace,
     chatAgentId,
     showPermissionToggle,
     cloudModes,
@@ -3694,6 +3854,21 @@ function AgentChatBody({
       sendInFlightRef.current = false;
     }
   };
+
+  // A turn stopped by an agent switch continues under the new agent once the
+  // chat row names it and the seeded transcript is staged.
+  useEffect(() => {
+    const pending = continueAfterSwitchRef.current;
+    if (!pending || pending.chatId !== chatId || chatThread?.agentId !== pending.agentId) return;
+    continueAfterSwitchRef.current = null;
+    // A draft the user is still writing is theirs to send.
+    if (!canAutoContinueAfterSwitch(serializeComposerState())) {
+      toast.info("The conversation is attached. Send to continue with the new agent.");
+      return;
+    }
+    void handleSend();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [continueAfterSwitch, chatId, chatThread?.agentId]);
 
   /** Leave queued-edit mode. Restores the stashed pre-edit draft, releases
    *  the provider-side queue hold, and hands focus back to the composer. */

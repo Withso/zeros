@@ -350,6 +350,7 @@ describe("fixed workbench tabs", () => {
       "design",
       "changes",
       "review",
+      "agents",
     ]);
     expect(isFixedWorkbenchTab(createChangesTab())).toBe(true);
     expect(isFixedWorkbenchTab(createReviewTab())).toBe(true);
@@ -427,6 +428,7 @@ describe("defaultTabs", () => {
       "design",
       "changes",
       "review",
+      "agents",
       "terminal",
     ]);
     expect(tabs.map((tab) => tab.title)).toEqual([
@@ -434,10 +436,12 @@ describe("defaultTabs", () => {
       "Design",
       "Changes",
       "Review",
+      "Agents",
       "Setup",
     ]);
     expect(tabs.map((tab) => Boolean(tab.pinned))).toEqual([
       false,
+      true,
       true,
       true,
       true,
@@ -470,6 +474,7 @@ describe("normalizeWorkbenchTabs", () => {
       "design",
       "changes",
       "review",
+      "agents",
     ]);
     expect(out[0]).toMatchObject({
       title: "Open file",
@@ -505,6 +510,7 @@ describe("normalizeWorkbenchTabs", () => {
       expect.stringMatching(/^design-/),
       expect.stringMatching(/^changes-/),
       expect.stringMatching(/^review-/),
+      expect.stringMatching(/^agents-/),
       "b1",
       "b2",
       "f1",
@@ -1086,6 +1092,7 @@ describe("migrateScopes", () => {
       "design",
       "changes",
       "review",
+      "agents",
       "terminal",
     ]);
     expect(out["/repo/feature"].tabs[0].fixed).toBe(true);
@@ -1133,6 +1140,7 @@ describe("workbench persistence compatibility", () => {
       "design",
       "changes",
       "review",
+      "agents",
       "terminal",
     ]);
 
