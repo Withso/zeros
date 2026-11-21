@@ -492,11 +492,29 @@ export function AppSidebar({ hidden = false }: { hidden?: boolean }) {
   );
   // Repository filtering also bounds Back/Forward destinations; collapse does
   // not remove a destination from history.
+  // Child workspaces under a collapsed parent stay history destinations.
+  const historyWorkspaces = useMemo(() => {
+    const listed = new Set(navigableWorkspaces.map(workspace => workspace.id));
+    const byId = new Map(realWorkspaces.map(workspace => [workspace.id, workspace]));
+    const underListed = (workspace: Workspace) => {
+      const seen = new Set<string>();
+      let parent = workspace.parentWorkspaceId;
+      while (parent && !seen.has(parent)) {
+        if (listed.has(parent)) return true;
+        seen.add(parent);
+        parent = byId.get(parent)?.parentWorkspaceId;
+      }
+      return false;
+    };
+    const collapsed = realWorkspaces.filter(workspace =>
+      !listed.has(workspace.id) && !workspace.archivedAt && underListed(workspace));
+    return collapsed.length ? [...navigableWorkspaces, ...collapsed] : navigableWorkspaces;
+  }, [navigableWorkspaces, realWorkspaces]);
   const historyScope = useMemo<SidebarHistoryScope>(() => ({
     projects,
-    workspaces: navigableWorkspaces,
+    workspaces: historyWorkspaces,
     pendingCreates: listedItems.flatMap(item => item.kind === "pending" ? [item.pending] : []),
-  }), [listedItems, navigableWorkspaces, projects]);
+  }), [listedItems, historyWorkspaces, projects]);
 
   // A cold repository switch is allowed to publish its remembered folder
   // before the workspace list settles. Only a completed exact-key snapshot may
