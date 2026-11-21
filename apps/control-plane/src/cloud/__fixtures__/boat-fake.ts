@@ -19,6 +19,8 @@ export const BOAT_FAKE_ASSUMPTIONS = [
   { verified: false, assumption: "a stopped machine keeps only its disk: a fork boots with none of its source's processes or memory" },
   { verified: false, assumption: "execLong input reaches only the last simple command, through a private file removed before it runs" },
   { verified: false, assumption: "delete succeeds when the machine is already gone; findSandbox returns the newest machine with that exact name" },
+  { verified: false, assumption: "GET /named-snapshots/<name> answers status \"ready\" for a snapshot that can start a machine and 404 for none, also for the shared Zeros base saved under another Boat organization" },
+  { verified: false, assumption: "a machine's disk holds a project's 10 full clones with their dependencies (about 20-30 GB)" },
 ] as const;
 
 type Machine = {
