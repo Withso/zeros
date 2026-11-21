@@ -17,6 +17,8 @@ export const HISTORY_DIGEST_FEATURE = "history-digest-v1";
 export const HISTORY_BATCH_FEATURE = "history-batch-v1";
 /** A worker that takes a new turn's lease from its begin reply (one request instead of two). */
 export const BEGIN_LEASE_FEATURE = "begin-lease-v1";
+/** A workspace of several repositories: config.workspace.root and .repositories, and a repository on GitHub token requests. */
+export const WORKSPACE_REPOSITORIES_FEATURE = "workspace-repositories-v1";
 export const CLOUD_V2_MAX_HISTORY_BATCH_FRAMES = 50;
 export const BOOT_TIMINGS_FEATURE = "boot-timings-v1";
 /** R2: the worker holds who may act from authority freshness instead of renewing each context. */
@@ -112,7 +114,9 @@ export const CloudV2WorkerFrameSchema = z.discriminatedUnion("t", [
   z.object({ t: z.literal("idle"), idle: z.boolean() }).strict(),
   /** Negotiated worker-push-v1 only; the socket supplies workspace authority. */
   z.object({ t: z.literal("activity"), id: z.string().uuid(), idle: z.boolean() }).strict(),
-  z.object({ t: z.literal("request"), id: z.string().uuid(), kind: z.literal("github-token"), purpose: z.enum(["git", "gh"]).optional(), failedTokenSha256: z.string().length(64).regex(/^[a-f0-9]{64}$/).optional() }).strict(),
+  z.object({ t: z.literal("request"), id: z.string().uuid(), kind: z.literal("github-token"), purpose: z.enum(["git", "gh"]).optional(), failedTokenSha256: z.string().length(64).regex(/^[a-f0-9]{64}$/).optional(),
+    /** workspace-repositories-v1: which of the workspace's repositories the token is for; the first without one. */
+    repository: z.string().regex(/^[A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100}$/).optional() }).strict(),
   z.object({ t: z.literal("stop-ack"), id: z.string().uuid() }).strict(),
 ]);
 export type CloudV2WorkerFrame = z.infer<typeof CloudV2WorkerFrameSchema>;
@@ -216,6 +220,23 @@ export const CloudV2ControlFrameSchema = z.discriminatedUnion("t", [
       /** Delivered only with workspace-setup-v1; runs once after a new checkout. */
       setup: z.string().max(8000).optional(),
       setupScript: RepositorySetupPathSchema.optional(),
+      /** workspace-repositories-v1, a workspace of several repositories: the project folder, where agents and
+       * terminals start and every workspace path is relative to. Absent: the checkout is the root. */
+      root: z.string().min(1).max(1024).optional(),
+      /** workspace-repositories-v1: every repository in position order, the first equal to the fields above. */
+      repositories: z.array(z.object({
+        repository: z.string().min(1).max(512),
+        checkoutPath: z.string().min(1).max(1024),
+        github: z.object({ repositoryId: z.string().regex(/^[1-9][0-9]{0,15}$/),
+          repository: z.string().regex(/^[A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100}$/),
+          previousRepositories: z.array(z.string().regex(/^[A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100}$/)).max(102),
+        }).strict().optional(),
+        branch: z.string().min(1).max(255),
+        baseBranch: z.string().min(1).max(255),
+        baseCommit: z.string().regex(/^[0-9a-f]{40}$/).optional(),
+        setup: z.string().max(8000).optional(),
+        setupScript: RepositorySetupPathSchema.optional(),
+      }).strict()).min(2).max(10).optional(),
     }).strict(),
     agents: CloudV2AgentLoginsSchema,
   }).strict(),

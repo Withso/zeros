@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { workerRepositories, type WorkerRepositoryConfig } from "./workspace-repositories.js";
 import { workspaceCheckoutPath } from "./workspace-layout.js";
 import { withExecutionLifetimeRetry } from "./execution/lifetime.js";
 // Assembles cloud workspace v2 from configuration: one store, Boat, the relay
@@ -159,7 +160,16 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
   const logins = createCloudV2AgentLogins(pool, keys);
   const github = createCloudGithubServices(pool, config.github, keys, store);
   const environments = new CloudEnvironments(pool, keys, github.connections.authorizeRepositoryConfiguration.bind(github.connections));
-  const githubToken = (workspace: CloudV2Workspace, purpose: "git" | "gh" = "git", failedTokenSha256?: string) => github.workspaceToken(workspace, "user", purpose, failedTokenSha256);
+  const githubToken = async (workspace: CloudV2Workspace, purpose: "git" | "gh" = "git", failedTokenSha256?: string, repository?: string) => {
+    if (!repository || repository.toLowerCase() === workspace.repository.toLowerCase()) return github.workspaceToken(workspace, "user", purpose, failedTokenSha256);
+    // Another repository of a workspace of several: only one of its own sources, checked as its creator.
+    requireWorkspaceCreator(workspace);
+    const target = (await withSystemTx(pool, tx => tx.query<{ repository: string; repositoryId: string }>(
+      `SELECT source_repository AS repository, repository_id::text AS "repositoryId" FROM cloud_v2_github_sources WHERE workspace_id=$1 AND source_repository=lower($2)`,
+      [workspace.id, repository]))).rows[0];
+    if (!target) throw new HttpError(403, "github_repository_access_required", "This repository is not part of this workspace.");
+    return github.token({ organizationId: workspace.organizationId, userId: workspace.creatorUserId }, target, "user", purpose, () => authorizeSource(workspace), failedTokenSha256);
+  };
   const proxyBase = `${v2.apiUrl}${CLOUD_V2_PROXY_PREFIX}`;
   const computers = new CloudV2Computers(pool, lockPool, github.resolveRepository, github.resolveRecentRepository,
     { readyCopies: v2.readyCopies === true, ...(v2.sharedBaseSnapshot ? { sharedBaseSnapshot: v2.sharedBaseSnapshot } : {}) });
@@ -246,12 +256,13 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
   const execution: CloudExecutionContexts = new CloudExecutionContexts(pool, {
     authority: new CloudExecutionAuthority(pool, source, github.connections.store), logins: new CloudExecutionLogins(pool, keys), keys,
     apiUrl: `${v2.apiUrl}/api/v0`, proxyBase, agentConfig: cloudV2AgentConfig,
-    githubToken: async (context, check, purpose, failed) => {
+    githubToken: async (context, check, purpose, failed, repository) => {
       const target = await withSystemTx(pool, async tx => {
         await check(tx);
+        // The workspace's first repository, or the one named, which must be one of its sources.
         const row = (await tx.query<{ repository: string; repositoryId: string }>(`SELECT s.source_repository AS repository,s.repository_id::text AS "repositoryId"
           FROM cloud_v2_github_sources s JOIN cloud_v2_workspaces w ON w.id=s.workspace_id
-          WHERE w.id=$1 AND s.source_repository=lower(w.repository)`, [context.workspace_id])).rows[0];
+          WHERE w.id=$1 AND s.source_repository=lower(coalesce($2::text, w.repository))`, [context.workspace_id, repository ?? null])).rows[0];
         if (!row) throw new HttpError(409, "actor_changed", "Execution source changed");
         return row;
       });
@@ -290,6 +301,12 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
   const timing = (record: CloudV2TimingRecord) => console.log(`[cloud-v2] timing ${JSON.stringify(record)}`);
   const readySignals = new WorkerReadySignals();
 
+  /** Whether the workspace's VM is a fork of its project's ready copy, whose build ran each setup. */
+  const forkedFromCopy = async (workspaceId: string) => !!readyCopies && !!(await readyCopies.forkOf(workspaceId))?.sandboxId;
+  /** Several repositories: the project folder and each repository, the first with the binding the config already names. */
+  const repositoriesConfig = (layout: Awaited<ReturnType<typeof workerRepositories>>, first: WorkerRepositoryConfig["github"] | undefined) =>
+    layout.root && layout.repositories ? { root: layout.root, repositories: layout.repositories.map((entry, index) =>
+      index === 0 ? { ...entry, ...(first ? { github: first } : {}), ...(layout.firstSetup ?? {}) } : entry) } : {};
   const workerConfig = async (workspace: CloudV2Workspace & Partial<Pick<CloudV2WorkerSession, "loginRevision" | "executionMode">>, mode: "admission" | "continuation" = "admission",
     proof?: CloudSourceProof): Promise<ConfigFrame> => {
     if (workspace.executionMode === "active" || workspace.executionMode === undefined && await execution.active(workspace.id)) {
@@ -309,6 +326,7 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
                 throw error;
               }) : null;
             const localCommandsEnabled = v2.promptOutbox && commandsAllowed;
+            const layout = await workerRepositories(tx, workspace, { forked: await forkedFromCopy(workspace.id) });
             return { t: "config", actingUser: 1, bootstrapContextId, agents: {}, ...availability?.presentation, gitIdentity,
               gitIdentitySource: creatorUserId ? "creator" : "actor",
               loginRevision: availability?.loginRevision ?? workspace.loginRevision ?? "0",
@@ -316,7 +334,8 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
               ...(localCommandsEnabled ? { localCommands: 1 } : {}),
               workspace: { id: workspace.id, organizationId: workspace.organizationId, repository: workspace.repository,
                 checkoutPath: workspaceCheckoutPath(workspace), branch: workspace.branch, baseBranch: workspace.baseBranch,
-                github: { ...target, previousRepositories: [workspace.repository] }, ...(setup ?? {}), ...(baseCommit ? { baseCommit } : {}) } } satisfies ConfigFrame;
+                github: { ...target, previousRepositories: [workspace.repository] }, ...(setup ?? layout.firstSetup ?? {}), ...(baseCommit ? { baseCommit } : {}),
+                ...repositoriesConfig(layout, { ...target, previousRepositories: [workspace.repository] }) } } satisfies ConfigFrame;
           }, { serializable: true }));
         } catch (error) {
           if (!(error && typeof error === "object" && "code" in error && error.code === "40001") || attempt === 2) throw error;
@@ -333,7 +352,9 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
     // configuration fence also covers login, environment and tool reads.
     const [access, setup] = await Promise.all([github.workerConfiguration(workspace), github.workspaceSetup(workspace, computers)]);
     const { repositoryBinding } = access;
-    const { selectedLogins, baseCommit, environment, mcpServers } = await withSystemTx(pool, async tx => ({
+    const forked = await forkedFromCopy(workspace.id);
+    const { selectedLogins, baseCommit, environment, mcpServers, layout } = await withSystemTx(pool, async tx => ({
+      layout: await workerRepositories(tx, workspace, { forked }),
       selectedLogins: await logins.all(workspace.creatorUserId, workspace.organizationId, tx),
       baseCommit: await store.baseCommit(workspace.id, tx),
       environment: await environments.resolve(workspace, tx),
@@ -355,8 +376,9 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
         id: workspace.id, organizationId: workspace.organizationId, repository: workspace.repository,
         checkoutPath: workspaceCheckoutPath(workspace), branch: workspace.branch, baseBranch: workspace.baseBranch,
         github: repositoryBinding,
-        ...(setup ?? {}),
+        ...(setup ?? layout.firstSetup ?? {}),
         ...(baseCommit ? { baseCommit } : {}),
+        ...repositoriesConfig(layout, repositoryBinding),
       },
       agents,
       ...(environment ? { environment } : {}),

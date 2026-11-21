@@ -265,6 +265,28 @@ it("requires exact repository setup support before hello readiness or refreshed 
   }
   expect(f.deps.store.acceptWorkerHello).toHaveBeenCalledTimes(1);
 });
+it("delivers a workspace of several repositories only to a worker that holds them all, each repository as it may parse it", async () => {
+  const f = fixture(), original = await f.deps.config({} as CloudV2Workspace);
+  const repositories = [
+    { repository: original.workspace.repository, checkoutPath: original.workspace.checkoutPath, branch: "zeros/app", baseBranch: "main", baseCommit: "a".repeat(40),
+      github: { repositoryId: "42", repository: "withso/api", previousRepositories: ["withso/api"] } },
+    { repository: "withso/web", checkoutPath: "/home/user/zeros-app/web", branch: "zeros/app", baseBranch: "next", baseCommit: "b".repeat(40), setup: "make",
+      github: { repositoryId: "43", repository: "withso/web", previousRepositories: ["withso/web"] } }];
+  vi.mocked(f.deps.config).mockResolvedValue({ ...original, workspace: { ...original.workspace, root: "/home/user/zeros-app", repositories } });
+  for (const [path, input] of [["hello", { bootId: f.bootId, protocol: 2, runtimeSha256: "a".repeat(64) }], ["config", undefined]] as const) {
+    const refused = await f.request(path, input, { "x-zeros-worker-features": "workspace-setup-v1, checkout-v2, github-pr-v1" });
+    expect(refused.status).toBe(409);
+    expect(await refused.json()).toEqual({ error: { code: "cloud_repositories_runtime_required" } });
+    const accepted = await f.request(path, input, { "x-zeros-worker-features": "workspace-repositories-v1, checkout-v2" });
+    expect(accepted.status).toBe(200);
+    // Each repository carries only what this worker said it parses, as the first's fields do.
+    expect((await accepted.json()).config.workspace).toMatchObject({ root: "/home/user/zeros-app", repositories: [
+      { repository: original.workspace.repository, checkoutPath: original.workspace.checkoutPath, baseCommit: "a".repeat(40) },
+      { repository: "withso/web", checkoutPath: "/home/user/zeros-app/web", baseBranch: "next", baseCommit: "b".repeat(40) }] });
+  }
+  const delivered = await (await f.request("config", undefined, { "x-zeros-worker-features": "workspace-repositories-v1" })).json();
+  for (const entry of delivered.config.workspace.repositories) for (const field of ["github", "setup", "baseCommit"]) expect(entry).not.toHaveProperty(field);
+});
 it("acknowledges bounded environment status only for the current authenticated boot", async () => {
   const f = fixture(), status = { versionId: randomUUID(), sequence: 1, state: "ready" };
   f.deps.environmentReport = vi.fn(async () => {});

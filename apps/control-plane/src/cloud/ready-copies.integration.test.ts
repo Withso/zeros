@@ -15,6 +15,7 @@ import { CloudRepositoryLevels } from "./repository-levels.js";
 import { CloudProjects } from "./projects.js";
 import { scheduleCloudDeletion } from "./deletion.js";
 import { withSystemTx } from "../db.js";
+import { workerRepositories } from "./workspace-repositories.js";
 
 const d = process.env.TEST_DATABASE_URL ? describe : describe.skip;
 const DAY = 24 * 60 * 60_000;
@@ -823,5 +824,34 @@ d("cloud v2 ready copies", () => {
     // Anything but the project's repositories in its order is refused.
     for (const wrong of [repositories.slice(0, 2), [repositories[1]!, repositories[0]!, repositories[2]!], [...repositories.slice(0, 2), { ...repositories[2]!, repositoryId: "77" }]])
       await expect(store.createWorkspace({ id: randomUUID(), ...input, repository: wrong[0]!.repository, repositories: wrong })).rejects.toMatchObject({ code: "project_unavailable" });
+  });
+
+  it("configures a worker with each repository's checkout, identity and, unless forked from the copy, its setup from the project", async () => {
+    await liveBase();
+    const app = await project([{ repository: "withso/api", setup: "make api" }, { repository: "withso/web" }, { repository: "acme/web", setup: "make acme" }],
+      { name: "Zeros App" });
+    const store = new CloudV2Store(pool), base = (await copies.base(org))!, id = randomUUID();
+    const repositories = [["withso/api", "api"], ["withso/web", "web"], ["acme/web", "web-acme"]].map(([repository, folder]) =>
+      ({ repository: repository!, repositoryId: repositoryId(repository!), folder: folder!, branch: "zeros/app-1", baseBranch: "main", baseCommit: "c".repeat(40) }));
+    const workspace = await store.createWorkspace({ id, organizationId: org, creatorUserId: member, name: "Zeros App", repository: "withso/api", branch: "zeros/app-1",
+      baseBranch: "main", computerBuildId: base.buildId, projectId: app, checkoutFolder: "zeros-app/api", folder: "zeros-app", repositories });
+    const direct = await withSystemTx(pool, tx => workerRepositories(tx, workspace, { forked: false }));
+    expect(direct).toEqual({ root: "/home/user/zeros-app", firstSetup: { setup: "make api" }, repositories: [
+      { repository: "withso/api", checkoutPath: "/home/user/zeros-app/api", branch: "zeros/app-1", baseBranch: "main", baseCommit: "c".repeat(40), setup: "make api",
+        github: { repositoryId: repositoryId("withso/api"), repository: "withso/api", previousRepositories: ["withso/api"] } },
+      { repository: "withso/web", checkoutPath: "/home/user/zeros-app/web", branch: "zeros/app-1", baseBranch: "main", baseCommit: "c".repeat(40),
+        github: { repositoryId: repositoryId("withso/web"), repository: "withso/web", previousRepositories: ["withso/web"] } },
+      { repository: "acme/web", checkoutPath: "/home/user/zeros-app/web-acme", branch: "zeros/app-1", baseBranch: "main", baseCommit: "c".repeat(40), setup: "make acme",
+        github: { repositoryId: repositoryId("acme/web"), repository: "acme/web", previousRepositories: ["acme/web"] } }] });
+    // The copy's build already ran them: a fork gets no setup.
+    const forked = await withSystemTx(pool, tx => workerRepositories(tx, workspace, { forked: true }));
+    expect(forked.firstSetup).toEqual({});
+    for (const entry of forked.repositories!) expect(entry).not.toHaveProperty("setup");
+    // A one-repository project's workspace: no root or list, only its setup.
+    const single = await store.createWorkspace({ id: randomUUID(), organizationId: org, creatorUserId: member, name: "zeros", repository: "withso/zeros",
+      branch: "zeros/z-1", baseBranch: "main", computerBuildId: base.buildId, projectId: zeros, ...one("withso/zeros", "zeros/z-1") });
+    expect(await withSystemTx(pool, tx => workerRepositories(tx, single, { forked: false }))).toEqual({ firstSetup: { setup: "pnpm install" } });
+    // A workspace made before projects: nothing changes.
+    expect(await withSystemTx(pool, tx => workerRepositories(tx, { ...single, projectId: undefined } as never, { forked: false }))).toEqual({});
   });
 });

@@ -56,7 +56,8 @@ export type ExecutionDeps = {
   material(context: ExecutionContext, check: (tx?: Tx) => Promise<void>, transaction?: Tx): Promise<Material>;
   agentConfig(logins: Partial<Record<CloudV2Agent, CloudAgentCredentialMaterial>>, base: string,
     proxy: () => Promise<{ token: string; expiresAt: number }>): Promise<Config["agents"]>;
-  githubToken?(context: ExecutionContext, check: (tx?: Tx) => Promise<void>, purpose: "git" | "gh", failedTokenSha256?: string): Promise<{ token: string; expiresAt: number }>;
+  /** `repository`: one of the workspace's repositories (workspace-repositories-v1); the first without one. */
+  githubToken?(context: ExecutionContext, check: (tx?: Tx) => Promise<void>, purpose: "git" | "gh", failedTokenSha256?: string, repository?: string): Promise<{ token: string; expiresAt: number }>;
   mcpAuthorization?(context: ExecutionContext, check: (tx?: Tx) => Promise<void>, id: string, force: boolean): Promise<{ headers: Record<string, string>; expiresAt?: number }>;
 };
 type PromptRow = { user_message_id: string; chat_id: string; creator_user_id: string; sequence: string; epoch: string; access_epoch: string;
@@ -115,14 +116,15 @@ export class CloudExecutionContexts {
     return { context, proof, check };
   }
 
-  async githubToken(identity: ExecutionWorker, id: string | undefined, purpose: "git" | "gh", failedTokenSha256?: string) {
+  async githubToken(identity: ExecutionWorker, id: string | undefined, purpose: "git" | "gh", failedTokenSha256?: string, repository?: string) {
     const { context, check } = await this.authorizedContext(identity, id);
     if (context.kind === "client" && !context.operation || !this.deps.githubToken) throw actorChanged();
     if (context.kind === "bootstrap" && context.material === null) throw actorChanged();
     // The payer keeps a started turn running, never the sender's GitHub.
     if (senderEnded(context)) throw senderAccessEnded();
     try {
-      const result = await this.deps.githubToken(context, check, purpose, failedTokenSha256);
+      const result = repository ? await this.deps.githubToken(context, check, purpose, failedTokenSha256, repository)
+        : await this.deps.githubToken(context, check, purpose, failedTokenSha256);
       await check();
       return { ...result, expiresAt: Math.min(result.expiresAt, context.expires_at.getTime()) };
     } catch (error) { await check(); throw error; }

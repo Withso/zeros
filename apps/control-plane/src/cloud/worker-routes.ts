@@ -4,7 +4,7 @@ import { bodyLimit } from "hono/body-limit";
 import { z } from "zod";
 import { HttpError } from "../authz.js";
 import type { Tx } from "../db.js";
-import { CLOUD_V2_MAX_FRAME_BYTES, CloudV2WorkerActivitySchema, CloudV2WorkerHelloSchema, CloudV2WorkerHistorySchema, CloudV2WorkerTimingRequestSchema, CloudV2RenewRequestSchema, CloudV2TurnLeaseRequestSchema, CloudV2TerminalLeaseRequestSchema, CloudV2ClientLeaseRequestSchema, CloudV2BootstrapLeaseRequestSchema, CloudV2RetiredRequestSchema, CloudV2BootCleanRequestSchema, CloudV2AuthorityRequestSchema, ACTING_USER_FEATURE, BOOT_TIMINGS_FEATURE, MESSAGE_AUTHORITY_FEATURE, HISTORY_DIGEST_FEATURE, HISTORY_DIGEST_DELETIONS_FEATURE, HISTORY_BATCH_FEATURE, BEGIN_LEASE_FEATURE, TURN_EVENTS_FEATURE, CloudV2WorkerHistoryBatchSchema, type CloudV2TurnEvent, type CloudV2ControlFrame } from "./contract.js";
+import { CLOUD_V2_MAX_FRAME_BYTES, CloudV2WorkerActivitySchema, CloudV2WorkerHelloSchema, CloudV2WorkerHistorySchema, CloudV2WorkerTimingRequestSchema, CloudV2RenewRequestSchema, CloudV2TurnLeaseRequestSchema, CloudV2TerminalLeaseRequestSchema, CloudV2ClientLeaseRequestSchema, CloudV2BootstrapLeaseRequestSchema, CloudV2RetiredRequestSchema, CloudV2BootCleanRequestSchema, CloudV2AuthorityRequestSchema, ACTING_USER_FEATURE, BOOT_TIMINGS_FEATURE, MESSAGE_AUTHORITY_FEATURE, HISTORY_DIGEST_FEATURE, HISTORY_DIGEST_DELETIONS_FEATURE, HISTORY_BATCH_FEATURE, BEGIN_LEASE_FEATURE, TURN_EVENTS_FEATURE, WORKSPACE_REPOSITORIES_FEATURE, CloudV2WorkerHistoryBatchSchema, type CloudV2TurnEvent, type CloudV2ControlFrame } from "./contract.js";
 import type { AuthorityPull } from "./execution/authority-pull.js";
 import { emitCloudV2Timing, type CloudV2TimingRecord } from "./lifecycle.js";
 import type { CloudV2Store, CloudV2WorkerSession, CloudV2Workspace } from "./store.js";
@@ -73,7 +73,8 @@ export type CloudV2WorkerRouteDeps = {
   apiConfiguration?(workspaceId: string): Promise<ConfigFrame["api"]>;
   authorizeSource?(workspace: CloudV2Workspace): Promise<void>;
   continueSource?(workspace: CloudV2Workspace, proof?: CloudSourceProof): Promise<CloudSourceContinuation>;
-  githubToken(workspace: CloudV2Workspace, purpose?: "git" | "gh", failedTokenSha256?: string): Promise<{ token: string; expiresAt: number }>;
+  /** `repository`: one of the workspace's repositories (workspace-repositories-v1); the first without one. */
+  githubToken(workspace: CloudV2Workspace, purpose?: "git" | "gh", failedTokenSha256?: string, repository?: string): Promise<{ token: string; expiresAt: number }>;
   githubCheckout?(token: string, bootId: string, value: CloudGithubCheckout): Promise<void>;
   environmentReport?(token: string, bootId: string, value: CloudEnvironmentReport): Promise<void>;
   mcpAuthorization?(workspace: CloudV2Workspace, id: string, force: boolean): Promise<{ headers: Record<string, string>; expiresAt?: number }>;
@@ -174,10 +175,17 @@ async function configuration(deps: CloudV2WorkerRouteDeps, workspace: CloudV2Wor
       const { api, agentLogins, agentModels, localCommands: _localCommands, localCommandReason: _localCommandReason, notifyUser: _notifyUser, mcpServers, githubPullRequests, githubUserTokens, gitIdentity: _gitIdentity, gitIdentitySource: _gitIdentitySource, agentInteractions, codeReview, historyReplacement: _historyReplacement, historyDigest: _historyDigest, bootTimings: _bootTimings, environment, runtimeUpdate: _runtimeUpdate, pushSignals, ...legacy } = config;
       if (environment && !features.has("workspace-environment-v1"))
         throw new HttpError(409, "cloud_environment_runtime_required", "Update the cloud runtime before opening this workspace.");
-      const { setup, setupScript, baseCommit, github, ...workspaceConfig } = config.workspace;
+      const { setup, setupScript, baseCommit, github, root, repositories, ...workspaceConfig } = config.workspace;
       if (setupScript !== undefined && !features.has("repository-setup-v1"))
         throw new HttpError(409, "cloud_repository_setup_runtime_required", "Update the cloud runtime before opening this workspace.");
+      // A workspace of several repositories needs a worker that holds them all.
+      if (repositories && !features.has(WORKSPACE_REPOSITORIES_FEATURE))
+        throw new HttpError(409, "cloud_repositories_runtime_required", "Update the cloud runtime before opening this workspace.");
       return { ...legacy, workspace: { ...workspaceConfig,
+        ...(root && repositories ? { root, repositories: repositories.map(entry => ({ ...entry,
+          ...(features.has("github-pr-v1") ? {} : { github: undefined }),
+          ...(features.has("workspace-setup-v1") ? {} : { setup: undefined }),
+          ...(features.has("checkout-v2") ? {} : { baseCommit: undefined }) })).map(entry => Object.fromEntries(Object.entries(entry).filter(([, value]) => value !== undefined)) as typeof entry) } : {}),
         ...(setupScript !== undefined ? { setupScript } : {}),
         ...(features.has("github-pr-v1") && github ? { github } : {}),
         ...(features.has("workspace-setup-v1") && setup !== undefined ? { setup } : {}),
@@ -567,16 +575,19 @@ export function createCloudV2WorkerRoutes(deps: CloudV2WorkerRouteDeps): Hono {
   });
   app.post(`${CLOUD_V2_WORKER_API}/github-token`, async c => {
     const auth = await session(c, deps);
-    const input = await body(c, z.object({ purpose: z.enum(["git", "gh"]).optional(), failedTokenSha256: z.string().length(64).regex(/^[a-f0-9]{64}$/).optional(), contextId: z.uuid().optional() }).strict());
+    const input = await body(c, z.object({ purpose: z.enum(["git", "gh"]).optional(), failedTokenSha256: z.string().length(64).regex(/^[a-f0-9]{64}$/).optional(), contextId: z.uuid().optional(),
+      // workspace-repositories-v1: one of the workspace's repositories; the first without one.
+      repository: z.string().regex(/^[A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100}$/).optional() }).strict());
     assertLegacyMaterial(auth.workspace);
     let granted: { token: string; expiresAt: number };
     try {
-      if (auth.workspace.executionMode === "active") return c.json(await deps.execution!.githubToken(auth, input.contextId, input.purpose ?? "git", input.failedTokenSha256));
+      if (auth.workspace.executionMode === "active") return c.json(await deps.execution!.githubToken(auth, input.contextId, input.purpose ?? "git", input.failedTokenSha256, input.repository));
       if (auth.workspace.state !== "stopping") {
         if (deps.continueSource) await deps.continueSource(auth.workspace, auth.workspace);
         else await deps.authorizeSource?.(auth.workspace);
       }
-      granted = await deps.githubToken(auth.workspace, input.purpose ?? "git", ...(input.failedTokenSha256 ? [input.failedTokenSha256] : []));
+      granted = input.repository ? await deps.githubToken(auth.workspace, input.purpose ?? "git", input.failedTokenSha256, input.repository)
+        : await deps.githubToken(auth.workspace, input.purpose ?? "git", ...(input.failedTokenSha256 ? [input.failedTokenSha256] : []));
     } catch (error) {
       const failure = cloudGithubFailure(error);
       if (auth.workspace.executionMode === "active" && failure.kind !== "http") throw error;
