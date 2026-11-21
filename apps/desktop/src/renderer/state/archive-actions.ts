@@ -451,6 +451,13 @@ function commitConfirmedArchive(
   opts?: ArchiveFeedbackOptions,
 ): void {
   trackGitOp({ op: "workspace_archive", outcome: "ok" });
+  // Child workspaces an agent created from this one archive with it, including
+  // after a timed-out archive is confirmed late.
+  for (const child of peekLiveWorkspaceUnion()) {
+    if (child.parentWorkspaceId === original.id && !child.archivedAt) {
+      void archiveWorkspaceWithFeedback(child, dispatch);
+    }
+  }
   unstable_batchedUpdates(() => {
     // Resolve the destination while the live cache still contains `original`;
     // commitWorkspaceArchived removes it synchronously. React batching prevents

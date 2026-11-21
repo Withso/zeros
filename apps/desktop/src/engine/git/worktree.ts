@@ -5,6 +5,7 @@
 // (WorkspaceService { op, params }), which validates inputs and forwards.
 // This makes the engine module trivial to unit-test against a tmpdir repo.
 
+import { localWorkspaceOrigins } from "../db/local-orchestration";
 import { closeSync, constants, existsSync, fstatSync, openSync } from "node:fs";
 import {
   mkdir,
@@ -2452,9 +2453,14 @@ function stampPresence(ws: Workspace): Workspace {
 export function listWorkspaces(opts: ListWorkspacesOptions = {}): Workspace[] {
   const hidden = listWorkspaceIdsWithMeta(REPO_READD_HIDDEN_META, "1");
   const removedRepos = listRemovedRepoRoots();
+  const origins = localWorkspaceOrigins();
   return listWorkspacesFromDb(opts)
     .filter((workspace) => !removedRepos.has(workspace.repoRoot))
     .map(stampPresence)
+    .map((workspace) => {
+      const parent = origins.get(workspace.id)?.parentWorkspaceId;
+      return parent ? { ...workspace, parentWorkspaceId: parent } : workspace;
+    })
     .filter((workspace) => {
       if (!hidden.has(workspace.id)) return true;
       if (workspace.present === false) return false;

@@ -543,6 +543,9 @@ export interface ChatRowWire {
   /** "chat" | "terminal" | null. NULL is the legacy chat marker for rows written
    *  before the Conversation pane terminal-tab feature shipped. */
   kind: string | null;
+  /** Read-only `zeros local` lineage; omitted for a chat no agent started. */
+  parentChatId?: string | null;
+  rootChatId?: string | null;
 }
 
 export async function dbListChats(): Promise<ChatRowWire[]> {

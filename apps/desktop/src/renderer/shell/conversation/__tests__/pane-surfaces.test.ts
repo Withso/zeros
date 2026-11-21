@@ -74,7 +74,7 @@ describe("split pane surfaces", () => {
   it("tells a split pane's focus by the 80% dim alone, eased like every opacity change", () => {
     const pane = component(paneLayout(), "ChatPane");
     // One fill for every pane: nothing overrides the bg1 window surface.
-    expect(pane).toContain('"relative flex min-h-0 min-w-0 flex-1 flex-col bg-(--pane-bg)"');
+    expect(pane).toContain('"relative flex min-h-0 min-w-0 flex-1 flex-col bg-(--pane-bg) outline-none"');
     expect(pane).not.toContain("[--pane-bg:");
     expect(pane).not.toContain("sidebar-bg");
     expect(pane).toContain('split && "*:transition-opacity *:duration-120 *:ease-out motion-reduce:*:transition-none"');

@@ -17,6 +17,7 @@
 // explicitly through deleteChat. Cross-client reconciliation uses revision sync.
 // ──────────────────────────────────────────────────────────
 
+import { localLineageIndex } from "./local-orchestration";
 import { openZerosDb } from "./index";
 import { composerModeSchema, type ComposerMode, type ComposerModeSnapshot } from "@zeros/protocol/composer-mode";
 import { nextRev, recordTombstone, clearTombstone } from "./sync";
@@ -97,6 +98,19 @@ export interface ChatRow {
   archived: boolean;
   sourceChatId: string | null;
   kind: string | null;
+  /** Read-only lineage from `zeros local` links; never written by upserts. */
+  parentChatId?: string | null;
+  rootChatId?: string | null;
+}
+
+/** Stamp each chat with the parent and root recorded by Local orchestration. */
+export function withChatLineage(rows: readonly ChatRow[]): ChatRow[] {
+  const lineage = localLineageIndex();
+  if (lineage.size === 0) return [...rows];
+  return rows.map((row) => {
+    const link = lineage.get(row.id);
+    return link ? { ...row, parentChatId: link.parentChatId, rootChatId: link.rootChatId } : row;
+  });
 }
 
 interface ChatDbRow {

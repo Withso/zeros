@@ -466,11 +466,7 @@ export async function runAppSidebarSmoke({ page, check, harnessBase }) {
     .click();
   await page.getByRole("button", { name: "Hide sidebar", exact: true }).click();
   const toggleBox = await show.boundingBox();
-  const firstTab = await page
-    .getByRole("tablist", { name: "Chat sessions" })
-    .getByRole("tab")
-    .first()
-    .boundingBox();
+  const firstTab = await page.locator("[data-pane-root]").first().boundingBox();
   const workspaceHeader = page.getByLabel("Workspace header", { exact: true });
   await expect(workspaceHeader).toHaveCount(1);
   const reserve = page.locator("[data-window-controls-reserve]");

@@ -143,6 +143,9 @@ export interface Workspace {
    *  `withChanges` (the Dashboard); undefined otherwise. Drives the Create-PR /
    *  no-button decision on cards + the conversation header. */
   hasChanges?: boolean;
+  /** The workspace whose chat created this one through `zeros local`; null or
+   *  omitted for a workspace the user created. Read-only, never persisted here. */
+  parentWorkspaceId?: string | null;
 }
 
 export type FileChangeStatus =
