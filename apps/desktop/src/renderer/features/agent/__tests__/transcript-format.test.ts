@@ -895,3 +895,21 @@ describe("formatTranscript — handoff", () => {
     expect(formatTranscript([tool({ title: "Read" })], "handoff").count).toBe(0);
   });
 });
+
+describe("formatTranscript — handoff native questions", () => {
+  it("keeps the user's answers to a native ask-tool", () => {
+    const out = formatTranscript([
+      text("user", "pick a database"),
+      tool({
+        title: "AskUserQuestion",
+        toolKind: "other",
+        rawInput: { secret: "do-not-copy" },
+        rawOutput: { zerosQuestion: { outcome: "answered", answers: [{ prompt: "Which database?", value: "Postgres" }] } },
+      }),
+      text("agent", "Using Postgres."),
+    ], "handoff").text;
+    expect(out).toContain("- Which database? → Postgres");
+    expect(out).not.toContain("do-not-copy");
+    expect(out).not.toContain("### Tool");
+  });
+});

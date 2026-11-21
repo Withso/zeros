@@ -543,7 +543,14 @@ function handoffTurn(prompt: AgentTextMessage | null, events: AgentMessage[], ro
   const files = new Set<string>();
   for (const m of events) {
     if (m.kind === "tool") {
-      if (!m.parentToolId) for (const path of changedPaths(m)) files.add(relativize(path, root));
+      if (m.parentToolId) continue;
+      for (const path of changedPaths(m)) files.add(relativize(path, root));
+      // A native ask-tool's answers exist only on its stamp.
+      const stamp = readQuestionStamp(m.rawOutput);
+      if (stamp) {
+        parts.push(["### Question", "", `Question ${stamp.outcome}.`,
+          ...(stamp.answers ?? []).map((a) => `- ${clipField(a.prompt)} → ${clipField(a.value)}`)].join("\n"));
+      }
     } else if (m.kind === "question" || handoffProse(m)) {
       const section = safeSection(() => renderMessage(m, { children: undefined, root }, 0), "message");
       if (section) parts.push(section);
