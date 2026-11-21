@@ -305,7 +305,7 @@ export function NewProjectDialog({ organization, userKey, connections, projects,
           ) : (
             <>
               <Field label="Name">
-                <Input aria-label="Project name" placeholder="Zeros" value={name} onChange={event => setName(event.target.value)} maxLength={100} disabled={busy} />
+                <Input placeholder="Zeros" value={name} onChange={event => setName(event.target.value)} maxLength={100} disabled={busy} />
               </Field>
               {levels.length > 1 && (
                 <Field label="Who can use it">

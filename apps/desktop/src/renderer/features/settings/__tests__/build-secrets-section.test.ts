@@ -14,7 +14,10 @@ describe("build secrets", () => {
       projectId: "88888888-8888-4888-8888-888888888881", active: true, disabled: false }));
     expect(html).toContain("NPM_TOKEN");
     expect(html).toContain('aria-label="Remove NPM_TOKEN"');
-    expect(html).toMatch(/type="password"[^>]*aria-label="Build secret value"|aria-label="Build secret value"[^>]*type="password"/);
+    // The visible "Value" label names the write-only field.
+    const id = /<label for="([^"]+)"[^>]*>Value<\/label>/.exec(html)?.[1];
+    expect(id).toBeTruthy();
+    expect(html).toMatch(new RegExp(`<input[^>]*(id="${id}"[^>]*type="password"|type="password"[^>]*id="${id}")`));
     expect(html).toContain("Values shorter than 4 characters are not checked for on the disk.");
     expect(html).toContain("Given to setup scripts while the project is built. Workspaces never get them.");
     expect(html).toContain("Don&#x27;t write a value to a file");

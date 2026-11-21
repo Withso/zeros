@@ -44,10 +44,10 @@ export function BuildSecretsSection({ ownerKey, organizationId, projectId, activ
       ))}
       <div className="flex items-start gap-2">
         <Field label="Name" className="min-w-0 flex-1">
-          <Input aria-label="Build secret name" placeholder="NAME" value={name} onChange={event => setName(event.target.value)} disabled={disabled || busy} />
+          <Input placeholder="NAME" value={name} onChange={event => setName(event.target.value)} disabled={disabled || busy} />
         </Field>
         <Field label="Value" hint={BUILD_SECRET_VALUE_HINT} className="min-w-0 flex-1">
-          <Input aria-label="Build secret value" placeholder="Value" type="password" autoComplete="off" value={value}
+          <Input placeholder="Value" type="password" autoComplete="off" value={value}
             onChange={event => setValue(event.target.value)} disabled={disabled || busy} />
         </Field>
         <Button variant="secondary" className="mt-6" disabled={disabled || busy || !valid} onClick={() => void change({ set: { [name]: value } })}>Save</Button>
