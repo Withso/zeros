@@ -37,6 +37,7 @@ export function ProjectPage({
   canManageCloud,
   initialFolderId,
   onFolderChange,
+  sharing,
   onAddToCloud,
   onOpenEnvironment,
   onOpenCloudComputer,
@@ -50,6 +51,8 @@ export function ProjectPage({
   initialFolderId?: string | null;
   /** Remembers a folder chosen on the page. */
   onFolderChange?(folderId: string): void;
+  /** Two GitHub levels: who the cloud repository is for, and how to share it. */
+  sharing?: { level: "shared" | "private"; organizationName: string; canShare: boolean; onShare(): void; onAskAdmin(): void } | null;
   onAddToCloud(): void;
   onOpenEnvironment(): void;
   onOpenCloudComputer(): void;
@@ -68,7 +71,13 @@ export function ProjectPage({
   const side = (place: "mac" | "cloud", content: ReactNode) =>
     both ? <SettingsSection title={<PlaceLabel place={place} />}>{content}</SettingsSection> : content;
   const cloudPart = (part: "git" | "setup") =>
-    canManageCloud ? (
+    // A repository only this member keeps is cloned as them, without the organization's setup.
+    sharing?.level === "private" ? (
+      <SettingsGroup>
+        <SettingsRow label={both ? <PlaceLabel place="cloud" /> : part === "git" ? "Cloud branch" : "Cloud setup"}
+          hint={part === "git" ? "The repository's default branch" : "Cloned as you, without a setup command"} />
+      </SettingsGroup>
+    ) : canManageCloud ? (
       side("cloud", <CloudRepositoryPanel repository={cloud!} tab="git" onTabChange={() => {}}
         onOpenComputer={onOpenCloudComputer} surfaceActive={surfaceActive} part={part} />)
     ) : (
@@ -99,6 +108,14 @@ export function ProjectPage({
               <Button variant="secondary" size="sm" onClick={onAddToCloud}>Add to cloud</Button>
             </SettingsRow>
           ) : null}
+          {cloud && sharing && (
+            <SettingsRow label="Sharing" hint={sharing.level === "shared" ? `Shared with ${sharing.organizationName}` : "Only you"}>
+              {sharing.level === "private" && (sharing.canShare
+                ? <Button variant="secondary" size="sm" onClick={sharing.onShare}>Share with {sharing.organizationName}</Button>
+                : <Button variant="ghost" size="sm" onClick={sharing.onAskAdmin}
+                    title="Only owners and admins can share a repository with the organization.">Ask an admin to share</Button>)}
+            </SettingsRow>
+          )}
           {main && project.local.length > 1 && (
             <SettingsRow label="Folder these settings apply to" hint="Each folder keeps its own settings on this Mac.">
               <Select value={main.id} onValueChange={id => { setFolderId(id); onFolderChange?.(id); }}>

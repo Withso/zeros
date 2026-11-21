@@ -50,6 +50,7 @@ import { createDispatcherChat } from "./dispatcher-chat";
 import { useCloudCreate } from "./cloud-create";
 import { cloudCreateRequest } from "./cloud-create-request";
 import { CloudComputerRepositoryPicker } from "./cloud-computer-repository-picker";
+import { useGithubLevels } from "../../features/settings/cloud-github-levels";
 import { CloudComputerSourcePicker, computerSourceReadKey, warmComputerSources } from "./cloud-computer-source";
 import type { DispatcherBase } from "./dispatcher-source";
 import { CloudComputerV2CreateNotice } from "../../features/settings/cloud-computer-v2-create-gate";
@@ -96,6 +97,7 @@ import {
   getActiveOrganizationSnapshot,
   getOrganizationStoreGeneration,
   useActiveOrganization,
+  useTeams,
 } from "../../features/team/team-store";
 import { canCreateWorkspaceIn, localWorkShowsEverywhere, localWorkspaceOwner } from "../../features/team/organization-capabilities";
 import { CloudWorkspacePausedNotice, useOrganizationCloudPaused } from "../../features/team/cloud-workspace-pause";
@@ -244,6 +246,7 @@ function ActiveDispatcherPage({
   // choice, or the cloud when this Mac has no projects yet.
   const savedPlacement = useSavedCreatePlacement();
   const activeOrganization = useActiveOrganization();
+  const { me } = useTeams();
   const cloudFeature = isFeatureEnabled("cloud-workspaces");
   const routedPlacement: CreatePlacement | null = contextProject
     ? isCloudWorkspace(contextProject.repoRoot) ? "cloud" : "local"
@@ -620,6 +623,17 @@ function ActiveDispatcherPage({
     requestUserSettingsSection("cloud-computer");
     dispatch({ type: "SET_ACTIVE_PAGE", page: "settings" });
   };
+  // Two GitHub levels: repositories are added in GitHub settings, the organization's
+  // page for owners and admins, Personal › GitHub for members and one-person organizations.
+  const leveled = (cloud.computerRepositories ?? []).some(repository => repository.level);
+  const githubLevels = useGithubLevels(me?.user.id ?? "", activeOrganization && !activeOrganization.isPersonal ? activeOrganization.id : "",
+    active && unified && leveled && !!me);
+  const manageSection = !leveled ? "cloud-computer" as const
+    : cloud.canManageComputer && githubLevels.connections && !githubLevels.connections.solo ? "org-github" as const : "integrations" as const;
+  const openManageRepositories = () => {
+    requestUserSettingsSection(manageSection);
+    dispatch({ type: "SET_ACTIVE_PAGE", page: "settings" });
+  };
   const tray = unified ? createTrayState({
     notice: computerCreateNotice?.owner === cloud.computerOwner && cloud.computerOwner ? computerCreateNotice.message : null,
     reason: placementReason,
@@ -628,11 +642,14 @@ function ActiveDispatcherPage({
     computerReason: cloud.computerReason,
     canManageComputer: cloud.canManageComputer,
     readyCopyBuilding: cloud.computerMode && cloud.computerRepository?.readyCopy === "building",
+    ...(cloud.computerMode && cloud.computerRepository?.connection ? { connectionState: cloud.computerRepository.connection } : {}),
   }) : null;
   const trayAction = tray?.action === "cloud-computer-settings"
     ? { label: "Open Cloud Computer settings", onClick: openCloudComputerSettings, onIntent: cloud.warmComputer }
     : tray?.action === "manage-repositories"
-      ? { label: "Manage repositories", onClick: openCloudComputerSettings }
+      ? { label: "Manage repositories", onClick: openManageRepositories }
+      : tray?.action === "github-settings"
+        ? { label: "Open GitHub settings", onClick: openManageRepositories }
       : null;
 
   return (
@@ -662,6 +679,8 @@ function ActiveDispatcherPage({
               selected={cloud.computerRepository}
               rememberedId={cloud.rememberedRepositoryId}
               manage={unified}
+              organizationName={activeOrganization?.name}
+              manageSection={manageSection}
               active={active}
               open={projectMenuOpen}
               onOpenChange={setProjectMenuOpen}

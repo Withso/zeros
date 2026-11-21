@@ -23,10 +23,12 @@ const folder = (id: string, originUrl: string | null, addedAt = 1): Project =>
 let container: HTMLDivElement;
 let root: Root;
 const handlers = { onAddToCloud: vi.fn(), onOpenEnvironment: vi.fn(), onOpenCloudComputer: vi.fn() };
-function render(project: SettingsProject, options: { cloudAvailable?: boolean; canManageCloud?: boolean; initialFolderId?: string } = {}) {
+type Sharing = NonNullable<Parameters<typeof ProjectPage>[0]["sharing"]>;
+function render(project: SettingsProject, options: { cloudAvailable?: boolean; canManageCloud?: boolean; initialFolderId?: string; sharing?: Sharing } = {}) {
   act(() => root.render(createElement(ProjectPage, {
     key: options.initialFolderId, project, surfaceActive: true, cloudAvailable: options.cloudAvailable ?? true,
     canManageCloud: options.canManageCloud ?? true, initialFolderId: options.initialFolderId, ...handlers,
+    ...(options.sharing ? { sharing: options.sharing } : {}),
   })));
   return container.textContent ?? "";
 }
@@ -146,6 +148,24 @@ describe("project page", () => {
     expect(text).not.toContain("local-git:first");
     text = render(two, { initialFolderId: "gone" });
     expect(text).toContain("local-git:first");
+  });
+
+  it("shows who a cloud repository is for: shared, or only you with Share for admins and Ask an admin for members", () => {
+    const sharing = (level: "shared" | "private", canShare: boolean) =>
+      ({ level, organizationName: "Withso", canShare, onShare: vi.fn(), onAskAdmin: vi.fn() });
+    expect(render(both, { sharing: sharing("shared", true) })).toContain("Shared with Withso");
+    expect(button("Share with Withso")).toBeUndefined();
+    const admin = sharing("private", true);
+    expect(render(both, { sharing: admin })).toContain("Only you");
+    act(() => button("Share with Withso")!.click());
+    expect(admin.onShare).toHaveBeenCalledOnce();
+    // A private repository has no organization setup to edit.
+    expect(container.textContent).not.toContain("cloud-setup:");
+    const member = sharing("private", false);
+    render(both, { sharing: member, canManageCloud: false });
+    expect(button("Share with Withso")).toBeUndefined();
+    act(() => button("Ask an admin to share")!.click());
+    expect(member.onAskAdmin).toHaveBeenCalledOnce();
   });
 
   it("offers no folder choice for one clone", () => {

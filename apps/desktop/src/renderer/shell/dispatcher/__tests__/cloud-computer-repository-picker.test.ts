@@ -21,6 +21,7 @@ vi.mock("../../../shared/ui/primitives/dropdown-menu", () => ({
   DropdownMenuContent: ({ children }: { children: ReactNode }) => children,
   DropdownMenuTrigger: ({ children }: { children: ReactNode }) => children,
   DropdownMenuSeparator: () => null,
+  DropdownMenuLabel: ({ children }: { children: ReactNode }) => createElement("h4", {}, children),
   DropdownMenuItem: ({
     children,
     onSelect,
@@ -40,6 +41,19 @@ beforeEach(() => {
   state.dispatch.mockReset();
 });
 describe("Cloud Computer project picker", () => {
+  it("splits repositories into the organization's and Only you, and manages them in the GitHub page it is given", () => {
+    const shared = { id: "withso/zeros", owner: "withso", name: "zeros", defaultBranch: "main", level: "shared" as const };
+    const mine = { id: "withso/notes", owner: "withso", name: "notes", defaultBranch: null, level: "private" as const };
+    const html = renderToStaticMarkup(createElement(CloudComputerRepositoryPicker, { repositories: [mine, shared], selected: shared, active: true, open: true,
+      onOpenChange: vi.fn(), disabled: false, onSelect: vi.fn(), warm: vi.fn(), manage: true, organizationName: "Withso", manageSection: "org-github" }));
+    const menu = html.slice(html.indexOf("<h4>"));
+    const order = ["<h4>Withso</h4>", "withso/zeros", "<h4>Only you</h4>", "withso/notes", "Manage repositories"].map(part => menu.indexOf(part));
+    expect(order.every(index => index >= 0)).toBe(true);
+    expect([...order].sort((a, b) => a - b)).toEqual(order);
+    state.items.at(-1)!();
+    expect(state.navigate).toHaveBeenCalledWith("org-github");
+  });
+
   it("renders active repository names and only the Add repository Settings action", () => {
     const repository = { id: "example/project", owner: "example", name: "project", defaultBranch: "main" };
     const select = vi.fn();

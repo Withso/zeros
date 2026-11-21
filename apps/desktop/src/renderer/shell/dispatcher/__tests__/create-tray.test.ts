@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { cloudComputerV2BuildRequired, cloudComputerV2CheckFailed } from "../../../features/settings/cloud-computer-v2-create-gate";
-import { ADD_CLOUD_REPOSITORY_REASON, READY_COPY_BUILDING, createTrayState } from "../create-tray";
+import { ADD_CLOUD_REPOSITORY_REASON, GITHUB_CONNECTION_STATES, READY_COPY_BUILDING, createTrayState } from "../create-tray";
 
 const base = {
   notice: null,
@@ -16,6 +16,13 @@ describe("Create tray", () => {
     expect(createTrayState({ ...base, readyCopyBuilding: true })).toEqual({ message: READY_COPY_BUILDING, action: null });
     expect(createTrayState({ ...base, readyCopyBuilding: true, checking: true })).toBeNull();
     expect(createTrayState({ ...base, readyCopyBuilding: true, reason: "Creating a cloud workspace requires Pro." }))
+      .toEqual({ message: "Creating a cloud workspace requires Pro.", action: null });
+  });
+
+  it("names a suspended or uninstalled GitHub App with the way to fix it", () => {
+    for (const state of ["suspended", "uninstalled"] as const)
+      expect(createTrayState({ ...base, connectionState: state })).toEqual({ message: GITHUB_CONNECTION_STATES[state], action: "github-settings" });
+    expect(createTrayState({ ...base, connectionState: "suspended", reason: "Creating a cloud workspace requires Pro." }))
       .toEqual({ message: "Creating a cloud workspace requires Pro.", action: null });
   });
 
