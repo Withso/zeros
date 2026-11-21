@@ -1005,19 +1005,44 @@ describe("an inspector field scrub", () => {
         actions.push("style");
         return { result: null };
       });
+      const updateStyles = mocks.updateStyles.getMockImplementation();
+      const applyEdit = mocks.applyEdit.getMockImplementation();
       mocks.updateStyles.mockImplementation(style);
       mocks.applyEdit.mockImplementation(style);
-      await beginMixedScrub();
+      try {
+        await beginMixedScrub();
+        await enterReadbackGap();
+        await release();
+        await act(async () => {
+          fieldInput("opacity").focus();
+          window.dispatchEvent(new KeyboardEvent("keydown", { key: "z", metaKey: true, bubbles: true, cancelable: true }));
+          await Promise.resolve();
+        });
+        await leaveReadbackGap();
+        await settle();
+        await vi.waitFor(() => expect(actions).toEqual(["style", "undo"]));
+      } finally {
+        mocks.updateStyles.mockImplementation(updateStyles!);
+        mocks.applyEdit.mockImplementation(applyEdit!);
+      }
+    });
+
+    it("admits a Mixed size scrub released during the readback gap", async () => {
+      const wide = { ...other, rect: { ...other.rect, width: 150 } };
+      useDesignRuntimeStore.getState().publishNodeDetails("w", "/repo", "home.html", wide, sourceVersion);
+      await showRuntime(card, false, sourceVersion, selection);
+      const scrubW = () => container.querySelector<HTMLButtonElement>('button[aria-label="Scrub W"]')!;
+      expect(scrubW().closest("[data-design-inspector-field]")?.querySelector("input")?.placeholder).toBe("Mixed");
+      act(() => { scrubW().dispatchEvent(pointer("pointerdown", 0)); });
+      for (let tick = 1; tick <= 4; tick += 1) {
+        act(() => { window.dispatchEvent(pointer("pointermove", tick * 2)); });
+        await settle();
+      }
       await enterReadbackGap();
-      await release();
-      await act(async () => {
-        fieldInput("opacity").focus();
-        window.dispatchEvent(new KeyboardEvent("keydown", { key: "z", metaKey: true, bubbles: true, cancelable: true }));
-        await Promise.resolve();
-      });
-      await leaveReadbackGap();
+      const before = mocks.applyEdit.mock.calls.length;
+      await act(async () => { window.dispatchEvent(pointer("pointerup", 8)); });
       await settle();
-      await vi.waitFor(() => expect(actions).toEqual(["style", "undo"]));
+      await vi.waitFor(() => expect(mocks.applyEdit.mock.calls.length).toBe(before + 1));
     });
 
     it("shows a Mixed scrub that first moves during the readback gap once the layers read back", async () => {

@@ -379,6 +379,12 @@ function inspectorFieldDraftWithUnit(text: string, unit: string): string {
   return text;
 }
 
+/** A commit that ends a gesture the user saw previewed, such as a released
+ *  scrub, as opposed to an edit computed from the current details. */
+interface DesignGestureCommit {
+  gesture?: boolean;
+}
+
 interface DesignStylePreviewRequest {
   styles: Record<string, string | null>;
   perNode?: (nodeId: string) => Record<string, string | null>;
@@ -1266,7 +1272,7 @@ const InspectorStyleField = React.memo(function InspectorStyleField({
    * from its own value. */
   selection?: readonly DesignRuntimeNodeDetails[];
   originLabel?: DesignStyleOriginLabel;
-  onLayoutAction?: (action: DesignLayoutAction) => Promise<void>;
+  onLayoutAction?: (action: DesignLayoutAction, options?: DesignGestureCommit) => Promise<void>;
   onPreviewLayoutAction?: (action: DesignLayoutAction) => Promise<void>;
   disabled?: boolean;
   revalidating?: boolean;
@@ -1280,6 +1286,8 @@ const InspectorStyleField = React.memo(function InspectorStyleField({
   onCommitStyles: (
     styles: Record<string, string | null>,
     perNode?: (nodeId: string) => Record<string, string | null>,
+    intent?: "reset" | "token" | "detach",
+    options?: DesignGestureCommit,
   ) => Promise<void>;
   motionModeActive: boolean;
   motionTrackActive: boolean;
@@ -1403,11 +1411,11 @@ const InspectorStyleField = React.memo(function InspectorStyleField({
         previewLayout: (action) => void Promise.resolve(onPreviewLayoutAction?.(action)).catch(() => {}),
         cancel: () => void Promise.resolve(onCancelPreview()).catch(() => {}),
         commit: (styles, perNode) =>
-          void onCommitStyles(styles, perNode).catch((error) =>
+          void onCommitStyles(styles, perNode, undefined, { gesture: true }).catch((error) =>
             toast.error(`Couldn't update ${label.toLowerCase()}`, { description: errorMessage(error) }),
           ),
         commitLayout: (action) =>
-          void Promise.resolve(onLayoutAction?.(action)).catch((error) =>
+          void Promise.resolve(onLayoutAction?.(action, { gesture: true })).catch((error) =>
             toast.error(`Couldn't update ${label.toLowerCase()}`, { description: errorMessage(error) }),
           ),
       })
@@ -2601,13 +2609,15 @@ export const DesignInspector = React.memo(function DesignInspector({
        * a token resolves to on that layer. */
       perNode?: (nodeId: string) => Record<string, string | null>,
       intent?: "reset" | "token" | "detach",
+      options?: DesignGestureCommit,
     ): Promise<void> => {
       const context = styleEditContextRef.current;
       // Retire stale callbacks during render, before passive unmount cleanup.
       // An eyedropper or a pending animation frame cannot follow a new layer.
-      // Layers still reading back at a new generation take the save: its
-      // values are captured here and the lane prepares the rest at its turn.
-      if (currentStyleOwnerRef.current !== styleOwner || !(context.active || context.editable))
+      // A released gesture whose layers still read back at a new generation
+      // takes its save: the values it showed are captured here and the lane
+      // prepares the rest at its turn. Other edits wait for current details.
+      if (currentStyleOwnerRef.current !== styleOwner || !(context.active || (options?.gesture && context.editable)))
         return Promise.resolve();
       styleOwner.gesturePreview.clear();
       // A held state is view only, answered or not: no value reaches the source.
@@ -2904,8 +2914,12 @@ export const DesignInspector = React.memo(function DesignInspector({
   );
 
   const commitLayoutAction = useCallback(
-    (action: DesignLayoutAction): Promise<void> => {
-      if (currentStyleOwnerRef.current !== styleOwner || !styleEditContextRef.current.active)
+    (action: DesignLayoutAction, options?: DesignGestureCommit): Promise<void> => {
+      // As the style commit: a released gesture whose layers still read back
+      // takes its save, prepared from confirmed measurements at its turn.
+      const admissible = styleEditContextRef.current.active ||
+        (options?.gesture === true && styleEditContextRef.current.editable);
+      if (currentStyleOwnerRef.current !== styleOwner || !admissible)
         return Promise.resolve();
       const currentContext = styleEditContextRef.current;
       const { workspaceId, frame, stateContext } = currentContext;
