@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type FocusEvent as ReactFocusEvent, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import { MessageSquarePlus, Reply } from "lucide-react";
 import {
   Button,
@@ -261,9 +261,35 @@ export function ChatSelectionPopup({ root, active, onAddSelection, onAddReply, o
     closeReply();
   }, [closeReply]);
 
+  // The field takes focus when Reply opens it, and again when its chat comes
+  // back, unless the user had since moved on to something else in the chat.
+  const fieldOwnsFocus = useRef(false);
   useEffect(() => {
-    if (reply) field.current?.focus({ preventScroll: true });
+    if (!reply) {
+      fieldOwnsFocus.current = false;
+      return;
+    }
+    fieldOwnsFocus.current = true;
   }, [reply]);
+  useEffect(() => {
+    if (!active || !reply || !fieldOwnsFocus.current) return;
+    // The content mounts in a portal on the open render.
+    const frame = requestAnimationFrame(() => {
+      const element = field.current;
+      if (!element) return;
+      element.focus({ preventScroll: true });
+      element.setSelectionRange(element.value.length, element.value.length);
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [active, reply]);
+  const fieldBlur = (event: ReactFocusEvent<HTMLTextAreaElement>) => {
+    const to = event.relatedTarget;
+    const surface = root?.closest("[data-zeros-root]") ?? root;
+    // Leaving for the composer or another control in this chat is a choice;
+    // a press outside the chat (a tab, another pane) is a switch, and the
+    // popup's own buttons keep the reply in hand.
+    if (to instanceof Node && surface?.contains(to) && !content.current?.contains(to)) fieldOwnsFocus.current = false;
+  };
 
   // ⌘L adds the selection. Capture, so an editor's own Mod-L never runs, and
   // only while the popup shows: a field elsewhere keeps its own selection.
@@ -343,6 +369,8 @@ export function ChatSelectionPopup({ root, active, onAddSelection, onAddReply, o
                 aria-keyshortcuts="Enter Meta+Enter Control+Enter"
                 onChange={(event) => setDraft(event.target.value)}
                 onKeyDown={fieldKeyDown}
+                onFocus={() => { fieldOwnsFocus.current = true; }}
+                onBlur={fieldBlur}
                 className="max-h-60 min-h-0 flex-1 self-stretch"
               />
               <SplitButton

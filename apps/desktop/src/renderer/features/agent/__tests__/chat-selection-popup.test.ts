@@ -38,7 +38,7 @@ beforeAll(async () => {
         const filler = Array.from({ length: 30 }, (_, i) => "Filler paragraph " + i + " keeps the transcript long enough to scroll.");
         function Host({ active }) {
           const [root, setRoot] = useState(null);
-          return <div id="fixture">
+          return <div id="fixture" data-zeros-root="">
             <div ref={setRoot} id="transcript">
               <div className="select-text" id="user">What do you want to work on?</div>
               <div className="select-text" id="answer">
@@ -427,8 +427,19 @@ describe("chat selection popup", { timeout: 15_000 }, () => {
       expect(await page.evaluate(() => CSS.highlights.has("zeros-chat-reply"))).toBe(false);
       await page.evaluate(() => window.mount(true));
       await expect.poll(() => replyBox(page).isVisible()).toBe(true);
-      expect(await page.getByRole("textbox", { name: "Reply" }).inputValue()).toBe("back soon");
+      // Focus comes back with it, so typing continues the reply.
+      await expect.poll(() => page.getByRole("textbox", { name: "Reply" }).evaluate((element) => element === document.activeElement)).toBe(true);
+      await page.keyboard.type(", really");
+      expect(await page.getByRole("textbox", { name: "Reply" }).inputValue()).toBe("back soon, really");
       expect(await page.locator("[data-chat-reply-quote]").textContent()).toBe("The demo repository is left untouched.");
+
+      // Moving on to the composer first means the chat's return leaves focus there.
+      await page.locator("#composer").click();
+      await page.evaluate(() => window.mount(false));
+      await page.evaluate(() => window.mount(true));
+      await expect.poll(() => replyBox(page).isVisible()).toBe(true);
+      await frames(page);
+      expect(await page.evaluate(() => document.activeElement?.id)).toBe("composer");
     } finally { await page.close(); }
   });
 

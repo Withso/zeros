@@ -3460,6 +3460,10 @@ function AgentChatBody({
       /** The override is sent beside the composer, not from it: keep the
        *  chat's saved draft, which still matches what the composer shows. */
       keepDraft?: boolean;
+      /** Called once the message is durable (the cloud outbox holds it) or
+       *  handed to the local session. A failure after this is retried by its
+       *  owner, so the caller must not send the same text again. */
+      onCommitted?: () => void;
       /** Summary imports from prior chats, prepended as <from_previous_chat> blocks. */
       imports?: import("../../state/store").SummaryImport[];
       /** Attachments from another surface (browser capture), encoded like paste and
@@ -3605,6 +3609,7 @@ function AgentChatBody({
       const releaseSubmittedComposer = () => {
         if (composerReleased) return;
         composerReleased = true;
+        extras?.onCommitted?.();
         const unchanged = override === undefined && snapshot && isSubmittedComposerDocument(snapshot.json, serializeComposerState()?.json);
         if (unchanged) {
           clearComposerEditor(); designFrameContext.consume(submittedDesignFrame);
@@ -3825,6 +3830,7 @@ function AgentChatBody({
     // Arm the send-jump after every early return, so slash commands and refused
     // sends never leave a stale count.
     pendingSendScrollCountRef.current += 1;
+    extras?.onCommitted?.();
     submit().catch(() => {
       /* error surfaces via session.error */
     });
@@ -4469,10 +4475,15 @@ function AgentChatBody({
     }
     const message = replyMessage(quote, reply);
     // A refused send keeps the reply open with its text, so nothing is lost.
-    return handleSend(message.text, {
+    // Once committed, a later failure belongs to the outbox's own retry, and
+    // sending the text again would deliver it twice.
+    let committed = false;
+    const accepted = await handleSend(message.text, {
       keepDraft: true,
+      onCommitted: () => { committed = true; },
       ...(message.attachQuote ? { stagedAttachments: [textFileAttachment(chatAttachmentName("selection"), quote)] } : {}),
     });
+    return accepted || committed;
   };
 
   return (

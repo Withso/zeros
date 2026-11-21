@@ -82,7 +82,8 @@ export async function runChatSelectionSmoke({ page, check, harnessBase }) {
     await expect(pills).toHaveCount(2);
     check(`${placement}: Add to chat stages the reply as its own pill`, (await pills.nth(1).textContent()) === "Namaste");
 
-    await drag(page, "[data-testid=assistant-message] li:last-child", "[data-testid=assistant-message] p:last-of-type");
+    // One line of text, so only measuring the clipped quote can offer the toggle.
+    await drag(page, "[data-testid=assistant-message] li:last-child", "[data-testid=assistant-message] li:last-child");
     await page.getByRole("button", { name: "Reply", exact: true }).click();
     await field.fill("Great");
     await page.getByRole("button", { name: "More ways to reply" }).click();
@@ -98,7 +99,7 @@ export async function runChatSelectionSmoke({ page, check, harnessBase }) {
     const expanded = sent.locator("[data-reply-quote]");
     const whole = await expanded.textContent();
     check(`${placement}: the sent quote expands to every word`,
-      whole.includes("Main component inspector") && whole.includes("The demo repository is left untouched.") &&
+      whole.includes("Main component inspector") && whole.includes("like an instance.") &&
         (await box(expanded)).height > quoteBox.height,
       whole);
 

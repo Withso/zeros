@@ -206,6 +206,31 @@ describe("cloud composer readiness queue", () => {
     expect(h.clear).toHaveBeenCalledTimes(edited ? 0 : 1);
     expect(h.composer.serializeComposerState().displayText).toBe(edited ? "New text while saving" : "Next prompt while HTTPS is pending");
   });
+  it("reports a transcript reply committed even when delivery fails afterwards, and keeps the saved draft", async () => {
+    const h = harness(true, "ready");
+    h.provider.cloudPrompts.available = () => true;
+    h.provider.cloudPrompts.send.mockImplementation(async (_chat: string, _input: unknown, options: { committed?(): void }) => {
+      const row = { id: "saved", kind: "text", role: "user", text: "> quote\n\nreply" };
+      h.store.patchSession("chat", { cloudOutbox: { rows: [row], states: {} } });
+      options.committed?.();
+      throw new Error("journal write failed");
+    });
+    const committed = vi.fn();
+    const accepted = await h.composer.actions.handleSend("> quote\n\nreply", { keepDraft: true, onCommitted: committed });
+    // The outbox owns the saved row now; the reply must not be sent again.
+    expect(accepted).toBe(false);
+    expect(committed).toHaveBeenCalledOnce();
+    expect(h.dispatch).not.toHaveBeenCalledWith({ type: "CLEAR_CHAT_DRAFT", chatId: "chat" });
+    expect(h.clear).not.toHaveBeenCalled();
+  });
+  it("does not report a refused transcript reply as committed", async () => {
+    const h = harness(true, "ready");
+    h.provider.cloudPrompts.available = () => true;
+    h.provider.cloudPrompts.send.mockImplementation(async () => { throw new Error("rejected before saving"); });
+    const committed = vi.fn();
+    expect(await h.composer.actions.handleSend("> quote\n\nreply", { keepDraft: true, onCommitted: committed })).toBe(false);
+    expect(committed).not.toHaveBeenCalled();
+  });
   it("keeps a send queued through a 25-second drop, re-adopts its session and delivers once on reconnect", async () => {
     const h = harness(true, "ready");
     Object.assign(h.store.sessions.chat, { status: "ready", sessionId: "old-route" });

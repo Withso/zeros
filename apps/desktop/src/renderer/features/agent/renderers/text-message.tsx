@@ -27,7 +27,7 @@
 // to bind.
 // ──────────────────────────────────────────────────────────
 
-import { memo, useContext, useMemo, useRef, useState, type SyntheticEvent } from "react";
+import { memo, useContext, useLayoutEffect, useMemo, useRef, useState, type SyntheticEvent } from "react";
 import { AlarmClock, ChevronDown, ChevronUp, CornerDownRight } from "lucide-react";
 import type { Renderer, RendererContext } from "./types";
 import type {
@@ -296,12 +296,29 @@ export const TextMessage: Renderer<AgentTextMessage> = memo(
   },
 );
 
+/** Whether a one-line truncating element cuts its text at its current width.
+ *  Observed only while collapsed; a narrow split pane clips short text too. */
+function useClipped<T extends HTMLElement>(watch: boolean) {
+  const [element, ref] = useState<T | null>(null);
+  const [value, setValue] = useState(false);
+  useLayoutEffect(() => {
+    if (!element || !watch) return;
+    const measure = () => setValue(element.scrollWidth > element.clientWidth + 1);
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, [element, watch]);
+  return { ref, value };
+}
+
 /** A sent reply: the quoted text on one muted line, then ↳ and the reply.
  *  A quote that doesn't fit expands in place, so none of it is lost. */
 function ReplyMessageText({ quote, reply }: { quote: string; reply: string }) {
   const [expanded, setExpanded] = useState(false);
   const line = previewText(quote);
-  const folds = line !== quote || quote.length > 60;
+  const clipped = useClipped<HTMLSpanElement>(!expanded);
+  const folds = line !== quote || clipped.value || expanded;
   return (
     <div data-reply-message="" className="flex min-w-0 flex-col gap-0.5">
       <div className="flex min-w-0 items-start gap-1">
@@ -313,7 +330,7 @@ function ReplyMessageText({ quote, reply }: { quote: string; reply: string }) {
           {expanded ? `“${quote}”` : (
             <>
               <span aria-hidden="true">“</span>
-              <span className="min-w-0 truncate">{line}</span>
+              <span ref={clipped.ref} className="min-w-0 truncate">{line}</span>
               <span aria-hidden="true">”</span>
             </>
           )}
