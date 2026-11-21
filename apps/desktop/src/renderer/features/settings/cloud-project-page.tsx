@@ -9,6 +9,7 @@ import { Button, GithubIcon, Input } from "../../shared/ui";
 import { Dialog, DialogBody, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "../../shared/ui/primitives";
 import { IconButton } from "../../shared/ui/primitives/icon-button";
 import { MessageRow } from "../../shared/ui/primitives/message-row";
+import { Field } from "../../shared/ui/primitives/field";
 import { CodeTextarea } from "../../shared/ui/primitives/code-textarea";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../../shared/ui/primitives/select";
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "../../shared/ui/primitives/sheet";
@@ -303,17 +304,23 @@ export function NewProjectDialog({ organization, userKey, connections, projects,
             <MessageRow tone="neutral" flush>{`Only owners and admins of ${organization.name} create projects here.`}</MessageRow>
           ) : (
             <>
-              <Input aria-label="Project name" placeholder="Name" value={name} onChange={event => setName(event.target.value)} maxLength={100} disabled={busy} />
+              <Field label="Name">
+                <Input aria-label="Project name" placeholder="Zeros" value={name} onChange={event => setName(event.target.value)} maxLength={100} disabled={busy} />
+              </Field>
               {levels.length > 1 && (
-                <Tabs value={level} onValueChange={value => { setLevel(value as typeof level); setChosen(new Set()); }}>
-                  <TabsList aria-label="Who can use it">
-                    <TabsTrigger value="organization">{organization.name}</TabsTrigger>
-                    <TabsTrigger value="personal">Only me</TabsTrigger>
-                  </TabsList>
-                </Tabs>
+                <Field label="Who can use it">
+                  <Tabs value={level} onValueChange={value => { setLevel(value as typeof level); setChosen(new Set()); }}>
+                    <TabsList aria-label="Who can use it">
+                      <TabsTrigger value="organization">{organization.name}</TabsTrigger>
+                      <TabsTrigger value="personal">Only me</TabsTrigger>
+                    </TabsList>
+                  </Tabs>
+                </Field>
               )}
-              <ProjectRepositoryPicker userKey={userKey} organizationId={organization.id} connections={connections} level={level}
-                chosen={chosen} limit={projects.limits.repositories} active={active} onToggle={repository => setChosen(current => toggled(current, repository))} />
+              <Field label="Repositories">
+                <ProjectRepositoryPicker userKey={userKey} organizationId={organization.id} connections={connections} level={level}
+                  chosen={chosen} limit={projects.limits.repositories} active={active} onToggle={repository => setChosen(current => toggled(current, repository))} />
+              </Field>
             </>
           )}
         </DialogBody>

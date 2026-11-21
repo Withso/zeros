@@ -43,7 +43,9 @@ function useConnectionRows(userKey: string, organizationId: string, connectionId
   return useRecoveringRead(readableRepositoriesCache, key, () => readAll(organizationId, connectionId), { enabled: active, maxAgeMs: 60_000 });
 }
 
-export function ProjectRepositoryPicker({ userKey, organizationId, connections, level, chosen, onToggle, exclude, limit, active }: {
+export function ProjectRepositoryPicker({ id, userKey, organizationId, connections, level, chosen, onToggle, exclude, limit, active }: {
+  /** A Field's label names the search input. */
+  id?: string; "aria-describedby"?: string;
   userKey: string; organizationId: string; connections: CloudGithubLevelConnections | null | undefined; level: "organization" | "personal";
   /** Lowercased `owner/name`. */
   chosen: ReadonlySet<string>; onToggle(repository: string): void;
@@ -54,7 +56,7 @@ export function ProjectRepositoryPicker({ userKey, organizationId, connections, 
   const list = pickableConnections(connections, level);
   return (
     <div className="flex min-h-0 flex-col gap-2">
-      <Input aria-label="Search repositories" placeholder="Search repositories" value={query} onChange={event => setQuery(event.target.value)} />
+      <Input id={id} aria-label="Search repositories" placeholder="Search repositories" value={query} onChange={event => setQuery(event.target.value)} />
       <div className="border-border1 flex max-h-80 min-h-40 flex-col gap-3 overflow-y-auto rounded-lg border p-2" role="group" aria-label="Repositories">
         {list.length === 0 && (
           <p className="text-fg3 m-0 p-2 text-xs">
@@ -90,7 +92,8 @@ function ConnectionRepositories({ userKey, organizationId, connectionId, account
         const name = row.repository.toLowerCase(), on = chosen.has(name);
         return (
           <Checkbox key={row.id} checked={on} disabled={!on && full} onChange={() => onToggle(name)}
-            label={row.repository} hint={row.private ? "Private" : "Public"} className="px-2" />
+            // The account is the group's header: each row names its repository.
+            label={row.repository.split("/")[1] ?? row.repository} hint={row.private ? "Private" : "Public"} className="px-2" />
         );
       })}
     </section>
