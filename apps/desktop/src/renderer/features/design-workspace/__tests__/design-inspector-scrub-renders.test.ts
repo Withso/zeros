@@ -949,16 +949,75 @@ describe("an inspector field scrub", () => {
       return showRuntime({ ...card, sourceVersion: nextVersion }, false, nextVersion, { ...selection, frameVersion: nextVersion });
     };
 
-    it("saves a Mixed scrub released during the readback gap once the layers read back", async () => {
-      await beginMixedScrub();
+    it("saves a Mixed scrub released during the readback gap with what it showed", async () => {
+      const shown = await beginMixedScrub();
       await enterReadbackGap();
       const before = writes();
-      await release();
-      expect(writes()).toBe(before);
-      await leaveReadbackGap();
+      // Released where it last moved, so it saves exactly what it showed.
+      await act(async () => { window.dispatchEvent(pointer("pointerup", 8)); });
       await settle();
       await vi.waitFor(() => expect(writes()).toBe(before + 1));
-      expect(lastWrite()).toContain('"opacity"');
+      const written: Array<[string, string]> = [];
+      const collect = (value: unknown): void => {
+        if (Array.isArray(value)) value.forEach(collect);
+        else if (value && typeof value === "object") {
+          const entry = value as { nodeId?: unknown; styles?: { opacity?: unknown } };
+          if (typeof entry.nodeId === "string" && typeof entry.styles?.opacity === "string")
+            written.push([entry.nodeId, entry.styles.opacity]);
+          Object.values(value).forEach(collect);
+        }
+      };
+      collect(JSON.parse(lastWrite()));
+      expect(written).toContainEqual([shown[0], shown[1].opacity]);
+      await leaveReadbackGap();
+      await settle();
+      expect(writes()).toBe(before + 1);
+    });
+
+    it("saves a scrub that moves and releases within one readback gap once", async () => {
+      useDesignRuntimeStore.getState().publishNodeDetails("w", "/repo", "home.html", other, sourceVersion);
+      await showRuntime(card, false, sourceVersion, selection);
+      act(() => {
+        container.querySelector<HTMLButtonElement>('button[aria-label="Scrub Opacity"]')!
+          .dispatchEvent(pointer("pointerdown", 0));
+      });
+      await enterReadbackGap();
+      for (let tick = 1; tick <= 4; tick += 1) {
+        act(() => { window.dispatchEvent(pointer("pointermove", tick * 2)); });
+        await settle();
+      }
+      const before = writes();
+      await release();
+      await vi.waitFor(() => expect(writes()).toBe(before + 1));
+      await leaveReadbackGap();
+      await settle();
+      expect(writes()).toBe(before + 1);
+    });
+
+    it("admits a scrub released during the readback gap before a later Undo", async () => {
+      const actions: string[] = [];
+      const enqueueMutation = serialMutationLane();
+      mocks.applyHistory.mockImplementation(() => enqueueMutation(async () => {
+        actions.push("undo");
+        return { result: null };
+      }));
+      const style = () => enqueueMutation(async () => {
+        actions.push("style");
+        return { result: null };
+      });
+      mocks.updateStyles.mockImplementation(style);
+      mocks.applyEdit.mockImplementation(style);
+      await beginMixedScrub();
+      await enterReadbackGap();
+      await release();
+      await act(async () => {
+        fieldInput("opacity").focus();
+        window.dispatchEvent(new KeyboardEvent("keydown", { key: "z", metaKey: true, bubbles: true, cancelable: true }));
+        await Promise.resolve();
+      });
+      await leaveReadbackGap();
+      await settle();
+      await vi.waitFor(() => expect(actions).toEqual(["style", "undo"]));
     });
 
     it("shows a Mixed scrub that first moves during the readback gap once the layers read back", async () => {

@@ -467,7 +467,6 @@ export function InspectorEditField({
   const commitIntentRef = useRef(0);
   const scrubCancelRef = useRef<(() => void) | null>(null);
   const mixedScrubRef = useRef(false);
-  const pendingMixedCommitRef = useRef<{ commit: () => void; cancel: () => void } | null>(null);
   const scrubRef = useRef<{
     pointerId: number;
     originX: number;
@@ -743,12 +742,6 @@ export function InspectorEditField({
   };
   commitRef.current = commit;
   useLayoutEffect(() => {
-    const mixedCommit = pendingMixedCommitRef.current;
-    if (mixedCommit && !revalidating) {
-      pendingMixedCommitRef.current = null;
-      if (disabled) mixedCommit.cancel();
-      else mixedCommit.commit();
-    }
     const pending = pendingCommitRef.current;
     if (pending === null || revalidating) return;
     pendingCommitRef.current = null;
@@ -849,12 +842,9 @@ export function InspectorEditField({
                     mixedSteps.cancel();
                     return;
                   }
-                  const commit = () => showMixedMessage(mixedSteps.commit(sent, fine));
-                  // Released while the layers read back: save once they do,
-                  // as a typed commit waits, rather than skip the save.
-                  if (disabledRef.current && revalidatingRef.current)
-                    pendingMixedCommitRef.current = { commit, cancel: () => mixedSteps.cancel() };
-                  else commit();
+                  // Admitted now even while the layers read back, so an Undo
+                  // pressed after the release reverts this scrub.
+                  showMixedMessage(mixedSteps.commit(sent, fine));
                 },
                 onCancel: () => {
                   end();
@@ -2190,6 +2180,7 @@ export const DesignInspector = React.memo(function DesignInspector({
   });
   const styleEditContextRef = useRef({
     active: active && Boolean(elementDetails),
+    editable: !editsDisabled && Boolean(presentedElementDetails),
     pageId: activePageId ?? null,
     directoryKey: styleDirectoryKey,
     workspaceId,
@@ -2203,6 +2194,7 @@ export const DesignInspector = React.memo(function DesignInspector({
   });
   styleEditContextRef.current = {
     active: active && Boolean(elementDetails),
+    editable: !editsDisabled && Boolean(presentedElementDetails),
     pageId: activePageId ?? null,
     directoryKey: styleDirectoryKey,
     workspaceId,
@@ -2613,7 +2605,9 @@ export const DesignInspector = React.memo(function DesignInspector({
       const context = styleEditContextRef.current;
       // Retire stale callbacks during render, before passive unmount cleanup.
       // An eyedropper or a pending animation frame cannot follow a new layer.
-      if (currentStyleOwnerRef.current !== styleOwner || !context.active)
+      // Layers still reading back at a new generation take the save: its
+      // values are captured here and the lane prepares the rest at its turn.
+      if (currentStyleOwnerRef.current !== styleOwner || !(context.active || context.editable))
         return Promise.resolve();
       styleOwner.gesturePreview.clear();
       // A held state is view only, answered or not: no value reaches the source.
