@@ -13,7 +13,8 @@ SET LOCAL lock_timeout = '5s';
 -- projects) keeps /home/user/<repository>. Both are fixed at creation.
 --
 -- Down path (never run automatically): DROP TRIGGER cloud_v2_first_repository ON cloud_v2_workspaces;
---   DROP FUNCTION cloud_v2_first_repository(); DROP TABLE cloud_workspace_environment_repository_pins,
+--   DROP TRIGGER cloud_v2_first_repository_inserted ON cloud_v2_workspaces;
+--   DROP FUNCTION cloud_v2_first_repository(), cloud_v2_first_repository_inserted(); DROP TABLE cloud_workspace_environment_repository_pins,
 --   cloud_v2_github_workspace_repositories, cloud_v2_workspace_repositories;
 --   ALTER TABLE cloud_v2_workspaces DROP COLUMN checkout_path, DROP COLUMN folder;
 
@@ -51,6 +52,19 @@ FROM cloud_v2_workspaces w
 LEFT JOIN cloud_v2_github_sources s ON s.workspace_id = w.id AND s.source_repository = lower(w.repository)
 ON CONFLICT DO NOTHING;
 
+-- One statement-level insert per INSERT (bulk inserts stay one statement),
+-- and a row-level update only when a mirrored column changes.
+CREATE FUNCTION cloud_v2_first_repository_inserted() RETURNS trigger
+LANGUAGE plpgsql SECURITY INVOKER SET search_path = pg_catalog, public, pg_temp AS $$
+BEGIN
+  INSERT INTO cloud_v2_workspace_repositories (workspace_id, position, repository, branch, base_branch, base_commit, setup_status)
+  SELECT id, 0, repository, branch, base_branch, base_commit, setup_status FROM inserted_workspaces
+  ON CONFLICT (workspace_id, position) DO NOTHING;
+  RETURN NULL;
+END $$;
+CREATE TRIGGER cloud_v2_first_repository_inserted AFTER INSERT ON cloud_v2_workspaces
+  REFERENCING NEW TABLE AS inserted_workspaces FOR EACH STATEMENT EXECUTE FUNCTION cloud_v2_first_repository_inserted();
+
 CREATE FUNCTION cloud_v2_first_repository() RETURNS trigger
 LANGUAGE plpgsql SECURITY INVOKER SET search_path = pg_catalog, public, pg_temp AS $$
 BEGIN
@@ -60,8 +74,11 @@ BEGIN
     base_branch = EXCLUDED.base_branch, base_commit = EXCLUDED.base_commit, setup_status = EXCLUDED.setup_status;
   RETURN NULL;
 END $$;
-CREATE TRIGGER cloud_v2_first_repository AFTER INSERT OR UPDATE OF repository, branch, base_branch, base_commit, setup_status
-  ON cloud_v2_workspaces FOR EACH ROW EXECUTE FUNCTION cloud_v2_first_repository();
+CREATE TRIGGER cloud_v2_first_repository AFTER UPDATE OF repository, branch, base_branch, base_commit, setup_status
+  ON cloud_v2_workspaces FOR EACH ROW
+  WHEN ((OLD.repository, OLD.branch, OLD.base_branch, OLD.base_commit, OLD.setup_status)
+    IS DISTINCT FROM (NEW.repository, NEW.branch, NEW.base_branch, NEW.base_commit, NEW.setup_status))
+  EXECUTE FUNCTION cloud_v2_first_repository();
 
 -- Pull request and checkout state of a workspace's repositories after the
 -- first, keyed by (workspace, repository id); the first keeps
