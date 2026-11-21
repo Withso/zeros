@@ -468,9 +468,9 @@ export function AppSidebar({ hidden = false }: { hidden?: boolean }) {
     if (!next.delete(id)) next.add(id);
     return next;
   }), []);
-  const sections = useMemo(() => {
+  const buildSections = useCallback((expanded: ReadonlySet<string>) => {
     const args = {
-      expandedWorkspaceIds,
+      expandedWorkspaceIds: expanded,
       filter: listFilter,
       sort: preferences.sort,
       repositoryIds,
@@ -483,7 +483,8 @@ export function AppSidebar({ hidden = false }: { hidden?: boolean }) {
     return sharing
       ? buildSidebarSharingSections({ ...args, sectionOf })
       : [{ id: null, label: "", entries: buildSidebarWorkspaceEntries(args) }];
-  }, [expandedWorkspaceIds, dedupedPendingCreates, listFilter, preferences.sort, repositoryIds, hiddenPlacements, activeAtByWorkspaceId, projects, realWorkspaces, sharing, sectionOf, unifiedPlacements]);
+  }, [dedupedPendingCreates, listFilter, preferences.sort, repositoryIds, hiddenPlacements, activeAtByWorkspaceId, projects, realWorkspaces, sharing, sectionOf, unifiedPlacements]);
+  const sections = useMemo(() => buildSections(expandedWorkspaceIds), [buildSections, expandedWorkspaceIds]);
   const entries = useMemo(() => sections.flatMap(section => section.entries), [sections]);
   const listedItems = useMemo(() => sidebarWorkspaceItems(entries), [entries]);
   const navigableWorkspaces = useMemo(
@@ -492,24 +493,14 @@ export function AppSidebar({ hidden = false }: { hidden?: boolean }) {
   );
   // Repository filtering also bounds Back/Forward destinations; collapse does
   // not remove a destination from history.
-  // Child workspaces under a collapsed parent stay history destinations.
+  // Child workspaces under a collapsed parent stay history destinations,
+  // bounded by the same repository, placement and list filters.
   const historyWorkspaces = useMemo(() => {
-    const listed = new Set(navigableWorkspaces.map(workspace => workspace.id));
-    const byId = new Map(realWorkspaces.map(workspace => [workspace.id, workspace]));
-    const underListed = (workspace: Workspace) => {
-      const seen = new Set<string>();
-      let parent = workspace.parentWorkspaceId;
-      while (parent && !seen.has(parent)) {
-        if (listed.has(parent)) return true;
-        seen.add(parent);
-        parent = byId.get(parent)?.parentWorkspaceId;
-      }
-      return false;
-    };
-    const collapsed = realWorkspaces.filter(workspace =>
-      !listed.has(workspace.id) && !workspace.archivedAt && underListed(workspace));
-    return collapsed.length ? [...navigableWorkspaces, ...collapsed] : navigableWorkspaces;
-  }, [navigableWorkspaces, realWorkspaces]);
+    if (!realWorkspaces.some(workspace => workspace.parentWorkspaceId)) return navigableWorkspaces;
+    const allExpanded = new Set(realWorkspaces.map(workspace => workspace.id));
+    return sidebarWorkspaceItems(buildSections(allExpanded).flatMap(section => section.entries))
+      .flatMap(item => item.kind === "workspace" ? [item.workspace] : []);
+  }, [buildSections, navigableWorkspaces, realWorkspaces]);
   const historyScope = useMemo<SidebarHistoryScope>(() => ({
     projects,
     workspaces: historyWorkspaces,
