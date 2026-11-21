@@ -3,6 +3,7 @@
 import type { CloudV2CommandResult, CloudV2Compute } from "../boat.js";
 import { BoatForkRefusedError, BoatSnapshotExpiredError } from "../boat-client.js";
 import { CloudProviderError } from "../provider-error.js";
+import { READY_COPY_SECRET_PATHS } from "../ready-copies.js";
 
 /** Measured on Boat (PLAN.md, "Measured on Boat") or unverified, awaiting a live check. */
 export const BOAT_FAKE_ASSUMPTIONS = [
@@ -142,15 +143,14 @@ export class FakeBoat implements CloudV2Compute {
     // The ready copy scrub (READY_COPY_SCRUB_COMMAND) removes command inputs and detached job files.
     if (command.includes("rm -rf /tmp/zeros-command-input-* /tmp/zeros-job-*"))
       for (const path of [...machine.files.keys()]) if (/^\/tmp\/zeros-(?:command-input|job)-/.test(path)) machine.files.delete(path);
-    // The ready copy secret search (READY_COPY_SECRET_SEARCH_COMMAND): patterns arrive on standard input.
-    if (command.includes("grep -rlsIF -f - ")) {
-      const roots = /grep -rlsIF -f - ([^|]*) \|/.exec(command)![1]!.trim().split(" ");
+    if (command.includes("grep -lsIF -f")) {
+      // The secret search (READY_COPY_SECRET_SEARCH_COMMAND) over READY_COPY_SECRET_PATHS, skipping .git/objects.
       const patterns = (input ?? "").split("\n").filter(Boolean);
-      const hit = [...machine.files].find(([path, content]) => roots.some(root => path.startsWith(`${root}/`)) && patterns.some(pattern => content.includes(pattern)));
-      this.commands.push({ machineId: sandboxId, command, ...(input === undefined ? {} : { input }) });
+      const hit = [...machine.files].find(([path, content]) => READY_COPY_SECRET_PATHS.some(root => path.startsWith(`${root}/`))
+        && !path.includes("/.git/objects/") && patterns.some(pattern => content.includes(pattern)));
       const scripted = await this.script?.(machine, command, input);
       if (scripted) return scripted;
-      return { exitCode: 0, stdout: `${hit ? `${hit[0]}\n` : ""}zeros-search-status=${hit ? 141 : 1}\n`, timedOut: false };
+      return { exitCode: 0, stdout: `zeros-search-bytes=1024 zeros-search-limit=300\n${hit ? `${hit[0]}\n` : ""}zeros-search-status=${hit ? "141,141" : "0,0"}\n`, timedOut: false };
     }
     const scripted = await this.script?.(machine, command, input);
     if (scripted) return scripted;

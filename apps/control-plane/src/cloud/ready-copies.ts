@@ -458,17 +458,63 @@ export const READY_COPY_SCRUB_COMMAND = "rm -rf /tmp/zeros-command-input-* /tmp/
  * managers keep configuration and data a setup run with sudo may write: /etc,
  * /usr/local, /opt, /srv, /root and /var. All survive the stop and are in every
  * fork. Not searched: the package-managed system trees (/usr outside
- * /usr/local, /bin, /lib, /sbin, /boot); searching every file of the image
- * would not finish within the command's time. Binary files are skipped (-I).
- * The whole search is one quoted command, since only the last simple command
- * of a line receives Boat's standard input; a search that does not finish
- * fails the copy.
+ * /usr/local, /bin, /lib, /sbin, /boot); a setup with sudo can write there, but
+ * they hold the image itself and searching them would multiply the time for
+ * places a setup does not keep its own files.
+ *
+ * Skipped inside them: Git's object store (.git/objects), whose loose objects
+ * and packs are zlib-compressed, so a value can never appear there as plain
+ * text. Git's plain files (config, refs, logs, hooks) are searched. Binary
+ * files are skipped (-I): a value a setup writes is text.
+ *
+ * The time allowed scales with the bytes to read: measured at about 430 MB/s on
+ * 8 cores for a 3.8 GB checkout with node_modules (8.8 s), and assumed at
+ * READY_COPY_SEARCH.bytesPerSecond for fewer cores and a cold disk. The floor
+ * covers start-up on small disks; the ceiling stops a stuck search from holding
+ * this replica's copy builds for more than a few hours. Nobody waits on it: a
+ * create forks the previous generation or clones directly meanwhile. The search
+ * runs across every core with LC_ALL=C, and its patterns stay in /dev/shm
+ * (memory, outside the searched disk), removed when it ends.
  */
 export const READY_COPY_SECRET_PATHS = ["/home/user", "/tmp", "/etc", "/usr/local", "/opt", "/srv", "/root", "/var"] as const;
-export const READY_COPY_SECRET_SEARCH_COMMAND = `sudo -n bash -c ${shellQuote(
-  `timeout 540 grep -rlsIF -f - ${READY_COPY_SECRET_PATHS.join(" ")} | head -n 1; echo "zeros-search-status=\${PIPESTATUS[0]}"`)}`;
+export const READY_COPY_SEARCH = { bytesPerSecond: 64 * 1024 * 1024, floorSeconds: 300, ceilingSeconds: 3 * 60 * 60 } as const;
+export function readyCopySecretSearchScript(paths: readonly string[] = READY_COPY_SECRET_PATHS,
+  limits: { bytesPerSecond: number; floorSeconds: number; ceilingSeconds: number } = READY_COPY_SEARCH): string {
+  const roots = paths.map(shellQuote).join(" ");
+  return [
+    "set -u", "export LC_ALL=C",
+    "patterns=$(mktemp -p /dev/shm zeros-secret-patterns.XXXXXX) || exit 70",
+    "trap 'rm -f \"$patterns\"' EXIT",
+    "cat > \"$patterns\"",
+    `bytes=$(du -sxb ${roots} 2>/dev/null | awk '{ s += $1 } END { print s + 0 }')`,
+    `limit=$(( bytes / ${limits.bytesPerSecond} ))`,
+    `if [ "$limit" -lt ${limits.floorSeconds} ]; then limit=${limits.floorSeconds}; fi`,
+    `if [ "$limit" -gt ${limits.ceilingSeconds} ]; then limit=${limits.ceilingSeconds}; fi`,
+    'echo "zeros-search-bytes=$bytes zeros-search-limit=$limit"',
+    `timeout -k 10 "$limit" find ${roots} -xdev -path '*/.git/objects' -prune -o -type f -print0 2>/dev/null \\`,
+    `  | timeout -k 10 "$limit" xargs -0 -r -P "$(nproc)" -n 256 sh -c 'grep -lsIF -f "$0" -- "$@" || true' "$patterns" \\`,
+    "  | head -n 1",
+    'echo "zeros-search-status=${PIPESTATUS[0]},${PIPESTATUS[1]}"',
+  ].join("\n");
+}
+/** One quoted command, since only the last simple command of a line receives Boat's standard input. */
+export const READY_COPY_SECRET_SEARCH_COMMAND = `sudo -n bash -c ${shellQuote(readyCopySecretSearchScript())}`;
+/** Generous over the ceiling: the search's own limit ends it first. */
+export const READY_COPY_SECRET_SEARCH_SECONDS = READY_COPY_SEARCH.ceilingSeconds + 120;
 /** Values shorter than this are not searched for: they would match ordinary files. */
 export const READY_COPY_SECRET_MIN_SEARCH_LENGTH = 4;
+
+/** What the search printed: a path it found, whether it finished. find and
+ * xargs end 0 (or find 1, for an entry that vanished while it ran) when they
+ * finished; a timeout is 124 and a kill 137. Any path printed means a secret
+ * was found, whatever the status (head ends the pipeline early). */
+export function readyCopySearchResult(stdout: string): { found: string | null; complete: boolean } {
+  const lines = stdout.split("\n");
+  const status = /^zeros-search-status=(\d+),(\d+)$/.exec(lines.find(line => line.startsWith("zeros-search-status=")) ?? "");
+  const found = lines.find(line => line.length > 0 && !line.startsWith("zeros-search-")) ?? null;
+  const complete = !!status && ["0", "1"].includes(status[1]!) && status[2] === "0";
+  return { found, complete };
+}
 
 /** The location shown to an admin: a path the search printed, with any part
  * that is, or holds part of, a secret withheld. Never a value or file content. */
@@ -670,13 +716,12 @@ export class CloudV2ReadyCopyBuilder {
     const scrub = await compute.exec(machineId, READY_COPY_SCRUB_COMMAND, 120);
     if (scrub.exitCode !== 0 || scrub.timedOut) throw failure("ready_copy_scrub_failed");
     if (values.length) {
-      const found = await compute.execLong(machineId, READY_COPY_SECRET_SEARCH_COMMAND, 600, `${values.join("\n")}\n`);
-      const status = /zeros-search-status=(\d+)/.exec(found.stdout)?.[1];
-      const printed = found.stdout.replace(/\n?zeros-search-status=\d+\s*$/, "").trim();
+      const searched = await compute.execLong(machineId, READY_COPY_SECRET_SEARCH_COMMAND, READY_COPY_SECRET_SEARCH_SECONDS, `${values.join("\n")}\n`);
+      const result = readyCopySearchResult(searched.stdout);
       // Every member's fork would hold it: this generation never becomes ready.
-      if (printed) throw Object.assign(failure("ready_copy_secret_left"), { detail: readyCopySecretLocation(printed, values) });
-      // grep: 0 found, 1 none, 2 an unreadable file; 124 the time ran out.
-      if (found.exitCode !== 0 || found.timedOut || !status || !["0", "1", "2"].includes(status)) throw failure("ready_copy_secret_search_incomplete");
+      if (result.found) throw Object.assign(failure("ready_copy_secret_left"), { detail: readyCopySecretLocation(result.found, values) });
+      // Fails closed: a copy that was not searched in full never becomes ready.
+      if (searched.exitCode !== 0 || searched.timedOut || !result.complete) throw failure("ready_copy_secret_search_incomplete");
     }
     await compute.stop(machineId);
     const stoppedAt = await this.archived(machineId);
