@@ -95,6 +95,25 @@ describe("rename row", () => {
     expect(editChat).not.toHaveBeenCalled();
   });
 
+  it("saves the draft when the menu closes without a blur", () => {
+    vi.mocked(editChat).mockClear();
+    const input = mount("Old");
+    type(input, "Outside click");
+    act(() => root!.unmount());
+    root = undefined;
+    expect(vi.mocked(editChat).mock.calls[0]?.[2]).toEqual({ title: "Outside click" });
+  });
+
+  it("Escape then close saves nothing", () => {
+    vi.mocked(editChat).mockClear();
+    const input = mount("Old");
+    type(input, "Discard me");
+    key(input, "Escape");
+    act(() => root!.unmount());
+    root = undefined;
+    expect(editChat).not.toHaveBeenCalled();
+  });
+
   it("ignores an empty name", () => {
     vi.mocked(editChat).mockClear();
     const input = mount("Old");

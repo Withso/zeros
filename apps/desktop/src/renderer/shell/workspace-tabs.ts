@@ -177,15 +177,15 @@ export function workspaceTabDescription(args: {
 const SCROLL_TOLERANCE_PX = 1;
 
 /** What the sidebar and lists call a workspace: the first title one of its
- * chats received, else "Untitled". A repository folder row keeps the folder's
- * name, and a row from an engine or control plane without titles (`title`
- * absent, not null) keeps its branch name. */
+ * chats received, else the branch for an agent-created workspace, else
+ * "Untitled". A repository folder row keeps the folder's name, and a row from
+ * an engine or control plane without titles (`title` absent, not null) keeps
+ * its branch name. */
 export function workspaceLabel(workspace: Workspace): string {
   if (workspace.title === undefined || isLocalMainWorkspace(workspace))
     return branchDisplayName(workspace.branch);
   const title = workspace.title?.trim();
   if (title) return title;
-  // An agent-created workspace is named by its branch until a chat is titled.
   return workspace.parentWorkspaceId
     ? branchDisplayName(workspace.branch)
     : UNTITLED_WORKSPACE_TITLE;

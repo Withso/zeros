@@ -188,22 +188,30 @@ export function ParentMenu({ tree, folder, activeId, onSelect, onNewParent }: {
   );
 }
 
-/** The open session's name, editable at the top of its crumb's menu. */
 export function RenameRow({ chat }: { chat: ChatThread }) {
   const dispatch = useWorkspaceDispatch();
   const [draft, setDraft] = useState(chat.title);
   useEffect(() => setDraft(chat.title), [chat.title]);
   const cancelled = useRef(false);
-  const commit = () => {
-    if (cancelled.current) {
-      cancelled.current = false;
-      setDraft(chat.title);
-      return;
-    }
-    const next = draft.trim();
-    if (next && next !== chat.title) editChat(dispatch, chat.id, { title: next });
-    else setDraft(chat.title);
+  const pending = useRef<{ draft: string; title: string } | null>(null);
+  const save = (next: string, title: string) => {
+    pending.current = null;
+    const name = next.trim();
+    if (name && name !== title) editChat(dispatch, chat.id, { title: name });
   };
+  const commit = () => {
+    if (cancelled.current) cancelled.current = false;
+    else save(draft, chat.title);
+    setDraft(chat.title);
+  };
+  pending.current = cancelled.current || draft === chat.title ? null : { draft, title: chat.title };
+  // Dismissing the menu by clicking outside unmounts the field without a blur.
+  const saveOnUnmount = useRef(save);
+  saveOnUnmount.current = save;
+  useEffect(() => () => {
+    const last = pending.current;
+    if (last && !cancelled.current) saveOnUnmount.current(last.draft, last.title);
+  }, []);
   return (
     <>
       <label className="text-fg2 flex items-center gap-2 px-2 py-1.5">
@@ -236,7 +244,6 @@ export function RenameRow({ chat }: { chat: ChatThread }) {
 
 function Crumb({ chat, leading, identity, rename, children }: {
   chat: ChatThread;
-  /** The session the crumb names can be renamed from its menu. */
   rename?: boolean;
   leading?: React.ReactNode;
   /** The first crumb is the workspace's identity: placement, then name. */
