@@ -5,7 +5,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import type { Workspace, WorkspaceRepository } from "../../platform/git";
 import { loadPersistedUiState } from "../persist-ui-state";
 import { selectCurrentRepository, useWorkspaceStore } from "../store";
-import { repositoryWorkspace, workspaceRepositories } from "../workspace-repositories";
+import { combinedPullRequest, repositoryWorkspace, workspaceRepositories } from "../workspace-repositories";
 
 const key = "cloud://11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222";
 const entry = (repository: string, folder: string, extra: Partial<WorkspaceRepository> = {}): WorkspaceRepository => ({
@@ -72,5 +72,17 @@ describe("a workspace's current repository", () => {
     expect(view).toMatchObject({ id: `${key}/web`, path: `${key}/web`, repoRoot: key, baseBranch: "release", prNumber: 9, prState: "draft" });
     expect(repositoryWorkspace(workspace, web)).toBe(view);
     expect(repositoryWorkspace(workspace, workspace.repositories![0]!)).not.toBe(view);
+  });
+});
+
+describe("the one pull request mark of a workspace of several repositories", () => {
+  const pr = (prState: WorkspaceRepository["prState"], prNumber: number | null = prState ? 1 : null) =>
+    ({ prState, prNumber, prUrl: prNumber ? `https://github.com/withso/r/pull/${prNumber}` : null });
+  it("shows an open pull request first, ready over draft, then merged only when every one merged, then closed", () => {
+    expect(combinedPullRequest([pr(null), pr(null)])).toEqual({ prNumber: null, prState: null, prUrl: null });
+    expect(combinedPullRequest([pr("merged", 4), pr("draft", 5), pr("ready", 6)])).toMatchObject({ prState: "ready", prNumber: 6 });
+    expect(combinedPullRequest([pr("closed", 4), pr("draft", 5)])).toMatchObject({ prState: "draft", prNumber: 5 });
+    expect(combinedPullRequest([pr("merged", 4), pr(null), pr("merged", 7)])).toMatchObject({ prState: "merged", prNumber: 4 });
+    expect(combinedPullRequest([pr("merged", 4), pr("closed", 7)])).toMatchObject({ prState: "closed", prNumber: 7 });
   });
 });

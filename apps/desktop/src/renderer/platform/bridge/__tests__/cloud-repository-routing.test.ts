@@ -38,6 +38,22 @@ describe("requests on a workspace of several repositories", () => {
     expect(ignored.merge([{ entries: ["node_modules/x"] }])).toEqual({ entries: ["web/node_modules/x"] });
   });
 
+  it("answers for the whole workspace from every repository: has-changes is any one's, counts are summed", () => {
+    const each = (op: string) => {
+      const route = cloudRepositoryRoute(op, { workspaceId: key }, several);
+      if (route.kind !== "each") throw new Error("expected a fan-out");
+      expect(route.requests.map(request => request.params.repository)).toEqual(["withso/api", "withso/web"]);
+      return route.merge;
+    };
+    expect(each("git.hasChanges")([{ hasChanges: false }, { hasChanges: true }])).toEqual({ hasChanges: true });
+    expect(each("git.hasChanges")([{ hasChanges: false }, {}])).toEqual({ hasChanges: false });
+    expect(each("git.changeCounts")([{ all: 2, uncommitted: 1, staged: 1, unstaged: 0 }, { all: 3, uncommitted: 3, staged: 0, unstaged: 3 }]))
+      .toEqual({ all: 5, uncommitted: 4, staged: 1, unstaged: 3 });
+    expect(each("git.changeLineCounts")([{ additions: 48, deletions: 6 }, { additions: 12, deletions: 0 }])).toEqual({ additions: 60, deletions: 6 });
+    // A repository's own key reads only that repository.
+    expect(cloudRepositoryRoute("git.hasChanges", { workspaceId: `${key}/web` }, several)).toMatchObject({ kind: "one", params: { repository: "withso/web" } });
+  });
+
   it("leaves a workspace of one repository, a Local workspace and an already named request alone", () => {
     expect(cloudRepositoryRoute("git.status", { workspaceId: key }, one)).toEqual({ kind: "same" });
     expect(cloudRepositoryRoute("file.read", { workspaceId: key, path: "web/x" }, one)).toEqual({ kind: "same" });

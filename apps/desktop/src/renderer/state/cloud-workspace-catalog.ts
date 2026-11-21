@@ -2,6 +2,7 @@ import type { WorkspaceAddress } from "@zeros/protocol/local-orchestration";
 import { clearChatSenders } from "../platform/chat-senders";
 import type { Workspace, WorkspaceRepository } from "../platform/git";
 import { publishCloudRepositoryLayouts, type CloudRepositoryLayout } from "../platform/bridge/cloud-repository-routing";
+import { combinedPullRequest } from "./workspace-repositories";
 import { publishCloudGithubPrCapabilities } from "../platform/cloud-github-pr-capability";
 import {
   CloudWorkspaceDocumentSchema,
@@ -266,6 +267,8 @@ function rebuild(documentsChanged = false, { pruneRepositoryFilters = true } = {
               ? "passed"
               : "running",
       };
+      // One mark for a workspace of several repositories (combinedPullRequest states the rule).
+      if (row.repositories) Object.assign(row, combinedPullRequest(row.repositories));
       const old = prior.get(key);
       const next = old && catalogOnlyRows.has(old) === !engine && JSON.stringify(old) === JSON.stringify(row) ? old : row;
       if (!engine) catalogOnlyRows.add(next);

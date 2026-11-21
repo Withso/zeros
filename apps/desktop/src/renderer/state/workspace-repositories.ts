@@ -45,3 +45,23 @@ export function repositoryWorkspace(workspace: Workspace, repository: WorkspaceR
   }
   return view;
 }
+
+/**
+ * The one pull request mark a workspace of several repositories shows (its
+ * sidebar glyph and dashboard card), from each repository's own:
+ *   1. any open pull request wins: "ready" if any open one is ready, else "draft";
+ *   2. else, every repository that has one merged: "merged";
+ *   3. else, any closed (some merged, some closed, or all closed): "closed";
+ *   4. no repository has one: none.
+ * The number and URL are the first repository's (in order) that has that state,
+ * so opening the mark opens a pull request in that state.
+ */
+export function combinedPullRequest(repositories: readonly Pick<WorkspaceRepository, "prNumber" | "prState" | "prUrl">[]):
+  Pick<WorkspaceRepository, "prNumber" | "prState" | "prUrl"> {
+  const withPr = repositories.filter(entry => entry.prNumber != null && entry.prState);
+  const open = withPr.filter(entry => entry.prState === "ready" || entry.prState === "draft");
+  const state = open.some(entry => entry.prState === "ready") ? "ready" : open.length ? "draft"
+    : withPr.length && withPr.every(entry => entry.prState === "merged") ? "merged" : withPr.length ? "closed" : null;
+  const chosen = state ? withPr.find(entry => entry.prState === state) : undefined;
+  return chosen ? { prNumber: chosen.prNumber, prState: state, prUrl: chosen.prUrl } : { prNumber: null, prState: null, prUrl: null };
+}

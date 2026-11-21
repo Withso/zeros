@@ -856,6 +856,8 @@ describe("a workspace of several repositories", () => {
       expect.objectContaining({ repository: "withso/api", folder: "api", target: `${key}/api`, branch: "zeros/app-1", baseBranch: "main", prNumber: null }),
       { repository: "withso/web", folder: "web", target: `${key}/web`, branch: "zeros/app-1", baseBranch: "release", prNumber: 9, prState: "draft",
         prUrl: "https://github.com/withso/web/pull/9" }]);
+    // Its one mark: web's open draft, whichever repository is current.
+    expect(row).toMatchObject({ prNumber: 9, prState: "draft", prUrl: "https://github.com/withso/web/pull/9" });
     const [group] = getCloudProjects();
     // Its project, never a repository: no remote, so it joins no Mac folder.
     expect(group).toMatchObject({ id: `cloud-project:${target.organizationId}:project:${project.id}`, name: "Zeros App", originUrl: null });

@@ -81,6 +81,19 @@ export function cloudRepositoryRoute(op: string, params: Params, layout: (target
       merge: ([result]) => prefixed(result, "entries", folder),
     };
   }
+  // The workspace as a whole: has-changes is any repository's, counts are every repository's summed.
+  if (op === "git.hasChanges" || op === "git.changeCounts" || op === "git.changeLineCounts") {
+    return {
+      kind: "each",
+      requests: found.repositories.map(entry => ({ folder: entry.folder, params: { ...params, workspaceId, repository: entry.repository } })),
+      merge: results => {
+        const rows = results.map(result => result && typeof result === "object" ? result as Params : {});
+        if (op === "git.hasChanges") return { hasChanges: rows.some(row => row.hasChanges === true) };
+        const fields = op === "git.changeCounts" ? ["all", "uncommitted", "staged", "unstaged"] : ["additions", "deletions"];
+        return Object.fromEntries(fields.map(field => [field, rows.reduce((sum, row) => sum + (typeof row[field] === "number" ? row[field] as number : 0), 0)]));
+      },
+    };
+  }
   if (LISTINGS.has(op)) {
     const field = op === "file.tree" ? "files" : "entries";
     const limit = typeof params.limit === "number" ? params.limit : undefined;
