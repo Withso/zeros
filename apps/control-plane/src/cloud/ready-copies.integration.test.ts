@@ -924,6 +924,10 @@ d("cloud v2 ready copies", () => {
       { repository: "withso/web", checkoutPath: "/home/user/zeros-app/web", baseBranch: "main",
         github: { repositoryId: repositoryId("withso/web"), baseBranch: "release", headSha: "b".repeat(40), prNumber: 7, prState: "draft" } }] });
     expect(document).not.toHaveProperty("checkoutFolder");
+    expect(document!.project).toEqual({ id: app, name: "Zeros App" });
+    // A renamed project shows its new name; the workspace's folder keeps the old one.
+    await pool.query("UPDATE cloud_projects SET name='Zeros Studio' WHERE id=$1", [app]);
+    expect((await prs.documents([workspace]))[0]).toMatchObject({ project: { id: app, name: "Zeros Studio" }, root: "/home/user/zeros-app" });
     // Each repository's context has the same access rule as the first's: only its creator outside shared execution.
     for (const repository of [undefined, "withso/web"]) await expect(prs.context(id, admin, undefined, repository)).rejects.toMatchObject({ status: 404 });
   });

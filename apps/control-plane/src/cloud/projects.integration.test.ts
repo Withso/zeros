@@ -115,13 +115,19 @@ d("cloud projects and GitHub at two levels", () => {
     const workspace = randomUUID();
     await pool.query(`INSERT INTO cloud_v2_workspaces (id, org_id, creator_user_id, name, repository, branch, base_branch, state, private_owner_user_id, project_id)
       VALUES ($1,$2,$3,'api','withso/api','zeros/a','main','stopped',$3,$4)`, [workspace, org, admin, mine.id]);
+    // "Share with" is offered only where it can succeed: the admin's own, every repository reachable through an organization connection.
+    const offered = async (user: string) => Object.fromEntries((await projects.list(org, user)).map(row => [row.id, row.canShare]));
+    expect(await offered(admin)).toMatchObject({ [mine.id]: false });
     await expectCode(projects.share(org, admin, mine.id), "organization_connection_required");
     await connectOrganization(admin, 501, "withso");
+    expect(await offered(admin)).toMatchObject({ [mine.id]: true });
+    expect(await offered(member)).toMatchObject({ [theirs.id]: false });
+    expect((await projects.get(org, admin, mine.id)).canShare).toBe(true);
     await expectCode(projects.share(org, member, theirs.id), "forbidden");
     // An admin cannot see, or share, another member's project.
     await expectCode(projects.share(org, admin, theirs.id), "not_found");
     const shared = await projects.share(org, admin, mine.id);
-    expect(shared).toMatchObject({ level: "organization", ownerUserId: null, repositories: [expect.objectContaining({ connectionId: expect.any(String) })] });
+    expect(shared).toMatchObject({ level: "organization", ownerUserId: null, canShare: false, repositories: [expect.objectContaining({ connectionId: expect.any(String) })] });
     expect((await projects.list(org, other)).map(row => row.id)).toEqual([shared.id]);
     // The member's own project of the same repository is still theirs alone.
     expect((await projects.list(org, member)).map(row => row.id)).toEqual([shared.id, theirs.id]);

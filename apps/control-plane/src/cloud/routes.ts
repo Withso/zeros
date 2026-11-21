@@ -45,6 +45,8 @@ export type CloudGithubWorkspaceDocument = CloudV2Workspace & {
   /** A workspace of several repositories: the project folder, and each repository with its own checkout and pull request. */
   root?: string;
   repositories?: { repository: string; checkoutPath: string; branch: string; baseBranch: string; github?: CloudGithubRepositoryState }[];
+  /** The project the workspace was created from, by its current name. */
+  project?: { id: string; name: string };
 };
 export type CloudGithubRepositoryState = { repositoryId: string; branch: string | null; baseBranch: string; headSha: string | null;
   prNumber: number | null; prState: "draft" | "ready" | "merged" | "closed" | null; prUrl: string | null };
