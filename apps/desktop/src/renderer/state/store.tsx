@@ -318,6 +318,9 @@ export type PendingComposerAppend = {
   /** Target chat. Null = the (removed) new-agent landing — no consumer. */
   chatId: string | null;
   source: "element-picker" | "manual";
+  /** Keep focus where it is: a code reference added from an editor leaves
+   *  the next keystroke in that editor. */
+  preserveFocus?: boolean;
 };
 
 export type PendingChatSubmission = {

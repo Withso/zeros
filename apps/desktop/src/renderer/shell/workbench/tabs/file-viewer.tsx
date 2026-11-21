@@ -54,6 +54,7 @@ import { conflictMarkerNotice } from "@/renderer/features/code-review/merge-conf
 import { parseMergeConflicts } from "@zeros/protocol/merge-conflicts";
 import { MessageRow } from "@/renderer/shared/ui/primitives/message-row";
 import { SourceEditor } from "./code-editor/source-editor";
+import { AddToChatPopup } from "./add-to-chat-popup";
 import { forgetEditorDraft } from "./code-editor/draft-journal";
 import { FileEditorOptions, type FileEditorControls } from "./code-editor/file-editor-options";
 import { useFileEditorPreferences } from "./code-editor/editor-preferences";
@@ -297,6 +298,7 @@ export function FileViewer({
   reviewComments = false,
 }: FileViewerProps) {
   const viewerRef = useRef<HTMLDivElement | null>(null);
+  const [bodyElement, setBodyElement] = useState<HTMLDivElement | null>(null);
   const [mediaActionsContainer, setMediaActionsContainer] = useState<HTMLSpanElement | null>(null);
   const editorPreferences = useFileEditorPreferences();
   const [editorControls, setEditorControls] = useState<{ key: string; value: FileEditorControls | null } | null>(null);
@@ -843,6 +845,7 @@ export function FileViewer({
         {/* Body row. Optional trailing content starts below the fixed header. */}
         <div className="flex min-h-0 flex-1 overflow-hidden">
           <div
+            ref={setBodyElement}
             data-testid="files-viewer-body"
             className="min-h-0 min-w-0 flex-1 overflow-hidden"
             aria-busy={readLoading || diffLoading || undefined}
@@ -973,6 +976,7 @@ export function FileViewer({
                 />
               </div>
             )}
+            <AddToChatPopup root={bodyElement} active={active && !skillSource} path={path} />
           </div>
           {bodyTrailing}
         </div>
