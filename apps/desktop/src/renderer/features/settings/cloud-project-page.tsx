@@ -27,7 +27,7 @@ import { BuildSecretsSection } from "./build-secrets-section";
 import { message } from "./cloud-computer-store";
 import { ProjectRepositoryPicker } from "./cloud-project-repository-picker";
 import { ReadyCopySection } from "./ready-copy-section";
-import { PlaceLabel, SettingsGroup, SettingsPageSection, SettingsRow } from "./settings-ui";
+import { SettingsGroup, SettingsPageSection, SettingsRow } from "./settings-ui";
 
 /** "Withso · 2 repositories" or "Only you · 3 repositories". */
 export function cloudProjectSubtitle(project: Pick<CloudProject, "level" | "repositories">, organizationName: string): string {
