@@ -82,8 +82,11 @@ export async function runDesignComponentOptionsSmoke({ page, check }) {
   const previewsBefore = await previews();
   await drag(slider("Width"), 0.52, 0.3, { release: false, steps: 24 });
   await expect.poll(width).not.toBe("1120px");
-  const during = { ops: (await operations()) - opsBefore, previews: (await previews()) - previewsBefore,
-    names: await page.evaluate((from) => (window.__zerosHarnessWorkbenchOperations ?? []).slice(from), opsBefore) };
+  // A still captured before the drag may finish saving during it; the drag
+  // pauses background captures, so it never starts one.
+  const names = (await page.evaluate((from) => (window.__zerosHarnessWorkbenchOperations ?? []).slice(from), opsBefore))
+    .filter((name) => name !== "design.screenshot.set");
+  const during = { ops: names.length, previews: (await previews()) - previewsBefore, names };
   const frameTicks = await page.evaluate(() => { cancelAnimationFrame(window.__zerosSmokeTickHandle); return window.__zerosSmokeTicks; });
   check(
     "dragging a CSS-only number previews it in the frame with no engine request, at most once per animation frame",
