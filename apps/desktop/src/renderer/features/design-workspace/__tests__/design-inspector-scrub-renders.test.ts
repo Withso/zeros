@@ -142,7 +142,7 @@ import { TooltipProvider } from "../../../shared/ui/primitives";
 import { DesignInspector } from "../design-inspector";
 import { resetDesignRuntimeStoreForTests, useDesignRuntimeStore } from "../state/design-runtime-store";
 import { resetDesignHeldStateForTests } from "../state/design-held-state";
-import { designFrameGeometryLiveValue, publishDesignFrameGeometryLive, resetDesignLivePreviewForTests, useDesignLivePreviewStore } from "../state/design-live-preview";
+import { clearDesignLivePreview, designFrameGeometryLiveValue, publishDesignFrameGeometryLive, resetDesignLivePreviewForTests, useDesignLivePreviewStore } from "../state/design-live-preview";
 import { designWorkspaceSnapshotCache } from "../state/design-workspace-cache";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -927,6 +927,19 @@ describe("an inspector field scrub", () => {
       const replacement = await showRuntime({ ...card, sourceVersion: nextVersion }, false, nextVersion, { ...selection, frameVersion: nextVersion });
       await settle();
       await vi.waitFor(() => expect(replacement.previewStyles.mock.calls.map((call) => call[1])).toContainEqual(shown[1]));
+      await release();
+    });
+
+    it("leaves a preview that was taken out of the live preview off the new document", async () => {
+      await beginMixedScrub();
+      // A save, restore or undo elsewhere has already retired the preview.
+      act(() => {
+        clearDesignLivePreview("w", "home.html", "card");
+        clearDesignLivePreview("w", "home.html", "other");
+      });
+      const next = await nextGeneration();
+      await settle();
+      expect(next.previewStyles).not.toHaveBeenCalled();
       await release();
     });
 

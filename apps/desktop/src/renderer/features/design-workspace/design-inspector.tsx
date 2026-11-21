@@ -204,6 +204,7 @@ import { designFieldMixed, designValuesMixed } from "./design-style-mixed";
 import { dispatchDesignWorkspaceShortcut } from "./design-workspace-shortcuts";
 import {
   clearDesignLivePreview,
+  designLivePreviewValue,
   publishDesignLivePreviewStyles,
   useDesignFrameGeometryLiveValue,
   useDesignLivePreviewValue,
@@ -2472,7 +2473,18 @@ export const DesignInspector = React.memo(function DesignInspector({
         ? styleOwner.contextRef.current.elementDetails?.sourceVersion ?? null
         : null;
       const request = styleOwner.gesturePreview.replay(generation);
-      if (request) void previewSelectedStyles(request.styles, request.perNode).catch(() => {});
+      if (!request) return;
+      // Only a preview still showing returns: a save that landed, a restore
+      // or an undo past it has already taken it out of the live preview.
+      const context = styleOwner.contextRef.current;
+      const showing = context.styleNodeIds.some((nodeId) =>
+        Object.keys(request.perNode ? request.perNode(nodeId) : request.styles).some((property) =>
+          designLivePreviewValue(workspaceId, styleFrameFile, nodeId, property) !== undefined));
+      if (!showing) {
+        styleOwner.gesturePreview.clear();
+        return;
+      }
+      void previewSelectedStyles(request.styles, request.perNode).catch(() => {});
     };
     replayStylePreviewRef.current = replay;
     replay();
