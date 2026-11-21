@@ -120,3 +120,33 @@ describe("review bridge exact-workspace contract", () => {
     expect(request).not.toHaveBeenCalled();
   });
 });
+
+describe("review comments on one repository of a workspace of several", () => {
+  it("keep each repository's threads apart: the project-folder path goes out, the repository's path comes back", async () => {
+    const { publishCloudRepositoryLayouts } = await import("../cloud-repository-routing");
+    const target = { organizationId: "11111111-1111-4111-8111-111111111111", workspaceId: "22222222-2222-4222-8222-222222222222" };
+    const key = cloudWorkspaceKey(target), web = `${key}/web`, api = `${key}/api`;
+    publishCloudRepositoryLayouts(new Map([[key, { repositories: [{ repository: "withso/api", folder: "api" }, { repository: "withso/web", folder: "web" }] }]]));
+    const stored = (path: string, id: string) => ({ ...thread, id, workspaceId: key, anchor: { ...thread.anchor, path } });
+    const requestConnected = vi.fn(async (message: { op: string; params: { anchor?: { path: string } } }) => ({ type: "WORKSPACE_RESPONSE", op: message.op,
+      result: message.op === "codeReview.list" ? { workspaceId: key, threads: [stored("api/src/a.ts", "t-api"), stored("web/src/a.ts", "t-web")] }
+        : stored(message.params.anchor?.path ?? "web/src/a.ts", "t-web") }));
+    setActiveBridge({ request: vi.fn(), requestConnected, supportsEngineCapability: () => true, executionIdentity: { kind: "local", sidecar: "active" } } as unknown as RuntimeClient);
+    const listed = await listCodeReviewThreads({ cwd: key, workspaceId: web });
+    expect(listed.threads.map(row => [row.id, row.anchor.path])).toEqual([["t-web", "src/a.ts"]]);
+    expect((await listCodeReviewThreads({ cwd: key, workspaceId: api })).threads.map(row => row.id)).toEqual(["t-api"]);
+    const created = await createCodeReviewThread({ cwd: key, workspaceId: web, anchor: { ...thread.anchor, path: "src/a.ts" }, body: "Comment" });
+    expect(created.anchor.path).toBe("src/a.ts");
+    await listCodeReviewThreads({ cwd: key, workspaceId: web, path: "src/a.ts" });
+    expect(requestConnected.mock.calls.map(([message]) => message.params)).toEqual([
+      { workspaceId: key }, { workspaceId: key },
+      { workspaceId: key, anchor: { ...thread.anchor, path: "web/src/a.ts" }, body: "Comment" },
+      { workspaceId: key, path: "web/src/a.ts" },
+    ]);
+    // A thread from another repository is never answered as this one's.
+    requestConnected.mockImplementationOnce(async message => ({ type: "WORKSPACE_RESPONSE", op: message.op, result: stored("api/src/a.ts", "t-api") }));
+    await expect(replyCodeReviewThread({ cwd: key, workspaceId: web, threadId: "t-api", body: "Reply" })).rejects.toThrow(/another repository/);
+    await expect(listCodeReviewThreads({ cwd: key, workspaceId: `${key}/docs` })).rejects.toThrow(/not one of the workspace's repositories/);
+    publishCloudRepositoryLayouts(new Map());
+  });
+});
