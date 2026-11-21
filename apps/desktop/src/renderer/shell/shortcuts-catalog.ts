@@ -110,7 +110,7 @@ export const SHORTCUT_CATEGORIES: ShortcutCategory[] = [
       {
         id: "toggle-theme",
         label: "Toggle theme",
-        keys: ["⌥⌘T"],
+        keys: ["⇧⌥⌘T"],
         keywords: ["dark", "light", "appearance", "mode"],
       },
       {
@@ -153,6 +153,12 @@ export const SHORTCUT_CATEGORIES: ShortcutCategory[] = [
         label: "New terminal agent",
         keys: ["⇧⌘T"],
         keywords: ["tab", "shell"],
+      },
+      {
+        id: "add-child-session",
+        label: "Add child session",
+        keys: ["⌥⌘T"],
+        keywords: ["session", "subagent", "branch", "handoff", "parent"],
       },
       {
         id: "previous-chat",

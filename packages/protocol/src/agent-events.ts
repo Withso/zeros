@@ -141,6 +141,9 @@ export type ToolKind =
   // "Turn stopped · BUDGET" card right above the footer; it replaces a footer
   // status pill (the card already names the ending).
   | "budget_stop"
+  // Zeros-authored record of a user-applied agent/model switch: one static
+  // "Switched to <model>" row that stays visible wherever it lands.
+  | "harness_switch"
   | "other";
 
 export type ToolCallStatus = "pending" | "in_progress" | "completed" | "failed";

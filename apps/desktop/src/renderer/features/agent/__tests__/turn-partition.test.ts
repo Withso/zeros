@@ -430,3 +430,30 @@ describe("Claude usage status in the working feed", () => {
       .toEqual([{ command: "pwd" }, "Claude is nearing its usage limit.", { command: "ls" }, { command: "git status" }]);
   });
 });
+
+describe("creation cards", () => {
+  const local = (id: string, command: string, status = "completed"): AgentMessage =>
+    ({ kind: "tool", id, toolCallId: id, title: "Bash", toolKind: "execute", status,
+      createdAt: 1, updatedAt: 2, rawInput: { command } }) as unknown as AgentMessage;
+
+  it("keeps created chats and workspaces as their own segments between working runs", () => {
+    const sequence = partitionTurnSequence([
+      tool("a"),
+      local("chat", "zeros local chat create --message Test"),
+      tool("b"),
+      local("ws", "zeros local workspace create --name next"),
+      tool("c"),
+      local("list", "zeros local chat list"),
+    ]);
+    expect(sequence.map((segment) => [segment.events.map((event) => event.id), !!segment.standalone]))
+      .toEqual([[["a"], false], [["chat"], true], [["b"], false], [["ws"], true], [["c", "list"], false]]);
+  });
+
+  it("folds a failed creation into the working run", () => {
+    const sequence = partitionTurnSequence([
+      tool("a"),
+      local("chat", "zeros local chat create --message Test", "failed"),
+    ]);
+    expect(sequence.map((segment) => segment.events.map((event) => event.id))).toEqual([["a", "chat"]]);
+  });
+});

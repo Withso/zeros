@@ -1724,6 +1724,7 @@ function reducer(state: WorkspaceState, action: Action): WorkspaceState {
       if (
         action.tab.type === "changes" ||
         action.tab.type === "review" ||
+        action.tab.type === "agents" ||
         action.tab.type === "design"
       ) {
         const existing = cur.tabs.find((t) => t.type === action.tab.type);
@@ -1748,6 +1749,7 @@ function reducer(state: WorkspaceState, action: Action): WorkspaceState {
       const tab =
         action.tab.type === "changes" ||
         action.tab.type === "review" ||
+        action.tab.type === "agents" ||
         action.tab.type === "design"
           ? { ...action.tab, pinned: true }
           : action.tab.pinned || action.tab.fixed
@@ -1791,6 +1793,7 @@ function reducer(state: WorkspaceState, action: Action): WorkspaceState {
       if (
         target.type === "changes" ||
         target.type === "review" ||
+        target.type === "agents" ||
         target.type === "design"
       )
         return state;
@@ -2019,6 +2022,7 @@ function reducer(state: WorkspaceState, action: Action): WorkspaceState {
         pinned:
           target.type === "changes" ||
           target.type === "review" ||
+          target.type === "agents" ||
           target.type === "design",
         // Permanence is born with the slice (defaultTabs/normalizeWorkbenchTabs):
         // updates can neither demote the fixed Files home nor mint a new one.

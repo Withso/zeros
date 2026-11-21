@@ -29,6 +29,7 @@ import {
   bridgeChatDelete,
   bridgeChatClearProviderIdentity,
   bridgeChatBulkUpsert,
+  bridgeChatCreateChild,
   bridgeMessageWindow,
   bridgeMessageWindowSnapshot,
   bridgeMessageWindowOlder,
@@ -104,6 +105,27 @@ export async function persistAuthenticationPrompt(
   })) as { imported?: number };
   if (result.imported !== 1)
     throw new Error("Could not save the message for retry.");
+}
+
+/** Persist one Zeros-authored transcript row (a user-applied agent switch)
+ * through the engine's message upsert. */
+export async function persistTranscriptRow(
+  bridge: import("../../platform/bridge/ws-client").RuntimeClient,
+  chatId: string,
+  message: import("./use-agent-session").AgentMessage,
+): Promise<void> {
+  const result = (await workspaceOp(bridge, "messages.import", {
+    chatId,
+    messages: [
+      {
+        msgId: message.id,
+        kind: message.kind,
+        payload: JSON.stringify(message),
+        createdAt: message.createdAt,
+      },
+    ],
+  })) as { imported?: number };
+  if (result.imported !== 1) throw new Error("Could not save the switch.");
 }
 
 export async function windowMessages(
@@ -570,6 +592,14 @@ export async function dbClearChatProviderIdentity(input: {
     requireBridge("clear a stale chat provider binding"),
     input,
   );
+}
+
+/** Local only: persist `chat` linked as a child of `parentChatId`. */
+export async function dbCreateChildChat(
+  chat: ChatRowWire,
+  parentChatId: string,
+): Promise<{ parentChatId: string; rootChatId: string }> {
+  return bridgeChatCreateChild(requireBridge("add a child session"), chat, parentChatId);
 }
 
 export async function dbReplaceAllChats(chats: ChatRowWire[]): Promise<void> {

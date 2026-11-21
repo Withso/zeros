@@ -7,6 +7,7 @@
 import { describe, it, expect } from "vitest";
 
 import {
+  formatHandoffTranscript,
   formatTranscript,
   TRANSCRIPT_PAYLOAD_LINES,
   TRANSCRIPT_PAYLOAD_MAX,
@@ -829,5 +830,86 @@ describe("formatTranscript — header", () => {
     expect(out).toContain("full transcript");
     expect(out).not.toContain("undefined");
     expect(out).not.toContain("NaN");
+  });
+});
+
+describe("formatTranscript — handoff", () => {
+  const conversation = (): AgentMessage[] => [
+    text("user", "fix the parser"),
+    text("thought", "the tokenizer drops escapes"),
+    text("agent", "Reading the tokenizer first."),
+    tool({ title: "Run pnpm test", toolKind: "execute", rawInput: { command: "pnpm test" }, rawOutput: "FAIL tokenizer.test.ts" }),
+    tool({ title: "Search escapes", toolKind: "search", rawInput: { pattern: "escape" } }),
+    tool({ title: "Edit", toolKind: "edit", content: [{ type: "diff", path: "/repo/src/tokenizer.ts", oldText: "a", newText: "b" }] }),
+    tool({ title: "Edit", toolKind: "edit", locations: [{ path: "/repo/src/tokenizer.ts" }] }),
+    tool({ title: "Delete", toolKind: "delete", locations: [{ path: "/repo/src/old.ts" }] }),
+    tool({ title: "Edit", toolKind: "edit", status: "failed", locations: [{ path: "/repo/src/never.ts" }] }),
+    tool({ title: "Read", toolKind: "read", locations: [{ path: "/repo/src/read-only.ts" }] }),
+    text("agent", "Fixed: escapes survive tokenizing."),
+    text("user", "thanks"),
+    text("agent", "You're welcome."),
+  ];
+
+  it("keeps every prompt, thinking and in-between message and the answer", () => {
+    const { text: out, count } = formatTranscript(conversation(), "handoff", { folder: "/repo" });
+    expect(count).toBe(2);
+    const order = [
+      "fix the parser",
+      "the tokenizer drops escapes",
+      "Reading the tokenizer first.",
+      "Fixed: escapes survive tokenizing.",
+      "### Files changed",
+      "thanks",
+      "You're welcome.",
+    ].map((needle) => out.indexOf(needle));
+    expect(order.every((i) => i > -1)).toBe(true);
+    expect(order).toEqual([...order].sort((a, b) => a - b));
+    expect(out).toContain("handoff transcript");
+  });
+
+  it("drops tool calls, commands, searches and output for one deduplicated file list per turn", () => {
+    const out = formatTranscript(conversation(), "handoff", { folder: "/repo" }).text;
+    expect(out).not.toContain("### Tool");
+    expect(out).not.toContain("pnpm test");
+    expect(out).not.toContain("FAIL tokenizer.test.ts");
+    expect(out).not.toContain("escape\"");
+    expect(out).not.toContain("never.ts");
+    expect(out).not.toContain("read-only.ts");
+    expect(out.match(/### Files changed/g)).toHaveLength(1);
+    expect(out.match(/- src\/tokenizer\.ts/g)).toHaveLength(1);
+    expect(out).toContain("- src/old.ts");
+  });
+
+  it("is exported as the reusable builder and leaves full and concise unchanged", () => {
+    const messages = conversation();
+    expect(formatHandoffTranscript(messages, { folder: "/repo" })).toEqual(formatTranscript(messages, "handoff", { folder: "/repo" }));
+    const full = formatTranscript(messages, "full").text;
+    const concise = formatTranscript(messages, "concise").text;
+    expect(full).toContain("### Tool");
+    expect(full).not.toContain("### Files changed");
+    expect(concise).not.toContain("Reading the tokenizer first.");
+    expect(concise).not.toContain("### Files changed");
+  });
+
+  it("omits a turn with nothing to hand off", () => {
+    expect(formatTranscript([tool({ title: "Read" })], "handoff").count).toBe(0);
+  });
+});
+
+describe("formatTranscript — handoff native questions", () => {
+  it("keeps the user's answers to a native ask-tool", () => {
+    const out = formatTranscript([
+      text("user", "pick a database"),
+      tool({
+        title: "AskUserQuestion",
+        toolKind: "other",
+        rawInput: { secret: "do-not-copy" },
+        rawOutput: { zerosQuestion: { outcome: "answered", answers: [{ prompt: "Which database?", value: "Postgres" }] } },
+      }),
+      text("agent", "Using Postgres."),
+    ], "handoff").text;
+    expect(out).toContain("- Which database? → Postgres");
+    expect(out).not.toContain("do-not-copy");
+    expect(out).not.toContain("### Tool");
   });
 });

@@ -80,7 +80,7 @@ export function isProviderWorkEvent(event: AgentMessage): boolean {
   const invoked = event.kind === "tool" &&
     (event.rawInput != null || event.status === "pending" || event.status === "in_progress");
   return invoked && !isLegacyEnvironmentConnection(event) && !isRoutineNativeSleep(event) && ![
-    "model_switch", "mode_switch", "background_task", "compaction", "budget_stop",
+    "model_switch", "mode_switch", "background_task", "compaction", "budget_stop", "harness_switch",
   ].includes(event.toolKind ?? "");
 }
 
