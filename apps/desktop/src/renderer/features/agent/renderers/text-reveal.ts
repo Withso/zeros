@@ -30,7 +30,9 @@ export const UNDECIDED_STEP_LINES = 3;
 const ATOMIC = "pre, .zeros-md-codeblock, img, svg, hr, video, iframe, .katex-display, [data-reveal-unit]";
 const CODE = "pre, .zeros-md-codeblock";
 const TEXT_BLOCK = "p, h1, h2, h3, h4, h5, h6, li, dt, dd";
-const NESTED = `${TEXT_BLOCK}, ${ATOMIC}, tr, blockquote`;
+/** Block children that split a text block into several units. Inline media
+ * (an image with its caption) stays in its paragraph's unit. */
+const NESTED = `${TEXT_BLOCK}, pre, .zeros-md-codeblock, hr, video, iframe, .katex-display, [data-reveal-unit], tr, blockquote`;
 export const INTERACTIVE_SELECTOR = "a[href], button, input, select, textarea, summary, [tabindex]";
 
 export type UnitKind = "text" | "code" | "block" | "row";
@@ -55,14 +57,57 @@ export function revealUnitElements(root: Element): UnitElement[] {
   return units;
 }
 
+/** Code fences in one pass (CommonMark): an opener is 3+ backticks or
+ * tildes indented at most 3 spaces; its closer uses the same marker, at
+ * least as long, with nothing after it but spaces. Whether a fence is still
+ * open at the end, and whether the last non-blank line closed one. */
+function fenceState(source: string): { open: boolean; closedLast: boolean } {
+  let open: { marker: string; length: number } | null = null;
+  let closedLast = false;
+  for (let start = 0; start <= source.length;) {
+    let end = source.indexOf("\n", start);
+    if (end < 0) end = source.length;
+    const line = source.slice(start, end);
+    if (line.trim()) closedLast = false;
+    const fence = /^ {0,3}(`{3,}|~{3,})/.exec(line);
+    if (fence) {
+      const run = fence[1];
+      const rest = line.slice(fence[0].length);
+      if (!open) {
+        // A backtick fence's info string cannot hold a backtick.
+        if (run[0] === "~" || !rest.includes("`")) open = { marker: run[0], length: run.length };
+      } else if (run[0] === open.marker && run.length >= open.length && !rest.trim()) {
+        open = null;
+        closedLast = true;
+      }
+    }
+    start = end + 1;
+  }
+  return { open: open !== null, closedLast };
+}
+
+/** Whether the trailing whitespace holds a blank line (two line breaks with
+ * only spaces or tabs between them). One backward scan. */
+function endsWithBlankLine(source: string): boolean {
+  let from = source.length;
+  while (from > 0 && /\s/.test(source[from - 1])) from--;
+  let afterBreak = false;
+  for (let index = from; index < source.length; index++) {
+    const char = source[index];
+    if (char === "\n") {
+      if (afterBreak) return true;
+      afterBreak = true;
+    } else if (char !== " " && char !== "\t" && char !== "\r") afterBreak = false;
+  }
+  return false;
+}
+
 /** Whether the source's last block is finished: closed by a blank line, or a
  * code fence just closed. Any other last unit may still grow. */
 export function tailClosed(source: string): boolean {
-  const fences = source.match(/^ {0,3}(```|~~~)/gm)?.length ?? 0;
-  if (fences % 2 === 1) return false;
-  if (/\n[ \t]*\n\s*$/.test(source)) return true;
-  const lastLine = source.trimEnd().slice(source.trimEnd().lastIndexOf("\n") + 1);
-  return fences > 0 && /^ {0,3}(```|~~~)\s*$/.test(lastLine);
+  const fences = fenceState(source);
+  if (fences.open) return false;
+  return endsWithBlankLine(source) || fences.closedLast;
 }
 
 /** Inline openers that, unclosed at the tail, render literally and later
@@ -82,8 +127,7 @@ export interface TailHold {
 export function tailHold(source: string): TailHold {
   const lastLine = source.slice(source.lastIndexOf("\n") + 1);
   const firstLine = source.slice(source.lastIndexOf("\n\n") + 2).split("\n")[0];
-  const fences = source.match(/^ {0,3}(```|~~~)/gm)?.length ?? 0;
-  const block = fences % 2 === 1 || /^ {0,3}\|/.test(firstLine) || /^ {0,3}\|/.test(lastLine) ||
+  const block = fenceState(source).open || /^ {0,3}\|/.test(firstLine) || /^ {0,3}\|/.test(lastLine) ||
     /^ {0,3}(#{1,6}|>|[-*+]|\d+[.)])?\s*$/.test(lastLine) && lastLine.trim().length > 0 ||
     /^ {0,3}(=+|-+)\s*$/.test(lastLine);
   const paragraph = source.slice(source.lastIndexOf("\n\n") + 1);
@@ -106,7 +150,10 @@ function unclosedAt(text: string, marker: string): number {
     const open = text.lastIndexOf("[");
     if (open < 0) return -1;
     const rest = text.slice(open);
-    return /^\[[^\]]*\](\([^)]*\))?(?!\()/.test(rest) && !/\]\([^)]*$/.test(rest) ? -1 : open;
+    // A target still being typed: the last "](" has no ")" after it.
+    const target = rest.lastIndexOf("](");
+    const unfinishedTarget = target >= 0 && rest.indexOf(")", target) < 0;
+    return /^\[[^\]]*\](\([^)]*\))?(?!\()/.test(rest) && !unfinishedTarget ? -1 : open;
   }
   let count = 0;
   let first = -1;
@@ -212,6 +259,18 @@ export function release(state: ReleaseState, cuts: readonly Cut[], now: number,
   state.lastReleaseAt = now;
   for (const key of state.readyAt.keys()) if (key <= state.shownY + 0.5) state.readyAt.delete(key);
   return state.shownY;
+}
+
+/** Whether time alone can release something: a completed unit (it may only
+ * wait out the stagger), or lines that are enough already or may go after
+ * their wait. Lines that need more of their paragraph wait on new text, so
+ * no frame needs to run for them. */
+export function releaseWaitsOnTime(state: ReleaseState, cuts: readonly Cut[],
+  { stepLines = LINE_STEP_LINES, lineWaitMs = LINE_STEP_WAIT_MS }: { stepLines?: number; lineWaitMs?: number } = {}): boolean {
+  const waiting = cuts.filter((cut) => cut.y > state.shownY + 0.5);
+  if (waiting.some((cut) => cut.kind === "unit")) return true;
+  const lines = waiting.length;
+  return lines > 0 && (lines >= stepLines || Number.isFinite(lineWaitMs));
 }
 
 /** Whether a later frame could release more. */

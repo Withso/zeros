@@ -9,6 +9,7 @@ import {
   groupLines,
   release,
   releasePending,
+  releaseWaitsOnTime,
   releaseState,
   revealCuts,
   revealRole,
@@ -50,7 +51,7 @@ describe("unit segmentation", () => {
       "<h2>Title</h2><p>One.</p><ul><li>a</li><li>b</li></ul><blockquote><p>Quoted.</p></blockquote>" +
       "<div class=\"zeros-md-codeblock\"><pre><code>x\ny</code></pre></div><p><img src=\"x.png\"></p><hr>"));
     expect(units.map(({ el, kind }) => `${kind}:${el.tagName.toLowerCase()}`)).toEqual([
-      "text:h2", "text:p", "text:li", "text:li", "text:p", "code:div", "block:img", "block:hr",
+      "text:h2", "text:p", "text:li", "text:li", "text:p", "code:div", "text:p", "block:hr",
     ]);
   });
 
@@ -58,6 +59,11 @@ describe("unit segmentation", () => {
     const units = revealUnitElements(dom(
       "<table><thead><tr><th>A</th></tr></thead><tbody><tr><td>1</td></tr><tr><td>2</td></tr></tbody></table>"));
     expect(units.map(({ el, kind }) => `${kind}:${el.textContent}`)).toEqual(["row:1", "row:2"]);
+  });
+
+  it("keeps an image and its caption in one paragraph unit", () => {
+    const units = revealUnitElements(dom("<p><img src=\"x.png\"><br>Figure 1: the caption.</p><p>Next.</p>"));
+    expect(units.map(({ el, kind }) => `${kind}:${el.textContent}`)).toEqual(["text:Figure 1: the caption.", "text:Next."]);
   });
 
   it("splits a list item at its nested items", () => {
@@ -72,6 +78,25 @@ describe("unit segmentation", () => {
     expect(tailClosed("```ts\nconst a = 1;\n")).toBe(false);
     expect(tailClosed("```ts\nconst a = 1;\n```")).toBe(true);
     expect(tailClosed("```ts\nconst a = 1;\n```\n")).toBe(true);
+  });
+
+  it("closes a fence only with the same marker, at least as long", () => {
+    expect(tailClosed("````md\n```\ninner\n```")).toBe(false);
+    expect(tailClosed("````md\n```\ninner\n```\n````")).toBe(true);
+    expect(tailClosed("~~~\ncode\n```")).toBe(false);
+    expect(tailClosed("~~~\ncode\n~~~~")).toBe(true);
+    expect(tailHold("````md\n```\ninner\n```").block).toBe(true);
+    expect(tailHold("````md\n```\ninner\n```\n````\n").block).toBe(false);
+  });
+
+  it("scans untrusted tails in linear time", () => {
+    const blank = `a${"\n \n".repeat(40_000)}x`;
+    const links = `[a](${"](".repeat(40_000)}`;
+    const started = performance.now();
+    expect(tailClosed(blank)).toBe(false);
+    expect(tailHold(links).opener).toBe("[");
+    expect(tailHold(`See [the docs](${"](".repeat(40_000)})`).opener).toBe(null);
+    expect(performance.now() - started).toBeLessThan(200);
   });
 
   it("groups text rects into line boxes", () => {
@@ -162,6 +187,16 @@ describe("release pacing", () => {
     expect(drive([[0, [line(20), line(40), line(60)]]], 200, options).steps.map((step) => step.y)).toEqual([60]);
     // Completed by the next unit: it is the answer, shown at once.
     expect(drive([[0, [unit(40)]]], 200, options).steps.map((step) => step.y)).toEqual([40]);
+  });
+
+  it("knows when only new text can release more, so frames can stop", () => {
+    const undecided = { stepLines: UNDECIDED_STEP_LINES, lineWaitMs: Infinity };
+    expect(releaseWaitsOnTime(releaseState(), [line(20)], undecided)).toBe(false);
+    expect(releaseWaitsOnTime(releaseState(), [line(20), line(40)], undecided)).toBe(false);
+    expect(releaseWaitsOnTime(releaseState(), [line(20), line(40), line(60)], undecided)).toBe(true);
+    expect(releaseWaitsOnTime(releaseState(), [line(20)])).toBe(true);
+    expect(releaseWaitsOnTime(releaseState(), [unit(20)], undecided)).toBe(true);
+    expect(releaseWaitsOnTime(releaseState(40), [unit(40)])).toBe(false);
   });
 
   it("knows when nothing is left to release", () => {
