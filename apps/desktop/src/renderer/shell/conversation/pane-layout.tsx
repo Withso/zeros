@@ -1313,7 +1313,9 @@ function ChatPane({ paneId, ctx }: { paneId: string; ctx: PaneCtx }) {
         if (index === null) return;
         event.preventDefault();
         event.stopPropagation();
-        if (index !== current) onSelectChat(parents[index]);
+        if (index === current) return;
+        root.focus({ preventScroll: true });
+        onSelectChat(parents[index]);
         return;
       }
       if (shortcut?.kind !== "chat-tab") return;
@@ -1327,13 +1329,12 @@ function ChatPane({ paneId, ctx }: { paneId: string; ctx: PaneCtx }) {
       event.stopPropagation();
       if (index === current) return;
       const nextId = paneChats[index].id;
-      // Move focus before hiding the old composer. Otherwise it remains the
-      // engaged input while the next chat mounts, blocking its autofocus; once
-      // Chromium blurs the inert layer to body, subsequent keys miss this pane.
-      // The strip survives the switch and also holds focus for read-only chats
-      // or a destination whose composer/terminal is not ready yet.
-      root.querySelector<HTMLElement>(`[data-chat-tab="true"][data-chat-id="${CSS.escape(nextId)}"]`)
-        ?.focus({ preventScroll: true });
+      // Move focus to the pane before hiding the old composer. Otherwise it
+      // remains the engaged input while the next chat mounts, blocking its
+      // autofocus; once Chromium blurs the inert layer to body, subsequent keys
+      // miss this pane. The pane also holds focus for read-only chats or a
+      // destination whose composer/terminal is not ready yet.
+      root.focus({ preventScroll: true });
       onSelectChat(nextId);
     };
     root.addEventListener("keydown", handler, true);
@@ -1346,6 +1347,7 @@ function ChatPane({ paneId, ctx }: { paneId: string; ctx: PaneCtx }) {
   return (
     <section
       ref={rootRef}
+      tabIndex={-1}
       data-pane-root=""
       data-pane-focused={isFocused ? "true" : "false"}
       // --pane-bg is the window surface, bg1 on every pane, and no pane draws
@@ -1354,7 +1356,7 @@ function ChatPane({ paneId, ctx }: { paneId: string; ctx: PaneCtx }) {
       // owner's choice: fg1 and fg2 stay at WCAG AA, while fg3 in Light and
       // muted-fg in Dark dip below their floors there.
       className={cn(
-        "relative flex min-h-0 min-w-0 flex-1 flex-col bg-(--pane-bg)",
+        "relative flex min-h-0 min-w-0 flex-1 flex-col bg-(--pane-bg) outline-none",
         split && "*:transition-opacity *:duration-120 *:ease-out motion-reduce:*:transition-none",
         split && !isFocused && "*:opacity-80",
       )}
