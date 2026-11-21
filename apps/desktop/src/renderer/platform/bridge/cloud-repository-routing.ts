@@ -97,7 +97,13 @@ export function cloudRepositoryRoute(op: string, params: Params, layout: (target
       merge: results => {
         const rows = results.map((result, index) => inFolder(result, found.repositories[index]!.folder) as Params ?? {});
         const all = (field: string) => rows.flatMap(row => Array.isArray(row[field]) ? row[field] as unknown[] : []);
-        return { ...rows[0], staged: all("staged"), unstaged: all("unstaged"), conflicted: all("conflicted"), untracked: all("untracked") };
+        // The project folder has no tracking of its own: one repository's ahead, behind,
+        // upstream and branch summary are omitted (unknown), never shown as the folder's.
+        const { ahead: _ahead, behind: _behind, upstream: _upstream, summary: _summary, shallow: _shallow, ...first } = rows[0] ?? {};
+        const operation = rows.map(row => row.conflictState).find(state => state != null && state !== "none");
+        return { ...first, staged: all("staged"), unstaged: all("unstaged"), conflicted: all("conflicted"), untracked: all("untracked"),
+          ...(operation !== undefined ? { conflictState: operation } : {}),
+          ...(rows.some(row => row.shallow === true) ? { shallow: true } : {}) };
       },
     };
   }

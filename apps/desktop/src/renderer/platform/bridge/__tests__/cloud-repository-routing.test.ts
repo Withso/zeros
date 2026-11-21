@@ -61,7 +61,12 @@ describe("requests on a workspace of several repositories", () => {
       { staged: [{ path: "a.ts", status: "added" }], unstaged: [], untracked: ["n.ts"], conflicted: [], conflictState: "none", ahead: 1 },
       { staged: [], unstaged: [{ path: "new.ts", oldPath: "old.ts", status: "renamed" }], untracked: [], conflicted: [], conflictState: "none" }]))
       .toEqual({ staged: [{ path: "api/a.ts", status: "added" }], unstaged: [{ path: "web/new.ts", oldPath: "web/old.ts", status: "renamed" }],
-        untracked: ["api/n.ts"], conflicted: [], conflictState: "none", ahead: 1 });
+        untracked: ["api/n.ts"], conflicted: [], conflictState: "none" });
+    // An operation in progress in any repository is the project folder's; one repository's tracking is not the folder's.
+    expect(status.merge([
+      { staged: [], unstaged: [], untracked: [], conflicted: [], conflictState: null, ahead: 2, behind: 0, upstream: "origin/work", summary: { branch: "work", base: null } },
+      { staged: [], unstaged: [], untracked: [], conflicted: [{ path: "c.ts", status: "modified" }], conflictState: "rebase", shallow: true }]))
+      .toEqual({ staged: [], unstaged: [], untracked: [], conflicted: [{ path: "web/c.ts", status: "modified" }], conflictState: "rebase", shallow: true });
     // A repository's own key is never fanned out: its paths stay its own.
     expect(cloudRepositoryRoute("git.status", { workspaceId: `${key}/web` }, several)).toMatchObject({ kind: "one" });
   });
