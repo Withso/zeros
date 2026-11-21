@@ -16,7 +16,7 @@ import type { CloudV2ReadyCopyForks } from "./ready-copies.js";
 import type { CloudV2CheckpointFork, CloudV2CheckpointReuse, CloudV2CheckpointRetry, CloudV2CheckpointScope, CloudV2Store, CloudV2Workspace,
   CloudV2LifecycleWorkspace, CloudV2RestoreCreate } from "./store.js";
 import { CLOUD_V2_WORKER_PORT, type CloudV2WorkerTiming, type CloudV2WorkerBootTiming } from "./contract.js";
-import { CLOUD_V2_BACKUP_PROBE_SECONDS, CLOUD_V2_CHECKPOINT_ERRORS, CLOUD_V2_CHECKPOINT_SECONDS, WORKER_UNIT_CHECK, backupProbeCommand, checkpointCommand,
+import { CLOUD_V2_BACKUP_PROBE_SECONDS, CLOUD_V2_CHECKPOINT_ERRORS, CLOUD_V2_CHECKPOINT_SECONDS, WORKER_OFF_COMMAND, WORKER_UNIT_CHECK, backupProbeCommand, checkpointCommand,
   cloudV2CheckpointObject, parseBackupProbe, parseCheckpointResult, parseRestoreResult, restoreCommand, workerUnitOff, type BackupProbe,
   type CloudV2CheckpointError, type CloudV2CheckpointStorage } from "./checkpoint.js";
 
@@ -750,11 +750,15 @@ export class CloudV2Lifecycle {
     return state && (options.find || state === "starting") ? sandboxId : null;
   }
 
-  /** Retention's stop: switches the worker service off and records whether any
-   * repository holds work that is not on GitHub. Bounded to a few seconds and
-   * never fails the stop: no answer records unknown, which backs up. Resolves
-   * false: the stop has no checkpoint of its own. */
+  /** Retention's stop: switches the worker service off and verifies it, then
+   * records whether any repository holds work that is not on GitHub. Bounded by
+   * its commands' timeouts and never fails the stop: an unverified worker is
+   * recorded for the next wake, no probe answer records unknown, which backs up.
+   * Resolves false: the stop has no checkpoint of its own. */
   private async probeStop(workspace: CloudV2LifecycleWorkspace, sandboxId: string): Promise<false> {
+    const workerOff = await this.switchWorkerOff(sandboxId);
+    if (!workerOff) (this.deps.logger?.error ?? this.deps.logger?.warn)?.call(this.deps.logger,
+      `[cloud-v2] stop could not verify the worker off; recorded for the next wake workspace=${workspace.id.slice(0, 8)}`);
     let probe: BackupProbe = "unknown";
     try {
       const others = await this.deps.repositories?.(workspace) ?? [];
@@ -764,8 +768,22 @@ export class CloudV2Lifecycle {
     } catch (error) {
       this.deps.logger?.warn(`[cloud-v2] stop probe failed (${errorCode(error)}) workspace=${workspace.id.slice(0, 8)}`);
     }
-    await this.deps.store.recordStopProbe(workspace.id, workspace.stopGeneration, probe)
+    await this.deps.store.recordStopProbe(workspace.id, workspace.stopGeneration, probe, workerOff)
       .catch(error => this.deps.logger?.warn(`[cloud-v2] stop probe not recorded (${errorCode(error)})`));
+    return false;
+  }
+
+  /** Stops and disables the worker service, then checks both took (boat-fake.ts, "worker unit stays
+   * disabled": an explicit stop freezes a running worker and resume restores it; a fork or a cold
+   * resume starts an enabled one). Two attempts, each bounded by its commands' timeouts. */
+  private async switchWorkerOff(sandboxId: string): Promise<boolean> {
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      try {
+        await this.deps.compute.exec(sandboxId, WORKER_OFF_COMMAND, CLOUD_V2_BACKUP_PROBE_SECONDS);
+        const unit = await this.deps.compute.exec(sandboxId, WORKER_UNIT_CHECK, CLOUD_V2_BACKUP_PROBE_SECONDS);
+        if (unit.exitCode === 0 && !unit.timedOut && workerUnitOff(unit.stdout)) return true;
+      } catch { /* Retried once, then recorded as unverified. */ }
+    }
     return false;
   }
 
@@ -915,12 +933,17 @@ export class CloudV2Lifecycle {
       await store.checkpointForkCreated(row.id, attempt, sandboxId);
       await this.untilReady(sandboxId);
       // A fork is a fresh boot that starts every enabled unit (boat-fake.ts, "worker unit stays
-      // disabled"); one whose worker unit is on is never used, and the source will not change.
+      // disabled"). The fork is ours and goes afterwards: a worker it started is switched off
+      // there first; one that will not switch off is never used.
       if (retention) {
-        const unit = await this.deps.compute.exec(sandboxId, WORKER_UNIT_CHECK, 30);
-        if (unit.exitCode !== 0 || unit.timedOut || !workerUnitOff(unit.stdout)) {
-          unsafe = true;
-          throw checkpointError("checkpoint_failed");
+        const unit = await this.deps.compute.exec(sandboxId, WORKER_UNIT_CHECK, 30).catch(() => null);
+        if (!unit || unit.exitCode !== 0 || unit.timedOut || !workerUnitOff(unit.stdout)) {
+          (this.deps.logger?.error ?? this.deps.logger?.warn)?.call(this.deps.logger,
+            `[cloud-v2] backup fork had its worker unit on (not switched off at the stop); switching it off there workspace=${row.id.slice(0, 8)}`);
+          if (!await this.switchWorkerOff(sandboxId)) {
+            unsafe = true;
+            throw checkpointError("checkpoint_failed");
+          }
         }
       }
       outcome = await this.capture(row, sandboxId, source, "retry");

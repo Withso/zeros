@@ -165,6 +165,9 @@ export type CloudV2LifecycleWorkspace = CloudV2Workspace & {
   checkpointRetryFork: CloudV2CheckpointFork | null;
   /** Retention: what the probe of the latest stop reported; absent when it ran for no stop of this generation. */
   stopProbe?: BackupProbe;
+  /** Retention: the latest stop could not verify the worker service off, so the machine may resume
+   * with it running or enabled; a wake must switch it off before treating the machine as safe. */
+  workerOffUnverified?: true;
 };
 /** `from` is null for Boat's stock image; `prune` lists the other recipe
  * checkouts a v3 image starts with. */
@@ -226,13 +229,13 @@ type LifecycleRow = Row & {
   stop_generation: string; checkpoint_stop_generation: string | null;
   checkpoint_object: string | null; checkpoint_key: unknown; checkpoint_sha256: string | null; checkpoint_bytes: string | null; checkpoint_saved_at: Date | null;
   checkpoint_reuse: unknown; checkpoint_retry_fork: unknown;
-  backup_probe?: BackupProbe | null; backup_probe_generation?: string | null;
+  backup_probe?: BackupProbe | null; backup_probe_generation?: string | null; worker_off_unverified_at?: Date | null;
 };
 const LIFECYCLE_COLUMNS = `${COLUMNS}, lease_renewed_at, base_commit, restore_pending, restore_attempt, restore_create, checkpoint_uploads,
   execution_mode, execution_transition_id, execution_restore_claimed_at, execution_initiator_user_id, execution_intent_id, execution_intent_authority, access_epoch,
   stop_generation, checkpoint_stop_generation,
   checkpoint_object, checkpoint_key, checkpoint_sha256, checkpoint_bytes, checkpoint_saved_at, checkpoint_reuse, checkpoint_retry_fork,
-  backup_probe, backup_probe_generation`;
+  backup_probe, backup_probe_generation, worker_off_unverified_at`;
 type RetryRow = LifecycleRow & { retry_stopped_at: Date; checkpoint_retry_generation: string; checkpoint_retry_attempts: number; checkpoint_retry_exhausted_at: Date | null };
 
 function uploadHorizon(uploads: Record<string, string>): string | null {
@@ -275,7 +278,8 @@ export function cloudV2LifecycleWorkspaceFromRow(row: LifecycleRow): CloudV2Life
     checkpoint, restorePending: row.restore_pending, restoreAttempt: row.restore_attempt, restoreCreate: restoreCreate(row.restore_create),
     stopGeneration: row.stop_generation, checkpointUploadUntil: uploadHorizon(row.checkpoint_uploads),
     checkpointRetryFork: checkpointFork(row.checkpoint_retry_fork),
-    ...(row.backup_probe && row.backup_probe_generation === row.stop_generation ? { stopProbe: row.backup_probe } : {}) };
+    ...(row.backup_probe && row.backup_probe_generation === row.stop_generation ? { stopProbe: row.backup_probe } : {}),
+    ...(row.worker_off_unverified_at ? { workerOffUnverified: true as const } : {}) };
 }
 const lifecycleWorkspace = cloudV2LifecycleWorkspaceFromRow;
 
@@ -1584,12 +1588,14 @@ export class CloudV2Store {
       `UPDATE cloud_v2_workspaces SET restore_create = restore_create - 'fork' WHERE id=$1 AND restore_attempt=$2 AND restore_pending`, [id, attempt]));
   }
 
-  /** Retention: what this stop's probe found, recorded only while that stop is the latest. Retention's clocks start at the first. */
-  async recordStopProbe(id: string, stopGeneration: string, probe: BackupProbe): Promise<boolean> {
+  /** Retention: what this stop's probe found and whether it verified the worker off, recorded only
+   * while that stop is the latest. Retention's clocks start at the first. */
+  async recordStopProbe(id: string, stopGeneration: string, probe: BackupProbe, workerOff: boolean): Promise<boolean> {
     const result = await withSystemTx(this.pool, tx => tx.query(
       `UPDATE cloud_v2_workspaces SET backup_probe=$3, backup_probe_generation=$2::bigint,
+         worker_off_unverified_at=CASE WHEN $4::boolean THEN NULL ELSE coalesce(worker_off_unverified_at, clock_timestamp()) END,
          retention_started_at=coalesce(retention_started_at, clock_timestamp())
-       WHERE id=$1 AND state='stopping' AND stop_generation=$2::bigint`, [id, stopGeneration, probe]));
+       WHERE id=$1 AND state='stopping' AND stop_generation=$2::bigint`, [id, stopGeneration, probe, workerOff]));
     return Boolean(result.rowCount);
   }
 

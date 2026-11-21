@@ -582,14 +582,16 @@ export function workerUnitOff(stdout: string): boolean {
   return !!match && ["disabled", "masked", "not-found"].includes(match[1]!) && ["inactive", "failed"].includes(match[2]!);
 }
 
+/** The worker-off step on its own, verified afterwards with WORKER_UNIT_CHECK. */
+export const WORKER_OFF_COMMAND = `bash -c ${quote(WORKER_SERVICE_OFF.join("\n"))}`;
+
 /** Whether a stop left work that is not on GitHub, in any repository. */
 export type BackupProbe = "clean" | "dirty" | "unknown";
 /** A probe answers within a few seconds or counts as unknown, which backs up. */
 export const CLOUD_V2_BACKUP_PROBE_SECONDS = 15;
 
-/** Run at a retention stop, after the worker is told to stop: switches the
- * worker service off, then reports whether any repository holds Git work that
- * is not on GitHub: tracked changes, untracked files Git does not ignore, a
+/** Run at a retention stop, once the worker service is off: reports whether
+ * any repository holds Git work that is not on GitHub: tracked changes, untracked files Git does not ignore, a
  * stash, or a commit on a branch or HEAD that no remote-tracking ref reaches.
  * Ignored files never count. Read-only: no optional index writes, no
  * fsmonitor. Any doubt reports unknown; it never fails. */
@@ -597,7 +599,6 @@ export function backupProbeCommand(checkoutPaths: readonly string[]): string {
   if (!checkoutPaths.length) throw new Error("Invalid backup probe");
   const script = [
     "set -u", "exec 3>&1 >/dev/null 2>&1",
-    ...WORKER_SERVICE_OFF,
     "export GIT_OPTIONAL_LOCKS=0 GIT_TERMINAL_PROMPT=0",
     "g() { git -c core.fsmonitor=false \"$@\"; }",
     "state=clean",

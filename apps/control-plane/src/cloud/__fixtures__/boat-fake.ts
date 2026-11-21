@@ -57,6 +57,8 @@ export class FakeBoat implements CloudV2Compute {
   private next = 1;
   /** Replies the test scripts; undefined falls through to the default. */
   script: Exec | null = null;
+  /** A command the test makes fail at Boat before the machine runs any of it. */
+  failCommand: ((machine: Machine, command: string) => boolean) | null = null;
   /** Whether stop goes through "archiving" before "archived". */
   archivingReads = 0;
 
@@ -161,6 +163,7 @@ export class FakeBoat implements CloudV2Compute {
     const machine = this.live(sandboxId);
     if (machine.state !== "running") throw new CloudProviderError("provider_request_failed", "Boat API request did not succeed", true, { httpStatus: 409 });
     this.commands.push({ machineId: sandboxId, command, ...(input === undefined ? {} : { input }) });
+    if (this.failCommand?.(machine, command)) throw lost();
     if (command.includes("systemctl stop zeros-worker.service")) machine.worker.active = false;
     if (command.includes("systemctl disable zeros-worker.service")) machine.worker.enabled = false;
     if (command.includes("systemctl enable zeros-worker.service")) machine.worker.enabled = true;

@@ -7,9 +7,12 @@ SET LOCAL lock_timeout = '5s';
 -- from history.
 -- backup_probe: what the probe of stop backup_probe_generation reported; another stop's answer never applies.
 -- backup_forked_at: the last backup fork's request, for the hourly fork cap.
+-- worker_off_unverified_at: set when the latest stop could not verify the worker service stopped and disabled, so a
+-- later wake must switch it off first; null once a stop verified it.
 ALTER TABLE cloud_v2_workspaces
   ADD COLUMN retention_started_at timestamptz,
   ADD COLUMN backup_probe text CHECK (backup_probe IN ('clean', 'dirty', 'unknown')),
   ADD COLUMN backup_probe_generation bigint,
-  ADD COLUMN backup_forked_at timestamptz;
+  ADD COLUMN backup_forked_at timestamptz,
+  ADD COLUMN worker_off_unverified_at timestamptz;
 CREATE INDEX cloud_v2_workspaces_backup_forked ON cloud_v2_workspaces (backup_forked_at) WHERE backup_forked_at IS NOT NULL;

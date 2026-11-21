@@ -27,18 +27,16 @@ d("cloud v2 retention", () => {
   let archives: Map<string, Map<string, string>>, uploads: string[], errors: string[], warnings: string[], timings: CloudV2TimingRecord[];
   /** Branches GitHub has, by checkout path. */
   let remoteBranches: Set<string>;
-  /** Machines whose probe command fails outright. */
-  let probeFails: Set<string>, backupFails: boolean;
+  let backupFails: boolean;
 
   beforeAll(() => { pool = new pg.Pool({ connectionString: process.env.TEST_DATABASE_URL, max: 4 }); });
   afterAll(() => pool.end());
   beforeEach(async () => {
     await resetMigratedTestDatabase(pool);
-    archives = new Map(); uploads = []; errors = []; warnings = []; timings = []; remoteBranches = new Set(); probeFails = new Set(); backupFails = false;
+    archives = new Map(); uploads = []; errors = []; warnings = []; timings = []; remoteBranches = new Set(); backupFails = false;
     boat = new FakeBoat();
     boat.script = (machine, command, input) => {
       if (command.includes("zeros-backup-probe")) {
-        if (probeFails.has(machine.id)) throw Object.assign(new Error("lost"), { code: "provider_request_failed" });
         const dirty = REPOS.some(repo => command.includes(path(repo.folder)) && machine.files.has(`${path(repo.folder)}/UNPUSHED`));
         return { exitCode: 0, stdout: `zeros-backup-probe ${dirty ? "dirty" : "clean"}\n`, timedOut: false };
       }
@@ -139,6 +137,55 @@ d("cloud v2 retention", () => {
     // Resumed later, the machine still runs no worker; a fork of it would not either.
     await boat.resume(vm);
     expect(boat.machine(vm)!.worker).toEqual({ enabled: false, active: false });
+  });
+
+  const workerOffRow = async () => (await pool.query("SELECT worker_off_unverified_at FROM cloud_v2_workspaces WHERE id=$1", [id])).rows[0].worker_off_unverified_at;
+  const isOffStep = (command: string) => command.includes("systemctl disable zeros-worker.service") && !command.includes("zeros-backup-probe");
+
+  it("switches the worker off as its own step, verifies it, and retries once when the first attempt fails", async () => {
+    let failures = 1;
+    boat.failCommand = (machine, command) => machine.id === vm && isOffStep(command) && failures-- > 0;
+    await stop();
+    expect(boat.machine(vm)!.worker).toEqual({ enabled: false, active: false });
+    const own = boat.commands.filter(command => command.machineId === vm).map(command => command.command);
+    expect(own.filter(isOffStep)).toHaveLength(2);
+    expect(own.some(command => command.includes("zeros-worker-unit"))).toBe(true);
+    expect(await workerOffRow()).toBeNull();
+  });
+
+  it("completes a stop whose worker it could not switch off, records it, and still backs up through the fork", async () => {
+    boat.write(vm, `${path("api")}/UNPUSHED`, "api work");
+    boat.failCommand = (machine, command) => machine.id === vm && isOffStep(command);
+    await stop();
+    expect((await row()).state).toBe("stopped");
+    expect(boat.machine(vm)!.worker).toEqual({ enabled: true, active: true });
+    expect(await workerOffRow()).toBeInstanceOf(Date);
+    await earlier(CLOUD_V2_BACKUP_DELAY_MS + 60_000);
+    await lifecycle().tick();
+    // The fork booted the enabled worker; it is switched off there, verified, then backed up.
+    const fork = [...boat.machines.values()].find(machine => machine.source === vm)!;
+    const own = boat.commands.filter(command => command.machineId === fork.id).map(command => command.command);
+    expect(own.some(isOffStep)).toBe(true);
+    expect(own.findIndex(isOffStep)).toBeLessThan(own.findIndex(command => command.includes("zeros-checkpoint-saved")));
+    const saved = await row();
+    expect(saved).toMatchObject({ checkpoint_stop_generation: saved.stop_generation, checkpoint_retry_exhausted_at: null });
+    expect(fork.state).toBe("deleted");
+    expect(errors.some(line => line.includes("backup fork had its worker unit on"))).toBe(true);
+    // The source machine itself was not fixed: the flag stays for a later wake to act on.
+    expect(await workerOffRow()).toBeInstanceOf(Date);
+  });
+
+  it("refuses a fork whose worker it cannot switch off there either", async () => {
+    boat.write(vm, `${path("api")}/UNPUSHED`, "api work");
+    boat.failCommand = (_machine, command) => isOffStep(command);
+    await stop();
+    await earlier(CLOUD_V2_BACKUP_DELAY_MS + 60_000);
+    await lifecycle().tick();
+    const fork = [...boat.machines.values()].find(machine => machine.source === vm)!;
+    expect(boat.commands.some(command => command.machineId === fork.id && command.command.includes("zeros-checkpoint-saved"))).toBe(false);
+    expect(fork.state).toBe("deleted");
+    expect((await row()).checkpoint_retry_exhausted_at).toBeInstanceOf(Date);
+    expect(errors.some(line => line.includes("backup fork refused: its worker unit is on"))).toBe(true);
   });
 
   it("with the switch off, still checkpoints at the stop exactly as before", async () => {
@@ -246,22 +293,6 @@ d("cloud v2 retention", () => {
     expect(replacement.from).toEqual(expect.any(String));
     expect(cloned).toEqual([replacement.id]);
     expect(warnings.some(line => line.includes("ready copy fork refused for a restore"))).toBe(true);
-  });
-
-  it("refuses a fork whose worker started because the stop could not switch it off, and alerts", async () => {
-    boat.write(vm, `${path("api")}/UNPUSHED`, "api work");
-    probeFails.add(vm);
-    await stop();
-    expect((await row()).backup_probe).toBe("unknown");
-    // The probe's reply was lost; say its service lines never ran either.
-    boat.machine(vm)!.worker = { enabled: true, active: true };
-    await earlier(CLOUD_V2_BACKUP_DELAY_MS + 60_000);
-    await lifecycle().tick();
-    const forkId = [...boat.machines.values()].find(machine => machine.source === vm)!.id;
-    expect(boat.commands.some(command => command.machineId === forkId && command.command.includes("zeros-checkpoint-saved"))).toBe(false);
-    expect(boat.machine(forkId)!.state).toBe("deleted");
-    expect((await row()).checkpoint_retry_exhausted_at).toBeInstanceOf(Date);
-    expect(errors.some(line => line.includes("backup fork refused: its worker unit is on"))).toBe(true);
   });
 
   it("sweeps a fork whose delete failed, and alerts on one it can no longer find", async () => {

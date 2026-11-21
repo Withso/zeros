@@ -1349,9 +1349,9 @@ describe("retention backups and the stop probe", () => {
     expect(digest(checkpointCommand({ ...PIN, reuse: { fingerprint: "f".repeat(64), base: "a".repeat(40) } })))
       .toBe("b6e28ffb57f9b435ae69b616cecb9e09827b66a39ccca776f78b57fd87d5a524");
     expect(checkpointCommand({ ...PIN, backup: false })).toBe(checkpointCommand(PIN));
-    // The worker is switched off before anything is read, by both commands.
-    for (const command of [checkpointCommand(PIN), backupProbeCommand([PIN.checkoutPath])])
-      expect(command.indexOf(WORKER_SERVICE_OFF[1])).toBeLessThan(command.indexOf("git"));
+    // The stop checkpoint switches the worker off before anything is read; a retention stop does it as its own step.
+    expect(checkpointCommand(PIN).indexOf(WORKER_SERVICE_OFF[1])).toBeLessThan(checkpointCommand(PIN).indexOf("git"));
+    expect(backupProbeCommand([PIN.checkoutPath])).not.toContain("systemctl");
   });
 
   it("saves every repository's work, small ignored files and the worker's chats, but no provider sessions or ignored attachments, and today's restore applies it", () => {
