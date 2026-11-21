@@ -75,12 +75,13 @@ describe("Add child session", () => {
   });
 
   it("reads the parent's current transcript for every child, not a cached one", () => {
-    const d = deps();
+    const loadTranscript = vi.fn().mockResolvedValue(snapshot());
+    const d = deps({ loadTranscript });
     vi.spyOn(Date, "now").mockReturnValueOnce(1_000).mockReturnValueOnce(2_000).mockReturnValueOnce(3_000).mockReturnValueOnce(4_000);
     addChildSession(parent, d);
     addChildSession(parent, d);
     vi.restoreAllMocks();
-    const [first, second] = d.loadTranscript.mock.calls.map(([input]) => input.lastMessageAt);
+    const [first, second] = loadTranscript.mock.calls.map((call) => (call[0] as { lastMessageAt: number }).lastMessageAt);
     expect(first).not.toBe(parent.updatedAt);
     expect(first).not.toBe(second);
   });
