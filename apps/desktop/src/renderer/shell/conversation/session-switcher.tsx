@@ -195,7 +195,7 @@ export function SessionSwitcher({ folder, placement, showPlacement = true, fallb
   };
   const Icon = placement === "cloud" ? Cloud : Laptop;
   return (
-    <nav aria-label="Sessions" className={`${showPlacement ? "-ml-1.5" : ""} flex min-w-0 items-center`} data-session-switcher="">
+    <nav aria-label="Sessions" className={`${showPlacement ? "-ml-1.5" : ""} flex min-w-0 items-center`} data-session-switcher="" data-workspace-identity="">
       {lineage.map((chat, index) => {
         const node = tree.byId.get(chat.id);
         return (

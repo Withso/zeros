@@ -76,6 +76,7 @@ import {
   CHAT_STRIP_LEADING_CLS,
   CHAT_STRIP_SHELL_CLS,
   CHAT_STRIP_TRAILING_CLS,
+  ChatTabs,
 } from "./chat-tabs";
 import {
   chatCloseConfirmation,
@@ -1361,10 +1362,33 @@ function ChatPane({ paneId, ctx }: { paneId: string; ctx: PaneCtx }) {
         split && !isFocused && "*:opacity-80",
       )}
     >
-      {split && (
+      {split && !ctx.readOnly && (
         <PaneSessionBar
           chat={paneChats.find((chat) => chat.id === paneActiveChatId) ?? null}
           focused={isFocused}
+        />
+      )}
+      {/* An archived workspace's read-only history keeps its tab strip for
+          browsing saved and closed chats without reopening them. */}
+      {ctx.readOnly && (
+        <ChatTabs
+          readOnly
+          workspaceFolder={ctx.folder}
+          paneId={paneId}
+          chats={paneChats}
+          activeChatId={paneActiveChatId}
+          historyChats={ctx.historyChats}
+          showSyntheticUntitled={false}
+          onSelectUntitled={ctx.onSelectUntitled}
+          onSelectChat={ctx.onSelectChat}
+          onPrefetchChat={ctx.onPrefetchChat}
+          onCloseTab={(chat, e) => ctx.onCloseTab(paneId, chat, e)}
+          onRestoreChat={(chat) => ctx.onRestoreChat(paneId, chat)}
+          onSplit={(dir) => ctx.onSplit(paneId, dir)}
+          canSplitRight={false}
+          canSplitDown={false}
+          leading={null}
+          trailing={null}
         />
       )}
       <div className={cn("relative flex min-h-0 min-w-0 flex-1", CHAT_ASIDE_INSET_HOST_CLS)}>

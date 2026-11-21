@@ -291,8 +291,9 @@ describe("Code seats its column controls above the chat strips", () => {
   });
 
   it("names each split pane's session instead of mounting a tab strip", () => {
-    expect(paneLayoutSource).not.toContain("<ChatTabs");
-    expect(paneLayoutSource).toContain("{split && (\n        <PaneSessionBar");
+    expect(paneLayoutSource.match(/<ChatTabs/g)).toHaveLength(1);
+    expect(paneLayoutSource).toContain("{ctx.readOnly && (\n        <ChatTabs");
+    expect(paneLayoutSource).toContain("{split && !ctx.readOnly && (\n        <PaneSessionBar");
   });
 
   it("orders the strip: toggle, tabs, +, history, pane menu, expand", () => {
