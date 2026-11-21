@@ -322,8 +322,9 @@ export const CloudV2ComputerReplySchema = z.object({
   /** Ready copies are on: builds make the base, and repositories are not listed. */
   readyCopies: z.literal(true).optional(),
   installScript: z.string().max(16_000).nullable().optional(),
-  /** Ready copies: each repository's latest failed copy; detail is a path at most. */
-  readyCopyFailures: z.array(z.object({ repository: z.string().max(200), generation: z.number().int(), reason: z.string().max(64),
+  /** Ready copies: each organization project's latest failed copy, the repository and step; detail is a path at most. */
+  readyCopyFailures: z.array(z.object({ projectId: uuid, project: z.string().max(100), repository: z.string().max(201).nullable(),
+    step: z.string().max(32).nullable(), generation: z.number().int(), reason: z.string().max(64),
     detail: z.string().max(1100).nullable(), finishedAt: z.string(), failures: z.number().int().optional(),
     nextRetryAt: z.string().nullable().optional() }).passthrough()).max(200).optional().catch(undefined),
 });
@@ -404,27 +405,6 @@ export async function getCloudV2InstallScript(organizationId: string) {
 export async function saveCloudV2InstallScript(organizationId: string, installScript: string | null, revision: number) {
   return cloudAccountRequest(`/v1/cloud-v2/organizations/${uuid.parse(organizationId)}/computer/install-script`,
     InstallScriptSchema, { body: { installScript, revision }, idempotencyKey: key(), method: "PUT" });
-}
-
-const BuildSecretNamesSchema = z.object({ names: z.array(z.string().max(128)).max(64) });
-const secretsPath = (organizationId: string, repository: string) => {
-  const [owner, name] = repository.split("/");
-  return `/v1/cloud-v2/organizations/${uuid.parse(organizationId)}/computer/repositories/${encodeURIComponent(owner ?? "")}/${encodeURIComponent(name ?? "")}/build-secrets`;
-};
-/** Ready copies: the names of a repository's build secrets; values never come back. */
-export async function getCloudV2BuildSecretNames(organizationId: string, repository: string) {
-  return (await cloudAccountRequest(secretsPath(organizationId, repository), BuildSecretNamesSchema)).names;
-}
-export async function updateCloudV2BuildSecrets(organizationId: string, repository: string, change: { set?: Record<string, string>; remove?: string[] }) {
-  return (await cloudAccountRequest(secretsPath(organizationId, repository), BuildSecretNamesSchema,
-    { body: change, idempotencyKey: key(), method: "PATCH" })).names;
-}
-
-/** Ready copies: an admin's Retry now for one shared repository. */
-export async function retryCloudV2ReadyCopy(organizationId: string, repository: string) {
-  const [owner, name] = repository.split("/");
-  await cloudAccountRequest(`/v1/cloud-v2/organizations/${uuid.parse(organizationId)}/computer/repositories/${encodeURIComponent(owner ?? "")}/${encodeURIComponent(name ?? "")}/ready-copy/retry`,
-    z.unknown(), { body: {}, idempotencyKey: key() });
 }
 
 export async function activateCloudV2Build(organizationId: string, buildId: string) {

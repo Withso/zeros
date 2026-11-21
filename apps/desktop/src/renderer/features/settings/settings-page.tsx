@@ -14,8 +14,8 @@ import { CloudComputerPanel } from "./cloud-computer-panel";
 import { prefetchCloudComputer, useCloudComputerRepositories } from "./cloud-computer-store";
 import { CLOUD_REPOSITORY_TABS, CloudRepositoryPanel, type CloudRepositoryTab } from "./cloud-repository-panel";
 import { CloudGithubSection } from "./cloud-github-section";
-import { GithubConnectionsSection, PersonalRepositoriesSetting, useGithubLevels } from "./cloud-github-levels";
-import { shareCloudRepository } from "../../platform/cloud-github-levels";
+import { GithubConnectionsSection, PersonalProjectsSetting, useGithubLevels } from "./cloud-github-levels";
+import { projectForRepository, shareCloudProject } from "../../platform/cloud-github-levels";
 import { EnvironmentPanel } from "./environment-panel";
 import { KeepAwakeSetting } from "./keep-awake-setting";
 
@@ -591,13 +591,12 @@ function ScopedSettingsPage({ owner }: { owner: string }) {
     pageActive && unified && !local && !!me && !!organization && !organization.isPersonal);
   const organizationGithub = !!githubLevels.connections && !githubLevels.connections.solo;
   const canManageOrganization = organization?.role === "owner" || organization?.role === "admin";
-  /** Two GitHub levels: a cloud repository is the organization's unless it is only the caller's. */
+  /** Projects: a repository's cloud settings are its one-repository project's, the organization's unless only the caller's. */
   const projectSharing = (project: SettingsProject) => {
-    const entries = githubLevels.repositories, name = project.cloudRepository?.toLowerCase();
-    if (!entries || !name || !organization || organization.isPersonal) return null;
-    const own = entries.private.find(entry => entry.repository === name);
-    return { level: own ? "private" as const : "shared" as const, organizationName: organization.name, canShare: canManageOrganization,
-      onShare: () => { if (own) void shareCloudRepository(organization.id, own.id).then(githubLevels.refresh, cause => toast.error(cause instanceof Error ? cause.message : String(cause))); },
+    const found = projectForRepository(githubLevels.projects, project.cloudRepository);
+    if (!found || !organization || organization.isPersonal) return null;
+    return { level: found.level === "personal" ? "private" as const : "shared" as const, organizationName: organization.name, canShare: canManageOrganization,
+      onShare: () => { if (found.level === "personal") void shareCloudProject(organization.id, found.id).then(githubLevels.refresh, cause => toast.error(cause instanceof Error ? cause.message : String(cause))); },
       onAskAdmin: () => void shellOpenUrl(organizationDashboardUrl(APP_BASE_URL, { organizationId: organization.id, section: "members" })) };
   };
   const organizationGeneral =
@@ -852,7 +851,10 @@ function ScopedSettingsPage({ owner }: { owner: string }) {
                     cloudAvailable={!local && availableSectionIds.has("cloud-computer")}
                     canManageCloud={organization?.role === "owner" || organization?.role === "admin"}
                     sharing={projectSharing(currentProject)}
-                    readyCopyOrganizationId={githubLevels.connections && organization && !organization.isPersonal ? organization.id : null}
+                    readyCopy={(() => {
+                      const found = organization && !organization.isPersonal ? projectForRepository(githubLevels.projects, currentProject.cloudRepository) : null;
+                      return found && organization ? { organizationId: organization.id, projectId: found.id } : null;
+                    })()}
                     onAddToCloud={() => setActive(userSelection(!githubLevels.connections ? "cloud-computer"
                       : canManageOrganization && organizationGithub ? "org-github" : "integrations"))}
                     onOpenCloudComputer={() => setActive(userSelection("cloud-computer"))}
@@ -1336,8 +1338,8 @@ function OrganizationGithubPanel({ surfaceActive = true }: { surfaceActive?: boo
   const canManage = organization.role === "owner" || organization.role === "admin";
   return <div className="flex flex-col gap-8">
     <GithubConnectionsSection userId={me.user.id} organizationId={organization.id} level="organization" canManage={canManage} active={surfaceActive}
-      title="Connections" description={`Shared ready copies are built through these. Repositories added here are available to everyone in ${organization.name}.`} />
-    <PersonalRepositoriesSetting userId={me.user.id} organizationId={organization.id} canManage={canManage} active={surfaceActive} />
+      title="Connections" description={`Organization projects are built through these and pick their repositories from what these can read, for everyone in ${organization.name}.`} />
+    <PersonalProjectsSetting userId={me.user.id} organizationId={organization.id} canManage={canManage} active={surfaceActive} />
   </div>;
 }
 
@@ -1356,11 +1358,11 @@ function IntegrationsPanel({ surfaceActive = true, unified = false }: { surfaceA
       {/* A one-person organization shows both GitHub levels here, as one page. */}
       {cloud && levels.connections?.solo && (
         <GithubConnectionsSection userId={me!.user.id} organizationId={organizationId!} level="organization" canManage={canManage} active={surfaceActive}
-          title={`Shared with ${organization?.name ?? "the organization"}`} description="Repositories added here are the organization's." />
+          title={`Shared with ${organization?.name ?? "the organization"}`} description="Organization projects pick their repositories from these." />
       )}
       {cloud && levels.connections && (
         <GithubConnectionsSection userId={me!.user.id} organizationId={organizationId!} level="personal" canManage active={surfaceActive}
-          title="Only you" description="Your own GitHub accounts. Repositories added here are only yours; nobody else sees them, admins included." />
+          title="Only you" description="Your own GitHub accounts. Projects only you use pick from these; nobody else sees them, admins included." />
       )}
     </div>;
   }

@@ -9,7 +9,7 @@ vi.mock("../../repositories/repositories-panel", () => ({
   ProjectLocalPart: ({ part, project }: { part: string; project: { id: string } }) => `local-${part}:${project.id}`,
 }));
 vi.mock("../ready-copy-section", () => ({
-  ReadyCopySection: ({ repository }: { repository: string }) => `ready-copy:${repository}`,
+  ReadyCopySection: ({ projectId }: { projectId: string }) => `ready-copy:${projectId}`,
 }));
 vi.mock("../cloud-repository-panel", () => ({
   CloudRepositoryPanel: ({ part, repository }: { part: string; repository: string }) => `cloud-${part}:${repository}`,
@@ -28,12 +28,12 @@ let root: Root;
 const handlers = { onAddToCloud: vi.fn(), onOpenEnvironment: vi.fn(), onOpenCloudComputer: vi.fn() };
 type Sharing = NonNullable<Parameters<typeof ProjectPage>[0]["sharing"]>;
 function render(project: SettingsProject, options: { cloudAvailable?: boolean; canManageCloud?: boolean; initialFolderId?: string; sharing?: Sharing;
-  readyCopyOrganizationId?: string } = {}) {
+  readyCopy?: { organizationId: string; projectId: string } } = {}) {
   act(() => root.render(createElement(ProjectPage, {
     key: options.initialFolderId, project, surfaceActive: true, cloudAvailable: options.cloudAvailable ?? true,
     canManageCloud: options.canManageCloud ?? true, initialFolderId: options.initialFolderId, ...handlers,
     ...(options.sharing ? { sharing: options.sharing } : {}),
-    ...(options.readyCopyOrganizationId ? { readyCopyOrganizationId: options.readyCopyOrganizationId } : {}),
+    ...(options.readyCopy ? { readyCopy: options.readyCopy } : {}),
   })));
   return container.textContent ?? "";
 }
@@ -174,10 +174,10 @@ describe("project page", () => {
   });
 
   it("shows the cloud repository's build in a Cloud build section, and nothing new for a local-only project", () => {
-    expect(render(both, { readyCopyOrganizationId: "11111111-1111-4111-8111-111111111111" })).toContain("ready-copy:withso/zeros");
+    expect(render(both, { readyCopy: { organizationId: "11111111-1111-4111-8111-111111111111", projectId: "88888888-8888-4888-8888-888888888881" } })).toContain("ready-copy:88888888-8888-4888-8888-888888888881");
     expect([...container.querySelectorAll("h2")].map(node => node.textContent)).toContain("Cloud build");
     const [local] = settingsProjects([folder("app", "https://github.com/acme/app.git")], []);
-    expect(render(local, { readyCopyOrganizationId: "11111111-1111-4111-8111-111111111111" })).not.toContain("ready-copy:");
+    expect(render(local, { readyCopy: { organizationId: "11111111-1111-4111-8111-111111111111", projectId: "88888888-8888-4888-8888-888888888881" } })).not.toContain("ready-copy:");
     expect(render(both)).not.toContain("ready-copy:");
   });
 

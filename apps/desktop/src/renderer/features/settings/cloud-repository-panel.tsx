@@ -10,6 +10,7 @@ import { editableRepositories } from "./cloud-computer-model";
 import { computers, computerKey, patchRepository, TYPING_SAVE_MS, useRecipeDraft } from "./cloud-computer-store";
 import { SettingsGroup, SettingsSection } from "./settings-ui";
 import { BuildSecretsSection } from "./build-secrets-section";
+import { useCloudProjectFor } from "./cloud-github-levels";
 
 export type CloudRepositoryTab = "git" | "environment";
 export const CLOUD_REPOSITORY_TABS: ReadonlyArray<{ id: CloudRepositoryTab; label: string }> = [
@@ -51,6 +52,8 @@ function RepositoryScope({ userId, organizationId, canManage, repository, tab, o
   const row = configured.find(candidate => candidate.repository === repository);
   const locked = builds[0]?.state === "queued" || builds[0]?.state === "building";
   const liveBranch = activeBuild?.recipe.repositories.find(candidate => candidate.repository.toLowerCase() === repository.toLowerCase())?.branch;
+  // Projects: build secrets belong to the repository's one-repository project.
+  const project = useCloudProjectFor(userId, organizationId, data?.readyCopies ? repository : null, active);
   const update = (patch: { ref?: string; setup?: string; setupScript?: string }) =>
     draft.edit(patchRepository(configured, repository, patch), TYPING_SAVE_MS);
 
@@ -95,8 +98,8 @@ function RepositoryScope({ userId, organizationId, canManage, repository, tab, o
       <div className="flex flex-col gap-4" {...(!active ? { inert: "" } : {})} aria-hidden={!active || undefined}>
         {notices}
         {part === "git" ? branch : setup}
-        {part === "setup" && data?.readyCopies && row && (
-          <BuildSecretsSection ownerKey={key} organizationId={organizationId} repository={repository} active={active} disabled={locked} />
+        {part === "setup" && data?.readyCopies && row && project?.canEdit && (
+          <BuildSecretsSection ownerKey={key} organizationId={organizationId} projectId={project.id} active={active} disabled={locked} />
         )}
       </div>
     );

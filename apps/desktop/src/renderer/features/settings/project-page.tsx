@@ -39,7 +39,7 @@ export function ProjectPage({
   initialFolderId,
   onFolderChange,
   sharing,
-  readyCopyOrganizationId,
+  readyCopy,
   onAddToCloud,
   onOpenEnvironment,
   onOpenCloudComputer,
@@ -56,7 +56,8 @@ export function ProjectPage({
   /** Two GitHub levels: who the cloud repository is for, and how to share it. */
   sharing?: { level: "shared" | "private"; organizationName: string; canShare: boolean; onShare(): void; onAskAdmin(): void } | null;
   /** Ready copies: the organization whose copy of this repository the Cloud build section shows. */
-  readyCopyOrganizationId?: string | null;
+  /** The ready copy of this repository's one-repository project, when projects are on. */
+  readyCopy?: { organizationId: string; projectId: string } | null;
   onAddToCloud(): void;
   onOpenEnvironment(): void;
   onOpenCloudComputer(): void;
@@ -137,9 +138,9 @@ export function ProjectPage({
         </SettingsGroup>
       </SettingsPageSection>
 
-      {cloud && readyCopyOrganizationId && (
+      {cloud && readyCopy && (
         <SettingsPageSection title="Cloud build" description="The ready copy new cloud workspaces start from.">
-          <ReadyCopySection organizationId={readyCopyOrganizationId} repository={cloud} active={surfaceActive} />
+          <ReadyCopySection organizationId={readyCopy.organizationId} projectId={readyCopy.projectId} active={surfaceActive} />
         </SettingsPageSection>
       )}
 

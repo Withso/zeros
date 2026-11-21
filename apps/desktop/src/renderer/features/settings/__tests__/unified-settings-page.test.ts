@@ -100,7 +100,7 @@ vi.mock("../cloud-github-levels", () => ({
   useGithubLevels: () => ({ connections: state.githubLevels && { organization: [], personal: [], solo: state.githubLevels.solo },
     repositories: state.githubLevels && { shared: [], private: [], personalAllowed: true }, refresh: () => {} }),
   GithubConnectionsSection: ({ title, level }: { title: string; level: string }) => `github-levels-fixture:${level}:${title}`,
-  PersonalRepositoriesSetting: () => "personal-repositories-fixture",
+  PersonalProjectsSetting: () => "personal-repositories-fixture",
 }));
 vi.mock("../project-page", async (original) => ({
   ...(await original<typeof import("../project-page")>()),

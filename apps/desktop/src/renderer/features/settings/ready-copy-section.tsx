@@ -29,7 +29,7 @@ export function readyCopyStatusLine(status: CloudReadyCopy["status"], now: numbe
     case "updating": return "Updating… The previous copy still serves new workspaces.";
     case "getting_ready": return "Getting ready…";
     case "update_failed": return `Update failed. New workspaces still use the copy from ${updated ?? "before"}.`;
-    case "failed": return "Update failed. New workspaces clone the repository directly until a copy is ready.";
+    case "failed": return "Update failed. New workspaces clone directly until a copy is ready.";
     default: return null;
   }
 }
@@ -41,10 +41,10 @@ const duration = (start: string | null, end: string | null) => {
   return seconds < 90 ? `${seconds}s` : `${Math.round(seconds / 60)} min`;
 };
 
-/** A repository's ready copy on its project page, for whoever the server lets see it. */
-export function ReadyCopySection({ organizationId, repository, active }: { organizationId: string; repository: string; active: boolean }) {
-  const key = JSON.stringify([organizationId, repository.toLowerCase()]);
-  const read = useRecoveringRead(copies, key, () => getCloudReadyCopy(organizationId, repository).catch(absent), { enabled: active, maxAgeMs: 30_000 });
+/** A project's ready copy on its project page, for whoever the server lets see it. */
+export function ReadyCopySection({ organizationId, projectId, active }: { organizationId: string; projectId: string; active: boolean }) {
+  const key = JSON.stringify([organizationId, projectId]);
+  const read = useRecoveringRead(copies, key, () => getCloudReadyCopy(organizationId, projectId).catch(absent), { enabled: active, maxAgeMs: 30_000 });
   const [busy, setBusy] = useState(false), [error, setError] = useState<string | null>(null);
   const [output, setOutput] = useState<{ generation: number; text: string } | null>(null);
   const copy = read.data;
@@ -52,10 +52,10 @@ export function ReadyCopySection({ organizationId, repository, active }: { organ
   const now = Date.now(), line = readyCopyStatusLine(copy.status, now), failure = copy.status.failure;
   const build = async () => {
     setBusy(true); setError(null);
-    try { await buildCloudReadyCopy(organizationId, repository); read.refresh(); } catch (cause) { setError(message(cause)); } finally { setBusy(false); }
+    try { await buildCloudReadyCopy(organizationId, projectId); read.refresh(); } catch (cause) { setError(message(cause)); } finally { setBusy(false); }
   };
   const show = async (generation: number) => {
-    try { setOutput({ generation, text: await getCloudReadyCopyOutput(organizationId, repository, generation) }); } catch (cause) { setError(message(cause)); }
+    try { setOutput({ generation, text: await getCloudReadyCopyOutput(organizationId, projectId, generation) }); } catch (cause) { setError(message(cause)); }
   };
   if (!line && !copy.history?.length) return null;
   return (
@@ -73,7 +73,9 @@ export function ReadyCopySection({ organizationId, repository, active }: { organ
             <BuildHistoryItem key={row.generation} state={RESULT[row.state]} title={`Copy #${row.generation}`}
               details={[relativeAge(row.startedAt, now) && `started ${relativeAge(row.startedAt, now)}`, duration(row.startedAt, row.finishedAt),
                 row.failure ? readyCopyFailureLine({ ...row.failure, nextRetryAt: null }, now).split(".")[0]! : null,
-                row.branch && row.commit ? `${row.branch} @ ${row.commit.slice(0, 7)}` : null, readyCopyTriggerLabel(row.trigger, row.startedBy)]}
+                ...(row.repositories ?? []).map(entry => entry.branch && entry.commit
+                  ? `${row.repositories!.length > 1 ? `${entry.repository} ` : ""}${entry.branch} @ ${entry.commit.slice(0, 7)}` : null),
+                readyCopyTriggerLabel(row.trigger, row.startedBy)]}
               action={row.output ? <Button variant="ghost" size="compact" onClick={() => void show(row.generation)}>Output</Button> : undefined} />
           ))}
         </ul>

@@ -11,7 +11,7 @@ import { BuildSecretsSection } from "../build-secrets-section";
 describe("build secrets", () => {
   it("lists names only, takes a value write-only, and says short values are not searched for", () => {
     const html = renderToStaticMarkup(createElement(BuildSecretsSection, { ownerKey: "k", organizationId: "11111111-1111-4111-8111-111111111111",
-      repository: "withso/zeros", active: true, disabled: false }));
+      projectId: "88888888-8888-4888-8888-888888888881", active: true, disabled: false }));
     expect(html).toContain("NPM_TOKEN");
     expect(html).toContain('aria-label="Remove NPM_TOKEN"');
     expect(html).toMatch(/type="password"[^>]*aria-label="Build secret value"|aria-label="Build secret value"[^>]*type="password"/);

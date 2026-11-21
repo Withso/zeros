@@ -13,13 +13,14 @@ const COPY: Record<string, ReadyCopyFailureCopy> = {
   ready_copy_interrupted: { what: "The build was interrupted.", change: "It is retried automatically." },
   ready_copy_superseded: { what: "A newer build replaced this one.", change: "Nothing to change." },
   ready_copy_base_changed: { what: "The Cloud Computer changed while this built.", change: "It is rebuilt from the new Cloud Computer." },
+  ready_copy_project_changed: { what: "The project changed while this built.", change: "It is rebuilt from the saved project." },
   ready_copy_source_missing: { what: "The copy it updates from was gone.", change: "Build again; it starts from the Cloud Computer." },
   worker_runtime_install_failed: { what: "The Zeros runtime could not be installed on the copy.", change: "Build again." },
   organization_connection_required: { what: "The organization has no GitHub connection for this repository's account.", change: "Connect it in GitHub settings." },
   github_installation_required: { what: "The Zeros GitHub App is no longer installed for this repository's account.", change: "Install it again in GitHub." },
   github_installation_suspended: { what: "The Zeros GitHub App is suspended for this repository's account.", change: "Unsuspend it in GitHub." },
   github_app_access_required: { what: "The Zeros GitHub App can't read this repository.", change: "Add it to the App's repositories in GitHub." },
-  private_repository_removed: { what: "The repository was removed.", change: "Add it again to build its copy." },
+  project_unavailable: { what: "The project was removed, or its member left.", change: "Nothing to change here." },
   organization_unavailable: { what: "The organization can't use the cloud now.", change: "Nothing to change here." },
   ready_copy_failed: { what: "The copy could not be built.", change: "Build again." },
 };
@@ -27,7 +28,7 @@ export const READY_COPY_FAILURE_CODES = Object.keys(COPY);
 export const readyCopyFailureCopy = (reason: string): ReadyCopyFailureCopy => COPY[reason] ?? COPY.ready_copy_failed!;
 
 const TRIGGERS: Record<string, string> = {
-  repository_added: "Repository added", weekly_update: "Weekly update", computer_build: "New Cloud Computer build",
+  project_created: "Project created", repositories_changed: "Repositories changed", weekly_update: "Weekly update", computer_build: "New Cloud Computer build",
   setup_changed: "Setup changed", branch_changed: "Branch changed", secrets_changed: "Build secrets changed", retry: "Retry after a failure",
 };
 export function readyCopyTriggerLabel(trigger: string | null, startedBy: string | null): string | null {
@@ -45,9 +46,10 @@ export function nextRetryWords(nextRetryAt: string | null, now: number): string 
   return `Next try in ${hours} hour${hours === 1 ? "" : "s"}.`;
 }
 
-/** The admin's one line for a failed repository: what, where, what to change, when it retries. */
-export function readyCopyFailureLine(failure: { reason: string; detail: string | null; nextRetryAt?: string | null }, now: number): string {
+/** The one line for a project's failed copy: which repository, what, where, what to change, when it retries. */
+export function readyCopyFailureLine(failure: { reason: string; repository?: string | null; detail: string | null; nextRetryAt?: string | null }, now: number): string {
   const copy = readyCopyFailureCopy(failure.reason);
+  const repository = failure.repository ? `${failure.repository}: ` : "";
   const where = failure.detail && failure.reason === "ready_copy_secret_left" ? ` In ${failure.detail}.` : "";
-  return `${copy.what}${where} ${copy.change} ${nextRetryWords(failure.nextRetryAt ?? null, now)}`.replace(/\s+/g, " ").trim();
+  return `${repository}${copy.what}${where} ${copy.change} ${nextRetryWords(failure.nextRetryAt ?? null, now)}`.replace(/\s+/g, " ").trim();
 }

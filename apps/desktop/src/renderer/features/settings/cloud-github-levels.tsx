@@ -10,16 +10,16 @@ import { useRecoveringRead } from "../../state/use-recovering-read";
 import { shellOpenUrl } from "../../platform/app";
 import { ControlPlaneError } from "../team/control-plane";
 import {
-  addCloudRepository, connectCloudGithubInstallation, disconnectCloudGithubConnection, getCloudGithubConnectionRepositories,
-  getCloudGithubLevelConnections, getCloudGithubVisibleInstallations, getCloudRepositoryLevels, setCloudPersonalRepositoriesAllowed,
-  type CloudGithubLevelConnection, type CloudGithubLevelConnections, type CloudGithubVisibleInstallation, type CloudRepositoryLevels,
+  connectCloudGithubInstallation, disconnectCloudGithubConnection, getCloudGithubConnectionRepositories,
+  getCloudGithubLevelConnections, getCloudGithubVisibleInstallations, getCloudProjects, projectForRepository, setCloudPersonalProjectsAllowed,
+  type CloudGithubLevelConnection, type CloudGithubLevelConnections, type CloudGithubVisibleInstallation, type CloudProjects,
 } from "../../platform/cloud-github-levels";
 import { message } from "./cloud-computer-store";
 import { SettingsGroup, SettingsRow } from "./settings-ui";
 
 /** Null: this control plane has no GitHub levels (ready copies off or older). */
 export const githubLevelConnections = new KeyedAsyncCache<CloudGithubLevelConnections | null>({ maxEntries: 16 });
-export const cloudRepositoryLevels = new KeyedAsyncCache<CloudRepositoryLevels | null>({ maxEntries: 16 });
+export const cloudProjects = new KeyedAsyncCache<CloudProjects | null>({ maxEntries: 16 });
 const installations = new KeyedAsyncCache<CloudGithubVisibleInstallation[]>({ maxEntries: 16 });
 const absent = (error: unknown) => { if (error instanceof ControlPlaneError && error.status === 404) return null; throw error; };
 export const githubLevelsKey = (userId: string, organizationId: string) => JSON.stringify([userId, organizationId]);
@@ -28,10 +28,16 @@ export function useGithubLevels(userId: string, organizationId: string, active: 
   const key = githubLevelsKey(userId, organizationId);
   const connections = useRecoveringRead(githubLevelConnections, key, () => getCloudGithubLevelConnections(organizationId).catch(absent),
     { enabled: active, maxAgeMs: 30_000 });
-  const repositories = useRecoveringRead(cloudRepositoryLevels, key, () => getCloudRepositoryLevels(organizationId).catch(absent),
+  const projects = useRecoveringRead(cloudProjects, key, () => getCloudProjects(organizationId).catch(absent),
     { enabled: active && connections.data !== null, maxAgeMs: 30_000 });
-  return { key, connections: connections.data, repositories: repositories.data,
-    refresh: () => { connections.refresh(); repositories.refresh(); } };
+  return { key, connections: connections.data, projects: projects.data,
+    refresh: () => { connections.refresh(); projects.refresh(); } };
+}
+
+/** The one-repository project whose cloud settings a repository's page shows; null until known or when none. */
+export function useCloudProjectFor(userId: string, organizationId: string, repository: string | null | undefined, active: boolean) {
+  const levels = useGithubLevels(userId, organizationId, active && !!organizationId);
+  return projectForRepository(levels.projects, repository);
 }
 
 /** One fix for each GitHub edge state, reusing the reasons Create shows. */
@@ -96,39 +102,31 @@ export function GithubConnectionsSection({ userId, organizationId, level, canMan
             onClick={() => void run(() => connectCloudGithubInstallation(organizationId, Number(choice), level))}>Connect</Button>
         </div>
       )}
-      <ConnectionRepositories organizationId={organizationId} connection={open} onClose={() => { setOpen(null); levels.refresh(); }}
-        addLevel={level === "organization" && canManage ? "shared" : "private"} canAdd={level === "personal" || canManage} />
+      <ConnectionRepositories organizationId={organizationId} connection={open} onClose={() => { setOpen(null); levels.refresh(); }} />
     </SettingsGroup>
   );
 }
 
-/** The drawer: what the caller can read through one connection, what is
- * already added, and Add to cloud at this connection's level. */
-export function ConnectionRepositories({ organizationId, connection, onClose, addLevel, canAdd }: {
-  organizationId: string; connection: CloudGithubLevelConnection | null; onClose(): void; addLevel: "shared" | "private"; canAdd: boolean;
+/** The drawer: every repository the caller can read through one connection,
+ * and which of their projects use each. Projects pick from these; nothing is added here. */
+export function ConnectionRepositories({ organizationId, connection, onClose }: {
+  organizationId: string; connection: CloudGithubLevelConnection | null; onClose(): void;
 }) {
   const key = connection ? JSON.stringify([organizationId, connection.id]) : null;
   const read = useRecoveringRead(drawers, key, () => getCloudGithubConnectionRepositories(organizationId, connection!.id), { enabled: !!connection, maxAgeMs: 15_000 });
-  const [error, setError] = useState<string | null>(null), [busy, setBusy] = useState<string | null>(null);
-  const add = async (repository: string) => {
-    setBusy(repository); setError(null);
-    try { await addCloudRepository(organizationId, repository, addLevel, connection?.id); read.refresh(); }
-    catch (cause) { setError(message(cause)); } finally { setBusy(null); }
-  };
   return (
     <Sheet open={!!connection} onOpenChange={value => { if (!value) onClose(); }}>
       <SheetContent side="right" className="p-6">
         <SheetHeader>
           <SheetTitle>{connection?.accountLogin ?? ""}</SheetTitle>
-          <SheetDescription>{addLevel === "shared" ? "Added repositories are available to everyone in the organization." : "Added repositories are only yours."}</SheetDescription>
+          <SheetDescription>Repositories this connection can read. Projects pick their repositories from these.</SheetDescription>
         </SheetHeader>
-        {error && <MessageRow tone="error" role="alert" flush>{error}</MessageRow>}
+        {read.error && <MessageRow tone="error" role="alert" flush>{message(read.error)}</MessageRow>}
         <ul className="m-0 flex list-none flex-col gap-2 overflow-y-auto p-0" aria-label="Repositories">
           {(read.data?.repositories ?? []).map(row => (
             <li key={row.id} className="flex items-center justify-between gap-2">
               <span className="text-fg1 truncate text-xs">{row.repository}</span>
-              {row.added ? <Badge>{row.added === "shared" ? "Shared" : "Only you"}</Badge>
-                : canAdd && <Button variant="secondary" size="sm" disabled={busy !== null} onClick={() => void add(row.repository)}>Add to cloud</Button>}
+              {row.projects.length > 0 && <Badge>{row.projects.length === 1 ? `In ${row.projects[0]!.name}` : `In ${row.projects.length} projects`}</Badge>}
             </li>
           ))}
         </ul>
@@ -138,20 +136,20 @@ export function ConnectionRepositories({ organizationId, connection, onClose, ad
 }
 const drawers = new KeyedAsyncCache<Awaited<ReturnType<typeof getCloudGithubConnectionRepositories>>>({ maxEntries: 16 });
 
-export const PERSONAL_REPOSITORIES_HINT = "Members may add repositories only they can use. Turning this off stops their copies from refreshing and new workspaces of them; existing workspaces keep working.";
+export const PERSONAL_PROJECTS_HINT = "Members may keep projects only they can use. Turning this off stops their copies from refreshing and new workspaces of them; existing workspaces keep working.";
 
-/** Owners and admins allow or forbid repositories for one member. */
-export function PersonalRepositoriesSetting({ userId, organizationId, canManage, active }: { userId: string; organizationId: string; canManage: boolean; active: boolean }) {
+/** Owners and admins allow or forbid projects for one member. */
+export function PersonalProjectsSetting({ userId, organizationId, canManage, active }: { userId: string; organizationId: string; canManage: boolean; active: boolean }) {
   const levels = useGithubLevels(userId, organizationId, active);
   const [error, setError] = useState<string | null>(null);
-  if (!levels.repositories) return null;
-  const allowed = levels.repositories.personalAllowed;
+  if (!levels.projects) return null;
+  const allowed = levels.projects.personalAllowed;
   return (
     <SettingsGroup>
       {error && <MessageRow tone="error" role="alert" flush>{error}</MessageRow>}
-      <SettingsRow label="Repositories for one member" hint={canManage ? PERSONAL_REPOSITORIES_HINT : "Managed by admins"}>
-        <Switch checked={allowed} disabled={!canManage} aria-label="Repositories for one member"
-          onCheckedChange={value => void setCloudPersonalRepositoriesAllowed(organizationId, value).then(levels.refresh, cause => setError(message(cause)))} />
+      <SettingsRow label="Projects for one member" hint={canManage ? PERSONAL_PROJECTS_HINT : "Managed by admins"}>
+        <Switch checked={allowed} disabled={!canManage} aria-label="Projects for one member"
+          onCheckedChange={value => void setCloudPersonalProjectsAllowed(organizationId, value).then(levels.refresh, cause => setError(message(cause)))} />
       </SettingsRow>
     </SettingsGroup>
   );

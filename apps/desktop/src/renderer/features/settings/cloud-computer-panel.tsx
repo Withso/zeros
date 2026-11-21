@@ -10,11 +10,15 @@ import { assertComputerOwner, computerKey, computers, MAX_REPOSITORIES, message,
 import { SettingsGroup, SettingsRow, SettingsSection } from "./settings-ui";
 import { BuildHistoryItem } from "./build-history";
 import { readyCopyFailureLine } from "./ready-copy-copy";
+import { retryCloudReadyCopy } from "../../platform/cloud-github-levels";
+
+/** With projects on, the Cloud Computer holds tools only. */
+export const CLOUD_COMPUTER_TOOLS_ONLY = "The Cloud Computer holds tools only: the runtime, Git LFS and your install script. Repositories belong to projects, each with its own ready copy.";
 import { CloudRepositoryChooser } from "./cloud-repository-chooser";
 import type { ChooserRepository } from "./cloud-repository-chooser-model";
 import {
   activateCloudV2Build, buildCloudV2Computer, buildConfiguredCloudV2Computer, discardCloudV2ComputerRecipe,
-  getCloudV2Computer, getCloudV2InstallScript, retryCloudV2ReadyCopy, saveCloudV2InstallScript, type CloudV2Build, type CloudV2RepositoryDraft,
+  getCloudV2Computer, getCloudV2InstallScript, saveCloudV2InstallScript, type CloudV2Build, type CloudV2RepositoryDraft,
 } from "../../platform/cloud-v2";
 import { KeyedAsyncCache } from "../../shared/lib/keyed-async-cache";
 import { computerChanges, computerStatus, editableRepositories, historyNote, relativeAge, type ComputerStatus } from "./cloud-computer-model";
@@ -153,11 +157,11 @@ function CloudComputerScope({ userId, organizationId, canManage, active, openRep
       </SettingsGroup>
 
       {data?.readyCopies && (data.readyCopyFailures?.length ?? 0) > 0 && (
-        <SettingsGroup title="Ready copies" description="A repository whose ready copy failed keeps the previous one; new workspaces clone directly until one is ready.">
+        <SettingsGroup title="Ready copies" description="A project whose ready copy failed keeps the previous one; new workspaces clone directly until one is ready.">
           {data.readyCopyFailures!.map(failure => (
-            <SettingsRow key={failure.repository} label={failure.repository} hint={readyCopyFailureLine(failure, Date.now())}>
+            <SettingsRow key={failure.projectId} label={failure.project} hint={readyCopyFailureLine(failure, Date.now())}>
               <Button variant="ghost" size="sm" disabled={busy}
-                onClick={() => void run(() => retryCloudV2ReadyCopy(organizationId, failure.repository))}>Retry now</Button>
+                onClick={() => void run(() => retryCloudReadyCopy(organizationId, failure.projectId))}>Retry now</Button>
             </SettingsRow>
           ))}
         </SettingsGroup>
@@ -168,7 +172,12 @@ function CloudComputerScope({ userId, organizationId, canManage, active, openRep
           onSave={script => void saveScript(script)} />
       )}
 
-      {/* With ready copies each repository is set up in its own copy, from its project page. */}
+      {/* Projects: the Cloud Computer is tools only; repositories belong to projects. */}
+      {data?.readyCopies && (
+        <SettingsGroup title="Repositories">
+          <SettingsRow label="Tools only" hint={CLOUD_COMPUTER_TOOLS_ONLY} />
+        </SettingsGroup>
+      )}
       {!data?.readyCopies && <SettingsGroup title="Repositories" description="Changes apply after the next build.">
         <CloudRepositoryChooser userId={userId} organizationId={organizationId} active={active}
           disabled={locked || data === undefined} chosenCount={configured.length} isChosen={isChosen}

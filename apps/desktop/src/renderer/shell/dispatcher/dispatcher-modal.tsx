@@ -623,8 +623,8 @@ function ActiveDispatcherPage({
     requestUserSettingsSection("cloud-computer");
     dispatch({ type: "SET_ACTIVE_PAGE", page: "settings" });
   };
-  // Two GitHub levels: repositories are added in GitHub settings, the organization's
-  // page for owners and admins, Personal › GitHub for members and one-person organizations.
+  // Projects: repositories come from what GitHub connections can read, managed on the
+  // organization's page for owners and admins, Personal › GitHub for members and one-person organizations.
   const leveled = (cloud.computerRepositories ?? []).some(repository => repository.level);
   const githubLevels = useGithubLevels(me?.user.id ?? "", activeOrganization && !activeOrganization.isPersonal ? activeOrganization.id : "",
     active && unified && leveled && !!me);

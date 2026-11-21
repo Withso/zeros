@@ -50,7 +50,7 @@ beforeEach(() => {
 });
 
 describe("Cloud Computer settings panel", () => {
-  it("with ready copies, offers build, history and the install script, and no repository list", () => {
+  it("with projects, offers build, history and the install script, and says it holds tools only", () => {
     state.data = { ...state.data!, readyCopies: true, installScript: "sudo -n apt-get install -y jq" };
     const html = render(), page = text(html);
     expect(page).toContain("Build computer");
@@ -58,18 +58,20 @@ describe("Cloud Computer settings panel", () => {
     expect(page).toContain("Install script");
     expect(html).toContain("sudo -n apt-get install -y jq");
     expect(html).not.toContain("data-chooser");
-    expect(page).not.toContain("Repositories");
+    expect(page).toContain("The Cloud Computer holds tools only: the runtime, Git LFS and your install script. Repositories belong to projects, each with its own ready copy.");
   });
 
   it("names where a ready copy kept a build secret and how to avoid it", () => {
     state.data = { ...state.data!, readyCopies: true, installScript: null, readyCopyFailures: [
-      { repository: "withso/zeros", generation: 2, reason: "ready_copy_secret_left", detail: "/home/user/withso/zeros/.npmrc", finishedAt: ago(day),
+      { projectId: "88888888-8888-4888-8888-888888888881", project: "zeros", repository: "withso/zeros", step: "secret_search", generation: 2,
+        reason: "ready_copy_secret_left", detail: "/home/user/withso/zeros/.npmrc", finishedAt: ago(day),
         failures: 2, nextRetryAt: new Date(Date.now() + 2 * 60 * 60_000).toISOString() },
-      { repository: "withso/web", generation: 5, reason: "ready_copy_setup_failed", detail: null, finishedAt: ago(day), failures: 5, nextRetryAt: null }] };
+      { projectId: "88888888-8888-4888-8888-888888888882", project: "app", repository: "withso/web", step: "setup", generation: 5,
+        reason: "ready_copy_setup_failed", detail: null, finishedAt: ago(day), failures: 5, nextRetryAt: null }] };
     const page = text(render()).replace(/&#x27;/g, "'");
     expect(page).toContain("Ready copies");
-    expect(page).toContain("A build secret was left on the disk. In /home/user/withso/zeros/.npmrc. Read it from the environment in setup; don't write it to a file. Next try in 2 hours.");
-    expect(page).toContain("Setup failed. Check the setup command and its output, then save it or build again. Automatic retries stopped; change something or retry now.");
+    expect(page).toContain("withso/zeros: A build secret was left on the disk. In /home/user/withso/zeros/.npmrc. Read it from the environment in setup; don't write it to a file. Next try in 2 hours.");
+    expect(page).toContain("withso/web: Setup failed. Check the setup command and its output, then save it or build again. Automatic retries stopped; change something or retry now.");
     expect(page).not.toMatch(/ready_copy_/);
     expect(page.match(/Retry now/g)).toHaveLength(2);
   });
