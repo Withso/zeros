@@ -322,6 +322,7 @@ export const scenarioRegistry = [
     800,
   ),
   shared("pr-actions", "pr-actions", "runPrActionsSmoke", 1100, 800),
+  shared("cloud-projects", "cloud-projects", "runCloudProjectsSmoke", 1440, 900),
   shared(
     "activity-disclosure",
     "activity-disclosure",
