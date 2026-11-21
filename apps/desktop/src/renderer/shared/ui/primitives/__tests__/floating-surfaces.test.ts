@@ -165,7 +165,12 @@ describe("Popover", () => {
     expect(popover).toContain('sm: "w-60"');
     expect(popover).toContain('md: "w-80"');
     expect(popover).toContain('lg: "w-100"');
-    expect(popover).toContain('padding === "default" ? "p-3" : "p-0"');
+    expect(popover).toMatch(/default: "p-3",\s*none: "p-0"/);
+  });
+
+  it("fits a single-action surface to its content inside the menu inset", () => {
+    expect(popover).toContain('fit: "w-fit"');
+    expect(popover).toContain("inset: MENU_SURFACE_INSET");
   });
 
   // Regression: the @, / and # pickers docked on the composer floated on bg3
