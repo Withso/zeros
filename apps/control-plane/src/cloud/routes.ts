@@ -48,7 +48,9 @@ export type CloudGithubWorkspaceDocument = CloudV2Workspace & {
   root?: string;
   repositories?: { repository: string; checkoutPath: string; branch: string; baseBranch: string; github?: CloudGithubRepositoryState;
     /** setup-status-v1: this repository's own setup status. */
-    setup?: CloudV2SetupStatus }[];
+    setup?: CloudV2SetupStatus;
+    /** A later repository's environment files: seeded (`ready`), refused (`failed`), or not available in shared execution. */
+    environment?: { state: "ready" | "failed" | "unavailable"; errorCode?: string } }[];
   /** The project the workspace was created from, by its current name. */
   project?: { id: string; name: string };
 };

@@ -19,7 +19,7 @@ const exec = promisify(execFile);
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
 
-async function fixture(options: { setup?: boolean } = {}) {
+async function fixture(options: { setup?: boolean; environment?: boolean; acting?: boolean } = {}) {
   const directory = await mkdtemp(join(tmpdir(), "worker-repositories-"));
   cleanups.push(() => rm(directory, { recursive: true, force: true }));
   const root = join(directory, "zeros-app"), state = join(directory, "state");
@@ -32,15 +32,19 @@ async function fixture(options: { setup?: boolean } = {}) {
     await git("config", "user.name", "Fixture"); await git("config", "user.email", "fixture@example.invalid");
     await writeFile(join(checkout, "readme.txt"), `${name}\n`);
     if (name === "web") await writeFile(join(checkout, "CLAUDE.md"), "web instructions\n");
+    await writeFile(join(checkout, ".gitignore"), ".env.local\n");
     await git("add", "."); await git("commit", "-m", "initial");
     await git("switch", "-c", "zeros/app");
   }
   const repository = (name: string, owner = "withso") => ({ repository: `${owner}/${name}`, checkoutPath: join(root, name), branch: "zeros/app", baseBranch: "main",
-    ...(options.setup && name === "web" ? { setup: "true" } : {}) });
+    ...(options.setup && name === "web" ? { setup: "true" } : {}),
+    ...(options.environment && name === "web" ? { environment: { versionId: "88888888-8888-4888-8888-888888888888", repositoryId: "43",
+      variables: {}, files: [{ path: ".env.local", content: "WEB_VALUE=synthetic-web\n" }] } } : {}) });
   const workspace = { ...config.workspace, repository: "withso/api", checkoutPath: join(root, "api"), branch: "zeros/app", baseBranch: "main",
     root, repositories: [repository("api"), repository("web")] };
   const relay = Object.assign(new FakeRelay(), {
-    reportSetup: vi.fn(async (_status: unknown) => {}), reportRepositorySetup: vi.fn(async (_repository: string, _status: unknown) => {}) });
+    reportSetup: vi.fn(async (_status: unknown) => {}), reportRepositorySetup: vi.fn(async (_repository: string, _status: unknown) => {}),
+    reportRepositoryEnvironment: vi.fn(async (_repository: string, _report: unknown) => {}) });
   const prepareCheckout = vi.fn(async () => ({ createdBranch: options.setup === true }));
   const cloneCheckout = vi.fn(async () => false);
   const setupRunner = vi.fn(async () => 0);
@@ -144,4 +148,12 @@ it("reports a later repository's setup under its own name, never as the workspac
   expect(new Set(f.relay.reportRepositorySetup.mock.calls.map(([repository]) => repository))).toEqual(new Set(["withso/web"]));
   // The first repository has no setup here: nothing reports as the workspace's own.
   expect(f.relay.reportSetup.mock.calls.filter(([status]) => (status as { state?: string } | undefined)?.state === "succeeded")).toEqual([]);
+});
+
+it("seeds a later repository's own environment into its own checkout, reported under its name", async () => {
+  const f = await fixture({ environment: true });
+  await vi.waitFor(() => expect(f.relay.reportRepositoryEnvironment).toHaveBeenCalled());
+  expect(f.relay.reportRepositoryEnvironment.mock.calls.map(call => call.slice(0, 2))).toEqual([["withso/web", { versionId: "88888888-8888-4888-8888-888888888888", sequence: 1, state: "ready" }]]);
+  expect(await readFile(join(f.root, "web", ".env.local"), "utf8")).toBe("WEB_VALUE=synthetic-web\n");
+  await expect(readFile(join(f.root, "api", ".env.local"))).rejects.toMatchObject({ code: "ENOENT" });
 });

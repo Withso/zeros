@@ -106,12 +106,18 @@ class ActingRelay extends FakeRelay {
   }
 }
 
-async function setup(options: { identitySource?: "creator" | "actor"; creatorIdentity?: { name: string; email: string }; agentLogins?: Record<string, true>; freshCheckout?: boolean; bootstrapError?: unknown; activated?: boolean; bootstrap?: string; survivors?: number; noSweep?: boolean; beforeStart?: (home: string) => Promise<void>; environment?: unknown; log?: (line: string) => void; setupRunner?: (...args: any[]) => Promise<number>; checkout?: () => void; clone?: (repository: string) => void; several?: boolean } = {}) {
+async function setup(options: { identitySource?: "creator" | "actor"; creatorIdentity?: { name: string; email: string }; agentLogins?: Record<string, true>; freshCheckout?: boolean; bootstrapError?: unknown; activated?: boolean; bootstrap?: string; survivors?: number; noSweep?: boolean; beforeStart?: (home: string) => Promise<void>; environment?: unknown; log?: (line: string) => void; setupRunner?: (...args: any[]) => Promise<number>; checkout?: () => void; clone?: (repository: string) => void; several?: boolean; webEnvironment?: boolean; repositoryReports?: unknown[] } = {}) {
   const directory = await mkdtemp(join(tmpdir(), "zeros-acting-")); directories.push(directory);
   const root = join(directory, "checkout"); await mkdir(root);
   // An existing checkout (a later process on this boot, or an earlier boot's): nothing to clone without a bootstrap.
   if (!options.freshCheckout) await mkdir(join(root, ".git"));
-  const relay = new ActingRelay(), drivers: FakeDriver[] = [];
+  const relay = Object.assign(new ActingRelay(), options.repositoryReports
+    ? { reportRepositoryEnvironment: async (...args: unknown[]) => { options.repositoryReports!.push(args); } } : {}), drivers: FakeDriver[] = [];
+  if (options.webEnvironment) {
+    // A real second checkout that ignores .env.local, so a seed there would succeed if it were ever attempted.
+    const web = join(directory, "web"); await mkdir(web);
+    execFileSync("git", ["init", "-q"], { cwd: web }); await writeFile(join(web, ".gitignore"), ".env.local\n");
+  }
   if (options.bootstrapError) relay.bootstrapError = options.bootstrapError;
   let socketPath = "";
   const home = join(directory, "home"); await mkdir(home);
@@ -128,7 +134,9 @@ async function setup(options: { identitySource?: "creator" | "actor"; creatorIde
   await (options.bootstrapError || options.freshCheckout || (options.bootstrap && options.survivors) ? (p: Promise<unknown>) => p.catch(() => {}) : (p: Promise<unknown>) => p)(relay.receive({ ...config, workspace: { ...config.workspace, checkoutPath: root, ...(options.setupRunner ? { setup: "make bootstrap" } : {}),
       ...(options.several ? { root: directory, repositories: [
         { repository: config.workspace.repository, checkoutPath: root, branch: config.workspace.branch, baseBranch: config.workspace.baseBranch },
-        { repository: "withso/web", checkoutPath: join(directory, "web"), branch: config.workspace.branch, baseBranch: config.workspace.baseBranch }] } : {}) }, promptOutbox: 1,
+        { repository: "withso/web", checkoutPath: join(directory, "web"), branch: config.workspace.branch, baseBranch: config.workspace.baseBranch,
+          ...(options.webEnvironment ? { environment: { versionId: "88888888-8888-4888-8888-888888888888", repositoryId: "43", variables: {},
+            files: [{ path: ".env.local", content: "CREATOR_VALUE=synthetic-creator\n" }] } } : {}) }] } : {}) }, promptOutbox: 1,
     ...(options.bootstrap ? { bootstrapContextId: options.bootstrap } : {}),
     ...(options.environment ? { environment: options.environment } : {}), agents: options.activated === false ? { claude: { apiKey: "creator-claude-key-000" } } : {},
     ...(options.agentLogins ? { agentLogins: options.agentLogins } : {}),
@@ -448,6 +456,14 @@ it("clones a missing repository after the first as the starter, from the same bo
   const cloned: Array<[string, unknown]> = [];
   await setup({ bootstrap: BOOT, several: true, clone: repository => { cloned.push([repository, operationEnvironment.getStore()]); } });
   expect(cloned).toEqual([["withso/web", expect.objectContaining({ git: expect.objectContaining({ GIT_AUTHOR_NAME: "Sam" }), zeros: { ZEROS_EXECUTION_CONTEXT: BOOT } })]]);
+});
+
+it("never seeds a later repository's files in a shared workspace, whatever its configuration carries", async () => {
+  const BOOT = "77777777-7777-4777-8777-777777777777", reports: unknown[] = [];
+  const f = await setup({ bootstrap: BOOT, several: true, webEnvironment: true, repositoryReports: reports, clone: () => {} });
+  await new Promise(resolve => setTimeout(resolve, 200));
+  await expect(readFile(join(f.directory, "web", ".env.local"))).rejects.toMatchObject({ code: "ENOENT" });
+  expect(reports).toEqual([]);
 });
 
 it("interrupts a running turn whose context is revoked, and retires it as revoked", async () => {

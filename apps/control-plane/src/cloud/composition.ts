@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { otherRepositories, workerRepositories, workspaceTokenSource, type WorkerRepositoryConfig } from "./workspace-repositories.js";
 import { repositorySetupReports } from "./workspace-repository-setup.js";
+import type { CloudWorkspaceEnvironment } from "./environment-contract.js";
 import { workspaceCheckoutPath } from "./workspace-layout.js";
 import { withExecutionLifetimeRetry } from "./execution/lifetime.js";
 // Assembles cloud workspace v2 from configuration: one store, Boat, the relay
@@ -301,9 +302,13 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
   /** Whether the workspace's VM is a fork of its project's ready copy, whose build ran each setup. */
   const forkedFromCopy = async (workspaceId: string) => !!readyCopies && !!(await readyCopies.forkOf(workspaceId))?.sandboxId;
   /** Several repositories: the project folder and each repository, the first with the binding the config already names. */
-  const repositoriesConfig = (layout: Awaited<ReturnType<typeof workerRepositories>>, first: WorkerRepositoryConfig["github"] | undefined) =>
-    layout.root && layout.repositories ? { root: layout.root, repositories: layout.repositories.map((entry, index) =>
-      index === 0 ? { ...entry, ...(first ? { github: first } : {}), ...(layout.firstSetup ?? {}) } : entry) } : {};
+  const repositoriesConfig = (layout: Awaited<ReturnType<typeof workerRepositories>>, first: WorkerRepositoryConfig["github"] | undefined,
+    environments?: ReadonlyMap<string, CloudWorkspaceEnvironment>) =>
+    layout.root && layout.repositories ? { root: layout.root, repositories: layout.repositories.map((entry, index) => {
+      if (index === 0) return { ...entry, ...(first ? { github: first } : {}), ...(layout.firstSetup ?? {}) };
+      const environment = entry.github ? environments?.get(entry.github.repositoryId) : undefined;
+      return environment ? { ...entry, environment } : entry;
+    }) } : {};
   const workerConfig = async (workspace: CloudV2Workspace & Partial<Pick<CloudV2WorkerSession, "loginRevision" | "executionMode">>, mode: "admission" | "continuation" = "admission",
     proof?: CloudSourceProof): Promise<ConfigFrame> => {
     if (workspace.executionMode === "active" || workspace.executionMode === undefined && await execution.active(workspace.id)) {
@@ -350,8 +355,10 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
     const [access, setup] = await Promise.all([github.workerConfiguration(workspace), github.workspaceSetup(workspace, computers)]);
     const { repositoryBinding } = access;
     const forked = await forkedFromCopy(workspace.id);
-    const { selectedLogins, baseCommit, environment, mcpServers, layout } = await withSystemTx(pool, async tx => ({
+    const { selectedLogins, baseCommit, environment, mcpServers, layout, repositoryEnvironments } = await withSystemTx(pool, async tx => ({
       layout: await workerRepositories(tx, workspace, { forked }),
+      // Creator path: each later repository's own pinned environment.
+      repositoryEnvironments: await environments.resolveRepositories(workspace, tx),
       selectedLogins: await logins.all(workspace.creatorUserId, workspace.organizationId, tx),
       baseCommit: await store.baseCommit(workspace.id, tx),
       environment: await environments.resolve(workspace, tx),
@@ -375,7 +382,7 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
         github: repositoryBinding,
         ...(setup ?? layout.firstSetup ?? {}),
         ...(baseCommit ? { baseCommit } : {}),
-        ...repositoriesConfig(layout, repositoryBinding),
+        ...repositoriesConfig(layout, repositoryBinding, repositoryEnvironments),
       },
       agents,
       ...(environment ? { environment } : {}),
@@ -487,6 +494,7 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
       return { sha256: selected.sha256, channel: selected === runtime };
     },
     environmentReport: (token, bootId, value) => environments.report(token, bootId, value),
+    repositoryEnvironmentReport: (token, bootId, repository, value) => environments.reportRepository(token, bootId, repository, value),
     githubCheckout: (token,bootId,value) => github.metadata.checkout(token,bootId,value),
     ...(mcp ? { mcpAuthorization: async (workspace, id, force) => {
       requireWorkspaceCreator(workspace);

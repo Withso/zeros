@@ -26,7 +26,7 @@ import { NotifyUserService } from "./notify-user/service";
 import { SyncService } from "./workspace/sync-service";
 import { SyncTransferActivity } from "./workspace/sync-activity";
 import { SYNC_CAPABILITY, SYNC_HINT_KIND, SYNC_BATCH_CAPABILITY, SYNC_HAVE_V2_CAPABILITY, SYNC_TRANSFER_OPS } from "@zeros/protocol/workspace-sync";
-import { unsupported, WorkspaceError, WorkspaceScope, type WorkerConfig } from "./workspace/scope";
+import { unsupported, WorkspaceError, WorkspaceScope, type WorkerConfig, type WorkerRepository } from "./workspace/scope";
 import { WorkspaceService, type WorkspaceServiceOptions } from "./workspace/service";
 import { isGitMutation } from "./workspace/git";
 import { GithubBroker, GithubTokens, githubEnvironment, type GithubToken } from "./credentials/github";
@@ -970,6 +970,24 @@ export class CloudWorker {
     return { handle: (op: string) => runtime.service!.handle(op, rest) };
   }
 
+  /** Creator path: a repository after the first seeds its own pinned environment from its own
+   * state directory, and reports under its name. A failure marks only that repository; it never
+   * stops the workspace. Activated (shared execution), no file is ever seeded for a repository
+   * after the first: whatever a configuration carried, it is not this person's. */
+  private async seedRepositoryEnvironment(scope: WorkspaceScope, directory: string, entry: WorkerRepository): Promise<void> {
+    if (!entry.environment || this.acting) return;
+    const report = this.options.transport.reportRepositoryEnvironment?.bind(this.options.transport);
+    if (!report) return;
+    const signal = this.environmentLifetime.signal, versionId = entry.environment.versionId;
+    try { await seedEnvironment(scope, directory, entry.environment, signal); }
+    catch (error) {
+      if (!(error instanceof EnvironmentSeedError) || signal.aborted) throw error;
+      await report(entry.repository, { versionId, sequence: 1, state: "failed", errorCode: error.code }, signal).catch(() => {});
+      return;
+    }
+    await report(entry.repository, { versionId, sequence: 1, state: "ready" }, signal).catch(() => {});
+  }
+
   /** The repositories after the first: each checkout prepared on its branch, its own
    * workspace service (state, Git, files, remote fix-up) and setup. One that cannot be
    * prepared stays unavailable without failing the workspace. */
@@ -987,6 +1005,7 @@ export class CloudWorker {
         const checkout = this.options.runtimeResume ? undefined
           : await asStarter(() => (this.options.prepareCheckout ?? prepareCheckout)(repositoryScope.workspace, this.gitEnvironment, timing));
         runtime.refresh = checkout?.refresh; runtime.createdBranch = checkout?.createdBranch === true;
+        await this.seedRepositoryEnvironment(repositoryScope, directory, entry);
         const run = commandRunner(repositoryScope.root, this.gitEnvironment);
         runtime.service = await WorkspaceService.open(repositoryScope, directory, {
           onStartupTiming: timing, nextCheckoutSequence: () => ++this.checkoutSequence,
