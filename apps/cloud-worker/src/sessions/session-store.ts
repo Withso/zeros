@@ -111,6 +111,10 @@ const established = (data: SessionData | undefined): boolean => !!data && !!(
   data.rows.length || data.inbox.length || data.steers.length
 );
 
+const pendingInput = (data: SessionData | undefined): boolean => !!data && (
+  data.inbox.some(entry => entry.state === "queued") || data.steers.some(steer => steer.outcome === "pending")
+);
+
 export function userMessage(input: PromptInput, steeredTurnId?: string): AgentTextMessage {
   const { bubble } = input;
   return {
@@ -502,6 +506,32 @@ export class SessionStore {
       return chat;
     }, initial);
   }
+
+  /** Moves an established chat to another provider in place. The old provider's
+   * resume identity never carries across families, so it is cleared with the
+   * agent change. Returns false when the chat is no longer on `fromAgentId`. */
+  async switchAgent(chatId: string, input: { fromAgentId: string; agentId: string; agentName: string; model: string | null; effort: string; fast: boolean; row?: CloudV2MessageRow }): Promise<boolean> {
+    return this.change(chatId, (draft) => {
+      const chat = draft.chat;
+      if (!chat || chat.agentId !== input.fromAgentId) return false;
+      if (pendingInput(draft)) throw new WorkspaceError("VALIDATION_FAILED", "Send or remove queued messages before switching agent.");
+      // The switch marker is worker-authored, so unlike a legacy import it is
+      // kept after a history cut.
+      if (input.row && !draft.rows.some(existing => existing.msgId === input.row!.msgId)) {
+        upsertRows(draft.rows, [input.row]);
+        draft.messages = [...draft.messages, ...transcript([input.row])];
+        draft.continuation = (draft.continuation ?? 0) + 1;
+      }
+      draft.nativeSessionId = undefined;
+      chat.agentId = input.agentId; chat.agentName = input.agentName;
+      chat.model = input.model; chat.effort = input.effort; chat.fast = input.fast;
+      chat.sessionId = null; chat.providerBinding = null; chat.providerMetadata = null;
+      chat.updatedAt = Date.now();
+      return true;
+    });
+  }
+
+  hasPendingInput(chatId: string): boolean { return pendingInput(this.sessions.get(chatId)); }
 
   /** A control-plane rename or archive: title and archived only, never
    * updatedAt, and each version at most once. Unknown or deleted chats are

@@ -643,6 +643,30 @@ export async function bridgeChatClearProviderIdentity(
   return result?.ok === true;
 }
 
+/** `unsupported`: a pinned older cloud worker without in-place agent switching. */
+export type ChatSwitchAgentOutcome = "switched" | "stale" | "unsupported";
+
+export async function bridgeChatSwitchAgent(
+  bridge: RuntimeClient,
+  input: {
+    chatId: string;
+    fromAgentId: string;
+    agentId: string;
+    model: string | null;
+    effort: string;
+    fast: boolean;
+    message?: { msgId: string; kind: string; payload: string; createdAt: number };
+  },
+): Promise<ChatSwitchAgentOutcome> {
+  try {
+    const result = (await workspaceOp(bridge, "chats.switchAgent", input, 30_000)) as { ok?: boolean } | undefined;
+    return result?.ok === true ? "switched" : "stale";
+  } catch (error) {
+    if (error instanceof WorkspaceOpError && error.code === "CLOUD_V2_UNSUPPORTED") return "unsupported";
+    throw error;
+  }
+}
+
 export async function bridgeChatBulkUpsert(
   bridge: RuntimeClient,
   chats: ChatRowWire[],
