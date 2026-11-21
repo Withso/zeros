@@ -761,4 +761,42 @@ d("cloud v2 ready copies", () => {
     expect(fetchBase).toHaveBeenCalledOnce();
     expect((await row(1)).lastForkedAt?.getTime()).toBe(clock);
   });
+
+  it("keeps a removed project's workspaces working, private ones private, with nothing left on project_id", async () => {
+    await liveBase();
+    const mine = await project([{ repository: "withso/notes" }], { level: "personal", owner: member, name: "notes" });
+    await copyBuilder().reconcile(org, mine, "project_created");
+    await copyBuilder().tick();
+    await copyBuilder().tick();
+    const store = new CloudV2Store(pool), base = (await copies.base(org))!, projects = new CloudProjects(pool);
+    const make = (projectId: string, repository: string) => store.createWorkspace({ id: randomUUID(), organizationId: org, creatorUserId: member,
+      name: "w", repository, branch: `zeros/${randomUUID().slice(0, 8)}`, baseBranch: "main", computerBuildId: base.buildId, projectId });
+    const shared = await make(zeros, "withso/zeros"), personal = await make(mine, "withso/notes");
+    // Both forked their project's copy; a third is still waiting to be made.
+    for (const made of [shared, personal]) expect(await forks().prepare({ ...made, boatSandboxId: null })).toHaveProperty("sandboxId");
+    const waiting = await make(zeros, "withso/zeros");
+    const images = { shared: await store.workspaceImage(shared.id), personal: await store.workspaceImage(personal.id) };
+    const sandboxes = [(await copies.forkOf(shared.id))!.sandboxId!, (await copies.forkOf(personal.id))!.sandboxId!];
+
+    await projects.remove(org, admin, zeros);
+    await projects.remove(org, member, mine);
+    // Nothing points at the removed projects; the personal workspace stays its member's.
+    expect((await pool.query("SELECT count(*)::int AS n FROM cloud_v2_workspaces WHERE project_id = ANY($1::uuid[])", [[zeros, mine]])).rows[0].n).toBe(0);
+    expect(await store.get(personal.id, member)).toMatchObject({ privateOwnerUserId: member });
+    expect(await store.get(personal.id, member)).not.toHaveProperty("projectId");
+    await expect(store.get(personal.id, admin)).rejects.toMatchObject({ status: 404 });
+    // They keep working: the same machines and states, and a restore starts from the
+    // same Cloud Computer base and clones, needing neither the project nor its copy.
+    expect((await pool.query("SELECT state FROM cloud_v2_workspaces WHERE id = ANY($1::uuid[]) ORDER BY state", [[shared.id, personal.id]])).rows)
+      .toEqual([{ state: "creating" }, { state: "creating" }]);
+    expect({ shared: await store.workspaceImage(shared.id), personal: await store.workspaceImage(personal.id) }).toEqual(images);
+    for (const sandbox of sandboxes) expect(boat.machine(sandbox)!.state).toBe("running");
+    // A create still waiting clones directly: no fork, no copy needed.
+    expect(await forks().prepare({ ...(await store.get(waiting.id, member)), boatSandboxId: null })).toBeNull();
+    expect(await copies.forkOf(waiting.id)).toBeNull();
+    // The copies are retired and their machines deleted; the workspaces' forks are untouched.
+    await copyBuilder().tick();
+    for (const id of [zeros, mine]) expect((await copies.list(org, id)).map(row => row.state)).toEqual(["retired"]);
+    for (const sandbox of sandboxes) expect(boat.machine(sandbox)!.state).toBe("running");
+  });
 });

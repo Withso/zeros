@@ -221,6 +221,11 @@ export class CloudProjects {
         failure_reason=CASE WHEN state='building' THEN 'project_removed' ELSE failure_reason END, updated_at=clock_timestamp()
         WHERE id IN (SELECT id FROM cloud_v2_ready_copies WHERE project_id=$1 AND state IN ('building','ready') ORDER BY id FOR UPDATE)`, [projectId]);
       await tx.query("DELETE FROM cloud_projects WHERE id=$1", [projectId]);
+      // Its workspaces keep working without it: their image is the Cloud Computer base
+      // they were pinned to, and a create still waiting clones directly. A personal
+      // project's stay private (private_owner_user_id is untouched). Cleared after the
+      // delete, which waits for any create holding the project, so none is missed.
+      await tx.query("UPDATE cloud_v2_workspaces SET project_id=NULL WHERE org_id=$1 AND project_id=$2", [organizationId, projectId]);
       if (row.level === "organization") await this.moved(tx, organizationId);
     });
   }
