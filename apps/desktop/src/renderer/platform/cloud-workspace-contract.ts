@@ -69,6 +69,8 @@ export const CloudWorkspaceDocumentSchema = z.object({
     branch: z.string().min(1).max(255),
     baseBranch: z.string().min(1).max(255),
     github: GithubStateSchema.optional(),
+    /** A later repository's environment files: seeded, refused, or not available in shared workspaces yet. */
+    environment: lenient(z.object({ state: z.enum(["ready", "failed", "unavailable"]), errorCode: z.string().max(100).optional() })),
   })).min(2).max(10)),
   generation: z.object({
     number: z.number().int().positive(),
