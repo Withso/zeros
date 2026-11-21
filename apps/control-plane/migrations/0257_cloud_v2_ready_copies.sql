@@ -34,6 +34,8 @@ CREATE TABLE cloud_v2_ready_copies (
   org_id uuid NOT NULL,
   repository text NOT NULL CHECK (repository ~ '^[a-z0-9_.-]{1,100}/[a-z0-9_.-]{1,100}$'),
   repository_id text NOT NULL CHECK (repository_id ~ '^[1-9][0-9]{0,19}$'),
+  -- A private repository's copy belongs to its one member; NULL for a shared repository.
+  owner_user_id uuid,
   generation integer NOT NULL CHECK (generation > 0),
   state text NOT NULL CHECK (state IN ('building','ready','failed','retired')),
   -- Boat's create or fork key for this generation's machine; replayed after a lost reply.
@@ -62,12 +64,12 @@ CREATE TABLE cloud_v2_ready_copies (
   started_at timestamptz,
   heartbeat_at timestamptz,
   finished_at timestamptz,
-  UNIQUE (org_id, repository, generation)
+  UNIQUE NULLS NOT DISTINCT (org_id, repository, owner_user_id, generation)
 );
 -- Concurrent requests for the same repository join one build.
-CREATE UNIQUE INDEX cloud_v2_ready_copies_building ON cloud_v2_ready_copies (org_id, repository) WHERE state = 'building';
+CREATE UNIQUE INDEX cloud_v2_ready_copies_building ON cloud_v2_ready_copies (org_id, repository, owner_user_id) NULLS NOT DISTINCT WHERE state = 'building';
 -- The pointer: at most one ready generation, switched in one transaction.
-CREATE UNIQUE INDEX cloud_v2_ready_copies_ready ON cloud_v2_ready_copies (org_id, repository) WHERE state = 'ready';
+CREATE UNIQUE INDEX cloud_v2_ready_copies_ready ON cloud_v2_ready_copies (org_id, repository, owner_user_id) NULLS NOT DISTINCT WHERE state = 'ready';
 CREATE INDEX cloud_v2_ready_copies_queue ON cloud_v2_ready_copies (created_at, id) WHERE state = 'building';
 CREATE INDEX cloud_v2_ready_copies_cleanup ON cloud_v2_ready_copies (updated_at, id)
   WHERE state IN ('failed','retired') AND machine_deleted_at IS NULL;
