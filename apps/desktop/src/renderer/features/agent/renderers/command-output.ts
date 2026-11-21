@@ -7,9 +7,28 @@ export type CommandOutputPart =
 const HEADER = /^(?:diff --git |index |--- |\+\+\+ |(?:old|new|deleted file|new file) mode |similarity index |dissimilarity index |rename (?:from|to) |copy (?:from|to) |Binary files )/;
 const HUNK = /^@@ -\d+(?:,(\d+))? \+\d+(?:,(\d+))? @@/;
 
-/** A header's file name without its a/ or b/ prefix or diff -u timestamp. */
+const ESCAPES: Record<string, string> = { a: "\x07", b: "\b", f: "\f", n: "\n", r: "\r", t: "\t", v: "\v" };
+
+// Git quotes a path holding non-ASCII or special characters and writes its
+// UTF-8 bytes as octal escapes.
+function unquoteGitPath(quoted: string): string {
+  const bytes: number[] = [];
+  const encoder = new TextEncoder();
+  for (let index = 1; index < quoted.length - 1; index++) {
+    const char = quoted[index];
+    if (char !== "\\") { bytes.push(...encoder.encode(char)); continue; }
+    const next = quoted[++index] ?? "";
+    const octal = /^[0-7]{3}/.exec(quoted.slice(index, index + 3));
+    if (octal) { bytes.push(Number.parseInt(octal[0], 8)); index += 2; }
+    else bytes.push(...encoder.encode(ESCAPES[next] ?? next));
+  }
+  return new TextDecoder().decode(new Uint8Array(bytes));
+}
+
+// A diff -u header carries a tab and a timestamp after the name.
 function headerName(line: string, prefix: string): string | null {
-  const name = line.slice(4).split("\t")[0].trimEnd();
+  const field = line.slice(4).split("\t")[0].trimEnd();
+  const name = field.length > 1 && field.startsWith('"') && field.endsWith('"') ? unquoteGitPath(field) : field;
   if (name === "/dev/null" || !name) return null;
   return name.startsWith(prefix) ? name.slice(prefix.length) : name;
 }
@@ -52,8 +71,8 @@ function readFilePatch(lines: string[], start: number): { end: number; patch: st
   return { end: index, patch: [...headers, ...body].join("\n") + "\n", path: headerPath(headers) };
 }
 
-/** Command output with every complete unified file diff lifted out, so the
- *  diff can render as one while the rest stays plain text. */
+/** Only complete file diffs are lifted out: output cut off mid-hunk stays
+ *  plain text rather than rendering a diff that misstates the change. */
 export function splitCommandOutput(output: string): CommandOutputPart[] {
   const lines = output.split("\n");
   const parts: CommandOutputPart[] = [];
@@ -105,4 +124,14 @@ export function printedFile(rawInput: unknown): { path: string; startLine: numbe
     else files.push(arg);
   }
   return files.length === 1 ? { path: files[0], startLine: command === "tail" ? null : 1 } : null;
+}
+
+/** A literal comparison that exits 1 when it finds differences (`diff`,
+ *  `git diff --no-index` or `--exit-code`), which providers report as a
+ *  failed command. */
+export function comparisonCommand(rawInput: unknown): boolean {
+  const words = literalCommandWords(rawInput);
+  if (!words) return false;
+  if (words[0] === "diff") return true;
+  return words[0] === "git" && words[1] === "diff" && words.some((word) => word === "--no-index" || word === "--exit-code");
 }
