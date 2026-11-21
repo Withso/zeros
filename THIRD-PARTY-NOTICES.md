@@ -49,6 +49,21 @@ The reviewed `patches/ssh2@1.17.0.patch` preserves leading zero bytes in
 fixed-width Ed25519 public keys during OpenSSH encoding. A deterministic
 regression test covers that dependency change.
 
+## Diff and code views
+
+- **Component:** [`@pierre/diffs`](https://diffs.com), pinned to `1.4.1` in the
+  root production dependency graph.
+- **License:** Apache-2.0. Its license is retained in `THIRD-PARTY-LICENSES.txt`.
+- **Use:** the Changes, Files Diff view and chat diff renderers and the
+  editable Diff view.
+
+The reviewed `patches/@pierre__diffs@1.4.1.patch` changes its editor's
+selection handling: a line-number drag keeps its whole-line selection, a new
+primary-button selection inside a removed line replaces the previous one
+(right-click keeps it for Copy), and an editable line-number selection leaves
+removed-text mode so Cut edits the file. Browser regression tests cover each
+change.
+
 ## Generated and vendored code
 
 ### Recorded Design canvas (CanvasKit)
