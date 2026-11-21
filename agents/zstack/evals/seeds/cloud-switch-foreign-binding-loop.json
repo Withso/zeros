@@ -1,0 +1,5 @@
+{
+  "file": "apps/desktop/src/renderer/features/agent/chat-provider-identity-persistence.ts",
+  "before": "  if (!binding || binding.providerId !== chat.agentId) return null;",
+  "after": "  if (!binding) return null;"
+}
