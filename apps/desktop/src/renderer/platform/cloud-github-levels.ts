@@ -20,6 +20,8 @@ const ProjectRepositorySchema = z.object({ repository: z.string().max(201), repo
   position: z.number().int() }).passthrough();
 export const CloudProjectSchema = z.object({
   id: uuid, name: z.string().max(100), level: z.enum(["organization", "personal"]), ownerUserId: uuid.nullable(), canEdit: z.boolean(),
+  /** "Share with <organization>" can succeed now (an admin's own project, every repository reachable); older servers omit it. */
+  canShare: z.boolean().optional().catch(false),
   repositories: z.array(ProjectRepositorySchema).max(10), readyCopy: z.enum(["ready", "building"]).nullable().optional().catch(null),
 }).passthrough();
 export type CloudProject = z.infer<typeof CloudProjectSchema>;
@@ -63,6 +65,23 @@ export const getCloudProjects = (organizationId: string) =>
 export const shareCloudProject = (organizationId: string, projectId: string) =>
   cloudAccountRequest(`${base(organizationId)}/cloud-projects/${uuid.parse(projectId)}/share`, z.object({ project: CloudProjectSchema }).passthrough(),
     { body: {}, idempotencyKey: key() });
+/** A repository as a project names it; its GitHub ID is read by the server as the caller. */
+export type CloudProjectRepositoryInput = { repository: string; defaultBranch?: string | null; setup?: string | null; setupScript?: string | null };
+const ProjectReplySchema = z.object({ project: CloudProjectSchema }).passthrough();
+export const createCloudProject = async (organizationId: string, input: { name: string; level: "organization" | "personal"; repositories: CloudProjectRepositoryInput[] }) =>
+  (await cloudAccountRequest(`${base(organizationId)}/cloud-projects`, ProjectReplySchema, { body: input, idempotencyKey: key() })).project;
+/** A project's name or its whole repository list (each with its branch and setup, in order). */
+export const updateCloudProject = async (organizationId: string, projectId: string, change: { name?: string; repositories?: CloudProjectRepositoryInput[] }) =>
+  (await cloudAccountRequest(`${base(organizationId)}/cloud-projects/${uuid.parse(projectId)}`, ProjectReplySchema,
+    { body: change, idempotencyKey: key(), method: "PATCH" })).project;
+export const removeCloudProject = (organizationId: string, projectId: string) =>
+  cloudAccountRequest(`${base(organizationId)}/cloud-projects/${uuid.parse(projectId)}`, z.unknown(), { body: {}, idempotencyKey: key(), method: "DELETE" });
+/** Create's intent warm-up: the project's access check, so a create seconds later is a cache hit. */
+export const warmCloudProject = (organizationId: string, projectId: string) =>
+  cloudAccountRequest(`${base(organizationId)}/cloud-projects/${uuid.parse(projectId)}/warm`, z.unknown(), { body: {}, idempotencyKey: key() });
+/** The repositories a project keeps, as its saves send them back. */
+export const projectRepositoryInputs = (project: CloudProject): CloudProjectRepositoryInput[] => project.repositories.map(entry => ({
+  repository: entry.repository, defaultBranch: entry.defaultBranch, setup: entry.setup, setupScript: entry.setupScript }));
 export const setCloudPersonalProjectsAllowed = (organizationId: string, personalAllowed: boolean) =>
   cloudAccountRequest(`${base(organizationId)}/cloud-projects/settings`, z.object({ personalAllowed: z.boolean() }),
     { body: { personalAllowed }, idempotencyKey: key(), method: "PUT" });

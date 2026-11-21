@@ -7,10 +7,12 @@ const state = vi.hoisted(() => ({
   role: "owner" as string,
   data: undefined as CloudV2Computer | undefined,
   error: null as Error | null,
+  projects: null as null | { projects: unknown[]; canCreateOrganization: boolean; personalAllowed: boolean },
 }));
+vi.mock("../cloud-github-levels", () => ({ useGithubLevels: () => ({ projects: state.projects }) }));
 vi.mock("../../team/team-store", () => ({
   getOrganizationStoreGeneration: () => 0,
-  useActiveOrganization: () => ({ id: "11111111-1111-4111-8111-111111111111", isPersonal: false, role: state.role }),
+  useActiveOrganization: () => ({ id: "11111111-1111-4111-8111-111111111111", name: "Withso", isPersonal: false, role: state.role }),
   useTeams: () => ({ me: { user: { id: "22222222-2222-4222-8222-222222222222" } } }),
 }));
 vi.mock("../../../state/use-cached-read", () => ({
@@ -58,7 +60,17 @@ describe("Cloud Computer settings panel", () => {
     expect(page).toContain("Install script");
     expect(html).toContain("sudo -n apt-get install -y jq");
     expect(html).not.toContain("data-chooser");
-    expect(page).toContain("The Cloud Computer holds tools only: the runtime, Git LFS and your install script. Repositories belong to projects, each with its own ready copy.");
+    expect(page).toContain("The Cloud Computer holds tools only. Repositories, setup scripts and build secrets belong to projects.");
+    state.projects = { projects: [{}, {}, {}], canCreateOrganization: true, personalAllowed: true };
+    const onNewProject = vi.fn();
+    const withProjects = text(renderToStaticMarkup(createElement(CloudComputerPanel, { onNewProject })));
+    expect(withProjects).toContain("3 projects in Withso");
+    expect(withProjects).toContain("New project");
+    state.projects = { projects: [{}], canCreateOrganization: false, personalAllowed: false };
+    const member = text(renderToStaticMarkup(createElement(CloudComputerPanel, { onNewProject })));
+    expect(member).toContain("1 project in Withso");
+    expect(member).not.toContain("New project");
+    state.projects = null;
   });
 
   it("names where a ready copy kept a build secret and how to avoid it", () => {

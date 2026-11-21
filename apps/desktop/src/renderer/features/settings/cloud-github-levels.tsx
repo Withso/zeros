@@ -12,7 +12,7 @@ import { ControlPlaneError } from "../team/control-plane";
 import {
   connectCloudGithubInstallation, disconnectCloudGithubConnection, getCloudGithubConnectionRepositories,
   getCloudGithubLevelConnections, getCloudGithubVisibleInstallations, getCloudProjects, projectForRepository, setCloudPersonalProjectsAllowed,
-  type CloudGithubLevelConnection, type CloudGithubLevelConnections, type CloudGithubVisibleInstallation, type CloudProjects,
+  type CloudGithubLevelConnection, type CloudGithubLevelConnections, type CloudGithubVisibleInstallation, type CloudProject, type CloudProjects,
 } from "../../platform/cloud-github-levels";
 import { message } from "./cloud-computer-store";
 import { SettingsGroup, SettingsRow } from "./settings-ui";
@@ -32,6 +32,14 @@ export function useGithubLevels(userId: string, organizationId: string, active: 
     { enabled: active && connections.data !== null, maxAgeMs: 30_000 });
   return { key, connections: connections.data, projects: projects.data,
     refresh: () => { connections.refresh(); projects.refresh(); } };
+}
+
+/** A saved or created project, shown at once while the list is read again. */
+export function patchCloudProject(key: string, project: CloudProject): void {
+  const current = cloudProjects.peekSnapshot(key).data;
+  if (!current) return;
+  const known = current.projects.some(row => row.id === project.id);
+  cloudProjects.setData(key, { ...current, projects: known ? current.projects.map(row => row.id === project.id ? project : row) : [...current.projects, project] });
 }
 
 /** The one-repository project whose cloud settings a repository's page shows; null until known or when none. */
