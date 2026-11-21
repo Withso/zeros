@@ -101,6 +101,9 @@ export const AttachmentNode = Node.create({
       // decide whether it is "added", so removing the chip with × un-adds the
       // pill for free, with no second list to keep in sync.
       sourceKey: { default: "" },
+      // What the pill shows instead of the file name: a chat selection's or
+      // reply's own text. The name stays the file's, on disk and once sent.
+      label: { default: "", rendered: false },
     };
   },
 

@@ -197,6 +197,8 @@ export interface ComposerEditorApi {
     sourceKey: string;
     name: string;
     text: string;
+    /** Shown on the pill instead of the file name. */
+    label?: string;
     /** Turns the chip's tooltip into the same hover preview its source pill
      *  has. Frozen at staging time — the chip is a file, not a live view. */
     preview?: ComposerAttachmentPreview;
@@ -974,6 +976,7 @@ export function useComposerEditor(
       sourceKey: string;
       name: string;
       text: string;
+      label?: string;
       preview?: ComposerAttachmentPreview;
     }, options?: { focus?: boolean }): AttachmentValidation | null => {
       const ed = editorRef.current;
@@ -1000,6 +1003,7 @@ export function useComposerEditor(
               mimeType,
               kind: "text",
               sourceKey: input.sourceKey,
+              label: input.label ?? "",
             },
           },
           { type: "text", text: " " },

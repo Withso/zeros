@@ -28,7 +28,7 @@
 // ──────────────────────────────────────────────────────────
 
 import { memo, useContext, useMemo, useRef, type SyntheticEvent } from "react";
-import { AlarmClock } from "lucide-react";
+import { AlarmClock, CornerDownRight } from "lucide-react";
 import type { Renderer, RendererContext } from "./types";
 import type {
   AgentTextMessage,
@@ -64,6 +64,7 @@ import { fallbackDisplayText } from "../model-fallback";
 import { wakeupDisplayText } from "../wakeup-notice";
 import { LocalLinkHtml, LocalLinkText } from "../local-links/text";
 import { LocalNoteRow } from "../local-links/note-row";
+import { parseReply, previewText } from "../chat-selection";
 
 type ChatRole = "user" | "assistant" | "system";
 
@@ -143,6 +144,14 @@ export const TextMessage: Renderer<AgentTextMessage> = memo(
         message.segments ? groupMessageSegments(trimTrailingSegments(message.segments)) : undefined,
       [message.segments],
     );
+    // A reply to selected transcript text: a Markdown quote, a blank line, then
+    // the reply, with no pills in between.
+    const reply = useMemo(() => {
+      if (message.role !== "user") return null;
+      if (!displaySegments || displaySegments.length === 0) return parseReply(text);
+      const only = displaySegments.length === 1 ? displaySegments[0] : null;
+      return only?.type === "text" ? parseReply(only.text) : null;
+    }, [message.role, displaySegments, text]);
 
     // Session-continuity notices (resumeBoundary) never render — session
     // rebuilds are invisible by design, with no resume or continuation UI.
@@ -177,7 +186,9 @@ export const TextMessage: Renderer<AgentTextMessage> = memo(
                 : undefined
             }
           >
-            {message.role === "user" &&
+            {reply && !message.attachments?.length ? (
+              <ReplyMessageText quote={reply.quote} reply={reply.reply} />
+            ) : message.role === "user" &&
             displaySegments &&
             displaySegments.length > 0 ? (
               // 2026-06-08 — inline render: text + mention/attachment pills
@@ -264,11 +275,13 @@ export const TextMessage: Renderer<AgentTextMessage> = memo(
                   // trailing whitespace so stray end-of-message newlines/spaces
                   // don't balloon the bubble; interior/leading spacing is kept.
                   // wrap-anywhere: see the segments branch above.
-                  <div className={cn(message.role === "system" ? "leading-5" : "text-reading", "wrap-anywhere whitespace-pre-wrap")}>
-                    <LocalLinkText text={message.role === "user"
-                      ? text.trimEnd()
-                      : text} />
-                  </div>
+                  reply ? <ReplyMessageText quote={reply.quote} reply={reply.reply} /> : (
+                    <div className={cn(message.role === "system" ? "leading-5" : "text-reading", "wrap-anywhere whitespace-pre-wrap")}>
+                      <LocalLinkText text={message.role === "user"
+                        ? text.trimEnd()
+                        : text} />
+                    </div>
+                  )
                 )}
               </>
             )}
@@ -281,6 +294,28 @@ export const TextMessage: Renderer<AgentTextMessage> = memo(
     );
   },
 );
+
+/** A sent reply: the quoted text on one muted line, then ↳ and the reply. */
+function ReplyMessageText({ quote, reply }: { quote: string; reply: string }) {
+  const line = previewText(quote);
+  return (
+    <div data-reply-message="" className="flex min-w-0 flex-col gap-0.5">
+      <Tooltip label={line}>
+        <blockquote data-reply-quote="" className="text-fg3 flex min-w-0 text-sm">
+          <span aria-hidden="true">“</span>
+          <span className="min-w-0 truncate">{line}</span>
+          <span aria-hidden="true">”</span>
+        </blockquote>
+      </Tooltip>
+      <div className="flex min-w-0 items-start gap-1.5">
+        <CornerDownRight aria-hidden="true" className="text-fg3 mt-1 size-3.5 shrink-0" />
+        <div className="text-reading min-w-0 wrap-anywhere whitespace-pre-wrap">
+          <LocalLinkText text={reply} />
+        </div>
+      </div>
+    </div>
+  );
+}
 
 /** Single chip on a user bubble showing an attached file. Same
  *  pill shape as the composer's chips so the UI reads as one

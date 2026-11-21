@@ -78,6 +78,9 @@ import {
 } from "./composer-editor";
 import { QueuedMessagesCard } from "./queued-messages-card";
 import { cloudQueuedPrompt } from "./cloud-queued-prompt";
+import { textFileAttachment } from "./composer-editor/attachment-io";
+import { chatAttachmentName, formatReply, replyMessage, replySendBlocker } from "./chat-selection";
+import { ChatSelectionPopup, stageChatText } from "./chat-selection-popup";
 import { agentActivity, chatAgentActivity } from "./agent-activity";
 import { EmbeddedTerminalCommand } from "./embedded-terminal-command";
 import { AddedDirectories } from "./added-directories";
@@ -4447,6 +4450,23 @@ function AgentChatBody({
     ],
   );
 
+  // A reply sent at once, beside the composer's draft rather than with it.
+  const sendChatReply = (quote: string, reply: string): boolean => {
+    const blocker = replySendBlocker({
+      sendInFlight: sendInFlightRef.current,
+      provisioning: workspaceProvisioning,
+      permission: sendPastPermission({ permissionPending: !!session.pendingPermission, planReview: !!planReview, status: session.status }),
+    });
+    if (blocker) {
+      toast.info(blocker.title, { description: blocker.description });
+      return false;
+    }
+    const message = replyMessage(quote, reply);
+    void handleSend(message.text, message.attachQuote
+      ? { stagedAttachments: [textFileAttachment(chatAttachmentName("selection"), quote)] }
+      : undefined);
+    return true;
+  };
 
   return (
     <div
@@ -4676,6 +4696,13 @@ function AgentChatBody({
           // under the strip. It stops short of the scrollbar, or of a docked
           // summary island, so neither fades.
           className="pointer-events-none absolute top-0 left-0 right-[max(var(--scrollbar-size),var(--chat-aside-inset,0px))] z-1 h-8 bg-gradient-to-b from-(--pane-bg) to-transparent"
+        />
+        <ChatSelectionPopup
+          root={scrollEl}
+          active={interactive}
+          onAddSelection={(text) => stageChatText(stageTextAttachment, "selection", text, text)}
+          onAddReply={(quote, reply) => stageChatText(stageTextAttachment, "reply", formatReply(quote, reply), reply)}
+          onSendReply={sendChatReply}
         />
         {/* A sibling of the scroller so the rail stays pinned; z-2 paints above
             the top mask. */}
