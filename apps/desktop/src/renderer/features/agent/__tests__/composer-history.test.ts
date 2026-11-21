@@ -97,6 +97,12 @@ describe.each(["/personal/a", "/organization/a", "cloud://organization/a"])("rea
     expect(api.serialize()!.attachments).toEqual([]);
   });
 
+  it("appends text literally, never as HTML", async () => {
+    await render(cwd);
+    act(() => api.appendText("\n\nsrc/<p>a.ts:L2", { focus: false }));
+    expect(api.editor!.getText()).toContain("src/<p>a.ts:L2");
+  });
+
   it("appends without taking focus when the caller keeps it", async () => {
     await render(cwd);
     const editor = document.createElement("textarea");

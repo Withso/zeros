@@ -1186,7 +1186,12 @@ export function useComposerEditor(
     const ed = editorRef.current;
     if (!ed || ed.isDestroyed || !text) return;
     const end = ed.state.doc.content.size;
-    ed.chain().insertContentAt(end, text).scrollIntoView().run();
+    // A node, not a string: a string is parsed as HTML, so a path such as
+    // src/<p>a.ts would lose its brackets and split into paragraphs.
+    ed.chain()
+      .insertContentAt(end, { type: "paragraph", content: [{ type: "text", text }] })
+      .scrollIntoView()
+      .run();
     if (options?.focus !== false) ed.view.focus();
     setIsEmpty(ed.isEmpty);
   }, []);

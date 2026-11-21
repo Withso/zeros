@@ -106,7 +106,11 @@ export function AddToChatPopup({
   const anchorRect = useCallback(() => {
     const rect = latest.current.shown?.rect();
     const bounds = latest.current.root?.getBoundingClientRect();
-    return rect && bounds && rect.bottom > bounds.top && rect.top < bounds.bottom ? rect : OFF_SCREEN;
+    return rect && bounds &&
+      rect.bottom > bounds.top && rect.top < bounds.bottom &&
+      rect.right > bounds.left && rect.left < bounds.right
+      ? rect
+      : OFF_SCREEN;
   }, []);
 
   // Capture so the editors' own Mod-L (CodeMirror selects a line) never runs.
