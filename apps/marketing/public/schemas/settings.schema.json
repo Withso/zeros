@@ -137,6 +137,10 @@
         "archive_on_merge": {
           "type": "boolean",
           "description": "Archive a workspace automatically when its PR merges."
+        },
+        "fetch_submodules": {
+          "type": "boolean",
+          "description": "Fetch the repository's github.com submodules after a Local workspace is created. Off by default."
         }
       }
     },

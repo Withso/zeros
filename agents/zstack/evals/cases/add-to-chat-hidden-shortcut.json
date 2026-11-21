@@ -1,0 +1,9 @@
+{
+  "id": "add-to-chat-hidden-shortcut",
+  "kind": "replay",
+  "area": "renderer-ui",
+  "fixedBy": "pr:1215",
+  "symptom": "With the selection scrolled out of the viewer sideways, Add to Chat was hidden but still captured ⌘L, adding off-screen lines instead of leaving the shortcut to the editor.",
+  "rule": "A shortcut owned by a floating action uses the same visibility predicate as the action, in both axes.",
+  "check": "pnpm exec vitest run --config vitest.config.ts apps/desktop/src/renderer/shell/workbench/tabs/__tests__/add-to-chat-popup.test.ts"
+}

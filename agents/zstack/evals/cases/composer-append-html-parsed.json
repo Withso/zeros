@@ -1,0 +1,9 @@
+{
+  "id": "composer-append-html-parsed",
+  "kind": "replay",
+  "area": "renderer-agents",
+  "fixedBy": "pr:1215",
+  "symptom": "Add to Chat appended a code reference as a string, which TipTap parsed as HTML: src/<p>a.ts:L2 lost its brackets and split into two paragraphs in the composer.",
+  "rule": "Text a feature appends to the composer is inserted as a text node, never as an HTML string.",
+  "check": "pnpm exec vitest run --config vitest.config.ts apps/desktop/src/renderer/features/agent/__tests__/composer-history.test.ts"
+}
