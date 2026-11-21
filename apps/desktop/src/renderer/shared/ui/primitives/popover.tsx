@@ -4,7 +4,7 @@ import * as PopoverPrimitive from "@radix-ui/react-popover";
 import { cn } from "@/renderer/shared/ui/cn";
 import { ANCHORED_OVERLAY_MOTION } from "@/renderer/shared/ui/anchored-overlay-motion";
 import { COMPOSER_DOCK_FADE } from "@/renderer/shared/ui/composer-surface";
-import { MENU_SURFACE_RADIUS } from "@/renderer/shared/ui/menu-surface";
+import { MENU_SURFACE_INSET, MENU_SURFACE_RADIUS } from "@/renderer/shared/ui/menu-surface";
 import { suppressPointerRefocus } from "@/renderer/shared/ui/overlay-focus";
 import { useOverlayEscape } from "@/renderer/shared/ui/overlay-escape";
 import { useNativeSurfaceOverlayIntent } from "@/renderer/shared/ui/native-surface-overlay";
@@ -52,10 +52,12 @@ export interface PopoverContentProps extends React.ComponentPropsWithoutRef<
   typeof PopoverPrimitive.Content
 > {
   /** Width owned by the primitive: sm 240, md 320 (the default), lg 400.
-   *  wide fills up to 34rem for full-width feature pickers. */
-  size?: "sm" | "md" | "lg" | "default" | "wide";
-  /** Edge-to-edge feature surfaces use their own section primitives. */
-  padding?: "default" | "none";
+   *  wide fills up to 34rem for full-width feature pickers; fit wraps a
+   *  single action. */
+  size?: "sm" | "md" | "lg" | "default" | "wide" | "fit";
+  /** Edge-to-edge feature surfaces use their own section primitives; inset
+   *  is the menu's 4px, for rows and actions. */
+  padding?: "default" | "none" | "inset";
   /** floating (the default) is the bg3 menu surface with the dropdown lift;
    *  composer is for a picker docked on the composer, which takes the
    *  composer's own surface like every card above it: sidebar-bg, the
@@ -79,6 +81,13 @@ const POPOVER_WIDTH = {
   default: "w-80",
   lg: "w-100",
   wide: "w-[min(34rem,calc(100vw-1rem))]",
+  fit: "w-fit",
+} as const;
+
+const POPOVER_PADDING = {
+  default: "p-3",
+  none: "p-0",
+  inset: MENU_SURFACE_INSET,
 } as const;
 
 const PopoverContent = React.forwardRef<
@@ -127,7 +136,7 @@ const PopoverContent = React.forwardRef<
             POPOVER_SURFACE[surface],
             MENU_SURFACE_RADIUS,
             POPOVER_WIDTH[size],
-            padding === "default" ? "p-3" : "p-0",
+            POPOVER_PADDING[padding],
             className,
           )}
           {...props}
