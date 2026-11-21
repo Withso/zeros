@@ -56,3 +56,23 @@ export const shareCloudRepository = (organizationId: string, entryId: string) =>
 export const setCloudPersonalRepositoriesAllowed = (organizationId: string, personalAllowed: boolean) =>
   cloudAccountRequest(`${base(organizationId)}/cloud-repositories/settings`, z.object({ personalAllowed: z.boolean() }),
     { body: { personalAllowed }, idempotencyKey: key(), method: "PUT" });
+
+const ReadyCopySchema = z.object({
+  status: z.object({ state: z.enum(["none", "getting_ready", "ready", "updating", "update_failed", "failed"]).catch("none"),
+    updatedAt: z.string().nullable(), nextUpdateAt: z.string().nullable(),
+    failure: z.object({ reason: z.string().max(64), detail: z.string().max(1100).nullable(), failures: z.number().int(), nextRetryAt: z.string().nullable() }).passthrough().optional(),
+  }).passthrough(),
+  history: z.array(z.object({ generation: z.number().int(), state: z.enum(["building", "ready", "failed", "retired"]), startedAt: z.string().nullable(),
+    finishedAt: z.string().nullable(), commit: z.string().nullable(), branch: z.string().nullable(), trigger: z.string().nullable(), startedBy: z.string().nullable(),
+    failure: z.object({ reason: z.string(), detail: z.string().nullable() }).nullable(), output: z.boolean() }).passthrough()).max(50).optional(),
+  canBuild: z.boolean().optional(),
+}).passthrough();
+export type CloudReadyCopy = z.infer<typeof ReadyCopySchema>;
+const copyQuery = (repository: string) => `repository=${encodeURIComponent(repository)}`;
+export const getCloudReadyCopy = (organizationId: string, repository: string) =>
+  cloudAccountRequest(`${base(organizationId)}/cloud-repositories/ready-copy?${copyQuery(repository)}`, ReadyCopySchema);
+export const getCloudReadyCopyOutput = async (organizationId: string, repository: string, generation: number) =>
+  (await cloudAccountRequest(`${base(organizationId)}/cloud-repositories/ready-copy/output?${copyQuery(repository)}&generation=${generation}`,
+    z.object({ output: z.string().max(20_000) }))).output;
+export const buildCloudReadyCopy = (organizationId: string, repository: string) =>
+  cloudAccountRequest(`${base(organizationId)}/cloud-repositories/ready-copy/build`, z.unknown(), { body: { repository }, idempotencyKey: key() });

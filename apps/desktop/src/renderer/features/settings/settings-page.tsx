@@ -852,6 +852,7 @@ function ScopedSettingsPage({ owner }: { owner: string }) {
                     cloudAvailable={!local && availableSectionIds.has("cloud-computer")}
                     canManageCloud={organization?.role === "owner" || organization?.role === "admin"}
                     sharing={projectSharing(currentProject)}
+                    readyCopyOrganizationId={githubLevels.connections && organization && !organization.isPersonal ? organization.id : null}
                     onAddToCloud={() => setActive(userSelection(!githubLevels.connections ? "cloud-computer"
                       : canManageOrganization && organizationGithub ? "org-github" : "integrations"))}
                     onOpenCloudComputer={() => setActive(userSelection("cloud-computer"))}

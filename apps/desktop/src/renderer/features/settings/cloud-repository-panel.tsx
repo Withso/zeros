@@ -64,14 +64,16 @@ function RepositoryScope({ userId, organizationId, canManage, repository, tab, o
         </div>
       </SettingsGroup>
     );
+  // With ready copies a save rebuilds just this repository's copy.
+  const applyHint = data?.readyCopies ? "Saving rebuilds this repository's ready copy." : "Changes apply after the next build.";
   const branch = (
-    <SettingsGroup title="Branch" description="Changes apply after the next build.">
+    <SettingsGroup title="Branch" description={applyHint}>
       <Input aria-label={`${repository} branch`} placeholder={`Branch or tag (default: ${liveBranch ?? "the repository's default"})`}
         value={row?.ref ?? ""} onChange={event => update({ ref: event.target.value })} disabled={locked || !row} />
     </SettingsGroup>
   );
   const setup = (
-    <SettingsGroup title="Setup" description="Changes apply after the next build.">
+    <SettingsGroup title="Setup" description={applyHint}>
       <CodeTextarea aria-label={`${repository} setup command`} value={row?.setup ?? ""} readOnly={locked || !row}
         offscreen={!active} onChange={value => update({ setup: value })}
         description={row?.setupScript ? "Build validation command (e.g. pnpm install). Workspaces use the selected script below."

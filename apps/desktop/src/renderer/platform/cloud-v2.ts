@@ -324,7 +324,8 @@ export const CloudV2ComputerReplySchema = z.object({
   installScript: z.string().max(16_000).nullable().optional(),
   /** Ready copies: each repository's latest failed copy; detail is a path at most. */
   readyCopyFailures: z.array(z.object({ repository: z.string().max(200), generation: z.number().int(), reason: z.string().max(64),
-    detail: z.string().max(1100).nullable(), finishedAt: z.string() }).passthrough()).max(200).optional().catch(undefined),
+    detail: z.string().max(1100).nullable(), finishedAt: z.string(), failures: z.number().int().optional(),
+    nextRetryAt: z.string().nullable().optional() }).passthrough()).max(200).optional().catch(undefined),
 });
 export type CloudV2Computer = z.infer<typeof CloudV2ComputerReplySchema>;
 const SavedRecipeSchema = z.object({ recipe: RecipeSchema, recipeRevision: z.number().int().nonnegative() });
@@ -417,6 +418,13 @@ export async function getCloudV2BuildSecretNames(organizationId: string, reposit
 export async function updateCloudV2BuildSecrets(organizationId: string, repository: string, change: { set?: Record<string, string>; remove?: string[] }) {
   return (await cloudAccountRequest(secretsPath(organizationId, repository), BuildSecretNamesSchema,
     { body: change, idempotencyKey: key(), method: "PATCH" })).names;
+}
+
+/** Ready copies: an admin's Retry now for one shared repository. */
+export async function retryCloudV2ReadyCopy(organizationId: string, repository: string) {
+  const [owner, name] = repository.split("/");
+  await cloudAccountRequest(`/v1/cloud-v2/organizations/${uuid.parse(organizationId)}/computer/repositories/${encodeURIComponent(owner ?? "")}/${encodeURIComponent(name ?? "")}/ready-copy/retry`,
+    z.unknown(), { body: {}, idempotencyKey: key() });
 }
 
 export async function activateCloudV2Build(organizationId: string, buildId: string) {

@@ -63,10 +63,15 @@ describe("Cloud Computer settings panel", () => {
 
   it("names where a ready copy kept a build secret and how to avoid it", () => {
     state.data = { ...state.data!, readyCopies: true, installScript: null, readyCopyFailures: [
-      { repository: "withso/zeros", generation: 2, reason: "ready_copy_secret_left", detail: "/home/user/withso/zeros/.npmrc", finishedAt: ago(day) }] };
-    const page = text(render());
+      { repository: "withso/zeros", generation: 2, reason: "ready_copy_secret_left", detail: "/home/user/withso/zeros/.npmrc", finishedAt: ago(day),
+        failures: 2, nextRetryAt: new Date(Date.now() + 2 * 60 * 60_000).toISOString() },
+      { repository: "withso/web", generation: 5, reason: "ready_copy_setup_failed", detail: null, finishedAt: ago(day), failures: 5, nextRetryAt: null }] };
+    const page = text(render()).replace(/&#x27;/g, "'");
     expect(page).toContain("Ready copies");
-    expect(page.replace(/&#x27;/g, "'")).toContain("A build secret was left in /home/user/withso/zeros/.npmrc. Read it from the environment in setup; don't write it to a file.");
+    expect(page).toContain("A build secret was left on the disk. In /home/user/withso/zeros/.npmrc. Read it from the environment in setup; don't write it to a file. Next try in 2 hours.");
+    expect(page).toContain("Setup failed. Check the setup command and its output, then save it or build again. Automatic retries stopped; change something or retry now.");
+    expect(page).not.toMatch(/ready_copy_/);
+    expect(page.match(/Retry now/g)).toHaveLength(2);
   });
 
   it("shows members the install script read-only, managed by admins", () => {

@@ -1,6 +1,6 @@
 import { useCallback, useState } from "react";
 import { IconButton } from "@/renderer/shared/ui/primitives/icon-button";
-import { ChevronDown, ChevronUp, CircleCheck, CircleMinus, CircleX, LoaderCircle, TriangleAlert, X } from "lucide-react";
+import { ChevronDown, ChevronUp, CircleX, LoaderCircle, TriangleAlert, X } from "lucide-react";
 import { Button } from "../../shared/ui";
 import { Badge, CodeTextarea, Pill } from "../../shared/ui/primitives";
 import { MessageRow } from "../../shared/ui/primitives/message-row";
@@ -8,11 +8,13 @@ import { useRecoveringRead } from "../../state/use-recovering-read";
 import { useActiveOrganization, useTeams } from "../team/team-store";
 import { assertComputerOwner, computerKey, computers, MAX_REPOSITORIES, message, publishRecipe, useRecipeDraft } from "./cloud-computer-store";
 import { SettingsGroup, SettingsRow, SettingsSection } from "./settings-ui";
+import { BuildHistoryItem } from "./build-history";
+import { readyCopyFailureLine } from "./ready-copy-copy";
 import { CloudRepositoryChooser } from "./cloud-repository-chooser";
 import type { ChooserRepository } from "./cloud-repository-chooser-model";
 import {
   activateCloudV2Build, buildCloudV2Computer, buildConfiguredCloudV2Computer, discardCloudV2ComputerRecipe,
-  getCloudV2Computer, getCloudV2InstallScript, saveCloudV2InstallScript, type CloudV2Build, type CloudV2RepositoryDraft,
+  getCloudV2Computer, getCloudV2InstallScript, retryCloudV2ReadyCopy, saveCloudV2InstallScript, type CloudV2Build, type CloudV2RepositoryDraft,
 } from "../../platform/cloud-v2";
 import { KeyedAsyncCache } from "../../shared/lib/keyed-async-cache";
 import { computerChanges, computerStatus, editableRepositories, historyNote, relativeAge, type ComputerStatus } from "./cloud-computer-model";
@@ -153,7 +155,10 @@ function CloudComputerScope({ userId, organizationId, canManage, active, openRep
       {data?.readyCopies && (data.readyCopyFailures?.length ?? 0) > 0 && (
         <SettingsGroup title="Ready copies" description="A repository whose ready copy failed keeps the previous one; new workspaces clone directly until one is ready.">
           {data.readyCopyFailures!.map(failure => (
-            <SettingsRow key={failure.repository} label={failure.repository} hint={readyCopyFailureHint(failure.reason, failure.detail)} />
+            <SettingsRow key={failure.repository} label={failure.repository} hint={readyCopyFailureLine(failure, Date.now())}>
+              <Button variant="ghost" size="sm" disabled={busy}
+                onClick={() => void run(() => retryCloudV2ReadyCopy(organizationId, failure.repository))}>Retry now</Button>
+            </SettingsRow>
           ))}
         </SettingsGroup>
       )}
@@ -185,16 +190,6 @@ function CloudComputerScope({ userId, organizationId, canManage, active, openRep
       </SettingsGroup>}
     </div>
   );
-}
-
-/** One line naming what failed and, for a secret left on disk, where and how to avoid it. */
-export function readyCopyFailureHint(reason: string, detail: string | null): string {
-  if (reason === "ready_copy_secret_left")
-    return `A build secret was left in ${detail ?? "a file"}. Read it from the environment in setup; don't write it to a file.`;
-  if (reason === "ready_copy_secret_search_incomplete") return "The search for build secrets left on the disk did not finish. Build again.";
-  if (reason === "ready_copy_setup_failed") return "Setup failed. Check the setup command, then build again.";
-  if (reason === "ready_copy_clone_failed") return "The repository could not be cloned. Check its GitHub access, then build again.";
-  return "The ready copy could not be built. Build again.";
 }
 
 const INSTALL_SCRIPT_HINT = "Runs once in each build, as the workspace user, before the Cloud Computer is saved. Changes apply after the next build.";
@@ -250,33 +245,17 @@ function StatusSummary({ status }: { status: ComputerStatus }) {
   );
 }
 
-const BUILD_ICON: Record<CloudV2Build["state"], { icon: React.ReactNode; label: string }> = {
-  succeeded: { icon: <CircleCheck className="text-fg2 size-4 shrink-0" aria-hidden />, label: "Built" },
-  failed: { icon: <CircleX className="text-red-primary size-4 shrink-0" aria-hidden />, label: "Failed" },
-  cancelled: { icon: <CircleMinus className="text-fg3 size-4 shrink-0" aria-hidden />, label: "Cancelled" },
-  queued: { icon: <LoaderCircle className="text-fg2 size-4 shrink-0 animate-spin motion-reduce:animate-none" aria-hidden />, label: "Queued" },
-  building: { icon: <LoaderCircle className="text-fg2 size-4 shrink-0 animate-spin motion-reduce:animate-none" aria-hidden />, label: "Building" },
-};
-
 function HistoryRow({ build, active, disabled, onActivate }: {
   build: CloudV2Build; active: boolean; disabled: boolean; onActivate(): void;
 }) {
-  const state = BUILD_ICON[build.state], note = historyNote(build);
   return (
-    <li className="flex min-h-10 items-center justify-between gap-3 py-2">
-      <span className="flex min-w-0 items-center gap-3">
-        <span title={state.label} className="inline-flex">{state.icon}<span className="sr-only">{state.label}</span></span>
-        <span className="text-fg1 text-xs font-medium">Build #{build.version}</span>
-        <span className="text-muted-fg truncate text-xs">
-          {[relativeAge(build.finishedAt ?? build.createdAt, Date.now()), note].filter(Boolean).join(" · ")}
-        </span>
-      </span>
-      {active
+    <BuildHistoryItem state={build.state} title={`Build #${build.version}`}
+      details={[relativeAge(build.finishedAt ?? build.createdAt, Date.now()), historyNote(build)]}
+      action={active
         ? <Badge variant="success">Active</Badge>
         : build.state === "succeeded" && (
           <Button variant="ghost" size="compact" onClick={onActivate} disabled={disabled}
             title="Builds this version again at the same commits and makes it live">Activate</Button>
-        )}
-    </li>
+        )} />
   );
 }

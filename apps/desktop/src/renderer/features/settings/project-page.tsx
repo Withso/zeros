@@ -7,6 +7,7 @@ import { parseRemote } from "../../shell/pr/github-url";
 import { useOptionalAddProject } from "../../shell/add-project-provider";
 import { ProjectLocalPart } from "../repositories/repositories-panel";
 import { CloudRepositoryPanel } from "./cloud-repository-panel";
+import { ReadyCopySection } from "./ready-copy-section";
 import { PlaceLabel, SettingsGroup, SettingsPageSection, SettingsRow, SettingsSection } from "./settings-ui";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../../shared/ui/primitives/select";
 
@@ -38,6 +39,7 @@ export function ProjectPage({
   initialFolderId,
   onFolderChange,
   sharing,
+  readyCopyOrganizationId,
   onAddToCloud,
   onOpenEnvironment,
   onOpenCloudComputer,
@@ -53,6 +55,8 @@ export function ProjectPage({
   onFolderChange?(folderId: string): void;
   /** Two GitHub levels: who the cloud repository is for, and how to share it. */
   sharing?: { level: "shared" | "private"; organizationName: string; canShare: boolean; onShare(): void; onAskAdmin(): void } | null;
+  /** Ready copies: the organization whose copy of this repository the Cloud build section shows. */
+  readyCopyOrganizationId?: string | null;
   onAddToCloud(): void;
   onOpenEnvironment(): void;
   onOpenCloudComputer(): void;
@@ -132,6 +136,12 @@ export function ProjectPage({
           )}
         </SettingsGroup>
       </SettingsPageSection>
+
+      {cloud && readyCopyOrganizationId && (
+        <SettingsPageSection title="Cloud build" description="The ready copy new cloud workspaces start from.">
+          <ReadyCopySection organizationId={readyCopyOrganizationId} repository={cloud} active={surfaceActive} />
+        </SettingsPageSection>
+      )}
 
       {((main && main.isGitRepository !== false) || cloud) && (
         <SettingsPageSection title="Scripts"
