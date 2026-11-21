@@ -26,6 +26,11 @@ describe("buildSessionTree", () => {
     expect(sessionDescendantIds(tree.byId.get("p1")!)).toEqual(["c3", "g4", "x5"]);
   });
 
+  it("includes closed chats only for a read-only workspace", () => {
+    expect(buildSessionTree(chats, "/ws/a").byId.has("a7")).toBe(false);
+    expect(buildSessionTree(chats, "/ws/a", { includeArchived: true }).roots.map((n) => n.chat.id)).toEqual(["p1", "p2", "a7", "o8"]);
+  });
+
   it("makes a child-workspace session a parent there", () => {
     const tree = buildSessionTree(chats, "/ws/b");
     expect(tree.roots.map((n) => n.chat.id)).toEqual(["x5"]);

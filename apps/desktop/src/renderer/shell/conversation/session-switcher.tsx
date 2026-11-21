@@ -7,7 +7,7 @@ import { requestFocusedPaneSplit } from "./pane-split-requests";
 import { AgentAwaitingIcon } from "../../features/agent/agent-awaiting-indicator";
 import { AgentIcon } from "../../features/agent/agent-icon";
 import { useAnyChatAgentActivity, useAnyChatAwaitingKind } from "../../features/agent/sessions-store";
-import { useAgentSessions } from "../../features/agent/sessions-hooks";
+import { useOptionalAgentSessions } from "../../features/agent/sessions-hooks";
 import { RunStream } from "../../shared/ui/loading";
 import { Button } from "../../shared/ui/primitives";
 import {
@@ -182,15 +182,15 @@ export function SessionSwitcher({ folder, placement, showPlacement = true, fallb
   const chats = useChats();
   const activeId = useActiveChatId();
   const dispatch = useWorkspaceDispatch();
-  const sessions = useAgentSessions();
-  const tree = useMemo(() => buildSessionTree(chats, folder), [chats, folder]);
+  const sessions = useOptionalAgentSessions();
+  const tree = useMemo(() => buildSessionTree(chats, folder, { includeArchived: readOnly }), [chats, folder, readOnly]);
   const lineage = useMemo(() => {
     const path = activeId ? sessionLineage(tree, activeId) : [];
     return path.length ? path : tree.roots[0] ? [tree.roots[0].chat] : [];
   }, [tree, activeId]);
   if (lineage.length === 0) return <>{fallback}</>;
   const select = (id: string) => dispatch({ type: "SET_ACTIVE_CHAT", id });
-  const newParent = readOnly ? undefined : () => {
+  const newParent = readOnly || !sessions ? undefined : () => {
     void spawnNewChatTab({ folder, sessions, dispatch }).then((chat) => select(chat.id)).catch(() => {});
   };
   const Icon = placement === "cloud" ? Cloud : Laptop;
@@ -266,7 +266,7 @@ export function SessionActionsMenu({ folder, readOnly = false }: { folder: strin
 /** A split pane's slim row: which session it shows. */
 export function PaneSessionBar({ chat, focused }: { chat: ChatThread | null; focused: boolean }) {
   return (
-    <div className="border-border1 flex h-8 shrink-0 items-center gap-1.5 border-b px-3" data-pane-session-bar="" data-focused={focused ? "true" : "false"}>
+    <div className="border-border1 flex h-8 shrink-0 items-center gap-1.5 border-b px-3" data-pane-session-bar="" data-chat-id={chat?.id} data-focused={focused ? "true" : "false"}>
       {chat && <AgentIcon agentId={chat.agentId ?? ""} iconUrl={null} size={14} />}
       <span className={`min-w-0 truncate text-xs ${focused ? "text-fg1" : "text-fg2"}`}>{chat ? sessionName(chat) : "New session"}</span>
     </div>

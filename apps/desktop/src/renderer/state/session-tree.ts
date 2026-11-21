@@ -15,18 +15,23 @@ export interface SessionTree {
   byId: ReadonlyMap<string, SessionNode>;
 }
 
-function isSession(chat: ChatThread): boolean {
-  return chat.kind !== "terminal" && !chat.archived;
+function isSession(chat: ChatThread, includeArchived: boolean): boolean {
+  return chat.kind !== "terminal" && (includeArchived || !chat.archived);
 }
 
 const byCreated = (a: SessionNode, b: SessionNode) =>
   a.chat.createdAt - b.chat.createdAt || a.chat.id.localeCompare(b.chat.id);
 
 /** Build the session tree for `folder`. Children may live in other folders
- *  (a child workspace); they nest under their parent wherever it is. */
-export function buildSessionTree(chats: readonly ChatThread[], folder: string): SessionTree {
+ *  (a child workspace); they nest under their parent wherever it is. A
+ *  read-only (archived) workspace includes its closed chats. */
+export function buildSessionTree(
+  chats: readonly ChatThread[],
+  folder: string,
+  { includeArchived = false }: { includeArchived?: boolean } = {},
+): SessionTree {
   const byId = new Map<string, SessionNode>();
-  for (const chat of chats) if (isSession(chat)) byId.set(chat.id, { chat, children: [] });
+  for (const chat of chats) if (isSession(chat, includeArchived)) byId.set(chat.id, { chat, children: [] });
   const roots: SessionNode[] = [];
   for (const node of byId.values()) {
     const parent = node.chat.parentChatId ? byId.get(node.chat.parentChatId) : undefined;
