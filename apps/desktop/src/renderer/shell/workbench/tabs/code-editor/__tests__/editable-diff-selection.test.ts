@@ -93,10 +93,13 @@ describe("editable diff selection", () => {
         (root.activeElement ?? root.querySelector("[contenteditable]"))!.dispatchEvent(new ClipboardEvent("copy", { clipboardData: data, bubbles: true, cancelable: true, composed: true }));
         return data.getData("text/plain") || document.getSelection()!.toString();
       });
-      await page.mouse.move(removed.x + 4, removed.y);
-      await page.mouse.down();
-      await page.mouse.move(removed.x + 300, removed.y, { steps: 6 });
-      await page.mouse.up();
+      const selectRemoved = async () => {
+        await page.mouse.move(removed.x + 4, removed.y);
+        await page.mouse.down();
+        await page.mouse.move(removed.x + 300, removed.y, { steps: 6 });
+        await page.mouse.up();
+      };
+      await selectRemoved();
       expect(await copy()).toBe("line 5;");
 
       const from = await lineBox(page, 4), to = await lineBox(page, 6);
@@ -105,6 +108,10 @@ describe("editable diff selection", () => {
       await page.mouse.move(to.x + 300, to.y + to.height / 2, { steps: 6 });
       await page.mouse.up();
       expect(await copy()).toBe("line 4;\nline 5 changed;\nline 6;");
+
+      // A new selection inside the removed line replaces the one before it.
+      await selectRemoved();
+      expect(await copy()).toBe("line 5;");
     } finally { await page.close(); }
   });
 });
