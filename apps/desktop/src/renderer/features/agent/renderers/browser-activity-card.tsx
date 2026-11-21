@@ -26,7 +26,9 @@ import type { AgentToolMessage } from "../use-agent-session";
 import type { RendererContext } from "./types";
 import { NativeBrowserToolRow } from "./event-row-renderer";
 import { ToolIdentityIcon } from "./tool-identity-icon";
+import { TOOL_DESCRIPTION_FIT, ToolName } from "./tool-label";
 import { ListRow } from "@/renderer/shared/ui/primitives/list-row";
+import { cn } from "@/renderer/shared/ui/cn";
 
 const MAX_VISIBLE_ACTIONS = 24;
 
@@ -114,9 +116,9 @@ export const BrowserActivityCard = memo(function BrowserActivityCard({
             }
           />
         </span>
-        <span className="text-fg1 min-w-0 truncate text-reading leading-5">{statusLabel}</span>
+        <ToolName label={statusLabel} capped={!!liveText} className="text-fg1" />
         {liveText ? (
-          <span className="text-fg2 min-w-0 truncate text-xs">{liveText}</span>
+          <span className={cn("text-fg2 truncate text-xs", TOOL_DESCRIPTION_FIT)}>{liveText}</span>
         ) : null}
         <Chevron className="text-fg3 size-3 shrink-0" aria-hidden="true" />
       </ListRow>

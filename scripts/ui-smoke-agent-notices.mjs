@@ -211,10 +211,13 @@ export async function runAgentNoticesSmoke({ page, check }) {
       await expect(failure).toBeVisible();
       await expect(failure.getByRole("button", { name: "Retry", exact: true })).toBeEnabled();
       await expect(failure.getByRole("button", { name: "Retry in new chat" })).toBeEnabled();
-      await transcript.getByRole("button", { name: /^1 tool call$/ }).click();
+      // One call is a row, not a group.
+      await expect(transcript.locator("[data-working-group]")).toHaveCount(0);
       await expect(transcript.getByText(`${provider}: Selected model is at capacity.`, { exact: true })).toHaveCount(1);
       await expect(transcript.locator(".zeros-working-feed [data-agent-notice]")).toHaveCount(0);
-      await transcript.getByRole("button", { name: /pnpm verify/ }).click();
+      const verify = transcript.getByRole("button", { name: /pnpm verify/ });
+      if (await verify.getAttribute("aria-expanded") === "false") await verify.click();
+      await expect(verify).toHaveAttribute("aria-expanded", "true");
       await expect(transcript.getByText("Verification failed", { exact: true })).toBeVisible();
     }
   }

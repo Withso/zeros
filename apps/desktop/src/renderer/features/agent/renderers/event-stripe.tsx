@@ -1,42 +1,38 @@
 // ──────────────────────────────────────────────────────────
-// EventStripe — the "working" group (reasoning + tools)
+// EventStripe — one working run (reasoning + tools)
 // ──────────────────────────────────────────────────────────
 //
-// A turn's working content — tool calls, thinking, in-between
-// narration, sub-agents — renders as ONE group:
+// A run with two or more tool calls is a group: a collapsed header,
 //
-//   • While the turn is LIVE: fully EXPANDED with NO header chip. The top-level
-//     caller supplies narration and tool activity in source order. Running
-//     calls can be expanded before their final result arrives.
+//   ▸ Worked for 48s  📄 >_ 🔍
 //
-//   • Once the turn settles (live=false): ordinary work
-//     COLLAPSES into one chip —
-//
-//       ▸ 📄 >_ 🔍 🤖  6 tool calls, 2 messages, 3 agents
-//
-//     — and the agent's final answer (rendered by the parent,
-//     bright) sits below it. Click the chip to re-expand the
-//     dimmed history, including its nested Browser activity group.
+// that counts its own time ("Working for" while it is the live tail) and
+// carries the old "<N> tool calls, <M> messages" summary as its tooltip and
+// accessible name. Opening it shows the rows. A smaller run renders its rows
+// inline with no header. Sub-agent bodies always show their rows.
 //
 // Borderless. No card. No shadow. Just rows.
 // ──────────────────────────────────────────────────────────
 
-import { memo, useState } from "react";
+import { memo, useMemo } from "react";
 import { ToolIdentityIcon } from "./tool-identity-icon";
 import { nativeToolSurface, toolRecord } from "./native-tool-presentation";
 import { safeToolImageSource } from "@zeros/protocol/tool-artwork";
 import {
   ChevronDown,
   ChevronRight,
+  CircleX,
   Globe2,
   SquareMousePointer,
 } from "lucide-react";
 
 import { cn } from "@/renderer/shared/ui/cn";
+import { formatElapsed, WorkingDuration } from "@/renderer/shared/ui/loading";
 import type { AgentMessage, AgentToolMessage } from "../use-agent-session";
 import type { RendererContext } from "./types";
-import { isVisibleTranscriptEvent } from "../turn-partition";
-import { fallbackProse } from "../model-fallback";
+import { isInBetweenMessage } from "../turn-partition";
+import { useTurnDisclosure } from "../turn-disclosures";
+import { gatedEventIds, isWorkingGroup, workingFeedEvents, workingGroupSpan } from "../working-group";
 import {
   countEventSummary,
   formatEventSummary,
@@ -45,6 +41,7 @@ import {
 } from "./tool-summary";
 import { MessageView } from "./message-view";
 import { WORKING_FEED_GAP } from "./event-row";
+import { groupShowsFailure } from "./tool-failure";
 import {
   browserActivityTailClosed,
   browserActivityUsesWebsiteIcon,
@@ -59,123 +56,73 @@ import {
 } from "../../browser/browser-session-activity-store";
 import { Inline } from "@/renderer/shared/ui/layout/inline";
 import { ListRow } from "@/renderer/shared/ui/primitives/list-row";
+import { Tooltip } from "@/renderer/shared/ui/primitives";
 
 interface EventStripeProps {
   events: AgentMessage[];
   ctx: RendererContext;
-  /** True while the turn is actively streaming. A live group renders fully
-   *  expanded with no header chip. Once the turn finishes (live=false), the full
-   *  history collapses into one summary chip. */
+  /** True while the turn is actively streaming. */
   live: boolean;
   /** Sub-agent bodies pass this: always render the (dimmed) children, never
-   *  the collapse chip — the SubagentCard row is the collapse boundary. */
+   *  a group header — the SubagentCard row is the collapse boundary. */
   alwaysExpanded?: boolean;
   /** A final/result message rendered outside this feed is still a real
    * chronological boundary for its trailing Browser subgroup. */
   browserTailClosed?: boolean;
+  /** Durable segment anchor that owns the group's open state. */
+  groupKey?: string;
+  /** The live turn's last run: its header counts up as "Working for". */
+  tail?: boolean;
+  /** A lone call shown on the loader line instead of as a row. */
+  loaderEventId?: string;
 }
 
 // Brightness split inside the feed (styles/global/runtime-content.css,
-// `.zeros-working-feed`):
-// tool-row NAMES and OUTPUT markdown (the top-level answer, and a sub-agent's
-// result/"Output" — a bare `.zeros-agent-md`) read at full `fg1`; only the
-// in-between NARRATION (TextMessage, carrying `[data-role]`) is muted to `fg3`,
-// uniformly down to bold/headings/links. So output reads like our own output
-// markdown at every depth. The working-vs-answer
-// split is also structural: the feed collapses to one summary chip on settle.
+// `.zeros-working-feed`): tool-row names and output markdown read at `fg1`;
+// nested narration (TextMessage, carrying `[data-role]`) is muted to `fg3`.
+// Top-level in-between messages folded into a group (`data-in-between`)
+// keep `fg1`, the same as when they sit outside the group.
 
 export const EventStripe = memo(function EventStripe({
-  events,
+  events: source,
   ctx,
   live,
   alwaysExpanded = false,
   browserTailClosed = false,
+  groupKey,
+  tail = false,
+  loaderEventId,
 }: EventStripeProps) {
-  const [userExpanded, setUserExpanded] = useState(false);
-  events = events.filter(isVisibleTranscriptEvent).map((message) =>
-    message.kind === "tool" && message.toolKind === "model_switch"
-      ? fallbackProse(message) ?? message
-      : message,
-  );
-
-  // Force the group open while it holds a pending permission, so the gated
-  // row (e.g. Claude's "Plan ready for review") is never hidden inside a
-  // collapsed summary chip while the user's decision pends: the plan must stay
-  // visible until approved or rejected.
-  // ⚠️ The permission request references the VENDOR's tool-use id, which is
-  // the transcript row's nativeToolCallId (the Claude translator mints its
-  // own uuid for toolCallId) — match BOTH, same as the question record.
-  const pendingPermId = ctx.pendingPermission?.request.toolCall.toolCallId;
-  const hasPendingPermission =
-    !!pendingPermId &&
-    events.some((e) => {
-      if (e.kind !== "tool") return false;
-      const t = e as AgentToolMessage;
-      return (
-        t.toolCallId === pendingPermId || t.nativeToolCallId === pendingPermId
-      );
-    });
-
-  // Same guard for a pending blocking QUESTION: its "Awaiting response"
-  // record row must stay visible while the user's answer pends, not fold
-  // into a collapsed chip (the interactive card lives in the composer slot,
-  // but the transcript record is the only in-feed cue it's waiting).
-  const hasPendingQuestion =
-    ctx.pendingQuestionToolCallIds.size > 0 &&
-    events.some((e) => {
-      if (e.kind !== "tool") return false;
-      const t = e as AgentToolMessage;
-      return (
-        ctx.pendingQuestionToolCallIds.has(t.toolCallId) ||
-        (!!t.nativeToolCallId &&
-          ctx.pendingQuestionToolCallIds.has(t.nativeToolCallId))
-      );
-    });
-
+  const allEvents = workingFeedEvents(source);
+  const group = !alwaysExpanded && isWorkingGroup(allEvents);
+  const [open, setOpen] = useTurnDisclosure<boolean>(groupKey ?? allEvents[0]?.id ?? "", "group", false);
+  const events = group || !loaderEventId ? allEvents : allEvents.filter((event) => event.id !== loaderEventId);
   if (events.length === 0) return null;
 
-  const canCollapse =
-    !live && !alwaysExpanded && !hasPendingPermission && !hasPendingQuestion;
-  const showHeader = canCollapse && events.length > 0;
-  const expanded = !showHeader || userExpanded;
-  const Chev = expanded ? ChevronDown : ChevronRight;
-  const displayEvents = groupBrowserToolActivity(events, {
+  const gated = group && !open
+    ? gatedEventIds(events, ctx.pendingPermission?.request.toolCall.toolCallId, ctx.pendingQuestionToolCallIds)
+    : null;
+  const feedEvents = gated ? events.filter((event) => gated.has(event.id)) : events;
+  const displayEvents = groupBrowserToolActivity(feedEvents, {
     closeTail: browserActivityTailClosed(live, browserTailClosed),
   });
 
   return (
     <div className="flex flex-col">
-      {showHeader && (
-        <ListRow
-          type="button"
-          // Content-width chip (`w-fit`, lane-capped via `max-w-full`) so the
-          // hover tint wraps the summary + icons, not the empty lane to the
-          // right; hover should fit the content.
-          className="group/event-stripe min-w-0 transition-colors"
-          onClick={() => setUserExpanded((v) => !v)}
-          aria-expanded={expanded}
-        >
-          <Chev className="text-fg2 size-3 shrink-0" />
-          {/* The roll-up FIRST: "<N> tool calls, <M> messages, <K> agents".
-              Natural width (truncates if the row is narrow) so the icons sit
-              directly after it rather than at the far right edge. */}
-          <span className="text-fg2 min-w-0 truncate text-reading leading-5">
-            {formatEventSummary(countEventSummary(events))}
-          </span>
-          {/* Activity icons at the END, after the text: deduped tool kinds +
-              Bot (any sub-agent) + Brain (any
-              reasoning), capped at 5, visible. */}
-          <StripeIcons
-            events={events}
-            chatId={ctx.chatId}
-            active={ctx.attachmentImagesActive !== false}
-          />
-        </ListRow>
+      {group && (
+        <GroupHeader
+          events={events}
+          ctx={ctx}
+          tail={tail}
+          browserClosed={browserActivityTailClosed(live, browserTailClosed)}
+          open={open}
+          onToggle={() => setOpen((value) => !value)}
+        />
       )}
-      {expanded && (
-        // `zeros-working-feed` tags the group so runtime-content.css mutes it to fg3 and
-        // flattens narration padding. Each row owns its OWN 4px top/bottom
-        // padding (`py-1` on the hover target itself, not an outer wrapper).
+      {displayEvents.length > 0 && (
+        // `zeros-working-feed` tags the group so runtime-content.css mutes
+        // nested narration to fg3 and flattens narration padding. Each row
+        // owns its OWN 4px top/bottom padding.
         //
         // Every feed — top-level AND nested agent / task bodies alike — puts
         // one uniform 8px gap (`gap-y-2`, see WORKING_FEED_GAP) between
@@ -189,7 +136,7 @@ export const EventStripe = memo(function EventStripe({
             "zeros-working-feed flex flex-col",
             WORKING_FEED_GAP,
             // The first entry sits one feed gap (8px) under the group header.
-            showHeader && "pt-2 pb-1",
+            group && "pt-2 pb-1",
           )}
         >
           {displayEvents.map((item) => {
@@ -208,6 +155,11 @@ export const EventStripe = memo(function EventStripe({
             return (
               <div
                 key={item.id}
+                data-in-between={
+                  !alwaysExpanded && item.kind !== "browser-activity" && isInBetweenMessage(item.event)
+                    ? true
+                    : undefined
+                }
                 data-live-narration={
                   live &&
                   !browserTailClosed &&
@@ -217,6 +169,9 @@ export const EventStripe = memo(function EventStripe({
                     ? true
                     : undefined
                 }
+                // A row that renders nothing yet (a thought whose description
+                // has not settled) takes no gap in the feed.
+                className="empty:hidden"
               >
                 {content}
               </div>
@@ -227,6 +182,55 @@ export const EventStripe = memo(function EventStripe({
     </div>
   );
 });
+
+function GroupHeader({ events, ctx, tail, browserClosed, open, onToggle }: {
+  events: AgentMessage[];
+  ctx: RendererContext;
+  tail: boolean;
+  browserClosed: boolean;
+  open: boolean;
+  onToggle: () => void;
+}) {
+  const Chev = open ? ChevronDown : ChevronRight;
+  const summary = formatEventSummary(countEventSummary(events));
+  const span = workingGroupSpan(events);
+  const worked = formatElapsed(span?.durationMs ?? 0);
+  const failed = useMemo(() => groupShowsFailure(events, browserClosed), [events, browserClosed]);
+  return (
+    <Tooltip label={summary}>
+      <ListRow
+        type="button"
+        data-working-group={tail ? "live" : "closed"}
+        // Content-width row (`w-fit`, lane-capped via `max-w-full`) so the
+        // hover tint wraps the header, not the empty lane to the right.
+        className="group/event-stripe min-w-0 transition-colors"
+        onClick={onToggle}
+        aria-expanded={open}
+        // The ticking time stays out of the name; the summary joins it.
+        aria-label={`${tail ? "Working" : `Worked for ${worked}`}, ${summary}${failed ? ", with a failed tool call" : ""}`}
+      >
+        <Chev className="text-fg2 size-3 shrink-0" />
+        {/* "Working for 33.3s" becomes "Worked for 33s" in place, at once. */}
+        <span className="text-fg2 shrink-0 text-reading leading-5 whitespace-nowrap">
+          {tail ? "Working for " : "Worked for "}
+          {tail && span ? (
+            <WorkingDuration startedAt={span.startedAt} className="text-reading leading-5" />
+          ) : (
+            <span className="tabular-nums">{worked}</span>
+          )}
+        </span>
+        <span className="flex min-w-0 items-center gap-1 overflow-hidden">
+          <StripeIcons
+            events={events}
+            chatId={ctx.chatId}
+            active={ctx.attachmentImagesActive !== false}
+          />
+          {failed && <CircleX className="text-red-primary size-3 shrink-0" aria-hidden="true" />}
+        </span>
+      </ListRow>
+    </Tooltip>
+  );
+}
 
 function StripeIcons({
   events,

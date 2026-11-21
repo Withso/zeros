@@ -22,6 +22,8 @@
 // the very moment the user was deciding whether to let the run continue.
 // ──────────────────────────────────────────────────────────
 
+import type { AgentMessage } from "./use-agent-session";
+
 /** Whether the transcript's tail turn is still IN FLIGHT — the single input
  *  behind both the tail shimmer/timer and the suppression of the turn footer.
  *  One function because those two must never disagree: a shimmer with no footer
@@ -88,4 +90,20 @@ export function tailIndicators({
     shimmer: liveTail && !awaitingUserInput,
     workflow: liveTail,
   };
+}
+
+/** Not a call the agent made: bookkeeping rows that may follow its text. */
+const NOT_A_CALL = new Set(["model_switch", "mode_switch", "compaction", "budget_stop"]);
+
+/** The live tail: the newest drawn event, unless the agent has since started
+ * a call the feed does not draw (a native Sleep). Then nothing drawn is
+ * live, and a message before it is complete. */
+export function liveTailId(events: readonly AgentMessage[], drawn: string | null): string | null {
+  if (!drawn) return drawn;
+  for (let index = events.length - 1; index >= 0; index--) {
+    const event = events[index];
+    if (event.id === drawn) return drawn;
+    if (event.kind === "tool" && !event.parentToolId && !NOT_A_CALL.has(event.toolKind ?? "")) return event.id;
+  }
+  return drawn;
 }

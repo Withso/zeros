@@ -15,7 +15,7 @@
 //     duration > 250ms — short ops don't warrant a chip).
 //   - WorkingDuration({ startedAt }) — the agent's working
 //     timer on the active turn's rail: counts in tenths of a
-//     second (57.5s · 1m, 27.3s · 103m, 57.5s), so it visibly
+//     second (57.5s · 1m 27.3s · 103m 57.5s), so it visibly
 //     runs, at 12px in plain --fg2 with no pulse.
 //
 // Chrome migrated from .zeros-agent-live-duration /
@@ -149,13 +149,13 @@ export const DurationChip = memo(function DurationChip({
 });
 
 /** The working timer's format, in tenths of a second: 7.4s · 57.5s ·
- *  1m, 27.3s · 103m, 57.5s. Minutes keep counting past the hour. */
+ *  1m 27.3s · 103m 57.5s. Minutes keep counting past the hour. */
 export function formatWorkingElapsed(ms: number): string {
   const tenths = Math.floor(Math.max(0, ms) / 100);
   const minutes = Math.floor(tenths / 600);
   const rest = tenths % 600;
   const seconds = `${Math.floor(rest / 10)}.${rest % 10}s`;
-  return minutes ? `${minutes}m, ${seconds}` : seconds;
+  return minutes ? `${minutes}m ${seconds}` : seconds;
 }
 
 /** Compact human-readable elapsed format: 4s · 12s · 1m 4s · 12m 30s · 1h 20m. */

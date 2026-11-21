@@ -182,7 +182,8 @@ describe("native Sleep visibility", () => {
       }));
       expect(html.match(/LIVE ACTIVITY/g)).toHaveLength(1);
       expect(html).toContain('data-activity-start="1"');
-      expect(html).toContain('data-live-narration="true"');
+      // Live narration is an in-between message, outside the working run.
+      expect(html.indexOf("I will check again shortly.")).toBeGreaterThan(html.lastIndexOf("zeros-working-feed"));
       expect(html).not.toContain(">sleep<");
     }
   });

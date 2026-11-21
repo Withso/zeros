@@ -2,7 +2,6 @@ import { useMemo } from "react";
 import { isCloudWorkspace } from "../../platform/bridge/cloud-workspace-key";
 import type { AgentMessage, AgentSessionState, AgentTextMessage, AgentToolMessage } from "./use-agent-session";
 import { useSessionsStore } from "./sessions-store";
-import { StreamingTextBuffer } from "./renderers/streaming-text-buffer";
 
 /** A leaf may observe growing prose without invalidating the chat's composer,
  * transcript structure or finished turns. No transport or durable state moves. */
@@ -20,103 +19,69 @@ export interface LiveAgentTextSnapshot {
 export interface LiveTextObservationOptions {
   requestFrame?: (callback: (now: number) => void) => number;
   cancelFrame?: (handle: number) => void;
-  now?: () => number;
   visible?: () => boolean;
-  reducedMotion?: () => boolean;
   watch?: (listener: () => void) => () => void;
 }
 
-/** Publish presentation only when there is a paintable change. Raw streamed
- * text remains in the session immediately; parsing never sees intermediate
- * target updates followed by a second smoothing render in the same frame. */
+/** Publish the growing text as it arrives, at most once per frame (several
+ * provider deltas in one frame lay out once). The message itself paces what
+ * the reader sees (render first, then reveal: renderers/use-text-reveal.ts),
+ * so nothing here holds text back. Hidden surfaces publish nothing until
+ * they are shown again, then the full native text at once. */
 export function observeLiveAgentText(
   source: LiveAgentTextSource,
   initial: AgentTextMessage,
   options: LiveTextObservationOptions = {},
 ) {
-  const media = options.reducedMotion
-    ? null
-    : window.matchMedia("(prefers-reduced-motion: reduce)");
   const visible =
     options.visible ?? (() => document.visibilityState !== "hidden");
-  const reducedMotion = options.reducedMotion ?? (() => media!.matches);
   const requestFrame = options.requestFrame ?? requestAnimationFrame;
   const cancelFrame = options.cancelFrame ?? cancelAnimationFrame;
-  const now = options.now ?? (() => performance.now());
   const watch =
     options.watch ??
     ((listener: () => void) => {
       document.addEventListener("visibilitychange", listener);
-      media?.addEventListener("change", listener);
-      return () => {
-        document.removeEventListener("visibilitychange", listener);
-        media?.removeEventListener("change", listener);
-      };
+      return () => document.removeEventListener("visibilitychange", listener);
     });
-  let current = source.read(initial);
-  const buffer = new StreamingTextBuffer(current.text);
-  let snapshot: LiveAgentTextSnapshot = { message: current, pending: false };
+  let snapshot: LiveAgentTextSnapshot = { message: source.read(initial), pending: false };
   let frame: number | null = null;
-  let paintedAt = 0;
   let release: (() => void) | undefined;
   const listeners = new Set<() => void>();
   const publish = () => {
-    if (
-      snapshot.message.text === buffer.text &&
-      snapshot.pending === buffer.pending
-    )
-      return;
-    snapshot = {
-      message: buffer.pending ? { ...current, text: buffer.text } : current,
-      pending: buffer.pending,
-    };
+    frame = null;
+    const message = source.read(initial);
+    if (message === snapshot.message) return;
+    snapshot = { message, pending: false };
     if (visible()) for (const listener of listeners) listener();
   };
   const disarm = () => {
     if (frame !== null) cancelFrame(frame);
     frame = null;
   };
-  const tick = (at: number) => {
-    frame = null;
-    if (!visible() || reducedMotion()) {
-      buffer.flush();
-      publish();
-    } else if (at - paintedAt >= 30) {
-      paintedAt = at;
-      buffer.advance(at);
-      publish();
-    }
-    if (buffer.pending && visible()) frame = requestFrame(tick);
-  };
   const push = () => {
-    current = source.read(initial);
-    buffer.push(current.text, now());
-    if (!visible() || reducedMotion() || !buffer.pending) {
-      disarm();
-      buffer.flush();
-      publish();
-    } else if (frame === null) frame = requestFrame(tick);
+    if (!visible()) return;
+    if (frame === null) frame = requestFrame(publish);
   };
   return {
     getSnapshot: () => snapshot,
     subscribe(listener: () => void) {
       listeners.add(listener);
       if (listeners.size === 1) {
-        // Reveal/remount starts from the full native text, never a hidden queue.
-        current = source.read(initial);
-        buffer.push(current.text, now());
-        buffer.flush();
-        publish();
+        // Reveal/remount starts from the full native text, never a queue.
+        snapshot = { message: source.read(initial), pending: false };
         const unsubscribe = source.subscribe(push);
         const unwatch = watch(() => {
-          push();
-          if (visible()) for (const notify of listeners) notify();
+          if (!visible()) return;
+          disarm();
+          const before = snapshot;
+          publish();
+          // Shown again: one render with the full text, published or not.
+          if (snapshot === before) for (const notify of listeners) notify();
         });
         release = () => {
           unsubscribe();
           unwatch();
           disarm();
-          buffer.flush();
         };
       }
       return () => {

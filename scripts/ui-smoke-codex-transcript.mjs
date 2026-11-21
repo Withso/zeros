@@ -1,3 +1,4 @@
+import { expectPageSettled } from "./ui-smoke/page-settled.mjs";
 import { runTurnUsageSmoke } from "./ui-smoke-turn-usage.mjs";
 import { runGeneratedImagesSmoke } from "./ui-smoke-generated-images.mjs";
 import { runArtifactLinksSmoke } from "./ui-smoke-artifact-links.mjs";
@@ -56,6 +57,13 @@ export async function runCodexTranscriptSmoke({ page, check, captureDirectory })
   await expect(
     transcript.getByText("I am checking the implementation."),
   ).toBeVisible();
+  // The live run is a collapsed group; its rows mount once it is opened.
+  const workingGroup = transcript.locator("[data-working-group]").first();
+  await expect(workingGroup).toHaveAttribute("aria-expanded", "false");
+  await expect(
+    transcript.getByRole("button", { name: /Bash pnpm test/ }),
+  ).toHaveCount(0);
+  await workingGroup.click();
   await expect(
     transcript.getByRole("button", { name: /Bash pnpm test/ }),
   ).toBeVisible();
@@ -107,8 +115,10 @@ export async function runCodexTranscriptSmoke({ page, check, captureDirectory })
   await expect(
     transcript.getByText("The final answer stays visible."),
   ).toBeVisible();
-  await transcript.getByRole("button", { name: /tool calls/ }).click();
-  await transcript.getByRole("button", { name: /^1 tool call$/ }).click();
+  // The user's open choice survives settling; the late call after the
+  // answer is a lone row, not a group.
+  await expect(workingGroup).toHaveAttribute("data-working-group", "closed");
+  await expect(workingGroup).toHaveAttribute("aria-expanded", "true");
   await expect(
     transcript.getByRole("button", {
       name: /^Background agent completed/,
@@ -259,12 +269,18 @@ export async function runCodexTranscriptSmoke({ page, check, captureDirectory })
   await expect(waitingLoader(backgroundTranscript)).toHaveCount(0);
   await expect(chatTab.getByRole("status")).toHaveCount(0);
   check("Claude waiting/resume retains its clock, child updates stay quiet, and both tabs clear on completion or Stop", true);
-  await runToolPresentationSmoke({ page, check });
-  await runArtifactLinksSmoke({ page, check });
-  await runSubagentPresentationSmoke({ page, check });
-  await runStreamingTextSmoke({ page, check });
-  await runModelFallbackSmoke({ page, check });
-  await runWakeupSmoke({ page, check });
-  await runTurnUsageSmoke({ page, check });
+  // These smokes share this page: each must leave it still for the next.
+  for (const [name, run] of [
+    ["tool presentation", () => runToolPresentationSmoke({ page, check })],
+    ["artifact links", () => runArtifactLinksSmoke({ page, check })],
+    ["subagent presentation", () => runSubagentPresentationSmoke({ page, check })],
+    ["streaming text", () => runStreamingTextSmoke({ page, check })],
+    ["model fallback", () => runModelFallbackSmoke({ page, check })],
+    ["wakeup", () => runWakeupSmoke({ page, check })],
+    ["turn usage", () => runTurnUsageSmoke({ page, check })],
+  ]) {
+    await run();
+    await expectPageSettled(page, `the ${name} smoke`);
+  }
   await runGeneratedImagesSmoke({ page, check, captureDirectory });
 }

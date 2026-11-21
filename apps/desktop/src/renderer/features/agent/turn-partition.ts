@@ -1,6 +1,6 @@
 import { toolPresentationReady, withoutRedundantAgentTasks } from "./renderers/tool-readiness";
 import { isTurnFailureNotice } from "./turn-failure";
-import { isProviderWorkEvent, isUsageNotice, usageStatusChanges } from "./transcript-notices";
+import { isLegacyAuthenticationNotice, isProviderWorkEvent, isUsageNotice, usageStatusChanges } from "./transcript-notices";
 // Split working narration/tools from provider-declared partial/final answers.
 // Live events retain their source order and become inspectable immediately.
 
@@ -25,6 +25,9 @@ export interface PartitionOptions {
    * notice stays in the working feed where it arrived, but only where it
    * changes that turn's status. Defaults to the segment's own events. */
   usageEvents?: readonly AgentMessage[];
+  /** Rendering only: in-between messages become their own output-style
+   * segments between the working runs instead of folding into them. */
+  inBetweenOutside?: boolean;
 }
 
 /** Replaced legacy fragments retain their durable ids with empty text so a
@@ -37,6 +40,22 @@ export function isVisibleTranscriptEvent(event: AgentMessage): boolean {
     event.text !== "" ||
     event.redacted === true
   );
+}
+
+/** Prose the model wrote at the top level of the turn while still working:
+ * phase-less or commentary agent text. Text that Zeros or a runtime wrote
+ * (wake-ups, local notes, usage, hook feedback, sign-in and verification
+ * notices, model fallback, session dividers) and retired fragments are not. */
+export function isInBetweenMessage(event: AgentMessage): boolean {
+  if (event.kind !== "text" || event.role !== "agent" || event.parentToolId) return false;
+  if (event.phase && event.phase !== "commentary") return false;
+  if (event.retracted || event.wakeupNotice || event.localNote || event.modelFallback ||
+    event.summaryBoundary || event.resumeBoundary) return false;
+  if (typeof event.text !== "string" || event.text.trim() === "") return false;
+  // Codex ids carry a turn prefix: `<turn>-unsupported-verification:<request>`.
+  const ids = [event.id, event.messageId ?? ""];
+  if (ids.some((id) => id.startsWith("claude-feedback-") || /(?:^|-)unsupported-verification:/.test(id))) return false;
+  return !isUsageNotice(event) && !isLegacyAuthenticationNotice(event);
 }
 
 /** A USER-INITIATED compaction row (Compact now / typed /compact →
@@ -180,6 +199,9 @@ function partitionVisible(
 
 export interface TurnSegment {
   kind: "working" | "output";
+  /** An output segment holding an in-between message rather than an answer.
+   * It shares the output kind so settling it as the answer keeps its key. */
+  inBetween?: true;
   /** Durable anchor retained from the last committed group when history grows
    * at either end. New groups start with their first visible event id. */
   key: string;
@@ -200,10 +222,11 @@ export function partitionTurnSequence(
   const segments: TurnSegment[] = [];
   for (const event of partition.events) {
     if (!visible.has(event)) continue;
-    const kind = output.has(event) ? "output" : "working";
+    const between = !output.has(event) && !!options?.inBetweenOutside && isInBetweenMessage(event);
+    const kind = output.has(event) || between ? "output" : "working";
     const previous = segments.at(-1);
     if (kind === "working" && previous?.kind === kind) previous.events.push(event);
-    else segments.push({ kind, key: event.id, events: [event] });
+    else segments.push({ kind, key: event.id, events: [event], ...(between ? { inBetween: true as const } : {}) });
   }
   // Prepending within a working run must not remount EventStripe or its
   // nested tool/Agent disclosures. Match durable rows only, and let at most

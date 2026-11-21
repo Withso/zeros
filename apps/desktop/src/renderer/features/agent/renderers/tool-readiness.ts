@@ -76,16 +76,30 @@ export function isRoutineNativeSleep(tool: AgentToolMessage): boolean {
     : isSleepItem(tool.rawOutput));
 }
 
-/** Keep provisional native records in state; expose the same durable row when
- * its command/target is ready. Terminal and missing-completion records always
- * remain inspectable, even when the producer never supplied arguments. */
-export function toolPresentationReady(tool: AgentToolMessage): boolean {
-  if (isLegacyEnvironmentConnection(tool) || isRoutineNativeSleep(tool) || isWorkspaceToolLoading(tool)) return false;
-  if (
-    !["pending", "in_progress"].includes(tool.status) ||
-    toolCompletionUnreported(tool.rawOutput)
-  )
-    return true;
+/** How long the loader line keeps naming a call that has finished while a
+ * newer call still waits for its description. Then the line returns to its
+ * timer: the newer call is never shown by its name alone (it shows once its
+ * description is known), and the line must not look stuck on the old one. */
+export const PROVISIONAL_WAIT_MS = 2_000;
+
+/** Titles the adapters give a call before its input is known ("Editing
+ * file", "Running shell command", a bare tool name). Never a description:
+ * a call titled like this shows by its name alone. */
+const PLACEHOLDER_TITLE = new RegExp("^(?:" + [
+  "Reading file", "Editing files?", "Running shell command", "Searching for files", "Searching web",
+  "Fetching URL", "Finding tools", "Grep", "Glob", "Subagent", "Skill", "Bash", "Shell", "Execute",
+  "Read", "Edit", "Write", "MultiEdit", "List", "List files", "Fetch", "WebFetch", "WebSearch",
+  "Web search", "Agent", "Task", "Spawn[ _]?agent",
+].join("|") + ")$", "i");
+
+export function placeholderTitle(title: string | undefined): boolean {
+  return !title?.trim() || PLACEHOLDER_TITLE.test(title.trim());
+}
+
+/** Whether a call's description is known: the input field its row names, or
+ * a provider title that is more than a placeholder. Kinds without a
+ * description (named by title alone) always are. */
+export function toolDescribed(tool: AgentToolMessage): boolean {
   const input = toolRecord(tool.rawInput);
   const has = (...keys: string[]) =>
     keys.some(
@@ -93,42 +107,59 @@ export function toolPresentationReady(tool: AgentToolMessage): boolean {
         typeof input[key] === "string" &&
         (input[key] as string).trim().length > 0,
     );
+  const titled = !placeholderTitle(tool.title);
   switch (tool.toolKind) {
     case "execute":
-      return (
-        has("command", "cmd", "script") ||
-        !/^(Bash|Shell|Running shell command|Execute)$/i.test(tool.title)
-      );
+      return has("command", "cmd", "script") || titled;
     case "read":
-      return (
-        has("path", "file_path", "filePath", "targetFile") ||
-        /^Read\s+\S/.test(tool.title)
-      );
+      return has("path", "file_path", "filePath", "targetFile", "target_file") || titled;
+    case "edit":
+      return has("file_path", "path", "filePath", "target_file", "targetFile") ||
+        Array.isArray(input.changes) && input.changes.length > 0 || titled;
     case "list":
-      return (
-        has("path", "dir", "directory", "command") ||
-        /^List\s+(?!files$)\S/.test(tool.title)
-      );
+      return has("path", "dir", "directory", "command") || /^List\s+(?!files$)\S/.test(tool.title);
     case "search":
-      return (
-        has(
-          "pattern",
-          "query",
-          "glob",
-          "globPattern",
-          "searchTerm",
-          "command",
-        ) || /^(Grep|Glob)\s+\S/.test(tool.title)
-      );
+      return has("pattern", "query", "glob", "globPattern", "searchTerm", "command", "regex") || /^(Grep|Glob)\s+\S/.test(tool.title);
+    case "fetch":
+      return has("url", "URL") || titled;
+    case "web_search":
+      return has("query", "q") || Object.keys(toolRecord(input.action)).length > 0 || titled;
+    case "skill":
+      return has("skill", "command", "name") || titled;
     case "subagent":
     case "task":
-      return (
-        has("description", "prompt", "task", "agentPath", "name") ||
-        !/^(Agent|Task|Subagent|Spawn[ _]?agent)$/i.test(tool.title)
-      );
+      return has("description", "prompt", "task", "agentPath", "name") || titled;
     default:
       return true;
   }
+}
+
+/** Keep provisional records in state; expose the same durable row once its
+ * description is known: a call is shown with its real description or not at
+ * all, however long its input takes (like a thought, which shows once its
+ * opening line has settled). Kinds named by their title alone show at once.
+ * Terminal and missing-completion records always remain inspectable, even
+ * when the producer never supplied arguments. */
+export function toolPresentationReady(tool: AgentToolMessage): boolean {
+  if (isLegacyEnvironmentConnection(tool) || isRoutineNativeSleep(tool) || isWorkspaceToolLoading(tool)) return false;
+  if (
+    !["pending", "in_progress"].includes(tool.status) ||
+    toolCompletionUnreported(tool.rawOutput)
+  )
+    return true;
+  return toolDescribed(tool);
+}
+
+/** When the oldest live call still waiting for its description started, or
+ * null when none waits. */
+export function provisionalCallSince(messages: readonly AgentMessage[]): number | null {
+  let since: number | null = null;
+  for (const message of messages) {
+    if (message.kind !== "tool" || toolPresentationReady(message)) continue;
+    if (isLegacyEnvironmentConnection(message) || isRoutineNativeSleep(message) || isWorkspaceToolLoading(message)) continue;
+    if (since === null || message.createdAt < since) since = message.createdAt;
+  }
+  return since;
 }
 
 /** A tool search is harness mechanics. It never shows while pending (its query

@@ -4,7 +4,8 @@
 
 import { describe, expect, it } from "vitest";
 
-import { tailIndicators, tailTurnInFlight } from "../tail-indicators";
+import { liveTailId, tailIndicators, tailTurnInFlight } from "../tail-indicators";
+import type { AgentMessage } from "../use-agent-session";
 
 const at = (overrides: Partial<Parameters<typeof tailIndicators>[0]> = {}) =>
   tailIndicators({
@@ -116,5 +117,25 @@ describe("tailTurnInFlight across a cloud send's handoff", () => {
   it("settles once the agent produced output or the durable prompt is terminal", () => {
     expect(tailTurnInFlight({ sessionStreaming: false, pendingLocalTurn: false, hasEvents: true, durableAwaitingStart: true })).toBe(false);
     expect(tailTurnInFlight({ sessionStreaming: false, pendingLocalTurn: false, hasEvents: false, durableAwaitingStart: false })).toBe(false);
+  });
+});
+
+describe("liveTailId", () => {
+  const text = (id: string): AgentMessage => ({ kind: "text", id, role: "agent", text: "Checking.", createdAt: 1 });
+  const call = (id: string, toolKind = "other", parentToolId?: string): AgentMessage =>
+    ({ kind: "tool", id, toolCallId: id, title: "Sleep", toolKind, status: "in_progress", rawInput: {}, createdAt: 2, ...(parentToolId ? { parentToolId } : {}) }) as AgentMessage;
+
+  it("is the newest drawn event", () => {
+    expect(liveTailId([call("a"), text("m")], "m")).toBe("m");
+    expect(liveTailId([text("m")], null)).toBe(null);
+  });
+
+  it("moves past a message once the agent started a call the feed does not draw", () => {
+    expect(liveTailId([text("m"), call("sleep")], "m")).toBe("sleep");
+  });
+
+  it("ignores bookkeeping rows and a sub-agent's own calls", () => {
+    expect(liveTailId([text("m"), call("switch", "model_switch")], "m")).toBe("m");
+    expect(liveTailId([text("m"), call("child", "read", "parent")], "m")).toBe("m");
   });
 });

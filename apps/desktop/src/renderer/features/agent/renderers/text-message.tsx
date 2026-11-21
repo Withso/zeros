@@ -27,7 +27,7 @@
 // to bind.
 // ──────────────────────────────────────────────────────────
 
-import { memo, useMemo, useRef, type SyntheticEvent } from "react";
+import { memo, useContext, useMemo, useRef, type SyntheticEvent } from "react";
 import { AlarmClock } from "lucide-react";
 import type { Renderer, RendererContext } from "./types";
 import type {
@@ -59,7 +59,7 @@ import { COMPOSER_PILL_SPACING, PILL_HOVER, PILL_SHELL } from "../composer-edito
 import { cn } from "@/renderer/shared/ui/cn";
 import { MarkdownCodeBlock } from "./markdown-code-block";
 import { useAttachmentImageSource } from "../attachment-image-source";
-import { useStreamingText, useStreamingTextEdge } from "./use-streaming-text";
+import { RevealHeldContext, useTextReveal } from "./use-text-reveal";
 import { fallbackDisplayText } from "../model-fallback";
 import { wakeupDisplayText } from "../wakeup-notice";
 import { LocalLinkHtml, LocalLinkText } from "../local-links/text";
@@ -119,14 +119,20 @@ export const TextMessage: Renderer<AgentTextMessage> = memo(
     const useMarkdown = message.role === "agent" && !message.modelFallback && !message.wakeupNotice;
     const text = message.modelFallback ? fallbackDisplayText(message.modelFallback) : message.text;
     const proseRef = useRef<HTMLDivElement>(null);
-    const smooth = useStreamingText(text, useMarkdown && ctx.isStreaming && ctx.lastMessageId === message.id && ctx.attachmentImagesActive !== false, ctx.liveTextPresentation);
-    const liveLocal = !!ctx.liveTextSource && useMarkdown && ctx.isStreaming && ctx.lastMessageId === message.id && ctx.attachmentImagesActive !== false;
+    const reportHeld = useContext(RevealHeldContext);
+    // The live tail message renders everything received and is revealed unit
+    // by unit (render first, then reveal); an in-between one appears whole.
+    const live = useMarkdown && ctx.isStreaming && ctx.lastMessageId === message.id;
+    const liveLocal = !!ctx.liveTextSource && live && ctx.attachmentImagesActive !== false;
     const parse = useMemo(() => liveLocal ? createStreamingMarkdownRenderer() : renderMarkdownSegments, [liveLocal]);
     const segments = useMemo(
-      () => (useMarkdown ? parse(smooth.text) : null),
-      [useMarkdown, smooth.text, parse],
+      () => (useMarkdown ? parse(text) : null),
+      [useMarkdown, text, parse],
     );
-    useStreamingTextEdge(proseRef, smooth.text, smooth.pending);
+    useTextReveal(proseRef, { source: text, live, turnLive: ctx.isStreaming,
+      endedNaturally: !ctx.isStreaming && ctx.turnEndedNaturally === true,
+      active: ctx.attachmentImagesActive !== false, createdAt: message.createdAt, phase: message.phase,
+      onHeld: reportHeld ? (held: boolean | null) => reportHeld(message.id, held) : undefined });
 
     // Drop trailing whitespace from the sent user bubble so a message ending in
     // stray newlines/spaces doesn't render as a tall, mostly-empty bubble (the

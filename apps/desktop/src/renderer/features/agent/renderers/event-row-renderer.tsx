@@ -40,6 +40,7 @@ import { toast } from "@/renderer/shared/ui/primitives/elements";
 import type { AgentMessage, AgentToolMessage } from "../use-agent-session";
 import { commandReadActions, displayCommand, type CommandReadAction } from "./tool-command";
 import { EventRow, WORKING_FEED_GAP } from "./event-row";
+import { streamingThoughtReady } from "../working-group";
 import { cn } from "@/renderer/shared/ui/cn";
 import { ToolIdentityIcon } from "./tool-identity-icon";
 import { useNativeAppName } from "@/renderer/platform/native-app-artwork";
@@ -115,6 +116,10 @@ function readPathOf(tool: AgentToolMessage): string | null {
 export const EventRowRenderer: Renderer<AgentMessage> = memo(
   function EventRowRenderer({ message, ctx }) {
     if (message.kind === "tool" && !toolPresentationReady(message)) return null;
+    // A streaming thought appears as one unit, name and description together,
+    // once its opening line has settled (or when it finishes).
+    if (message.kind === "text" && message.role === "thought" && ctx.isStreaming &&
+        ctx.lastMessageId === message.id && !streamingThoughtReady(message)) return null;
     // A LIVE api_retry notice (the CLI is mid-backoff, this row is the
     // streaming tail) renders as a shimmer + "Reconnecting agent" — an
     // active state, not a warning. The moment the

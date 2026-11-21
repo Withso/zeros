@@ -27,10 +27,10 @@ describe("the agent's working timer", () => {
     expect(formatWorkingElapsed(7_450)).toBe("7.4s");
     expect(formatWorkingElapsed(57_500)).toBe("57.5s");
     expect(formatWorkingElapsed(59_999)).toBe("59.9s");
-    expect(formatWorkingElapsed(MINUTE)).toBe("1m, 0.0s");
-    expect(formatWorkingElapsed(MINUTE + 27_300)).toBe("1m, 27.3s");
+    expect(formatWorkingElapsed(MINUTE)).toBe("1m 0.0s");
+    expect(formatWorkingElapsed(MINUTE + 27_300)).toBe("1m 27.3s");
     // Minutes keep counting past the hour.
-    expect(formatWorkingElapsed(103 * MINUTE + 57_500)).toBe("103m, 57.5s");
+    expect(formatWorkingElapsed(103 * MINUTE + 57_500)).toBe("103m 57.5s");
     expect(formatWorkingElapsed(-50)).toBe("0.0s");
   });
 
@@ -53,7 +53,7 @@ describe("the agent's working timer", () => {
 
   it("is the timer on the active turn's rail, a little apart from the loader", () => {
     const markup = renderToStaticMarkup(createElement(ActivityShimmer, { startedAt: Date.now() - 2 * MINUTE }));
-    expect(markup).toMatch(/>2m, 0\.\ds<\/span>/);
+    expect(markup).toMatch(/>2m 0\.\ds<\/span>/);
     // 6px after a loader centred on the 12px icon column: the timer starts on
     // the 20px label column every feed row shares.
     expect(markup).toMatch(/^<div[^>]*class="[^"]*\bgap-1\.5\b/);

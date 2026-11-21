@@ -285,6 +285,9 @@
         "restart_automatically_on_update": {
           "type": "boolean"
         },
+        "show_in_between_messages": {
+          "type": "boolean"
+        },
         "internal": {
           "type": "object",
           "propertyNames": {

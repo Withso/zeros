@@ -21,8 +21,9 @@ import { cn } from "@/renderer/shared/ui/cn";
 import { ZerosSpinner } from "@/renderer/shared/ui/loading";
 import { toolCompletionUnreported } from "./raw-output";
 import { toolRecord } from "./native-tool-presentation";
-import { toolPresentationReady } from "./tool-readiness";
+import { placeholderTitle, toolPresentationReady } from "./tool-readiness";
 import { ToolDetailSurface } from "./tool-detail-surface";
+import { TOOL_DESCRIPTION_FIT, ToolName } from "./tool-label";
 import { LIST_ROW_IN_GROUP, ListRow, ListRowGroup } from "@/renderer/shared/ui/primitives/list-row";
 
 const NO_CHILDREN: AgentMessage[] = [];
@@ -38,7 +39,8 @@ export const SubagentCard: Renderer<AgentToolMessage> = memo(
       readString(input.description) ??
       readString(input.prompt) ??
       readString(input.agentPath)?.split("/").at(-1) ??
-      tool.title;
+      // A placeholder title ("Agent", "spawnAgent") is never a description.
+      (placeholderTitle(tool.title) ? "" : tool.title);
     const model = readString(output.resolvedModel) ?? readString(input.model);
     const modelLabel =
       model && model !== "inherit" ? agentModelLabel(model) : undefined;
@@ -101,7 +103,7 @@ export const SubagentCard: Renderer<AgentToolMessage> = memo(
           // the row, so the header hovers and focuses like every feed row.
           className={cn("min-w-0 transition-colors", linkedHeader ? LIST_ROW_IN_GROUP : "group/subagent-row")}
           onClick={toggleOpen}
-          aria-label={`Agent ${headerText}`}
+          aria-label={`Agent ${headerText}`.trim()}
           aria-description={[failed ? "Agent failed" : undefined, modelLabel, effortText].filter(Boolean).join(" · ") || undefined}
           aria-expanded={open}
           aria-controls={bodyId}
@@ -132,20 +134,22 @@ export const SubagentCard: Renderer<AgentToolMessage> = memo(
               className="absolute inset-0 hidden size-3 group-hover/subagent-row:block group-focus-visible/subagent-row:block group-has-[[data-list-row-disclosure]:focus-visible]/subagent-row:block"
             />
           </span>
-          <span
+          <ToolName
             data-agent-label=""
-            className={cn(
-              // A half-row cap hides effort even when the full label fits.
-              "min-w-0 truncate text-reading leading-5",
-              failed ? "text-red-primary" : "text-fg1",
-            )}
+            label={effortText ? `${label} ${effortText}` : label}
+            // No 22ch cap beside the description: it would hide the model
+            // and effort even when the full label fits.
+            capped={false}
+            className={failed ? "text-red-primary" : "text-fg1"}
           >
             {label}
             {effortText ? <span data-agent-effort="" className={cn("text-fg2 text-xs opacity-80", failed && "text-red-primary")}>{` ${effortText}`}</span> : null}
-          </span>
+          </ToolName>
           {!linkedHeader && <span
+            data-tool-preview=""
             className={cn(
-              "min-w-0 truncate text-xs",
+              "truncate text-xs",
+              TOOL_DESCRIPTION_FIT,
               failed ? "text-red-primary" : "text-fg2",
             )}
           >
@@ -159,7 +163,7 @@ export const SubagentCard: Renderer<AgentToolMessage> = memo(
           <ListRowGroup className="group/subagent-row flex-wrap" onToggle={toggleOpen}>
             {header}
             {headerLinks.map((href) => <LocalLinkPill key={href} href={href} />)}
-            <span data-tool-preview="" className={cn("min-w-0 truncate text-xs", failed ? "text-red-primary" : "text-fg2")}>{headerText}</span>
+            <span data-tool-preview="" className={cn("truncate text-xs", TOOL_DESCRIPTION_FIT, failed ? "text-red-primary" : "text-fg2")}>{headerText}</span>
           </ListRowGroup>
         ) : header}
         {open && (

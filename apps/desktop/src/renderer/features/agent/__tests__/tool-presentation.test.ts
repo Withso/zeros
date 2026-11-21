@@ -292,6 +292,8 @@ describe("tool presentation contract", () => {
       }),
     ]) {
       expect(isVisibleTranscriptEvent(value)).toBe(false);
+      // However long its input takes, a live call never shows by name alone.
+      expect(isVisibleTranscriptEvent({ ...value, createdAt: Date.now() - 60_000 })).toBe(false);
       expect(
         isVisibleTranscriptEvent({
           ...value,
@@ -376,6 +378,19 @@ describe("tool presentation contract", () => {
     );
     expect(failed).toContain(">Error<");
     expect(failed).toContain("bg-red-bg");
+  });
+  // The narrow-lane layout itself is measured by ui-smoke-tool-presentation.
+  it("lets a row's description give way before its name, capping the name only beside a description", () => {
+    const name = (html: string) => html.match(/<span[^>]*class="([^"]*text-reading[^"]*)"/)![1]!;
+    const command = tool({ rawInput: { command: "git status --short" } });
+    const collapsed = row(command, false);
+    expect(name(collapsed)).toContain("max-w-[22ch]");
+    expect(collapsed.match(/<span data-tool-preview=""[^>]*>/)![0]).toContain("shrink-[9999]");
+    expect(name(row(command))).toContain("max-w-[60ch]");
+    const file = row(tool({ title: "Read", toolKind: "read", rawInput: { path: "src/a.ts" } }));
+    expect(name(file)).toContain("max-w-[22ch]");
+    expect(file.match(/<button[^>]*data-file-path[^>]*>/)![0]).toContain("shrink-[9999]");
+    expect(file.match(/<button[^>]*data-list-row-disclosure[^>]*>/)![0]).not.toContain("shrink-0");
   });
   it("keeps one bounded detail card and hides a command preview only while expanded", () => {
     const value = tool({

@@ -1,7 +1,22 @@
 import { expect } from "@playwright/test";
+import { runWorkingGroupsSmoke } from "./ui-smoke-working-groups.mjs";
 
 export async function runActivityDisclosureSmoke({ page, check }) {
   const origin = new URL(page.url()).origin;
+  // The large history interleaves calls with narration. With in-between
+  // messages folded (the setting off) it is one group whose disclosure must
+  // survive paging, retention and reload.
+  await page.goto(`${origin}/apps/desktop/src/renderer/harnesses/harness-activity-disclosure.html`);
+  await page.evaluate(() => localStorage.setItem("zeros.showInBetweenMessages", "false"));
+  try {
+    await runFoldedActivityDisclosure({ page, check, origin });
+  } finally {
+    await page.evaluate(() => localStorage.removeItem("zeros.showInBetweenMessages"));
+  }
+  await runWorkingGroupsSmoke({ page, check, origin });
+}
+
+async function runFoldedActivityDisclosure({ page, check, origin }) {
   for (const provider of ["Claude", "Codex", "Cursor"]) {
     await page.goto(
       `${origin}/apps/desktop/src/renderer/harnesses/harness-activity-disclosure.html?provider=${provider}`,
@@ -9,10 +24,10 @@ export async function runActivityDisclosureSmoke({ page, check }) {
     const transcript = page.locator("#activity-transcript-a");
     const scroller = page.locator("#activity-scroller-a");
     const largeGroup = transcript.getByRole("button", {
-      name: /tool calls, \d+ messages, 2 agents$/,
+      name: /^Worked for .+, \d+ tool calls, \d+ messages, 2 agents$/,
     });
-    await expect(largeGroup).toHaveText(
-      "257 tool calls, 224 messages, 2 agents",
+    await expect(largeGroup).toHaveAttribute(
+      "aria-label", /, 257 tool calls, 224 messages, 2 agents$/,
     );
     await expect(largeGroup).toHaveAttribute("aria-expanded", "false");
     await largeGroup.click();
@@ -69,8 +84,8 @@ export async function runActivityDisclosureSmoke({ page, check }) {
     await scroller.hover();
     await page.mouse.wheel(0, -1600);
     await expect(page.locator("#history-page")).toHaveText("1");
-    await expect(largeGroup).toHaveText(
-      "357 tool calls, 324 messages, 2 agents",
+    await expect(largeGroup).toHaveAttribute(
+      "aria-label", /, 357 tool calls, 324 messages, 2 agents$/,
     );
     await expect(largeGroup).toHaveAttribute("aria-expanded", "true");
     for (const nested of [tool, worker, childTool, prompt])
@@ -94,9 +109,10 @@ export async function runActivityDisclosureSmoke({ page, check }) {
       ),
     );
 
+    // A single call between two reports is a row, not a group; each row
+    // keeps its own disclosure.
     const reportGroups = transcript.getByRole("button", {
-      name: "1 tool call",
-      exact: true,
+      name: /^Bash echo after-steer-(?:one|two)$/,
     });
     await reportGroups.first().click();
     await expect(reportGroups.first()).toHaveAttribute("aria-expanded", "true");
@@ -116,11 +132,10 @@ export async function runActivityDisclosureSmoke({ page, check }) {
     await expect(page.locator("#activity-chat")).toHaveText("b");
     const otherTranscript = page.locator("#activity-transcript-b");
     const otherReports = otherTranscript.getByRole("button", {
-      name: "1 tool call",
-      exact: true,
+      name: /^Bash echo after-steer-(?:one|two)$/,
     });
     const otherLarge = otherTranscript.getByRole("button", {
-      name: /tool calls, \d+ messages, 2 agents$/,
+      name: /^Worked for .+, \d+ tool calls, \d+ messages, 2 agents$/,
     });
     await expect(otherReports.first()).toHaveAttribute(
       "aria-expanded",
@@ -129,7 +144,9 @@ export async function runActivityDisclosureSmoke({ page, check }) {
     await page
       .getByRole("button", { name: "Resume turn", exact: true })
       .click();
-    await expect(otherReports).toHaveCount(0);
+    // Live, narration sits outside the runs, so the folded group splits up.
+    await expect(otherLarge).toHaveCount(0);
+    await expect(otherReports.first()).toHaveAttribute("aria-expanded", "false");
     await page.getByRole("button", { name: "Stop turn", exact: true }).click();
     await expect(otherReports.first()).toHaveAttribute(
       "aria-expanded",
