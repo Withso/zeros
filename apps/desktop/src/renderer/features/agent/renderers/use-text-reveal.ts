@@ -20,6 +20,7 @@ import {
   release,
   releasePending,
   releaseState,
+  releaseWaitsOnTime,
   revealCuts,
   revealRole,
   revealUnitElements,
@@ -64,6 +65,12 @@ interface RevealState {
   /** As of the last render: frames scheduled earlier read these. */
   live: boolean;
   role: RevealRole;
+  /** Watches layout while a reveal runs (only then: settled and hidden
+   * messages are never observed or measured). */
+  watch?: { root: HTMLElement; observer?: ResizeObserver; onLoad: (event: Event) => void } | undefined;
+  /** Units and the boundary the accessibility pass last ran for. */
+  units: { el: Element; bottom: number }[];
+  inertFor: number;
   /** Told whether the message is held, on every change; null on unmount. */
   onHeld?: (held: boolean | null) => void;
   held?: boolean;
@@ -93,6 +100,9 @@ function clearReveal(root: HTMLElement, state: RevealState): void {
   state.fades = [];
   state.clip = null;
   state.inPlace = false;
+  state.units = [];
+  state.inertFor = NaN;
+  unwatch(state);
   if (root.dataset.revealing === undefined) return;
   delete root.dataset.revealing;
   delete root.dataset.revealHeld;
@@ -125,6 +135,8 @@ function measure(root: HTMLElement, state: RevealState, complete: boolean): void
   });
   state.lastKind = elements.at(-1)?.kind ?? null;
   state.cuts = revealCuts(units, lastComplete, holdTop);
+  state.units = elements.map(({ el }, index) => ({ el, bottom: units[index].bottom }));
+  state.inertFor = NaN;
 }
 
 /** The top of the line where the last unclosed `opener` renders literally. */
@@ -175,17 +187,62 @@ function paint(root: HTMLElement, state: RevealState, now: number, held: boolean
     // The message grew by a unit: the agent's growth at the tail (it may settle).
     if (grew) root.dispatchEvent(new Event(TAIL_GROWTH_EVENT, { bubbles: true }));
   }
-  // Nothing not yet shown is reachable: links, buttons and copy buttons below
-  // the shown part are inert (not focusable, not hittable, skipped by Tab).
-  const top = root.getBoundingClientRect().top;
-  for (const el of root.querySelectorAll<HTMLElement>(INTERACTIVE_SELECTOR)) {
-    const hidden = el.getBoundingClientRect().top - top >= shownY - 0.5;
-    if (hidden === (el.dataset.revealInert !== undefined)) continue;
-    el.inert = hidden;
-    if (hidden) el.dataset.revealInert = "";
-    else delete el.dataset.revealInert;
+  if (state.inertFor !== shownY) {
+    state.inertFor = shownY;
+    // Nothing not yet shown is reachable, by pointer, keyboard or assistive
+    // technology: a unit not wholly released is inert (out of the
+    // accessibility tree, not focusable, not hittable). A paragraph released
+    // in line steps stays inert until it completes, so a screen reader reads
+    // it whole, once, rather than lines that are still being written.
+    // Interactive elements and table header rows below the shown part too.
+    const setInert = (el: HTMLElement, hidden: boolean) => {
+      if (hidden === (el.dataset.revealInert !== undefined)) return;
+      el.inert = hidden;
+      if (hidden) el.dataset.revealInert = "";
+      else delete el.dataset.revealInert;
+    };
+    for (const { el, bottom } of state.units) if (el instanceof HTMLElement) setInert(el, bottom > shownY + 0.5);
+    const top = root.getBoundingClientRect().top;
+    for (const el of root.querySelectorAll<HTMLElement>(`${INTERACTIVE_SELECTOR}, thead tr`))
+      if (!state.units.some((unit) => unit.el.contains(el))) setInert(el, el.getBoundingClientRect().top - top >= shownY - 0.5);
   }
   return state.fades.length > 0;
+}
+
+/** Re-measure after the layout changed under a running reveal (a width
+ * change reflows the lines; an image loads and grows its unit). What was
+ * shown stays shown, at once, without a fade. */
+function remap(root: HTMLElement, state: RevealState): void {
+  if (!state.release || state.release.shownY <= 0) return;
+  const shown = state.cuts.filter((cut) => cut.y <= state.release!.shownY + 0.5).length;
+  measure(root, state, state.inPlace);
+  state.release.shownY = Math.max(state.release.shownY, state.cuts[shown - 1]?.y ?? 0);
+  state.fades = [];
+  paint(root, state, performance.now(), root.dataset.revealHeld !== undefined);
+}
+
+/** Watch layout while a reveal runs, and only then. */
+function watch(root: HTMLElement, state: RevealState): void {
+  if (state.watch) return;
+  const onLoad = () => remap(root, state);
+  const observer = typeof ResizeObserver === "undefined" ? undefined : new ResizeObserver(() => {
+    if (!state.release) return;
+    const width = root.getBoundingClientRect().width;
+    if (Math.abs(width - state.width) < 0.5) return;
+    state.width = width;
+    remap(root, state);
+  });
+  observer?.observe(root);
+  // Image loads do not bubble: listen in the capture phase.
+  root.addEventListener("load", onLoad, true);
+  state.watch = { root, observer, onLoad };
+}
+
+function unwatch(state: RevealState): void {
+  if (!state.watch) return;
+  state.watch.observer?.disconnect();
+  state.watch.root.removeEventListener("load", state.watch.onLoad, true);
+  state.watch = undefined;
 }
 
 /** Release what may go now, paint, and keep frames running while anything
@@ -195,9 +252,10 @@ function tick(root: HTMLElement, state: RevealState, now: number): void {
   const rel = state.release!;
   const before = rel.shownY;
   const undecided = role === "undecided" && !state.shownAny && live;
-  release(rel, state.cuts, now, undecided
+  const pacing = undecided
     ? { stepLines: UNDECIDED_STEP_LINES, lineWaitMs: Infinity }
-    : { stepLines: state.lastKind === "code" ? CODE_STEP_LINES : LINE_STEP_LINES });
+    : { stepLines: state.lastKind === "code" ? CODE_STEP_LINES : LINE_STEP_LINES };
+  release(rel, state.cuts, now, pacing);
   if (rel.shownY > before) {
     if (!state.shownAny) {
       // The first release puts the row back in flow, where its lines are
@@ -218,7 +276,10 @@ function tick(root: HTMLElement, state: RevealState, now: number): void {
     return;
   }
   reportHeld(root, state);
-  if ((pending || fading) && !state.frame) {
+  // Frames run only while time can change something: a fade, or a release
+  // that waits on its stagger or line wait. Lines that need more text wait
+  // for the next render (new text or a lifecycle change).
+  if ((fading || (pending && releaseWaitsOnTime(rel, state.cuts, pacing))) && !state.frame) {
     state.frame = requestAnimationFrame(() => {
       state.frame = 0;
       // The same clock the fades started on (a frame's timestamp can be
@@ -257,6 +318,7 @@ export function useTextReveal(rootRef: RefObject<HTMLElement>, { source, live, t
   const stateRef = useRef<RevealState>({
     release: null, cuts: [], lastKind: null, fades: [], clip: null, inPlace: false,
     shownAny: false, source: "", started: false, frame: 0, width: 0, live: false, role: "undecided",
+    units: [], inertFor: NaN,
   });
 
   useBrowserLayoutEffect(() => {
@@ -306,33 +368,16 @@ export function useTextReveal(rootRef: RefObject<HTMLElement>, { source, live, t
       state.shownAny = state.release.shownY > 0;
     }
     if (corrected) {
-      // A correction: show what is there now, at once.
+      // A correction: show what is there now, at once (a held draft too).
       state.release.shownY = Math.max(state.release.shownY, root.scrollHeight);
+      state.shownAny = state.release.shownY > 0;
       state.fades = [];
     }
+    watch(root, state);
     state.live = live;
     state.role = role;
     tick(root, state, now);
   }
-
-  // A width change reflows the lines: what was shown stays shown, at once.
-  useEffect(() => {
-    const root = rootRef.current;
-    if (!root || typeof ResizeObserver === "undefined") return;
-    const observer = new ResizeObserver(() => {
-      const state = stateRef.current;
-      const width = root.getBoundingClientRect().width;
-      if (!state.release || state.release.shownY <= 0 || Math.abs(width - state.width) < 0.5) return;
-      state.width = width;
-      const shown = state.cuts.filter((cut) => cut.y <= state.release!.shownY + 0.5).length;
-      measure(root, state, state.inPlace);
-      state.release.shownY = Math.max(state.release.shownY, state.cuts[shown - 1]?.y ?? 0);
-      state.fades = [];
-      paint(root, state, performance.now(), root.dataset.revealHeld !== undefined);
-    });
-    observer.observe(root);
-    return () => observer.disconnect();
-  }, [rootRef]);
 
   // A hidden tab or a reduced-motion switch completes the message at once.
   useEffect(() => {
@@ -355,6 +400,7 @@ export function useTextReveal(rootRef: RefObject<HTMLElement>, { source, live, t
   useEffect(() => () => {
     cancelAnimationFrame(stateRef.current.frame);
     stateRef.current.frame = 0;
+    unwatch(stateRef.current);
     // Gone: the feed forgets what it heard (a remount reports afresh).
     stateRef.current.onHeld?.(null);
     stateRef.current.held = undefined;
