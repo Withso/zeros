@@ -66,7 +66,9 @@ export function addChildSession(parent: ChatThread, deps: AddChildSessionDeps): 
   const delivery = loadTranscript({
     chatId: parent.id,
     mode: "handoff",
-    lastMessageAt: parent.updatedAt,
+    // Message writes do not advance `updatedAt`; a fresh key never reuses an
+    // older handoff from the transcript cache.
+    lastMessageAt: Date.now(),
     meta: { title: sourceLabel, folder: parent.folder },
   })
     .then((snapshot) => {
