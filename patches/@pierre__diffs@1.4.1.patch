@@ -1,8 +1,16 @@
 diff --git a/dist/editor/editor.js b/dist/editor/editor.js
-index 04433fcbc8314ff48089e990fe774988376ca10a..85fd68f87f63411e24ba517a6939ed2ab3cc1ae8 100644
+index 04433fcbc8314ff48089e990fe774988376ca10a..11e723c64aa0a046efacb834c59451bd3591259e 100644
 --- a/dist/editor/editor.js
 +++ b/dist/editor/editor.js
-@@ -1287,7 +1287,8 @@ var Editor = class {
+@@ -1047,6 +1047,7 @@ var Editor = class {
+ 				if (this.#isDeletedLineTarget(e)) {
+ 					this.#setDeletedTextSelectionActive(true);
+ 					if (this.#selections !== void 0) this.#updateSelections([]);
++					document.getSelection()?.removeAllRanges();
+ 					return;
+ 				}
+ 				this.#setDeletedTextSelectionActive(false);
+@@ -1287,7 +1288,8 @@ var Editor = class {
  					const selection = this.#spanLineSelection(anchorLine, lineIndex, textDocument);
  					this.#selectionStart ??= selection;
  					this.#updateSelections([selection]);
