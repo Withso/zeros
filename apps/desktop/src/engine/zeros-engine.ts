@@ -1321,6 +1321,9 @@ export class ZerosEngine {
         this.setup.start({ workspaceId, command, target }),
       );
     });
+    this.workspace.setSubmoduleFetcher((workspaceId) =>
+      this.fetchCreatedWorkspaceSubmodules(workspaceId),
+    );
     this.workspace.setSetupStopper((workspaceId) =>
       this.setup.stop(workspaceId),
     );

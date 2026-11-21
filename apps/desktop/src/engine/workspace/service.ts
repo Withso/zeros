@@ -1638,6 +1638,14 @@ export class WorkspaceService {
   ): void {
     this.setupRunner = fn;
   }
+  /** The engine's post-create submodule step (never rejects). Injected like
+   *  the setup runner so create-from-branch shares the workspace.create order:
+   *  submodules, then setup. */
+  private submoduleFetcher: ((workspaceId: string) => Promise<void>) | null =
+    null;
+  setSubmoduleFetcher(fn: (workspaceId: string) => Promise<void>): void {
+    this.submoduleFetcher = fn;
+  }
   /** Boundary used by non-PTY repository hooks (currently archive cleanup).
    * Kept engine-injected so the Git module never constructs a weaker backend
    * or silently falls back to an ordinary host shell. */
@@ -5364,6 +5372,7 @@ export class WorkspaceService {
           // setup read a half-copied .env/.npmrc, and do not hold the create RPC
           // open while that uncommon cold-disk pass finishes.
           void whenSeedingSettled(result.workspaceId)
+            .then(() => this.submoduleFetcher?.(result.workspaceId))
             .then(async () => {
               const ws = getWorkspaceById(result.workspaceId);
               if (ws && ws.archivedAt == null) {

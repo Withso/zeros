@@ -17,6 +17,7 @@ import { ZerosEngine } from "../index";
 
 interface Internals {
   workspace: {
+    submoduleFetcher: ((workspaceId: string) => Promise<void>) | null;
     isWriteOp(op: string): boolean;
     lifecycleMutationWorkspaceId(op: string, params: Record<string, unknown>): string | null;
     handle(op: string, params?: Record<string, unknown>, opts?: { remote?: boolean }): Promise<unknown>;
@@ -137,5 +138,13 @@ describe("workspace.create post-create chain", () => {
     await vi.waitFor(() => expect(seen!.aborted).toBe(true), { timeout: 2_000 });
     await vi.waitFor(() => expect(state.workspaceProcessStarts.has("ws_sub")).toBe(false));
     expect(order).toEqual([]);
+  });
+
+  it("wires the same step into workspace.createFromBranch", async () => {
+    submoduleStep.fetch.mockResolvedValue("Submodules: 1 fetched, 0 skipped, 0 failed.\r\n\r\n");
+    const { state, order } = engine("pnpm install");
+    await state.workspace.submoduleFetcher!("ws_branch");
+    expect(submoduleStep.fetch).toHaveBeenCalledWith("ws_branch", expect.any(AbortSignal));
+    expect(order).toEqual(["note:Submodules: 1 fetched, 0 skipped, 0 failed.\r\n\r\n"]);
   });
 });
