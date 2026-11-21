@@ -369,7 +369,9 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
         await repositoryLevels.syncFromRecipe(organizationId, userId, await computers.configuredTargets(organizationId));
       } } : {}),
     ...(readyCopies && readyCopySecrets ? { readyCopies: { status: (organizationId: string, viewer?: string | null) => readyCopies.status(organizationId, viewer ?? null),
-      failures: (organizationId: string) => readyCopies.failures(organizationId), secrets: readyCopySecrets } } : {}),
+      failures: (organizationId: string) => readyCopies.failureSummaries(organizationId, new Date()),
+      retryNow: async (organizationId: string, repository: string) => { await readyCopyBuilder?.retryNow(organizationId, repository); },
+      secrets: readyCopySecrets } } : {}),
     authorizeRepository, authorizeRepositories, authorizeSourceTargets, authorizeBuildRepository, authorizeSource, continueSource,
     remoteHead: (org, user, target, branch) => github.remoteHead(org, user, target.repository, branch, target.repositoryId),
     github: { service: github.service, documents: github.documents },

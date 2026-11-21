@@ -86,7 +86,10 @@ export type CloudV2RouteDeps = {
   /** Present only when ready copies are on (CloudV2Config.readyCopies). */
   readyCopies?: {
     status(organizationId: string, viewerUserId?: string | null): Promise<ReadonlyMap<string, "ready" | "building" | null>>;
-    failures(organizationId: string): Promise<{ repository: string; generation: number; reason: string; detail: string | null; finishedAt: string }[]>;
+    failures(organizationId: string): Promise<{ repository: string; generation: number; reason: string; detail: string | null; finishedAt: string;
+      failures?: number; nextRetryAt?: string | null }[]>;
+    /** An admin's Retry now for one shared repository's ready copy. */
+    retryNow?(organizationId: string, repository: string): Promise<unknown>;
     secrets: Pick<CloudV2ReadyCopySecrets, "names" | "save" | "clear" | "update">;
   };
   /** Repositories the organization's active Cloud Computer has installed; null without one. */
@@ -440,6 +443,14 @@ export function createCloudV2Routes(deps: CloudV2RouteDeps): Hono {
     if (!parsed.success) throw new HttpError(400, "invalid_request", "Invalid build secrets");
     c.header("Cache-Control", "no-store");
     return c.json({ names: await deps.readyCopies.secrets.save(organizationId, secretRepository(c.req.param("owner"), c.req.param("name")), userId, parsed.data.secrets) });
+  });
+
+  app.post("/v1/cloud-v2/organizations/:org/computer/repositories/:owner/:name/ready-copy/retry", async c => {
+    const organizationId = org(c.req.param("org"));
+    if (!deps.readyCopies?.retryNow) throw new HttpError(404, "not_found", "Not found");
+    await deps.computers.requireAdmin(organizationId, c.get("user").id);
+    await deps.readyCopies.retryNow(organizationId, secretRepository(c.req.param("owner"), c.req.param("name")));
+    return c.json({ ok: true }, 202);
   });
 
   app.patch("/v1/cloud-v2/organizations/:org/computer/repositories/:owner/:name/build-secrets", json, async c => {

@@ -9,7 +9,7 @@
 // "<source name> fork". A copy only becomes ready once stopped, and a newer
 // generation replaces it in one transaction; the old machine is deleted only
 // after every fork that began from it has its machine.
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type pg from "pg";
 import { withSystemTx, type Tx } from "../db.js";
 import { HttpError } from "../authz.js";
@@ -41,7 +41,16 @@ const KEY_WINDOW_MS = 23 * 60 * 60_000;
 /** A build whose server stopped beating is failed after this. */
 const INTERRUPTED_MS = 5 * 60_000;
 /** A failed generation is not retried sooner than this. */
-const FAILURE_BACKOFF_MS = 60 * 60_000;
+/** A generation that failed is retried after 1 hour, then twice as long each
+ * time, at most a day apart, and not at all after READY_COPY_RETRY_LIMIT
+ * failures in a row: one that fails for its setup would otherwise rebuild a
+ * whole repository every hour forever. Anything that could fix it (a new base,
+ * install script, setup, branch, build secrets or private entry, all in the
+ * inputs fingerprint) or an admin's Retry now starts it over. */
+export const READY_COPY_RETRY_FIRST_MS = 60 * 60_000;
+export const READY_COPY_RETRY_MAX_MS = 24 * 60 * 60_000;
+export const READY_COPY_RETRY_LIMIT = 5;
+export type ReadyCopyRetry = { failures: number; nextAt: Date | null; allowed: boolean };
 const HEARTBEAT_MS = 60_000;
 const ARCHIVE_READS = 24, ARCHIVE_WAIT_MS = 5_000;
 const READY_ATTEMPTS = 36, READY_WAIT_MS = 5_000;
@@ -55,6 +64,7 @@ export type CloudV2ReadyCopy = {
   idempotencyKey: string; machineId: string | null; machinePending: boolean; builtFromBase: string | null;
   computerBuildId: string | null; createdBy: string | null; branch: string | null; commit: string | null;
   failureReason: string | null; failureDetail: string | null; stale: boolean; refresh: boolean; machineDeletedAt: Date | null;
+  inputs: string | null; manualRetry: boolean;
   stoppedAt: Date | null; lastForkedAt: Date | null; createdAt: Date; startedAt: Date | null; finishedAt: Date | null;
 };
 type Row = {
@@ -62,6 +72,7 @@ type Row = {
   owner_user_id: string | null; idempotency_key: string; machine_id: string | null; machine_pending: boolean; built_from_base: string | null;
   computer_build_id: string | null; created_by: string | null; branch: string | null; commit_sha: string | null;
   failure_reason: string | null; failure_detail: string | null; stale: boolean; refresh: boolean; machine_deleted_at: Date | null;
+  inputs: string | null; manual_retry: boolean;
   stopped_at: Date | null; last_forked_at: Date | null; created_at: Date; started_at: Date | null; finished_at: Date | null;
 };
 const copy = (row: Row): CloudV2ReadyCopy => ({
@@ -69,7 +80,7 @@ const copy = (row: Row): CloudV2ReadyCopy => ({
   state: row.state, ownerUserId: row.owner_user_id, idempotencyKey: row.idempotency_key, machineId: row.machine_id, machinePending: row.machine_pending,
   builtFromBase: row.built_from_base, computerBuildId: row.computer_build_id, createdBy: row.created_by, branch: row.branch,
   commit: row.commit_sha, failureReason: row.failure_reason, failureDetail: row.failure_detail, stale: row.stale, refresh: row.refresh,
-  machineDeletedAt: row.machine_deleted_at, stoppedAt: row.stopped_at,
+  machineDeletedAt: row.machine_deleted_at, inputs: row.inputs, manualRetry: row.manual_retry, stoppedAt: row.stopped_at,
   lastForkedAt: row.last_forked_at, createdAt: row.created_at, startedAt: row.started_at, finishedAt: row.finished_at,
 });
 
@@ -109,18 +120,18 @@ export class CloudV2ReadyCopies {
 
   /** Queues a generation, or joins the one already building for this repository. */
   async request(input: { organizationId: string; repository: string; repositoryId: string; createdBy: string; computerBuildId: string;
-    builtFromBase: string; refresh?: boolean; now?: Date; ownerUserId?: string | null }): Promise<CloudV2ReadyCopy> {
+    builtFromBase: string; refresh?: boolean; now?: Date; ownerUserId?: string | null; inputs?: string | null; manualRetry?: boolean }): Promise<CloudV2ReadyCopy> {
     const repository = input.repository.toLowerCase(), id = randomUUID(), owner = input.ownerUserId ?? null;
     return this.tx(async tx => {
       await tx.query(
         `INSERT INTO cloud_v2_ready_copies (id, org_id, repository, repository_id, generation, state, idempotency_key, built_from_base,
-           computer_build_id, created_by, refresh, created_at, updated_at, owner_user_id)
+           computer_build_id, created_by, refresh, created_at, updated_at, owner_user_id, inputs, manual_retry)
          VALUES ($1,$2,$3,$4,coalesce((SELECT max(generation) FROM cloud_v2_ready_copies
              WHERE org_id=$2 AND repository=$3 AND owner_user_id IS NOT DISTINCT FROM $11::uuid),0)+1,
-           'building',$5,$6,$7,$8,$9,coalesce($10,clock_timestamp()),coalesce($10,clock_timestamp()),$11)
+           'building',$5,$6,$7,$8,$9,coalesce($10,clock_timestamp()),coalesce($10,clock_timestamp()),$11,$12,$13)
          ON CONFLICT (org_id, repository, owner_user_id) WHERE state='building' DO NOTHING`,
         [id, input.organizationId, repository, input.repositoryId, `ready-copy:${id}`, input.builtFromBase, input.computerBuildId,
-          input.createdBy, input.refresh === true, input.now ?? null, owner]);
+          input.createdBy, input.refresh === true, input.now ?? null, owner, input.inputs ?? null, input.manualRetry === true]);
       return copy((await tx.query<Row>(`SELECT * FROM cloud_v2_ready_copies WHERE org_id=$1 AND repository=$2 AND state='building'
         AND owner_user_id IS NOT DISTINCT FROM $3::uuid`, [input.organizationId, repository, owner])).rows[0]!);
     });
@@ -150,6 +161,31 @@ export class CloudV2ReadyCopies {
        ORDER BY f.repository, f.generation DESC`, [organizationId]));
     return rows.map(row => ({ repository: row.repository, generation: row.generation, reason: row.failure_reason, detail: row.failure_detail,
       finishedAt: row.finished_at.toISOString() }));
+  }
+
+  /** Repositories whose latest generation failed with none ready or building:
+   * candidates for an automatic retry once the backoff allows. */
+  async unrecovered(limit = 100): Promise<CloudV2ReadyCopy[]> {
+    const { rows } = await this.tx(tx => tx.query<Row>(
+      `SELECT DISTINCT ON (f.org_id, f.repository, f.owner_user_id) f.* FROM cloud_v2_ready_copies f
+       JOIN organizations o ON o.id=f.org_id AND o.deleted_at IS NULL AND o.lifecycle_status='active' AND o.cloud_workspaces_allowed
+       WHERE f.state='failed' AND f.failure_reason IS DISTINCT FROM 'organization_deleted' AND NOT EXISTS (SELECT 1 FROM cloud_v2_ready_copies n
+         WHERE n.org_id=f.org_id AND n.repository=f.repository AND n.owner_user_id IS NOT DISTINCT FROM f.owner_user_id
+           AND (n.state IN ('building','ready') OR n.generation>f.generation))
+       ORDER BY f.org_id, f.repository, f.owner_user_id, f.generation DESC LIMIT $1`, [limit]));
+    return rows.map(copy);
+  }
+
+  /** The Cloud Computer page's line per failed shared repository: what failed,
+   * where, how many times in a row, and when the next automatic retry is (null: stopped). */
+  async failureSummaries(organizationId: string, now: Date): Promise<{ repository: string; generation: number; reason: string; detail: string | null;
+    finishedAt: string; failures: number; nextRetryAt: string | null }[]> {
+    const summaries = [];
+    for (const failure of await this.failures(organizationId)) {
+      const retry = await this.retryState(organizationId, failure.repository, null, await this.inputs(organizationId, failure.repository, null), now);
+      summaries.push({ ...failure, failures: Math.max(retry.failures, 1), nextRetryAt: retry.nextAt?.toISOString() ?? null });
+    }
+    return summaries;
   }
 
   /** Per repository: whether its first copy is still being made. */
@@ -318,7 +354,8 @@ export class CloudV2ReadyCopies {
   }
 
   /** Ready copies due a new generation: stale, or stopped a week ago, and forked
-   * within the last 60 days. Not while one builds or one failed within the hour. */
+   * within the last 60 days (14 for a private one), not while one builds. The
+   * retry backoff is the caller's (retryState). */
   async refreshCandidates(now: Date, limit = 100): Promise<CloudV2ReadyCopy[]> {
     const { rows } = await this.tx(tx => tx.query<Row>(
       `SELECT r.* FROM cloud_v2_ready_copies r
@@ -327,27 +364,58 @@ export class CloudV2ReadyCopies {
          AND (r.stale OR r.stopped_at <= $1::timestamptz - make_interval(secs => $2::double precision / 1000))
          -- Shared copies stop refreshing after 60 days unforked, private ones after 14.
          AND coalesce(r.last_forked_at, r.created_at) > $1::timestamptz - make_interval(secs =>
-           (CASE WHEN r.owner_user_id IS NULL THEN $3 ELSE $6 END)::double precision / 1000)
+           (CASE WHEN r.owner_user_id IS NULL THEN $3 ELSE $5 END)::double precision / 1000)
          -- A private copy refreshes only while its entry stands and members may keep repositories.
          AND (r.owner_user_id IS NULL OR (o.cloud_personal_repositories_allowed AND EXISTS (SELECT 1 FROM cloud_repositories p
            WHERE p.org_id=r.org_id AND p.level='private' AND p.owner_user_id=r.owner_user_id AND p.repository_id=r.repository_id AND p.folded_at IS NULL)))
          AND NOT EXISTS (SELECT 1 FROM cloud_v2_ready_copies b WHERE b.org_id=r.org_id AND b.repository=r.repository
            AND b.owner_user_id IS NOT DISTINCT FROM r.owner_user_id AND b.state='building')
-         AND NOT EXISTS (SELECT 1 FROM cloud_v2_ready_copies f WHERE f.org_id=r.org_id AND f.repository=r.repository
-           AND f.owner_user_id IS NOT DISTINCT FROM r.owner_user_id AND f.state='failed'
-           AND f.finished_at > $1::timestamptz - make_interval(secs => $4::double precision / 1000))
-       ORDER BY r.stale DESC, r.stopped_at, r.id LIMIT $5`, [now, READY_COPY_REFRESH_MS, READY_COPY_UNUSED_MS, FAILURE_BACKOFF_MS, limit, READY_COPY_PRIVATE_UNUSED_MS]));
+       ORDER BY r.stale DESC, r.stopped_at, r.id LIMIT $4`, [now, READY_COPY_REFRESH_MS, READY_COPY_UNUSED_MS, limit, READY_COPY_PRIVATE_UNUSED_MS]));
     return rows.map(copy);
   }
 
-  /** Whether a first copy for this repository may be queued now. */
-  async mayQueueFirst(organizationId: string, repository: string, now: Date, ownerUserId: string | null = null): Promise<boolean> {
+  /** Whether a first copy for this repository may be queued now: none
+   * building or ready, and the retry backoff allows it for these inputs. */
+  async mayQueueFirst(organizationId: string, repository: string, now: Date, ownerUserId: string | null = null, inputs: string | null = null): Promise<boolean> {
     const { rows } = await this.tx(tx => tx.query<{ blocked: boolean }>(
-      `SELECT EXISTS (SELECT 1 FROM cloud_v2_ready_copies WHERE org_id=$1 AND repository=$2 AND owner_user_id IS NOT DISTINCT FROM $5::uuid
-         AND (state IN ('building','ready')
-         OR (state='failed' AND finished_at > $3::timestamptz - make_interval(secs => $4::double precision / 1000)))) AS blocked`,
-      [organizationId, repository.toLowerCase(), now, FAILURE_BACKOFF_MS, ownerUserId]));
-    return !rows[0]?.blocked;
+      `SELECT EXISTS (SELECT 1 FROM cloud_v2_ready_copies WHERE org_id=$1 AND repository=$2 AND owner_user_id IS NOT DISTINCT FROM $3::uuid
+         AND state IN ('building','ready')) AS blocked`, [organizationId, repository.toLowerCase(), ownerUserId]));
+    return !rows[0]?.blocked && (await this.retryState(organizationId, repository, ownerUserId, inputs, now)).allowed;
+  }
+
+  /** Consecutive failed generations since the last ready or building one,
+   * counted while their inputs equal `inputs` and up to an admin's Retry now. */
+  async retryState(organizationId: string, repository: string, ownerUserId: string | null, inputs: string | null, now: Date): Promise<ReadyCopyRetry> {
+    const { rows } = await this.tx(tx => tx.query<{ state: ReadyCopyState; inputs: string | null; manual_retry: boolean; finished_at: Date | null }>(
+      `SELECT state, inputs, manual_retry, finished_at FROM cloud_v2_ready_copies WHERE org_id=$1 AND repository=$2
+         AND owner_user_id IS NOT DISTINCT FROM $3::uuid ORDER BY generation DESC LIMIT $4`,
+      [organizationId, repository.toLowerCase(), ownerUserId, READY_COPY_RETRY_LIMIT + 1]));
+    let failures = 0, last: Date | null = null;
+    for (const row of rows) {
+      if (row.state !== "failed" || row.inputs !== inputs) break;
+      failures++; last ??= row.finished_at;
+      if (row.manual_retry) break;
+    }
+    if (!failures) return { failures, nextAt: now, allowed: true };
+    if (failures >= READY_COPY_RETRY_LIMIT) return { failures, nextAt: null, allowed: false };
+    const nextAt = new Date((last ?? now).getTime() + Math.min(READY_COPY_RETRY_FIRST_MS * 2 ** (failures - 1), READY_COPY_RETRY_MAX_MS));
+    return { failures, nextAt, allowed: nextAt.getTime() <= now.getTime() };
+  }
+
+  /** What a shared or private copy is built from; see READY_COPY_RETRY_LIMIT. */
+  async inputs(organizationId: string, repository: string, ownerUserId: string | null): Promise<string | null> {
+    const base = await this.base(organizationId);
+    if (!base) return null;
+    const name = repository.toLowerCase();
+    if (ownerUserId) {
+      const entry = await this.privateEntry(organizationId, ownerUserId, name);
+      return entry ? createHash("sha256").update(JSON.stringify(["private", base.buildId, entry.id])).digest("hex") : null;
+    }
+    const entry = base.repositories.find(candidate => candidate.repository.toLowerCase() === name);
+    const secrets = (await this.tx(tx => tx.query<{ updated_at: Date }>(
+      "SELECT updated_at FROM cloud_v2_ready_copy_secrets WHERE org_id=$1 AND repository=$2", [organizationId, name]))).rows[0];
+    return createHash("sha256").update(JSON.stringify(["shared", base.buildId, entry?.setup ?? null, entry?.ref ?? null,
+      secrets?.updated_at.toISOString() ?? null])).digest("hex");
   }
 
   /** Failed or retired generations whose machine can go: no fork that began
@@ -570,9 +638,10 @@ export class CloudV2ReadyCopyBuilder {
   async queuePrivateCopy(organizationId: string, ownerUserId: string, repository: string): Promise<void> {
     const { copies } = this.deps;
     const base = await copies.base(organizationId), entry = await copies.privateEntry(organizationId, ownerUserId, repository);
-    if (!base || !entry || !await copies.mayQueueFirst(organizationId, repository, this.now(), ownerUserId)) return;
+    const inputs = await copies.inputs(organizationId, repository, ownerUserId);
+    if (!base || !entry || !await copies.mayQueueFirst(organizationId, repository, this.now(), ownerUserId, inputs)) return;
     await copies.request({ organizationId, repository, repositoryId: entry.repositoryId, createdBy: ownerUserId, ownerUserId,
-      computerBuildId: base.buildId, builtFromBase: `snapshot:${base.snapshot}` });
+      computerBuildId: base.buildId, builtFromBase: `snapshot:${base.snapshot}`, inputs });
   }
 
   async queueFirstCopies(organizationId: string, only?: string): Promise<void> {
@@ -582,9 +651,10 @@ export class CloudV2ReadyCopyBuilder {
     for (const entry of base.repositories) {
       if (only && entry.repository.toLowerCase() !== only.toLowerCase()) continue;
       const target = base.sources.find(source => source.repository.toLowerCase() === entry.repository.toLowerCase());
-      if (!target || !await copies.mayQueueFirst(organizationId, entry.repository, this.now())) continue;
+      const inputs = await copies.inputs(organizationId, entry.repository, null);
+      if (!target || !await copies.mayQueueFirst(organizationId, entry.repository, this.now(), null, inputs)) continue;
       await copies.request({ organizationId, repository: entry.repository, repositoryId: target.repositoryId, createdBy: base.createdBy,
-        computerBuildId: base.buildId, builtFromBase: `snapshot:${base.snapshot}` });
+        computerBuildId: base.buildId, builtFromBase: `snapshot:${base.snapshot}`, inputs });
     }
   }
 
@@ -606,11 +676,15 @@ export class CloudV2ReadyCopyBuilder {
     for (const ready of await copies.refreshCandidates(now)) {
       if (this.closed) return;
       const base = await copies.base(ready.organizationId);
+      // A refresh that keeps failing backs off and stops like a first copy; the
+      // older generation keeps serving until it expires, and nobody but admins hears of it.
+      const inputs = await copies.inputs(ready.organizationId, ready.repository, ready.ownerUserId);
+      if (!(await copies.retryState(ready.organizationId, ready.repository, ready.ownerUserId, inputs, now)).allowed) continue;
       if (ready.ownerUserId) {
         // A private copy: its entry still stands (refreshCandidates checks); rebuilt as its member.
         if (!base) continue;
         await copies.request({ organizationId: ready.organizationId, repository: ready.repository, repositoryId: ready.repositoryId,
-          createdBy: ready.ownerUserId, ownerUserId: ready.ownerUserId, computerBuildId: base.buildId, refresh: true,
+          createdBy: ready.ownerUserId, ownerUserId: ready.ownerUserId, computerBuildId: base.buildId, refresh: true, inputs,
           builtFromBase: ready.stale || !ready.machineId || ready.computerBuildId !== base.buildId ? `snapshot:${base.snapshot}` : `copy:${ready.id}` });
         continue;
       }
@@ -620,9 +694,26 @@ export class CloudV2ReadyCopyBuilder {
       if (!target || !base.repositories.some(entry => entry.repository.toLowerCase() === ready.repository)) { await copies.retire(ready.id); continue; }
       // A copy on the current base is refreshed by forking it; a stale one is rebuilt from the base.
       await copies.request({ organizationId: ready.organizationId, repository: ready.repository, repositoryId: target.repositoryId,
-        createdBy: base.createdBy, computerBuildId: base.buildId, refresh: true,
+        createdBy: base.createdBy, computerBuildId: base.buildId, refresh: true, inputs,
         builtFromBase: ready.stale || !ready.machineId || ready.computerBuildId !== base.buildId ? `snapshot:${base.snapshot}` : `copy:${ready.id}` });
     }
+    // First copies that failed: retried on the backoff, then left until something changes.
+    for (const failed of await copies.unrecovered()) {
+      if (this.closed) return;
+      if (failed.ownerUserId) await this.queuePrivateCopy(failed.organizationId, failed.ownerUserId, failed.repository);
+      else await this.queueFirstCopies(failed.organizationId, failed.repository);
+    }
+  }
+
+  /** An admin's Retry now: a new generation whatever the backoff, which also starts it over. */
+  async retryNow(organizationId: string, repository: string): Promise<CloudV2ReadyCopy | null> {
+    const { copies } = this.deps, base = await copies.base(organizationId);
+    const entry = base?.repositories.find(candidate => candidate.repository.toLowerCase() === repository.toLowerCase());
+    const target = base?.sources.find(source => source.repository.toLowerCase() === repository.toLowerCase());
+    if (!base || !entry || !target) return null;
+    const ready = await copies.forkable(organizationId, repository, this.now());
+    return copies.request({ organizationId, repository, repositoryId: target.repositoryId, createdBy: base.createdBy, computerBuildId: base.buildId,
+      builtFromBase: `snapshot:${base.snapshot}`, refresh: !!ready, manualRetry: true, inputs: await copies.inputs(organizationId, repository, null) });
   }
 
   async cleanup(): Promise<void> {

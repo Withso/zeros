@@ -7,7 +7,8 @@ import { FakeBoat } from "./__fixtures__/boat-fake.js";
 import { CloudV2ComputerBuilder, CloudV2Computers, type CloudV2ComputerOptions } from "./computer.js";
 import type { CloudV2ComputerSourceResolver } from "./computer-provenance.js";
 import { CloudV2Lifecycle } from "./lifecycle.js";
-import { CloudV2ReadyCopies, CloudV2ReadyCopyBuilder, CloudV2ReadyCopyForks, READY_COPY_REFRESH_STARTS, type ReadyCopyWorkspace } from "./ready-copies.js";
+import { CloudV2ReadyCopies, CloudV2ReadyCopyBuilder, CloudV2ReadyCopyForks, READY_COPY_REFRESH_STARTS, READY_COPY_RETRY_LIMIT,
+  type ReadyCopyWorkspace } from "./ready-copies.js";
 import { CloudV2ReadyCopySecrets } from "./ready-copy-secrets.js";
 import { CloudV2Store } from "./store.js";
 import { CloudRepositoryLevels } from "./repository-levels.js";
@@ -485,6 +486,63 @@ d("cloud v2 ready copies", () => {
     await pool.query("UPDATE cloud_v2_ready_copies SET last_forked_at=$2 WHERE id=$1", [copy.id, new Date(clock - DAY)]);
     await copyBuilder({ cloneToken }).maintain();
     expect(await copies.list(org, "withso/notes")).toMatchObject([{ state: "ready" }, { state: "building", refresh: true, ownerUserId: member }]);
+  });
+
+  it("backs a failing copy off from 1 hour doubling to a day, stops after the limit, and starts over when something changes", async () => {
+    await liveBase();
+    boat.script = (_machine, command) => command.includes("pnpm install") ? { exitCode: 1, stdout: "", timedOut: false } : undefined;
+    await copyBuilder().tick();
+    const generations = async () => (await copies.list(org, "withso/zeros")).length;
+    const state = async () => copies.retryState(org, "withso/zeros", null, await copies.inputs(org, "withso/zeros", null), new Date(clock));
+    for (let failures = 1; failures < READY_COPY_RETRY_LIMIT; failures++) {
+      const retry = await state();
+      const wait = Math.min(60 * 60_000 * 2 ** (failures - 1), DAY);
+      expect(retry).toMatchObject({ failures, allowed: false });
+      expect(retry.nextAt!.getTime() - (await row(failures)).finishedAt!.getTime()).toBe(wait);
+      clock = retry.nextAt!.getTime() - 60_000;
+      await copyBuilder().tick();
+      expect(await generations()).toBe(failures);
+      clock = retry.nextAt!.getTime() + 1;
+      await copyBuilder().tick();
+      expect(await generations()).toBe(failures + 1);
+    }
+    expect(await state()).toMatchObject({ failures: READY_COPY_RETRY_LIMIT, nextAt: null, allowed: false });
+    clock += 7 * DAY;
+    await copyBuilder().tick();
+    expect(await generations()).toBe(READY_COPY_RETRY_LIMIT);
+    // Build secrets changed: the inputs differ, so it is retried at once.
+    const keys = { keys: { 1: randomBytes(32).toString("base64url") }, currentKeyVersion: 1 };
+    await new CloudV2ReadyCopySecrets(pool, keys).save(org, "withso/zeros", admin, { NPM_TOKEN: "npm_fixture_secret_retry" });
+    await copyBuilder().tick();
+    expect(await generations()).toBe(READY_COPY_RETRY_LIMIT + 1);
+    // Retry now restarts the count: its failure waits 1 hour again.
+    await copyBuilder().retryNow(org, "withso/zeros");
+    await copyBuilder().tick();
+    expect((await copies.list(org, "withso/zeros")).at(-1)).toMatchObject({ state: "failed", manualRetry: true });
+    expect(await state()).toMatchObject({ failures: 1 });
+    // A new Cloud Computer base starts it over too.
+    await liveBase();
+    expect((await copies.list(org, "withso/zeros")).at(-1)).toMatchObject({ state: "building" });
+  });
+
+  it("keeps a failed or unverifiable copy from members: no wait, no tray line, nothing in their lists", async () => {
+    await liveBase();
+    boat.script = (_machine, command) => command.includes("pnpm install") ? { exitCode: 1, stdout: "", timedOut: false } : undefined;
+    await copyBuilder().tick();
+    expect(await row(1)).toMatchObject({ state: "failed" });
+    // Every create takes the direct clone at once, and none queues another build within the backoff.
+    for (let create = 0; create < 3; create++) expect(await forks().prepare(workspace())).toBeNull();
+    expect(await copies.list(org, "withso/zeros")).toHaveLength(1);
+    // Create's list says nothing is getting ready (no tray line), and members never see the cause.
+    expect((await copies.status(org, member)).get("withso/zeros")).toBeNull();
+    const summaries = await copies.failureSummaries(org, new Date(clock));
+    expect(summaries).toEqual([expect.objectContaining({ repository: "withso/zeros", reason: "ready_copy_setup_failed", failures: 1 })]);
+    // Only while a generation is actually building does a create wait, bounded.
+    clock += 61 * 60_000;
+    await copyBuilder().maintain();
+    expect(await forks().prepare(workspace())).toEqual({ waitMs: 3_000 });
+    const older = workspace({ createdAt: new Date(clock - 91_000).toISOString() });
+    expect(await forks().prepare(older)).toBeNull();
   });
 
   it("never stamps a workspace's activity when a copy is built or forked", async () => {
