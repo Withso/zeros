@@ -1,5 +1,7 @@
 import { randomUUID } from "node:crypto";
+import { lstat } from "node:fs/promises";
 import { createRequire } from "node:module";
+import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import type { Options, Query, Settings, SDKUserMessage, PermissionResult, UserDialogRequest, UserDialogResult } from "@anthropic-ai/claude-agent-sdk";
 import { buildClaudeQuestionRequest, buildAskUserQuestionOutput, claudeQuestionHookOutput, formatAnswerForClaude, claudePermissionMode, claudeRequiresExplicitApproval, type QuestionResponse, type ContentBlock, type PromptResponse, type SessionNotification } from "@zeros/protocol/agent-events";
@@ -46,6 +48,11 @@ interface ClaudeOptions {
   environment?: NodeJS.ProcessEnv;
   gitEnvironment?: NodeJS.ProcessEnv;
   interruptTimeoutMs?: number;
+  /** Claude Code's config directory, whose projects/ holds each native session. Null skips
+   * the on-disk check (a resume proceeds as before). Defaults to CLAUDE_CONFIG_DIR or
+   * ~/.claude when the driver runs on the worker's own environment, and to null when a
+   * caller supplies one. */
+  configDirectory?: string | null;
 }
 interface Process {
   query: NativeQuery; input: InputQueue<SDKUserMessage>;
@@ -88,12 +95,37 @@ export class ClaudeDriver implements Driver {
     if (this.input || this.disposed) throw new Error("Claude driver has already been opened.");
     if (input.proxy || !!input.oauthToken === !!input.apiKey) throw new Error("Provide one Claude OAuth token or API key.");
     if (input.nativeSessionId && !/^[\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12}$/i.test(input.nativeSessionId)) throw new Error("Invalid Claude session id.");
-    this.input = input; this.nativeSessionId = input.nativeSessionId ?? randomUUID(); this.resumed = !!input.nativeSessionId; this.model = input.model;
+    // Claude reads a resumed session only at the first turn; one it does not have would fail that turn.
+    const fresh = !!input.nativeSessionId && await this.nativeSessionOnDisk(input.nativeSessionId, input.cwd) === false;
+    if (this.input || this.disposed) throw new Error("Claude driver has already been opened.");
+    this.input = input; this.nativeSessionId = input.nativeSessionId && !fresh ? input.nativeSessionId : randomUUID();
+    this.resumed = !!input.nativeSessionId && !fresh; this.model = input.model;
     this.effort = input.effort; this.fast = input.fast === true;
     if (input.modeId !== undefined && input.modeId !== "plan" && input.modeId !== "bypass") throw new Error("Invalid Claude mode.");
     this.modeId = input.modeId ?? "bypass";
     this.mapper = new ClaudeStreamTranslator({ sessionId: input.sessionId, streamPartials: true, emit: event => this.emit(event) });
-    return { nativeSessionId: this.nativeSessionId, ...(!this.resumed ? { provisional: true } : {}) };
+    return { nativeSessionId: this.nativeSessionId, ...(!this.resumed ? { provisional: true } : {}), ...(fresh ? { resumedFresh: true as const } : {}) };
+  }
+
+  /** Whether Claude Code holds this session: exactly <config>/projects/<cwd as the SDK
+   * encodes it>/<id>.jsonl, the id already checked as a UUID. Present costs one lstat;
+   * a link at the file, or anywhere on the way when it is absent, is never followed and
+   * answers undefined (resume as before), as does a cwd the SDK would hash. */
+  private async nativeSessionOnDisk(id: string, cwd: string): Promise<boolean | undefined> {
+    const config = this.options.configDirectory !== undefined ? this.options.configDirectory
+      : this.options.environment ? null : process.env.CLAUDE_CONFIG_DIR || join(homedir(), ".claude");
+    if (!config || !config.startsWith("/")) return undefined;
+    // The SDK's own project key; above 200 characters it appends a hash we do not reproduce.
+    const project = cwd.replace(/[^a-zA-Z0-9]/g, "-");
+    if (project.length > 200) return undefined;
+    const root = join(config, "projects"), directory = join(root, project);
+    try { return (await lstat(join(directory, `${id}.jsonl`))).isFile() ? true : undefined; }
+    catch (error) { if (!["ENOENT", "ENOTDIR"].includes((error as NodeJS.ErrnoException).code ?? "")) return undefined; }
+    for (const path of [config, root, directory]) {
+      try { if ((await lstat(path)).isSymbolicLink()) return undefined; }
+      catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") break; return undefined; }
+    }
+    return false;
   }
 
   async prompt(content: ContentBlock[]): Promise<PromptResponse> {
