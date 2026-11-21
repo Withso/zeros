@@ -108,7 +108,7 @@ import { readPlan, isPlanReviewRequest } from "./renderers/plan-body";
 import { WorkspaceDirectoryPicker } from "./workspace-directory-picker";
 import { useProjects } from "../../state/use-projects";
 import { turnGet } from "../../platform/turns";
-import { turnRowCache, turnRowKey } from "../../state/read-caches";
+import { refreshChatTurnRows, turnRowCache, turnRowKey } from "../../state/read-caches";
 import { useCachedRead } from "../../state/use-cached-read";
 import { findProjectForFolder } from "../../state/workspace-resolution";
 import { Bot, Square, ArrowLeft, Check, GitBranch, RotateCw } from "lucide-react";
@@ -321,7 +321,6 @@ import {
 import {
   buildHarnessSwitchMessage,
   switchContinuation,
-  refreshChatTurnRows,
   type PendingSwitchContinuation,
   HARNESS_SWITCH_CONTINUE_NOTE,
   harnessSwitchBlockedByQueue,
@@ -1466,7 +1465,7 @@ function AgentChatBody({
     // An older cloud worker can't switch in place: open the picked agent in a new tab.
     if (committed === "unsupported") switchAgentModel({ ...pick, agentName: pick.agentName ?? "" });
     if (committed !== "switched") return;
-    if (wasRunning) refreshChatTurnRows(turnRowCache, chatId);
+    if (wasRunning) refreshChatTurnRows(chatId);
     const delivery = transcript.then((snapshot) => {
       if (snapshot.count === 0) return;
       const attachment = buildForkTranscriptAttachment({

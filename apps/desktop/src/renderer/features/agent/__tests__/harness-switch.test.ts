@@ -4,7 +4,6 @@ import {
   canAutoContinueAfterSwitch,
   switchContinuation,
   commitHarnessSwitch,
-  refreshChatTurnRows,
   type HarnessSwitchCommit,
   harnessSwitchBlockedByQueue,
   harnessSwitchTranscriptMode,
@@ -17,8 +16,8 @@ import { metaForEvent } from "../renderers/event-meta";
 import { isProviderWorkEvent } from "../transcript-notices";
 import { buildForkTranscriptAttachment } from "../fork-chat";
 import type { AgentMessage } from "../use-agent-session";
-import { turnRowKey } from "../../../state/read-caches";
-import { KeyedAsyncCache } from "../../../shared/lib/keyed-async-cache";
+import { refreshChatTurnRows, turnRowCache, turnRowKey } from "../../../state/read-caches";
+import type { TurnInfo } from "../../../platform/turns";
 
 const row = (to = { agentId: "codex", model: "gpt-5.1-codex" }) =>
   buildHarnessSwitchMessage({
@@ -175,15 +174,19 @@ describe("commit harness switch", () => {
   });
 
   it("marks only the switched chat's cached turn rows stale", () => {
-    const cache = new KeyedAsyncCache<{ status: string } | null>(8);
+    const row = (status: string) => ({ status }) as unknown as TurnInfo;
     const stopped = turnRowKey("c1", "user-1");
+    const settled = turnRowKey("c1", "user-0");
     const other = turnRowKey("c10", "user-1");
-    cache.setData(stopped, { status: "running" });
-    cache.setData(other, { status: "running" });
+    turnRowCache.setData(stopped, row("running"));
+    turnRowCache.setData(settled, row("completed"));
+    turnRowCache.setData(other, row("running"));
     const seen: string[] = [];
-    cache.subscribe(stopped, () => seen.push(stopped));
-    cache.subscribe(other, () => seen.push(other));
-    refreshChatTurnRows(cache, "c1");
+    const offs = [stopped, settled, other].map((key) => turnRowCache.subscribe(key, () => seen.push(key)));
+    refreshChatTurnRows("c1", true);
     expect(seen).toEqual([stopped]);
+    refreshChatTurnRows("c1");
+    expect(seen).toEqual([stopped, stopped, settled]);
+    offs.forEach((off) => off());
   });
 });

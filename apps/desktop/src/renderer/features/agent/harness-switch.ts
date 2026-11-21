@@ -141,14 +141,3 @@ export async function commitHarnessSwitch(steps: {
   steps.updateSettings();
   return "switched";
 }
-
-/** Mark a chat's cached turn rows stale. A switch that stops a running turn can
- *  leave its footer holding the row read before the engine finalized it, and
- *  that turn is no longer the tail whose live stop reason would cover it. */
-export function refreshChatTurnRows(
-  cache: { keys(): string[]; invalidate(key: string): void },
-  chatId: string,
-): void {
-  const prefix = `${chatId}\u0000`;
-  for (const key of cache.keys()) if (key.startsWith(prefix)) cache.invalidate(key);
-}
