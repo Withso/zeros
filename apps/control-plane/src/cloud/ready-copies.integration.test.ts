@@ -53,6 +53,9 @@ d("cloud v2 ready copies", () => {
     zeros = await project([{ repository: "withso/zeros", setup: "pnpm install" }], { name: "zeros" });
   });
 
+  /** A create's repositories for a one-repository project, as the create path passes them. */
+  const one = (repository: string, branch: string) => ({ repositories: [{ repository, repositoryId: repositoryId(repository),
+    folder: repository.split("/")[1]!, branch, baseBranch: "main" }], checkoutFolder: `p/${repository.split("/")[1]!}` });
   /** A project written as its routes would, without GitHub. */
   async function project(repositories: { repository: string; setup?: string | null; defaultBranch?: string | null }[],
     options: { level?: "organization" | "personal"; owner?: string; name?: string } = {}): Promise<string> {
@@ -424,7 +427,7 @@ d("cloud v2 ready copies", () => {
     expect(build).toEqual({ base_shared: true, snapshot_id: `zeros-base-1@${shared.id}` });
     const store = new CloudV2Store(pool), id = randomUUID();
     await store.createWorkspace({ id, organizationId: org, creatorUserId: admin, name: "zeros", repository: "withso/zeros",
-      branch: "zeros/w", baseBranch: "main", computerBuildId: shared.id, projectId: zeros });
+      branch: "zeros/w", baseBranch: "main", computerBuildId: shared.id, projectId: zeros, ...one("withso/zeros", "zeros/w") });
     expect(await store.workspaceImage(id)).toEqual({ from: "zeros-base-1", prune: [], checkout: false });
     await copyBuilder().tick();
     expect(boat.calls.find(call => call.op === "create")!.args[0]).toMatchObject({ from: "zeros-base-1" });
@@ -529,10 +532,10 @@ d("cloud v2 ready copies", () => {
 
     const store = new CloudV2Store(pool), base = (await copies.base(org))!, id = randomUUID();
     const created = await store.createWorkspace({ id, organizationId: org, creatorUserId: member, name: "notes", repository: "withso/notes",
-      branch: "zeros/n", baseBranch: "main", computerBuildId: base.buildId, projectId: mine });
+      branch: "zeros/n", baseBranch: "main", computerBuildId: base.buildId, projectId: mine, ...one("withso/notes", "zeros/n") });
     expect(created).toMatchObject({ privateOwnerUserId: member, projectId: mine });
     await expect(store.createWorkspace({ id: randomUUID(), organizationId: org, creatorUserId: other, name: "notes", repository: "withso/notes",
-      branch: "zeros/o", baseBranch: "main", computerBuildId: base.buildId, projectId: mine })).rejects.toMatchObject({ code: "project_unavailable" });
+      branch: "zeros/o", baseBranch: "main", computerBuildId: base.buildId, projectId: mine, ...one("withso/notes", "zeros/o") })).rejects.toMatchObject({ code: "project_unavailable" });
     const forked = await forks().prepare({ id, organizationId: org, repository: "withso/notes", baseBranch: "main", createdAt: created.createdAt,
       boatSandboxId: null, projectId: mine, privateOwnerUserId: member }) as { sandboxId: string };
     expect(boat.machine(forked.sandboxId)!.source).toBe(copy.machineId);
@@ -549,7 +552,7 @@ d("cloud v2 ready copies", () => {
     await copyBuilder({ cloneToken }).maintain();
     expect(await copies.list(org, mine)).toHaveLength(1);
     await expect(store.createWorkspace({ id: randomUUID(), organizationId: org, creatorUserId: member, name: "notes", repository: "withso/notes",
-      branch: "zeros/m", baseBranch: "main", computerBuildId: base.buildId, projectId: mine })).rejects.toMatchObject({ code: "project_unavailable" });
+      branch: "zeros/m", baseBranch: "main", computerBuildId: base.buildId, projectId: mine, ...one("withso/notes", "zeros/m") })).rejects.toMatchObject({ code: "project_unavailable" });
     // Allowed again but unforked for 14 days: no longer refreshed either.
     await levels.setPersonalAllowed(org, admin, true);
     await pool.query("UPDATE cloud_v2_ready_copies SET last_forked_at=$2 WHERE id=$1", [copy.id, new Date(clock - 15 * DAY)]);
@@ -746,7 +749,7 @@ d("cloud v2 ready copies", () => {
     const store = new CloudV2Store(pool), id = randomUUID();
     const base = (await copies.base(org))!;
     await store.createWorkspace({ id, organizationId: org, creatorUserId: member, name: "zeros", repository: "withso/zeros",
-      branch: "zeros/w", baseBranch: "main", computerBuildId: base.buildId, projectId: zeros });
+      branch: "zeros/w", baseBranch: "main", computerBuildId: base.buildId, projectId: zeros, ...one("withso/zeros", "zeros/w") });
     const fetchBase = vi.fn(async () => true);
     const readyCopies = { prepare: (w: Parameters<CloudV2ReadyCopyForks["prepare"]>[0]) => forks().prepare(w), fetchBase };
     await new CloudV2Lifecycle({ store, compute: boat, readyCopies, runtime,
@@ -769,8 +772,9 @@ d("cloud v2 ready copies", () => {
     await copyBuilder().tick();
     await copyBuilder().tick();
     const store = new CloudV2Store(pool), base = (await copies.base(org))!, projects = new CloudProjects(pool);
-    const make = (projectId: string, repository: string) => store.createWorkspace({ id: randomUUID(), organizationId: org, creatorUserId: member,
-      name: "w", repository, branch: `zeros/${randomUUID().slice(0, 8)}`, baseBranch: "main", computerBuildId: base.buildId, projectId });
+    const make = (projectId: string, repository: string, branch = `zeros/${randomUUID().slice(0, 8)}`) => store.createWorkspace({ id: randomUUID(),
+      organizationId: org, creatorUserId: member, name: "w", repository, branch, baseBranch: "main", computerBuildId: base.buildId, projectId,
+      ...one(repository, branch) });
     const shared = await make(zeros, "withso/zeros"), personal = await make(mine, "withso/notes");
     // Both forked their project's copy; a third is still waiting to be made.
     for (const made of [shared, personal]) expect(await forks().prepare({ ...made, boatSandboxId: null })).toHaveProperty("sandboxId");
@@ -798,5 +802,26 @@ d("cloud v2 ready copies", () => {
     await copyBuilder().tick();
     for (const id of [zeros, mine]) expect((await copies.list(org, id)).map(row => row.state)).toEqual(["retired"]);
     for (const sandbox of sandboxes) expect(boat.machine(sandbox)!.state).toBe("running");
+  });
+
+  it("stores a workspace of several repositories: each in its folder, every source bound, and only the project's set", async () => {
+    await liveBase();
+    const app = await project([{ repository: "withso/api" }, { repository: "withso/web" }, { repository: "acme/web" }], { name: "Zeros App" });
+    const store = new CloudV2Store(pool), base = (await copies.base(org))!, id = randomUUID();
+    const repositories = [["withso/api", "api", "release"], ["withso/web", "web", "main"], ["acme/web", "web-acme", "next"]].map(([repository, folder, baseBranch], index) =>
+      ({ repository: repository!, repositoryId: repositoryId(repository!), folder: folder!, branch: "zeros/app-1", baseBranch: baseBranch!, baseCommit: String(index).repeat(40) }));
+    const input = { organizationId: org, creatorUserId: member, name: "Zeros App", repository: "withso/api", branch: "zeros/app-1", baseBranch: "release",
+      computerBuildId: base.buildId, projectId: app, checkoutFolder: "zeros-app/api", folder: "zeros-app" };
+    const created = await store.createWorkspace({ id, ...input, repositories });
+    expect(created).toMatchObject({ repository: "withso/api", branch: "zeros/app-1", baseBranch: "release", folder: "zeros-app", checkoutFolder: "zeros-app/api", projectId: app });
+    expect((await pool.query(`SELECT position, repository, repository_id::text AS id, folder, branch, base_branch, base_commit
+      FROM cloud_v2_workspace_repositories WHERE workspace_id=$1 ORDER BY position`, [id])).rows).toEqual(repositories.map((entry, position) => ({
+      position, repository: entry.repository, id: entry.repositoryId, folder: entry.folder, branch: "zeros/app-1", base_branch: entry.baseBranch, base_commit: entry.baseCommit })));
+    expect((await pool.query("SELECT source_repository, repository_id::text AS id FROM cloud_v2_github_sources WHERE workspace_id=$1 ORDER BY source_repository", [id])).rows)
+      .toEqual(repositories.map(entry => ({ source_repository: entry.repository, id: entry.repositoryId })).sort((a, b) => a.source_repository.localeCompare(b.source_repository)));
+    expect((await pool.query("SELECT source_repositories FROM cloud_v2_workspaces WHERE id=$1", [id])).rows[0].source_repositories).toEqual(repositories.map(entry => entry.repository));
+    // Anything but the project's repositories in its order is refused.
+    for (const wrong of [repositories.slice(0, 2), [repositories[1]!, repositories[0]!, repositories[2]!], [...repositories.slice(0, 2), { ...repositories[2]!, repositoryId: "77" }]])
+      await expect(store.createWorkspace({ id: randomUUID(), ...input, repository: wrong[0]!.repository, repositories: wrong })).rejects.toMatchObject({ code: "project_unavailable" });
   });
 });

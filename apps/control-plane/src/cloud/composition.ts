@@ -181,6 +181,7 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
   const projectRoutes = repositoryLevels && projects ? {
     levels: repositoryLevels,
     projects,
+    warm: (organizationId: string, userId: string, targets: readonly CloudSourceTarget[]) => github.source.targets(organizationId, userId, targets, true),
     resolveMemberRepository,
     visibleInstallation: async (organizationId: string, userId: string, installationId: number) => {
       const http = (await memberGithub(organizationId, userId)).api.http;
@@ -376,7 +377,7 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
     computers,
     ...(v2.asyncCreate !== false ? { asyncCreate: () => Date.now() >= asyncCreateFrom } : {}),
     installedRepositories: organizationId => store.installedRepositories(organizationId),
-    ...(projects && projectRoutes ? { projects, resolveMemberRepository, projectRoutes } : {}),
+    ...(projects && projectRoutes ? { projects, resolveMemberRepository, projectRoutes, projectAccess: github.projectAccess } : {}),
     ...(readyCopies ? { readyCopies: { status: (organizationId: string, viewer?: string | null) => readyCopies.status(organizationId, viewer ?? null),
       failures: (organizationId: string) => readyCopies.failureSummaries(organizationId, new Date()),
       changed: async (organizationId: string, projectId: string, change: "project_created" | "repositories_changed" | "setup_changed" | "branch_changed") => {

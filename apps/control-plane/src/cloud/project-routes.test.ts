@@ -98,8 +98,9 @@ describe("released desktops' Create and Cloud Computer, answered from one-reposi
   });
 });
 
-describe("a create from a one-repository project", () => {
+describe("a create from a project", () => {
   const ZEROS = project(P1, "zeros", "organization", null, [["withso/zeros", "42"]]);
+  const APP = project(P2, "Zeros App", "organization", null, [["withso/api", "43"], ["withso/web", "44"], ["acme/web", "45"]]);
   function create(user: string, found: CloudProjectView | null, extra: Record<string, unknown> = {}) {
     const createWorkspace = vi.fn(async (input: Record<string, unknown>) => ({ ...input, state: "creating", createdAt: "2026-11-21T00:00:00.000Z" }));
     const hono = new Hono();
@@ -108,9 +109,11 @@ describe("a create from a one-repository project", () => {
     const deps = {
       store: { activeComputer: async () => ({ buildId: "55555555-5555-4555-8555-555555555555", baseOnly: true, repositories: [] }), createWorkspace },
       computers: { requireMember: async () => {}, requireAdmin: async () => {}, overview: async () => ({ activeBuildId: "b" }) },
-      projects: { forRepository: vi.fn(async () => found), oneRepositoryProjects: vi.fn(), syncRecipe: vi.fn() },
-      resolveMemberRepository: vi.fn(async (_o: string, _u: string, repository: string) => ({ repository, repositoryId: "42", defaultBranch: "trunk" })),
-      remoteHead: vi.fn(async () => "c".repeat(40)),
+      projects: { forRepository: vi.fn(async () => found), get: vi.fn(async () => { if (!found) throw new HttpError(404, "not_found", "Project not found"); return found; }),
+        oneRepositoryProjects: vi.fn(), syncRecipe: vi.fn() },
+      projectAccess: vi.fn(async (_o: string, _u: string, repositories: { repository: string; repositoryId: string; baseBranch?: string | null }[]) =>
+        repositories.map(entry => ({ ...entry, baseBranch: entry.baseBranch ?? "trunk", baseCommit: entry.repositoryId.padStart(40, "c") }))),
+      remoteHead: vi.fn(),
       installedRepositories: async () => null, bridgeBaseUrl: "wss://dev.example.test", ...extra,
     };
     hono.route("/", createCloudV2Routes(deps as unknown as CloudV2RouteDeps));
@@ -121,23 +124,39 @@ describe("a create from a one-repository project", () => {
     return { deps, createWorkspace, send };
   }
 
-  it("creates the workspace from the project, checked as the caller's own GitHub, on the project's branch", async () => {
+  it("creates a released desktop's repository workspace from its one-repository project, in the project's folder", async () => {
     const f = create(alice, ZEROS);
     expect((await f.send({ organizationId: org, repository: "Withso/Zeros" })).status).toBe(201);
     expect(f.deps.projects.forRepository).toHaveBeenCalledWith(org, alice, "Withso/Zeros");
-    expect(f.deps.resolveMemberRepository).toHaveBeenCalledWith(org, alice, "withso/zeros");
-    expect(f.deps.remoteHead).toHaveBeenCalledWith(org, alice, { repository: "withso/zeros", repositoryId: "42" }, "main");
+    expect(f.deps.projectAccess).toHaveBeenCalledWith(org, alice, [{ repository: "withso/zeros", repositoryId: "42", baseBranch: "main" }]);
     expect(f.createWorkspace).toHaveBeenCalledWith(expect.objectContaining({ repository: "withso/zeros", baseBranch: "main", projectId: P1,
-      sourceRepositoryId: "42", creatorUserId: alice }));
+      sourceRepositoryId: "42", creatorUserId: alice, checkoutFolder: "zeros/zeros", name: "zeros",
+      repositories: [expect.objectContaining({ repository: "withso/zeros", repositoryId: "42", folder: "zeros", baseCommit: "c".repeat(38) + "42" })] }));
+    // One repository: no project folder of its own (the agent works in the checkout).
+    expect(f.createWorkspace.mock.calls[0]![0]).not.toHaveProperty("folder");
   });
 
-  it("refuses a repository in no project, a renamed identity and a missing branch", async () => {
+  it("creates a project's workspace with every repository, one branch name in each and each repository's own base branch", async () => {
+    const f = create(alice, APP);
+    expect((await f.send({ organizationId: org, projectId: P2, baseBranch: "release", repositories: [{ repository: "acme/web", baseBranch: "next" }] })).status).toBe(201);
+    expect(f.deps.projectAccess).toHaveBeenCalledWith(org, alice, [{ repository: "withso/api", repositoryId: "43", baseBranch: "release" },
+      { repository: "withso/web", repositoryId: "44", baseBranch: null }, { repository: "acme/web", repositoryId: "45", baseBranch: "next" }]);
+    const input = f.createWorkspace.mock.calls[0]![0] as { branch: string; repositories: { folder: string; branch: string; baseBranch: string }[] };
+    expect(input).toMatchObject({ name: "Zeros App", repository: "withso/api", baseBranch: "release", folder: "zeros-app", checkoutFolder: "zeros-app/api" });
+    expect(input.repositories.map(entry => [entry.folder, entry.baseBranch])).toEqual([["api", "release"], ["web", "trunk"], ["web-acme", "next"]]);
+    expect(new Set(input.repositories.map(entry => entry.branch))).toEqual(new Set([input.branch]));
+    expect(input.branch).toMatch(/^zeros\/zeros-app-[0-9a-f]{8}$/);
+  });
+
+  it("refuses a repository in no project, one the creator can't read (named), and a project's repository given out of place", async () => {
     expect((await create(alice, null).send({ organizationId: org, repository: "withso/zeros" })).body.error.code).toBe("repository_not_in_project");
-    const moved = create(alice, ZEROS, { resolveMemberRepository: async () => ({ repository: "withso/zeros", repositoryId: "99", defaultBranch: "main" }) });
-    expect((await moved.send({ organizationId: org, repository: "withso/zeros" })).body.error.code).toBe("cloud_source_review_required");
-    const gone = create(alice, ZEROS, { remoteHead: async () => null });
-    expect((await gone.send({ organizationId: org, repository: "withso/zeros", baseBranch: "gone" })).body.error.code).toBe("repository_branch_not_found");
-    for (const f of [moved, gone]) expect(f.createWorkspace).not.toHaveBeenCalled();
+    const denied = create(alice, APP, { projectAccess: async () => {
+      throw new HttpError(404, "github_repository_not_found", "You can't read acme/web on GitHub, so this workspace can't be created."); } });
+    const refused = await denied.send({ organizationId: org, projectId: P2 });
+    expect(refused).toMatchObject({ status: 404, body: { error: { code: "github_repository_not_found" } } });
+    expect(denied.createWorkspace).not.toHaveBeenCalled();
+    expect((await create(alice, APP).send({ organizationId: org, projectId: P2, repository: "withso/web" })).status).toBe(422);
+    expect((await create(alice, APP).send({ organizationId: org })).status).toBe(400);
   });
 
   it("asks for a Cloud Computer build while the live one still holds repositories", async () => {

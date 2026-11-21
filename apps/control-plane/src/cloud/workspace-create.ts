@@ -5,17 +5,34 @@ import type { CloudV2RouteDeps } from "./routes.js";
 import type { CloudV2InstalledRepository, CloudV2Workspace } from "./store.js";
 import { CloudSourceTargetSchema } from "./source-authority.js";
 import { refuseRuntimeCanary } from "./runtime-canary.js";
+import { projectFolderName, repositoryFolderNames } from "./workspace-layout.js";
 import { executionWorkerRequired } from "./execution/errors.js";
 
 const uuid = z.string().uuid();
 const branchName = z.string().min(1).max(255).regex(/^(?!-)(?!.*\.\.)(?!.*\/\/)(?!.*\.lock$)[A-Za-z0-9._/-]+$/);
-export const CloudWorkspaceCreateSchema = z.object({
+const repositoryName = z.string().regex(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/).max(200);
+/** A create that names one repository: released desktops and the workspace API, unchanged. */
+export const CloudWorkspaceRepositoryCreateSchema = z.object({
   organizationId: uuid,
-  repository: z.string().regex(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/).max(200),
+  repository: repositoryName,
   baseBranch: branchName.optional(),
   branch: branchName.optional(),
   name: z.string().trim().min(1).max(200).optional(),
 }).strict();
+export const CloudWorkspaceCreateSchema = z.object({
+  organizationId: uuid,
+  /** Released desktops name a repository; its one-repository project answers (projects on). */
+  repository: repositoryName.optional(),
+  /** Projects on: the project to create from, with every one of its repositories. */
+  projectId: uuid.optional(),
+  /** The first (or only) repository's base branch. */
+  baseBranch: branchName.optional(),
+  /** A project's other repositories' base branches; each otherwise takes the project's branch, then its default. */
+  repositories: z.array(z.object({ repository: repositoryName, baseBranch: branchName }).strict()).max(10).optional(),
+  /** One branch name, created in every repository. */
+  branch: branchName.optional(),
+  name: z.string().trim().min(1).max(200).optional(),
+}).strict().refine(value => value.repository !== undefined || value.projectId !== undefined, "A repository or a project");
 
 export type CloudWorkspaceCreateInput = z.infer<typeof CloudWorkspaceCreateSchema>;
 type CreateOptions = {
@@ -70,7 +87,7 @@ export function createCloudWorkspaceOperations(deps: CloudV2RouteDeps) {
     if (key !== undefined && !/^[\x21-\x7e]{1,200}$/.test(key)) throw new HttpError(400, "invalid_request", "Invalid creation key");
     const canary = options.canary;
     if (canary !== undefined && (!deps.runtimeCanary || !key || !canary || canary.length > 4096)) throw refuseRuntimeCanary();
-    const hash = options.requestHash ?? createHash("sha256").update(JSON.stringify({ ...input, repository: input.repository.toLowerCase(),
+    const hash = options.requestHash ?? createHash("sha256").update(JSON.stringify({ ...input, ...(input.repository ? { repository: input.repository.toLowerCase() } : {}),
       ...(canary === undefined ? {} : { runtimeCanary: createHash("sha256").update(canary).digest("hex") }) })).digest("hex");
     if (key) {
       const previous = await deps.store.readCreateReceipt(userId, key, hash);
@@ -103,27 +120,37 @@ export function createCloudWorkspaceOperations(deps: CloudV2RouteDeps) {
     // from the one-repository project for this repository, the organization's
     // first, then the caller's own. Access is checked as the caller's own GitHub.
     if (deps.projects) {
-      const project = await deps.projects.forRepository(input.organizationId, userId, input.repository);
+      const project = input.projectId ? await deps.projects.get(input.organizationId, userId, input.projectId)
+        : await deps.projects.forRepository(input.organizationId, userId, input.repository!);
       if (!project) throw new HttpError(409, "repository_not_in_project", "Add this repository to a project first.");
+      const first = project.repositories[0]!;
+      if (input.repository && input.repository.toLowerCase() !== first.repository)
+        throw new HttpError(422, "invalid_request", "The repository is not this project's first.");
       if (!computer.baseOnly) throw await computerUnavailable(input.organizationId, userId);
-      if (!deps.resolveMemberRepository) throw new HttpError(503, "github_unavailable", "Repository access could not be verified.");
-      const entry = project.repositories[0]!;
-      const resolved = await deps.resolveMemberRepository(input.organizationId, userId, entry.repository);
-      if (resolved.repositoryId !== entry.repositoryId) throw new HttpError(409, "cloud_source_review_required", "The repository's identity changed.");
-      const target = { repository: resolved.repository, repositoryId: resolved.repositoryId };
-      if (runtimeCanary && runtimeCanary.repositoryId !== target.repositoryId) throw refuseRuntimeCanary();
-      const baseBranch = input.baseBranch ?? entry.defaultBranch ?? resolved.defaultBranch;
-      if (await deps.remoteHead(input.organizationId, userId, target, baseBranch) === null)
-        throw new HttpError(404, "repository_branch_not_found", `Branch ${baseBranch} does not exist in ${target.repository}.`);
+      if (!deps.projectAccess) throw new HttpError(503, "github_unavailable", "Repository access could not be verified.");
+      const branchFor = (entry: (typeof project.repositories)[number], index: number) => (index === 0 ? input.baseBranch : undefined)
+        ?? input.repositories?.find(requested => requested.repository.toLowerCase() === entry.repository)?.baseBranch ?? entry.defaultBranch ?? null;
+      const checked = await deps.projectAccess(input.organizationId, userId, project.repositories.map((entry, index) => ({
+        repository: entry.repository, repositoryId: entry.repositoryId, baseBranch: branchFor(entry, index) })));
+      if (runtimeCanary && runtimeCanary.repositoryId !== first.repositoryId) throw refuseRuntimeCanary();
       const executionRuntime = deps.actingUserDefault ? await deps.activeCreateRuntime?.(runtimeCanary) : undefined;
       if (deps.actingUserDefault && !executionRuntime) throw executionWorkerRequired();
-      const id = randomUUID(), name = input.name ?? input.repository.split("/")[1]!;
-      return record({ id, organizationId: input.organizationId, creatorUserId: userId, name, repository: entry.repository,
-        branch: input.branch ?? `${prefix}${slug(name)}-${id.slice(0, 8)}`, baseBranch, computerBuildId: computer.buildId,
-        sourceRepositoryId: target.repositoryId, projectId: project.id,
+      const id = randomUUID(), several = project.repositories.length > 1;
+      const name = input.name ?? (several ? project.name : first.repository.split("/")[1]!);
+      // One branch name in every repository; the folders are fixed now, whatever the project is called later.
+      const branch = input.branch ?? `${prefix}${slug(name)}-${id.slice(0, 8)}`;
+      const folder = projectFolderName(project.name), folders = repositoryFolderNames(project.repositories.map(entry => entry.repository));
+      return record({ id, organizationId: input.organizationId, creatorUserId: userId, name, repository: first.repository, branch,
+        baseBranch: checked[0]!.baseBranch, computerBuildId: computer.buildId, sourceRepositoryId: first.repositoryId, projectId: project.id,
+        repositories: checked.map((entry, index) => ({ repository: project.repositories[index]!.repository, repositoryId: entry.repositoryId,
+          folder: folders[index]!, branch, baseBranch: entry.baseBranch, baseCommit: entry.baseCommit })),
+        checkoutFolder: `${folder}/${folders[0]}`, ...(several ? { folder } : {}),
         ...(runtimeCanary ? { runtimeCanary } : {}), ...(executionRuntime ? { executionRuntime } : {}) });
     }
-    const named = (entry: CloudV2InstalledRepository) => entry.repository.toLowerCase() === input.repository.toLowerCase();
+    // Without projects a create names its repository.
+    const requestedRepository = input.repository;
+    if (requestedRepository === undefined) throw new HttpError(400, "invalid_request", "Invalid cloud workspace request");
+    const named = (entry: CloudV2InstalledRepository) => entry.repository.toLowerCase() === requestedRepository.toLowerCase();
     // Returns before its GitHub checks, which the lifecycle runs before any VM
     // exists. A canary binds a repository ID, and a renamed repository's name
     // needs GitHub to match it, so both stay on the synchronous path below.
@@ -133,7 +160,7 @@ export function createCloudWorkspaceOperations(deps: CloudV2RouteDeps) {
     if (pendingEntry) {
       const baseBranch = input.baseBranch ?? pendingEntry.defaultBranch;
       if (!baseBranch) throw new HttpError(409, "repository_branch_required", "Select a branch or rebuild the Cloud Computer to record its default branch");
-      const id = randomUUID(), name = input.name ?? input.repository.split("/")[1]!;
+      const id = randomUUID(), name = input.name ?? requestedRepository.split("/")[1]!;
       return record({ id, organizationId: input.organizationId, creatorUserId: userId, name,
         repository: pendingEntry.repository, branch: input.branch ?? `${prefix}${slug(name)}-${id.slice(0, 8)}`,
         baseBranch, computerBuildId: computer.buildId, pendingSource: true });
@@ -164,7 +191,7 @@ export function createCloudWorkspaceOperations(deps: CloudV2RouteDeps) {
       if (index === namedIndex && branch) { early = deps.remoteHead(input.organizationId, userId, resolved[index].target, branch); early.catch(() => {}); }
     }
     const candidates = resolved.filter(Boolean);
-    const selected = candidates.find(({ target }) => target.repository.toLowerCase() === input.repository.toLowerCase())
+    const selected = candidates.find(({ target }) => target.repository.toLowerCase() === requestedRepository.toLowerCase())
       ?? candidates.find(({ entry }) => requested(entry));
     if (!selected) {
       if (originalError) throw originalError;
@@ -180,7 +207,7 @@ export function createCloudWorkspaceOperations(deps: CloudV2RouteDeps) {
     if (head === null)
       throw new HttpError(404, "repository_branch_not_found", `Branch ${baseBranch} does not exist in ${target.repository}.`);
     const id = randomUUID();
-    const name = input.name ?? input.repository.split("/")[1]!;
+    const name = input.name ?? requestedRepository.split("/")[1]!;
     const executionRuntime = deps.actingUserDefault ? await deps.activeCreateRuntime?.(runtimeCanary) : undefined;
     if (deps.actingUserDefault && !executionRuntime) throw executionWorkerRequired();
     const create = {

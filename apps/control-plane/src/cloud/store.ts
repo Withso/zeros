@@ -59,7 +59,14 @@ type CreateWorkspace = {
   pendingSource?: true;
   /** The project it is created from (ready copies on); a personal project's workspace is its member's alone. */
   projectId?: string;
+  /** A project create: every repository of the project in position order, the
+   * first equal to repository/branch/baseBranch, each with its folder and verified id. */
+  repositories?: readonly CloudV2CreateRepository[];
+  /** workspace-layout.ts: the first checkout under /home/user, and the project folder for several repositories. */
+  checkoutFolder?: string;
+  folder?: string;
 };
+export type CloudV2CreateRepository = { repository: string; repositoryId: string; folder: string; branch: string; baseBranch: string; baseCommit?: string | null };
 type CreateReceipt = { status: 201; response: Record<string, unknown> };
 type HistoryInput = {
   chats?: readonly { id: string }[] | undefined; chatDeletions?: readonly string[] | undefined;
@@ -452,18 +459,24 @@ export class CloudV2Store {
     if (input.projectId) {
       // Checked under the create's own transaction: a project the creator may use
       // (the organization's, or their own while personal projects are allowed),
-      // holding exactly this repository, and a live base that holds no repository's source.
-      const project = (await tx.query<{ repository_id: string; level: "organization" | "personal" }>(`SELECT r.repository_id, p.level FROM cloud_projects p
-        JOIN organizations o ON o.id=p.org_id
-        JOIN cloud_project_repositories r ON r.project_id=p.id AND r.repository=lower($5)
+      // holding exactly these repositories in this order, and a live base that holds no repository's source.
+      const requested = input.repositories ?? [];
+      const project = (await tx.query<{ level: "organization" | "personal"; repositories: { repository: string; repositoryId: string }[] }>(`SELECT p.level,
+          (SELECT jsonb_agg(jsonb_build_object('repository', r.repository, 'repositoryId', r.repository_id) ORDER BY r.position)
+             FROM cloud_project_repositories r WHERE r.project_id=p.id) AS repositories
+        FROM cloud_projects p JOIN organizations o ON o.id=p.org_id
         JOIN cloud_v2_computers c ON c.org_id=p.org_id AND c.active_build_id=$4
         JOIN cloud_v2_computer_builds b ON b.id=c.active_build_id AND b.base_only AND b.state='succeeded'
         WHERE p.id=$1 AND p.org_id=$2 AND (p.level='organization' OR (p.owner_user_id=$3 AND o.cloud_personal_projects_allowed))
-          AND (SELECT count(*) FROM cloud_project_repositories n WHERE n.project_id=p.id)=1
-        FOR SHARE OF p`, [input.projectId, input.organizationId, input.creatorUserId, input.computerBuildId, input.repository])).rows[0];
-      if (!project || pending || (input.sourceRepositoryId !== undefined && input.sourceRepositoryId !== project.repository_id))
+        FOR SHARE OF p`, [input.projectId, input.organizationId, input.creatorUserId, input.computerBuildId])).rows[0];
+      const matches = !!project?.repositories && project.repositories.length === requested.length && requested.length > 0
+        && requested.every((entry, index) => entry.repositoryId === project.repositories[index]!.repositoryId
+          && entry.repository.toLowerCase() === project.repositories[index]!.repository)
+        && requested[0]!.repository.toLowerCase() === input.repository.toLowerCase();
+      if (!project || !matches || pending || (input.sourceRepositoryId !== undefined && input.sourceRepositoryId !== requested[0]!.repositoryId))
         throw new HttpError(409, "project_unavailable", "This project is no longer available to you in the cloud.");
-      sourceRepositoryId = project.repository_id;
+      sourceRepositoryId = requested[0]!.repositoryId;
+      scope = requested.map(entry => ({ repository: entry.repository.toLowerCase(), repositoryId: entry.repositoryId }));
       projectId = input.projectId;
       // Private for good: sharing the project later never shares this workspace.
       if (project.level === "personal") privateOwner = input.creatorUserId;
@@ -473,15 +486,26 @@ export class CloudV2Store {
     if (Object.keys(input.env ?? {}).length && sourceRepositoryId === undefined)
       throw new HttpError(409, "cloud_source_review_required", "A workspace environment requires a verified repository identity.");
     const row = (await tx.query<Row>(
-      `INSERT INTO cloud_v2_workspaces (id, org_id, creator_user_id, name, repository, branch, base_branch, state, computer_build_id, source_repositories, source_pending, api_access, created_by_session_id, execution_initiator_user_id, execution_intent_id, execution_mode, private_owner_user_id, project_id)
+      `INSERT INTO cloud_v2_workspaces (id, org_id, creator_user_id, name, repository, branch, base_branch, state, computer_build_id, source_repositories, source_pending, api_access, created_by_session_id, execution_initiator_user_id, execution_intent_id, execution_mode, private_owner_user_id, project_id, checkout_path, folder, base_commit)
        VALUES ($1, $2, $3, $4, $5, $6, $7, 'creating', $8, $9::text[], $10,
-         coalesce((SELECT workspace_api_access FROM cloud_api_access_settings WHERE org_id=$2 AND user_id=$3),true), $11, $3, gen_random_uuid(), $12, $13, $14) RETURNING ${COLUMNS}`,
+         coalesce((SELECT workspace_api_access FROM cloud_api_access_settings WHERE org_id=$2 AND user_id=$3),true), $11, $3, gen_random_uuid(), $12, $13, $14,
+         $15, $16, $17) RETURNING ${COLUMNS}`,
       [input.id, input.organizationId, input.creatorUserId, input.name, input.repository, input.branch,
         input.baseBranch, input.computerBuildId,
         pending ? null : (scope ?? [{ repository: input.repository }]).map(source => source.repository.toLowerCase()), pending, input.createdBySessionId ?? null,
-        input.executionRuntime ? "active" : "legacy", privateOwner, projectId],
+        input.executionRuntime ? "active" : "legacy", privateOwner, projectId,
+        projectId ? input.checkoutFolder ?? null : null, projectId && (input.repositories?.length ?? 0) > 1 ? input.folder ?? null : null,
+        projectId ? input.repositories?.[0]?.baseCommit ?? null : null],
     )).rows[0]!;
     if (!pending && sourceRepositoryId !== undefined) await this.bindSources(tx, workspace(row), sourceRepositoryId, scope, input.env);
+    // The trigger made the first repository's row from the workspace's; it gets
+    // its folder and id here, and the project's others follow it.
+    if (projectId) for (const [position, entry] of (input.repositories ?? []).entries()) {
+      if (position === 0) await tx.query("UPDATE cloud_v2_workspace_repositories SET folder=$2, repository_id=$3 WHERE workspace_id=$1 AND position=0",
+        [row.id, entry.folder, entry.repositoryId]);
+      else await tx.query(`INSERT INTO cloud_v2_workspace_repositories (workspace_id, position, repository, repository_id, folder, branch, base_branch, base_commit)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`, [row.id, position, entry.repository, entry.repositoryId, entry.folder, entry.branch, entry.baseBranch, entry.baseCommit ?? null]);
+    }
     if (input.runtimeCanary) await consumeRuntimeCanary(tx, workspace(row), input.runtimeCanary, sourceRepositoryId, createKey);
     let promptAdmission;
     if (input.executionRuntime) {

@@ -4,7 +4,7 @@ import { CloudV2InstallScriptSchema } from "./computer.js";
 import type { CloudProjects } from "./projects.js";
 import { createProjectRoutes, type ProjectRouteDeps } from "./project-routes.js";
 import type { CloudExecutionContexts } from "./execution/store.js";
-import { CloudWorkspaceCreateSchema, createCloudWorkspaceOperations } from "./workspace-create.js";
+import { CloudWorkspaceCreateSchema, CloudWorkspaceRepositoryCreateSchema, createCloudWorkspaceOperations } from "./workspace-create.js";
 import { rateLimit } from "../ratelimit.js";
 import { Hono, type Context } from "hono";
 import { bodyLimit } from "hono/body-limit";
@@ -56,7 +56,7 @@ const ORGANIZATION_SLUG = /^[a-z0-9](?:[a-z0-9-]{0,98}[a-z0-9])?$/;
 const WORKSPACE_NUMBER = /^[1-9][0-9]{0,9}$/;
 const MAX_WORKSPACE_NUMBER = 2_147_483_647;
 const ConnectSchema = z.object({ wake: z.boolean().default(true) }).strict();
-const WarmSchema = z.object({ repository: CloudWorkspaceCreateSchema.shape.repository }).strict();
+const WarmSchema = z.object({ repository: CloudWorkspaceRepositoryCreateSchema.shape.repository }).strict();
 const ChatEditSchema = z.object({ title: CloudV2SessionNameSchema.transform(value => value.trim()).optional(), archived: z.boolean().optional() })
   .strict().refine(value => value.title !== undefined || value.archived !== undefined);
 
@@ -76,7 +76,10 @@ export type CloudV2RouteDeps = {
     & Partial<Pick<CloudV2Computers, "saveInstallScript">>;
   /** Projects (ready copies on): the Cloud Computer is tools only, and creates,
    * repository lists and the old recipe are answered from projects. */
-  projects?: Pick<CloudProjects, "forRepository" | "oneRepositoryProjects" | "syncRecipe">;
+  projects?: Pick<CloudProjects, "get" | "forRepository" | "oneRepositoryProjects" | "syncRecipe">;
+  /** Projects on: a project create's GitHub checks as its creator (github-composition projectAccess). */
+  projectAccess?(organizationId: string, userId: string, repositories: readonly { repository: string; repositoryId: string; baseBranch?: string | null }[]):
+    Promise<{ repository: string; repositoryId: string; baseBranch: string; baseCommit: string }[]>;
   /** The caller's own GitHub reading a repository: its identity and default branch. */
   resolveMemberRepository?(organizationId: string, userId: string, repository: string): Promise<{ repository: string; repositoryId: string; defaultBranch: string }>;
   /** Projects' and GitHub connections' own routes. */

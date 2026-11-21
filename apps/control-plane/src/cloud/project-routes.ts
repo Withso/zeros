@@ -26,6 +26,8 @@ export type ProjectRouteDeps = {
   /** Repositories the caller can read through one installation, a page at a time. */
   installationRepositories(organizationId: string, userId: string, installationId: number, page: number):
     Promise<{ repositories: { id: string; repository: string; defaultBranch: string; private: boolean }[]; nextPage: number | null }>;
+  /** Renews the caller's check of these repositories, so a create seconds later reuses it. */
+  warm?(organizationId: string, userId: string, targets: readonly { repository: string; repositoryId: string }[]): Promise<void>;
   /** The caller's GitHub reading one repository: its immutable ID. */
   resolveMemberRepository(organizationId: string, userId: string, repository: string): Promise<{ repository: string; repositoryId: string }>;
   /** Present when ready copies are composed. */
@@ -150,6 +152,15 @@ export function createProjectRoutes(deps: ProjectRouteDeps): Hono {
     const org = organization(c.req.param("org")), user = c.get("user").id;
     const project = await deps.projects.get(org, user, id(c.req.param("project")));
     return c.json({ project: (await status(org, user, [project]))[0] });
+  });
+
+  /** The Create page calls this on intent (a project selected or hovered), so the create seconds later is a cache hit. */
+  app.post(`${projects}/:project/warm`, rateLimit("cloud-projects-warm", 60, 60_000), async c => {
+    const org = organization(c.req.param("org")), user = c.get("user").id;
+    const project = await deps.projects.get(org, user, id(c.req.param("project")));
+    if (!deps.warm) throw new HttpError(404, "not_found", "Not found");
+    await deps.warm(org, user, project.repositories.map(entry => ({ repository: entry.repository, repositoryId: entry.repositoryId })));
+    return c.json({ ok: true });
   });
 
   app.patch(`${projects}/:project`, json, rateLimit("cloud-projects-write", 30, 60_000), async c => {
