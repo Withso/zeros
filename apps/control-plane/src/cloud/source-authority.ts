@@ -38,13 +38,33 @@ type WorkspaceLease = { proof: string; revision: SourceRevision; organizationId:
 
 /** A confirmed positive is retained only for its exact person, connection and
  * repository identity. Temporary failures never move its one-hour deadline. */
+/** Repositories one create checks at once, and verifications one person has at GitHub at once. */
+export const CLOUD_SOURCE_PARALLEL = 4;
+
+/** Runs `work` for each item, at most `limit` at a time, keeping order. */
+export async function mapBounded<T, R>(items: readonly T[], limit: number, work: (item: T, index: number) => Promise<R>): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let next = 0, failed: { error: unknown } | null = null;
+  const runner = async () => {
+    while (!failed && next < items.length) {
+      const index = next++;
+      try { results[index] = await work(items[index]!, index); }
+      catch (error) { failed ??= { error }; }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, runner));
+  if (failed) throw (failed as { error: unknown }).error;
+  return results;
+}
+
 export class CloudV2SourceAuthority {
   private readonly observations = new Map<string, GithubVerification>();
   private readonly flights = new Map<string, Promise<GithubVerification>>();
   private readonly workspaceLeases = new Map<string, WorkspaceLease>();
   private readonly workspaceFlights = new Map<string, Promise<CloudSourceContinuation>>();
   private readonly fingerprints = new Map<string, Promise<string>>();
-  private readonly actorFlights = new Map<string, Promise<GithubVerification>>();
+  /** Verifications one person (and connection) has at GitHub now, and those waiting for a turn. */
+  private readonly actorSlots = new Map<string, { active: number; waiting: (() => void)[] }>();
   private readonly backoffs = new Map<string, { until: number; error: HttpError }>();
   private readonly revisions = new Map<string, SourceRevision>();
   private nextRevision = 0;
@@ -77,10 +97,11 @@ export class CloudV2SourceAuthority {
   }
   /** renew is for a create's requested repository, whose lifecycle and hello
    * follow within seconds, and for the Create page's intent to create. */
-  async targets(organizationId: string, userId: string, targets: readonly CloudSourceTarget[], renew = false): Promise<void> {
+  async targets(organizationId: string, userId: string, targets: readonly CloudSourceTarget[], renew = false, options: { nameDenied?: boolean } = {}): Promise<void> {
     const parsed = z.array(CloudSourceTargetSchema).min(1).max(100).safeParse(targets);
     if (!parsed.success) throw new HttpError(409, "cloud_source_review_required", "The original source identities could not be verified. Existing data has been retained.");
-    await this.observeSources(organizationId, userId, parsed.data.map(target => target.repository), parsed.data.map(target => target.repositoryId), false, renew);
+    await this.observeSources(organizationId, userId, parsed.data.map(target => target.repository), parsed.data.map(target => target.repositoryId), false, renew,
+      0, false, options.nameDenied === true);
   }
 
   /** A reader uses their own connection, independently of the VM's Creator.
@@ -114,7 +135,8 @@ export class CloudV2SourceAuthority {
     return pending;
   }
 
-  private async observeSources(organizationId: string, userId: string, repositories: readonly string[], ids?: readonly string[], continuation = false, renew = false, minimumRemainingMs = 0, requireFresh = false): Promise<SourceObservation[]> {
+  private async observeSources(organizationId: string, userId: string, repositories: readonly string[], ids?: readonly string[], continuation = false, renew = false, minimumRemainingMs = 0, requireFresh = false,
+    nameDenied = false): Promise<SourceObservation[]> {
     const sources = z.array(repositorySchema).min(1).max(100).safeParse(repositories);
     if (!sources.success || ids && (ids.length !== repositories.length || !z.array(repositoryIdSchema).safeParse(ids).success))
       throw new HttpError(403, "github_repository_invalid", "Repository access could not be verified.");
@@ -123,7 +145,15 @@ export class CloudV2SourceAuthority {
     // Repositories of one owner share a connection: read its fingerprint once
     // before the observations and once after, not once per repository.
     const before = new Map<string, Promise<string>>(), after = new Map<string, Promise<string>>();
-    for (const [index, repository] of sources.data.entries()) observations.push(await this.observeRepository(organizationId, userId, repository, ids?.[index], continuation, deadline, before, renew, minimumRemainingMs,requireFresh));
+    // A create's repositories are checked together, a few at a time.
+    observations.push(...await mapBounded(sources.data, CLOUD_SOURCE_PARALLEL, (repository, index) =>
+      this.observeRepository(organizationId, userId, repository, ids?.[index], continuation, deadline, before, renew, minimumRemainingMs, requireFresh)
+        .catch(error => {
+          // A project's create names the repository the member can't read.
+          if (nameDenied && error instanceof HttpError && [403, 404].includes(error.status))
+            throw new HttpError(error.status, error.code, `You can't read ${repository} on GitHub, so this workspace can't be created. Ask for access or remove it from the project.`);
+          throw error;
+        })));
     const assertLifetime = () => {
       if (observations.some(observation => observation.until - this.now() < minimumRemainingMs || observation.until <= this.now()))
         throw new SourceLifetimeUnavailable();
@@ -171,11 +201,13 @@ export class CloudV2SourceAuthority {
       organizationId: scope.organizationId!, userId: scope.userId, repositoryId: scope.repositoryIds[0], fingerprint,
     } : undefined;
     const actor = JSON.stringify([scope.organizationId, scope.userId, fingerprint]);
-    const predecessor = this.actorFlights.get(actor);
+    let held = false;
     const flight = (async () => {
-      // One provider verification per actor at a time. A first outage response
-      // backs off queued repositories too, instead of producing a request storm.
-      if (predecessor) await this.waitFor(predecessor.catch(() => {}), deadline);
+      // A few provider verifications per actor at a time. One that waits
+      // re-reads the backoff below, so a first outage response still backs off
+      // the queued repositories instead of producing a request storm. A
+      // background renewal never takes a turn from the actor's other checks.
+      if (!renewal) { await this.actorTurn(actor, deadline); held = true; }
       this.assertRevision(scope, revision);
       let blocked = this.backoffs.get(actor);
       if ((!blocked || blocked.until <= this.now()) && persistent) {
@@ -254,15 +286,41 @@ export class CloudV2SourceAuthority {
       return this.remember(key, value);
     })().finally(() => {
       if (this.flights.get(flightKey) === flight) this.flights.delete(flightKey);
-      if (this.actorFlights.get(actor) === flight) this.actorFlights.delete(actor);
+      if (held) this.actorDone(actor);
     });
     // A continuation returns immediately while the observation refreshes. The
     // caller also receives this promise so confirmed revocation can retire it.
     void flight.catch(() => {});
     this.flights.set(flightKey, flight);
-    // A background renewal never queues the actor's other verifications.
-    if (!renewal) this.actorFlights.set(actor, flight);
     return flight;
+  }
+
+  private async actorTurn(actor: string, deadline: number): Promise<void> {
+    let slots = this.actorSlots.get(actor);
+    if (!slots) {
+      if (this.actorSlots.size >= MAX_LEASES) throw new GithubTemporaryError("github_verification_busy");
+      this.actorSlots.set(actor, slots = { active: 0, waiting: [] });
+    }
+    if (slots.active < CLOUD_SOURCE_PARALLEL) { slots.active++; return; }
+    let turn!: () => void;
+    const granted = new Promise<void>(resolve => { turn = resolve; });
+    slots.waiting.push(turn);
+    try { await this.waitFor(granted, deadline); }
+    catch (error) {
+      // Timed out: leave the queue, or hand on a turn granted meanwhile.
+      const index = slots.waiting.indexOf(turn);
+      if (index >= 0) slots.waiting.splice(index, 1);
+      else this.actorDone(actor);
+      throw error;
+    }
+  }
+
+  private actorDone(actor: string): void {
+    const slots = this.actorSlots.get(actor);
+    if (!slots) return;
+    const next = slots.waiting.shift();
+    if (next) { next(); return; }
+    if (--slots.active <= 0) this.actorSlots.delete(actor);
   }
 
   private async observeRepository(organizationId: string, userId: string, repository: string, repositoryId?: string, continuation = false, deadline = this.now() + VERIFICATION_WAIT_MS,

@@ -1,4 +1,6 @@
 import type pg from "pg";
+import { withGithubReadScope } from "./github-http.js";
+import { CLOUD_SOURCE_PARALLEL, mapBounded } from "./source-authority.js";
 import type { GithubBackendConfig } from "../config.js";
 import type { CloudAgentCredentialKeys } from "../agent-credentials/agent-credential-envelope.js";
 import { HttpError } from "../authz.js";
@@ -268,7 +270,38 @@ export function createCloudGithubServices(
       return null;
     }
   };
+  /** A project create's GitHub checks, as its creator: every repository's
+   * access through the verification cache (a check from the last ten minutes,
+   * such as the Create page's warm, is reused; a denial or revocation is not),
+   * a few at a time, then each base branch's head. One read scope: no GitHub
+   * read is made twice in one create. A repository the creator can't read, or
+   * a branch it lacks, refuses the create and names it. */
+  const projectAccess = (organizationId: string, userId: string,
+    repositories: readonly { repository: string; repositoryId: string; baseBranch?: string | null | undefined }[]) =>
+    withGithubReadScope(async () => {
+      await source.targets(organizationId, userId, repositories.map((entry) => ({ repository: entry.repository, repositoryId: entry.repositoryId })),
+        true, { nameDenied: true });
+      const access = await connections.access({ organizationId, userId });
+      const checked = await mapBounded(repositories, CLOUD_SOURCE_PARALLEL, async (entry) => {
+        // The repository's own default only when neither the request nor the project names a branch.
+        const baseBranch = entry.baseBranch
+          ?? (await access.api.repository({ repository: entry.repository, repositoryId: entry.repositoryId })).defaultBranch;
+        try {
+          const head = await access.api.http.json(
+            `/repositories/${entry.repositoryId}/branches/${encodeURIComponent(baseBranch)}`,
+            z.object({ commit: z.object({ sha: z.string().regex(/^[a-f0-9]{40}$/) }) }),
+          );
+          return { repository: entry.repository, repositoryId: entry.repositoryId, baseBranch, baseCommit: head.commit.sha };
+        } catch (error) {
+          if (!(error instanceof HttpError) || error.status !== 404) throw error;
+          throw new HttpError(404, "repository_branch_not_found", `Branch ${baseBranch} does not exist in ${entry.repository}.`);
+        }
+      });
+      await access.assertCurrent();
+      return checked;
+    });
   return {
+    projectAccess,
     connections,
     identities,
     metadata,

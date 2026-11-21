@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { createHash } from "node:crypto";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { HttpError } from "../authz.js";
 import { GithubTemporaryError, githubRateLimit, githubRetryAfter } from "../github-availability.js";
 
@@ -37,6 +38,15 @@ const unavailable = () =>
     "GitHub could not be reached. Try again.",
   );
 
+const readScope = new AsyncLocalStorage<Map<string, Promise<unknown>>>();
+/** Within `work` (one create, say), each GitHub read (a GET with one token and
+ * URL) is made at most once: later identical reads share its answer, success or
+ * failure. Nothing outlives the scope, so a later operation always reads again
+ * and a denial takes effect at once. */
+export function withGithubReadScope<T>(work: () => Promise<T>): Promise<T> {
+  return readScope.run(new Map(), work);
+}
+
 /** Only fixed GitHub API paths reach this courier. No upstream response body,
  * arbitrary URL, redirect, or credential is included in an error. */
 export class CloudGithubHttp {
@@ -51,6 +61,25 @@ export class CloudGithubHttp {
       mutation?: boolean;
       repositoryLookup?: boolean;
     } = {},
+  ): Promise<unknown> {
+    const reads = readScope.getStore();
+    if (!reads || (input.method && input.method !== "GET") || input.body !== undefined || input.mutation) return this.send(path, input);
+    const key = JSON.stringify([createHash("sha256").update(this.options.token).digest("hex"), this.options.apiBaseUrl, path, input.text === true,
+      input.repositoryLookup === true]);
+    let pending = reads.get(key);
+    if (!pending) { pending = this.send(path, input); reads.set(key, pending); }
+    return pending;
+  }
+
+  private async send(
+    path: string,
+    input: {
+      method?: "GET" | "POST" | "PATCH" | "PUT" | "DELETE";
+      body?: unknown;
+      text?: boolean;
+      mutation?: boolean;
+      repositoryLookup?: boolean;
+    },
   ): Promise<unknown> {
     if (
       !path.startsWith("/") ||
