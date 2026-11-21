@@ -22,7 +22,7 @@ function useSectionTitle(title: React.ReactNode): React.ReactNode {
 }
 
 /** A long settings page's top level: one heading per section, larger than the
- * groups and sections it contains. */
+ * groups and sections it contains, with a rule between sections. */
 export function SettingsPageSection({
   title,
   description,
@@ -33,7 +33,7 @@ export function SettingsPageSection({
   children: React.ReactNode;
 }) {
   return (
-    <section className="flex flex-col gap-4">
+    <section className="border-border1 flex flex-col gap-4 border-t pt-8 first:border-t-0 first:pt-0">
       <div className="flex flex-col gap-0.5 px-0.5">
         <h2 className={cn(PAGE_SECTION_NAME_CLS, "m-0")}>{title}</h2>
         {description && <p className={cn(HINT_CLS, "m-0")}>{description}</p>}

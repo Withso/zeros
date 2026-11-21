@@ -77,7 +77,7 @@ export function ProjectPage({
       </SettingsGroup>
     );
   return (
-    <div className="flex flex-col gap-10" data-project-page={project.key}>
+    <div className="flex flex-col gap-8" data-project-page={project.key}>
       <SettingsPageSection title="Where it runs">
         <SettingsGroup>
           {main ? (
