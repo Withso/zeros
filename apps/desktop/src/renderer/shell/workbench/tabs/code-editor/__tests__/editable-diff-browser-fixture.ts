@@ -21,7 +21,7 @@ export async function buildEditableDiffFixture(patch: string, draft: string): Pr
         import { EditableDiffEditor } from "./editable-diff-editor";
         const fixture = window.diffFixture = { value: ${JSON.stringify(draft)} };
         const app = createRoot(document.getElementById("root"));
-        const query = { workspaceId: "workspace", cwd: "/personal/a", path: "file.ts", filter: "all" };
+        const query = { workspaceId: "workspace", cwd: window.fixtureCwd, path: "file.ts", filter: "all" };
         fixture.render = () => flushSync(() => app.render(<EditableDiffEditor query={query}
           value={fixture.value} savedContent={${JSON.stringify(draft)}} isNewFile={false} active
           revision={0} refreshKey={0} onChange={value => { fixture.value = value; fixture.render(); }}
@@ -58,7 +58,14 @@ export async function buildEditableDiffFixture(patch: string, draft: string): Pr
   return result.outputFiles[0].text;
 }
 
-export async function mountEditableDiff(page: Page, source: string): Promise<void> {
+/** The placements whose workspace keys an editable diff is opened under. */
+export const PLACEMENTS = [
+  ["Local Personal", "/Users/someone/projects/app"],
+  ["organization-local", "/Users/someone/work/app"],
+  ["cloud", "cloud://11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222"],
+] as const;
+
+export async function mountEditableDiff(page: Page, source: string, cwd: string = PLACEMENTS[0][1]): Promise<void> {
   await page.setContent(`<style>${TOKENS}
     body { margin: 0; background: var(--bg1); }
     #root { height: 600px; width: 800px; }
@@ -66,6 +73,7 @@ export async function mountEditableDiff(page: Page, source: string): Promise<voi
     .overflow-y-auto { overflow-y: auto; } .overflow-x-hidden { overflow-x: hidden; }
     .select-text { -webkit-user-select: text; user-select: text; }
   </style><div id="root"></div>`);
+  await page.evaluate((cwd) => { (window as unknown as { fixtureCwd: string }).fixtureCwd = cwd; }, cwd);
   await page.addScriptTag({ content: source });
   await page.waitForFunction(() =>
     [...document.querySelectorAll("*")].some((element) => element.shadowRoot?.querySelector("[contenteditable]")));
