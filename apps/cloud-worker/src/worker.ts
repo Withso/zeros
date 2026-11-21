@@ -20,7 +20,7 @@ import { SessionStore } from "./sessions/session-store";
 import { HistoryMirror } from "./sessions/history-mirror";
 import type { Transport } from "./transport";
 import { ChatService } from "./workspace/chat-service";
-import { prepareCheckout, type CheckoutRefresh, type CheckoutResult } from "./workspace/checkout";
+import { cloneMissingCheckout, prepareCheckout, type CheckoutRefresh, type CheckoutResult } from "./workspace/checkout";
 import { WorkspaceSetup, readSetupOutput, type SetupRunner } from "./workspace/setup";
 import { NotifyUserService } from "./notify-user/service";
 import { SyncService } from "./workspace/sync-service";
@@ -80,6 +80,8 @@ interface WorkerOptions {
   transport: Transport;
   drivers?: DriverFactories;
   prepareCheckout?: (workspace: WorkerConfig["workspace"], gitEnvironment: NodeJS.ProcessEnv, timing?: StartupTimingObserver) => Promise<CheckoutResult | void>;
+  /** A repository after the first that is not on disk: cloned before its branch is prepared. */
+  cloneCheckout?: (workspace: WorkerConfig["workspace"], repository: string, gitEnvironment: NodeJS.ProcessEnv) => Promise<boolean>;
   setupRunner?: SetupRunner;
   gitAskpassPath?: string;
   githubFetch?: typeof fetch;
@@ -978,6 +980,9 @@ export class CloudWorker {
       const runtime = new RepositoryRuntime(repositoryScope);
       opened.set(entry.repository.toLowerCase(), runtime);
       try {
+        // Not on disk yet (no project build was forked): cloned first, as the starter, with its own token.
+        if (!this.options.runtimeResume)
+          await asStarter(() => (this.options.cloneCheckout ?? cloneMissingCheckout)(repositoryScope.workspace, entry.repository, this.gitEnvironment));
         const checkout = this.options.runtimeResume ? undefined
           : await asStarter(() => (this.options.prepareCheckout ?? prepareCheckout)(repositoryScope.workspace, this.gitEnvironment, timing));
         runtime.refresh = checkout?.refresh; runtime.createdBranch = checkout?.createdBranch === true;

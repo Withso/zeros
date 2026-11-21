@@ -106,7 +106,7 @@ class ActingRelay extends FakeRelay {
   }
 }
 
-async function setup(options: { identitySource?: "creator" | "actor"; creatorIdentity?: { name: string; email: string }; agentLogins?: Record<string, true>; freshCheckout?: boolean; bootstrapError?: unknown; activated?: boolean; bootstrap?: string; survivors?: number; noSweep?: boolean; beforeStart?: (home: string) => Promise<void>; environment?: unknown; log?: (line: string) => void; setupRunner?: (...args: any[]) => Promise<number>; checkout?: () => void } = {}) {
+async function setup(options: { identitySource?: "creator" | "actor"; creatorIdentity?: { name: string; email: string }; agentLogins?: Record<string, true>; freshCheckout?: boolean; bootstrapError?: unknown; activated?: boolean; bootstrap?: string; survivors?: number; noSweep?: boolean; beforeStart?: (home: string) => Promise<void>; environment?: unknown; log?: (line: string) => void; setupRunner?: (...args: any[]) => Promise<number>; checkout?: () => void; clone?: (repository: string) => void; several?: boolean } = {}) {
   const directory = await mkdtemp(join(tmpdir(), "zeros-acting-")); directories.push(directory);
   const root = join(directory, "checkout"); await mkdir(root);
   // An existing checkout (a later process on this boot, or an earlier boot's): nothing to clone without a bootstrap.
@@ -118,13 +118,17 @@ async function setup(options: { identitySource?: "creator" | "actor"; creatorIde
   await options.beforeStart?.(home);
   const worker = new CloudWorker({ directory, homeDirectory: home, transport: relay, workspaceId: WORKSPACE_ID, githubFetch: async () => new Response(null, { status: 200 }),
     prepareCheckout: async (_workspace, environment) => { socketPath = environment.GH_ZEROS_BROKER_SOCKET!; options.checkout?.(); return { createdBranch: true }; },
+    ...(options.clone ? { cloneCheckout: async (_workspace: unknown, repository: string) => { options.clone!(repository); return true; } } : {}),
     ...(options.setupRunner ? { setupRunner: options.setupRunner } : {}),
     ...(options.noSweep ? {} : { bootClean: async () => options.survivors ?? 0 }),
     contextRenewMs: 20, sharedMemory: join(directory, "shm"),
     ...(options.log ? { log: options.log } : {}),
     drivers: { claude: () => { const driver = new FakeDriver(); drivers.push(driver); return driver; } } });
   workers.push(worker); worker.start();
-  await (options.bootstrapError || options.freshCheckout || (options.bootstrap && options.survivors) ? (p: Promise<unknown>) => p.catch(() => {}) : (p: Promise<unknown>) => p)(relay.receive({ ...config, workspace: { ...config.workspace, checkoutPath: root, ...(options.setupRunner ? { setup: "make bootstrap" } : {}) }, promptOutbox: 1,
+  await (options.bootstrapError || options.freshCheckout || (options.bootstrap && options.survivors) ? (p: Promise<unknown>) => p.catch(() => {}) : (p: Promise<unknown>) => p)(relay.receive({ ...config, workspace: { ...config.workspace, checkoutPath: root, ...(options.setupRunner ? { setup: "make bootstrap" } : {}),
+      ...(options.several ? { root: directory, repositories: [
+        { repository: config.workspace.repository, checkoutPath: root, branch: config.workspace.branch, baseBranch: config.workspace.baseBranch },
+        { repository: "withso/web", checkoutPath: join(directory, "web"), branch: config.workspace.branch, baseBranch: config.workspace.baseBranch }] } : {}) }, promptOutbox: 1,
     ...(options.bootstrap ? { bootstrapContextId: options.bootstrap } : {}),
     ...(options.environment ? { environment: options.environment } : {}), agents: options.activated === false ? { claude: { apiKey: "creator-claude-key-000" } } : {},
     ...(options.agentLogins ? { agentLogins: options.agentLogins } : {}),
@@ -437,6 +441,13 @@ it("checks out and runs setup as the workspace's starter from the bootstrap leas
   await until(() => setupEnv?.GIT_AUTHOR_NAME).toBe("Sam");
   expect(setupEnv!.ZEROS_EXECUTION_CONTEXT).toBe(BOOT);
   await until(() => f.relay.calls.find(call => call.op === `execution-leases/${BOOT}/retired`)?.body.reason).toBe("setup_done");
+});
+
+it("clones a missing repository after the first as the starter, from the same bootstrap lease as the first checkout", async () => {
+  const BOOT = "77777777-7777-4777-8777-777777777777";
+  const cloned: Array<[string, unknown]> = [];
+  await setup({ bootstrap: BOOT, several: true, clone: repository => { cloned.push([repository, operationEnvironment.getStore()]); } });
+  expect(cloned).toEqual([["withso/web", expect.objectContaining({ git: expect.objectContaining({ GIT_AUTHOR_NAME: "Sam" }), zeros: { ZEROS_EXECUTION_CONTEXT: BOOT } })]]);
 });
 
 it("interrupts a running turn whose context is revoked, and retires it as revoked", async () => {

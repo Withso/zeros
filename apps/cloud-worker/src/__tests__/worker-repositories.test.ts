@@ -40,7 +40,8 @@ async function fixture() {
     root, repositories: [repository("api"), repository("web")] };
   const relay = new FakeRelay();
   const prepareCheckout = vi.fn(async () => ({ createdBranch: false }));
-  const worker = new CloudWorker({ directory: state, homeDirectory: directory, transport: relay, prepareCheckout, drivers: {}, workspaceServices: { watch: false } });
+  const cloneCheckout = vi.fn(async () => false);
+  const worker = new CloudWorker({ directory: state, homeDirectory: directory, transport: relay, prepareCheckout, cloneCheckout, drivers: {}, workspaceServices: { watch: false } });
   cleanups.push(() => worker.dispose());
   worker.start();
   await relay.receive({ ...config, agents: {}, workspace });
@@ -50,7 +51,7 @@ async function fixture() {
     return relay.response(frame.id) as Extract<BridgeMessage, { type: "WORKSPACE_RESPONSE" | "WORKSPACE_ERROR" }>;
   };
   await relay.receive({ t: "open", clientId: CLIENT_A });
-  return { root, workspace, prepareCheckout, request };
+  return { root, workspace, prepareCheckout, cloneCheckout, request };
 }
 const changed = (reply: { type: string; result?: unknown }) => JSON.stringify(reply.result);
 
@@ -58,6 +59,10 @@ it("prepares every repository's checkout and sends each Git request to the repos
   const f = await fixture();
   expect(f.prepareCheckout.mock.calls.map(call => (call as unknown as [{ checkoutPath: string; repository: string }])[0]).map(entry => [entry.repository, entry.checkoutPath]))
     .toEqual([["withso/api", join(f.root, "api")], ["withso/web", join(f.root, "web")]]);
+  // Only a repository after the first is cloned when missing, by its own name, into its own folder, before its branch is prepared.
+  expect(f.cloneCheckout.mock.calls.map(call => { const [workspace, repository] = call as unknown as [{ checkoutPath: string }, string]; return [repository, workspace.checkoutPath]; }))
+    .toEqual([["withso/web", join(f.root, "web")]]);
+  expect(f.cloneCheckout.mock.invocationCallOrder[0]).toBeLessThan(f.prepareCheckout.mock.invocationCallOrder[1]!);
   await writeFile(join(f.root, "web", "only-web.txt"), "new\n");
   const first = await f.request("git.status");
   expect(first.type).toBe("WORKSPACE_RESPONSE");

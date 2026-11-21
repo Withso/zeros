@@ -1,4 +1,6 @@
 import { spawn } from "node:child_process";
+import { lstat, mkdir, readdir } from "node:fs/promises";
+import { dirname } from "node:path";
 import { workerChildEnvironment, mergeGitEnvironment } from "../drivers/shared/agent-environment";
 import { WorkspaceError, type WorkerConfig } from "./scope";
 import { measureStartup, recordStartupTiming, type StartupTimingObserver } from "../startup-timings";
@@ -18,7 +20,7 @@ type Git = (args: string[], signal?: AbortSignal) => Promise<string>;
 
 /** No shell or stderr in errors. Background Git owns a process group so a
  * cancelled fetch cannot leave a remote helper writing the checkout at Stop. */
-function git(cwd: string, environment: NodeJS.ProcessEnv): Git {
+function git(cwd: string, environment: NodeJS.ProcessEnv, timeoutMs = 120_000): Git {
   // Activated: the bootstrap lease's person and context (team sharing); none otherwise.
   const operation = operationEnvironment.getStore();
   const env = operation ? workerChildEnvironment(undefined, mergeGitEnvironment(environment, operation.git), {}, operation.zeros) : workerChildEnvironment(undefined, environment);
@@ -33,7 +35,7 @@ function git(cwd: string, environment: NodeJS.ProcessEnv): Git {
       failed = true; kill("SIGTERM");
       escalation ??= setTimeout(() => kill("SIGKILL"), 2000); escalation.unref();
     };
-    const timeout = setTimeout(cancel, 120_000); timeout.unref();
+    const timeout = setTimeout(cancel, timeoutMs); timeout.unref();
     signal?.addEventListener("abort", cancel, { once: true });
     if (signal?.aborted) cancel();
     child.stdout.on("data", (chunk: Buffer) => {
@@ -107,6 +109,41 @@ class BackgroundRefresh implements CheckoutRefresh {
 
 /** Run only for the first config in a worker process. Existing branches and
  * dirty files remain owned by the user; Git refuses an unsafe switch itself. */
+const REPOSITORY = /^[A-Za-z0-9][A-Za-z0-9._-]{0,99}\/[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/;
+/** Generous for a large repository; Stop still cancels it through the process group. */
+const CLONE_TIMEOUT_MS = 15 * 60_000;
+
+/**
+ * A repository after the first of a workspace of several that is not on disk
+ * yet, cloned into its folder. That happens when a shared-execution create (or
+ * one from a Cloud Computer that holds only the first repository) had no
+ * project build to fork. Git asks the broker for this repository's own token by
+ * name (credential.useHttpPath); activated, it runs as the starter, from the
+ * bootstrap lease. An existing checkout is left alone, and a folder that holds
+ * anything else is never cloned over. True when it cloned.
+ */
+export async function cloneMissingCheckout(workspace: WorkerConfig["workspace"], repository: string, gitEnvironment: NodeJS.ProcessEnv = {},
+  origin = `https://github.com/${repository}.git`): Promise<boolean> {
+  if (!REPOSITORY.test(repository)) throw new WorkspaceError("VALIDATION_FAILED", "Invalid repository.");
+  const present = await lstat(`${workspace.checkoutPath}/.git`).then(() => true, (error: NodeJS.ErrnoException) => {
+    if (error.code === "ENOENT") return false;
+    throw error;
+  });
+  if (present) return false;
+  const contents = await readdir(workspace.checkoutPath).catch((error: NodeJS.ErrnoException) => {
+    if (error.code === "ENOENT") return [];
+    throw error;
+  });
+  if (contents.length) throw new WorkspaceError("WORKSPACE_UNAVAILABLE", "This repository's folder already holds other files.");
+  const parent = dirname(workspace.checkoutPath);
+  await mkdir(parent, { recursive: true });
+  try {
+    await git(parent, gitEnvironment, CLONE_TIMEOUT_MS)(
+      ["clone", "--quiet", "--no-recurse-submodules", "--template=", "--origin", "origin", "--", origin, workspace.checkoutPath]);
+  } catch { throw new WorkspaceError("WORKSPACE_UNAVAILABLE", "This repository could not be cloned. Check that its GitHub connection can read it."); }
+  return true;
+}
+
 export async function prepareCheckout(workspace: WorkerConfig["workspace"], gitEnvironment: NodeJS.ProcessEnv = {}, timing?: StartupTimingObserver): Promise<CheckoutResult> {
   const run = git(workspace.checkoutPath, gitEnvironment), { branch, baseBranch, baseCommit } = workspace;
   for (const name of [branch, baseBranch]) {
