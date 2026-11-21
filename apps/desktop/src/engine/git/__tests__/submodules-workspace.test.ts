@@ -92,13 +92,13 @@ beforeEach(() => {
     path.join(repoRoot, ".gitmodules"),
     [
       '[submodule "lib"]', "\tpath = vendor/lib", "\turl = https://github.com/acme/lib.git",
-      '[submodule "secret"]', "\tpath = vendor/secret", "\turl = https://github.com/acme/secret.git",
+      '[submodule "private"]', "\tpath = vendor/private", "\turl = https://github.com/acme/private.git",
       '[submodule "elsewhere"]', "\tpath = vendor/elsewhere", "\turl = https://gitlab.com/acme/elsewhere.git",
     ].join("\n"),
   );
   writeFileSync(path.join(repoRoot, "README.md"), "# repo\n");
   git(repoRoot, "add", "-A");
-  for (const gitlink of ["vendor/lib", "vendor/secret", "vendor/elsewhere"]) {
+  for (const gitlink of ["vendor/lib", "vendor/private", "vendor/elsewhere"]) {
     git(repoRoot, "update-index", "--add", "--cacheinfo", `160000,${libCommits[0]},${gitlink}`);
   }
   git(repoRoot, "commit", "-q", "-m", "init");
@@ -123,11 +123,11 @@ describe("submodules in a created Local workspace", () => {
     const result = await fetchSubmodules({ workspacePath: ws.path, remote: "origin", cloneSource });
     expect(result.outcomes.map((o) => [o.path, o.status])).toEqual([
       ["vendor/lib", "fetched"],
-      ["vendor/secret", "failed"],
+      ["vendor/private", "failed"],
       ["vendor/elsewhere", "skipped"],
     ]);
     expect(readFileSync(path.join(ws.path, "vendor/lib/lib.txt"), "utf8")).toBe("one");
-    expect(readdirSync(path.join(ws.path, "vendor/secret"))).toEqual([]);
+    expect(readdirSync(path.join(ws.path, "vendor/private"))).toEqual([]);
     expect(readdirSync(path.join(ws.path, "vendor/elsewhere"))).toEqual([]);
 
     expect(git(ws.path, "status", "--porcelain", "--untracked-files=all", "--ignore-submodules=none")).toBe("");
@@ -207,13 +207,13 @@ describe("submodules in a created Local workspace", () => {
 
       expect(requests.filter((url) => url.includes("/info/refs")).map((url) => url.split("?")[0])).toEqual([
         "/acme/lib.git/info/refs",
-        "/acme/secret.git/info/refs",
+        "/acme/private.git/info/refs",
       ]);
       expect(report).toBe(
         [
           "Submodules: 0 fetched, 1 skipped, 2 failed.",
           "  failed: vendor/lib (github.com/acme/lib): GitHub refused access (a private repository the connected account cannot read, or it does not exist)",
-          "  failed: vendor/secret (github.com/acme/secret): GitHub refused access (a private repository the connected account cannot read, or it does not exist)",
+          "  failed: vendor/private (github.com/acme/private): GitHub refused access (a private repository the connected account cannot read, or it does not exist)",
           "  skipped: vendor/elsewhere: only github.com submodules are followed",
           "",
           "",

@@ -49,6 +49,9 @@ function git(cwd: string, ...args: string[]): string {
   }).trim();
 }
 
+/** A well-formed commit id that no fixture contains. */
+const MISSING_COMMIT = "0123456789abcdef".repeat(3).slice(0, 40);
+
 let root: string;
 let previousHome: string | undefined;
 let fixtures: Map<string, string>;
@@ -510,7 +513,7 @@ describe("fetchSubmodules", () => {
     const lib = fixture("acme/lib", [{ "a.txt": "a" }]);
     const { repo, workspace } = superproject({
       gitmodules: '[submodule "lib"]\n\tpath = lib\n\turl = https://github.com/acme/lib',
-      gitlinks: [["lib", "0123456789abcdef0123456789abcdef01234567"]],
+      gitlinks: [["lib", MISSING_COMMIT]],
     });
     void lib;
     const result = await run(workspace);
@@ -540,25 +543,25 @@ describe("fetchSubmodules", () => {
     it("is reported as failed with a clear reason and the workspace stays usable", async () => {
       const { port } = server.address() as AddressInfo;
       const { workspace } = superproject({
-        gitmodules: '[submodule "secret"]\n\tpath = secret\n\turl = https://github.com/acme/secret',
-        gitlinks: [["secret", "0123456789abcdef0123456789abcdef01234567"]],
+        gitmodules: '[submodule "private"]\n\tpath = private\n\turl = https://github.com/acme/private',
+        gitlinks: [["private", MISSING_COMMIT]],
       });
       const result = await run(workspace, {
         cloneSource: (r) => `http://127.0.0.1:${port}/${r.owner}/${r.repo}.git`,
       });
-      expect(requests.some((url) => url.startsWith("/acme/secret.git/info/refs"))).toBe(true);
+      expect(requests.some((url) => url.startsWith("/acme/private.git/info/refs"))).toBe(true);
       expect(result.outcomes).toEqual([
         expect.objectContaining({
-          path: "secret",
+          path: "private",
           status: "failed",
-          repository: "github.com/acme/secret",
+          repository: "github.com/acme/private",
           reason: expect.stringMatching(/^GitHub refused access/),
         }),
       ]);
       expect(formatSubmoduleReport(result)).toContain(
-        "failed: secret (github.com/acme/secret): GitHub refused access",
+        "failed: private (github.com/acme/private): GitHub refused access",
       );
-      expect(readdirSync(path.join(workspace, "secret"))).toEqual([]);
+      expect(readdirSync(path.join(workspace, "private"))).toEqual([]);
       expect(git(workspace, "status", "--porcelain")).toBe("");
     });
   });
