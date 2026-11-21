@@ -281,7 +281,7 @@ export const TerminalSessionView = React.memo(function TerminalSessionView({
       // return true), which is fine — it's a no-op for these chords.
       if (evt.type !== "keydown") return true;
       const mod = evt.metaKey || evt.ctrlKey;
-      // App chords use Cmd/Ctrl+Option (⌥⌘B, ⌥⌘T). Returning false keeps xterm from
+      // App chords use Cmd/Ctrl+Option (⌥⌘B, ⌥⌘T, ⇧⌥⌘T). Returning false keeps xterm from
       // forwarding them or calling preventDefault, so they bubble to app-shell's
       // window handlers; macOS terminals never deliver Cmd+Option to the shell.
       // editable-target.ts exempts xterm's hidden textarea for the same reason.

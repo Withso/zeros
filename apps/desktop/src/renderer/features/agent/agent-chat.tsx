@@ -111,7 +111,7 @@ import { turnGet } from "../../platform/turns";
 import { turnRowCache, turnRowKey } from "../../state/read-caches";
 import { useCachedRead } from "../../state/use-cached-read";
 import { findProjectForFolder } from "../../state/workspace-resolution";
-import { Bot, Square, ArrowLeft, Check } from "lucide-react";
+import { Bot, Square, ArrowLeft, Check, GitBranch } from "lucide-react";
 import {
   encodeAttachments,
   reportSkippedAttachments,
@@ -162,6 +162,7 @@ import {
 } from "./composer-text-attachment-delivery";
 import { registerLiveChatFileStager } from "./composer-file-attachment-delivery";
 import { buildForkTranscriptAttachment, createForkedChat } from "./fork-chat";
+import { hasParentContext } from "./add-child-session";
 import { resolveComposerPlaceholder } from "./composer-placeholder";
 import {
   composerCardDock,
@@ -4393,6 +4394,12 @@ function AgentChatBody({
                   />
                 </ChatProvenance>
               )}
+            {hasParentContext(chatThread) && (
+              <p className={TRANSCRIPT_STATUS_ROW_CLS} data-parent-context-banner="">
+                <GitBranch className="size-3.5 shrink-0" strokeWidth={1.5} aria-hidden="true" />
+                Includes context from parent
+              </p>
+            )}
             {turns.map((turn, i) => {
               // A steer starts a new VISUAL prompt segment but remains inside
               // the same provider turn. Only the visual tail owns sticky/tail

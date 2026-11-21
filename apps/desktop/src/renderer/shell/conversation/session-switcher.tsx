@@ -1,5 +1,5 @@
 import { Fragment, useMemo, useState } from "react";
-import { ChevronRight, Cloud, Columns2, Ellipsis, Laptop, Plus, Rows2, X } from "lucide-react";
+import { ChevronRight, Cloud, Columns2, Ellipsis, GitBranchPlus, Laptop, Plus, Rows2, X } from "lucide-react";
 import { leafIds } from "../../state/chat-panes";
 import { useChatPanesStore } from "../../state/chat-panes-store";
 import { IconButton } from "@/renderer/shared/ui/primitives/icon-button";
@@ -15,11 +15,13 @@ import {
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuSeparator,
+  DropdownMenuShortcut,
   DropdownMenuTrigger,
 } from "../../shared/ui/primitives/dropdown-menu";
+import { addChildSession, canAddChildSession } from "../../features/agent/add-child-session";
 import { spawnNewChatTab } from "../../state/spawn-default-chat";
 import type { ChatThread } from "../../state/store";
-import { useWorkspaceDispatch } from "../../state/store";
+import { useWorkspaceDispatch, useWorkspaceStore } from "../../state/store";
 import { buildSessionTree, sessionDescendantIds, sessionLineage, type SessionNode, type SessionTree } from "../../state/session-tree";
 import { useActiveChatId, useChats } from "../../state/workspace-store";
 import type { WorkspacePlacement } from "./workspace-identity";
@@ -251,6 +253,11 @@ export function SessionActionsMenu({ folder, readOnly = false }: { folder: strin
     const layout = state.byFolder[folder];
     return layout ? leafIds(layout.root).length > 1 : false;
   });
+  const dispatch = useWorkspaceDispatch();
+  const parent = useWorkspaceStore((state) => {
+    const active = state.chats.find((chat) => chat.id === state.activeChatId);
+    return active?.folder === folder ? active : undefined;
+  });
   if (readOnly) return null;
   return (
     <DropdownMenu>
@@ -260,6 +267,19 @@ export function SessionActionsMenu({ folder, readOnly = false }: { folder: strin
         </IconButton>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end" sideOffset={6}>
+        {canAddChildSession(parent) && (
+          <>
+            <DropdownMenuItem
+              data-session-add-child=""
+              onSelect={() => addChildSession(parent, { publishChat: (chat) => dispatch({ type: "ADD_CHAT", chat }) })}
+            >
+              <GitBranchPlus className="size-4" strokeWidth={1.5} />
+              Add child session
+              <DropdownMenuShortcut>⌥⌘T</DropdownMenuShortcut>
+            </DropdownMenuItem>
+            <DropdownMenuSeparator />
+          </>
+        )}
         <DropdownMenuItem onSelect={() => requestFocusedPaneSplit("right")}>
           <Columns2 className="size-4" strokeWidth={1.5} />
           Split right
