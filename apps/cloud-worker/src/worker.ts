@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { writeWorkspaceInstructions } from "./workspace/instructions";
 import { access, lstat, rm } from "node:fs/promises";
-import { join } from "node:path";
+import { join, relative } from "node:path";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { CloudV2ClientOperationSchema, CloudV2ControlFrameSchema, type CloudV2BootCleanRefusal, type CloudV2ClientLease, CLOUD_V2_RELAY_PROTOCOL, CLOUD_WORKSPACE_RESOURCES_CAPABILITY, CLOUD_WORKSPACE_RESOURCES_PUSH_MS, CLOUD_WORKSPACE_RESOURCES_WATCH_CAPABILITY, PUSH_SIGNALS_REPORT_MS, type CloudV2ControlFrame, type CloudV2SetupStatus, type CloudV2WorkerFrame, type RuntimeMcpServer } from "@zeros/protocol/cloud-v2-relay";
@@ -26,7 +26,7 @@ import { NotifyUserService } from "./notify-user/service";
 import { SyncService } from "./workspace/sync-service";
 import { SyncTransferActivity } from "./workspace/sync-activity";
 import { SYNC_CAPABILITY, SYNC_HINT_KIND, SYNC_BATCH_CAPABILITY, SYNC_HAVE_V2_CAPABILITY, SYNC_TRANSFER_OPS } from "@zeros/protocol/workspace-sync";
-import { WorkspaceError, WorkspaceScope, type WorkerConfig } from "./workspace/scope";
+import { unsupported, WorkspaceError, WorkspaceScope, type WorkerConfig } from "./workspace/scope";
 import { WorkspaceService, type WorkspaceServiceOptions } from "./workspace/service";
 import { isGitMutation } from "./workspace/git";
 import { GithubBroker, GithubTokens, githubEnvironment, type GithubToken } from "./credentials/github";
@@ -997,6 +997,8 @@ export class CloudWorker {
             return run(program, args, options);
           },
           publish: frame => { if (this.repositories.get(entry.repository.toLowerCase()) === runtime) void this.broadcast(frame); },
+          // Its own turn history: the project folder's turns, restricted to this repository's folder.
+          historyDiff: params => this.agents ? this.agents.turns.historyDiff(params, relative(scope.workspaceRoot, entry.checkoutPath)) : unsupported(),
           // Its own checkout report, so its pull request follows its branch.
           ...(pullRequests && this.options.transport.reportGithubCheckout && /^[A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100}$/.test(entry.repository)
             ? { reportGithubCheckout: value => this.options.transport.reportGithubCheckout!({ ...value, repository: entry.repository }) } : {}),
