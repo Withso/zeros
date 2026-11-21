@@ -113,7 +113,7 @@ export function CloudProjectPage({ project, organization, userKey, connections, 
       </SettingsPageSection>
 
       {project.canEdit && (
-        <SettingsPageSection title="Build secrets" description="Given to setup scripts while the project is built. Never kept on the machine.">
+        <SettingsPageSection title="Build secrets">
           <BuildSecretsSection ownerKey={userKey} organizationId={organization.id} projectId={project.id} active={active} disabled={busy} />
         </SettingsPageSection>
       )}
@@ -181,7 +181,7 @@ function RepositoryBranchSelect({ userKey, repositoryId, repository, value, disa
   const names = useMemo(() => [...new Set([...(value ? [value] : []), ...(branches.data ?? []).map(row => row.name)])], [branches.data, value]);
   return (
     <Select value={value ?? DEFAULT} onValueChange={next => onChange(next === DEFAULT ? null : next)} disabled={disabled} onOpenChange={setOpen}>
-      <SelectTrigger width="fixed" aria-label={`${repository} branch`}>
+      <SelectTrigger aria-label={`${repository} branch`}>
         <GitBranch className="text-fg3 size-3.5" aria-hidden />
         <SelectValue />
       </SelectTrigger>

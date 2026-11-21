@@ -16,7 +16,7 @@ import { message } from "./cloud-computer-store";
 
 type Row = CloudGithubConnectionRepositories["repositories"][number];
 /** A connection's readable repositories, up to ten pages of a hundred. */
-const readable = new KeyedAsyncCache<Row[]>({ maxEntries: 32 });
+export const readableRepositoriesCache = new KeyedAsyncCache<Row[]>({ maxEntries: 32 });
 const MAX_PAGES = 10;
 
 async function readAll(organizationId: string, connectionId: string): Promise<Row[]> {
@@ -40,7 +40,7 @@ export function pickableConnections(connections: CloudGithubLevelConnections | n
 /** One connection's repositories, read once per (caller, organization, connection). */
 function useConnectionRows(userKey: string, organizationId: string, connectionId: string, active: boolean) {
   const key = JSON.stringify([userKey, organizationId, connectionId]);
-  return useRecoveringRead(readable, key, () => readAll(organizationId, connectionId), { enabled: active, maxAgeMs: 60_000 });
+  return useRecoveringRead(readableRepositoriesCache, key, () => readAll(organizationId, connectionId), { enabled: active, maxAgeMs: 60_000 });
 }
 
 export function ProjectRepositoryPicker({ userKey, organizationId, connections, level, chosen, onToggle, exclude, limit, active }: {

@@ -1,6 +1,5 @@
 import { useState } from "react";
 import { Button } from "../../shared/ui";
-import { Badge } from "../../shared/ui/primitives";
 import { Switch } from "../../shared/ui/primitives/switch";
 import { MessageRow } from "../../shared/ui/primitives/message-row";
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "../../shared/ui/primitives/sheet";
@@ -121,28 +120,38 @@ export function ConnectionRepositories({ organizationId, connection, onClose }: 
   organizationId: string; connection: CloudGithubLevelConnection | null; onClose(): void;
 }) {
   const key = connection ? JSON.stringify([organizationId, connection.id]) : null;
-  const read = useRecoveringRead(drawers, key, () => getCloudGithubConnectionRepositories(organizationId, connection!.id), { enabled: !!connection, maxAgeMs: 15_000 });
+  const read = useRecoveringRead(connectionRepositoriesCache, key, () => getCloudGithubConnectionRepositories(organizationId, connection!.id), { enabled: !!connection, maxAgeMs: 15_000 });
   return (
     <Sheet open={!!connection} onOpenChange={value => { if (!value) onClose(); }}>
-      <SheetContent side="right" className="p-6">
+      <SheetContent side="right" className="flex flex-col gap-6 overflow-y-auto p-6">
         <SheetHeader>
           <SheetTitle>{connection?.accountLogin ?? ""}</SheetTitle>
           <SheetDescription>Repositories this connection can read. Projects pick their repositories from these.</SheetDescription>
         </SheetHeader>
         {read.error && <MessageRow tone="error" role="alert" flush>{message(read.error)}</MessageRow>}
-        <ul className="m-0 flex list-none flex-col gap-2 overflow-y-auto p-0" aria-label="Repositories">
+        <SettingsGroup title="Repositories" description="Everything this connection can read. Nothing to add here: pick them when you create a project."
+          aria-label="Repositories">
           {(read.data?.repositories ?? []).map(row => (
-            <li key={row.id} className="flex items-center justify-between gap-2">
-              <span className="text-fg1 truncate text-xs">{row.repository}</span>
-              {row.projects.length > 0 && <Badge>{row.projects.length === 1 ? `In ${row.projects[0]!.name}` : `In ${row.projects.length} projects`}</Badge>}
-            </li>
+            <SettingsRow key={row.id} label={row.repository} hint={row.private ? "Private" : "Public"}>
+              {row.projects.length > 0 && (
+                <span className="text-fg3 text-xs">{row.projects.length === 1 ? `In ${row.projects[0]!.name}` : `In ${row.projects.length} projects`}</span>
+              )}
+            </SettingsRow>
           ))}
-        </ul>
+        </SettingsGroup>
+        {connection && (
+          <SettingsGroup title="On GitHub">
+            <SettingsRow label="Add or remove repositories" hint="Choose which repositories Zeros can see.">
+              <Button variant="secondary" size="sm" onClick={() => void shellOpenUrl(installationSettingsUrl(connection.accountLogin))}>Manage</Button>
+            </SettingsRow>
+          </SettingsGroup>
+        )}
       </SheetContent>
     </Sheet>
   );
 }
-const drawers = new KeyedAsyncCache<Awaited<ReturnType<typeof getCloudGithubConnectionRepositories>>>({ maxEntries: 16 });
+/** One connection's drawer, by (organization, connection). */
+export const connectionRepositoriesCache = new KeyedAsyncCache<Awaited<ReturnType<typeof getCloudGithubConnectionRepositories>>>({ maxEntries: 16 });
 
 export const PERSONAL_PROJECTS_HINT = "Members may keep projects only they can use. Turning this off stops their copies from refreshing and new workspaces of them; existing workspaces keep working.";
 

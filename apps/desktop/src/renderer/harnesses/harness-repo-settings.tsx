@@ -32,6 +32,10 @@ import { SettingsPage } from "../features/settings/settings-page";
 import { AddProjectFixtureProvider, type AddProjectActions } from "../shell/add-project-provider";
 import { settingsOwnerKey, writeScopedSettingsSelection } from "../features/settings/settings-scope";
 import { computerKey, computers } from "../features/settings/cloud-computer-store";
+import { cloudProjects, connectionRepositoriesCache, githubLevelConnections, githubLevelsKey } from "../features/settings/cloud-github-levels";
+import { readyCopyCache } from "../features/settings/ready-copy-section";
+import { buildSecretNamesCache } from "../features/settings/build-secrets-section";
+import { readableRepositoriesCache } from "../features/settings/cloud-project-repository-picker";
 import {
   cloudComputerRepositoriesCache,
   cloudComputerRepositoriesKey,
@@ -146,6 +150,38 @@ async function openProjectState(state: "both-admin" | "both-member" | "cloud-onl
   dispatch({ type: "SET_ACTIVE_PAGE", page: "settings" });
 }
 
+/** Seeds the projects' keyed reads (no session in this fixture, so nothing is fetched). */
+function seedProjects(fixture: { connections: unknown; projects: unknown; readyCopy: unknown; secrets: string[];
+  readable: Record<string, unknown[]>; computer?: unknown }) {
+  const key = githubLevelsKey(membership.user.id, organization.id);
+  githubLevelConnections.setData(key, fixture.connections as never);
+  cloudProjects.setData(key, fixture.projects as never);
+  for (const project of (fixture.projects as { projects: { id: string }[] }).projects) {
+    readyCopyCache.setData(JSON.stringify([organization.id, project.id]), fixture.readyCopy as never);
+    buildSecretNamesCache.setData(JSON.stringify([key, project.id]), fixture.secrets);
+  }
+  for (const [connection, rows] of Object.entries(fixture.readable)) {
+    readableRepositoriesCache.setData(JSON.stringify([key, organization.id, connection]), rows as never);
+    const all = fixture.connections as { organization: { id: string }[]; personal: { id: string }[] };
+    connectionRepositoriesCache.setData(JSON.stringify([organization.id, connection]), {
+      connection: [...all.organization, ...all.personal].find(row => row.id === connection), repositories: rows, nextPage: null } as never);
+  }
+  if (fixture.computer) computers.setData(computerKey(membership.user.id, organization.id), fixture.computer as never);
+}
+
+/** Opens any Settings selection (a cloud project page, Cloud Computer, GitHub) as an owner or a member. */
+async function openSelection(selection: string, role: "owner" | "member" = "owner") {
+  const next = { ...organization, role } as OrganizationSummary;
+  acceptOrganizationSnapshot({ ...membership, organizations: [next], teams: [next] });
+  setActiveOrganizationSelection(organization.id, false);
+  seedCloudComputer();
+  writeScopedSettingsSelection(settingsOwnerKey(membership.user.id, organization.id), "section", selection);
+  const { dispatch } = useWorkspaceStore.getState();
+  dispatch({ type: "SET_ACTIVE_PAGE", page: "repo" });
+  await new Promise(resolve => requestAnimationFrame(resolve));
+  dispatch({ type: "SET_ACTIVE_PAGE", page: "settings" });
+}
+
 function openProject(projectId: string) {
   const personal = projectId === projects[0].id;
   setActiveOrganizationSelection(personal ? null : organization.id, personal);
@@ -163,6 +199,8 @@ Object.assign(window, {
     user: { ...membership.user, staffRole: internal ? "developer" : null },
   }),
   repoSettingsOpenProject: openProjectState,
+  repoSettingsOpenSelection: openSelection,
+  repoSettingsSeedProjects: seedProjects,
   repoSettingsRequests: requests,
   repoSettingsCloneRequests: cloneRequests,
   repoSettingsProjects: projects,

@@ -12,20 +12,20 @@ import { SettingsGroup, SettingsRow } from "./settings-ui";
 export const BUILD_SECRETS_HINT = "Only this project's ready copy build reads them, from its setup's environment; workspaces never get them. "
   + "Don't write a value to a file: a copy whose disk still holds one is not used. Values shorter than 4 characters are not searched for.";
 const NAME = /^[A-Za-z_][A-Za-z0-9_]{0,127}$/;
-const names = new KeyedAsyncCache<string[]>({ maxEntries: 32 });
+export const buildSecretNamesCache = new KeyedAsyncCache<string[]>({ maxEntries: 32 });
 
 /** Ready copies, whoever edits the project: write-only values, listed by name. */
 export function BuildSecretsSection({ ownerKey, organizationId, projectId, active, disabled }: {
   ownerKey: string; organizationId: string; projectId: string; active: boolean; disabled: boolean;
 }) {
   const key = JSON.stringify([ownerKey, projectId]);
-  const read = useRecoveringRead(names, key, () => getCloudBuildSecretNames(organizationId, projectId), { enabled: active, maxAgeMs: 30_000 });
+  const read = useRecoveringRead(buildSecretNamesCache, key, () => getCloudBuildSecretNames(organizationId, projectId), { enabled: active, maxAgeMs: 30_000 });
   const [name, setName] = useState(""), [value, setValue] = useState("");
   const [busy, setBusy] = useState(false), [error, setError] = useState<string | null>(null);
   const change = async (update: { set?: Record<string, string>; remove?: string[] }) => {
     setBusy(true); setError(null);
     try {
-      names.setData(key, await updateCloudBuildSecrets(organizationId, projectId, update));
+      buildSecretNamesCache.setData(key, await updateCloudBuildSecrets(organizationId, projectId, update));
       if (update.set) { setName(""); setValue(""); }
     } catch (cause) { setError(message(cause)); } finally { setBusy(false); }
   };

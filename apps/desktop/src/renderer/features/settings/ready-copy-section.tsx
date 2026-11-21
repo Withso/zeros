@@ -13,7 +13,7 @@ import { readyCopyFailureLine, readyCopyTriggerLabel } from "./ready-copy-copy";
 import { SettingsGroup, SettingsRow } from "./settings-ui";
 
 /** Null: no ready copies here (setting off, older control plane, or not visible to this reader). */
-const copies = new KeyedAsyncCache<CloudReadyCopy | null>({ maxEntries: 32 });
+export const readyCopyCache = new KeyedAsyncCache<CloudReadyCopy | null>({ maxEntries: 32 });
 const absent = (error: unknown) => { if (error instanceof ControlPlaneError && error.status === 404) return null; throw error; };
 const later = (iso: string | null, now: number) => {
   if (!iso) return null;
@@ -44,7 +44,7 @@ const duration = (start: string | null, end: string | null) => {
 /** A project's ready copy on its project page, for whoever the server lets see it. */
 export function ReadyCopySection({ organizationId, projectId, active }: { organizationId: string; projectId: string; active: boolean }) {
   const key = JSON.stringify([organizationId, projectId]);
-  const read = useRecoveringRead(copies, key, () => getCloudReadyCopy(organizationId, projectId).catch(absent), { enabled: active, maxAgeMs: 30_000 });
+  const read = useRecoveringRead(readyCopyCache, key, () => getCloudReadyCopy(organizationId, projectId).catch(absent), { enabled: active, maxAgeMs: 30_000 });
   const [busy, setBusy] = useState(false), [error, setError] = useState<string | null>(null);
   const [output, setOutput] = useState<{ generation: number; text: string } | null>(null);
   const copy = read.data;
