@@ -144,6 +144,7 @@ import {
   selectWorkspaceHistory,
   workspaceIsReadOnly,
 } from "../../state/workspace-history";
+import { pullRequestTarget } from "../../state/workspace-repositories";
 
 /** Stable empty list so non-Backlog columns don't allocate a new array each
  *  render (the pending placeholders only ever appear under Backlog). */
@@ -1062,7 +1063,7 @@ function DashboardCard({
   const w = row.workspace;
   const archiveWorkspace = useArchiveWorkspace();
   const mutating = useWorkspaceArchiving(w.id);
-  const prTone = workspacePrTone(w, usePrIslandKind(w.id, w.prNumber));
+  const prTone = workspacePrTone(w, usePrIslandKind(pullRequestTarget(w), w.prNumber));
   const [busy, setBusy] = useState<null | "merge">(null);
   // Lazy, tri-state dirtiness probe (replaces the removed heavy withChanges list
   // column). `undefined` until the first probe resolves → resolveCardActionKind
@@ -1085,7 +1086,7 @@ function DashboardCard({
     setBusy("merge");
     try {
       await ghPrMerge({
-        workspaceId: w.id,
+        workspaceId: pullRequestTarget(w),
         prNumber: w.prNumber,
         method: "squash",
       });

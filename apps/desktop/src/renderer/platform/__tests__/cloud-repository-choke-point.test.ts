@@ -31,6 +31,7 @@ import * as git from "../git";
 import * as review from "../github-review";
 import { clearCloudGithubPr } from "../cloud-github-pr";
 import { publishCloudRepositoryLayouts } from "../bridge/cloud-repository-routing";
+import { combinedPullRequest, pullRequestTarget } from "../../state/workspace-repositories";
 
 const root = "cloud://11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222";
 const web = `${root}/web`;
@@ -170,5 +171,20 @@ describe("the routing choke point for a workspace of several repositories", () =
     await git.ghPrGet({ workspaceId: one, prNumber: 9 });
     await git.gitStatus(one);
     expect(sent()).toEqual([{ via: "cloud", workspaceId: one, repository: undefined }, { via: "bridge", workspaceId: one, repository: undefined }]);
+  });
+
+  it("a card's Merge acts on the repository its combined pull request mark comes from", async () => {
+    const repositories = [
+      { repository: "withso/api", folder: "api", target: `${root}/api`, branch: "work", baseBranch: "main", prNumber: 9, prState: "merged" as const, prUrl: "https://github.com/withso/api/pull/9" },
+      { repository: "withso/web", folder: "web", target: web, branch: "work", baseBranch: "main", prNumber: 9, prState: "ready" as const, prUrl: "https://github.com/withso/web/pull/9" },
+    ];
+    const workspace = { id: root, path: root, repoRoot: root, repoSlug: "cloud-project", branch: "work", baseBranch: "main", repositories,
+      ...combinedPullRequest(repositories) } as unknown as git.Workspace;
+    expect(pullRequestTarget(workspace)).toBe(web);
+    await git.ghPrGet({ workspaceId: pullRequestTarget(workspace), prNumber: 9 });
+    await git.ghPrMerge({ workspaceId: pullRequestTarget(workspace), prNumber: workspace.prNumber!, method: "squash" });
+    expect(sent().map(request => request.repository)).toEqual(["withso/web", "withso/web"]);
+    // On the bare key the number is refused: it is web's #9 here, and api has a #9 too.
+    await expect(git.ghPrMerge({ workspaceId: root, prNumber: 9, method: "squash" })).rejects.toThrow(/Choose which/);
   });
 });

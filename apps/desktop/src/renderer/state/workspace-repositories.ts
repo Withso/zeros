@@ -77,3 +77,13 @@ export function repositoryForPath(workspace: Workspace, path: string): Workspace
   const folder = path.replace(/^\/+/, "").split("/")[0];
   return list.find(entry => entry.folder === folder);
 }
+
+/** Where the workspace's pull request mark (its number and state) is read and
+ * acted on: the key of the repository that mark comes from in a workspace of
+ * several (see combinedPullRequest), the workspace itself otherwise. The bare
+ * key of a workspace of several names no repository's pull request. */
+export function pullRequestTarget(workspace: Workspace): string {
+  const list = workspaceRepositories(workspace);
+  if (list.length < 2 || workspace.prNumber == null) return workspace.id;
+  return list.find(entry => entry.prNumber === workspace.prNumber && entry.prState === workspace.prState)?.target ?? workspace.id;
+}
