@@ -78,6 +78,9 @@ import {
 } from "./composer-editor";
 import { QueuedMessagesCard } from "./queued-messages-card";
 import { cloudQueuedPrompt } from "./cloud-queued-prompt";
+import { textFileAttachment } from "./composer-editor/attachment-io";
+import { chatAttachmentName, deliverReply, formatReply, replyMessage, replySendBlocker } from "./chat-selection";
+import { ChatSelectionPopup, stageChatText } from "./chat-selection-popup";
 import { agentActivity, chatAgentActivity } from "./agent-activity";
 import { EmbeddedTerminalCommand } from "./embedded-terminal-command";
 import { AddedDirectories } from "./added-directories";
@@ -117,7 +120,7 @@ import {
   reportSkippedAttachments,
 } from "./encode-attachments";
 import type { ComposerAttachment } from "./composer-attachments";
-import { isSubmittedComposerDocument } from "./composer-submission";
+import { isSubmittedComposerDocument, sendClearsChatDraft } from "./composer-submission";
 import { useCloudWorkspaceAccountAccess } from "../team/cloud-workspace-account-access";
 import {
   COMPOSER_DRAG_CLS,
@@ -3480,6 +3483,13 @@ function AgentChatBody({
     override?: string,
     extras?: {
       followUpBehavior?: FollowUpBehavior;
+      /** The override is sent beside the composer, not from it: keep the
+       *  chat's saved draft, which still matches what the composer shows. */
+      keepDraft?: boolean;
+      /** Called once the message is durable (the cloud outbox holds it) or
+       *  handed to the local session. A failure after this is retried by its
+       *  owner, so the caller must not send the same text again. */
+      onCommitted?: () => void;
       /** Summary imports from prior chats, prepended as <from_previous_chat> blocks. */
       imports?: import("../../state/store").SummaryImport[];
       /** Attachments from another surface (browser capture), encoded like paste and
@@ -3625,11 +3635,12 @@ function AgentChatBody({
       const releaseSubmittedComposer = () => {
         if (composerReleased) return;
         composerReleased = true;
+        extras?.onCommitted?.();
         const unchanged = override === undefined && snapshot && isSubmittedComposerDocument(snapshot.json, serializeComposerState()?.json);
         if (unchanged) {
           clearComposerEditor(); designFrameContext.consume(submittedDesignFrame);
         }
-        if (override !== undefined || unchanged)
+        if (sendClearsChatDraft({ override: override !== undefined, keepDraft: !!extras?.keepDraft, submittedUnchanged: !!unchanged }))
           dispatch({ type: "CLEAR_CHAT_DRAFT", chatId });
       };
       await session.sendPrompt(queued.text, queued.displayText, queued.attachments, queued.bubbleAttachments, queued.segments, undefined, queued.cloudQueue, wakeIntent,
@@ -3839,16 +3850,30 @@ function AgentChatBody({
     // Drop any stashed draft for this chat —
     // the user just sent it. Defensive against the cleanup-on-unmount
     // path racing the post-send empty state.
-    if (chatId && (override !== undefined || submittedDraftUnchanged)) {
+    if (chatId && sendClearsChatDraft({ override: override !== undefined, keepDraft: !!extras?.keepDraft, submittedUnchanged: !!submittedDraftUnchanged })) {
       dispatch({ type: "CLEAR_CHAT_DRAFT", chatId });
     }
     // Arm the send-jump after every early return, so slash commands and refused
     // sends never leave a stale count.
     pendingSendScrollCountRef.current += 1;
-    submit().catch(() => {
-      /* error surfaces via session.error */
+    const onCommitted = extras?.onCommitted;
+    if (!onCommitted) {
+      submit().catch(() => {
+        /* error surfaces via session.error */
+      });
+      return true;
+    }
+    // A caller that holds the only copy of the text (a transcript reply) waits
+    // until the session retains the prompt. A send that settles without being
+    // retained (no bridge yet) leaves the text with that caller.
+    return new Promise<boolean>((resolve) => {
+      let retained = false;
+      submit(() => {
+        retained = true;
+        onCommitted();
+        resolve(true);
+      }).then(() => resolve(retained), () => resolve(retained));
     });
-    return true;
   };
 
   /** Single-flight entry point for every send. runSend clears the composer only
@@ -3859,23 +3884,26 @@ function AgentChatBody({
     override?: string,
     extras?: Parameters<typeof runSend>[1],
     recordActivity = true,
-  ): Promise<void> => {
-    if (readOnly || sendInFlightRef.current) return;
+  ): Promise<boolean> => {
+    if (readOnly || sendInFlightRef.current) return false;
     const folder = chatThread?.folder ?? session.cwd;
     const attemptId = `send-${crypto.randomUUID()}`;
     sendInFlightRef.current = true;
     const generation = chatId ? agentSessions.getSendGeneration(chatId) : undefined;
     try {
-      await runSend(override, extras, recordActivity);
+      // True once the message is handed to the session; every refusal returns
+      // early, after saying why.
+      return (await runSend(override, extras, recordActivity)) === true;
     } catch (error) {
-      if (chatId && generation !== agentSessions.getSendGeneration(chatId)) return;
+      if (chatId && generation !== agentSessions.getSendGeneration(chatId)) return false;
       if (chatId && isCloudWorkspace(folder)) {
         notifyAgentSendFailure({ folder, chatId, attemptId, agentId: chatThread?.agentId ?? session.agentId, model: chatThread?.model, error });
-        return;
+        return false;
       }
       toast.error("Message wasn't sent", {
         description: error instanceof Error ? error.message : String(error),
       });
+      return false;
     } finally {
       sendInFlightRef.current = false;
     }
@@ -4478,6 +4506,25 @@ function AgentChatBody({
     ],
   );
 
+  // A reply sent at once, beside the composer's draft rather than with it.
+  const sendChatReply = async (quote: string, reply: string): Promise<boolean> => {
+    const blocker = replySendBlocker({
+      sendInFlight: sendInFlightRef.current,
+      provisioning: workspaceProvisioning,
+      permission: sendPastPermission({ permissionPending: !!session.pendingPermission, planReview: !!planReview, status: session.status }),
+    });
+    if (blocker) {
+      toast.info(blocker.title, { description: blocker.description });
+      return false;
+    }
+    const message = replyMessage(quote, reply);
+    // A refused send keeps the reply open with its text, so nothing is lost.
+    return deliverReply((onCommitted) => handleSend(message.text, {
+      keepDraft: true,
+      onCommitted,
+      ...(message.attachQuote ? { stagedAttachments: [textFileAttachment(chatAttachmentName("selection"), quote)] } : {}),
+    }));
+  };
 
   return (
     <div
@@ -4707,6 +4754,16 @@ function AgentChatBody({
           // under the strip. It stops short of the scrollbar, or of a docked
           // summary island, so neither fades.
           className="pointer-events-none absolute top-0 left-0 right-[max(var(--scrollbar-size),var(--chat-aside-inset,0px))] z-1 h-8 bg-gradient-to-b from-(--pane-bg) to-transparent"
+        />
+        <ChatSelectionPopup
+          // A quote never crosses chats, even if this body is reused for another.
+          key={chatId ?? "new-chat"}
+          root={scrollEl}
+          active={interactive}
+          ownsKeyboard={interactive && !!chatId && activeChatId === chatId}
+          onAddSelection={(text) => stageChatText(stageTextAttachment, "selection", text, text)}
+          onAddReply={(quote, reply) => stageChatText(stageTextAttachment, "reply", formatReply(quote, reply), reply)}
+          onSendReply={sendChatReply}
         />
         {/* A sibling of the scroller so the rail stays pinned; z-2 paints above
             the top mask. */}

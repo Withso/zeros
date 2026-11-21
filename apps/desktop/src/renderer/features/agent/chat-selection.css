@@ -1,0 +1,7 @@
+/* The text a reply answers stays marked while the reply field holds the
+   document's selection. A highlight range is registered at runtime, so its
+   pseudo-element can only be styled from a stylesheet; it takes the system
+   selection colour, the same mark the text had a moment before. */
+::highlight(zeros-chat-reply) {
+  background-color: Highlight;
+}

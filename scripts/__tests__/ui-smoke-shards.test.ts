@@ -23,6 +23,7 @@ const originalOrder = [
   "local-storage",
   "local-links",
   "text-selection",
+  "chat-selection",
   "git-review-actions",
   "code-review",
   "cloud-github",

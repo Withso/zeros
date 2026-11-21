@@ -69,6 +69,16 @@ describe("the field box", () => {
     expect(set).toContain("px-2");
     expect(set).not.toContain("min-h-[60px]");
   });
+
+  it("offers a bare Textarea that grows with its text inside its own surface", () => {
+    const set = classes(renderToStaticMarkup(createElement(Textarea, { appearance: "bare", "aria-label": "Reply" })));
+    for (const cls of ["field-sizing-content", "border-0", "bg-transparent", "resize-none", "overflow-y-auto", "text-reading",
+      "focus-visible:data-[zeros-keyboard-focus]:ring-[3px]"]) {
+      expect(set, cls).toContain(cls);
+    }
+    expect(set).not.toContain("border-border3");
+    expect(set).not.toContain("min-h-17");
+  });
 });
 
 describe("Field", () => {

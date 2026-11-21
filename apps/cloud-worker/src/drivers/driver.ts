@@ -53,7 +53,11 @@ export function redactDriverValue<T>(value: T, input?: DriverOpen): T {
 export interface Driver {
   /** A reserved native UUID is not yet evidence that a resumable conversation
    * exists. Provisional drivers confirm it via provider_binding_update. */
-  open(input: DriverOpen): Promise<{ nativeSessionId: string; provisional?: boolean }>;
+  open(input: DriverOpen): Promise<{ nativeSessionId: string; provisional?: boolean;
+    /** The requested native session is not on disk (a restore keeps no provider session
+     * files), so a fresh one was opened: the conversation is replayed to it, as after any
+     * provider-confirmed expiry. Only a driver that can tell exactly sets it. */
+    resumedFresh?: true }>;
   prompt(content: ContentBlock[]): Promise<PromptResponse>;
   steer(content: ContentBlock[]): Promise<SteerOutcome>;
   setModel(model: string): Promise<void>;

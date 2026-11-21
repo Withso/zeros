@@ -3,6 +3,7 @@ import { otherRepositories, workerRepositories, workspaceTokenSource, type Worke
 import { repositorySetupReports } from "./workspace-repository-setup.js";
 import type { CloudWorkspaceEnvironment } from "./environment-contract.js";
 import { workspaceCheckoutPath } from "./workspace-layout.js";
+import { readyCopyRestoreSource } from "./retention-restore-source.js";
 import { withExecutionLifetimeRetry } from "./execution/lifetime.js";
 // Assembles cloud workspace v2 from configuration: one store, Boat, the relay
 // (realtime role), the lifecycle loop (worker role), the HTTP routes and the
@@ -751,6 +752,9 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
     prompts: store.prompts, stopIdle: (id, before) => store.stopIdle(id, before),
     pruneEnvironments: () => environments.prune(),
     checkpointRetry: v2.checkpointRetry === true,
+    // Retention (CLOUD_V2_RETENTION_ENABLED): absent while off, so stops checkpoint and restores create as before.
+    ...(v2.retention === true ? { retention: true, ...(v2.backupForksPerHour ? { backupForksPerHour: v2.backupForksPerHour } : {}),
+      ...(readyCopies ? { restoreSource: readyCopyRestoreSource(readyCopies) } : {}) } : {}),
     publicKeys: signer.publicKeys, sealPortToken: (token, id) => sealPortToken(token, id, keys),
     stopWorker: workspace => connections!.stopWorkspace(workspace),
     bootEnv: async (workspace, selected) => ({ CLOUD_V2_API_URL: v2.apiUrl,

@@ -612,3 +612,34 @@ describe("cloud v2 focused-window activity", () => {
     expect(other.store.markActive).not.toHaveBeenCalled();
   });
 });
+
+describe("cloud v2 lost-work notice", () => {
+  const id = "55555555-5555-4555-8555-555555555555";
+  function setup(refused = false) {
+    const store = {
+      dismissLostWork: vi.fn(async () => { if (refused) throw new HttpError(404, "not_found", "Cloud workspace not found"); return { id, state: "running" }; }),
+    };
+    const app = new Hono();
+    app.use("*", async (c, next) => { c.set("user", { id: member } as never); await next(); });
+    app.onError((error, c) => error instanceof HttpError
+      ? c.json({ error: { code: error.code } }, error.status) : c.json({ error: { code: "internal" } }, 500));
+    app.route("/", createCloudV2Routes({ store, bridgeBaseUrl: "wss://dev.example.test" } as unknown as CloudV2RouteDeps));
+    return { app, store };
+  }
+  const dismiss = (app: Hono, target = id) => app.request(`/v1/cloud-v2/workspaces/${target}/lost-work/dismiss`, { method: "POST" });
+
+  it("clears the notice for the person the workspace belongs to and returns its document", async () => {
+    const { app, store } = setup();
+    const response = await dismiss(app);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ workspace: { id, placement: "cloud", version: 2 } });
+    expect(store.dismissLostWork).toHaveBeenCalledWith(id, member);
+  });
+
+  it("refuses anyone else and an invalid id", async () => {
+    expect((await dismiss(setup(true).app)).status).toBe(404);
+    const { app, store } = setup();
+    expect((await dismiss(app, "not-a-uuid")).status).toBe(404);
+    expect(store.dismissLostWork).not.toHaveBeenCalled();
+  });
+});

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { isSubmittedComposerDocument } from "../composer-submission";
+import { isSubmittedComposerDocument, sendClearsChatDraft } from "../composer-submission";
 
 describe("composer edits during attachment transfer", () => {
   const submitted = {
@@ -31,5 +31,17 @@ describe("composer edits during attachment transfer", () => {
       }),
     ).toBe(false);
     expect(isSubmittedComposerDocument(submitted, undefined)).toBe(false);
+  });
+});
+
+describe("the saved draft after a send", () => {
+  // Local and cloud sends both decide through this one rule.
+  it("survives a reply sent beside the composer", () => {
+    expect(sendClearsChatDraft({ override: true, keepDraft: true, submittedUnchanged: false })).toBe(false);
+  });
+  it("is retired by the composer's own unchanged send and by another surface's send", () => {
+    expect(sendClearsChatDraft({ override: false, keepDraft: false, submittedUnchanged: true })).toBe(true);
+    expect(sendClearsChatDraft({ override: true, keepDraft: false, submittedUnchanged: false })).toBe(true);
+    expect(sendClearsChatDraft({ override: false, keepDraft: false, submittedUnchanged: false })).toBe(false);
   });
 });

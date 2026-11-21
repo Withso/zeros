@@ -5,7 +5,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Me } from "../../team/control-plane";
 import { cloudWorkspaceAccountAccess } from "../../team/cloud-workspace-account-access";
 import { isCloudWorkspace, parseCloudWorkspaceKey, parseCloudScopedId } from "../../../platform/bridge/cloud-workspace-key";
-import { isSubmittedComposerDocument } from "../composer-submission";
+import { isSubmittedComposerDocument, sendClearsChatDraft } from "../composer-submission";
+import { deliverReply } from "../chat-selection";
 import * as lifecycle from "../session-reload-lifecycle";
 import * as retention from "../transcript-retention";
 import { BLANK, useSessionsStore } from "../sessions-store";
@@ -139,7 +140,7 @@ function harness(cloud = true, status = "stopped", resident = true) {
     serializeComposerState: () => current, sendPastPermission: () => "send", planReview: null, bareInlineSlashCommand: () => null,
     composerLiveRef: { current: null }, dispatch, recordWorkspaceActivity: vi.fn(), agentsList: null, envForChat: () => ({}),
     setCloudSendPreparing: vi.fn(), setSendPreparing: vi.fn(), encodeComposerAttachments: encoding.run, reportSkippedAttachments: vi.fn(),
-    expandMentionsInText: (text: string) => text, browserPickerSelection: null, toMessageSegments: () => draft.segments, isSubmittedComposerDocument,
+    expandMentionsInText: (text: string) => text, browserPickerSelection: null, toMessageSegments: () => draft.segments, isSubmittedComposerDocument, sendClearsChatDraft,
     clearComposer: clear, clearComposerEditor: clear, pendingSendScrollCountRef: { current: 0 }, sendInFlightRef: { current: false }, startCloudSubmitSpan: () => vi.fn(), toast: toasts,
   };
   vm.runInNewContext(composerCode, composer);
@@ -205,6 +206,39 @@ describe("cloud composer readiness queue", () => {
     } finally { https.resolve(); await sending; }
     expect(h.clear).toHaveBeenCalledTimes(edited ? 0 : 1);
     expect(h.composer.serializeComposerState().displayText).toBe(edited ? "New text while saving" : "Next prompt while HTTPS is pending");
+  });
+  it("reports a transcript reply committed even when delivery fails afterwards, and keeps the saved draft", async () => {
+    const h = harness(true, "ready");
+    h.provider.cloudPrompts.available = () => true;
+    h.provider.cloudPrompts.send.mockImplementation(async (_chat: string, _input: unknown, options: { committed?(): void }) => {
+      const row = { id: "saved", kind: "text", role: "user", text: "> quote\n\nreply" };
+      h.store.patchSession("chat", { cloudOutbox: { rows: [row], states: {} } });
+      options.committed?.();
+      throw new Error("journal write failed");
+    });
+    // The outbox owns the saved row now: the reply counts as done and closes,
+    // so it can't be sent again.
+    expect(await deliverReply((onCommitted) => h.composer.actions.handleSend("> quote\n\nreply", { keepDraft: true, onCommitted }))).toBe(true);
+    expect(h.dispatch).not.toHaveBeenCalledWith({ type: "CLEAR_CHAT_DRAFT", chatId: "chat" });
+    expect(h.clear).not.toHaveBeenCalled();
+  });
+  it("closes a Local transcript reply only once the session retains it", async () => {
+    const h = harness(false, "ready");
+    Object.assign(h.store.sessions.chat, { status: "ready" });
+    h.composer.session.status = "ready";
+    // No bridge yet: the send settles without retaining anything.
+    h.composer.session.sendPrompt = vi.fn(async () => {});
+    expect(await deliverReply((onCommitted) => h.composer.actions.handleSend("> quote\n\nreply", { keepDraft: true, onCommitted }))).toBe(false);
+    h.composer.session.sendPrompt = vi.fn(async (...args: unknown[]) => { (args[5] as () => void)(); });
+    expect(await deliverReply((onCommitted) => h.composer.actions.handleSend("> quote\n\nreply", { keepDraft: true, onCommitted }))).toBe(true);
+    expect(h.dispatch).not.toHaveBeenCalledWith({ type: "CLEAR_CHAT_DRAFT", chatId: "chat" });
+  });
+  it("does not report a refused transcript reply as committed", async () => {
+    const h = harness(true, "ready");
+    h.provider.cloudPrompts.available = () => true;
+    h.provider.cloudPrompts.send.mockImplementation(async () => { throw new Error("rejected before saving"); });
+    // Nothing was saved, so the reply stays open with its text.
+    expect(await deliverReply((onCommitted) => h.composer.actions.handleSend("> quote\n\nreply", { keepDraft: true, onCommitted }))).toBe(false);
   });
   it("keeps a send queued through a 25-second drop, re-adopts its session and delivers once on reconnect", async () => {
     const h = harness(true, "ready");
