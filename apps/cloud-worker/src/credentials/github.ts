@@ -26,7 +26,8 @@ export class GithubTokens {
   private cached?: GithubToken;
   private pending?: Pending;
   private readonly now: () => number;
-  constructor(private readonly send: (frame: CloudV2WorkerFrame, timeoutMs: number) => Promise<boolean>, private readonly options: { now?: () => number; timeoutMs?: number; purpose?: "git" | "gh"; contextId?: string } = {}) { this.now = options.now ?? Date.now; }
+  /** `repository`: a workspace of several repositories asks for this one's token (workspace-repositories-v1). */
+  constructor(private readonly send: (frame: CloudV2WorkerFrame, timeoutMs: number) => Promise<boolean>, private readonly options: { now?: () => number; timeoutMs?: number; purpose?: "git" | "gh"; contextId?: string; repository?: string } = {}) { this.now = options.now ?? Date.now; }
   connect(): void {
     if (this.disposed) return;
     this.online = true;
@@ -81,7 +82,8 @@ export class GithubTokens {
     const purpose = pending.request.purpose ?? this.options.purpose;
     void this.send({ t: "request", id, kind: "github-token", ...(purpose ? { purpose } : {}),
       ...(pending.request.failedTokenSha256 ? { failedTokenSha256: pending.request.failedTokenSha256 } : {}),
-      ...(this.options.contextId ? { contextId: this.options.contextId } : {}) }, remaining)
+      ...(this.options.contextId ? { contextId: this.options.contextId } : {}),
+      ...(this.options.repository ? { repository: this.options.repository } : {}) }, remaining)
       .then(sent => { if (!sent) failed(); }, failed);
   }
   private failed(pending: Pending, error: GithubAuthenticationError): void {
@@ -100,11 +102,15 @@ export class GithubTokens {
   }
 }
 
+const REPOSITORY = /^[A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100}$/;
+
 export function githubEnvironment(socketPath: string, askpassPath: string): NodeJS.ProcessEnv {
   return { GH_ZEROS_BROKER_SOCKET: socketPath, GIT_ASKPASS: askpassPath, GIT_TERMINAL_PROMPT: "0",
     // Git reports a rejected password to erase; askpass alone cannot observe it.
-    GIT_CONFIG_COUNT: "2", GIT_CONFIG_KEY_0: "credential.helper", GIT_CONFIG_VALUE_0: "",
-    GIT_CONFIG_KEY_1: "credential.https://github.com.helper", GIT_CONFIG_VALUE_1: `!'${join(dirname(askpassPath), "git-credential").replaceAll("'", "'\\''")}'` };
+    GIT_CONFIG_COUNT: "3", GIT_CONFIG_KEY_0: "credential.helper", GIT_CONFIG_VALUE_0: "",
+    GIT_CONFIG_KEY_1: "credential.https://github.com.helper", GIT_CONFIG_VALUE_1: `!'${join(dirname(askpassPath), "git-credential").replaceAll("'", "'\\''")}'`,
+    // The helper is told which repository it is for, so each repository of a workspace gets its own token.
+    GIT_CONFIG_KEY_2: "credential.https://github.com.useHttpPath", GIT_CONFIG_VALUE_2: "true" };
 }
 
 /** Same-user VM broker. The socket is private to the worker's Unix account;
@@ -117,7 +123,7 @@ export class GithubBroker {
   private ownedSocket?: Stats;
   private ownedDirectory?: Stats;
   private readonly sockets = new Set<Socket>();
-  constructor(readonly socketPath: string, private readonly token: (purpose: "git" | "gh", failedTokenSha256?: string, contextId?: string) => Promise<GithubToken>, private readonly changed: () => void = () => {}) {}
+  constructor(readonly socketPath: string, private readonly token: (purpose: "git" | "gh", failedTokenSha256?: string, contextId?: string, repository?: string) => Promise<GithubToken>, private readonly changed: () => void = () => {}) {}
   start(): Promise<void> {
     if (this.disposed) return Promise.reject(new Error("The GitHub broker is disposed."));
     if (this.server) return Promise.resolve();
@@ -190,8 +196,11 @@ export class GithubBroker {
         if (request.kind === "changed") { this.changed(); return { ok: true }; }
         // The helper's execution context (team sharing); an invalid one names none, and the worker decides what none may have.
         const contextId = "contextId" in request && typeof request.contextId === "string" && CONTEXT_ID.test(request.contextId) ? request.contextId : undefined;
-        // Legacy callers keep their exact arguments; a context is passed only when named.
-        const ask = (purpose: "git" | "gh", failed?: string) => contextId ? this.token(purpose, failed, contextId) : failed ? this.token(purpose, failed) : this.token(purpose);
+        // The repository Git named (credential.useHttpPath), for a workspace of several.
+        const repository = "repository" in request && typeof request.repository === "string" && REPOSITORY.test(request.repository) ? request.repository : undefined;
+        // Legacy callers keep their exact arguments; a context and a repository are passed only when named.
+        const ask = (purpose: "git" | "gh", failed?: string) => repository ? this.token(purpose, failed, contextId, repository)
+          : contextId ? this.token(purpose, failed, contextId) : failed ? this.token(purpose, failed) : this.token(purpose);
         if (request.kind === "token" || request.kind === "user-token") return ask(request.kind === "user-token" ? "gh" : "git");
         if (request.kind === "report-failure" && "purpose" in request && (request.purpose === "git" || request.purpose === "gh")) {
           if ("rejectedToken" in request) {

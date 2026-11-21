@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import { writeWorkspaceInstructions } from "./workspace/instructions";
 import { access, lstat, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { homedir } from "node:os";
@@ -149,6 +150,8 @@ export class CloudWorker {
   private history?: HistoryMirror;
   private promptInbox?: PromptInbox;
   private workspace?: WorkspaceService;
+  /** workspace-repositories-v1: the repositories after the first, each with its own checkout, services and setup. */
+  private repositories = new Map<string, RepositoryRuntime>();
   private sync?: SyncService;
   private readonly syncTransfers = new SyncTransferActivity();
   private terminals?: Terminals;
@@ -206,7 +209,7 @@ export class CloudWorker {
     this.instanceId = options.runtimeResume?.instanceId ?? randomUUID();
     this.tokens = new GithubTokens((frame, timeoutMs) => this.send(frame, timeoutMs));
     this.githubCredentials = new GithubCredentialRecovery(this.tokens, { fetch: options.githubFetch, supportsRecovery: () => this.githubUserTokensEnabled });
-    this.github = new GithubBroker(`/tmp/zeros-github-${this.instanceId}/github.sock`, (purpose, failed, contextId) => this.githubToken(purpose, failed, contextId), () => this.workspace?.githubChanged());
+    this.github = new GithubBroker(`/tmp/zeros-github-${this.instanceId}/github.sock`, (purpose, failed, contextId, repository) => this.githubToken(purpose, failed, contextId, repository), () => this.workspace?.githubChanged());
     this.gitEnvironment = githubEnvironment(this.github.socketPath, options.gitAskpassPath ?? fileURLToPath(new URL("../bin/git-askpass", import.meta.url)));
     this.personal = new PersonalEnvironments(options.homeDirectory ?? homedir());
     this.commitIdentities = new ContextCommitIdentities(options.homeDirectory ?? homedir());
@@ -287,7 +290,10 @@ export class CloudWorker {
   }
 
   /** An activated workspace never gives a credential outside a live context: no Creator fallback. */
-  private githubToken(purpose: "git" | "gh", failed: string | undefined, contextId: string | undefined): Promise<GithubToken> {
+  private githubToken(purpose: "git" | "gh", failed: string | undefined, contextId: string | undefined, repository?: string): Promise<GithubToken> {
+    // A repository after the first of a workspace of several: its own token, asked for by name.
+    const other = repository && this.scope?.several ? this.scope.repositories.slice(1).find(entry => entry.repository.toLowerCase() === repository.toLowerCase()) : undefined;
+    if (other) return this.repositoryToken(other.repository, purpose, failed, this.acting ? contextId : undefined);
     if (!this.acting) return this.githubCredentials.get(purpose, failed);
     if (!contextId || !this.contexts) return Promise.reject(githubAuthenticationError("connection-changed"));
     if (!this.contexts.admits(contextId)) return this.contexts.admitted(contextId).then(admitted => admitted
@@ -303,6 +309,21 @@ export class CloudWorker {
     return flight.recovery.get(purpose, failed);
   }
 
+  private readonly repositoryGithub = new Map<string, { tokens: GithubTokens; recovery: GithubCredentialRecovery }>();
+  private repositoryToken(repository: string, purpose: "git" | "gh", failed: string | undefined, contextId: string | undefined): Promise<GithubToken> {
+    if (this.acting && (!contextId || !this.contexts?.admits(contextId))) return Promise.reject(githubAuthenticationError("connection-changed"));
+    const key = JSON.stringify([contextId ?? null, repository.toLowerCase()]);
+    let flight = this.repositoryGithub.get(key);
+    if (!flight) {
+      const tokens = new GithubTokens((frame, timeoutMs) => this.send(frame, timeoutMs), { repository, ...(contextId ? { contextId } : {}) });
+      if (this.online) tokens.connect();
+      flight = { tokens, recovery: new GithubCredentialRecovery(tokens, { fetch: this.options.githubFetch, supportsRecovery: () => this.githubUserTokensEnabled }) };
+      this.repositoryGithub.set(key, flight);
+      if (contextId) this.contexts!.onEnd(contextId, () => { flight!.tokens.dispose(); flight!.recovery.invalidate(); this.repositoryGithub.delete(key); });
+    }
+    return flight.recovery.get(purpose, failed);
+  }
+
   start(): void {
     if (this.started || this.disposed) return;
     this.started = true;
@@ -312,6 +333,7 @@ export class CloudWorker {
         if (this.disposed) return;
         this.online = true; this.idle = undefined; this.tokens.connect();
         for (const { tokens } of this.contextGithub.values()) tokens.connect();
+        for (const { tokens } of this.repositoryGithub.values()) tokens.connect();
         await this.send({ t: "hello", protocol: CLOUD_V2_RELAY_PROTOCOL, workerVersion: "0.0.0",
           capabilities: { design: false, browser: false, simulators: false, terminal: true, files: true, git: true, agents: ["codex", "claude", "cursor"], mcp: 1 } });
         // setup-status-v1: once after each hello; a first hello has no workspace yet and configuration reports it.
@@ -324,6 +346,7 @@ export class CloudWorker {
         for (const client of this.clients.values()) this.terminals?.detach(client);
         for (const client of this.clients.values()) if (client.contextId) this.contexts?.release(client.contextId);
         this.clients.clear(); this.history?.disconnect(); this.tokens.disconnect(); this.githubCredentials.disconnect();
+        for (const flight of this.repositoryGithub.values()) { flight.tokens.disconnect(); flight.recovery.disconnect(); }
         for (const { tokens, recovery } of this.contextGithub.values()) { tokens.disconnect(); recovery.disconnect(); }
       },
     });
@@ -349,6 +372,7 @@ export class CloudWorker {
     this.resourceWatchers.clear();
     if (this.disposed) return;
     this.disposed = true; this.runtimeUpdater?.stop(); this.recoveryQuiesce?.stop(); this.watchdog?.stop(); clearInterval(this.heartbeat); this.tokens.dispose(); this.githubCredentials.invalidate();
+    for (const flight of this.repositoryGithub.values()) { flight.tokens.dispose(); flight.recovery.invalidate(); }
     const workspaceTools = this.workspaceMcp.dispose();
     const agentsClosing = this.agents?.dispose();
     this.environmentLifetime.abort();
@@ -359,6 +383,7 @@ export class CloudWorker {
     await this.terminals?.dispose();
     this.sync?.dispose();
     await this.workspace?.dispose();
+    await Promise.allSettled([...this.repositories.values()].map(entry => entry.dispose()));
     await agentsClosing;
     await this.mcp?.dispose();
     await workspaceTools;
@@ -416,6 +441,7 @@ export class CloudWorker {
     if (message.t === "reply" || message.t === "refusal") {
       this.tokens.receive(message);
       for (const { tokens } of this.contextGithub.values()) tokens.receive(message);
+      for (const { tokens } of this.repositoryGithub.values()) tokens.receive(message);
       return;
     }
     if (message.t === "prompts") { this.promptInbox?.hint(); return; }
@@ -537,7 +563,7 @@ export class CloudWorker {
           this.lastMutationAt = Date.now();
           await this.reportIdle();
         }
-        const service = /^(chats|messages|turns)\./.test(frame.op) ? this.chats! : this.workspace!;
+        const service = /^(chats|messages|turns)\./.test(frame.op) ? this.chats! : this.workspaceFor(frame.params ?? {});
         const result = await this.asClient(client, frame.id, frame.op, frame.params ?? {}, () => service.handle(frame.op, frame.params ?? {}));
         if (frame.op === "attachment.write") await this.reportIdle();
         await client.send(createMessage({ type: "WORKSPACE_RESPONSE", source: "engine", requestId: frame.id, op: frame.op, result }));
@@ -617,7 +643,10 @@ export class CloudWorker {
     this.localCommandsEnabled = config.localCommands === 1;
     this.localCommandReason = config.localCommandReason === 1;
     this.notifyUserEnabled = config.notifyUser === 1;
-    if (this.configurationRevision !== revision) { this.tokens.invalidate(); this.githubCredentials.invalidate(); }
+    if (this.configurationRevision !== revision) {
+      this.tokens.invalidate(); this.githubCredentials.invalidate();
+      for (const flight of this.repositoryGithub.values()) { flight.tokens.invalidate(); flight.recovery.invalidate(); }
+    }
     if (!changed || changed.includes("gitIdentity") || changed.includes("gitIdentitySource")) {
       // Activated with a Creator: the VM-wide managed identity is the Creator's; open contexts follow (identity.ts).
       await configureGitIdentity(this.options.homeDirectory ?? homedir(), config.gitIdentity, { managed: config.gitIdentitySource === "creator" });
@@ -776,7 +805,9 @@ export class CloudWorker {
       const servicesStarted = performance.now();
       // Earlier worker snapshots stored a cloud key in chat metadata. Native
       // bridge rows must round-trip through the renderer's existing mapper.
-      for (const chat of store.list().chats) if (chat.folder !== scope.folder(chat.folder)) await store.upsert({ ...chat, folder: scope.root });
+      // Agents, terminals and chats start at the workspace root: the project folder for several repositories.
+      const rootScope = scope.atRoot();
+      for (const chat of store.list().chats) if (chat.folder !== rootScope.folder(chat.folder)) await store.upsert({ ...chat, folder: rootScope.root });
       if (this.disposed || this.stopping) return false;
       const run = this.options.workspaceServices?.run ?? commandRunner(scope.root, this.gitEnvironment);
       await reviewConfiguring;
@@ -802,16 +833,20 @@ export class CloudWorker {
         publish: (frame) => { if (workspace && this.workspace === workspace) void this.broadcast(frame); },
       }), timing);
       if (this.disposed || this.stopping) return false;
-      mcp = new McpGateway({ workspaceRoot: scope.root, authorization: this.options.transport.mcpAuthorization?.bind(this.options.transport), admit: async () => this.runtimeGate.admit(),
+      const repositories = await this.openRepositories(scope, asStarter, timing);
+      // Agents start in the project folder; it names each repository's own instruction files.
+      await writeWorkspaceInstructions(scope).catch(() => this.options.log?.("[repositories] workspace instructions could not be written"));
+      if (this.disposed || this.stopping) { await Promise.allSettled([...repositories.values()].map(entry => entry.dispose())); return false; }
+      mcp = new McpGateway({ workspaceRoot: rootScope.root, authorization: this.options.transport.mcpAuthorization?.bind(this.options.transport), admit: async () => this.runtimeGate.admit(),
         onFailure: (executionId, failure) => agents?.mcpFailure(executionId, failure) });
       await measureStartup("worker_services_mcp", () => mcp!.configure(config.mcpServers ?? [], config.loginRevision), timing);
       if (this.disposed || this.stopping) return false;
-      agents = new Agents(store, scope, this.options.drivers ?? {
+      agents = new Agents(store, rootScope, this.options.drivers ?? {
         codex: () => new CodexDriver({ gitEnvironment: this.gitEnvironment }), claude: () => new ClaudeDriver({ gitEnvironment: this.gitEnvironment }),
         cursor: () => new CursorDriver({ gitEnvironment: this.gitEnvironment }),
       }, config,
         (frame) => this.broadcast(frame), () => { this.runtimeGate.activity(); void this.reportIdle(); }, this.options.onTiming, this.options.modelDiscovery,
-        (executionId, context) => context ? this.contextGateway(context, scope.root, agents!).then(gateway => gateway.providers(executionId)) : mcp!.providers(executionId),
+        (executionId, context) => context ? this.contextGateway(context, rootScope.root, agents!).then(gateway => gateway.providers(executionId)) : mcp!.providers(executionId),
         async input => this.workspaceMcp.admit(input.executionId, new WorkspaceAgentTools({ assertCurrent: () => input.assertExecutionCurrent(),
           terminalOutput: async ({ source, ...request }) => {
             if (source !== "setup") {
@@ -833,12 +868,12 @@ export class CloudWorker {
       this.notifyUserService = new NotifyUserService({ activeTurn: executionId => agents!.activeTurn(executionId),
         publish: (executionId, update) => agents!.attention(executionId, update),
         ...(this.options.transport.notifyUser ? { deliver: (request, signal) => this.options.transport.notifyUser!(request, signal) } : {}) });
-      terminals = new Terminals(scope, { gitEnvironment: this.gitEnvironment, applicationEnvironment: application.variables,
+      terminals = new Terminals(rootScope, { gitEnvironment: this.gitEnvironment, applicationEnvironment: application.variables,
         zerosEnvironment: () => workspaceApi.variables(), redact: text => application.text(text),
         ...(config.actingUser === 1 && this.contexts ? { people: this.terminalPeople(this.contexts, application) } : {}),
         ...(this.options.log ? { log: this.options.log } : {}),
         records: join(this.options.directory, "terminals"), broadcast: frame => this.broadcast(frame), activity: () => { this.runtimeGate.activity("terminal"); void this.reportIdle(); } });
-      const chats = new ChatService(store, scope, (chatId) => agents!.closeChat(chatId), agents.turns, {
+      const chats = new ChatService(store, rootScope, (chatId) => agents!.closeChat(chatId), agents.turns, {
         historyReplacement: () => this.historyReplacementEnabled,
         mutate: agents.mutateChat.bind(agents),
         files: action => workspace!.git.mutate(action),
@@ -874,6 +909,8 @@ export class CloudWorker {
       if (this.disposed || this.stopping) return false;
       this.environmentVersion = config.environment?.versionId;
       this.sync?.dispose(); this.sync = sync;
+      for (const entry of this.repositories.values()) void entry.dispose();
+      this.repositories = repositories;
       this.store = store; this.workspace = workspace; this.mcp = mcp; this.agents = agents; agents.setExecutionContexts(this.contexts, this.personal, this.options.log);
       agents.commitIdentity = (contextId, identity) => this.contextGit(contextId, identity); this.reviews = reviews;
       agents.turnsHeld = () => this.turnsHeld;
@@ -885,6 +922,12 @@ export class CloudWorker {
       // Before start: a file a hard stop left running reads as interrupted, never as this run.
       void setup.reportCurrent();
       if (!this.options.runtimeResume) asStarter(() => setup!.start(this.initialSetupNeeded || restored));
+      // Each other repository's setup runs in its own folder after the first's, one at a time.
+      for (const entry of repositories.values()) entry.refresh?.start().catch(() => {});
+      if (!this.options.runtimeResume && repositories.size) void asStarter(async () => {
+        await setup!.done();
+        for (const entry of repositories.values()) { entry.setup?.start(entry.createdBranch || restored); await entry.setup?.done(); }
+      });
       if (holdTurns) {
         this.turnsHeld = true;
         // Only success or a confirmed no-op releases; failed/interrupted keep the hold (the control plane keeps the
@@ -905,10 +948,61 @@ export class CloudWorker {
         store ??= await storeOpening?.catch(() => undefined);
         await reviewConfiguring?.catch(() => undefined);
         const closed = await Promise.allSettled([setup?.dispose(), refresh?.dispose(), terminals?.dispose(), workspace?.dispose(),
+          ...[...(this.pendingRepositories?.values() ?? [])].map(entry => entry.dispose()),
           agents?.dispose(), mcp?.dispose(), store?.flush(), history?.dispose(), Promise.resolve().then(() => reviews?.close())]);
         if (closed.some(result => result.status === "rejected")) this.options.onError?.("storage");
       }
     }
+  }
+
+  private pendingRepositories?: Map<string, RepositoryRuntime>;
+
+  /** The service a request is for: its repository's, named or by folder; the first repository's otherwise. */
+  private workspaceFor(params: Record<string, unknown>): Pick<WorkspaceService, "handle"> {
+    const entry = this.scope?.repositoryFor(params);
+    if (!entry || entry === this.scope!.repositories[0]) return this.workspace!;
+    const runtime = this.repositories.get(entry.repository.toLowerCase());
+    if (!runtime?.service) throw new WorkspaceError("WORKSPACE_UNAVAILABLE", `${entry.repository} is not available in this workspace yet.`);
+    const { repository: _repository, ...rest } = params;
+    return { handle: (op: string) => runtime.service!.handle(op, rest) };
+  }
+
+  /** The repositories after the first: each checkout prepared on its branch, its own
+   * workspace service (state, Git, files, remote fix-up) and setup. One that cannot be
+   * prepared stays unavailable without failing the workspace. */
+  private async openRepositories(scope: WorkspaceScope, asStarter: <T>(work: () => T) => T, timing?: StartupTimingObserver): Promise<Map<string, RepositoryRuntime>> {
+    const opened = this.pendingRepositories = new Map<string, RepositoryRuntime>();
+    for (const [position, entry] of scope.repositories.entries()) {
+      if (!position || this.disposed || this.stopping) continue;
+      const repositoryScope = scope.forRepository(entry), directory = join(this.options.directory, "repositories", String(position));
+      const runtime = new RepositoryRuntime(repositoryScope);
+      opened.set(entry.repository.toLowerCase(), runtime);
+      try {
+        const checkout = this.options.runtimeResume ? undefined
+          : await asStarter(() => (this.options.prepareCheckout ?? prepareCheckout)(repositoryScope.workspace, this.gitEnvironment, timing));
+        runtime.refresh = checkout?.refresh; runtime.createdBranch = checkout?.createdBranch === true;
+        const run = commandRunner(repositoryScope.root, this.gitEnvironment);
+        runtime.service = await WorkspaceService.open(repositoryScope, directory, {
+          onStartupTiming: timing, nextCheckoutSequence: () => ++this.checkoutSequence,
+          pollingAllowed: () => this.runtimeGate.open && (!this.options.runtimeResume || this.runtimePublished),
+          activity: () => this.runtimeGate.activity(),
+          run: async (program, args, options) => {
+            if (options?.readOnly !== true) await runtime.refresh?.touch();
+            return run(program, args, options);
+          },
+          publish: frame => { if (this.repositories.get(entry.repository.toLowerCase()) === runtime) void this.broadcast(frame); },
+        });
+        runtime.setup = new WorkspaceSetup({ directory, workspace: repositoryScope.workspace, gitEnvironment: this.gitEnvironment,
+          application: new ApplicationEnvironment(undefined), signal: this.environmentLifetime.signal,
+          runner: this.options.setupRunner, activity: () => { void this.reportIdle(); }, onStorageError: () => this.options.onError?.("storage"),
+          beforeRun: async () => { await runtime.refresh?.touch(); } });
+      } catch {
+        // Unavailable on its own; the workspace and the other repositories keep working. A closed line, never a path.
+        this.options.log?.(`[repositories] repository ${position} could not be prepared`);
+      }
+    }
+    this.pendingRepositories = undefined;
+    return opened;
   }
 
   private startWatchdog(runtimeRoots: readonly string[], uid: number): void {
@@ -1007,8 +1101,11 @@ export class CloudWorker {
     // Abort setup before releasing its refresh wait; otherwise it could launch
     // as refresh cancellation finishes, while Stop is already checkpointing.
     const setup = this.setup?.dispose();
+    const others = [...this.repositories.values()].map(entry => entry.setup?.dispose());
     await this.checkoutRefresh?.dispose();
+    await Promise.allSettled([...this.repositories.values()].map(entry => entry.refresh?.dispose()));
     await setup;
+    await Promise.allSettled(others);
   }
   private async prepareStop(): Promise<void> {
     clearInterval(this.heartbeat); this.watchdog?.stop();
@@ -1034,7 +1131,7 @@ export class CloudWorker {
     catch { this.options.onError?.("transport"); return false; }
   }
   private get busy(): boolean {
-    return Boolean(this.agents?.busy || this.terminals?.busy || this.setup?.busy || this.workspace?.uploading ||
+    return Boolean(this.agents?.busy || this.terminals?.busy || this.setup?.busy || [...this.repositories.values()].some(entry => entry.setup?.busy) || this.workspace?.uploading ||
       this.activeMutations || (this.options.transport.localCommandsPending ?? 0) > 0 || Date.now() - this.lastMutationAt < RECENT_ACTIVITY_MS ||
       this.syncTransfers.active(Date.now()));
   }
@@ -1066,5 +1163,17 @@ export class CloudWorker {
       }
       this.idle = idle; await this.send({ t: "idle", idle });
     }
+  }
+}
+
+/** One repository after the first, in a workspace of several. */
+class RepositoryRuntime {
+  service?: WorkspaceService;
+  setup?: WorkspaceSetup;
+  refresh?: CheckoutRefresh;
+  createdBranch = false;
+  constructor(readonly scope: WorkspaceScope) {}
+  async dispose(): Promise<void> {
+    await Promise.allSettled([this.setup?.dispose(), this.refresh?.dispose(), this.service?.dispose()]);
   }
 }
