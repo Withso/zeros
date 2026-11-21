@@ -15,7 +15,7 @@ declare global {
     calls: Call[];
     sendResult: boolean;
     pendingSend: ((sent: boolean) => void) | null;
-    mount(active: boolean): void;
+    mount(active: boolean, ownsKeyboard?: boolean): void;
     deferSend?: boolean;
     addResult?: boolean;
   }
@@ -36,7 +36,7 @@ beforeAll(async () => {
         window.sendResult = true;
         window.pendingSend = null;
         const filler = Array.from({ length: 30 }, (_, i) => "Filler paragraph " + i + " keeps the transcript long enough to scroll.");
-        function Host({ active }) {
+        function Host({ active, ownsKeyboard }) {
           const [root, setRoot] = useState(null);
           return <div id="fixture" data-zeros-root="">
             <div ref={setRoot} id="transcript">
@@ -55,7 +55,7 @@ beforeAll(async () => {
               {filler.map((text, i) => <p className="select-text" key={i} id={"filler-" + i}>{text}</p>)}
             </div>
             <div id="composer" className="select-text" contentEditable suppressContentEditableWarning>composer draft</div>
-            <ChatSelectionPopup root={root} active={active}
+            <ChatSelectionPopup root={root} active={active} ownsKeyboard={ownsKeyboard ?? active}
               onAddSelection={(text) => { window.calls.push(["add", text]); return window.addResult ?? true; }}
               onAddReply={(quote, reply) => { window.calls.push(["reply", quote, reply]); return true; }}
               onSendReply={(quote, reply) => {
@@ -66,7 +66,7 @@ beforeAll(async () => {
           </div>;
         }
         const app = createRoot(document.getElementById("root"));
-        window.mount = (active) => app.render(<Host active={active} />);
+        window.mount = (active, ownsKeyboard) => app.render(<Host active={active} ownsKeyboard={ownsKeyboard} />);
       `,
     },
     bundle: true,
@@ -432,6 +432,16 @@ describe("chat selection popup", { timeout: 15_000 }, () => {
       await page.keyboard.type(", really");
       expect(await page.getByRole("textbox", { name: "Reply" }).inputValue()).toBe("back soon, really");
       expect(await page.locator("[data-chat-reply-quote]").textContent()).toBe("The demo repository is left untouched.");
+
+      // A split workspace shows this chat beside the selected one: no focus taking.
+      await page.locator("body").evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
+      await page.evaluate(() => window.mount(false));
+      await page.evaluate(() => window.mount(true, false));
+      await expect.poll(() => replyBox(page).isVisible()).toBe(true);
+      await frames(page);
+      expect(await page.evaluate(() => document.activeElement?.tagName)).toBe("BODY");
+      await page.evaluate(() => window.mount(true, true));
+      await expect.poll(() => page.getByRole("textbox", { name: "Reply" }).evaluate((element) => element === document.activeElement)).toBe(true);
 
       // Moving on to the composer first means the chat's return leaves focus there.
       await page.locator("#composer").click();

@@ -96,6 +96,10 @@ export interface ChatSelectionPopupProps {
   root: HTMLElement | null;
   /** The chat is the visible, editable surface. */
   active: boolean;
+  /** The chat is the selected one, which owns typing. A split workspace shows
+   *  two active chats, and only this one may take focus back. Defaults to
+   *  `active`. */
+  ownsKeyboard?: boolean;
   /** Stage the text as a pill; false when nothing was staged. */
   onAddSelection: (text: string) => boolean;
   onAddReply: (quote: string, reply: string) => boolean;
@@ -107,7 +111,7 @@ export interface ChatSelectionPopupProps {
 /** "Add to chat ⌘L · Reply" over text selected anywhere in the transcript:
  *  user and agent messages, thinking, tool output and between them. Reply
  *  turns the same popup into a field under a two-line quote of the text. */
-export function ChatSelectionPopup({ root, active, onAddSelection, onAddReply, onSendReply }: ChatSelectionPopupProps) {
+export function ChatSelectionPopup({ root, active, ownsKeyboard = active, onAddSelection, onAddReply, onSendReply }: ChatSelectionPopupProps) {
   const [selection, setSelection] = useState<ChatSelection | null>(null);
   // Hidden by Esc, an outside click or an action until the selection changes.
   const [dismissed, setDismissed] = useState<ChatSelection | null>(null);
@@ -272,7 +276,7 @@ export function ChatSelectionPopup({ root, active, onAddSelection, onAddReply, o
     fieldOwnsFocus.current = true;
   }, [reply]);
   useEffect(() => {
-    if (!active || !reply || !fieldOwnsFocus.current) return;
+    if (!active || !ownsKeyboard || !reply || !fieldOwnsFocus.current) return;
     // The content mounts in a portal on the open render.
     const frame = requestAnimationFrame(() => {
       const element = field.current;
@@ -281,7 +285,7 @@ export function ChatSelectionPopup({ root, active, onAddSelection, onAddReply, o
       element.setSelectionRange(element.value.length, element.value.length);
     });
     return () => cancelAnimationFrame(frame);
-  }, [active, reply]);
+  }, [active, ownsKeyboard, reply]);
   const fieldBlur = (event: ReactFocusEvent<HTMLTextAreaElement>) => {
     const to = event.relatedTarget;
     const surface = root?.closest("[data-zeros-root]") ?? root;

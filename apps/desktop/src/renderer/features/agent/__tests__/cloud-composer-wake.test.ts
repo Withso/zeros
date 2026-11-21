@@ -6,6 +6,7 @@ import type { Me } from "../../team/control-plane";
 import { cloudWorkspaceAccountAccess } from "../../team/cloud-workspace-account-access";
 import { isCloudWorkspace, parseCloudWorkspaceKey, parseCloudScopedId } from "../../../platform/bridge/cloud-workspace-key";
 import { isSubmittedComposerDocument, sendClearsChatDraft } from "../composer-submission";
+import { deliverReply } from "../chat-selection";
 import * as lifecycle from "../session-reload-lifecycle";
 import * as retention from "../transcript-retention";
 import { BLANK, useSessionsStore } from "../sessions-store";
@@ -215,11 +216,9 @@ describe("cloud composer readiness queue", () => {
       options.committed?.();
       throw new Error("journal write failed");
     });
-    const committed = vi.fn();
-    const accepted = await h.composer.actions.handleSend("> quote\n\nreply", { keepDraft: true, onCommitted: committed });
-    // The outbox owns the saved row now; the reply must not be sent again.
-    expect(accepted).toBe(false);
-    expect(committed).toHaveBeenCalledOnce();
+    // The outbox owns the saved row now: the reply counts as done and closes,
+    // so it can't be sent again.
+    expect(await deliverReply((onCommitted) => h.composer.actions.handleSend("> quote\n\nreply", { keepDraft: true, onCommitted }))).toBe(true);
     expect(h.dispatch).not.toHaveBeenCalledWith({ type: "CLEAR_CHAT_DRAFT", chatId: "chat" });
     expect(h.clear).not.toHaveBeenCalled();
   });
@@ -227,9 +226,8 @@ describe("cloud composer readiness queue", () => {
     const h = harness(true, "ready");
     h.provider.cloudPrompts.available = () => true;
     h.provider.cloudPrompts.send.mockImplementation(async () => { throw new Error("rejected before saving"); });
-    const committed = vi.fn();
-    expect(await h.composer.actions.handleSend("> quote\n\nreply", { keepDraft: true, onCommitted: committed })).toBe(false);
-    expect(committed).not.toHaveBeenCalled();
+    // Nothing was saved, so the reply stays open with its text.
+    expect(await deliverReply((onCommitted) => h.composer.actions.handleSend("> quote\n\nreply", { keepDraft: true, onCommitted }))).toBe(false);
   });
   it("keeps a send queued through a 25-second drop, re-adopts its session and delivers once on reconnect", async () => {
     const h = harness(true, "ready");

@@ -79,7 +79,7 @@ import {
 import { QueuedMessagesCard } from "./queued-messages-card";
 import { cloudQueuedPrompt } from "./cloud-queued-prompt";
 import { textFileAttachment } from "./composer-editor/attachment-io";
-import { chatAttachmentName, formatReply, replyMessage, replySendBlocker } from "./chat-selection";
+import { chatAttachmentName, deliverReply, formatReply, replyMessage, replySendBlocker } from "./chat-selection";
 import { ChatSelectionPopup, stageChatText } from "./chat-selection-popup";
 import { agentActivity, chatAgentActivity } from "./agent-activity";
 import { EmbeddedTerminalCommand } from "./embedded-terminal-command";
@@ -4475,15 +4475,11 @@ function AgentChatBody({
     }
     const message = replyMessage(quote, reply);
     // A refused send keeps the reply open with its text, so nothing is lost.
-    // Once committed, a later failure belongs to the outbox's own retry, and
-    // sending the text again would deliver it twice.
-    let committed = false;
-    const accepted = await handleSend(message.text, {
+    return deliverReply((onCommitted) => handleSend(message.text, {
       keepDraft: true,
-      onCommitted: () => { committed = true; },
+      onCommitted,
       ...(message.attachQuote ? { stagedAttachments: [textFileAttachment(chatAttachmentName("selection"), quote)] } : {}),
-    });
-    return accepted || committed;
+    }));
   };
 
   return (
@@ -4720,6 +4716,7 @@ function AgentChatBody({
           key={chatId ?? "new-chat"}
           root={scrollEl}
           active={interactive}
+          ownsKeyboard={interactive && !!chatId && activeChatId === chatId}
           onAddSelection={(text) => stageChatText(stageTextAttachment, "selection", text, text)}
           onAddReply={(quote, reply) => stageChatText(stageTextAttachment, "reply", formatReply(quote, reply), reply)}
           onSendReply={sendChatReply}

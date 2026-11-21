@@ -188,7 +188,7 @@ export const TextMessage: Renderer<AgentTextMessage> = memo(
             }
           >
             {reply && !message.attachments?.length ? (
-              <ReplyMessageText quote={reply.quote} reply={reply.reply} />
+              <ReplyMessageText quote={reply.quote} reply={reply.reply} active={ctx.attachmentImagesActive !== false} />
             ) : message.role === "user" &&
             displaySegments &&
             displaySegments.length > 0 ? (
@@ -276,7 +276,7 @@ export const TextMessage: Renderer<AgentTextMessage> = memo(
                   // trailing whitespace so stray end-of-message newlines/spaces
                   // don't balloon the bubble; interior/leading spacing is kept.
                   // wrap-anywhere: see the segments branch above.
-                  reply ? <ReplyMessageText quote={reply.quote} reply={reply.reply} /> : (
+                  reply ? <ReplyMessageText quote={reply.quote} reply={reply.reply} active={ctx.attachmentImagesActive !== false} /> : (
                     <div className={cn(message.role === "system" ? "leading-5" : "text-reading", "wrap-anywhere whitespace-pre-wrap")}>
                       <LocalLinkText text={message.role === "user"
                         ? text.trimEnd()
@@ -297,7 +297,8 @@ export const TextMessage: Renderer<AgentTextMessage> = memo(
 );
 
 /** Whether a one-line truncating element cuts its text at its current width.
- *  Observed only while collapsed; a narrow split pane clips short text too. */
+ *  Observed only while `watch` (collapsed and shown); a narrow split pane
+ *  clips short text too. */
 function useClipped<T extends HTMLElement>(watch: boolean) {
   const [element, ref] = useState<T | null>(null);
   const [value, setValue] = useState(false);
@@ -314,10 +315,11 @@ function useClipped<T extends HTMLElement>(watch: boolean) {
 
 /** A sent reply: the quoted text on one muted line, then ↳ and the reply.
  *  A quote that doesn't fit expands in place, so none of it is lost. */
-function ReplyMessageText({ quote, reply }: { quote: string; reply: string }) {
+function ReplyMessageText({ quote, reply, active }: { quote: string; reply: string; active: boolean }) {
   const [expanded, setExpanded] = useState(false);
   const line = previewText(quote);
-  const clipped = useClipped<HTMLSpanElement>(!expanded);
+  // Retained hidden chats measure nothing; the last answer stands until shown.
+  const clipped = useClipped<HTMLSpanElement>(!expanded && active);
   const folds = line !== quote || clipped.value || expanded;
   return (
     <div data-reply-message="" className="flex min-w-0 flex-col gap-0.5">

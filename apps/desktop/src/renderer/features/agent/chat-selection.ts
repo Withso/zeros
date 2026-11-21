@@ -140,6 +140,15 @@ export function replySendBlocker(input: {
   return null;
 }
 
+/** Send a reply and say whether it is done. A send the outbox has committed
+ * is done even if delivery then fails: its owner retries it, and sending the
+ * text again would deliver it twice. */
+export async function deliverReply(send: (onCommitted: () => void) => Promise<boolean>): Promise<boolean> {
+  let committed = false;
+  const accepted = await send(() => { committed = true; });
+  return accepted || committed;
+}
+
 /** A sent reply's quote and reply text, or null for any other message. The
  * quote is the leading run of `>` lines, then one blank line, then the reply. */
 export function parseReply(text: string): { quote: string; reply: string } | null {
