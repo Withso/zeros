@@ -34,14 +34,15 @@ function insideEditable(node: Node): boolean {
   return !!elementOf(node)?.closest(EDITABLE);
 }
 
-/** Same text the user sees: no-break and zero-width characters from rendered
- * markup are spaces or nothing, line ends lose trailing spaces, and runs of
+/** Same text the user sees: no-break spaces are spaces and zero-width spaces
+ * from rendered markup are nothing, line ends lose trailing spaces, and runs of
  * blank lines between blocks become one. */
 export function normalizeSelectionText(raw: string): string {
   return raw
     .replace(/\r\n?/g, "\n")
     .replace(/\u00a0/g, " ")
-    .replace(/\u200b|\u200c|\u200d|\ufeff/g, "")
+    // Zero-width spaces only: joiners build emoji and shape scripts.
+    .replace(/\u200b|\ufeff/g, "")
     .split("\n")
     .map((line) => line.trimEnd())
     .join("\n")

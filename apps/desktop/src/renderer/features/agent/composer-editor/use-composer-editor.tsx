@@ -205,7 +205,7 @@ export interface ComposerEditorApi {
     /** The validation verdict, or null when unmounted. Returned because an invalid
      *  attachment is excluded at send, and a caller that ignores it ships a chip for
      *  a file the agent never receives. */
-  }, options?: { focus?: boolean }) => AttachmentValidation | null;
+  }, options?: { focus?: boolean; atEnd?: boolean }) => AttachmentValidation | null;
   /** Remove whatever is staged under `sourceKey`. No-op when absent. */
   removeAttachmentBySourceKey: (sourceKey: string) => void;
   /** The sourceKeys in the document, recomputed on every change, so transcript
@@ -978,7 +978,7 @@ export function useComposerEditor(
       text: string;
       label?: string;
       preview?: ComposerAttachmentPreview;
-    }, options?: { focus?: boolean }): AttachmentValidation | null => {
+    }, options?: { focus?: boolean; atEnd?: boolean }): AttachmentValidation | null => {
       const ed = editorRef.current;
       // isDestroyed too: the ref is never nulled, and a read landing after unmount
       // would throw into a torn-down view and report a successful read as failed.
@@ -993,21 +993,25 @@ export function useComposerEditor(
         sourceKey: input.sourceKey,
         preview: input.preview,
       });
-      const transaction = ed.chain()
-        .insertContent([
-          {
-            type: "attachment",
-            attrs: {
-              attachmentId: id,
-              name: input.name,
-              mimeType,
-              kind: "text",
-              sourceKey: input.sourceKey,
-              label: input.label ?? "",
-            },
+      const content = [
+        {
+          type: "attachment",
+          attrs: {
+            attachmentId: id,
+            name: input.name,
+            mimeType,
+            kind: "text",
+            sourceKey: input.sourceKey,
+            label: input.label ?? "",
           },
-          { type: "text", text: " " },
-        ]);
+        },
+        { type: "text", text: " " },
+      ];
+      // At the end, a delivery from outside the editor never replaces text the
+      // user had selected in it before looking away.
+      const transaction = options?.atEnd
+        ? ed.chain().insertContentAt(TextSelection.atEnd(ed.state.doc).to, content, { updateSelection: options.focus !== false })
+        : ed.chain().insertContent(content);
       if (options?.focus !== false) transaction.scrollIntoView();
       transaction.run();
       if (options?.focus !== false) ed.view.focus();

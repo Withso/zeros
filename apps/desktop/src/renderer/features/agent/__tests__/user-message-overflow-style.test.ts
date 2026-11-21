@@ -28,8 +28,8 @@ describe("narrow transcript message overflow", () => {
     expect(turnContainer).toContain('"w-fit max-w-7/8 min-w-0 cursor-text px-3 py-2 select-text"');
 
     const textMessage = code("../renderers/text-message.tsx");
-    // Segments, plain text, and a sent reply's own text.
-    expect(textMessage.match(/wrap-anywhere/g)).toHaveLength(3);
+    // Segments, plain text, and a sent reply's expanded quote and own text.
+    expect(textMessage.match(/wrap-anywhere/g)).toHaveLength(4);
   });
 
   it("lets inline pills shrink with the user bubble", () => {

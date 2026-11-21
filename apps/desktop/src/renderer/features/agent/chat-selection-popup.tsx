@@ -26,7 +26,10 @@ import {
 } from "./chat-selection";
 import "./chat-selection.css";
 
-type StageText = (input: { sourceKey: string; name: string; text: string; label?: string }) => AttachmentValidation | null;
+type StageText = (
+  input: { sourceKey: string; name: string; text: string; label?: string },
+  options?: { focus?: boolean; atEnd?: boolean },
+) => AttachmentValidation | null;
 
 /** Stage selected text, or a reply with its quote, as a `.txt` pill in the
  *  composer. Each gets its own key and file, and the pill shows `label`. */
@@ -37,7 +40,7 @@ export function stageChatText(stage: StageText, kind: "selection" | "reply", tex
     name,
     text,
     label: previewText(label, 120),
-  });
+  }, { atEnd: true });
   if (!staged) {
     toast.error("Couldn't add that to the chat.", { description: "The message box isn't available right now." });
     return false;
@@ -96,9 +99,9 @@ export interface ChatSelectionPopupProps {
   /** Stage the text as a pill; false when nothing was staged. */
   onAddSelection: (text: string) => boolean;
   onAddReply: (quote: string, reply: string) => boolean;
-  /** Send now; false keeps the reply open, such as while another send is
-   *  still being prepared. */
-  onSendReply: (quote: string, reply: string) => boolean;
+  /** Send now. The reply stays open, busy, until this settles, and stays
+   *  open with its text when it resolves false (the send was refused). */
+  onSendReply: (quote: string, reply: string) => boolean | Promise<boolean>;
 }
 
 /** "Add to chat ⌘L · Reply" over text selected anywhere in the transcript:
@@ -110,18 +113,22 @@ export function ChatSelectionPopup({ root, active, onAddSelection, onAddReply, o
   const [dismissed, setDismissed] = useState<ChatSelection | null>(null);
   const [reply, setReply] = useState<ChatSelection | null>(null);
   const [draft, setDraft] = useState("");
-  const shown = reply ?? (selection && !sameSelection(selection, dismissed) ? selection : null);
+  const [sending, setSending] = useState(false);
+  // Hidden while the chat is, but a reply keeps its quote and text for when
+  // the chat comes back.
+  const shown = active ? reply ?? (selection && !sameSelection(selection, dismissed) ? selection : null) : null;
   const content = useRef<HTMLDivElement | null>(null);
   const field = useRef<HTMLTextAreaElement | null>(null);
   const placement = useRef<Placement["side"] | null>(null);
-  const latest = useRef({ shown, reply, root, draft, onAddSelection, onAddReply, onSendReply });
-  latest.current = { shown, reply, root, draft, onAddSelection, onAddReply, onSendReply };
+  const latest = useRef({ shown, reply, root, draft, sending, onAddSelection, onAddReply, onSendReply });
+  latest.current = { shown, reply, root, draft, sending, onAddSelection, onAddReply, onSendReply };
 
-  useReplyHighlight(reply?.range ?? null);
+  useReplyHighlight(active ? reply?.range ?? null : null);
 
   const closeReply = useCallback(() => {
     setReply(null);
     setDraft("");
+    setSending(false);
     placement.current = null;
   }, []);
 
@@ -129,7 +136,7 @@ export function ChatSelectionPopup({ root, active, onAddSelection, onAddReply, o
     if (active && root) return;
     setSelection(null);
     setDismissed(null);
-    closeReply();
+    if (!root) closeReply();
   }, [active, root, closeReply]);
 
   // The popup waits for a drag to end instead of chasing the pointer, and
@@ -186,7 +193,9 @@ export function ChatSelectionPopup({ root, active, onAddSelection, onAddReply, o
   // reply is being typed, which rests at the nearer edge of the view instead.
   const anchorRect = useCallback(() => {
     const { shown: target, reply: replying, root: scroller } = latest.current;
-    if (!target || !scroller || !rangeStillSelects(target.range)) return OFF_SCREEN;
+    if (!target || !scroller) return OFF_SCREEN;
+    const live = rangeStillSelects(target.range);
+    if (!live && !replying) return OFF_SCREEN;
     const bounds = visibleBounds(scroller);
     const element = content.current;
     // The transcript bounds the popup, not the window. Written only on change:
@@ -200,7 +209,9 @@ export function ChatSelectionPopup({ root, active, onAddSelection, onAddReply, o
         element.style.setProperty("--chat-selection-max-height", height);
     }
     const next = placePopup({
-      selection: target.range.getBoundingClientRect(),
+      // A reply whose text left the DOM (older history paged out) keeps its
+      // quote and rests at the top of the view.
+      selection: live ? target.range.getBoundingClientRect() : { top: bounds.top - 2, bottom: bounds.top - 1, left: bounds.left, right: bounds.right },
       bounds,
       width: element?.offsetWidth ?? 0,
       height: element?.offsetHeight ?? 0,
@@ -216,8 +227,8 @@ export function ChatSelectionPopup({ root, active, onAddSelection, onAddReply, o
   const addSelection = useCallback(() => {
     const target = latest.current.shown;
     if (!target || latest.current.reply) return;
-    setDismissed(target);
-    latest.current.onAddSelection(target.text);
+    // A failed stage leaves the bar up, so the same selection can be retried.
+    if (latest.current.onAddSelection(target.text)) setDismissed(target);
   }, []);
 
   const startReply = useCallback(() => {
@@ -228,10 +239,23 @@ export function ChatSelectionPopup({ root, active, onAddSelection, onAddReply, o
     setReply(target);
   }, []);
 
-  const submitReply = useCallback((send: boolean) => {
-    const { reply: target, draft: text, onSendReply: sendReply, onAddReply: addReply } = latest.current;
-    if (!target || !text.trim()) return;
-    const done = send ? sendReply(target.text, text) : addReply(target.text, text);
+  const submitReply = useCallback(async (send: boolean) => {
+    const { reply: target, draft: text, sending: busy, onSendReply: sendReply, onAddReply: addReply } = latest.current;
+    if (!target || !text.trim() || busy) return;
+    let done: boolean;
+    if (send) {
+      setSending(true);
+      try {
+        done = await sendReply(target.text, text);
+      } catch {
+        done = false;
+      }
+      // Closed, or replaced by another reply, while the send was prepared.
+      if (latest.current.reply !== target) return;
+      setSending(false);
+    } else {
+      done = addReply(target.text, text);
+    }
     if (!done) return;
     setDismissed(target);
     closeReply();
@@ -259,7 +283,7 @@ export function ChatSelectionPopup({ root, active, onAddSelection, onAddReply, o
   const fieldKeyDown = (event: ReactKeyboardEvent<HTMLTextAreaElement>) => {
     if (event.key !== "Enter" || event.shiftKey || event.altKey || event.nativeEvent.isComposing) return;
     event.preventDefault();
-    submitReply(event.metaKey || event.ctrlKey);
+    void submitReply(event.metaKey || event.ctrlKey);
   };
 
   const close = () => {
@@ -313,6 +337,7 @@ export function ChatSelectionPopup({ root, active, onAddSelection, onAddReply, o
                 appearance="bare"
                 rows={1}
                 value={draft}
+                readOnly={sending}
                 placeholder="Reply…"
                 aria-label="Reply"
                 aria-keyshortcuts="Enter Meta+Enter Control+Enter"
@@ -325,11 +350,12 @@ export function ChatSelectionPopup({ root, active, onAddSelection, onAddReply, o
                 variant="primary"
                 className="shrink-0"
                 disabled={empty}
-                onClick={() => submitReply(false)}
+                loading={sending}
+                onClick={() => void submitReply(false)}
                 menuLabel="More ways to reply"
                 menu={
                   <DropdownMenuContent align="end" side="bottom">
-                    <DropdownMenuItem disabled={empty} onSelect={() => submitReply(true)}>
+                    <DropdownMenuItem disabled={empty || sending} onSelect={() => void submitReply(true)}>
                       Send immediately
                       <DropdownMenuShortcut>⌘↵</DropdownMenuShortcut>
                     </DropdownMenuItem>

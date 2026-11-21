@@ -39,6 +39,7 @@ export async function runChatSelectionSmoke({ page, check, harnessBase }) {
   for (const [placement, theme] of [["Local", "Dark"], ["Organization local", "Light"], ["Organization cloud", "Dark"]]) {
     await page.getByRole("button", { name: placement, exact: true }).click();
     await page.getByRole("button", { name: `${theme} theme`, exact: true }).click();
+    await expect(page.locator("html")).toHaveAttribute("data-theme", theme.toLowerCase());
     await page.getByTestId("transcript").evaluate((element) => { element.scrollTop = element.scrollHeight; });
 
     await drag(page, "[data-testid=assistant-message] li:first-child", "[data-testid=assistant-message] li:last-child");
@@ -81,7 +82,7 @@ export async function runChatSelectionSmoke({ page, check, harnessBase }) {
     await expect(pills).toHaveCount(2);
     check(`${placement}: Add to chat stages the reply as its own pill`, (await pills.nth(1).textContent()) === "Namaste");
 
-    await drag(page, "[data-testid=assistant-message] p:last-of-type", "[data-testid=assistant-message] p:last-of-type");
+    await drag(page, "[data-testid=assistant-message] li:last-child", "[data-testid=assistant-message] p:last-of-type");
     await page.getByRole("button", { name: "Reply", exact: true }).click();
     await field.fill("Great");
     await page.getByRole("button", { name: "More ways to reply" }).click();
@@ -93,6 +94,13 @@ export async function runChatSelectionSmoke({ page, check, harnessBase }) {
     check(`${placement}: Send immediately renders the quote on one line above ↳ the reply`,
       (await sent.textContent()).includes("Great") && quoteBox.height <= 24 && quoteBox.width <= bubble.width,
       JSON.stringify({ quoteBox, bubble }));
+    await sent.getByRole("button", { name: "Show the whole quote" }).click();
+    const expanded = sent.locator("[data-reply-quote]");
+    const whole = await expanded.textContent();
+    check(`${placement}: the sent quote expands to every word`,
+      whole.includes("Main component inspector") && whole.includes("The demo repository is left untouched.") &&
+        (await box(expanded)).height > quoteBox.height,
+      whole);
 
     await page.getByTestId("composer").locator("[aria-label^='Remove chat-']").first().click();
     await page.getByTestId("composer").locator("[aria-label^='Remove chat-']").first().click();

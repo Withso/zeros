@@ -21,6 +21,11 @@ describe("selection text", () => {
     expect(normalizeSelectionText("\n\nTwo things  \r\n\n\n\n- one​\n- two \n\n")).toBe("Two things\n\n- one\n- two");
   });
 
+  it("keeps joiners, which build emoji and shape scripts", () => {
+    const family = "\u{1F469}\u200d\u{1F467}";
+    expect(normalizeSelectionText(`${family} می\u200cخواهم`)).toBe(`${family} می\u200cخواهم`);
+  });
+
   it("keeps indentation inside a selection", () => {
     expect(normalizeSelectionText("if (a) {\n  b();\n}")).toBe("if (a) {\n  b();\n}");
   });

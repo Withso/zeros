@@ -120,7 +120,7 @@ import {
   reportSkippedAttachments,
 } from "./encode-attachments";
 import type { ComposerAttachment } from "./composer-attachments";
-import { isSubmittedComposerDocument } from "./composer-submission";
+import { isSubmittedComposerDocument, sendClearsChatDraft } from "./composer-submission";
 import { useCloudWorkspaceAccountAccess } from "../team/cloud-workspace-account-access";
 import {
   COMPOSER_DRAG_CLS,
@@ -3457,6 +3457,9 @@ function AgentChatBody({
     override?: string,
     extras?: {
       followUpBehavior?: FollowUpBehavior;
+      /** The override is sent beside the composer, not from it: keep the
+       *  chat's saved draft, which still matches what the composer shows. */
+      keepDraft?: boolean;
       /** Summary imports from prior chats, prepended as <from_previous_chat> blocks. */
       imports?: import("../../state/store").SummaryImport[];
       /** Attachments from another surface (browser capture), encoded like paste and
@@ -3606,7 +3609,7 @@ function AgentChatBody({
         if (unchanged) {
           clearComposerEditor(); designFrameContext.consume(submittedDesignFrame);
         }
-        if (override !== undefined || unchanged)
+        if (sendClearsChatDraft({ override: override !== undefined, keepDraft: !!extras?.keepDraft, submittedUnchanged: !!unchanged }))
           dispatch({ type: "CLEAR_CHAT_DRAFT", chatId });
       };
       await session.sendPrompt(queued.text, queued.displayText, queued.attachments, queued.bubbleAttachments, queued.segments, undefined, queued.cloudQueue, wakeIntent,
@@ -3816,7 +3819,7 @@ function AgentChatBody({
     // Drop any stashed draft for this chat —
     // the user just sent it. Defensive against the cleanup-on-unmount
     // path racing the post-send empty state.
-    if (chatId && (override !== undefined || submittedDraftUnchanged)) {
+    if (chatId && sendClearsChatDraft({ override: override !== undefined, keepDraft: !!extras?.keepDraft, submittedUnchanged: !!submittedDraftUnchanged })) {
       dispatch({ type: "CLEAR_CHAT_DRAFT", chatId });
     }
     // Arm the send-jump after every early return, so slash commands and refused
@@ -3836,23 +3839,26 @@ function AgentChatBody({
     override?: string,
     extras?: Parameters<typeof runSend>[1],
     recordActivity = true,
-  ): Promise<void> => {
-    if (readOnly || sendInFlightRef.current) return;
+  ): Promise<boolean> => {
+    if (readOnly || sendInFlightRef.current) return false;
     const folder = chatThread?.folder ?? session.cwd;
     const attemptId = `send-${crypto.randomUUID()}`;
     sendInFlightRef.current = true;
     const generation = chatId ? agentSessions.getSendGeneration(chatId) : undefined;
     try {
-      await runSend(override, extras, recordActivity);
+      // True once the message is handed to the session; every refusal returns
+      // early, after saying why.
+      return (await runSend(override, extras, recordActivity)) === true;
     } catch (error) {
-      if (chatId && generation !== agentSessions.getSendGeneration(chatId)) return;
+      if (chatId && generation !== agentSessions.getSendGeneration(chatId)) return false;
       if (chatId && isCloudWorkspace(folder)) {
         notifyAgentSendFailure({ folder, chatId, attemptId, agentId: chatThread?.agentId ?? session.agentId, model: chatThread?.model, error });
-        return;
+        return false;
       }
       toast.error("Message wasn't sent", {
         description: error instanceof Error ? error.message : String(error),
       });
+      return false;
     } finally {
       sendInFlightRef.current = false;
     }
@@ -4451,7 +4457,7 @@ function AgentChatBody({
   );
 
   // A reply sent at once, beside the composer's draft rather than with it.
-  const sendChatReply = (quote: string, reply: string): boolean => {
+  const sendChatReply = async (quote: string, reply: string): Promise<boolean> => {
     const blocker = replySendBlocker({
       sendInFlight: sendInFlightRef.current,
       provisioning: workspaceProvisioning,
@@ -4462,10 +4468,11 @@ function AgentChatBody({
       return false;
     }
     const message = replyMessage(quote, reply);
-    void handleSend(message.text, message.attachQuote
-      ? { stagedAttachments: [textFileAttachment(chatAttachmentName("selection"), quote)] }
-      : undefined);
-    return true;
+    // A refused send keeps the reply open with its text, so nothing is lost.
+    return handleSend(message.text, {
+      keepDraft: true,
+      ...(message.attachQuote ? { stagedAttachments: [textFileAttachment(chatAttachmentName("selection"), quote)] } : {}),
+    });
   };
 
   return (
@@ -4698,6 +4705,8 @@ function AgentChatBody({
           className="pointer-events-none absolute top-0 left-0 right-[max(var(--scrollbar-size),var(--chat-aside-inset,0px))] z-1 h-8 bg-gradient-to-b from-(--pane-bg) to-transparent"
         />
         <ChatSelectionPopup
+          // A quote never crosses chats, even if this body is reused for another.
+          key={chatId ?? "new-chat"}
           root={scrollEl}
           active={interactive}
           onAddSelection={(text) => stageChatText(stageTextAttachment, "selection", text, text)}

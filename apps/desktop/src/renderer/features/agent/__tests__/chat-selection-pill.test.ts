@@ -36,8 +36,14 @@ afterEach(() => {
   host.remove();
 });
 
-// Node views mount their React pills after the transaction.
-const flush = () => act(async () => { await new Promise(resolve => setTimeout(resolve, 20)); });
+// Node views mount their React pills after the transaction. React holds that
+// work until an act scope ends, so poll across scopes until the pills show.
+async function settle(assertion: () => void) {
+  for (let attempt = 0; ; attempt += 1) {
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 10)); });
+    try { assertion(); return; } catch (error) { if (attempt >= 100) throw error; }
+  }
+}
 const pills = () => [...host.querySelectorAll("[data-attachment-pill]")];
 
 describe.each(["/personal/a", "/organization/a", "cloud://organization/a"])("chat selection pills in %s", cwd => {
@@ -57,10 +63,9 @@ describe.each(["/personal/a", "/organization/a", "cloud://organization/a"])("cha
         text: "> What do you want to work on?\n\nNamaste", label: "Namaste",
       }, { focus: false });
     });
-    await flush();
-    const [first, second, reply] = pills();
     // Two selections made in the same second are two pills, not a replacement.
-    expect(pills()).toHaveLength(3);
+    await settle(() => expect(pills()).toHaveLength(3));
+    const [first, second, reply] = pills();
     expect(first.textContent).toBe("blocked every merge here. After moving a frame");
     expect(second.textContent).toBe("ign check where dragging a value");
     expect(first.querySelector(".lucide-text-quote")).not.toBeNull();
@@ -85,20 +90,32 @@ describe.each(["/personal/a", "/organization/a", "cloud://organization/a"])("cha
     act(() => api.insertTextAttachment({
       sourceKey: `${CHAT_REPLY_SOURCE}c`, name: "chat-reply-2026-11-22_00-36-24.txt", text: "> q\n\nNamaste", label: "Namaste",
     }, { focus: false }));
-    await flush();
+    await settle(() => expect(pills()).toHaveLength(1));
     const draft = { json: api.editor!.getJSON(), attachments: api.serialize()!.attachments };
     act(() => api.clear());
-    await flush();
-    expect(pills()).toHaveLength(0);
+    await settle(() => expect(pills()).toHaveLength(0));
     act(() => api.setContent(draft));
-    await flush();
-    expect(pills().map(p => p.textContent)).toEqual(["Namaste"]);
+    await settle(() => expect(pills().map(p => p.textContent)).toEqual(["Namaste"]));
+  });
+
+  it("appends at the end instead of replacing draft text selected before looking away", async () => {
+    await render(cwd);
+    act(() => { api.setText("keep this draft"); });
+    act(() => { api.editor!.commands.setTextSelection({ from: 1, to: 5 }); });
+    act(() => {
+      api.insertTextAttachment({
+        sourceKey: `${CHAT_SELECTION_SOURCE}a`, name: "chat-selection-2026-11-22_00-31-48.txt", text: "quoted", label: "quoted",
+      }, { focus: false, atEnd: true });
+    });
+    await settle(() => expect(pills()).toHaveLength(1));
+    expect(api.editor!.getText()).toContain("keep this draft");
+    expect(api.serialize()!.segments.map(segment => segment.type)).toEqual(["text", "attachment", "text"]);
   });
 
   it("leaves ordinary file pills showing their name", async () => {
     await render(cwd);
     act(() => api.insertTextAttachment({ sourceKey: "transcript:x", name: "notes.txt", text: "body" }, { focus: false }));
-    await flush();
+    await settle(() => expect(pills()).toHaveLength(1));
     expect(pills()[0].textContent).toBe("notes.txt");
     expect(pills()[0].querySelector(".lucide-text-quote, .lucide-message-square")).toBeNull();
   });

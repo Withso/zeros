@@ -27,8 +27,8 @@
 // to bind.
 // ──────────────────────────────────────────────────────────
 
-import { memo, useContext, useMemo, useRef, type SyntheticEvent } from "react";
-import { AlarmClock, CornerDownRight } from "lucide-react";
+import { memo, useContext, useMemo, useRef, useState, type SyntheticEvent } from "react";
+import { AlarmClock, ChevronDown, ChevronUp, CornerDownRight } from "lucide-react";
 import type { Renderer, RendererContext } from "./types";
 import type {
   AgentTextMessage,
@@ -65,6 +65,7 @@ import { wakeupDisplayText } from "../wakeup-notice";
 import { LocalLinkHtml, LocalLinkText } from "../local-links/text";
 import { LocalNoteRow } from "../local-links/note-row";
 import { parseReply, previewText } from "../chat-selection";
+import { IconButton } from "@/renderer/shared/ui/primitives/icon-button";
 
 type ChatRole = "user" | "assistant" | "system";
 
@@ -295,18 +296,39 @@ export const TextMessage: Renderer<AgentTextMessage> = memo(
   },
 );
 
-/** A sent reply: the quoted text on one muted line, then ↳ and the reply. */
+/** A sent reply: the quoted text on one muted line, then ↳ and the reply.
+ *  A quote that doesn't fit expands in place, so none of it is lost. */
 function ReplyMessageText({ quote, reply }: { quote: string; reply: string }) {
+  const [expanded, setExpanded] = useState(false);
   const line = previewText(quote);
+  const folds = line !== quote || quote.length > 60;
   return (
     <div data-reply-message="" className="flex min-w-0 flex-col gap-0.5">
-      <Tooltip label={line}>
-        <blockquote data-reply-quote="" className="text-fg3 flex min-w-0 text-sm">
-          <span aria-hidden="true">“</span>
-          <span className="min-w-0 truncate">{line}</span>
-          <span aria-hidden="true">”</span>
+      <div className="flex min-w-0 items-start gap-1">
+        <blockquote
+          data-reply-quote=""
+          data-expanded={expanded || undefined}
+          className={cn("text-fg3 min-w-0 flex-1 text-sm", expanded ? "whitespace-pre-wrap wrap-anywhere" : "flex")}
+        >
+          {expanded ? `“${quote}”` : (
+            <>
+              <span aria-hidden="true">“</span>
+              <span className="min-w-0 truncate">{line}</span>
+              <span aria-hidden="true">”</span>
+            </>
+          )}
         </blockquote>
-      </Tooltip>
+        {folds && (
+          <IconButton
+            size="inline"
+            label={expanded ? "Show less of the quote" : "Show the whole quote"}
+            aria-expanded={expanded}
+            onClick={() => setExpanded((open) => !open)}
+          >
+            {expanded ? <ChevronUp /> : <ChevronDown />}
+          </IconButton>
+        )}
+      </div>
       <div className="flex min-w-0 items-start gap-1.5">
         <CornerDownRight aria-hidden="true" className="text-fg3 mt-1 size-3.5 shrink-0" />
         <div className="text-reading min-w-0 wrap-anywhere whitespace-pre-wrap">
