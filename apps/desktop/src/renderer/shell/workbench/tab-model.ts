@@ -20,6 +20,7 @@ import {
   Diff as DiffIcon,
   Globe,
   File as FileIcon,
+  Bot,
   GitPullRequestArrow,
   Smartphone,
   Terminal,
@@ -31,6 +32,7 @@ export type WorkbenchTabType =
   | "design"
   | "changes"
   | "review"
+  | "agents"
   | "browser"
   | "terminal"
   | "files"
@@ -505,6 +507,16 @@ export function createReviewTab(): WorkbenchTab {
   };
 }
 
+/** Build THE Agents tab: the workspace's parent sessions and their child
+ *  sessions by status. One per worktree, can't be closed. */
+export function createAgentsTab(): WorkbenchTab {
+  return {
+    id: nextId("agents"),
+    type: "agents",
+    title: "Agents",
+  };
+}
+
 /** The path a tab's strip icon resolves from, or null for the type's own glyph.
  *  A File tab showing a file wears that file's type glyph, as in the tree and
  *  mention pills; a blank tab keeps the generic one. */
@@ -514,13 +526,14 @@ export function workbenchTabIconPath(tab: WorkbenchTab): string | null {
   return path ? path : null;
 }
 
-/** The tabs every workspace keeps: the fixed Files home, Design, Changes and
- *  Review. The strip draws them as text only. */
+/** The tabs every workspace keeps: the fixed Files home, Design, Changes,
+ *  Review and Agents. The strip draws them as text only. */
 export function isFixedWorkbenchTab(tab: WorkbenchTab): boolean {
   return (
     tab.type === "design" ||
     tab.type === "changes" ||
     tab.type === "review" ||
+    tab.type === "agents" ||
     (tab.type === "files" && tab.fixed === true)
   );
 }
@@ -541,6 +554,10 @@ export const TAB_TYPE_META: Record<WorkbenchTabType, TabTypeMeta> = {
   review: {
     label: "Review",
     icon: GitPullRequestArrow,
+  },
+  agents: {
+    label: "Agents",
+    icon: Bot,
   },
   browser: {
     label: "Browser",
@@ -576,6 +593,7 @@ const CURRENT_TAB_TYPES = new Set<WorkbenchTabType>([
   "terminal",
   "changes",
   "review",
+  "agents",
   "browser",
   "files",
   "simulator",
@@ -626,8 +644,9 @@ export function orderWorkbenchTabs(tabs: WorkbenchTab[]): WorkbenchTab[] {
   const design = tabs.find((t) => t.type === "design");
   const changes = tabs.find((t) => t.type === "changes");
   const review = tabs.find((t) => t.type === "review");
+  const agents = tabs.find((t) => t.type === "agents");
   const systemIds = new Set(
-    [design?.id, changes?.id, review?.id].filter((id): id is string =>
+    [design?.id, changes?.id, review?.id, agents?.id].filter((id): id is string =>
       Boolean(id),
     ),
   );
@@ -648,6 +667,7 @@ export function orderWorkbenchTabs(tabs: WorkbenchTab[]): WorkbenchTab[] {
     ...(design ? [{ ...design, pinned: true }] : []),
     ...(changes ? [{ ...changes, pinned: true }] : []),
     ...(review ? [{ ...review, pinned: true }] : []),
+    ...(agents ? [{ ...agents, pinned: true }] : []),
     ...rest,
   ];
 }
@@ -671,8 +691,9 @@ export function orderWorkbenchTabs(tabs: WorkbenchTab[]): WorkbenchTab[] {
  *     generic Terminal tabs without a session identity are removed;
  *   • Simulator tabs with a known platform survive with only their platform
  *     and a well-formed device id; others are removed;
- *   • order is [fixed Files home, Design, Changes, Review, ...other closable
- *     tabs].
+ *   • exactly ONE Agents tab, keeping an older Agents tab's identity;
+ *   • order is [fixed Files home, Design, Changes, Review, Agents, ...other
+ *     closable tabs].
  *  Result never becomes empty because the home tabs remain. */
 export function normalizeWorkbenchTabs(parsed: WorkbenchTab[]): WorkbenchTab[] {
   // Persistence is user-editable and old builds could leave duplicate ids.
@@ -750,6 +771,13 @@ export function normalizeWorkbenchTabs(parsed: WorkbenchTab[]): WorkbenchTab[] {
         fileTreeVisible: undefined,
       }
     : { ...createReviewTab(), pinned: true };
+  const firstAgents = tabs.find((t) => t.type === "agents");
+  const homeAgents: WorkbenchTab = {
+    id: firstAgents?.id ?? nextId("agents"),
+    type: "agents",
+    title: "Agents",
+    pinned: true,
+  };
   const seenTerminalIds = new Set<string>();
   const closable: WorkbenchTab[] = tabs
     .filter((t) => {
@@ -885,6 +913,7 @@ export function normalizeWorkbenchTabs(parsed: WorkbenchTab[]): WorkbenchTab[] {
     homeDesign,
     { ...homeChanges, fixed: undefined },
     { ...homeReview, fixed: undefined },
+    homeAgents,
     ...withHome,
   ]);
 }
