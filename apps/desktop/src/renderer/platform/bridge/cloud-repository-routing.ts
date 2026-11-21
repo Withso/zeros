@@ -51,6 +51,9 @@ function split(path: string): { folder: string; rest: string } {
 
 /** How a request on a workspace of several repositories goes out; `same` for every other request. */
 export function cloudRepositoryRoute(op: string, params: Params, layout: (target: CloudWorkspaceTarget) => CloudRepositoryLayout | undefined = cloudRepositoryLayout): CloudRepositoryRoute {
+  // A repository root (branch catalogs, init, publish, owner avatar) is one checkout; a workspace of several has none to name.
+  const repoRoot = parseCloudWorkspaceKey(params.repoRoot);
+  if (repoRoot && layout(repoRoot)) throw new Error("This isn't available for a workspace of several repositories.");
   const key = parseCloudWorkspaceKey(params.workspaceId);
   if (!key) return { kind: "same" };
   const found = layout(key);

@@ -1,6 +1,18 @@
 import { afterEach, expect, it, vi } from "vitest";
 const cloudGithub = vi.hoisted(() => ({ request: vi.fn(async (_target: unknown, op: string) => op === "gh.prGet" ? { number: 12, title: "Cloud PR" } : op === "gh.authStatus" ? { authenticated: true, login: "cloud-user" } : {}) }));
-vi.mock("../../cloud-github-pr", () => ({ requestCloudGithubPr: cloudGithub.request }));
+// A workspace of one repository: every cloud pull request request goes to its workspace, through the transport stub.
+vi.mock("../../cloud-github-pr", async () => {
+  const { cloudTargetForValue } = await import("../cloud-workspace-key");
+  const cloudGithubPrRoute = (id: unknown) => { const target = cloudTargetForValue(id); return target ? { target } : null; };
+  return {
+    requestCloudGithubPr: cloudGithub.request,
+    cloudGithubPrRoute,
+    requestCloudGithubPrFor: (id: unknown, op: string, input: Record<string, unknown> = {}) => {
+      const scope = cloudGithubPrRoute(id);
+      return scope ? (cloudGithub.request as (...args: unknown[]) => Promise<unknown>)(scope.target, op, input) : null;
+    },
+  };
+});
 import { RuntimeClient } from "@/renderer/platform/bridge/ws-client";
 import {
   WorkspaceRuntimeClient,
