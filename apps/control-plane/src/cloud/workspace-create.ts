@@ -121,7 +121,10 @@ export function createCloudWorkspaceOperations(deps: CloudV2RouteDeps) {
     // the requested repository first. Only its branch read, a connection call
     // that authority never invalidates, overlaps the rest.
     const requested = named;
-    const namedIndex = computer.repositories.findIndex(requested), indices = [...computer.repositories.keys()];
+    // A base for ready copies holds no repository: access is checked for the requested one alone.
+    const namedIndex = computer.repositories.findIndex(requested), indices = [...computer.repositories.keys()]
+      // A renamed repository is found among them all, as before.
+      .filter(index => !computer.baseOnly || namedIndex < 0 || index === namedIndex);
     const resolved: Awaited<ReturnType<typeof buildRepository>>[] = [];
     let originalError: HttpError | undefined, early: Promise<string | null> | undefined;
     for (const index of namedIndex < 0 ? indices : [namedIndex, ...indices.filter(other => other !== namedIndex)]) {

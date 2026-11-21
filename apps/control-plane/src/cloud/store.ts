@@ -1,3 +1,4 @@
+import { cloudV2BoatSnapshotName } from "./resource-names.js";
 import { executionIntentAuthority, type ExecutionAdmission, type ExecutionIntentAuthority } from "./execution/authority.js";
 import { assertNoExecutionTransition, cancelExecutionActivation, clearStoppedExecutionTransition, confirmExecutionStop, failExecutionActivation, needsExecutionStopConfirmation } from "./execution/activation-state.js";
 import { bindExecutionActivationBoot } from "./execution/activation.js";
@@ -158,7 +159,7 @@ export type CloudV2WorkspaceImage = { from: string | null; prune: string[]; chec
  * other checkouts before its worker starts. Any other starts from Boat's
  * stock image and clones its own repository. A v2 image holds no source. */
 export function cloudV2WorkspaceImage(input: { policy: number; snapshot: string; recipe: unknown; scope: readonly string[]; repository: string }): CloudV2WorkspaceImage {
-  if (input.policy !== 3) return { from: input.snapshot, prune: [], checkout: false };
+  if (input.policy !== 3) return { from: cloudV2BoatSnapshotName(input.snapshot), prune: [], checkout: false };
   const entries = (input.recipe as { repositories?: { repository?: unknown }[] } | null)?.repositories ?? [];
   const names = entries.flatMap(entry => typeof entry.repository === "string" ? [entry.repository] : []);
   const scope = new Set(input.scope.map(name => name.toLowerCase()));
@@ -1572,19 +1573,20 @@ export class CloudV2Store {
     const { rows } = await withSystemTx(this.pool, tx => tx.query<{ snapshot_name: string | null }>(
       `SELECT c.snapshot_name FROM cloud_v2_computers c JOIN cloud_v2_computer_builds b ON b.id=c.active_build_id
        WHERE c.org_id = $1 AND b.source_policy_version=2`, [organizationId]));
-    return rows[0]?.snapshot_name ?? null;
+    return rows[0]?.snapshot_name ? cloudV2BoatSnapshotName(rows[0].snapshot_name) : null;
   }
 
   /** One selection supplies the build pin and its installed repositories. */
-  async activeComputer(organizationId: string): Promise<{ buildId: string; repositories: CloudV2InstalledRepository[] } | null> {
-    const { rows } = await withSystemTx(this.pool, tx => tx.query<{ id: string; recipe: { repositories?: { repository?: unknown; branch?: unknown }[] } }>(
-      `SELECT build.id, build.recipe FROM cloud_v2_computers computer
+  async activeComputer(organizationId: string): Promise<{ buildId: string; repositories: CloudV2InstalledRepository[]; baseOnly?: true } | null> {
+    const { rows } = await withSystemTx(this.pool, tx => tx.query<{ id: string; base_only: boolean; recipe: { repositories?: { repository?: unknown; branch?: unknown }[] } }>(
+      `SELECT build.id, build.base_only, build.recipe FROM cloud_v2_computers computer
        JOIN cloud_v2_computer_builds build ON build.id = computer.active_build_id AND build.org_id = computer.org_id
        WHERE computer.org_id = $1 AND computer.snapshot_name IS NOT NULL AND build.state = 'succeeded' AND build.source_policy_version IN (2,3)`,
       [organizationId],
     ));
     if (!rows[0]) return null;
-    return { buildId: rows[0].id, repositories: (rows[0].recipe.repositories ?? []).flatMap(entry => typeof entry.repository === "string" ? [{
+    return { buildId: rows[0].id, ...(rows[0].base_only ? { baseOnly: true as const } : {}),
+      repositories: (rows[0].recipe.repositories ?? []).flatMap(entry => typeof entry.repository === "string" ? [{
       repository: entry.repository,
       // A recipe ref can be a tag. Only the build's verified branch is a
       // supported source for the worker's origin/<baseBranch> checkout.

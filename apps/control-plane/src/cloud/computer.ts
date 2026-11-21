@@ -11,7 +11,7 @@ import { withSystemTx, type Tx } from "../db.js";
 import { HttpError } from "../authz.js";
 import type { CloudV2Compute } from "./boat.js";
 import { installRuntimeCommand, type CloudV2Runtime } from "./runtime.js";
-import { cloudV2SandboxName, cloudV2SnapshotName } from "./resource-names.js";
+import { cloudV2SandboxName, cloudV2SharedSnapshotReference, cloudV2SnapshotName } from "./resource-names.js";
 import { CloudSourceTargetSchema, type CloudSourceTarget } from "./source-authority.js";
 import { computerSourceReviewRequired, readComputerSourceTargets, type CloudV2ComputerSourceResolver } from "./computer-provenance.js";
 import { RepositorySetupPathSchema } from "./repository-setup-contract.js";
@@ -88,6 +88,10 @@ export type CloudV2ComputerOverview = {
   /** The configured repositories; equal to the active build's until an admin edits them. */
   recipe: { repositories: CloudV2RepositoryDraft[] };
   recipeRevision: number;
+  /** Ready copies only: what each base build installs on top of Boat's image. */
+  installScript?: string | null;
+  /** Ready copies are on: a build makes the base only, and repositories are not listed. */
+  readyCopies?: true;
 };
 export type CloudV2RefreshCandidate = {
   organizationId: string; createdBy: string; recipe: CloudV2Recipe;
@@ -97,6 +101,15 @@ export type CloudV2RefreshCandidate = {
   runtimeStale: boolean;
   /** A daily refresh is due: an older build, recent cloud use, nothing built today. */
   refreshDue: boolean;
+};
+export const CLOUD_V2_INSTALL_SCRIPT_MAX_BYTES = 16_000;
+export const CloudV2InstallScriptSchema = z.string().max(CLOUD_V2_INSTALL_SCRIPT_MAX_BYTES)
+  .refine(value => Buffer.byteLength(value) <= CLOUD_V2_INSTALL_SCRIPT_MAX_BYTES, "Install script is too long");
+export type CloudV2ComputerOptions = {
+  /** CloudV2Config.readyCopies: builds make the base only. */
+  readyCopies?: boolean;
+  /** CloudV2Config.sharedBaseSnapshot: the base of organizations without an install script. */
+  sharedBaseSnapshot?: string;
 };
 
 type Row = {
@@ -113,6 +126,7 @@ type ConfiguredSources = { repositories: CloudV2RepositoryDraft[]; sources: unkn
 const configurationKey = (row: ComputerConfiguration | undefined) => JSON.stringify(row ?
   [row.recipe_revision, row.active_build_id, row.recipe, row.recipe_source_targets] : null);
 type Resources = Row & {
+  base_shared?: boolean;
   cleanup_requested_at: Date | null; builder_create_pending: boolean; builder_deleted_at: Date | null;
   snapshot_deleted_at: Date | null; operation_until: Date | null; active: boolean; pinned: boolean;
 };
@@ -143,7 +157,8 @@ export class CloudV2Computers {
     /** Used only by resolveBuildRepository without `fresh`, whose caller
      * verifies access through the source authority right afterwards. It may
      * reuse a recent resolution; recipe saves and builds always resolve afresh. */
-    private readonly resolveBuildIdentity: CloudV2ComputerSourceResolver | undefined = resolveRepository) {}
+    private readonly resolveBuildIdentity: CloudV2ComputerSourceResolver | undefined = resolveRepository,
+    readonly options: CloudV2ComputerOptions = {}) {}
 
   private async memberRole(organizationId: string, userId: string): Promise<string> {
     const { rows } = await withSystemTx(this.pool, tx => tx.query<{ role: string }>(
@@ -164,15 +179,34 @@ export class CloudV2Computers {
 
   async overview(organizationId: string): Promise<CloudV2ComputerOverview> {
     return withSystemTx(this.pool, async tx => {
-      const computer = (await tx.query<{ active_build_id: string | null; snapshot_name: string | null; recipe: { repositories?: unknown } | null; recipe_revision: string }>(
-        `SELECT active_build_id, snapshot_name, recipe, recipe_revision::text FROM cloud_v2_computers WHERE org_id = $1`, [organizationId])).rows[0];
+      const computer = (await tx.query<{ active_build_id: string | null; snapshot_name: string | null; recipe: { repositories?: unknown } | null; recipe_revision: string; install_script: string | null }>(
+        `SELECT active_build_id, snapshot_name, recipe, recipe_revision::text, install_script FROM cloud_v2_computers WHERE org_id = $1`, [organizationId])).rows[0];
       const builds = (await tx.query<Row>(
         `SELECT ${COLUMNS} FROM cloud_v2_computer_builds WHERE org_id = $1 ORDER BY version DESC LIMIT 50`, [organizationId])).rows;
       return {
         activeBuildId: computer?.active_build_id ?? null, snapshotName: computer?.snapshot_name ?? null, builds: builds.map(build),
         recipe: { repositories: await this.configured(tx, organizationId, computer?.recipe ?? null, computer?.active_build_id ?? null) },
         recipeRevision: Number(computer?.recipe_revision ?? 0),
+        ...(this.options.readyCopies ? { installScript: computer?.install_script ?? null, readyCopies: true as const } : {}),
       };
+    });
+  }
+
+  /** Saves the install script as the editor saw it at `revision`; the next build runs it. */
+  async saveInstallScript(organizationId: string, userId: string, script: string | null, revision: number):
+    Promise<{ installScript: string | null; recipeRevision: number }> {
+    const parsed = script === null ? null : CloudV2InstallScriptSchema.parse(script);
+    const value = parsed?.trim() ? parsed : null;
+    return withSystemTx(this.pool, async tx => {
+      await this.lockOrganization(tx, organizationId, userId);
+      const current = Number((await tx.query<{ recipe_revision: string }>(
+        "SELECT recipe_revision::text FROM cloud_v2_computers WHERE org_id=$1 FOR UPDATE", [organizationId])).rows[0]?.recipe_revision ?? 0);
+      if (current !== revision) throw recipeChanged();
+      await tx.query(`INSERT INTO cloud_v2_computers (org_id, recipe_revision, install_script, recipe_updated_by, recipe_updated_at)
+        VALUES ($1, $2, $3, $4, clock_timestamp())
+        ON CONFLICT (org_id) DO UPDATE SET recipe_revision=EXCLUDED.recipe_revision, install_script=EXCLUDED.install_script,
+          recipe_updated_by=EXCLUDED.recipe_updated_by, recipe_updated_at=EXCLUDED.recipe_updated_at`, [organizationId, current + 1, value, userId]);
+      return { installScript: value, recipeRevision: current + 1 };
     });
   }
 
@@ -317,14 +351,19 @@ export class CloudV2Computers {
       automaticBaseBuildId?: string; retryOf?: string; retryAttempt?: number }): Promise<CloudV2Build> {
     const revision = Number(computer?.recipe_revision ?? 0);
     if (options.revision !== undefined && options.revision !== revision) throw recipeChanged();
+    // With ready copies a build is the base only: its image holds no source,
+    // the source policy that captures before any repository (2).
+    const baseOnly = this.options.readyCopies === true;
+    const installScript = baseOnly ? (await tx.query<{ install_script: string | null }>(
+      "SELECT install_script FROM cloud_v2_computers WHERE org_id=$1", [organizationId])).rows[0]?.install_script ?? null : null;
     const { rows } = await tx.query<Row>(
       `INSERT INTO cloud_v2_computer_builds (id, org_id, version, recipe, state, created_by, reason, base_snapshot, runtime_sha256, source_targets, source_policy_version,
-         automatic_base_build_id,automatic_recipe_revision,retry_of,retry_attempt)
-       VALUES ($1, $2, coalesce((SELECT max(version) FROM cloud_v2_computer_builds WHERE org_id = $2), 0) + 1, $3, 'queued', $4, $5, $6, $7, $8, 3, $9, $10, $11, $12)
+         automatic_base_build_id,automatic_recipe_revision,retry_of,retry_attempt,base_only,install_script)
+       VALUES ($1, $2, coalesce((SELECT max(version) FROM cloud_v2_computer_builds WHERE org_id = $2), 0) + 1, $3, 'queued', $4, $5, $6, $7, $8, $13, $9, $10, $11, $12, $14, $15)
        RETURNING ${COLUMNS}`,
       [randomUUID(), organizationId, JSON.stringify(recipe), userId, options.reason ?? "manual", computer?.snapshot_name ?? null, options.runtimeSha256 ?? null,
         JSON.stringify(readComputerSourceTargets(recipe.repositories, sources)), options.automaticBaseBuildId ?? null,
-        options.automaticBaseBuildId ? revision : null, options.retryOf ?? null, options.retryAttempt ?? 1],
+        options.automaticBaseBuildId ? revision : null, options.retryOf ?? null, options.retryAttempt ?? 1, baseOnly ? 2 : 3, baseOnly, installScript],
     );
     if (options.configure) await this.writeConfigured(tx, organizationId, userId, editableRepositories(recipe), revision + 1, sources);
     return build(rows[0]!);
@@ -454,14 +493,14 @@ export class CloudV2Computers {
   async refreshCandidates(runtimeSha256: string, limit = 25): Promise<CloudV2RefreshCandidate[]> {
     const { rows } = await withSystemTx(this.pool, tx => tx.query<{ org_id: string; active_build_id: string; created_by: string; recipe: CloudV2Recipe; runtime_stale: boolean; refresh_due: boolean }>(
       `SELECT * FROM (SELECT c.org_id, c.active_build_id, b.created_by, b.recipe, b.finished_at, c.refresh_next_at,
-         ((b.runtime_sha256 IS DISTINCT FROM $1 OR b.source_policy_version <> 3)
+         (NOT b.base_shared AND (b.runtime_sha256 IS DISTINCT FROM $1 OR (b.source_policy_version <> 3 AND NOT b.base_only))
            AND NOT EXISTS (SELECT 1 FROM cloud_v2_computer_builds f WHERE f.org_id = c.org_id AND f.reason = 'runtime'
              AND f.runtime_sha256 = $1 AND f.state IN ('failed','cancelled') AND f.created_at > clock_timestamp() - interval '6 hours'
              AND coalesce(f.error_code,'') NOT IN ('computer_build_interrupted','computer_refresh_superseded'))
            AND (SELECT count(*) FROM cloud_v2_computer_builds f WHERE f.org_id = c.org_id AND f.reason = 'runtime'
              AND f.runtime_sha256 = $1 AND f.state IN ('failed','cancelled')
              AND coalesce(f.error_code,'') NOT IN ('computer_build_interrupted','computer_refresh_superseded')) < 3) AS runtime_stale,
-         (b.finished_at < clock_timestamp() - interval '24 hours'
+         (b.finished_at < clock_timestamp() - interval '24 hours' AND NOT b.base_only
            AND (b.recipe->>'rebuiltFrom') IS NULL
            AND coalesce(c.refresh_next_at, '-infinity') <= clock_timestamp()
            AND NOT EXISTS (SELECT 1 FROM cloud_v2_computer_builds r WHERE r.org_id = c.org_id AND r.created_at > clock_timestamp() - interval '24 hours')
@@ -645,6 +684,51 @@ export class CloudV2Computers {
       [buildId, code.slice(0, 64)]));
   }
 
+  /** What a build installs on its base, and whether that base is all it makes. */
+  async buildBase(buildId: string): Promise<{ baseOnly: boolean; installScript: string | null }> {
+    const row = (await withSystemTx(this.pool, tx => tx.query<{ base_only: boolean; install_script: string | null }>(
+      "SELECT base_only, install_script FROM cloud_v2_computer_builds WHERE id=$1", [buildId]))).rows[0];
+    return { baseOnly: row?.base_only ?? false, installScript: row?.install_script ?? null };
+  }
+
+  /** A base-only build keeps each repository's verified branch from the live
+   * build, so released desktops and creates still read a default branch; a
+   * new repository's comes from its first ready copy. No commit is pinned. */
+  async carriedRecipe(organizationId: string, recipe: CloudV2Recipe): Promise<CloudV2Recipe["repositories"]> {
+    const live = (await withSystemTx(this.pool, tx => tx.query<{ recipe: CloudV2Recipe }>(
+      `SELECT b.recipe FROM cloud_v2_computers c JOIN cloud_v2_computer_builds b ON b.id=c.active_build_id AND b.org_id=c.org_id
+       WHERE c.org_id=$1`, [organizationId]))).rows[0]?.recipe.repositories ?? [];
+    return recipe.repositories.map(({ commit: _commit, branch: _branch, ...entry }) => {
+      const previous = live.find(old => old.repository.toLowerCase() === entry.repository.toLowerCase() && (old.ref ?? null) === (entry.ref ?? null));
+      return { ...entry, ...(previous?.branch ? { branch: previous.branch } : {}) };
+    });
+  }
+
+  /** Organizations without an install script share Zeros's base: no machine
+   * is made, and no cleanup ever deletes that snapshot. */
+  async activateShared(buildId: string, snapshotName: string, runtimeSha256: string, repositories: CloudV2Recipe["repositories"]): Promise<void> {
+    // The shared name is every such organization's; each stores its own reference.
+    const reference = cloudV2SharedSnapshotReference(snapshotName, buildId);
+    await withSystemTx(this.pool, async tx => {
+      const actor = (await tx.query<{ org_id: string; created_by: string | null; recipe: CloudV2Recipe }>(
+        "SELECT org_id,created_by,recipe FROM cloud_v2_computer_builds WHERE id=$1", [buildId])).rows[0];
+      if (!actor?.created_by) throw new HttpError(403, "forbidden", "Build creator is unavailable");
+      await this.lockOrganization(tx, actor.org_id, actor.created_by);
+      await this.cancelSupersededRetries(tx, buildId);
+      const { rows } = await tx.query<{ org_id: string }>(
+        `UPDATE cloud_v2_computer_builds SET state='succeeded', snapshot_id=$2, base_shared=true, runtime_sha256=$3, recipe=$4,
+           finished_at=clock_timestamp()
+         WHERE id=$1 AND state='building' AND base_only AND cleanup_requested_at IS NULL AND source_targets IS NOT NULL
+           AND EXISTS (SELECT 1 FROM organizations o WHERE o.id=org_id AND o.deleted_at IS NULL)
+         RETURNING org_id`, [buildId, reference, runtimeSha256, JSON.stringify({ ...actor.recipe, repositories })]);
+      if (!rows[0]) throw new Error("build is not running");
+      await tx.query(
+        `INSERT INTO cloud_v2_computers (org_id, active_build_id, snapshot_name) VALUES ($1, $2, $3)
+         ON CONFLICT (org_id) DO UPDATE SET active_build_id = EXCLUDED.active_build_id, snapshot_name = EXCLUDED.snapshot_name,
+           updated_at = clock_timestamp()`, [rows[0].org_id, buildId, reference]);
+    });
+  }
+
   /** Makes the build live and returns the snapshot it replaced. */
   async activate(buildId: string, snapshotName: string): Promise<{ previousSnapshot: string | null }> {
     return withSystemTx(this.pool, async tx => {
@@ -787,13 +871,13 @@ export function shellQuote(value: string): string {
 
 /** A non-interactive login bash script, like Conductor's setup. Boat runs
  * commands as the stock image's user, the same user the worker runs as. */
-function asZeros(lines: readonly string[]): string {
+export function asZeros(lines: readonly string[]): string {
   return `bash -lc ${shellQuote(lines.join("\n"))}`;
 }
 
 /** Reuse checkouts so ignored dependencies survive; credentials stay in a
  * per-command header, never a saved remote URL. */
-function checkoutScript(entry: RecipeEntry, dir: string, canonicalRepository = entry.repository): string[] {
+export function checkoutScript(entry: RecipeEntry, dir: string, canonicalRepository = entry.repository): string[] {
   const q = shellQuote, d = q(dir);
   const header = "--config-env=http.extraHeader=ZEROS_GITHUB_AUTH_HEADER";
   // Fetch pinned commits directly when moved or deleted refs no longer reach them.
@@ -887,6 +971,8 @@ export class CloudV2ComputerBuilder {
     refreshDelayMs?: number;
     now?: () => number;
     logger?: Pick<Console, "warn">;
+    /** Ready copies: a base went live. Queues first copies and marks the rest stale. */
+    onActivated?(build: { organizationId: string; reason: CloudV2BuildReason }): Promise<void>;
   }) {
     this.lastRefreshScan = (deps.now?.() ?? Date.now()) - REFRESH_SCAN_MS + (deps.refreshDelayMs ?? REFRESH_SCAN_MS);
   }
@@ -1021,7 +1107,10 @@ export class CloudV2ComputerBuilder {
       assertHeld(); await compute.delete(sandboxId);
       assertHeld(); await computers.confirmDeleted(id, "builder");
     }
-    if (!resource.active && !resource.pinned && !resource.snapshot_deleted_at) {
+    if (!resource.active && !resource.pinned && !resource.snapshot_deleted_at && resource.base_shared) {
+      // The shared Zeros base belongs to every organization on it: only the reference goes.
+      assertHeld(); await computers.confirmDeleted(id, "snapshot");
+    } else if (!resource.active && !resource.pinned && !resource.snapshot_deleted_at) {
       // Older builds may have cleared snapshot_id before a failed delete. Their
       // deterministic names still let org erasure verify every named snapshot.
       const name = resource.snapshot_id ?? (resource.cleanup_requested_at ? cloudV2SnapshotName(this.deps.channel, resource.org_id, resource.version, this.deps.localOwner) : null);
@@ -1039,6 +1128,16 @@ export class CloudV2ComputerBuilder {
     await computers.resolveSourceTargets(job.organizationId, job.createdBy, await computers.buildSourceTargets(job.organizationId, job.id));
     const log = (text: string) => computers.append(job.id, text);
     await log(`[zeros] building Cloud Computer v${job.version}${REASON_LABEL[job.reason]}\n`);
+    const base = await computers.buildBase(job.id), shared = computers.options.sharedBaseSnapshot;
+    if (base.baseOnly && !base.installScript && shared) {
+      // Nothing of the organization's own to install: no machine at all.
+      assertHeld();
+      if (!await computers.running(job.id)) return;
+      await computers.activateShared(job.id, shared, job.runtimeSha256 ?? this.deps.runtime.sha256, await computers.carriedRecipe(job.organizationId, job.recipe));
+      await log(`[zeros] Cloud Computer v${job.version} uses the shared Zeros base\n`);
+      await this.activated(job);
+      return;
+    }
     await log("[zeros] starting from Boat's stock image\n");
     assertHeld();
     if (!await computers.prepareResource(job.id)) return;
@@ -1074,6 +1173,15 @@ export class CloudV2ComputerBuilder {
     const lfs = await compute.exec(sandboxId, GIT_LFS_INSTALL_COMMAND, 300);
     await log(lfs.exitCode === 0 && !lfs.timedOut ? "[zeros] git-lfs installed\n"
       : "[zeros] git-lfs could not be installed; Git LFS files stay placeholders until a later build adds it\n");
+    const base = await computers.buildBase(job.id);
+    if (base.installScript) {
+      assertHeld();
+      if (!await computers.running(job.id)) return;
+      await log("[zeros] running the install script\n");
+      const script = await compute.execLong(sandboxId, `${asZeros(["cd /home/user", base.installScript])} 2>&1`, 3600);
+      await log(script.stdout.slice(-64 * 1024) + `\n[zeros] install script: exit ${script.exitCode}\n`);
+      if (script.exitCode !== 0 || script.timedOut) throw Object.assign(new Error("install script failed"), { code: "computer_install_script_failed" });
+    }
     const policy = await computers.sourcePolicy(job.id);
     const name = cloudV2SnapshotName(this.deps.channel, job.organizationId, job.version, this.deps.localOwner);
     const capture = async (): Promise<boolean> => {
@@ -1089,7 +1197,9 @@ export class CloudV2ComputerBuilder {
     // disk. v3 captures after them; only a workspace whose source scope covers
     // the whole recipe may start from it (CloudV2Store.workspaceImage).
     if (policy === 2 && !await capture()) return;
-    const pinned = await this.installRepositories({ ...job, baseSnapshot: null }, sandboxId, assertHeld, policy === 3);
+    // A base for ready copies holds no repository; each gets its own copy.
+    const pinned = base.baseOnly ? await computers.carriedRecipe(job.organizationId, job.recipe)
+      : await this.installRepositories({ ...job, baseSnapshot: null }, sandboxId, assertHeld, policy === 3);
     if (!pinned.length) return;
     assertHeld();
     if (!await computers.running(job.id)) return;
@@ -1105,6 +1215,12 @@ export class CloudV2ComputerBuilder {
     assertHeld();
     await computers.activate(job.id, name);
     await log(`[zeros] Cloud Computer v${job.version} is live as ${name}\n`);
+    if (base.baseOnly) await this.activated(job);
+  }
+
+  private async activated(job: CloudV2Build): Promise<void> {
+    await this.deps.onActivated?.({ organizationId: job.organizationId, reason: job.reason })
+      .catch(() => this.deps.logger?.warn("[cloud-v2] ready copies will be queued by maintenance"));
   }
 
   /** Returns the recipe pinned to what was installed, or [] when the build stopped. */
