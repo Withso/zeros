@@ -55,6 +55,7 @@ import { startSettingsWatcher, type SettingsWatcher } from "./settings/watch";
 import { onWorktreeContentChange, startGitWatcher, type GitWatcher } from "./git/watch";
 import { createLocalWatchHost, type WatchHostClient } from "./git/watch-host-client";
 import { invalidateWorkspaceChangeProbes } from "./git/workspace-change-probe";
+import { fetchCreatedWorkspaceSubmodules } from "./git/submodules";
 import { LocalTransport } from "./transport/local";
 import type { Transport, TransportClient } from "./transport/types";
 import {
@@ -1320,6 +1321,9 @@ export class ZerosEngine {
         this.setup.start({ workspaceId, command, target }),
       );
     });
+    this.workspace.setSubmoduleFetcher((workspaceId) =>
+      this.fetchCreatedWorkspaceSubmodules(workspaceId),
+    );
     this.workspace.setSetupStopper((workspaceId) =>
       this.setup.stop(workspaceId),
     );
@@ -3675,6 +3679,30 @@ export class ZerosEngine {
     });
     starts.add(tracked);
     return tracked;
+  }
+
+  /** Fetch submodules before setup and run-on-create when the repository's
+   *  Local `git.fetch_submodules` setting is on. Archive/delete blocks new
+   *  process starts and then drains this one, so the poll aborts the clone
+   *  well inside that drain's deadline. Never rejects. */
+  private fetchCreatedWorkspaceSubmodules(workspaceId: string): Promise<void> {
+    if (!this.workspaceAllowsProcessStart(workspaceId)) return Promise.resolve();
+    const controller = new AbortController();
+    const watch = setInterval(() => {
+      if (!this.workspaceAllowsProcessStart(workspaceId)) controller.abort();
+    }, 500);
+    watch.unref?.();
+    const run = fetchCreatedWorkspaceSubmodules(workspaceId, controller.signal)
+      .then((note) => {
+        if (note && this.workspaceAllowsProcessStart(workspaceId)) {
+          this.setup.recordNote(workspaceId, note);
+        }
+      })
+      .catch((error) => {
+        console.error(`[submodules] fetch failed for ${workspaceId}:`, error);
+      })
+      .finally(() => clearInterval(watch));
+    return this.trackWorkspaceProcessStart(workspaceId, run);
   }
 
   /** Register a Code actor in the ordinary owner-local lifecycle drain. Only
@@ -7854,6 +7882,7 @@ export class ZerosEngine {
           // (.env, .npmrc, …), so they must observe the COMPLETE set. Resolves
           // immediately in the normal case (no pending pass); never rejects.
           void whenSeedingSettled(created.workspaceId)
+            .then(() => this.fetchCreatedWorkspaceSubmodules(created.workspaceId))
             .then(() => {
               if (!this.workspaceAllowsProcessStart(created.workspaceId)) {
                 return;

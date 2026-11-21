@@ -40,6 +40,8 @@ const SETUP_PREFIX = "setup:";
 /** Keep at most the last 512 KB of setup output in memory (the tail is what a
  *  user reads after a failed install). Older bytes are dropped with a marker. */
 const MAX_LOG_BYTES = 512 * 1024;
+const MAX_NOTE_BYTES = 64 * 1024;
+const MAX_NOTES = 256;
 const TRUNCATION_MARKER = "\r\n[2m…[earlier setup output truncated]…[0m\r\n";
 
 /** PTY session id for one setup RUN. `gen` makes it unique per run so a
@@ -405,6 +407,22 @@ export class SetupManager {
 
   private readonly settledWaiters = new Map<string, Set<() => void>>();
 
+  /** Post-create provisioning messages (submodules) shown above the setup
+   * output. In memory like the log itself, and bounded. */
+  private readonly notes = new Map<string, string>();
+
+  /** Show one provisioning message at the top of this workspace's Setup log. */
+  recordNote(workspaceId: string, note: string): void {
+    this.notes.delete(workspaceId);
+    this.notes.set(workspaceId, note.slice(0, MAX_NOTE_BYTES));
+    while (this.notes.size > MAX_NOTES) {
+      const oldest = this.notes.keys().next().value;
+      if (typeof oldest !== "string") break;
+      this.notes.delete(oldest);
+    }
+    this.onChange(getWorkspaceById(workspaceId) ? workspaceId : null);
+  }
+
   /** Null when this workspace's setup is not running; otherwise resolves when
    *  it passes, fails or stops. Work that needs installed dependencies (Design
    *  style builds) waits on it instead of failing in a half-set-up worktree. */
@@ -663,7 +681,7 @@ export class SetupManager {
     return {
       state: ws ? (ws.setupState ?? null) : (entry?.state ?? null),
       command: entry?.command ?? null,
-      log: entry?.log ?? "",
+      log: (this.notes.get(workspaceId) ?? "") + (entry?.log ?? ""),
       truncated: entry?.truncated ?? false,
     };
   }

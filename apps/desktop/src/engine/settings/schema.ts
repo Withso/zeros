@@ -134,6 +134,11 @@ const gitSchema = z
     archive_on_merge: z
       .boolean()
       .describe("Archive a workspace automatically when its PR merges."),
+    fetch_submodules: z
+      .boolean()
+      .describe(
+        "Fetch the repository's github.com submodules after a Local workspace is created. Off by default.",
+      ),
   })
   .partial();
 
