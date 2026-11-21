@@ -24,7 +24,7 @@ const project = (id: string, name: string, level: "organization" | "personal", o
     setup: null, setupScript: null, position })), ...extra,
 });
 const onError = (hono: Hono) => hono.onError((error, c) =>
-  error instanceof HttpError ? c.json({ error: { code: error.code } }, error.status) : c.json({ error: { code: "internal" } }, 500));
+  error instanceof HttpError ? c.json({ error: { code: error.code, message: error.message } }, error.status) : c.json({ error: { code: "internal" } }, 500));
 
 describe("released desktops' Create and Cloud Computer, answered from one-repository projects", () => {
   // The organization's, alice's own, and a two-repository one that is never offered.
@@ -157,6 +157,21 @@ describe("a create from a project", () => {
     expect(denied.createWorkspace).not.toHaveBeenCalled();
     expect((await create(alice, APP).send({ organizationId: org, projectId: P2, repository: "withso/web" })).status).toBe(422);
     expect((await create(alice, APP).send({ organizationId: org })).status).toBe(400);
+  });
+
+  it("refuses a create body entry naming a repository that is not one of the project's, before any access check or write", async () => {
+    for (const repository of ["acme/other", "withso/zeros", "withso/web-next"]) {
+      const f = create(alice, APP);
+      const refused = await f.send({ organizationId: org, projectId: P2, repositories: [{ repository: "withso/web", baseBranch: "next" }, { repository, baseBranch: "main" }] });
+      expect([repository, refused.status, refused.body.error.code]).toEqual([repository, 422, "invalid_request"]);
+      expect(refused.body.error.message).toContain(repository);
+      expect(f.deps.projectAccess).not.toHaveBeenCalled();
+      expect(f.createWorkspace).not.toHaveBeenCalled();
+    }
+    // GitHub's casing of one of the project's own repositories is that repository.
+    const f = create(alice, APP);
+    expect((await f.send({ organizationId: org, projectId: P2, repositories: [{ repository: "Acme/Web", baseBranch: "next" }] })).status).toBe(201);
+    expect(f.deps.projectAccess).toHaveBeenCalledWith(org, alice, expect.arrayContaining([{ repository: "acme/web", repositoryId: "45", baseBranch: "next" }]));
   });
 
   it("asks for a Cloud Computer build while the live one still holds repositories", async () => {
