@@ -42,7 +42,7 @@ import { zerosEditorTheme } from "./theme";
 import { shikiColors } from "./shiki-highlight";
 import { indentationMarkers } from "@replit/codemirror-indentation-markers";
 import { wrappedLineIndent } from "./wrapped-line-indent";
-import { indentGuideClickSnap } from "./indent-click-snap";
+import { fileFolding } from "./file-folding";
 import { shikiLangForPath } from "./shiki-lang";
 import { useCodeThemeFg } from "./use-code-theme-fg";
 import { useCodeTheme } from "@/renderer/shared/theme/use-code-theme";
@@ -116,11 +116,6 @@ const BASE_EXTENSIONS: Extension[] = [
       activeDark: "color-mix(in srgb, var(--fg1) 14%, transparent)",
     },
   }),
-  // Those guides sit on the indentation itself, so clicking one used to drop the
-  // caret INSIDE the indent (the leftmost guide is column 0) and typing broke
-  // the line out of its block. A plain click there now lands at the line's
-  // content start; drag/⇧/⌘/⌥/double-click keep CM's behavior.
-  indentGuideClickSnap(),
   closeBrackets(),
   highlightSelectionMatches(),
   editorHistory.of(history()),
@@ -174,12 +169,13 @@ const COMPACT_EDITOR_THEME = EditorView.theme({
   },
 });
 
-// Full File-tab editors wrap every logical line and reserve vertical scrolling
-// as the only navigation axis. Wrapped continuation rows hang at the line's
-// own indentation so long lines stay inside their block instead of cutting
-// across the indent guides. Kept out of compact command editors, whose
+// Full File-tab editors fold ranges, wrap every logical line and reserve
+// vertical scrolling as the only navigation axis. Wrapped continuation rows
+// hang at the line's own indentation so long lines stay inside their block
+// instead of cutting across the indent guides. Kept out of compact command editors, whose
 // single-line command ergonomics are a separate contract.
-const FILE_LINE_WRAP_EXTENSIONS: Extension[] = [
+const FILE_EDITOR_EXTENSIONS: Extension[] = [
+  fileFolding(),
   EditorView.lineWrapping,
   wrappedLineIndent(),
   EditorView.theme({
@@ -328,7 +324,7 @@ export function CodeEditor({
       // when the code theme's appearance (=== the app variant) flips. The base
       // foreground rides along so it applies on the first paint.
       zerosEditorTheme(codeThemeOpt.appearance === "dark", baseFg),
-      ...(!compact ? FILE_LINE_WRAP_EXTENSIONS : []),
+      ...(!compact ? FILE_EDITOR_EXTENSIONS : []),
       ...(compact ? [Prec.highest(COMPACT_EDITOR_THEME)] : []),
       ...langExt,
       // Shiki color layer (exact parity). Recreated when the file's language or

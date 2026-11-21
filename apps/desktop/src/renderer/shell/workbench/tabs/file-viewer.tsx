@@ -205,6 +205,8 @@ interface FileViewerProps {
    *  sweep would spawn a separate File tab and yank away from the Changes tab. */
   onOpenPath?: (path: string, opts: OpenFileOpts) => void;
   reviewExternal?: CodeReviewExternalSource;
+  /** Only the Changes tab hosts review comments; file tabs show none. */
+  reviewComments?: boolean;
 }
 
 const MARKDOWN_EXT = new Set(["md", "markdown", "mdx"]);
@@ -292,6 +294,7 @@ export function FileViewer({
   bodyTrailing,
   onOpenPath,
   reviewExternal,
+  reviewComments = false,
 }: FileViewerProps) {
   const viewerRef = useRef<HTMLDivElement | null>(null);
   const [mediaActionsContainer, setMediaActionsContainer] = useState<HTMLSpanElement | null>(null);
@@ -307,6 +310,7 @@ export function FileViewer({
     active: active && !skillSource,
     refreshKey,
     external: reviewExternal,
+    comments: reviewComments,
   });
   const gitStatus = useWorkspaceReviewStatus({
     cwd,

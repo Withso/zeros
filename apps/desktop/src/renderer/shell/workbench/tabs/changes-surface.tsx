@@ -941,6 +941,7 @@ export function ChangesSurface({
                       path={viewTarget.path}
                       workspaceId={workspaceId}
                       reviewExternal={reviewExternal}
+                      reviewComments
                       diff={viewTarget.diff}
                       diffScope={viewTarget.diffScope}
                       diffSha={viewTarget.diffSha}
