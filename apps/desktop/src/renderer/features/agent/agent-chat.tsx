@@ -1465,6 +1465,12 @@ function AgentChatBody({
     // An older cloud worker can't switch in place: open the picked agent in a new tab.
     if (committed === "unsupported") switchAgentModel({ ...pick, agentName: pick.agentName ?? "" });
     if (committed !== "switched") return;
+    if (wasRunning) {
+      // The footer may have read the stopped turn's row before closeSession let
+      // it finalize, and that turn is no longer the tail to fall back on.
+      const prefix = turnRowKey(chatId, "");
+      for (const key of turnRowCache.keys()) if (key.startsWith(prefix)) turnRowCache.invalidate(key);
+    }
     const delivery = transcript.then((snapshot) => {
       if (snapshot.count === 0) return;
       const attachment = buildForkTranscriptAttachment({
