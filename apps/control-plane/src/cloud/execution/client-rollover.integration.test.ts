@@ -166,6 +166,18 @@ database("in-place client authentication through the real router, PostgreSQL and
     expect((await context(client.open.contextId)).state).not.toBe("active");
   });
 
+  it("admits a teammate on a current desktop to a workspace of several repositories, and refuses one that does not declare them", async () => {
+    await pool.query("UPDATE cloud_v2_workspaces SET checkout_path='zeros-app/api', folder='zeros-app' WHERE id=$1", [f.workspace.id]);
+    const call = (features: string) => f.call(`/v1/cloud-v2/workspaces/${f.workspace.id}/connect`, "POST", { wake: false }, f.viewer, {
+      "X-Zeros-Team-Sharing": "1", "X-Zeros-Client-Features": features, "X-Zeros-Client-Instance": randomUUID() });
+    const refused = await call(feature);
+    expect(refused.status).toBe(409);
+    expect(await refused.json()).toMatchObject({ error: { code: "client_update_required", message: "Update Zeros to open this workspace." } });
+    const admitted = await call(`${feature},workspace-repositories-v1`);
+    expect(admitted.status).toBe(200);
+    expect((await admitted.json()).protocols[1]).toMatch(/^ticket\./);
+  });
+
   it("does not negotiate rollover with an old desktop", async () => {
     const client = await connect(false);
     expect(client.messages.some(message => message.type === "CLOUD_CONNECTION_AUTH")).toBe(false);

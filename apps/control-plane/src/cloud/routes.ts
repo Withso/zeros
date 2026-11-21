@@ -10,6 +10,7 @@ import { Hono, type Context } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import { z } from "zod";
 import { CLOUD_CLIENT_ROLLOVER_FEATURE } from "./client-auth-contract.js";
+import { WORKSPACE_REPOSITORIES_FEATURE } from "./contract.js";
 import type { CloudWorkspaceSync } from "./workspace-sync/store.js";
 import { createCloudWorkspaceSyncRoutes } from "./workspace-sync/routes.js";
 import type { CloudWorkspaceGithubReadTokens } from "./workspace-sync/github-read-token.js";
@@ -52,6 +53,8 @@ export type CloudGithubRepositoryState = { repositoryId: string; branch: string 
   prNumber: number | null; prState: "draft" | "ready" | "merged" | "closed" | null; prUrl: string | null };
 
 const CONNECT_TICKET_TTL_MS = 60_000;
+/** A released desktop shows this as its open failure's description. */
+export const CLIENT_UPDATE_REQUIRED_MESSAGE = "Update Zeros to open this workspace.";
 export const CLOUD_V2_CAPABILITIES: CloudV2Capabilities = {
   design: false, browser: false, simulators: false, terminal: true, files: true, git: true,
   agents: ["codex", "claude", "cursor"],
@@ -263,6 +266,11 @@ export function createCloudV2Routes(deps: CloudV2RouteDeps): Hono {
     const acting = await connectionWorkspace(c, id.data);
     const active = Boolean(acting);
     const workspace = acting?.workspace ?? await deps.store.get(id.data, userId);
+    const clientFeatures = c.req.header("X-Zeros-Client-Features")?.split(",").map(value => value.trim()) ?? [];
+    // A desktop that does not declare several repositories would root at the first
+    // checkout while the chats live in the project folder: refused before any wake or ticket.
+    if (workspace.folder && !clientFeatures.includes(WORKSPACE_REPOSITORIES_FEATURE))
+      throw new HttpError(409, "client_update_required", CLIENT_UPDATE_REQUIRED_MESSAGE);
     const explicitWake = c.req.query("wakePolicy") === "explicit";
     if (explicitWake && (workspace.archivedAt || workspace.state === "stopping" || (!wake && workspace.state === "stopped")))
       throw new HttpError(409, "cloud_workspace_not_running", "This cloud workspace is not ready for a connection");
@@ -277,7 +285,6 @@ export function createCloudV2Routes(deps: CloudV2RouteDeps): Hono {
       }
     }
     let clientInstanceId: string | undefined;
-    const clientFeatures = c.req.header("X-Zeros-Client-Features")?.split(",").map(value => value.trim()) ?? [];
     if (active && clientFeatures.includes(CLOUD_CLIENT_ROLLOVER_FEATURE)) {
       const instance = uuid.safeParse(c.req.header("X-Zeros-Client-Instance"));
       if (!instance.success) throw new HttpError(400, "invalid_request", "Invalid cloud connection binding");

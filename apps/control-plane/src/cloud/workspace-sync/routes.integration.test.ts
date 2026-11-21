@@ -36,6 +36,20 @@ suite("direct sync through the production composition and PostgreSQL", () => {
     expect(await clocks()).toEqual(before); expect(f.fetcher).toHaveBeenCalledTimes(calls);
   });
 
+  it("refuses a sync grant for a workspace of several repositories, whose sync would cover only its first", async () => {
+    const mac = await f.register();
+    await f.call(`${f.path}/macs/${mac.device.deviceId}/connect`, "POST", undefined, mac.headers);
+    const { rows: [workspace] } = await pool.query("SELECT checkout_path FROM cloud_v2_workspaces WHERE id=$1", [f.workspaceId]);
+    await pool.query("UPDATE cloud_v2_workspaces SET checkout_path='zeros-app/api', folder='zeros-app' WHERE id=$1", [f.workspaceId]);
+    const calls = f.fetcher.mock.calls.length;
+    const refused = await f.grant(mac.headers);
+    expect(refused.status).toBe(409);
+    expect((await refused.json()).error).toMatchObject({ code: "sync_unsupported" });
+    expect(f.fetcher.mock.calls.length).toBe(calls);
+    await pool.query("UPDATE cloud_v2_workspaces SET folder=NULL, checkout_path=$2 WHERE id=$1", [f.workspaceId, workspace.checkout_path]);
+    expect((await f.grant(mac.headers)).status).toBe(200);
+  });
+
   it("keeps the Mac flag passive and the released strict Mac reply compatible", async () => {
     const mac = await f.register(), macPath = `${f.path}/macs/${mac.device.deviceId}`;
     const legacyMac = z.object({ deviceId: z.string().uuid(), name: z.string(), connected: z.boolean(), active: z.boolean(),
