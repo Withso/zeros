@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import pg from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import type { AuthedUser } from "../../auth.js";
+import { withSystemTx } from "../../db.js";
 import { teamSharingFixture, type TeamSharingFixture } from "./test-fixture.js";
 
 const database = process.env.TEST_DATABASE_URL ? describe : describe.skip;
@@ -56,5 +57,28 @@ database("a private repository's workspace on every team route", () => {
       expect([route, (await response.json()).error?.code]).toEqual([route, "private_workspace"]);
     }
     expect((await pool.query("SELECT count(*)::int AS n FROM audit_log WHERE org_id=$1", [f.organizationId])).rows[0].n).toBe(0);
+  });
+
+  it("keeps a departed member's private workspace from everyone, admins and owners included, with no way to take it over", async () => {
+    // As production: leaving clears an active workspace's Creator.
+    await pool.query("UPDATE cloud_v2_workspaces SET execution_mode='active' WHERE id=$1", [f.own.id]);
+    await withSystemTx(pool, tx => tx.query("DELETE FROM organization_members WHERE org_id=$1 AND user_id=$2", [f.organizationId, f.viewer.id]));
+    expect((await pool.query("SELECT creator_user_id, private_owner_user_id, creator_absent_reason FROM cloud_v2_workspaces WHERE id=$1", [f.own.id])).rows[0])
+      .toEqual({ creator_user_id: null, private_owner_user_id: f.viewer.id, creator_absent_reason: "left" });
+    const path = `/v1/cloud-v2/workspaces/${f.own.id}`;
+    for (const user of [f.creator, f.admin, f.outsider]) {
+      for (const query of ["", "&creator=none", "&archived=include"]) {
+        const page = await (await call(`/v1/cloud-v2/workspaces?organizationId=${f.organizationId}${query}`, user)).json();
+        expect((page.workspaces ?? []).map((row: { id: string }) => row.id)).not.toContain(f.own.id);
+      }
+      for (const [route, method, body] of [[path, "GET"], [`${path}/reassign-candidates?limit=10`, "GET"],
+        [`${path}/reassign`, "POST", { requestId: randomUUID(), toUserId: f.admin.id, expectedCreatorUserId: null, expectedCreatorRevision: "2" }],
+        [`${path}/archive`, "POST", {}], [path, "DELETE"]] as [string, string, unknown?][])
+        expect([route, method, (await call(route, user, method, body)).status]).toEqual([route, method, 404]);
+    }
+    // The departed member reaches nothing of the organization either.
+    expect((await call(path, f.viewer)).status).toBe(404);
+    expect((await pool.query("SELECT creator_user_id FROM cloud_v2_workspaces WHERE id=$1", [f.own.id])).rows[0].creator_user_id).toBeNull();
+    expect((await pool.query("SELECT count(*)::int AS n FROM cloud_v2_reassignments WHERE workspace_id=$1", [f.own.id])).rows[0].n).toBe(0);
   });
 });

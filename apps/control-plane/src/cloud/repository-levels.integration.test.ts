@@ -45,6 +45,20 @@ d("GitHub at two levels", () => {
     await expectCode(levels.repositories(org, removed), "not_found");
   });
 
+  it("keeps a member's private repositories from everyone after they leave, and lets them do nothing", async () => {
+    const entry = await levels.add(org, member, { repository: "member-gh/notes", repositoryId: "9001", level: "private" });
+    await pool.query("DELETE FROM organization_members WHERE org_id=$1 AND user_id=$2", [org, member]);
+    for (const viewer of [owner, admin, other]) {
+      expect((await levels.repositories(org, viewer)).private).toEqual([]);
+      expect(await levels.levelFor(org, viewer, "member-gh/notes")).toBeNull();
+      await expectCode(levels.share(org, viewer, entry.id), viewer === other ? "forbidden" : "not_found");
+      await expectCode(levels.remove(org, viewer, entry.id), "not_found");
+    }
+    for (const action of [levels.repositories(org, member), levels.connections(org, member), levels.remove(org, member, entry.id),
+      levels.add(org, member, { repository: "member-gh/more", repositoryId: "9002", level: "private" })])
+      await expectCode(action, "not_found");
+  });
+
   it("lets owners and admins add shared repositories through an organization connection only", async () => {
     await expectCode(levels.add(org, admin, { repository: "withso/zeros", repositoryId: "42", level: "shared" }), "organization_connection_required");
     await expectCode(connectOrganization(member), "forbidden");
