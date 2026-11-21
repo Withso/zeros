@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 import {
+  liveProviderBindingUpdate,
   persistChatRowsWithBestEffortIdentityClears,
   providerIdentityClearForTransition,
 } from "../chat-provider-identity-persistence";
@@ -99,5 +100,24 @@ describe("persistChatRowsWithBestEffortIdentityClears", () => {
         vi.fn().mockRejectedValue(upsertFailure),
       ),
     ).rejects.toBe(upsertFailure);
+  });
+});
+
+describe("liveProviderBindingUpdate", () => {
+  it("persists a new binding for the chat's own agent", () => {
+    expect(liveProviderBindingUpdate({ id: "c", agentId: "codex", providerBinding: null }, binding, null))
+      .toEqual({ providerBinding: binding, sessionId: "thread-1" });
+  });
+
+  it("skips a binding the chat already holds", () => {
+    expect(liveProviderBindingUpdate({ id: "c", agentId: "codex", providerBinding: { ...binding } }, binding, null))
+      .toBeNull();
+  });
+
+  it("skips the previous agent's binding left on the slot by an in-place switch", () => {
+    // UPDATE_CHAT_SETTINGS drops a binding for another provider, so writing it
+    // would only bump updatedAt and re-run the persisting effect forever.
+    expect(liveProviderBindingUpdate({ id: "c", agentId: "claude", providerBinding: null }, binding, null))
+      .toBeNull();
   });
 });
