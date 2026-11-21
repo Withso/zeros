@@ -221,7 +221,10 @@ export class CloudPromptRuntime {
   async recover(chatId: string, messageId: string, retry = false): Promise<boolean> {
     const owner = this.context(chatId); if (!owner) return false;
     const chat = useWorkspaceStore.getState().chats.find(chat => chat.id === chatId), permissionMode = this.permissionMode(chatId, owner);
-    const selection = { model: chat?.model, effort: chat?.effort || undefined, ...(permissionMode ? { permissionMode } : {}) };
+    // A retry runs on the chat's current agent, which an in-place switch may have changed.
+    const agentId = CloudV2PromptSchema.shape.agentId.safeParse(chat?.agentId);
+    const selection = { model: chat?.model, effort: chat?.effort || undefined, ...(permissionMode ? { permissionMode } : {}),
+      ...(agentId.success ? { agentId: agentId.data } : {}) };
     const channel = this.channel(owner); await channel.refresh();
     const entry = channel.snapshot.entries.find(entry => entry.payload.userMessageId === messageId);
     if (!entry) return false;

@@ -108,7 +108,7 @@ import { readPlan, isPlanReviewRequest } from "./renderers/plan-body";
 import { WorkspaceDirectoryPicker } from "./workspace-directory-picker";
 import { useProjects } from "../../state/use-projects";
 import { turnGet } from "../../platform/turns";
-import { turnRowCache, turnRowKey } from "../../state/read-caches";
+import { refreshChatTurnRows, turnRowCache, turnRowKey } from "../../state/read-caches";
 import { useCachedRead } from "../../state/use-cached-read";
 import { findProjectForFolder } from "../../state/workspace-resolution";
 import { Bot, Square, ArrowLeft, Check, GitBranch, RotateCw } from "lucide-react";
@@ -316,15 +316,19 @@ import {
   cachedWindowOlderMessages as ipcCachedWindowOlderMessages,
   truncateMessagesFrom as ipcTruncateMessagesFrom,
   persistTranscriptRow,
+  switchCloudChatAgent,
 } from "./agent-history-client";
 import {
   buildHarnessSwitchMessage,
-  canAutoContinueAfterSwitch,
+  switchContinuation,
+  type PendingSwitchContinuation,
   HARNESS_SWITCH_CONTINUE_NOTE,
   harnessSwitchBlockedByQueue,
   harnessSwitchTranscriptMode,
   isHarnessChange,
   isPendingPick,
+  commitHarnessSwitch,
+  type HarnessSwitchCommit,
   pickLabel,
   type AgentModelPick,
 } from "./harness-switch";
@@ -1234,9 +1238,9 @@ function AgentChatBody({
   );
 
   // A fresh chat switches agent in place, clearing the native mode ids and engine
-  // session id, which don't translate across agents. A started Local chat
-  // stages the pick (applyStagedPick); a started cloud chat opens a new tab for
-  // the picked agent and carries the draft across.
+  // session id, which don't translate across agents. A started chat stages the
+  // pick (applyStagedPick); this opens a new tab for it only when an older cloud
+  // worker can't switch in place, carrying the draft across.
   const agentSwitchRef = useRef(0);
   const switchAgentModel = useCallback(
     function selectAgentModel(sel: AgentModelSelection) {
@@ -1362,7 +1366,7 @@ function AgentChatBody({
   const stagedPick = stagedPickState && stagedPickState.chatId === chatId && chatThread &&
     isPendingPick(stagedPickState.pick, chatThread) ? stagedPickState.pick : null;
   const cloudChat = isCloudWorkspace(chatThread?.folder);
-  const continueAfterSwitchRef = useRef<{ chatId: string; agentId: string } | null>(null);
+  const continueAfterSwitchRef = useRef<PendingSwitchContinuation | null>(null);
   const [continueAfterSwitch, setContinueAfterSwitch] = useState(0);
 
   const recordSwitchRow = useCallback(
@@ -1400,12 +1404,12 @@ function AgentChatBody({
     });
     if (!isHarnessChange(chatThread.agentId, pick.agentId)) {
       applyModelInPlace(pick.model);
-      void recordSwitchRow(chatId, row, !cloudChat);
+      void recordSwitchRow(chatId, row, true);
       return;
     }
-    if (cloudChat) return;
     const wasRunning = session.status === "streaming";
-    if (wasRunning) {
+    // A cloud worker stops the running turn itself as part of its switch.
+    if (wasRunning && !cloudChat) {
       try { await agentSessions.cancel(chatId); } catch { /* Local cancellation remains best-effort. */ }
     }
     const sourceLabel = transcriptPillLabel({ title: chatThread.title, summary: "" });
@@ -1421,24 +1425,47 @@ function AgentChatBody({
     // The read above observes the engine before the row is written, so the
     // seeded transcript is the conversation the previous agent saw.
     await transcript.catch(() => null);
-    await recordSwitchRow(chatId, row, true);
-    const closing = agentSessions.closeSession(chatId);
-    if (closing) await closing.catch(() => false);
-    const current = useWorkspaceStore.getState().chats.find((candidate) => candidate.id === chatId);
-    if (!current || current.agentId !== chatThread.agentId) return;
-    // Clearing sessionId drops the old provider's binding; the same chat id,
-    // lineage and attribution carry over to the new agent.
-    updateChatSettings({
-      agentId: pick.agentId,
-      agentName: pick.agentName || null,
-      model: pick.model,
-      effort,
-      fast,
-      permissionMode: born.permissionMode,
-      lastModeId: born.lastModeId,
-      prePlanModeId: undefined,
-      sessionId: undefined,
-    });
+    const fromAgentId = chatThread.agentId;
+    let committed: HarnessSwitchCommit;
+    try {
+      committed = await commitHarnessSwitch({
+        cloud: cloudChat,
+        switchCloudAgent: () => capabilitiesBridge
+          ? switchCloudChatAgent(capabilitiesBridge, {
+            chatId, fromAgentId: fromAgentId ?? "", agentId: pick.agentId, model: pick.model, effort, fast, message: row,
+          })
+          : Promise.reject(new Error("Not connected to the cloud workspace yet.")),
+        recordRow: () => recordSwitchRow(chatId, row, !cloudChat),
+        closeSession: () => agentSessions.closeSession(chatId),
+        stillCurrent: () => {
+          const current = useWorkspaceStore.getState().chats.find((candidate) => candidate.id === chatId);
+          // The worker's chat change can reach the renderer before this step.
+          return !!current && (current.agentId === fromAgentId || (cloudChat && current.agentId === pick.agentId));
+        },
+        // Clearing sessionId drops the old provider's binding; the same chat id,
+        // lineage and attribution carry over to the new agent.
+        updateSettings: () => updateChatSettings({
+          agentId: pick.agentId,
+          agentName: pick.agentName || null,
+          model: pick.model,
+          effort,
+          fast,
+          permissionMode: born.permissionMode,
+          lastModeId: born.lastModeId,
+          prePlanModeId: undefined,
+          sessionId: undefined,
+        }),
+      });
+    } catch (error) {
+      console.error("[Zeros] agent switch failed:", error);
+      toast.error(error instanceof Error && error.message ? error.message : "Couldn't switch agent.");
+      setStagedPickState({ chatId, pick });
+      return;
+    }
+    // An older cloud worker can't switch in place: open the picked agent in a new tab.
+    if (committed === "unsupported") switchAgentModel({ ...pick, agentName: pick.agentName ?? "" });
+    if (committed !== "switched") return;
+    if (wasRunning) refreshChatTurnRows(chatId);
     const delivery = transcript.then((snapshot) => {
       if (snapshot.count === 0) return;
       const attachment = buildForkTranscriptAttachment({
@@ -1457,10 +1484,10 @@ function AgentChatBody({
     });
     trackPendingTextAttachmentDelivery(chatId, delivery);
     if (wasRunning) {
-      continueAfterSwitchRef.current = { chatId, agentId: pick.agentId };
+      continueAfterSwitchRef.current = { chatId, agentId: pick.agentId, sourceKey: transcriptSourceKey(chatId) };
       void delivery.then(() => setContinueAfterSwitch((n) => n + 1));
     }
-  }, [chatThread, chatId, stagedPick, queuedMessages.length, cloudChat, session.status, agentSessions, applyModelInPlace, recordSwitchRow, updateChatSettings]);
+  }, [chatThread, chatId, stagedPick, queuedMessages.length, cloudChat, session.status, agentSessions, applyModelInPlace, recordSwitchRow, updateChatSettings, capabilitiesBridge, switchAgentModel]);
 
   const stagePick = useCallback(
     (pick: AgentModelPick) => {
@@ -1485,10 +1512,9 @@ function AgentChatBody({
           effort={chatThread.effort}
           fast={!!chatThread.fast}
           onSelectAgentModel={(sel) => {
-            if (conversationStarted && !cloudChat) stagePick(sel);
+            if (conversationStarted) stagePick(sel);
             else switchAgentModel(sel);
           }}
-          redirectCrossAgent={conversationStarted && cloudChat}
           onConfigure={({ effort, fast }) => {
             const effortChanged = effort !== chatThread.effort;
             updateChatSettings({ effort, fast });
@@ -3858,17 +3884,22 @@ function AgentChatBody({
   // A turn stopped by an agent switch continues under the new agent once the
   // chat row names it and the seeded transcript is staged.
   useEffect(() => {
-    const pending = continueAfterSwitchRef.current;
-    if (!pending || pending.chatId !== chatId || chatThread?.agentId !== pending.agentId) return;
+    const decision = switchContinuation(continueAfterSwitchRef.current, {
+      chatId,
+      agentId: chatThread?.agentId,
+      stagedSourceKeys,
+      composer: serializeComposerState(),
+    });
+    if (decision === "wait") return;
     continueAfterSwitchRef.current = null;
     // A draft the user is still writing is theirs to send.
-    if (!canAutoContinueAfterSwitch(serializeComposerState())) {
+    if (decision === "ask") {
       toast.info("The conversation is attached. Send to continue with the new agent.");
       return;
     }
     void handleSend();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [continueAfterSwitch, chatId, chatThread?.agentId]);
+  }, [continueAfterSwitch, chatId, chatThread?.agentId, stagedSourceKeys]);
 
   /** Leave queued-edit mode. Restores the stashed pre-edit draft, releases
    *  the provider-side queue hold, and hands focus back to the composer. */

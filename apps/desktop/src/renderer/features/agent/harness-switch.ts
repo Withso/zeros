@@ -10,7 +10,7 @@ export const HARNESS_SWITCH_TOOL_KIND = "harness_switch";
 /** Appended to the seeded transcript when a running turn was stopped for the
  * switch, so the new agent resumes the work instead of summarizing it. */
 export const HARNESS_SWITCH_CONTINUE_NOTE =
-  "The previous agent was stopped mid-turn by an agent switch. Continue the task from where it stopped.";
+  "The previous agent was stopped mid-turn by an agent switch. Continue the task from where it stopped without asking the user to confirm first.";
 
 export interface AgentModelPick {
   agentId: string;
@@ -93,4 +93,51 @@ export function canAutoContinueAfterSwitch(
   composer: { displayText: string; attachments: readonly unknown[] } | null | undefined,
 ): boolean {
   return !!composer && !composer.displayText.trim() && composer.attachments.length === 1;
+}
+
+export interface PendingSwitchContinuation {
+  chatId: string;
+  agentId: string;
+  sourceKey: string;
+}
+
+/** The seeded transcript is staged into the composer asynchronously, after the
+ *  chat row already names the new agent, so the decision waits for its chip. */
+export function switchContinuation(
+  pending: PendingSwitchContinuation | null,
+  state: {
+    chatId: string | null | undefined;
+    agentId: string | null | undefined;
+    stagedSourceKeys: readonly string[];
+    composer: { displayText: string; attachments: readonly unknown[] } | null | undefined;
+  },
+): "wait" | "send" | "ask" {
+  if (!pending || pending.chatId !== state.chatId || pending.agentId !== state.agentId) return "wait";
+  if (!state.stagedSourceKeys.includes(pending.sourceKey)) return "wait";
+  return canAutoContinueAfterSwitch(state.composer) ? "send" : "ask";
+}
+
+export type HarnessSwitchCommit = "switched" | "stale" | "unsupported";
+
+/** Moves the chat to the picked harness. A cloud worker rejects a settings
+ * upsert while the chat still belongs to the old agent, so its own switch
+ * (which also stops the turn and saves the row) runs first. `unsupported`
+ * means a pinned older worker; nothing has changed yet. */
+export async function commitHarnessSwitch(steps: {
+  cloud: boolean;
+  switchCloudAgent: () => Promise<HarnessSwitchCommit>;
+  recordRow: () => Promise<void>;
+  closeSession: () => Promise<unknown> | null | undefined | void;
+  stillCurrent: () => boolean;
+  updateSettings: () => void;
+}): Promise<HarnessSwitchCommit> {
+  if (steps.cloud) {
+    const outcome = await steps.switchCloudAgent();
+    if (outcome !== "switched") return outcome;
+  }
+  await steps.recordRow();
+  await Promise.resolve(steps.closeSession()).catch(() => false);
+  if (!steps.stillCurrent()) return "stale";
+  steps.updateSettings();
+  return "switched";
 }
