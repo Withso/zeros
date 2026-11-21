@@ -67,6 +67,7 @@ import { hasShortcutPriorityClaim } from "../../features/agent/shortcut-priority
 
 import { popoverBoundaryProps } from "@/renderer/shared/ui/popover-boundary";
 import { Surface } from "@/renderer/shared/ui/layout/surface";
+import { observePullRequestAppearance } from "./pr-appearance";
 // Proportional columns (2026-07-17): workbench grows by `(1 - ratio)·100`,
 // the complement of conversation pane's `--zeros-column-2-ratio` grow factor (see
 // CONVERSATION_DEFAULT_WIDTH_CLS in conversation/conversation-pane.tsx) — so a window
@@ -412,12 +413,11 @@ export function WorkbenchPane({
     lastWorkbenchInteractionRef.current = Date.now();
   };
   const seenPrByWorkspace = useRef(new Map<string, number | null>());
-  const workspaceId = activeWorkspace?.id ?? null;
+  // The current repository's key: its pull request number is that repository's.
+  const prWatchKey = repositoryWorkspace?.id ?? activeWorkspace?.id ?? null;
   useEffect(() => {
-    if (!workspaceId) return;
-    const prev = seenPrByWorkspace.current.get(workspaceId);
-    seenPrByWorkspace.current.set(workspaceId, prNumber);
-    if (prev !== null || prNumber == null) return; // not a live null → PR flip
+    if (!prWatchKey) return;
+    if (!observePullRequestAppearance(seenPrByWorkspace.current, prWatchKey, prNumber)) return; // not a live null → PR flip
     const WORKBENCH_IDLE_MS = 10_000;
     if (Date.now() - lastWorkbenchInteractionRef.current < WORKBENCH_IDLE_MS)
       return;
@@ -425,7 +425,7 @@ export function WorkbenchPane({
     if (reviewTabIdRef.current) {
       dispatch({ type: "ACTIVATE_WORKBENCH_TAB", id: reviewTabIdRef.current });
     }
-  }, [workspaceId, prNumber, dispatch]);
+  }, [prWatchKey, prNumber, dispatch]);
 
   // ── New-workspace defaults: Open file + Setup in primary tabs ────────────────────────────
   // A newly-created workspace may reuse stale persisted UI state if its path was
