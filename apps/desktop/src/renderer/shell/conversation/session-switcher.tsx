@@ -26,6 +26,8 @@ export function sessionName(chat: ChatThread): string {
   return chat.title.trim() || "New session";
 }
 
+const ROW_INDENT_CLS = ["pl-2", "pl-6", "pl-8", "pl-10", "pl-12"] as const;
+
 const CRUMB_CLS = "text-fg1 min-w-0 max-w-60 gap-1.5 aria-expanded:bg-bg2-highlight";
 
 /** Working, or the question/permission it waits on, across these sessions. */
@@ -57,8 +59,7 @@ function SessionRow({ node, depth, folder, activeId, expanded, onToggle, onSelec
       onSelect={() => onSelect(node.chat.id)}
       data-session-row={node.chat.id}
       aria-current={node.chat.id === activeId ? "true" : undefined}
-      className="aria-[current=true]:bg-bg2-highlight"
-      style={{ paddingLeft: 8 + depth * 16 }}
+      className={`aria-[current=true]:bg-bg2-highlight ${ROW_INDENT_CLS[Math.min(depth, ROW_INDENT_CLS.length - 1)]}`}
     >
       {onToggle ? (
         <span
@@ -76,7 +77,7 @@ function SessionRow({ node, depth, folder, activeId, expanded, onToggle, onSelec
       <AgentIcon agentId={node.chat.agentId ?? ""} iconUrl={null} size={14} />
       <span className="min-w-0 flex-1 truncate">{sessionName(node.chat)}</span>
       {node.chat.folder !== folder && (
-        <span className="text-fg3 border-border1 shrink-0 rounded border px-1 text-[11px] leading-4" data-session-workspace="">
+        <span className="text-fg3 border-border1 shrink-0 rounded-sm border px-1 text-xxs leading-4" data-session-workspace="">
           {folderName(node.chat.folder)}
         </span>
       )}
