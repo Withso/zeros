@@ -16,6 +16,8 @@ export interface RepoGitConfig {
   /** Only new branches use this preference; unavailable GitHub or custom names fall back to zeros. */
   branchPrefixType: BranchPrefixType;
   branchPrefix: string | null;
+  /** Fetch github.com submodules once, after a Local workspace is created. */
+  fetchSubmodules: boolean;
 }
 
 const DEFAULTS: RepoGitConfig = {
@@ -24,6 +26,7 @@ const DEFAULTS: RepoGitConfig = {
   baseBranchExplicit: false,
   branchPrefixType: DEFAULT_BRANCH_PREFIX_TYPE,
   branchPrefix: null,
+  fetchSubmodules: false,
 };
 
 function readBranchPrefixType(value: unknown): BranchPrefixType {
@@ -60,6 +63,7 @@ export function resolveRepoGit(
         branchPrefix: normalizeBranchPrefix(
           typeof g.branch_prefix === "string" ? g.branch_prefix : undefined,
         ),
+        fetchSubmodules: g.fetch_submodules === true,
       };
     }
   } catch {

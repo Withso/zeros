@@ -28,3 +28,5 @@ c03ae82370c0825bc7f383a4669f34d4f9544f37:apps/desktop/src/renderer/platform/brid
 0ca6b00b80a9a2b1a840a16590c71531397d8fc7:apps/control-plane/src/cloud/ready-copies.integration.test.ts:generic-api-key:367
 0208d5ece0edcd7dc42d47cbd57b8698532ff8bb:apps/control-plane/src/cloud/ready-copy-search.test.ts:generic-api-key:11
 1ced1006c9ee03448c148bc8785909b26164552d:apps/control-plane/src/cloud/ready-copies.integration.test.ts:generic-api-key:338
+# Fake missing-commit id next to a fixture named "secret" in a submodule test (not a credential); the next commit renames the fixture and uses a computed constant.
+8bf9a1d64f0d2a901dc31fe434e691f1804232c9:apps/desktop/src/engine/git/__tests__/submodules.test.ts:generic-api-key:544

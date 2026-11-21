@@ -215,8 +215,9 @@ export interface ComposerEditorApi {
   setContent: (content: ComposerInitialContent) => void;
   /** Replace the document with plain text (no pills). */
   setText: (text: string) => void;
-  /** Append plain text at the end + focus (⌥-click element context, etc.). */
-  appendText: (text: string) => void;
+  /** Append plain text at the end (⌥-click element context, etc.); focuses
+   *  the composer unless `focus` is false. */
+  appendText: (text: string, options?: { focus?: boolean }) => void;
   focus: () => void;
   /** Render where the textarea was. */
   editorContent: ReactNode;
@@ -1181,12 +1182,17 @@ export function useComposerEditor(
     [abandonVideoReads, syncSourceKeys, resyncGraphIds],
   );
 
-  const appendText = useCallback((text: string) => {
+  const appendText = useCallback((text: string, options?: { focus?: boolean }) => {
     const ed = editorRef.current;
     if (!ed || ed.isDestroyed || !text) return;
     const end = ed.state.doc.content.size;
-    ed.chain().insertContentAt(end, text).scrollIntoView().run();
-    ed.view.focus();
+    // A node, not a string: a string is parsed as HTML, so a path such as
+    // src/<p>a.ts would lose its brackets and split into paragraphs.
+    ed.chain()
+      .insertContentAt(end, { type: "paragraph", content: [{ type: "text", text }] })
+      .scrollIntoView()
+      .run();
+    if (options?.focus !== false) ed.view.focus();
     setIsEmpty(ed.isEmpty);
   }, []);
 
