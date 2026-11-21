@@ -248,6 +248,16 @@ export type CloudV2Config = {
    * before any VM exists. CLOUD_V2_ASYNC_CREATE_ENABLED=false keeps every
    * create synchronous; unset means enabled. */
   asyncCreate?: boolean;
+  /** Ready copies (cloud/ready-copies.ts), CLOUD_V2_READY_COPIES_ENABLED=true. Default off: off,
+   * Cloud Computer builds install every repository and creates clone as before.
+   * On, a build makes the base only (runtime, Git LFS, install script), each
+   * repository gets a stopped machine cloned and set up from it, and creates
+   * fork that machine, falling back to the direct clone when none is ready. */
+  readyCopies?: boolean;
+  /** CLOUD_V2_SHARED_BASE_SNAPSHOT: the Boat named snapshot organizations
+   * without an install script start from when ready copies are on. Unset,
+   * each organization builds its own base. */
+  sharedBaseSnapshot?: string;
   /** Execution token verdicts served from memory (cloud/execution/authorization-cache.ts). Default off. */
   executionAuthCache?: "off" | "shadow" | "on";
   /** Finish the stop when Boat archives a running VM on its own (cloud/provider-stop.ts). Default off. */
@@ -284,6 +294,11 @@ function loadCloudV2Config(env: NodeJS.ProcessEnv, channel: string): CloudV2Conf
   if (checkpointRetry && !["true", "false"].includes(checkpointRetry)) throw new Error("Invalid environment: CLOUD_V2_CHECKPOINT_RETRY_ENABLED must be true or false");
   const asyncCreate = env.CLOUD_V2_ASYNC_CREATE_ENABLED?.trim().toLowerCase();
   if (asyncCreate && !["true", "false"].includes(asyncCreate)) throw new Error("Invalid environment: CLOUD_V2_ASYNC_CREATE_ENABLED must be true or false");
+  const readyCopies = env.CLOUD_V2_READY_COPIES_ENABLED?.trim().toLowerCase();
+  if (readyCopies && !["true", "false"].includes(readyCopies)) throw new Error("Invalid environment: CLOUD_V2_READY_COPIES_ENABLED must be true or false");
+  const sharedBaseSnapshot = env.CLOUD_V2_SHARED_BASE_SNAPSHOT?.trim() || undefined;
+  if (sharedBaseSnapshot && !/^[a-z0-9][a-z0-9-]{0,61}[a-z0-9]$/.test(sharedBaseSnapshot))
+    throw new Error("Invalid environment: CLOUD_V2_SHARED_BASE_SNAPSHOT must be a Boat snapshot name");
   const executionAuthCache = env.CLOUD_V2_EXECUTION_AUTH_CACHE?.trim().toLowerCase() || "off";
   if (!["off", "shadow", "on"].includes(executionAuthCache)) throw new Error("Invalid environment: CLOUD_V2_EXECUTION_AUTH_CACHE must be off, shadow or on");
   const providerStopRecovery = env.CLOUD_V2_PROVIDER_STOP_RECOVERY?.trim().toLowerCase() || "off";
@@ -326,6 +341,8 @@ function loadCloudV2Config(env: NodeJS.ProcessEnv, channel: string): CloudV2Conf
     promptOutbox: promptOutbox === "true",
     messageAuthority: messageAuthority !== "false",
     checkpointRetry: checkpointRetry === "true",
+    readyCopies: readyCopies === "true",
+    ...(sharedBaseSnapshot ? { sharedBaseSnapshot } : {}),
     asyncCreate: asyncCreate !== "false",
     executionAuthCache: executionAuthCache as "off" | "shadow" | "on",
     providerStopRecovery: providerStopRecovery as "off" | "observe" | "on",
