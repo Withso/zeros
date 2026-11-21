@@ -118,3 +118,14 @@ it("tells the broker which repository Git asks for", async () => {
   await gitCredential("get", "protocol=https\nhost=github.com\npath=../..\n\n", socket);
   expect(received).toEqual([{ kind: "token", repository: "withso/web" }, { kind: "token" }, { kind: "token" }, { kind: "token" }]);
 });
+
+it("refuses a request naming a repository that is not the workspace's own, with one repository as with several", async () => {
+  const f = await fixture();
+  const { root: _root, repositories: _repositories, ...one } = f.workspace;
+  for (const scope of [new WorkspaceScope(one), new WorkspaceScope(f.workspace)]) {
+    for (const repository of ["acme/other", "withso/docs", "withso/api/extra", 42])
+      expect(() => scope.repositoryFor({ repository }), String(repository)).toThrow("another workspace");
+    // GitHub compares names case-insensitively: the first's own name is the first.
+    for (const repository of ["withso/api", "Withso/API"]) expect(scope.repositoryFor({ repository })).toBe(scope.several ? scope.repositories[0] : undefined);
+  }
+});

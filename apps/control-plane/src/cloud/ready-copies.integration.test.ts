@@ -15,7 +15,7 @@ import { CloudRepositoryLevels } from "./repository-levels.js";
 import { CloudProjects } from "./projects.js";
 import { scheduleCloudDeletion } from "./deletion.js";
 import { withSystemTx } from "../db.js";
-import { otherRepositories, workerRepositories } from "./workspace-repositories.js";
+import { otherRepositories, workerRepositories, workspaceTokenSource } from "./workspace-repositories.js";
 import { CloudGithubPrStore } from "./github-pr-store.js";
 import { hashCloudV2Token } from "./tokens.js";
 
@@ -926,5 +926,79 @@ d("cloud v2 ready copies", () => {
     expect(document).not.toHaveProperty("checkoutFolder");
     // Each repository's context has the same access rule as the first's: only its creator outside shared execution.
     for (const repository of [undefined, "withso/web"]) await expect(prs.context(id, admin, undefined, repository)).rejects.toMatchObject({ status: 404 });
+  });
+
+  it("binds every repository a worker or client names to the workspace's own: anything else is refused and changes nothing, and the first's own name is no name", async () => {
+    await liveBase();
+    const app = await project([{ repository: "withso/api" }, { repository: "withso/web" }], { name: "Zeros App" });
+    const docs = await project([{ repository: "withso/docs" }, { repository: "withso/site" }], { name: "Docs" });
+    const store = new CloudV2Store(pool), base = (await copies.base(org))!, prs = new CloudGithubPrStore(pool);
+    const make = async (projectId: string, folder: string, repositories: [string, string][], token: string) => {
+      const id = randomUUID(), boot = randomUUID();
+      await store.createWorkspace({ id, organizationId: org, creatorUserId: member, name: folder, repository: repositories[0]![0], branch: "zeros/app-1",
+        baseBranch: "main", computerBuildId: base.buildId, projectId, checkoutFolder: `${folder}/${repositories[0]![1]}`, folder,
+        repositories: repositories.map(([repository, name]) => ({ repository, repositoryId: repositoryId(repository), folder: name, branch: "zeros/app-1",
+          baseBranch: "main", baseCommit: "c".repeat(40) })) });
+      await pool.query("UPDATE cloud_v2_workspaces SET state='running', worker_token_hash=$2, worker_boot_id=$3 WHERE id=$1", [id, hashCloudV2Token(token), boot]);
+      for (const [repository] of repositories)
+        await pool.query(`INSERT INTO cloud_v2_github_sources(workspace_id,source_repository,repository_id) VALUES($1,lower($2),$3) ON CONFLICT DO NOTHING`,
+          [id, repository, repositoryId(repository)]);
+      return { id, boot, token };
+    };
+    const a = await make(app, "zeros-app", [["withso/api", "api"], ["withso/web", "web"]], "synthetic-worker-token-a");
+    const b = await make(docs, "docs", [["withso/docs", "docs"], ["withso/site", "site"]], "synthetic-worker-token-b");
+    const report = (sequence: number, headSha: string) => ({ sequence, branch: "zeros/app-1", baseBranch: "main", headSha });
+    for (const workspace of [a, b]) await prs.checkout(workspace.token, workspace.boot, report(1, "a".repeat(40)));
+    await prs.checkout(a.token, a.boot, { ...report(1, "b".repeat(40)), repository: "withso/web" });
+    await prs.checkout(b.token, b.boot, { ...report(1, "b".repeat(40)), repository: "withso/site" });
+    await pool.query("UPDATE cloud_v2_github_workspaces SET pr_number=5, pr_state='draft', pr_url='https://github.com/withso/api/pull/5' WHERE workspace_id=$1", [a.id]);
+    await pool.query("UPDATE cloud_v2_github_workspace_repositories SET pr_number=6, pr_state='draft', pr_url='https://github.com/withso/web/pull/6' WHERE workspace_id=$1", [a.id]);
+    // A source outside the workspace's repositories (an older access scope) is not one of its repositories either.
+    await pool.query("INSERT INTO cloud_v2_github_sources(workspace_id,source_repository,repository_id) VALUES($1,'withso/extra',$2)", [a.id, repositoryId("withso/extra")]);
+    const state = async () => (await pool.query(`SELECT 'first' AS kind, row_to_json(g.*)::text AS row FROM cloud_v2_github_workspaces g WHERE workspace_id = ANY($1::uuid[])
+      UNION ALL SELECT 'other', row_to_json(g.*)::text FROM cloud_v2_github_workspace_repositories g WHERE workspace_id = ANY($1::uuid[])
+      UNION ALL SELECT 'workspace', concat_ws(' ', id, repository, branch, base_branch, updated_at) FROM cloud_v2_workspaces WHERE id = ANY($1::uuid[]) ORDER BY 1, 2`,
+      [[a.id, b.id]])).rows;
+    const before = await state();
+
+    // Checkout reports carry the worker's configured names exactly: another workspace's, an unknown one, and case variants are refused.
+    for (const repository of ["acme/other", "withso/docs", "withso/site", "withso/extra", "Withso/Web", "WITHSO/WEB", "Withso/api"])
+      await expect(prs.checkout(a.token, a.boot, { ...report(2, "d".repeat(40)), branch: "elsewhere", repository }), repository).rejects.toMatchObject({ status: 404 });
+    // Unicode look-alikes (Cyrillic e, a zero-width space, a fullwidth w) never parse.
+    for (const repository of ["withso/w\u0435b", "withso/web\u200b", "\uff57ithso/web"])
+      await expect(Promise.resolve().then(() => prs.checkout(a.token, a.boot, { ...report(2, "d".repeat(40)), repository }))).rejects.toThrow(/pattern/);
+    expect(await state()).toEqual(before);
+
+    // Pull request requests name a repository as the client shows it (GitHub's casing, a renamed repository's new name),
+    // and only ever one of this workspace's own; never the first one in its place.
+    for (const repository of ["acme/other", "withso/docs", "Withso/Docs", "withso/site", "withso/extra"])
+      await expect(prs.context(a.id, member, undefined, repository), repository).rejects.toMatchObject({ status: 404 });
+    expect(await prs.context(a.id, member, undefined, "WITHSO/API")).not.toHaveProperty("other");
+    expect(await prs.context(a.id, member, undefined, "Withso/Web")).toMatchObject({ other: { repository: "withso/web" } });
+    await pool.query("UPDATE cloud_v2_github_workspace_repositories SET canonical_repository='withso/web-next' WHERE workspace_id=$1", [a.id]);
+    expect(await prs.context(a.id, member, undefined, "withso/web-next")).toMatchObject({ other: { repository: "withso/web" }, repository: "withso/web-next" });
+    await pool.query("UPDATE cloud_v2_github_workspace_repositories SET canonical_repository='withso/web' WHERE workspace_id=$1", [a.id]);
+
+    // A token is minted only for one of the workspace's repositories that is also one of its sources.
+    const source = (workspace: string, repository: string | null) => withSystemTx(pool, tx => workspaceTokenSource(tx, workspace, repository));
+    expect(await source(a.id, null)).toEqual({ repository: "withso/api", repositoryId: repositoryId("withso/api") });
+    expect(await source(a.id, "withso/web")).toEqual({ repository: "withso/web", repositoryId: repositoryId("withso/web") });
+    expect(await source(a.id, "Withso/Web")).toEqual({ repository: "withso/web", repositoryId: repositoryId("withso/web") });
+    for (const repository of ["acme/other", "withso/docs", "withso/site", "withso/extra"]) expect(await source(a.id, repository), repository).toBeNull();
+    expect(await source(b.id, "withso/web")).toBeNull();
+    expect(await state()).toEqual(before);
+
+    // The first repository named by its own name is the same report as one without a name: one sequence, one row.
+    await prs.checkout(a.token, a.boot, { ...report(2, "e".repeat(40)), repository: "withso/api" });
+    await prs.checkout(a.token, a.boot, report(2, "e".repeat(40)));
+    for (const named of [{}, { repository: "withso/api" }])
+      await expect(prs.checkout(a.token, a.boot, { ...report(2, "f".repeat(40)), ...named })).rejects.toMatchObject({ status: 409 });
+    const first = (await pool.query("SELECT checkout_sequence, head_sha, pr_number FROM cloud_v2_github_workspaces WHERE workspace_id=$1", [a.id])).rows[0];
+    expect(first).toEqual({ checkout_sequence: "2", head_sha: "e".repeat(40), pr_number: 5 });
+    expect((await pool.query("SELECT count(*)::int AS n FROM cloud_v2_github_workspace_repositories WHERE workspace_id=$1 AND repository_id=$2",
+      [a.id, repositoryId("withso/api")])).rows[0].n).toBe(0);
+    const after = await state();
+    expect(after.filter(row => !row.row.includes(`"workspace_id":"${a.id}"`) || row.kind === "other")).toEqual(
+      before.filter(row => !row.row.includes(`"workspace_id":"${a.id}"`) || row.kind === "other"));
   });
 });

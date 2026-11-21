@@ -130,6 +130,18 @@ const merge = {
 };
 
 describe("cloud PR service authority", () => {
+  it("refuses a malformed repository name before reading anything, and lets open bind a well-formed one to the workspace", async () => {
+    const { deps } = fixture();
+    const open = vi.fn(async () => { throw new HttpError(404, "not_found", "This repository is not part of this workspace."); });
+    const service = new CloudGithubPrService({ ...deps, open });
+    for (const repository of ["withso/w\u0435b", "withso/web\u200b", "\uff57ithso/web", "a/b/c", "other", "", 42, null])
+      await expect(service.execute("workspace", "creator", { op: "gh.authStatus", params: {}, repository }), String(repository))
+        .rejects.toMatchObject({ status: 422 });
+    expect(open).not.toHaveBeenCalled();
+    await expect(service.execute("workspace", "creator", { op: "gh.authStatus", params: {}, repository: "acme/other" })).rejects.toMatchObject({ status: 404 });
+    expect(open).toHaveBeenCalledExactlyOnceWith("workspace", "creator", { checkout: true }, "acme/other");
+  });
+
   it("reports the selected GitHub identity after verifying repository access", async () => {
     const { service, deps } = fixture();
     await expect(

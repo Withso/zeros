@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { otherRepositories, workerRepositories, type WorkerRepositoryConfig } from "./workspace-repositories.js";
+import { otherRepositories, workerRepositories, workspaceTokenSource, type WorkerRepositoryConfig } from "./workspace-repositories.js";
 import { workspaceCheckoutPath } from "./workspace-layout.js";
 import { withExecutionLifetimeRetry } from "./execution/lifetime.js";
 // Assembles cloud workspace v2 from configuration: one store, Boat, the relay
@@ -164,9 +164,7 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
     if (!repository || repository.toLowerCase() === workspace.repository.toLowerCase()) return github.workspaceToken(workspace, "user", purpose, failedTokenSha256);
     // Another repository of a workspace of several: only one of its own sources, checked as its creator.
     requireWorkspaceCreator(workspace);
-    const target = (await withSystemTx(pool, tx => tx.query<{ repository: string; repositoryId: string }>(
-      `SELECT source_repository AS repository, repository_id::text AS "repositoryId" FROM cloud_v2_github_sources WHERE workspace_id=$1 AND source_repository=lower($2)`,
-      [workspace.id, repository]))).rows[0];
+    const target = await withSystemTx(pool, tx => workspaceTokenSource(tx, workspace.id, repository));
     if (!target) throw new HttpError(403, "github_repository_access_required", "This repository is not part of this workspace.");
     return github.token({ organizationId: workspace.organizationId, userId: workspace.creatorUserId }, target, "user", purpose, () => authorizeSource(workspace), failedTokenSha256);
   };
@@ -259,10 +257,8 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
     githubToken: async (context, check, purpose, failed, repository) => {
       const target = await withSystemTx(pool, async tx => {
         await check(tx);
-        // The workspace's first repository, or the one named, which must be one of its sources.
-        const row = (await tx.query<{ repository: string; repositoryId: string }>(`SELECT s.source_repository AS repository,s.repository_id::text AS "repositoryId"
-          FROM cloud_v2_github_sources s JOIN cloud_v2_workspaces w ON w.id=s.workspace_id
-          WHERE w.id=$1 AND s.source_repository=lower(coalesce($2::text, w.repository))`, [context.workspace_id, repository ?? null])).rows[0];
+        // The workspace's first repository, or the one named, which must be one of its own.
+        const row = await workspaceTokenSource(tx, context.workspace_id, repository ?? null);
         if (!row) throw new HttpError(409, "actor_changed", "Execution source changed");
         return row;
       });
@@ -605,9 +601,7 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
   const otherRepositoryToken = async (workspace: CloudV2LifecycleWorkspace, repository: string) => {
     const actor = await lifecycleExecution(execution, workspace);
     if (!actor) return githubToken(workspace, "git", undefined, repository);
-    const target = (await withSystemTx(pool, tx => tx.query<{ repository: string; repositoryId: string }>(
-      `SELECT source_repository AS repository, repository_id::text AS "repositoryId" FROM cloud_v2_github_sources WHERE workspace_id=$1 AND source_repository=lower($2)`,
-      [workspace.id, repository]))).rows[0];
+    const target = await withSystemTx(pool, tx => workspaceTokenSource(tx, workspace.id, repository));
     if (!target) throw new HttpError(403, "github_repository_access_required", "This repository is not part of this workspace.");
     return github.token({ organizationId: workspace.organizationId, userId: actor.userId }, target, "read", "computer", actor.check);
   };

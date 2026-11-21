@@ -77,7 +77,10 @@ describe("cloud GitHub protocol parity", () => {
     expect(CloudGithubPrRequestSchema.safeParse(value).success).toBe(accepted);
     expect(server.safeParse(value).success).toBe(accepted);
   });
-  it("does not let worker checkout reports retarget a repository", () => {
+  // The schema only shapes the name. The control plane binds it to one of the
+  // reporting workspace's own repositories and refuses anything else without a
+  // write (ready-copies.integration.test.ts, "binds every repository ...").
+  it("lets a worker checkout report name a well-formed owner/name repository and refuses any malformed name", () => {
     const valid = {
       sequence: 1,
       branch: "work",
@@ -88,6 +91,27 @@ describe("cloud GitHub protocol parity", () => {
       expect(schema.safeParse(valid).success).toBe(true);
       expect(
         schema.safeParse({ ...valid, repository: "other/repo" }).success,
+      ).toBe(true);
+      for (const repository of [
+        "",
+        "other",
+        "other/",
+        "/repo",
+        "a/b/c",
+        "other/repo ",
+        "withso/w\u0435b",
+        "withso/web\u200b",
+        "\uff57ithso/web",
+        `${"a".repeat(101)}/repo`,
+        42,
+        null,
+      ])
+        expect(
+          schema.safeParse({ ...valid, repository }).success,
+          String(repository),
+        ).toBe(false);
+      expect(
+        schema.safeParse({ ...valid, repositoryId: "42" }).success,
       ).toBe(false);
       expect(
         schema.safeParse({ ...valid, branch: null, headSha: null }).success,
