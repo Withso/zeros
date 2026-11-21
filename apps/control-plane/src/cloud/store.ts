@@ -1417,7 +1417,7 @@ export class CloudV2Store {
       await tx.query(
         `UPDATE cloud_v2_workspaces SET checkpoint_object=$2, checkpoint_key=$3, checkpoint_sha256=$4, checkpoint_bytes=$5, checkpoint_reuse=$6,
            checkpoint_saved_at=clock_timestamp(), checkpoint_stop_generation=stop_generation, checkpoint_error=NULL,
-           lost_work_restored=NULL, lost_work_since=NULL WHERE id=$1`,
+           lost_work_restored=NULL, lost_work_since=NULL, lost_work_machine=NULL WHERE id=$1`,
         [id, checkpoint.object, JSON.stringify(checkpoint.key), checkpoint.sha256, checkpoint.bytes, reuse ? JSON.stringify(reuse) : null]);
       return { replaced: rows[0].checkpoint_object };
     });
@@ -1615,6 +1615,7 @@ export class CloudV2Store {
   async replaceLostSandbox(id: string, lostSandboxId: string | null, sandboxId: string, renewedAt: Date): Promise<boolean> {
     const result = await withSystemTx(this.pool, tx => tx.query(
       `UPDATE cloud_v2_workspaces SET boat_sandbox_id=$3, lease_renewed_at=$4,
+         lost_work_machine=CASE WHEN backup_probe='clean' AND backup_probe_generation=stop_generation THEN lost_work_machine ELSE coalesce($2::text, lost_work_machine) END,
          lost_work_restored=CASE WHEN backup_probe='clean' AND backup_probe_generation=stop_generation THEN lost_work_restored ELSE 'none' END,
          lost_work_since=CASE WHEN backup_probe='clean' AND backup_probe_generation=stop_generation THEN lost_work_since ELSE coalesce(stopped_at, updated_at) END
        WHERE id=$1 AND state='starting' AND boat_sandbox_id IS NOT DISTINCT FROM $2::text AND NOT restore_pending

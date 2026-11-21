@@ -20,5 +20,7 @@ ALTER TABLE cloud_v2_workspaces
   ADD COLUMN worker_off_unverified_at timestamptz,
   ADD COLUMN lost_work_restored text CHECK (lost_work_restored IN ('none', 'earlier')),
   ADD COLUMN lost_work_since timestamptz,
+  -- The machine Boat reported gone when unbacked work was rebuilt without it. Never deleted by us; server-side only.
+  ADD COLUMN lost_work_machine text,
   ADD CONSTRAINT cloud_v2_lost_work_complete CHECK ((lost_work_restored IS NULL) = (lost_work_since IS NULL));
 CREATE INDEX cloud_v2_workspaces_backup_forked ON cloud_v2_workspaces (backup_forked_at) WHERE backup_forked_at IS NOT NULL;

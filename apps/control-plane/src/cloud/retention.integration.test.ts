@@ -5,11 +5,12 @@
 // not on GitHub, and an archive is the set of such files it captured.
 import { generateKeyPairSync, randomUUID } from "node:crypto";
 import pg from "pg";
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { CloudProviderError } from "./provider-error.js";
 import { resetMigratedTestDatabase } from "../test-database.js";
 import { grantTestPro } from "../test-pro.js";
 import { FakeBoat } from "./__fixtures__/boat-fake.js";
-import { CLOUD_V2_BACKUP_DELAY_MS, CLOUD_V2_CHECKPOINT_RETRY_WINDOW_MS, CloudV2Lifecycle, type CloudV2LifecycleDeps, type CloudV2TimingRecord } from "./lifecycle.js";
+import { CLOUD_V2_BACKUP_DELAY_MS, CLOUD_V2_CHECKPOINT_RETRY_WINDOW_MS, CLOUD_V2_LOSS_CONFIRM_MS, CloudV2Lifecycle, type CloudV2LifecycleDeps, type CloudV2TimingRecord } from "./lifecycle.js";
 import { CloudV2Store } from "./store.js";
 
 const d = process.env.TEST_DATABASE_URL ? describe : describe.skip;
@@ -205,6 +206,60 @@ d("cloud v2 retention", () => {
     expect(replacement.files.get(`${path("app")}/.git/refs/heads/zeros/w`)).toBe("from GitHub");
     expect(replacement.files.has(`${path("api")}/UNPUSHED`)).toBe(false);
     expect(await lostWork()).toEqual({ restored: "none", stoppedAt: stoppedAt.toISOString() });
+  });
+
+  const notFound = () => new CloudProviderError("provider_not_found", "Boat API request did not succeed", false, { httpStatus: 404 });
+  const deletes = () => boat.calls.filter(call => call.op === "delete").map(call => call.args[0]);
+
+  it("does not rebuild a workspace with unbacked work on a single 404, and loses nothing", async () => {
+    boat.write(vm, `${path("api")}/UNPUSHED`, "api work");
+    await stop();
+    await store.transition(id, ["stopped"], "starting");
+    // Boat answers one resume wrongly; the machine is there when asked again.
+    const resume = vi.spyOn(boat, "resume").mockRejectedValueOnce(notFound());
+    const before = boat.calls.length;
+    await lifecycle().tick();
+    expect((await row()).boat_sandbox_id).toBe(vm);
+    expect(boat.calls.slice(before).filter(call => call.op === "fork" || call.op === "create")).toEqual([]);
+    expect(deletes()).toEqual([]);
+    expect(await lostWork()).toBeUndefined();
+    expect(boat.machine(vm)!.files.get(`${path("api")}/UNPUSHED`)).toBe("api work");
+    // The deferred step resumes the same machine.
+    await pool.query("UPDATE cloud_v2_workspaces SET next_attempt_at=NULL WHERE id=$1", [id]);
+    await lifecycle().tick();
+    expect(resume).toHaveBeenCalledTimes(2);
+    expect((await row()).boat_sandbox_id).toBe(vm);
+  });
+
+  it("rebuilds only once two reads apart confirm the machine gone, and never deletes it", async () => {
+    boat.write(vm, `${path("api")}/UNPUSHED`, "api work");
+    await stop();
+    boat.machine(vm)!.state = "deleted";
+    const sleeps: number[] = [];
+    await store.transition(id, ["stopped"], "starting");
+    await lifecycle({ sleep: async ms => { sleeps.push(ms); } }).tick();
+    expect(sleeps).toContain(CLOUD_V2_LOSS_CONFIRM_MS);
+    expect(boat.calls.filter(call => call.op === "inspect" && call.args[0] === vm).length).toBeGreaterThanOrEqual(2);
+    const restored = await row();
+    expect(restored.boat_sandbox_id).not.toBe(vm);
+    expect((await lostWork())?.restored).toBe("none");
+    expect(deletes()).not.toContain(vm);
+    expect((await pool.query("SELECT lost_work_machine FROM cloud_v2_workspaces WHERE id=$1", [id])).rows[0].lost_work_machine).toBe(vm);
+    expect(errors.some(line => line.startsWith("[cloud-v2] rebuilt a workspace whose machine is gone without a backup"))).toBe(true);
+    // The old machine's id is never shown to clients.
+    expect(JSON.stringify(await store.get(id, user))).not.toContain(vm);
+  });
+
+  it("keeps the clean rebuild immediate, and deletes the old machine there", async () => {
+    await stop();
+    boat.machine(vm)!.state = "deleted";
+    const sleeps: number[] = [];
+    await store.transition(id, ["stopped"], "starting");
+    await lifecycle({ sleep: async ms => { sleeps.push(ms); } }).tick();
+    expect(sleeps).not.toContain(CLOUD_V2_LOSS_CONFIRM_MS);
+    expect((await row()).boat_sandbox_id).not.toBe(vm);
+    expect(deletes()).toContain(vm);
+    expect(await lostWork()).toBeUndefined();
   });
 
   it("restores the earlier checkpoint when the VM is lost before the backup, and records that the latest stop's work is missing", async () => {
