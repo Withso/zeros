@@ -10,6 +10,7 @@
 // "<source name> fork". A copy only becomes ready once stopped, and a newer
 // generation replaces it in one transaction; the old machine is deleted only
 // after every fork that began from it has its machine.
+import { projectFolderName, repositoryFolderNames } from "./workspace-layout.js";
 import { createHash, randomUUID } from "node:crypto";
 import type pg from "pg";
 import { withSystemTx, type Tx } from "../db.js";
@@ -67,7 +68,9 @@ export const READY_COPY_OUTPUT_BYTES = 16 * 1024;
 /** Build now: at most one manual start per project in this long. */
 export const READY_COPY_MANUAL_INTERVAL_MS = 10 * 60_000;
 /** What a generation cloned, per repository in position order. */
-export type ReadyCopyRepositoryResult = { repository: string; repositoryId: string; branch: string | null; commit: string | null };
+export type ReadyCopyRepositoryResult = { repository: string; repositoryId: string; branch: string | null; commit: string | null;
+  /** Where it was cloned under /home/user: <project-folder>/<repository-folder>, the layout its workspaces have. */
+  checkoutFolder?: string };
 export type CloudV2ReadyCopy = {
   id: string; organizationId: string; projectId: string; generation: number; state: ReadyCopyState;
   idempotencyKey: string; machineId: string | null; machinePending: boolean; builtFromBase: string | null;
@@ -535,6 +538,25 @@ export class CloudV2ReadyCopies {
     });
   }
 
+  /** A workspace's repositories as [id, checkout folder] in position order, to match a copy's layout. */
+  async workspaceLayout(workspaceId: string): Promise<[string, string | null][]> {
+    const { rows } = await this.tx(tx => tx.query<{ id: string | null; checkout: string | null }>(
+      `SELECT coalesce(r.repository_id, s.repository_id)::text AS id,
+         CASE WHEN r.position=0 THEN w.checkout_path ELSE w.folder || '/' || r.folder END AS checkout
+       FROM cloud_v2_workspace_repositories r JOIN cloud_v2_workspaces w ON w.id=r.workspace_id
+       LEFT JOIN cloud_v2_github_sources s ON s.workspace_id=r.workspace_id AND s.source_repository=lower(r.repository)
+       WHERE r.workspace_id=$1 ORDER BY r.position`, [workspaceId]));
+    return rows.map(row => [row.id ?? "", row.checkout]);
+  }
+
+  /** Each repository's requested base branch and checkout, for the fork's update. */
+  async workspaceBases(workspaceId: string): Promise<{ repository: string; baseBranch: string; checkoutFolder: string | null; first: boolean }[]> {
+    const { rows } = await this.tx(tx => tx.query<{ position: number; repository: string; base_branch: string; checkout: string | null }>(
+      `SELECT r.position, r.repository, r.base_branch, CASE WHEN r.position=0 THEN w.checkout_path ELSE w.folder || '/' || r.folder END AS checkout
+       FROM cloud_v2_workspace_repositories r JOIN cloud_v2_workspaces w ON w.id=r.workspace_id WHERE r.workspace_id=$1 ORDER BY r.position`, [workspaceId]));
+    return rows.map(row => ({ repository: row.repository, baseBranch: row.base_branch, checkoutFolder: row.checkout, first: row.position === 0 }));
+  }
+
   async completeFork(workspaceId: string, sandboxId: string | null): Promise<void> {
     await this.tx(tx => tx.query(
       "UPDATE cloud_v2_ready_copy_forks SET sandbox_id=coalesce($2, sandbox_id), completed_at=coalesce(completed_at, clock_timestamp()) WHERE workspace_id=$1",
@@ -682,9 +704,14 @@ export type ReadyCopyBuilderDeps = {
   logger?: Pick<Console, "warn">;
 };
 
-/** Where a project's repository is cloned in its copy. Until a workspace can
- * hold several repositories, each keeps the workspace layout of today. */
-export const readyCopyRepositoryDir = (repository: string) => `/home/user/${repository}`;
+/** Each repository's folder in a project's copy: the layout a workspace
+ * created from the project now has (workspace-layout.ts), so a fork's checkouts
+ * are where its worker expects them and setup output keeps its paths. */
+export const readyCopyLayout = (project: { name: string; repositories: readonly { repository: string }[] }): string[] => {
+  const folder = projectFolderName(project.name);
+  return repositoryFolderNames(project.repositories.map(entry => entry.repository)).map(name => `${folder}/${name}`);
+};
+const homePath = (checkoutFolder: string) => `/home/user/${checkoutFolder}`;
 
 export class CloudV2ReadyCopyBuilder {
   private closed = false;
@@ -858,9 +885,9 @@ export class CloudV2ReadyCopyBuilder {
       if (installed.exitCode !== 0 || installed.timedOut) throw failure("worker_runtime_install_failed");
     }
     // Every repository is cloned in full first; a refresh fetches into the previous generation's.
-    const result: ReadyCopyRepositoryResult[] = [];
+    const result: ReadyCopyRepositoryResult[] = [], layout = readyCopyLayout(project);
     at.step = "clone";
-    for (const entry of project.repositories) {
+    for (const [index, entry] of project.repositories.entries()) {
       at.repository = entry.repository;
       const target = { repository: entry.repository, repositoryId: entry.repositoryId };
       // An organization project clones through the organization's GitHub connection; a personal one as its member.
@@ -869,10 +896,10 @@ export class CloudV2ReadyCopyBuilder {
         : await this.deps.cloneToken(job.organizationId, base.createdBy, target);
       const header = `Authorization: Basic ${Buffer.from(`x-access-token:${token}`).toString("base64")}\n`;
       const clone = await compute.execLong(machineId, asZeros(checkoutScript({ repository: entry.repository, ...(entry.defaultBranch ? { ref: entry.defaultBranch } : {}) },
-        readyCopyRepositoryDir(entry.repository), entry.repository)), 900, header);
+        homePath(layout[index]!), entry.repository)), 900, header);
       if (clone.exitCode !== 0) throw failure("ready_copy_clone_failed");
       const commit = clone.stdout.trim().split("\n").pop() ?? "";
-      result.push({ repository: entry.repository, repositoryId: entry.repositoryId,
+      result.push({ repository: entry.repository, repositoryId: entry.repositoryId, checkoutFolder: layout[index]!,
         branch: /(?:^|\n)zeros-build-branch=([^\r\n]*)/.exec(clone.stdout)?.[1] || null, commit: /^[0-9a-f]{40}$/.test(commit) ? commit : null });
     }
     // Then each repository's setup in its own folder, in position order, with the project's build secrets.
@@ -882,10 +909,10 @@ export class CloudV2ReadyCopyBuilder {
       const secrets = await this.deps.secrets?.(job.organizationId, job.projectId) ?? {};
       const names = Object.keys(secrets);
       const input = names.length ? names.map(name => `${name}=${Buffer.from(secrets[name]!, "utf8").toString("base64")}`).join("\n") + "\n" : undefined;
-      for (const entry of project.repositories) {
+      for (const [index, entry] of project.repositories.entries()) {
         if (!entry.setup) continue;
         at.repository = entry.repository;
-        const dir = readyCopyRepositoryDir(entry.repository);
+        const dir = homePath(layout[index]!);
         const setup = await compute.execLong(machineId, readyCopySetupCommand(dir, entry.setup, input !== undefined), 3600, input);
         // Only a failed setup keeps its output: the last part, every build secret redacted.
         if (setup.exitCode !== 0 || setup.timedOut)
@@ -907,7 +934,7 @@ export class CloudV2ReadyCopyBuilder {
       // Every member's fork would hold it: this generation never becomes ready.
       if (found.found) {
         const location = readyCopySecretLocation(found.found, values);
-        at.repository = project.repositories.find(entry => location.startsWith(`${readyCopyRepositoryDir(entry.repository)}/`))?.repository ?? null;
+        at.repository = project.repositories.find((_entry, index) => location.startsWith(`${homePath(layout[index]!)}/`))?.repository ?? null;
         throw Object.assign(failure("ready_copy_secret_left"), { detail: location });
       }
       // Fails closed: a copy that was not searched in full never becomes ready.
@@ -954,8 +981,8 @@ export class CloudV2ReadyCopyForks<W extends ReadyCopyWorkspace = ReadyCopyWorks
     compute: CloudV2Compute;
     /** Queues the project's first copy when it has none. */
     queueFirst?(organizationId: string, projectId: string): Promise<unknown>;
-    /** A repository token for the creator, to fetch the base branch. */
-    githubToken?(workspace: W): Promise<{ token: string }>;
+    /** A repository token for the creator, to fetch the base branch: the first repository's, or the one named. */
+    githubToken?(workspace: W, repository?: string): Promise<{ token: string }>;
     now?: () => number;
     logger?: Pick<Console, "warn">;
   }) {}
@@ -987,8 +1014,13 @@ export class CloudV2ReadyCopyForks<W extends ReadyCopyWorkspace = ReadyCopyWorks
       this.deps.logger?.warn(`[cloud-v2] ready copy unavailable; cloning directly (${building ? "still_building" : "none_ready"})`);
       return null;
     }
-    // Only a copy holding this workspace's repository: a project changed since the copy was made clones directly.
-    if (!ready.result?.some(entry => entry.repository === workspace.repository.toLowerCase())) return null;
+    // Only a copy laid out as this workspace is: the same repositories in the same folders. One built
+    // before the project changed (or was renamed) clones directly; moving set-up checkouts would break paths.
+    const layout = await copies.workspaceLayout(workspace.id);
+    if (!ready.result || JSON.stringify(ready.result.map(entry => [entry.repositoryId, entry.checkoutFolder ?? null])) !== JSON.stringify(layout)) {
+      this.deps.logger?.warn("[cloud-v2] ready copy laid out for another version of the project; cloning directly");
+      return null;
+    }
     const begun = await copies.beginFork(workspace.id, workspace.organizationId, ready.id, now);
     if (!begun) return null;
     return this.fork(workspace, begun);
@@ -1008,26 +1040,34 @@ export class CloudV2ReadyCopyForks<W extends ReadyCopyWorkspace = ReadyCopyWorks
     }
   }
 
-  /** Brings the copy's checkout up to the requested base branch before the
-   * worker starts. A failure is not the workspace's: it opens on the copy's
+  /** Brings each of the fork's checkouts up to its requested base branch
+   * before the worker starts. A failure is not the workspace's, and one
+   * repository's never stops another's: that checkout opens on the copy's
    * commit and the worker's own refresh retries the fetch in the background. */
   async fetchBase(workspace: W, sandboxId: string): Promise<boolean> {
-    if (!this.deps.githubToken || !/^[A-Za-z0-9._/-]{1,255}$/.test(workspace.baseBranch) || workspace.baseBranch.startsWith("-")) return false;
-    try {
-      const { token } = await this.deps.githubToken(workspace);
-      const dir = readyCopyRepositoryDir(workspace.repository), q = shellQuote, branch = workspace.baseBranch;
-      const result = await this.deps.compute.execLong(sandboxId, asZeros([
-        "set -e", "IFS= read -r ZEROS_GITHUB_AUTH_HEADER", "export ZEROS_GITHUB_AUTH_HEADER",
-        `git -C ${q(dir)} --config-env=http.extraHeader=ZEROS_GITHUB_AUTH_HEADER fetch --quiet --prune origin ${q(`+refs/heads/${branch}:refs/remotes/origin/${branch}`)}`,
-      ]), 300, `Authorization: Basic ${Buffer.from(`x-access-token:${token}`).toString("base64")}\n`);
-      if (result.exitCode === 0 && !result.timedOut) return true;
-    } catch { /* Reported below; the workspace still opens. */ }
-    this.deps.logger?.warn("[cloud-v2] ready copy fork could not update its base branch; opening on the copy's commit");
-    return false;
+    if (!this.deps.githubToken) return false;
+    const repositories = await this.deps.copies.workspaceBases(workspace.id);
+    let fetched = 0;
+    for (const entry of repositories.length ? repositories : [{ repository: workspace.repository, baseBranch: workspace.baseBranch, checkoutFolder: null, first: true }]) {
+      if (!/^[A-Za-z0-9._/-]{1,255}$/.test(entry.baseBranch) || entry.baseBranch.startsWith("-")) continue;
+      try {
+        const { token } = entry.first ? await this.deps.githubToken(workspace) : await this.deps.githubToken(workspace, entry.repository);
+        const dir = homePath(entry.checkoutFolder ?? workspace.checkoutFolder ?? workspace.repository), q = shellQuote, branch = entry.baseBranch;
+        const result = await this.deps.compute.execLong(sandboxId, asZeros([
+          "set -e", "IFS= read -r ZEROS_GITHUB_AUTH_HEADER", "export ZEROS_GITHUB_AUTH_HEADER",
+          `git -C ${q(dir)} --config-env=http.extraHeader=ZEROS_GITHUB_AUTH_HEADER fetch --quiet --prune origin ${q(`+refs/heads/${branch}:refs/remotes/origin/${branch}`)}`,
+        ]), 300, `Authorization: Basic ${Buffer.from(`x-access-token:${token}`).toString("base64")}\n`);
+        if (result.exitCode === 0 && !result.timedOut) { fetched++; continue; }
+      } catch { /* Reported below; the workspace still opens. */ }
+      this.deps.logger?.warn("[cloud-v2] ready copy fork could not update a repository's base branch; it opens on the copy's commit");
+    }
+    return fetched === Math.max(repositories.length, 1);
   }
 }
 
 export type ReadyCopyWorkspace = { id: string; organizationId: string; repository: string; baseBranch: string; createdAt: string; boatSandboxId: string | null;
+  /** workspace-layout.ts: the first checkout under /home/user. */
+  checkoutFolder?: string | null;
   /** The project the workspace was created from; none for one made before projects. */
   projectId?: string | null;
   /** Set for a workspace of a personal project: its member. */

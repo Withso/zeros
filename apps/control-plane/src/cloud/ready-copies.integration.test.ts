@@ -54,9 +54,9 @@ d("cloud v2 ready copies", () => {
     zeros = await project([{ repository: "withso/zeros", setup: "pnpm install" }], { name: "zeros" });
   });
 
-  /** A create's repositories for a one-repository project, as the create path passes them. */
+  /** A create's repositories for a one-repository project named after its repository, as the create path passes them. */
   const one = (repository: string, branch: string) => ({ repositories: [{ repository, repositoryId: repositoryId(repository),
-    folder: repository.split("/")[1]!, branch, baseBranch: "main" }], checkoutFolder: `p/${repository.split("/")[1]!}` });
+    folder: repository.split("/")[1]!, branch, baseBranch: "main" }], checkoutFolder: `${repository.split("/")[1]!}/${repository.split("/")[1]!}` });
   /** A project written as its routes would, without GitHub. */
   async function project(repositories: { repository: string; setup?: string | null; defaultBranch?: string | null }[],
     options: { level?: "organization" | "personal"; owner?: string; name?: string } = {}): Promise<string> {
@@ -87,10 +87,14 @@ d("cloud v2 ready copies", () => {
   const workspace = async (extra: Partial<ReadyCopyWorkspace> = {}, creator = member): Promise<ReadyCopyWorkspace> => {
     const value = { id: randomUUID(), organizationId: org, repository: "withso/zeros", baseBranch: "main",
       createdAt: new Date(clock).toISOString(), boatSandboxId: null, projectId: zeros, ...extra };
-    await pool.query(`INSERT INTO cloud_v2_workspaces (id, org_id, creator_user_id, name, repository, branch, base_branch, state, project_id, private_owner_user_id)
-      VALUES ($1,$2,$3,'w',$4,$5,'main','creating',$6,$7)`, [value.id, org, creator, value.repository, `zeros/${value.id.slice(0, 8)}`,
-      value.projectId ?? null, value.privateOwnerUserId ?? null]);
-    return value;
+    // Laid out as a create of that one-repository project (named after its repository) lays it out.
+    const name = value.repository.split("/")[1]!, checkout = value.projectId ? `${name}/${name}` : null;
+    await pool.query(`INSERT INTO cloud_v2_workspaces (id, org_id, creator_user_id, name, repository, branch, base_branch, state, project_id, private_owner_user_id, checkout_path)
+      VALUES ($1,$2,$3,'w',$4,$5,'main','creating',$6,$7,$8)`, [value.id, org, creator, value.repository, `zeros/${value.id.slice(0, 8)}`,
+      value.projectId ?? null, value.privateOwnerUserId ?? null, checkout]);
+    await pool.query("UPDATE cloud_v2_workspace_repositories SET repository_id=$2, folder=$3 WHERE workspace_id=$1 AND position=0",
+      [value.id, repositoryId(value.repository), value.projectId ? name : null]);
+    return { ...value, ...(checkout ? { checkoutFolder: checkout } : {}) };
   };
   const forks = () => new CloudV2ReadyCopyForks({ copies, compute: boat, now: () => clock, logger,
     queueFirst: (organizationId, projectId) => copyBuilder().queueFirst(organizationId, projectId) });
@@ -333,17 +337,17 @@ d("cloud v2 ready copies", () => {
     await liveBase();
     boat.script = (machine, command) => {
       if (!command.includes("pnpm install")) return undefined;
-      boat.write(machine.id, "/home/user/withso/zeros/.npmrc", `//registry.npmjs.org/:_authToken=${value}`);
+      boat.write(machine.id, "/home/user/zeros/zeros/.npmrc", `//registry.npmjs.org/:_authToken=${value}`);
       return { exitCode: 0, stdout: "", timedOut: false };
     };
     await copyBuilder({ secrets: (organizationId, projectId) => secrets.open(organizationId, projectId) }).tick();
     const copy = await row(1);
-    expect(copy).toMatchObject({ state: "failed", failureReason: "ready_copy_secret_left", failureDetail: "/home/user/withso/zeros/.npmrc",
+    expect(copy).toMatchObject({ state: "failed", failureReason: "ready_copy_secret_left", failureDetail: "/home/user/zeros/zeros/.npmrc",
       failureRepository: "withso/zeros", failureStep: "secret_search" });
     expect(boat.machine(copy.machineId!)!.state).toBe("deleted");
     expect(await copies.forkable(org, zeros, new Date(clock))).toBeNull();
     expect(await copies.failures(org)).toEqual([expect.objectContaining({ projectId: zeros, project: "zeros", repository: "withso/zeros",
-      step: "secret_search", reason: "ready_copy_secret_left", detail: "/home/user/withso/zeros/.npmrc" })]);
+      step: "secret_search", reason: "ready_copy_secret_left", detail: "/home/user/zeros/zeros/.npmrc" })]);
   });
 
   it.each([
@@ -577,10 +581,10 @@ d("cloud v2 ready copies", () => {
     expect(clones).toHaveLength(2);
     for (const clone of clones) expect(clone).not.toMatch(/--depth|--filter|--single-branch/);
     // Every clone first, then each setup in position order, each in its own folder, then the scrub.
-    expect(at("/home/user/withso/api")).toBeLessThan(at("/home/user/withso/web"));
+    expect(at("/home/user/both/api")).toBeLessThan(at("/home/user/both/web"));
     expect(Math.max(...clones.map(clone => own.indexOf(clone)))).toBeLessThan(at("make api"));
     expect(at("make api")).toBeLessThan(at("make web"));
-    expect(own.find(command => command.includes("make web"))).toContain("/home/user/withso/web");
+    expect(own.find(command => command.includes("make web"))).toContain("/home/user/both/web");
     expect(at("make web")).toBeLessThan(at("rm -rf /tmp/zeros-command-input-*"));
     // The second repository's setup fails: the line says which and where.
     boat.script = (_machine, command) => command.includes("make web") ? { exitCode: 2, stdout: "web failed", timedOut: false } : undefined;
@@ -857,5 +861,37 @@ d("cloud v2 ready copies", () => {
     expect(await withSystemTx(pool, tx => workerRepositories(tx, single, { forked: false }))).toEqual({ firstSetup: { setup: "pnpm install" } });
     // A workspace made before projects: nothing changes.
     expect(await withSystemTx(pool, tx => workerRepositories(tx, { ...single, projectId: undefined } as never, { forked: false }))).toEqual({});
+  });
+
+  it("updates every repository of a fork to its base branch with its own token, one failing fetch stopping no other, and never forks a copy laid out otherwise", async () => {
+    await liveBase();
+    const app = await project([{ repository: "withso/api" }, { repository: "withso/web" }, { repository: "acme/web" }], { name: "Zeros App" });
+    await pool.query("DELETE FROM cloud_v2_ready_copies WHERE project_id=$1", [zeros]);
+    await copyBuilder().reconcile(org, app, "project_created");
+    await copyBuilder().tick();
+    expect((await copies.list(org, app))[0]!.result!.map(entry => entry.checkoutFolder)).toEqual(["zeros-app/api", "zeros-app/web", "zeros-app/web-acme"]);
+    const store = new CloudV2Store(pool), base = (await copies.base(org))!;
+    const make = (folder: string, bases: string[]) => store.createWorkspace({ id: randomUUID(), organizationId: org, creatorUserId: member, name: "Zeros App",
+      repository: "withso/api", branch: "zeros/app-1", baseBranch: bases[0]!, computerBuildId: base.buildId, projectId: app, checkoutFolder: `${folder}/api`, folder,
+      repositories: [["withso/api", "api"], ["withso/web", "web"], ["acme/web", "web-acme"]].map(([repository, name], index) => ({ repository: repository!,
+        repositoryId: repositoryId(repository!), folder: name!, branch: "zeros/app-1", baseBranch: bases[index]!, baseCommit: "c".repeat(40) })) });
+    const workspace = await make("zeros-app", ["main", "next", "release"]);
+    const githubToken = vi.fn(async (_workspace: unknown, repository?: string) => ({ token: `synthetic-${repository ?? "first"}` }));
+    const forks = new CloudV2ReadyCopyForks({ copies, compute: boat, now: () => clock, logger, githubToken });
+    const forked = await forks.prepare({ ...workspace, boatSandboxId: null }) as { sandboxId: string };
+    expect(forked).toHaveProperty("sandboxId");
+    boat.script = (_machine, command) => command.includes("web-acme") ? { exitCode: 128, stdout: "", timedOut: false } : undefined;
+    expect(await forks.fetchBase({ ...workspace, boatSandboxId: forked.sandboxId }, forked.sandboxId)).toBe(false);
+    boat.script = null;
+    const fetches = boat.commands.filter(command => command.machineId === forked.sandboxId && command.command.includes(" fetch "));
+    expect(fetches.map(command => [/\/home\/user\/[^']+/.exec(command.command)![0], /refs\/heads\/([^:]+):/.exec(command.command)![1]])).toEqual([
+      ["/home/user/zeros-app/api", "main"], ["/home/user/zeros-app/web", "next"], ["/home/user/zeros-app/web-acme", "release"]]);
+    expect(fetches.map(command => Buffer.from(command.input!.slice("Authorization: Basic ".length).trim(), "base64").toString())).toEqual([
+      "x-access-token:synthetic-first", "x-access-token:synthetic-withso/web", "x-access-token:synthetic-acme/web"]);
+    expect(warnings.filter(line => line.includes("opens on the copy's commit"))).toHaveLength(1);
+    // The project renamed after its copy was built: a new workspace's folder differs, so it clones directly.
+    const renamed = await make("zeros-studio", ["main", "main", "main"]);
+    expect(await forks.prepare({ ...renamed, boatSandboxId: null })).toBeNull();
+    expect(await copies.forkOf(renamed.id)).toBeNull();
   });
 });
