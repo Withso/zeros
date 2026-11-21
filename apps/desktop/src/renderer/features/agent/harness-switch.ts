@@ -94,3 +94,25 @@ export function canAutoContinueAfterSwitch(
 ): boolean {
   return !!composer && !composer.displayText.trim() && composer.attachments.length === 1;
 }
+
+export interface PendingSwitchContinuation {
+  chatId: string;
+  agentId: string;
+  sourceKey: string;
+}
+
+/** The seeded transcript is staged into the composer asynchronously, after the
+ *  chat row already names the new agent, so the decision waits for its chip. */
+export function switchContinuation(
+  pending: PendingSwitchContinuation | null,
+  state: {
+    chatId: string | null | undefined;
+    agentId: string | null | undefined;
+    stagedSourceKeys: readonly string[];
+    composer: { displayText: string; attachments: readonly unknown[] } | null | undefined;
+  },
+): "wait" | "send" | "ask" {
+  if (!pending || pending.chatId !== state.chatId || pending.agentId !== state.agentId) return "wait";
+  if (!state.stagedSourceKeys.includes(pending.sourceKey)) return "wait";
+  return canAutoContinueAfterSwitch(state.composer) ? "send" : "ask";
+}

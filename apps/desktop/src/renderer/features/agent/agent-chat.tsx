@@ -319,7 +319,8 @@ import {
 } from "./agent-history-client";
 import {
   buildHarnessSwitchMessage,
-  canAutoContinueAfterSwitch,
+  switchContinuation,
+  type PendingSwitchContinuation,
   HARNESS_SWITCH_CONTINUE_NOTE,
   harnessSwitchBlockedByQueue,
   harnessSwitchTranscriptMode,
@@ -1362,7 +1363,7 @@ function AgentChatBody({
   const stagedPick = stagedPickState && stagedPickState.chatId === chatId && chatThread &&
     isPendingPick(stagedPickState.pick, chatThread) ? stagedPickState.pick : null;
   const cloudChat = isCloudWorkspace(chatThread?.folder);
-  const continueAfterSwitchRef = useRef<{ chatId: string; agentId: string } | null>(null);
+  const continueAfterSwitchRef = useRef<PendingSwitchContinuation | null>(null);
   const [continueAfterSwitch, setContinueAfterSwitch] = useState(0);
 
   const recordSwitchRow = useCallback(
@@ -1457,7 +1458,7 @@ function AgentChatBody({
     });
     trackPendingTextAttachmentDelivery(chatId, delivery);
     if (wasRunning) {
-      continueAfterSwitchRef.current = { chatId, agentId: pick.agentId };
+      continueAfterSwitchRef.current = { chatId, agentId: pick.agentId, sourceKey: transcriptSourceKey(chatId) };
       void delivery.then(() => setContinueAfterSwitch((n) => n + 1));
     }
   }, [chatThread, chatId, stagedPick, queuedMessages.length, cloudChat, session.status, agentSessions, applyModelInPlace, recordSwitchRow, updateChatSettings]);
@@ -3858,17 +3859,22 @@ function AgentChatBody({
   // A turn stopped by an agent switch continues under the new agent once the
   // chat row names it and the seeded transcript is staged.
   useEffect(() => {
-    const pending = continueAfterSwitchRef.current;
-    if (!pending || pending.chatId !== chatId || chatThread?.agentId !== pending.agentId) return;
+    const decision = switchContinuation(continueAfterSwitchRef.current, {
+      chatId,
+      agentId: chatThread?.agentId,
+      stagedSourceKeys,
+      composer: serializeComposerState(),
+    });
+    if (decision === "wait") return;
     continueAfterSwitchRef.current = null;
     // A draft the user is still writing is theirs to send.
-    if (!canAutoContinueAfterSwitch(serializeComposerState())) {
+    if (decision === "ask") {
       toast.info("The conversation is attached. Send to continue with the new agent.");
       return;
     }
     void handleSend();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [continueAfterSwitch, chatId, chatThread?.agentId]);
+  }, [continueAfterSwitch, chatId, chatThread?.agentId, stagedSourceKeys]);
 
   /** Leave queued-edit mode. Restores the stashed pre-edit draft, releases
    *  the provider-side queue hold, and hands focus back to the composer. */
