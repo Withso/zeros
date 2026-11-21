@@ -1,18 +1,16 @@
-// The Agents tab: the workspace's parent sessions along the top, and the
-// selected parent's child sessions below, grouped by what they are doing.
-
 import { useMemo, useState } from "react";
 import { AgentAwaitingIcon } from "../../../features/agent/agent-awaiting-indicator";
 import { chatAgentActivity } from "../../../features/agent/agent-activity";
 import { AgentIcon } from "../../../features/agent/agent-icon";
 import { awaitingKindOfSlot, useSessionsStore } from "../../../features/agent/sessions-store";
 import { RunStream } from "../../../shared/ui/loading";
-import { ListRow, Tabs, TabsList, TabsTrigger } from "../../../shared/ui/primitives";
+import { ListRow, Tabs, TabsContent, TabsList, TabsTrigger } from "../../../shared/ui/primitives";
 import { buildSessionTree, sessionRootId, type SessionNode } from "../../../state/session-tree";
 import { selectActiveFolder, useWorkspaceDispatch, useWorkspaceStore, type ChatThread } from "../../../state/store";
 import { useActiveChatId, useChats } from "../../../state/workspace-store";
 import { sessionName } from "../../conversation/session-switcher";
 import type { WorkbenchTab } from "../tab-model";
+import { useWorkbenchStatusSource } from "../tab-status";
 
 type SessionStatus = "input" | "plan" | "running" | "idle";
 
@@ -33,6 +31,8 @@ export function useSessionStatuses(ids: readonly string[]): readonly SessionStat
   }).join(","));
   return useMemo(() => (key ? (key.split(",") as SessionStatus[]) : []), [key]);
 }
+
+const NO_IDS: readonly string[] = [];
 
 function descendants(node: SessionNode): ChatThread[] {
   return node.children.flatMap((child) => [child.chat, ...descendants(child)]);
@@ -76,7 +76,7 @@ function SessionListRow({ chat, folder, status, active, onSelect }: {
   );
 }
 
-export function AgentsTab({ scope }: { tab: WorkbenchTab; active: boolean; scope?: string }) {
+export function AgentsTab({ active, scope }: { tab: WorkbenchTab; active: boolean; scope?: string }) {
   const activeFolder = useWorkspaceStore(selectActiveFolder);
   const folder = scope ?? activeFolder ?? "";
   const chats = useChats();
@@ -96,26 +96,27 @@ export function AgentsTab({ scope }: { tab: WorkbenchTab; active: boolean; scope
     [chats, folder],
   );
   const childIds = useMemo(() => children.map((chat) => chat.id), [children]);
-  const statuses = useSessionStatuses(childIds);
+  // Hidden retained tabs stay inert: no status scans while inactive.
+  const statuses = useSessionStatuses(active ? childIds : NO_IDS);
+  // Stored chats stay browsable while a cloud runtime sleeps.
+  useWorkbenchStatusSource({ pending: false, primary: true, hasContent: chats.length > 0 });
   const select = (id: string) => dispatch({ type: "SET_ACTIVE_CHAT", id });
 
   if (tree.roots.length === 0 && terminals.length === 0) {
     return <div className="text-fg3 flex h-full items-center justify-center text-xs" data-agents-empty="">No sessions yet</div>;
   }
   return (
-    <div className="flex h-full min-h-0 flex-col" data-agents-tab="">
+    <Tabs value={parentId ?? ""} onValueChange={setPicked} className="flex h-full min-h-0 flex-col" data-agents-tab="">
       {tree.roots.length > 0 && (
-        <Tabs value={parentId ?? undefined} onValueChange={setPicked}>
-          <TabsList variant="chrome" aria-label="Parent sessions" className="border-border1 w-full overflow-x-auto border-b">
-            {tree.roots.map((root) => (
-              <TabsTrigger key={root.chat.id} variant="chrome" value={root.chat.id} className="max-w-48" data-agents-parent={root.chat.id}>
-                <span className="min-w-0 truncate">{sessionName(root.chat)}</span>
-              </TabsTrigger>
-            ))}
-          </TabsList>
-        </Tabs>
+        <TabsList variant="chrome" aria-label="Parent sessions" className="border-border1 w-full overflow-x-auto border-b">
+          {tree.roots.map((root) => (
+            <TabsTrigger key={root.chat.id} variant="chrome" value={root.chat.id} className="max-w-48" data-agents-parent={root.chat.id}>
+              <span className="min-w-0 truncate">{sessionName(root.chat)}</span>
+            </TabsTrigger>
+          ))}
+        </TabsList>
       )}
-      <div className="min-h-0 flex-1 overflow-y-auto py-2">
+      <TabsContent value={parentId ?? ""} forceMount className="mt-0 min-h-0 flex-1 overflow-y-auto py-2">
         {parent && children.length === 0 && (
           <p className="text-fg3 px-3 py-2 text-xs">No child sessions</p>
         )}
@@ -146,7 +147,7 @@ export function AgentsTab({ scope }: { tab: WorkbenchTab; active: boolean; scope
             ))}
           </section>
         )}
-      </div>
-    </div>
+      </TabsContent>
+    </Tabs>
   );
 }
