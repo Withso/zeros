@@ -6,7 +6,6 @@ import type { CloudV2InstalledRepository, CloudV2Workspace } from "./store.js";
 import { CloudSourceTargetSchema } from "./source-authority.js";
 import { refuseRuntimeCanary } from "./runtime-canary.js";
 import { executionWorkerRequired } from "./execution/errors.js";
-import { personalRepositoriesForbidden } from "./repository-levels.js";
 
 const uuid = z.string().uuid();
 const branchName = z.string().min(1).max(255).regex(/^(?!-)(?!.*\.\.)(?!.*\/\/)(?!.*\.lock$)[A-Za-z0-9._/-]+$/);
@@ -100,24 +99,29 @@ export function createCloudWorkspaceOperations(deps: CloudV2RouteDeps) {
       const workspace = await deps.store.createWorkspace(create);
       return { status: 201 as const, response: await options.document(workspace) };
     };
-    // Two GitHub levels: a repository only the caller keeps is created from its own entry,
-    // checked against the caller's own GitHub access alone. Shared wins (levelFor).
-    const level = deps.repositoryLevels ? await deps.repositoryLevels.levelFor(input.organizationId, userId, input.repository) : null;
-    if (level?.level === "private") {
-      if (!level.allowed) throw personalRepositoriesForbidden();
+    // Ready copies: the Cloud Computer is tools only and a create is answered
+    // from the one-repository project for this repository, the organization's
+    // first, then the caller's own. Access is checked as the caller's own GitHub.
+    if (deps.projects) {
+      const project = await deps.projects.forRepository(input.organizationId, userId, input.repository);
+      if (!project) throw new HttpError(409, "repository_not_in_project", "Add this repository to a project first.");
       if (!computer.baseOnly) throw await computerUnavailable(input.organizationId, userId);
-      if (!deps.resolveMemberRepository || runtimeCanary || deps.actingUserDefault)
-        throw new HttpError(409, "private_repository_unavailable", "This repository can't be used for this workspace.");
-      const resolved = await deps.resolveMemberRepository(input.organizationId, userId, level.entry.repository);
-      if (resolved.repositoryId !== level.entry.repositoryId) throw new HttpError(409, "cloud_source_review_required", "The repository's identity changed.");
+      if (!deps.resolveMemberRepository) throw new HttpError(503, "github_unavailable", "Repository access could not be verified.");
+      const entry = project.repositories[0]!;
+      const resolved = await deps.resolveMemberRepository(input.organizationId, userId, entry.repository);
+      if (resolved.repositoryId !== entry.repositoryId) throw new HttpError(409, "cloud_source_review_required", "The repository's identity changed.");
       const target = { repository: resolved.repository, repositoryId: resolved.repositoryId };
-      const baseBranch = input.baseBranch ?? resolved.defaultBranch;
+      if (runtimeCanary && runtimeCanary.repositoryId !== target.repositoryId) throw refuseRuntimeCanary();
+      const baseBranch = input.baseBranch ?? entry.defaultBranch ?? resolved.defaultBranch;
       if (await deps.remoteHead(input.organizationId, userId, target, baseBranch) === null)
         throw new HttpError(404, "repository_branch_not_found", `Branch ${baseBranch} does not exist in ${target.repository}.`);
+      const executionRuntime = deps.actingUserDefault ? await deps.activeCreateRuntime?.(runtimeCanary) : undefined;
+      if (deps.actingUserDefault && !executionRuntime) throw executionWorkerRequired();
       const id = randomUUID(), name = input.name ?? input.repository.split("/")[1]!;
-      return record({ id, organizationId: input.organizationId, creatorUserId: userId, name, repository: level.entry.repository,
+      return record({ id, organizationId: input.organizationId, creatorUserId: userId, name, repository: entry.repository,
         branch: input.branch ?? `${prefix}${slug(name)}-${id.slice(0, 8)}`, baseBranch, computerBuildId: computer.buildId,
-        sourceRepositoryId: target.repositoryId, privateRepositoryId: level.entry.id });
+        sourceRepositoryId: target.repositoryId, projectId: project.id,
+        ...(runtimeCanary ? { runtimeCanary } : {}), ...(executionRuntime ? { executionRuntime } : {}) });
     }
     const named = (entry: CloudV2InstalledRepository) => entry.repository.toLowerCase() === input.repository.toLowerCase();
     // Returns before its GitHub checks, which the lifecycle runs before any VM
@@ -141,10 +145,7 @@ export function createCloudWorkspaceOperations(deps: CloudV2RouteDeps) {
     // the requested repository first. Only its branch read, a connection call
     // that authority never invalidates, overlaps the rest.
     const requested = named;
-    // A base for ready copies holds no repository: access is checked for the requested one alone.
-    const namedIndex = computer.repositories.findIndex(requested), indices = [...computer.repositories.keys()]
-      // A renamed repository is found among them all, as before.
-      .filter(index => !computer.baseOnly || namedIndex < 0 || index === namedIndex);
+    const namedIndex = computer.repositories.findIndex(requested), indices = [...computer.repositories.keys()];
     const resolved: Awaited<ReturnType<typeof buildRepository>>[] = [];
     let originalError: HttpError | undefined, early: Promise<string | null> | undefined;
     for (const index of namedIndex < 0 ? indices : [namedIndex, ...indices.filter(other => other !== namedIndex)]) {

@@ -1506,9 +1506,36 @@
             "items": {
               "type": "object",
               "properties": {
-                "repository": {
+                "projectId": {
                   "type": "string",
-                  "maxLength": 200
+                  "format": "uuid",
+                  "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                },
+                "project": {
+                  "type": "string",
+                  "maxLength": 100
+                },
+                "repository": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "maxLength": 201
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "step": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "maxLength": 32
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
                 },
                 "generation": {
                   "type": "integer",
@@ -1546,7 +1573,10 @@
                 }
               },
               "required": [
+                "projectId",
+                "project",
                 "repository",
+                "step",
                 "generation",
                 "reason",
                 "detail",

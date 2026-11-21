@@ -22,7 +22,8 @@ import type { CloudV2ControlFrame } from "./contract.js";
 import { CloudV2ComputerBuilder, CloudV2Computers } from "./computer.js";
 import { CloudV2ReadyCopies, CloudV2ReadyCopyBuilder, CloudV2ReadyCopyForks } from "./ready-copies.js";
 import { CloudV2ReadyCopySecrets } from "./ready-copy-secrets.js";
-import { CloudRepositoryLevels, migrateRepositoryLevels } from "./repository-levels.js";
+import { CloudRepositoryLevels } from "./repository-levels.js";
+import { CloudProjects, migrateProjects } from "./projects.js";
 import { organizationCloneToken } from "./organization-github.js";
 import { createCloudGithubServices } from "./github-composition.js";
 import { CLOUD_V2_READY_CHANNEL, CLOUD_V2_BOOT_CHANNEL, WorkerReadySignals, notifyCloudV2WorkerBoot } from "./worker-ready.js";
@@ -164,8 +165,9 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
   // Ready copies (CLOUD_V2_READY_COPIES_ENABLED): absent while off, so creates and builds run as before.
   const readyCopies = v2.readyCopies === true ? new CloudV2ReadyCopies(pool) : null;
   const readyCopySecrets = readyCopies ? new CloudV2ReadyCopySecrets(pool, keys) : null;
-  // GitHub at two levels rides the same setting: shared and private repositories.
+  // Projects and GitHub at two levels ride the same setting.
   const repositoryLevels = readyCopies ? new CloudRepositoryLevels(pool) : null;
+  const projects = readyCopies ? new CloudProjects(pool) : null;
   const memberGithub = (organizationId: string, userId: string) => github.connections.access({ organizationId, userId });
   const resolveMemberRepository = async (organizationId: string, userId: string, repository: string) => {
     const identity = await (await memberGithub(organizationId, userId)).api.repository({ repository });
@@ -175,8 +177,9 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
     account: z.object({ login: z.string().max(100) }), suspended_at: z.string().nullable().optional() }).passthrough()).max(100) }).passthrough();
   const InstallationRepositoriesPage = z.object({ repositories: z.array(z.object({ id: z.number().int().positive(), full_name: z.string().max(201),
     default_branch: z.string().max(512), private: z.boolean() }).passthrough()).max(100) }).passthrough();
-  const levelRoutes = repositoryLevels ? {
+  const projectRoutes = repositoryLevels && projects ? {
     levels: repositoryLevels,
+    projects,
     resolveMemberRepository,
     visibleInstallation: async (organizationId: string, userId: string, installationId: number) => {
       const http = (await memberGithub(organizationId, userId)).api.http;
@@ -203,12 +206,16 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
       return { repositories: rows.map(row => ({ id: String(row.id), repository: row.full_name, defaultBranch: row.default_branch, private: row.private })),
         nextPage: rows.length === 100 && page < 100 ? page + 1 : null };
     },
-    onShared: (organizationId: string, userId: string, repository: string) => computers.addConfigured(organizationId, userId, repository),
-    onPrivate: async (organizationId: string, userId: string, repository: string) => { await readyCopyBuilder?.queuePrivateCopy(organizationId, userId, repository); },
-    ...(readyCopies ? { readyCopies: { copies: readyCopies, buildNow: async (organizationId: string, repository: string, owner: string | null, userId: string) => {
-      if (!readyCopyBuilder) throw new HttpError(503, "ready_copies_unavailable", "Ready copies are not built on this server.");
-      return readyCopyBuilder.buildNow(organizationId, repository, owner, userId);
-    } } } : {}),
+    ...(readyCopies && readyCopySecrets ? { readyCopies: { copies: readyCopies, secrets: readyCopySecrets,
+      changed: async (organizationId: string, projectId: string, change: Parameters<CloudV2ReadyCopyBuilder["reconcile"]>[2]) => {
+        await readyCopyBuilder?.reconcile(organizationId, projectId, change);
+      },
+      buildNow: async (organizationId: string, projectId: string, userId: string) => {
+        if (!readyCopyBuilder) throw new HttpError(503, "ready_copies_unavailable", "Ready copies are not built on this server.");
+        return readyCopyBuilder.buildNow(organizationId, projectId, userId);
+      },
+      retryNow: async (organizationId: string, projectId: string, userId: string) => readyCopyBuilder?.retryNow(organizationId, projectId, userId),
+    } } : {}),
   } : null;
   const source = github.source;
   const authorizeRepository = async (org: string, user: string, repository: string) => {
@@ -368,17 +375,12 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
     computers,
     ...(v2.asyncCreate !== false ? { asyncCreate: () => Date.now() >= asyncCreateFrom } : {}),
     installedRepositories: organizationId => store.installedRepositories(organizationId),
-    ...(repositoryLevels && levelRoutes ? { repositoryLevels, resolveMemberRepository, repositoryLevelRoutes: levelRoutes,
-      syncSharedRepositories: async (organizationId: string, userId: string) => {
-        await repositoryLevels.syncFromRecipe(organizationId, userId, await computers.configuredTargets(organizationId));
-      } } : {}),
-    ...(readyCopies && readyCopySecrets ? { readyCopies: { status: (organizationId: string, viewer?: string | null) => readyCopies.status(organizationId, viewer ?? null),
+    ...(projects && projectRoutes ? { projects, resolveMemberRepository, projectRoutes } : {}),
+    ...(readyCopies ? { readyCopies: { status: (organizationId: string, viewer?: string | null) => readyCopies.status(organizationId, viewer ?? null),
       failures: (organizationId: string) => readyCopies.failureSummaries(organizationId, new Date()),
-      retryNow: async (organizationId: string, repository: string, userId: string) => { await readyCopyBuilder?.retryNow(organizationId, repository, userId); },
-      reconcile: async (organizationId: string, repository: string, trigger: "setup_changed" | "branch_changed" | "secrets_changed" | "repository_added") => {
-        await readyCopyBuilder?.reconcile(organizationId, repository, trigger);
-      },
-      secrets: readyCopySecrets } } : {}),
+      changed: async (organizationId: string, projectId: string, change: "project_created" | "repositories_changed" | "setup_changed" | "branch_changed") => {
+        await readyCopyBuilder?.reconcile(organizationId, projectId, change);
+      } } } : {}),
     authorizeRepository, authorizeRepositories, authorizeSourceTargets, authorizeBuildRepository, authorizeSource, continueSource,
     remoteHead: (org, user, target, branch) => github.remoteHead(org, user, target.repository, branch, target.repositoryId),
     github: { service: github.service, documents: github.documents },
@@ -642,18 +644,18 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
     copies: readyCopies, compute, channel: config.deploymentChannel, localOwner, runtime, publicKeys: signer.publicKeys,
     cloneToken: copyCloneToken,
     ...(repositoryLevels ? { sharedCloneToken: organizationCloneToken({ levels: repositoryLevels, config: config.github ?? null }) } : {}),
-    ...(readyCopySecrets ? { secrets: (organizationId: string, repository: string) => readyCopySecrets.open(organizationId, repository) } : {}),
+    ...(readyCopySecrets ? { secrets: (organizationId: string, projectId: string) => readyCopySecrets.open(organizationId, projectId) } : {}),
     logger: console,
   }) : null;
   const readyCopyForks = roles.lifecycle && readyCopies ? new CloudV2ReadyCopyForks({
     copies: readyCopies, compute,
-    ...(readyCopyBuilder ? { queueFirst: (organizationId: string, repository: string, owner: string | null) =>
-      owner ? readyCopyBuilder.queuePrivateCopy(organizationId, owner, repository) : readyCopyBuilder.queueFirstCopies(organizationId, repository) } : {}),
+    ...(readyCopyBuilder ? { queueFirst: (organizationId: string, projectId: string) => readyCopyBuilder.queueFirst(organizationId, projectId) } : {}),
     githubToken: async (workspace: CloudV2LifecycleWorkspace) => (await lifecycleSource(workspace, "computer"))?.credential ?? github.workspaceToken(workspace),
     logger: console,
   }) : null;
-  // 4.13: data only and idempotent, so it runs whether or not ready copies are on.
-  if (roles.lifecycle) void migrateRepositoryLevels(pool).catch(() => console.warn("[cloud-v2] repository levels migration will retry at the next start"));
+  // Data only and idempotent, so it runs whether or not ready copies are on:
+  // projects exist by the time the setting is turned on.
+  if (roles.lifecycle) void migrateProjects(pool).catch(() => console.warn("[cloud-v2] projects migration will retry at the next start"));
   const lifecycle = roles.lifecycle ? new CloudV2Lifecycle({
     ...(providerStop ? { providerStop } : {}),
     ...(recovery ? { recovery } : {}),

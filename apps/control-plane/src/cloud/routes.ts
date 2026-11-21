@@ -1,9 +1,8 @@
 // Cloud workspace v2 HTTP API under /v1, so the normal authentication
 // middleware always sets c.get("user"). Execution authority belongs to the persisted rollout mode.
 import { CloudV2InstallScriptSchema } from "./computer.js";
-import { ReadyCopySecretsSchema, type CloudV2ReadyCopySecrets } from "./ready-copy-secrets.js";
-import type { CloudRepositoryLevels } from "./repository-levels.js";
-import { createRepositoryLevelRoutes, type RepositoryLevelRouteDeps } from "./repository-level-routes.js";
+import type { CloudProjects } from "./projects.js";
+import { createProjectRoutes, type ProjectRouteDeps } from "./project-routes.js";
 import type { CloudExecutionContexts } from "./execution/store.js";
 import { CloudWorkspaceCreateSchema, createCloudWorkspaceOperations } from "./workspace-create.js";
 import { rateLimit } from "../ratelimit.js";
@@ -75,24 +74,22 @@ export type CloudV2RouteDeps = {
   promptOutbox?: boolean;
   computers: Pick<CloudV2Computers, "requireMember" | "requireAdmin" | "overview" | "enqueue" | "buildConfigured" | "buildSourceTargets" | "saveRecipe" | "discardRecipe" | "reactivate" | "log" | "logRepositories">
     & Partial<Pick<CloudV2Computers, "saveInstallScript">>;
-  /** Two GitHub levels (ready copies on): which level a repository lives at for the caller. */
-  repositoryLevels?: Pick<CloudRepositoryLevels, "levelFor" | "repositories"> & Partial<Pick<CloudRepositoryLevels, "organizationInstallation">>;
+  /** Projects (ready copies on): the Cloud Computer is tools only, and creates,
+   * repository lists and the old recipe are answered from projects. */
+  projects?: Pick<CloudProjects, "forRepository" | "oneRepositoryProjects" | "syncRecipe">;
   /** The caller's own GitHub reading a repository: its identity and default branch. */
   resolveMemberRepository?(organizationId: string, userId: string, repository: string): Promise<{ repository: string; repositoryId: string; defaultBranch: string }>;
-  /** Two GitHub levels' own routes. */
-  repositoryLevelRoutes?: RepositoryLevelRouteDeps;
-  /** After an admin saves or builds the Cloud Computer's repositories, they are shared repositories. */
-  syncSharedRepositories?(organizationId: string, userId: string): Promise<void>;
+  /** Projects' and GitHub connections' own routes. */
+  projectRoutes?: ProjectRouteDeps;
   /** Present only when ready copies are on (CloudV2Config.readyCopies). */
   readyCopies?: {
+    /** Per project id. */
     status(organizationId: string, viewerUserId?: string | null): Promise<ReadonlyMap<string, "ready" | "building" | null>>;
-    failures(organizationId: string): Promise<{ repository: string; generation: number; reason: string; detail: string | null; finishedAt: string;
-      failures?: number; nextRetryAt?: string | null }[]>;
-    /** An admin's Retry now for one shared repository's ready copy. */
-    retryNow?(organizationId: string, repository: string, userId: string): Promise<unknown>;
-    /** A saved setup, branch or build secrets rebuild that repository's copy alone. */
-    reconcile?(organizationId: string, repository: string, trigger: "setup_changed" | "branch_changed" | "secrets_changed" | "repository_added"): Promise<void>;
-    secrets: Pick<CloudV2ReadyCopySecrets, "names" | "save" | "clear" | "update">;
+    /** Organization projects' failed copies, for the Cloud Computer page. */
+    failures(organizationId: string): Promise<{ projectId: string; project: string; repository: string | null; step: string | null; generation: number;
+      reason: string; detail: string | null; finishedAt: string; failures?: number; nextRetryAt?: string | null }[]>;
+    /** A released desktop's recipe save rebuilds each changed project's copy alone. */
+    changed?(organizationId: string, projectId: string, change: "project_created" | "repositories_changed" | "setup_changed" | "branch_changed"): Promise<void>;
   };
   /** Repositories the organization's active Cloud Computer has installed; null without one. */
   installedRepositories(organizationId: string): Promise<readonly CloudV2InstalledRepository[] | null>;
@@ -153,7 +150,7 @@ export function createCloudV2Routes(deps: CloudV2RouteDeps): Hono {
   if (deps.workspaceGithubReadTokens) app.route("/", createCloudWorkspaceGithubReadTokenRoutes(deps.workspaceGithubReadTokens));
   if (deps.environments) app.route("/", createCloudEnvironmentRoutes(deps.environments));
   if (deps.githubConnections) app.route("/",createCloudGithubConnectionRoutes(deps.githubConnections));
-  if (deps.repositoryLevelRoutes) app.route("/", createRepositoryLevelRoutes(deps.repositoryLevelRoutes));
+  if (deps.projectRoutes) app.route("/", createProjectRoutes(deps.projectRoutes));
   const documents = async (workspaces: readonly CloudV2Workspace[]) =>
     (deps.github ? await deps.github.documents(workspaces) : workspaces).map(workspace => workspaceDocument(workspace, deps.promptOutbox === true, !!chatEdits));
   const document = async (workspace: CloudV2Workspace) => {
@@ -347,9 +344,36 @@ export function createCloudV2Routes(deps: CloudV2RouteDeps): Hono {
     return parsed.data;
   };
 
+  /** Projects (ready copies on): what a released desktop's Create lists is each
+   * one-repository project the caller may use whose repository they can read:
+   * the organization's, then their own, marked. A multi-repository project is
+   * never offered to it. Null without a live base, as without a Cloud Computer. */
+  const projectRepositories = async (organizationId: string, userId: string) => {
+    const projects = deps.projects!, computer = await deps.store.activeComputer(organizationId);
+    if (!computer) {
+      const error = await computerUnavailable(organizationId, userId);
+      if (error.code === "cloud_computer_rebuild_required") throw error;
+      return null;
+    }
+    const status = await deps.readyCopies?.status(organizationId, userId);
+    const listed: (CloudV2InstalledRepository & { level: "shared" | "private"; projectId: string; readyCopy?: "ready" | "building" | null })[] = [];
+    for (const project of await projects.oneRepositoryProjects(organizationId, userId)) {
+      const entry = project.repositories[0]!;
+      if (listed.some(row => row.repository === entry.repository)) continue;
+      if (deps.authorizeSourceTargets) {
+        try { await deps.authorizeSourceTargets(organizationId, userId, [{ repository: entry.repository, repositoryId: entry.repositoryId }]); }
+        catch (error) { if (!(error instanceof HttpError) || ![403, 404].includes(error.status)) throw error; continue; }
+      }
+      listed.push({ repository: entry.repository, defaultBranch: entry.defaultBranch, level: project.level === "organization" ? "shared" : "private",
+        projectId: project.id, ...(status ? { readyCopy: status.get(project.id) ?? null } : {}) });
+    }
+    return listed;
+  };
+
   app.get("/v1/cloud-v2/organizations/:org/computer/repositories", async c => {
     const organizationId = org(c.req.param("org"));
     await deps.computers.requireMember(organizationId, c.get("user").id);
+    if (deps.projects) return c.json({ repositories: await projectRepositories(organizationId, c.get("user").id) });
     const computer = await deps.store.activeComputer(organizationId);
     if (!computer) {
       const error = await computerUnavailable(organizationId, c.get("user").id);
@@ -364,23 +388,7 @@ export function createCloudV2Routes(deps: CloudV2RouteDeps): Hono {
       }
       catch (error) { if (!(error instanceof HttpError) || ![403,404].includes(error.status)) throw error; }
     }
-    // Two levels: the caller's own private repositories join the shared ones, marked;
-    // no other member's ever does. A released desktop reads the same list.
-    const levels = deps.repositoryLevels && repositories !== null ? await deps.repositoryLevels.repositories(organizationId, c.get("user").id) : null;
-    // A shared repository's organization connection, when GitHub reported it suspended or uninstalled.
-    const connectionState = async (repository: string) => {
-      const connection = await deps.repositoryLevels?.organizationInstallation?.(organizationId, repository);
-      return connection && connection.state !== "active" ? { connection: connection.state } : {};
-    };
-    const listed: (CloudV2InstalledRepository & { level?: "shared" | "private"; connection?: string })[] = levels
-      ? [...await Promise.all(allowed.map(async entry => ({ ...entry, level: "shared" as const, ...await connectionState(entry.repository) }))),
-        ...(levels.personalAllowed ? levels.private.filter(own => !allowed.some(entry => entry.repository.toLowerCase() === own.repository))
-          .map(own => ({ repository: own.repository, defaultBranch: null, level: "private" as const })) : [])]
-      : allowed;
-    // With ready copies, Create says a repository is still getting ready while its first copy builds.
-    const status = deps.readyCopies && listed.length ? await deps.readyCopies.status(organizationId, c.get("user").id) : null;
-    return c.json({ repositories: repositories === null ? null : status
-      ? listed.map(entry => ({ ...entry, readyCopy: status.get(entry.repository.toLowerCase()) ?? null })) : listed });
+    return c.json({ repositories: repositories === null ? null : allowed });
   });
 
   // The Create page calls this on intent for its selected repository, so the
@@ -390,6 +398,14 @@ export function createCloudV2Routes(deps: CloudV2RouteDeps): Hono {
     const parsed = WarmSchema.safeParse(await c.req.json().catch(() => null));
     if (!parsed.success) throw new HttpError(400, "invalid_request", "Invalid repository");
     await deps.computers.requireMember(organizationId, userId);
+    if (deps.projects) {
+      const project = await deps.projects.forRepository(organizationId, userId, parsed.data.repository);
+      if (!project || !deps.authorizeSourceTargets) throw new HttpError(404, "repository_not_in_project", "Add this repository to a project first.");
+      const entry = project.repositories[0]!;
+      await deps.authorizeSourceTargets(organizationId, userId, [{ repository: entry.repository, repositoryId: entry.repositoryId }]);
+      c.header("Cache-Control", "no-store");
+      return c.json({ ok: true });
+    }
     const computer = await deps.store.activeComputer(organizationId);
     const entry = computer?.repositories.find(value => value.repository.toLowerCase() === parsed.data.repository.toLowerCase());
     if (!computer || !entry) throw new HttpError(404, "repository_not_installed", "Add this repository to the Cloud Computer first");
@@ -402,8 +418,11 @@ export function createCloudV2Routes(deps: CloudV2RouteDeps): Hono {
     const organizationId = org(c.req.param("org"));
     await deps.computers.requireAdmin(organizationId, c.get("user").id);
     const overview = await deps.computers.overview(organizationId);
-    // Ready copies: each repository's latest failure, a path at most, for the admin to fix.
-    return c.json(deps.readyCopies ? { ...overview, readyCopyFailures: await deps.readyCopies.failures(organizationId) } : overview);
+    if (!deps.projects) return c.json(overview);
+    // Tools only: its repositories, for released desktops, are the one-repository
+    // organization projects; each organization project's copy failure, a path at most.
+    return c.json({ ...overview, recipe: { repositories: await projectRecipe(organizationId) },
+      ...(deps.readyCopies ? { readyCopyFailures: await deps.readyCopies.failures(organizationId) } : {}) });
   });
 
   /** Ready copies: members read the install script; owners and admins edit it. */
@@ -424,63 +443,39 @@ export function createCloudV2Routes(deps: CloudV2RouteDeps): Hono {
     return c.json(await deps.computers.saveInstallScript(organizationId, c.get("user").id, parsed.data.installScript, parsed.data.revision));
   });
 
-  /** Build secrets for a shared repository's ready copy. Values are write-only. */
-  const secretRepository = (owner: string, name: string) => {
-    const value = `${owner}/${name}`;
-    if (!/^[A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100}$/.test(value)) throw new HttpError(404, "not_found", "Repository not found");
-    return value;
+  /** The old recipe as released desktops read it: one-repository organization projects. */
+  const projectRecipe = async (organizationId: string) =>
+    (await deps.projects!.oneRepositoryProjects(organizationId, null)).filter(project => project.level === "organization").map(project => {
+      const entry = project.repositories[0]!;
+      return { repository: entry.repository, ...(entry.defaultBranch ? { ref: entry.defaultBranch } : {}), ...(entry.setup ? { setup: entry.setup } : {}),
+        ...(entry.setupScript ? { setupScript: entry.setupScript } : {}) };
+    });
+  /** A released desktop saved the recipe: its entries become one-repository
+   * organization projects, each rebuilding its own copy; the Cloud Computer keeps none. */
+  const saveProjectRecipe = async (organizationId: string, userId: string, entries: readonly { repository: string; ref?: string | undefined;
+    setup?: string | undefined; setupScript?: string | undefined }[]) => {
+    if (!deps.resolveMemberRepository) throw new HttpError(503, "github_unavailable", "Repository identity could not be verified.");
+    const current = await deps.projects!.oneRepositoryProjects(organizationId, null);
+    const resolved = await Promise.all(entries.map(async entry => {
+      const kept = current.find(project => project.level === "organization" && project.repositories[0]!.repository === entry.repository.toLowerCase());
+      const repositoryId = kept?.repositories[0]!.repositoryId ?? (await deps.resolveMemberRepository!(organizationId, userId, entry.repository)).repositoryId;
+      return { repository: entry.repository.toLowerCase(), repositoryId, ...(entry.ref ? { ref: entry.ref } : {}), ...(entry.setup ? { setup: entry.setup } : {}),
+        ...(entry.setupScript ? { setupScript: entry.setupScript } : {}) };
+    }));
+    for (const { projectId, change } of await deps.projects!.syncRecipe(organizationId, userId, resolved))
+      await deps.readyCopies?.changed?.(organizationId, projectId, change).catch(() => undefined);
   };
-  app.get("/v1/cloud-v2/organizations/:org/computer/repositories/:owner/:name/build-secrets", async c => {
-    const organizationId = org(c.req.param("org"));
-    if (!deps.readyCopies) throw new HttpError(404, "not_found", "Not found");
-    await deps.computers.requireAdmin(organizationId, c.get("user").id);
-    c.header("Cache-Control", "no-store");
-    return c.json({ names: await deps.readyCopies.secrets.names(organizationId, secretRepository(c.req.param("owner"), c.req.param("name"))) });
-  });
-  app.put("/v1/cloud-v2/organizations/:org/computer/repositories/:owner/:name/build-secrets", json, async c => {
-    const organizationId = org(c.req.param("org")), userId = c.get("user").id;
-    if (!deps.readyCopies) throw new HttpError(404, "not_found", "Not found");
-    await deps.computers.requireAdmin(organizationId, userId);
-    const parsed = z.object({ secrets: ReadyCopySecretsSchema }).strict().safeParse(await c.req.json().catch(() => null));
-    if (!parsed.success) throw new HttpError(400, "invalid_request", "Invalid build secrets");
-    c.header("Cache-Control", "no-store");
-    const repository = secretRepository(c.req.param("owner"), c.req.param("name"));
-    const names = await deps.readyCopies.secrets.save(organizationId, repository, userId, parsed.data.secrets);
-    await deps.readyCopies.reconcile?.(organizationId, repository, "secrets_changed").catch(() => undefined);
-    return c.json({ names });
-  });
-
-  app.post("/v1/cloud-v2/organizations/:org/computer/repositories/:owner/:name/ready-copy/retry", async c => {
-    const organizationId = org(c.req.param("org"));
-    if (!deps.readyCopies?.retryNow) throw new HttpError(404, "not_found", "Not found");
-    await deps.computers.requireAdmin(organizationId, c.get("user").id);
-    await deps.readyCopies.retryNow(organizationId, secretRepository(c.req.param("owner"), c.req.param("name")), c.get("user").id);
-    return c.json({ ok: true }, 202);
-  });
-
-  app.patch("/v1/cloud-v2/organizations/:org/computer/repositories/:owner/:name/build-secrets", json, async c => {
-    const organizationId = org(c.req.param("org")), userId = c.get("user").id;
-    if (!deps.readyCopies) throw new HttpError(404, "not_found", "Not found");
-    await deps.computers.requireAdmin(organizationId, userId);
-    const parsed = z.object({ set: ReadyCopySecretsSchema.optional(), remove: z.array(z.string().max(128)).max(64).optional() }).strict()
-      .safeParse(await c.req.json().catch(() => null));
-    if (!parsed.success) throw new HttpError(400, "invalid_request", "Invalid build secrets");
-    c.header("Cache-Control", "no-store");
-    const repository = secretRepository(c.req.param("owner"), c.req.param("name"));
-    const names = await deps.readyCopies.secrets.update(organizationId, repository, userId, parsed.data);
-    await deps.readyCopies.reconcile?.(organizationId, repository, "secrets_changed").catch(() => undefined);
-    return c.json({ names });
-  });
 
   app.post("/v1/cloud-v2/organizations/:org/computer/builds", json, async c => {
     const organizationId = org(c.req.param("org"));
     await deps.computers.requireAdmin(organizationId, c.get("user").id);
     const parsed = BuildSchema.safeParse(await c.req.json().catch(() => null));
     if (!parsed.success) throw new HttpError(400, "invalid_request", "Invalid Cloud Computer build");
+    if ("repositories" in parsed.data && deps.projects) await saveProjectRecipe(organizationId, c.get("user").id, parsed.data.repositories);
+    else if ("repositories" in parsed.data && !parsed.data.repositories.length) throw new HttpError(400, "invalid_request", "Invalid Cloud Computer build");
     const build = "revision" in parsed.data
       ? await deps.computers.buildConfigured(organizationId, c.get("user").id, parsed.data.revision)
       : await deps.computers.enqueue(organizationId, c.get("user").id, { repositories: parsed.data.repositories }, { configure: true });
-    await deps.syncSharedRepositories?.(organizationId, c.get("user").id);
     return c.json({ build }, 202);
   });
 
@@ -490,16 +485,16 @@ export function createCloudV2Routes(deps: CloudV2RouteDeps): Hono {
     await deps.computers.requireAdmin(organizationId, c.get("user").id);
     const parsed = RecipeSchema.safeParse(await c.req.json().catch(() => null));
     if (!parsed.success) throw new HttpError(400, "invalid_request", "Invalid Cloud Computer repositories");
-    const before = deps.readyCopies?.reconcile ? (await deps.computers.overview(organizationId)).recipe.repositories : [];
-    const saved = await deps.computers.saveRecipe(organizationId, c.get("user").id, parsed.data.repositories, parsed.data.revision);
-    await deps.syncSharedRepositories?.(organizationId, c.get("user").id);
-    // Ready copies: each repository whose setup or branch changed rebuilds its own copy, no Cloud Computer build needed.
-    for (const entry of deps.readyCopies?.reconcile ? saved.recipe.repositories : []) {
-      const old = before.find(candidate => candidate.repository.toLowerCase() === entry.repository.toLowerCase());
-      const trigger = !old ? "repository_added" as const : (old.setup ?? "") !== (entry.setup ?? "") ? "setup_changed" as const
-        : (old.ref ?? "") !== (entry.ref ?? "") ? "branch_changed" as const : null;
-      if (trigger) await deps.readyCopies?.reconcile?.(organizationId, entry.repository, trigger).catch(() => undefined);
+    if (deps.projects) {
+      // The revision still guards two editors; the Cloud Computer itself keeps no repositories.
+      const overview = await deps.computers.overview(organizationId);
+      if (overview.recipeRevision !== parsed.data.revision)
+        throw new HttpError(409, "computer_recipe_changed", "The Cloud Computer changed. Review the latest version and try again.");
+      await saveProjectRecipe(organizationId, c.get("user").id, parsed.data.repositories);
+      const bumped = await deps.computers.saveInstallScript!(organizationId, c.get("user").id, overview.installScript ?? null, parsed.data.revision);
+      return c.json({ recipe: { repositories: await projectRecipe(organizationId) }, recipeRevision: bumped.recipeRevision });
     }
+    const saved = await deps.computers.saveRecipe(organizationId, c.get("user").id, parsed.data.repositories, parsed.data.revision);
     return c.json(saved);
   });
 
@@ -509,6 +504,11 @@ export function createCloudV2Routes(deps: CloudV2RouteDeps): Hono {
     await deps.computers.requireAdmin(organizationId, c.get("user").id);
     const parsed = z.object({ revision }).strict().safeParse(await c.req.json().catch(() => null));
     if (!parsed.success) throw new HttpError(400, "invalid_request", "Invalid Cloud Computer request");
+    // Projects: saves are live at once, so there is nothing unbuilt to discard.
+    if (deps.projects) {
+      const overview = await deps.computers.overview(organizationId);
+      return c.json({ recipe: { repositories: await projectRecipe(organizationId) }, recipeRevision: overview.recipeRevision });
+    }
     return c.json(await deps.computers.discardRecipe(organizationId, c.get("user").id, parsed.data.revision));
   });
 
