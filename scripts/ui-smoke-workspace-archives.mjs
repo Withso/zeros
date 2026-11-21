@@ -349,12 +349,7 @@ export async function runWorkspaceArchivesSmoke({ page, check }) {
         name: /Retry|Resend|Send|Edit|New chat|Run|Terminal|Files|Turn actions|Continue/,
       }),
     ).toHaveCount(0);
-    await expect(
-      history.getByRole("tablist", { name: "Chat sessions" }),
-    ).toBeVisible();
-    await expect(
-      history.locator('[data-chat-tab="true"][data-active="true"]'),
-    ).toHaveText(title);
+    await expect(page.locator("[data-session-switcher]")).toContainText(title);
     await expect(
       history
         .locator(".zeros-agent-surface .zeros-agent-body")
@@ -595,7 +590,7 @@ export async function runWorkspaceArchivesSmoke({ page, check }) {
       await expect(
         history.getByText("No chat history.", { exact: true }),
       ).toBeVisible();
-      await expect(history.locator('[data-chat-tab="true"]')).toHaveCount(0);
+      await expect(page.locator("[data-session-switcher]")).toHaveCount(0);
     } else {
       await expect(
         history
@@ -604,9 +599,9 @@ export async function runWorkspaceArchivesSmoke({ page, check }) {
           })
           .filter({ visible: true }),
       ).toBeVisible();
-      await expect(
-        history.locator('[data-chat-tab="true"][data-active="true"]'),
-      ).toHaveText("Saved edge conversation");
+      await expect(page.locator("[data-session-switcher]")).toContainText(
+        "Saved edge conversation",
+      );
       const saved = await page.evaluate(
         (id) =>
           window.archiveFixture.snapshot().chats.find((chat) => chat.id === id),

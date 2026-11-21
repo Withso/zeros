@@ -18,7 +18,7 @@ export async function runChatSurfacesSmoke({ page, check, harnessBase }) {
   await page.setViewportSize({ width: 1600, height: 1000 });
   await page.goto(`${harnessBase}/harness-app-sidebar.html?shortcuts`, { waitUntil: "networkidle" });
   await page.keyboard.press("Meta+Digit1");
-  await expect(page.getByRole("tablist", { name: "Chat sessions" }).getByRole("tab")).toHaveCount(3);
+  await expect(page.locator("[data-session-switcher]")).toBeVisible();
 
   // Side column (2026-11-09, flush): its tab row and the open tab fill the
   // column to the window's right and bottom edges, and its 1px border1 left
