@@ -1,0 +1,30 @@
+diff --git a/dist/editor/editor.js b/dist/editor/editor.js
+index 04433fcbc8314ff48089e990fe774988376ca10a..a9674e926f060cebd629e6c9a59ba1b0bb45162b 100644
+--- a/dist/editor/editor.js
++++ b/dist/editor/editor.js
+@@ -1047,6 +1047,7 @@ var Editor = class {
+ 				if (this.#isDeletedLineTarget(e)) {
+ 					this.#setDeletedTextSelectionActive(true);
+ 					if (this.#selections !== void 0) this.#updateSelections([]);
++					if (e.button === 0 && !e.ctrlKey) document.getSelection()?.removeAllRanges();
+ 					return;
+ 				}
+ 				this.#setDeletedTextSelectionActive(false);
+@@ -1270,6 +1271,7 @@ var Editor = class {
+ 				const textDocument = this.#editSession?.document;
+ 				const lineIndex = resolveEditableLine(gutterRow);
+ 				if (lineIndex === void 0 || textDocument === void 0) return;
++				this.#setDeletedTextSelectionActive(false);
+ 				this.#canMountSelectionAction = true;
+ 				this.#markerRenderer?.removePopover();
+ 				const selection = this.#spanLineSelection(lineIndex, lineIndex, textDocument);
+@@ -1287,7 +1289,8 @@ var Editor = class {
+ 					const selection = this.#spanLineSelection(anchorLine, lineIndex, textDocument);
+ 					this.#selectionStart ??= selection;
+ 					this.#updateSelections([selection]);
+-					this.#focus(selection.direction === -1 ? selection.start : selection.end);
++					this.#setWindowSelection(selection);
++					this.#focus();
+ 				}, { passive: true })]);
+ 			}, { passive: true }));
+ 		}
