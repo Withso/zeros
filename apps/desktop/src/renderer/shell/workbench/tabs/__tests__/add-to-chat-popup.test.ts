@@ -233,8 +233,8 @@ describe("Add to Chat", () => {
     } finally { await page.close(); }
   });
 
-  it("leaves ⌘L to the editor once the selection scrolls out of view sideways", async () => {
-    const page = await open("wide");
+  it.each(PLACEMENTS)("leaves ⌘L to the editor once the selection scrolls out of view sideways (%s)", async (_placement, cwd) => {
+    const page = await open("wide", cwd);
     try {
       const first = await page.evaluate(() => {
         const { x, y, height } = document.querySelector(".cm-line")!.getBoundingClientRect();
