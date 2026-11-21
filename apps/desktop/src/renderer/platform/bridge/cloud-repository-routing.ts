@@ -83,9 +83,11 @@ export function cloudRepositoryRoute(op: string, params: Params, layout: (target
     const entry = folders.size === 1 ? byFolder([...folders][0]!) : undefined;
     if (!entry || named.some(path => !split(path).rest)) throw new Error("Choose files inside one of the workspace's repositories.");
     const strip = (path: string) => split(path).rest;
-    return { kind: "one", params: { ...params, workspaceId, repository: entry.repository,
+    const routed = { ...params, workspaceId, repository: entry.repository,
       ...Object.fromEntries(single.map(field => [field, strip(params[field] as string)])),
-      ...Object.fromEntries(lists.map(field => [field, (params[field] as unknown[]).map(value => typeof value === "string" ? strip(value) : value)])) } };
+      ...Object.fromEntries(lists.map(field => [field, (params[field] as unknown[]).map(value => typeof value === "string" ? strip(value) : value)])) };
+    // Asked in the project folder, answered in it: the reply's paths get the repository's folder back.
+    return { kind: "each", requests: [{ folder: entry.folder, params: routed }], merge: ([result]) => inFolder(result, entry.folder) };
   }
   // The project folder's status: every repository's, each path under its folder.
   if (op === "git.status") {
@@ -93,16 +95,9 @@ export function cloudRepositoryRoute(op: string, params: Params, layout: (target
       kind: "each",
       requests: found.repositories.map(entry => ({ folder: entry.folder, params: { ...params, workspaceId, repository: entry.repository } })),
       merge: results => {
-        const rows = results.map(result => result && typeof result === "object" ? result as Params : {});
-        const changes = (field: string) => rows.flatMap((row, index) => {
-          const folder = found.repositories[index]!.folder;
-          return (Array.isArray(row[field]) ? row[field] as Params[] : []).map(change => ({ ...change,
-            ...(typeof change.path === "string" ? { path: `${folder}/${change.path}` } : {}),
-            ...(typeof change.oldPath === "string" ? { oldPath: `${folder}/${change.oldPath}` } : {}) }));
-        });
-        return { ...rows[0], staged: changes("staged"), unstaged: changes("unstaged"), conflicted: changes("conflicted"),
-          untracked: rows.flatMap((row, index) => (Array.isArray(row.untracked) ? row.untracked as unknown[] : [])
-            .filter((path): path is string => typeof path === "string").map(path => `${found.repositories[index]!.folder}/${path}`)) };
+        const rows = results.map((result, index) => inFolder(result, found.repositories[index]!.folder) as Params ?? {});
+        const all = (field: string) => rows.flatMap(row => Array.isArray(row[field]) ? row[field] as unknown[] : []);
+        return { ...rows[0], staged: all("staged"), unstaged: all("unstaged"), conflicted: all("conflicted"), untracked: all("untracked") };
       },
     };
   }
@@ -161,4 +156,19 @@ function prefixed(result: unknown, field: string, folder: string): Params {
   const design = Array.isArray(row.designDirectories)
     ? (row.designDirectories as unknown[]).filter((value): value is string => typeof value === "string").map(path => `${folder}/${path}`) : undefined;
   return { ...row, [field]: list.map(path => `${folder}/${path}`), ...(design ? { designDirectories: design } : {}) };
+}
+
+/** A repository's reply with its paths in the project folder: status changes
+ * and untracked paths, a diff's file list, and the paths a clean removed. */
+function inFolder<T>(result: T, folder: string): T | Params {
+  if (!result || typeof result !== "object") return result;
+  const row = result as Params;
+  const at = (path: unknown) => typeof path === "string" ? `${folder}/${path}` : path;
+  const change = (value: unknown) => value && typeof value === "object"
+    ? { ...value as Params, ...("path" in (value as Params) ? { path: at((value as Params).path) } : {}),
+      ...(typeof (value as Params).oldPath === "string" ? { oldPath: at((value as Params).oldPath) } : {}) } : value;
+  const out: Params = { ...row };
+  for (const field of ["staged", "unstaged", "conflicted", "files"]) if (Array.isArray(row[field])) out[field] = (row[field] as unknown[]).map(change);
+  for (const field of ["untracked", "removed"]) if (Array.isArray(row[field])) out[field] = (row[field] as unknown[]).map(at);
+  return out;
 }

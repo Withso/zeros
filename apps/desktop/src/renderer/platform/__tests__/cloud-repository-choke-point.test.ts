@@ -32,6 +32,7 @@ import * as review from "../github-review";
 import { clearCloudGithubPr } from "../cloud-github-pr";
 import { publishCloudRepositoryLayouts } from "../bridge/cloud-repository-routing";
 import { combinedPullRequest, pullRequestTarget } from "../../state/workspace-repositories";
+import { planDiscard } from "../../shell/workbench/tabs/discard-file";
 
 const root = "cloud://11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222";
 const web = `${root}/web`;
@@ -186,5 +187,16 @@ describe("the routing choke point for a workspace of several repositories", () =
     expect(sent().map(request => request.repository)).toEqual(["withso/web", "withso/web"]);
     // On the bare key the number is refused: it is web's #9 here, and api has a #9 too.
     await expect(git.ghPrMerge({ workspaceId: root, prNumber: 9, method: "squash" })).rejects.toThrow(/Choose which/);
+  });
+
+  it("a project-folder file's status comes back in the project folder, so Discard plans on the file it was asked about", async () => {
+    f.bridge.mockImplementation(async () => ({ type: "WORKSPACE_RESPONSE",
+      result: { staged: [{ path: "new.ts", status: "added" }], unstaged: [{ path: "moved.ts", oldPath: "old.ts", status: "renamed" }], untracked: ["scratch.ts"], conflicted: [] } }));
+    const status = await git.gitStatus(root, { paths: ["web/scratch.ts"], includeTracking: false });
+    expect(sent()).toEqual([{ via: "bridge", workspaceId: root, repository: "withso/web" }]);
+    expect(f.bridge.mock.calls[0]![0].params.paths).toEqual(["scratch.ts"]);
+    expect(planDiscard(status, "web/scratch.ts")).toMatchObject({ operation: "clean", isNewFile: true });
+    expect(planDiscard(status, "web/new.ts")).toMatchObject({ operation: "unstage-clean" });
+    expect(planDiscard(status, "web/moved.ts")).toMatchObject({ operation: "discard", restorePaths: ["web/old.ts", "web/moved.ts"] });
   });
 });
