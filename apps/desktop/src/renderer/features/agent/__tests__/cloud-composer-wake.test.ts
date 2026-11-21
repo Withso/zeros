@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Me } from "../../team/control-plane";
 import { cloudWorkspaceAccountAccess } from "../../team/cloud-workspace-account-access";
 import { isCloudWorkspace, parseCloudWorkspaceKey, parseCloudScopedId } from "../../../platform/bridge/cloud-workspace-key";
-import { isSubmittedComposerDocument } from "../composer-submission";
+import { isSubmittedComposerDocument, sendClearsChatDraft } from "../composer-submission";
 import * as lifecycle from "../session-reload-lifecycle";
 import * as retention from "../transcript-retention";
 import { BLANK, useSessionsStore } from "../sessions-store";
@@ -139,7 +139,7 @@ function harness(cloud = true, status = "stopped", resident = true) {
     serializeComposerState: () => current, sendPastPermission: () => "send", planReview: null, bareInlineSlashCommand: () => null,
     composerLiveRef: { current: null }, dispatch, recordWorkspaceActivity: vi.fn(), agentsList: null, envForChat: () => ({}),
     setCloudSendPreparing: vi.fn(), setSendPreparing: vi.fn(), encodeComposerAttachments: encoding.run, reportSkippedAttachments: vi.fn(),
-    expandMentionsInText: (text: string) => text, browserPickerSelection: null, toMessageSegments: () => draft.segments, isSubmittedComposerDocument,
+    expandMentionsInText: (text: string) => text, browserPickerSelection: null, toMessageSegments: () => draft.segments, isSubmittedComposerDocument, sendClearsChatDraft,
     clearComposer: clear, clearComposerEditor: clear, pendingSendScrollCountRef: { current: 0 }, sendInFlightRef: { current: false }, startCloudSubmitSpan: () => vi.fn(), toast: toasts,
   };
   vm.runInNewContext(composerCode, composer);
