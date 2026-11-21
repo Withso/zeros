@@ -152,13 +152,28 @@ function ParentMenu({ tree, folder, activeId, onSelect, onNewParent }: {
   );
 }
 
-function Crumb({ chat, leading, children }: { chat: ChatThread; leading?: React.ReactNode; children: React.ReactNode }) {
+function Crumb({ chat, leading, identity, children }: {
+  chat: ChatThread;
+  leading?: React.ReactNode;
+  /** The first crumb is the workspace's identity: placement, then name. */
+  identity?: WorkspacePlacement;
+  children: React.ReactNode;
+}) {
+  const name = sessionName(chat);
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
-        <Button variant="ghost" className={CRUMB_CLS} data-session-crumb={chat.id}>
+        <Button
+          variant="ghost"
+          className={CRUMB_CLS}
+          data-session-crumb={chat.id}
+          {...(identity ? {
+            "data-workspace-identity": "",
+            "aria-label": `${name}, ${identity === "cloud" ? "Cloud" : "Local"} workspace`,
+          } : {})}
+        >
           {leading}
-          <span className="min-w-0 truncate">{sessionName(chat)}</span>
+          <span className="min-w-0 truncate" {...(identity ? { "data-workspace-name": "" } : {})}>{name}</span>
         </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="start" sideOffset={6} className="max-h-96 min-w-64 max-w-96 overflow-y-auto">
@@ -195,7 +210,7 @@ export function SessionSwitcher({ folder, placement, showPlacement = true, fallb
   };
   const Icon = placement === "cloud" ? Cloud : Laptop;
   return (
-    <nav aria-label="Sessions" className={`${showPlacement ? "-ml-1.5" : ""} flex min-w-0 items-center`} data-session-switcher="" data-workspace-identity="">
+    <nav aria-label="Sessions" className={`${showPlacement ? "-ml-1.5" : ""} flex min-w-0 items-center`} data-session-switcher="">
       {lineage.map((chat, index) => {
         const node = tree.byId.get(chat.id);
         return (
@@ -203,6 +218,7 @@ export function SessionSwitcher({ folder, placement, showPlacement = true, fallb
             {index > 0 && <ChevronRight className="text-fg3 size-3.5 shrink-0" strokeWidth={1.5} aria-hidden="true" />}
             <Crumb
               chat={chat}
+              identity={index === 0 && showPlacement ? placement : undefined}
               leading={index === 0 && showPlacement
                 ? <Icon className="text-fg2 size-4 shrink-0" strokeWidth={1.5} aria-hidden="true" data-workspace-placement={placement} />
                 : undefined}
