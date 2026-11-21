@@ -1,3 +1,4 @@
+import { HARNESS_SWITCH_TOOL_KIND } from "../harness-switch";
 import { placeholderTitle } from "./tool-readiness";
 import { generatedImagePath, isImageGenerationTool } from "./tool-artifacts";
 import { modelRejectionDisplayText } from "@zeros/protocol/model-rejection";
@@ -43,6 +44,7 @@ import {
   Terminal,
   TriangleAlert,
   Wrench,
+  ArrowLeftRight,
 } from "lucide-react";
 
 import type { ComponentType } from "react";
@@ -212,6 +214,10 @@ function metaForTool(tool: AgentToolMessage): EventMeta {
   // The provider's title as a description, unless it is only a placeholder
   // ("Editing file") given before the input was known: then the name alone.
   const described = placeholderTitle(tool.title) ? undefined : tool.title;
+
+  if (kind === HARNESS_SWITCH_TOOL_KIND) {
+    return { Icon: ArrowLeftRight, label: tool.title, expandable: false };
+  }
 
   const wait = nativeAgentWait(tool);
   if (wait) return { Icon: Hourglass, label: wait.label, expandable: !!wait.result };

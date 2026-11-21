@@ -1,4 +1,5 @@
 import { toolPresentationReady, withoutRedundantAgentTasks } from "./renderers/tool-readiness";
+import { isHarnessSwitchMessage } from "./harness-switch";
 import { isTurnFailureNotice } from "./turn-failure";
 import { isLegacyAuthenticationNotice, isProviderWorkEvent, isUsageNotice, usageStatusChanges } from "./transcript-notices";
 // Split working narration/tools from provider-declared partial/final answers.
@@ -116,7 +117,7 @@ function isBackgroundTask(e: AgentMessage): boolean {
  *  compacted an idle chat — and must stay visible, not fold into the
  *  chip). */
 function isFinalOutputEvent(e: AgentMessage): boolean {
-  return isOutputText(e) || isManualCompaction(e) || isBudgetStop(e);
+  return isOutputText(e) || isManualCompaction(e) || isBudgetStop(e) || isHarnessSwitchMessage(e);
 }
 
 export function partitionTurn(
@@ -170,6 +171,8 @@ function partitionVisible(
     ) {
       finalOutputIndexes.add(index);
     }
+    // A user-applied switch stays visible wherever it lands, even mid-turn.
+    if (isHarnessSwitchMessage(event)) finalOutputIndexes.add(index);
   });
   // Legacy providers have no phase. Keep their settled trailing-answer
   // convention, while explicit answers survive further work and bookkeeping.
