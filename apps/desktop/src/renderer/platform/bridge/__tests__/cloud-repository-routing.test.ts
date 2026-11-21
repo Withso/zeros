@@ -108,4 +108,15 @@ describe("the runtime root of a cloud workspace", () => {
     expect(cloudRuntimeRoot(undefined, "/home/user/withso/zeros")).toBe("/home/user/withso/zeros");
     expect(cloudRuntimeRoot({}, "/home/user/withso/zeros")).toBe("/home/user/withso/zeros");
   });
+
+  it("refuses a path that leaves its repository folder, before anything is sent", () => {
+    for (const path of ["web/../api/secret.ts", "web/./a.ts", "web//a.ts", "web/a/../../api/b.ts", "web/a\\..\\b.ts", "/web/a.ts"]) {
+      expect(() => cloudRepositoryRoute("file.read", { workspaceId: key, path }, several)).toThrow(/inside one of the workspace's repositories/);
+      expect(() => cloudRepositoryRoute("git.stage", { workspaceId: key, paths: [path] }, several)).toThrow(/inside one of the workspace's repositories/);
+      expect(() => cloudRepositoryRoute("git.diff", { workspaceId: key, filePath: path }, several)).toThrow(/inside one of the workspace's repositories/);
+    }
+    expect(() => cloudRepositoryRoute("file.ignored", { workspaceId: key, dir: "web/../api" }, several)).toThrow(/inside one of the workspace's repositories/);
+    // A repository's own key with a path that climbs out of it.
+    expect(() => cloudRepositoryRoute("file.read", { workspaceId: `${key}/web`, path: "../api/secret.ts" }, several)).toThrow(/inside one of the workspace's repositories/);
+  });
 });

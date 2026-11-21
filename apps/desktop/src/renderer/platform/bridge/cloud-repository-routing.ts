@@ -44,6 +44,20 @@ export type CloudRepositoryRoute =
 const PATH_OPS = new Set(["file.read", "file.readRange", "file.write"]);
 const LISTINGS = new Set(["file.tree", "file.ignored"]);
 
+/** A relative path that stays where it starts: no root, backslash, control character, or empty, `.` or `..` part. */
+function contained(path: string): boolean {
+  return !path.startsWith("/") && !/[\\\u0000-\u001f]/.test(path) && path.split("/").every(part => part !== "" && part !== "." && part !== "..");
+}
+const PATH_FIELDS = ["path", "filePath", "oldFilePath", "dir"] as const;
+const PATH_LISTS = ["paths", "files"] as const;
+/** The worker checks paths too; a path that would leave its repository folder is refused here, before it is sent. */
+function assertContained(op: string, params: Params): void {
+  if (!op.startsWith("git.") && !op.startsWith("file.")) return;
+  const named = [...PATH_FIELDS.map(field => params[field]).filter((value): value is string => typeof value === "string" && value !== ""),
+    ...PATH_LISTS.flatMap(field => Array.isArray(params[field]) ? (params[field] as unknown[]).filter((value): value is string => typeof value === "string") : [])];
+  if (named.some(path => !contained(path))) throw new Error("Choose a file inside one of the workspace's repositories.");
+}
+
 function split(path: string): { folder: string; rest: string } {
   const at = path.indexOf("/");
   return at < 0 ? { folder: path, rest: "" } : { folder: path.slice(0, at), rest: path.slice(at + 1) };
@@ -59,6 +73,7 @@ export function cloudRepositoryRoute(op: string, params: Params, layout: (target
   const found = layout(key);
   if (!found) return { kind: "same" };
   const workspaceId = cloudWorkspaceKey(key);
+  assertContained(op, params);
   const byFolder = (folder: string) => found.repositories.find(entry => entry.folder === folder);
   if (key.relativePath) {
     // A repository's own key: only a repository folder itself is a target.
