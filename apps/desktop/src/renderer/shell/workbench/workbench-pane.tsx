@@ -57,6 +57,7 @@ import {
   useStableRetainedViewOrder,
 } from "../use-retained-view-keys";
 import { PrStatusRow } from "../pr/pr-status-row";
+import { RepositorySwitcher, repositoryOriginUrl } from "./repository-switcher";
 import { useBrowserFloatEntries } from "../../features/browser/browser-float-store";
 import { activeBrowserDeckKeys, browserViewKey } from "./browser-deck-keys";
 import { ActivityScope } from "../../shared/ui/loading/activity-scope";
@@ -270,7 +271,7 @@ export function WorkbenchPane({
   // The Changes tab's PR status row and the Review tab share one condition:
   // the active workspace has a PR. Tracked here for the creation-moment
   // auto-focus below.
-  const { workspace: activeWorkspace, project: activeProject } =
+  const { workspace: activeWorkspace, project: activeProject, repositoryWorkspace } =
     useActiveWorkspace();
   const tabs = useMemo(
     () => availableWorkspaceTabs(allTabs, activeProject),
@@ -284,7 +285,8 @@ export function WorkbenchPane({
       ? activeWorkspace.repoRoot
       : activeWorkspace.id
     : null;
-  const prNumber = activeWorkspace?.prNumber ?? null;
+  // A workspace of several repositories: its current repository's pull request.
+  const prNumber = repositoryWorkspace?.prNumber ?? null;
 
   // Re-validate the stored active id against the tab list: a stale id (including
   // a removed tab) falls back to the first File tab, then
@@ -308,7 +310,7 @@ export function WorkbenchPane({
     !!activeWorkspace &&
     !isLocalMainWorkspace(activeWorkspace) &&
     (activeWorkbenchTab?.type === "changes" ||
-      (activeWorkbenchTab?.type === "review" && activeWorkspace.prNumber == null));
+      (activeWorkbenchTab?.type === "review" && prNumber == null));
   // Recent clean File views join the always-retained Browser/source surfaces;
   // this preserves tree/editor layout without mounting an unbounded tab set.
   const availableWorkbenchIds = useMemo(
@@ -563,9 +565,10 @@ export function WorkbenchPane({
               <div className={WORKBENCH_CONTENT_CLS}>
                 {showSharedPrStatusRow && (
                   <PrStatusRow
-                    workspace={activeWorkspace}
-                    originUrl={activeProject?.originUrl ?? null}
+                    workspace={repositoryWorkspace}
+                    originUrl={repositoryOriginUrl(activeWorkspace, repositoryWorkspace, activeProject?.originUrl ?? null)}
                     active={surfaceActive && !collapsed}
+                    leading={<RepositorySwitcher workspace={activeWorkspace} active={surfaceActive && !collapsed} />}
                   />
                 )}
                 <div className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">

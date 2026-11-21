@@ -20,7 +20,8 @@
 
 import { useMemo } from "react";
 
-import type { Workspace } from "../platform/git";
+import type { Workspace, WorkspaceRepository } from "../platform/git";
+import { repositoryWorkspace, selectedRepository } from "./workspace-repositories";
 import { findWorkspaceForFolder } from "./workspace-resolution";
 import {
   buildLocalMainWorkspace,
@@ -40,6 +41,11 @@ export interface ActiveWorkspaceResolution {
   folder: string | null;
   project: Project | null;
   loading: boolean;
+  /** The workspace's current repository (its only one unless it holds several). */
+  repository: WorkspaceRepository | null;
+  /** The workspace as its current repository: what Changes, the branch pickers,
+   * the pull request row and review use. The workspace itself with one repository. */
+  repositoryWorkspace: Workspace | null;
 }
 
 export function useActiveWorkspace(): ActiveWorkspaceResolution {
@@ -96,10 +102,14 @@ export function useActiveWorkspace(): ActiveWorkspaceResolution {
     return null;
   }, [folder, project, workspaces, archived, resolved, archives.resolved, linked]);
 
+  const saved = useWorkspaceStore(state => workspace ? state.currentRepositoryByWorkspace[workspace.id] : undefined);
+  const repository = workspace ? selectedRepository(workspace, saved) : null;
   return {
     workspace,
     folder,
     project,
+    repository,
+    repositoryWorkspace: workspace && repository ? repositoryWorkspace(workspace, repository) : null,
     loading:
       !!folder &&
       !workspace &&

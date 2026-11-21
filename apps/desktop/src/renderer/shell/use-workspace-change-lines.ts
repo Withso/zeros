@@ -131,6 +131,57 @@ export function useWorkspaceChangeLines(
   workspace: Workspace | null,
   active = true,
 ): ChangeLineCounts {
+  // A workspace of several repositories shows the sum of every repository's pair.
+  const several = workspace && workspace.present !== false && workspace.repositories && workspace.repositories.length > 1
+    ? workspace.repositories : null;
+  const one = useOneWorkspaceChangeLines(several ? null : workspace, active);
+  const total = useRepositoriesChangeLines(several, workspace?.path, workspace?.id ?? null, active && !!several);
+  return several ? total : one;
+}
+
+/** The sum of each repository's pair. Each keeps its own last confirmed pair
+ * through a failed refresh, and the sum is shown only for the exact set of
+ * repositories it was read for. */
+function useRepositoriesChangeLines(
+  repositories: readonly { target: string; baseBranch: string }[] | null,
+  path: string | undefined,
+  workspaceId: string | null,
+  active: boolean,
+): ChangeLineCounts {
+  const key = repositories ? JSON.stringify(repositories.map(entry => [entry.target, entry.baseBranch])) : "";
+  const refreshKey = useGitRefreshKey(path, workspaceId, active);
+  const [live, setLive] = useState<{ key: string; counts: ChangeLineCounts } | null>(null);
+  useEffect(() => {
+    if (!active || !key) return;
+    let cancelled = false;
+    const list = JSON.parse(key) as [string, string][];
+    void Promise.all(list.map(([target, baseBranch]) => {
+      const request = changeLineCountsForGeneration(target, refreshKey, baseBranch);
+      return request.then(counts => rememberChangeLines(target, counts, baseBranch, observations.get(request)),
+        () => confirmedChangeLinesForBase(target, baseBranch) ?? NO_CHANGE_LINES);
+    })).then(pairs => {
+      if (cancelled) return;
+      const counts = sumChangeLines(pairs);
+      setLive(current => current?.key === key && current.counts.additions === counts.additions && current.counts.deletions === counts.deletions
+        ? current : { key, counts });
+    });
+    return () => { cancelled = true; };
+  }, [active, key, refreshKey]);
+  if (!key) return NO_CHANGE_LINES;
+  if (live?.key === key) return live.counts;
+  return sumChangeLines((JSON.parse(key) as [string, string][]).map(([target, baseBranch]) =>
+    confirmedChangeLinesForBase(target, baseBranch) ?? NO_CHANGE_LINES));
+}
+
+function sumChangeLines(pairs: readonly ChangeLineCounts[]): ChangeLineCounts {
+  const additions = pairs.reduce((sum, pair) => sum + pair.additions, 0), deletions = pairs.reduce((sum, pair) => sum + pair.deletions, 0);
+  return additions === 0 && deletions === 0 ? NO_CHANGE_LINES : { additions, deletions };
+}
+
+function useOneWorkspaceChangeLines(
+  workspace: Workspace | null,
+  active = true,
+): ChangeLineCounts {
   const target = workspaceChangeLinesTarget(workspace);
   const baseBranch = workspace?.baseBranch;
   const refreshKey = useGitRefreshKey(workspace?.path, target, active);

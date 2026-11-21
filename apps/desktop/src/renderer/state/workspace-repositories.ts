@@ -27,3 +27,21 @@ export function selectedRepository(workspace: Workspace, repository: string | nu
   const name = repository?.toLowerCase();
   return (name ? list.find(entry => entry.repository.toLowerCase() === name) : undefined) ?? list[0]!;
 }
+
+const views = new WeakMap<Workspace, Map<WorkspaceRepository, Workspace>>();
+
+/** The workspace as one of its repositories: its key, branch, base branch and
+ * pull request, so Changes, the branch pickers, the pull request row and review
+ * follow that repository. The workspace itself for its only repository. */
+export function repositoryWorkspace(workspace: Workspace, repository: WorkspaceRepository): Workspace {
+  if (repository.target === workspace.id) return workspace;
+  let byRepository = views.get(workspace);
+  if (!byRepository) views.set(workspace, byRepository = new Map());
+  let view = byRepository.get(repository);
+  if (!view) {
+    view = { ...workspace, id: repository.target, path: repository.target, branch: repository.branch, baseBranch: repository.baseBranch,
+      prNumber: repository.prNumber, prState: repository.prState, prUrl: repository.prUrl };
+    byRepository.set(repository, view);
+  }
+  return view;
+}

@@ -32,6 +32,8 @@ export interface PersistedUiState {
   activeRepoId: string | null;
   /** Per-repository hub tab, keyed by stable project id. */
   repoPageViewByProject: Record<string, RepoPageView>;
+  /** Per-workspace current repository, keyed by workspace key. */
+  currentRepositoryByWorkspace: Record<string, string>;
   newAgentFolder: string | null;
   /** The workspace folder the user was last viewing — restored on boot so the
    *  app reopens on the same workspace instead of "No workspace selected". */
@@ -276,6 +278,12 @@ export function loadPersistedUiState(): Partial<PersistedUiState> {
         ]);
       }
     }
+    if ("currentRepositoryByWorkspace" in parsed) {
+      out.currentRepositoryByWorkspace = Object.fromEntries(Object.entries(parseBoundedStringMap(
+        parsed.currentRepositoryByWorkspace,
+        MAX_SCOPED_NAV_ENTRIES,
+      )).filter(([, repository]) => /^[a-z0-9_.-]{1,100}\/[a-z0-9_.-]{1,100}$/.test(repository)));
+    }
     if ("newAgentFolder" in parsed) {
       out.newAgentFolder = parseStringOrNull(parsed.newAgentFolder);
     }
@@ -340,6 +348,7 @@ export function schedulePersistUiState(state: WorkspaceState): void {
     lastHomePage: state.lastHomePage,
     activeRepoId: state.activeRepoId,
     repoPageViewByProject: state.repoPageViewByProject,
+    currentRepositoryByWorkspace: state.currentRepositoryByWorkspace,
     newAgentFolder: state.newAgentFolder,
     lastWorkspaceFolder: state.lastWorkspaceFolder,
     lastWorkspaceByRepoRoot: state.lastWorkspaceByRepoRoot,

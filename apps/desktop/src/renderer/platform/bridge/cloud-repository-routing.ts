@@ -25,6 +25,14 @@ export function cloudRepositoryLayout(target: CloudWorkspaceTarget): CloudReposi
   return layouts.get(cloudWorkspaceKey(target));
 }
 
+/** A workspace key's repository keys (`<key>/<folder>`); none for one repository or another key. */
+export function cloudRepositoryTargets(value: string): string[] {
+  const key = parseCloudWorkspaceKey(value);
+  if (!key || key.relativePath) return [];
+  const root = cloudWorkspaceKey(key);
+  return cloudRepositoryLayout(key)?.repositories.map(entry => `${root}/${entry.folder}`) ?? [];
+}
+
 type Params = Record<string, unknown>;
 export type CloudRepositoryRoute =
   | { kind: "same" }

@@ -21,6 +21,7 @@ export {
   selectChatToRestoreForFolder,
   selectLastWorkspaceFolderForRepo,
   selectRepoPageView,
+  selectCurrentRepository,
   useActivePage,
   useWorkspaceListFilter,
   useWorkspaceActivityByFolder,
@@ -220,6 +221,11 @@ export type WorkspaceState = {
   // Repository-hub tabs belong to their repository, not to the app. Switching
   // repo A → B → A therefore restores A's own last view rather than leaking B's.
   repoPageViewByProject: Record<string, RepoPageView>;
+  /** A workspace of several repositories' current repository (`owner/name`,
+   * lowercased), keyed by the workspace's key. Absent means its first. Read
+   * through `selectCurrentRepository`, which validates it against the
+   * workspace's own repositories. */
+  currentRepositoryByWorkspace: Record<string, string>;
   isLoading: boolean;
 
   aiSettings: AiSettings;

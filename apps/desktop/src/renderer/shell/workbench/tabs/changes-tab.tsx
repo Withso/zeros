@@ -225,7 +225,8 @@ export function useSourceTarget(): {
   workspaceId: string | null;
   changesTarget: string | null;
 } {
-  const { workspace } = useActiveWorkspace();
+  // The current repository of a workspace of several; the workspace itself otherwise.
+  const { repositoryWorkspace: workspace } = useActiveWorkspace();
   const isLocalMain = !!workspace && isLocalMainWorkspace(workspace);
   const workspaceId = workspace && !isLocalMain ? workspace.id : null;
   const changesTarget = isLocalMain ? workspace?.repoRoot || null : workspaceId;
@@ -233,10 +234,35 @@ export function useSourceTarget(): {
 }
 
 /** All-changes count for the active workspace — exactly the number of rows in
- * the default Changes scope, including committed work. */
+ * the default Changes scope, including committed work. A workspace of several
+ * repositories totals every repository's, whichever one is current. */
 export function useWorkspaceChangeCount(refreshKey: number): number {
   const { changesTarget } = useSourceTarget();
-  return useChangeCount(changesTarget, refreshKey);
+  const { workspace } = useActiveWorkspace();
+  const several = workspace?.repositories && workspace.repositories.length > 1 ? workspace.repositories : null;
+  const single = useChangeCount(several ? null : changesTarget, refreshKey);
+  const total = useChangeCountTotal(several ? several.map(entry => entry.target) : null, refreshKey);
+  return several ? total : single;
+}
+
+/** The sum of each target's All Changes count; each keeps its own last confirmed
+ * count through a transient failure, exactly as one target does. */
+export function useChangeCountTotal(targets: readonly string[] | null, refreshKey: number, active = true): number {
+  const key = targets?.join("\0") ?? "";
+  const [snapshot, setSnapshot] = useState<{ key: string; total: number }>({ key: "", total: 0 });
+  useEffect(() => {
+    if (!active || !key) return;
+    let cancelled = false;
+    const list = key.split("\0");
+    void Promise.all(list.map(target => changeCountsForGeneration(target, refreshKey)
+      .then(counts => { writeChangesCount(target, counts.all); return counts.all; },
+        () => readChangesCount(target) ?? 0)))
+      .then(counts => { if (!cancelled) setSnapshot({ key, total: counts.reduce((sum, count) => sum + count, 0) }); });
+    return () => { cancelled = true; };
+  }, [active, key, refreshKey]);
+  if (!key) return 0;
+  if (snapshot.key === key) return snapshot.total;
+  return key.split("\0").reduce((sum, target) => sum + (readChangesCount(target) ?? 0), 0);
 }
 
 const ZERO_CHANGE_COUNTS: ChangeCounts = Object.freeze({
