@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
@@ -182,7 +183,13 @@ describe("native Sleep visibility", () => {
       }));
       expect(html.match(/LIVE ACTIVITY/g)).toHaveLength(1);
       expect(html).toContain('data-activity-start="1"');
-      expect(html).toContain('data-live-narration="true"');
+      // Live narration is an in-between message, outside the working run.
+      const rendered = document.createElement("div");
+      rendered.innerHTML = html;
+      const narrationProse = [...rendered.querySelectorAll(".zeros-agent-md")]
+        .find((node) => node.textContent?.includes("I will check again shortly."));
+      expect(narrationProse).toBeDefined();
+      expect(narrationProse!.closest(".zeros-working-feed")).toBeNull();
       expect(html).not.toContain(">sleep<");
     }
   });

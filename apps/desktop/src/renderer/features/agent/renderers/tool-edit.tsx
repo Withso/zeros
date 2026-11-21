@@ -5,6 +5,7 @@
 // patch and themed through zerosDiffOptions. Busy cards start collapsed with
 // their +N/−M counts in the header.
 
+import { placeholderTitle } from "./tool-readiness";
 import { memo, useMemo } from "react";
 import { useTurnDisclosure } from "../turn-disclosures";
 import { FileEdit } from "lucide-react";
@@ -112,7 +113,8 @@ const EditFileRow = memo(function EditFileRow({
   const hasChanges =
     counts !== null && (counts.added > 0 || counts.removed > 0);
   const isWrite = source?.write === true;
-  const path = source?.path ?? readPath(tool.rawInput) ?? tool.title;
+  // A placeholder title ("Editing file") is never a description.
+  const path = source?.path ?? readPath(tool.rawInput) ?? (placeholderTitle(tool.title) ? undefined : tool.title);
   const writeLineCount =
     isWrite && source
       ? contentLineCount(
@@ -126,7 +128,7 @@ const EditFileRow = memo(function EditFileRow({
     label: writeLineCount != null ? `Write ${writeLineCount} lines` : "Edit",
     target: path,
     filePath: source?.path ?? readPath(tool.rawInput) ?? undefined,
-    targetFile: true,
+    targetFile: !!path,
     targetKind: "file",
     expandable: true,
   };

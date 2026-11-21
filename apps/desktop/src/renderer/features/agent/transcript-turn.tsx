@@ -12,6 +12,7 @@
 // travels in `tail`, which is null for every other turn.
 // ──────────────────────────────────────────────────────────
 
+import { turnEndedNaturally } from "./turn-end";
 import { usePromptSender } from "./use-prompt-sender";
 import React, { memo, useCallback, useMemo } from "react";
 import type { CloudV2PromptState } from "@zeros/protocol/cloud-v2-prompts";
@@ -250,6 +251,13 @@ export const TranscriptTurn = memo(function TranscriptTurn({
           {(!authRequired || visibleEvents.length > 0) && (
             <TurnEventList
               events={visibleEvents}
+              // Known with the same update that ends streaming: the session
+              // patches status, failure and stop reason together.
+              endedNaturally={!!tail && !tail.sessionStreaming && turnEndedNaturally({
+                stopReason: presentation ? presentation.stopReason : tail.lastStopReason,
+                failure: tail.failure,
+                cancelled: receiptState === "cancelled" || authStopped,
+              })}
               usageEvents={turn.providerEvents}
               failureTurnId={!authRequired && shared.chatId ? turn.recordedTurnId ?? undefined : undefined}
               isActive={isActiveProviderSegment}

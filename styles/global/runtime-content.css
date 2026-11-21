@@ -71,7 +71,9 @@
 
 /* The current narrated block stays bright as it streams. Advancing to the
    next event removes the marker. Explicit child answers remain output at any
-   nesting depth, even though the group lives in an outer working feed. */
+   nesting depth, even though the group lives in an outer working feed. A
+   top-level in-between message folded into a group (`data-in-between`) reads
+   like one outside it; nested sub-agent narration keeps its tone. */
 [data-Zeros-root]
   .zeros-working-feed
   [data-live-narration="true"]
@@ -91,6 +93,17 @@
 [data-Zeros-root]
   .zeros-working-feed
   [data-agent-output]
+  [data-role="assistant"]
+  .zeros-agent-md
+  *,
+[data-Zeros-root]
+  .zeros-working-feed
+  [data-in-between]
+  [data-role="assistant"]
+  .zeros-agent-md,
+[data-Zeros-root]
+  .zeros-working-feed
+  [data-in-between]
   [data-role="assistant"]
   .zeros-agent-md
   * {
@@ -616,16 +629,29 @@
 [data-Zeros-root] .zeros-agent-md sub {
   bottom: -0.25em;
 }
-/* These are alpha masks, not UI colors: black supplies opaque coverage. */
-[data-Zeros-root] .zeros-agent-md[data-streaming-edge="true"] {
-  mask-image:
-    linear-gradient(to bottom, black var(--stream-edge-y), transparent var(--stream-edge-y)),
-    linear-gradient(to var(--stream-edge-direction), black var(--stream-edge-x), color-mix(in srgb, black 65%, transparent) var(--stream-edge-end));
-  mask-composite: add;
+/* Render first, then reveal, block by block (renderers/use-text-reveal.ts):
+   the live tail answer is laid out in full and clipped (max-height, set
+   inline) to the bottom of its last released unit, so units not yet shown
+   take no space. --reveal-mask is an alpha mask, not a UI color: black
+   supplies opaque coverage; a just-released unit's band fades in at partial
+   alpha. After a natural turn end the box is not clipped and the rest fades
+   in where it already is. */
+[data-Zeros-root] .zeros-agent-md[data-revealing] {
+  overflow: clip;
+  mask-image: var(--reveal-mask, none);
 }
-
-@media (prefers-reduced-motion: reduce) {
-  [data-Zeros-root] .zeros-agent-md[data-streaming-edge="true"] {
-    mask-image: none;
-  }
+/* A held message (still being written, nothing of it shown yet) takes no
+   space and no feed gap, but keeps its lane-wide layout so its lines can be
+   measured: its row is out of flow and invisible, and its feed entry box
+   dissolves into the feed. */
+[data-Zeros-root] [data-role]:has(> * > .zeros-agent-md[data-reveal-held]) {
+  position: absolute;
+  inset-inline: 0;
+  visibility: hidden;
+}
+[data-Zeros-root] .zeros-working-feed > div:has(> [data-role] > * > .zeros-agent-md[data-reveal-held]) {
+  display: contents;
+}
+[data-Zeros-root] .zeros-working-feed:has(> div > [data-role] > * > .zeros-agent-md[data-reveal-held]) {
+  position: relative;
 }

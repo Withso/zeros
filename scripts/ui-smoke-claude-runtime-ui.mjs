@@ -41,6 +41,12 @@ export async function runClaudeRuntimeUiSmoke({ page, check, harnessBase }) {
   await page.goto(transcript);
   const recovery = page.locator("#claude-transcript-recovery");
   await expect(recovery.locator('[data-authentication-status="signed-in"]')).toHaveText("Signed in");
+  // Three agents make a group, collapsed while live as well; its open state
+  // is the user's and survives settling.
+  const recoveryWork = recovery.getByRole("button", { name: /^Worked for .+, 1 message, 3 agents$/ });
+  await expect(recoveryWork).toHaveAttribute("aria-expanded", "false");
+  await expect(recovery.locator("[data-agent-group]")).toHaveCount(0);
+  await recoveryWork.click();
   await expect(recovery.locator("[data-agent-group]")).toHaveCount(3);
   await expect(recovery.locator("[data-provider-usage-notice]")).toHaveCount(1);
   await expect(recovery).not.toContainText("No conversation found");
@@ -63,8 +69,9 @@ export async function runClaudeRuntimeUiSmoke({ page, check, harnessBase }) {
       element.querySelector("button") === null;
   });
   check("Usage feedback is a plain inbetween message with no banner surface or action", inlineUsage);
+  await recoveryWork.click();
   await recovery.getByRole("button", { name: "Show settled recovery", exact: true }).click();
-  const settledWork = recovery.getByRole("button", { name: "1 message, 3 agents", exact: true });
+  const settledWork = recovery.getByRole("button", { name: /^Worked for .+, 1 message, 3 agents$/ });
   await expect(settledWork).toHaveAttribute("aria-expanded", "false");
   await expect(recovery.locator("[data-provider-usage-notice]")).toHaveCount(0);
   await expect(recovery).not.toContainText("No conversation found");
@@ -223,6 +230,7 @@ export async function runClaudeRuntimeUiSmoke({ page, check, harnessBase }) {
 
   for (const params of ["owner=personal", "owner=organization", "owner=organization&placement=cloud", "owner=personal"]) {
     await page.goto(`${transcript}?${params}`);
+    await page.locator("#claude-transcript-recovery").getByRole("button", { name: /^Worked for .+, 1 message, 3 agents$/ }).click();
     await expect(page.locator("#claude-transcript-recovery [data-agent-group]")).toHaveCount(3);
     await expect(page.locator("#claude-transcript-recovery [data-provider-usage-notice]")).toHaveCount(1);
     await expect(page.locator("#claude-transcript-recovery")).not.toContainText("No conversation found");

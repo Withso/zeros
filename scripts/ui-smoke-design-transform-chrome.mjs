@@ -419,6 +419,15 @@ const savedFrameSize = (page, file = "home.html") =>
     return frame ? `${frame.width} × ${frame.height}` : null;
   }, file);
 
+const savedFrameGeneration = (page, file = "home.html") =>
+  page.evaluate(async (file) => {
+    const { designWorkspaceSnapshotCache } =
+      await import("/apps/desktop/src/renderer/features/design-workspace/state/design-workspace-cache.ts");
+    return designWorkspaceSnapshotCache
+      .peekSnapshot("ws_design_harness")
+      .data?.frames.find((item) => item.file === file)?.sourceVersion ?? null;
+  }, file);
+
 async function typeSize(page, width, height) {
   const layout = page.locator("[data-design-layout-section]");
   for (const [label, value] of [["W", width], ["H", height]]) {
@@ -488,6 +497,9 @@ export async function runDesignTinySelectionSmoke({ page, check }) {
     width: Number.parseFloat(node.style.width), height: Number.parseFloat(node.style.height),
   }));
   const before = await geometry();
+  const generationBeforeMove = await savedFrameGeneration(page);
+  const widthField = page.locator('[data-design-layout-section] input[aria-label="W"]');
+  await widthField.evaluate((node) => { node.dataset.smokeBeforeMove = ""; });
   const box = await canvasFrame.boundingBox();
   const handles = await canvasFrame.locator(".zd-design-selection-handle").count();
   await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
@@ -495,6 +507,14 @@ export async function runDesignTinySelectionSmoke({ page, check }) {
   await page.mouse.move(box.x + box.width / 2 + 40, box.y + box.height / 2 + 30, { steps: 8 });
   await page.mouse.up();
   await expect.poll(async () => (await geometry()).x).not.toBe(before.x);
+  await expect.poll(() => savedFrameGeneration(page)).not.toBe(generationBeforeMove);
+  await expect(widthField).toBeEnabled();
+  // The move's readback must not remount the inspector: a remount between it
+  // and the next typed size discarded that size.
+  check(
+    "a frame's inspector fields stay mounted through the readback after it moves",
+    await widthField.evaluate((node) => node.dataset.smokeBeforeMove === ""),
+  );
   const after = await geometry();
   check(
     "a selected 10 × 10 canvas frame at 25% moves from its body and keeps its size",

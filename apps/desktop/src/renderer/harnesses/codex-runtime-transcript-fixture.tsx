@@ -53,7 +53,7 @@ function initialSnapshots(): Record<Owner, Snapshot> {
       { sessionUpdate: "tool_call", toolCallId: "browser", title: "node_repl:js", kind: "mcp", status: "completed",
         rawInput: { server: "node_repl", tool: "js", arguments: { title: "Inspect disclosure page", code: "await tab.url();" } },
         rawOutput: { raw: { _meta: { browser_use: { url: "https://example.test/disclosures" }, "codex/browserUse": true } } } },
-      { sessionUpdate: "agent_thought_chunk", messageId: "thinking", content: { type: "text", text: "Checking disclosure continuity." } },
+      { sessionUpdate: "agent_thought_chunk", messageId: "thinking", content: { type: "text", text: "Checking disclosure continuity. Then the rows" } },
     ]),
   }])) as Record<Owner, Snapshot>;
 }

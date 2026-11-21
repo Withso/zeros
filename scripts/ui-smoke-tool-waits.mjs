@@ -4,16 +4,21 @@ export async function runToolWaitSmoke({ page, check }) {
   const fixture = page.locator("#tool-wait-fixture");
   const feed = fixture.locator("#tool-wait-feed");
   const pending = feed.getByRole("button", { name: "Bash gh pr checks 42", exact: true });
-  await pending.click();
-  await expect(pending).toHaveAttribute("aria-expanded", "true");
-  const timer = feed.locator('[aria-live="off"]');
+  const loaderLine = feed.locator('div[role="status"][aria-live="polite"]');
+  const timer = loaderLine.locator(".tabular-nums");
+  // A lone live call is on the loader line, not also a row.
+  await expect(loaderLine).toContainText("gh pr checks 42");
+  await expect(pending).toHaveCount(0);
   await expect(feed.getByRole("status", { name: "Agent working", exact: true })).toHaveCount(1);
-  await timer.evaluate((element) => { element.dataset.waitTimer = "retained"; });
-  await expect(timer).toContainText(/^\d{1,2}m, /);
-  const firstTime = await timer.textContent();
 
   await fixture.getByRole("button", { name: "Show pending checks", exact: true }).click();
+  // The narration closes its run: the call becomes a row and the loader line
+  // returns to the turn clock.
+  await pending.click();
   await expect(pending).toHaveAttribute("aria-expanded", "true");
+  await timer.evaluate((element) => { element.dataset.waitTimer = "retained"; });
+  await expect(timer).toContainText(/^\d{1,2}m \d/);
+  const firstTime = await timer.textContent();
   await expect(pending).toHaveAttribute("aria-description", "Checks are still running.");
   await expect(pending).toHaveText("Bash");
   const detail = page.locator(`[id="${await pending.getAttribute("aria-controls")}"] [data-tool-detail]`);
@@ -22,7 +27,9 @@ export async function runToolWaitSmoke({ page, check }) {
   await expect(detail).not.toHaveClass(/text-red-primary/);
   await expect(feed).not.toContainText("Sleep");
   await expect(feed).not.toContainText("durationMs");
-  await expect(feed.locator('[data-live-narration="true"]')).toContainText("I will check again shortly.");
+  const narration = feed.getByText(/I will check again shortly\.$/);
+  await expect(narration).toBeVisible();
+  expect(await narration.evaluate((element) => !element.closest(".zeros-working-feed"))).toBe(true);
   await expect(timer).toHaveAttribute("data-wait-timer", "retained");
   await expect(timer).not.toHaveText(firstTime);
   await expect(fixture.locator("#tool-wait-export")).toContainText("checks pending");
@@ -36,12 +43,11 @@ export async function runToolWaitSmoke({ page, check }) {
   await expect(timer).toHaveAttribute("data-wait-timer", "retained");
   await expect(feed).not.toContainText("Sleep");
   await fixture.getByRole("button", { name: "Finish Sleep", exact: true }).click();
-  await expect(feed.getByRole("button", { name: "Bash gh pr checks 42 --required", exact: true })).toBeVisible();
+  await expect(loaderLine).toContainText("gh pr checks 42 --required");
   await expect(pending).toHaveAttribute("aria-expanded", "true");
-  await expect(timer).toHaveAttribute("data-wait-timer", "retained");
   await expect(feed.getByRole("status", { name: "Agent working", exact: true })).toHaveCount(1);
   await expect(feed).not.toContainText("Sleep");
-  check("Pending CI keeps its disclosure and neutral details; native Sleep keeps one ticking activity timer through replay", true);
+  check("Pending CI keeps its disclosure and neutral details; native Sleep keeps one ticking activity timer through replay and hands the line to the next call", true);
 
   const failure = fixture.locator("#tool-wait-real-failure").getByRole("button", { name: "Bash pnpm test", exact: true });
   await expect(failure).toContainText("Error");
@@ -52,7 +58,9 @@ export async function runToolWaitSmoke({ page, check }) {
 
   await fixture.getByRole("button", { name: "Finish checks", exact: true }).click();
   await expect(feed.getByRole("status", { name: "Agent working", exact: true })).toHaveCount(0);
-  await expect(feed.getByRole("button", { name: "2 tool calls, 1 message", exact: true })).toBeVisible();
+  // Each run holds one call, so neither is a group.
+  await expect(feed.locator("[data-working-group]")).toHaveCount(0);
+  await expect(feed.getByRole("button", { name: "Bash gh pr checks 42 --required", exact: true })).toBeVisible();
   await expect(feed).toContainText("All checks passed.");
   await expect(fixture.locator("#tool-wait-export")).not.toContainText("Sleep");
   await expect(fixture.locator("#tool-wait-native")).toContainText('"type":"sleep"');
@@ -61,7 +69,6 @@ export async function runToolWaitSmoke({ page, check }) {
   await fixture.getByRole("button", { name: "Reset wait", exact: true }).click();
   await fixture.getByRole("button", { name: "Show pending checks", exact: true }).click();
   await fixture.getByRole("button", { name: "Stop wait", exact: true }).click();
-  await feed.getByRole("button", { name: "2 tool calls, 1 message", exact: true }).click();
   await feed.getByRole("button", { name: "Sleep", exact: true }).click();
   await expect(feed).toContainText("Completion not reported.");
   await expect(feed.getByRole("status", { name: "Agent working", exact: true })).toHaveCount(0);

@@ -36,6 +36,7 @@ import {
 } from "react";
 
 import { ActivityScope } from "../../shared/ui/loading/activity-scope";
+import { layoutScrollHeight } from "../../shared/ui/motion/soft-motion";
 import { beginChatScrollNavigation, CHAT_SCROLL_NAVIGATION_EVENT, type ChatScrollNavigation } from "./chat-scroll-navigation";
 
 export interface StickyBottomState {
@@ -122,6 +123,15 @@ export function useStickyBottom(
    *  read the user's pre-render intent without triggering an extra
    *  re-render of the hook's consumer. */
   const stickRef = useRef(options.initialAtBottom ?? true);
+  /** Reader intent, also published on the scroller (`data-follows-tail`) so
+   * motion inside it can tell a scroll that will follow the tail from one
+   * that will not (shared/ui/motion/soft-motion.ts). */
+  const setFollowing = useCallback((value: boolean) => {
+    stickRef.current = value;
+    // A checkpoint's bottom inset suspends the follow (see the option doc).
+    const published = String(value && insetRef.current === 0);
+    if (scrollEl?.dataset && scrollEl.dataset.followsTail !== published) scrollEl.dataset.followsTail = published;
+  }, [scrollEl]);
   /** Inset read through a ref everywhere: it changes on every spacer
    *  resize tick during streaming, and going through deps would tear
    *  down / re-subscribe the scroll listener + ResizeObserver each
@@ -139,12 +149,12 @@ export function useStickyBottom(
 
   useEffect(() => {
     if (!scrollEl || !enabled) return;
-    let lastHeight = scrollEl.scrollHeight;
+    let lastHeight = layoutScrollHeight(scrollEl);
     let lastViewport = scrollEl.clientHeight;
     const measure = (resized = false) => {
       if (!enabledRef.current || scrollEl.clientHeight === 0) return;
       const geometryChanged =
-        lastHeight !== scrollEl.scrollHeight ||
+        lastHeight !== layoutScrollHeight(scrollEl) ||
         lastViewport !== scrollEl.clientHeight;
       // Text smoothing, image decoding and content-visibility layout happen
       // after React's content effect. Follow these resizes too, without
@@ -153,12 +163,12 @@ export function useStickyBottom(
         (resized || geometryChanged) && stickRef.current &&
         !jumpingRef.current && insetRef.current === 0
       ) {
-        scrollEl.scrollTop = scrollEl.scrollHeight;
+        scrollEl.scrollTop = layoutScrollHeight(scrollEl) - scrollEl.clientHeight;
       }
-      lastHeight = scrollEl.scrollHeight;
+      lastHeight = layoutScrollHeight(scrollEl);
       lastViewport = scrollEl.clientHeight;
       const atBottom =
-        scrollEl.scrollHeight - insetRef.current - scrollEl.scrollTop -
+        layoutScrollHeight(scrollEl) - insetRef.current - scrollEl.scrollTop -
         scrollEl.clientHeight <= threshold;
       // Scrollend can still belong to the navigation we just interrupted.
       // Release reading suppression on actual departure or arrival at its
@@ -181,7 +191,7 @@ export function useStickyBottom(
       const awaitingSpacerResize = stickRef.current && insetRef.current > 0 &&
         (resized || geometryChanged);
       if (!jumpingRef.current && !readingNavigationRef.current && !awaitingSpacerResize) {
-        stickRef.current = atBottom;
+        setFollowing(atBottom);
       }
       if (!local || publishedBottomRef.current !== atBottom) {
         publishedBottomRef.current = atBottom;
@@ -196,7 +206,7 @@ export function useStickyBottom(
         scrollEl.scrollTo({ top: scrollEl.scrollTop, behavior: "instant" });
       }
       readingNavigationRef.current = false;
-      stickRef.current = false;
+      setFollowing(false);
       // A click or a downward wheel at the very end may not emit scroll.
       // Re-measure after the browser/React handles the gesture so following
       // does not remain disabled when the reader never actually moved away.
@@ -211,7 +221,7 @@ export function useStickyBottom(
       const { follow = false, target } = (event as CustomEvent<ChatScrollNavigation>).detail ?? {};
       readingTargetRef.current = target;
       readingNavigationRef.current = !follow;
-      stickRef.current = follow;
+      setFollowing(follow);
       // A navigation can spend its first frame at the old bottom. Unlike a
       // no-motion gesture, it must not re-arm following before it moves.
       if (gestureFrame) cancelAnimationFrame(gestureFrame);
@@ -236,6 +246,7 @@ export function useStickyBottom(
     ro?.observe(scrollEl);
     const content = scrollEl.firstElementChild;
     if (content) ro?.observe(content);
+    setFollowing(stickRef.current);
     measure();
     return () => {
       cancelJumpRef.current();
@@ -250,7 +261,7 @@ export function useStickyBottom(
       scrollEl.removeEventListener("keydown", onKeyDown);
       ro?.disconnect();
     };
-  }, [scrollEl, threshold, enabled, local]);
+  }, [scrollEl, threshold, enabled, local, setFollowing]);
 
   // Snap to bottom on content change, but only when the user was
   // already there before the change. useLayoutEffect runs after
@@ -280,7 +291,7 @@ export function useStickyBottom(
     // doc. (Following resumes automatically: once the inset is gone
     // the next content change lands here again.)
     if (insetRef.current > 0) return;
-    scrollEl.scrollTop = scrollEl.scrollHeight;
+    scrollEl.scrollTop = layoutScrollHeight(scrollEl) - scrollEl.clientHeight;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, contentDeps);
 
@@ -291,7 +302,7 @@ export function useStickyBottom(
       cancelJumpRef.current();
       readingNavigationRef.current = false;
       const target = () => Math.max(
-        0, scrollEl.scrollHeight - insetRef.current - scrollEl.clientHeight,
+        0, layoutScrollHeight(scrollEl) - insetRef.current - scrollEl.clientHeight,
       );
       const finish = () => {
         scrollEl.removeEventListener("scrollend", finish);
@@ -299,13 +310,13 @@ export function useStickyBottom(
         jumpingRef.current = false;
         if (!enabledRef.current || scrollEl.clientHeight === 0) return;
         scrollEl.scrollTo({ top: target(), behavior: "instant" });
-        stickRef.current = true;
+        setFollowing(true);
         if (!local || !publishedBottomRef.current) {
           publishedBottomRef.current = true;
           setIsAtBottom(true);
         }
       };
-      stickRef.current = true;
+      setFollowing(true);
       if (
         !smooth || Math.abs(scrollEl.scrollTop - target()) <= 1 ||
         window.matchMedia("(prefers-reduced-motion: reduce)").matches
@@ -326,7 +337,7 @@ export function useStickyBottom(
       // isAtBottom describes actual geometry, not the destination. Publishing
       // true here would let AgentChat trim paged history during the animation.
     },
-    [scrollEl, local],
+    [scrollEl, local, setFollowing],
   );
 
   return { isAtBottom, jumpToBottom };

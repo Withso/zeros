@@ -16,6 +16,7 @@
 // skipped turn on each frame. Off-screen turns use a 240px estimate, so a long
 // jump settles and nudges onto the re-measured target; user input cancels it.
 
+import { contentGlideOf } from "@/renderer/shared/ui/motion/soft-motion";
 import React, {
   memo,
   useCallback,
@@ -185,7 +186,8 @@ export const CheckpointRail = memo(function CheckpointRail({
    *  the containment boundaries — no forced layout of skipped turns. */
   const measureTops = useCallback((): Array<number | null> => {
     if (!scrollEl) return [];
-    const containerTop = scrollEl.getBoundingClientRect().top;
+    // Rows are measured in layout, not mid-glide (soft-motion.ts).
+    const containerTop = scrollEl.getBoundingClientRect().top + contentGlideOf(scrollEl);
     const byId = new Map<string, number>();
     scrollEl
       .querySelectorAll<HTMLElement>("[data-checkpoint-id]")
@@ -209,7 +211,7 @@ export const CheckpointRail = memo(function CheckpointRail({
         `[data-checkpoint-id="${CSS.escape(id)}"]`,
       );
       if (!el) return null;
-      const containerTop = scrollEl.getBoundingClientRect().top;
+      const containerTop = scrollEl.getBoundingClientRect().top + contentGlideOf(scrollEl);
       const raw =
         el.getBoundingClientRect().top - containerTop + scrollEl.scrollTop;
       return Math.max(0, Math.round(raw - 12));

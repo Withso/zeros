@@ -1,7 +1,9 @@
+import { placeholderTitle } from "./tool-readiness";
 import { generatedImagePath, isImageGenerationTool } from "./tool-artifacts";
 import { modelRejectionDisplayText } from "@zeros/protocol/model-rejection";
 import { designToolLabel } from "./design-tool-presentation";
 import { workspaceToolMeta } from "./workspace-tool-presentation";
+import { thoughtPreview } from "./thought-preview";
 import { ChromeIcon } from "@/renderer/shared/ui/chrome-icon";
 import { formatWorkingElapsed } from "@/renderer/shared/ui/loading/live-duration";
 // ──────────────────────────────────────────────────────────
@@ -132,8 +134,10 @@ function basename(p: string): string {
   return i === -1 ? cleaned : cleaned.slice(i + 1);
 }
 
-/** Map any AgentMessage to its EventRow shape. */
-export function metaForEvent(message: AgentMessage): EventMeta {
+/** Map any AgentMessage to its EventRow shape. `streaming`: the event is the
+ * live turn's growing tail; a thought's description then waits until its
+ * opening line is settled. */
+export function metaForEvent(message: AgentMessage, options: { streaming?: boolean } = {}): EventMeta {
   if (message.kind === "tool") {
     return metaForTool(message as AgentToolMessage);
   }
@@ -143,14 +147,10 @@ export function metaForEvent(message: AgentMessage): EventMeta {
     return {
       Icon: Brain,
       label: "Thinking",
-      // Glimpse of the thought as the collapsed-row preview:
-      // a single-line, whitespace-collapsed snippet so a collapsed Thinking
-      // row reads like any other tool row (icon · label · preview) instead of
-      // a bare "Thinking". The full thought stays inspectable via expand; the
-      // preview pill (event-row.tsx) caps the width so long thoughts ellipsize.
-      target: text
-        ? truncate(text.replace(/\s+/g, " ").trim(), 200)
-        : undefined,
+      // The thought's opening line as the collapsed-row preview, so a Thinking
+      // row reads like any other tool row (icon · label · preview). It is set
+      // once and never re-flows per delta; the body streams when opened.
+      target: text ? thoughtPreview(text, !options.streaming) : undefined,
       // Char count intentionally omitted from the right edge. The thought text
       // is still inspectable via expand.
       //
@@ -209,6 +209,10 @@ function metaForTool(tool: AgentToolMessage): EventMeta {
       : {}
   ) as Record<string, unknown>;
 
+  // The provider's title as a description, unless it is only a placeholder
+  // ("Editing file") given before the input was known: then the name alone.
+  const described = placeholderTitle(tool.title) ? undefined : tool.title;
+
   const wait = nativeAgentWait(tool);
   if (wait) return { Icon: Hourglass, label: wait.label, expandable: !!wait.result };
 
@@ -240,7 +244,7 @@ function metaForTool(tool: AgentToolMessage): EventMeta {
       label: image
         ? "Read image"
         : readLabel(lineCount),
-      target: path ? basename(path) : tool.title,
+      target: path ? basename(path) : described,
       filePath: path ?? undefined,
       targetFile: !!path,
       targetKind: "file",
@@ -252,18 +256,22 @@ function metaForTool(tool: AgentToolMessage): EventMeta {
 
   if (kind === "edit") {
     // NOTE: edits route to EditCard (registry), which builds its own row via
-    // EventRow. This branch is the defensive EventRow fallback.
+    // EventRow. This branch is the defensive EventRow fallback (and the
+    // loader line's label). Codex names its files in `changes`.
+    const changed = Array.isArray(input.changes)
+      ? input.changes.map((change) => pickString(objectRecord(change).path)).filter((path): path is string => !!path)
+      : [];
     const path = pickString(
       input.file_path,
       input.path,
       input.filePath,
       input.target_file,
-    );
+    ) ?? (changed.length === 1 ? changed[0] : null);
     const diff = editDiffNumbers(tool);
     return {
       Icon: FileEdit,
       label: "Edit",
-      target: path ? basename(path) : tool.title,
+      target: path ? basename(path) : changed.length > 1 ? `${changed.length} files` : described,
       filePath: path ?? undefined,
       targetFile: !!path,
       targetKind: "file",
@@ -273,11 +281,11 @@ function metaForTool(tool: AgentToolMessage): EventMeta {
   }
 
   if (kind === "execute") {
-    const cmd = displayCommand(input) ?? tool.title;
+    const cmd = displayCommand(input) ?? described;
     return {
       Icon: Terminal,
       label: pickString(input.description)?.replace(/\s+/g, " ").trim() || "Bash",
-      target: truncate(cmd.replace(/\s+/g, " ").trim(), 300),
+      target: cmd ? truncate(cmd.replace(/\s+/g, " ").trim(), 300) : undefined,
       trailing: undefined,
       expandable: true,
     };
@@ -296,7 +304,7 @@ function metaForTool(tool: AgentToolMessage): EventMeta {
             !input.pattern
           ? "Search"
           : "Grep",
-      target: pattern ? truncate(pattern, 60) : tool.title,
+      target: pattern ? truncate(pattern, 60) : described,
       trailing: matches != null ? `${matches} matches` : undefined,
       expandable: !glob || tool.status === "failed" || toolCompletionUnreported(tool.rawOutput),
     };
@@ -314,7 +322,7 @@ function metaForTool(tool: AgentToolMessage): EventMeta {
     return {
       Icon: FileSearch,
       label: "List",
-      target: path ? basename(path) : tool.title,
+      target: path ? basename(path) : described,
       targetFile: !!path,
       targetKind: "folder",
       trailing: undefined,
@@ -331,7 +339,7 @@ function metaForTool(tool: AgentToolMessage): EventMeta {
     return {
       Icon: Globe,
       label: action.type === "open_page" ? "Open page" : action.type === "find_in_page" ? "Find in page" : "Web search",
-      target: action.type === "find_in_page" ? [pattern, url].filter(Boolean).join(" · ") : url ?? (query ? `"${truncate(query, 60)}"` : tool.title),
+      target: action.type === "find_in_page" ? [pattern, url].filter(Boolean).join(" · ") : url ?? (query ? `"${truncate(query, 60)}"` : described),
       trailing: undefined,
       expandable: true,
     };
@@ -342,7 +350,7 @@ function metaForTool(tool: AgentToolMessage): EventMeta {
     return {
       Icon: Globe,
       label: "Fetch",
-      target: url ? truncate(url, 80) : tool.title,
+      target: url ? truncate(url, 80) : described,
       trailing: undefined,
       expandable: true,
     };
@@ -358,7 +366,7 @@ function metaForTool(tool: AgentToolMessage): EventMeta {
     return {
       Icon: Bot,
       label: "Agent",
-      target: desc ? truncate(desc, 80) : tool.title,
+      target: desc ? truncate(desc, 80) : described,
       trailing: undefined,
       expandable: true,
     };
@@ -376,7 +384,7 @@ function metaForTool(tool: AgentToolMessage): EventMeta {
     return {
       Icon: Bot,
       label: "Task",
-      target: desc ? truncate(desc, 80) : tool.title,
+      target: desc ? truncate(desc, 80) : described,
       trailing: undefined,
       expandable: true,
     };
@@ -442,7 +450,7 @@ function metaForTool(tool: AgentToolMessage): EventMeta {
         ? args
           ? `/${name} ${truncate(args, 60)}`
           : `/${name}`
-        : tool.title,
+        : described,
       trailing: undefined,
       expandable: true,
     };
@@ -472,7 +480,7 @@ function metaForTool(tool: AgentToolMessage): EventMeta {
         ? selected.join(", ")
         : query
           ? `"${truncate(query, 60)}"`
-          : tool.title,
+          : described,
       trailing: undefined,
       expandable: true,
     };

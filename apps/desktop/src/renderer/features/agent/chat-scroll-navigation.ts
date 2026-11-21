@@ -1,3 +1,4 @@
+import { layoutScrollHeight } from "@/renderer/shared/ui/motion/soft-motion";
 /** One navigation owns a transcript scroller at a time. Before moving it,
  * cancel pending latest/checkpoint/history corrections on this exact element.
  * This event is local renderer coordination; it is never persisted or sent. */
@@ -28,5 +29,5 @@ export function scrollChatToBoundary(element: HTMLElement, boundary: "top" | "bo
   });
   // The rail removes its spacer synchronously during navigation. Measure the
   // new content boundary only after it and older scroll corrections release.
-  element.scrollTo({ top: boundary === "top" ? 0 : element.scrollHeight, behavior: "instant" });
+  element.scrollTo({ top: boundary === "top" ? 0 : layoutScrollHeight(element) - element.clientHeight, behavior: "instant" });
 }

@@ -64,6 +64,7 @@ import { useCodeReview } from "@/renderer/features/code-review/use-code-review";
 import { useInlineReview } from "@/renderer/features/code-review/use-inline-review";
 import {
   reviewAnnotationVersion,
+  reviewThreadsOutside,
   reviewUnplacedThreads,
   type ReviewAnnotationPayload,
 } from "@/renderer/features/code-review/review-annotations";
@@ -435,8 +436,8 @@ export function ChangesDiffViewer({
           : review.threads
               .filter((thread) => thread.anchor.path === item.id)
               .map((thread) => ({ thread, state: "unavailable" as const })),
-      ),
-    [items, review.threads, snapshotFor],
+      ).concat(reviewThreadsOutside(files.map((file) => file.path), review.threads)),
+    [items, files, review.threads, snapshotFor],
   );
   const loadDiffFiles = useCallback(
     async (fileDiff: FileDiffMetadata) => {
@@ -689,6 +690,12 @@ export function ChangesDiffViewer({
           )}
           className="absolute inset-0 min-h-0 overflow-x-hidden overflow-y-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
         />
+        {/* An empty comparison has no rows for the footer to follow. */}
+        {!items.length && unplacedThreads.length > 0 && (
+          <div className="absolute inset-0 min-h-0 overflow-y-auto">
+            <ReviewUnplacedThreads entries={unplacedThreads} review={review} active={active} showPath />
+          </div>
+        )}
       </div>
     </>
   );

@@ -751,7 +751,7 @@ export const TurnFooter = memo(function TurnFooter({
           onChooseModel={!readOnly && isLastTurn ? onChooseModel : undefined}
         />
       )}
-      <div className="mt-1 flex flex-wrap items-center gap-1.5 text-xs">
+      <div className="mt-1 flex flex-wrap items-center gap-x-0.5 gap-y-1.5 text-xs">
         {statusLabel && !settledFailure.card && (
           <div className="basis-full">
             <Badge variant="outline">{statusLabel}</Badge>

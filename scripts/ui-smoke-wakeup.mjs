@@ -22,6 +22,11 @@ export async function runWakeupSmoke({ page, check, capture = async () => {} }) 
     await fixture.getByRole("button", { name: "Start woken work", exact: true }).click();
     await expect(waiting).toHaveCount(0);
     await expect(transcript.locator("[data-wakeup-footer]")).toHaveCount(0);
+    // Two calls make a group, collapsed while live; the notice is inside it.
+    const chip = transcript.locator("[data-working-group]");
+    await expect(chip).toHaveAttribute("aria-expanded", "false");
+    await expect(notice).toHaveCount(0);
+    await chip.click();
     await expect(notice).toContainText(label);
     await expect(notice).toHaveAttribute("role", "status");
     await expect(notice.locator("svg")).toHaveAttribute("aria-hidden", "true");
@@ -30,9 +35,10 @@ export async function runWakeupSmoke({ page, check, capture = async () => {} }) 
       return !!call && !!(element.compareDocumentPosition(call) & Node.DOCUMENT_POSITION_FOLLOWING);
     })).toBe(true);
     await capture(`${source}-live`, transcript);
+    await chip.click();
     await fixture.getByRole("button", { name: "Finish woken work", exact: true }).click();
-    const chip = transcript.getByRole("button", { name: "2 tool calls", exact: true });
-    await expect(chip).toBeVisible();
+    await expect(chip).toHaveAttribute("aria-label", /^Worked for .+, 2 tool calls$/);
+    await expect(chip).toHaveAttribute("aria-expanded", "false");
     await expect(notice).toHaveCount(0);
     await expect(transcript.getByText("The deployment is ready. All health checks passed.")).toBeVisible();
     await expect(fixture.locator("[data-wakeup-copy]")).not.toContainText(label);
@@ -45,6 +51,6 @@ export async function runWakeupSmoke({ page, check, capture = async () => {} }) 
     await page.keyboard.press("Space");
     await expect(chip).toHaveAttribute("aria-expanded", "false");
     await expect(notice).toHaveCount(0);
-    check(`${source} wake-up stays out of waiting and copy, starts the live feed, and folds into the unchanged two-call chip`, true);
+    check(`${source} wake-up stays out of waiting and copy, starts the live feed, and folds into the two-call group`, true);
   }
 }

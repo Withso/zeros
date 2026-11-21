@@ -120,6 +120,7 @@ import {
 } from "./dashboard-settings";
 import { useInternalFeature, useIsInternalUser } from "./internal-features";
 import { FollowUpBehaviorSetting } from "./follow-up-behavior-setting";
+import { setShowInBetweenMessages, useShowInBetweenMessages } from "./in-between-messages";
 import { FullDiskAccessRow } from "./full-disk-access-row";
 import {
   setRestartAutomaticallyOnUpdate,
@@ -982,6 +983,7 @@ function LocalGeneralPanel({ surfaceActive }: { surfaceActive: boolean }) {
     <div className="flex flex-col gap-8">
       <SettingsGroup>
         <FollowUpBehaviorSetting />
+        <ShowInBetweenMessagesRow />
         <KeepAwakeSetting />
         <ShowHiddenWorkspacesRow />
         <RestartOnUpdateRow />
@@ -998,6 +1000,7 @@ function PersonalGeneralPanel() {
     <div className="flex flex-col gap-8">
       <SettingsGroup>
         <FollowUpBehaviorSetting />
+        <ShowInBetweenMessagesRow />
         <ShowHiddenWorkspacesRow />
       </SettingsGroup>
       <SettingsGroup title={<PlaceLabel place="mac" />}>
@@ -1006,6 +1009,23 @@ function PersonalGeneralPanel() {
         <AnalyticsRow />
       </SettingsGroup>
     </div>
+  );
+}
+
+function ShowInBetweenMessagesRow() {
+  const showInBetween = useShowInBetweenMessages();
+  return (
+    <SettingsRow
+      label="Show in-between messages when the agent turn is done"
+      hint="When off, they fold into the working group with the tool calls."
+      htmlFor="show-in-between-messages"
+    >
+      <Switch
+        id="show-in-between-messages"
+        checked={showInBetween}
+        onCheckedChange={setShowInBetweenMessages}
+      />
+    </SettingsRow>
   );
 }
 

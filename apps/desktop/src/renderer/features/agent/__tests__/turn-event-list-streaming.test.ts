@@ -1,5 +1,5 @@
-// Live narration and tool activity remain inspectable. The settled render
-// collapses working history while preserving the final answer.
+// Runs of two or more tool calls collapse into a group, live and settled,
+// while answers and in-between messages stay outside it.
 
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
@@ -83,13 +83,14 @@ const usageNotice = (id: string, createdAt: number): AgentMessage => ({ id, kind
 
 describe("TurnEventList streaming projection", () => {
   it("keeps live usage where it arrived in the working feed, with later tool calls after it", () => {
+    // One call is not a group, so its run shows its rows inline.
     const html = renderToStaticMarkup(createElement(TurnEventList, {
-      events: [usageNotice("usage", 1), ...events], isActive: true, isStreaming: true, showActivity: false, ctx,
+      events: [usageNotice("usage", 1), events[0], events[2]],
+      isActive: true, isStreaming: true, showActivity: false, ctx,
     }));
     expect(html.match(/Claude is nearing its usage limit\./g)).toHaveLength(1);
     expect(html.indexOf("zeros-working-feed")).toBeLessThan(html.indexOf("Claude is nearing"));
     expect(html.indexOf("Claude is nearing")).toBeLessThan(html.indexOf("Running check"));
-    expect(html.indexOf("Claude is nearing")).toBeLessThan(html.indexOf("Completed check"));
   });
 
   it("collapses settled usage with the work it preceded", () => {
@@ -108,13 +109,9 @@ describe("TurnEventList streaming projection", () => {
       events: [usage, events[1], answer, { ...usage, id: "claude-feedback-usage-2", createdAt: 5 }],
       isActive: true, isStreaming, showActivity: false, ctx,
     }));
-    if (isStreaming) {
-      expect(html.match(/Claude is nearing its usage limit\./g)).toHaveLength(1);
-      expect(html.indexOf("Claude is nearing")).toBeLessThan(html.indexOf("Completed check"));
-    } else {
-      expect(html).toContain("1 tool call, 1 message");
-      expect(html).not.toContain("Claude is nearing");
-    }
+    // A single call is not a group, live or settled: the status stays a row.
+    expect(html.match(/Claude is nearing its usage limit\./g)).toHaveLength(1);
+    expect(html.indexOf("Claude is nearing")).toBeLessThan(html.indexOf("Completed check"));
     const afterAnswer = html.slice(html.indexOf("Confirmed report"));
     expect(afterAnswer).not.toContain("Claude is nearing");
     expect(afterAnswer).not.toContain("zeros-working-feed");
@@ -133,8 +130,7 @@ describe("TurnEventList streaming projection", () => {
     const [beforeSteer, afterSteer] = turns.map(turn => renderToStaticMarkup(createElement(TurnEventList, {
       events: turn.events, usageEvents: turn.providerEvents, isActive: true, isStreaming, showActivity: false, ctx,
     })));
-    if (isStreaming) expect(beforeSteer.match(/Claude is nearing its usage limit\./g)).toHaveLength(1);
-    else expect(beforeSteer).toContain("1 message");
+    expect(beforeSteer.match(/Claude is nearing its usage limit\./g)).toHaveLength(1);
     expect(afterSteer).toContain("Report after steering");
     expect(afterSteer).not.toContain("Claude is nearing");
     expect(afterSteer).not.toMatch(/\d+ messages?/);
@@ -174,13 +170,8 @@ describe("TurnEventList streaming projection", () => {
       events: turn.events, usageEvents: turn.providerEvents, isActive: true, isStreaming, showActivity: false, ctx,
     })));
     expect(html[1]).toBe("");
-    if (isStreaming) {
-      expect(html[0]).toContain("Claude is nearing its usage limit.");
-      expect(html[2]).toContain("Claude usage is available again.");
-    } else {
-      expect(html[0]).toContain("1 message");
-      expect(html[2]).toContain("1 message");
-    }
+    expect(html[0]).toContain("Claude is nearing its usage limit.");
+    expect(html[2]).toContain("Claude usage is available again.");
   });
 
   it("places quiet background waiting after the settled output and footer, then resumes the working feed", () => {
@@ -198,7 +189,9 @@ describe("TurnEventList streaming projection", () => {
     const resumed = renderToStaticMarkup(createElement(TurnEventList, { ...props, isStreaming: true }));
     expect(resumed).not.toContain("Waiting for 1 background task");
     expect(resumed).toContain("LIVE ACTIVITY");
-    expect(resumed).toContain("Completed check");
+    // The progress text closed the run, so its group reads "Worked for".
+    expect(resumed).toContain('data-working-group="closed"');
+    expect(resumed).not.toContain("Completed check");
   });
   it("keeps activity visible while an optional question awaits an answer", () => {
     const html = renderToStaticMarkup(createElement(TurnEventList, {
@@ -207,13 +200,15 @@ describe("TurnEventList streaming projection", () => {
     }));
     expect(html).toContain("LIVE ACTIVITY");
   });
-  it("mounts running tools and progress text while a turn is live", () => {
+  it("keeps a live group collapsed, without mounting its rows, and the progress text outside it", () => {
     const html = render(true);
 
-    expect(html).toContain("Completed check");
-    expect(html).toContain("Running check");
+    expect(html).toContain('aria-expanded="false"');
+    expect(html).toContain("2 tool calls");
+    expect(html).not.toContain("Completed check");
+    expect(html).not.toContain("Running check");
+    expect(html).not.toContain("zeros-working-feed");
     expect(html).toContain("Progress text");
-    expect(html).toContain("zeros-working-feed");
   });
 
   it("collapses tools while retaining the settled answer", () => {

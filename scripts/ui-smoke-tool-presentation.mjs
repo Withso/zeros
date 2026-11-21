@@ -1,10 +1,12 @@
 import { expect } from "@playwright/test";
+import { mkdir } from "node:fs/promises";
 import { runToolWaitSmoke } from "./ui-smoke-tool-waits.mjs";
 import { runFilePillNavigationSmoke } from "./ui-smoke-file-pill-navigation.mjs";
 import { runTurnChangesSmoke } from "./ui-smoke-turn-changes.mjs";
 
 export async function runToolPresentationSmoke({ page, check }) {
   await runToolSpacingSmoke({ page, check });
+  await runToolRowWidthSmoke({ page, check });
   const fixture = page.locator("#tool-presentation-fixture");
   const rows = fixture.locator("#tool-presentation-rows");
   await expect(rows.getByRole("button", { name: "Compacting..", exact: true })).toHaveCount(2);
@@ -267,6 +269,96 @@ async function expectRowShape({ page, feed, check, label }) {
   check(`${label}: every tool row, with or without targets, is one padded 28px row with 6px corners, one pitch and one hover fill`, true);
 }
 
+// Regression: in a narrow lane the tool name truncated (`B…`) while its
+// description stayed wide.
+export async function runToolRowWidthSmoke({ page, check }) {
+  const fixture = page.locator("#tool-row-width-fixture");
+  await expect(fixture.locator("[data-lane]")).toHaveCount(3);
+  await expect(fixture.locator("[data-list-row-disclosure]")).toHaveCount(18);
+  const lanes = await fixture.evaluate((root) => {
+    const box = (element) => element.getBoundingClientRect();
+    const cut = (element) => element.scrollWidth > element.clientWidth;
+    return Object.fromEntries([...root.querySelectorAll("[data-lane]")].map((lane) => {
+      const right = box(lane).right;
+      const row = (prefix) => {
+        const disclosure = [...lane.querySelectorAll("[data-list-row-disclosure]")]
+          .find((element) => element.getAttribute("aria-label")?.startsWith(prefix));
+        const container = disclosure.parentElement;
+        const name = disclosure.querySelector(".text-reading");
+        const description = container.querySelector("[data-tool-preview], [data-file-path]");
+        const probe = document.createElement("span");
+        probe.style.cssText = "display:inline-block;width:22ch";
+        name.append(probe);
+        const cap = box(probe).width;
+        probe.remove();
+        const text = description?.matches("[data-file-path]") ? description.querySelector("span") : description;
+        return {
+          name: { width: box(name).width, cut: cut(name), cap },
+          description: description && { width: box(description).width, cut: cut(text) },
+          overflow: Math.max(...[container, ...container.querySelectorAll("*")].map((element) => box(element).right)) - right,
+        };
+      };
+      return [lane.dataset.lane, {
+        bash: row("Bash git -C"),
+        short: row("Bash ls"),
+        mcp: row("planetscale: execute_read_query"),
+        bare: row("planetscale: list_schema_recommendations"),
+        read: row("Read"),
+        agent: row("Agent"),
+      }];
+    }));
+  });
+  for (const [lane, rows] of Object.entries(lanes)) {
+    for (const [id, row] of Object.entries(rows)) {
+      check(`${lane}px lane, ${id} row: stays inside the lane`, row.overflow <= 0.5, `overflow ${row.overflow}`);
+      if (row.description && id !== "short") {
+        check(`${lane}px lane, ${id} row: the description keeps at least a 48px stub`, row.description.width >= 47.5, `width ${row.description.width}`);
+      }
+    }
+    for (const id of ["bash", "short", "read"]) {
+      check(`${lane}px lane, ${id} row: the short name is whole`, !rows[id].name.cut, JSON.stringify(rows[id].name));
+    }
+    check(`${lane}px lane: a short description is not padded out to the stub`, !rows.short.description.cut && rows.short.description.width < 40, JSON.stringify(rows.short.description));
+    check(`${lane}px lane: a long name beside a description is capped at 22ch`, rows.mcp.name.width <= rows.mcp.name.cap + 0.5, JSON.stringify(rows.mcp.name));
+  }
+  const narrow = lanes[220];
+  check("220px lane: the description gives way first", narrow.bash.description.cut && narrow.read.description.cut, JSON.stringify([narrow.bash, narrow.read]));
+  check("220px lane: a long name shrinks only once its description is at the stub", narrow.mcp.name.cut && Math.abs(narrow.mcp.description.width - 48) <= 0.5, JSON.stringify(narrow.mcp));
+  check("280px lane: the agent label is whole while its description truncates", !lanes[280].agent.name.cut && lanes[280].agent.description.cut, JSON.stringify(lanes[280].agent));
+  const wide = lanes[640];
+  check("640px lane: the capped name leaves the room to its description", wide.mcp.name.cut && !wide.mcp.description.cut, JSON.stringify(wide.mcp));
+  check("640px lane: a name with no description keeps the wider cap", !wide.bare.name.cut && wide.bare.name.width > wide.bare.name.cap, JSON.stringify(wide.bare.name));
+
+  const wideLane = fixture.locator('[data-lane="640"]');
+  const nameOf = (prefix) => wideLane.locator(`[data-list-row-disclosure][aria-label^="${prefix}"] .text-reading`).first();
+  await nameOf("planetscale: execute_read_query").hover();
+  await expect(page.getByRole("tooltip")).toHaveText("planetscale: execute_read_query");
+  // Several moves, so Radix sees the pointer leave its hoverable grace area.
+  await page.mouse.move(0, 0, { steps: 5 });
+  await expect(page.getByRole("tooltip")).toHaveCount(0);
+  const untruncated = nameOf("Bash git -C");
+  await untruncated.hover();
+  // A negative check: the pointer stays on the name across the harness's
+  // 100ms tooltip delay (the window under test), and no tooltip opens.
+  const hovered = () => untruncated.evaluate((node) => node.matches(":hover"));
+  expect(await hovered()).toBe(true);
+  await page.waitForTimeout(400);
+  expect(await hovered()).toBe(true);
+  await expect(page.getByRole("tooltip")).toHaveCount(0);
+  await page.mouse.move(0, 0);
+  check("Only a truncated tool name shows its full name in the shared tooltip", true);
+  await mkdir(".context/tool-row-width", { recursive: true });
+  const initialTheme = await page.evaluate(() => document.documentElement.dataset.theme);
+  for (const theme of ["dark", "light"]) {
+    await page.evaluate((value) => { document.documentElement.dataset.theme = value; }, theme);
+    await fixture.screenshot({ path: `.context/tool-row-width/lanes-${theme}.png` });
+  }
+  await page.evaluate((value) => {
+    if (value === undefined) delete document.documentElement.dataset.theme;
+    else document.documentElement.dataset.theme = value;
+  }, initialTheme);
+}
+
 export async function runToolSpacingSmoke({ page, check }) {
   const fixture = page.locator("#tool-spacing-fixture");
   const root = fixture.locator("#tool-spacing-root");
@@ -286,6 +378,11 @@ export async function runToolSpacingSmoke({ page, check }) {
     check(`${label}: every tool row has an 8px gap`, true);
   };
 
+  // The run is a group, collapsed live and settled; spacing is measured open.
+  const group = root.locator("[data-working-group]");
+  await expect(group).toHaveAttribute("aria-expanded", "false");
+  await expect(rows(root)).toHaveCount(0);
+  await group.click();
   await expectSpacing(root, "Live mixed calls and batched edits/reads");
   await expectRowShape({ page, feed: rows(root), check, label: "Live mixed calls and batched edits/reads" });
   await fixture.getByRole("button", { name: "Agent Spacing audit", exact: true }).click();
@@ -295,11 +392,11 @@ export async function runToolSpacingSmoke({ page, check }) {
   await expect(edit).toHaveAttribute("aria-expanded", "true");
   await expectSpacing(root, "Expanded edit details");
   await fixture.getByRole("button", { name: "Finish spacing tools", exact: true }).click();
-  await root.getByRole("button", { name: /tool calls/ }).click();
+  await expect(group).toHaveAttribute("aria-expanded", "true");
   await expectSpacing(root, "Completed expanded history");
   await expectSpacing(nested, "Completed nested history");
   await fixture.getByRole("button", { name: "Remount spacing history", exact: true }).click();
-  await root.getByRole("button", { name: /tool calls/ }).click();
+  await group.click();
   await expectSpacing(root, "Remounted history");
   const viewport = page.viewportSize();
   try {

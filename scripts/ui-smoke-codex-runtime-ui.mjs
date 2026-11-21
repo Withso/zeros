@@ -54,13 +54,24 @@ async function checkTranscript({ page, check, owner, theme }) {
   const fixture = page.locator("#codex-runtime-transcript");
   const feed = fixture.locator("#codex-runtime-feed");
   const header = feed.getByRole("button", { name: "Agent Research", exact: true });
-  const timer = feed.locator('[role="status"] [aria-live="off"]');
+  // The tail run is a collapsed group; the agent row lives inside it. The
+  // turn clock is the loader line's timer, shown while no call is named.
+  const group = feed.locator("[data-working-group]").last();
+  const loaderLine = feed.locator('div[role="status"][aria-live="polite"]');
+  const timer = loaderLine.locator(".tabular-nums");
   const report = feed.getByText(`First confirmed finding for ${owner}.`, { exact: true });
   const start = await fixture.getAttribute("data-started-at");
+  await expect(group).toHaveAttribute("data-working-group", "live");
+  await expect(group).toHaveAttribute("aria-expanded", "false");
+  // A thought streams after the group's last call; its opening sentence has
+  // settled, so the line names it with its description.
+  await expect(loaderLine).toContainText("Thinking");
+  await expect(loaderLine).toContainText("Checking disclosure continuity.");
+  await expect(timer).toHaveCount(0);
+  await group.click();
+  await expect(loaderLine.locator('[aria-live="off"]')).toHaveCount(0);
   await expect(header).toContainText("GPT-6.1 Sol Max");
   await expect(header).toHaveAttribute("aria-expanded", "false");
-  await expect(timer).toHaveCount(1);
-  await expect(timer).toHaveText(/1m,/);
   await header.focus();
   await page.keyboard.press("Enter");
   const childReport = feed.getByText("The child found the affected code.", { exact: true });
@@ -84,6 +95,15 @@ async function checkTranscript({ page, check, owner, theme }) {
   }
   await fixture.getByRole("button", { name: "Show partial answer", exact: true }).click();
   await expect(report).toBeVisible();
+  // The new in-between message is the newest event, so it is held (written
+  // out of sight): the tail reads as if it were not there yet and the group
+  // stays live until the message appears. Held this long (2s), the line
+  // returns to the turn clock, even under the group the reader opened.
+  await expect(group).toHaveAttribute("data-working-group", "live");
+  // (This harness has no runtime-content root, so check the held state, not
+  // the CSS that hides it in the app.)
+  await expect(feed.locator(".zeros-agent-md", { hasText: "Checking the remaining cases." })).toHaveAttribute("data-reveal-held", "");
+  await expect(timer).toHaveText(/^1m \d+\.\ds$/);
   await expect(header).toHaveAttribute("aria-expanded", "true");
   for (const disclosure of disclosures) await expect(disclosure).toHaveAttribute("aria-expanded", "true");
   await fixture.getByRole("button", { name: "Confirm child partial answer", exact: true }).click();
@@ -116,15 +136,21 @@ async function checkTranscript({ page, check, owner, theme }) {
   await expect(header).toContainText("GPT-6.1 Sol Max");
   await expect(header.getByLabel("Agent working", { exact: true })).toHaveCount(1);
   await fixture.getByRole("button", { name: "Switch chat", exact: true }).click();
+  await expect(group).toHaveAttribute("aria-expanded", "false");
+  await group.click();
   await expect(header).toHaveAttribute("aria-expanded", "false");
   await header.click();
   await fixture.getByRole("button", { name: "Switch chat", exact: true }).click();
+  await expect(group).toHaveAttribute("aria-expanded", "false");
+  await group.click();
   await expect(header).toHaveAttribute("aria-expanded", "false");
   await header.click();
   for (const other of ["personal-local", "organization-local", "organization-cloud"].filter((value) => value !== owner)) {
     await fixture.getByRole("button", { name: other, exact: true }).click();
     await expect(report).toHaveCount(0);
     await expect(feed.getByText(`Inspecting source for ${other}.`, { exact: true })).toBeVisible();
+    await expect(group).toHaveAttribute("aria-expanded", "false");
+    await group.click();
     await expect(header).toHaveAttribute("aria-expanded", "false");
     await expect(feed.getByRole("button", { name: "Bash printf phase-details", exact: true })).toHaveAttribute("aria-expanded", "false");
   }
@@ -138,6 +164,7 @@ async function checkTranscript({ page, check, owner, theme }) {
   await expect(report).toBeVisible();
   await page.reload();
   await expect(report).toBeVisible();
+  await group.click();
   await expect(header).toContainText("GPT-6.1 Sol Max");
   await expect(fixture).toHaveAttribute("data-started-at", start);
   await expect(timer).toHaveCount(1);

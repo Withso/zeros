@@ -4,11 +4,9 @@
 //
 // Shared tool-summary formatting; simplified 2026-06-18.
 //
-// Once a turn settles, its "working" group (tools + reasoning +
-// in-between narration + sub-agents) collapses into ONE chip: the
-// deduplicated activity icons listed first, then a single plain-text
-// "<N> tool calls, <M> messages, <K> agents" roll-up. We never expose
-// tool names. The buckets:
+// A working group's header shows its deduplicated activity icons; the
+// plain-text "<N> tool calls, <M> messages, <K> agents" roll-up is its
+// tooltip and accessible name. We never expose tool names. The buckets:
 //   - tool calls — every non-sub-agent tool (Bash, read, edit, web, MCP)
 //   - messages   — every non-tool event: reasoning / thinking and
 //     in-between narration (NOT the final answer, which renders bright)
