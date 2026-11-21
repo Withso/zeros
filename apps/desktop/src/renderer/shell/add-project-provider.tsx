@@ -83,7 +83,7 @@ export interface AddProjectOptions {
   url?: string;
 }
 
-interface AddProjectActions {
+export interface AddProjectActions {
   /** Open the native folder picker and register the chosen folder as a project.
    *  A foreign linked-worktree is routed through the Add-local-project
    *  confirmation first. */
@@ -128,6 +128,9 @@ export function useAddProject(): AddProjectActions {
   }
   return ctx;
 }
+
+/** Harness pages supply recorded actions instead of the real flows. */
+export const AddProjectFixtureProvider = AddProjectContext.Provider;
 
 /** For surfaces that can also render outside the provider (harness pages). */
 export function useOptionalAddProject(): AddProjectActions | null {
