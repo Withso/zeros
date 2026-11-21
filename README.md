@@ -4,6 +4,8 @@ Zeros is an open-source, local-first macOS app for running coding agents against
 real repositories. Each workspace is an isolated Git worktree with its own
 conversation, terminal, preview, and review surface.
 
+Changes-tab check, 21 Nov 2026: this sentence exists so a zeros diff is visible.
+
 Zeros is licensed under MIT. The public source is suitable for review, learning,
 and forks; the maintainer does not currently review external pull requests. See
 [CONTRIBUTING.md](CONTRIBUTING.md) for the project policy.

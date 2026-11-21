@@ -6,6 +6,8 @@ Cursor, Devin, Factory or Conductor. It sits on top of `AGENTS.md`,
 `RULES.md` and the existing skills. It adds procedures, principles, evidence
 rules and evals, and a learn step that improves the pack after every loop.
 
+Changes-tab check, 21 Nov 2026: this sentence is the second file in that diff.
+
 The pack is never finished. When a loop exposes a missed check, a flaky gate,
 a wrong assumption or a new gotcha, that loop updates the pack in the same
 branch, preferably with a test or check rather than more prose.
