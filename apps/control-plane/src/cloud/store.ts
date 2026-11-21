@@ -57,8 +57,8 @@ type CreateWorkspace = {
   /** The lifecycle runs the GitHub checks and sets the source scope before
    * any VM exists; until then the row has no scope (resolvePendingSource). */
   pendingSource?: true;
-  /** A private repository's entry (cloud_repositories): the workspace is its member's alone. */
-  privateRepositoryId?: string;
+  /** The project it is created from (ready copies on); a personal project's workspace is its member's alone. */
+  projectId?: string;
 };
 type CreateReceipt = { status: 201; response: Record<string, unknown> };
 type HistoryInput = {
@@ -110,8 +110,10 @@ export type CloudV2Workspace = {
   /** Created before its GitHub checks: no source scope, sandbox or worker
    * yet. Only the lifecycle's resolvePendingSource may end it. */
   sourcePending?: true;
-  /** A private repository's workspace: its member's alone, never shared or reassigned. */
+  /** A personal project's workspace: its member's alone, never shared or reassigned. */
   privateOwnerUserId?: string;
+  /** The project it was created from; none for workspaces made before projects. */
+  projectId?: string;
 };
 
 /** What a checkpoint is compared by at the next stop: the fingerprint of what
@@ -186,12 +188,13 @@ export type CloudV2WorkspaceRow = {
   setup_status: CloudV2SetupStatus | null;
   agent_cost_usd: string; agent_cost_turns: string; agent_cost_estimated_turns: string;
   private_owner_user_id?: string | null;
+  project_id?: string | null;
 };
 type Row = CloudV2WorkspaceRow;
 
 const WORKSPACE_COLUMNS_SQL = sql`id, org_id, creator_user_id, name, number, title, repository, branch, base_branch, state, boat_sandbox_id,
   computer_build_id, error_code, active_at, archived_at, created_at, updated_at, source_pending, created_by_session_id, setup_status,
-  agent_cost_usd, agent_cost_turns, agent_cost_estimated_turns, private_owner_user_id`;
+  agent_cost_usd, agent_cost_turns, agent_cost_estimated_turns, private_owner_user_id, project_id`;
 const COLUMNS = WORKSPACE_COLUMNS_SQL.text;
 export const CLOUD_V2_WORKSPACE_COLUMNS = COLUMNS.split(",").map(value => value.trim());
 
@@ -290,6 +293,7 @@ function workspace(row: Row): CloudV2Workspace {
     ...(Number(row.agent_cost_turns) > 0 ? { agentCost: { totalUsd: Number(row.agent_cost_usd), estimated: Number(row.agent_cost_estimated_turns) > 0 } } : {}),
     ...(row.source_pending ? { sourcePending: true as const } : {}),
     ...(row.private_owner_user_id ? { privateOwnerUserId: row.private_owner_user_id } : {}),
+    ...(row.project_id ? { projectId: row.project_id } : {}),
   };
 }
 export { workspace as cloudV2WorkspaceFromRow };
@@ -437,33 +441,38 @@ export class CloudV2Store {
       if (budget.count >= 10) throw new HttpError(429, "workspace_create_limit", "Workspace token creation limit reached for this user and organization",
         { retryAfterSeconds: budget.retry_after });
     }
-    let privateOwner: string | null = null;
-    if (input.privateRepositoryId) {
-      // Checked under the create's own transaction: the caller's standing entry, personal
-      // repositories still allowed, and a base build that holds no repository's source.
-      const own = (await tx.query<{ repository_id: string }>(`SELECT r.repository_id FROM cloud_repositories r
-        JOIN organizations o ON o.id=r.org_id AND o.cloud_personal_repositories_allowed
-        JOIN cloud_v2_computers c ON c.org_id=r.org_id AND c.active_build_id=$4
+    let privateOwner: string | null = null, projectId: string | null = null;
+    if (input.projectId) {
+      // Checked under the create's own transaction: a project the creator may use
+      // (the organization's, or their own while personal projects are allowed),
+      // holding exactly this repository, and a live base that holds no repository's source.
+      const project = (await tx.query<{ repository_id: string; level: "organization" | "personal" }>(`SELECT r.repository_id, p.level FROM cloud_projects p
+        JOIN organizations o ON o.id=p.org_id
+        JOIN cloud_project_repositories r ON r.project_id=p.id AND r.repository=lower($5)
+        JOIN cloud_v2_computers c ON c.org_id=p.org_id AND c.active_build_id=$4
         JOIN cloud_v2_computer_builds b ON b.id=c.active_build_id AND b.base_only AND b.state='succeeded'
-        WHERE r.id=$1 AND r.org_id=$2 AND r.level='private' AND r.owner_user_id=$3 AND r.folded_at IS NULL AND r.repository=lower($5)
-        FOR SHARE OF r`, [input.privateRepositoryId, input.organizationId, input.creatorUserId, input.computerBuildId, input.repository])).rows[0];
-      if (!own || pending || (input.sourceRepositoryId !== undefined && input.sourceRepositoryId !== own.repository_id))
-        throw new HttpError(409, "private_repository_unavailable", "This repository is no longer available to you in the cloud.");
-      sourceRepositoryId = own.repository_id;
-      privateOwner = input.creatorUserId;
+        WHERE p.id=$1 AND p.org_id=$2 AND (p.level='organization' OR (p.owner_user_id=$3 AND o.cloud_personal_projects_allowed))
+          AND (SELECT count(*) FROM cloud_project_repositories n WHERE n.project_id=p.id)=1
+        FOR SHARE OF p`, [input.projectId, input.organizationId, input.creatorUserId, input.computerBuildId, input.repository])).rows[0];
+      if (!project || pending || (input.sourceRepositoryId !== undefined && input.sourceRepositoryId !== project.repository_id))
+        throw new HttpError(409, "project_unavailable", "This project is no longer available to you in the cloud.");
+      sourceRepositoryId = project.repository_id;
+      projectId = input.projectId;
+      // Private for good: sharing the project later never shares this workspace.
+      if (project.level === "personal") privateOwner = input.creatorUserId;
     } else if (input.computerBuildId)
       ({ sourceRepositoryId, scope } = await this.computerScope(tx, input.organizationId, input.computerBuildId, input.repository,
         input.sourceRepositoryId, input.readableRepositoryIds));
     if (Object.keys(input.env ?? {}).length && sourceRepositoryId === undefined)
       throw new HttpError(409, "cloud_source_review_required", "A workspace environment requires a verified repository identity.");
     const row = (await tx.query<Row>(
-      `INSERT INTO cloud_v2_workspaces (id, org_id, creator_user_id, name, repository, branch, base_branch, state, computer_build_id, source_repositories, source_pending, api_access, created_by_session_id, execution_initiator_user_id, execution_intent_id, execution_mode, private_owner_user_id)
+      `INSERT INTO cloud_v2_workspaces (id, org_id, creator_user_id, name, repository, branch, base_branch, state, computer_build_id, source_repositories, source_pending, api_access, created_by_session_id, execution_initiator_user_id, execution_intent_id, execution_mode, private_owner_user_id, project_id)
        VALUES ($1, $2, $3, $4, $5, $6, $7, 'creating', $8, $9::text[], $10,
-         coalesce((SELECT workspace_api_access FROM cloud_api_access_settings WHERE org_id=$2 AND user_id=$3),true), $11, $3, gen_random_uuid(), $12, $13) RETURNING ${COLUMNS}`,
+         coalesce((SELECT workspace_api_access FROM cloud_api_access_settings WHERE org_id=$2 AND user_id=$3),true), $11, $3, gen_random_uuid(), $12, $13, $14) RETURNING ${COLUMNS}`,
       [input.id, input.organizationId, input.creatorUserId, input.name, input.repository, input.branch,
         input.baseBranch, input.computerBuildId,
         pending ? null : (scope ?? [{ repository: input.repository }]).map(source => source.repository.toLowerCase()), pending, input.createdBySessionId ?? null,
-        input.executionRuntime ? "active" : "legacy", privateOwner],
+        input.executionRuntime ? "active" : "legacy", privateOwner, projectId],
     )).rows[0]!;
     if (!pending && sourceRepositoryId !== undefined) await this.bindSources(tx, workspace(row), sourceRepositoryId, scope, input.env);
     if (input.runtimeCanary) await consumeRuntimeCanary(tx, workspace(row), input.runtimeCanary, sourceRepositoryId, createKey);

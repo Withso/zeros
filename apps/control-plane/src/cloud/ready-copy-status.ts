@@ -1,9 +1,11 @@
-// A repository's ready copy as its project page shows it. What a reader gets
-// is decided here: owners and admins see a shared repository's status with its
-// cause, its history and failed setup output; members see the status line only
-// and never a failure; a private repository's member sees everything of it and
-// nobody else sees anything (the route answers not found).
-import { READY_COPY_REFRESH_MS, type CloudV2ReadyCopy, type ReadyCopyRetry, type ReadyCopyTrigger } from "./ready-copies.js";
+// A project's ready copy as its project page shows it. What a reader gets is
+// decided here: whoever edits the project (owners and admins for an
+// organization project, its member for a personal one) sees the status with
+// its cause, the history and failed setup output; other members see the status
+// line only and never a failure; nobody else sees a personal project at all
+// (the route answers not found).
+import { READY_COPY_REFRESH_MS, type CloudV2ReadyCopy, type ReadyCopyRepositoryResult, type ReadyCopyRetry, type ReadyCopyStep,
+  type ReadyCopyTrigger } from "./ready-copies.js";
 
 export type ReadyCopyStatusState = "none" | "getting_ready" | "ready" | "updating" | "update_failed" | "failed";
 export type ReadyCopyStatus = {
@@ -13,12 +15,13 @@ export type ReadyCopyStatus = {
   /** The next weekly update, while the copy is in use. */
   nextUpdateAt: string | null;
   /** Full view only: the failure, where, how many in a row, and the next automatic retry (null: stopped). */
-  failure?: { reason: string; detail: string | null; failures: number; nextRetryAt: string | null };
+  failure?: { reason: string; repository: string | null; step: ReadyCopyStep | null; detail: string | null; failures: number; nextRetryAt: string | null };
 };
 export type ReadyCopyHistoryRow = {
   generation: number; state: CloudV2ReadyCopy["state"]; startedAt: string | null; finishedAt: string | null;
-  commit: string | null; branch: string | null; trigger: ReadyCopyTrigger | null; startedBy: string | null;
-  failure: { reason: string; detail: string | null } | null; output: boolean;
+  /** What each repository was cloned at; null until the generation is ready. */
+  repositories: ReadyCopyRepositoryResult[] | null; trigger: ReadyCopyTrigger | null; startedBy: string | null;
+  failure: { reason: string; repository: string | null; step: ReadyCopyStep | null; detail: string | null } | null; output: boolean;
 };
 
 export function readyCopyStatus(history: readonly CloudV2ReadyCopy[], retry: ReadyCopyRetry, now: Date, full: boolean): ReadyCopyStatus {
@@ -35,16 +38,17 @@ export function readyCopyStatus(history: readonly CloudV2ReadyCopy[], retry: Rea
     return { state, updatedAt: state === "none" ? null : updatedAt, nextUpdateAt: state === "ready" ? nextUpdateAt : null };
   }
   return { state, updatedAt, nextUpdateAt,
-    ...(latest?.state === "failed" ? { failure: { reason: latest.failureReason ?? "ready_copy_failed", detail: latest.failureDetail,
-      failures: Math.max(retry.failures, 1), nextRetryAt: retry.nextAt?.toISOString() ?? null } } : {}) };
+    ...(latest?.state === "failed" ? { failure: { reason: latest.failureReason ?? "ready_copy_failed", repository: latest.failureRepository,
+      step: latest.failureStep, detail: latest.failureDetail, failures: Math.max(retry.failures, 1), nextRetryAt: retry.nextAt?.toISOString() ?? null } } : {}) };
 }
 
 export function readyCopyHistory(history: readonly CloudV2ReadyCopy[], people: ReadonlyMap<string, string>): ReadyCopyHistoryRow[] {
   return history.map(row => ({
     generation: row.generation, state: row.state, startedAt: row.startedAt?.toISOString() ?? null, finishedAt: row.finishedAt?.toISOString() ?? null,
-    commit: row.commit, branch: row.branch, trigger: row.trigger,
+    repositories: row.result, trigger: row.trigger,
     startedBy: row.trigger === "manual" && row.triggeredBy ? people.get(row.triggeredBy) ?? "A member" : null,
-    failure: row.state === "failed" ? { reason: row.failureReason ?? "ready_copy_failed", detail: row.failureDetail } : null,
+    failure: row.state === "failed" ? { reason: row.failureReason ?? "ready_copy_failed", repository: row.failureRepository, step: row.failureStep,
+      detail: row.failureDetail } : null,
     output: !!row.setupOutput,
   }));
 }
