@@ -27,6 +27,9 @@ import type { ChatThread } from "../../state/store";
 import { useWorkspaceDispatch, useWorkspaceStore } from "../../state/store";
 import { buildSessionTree, sessionDescendantIds, sessionLineage, type SessionNode, type SessionTree } from "../../state/session-tree";
 import { useActiveChatId, useChats } from "../../state/workspace-store";
+import { useLiveWorkspaces } from "../../state/use-projects";
+import { findWorkspaceForFolder } from "../../state/workspace-resolution";
+import { workspaceLabel } from "../workspace-tabs";
 import type { WorkspacePlacement } from "./workspace-identity";
 
 export function sessionName(chat: ChatThread): string {
@@ -50,6 +53,17 @@ function folderName(folder: string): string {
   return folder.split(/[\\/]/).filter(Boolean).pop() ?? folder;
 }
 
+/** Names the workspace a child session lives in, as the sidebar does. */
+export function WorkspaceBadge({ folder }: { folder: string }) {
+  const { workspaces } = useLiveWorkspaces();
+  const workspace = findWorkspaceForFolder(folder, workspaces);
+  return (
+    <span className="text-fg3 border-border1 shrink-0 rounded-sm border px-1 text-xxs leading-4" data-session-workspace="">
+      {workspace ? workspaceLabel(workspace) : folderName(folder)}
+    </span>
+  );
+}
+
 function SessionRow({ node, depth, folder, activeId, expanded, onToggle, onSelect }: {
   node: SessionNode;
   depth: number;
@@ -64,6 +78,13 @@ function SessionRow({ node, depth, folder, activeId, expanded, onToggle, onSelec
   return (
     <DropdownMenuItem
       onSelect={() => onSelect(node.chat.id)}
+      onKeyDown={onToggle && hasChildren ? (event) => {
+        if ((event.key === "ArrowRight" && !expanded) || (event.key === "ArrowLeft" && expanded)) {
+          event.preventDefault();
+          onToggle();
+        }
+      } : undefined}
+      aria-expanded={onToggle && hasChildren ? !!expanded : undefined}
       data-session-row={node.chat.id}
       aria-current={node.chat.id === activeId ? "true" : undefined}
       className={`aria-[current=true]:bg-bg2-highlight ${ROW_INDENT_CLS[Math.min(depth, ROW_INDENT_CLS.length - 1)]}`}
@@ -75,7 +96,10 @@ function SessionRow({ node, depth, folder, activeId, expanded, onToggle, onSelec
           aria-label={expanded ? "Collapse" : "Expand"}
           aria-expanded={expanded}
           className={`text-fg3 -ml-1 flex size-4 shrink-0 items-center justify-center ${hasChildren ? "" : "invisible"}`}
+          // The item selects on a pointerup it did not see go down, so keep
+          // both halves of the press on the arrow.
           onPointerDown={(event) => { event.preventDefault(); event.stopPropagation(); }}
+          onPointerUp={(event) => { event.preventDefault(); event.stopPropagation(); }}
           onClick={(event) => { event.preventDefault(); event.stopPropagation(); onToggle(); }}
         >
           <ChevronRight className={`size-3.5 transition-transform ${expanded ? "rotate-90" : ""}`} strokeWidth={1.5} />
@@ -83,11 +107,7 @@ function SessionRow({ node, depth, folder, activeId, expanded, onToggle, onSelec
       ) : null}
       <AgentIcon agentId={node.chat.agentId ?? ""} iconUrl={null} size={14} />
       <span className="min-w-0 flex-1 truncate">{sessionName(node.chat)}</span>
-      {node.chat.folder !== folder && (
-        <span className="text-fg3 border-border1 shrink-0 rounded-sm border px-1 text-xxs leading-4" data-session-workspace="">
-          {folderName(node.chat.folder)}
-        </span>
-      )}
+      {node.chat.folder !== folder && <WorkspaceBadge folder={node.chat.folder} />}
       <SessionStatus ids={ids} />
     </DropdownMenuItem>
   );
@@ -113,7 +133,7 @@ function SubtreeRows({ node, depth, ...rest }: {
 }
 
 /** Every parent session, collapsed, with New parent session. */
-function ParentMenu({ tree, folder, activeId, onSelect, onNewParent }: {
+export function ParentMenu({ tree, folder, activeId, onSelect, onNewParent }: {
   tree: SessionTree;
   folder: string;
   activeId: string | null;

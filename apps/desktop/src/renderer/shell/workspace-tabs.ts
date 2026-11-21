@@ -183,7 +183,12 @@ const SCROLL_TOLERANCE_PX = 1;
 export function workspaceLabel(workspace: Workspace): string {
   if (workspace.title === undefined || isLocalMainWorkspace(workspace))
     return branchDisplayName(workspace.branch);
-  return workspace.title?.trim() || UNTITLED_WORKSPACE_TITLE;
+  const title = workspace.title?.trim();
+  if (title) return title;
+  // An agent-created workspace is named by its branch until a chat is titled.
+  return workspace.parentWorkspaceId
+    ? branchDisplayName(workspace.branch)
+    : UNTITLED_WORKSPACE_TITLE;
 }
 
 
