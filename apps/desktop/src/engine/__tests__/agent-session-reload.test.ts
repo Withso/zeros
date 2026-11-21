@@ -311,6 +311,35 @@ describe("agent session continuity across a local renderer reload", () => {
     },
   );
 
+  it("persists an attachment-only prompt as its own user row", () => {
+    const dbDir = fs.mkdtempSync(path.join(os.tmpdir(), "zeros-attachment-only-"));
+    setZerosDbPathForTesting(path.join(dbDir, "zeros.db"));
+    try {
+      upsertChat(persistedChat("chat-attachment-only", { folder: dbDir }));
+      const engine = new ZerosEngine({ root: dbDir, port: 29_905 });
+      const state = internals(engine);
+      const attachment = { name: "c1.handoff.txt", kind: "text" as const, mimeType: "text/plain", diskPath: ".context/attachments/c1.handoff.txt" };
+      state.sessionChat.set("execution-attachment-only", "chat-attachment-only");
+      state.persistUserPrompt(
+        "execution-attachment-only",
+        [{ type: "text", text: "<handoff transcript>" }],
+        { displayText: "", attachments: [attachment] },
+        "user-attachment-only",
+        2000,
+      );
+      const saved = windowChatMessages("chat-attachment-only", 10);
+      expect(saved).toHaveLength(1);
+      expect(JSON.parse(saved[0]!.payload)).toMatchObject({
+        id: "user-attachment-only", role: "user", text: "", createdAt: 2000, attachments: [attachment],
+      });
+      expect(state.sessionMessages.get("execution-attachment-only")).toHaveLength(1);
+    } finally {
+      closeZerosDb();
+      setZerosDbPathForTesting(null);
+      fs.rmSync(dbDir, { recursive: true, force: true });
+    }
+  });
+
   it("persists admission time on both the user bubble and completed turn", async () => {
     const dbDir = fs.mkdtempSync(path.join(os.tmpdir(), "zeros-prompt-time-"));
     const workDir = path.join(dbDir, "worktree");
