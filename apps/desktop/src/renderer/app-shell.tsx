@@ -392,6 +392,9 @@ function rowToThread(r: ChatRowWire): ChatThread {
     archived: r.archived,
     sourceChatId: r.sourceChatId ?? undefined,
     kind: resolvedKind,
+    ...(r.parentChatId && r.rootChatId
+      ? { parentChatId: r.parentChatId, rootChatId: r.rootChatId }
+      : {}),
   };
 }
 

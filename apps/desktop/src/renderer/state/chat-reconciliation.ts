@@ -64,6 +64,8 @@ export function samePersistedChat(
     left.pinned === right.pinned &&
     left.archived === right.archived &&
     left.sourceChatId === right.sourceChatId &&
+    left.parentChatId === right.parentChatId &&
+    left.rootChatId === right.rootChatId &&
     sameDirectories(
       left.additionalDirectories ?? [],
       right.additionalDirectories ?? [],
