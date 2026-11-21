@@ -1,7 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { lstat } from "node:fs/promises";
 import { createRequire } from "node:module";
-import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import type { Options, Query, Settings, SDKUserMessage, PermissionResult, UserDialogRequest, UserDialogResult } from "@anthropic-ai/claude-agent-sdk";
 import { buildClaudeQuestionRequest, buildAskUserQuestionOutput, claudeQuestionHookOutput, formatAnswerForClaude, claudePermissionMode, claudeRequiresExplicitApproval, type QuestionResponse, type ContentBlock, type PromptResponse, type SessionNotification } from "@zeros/protocol/agent-events";
@@ -48,10 +47,9 @@ interface ClaudeOptions {
   environment?: NodeJS.ProcessEnv;
   gitEnvironment?: NodeJS.ProcessEnv;
   interruptTimeoutMs?: number;
-  /** Claude Code's config directory, whose projects/ holds each native session. Null skips
-   * the on-disk check (a resume proceeds as before). Defaults to CLAUDE_CONFIG_DIR or
-   * ~/.claude when the driver runs on the worker's own environment, and to null when a
-   * caller supplies one. */
+  /** Claude Code's config directory, whose projects/ holds each native session, exactly as the
+   * spawned Claude process sees it. Unset skips the on-disk check (a resume proceeds as before);
+   * the worker sets it where it knows the agent's home. */
   configDirectory?: string | null;
 }
 interface Process {
@@ -112,8 +110,7 @@ export class ClaudeDriver implements Driver {
    * a link at the file, or anywhere on the way when it is absent, is never followed and
    * answers undefined (resume as before), as does a cwd the SDK would hash. */
   private async nativeSessionOnDisk(id: string, cwd: string): Promise<boolean | undefined> {
-    const config = this.options.configDirectory !== undefined ? this.options.configDirectory
-      : this.options.environment ? null : process.env.CLAUDE_CONFIG_DIR || join(homedir(), ".claude");
+    const config = this.options.configDirectory;
     if (!config || !config.startsWith("/")) return undefined;
     // The SDK's own project key; above 200 characters it appends a hash we do not reproduce.
     const project = cwd.replace(/[^a-zA-Z0-9]/g, "-");
