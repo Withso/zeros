@@ -84,12 +84,12 @@ it("keeps hidden cloud review surfaces inert", async () => {
   expect([...f.handlers.values()].reduce((n, handlers) => n + handlers.size, 0)).toBe(0);
 });
 
-it("turns comments off for a surface that does not host review", async () => {
+it.each([["cloud", folder], ["Local", "/Users/someone/projects/app"]])("turns %s comments off for a surface that does not host review", async (_placement, target) => {
   f.available = true;
   const { codeReviewCache, codeReviewCacheKey } = await import("../review-cache");
   const { useCodeReview } = await import("../use-code-review");
-  codeReviewCache.setData(codeReviewCacheKey(folder, folder), { workspaceId: folder, threads: [thread], partial: false });
-  const review = useCodeReview({ cwd: folder, workspaceId: folder, active: true, comments: false });
+  codeReviewCache.setData(codeReviewCacheKey(target, target), { workspaceId: target, threads: [thread], partial: false });
+  const review = useCodeReview({ cwd: target, workspaceId: target, active: true, comments: false });
   for (const subscribe of f.subscriptions.splice(0)) cleanups.push(subscribe(() => {}));
   effects(); await review.refresh(); await review.loadMore?.();
   expect(review).toMatchObject({ commentsAvailable: false, workspaceCommentsAvailable: false, external: undefined, threads: [] });

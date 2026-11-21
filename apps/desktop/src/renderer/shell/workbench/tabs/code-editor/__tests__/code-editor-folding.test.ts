@@ -4,7 +4,7 @@ import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { EditorView } from "@codemirror/view";
-import { foldable, foldedRanges, foldCode, unfoldCode } from "@codemirror/language";
+import { foldable, foldedRanges } from "@codemirror/language";
 import { CodeEditor, type CodeEditorProps } from "../code-editor";
 
 const writes = vi.hoisted(() => ({ save: vi.fn(async () => ({ kind: "success", path: "file.ts", bytes: 4 })) }));
@@ -52,12 +52,15 @@ describe("CodeEditor folding", () => {
     expect(open).toHaveLength(2);
     expect(open[0].getAttribute("title")).toBe("Click to collapse the range.");
     expect(foldable(view.state, 0, view.state.doc.line(1).to)).toEqual({ from: view.state.doc.line(1).to, to: view.state.doc.line(4).to });
-    act(() => { view.dispatch({ selection: { anchor: 0 } }); foldCode(view); });
+    const click = (element: Element) => act(() => {
+      for (const type of ["mousedown", "mouseup", "click"])
+        element.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, button: 0 }));
+    });
+    click(open[0]);
     expect(foldedRanges(view.state).size).toBe(1);
-    expect(host.querySelector(".cm-foldPlaceholder")).not.toBeNull();
     expect(host.querySelectorAll(".cm-foldGutter [data-fold='open']")).toHaveLength(0);
     expect(host.querySelector(".cm-foldGutter [data-fold='folded']")?.getAttribute("title")).toBe("Click to expand the range.");
-    act(() => { unfoldCode(view); });
+    click(host.querySelector(".cm-foldPlaceholder")!);
     expect(foldedRanges(view.state).size).toBe(0);
     expect(host.querySelectorAll(".cm-foldGutter [data-fold='open']")).toHaveLength(2);
   });
