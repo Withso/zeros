@@ -585,6 +585,12 @@ export async function archiveWorkspaceWithFeedback(
       present: false,
     };
     commitConfirmedArchive(workspace, archivedWorkspace, dispatch, opts);
+    // Child workspaces an agent created from this one archive with it.
+    for (const child of peekLiveWorkspaceUnion()) {
+      if (child.parentWorkspaceId === workspace.id && !child.archivedAt) {
+        void archiveWorkspaceWithFeedback(child, dispatch);
+      }
+    }
   } catch (err) {
     // A concurrent device permanently deleted the row after this renderer
     // started archiving it. That is already a terminal removed state; scrub the

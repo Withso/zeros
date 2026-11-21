@@ -33,6 +33,7 @@ import React, {
   useLayoutEffect,
   useMemo,
   useRef,
+  useState,
 } from "react";
 import {
   Blocks,
@@ -258,6 +259,36 @@ function useNativeRuntimeNotice(): void {
 
 const NO_HIDDEN_PLACEMENTS: readonly ("local" | "cloud")[] = [];
 
+/** A child workspace indents under its parent; a parent gets a collapsed
+ * "N child workspaces" disclosure below it. */
+function nestedWorkspaceRow(
+  item: Extract<SidebarWorkspaceItem, { kind: "workspace" }>,
+  row: React.ReactElement,
+  onToggle: (id: string) => void,
+): React.ReactElement {
+  const depth = item.depth ?? 0;
+  const count = item.childCount ?? 0;
+  if (!depth && !count) return row;
+  return (
+    <React.Fragment key={item.key}>
+      {depth ? <div className="min-w-0" style={{ paddingLeft: depth * 12 }}>{row}</div> : row}
+      {count > 0 && (
+        <button
+          type="button"
+          className="text-fg3 hover:text-fg2 flex h-6 min-w-0 items-center gap-1 rounded-md pr-2 text-xs"
+          style={{ paddingLeft: 8 + (depth + 1) * 12 }}
+          aria-expanded={item.expanded ? "true" : "false"}
+          onClick={() => onToggle(item.workspace.id)}
+          data-child-workspaces-toggle={item.workspace.id}
+        >
+          <ChevronRight className={cn("size-3.5 shrink-0 transition-transform", item.expanded && "rotate-90")} strokeWidth={1.5} aria-hidden="true" />
+          <span className="truncate">{count === 1 ? "1 child workspace" : `${count} child workspaces`}</span>
+        </button>
+      )}
+    </React.Fragment>
+  );
+}
+
 export function AppSidebar({ hidden = false }: { hidden?: boolean }) {
   const activeResolution = useActiveWorkspace();
   const chats = useChats();
@@ -429,8 +460,15 @@ export function AppSidebar({ hidden = false }: { hidden?: boolean }) {
     [chats, realWorkspaces],
   );
 
+  const [expandedWorkspaceIds, setExpandedWorkspaceIds] = useState<ReadonlySet<string>>(() => new Set());
+  const toggleChildWorkspaces = useCallback((id: string) => setExpandedWorkspaceIds((prev) => {
+    const next = new Set(prev);
+    if (!next.delete(id)) next.add(id);
+    return next;
+  }), []);
   const sections = useMemo(() => {
     const args = {
+      expandedWorkspaceIds,
       filter: listFilter,
       sort: preferences.sort,
       repositoryIds,
@@ -443,7 +481,7 @@ export function AppSidebar({ hidden = false }: { hidden?: boolean }) {
     return sharing
       ? buildSidebarSharingSections({ ...args, sectionOf })
       : [{ id: null, label: "", entries: buildSidebarWorkspaceEntries(args) }];
-  }, [dedupedPendingCreates, listFilter, preferences.sort, repositoryIds, hiddenPlacements, activeAtByWorkspaceId, projects, realWorkspaces, sharing, sectionOf, unifiedPlacements]);
+  }, [expandedWorkspaceIds, dedupedPendingCreates, listFilter, preferences.sort, repositoryIds, hiddenPlacements, activeAtByWorkspaceId, projects, realWorkspaces, sharing, sectionOf, unifiedPlacements]);
   const entries = useMemo(() => sections.flatMap(section => section.entries), [sections]);
   const listedItems = useMemo(() => sidebarWorkspaceItems(entries), [entries]);
   const navigableWorkspaces = useMemo(
@@ -777,7 +815,7 @@ export function AppSidebar({ hidden = false }: { hidden?: boolean }) {
   const renderItem = (item: SidebarWorkspaceItem, grouped: boolean) => {
     const selectionKey = sidebarItemSelectionKey(item);
     const active = activeSelectionKey === selectionKey;
-    return item.kind === "workspace" ? (
+    return item.kind === "workspace" ? nestedWorkspaceRow(item, (
       <SidebarWorkspaceRow
         key={item.key}
         workspace={item.workspace}
@@ -805,7 +843,7 @@ export function AppSidebar({ hidden = false }: { hidden?: boolean }) {
             : undefined
         }
       />
-    ) : (
+    ), toggleChildWorkspaces) : (
       <PendingSidebarWorkspaceRow
         key={item.key}
         branch={item.pending.branch ?? undefined}
