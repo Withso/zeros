@@ -1141,9 +1141,10 @@ export class CloudV2Lifecycle {
     const github = await this.deps.githubToken?.(workspace) ?? null;
     // Each repository after the first is restored with its own token and clone URL.
     const others = await this.deps.repositories?.(workspace) ?? [];
-    if (active && others.length) throw checkpointError("checkpoint_restore_failed");
     const repositories = await Promise.all(others.map(async entry => {
       const token = await this.deps.githubToken?.(workspace, entry.repository) ?? null;
+      // Shared execution fetches every repository's objects with its own token, as for the first.
+      if (active && !token) throw checkpointError("checkpoint_restore_failed");
       return { checkoutPath: `${CLOUD_V2_HOME}/${entry.checkoutFolder}`, repositoryUrl: `https://github.com/${entry.repository}.git`,
         ...(token ? { githubToken: token.token } : {}) };
     }));

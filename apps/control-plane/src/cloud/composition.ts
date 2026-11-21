@@ -645,12 +645,16 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
       if (!workspace.recoveryAttemptId || !await lifecycleExecution(execution, workspace, { recoveryId: workspace.recoveryAttemptId }))
         throw new HttpError(409, "recovery_binding_changed", "Workspace recovery changed.");
     },
-    githubToken: async workspace => {
+    githubToken: async (workspace, repository) => {
       if (!workspace.recoveryAttemptId) throw new HttpError(409, "recovery_binding_changed", "Workspace recovery changed.");
       const actor = await lifecycleSource(workspace, "computer", workspace.recoveryAttemptId);
       if (!actor) throw new HttpError(409, "recovery_binding_changed", "Workspace recovery changed.");
-      return actor.credential;
+      if (!repository) return actor.credential;
+      // A repository after the first: the recovery actor's own token for it, as prepareRepository mints it.
+      return github.token({ organizationId: workspace.organizationId, userId: actor.userId },
+        { repository: repository.repository.toLowerCase(), repositoryId: repository.repositoryId }, "read", "git", actor.check);
     },
+    repositories: workspace => withSystemTx(pool, tx => otherRepositories(tx, workspace)),
     bootEnv: async (workspace, selected) => ({ CLOUD_V2_API_URL: v2.apiUrl, CLOUD_V2_RUNTIME_SHA256: selected.sha256, ZEROS_WORKSPACE_ID: workspace.id }),
     sandboxName: (workspace, attempt) => `${cloudV2SandboxName(config.deploymentChannel, "ws", workspace.id, localOwner)}-r${attempt.slice(0, 8)}`,
     sealToken: (token, id) => sealPortToken(token, id, keys), openToken: (envelope, id) => openPortToken(envelope, id, keys),

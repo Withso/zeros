@@ -1322,6 +1322,76 @@ describe("a workspace of several repositories", () => {
     expect(readFileSync(join(p.folder(p.newHome, "web"), "work.txt"), "utf8")).toBe("work\n");
   });
 
+  /** Shared execution: each GitHub remote is served from its own origin, and each fetch shows which token it was given. */
+  function activeProbe(p: ReturnType<typeof project>) {
+    const bin = join(p.root, "probe-bin"), log = join(p.root, "restore-events.jsonl"), git = "/usr/bin/git";
+    const tar = execFileSync("which", ["tar"], { encoding: "utf8" }).trim();
+    const remotes = { "https://github.com/withso/api.git": { origin: p.origins.api, token: `synthetic-restore-${randomUUID()}` },
+      "https://github.com/withso/web.git": { origin: p.origins.web, token: `synthetic-restore-${randomUUID()}` } };
+    const script = `#!${process.execPath}
+const fs = require('node:fs'), cp = require('node:child_process');
+const args = process.argv.slice(2), isGit = process.argv[1].endsWith('/git');
+const log = ${JSON.stringify(log)}, remotes = ${JSON.stringify(remotes)};
+const emit = value => fs.appendFileSync(log, JSON.stringify(value)+'\\n');
+if (isGit && args.includes('fetch') && process.env.ZEROS_RESTORE_TOKEN_FILE) {
+  const url = args.find(arg => remotes[arg]), file = process.env.ZEROS_RESTORE_TOKEN_FILE;
+  const token = url && fs.readFileSync(file, 'utf8');
+  emit({ event: 'fetch', url, own: !!url && token === remotes[url].token, directory: require('node:path').dirname(file) });
+  if (!url) process.exit(2);
+  args[args.indexOf(url)] = remotes[url].origin;
+  args.unshift('-c','protocol.file.allow=always');
+  process.env.GIT_ALLOW_PROTOCOL='file';
+}
+if (!isGit && args.some(arg=>/^-.*x/.test(arg))) {
+  const entries = fs.existsSync(log) ? fs.readFileSync(log,'utf8').trim().split('\\n').map(JSON.parse) : [];
+  emit({ event: 'unpack', authGone: entries.filter(row=>row.event==='fetch').every(row=>!fs.existsSync(row.directory)) });
+}
+const result=cp.spawnSync(isGit?${JSON.stringify(git)}:${JSON.stringify(tar)},args,{stdio:'inherit',env:process.env});
+process.exit(result.status??1);
+`;
+    for (const name of ["git", "tar"]) { p.write(join(bin, name), script); chmodSync(join(bin, name), 0o755); }
+    return { remotes, env: { ...p.env, PATH: `${bin}:${p.env.PATH}` },
+      events: () => existsSync(log) ? readFileSync(log, "utf8").trim().split("\n").map(line => JSON.parse(line) as Record<string, unknown>) : [] };
+  }
+  const activeLoad = (p: ReturnType<typeof project>, probe: ReturnType<typeof activeProbe>, key: Buffer, from: string, webToken?: string) =>
+    run([`export PATH='${probe.env.PATH}'`, ...checkpointRestoreSteps({ checkoutPath: p.folder(p.newHome, "api"), home: p.newHome, key, sha256: sha(from), active: true,
+      repositoryUrl: "https://github.com/withso/api.git", githubToken: probe.remotes["https://github.com/withso/api.git"].token,
+      repositories: [{ checkoutPath: p.folder(p.newHome, "web"), repositoryUrl: "https://github.com/withso/web.git",
+        githubToken: webToken ?? probe.remotes["https://github.com/withso/web.git"].token }] },
+      [`cp '${from}' "$work/checkpoint.zck"`]), "report zeros-checkpoint-restored"], probe.env);
+
+  it.each([false, true])("restores every repository in shared execution, each fetched with its own token before anything is unpacked (backup: %s)", backup => {
+    const p = project(), key = randomBytes(32), out = join(p.root, "checkpoint.zck");
+    const web = p.folder(p.oldHome, "web"), api = p.folder(p.oldHome, "api");
+    p.write(join(web, "page.html"), "<p>committed</p>\n"); p.git(web, "add", "page.html"); p.git(web, "commit", "-q", "-m", "page");
+    p.write(join(web, "staged.txt"), "staged\n"); p.git(web, "add", "staged.txt");
+    p.write(join(api, "README.md"), "api edited\n");
+    const saved = run([...checkpointArchiveSteps({ checkoutPath: api, home: p.oldHome, baseBranch: "main", key, backup,
+      repositories: [{ checkoutPath: web, baseBranch: "main" }] }), `cp "$work/checkpoint.zck" '${out}'`, CHECKPOINT_SAVED_REPORT], p.env);
+    expect(parseCheckpointResult(saved.stdout)).toMatchObject({ ok: true });
+    // A replacement VM holds neither repository: shared execution fetches both.
+    const probe = activeProbe(p);
+    const restored = activeLoad(p, probe, key, out);
+    expect(parseRestoreResult(restored.stdout), JSON.stringify(probe.events())).toEqual({ ok: true });
+    const events = probe.events(), firstUnpack = events.findIndex(event => event.event === "unpack");
+    expect(events.filter(event => event.event === "fetch").map(event => [event.url, event.own]))
+      .toEqual([["https://github.com/withso/api.git", true], ["https://github.com/withso/web.git", true]]);
+    expect(events.slice(0, firstUnpack).filter(event => event.event === "fetch")).toHaveLength(2);
+    for (const event of events.filter(event => event.event === "unpack")) expect(event.authGone).toBe(true);
+    for (const token of Object.values(probe.remotes).map(entry => entry.token)) expect(restored.stdout).not.toContain(token);
+    const newWeb = p.folder(p.newHome, "web"), newApi = p.folder(p.newHome, "api");
+    expect(p.git(newWeb, "log", "-1", "--format=%s")).toBe("page");
+    expect(sorted(p.git(newWeb, "diff", "--cached", "--name-only"))).toEqual(["staged.txt"]);
+    expect(readFileSync(join(newApi, "README.md"), "utf8")).toBe("api edited\n");
+  });
+
+  it("refuses a shared-execution restore of several repositories without each repository's token", () => {
+    const p = project(), key = randomBytes(32);
+    expect(() => checkpointRestoreSteps({ checkoutPath: p.folder(p.newHome, "api"), home: p.newHome, key, sha256: "a".repeat(64), active: true,
+      repositoryUrl: "https://github.com/withso/api.git", githubToken: "synthetic-token-0123456789",
+      repositories: [{ checkoutPath: p.folder(p.newHome, "web"), repositoryUrl: "https://github.com/withso/web.git" }] }, [])).toThrow(/GitHub credential/);
+  });
+
   it("restores a checkpoint made before the workspace had a repository, and an older one-repository checkpoint, unchanged", () => {
     const w = workspaces(), key = randomBytes(32), out = join(w.root, "checkpoint.zck");
     w.write(join(w.oldRepo, "a.txt"), "edited\n");

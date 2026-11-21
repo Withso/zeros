@@ -659,6 +659,14 @@ export function checkpointRestoreSteps(input: RestoreInput, fetch: readonly stri
   return [
     ...prologue("restore", paths(input), input.active),
     ...(input.active ? activeRestoreFetchSteps(token, remote) : []),
+    // A workspace of several repositories: every other repository's objects are
+    // fetched with its own token here too, so every credential is gone before
+    // any checkpoint content exists.
+    ...(input.active ? (input.repositories ?? []).flatMap(entry => [
+      `first_repo=$repo; repo=${quote(checkedPath(entry.checkoutPath))}`,
+      ...activeRestoreFetchSteps(entry.githubToken, entry.repositoryUrl ?? ""),
+      "repo=$first_repo",
+    ]) : []),
     "step=download",
     ...fetch,
     `printf '%s  %s\\n' ${input.sha256} "$work/checkpoint.zck" | sha256sum -c --status || fail checkpoint_corrupt`,
@@ -816,7 +824,6 @@ function repositoryRestore(input: RestoreInput, remote: string): string[] {
  * own subshell, fetching what its base lacks (or cloning it) with its own
  * token. A checkpoint made before it had that repository leaves it as it is. */
 function otherRepositoriesRestore(input: RestoreInput): string[] {
-  if (input.active && input.repositories?.length) throw new Error("A shared-execution restore holds one repository");
   return (input.repositories ?? []).flatMap((entry, index) => {
     const i = index + 1, token = entry.githubToken;
     if (token !== undefined && !/^[\x21-\x7e]{16,4096}$/.test(token)) throw new Error("Invalid GitHub token");
@@ -827,7 +834,10 @@ function otherRepositoriesRestore(input: RestoreInput): string[] {
       `  repo=${quote(checkedPath(entry.checkoutPath))} c="$c/repositories/${i}" reported=''`,
       "  trap 'code=$?; if [ \"$code\" -ne 0 ] && [ -z \"$reported\" ]; then printf \"zeros-checkpoint-error checkpoint_restore_failed %s\\n\" \"$step\" >&3; fi' EXIT",
       "  m=\"$c/manifest\"; [ \"$(head -n 1 \"$m\")\" = 'zeros-checkpoint 1' ] || fail checkpoint_corrupt",
-      ...(token ? [
+      // Its own work directory, so its credential, environment and index files never meet another repository's.
+      `  work="$work/repository-${i}"; mkdir -m 700 "$work"`,
+      // Active: its objects were fetched before the download; no credential is written again.
+      ...(input.active ? [] : token ? [
         `  printf %s ${quote(b64(token))} | base64 -d > "$work/token-${i}"`,
         `  printf '#!/bin/sh\\ncase "$1" in Username*) echo x-access-token ;; *) cat "%s" ;; esac\\n' "$work/token-${i}" > "$work/askpass-${i}"; chmod 700 "$work/askpass-${i}"`,
         `  remote_git() { GIT_ASKPASS="$work/askpass-${i}" git -c credential.helper= "$@"; }`,
@@ -835,7 +845,7 @@ function otherRepositoriesRestore(input: RestoreInput): string[] {
       "  fetched=''",
       ...repositoryRestore(input, remote).map(line => `  ${line}`),
       ") || { reported=1; exit 3; }; fi",
-      `rm -f "$work/token-${i}" "$work/askpass-${i}"`,
+      `rm -f "$work/repository-${i}/token-${i}" "$work/repository-${i}/askpass-${i}"`,
     ];
   });
 }
