@@ -75,6 +75,19 @@ it("keeps ready copies off until a deployment enables them, and validates the sh
   expect(() => loadConfig({ ...base, CLOUD_V2_SHARED_BASE_SNAPSHOT: "Not A Name" })).toThrow("CLOUD_V2_SHARED_BASE_SNAPSHOT");
 });
 
+it("keeps retention off until a deployment enables it", () => {
+  const key = generateKeyPairSync("ed25519").privateKey.export({ format: "der", type: "pkcs8" }).toString("base64");
+  const base = { ...env, CLOUD_V2_WORKER_SIGNING_KEY: key };
+  expect(loadConfig(base).cloudV2).toMatchObject({ retention: false });
+  expect(loadConfig({ ...base, CLOUD_V2_RETENTION_ENABLED: " TRUE " }).cloudV2).toMatchObject({ retention: true });
+  expect(loadConfig({ ...base, CLOUD_V2_RETENTION_ENABLED: "false" }).cloudV2).toMatchObject({ retention: false });
+  expect(() => loadConfig({ ...base, CLOUD_V2_RETENTION_ENABLED: "1" })).toThrow("CLOUD_V2_RETENTION_ENABLED");
+  expect(loadConfig(base).cloudV2).not.toHaveProperty("backupForksPerHour");
+  expect(loadConfig({ ...base, CLOUD_V2_RETENTION_BACKUP_FORKS_PER_HOUR: "8" }).cloudV2).toMatchObject({ backupForksPerHour: 8 });
+  for (const value of ["0", "201", "2.5", "many"])
+    expect(() => loadConfig({ ...base, CLOUD_V2_RETENTION_BACKUP_FORKS_PER_HOUR: value })).toThrow("CLOUD_V2_RETENTION_BACKUP_FORKS_PER_HOUR");
+});
+
 it("uses only a dedicated public canary key on Alpha and never accepts the worker signing key for that authority", () => {
   const worker = generateKeyPairSync("ed25519"), canary = generateKeyPairSync("ed25519"), previous = generateKeyPairSync("ed25519");
   const key = worker.privateKey.export({ format: "der", type: "pkcs8" }).toString("base64");

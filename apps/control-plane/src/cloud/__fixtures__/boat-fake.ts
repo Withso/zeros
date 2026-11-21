@@ -5,20 +5,29 @@ import { BoatForkRefusedError, BoatSnapshotExpiredError } from "../boat-client.j
 import { CloudProviderError } from "../provider-error.js";
 import { READY_COPY_SECRET_PATHS } from "../ready-copies.js";
 
-/** Measured on Boat (PLAN.md, "Measured on Boat") or unverified, awaiting a live check. */
+/** Measured on Boat (PLAN.md, "Measured on Boat"; `verified` names the date of a live check) or unverified, awaiting one. */
 export const BOAT_FAKE_ASSUMPTIONS = [
   { verified: true, assumption: "Boat names every fork \"<source name> fork\"" },
   { verified: true, assumption: "a fork of a stopped machine works and copies its disk; the source's stoppedAt is unchanged" },
   { verified: true, assumption: "Boat deletes the disk of a machine stopped for 14 days; resume, inspect and fork then fail as expired" },
-  { verified: false, assumption: "fork is idempotent per key for 24 hours: a replay returns the machine the first request made (measured for create only)" },
+  { verified: "2026-11-21", assumption: "fork is idempotent per key for 24 hours: a replay returns the machine the first request made" },
   { verified: false, assumption: "the name a fork request asks for is ignored" },
-  { verified: false, assumption: "Boat refuses a fork of a machine still archiving before making anything" },
-  { verified: false, assumption: "stoppedAt is recorded when the stop is accepted, not when archiving finishes" },
+  { verified: "2026-11-21", assumption: "Boat refuses a fork of a machine still archiving (409 fork_failed, \"Fork needs a completed snapshot\") before making anything" },
+  { verified: "2026-11-21", assumption: "stoppedAt is null while archiving and set when the machine becomes archived: the archive-end time, not the accept time" },
   { verified: false, assumption: "a reply can be lost after Boat acted, so the caller sees an error although the machine exists" },
-  { verified: false, assumption: "a fork gets no environment of its own; a create's env is the only environment a machine has" },
-  { verified: false, assumption: "a stopped machine keeps only its disk: a fork boots with none of its source's processes or memory" },
+  { verified: "2026-11-21", assumption: "a fork carries its source's environment; a fork request's env does not replace it" },
+  { verified: "2026-11-21", assumption: "a fork is a fresh boot from its source's disk: none of its source's processes, and its enabled units start" },
+  { verified: "2026-11-21", assumption: "worker unit stays disabled: a unit stopped and disabled before a stop is inactive and disabled after resume and in a fork; one left enabled runs in both" },
+  { verified: "2026-11-21", assumption: "an explicit stop freezes running processes and resume restores them; a stop is accepted while a command runs and archives normally" },
+  { verified: "2026-11-21", assumption: "a lease that runs out archives a running machine (disk kept, stoppedAt set then); the resume after it is a cold start: processes are gone and enabled units start" },
+  { verified: "2026-11-21", assumption: "a fork's lease is not a delete: a fork left past its ttlSeconds is archived and stays until Boat's own retention removes it" },
+  { verified: "2026-11-21", assumption: "deleting a fork leaves its source's state and stoppedAt unchanged" },
+  { verified: "2026-11-21", assumption: "resume of a running machine is harmless: processes keep running, it re-arms the lease, and inspect may report the state as idle" },
+  { verified: "2026-11-21", assumption: "a fork accepts commands within seconds, as user with sudo -n systemctl" },
+  { verified: false, assumption: "which calls count against Boat's creation-request limits: create and fork are assumed to, resume is assumed to as well" },
   { verified: false, assumption: "execLong input reaches only the last simple command, through a private file removed before it runs" },
-  { verified: false, assumption: "delete succeeds when the machine is already gone; findSandbox returns the newest machine with that exact name" },
+  { verified: "2026-11-21", assumption: "delete succeeds when the machine is already gone and inspect then answers 404 not_found" },
+  { verified: false, assumption: "findSandbox returns the newest machine with that exact name" },
   { verified: false, assumption: "GET /named-snapshots/<name> answers status \"ready\" for a snapshot that can start a machine and 404 for none, also for the shared Zeros base saved under another Boat organization" },
   { verified: false, assumption: "a machine's disk holds a project's 10 full clones with their dependencies (about 20-30 GB)" },
 ] as const;
@@ -27,6 +36,10 @@ type Machine = {
   id: string; name: string; state: "running" | "archiving" | "archived" | "deleted";
   env: Record<string, string>; files: Map<string, string>; from: string | null; source: string | null;
   createdAt: number; stoppedAt: number | null;
+  /** The worker's systemd unit. A stop freezes it; a fork or a cold resume starts it when enabled. */
+  worker: { enabled: boolean; active: boolean };
+  /** A fork's lease end; past it Boat archives the fork, and the next resume is cold. */
+  leaseUntil: number | null; cold: boolean;
 };
 export type FakeCommand = { machineId: string; command: string; input?: string };
 type Exec = (machine: Machine, command: string, input?: string) => CloudV2CommandResult | Promise<CloudV2CommandResult> | undefined;
@@ -60,6 +73,9 @@ export class FakeBoat implements CloudV2Compute {
   private live(id: string): Machine {
     const machine = this.machines.get(id);
     if (!machine || machine.state === "deleted") throw new CloudProviderError("provider_not_found", "Boat API request did not succeed", false, { httpStatus: 404 });
+    if (machine.state === "running" && machine.leaseUntil !== null && this.clock() >= machine.leaseUntil) {
+      machine.state = "archived"; machine.stoppedAt = machine.leaseUntil; machine.cold = true;
+    }
     if (machine.stoppedAt !== null && machine.state !== "running" && this.clock() - machine.stoppedAt >= 14 * DAY) throw new BoatSnapshotExpiredError();
     return machine;
   }
@@ -67,9 +83,10 @@ export class FakeBoat implements CloudV2Compute {
     const entry = this.keys.get(key);
     return entry && this.clock() - entry.at < DAY ? entry.id : null;
   }
-  private make(key: string, init: Omit<Machine, "id" | "createdAt" | "stoppedAt" | "state">): string {
+  private make(key: string, init: Omit<Machine, "id" | "createdAt" | "stoppedAt" | "state" | "worker" | "leaseUntil" | "cold">
+    & Partial<Pick<Machine, "worker" | "leaseUntil">>): string {
     const id = `bx_fake${String(this.next++).padStart(4, "0")}`;
-    this.machines.set(id, { ...init, id, state: "running", createdAt: this.clock(), stoppedAt: null });
+    this.machines.set(id, { worker: { enabled: false, active: false }, leaseUntil: null, ...init, id, state: "running", createdAt: this.clock(), stoppedAt: null, cold: false });
     this.keys.set(key, { id, at: this.clock() });
     return id;
   }
@@ -89,21 +106,23 @@ export class FakeBoat implements CloudV2Compute {
     if (known) return this.replied("fork", { sandboxId: known });
     const source = this.live(sourceId);
     if (source.state !== "archived") throw new BoatForkRefusedError();
-    const id = this.make(input.key, { name: `${source.name} fork`, env: {}, files: new Map(source.files), from: null, source: sourceId });
+    const id = this.make(input.key, { name: `${source.name} fork`, env: { ...source.env }, files: new Map(source.files), from: null, source: sourceId,
+      worker: { enabled: source.worker.enabled, active: source.worker.enabled }, leaseUntil: this.clock() + input.ttlSeconds * 1000 });
     return this.replied("fork", { sandboxId: id });
   }
 
   async inspect(sandboxId: string) {
     this.record("inspect", sandboxId);
     const machine = this.live(sandboxId);
-    if (machine.state === "archiving" && this.archivingReads-- <= 0) machine.state = "archived";
+    if (machine.state === "archiving" && this.archivingReads-- <= 0) { machine.state = "archived"; machine.stoppedAt = this.clock(); }
     return { name: machine.name, state: machine.state, stoppedAt: machine.stoppedAt === null ? null : new Date(machine.stoppedAt) };
   }
 
   async resume(sandboxId: string) {
     this.record("resume", sandboxId);
     const machine = this.live(sandboxId);
-    machine.state = "running";
+    if (machine.cold) { machine.worker.active = machine.worker.enabled; machine.cold = false; }
+    machine.state = "running"; machine.leaseUntil = null;
   }
 
   async extendLease(sandboxId: string) { this.record("extendLease", sandboxId); this.live(sandboxId); }
@@ -111,7 +130,7 @@ export class FakeBoat implements CloudV2Compute {
   async stop(sandboxId: string) {
     this.record("stop", sandboxId);
     const machine = this.live(sandboxId);
-    if (machine.state === "running") { machine.state = "archiving"; machine.stoppedAt = this.clock(); }
+    if (machine.state === "running") machine.state = "archiving";
     this.replied("stop", undefined);
   }
 
@@ -142,6 +161,12 @@ export class FakeBoat implements CloudV2Compute {
     const machine = this.live(sandboxId);
     if (machine.state !== "running") throw new CloudProviderError("provider_request_failed", "Boat API request did not succeed", true, { httpStatus: 409 });
     this.commands.push({ machineId: sandboxId, command, ...(input === undefined ? {} : { input }) });
+    if (command.includes("systemctl stop zeros-worker.service")) machine.worker.active = false;
+    if (command.includes("systemctl disable zeros-worker.service")) machine.worker.enabled = false;
+    if (command.includes("systemctl enable zeros-worker.service")) machine.worker.enabled = true;
+    if (command.includes("systemctl restart zeros-worker.service")) machine.worker.active = true;
+    if (command.includes("zeros-worker-unit"))
+      return { exitCode: 0, stdout: `zeros-worker-unit enabled=${machine.worker.enabled ? "enabled" : "disabled"} active=${machine.worker.active ? "active" : "inactive"}\n`, timedOut: false };
     // The ready copy scrub (READY_COPY_SCRUB_COMMAND) removes command inputs and detached job files.
     if (command.includes("rm -rf /tmp/zeros-command-input-* /tmp/zeros-job-*"))
       for (const path of [...machine.files.keys()]) if (/^\/tmp\/zeros-(?:command-input|job)-/.test(path)) machine.files.delete(path);

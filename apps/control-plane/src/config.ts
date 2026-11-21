@@ -254,6 +254,17 @@ export type CloudV2Config = {
    * repository gets a stopped machine cloned and set up from it, and creates
    * fork that machine, falling back to the direct clone when none is ready. */
   readyCopies?: boolean;
+  /** Retention (cloud/lifecycle.ts), CLOUD_V2_RETENTION_ENABLED=true. Default off: off,
+   * stop, checkpoint, wake, archive and delete behave as before. On, a stop
+   * uploads nothing: it switches the worker service off and probes for work not
+   * on GitHub, and about an hour later a smaller backup (no agent sessions or
+   * chat attachments) is taken on a fork of the stopped VM, only when the probe
+   * found work or could not tell. Every retention clock starts when it first
+   * applies to a workspace, never from history. */
+  retention?: boolean;
+  /** CLOUD_V2_RETENTION_BACKUP_FORKS_PER_HOUR: retention's cap on backup forks begun per hour
+   * across the deployment (1-200). Unset uses the lifecycle's default of 20. */
+  backupForksPerHour?: number;
   /** CLOUD_V2_SHARED_BASE_SNAPSHOT: the Boat named snapshot organizations
    * without an install script start from when ready copies are on. Unset,
    * each organization builds its own base. */
@@ -296,6 +307,11 @@ function loadCloudV2Config(env: NodeJS.ProcessEnv, channel: string): CloudV2Conf
   if (asyncCreate && !["true", "false"].includes(asyncCreate)) throw new Error("Invalid environment: CLOUD_V2_ASYNC_CREATE_ENABLED must be true or false");
   const readyCopies = env.CLOUD_V2_READY_COPIES_ENABLED?.trim().toLowerCase();
   if (readyCopies && !["true", "false"].includes(readyCopies)) throw new Error("Invalid environment: CLOUD_V2_READY_COPIES_ENABLED must be true or false");
+  const retention = env.CLOUD_V2_RETENTION_ENABLED?.trim().toLowerCase();
+  if (retention && !["true", "false"].includes(retention)) throw new Error("Invalid environment: CLOUD_V2_RETENTION_ENABLED must be true or false");
+  const backupForks = env.CLOUD_V2_RETENTION_BACKUP_FORKS_PER_HOUR?.trim();
+  if (backupForks && (!/^\d{1,3}$/.test(backupForks) || Number(backupForks) < 1 || Number(backupForks) > 200))
+    throw new Error("Invalid environment: CLOUD_V2_RETENTION_BACKUP_FORKS_PER_HOUR must be an integer from 1 to 200");
   const sharedBaseSnapshot = env.CLOUD_V2_SHARED_BASE_SNAPSHOT?.trim() || undefined;
   if (sharedBaseSnapshot && !/^[a-z0-9][a-z0-9-]{0,61}[a-z0-9]$/.test(sharedBaseSnapshot))
     throw new Error("Invalid environment: CLOUD_V2_SHARED_BASE_SNAPSHOT must be a Boat snapshot name");
@@ -342,6 +358,8 @@ function loadCloudV2Config(env: NodeJS.ProcessEnv, channel: string): CloudV2Conf
     messageAuthority: messageAuthority !== "false",
     checkpointRetry: checkpointRetry === "true",
     readyCopies: readyCopies === "true",
+    retention: retention === "true",
+    ...(backupForks ? { backupForksPerHour: Number(backupForks) } : {}),
     ...(sharedBaseSnapshot ? { sharedBaseSnapshot } : {}),
     asyncCreate: asyncCreate !== "false",
     executionAuthCache: executionAuthCache as "off" | "shadow" | "on",

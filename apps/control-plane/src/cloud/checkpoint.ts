@@ -567,6 +567,21 @@ export const WORKER_SERVICE_OFF = [
   "sudo -n systemctl disable zeros-worker.service >/dev/null 2>&1 || true",
 ] as const;
 
+/** Run on a backup fork before anything is read. A fork is a fresh boot that
+ * starts every enabled unit, so a worker unit left enabled by its source would
+ * already be running there, on the workspace's environment and disk; such a
+ * fork is never used. */
+export const WORKER_UNIT_CHECK = `bash -c ${quote([
+  "e=$(systemctl is-enabled zeros-worker.service 2>/dev/null || true); a=$(systemctl is-active zeros-worker.service 2>/dev/null || true)",
+  "printf 'zeros-worker-unit enabled=%s active=%s\\n' \"${e:-unknown}\" \"${a:-unknown}\"",
+].join("\n"))}`;
+
+/** Only a unit that is known to be off on both counts is safe; anything else, including no answer, is not. */
+export function workerUnitOff(stdout: string): boolean {
+  const match = /^zeros-worker-unit enabled=(\S+) active=(\S+)$/m.exec(stdout);
+  return !!match && ["disabled", "masked", "not-found"].includes(match[1]!) && ["inactive", "failed"].includes(match[2]!);
+}
+
 /** Whether a stop left work that is not on GitHub, in any repository. */
 export type BackupProbe = "clean" | "dirty" | "unknown";
 /** A probe answers within a few seconds or counts as unknown, which backs up. */
