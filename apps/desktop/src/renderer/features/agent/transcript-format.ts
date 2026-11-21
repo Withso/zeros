@@ -513,8 +513,7 @@ function renderMessage(m: AgentMessage, ctx: Ctx, depth: Depth): string {
   }
 }
 
-/** Paths a tool changed: its diffs, else the locations of an edit, delete or
- *  move. A failed tool changed nothing worth reporting. */
+// A failed tool changed nothing worth reporting.
 function changedPaths(tool: AgentToolMessage): string[] {
   if (tool.status === "failed") return [];
   const diffs = ((tool.content ?? []) as ToolCallContent[])
@@ -534,9 +533,6 @@ function handoffProse(m: AgentMessage): boolean {
   return m.redacted === true || (typeof m.text === "string" && m.text.trim().length > 0);
 }
 
-/** One handoff turn: the prompt, every thinking block, in-between message and
- *  answer in order, and the question answers; tools collapse into a
- *  deduplicated "Files changed" list. */
 function handoffTurn(prompt: AgentTextMessage | null, events: AgentMessage[], root: string | undefined): string {
   const parts: string[] = [];
   if (prompt) parts.push(safeSection(() => renderUser(prompt), "prompt"));

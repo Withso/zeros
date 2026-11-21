@@ -17,7 +17,6 @@ export function canAddChildSession(parent: ChatThread | null | undefined): paren
   return !!parent && parent.kind !== "terminal" && !parent.archived && !!parent.folder && !isCloudWorkspace(parent.folder);
 }
 
-/** A fresh chat with the parent's Zeros settings, linked one level below it. */
 export function createChildChat(parent: ChatThread, id?: string, now?: number): ChatThread {
   return {
     ...createForkedChat(parent, id, now),
@@ -41,8 +40,6 @@ export interface AddChildSessionDeps {
   onError?(message: string, error: unknown): void;
 }
 
-/** Open a child of `parent` at once, then record its Local link and stage the
- *  parent's handoff transcript in its composer. */
 export function addChildSession(parent: ChatThread, deps: AddChildSessionDeps): ChatThread | null {
   if (!canAddChildSession(parent)) return null;
   const {
