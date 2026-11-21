@@ -135,6 +135,17 @@ it("retries a failed Plan send with the user's current full-access selection", a
   await vi.advanceTimersByTimeAsync(1);
   expect(f.api.enqueue.mock.calls[1]?.[0]).toMatchObject({ permissionMode: "bypass" });
 });
+it("retries a failed send on the agent the chat switched to in place", async () => {
+  const runtime = new CloudPromptRuntime(); cleanup = runtime.start();
+  await runtime.send(chatId, { text: "Build it" }, { id: "before-switch" });
+  const original = f.api.enqueue.mock.calls[0]?.[0]?.agentId;
+  const switched = original === "codex" ? "claude" : "codex";
+  const page = await f.api.list(); page.items[0].state = "failed";
+  f.workspace.chats[0] = { ...f.workspace.chats[0], agentId: switched, model: "switched-model" };
+  expect(await runtime.recover(chatId, "before-switch", true)).toBe(true);
+  await vi.advanceTimersByTimeAsync(1);
+  expect(f.api.enqueue.mock.calls[1]?.[0]).toMatchObject({ agentId: switched, model: "switched-model" });
+});
 it("freezes the retry's mode before refreshing the failed receipt", async () => {
   f.workspace.chats[0] = { ...f.workspace.chats[0], permissionMode: "plan", lastModeId: "read-only" };
   const runtime = new CloudPromptRuntime();
