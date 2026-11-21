@@ -76,6 +76,8 @@ interface DesignLivePreviewOwner {
 
 interface DesignStyleEditorProps {
   details: DesignRuntimeNodeDetails;
+  /** Only the Size fields: an instance is sized from outside, never styled. */
+  only?: "size";
   livePreviewOwner?: DesignLivePreviewOwner;
   renderField: (
     label: string,
@@ -223,6 +225,7 @@ function LiveTransformSection(
 
 export function DesignStyleEditor({
   details,
+  only,
   livePreviewOwner,
   renderField,
   onPreviewStyles,
@@ -325,6 +328,25 @@ export function DesignStyleEditor({
       }),
     );
   };
+  if (only === "size") {
+    return (
+      <InspectorSection title="Size" data-design-size-section="">
+        <DesignAutoLayoutControls
+          only="size"
+          details={details}
+          livePreviewOwner={livePreviewOwner}
+          renderField={renderField}
+          disabled={disabled}
+          active={active}
+          frameSelected={frameSelected}
+          layoutParents={layoutParents}
+          selectionCount={selectionCount}
+          onCommit={(styles) => commit(styles, "size")}
+          onAction={layoutAction}
+        />
+      </InspectorSection>
+    );
+  }
   const sections: Partial<Record<DesignStyleSectionId, React.ReactNode>> = {};
   sections.position = (
     <DesignPositionSection

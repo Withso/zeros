@@ -213,7 +213,7 @@ import {
   type DesignMotionTimelineDraft,
 } from "./design-motion-timeline";
 import { canEditDesignNodeText } from "./design-node-capabilities";
-import { designComponentIdentityLabel, designComponentInstanceIdentity, designComponentSelectionIdentity, designComponentPartHost, designComponentTextLock, designFrameComponentPresentation, designFrameMissingComponents, designFrameOptionsProblem, isDesignComponentPartNodeId } from "./state/design-component-parts";
+import { designCanvasStyleToolsBlocked, designComponentIdentityLabel, designComponentInstanceIdentity, designComponentSelectionIdentity, designComponentPartHost, designComponentTextLock, designFrameComponentPresentation, designFrameMissingComponents, designFrameOptionsProblem, isDesignComponentPartNodeId } from "./state/design-component-parts";
 import { designDeclaredVariants, useDesignComponentVariantStore } from "./state/design-component-variants";
 import { resolveDesignSelectionShortcut } from "./design-selection-shortcuts";
 import { captureDesignFrameComponentCopy } from "./state/design-component-variants";
@@ -660,12 +660,20 @@ export const DesignCanvas = React.memo(function DesignCanvas({
   // Motion uses the inspector's style target, including the outer frame root.
   // Selection, rather than runtime readback readiness, keeps the timeline open.
   const motionNodeDetails = selectedNodeDetails ?? frameLayoutOwnerDetails;
-  const motionTargetSelected = view.frameSelected || Boolean(view.selectedNodeId);
+  // A frame-root instance is its frame's root layer, named before its
+  // readback arrives.
+  const frameRootNodeId = selectedFrame?.componentIdentity?.kind === "instance"
+    ? selectedFrame.componentIdentity.nodeId
+    : frameLayoutOwnerDetails?.oid ?? null;
+  const componentStyleTarget = designCanvasStyleToolsBlocked(selectedFrame,
+    view.selectedNodeIds.length ? view.selectedNodeIds : [view.selectedNodeId ?? (view.frameSelected ? frameRootNodeId : null)]);
+  const motionTargetSelected = (view.frameSelected || Boolean(view.selectedNodeId)) && !componentStyleTarget;
   /** The one auto-layout owner whose padding and gaps the canvas edits: a
    * single selected layer, or the selected frame's root. A multi-selection
-   * has none — editing its primary alone would surprise. */
+   * has none — editing its primary alone would surprise — and nor does an
+   * instance host or part, whose padding and gaps are its main's. */
   const layoutOwnerDetails =
-    view.selectedNodeIds.length > 1
+    view.selectedNodeIds.length > 1 || componentStyleTarget
       ? null
       : (selectedNodeDetails ?? frameLayoutOwnerDetails);
   const layoutOwnerId = layoutOwnerDetails?.oid ?? null;
@@ -8809,6 +8817,8 @@ export const DesignCanvas = React.memo(function DesignCanvas({
                   // An instance's part is outlined only: no handle, and a
                   // click goes through to the frame to pick another part.
                   const partOutline = isDesignComponentPartNodeId(details.oid);
+                  // An instance's padding and gaps are its main's, not the canvas's to edit.
+                  const spacingToolsAllowed = !designCanvasStyleToolsBlocked(frame, [details.oid]);
                   const componentOwnerId = partOutline ? designComponentPartHost(details.oid) : details.oid;
                   const mainComponentRoot = frameComponentPresentation?.kind === "main" && componentOwnerId === selectedFrameRootId;
                   const instanceComponentIdentity = mainComponentRoot ? null : designComponentInstanceIdentity(frame, componentOwnerId, (file) =>
@@ -8917,11 +8927,13 @@ export const DesignCanvas = React.memo(function DesignCanvas({
                       <DesignOverlayGeometrySync overlay={overlayFrame} />
                       {primarySelection && !editingThisElement && !partOutline ? (
                         <>
-                          <span
-                            data-design-spacing-hover-zone=""
-                            className="absolute inset-0"
-                            aria-hidden="true"
-                          />
+                          {spacingToolsAllowed ? (
+                            <span
+                              data-design-spacing-hover-zone=""
+                              className="absolute inset-0"
+                              aria-hidden="true"
+                            />
+                          ) : null}
                           {motionTimelineOpen && currentMotionOverlay?.draft ? (
                             <DesignMotionCanvasOverlay
                               owner={motionOverlayOwner}
@@ -8947,7 +8959,8 @@ export const DesignCanvas = React.memo(function DesignCanvas({
                             componentKind={mainComponentRoot ? "main" : "instance"}
                             onSpacingPointerDown={
                               selectedElements.length === 1 &&
-                              activeTool === "select"
+                              activeTool === "select" &&
+                              spacingToolsAllowed
                                 ? (event, control) =>
                                     startInlineSpacingGesture(
                                       event,
@@ -9060,6 +9073,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
 
                 {frameSelectedOnly &&
                 frameLayoutOwnerDetails &&
+                !designCanvasStyleToolsBlocked(frame, [frameLayoutOwnerDetails.oid]) &&
                 workspaceId &&
                 activeTool === "select" &&
                 inlineTextEdit?.frame !== frame.file &&

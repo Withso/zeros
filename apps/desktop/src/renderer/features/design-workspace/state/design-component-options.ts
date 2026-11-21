@@ -18,6 +18,7 @@ import {
   type ComponentEasing,
   type ComponentOptionValue,
   type ComponentVariantState,
+  componentInstanceHostStyleAllowed,
 } from "@zeros/design-core/component-options";
 import {
   designComponentRecordLimitMessage,
@@ -172,7 +173,7 @@ export function designInstanceResetAllFits(counts: { options: number; parts: num
   return counts.options + counts.parts + Number(counts.style) + counts.slotted + Number(counts.text) <= DESIGN_TRANSACTION_MAX_OPERATIONS;
 }
 
-type DesignInstanceResetKind = "style" | "all";
+type DesignInstanceResetKind = "older" | "all";
 type DesignInstanceResetFrame = { file: string; sourceVersion: string; frameId?: string };
 
 function resetError(nodeId: string): Error {
@@ -197,10 +198,12 @@ async function prepareDesignInstanceReset(
   const declaration = readDesignFrameComponent(component).declaration;
   const optionState = designInstanceOptionState(declaration, host.attributes);
   const parts = Object.keys(host.overrides ?? {});
-  const properties = designInstanceVisualStyleProperties(host.style);
+  const properties = kind === "all" ? designInstanceVisualStyleProperties(host.style) : designInstanceOlderOverrideProperties(host.style);
   const styleUpdates: Record<string, string | null> = Object.fromEntries(properties.map((property) => [property, null]));
 
-  if (host.style && hasLegacyRelocationCandidate(host.style)) {
+  // Reset all removes a legacy transform, so its offset folds into the pins;
+  // older overrides keep the transform, so placement needs nothing.
+  if (kind === "all" && host.style && hasLegacyRelocationCandidate(host.style)) {
     const runtime = await waitForDesignFrameRuntime(workspaceId, currentFrame.file, 2_000, {
       sourceVersion: currentFrame.sourceVersion,
     });
@@ -238,7 +241,7 @@ async function prepareDesignInstanceReset(
   if (!operations.length) return null;
   if (operations.length > DESIGN_TRANSACTION_MAX_OPERATIONS)
     throw new Error(`${nodeId} supplies too many layers to reset in one step; reset its slots one at a time.`);
-  return edit(kind === "all" ? "Reset all overrides" : "Reset overrides", operations);
+  return edit(kind === "all" ? "Reset all overrides" : "Reset older overrides", operations);
 }
 
 /** Set or remove (null) attributes of one instance's host: one transaction,
@@ -287,20 +290,32 @@ const INSTANCE_PLACEMENT_PROPERTIES = new Set([
   "inset-inline-end", "inset-inline-start", "left", "position", "right", "top",
 ]);
 
-/** CSS positioning belongs to the canvas; visual sizing and transforms reset with Style. */
+/** CSS positioning belongs to the canvas; Reset all takes every other
+ * property of the host's own style, its size included. */
 export function designInstanceVisualStyleProperties(style: string | undefined): string[] {
   return style ? designDeclaredProperties(style).filter((property) => !INSTANCE_PLACEMENT_PROPERTIES.has(property)) : [];
 }
 
-/** Reset an instance's overrides in one step: each part's zd-style-<part>,
- * and the style the instance sets on its root (its host's own style). */
-export function commitDesignInstanceOverridesReset(
+/** The host style properties the app no longer writes: anything outside its
+ * placement, size and layout-child sizing. */
+export function designInstanceOlderOverrideProperties(style: string | undefined): string[] {
+  return style ? designDeclaredProperties(style).filter((property) => !componentInstanceHostStyleAllowed(property)) : [];
+}
+
+/** Older overrides: each part's zd-style-<part>, and each such host style
+ * property. The engine still renders them; the app only offers to reset them. */
+export function designInstanceOlderOverrideCount(host: DesignFrameInstances["hosts"][string]): number {
+  return Object.keys(host.overrides ?? {}).length + designInstanceOlderOverrideProperties(host.style).length;
+}
+
+/** Reset an instance's older overrides in one step, keeping its size and place. */
+export function commitDesignInstanceOlderOverridesReset(
   workspaceId: string,
   frame: DesignInstanceResetFrame,
   nodeId: string,
 ) {
   return applyDesignEditCached(workspaceId, frame,
-    ({ assertCurrent }) => prepareDesignInstanceReset(workspaceId, frame, nodeId, "style", assertCurrent));
+    ({ assertCurrent }) => prepareDesignInstanceReset(workspaceId, frame, nodeId, "older", assertCurrent));
 }
 
 /** Reset local component values, styles and supplied slots without changing

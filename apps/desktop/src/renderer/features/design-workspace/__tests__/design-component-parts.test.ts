@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { designComponentPartNodeId, designComponentSlotNodeId } from "@zeros/protocol/design-runtime";
 import { canInsertDesignFrame, designDrawParentAt, designFrameInsertion } from "../design-frame-insertion";
 import {
+  designCanvasStyleToolsBlocked,
   designComponentInstanceMark,
   designComponentInstanceIdentity,
   designComponentIdentityLabel,
@@ -41,9 +42,9 @@ describe("what a person may not type over in a component", () => {
     expect(designComponentTextLock({}, "cc-send")).toBeNull();
   });
 
-  it("lets a style write name a part, as the instance's override, and refuses any other write", () => {
+  it("refuses every write that names a part, a style write included", () => {
     const part = designComponentPartNodeId("inst", "cc-send");
-    expect(() => refuseDesignComponentPartWrite([{ operationId: "s", type: "node.set-styles", nodeId: part, styles: { color: "red" } }])).not.toThrow();
+    expect(() => refuseDesignComponentPartWrite([{ operationId: "s", type: "node.set-styles", nodeId: part, styles: { color: "red" } }])).toThrow();
     expect(() => refuseDesignComponentPartWrite([{ operationId: "t", type: "node.set-text", nodeId: part, text: "x" }])).toThrow();
     expect(() => refuseDesignComponentPartWrite([{ operationId: "m", type: "node.move", nodeId: "a", parentId: part, beforeId: null }])).toThrow();
   });
@@ -193,5 +194,20 @@ describe("where the canvas marks a component", () => {
     const mainOnly: { component: typeof component; instances?: typeof instances } = { component };
     expect(designComponentInstanceMark(mainOnly, "inst-a", mainTitle)).toBeNull();
     expect(designComponentInstanceMark({ instances }, null, mainTitle)).toBeNull();
+  });
+});
+
+describe("canvas style tools on component layers", () => {
+  const frame = { instances: { key: "0".repeat(16), components: {}, hosts: { inst: { component: "chip", attributes: {} } } } };
+  it("hides padding, gap and motion tools for an instance host, a part or a slot, and keeps them elsewhere", () => {
+    expect(designCanvasStyleToolsBlocked(frame, ["inst"])).toBe(true);
+    expect(designCanvasStyleToolsBlocked(frame, ["card", "inst"])).toBe(true);
+    expect(designCanvasStyleToolsBlocked(frame, [designComponentPartNodeId("inst", "cc-send")])).toBe(true);
+    expect(designCanvasStyleToolsBlocked(frame, [designComponentSlotNodeId("inst", "extras")])).toBe(true);
+    expect(designCanvasStyleToolsBlocked(frame, ["card"])).toBe(false);
+    // A main's root is not a host: its padding and gaps are the main's own.
+    expect(designCanvasStyleToolsBlocked({ component: { elements: [], reach: {} } } as never, ["root"])).toBe(false);
+    expect(designCanvasStyleToolsBlocked(frame, [null, "constructor"])).toBe(false);
+    expect(designCanvasStyleToolsBlocked(null, ["inst"])).toBe(false);
   });
 });

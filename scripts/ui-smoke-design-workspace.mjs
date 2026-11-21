@@ -5103,7 +5103,7 @@ export async function runDesignWorkspaceCanvasSmoke({ page, waitFor, check }) {
   );
   check(
     "multi-selection is explicit in the inspector",
-    await page.getByText("2 layers", { exact: true }).last().isVisible(),
+    await page.locator("[data-design-inspector-header]").getByText("2 layers", { exact: true }).isVisible(),
   );
   check(
     "multi-selection labels only the group's size, not its primary layer's",

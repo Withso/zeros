@@ -117,6 +117,9 @@ describe("the Style panel's hover card", () => {
     const card = designStyleCardContent(field("width"), designFieldOrigins([sized], context, null), catalog);
     expect(card.notes).toEqual(["Uses calc()."]);
     expect(card.actions).toEqual([{ kind: "css", label: "Edit in CSS" }]);
+    // A component's layers have no CSS tab: the agent changes it instead.
+    const main = designStyleCardContent(field("width"), designFieldOrigins([sized], context, null), catalog, false, { css: false });
+    expect(main.actions).toEqual([{ kind: "agent", label: "Ask agent to change" }]);
   });
 
   it("names which layer makes a field of several read only, and why", () => {

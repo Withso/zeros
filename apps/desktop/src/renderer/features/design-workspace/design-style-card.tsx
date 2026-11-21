@@ -120,7 +120,8 @@ export function DesignFieldOverlays({
    * a gradient), so a token chosen here lands the same way. */
   onChooseToken: (properties: readonly string[], name: string, companion?: Record<string, string>) => void;
   onReset: (properties: readonly string[]) => void;
-  /** A computed value's card: show the CSS tab. */
+  /** A computed value's card: show the CSS tab. Without one (a component's
+   * layers have no CSS tab) the card asks the agent instead. */
   onEditInCss?: () => void;
   /** A forced value's card: ask the agent to free it. */
   onAskAgent?: (properties: readonly string[]) => void;
@@ -464,6 +465,7 @@ export function DesignFieldOverlays({
             closeCard();
             api.openPickerForField(card.field);
           }}
+          cssAvailable={onEditInCss !== undefined}
           onEditInCss={() => {
             closeCard();
             onEditInCss?.();
@@ -547,16 +549,18 @@ const DesignStyleCardContent = React.forwardRef<
     onClose: () => void;
     onReset: () => void;
     onUseToken: () => void;
+    /** Edit in CSS has somewhere to go. */
+    cssAvailable: boolean;
     onEditInCss: () => void;
     onAskAgent: () => void;
   }
 >(function DesignStyleCardContent(
-  { id, target, panel, origins, catalog, disabled, readOnly, onKeep, onLeave, onClose, onReset, onUseToken, onEditInCss, onAskAgent },
+  { id, target, panel, origins, catalog, disabled, readOnly, cssAvailable, onKeep, onLeave, onClose, onReset, onUseToken, onEditInCss, onAskAgent },
   ref,
 ) {
   const { field, property } = target;
   const edge = useMemo(() => designFieldEdgeAnchor(field, panel), [field, panel]);
-  const content = designStyleCardContent(readDesignCardField(field, property), origins, catalog, readOnly);
+  const content = designStyleCardContent(readDesignCardField(field, property), origins, catalog, readOnly, { css: cssAvailable });
   const detach = useDesignTokenDetach();
   const actions = detach ? content.actions : content.actions.filter((action) => action.kind !== "detach");
   return (
@@ -710,6 +714,9 @@ export function designStyleCardContent(
   /** A held layer state: where the value comes from, and nothing the card
    * could do about it. */
   readOnly = false,
+  /** Whether the selection has a CSS tab; without one a computed value is
+   * the agent's to change. */
+  { css = true }: { css?: boolean } = {},
 ): DesignStyleCardText {
   const mixedRows = [{ key: "Value", text: "Mixed: the selected layers differ" }];
   const origin = origins.origin(property);
@@ -723,7 +730,7 @@ export function designStyleCardContent(
     const notes = [lock.why, ...themeNotes];
     const actions: DesignStyleCardText["actions"] = readOnly
       ? []
-      : [lock.kind === "computed" ? { kind: "css", label: "Edit in CSS" } : { kind: "agent", label: "Ask agent to change" }];
+      : [lock.kind === "computed" && css ? { kind: "css", label: "Edit in CSS" } : { kind: "agent", label: "Ask agent to change" }];
     return { label, rows, notes, foot: origin?.card.foot, actions };
   }
   const notes: string[] = [...themeNotes];

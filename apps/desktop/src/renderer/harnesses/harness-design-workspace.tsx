@@ -276,6 +276,13 @@ const styleOriginsHarness = new URLSearchParams(window.location.search).has(
 // every option kind, rendered with the engine's own template layer.
 const componentOptionsHarness = new URLSearchParams(window.location.search).has("componentOptions");
 const legacyMainHarness = componentOptionsHarness && new URLSearchParams(window.location.search).has("legacyMain");
+// With ?olderOverrides the instance carries what an earlier app wrote: a part
+// override and a visual style on its host, beside a size the app still writes.
+const olderOverridesHarness = componentOptionsHarness && new URLSearchParams(window.location.search).has("olderOverrides");
+// With ?frameRootInstance the home frame's root is the instance itself, as a
+// duplicated main is: the frame's one root layer, marked data-zeros-frame-root.
+const frameRootInstanceHarness = componentOptionsHarness && new URLSearchParams(window.location.search).has("frameRootInstance");
+const HARNESS_FRAME_IDENTITY = frameRootInstanceHarness ? { kind: "instance" as const, nodeId: "home-composer" } : null;
 const COMPONENT_OPTIONS_SOURCE = `<!doctype html>
 <html lang="en">
   <head>
@@ -341,7 +348,9 @@ function renderHarnessComponentFrame(source: string, variant: string | null = nu
 // instance: the definition's markup with the instance's values, its inner
 // layers as parts with its part overrides, and its values on a
 // zero-specificity rule for its host.
-const HARNESS_INSTANCE = '<zd-chat-composer data-oid="home-composer" width="800" mode="plan"></zd-chat-composer>';
+const HARNESS_INSTANCE = olderOverridesHarness
+  ? '<zd-chat-composer data-oid="home-composer" width="800" mode="plan" zd-style-cc-send="opacity: 0.5" style="height: 300px; opacity: 0.8"></zd-chat-composer>'
+  : '<zd-chat-composer data-oid="home-composer" width="800" mode="plan"></zd-chat-composer>';
 let harnessComponentDefinition = COMPONENT_OPTIONS_SOURCE;
 // With ?legacyMain the composer starts as a components/ file, not a main frame.
 let harnessMainMoved = false;
@@ -351,7 +360,7 @@ const harnessInstanceFailures = new Set<string>();
 function harnessInstanceAttributes(source: string): Map<string, Map<string, string>> {
   const hosts = new Map<string, Map<string, string>>();
   for (const element of new DOMParser().parseFromString(source, "text/html").querySelectorAll("zd-chat-composer[data-oid]"))
-    hosts.set(element.getAttribute("data-oid")!, new Map([...element.attributes].filter((attribute) => attribute.name !== "data-oid").map((attribute) => [attribute.name, attribute.value])));
+    hosts.set(element.getAttribute("data-oid")!, new Map([...element.attributes].filter((attribute) => !attribute.name.startsWith("data-")).map((attribute) => [attribute.name, attribute.value])));
   return hosts;
 }
 
@@ -522,7 +531,10 @@ const STYLE_ORIGINS_HOME_SOURCE = `<!doctype html>
     </main>
   </body>
 </html>`;
-const homeSource = styleOriginsHarness && componentOptionsHarness
+const homeSource = styleOriginsHarness && frameRootInstanceHarness
+  ? STYLE_ORIGINS_HOME_SOURCE.replace(/<main data-oid="home-main" data-zeros-frame-root>[\s\S]*<\/main>/,
+    HARNESS_INSTANCE.replace('data-oid="home-composer"', 'data-oid="home-composer" data-zeros-frame-root'))
+  : styleOriginsHarness && componentOptionsHarness
   ? STYLE_ORIGINS_HOME_SOURCE.replace(/(\s*)<\/main>/, `$1  ${HARNESS_INSTANCE}$1</main>`)
   : styleOriginsHarness
   ? STYLE_ORIGINS_HOME_SOURCE
@@ -819,7 +831,7 @@ async function main() {
         nodeCount: 12,
         modifiedAt: 1,
         sourceVersion: HOME_SOURCE_VERSION,
-        componentIdentity: null,
+        componentIdentity: HARNESS_FRAME_IDENTITY,
         ...(componentOptionsHarness ? { instances: harnessInstancesRecord(homeSource) } : {}),
       },
       {
@@ -1023,7 +1035,7 @@ async function main() {
       nodeCount: 12,
       modifiedAt: 1,
       sourceVersion: HOME_SOURCE_VERSION,
-      componentIdentity: null,
+      componentIdentity: HARNESS_FRAME_IDENTITY,
       source: homeSource,
       srcDoc: withDesignRuntime(homeSource, HOME_SOURCE_VERSION),
       tree: [],
@@ -2169,13 +2181,15 @@ async function main() {
           operation.type === "component.set-option" || operation.type === "component.save-variant" ||
           (operation.type === "node.set-styles" && transaction.documentId === "harness:pricing.html" && (operation.stateContext ?? "default") !== "default"));
         // A slot's writes as the adapter makes them: a layer moved or drawn
-        // into it, and the layers a Reset to default deletes.
+        // into it, and the layers a Reset to default deletes. A reset of an
+        // instance's own style is one of its writes too, so undo restores it.
         const slotted = new Set([...harnessSlottedLayers(currentHomeSource).values()].flatMap((slots) => Object.values(slots).flat()));
         const movedIntoSlot = new Set((transaction?.operations ?? []).flatMap((operation) =>
           operation.type === "node.move" && designSlotOfNodeId(String(operation.parentId ?? "")) ? [String(operation.nodeId)] : []));
         const instanceWrite = transaction?.operations?.length && transaction.documentId === "harness:home.html" &&
           transaction.operations.every((operation) => operation.type === "node.set-attribute" ||
-            (operation.type === "node.set-styles" && (!!designPartOfNodeId(String(operation.nodeId ?? "")) || movedIntoSlot.has(String(operation.nodeId)))) ||
+            (operation.type === "node.set-styles" && (!!designPartOfNodeId(String(operation.nodeId ?? "")) || movedIntoSlot.has(String(operation.nodeId)) ||
+              harnessInstanceAttributes(currentHomeSource).has(String(operation.nodeId)))) ||
             (operation.type === "node.move" && !!designSlotOfNodeId(String(operation.parentId ?? ""))) ||
             (operation.type === "node.set-html" && operation.mode === "append" && !!designSlotOfNodeId(String(operation.nodeId ?? ""))) ||
             (operation.type === "node.delete" && slotted.has(String(operation.nodeId ?? ""))));

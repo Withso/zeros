@@ -5,15 +5,16 @@ import { openLayersDrawer } from "./ui-smoke-design-helpers.mjs";
 // Variants, instances and inner parts (harness `?componentOptions`): the
 // main's Variant menu shows a variant without writing and saves a new one in
 // one line; a row writes the shown variant's line; an instance in the home
-// frame shows its values with a dot where they differ from what it
-// inherits, writes its attributes, resets in one undo step and previews on
-// its own host with no engine request; one header row names the instance,
-// part or slot, with Edit main its one button; a double-click enters the
-// instance and selects a part, whose style edits are overrides on the
-// instance (shared by repeated copies and undone) while its place, structure
-// and text stay the main's; a slot the main marks
+// frame shows its Size and then its Controls (no tabs, no Style), with a dot
+// where a value differs from what it inherits, writes its attributes, resets
+// in one undo step and previews on its own host with no engine request; one
+// header row names the instance, part or slot, with Edit main its one button;
+// a double-click enters the instance and selects a part, which shows its
+// instance's Controls and takes no write of its own; a slot the main marks
 // takes layers drawn or dropped into it, and Reset to default removes them;
-// a main kept in components/ moves to the canvas, and is then Edit main.
+// a main kept in components/ moves to the canvas, and is then Edit main; an
+// instance's older overrides (`?olderOverrides`) reset in one write, and its
+// host offers no spacing handles or motion timeline.
 export async function runDesignComponentInstancesSmoke({ page, check }) {
   await page.clock.resume().catch(() => {});
   const origin = new URL(page.url()).origin;
@@ -21,16 +22,6 @@ export async function runDesignComponentInstancesSmoke({ page, check }) {
   await page.goto(`${origin}/apps/desktop/src/renderer/harnesses/harness-design-workspace.html?styleOrigins&componentOptions`, { waitUntil: "networkidle" });
   await openLayersDrawer(page);
   const section = page.locator("[data-design-component-options]");
-  // Reset all overrides sits in the instance's component actions menu.
-  const resetAllItem = page.locator("[data-design-reset-all-overrides]");
-  const resetAllEnabled = async () => {
-    await section.locator("[data-design-component-actions]").click();
-    await resetAllItem.waitFor();
-    const enabled = (await resetAllItem.getAttribute("data-disabled")) === null;
-    await page.keyboard.press("Escape");
-    await resetAllItem.waitFor({ state: "detached" });
-    return enabled;
-  };
   const header = page.locator("[data-design-inspector-header]");
   // The header row says whether the selection is an instance, a part or a slot.
   const line = page.locator("[data-design-inspector-header][data-design-component-of]");
@@ -222,25 +213,17 @@ export async function runDesignComponentInstancesSmoke({ page, check }) {
   check("the instance's width reads its root's, which its Width option sets",
     (await inspectorPanel.locator('[data-design-size-axis="x"]').innerText()).includes("zd-width"),
     await inspectorPanel.locator('[data-design-size-axis="x"]').innerText());
-  // An instance opens on Controls; its size lives on Style.
-  await inspectorPanel.getByRole("tab", { name: "Style", exact: true }).click();
+  // An instance has no tabs: its Size, then its Controls, and nothing else.
+  check("an instance shows Size then Controls, with no tabs, Style or CSS",
+    (await inspectorPanel.getByRole("tab").count()) === 0 && (await inspectorPanel.locator("[data-design-size-section]").count()) === 1 &&
+      (await inspectorPanel.locator("[data-design-style-panel], [data-design-style-panel-css-mode]").count()) === 0 &&
+      (await inspectorPanel.getByLabel("Opacity", { exact: true }).count()) === 0 &&
+      (await inspectorPanel.getByRole("button", { name: /^Canvas zoom/ }).count()) === 1);
   const instanceHeight = inspectorPanel.getByLabel("H", { exact: true });
   const rootHeight = await rootBox.evaluate((element) => element.offsetHeight);
   check("the instance's height reads its root's", Math.abs(Number(await instanceHeight.inputValue()) - rootHeight) <= 1, `${await instanceHeight.inputValue()} root ${rootHeight}`);
-  await instanceHeight.fill("300");
-  await instanceHeight.press("Enter");
-  await expect.poll(home).toMatch(/<zd-chat-composer data-oid="home-composer"[^>]*style="[^"]*height: 300px/);
-  await expect.poll(() => rootBox.evaluate((element) => getComputedStyle(element).height)).toBe("300px");
-  // A size override is Style's: Reset Style takes it back and leaves options alone.
-  const resetStyle = inspectorPanel.locator("[data-design-reset-style]");
-  await expect(resetStyle).toBeEnabled();
-  check("resizing an instance sizes its root, as an override Style offers to reset", true);
-  await resetStyle.click();
-  await expect.poll(home).not.toMatch(/<zd-chat-composer data-oid="home-composer"[^>]*style=/);
-  await expect.poll(() => rootBox.evaluate((element) => getComputedStyle(element).height)).toBe(`${rootHeight}px`);
-  await expect(resetStyle).toHaveCount(0);
-  check("Reset Style gives the instance its main's size back", (await home()).includes('mode="plan"'));
-  await inspectorPanel.getByRole("tab", { name: "Controls", exact: true }).click();
+  // Resizing writes the host's own size; it is checked on its own page below,
+  // where an undo of it cannot reach the variants saved above.
 
   // Mode back to what it inherits removes the attribute, and the dot.
   const writesBeforeMode = await writes();
@@ -322,7 +305,6 @@ export async function runDesignComponentInstancesSmoke({ page, check }) {
   await quiet();
   await selectInstance();
   const sendPart = frame("home.html").locator('[data-zd-instance] [data-zd-part="cc-send"]');
-  const chips = frame("home.html").locator('[data-zd-instance] .chip');
   const styleWrites = () => page.evaluate(() => (window.__zerosHarnessWorkbenchOperations ?? []).filter((op) => op === "design.node.styles").length);
   // At the canvas, where the selection's outline lies over the frame.
   const at = async (locator, action) => {
@@ -344,55 +326,30 @@ export async function runDesignComponentInstancesSmoke({ page, check }) {
     /Chat composer\/[^·]+·\s*\S/.test(partHeader) && layerNameShown && (await page.locator("[data-design-component-of]").count()) === 1 &&
       (await page.locator("[data-design-select-instance]").count()) === 0 &&
       (await header.locator("[data-design-edit-main]").count()) === 1 && (await header.getByRole("button").count()) === 1, partHeader);
-  check("a part shows no Controls", (await section.count()) === 0);
+  await expect(section).toHaveAttribute("data-design-component-options", "instance");
+  check("a part shows its instance's Controls, and no Style, CSS or Size",
+    (await inspectorPanel.getByRole("tab").count()) === 0 && (await inspectorPanel.locator("[data-design-size-section], [data-design-style-panel]").count()) === 0 &&
+      (await inspectorPanel.getByLabel("Opacity", { exact: true }).count()) === 0);
   check("Layers lists the selected part once, under its one instance row",
     (await page.locator('[data-design-layer-id="::zeros-part:home-composer:cc-send"]').count()) === 1 && (await layer("home-composer").count()) === 1);
   check("a part has no resize, spacing or rotation handle",
     (await page.locator("[data-design-selected-element] [data-design-resize-handle], [data-design-selected-element] button").count()) === 0);
-
-  const opacity = page.locator("[data-design-inspector]").getByLabel("Opacity", { exact: true });
-  const labels = await page.locator("[data-design-inspector] input:not([type=hidden])").evaluateAll((inputs) =>
-    inputs.filter((input) => !input.disabled).map((input) => input.getAttribute("aria-label")));
-  check("a part's Style panel can be edited", labels.includes("Opacity"), JSON.stringify(labels));
-  const mainBeforeOverride = await main();
-  await opacity.fill("50");
-  await opacity.press("Enter");
-  await expect.poll(home).toMatch(/zd-style-cc-send="opacity: [^"]+"/);
-  await expect.poll(() => style("home.html", '[data-zd-instance] [data-zd-part="cc-send"]', "opacity")).toBe("0.5");
-  check("a part's style edit is an override on its instance, and the main is unchanged",
-    (await main()) === mainBeforeOverride && /<zd-chat-composer [^>]*zd-style-cc-send="opacity: [^"]+"/.test(await home()));
-  check("an overridden part offers no Reset of its own", (await page.locator("[data-design-part-reset]").count()) === 0);
-
-  // A repeated part's copies share one override.
-  await at(chips.first(), "click");
-  await expect(line).toHaveAttribute("data-design-component-of", "part");
-  await expect.poll(selected).toBe("::zeros-part:home-composer:cc-chip");
-  const chipOpacity = page.locator("[data-design-inspector]").getByLabel("Opacity", { exact: true });
-  await chipOpacity.fill("40");
-  await chipOpacity.press("Enter");
-  await expect.poll(home).toContain('zd-style-cc-chip="opacity: 0.4"');
-  const chipOpacities = () => chips.evaluateAll((elements) => elements.map((element) => getComputedStyle(element).opacity));
-  await expect.poll(async () => { const all = await chipOpacities(); return all.length >= 2 && all.every((value) => value === "0.4"); }).toBe(true);
-  check("restyling one copy of a repeated part restyles every copy", true);
-
-  // The instance offers to reset its overrides; undo takes back one.
-  await selectInstance();
-  check("an instance's Controls offer to reset its part overrides", await resetAllEnabled());
+  // A part's Controls are its instance's: a change writes the host's attribute.
+  const writesBeforePartControl = await writes();
+  const mainBeforePartControl = await main();
+  const homeBeforePartControl = await home();
+  const modes = section.getByRole("radiogroup", { name: "Mode" }).getByRole("radio");
+  await ((await modes.nth(0).getAttribute("aria-checked")) === "true" ? modes.nth(1) : modes.nth(0)).click();
+  await expect.poll(writes).toBe(writesBeforePartControl + 1);
+  const hostOf = (source) => source.match(/<zd-chat-composer data-oid="home-composer"[^>]*>/)?.[0];
+  check("a part's Controls write its instance's attribute, and the main is unchanged",
+    hostOf(await home()) !== hostOf(homeBeforePartControl) && (await main()) === mainBeforePartControl && !(await home()).includes("zd-style-"),
+    hostOf(await home()));
   await undo();
-  await expect.poll(home).not.toContain("zd-style-cc-chip");
-  // History restores the part's selection; the instance's actions hold Reset all.
-  await selectInstance();
-  await expect.poll(resetAllEnabled).toBe(true);
-  check("undo takes back the last part override", /zd-style-cc-send="opacity: [^"]+"/.test(await home()));
-
-  // A second undo takes back the first override too.
-  await undo();
-  await expect.poll(home).not.toContain("zd-style-cc-send");
-  await expect.poll(() => style("home.html", '[data-zd-instance] [data-zd-part="cc-send"]', "opacity")).toBe("1");
+  await expect.poll(home).toBe(homeBeforePartControl);
   await selectInstance();
   await at(sendPart, "dblclick");
   await expect(line).toHaveAttribute("data-design-component-of", "part");
-  check("undo takes back each part override", true);
 
   // The Layers eye hides a part on the canvas, as it does any layer.
   const sourceBeforeEye = await home();
@@ -565,4 +522,102 @@ export async function runDesignComponentInstancesSmoke({ page, check }) {
     JSON.stringify(mainMoves));
   await selectInstance();
   check("the instance then offers Edit main", (await header.innerText()).includes("Edit main"));
+
+  // ── Older overrides: what an earlier app wrote stays, and resets in one step ──
+  await page.goto(`${origin}/apps/desktop/src/renderer/harnesses/harness-design-workspace.html?styleOrigins&componentOptions&olderOverrides`, { waitUntil: "networkidle" });
+  await openLayersDrawer(page);
+  await selectInstance();
+  const older = page.locator("[data-design-older-overrides]");
+  await expect(older).toHaveAttribute("data-design-older-overrides", "2");
+  check("an instance with a part override and a visual host style shows 2 older overrides; its size is not one",
+    (await older.innerText()).includes("2 older overrides"), await older.innerText());
+  // Canvas tools that would only write refused styles are not offered on the host.
+  check("an instance host offers no padding or gap handles, and no motion timeline",
+    (await page.locator("[data-design-layout-tools-key], [data-design-spacing-hover-zone]").count()) === 0 &&
+      (await page.getByRole("button", { name: "Toggle motion timeline" }).isDisabled()));
+  const olderSendPart = frame("home.html").locator('[data-zd-instance] [data-zd-part="cc-send"]');
+  const olderAt = async (locator, action) => {
+    const box = await locator.boundingBox();
+    await page.mouse[action](box.x + box.width / 2, box.y + box.height / 2);
+  };
+  await olderAt(olderSendPart, "dblclick");
+  await expect(line).toHaveAttribute("data-design-component-of", "part");
+  check("a part shows its instance's older overrides too", (await older.getAttribute("data-design-older-overrides")) === "2");
+  // Resizing writes the host's size, which is not an older override.
+  await selectInstance();
+  const olderHeight = page.locator("[data-design-inspector] [data-design-size-section]").getByLabel("H", { exact: true });
+  await olderHeight.fill("320");
+  await olderHeight.press("Enter");
+  await expect.poll(home).toMatch(/<zd-chat-composer data-oid="home-composer"[^>]*height: 320px/);
+  await expect.poll(() => frame("home.html").locator('[data-oid="home-composer"] > [data-zd-root]').evaluate((element) => getComputedStyle(element).height).catch(() => null)).toBe("320px");
+  check("resizing an instance sizes its root, and its size is not an older override",
+    (await older.getAttribute("data-design-older-overrides")) === "2" && (await page.locator("[data-design-reset-style]").count()) === 0);
+  await quiet();
+  await selectInstance();
+  const beforeOlder = await home();
+  const writesBeforeOlder = await writes();
+  await page.locator("[data-design-older-overrides-reset]").click();
+  await expect.poll(writes).toBe(writesBeforeOlder + 1);
+  await expect.poll(home).not.toContain("zd-style-cc-send");
+  check("Reset removes the part override and the visual host style in one write, keeping the size and controls",
+    !/<zd-chat-composer data-oid="home-composer"[^>]*opacity/.test(await home()) && /<zd-chat-composer data-oid="home-composer"[^>]*height: 320px/.test(await home()) &&
+      /<zd-chat-composer data-oid="home-composer" width="800" mode="plan"/.test(await home()), (await home()).match(/<zd-chat-composer[^>]*>/)?.[0]);
+  await expect(older).toHaveCount(0);
+  await undo();
+  await expect.poll(home).toBe(beforeOlder);
+  check("one undo restores every older override", true);
+  // A parent's layout change moves an instance among its children: the host
+  // takes the app's own layout bookkeeping, so the change goes through.
+  const toasts = page.locator("[data-sonner-toast]");
+  const toastsBeforeFlow = await toasts.count();
+  await expect(async () => {
+    if ((await frameRow("home.html").getAttribute("aria-selected")) !== "true") await frameRow("home.html").click();
+    await expect(frameRow("home.html")).toHaveAttribute("aria-selected", "true", { timeout: 1_000 });
+  }).toPass();
+  const flow = (name) => page.locator("[data-design-inspector]").getByRole("button", { name: `Auto layout: ${name}`, exact: true });
+  // The home frame's root is already vertical: None removes auto layout, Vertical puts it back.
+  for (const name of ["None", "Vertical"]) {
+    const writesBeforeFlow = await writes();
+    await flow(name).click();
+    await expect.poll(writes).toBe(writesBeforeFlow + 1);
+    await quiet();
+  }
+  check("Flow on a frame that holds an instance changes it and back with no refusal",
+    (await toasts.count()) === toastsBeforeFlow && /<zd-chat-composer data-oid="home-composer"[^>]*>/.test(await home()), await toasts.allInnerTexts().then((all) => JSON.stringify(all)));
+
+  // A main's own root keeps its canvas spacing and motion tools.
+  await selectMain();
+  await expect(page.getByRole("button", { name: "Toggle motion timeline" })).toBeEnabled();
+  check("a main's root keeps the motion timeline", true);
+
+  // ── A frame whose root is an instance, as duplicating a main makes ──
+  await page.goto(`${origin}/apps/desktop/src/renderer/harnesses/harness-design-workspace.html?styleOrigins&componentOptions&frameRootInstance`, { waitUntil: "networkidle" });
+  await openLayersDrawer(page);
+  await frameRow("home.html").click();
+  const rootPanel = page.locator("[data-design-inspector]");
+  await expect(line).toHaveAttribute("data-design-component-of", "instance");
+  await expect(rootPanel.locator("[data-design-size-section]")).toHaveCount(1);
+  check("a frame-root instance shows its Size and then its Controls, with no tabs",
+    (await rootPanel.getByRole("tab").count()) === 0 && (await section.getAttribute("data-design-component-options")) === "instance" &&
+      (await header.innerText()).includes("Chat composer/Default") && (await rootPanel.locator("[data-design-style-panel]").count()) === 0,
+    await header.innerText());
+  const rootHeightField = rootPanel.locator("[data-design-size-section]").getByLabel("H", { exact: true });
+  await expect(rootHeightField).toBeEnabled();
+  const writesBeforeRootSize = await writes();
+  const toastsBeforeRootSize = await toasts.count();
+  await rootHeightField.fill("320");
+  await rootHeightField.press("Enter");
+  await expect.poll(writes).toBe(writesBeforeRootSize + 1);
+  // The frame takes the height; its root fills the frame (100vh), as any frame root does.
+  const frameHeight = () => page.evaluate(async () => {
+    const { designWorkspaceSnapshotCache } = await import("/apps/desktop/src/renderer/features/design-workspace/state/design-workspace-cache.ts");
+    return designWorkspaceSnapshotCache.peekSnapshot("ws_design_harness").data.frames.find((candidate) => candidate.file === "home.html")?.height;
+  });
+  await expect.poll(frameHeight).toBe(320);
+  check("resizing a frame-root instance sizes its frame and root in one write, with no refusal",
+    (await toasts.count()) === toastsBeforeRootSize && /<zd-chat-composer data-oid="home-composer"[^>]*style="height: 100vh;?"/.test(await home()),
+    (await home()).match(/<zd-chat-composer[^>]*>/)?.[0]);
+  check("a frame-root instance offers no padding or gap handles, and no motion timeline",
+    (await page.locator("[data-design-layout-tools-key], [data-design-spacing-hover-zone]").count()) === 0 &&
+      (await page.getByRole("button", { name: "Toggle motion timeline" }).isDisabled()));
 }

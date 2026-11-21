@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  COMPONENT_INSTANCE_HOST_STYLE_PROPERTIES,
+  componentInstanceHostStyleAllowed,
   COMPONENT_OPTION_LIMITS,
   COMPONENT_STATE_PRESETS,
   componentInheritedValues,
@@ -210,5 +212,22 @@ describe("option values in CSS", () => {
       "hsl(210deg 50% 40% / 80%)", "oklch(0.7 0.1 200)", "lab(50% 40 59.5)", "hwb(12 50% 0%)"]) {
       expect(problems([option({ name: "c", type: "color", default: color })]), color).toEqual([]);
     }
+  });
+});
+
+describe("what an app may write in an instance host's own style", () => {
+  it("is its placement, size and layout-child sizing, and nothing visual", () => {
+    for (const property of ["left", "top", "position", "inset", "rotate", "transform", "transform-origin", "translate",
+      "width", "height", "min-width", "max-height", "aspect-ratio", "flex", "flex-grow", "flex-basis", "align-self", "justify-self", "grid-area"])
+      expect(COMPONENT_INSTANCE_HOST_STYLE_PROPERTIES.has(property)).toBe(true);
+    for (const property of ["opacity", "scale", "margin", "padding", "gap", "background", "background-color", "color", "border-radius", "display", "--gap"])
+      expect(COMPONENT_INSTANCE_HOST_STYLE_PROPERTIES.has(property)).toBe(false);
+  });
+
+  it("accepts the app's own layout bookkeeping, and no other custom property", () => {
+    for (const property of ["--zeros-layout-origin-flow", "--zeros-layout-x", "--zeros-layout-y", "width", "transform"])
+      expect(componentInstanceHostStyleAllowed(property)).toBe(true);
+    for (const property of ["--zd-x", "--anything", "--zeros-layoutx", "--zeros-other", "opacity", "-zeros-layout-x"])
+      expect(componentInstanceHostStyleAllowed(property)).toBe(false);
   });
 });

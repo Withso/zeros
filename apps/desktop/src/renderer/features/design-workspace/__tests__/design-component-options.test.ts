@@ -35,7 +35,9 @@ import {
   commitDesignComponentVariant,
   commitDesignInstanceAllOverridesReset,
   commitDesignInstanceAttributes,
-  commitDesignInstanceOverridesReset,
+  commitDesignInstanceOlderOverridesReset,
+  designInstanceOlderOverrideCount,
+  designInstanceOlderOverrideProperties,
   commitDesignInstanceSlotReset,
   commitDesignInstanceText,
   designInstanceResetAllFits,
@@ -251,21 +253,28 @@ describe("variants and instances", () => {
     ]);
   });
 
-  it("resets an instance's overrides in one transaction: each part's attribute, and each property its own style sets on its root", async () => {
+  it("counts an instance's older overrides: each part override and each host style outside its size and place", () => {
+    const style = 'position: absolute; left: 12px; top: 24px; width: 300px; height: 120px; flex-grow: 1; rotate: 5deg; transform: rotate(5deg); transform-origin: 0 0; translate: 1px 2px; margin: 8px; opacity: .5; scale: 2; background: url("a;b.png"); --Gap: 2px';
+    expect(designInstanceOlderOverrideProperties(style)).toEqual(["margin", "opacity", "scale", "background", "--Gap"]);
+    expect(designInstanceOlderOverrideCount({ component: "card", attributes: {}, overrides: { "cc-send": "x", "chip#1": "y" }, style })).toBe(7);
+    expect(designInstanceOlderOverrideCount({ component: "card", attributes: {}, style: "width: 200px; left: 4px" })).toBe(0);
+    expect(designInstanceOlderOverrideCount({ component: "card", attributes: {} })).toBe(0);
+  });
+
+  it("resets an instance's older overrides in one transaction, keeping its size and place", async () => {
     const frame = { file: "home.html", sourceVersion: V1 } as never;
-    prepareResetSnapshot("home.html", "inst", { overrides: { "cc-send": "x", "chip#1": "y" }, style: 'position: absolute; left: 12px; top: 24px; width: 300px; height: 120px; margin: 8px; transform: rotate(5deg); background: url("a;b.png"); --Gap: 2px' });
-    await commitDesignInstanceOverridesReset("w", frame, "inst");
-    expect(latestCapturedEdit().intent).toBe("Reset overrides");
+    prepareResetSnapshot("home.html", "inst", { overrides: { "cc-send": "x", "chip#1": "y" }, style: 'position: absolute; left: 12px; top: 24px; width: 300px; height: 120px; margin: 8px; transform: matrix(1, 0, 0, 1, 6, 8); background: url("a;b.png"); --Gap: 2px' });
+    await commitDesignInstanceOlderOverridesReset("w", frame, "inst");
+    expect(latestCapturedEdit().intent).toBe("Reset older overrides");
     expect(latestCapturedEdit().operations).toEqual([
       expect.objectContaining({ type: "node.set-attribute", nodeId: "inst", attribute: "zd-style-cc-send", value: null }),
       expect.objectContaining({ type: "node.set-attribute", nodeId: "inst", attribute: "zd-style-chip", value: null }),
-      expect.objectContaining({ type: "node.set-styles", nodeId: "inst", scope: "inline", styles: {
-        width: null, height: null, margin: null, transform: null, background: null, "--Gap": null,
-      } }),
+      expect.objectContaining({ type: "node.set-styles", nodeId: "inst", scope: "inline", styles: { margin: null, background: null, "--Gap": null } }),
     ]);
+    // Placement stays, so a legacy translate needs no fold.
     expect(mocks.waitRuntime).not.toHaveBeenCalled();
-    prepareResetSnapshot("home.html", "inst", { overrides: { "cc-send": "x" } });
-    await commitDesignInstanceOverridesReset("w", frame, "inst");
+    prepareResetSnapshot("home.html", "inst", { overrides: { "cc-send": "x" }, style: "width: 300px" });
+    await commitDesignInstanceOlderOverridesReset("w", frame, "inst");
     expect(latestCapturedEdit().operations).toHaveLength(1);
   });
 
@@ -289,7 +298,7 @@ describe("variants and instances", () => {
     mocks.runtime.mockReturnValue(runtime);
     mocks.waitRuntime.mockResolvedValue(runtime);
     prepareResetSnapshot("home.html", "inst", { style: "position: absolute; left: 10px; top: 20px; transform: matrix(1, 0, 0, 1, 6, 8); width: 100px" });
-    await commitDesignInstanceOverridesReset("w", { file: "home.html", sourceVersion: V1 }, "inst");
+    await commitDesignInstanceAllOverridesReset("w", { file: "home.html", sourceVersion: V1 }, "inst");
     const styles = latestCapturedEdit().operations.find((operation) => operation.type === "node.set-styles") as Extract<DesignOperation, { type: "node.set-styles" }>;
     expect(styles.styles).toMatchObject({ left: "16px", top: "28px", width: null, transform: null });
     expect(mocks.waitRuntime).toHaveBeenCalledWith("w", "home.html", 2_000, { sourceVersion: V1 });
@@ -317,7 +326,7 @@ describe("variants and instances", () => {
     mocks.waitRuntime.mockResolvedValue(runtime);
     prepareResetSnapshot("home.html", "inst", { style: "position: relative; transform: matrix(1, 0, 0, 1, 6, 8); width: 100px" });
 
-    await commitDesignInstanceOverridesReset("w", { file: "home.html", sourceVersion: V1 }, "inst");
+    await commitDesignInstanceAllOverridesReset("w", { file: "home.html", sourceVersion: V1 }, "inst");
 
     const styles = latestCapturedEdit().operations.find((operation) => operation.type === "node.set-styles") as Extract<DesignOperation, { type: "node.set-styles" }>;
     expect(styles.styles).toMatchObject({ transform: null, width: null });
@@ -345,7 +354,7 @@ describe("variants and instances", () => {
     mocks.waitRuntime.mockResolvedValue(runtime);
     prepareResetSnapshot("home.html", "inst", { style: "position: absolute; transform: matrix(1, 0, 0, 1, 6, 8)" });
 
-    await expect(commitDesignInstanceOverridesReset("w", { file: "home.html", sourceVersion: V1 }, "inst"))
+    await expect(commitDesignInstanceAllOverridesReset("w", { file: "home.html", sourceVersion: V1 }, "inst"))
       .rejects.toThrow(/runtime details for inst are stale/);
     expect(mocks.apply).toHaveBeenCalledOnce();
     expect(mocks.resolved).toBeUndefined();
@@ -372,13 +381,13 @@ describe("variants and instances", () => {
     mocks.waitRuntime.mockResolvedValue(runtime);
     prepareResetSnapshot("home.html", "inst", { style: "position: absolute; transform: matrix(1, 0, 0, 1, 6, 8)" });
 
-    await expect(commitDesignInstanceOverridesReset("w", { file: "home.html", sourceVersion: V1 }, "inst"))
+    await expect(commitDesignInstanceAllOverridesReset("w", { file: "home.html", sourceVersion: V1 }, "inst"))
       .rejects.toThrow(/runtime details for inst are stale/);
     expect(mocks.resolved).toBeUndefined();
   });
 
   it("fails closed when the captured frame or host is no longer current", async () => {
-    await expect(commitDesignInstanceOverridesReset("w", { file: "home.html", sourceVersion: V1, frameId: "old" }, "inst"))
+    await expect(commitDesignInstanceOlderOverridesReset("w", { file: "home.html", sourceVersion: V1, frameId: "old" }, "inst"))
       .rejects.toThrow(/no longer available/);
     mocks.snapshot = {
       frames: [{ file: "home.html", sourceVersion: V1, instances: {
@@ -386,10 +395,10 @@ describe("variants and instances", () => {
         hosts: { inst: { component: "card", attributes: {}, style: "width: 10px" } },
       } }],
     };
-    await expect(commitDesignInstanceOverridesReset("w", { file: "home.html", sourceVersion: V1, frameId: "old" }, "inst"))
+    await expect(commitDesignInstanceOlderOverridesReset("w", { file: "home.html", sourceVersion: V1, frameId: "old" }, "inst"))
       .rejects.toThrow(/no longer available/);
     prepareResetSnapshot("home.html", "other", { style: "width: 10px" });
-    await expect(commitDesignInstanceOverridesReset("w", { file: "home.html", sourceVersion: V1 }, "inst"))
+    await expect(commitDesignInstanceAllOverridesReset("w", { file: "home.html", sourceVersion: V1 }, "inst"))
       .rejects.toThrow(/no longer available/);
   });
 

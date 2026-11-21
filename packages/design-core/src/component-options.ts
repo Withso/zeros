@@ -487,6 +487,28 @@ export function componentIgnoresAttribute(name: string): boolean {
   return !HOST_ATTRIBUTES.has(name) && !/^(?:data|aria|zd)-/.test(name) && !/^on/.test(name);
 }
 
+/** The only properties an app may set in an instance host's own style: its
+ * placement (move, nudge and rotation, with the rotation origin), its size,
+ * and how it sizes as a layout child. Anything else would sit over what the
+ * main and its controls set. Shared by the Design renderer, which refuses
+ * other writes, and the engine lint, which reports them. */
+export const COMPONENT_INSTANCE_HOST_STYLE_PROPERTIES: ReadonlySet<string> = new Set([
+  "bottom", "inset", "inset-block", "inset-block-end", "inset-block-start", "inset-inline",
+  "inset-inline-end", "inset-inline-start", "left", "position", "right", "top",
+  "rotate", "transform", "transform-origin", "translate",
+  "width", "height", "min-width", "min-height", "max-width", "max-height", "aspect-ratio",
+  "flex", "flex-grow", "flex-shrink", "flex-basis", "align-self", "justify-self", "order",
+  "grid-area", "grid-column", "grid-column-start", "grid-column-end", "grid-row", "grid-row-start", "grid-row-end",
+]);
+
+/** Whether an app may set this property in an instance host's own style:
+ * one of the properties above, or the app's own layout bookkeeping
+ * (`--zeros-layout-*`, written on each child when its parent's layout
+ * changes). Every other custom property is refused. */
+export function componentInstanceHostStyleAllowed(property: string): boolean {
+  return COMPONENT_INSTANCE_HOST_STYLE_PROPERTIES.has(property) || property.startsWith("--zeros-layout-");
+}
+
 /** Why an instance's attribute has no effect, naming the value it ignores. */
 export function componentIgnoredAttributeMessage(name: string, value: string): string {
   return `This component has no option ${name}; ${name}="${value.length > 64 ? `${value.slice(0, 63)}…` : value}" is ignored.`;

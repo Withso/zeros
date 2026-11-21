@@ -66,6 +66,7 @@ import {
   commitDesignComponentVariant,
   commitDesignInstanceAllOverridesReset,
   commitDesignInstanceAttributes,
+  commitDesignInstanceOlderOverridesReset,
   commitDesignInstanceSlotReset,
   commitDesignInstanceText,
   designInstanceResetAllFits,
@@ -77,6 +78,7 @@ import {
   designComponentVariantName,
   designInstanceVisualStyleProperties,
   designInstanceIgnoredAttributes,
+  designInstanceOlderOverrideProperties,
   designInstanceOptionState,
   readDesignFrameComponent,
   sameDesignComponentValue,
@@ -254,6 +256,18 @@ export function DesignComponentOptions({
   const hasSuppliedContent = designInstanceHasSuppliedContent(slottedLayers, instance?.host.text);
   const canResetAll = Boolean(instance && ((instanceState?.overridden.size ?? 0) > 0 || overridden.length > 0 || visualStyleCount > 0 || slottedLayers.length > 0 || resetText)) &&
     designInstanceResetAllFits({ options: instanceState?.overridden.size ?? 0, parts: overridden.length, style: visualStyleCount > 0, slotted: slottedLayers.length, text: resetText });
+  // Older overrides: styles an earlier app wrote on this instance or its
+  // parts. They still render; the app no longer writes them, so it only
+  // offers to remove them, in one step.
+  const olderStyle = designInstanceOlderOverrideProperties(ownStyle).length;
+  const olderCount = overridden.length + olderStyle;
+  const canResetOlder = olderCount > 0 &&
+    designInstanceResetAllFits({ options: 0, parts: overridden.length, style: olderStyle > 0, slotted: 0, text: false });
+  const resetOlder = () => {
+    if (!instance || !canResetOlder || !active) return;
+    void commitDesignInstanceOlderOverridesReset(workspaceId, frame, instance.nodeId)
+      .catch(failed("the older overrides"));
+  };
   const resetAll = () => {
     if (!instance || !canResetAll || !active) return;
     setConfirmResetAll(false);
@@ -411,6 +425,16 @@ export function DesignComponentOptions({
         </>
       ) : undefined}
     >
+      {instance && olderCount > 0 ? (
+        <div data-design-older-overrides={olderCount} className="text-fg2 flex min-h-7 min-w-0 items-center gap-2 px-2 text-xs">
+          <Tooltip label="Styles set on this instance or its layers outside its controls. They still apply; Reset removes them.">
+            <span tabIndex={0} className="min-w-0 flex-1 truncate">{olderCount} older {olderCount === 1 ? "override" : "overrides"}</span>
+          </Tooltip>
+          <Button type="button" variant="secondary" size="compact" data-design-older-overrides-reset="" disabled={actionDisabled || !canResetOlder} onClick={resetOlder}>
+            Reset
+          </Button>
+        </div>
+      ) : null}
       {notApplied ? (
         <OptionsNotice tone="error" role="alert" data-design-options-not-applied={notApplied}>
           <p>These controls could not be applied. {DESIGN_OPTIONS_NOT_APPLIED_MESSAGES[notApplied]}</p>
