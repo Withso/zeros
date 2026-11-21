@@ -1,10 +1,13 @@
 // Response shapes follow engine/workspace/service.ts at 4baf69ec. Only the
 // shared protocol is imported by the worker; Local remains a separate runtime.
+import { CloudV2MessageRowSchema } from "@zeros/protocol/cloud-v2-relay";
 import { coerceChat } from "../sessions/chat-history";
 import type { SessionStore } from "../sessions/session-store";
 import { reqString, unsupported, WorkspaceError, type WorkspaceScope } from "./scope";
 import { TurnService } from "./turns";
 import { randomUUID } from "node:crypto";
+
+const AGENT_NAMES = { codex: "Codex", claude: "Claude", cursor: "Cursor" } as const;
 
 export const UNSUPPORTED_CHAT_OPS = [
   "messages.clear",
@@ -142,6 +145,22 @@ export class ChatService {
           draft.chat!.sessionId = null; draft.chat!.providerBinding = null; draft.chat!.providerMetadata = null;
         });
         return { ok: true };
+      }
+      case "chats.switchAgent": {
+        const id = chatId(), fromAgentId = reqString(params, "fromAgentId"), agentId = reqString(params, "agentId");
+        const agentName = AGENT_NAMES[agentId as keyof typeof AGENT_NAMES];
+        if (!agentName) throw new WorkspaceError("VALIDATION_FAILED", "Unknown agent.");
+        const model = params.model === undefined || params.model === null ? null : reqString(params, "model");
+        const effort = typeof params.effort === "string" ? params.effort : "";
+        const row = params.message === undefined ? undefined : CloudV2MessageRowSchema.safeParse(params.message);
+        if (row && !row.success) throw new WorkspaceError("VALIDATION_FAILED", "Invalid switch message.");
+        const chat = this.store.metadata(id)?.chat;
+        if (!chat || chat.archived || chat.kind === "terminal") throw new WorkspaceError("WORKSPACE_NOT_FOUND", "Unknown chat.");
+        if (chat.agentId !== fromAgentId) return { ok: false };
+        if (this.store.hasPendingInput(id)) throw new WorkspaceError("VALIDATION_FAILED", "Send or remove queued messages before switching agent.");
+        // Stops a running turn and retires the old provider's route first.
+        await this.closeChat(id);
+        return { ok: await this.store.switchAgent(id, { fromAgentId, agentId, agentName, model, effort, fast: params.fast === true, row: row?.data }) };
       }
       default: return unsupported();
     }

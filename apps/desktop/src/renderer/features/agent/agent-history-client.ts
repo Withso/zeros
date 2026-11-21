@@ -28,6 +28,7 @@ import {
   bridgeChatSnapshot,
   bridgeChatDelete,
   bridgeChatClearProviderIdentity,
+  bridgeChatSwitchAgent,
   bridgeChatBulkUpsert,
   bridgeChatCreateChild,
   bridgeMessageWindow,
@@ -107,25 +108,45 @@ export async function persistAuthenticationPrompt(
     throw new Error("Could not save the message for retry.");
 }
 
+function transcriptRow(message: AgentMessage) {
+  return {
+    msgId: message.id,
+    kind: message.kind,
+    payload: JSON.stringify(message),
+    createdAt: message.createdAt,
+  };
+}
+
 /** Persist one Zeros-authored transcript row (a user-applied agent switch)
  * through the engine's message upsert. */
 export async function persistTranscriptRow(
   bridge: import("../../platform/bridge/ws-client").RuntimeClient,
   chatId: string,
-  message: import("./use-agent-session").AgentMessage,
+  message: AgentMessage,
 ): Promise<void> {
   const result = (await workspaceOp(bridge, "messages.import", {
     chatId,
-    messages: [
-      {
-        msgId: message.id,
-        kind: message.kind,
-        payload: JSON.stringify(message),
-        createdAt: message.createdAt,
-      },
-    ],
+    messages: [transcriptRow(message)],
   })) as { imported?: number };
   if (result.imported !== 1) throw new Error("Could not save the switch.");
+}
+
+/** Cloud: the worker stops the chat, swaps its agent, clears the old
+ * provider's identity and saves the switch row in one operation. */
+export function switchCloudChatAgent(
+  bridge: import("../../platform/bridge/ws-client").RuntimeClient,
+  input: {
+    chatId: string;
+    fromAgentId: string;
+    agentId: string;
+    model: string | null;
+    effort: string;
+    fast: boolean;
+    message: AgentMessage;
+  },
+) {
+  const { message, ...rest } = input;
+  return bridgeChatSwitchAgent(bridge, { ...rest, message: transcriptRow(message) });
 }
 
 export async function windowMessages(

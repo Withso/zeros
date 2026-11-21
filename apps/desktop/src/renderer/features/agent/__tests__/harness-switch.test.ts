@@ -1,8 +1,10 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   buildHarnessSwitchMessage,
   canAutoContinueAfterSwitch,
   switchContinuation,
+  commitHarnessSwitch,
+  type HarnessSwitchCommit,
   harnessSwitchBlockedByQueue,
   harnessSwitchTranscriptMode,
   isHarnessChange,
@@ -105,5 +107,67 @@ describe("harness switch guards", () => {
     expect(at({ stagedSourceKeys: ["transcript:c1"], composer: seeded })).toBe("send");
     expect(at({ stagedSourceKeys: ["transcript:c1"], composer: { ...seeded, displayText: "mine" } })).toBe("ask");
     expect(switchContinuation(null, { chatId: "c1", agentId: "cursor", stagedSourceKeys: [], composer: empty })).toBe("wait");
+  });
+});
+
+describe("commit harness switch", () => {
+  const steps = (cloud: boolean, outcome: HarnessSwitchCommit | Error = "switched", current = true) => {
+    const calls: string[] = [];
+    const run = commitHarnessSwitch({
+      cloud,
+      switchCloudAgent: async () => {
+        calls.push("worker switch");
+        if (outcome instanceof Error) throw outcome;
+        return outcome;
+      },
+      recordRow: async () => { calls.push(cloud ? "show row" : "save row"); },
+      closeSession: () => { calls.push("close session"); return Promise.reject(new Error("closed already")); },
+      stillCurrent: () => current,
+      updateSettings: () => { calls.push("update settings"); },
+    });
+    return { calls, run };
+  };
+
+  it("switches the cloud worker before the renderer's settings upsert", async () => {
+    const { calls, run } = steps(true);
+    await expect(run).resolves.toBe("switched");
+    expect(calls).toEqual(["worker switch", "show row", "close session", "update settings"]);
+  });
+
+  it("leaves the chat untouched when an older cloud worker lacks the switch", async () => {
+    const { calls, run } = steps(true, "unsupported");
+    await expect(run).resolves.toBe("unsupported");
+    expect(calls).toEqual(["worker switch"]);
+  });
+
+  it("stops when the worker chat already left the previous agent", async () => {
+    const { calls, run } = steps(true, "stale");
+    await expect(run).resolves.toBe("stale");
+    expect(calls).toEqual(["worker switch"]);
+  });
+
+  it("surfaces a worker refusal without changing settings", async () => {
+    const { calls, run } = steps(true, new Error("Send or remove queued messages before switching agent."));
+    await expect(run).rejects.toThrow(/queued messages/);
+    expect(calls).toEqual(["worker switch"]);
+  });
+
+  it("saves the Local row and never calls the cloud worker", async () => {
+    const { calls, run } = steps(false);
+    await expect(run).resolves.toBe("switched");
+    expect(calls).toEqual(["save row", "close session", "update settings"]);
+  });
+
+  it("skips the settings change when the chat moved on meanwhile", async () => {
+    const update = vi.fn();
+    await expect(commitHarnessSwitch({
+      cloud: false,
+      switchCloudAgent: async () => "switched",
+      recordRow: async () => {},
+      closeSession: () => undefined,
+      stillCurrent: () => false,
+      updateSettings: update,
+    })).resolves.toBe("stale");
+    expect(update).not.toHaveBeenCalled();
   });
 });
