@@ -87,6 +87,12 @@ const WorkspaceFilesTab = React.memo(function WorkspaceFilesTab({
   // The git target for the Diff view: a real worktree diffs by its id; the
   // read-only Local-main trunk diffs by its repoRoot (matches useSourceTarget).
   const { workspace, project } = useActiveWorkspace();
+  // A workspace of several repositories: its project folder holds one folder per
+  // repository, each labelled with its branch.
+  const repositories = workspace?.repositories && workspace.repositories.length > 1 ? workspace.repositories : null;
+  const folderDecorations = React.useMemo(() => repositories
+    ? new Map(repositories.map(entry => [entry.folder, { text: entry.branch, title: `${entry.repository} on ${entry.branch}` }]))
+    : undefined, [repositories]);
   // Local main (the trunk) resolves to the primary checkout's working tree and
   // is now a first-class EDITABLE target (the engine's TRUNK_READ_ONLY gate was
   // removed) — so it gets a git workspaceId like any worktree and is never
@@ -311,12 +317,19 @@ const WorkspaceFilesTab = React.memo(function WorkspaceFilesTab({
         // Both trees receive the same selection mirror: whichever holds the
         // open file highlights it, the other clears any stale highlight.
         <>
+          {repositories && (
+            <Inline gap={1.5} align="center" className="text-fg2 h-7 shrink-0 px-3 text-xs" title={workspace?.project?.name}>
+              <FolderOpen className="size-3.5 shrink-0" aria-hidden />
+              <span className="min-w-0 truncate">{workspace?.project?.name ?? "Project"}</span>
+            </Inline>
+          )}
           <div className="min-h-0 flex-1">
             <WorkspaceFileTree
               active={active}
               cwd={cwd}
               reloadKey={gitRefresh}
               fileStatuses={fileStatuses}
+              folderDecorations={folderDecorations}
               // Always on: inert (the SAME listing reference) on a workspace
               // with no design document, so the split never has to be switched
               // on after the tree mounted and the filter was captured.

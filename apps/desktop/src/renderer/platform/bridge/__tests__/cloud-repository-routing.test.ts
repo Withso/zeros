@@ -38,6 +38,23 @@ describe("requests on a workspace of several repositories", () => {
     expect(ignored.merge([{ entries: ["node_modules/x"] }])).toEqual({ entries: ["web/node_modules/x"] });
   });
 
+  it("sends a Git request about paths in a repository's folder to that repository, and reads the project folder's status from every one", () => {
+    expect(cloudRepositoryRoute("git.diff", { workspaceId: key, path: "web/src/a.ts" }, several))
+      .toEqual({ kind: "one", params: { workspaceId: key, repository: "withso/web", path: "src/a.ts" } });
+    expect(cloudRepositoryRoute("git.stage", { workspaceId: key, paths: ["api/a.ts", "api/b/c.ts"] }, several))
+      .toEqual({ kind: "one", params: { workspaceId: key, repository: "withso/api", paths: ["a.ts", "b/c.ts"] } });
+    expect(() => cloudRepositoryRoute("git.stage", { workspaceId: key, paths: ["api/a.ts", "web/b.ts"] }, several)).toThrow();
+    const status = cloudRepositoryRoute("git.status", { workspaceId: key }, several);
+    if (status.kind !== "each") throw new Error("expected a fan-out");
+    expect(status.merge([
+      { staged: [{ path: "a.ts", status: "added" }], unstaged: [], untracked: ["n.ts"], conflicted: [], conflictState: "none", ahead: 1 },
+      { staged: [], unstaged: [{ path: "new.ts", oldPath: "old.ts", status: "renamed" }], untracked: [], conflicted: [], conflictState: "none" }]))
+      .toEqual({ staged: [{ path: "api/a.ts", status: "added" }], unstaged: [{ path: "web/new.ts", oldPath: "web/old.ts", status: "renamed" }],
+        untracked: ["api/n.ts"], conflicted: [], conflictState: "none", ahead: 1 });
+    // A repository's own key is never fanned out: its paths stay its own.
+    expect(cloudRepositoryRoute("git.status", { workspaceId: `${key}/web` }, several)).toMatchObject({ kind: "one" });
+  });
+
   it("answers for the whole workspace from every repository: has-changes is any one's, counts are summed", () => {
     const each = (op: string) => {
       const route = cloudRepositoryRoute(op, { workspaceId: key }, several);
@@ -59,8 +76,8 @@ describe("requests on a workspace of several repositories", () => {
     expect(cloudRepositoryRoute("file.read", { workspaceId: key, path: "web/x" }, one)).toEqual({ kind: "same" });
     expect(cloudRepositoryRoute("git.status", { workspaceId: "local-workspace" }, several)).toEqual({ kind: "same" });
     expect(cloudRepositoryRoute("git.status", { workspaceId: key, repository: "withso/web" }, several)).toEqual({ kind: "same" });
-    // The workspace's own key, with no repository: the worker's first repository, as a released desktop sends it.
-    expect(cloudRepositoryRoute("git.status", { workspaceId: key }, several)).toEqual({ kind: "same" });
+    // Other requests on the workspace's own key, with no repository: the worker's first repository, as a released desktop sends them.
+    expect(cloudRepositoryRoute("git.log", { workspaceId: key }, several)).toEqual({ kind: "same" });
   });
 });
 

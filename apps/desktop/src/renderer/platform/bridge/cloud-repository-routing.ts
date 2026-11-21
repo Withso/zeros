@@ -70,6 +70,37 @@ export function cloudRepositoryRoute(op: string, params: Params, layout: (target
     if (!entry || !rest) throw new Error("Choose a file inside one of the workspace's repositories.");
     return { kind: "one", params: { ...params, workspaceId, repository: entry.repository, path: rest } };
   }
+  // A Git request about paths in the project folder: the repository that holds them, relative to it.
+  if (op.startsWith("git.") && (typeof params.path === "string" || Array.isArray(params.paths))) {
+    const paths = typeof params.path === "string" ? [params.path] : (params.paths as unknown[]).filter((value): value is string => typeof value === "string");
+    const folders = new Set(paths.map(path => split(path).folder));
+    const entry = folders.size === 1 ? byFolder([...folders][0]!) : undefined;
+    if (!entry || paths.some(path => !split(path).rest)) throw new Error("Choose files inside one of the workspace's repositories.");
+    const strip = (path: string) => split(path).rest;
+    return { kind: "one", params: { ...params, workspaceId, repository: entry.repository,
+      ...(typeof params.path === "string" ? { path: strip(params.path) } : {}),
+      ...(Array.isArray(params.paths) ? { paths: paths.map(strip) } : {}),
+      ...(typeof params.oldPath === "string" && split(params.oldPath).folder === entry.folder ? { oldPath: strip(params.oldPath) } : {}) } };
+  }
+  // The project folder's status: every repository's, each path under its folder.
+  if (op === "git.status") {
+    return {
+      kind: "each",
+      requests: found.repositories.map(entry => ({ folder: entry.folder, params: { ...params, workspaceId, repository: entry.repository } })),
+      merge: results => {
+        const rows = results.map(result => result && typeof result === "object" ? result as Params : {});
+        const changes = (field: string) => rows.flatMap((row, index) => {
+          const folder = found.repositories[index]!.folder;
+          return (Array.isArray(row[field]) ? row[field] as Params[] : []).map(change => ({ ...change,
+            ...(typeof change.path === "string" ? { path: `${folder}/${change.path}` } : {}),
+            ...(typeof change.oldPath === "string" ? { oldPath: `${folder}/${change.oldPath}` } : {}) }));
+        });
+        return { ...rows[0], staged: changes("staged"), unstaged: changes("unstaged"), conflicted: changes("conflicted"),
+          untracked: rows.flatMap((row, index) => (Array.isArray(row.untracked) ? row.untracked as unknown[] : [])
+            .filter((path): path is string => typeof path === "string").map(path => `${found.repositories[index]!.folder}/${path}`)) };
+      },
+    };
+  }
   if (op === "file.ignored" && typeof params.dir === "string" && params.dir) {
     const { folder, rest } = split(params.dir);
     const entry = byFolder(folder);
