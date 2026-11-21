@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { projectFolderName, repositoryFolderNames, workspaceCheckoutPath, workspaceRootPath } from "./workspace-layout.js";
+import { hydrateCloudRepository } from "./source-authority.js";
+import type { CloudV2Workspace } from "./store.js";
 
 describe("a workspace's folders", () => {
   it("derives a project folder of safe characters, never a dotfile, a reserved home entry or empty", () => {
@@ -36,5 +38,11 @@ describe("a workspace's folders", () => {
     const project = several;
     // Released desktops parse the first checkout as /home/user/<a>/<b>.
     expect(workspaceCheckoutPath(project)).toMatch(/^\/home\/user\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/);
+  });
+
+  it("clones each repository into its own folder of the project folder, and older workspaces as before", () => {
+    const workspace = { repository: "withso/web", checkoutFolder: "zeros-app/web" } as CloudV2Workspace;
+    expect(hydrateCloudRepository(workspace)).toContain("'\\''/home/user/zeros-app/web'\\''");
+    expect(hydrateCloudRepository({ repository: "withso/web" } as CloudV2Workspace)).toContain("'\\''/home/user/withso/web'\\''");
   });
 });

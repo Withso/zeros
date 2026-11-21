@@ -15,7 +15,7 @@ import { CloudRepositoryLevels } from "./repository-levels.js";
 import { CloudProjects } from "./projects.js";
 import { scheduleCloudDeletion } from "./deletion.js";
 import { withSystemTx } from "../db.js";
-import { workerRepositories } from "./workspace-repositories.js";
+import { otherRepositories, workerRepositories } from "./workspace-repositories.js";
 
 const d = process.env.TEST_DATABASE_URL ? describe : describe.skip;
 const DAY = 24 * 60 * 60_000;
@@ -843,6 +843,10 @@ d("cloud v2 ready copies", () => {
         github: { repositoryId: repositoryId("withso/web"), repository: "withso/web", previousRepositories: ["withso/web"] } },
       { repository: "acme/web", checkoutPath: "/home/user/zeros-app/web-acme", branch: "zeros/app-1", baseBranch: "main", baseCommit: "c".repeat(40), setup: "make acme",
         github: { repositoryId: repositoryId("acme/web"), repository: "acme/web", previousRepositories: ["acme/web"] } }] });
+    // The direct clone path prepares the others, each in its folder.
+    expect(await withSystemTx(pool, tx => otherRepositories(tx, workspace))).toEqual([
+      { repository: "withso/web", repositoryId: repositoryId("withso/web"), checkoutFolder: "zeros-app/web" },
+      { repository: "acme/web", repositoryId: repositoryId("acme/web"), checkoutFolder: "zeros-app/web-acme" }]);
     // The copy's build already ran them: a fork gets no setup.
     const forked = await withSystemTx(pool, tx => workerRepositories(tx, workspace, { forked: true }));
     expect(forked.firstSetup).toEqual({});

@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { workerRepositories, type WorkerRepositoryConfig } from "./workspace-repositories.js";
+import { otherRepositories, workerRepositories, type WorkerRepositoryConfig } from "./workspace-repositories.js";
 import { workspaceCheckoutPath } from "./workspace-layout.js";
 import { withExecutionLifetimeRetry } from "./execution/lifetime.js";
 // Assembles cloud workspace v2 from configuration: one store, Boat, the relay
@@ -718,6 +718,18 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
       const result = await compute.execLong(sandboxId, hydrateCloudRepository(workspace, repository), 900, input);
       await actor?.check();
       if (result.exitCode !== 0) throw new HttpError(409, "cloud_source_checkout_failed", "The repository checkout could not be prepared. Existing files were retained.");
+      // A workspace of several repositories: each other repository in its folder, with its own token.
+      for (const other of await withSystemTx(pool, tx => otherRepositories(tx, workspace))) {
+        const target = { repository: other.repository.toLowerCase(), repositoryId: other.repositoryId };
+        const token = actor ? await github.token({ organizationId: workspace.organizationId, userId: actor.userId }, target, "read", "git", actor.check)
+          : await githubToken(workspace, "git", undefined, other.repository);
+        await actor?.check();
+        const cloned = await compute.execLong(sandboxId, hydrateCloudRepository({ ...workspace, repository: other.repository, checkoutFolder: other.checkoutFolder },
+          other.repository), 900, `Authorization: Basic ${Buffer.from(`x-access-token:${token.token}`).toString("base64")}\n`);
+        await actor?.check();
+        if (cloned.exitCode !== 0)
+          throw new HttpError(409, "cloud_source_checkout_failed", `${other.repository} could not be checked out. Existing files were retained.`);
+      }
       if (!actor) await authorizeSource(workspace);
     },
     prompts: store.prompts, stopIdle: (id, before) => store.stopIdle(id, before),
