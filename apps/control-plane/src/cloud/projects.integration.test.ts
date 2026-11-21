@@ -172,14 +172,15 @@ d("cloud projects and GitHub at two levels", () => {
     expect((await projects.oneRepositoryProjects(org, member)).map(row => row.id)).toEqual([zeros.id, mine.id, notes.id]);
     expect((await projects.oneRepositoryProjects(org, null)).map(row => row.id)).toEqual([zeros.id]);
     // A released desktop saves its recipe: entries become, update or remove one-repository organization projects.
-    const changed = await projects.syncRecipe(org, admin, [{ repository: "withso/zeros", repositoryId: "42", ref: "main", setup: "pnpm install" },
-      { repository: "withso/web", repositoryId: "43" }]);
+    const shown = async () => Number((await pool.query("SELECT recipe_revision FROM cloud_v2_computers WHERE org_id=$1", [org])).rows[0]?.recipe_revision ?? 0);
+    const { changed } = await projects.syncRecipe(org, admin, [{ repository: "withso/zeros", repositoryId: "42", ref: "main", setup: "pnpm install" },
+      { repository: "withso/web", repositoryId: "43" }], await shown());
     const after = await projects.oneRepositoryProjects(org, null);
     expect(after.map(row => [row.name, row.repositories[0]!.repository, row.repositories[0]!.setup])).toEqual([["zeros", "withso/zeros", "pnpm install"],
       ["web", "withso/web", null]]);
     expect(changed).toEqual([{ projectId: zeros.id, change: "setup_changed" }, { projectId: after[1]!.id, change: "project_created" }]);
     expect((await projects.list(org, admin)).map(row => row.name)).toEqual(["Pair", "web", "zeros"]);
-    await projects.syncRecipe(org, admin, [{ repository: "withso/web", repositoryId: "43" }]);
+    await projects.syncRecipe(org, admin, [{ repository: "withso/web", repositoryId: "43" }], await shown());
     expect((await projects.oneRepositoryProjects(org, null)).map(row => row.name)).toEqual(["web"]);
     // The member's own projects are never touched by a recipe save.
     expect((await projects.list(org, member)).filter(row => row.level === "personal").map(row => row.id)).toEqual([mine.id, notes.id]);
@@ -231,5 +232,60 @@ d("cloud projects and GitHub at two levels", () => {
     expect(await migrateProjects(pool)).toEqual({ organizations: 1, connections: 1, projects: count });
     expect(await revertProjectsMigration(pool)).toEqual({ connections: 1, projects: count });
     expect((await pool.query("SELECT count(*)::int AS n FROM cloud_projects")).rows[0].n).toBe(0);
+  });
+
+  describe("a released desktop's recipe save", () => {
+    const revision = async () => Number((await pool.query("SELECT recipe_revision FROM cloud_v2_computers WHERE org_id=$1", [org])).rows[0]?.recipe_revision ?? 0);
+    const names = async () => (await projects.list(org, admin)).map(row => row.name);
+    beforeEach(async () => { await connectOrganization(admin, 501, "withso"); });
+
+    it("is refused when a project was created in the new UI after the list was loaded, and removes nothing", async () => {
+      const shown = await revision();
+      await projects.create(org, owner, { name: "web", level: "organization", repositories: [repo("withso/web", "43")] });
+      await expectCode(projects.syncRecipe(org, admin, [], shown), "computer_recipe_changed");
+      expect(await names()).toEqual(["web"]);
+    });
+
+    it("is refused when a project was edited, removed or shared after the list was loaded", async () => {
+      const web = await projects.create(org, owner, { name: "web", level: "organization", repositories: [repo("withso/web", "43")] });
+      const api = await projects.create(org, owner, { name: "api", level: "organization", repositories: [repo("withso/api", "44")] });
+      const mine = await projects.create(org, admin, { name: "mine", level: "personal", repositories: [repo("withso/tools", "45")] });
+      for (const change of [() => projects.update(org, owner, web.id, { repositories: [repo("withso/web", "43", { setup: "make" })] }),
+        () => projects.remove(org, owner, api.id), () => projects.share(org, admin, mine.id)]) {
+        const shown = await revision();
+        await change();
+        await expectCode(projects.syncRecipe(org, admin, [repo("withso/web", "43")], shown), "computer_recipe_changed");
+      }
+      expect((await projects.get(org, admin, web.id)).repositories[0]!.setup).toBe("make");
+      expect(await names()).toEqual(["mine", "web"]);
+    });
+
+    it("applies a save made from the current list, which may remove a project, and moves the revision", async () => {
+      await projects.create(org, owner, { name: "web", level: "organization", repositories: [repo("withso/web", "43")] });
+      const shown = await revision();
+      const saved = await projects.syncRecipe(org, admin, [repo("withso/api", "44")], shown);
+      expect(saved.revision).toBeGreaterThan(shown);
+      expect(saved.revision).toBe(await revision());
+      expect(await names()).toEqual(["api"]);
+      // The other order: a project created after that save still survives the next stale one.
+      await projects.create(org, owner, { name: "docs", level: "organization", repositories: [repo("withso/docs", "46")] });
+      await expectCode(projects.syncRecipe(org, admin, [repo("withso/api", "44")], saved.revision), "computer_recipe_changed");
+      expect(await names()).toEqual(["api", "docs"]);
+    });
+
+    it("never touches personal projects, whose writes leave the revision alone", async () => {
+      const shown = await revision();
+      const notes = await projects.create(org, member, { name: "notes", level: "personal", repositories: [repo("withso/notes", "47")] });
+      await projects.update(org, member, notes.id, { name: "Notes" });
+      expect(await revision()).toBe(shown);
+      await projects.syncRecipe(org, admin, [], shown);
+      expect((await projects.list(org, member)).map(row => row.name)).toEqual(["Notes"]);
+    });
+
+    it("without a revision (the oldest clients' build), adds and updates but never removes", async () => {
+      await projects.create(org, owner, { name: "web", level: "organization", repositories: [repo("withso/web", "43")] });
+      await projects.syncRecipe(org, admin, [repo("withso/api", "44")], null);
+      expect(await names()).toEqual(["api", "web"]);
+    });
   });
 });

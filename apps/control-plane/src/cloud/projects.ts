@@ -12,6 +12,7 @@ import { z } from "zod";
 import { HttpError } from "../authz.js";
 import { withSystemTx, type Tx } from "../db.js";
 import { RepositorySetupPathSchema } from "./repository-setup-contract.js";
+import { recipeChanged } from "./computer.js";
 
 /** Projects one member may keep for themselves; organization projects are unlimited. */
 export const PERSONAL_PROJECT_LIMIT = 20;
@@ -70,6 +71,19 @@ export class CloudProjects {
   constructor(private readonly pool: pg.Pool) {}
 
   private tx<T>(work: (tx: Tx) => Promise<T>): Promise<T> { return withSystemTx(this.pool, work); }
+  /** In the caller's transaction when given one (a recipe save is one transaction), else a new one. */
+  private within<T>(tx: Tx | undefined, work: (tx: Tx) => Promise<T>): Promise<T> { return tx ? work(tx) : this.tx(work); }
+
+  /** A released desktop saves its recipe against the Cloud Computer's revision, and that
+   * recipe is the organization's one-repository projects. Every change to the
+   * organization's projects moves the revision in the same transaction, under the
+   * organization lock a save also holds, so a save made from an older list is refused
+   * instead of undoing the change. Personal projects never reach that recipe: their
+   * writes leave it alone, so a member's private edits never show to admins as conflicts. */
+  private async moved(tx: Tx, organizationId: string): Promise<void> {
+    await tx.query(`INSERT INTO cloud_v2_computers (org_id, recipe_revision, recipe_updated_at) VALUES ($1, 1, clock_timestamp())
+      ON CONFLICT (org_id) DO UPDATE SET recipe_revision=cloud_v2_computers.recipe_revision+1`, [organizationId]);
+  }
 
   /** The caller's role; not found once they have left, and for deleted organizations or ones without cloud. */
   private async member(tx: Tx, organizationId: string, userId: string, lock = false): Promise<{ role: string; name: string; personalAllowed: boolean }> {
@@ -133,10 +147,10 @@ export class CloudProjects {
     });
   }
 
-  async create(organizationId: string, userId: string, input: { name: string; level: CloudProjectLevel; repositories: CloudProjectRepositoryInput[] }):
-    Promise<CloudProjectView> {
+  async create(organizationId: string, userId: string, input: { name: string; level: CloudProjectLevel; repositories: CloudProjectRepositoryInput[] },
+    inside?: Tx): Promise<CloudProjectView> {
     const projectName = name.parse(input.name), repositories = this.repositories(input.repositories);
-    return this.tx(async tx => {
+    return this.within(inside, async tx => {
       const member = await this.member(tx, organizationId, userId, true);
       if (input.level === "organization") {
         if (!this.admin(member.role)) throw new HttpError(403, "forbidden", "Requires an owner or admin");
@@ -157,16 +171,17 @@ export class CloudProjects {
         throw error;
       }
       await this.writeRepositories(tx, id, repositories, connections);
+      if (input.level === "organization") await this.moved(tx, organizationId);
       return (await this.read(tx, [(await tx.query<ProjectRow>("SELECT * FROM cloud_projects WHERE id=$1", [id])).rows[0]!], userId, member.role))[0]!;
     });
   }
 
   /** Owners and admins edit an organization project; only its member edits a personal one. */
-  async update(organizationId: string, userId: string, projectId: string, input: { name?: string; repositories?: CloudProjectRepositoryInput[] }):
-    Promise<{ project: CloudProjectView; change: CloudProjectChange }> {
+  async update(organizationId: string, userId: string, projectId: string, input: { name?: string; repositories?: CloudProjectRepositoryInput[] },
+    inside?: Tx): Promise<{ project: CloudProjectView; change: CloudProjectChange }> {
     const projectName = input.name === undefined ? undefined : name.parse(input.name);
     const repositories = input.repositories === undefined ? undefined : this.repositories(input.repositories);
-    return this.tx(async tx => {
+    return this.within(inside, async tx => {
       const member = await this.member(tx, organizationId, userId, true);
       const row = await this.editable(tx, organizationId, userId, projectId, member.role);
       let change: CloudProjectChange = null;
@@ -191,20 +206,22 @@ export class CloudProjects {
         await this.writeRepositories(tx, projectId, repositories, connections);
         await tx.query("UPDATE cloud_projects SET updated_at=clock_timestamp() WHERE id=$1", [projectId]);
       }
+      if (row.level === "organization") await this.moved(tx, organizationId);
       const fresh = (await tx.query<ProjectRow>("SELECT * FROM cloud_projects WHERE id=$1", [projectId])).rows[0]!;
       return { project: (await this.read(tx, [fresh], userId, member.role))[0]!, change };
     });
   }
 
-  async remove(organizationId: string, userId: string, projectId: string): Promise<void> {
-    await this.tx(async tx => {
+  async remove(organizationId: string, userId: string, projectId: string, inside?: Tx): Promise<void> {
+    await this.within(inside, async tx => {
       const member = await this.member(tx, organizationId, userId, true);
-      await this.editable(tx, organizationId, userId, projectId, member.role);
+      const row = await this.editable(tx, organizationId, userId, projectId, member.role);
       // Its ready copies are provider receipts: retired, so cleanup deletes their machines.
       await tx.query(`UPDATE cloud_v2_ready_copies SET state=CASE WHEN state='building' THEN 'failed' ELSE 'retired' END,
         failure_reason=CASE WHEN state='building' THEN 'project_removed' ELSE failure_reason END, updated_at=clock_timestamp()
         WHERE id IN (SELECT id FROM cloud_v2_ready_copies WHERE project_id=$1 AND state IN ('building','ready') ORDER BY id FOR UPDATE)`, [projectId]);
       await tx.query("DELETE FROM cloud_projects WHERE id=$1", [projectId]);
+      if (row.level === "organization") await this.moved(tx, organizationId);
     });
   }
 
@@ -230,6 +247,7 @@ export class CloudProjects {
       }
       for (const [index, entry] of repositories.entries())
         await tx.query("UPDATE cloud_project_repositories SET connection=$3 WHERE project_id=$1 AND repository_id=$2", [projectId, entry.repository_id, connections[index]]);
+      await this.moved(tx, organizationId);
       // Its copy was its member's: rebuilt through the organization's connection.
       await tx.query(`UPDATE cloud_v2_ready_copies SET stale=true, updated_at=clock_timestamp()
         WHERE id IN (SELECT id FROM cloud_v2_ready_copies WHERE project_id=$1 AND state='ready' ORDER BY id FOR UPDATE)`, [projectId]);
@@ -253,8 +271,8 @@ export class CloudProjects {
   /** One-repository projects as the old Cloud Computer recipe: organization ones
    * for the recipe, plus the caller's own for the repository list. Multi-repository
    * projects are never offered to released desktops. */
-  async oneRepositoryProjects(organizationId: string, userId: string | null): Promise<CloudProject[]> {
-    return this.tx(async tx => {
+  async oneRepositoryProjects(organizationId: string, userId: string | null, inside?: Tx): Promise<CloudProject[]> {
+    return this.within(inside, async tx => {
       const rows = (await tx.query<ProjectRow>(`SELECT p.* FROM cloud_projects p WHERE p.org_id=$1 AND (p.level='organization' OR p.owner_user_id=$2)
         AND (SELECT count(*) FROM cloud_project_repositories c WHERE c.project_id=p.id) = 1 ORDER BY (p.level='personal'), p.created_at, p.id`,
         [organizationId, userId])).rows;
@@ -264,35 +282,47 @@ export class CloudProjects {
 
   /** A released desktop's admin saved the recipe: it is the set of one-repository
    * organization projects. Entries become or update such projects; ones no longer
-   * listed are removed. Returns the projects whose copy must be rebuilt. */
-  async syncRecipe(organizationId: string, userId: string, entries: readonly { repository: string; repositoryId: string; ref?: string; setup?: string; setupScript?: string }[]):
-    Promise<{ projectId: string; change: Exclude<CloudProjectChange, null> }[]> {
-    const current = await this.oneRepositoryProjects(organizationId, null);
-    const changed: { projectId: string; change: Exclude<CloudProjectChange, null> }[] = [];
-    for (const entry of entries) {
-      const repositories = [{ repository: entry.repository, repositoryId: entry.repositoryId, defaultBranch: entry.ref ?? null, setup: entry.setup ?? null,
-        setupScript: entry.setupScript ?? null }];
-      const existing = current.find(project => project.level === "organization" && project.repositories[0]!.repositoryId === entry.repositoryId);
-      if (existing) {
-        const { change } = await this.update(organizationId, userId, existing.id, { repositories });
-        if (change) changed.push({ projectId: existing.id, change });
-      } else {
-        const project = await this.create(organizationId, userId, { name: await this.freeName(organizationId, entry.repository), level: "organization", repositories });
-        changed.push({ projectId: project.id, change: "project_created" });
+   * listed are removed. One transaction under the organization lock: the save is
+   * checked against the revision its editor was shown, then moves it. Without a
+   * revision (the oldest clients' build request) nothing is removed. Returns the
+   * projects whose copy must be rebuilt and the new revision. */
+  async syncRecipe(organizationId: string, userId: string, entries: readonly { repository: string; repositoryId: string; ref?: string; setup?: string; setupScript?: string }[],
+    revision: number | null): Promise<{ changed: { projectId: string; change: Exclude<CloudProjectChange, null> }[]; revision: number }> {
+    return this.tx(async tx => {
+      const member = await this.member(tx, organizationId, userId, true);
+      if (!this.admin(member.role)) throw new HttpError(403, "forbidden", "Requires an owner or admin");
+      const shown = async () => Number((await tx.query<{ revision: string }>(
+        "SELECT recipe_revision::text AS revision FROM cloud_v2_computers WHERE org_id=$1 FOR UPDATE", [organizationId])).rows[0]?.revision ?? 0);
+      if (revision !== null && await shown() !== revision) throw recipeChanged();
+      const current = (await this.oneRepositoryProjects(organizationId, null, tx)).filter(project => project.level === "organization");
+      const changed: { projectId: string; change: Exclude<CloudProjectChange, null> }[] = [];
+      for (const entry of entries) {
+        const repositories = [{ repository: entry.repository, repositoryId: entry.repositoryId, defaultBranch: entry.ref ?? null, setup: entry.setup ?? null,
+          setupScript: entry.setupScript ?? null }];
+        const existing = current.find(project => project.repositories[0]!.repositoryId === entry.repositoryId);
+        if (existing) {
+          const { change } = await this.update(organizationId, userId, existing.id, { repositories }, tx);
+          if (change) changed.push({ projectId: existing.id, change });
+        } else {
+          const project = await this.create(organizationId, userId, { name: await this.freeName(tx, organizationId, entry.repository), level: "organization",
+            repositories }, tx);
+          changed.push({ projectId: project.id, change: "project_created" });
+        }
       }
-    }
-    for (const project of current)
-      if (project.level === "organization" && !entries.some(entry => entry.repositoryId === project.repositories[0]!.repositoryId))
-        await this.remove(organizationId, userId, project.id);
-    return changed;
+      if (revision !== null)
+        for (const project of current)
+          if (!entries.some(entry => entry.repositoryId === project.repositories[0]!.repositoryId)) await this.remove(organizationId, userId, project.id, tx);
+      await this.moved(tx, organizationId);
+      return { changed, revision: await shown() };
+    });
   }
 
   /** A project name from a repository: its name, or owner/name when that is taken. */
-  private async freeName(organizationId: string, repository: string): Promise<string> {
+  private async freeName(tx: Tx, organizationId: string, repository: string): Promise<string> {
     const [repoOwner, repoName] = repository.split("/") as [string, string];
-    const taken = async (candidate: string) => !!(await this.tx(tx => tx.query(
-      "SELECT 1 FROM cloud_projects WHERE org_id=$1 AND level='organization' AND lower(name)=lower($2)", [organizationId, candidate]))).rowCount;
-    return await taken(repoName) ? `${repoOwner}/${repoName}` : repoName;
+    const taken = (await tx.query("SELECT 1 FROM cloud_projects WHERE org_id=$1 AND level='organization' AND lower(name)=lower($2)",
+      [organizationId, repoName])).rowCount;
+    return taken ? `${repoOwner}/${repoName}` : repoName;
   }
 
   private repositories(input: readonly CloudProjectRepositoryInput[]): CloudProjectRepositoryInput[] {

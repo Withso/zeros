@@ -451,9 +451,11 @@ export function createCloudV2Routes(deps: CloudV2RouteDeps): Hono {
         ...(entry.setupScript ? { setupScript: entry.setupScript } : {}) };
     });
   /** A released desktop saved the recipe: its entries become one-repository
-   * organization projects, each rebuilding its own copy; the Cloud Computer keeps none. */
+   * organization projects, each rebuilding its own copy; the Cloud Computer keeps none.
+   * Checked against the revision the editor was shown, which every organization
+   * project write moves; null (a build request without one) never removes a project. */
   const saveProjectRecipe = async (organizationId: string, userId: string, entries: readonly { repository: string; ref?: string | undefined;
-    setup?: string | undefined; setupScript?: string | undefined }[]) => {
+    setup?: string | undefined; setupScript?: string | undefined }[], revision: number | null) => {
     if (!deps.resolveMemberRepository) throw new HttpError(503, "github_unavailable", "Repository identity could not be verified.");
     const current = await deps.projects!.oneRepositoryProjects(organizationId, null);
     const resolved = await Promise.all(entries.map(async entry => {
@@ -462,8 +464,10 @@ export function createCloudV2Routes(deps: CloudV2RouteDeps): Hono {
       return { repository: entry.repository.toLowerCase(), repositoryId, ...(entry.ref ? { ref: entry.ref } : {}), ...(entry.setup ? { setup: entry.setup } : {}),
         ...(entry.setupScript ? { setupScript: entry.setupScript } : {}) };
     }));
-    for (const { projectId, change } of await deps.projects!.syncRecipe(organizationId, userId, resolved))
+    const saved = await deps.projects!.syncRecipe(organizationId, userId, resolved, revision);
+    for (const { projectId, change } of saved.changed)
       await deps.readyCopies?.changed?.(organizationId, projectId, change).catch(() => undefined);
+    return saved.revision;
   };
 
   app.post("/v1/cloud-v2/organizations/:org/computer/builds", json, async c => {
@@ -471,7 +475,7 @@ export function createCloudV2Routes(deps: CloudV2RouteDeps): Hono {
     await deps.computers.requireAdmin(organizationId, c.get("user").id);
     const parsed = BuildSchema.safeParse(await c.req.json().catch(() => null));
     if (!parsed.success) throw new HttpError(400, "invalid_request", "Invalid Cloud Computer build");
-    if ("repositories" in parsed.data && deps.projects) await saveProjectRecipe(organizationId, c.get("user").id, parsed.data.repositories);
+    if ("repositories" in parsed.data && deps.projects) await saveProjectRecipe(organizationId, c.get("user").id, parsed.data.repositories, null);
     else if ("repositories" in parsed.data && !parsed.data.repositories.length) throw new HttpError(400, "invalid_request", "Invalid Cloud Computer build");
     const build = "revision" in parsed.data
       ? await deps.computers.buildConfigured(organizationId, c.get("user").id, parsed.data.revision)
@@ -486,13 +490,8 @@ export function createCloudV2Routes(deps: CloudV2RouteDeps): Hono {
     const parsed = RecipeSchema.safeParse(await c.req.json().catch(() => null));
     if (!parsed.success) throw new HttpError(400, "invalid_request", "Invalid Cloud Computer repositories");
     if (deps.projects) {
-      // The revision still guards two editors; the Cloud Computer itself keeps no repositories.
-      const overview = await deps.computers.overview(organizationId);
-      if (overview.recipeRevision !== parsed.data.revision)
-        throw new HttpError(409, "computer_recipe_changed", "The Cloud Computer changed. Review the latest version and try again.");
-      await saveProjectRecipe(organizationId, c.get("user").id, parsed.data.repositories);
-      const bumped = await deps.computers.saveInstallScript!(organizationId, c.get("user").id, overview.installScript ?? null, parsed.data.revision);
-      return c.json({ recipe: { repositories: await projectRecipe(organizationId) }, recipeRevision: bumped.recipeRevision });
+      const recipeRevision = await saveProjectRecipe(organizationId, c.get("user").id, parsed.data.repositories, parsed.data.revision);
+      return c.json({ recipe: { repositories: await projectRecipe(organizationId) }, recipeRevision });
     }
     const saved = await deps.computers.saveRecipe(organizationId, c.get("user").id, parsed.data.repositories, parsed.data.revision);
     return c.json(saved);

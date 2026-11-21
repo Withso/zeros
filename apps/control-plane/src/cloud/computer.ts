@@ -148,7 +148,7 @@ const build = (row: Row): CloudV2Build => ({
   reason: row.reason, baseSnapshot: row.base_snapshot, runtimeSha256: row.runtime_sha256,
 });
 
-const recipeChanged = () => new HttpError(409, "computer_recipe_changed", "The Cloud Computer changed. Review the latest version and try again.");
+export const recipeChanged = () => new HttpError(409, "computer_recipe_changed", "The Cloud Computer changed. Review the latest version and try again.");
 
 function notFound(error: unknown): boolean {
   const value = error as { code?: unknown; httpStatus?: unknown } | null;

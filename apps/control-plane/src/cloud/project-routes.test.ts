@@ -38,10 +38,15 @@ describe("released desktops' Create and Cloud Computer, answered from one-reposi
     onError(hono);
     const deps = {
       store: { activeComputer: async () => ({ buildId: "55555555-5555-4555-8555-555555555555", baseOnly: true, repositories: [] }) },
-      computers: { requireMember: async () => {}, requireAdmin: async () => {}, saveRecipe: vi.fn(), buildConfigured: vi.fn(async () => ({ id: "b" })),
+      computers: { requireMember: async () => {}, requireAdmin: async () => {}, saveRecipe: vi.fn(), buildConfigured: vi.fn(async () => ({ id: "b" })), enqueue: vi.fn(async () => ({ id: "b" })),
         overview: async () => ({ activeBuildId: "b", snapshotName: "s", builds: [], recipe: { repositories: [] }, recipeRevision: 4, installScript: null, readyCopies: true }),
         saveInstallScript: vi.fn(async () => ({ installScript: null, recipeRevision: 5 })) },
-      projects: { oneRepositoryProjects: oneRepository, forRepository: vi.fn(), syncRecipe: vi.fn(async () => [{ projectId: P3, change: "project_created" }]) },
+      projects: { oneRepositoryProjects: oneRepository, forRepository: vi.fn(),
+        // The store checks the shown revision under the organization lock; 4 is current here.
+        syncRecipe: vi.fn(async (_o: string, _u: string, _e: unknown, revision: number | null) => {
+          if (revision !== null && revision !== 4) throw new HttpError(409, "computer_recipe_changed", "Changed");
+          return { changed: [{ projectId: P3, change: "project_created" }], revision: 5 };
+        }) },
       readyCopies: { status: async () => new Map([[P1, "ready" as const]]), failures: async () => [], changed: vi.fn(async () => {}) },
       authorizeSourceTargets: vi.fn(async () => {}),
       resolveMemberRepository: vi.fn(async (_o: string, _u: string, repository: string) => ({ repository, repositoryId: "77", defaultBranch: "main" })),
@@ -80,10 +85,14 @@ describe("released desktops' Create and Cloud Computer, answered from one-reposi
     // A kept project keeps its ID; a new repository's is read from GitHub as the caller.
     expect(f.deps.resolveMemberRepository).toHaveBeenCalledTimes(1);
     expect(f.deps.projects.syncRecipe).toHaveBeenCalledWith(org, alice, [{ repository: "withso/zeros", repositoryId: "42", ref: "main" },
-      { repository: "withso/web", repositoryId: "77", setup: "make" }]);
+      { repository: "withso/web", repositoryId: "77", setup: "make" }], 4);
     expect(f.deps.readyCopies.changed).toHaveBeenCalledWith(org, P3, "project_created");
     expect((await saved.json()).recipeRevision).toBe(5);
     expect((await f.send("/computer/recipe", "PUT", { repositories: [], revision: 3 })).status).toBe(409);
+    expect(f.deps.computers.saveRecipe).not.toHaveBeenCalled();
+    // A build request without a revision passes none, so the store never removes a project for it.
+    expect((await f.send("/computer/builds", "POST", { repositories: [{ repository: "withso/zeros" }] })).status).toBe(202);
+    expect(f.deps.projects.syncRecipe).toHaveBeenLastCalledWith(org, alice, [{ repository: "withso/zeros", repositoryId: "42" }], null);
     // A build is the base only: tools, no repository.
     expect((await f.send("/computer/builds", "POST", { revision: 5 })).status).toBe(202);
   });
