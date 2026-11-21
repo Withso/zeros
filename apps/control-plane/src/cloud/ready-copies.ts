@@ -155,7 +155,7 @@ export class CloudV2ReadyCopies {
    * starts stay within READY_COPY_REFRESH_STARTS across the deployment. */
   async claim(now: Date): Promise<CloudV2ReadyCopy | null> {
     const row = (await this.tx(async tx => {
-      await tx.query("SELECT pg_advisory_xact_lock(hashtextextended('cloud-v2-ready-copy-claim',0))");
+      await tx.query("/* lock_purpose='cloud-v2-ready-copy-claim' */ SELECT pg_advisory_xact_lock(hashtextextended('cloud-v2-ready-copy-claim',0))");
       return tx.query<Row>(
         `UPDATE cloud_v2_ready_copies SET started_at=$1, heartbeat_at=$1, updated_at=$1
          WHERE id=(SELECT c.id FROM cloud_v2_ready_copies c
