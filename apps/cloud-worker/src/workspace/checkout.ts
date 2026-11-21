@@ -109,7 +109,7 @@ class BackgroundRefresh implements CheckoutRefresh {
 
 /** Run only for the first config in a worker process. Existing branches and
  * dirty files remain owned by the user; Git refuses an unsafe switch itself. */
-const REPOSITORY = /^[A-Za-z0-9][A-Za-z0-9._-]{0,99}\/[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/;
+const REPOSITORY = /^[A-Za-z0-9][A-Za-z0-9._-]{0,99}\/(?!\.\.?$)[A-Za-z0-9._-]{1,100}$/;
 /** Generous for a large repository; Stop still cancels it through the process group. */
 const CLONE_TIMEOUT_MS = 15 * 60_000;
 

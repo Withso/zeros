@@ -340,6 +340,7 @@ export class CloudWorker {
           capabilities: { design: false, browser: false, simulators: false, terminal: true, files: true, git: true, agents: ["codex", "claude", "cursor"], mcp: 1 } });
         // setup-status-v1: once after each hello; a first hello has no workspace yet and configuration reports it.
         void this.setup?.reportCurrent();
+        for (const entry of this.repositories.values()) void entry.setup?.reportCurrent();
       },
       frame: (raw) => this.receive(raw),
       runtimeUpdate: () => { this.runtimeUpdater?.hint(); void this.runtimeUpdater?.tick(); },
@@ -1000,8 +1001,11 @@ export class CloudWorker {
           ...(pullRequests && this.options.transport.reportGithubCheckout && /^[A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100}$/.test(entry.repository)
             ? { reportGithubCheckout: value => this.options.transport.reportGithubCheckout!({ ...value, repository: entry.repository }) } : {}),
         });
+        const reportRepositorySetup = this.options.transport.reportRepositorySetup?.bind(this.options.transport);
         runtime.setup = new WorkspaceSetup({ directory, workspace: repositoryScope.workspace, gitEnvironment: this.gitEnvironment,
           application: new ApplicationEnvironment(undefined), signal: this.environmentLifetime.signal,
+          // Its own status, under its name; the first repository's stays the workspace's.
+          ...(reportRepositorySetup ? { report: (status: CloudV2SetupStatus) => reportRepositorySetup(entry.repository, status) } : {}),
           runner: this.options.setupRunner, activity: () => { void this.reportIdle(); }, onStorageError: () => this.options.onError?.("storage"),
           beforeRun: async () => { await runtime.refresh?.touch(); } });
       } catch {

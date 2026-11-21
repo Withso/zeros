@@ -261,7 +261,10 @@ it("clones a repository that is not on disk, then prepares its branch; leaves a 
   await expect(cloneMissingCheckout(occupied, "withso/docs", {}, f.source)).rejects.toThrow(/already holds other files/);
   expect(await readFile(join(occupied.checkoutPath, "notes.txt"), "utf8")).toBe("mine\n");
   // Only a GitHub owner/name.
-  await expect(cloneMissingCheckout({ ...missing, checkoutPath: join(f.root, "x") }, "../etc", {}, f.source)).rejects.toThrow(/Invalid repository/);
+  for (const name of ["../etc", "withso/..", "withso", "-x/y"])
+    await expect(cloneMissingCheckout({ ...missing, checkoutPath: join(f.root, "x") }, name, {}, f.source)).rejects.toThrow(/Invalid repository/);
+  // A name may start with a dot, like .github.
+  expect(await cloneMissingCheckout({ ...missing, checkoutPath: join(f.root, "dot") }, "withso/.github", {}, f.source)).toBe(true);
   // A clone that fails says so without a path or Git's text.
   await expect(cloneMissingCheckout({ ...missing, checkoutPath: join(f.root, "y") }, "withso/y", {}, join(f.root, "absent")))
     .rejects.toThrow("This repository could not be cloned. Check that its GitHub connection can read it.");

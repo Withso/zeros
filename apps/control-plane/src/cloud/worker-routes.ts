@@ -24,7 +24,8 @@ import { localBody, localUuid, localRouteError } from "./local-commands/routes.j
 import { requestSignal, type CloudLocalCommandSignals } from "./local-commands/signals.js";
 import { NOTIFY_USER_FEATURE, NotifyUserWorkerRequestSchema } from "./notify-user/contract.js";
 import { NotificationRateLimit, type CloudNotifyUser } from "./notify-user/store.js";
-import { CloudV2SetupStatusSchema } from "./setup-status-contract.js";
+import { CloudV2RepositorySetupStatusSchema, CloudV2SetupStatusSchema } from "./setup-status-contract.js";
+import type { RepositorySetupReport } from "./workspace-repository-setup.js";
 import { CLOUD_RECOVERY_QUIESCE_FEATURE, CloudRecoveryRequestSchema, CloudRecoveryReplySchema,
   type CloudRecoveryHint, type CloudRecoveryRequest, type CloudRecoveryReply } from "./recovery-quiesce-contract.js";
 import type { CloudWorkspaceSync } from "./workspace-sync/store.js";
@@ -64,6 +65,8 @@ export type CloudV2WorkerRouteDeps = {
   localCommands?: { requests: CloudLocalCommands; signals: CloudLocalCommandSignals };
   notifications?: CloudNotifyUser;
   workspaceSync?: Pick<CloudWorkspaceSync, "advertise">;
+  /** workspace-repositories-v1: a repository after the first reports its own setup status. */
+  repositorySetup?: RepositorySetupReport;
   timing?: (record: CloudV2TimingRecord) => void;
   appliedReady?(workspaceId: string, bootId: string): Promise<void>;
   helloTransaction?<T>(work: (tx?: Tx) => Promise<T>): Promise<T>;
@@ -504,6 +507,16 @@ export function createCloudV2WorkerRoutes(deps: CloudV2WorkerRouteDeps): Hono {
     await deps.store.reportWorkerSetup(auth.token, auth.bootId, report,
       { accessEpoch: auth.workspace.accessEpoch, ...(handoff ? { handoff } : {}) });
     if (auth.workspace.recoveryAttemptId) await deps.recovery?.setup(auth.token, auth.bootId, auth.workspace.recoveryAttemptId, report);
+    return c.body(null, 204);
+  });
+  app.post(`${CLOUD_V2_WORKER_API}/repository-setup`, async c => {
+    const features = workerFeatures(c);
+    if (!features.has("setup-status-v1") || !features.has(WORKSPACE_REPOSITORIES_FEATURE) || !deps.repositorySetup)
+      throw new HttpError(404, "not_found", "Setup status is unavailable.");
+    const auth = await session(c, deps, true), report = await body(c, CloudV2RepositorySetupStatusSchema);
+    const handoff = c.req.header("x-zeros-runtime-handoff");
+    await deps.repositorySetup(auth.token, auth.bootId, report.repository, report.status,
+      { accessEpoch: auth.workspace.accessEpoch, ...(handoff ? { handoff } : {}) });
     return c.body(null, 204);
   });
   app.post(`${CLOUD_V2_WORKER_API}/history`, async c => {

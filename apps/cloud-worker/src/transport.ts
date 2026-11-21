@@ -43,6 +43,8 @@ export interface Transport {
   notifyUser?(request: NotifyUserWorkerRequest, signal?: AbortSignal): Promise<NotifyUserDelivery>;
   /** setup-status-v1: POST setup, 204. Best effort; the next hello reports again. */
   reportSetup?: (status: CloudV2SetupStatus) => Promise<void>;
+  /** workspace-repositories-v1: a repository after the first reports its own setup. Best effort, like reportSetup. */
+  reportRepositorySetup?: (repository: string, status: CloudV2SetupStatus) => Promise<void>;
   /** history-digest-v1: each chat's stored digest (one read on reconnect). */
   historyDigests?: () => Promise<unknown>;
   /** history-batch-v1: several history frames in one request (accepted only when the configuration offers historyBatch). */

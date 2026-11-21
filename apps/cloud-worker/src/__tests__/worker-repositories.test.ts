@@ -19,7 +19,7 @@ const exec = promisify(execFile);
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
 
-async function fixture() {
+async function fixture(options: { setup?: boolean } = {}) {
   const directory = await mkdtemp(join(tmpdir(), "worker-repositories-"));
   cleanups.push(() => rm(directory, { recursive: true, force: true }));
   const root = join(directory, "zeros-app"), state = join(directory, "state");
@@ -35,13 +35,16 @@ async function fixture() {
     await git("add", "."); await git("commit", "-m", "initial");
     await git("switch", "-c", "zeros/app");
   }
-  const repository = (name: string, owner = "withso") => ({ repository: `${owner}/${name}`, checkoutPath: join(root, name), branch: "zeros/app", baseBranch: "main" });
+  const repository = (name: string, owner = "withso") => ({ repository: `${owner}/${name}`, checkoutPath: join(root, name), branch: "zeros/app", baseBranch: "main",
+    ...(options.setup && name === "web" ? { setup: "true" } : {}) });
   const workspace = { ...config.workspace, repository: "withso/api", checkoutPath: join(root, "api"), branch: "zeros/app", baseBranch: "main",
     root, repositories: [repository("api"), repository("web")] };
-  const relay = new FakeRelay();
-  const prepareCheckout = vi.fn(async () => ({ createdBranch: false }));
+  const relay = Object.assign(new FakeRelay(), {
+    reportSetup: vi.fn(async (_status: unknown) => {}), reportRepositorySetup: vi.fn(async (_repository: string, _status: unknown) => {}) });
+  const prepareCheckout = vi.fn(async () => ({ createdBranch: options.setup === true }));
   const cloneCheckout = vi.fn(async () => false);
-  const worker = new CloudWorker({ directory: state, homeDirectory: directory, transport: relay, prepareCheckout, cloneCheckout, drivers: {}, workspaceServices: { watch: false } });
+  const setupRunner = vi.fn(async () => 0);
+  const worker = new CloudWorker({ directory: state, homeDirectory: directory, transport: relay, prepareCheckout, cloneCheckout, setupRunner, drivers: {}, workspaceServices: { watch: false } });
   cleanups.push(() => worker.dispose());
   worker.start();
   await relay.receive({ ...config, agents: {}, workspace });
@@ -51,7 +54,7 @@ async function fixture() {
     return relay.response(frame.id) as Extract<BridgeMessage, { type: "WORKSPACE_RESPONSE" | "WORKSPACE_ERROR" }>;
   };
   await relay.receive({ t: "open", clientId: CLIENT_A });
-  return { root, workspace, prepareCheckout, cloneCheckout, request };
+  return { root, workspace, relay, prepareCheckout, cloneCheckout, setupRunner, request };
 }
 const changed = (reply: { type: string; result?: unknown }) => JSON.stringify(reply.result);
 
@@ -133,4 +136,12 @@ it("refuses a request naming a repository that is not the workspace's own, with 
     // GitHub compares names case-insensitively: the first's own name is the first.
     for (const repository of ["withso/api", "Withso/API"]) expect(scope.repositoryFor({ repository })).toBe(scope.several ? scope.repositories[0] : undefined);
   }
+});
+
+it("reports a later repository's setup under its own name, never as the workspace's", async () => {
+  const f = await fixture({ setup: true });
+  await vi.waitFor(() => expect(f.relay.reportRepositorySetup.mock.calls.map(([, status]) => (status as { state: string }).state)).toContain("succeeded"));
+  expect(new Set(f.relay.reportRepositorySetup.mock.calls.map(([repository]) => repository))).toEqual(new Set(["withso/web"]));
+  // The first repository has no setup here: nothing reports as the workspace's own.
+  expect(f.relay.reportSetup.mock.calls.filter(([status]) => (status as { state?: string } | undefined)?.state === "succeeded")).toEqual([]);
 });

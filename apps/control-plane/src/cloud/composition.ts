@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { otherRepositories, workerRepositories, workspaceTokenSource, type WorkerRepositoryConfig } from "./workspace-repositories.js";
+import { repositorySetupReports } from "./workspace-repository-setup.js";
 import { workspaceCheckoutPath } from "./workspace-layout.js";
 import { withExecutionLifetimeRetry } from "./execution/lifetime.js";
 // Assembles cloud workspace v2 from configuration: one store, Boat, the relay
@@ -479,6 +480,7 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
     localCommands: { requests: localCommands, signals: localCommandSignals },
     notifications,
     workspaceSync,
+    repositorySetup: repositorySetupReports(pool),
     runtimeUpdates, runtimeHandoffs,
     runtimeSha256ForWorkspace: async workspace => {
       const selected = await runtimeForWorkspace(workspace);

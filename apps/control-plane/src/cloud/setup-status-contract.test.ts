@@ -1,5 +1,5 @@
 import { beforeAll, expect, it } from "vitest";
-import { CloudV2SetupStatusSchema } from "./setup-status-contract.js";
+import { CloudV2RepositorySetupStatusSchema, CloudV2SetupStatusSchema } from "./setup-status-contract.js";
 
 let protocol: typeof CloudV2SetupStatusSchema;
 beforeAll(async () => {
@@ -20,6 +20,21 @@ it.each([
   ...["path", "script", "log", "source", "workspaceId", "bootId"].map(key => ({ value: { state: "running", startedAt: 1, [key]: "private" }, valid: false })),
 ])("matches the worker's setup-status-v1 schema: $value", ({ value, valid }) => {
   for (const schema of [CloudV2SetupStatusSchema, protocol]) {
+    const parsed = schema.safeParse(value); expect(parsed.success).toBe(valid);
+    if (parsed.success) expect(parsed.data).toEqual(value);
+  }
+});
+
+it.each([
+  { value: { repository: "withso/web", status: { state: "running", startedAt: 1 } }, valid: true },
+  { value: { repository: "Withso/Web.js", status: { state: "failed", startedAt: 1, finishedAt: 2, exitCode: 1 } }, valid: true },
+  ...["web", "withso/web/x", "../web", "withso/ web", ""].map(repository => ({ value: { repository, status: { state: "running", startedAt: 1 } }, valid: false })),
+  { value: { repository: "withso/web", status: { state: "running", startedAt: 1, path: "/x" } }, valid: false },
+  { value: { repository: "withso/web", status: { state: "running", startedAt: 1 }, workspaceId: "x" }, valid: false },
+])("matches the worker's repository setup schema: $value", async ({ value, valid }) => {
+  const root = new URL(process.env.CLOUD_API_TEST_PROTOCOL_ROOT ?? "../../../../packages/protocol/src/", import.meta.url);
+  const protocolRepository = (await import(new URL("cloud-v2-relay.ts", root).href)).CloudV2RepositorySetupStatusSchema as typeof CloudV2RepositorySetupStatusSchema;
+  for (const schema of [CloudV2RepositorySetupStatusSchema, protocolRepository]) {
     const parsed = schema.safeParse(value); expect(parsed.success).toBe(valid);
     if (parsed.success) expect(parsed.data).toEqual(value);
   }
