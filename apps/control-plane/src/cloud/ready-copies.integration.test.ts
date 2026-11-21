@@ -306,9 +306,40 @@ d("cloud v2 ready copies", () => {
     };
     await copyBuilder({ secrets: (organizationId, repository) => secrets.open(organizationId, repository) }).tick();
     const copy = await row(1);
-    expect(copy).toMatchObject({ state: "failed", failureReason: "ready_copy_secret_left" });
+    expect(copy).toMatchObject({ state: "failed", failureReason: "ready_copy_secret_left", failureDetail: "/home/user/withso/zeros/.npmrc" });
     expect(boat.machine(copy.machineId!)!.state).toBe("deleted");
     expect(await copies.forkable(org, "withso/zeros", new Date(clock))).toBeNull();
+    expect(await copies.failures(org)).toEqual([expect.objectContaining({ repository: "withso/zeros", reason: "ready_copy_secret_left",
+      detail: "/home/user/withso/zeros/.npmrc" })]);
+  });
+
+  it.each([
+    ["outside the home", "/etc/profile.d/npm.sh", (value: string) => `export NPM_TOKEN=${value}`, "/etc/profile.d/npm.sh"],
+    ["in a file named after the secret", (value: string) => `/root/.cache/${value}`, (value: string) => value, "/root/.cache/… (a name there contains a build secret)"],
+  ] as const)("finds a build secret left %s and records only where, never the value", async (_case, path, content, detail) => {
+    const keys = { keys: { 1: randomBytes(32).toString("base64url") }, currentKeyVersion: 1 };
+    const secrets = new CloudV2ReadyCopySecrets(pool, keys), value = "npm_fixture_secret_b7d4";
+    await secrets.save(org, "withso/zeros", admin, { NPM_TOKEN: value });
+    await liveBase();
+    boat.script = (machine, command) => {
+      if (!command.includes("pnpm install")) return undefined;
+      boat.write(machine.id, typeof path === "string" ? path : path(value), content(value));
+      return { exitCode: 0, stdout: "", timedOut: false };
+    };
+    await copyBuilder({ secrets: (organizationId, repository) => secrets.open(organizationId, repository) }).tick();
+    expect(await row(1)).toMatchObject({ state: "failed", failureReason: "ready_copy_secret_left", failureDetail: detail });
+    expect(JSON.stringify(await copies.failures(org))).not.toContain(value);
+    expect(JSON.stringify((await pool.query("SELECT * FROM cloud_v2_ready_copies")).rows)).not.toContain(value);
+  });
+
+  it("fails a copy whose secret search did not finish", async () => {
+    const keys = { keys: { 1: randomBytes(32).toString("base64url") }, currentKeyVersion: 1 };
+    const secrets = new CloudV2ReadyCopySecrets(pool, keys);
+    await secrets.save(org, "withso/zeros", admin, { NPM_TOKEN: "npm_fixture_secret_c3e9" });
+    await liveBase();
+    boat.script = (_machine, command) => command.includes("grep -rlsIF") ? { exitCode: 0, stdout: "zeros-search-status=124\n", timedOut: false } : undefined;
+    await copyBuilder({ secrets: (organizationId, repository) => secrets.open(organizationId, repository) }).tick();
+    expect(await row(1)).toMatchObject({ state: "failed", failureReason: "ready_copy_secret_search_incomplete", failureDetail: null });
   });
 
   it("retires the copy of a repository removed from the Cloud Computer", async () => {

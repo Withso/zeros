@@ -9,6 +9,7 @@ import { useActiveOrganization, useTeams } from "../team/team-store";
 import { editableRepositories } from "./cloud-computer-model";
 import { computers, computerKey, patchRepository, TYPING_SAVE_MS, useRecipeDraft } from "./cloud-computer-store";
 import { SettingsGroup, SettingsSection } from "./settings-ui";
+import { BuildSecretsSection } from "./build-secrets-section";
 
 export type CloudRepositoryTab = "git" | "environment";
 export const CLOUD_REPOSITORY_TABS: ReadonlyArray<{ id: CloudRepositoryTab; label: string }> = [
@@ -92,6 +93,9 @@ function RepositoryScope({ userId, organizationId, canManage, repository, tab, o
       <div className="flex flex-col gap-4" {...(!active ? { inert: "" } : {})} aria-hidden={!active || undefined}>
         {notices}
         {part === "git" ? branch : setup}
+        {part === "setup" && data?.readyCopies && row && (
+          <BuildSecretsSection ownerKey={key} organizationId={organizationId} repository={repository} active={active} disabled={locked} />
+        )}
       </div>
     );
   return (

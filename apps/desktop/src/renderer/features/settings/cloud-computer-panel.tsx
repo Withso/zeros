@@ -150,6 +150,14 @@ function CloudComputerScope({ userId, organizationId, canManage, active, openRep
         )}
       </SettingsGroup>
 
+      {data?.readyCopies && (data.readyCopyFailures?.length ?? 0) > 0 && (
+        <SettingsGroup title="Ready copies" description="A repository whose ready copy failed keeps the previous one; new workspaces clone directly until one is ready.">
+          {data.readyCopyFailures!.map(failure => (
+            <SettingsRow key={failure.repository} label={failure.repository} hint={readyCopyFailureHint(failure.reason, failure.detail)} />
+          ))}
+        </SettingsGroup>
+      )}
+
       {data?.readyCopies && (
         <InstallScript key={data.recipeRevision ?? 0} saved={data.installScript ?? ""} disabled={locked} active={active}
           onSave={script => void saveScript(script)} />
@@ -177,6 +185,16 @@ function CloudComputerScope({ userId, organizationId, canManage, active, openRep
       </SettingsGroup>}
     </div>
   );
+}
+
+/** One line naming what failed and, for a secret left on disk, where and how to avoid it. */
+export function readyCopyFailureHint(reason: string, detail: string | null): string {
+  if (reason === "ready_copy_secret_left")
+    return `A build secret was left in ${detail ?? "a file"}. Read it from the environment in setup; don't write it to a file.`;
+  if (reason === "ready_copy_secret_search_incomplete") return "The search for build secrets left on the disk did not finish. Build again.";
+  if (reason === "ready_copy_setup_failed") return "Setup failed. Check the setup command, then build again.";
+  if (reason === "ready_copy_clone_failed") return "The repository could not be cloned. Check its GitHub access, then build again.";
+  return "The ready copy could not be built. Build again.";
 }
 
 const INSTALL_SCRIPT_HINT = "Runs once in each build, as the workspace user, before the Cloud Computer is saved. Changes apply after the next build.";

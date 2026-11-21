@@ -65,6 +65,13 @@ export class CloudV2ReadyCopySecrets {
     } finally { key.fill(0); bytes.fill(0); }
   }
 
+  /** Sets and removes single names, keeping the rest; values never leave the server. */
+  async update(organizationId: string, repository: string, userId: string, change: { set?: ReadyCopySecrets | undefined; remove?: readonly string[] | undefined }): Promise<string[]> {
+    const next = { ...await this.open(organizationId, repository), ...ReadyCopySecretsSchema.parse(change.set ?? {}) };
+    for (const name of change.remove ?? []) delete next[name];
+    return this.save(organizationId, repository, userId, next);
+  }
+
   async clear(organizationId: string, repository: string): Promise<void> {
     await withSystemTx(this.pool, tx => tx.query("DELETE FROM cloud_v2_ready_copy_secrets WHERE org_id=$1 AND repository=$2",
       [organizationId, repositoryKey(repository)]));

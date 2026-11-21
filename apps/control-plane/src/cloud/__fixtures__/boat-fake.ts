@@ -124,6 +124,10 @@ export class FakeBoat implements CloudV2Compute {
 
   async execLong(sandboxId: string, command: string, _timeoutSeconds: number, input?: string): Promise<CloudV2CommandResult> {
     const machine = this.live(sandboxId);
+    // Boat's long commands append the input redirect to the command line, so it
+    // reaches only the last simple command: a command taking input is one quoted invocation.
+    if (input !== undefined && !/^(?:sudo -n )?bash -l?c '(?:[^']|'\\'')*'(?: 2>&1)?$/.test(command))
+      throw new Error(`fake Boat: input would not reach this command: ${command.slice(0, 80)}`);
     const path = input === undefined ? null : `/tmp/zeros-command-input-${this.next++}/stdin`;
     // Written privately, then removed before the command itself runs.
     if (path) { machine.files.set(path, input!); machine.files.delete(path); }
@@ -138,11 +142,14 @@ export class FakeBoat implements CloudV2Compute {
     if (command.includes("rm -rf /tmp/zeros-command-input-* /tmp/zeros-job-*"))
       for (const path of [...machine.files.keys()]) if (/^\/tmp\/zeros-(?:command-input|job)-/.test(path)) machine.files.delete(path);
     // The ready copy secret search (READY_COPY_SECRET_SEARCH_COMMAND): patterns arrive on standard input.
-    if (command.startsWith("grep -rlIF -f - /home/user /tmp")) {
+    if (command.includes("grep -rlsIF -f - ")) {
+      const roots = /grep -rlsIF -f - ([^|]*) \|/.exec(command)![1]!.trim().split(" ");
       const patterns = (input ?? "").split("\n").filter(Boolean);
-      const hit = [...machine.files].find(([path, content]) => /^\/(?:home\/user|tmp)\//.test(path) && patterns.some(pattern => content.includes(pattern)));
+      const hit = [...machine.files].find(([path, content]) => roots.some(root => path.startsWith(`${root}/`)) && patterns.some(pattern => content.includes(pattern)));
       this.commands.push({ machineId: sandboxId, command, ...(input === undefined ? {} : { input }) });
-      return { exitCode: 0, stdout: hit ? `${hit[0]}\n` : "", timedOut: false };
+      const scripted = await this.script?.(machine, command, input);
+      if (scripted) return scripted;
+      return { exitCode: 0, stdout: `${hit ? `${hit[0]}\n` : ""}zeros-search-status=${hit ? 141 : 1}\n`, timedOut: false };
     }
     const scripted = await this.script?.(machine, command, input);
     if (scripted) return scripted;

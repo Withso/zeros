@@ -61,6 +61,14 @@ describe("Cloud Computer settings panel", () => {
     expect(page).not.toContain("Repositories");
   });
 
+  it("names where a ready copy kept a build secret and how to avoid it", () => {
+    state.data = { ...state.data!, readyCopies: true, installScript: null, readyCopyFailures: [
+      { repository: "withso/zeros", generation: 2, reason: "ready_copy_secret_left", detail: "/home/user/withso/zeros/.npmrc", finishedAt: ago(day) }] };
+    const page = text(render());
+    expect(page).toContain("Ready copies");
+    expect(page.replace(/&#x27;/g, "'")).toContain("A build secret was left in /home/user/withso/zeros/.npmrc. Read it from the environment in setup; don't write it to a file.");
+  });
+
   it("shows members the install script read-only, managed by admins", () => {
     state.role = "member";
     state.data = { installScript: "sudo -n apt-get install -y jq", recipeRevision: 2 } as unknown as CloudV2Computer;

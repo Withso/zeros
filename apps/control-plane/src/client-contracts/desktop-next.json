@@ -1489,6 +1489,50 @@
                 "type": "null"
               }
             ]
+          },
+          "readyCopyFailures": {
+            "maxItems": 200,
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "repository": {
+                  "type": "string",
+                  "maxLength": 200
+                },
+                "generation": {
+                  "type": "integer",
+                  "minimum": -9007199254740991,
+                  "maximum": 9007199254740991
+                },
+                "reason": {
+                  "type": "string",
+                  "maxLength": 64
+                },
+                "detail": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "maxLength": 1100
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "finishedAt": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "repository",
+                "generation",
+                "reason",
+                "detail",
+                "finishedAt"
+              ],
+              "additionalProperties": {}
+            }
           }
         },
         "required": [

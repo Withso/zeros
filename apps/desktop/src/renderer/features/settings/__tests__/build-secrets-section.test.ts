@@ -1,0 +1,21 @@
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
+import { describe, expect, it, vi } from "vitest";
+
+vi.mock("../../../state/use-cached-read", () => ({
+  useCachedRead: () => ({ data: ["NPM_TOKEN"], error: null, loading: false, refresh: () => {} }),
+}));
+
+import { BuildSecretsSection } from "../build-secrets-section";
+
+describe("build secrets", () => {
+  it("lists names only, takes a value write-only, and says short values are not searched for", () => {
+    const html = renderToStaticMarkup(createElement(BuildSecretsSection, { ownerKey: "k", organizationId: "11111111-1111-4111-8111-111111111111",
+      repository: "withso/zeros", active: true, disabled: false }));
+    expect(html).toContain("NPM_TOKEN");
+    expect(html).toContain('aria-label="Remove NPM_TOKEN"');
+    expect(html).toMatch(/type="password"[^>]*aria-label="Build secret value"|aria-label="Build secret value"[^>]*type="password"/);
+    expect(html).toContain("Values shorter than 4 characters are not searched for.");
+    expect(html).toContain("Don&#x27;t write a value to a file");
+  });
+});

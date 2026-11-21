@@ -319,6 +319,9 @@ export const CloudV2ComputerReplySchema = z.object({
   /** Ready copies are on: builds make the base, and repositories are not listed. */
   readyCopies: z.literal(true).optional(),
   installScript: z.string().max(16_000).nullable().optional(),
+  /** Ready copies: each repository's latest failed copy; detail is a path at most. */
+  readyCopyFailures: z.array(z.object({ repository: z.string().max(200), generation: z.number().int(), reason: z.string().max(64),
+    detail: z.string().max(1100).nullable(), finishedAt: z.string() }).passthrough()).max(200).optional().catch(undefined),
 });
 export type CloudV2Computer = z.infer<typeof CloudV2ComputerReplySchema>;
 const SavedRecipeSchema = z.object({ recipe: RecipeSchema, recipeRevision: z.number().int().nonnegative() });
@@ -390,6 +393,20 @@ export async function getCloudV2InstallScript(organizationId: string) {
 export async function saveCloudV2InstallScript(organizationId: string, installScript: string | null, revision: number) {
   return cloudAccountRequest(`/v1/cloud-v2/organizations/${uuid.parse(organizationId)}/computer/install-script`,
     InstallScriptSchema, { body: { installScript, revision }, idempotencyKey: key(), method: "PUT" });
+}
+
+const BuildSecretNamesSchema = z.object({ names: z.array(z.string().max(128)).max(64) });
+const secretsPath = (organizationId: string, repository: string) => {
+  const [owner, name] = repository.split("/");
+  return `/v1/cloud-v2/organizations/${uuid.parse(organizationId)}/computer/repositories/${encodeURIComponent(owner ?? "")}/${encodeURIComponent(name ?? "")}/build-secrets`;
+};
+/** Ready copies: the names of a repository's build secrets; values never come back. */
+export async function getCloudV2BuildSecretNames(organizationId: string, repository: string) {
+  return (await cloudAccountRequest(secretsPath(organizationId, repository), BuildSecretNamesSchema)).names;
+}
+export async function updateCloudV2BuildSecrets(organizationId: string, repository: string, change: { set?: Record<string, string>; remove?: string[] }) {
+  return (await cloudAccountRequest(secretsPath(organizationId, repository), BuildSecretNamesSchema,
+    { body: change, idempotencyKey: key(), method: "PATCH" })).names;
 }
 
 export async function activateCloudV2Build(organizationId: string, buildId: string) {

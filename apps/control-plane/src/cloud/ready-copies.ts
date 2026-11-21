@@ -49,21 +49,21 @@ export type CloudV2ReadyCopy = {
   id: string; organizationId: string; repository: string; repositoryId: string; generation: number; state: ReadyCopyState;
   idempotencyKey: string; machineId: string | null; machinePending: boolean; builtFromBase: string | null;
   computerBuildId: string | null; createdBy: string | null; branch: string | null; commit: string | null;
-  failureReason: string | null; stale: boolean; refresh: boolean; machineDeletedAt: Date | null;
+  failureReason: string | null; failureDetail: string | null; stale: boolean; refresh: boolean; machineDeletedAt: Date | null;
   stoppedAt: Date | null; lastForkedAt: Date | null; createdAt: Date; startedAt: Date | null; finishedAt: Date | null;
 };
 type Row = {
   id: string; org_id: string; repository: string; repository_id: string; generation: number; state: ReadyCopyState;
   idempotency_key: string; machine_id: string | null; machine_pending: boolean; built_from_base: string | null;
   computer_build_id: string | null; created_by: string | null; branch: string | null; commit_sha: string | null;
-  failure_reason: string | null; stale: boolean; refresh: boolean; machine_deleted_at: Date | null;
+  failure_reason: string | null; failure_detail: string | null; stale: boolean; refresh: boolean; machine_deleted_at: Date | null;
   stopped_at: Date | null; last_forked_at: Date | null; created_at: Date; started_at: Date | null; finished_at: Date | null;
 };
 const copy = (row: Row): CloudV2ReadyCopy => ({
   id: row.id, organizationId: row.org_id, repository: row.repository, repositoryId: row.repository_id, generation: row.generation,
   state: row.state, idempotencyKey: row.idempotency_key, machineId: row.machine_id, machinePending: row.machine_pending,
   builtFromBase: row.built_from_base, computerBuildId: row.computer_build_id, createdBy: row.created_by, branch: row.branch,
-  commit: row.commit_sha, failureReason: row.failure_reason, stale: row.stale, refresh: row.refresh,
+  commit: row.commit_sha, failureReason: row.failure_reason, failureDetail: row.failure_detail, stale: row.stale, refresh: row.refresh,
   machineDeletedAt: row.machine_deleted_at, stoppedAt: row.stopped_at,
   lastForkedAt: row.last_forked_at, createdAt: row.created_at, startedAt: row.started_at, finishedAt: row.finished_at,
 });
@@ -132,6 +132,19 @@ export class CloudV2ReadyCopies {
     return rows.map(copy);
   }
 
+  /** Each repository's latest generation that failed after its last ready
+   * one, for the Cloud Computer page. Detail is a path at most. */
+  async failures(organizationId: string): Promise<{ repository: string; generation: number; reason: string; detail: string | null; finishedAt: string }[]> {
+    const { rows } = await this.tx(tx => tx.query<{ repository: string; generation: number; failure_reason: string; failure_detail: string | null; finished_at: Date }>(
+      `SELECT DISTINCT ON (f.repository) f.repository, f.generation, f.failure_reason, f.failure_detail, f.finished_at
+       FROM cloud_v2_ready_copies f WHERE f.org_id=$1 AND f.state='failed' AND f.failure_reason IS NOT NULL AND f.finished_at IS NOT NULL
+         AND NOT EXISTS (SELECT 1 FROM cloud_v2_ready_copies n WHERE n.org_id=f.org_id AND n.repository=f.repository
+           AND n.generation>f.generation AND n.state IN ('ready','retired'))
+       ORDER BY f.repository, f.generation DESC`, [organizationId]));
+    return rows.map(row => ({ repository: row.repository, generation: row.generation, reason: row.failure_reason, detail: row.failure_detail,
+      finishedAt: row.finished_at.toISOString() }));
+  }
+
   /** Per repository: whether its first copy is still being made. */
   async status(organizationId: string): Promise<Map<string, "ready" | "building" | null>> {
     const { rows } = await this.tx(tx => tx.query<{ repository: string; ready: boolean; building: boolean }>(
@@ -192,11 +205,11 @@ export class CloudV2ReadyCopies {
   }
 
   /** The previous ready generation stays the one workspaces fork. */
-  async fail(id: string, reason: string, now = new Date()): Promise<void> {
+  async fail(id: string, reason: string, now = new Date(), detail: string | null = null): Promise<void> {
     const code = /^[a-z0-9_]{1,64}$/.test(reason) ? reason : "ready_copy_failed";
     await this.tx(tx => tx.query(
-      `UPDATE cloud_v2_ready_copies SET state='failed', failure_reason=$2, finished_at=$3, updated_at=$3 WHERE id=$1 AND state='building'`,
-      [id, code, now]));
+      `UPDATE cloud_v2_ready_copies SET state='failed', failure_reason=$2, failure_detail=$4, finished_at=$3, updated_at=$3 WHERE id=$1 AND state='building'`,
+      [id, code, now, detail?.slice(0, 1100) || null]));
   }
 
   /** The atomic pointer switch: the previous ready generation retires in the
@@ -397,7 +410,36 @@ export function readyCopySetupCommand(dir: string, setup: string, withSecrets: b
 export const READY_COPY_SCRUB_COMMAND = "rm -rf /tmp/zeros-command-input-* /tmp/zeros-job-* 2>/dev/null; sync";
 /** A setup can write a secret anywhere it may write. Before stop the disk is
  * searched for every value, read from standard input; only a path is printed. */
-export const READY_COPY_SECRET_SEARCH_COMMAND = "grep -rlIF -f - /home/user /tmp 2>/dev/null | head -n 1; true";
+/**
+ * Searched: the user's home and /tmp, and where tools, services and package
+ * managers keep configuration and data a setup run with sudo may write: /etc,
+ * /usr/local, /opt, /srv, /root and /var. All survive the stop and are in every
+ * fork. Not searched: the package-managed system trees (/usr outside
+ * /usr/local, /bin, /lib, /sbin, /boot); searching every file of the image
+ * would not finish within the command's time. Binary files are skipped (-I).
+ * The whole search is one quoted command, since only the last simple command
+ * of a line receives Boat's standard input; a search that does not finish
+ * fails the copy.
+ */
+export const READY_COPY_SECRET_PATHS = ["/home/user", "/tmp", "/etc", "/usr/local", "/opt", "/srv", "/root", "/var"] as const;
+export const READY_COPY_SECRET_SEARCH_COMMAND = `sudo -n bash -c ${shellQuote(
+  `timeout 540 grep -rlsIF -f - ${READY_COPY_SECRET_PATHS.join(" ")} | head -n 1; echo "zeros-search-status=\${PIPESTATUS[0]}"`)}`;
+/** Values shorter than this are not searched for: they would match ordinary files. */
+export const READY_COPY_SECRET_MIN_SEARCH_LENGTH = 4;
+
+/** The location shown to an admin: a path the search printed, with any part
+ * that is, or holds part of, a secret withheld. Never a value or file content. */
+export function readyCopySecretLocation(printed: string, values: readonly string[]): string {
+  const path = printed.split("\n")[0]!.trim();
+  if (!/^\/[\x20-\x7e]{1,1024}$/.test(path)) return "a file whose name cannot be shown";
+  const secret = (part: string) => values.some(value => part.includes(value) || (part.length >= READY_COPY_SECRET_MIN_SEARCH_LENGTH && value.includes(part)));
+  const parts = path.split("/").filter(Boolean), shown: string[] = [];
+  for (const part of parts) {
+    if (secret(part)) return `/${[...shown, "…"].join("/")} (a name there contains a build secret)`;
+    shown.push(part);
+  }
+  return secret(path) ? "a file whose path contains a build secret" : path;
+}
 
 export type ReadyCopyBuilderDeps = {
   copies: CloudV2ReadyCopies;
@@ -511,8 +553,9 @@ export class CloudV2ReadyCopyBuilder {
     try { await this.build(job); }
     catch (error) {
       const reason = code(error, "ready_copy_failed");
+      const detail = (error as { detail?: unknown } | null)?.detail;
       this.deps.logger?.warn(`[cloud-v2] ready copy ${job.repository} generation ${job.generation} failed (${reason})`);
-      await copies.fail(job.id, reason, this.now());
+      await copies.fail(job.id, reason, this.now(), typeof detail === "string" ? detail : null);
     } finally { clearInterval(beat); }
   }
 
@@ -553,14 +596,18 @@ export class CloudV2ReadyCopyBuilder {
       const tidy = await compute.exec(machineId, asZeros([`cd ${shellQuote(dir)}`,
         "if [ \"$(git status --porcelain --untracked-files=no | wc -l)\" -gt 0 ]; then git reset -q --hard HEAD; fi"]), 120);
       if (tidy.exitCode !== 0 || tidy.timedOut) throw failure("ready_copy_setup_failed");
-      values = Object.values(secrets).filter(value => value.length >= 4);
+      values = Object.values(secrets).filter(value => value.length >= READY_COPY_SECRET_MIN_SEARCH_LENGTH);
     }
     const scrub = await compute.exec(machineId, READY_COPY_SCRUB_COMMAND, 120);
     if (scrub.exitCode !== 0 || scrub.timedOut) throw failure("ready_copy_scrub_failed");
     if (values.length) {
       const found = await compute.execLong(machineId, READY_COPY_SECRET_SEARCH_COMMAND, 600, `${values.join("\n")}\n`);
+      const status = /zeros-search-status=(\d+)/.exec(found.stdout)?.[1];
+      const printed = found.stdout.replace(/\n?zeros-search-status=\d+\s*$/, "").trim();
       // Every member's fork would hold it: this generation never becomes ready.
-      if (found.exitCode !== 0 || found.timedOut || found.stdout.trim()) throw failure("ready_copy_secret_left");
+      if (printed) throw Object.assign(failure("ready_copy_secret_left"), { detail: readyCopySecretLocation(printed, values) });
+      // grep: 0 found, 1 none, 2 an unreadable file; 124 the time ran out.
+      if (found.exitCode !== 0 || found.timedOut || !status || !["0", "1", "2"].includes(status)) throw failure("ready_copy_secret_search_incomplete");
     }
     await compute.stop(machineId);
     const stoppedAt = await this.archived(machineId);

@@ -76,7 +76,8 @@ export type CloudV2RouteDeps = {
   /** Present only when ready copies are on (CloudV2Config.readyCopies). */
   readyCopies?: {
     status(organizationId: string): Promise<ReadonlyMap<string, "ready" | "building" | null>>;
-    secrets: Pick<CloudV2ReadyCopySecrets, "names" | "save" | "clear">;
+    failures(organizationId: string): Promise<{ repository: string; generation: number; reason: string; detail: string | null; finishedAt: string }[]>;
+    secrets: Pick<CloudV2ReadyCopySecrets, "names" | "save" | "clear" | "update">;
   };
   /** Repositories the organization's active Cloud Computer has installed; null without one. */
   installedRepositories(organizationId: string): Promise<readonly CloudV2InstalledRepository[] | null>;
@@ -371,7 +372,9 @@ export function createCloudV2Routes(deps: CloudV2RouteDeps): Hono {
   app.get("/v1/cloud-v2/organizations/:org/computer", async c => {
     const organizationId = org(c.req.param("org"));
     await deps.computers.requireAdmin(organizationId, c.get("user").id);
-    return c.json(await deps.computers.overview(organizationId));
+    const overview = await deps.computers.overview(organizationId);
+    // Ready copies: each repository's latest failure, a path at most, for the admin to fix.
+    return c.json(deps.readyCopies ? { ...overview, readyCopyFailures: await deps.readyCopies.failures(organizationId) } : overview);
   });
 
   /** Ready copies: members read the install script; owners and admins edit it. */
@@ -413,6 +416,17 @@ export function createCloudV2Routes(deps: CloudV2RouteDeps): Hono {
     if (!parsed.success) throw new HttpError(400, "invalid_request", "Invalid build secrets");
     c.header("Cache-Control", "no-store");
     return c.json({ names: await deps.readyCopies.secrets.save(organizationId, secretRepository(c.req.param("owner"), c.req.param("name")), userId, parsed.data.secrets) });
+  });
+
+  app.patch("/v1/cloud-v2/organizations/:org/computer/repositories/:owner/:name/build-secrets", json, async c => {
+    const organizationId = org(c.req.param("org")), userId = c.get("user").id;
+    if (!deps.readyCopies) throw new HttpError(404, "not_found", "Not found");
+    await deps.computers.requireAdmin(organizationId, userId);
+    const parsed = z.object({ set: ReadyCopySecretsSchema.optional(), remove: z.array(z.string().max(128)).max(64).optional() }).strict()
+      .safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) throw new HttpError(400, "invalid_request", "Invalid build secrets");
+    c.header("Cache-Control", "no-store");
+    return c.json({ names: await deps.readyCopies.secrets.update(organizationId, secretRepository(c.req.param("owner"), c.req.param("name")), userId, parsed.data) });
   });
 
   app.post("/v1/cloud-v2/organizations/:org/computer/builds", json, async c => {
