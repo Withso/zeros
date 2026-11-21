@@ -91,6 +91,9 @@ import {
   restoreScrollWithin,
 } from "../scroll-memory";
 import { prepareChatView } from "./chat-intent";
+import { onFocusedPaneSplitRequest } from "./pane-split-requests";
+import { PaneSessionBar } from "./session-switcher";
+import { buildSessionTree, sessionRootId } from "../../state/session-tree";
 import { warmCloudWorkspaceDestination } from "../../state/cloud-workspace-warmup";
 import { useInstantViewSwitch } from "../../shared/ui/use-instant-view-switch";
 import { useWorkspaceProvisioning } from "../../state/pending-workspaces";
@@ -689,6 +692,15 @@ export function ConversationPaneLayout({
     ],
   );
 
+  useEffect(() => onFocusedPaneSplitRequest((dir) => {
+    if (readOnly || !activeWorkspacePath) return;
+    if (dir !== "merge") { handleSplit(focusedPaneId, dir); return; }
+    // Moving a pane's last chat out collapses it.
+    const target = leafIds(layout.root).find(id => id !== focusedPaneId);
+    if (!target) return;
+    for (const chat of chatsByPane.get(focusedPaneId) ?? EMPTY_CHATS) moveChatToPane(activeWorkspacePath, chat.id, target);
+  }), [focusedPaneId, readOnly, handleSplit, activeWorkspacePath, layout, chatsByPane, moveChatToPane]);
+
   const handleDropOnPane = useCallback(
     (paneId: string, zone: DropZone, chatId: string) => {
       if (readOnly || !activeWorkspacePath) return;
@@ -1282,14 +1294,31 @@ function ChatPane({ paneId, ctx }: { paneId: string; ctx: PaneCtx }) {
     };
   }, [handlePaneActivation]);
 
+  const paneFolder = ctx.folder;
   // Native capture also reaches the portaled composer/terminal body. Only the
-  // pane containing keyboard focus owns Command+Left/Right.
+  // pane containing keyboard focus owns Command+Left/Right and Command+[/].
   useEffect(() => {
     const root = rootRef.current;
     if (!root) return;
     const handler = (event: KeyboardEvent) => {
       if (hasShortcutPriorityClaim() || navigationShortcutBlocked(event)) return;
       const shortcut = resolveNavigationShortcut(event);
+      if (shortcut?.kind === "parent-session") {
+        const state = useWorkspaceStore.getState();
+        if (state.activePage !== "workspace" || !state.activeChatId) return;
+        const tree = buildSessionTree(state.chats, paneFolder);
+        const parents = tree.roots.map(node => node.chat.id);
+        const current = parents.indexOf(sessionRootId(tree, state.activeChatId) ?? "");
+        if (current < 0) return;
+        const index = adjacentNavigationIndex(parents.length, current, shortcut.direction, true);
+        if (index === null) return;
+        event.preventDefault();
+        event.stopPropagation();
+        if (index === current) return;
+        root.focus({ preventScroll: true });
+        onSelectChat(parents[index]);
+        return;
+      }
       if (shortcut?.kind !== "chat-tab") return;
       const state = useWorkspaceStore.getState();
       if (state.activePage !== "workspace") return;
@@ -1301,38 +1330,17 @@ function ChatPane({ paneId, ctx }: { paneId: string; ctx: PaneCtx }) {
       event.stopPropagation();
       if (index === current) return;
       const nextId = paneChats[index].id;
-      // Move focus before hiding the old composer. Otherwise it remains the
-      // engaged input while the next chat mounts, blocking its autofocus; once
-      // Chromium blurs the inert layer to body, subsequent keys miss this pane.
-      // The strip survives the switch and also holds focus for read-only chats
-      // or a destination whose composer/terminal is not ready yet.
-      root.querySelector<HTMLElement>(`[data-chat-tab="true"][data-chat-id="${CSS.escape(nextId)}"]`)
-        ?.focus({ preventScroll: true });
+      // Move focus to the pane before hiding the old composer. Otherwise it
+      // remains the engaged input while the next chat mounts, blocking its
+      // autofocus; once Chromium blurs the inert layer to body, subsequent keys
+      // miss this pane. The pane also holds focus for read-only chats or a
+      // destination whose composer/terminal is not ready yet.
+      root.focus({ preventScroll: true });
       onSelectChat(nextId);
     };
     root.addEventListener("keydown", handler, true);
     return () => root.removeEventListener("keydown", handler, true);
-  }, [onSelectChat, paneChats]);
-
-  // Show the synthetic Untitled tab only while the whole WORKSPACE has
-  // no chats (the keeper is mid-spawn) — and only in the FIRST pane,
-  // where the keeper's spawn will land; a persisted split revisited
-  // with all chats archived would otherwise show one pill per pane.
-  const isFirstPane = paneId === firstLeafId(ctx.layout.root);
-  const showSyntheticUntitled =
-    !ctx.readOnly &&
-    paneChats.length === 0 &&
-    !ctx.workspaceHasChats &&
-    isFirstPane;
-
-  // The column's own controls belong to ONE strip each, or a split would
-  // duplicate them: the mode toggle rides the first pane (the column's
-  // top-left corner) and the workbench expand control the top-right pane, the
-  // seat it already occupies inside Workbench's header while that panel is
-  // open.
-  const stripLeading = isFirstPane ? ctx.stripLeading : null;
-  const stripTrailing =
-    paneId === topRightLeafId(ctx.layout.root) ? ctx.stripTrailing : null;
+  }, [onSelectChat, paneChats, paneFolder]);
 
   const splitRightAllowed = !ctx.readOnly && canSplit.right && !atPaneCap;
   const splitDownAllowed = !ctx.readOnly && canSplit.down && !atPaneCap;
@@ -1340,6 +1348,7 @@ function ChatPane({ paneId, ctx }: { paneId: string; ctx: PaneCtx }) {
   return (
     <section
       ref={rootRef}
+      tabIndex={-1}
       data-pane-root=""
       data-pane-focused={isFocused ? "true" : "false"}
       // --pane-bg is the window surface, bg1 on every pane, and no pane draws
@@ -1348,30 +1357,40 @@ function ChatPane({ paneId, ctx }: { paneId: string; ctx: PaneCtx }) {
       // owner's choice: fg1 and fg2 stay at WCAG AA, while fg3 in Light and
       // muted-fg in Dark dip below their floors there.
       className={cn(
-        "relative flex min-h-0 min-w-0 flex-1 flex-col bg-(--pane-bg)",
+        "relative flex min-h-0 min-w-0 flex-1 flex-col bg-(--pane-bg) outline-none",
         split && "*:transition-opacity *:duration-120 *:ease-out motion-reduce:*:transition-none",
         split && !isFocused && "*:opacity-80",
       )}
     >
-      <ChatTabs
-        readOnly={ctx.readOnly}
-        workspaceFolder={ctx.folder}
-        paneId={paneId}
-        chats={paneChats}
-        activeChatId={paneActiveChatId}
-        historyChats={ctx.historyChats}
-        showSyntheticUntitled={showSyntheticUntitled}
-        onSelectUntitled={ctx.onSelectUntitled}
-        onSelectChat={ctx.onSelectChat}
-        onPrefetchChat={ctx.onPrefetchChat}
-        onCloseTab={(chat, e) => ctx.onCloseTab(paneId, chat, e)}
-        onRestoreChat={(chat) => ctx.onRestoreChat(paneId, chat)}
-        onSplit={(dir) => ctx.onSplit(paneId, dir)}
-        canSplitRight={splitRightAllowed}
-        canSplitDown={splitDownAllowed}
-        leading={stripLeading}
-        trailing={stripTrailing}
-      />
+      {split && !ctx.readOnly && (
+        <PaneSessionBar
+          chat={paneChats.find((chat) => chat.id === paneActiveChatId) ?? null}
+          focused={isFocused}
+        />
+      )}
+      {/* An archived workspace's read-only history keeps its tab strip for
+          browsing saved and closed chats without reopening them. */}
+      {ctx.readOnly && (
+        <ChatTabs
+          readOnly
+          workspaceFolder={ctx.folder}
+          paneId={paneId}
+          chats={paneChats}
+          activeChatId={paneActiveChatId}
+          historyChats={ctx.historyChats}
+          showSyntheticUntitled={false}
+          onSelectUntitled={ctx.onSelectUntitled}
+          onSelectChat={ctx.onSelectChat}
+          onPrefetchChat={ctx.onPrefetchChat}
+          onCloseTab={(chat, e) => ctx.onCloseTab(paneId, chat, e)}
+          onRestoreChat={(chat) => ctx.onRestoreChat(paneId, chat)}
+          onSplit={(dir) => ctx.onSplit(paneId, dir)}
+          canSplitRight={false}
+          canSplitDown={false}
+          leading={null}
+          trailing={null}
+        />
+      )}
       <div className={cn("relative flex min-h-0 min-w-0 flex-1", CHAT_ASIDE_INSET_HOST_CLS)}>
         <div className="relative min-h-0 min-w-0 flex-1">
           {!paneActiveChatId && ctx.emptyContent && (

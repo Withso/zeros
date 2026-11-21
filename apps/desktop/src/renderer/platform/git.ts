@@ -265,6 +265,8 @@ export interface Workspace {
   present?: boolean;
   /** Known only for withChanges reads; counts the All Changes net comparison. */
   hasChanges?: boolean;
+  /** Local only: the workspace whose agent created this one (`zeros local`). */
+  parentWorkspaceId?: string | null;
   /** The cloud project it was created from, by its current name. */
   project?: { id: string; name: string };
   /** A cloud workspace of several repositories, the first being this row's own

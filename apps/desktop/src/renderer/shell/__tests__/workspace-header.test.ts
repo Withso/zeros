@@ -20,9 +20,13 @@ vi.mock("../../state/cloud-workspace-catalog", () => ({
     state.reads.push(key); return state.documents[key];
   },
 }));
+vi.mock("../conversation/session-switcher", () => ({
+  SessionSwitcher: ({ fallback }: { fallback: unknown }) => fallback,
+  SessionActionsMenu: () => null,
+}));
 vi.mock("../../state/use-active-workspace", () => ({ useActiveWorkspace: () => ({ workspace: null, folder: null }) }));
 vi.mock("../../state/use-projects", () => ({ useProjectForFolder: (folder: string) => state.projects[folder] ?? null }));
-vi.mock("../../state/workspace-store", () => ({ useWorkspaceStore: (select: (value: typeof state) => unknown) => select(state) }));
+vi.mock("../../state/workspace-store", () => ({ selectActiveFolder: () => null, useWorkspaceStore: (select: (value: typeof state) => unknown) => select(state) }));
 vi.mock("../workspace-tabs", () => ({ workspaceLabel: () => "Local branch" }));
 vi.mock("../../state/use-cloud-workspace-events", () => ({ useCloudWorkspaceEvents: () => null }));
 import { TooltipProvider } from "../../shared/ui/primitives";

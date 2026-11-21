@@ -33,6 +33,7 @@ import React, {
   useLayoutEffect,
   useMemo,
   useRef,
+  useState,
 } from "react";
 import {
   Blocks,
@@ -258,6 +259,38 @@ function useNativeRuntimeNotice(): void {
 
 const NO_HIDDEN_PLACEMENTS: readonly ("local" | "cloud")[] = [];
 
+const CHILD_INDENT_CLS = ["", "ml-3", "ml-6", "ml-8", "ml-10"] as const;
+
+/** A child workspace indents under its parent; a parent gets a collapsed
+ * "N child workspaces" disclosure below it. */
+function nestedWorkspaceRow(
+  item: Extract<SidebarWorkspaceItem, { kind: "workspace" }>,
+  row: React.ReactElement,
+  onToggle: (id: string) => void,
+): React.ReactElement {
+  const depth = item.depth ?? 0;
+  const count = item.childCount ?? 0;
+  if (!depth && !count) return row;
+  return (
+    <React.Fragment key={item.key}>
+      {depth ? <div className={cn("min-w-0", CHILD_INDENT_CLS[Math.min(depth, CHILD_INDENT_CLS.length - 1)])}>{row}</div> : row}
+      {count > 0 && (
+        <Button
+          variant="ghost"
+          size="compact"
+          className={cn("text-fg3 hover:text-fg2 min-w-0 justify-start gap-1 font-normal", CHILD_INDENT_CLS[Math.min(depth + 1, CHILD_INDENT_CLS.length - 1)])}
+          aria-expanded={item.expanded ? "true" : "false"}
+          onClick={() => onToggle(item.workspace.id)}
+          data-child-workspaces-toggle={item.workspace.id}
+        >
+          <ChevronRight className={cn("size-3.5 shrink-0 transition-transform", item.expanded && "rotate-90")} strokeWidth={1.5} aria-hidden="true" />
+          <span className="truncate">{count === 1 ? "1 child workspace" : `${count} child workspaces`}</span>
+        </Button>
+      )}
+    </React.Fragment>
+  );
+}
+
 export function AppSidebar({ hidden = false }: { hidden?: boolean }) {
   const activeResolution = useActiveWorkspace();
   const chats = useChats();
@@ -429,8 +462,15 @@ export function AppSidebar({ hidden = false }: { hidden?: boolean }) {
     [chats, realWorkspaces],
   );
 
-  const sections = useMemo(() => {
+  const [expandedWorkspaceIds, setExpandedWorkspaceIds] = useState<ReadonlySet<string>>(() => new Set());
+  const toggleChildWorkspaces = useCallback((id: string) => setExpandedWorkspaceIds((prev) => {
+    const next = new Set(prev);
+    if (!next.delete(id)) next.add(id);
+    return next;
+  }), []);
+  const buildSections = useCallback((expanded: ReadonlySet<string>) => {
     const args = {
+      expandedWorkspaceIds: expanded,
       filter: listFilter,
       sort: preferences.sort,
       repositoryIds,
@@ -444,6 +484,7 @@ export function AppSidebar({ hidden = false }: { hidden?: boolean }) {
       ? buildSidebarSharingSections({ ...args, sectionOf })
       : [{ id: null, label: "", entries: buildSidebarWorkspaceEntries(args) }];
   }, [dedupedPendingCreates, listFilter, preferences.sort, repositoryIds, hiddenPlacements, activeAtByWorkspaceId, projects, realWorkspaces, sharing, sectionOf, unifiedPlacements]);
+  const sections = useMemo(() => buildSections(expandedWorkspaceIds), [buildSections, expandedWorkspaceIds]);
   const entries = useMemo(() => sections.flatMap(section => section.entries), [sections]);
   const listedItems = useMemo(() => sidebarWorkspaceItems(entries), [entries]);
   const navigableWorkspaces = useMemo(
@@ -452,11 +493,19 @@ export function AppSidebar({ hidden = false }: { hidden?: boolean }) {
   );
   // Repository filtering also bounds Back/Forward destinations; collapse does
   // not remove a destination from history.
+  // Child workspaces under a collapsed parent stay history destinations,
+  // bounded by the same repository, placement and list filters.
+  const historyWorkspaces = useMemo(() => {
+    if (!realWorkspaces.some(workspace => workspace.parentWorkspaceId)) return navigableWorkspaces;
+    const allExpanded = new Set(realWorkspaces.map(workspace => workspace.id));
+    return sidebarWorkspaceItems(buildSections(allExpanded).flatMap(section => section.entries))
+      .flatMap(item => item.kind === "workspace" ? [item.workspace] : []);
+  }, [buildSections, navigableWorkspaces, realWorkspaces]);
   const historyScope = useMemo<SidebarHistoryScope>(() => ({
     projects,
-    workspaces: navigableWorkspaces,
+    workspaces: historyWorkspaces,
     pendingCreates: listedItems.flatMap(item => item.kind === "pending" ? [item.pending] : []),
-  }), [listedItems, navigableWorkspaces, projects]);
+  }), [listedItems, historyWorkspaces, projects]);
 
   // A cold repository switch is allowed to publish its remembered folder
   // before the workspace list settles. Only a completed exact-key snapshot may
@@ -777,7 +826,7 @@ export function AppSidebar({ hidden = false }: { hidden?: boolean }) {
   const renderItem = (item: SidebarWorkspaceItem, grouped: boolean) => {
     const selectionKey = sidebarItemSelectionKey(item);
     const active = activeSelectionKey === selectionKey;
-    return item.kind === "workspace" ? (
+    return item.kind === "workspace" ? nestedWorkspaceRow(item, (
       <SidebarWorkspaceRow
         key={item.key}
         workspace={item.workspace}
@@ -805,7 +854,7 @@ export function AppSidebar({ hidden = false }: { hidden?: boolean }) {
             : undefined
         }
       />
-    ) : (
+    ), toggleChildWorkspaces) : (
       <PendingSidebarWorkspaceRow
         key={item.key}
         branch={item.pending.branch ?? undefined}

@@ -337,6 +337,7 @@ import {
 import {
   listChats,
   listChatsSince,
+  withChatLineage,
   summariesForFolder,
   chatTitleSeeds,
   getChat,
@@ -3951,7 +3952,7 @@ export class WorkspaceService {
       // are deliberately NOT in WRITE_OPS — direct for local AND remote. ──
       case "chats.list": {
         const read = () => {
-          const chats = listChats();
+          const chats = withChatLineage(listChats());
           return {
             chats: remote ? this.redactChatsForRemote(chats) : chats,
             // A full list cannot represent deletions by itself. Pair it with the
@@ -3984,7 +3985,7 @@ export class WorkspaceService {
         return { rev: headRev() };
       case "db.pull": {
         const since = optNum(params, "since") ?? 0;
-        const chats = listChatsSince(since);
+        const chats = withChatLineage(listChatsSince(since));
         const visibleChats = remote ? this.redactChatsForRemote(chats) : chats;
         // The MESSAGE half of delta sync: transcript rows changed since the
         // cursor + chats whose transcript was cleared/truncated (msgreset

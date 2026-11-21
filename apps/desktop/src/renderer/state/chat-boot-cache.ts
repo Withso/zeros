@@ -113,6 +113,9 @@ export function sanitizeCachedChat(value: unknown): ChatThread | null {
     ...(typeof raw.sourceChatId === "string"
       ? { sourceChatId: raw.sourceChatId }
       : {}),
+    ...(typeof raw.parentChatId === "string" && typeof raw.rootChatId === "string"
+      ? { parentChatId: raw.parentChatId, rootChatId: raw.rootChatId }
+      : {}),
   };
 }
 

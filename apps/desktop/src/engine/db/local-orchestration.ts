@@ -141,6 +141,44 @@ export function localFamilyMembers(chatId: string): string[] {
   return [...out];
 }
 
+export interface LocalChatLineage {
+  parentChatId: string;
+  rootChatId: string;
+}
+
+/** Every recorded parent link, keyed by the child chat id. */
+export function localLineageIndex(): Map<string, LocalChatLineage> {
+  const rows = openZerosDb()
+    .prepare("SELECT chat_id, parent_chat_id, root_chat_id FROM local_orchestration_links")
+    .all() as Array<{ chat_id: string; parent_chat_id: string; root_chat_id: string }>;
+  return new Map(rows.map((row) => [row.chat_id, { parentChatId: row.parent_chat_id, rootChatId: row.root_chat_id }]));
+}
+
+export interface LocalWorkspaceOrigin {
+  createdByChatId: string;
+  /** The workspace that owned the creating chat; null when it had none. */
+  parentWorkspaceId: string | null;
+}
+
+/** Workspaces an agent created, keyed by workspace id. */
+export function localWorkspaceOrigins(): Map<string, LocalWorkspaceOrigin> {
+  const rows = openZerosDb()
+    .prepare(
+      `SELECT f.workspace_id, f.created_by_chat_id, c.workspace_id AS parent_workspace_id
+         FROM local_orchestration_family_workspaces f
+         LEFT JOIN chats c ON c.id = f.created_by_chat_id
+        ORDER BY f.created_at ASC`,
+    )
+    .all() as Array<{ workspace_id: string; created_by_chat_id: string; parent_workspace_id: string | null }>;
+  const out = new Map<string, LocalWorkspaceOrigin>();
+  for (const row of rows) {
+    if (out.has(row.workspace_id)) continue;
+    const parent = row.parent_workspace_id && row.parent_workspace_id !== row.workspace_id ? row.parent_workspace_id : null;
+    out.set(row.workspace_id, { createdByChatId: row.created_by_chat_id, parentWorkspaceId: parent });
+  }
+  return out;
+}
+
 export function localChildrenOf(chatId: string): string[] {
   return (
     openZerosDb()

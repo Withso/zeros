@@ -459,4 +459,9 @@ export type ChatThread = {
    * current fork flow separately stages a bounded transcript attachment in
    * the new composer. */
   sourceChatId?: string;
+  /** The chat whose agent started this one (`zeros local`). Engine-owned
+   * lineage: read from the chat list, never written back. */
+  parentChatId?: string;
+  /** The top of this chat's tree; set together with `parentChatId`. */
+  rootChatId?: string;
 };

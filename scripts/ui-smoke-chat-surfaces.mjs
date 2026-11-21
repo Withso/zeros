@@ -18,7 +18,7 @@ export async function runChatSurfacesSmoke({ page, check, harnessBase }) {
   await page.setViewportSize({ width: 1600, height: 1000 });
   await page.goto(`${harnessBase}/harness-app-sidebar.html?shortcuts`, { waitUntil: "networkidle" });
   await page.keyboard.press("Meta+Digit1");
-  await expect(page.getByRole("tablist", { name: "Chat sessions" }).getByRole("tab")).toHaveCount(3);
+  await expect(page.locator("[data-session-switcher]")).toBeVisible();
 
   // Side column (2026-11-09, flush): its tab row and the open tab fill the
   // column to the window's right and bottom edges, and its 1px border1 left
@@ -268,8 +268,8 @@ export async function runChatSurfacesSmoke({ page, check, harnessBase }) {
   near(undocked.scroller, undocked.pane);
 
   const panes = page.locator("[data-pane-root]");
-  await page.getByRole("button", { name: "Pane options", exact: true }).click();
-  await page.getByRole("menuitem", { name: "Split Right", exact: true }).click();
+  await page.getByRole("button", { name: "Session actions", exact: true }).click();
+  await page.getByRole("menuitem", { name: "Split right", exact: true }).click();
   await expect(panes).toHaveCount(2);
 
   await settledDims();
@@ -397,8 +397,13 @@ export async function runChatSurfacesSmoke({ page, check, harnessBase }) {
   check("Keyboard: focusing the Ask pill focuses its pane and moves the caret into its composer; reduced motion swaps without movement", true);
 
   // Split the right pane down; the new lower-right pane takes focus.
-  await panes.nth(1).getByRole("button", { name: "Pane options", exact: true }).click();
-  await page.getByRole("menuitem", { name: "Split Down", exact: true }).click();
+  // The header's session menu splits the focused pane.
+  if ((await panes.nth(1).getAttribute("data-pane-focused")) !== "true") {
+    await panes.nth(1).locator('[data-composer-ask="pill"] [data-composer-ask-pill]').click();
+  }
+  await expect(panes.nth(1)).toHaveAttribute("data-pane-focused", "true");
+  await page.getByRole("button", { name: "Session actions", exact: true }).click();
+  await page.getByRole("menuitem", { name: "Split down", exact: true }).click();
   await expect(panes).toHaveCount(3);
   await expect(panes.nth(2)).toHaveAttribute("data-pane-focused", "true");
   await settledDims();

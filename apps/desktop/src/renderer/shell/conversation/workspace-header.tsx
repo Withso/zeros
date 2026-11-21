@@ -5,7 +5,7 @@ import { getOrganizationStoreGeneration } from "../../features/team/team-store";
 import { cloudCatalogGeneration, cloudWorkspaceDocument, subscribeCloudWorkspaces } from "../../state/cloud-workspace-catalog";
 import { isLocalMainWorkspace } from "../../state/local-main-workspace";
 import { useActiveWorkspace } from "../../state/use-active-workspace";
-import { useWorkspaceStore } from "../../state/workspace-store";
+import { selectActiveFolder, useWorkspaceStore } from "../../state/workspace-store";
 import { PanelHeader } from "../../shared/ui/primitives";
 import { workspaceLabel } from "../workspace-tabs";
 import {
@@ -14,6 +14,7 @@ import {
 } from "../../shared/lib/workspace-name";
 import { CloudWorkspaceDetails } from "./cloud-workspace-details";
 import { LocalWorkspaceDetails } from "./local-workspace-details";
+import { SessionActionsMenu, SessionSwitcher } from "./session-switcher";
 import { WorkspaceIdentityLabel } from "./workspace-identity";
 import { TeamSharingHeaderControls } from "./team-sharing-header-controls";
 
@@ -54,11 +55,21 @@ export function WorkspaceHeader({ folder, ...props }: {
   trailing?: ReactNode;
   onRevealWorkbench?: () => void;
 }) {
+  const sessionFolder = useSessionFolder(folder, props.readOnly);
   return folder && parseCloudWorkspaceKey(folder)
     ? <CloudHeader key={`${getOrganizationStoreGeneration()}:${cloudCatalogGeneration()}:${folder}`} {...props} folder={folder} />
-    : <WorkspaceHeaderView {...props} identity={folder
-      ? <LocalWorkspaceDetails key={folder} folder={folder} name={props.name} title={props.title} branch={props.branch} />
+    : <WorkspaceHeaderView {...props} sessionFolder={sessionFolder} identity={folder && sessionFolder
+      ? <SessionSwitcher folder={sessionFolder} placement="local" readOnly={props.readOnly}
+          fallback={<LocalWorkspaceDetails key={folder} folder={folder} name={props.name} title={props.title} branch={props.branch} />} />
       : <WorkspaceIdentityLabel name={props.name} title={props.title} placement="local" />} />;
+}
+
+/** Panes key chats by the exact folder, which may be a subdirectory of the
+ * owning workspace; the session row follows the same identity. */
+function useSessionFolder(folder: string | null, readOnly?: boolean): string | null {
+  const active = useWorkspaceStore(selectActiveFolder);
+  if (readOnly || !folder || !active || active === folder) return folder;
+  return active.startsWith(`${folder}/`) || active.startsWith(`${folder}\\`) ? active : folder;
 }
 
 function CloudHeader({ folder, ...props }: Parameters<typeof WorkspaceHeader>[0] & { folder: string }) {
@@ -69,14 +80,19 @@ function CloudHeader({ folder, ...props }: Parameters<typeof WorkspaceHeader>[0]
   const workspace = useSyncExternalStore(subscribe, read, read);
   const number = workspaceNumberName(workspace);
   const title = workspace ? cloudWorkspaceDocumentTitle(workspace) : props.title;
-  return <WorkspaceHeaderView {...props} identity={
-    <CloudWorkspaceDetails folder={folder} name={number ?? workspace?.name ?? props.name} title={title} workspace={workspace} />
+  return <WorkspaceHeaderView {...props} sessionFolder={folder} identity={
+    <div className="flex min-w-0 items-center gap-1">
+      <CloudWorkspaceDetails folder={folder} name={number ?? workspace?.name ?? props.name} title={title} workspace={workspace} />
+      <SessionSwitcher folder={folder} placement="cloud" showPlacement={false} readOnly={props.readOnly} fallback={null} />
+    </div>
   } sharing={workspace?.sharing && <TeamSharingHeaderControls target={target} workspace={workspace} active={active} />} />;
 }
 
-export function WorkspaceHeaderView({ identity, actions, readOnly, windowControlsInset, trailing, sharing }: {
+export function WorkspaceHeaderView({ identity, sessionFolder, actions, readOnly, windowControlsInset, trailing, sharing }: {
   /** The name, then where the workspace lives. */
   identity: ReactNode;
+  /** The folder whose session row gets the ⋯ menu (splits). */
+  sessionFolder?: string | null;
   /** Team sharing's presence, Follow and Pin: shown to readers, too. */
   sharing?: ReactNode;
   actions?: ReactNode;
@@ -88,7 +104,7 @@ export function WorkspaceHeaderView({ identity, actions, readOnly, windowControl
   // pane's own fill and corners set it apart.
   return <PanelHeader size="window" divider={false} aria-label="Workspace header" data-workspace-header="" data-tauri-drag-region="">
     {windowControlsInset && <span className="block h-full w-[108px] shrink-0" aria-hidden="true" data-window-controls-reserve="" />}
-    <div className="flex min-w-0 flex-1 items-center">{identity}</div>
+    <div className="flex min-w-0 flex-1 items-center gap-1">{identity}<span className="ml-auto" />{sessionFolder && <SessionActionsMenu folder={sessionFolder} readOnly={readOnly} />}</div>
     {sharing}
     {!readOnly && <div className="flex shrink-0 items-center gap-1" data-workspace-header-actions="">{actions}{trailing}</div>}
   </PanelHeader>;

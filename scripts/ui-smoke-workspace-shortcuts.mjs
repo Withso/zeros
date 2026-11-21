@@ -11,6 +11,24 @@ export async function runWorkspaceShortcutsSmoke({ page, check, harnessBase, scr
   const order = () => rows.evaluateAll(nodes => nodes.map(node => node.dataset.workspaceId));
   const row = id => page.locator(`[data-workspace-id="${id}"]`);
   const composer = () => page.locator('[data-pane-focused="true"] .composer-pm:visible');
+  const activeChat = async () => (await state()).chatId;
+  const loadWorkspaceStore = () => page.evaluate(() => window.__shortcutWorkspaceStore ??= import("/apps/desktop/src/renderer/state/workspace-store.ts")
+    .then(module => { window.__shortcutWorkspaceModule = module; window.__shortcutUseWorkspaceStore = module.useWorkspaceStore; }));
+  // The active folder's chats in pane order (oldest first).
+  const paneChatIds = async () => {
+    await loadWorkspaceStore();
+    return page.evaluate(() => {
+      const state = window.__shortcutWorkspaceModule.useWorkspaceStore.getState();
+      const folder = window.__shortcutWorkspaceModule.selectActiveFolder(state);
+      return state.chats.filter(chat => chat.folder === folder && !chat.archived)
+        .sort((a, b) => a.createdAt - b.createdAt).map(chat => chat.id);
+    });
+  };
+  const selectChat = async id => {
+    await loadWorkspaceStore();
+    await page.evaluate(id => window.__shortcutWorkspaceModule.useWorkspaceStore.getState().dispatch({ type: "SET_ACTIVE_CHAT", id }), id);
+    await expect.poll(activeChat).toBe(id);
+  };
   const selectGroup = async name => {
     await page.getByRole("button", { name: "Filter workspaces", exact: true }).click();
     await page.getByRole("menuitemradio", { name, exact: true }).click();
@@ -78,9 +96,9 @@ export async function runWorkspaceShortcutsSmoke({ page, check, harnessBase, scr
   await expect(composer()).toHaveText("Keep this chat draft");
   check("Command+N opens Create for the current repository; workspace keys also work on Create and with a hidden sidebar", true);
 
-  const chatTabs = page.getByRole("tablist", { name: "Chat sessions" }).getByRole("tab");
-  await expect(chatTabs).toHaveCount(3);
-  await chatTabs.nth(0).click();
+  const chatIds = await paneChatIds();
+  expect(chatIds).toHaveLength(3);
+  await selectChat(chatIds[0]);
   await composer().focus();
   // Do not repair focus between presses: the outgoing composer becomes inert
   // during selection, and the shortcut must hand off before that happens.
@@ -88,19 +106,17 @@ export async function runWorkspaceShortcutsSmoke({ page, check, harnessBase, scr
     ["ArrowRight", 1], ["ArrowRight", 2], ["ArrowRight", 0], ["ArrowLeft", 2],
   ]) {
     await page.keyboard.press(`Meta+${key}`);
-    await expect(chatTabs.nth(index)).toHaveAttribute("aria-selected", "true");
+    await expect.poll(activeChat).toBe(chatIds[index]);
     await expect(composer()).toBeFocused();
     if (index === 0) await expect(composer()).toHaveText("Keep this chat draft");
   }
   check("Command+Left/Right preserves composer focus across consecutive chat switches and wrapping", true);
 
-  const chatIds = await chatTabs.evaluateAll(nodes => nodes.map(node => node.dataset.chatId));
   // CI saw "Execution context was destroyed" here with no reload or navigation
   // in the incident log. Playwright also reports a page promise collected
   // before it settles that way, so the import's promise stays reachable from
   // window and the key delivery below is synchronous.
-  await page.evaluate(() => window.__shortcutWorkspaceStore ??= import("/apps/desktop/src/renderer/state/workspace-store.ts")
-    .then(module => { window.__shortcutUseWorkspaceStore = module.useWorkspaceStore; }));
+  await loadWorkspaceStore();
   const rapidSelections = await page.evaluate(() => {
     const useWorkspaceStore = window.__shortcutUseWorkspaceStore;
     const selections = [];
@@ -116,21 +132,19 @@ export async function runWorkspaceShortcutsSmoke({ page, check, harnessBase, scr
     } finally { unsubscribe(); }
   });
   expect(rapidSelections).toEqual([chatIds[0], chatIds[1]]);
-  await expect(chatTabs.nth(1)).toHaveAttribute("aria-selected", "true");
+  await expect.poll(activeChat).toBe(chatIds[1]);
   await expect(composer()).toBeFocused();
   check("Rapid chat shortcuts publish exactly one selection per key without restoring a stale tab", true);
 
-  await chatTabs.nth(0).focus();
-  await page.keyboard.press("ArrowRight");
-  await expect(chatTabs.nth(1)).toBeFocused();
-  for (const [key, index] of [["ArrowRight", 2], ["ArrowRight", 0], ["ArrowLeft", 2]]) {
+  await composer().focus();
+  // Parent sessions: every chat here is a parent. Consecutive presses must
+  // keep keyboard focus in the pane without another click.
+  for (const [key, index] of [["BracketRight", 2], ["BracketRight", 0], ["BracketLeft", 2]]) {
     await page.keyboard.press(`Meta+${key}`);
-    await expect(chatTabs.nth(index)).toHaveAttribute("aria-selected", "true");
-    await expect(chatTabs.nth(index)).toBeFocused();
+    await expect.poll(activeChat).toBe(chatIds[index]);
+    await expect(composer()).toBeFocused();
   }
-  // A deliberate pointer return releases tab-strip keyboard focus.
-  await composer().click();
-  check("Chat shortcuts preserve deliberate tab-strip focus and move it to the selected tab", true);
+  check("Command+[/] cycles parent sessions and keeps composer focus across consecutive presses", true);
 
   const sideTabs = page.locator('[data-zeros-column-3] [data-workbench-tab="true"]');
   const sideCount = await sideTabs.count();
@@ -146,7 +160,7 @@ export async function runWorkspaceShortcutsSmoke({ page, check, harnessBase, scr
   expect((await state()).chatId).toBe(chatBeforeSide);
   await page.keyboard.press("Meta+Alt+ArrowLeft");
   await expect.poll(selectedSide).toBe(sideIndex);
-  await chatTabs.nth(2).focus();
+  await composer().focus();
   await page.keyboard.press("Meta+Alt+ArrowRight");
   await expect.poll(selectedSide).toBe((sideIndex + 1) % sideCount);
   expect((await state()).chatId).toBe(chatBeforeSide);
@@ -217,14 +231,15 @@ export async function runWorkspaceShortcutsSmoke({ page, check, harnessBase, scr
 
   // A real split reparents the chat body through a portal. The two remaining
   // tabs must cycle only in their own pane, and the neighbor must not scroll.
-  const firstChatId = await chatTabs.nth(0).getAttribute("data-chat-id");
-  const thirdChatId = await chatTabs.nth(2).getAttribute("data-chat-id");
-  await page.getByRole("button", { name: "Pane options", exact: true }).click();
-  await page.getByRole("menuitem", { name: "Split Down", exact: true }).click();
+  const thirdChatId = chatIds[2];
+  expect(await activeChat()).toBe(thirdChatId);
+  await page.getByRole("button", { name: "Session actions", exact: true }).click();
+  await page.getByRole("menuitem", { name: "Split down", exact: true }).click();
   const panes = page.locator("[data-pane-root]");
   await expect(panes).toHaveCount(2);
-  const twoTabs = panes.filter({ has: page.locator(`[data-chat-id="${firstChatId}"]`) });
-  const neighbor = panes.filter({ has: page.locator(`[data-chat-id="${thirdChatId}"]`) });
+  const thirdBar = page.locator(`[data-pane-session-bar][data-chat-id="${thirdChatId}"]`);
+  const twoTabs = panes.filter({ hasNot: thirdBar });
+  const neighbor = panes.filter({ has: thirdBar });
   // An unfocused pane's composer is its Ask pill (2026-11-07): pressing it
   // focuses the pane and puts the caret in the composer it becomes.
   const enterPane = async (pane) => {
@@ -236,20 +251,21 @@ export async function runWorkspaceShortcutsSmoke({ page, check, harnessBase, scr
   };
   await enterPane(twoTabs);
   const neighborBefore = await neighbor.locator(".zeros-agent-body:visible").evaluate(node => node.scrollTop);
-  const paneTabs = twoTabs.getByRole("tab");
-  const paneIndex = await paneTabs.evaluateAll(nodes => nodes.findIndex(node => node.getAttribute("aria-selected") === "true"));
+  const paneChat = () => twoTabs.locator("[data-pane-session-bar]").getAttribute("data-chat-id");
+  const paneStart = await paneChat();
+  const paneOther = chatIds.slice(0, 2).find(id => id !== paneStart);
   await page.keyboard.press("Meta+ArrowRight");
-  await expect(paneTabs.nth((paneIndex + 1) % 2)).toHaveAttribute("aria-selected", "true");
+  await expect.poll(paneChat).toBe(paneOther);
   await expect(twoTabs.locator(".composer-pm:visible")).toBeFocused();
   await page.keyboard.press("Meta+ArrowLeft");
-  await expect(paneTabs.nth(paneIndex)).toHaveAttribute("aria-selected", "true");
+  await expect.poll(paneChat).toBe(paneStart);
   await expect(twoTabs.locator(".composer-pm:visible")).toBeFocused();
   await page.keyboard.press("Shift+Meta+ArrowUp");
   await expect.poll(() => atPanelBoundary("top")).toBe(true);
   await page.keyboard.press("Shift+Meta+ArrowDown");
   await expect.poll(() => atPanelBoundary("bottom")).toBe(true);
   expect(await neighbor.locator(".zeros-agent-body:visible").evaluate(node => node.scrollTop)).toBe(neighborBefore);
-  await expect(neighbor.getByRole("tab")).toHaveAttribute("aria-selected", "true");
+  await expect(neighbor.locator("[data-pane-session-bar]")).toHaveAttribute("data-chat-id", thirdChatId);
   check("Split panes route keys through the portaled composer without changing the neighboring chat", true);
 
   await enterPane(neighbor);
@@ -308,14 +324,15 @@ export async function runWorkspaceShortcutsSmoke({ page, check, harnessBase, scr
   await page.getByRole("button", { name: "Home", exact: true }).focus();
   await page.keyboard.press("Meta+Digit1");
   await expect.poll(async () => (await state()).folder).toBe(cloud.keys[0]);
-  await expect(chatTabs).toHaveCount(3);
-  await chatTabs.nth(0).click();
+  const cloudChatIds = await paneChatIds();
+  expect(cloudChatIds).toHaveLength(3);
+  await selectChat(cloudChatIds[0]);
   await composer().focus();
   await page.keyboard.press("Meta+ArrowRight");
-  await expect(chatTabs.nth(1)).toHaveAttribute("aria-selected", "true");
+  await expect.poll(activeChat).toBe(cloudChatIds[1]);
   await expect(composer()).toBeFocused();
   await page.keyboard.press("Meta+ArrowLeft");
-  await expect(chatTabs.nth(0)).toHaveAttribute("aria-selected", "true");
+  await expect.poll(activeChat).toBe(cloudChatIds[0]);
   await expect(composer()).toBeFocused();
   await checkPanelScrolling("Cloud: Shift+Command+Up/Down scrolls the whole panel and cancels an older checkpoint jump");
   await jumpToPrompt(1);

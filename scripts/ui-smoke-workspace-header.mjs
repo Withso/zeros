@@ -3,7 +3,7 @@ import { expect } from "@playwright/test";
 /** 2026-11-10: the workspace header reads where the workspace lives first (a
  *  laptop for every Local workspace, a cloud for cloud), then its name, as one
  *  ghost control: no fill at rest, bg2-highlight on hover and while its details
- *  are open, in both themes. It opens the Local details (branch, folder and Local)
+ *  are open, in both themes. Local opens its parent sessions (2026-11-21);
  *  or the cloud details, which close on Escape and when the workspace page is
  *  hidden, and stay closed when it returns. */
 export async function runWorkspaceHeaderSmoke({ page, check, harnessBase }) {
@@ -55,9 +55,7 @@ export async function runWorkspaceHeaderSmoke({ page, check, harnessBase }) {
   };
 
   // Local: the laptop, then the name.
-  const { folder } = await state();
   const name = (await nameText.textContent()).trim();
-  const branch = `zeros/${folder.split("/").pop()}`;
   await expect(identity.locator(".lucide-laptop")).toBeVisible();
   expect(await iconThenName("local")).toBe(true);
   await expect(identity).toHaveAccessibleName(`${name}, Local workspace`);
@@ -67,37 +65,34 @@ export async function runWorkspaceHeaderSmoke({ page, check, harnessBase }) {
   await ghost();
   check("Workspace header: a Local workspace reads laptop then name, one 28px ghost control filled only on hover, in both themes", true);
 
-  const details = page.getByRole("dialog", { name: "Local workspace details", exact: true });
+  // The Local name is the parent session; it opens the workspace's sessions.
+  const sessions = page.getByRole("menu");
   await identity.click();
-  await expect(details).toBeVisible();
+  await expect(sessions).toBeVisible();
   await expect(identity).toHaveAttribute("aria-expanded", "true");
   await away();
   await expect.poll(fill).toBe(await token("--bg2-highlight"));
-  await expect(details.getByText(name, { exact: true })).toBeVisible();
-  await expect(details.getByText(branch, { exact: true })).toBeVisible();
-  await expect(details.getByText(folder, { exact: true })).toBeVisible();
-  await expect(details.getByText("Local", { exact: true })).toBeVisible();
-  await expect(details.locator(".lucide-git-branch")).toBeVisible();
-  await expect(details.locator(".lucide-folder")).toBeVisible();
-  const [popupBox, triggerBox] = await Promise.all([details.boundingBox(), identity.boundingBox()]);
+  await expect(sessions.locator("[data-session-row]").first()).toContainText(name);
+  await expect(sessions.getByText("New parent session", { exact: true })).toBeVisible();
+  const [popupBox, triggerBox] = await Promise.all([sessions.boundingBox(), identity.boundingBox()]);
   expect(Math.abs(popupBox.x - triggerBox.x)).toBeLessThanOrEqual(1);
   expect(popupBox.y).toBeGreaterThanOrEqual(triggerBox.y + triggerBox.height + 5);
   await page.keyboard.press("Escape");
-  await expect(details).toHaveCount(0);
+  await expect(sessions).toHaveCount(0);
   await expect(identity).toHaveAttribute("aria-expanded", "false");
-  check("Workspace header: the Local name opens its branch, folder and Local, holds its fill while open and closes on Escape", true);
+  check("Workspace header: the Local parent session opens its sessions and New parent session, holds its fill while open and closes on Escape", true);
 
   // This harness unmounts the chat on Settings; the shell keeps it mounted,
   // inert and invisible, which workspace-details-open.test.ts covers.
   await identity.click();
-  await expect(details).toBeVisible();
+  await expect(sessions).toBeVisible();
   await page.evaluate(() => window.appSidebarNavigate("settings"));
-  await expect(details).toHaveCount(0);
+  await expect(sessions).toHaveCount(0);
   await page.evaluate(() => window.appSidebarNavigate("workspace"));
   await expect(identity).toBeVisible();
   await expect(identity).toHaveAttribute("aria-expanded", "false");
-  await expect(details).toHaveCount(0);
-  check("Workspace header: hiding the workspace page closes its details, and they stay closed when it returns", true);
+  await expect(sessions).toHaveCount(0);
+  check("Workspace header: hiding the workspace page closes its session menu, and it stays closed when it returns", true);
 
   // Cloud: the same control with a cloud, opening the cloud details.
   const cloud = await page.evaluate(() => window.appSidebarSeedCloud());
