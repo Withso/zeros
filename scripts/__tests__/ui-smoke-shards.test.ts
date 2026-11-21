@@ -98,6 +98,7 @@ const originalOrder = [
   "terminal-workbench",
   "workspace-archives",
   "pr-actions",
+  "cloud-projects",
   "activity-disclosure",
   "sticky-bottom",
   "scroll-area-cleanup",

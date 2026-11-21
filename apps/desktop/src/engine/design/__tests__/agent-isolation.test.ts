@@ -138,7 +138,7 @@ describe("design workspace agent isolation", () => {
     expect(appShell).not.toContain("DesignModeDisabledPanel");
     expect(appShell).not.toContain("designWorkspaceBlocked");
     expect(appShell).toContain(
-      "useWorkspacePrSync(workspaceToolsAvailable ? activeWorkspace : null)",
+      "useWorkspacePrSync(workspaceToolsAvailable ? activeRepositoryWorkspace ?? activeWorkspace : null)",
     );
     expect(appShell).toContain("<ConversationPane");
     expect(appShell).not.toContain("WorkspaceHistoryView");
