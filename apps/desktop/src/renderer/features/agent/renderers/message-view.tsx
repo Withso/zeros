@@ -40,23 +40,19 @@ export const MessageView = memo(
     const observation = useMemo(() => {
       if (!source) return undefined;
       if (suppliedMessage.kind === "tool") return observeLiveToolOutput(source, suppliedMessage);
-      if (suppliedMessage.kind === "text") return observeLiveAgentText(source, suppliedMessage,
-        suppliedMessage.role === "thought" ? { reducedMotion: () => true } : undefined);
+      if (suppliedMessage.kind === "text") return observeLiveAgentText(source, suppliedMessage);
       return undefined;
     }, [source, suppliedMessage]);
     const fallback = useMemo(() => ({ message: suppliedMessage, pending: false }), [suppliedMessage]);
     const read = useCallback(() => observation?.getSnapshot() ?? fallback, [observation, fallback]);
     const snapshot = useSyncExternalStore(observation?.subscribe ?? noSubscription, read, read);
     const message = snapshot.message;
-    const renderCtx = useMemo(() => observation && message.kind === "text"
-      ? { ...ctx, liveTextPresentation: { text: message.text, pending: snapshot.pending } } : ctx,
-    [ctx, observation, message, snapshot.pending]);
     const { Component } = resolveRenderer(message, registry);
     // 2026-07-02: the inline permission cluster was removed. Permissions now
     // render in ONE card that replaces the composer (see <PermissionCard>).
     // The "auto-allowed by policy" attribution chip is also omitted because
     // policy auto-allows are silent, with no extra timeline UI.
-    return <Component message={message} ctx={renderCtx} />;
+    return <Component message={message} ctx={ctx} />;
   },
   // Re-render only when the message itself or its slice of ctx changed.
   (prev, next) => {

@@ -124,6 +124,7 @@ describe("the Gibberish agent thinking option", () => {
     expect(panel).toContain('label="Gibberish agent thinking"');
     const list = source("apps/desktop/src/renderer/features/agent/turn-event-list.tsx");
     expect(list).toContain('useExperimentalFeature("gibberishAgentThinking")');
-    expect(list).toMatch(/<ActivityShimmer[\s\S]*?gibberish=\{gibberish\}/);
+    expect(list).toMatch(/startedAt: pickStartedAt[\s\S]*?gibberish,/);
+    expect(list).toMatch(/<ActivityShimmer[\s\S]*?gibberish=\{shimmer\.gibberish\}/);
   });
 });

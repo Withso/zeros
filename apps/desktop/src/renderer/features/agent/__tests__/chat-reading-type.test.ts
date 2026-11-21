@@ -98,14 +98,15 @@ describe("chat reading type", () => {
 
   it("sets the transcript's rows and notices in the reading size, rows on 20px lines so they stay 28px", () => {
     const rows: [string, string][] = [
-      ["features/agent/renderers/event-row.tsx", '"max-w-[60ch] min-w-0 truncate text-reading leading-5"'],
-      ["features/agent/renderers/event-stripe.tsx", '<span className="text-fg2 min-w-0 truncate text-reading leading-5">'],
+      ["features/agent/renderers/tool-label.tsx", '"min-w-0 truncate text-reading leading-5"'],
+      ["features/agent/renderers/event-row.tsx", "<ToolName"],
+      ["features/agent/renderers/event-stripe.tsx", '<span className="text-fg2 shrink-0 text-reading leading-5 whitespace-nowrap">'],
       ["features/agent/renderers/event-row-renderer.tsx", '"text-fg1 flex items-center gap-2 py-1 text-reading leading-5"'],
       ["features/agent/renderers/event-row-renderer.tsx", '"text-fg2 py-1 text-reading leading-5" data-provider-notice'],
       ["features/agent/renderers/text-message.tsx", '"text-fg3 flex items-start gap-2 py-1 text-reading leading-5"'],
-      ["features/agent/renderers/tool-subagent.tsx", '"min-w-0 truncate text-reading leading-5"'],
+      ["features/agent/renderers/tool-subagent.tsx", "<ToolName"],
       ["features/agent/renderers/tool-subagent.tsx", '<span className="text-fg1 text-reading leading-5">Prompt</span>'],
-      ["features/agent/renderers/browser-activity-card.tsx", '<span className="text-fg1 min-w-0 truncate text-reading leading-5">{statusLabel}</span>'],
+      ["features/agent/renderers/browser-activity-card.tsx", '<ToolName label={statusLabel}'],
       ["features/agent/workflow-activity.tsx", '<span className="text-fg1 truncate text-reading leading-5">{label}</span>'],
       ["features/agent/local-links/note-row.tsx", '<span className="text-fg1 text-reading leading-5">{LABELS[note.event]}</span>'],
     ];
@@ -120,7 +121,7 @@ describe("chat reading type", () => {
 
   it("sets the chip beside a tool's name at 13px, still 20px tall", () => {
     const row = source(`${R}/features/agent/renderers/event-row.tsx`);
-    expect(row).toContain('"max-w-[440px] min-w-0 truncate rounded-sm px-1.5 py-0.5 text-xs leading-4 font-medium"');
+    expect(source(`${R}/features/agent/renderers/tool-label.tsx`)).toContain('"max-w-[440px] truncate rounded-sm px-1.5 py-0.5 text-xs leading-4 font-medium"');
     // The file tag is the inline Pill, already 13px; it sets no size of its own.
     const fileTag = /<FileTag[\s\S]*?\/>/.exec(row)?.[0] ?? "";
     expect(fileTag).toContain("className=");

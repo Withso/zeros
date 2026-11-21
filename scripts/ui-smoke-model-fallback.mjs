@@ -43,7 +43,8 @@ export async function runModelFallbackSmoke({ page, check }) {
   await expect(page.locator("[cmdk-root]")).toBeVisible();
   await page.keyboard.press("Escape");
   const legacy = fixture.locator("[data-legacy-fallback]");
-  await legacy.getByRole("button", { name: "1 message", exact: true }).click();
+  // Prose alone is not a group: it stays inline.
+  await expect(legacy.locator("[data-working-group]")).toHaveCount(0);
   await expect(
     legacy.getByText("Model switched to Haiku 4.5", { exact: true }),
   ).toBeVisible();

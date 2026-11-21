@@ -1,4 +1,5 @@
 import { LocalLinksProvider } from "./local-links/provider";
+import { layoutScrollHeight } from "@/renderer/shared/ui/motion/soft-motion";
 import { editChat } from "../../state/cloud-chat-edits";
 import { LocalCommandChatApprovals } from "./local-command-approvals";
 import { IconButton } from "@/renderer/shared/ui/primitives/icon-button";
@@ -2181,7 +2182,7 @@ function AgentChatBody({
     (el: HTMLElement) => {
       // Tail-following needs no historical turns materialized; skip the full layout
       // of a cold 200-message transcript.
-      settleScroll(el, () => el.scrollHeight - el.clientHeight, undefined, true);
+      settleScroll(el, () => layoutScrollHeight(el) - el.clientHeight, undefined, true);
       checkpointRecomputeRef.current?.();
     },
     [settleScroll],
@@ -2210,7 +2211,7 @@ function AgentChatBody({
     }
     // No saved position OR no chatId (picker/beta flows) → snap to
     // bottom so the user sees the latest message immediately.
-    scrollEl.scrollTop = scrollEl.scrollHeight;
+    scrollEl.scrollTop = layoutScrollHeight(scrollEl) - scrollEl.clientHeight;
     checkpointRecomputeRef.current?.();
   }, [scrollEl, chatId, restoreToPosition, restoreToBottom]);
 
@@ -2238,7 +2239,8 @@ function AgentChatBody({
       // max scroll is still "reading this checkpoint", not following latest.
       if (
         isAtChatContentBottom({
-          scrollHeight: el.scrollHeight,
+          // In layout: a live tail mid-glide is still at the bottom.
+          scrollHeight: layoutScrollHeight(el),
           scrollTop: el.scrollTop,
           clientHeight: el.clientHeight,
           bottomInset: spacer,

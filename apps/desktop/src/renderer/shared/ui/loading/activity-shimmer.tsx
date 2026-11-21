@@ -1,12 +1,13 @@
 // ============================================
 // COMPONENT: ActivityShimmer
 // PURPOSE: Show the agent at work (the glass square) with its working timer
-//          and, when opted in, its gibberish thinking phrase.
+//          or the subject the caller names (the current tool call), and,
+//          when opted in, its gibberish thinking phrase.
 // USED IN: The active agent turn's trailing activity row.
 // ============================================
 
 // --- IMPORTS ---
-import { memo, useContext, useEffect, useRef, useState } from "react";
+import { memo, useContext, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 
 import { cn } from "@/renderer/shared/ui/cn";
 
@@ -16,6 +17,8 @@ import { startLoaderRun } from "./loader-loop";
 import { ZerosSpinner } from "./zeros-spinner";
 import { ActivityScope } from "./activity-scope";
 import { startElapsedDisplay } from "./elapsed-display";
+import { loaderTickDelay } from "./loader-ticker";
+import { SOFT_ENTER_DELAY_MS, SOFT_ENTER_TRAVEL_PX, softEnter, softExit } from "../motion/soft-motion";
 
 // --- TYPES ---
 export interface ActivityShimmerProps {
@@ -27,6 +30,133 @@ export interface ActivityShimmerProps {
    *  seconds, between the loader and the timer: Settings → Experimental →
    *  Gibberish agent thinking. Off by default. */
   gibberish?: boolean;
+  /** Replaces the timer. A new `key` slides in over the previous subject. */
+  subject?: { key: string; label: ReactNode } | null;
+  /** The loader alone: what it would name is already visible. */
+  bare?: boolean;
+  /** A new value swaps the subject without a dissolve: its label has moved
+   * into the feed as a row at the same place. */
+  resetKey?: string;
+  /** The subject's call just became a new group's header at its own row. */
+  tucked?: boolean;
+}
+
+const TICKER_ITEM = "col-start-1 row-start-1 flex min-w-0 items-center gap-2";
+/** The idle subject: the run closed, so the line returns to it at once. */
+const TIMER_KEY = "timer";
+
+type TickerItem = { key: string; node: ReactNode };
+
+/** One line that hands a new subject over the previous one as a soft
+ * dissolve (shared/ui/motion/soft-motion.ts): the old one drifts up and out
+ * while the new one rises in, overlapping. The first subject appears without
+ * motion. Each subject stays at least LOADER_TICK_DWELL_MS; a newer one
+ * waits, and ones that came and went meanwhile are skipped. A new `resetKey`
+ * swaps silently: the caller has moved the old subject into the feed. Items
+ * keep their DOM node from entering to leaving, so an interrupted dissolve
+ * continues from where it is. */
+function LoaderTicker({ itemKey, resetKey, tucked = false, children }: { itemKey: string; resetKey?: string; tucked?: boolean; children: ReactNode }) {
+  const painted = useRef<TickerItem>({ key: itemKey, node: children });
+  const reset = useRef(resetKey);
+  const [shown, setShown] = useState<{ key: string; at: number; moved: boolean; leaving: TickerItem | null; swap: number }>(
+    () => ({ key: itemKey, at: performance.now(), moved: false, leaving: null, swap: 0 }),
+  );
+  const [, wake] = useState(0);
+  const silent = reset.current !== resetKey;
+  const delay = silent ? 0 : loaderTickDelay(shown, itemKey, performance.now(), itemKey === TIMER_KEY);
+  if (shown.key !== itemKey && delay === 0) {
+    // The previous subject leaves as it was last painted.
+    // Tucked: the old call became the group header at its own row, so it does
+    // not leave from the line; only the new call appears (one row lower).
+    setShown({ key: itemKey, at: performance.now(), moved: !silent, swap: shown.swap + 1,
+      leaving: !silent && !tucked && painted.current.key === shown.key ? painted.current : null });
+  }
+  const current = shown.key === itemKey;
+  const nodes = useRef(new Map<string, HTMLSpanElement>());
+  const cell = useRef<HTMLSpanElement>(null);
+  const lineTop = useRef<number | null>(null);
+  useLayoutEffect(() => {
+    reset.current = resetKey;
+    if (current) painted.current = { key: itemKey, node: children };
+  });
+  useLayoutEffect(() => {
+    if (!shown.moved) return;
+    const leavingKey = shown.leaving?.key;
+    const done = () => setShown((value) => value.leaving?.key === leavingKey ? { ...value, leaving: null } : value);
+    // The line itself moved to a new row in this commit (its layout place,
+    // not the settle on top of it): it lands with the new label already on
+    // it, and nothing fades at the old place.
+    const top = tailLineTop(cell.current);
+    if (top !== null && lineTop.current !== null && Math.abs(top - lineTop.current) > 1) {
+      done();
+      return;
+    }
+    const leaving = shown.leaving && nodes.current.get(shown.leaving.key);
+    const entering = nodes.current.get(shown.key);
+    if (leaving) {
+      const exit = softExit(leaving);
+      if (exit) exit.onfinish = done;
+      else done();
+    }
+    // Tucked, the whole line already settles down its last few px into the new
+    // row; the new call only fades in on it (offsets never add past the cap).
+    if (entering) softEnter(entering, { delay: leaving ? SOFT_ENTER_DELAY_MS : 0, travel: tucked ? 0 : SOFT_ENTER_TRAVEL_PX });
+    // Only a swap starts motion; the leaving item's removal does not.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [shown.swap]);
+  // The line moved to a new row while its new subject waited out the dwell:
+  // it lands with that subject now (silently, below), not a moment later.
+  // Every commit (a move can come in any); it settles at once: it only sets
+  // the pending subject, after which `current` holds.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useLayoutEffect(() => {
+    if (current) return;
+    const top = tailLineTop(cell.current);
+    if (top === null || lineTop.current === null || Math.abs(top - lineTop.current) <= 1) return;
+    setShown((value) => value.key === itemKey ? value
+      : { key: itemKey, at: performance.now(), moved: true, swap: value.swap + 1, leaving: null });
+  });
+  // Where the line was last painted: a move and its new subject can land in
+  // two commits before one paint (a message that appears reports so), and
+  // that is still one move.
+  useLayoutEffect(() => {
+    if (lineTop.current === null) lineTop.current = tailLineTop(cell.current);
+    const frame = requestAnimationFrame(() => { lineTop.current = tailLineTop(cell.current); });
+    return () => cancelAnimationFrame(frame);
+  });
+  useEffect(() => {
+    if (current || delay === 0) return;
+    const timer = setTimeout(() => wake((value) => value + 1), delay);
+    return () => clearTimeout(timer);
+  }, [current, delay, itemKey]);
+  const items: (TickerItem & { leaving: boolean })[] = [
+    ...(shown.leaving ? [{ ...shown.leaving, leaving: true }] : []),
+    { key: shown.key, node: current ? children : painted.current.node, leaving: false },
+  ];
+  return (
+    // 20px tall in the 16px loader's 28px row: it overhangs the padding, not
+    // the row, so the row keeps the timer's height. Clipped sideways only, so
+    // the dissolve's few pixels of travel and blur are not cut off.
+    <span ref={cell} className="-my-0.5 grid h-5 min-w-0 flex-1 overflow-x-clip" aria-live="off">
+      {items.map((item) => (
+        <span
+          key={item.key}
+          ref={(node) => { if (node) nodes.current.set(item.key, node); else nodes.current.delete(item.key); }}
+          className={TICKER_ITEM}
+          aria-hidden={item.leaving || undefined}
+          data-loader-tick={item.leaving ? "out" : "in"}
+        >
+          {item.node}
+        </span>
+      ))}
+    </span>
+  );
+}
+
+/** The live tail line's layout offset in its feed (transforms excluded). */
+function tailLineTop(cell: HTMLElement | null): number | null {
+  const line = cell?.closest<HTMLElement>("[data-live-tail-line]");
+  return line ? line.offsetTop : null;
 }
 
 /** How many GIBBERISH_THINKING_MS the turn has been running. */
@@ -76,8 +206,18 @@ export const ActivityShimmer = memo(function ActivityShimmer({
   startedAt,
   className,
   gibberish = false,
+  subject = null,
+  bare = false,
+  resetKey,
+  tucked = false,
 }: ActivityShimmerProps) {
   const timer = <WorkingDuration startedAt={startedAt} />;
+  const idle = gibberish ? (
+    <span className="flex min-w-0 items-center gap-2">
+      <GibberishThinking startedAt={startedAt} />
+      {timer}
+    </span>
+  ) : timer;
   return (
     <div
       className={cn(
@@ -96,13 +236,10 @@ export const ActivityShimmer = memo(function ActivityShimmer({
         label="Agent working"
         className="-ml-0.5 shrink-0"
       />
-      {gibberish ? (
-        <span className="flex min-w-0 items-center gap-2">
-          <GibberishThinking startedAt={startedAt} />
-          {timer}
-        </span>
-      ) : (
-        timer
+      {bare ? null : (
+        <LoaderTicker itemKey={subject?.key ?? TIMER_KEY} resetKey={resetKey} tucked={tucked}>
+          {subject ? subject.label : idle}
+        </LoaderTicker>
       )}
     </div>
   );

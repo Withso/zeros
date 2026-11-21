@@ -71,9 +71,11 @@ export async function runWorkspaceArchivesSmoke({ page, check }) {
         "[data-zeros-column-2] [data-pane-root] .zeros-agent-surface",
       ),
     ).toBeVisible();
+    // Thinking alone is not a group: its row stays inline.
+    await expect(reference.locator("[data-working-group]")).toHaveCount(0);
     await expect(
-      reference.getByRole("button", { name: "1 message", exact: true }),
-    ).toHaveAttribute("aria-expanded", "false");
+      reference.getByRole("button", { name: /^Thinking/ }),
+    ).toBeVisible();
     activeFormatting = await readOutputFormatting(reference);
     expect(
       activeFormatting.find((node) => node.tag === "P").styles["margin-bottom"],
@@ -365,19 +367,13 @@ export async function runWorkspaceArchivesSmoke({ page, check }) {
       history.getByRole("complementary", { name: "Workspace summary" }),
     ).toHaveCount(0);
     expect(await readOutputFormatting(history)).toEqual(activeFormatting);
-    const workingGroup = history.getByRole("button", {
-      name: "1 message",
-      exact: true,
-    });
-    await expect(workingGroup).toHaveAttribute("aria-expanded", "false");
-    await workingGroup.click();
-    await expect(
-      history.getByRole("button", { name: /^Thinking/ }),
-    ).toBeVisible();
-    await workingGroup.click();
-    await expect(
-      history.getByRole("button", { name: /^Thinking/ }),
-    ).toHaveCount(0);
+    await expect(history.locator("[data-working-group]")).toHaveCount(0);
+    const thinking = history.getByRole("button", { name: /^Thinking/ });
+    await expect(thinking).toHaveAttribute("aria-expanded", "false");
+    await thinking.click();
+    await expect(thinking).toHaveAttribute("aria-expanded", "true");
+    await thinking.click();
+    await expect(thinking).toHaveAttribute("aria-expanded", "false");
   };
   const before = await page.evaluate(
     () => window.archiveFixture.requests.length,

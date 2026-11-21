@@ -17,6 +17,12 @@ export async function runTurnChangesSmoke({ page, check }) {
       await expect(page.getByRole("button", { name: "Turn usage, 30m 49s" })).toBeVisible();
       await expect(page.getByRole("button", { name: "Copy output" })).toBeEnabled();
       await expect(page.getByRole("button", { name: "Turn actions" })).toBeVisible();
+      const footerGaps = await page.getByRole("button", { name: "Copy output" }).evaluate((copy) => {
+        const line = [...copy.parentElement.children].map((element) => element.getBoundingClientRect())
+          .filter((box) => Math.abs(box.top + box.height / 2 - (copy.getBoundingClientRect().top + copy.getBoundingClientRect().height / 2)) < 1);
+        return line.slice(1).map((box, index) => box.left - line[index].right);
+      });
+      check(`${owner}/${agent}: the footer's time and actions sit 2px apart`, footerGaps.length >= 2 && footerGaps.every((gap) => Math.abs(gap - 2) <= 0.5), JSON.stringify(footerGaps));
       if (owner === "cloud") expect(await page.evaluate(() => window.__turnChanges.requests().filter(request => request.op?.startsWith("turns.")).length)).toBe(0);
       await page.getByRole("button", { name: "Turn actions" }).click();
       const reset = page.getByRole("menuitem", { name: "Reset changes", exact: true });

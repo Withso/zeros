@@ -41,8 +41,10 @@ describe("the turn rail's place in the turn", () => {
       resolve(process.cwd(), "apps/desktop/src/renderer/features/agent/turn-event-list.tsx"),
       "utf8",
     );
-    expect(list).toMatch(
-      /<ActivityShimmer[\s\S]*?className=\{sequence\.length > 0 \|\| workflowRow \? "mt-2" : undefined\}/,
-    );
+    // Only rows actually drawn above count (rowsAboveLoader, unit-tested in
+    // working-groups.test.ts): a lone call on the line itself does not.
+    // `shown` is the presented sequence (a held tail message is not yet drawn).
+    expect(list).toMatch(/const above = !!workflowRow \|\| rowsAboveLoader\(shown, loneCallId\);/);
+    expect(list).toMatch(/<LiveTailLine[\s\S]*?className=\{above \? "mt-2" : undefined\}>[\s\S]*?<ActivityShimmer/);
   });
 });

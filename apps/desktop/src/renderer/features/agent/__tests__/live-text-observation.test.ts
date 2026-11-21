@@ -17,10 +17,8 @@ function fixture() {
   const listeners = new Set<() => void>(),
     watchers = new Set<() => void>();
   const frames = new Map<number, (now: number) => void>();
-  let time = 0,
-    handle = 0,
-    visible = true,
-    reduced = false;
+  let handle = 0,
+    visible = true;
   const source: LiveAgentTextSource = {
     read: () => message,
     subscribe: (listener) => {
@@ -31,9 +29,7 @@ function fixture() {
     },
   };
   const observation = observeLiveAgentText(source, message, {
-    now: () => time,
     visible: () => visible,
-    reducedMotion: () => reduced,
     requestFrame: (callback) => {
       frames.set(++handle, callback);
       return handle;
@@ -65,12 +61,7 @@ function fixture() {
       visible = value;
       for (const listener of watchers) listener();
     },
-    reduced(value: boolean) {
-      reduced = value;
-      for (const listener of watchers) listener();
-    },
     frame(at: number) {
-      time = at;
       const callbacks = [...frames.values()];
       frames.clear();
       for (const callback of callbacks) callback(at);
@@ -109,57 +100,40 @@ describe("Local live text publication", () => {
     expect(watchers.size).toBe(0);
   });
 
-  it("keeps the first token immediate and publishes only advancing paced text", () => {
+  it("publishes the full text as it arrives, at most once per frame", () => {
     const h = fixture();
     expect(h.text()).toBe("First token");
     const final = `First token${" abc".repeat(100)}`;
     h.update(final.slice(0, 100));
     h.update(final.slice(0, 200));
     h.update(final);
+    // Several deltas in one frame lay out once, with everything received.
     expect(h.notify).not.toHaveBeenCalled();
     expect(h.frames.size).toBe(1);
     h.frame(16);
-    expect(h.notify).not.toHaveBeenCalled();
+    expect(h.notify).toHaveBeenCalledTimes(1);
+    expect(h.text()).toBe(final);
+    expect(h.frames.size).toBe(0);
     h.frame(32);
     expect(h.notify).toHaveBeenCalledTimes(1);
-    expect(h.text().length).toBeGreaterThan("First token".length);
-    expect(h.text().length).toBeLessThan(final.length);
-    for (const at of [48, 64, 80, 96, 112, 128, 144, 160]) h.frame(at);
-    expect(h.text()).toBe(final);
-    expect(h.notify).toHaveBeenCalledTimes(5);
-    expect(h.frames.size).toBe(0);
     h.unsubscribe();
   });
 
-  it("flushes corrections, truncations and oversized chunks without a frame", () => {
+  it("publishes corrections and truncations as they arrive", () => {
     const h = fixture();
     h.update(`First token ${"x".repeat(500)}`);
-    h.frame(32);
+    h.frame(16);
     h.update("Corrected");
+    h.frame(32);
     expect(h.text()).toBe("Corrected");
-    expect(h.frames.size).toBe(0);
     h.update("Correct");
+    h.frame(48);
     expect(h.text()).toBe("Correct");
-    h.update(`Correct${"x".repeat(5000)}`);
-    expect(h.text()).toHaveLength(5007);
-    expect(h.frames.size).toBe(0);
     h.unsubscribe();
   });
 
-  it("reduced motion publishes one native batch once with no animation", () => {
+  it("stays silent while hidden and shows the full text when shown again", () => {
     const h = fixture();
-    h.reduced(true);
-    h.notify.mockClear();
-    h.update("First token plus a frame of content");
-    expect(h.text()).toBe("First token plus a frame of content");
-    expect(h.notify).toHaveBeenCalledOnce();
-    expect(h.frames.size).toBe(0);
-    h.unsubscribe();
-  });
-
-  it("flushes hidden content silently and reveals it without replaying a backlog", () => {
-    const h = fixture();
-    h.update("First token plus visible content");
     h.visible(false);
     h.update("First token plus hidden content");
     expect(h.frames.size).toBe(0);

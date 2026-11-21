@@ -16,11 +16,14 @@ import {
 } from "./event-meta";
 import { ToolDetailSurface } from "./tool-detail-surface";
 import { FileTag } from "./file-tag";
+import { TOOL_DESCRIPTION_FIT, ToolName, ToolPreview } from "./tool-label";
 import type { RendererContext } from "./types";
 import { DiffHoverCard } from "./diff-hover-preview";
 import { ToolIdentityIcon } from "./tool-identity-icon";
 import { nativeToolSurface, toolRecord } from "./native-tool-presentation";
 import { pendingChecksMessage } from "./tool-pending-checks";
+import { toolRowTone } from "./tool-failure";
+import { useSoftAppear } from "@/renderer/shared/ui/motion/soft-motion";
 import { useTurnDisclosure } from "../turn-disclosures";
 import { Badge, LIST_ROW_IN_GROUP, ListRow, ListRowGroup, Tooltip } from "@/renderer/shared/ui/primitives";
 import { ImageHoverCard, imagePreviewMimeType } from "../image-hover-card";
@@ -100,10 +103,12 @@ export const EventRow = memo(function EventRow({
 }: EventRowProps) {
   const links = useLocalLinks();
   const localCli = useMemo(() => links.enabled && message.kind === "tool" ? localCliPresentation(message, links.scheme) : null, [message, links.enabled, links.scheme]);
+  const streaming = ctx.isStreaming && ctx.lastMessageId === message.id;
   const meta = useMemo(() => {
-    const original = metaOverride ?? metaForEvent(message);
+    const original = metaOverride ?? metaForEvent(message, { streaming });
     return localCli ? { ...original, Icon: Terminal, label: localCli.label, target: localCli.preview, targetFile: false } : original;
-  }, [metaOverride, message, localCli]);
+  }, [metaOverride, message, localCli, streaming]);
+  const previewAppear = useSoftAppear(!!meta.target);
   const [localOpen, setLocalOpen] = useTurnDisclosure<boolean>(message.id, disclosureKey, defaultOpen ?? false);
   const open = controlledOpen ?? localOpen;
   const detailId = useId();
@@ -111,10 +116,9 @@ export const EventRow = memo(function EventRow({
   const isTool = message.kind === "tool";
   const transportTruncated =
     isTool && hasTransportTruncation(message as AgentToolMessage);
-  const status = isTool ? (message as AgentToolMessage).status : undefined;
   const pendingChecks = isTool ? pendingChecksMessage(message) : null;
   const sTone =
-    toneOverride ?? (pendingChecks ? "ok" : meta.tone ?? (isTool ? statusTone(status as any) : undefined));
+    toneOverride ?? (isTool ? toolRowTone(message as AgentToolMessage, meta) : meta.tone);
   const expandable = meta.expandable && detail !== undefined && detail !== null;
   const Icon = sTone === "fail" ? CircleX : meta.Icon;
   const SecondIcon = sTone === "fail" ? undefined : meta.SecondIcon;
@@ -154,7 +158,7 @@ export const EventRow = memo(function EventRow({
       onPointerEnter={warmFile}
       onFocus={warmFile}
       onClick={() => { if (canOpen && path) openFilePill(ctx.attachmentCwd, path, destination); }}
-      className={cn(sTone === "fail" && "border-red-primary/25 bg-red-bg text-red-primary hover:bg-red-bg [&_*]:text-red-primary!")}
+      className={cn(TOOL_DESCRIPTION_FIT, sTone === "fail" && "border-red-primary/25 bg-red-bg text-red-primary hover:bg-red-bg [&_*]:text-red-primary!")}
     />
   ) : null;
   if (filePill && hoverPreview) {
@@ -170,12 +174,11 @@ export const EventRow = memo(function EventRow({
     {transportTruncated && <Tooltip label="The provider truncated this tool payload"><Badge variant="warning" className="shrink-0">Truncated</Badge></Tooltip>}
   </>;
   const preview = meta.target && !open ? (
-    <span data-tool-preview="" className={cn(
-      // A 20px chip: 13/16 on bg2, the height and size of the file tags beside it.
-      "max-w-[440px] min-w-0 truncate rounded-sm px-1.5 py-0.5 text-xs leading-4 font-medium",
-      localCli && sTone !== "fail" && "font-mono",
-      sTone === "fail" ? "bg-red-bg text-red-primary" : "bg-bg2 text-fg2",
-    )}>{meta.target}</span>
+    <ToolPreview
+      previewRef={previewAppear}
+      mono={!!localCli && sTone !== "fail"}
+      className={sTone === "fail" ? "bg-red-bg text-red-primary" : undefined}
+    >{meta.target}</ToolPreview>
   ) : null;
   const toggle = () => {
     if (!expandable) return;
@@ -257,15 +260,11 @@ export const EventRow = memo(function EventRow({
         )}
       </span>
 
-      {/* Stable operation name; a long native/MCP name must still fit the lane. */}
-      <span
-        className={cn(
-          "max-w-[60ch] min-w-0 truncate text-reading leading-5",
-          sTone === "fail" ? "text-red-primary" : "text-fg1",
-        )}
-      >
-        {sTone === "fail" ? "Error" : meta.label}
-      </span>
+      <ToolName
+        label={sTone === "fail" ? "Error" : meta.label}
+        capped={!!(filePill || preview || localTargets.length)}
+        className={sTone === "fail" ? "text-red-primary" : "text-fg1"}
+      />
 
       {!separateTargets && preview}
       {!separateTargets && trailing}

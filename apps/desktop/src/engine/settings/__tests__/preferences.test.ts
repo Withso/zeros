@@ -64,6 +64,13 @@ describe("personal app preference ownership", () => {
       syncPersonalPreferences({}, { restart_automatically_on_update: false }),
     ).toEqual({ restart_automatically_on_update: false });
   });
+  it("keeps the in-between messages choice through settings.toml, with older files omitting it", () => {
+    expect(syncPersonalPreferences({})).toEqual({});
+    expect(syncPersonalPreferences({}, { show_in_between_messages: false })).toEqual({ show_in_between_messages: false });
+    expect(readFileSync(path.join(root, "settings.toml"), "utf8")).toContain("show_in_between_messages = false");
+    expect(() => syncPersonalPreferences({}, { show_in_between_messages: "off" })).toThrow();
+    expect(sanitizeLayer({ preferences: { show_in_between_messages: false } }, "team").doc).toEqual({});
+  });
   it("keeps the chat width through settings.toml, while older appearance docs stay without one", () => {
     const wide = { appearance: { mode: "dark", codeThemes: {}, chatWidth: "wide" } };
     expect(syncPersonalPreferences({}, wide)).toEqual(wide);

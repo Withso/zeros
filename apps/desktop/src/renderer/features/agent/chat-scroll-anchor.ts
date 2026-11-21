@@ -25,6 +25,8 @@
 // gone (edit-truncated, paged out of the hydrate window) and the legacy
 // format for pre-anchor saved values.
 
+import { contentGlideOf } from "@/renderer/shared/ui/motion/soft-motion";
+
 export interface ChatScrollPosition {
   /** Raw scrollTop px — fallback when the anchor can't be resolved, and the
    *  shape older builds persisted (a bare number normalizes to this). */
@@ -127,6 +129,8 @@ export function sameChatScrollPosition(
  *  helpers need — lets node-env tests drive them with fakes. */
 export interface AnchorScrollElement {
   scrollTop: number;
+  /** The scroll content, which may be mid-glide (shared/ui/motion). */
+  firstElementChild?: Element | null;
   getBoundingClientRect(): { top: number };
   querySelectorAll(selector: string): ArrayLike<AnchorTurnElement>;
   querySelector(selector: string): AnchorTurnElement | null;
@@ -155,7 +159,8 @@ function escapeForSelector(id: string): string {
 export function captureScrollAnchor(
   scrollEl: AnchorScrollElement,
 ): { anchorId: string; anchorOffset: number } | undefined {
-  const containerTop = scrollEl.getBoundingClientRect().top;
+  // Rows are measured in layout, not mid-glide (soft-motion.ts).
+  const containerTop = scrollEl.getBoundingClientRect().top + contentGlideOf(scrollEl);
   const scrollTop = scrollEl.scrollTop;
   let bestId: string | null = null;
   let bestTop = -Infinity;
@@ -186,7 +191,8 @@ export function resolveAnchorTop(
   if (!el) return null;
   return (
     el.getBoundingClientRect().top -
-    scrollEl.getBoundingClientRect().top +
+    scrollEl.getBoundingClientRect().top -
+    contentGlideOf(scrollEl) +
     scrollEl.scrollTop
   );
 }
