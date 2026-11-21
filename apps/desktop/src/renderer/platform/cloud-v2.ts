@@ -221,12 +221,16 @@ export function isCloudV2BaseBranch(value: string): boolean {
 /** Without a base branch the server uses the branch its Cloud Computer installed. */
 export async function createCloudV2Workspace(input: {
   organizationId: string; repository: string; baseBranch?: string; name?: string;
+  /** Projects: the project to create from (`repository` is its first), and a base branch for any of its other repositories. */
+  projectId?: string; repositories?: readonly { repository: string; baseBranch: string }[];
 }, idempotencyKey: string = key()): Promise<CloudV2Workspace> {
-  if (input.baseBranch !== undefined && !isCloudV2BaseBranch(input.baseBranch))
+  if ([input.baseBranch, ...(input.repositories ?? []).map(entry => entry.baseBranch)].some(branch => branch !== undefined && !isCloudV2BaseBranch(branch)))
     throw new Error("Choose a branch from GitHub for this cloud workspace.");
   const body = {
     organizationId: uuid.parse(input.organizationId), repository: input.repository,
+    ...(input.projectId ? { projectId: uuid.parse(input.projectId) } : {}),
     ...(input.baseBranch !== undefined ? { baseBranch: input.baseBranch } : {}),
+    ...(input.repositories?.length ? { repositories: input.repositories.map(entry => ({ repository: entry.repository, baseBranch: entry.baseBranch })) } : {}),
     ...(input.name ? { name: input.name } : {}),
   };
   return (await cloudAccountRequest("/v1/cloud-v2/workspaces", one, { body, idempotencyKey })).workspace;

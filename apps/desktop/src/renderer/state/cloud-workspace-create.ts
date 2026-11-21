@@ -18,7 +18,9 @@ export function createCloudWorkspaceWithPending(
   const token = `cloud-create:${account}:${catalog}:${input.organizationId}:${input.idempotencyKey}`;
   const existing = flights.get(token);
   if (existing) return existing;
-  const repoSlug = `cloud-${input.organizationId}:github.com:${input.repository.owner.toLowerCase()}/${input.repository.name.toLowerCase()}`;
+  // The catalog's own group: a workspace of several repositories is its project's.
+  const repoSlug = input.projectId && input.severalRepositories ? `cloud-${input.organizationId}:project:${input.projectId}`
+    : `cloud-${input.organizationId}:github.com:${input.repository.owner.toLowerCase()}/${input.repository.name.toLowerCase()}`;
   const project = getCloudProjects().find(candidate => candidate.repoSlug === repoSlug);
   const current = () => account === getOrganizationStoreGeneration() && catalog === cloudCatalogGeneration();
   beginPendingCreate({ token, repoRoot: project?.repoRoot ?? token, repoSlug, kind,

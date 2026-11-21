@@ -238,7 +238,7 @@ function RepositorySheet({ project, entry, userKey, busy, active, onClose, onSav
   );
 }
 
-function AddRepositoriesDialog({ project, organizationId, userKey, connections, limits, active, onClose, onAdd }: {
+export function AddRepositoriesDialog({ project, organizationId, userKey, connections, limits, active, onClose, onAdd }: {
   project: CloudProject; organizationId: string; userKey: string; connections: CloudGithubLevelConnections | null | undefined;
   limits: CloudProjects["limits"]; active: boolean; onClose(): void; onAdd(repositories: string[]): Promise<void>;
 }) {

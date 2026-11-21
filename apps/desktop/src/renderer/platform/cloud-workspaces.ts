@@ -220,6 +220,11 @@ export async function createCloudWorkspaceDocument(input: {
   repository: { owner: string; name: string };
   /** A plain branch name; omitted, the server uses its Cloud Computer's branch. */
   baseBranch?: string;
+  /** Projects: the project to create from, and a base branch for any of its other repositories. */
+  projectId?: string;
+  repositories?: readonly { repository: string; baseBranch: string }[];
+  /** Client-only: the project holds several repositories, so its pending row is grouped under the project. Never sent. */
+  severalRepositories?: boolean;
   idempotencyKey: string;
 }): Promise<CloudWorkspaceDocument> {
   const epoch = getOrganizationStoreGeneration();
@@ -228,6 +233,8 @@ export async function createCloudWorkspaceDocument(input: {
     organizationId: input.organizationId,
     repository: `${input.repository.owner}/${input.repository.name}`,
     ...(input.baseBranch !== undefined ? { baseBranch: input.baseBranch } : {}),
+    ...(input.projectId ? { projectId: input.projectId } : {}),
+    ...(input.repositories?.length ? { repositories: input.repositories } : {}),
     ...(input.name ? { name: input.name } : {}),
   }, input.idempotencyKey);
   if (epoch !== getOrganizationStoreGeneration())

@@ -51,7 +51,11 @@ import { useCloudCreate } from "./cloud-create";
 import { cloudCreateRequest } from "./cloud-create-request";
 import { CloudComputerRepositoryPicker } from "./cloud-computer-repository-picker";
 import { useGithubLevels } from "../../features/settings/cloud-github-levels";
-import { CloudComputerSourcePicker, computerSourceReadKey, warmComputerSources } from "./cloud-computer-source";
+import { CloudComputerSourcePicker, computerBranchBase, computerSourceReadKey, warmComputerSources } from "./cloud-computer-source";
+import { CloudProjectPicker, CloudProjectRepositoriesMenu } from "./cloud-project-picker";
+import { AddRepositoriesDialog, NewProjectDialog } from "../../features/settings/cloud-project-page";
+import { patchCloudProject } from "../../features/settings/cloud-github-levels";
+import { projectRepositoryInputs, updateCloudProject } from "../../platform/cloud-github-levels";
 import type { DispatcherBase } from "./dispatcher-source";
 import { CloudComputerV2CreateNotice } from "../../features/settings/cloud-computer-v2-create-gate";
 import { createCloudWorkspaceWithPending } from "../../state/cloud-workspace-create";
@@ -183,6 +187,8 @@ function ActiveDispatcherPage({
   const [computerSource, setComputerSource] = useState<{ owner: string; base: DispatcherBase } | null>(null);
   const [computerCreateNotice, setComputerCreateNotice] = useState<{ owner: string; message: string } | null>(null);
   const [projectMenuOpen, setProjectMenuOpen] = useState(false);
+  // Projects: New project and Add repositories, opened from Create.
+  const [projectDialog, setProjectDialog] = useState<"new" | "add" | null>(null);
   const [composerConfiguration, setComposerConfiguration] = useState<DispatcherComposerConfiguration>();
   const [busy, setBusy] = useState(false);
   const cloudCreateIntent = useRef<{ fingerprint: string; key: string } | null>(null);
@@ -258,7 +264,8 @@ function ActiveDispatcherPage({
     hasLocalProjects: localProjects.length > 0,
   });
   const cloud = useCloudCreate(active, computerSource, preferredCloudRepository, initialProjectId,
-    unified ? chosenPlacement : undefined);
+    unified ? chosenPlacement : undefined, contextDocument?.project?.id ?? null);
+  const severalRepositories = !!cloud.project && cloud.project.repositories.length > 1;
   const computerReadKey = cloud.computerOwner && cloud.computerRepository
     ? computerSourceReadKey(cloud.computerOwner, cloud.computerRepository) : null;
   // Ownership selects the backend synchronously; an unavailable cloud backend
@@ -276,7 +283,10 @@ function ActiveDispatcherPage({
     });
   const draftKeyFor = (target: CreatePlacement) => {
     const owner = draftOwnerFor(target);
-    const project = target === "cloud" ? cloud.computerRepository?.id ?? cloud.rememberedRepositoryId : selectedProject?.repoRoot;
+    // A project of one repository keeps that repository's draft; one of several has its own.
+    const project = target === "cloud"
+      ? severalRepositories ? `project:${cloud.project!.id}` : cloud.computerRepository?.id ?? cloud.rememberedRepositoryId
+      : selectedProject?.repoRoot;
     return owner ? createComposerDraftKey({ owner, project: project ?? null, placement: target }) : null;
   };
   const draftOwner = draftOwnerFor(placement);
@@ -668,13 +678,52 @@ function ActiveDispatcherPage({
             Pick a repository and describe a task.
           </p>
 
+          {projectDialog === "new" && cloud.projects && activeOrganization && (
+            <NewProjectDialog organization={activeOrganization} userKey={cloud.githubLevels.key} connections={cloud.githubLevels.connections}
+              projects={cloud.projects} active={active} onClose={() => setProjectDialog(null)}
+              onCreated={created => {
+                setProjectDialog(null);
+                patchCloudProject(cloud.githubLevels.key, created);
+                cloud.githubLevels.refresh();
+                cloud.selectProject(created.id);
+              }} />
+          )}
+          {projectDialog === "add" && cloud.project && cloud.projects && activeOrganization && (
+            <AddRepositoriesDialog project={cloud.project} organizationId={activeOrganization.id} userKey={cloud.githubLevels.key}
+              connections={cloud.githubLevels.connections} limits={cloud.projects.limits} active={active} onClose={() => setProjectDialog(null)}
+              onAdd={async repositories => {
+                try {
+                  const saved = await updateCloudProject(activeOrganization.id, cloud.project!.id,
+                    { repositories: [...projectRepositoryInputs(cloud.project!), ...repositories.map(repository => ({ repository }))] });
+                  patchCloudProject(cloud.githubLevels.key, saved);
+                  cloud.githubLevels.refresh();
+                  setProjectDialog(null);
+                } catch (error) { toast.error("Couldn't add the repositories", { description: error instanceof Error ? error.message : String(error) }); }
+              }} />
+          )}
+
           {/* Project and source belong to the selected owner, even during a cold read. */}
           <div
             data-dispatcher-context=""
             className="flex min-w-0 items-center gap-1 px-1"
           >
             {/* Project selector */}
-            {cloud.computerMode ? <CloudComputerRepositoryPicker
+            {cloud.computerMode && cloud.projects ? <CloudProjectPicker
+              projects={cloud.projects}
+              selected={cloud.project}
+              rememberedId={cloud.rememberedProjectId}
+              organizationName={activeOrganization?.name ?? "Organization"}
+              active={active}
+              open={projectMenuOpen}
+              onOpenChange={setProjectMenuOpen}
+              disabled={busy}
+              onSelect={id => {
+                cloud.selectProject(id);
+                dispatch({ type: "OPEN_CREATE_PAGE", projectId: null });
+              }}
+              warm={cloud.warmProject}
+              onNewProject={cloud.projects.canCreateOrganization || cloud.projects.personalAllowed ? () => setProjectDialog("new") : null}
+            /> : cloud.computerMode ? <CloudComputerRepositoryPicker
               repositories={cloud.computerRepositories ?? []}
               selected={cloud.computerRepository}
               rememberedId={cloud.rememberedRepositoryId}
@@ -764,7 +813,19 @@ function ActiveDispatcherPage({
             )}
 
             {/* Source selection is metadata until Create is pressed. */}
-            {cloud.computerMode ? <CloudComputerSourcePicker
+            {cloud.computerMode && severalRepositories ? <CloudProjectRepositoriesMenu
+              project={cloud.project!}
+              firstBranch={cloud.baseBranch}
+              bases={cloud.projectBases}
+              userKey={cloud.githubLevels.key}
+              active={active}
+              disabled={busy}
+              onBase={(repository, branch) => {
+                if (repository.toLowerCase() !== cloud.project!.repositories[0]!.repository) cloud.setProjectBase(repository, branch);
+                else setComputerSource(branch && cloud.sourceOwner ? { owner: cloud.sourceOwner, base: computerBranchBase(branch) } : null);
+              }}
+              onAddRepositories={cloud.project!.canEdit ? () => setProjectDialog("add") : null}
+            /> : cloud.computerMode ? <CloudComputerSourcePicker
               key={cloud.sourceOwner}
               readKey={computerReadKey}
               repository={cloud.computerRepository}
