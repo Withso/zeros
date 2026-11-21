@@ -9,7 +9,10 @@ import { READY_COPY_SECRET_PATHS } from "../ready-copies.js";
 export const BOAT_FAKE_ASSUMPTIONS = [
   { verified: true, assumption: "Boat names every fork \"<source name> fork\"" },
   { verified: true, assumption: "a fork of a stopped machine works and copies its disk; the source's stoppedAt is unchanged" },
-  { verified: true, assumption: "Boat deletes the disk of a machine stopped for 14 days; resume, inspect and fork then fail as expired" },
+  { verified: "2026-11-21", assumption: "a stopped machine whose disk Boat expired still inspects as archived (HTTP 200) with snapshotAvailable false and dataExpiredAt set; resume and fork then fail as expired" },
+  { verified: "2026-11-21", assumption: "a machine that can still be resumed inspects with snapshotAvailable true and dataExpiredAt null" },
+  // Note (Alpha, read-only, 2026-11-21): expiry usually lands about 14.00 days after stoppedAt, but one machine
+  // stopped 16.3 days earlier still read snapshotAvailable true. Read Boat's fields; never compute expiry from stoppedAt.
   { verified: "2026-11-21", assumption: "fork is idempotent per key for 24 hours: a replay returns the machine the first request made" },
   { verified: false, assumption: "the name a fork request asks for is ignored" },
   { verified: "2026-11-21", assumption: "Boat refuses a fork of a machine still archiving (409 fork_failed, \"Fork needs a completed snapshot\") before making anything" },
@@ -36,6 +39,8 @@ type Machine = {
   id: string; name: string; state: "running" | "archiving" | "archived" | "deleted";
   env: Record<string, string>; files: Map<string, string>; from: string | null; source: string | null;
   createdAt: number; stoppedAt: number | null;
+  /** Boat expired this stopped machine's disk (also after 14 days stopped, as usually observed). */
+  expired?: boolean;
   /** The worker's systemd unit. A stop freezes it; a fork or a cold resume starts it when enabled. */
   worker: { enabled: boolean; active: boolean };
   /** A fork's lease end; past it Boat archives the fork, and the next resume is cold. */
@@ -78,8 +83,11 @@ export class FakeBoat implements CloudV2Compute {
     if (machine.state === "running" && machine.leaseUntil !== null && this.clock() >= machine.leaseUntil) {
       machine.state = "archived"; machine.stoppedAt = machine.leaseUntil; machine.cold = true;
     }
-    if (machine.stoppedAt !== null && machine.state !== "running" && this.clock() - machine.stoppedAt >= 14 * DAY) throw new BoatSnapshotExpiredError();
+    if (this.expired(machine)) throw new BoatSnapshotExpiredError();
     return machine;
+  }
+  private expired(machine: Machine): boolean {
+    return machine.state !== "running" && (machine.expired === true || (machine.stoppedAt !== null && this.clock() - machine.stoppedAt >= 14 * DAY));
   }
   private keyed(key: string): string | null {
     const entry = this.keys.get(key);
@@ -115,9 +123,15 @@ export class FakeBoat implements CloudV2Compute {
 
   async inspect(sandboxId: string) {
     this.record("inspect", sandboxId);
+    const known = this.machines.get(sandboxId);
+    // An expired disk still answers inspect: archived, no snapshot, and when Boat expired it.
+    if (known && known.state !== "deleted" && this.expired(known))
+      return { name: known.name, state: "archived", stoppedAt: known.stoppedAt === null ? null : new Date(known.stoppedAt), snapshotAvailable: false,
+        dataExpiredAt: new Date(known.stoppedAt === null ? this.clock() : Math.min(this.clock(), known.stoppedAt + 14 * DAY)) };
     const machine = this.live(sandboxId);
     if (machine.state === "archiving" && this.archivingReads-- <= 0) { machine.state = "archived"; machine.stoppedAt = this.clock(); }
-    return { name: machine.name, state: machine.state, stoppedAt: machine.stoppedAt === null ? null : new Date(machine.stoppedAt) };
+    return { name: machine.name, state: machine.state, stoppedAt: machine.stoppedAt === null ? null : new Date(machine.stoppedAt),
+      ...(machine.state === "archived" ? { snapshotAvailable: true, dataExpiredAt: null } : {}) };
   }
 
   async resume(sandboxId: string) {

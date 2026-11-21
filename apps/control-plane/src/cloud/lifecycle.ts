@@ -68,6 +68,8 @@ export const CLOUD_V2_BACKUP_FORKS_PER_HOUR = 20;
 /** Retention: before rebuilding a workspace whose unbacked work only its machine held, the
  * machine must read as gone twice this far apart, after the resume that failed. */
 export const CLOUD_V2_LOSS_CONFIRM_MS = 30_000;
+/** Deferred unconfirmed losses alert from this attempt on. */
+export const CLOUD_V2_LOSS_UNCONFIRMED_ALERT = 3;
 /** Holds a retry's claim while its fork boots and runs the checkpoint. */
 const RETRY_LEASE_MS = (CLOUD_V2_CHECKPOINT_SECONDS + 600) * 1000;
 /** A backstop only: every fork is deleted as soon as its attempt ends. */
@@ -602,8 +604,14 @@ export class CloudV2Lifecycle {
             if (!sandboxLost(error) || !(workspace.checkpoint || this.cleanRestore(workspace))) throw error;
             if (this.cleanRestore(workspace)) {
               // One 404 is not proof: the machine may hold the only copy of the latest stop's work.
-              if (this.unbacked(workspace) && !await this.confirmedGone(sandboxId))
+              if (this.unbacked(workspace) && !await this.confirmedGone(sandboxId)) {
+                // Deferred, never rebuilt; past a few attempts someone should look. The generic attempt
+                // bound then fails the start visibly with this code, leaving the machine untouched.
+                // The claim has already counted this attempt.
+                if (workspace.attempts >= CLOUD_V2_LOSS_UNCONFIRMED_ALERT) (this.deps.logger?.error ?? this.deps.logger?.warn)?.call(this.deps.logger,
+                  `[cloud-v2] resume keeps failing but Boat still has the machine; not rebuilding workspace=${workspace.id.slice(0, 8)} attempts=${workspace.attempts}`);
                 throw Object.assign(new Error("Boat has not confirmed the machine gone"), { code: "provider_loss_unconfirmed" });
+              }
               sandboxId = await this.cleanReplacement(workspace, sandboxId, boot.env);
               if (!sandboxId) return;
             } else {
@@ -1047,11 +1055,16 @@ export class CloudV2Lifecycle {
     return this.cleanRestore(workspace) && workspace.stopProbe !== "clean";
   }
 
-  /** Two inspect reads CLOUD_V2_LOSS_CONFIRM_MS apart both report the machine gone. */
+  /** Two inspect reads CLOUD_V2_LOSS_CONFIRM_MS apart both report the machine gone: not found,
+   * deleted, or archived with no snapshot left (Boat's own snapshotAvailable; an expired disk still
+   * reads archived). An archived machine whose snapshot is available is never gone, whatever a
+   * resume said. */
   private async confirmedGone(sandboxId: string): Promise<boolean> {
     const gone = async () => {
-      try { return (await this.deps.compute.inspect(sandboxId)).state === "deleted"; }
-      catch (error) { if (sandboxLost(error)) return true; throw error; }
+      try {
+        const inspected = await this.deps.compute.inspect(sandboxId);
+        return inspected.state === "deleted" || (inspected.state === "archived" && inspected.snapshotAvailable === false);
+      } catch (error) { if (sandboxLost(error)) return true; throw error; }
     };
     if (!await gone()) return false;
     await (this.deps.sleep ?? (ms => new Promise(resolve => setTimeout(resolve, ms))))(CLOUD_V2_LOSS_CONFIRM_MS);
