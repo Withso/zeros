@@ -27,6 +27,13 @@ export async function runDesignFieldStatesSmoke({ page, check }) {
   const status = inspector.locator('[role="status"][aria-live="polite"]');
   const card = page.locator("[data-design-style-card]");
   const writes = () => page.evaluate(() => window.__zerosHarnessDesignTransactions ?? 0);
+  // What a save wrote to the source, which a retained preview cannot fake.
+  const saved = (id, property) =>
+    page.evaluate(([id, property]) => {
+      const source = window.__zerosHarnessHomeSource?.() ?? "";
+      const element = new DOMParser().parseFromString(source, "text/html").querySelector(`[data-oid="${id}"]`);
+      return element?.style.getPropertyValue(property) ?? null;
+    }, [id, property]);
   const runtimeGeneration = () =>
     page.evaluate(async () => {
       const { designFrameRuntime } = await import("/apps/desktop/src/renderer/platform/bridge/design-frame-runtime.ts");
@@ -237,7 +244,8 @@ export async function runDesignFieldStatesSmoke({ page, check }) {
   await expect.poll(moved).toEqual(dragged);
   check("a Mixed scrub keeps its preview when a new generation lands mid-drag", true);
   await page.mouse.up();
-  await expect.poll(radii).toEqual(start.map((value, index) => `${Number.parseFloat(value) + dragged[index]}px`));
+  const shownRadii = start.map((value, index) => `${Number.parseFloat(value) + dragged[index]}px`);
+  await expect.poll(async () => [await saved("home-cancel", "border-radius"), await saved("home-drawn", "border-radius")]).toEqual(shownRadii);
   await editable("border-radius");
   check("that scrub saves what it showed on the new generation", true);
 
@@ -257,7 +265,7 @@ export async function runDesignFieldStatesSmoke({ page, check }) {
   await expect.poll(() => inline("home-note", "letter-spacing")).toBe("2px");
   await expect.poll(single).toBe(singleDragged);
   await page.mouse.up();
-  await expect.poll(() => inline("home-cancel", "border-radius")).toBe(`${singleDragged}px`);
+  await expect.poll(() => saved("home-cancel", "border-radius")).toBe(`${singleDragged}px`);
   check("a single layer's scrub keeps its preview across a new generation and saves it", true);
 
   // A Mixed size scrub previews through layout, which keeps it too.

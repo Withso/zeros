@@ -259,6 +259,7 @@ async function showRuntime(
     selectedNodeId?: string | null;
     selectedNodeIds?: string[];
     frameVersion?: string;
+    refusePreview?: boolean;
   } = {},
 ) {
   const {
@@ -266,6 +267,7 @@ async function showRuntime(
     selectedNodeId = "card",
     selectedNodeIds = ["card"],
     frameVersion = sourceVersion,
+    refusePreview = false,
   } = selection;
   const getNodeDetails = vi.fn<(nodeId: string) => Promise<DesignRuntimeNodeDetails>>(async (nodeId) =>
     nodeId === "root" && details.oid !== "root" ? root : details,
@@ -274,7 +276,10 @@ async function showRuntime(
     sourceVersion: runtimeSourceVersion,
     supports: (capability: string) => capability === "measureLayout" || (previewLayout && capability === "previewLayout"),
     ...(previewLayout ? { previewLayout: vi.fn(async () => []) } : {}),
-    previewStyles: vi.fn(async () => details),
+    previewStyles: vi.fn(async (_nodeId: string, _styles: Record<string, string | null>) => {
+      if (refusePreview) throw new Error("The design frame changed before the preview was applied.");
+      return details;
+    }),
     clearPreviewStyles: vi.fn(async () => details),
     getNodeDetails,
     measureLayout: vi.fn(async ({ nodeIds }: { nodeIds: string[] }) =>
@@ -873,6 +878,70 @@ describe("an inspector field scrub", () => {
     await showRuntime({ ...card, sourceVersion: nextVersion }, false, nextVersion, { ...selection, frameVersion: nextVersion });
     expect(fieldInput("opacity").placeholder).toBe("Mixed");
     expect(fieldInput("opacity").value).toBe("");
+  });
+
+  describe("when a new generation replaces the document mid-scrub", () => {
+    const other: DesignRuntimeNodeDetails = {
+      ...card, oid: "other", name: "Other", selector: '[data-oid="other"]',
+      styles: { ...card.styles, opacity: "1" },
+    };
+    const selection = { selectedNodeId: "card", selectedNodeIds: ["card", "other"] };
+    const nextVersion = "2".repeat(24);
+    const beginMixedScrub = async () => {
+      useDesignRuntimeStore.getState().publishNodeDetails("w", "/repo", "home.html", other, sourceVersion);
+      const first = await showRuntime(card, false, sourceVersion, selection);
+      expect(fieldInput("opacity").placeholder).toBe("Mixed");
+      act(() => {
+        container.querySelector<HTMLButtonElement>('button[aria-label="Scrub Opacity"]')!
+          .dispatchEvent(pointer("pointerdown", 0));
+      });
+      for (let tick = 1; tick <= 4; tick += 1) {
+        act(() => { window.dispatchEvent(pointer("pointermove", tick * 2)); });
+        await settle();
+      }
+      expect(first.previewStyles).toHaveBeenCalled();
+      return first.previewStyles.mock.calls.at(-1)!;
+    };
+    const nextGeneration = async () => {
+      useDesignRuntimeStore.getState().publishNodeDetails("w", "/repo", "home.html", { ...other, sourceVersion: nextVersion }, nextVersion);
+      return showRuntime({ ...card, sourceVersion: nextVersion }, false, nextVersion, { ...selection, frameVersion: nextVersion });
+    };
+
+    it("shows the scrub's preview on the new document", async () => {
+      const shown = await beginMixedScrub();
+      const next = await nextGeneration();
+      await settle();
+      await vi.waitFor(() => expect(next.previewStyles.mock.calls.map((call) => call[1])).toContainEqual(shown[1]));
+      await release();
+    });
+
+    it("offers it again on a replacement runtime when the new document refused it", async () => {
+      const shown = await beginMixedScrub();
+      useDesignRuntimeStore.getState().publishNodeDetails("w", "/repo", "home.html", { ...other, sourceVersion: nextVersion }, nextVersion);
+      const refusing = await showRuntime({ ...card, sourceVersion: nextVersion }, false, nextVersion,
+        { ...selection, frameVersion: nextVersion, refusePreview: true });
+      await settle();
+      await vi.waitFor(() => expect(refusing.previewStyles).toHaveBeenCalled());
+      // The same generation's document reconnects with a new runtime.
+      act(() => useDesignRuntimeStore.getState().retireFrame("w", "home.html"));
+      const replacement = await showRuntime({ ...card, sourceVersion: nextVersion }, false, nextVersion, { ...selection, frameVersion: nextVersion });
+      await settle();
+      await vi.waitFor(() => expect(replacement.previewStyles.mock.calls.map((call) => call[1])).toContainEqual(shown[1]));
+      await release();
+    });
+
+    it("keeps a Mixed scrub through the readback gap and saves it", async () => {
+      await beginMixedScrub();
+      // The frame is at the new generation before its layers read back.
+      await showRuntime(card, false, sourceVersion, { ...selection, frameVersion: nextVersion });
+      useDesignRuntimeStore.getState().publishNodeDetails("w", "/repo", "home.html", { ...other, sourceVersion: nextVersion }, nextVersion);
+      await showRuntime({ ...card, sourceVersion: nextVersion }, false, nextVersion, { ...selection, frameVersion: nextVersion });
+      act(() => { window.dispatchEvent(pointer("pointermove", 10)); });
+      await settle();
+      const before = writes();
+      await release();
+      expect(writes()).toBeGreaterThan(before);
+    });
   });
 
   it("keeps a Mixed scrub reading Mixed when the scrubbed layer's details read back mid-scrub", async () => {
