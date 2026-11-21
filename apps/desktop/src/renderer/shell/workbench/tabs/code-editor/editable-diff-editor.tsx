@@ -214,12 +214,11 @@ function EditableDiffSession({
       disableFileHeader: true,
       surface: "bg1",
     });
-    // Removed lines are no longer part of the file: a drag passes over them
-    // unpainted and Copy leaves them out.
+    // Pierre leaves removed lines out of a drag across them and copies text
+    // selected inside one; blocking selection there would lose the latter.
     return {
       ...base,
-      unsafeCSS: `${base.unsafeCSS}
-  [data-line][data-line-type="change-deletion"] { -webkit-user-select: none; user-select: none; }${newFile ? NEW_FILE_DIFF_CSS : ""}`,
+      unsafeCSS: `${base.unsafeCSS}${newFile ? NEW_FILE_DIFF_CSS : ""}`,
       // The plain editor's 12px above the first line and below the last.
       layout: {
         ...DEFAULT_CODE_VIEW_LAYOUT,

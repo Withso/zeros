@@ -1,0 +1,14 @@
+diff --git a/dist/editor/editor.js b/dist/editor/editor.js
+index 04433fcbc8314ff48089e990fe774988376ca10a..85fd68f87f63411e24ba517a6939ed2ab3cc1ae8 100644
+--- a/dist/editor/editor.js
++++ b/dist/editor/editor.js
+@@ -1287,7 +1287,8 @@ var Editor = class {
+ 					const selection = this.#spanLineSelection(anchorLine, lineIndex, textDocument);
+ 					this.#selectionStart ??= selection;
+ 					this.#updateSelections([selection]);
+-					this.#focus(selection.direction === -1 ? selection.start : selection.end);
++					this.#setWindowSelection(selection);
++					this.#focus();
+ 				}, { passive: true })]);
+ 			}, { passive: true }));
+ 		}
