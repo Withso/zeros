@@ -10,7 +10,8 @@ import { CloudProviderError } from "./provider-error.js";
 import { resetMigratedTestDatabase } from "../test-database.js";
 import { grantTestPro } from "../test-pro.js";
 import { FakeBoat } from "./__fixtures__/boat-fake.js";
-import { CLOUD_V2_BACKUP_DELAY_MS, CLOUD_V2_CHECKPOINT_RETRY_WINDOW_MS, CLOUD_V2_LOSS_CONFIRM_MS, CLOUD_V2_LOSS_UNCONFIRMED_ALERT, CloudV2Lifecycle, type CloudV2LifecycleDeps, type CloudV2TimingRecord } from "./lifecycle.js";
+import { CLOUD_V2_BACKUP_DELAY_MS, CLOUD_V2_CHECKPOINT_RETRY_WINDOW_MS, CLOUD_V2_LOSS_CONFIRM_MS, CLOUD_V2_LOSS_UNCONFIRMED_ALERT, CLOUD_V2_MAINTENANCE_LEASE_SECONDS,
+  CLOUD_V2_MAINTENANCE_STALE_MS, CloudV2Lifecycle, type CloudV2LifecycleDeps, type CloudV2TimingRecord } from "./lifecycle.js";
 import { CloudV2Store } from "./store.js";
 
 const d = process.env.TEST_DATABASE_URL ? describe : describe.skip;
@@ -504,5 +505,251 @@ d("cloud v2 retention", () => {
     expect(forks()).toEqual([]);
     await lifecycle({ backupForksPerHour: 2 }).tick();
     expect(forks()).toHaveLength(1);
+  });
+
+  describe("maintenance wakes", () => {
+    const DAY = 24 * 60 * 60_000;
+    /** A clean stop whose machine Boat stopped `days` ago. */
+    async function sleeping(days: number): Promise<void> {
+      await stop();
+      await pool.query("UPDATE cloud_v2_workspaces SET stopped_at=stopped_at - make_interval(secs => $2::double precision / 1000) WHERE id=$1", [id, days * DAY]);
+    }
+    const wakes = async () => (await pool.query("SELECT kind, outcome, worker_found_running, snapshot_available, deadline_at FROM cloud_v2_maintenance_wakes WHERE workspace_id=$1 ORDER BY started_at", [id])).rows;
+    const visible = async () => (await pool.query(`SELECT state, boat_sandbox_id, updated_at, active_at, worker_token_hash, stop_generation FROM cloud_v2_workspaces WHERE id=$1`, [id])).rows[0];
+    const catalog = async () => Number((await pool.query("SELECT count(*) AS n FROM security_events WHERE payload->>'workspaceId'=$1", [id])).rows[0].n);
+    const resumes = (machine = vm) => boat.calls.filter(call => call.op === "resume" && call.args[0] === machine);
+
+    it("wakes a machine 10 days after Boat stopped it, invisibly: same document, no catalog event, no token, no activity", async () => {
+      await sleeping(10.6);
+      const before = { row: await visible(), document: JSON.stringify(await store.get(id, user)), events: await catalog() };
+      await lifecycle().tick();
+      expect(resumes()).toEqual([{ op: "resume", args: [vm, CLOUD_V2_MAINTENANCE_LEASE_SECONDS] }]);
+      expect(boat.machine(vm)!.state).toBe("archived");
+      expect(await visible()).toEqual(before.row);
+      expect(JSON.stringify(await store.get(id, user))).toBe(before.document);
+      expect(await catalog()).toBe(before.events);
+      expect(await wakes()).toMatchObject([{ kind: "wake", outcome: "stopped", worker_found_running: false }]);
+      const machine = (await pool.query("SELECT machine_stopped_at, maintenance_attempt FROM cloud_v2_workspaces WHERE id=$1", [id])).rows[0];
+      expect(machine).toMatchObject({ maintenance_attempt: null });
+      expect(machine.machine_stopped_at.getTime()).toBe(boat.machine(vm)!.stoppedAt);
+      expect(timings).toContainEqual(expect.objectContaining({ phase: "maintenance_wake", outcome: "stopped" }));
+      // The next one is 10 days after Boat's new stop, not before.
+      await lifecycle().tick();
+      expect(resumes()).toHaveLength(1);
+    });
+
+    it("counts from the latest stop: a person's stop after a wake restarts the 10 days", async () => {
+      await sleeping(10.6);
+      await lifecycle().tick();
+      expect(resumes()).toHaveLength(1);
+      // Boat stopped it 11 days ago at the wake; the person used it since and stopped it yesterday.
+      await pool.query(`UPDATE cloud_v2_workspaces SET machine_stopped_at=clock_timestamp() - interval '11 days',
+        stopped_at=clock_timestamp() - interval '1 day' WHERE id=$1`, [id]);
+      await pool.query("UPDATE cloud_v2_maintenance_wakes SET started_at=started_at - interval '11 days' WHERE workspace_id=$1", [id]);
+      await lifecycle().tick();
+      expect(resumes()).toHaveLength(1);
+    });
+
+    it("leaves a machine stopped less than 10 days alone", async () => {
+      await sleeping(9);
+      await lifecycle().tick();
+      expect(resumes()).toEqual([]);
+    });
+
+    it("switches off a worker found running, alerts, and verifies it off", async () => {
+      await sleeping(10.6);
+      boat.machine(vm)!.worker = { enabled: true, active: true };
+      await lifecycle().tick();
+      expect(errors.some(line => line.startsWith("[cloud-v2] worker found running during a maintenance wake"))).toBe(true);
+      expect(boat.machine(vm)!.worker).toEqual({ enabled: false, active: false });
+      expect(await wakes()).toMatchObject([{ outcome: "stopped", worker_found_running: true }]);
+      expect((await store.lifecycleWorkspace(id))?.workerOffUnverified).toBeUndefined();
+    });
+
+    it("records a machine Boat already expired as gone, from Boat's own fields, and does not try again for that stop", async () => {
+      await sleeping(10.6);
+      boat.machine(vm)!.expired = true;
+      await lifecycle().tick();
+      expect(await wakes()).toMatchObject([{ outcome: "gone", snapshot_available: false }]);
+      await pool.query("UPDATE cloud_v2_maintenance_wakes SET started_at=started_at - interval '2 hours' WHERE workspace_id=$1", [id]);
+      await lifecycle().tick();
+      expect(await wakes()).toHaveLength(1);
+    });
+
+    it("expires a mark left by a wake that died between the mark and Boat's resume, and records that wake failed", async () => {
+      await sleeping(10.6);
+      const crashed = randomUUID();
+      await pool.query("INSERT INTO cloud_v2_maintenance_wakes (workspace_id, attempt, kind, started_at) VALUES ($1, $2, 'wake', clock_timestamp() - interval '2 hours')", [id, crashed]);
+      await pool.query(`UPDATE cloud_v2_workspaces SET maintenance_attempt=$2, maintenance_phase='waking',
+        maintenance_started_at=clock_timestamp() - interval '2 hours' WHERE id=$1`, [id, crashed]);
+      await lifecycle().tick();
+      expect(await wakes()).toMatchObject([{ outcome: "failed" }, { outcome: "stopped" }]);
+      expect((await pool.query("SELECT maintenance_attempt, maintenance_phase FROM cloud_v2_workspaces WHERE id=$1", [id])).rows[0])
+        .toEqual({ maintenance_attempt: null, maintenance_phase: null });
+      expect(resumes()).toHaveLength(1);
+    });
+
+    it("leaves a fresh mark alone: another step is still working it", async () => {
+      await sleeping(10.6);
+      await pool.query("UPDATE cloud_v2_workspaces SET maintenance_attempt=$2, maintenance_phase='waking', maintenance_started_at=clock_timestamp() WHERE id=$1", [id, randomUUID()]);
+      await lifecycle().tick();
+      expect(resumes()).toEqual([]);
+    });
+
+    describe("a person opening the workspace", () => {
+      it("before the wake starts: no wake, an ordinary start", async () => {
+        await sleeping(10.6);
+        await store.transition(id, ["stopped"], "starting");
+        await lifecycle().tick();
+        expect(await wakes()).toEqual([]);
+        expect(resumes()).toEqual([{ op: "resume", args: [vm] }]);
+      });
+
+      it("during the wake: adopts the running machine, re-arms its full lease, and the wake never stops it", async () => {
+        await sleeping(10.6);
+        const real = boat.exec.bind(boat);
+        let opened = false;
+        boat.exec = async (sandbox, command, timeout) => {
+          if (!opened && sandbox === vm && command.includes("zeros-worker-unit")) {
+            opened = true;
+            // The short maintenance lease is armed while the wake runs.
+            expect(boat.machine(vm)!.leaseUntil! - Date.now()).toBeLessThanOrEqual(CLOUD_V2_MAINTENANCE_LEASE_SECONDS * 1000);
+            await store.transition(id, ["stopped"], "starting");
+          }
+          return real(sandbox, command, timeout);
+        };
+        await lifecycle().tick();
+        expect(await wakes()).toMatchObject([{ outcome: "adopted" }]);
+        expect(boat.calls.filter(call => call.op === "stop" && call.args[0] === vm)).toHaveLength(1); // the user's own earlier stop only
+        await lifecycle().tick();
+        expect(resumes().at(-1)).toEqual({ op: "resume", args: [vm] });
+        expect(boat.machine(vm)!.leaseUntil! - Date.now()).toBeGreaterThan(23 * 60 * 60_000);
+        expect((await row()).state).toBe("starting");
+      });
+
+      it("between the stop mark and the stop call: waits, then resumes the stopped machine", async () => {
+        await sleeping(10.6);
+        const realStop = boat.stop.bind(boat);
+        let waited = false;
+        boat.stop = async sandbox => {
+          if (!waited && sandbox === vm) {
+            waited = true;
+            await store.transition(id, ["stopped"], "starting");
+            const before = resumes().length;
+            await lifecycle().tick();
+            // The person's start waited for the maintenance stop instead of resuming under it.
+            expect(resumes()).toHaveLength(before);
+          }
+          return realStop(sandbox);
+        };
+        await lifecycle().tick();
+        expect(await wakes()).toMatchObject([{ outcome: "stopped" }]);
+        await pool.query("UPDATE cloud_v2_workspaces SET next_attempt_at=NULL WHERE id=$1", [id]);
+        await lifecycle().tick();
+        const calls = boat.calls.filter(call => call.args[0] === vm && (call.op === "stop" || call.op === "resume")).map(call => call.op);
+        expect(calls.slice(-3)).toEqual(["resume", "stop", "resume"]);
+      });
+
+      it("takes over a stop mark left by a step that died", async () => {
+        await sleeping(10.6);
+        await pool.query(`UPDATE cloud_v2_workspaces SET maintenance_attempt=$2, maintenance_phase='stopping',
+          maintenance_started_at=clock_timestamp() - make_interval(secs => $3::double precision / 1000) WHERE id=$1`, [id, randomUUID(), CLOUD_V2_MAINTENANCE_STALE_MS + 60_000]);
+        await store.transition(id, ["stopped"], "starting");
+        await lifecycle().tick();
+        expect(resumes()).toEqual([{ op: "resume", args: [vm] }]);
+        expect((await pool.query("SELECT maintenance_attempt FROM cloud_v2_workspaces WHERE id=$1", [id])).rows[0].maintenance_attempt).toBeNull();
+      });
+
+      it("and a fresh mark keeps the start waiting", async () => {
+        await sleeping(10.6);
+        await pool.query("UPDATE cloud_v2_workspaces SET maintenance_attempt=$2, maintenance_phase='stopping', maintenance_started_at=clock_timestamp() WHERE id=$1", [id, randomUUID()]);
+        await store.transition(id, ["stopped"], "starting");
+        await lifecycle().tick();
+        expect(resumes()).toEqual([]);
+      });
+    });
+
+    it("wakes an archived workspace exactly once, 10 days after its archive", async () => {
+      await sleeping(3);
+      await pool.query("UPDATE cloud_v2_workspaces SET archived_at=clock_timestamp() - interval '5 days' WHERE id=$1", [id]);
+      await lifecycle().tick();
+      expect(resumes()).toEqual([]);
+      await pool.query("UPDATE cloud_v2_workspaces SET archived_at=clock_timestamp() - interval '10 days 1 hour' WHERE id=$1", [id]);
+      await lifecycle().tick();
+      expect(resumes()).toHaveLength(1);
+      expect((await pool.query("SELECT archive_wake_done_at FROM cloud_v2_workspaces WHERE id=$1", [id])).rows[0].archive_wake_done_at).toBeInstanceOf(Date);
+      // Never again, however long it sleeps.
+      await pool.query("UPDATE cloud_v2_workspaces SET machine_stopped_at=machine_stopped_at - interval '11 days' WHERE id=$1", [id]);
+      await pool.query("UPDATE cloud_v2_maintenance_wakes SET started_at=started_at - interval '2 hours' WHERE workspace_id=$1", [id]);
+      await lifecycle().tick();
+      expect(resumes()).toHaveLength(1);
+    });
+
+    it("gives a workspace archived again its own one wake, 10 days after that archive", async () => {
+      await sleeping(3);
+      await pool.query(`UPDATE cloud_v2_workspaces SET archived_at=clock_timestamp() - interval '10 days 1 hour',
+        archive_wake_done_at=clock_timestamp() - interval '40 days' WHERE id=$1`, [id]);
+      await lifecycle().tick();
+      expect(resumes()).toHaveLength(1);
+    });
+
+    it("works a switch-on backlog larger than a day's budget deadline-first, and reports what it cannot reach", async () => {
+      // 12 sleeping workspaces whose machines Boat should delete within the next 12 to 24 hours; nothing
+      // on them needs a backup, so the whole budget goes to wakes.
+      const others: { id: string; vm: string; days: number }[] = [];
+      for (let index = 0; index < 12; index++) {
+        const other = randomUUID(), days = 13 + ((index * 7) % 12) * 0.04;
+        const { sandboxId } = await boat.create({ key: other, name: `zeros-ws-${other.slice(0, 8)}`, env: {} });
+        await boat.stop(sandboxId); await boat.inspect(sandboxId);
+        await pool.query(`INSERT INTO cloud_v2_workspaces (id, org_id, creator_user_id, name, repository, branch, base_branch, state, boat_sandbox_id, stopped_at,
+            retention_started_at, backup_probe, backup_probe_generation, worker_off_verified_generation)
+          VALUES ($1,$2,$3,'o','acme/app','zeros/o','main','stopped',$4, clock_timestamp() - make_interval(secs => $5::double precision),
+            clock_timestamp() - interval '20 days', 'clean', 0, 0)`, [other, org, user, sandboxId, days * DAY / 1000]);
+        others.push({ id: other, vm: sandboxId, days });
+      }
+      const order: string[] = [];
+      const realResume = boat.resume.bind(boat);
+      boat.resume = async (sandbox, ttl) => { order.push(sandbox); return realResume(sandbox, ttl); };
+      const running = lifecycle({ maintenancePerDay: 5, maintenancePerHour: 5 });
+      for (let scan = 0; scan < 20; scan++) await running.tick();
+      // Only the day's budget, the nearest deletions first.
+      expect(order).toEqual([...others].sort((a, b) => b.days - a.days).slice(0, 5).map(entry => entry.vm));
+      expect(Number((await pool.query("SELECT count(*) AS n FROM cloud_v2_maintenance_wakes")).rows[0].n)).toBe(5);
+      // One summary line an hour, written after the first wake: 4 more fit today's budget, and the 7
+      // after them cannot be reached before Boat deletes them.
+      const summaries = warnings.filter(line => line.startsWith("[cloud-v2] maintenance backlog:"));
+      expect(summaries).toHaveLength(1);
+      expect(summaries[0]).toMatch(/11 due, 11 past due by 2 days, 7 beyond the budget before Boat's expected deletion/);
+      expect(timings.find(record => record.phase === "maintenance_backlog")).toMatchObject({ due: 11, overdue: 11, unreachable: 7 });
+    });
+
+    it("counts backup forks in the shared budget", async () => {
+      await sleeping(10.6);
+      await pool.query("INSERT INTO cloud_v2_maintenance_wakes (workspace_id, attempt, kind) VALUES ($1, $2, 'backup_fork')", [id, randomUUID()]);
+      await lifecycle({ maintenancePerHour: 1 }).tick();
+      expect(resumes()).toEqual([]);
+    });
+
+    it("confirms twice before restoring an earlier checkpoint over a machine that may hold later work, and keeps that machine", async () => {
+      const object = `cloud-v2/checkpoints/${id}/${randomUUID()}.zck`;
+      archives.set(object, new Map([[`${path("app")}/UNPUSHED`, "older work"]]));
+      await pool.query(`UPDATE cloud_v2_workspaces SET checkpoint_object=$2, checkpoint_key='{"sealed":true}', checkpoint_sha256=$3, checkpoint_bytes=100,
+        checkpoint_saved_at=clock_timestamp(), checkpoint_stop_generation=stop_generation WHERE id=$1`, [id, object, "e".repeat(64)]);
+      boat.write(vm, `${path("app")}/UNPUSHED`, "newer work");
+      await stop();
+      await store.transition(id, ["stopped"], "starting");
+      // One wrong 404: nothing is restored or deleted.
+      vi.spyOn(boat, "resume").mockRejectedValueOnce(notFound());
+      await lifecycle().tick();
+      expect((await row()).boat_sandbox_id).toBe(vm);
+      expect(deletes()).toEqual([]);
+      // Truly expired: the earlier checkpoint comes back, and the machine is kept, not deleted.
+      boat.machine(vm)!.expired = true;
+      await pool.query("UPDATE cloud_v2_workspaces SET next_attempt_at=NULL WHERE id=$1", [id]);
+      await lifecycle().tick();
+      expect(boat.machine((await row()).boat_sandbox_id)!.files.get(`${path("app")}/UNPUSHED`)).toBe("older work");
+      expect(deletes()).not.toContain(vm);
+      expect((await pool.query("SELECT lost_work_machine FROM cloud_v2_workspaces WHERE id=$1", [id])).rows[0].lost_work_machine).toBe(vm);
+    });
   });
 });

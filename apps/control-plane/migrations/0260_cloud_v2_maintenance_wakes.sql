@@ -4,11 +4,11 @@ SET LOCAL lock_timeout = '5s';
 -- about a minute every 10 days so Boat's 14-day deletion of a stopped disk never reaches it. A wake is invisible: it
 -- never changes state, boat_sandbox_id, updated_at, active_at or tokens, and touches none of the columns the catalog
 -- push trigger (0248) watches.
--- machine_stopped_at: Boat's stoppedAt after the latest maintenance wake; Boat's deletion counts from it (stopped_at
--- stays the user's stop).
+-- machine_stopped_at: Boat's stoppedAt after the latest maintenance wake (stopped_at stays the user's stop). The next
+-- wake counts from whichever of the two is later.
 -- maintenance_attempt/maintenance_phase/maintenance_started_at: the wake in flight. 'stopping' is set in the same
 -- statement that checks state='stopped'; a user wake that finds it waits for it to clear or takes it over.
--- archive_wake_done_at: an archived workspace is woken exactly once, 10 days after its archive.
+-- archive_wake_done_at: an archived workspace is woken exactly once per archive, 10 days after it.
 ALTER TABLE cloud_v2_workspaces
   ADD COLUMN machine_stopped_at timestamptz,
   ADD COLUMN maintenance_attempt uuid,

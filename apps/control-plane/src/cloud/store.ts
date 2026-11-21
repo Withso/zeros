@@ -1630,7 +1630,8 @@ export class CloudV2Store {
 
   /** Retention S2: the next due maintenance wake, deadline-first, within the shared budget of machine
    * starts (wakes and backup forks). Due: a sleeping workspace 10 days (plus a stable 0–12 h spread)
-   * after Boat last stopped its machine; an archived one exactly once, 10 days after its archive.
+   * after its machine last stopped (a person's stop or a wake's, whichever is later; greatest() skips
+   * a null); an archived one exactly once per archive, 10 days after it.
    * A wake whose mark went stale (its step died) is taken over. Serialized so the budget is exact. */
   async claimMaintenanceWake(input: { attempt: string; perHour: number; perDay: number; staleMs: number; excludeIds?: readonly string[] }):
     Promise<(CloudV2LifecycleWorkspace & { maintenanceWake: { attempt: string; archived: boolean } }) | null> {
@@ -1645,22 +1646,22 @@ export class CloudV2Store {
          WHERE state='stopped' AND boat_sandbox_id IS NOT NULL AND NOT restore_pending AND checkpoint_retry_fork IS NULL
            AND NOT (id = ANY($1::uuid[]))
            AND (maintenance_attempt IS NULL OR maintenance_started_at < clock_timestamp() - make_interval(secs => $2::double precision / 1000))
-           AND coalesce(machine_stopped_at, stopped_at) IS NOT NULL
+           AND greatest(machine_stopped_at, stopped_at) IS NOT NULL
            -- A failed wake backs off an hour; one that found the machine gone is not repeated for this stop.
            AND NOT EXISTS (SELECT 1 FROM cloud_v2_maintenance_wakes m WHERE m.workspace_id=cloud_v2_workspaces.id AND m.kind='wake'
              AND (m.started_at > clock_timestamp() - interval '1 hour'
-               OR (m.outcome='gone' AND m.started_at > coalesce(cloud_v2_workspaces.machine_stopped_at, cloud_v2_workspaces.stopped_at))))
+               OR (m.outcome='gone' AND m.started_at > greatest(cloud_v2_workspaces.machine_stopped_at, cloud_v2_workspaces.stopped_at))))
            AND CASE WHEN archived_at IS NULL
-             THEN coalesce(machine_stopped_at, stopped_at) + interval '10 days' + make_interval(secs => abs(hashtext(id::text)) % 43200) <= clock_timestamp()
-             ELSE archive_wake_done_at IS NULL AND archived_at + interval '10 days' <= clock_timestamp() END
-         ORDER BY coalesce(machine_stopped_at, stopped_at) LIMIT 1 FOR UPDATE SKIP LOCKED`, [input.excludeIds ?? [], input.staleMs])).rows[0];
+             THEN greatest(machine_stopped_at, stopped_at) + interval '10 days' + make_interval(secs => abs(hashtext(id::text)) % 43200) <= clock_timestamp()
+             ELSE (archive_wake_done_at IS NULL OR archive_wake_done_at < archived_at) AND archived_at + interval '10 days' <= clock_timestamp() END
+         ORDER BY greatest(machine_stopped_at, stopped_at) LIMIT 1 FOR UPDATE SKIP LOCKED`, [input.excludeIds ?? [], input.staleMs])).rows[0];
       if (!due) return null;
       if (due.maintenance_attempt) await tx.query(`UPDATE cloud_v2_maintenance_wakes SET outcome='failed', finished_at=clock_timestamp()
         WHERE attempt=$1 AND finished_at IS NULL`, [due.maintenance_attempt]);
       const { rows } = await tx.query<LifecycleRow>(`UPDATE cloud_v2_workspaces SET maintenance_attempt=$2, maintenance_phase='waking',
           maintenance_started_at=clock_timestamp() WHERE id=$1 RETURNING ${LIFECYCLE_COLUMNS}`, [due.id, input.attempt]);
       await tx.query(`INSERT INTO cloud_v2_maintenance_wakes (workspace_id, attempt, kind, deadline_at)
-        SELECT id, $2, 'wake', coalesce(machine_stopped_at, stopped_at) + interval '14 days' FROM cloud_v2_workspaces WHERE id=$1`, [due.id, input.attempt]);
+        SELECT id, $2, 'wake', greatest(machine_stopped_at, stopped_at) + interval '14 days' FROM cloud_v2_workspaces WHERE id=$1`, [due.id, input.attempt]);
       const row = rows[0]!;
       return { ...lifecycleWorkspace(row), maintenanceWake: { attempt: input.attempt, archived: row.archived_at !== null } };
     });
@@ -1709,16 +1710,18 @@ export class CloudV2Store {
   /** Retention S2's health, for its summary and S4's alert: sleeping workspaces due a wake, those past
    * due by 2 days, those whose last wake found Boat had expired the disk, and the Boat deletion
    * estimates (oldest first) of everything due, which the lifecycle compares with its budget. */
-  async maintenanceBacklog(): Promise<{ due: number; overdue: number; expired: number; deadlines: Date[] }> {
+  async maintenanceBacklog(): Promise<{ due: number; overdue: number; expired: number; usedToday: number; deadlines: Date[] }> {
     return withSystemTx(this.pool, async tx => {
-      const due = (await tx.query<{ deadline: Date; overdue: boolean }>(`SELECT coalesce(machine_stopped_at, stopped_at) + interval '14 days' AS deadline,
-          coalesce(machine_stopped_at, stopped_at) + interval '12 days' < clock_timestamp() AS overdue
+      const due = (await tx.query<{ deadline: Date; overdue: boolean }>(`SELECT greatest(machine_stopped_at, stopped_at) + interval '14 days' AS deadline,
+          greatest(machine_stopped_at, stopped_at) + interval '12 days' < clock_timestamp() AS overdue
         FROM cloud_v2_workspaces WHERE state='stopped' AND boat_sandbox_id IS NOT NULL AND archived_at IS NULL AND maintenance_attempt IS NULL
-          AND coalesce(machine_stopped_at, stopped_at) + interval '10 days' <= clock_timestamp()
+          AND greatest(machine_stopped_at, stopped_at) + interval '10 days' <= clock_timestamp()
         ORDER BY 1 LIMIT 20000`)).rows;
       const expired = (await tx.query<{ n: number }>(`SELECT count(DISTINCT workspace_id)::int AS n FROM cloud_v2_maintenance_wakes m
         WHERE m.kind='wake' AND m.snapshot_available IS FALSE AND m.started_at > clock_timestamp() - interval '30 days'`)).rows[0]!.n;
-      return { due: due.length, overdue: due.filter(entry => entry.overdue).length, expired, deadlines: due.map(entry => entry.deadline) };
+      const usedToday = (await tx.query<{ n: number }>(`SELECT count(*)::int AS n FROM cloud_v2_maintenance_wakes
+        WHERE started_at > clock_timestamp() - interval '1 day'`)).rows[0]!.n;
+      return { due: due.length, overdue: due.filter(entry => entry.overdue).length, expired, usedToday, deadlines: due.map(entry => entry.deadline) };
     });
   }
 

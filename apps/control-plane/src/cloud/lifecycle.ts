@@ -437,6 +437,7 @@ export class CloudV2Lifecycle {
     if (stopSlots > 0) this.admitClaimed(await this.deps.store.claimPending(stopSlots, LEASE_MS, [...this.inFlight.keys()], ["stopping"]), now);
     // One retry at a time, only with a slot to spare, and never in a slot: a
     // fork runs for minutes and nobody is waiting for it.
+    let retryStarted: Promise<void> | null = null;
     if ((this.deps.checkpointRetry || this.retention) && this.deps.checkpoints && !this.retrying && !this.maintaining && now >= this.nextRetryScan && this.inFlight.size < CONCURRENCY) {
       this.nextRetryScan = now + MAINTENANCE_SCAN_MS;
       this.retrying = this.retryCheckpoint()
@@ -444,13 +445,16 @@ export class CloudV2Lifecycle {
         .then(claimed => { if (claimed) this.nextRetryScan = -Infinity; })
         .catch(error => this.deps.logger?.warn(`[cloud-v2] checkpoint retry step failed (${errorCode(error)})`))
         .finally(() => { this.retrying = null; });
+      retryStarted = this.retrying;
     }
     // Retention S2: one maintenance wake at a time, only with two slots to spare, so creates and
     // user wakes always go first. A claimed wake looks for the next at once.
-    // Never beside a backup retry: one would resume the machine the other is forking or inspecting.
-    if (this.retention && !this.maintaining && !this.retrying && now >= this.nextMaintenanceScan && this.inFlight.size <= CONCURRENCY - 2) {
+    // Never beside a backup retry: one would resume the machine the other is forking or inspecting. A
+    // retry started in this same pass runs first and the wake follows it, so neither lane starves.
+    if (this.retention && !this.maintaining && (!this.retrying || this.retrying === retryStarted) && now >= this.nextMaintenanceScan && this.inFlight.size <= CONCURRENCY - 2) {
       this.nextMaintenanceScan = now + MAINTENANCE_SCAN_MS;
-      this.maintaining = this.maintenanceWake()
+      const after = retryStarted ?? Promise.resolve();
+      this.maintaining = after.then(() => this.maintenanceWake())
         .then(claimed => { if (claimed) this.nextMaintenanceScan = -Infinity; })
         .then(() => this.reportBacklog(now))
         .catch(error => this.deps.logger?.warn(`[cloud-v2] maintenance wake step failed (${errorCode(error)})`))
@@ -878,9 +882,14 @@ export class CloudV2Lifecycle {
     if (now < this.nextBacklogReport) return;
     this.nextBacklogReport = now + 60 * 60_000;
     const backlog = await this.deps.store.maintenanceBacklog();
-    const perHour = Math.min(this.deps.maintenancePerHour ?? CLOUD_V2_MAINTENANCE_PER_HOUR, (this.deps.maintenancePerDay ?? CLOUD_V2_MAINTENANCE_PER_DAY) / 24);
-    // Deadline-first: the i-th due workspace is reached about i / perHour hours from now.
-    const unreachable = backlog.deadlines.filter((deadline, index) => now + (index / perHour) * 60 * 60_000 > deadline.getTime()).length;
+    const perHour = this.deps.maintenancePerHour ?? CLOUD_V2_MAINTENANCE_PER_HOUR, perDay = this.deps.maintenancePerDay ?? CLOUD_V2_MAINTENANCE_PER_DAY;
+    // Deadline-first, after what the last day already spent: the i-th due workspace waits for the
+    // day's budget to roll over once per perDay ahead of it, then takes its place in the hourly rate.
+    const reachedAfter = (index: number) => {
+      const slot = index + backlog.usedToday;
+      return (Math.floor(slot / perDay) * 24 + (slot % perDay) / perHour) * 60 * 60_000;
+    };
+    const unreachable = backlog.deadlines.filter((deadline, index) => now + reachedAfter(index) > deadline.getTime()).length;
     emitCloudV2Timing(this.deps.timing, { workspaceId: "-", phase: "maintenance_backlog", durationMs: 0,
       due: backlog.due, overdue: backlog.overdue, expired: backlog.expired, unreachable });
     if (unreachable || backlog.overdue) this.deps.logger?.warn(`[cloud-v2] maintenance backlog: ${backlog.due} due, ${backlog.overdue} past due by 2 days, `
