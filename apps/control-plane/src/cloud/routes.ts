@@ -76,7 +76,7 @@ export type CloudV2RouteDeps = {
   computers: Pick<CloudV2Computers, "requireMember" | "requireAdmin" | "overview" | "enqueue" | "buildConfigured" | "buildSourceTargets" | "saveRecipe" | "discardRecipe" | "reactivate" | "log" | "logRepositories">
     & Partial<Pick<CloudV2Computers, "saveInstallScript">>;
   /** Two GitHub levels (ready copies on): which level a repository lives at for the caller. */
-  repositoryLevels?: Pick<CloudRepositoryLevels, "levelFor" | "repositories">;
+  repositoryLevels?: Pick<CloudRepositoryLevels, "levelFor" | "repositories"> & Partial<Pick<CloudRepositoryLevels, "organizationInstallation">>;
   /** The caller's own GitHub reading a repository: its identity and default branch. */
   resolveMemberRepository?(organizationId: string, userId: string, repository: string): Promise<{ repository: string; repositoryId: string; defaultBranch: string }>;
   /** Two GitHub levels' own routes. */
@@ -362,8 +362,13 @@ export function createCloudV2Routes(deps: CloudV2RouteDeps): Hono {
     // Two levels: the caller's own private repositories join the shared ones, marked;
     // no other member's ever does. A released desktop reads the same list.
     const levels = deps.repositoryLevels && repositories !== null ? await deps.repositoryLevels.repositories(organizationId, c.get("user").id) : null;
-    const listed: (CloudV2InstalledRepository & { level?: "shared" | "private" })[] = levels
-      ? [...allowed.map(entry => ({ ...entry, level: "shared" as const })),
+    // A shared repository's organization connection, when GitHub reported it suspended or uninstalled.
+    const connectionState = async (repository: string) => {
+      const connection = await deps.repositoryLevels?.organizationInstallation?.(organizationId, repository);
+      return connection && connection.state !== "active" ? { connection: connection.state } : {};
+    };
+    const listed: (CloudV2InstalledRepository & { level?: "shared" | "private"; connection?: string })[] = levels
+      ? [...await Promise.all(allowed.map(async entry => ({ ...entry, level: "shared" as const, ...await connectionState(entry.repository) }))),
         ...(levels.personalAllowed ? levels.private.filter(own => !allowed.some(entry => entry.repository.toLowerCase() === own.repository))
           .map(own => ({ repository: own.repository, defaultBranch: null, level: "private" as const })) : [])]
       : allowed;

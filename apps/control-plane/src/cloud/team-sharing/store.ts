@@ -65,7 +65,7 @@ export class CloudTeamSharing {
           ...(enriched.github ? { github: enriched.github } : {}) } : {}),
           teamSharing: 1 as const,createdByUserId: view.createdByUserId,viewerRole: view.role,
           ...(ownership ? { teamOwnership: 1 as const,creatorRevision: view.creatorRevision,noCreatorReason: view.noCreatorReason,
-            canReassign: this.ownership.enabled && view.executionMode === "active" && view.role !== "member" } : {}),
+            canReassign: this.ownership.enabled && view.executionMode === "active" && view.role !== "member" && !view.workspace.privateOwnerUserId } : {}),
           ...(row.execution_mode === "active" ? { teamWriting: 1 as const, canExecute: row.can_execute } : {}),
           readOnly: row.execution_mode === "active" ? !row.can_execute : view.role !== "creator",canManage: view.role !== "member",
           following: row.following,pinned: row.pinned,followerIds: row.follower_ids,followerCount: Number(row.follower_count) };

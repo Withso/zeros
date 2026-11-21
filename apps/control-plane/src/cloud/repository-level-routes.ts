@@ -72,7 +72,7 @@ export function createRepositoryLevelRoutes(deps: RepositoryLevelRouteDeps): Hon
 
   app.delete(`${base}/connections/:connection`, async c => {
     await deps.levels.disconnect(organization(c.req.param("org")), c.get("user").id, id(c.req.param("connection")));
-    return c.body(null, 204);
+    return c.json({ ok: true });
   });
 
   /** A connection's drawer: what the caller can read through it, and what is already added. */
@@ -116,7 +116,7 @@ export function createRepositoryLevelRoutes(deps: RepositoryLevelRouteDeps): Hon
 
   app.delete("/v1/cloud-v2/organizations/:org/cloud-repositories/:repository", async c => {
     await deps.levels.remove(organization(c.req.param("org")), c.get("user").id, id(c.req.param("repository")));
-    return c.body(null, 204);
+    return c.json({ ok: true });
   });
 
   app.put("/v1/cloud-v2/organizations/:org/cloud-repositories/settings", json, async c => {
