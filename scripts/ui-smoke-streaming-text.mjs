@@ -100,15 +100,22 @@ export async function runStreamingTextSmoke({ page, check }) {
   await expect(between).toHaveCount(0);
   const opened = await settle.evaluate(async (root) => {
     const seen = [];
+    const source = root.dataset.source.trim();
+    let done;
+    const mounted = new Promise((resolve) => { done = resolve; });
+    // Every state the message passes through until the opened group holds it
+    // complete and unrevealed (a replay would show partial or revealing text).
     const observer = new MutationObserver(() => {
       const prose = root.querySelector(".zeros-agent-md");
-      if (prose) seen.push({ text: prose.textContent.trim(), edge: prose.dataset.revealing !== undefined });
+      if (!prose) return;
+      seen.push({ text: prose.textContent.trim(), edge: prose.dataset.revealing !== undefined });
+      if (prose.textContent.trim() === source && prose.dataset.revealing === undefined) done();
     });
     observer.observe(root, { subtree: true, childList: true, characterData: true, attributes: true });
     root.querySelector("[data-working-group]").click();
-    await new Promise((resolve) => setTimeout(resolve, 300));
+    await Promise.race([mounted, new Promise((resolve) => setTimeout(resolve, 3_000))]);
     observer.disconnect();
-    return { seen, source: root.dataset.source.trim() };
+    return { seen, source };
   });
   check(
     "Settled with the setting off, the streamed message remounts in its group complete, without replaying",

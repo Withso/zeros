@@ -73,6 +73,9 @@ const seeded = (seed: number) => () => (seed = (seed * 1664525 + 1013904223) >>>
 function LongStreamProbe({ ctx }: { ctx: RendererContext }) {
   const [length, setLength] = useState<number>(LONG.small[0]);
   const [mode, setMode] = useState<keyof typeof LONG | null>(null);
+  // Each run is a new message (a restart is not a correction of the last),
+  // and restarts the stream even in the same mode.
+  const [run, setRun] = useState(0);
   const timer = useRef(0);
   useEffect(() => {
     if (!mode) return;
@@ -90,13 +93,11 @@ function LongStreamProbe({ ctx }: { ctx: RendererContext }) {
     };
     timer.current = window.setTimeout(step, 0);
     return () => clearTimeout(timer.current);
-  }, [mode]);
+  }, [mode, run]);
   const [blocks, setBlocks] = useState(false);
   const [stopped, setStopped] = useState(false);
   // Comparison only: show text as it arrives (the model before the reveal).
   const [revealOff, setRevealOff] = useState(false);
-  // Each run is a new message (a restart is not a correction of the last).
-  const [run, setRun] = useState(0);
   const message = useMemo<AgentTextMessage>(() => blocks
     ? { ...textMessage(`long-message-${run}`, BLOCKS.slice(0, length)), phase: "final_answer" }
     : textMessage(`long-message-${run}`, longReply(length)), [length, blocks, run]);

@@ -336,9 +336,14 @@ export async function runToolRowWidthSmoke({ page, check }) {
   // Several moves, so Radix sees the pointer leave its hoverable grace area.
   await page.mouse.move(0, 0, { steps: 5 });
   await expect(page.getByRole("tooltip")).toHaveCount(0);
-  await nameOf("Bash git -C").hover();
-  // A negative check: wait past the harness's 100ms tooltip delay.
+  const untruncated = nameOf("Bash git -C");
+  await untruncated.hover();
+  // A negative check: the pointer stays on the name across the harness's
+  // 100ms tooltip delay (the window under test), and no tooltip opens.
+  const hovered = () => untruncated.evaluate((node) => node.matches(":hover"));
+  expect(await hovered()).toBe(true);
   await page.waitForTimeout(400);
+  expect(await hovered()).toBe(true);
   await expect(page.getByRole("tooltip")).toHaveCount(0);
   await page.mouse.move(0, 0);
   check("Only a truncated tool name shows its full name in the shared tooltip", true);

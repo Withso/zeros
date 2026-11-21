@@ -11,7 +11,11 @@ async function watch(probe, { button, reveal, stopAfter = null, ms = 4_500 }) {
   return probe.evaluate(async (root, { button, reveal, stopAfter, ms }) => {
     const toggle = [...root.querySelectorAll("button")].find((node) => /^Reveal: /.test(node.textContent));
     if ((toggle.textContent === "Reveal: on") !== reveal) toggle.click();
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    // Until the probe carries the requested setting.
+    await new Promise((resolve) => {
+      const ready = () => (root.dataset.textReveal === "off") === !reveal ? resolve() : requestAnimationFrame(ready);
+      ready();
+    });
     const prose = () => root.querySelector(".zeros-agent-md");
     const texts = () => {
       const out = [];
@@ -76,7 +80,7 @@ async function watch(probe, { button, reveal, stopAfter = null, ms = 4_500 }) {
             const rect = range.getBoundingClientRect();
             const y = rect.bottom - box.top;
             if (y > clip + 0.5) continue;
-            for (const [position, time] of arrivals) if (position <= at && !shownAt.has(position) && at - position < 50) shownAt.set(position, now);
+            for (const position of arrivals.keys()) if (position <= at && !shownAt.has(position) && at - position < 50) shownAt.set(position, now);
             const position = { x: rect.left - box.left, y: rect.top - box.top, word: match[0] };
             const before = seen.get(at);
             if (before && (Math.abs(before.x - position.x) > 1.5 || Math.abs(before.y - position.y) > 1.5)) {
@@ -108,6 +112,10 @@ async function watch(probe, { button, reveal, stopAfter = null, ms = 4_500 }) {
       requestAnimationFrame(tick);
     });
     const lags = [...shownAt].filter(([at]) => arrivals.get(at) > 300).map(([at, time]) => time - arrivals.get(at));
+    // Text laid out early enough to judge must have been shown within the
+    // bound, including text that never appeared at all.
+    const overdue = [...arrivals].filter(([at, laidOut]) => laidOut > 300 && laidOut <= ms - 1_700 &&
+      !(shownAt.has(at) && shownAt.get(at) - laidOut <= 1_700)).length;
     // Lines shown in all, against the layout steps taken.
     const lineHeight = parseFloat(getComputedStyle(prose().querySelector("p") ?? prose()).lineHeight) || 24;
     const finite = clips.filter(Number.isFinite);
@@ -115,6 +123,7 @@ async function watch(probe, { button, reveal, stopAfter = null, ms = 4_500 }) {
     const lines = finite.length > 1 ? Math.round((finite.at(-1) - finite[0]) / lineHeight) : 0;
     return {
       words: seen.size, jumps, examples, dips, dipExamples, linkChecks, linkViolations, stops, frames, revealingFrames, steps, lines,
+      overdue,
       meanLagMs: lags.length ? Math.round(lags.reduce((sum, lag) => sum + lag, 0) / lags.length) : null,
       maxLagMs: lags.length ? Math.round(Math.max(...lags)) : null,
     };
@@ -141,8 +150,8 @@ export async function runTextRevealSmoke({ page, check }) {
     check(`Reveal (${name}): layout steps are fewer than the lines they show`,
       run.steps > 2 && run.lines > run.steps, JSON.stringify({ steps: run.steps, lines: run.lines }));
     check(`Reveal (${name}): text is shown within about 1.5s of being laid out`,
-      run.meanLagMs !== null && run.meanLagMs <= 1_000 && run.maxLagMs <= 1_700,
-      JSON.stringify({ meanLagMs: run.meanLagMs, maxLagMs: run.maxLagMs }));
+      run.meanLagMs !== null && run.meanLagMs <= 1_000 && run.maxLagMs <= 1_700 && run.overdue === 0,
+      JSON.stringify({ meanLagMs: run.meanLagMs, maxLagMs: run.maxLagMs, overdue: run.overdue }));
     check(`Reveal (${name}): links not yet shown are inert`,
       run.linkChecks > 0 && run.linkViolations === 0, JSON.stringify({ checks: run.linkChecks, violations: run.linkViolations }));
   }

@@ -1,3 +1,4 @@
+import { expect } from "@playwright/test";
 // The live tail's motion, measured frame by frame in the real renderer
 // (harness-working-groups' chain frames). Linux Chrome proof, not native
 // macOS. Each transition is sampled on every animation frame: the loader
@@ -91,11 +92,14 @@ export async function sample(page, frameId, transition, ms = 1_800) {
             .filter(Boolean).filter((node) => { const style = getComputedStyle(node); return style.transform !== "none" || style.translate !== "none" || style.filter !== "none"; }).length,
           labels,
         });
-        if (at >= ms) { observer.disconnect(); resolve(); }
+        if (at >= ms) { done = true; observer.disconnect(); resolve(); }
       });
       observer.observe(probe);
+      // Resize the probe every frame until the observer has resolved the
+      // sample (a time limit could stop it before the last callback).
+      let done = false;
       const tick = () => {
-        if (performance.now() - started > ms + 200) return;
+        if (done) return;
         probe.style.width = `${1 + (++count % 2)}px`;
         requestAnimationFrame(tick);
       };
@@ -157,12 +161,33 @@ async function pinnedPair(page) {
   return result;
 }
 
+/** Wait until the chain's line and content have carried no glide for three
+ * frames in a row: the setup has settled. */
+async function waitSettled(frame) {
+  await frame.evaluate((root) => new Promise((resolve, reject) => {
+    let still = 0;
+    const started = performance.now();
+    const tick = () => {
+      const line = root.querySelector('div[role="status"][aria-live="polite"]');
+      const content = root.querySelector("[data-chain-scroller] > div");
+      const moving = (line && getComputedStyle(line.parentElement).translate !== "none") ||
+        (content && getComputedStyle(content).translate !== "none");
+      still = moving ? 0 : still + 1;
+      if (still >= 3) resolve();
+      else if (performance.now() - started > 3_000) reject(new Error("the chain did not settle"));
+      else requestAnimationFrame(tick);
+    };
+    requestAnimationFrame(tick);
+  }));
+}
+
 /** Reader toggles while the turn is live: an older group, the live group and
  * a tool row's details, each opened and closed. Samples every frame. */
 async function sampleReaderToggles(page, frameId) {
   const frame = page.locator(`#${frameId}`);
   await frame.locator("[data-chain-controls] button", { hasText: "Live: two groups" }).click();
-  await page.waitForTimeout(1_200);
+  await expect(frame.locator("[data-working-group]")).toHaveCount(2);
+  await waitSettled(frame);
   return frame.evaluate(async (root) => {
     const headers = () => [...root.querySelectorAll("[data-working-group]")];
     const frames = [];
@@ -178,6 +203,8 @@ async function sampleReaderToggles(page, frameId) {
       requestAnimationFrame(tick);
     };
     requestAnimationFrame(tick);
+    // Each toggle is watched for 450ms: the window under test (any glide in
+    // it fails), not a readiness guess.
     const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
     const toggles = [
       () => headers()[0]?.click(), // the older group, open
@@ -200,10 +227,15 @@ async function sampleReaderToggles(page, frameId) {
 async function sampleOpenGroupGrowth(page, frameId) {
   const frame = page.locator(`#${frameId}`);
   await frame.locator("[data-chain-controls] button", { hasText: "Open group: three calls arrive" }).click();
+  await waitSettled(frame);
   return frame.evaluate(async (root) => {
-    // After the setup's own glide (320ms) has settled; the calls follow at 900ms+.
-    await new Promise((resolve) => setTimeout(resolve, 500));
-    [...root.querySelectorAll("[data-working-group]")].at(-1).click();
+    // Open the live group only while the calls have not arrived yet (they
+    // follow at 900ms+): the window is asserted open.
+    const live = [...root.querySelectorAll("[data-working-group]")].at(-1);
+    const before = live.getAttribute("aria-label");
+    if (!/, 2 tool calls$/.test(before)) throw new Error(`the arrival window closed before the group opened: ${before}`);
+    live.click();
+    if (live.getAttribute("aria-expanded") !== "true") throw new Error("the live group did not open");
     const frames = [];
     const started = performance.now();
     await new Promise((resolve) => {
@@ -500,7 +532,9 @@ export async function runLiveTailMotionSmoke({ page, check }) {
     const target = id === "group" ? turn.locator("[data-working-group]").last()
       : id === "row" ? turn.locator("button").first() : turn.locator(".zeros-agent-md").last();
     await target.hover();
-    await page.waitForTimeout(200);
+    // Hovered rows tint their background; the message has no hover state.
+    if (id !== "message") await expect.poll(() => turn.evaluate((root) => [...root.querySelectorAll(":hover")]
+      .some((node) => getComputedStyle(node).backgroundColor !== "rgba(0, 0, 0, 0)"))).toBe(true);
     gaps[id] = await turn.evaluate((root, id) => {
       const badge = [...root.querySelectorAll("*")].find((node) => node.children.length === 0 && node.textContent === "STOPPED BY USER");
       const hovered = [...root.querySelectorAll(":hover")].reverse().find((node) => getComputedStyle(node).backgroundColor !== "rgba(0, 0, 0, 0)");
