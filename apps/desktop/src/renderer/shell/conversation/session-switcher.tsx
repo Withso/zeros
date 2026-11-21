@@ -205,6 +205,16 @@ export function RenameRow({ chat }: { chat: ChatThread }) {
     setDraft(chat.title);
   };
   pending.current = cancelled.current || draft === chat.title ? null : { draft, title: chat.title };
+  useEffect(() => {
+    // The menu's own Escape handler (document, capture) closes it before the
+    // field sees the key, so mark the cancel earlier, on window.
+    const onEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape" && event.target instanceof Element && event.target.closest("[data-session-rename]"))
+        cancelled.current = true;
+    };
+    window.addEventListener("keydown", onEscape, true);
+    return () => window.removeEventListener("keydown", onEscape, true);
+  }, []);
   // Dismissing the menu by clicking outside unmounts the field without a blur.
   const saveOnUnmount = useRef(save);
   saveOnUnmount.current = save;

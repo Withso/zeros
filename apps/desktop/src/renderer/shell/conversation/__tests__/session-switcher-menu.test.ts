@@ -114,6 +114,25 @@ describe("rename row", () => {
     expect(editChat).not.toHaveBeenCalled();
   });
 
+  it("Escape cancels even when the menu closes before the field sees the key", () => {
+    vi.mocked(editChat).mockClear();
+    const input = mount("Old");
+    type(input, "Discard me");
+    const closeFirst = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.stopPropagation();
+      act(() => root!.unmount());
+      root = undefined;
+    };
+    document.addEventListener("keydown", closeFirst, true);
+    try {
+      key(input, "Escape");
+    } finally {
+      document.removeEventListener("keydown", closeFirst, true);
+    }
+    expect(editChat).not.toHaveBeenCalled();
+  });
+
   it("ignores an empty name", () => {
     vi.mocked(editChat).mockClear();
     const input = mount("Old");
