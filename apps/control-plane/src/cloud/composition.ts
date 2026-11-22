@@ -25,7 +25,7 @@ import type { CloudAgentCredentialMaterial } from "../agent-credentials/agent-cr
 import { createCloudV2AgentLogins, createCloudV2CodexRefresh } from "./agent-logins.js";
 import { BoatCloudV2Compute } from "./boat.js";
 import type { CloudV2ControlFrame } from "./contract.js";
-import { CloudV2ComputerBuilder, CloudV2Computers } from "./computer.js";
+import { CLOUD_V2_AUTOMATIC_BASE_BUDGET, CloudV2ComputerBuilder, CloudV2Computers } from "./computer.js";
 import { CloudV2ReadyCopies, CloudV2ReadyCopyBuilder, CloudV2ReadyCopyForks } from "./ready-copies.js";
 import { CloudV2ReadyCopySecrets } from "./ready-copy-secrets.js";
 import { CloudRepositoryLevels } from "./repository-levels.js";
@@ -187,7 +187,9 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
   };
   const computers = new CloudV2Computers(pool, lockPool, github.resolveRepository, github.resolveRecentRepository,
     { readyCopies: v2.readyCopies === true, ...(sharedBase ? { sharedBaseSnapshot: sharedBase } : {}),
-      ...(v2.readyCopies === true ? { sharedBaseAvailable, runtimeSha256: runtime.sha256 } : {}) });
+      ...(v2.readyCopies === true ? { sharedBaseAvailable, runtimeSha256: runtime.sha256 } : {}),
+      ...(v2.automaticBasePerHour || v2.automaticBasePerDay ? { automaticBaseBudget: { perHour: v2.automaticBasePerHour ?? CLOUD_V2_AUTOMATIC_BASE_BUDGET.perHour,
+        perDay: v2.automaticBasePerDay ?? CLOUD_V2_AUTOMATIC_BASE_BUDGET.perDay } } : {}) });
   // Ready copies (CLOUD_V2_READY_COPIES_ENABLED): absent while off, so creates and builds run as before.
   const readyCopies = v2.readyCopies === true ? new CloudV2ReadyCopies(pool) : null;
   const readyCopySecrets = readyCopies ? new CloudV2ReadyCopySecrets(pool, keys) : null;

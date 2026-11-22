@@ -274,6 +274,11 @@ export type CloudV2Config = {
    * starts (10-day wakes and backup forks) against Boat's creation-request limits; unset uses 20 and 120. */
   maintenancePerHour?: number;
   maintenancePerDay?: number;
+  /** CLOUD_V2_AUTOMATIC_BASE_PER_HOUR / _PER_DAY: automatic base builds that start a machine (ready copies, no shared
+   * base or an install script), beside retention's maintenance budget; a create waiting on one is never held back.
+   * Unset uses 4 and 30 (computer.ts CLOUD_V2_AUTOMATIC_BASE_BUDGET). */
+  automaticBasePerHour?: number;
+  automaticBasePerDay?: number;
   /** CLOUD_V2_SHARED_BASE_SNAPSHOT: the Boat named snapshot organizations
    * without an install script start from when ready copies are on. Unset,
    * each organization builds its own base. */
@@ -328,6 +333,8 @@ function loadCloudV2Config(env: NodeJS.ProcessEnv, channel: string): CloudV2Conf
   };
   const maintenancePerHour = maintenanceLimit("CLOUD_V2_RETENTION_MAINTENANCE_PER_HOUR", 720);
   const maintenancePerDay = maintenanceLimit("CLOUD_V2_RETENTION_MAINTENANCE_PER_DAY", 9999);
+  const automaticBasePerHour = maintenanceLimit("CLOUD_V2_AUTOMATIC_BASE_PER_HOUR", 720);
+  const automaticBasePerDay = maintenanceLimit("CLOUD_V2_AUTOMATIC_BASE_PER_DAY", 9999);
   const backupForks = env.CLOUD_V2_RETENTION_BACKUP_FORKS_PER_HOUR?.trim();
   if (backupForks && (!/^\d{1,3}$/.test(backupForks) || Number(backupForks) < 1 || Number(backupForks) > 200))
     throw new Error("Invalid environment: CLOUD_V2_RETENTION_BACKUP_FORKS_PER_HOUR must be an integer from 1 to 200");
@@ -381,6 +388,7 @@ function loadCloudV2Config(env: NodeJS.ProcessEnv, channel: string): CloudV2Conf
     personalCloud: personalCloud === "true",
     ...(backupForks ? { backupForksPerHour: Number(backupForks) } : {}),
     ...(maintenancePerHour ? { maintenancePerHour } : {}), ...(maintenancePerDay ? { maintenancePerDay } : {}),
+    ...(automaticBasePerHour ? { automaticBasePerHour } : {}), ...(automaticBasePerDay ? { automaticBasePerDay } : {}),
     ...(sharedBaseSnapshot ? { sharedBaseSnapshot } : {}),
     asyncCreate: asyncCreate !== "false",
     executionAuthCache: executionAuthCache as "off" | "shadow" | "on",

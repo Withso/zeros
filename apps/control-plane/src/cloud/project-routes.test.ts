@@ -302,6 +302,22 @@ describe("GitHub connections and projects", () => {
     return { deps, send };
   }
 
+  it("says what a project without a copy waits for: the Cloud Computer being prepared, or why it failed, never a silent none", async () => {
+    const f = routes(alice);
+    const readyCopies = f.deps.readyCopies as typeof f.deps.readyCopies & { base?: ReturnType<typeof vi.fn> };
+    readyCopies.copies.history.mockResolvedValue([]);
+    readyCopies.base = vi.fn(async () => ({ state: "preparing", buildId: null }));
+    expect((await (await f.send("/cloud-projects")).json()).base).toEqual({ state: "preparing" });
+    expect((await (await f.send(`/cloud-projects/${P1}/ready-copy`)).json()).base).toEqual({ state: "preparing" });
+    readyCopies.base = vi.fn(async () => ({ state: "failed", buildId: "b", errorCode: "computer_install_script_failed", failures: 2,
+      nextAttemptAt: "2026-11-22T13:00:00.000Z" }));
+    expect((await (await f.send(`/cloud-projects/${P1}/ready-copy`)).json()).base)
+      .toEqual({ state: "failed", reason: "computer_install_script_failed", nextAttemptAt: "2026-11-22T13:00:00.000Z" });
+    // A live base says nothing more; a project that has copies shows them instead.
+    readyCopies.base = vi.fn(async () => ({ state: "ready", buildId: "b" }));
+    expect((await (await f.send(`/cloud-projects/${P1}/ready-copy`)).json())).not.toHaveProperty("base");
+  });
+
   it("splits connections into the organization's and the caller's own, and shows which projects use each repository, with no add step", async () => {
     const f = routes(alice);
     expect(await (await f.send("/github/connections")).json()).toEqual({
