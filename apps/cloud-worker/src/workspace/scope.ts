@@ -30,6 +30,8 @@ export class WorkspaceScope {
   readonly workspaceRoot: string;
   readonly repositories: readonly WorkerRepository[];
   private readonly folders: ReadonlySet<string>;
+  /** The project folder's scope (atRoot) of a workspace of several: each repository's checkout, in order. Empty otherwise. */
+  readonly nested: readonly string[];
   constructor(readonly workspace: WorkerConfig["workspace"], within?: readonly string[]) {
     if (!isAbsolute(workspace.checkoutPath) || (workspace.root !== undefined && !isAbsolute(workspace.root)))
       throw new WorkspaceError("WORKSPACE_NOT_FOUND", "Invalid workspace checkout.");
@@ -45,6 +47,7 @@ export class WorkspaceScope {
       || checkouts.some(path => this.workspaceRoot !== this.root && relative(this.workspaceRoot, path).split(sep).length !== 1))
       throw new WorkspaceError("WORKSPACE_NOT_FOUND", "Invalid workspace checkout.");
     this.folders = new Set([this.root, this.workspaceRoot, ...checkouts, ...(within ?? [])]);
+    this.nested = (within ?? []).map(path => resolve(path));
   }
 
   /** Whether the workspace holds several repositories. */

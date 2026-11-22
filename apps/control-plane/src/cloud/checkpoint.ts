@@ -326,7 +326,7 @@ function archiveSteps(input: ArchiveInput, revision: string): string[] {
     "c=\"$work/c\"; mkdir \"$c\"; m=\"$c/manifest\"; printf 'zeros-checkpoint 1\\n' > \"$m\"",
     // Digests of the parts outside Git; a part that cannot be read disables reuse.
     "have_repo='' tree='' staged_tree='' base_commit='' digests=1; : > \"$work/parts\"",
-    ...repositoryCapture(true, !input.backup),
+    ...repositoryCapture(`${CLOUD_V2_WORKER_STATE}/environment-seed/manifest.json`, !input.backup),
     // Before the fingerprint, which then covers every repository.
     ...otherRepositoriesCapture(input.repositories ?? [], !input.backup),
     "step=sessions",
@@ -367,7 +367,20 @@ function archiveSteps(input: ArchiveInput, revision: string): string[] {
 /** One checkout's capture: its Git state, refs, stashes, remotes and what Git
  * ignores, into "$m" and "$work"; the first repository also captures its seeded
  * environment. Leaves have_repo, tree, staged_tree, base_commit and digests set. */
-function repositoryCapture(environment: boolean, attachments = true): string[] {
+/** One checkout's seeded environment files, by its seed manifest, into "$work/environment". */
+function environmentCapture(manifest: string): string[] {
+  return [
+    "  step=environment",
+    `  node "$work/environment.mjs" capture "$repo" "$home/${manifest}" "$work/environment" || { status=$?; if [ "$status" = 3 ]; then fail checkpoint_too_large; else fail checkpoint_failed; fi; }`,
+    "  if [ -d \"$work/environment\" ]; then printf 'environment ' >> \"$work/parts\"; node \"$work/digest.mjs\" tree \"$work/environment\" -- . >> \"$work/parts\" || digests=''; fi",
+  ];
+}
+
+/** `environment`: the seed manifest under the home, for a repository whose seeded
+ * environment files are captured into environment.tar; false for none. `seededOut`
+ * (a later repository): those files are left out of ignored.tar, so they exist only
+ * in environment.tar. The first repository keeps its capture exactly as it was. */
+function repositoryCapture(environment: string | false, attachments = true, seededOut = false): string[] {
   return [
     "step=repository",
     "if [ -d \"$repo\" ] && top=$(git -C \"$repo\" rev-parse --show-toplevel) && [ \"$(cd \"$repo\" && pwd -P)\" = \"$(cd \"$top\" && pwd -P)\" ]; then",
@@ -479,13 +492,14 @@ function repositoryCapture(environment: boolean, attachments = true): string[] {
       "    printf '%s\\0' \"$path\" >> \"$work/attachments\"",
       "  done < \"$work/attachment-ignored\"",
     ] : []),
-    "  step=ignored; total=0",
-    ...ignoredFiles(`printf '%s\\0' "$path" >> "$work/ignored"`),
-    ...(environment ? [
-    "  step=environment",
-    `  node "$work/environment.mjs" capture "$repo" "$home/${CLOUD_V2_WORKER_STATE}/environment-seed/manifest.json" "$work/environment" || { status=$?; if [ "$status" = 3 ]; then fail checkpoint_too_large; else fail checkpoint_failed; fi; }`,
-    "  if [ -d \"$work/environment\" ]; then printf 'environment ' >> \"$work/parts\"; node \"$work/digest.mjs\" tree \"$work/environment\" -- . >> \"$work/parts\" || digests=''; fi",
+    // A later repository's seeded files are captured first and listed, so the ignored archive leaves them out.
+    ...(environment && seededOut ? [...environmentCapture(environment),
+      "  if [ -d \"$work/environment\" ]; then node \"$work/environment.mjs\" exclude \"$repo\" \"$work/environment\" \"$work/environment-paths\" || fail checkpoint_failed; else : > \"$work/environment-paths\"; fi",
     ] : []),
+    "  step=ignored; total=0",
+    ...ignoredFiles(`printf '%s\\0' "$path" >> "$work/ignored"`,
+      environment && seededOut ? "    if grep -qxF -- \"$path\" \"$work/environment-paths\"; then continue; fi" : undefined),
+    ...(environment && !seededOut ? environmentCapture(environment) : []),
     "  step=fingerprint",
     "  for part in attachments ignored; do",
     "    if [ -s \"$work/$part\" ]; then printf '%s ' \"$part\" >> \"$work/parts\"; node \"$work/digest.mjs\" files \"$repo\" \"$work/$part\" >> \"$work/parts\" || digests=''; fi",
@@ -529,7 +543,8 @@ function otherRepositoriesCapture(repositories: readonly CheckpointRepository[],
       `  outer_work=$work; work="$outer_work/r${i}"; mkdir "$work"; cp "$outer_work/digest.mjs" "$outer_work/environment.mjs" "$work/"`,
       `  c="$outer_work/c/repositories/${i}"; mkdir -p "$c"; m="$c/manifest"; printf 'zeros-checkpoint 1\\n' > "$m"`,
       "  have_repo='' tree='' staged_tree='' base_commit='' digests=1; : > \"$work/parts\"",
-      ...repositoryCapture(false, attachments).map(line => `  ${line}`),
+      // Its seeded environment files, from its own seed manifest in the worker's state for this repository.
+      ...repositoryCapture(`${CLOUD_V2_WORKER_STATE}/repositories/${i}/environment-seed/manifest.json`, attachments, true).map(line => `  ${line}`),
       ...repositoryBundle().map(line => `  ${line}`),
       `  { printf 'repository ${i}\\n'; grep -v -E '^(index|worktree) ' "$m" || true; printf 'index-tree %s\\nworktree-tree %s\\nbase %s\\n' "\${staged_tree:--}" "\${tree:--}" "\${base_commit:--}";`,
       `    cat "$work/parts"; [ -n "$digests" ] || printf 'undigested\\n'; } > "$outer_work/repository-${i}"`,
@@ -582,13 +597,15 @@ export const WORKER_OFF_COMMAND = `bash -c ${quote(WORKER_SERVICE_OFF.join("\n")
 export type BackupProbe = "clean" | "dirty" | "unknown";
 /** The ignored files a checkpoint captures from the checkout it runs in: small regular files outside ignored
  * directories (Git lists such a directory as one entry ending in "/"), within the per-file and total bounds,
- * not attachments. `take` runs for each, with "$path". The capture and the backup probe both enumerate
+ * not attachments (and, with `skip`, not what that line skips). `take` runs for each, with "$path". The capture and the backup probe both enumerate
  * through this one definition, so what the probe judges is exactly what a backup would hold. */
-function ignoredFiles(take: string): string[] {
+function ignoredFiles(take: string, skip?: string): string[] {
   return [
     "  while IFS= read -r -d '' path; do",
     "    case \"$path\" in */) continue ;; esac",
     "    if attachment_path \"$path\"; then continue; fi",
+    // A later repository's seeded files go to its environment part instead (its own seed journal).
+    ...(skip ? [skip] : []),
     "    if [ -f \"$path\" ] && [ ! -L \"$path\" ]; then",
     "      size=$(stat -c %s -- \"$path\")",
     `      if [ "$size" -le ${IGNORED_FILE_BYTES} ] && [ $((total + size)) -le ${IGNORED_TOTAL_BYTES} ]; then total=$((total + size)); ${take}; fi`,
@@ -660,7 +677,8 @@ export const CLOUD_V2_BACKUP_PROBE_SECONDS = 15;
  * ignored file the backup would capture (the same enumeration, ignoredFiles) unless it is a seeded file the
  * seed journal says is the server's bytes, or a file the checkout's baseline recorded, unchanged. With no
  * baseline, every other such file is dirty. Read-only: no optional index writes, no fsmonitor. Any doubt,
- * error or the time bound reports unknown; it never fails. The first checkout's seed journal is the workspace's. */
+ * error or the time bound reports unknown; it never fails. Each checkout is judged by its own seed journal, the
+ * one its backup captures from (the first's is the workspace's; later ones' are under repositories/<i>/). */
 export function backupProbeCommand(checkoutPaths: readonly string[], home = "/home/user"): string {
   if (!checkoutPaths.length) throw new Error("Invalid backup probe");
   if (!home.startsWith("/") || /[\n\0]/.test(home) || home.split("/").some(part => part === "..")) throw new Error("Invalid backup probe");
@@ -669,7 +687,7 @@ export function backupProbeCommand(checkoutPaths: readonly string[], home = "/ho
     "export GIT_OPTIONAL_LOCKS=0 GIT_TERMINAL_PROMPT=0",
     "g() { git -c core.fsmonitor=false \"$@\"; }",
     `home=${quote(home)}`,
-    "state=clean first=1",
+    "state=clean index=0",
     "command -v node >/dev/null || { printf 'zeros-backup-probe unknown\\n' >&3; exit 0; }",
     "work=$(mktemp -d) || { printf 'zeros-backup-probe unknown\\n' >&3; exit 0; }",
     "trap 'rm -rf \"$work\"' EXIT",
@@ -681,7 +699,9 @@ export function backupProbeCommand(checkoutPaths: readonly string[], home = "/ho
     "  local path size total=0 journal=''",
     "  : > \"$work/list\"",
     ...ignoredFiles(`printf '%s\\0' "$path" >> "$work/list"`),
-    `  if [ -n "$first" ]; then journal="$home/${CLOUD_V2_WORKER_STATE}/environment-seed/manifest.json"; fi`,
+    // Each checkout's own seed journal: the first's is the workspace's, the i-th later one's is under repositories/<i>/.
+    `  if [ "$index" = 0 ]; then journal="$home/${CLOUD_V2_WORKER_STATE}/environment-seed/manifest.json"`,
+    `  else journal="$home/${CLOUD_V2_WORKER_STATE}/repositories/$index/environment-seed/manifest.json"; fi`,
     `  node "$work/ignored.mjs" judge "$1" "$work/list" "$journal" "$home/${IGNORED_BASELINE_DIR}"`,
     "  case $? in 0) ;; 1) state=dirty ;; *) return 1 ;; esac",
     "}",
@@ -699,7 +719,7 @@ export function backupProbeCommand(checkoutPaths: readonly string[], home = "/ho
     `for repo in ${checkoutPaths.map(path => quote(checkedPath(path))).join(" ")}; do`,
     "  probe \"$repo\" || { printf 'zeros-backup-probe unknown\\n' >&3; exit 0; }",
     "  [ \"$state\" = clean ] || break",
-    "  first=''",
+    "  index=$((index + 1))",
     "done",
     "printf 'zeros-backup-probe %s\\n' \"$state\" >&3",
   ];
@@ -771,6 +791,14 @@ export function checkpointRestoreSteps(input: RestoreInput, fetch: readonly stri
   return [
     ...prologue("restore", paths(input), input.active),
     ...(input.active ? activeRestoreFetchSteps(token, remote) : []),
+    // A workspace of several repositories: every other repository's objects are
+    // fetched with its own token here too, so every credential is gone before
+    // any checkpoint content exists.
+    ...(input.active ? (input.repositories ?? []).flatMap(entry => [
+      `first_repo=$repo; repo=${quote(checkedPath(entry.checkoutPath))}`,
+      ...activeRestoreFetchSteps(entry.githubToken, entry.repositoryUrl ?? ""),
+      "repo=$first_repo",
+    ]) : []),
     "step=download",
     ...fetch,
     `printf '%s  %s\\n' ${input.sha256} "$work/checkpoint.zck" | sha256sum -c --status || fail checkpoint_corrupt`,
@@ -928,7 +956,6 @@ function repositoryRestore(input: RestoreInput, remote: string): string[] {
  * own subshell, fetching what its base lacks (or cloning it) with its own
  * token. A checkpoint made before it had that repository leaves it as it is. */
 function otherRepositoriesRestore(input: RestoreInput): string[] {
-  if (input.active && input.repositories?.length) throw new Error("A shared-execution restore holds one repository");
   return (input.repositories ?? []).flatMap((entry, index) => {
     const i = index + 1, token = entry.githubToken;
     if (token !== undefined && !/^[\x21-\x7e]{16,4096}$/.test(token)) throw new Error("Invalid GitHub token");
@@ -939,7 +966,10 @@ function otherRepositoriesRestore(input: RestoreInput): string[] {
       `  repo=${quote(checkedPath(entry.checkoutPath))} c="$c/repositories/${i}" reported=''`,
       "  trap 'code=$?; if [ \"$code\" -ne 0 ] && [ -z \"$reported\" ]; then printf \"zeros-checkpoint-error checkpoint_restore_failed %s\\n\" \"$step\" >&3; fi' EXIT",
       "  m=\"$c/manifest\"; [ \"$(head -n 1 \"$m\")\" = 'zeros-checkpoint 1' ] || fail checkpoint_corrupt",
-      ...(token ? [
+      // Its own work directory, so its credential, environment and index files never meet another repository's.
+      `  work="$work/repository-${i}"; mkdir -m 700 "$work"`,
+      // Active: its objects were fetched before the download; no credential is written again.
+      ...(input.active ? [] : token ? [
         `  printf %s ${quote(b64(token))} | base64 -d > "$work/token-${i}"`,
         `  printf '#!/bin/sh\\ncase "$1" in Username*) echo x-access-token ;; *) cat "%s" ;; esac\\n' "$work/token-${i}" > "$work/askpass-${i}"; chmod 700 "$work/askpass-${i}"`,
         `  remote_git() { GIT_ASKPASS="$work/askpass-${i}" git -c credential.helper= "$@"; }`,
@@ -947,7 +977,7 @@ function otherRepositoriesRestore(input: RestoreInput): string[] {
       "  fetched=''",
       ...repositoryRestore(input, remote).map(line => `  ${line}`),
       ") || { reported=1; exit 3; }; fi",
-      `rm -f "$work/token-${i}" "$work/askpass-${i}"`,
+      `rm -f "$work/repository-${i}/token-${i}" "$work/repository-${i}/askpass-${i}"`,
     ];
   });
 }

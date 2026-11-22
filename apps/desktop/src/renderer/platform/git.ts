@@ -290,6 +290,8 @@ export interface WorkspaceRepository {
   prNumber: number | null;
   prState: PrState | null;
   prUrl: string | null;
+  /** A later repository of a cloud workspace of several: whether its environment files could be added. */
+  environment?: "failed" | "unavailable";
 }
 
 export interface WorkspaceSetupInfo {

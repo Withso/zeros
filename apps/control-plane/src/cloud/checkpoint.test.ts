@@ -1322,6 +1322,105 @@ describe("a workspace of several repositories", () => {
     expect(readFileSync(join(p.folder(p.newHome, "web"), "work.txt"), "utf8")).toBe("work\n");
   });
 
+  /** Shared execution: each GitHub remote is served from its own origin, and each fetch shows which token it was given. */
+  function activeProbe(p: ReturnType<typeof project>) {
+    const bin = join(p.root, "probe-bin"), log = join(p.root, "restore-events.jsonl"), git = "/usr/bin/git";
+    const tar = execFileSync("which", ["tar"], { encoding: "utf8" }).trim();
+    const remotes = { "https://github.com/withso/api.git": { origin: p.origins.api, token: `synthetic-restore-${randomUUID()}` },
+      "https://github.com/withso/web.git": { origin: p.origins.web, token: `synthetic-restore-${randomUUID()}` } };
+    const script = `#!${process.execPath}
+const fs = require('node:fs'), cp = require('node:child_process');
+const args = process.argv.slice(2), isGit = process.argv[1].endsWith('/git');
+const log = ${JSON.stringify(log)}, remotes = ${JSON.stringify(remotes)};
+const emit = value => fs.appendFileSync(log, JSON.stringify(value)+'\\n');
+if (isGit && args.includes('fetch') && process.env.ZEROS_RESTORE_TOKEN_FILE) {
+  const url = args.find(arg => remotes[arg]), file = process.env.ZEROS_RESTORE_TOKEN_FILE;
+  const token = url && fs.readFileSync(file, 'utf8');
+  emit({ event: 'fetch', url, own: !!url && token === remotes[url].token, directory: require('node:path').dirname(file) });
+  if (!url) process.exit(2);
+  args[args.indexOf(url)] = remotes[url].origin;
+  args.unshift('-c','protocol.file.allow=always');
+  process.env.GIT_ALLOW_PROTOCOL='file';
+}
+if (!isGit && args.some(arg=>/^-.*x/.test(arg))) {
+  const entries = fs.existsSync(log) ? fs.readFileSync(log,'utf8').trim().split('\\n').map(JSON.parse) : [];
+  emit({ event: 'unpack', authGone: entries.filter(row=>row.event==='fetch').every(row=>!fs.existsSync(row.directory)) });
+}
+const result=cp.spawnSync(isGit?${JSON.stringify(git)}:${JSON.stringify(tar)},args,{stdio:'inherit',env:process.env});
+process.exit(result.status??1);
+`;
+    for (const name of ["git", "tar"]) { p.write(join(bin, name), script); chmodSync(join(bin, name), 0o755); }
+    return { remotes, env: { ...p.env, PATH: `${bin}:${p.env.PATH}` },
+      events: () => existsSync(log) ? readFileSync(log, "utf8").trim().split("\n").map(line => JSON.parse(line) as Record<string, unknown>) : [] };
+  }
+  const activeLoad = (p: ReturnType<typeof project>, probe: ReturnType<typeof activeProbe>, key: Buffer, from: string, webToken?: string) =>
+    run([`export PATH='${probe.env.PATH}'`, ...checkpointRestoreSteps({ checkoutPath: p.folder(p.newHome, "api"), home: p.newHome, key, sha256: sha(from), active: true,
+      repositoryUrl: "https://github.com/withso/api.git", githubToken: probe.remotes["https://github.com/withso/api.git"].token,
+      repositories: [{ checkoutPath: p.folder(p.newHome, "web"), repositoryUrl: "https://github.com/withso/web.git",
+        githubToken: webToken ?? probe.remotes["https://github.com/withso/web.git"].token }] },
+      [`cp '${from}' "$work/checkpoint.zck"`]), "report zeros-checkpoint-restored"], probe.env);
+
+  it.each([false, true])("restores every repository in shared execution, each fetched with its own token before anything is unpacked (backup: %s)", backup => {
+    const p = project(), key = randomBytes(32), out = join(p.root, "checkpoint.zck");
+    const web = p.folder(p.oldHome, "web"), api = p.folder(p.oldHome, "api");
+    p.write(join(web, "page.html"), "<p>committed</p>\n"); p.git(web, "add", "page.html"); p.git(web, "commit", "-q", "-m", "page");
+    p.write(join(web, "staged.txt"), "staged\n"); p.git(web, "add", "staged.txt");
+    p.write(join(api, "README.md"), "api edited\n");
+    const saved = run([...checkpointArchiveSteps({ checkoutPath: api, home: p.oldHome, baseBranch: "main", key, backup,
+      repositories: [{ checkoutPath: web, baseBranch: "main" }] }), `cp "$work/checkpoint.zck" '${out}'`, CHECKPOINT_SAVED_REPORT], p.env);
+    expect(parseCheckpointResult(saved.stdout)).toMatchObject({ ok: true });
+    // A replacement VM holds neither repository: shared execution fetches both.
+    const probe = activeProbe(p);
+    const restored = activeLoad(p, probe, key, out);
+    expect(parseRestoreResult(restored.stdout), JSON.stringify(probe.events())).toEqual({ ok: true });
+    const events = probe.events(), firstUnpack = events.findIndex(event => event.event === "unpack");
+    expect(events.filter(event => event.event === "fetch").map(event => [event.url, event.own]))
+      .toEqual([["https://github.com/withso/api.git", true], ["https://github.com/withso/web.git", true]]);
+    expect(events.slice(0, firstUnpack).filter(event => event.event === "fetch")).toHaveLength(2);
+    for (const event of events.filter(event => event.event === "unpack")) expect(event.authGone).toBe(true);
+    for (const token of Object.values(probe.remotes).map(entry => entry.token)) expect(restored.stdout).not.toContain(token);
+    const newWeb = p.folder(p.newHome, "web"), newApi = p.folder(p.newHome, "api");
+    expect(p.git(newWeb, "log", "-1", "--format=%s")).toBe("page");
+    expect(sorted(p.git(newWeb, "diff", "--cached", "--name-only"))).toEqual(["staged.txt"]);
+    expect(readFileSync(join(newApi, "README.md"), "utf8")).toBe("api edited\n");
+  });
+
+  it("keeps a later repository's seeded environment files in its own environment.tar: an active restore leaves them off disk, a creator restore applies them", () => {
+    const p = project(), key = randomBytes(32), out = join(p.root, "checkpoint.zck");
+    const web = p.folder(p.oldHome, "web"), content = "SYNTHETIC_SEED=creator-only\n";
+    // Ignored by the fixture's *.log rule, as seeded files are.
+    p.write(join(web, ".env.log"), content);
+    p.write(join(p.oldHome, ".local/share/zeros/cloud-worker/repositories/1/environment-seed/manifest.json"), JSON.stringify({
+      version: 2, versionId: randomUUID(), complete: true,
+      files: [{ path: ".env.log", alias: randomUUID(), phase: "complete", sha256: createHash("sha256").update(content).digest("hex") }] }));
+    const saved = run([...checkpointArchiveSteps({ checkoutPath: p.folder(p.oldHome, "api"), home: p.oldHome, baseBranch: "main", key,
+      repositories: [{ checkoutPath: web, baseBranch: "main" }] }), `cp "$work/checkpoint.zck" '${out}'`, CHECKPOINT_SAVED_REPORT], p.env);
+    expect(parseCheckpointResult(saved.stdout)).toMatchObject({ ok: true });
+    // Shared execution: another person's restore never gets the creator's file.
+    const probe = activeProbe(p);
+    expect(parseRestoreResult(activeLoad(p, probe, key, out).stdout), JSON.stringify(probe.events())).toEqual({ ok: true });
+    expect(existsSync(join(p.folder(p.newHome, "web"), ".env.log"))).toBe(false);
+    // The creator's own restore puts it back.
+    rmSync(p.newHome, { recursive: true, force: true });
+    mkdirSync(join(p.newHome, "zeros-app"), { recursive: true });
+    for (const name of ["api", "web"] as const) p.git(p.root, "clone", "-q", p.origins[name], p.folder(p.newHome, name));
+    const restored = run([...checkpointRestoreSteps({ checkoutPath: p.folder(p.newHome, "api"), home: p.newHome, key, sha256: sha(out),
+      repositories: [{ checkoutPath: p.folder(p.newHome, "web") }] }, [`cp '${out}' "$work/checkpoint.zck"`]), "report zeros-checkpoint-restored",
+      // What the archive held for the later repository: the seeded file only in its own environment.tar.
+      `{ printf 'ignored:'; { tar -tf "$work/c/repositories/1/ignored.tar" 2>/dev/null || true; } | tr '\\n' ' '; printf '\\nenvironment:'; tar -tf "$work/c/repositories/1/environment.tar" | tr '\\n' ' '; printf '\\n'; } >&3`], p.env);
+    expect(parseRestoreResult(restored.stdout)).toEqual({ ok: true });
+    expect(readFileSync(join(p.folder(p.newHome, "web"), ".env.log"), "utf8")).toBe(content);
+    expect(restored.stdout).toMatch(/environment:.*manifest\.json/);
+    expect(restored.stdout.split("\n").find(line => line.startsWith("ignored:"))).not.toContain(".env.log");
+  }, 30_000);
+
+  it("refuses a shared-execution restore of several repositories without each repository's token", () => {
+    const p = project(), key = randomBytes(32);
+    expect(() => checkpointRestoreSteps({ checkoutPath: p.folder(p.newHome, "api"), home: p.newHome, key, sha256: "a".repeat(64), active: true,
+      repositoryUrl: "https://github.com/withso/api.git", githubToken: "synthetic-token-0123456789",
+      repositories: [{ checkoutPath: p.folder(p.newHome, "web"), repositoryUrl: "https://github.com/withso/web.git" }] }, [])).toThrow(/GitHub credential/);
+  });
+
   it("restores a checkpoint made before the workspace had a repository, and an older one-repository checkpoint, unchanged", () => {
     const w = workspaces(), key = randomBytes(32), out = join(w.root, "checkpoint.zck");
     w.write(join(w.oldRepo, "a.txt"), "edited\n");
@@ -1345,7 +1444,9 @@ describe("retention backups and the stop probe", () => {
     expect(digest(checkpointCommand(PIN))).toBe("fefc12a759c38abc8217d209ec18ef24a3e34bf6860b2f17a726b7ca64039a56");
     expect(digest(checkpointCommand({ ...PIN, checkoutPath: "/home/user/project/app", repositories: [
       { checkoutPath: "/home/user/project/api", baseBranch: "trunk" }, { checkoutPath: "/home/user/project/docs", baseBranch: "main" }] })))
-      .toBe("dce572aee2e8c6da9ee3778b55b33843908f02525475187237a97bfa0eb37d16");
+      // Later repositories capture their own seeded environment files (environment.tar, left out of ignored.tar);
+      // the first repository's part of the command is unchanged, as the one-repository digest above shows.
+      .toBe("1e25ac142a6aa3c7dbec5b6f950118d512b46de158c7453dd2c97cdbfbb72a37");
     expect(digest(checkpointCommand({ ...PIN, reuse: { fingerprint: "f".repeat(64), base: "a".repeat(40) } })))
       .toBe("b6e28ffb57f9b435ae69b616cecb9e09827b66a39ccca776f78b57fd87d5a524");
     expect(checkpointCommand({ ...PIN, backup: false })).toBe(checkpointCommand(PIN));
@@ -1476,16 +1577,22 @@ describe("retention backups and the stop probe", () => {
         }
       });
 
-      it("counts a second repository's ignored files too, and is unknown when it cannot read the journal", () => {
+      it("judges a second repository by its own seed journal, and is unknown when it cannot read one", () => {
         const w = workspaces(), second = join(w.oldHome, "acme", "api");
         w.git(w.root, "clone", "-q", w.origin, second);
-        w.write(join(second, ".env"), "SECOND=1\n");
-        // The seed journal is the first repository's; the second's .env is the person's.
-        journal(w, { ".env": "SECOND=1\n" });
+        const own = join(w.oldHome, ".local/share/zeros/cloud-worker/repositories/1/environment-seed/manifest.json");
+        w.write(join(second, ".env"), "SECOND=server\n");
+        // The first repository's journal does not speak for the second's files.
+        journal(w, { ".env": "SECOND=server\n" });
         expect(probe([w.oldRepo, second], w.env, w.oldHome)).toBe("dirty");
-        w.write(join(w.oldRepo, ".env"), "x\n");
-        w.write(join(w.oldHome, ".local/share/zeros/cloud-worker/environment-seed/manifest.json"), "{not json");
-        expect(probe([w.oldRepo], w.env, w.oldHome)).toBe("unknown");
+        // Its own journal does: seeded and equal is clean, edited is dirty.
+        w.write(own, JSON.stringify({ version: 2, files: [{ path: ".env", sha256: createHash("sha256").update("SECOND=server\n").digest("hex") }] }));
+        rmSync(join(w.oldHome, ".local/share/zeros/cloud-worker/environment-seed/manifest.json"));
+        expect(probe([w.oldRepo, second], w.env, w.oldHome)).toBe("clean");
+        w.write(join(second, ".env"), "SECOND=edited by hand\n");
+        expect(probe([w.oldRepo, second], w.env, w.oldHome)).toBe("dirty");
+        w.write(own, "{not json");
+        expect(probe([w.oldRepo, second], w.env, w.oldHome)).toBe("unknown");
       });
     });
 

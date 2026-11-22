@@ -147,16 +147,26 @@ export class WorkerCodeReview {
     if (!this.enabled) return unsupported();
     try {
       return handleCodeReviewRouteCore({
-        resolveReadCwd: id => { if (id !== this.scope.key) throw new WorkspaceError("WORKSPACE_NOT_FOUND", "This request belongs to another workspace."); return this.scope.root; },
-        ownerRoots: () => [this.scope.root],
+        // A workspace of several repositories: threads are on project-folder paths, inside one repository's folder.
+        resolveReadCwd: id => { if (id !== this.scope.key) throw new WorkspaceError("WORKSPACE_NOT_FOUND", "This request belongs to another workspace."); return this.scope.workspaceRoot; },
+        ownerRoots: () => [this.scope.workspaceRoot],
       }, operation, raw, {
         author: () => actor, viewer: true, remote: true,
-        assertPath: (root, relative, policy, creating) => assertCodeReviewPathCore({ fs, path,
-          isSensitiveRepoPath: value => isSensitiveWorkspacePath(value, path.posix.normalize) }, root, relative, policy, creating),
+        assertPath: (root, relative, policy, creating) => {
+          if (this.scope.several && !this.repositoryFolders().has(relative.split("/")[0]!))
+            throw new WorkspaceError("VALIDATION_FAILED", "Choose a file inside one of the workspace's repositories.");
+          return assertCodeReviewPathCore({ fs, path,
+            isSensitiveRepoPath: value => isSensitiveWorkspacePath(value, path.posix.normalize) }, root, relative, policy, creating);
+        },
       }, this.store!);
     } catch (error) {
       throw sqliteFailure(error);
     }
+  }
+
+  /** Each repository's folder in the project folder (a workspace of several). */
+  private repositoryFolders(): Set<string> {
+    return new Set(this.scope.repositories.map(entry => path.relative(this.scope.workspaceRoot, entry.checkoutPath)));
   }
 
   handle(operation: string, params: Record<string, unknown>): unknown {
@@ -181,7 +191,7 @@ export class WorkerCodeReview {
   tools(input: { agentId: string; conversationId: string; executionId: string; assertCurrent(): void }): CodeReviewAgentToolsCore {
     const actor = codeReviewAgentActor(input);
     if (!actor || !this.enabled) return unsupported();
-    return new CodeReviewAgentToolsCore({ workspaceId: this.scope.key, workspacePath: this.scope.root, assertCurrent: () => {
+    return new CodeReviewAgentToolsCore({ workspaceId: this.scope.key, workspacePath: this.scope.workspaceRoot, assertCurrent: () => {
       input.assertCurrent(); if (!this.enabled) return unsupported();
     } }, (operation, raw, author) => this.execute(operation, raw, author), actor, () => this.changed());
   }

@@ -57,7 +57,8 @@ function setup(claimed: (CloudV2LifecycleWorkspace & { attempts: number })[], op
   checkpointRetry?: boolean; retries?: RetryRow[]; prepareRepository?: CloudV2LifecycleDeps["prepareRepository"]; pruneEnvironments?: () => Promise<void>;
   runtimeForWorkspace?: CloudV2LifecycleDeps["runtimeForWorkspace"]; bootEnv?: CloudV2LifecycleDeps["bootEnv"]; builds?: CloudV2LifecycleDeps["builds"]; recovery?: CloudV2LifecycleDeps["recovery"];
   authorizeWorkspace?: CloudV2LifecycleDeps["authorizeWorkspace"]; resolvePendingSource?: CloudV2LifecycleDeps["resolvePendingSource"]; previousRuntimeSha256?: string; logs?: true;
-  readyCopies?: CloudV2LifecycleDeps["readyCopies"]; repositories?: CloudV2LifecycleDeps["repositories"] } = {}) {
+  readyCopies?: CloudV2LifecycleDeps["readyCopies"]; repositories?: CloudV2LifecycleDeps["repositories"];
+  claimExecutionRestore?: CloudV2LifecycleDeps["claimExecutionRestore"] } = {}) {
   const retries = [...options.retries ?? []];
   const compute: CloudV2Compute = {
     create: vi.fn(async () => ({ sandboxId: "bx_new1" })),
@@ -138,6 +139,7 @@ function setup(claimed: (CloudV2LifecycleWorkspace & { attempts: number })[], op
     ...(options.resolvePendingSource ? { resolvePendingSource: options.resolvePendingSource } : {}),
     ...(options.readyCopies ? { readyCopies: options.readyCopies } : {}),
     ...(options.repositories ? { repositories: options.repositories } : {}),
+    ...(options.claimExecutionRestore ? { claimExecutionRestore: options.claimExecutionRestore } : {}),
   });
   return { lifecycle, compute, store, stopWorker, logs };
 }
@@ -536,6 +538,27 @@ describe("cloud v2 lifecycle", () => {
     expect(githubToken).toHaveBeenCalledWith(expect.anything(), "withso/web");
     expect(restore).toContain("https://github.com/withso/web.git");
     expect(restore).toContain(Buffer.from("synthetic-token-for-withso/web-0123").toString("base64"));
+  });
+
+  it("restores every repository of a workspace of several in shared execution, each with its own token, and refuses one without", async () => {
+    const repositories = vi.fn(async () => [{ repository: "withso/web", checkoutFolder: "zeros-app/web", baseBranch: "next" }]);
+    const active = { checkpoint: SAVED, executionIntent: { id: null, userId: null, accessEpoch: "1", authority: null } } as never;
+    const githubToken = vi.fn(async (_workspace: unknown, repository?: string) => ({ token: `synthetic-token-for-${repository ?? "first"}-0123` }));
+    const restoring = setup([workspace("starting", active)], { checkpoints: checkpointsFake(), repositories, githubToken, claimExecutionRestore: async () => true });
+    vmCommands(restoring);
+    await restoring.lifecycle.tick();
+    const [, restore] = vmCommand(restoring, "zeros-checkpoint-restored")!;
+    expect(githubToken).toHaveBeenCalledWith(expect.anything(), "withso/web");
+    // Both fetched before the download, each with its own credential.
+    const download = restore.indexOf("step=download");
+    expect(restore.indexOf("https://github.com/withso/web.git")).toBeLessThan(download);
+    expect(restore.indexOf(Buffer.from("synthetic-token-for-withso/web-0123").toString("base64"))).toBeLessThan(download);
+    // Without the later repository's token: refused before any command, like the first.
+    const missing = vi.fn(async (_workspace: unknown, repository?: string) => repository ? null : { token: "synthetic-token-for-first-0123" });
+    const refused = setup([workspace("starting", active)], { checkpoints: checkpointsFake(), repositories, githubToken: missing as never, claimExecutionRestore: async () => true });
+    vmCommands(refused);
+    await refused.lifecycle.tick();
+    expect(vmCommand(refused, "zeros-checkpoint-restored")).toBeUndefined();
   });
 
   it("continues a pending restore under the same key, and retries a failed apply without losing the checkpoint", async () => {

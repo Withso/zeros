@@ -39,10 +39,14 @@ export interface Transport {
   reportGithubCheckout?: ReportGithubCheckout;
   reportCheckoutFailure?: () => Promise<void>;
   reportEnvironment?: (report: CloudEnvironmentReport, signal?: AbortSignal) => Promise<void>;
+  /** workspace-repositories-v1: a repository after the first reports its own seeding; it never stops the workspace. */
+  reportRepositoryEnvironment?: (repository: string, report: CloudEnvironmentReport, signal?: AbortSignal) => Promise<void>;
   /** notify-user-v1: POST notifications (202); 409 already_notified and 429 are answers, not failures. */
   notifyUser?(request: NotifyUserWorkerRequest, signal?: AbortSignal): Promise<NotifyUserDelivery>;
   /** setup-status-v1: POST setup, 204. Best effort; the next hello reports again. */
   reportSetup?: (status: CloudV2SetupStatus) => Promise<void>;
+  /** workspace-repositories-v1: a repository after the first reports its own setup. Best effort, like reportSetup. */
+  reportRepositorySetup?: (repository: string, status: CloudV2SetupStatus) => Promise<void>;
   /** history-digest-v1: each chat's stored digest (one read on reconnect). */
   historyDigests?: () => Promise<unknown>;
   /** history-batch-v1: several history frames in one request (accepted only when the configuration offers historyBatch). */

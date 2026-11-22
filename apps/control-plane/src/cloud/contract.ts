@@ -236,6 +236,8 @@ export const CloudV2ControlFrameSchema = z.discriminatedUnion("t", [
         baseCommit: z.string().regex(/^[0-9a-f]{40}$/).optional(),
         setup: z.string().max(8000).optional(),
         setupScript: RepositorySetupPathSchema.optional(),
+        /** Creator path: this repository's own pinned environment, seeded into its checkout. */
+        environment: CloudWorkspaceEnvironmentSchema.optional(),
       }).strict()).min(2).max(10).optional(),
     }).strict(),
     agents: CloudV2AgentLoginsSchema,

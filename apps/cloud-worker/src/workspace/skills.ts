@@ -1,6 +1,6 @@
 import { readdir, realpath } from "node:fs/promises";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { join, relative } from "node:path";
 import { CheckedFiles, descriptorPath } from "./checked-files";
 import { WorkspaceError, WorkspaceScope } from "./scope";
 
@@ -17,25 +17,30 @@ export async function listWorkspaceSkills(scope: WorkspaceScope, agentId: unknow
   const home = homedir();
   const providerHome = agentId === "codex" && process.env.CODEX_HOME
     ? process.env.CODEX_HOME : join(home, `.${agentId}`);
-  const roots = [
-    { owner: scope.root, path: join(scope.root, `.${agentId}`, "skills") },
-    { owner: scope.root, path: join(scope.root, ".agents", "skills") },
-    { owner: scope.root, path: join(scope.root, "skills") },
+  // A workspace of several repositories: every repository's own libraries, each skill
+  // named by its repository's folder (`<folder>:<name>`); one repository is unchanged.
+  const checkouts: { root: string; folder?: string }[] = scope.several
+    ? scope.repositories.map(entry => ({ root: entry.checkoutPath, folder: relative(scope.workspaceRoot, entry.checkoutPath) }))
+    : [{ root: scope.root }];
+  const roots: { owner: string; path: string; folder?: string }[] = [
+    ...checkouts.flatMap(({ root, folder }) => [`.${agentId}/skills`, ".agents/skills", "skills"].map(library => ({ owner: root, path: join(root, library), ...(folder ? { folder } : {}) }))),
     { owner: providerHome, path: join(providerHome, "skills") },
     ...(agentId === "codex" ? [{ owner: providerHome, path: join(providerHome, "skills", ".system") }] : []),
     { owner: home, path: join(home, ".agents", "skills") },
   ];
+  // A library's own scope is a plain directory, never the workspace's repository layout.
+  const { root: _root, repositories: _repositories, ...plain } = scope.workspace;
   const byName = new Map<string, Skill>();
   let bytes = 14; // Object/array punctuation belongs to the wire budget too.
   for (const root of roots) {
     // The same held-descriptor checks as workspace reads, narrowed to each
     // known library's owner. Repositories cannot symlink into VM credentials.
-    const owner = new CheckedFiles(new WorkspaceScope({ ...scope.workspace, checkoutPath: root.owner }));
+    const owner = new CheckedFiles(new WorkspaceScope({ ...plain, checkoutPath: root.owner }));
     const directory = await owner.directory(root.path).catch(() => null);
     if (!directory) continue;
     try {
     const library = await realpath(descriptorPath(directory));
-    const files = new CheckedFiles(new WorkspaceScope({ ...scope.workspace, checkoutPath: library }));
+    const files = new CheckedFiles(new WorkspaceScope({ ...plain, checkoutPath: library }));
     const entries = await readdir(descriptorPath(directory), { withFileTypes: true });
     entries.sort((a, b) => a.name.localeCompare(b.name));
     for (const entry of entries.slice(0, 512)) {
@@ -57,7 +62,7 @@ export async function listWorkspaceSkills(scope: WorkspaceScope, agentId: unknow
         const content = new TextDecoder("utf-8", { fatal: true }).decode(buffer.subarray(0, read.bytesRead));
         const frontmatter = content.match(/^\s*---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/);
         const field = (key: string) => frontmatter?.[1].match(new RegExp(`^${key}:\\s*(.*)$`, "m"))?.[1].trim().replace(/^(['"])(.*)\1$/, "$2");
-        const name = field("name") || id;
+        const name = root.folder ? `${root.folder}:${field("name") || id}` : field("name") || id;
         if (byName.has(name)) continue;
         const skill: Skill = { id, name, description: field("description") || "", icon: field("icon") || "FileText", path, content, body: frontmatter ? content.slice(frontmatter[0].length) : content };
         const size = Buffer.byteLength(JSON.stringify(skill)) + 1;

@@ -1,3 +1,4 @@
+import type { CloudV2SetupStatus } from "./setup-status-contract.js";
 import type pg from "pg";
 import { workspaceCheckoutPath, workspaceRootPath } from "./workspace-layout.js";
 import { HttpError } from "../authz.js";
@@ -375,11 +376,18 @@ export class CloudGithubPrStore {
         [workspaces.map((row) => row.id)],
       );
     const several = workspaces.filter(workspace => workspace.folder).map(workspace => workspace.id);
-    type Other = Metadata & { position: number; repository: string; folder: string | null; r_branch: string; r_base_branch: string; id: string | null };
+    type Other = Metadata & { position: number; repository: string; folder: string | null; r_branch: string; r_base_branch: string; id: string | null;
+      r_setup: CloudV2SetupStatus | null; env_state: "ready" | "failed" | "unavailable" | null; env_error: string | null };
+    // A later repository's environment files: its own pin's report on the creator path;
+    // in shared execution they are not available for it yet.
     const readOthers = (tx: Tx) => tx.query<Other>(`SELECT g.*, r.workspace_id, r.position, r.repository, r.folder, r.branch AS r_branch,
-        r.base_branch AS r_base_branch, coalesce(r.repository_id, s.repository_id)::text AS id
+        r.base_branch AS r_base_branch, coalesce(r.repository_id, s.repository_id)::text AS id, r.setup_status AS r_setup,
+        CASE WHEN r.position = 0 THEN NULL WHEN w.execution_mode = 'active' THEN 'unavailable' ELSE ep.report_state END AS env_state,
+        CASE WHEN r.position = 0 OR w.execution_mode = 'active' THEN NULL ELSE ep.report_error END AS env_error
       FROM cloud_v2_workspace_repositories r
+      JOIN cloud_v2_workspaces w ON w.id=r.workspace_id
       LEFT JOIN cloud_v2_github_sources s ON s.workspace_id=r.workspace_id AND s.source_repository=lower(r.repository)
+      LEFT JOIN cloud_workspace_environment_repository_pins ep ON ep.workspace_id=r.workspace_id AND ep.repository_id=coalesce(r.repository_id, s.repository_id)
       LEFT JOIN cloud_v2_github_workspace_repositories g ON g.workspace_id=r.workspace_id AND g.repository_id=coalesce(r.repository_id, s.repository_id)
       WHERE r.workspace_id=ANY($1::uuid[]) ORDER BY r.workspace_id, r.position`, [several]);
     // A project's current name, so a workspace is shown under its project after a rename (its folder keeps the old one).
@@ -403,10 +411,11 @@ export class CloudGithubPrStore {
       const { checkoutFolder: _checkoutFolder, folder: _folder, ...shown } = workspace;
       const repositories = workspace.folder ? (repositoriesOf.get(workspace.id) ?? []).map((other, index) => {
         if (index === 0) return { repository: row?.canonical_repository ?? workspace.repository, checkoutPath: workspaceCheckoutPath(workspace),
-          branch: workspace.branch, baseBranch: workspace.baseBranch, ...(github ? { github } : {}) };
+          branch: workspace.branch, baseBranch: workspace.baseBranch, ...(github ? { github } : {}), ...(workspace.setup ? { setup: workspace.setup } : {}) };
         const otherCurrent = generations === undefined || other.pr_connection_generation === generations.get(workspace.id);
         return { repository: other.canonical_repository ?? other.repository, checkoutPath: `${workspaceRootPath(workspace)}/${other.folder}`,
-          branch: other.r_branch, baseBranch: other.r_base_branch,
+          branch: other.r_branch, baseBranch: other.r_base_branch, ...(other.r_setup ? { setup: other.r_setup } : {}),
+          ...(other.env_state ? { environment: { state: other.env_state, ...(other.env_error ? { errorCode: other.env_error } : {}) } } : {}),
           ...(other.id && other.checkout_boot_id ? { github: { repositoryId: other.id, branch: other.branch, baseBranch: other.base_branch ?? other.r_base_branch,
             headSha: other.head_sha, prNumber: otherCurrent ? other.pr_number : null, prState: otherCurrent ? other.pr_state : null,
             prUrl: otherCurrent ? other.pr_url : null } } : {}) };

@@ -10,6 +10,7 @@ import { CloudV2Lifecycle } from "./lifecycle.js";
 import { CloudV2ReadyCopies, CloudV2ReadyCopyBuilder, CloudV2ReadyCopyForks, READY_COPY_HISTORY_LIMIT, READY_COPY_REFRESH_STARTS, READY_COPY_RETRY_LIMIT,
   type ReadyCopyWorkspace } from "./ready-copies.js";
 import { CloudV2ReadyCopySecrets } from "./ready-copy-secrets.js";
+import { CloudEnvironments } from "./environment-store.js";
 import { CloudV2Store } from "./store.js";
 import { CloudRepositoryLevels } from "./repository-levels.js";
 import { CloudProjects } from "./projects.js";
@@ -895,6 +896,21 @@ d("cloud v2 ready copies", () => {
     const renamed = await make("zeros-studio", ["main", "main", "main"]);
     expect(await forks.prepare({ ...renamed, boatSandboxId: null })).toBeNull();
     expect(await copies.forkOf(renamed.id)).toBeNull();
+  });
+
+  it("pins each later repository's environment at create to its creator's own current version", async () => {
+    await liveBase();
+    const app = await project([{ repository: "withso/api" }, { repository: "withso/web" }], { name: "Zeros App" });
+    const keys = { currentKeyVersion: 1, keys: { 1: randomBytes(32).toString("base64url") } };
+    const environments = new CloudEnvironments(pool, keys, async (_org, _user, repository) => ({ repositoryId: repositoryId(repository), assertCurrent: async () => {}, assertReadable: async () => {} }));
+    const web = await environments.patch(org, member, repositoryId("withso/web"), "withso/web", { expectedRevision: 0, variables: { WEB_VALUE: "synthetic-web" } });
+    const store = new CloudV2Store(pool), base = (await copies.base(org))!, id = randomUUID();
+    await store.createWorkspace({ id, organizationId: org, creatorUserId: member, name: "Zeros App", repository: "withso/api", branch: "zeros/app-1",
+      baseBranch: "main", computerBuildId: base.buildId, projectId: app, checkoutFolder: "zeros-app/api", folder: "zeros-app",
+      repositories: [["withso/api", "api"], ["withso/web", "web"]].map(([repository, folder]) => ({ repository: repository!, repositoryId: repositoryId(repository!),
+        folder: folder!, branch: "zeros/app-1", baseBranch: "main", baseCommit: "c".repeat(40) })) });
+    expect((await pool.query("SELECT repository_id::text, owner_user_id, version_id FROM cloud_workspace_environment_repository_pins WHERE workspace_id=$1", [id])).rows)
+      .toEqual([{ repository_id: repositoryId("withso/web"), owner_user_id: member, version_id: web.versionId }]);
   });
 
   it("keeps each repository's checkout and pull request in its own row, and shows every repository with its own pull request", async () => {

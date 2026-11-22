@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import pg from "pg";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { CloudV2CapabilitiesSchema } from "./contract.js";
+import { CloudGithubPrStore } from "./github-pr-store.js";
 import { cloudWorkspaceReportFixture, type CloudWorkspaceReportFixture } from "./workspace-report-test-fixture.js";
 
 const database = process.env.TEST_DATABASE_URL ? describe : describe.skip;
@@ -95,5 +96,47 @@ database("setup reports through real routers and PostgreSQL", () => {
       await lock.query("ROLLBACK"); lock.release();
       await pending;
     }
+  });
+
+  describe("a workspace of several repositories", () => {
+    const several = async () => {
+      await pool.query("UPDATE cloud_v2_workspaces SET checkout_path=$2, folder='zeros-app' WHERE id=$1",
+        [f.workspaceId, `zeros-app/${(await f.store.get(f.workspaceId, f.owner.id)).repository.split("/")[1]}`]);
+      await pool.query(`INSERT INTO cloud_v2_workspace_repositories (workspace_id, position, repository, folder, branch, base_branch)
+        VALUES ($1, 1, 'withso/web', 'web', 'zeros/app', 'main')`, [f.workspaceId]);
+    };
+    const repository = (body: unknown, feature = "setup-status-v1,workspace-repositories-v1") => f.worker("repository-setup", body, { feature });
+    const statuses = async () => (await pool.query<{ position: number; setup_status: unknown }>(
+      "SELECT position, setup_status FROM cloud_v2_workspace_repositories WHERE workspace_id=$1 ORDER BY position", [f.workspaceId])).rows;
+
+    it("records a later repository's own setup under it, never the first repository's or the workspace's", async () => {
+      await several();
+      const first = { state: "succeeded", startedAt: 1, finishedAt: 2, exitCode: 0 };
+      expect((await report(first)).status).toBe(204);
+      const web = { state: "failed", startedAt: 5, finishedAt: 6, exitCode: 1 };
+      expect((await repository({ repository: "Withso/Web", status: web })).status).toBe(204);
+      expect(await statuses()).toEqual([{ position: 0, setup_status: first }, { position: 1, setup_status: web }]);
+      expect((await f.document()).setup).toEqual(first);
+      // An older or same-attempt running report never replaces it.
+      for (const late of [{ state: "running", startedAt: 5 }, { state: "succeeded", startedAt: 4, finishedAt: 9, exitCode: 0 }])
+        expect((await repository({ repository: "withso/web", status: late })).status).toBe(204);
+      expect((await statuses())[1]!.setup_status).toEqual(web);
+      // The document shows each repository's own status.
+      const [document] = await new CloudGithubPrStore(pool).documents([await f.store.get(f.workspaceId, f.owner.id)]);
+      expect(document!.repositories!.map(entry => [entry.repository, entry.setup])).toEqual([[document!.repository, first], ["withso/web", web]]);
+    });
+
+    it("refuses the first repository, another workspace's repository, an unnegotiated worker and a stale boot", async () => {
+      await several();
+      const status = { state: "running", startedAt: 1 };
+      const first = (await f.store.get(f.workspaceId, f.owner.id)).repository;
+      expect((await repository({ repository: first, status })).status).toBe(404);
+      expect((await repository({ repository: "withso/other", status })).status).toBe(404);
+      expect((await repository({ repository: "withso/web", status }, "setup-status-v1")).status).toBe(404);
+      expect((await repository({ repository: "withso/web", status, path: "/x" })).status).toBe(400);
+      expect((await f.worker("repository-setup", { repository: "withso/web", status }, { boot: randomUUID(), feature: "setup-status-v1,workspace-repositories-v1" })).status).toBe(401);
+      expect(await statuses()).toEqual([{ position: 0, setup_status: null }, { position: 1, setup_status: null }]);
+      expect(await f.document()).not.toHaveProperty("setup");
+    });
   });
 });

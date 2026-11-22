@@ -864,6 +864,24 @@ describe("a workspace of several repositories", () => {
     expect(cloudRepositoryLayout(target)).toEqual({ repositories: [{ repository: "withso/api", folder: "api" }, { repository: "withso/web", folder: "web" }] });
   });
 
+  it("carries a later repository's missing environment files, and the switcher says it once under the list", async () => {
+    const { repositoryEnvironmentNote } = await import("../../shell/workbench/repository-switcher");
+    const document = several(1);
+    document.repositories![1] = { ...document.repositories![1]!, environment: { state: "unavailable" } };
+    acceptCloudWorkspaceDocument(document);
+    const repositories = getCloudWorkspaceRows()[0]!.repositories!;
+    expect(repositories.map(entry => entry.environment)).toEqual([undefined, "unavailable"]);
+    expect(repositories.map(repositoryEnvironmentNote)).toEqual([null, "web: Environment files are not available for this repository in shared workspaces yet."]);
+    // Seeded files say nothing; an unknown state from a newer server is ignored.
+    for (const environment of [{ state: "ready" }, { state: "later" }]) {
+      clearCloudWorkspaceCatalog();
+      const next = several(2);
+      next.repositories![1] = { ...next.repositories![1]!, environment: environment as never };
+      acceptCloudWorkspaceDocument(next);
+      expect(getCloudWorkspaceRows()[0]!.repositories![1]!.environment).toBeUndefined();
+    }
+  });
+
   it("keeps the project group's identity and follows a rename, and keeps a workspace of one repository under its repository", () => {
     acceptCloudWorkspaceDocument(several(1));
     const first = getCloudProjects()[0]!;
@@ -884,5 +902,25 @@ describe("a workspace of several repositories", () => {
     acceptCloudWorkspaceDocument(bad);
     expect(getCloudWorkspaceRows()[0]!.repositories).toBeUndefined();
     expect(cloudRepositoryLayout(target)).toBeUndefined();
+  });
+});
+
+describe("lost work", () => {
+  beforeEach(() => clearCloudWorkspaceCatalog());
+  it("tells the workspace's member, in plain words, which work could not be recovered", async () => {
+    const { renderToStaticMarkup } = await import("react-dom/server");
+    const React = await import("react");
+    const { LostWorkNotice, lostWorkMessage } = await import("../../shell/conversation/lost-work-notice");
+    const { CloudWorkspaceDocumentSchema } = await import("../../platform/cloud-workspace-contract");
+    const key = `cloud://${target.organizationId}/${target.workspaceId}`, stoppedAt = "2026-11-20T15:04:00.000Z";
+    const rendered = () => renderToStaticMarkup(React.createElement(LostWorkNotice, { folder: key }));
+    acceptCloudWorkspaceDocument(doc(1));
+    expect(rendered()).toBe("");
+    acceptCloudWorkspaceDocument({ ...doc(2), lostWork: { restored: "none", stoppedAt } });
+    expect(rendered()).toContain("This workspace was rebuilt from GitHub. Work that was not pushed before ");
+    expect(rendered()).toContain(">Dismiss<");
+    expect(lostWorkMessage({ restored: "earlier", stoppedAt })).toMatch(/^This workspace was restored from an earlier backup\. Work after .+ that was not pushed could not be recovered\.$/);
+    // A value from a newer server that this release does not know reads as none.
+    expect(CloudWorkspaceDocumentSchema.parse({ ...doc(3), lostWork: { restored: "partial", stoppedAt } }).lostWork).toBeUndefined();
   });
 });

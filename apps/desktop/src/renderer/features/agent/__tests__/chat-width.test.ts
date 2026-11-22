@@ -55,7 +55,8 @@ describe("chat width", () => {
       "features/agent/turn-container.tsx": { "max-w-(--chat-lane)": 1 },
       // The archived, read-only and no-Creator bars share one frame.
       "shell/composer-replacement-bar.tsx": { "max-w-(--chat-column)": 1 },
-      "shell/conversation/chat-view.tsx": { "max-w-(--chat-column)": 1 },
+      // The history error row and the lost-work notice, both in the transcript's column.
+      "shell/conversation/chat-view.tsx": { "max-w-(--chat-column)": 2 },
       "shell/conversation/conversation-pane.tsx": { "max-w-(--chat-column)": 1 },
     };
     for (const [file, classes] of Object.entries(uses)) {
