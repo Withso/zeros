@@ -524,7 +524,7 @@ function AgentMessageHover({ message, ctx, wrap, enabled, children }: {
   children: ReactNode;
 }) {
   if (!wrap) return <>{children}</>;
-  const from = { messageId: message.id, promptId: ctx.turnPromptId ?? null, role: "agent" as const, text: message.text };
+  const from = { messageId: message.messageId ?? message.id, promptId: ctx.turnPromptId ?? null, role: "agent" as const, text: message.text };
   return (
     <div data-agent-message="" className="group/agentmsg relative">
       {children}

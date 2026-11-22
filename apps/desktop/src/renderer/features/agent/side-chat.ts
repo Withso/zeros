@@ -52,8 +52,8 @@ export interface SideChatTranscriptDeps {
   load?: typeof loadTranscriptSnapshot;
 }
 
-/** The source transcript through the branched message: the exact message
- *  when it is in the loaded history, else through its turn. */
+/** The source transcript through the branched message, else through its
+ *  prompt. Never the whole turn: later output must not leak into the branch. */
 export async function loadSideChatTranscript(
   seed: SideChatSeed,
   folder: string | null | undefined,
@@ -64,8 +64,8 @@ export async function loadSideChatTranscript(
   try {
     return await load({ chatId: seed.sourceChatId, mode: "handoff", lastMessageAt: seed.sourceUpdatedAt, throughMessageId: seed.messageId, cut: "message", meta });
   } catch (error) {
-    if (!seed.promptId) throw error;
-    return load({ chatId: seed.sourceChatId, mode: "handoff", lastMessageAt: seed.sourceUpdatedAt, throughMessageId: seed.promptId, meta });
+    if (!seed.promptId || seed.promptId === seed.messageId) throw error;
+    return load({ chatId: seed.sourceChatId, mode: "handoff", lastMessageAt: seed.sourceUpdatedAt, throughMessageId: seed.promptId, cut: "message", meta });
   }
 }
 

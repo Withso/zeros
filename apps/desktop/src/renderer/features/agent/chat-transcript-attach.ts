@@ -186,13 +186,21 @@ export interface LoadTranscriptInput {
   meta: TranscriptMeta;
 }
 
-/** Bound a chronological transcript through one exact message. A missing
- * target fails closed, like transcriptMessagesThroughTurn. */
+/** Bound a chronological transcript through one exact message. Streamed agent
+ * text is matched by its engine `messageId` too: the renderer and the engine
+ * each mint their own row id for it. A missing target fails closed, like
+ * transcriptMessagesThroughTurn. */
 export function transcriptMessagesThroughMessage(
   messages: AgentMessage[],
   throughMessageId: string,
 ): AgentMessage[] {
-  const target = messages.findIndex((message) => message.id === throughMessageId);
+  const target = messages.findIndex(
+    (message) =>
+      message.id === throughMessageId ||
+      (message.kind === "text" &&
+        message.role === "agent" &&
+        message.messageId === throughMessageId),
+  );
   if (target === -1) {
     throw new Error(
       `Transcript message ${throughMessageId} is outside the loaded history.`,

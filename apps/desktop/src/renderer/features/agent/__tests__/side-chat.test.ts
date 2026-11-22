@@ -121,7 +121,7 @@ describe("openSideChat", () => {
 });
 
 describe("side chat handoff", () => {
-  it("cuts at the exact message, then falls back to its turn", async () => {
+  it("cuts at the exact message, then at its prompt, never the whole turn", async () => {
     const d = deps();
     const chat = openSideChat(local, { messageId: "m2", promptId: "m1", role: "agent", text: "answer" }, d)!;
     const load = vi.fn()
@@ -129,8 +129,7 @@ describe("side chat handoff", () => {
       .mockResolvedValueOnce(snapshot());
     const prefix = await sideChatHandoffFor(chat.id, "/repo", { load });
     expect(load.mock.calls[0][0]).toMatchObject({ chatId: "source", mode: "handoff", throughMessageId: "m2", cut: "message", lastMessageAt: 2 });
-    expect(load.mock.calls[1][0]).toMatchObject({ throughMessageId: "m1" });
-    expect(load.mock.calls[1][0].cut).toBeUndefined();
+    expect(load.mock.calls[1][0]).toMatchObject({ throughMessageId: "m1", cut: "message" });
     expect(prefix).toMatch(/^<context_handoff from="Fix the parser" kind="side_chat">/);
     expect(prefix).toContain("> answer");
     expect(prefix).toContain("# handoff");
@@ -200,5 +199,16 @@ describe("helpers", () => {
     ] as AgentMessage[];
     expect(transcriptMessagesThroughMessage(messages, "a1").map((m) => m.id)).toEqual(["u1", "a1"]);
     expect(() => transcriptMessagesThroughMessage(messages, "missing")).toThrow(/outside the loaded history/);
+  });
+
+  it("matches streamed agent text by its engine message id", () => {
+    const messages = [
+      { id: "u1", kind: "text", role: "user", text: "go", createdAt: 1 },
+      { id: "thought-1", kind: "text", role: "thought", text: "t", messageId: "e1", createdAt: 2 },
+      { id: "agent-engine-1", kind: "text", role: "agent", text: "Generating.", messageId: "e1", createdAt: 3 },
+      { id: "tool-1", kind: "tool", toolCallId: "1", title: "uuidgen", status: "completed" },
+      { id: "agent-engine-2", kind: "text", role: "agent", text: "UUID", messageId: "e2", createdAt: 4 },
+    ] as AgentMessage[];
+    expect(transcriptMessagesThroughMessage(messages, "e1").map((m) => m.id)).toEqual(["u1", "thought-1", "agent-engine-1"]);
   });
 });
