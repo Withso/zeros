@@ -111,6 +111,17 @@ database("begin, lease and send refuse a removal exactly as before statements-1"
     expect(state.chat).toMatchObject({ active_context_id: contextId, acting_user_id: f.viewer.id,
       acting_generation: contexts.rows[0]!.generation });
   };
+  /** A dispatched turn the maintenance recheck has since ended: its context revoked for the changed authority and its
+   * prompt cancelled. False while it still runs, so the caller checks the strict dispatch. */
+  const endedAfterDispatch = async (begin: { userMessageId: string; dispatchId: string }, chatId: string,
+    response: Awaited<ReturnType<typeof readBeginResponse>>) => {
+    const context = (await pool.query<{ state: string; reason: string | null }>("SELECT state,reason FROM cloud_v2_execution_contexts WHERE id=$1",
+      [response.body.contextId])).rows[0];
+    if (context?.state !== "revoked") return false;
+    expect(["actor_changed", "access_revoked"]).toContain(context.reason);
+    expect((await beginState(begin.userMessageId, chatId)).prompt).toMatchObject({ state: "cancelled", dispatch_id: begin.dispatchId });
+    return true;
+  };
   const assertBeginRolledBack = async (begin: { userMessageId: string; dispatchId: string }, chatId: string,
     before: Awaited<ReturnType<typeof beginState>>) => {
     expect(before.prompt).toMatchObject({ state: "inboxed", dispatch_id: null, execution_context_id: null,
@@ -324,7 +335,10 @@ database("begin, lease and send refuse a removal exactly as before statements-1"
           outcome.dispatch = response.body.dispatch ?? null;
           outcome.contextId = response.body.contextId ?? null;
           if (response.status === 200 && response.body.dispatch === true) {
-            await assertBeginDispatched(begin, chatId, response);
+            // Begin may dispatch on authority the racing change had already altered (its fence ran before the context
+            // existed): the maintenance recheck then ends the turn, asynchronously. Either outcome is correct for an
+            // authority change; a change that alters nothing must leave the dispatch exactly as it was.
+            if (!(action.actorChanged && await endedAfterDispatch(begin, chatId, response))) await assertBeginDispatched(begin, chatId, response);
           } else if (response.status === 200 && response.body.dispatch === false && response.body.state === "cancelled"
             && (action.name === "viewer-account" || action.name === "viewer-membership")) {
             await assertBeginCancelled(begin, chatId, stateBefore, response);
@@ -346,4 +360,47 @@ database("begin, lease and send refuse a removal exactly as before statements-1"
     expect(failures).toEqual([]);
     expect(deadlockDelta).toBe(0);
   }, 120_000);
+
+  /** A begin and an authority change whose statement (and its fence trigger) runs first, uncommitted: begin reads the
+   * old authority and dispatches, then the change commits. The fence could not see a context that did not exist yet;
+   * the maintenance recheck (CloudExecutionMaintenance, on the zeros_cloud_v2_execution notification) must end it. */
+  const raced = async (statement: [string, unknown[]]) => {
+    const chatId = `chat-raced-${randomUUID()}`;
+    const { input, begin } = await delivered(f.viewer, f.prompt(randomUUID(), { chatId }));
+    const held = await pool.connect();
+    let reply: Awaited<ReturnType<typeof readBeginResponse>>;
+    try {
+      await held.query("BEGIN");
+      await held.query(statement[0], statement[1]);
+      // Begin does not wait for the change: it holds the user, member and organization rows only FOR KEY SHARE.
+      reply = await readBeginResponse(await f.worker("prompts/begin", begin, { features: features() }));
+      await held.query("COMMIT");
+    } catch (error) { await held.query("ROLLBACK"); throw error; } finally { held.release(); }
+    expect(reply).toMatchObject({ status: 200, body: { dispatch: true, state: "dispatching" } });
+    const ended = async () => {
+      const context = (await pool.query("SELECT state,reason,sender_ended_at IS NOT NULL AS sender_ended FROM cloud_v2_execution_contexts WHERE id=$1",
+        [reply.body.contextId])).rows[0];
+      return { context, prompt: (await beginState(input.userMessageId, chatId)).prompt.state };
+    };
+    return { ended, reply };
+  };
+
+  it.each([
+    ["the sender's account changes", (): [string, unknown[]] => ["UPDATE users SET auth_revision=auth_revision+1 WHERE id=$1", [f.viewer.id]], "actor_changed"],
+    ["the organization loses cloud", (): [string, unknown[]] => ["UPDATE organizations SET cloud_workspaces_allowed=false WHERE id=$1", [f.organizationId]], "access_revoked"],
+  ] as const)("ends a turn begun on authority that changed before it started: %s", async (_name, change, reason) => {
+    const { ended } = await raced(change());
+    // Ended by the maintenance recheck, asynchronously: about 250 ms here, at most one 30-second execution lease.
+    await vi.waitFor(async () => expect(await ended()).toMatchObject({ context: { state: "revoked", reason }, prompt: "cancelled" }), { timeout: 10_000, interval: 100 });
+  }, 30_000);
+
+  it("keeps a turn begun before the sender's removal committed on its pinned payer, as a started turn survives its sender (#1113)", async () => {
+    const { ended } = await raced(member(f.viewer.id));
+    // Begin committed first, so the turn started before the removal took effect: it runs on, marked sender-ended,
+    // on the payer it pinned (the creator), never on the removed sender's authority.
+    await new Promise(resolve => setTimeout(resolve, 1_500));
+    expect(await ended()).toMatchObject({ context: { state: "active", sender_ended: true }, prompt: "dispatching" });
+    const selection = (await pool.query("SELECT selection FROM cloud_v2_execution_contexts WHERE workspace_id=$1 AND kind='turn' AND state='active'", [f.workspace.id])).rows[0].selection;
+    expect(selection?.payer?.userId).toBe(f.creator.id);
+  }, 30_000);
 });
