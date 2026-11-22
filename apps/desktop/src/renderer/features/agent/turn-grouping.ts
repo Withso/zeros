@@ -90,6 +90,7 @@ function recordedMetadata(current: Turn | null, prompt: AgentTextMessage): Pick<
 export function groupMessagesIntoTurns(messages: AgentMessage[]): Turn[] {
   const turns: Turn[] = [];
   let current: Turn | null = null;
+  const moved = new Set<AgentMessage>();
   for (const m of withoutRedundantAgentTasks(uniqueDurableMessages(messages))) {
     if (m.kind === "tool" && isLegacyEnvironmentConnection(m)) continue;
     if (m.kind === "error_notice" && m.code === "mcp_startup_status") {
@@ -114,7 +115,7 @@ export function groupMessagesIntoTurns(messages: AgentMessage[]): Turn[] {
       const metadata = recordedMetadata(current, m);
       // A switch applied with this message is recorded just before it. Show it
       // in this turn, after the previous turn's footer, with its first work.
-      const switches = current && !m.localNote ? takeTrailingSwitches(current.events) : [];
+      const switches = current && !m.localNote ? takeTrailingSwitches(current.events, moved) : [];
       if (current && !isEmptyTurn(current) && !isSleepOnlySystemTurn(current)) turns.push(current);
       const events: AgentMessage[] = m.localNote ? [m] : switches;
       current = {
@@ -153,10 +154,14 @@ export function groupMessagesIntoTurns(messages: AgentMessage[]): Turn[] {
   return turns;
 }
 
-function takeTrailingSwitches(events: AgentMessage[]): AgentMessage[] {
+/** A switch moves once: a prompt that stopped before any output must not hand
+ * its own switch on to the next prompt. */
+function takeTrailingSwitches(events: AgentMessage[], moved: Set<AgentMessage>): AgentMessage[] {
   let start = events.length;
-  while (start > 0 && isHarnessSwitchMessage(events[start - 1])) start -= 1;
-  return start < events.length ? events.splice(start) : [];
+  while (start > 0 && isHarnessSwitchMessage(events[start - 1]) && !moved.has(events[start - 1])) start -= 1;
+  const taken = start < events.length ? events.splice(start) : [];
+  for (const event of taken) moved.add(event);
+  return taken;
 }
 
 function isEmptyTurn(turn: Turn): boolean {

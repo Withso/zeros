@@ -298,6 +298,13 @@ describe("harness switch rows", () => {
     expect(turns[0].events.map((e) => e.id)).toEqual(["s1"]);
   });
 
+  it("keeps a switch with its prompt when that turn stopped before any output", () => {
+    const turns = groupMessagesIntoTurns([
+      user("u1", "first"), event("e1"), switchRow("s1"), user("u2", "second"), user("u3", "third"),
+    ]);
+    expect(turns.map((t) => t.events.map((e) => e.id))).toEqual([["e1"], ["s1"], []]);
+  });
+
   it("stays at the end when no prompt follows yet", () => {
     const turns = groupMessagesIntoTurns([user("u1", "first"), event("e1"), switchRow("s1")]);
     expect(turns[0].events.map((e) => e.id)).toEqual(["e1", "s1"]);
