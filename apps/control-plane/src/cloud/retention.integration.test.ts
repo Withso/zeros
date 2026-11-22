@@ -1038,9 +1038,13 @@ d("cloud v2 retention", () => {
         const archived = await store.get(id, user);
         expect(archived).toMatchObject({ keep: false, archiveReason: "inactive", machineExpectedGoneAt: { estimate: true } });
         expect(Date.parse(archived.backupRemovalAt!) - Date.parse(archived.archivedAt!)).toBe(60 * DAY);
-        // Not yet woken: the archived wake at 10 days, then Boat's 14.
-        const stops = await columns("greatest(machine_stopped_at, stopped_at) AS last");
-        expect(Date.parse(archived.machineExpectedGoneAt!.at) - stops.last.getTime()).toBe(24 * DAY);
+        // Boat's 14 days after the machine's last stop, plus the archived wake's 10 while that wake is still owed.
+        // The same pass may archive the workspace and then give it that wake, or wake it first: both are right.
+        const stops = await columns("greatest(machine_stopped_at, stopped_at) AS last, archive_wake_done_at >= archived_at AS woken");
+        expect(Date.parse(archived.machineExpectedGoneAt!.at) - stops.last.getTime()).toBe((stops.woken ? 14 : 24) * DAY);
+        // Once the archived wake is recorded, only Boat's 14 days remain.
+        await pool.query("UPDATE cloud_v2_workspaces SET archive_wake_done_at=clock_timestamp() WHERE id=$1", [id]);
+        expect(Date.parse((await store.get(id, user)).machineExpectedGoneAt!.at) - stops.last.getTime()).toBe(14 * DAY);
         // Keep exists only while not archived: refused here, and clearing it changes nothing.
         await expect(store.setKeep(id, user, true)).rejects.toMatchObject({ status: 409, code: "keep_refused_archived" });
         expect(await store.setKeep(id, user, false)).toMatchObject({ keep: false, archiveReason: "inactive", backupRemovalAt: archived.backupRemovalAt });
