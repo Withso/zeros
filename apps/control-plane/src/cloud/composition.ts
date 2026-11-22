@@ -745,10 +745,7 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
     // Retention (CLOUD_V2_RETENTION_ENABLED): absent while off, so stops checkpoint and restores create as before.
     ...(v2.retention === true ? { retention: true, ...(v2.backupForksPerHour ? { backupForksPerHour: v2.backupForksPerHour } : {}),
       ...(v2.maintenancePerHour ? { maintenancePerHour: v2.maintenancePerHour } : {}), ...(v2.maintenancePerDay ? { maintenancePerDay: v2.maintenancePerDay } : {}),
-      ...(readyCopies ? { restoreSource: readyCopyRestoreSource(readyCopies) } : {}),
-      // The archive notice goes through the security notification outbox, whose processor runs with WorkOS
-      // and outside maintenance mode (index.ts); elsewhere none is queued, since it would only be sent late.
-      archiveNotices: Boolean(config.workos) && !config.databaseMaintenanceMode } : {}),
+      ...(readyCopies ? { restoreSource: readyCopyRestoreSource(readyCopies) } : {}) } : {}),
     publicKeys: signer.publicKeys, sealPortToken: (token, id) => sealPortToken(token, id, keys),
     stopWorker: workspace => connections!.stopWorkspace(workspace),
     bootEnv: async (workspace, selected) => ({ CLOUD_V2_API_URL: v2.apiUrl,

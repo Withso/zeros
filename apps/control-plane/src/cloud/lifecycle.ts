@@ -137,8 +137,8 @@ export type CloudV2TimingRecord = {
   /** maintenance_backlog: sleeping workspaces due a wake, past due by 2 days, found expired by Boat,
    * and those the budget cannot reach before Boat's expected deletion. */
   due?: number; overdue?: number; expired?: number; unreachable?: number;
-  /** archive_scan: workspaces archived for inactivity this run, and the notices queued for them. */
-  archived?: number; notices?: number;
+  /** archive_scan: workspaces archived for inactivity this run. */
+  archived?: number;
   /** maintenance_wake: how it ended. */
   outcome?: "stopped" | "adopted" | "gone" | "failed";
 } & ({
@@ -217,9 +217,6 @@ export type CloudV2LifecycleDeps = {
   /** Retention S2's shared maintenance budget; CLOUD_V2_MAINTENANCE_PER_HOUR / _PER_DAY by default. */
   maintenancePerHour?: number;
   maintenancePerDay?: number;
-  /** Retention S3: the security notification outbox's processor runs in this deployment, so an automatic
-   * archive's notice is queued; without it nothing is queued (it would only be sent late). */
-  archiveNotices?: boolean;
   /** Retention: the stopped machine of the workspace's project's ready copy a restore may fork,
    * when it is laid out as this workspace is; null to create from the Cloud Computer. */
   restoreSource?(workspace: CloudV2LifecycleWorkspace): Promise<string | null>;
@@ -964,13 +961,9 @@ export class CloudV2Lifecycle {
     for (const id of await store.archiveDepartedPrivate(CLOUD_V2_ARCHIVE_BATCH)) await store.archiveForSystem(id);
     if (!this.retention) return;
     await store.startRetentionClocks(CLOUD_V2_RETENTION_CLOCK_BATCH);
-    const run = randomUUID();
-    const { archived, notices } = await store.archiveInactive({ inactiveMs: CLOUD_V2_INACTIVE_ARCHIVE_MS, limit: CLOUD_V2_ARCHIVE_BATCH, run,
-      notify: this.deps.archiveNotices === true, backupRemovalMs: CLOUD_V2_BACKUP_REMOVAL_MS });
-    if (archived.length) this.deps.logger?.warn(`[cloud-v2] archived ${archived.length} inactive workspace(s); ${notices} notice(s) queued run=${run.slice(0, 8)}`);
-    // Switch-on precondition: the notice needs the security notification outbox's processor in this deployment.
-    if (this.deps.archiveNotices !== true) this.deps.logger?.warn("[cloud-v2] archive notices are not being queued: no security notification outbox processor runs here");
-    emitCloudV2Timing(this.deps.timing, { workspaceId: "-", phase: "archive_scan", durationMs: 0, archived: archived.length, notices });
+    const { archived } = await store.archiveInactive({ inactiveMs: CLOUD_V2_INACTIVE_ARCHIVE_MS, limit: CLOUD_V2_ARCHIVE_BATCH });
+    if (archived.length) this.deps.logger?.warn(`[cloud-v2] archived ${archived.length} inactive workspace(s)`);
+    emitCloudV2Timing(this.deps.timing, { workspaceId: "-", phase: "archive_scan", durationMs: 0, archived: archived.length });
   }
 
   /** Once an hour: how far the maintenance budget is from what is due. A workspace the budget cannot

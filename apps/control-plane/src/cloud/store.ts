@@ -28,7 +28,6 @@ import { CloudSourceTargetSchema, type CloudSourceTarget } from "./source-author
 import { pinCloudEnvironment, releaseCloudEnvironment } from "./environment-store.js";
 import { originalSetupBuild } from "./setup-selection.js";
 import { teamOwnershipRequired } from "./team-sharing/contract.js";
-import { CLOUD_ARCHIVE_NOTICE_NAMES } from "../security-notification-outbox.js";
 import type { ArchiveScrubMode, ArchiveScrubResult } from "./archive-scrub.js";
 
 import { mirrorMessageSenders, mirrorMessageWindow, type MessageWindow, type WindowOptions } from "./history.js";
@@ -372,14 +371,6 @@ const FINAL_BACKUP_PENDING = `(w.archived_at IS NOT NULL AND w.archived_at > clo
   AND NOT (w.backup_probe = 'clean' AND w.backup_probe_generation = w.stop_generation
     AND w.changed_since_stop_generation IS DISTINCT FROM w.stop_generation)
   AND NOT (w.checkpoint_retry_generation IS NOT DISTINCT FROM w.stop_generation AND w.checkpoint_retry_exhausted_at IS NOT NULL))`;
-/** One archive notice's payload: the outbox bounds it to 4 KiB, so names are shortened and, past the
- * bound or the size, counted instead. */
-function cloudArchiveNotice(run: string, workspaces: { name: string; organization: string }[], backupRemovalAt: Date) {
-  const named = workspaces.slice(0, CLOUD_ARCHIVE_NOTICE_NAMES).map(entry => ({ name: entry.name.slice(0, 60), organization: entry.organization.slice(0, 60) }));
-  const payload = () => ({ run, workspaces: named, more: workspaces.length - named.length, backupRemovalAt: backupRemovalAt.toISOString() });
-  while (named.length > 1 && Buffer.byteLength(JSON.stringify(payload())) > 3800) named.pop();
-  return payload();
-}
 /** Retention S3's archive fields. Boat removes a machine about 14 days after its last stop; an archived
  * workspace still owed its one wake has it 10 days later, so 24 days from now's last stop. */
 function archiveFields(row: Row): Pick<CloudV2Workspace, "archiveReason" | "machineExpectedGoneAt" | "backupRemovalAt"> {
@@ -1788,11 +1779,10 @@ export class CloudV2Store {
   /** Retention S3's automatic archive: up to `limit` sleeping workspaces, oldest clock first, with no
    * activity by anyone for `inactiveMs` since the later of their last activity and retention's start, not
    * kept, with no wake, queued prompt, maintenance wake or live execution context, all rechecked in the
-   * same statement. Each archived workspace's creator, still a member, gets one notice for this run. */
-  async archiveInactive(input: { inactiveMs: number; limit: number; run: string; notify: boolean; backupRemovalMs: number }):
-    Promise<{ archived: { id: string; creatorUserId: string | null }[]; notices: number }> {
+   * same statement. No mail (owner decision, 2026-11-22): the document's archiveReason and dates say it. */
+  async archiveInactive(input: { inactiveMs: number; limit: number }): Promise<{ archived: { id: string; creatorUserId: string | null }[] }> {
     return withSystemTx(this.pool, async tx => {
-      const { rows } = await tx.query<{ id: string; label: string; org_id: string; creator_user_id: string | null; archived_at: Date }>(
+      const { rows } = await tx.query<{ id: string; creator_user_id: string | null }>(
         `WITH due AS MATERIALIZED (
            SELECT w.id FROM cloud_v2_workspaces w
            WHERE w.archived_at IS NULL AND w.keep_set_at IS NULL AND w.state IN ('stopped','failed') AND w.retention_started_at IS NOT NULL
@@ -1803,28 +1793,8 @@ export class CloudV2Store {
            ORDER BY greatest(w.active_at, w.person_activity_at, w.retention_started_at) LIMIT $2 FOR UPDATE SKIP LOCKED)
          UPDATE cloud_v2_workspaces w SET archived_at=clock_timestamp(), archive_reason='inactive' FROM due
          WHERE w.id=due.id AND w.archived_at IS NULL AND w.keep_set_at IS NULL AND w.state IN ('stopped','failed')
-         RETURNING w.id, coalesce(w.title, w.name) AS label, w.org_id, w.creator_user_id, w.archived_at`, [input.inactiveMs, input.limit]);
-      let notices = 0;
-      if (input.notify) {
-        const people = new Map<string, typeof rows>();
-        for (const row of rows) if (row.creator_user_id) people.set(row.creator_user_id, [...people.get(row.creator_user_id) ?? [], row]);
-        for (const [person, archived] of people) {
-          const organizations = new Map((await tx.query<{ id: string; name: string }>(
-            `SELECT o.id, o.name FROM organizations o JOIN organization_members m ON m.org_id=o.id AND m.user_id=$2
-             WHERE o.id = ANY($1::uuid[])`, [[...new Set(archived.map(row => row.org_id))], person])).rows.map(row => [row.id, row.name]));
-          const named = archived.filter(row => organizations.has(row.org_id));
-          if (!named.length) continue;
-          const payload = cloudArchiveNotice(input.run, named.map(row => ({ name: row.label, organization: organizations.get(row.org_id)! })),
-            new Date(named[0]!.archived_at.getTime() + input.backupRemovalMs));
-          const sent = await tx.query(
-            `INSERT INTO security_notification_outbox (user_id, destination_email, template, payload)
-             SELECT u.id, u.email, 'cloud_workspaces_archived', $2::jsonb FROM users u
-             WHERE u.id=$1 AND u.auth_status='active' AND u.deleted_at IS NULL
-             ON CONFLICT ((payload->>'run'), user_id) WHERE template='cloud_workspaces_archived' DO NOTHING`, [person, JSON.stringify(payload)]);
-          notices += sent.rowCount ?? 0;
-        }
-      }
-      return { archived: rows.map(row => ({ id: row.id, creatorUserId: row.creator_user_id })), notices };
+         RETURNING w.id, w.creator_user_id`, [input.inactiveMs, input.limit]);
+      return { archived: rows.map(row => ({ id: row.id, creatorUserId: row.creator_user_id })) };
     });
   }
 

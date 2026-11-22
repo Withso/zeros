@@ -842,7 +842,6 @@ d("cloud v2 retention", () => {
     const ago = (days: number, names = "stopped_at, active_at, person_activity_at, retention_started_at") => pool.query(
       `UPDATE cloud_v2_workspaces SET ${names.split(",").map(name => `${name.trim()}=${name.trim()} - make_interval(secs => $2::double precision)`).join(", ")} WHERE id=$1`,
       [id, days * DAY / 1000]);
-    const outbox = async () => (await pool.query("SELECT user_id, template, payload FROM security_notification_outbox WHERE template='cloud_workspaces_archived'")).rows;
     async function member(role = "member") {
       const other = randomUUID();
       await pool.query("INSERT INTO users (id, email, display_name) VALUES ($1, $2, 'M')", [other, `m-${other}@example.test`]);
@@ -884,9 +883,6 @@ d("cloud v2 retention", () => {
         await ago(1.1, "retention_started_at");
         await lifecycle().tick();
         expect(await columns("archive_reason")).toEqual({ archive_reason: "inactive" });
-        // No outbox processor in this deployment: every run says so, and no notice is queued.
-        expect(warnings).toContain("[cloud-v2] archive notices are not being queued: no security notification outbox processor runs here");
-        expect(await outbox()).toEqual([]);
       });
     });
 
@@ -935,43 +931,31 @@ d("cloud v2 retention", () => {
         await stop();
         await ago(31);
         await pool.query("UPDATE cloud_v2_workspaces SET maintenance_attempt=$2, maintenance_phase='waking', maintenance_started_at=clock_timestamp() WHERE id=$1", [id, randomUUID()]);
-        await store.archiveInactive({ inactiveMs: 30 * DAY, limit: 200, run: randomUUID(), notify: false, backupRemovalMs: 60 * DAY });
+        await store.archiveInactive({ inactiveMs: 30 * DAY, limit: 200 });
         expect((await columns("archived_at")).archived_at).toBeNull();
         await pool.query("UPDATE cloud_v2_workspaces SET maintenance_attempt=NULL, maintenance_phase=NULL, maintenance_started_at=NULL WHERE id=$1", [id]);
         // Opened meanwhile: a start is pending.
         await store.transition(id, ["stopped"], "starting");
-        await store.archiveInactive({ inactiveMs: 30 * DAY, limit: 200, run: randomUUID(), notify: false, backupRemovalMs: 60 * DAY });
+        await store.archiveInactive({ inactiveMs: 30 * DAY, limit: 200 });
         expect((await columns("archived_at")).archived_at).toBeNull();
         await pool.query("UPDATE cloud_v2_workspaces SET state='stopped' WHERE id=$1", [id]);
-        await store.archiveInactive({ inactiveMs: 30 * DAY, limit: 200, run: randomUUID(), notify: false, backupRemovalMs: 60 * DAY });
+        await store.archiveInactive({ inactiveMs: 30 * DAY, limit: 200 });
         expect((await columns("archive_reason")).archive_reason).toBe("inactive");
       });
 
-      it("works the herd 200 a run, oldest clock first, and sends each person one notice listing theirs", async () => {
+      it("works the herd 200 a run, oldest clock first, and sends no mail", async () => {
         await stop();
         await ago(40);
-        const rows: string[] = [];
-        for (let index = 0; index < 204; index++) {
-          const other = randomUUID(); rows.push(other);
+        for (let index = 0; index < 204; index++)
           await pool.query(`INSERT INTO cloud_v2_workspaces (id, org_id, creator_user_id, name, repository, branch, base_branch, state, stopped_at, retention_started_at)
-            VALUES ($1,$2,$3,$4,'acme/app','zeros/h','main','stopped', clock_timestamp() - interval '35 days', clock_timestamp() - interval '35 days')`, [other, org, user, `h${index}`]);
-        }
-        const first = await store.archiveInactive({ inactiveMs: 30 * DAY, limit: 200, run: "run-1", notify: true, backupRemovalMs: 60 * DAY });
+            VALUES ($1,$2,$3,$4,'acme/app','zeros/h','main','stopped', clock_timestamp() - interval '35 days', clock_timestamp() - interval '35 days')`, [randomUUID(), org, user, `h${index}`]);
+        const first = await store.archiveInactive({ inactiveMs: 30 * DAY, limit: 200 });
         expect(first.archived).toHaveLength(200);
         // The oldest clock (this workspace, 40 days) is in the first run.
         expect(first.archived.map(entry => entry.id)).toContain(id);
-        expect(first.notices).toBe(1);
-        const [notice] = await outbox();
-        expect(notice).toMatchObject({ user_id: user, payload: { run: "run-1", more: 185 } });
-        expect(notice.payload.workspaces).toHaveLength(15);
-        expect(notice.payload.workspaces[0]).toEqual({ name: expect.any(String), organization: "Org" });
-        expect(Date.parse(notice.payload.backupRemovalAt)).toBeGreaterThan(Date.now() + 59 * DAY);
-        const second = await store.archiveInactive({ inactiveMs: 30 * DAY, limit: 200, run: "run-2", notify: true, backupRemovalMs: 60 * DAY });
-        expect(second.archived).toHaveLength(5);
-        expect(await outbox()).toHaveLength(2);
-        // One notice per person per run, whatever retries.
-        await expect(pool.query(`INSERT INTO security_notification_outbox (user_id, destination_email, template, payload)
-          VALUES ($1, 'x@example.test', 'cloud_workspaces_archived', '{"run":"run-2"}')`, [user])).rejects.toThrow(/duplicate key/);
+        expect((await store.archiveInactive({ inactiveMs: 30 * DAY, limit: 200 })).archived).toHaveLength(5);
+        // Owner decision (2026-11-22): the archive is shown in the app, never mailed.
+        expect(Number((await pool.query("SELECT count(*) AS n FROM security_notification_outbox")).rows[0].n)).toBe(0);
       });
 
       it("carries the archive's fields on the document, and none while Keep is set", async () => {
@@ -1013,7 +997,6 @@ d("cloud v2 retention", () => {
         await lifecycle({ retention: false }).tick();
         expect(await columns("state, archive_reason")).toEqual({ state: "stopped", archive_reason: "member_left" });
         expect(uploads.length).toBeGreaterThan(0);
-        expect(await outbox()).toEqual([]);
       });
 
       it("never lets anyone else in, admins included, and gives the member their workspace back when re-added", async () => {

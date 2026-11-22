@@ -94,18 +94,3 @@ $$;
 REVOKE ALL ON FUNCTION cloud_v2_restore_returning_private() FROM PUBLIC;
 CREATE TRIGGER cloud_v2_private_member_returned AFTER INSERT ON organization_members
   FOR EACH ROW EXECUTE FUNCTION cloud_v2_restore_returning_private();
-
--- The automatic-archive notice: one mail per person per archive run.
--- zeros-expand-exception: widen-check Replaces the template list with a superset that adds one template
-ALTER TABLE security_notification_outbox DROP CONSTRAINT security_notification_outbox_template_check;
-ALTER TABLE security_notification_outbox
-  ADD CONSTRAINT security_notification_outbox_template_check CHECK (template IN (
-    'account_identity_disabled', 'account_recovered',
-    'sessions_revoked', 'organization_access_revoked',
-    'account_deletion_scheduled', 'account_deletion_restored',
-    'account_deletion_completed', 'organization_deletion_scheduled',
-    'organization_deletion_restored', 'organization_deletion_completed',
-    'cloud_workspaces_archived'
-  ));
-CREATE UNIQUE INDEX security_notification_outbox_archive_run ON security_notification_outbox ((payload->>'run'), user_id)
-  WHERE template = 'cloud_workspaces_archived';

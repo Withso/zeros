@@ -13,8 +13,7 @@ export type SecurityNotificationTemplate =
   | "account_deletion_completed"
   | "organization_deletion_scheduled"
   | "organization_deletion_restored"
-  | "organization_deletion_completed"
-  | "cloud_workspaces_archived";
+  | "organization_deletion_completed";
 
 export type SecurityNotificationDelivery = {
   id: string;
@@ -177,39 +176,7 @@ export function securityNotificationContent(
           ],
         ),
       };
-    case "cloud_workspaces_archived":
-      return cloudWorkspacesArchivedContent(payload);
   }
-}
-
-const escapeHtml = (value: string) => value.replace(/[&<>"']/g, character => `&#${character.charCodeAt(0)};`);
-/** At most this many workspaces are named in one archive notice; the rest are counted. */
-export const CLOUD_ARCHIVE_NOTICE_NAMES = 15;
-
-/** Retention S3's service notice: a person's cloud workspaces archived after 30 days without activity, in
- * one mail per archive run. Workspace and organization names are user-authored, so each is validated,
- * bounded and escaped; nothing else from the payload is reflected. */
-function cloudWorkspacesArchivedContent(payload: Record<string, unknown>): { subject: string; html: string } {
-  const entries = (Array.isArray(payload.workspaces) ? payload.workspaces : []).slice(0, CLOUD_ARCHIVE_NOTICE_NAMES)
-    .filter((entry): entry is { name: string; organization: string } => !!entry && typeof entry === "object"
-      && typeof (entry as { name?: unknown }).name === "string" && typeof (entry as { organization?: unknown }).organization === "string");
-  const more = typeof payload.more === "number" && Number.isSafeInteger(payload.more) && payload.more > 0 ? payload.more : 0;
-  const removal = typeof payload.backupRemovalAt === "string" && !Number.isNaN(Date.parse(payload.backupRemovalAt))
-    ? new Date(payload.backupRemovalAt).toISOString().slice(0, 10) : null;
-  const list = `<ul style="margin:0;padding-left:20px">${entries.map(entry =>
-    `<li>${escapeHtml(entry.name.slice(0, 80))} <span style="color:#6b7280">(${escapeHtml(entry.organization.slice(0, 80))})</span></li>`).join("")}`
-    + `${more ? `<li>and ${more} more</li>` : ""}</ul>`;
-  const title = "Inactive Zeros cloud workspaces were archived";
-  return {
-    subject: title,
-    html: securityEmailHtml(title, [
-      "These cloud workspaces had no activity for 30 days, so Zeros archived them:",
-      list,
-      "To use one again, open it in Zeros: opening an archived workspace brings it back. Mark a workspace Keep to stop it being archived.",
-      removal ? `Their backups are kept until ${removal}. After that a workspace still opens, from its repository on GitHub.`
-        : "A workspace still opens after archive, from its backup or from its repository on GitHub.",
-    ]),
-  };
 }
 
 type ClaimedNotification = {
