@@ -34,7 +34,7 @@ const installation = (row: InstallationRow, userId: string): CloudGithubInstalla
 const owner = (repository: string) => repository.split("/")[0]!.toLowerCase();
 
 export const organizationConnectionRequired = (account: string) =>
-  new HttpError(409, "organization_connection_required", `Connect ${account} on GitHub for the organization first.`);
+  new HttpError(409, "organization_connection_required", `Connect ${account} on GitHub for projects first.`);
 export const privateWorkspaceRefused = () =>
   new HttpError(409, "private_workspace", "Workspaces of a project only you can use can't be shared or reassigned.");
 
@@ -49,7 +49,7 @@ export class CloudRepositoryLevels {
     const row = (await tx.query<{ role: string; name: string; personal: boolean }>(
       `SELECT m.role, o.name, o.cloud_personal_projects_allowed AS personal FROM organization_members m
        JOIN users u ON u.id=m.user_id AND u.auth_status='active' AND u.deleted_at IS NULL
-       JOIN organizations o ON o.id=m.org_id AND o.deleted_at IS NULL AND o.lifecycle_status='active' AND o.cloud_workspaces_allowed
+       JOIN organizations o ON o.id=m.org_id AND o.deleted_at IS NULL AND o.lifecycle_status='active' AND cloud_organization_enabled(o)
        WHERE m.org_id=$1 AND m.user_id=$2 ${lock ? "FOR UPDATE OF o" : ""}`, [organizationId, userId])).rows[0];
     if (!row) throw new HttpError(404, "not_found", "Organization not found");
     return { role: row.role, name: row.name, personalAllowed: row.personal };

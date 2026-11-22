@@ -130,7 +130,7 @@ export type ReadyCopyFork = { copyId: string; key: string; machineId: string; sa
 /** Whether a personal project may still build: personal projects allowed, its member still in the organization. */
 const PERSONAL_BUILDABLE = `(o.cloud_personal_projects_allowed AND EXISTS (SELECT 1 FROM organization_members m
   JOIN users u ON u.id=m.user_id AND u.auth_status='active' AND u.deleted_at IS NULL WHERE m.org_id=p.org_id AND m.user_id=p.owner_user_id))`;
-const ORGANIZATION_AVAILABLE = "o.deleted_at IS NULL AND o.lifecycle_status='active' AND o.cloud_workspaces_allowed";
+const ORGANIZATION_AVAILABLE = "o.deleted_at IS NULL AND o.lifecycle_status='active' AND cloud_organization_enabled(o)";
 
 /** Lock order, for every transaction that touches these rows: the
  * organization row (Cloud Computer, project and deletion paths), then ready

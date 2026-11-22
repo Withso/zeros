@@ -27,7 +27,7 @@
 // to bind.
 // ──────────────────────────────────────────────────────────
 
-import { memo, useContext, useLayoutEffect, useMemo, useRef, useState, type SyntheticEvent } from "react";
+import { memo, useContext, useLayoutEffect, useMemo, useRef, useState, type ReactNode, type SyntheticEvent } from "react";
 import { AlarmClock, ChevronDown, ChevronUp, CornerDownRight } from "lucide-react";
 import type { Renderer, RendererContext } from "./types";
 import type {
@@ -66,6 +66,7 @@ import { LocalLinkHtml, LocalLinkText } from "../local-links/text";
 import { LocalNoteRow } from "../local-links/note-row";
 import { parseReply, previewText } from "../chat-selection";
 import { IconButton } from "@/renderer/shared/ui/primitives/icon-button";
+import { MessageHoverActions } from "../message-hover-actions";
 
 type ChatRole = "user" | "assistant" | "system";
 
@@ -168,7 +169,7 @@ export const TextMessage: Renderer<AgentTextMessage> = memo(
     );
 
     return (
-      <>
+      <AgentMessageHover message={message} ctx={ctx} wrap={useMarkdown} enabled={!ctx.isStreaming && !!text.trim()}>
         <Message from={role}>
           {/* The assistant joins the user in variant="flat" — agent
             output is free-flow body copy, no card chrome. System keeps
@@ -291,7 +292,7 @@ export const TextMessage: Renderer<AgentTextMessage> = memo(
         {/* No "Summary" divider: summaryBoundary still cuts the replay preamble
           (replay.ts), but compaction points get no visible boundary UI in the
           timeline. */}
-      </>
+      </AgentMessageHover>
     );
   },
 );
@@ -510,5 +511,31 @@ function UserBubbleAttachment({
         <span className={MSG_CHIP_LABEL}>{a.name}</span>
       </span>
     </Tooltip>
+  );
+}
+
+/** Agent output and in-between messages get the floating popup: received
+ *  time, copy and, in an interactive transcript, Side chat from here. */
+function AgentMessageHover({ message, ctx, wrap, enabled, children }: {
+  message: AgentTextMessage;
+  ctx: RendererContext;
+  wrap: boolean;
+  enabled: boolean;
+  children: ReactNode;
+}) {
+  if (!wrap) return <>{children}</>;
+  const from = { messageId: message.messageId ?? message.id, promptId: ctx.turnPromptId ?? null, role: "agent" as const, text: message.text };
+  return (
+    <div data-agent-message="" className="group/agentmsg relative">
+      {children}
+      {enabled && <MessageHoverActions
+        text={message.text}
+        createdAt={message.createdAt}
+        timeLabel="Received"
+        onSideChat={ctx.openSideChat ? () => ctx.openSideChat?.(from) : undefined}
+        onSideChatIntent={ctx.warmSideChat ? () => ctx.warmSideChat?.(from) : undefined}
+        revealClassName="group-focus-within/agentmsg:pointer-events-auto group-focus-within/agentmsg:opacity-100 group-hover/agentmsg:pointer-events-auto group-hover/agentmsg:opacity-100"
+      />}
+    </div>
   );
 }

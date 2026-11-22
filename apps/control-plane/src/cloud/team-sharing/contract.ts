@@ -37,6 +37,12 @@ export function writeTeamCursor(key: string, at: string, id: string): string {
   return Buffer.from(JSON.stringify({ key,at,id })).toString("base64url");
 }
 export const teamNotFound = () => new HttpError(404,"not_found","Cloud workspace not found");
+/** A Personal organization has no team: its team routes answer as a server
+ * without team sharing would, through the creator routes. Found by the read the
+ * team route makes anyway; a 404 wherever it is not caught. */
+export class TeamSharingAbsent extends HttpError {
+  constructor() { super(404,"not_found","Cloud workspace not found"); }
+}
 export const teamUnavailable = () => new HttpError(503,"github_verification_unavailable","Repository verification is temporarily unavailable. Try again shortly.");
 export const teamReadOnly = () => new HttpError(409,"workspace_read_only","This workspace is read-only for you");
 export const teamOwnershipRequired = () => new HttpError(409,"team_ownership_required","Workspace ownership is not enabled for this client or channel");

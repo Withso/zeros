@@ -29,6 +29,14 @@ describe("D2: confirming that access really ended", () => {
     vi.stubGlobal("fetch", vi.fn(async () => { throw new TypeError("network"); }));
     expect(await confirmCloudWorkspaceAccessEnded(target)).toBe("unknown");
   });
+  it("keeps a Personal workspace whose owner's Pro ended, and carries the server's pro_required reason as the error", async () => {
+    const message = "Cloud workspaces need Pro. This workspace opens again when Pro is active.";
+    answer(403, { error: { code: "pro_required", message } });
+    expect(await confirmCloudWorkspaceAccessEnded(target)).toBe("unknown");
+    const { getCloudV2Workspace } = await import("../cloud-v2");
+    answer(403, { error: { code: "pro_required", message } });
+    await expect(getCloudV2Workspace(target)).rejects.toMatchObject({ status: 403, code: "pro_required", message });
+  });
 });
 
 describe("D2: the events stream's end", () => {

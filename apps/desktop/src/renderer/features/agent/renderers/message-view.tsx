@@ -67,9 +67,12 @@ export const MessageView = memo(
       prev.ctx.attachmentCwd !== next.ctx.attachmentCwd ||
       prev.ctx.chatId !== next.ctx.chatId
       || prev.ctx.liveTextSource !== next.ctx.liveTextSource
+      || prev.ctx.openSideChat !== next.ctx.openSideChat
     )
       return false;
     if (prev.ctx.liveTextSource && prev.ctx.isStreaming !== next.ctx.isStreaming) return false;
+    // Agent text shows its hover actions only once its turn stops streaming.
+    if (prev.message.kind === "text" && prev.message.role === "agent" && prev.ctx.isStreaming !== next.ctx.isStreaming) return false;
     if (prev.message.kind === "text" && (prev.message.role === "agent" || prev.message.role === "thought")) {
       const wasStreaming = prev.ctx.isStreaming && prev.ctx.lastMessageId === prev.message.id;
       const isStreaming = next.ctx.isStreaming && next.ctx.lastMessageId === next.message.id;

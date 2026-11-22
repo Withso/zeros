@@ -17,15 +17,17 @@ import { computerBranchesCache, GITHUB_READ_MAX_AGE_MS } from "../../state/read-
 import { computerSourceReadKey, readComputerBranches } from "./cloud-computer-source";
 
 /** The organization's projects, then this member's own; each group by name. */
-export function cloudProjectGroups(projects: readonly CloudProject[], organizationName: string) {
+export function cloudProjectGroups(projects: readonly CloudProject[], organizationName: string, personal = false) {
+  // Personal's own cloud has one person: one list.
+  if (personal) return projects.length ? [{ label: "Your projects", rows: [...projects] }] : [];
   return [
     { label: organizationName, rows: projects.filter(project => project.level === "organization") },
     { label: "Only you", rows: projects.filter(project => project.level === "personal") },
   ].filter(group => group.rows.length > 0);
 }
 
-export function CloudProjectPicker({ projects, selected, rememberedId, organizationName, active, open, onOpenChange, disabled, onSelect, warm, onNewProject }: {
-  projects: CloudProjects; selected: CloudProject | null; rememberedId: string | null; organizationName: string;
+export function CloudProjectPicker({ projects, selected, rememberedId, organizationName, personal = false, active, open, onOpenChange, disabled, onSelect, warm, onNewProject }: {
+  projects: CloudProjects; selected: CloudProject | null; rememberedId: string | null; organizationName: string; personal?: boolean;
   active: boolean; open: boolean; onOpenChange(open: boolean): void; disabled: boolean;
   onSelect(id: string): void; warm(projectId: string): void; onNewProject: (() => void) | null;
 }) {
@@ -41,7 +43,7 @@ export function CloudProjectPicker({ projects, selected, rememberedId, organizat
         </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="start" sideOffset={4} className="min-w-[240px]">
-        {cloudProjectGroups(projects.projects, organizationName).map((group, index) => (
+        {cloudProjectGroups(projects.projects, organizationName, personal).map((group, index) => (
           <div key={group.label} role="group" aria-label={group.label}>
             {index > 0 && <DropdownMenuSeparator />}
             <DropdownMenuLabel>{`${group.label} · ${group.rows.length}`}</DropdownMenuLabel>

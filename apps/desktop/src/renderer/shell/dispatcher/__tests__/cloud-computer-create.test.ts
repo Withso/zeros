@@ -17,6 +17,7 @@ const state = vi.hoisted(() => ({
 vi.mock("../cloud-create-access-warm", () => ({ warmCloudCreateAccess: state.warmAccess }));
 vi.mock("../../../features/team/team-store", () => ({
   getActiveOrganizationIdSnapshot: () => state.personal ? null : state.org,
+  getActiveCloudOrganizationIdSnapshot: () => state.personal ? null : state.org,
   useActiveOrganization: () => ({
     id: state.org,
     isPersonal: state.personal,

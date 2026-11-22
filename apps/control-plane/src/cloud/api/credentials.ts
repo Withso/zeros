@@ -36,7 +36,7 @@ const KEY = /^zk_[A-Za-z0-9_-]{43}$/;
 const unauthorized = () => new HttpError(401, "unauthorized", "Invalid API credential");
 const notFound = () => new HttpError(404, "not_found", "Not found");
 const LIVE_MEMBER = sql`u.auth_status='active' AND u.deleted_at IS NULL AND o.deleted_at IS NULL
-  AND NOT o.is_personal AND o.cloud_workspaces_allowed
+  AND cloud_organization_enabled(o)
   AND NOT organization_member_on_hold(m.org_id,m.user_id,
     ${SqlFragment.integer(PRO_ORGANIZATION_MEMBER_LIMIT, 1, 1000)},
     ${SqlFragment.integer(PRO_ORGANIZATION_FREE_MEMBER_LIMIT, 0, 1000)})`;

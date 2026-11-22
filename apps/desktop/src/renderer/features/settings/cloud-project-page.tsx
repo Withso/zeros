@@ -31,9 +31,9 @@ import { ReadyCopySection } from "./ready-copy-section";
 import { SettingsGroup, SettingsPageSection, SettingsRow } from "./settings-ui";
 
 /** "Withso · 2 repositories" or "Only you · 3 repositories". */
-export function cloudProjectSubtitle(project: Pick<CloudProject, "level" | "repositories">, organizationName: string): string {
+export function cloudProjectSubtitle(project: Pick<CloudProject, "level" | "repositories">, organizationName: string, personal = false): string {
   const count = project.repositories.length;
-  return `${project.level === "personal" ? "Only you" : organizationName} · ${count} ${count === 1 ? "repository" : "repositories"}`;
+  return `${project.level === "personal" || personal ? "Only you" : organizationName} · ${count} ${count === 1 ? "repository" : "repositories"}`;
 }
 
 /**
@@ -43,8 +43,10 @@ export function cloudProjectSubtitle(project: Pick<CloudProject, "level" | "repo
  * can succeed (the server's `canShare`: an admin's own project whose every
  * repository an organization connection reaches).
  */
-export function cloudProjectSharing(project: Pick<CloudProject, "level" | "canEdit" | "canShare">, organizationName: string):
+export function cloudProjectSharing(project: Pick<CloudProject, "level" | "canEdit" | "canShare">, organizationName: string, personal = false):
   { label: string; hint: string | null; share: boolean } {
+  // Personal's own cloud has one person: every project is only theirs, and nothing is shared.
+  if (personal) return { label: "Only you", hint: null, share: false };
   if (project.level === "personal") return { label: "Only you", hint: null, share: project.canShare === true };
   return { label: `Shared with ${organizationName}`,
     hint: project.canEdit ? "Members can use it when they can read every repository on GitHub." : "Managed by admins", share: false };
@@ -57,7 +59,7 @@ const setupLine = (entry: CloudProject["repositories"][number]) =>
 export const SEVERAL_REPOSITORIES_AGENT_LIMIT = "Agents start in the project folder, so settings a repository keeps for its own agent (hooks, permissions, rules, its own MCP file) are not loaded. Instructions files are.";
 
 export function CloudProjectPage({ project, organization, userKey, connections, limits, localProjects, active, onChanged, onOpenFolder }: {
-  project: CloudProject; organization: { id: string; name: string }; userKey: string;
+  project: CloudProject; organization: { id: string; name: string; isPersonal?: boolean }; userKey: string;
   connections: CloudGithubLevelConnections | null | undefined; limits: CloudProjects["limits"];
   /** This Mac's registered folders, to show each repository's. */
   localProjects: readonly Project[];
@@ -70,7 +72,7 @@ export function CloudProjectPage({ project, organization, userKey, connections, 
     ? (repository: string) => addProject.openGithubProject({ placement: "local", url: `https://github.com/${repository}.git` }) : null;
   const [busy, setBusy] = useState(false), [error, setError] = useState<string | null>(null);
   const [editing, setEditing] = useState<string | null>(null), [adding, setAdding] = useState(false);
-  const sharing = cloudProjectSharing(project, organization.name);
+  const sharing = cloudProjectSharing(project, organization.name, organization.isPersonal === true);
   const save = async (repositories: CloudProjectRepositoryInput[]) => {
     setBusy(true); setError(null);
     try { onChanged(await updateCloudProject(organization.id, project.id, { repositories })); return true; }
@@ -283,10 +285,12 @@ const toggled = (current: ReadonlySet<string>, name: string) => {
 
 /** A new project: its name, who can use it, and its repositories. */
 export function NewProjectDialog({ organization, userKey, connections, projects, active, onClose, onCreated }: {
-  organization: { id: string; name: string }; userKey: string; connections: CloudGithubLevelConnections | null | undefined;
+  organization: { id: string; name: string; isPersonal?: boolean }; userKey: string; connections: CloudGithubLevelConnections | null | undefined;
   projects: CloudProjects; active: boolean; onClose(): void; onCreated(project: CloudProject): void;
 }) {
-  const levels = [...(projects.canCreateOrganization ? ["organization" as const] : []), ...(projects.personalAllowed ? ["personal" as const] : [])];
+  // Personal's own cloud has one person: its projects are its own, with no choice of who can use them.
+  const levels = organization.isPersonal ? (projects.canCreateOrganization ? ["organization" as const] : projects.personalAllowed ? ["personal" as const] : [])
+    : [...(projects.canCreateOrganization ? ["organization" as const] : []), ...(projects.personalAllowed ? ["personal" as const] : [])];
   const [level, setLevel] = useState<"organization" | "personal">(levels[0] ?? "personal");
   const [name, setName] = useState("");
   const [chosen, setChosen] = useState<ReadonlySet<string>>(new Set());
@@ -306,7 +310,7 @@ export function NewProjectDialog({ organization, userKey, connections, projects,
         <DialogBody>
           {error && <MessageRow tone="error" role="alert" flush>{error}</MessageRow>}
           {levels.length === 0 ? (
-            <MessageRow tone="neutral" flush>{`Only owners and admins of ${organization.name} create projects here.`}</MessageRow>
+            <MessageRow tone="neutral" flush>{organization.isPersonal ? "Projects are not available for you yet." : `Only owners and admins of ${organization.name} create projects here.`}</MessageRow>
           ) : (
             <>
               <Field label="Name">

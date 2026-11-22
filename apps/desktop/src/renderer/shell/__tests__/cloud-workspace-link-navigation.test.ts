@@ -47,6 +47,8 @@ vi.mock("../../features/team/team-store", () => ({
   getTeamStoreState: () => ({ me: state.me }),
   getActiveOrganizationSnapshot: () =>
     state.me?.organizations.find((candidate) => candidate.id === state.active) ?? null,
+  getActiveCloudOrganizationIdSnapshot: () =>
+    state.me?.organizations.find((candidate) => candidate.id === state.active)?.id ?? null,
   useTeams: vi.fn(),
 }));
 vi.mock("../../features/team/control-plane", () => ({

@@ -6,6 +6,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "../../shared/ui/primit
 import { useRecoveringRead } from "../../state/use-recovering-read";
 import { getCloudV2Computer } from "../../platform/cloud-v2";
 import { useActiveOrganization, useTeams } from "../team/team-store";
+import { usableCloudOrganization } from "../team/personal-cloud";
 import { editableRepositories } from "./cloud-computer-model";
 import { computers, computerKey, patchRepository, TYPING_SAVE_MS, useRecipeDraft } from "./cloud-computer-store";
 import { SettingsGroup, SettingsSection } from "./settings-ui";
@@ -27,9 +28,10 @@ export function CloudRepositoryPanel({ repository, tab, onTabChange, onOpenCompu
   /** The unified project page shows one part (Git or Setup) without the tabs. */
   part?: "git" | "setup";
 }) {
-  const organization = useActiveOrganization();
+  // The organization, or Personal's own cloud with Pro (its owner manages it).
+  const organization = usableCloudOrganization(useActiveOrganization());
   const { me } = useTeams();
-  if (!organization || organization.isPersonal || !me) return null;
+  if (!organization || !me) return null;
   const canManage = organization.role === "owner" || organization.role === "admin";
   return <RepositoryScope key={computerKey(me.user.id, organization.id)} userId={me.user.id} organizationId={organization.id}
     canManage={canManage} repository={repository} tab={tab} onTabChange={onTabChange} onOpenComputer={onOpenComputer} active={surfaceActive} part={part} />;

@@ -99,7 +99,7 @@ export class DatabaseCloudAgentCredentialService {
     const row=(await tx.query(`SELECT 1
       FROM organization_members member JOIN organizations organization ON organization.id=member.org_id
       JOIN users account ON account.id=member.user_id
-      WHERE member.org_id=$1 AND member.user_id=$2 AND organization.deleted_at IS NULL AND NOT organization.is_personal
+      WHERE member.org_id=$1 AND member.user_id=$2 AND organization.deleted_at IS NULL AND (NOT organization.is_personal OR cloud_organization_enabled(organization))
       FOR SHARE OF organization,member`,[organizationId,ownerUserId])).rows[0];
     if(!row)unavailable();
   }

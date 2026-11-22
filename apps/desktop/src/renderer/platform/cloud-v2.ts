@@ -77,7 +77,7 @@ const STATUS: Record<CloudV2Workspace["state"], string> = {
 };
 
 const ERRORS: Record<string, string> = {
-  cloud_computer_build_required: "Build this organization's Cloud Computer first.",
+  cloud_computer_build_required: "Build the Cloud Computer first.",
   cloud_computer_changed: "The Cloud Computer was just rebuilt. Create the workspace again.",
   cloud_source_access_denied: "Your GitHub connection can no longer read this repository. Check repository access in Settings → GitHub, then create a new workspace.",
   repository_branch_not_found: "The base branch no longer exists on GitHub. Choose another branch and create a new workspace.",
@@ -185,7 +185,7 @@ export async function listCloudV2Workspaces(organizationId: string): Promise<{ w
     const query = `organizationId=${uuid.parse(organizationId)}&archived=include&limit=200${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`;
     const reply: { workspaces: CloudV2Workspace[]; teamSharing?: unknown; nextCursor?: unknown } = await cloudAccountRequest(`/v1/cloud-v2/workspaces?${query}`,
       CloudV2WorkspaceListReplySchema, undefined, { teamSharing: true });
-    if (reply.workspaces.some(row => row.organizationId !== organizationId)) throw new Error("Cloud catalog returned another organization");
+    if (reply.workspaces.some(row => row.organizationId.toLowerCase() !== organizationId.toLowerCase())) throw new Error("Cloud catalog returned another organization");
     workspaces.push(...reply.workspaces);
     teamSharing = reply.teamSharing === 1;
     const next = typeof reply.nextCursor === "string" && reply.nextCursor.length <= 2048 ? reply.nextCursor : null;

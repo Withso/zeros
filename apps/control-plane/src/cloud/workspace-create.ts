@@ -71,7 +71,7 @@ export function createCloudWorkspaceOperations(deps: CloudV2RouteDeps) {
         ? "Rebuild the Cloud Computer in Settings → Cloud Computer before creating a workspace."
         : "Ask an organization admin to rebuild the Cloud Computer in Settings → Cloud Computer before creating a workspace.");
     }
-    return new HttpError(409, "cloud_computer_build_required", "Build this organization's Cloud Computer first");
+    return new HttpError(409, "cloud_computer_build_required", "Build the Cloud Computer first");
   };
 
   const authorizeReceipt = async (response: Record<string, unknown>, userId: string, organizationId: string) => {

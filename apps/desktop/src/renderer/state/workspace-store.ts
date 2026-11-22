@@ -55,6 +55,7 @@ import { onAttachmentSourceConfirmed, startAttachmentSourceMaintenance } from ".
 import "./create-composer-drafts";
 import { forgetFreshLocalChat, markFreshLocalChat } from "../features/agent/fresh-local-chats";
 import { forgetFreshCloudChat, markFreshCloudChat } from "../features/agent/fresh-cloud-chats";
+import { forgetSideChatSeed } from "../features/agent/side-chat-seeds";
 import { localTranscriptCache, cloudTranscriptCache } from "./local-transcript-cache";
 import { retainCloudTranscriptSummaries } from "../features/agent/chat-transcript-summaries-cache";
 import { loadProjects } from "./projects-store";
@@ -2227,6 +2228,7 @@ function noteChatTranscriptLifecycle(state: WorkspaceState, action: Action): voi
   } else if (action.type === "DELETE_CHAT") {
     forgetFreshLocalChat(action.id);
     forgetFreshCloudChat(action.id);
+    forgetSideChatSeed(action.id);
     localTranscriptCache.forget(action.id);
     cloudTranscriptCache.forget(action.id);
     const cloud = parseCloudScopedId(action.id);

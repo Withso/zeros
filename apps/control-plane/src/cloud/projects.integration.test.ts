@@ -92,7 +92,7 @@ d("cloud projects and GitHub at two levels", () => {
     await expectCode(projects.create(org, admin, { name: "Zeros", level: "organization", repositories: [repo("withso/zeros", "42")] }),
       "organization_connection_required");
     await expect(projects.create(org, admin, { name: "Zeros", level: "organization", repositories: [repo("withso/zeros", "42")] }))
-      .rejects.toThrow("Connect withso on GitHub for the organization to use withso/zeros.");
+      .rejects.toThrow("Connect withso on GitHub for projects to use withso/zeros.");
     // A member's personal link is not the organization's.
     await levels.connect(org, admin, { installationId: 700, accountLogin: "withso", level: "personal" });
     await expectCode(projects.create(org, admin, { name: "Zeros", level: "organization", repositories: [repo("withso/zeros", "42")] }),

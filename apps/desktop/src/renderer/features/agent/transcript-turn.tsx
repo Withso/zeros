@@ -37,6 +37,7 @@ import { TurnEventList } from "./turn-event-list";
 import { TurnFooter, turnFooterFailureLabel } from "./turn-footer";
 import type { Turn } from "./turn-grouping";
 import type { AgentMessage, AgentSessionState, AgentTextMessage } from "./use-agent-session";
+import type { SideChatSource } from "./side-chat";
 
 
 /** Handlers shared by every turn. Their identities must not change while the
@@ -53,6 +54,9 @@ export interface TranscriptTurnActions {
   continueTurn: () => void;
   forkToNewTab: (messageId: string, text: string) => void;
   warmForkToNewTab: (messageId: string, text: string) => void;
+  /** Opens a side chat branched at a message of this chat. */
+  openSideChat: (from: SideChatSource) => void;
+  warmSideChat: (from: SideChatSource) => void;
   signIn: (provider?: string) => void;
   chooseModel?: () => void;
   stopWorkflow?: (taskId: string) => void;
@@ -192,6 +196,42 @@ export const TranscriptTurn = memo(function TranscriptTurn({
     [actions, promptId, promptText],
   );
   const retryable = shared.interactive && !!prompt && !prompt.localFrom;
+  const promptSideChat = useMemo<SideChatSource | null>(
+    () => (promptId && typeof promptText === "string"
+      ? { messageId: promptId, promptId, role: "user", text: promptText }
+      : null),
+    [promptId, promptText],
+  );
+  // The footer branches at the turn's last answer, else at its prompt.
+  const footerSideChat = useMemo<SideChatSource | null>(() => {
+    if (!promptId) return null;
+    for (let index = providerEvents.length - 1; index >= 0; index -= 1) {
+      const event = providerEvents[index];
+      if (event.kind === "text" && event.role === "agent" && event.text.trim()) {
+        return { messageId: event.id, promptId, role: "agent", text: event.text };
+      }
+    }
+    return promptSideChat;
+  }, [promptId, providerEvents, promptSideChat]);
+  const sideChatEnabled = shared.interactive && shared.hasChatThread;
+  const eventCtx = useMemo<RendererContext>(
+    () => (sideChatEnabled
+      ? { ...ctx, openSideChat: actions.openSideChat, warmSideChat: actions.warmSideChat, turnPromptId: promptId ?? null }
+      : ctx),
+    [ctx, sideChatEnabled, actions, promptId],
+  );
+  const sideChatFromPrompt = useCallback(() => {
+    if (promptSideChat) actions.openSideChat(promptSideChat);
+  }, [actions, promptSideChat]);
+  const sideChatFromPromptIntent = useCallback(() => {
+    if (promptSideChat) actions.warmSideChat(promptSideChat);
+  }, [actions, promptSideChat]);
+  const sideChatFromFooter = useCallback(() => {
+    if (footerSideChat) actions.openSideChat(footerSideChat);
+  }, [actions, footerSideChat]);
+  const sideChatFromFooterIntent = useCallback(() => {
+    if (footerSideChat) actions.warmSideChat(footerSideChat);
+  }, [actions, footerSideChat]);
 
   return (
     <TurnContainer
@@ -234,10 +274,12 @@ export const TranscriptTurn = memo(function TranscriptTurn({
               onEdit={editable ? onEdit : undefined}
               editToolbarPills={editToolbarPills}
               editAgentContext={editAgentContext}
+              onSideChat={sideChatEnabled && promptSideChat ? sideChatFromPrompt : undefined}
+              onSideChatIntent={sideChatEnabled && promptSideChat ? sideChatFromPromptIntent : undefined}
             >
               {/* The user prompt renders as a full-width bubble that folds
                   when long. TurnPromptHeader paints the bubble chrome, the
-                  fold and the hover edit/copy/age row; the inner
+                  fold and the hover popup; the inner
                   TextMessage contributes just the text. */}
               <MessageView message={prompt} ctx={ctx} />
             </TurnPromptHeader>
@@ -276,7 +318,7 @@ export const TranscriptTurn = memo(function TranscriptTurn({
               )}
               workflow={tail?.workflow ?? null}
               onStopWorkflow={shared.transcriptReadOnly ? undefined : actions.stopWorkflow}
-              ctx={ctx}
+              ctx={eventCtx}
               footer={
                 // Cached rows have no native turn/usage authority. Do not
                 // mount turn metadata reads or reset/fork controls until the
@@ -319,6 +361,8 @@ export const TranscriptTurn = memo(function TranscriptTurn({
                     onContinue={actions.continueTurn}
                     onFork={prompt ? fork : undefined}
                     onForkIntent={prompt ? forkIntent : undefined}
+                    onSideChat={sideChatEnabled && footerSideChat ? sideChatFromFooter : undefined}
+                    onSideChatIntent={sideChatEnabled && footerSideChat ? sideChatFromFooterIntent : undefined}
                   />
                 ) : null
               }

@@ -166,6 +166,8 @@ import {
 } from "./composer-text-attachment-delivery";
 import { registerLiveChatFileStager } from "./composer-file-attachment-delivery";
 import { buildForkTranscriptAttachment, createForkedChat } from "./fork-chat";
+import { markSideChatSeedSent, openSideChat as openSideChatFrom, sideChatHandoffFor, useSideChatSeed, warmSideChat as warmSideChatFrom, type SideChatSource } from "./side-chat";
+import { SideChatBranchBanner } from "./side-chat-banner";
 import { hasParentContext } from "./add-child-session";
 import { resolveComposerPlaceholder } from "./composer-placeholder";
 import {
@@ -2178,6 +2180,23 @@ function AgentChatBody({
     [chatId, chatThread],
   );
 
+  const openSideChat = useCallback(
+    (from: SideChatSource) => {
+      if (!chatThread) return;
+      openSideChatFrom(chatThread, from, {
+        publishChat: (chat) => dispatch({ type: "ADD_CHAT", chat }),
+      });
+    },
+    [chatThread, dispatch],
+  );
+  const warmSideChat = useCallback(
+    (from: SideChatSource) => {
+      if (chatThread) warmSideChatFrom(chatThread, from);
+    },
+    [chatThread],
+  );
+  const sideChatSeed = useSideChatSeed(chatId);
+
   /** Menu hover/focus pays the exact-key transcript read ahead of the click.
    * Preview errors stay silent; selecting the action is the point at which a
    * real read failure becomes user-visible. */
@@ -3490,6 +3509,9 @@ function AgentChatBody({
        *  handed to the local session. A failure after this is retried by its
        *  owner, so the caller must not send the same text again. */
       onCommitted?: () => void;
+      /** Called once the cloud outbox holds the message, without changing how
+       *  the send settles. */
+      onDurable?: () => void;
       /** The previous harness's conversation, prepended to the wire text only. */
       handoffContext?: string;
       /** Summary imports from prior chats, prepended as <from_previous_chat> blocks. */
@@ -3637,6 +3659,7 @@ function AgentChatBody({
       const releaseSubmittedComposer = () => {
         if (composerReleased) return;
         composerReleased = true;
+        extras?.onDurable?.();
         extras?.onCommitted?.();
         const unchanged = override === undefined && snapshot && isSubmittedComposerDocument(snapshot.json, serializeComposerState()?.json);
         if (unchanged) {
@@ -3895,7 +3918,16 @@ function AgentChatBody({
     try {
       // True once the message is handed to the session; every refusal returns
       // early, after saying why.
-      return (await runSend(override, extras, recordActivity)) === true;
+      const sideChatContext = await sideChatHandoffFor(chatId, folder);
+      const sent = (await runSend(
+        override,
+        sideChatContext && chatId
+          ? { ...extras, handoffContext: sideChatContext + (extras?.handoffContext ?? ""), onDurable: () => markSideChatSeedSent(chatId) }
+          : extras,
+        recordActivity,
+      )) === true;
+      if (sent && sideChatContext && chatId) markSideChatSeedSent(chatId);
+      return sent;
     } catch (error) {
       if (chatId && generation !== agentSessions.getSendGeneration(chatId)) return false;
       if (chatId && isCloudWorkspace(folder)) {
@@ -4475,6 +4507,8 @@ function AgentChatBody({
   });
   const forkToNewTabThroughRef = useLatestCallback(forkToNewTab);
   const warmForkToNewTabThroughRef = useLatestCallback(warmForkToNewTab);
+  const openSideChatThroughRef = useLatestCallback(openSideChat);
+  const warmSideChatThroughRef = useLatestCallback(warmSideChat);
   const signInThroughRef = useLatestCallback(handleSignIn);
   const chooseModelThroughRef = useLatestCallback(() => openModelPicker?.());
   const stopWorkflow = session.stopBackgroundTask;
@@ -4486,6 +4520,8 @@ function AgentChatBody({
       continueTurn: continueTurnThroughRef,
       forkToNewTab: forkToNewTabThroughRef,
       warmForkToNewTab: warmForkToNewTabThroughRef,
+      openSideChat: openSideChatThroughRef,
+      warmSideChat: warmSideChatThroughRef,
       signIn: signInThroughRef,
       chooseModel: chooseModelThroughRef,
       stopWorkflow,
@@ -4497,6 +4533,8 @@ function AgentChatBody({
       continueTurnThroughRef,
       forkToNewTabThroughRef,
       warmForkToNewTabThroughRef,
+      openSideChatThroughRef,
+      warmSideChatThroughRef,
       signInThroughRef,
       chooseModelThroughRef,
       stopWorkflow,
@@ -4712,7 +4750,9 @@ function AgentChatBody({
                   />
                 </ChatProvenance>
               )}
-            {hasParentContext(chatThread) && (
+            {sideChatSeed ? (
+              <SideChatBranchBanner seed={sideChatSeed} />
+            ) : hasParentContext(chatThread) && (
               <p className={TRANSCRIPT_STATUS_ROW_CLS} data-parent-context-banner="">
                 <GitBranch className="size-3.5 shrink-0" strokeWidth={1.5} aria-hidden="true" />
                 Includes context from parent
