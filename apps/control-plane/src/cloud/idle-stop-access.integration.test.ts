@@ -63,4 +63,45 @@ suite("the idle stop after the creator path loses access", () => {
     expect(await state(id)).toBe("stopping");
     expect(await prompt(id)).toBe("accepted");
   });
+
+  /** Running, last active `minutes` ago, with one prompt sent and never started. */
+  async function queued(fixture: ExecutionFixture, minutes: number) {
+    const id = fixture.workspace.id;
+    expect((await fixture.send()).status).toBe(201);
+    await pool.query(`UPDATE cloud_v2_workspaces SET state='running',worker_boot_id=$2,active_at=clock_timestamp()-$3*interval '1 minute' WHERE id=$1`,
+      [id, randomUUID(), minutes]);
+    expect(await prompt(id)).toBe("queued");
+    return id;
+  }
+  const outbox = async (id: string) => (await pool.query("SELECT state,terminal_at IS NOT NULL AS terminal,payload IS NOT NULL AS payload FROM cloud_v2_prompt_outbox WHERE workspace_id=$1", [id])).rows[0];
+
+  it("ends prompts never started once the idle stop is taken after access ended by the clock; nothing runs on reopen", async () => {
+    // A Pro window closing writes nothing, so only the stop ends them: fence_cloud_v2_prompts (0202) cancels
+    // every queued or inboxed prompt when a workspace starts stopping, as for any Stop.
+    f = await executionFixture(pool, { personal: true });
+    const id = await queued(f, 21);
+    await pool.query("UPDATE account_entitlements SET valid_from=clock_timestamp()-interval '1 day',valid_until=clock_timestamp()-interval '1 second' WHERE user_id=$1", [f.creator.id]);
+    expect(await prompt(id)).toBe("queued");
+    await f.cp.store.stopIdle(id, cutoff());
+    expect(await state(id)).toBe("stopping");
+    // Its payload is released with every terminal prompt's, seven days on.
+    expect(await outbox(id)).toEqual({ state: "cancelled", terminal: true, payload: true });
+    // Access back, the workspace opened on a new boot: nothing old runs, and the transcript shows it cancelled.
+    await pool.query("UPDATE account_entitlements SET valid_until=NULL WHERE user_id=$1", [f.creator.id]);
+    await pool.query("UPDATE cloud_v2_workspaces SET state='running' WHERE id=$1", [id]);
+    const token = await f.cp.store.rotateWorkerToken(id), boot = randomUUID();
+    await pool.query("UPDATE cloud_v2_workspaces SET worker_boot_id=$2 WHERE id=$1", [id, boot]);
+    expect((await f.cp.store.prompts.pull(token, boot)).prompts).toEqual([]);
+    const transcript = await f.call(`/v1/cloud-v2/workspaces/${id}/prompts?chatId=chat&after=0&includePayload=false`);
+    expect(transcript.status).toBe(200);
+    expect((await transcript.json()).items.map((row: { state: string }) => row.state)).toEqual(["cancelled"]);
+  });
+
+  it("leaves a queued prompt untouched while the workspace has access", async () => {
+    f = await executionFixture(pool);
+    const id = await queued(f, 21);
+    await f.cp.store.stopIdle(id, cutoff());
+    expect(await state(id)).toBe("running");
+    expect(await outbox(id)).toEqual({ state: "queued", terminal: false, payload: true });
+  });
 });
