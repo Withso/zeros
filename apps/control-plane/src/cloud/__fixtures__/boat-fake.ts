@@ -1,5 +1,6 @@
 // A stateful Boat for tests. It encodes only what we rely on Boat for; each
 // assumption is listed in BOAT_FAKE_ASSUMPTIONS and nothing here talks to Boat.
+import { createHash } from "node:crypto";
 import type { CloudV2CommandResult, CloudV2Compute } from "../boat.js";
 import { BoatForkRefusedError, BoatSnapshotExpiredError } from "../boat-client.js";
 import { CloudProviderError } from "../provider-error.js";
@@ -199,6 +200,15 @@ export class FakeBoat implements CloudV2Compute {
     }
     const scripted = await this.script?.(machine, command, input);
     if (scripted) return scripted;
+    // The ignored-file baseline (checkpoint.ts ignoredBaselineCommand): one file per checkout, named by its
+    // path, under the home's retention-baseline directory; an existing one is never replaced.
+    if (command.includes("zeros-baseline recorded")) {
+      for (const path of new Set(command.match(/\/home\/user\/(?!\.local\/)[A-Za-z0-9._/-]+/g) ?? [])) {
+        const file = `/home/user/.local/share/zeros/retention-baseline/${createHash("sha256").update(path).digest("hex")}`;
+        if (!machine.files.has(file)) machine.files.set(file, `baseline of ${path}`);
+      }
+      return { exitCode: 0, stdout: "zeros-baseline recorded\n", timedOut: false };
+    }
     if (command.includes("rev-parse HEAD"))
       return { exitCode: 0, stdout: `Cloning\nzeros-build-branch=main\n${"c".repeat(40)}\n`, timedOut: false };
     return { exitCode: 0, stdout: "", timedOut: false };
