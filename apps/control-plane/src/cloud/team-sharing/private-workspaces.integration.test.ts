@@ -87,6 +87,21 @@ database("a personal project's workspace on every team route", () => {
     expect((await pool.query("SELECT count(*)::int AS n FROM cloud_v2_reassignments WHERE workspace_id=$1", [f.own.id])).rows[0].n).toBe(0);
   });
 
+  it("archives a departed member's private workspace at once, lets nobody else in, and gives it back to them when re-added (retention S3)", async () => {
+    await pool.query("UPDATE cloud_v2_workspaces SET execution_mode='active' WHERE id=$1", [f.own.id]);
+    await withSystemTx(pool, tx => tx.query("DELETE FROM organization_members WHERE org_id=$1 AND user_id=$2", [f.organizationId, f.viewer.id]));
+    const row = async () => (await pool.query("SELECT creator_user_id, archive_reason, archived_at IS NOT NULL AS archived FROM cloud_v2_workspaces WHERE id=$1", [f.own.id])).rows[0];
+    expect(await row()).toEqual({ creator_user_id: null, archive_reason: "member_left", archived: true });
+    const path = `/v1/cloud-v2/workspaces/${f.own.id}`;
+    for (const user of [f.creator, f.admin, f.outsider, f.viewer])
+      for (const [route, method] of [[path, "GET"], [`${path}/keep`, "PUT"], [`${path}/keep`, "DELETE"], [`${path}/start`, "POST"]] as [string, string][])
+        expect([route, method, (await call(route, user, method, method === "POST" ? {} : undefined)).status]).toEqual([route, method, 404]);
+    // Their return gives it back to them alone (another person joining restores nothing: retention.integration.test.ts).
+    await withSystemTx(pool, tx => tx.query("INSERT INTO organization_members (org_id, user_id, role) VALUES ($1, $2, 'member')", [f.organizationId, f.viewer.id]));
+    expect(await row()).toEqual({ creator_user_id: f.viewer.id, archive_reason: "member_left", archived: true });
+    for (const user of [f.creator, f.admin, f.outsider]) expect((await call(path, user)).status).toBe(404);
+  });
+
   it("keeps it to its member under shared execution in every actor-access check, and lets nobody in once they leave", async () => {
     const allowed = async (userId: string, workspaceId: string) => (await withSystemTx(pool, tx => tx.query(
       `SELECT 1 FROM cloud_v2_workspaces w WHERE w.id=$2 AND ${cloudV2ActorAccess("$1")}`, [userId, workspaceId]))).rowCount === 1;
