@@ -627,7 +627,8 @@ describe("rehearsal --plan", () => {
       { release: { sourceSha: "a".repeat(40), workerSha256: "b".repeat(64) }, runtime: { found: false, actingUser: false, syncContext: false },
         projectsRead: "200", computer: "none" },
     ];
-    for (const facts of states) for (const line of preconditionLines(facts)) expect(safeLine(line), line).toBe(line);
+    // The lines come back through safeLine already: a line it refused would read "line withheld (unsafe)".
+    for (const facts of states) for (const line of preconditionLines(facts)) expect(line).not.toBe("line withheld (unsafe)");
     const lines = preconditionLines(states[0]!);
     expect(lines).toContain("  projects routes: not mounted (CLOUD_V2_READY_COPIES_ENABLED off)");
     expect(lines.join(" ")).toContain("CLOUD_V2_READY_COPIES_ENABLED=true, CLOUD_V2_PERSONAL_CLOUD_ENABLED=true, CLOUD_V2_RETENTION_ENABLED=true");
@@ -638,7 +639,7 @@ describe("rehearsal --plan", () => {
     const summary = await readAccount(alpha.api(), "owner", state.organizationId, "Withso");
     expect(alpha.writes).toEqual([]);
     expect(summary).toMatchObject({ admin: true, fixtureConnection: true, githubIdentity: true, connections: { organization: 1, personal: 0, logins: ["Withso"] } });
-    for (const line of accountLines(summary)) expect(safeLine(line)).toBe(line);
+    for (const line of accountLines(summary)) expect(line).not.toBe("line withheld (unsafe)");
     const switches = new Set(["projects", "retention"] as const), org = "organization" as const;
     expect(refusal("projects", summary, switches, org)).toBeNull();
     expect(refusal("retention", summary, new Set(["projects"] as const), org)).toBe("undeclared_retention");
@@ -667,6 +668,6 @@ describe("rehearsal --plan", () => {
     expect((await readAccount(alpha.api(), "9", state.organizationId, "Withso")).githubIdentity).toBe(false);
     for (const stage of ["provision", "setup", "projects", "personal", "retention", "submodules"] as StageName[])
       for (const owner of ["personal", "organization"] as const)
-        for (const line of writeLines(stage, "zr-<run>-", { one: R1 }, owner)) { expect(line).not.toBe("line withheld (unsafe)"); }
+        for (const line of writeLines(stage, "zr-<run>-", { one: R1, two: FIXTURE_TWO }, owner)) { expect(line).not.toBe("line withheld (unsafe)"); }
   });
 });

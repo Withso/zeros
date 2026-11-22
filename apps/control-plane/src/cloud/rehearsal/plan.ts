@@ -251,7 +251,7 @@ export function preconditionLines(facts: PreconditionFacts): string[] {
     "      named snapshot with no machine; base() reads only the organization's own build either way, so a build is always needed first",
     "    CLOUD_V2_CHECKPOINT_RETRY_ENABLED: nothing for retention; retention runs the checkpoint retry scan itself (lifecycle.ts: checkpointRetry || retention)",
     "    CLOUD_V2_ASYNC_CREATE_ENABLED: unset means on (creates return before their GitHub checks)",
-    "    CLOUD_V2_RETENTION_BACKUP_FORKS_PER_HOUR and CLOUD_V2_RETENTION_MAINTENANCE_PER_HOUR/_PER_DAY: defaults 20, 20 and 120",
+    "    CLOUD_V2_RETENTION_BACKUP_FORKS_PER_HOUR: default 20; CLOUD_V2_RETENTION_MAINTENANCE_PER_HOUR and _PER_DAY: defaults 20 and 120",
     "  set for the run, in one Railway change after no release is running (one redeploy):",
     "    CLOUD_V2_READY_COPIES_ENABLED=true, CLOUD_V2_PERSONAL_CLOUD_ENABLED=true, CLOUD_V2_RETENTION_ENABLED=true",
     "  while on, Alpha-wide: retention starts for every Alpha workspace (a dirty stop takes a backup fork after an hour, its object in R2);",
