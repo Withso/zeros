@@ -18,7 +18,9 @@ CREATE POLICY cloud_v2_backup_removals_system ON cloud_v2_backup_removals FOR AL
   USING (app_is_system()) WITH CHECK (app_is_system());
 
 -- A missed wake (a sleeping machine 12 days past its last stop) is alerted once per stop.
-ALTER TABLE cloud_v2_workspaces ADD COLUMN missed_wake_alerted_at timestamptz;
+-- machine_gone_at: a maintenance wake found the recorded machine gone (Boat confirmed it twice); what the archived
+-- document's `restores` reads, without a join to the wake records.
+ALTER TABLE cloud_v2_workspaces ADD COLUMN missed_wake_alerted_at timestamptz, ADD COLUMN machine_gone_at timestamptz;
 
 -- A personal project whose member left: its build secrets are deleted and its copy retired at once; the project
 -- waits, theirs again if they are re-added, and is deleted 60 days after the later of this stamp and retention's

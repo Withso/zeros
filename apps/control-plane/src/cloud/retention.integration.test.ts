@@ -1471,6 +1471,79 @@ d("cloud v2 retention", () => {
       }, 30_000);
     });
 
+    describe("restores: what opening an archived workspace brings back, as the open does", () => {
+      /** Archive, then let one wake run: it records Boat's answer (the machine there, or gone). */
+      const archiveAndWake = async (expired: boolean) => {
+        await store.requestLifecycle(id, user, "archive");
+        await pool.query(`UPDATE cloud_v2_workspaces SET stopped_at=stopped_at - interval '12 days 1 hour', archived_at=archived_at - interval '12 days',
+          retention_started_at=retention_started_at - interval '13 days' WHERE id=$1`, [id]);
+        if (expired) boat.machine(vm)!.expired = true;
+        await lifecycle().tick();
+      };
+      const open = async () => {
+        await store.requestLifecycle(id, user, "start");
+        for (let step = 0; step < 4; step++) {
+          await pool.query("UPDATE cloud_v2_workspaces SET next_attempt_at=NULL WHERE id=$1", [id]);
+          await lifecycle().tick();
+        }
+        return { machine: (await columns("boat_sandbox_id")).boat_sandbox_id as string, document: await store.get(id, user) };
+      };
+
+      it("all, and the open resumes the same machine: its machine is still there", async () => {
+        boat.write(vm, `${path("app")}/UNPUSHED`, "work");
+        await stop();
+        await store.requestLifecycle(id, user, "archive");
+        expect((await store.get(id, user)).restores).toBe("all");
+        const opened = await open();
+        expect(opened.machine).toBe(vm);
+        expect(opened.document).not.toHaveProperty("lostWork");
+      }, 30_000);
+
+      it("all, and the open restores the backup: a backup of this very stop holds everything", async () => {
+        boat.write(vm, `${path("app")}/UNPUSHED`, "work");
+        await stop();
+        await backup();
+        await archiveAndWake(true);
+        expect(await columns("machine_gone_at IS NOT NULL AS gone")).toEqual({ gone: true });
+        expect((await store.get(id, user)).restores).toBe("all");
+        const opened = await open();
+        expect(opened.machine).not.toBe(vm);
+        expect(boat.machine(opened.machine)!.files.get(`${path("app")}/UNPUSHED`)).toBe("only in the backup");
+        expect(opened.document).not.toHaveProperty("lostWork");
+      }, 30_000);
+
+      it("all, and the open rebuilds with nothing lost: the stop left nothing off GitHub", async () => {
+        await stop();
+        await archiveAndWake(true);
+        expect((await store.get(id, user)).restores).toBe("all");
+        const opened = await open();
+        expect(opened.machine).not.toBe(vm);
+        expect(opened.document).not.toHaveProperty("lostWork");
+      }, 30_000);
+
+      it("pushed, and the open rebuilds with the lost-work note: unpushed work was only on the machine, which is gone", async () => {
+        boat.write(vm, `${path("app")}/UNPUSHED`, "work");
+        await stop();
+        await archiveAndWake(true);
+        expect((await store.get(id, user)).restores).toBe("pushed");
+        const opened = await open();
+        expect(opened.machine).not.toBe(vm);
+        expect(opened.document.lostWork).toMatchObject({ restored: "none" });
+      }, 30_000);
+
+      it("pushed with only an earlier stop's backup, which lacks this stop's work; no field with the switch off", async () => {
+        boat.write(vm, `${path("app")}/UNPUSHED`, "work");
+        await stop();
+        await backup();
+        await pool.query("UPDATE cloud_v2_workspaces SET checkpoint_stop_generation=stop_generation - 1 WHERE id=$1", [id]);
+        await archiveAndWake(true);
+        expect((await store.get(id, user)).restores).toBe("pushed");
+        setCloudV2RetentionDocuments(false);
+        expect(await store.get(id, user)).not.toHaveProperty("restores");
+        setCloudV2RetentionDocuments(true);
+      }, 30_000);
+    });
+
     describe("a departed member's personal project", () => {
       async function personal(owner: string) {
         const project = randomUUID();

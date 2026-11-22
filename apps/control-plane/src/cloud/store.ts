@@ -138,6 +138,8 @@ export type CloudV2Workspace = {
   machineExpectedGoneAt?: { at: string; estimate: boolean };
   /** While archived with a backup, once retention applies: greatest(archive, retention's start) + 60 days. */
   backupRemovalAt?: string;
+  /** While archived: what opening it now would bring back, by the server's best knowledge (cloudV2Restores). */
+  restores?: "all" | "pushed";
 };
 
 /** What a checkpoint is compared by at the next stop: the fingerprint of what
@@ -232,6 +234,8 @@ export type CloudV2WorkspaceRow = {
   keep_set_at?: Date | null; archive_reason?: "manual" | "inactive" | "member_left" | null;
   stopped_at?: Date | null; machine_stopped_at?: Date | null; machine_data_expired_at?: Date | null;
   archive_wake_done_at?: Date | null; checkpoint_object?: string | null; retention_started_at?: Date | null;
+  backup_probe?: BackupProbe | null; backup_probe_generation?: string | null; stop_generation?: string; checkpoint_stop_generation?: string | null;
+  changed_since_stop_generation?: string | null; machine_gone_at?: Date | null;
 };
 type Row = CloudV2WorkspaceRow;
 
@@ -239,7 +243,8 @@ const WORKSPACE_COLUMNS_SQL = sql`id, org_id, creator_user_id, name, number, tit
   computer_build_id, error_code, active_at, archived_at, created_at, updated_at, source_pending, created_by_session_id, setup_status,
   agent_cost_usd, agent_cost_turns, agent_cost_estimated_turns, private_owner_user_id, project_id, checkout_path, folder,
   lost_work_restored, lost_work_since, keep_set_at, archive_reason, stopped_at, machine_stopped_at, machine_data_expired_at,
-  archive_wake_done_at, checkpoint_object, retention_started_at`;
+  archive_wake_done_at, checkpoint_object, retention_started_at, backup_probe, backup_probe_generation, stop_generation,
+  checkpoint_stop_generation, changed_since_stop_generation, machine_gone_at`;
 const COLUMNS = WORKSPACE_COLUMNS_SQL.text;
 export const CLOUD_V2_WORKSPACE_COLUMNS = COLUMNS.split(",").map(value => value.trim());
 
@@ -306,7 +311,7 @@ export function cloudV2LifecycleWorkspaceFromRow(row: LifecycleRow): CloudV2Life
     checkpoint, restorePending: row.restore_pending, restoreAttempt: row.restore_attempt, restoreCreate: restoreCreate(row.restore_create),
     stopGeneration: row.stop_generation, checkpointUploadUntil: uploadHorizon(row.checkpoint_uploads),
     checkpointRetryFork: checkpointFork(row.checkpoint_retry_fork),
-    ...(row.backup_probe && row.backup_probe_generation === row.stop_generation ? { stopProbe: row.backup_probe } : {}),
+    ...(cloudV2StopProbe(row) ? { stopProbe: cloudV2StopProbe(row)! } : {}),
     // Unverified unless this generation's stop ran the verified worker-off step: Boat's own stop,
     // a restore-pending stop and one from before retention never did.
     ...(row.worker_off_unverified_at || (row.backup_probe_generation !== undefined && row.backup_probe_generation !== row.stop_generation
@@ -390,7 +395,7 @@ const FINAL_BACKUP_PENDING = `(w.archived_at IS NOT NULL AND w.archived_at > clo
   AND NOT (w.checkpoint_retry_generation IS NOT DISTINCT FROM w.stop_generation AND w.checkpoint_retry_exhausted_at IS NOT NULL))`;
 /** Retention S3's archive fields. Boat removes a machine about 14 days after its last stop; an archived
  * workspace still owed its one wake has it 10 days later, so 24 days from now's last stop. */
-function archiveFields(row: Row): Pick<CloudV2Workspace, "archiveReason" | "machineExpectedGoneAt" | "backupRemovalAt"> {
+function archiveFields(row: Row): Pick<CloudV2Workspace, "archiveReason" | "machineExpectedGoneAt" | "backupRemovalAt" | "restores"> {
   if (!row.archived_at) return {};
   const lastStop = [row.machine_stopped_at, row.stopped_at].filter((at): at is Date => at instanceof Date)
     .reduce<Date | null>((latest, at) => !latest || at > latest ? at : latest, null);
@@ -404,7 +409,35 @@ function archiveFields(row: Row): Pick<CloudV2Workspace, "archiveReason" | "mach
     ...(row.archive_reason ? { archiveReason: row.archive_reason } : {}),
     ...(gone ? { machineExpectedGoneAt: gone } : {}),
     ...(removal ? { backupRemovalAt: removal.toISOString() } : {}),
+    restores: cloudV2Restores(row),
   };
+}
+
+/** The latest stop's probe as every restore decision reads it: the probe of this stop generation, and "clean" only
+ * while no maintenance wake has found the checkout changed since (S3), when it reads "unknown". The lifecycle's
+ * restore path (cleanRestore, unbacked, onlyOnMachine) and the document's `restores` both use this. */
+export function cloudV2StopProbe(row: { backup_probe?: BackupProbe | null; backup_probe_generation?: string | null; stop_generation?: string;
+  changed_since_stop_generation?: string | null }): BackupProbe | undefined {
+  if (!row.backup_probe || row.backup_probe_generation !== row.stop_generation) return undefined;
+  return row.backup_probe === "clean" && row.changed_since_stop_generation === row.stop_generation ? "unknown" : row.backup_probe;
+}
+
+/** What opening the workspace now would bring back, as S1's restore path decides it (tested against it):
+ * "all" when its machine is still there (resumed as it is), or a backup of this very stop holds everything (restored),
+ * or this stop left nothing off GitHub (rebuilt without loss); otherwise "pushed": it is rebuilt from GitHub and
+ * work never pushed is gone (the lostWork note). An earlier stop's backup alone is "pushed": it lacks this stop's work. */
+export function cloudV2Restores(row: Row, now = Date.now()): "all" | "pushed" {
+  if (row.checkpoint_object && row.checkpoint_stop_generation === row.stop_generation) return "all";
+  if (cloudV2StopProbe(row) === "clean") return "all";
+  const lastStop = [row.machine_stopped_at, row.stopped_at].filter((at): at is Date => at instanceof Date)
+    .reduce<Date | null>((latest, at) => !latest || at > latest ? at : latest, null);
+  const woken = row.archived_at instanceof Date && row.archive_wake_done_at instanceof Date && row.archive_wake_done_at >= row.archived_at;
+  // Boat's word on this machine, never an earlier one's: both are later than the stop they describe.
+  const after = (at: Date | null | undefined) => at instanceof Date && !!lastStop && at >= lastStop;
+  const gone = !row.boat_sandbox_id || !lastStop || after(row.machine_gone_at)
+    || (after(row.machine_data_expired_at) && row.machine_data_expired_at!.getTime() <= now)
+    || lastStop.getTime() + (woken ? 14 : 24) * DAY_MS <= now;
+  return gone ? "pushed" : "all";
 }
 export { workspace as cloudV2WorkspaceFromRow };
 
@@ -2044,6 +2077,7 @@ export class CloudV2Store {
           changed_since_stop_generation=CASE WHEN $6::boolean THEN stop_generation ELSE changed_since_stop_generation END,
           checkpoint_stop_generation=CASE WHEN $6::boolean AND checkpoint_stop_generation = stop_generation THEN NULL ELSE checkpoint_stop_generation END,
           machine_data_expired_at=coalesce($8::timestamptz, machine_data_expired_at),
+          machine_gone_at=CASE WHEN $4 = 'gone' THEN coalesce(machine_gone_at, clock_timestamp()) ELSE machine_gone_at END,
           worker_off_verified_generation=CASE WHEN $5::boolean THEN stop_generation ELSE worker_off_verified_generation END,
           worker_off_unverified_at=CASE WHEN $5::boolean THEN NULL WHEN $5::boolean IS FALSE THEN coalesce(worker_off_unverified_at, clock_timestamp())
             ELSE worker_off_unverified_at END
