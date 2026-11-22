@@ -693,13 +693,13 @@ d("cloud v2 ready copies", () => {
       expect(warnings).toContainEqual(expect.stringMatching(/recorded no ignored-file baseline \(exit 1\)/));
     });
 
-    it("keeps a forked rebuild's inherited baseline, and records afresh on a machine built from the base", async () => {
+    it("records afresh on every build: a rebuild forked from the previous copy drops that copy's baseline; the base never holds one", async () => {
       const computers = computersWith(), projects = new CloudProjects(pool);
       await liveBase(computers);
       await copyBuilder().tick();
       const first = await row(1);
       // A new build machine from the base starts without one: the base never held a project.
-      expect([...boat.machine(first.machineId!)!.files].filter(([path]) => path.startsWith(BASELINE))).toHaveLength(1);
+      expect(baselines(first.machineId!)).toHaveLength(1);
       expect([...(boat.snapshots.values())].every(files => [...files.keys()].every(path => !path.startsWith(BASELINE)))).toBe(true);
       // A saved setup forks the previous copy: its baseline comes with the disk and is not replaced.
       await projects.update(org, admin, zeros, { repositories: [{ repository: "withso/zeros", repositoryId: repositoryId("withso/zeros"),
@@ -708,7 +708,10 @@ d("cloud v2 ready copies", () => {
       await copyBuilder().tick();
       const second = await row(2);
       expect(second).toMatchObject({ state: "ready", builtFromBase: `copy:${first.id}` });
-      expect(baselines(second.machineId!)).toEqual(baselines(first.machineId!));
+      const [[firstPath, firstEntry]] = baselines(first.machineId!), recorded = baselines(second.machineId!);
+      expect(recorded).toHaveLength(1);
+      expect(recorded[0]![0]).toBe(firstPath);
+      expect(recorded[0]![1]).not.toBe(firstEntry);
     });
   });
 

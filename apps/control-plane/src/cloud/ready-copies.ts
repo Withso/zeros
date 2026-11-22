@@ -19,7 +19,7 @@ import { CLOUD_V2_LEASE_SECONDS, type CloudV2Compute } from "./boat.js";
 import { BoatCreateRejectedError, BoatForkRefusedError, BoatSnapshotExpiredError } from "./boat-client.js";
 import { CloudProviderError } from "./provider-error.js";
 import { asZeros, checkoutScript, shellQuote } from "./computer.js";
-import { ignoredBaselineCommand } from "./checkpoint.js";
+import { IGNORED_BASELINE_DIR, ignoredBaselineCommand } from "./checkpoint.js";
 import { installRuntimeCommand, type CloudV2Runtime } from "./runtime.js";
 import { cloudV2BoatSnapshotName, cloudV2SandboxName } from "./resource-names.js";
 import type { CloudSourceTarget } from "./source-authority.js";
@@ -716,9 +716,11 @@ export const readyCopyLayout = (project: { name: string; repositories: readonly 
 };
 const homePath = (checkoutFolder: string) => `/home/user/${checkoutFolder}`;
 /** The project's ignored-file baseline at the end of its build: one per checkout, at the paths a fork's
- * workspace has (checkpoint.ts ignoredBaselineCommand). `home` is the machine's; tests pass their own. */
+ * workspace has (checkpoint.ts ignoredBaselineCommand). Every build records afresh: a machine forked from the
+ * previous copy holds that copy's baseline, and on a build machine there is no person whose files it must keep
+ * out, so it is removed first (a failed removal records nothing). `home` is the machine's; tests pass their own. */
 export const readyCopyBaselineCommand = (project: { name: string; repositories: readonly { repository: string }[] }, home = CLOUD_V2_HOME_PATH) =>
-  ignoredBaselineCommand(readyCopyLayout(project).map(folder => `${home}/${folder}`), home);
+  `rm -rf -- ${shellQuote(`${home}/${IGNORED_BASELINE_DIR}`)} && ${ignoredBaselineCommand(readyCopyLayout(project).map(folder => `${home}/${folder}`), home)}`;
 
 export class CloudV2ReadyCopyBuilder {
   private closed = false;

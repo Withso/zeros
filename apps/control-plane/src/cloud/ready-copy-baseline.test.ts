@@ -6,7 +6,7 @@ import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSyn
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { backupProbeCommand, parseBackupProbe } from "./checkpoint.js";
+import { backupProbeCommand, ignoredBaselineCommand, parseBackupProbe } from "./checkpoint.js";
 import { READY_COPY_SCRUB_COMMAND, readyCopyBaselineCommand, readyCopyLayout } from "./ready-copies.js";
 
 const roots: string[] = [];
@@ -42,7 +42,7 @@ function built() {
   const run = (name: string, command: string) => spawnSync("bash", ["-c", `eval "$1"`, name, command], { env, encoding: "utf8" });
   const probe = () => { const result = run("probe", backupProbeCommand(checkouts, home)); expect(result.status).toBe(0); return parseBackupProbe(result.stdout); };
   const baselines = () => { const dir = join(home, ".local/share/zeros/retention-baseline"); return readdirSync(dir).sort().map(name => readFileSync(join(dir, name), "utf8")); };
-  return { root, home, checkouts, write, run, probe, baselines };
+  return { root, home, env, checkouts, write, run, probe, baselines };
 }
 
 describe("a project build's ignored-file baseline", () => {
@@ -78,14 +78,42 @@ describe("a project build's ignored-file baseline", () => {
     expect(b.probe()).toBe("dirty");
   });
 
-  it("is not replaced by a later build on a machine that already has one", () => {
+  it("is recorded afresh by a rebuild forked from the previous copy, whose setup now leaves other files", () => {
     const b = built();
     b.run("baseline", readyCopyBaselineCommand(project, b.home));
     const first = b.baselines();
-    // A rebuild of the project forks the previous copy: its setup leaves other files, and the build records again.
-    b.write(join(b.checkouts[0]!, "build.log"), "made by the next setup\n");
+    // The rebuild forks the previous copy's disk, baseline included; its changed setup leaves another ignored file.
+    rmSync(join(b.checkouts[0]!, "build.log"));
+    b.write(join(b.checkouts[0]!, "setup.log"), "made by the changed setup\n");
     expect(b.run("baseline", readyCopyBaselineCommand(project, b.home)).stdout).toBe("zeros-baseline recorded\n");
-    expect(b.baselines()).toEqual(first);
+    const second = b.baselines();
+    expect(second).toHaveLength(2);
+    expect(second).not.toEqual(first);
+    expect(second.some(entry => entry.includes("setup.log"))).toBe(true);
+    expect(second.some(entry => entry.includes("build.log") && entry.includes(b.checkouts[0]!))).toBe(false);
+    // A fork of the rebuild probes clean, and dirty once the new file changes.
+    expect(b.probe()).toBe("clean");
+    b.write(join(b.checkouts[0]!, "setup.log"), "edited in the workspace\n");
     expect(b.probe()).toBe("dirty");
+  });
+
+  it("records nothing when the old baseline cannot be removed, so the build only warns", () => {
+    const b = built();
+    b.run("baseline", readyCopyBaselineCommand(project, b.home));
+    const first = b.baselines();
+    // An rm that fails (a shell function takes precedence over the PATH).
+    const result = spawnSync("bash", ["-c", `rm() { return 1; }; eval "$1"`, "baseline", readyCopyBaselineCommand(project, b.home)], { env: b.env, encoding: "utf8" });
+    expect(result.status).not.toBe(0);
+    expect(result.stdout).not.toContain("zeros-baseline recorded");
+    expect(b.baselines()).toEqual(first);
+  });
+
+  it("leaves a workspace's own call unchanged: ignoredBaselineCommand never replaces an existing baseline", () => {
+    const b = built();
+    b.run("baseline", ignoredBaselineCommand(b.checkouts, b.home));
+    const first = b.baselines();
+    b.write(join(b.checkouts[0]!, ".env.local"), "MINE=1\n");
+    b.run("baseline", ignoredBaselineCommand(b.checkouts, b.home));
+    expect(b.baselines()).toEqual(first);
   });
 });
