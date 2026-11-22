@@ -27,6 +27,12 @@ export function descendants(table, roots) {
   return [...found.values()];
 }
 
+/** A shell (or timeout) whose command line only names the run's folder: whoever started the run, never the app's
+ * (the app's own shells are found as its descendants). The run's stub login shell is the app's. */
+export function isLauncherCommand(command, root) {
+  return /^(?:\S*\/)?(?:ba|z|da|k)?sh(?:\s|$)|^(?:\S*\/)?timeout\s/.test(command) && !command.includes(`${root}/bin/login-shell`);
+}
+
 /** Processes that belong to this run: below its roots, or naming its folder (a child that was reparented). */
 export async function runProcesses(roots, root) {
   const table = await processTable();
@@ -34,9 +40,7 @@ export async function runProcesses(roots, root) {
   const parents = new Map(table.map(row => [row.pid, row.ppid])), ancestors = new Set();
   for (let pid = process.pid; pid && !ancestors.has(pid); pid = parents.get(pid) ?? 0) ancestors.add(pid);
   const own = new Map(descendants(table, roots.filter(Boolean)).map(row => [row.pid, row]));
-  // A shell (or timeout) whose command line only names the folder is whoever started this run, never the app's.
-  const launcher = (command) => /^(?:\S*\/)?(?:ba|z|da|k)?sh(?:\s|$)|^(?:\S*\/)?timeout\s/.test(command) && !command.includes(`${root}/bin/login-shell`);
-  for (const row of table) if (root && row.command.includes(root) && !own.has(row.pid) && !launcher(row.command)) own.set(row.pid, row);
+  for (const row of table) if (root && row.command.includes(root) && !own.has(row.pid) && !isLauncherCommand(row.command, root)) own.set(row.pid, row);
   for (const pid of ancestors) own.delete(pid);
   return [...own.values()];
 }
