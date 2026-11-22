@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { otherRepositories, workerRepositories, workspaceTokenSource, type WorkerRepositoryConfig } from "./workspace-repositories.js";
 import { repositorySetupReports } from "./workspace-repository-setup.js";
+import { resolveWorkspaceMcpServers } from "./workspace-repository-mcp.js";
 import type { CloudWorkspaceEnvironment } from "./environment-contract.js";
 import { workspaceCheckoutPath } from "./workspace-layout.js";
 import { readyCopyRestoreSource } from "./retention-restore-source.js";
@@ -282,8 +283,9 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
         const workspace = cloudV2WorkspaceFromRow(row);
         const gitIdentity = await storedGitIdentity(tx, { organizationId: context.org_id, userId: context.user_id! });
         const environment = context.kind === "client" ? undefined : await environments.resolveExecution(workspace, context.user_id!, context.id, tx);
-        const mcpServers = context.kind === "turn" && mcp ? await mcp.store.resolve(context.org_id, context.user_id!, workspace.repository,
-          await github.identities.primary(workspace, tx), tx) : undefined;
+        // A workspace of several repositories: each repository's servers, together.
+        const mcpServers = context.kind === "turn" && mcp ? await resolveWorkspaceMcpServers(mcp.store, tx, workspace, context.user_id!,
+          await github.identities.primary(workspace, tx), line => console.warn(line)) : undefined;
         await check(tx);
         return { ...(environment ? { environment } : {}), ...(mcpServers ? { mcpServers } : {}), gitIdentity };
       };
@@ -363,7 +365,7 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
       selectedLogins: await logins.all(workspace.creatorUserId, workspace.organizationId, tx),
       baseCommit: await store.baseCommit(workspace.id, tx),
       environment: await environments.resolve(workspace, tx),
-      mcpServers: mcp ? await mcp.store.resolve(workspace.organizationId, workspace.creatorUserId, workspace.repository, repositoryBinding, tx) : undefined,
+      mcpServers: mcp ? await resolveWorkspaceMcpServers(mcp.store, tx, workspace, workspace.creatorUserId, repositoryBinding, line => console.warn(line)) : undefined,
     }), { consistentRead: true });
     const agents = await cloudV2AgentConfig(selectedLogins, proxyBase, proxy);
     const gitIdentity = await access.gitIdentity();
