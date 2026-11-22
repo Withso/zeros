@@ -299,13 +299,17 @@ export function ConversationPaneLayout({
 
   // A closed chat may be previewed without reopening it or changing its
   // durable archive flag. Empty history never manufactures an Untitled chat.
+  // While a side chat tab has focus, the column keeps the chat it last showed.
+  const [columnChatId, setColumnChatId] = useState(activeChatId);
+  const activeIsHosted = activeChatId !== null && hostedChatIds.has(activeChatId);
+  if (!activeIsHosted && columnChatId !== activeChatId) setColumnChatId(activeChatId);
   const selectedChatId = readOnly
     ? ((
         allChats.find((chat) => chat.id === activeChatId) ??
         allChats.find((chat) => !chat.archived) ??
         allChats[0]
       )?.id ?? null)
-    : activeChatId;
+    : activeIsHosted ? columnChatId : activeChatId;
 
   const visibleChats = useMemo(
     () =>
