@@ -130,8 +130,9 @@ export type CloudV2Workspace = {
   /** Retention: a lost VM came back without the work of the stop at `stoppedAt`: nothing of it
    * (rebuilt from GitHub) or an earlier backup instead. Until dismissed or the next backup. */
   lostWork?: { restored: "none" | "earlier"; stoppedAt: string };
-  /** Retention S3: exempt from automatic archive and from backup removal. Always present from this release. */
-  keep: boolean;
+  /** Retention S3: exempt from automatic archive and from backup removal. The serializer always sends it from
+   * this release; optional in the type so documents and fixtures built elsewhere stay valid. */
+  keep?: boolean;
   /** Why it is archived; only while archivedAt is set. */
   archiveReason?: "manual" | "inactive" | "member_left";
   /** While archived and its machine is recorded: when Boat removes the machine. `estimate` unless Boat said so. */
