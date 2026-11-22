@@ -27,6 +27,16 @@ describe("Connected Macs", () => {
     expect(render()).not.toContain("Shared Git:");
   });
 
+  it("says once, in place of every sync switch, that a project with several repositories cannot sync to a Mac yet", async () => {
+    const { SEVERAL_REPOSITORIES_SYNC_UNAVAILABLE } = await import("../conversation/cloud-workspace-details");
+    const sync = { busy: false, onEnable: () => {}, onStop: () => {}, onChoose: () => {}, onOpenTerminal: () => {}, onReveal: () => {}, onCopyPath: () => {}, status: null };
+    const connected = [{ ...macs[0]!, state: "connected" as const }, macs[1]!];
+    const html = render({ macs: connected, sync, onSetWanted: () => {}, syncUnavailable: SEVERAL_REPOSITORIES_SYNC_UNAVAILABLE });
+    expect(text(html).filter(line => line === "Syncing to this Mac is not available for projects with several repositories yet.")).toHaveLength(1);
+    expect(html).not.toContain("Sync to a local directory");
+    expect(render({ macs: connected, sync, onSetWanted: () => {} })).toContain("Sync to a local directory");
+  });
+
   it("lists this person's Macs with This Mac, their state and one action each", () => {
     // Connect is issued by that Mac itself, so only This Mac offers it.
     expect(text(render())).toEqual(["Connected Macs", "Alex's MacBook Pro", "This Mac", "Not connected", "Connect",
