@@ -64,7 +64,7 @@ export const projectRepositoryLimit = () =>
 export const projectNameTaken = () => new HttpError(409, "project_name_taken", "A project with this name already exists.");
 const projectNotFound = () => new HttpError(404, "not_found", "Project not found");
 const repositoryUnreachable = (repository: string) =>
-  new HttpError(409, "organization_connection_required", `Connect ${owner(repository)} on GitHub for the organization to use ${repository}.`);
+  new HttpError(409, "organization_connection_required", `Connect ${owner(repository)} on GitHub for projects to use ${repository}.`);
 
 /** What changed in a project's repositories, so only that project's copy is rebuilt. */
 export type CloudProjectChange = "project_created" | "repositories_changed" | "setup_changed" | "branch_changed" | null;

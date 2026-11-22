@@ -15,7 +15,8 @@ export function personalCloudOrganization(me: Me | null | undefined): Organizati
   if (cached) return cached;
   const offer = me.personalCloud;
   const organization: OrganizationSummary = Object.freeze({
-    id: offer.organizationId,
+    // Cloud keys and rows carry lower-case ids; compare one way everywhere.
+    id: offer.organizationId.toLowerCase(),
     slug: offer.slug,
     name: "Personal",
     logo: null,

@@ -648,6 +648,8 @@ function ActiveDispatcherPage({
     dispatch({ type: "SET_ACTIVE_PAGE", page: "settings" });
   };
   const auth = useContext(AuthContext);
+  // Projects belong to the cloud owner: the organization, or Personal's own cloud.
+  const projectOwner = cloud.cloudOrganization ?? activeOrganization;
   const tray = unified ? createTrayState({
     notice: computerCreateNotice?.owner === cloud.computerOwner && cloud.computerOwner ? computerCreateNotice.message : null,
     reason: placementReason,
@@ -684,8 +686,8 @@ function ActiveDispatcherPage({
             Pick a repository and describe a task.
           </p>
 
-          {projectDialog === "new" && cloud.projects && activeOrganization && (
-            <NewProjectDialog organization={activeOrganization} userKey={cloud.githubLevels.key} connections={cloud.githubLevels.connections}
+          {projectDialog === "new" && cloud.projects && projectOwner && (
+            <NewProjectDialog organization={projectOwner} userKey={cloud.githubLevels.key} connections={cloud.githubLevels.connections}
               projects={cloud.projects} active={active} onClose={() => setProjectDialog(null)}
               onCreated={created => {
                 setProjectDialog(null);
@@ -718,7 +720,8 @@ function ActiveDispatcherPage({
               projects={cloud.projects}
               selected={cloud.project}
               rememberedId={cloud.rememberedProjectId}
-              organizationName={activeOrganization?.name ?? "Organization"}
+              organizationName={projectOwner?.name ?? "Organization"}
+              personal={projectOwner?.isPersonal === true}
               active={active}
               open={projectMenuOpen}
               onOpenChange={setProjectMenuOpen}

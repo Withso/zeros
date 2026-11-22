@@ -123,11 +123,11 @@ export function filterRowsForOrganization<T extends OrganizationOwned>(
     ? new Set(getKnownPersonalOrganizationIds())
     : null;
   // Personal's cloud rows: only the signed-in account's own Personal cloud, never a known earlier Personal id.
-  const personalCloud = organization.isPersonal ? organization.cloudOrganization?.id ?? null : null;
+  const personalCloud = organization.isPersonal ? organization.cloudOrganization?.id.toLowerCase() ?? null : null;
   const filtered = rows.filter((row) =>
     organization.isPersonal
       ? row.placement === "cloud"
-        ? personalCloud !== null && row.organizationId === personalCloud
+        ? personalCloud !== null && row.organizationId?.toLowerCase() === personalCloud
         : row.organizationId == null ||
           row.organizationId === organization.id ||
           personalIds!.has(row.organizationId!)

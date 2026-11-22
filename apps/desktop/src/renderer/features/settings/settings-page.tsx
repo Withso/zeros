@@ -886,20 +886,20 @@ function ScopedSettingsPage({ owner }: { owner: string }) {
                     onOpenEnvironment={() => setActive(userSelection("environment"))} />
                 </div>
               )}
-              {currentCloudProject && organization && githubLevels.projects && (
+              {currentCloudProject && cloudOrganization && githubLevels.projects && (
                 <div className="flex flex-col gap-8">
                   <header className="flex min-w-0 flex-col gap-1">
                     <h1 className={PAGE_HEADING_CLS}>{currentCloudProject.name}</h1>
-                    <p className="text-fg2 m-0 truncate text-xs leading-4.5">{cloudProjectSubtitle(currentCloudProject, organization.name)}</p>
+                    <p className="text-fg2 m-0 truncate text-xs leading-4.5">{cloudProjectSubtitle(currentCloudProject, cloudOrganization.name, cloudOrganization.isPersonal)}</p>
                   </header>
-                  <CloudProjectPage key={currentCloudProject.id} project={currentCloudProject} organization={organization} userKey={githubLevels.key}
+                  <CloudProjectPage key={currentCloudProject.id} project={currentCloudProject} organization={cloudOrganization} userKey={githubLevels.key}
                     connections={githubLevels.connections} limits={githubLevels.projects.limits} localProjects={projects} active={pageActive}
                     onChanged={next => { if (next) patchCloudProject(githubLevels.key, next); githubLevels.refresh(); }}
                     onOpenFolder={folder => setActive(repoSelection(folder.id, REPO_OVERVIEW))} />
                 </div>
               )}
-              {newProject && organization && githubLevels.projects && (
-                <NewProjectDialog organization={organization} userKey={githubLevels.key} connections={githubLevels.connections}
+              {newProject && cloudOrganization && githubLevels.projects && (
+                <NewProjectDialog organization={cloudOrganization} userKey={githubLevels.key} connections={githubLevels.connections}
                   projects={githubLevels.projects} active={pageActive} onClose={() => setNewProject(false)}
                   onCreated={created => { setNewProject(false); patchCloudProject(githubLevels.key, created); githubLevels.refresh(); setActive(`project:cloud:${created.id}`); }} />
               )}
@@ -1416,17 +1416,20 @@ function IntegrationsPanel({ surfaceActive = true, unified = false }: { surfaceA
     const canManage = organization?.role === "owner" || organization?.role === "admin";
     return <div className="flex flex-col gap-8">
       <GitHubSection surfaceActive={surfaceActive} title={<PlaceLabel place="mac" />} />
-      {cloud && <CloudGithubSection key={`${me!.user.id}:${organizationId}`}
+      {cloud && <CloudGithubSection key={`${me!.user.id}:${organizationId}`} personal={!!organization?.isPersonal}
         userId={me!.user.id} organizationId={organizationId!} surfaceActive={surfaceActive} title={<PlaceLabel place="cloud" />} />}
       {/* A one-person organization shows both GitHub levels here, as one page. */}
       {cloud && levels.connections?.solo && (
         <GithubConnectionsSection userId={me!.user.id} organizationId={organizationId!} level="organization" canManage={canManage} active={surfaceActive}
+          personal={!!organization?.isPersonal}
           title={organization?.isPersonal ? "Projects" : `Shared with ${organization?.name ?? "the organization"}`}
           description={organization?.isPersonal ? "Your cloud projects pick their repositories from these." : "Organization projects pick their repositories from these."} />
       )}
       {cloud && levels.connections && (
         <GithubConnectionsSection userId={me!.user.id} organizationId={organizationId!} level="personal" canManage active={surfaceActive}
-          title="Only you" description="Your own GitHub accounts. Projects only you use pick from these; nobody else sees them, admins included." />
+          personal={!!organization?.isPersonal}
+          title="Only you" description={organization?.isPersonal ? "Your own GitHub accounts, for projects only you use."
+            : "Your own GitHub accounts. Projects only you use pick from these; nobody else sees them, admins included."} />
       )}
     </div>;
   }

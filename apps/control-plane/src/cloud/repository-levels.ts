@@ -34,7 +34,7 @@ const installation = (row: InstallationRow, userId: string): CloudGithubInstalla
 const owner = (repository: string) => repository.split("/")[0]!.toLowerCase();
 
 export const organizationConnectionRequired = (account: string) =>
-  new HttpError(409, "organization_connection_required", `Connect ${account} on GitHub for the organization first.`);
+  new HttpError(409, "organization_connection_required", `Connect ${account} on GitHub for projects first.`);
 export const privateWorkspaceRefused = () =>
   new HttpError(409, "private_workspace", "Workspaces of a project only you can use can't be shared or reassigned.");
 

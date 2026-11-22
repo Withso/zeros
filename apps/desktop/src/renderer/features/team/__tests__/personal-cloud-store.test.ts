@@ -70,6 +70,16 @@ describe("Personal cloud under the Personal entry", () => {
     expect(getActiveOrganizationSnapshot()).toBe(active());
   });
 
+  it("compares the server's id without regard to case: rows, projects and the active cloud id", () => {
+    acceptOrganizationSnapshot(account("ada", A_PERSONAL.toUpperCase(), "pro"));
+    expect(getActiveCloudOrganizationIdSnapshot()).toBe(A_PERSONAL);
+    const upper = { ...cloudRow(A_PERSONAL), organizationId: A_PERSONAL.toUpperCase() };
+    expect(filterRowsForOrganization([localRow, cloudRow(A_PERSONAL), upper, cloudRow(B_PERSONAL)], active()).map(row => row.organizationId))
+      .toEqual([null, A_PERSONAL, A_PERSONAL.toUpperCase()]);
+    expect(filterProjectsForOrganization([{ repoRoot: `cloud://${A_PERSONAL.toUpperCase()}/dddddddd-dddd-4ddd-8ddd-dddddddddddd` }, project(B_PERSONAL)], active()))
+      .toHaveLength(1);
+  });
+
   it("lists the rows without Pro but refuses Create with the one free-seat sentence", () => {
     acceptOrganizationSnapshot(account("ada", A_PERSONAL, "free"));
     expect(filterRowsForOrganization(rows(), active()).map(row => row.path)).toContain(cloudRow(A_PERSONAL).path);
