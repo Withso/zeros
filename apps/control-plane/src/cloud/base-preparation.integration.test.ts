@@ -118,6 +118,10 @@ d("ready copies: a safe switch-on", () => {
   } as unknown as CloudV2RouteDeps);
   const create = (computers: CloudV2Computers, user: string, body: { repository?: string; projectId?: string }) =>
     operations(computers).create(user, { organizationId: org, ...body }, { document: workspace => workspace as never, receiptDocument: workspace => workspace as never });
+  const snapshotOfBuild = async (id: string) => {
+    const stored = (await pool.query<{ snapshot_id: string }>("SELECT snapshot_id FROM cloud_v2_computer_builds WHERE id=$1", [id])).rows[0]!.snapshot_id;
+    return stored.split("@")[0]!;
+  };
   const workspaceRow = async (id: string) => (await pool.query<{ project_id: string | null; waiting_for_base_at: Date | null; computer_build_id: string; state: string }>(
     "SELECT project_id, waiting_for_base_at, computer_build_id, state FROM cloud_v2_workspaces WHERE id=$1", [id])).rows[0]!;
   const outcomeOf = async (id: string): Promise<Outcome> => {
@@ -201,5 +205,295 @@ d("ready copies: a safe switch-on", () => {
     await pool.query("UPDATE account_entitlements SET status='cancelled' WHERE user_id=$1", [admin]);
     await builder(computers).tick();
     expect((await pool.query("SELECT count(*)::int AS n FROM cloud_v2_computer_builds WHERE org_id=$1", [personal])).rows[0].n).toBe(0);
+  });
+
+  const lifecycle = () => new CloudV2Lifecycle({ store, compute: boat, runtime,
+    publicKeys: [generateKeyPairSync("ed25519").publicKey.export({ type: "spki", format: "pem" }).toString()],
+    sealPortToken: () => ({ encrypted: true }), stopWorker: async () => true, bootEnv: () => ({}),
+    sandboxName: () => `zeros-fixture-${randomUUID()}`, sleep: async () => {}, now: () => clock });
+  const due = (id: string) => pool.query("UPDATE cloud_v2_workspaces SET next_attempt_at=clock_timestamp() WHERE id=$1", [id]);
+  const creates = () => boat.calls.filter(call => call.op === "create").map(call => call.args[0] as { from?: string; name: string });
+  /** A project workspace created while the organization's base is being prepared (no shared base). */
+  async function waiting(installScript: string | null = null) {
+    if (installScript) await pool.query("INSERT INTO cloud_v2_computers (org_id, recipe_revision, install_script) VALUES ($1, 1, $2)", [org, installScript]);
+    const projectId = await project();
+    const computers = computersWith();
+    const created = await create(computers, member, { projectId });
+    const id = (created.response as unknown as { id: string }).id;
+    expect(await outcomeOf(id)).toBe("waits");
+    return { computers, id, buildId: (await workspaceRow(id)).computer_build_id };
+  }
+
+  describe("a workspace waiting for its base", () => {
+    it("waits while the base is prepared, then boots from it, its boot deadline counted from when the base went live", async () => {
+      const { computers, id, buildId } = await waiting();
+      // Created long ago as far as the deadline is concerned: still waits, never times out while its base is coming.
+      await pool.query("UPDATE cloud_v2_workspaces SET created_at=clock_timestamp()-interval '20 minutes' WHERE id=$1", [id]);
+      await lifecycle().tick();
+      expect(creates()).toEqual([]);
+      expect(await workspaceRow(id)).toMatchObject({ state: "creating", computer_build_id: buildId });
+      expect((await store.get(id, member)).preparing).toBe("computer");
+      await builder(computers).tick();
+      const base = (await pool.query("SELECT snapshot_id FROM cloud_v2_computer_builds WHERE id=$1", [buildId])).rows[0].snapshot_id as string;
+      await due(id);
+      await lifecycle().tick();
+      expect(creates().at(-1)).toMatchObject({ from: base });
+      expect((await workspaceRow(id)).waiting_for_base_at).toBeNull();
+      expect((await store.get(id, member)).preparing).toBeUndefined();
+    });
+
+    it("moves to a newer live base when the one it waited for fails, in one statement, and fails plainly when there is none", async () => {
+      const first = await waiting();
+      await pool.query("UPDATE cloud_v2_computer_builds SET state='failed', error_code='computer_install_script_failed', finished_at=clock_timestamp() WHERE id=$1", [first.buildId]);
+      await lifecycle().tick();
+      expect(await workspaceRow(first.id)).toMatchObject({ state: "failed" });
+      expect((await pool.query("SELECT error_code FROM cloud_v2_workspaces WHERE id=$1", [first.id])).rows[0].error_code).toBe("cloud_computer_preparation_failed");
+      // In another organization, a create waits on a base that is then cancelled; an admin's build goes live meanwhile.
+      org = await organization();
+      const computers = computersWith();
+      const second = await create(computers, member, { projectId: await project() });
+      const secondId = (second.response as unknown as { id: string }).id, waitedOn = (await workspaceRow(secondId)).computer_build_id;
+      await pool.query("UPDATE cloud_v2_computer_builds SET state='cancelled', finished_at=clock_timestamp() WHERE id=$1", [waitedOn]);
+      const manual = await computers.enqueue(org, admin, { repositories: [] });
+      await builder(computers).tick();
+      expect((await computers.overview(org)).activeBuildId).toBe(manual.id);
+      await due(secondId);
+      await lifecycle().tick();
+      expect((await workspaceRow(secondId)).computer_build_id).toBe(manual.id);
+      await due(secondId);
+      await lifecycle().tick();
+      expect(creates().at(-1)?.from).toBeTruthy();
+      expect((await pool.query("SELECT count(*)::int AS n FROM cloud_v2_workspaces w JOIN cloud_v2_computer_builds b ON b.id=w.computer_build_id WHERE w.state='creating' AND b.state IN ('failed','cancelled')")).rows[0].n).toBe(0);
+    });
+
+    it("lets stop, archive and delete end the wait cleanly: stop changes nothing, archive is refused as for any create, delete deletes", async () => {
+      const { computers, id } = await waiting();
+      expect((await store.requestLifecycle(id, member, "stop")).moved).toBe(false);
+      await expect(store.requestLifecycle(id, member, "archive")).rejects.toMatchObject({ code: "workspace_unavailable" });
+      expect((await workspaceRow(id)).state).toBe("creating");
+      const other = (await create(computers, member, { projectId: (await pool.query("SELECT id FROM cloud_projects WHERE org_id=$1 LIMIT 1", [org])).rows[0].id })).response as unknown as { id: string };
+      await store.manage(other.id, "delete", async () => {});
+      await lifecycle().tick();
+      expect((await workspaceRow(other.id)).state).toBe("deleted");
+      // The stopped one boots once its base is live; nothing is left creating on a build that will never be live.
+      await builder(computers).tick();
+      await due(id);
+      await lifecycle().tick();
+      expect(creates()).toHaveLength(2);
+      expect((await pool.query("SELECT count(*)::int AS n FROM cloud_v2_workspaces w JOIN cloud_v2_computer_builds b ON b.id=w.computer_build_id WHERE w.state='creating' AND b.state<>'succeeded'")).rows[0].n).toBe(0);
+    });
+  });
+
+  describe("the sweep", () => {
+    const automatic = async () => (await pool.query("SELECT org_id, state FROM cloud_v2_computer_builds WHERE automatic AND NOT base_shared ORDER BY created_at")).rows;
+    const tickAt = async (computers: CloudV2Computers, at: number) => { clock = at; await builder(computers).tick(); };
+
+    it("starts machines for automatic bases within the hourly and daily budget, and a waiting create always goes first", async () => {
+      const orgs = [org];
+      for (let index = 0; index < 4; index++) orgs.push(await organization());
+      for (const id of orgs) await project(["withso/zeros"], { at: id });
+      const computers = computersWith({ budget: { perHour: 2, perDay: 3 } });
+      await tickAt(computers, Date.now());
+      expect(await automatic()).toHaveLength(2);
+      await tickAt(computers, clock + 61_000);
+      expect((await automatic()).map(row => row.state)).toEqual(["succeeded", "succeeded"]);
+      expect(await automatic()).toHaveLength(2);
+      // An hour on: the hourly budget has room again, the daily one for one more.
+      await pool.query("UPDATE cloud_v2_computer_builds SET started_at=started_at-interval '2 hours', created_at=created_at-interval '2 hours' WHERE automatic");
+      await tickAt(computers, clock + 61_000);
+      await tickAt(computers, clock + 61_000);
+      expect(await automatic()).toHaveLength(3);
+      await tickAt(computers, clock + 61_000);
+      expect(await automatic()).toHaveLength(3);
+      // Budget spent for the day: a create in an organization with no base still gets its machine, first.
+      const waitingOrg = (await pool.query<{ id: string }>(
+        "SELECT o.id FROM organizations o WHERE o.id = ANY($1::uuid[]) AND NOT EXISTS (SELECT 1 FROM cloud_v2_computer_builds b WHERE b.org_id=o.id) LIMIT 1", [orgs])).rows[0]!.id;
+      org = waitingOrg;
+      const created = await create(computers, admin, { projectId: (await pool.query("SELECT id FROM cloud_projects WHERE org_id=$1", [waitingOrg])).rows[0].id });
+      const id = (created.response as unknown as { id: string }).id;
+      await tickAt(computers, clock + 61_000);
+      expect((await pool.query("SELECT b.state FROM cloud_v2_workspaces w JOIN cloud_v2_computer_builds b ON b.id=w.computer_build_id WHERE w.id=$1", [id])).rows[0].state).toBe("succeeded");
+    });
+
+    it("gives a base only to organizations with cloud and some use, never a Personal one, and the shared base to any number at no machine", async () => {
+      const without = await organization({ cloud: false }); await project(["withso/zeros"], { at: without });
+      const unused = await organization();
+      const old = await organization();
+      await pool.query(`INSERT INTO cloud_v2_workspaces (id, org_id, creator_user_id, name, repository, branch, base_branch, state, created_at)
+        VALUES ($1,$2,$3,'w','withso/zeros','b','main','deleted', clock_timestamp()-interval '40 days')`, [randomUUID(), old, admin]);
+      configureCloudPersonal(pool, true);
+      const personal = await organization({ personal: true }); await project(["withso/zeros"], { at: personal });
+      const used: string[] = [org];
+      await project();
+      for (let index = 0; index < 29; index++) { const id = await organization(); used.push(id); await project(["withso/zeros"], { at: id }); }
+      boat.snapshots.set(SHARED, new Map());
+      const computers = computersWith({ shared: true, budget: { perHour: 1, perDay: 1 } });
+      await tickAt(computers, Date.now());
+      await tickAt(computers, clock + 61_000);
+      const based = new Set((await pool.query<{ org_id: string }>("SELECT org_id FROM cloud_v2_computer_builds")).rows.map(row => row.org_id));
+      expect(used.every(id => based.has(id))).toBe(true);
+      for (const id of [without, unused, old, personal]) expect(based.has(id)).toBe(false);
+      expect(creates()).toEqual([]);
+      // The Personal organization gets its base at first use.
+      expect((await computers.ensureBase(personal)).state).toBe("ready");
+    });
+  });
+
+  describe("first copies", () => {
+    it("builds a copy for a project made while the base was being prepared, once the base is live, with nobody touching it", async () => {
+      const shared = await project();
+      const personal = await project(["withso/notes"], { level: "personal", owner: member });
+      const computers = computersWith();
+      // Saved while there is no base: each asks, and waits (ensureBase runs first, as the routes do).
+      await computers.ensureBase(org);
+      await copyBuilder().reconcile(org, shared, "project_created");
+      await copyBuilder().reconcile(org, personal, "project_created");
+      expect((await pool.query("SELECT count(*)::int AS n FROM cloud_v2_ready_copies WHERE org_id=$1", [org])).rows[0].n).toBe(0);
+      expect((await pool.query("SELECT count(*)::int AS n FROM cloud_projects WHERE org_id=$1 AND copy_requested_at IS NOT NULL", [org])).rows[0].n).toBe(2);
+      await builder(computers).tick();
+      for (let index = 0; index < 4; index++) await copyBuilder().tick();
+      const rows = (await pool.query<{ project_id: string; state: string; created_by: string }>(
+        "SELECT project_id, state, created_by FROM cloud_v2_ready_copies WHERE org_id=$1 ORDER BY created_at", [org])).rows;
+      expect(rows.map(row => [row.project_id, row.state]).sort()).toEqual([[shared, "ready"], [personal, "ready"]].sort());
+      // Each copy is its project's creator's (the personal one its member's), never the base's: the base has no creator.
+      expect(Object.fromEntries(rows.map(row => [row.project_id, row.created_by]))).toEqual({ [shared]: admin, [personal]: member });
+      expect((await pool.query("SELECT count(*)::int AS n FROM cloud_projects WHERE copy_requested_at IS NOT NULL")).rows[0].n).toBe(0);
+    });
+  });
+
+  describe("the legacy build", () => {
+    const legacy = async () => (await pool.query<{ legacy_build_id: string | null; base_live_at: Date | null }>(
+      "SELECT legacy_build_id, base_live_at FROM cloud_v2_computers WHERE org_id=$1", [org])).rows[0]!;
+    const snapshotOf = async (id: string) => (await pool.query<{ snapshot_id: string | null }>("SELECT snapshot_id FROM cloud_v2_computer_builds WHERE id=$1", [id])).rows[0]!.snapshot_id;
+    const offCreate = (user = admin) => createCloudWorkspaceOperations({ store, computers: computersWith({ readyCopies: false }),
+      authorizeBuildRepository: async (_o: string, _u: string, _b: string, repository: string) => ({ repository, repositoryId: repositoryId(repository) }),
+      remoteHead: async () => "d".repeat(40) } as unknown as CloudV2RouteDeps)
+      .create(user, { organizationId: org, repository: "withso/zeros" }, { document: w => w as never, receiptDocument: w => w as never });
+
+    it("keeps the build a base replaced, serves creates from it with the setting off, and through off, on and off again", async () => {
+      const pre = await preSwitchBuild();
+      const preSnapshot = (await snapshotOf(pre.id))!;
+      const on = computersWith({ shared: true });
+      boat.snapshots.set(SHARED, new Map());
+      expect((await on.ensureBase(org)).state).toBe("ready");
+      const first = await legacy();
+      expect(first.legacy_build_id).toBe(pre.id);
+      expect(first.base_live_at).not.toBeNull();
+      await builder(on).tick();
+      expect(boat.calls.filter(call => call.op === "deleteSnapshot").map(call => call.args[0])).not.toContain(preSnapshot);
+      // Off: creates come from the legacy build, as before the switch.
+      const off = await offCreate();
+      expect(off.status).toBe(201);
+      expect((await workspaceRow((off.response as unknown as { id: string }).id)).computer_build_id).toBe(pre.id);
+      // On again: the base is still live, the legacy build and its 30 days unchanged; off again: still served.
+      expect((await on.ensureBase(org)).state).toBe("ready");
+      expect(await legacy()).toEqual(first);
+      expect((await offCreate()).status).toBe(201);
+      await builder(computersWith({ readyCopies: false })).tick();
+      expect(await snapshotOf(pre.id)).toBe(preSnapshot);
+    });
+
+    it("releases the legacy build 30 days after the base went live, only once no workspace is on it, and not before", async () => {
+      const pre = await preSwitchBuild();
+      const on = computersWith({ shared: true });
+      boat.snapshots.set(SHARED, new Map());
+      await on.ensureBase(org);
+      const pinned = await offCreate();
+      const pinnedId = (pinned.response as unknown as { id: string }).id;
+      expect(await on.releaseLegacyBuilds()).toBe(0);
+      await pool.query("UPDATE cloud_v2_computers SET base_live_at=clock_timestamp()-interval '31 days' WHERE org_id=$1", [org]);
+      expect(await on.releaseLegacyBuilds()).toBe(0);
+      await store.manage(pinnedId, "delete", async () => {});
+      await pool.query("UPDATE cloud_v2_workspaces SET state='deleted' WHERE id=$1", [pinnedId]);
+      expect(await on.releaseLegacyBuilds()).toBe(1);
+      expect((await legacy()).legacy_build_id).toBeNull();
+      await builder(on).tick();
+      expect(await snapshotOf(pre.id)).toBeNull();
+    });
+  });
+
+  describe("with the setting off", () => {
+    it("never refreshes a base, which would queue a build with no repository; on, an automatic base is refreshed as another", async () => {
+      boat.snapshots.set(SHARED, new Map());
+      await pool.query("INSERT INTO cloud_v2_computers (org_id, recipe_revision, install_script) VALUES ($1, 1, 'echo tools')", [org]);
+      const on = computersWith();
+      await on.ensureBase(org);
+      await builder(on).tick();
+      const other = "c".repeat(64);
+      expect(await computersWith({ readyCopies: false }).refreshCandidates(other)).toEqual([]);
+      const [candidate] = await on.refreshCandidates(other);
+      expect(candidate).toMatchObject({ organizationId: org, createdBy: null, baseOnly: true, runtimeStale: true });
+      const refresh = await on.enqueueAutomatic(org, candidate!.activeBuildId, "runtime", other);
+      expect(refresh).toMatchObject({ automatic: true, createdBy: null, reason: "runtime", state: "queued" });
+      // Interrupted, it is retried as another automatic base.
+      await pool.query("UPDATE cloud_v2_computer_builds SET state='failed', error_code='computer_build_interrupted', finished_at=clock_timestamp()-interval '2 minutes' WHERE id=$1", [refresh!.id]);
+      expect(await on.retryInterrupted(other)).toBe(1);
+      expect((await pool.query("SELECT automatic, created_by, retry_of FROM cloud_v2_computer_builds WHERE retry_of=$1", [refresh!.id])).rows)
+        .toEqual([{ automatic: true, created_by: null, retry_of: refresh!.id }]);
+    });
+  });
+
+  describe("an image whose snapshot is gone", () => {
+    it("starts a pre-switch workspace, and one on an older base, from the organization's base with every repository cloned", async () => {
+      const pre = await preSwitchBuild();
+      const off = createCloudWorkspaceOperations({ store, computers: computersWith({ readyCopies: false }),
+        authorizeBuildRepository: async (_o: string, _u: string, _b: string, repository: string) => ({ repository, repositoryId: repositoryId(repository) }),
+        remoteHead: async () => "d".repeat(40) } as unknown as CloudV2RouteDeps);
+      const old = (await off.create(admin, { organizationId: org, repository: "withso/zeros" }, { document: w => w as never, receiptDocument: w => w as never })).response as unknown as { id: string };
+      await pool.query("UPDATE cloud_v2_computer_builds SET snapshot_id=NULL, snapshot_deleted_at=clock_timestamp() WHERE id=$1", [pre.id]);
+      // No base yet: it cannot be made, as before.
+      expect(await store.workspaceImage(old.id)).toBeNull();
+      await pool.query("INSERT INTO cloud_v2_computers (org_id, recipe_revision) VALUES ($1, 1) ON CONFLICT (org_id) DO UPDATE SET install_script='echo tools'", [org]);
+      const on = computersWith();
+      await on.ensureBase(org);
+      await builder(on).tick();
+      const first = (await on.overview(org)).activeBuildId!;
+      const base = await snapshotOfBuild(first);
+      expect(await store.workspaceImage(old.id)).toEqual({ from: base, prune: [], checkout: false });
+      // A workspace on that base; a later base retires its snapshot: it starts from the newer one.
+      const projectId = (await pool.query("SELECT id FROM cloud_projects WHERE org_id=$1 LIMIT 1", [org])).rows[0].id;
+      const onBase = (await create(on, admin, { projectId })).response as unknown as { id: string };
+      await on.enqueue(org, admin, { repositories: [] });
+      await builder(on).tick();
+      const second = (await on.overview(org)).activeBuildId!;
+      expect(second).not.toBe(first);
+      await pool.query("UPDATE cloud_v2_computer_builds SET snapshot_id=NULL, snapshot_deleted_at=clock_timestamp() WHERE id=$1", [first]);
+      expect(await store.workspaceImage(onBase.id)).toEqual({ from: await snapshotOfBuild(second), prune: [], checkout: false });
+    });
+
+    it("starts a project workspace of several repositories, with ready copies off, from its base with every repository cloned", async () => {
+      boat.snapshots.set(SHARED, new Map());
+      const on = computersWith({ shared: true });
+      const projectId = await project(["withso/zeros", "withso/web"]);
+      const created = (await create(on, admin, { projectId })).response as unknown as { id: string };
+      expect(await store.workspaceImage(created.id)).toEqual({ from: SHARED, prune: [], checkout: false });
+      await lifecycle().tick();
+      expect(creates().at(-1)).toMatchObject({ from: SHARED });
+      expect((await pool.query("SELECT count(*)::int AS n FROM cloud_v2_workspace_repositories WHERE workspace_id=$1", [created.id])).rows[0].n).toBe(2);
+    });
+  });
+
+  describe("a base that cannot be prepared", () => {
+    it("says why with when Zeros tries again, raises one operator line per failure, and tries again after the backoff", async () => {
+      await pool.query("INSERT INTO cloud_v2_computers (org_id, recipe_revision, install_script) VALUES ($1, 1, 'exit-7-tools')", [org]);
+      boat.script = (_machine, command) => command.includes("exit-7-tools") ? { exitCode: 7, stdout: "", timedOut: false } : undefined;
+      await project();
+      const computers = computersWith();
+      expect((await computers.ensureBase(org)).state).toBe("preparing");
+      await builder(computers).tick();
+      const failed = await computers.ensureBase(org) as Extract<CloudV2BaseState, { state: "failed" }>;
+      expect(failed).toMatchObject({ state: "failed", errorCode: "computer_install_script_failed", failures: 1 });
+      expect(Date.parse(failed.nextAttemptAt) - Date.now()).toBeGreaterThan(14 * 60_000);
+      expect((await computers.overview(org)).base).toMatchObject({ state: "failed", errorCode: "computer_install_script_failed" });
+      expect(errors).toEqual([`[cloud-v2] automatic base build failed org=${org.slice(0, 8)} code=computer_install_script_failed`]);
+      // Still in its backoff: nothing new; after it, another try (and its own line when it fails), now 30 minutes out.
+      await builder(computers).tick();
+      expect((await pool.query("SELECT count(*)::int AS n FROM cloud_v2_computer_builds WHERE org_id=$1", [org])).rows[0].n).toBe(1);
+      await pool.query("UPDATE cloud_v2_computer_builds SET finished_at=finished_at-interval '16 minutes' WHERE org_id=$1", [org]);
+      expect((await computers.ensureBase(org)).state).toBe("preparing");
+      await builder(computers).tick();
+      expect(errors).toHaveLength(2);
+      expect(await computers.ensureBase(org)).toMatchObject({ state: "failed", failures: 2 });
+    });
   });
 });

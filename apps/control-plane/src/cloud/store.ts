@@ -550,9 +550,11 @@ export class CloudV2Store {
     // pin before it can retire an inactive source snapshot.
     const selected = await tx.query<{ recipe: { repositories: { repository: string }[] }; source_targets: unknown; source_policy_version: number }>(
       `SELECT b.recipe,b.source_targets,b.source_policy_version FROM cloud_v2_computers c
-       JOIN cloud_v2_computer_builds b ON b.id=c.active_build_id AND b.org_id=c.org_id
-       WHERE c.org_id=$1 AND c.active_build_id=$2 AND c.snapshot_name IS NOT NULL
-         AND b.state='succeeded' AND b.source_policy_version IN (2,3) AND b.snapshot_id=c.snapshot_name AND b.snapshot_deleted_at IS NULL AND b.cleanup_requested_at IS NULL
+       JOIN cloud_v2_computer_builds b ON b.id=$2 AND b.org_id=c.org_id
+       WHERE c.org_id=$1 AND b.state='succeeded' AND b.source_policy_version IN (2,3) AND b.snapshot_deleted_at IS NULL AND b.cleanup_requested_at IS NULL
+         -- The live build, or (ready copies turned off again) the legacy build its base replaced, which is kept for this.
+         AND ((c.active_build_id=$2 AND c.snapshot_name IS NOT NULL AND b.snapshot_id=c.snapshot_name)
+           OR (c.legacy_build_id=$2 AND b.snapshot_id IS NOT NULL AND NOT b.base_only))
        FOR SHARE OF c,b`, [organizationId, computerBuildId]);
     if (!selected.rowCount) throw new HttpError(409, "cloud_computer_changed", "The Cloud Computer changed. Create the workspace again.");
     const build = selected.rows[0]!;
