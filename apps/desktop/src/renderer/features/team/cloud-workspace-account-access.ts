@@ -1,6 +1,7 @@
 import type { Me } from "./control-plane";
 import { getTeamStoreState, useTeams } from "./team-store";
 import { isFeatureEnabled } from "../../config/release-channel";
+import { isPersonalCloudOrganization } from "./personal-cloud";
 
 /** Account admission, independent of staff roles and retired preferences.
  * A known organization's Cloud entitlement must remain enabled and the member
@@ -16,8 +17,10 @@ export function cloudWorkspaceAccountAccess(
   const organization = (me.organizations ?? me.teams ?? []).find(
     candidate => candidate.id === organizationId,
   );
+  // The account's own Personal cloud is listed with any seat; opening it without Pro answers pro_required.
+  if (organization?.isPersonal) return isPersonalCloudOrganization(organizationId, me);
   return !organization ||
-    !organization.isPersonal && organization.workspaceCapabilities.cloud &&
+    organization.workspaceCapabilities.cloud &&
     organization.seat !== "hold";
 }
 

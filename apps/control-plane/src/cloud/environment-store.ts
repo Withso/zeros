@@ -47,7 +47,7 @@ async function member(tx: Tx, scope: Scope, lock = false): Promise<void> {
   const result = await tx.query<{ held: boolean }>(
     `SELECT ${memberOnHoldSql("m.org_id", "m.user_id")} AS held FROM organization_members m
      JOIN organizations o ON o.id=m.org_id JOIN users u ON u.id=m.user_id
-     WHERE m.org_id=$1 AND m.user_id=$2 AND NOT o.is_personal AND o.deleted_at IS NULL AND u.deleted_at IS NULL AND u.auth_status='active'
+     WHERE m.org_id=$1 AND m.user_id=$2 AND (NOT o.is_personal OR cloud_organization_enabled(o)) AND o.deleted_at IS NULL AND u.deleted_at IS NULL AND u.auth_status='active'
      ${lock ? "FOR SHARE OF m,o,u" : ""}`, [scope.organizationId, scope.userId]);
   if (!result.rows[0]) throw notFound();
   if (result.rows[0].held) throw organizationMemberOnHold();

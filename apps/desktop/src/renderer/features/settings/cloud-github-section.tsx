@@ -31,11 +31,14 @@ export function CloudGithubSection({
   organizationId,
   surfaceActive,
   title = "GitHub",
+  personal = false,
 }: {
   userId: string;
   organizationId: string;
   surfaceActive: boolean;
   title?: ReactNode;
+  /** Personal's own cloud: one person, no organization. */
+  personal?: boolean;
 }) {
   const key = cloudGithubConnectionKey(userId, organizationId);
   const snapshot = useRecoveringRead(
@@ -151,7 +154,7 @@ export function CloudGithubSection({
   return (
     <SettingsSection
       title={title}
-      description="How cloud workspaces in this organization reach GitHub."
+      description={personal ? "How your cloud workspaces reach GitHub." : "How cloud workspaces in this organization reach GitHub."}
       action={
         <Button
           variant="ghost"

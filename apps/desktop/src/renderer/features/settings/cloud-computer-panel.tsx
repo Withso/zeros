@@ -7,6 +7,7 @@ import { Badge, CodeTextarea, Pill } from "../../shared/ui/primitives";
 import { MessageRow } from "../../shared/ui/primitives/message-row";
 import { useRecoveringRead } from "../../state/use-recovering-read";
 import { useActiveOrganization, useTeams } from "../team/team-store";
+import { usableCloudOrganization } from "../team/personal-cloud";
 import { assertComputerOwner, computerKey, computers, MAX_REPOSITORIES, message, publishRecipe, useRecipeDraft } from "./cloud-computer-store";
 import { SettingsGroup, SettingsRow, SettingsSection } from "./settings-ui";
 import { BuildHistoryItem } from "./build-history";
@@ -31,9 +32,10 @@ export function CloudComputerPanel({ surfaceActive = true, openCloudRepository, 
   /** Projects: opens the New project dialog. */
   onNewProject?(): void;
 }) {
-  const organization = useActiveOrganization();
+  // The organization, or Personal's own cloud with Pro (its owner manages it).
+  const organization = usableCloudOrganization(useActiveOrganization());
   const { me } = useTeams();
-  if (!organization || organization.isPersonal || !me) return null;
+  if (!organization || !me) return null;
   const canManage = organization.role === "owner" || organization.role === "admin";
   return <CloudComputerScope key={computerKey(me.user.id, organization.id)} userId={me.user.id} organizationName={organization.name}
     organizationId={organization.id} canManage={canManage} active={surfaceActive} openRepository={openCloudRepository} onNewProject={onNewProject} />;

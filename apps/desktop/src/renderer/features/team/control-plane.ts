@@ -15,6 +15,7 @@ import { getSession } from "../auth/auth-store";
 import { controlPlaneFetch } from "../update/control-plane-fetch";
 import {
   normalizeOrganizationSummary,
+  personalCloudOffer,
   type OrganizationSummaryWire,
 } from "./organization-summary";
 
@@ -45,6 +46,9 @@ export type OrganizationSummary = {
   legacyPersonalOrganizationIds?: readonly string[];
   /** Mixed-version marker for a pre-hierarchy flat Team response. */
   legacyFlat?: boolean;
+  /** Renderer-only, on the device Personal entry: the signed-in account's server
+   * Personal organization while it offers cloud (`personalEntryWithCloud`). */
+  cloudOrganization?: OrganizationSummary;
   defaultTeamId: string | null;
   workspaceCapabilities: { local: boolean; cloud: boolean };
   teamCapabilities: { multiple: false; canCreate: false };
@@ -79,7 +83,13 @@ export type Me = {
   organizations?: OrganizationSummary[];
   /** Compatibility mirror returned by the control plane. */
   teams: TeamSummary[];
+  /** The server Personal organization's cloud, while the control plane offers it
+   * (its Personal row says cloud). `organizations` keeps that row as released
+   * desktops parse it: local only. Use `cloudOrganizationFor`, never this directly. */
+  personalCloud?: PersonalCloudOffer;
 };
+
+export type PersonalCloudOffer = { organizationId: string; slug: string; seat: "pro" | "free" };
 
 export type TeamMember = {
   id: string;
@@ -182,10 +192,10 @@ export const controlPlane = {
         teams?: OrganizationSummaryWire[];
       }
     >("GET", "/v1/me");
-    const organizations = (raw.organizations ?? raw.teams ?? []).map(
-      normalizeOrganizationSummary,
-    );
-    return { ...raw, organizations, teams: organizations };
+    const rows = raw.organizations ?? raw.teams ?? [];
+    const organizations = rows.map(normalizeOrganizationSummary);
+    const personalCloud = personalCloudOffer(rows);
+    return { ...raw, organizations, teams: organizations, ...(personalCloud ? { personalCloud } : {}) };
   },
 
   createOrganization: (name: string, logo?: string | null) =>

@@ -2,7 +2,7 @@ import { useOrganizationProjects } from "../../state/use-organization-projects";
 // Create owns a draft before either a Local checkout or a cloud VM exists.
 // Project/source select its destination; attachment previews use app storage.
 
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { ChevronDown, Cloud, FolderOpen, Laptop, Plus } from "lucide-react";
 
 import { Button, GithubIcon } from "../../shared/ui";
@@ -97,6 +97,7 @@ import {
   useCreateFromSourceRequest,
 } from "./create-source-request";
 import {
+  getActiveCloudOrganizationIdSnapshot,
   getActiveOrganizationIdSnapshot,
   getActiveOrganizationSnapshot,
   getOrganizationStoreGeneration,
@@ -104,6 +105,8 @@ import {
   useTeams,
 } from "../../features/team/team-store";
 import { canCreateWorkspaceIn, localWorkShowsEverywhere, localWorkspaceOwner } from "../../features/team/organization-capabilities";
+import { cloudOrganizationFor } from "../../features/team/personal-cloud";
+import { AuthContext } from "../../features/auth/auth-context";
 import { CloudWorkspacePausedNotice, useOrganizationCloudPaused } from "../../features/team/cloud-workspace-pause";
 import { CreateStartBanners } from "./create-start-banners";
 import { useNativeRuntime } from "../../platform/runtime";
@@ -246,7 +249,7 @@ function ActiveDispatcherPage({
   // the user picks another repository below, clear that route hint so it
   // cannot override their newer persisted selection after a reload.
   const contextTarget = parseCloudWorkspaceKey(contextProject?.repoRoot);
-  const contextDocument = contextTarget?.organizationId === getActiveOrganizationIdSnapshot() ? cloudWorkspaceDocument(contextTarget) : undefined;
+  const contextDocument = contextTarget?.organizationId === getActiveCloudOrganizationIdSnapshot() ? cloudWorkspaceDocument(contextTarget) : undefined;
   const preferredCloudRepository = contextDocument ? `${contextDocument.repository.owner}/${contextDocument.repository.name}`.toLowerCase() : null;
   // A sidebar route into Create names its project's side; otherwise the last
   // choice, or the cloud when this Mac has no projects yet.
@@ -274,7 +277,7 @@ function ActiveDispatcherPage({
   const placementReason = placement === "cloud" ? cloud.reason : null;
   const computerIdentity = cloud.computerOwner ? JSON.parse(cloud.computerOwner) as [string, string] : null;
   // The personal home has no Cloud Computer yet; its cloud side keeps a device draft so the prompt survives a flip.
-  const personalHome = Boolean(unified && cloud.organization?.isPersonal);
+  const personalHome = Boolean(unified && cloud.organization?.isPersonal && !cloud.cloudOrganization);
   const draftOwnerFor = (target: CreatePlacement) =>
     target === "cloud" && !computerIdentity ? (personalHome ? "local" : null) : createComposerDraftOwner({
       backend: CONTROL_PLANE_URL,
@@ -340,7 +343,7 @@ function ActiveDispatcherPage({
   const handleCreateCloud = async (payload?: DispatcherCreatePayload) => {
     if (!active || !cloud.computerRepository || cloud.reason || !cloud.organization || createInFlight.current) return;
     const currentOrganization = getActiveOrganizationSnapshot();
-    if (currentOrganization?.id !== cloud.organization.id || !canCreateWorkspaceIn(currentOrganization, "cloud")) return;
+    if (!currentOrganization || cloudOrganizationFor(currentOrganization)?.id !== cloud.organization.id || !canCreateWorkspaceIn(currentOrganization, "cloud")) return;
     const creationGeneration = getOrganizationStoreGeneration();
     if (payload?.additionalDirectories.length) {
       toast.error("Additional local folders cannot be used in a cloud workspace");
@@ -367,7 +370,7 @@ function ActiveDispatcherPage({
       // A late confirmation must not pull Personal (or another organization)
       // into that cloud chat. The original prompt remains in this composer.
       const destination = getActiveOrganizationSnapshot();
-      if (destination?.id !== document.organizationId || destination.isPersonal || !stillShowingCreate()) {
+      if (cloudOrganizationFor(destination)?.id !== document.organizationId || !stillShowingCreate()) {
         toast.success(`Cloud workspace created in ${currentOrganization.name}`, {
           description: "Open it from that organization to continue. Your prompt is still in Create.",
         });
@@ -636,7 +639,7 @@ function ActiveDispatcherPage({
   // Projects: repositories come from what GitHub connections can read, managed on the
   // organization's page for owners and admins, Personal › GitHub for members and one-person organizations.
   const leveled = (cloud.computerRepositories ?? []).some(repository => repository.level);
-  const githubLevels = useGithubLevels(me?.user.id ?? "", activeOrganization && !activeOrganization.isPersonal ? activeOrganization.id : "",
+  const githubLevels = useGithubLevels(me?.user.id ?? "", cloudOrganizationFor(activeOrganization)?.id ?? "",
     active && unified && leveled && !!me);
   const manageSection = !leveled ? "cloud-computer" as const
     : cloud.canManageComputer && githubLevels.connections && !githubLevels.connections.solo ? "org-github" as const : "integrations" as const;
@@ -644,6 +647,9 @@ function ActiveDispatcherPage({
     requestUserSettingsSection(manageSection);
     dispatch({ type: "SET_ACTIVE_PAGE", page: "settings" });
   };
+  const auth = useContext(AuthContext);
+  // Projects belong to the cloud owner: the organization, or Personal's own cloud.
+  const projectOwner = cloud.cloudOrganization ?? activeOrganization;
   const tray = unified ? createTrayState({
     notice: computerCreateNotice?.owner === cloud.computerOwner && cloud.computerOwner ? computerCreateNotice.message : null,
     reason: placementReason,
@@ -660,6 +666,8 @@ function ActiveDispatcherPage({
       ? { label: "Manage repositories", onClick: openManageRepositories }
       : tray?.action === "github-settings"
         ? { label: "Open GitHub settings", onClick: openManageRepositories }
+      : tray?.action === "sign-in"
+        ? { label: "Sign in", onClick: () => void auth?.startBrowserSignIn().then(result => { if (!result.ok) toast.error(result.error ?? "Couldn't start sign-in."); }) }
       : null;
 
   return (
@@ -678,8 +686,8 @@ function ActiveDispatcherPage({
             Pick a repository and describe a task.
           </p>
 
-          {projectDialog === "new" && cloud.projects && activeOrganization && (
-            <NewProjectDialog organization={activeOrganization} userKey={cloud.githubLevels.key} connections={cloud.githubLevels.connections}
+          {projectDialog === "new" && cloud.projects && projectOwner && (
+            <NewProjectDialog organization={projectOwner} userKey={cloud.githubLevels.key} connections={cloud.githubLevels.connections}
               projects={cloud.projects} active={active} onClose={() => setProjectDialog(null)}
               onCreated={created => {
                 setProjectDialog(null);
@@ -712,7 +720,8 @@ function ActiveDispatcherPage({
               projects={cloud.projects}
               selected={cloud.project}
               rememberedId={cloud.rememberedProjectId}
-              organizationName={activeOrganization?.name ?? "Organization"}
+              organizationName={projectOwner?.name ?? "Organization"}
+              personal={projectOwner?.isPersonal === true}
               active={active}
               open={projectMenuOpen}
               onOpenChange={setProjectMenuOpen}

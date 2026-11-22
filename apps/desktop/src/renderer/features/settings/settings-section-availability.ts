@@ -10,6 +10,8 @@ export interface SettingsSectionAvailability {
   localStorageSupported: boolean;
   /** `unified-workspaces`: Personal pages under every owner, organization pages in their own group. */
   unified?: boolean;
+  /** Unified only: the Personal entry has its own cloud (Personal cloud with Pro). */
+  personalCloud?: boolean;
   /** Unified only: the organization has General rows of its own. */
   organizationGeneral?: boolean;
   /** Unified only: the control plane keeps GitHub at two levels and the
@@ -87,7 +89,7 @@ export function isSettingsSectionAvailable(
   if (!context.unified) return legacySectionAvailable(id, context);
   switch (id) {
     case "cloud-computer":
-      return !context.local && context.cloudEnabled;
+      return (!context.local || context.personalCloud === true) && context.cloudEnabled;
     case "org-general":
       return !context.local && context.organizationGeneral === true;
     case "org-github":

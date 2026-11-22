@@ -262,6 +262,11 @@ export type CloudV2Config = {
    * found work or could not tell. Every retention clock starts when it first
    * applies to a workspace, never from history. */
   retention?: boolean;
+  /** Cloud in each user's Personal organization, for Pro (cloud_organization_enabled, 0262),
+   * CLOUD_V2_PERSONAL_CLOUD_ENABLED=true. Every transaction sets app.cloud_personal to match
+   * (db-context.ts); nothing is written. Default off: no Personal organization has cloud, as
+   * before. On, cloud there follows the owner's Pro, read live; turning it off takes effect at once. */
+  personalCloud?: boolean;
   /** CLOUD_V2_RETENTION_BACKUP_FORKS_PER_HOUR: retention's cap on backup forks begun per hour
    * across the deployment (1-200). Unset uses the lifecycle's default of 20. */
   backupForksPerHour?: number;
@@ -311,6 +316,8 @@ function loadCloudV2Config(env: NodeJS.ProcessEnv, channel: string): CloudV2Conf
   if (asyncCreate && !["true", "false"].includes(asyncCreate)) throw new Error("Invalid environment: CLOUD_V2_ASYNC_CREATE_ENABLED must be true or false");
   const readyCopies = env.CLOUD_V2_READY_COPIES_ENABLED?.trim().toLowerCase();
   if (readyCopies && !["true", "false"].includes(readyCopies)) throw new Error("Invalid environment: CLOUD_V2_READY_COPIES_ENABLED must be true or false");
+  const personalCloud = env.CLOUD_V2_PERSONAL_CLOUD_ENABLED?.trim().toLowerCase();
+  if (personalCloud && !["true", "false"].includes(personalCloud)) throw new Error("Invalid environment: CLOUD_V2_PERSONAL_CLOUD_ENABLED must be true or false");
   const retention = env.CLOUD_V2_RETENTION_ENABLED?.trim().toLowerCase();
   if (retention && !["true", "false"].includes(retention)) throw new Error("Invalid environment: CLOUD_V2_RETENTION_ENABLED must be true or false");
   const maintenanceLimit = (name: string, max: number): number | undefined => {
@@ -371,6 +378,7 @@ function loadCloudV2Config(env: NodeJS.ProcessEnv, channel: string): CloudV2Conf
     checkpointRetry: checkpointRetry === "true",
     readyCopies: readyCopies === "true",
     retention: retention === "true",
+    personalCloud: personalCloud === "true",
     ...(backupForks ? { backupForksPerHour: Number(backupForks) } : {}),
     ...(maintenancePerHour ? { maintenancePerHour } : {}), ...(maintenancePerDay ? { maintenancePerDay } : {}),
     ...(sharedBaseSnapshot ? { sharedBaseSnapshot } : {}),

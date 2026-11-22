@@ -40,6 +40,7 @@ import {
   subscribeActiveTeam,
 } from "./active-team";
 import { requestTeamResync } from "./team-sync";
+import { personalEntryWithCloud } from "./personal-cloud";
 import {
   hasOrganizationOwnershipHistory,
   hasRecordedOrganizationOwnership,
@@ -80,6 +81,11 @@ let personalOwnershipIds: readonly string[] | null = null;
 let personalSnapshot = PERSONAL_ORGANIZATION;
 
 function devicePersonalSnapshot(): TeamSummary {
+  // Only the confirmed account, never cached presentation, can carry its Personal cloud.
+  return personalEntryWithCloud(devicePersonalLocalSnapshot(), state.me);
+}
+
+function devicePersonalLocalSnapshot(): TeamSummary {
   const ids = getKnownPersonalOrganizationIds();
   if (ids !== personalOwnershipIds) {
     personalOwnershipIds = ids;
@@ -183,6 +189,14 @@ export function getActiveOrganizationIdSnapshot(): string | null {
   if (active) return active.isPersonal ? null : active.id;
   const persisted = getActiveTeamId();
   return hasRecordedOrganizationOwnership(persisted) ? persisted : null;
+}
+
+/** The active selection's cloud owner: an organization's own ID, the Personal
+ * entry's account Personal cloud when it resolves, else null. */
+export function getActiveCloudOrganizationIdSnapshot(): string | null {
+  const active = getActiveOrganizationSnapshot();
+  if (active?.isPersonal) return active.cloudOrganization?.id ?? null;
+  return getActiveOrganizationIdSnapshot();
 }
 
 /** Commit an exact `/v1/me` snapshot from either the visible store refresh or

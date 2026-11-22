@@ -4,7 +4,7 @@ import { Hono } from "hono";
 import type pg from "pg";
 import { describe, expect, it, vi } from "vitest";
 import { withSystemTx } from "./db.js";
-import { configureCloudTeamOwnership } from "./db-context.js";
+import { configureCloudPersonal, configureCloudTeamOwnership } from "./db-context.js";
 import * as timing from "./request-timing.js";
 
 const result = (command: string, rowCount: number | null = null) => ({ command, rowCount, rows: [], fields: [] });
@@ -47,9 +47,10 @@ function returningNative(native: Promise<unknown>) {
 }
 
 describe("opt-in request database cost observation", () => {
-  it.each([false, true])("counts ownership transaction setup as zero persistent writes with the switch %s", async enabled => {
+  it.each([[false, false], [true, false], [false, true], [true, true]])("counts transaction setup as zero persistent writes with ownership %s and Personal cloud %s", async (enabled, personal) => {
     const { pool } = database(async () => result("SELECT", 1));
     configureCloudTeamOwnership(pool, enabled);
+    configureCloudPersonal(pool, personal);
     const { app, summaries } = appWithCosts();
     app.get("/cost", async c => {
       await withSystemTx(pool, tx => tx.query("SELECT 1"));

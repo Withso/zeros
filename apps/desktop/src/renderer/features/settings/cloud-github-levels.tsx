@@ -58,9 +58,11 @@ const installationSettingsUrl = (account: string) => `https://github.com/organiz
 
 /** Connections at one level: the organization's (owners and admins manage,
  * members read) or the caller's own. Each opens a drawer of its repositories. */
-export function GithubConnectionsSection({ userId, organizationId, level, canManage, active, title, description }: {
+export function GithubConnectionsSection({ userId, organizationId, level, canManage, active, title, description, personal = false }: {
   userId: string; organizationId: string; level: "organization" | "personal"; canManage: boolean; active: boolean;
   title: string; description: string;
+  /** Personal's own cloud: one person, no organization. */
+  personal?: boolean;
 }) {
   const levels = useGithubLevels(userId, organizationId, active);
   const visible = useRecoveringRead(installations, canManage ? levels.key : null, () => getCloudGithubVisibleInstallations(organizationId),
@@ -109,15 +111,15 @@ export function GithubConnectionsSection({ userId, organizationId, level, canMan
             onClick={() => void run(() => connectCloudGithubInstallation(organizationId, Number(choice), level))}>Connect</Button>
         </div>
       )}
-      <ConnectionRepositories organizationId={organizationId} connection={open} onClose={() => { setOpen(null); levels.refresh(); }} />
+      <ConnectionRepositories organizationId={organizationId} connection={open} personal={personal} onClose={() => { setOpen(null); levels.refresh(); }} />
     </SettingsGroup>
   );
 }
 
 /** The drawer: every repository the caller can read through one connection,
  * and which of their projects use each. Projects pick from these; nothing is added here. */
-export function ConnectionRepositories({ organizationId, connection, onClose }: {
-  organizationId: string; connection: CloudGithubLevelConnection | null; onClose(): void;
+export function ConnectionRepositories({ organizationId, connection, onClose, personal = false }: {
+  organizationId: string; connection: CloudGithubLevelConnection | null; onClose(): void; personal?: boolean;
 }) {
   const key = connection ? JSON.stringify([organizationId, connection.id]) : null;
   const read = useRecoveringRead(connectionRepositoriesCache, key, () => getCloudGithubConnectionRepositories(organizationId, connection!.id), { enabled: !!connection, maxAgeMs: 15_000 });
@@ -126,7 +128,8 @@ export function ConnectionRepositories({ organizationId, connection, onClose }: 
       <SheetContent side="right" className="flex flex-col gap-6 overflow-y-auto p-6">
         <SheetHeader>
           <SheetTitle>{connection?.accountLogin ?? ""}</SheetTitle>
-          <SheetDescription>{connection?.level === "personal" ? "Your own connection. Nobody else sees it, admins included." : "Connected for the organization."}</SheetDescription>
+          <SheetDescription>{connection?.level === "personal" ? personal ? "Your own connection." : "Your own connection. Nobody else sees it, admins included."
+            : personal ? "Connected for your projects." : "Connected for the organization."}</SheetDescription>
         </SheetHeader>
         {read.error && <MessageRow tone="error" role="alert" flush>{message(read.error)}</MessageRow>}
         <SettingsGroup title="Repositories" description="Everything this connection can read. Nothing to add here: pick them when you create a project."

@@ -169,7 +169,7 @@ export class CloudV2Computers {
   private async memberRole(organizationId: string, userId: string): Promise<string> {
     const { rows } = await withSystemTx(this.pool, tx => tx.query<{ role: string }>(
       `SELECT m.role FROM organization_members m JOIN organizations o ON o.id = m.org_id AND o.deleted_at IS NULL
-       WHERE m.org_id = $1 AND m.user_id = $2 AND NOT o.is_personal AND o.cloud_workspaces_allowed`, [organizationId, userId]));
+       WHERE m.org_id = $1 AND m.user_id = $2 AND cloud_organization_enabled(o)`, [organizationId, userId]));
     if (!rows[0]) throw new HttpError(404, "not_found", "Organization not found");
     return rows[0].role;
   }
@@ -298,7 +298,7 @@ export class CloudV2Computers {
     const member = (await tx.query<{ role: string }>(
       `SELECT m.role FROM organization_members m
        JOIN users u ON u.id=m.user_id AND u.auth_status='active' AND u.deleted_at IS NULL
-       JOIN organizations o ON o.id=m.org_id AND NOT o.is_personal AND o.cloud_workspaces_allowed
+       JOIN organizations o ON o.id=m.org_id AND cloud_organization_enabled(o)
          AND o.deleted_at IS NULL AND o.lifecycle_status='active'
        WHERE m.org_id=$1 AND m.user_id=$2`, [organizationId, userId])).rows[0];
     if (!member || !["owner", "admin"].includes(member.role))
@@ -471,7 +471,7 @@ export class CloudV2Computers {
   async retryInterrupted(runtimeSha256: string): Promise<number> {
     const candidates = await withSystemTx(this.pool, tx => tx.query<{ id: string; org_id: string }>(`SELECT b.id,b.org_id FROM cloud_v2_computer_builds b
       JOIN cloud_v2_computers c ON c.org_id=b.org_id AND c.active_build_id=b.automatic_base_build_id AND c.recipe_revision=b.automatic_recipe_revision
-      JOIN organizations o ON o.id=b.org_id AND NOT o.is_personal AND o.cloud_workspaces_allowed AND o.deleted_at IS NULL AND o.lifecycle_status='active'
+      JOIN organizations o ON o.id=b.org_id AND cloud_organization_enabled(o) AND o.deleted_at IS NULL AND o.lifecycle_status='active'
       JOIN organization_members m ON m.org_id=b.org_id AND m.user_id=b.created_by AND m.role IN ('owner','admin')
       JOIN users u ON u.id=m.user_id AND u.auth_status='active' AND u.deleted_at IS NULL
       WHERE b.state='failed' AND b.error_code='computer_build_interrupted' AND b.reason IN ('runtime','refresh') AND b.retry_attempt<3
@@ -549,7 +549,7 @@ export class CloudV2Computers {
        FROM cloud_v2_computers c
        JOIN cloud_v2_computer_builds b ON b.id = c.active_build_id AND b.org_id = c.org_id AND b.state = 'succeeded'
        JOIN organizations o ON o.id = c.org_id AND o.deleted_at IS NULL AND o.lifecycle_status = 'active'
-         AND NOT o.is_personal AND o.cloud_workspaces_allowed
+         AND cloud_organization_enabled(o)
        WHERE c.snapshot_name IS NOT NULL AND b.created_by IS NOT NULL AND b.source_targets IS NOT NULL AND b.source_policy_version IN (2,3)
          AND NOT EXISTS (SELECT 1 FROM cloud_v2_computer_builds q WHERE q.org_id = c.org_id AND q.state IN ('queued','building'))
          AND NOT EXISTS (SELECT 1 FROM cloud_v2_computer_builds f WHERE f.org_id=c.org_id AND f.version>b.version
@@ -852,7 +852,7 @@ export class CloudV2Computers {
       WHERE ($1::uuid IS NULL OR b.id=$1) AND b.state IN ('queued','building') AND NOT EXISTS (
         SELECT 1 FROM organization_members m
         JOIN users u ON u.id=m.user_id AND u.auth_status='active' AND u.deleted_at IS NULL
-        JOIN organizations o ON o.id=m.org_id AND NOT o.is_personal AND o.cloud_workspaces_allowed
+        JOIN organizations o ON o.id=m.org_id AND cloud_organization_enabled(o)
           AND o.deleted_at IS NULL AND o.lifecycle_status='active'
         WHERE m.org_id=b.org_id AND m.user_id=b.created_by AND m.role IN ('owner','admin')
       )`, [id ?? null]);

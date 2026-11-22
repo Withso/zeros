@@ -4,6 +4,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "../../shared/ui/primit
 import { Dialog, DialogBody, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "../../shared/ui/primitives/dialog";
 import { UserEnvironmentPanel } from "../repositories/repositories-panel";
 import { useActiveOrganization, useTeams, getOrganizationStoreGeneration } from "../team/team-store";
+import { usableCloudOrganization } from "../team/personal-cloud";
 import { isFeatureEnabled } from "../../config/release-channel";
 import { useRecoveringRead } from "../../state/use-recovering-read";
 import { CloudRepositoryPicker, type CloudRepositorySelection } from "./cloud-repository-picker";
@@ -14,9 +15,10 @@ import { readEnvironmentSelection, saveEnvironmentSelection } from "./environmen
 
 /** `unified` shows this Mac and the cloud as two groups on one page instead of two tabs. */
 export function EnvironmentPanel({ surfaceActive = true, unified = false }: { surfaceActive?: boolean; unified?: boolean }) {
-  const organization = useActiveOrganization(), { me } = useTeams();
-  const member = (me?.organizations ?? me?.teams ?? []).find(row => row.id === organization?.id);
-  if (!isFeatureEnabled("cloud-workspaces") || !organization || organization.isPersonal || !me || !member?.workspaceCapabilities.cloud)
+  // The organization, or Personal's own cloud with Pro.
+  const organization = usableCloudOrganization(useActiveOrganization()), { me } = useTeams();
+  const member = organization?.isPersonal ? organization : (me?.organizations ?? me?.teams ?? []).find(row => row.id === organization?.id);
+  if (!isFeatureEnabled("cloud-workspaces") || !organization || !me || !member?.workspaceCapabilities.cloud)
     return unified ? <SettingsSection title={<PlaceLabel place="mac" />}><UserEnvironmentPanel /></SettingsSection> : <UserEnvironmentPanel />;
   return surfaceActive ? <EnvironmentScope key={`${me.user.id}:${getOrganizationStoreGeneration()}:${organization.id}`}
     userId={me.user.id} organizationId={organization.id} active={surfaceActive} unified={unified} /> : null;
