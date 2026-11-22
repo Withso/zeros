@@ -1,6 +1,6 @@
 import { execFileSync, spawnSync } from "node:child_process";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
-import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, renameSync, rmSync, symlinkSync, truncateSync, utimesSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, readdirSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, renameSync, rmSync, symlinkSync, truncateSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -1452,6 +1452,30 @@ describe("retention backups and the stop probe", () => {
         expect(probe([w.oldRepo], w.env, w.oldHome)).toBe("dirty");
       });
 
+      it("is clean for an ignored chat attachment alone: a backup drops attachments", () => {
+        const w = workspaces();
+        // Ignored by file pattern, so Git lists the attachment itself rather than one ignored directory.
+        w.write(join(w.oldRepo, ".gitignore"), "node_modules/\n.env*\n*.log\n*.png\n");
+        w.git(w.oldRepo, "commit", "-q", "-am", "ignore attachments"); w.git(w.oldRepo, "push", "-q", "origin", "HEAD");
+        w.write(join(w.oldRepo, ".context/attachments/upload-1/photo.png"), "png\n");
+        expect(probe([w.oldRepo], w.env, w.oldHome)).toBe("clean");
+      });
+
+      it("defines everything it calls: each generated script, on a real repository, writes nothing to stderr", () => {
+        const w = workspaces();
+        w.write(join(w.oldRepo, ".env.local"), "MINE=1\n");
+        w.write(join(w.oldRepo, "build.log"), "made\n");
+        // The scripts discard their own stderr; run them with it kept.
+        const keep = (command: string) => command.replace("exec 3>&1 >/dev/null 2>&1", "exec 3>&1 >/dev/null");
+        for (const command of [ignoredBaselineCommand([w.oldRepo], w.oldHome), backupProbeCommand([w.oldRepo], w.oldHome)]) {
+          expect(command).toContain("exec 3>&1 >/dev/null 2>&1");
+          const result = spawnSync("bash", ["-c", `eval "$1"`, "script", keep(command)], { env: w.env, encoding: "utf8" });
+          expect(result.stderr).toBe("");
+          // The baseline just recorded these files, so the probe after it is clean.
+          expect(result.stdout).toMatch(/^zeros-(baseline recorded|backup-probe clean)\n$/);
+        }
+      });
+
       it("counts a second repository's ignored files too, and is unknown when it cannot read the journal", () => {
         const w = workspaces(), second = join(w.oldHome, "acme", "api");
         w.git(w.root, "clone", "-q", w.origin, second);
@@ -1504,4 +1528,17 @@ describe("retention backups and the stop probe", () => {
       expect(() => backupProbeCommand(["relative/path"])).toThrow();
     });
   });
+});
+
+it("keeps every control-plane source file text: no NUL byte anywhere under src", () => {
+  const offenders: string[] = [];
+  const walk = (directory: string) => {
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      const file = join(directory, entry.name);
+      if (entry.isDirectory()) { if (entry.name !== "node_modules") walk(file); }
+      else if (/\.(ts|mts|mjs|js|sql|json)$/.test(entry.name) && readFileSync(file).includes(0)) offenders.push(file);
+    }
+  };
+  walk(join(__dirname, ".."));
+  expect(offenders).toEqual([]);
 });

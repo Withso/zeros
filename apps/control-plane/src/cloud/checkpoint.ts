@@ -614,7 +614,7 @@ const digest = path => {
   const fd = openSync(repo + "/" + path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
   try {
     const stat = fstatSync(fd);
-    if (!stat.isFile() || stat.size > 1048576) throw new Error();
+    if (!stat.isFile() || stat.size > __FILE_BYTES__) throw new Error();
     const bytes = Buffer.alloc(stat.size); let length = 0;
     while (length < bytes.length) { const n = readSync(fd, bytes, length, bytes.length - length, length); if (!n) break; length += n; }
     return createHash("sha256").update(bytes.subarray(0, length)).digest("hex");
@@ -622,7 +622,7 @@ const digest = path => {
 };
 const exists = path => { try { lstatSync(path); return true; } catch (error) { if (error.code === "ENOENT") return false; throw error; } };
 try {
-  const paths = readFileSync(list).toString("utf8").split(" ").filter(Boolean);
+  const paths = readFileSync(list).toString("utf8").split("\0").filter(Boolean);
   const baseline = baselineDir + "/" + createHash("sha256").update(repo).digest("hex") + ".json";
   if (mode === "baseline") {
     if (exists(baseline)) process.exit(0);
@@ -649,7 +649,7 @@ try {
   }
   process.exit(0);
 } catch { process.exit(2); }
-`;
+`.replace("__FILE_BYTES__", String(IGNORED_FILE_BYTES));
 
 /** A probe answers within a few seconds or counts as unknown, which backs up. */
 export const CLOUD_V2_BACKUP_PROBE_SECONDS = 15;
@@ -674,6 +674,8 @@ export function backupProbeCommand(checkoutPaths: readonly string[], home = "/ho
     "work=$(mktemp -d) || { printf 'zeros-backup-probe unknown\\n' >&3; exit 0; }",
     "trap 'rm -rf \"$work\"' EXIT",
     `printf %s ${quote(b64(IGNORED_SCRIPT))} | base64 -d > "$work/ignored.mjs"`,
+    // The capture's own attachment rule: ignoredFiles skips what a backup drops.
+    ...ATTACHMENT_HELPERS,
     // What the backup would capture of the ignored files, judged by the journal and the baseline.
     "ignored() {",
     "  local path size total=0 journal=''",
@@ -720,6 +722,7 @@ export function ignoredBaselineCommand(checkoutPaths: readonly string[], home = 
     "work=$(mktemp -d) || exit 0",
     "trap 'rm -rf \"$work\"' EXIT",
     `printf %s ${quote(b64(IGNORED_SCRIPT))} | base64 -d > "$work/ignored.mjs"`,
+    ...ATTACHMENT_HELPERS,
     `for repo in ${checkoutPaths.map(path => quote(checkedPath(path))).join(" ")}; do`,
     "  cd -- \"$repo\" 2>/dev/null || exit 0",
     "  total=0; : > \"$work/list\"",
