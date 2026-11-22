@@ -107,9 +107,10 @@ export const TurnContainer = memo(function TurnContainer({
   // the active turn always renders. `auto` in contain-intrinsic-size makes a
   // skipped turn keep its last rendered height instead of the 240px estimate,
   // so hiding and revealing a chat no longer shifts the reading position.
+  // Hover/focus lift the paint clip so the prompt's popup above the turn shows.
   const className = isActive
     ? "zeros-agent-turn zeros-agent-turn-active flex flex-col gap-4 relative [content-visibility:visible] [contain-intrinsic-size:auto_0px_auto_240px]"
-    : "zeros-agent-turn flex flex-col gap-4 relative [content-visibility:auto] [contain-intrinsic-size:auto_0px_auto_240px]";
+    : "zeros-agent-turn flex flex-col gap-4 relative [content-visibility:auto] hover:[content-visibility:visible] focus-within:[content-visibility:visible] [contain-intrinsic-size:auto_0px_auto_240px]";
   // data-checkpoint-id is CheckpointRail's anchor. It sits on this
   // content-visibility boundary because measuring a descendant would force
   // layout of every skipped turn; the prompt is the first child, so their tops
