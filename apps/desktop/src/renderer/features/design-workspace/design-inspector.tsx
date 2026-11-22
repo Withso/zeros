@@ -3587,11 +3587,23 @@ export const DesignInspector = React.memo(function DesignInspector({
               </span>
             </span>
           ) : (
-            <span data-design-inspector-title="" className={cn(componentHeader || optionsTarget?.kind === "main" ? "text-violet-primary" : "text-fg1", "min-w-0 flex-1 truncate text-xs font-medium")}>
-              {componentHeader
-                ? componentHeader.identity
-                : optionsTarget?.kind === "main" ? componentIdentity : missingComponent ? `zd-${missingComponent}` : selectionTitle ?? selectionName}
-            </span>
+            componentHeader && componentHeader.identity.lastIndexOf("/") > 0 ? (
+              // The component's name gives way first, so its variant stays readable.
+              <span data-design-inspector-title="" className="text-violet-primary flex min-w-0 flex-1 text-xs font-medium">
+                <span data-design-inspector-title-identity="" className="min-w-0 truncate">
+                  {componentHeader.identity.slice(0, componentHeader.identity.lastIndexOf("/"))}
+                </span>
+                <span data-design-inspector-title-variant="" className="max-w-1/2 shrink-0 truncate">
+                  {componentHeader.identity.slice(componentHeader.identity.lastIndexOf("/"))}
+                </span>
+              </span>
+            ) : (
+              <span data-design-inspector-title="" className={cn(componentHeader || optionsTarget?.kind === "main" ? "text-violet-primary" : "text-fg1", "min-w-0 flex-1 truncate text-xs font-medium")}>
+                {componentHeader
+                  ? componentHeader.identity
+                  : optionsTarget?.kind === "main" ? componentIdentity : missingComponent ? `zd-${missingComponent}` : selectionTitle ?? selectionName}
+              </span>
+            )
           )}
           {componentHeader ? (
             <Button type="button" variant="ghost" size="compact" data-design-edit-main="" disabled={!componentHeader.component.frame && !active} onClick={editMain}>
@@ -3810,7 +3822,8 @@ export const DesignInspector = React.memo(function DesignInspector({
                   </React.Suspense>
                 </DesignTokenCatalogContext.Provider>
               ) : null}
-              {selectionKind === "main-root" ? null : exportSection}
+              {/* Export is the frame's: an instance offers it, its parts and slots do not. */}
+              {selectionKind === "instance" ? exportSection : null}
               </div>
             </ScrollArea>
           </InertTabsContent>

@@ -136,6 +136,20 @@ export function setDesignSelectionSnapshotReader(
 }
 
 export function notifyDesignSelectionSnapshot(workspaceId: string): void {
+  // A selection restored before its frame was prepared is checked once the
+  // frame is: a part no control drives lands on its instance.
+  const restored = designWorkspaceView(workspaceId).selectedTargets;
+  if (restored.some((target) => target.nodeId && isDesignComponentPartNodeId(target.nodeId))) {
+    const frames = designFrameViews(readSelectionSnapshot(workspaceId));
+    const pruned = selectableDesignTargets(restored, frames);
+    const changed = pruned.length !== restored.length ||
+      pruned.some((target, index) => designSelectionTargetKey(target) !== designSelectionTargetKey(restored[index]!));
+    if (changed) {
+      void selectDesignTargets({ workspaceId, folder: useDesignRuntimeStore.getState().byWorkspace[workspaceId]?.folder ?? "",
+        targets: pruned, frames, explicit: false }).catch(() => {});
+      return;
+    }
+  }
   const demand = selectionDetailDemandByWorkspace.get(workspaceId);
   if (demand) {
     scheduleCurrentSelectionDetailDemand(demand);
@@ -1426,9 +1440,13 @@ export async function selectDesignFrameBodyAtLocation(
     if (!details) return selectFrame();
     // Only a part a control drives, or a slot, can be entered; without
     // bindings no part can (fail closed), and the instance stays selected.
-    const selectable = enteredHost ? designSelectablePartLayers(frame, enteredHost) : null;
-    if (enteredHost && details.oid === enteredHost && runtime.supports?.("getComponentPartAtLoc") && runtime.getComponentPartAtLoc) {
-      const part = await runtime.getComponentPartAtLoc(input.x, input.y, enteredHost, undefined, selectable ?? []);
+    // A deep select (⌘/Ctrl) on an instance reaches its deepest bound part too.
+    const deepHost = !enteredHost && !input.additive && input.intent === "deepest" && frame.instances && Object.hasOwn(frame.instances.hosts, details.oid) &&
+      !frame.instances.hosts[details.oid]!.missing ? details.oid : null;
+    const partHost = enteredHost ?? deepHost;
+    const selectable = partHost ? designSelectablePartLayers(frame, partHost) : null;
+    if (partHost && details.oid === partHost && runtime.supports?.("getComponentPartAtLoc") && runtime.getComponentPartAtLoc) {
+      const part = await runtime.getComponentPartAtLoc(input.x, input.y, partHost, undefined, selectable ?? []);
       if (!isCurrent() || (part && part.sourceVersion !== frame.sourceVersion)) return retryAdoptedClick();
       if (part && designPartSelectable(frame, part.oid)) return selectDesignNode({ ...input, owner, nodeId: part.oid, details: part });
     }
@@ -1796,9 +1814,13 @@ export async function hoverDesignNodeAtLocation(input: {
     details = await runtime.getElementAtLoc(input.x, input.y, {
       mode: "deepest",
     });
-    if (enteredHost && details?.oid === enteredHost && runtime.supports?.("getComponentPartAtLoc") && runtime.getComponentPartAtLoc) {
-      const part = await runtime.getComponentPartAtLoc(input.x, input.y, enteredHost, undefined,
-        designSelectablePartLayers(input.frame, enteredHost) ?? []);
+    // ⌘/Ctrl outlines what a deep select would pick: an instance's deepest bound part.
+    const deepHost = !enteredHost && input.deepest && details && hosts && Object.hasOwn(hosts, details.oid) && !hosts[details.oid]!.missing
+      ? details.oid : null;
+    const partHost = enteredHost ?? deepHost;
+    if (partHost && details?.oid === partHost && runtime.supports?.("getComponentPartAtLoc") && runtime.getComponentPartAtLoc) {
+      const part = await runtime.getComponentPartAtLoc(input.x, input.y, partHost, undefined,
+        designSelectablePartLayers(input.frame, partHost) ?? []);
       if (part && designPartSelectable(input.frame, part.oid)) details = part;
     } else if (details) {
       const snapshot = designRuntimeFrameState(input.workspaceId, input.frame.file)?.snapshot;

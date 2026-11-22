@@ -505,6 +505,57 @@ describe("design selection workflows", () => {
     expect(designWorkspaceView("workspace-a").selectedNodeId).toBe("inst");
   });
 
+  it("deep-selects and deep-hovers an instance's deepest bound part, and the instance when none is under the pointer", async () => {
+    const { designComponentPartNodeId } = await import("@zeros/protocol/design-runtime");
+    const { hoverDesignNodeAtLocation } = await import("../state/design-selection");
+    const send = designComponentPartNodeId("inst", "cc-send");
+    const frame = { ...FRAME, instances: { key: "0".repeat(16),
+      components: { chat: { elements: [], reach: {}, file: "main.html", frame: true, bindings: { layers: { "cc-send": { text: ["label"] } } } } },
+      hosts: { inst: { component: "chat", attributes: {} } } } };
+    const runtime = {
+      sourceVersion: FRAME.sourceVersion,
+      supports: (method: string) => method === "getComponentPartAtLoc",
+      getElementAtLoc: vi.fn(async () => details("inst")),
+      getComponentPartAtLoc: vi.fn(async (x: number) => (x < 20 ? details(send) : null)),
+      getNodeDetails: vi.fn(async (nodeId: string) => details(nodeId)),
+      captureScreenshot: vi.fn(async () => null),
+    };
+    mocks.designFrameRuntime.mockReturnValue(runtime);
+    const input = { workspaceId: "workspace-a", folder: "/design/a", frame, y: 10 };
+    await selectDesignNode({ ...input, nodeId: "other", details: details("other") });
+    await selectDesignFrameBodyAtLocation({ ...input, x: 10, intent: "deepest" });
+    expect(designWorkspaceView("workspace-a").selectedNodeId).toBe(send);
+    expect(runtime.getComponentPartAtLoc).toHaveBeenLastCalledWith(10, 10, "inst", undefined, ["cc-send"]);
+    await selectDesignNode({ ...input, nodeId: "other", details: details("other") });
+    await selectDesignFrameBodyAtLocation({ ...input, x: 30, intent: "deepest" });
+    expect(designWorkspaceView("workspace-a").selectedNodeId).toBe("inst");
+    // ⌘/Ctrl-hover outlines the same target, with one part hit test per move.
+    await selectDesignNode({ ...input, nodeId: "other", details: details("other") });
+    runtime.getComponentPartAtLoc.mockClear();
+    runtime.getElementAtLoc.mockClear();
+    await hoverDesignNodeAtLocation({ ...input, x: 10, deepest: true });
+    expect(useDesignRuntimeStore.getState().byWorkspace["workspace-a"]?.hoveredNodeId).toBe(send);
+    expect(runtime.getElementAtLoc).toHaveBeenCalledTimes(1);
+    expect(runtime.getComponentPartAtLoc).toHaveBeenCalledTimes(1);
+  });
+
+  it("checks a selection restored before its frame was prepared once the frame is", async () => {
+    const { designComponentPartNodeId } = await import("@zeros/protocol/design-runtime");
+    const { notifyDesignSelectionSnapshot } = await import("../state/design-selection");
+    const wrapper = designComponentPartNodeId("inst", "cc-wrapper");
+    const frame = { ...FRAME, instances: { key: "0".repeat(16),
+      components: { chat: { elements: [], reach: {}, file: "main.html", frame: true, bindings: { layers: { "cc-send": { text: ["label"] } } } } },
+      hosts: { inst: { component: "chat", attributes: {} } } } };
+    mocks.designFrameRuntime.mockReturnValue({ sourceVersion: FRAME.sourceVersion, getNodeDetails: vi.fn(async (nodeId: string) => details(nodeId)),
+      captureScreenshot: vi.fn(async () => null) });
+    // Restored while the frame was only described.
+    useDesignWorkspaceUiStore.getState().setSelectedTargets("workspace-a", [{ frame: FRAME.file, nodeId: wrapper }]);
+    expect(designWorkspaceView("workspace-a").selectedNodeId).toBe(wrapper);
+    setDesignSelectionSnapshotReader(() => ({ frames: [frame] }) as never);
+    notifyDesignSelectionSnapshot("workspace-a");
+    await vi.waitFor(() => expect(designWorkspaceView("workspace-a").selectedNodeId).toBe("inst"));
+  });
+
   it("lands a restored selection of a part no control drives on its instance", async () => {
     const { designComponentPartNodeId } = await import("@zeros/protocol/design-runtime");
     const { selectDesignTargets } = await import("../state/design-selection");

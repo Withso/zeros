@@ -85,3 +85,30 @@ describe("a layout action over an instance whose size a control drives", () => {
     expect(designWithoutBoundSize(record, "card", { width: "200px" })).toEqual({ width: "200px" });
   });
 });
+
+describe("size writers on an instance whose width a control drives", () => {
+  const record = { instances: { key: "0".repeat(16),
+    components: { "text-field": { elements: [], reach: {}, file: "tf.html", frame: true, bindings: { root: "tf", layers: { tf: { styles: { width: ["width"] } } } } } },
+    hosts: { inst: { component: "text-field", attributes: {} } } } };
+
+  it("lets a frame-root instance's frame edge size its height and drops only the width a frame edge carries along", async () => {
+    const { designWithoutBoundSize } = await import("../state/design-component-bindings");
+    expect(designWithoutBoundSize(record, "inst", { width: "100%", height: "320px" })).toEqual({ height: "320px" });
+    // East edge: nothing but the frame's own box is left.
+    expect(designWithoutBoundSize(record, "inst", { width: "100%" })).toBeNull();
+  });
+
+  it("resizes the other axis from the keyboard and makes the bound axis's key do nothing", async () => {
+    const { designKeyboardResizeStyles } = await import("../state/design-component-bindings");
+    const gesture = { frame: record, nodeId: "inst", width: 200, height: 40, dw: 10, dh: 5 };
+    expect(designKeyboardResizeStyles(gesture)).toEqual({ height: "45px" });
+    expect(designKeyboardResizeStyles({ ...gesture, nodeId: "plain" })).toEqual({ width: "210px", height: "45px" });
+  });
+
+  it("keeps a group's plain layers and the instance's other axis when the group resizes", async () => {
+    const { designWithoutBoundSize } = await import("../state/design-component-bindings");
+    const group = [["inst", { left: "4px", width: "220px", height: "48px" }], ["plain", { left: "300px", width: "80px", height: "48px" }]] as const;
+    expect(group.map(([nodeId, styles]) => designWithoutBoundSize(record, nodeId, styles))).toEqual([
+      { left: "4px", height: "48px" }, { left: "300px", width: "80px", height: "48px" }]);
+  });
+});

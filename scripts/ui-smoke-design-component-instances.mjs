@@ -164,7 +164,7 @@ export async function runDesignComponentInstancesSmoke({ page, check }) {
   await selectInstance();
   const instanceHeader = await header.innerText();
   check("an instance's one header row names its component/variant with Edit main, and nothing under it",
-    instanceHeader.includes("Chat composer/Default") && instanceHeader.includes("Edit main") &&
+    /Chat composer\s*\/Default/.test(instanceHeader) && instanceHeader.includes("Edit main") &&
       (await line.getAttribute("data-design-component-of")) === "instance" && (await page.locator("[data-design-component-of]").count()) === 1 &&
       (await page.locator("[data-design-component-scope]").count()) === 0,
     instanceHeader);
@@ -424,6 +424,17 @@ export async function runDesignComponentInstancesSmoke({ page, check }) {
   await at(frame("home.html").locator('[data-zd-instance] [data-zd-part="cc-prompt"]'), "dblclick");
   await page.waitForTimeout(300);
   check("a double-click on a layer no control drives keeps the instance selected", (await selected()) === "home-composer", await selected());
+  // ⌘/Ctrl-click on an instance reaches its deepest bound part, or the instance where none is.
+  await canvas.focus();
+  await page.keyboard.press("Escape");
+  await sendPart.click({ modifiers: ["ControlOrMeta"] });
+  await expect.poll(selected).toBe("::zeros-part:home-composer:cc-send");
+  await canvas.focus();
+  await page.keyboard.press("Escape");
+  await page.keyboard.press("Escape");
+  await frame("home.html").locator('[data-zd-instance] [data-zd-part="cc-prompt"]').click({ modifiers: ["ControlOrMeta"] });
+  await expect.poll(selected).toBe("home-composer");
+  check("⌘/Ctrl-click on an instance selects its deepest bound part, and the instance over a layer no control drives", true);
   await at(sendPart, "dblclick");
   await expect(line).toHaveAttribute("data-design-component-of", "part");
   await page.locator("[data-design-edit-main]").click();
@@ -615,7 +626,7 @@ export async function runDesignComponentInstancesSmoke({ page, check }) {
   await expect(rootPanel.locator("[data-design-size-section]")).toHaveCount(1);
   check("a frame-root instance shows its Size and then its Controls, with no tabs",
     (await rootPanel.getByRole("tab").count()) === 0 && (await section.getAttribute("data-design-component-options")) === "instance" &&
-      (await header.innerText()).includes("Chat composer/Default") && (await rootPanel.locator("[data-design-style-panel]").count()) === 0,
+      /Chat composer\s*\/Default/.test(await header.innerText()) && (await rootPanel.locator("[data-design-style-panel]").count()) === 0,
     await header.innerText());
   const rootHeightField = rootPanel.locator("[data-design-size-section]").getByLabel("H", { exact: true });
   await expect(rootHeightField).toBeEnabled();
@@ -633,6 +644,26 @@ export async function runDesignComponentInstancesSmoke({ page, check }) {
   check("resizing a frame-root instance sizes its frame and root in one write, with no refusal",
     (await toasts.count()) === toastsBeforeRootSize && /<zd-chat-composer data-oid="home-composer"[^>]*style="height: 100vh;?"/.test(await home()),
     (await home()).match(/<zd-chat-composer[^>]*>/)?.[0]);
+  // Its width is the Width control's: the frame's south edge still resizes it, quietly.
+  // The size write above swaps the frame's document; drag once it has
+  // settled, with the frame in view (the camera persists across reloads).
+  await quiet();
+  await page.getByLabel("Design canvas", { exact: true }).focus();
+  await page.keyboard.press("Shift+Digit2");
+  await quiet();
+  const southEdge = page.locator('[data-design-frame="home.html"] [aria-label$="from s edge"]').first();
+  const edgeBox = await southEdge.boundingBox();
+  const heightBeforeEdge = await frameHeight();
+  const toastsBeforeEdge = await toasts.count();
+  await page.mouse.move(edgeBox.x + edgeBox.width / 2, edgeBox.y + edgeBox.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(edgeBox.x + edgeBox.width / 2, edgeBox.y + edgeBox.height / 2 + 40, { steps: 8 });
+  await page.mouse.up();
+  await expect.poll(frameHeight).toBeGreaterThan(heightBeforeEdge).catch(() => {});
+  check("a frame-root instance whose width a control drives still resizes from its south edge, with no refusal",
+    (await frameHeight()) > heightBeforeEdge && (await toasts.count()) === toastsBeforeEdge,
+    JSON.stringify({ before: heightBeforeEdge, after: await frameHeight(), edgeBox, toasts: await toasts.allInnerTexts(),
+      ops: await page.evaluate(() => (window.__zerosHarnessWorkbenchOperations ?? []).slice(-5)) }));
   check("a frame-root instance offers no padding or gap handles, and no motion timeline",
     (await page.locator("[data-design-layout-tools-key], [data-design-spacing-hover-zone]").count()) === 0 &&
       (await page.getByRole("button", { name: "Toggle motion timeline" }).isDisabled()));

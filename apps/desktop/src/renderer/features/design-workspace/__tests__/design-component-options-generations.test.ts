@@ -366,6 +366,24 @@ describe("the Options section across new generations of the same target", () => 
     expect(section.querySelector("[data-design-options-ask-add]")?.textContent?.trim()).toBe("Ask agent to add a control");
   });
 
+  it("keeps an instance's variant readable, offers Export on the instance only, and scopes a part's Reset to its own controls", async () => {
+    const record = instances(bound(CHIP), { label: "Go", radius: "12" });
+    await show({ file: "home/page.html", nodeId: "chip-1", sourceVersion: V1, instances: record });
+    const title = container.querySelector<HTMLElement>("[data-design-inspector-title]")!;
+    expect(title.querySelector("[data-design-inspector-title-identity]")?.textContent).toBe("Chip");
+    expect(title.querySelector("[data-design-inspector-title-variant]")?.textContent).toBe("/Default");
+    expect(title.querySelector("[data-design-inspector-title-variant]")!.className).toContain("shrink-0");
+    expect(container.querySelector("[data-design-export-section]")).not.toBeNull();
+    expect(container.querySelector("[data-design-component-actions]")).not.toBeNull();
+
+    await show({ file: "home/page.html", nodeId: designComponentPartNodeId("chip-1", "cc-label"), sourceVersion: V1, instances: record,
+      componentIdentity: { kind: "instance", nodeId: "chip-1" } });
+    expect(container.querySelector("[data-design-export-section]")).toBeNull();
+    expect(container.querySelector("[data-design-component-actions]")).toBeNull();
+    act(() => container.querySelector<HTMLButtonElement>("[data-design-options-reset]")!.click());
+    expect(written().at(-1)!.operations).toEqual([expect.objectContaining({ type: "node.set-attribute", nodeId: "chip-1", attribute: "label", value: null })]);
+  });
+
   it("shows the control that drives an instance's width in Size, in place of W, and not again in Controls", async () => {
     await show({ file: "home/page.html", nodeId: "chip-1", sourceVersion: V1, instances: instances(bound(CHIP)) });
     const size = container.querySelector<HTMLElement>('[data-test-style-editor="size"]')!;

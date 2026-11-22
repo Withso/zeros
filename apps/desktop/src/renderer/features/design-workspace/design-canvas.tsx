@@ -367,7 +367,7 @@ import {
   type DesignCanvasProps,
   type DesignCanvasZoomActions,
 } from "./design-workspace-types";
-import { designBoundSizeAxes, designSelectableLayerTree } from "./state/design-component-bindings";
+import { designBoundSizeAxes, designKeyboardResizeStyles, designSelectableLayerTree, designWithoutBoundSize } from "./state/design-component-bindings";
 
 type DesignCanvasHoverSample = {
   workspaceId: string;
@@ -2954,6 +2954,12 @@ export const DesignCanvas = React.memo(function DesignCanvas({
         return false;
       }
       if (isDesignComponentPartNodeId(selectedNodeDetails.oid)) return true;
+      // An axis a control drives does not resize from the keyboard either:
+      // that key does nothing, and the other axis still resizes.
+      const bound = designBoundSizeAxes(selectedFrame, selectedNodeDetails.oid);
+      if (bound.width) deltaWidth = 0;
+      if (bound.height) deltaHeight = 0;
+      if (!deltaWidth && !deltaHeight) return true;
       const current = nudgeGestureRef.current;
       const gesture: NonNullable<typeof nudgeGestureRef.current> =
         current?.mode === "resize" &&
@@ -2993,10 +2999,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
         frame: gesture.frame.file,
         sourceVersion: gesture.frame.sourceVersion,
         nodeId: gesture.nodeId,
-        styles: preserveDesignLayoutPins(gesture.details, {
-          width: `${Math.max(1, Math.round(gesture.width + gesture.dw))}px`,
-          height: `${Math.max(1, Math.round(gesture.height + gesture.dh))}px`,
-        }),
+        styles: preserveDesignLayoutPins(gesture.details, designKeyboardResizeStyles(gesture)),
       }).catch(() => {});
       return true;
     },
@@ -3066,7 +3069,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
       }
       const updates = gesture.mode === "move"
         ? gesture.nodes.map((node) => ({ nodeId: node.nodeId, styles: designNodeMovementStyles(node.details, { x: gesture.dx, y: gesture.dy }) }))
-        : [{ nodeId: gesture.nodeId, styles: preserveDesignLayoutPins(gesture.details, { width: `${Math.max(1, Math.round(gesture.width + gesture.dw))}px`, height: `${Math.max(1, Math.round(gesture.height + gesture.dh))}px` }) }];
+        : [{ nodeId: gesture.nodeId, styles: preserveDesignLayoutPins(gesture.details, designKeyboardResizeStyles(gesture)) }];
       const operations: DesignOperation[] = updates.map((update) => ({ operationId: crypto.randomUUID(), type: "node.set-styles", nodeId: update.nodeId, styles: update.styles, scope: "auto", responsiveContext: "base", stateContext: "default" }));
       const result = await applyDesignEditCached(workspaceId, gesture.frame, { schemaVersion: 1, transactionId: `desktop:${crypto.randomUUID()}`, actor: { kind: "human", id: "desktop" }, intent: `Move ${updates.length} selected layers`, createdAt: Date.now(), operations }, {
         movementGuard: { sourceVersion: gesture.frame.sourceVersion, geometry: frameGeometry(gesture.frame) },
@@ -3465,8 +3468,12 @@ export const DesignCanvas = React.memo(function DesignCanvas({
             });
         });
       };
+      // A root size a control drives stays the control's: only the other
+      // axis is written, or just the frame's box.
+      const unboundRootStyles = (styles: ReturnType<typeof designFrameResizeRootStyles>) =>
+        styles && resizeRoot ? designWithoutBoundSize(frame, resizeRoot.oid, styles) as typeof styles : styles;
       const previewRootSizing = (geometry: DesignFrameGeometryWire) => {
-        const fixed = designFrameResizeRootStyles(resizeRoot, start, geometry);
+        const fixed = unboundRootStyles(designFrameResizeRootStyles(resizeRoot, start, geometry));
         paintDesignLabelText(
           badge,
           designSizeBadgeText(geometry.w, geometry.h, {
@@ -3745,11 +3752,11 @@ export const DesignCanvas = React.memo(function DesignCanvas({
             }, { isCurrent: ownerIsCurrent, movementGuard: { sourceVersion: acknowledgedFrame.sourceVersion, geometry: frameGeometry(acknowledgedFrame) } });
             return result.snapshot?.frames.find((candidate) => candidate.file === frame.file);
           }
-          const rootStyles = designFrameResizeRootStyles(
+          const rootStyles = unboundRootStyles(designFrameResizeRootStyles(
             resizeRoot,
             start,
             latest,
-          );
+          ));
           if (resizeRoot && rootStyles) {
             // A quick release must not let the drag's preview land after the
             // committed generation.
@@ -5283,12 +5290,12 @@ export const DesignCanvas = React.memo(function DesignCanvas({
           }
         }
       };
+      // An instance's axis a control drives stays the control's; the rest of
+      // the group, and its other axis, still resize.
       const updates = () =>
-        starts.map((start) => {
+        starts.flatMap((start) => {
           const rect = latestRects.get(start.details.oid) ?? start.details.rect;
-          return {
-            nodeId: start.details.oid,
-            styles: preserveDesignLayoutPins(start.details, {
+          const styles = designWithoutBoundSize(frame, start.details.oid, preserveDesignLayoutPins(start.details, {
               position: start.position,
               left: `${Math.round(
                 start.left + rect.x - start.details.rect.x,
@@ -5308,8 +5315,8 @@ export const DesignCanvas = React.memo(function DesignCanvas({
                   rect.height,
                 ),
               )}px`,
-            }),
-          };
+            }));
+          return styles ? [{ nodeId: start.details.oid, styles }] : [];
         });
       // The whole group is one flight: its members must never land a frame apart.
       const loop = createDesignGestureLoop<unknown>({

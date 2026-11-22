@@ -249,10 +249,12 @@ export function DesignComponentOptions({
     void commitDesignInstanceAttributes(workspaceId, frame, instance.nodeId, { "zd-variant": next }, next ? `Use variant ${next}` : "Use Default")
       .catch(failed("the variant"));
   };
-  const reset = instance && instanceState?.resettable
+  // On a part, Reset takes back only the controls listed for it.
+  const resettable = instanceState ? [...instanceState.overridden].filter((name) => !only || only.controls.includes(name)) : [];
+  const reset = instance && resettable.length
     ? () => {
         if (!active) return;
-        const removed: Record<string, null> = Object.fromEntries([...instanceState.overridden].map((name) => [name, null]));
+        const removed: Record<string, null> = Object.fromEntries(resettable.map((name) => [name, null]));
         void commitDesignInstanceAttributes(workspaceId, frame, instance.nodeId, removed, `Reset ${instance.title}`).catch(failed("the controls"));
       }
     : undefined;
@@ -425,19 +427,22 @@ export function DesignComponentOptions({
           <InspectorIconButton label="Reset controls" data-design-options-reset="" disabled={actionDisabled || !reset} onClick={reset}>
             <RotateCcw />
           </InspectorIconButton>
-          <DropdownMenu>
-            <DropdownMenuTrigger asChild>
-              <InspectorIconButton label="More component actions" data-design-component-actions="" disabled={actionDisabled}>
-                <MoreHorizontal />
-              </InspectorIconButton>
-            </DropdownMenuTrigger>
-            <DropdownMenuContent align="end">
-              <DropdownMenuItem disabled={!canResetAll} onSelect={requestResetAll} data-design-reset-all-overrides="">
-                <RotateCcw aria-hidden="true" />
-                Reset all overrides
-              </DropdownMenuItem>
-            </DropdownMenuContent>
-          </DropdownMenu>
+          {/* Reset all is the instance's, not offered from one of its parts. */}
+          {only ? null : (
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <InspectorIconButton label="More component actions" data-design-component-actions="" disabled={actionDisabled}>
+                  <MoreHorizontal />
+                </InspectorIconButton>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end">
+                <DropdownMenuItem disabled={!canResetAll} onSelect={requestResetAll} data-design-reset-all-overrides="">
+                  <RotateCcw aria-hidden="true" />
+                  Reset all overrides
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
+          )}
         </>
       ) : undefined}
     >

@@ -144,3 +144,12 @@ export function designWithoutBoundSize(
     value === null || !((property === "width" && bound.width) || (property === "height" && bound.height))));
   return Object.keys(kept).length ? kept : null;
 }
+
+/** A keyboard resize's styles: each axis a control drives is left out. */
+export function designKeyboardResizeStyles(gesture: { frame: InstancesFrame; nodeId: string; width: number; height: number; dw: number; dh: number }): Record<string, string> {
+  const bound = designBoundSizeAxes(gesture.frame, gesture.nodeId);
+  return {
+    ...(bound.width ? {} : { width: `${Math.max(1, Math.round(gesture.width + gesture.dw))}px` }),
+    ...(bound.height ? {} : { height: `${Math.max(1, Math.round(gesture.height + gesture.dh))}px` }),
+  };
+}

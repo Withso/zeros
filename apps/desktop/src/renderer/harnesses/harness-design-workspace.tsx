@@ -1605,10 +1605,12 @@ async function main() {
         designShortcutOperations.push("frames:confirmed");
         return { type: "WORKSPACE_RESPONSE", result: { snapshot: currentWorkspaceSnapshot } };
       }
-      if (layoutGestureHarness && message.op === "design.canvas.update") {
+      // A frame's box alone, as a frame-root instance's edge writes it when a
+      // control drives the root's size on the other axis.
+      if ((layoutGestureHarness || componentOptionsHarness) && message.op === "design.canvas.update") {
         const params = message.params!;
         designShortcutOperations.push("canvas:waiting");
-        if (!measureManipulationHarness)
+        if (layoutGestureHarness && !measureManipulationHarness)
           await new Promise((resolve) => window.setTimeout(resolve, 700));
         // Record the request, then clamp exactly like the engine route.
         const requests = ((window as typeof window & {
