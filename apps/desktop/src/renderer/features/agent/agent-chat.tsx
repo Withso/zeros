@@ -60,6 +60,7 @@ import {
   usePendingAutoSendAt,
   usePendingComposerAppend,
   type ChatThread,
+  type ChatEffort,
 } from "../../state/store";
 import { newChatId } from "../../state/chat-id";
 import { retryAgentTurn, warmRetryTranscript } from "./retry-agent-turn";
@@ -1335,7 +1336,7 @@ function AgentChatBody({
   );
 
   const applyModelInPlace = useCallback(
-    (v: string | null) => {
+    (v: string | null, override?: { effort: ChatEffort; fast: boolean }) => {
       if (!chatThread) return;
       if (chatId) {
         const store = useSessionsStore.getState();
@@ -1346,7 +1347,7 @@ function AgentChatBody({
         v,
         session.initialize,
       );
-      updateChatSettings({ model: v, ...configuration });
+      updateChatSettings({ model: v, ...configuration, ...override });
       // Apply to the LIVE session too, so the change takes effect on the
       // next turn instead of only on a rebuild.
       if (v) session.setModel?.(v);
@@ -1369,8 +1370,10 @@ function AgentChatBody({
   const cloudChat = isCloudWorkspace(chatThread?.folder);
   // A send that waits for the running turn before it changes harness, then the
   // send the new harness receives with its handoff once the chat names it.
-  const heldSwitchSendRef = useRef<string | null>(null);
-  const switchedSendRef = useRef<{ chatId: string; agentId: string; handoff: string } | null>(null);
+  const heldSwitchSendRef = useRef<{ chatId: string; generation: number | undefined } | null>(null);
+  // Kept until a prompt carrying it is accepted, so a slash command or a failed
+  // send doesn't drop the conversation.
+  const switchedSendRef = useRef<{ chatId: string; agentId: string; handoff: string; auto: boolean } | null>(null);
   const [switchSendTick, setSwitchSendTick] = useState(0);
 
   const recordSwitchRow = useCallback(
@@ -1413,7 +1416,7 @@ function AgentChatBody({
       meta: { title: sourceLabel, folder: chatThread.folder },
     });
     const born = newChatBornDefaults(pick.agentId);
-    const { effort, fast } = resolveModelConfiguration(pick.agentId, pick.model, null);
+    const { effort, fast } = pick.configuration ?? resolveModelConfiguration(pick.agentId, pick.model, null);
     // The read above observes the engine before the row is written, so the
     // handoff is the conversation the previous agent saw.
     const snapshot = await transcript.catch((error) => {
@@ -1481,7 +1484,7 @@ function AgentChatBody({
       to: pick,
       now: Date.now(),
     });
-    applyModelInPlace(pick.model);
+    applyModelInPlace(pick.model, pick.configuration);
     void recordSwitchRow(chatId, row, true);
   }, [chatThread, chatId, applyModelInPlace, recordSwitchRow]);
 
@@ -1505,13 +1508,18 @@ function AgentChatBody({
           initialize={stagedPick && isHarnessChange(chatThread.agentId, stagedPick.agentId) ? null : session.initialize}
           onRefreshModels={isCloudWorkspace(chatThread.folder) ? session.refreshModelCatalog : undefined}
           value={stagedPick ? stagedPick.model : chatThread.model}
-          effort={chatThread.effort}
-          fast={!!chatThread.fast}
+          effort={stagedPick?.configuration?.effort ?? chatThread.effort}
+          fast={stagedPick?.configuration?.fast ?? !!chatThread.fast}
           onSelectAgentModel={(sel) => {
             if (conversationStarted) stagePick(sel);
             else switchAgentModel(sel);
           }}
           onConfigure={({ effort, fast }) => {
+            // A staged pick's settings wait for it; the running harness keeps its own.
+            if (stagedPick) {
+              stagePick({ ...stagedPick, configuration: { effort, fast } });
+              return;
+            }
             const effortChanged = effort !== chatThread.effort;
             updateChatSettings({ effort, fast });
             session.updateConfig?.();
@@ -1519,7 +1527,9 @@ function AgentChatBody({
           }}
           onChange={(v) => {
             if (conversationStarted && v && chatThread.agentId) {
-              stagePick({ agentId: chatThread.agentId, agentName: chatThread.agentName, model: v });
+              stagePick(stagedPick
+                ? { agentId: stagedPick.agentId, agentName: stagedPick.agentName, model: v }
+                : { agentId: chatThread.agentId, agentName: chatThread.agentName, model: v });
             } else {
               applyModelInPlace(v);
             }
@@ -3897,12 +3907,17 @@ function AgentChatBody({
     extras?: Parameters<typeof runSend>[1],
     recordActivity = true,
   ): Promise<boolean> => {
+    const handoff = switchedSendRef.current;
+    if (handoff && handoff.chatId === chatId && handoff.agentId === chatThread?.agentId) {
+      return sendWithHandoff(handoff, extras, recordActivity);
+    }
     if (!readOnly && !sendInFlightRef.current && stagedPick && chatId) {
       const pick = stagedPick;
       const composer = serializeComposerState();
       const action = stagedPickOnSend({
         harnessChanged: isHarnessChange(chatThread?.agentId, pick.agentId),
-        hasDraft: !!composer && (!!composer.displayText.trim() || composer.attachments.length > 0),
+        hasDraft: designFrameContext.hasContext ||
+          (!!composer && (!!composer.displayText.trim() || composer.attachments.length > 0)),
         queuedCount: queuedMessages.length,
         running: composerStreaming,
         behavior: extras?.followUpBehavior ?? getFollowUpBehavior(),
@@ -3913,7 +3928,7 @@ function AgentChatBody({
         return false;
       }
       if (action === "hold") {
-        heldSwitchSendRef.current = chatId;
+        heldSwitchSendRef.current = { chatId, generation: agentSessions.getSendGeneration(chatId) };
         setSwitchSendTick((n) => n + 1);
         toast.info(`Sends to ${pickLabel(pick)} when this turn finishes.`, { id: `switch-held-${chatId}` });
         return false;
@@ -3923,7 +3938,7 @@ function AgentChatBody({
         try {
           const handoff = await switchHarness(pick, action === "restart");
           if (handoff === null) return false;
-          switchedSendRef.current = { chatId, agentId: pick.agentId, handoff };
+          switchedSendRef.current = { chatId, agentId: pick.agentId, handoff, auto: true };
           setSwitchSendTick((n) => n + 1);
         } finally {
           sendInFlightRef.current = false;
@@ -3934,10 +3949,23 @@ function AgentChatBody({
     return handleSend(undefined, extras, recordActivity);
   };
 
-  // A switch waits for the running turn, so the previous agent is never cut off.
+  const sendWithHandoff = async (
+    handoff: { chatId: string; agentId: string; handoff: string; auto: boolean },
+    extras?: Parameters<typeof runSend>[1],
+    recordActivity = true,
+  ): Promise<boolean> => {
+    const sent = await handleSend(undefined, { ...extras, handoffContext: handoff.handoff }, recordActivity);
+    if (sent && switchedSendRef.current === handoff) switchedSendRef.current = null;
+    return sent;
+  };
+
+  // A switch waits for the running turn, so the previous agent is never cut
+  // off. Stop cancels the held send with the turn.
   useEffect(() => {
-    if (!chatId || heldSwitchSendRef.current !== chatId || composerStreaming) return;
+    const held = heldSwitchSendRef.current;
+    if (!chatId || held?.chatId !== chatId || composerStreaming) return;
     heldSwitchSendRef.current = null;
+    if (held.generation !== agentSessions.getSendGeneration(chatId)) return;
     void submitComposer();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [chatId, composerStreaming, switchSendTick]);
@@ -3946,9 +3974,9 @@ function AgentChatBody({
   // the conversation hidden in the prompt.
   useEffect(() => {
     const pending = switchedSendRef.current;
-    if (!pending || pending.chatId !== chatId || pending.agentId !== chatThread?.agentId) return;
-    switchedSendRef.current = null;
-    void handleSend(undefined, { handoffContext: pending.handoff });
+    if (!pending?.auto || pending.chatId !== chatId || pending.agentId !== chatThread?.agentId) return;
+    pending.auto = false;
+    void sendWithHandoff(pending);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [switchSendTick, chatId, chatThread?.agentId]);
 

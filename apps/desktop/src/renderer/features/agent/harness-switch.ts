@@ -3,6 +3,7 @@
 
 import type { AgentToolMessage } from "./use-agent-session";
 import type { TranscriptMode } from "./transcript-format";
+import type { ChatEffort } from "../../state/store";
 import { agentFamily, displayNameForModelValue } from "./model-catalog";
 
 export const HARNESS_SWITCH_TOOL_KIND = "harness_switch";
@@ -11,6 +12,8 @@ export interface AgentModelPick {
   agentId: string;
   agentName?: string | null;
   model: string | null;
+  /** Set when the user configures a staged pick; applied with it on send. */
+  configuration?: { effort: ChatEffort; fast: boolean };
 }
 
 /** The transcript the next harness is seeded with: the conversation and
