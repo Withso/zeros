@@ -269,7 +269,7 @@ async function notify(
 }
 
 async function assertAccountCloudPurgeReady(tx: Tx, userId: string): Promise<void> {
-  const pending=await tx.query("SELECT 1 FROM cloud_v2_workspaces WHERE creator_user_id=$1 AND state<>'deleted' LIMIT 1 FOR UPDATE",[userId]);
+  const pending=await tx.query("SELECT 1 FROM cloud_v2_workspaces WHERE (creator_user_id=$1 OR private_owner_user_id=$1) AND state<>'deleted' LIMIT 1 FOR UPDATE",[userId]);
   if(pending.rowCount) throw new Error("account_cloud_deletion_not_verified");
 }
 
@@ -281,6 +281,10 @@ async function assertOrganizationCloudPurgeReady(tx: Tx, organizationId: string)
      OR (builder_sandbox_id IS NOT NULL AND builder_deleted_at IS NULL)
      OR snapshot_id IS NOT NULL OR snapshot_deleted_at IS NULL) LIMIT 1 FOR UPDATE`,[organizationId]);
   if(computers.rowCount) throw new Error("organization_cloud_computer_deletion_not_verified");
+  // Retention S4: a ready copy's machine is the organization's too; the purge waits for the copy builder's cleanup.
+  const copies=await tx.query(`SELECT 1 FROM cloud_v2_ready_copies WHERE org_id=$1 AND
+    (state IN ('building','ready') OR machine_pending OR (machine_id IS NOT NULL AND machine_deleted_at IS NULL)) LIMIT 1`,[organizationId]);
+  if(copies.rowCount) throw new Error("organization_cloud_copy_deletion_not_verified");
 }
 
 async function insertDeletionRequest(
@@ -1235,6 +1239,8 @@ function lifecycleRetryMs(attempt: number): number {
 
 const ORGANIZATION_PURGE_READINESS_ERRORS = new Set([
   "organization_cloud_deletion_not_verified", "account_cloud_deletion_not_verified",
+  // Retention S4: the copy builder's cleanup deletes a retired copy's machine shortly; the purge waits for it.
+  "organization_cloud_copy_deletion_not_verified",
 ]);
 
 /** Durable final-erasure worker. It never runs before `purge_after`; provider

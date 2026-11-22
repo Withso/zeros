@@ -76,6 +76,9 @@ export const CLOUD_V2_INACTIVE_ARCHIVE_MS = 30 * 24 * 60 * 60_000;
 /** The archive scan's cadence and per-run bound, oldest clock first: 200 an hour is 4,800 a day. */
 export const CLOUD_V2_ARCHIVE_SCAN_MS = 60 * 60_000;
 export const CLOUD_V2_ARCHIVE_BATCH = 200;
+/** Retention S4: missed wakes named per run (then counted), and backup prefixes listed per orphan-sweep run. */
+const CLOUD_V2_MISSED_WAKE_NAMED = 50;
+const CLOUD_V2_ORPHAN_PAGE = 1_000;
 const CLOUD_V2_RETENTION_CLOCK_BATCH = 5_000;
 export const CLOUD_V2_MAINTENANCE_PER_DAY = 120;
 /** A maintenance wake's own lease: if our stop fails, Boat archives the machine after this. */
@@ -137,6 +140,8 @@ export type CloudV2TimingRecord = {
   due?: number; overdue?: number; expired?: number; unreachable?: number;
   /** archive_scan: workspaces archived for inactivity this run. */
   archived?: number;
+  /** archive_scan: backups removed this run (S4). */
+  removed?: number;
   /** maintenance_wake: how it ended. */
   outcome?: "stopped" | "adopted" | "gone" | "failed";
 } & ({
@@ -158,7 +163,9 @@ export type CloudV2LifecycleDeps = {
     // Retention (`retention`); absent from older compositions, which never enable it.
     | "recordStopProbe" | "restoreForkRefused" | "replaceLostSandbox" | "workspaceBranches" | "recordLostWork"
     | "claimMaintenanceWake" | "beginMaintenanceStop" | "adoptMaintenance" | "maintenanceHeld" | "finishMaintenance"
-    | "startRetentionClocks" | "archiveInactive" | "archiveDepartedPrivate" | "restoreReturningPrivate" | "archiveForSystem" | "clearArchiveScrub" | "clearStaleMaintenance" | "maintenanceBacklog" | "keepLostMachine">;
+    | "startRetentionClocks" | "archiveInactive" | "archiveDepartedPrivate" | "restoreReturningPrivate" | "archiveForSystem" | "clearArchiveScrub"
+    | "claimBackupRemovals" | "pendingBackupRemovals" | "finishBackupRemoval" | "sweepDepartedProjects" | "deleteDepartedProjects" | "missedWakes"
+    | "accountCheckpointPrefixes" | "clearStaleMaintenance" | "maintenanceBacklog" | "keepLostMachine">;
   /** Optional for older compositions; the shipped store always provides it. */
   prompts?: CloudV2Store["prompts"];
   pruneEnvironments?: () => Promise<void>;
@@ -957,11 +964,80 @@ export class CloudV2Lifecycle {
     const { store } = this.deps;
     await store.restoreReturningPrivate(CLOUD_V2_ARCHIVE_BATCH);
     for (const id of await store.archiveDepartedPrivate(CLOUD_V2_ARCHIVE_BATCH)) await store.archiveForSystem(id);
+    // A departed member's build secrets never wait, whatever the switch (as the membership trigger).
+    await store.sweepDepartedProjects(CLOUD_V2_ARCHIVE_BATCH);
     if (!this.retention) return;
     await store.startRetentionClocks(CLOUD_V2_RETENTION_CLOCK_BATCH);
     const { archived } = await store.archiveInactive({ inactiveMs: CLOUD_V2_INACTIVE_ARCHIVE_MS, limit: CLOUD_V2_ARCHIVE_BATCH });
     if (archived.length) this.deps.logger?.warn(`[cloud-v2] archived ${archived.length} inactive workspace(s)`);
-    emitCloudV2Timing(this.deps.timing, { workspaceId: "-", phase: "archive_scan", durationMs: 0, archived: archived.length });
+    const removed = await this.removeBackups();
+    const projects = await store.deleteDepartedProjects(CLOUD_V2_ARCHIVE_BATCH);
+    if (projects.length) this.deps.logger?.warn(`[cloud-v2] deleted ${projects.length} departed member's personal project(s)`);
+    await this.alertMissedWakes();
+    await this.sweepOrphanBackups();
+    emitCloudV2Timing(this.deps.timing, { workspaceId: "-", phase: "archive_scan", durationMs: 0, archived: archived.length, removed });
+  }
+
+  /** Retention S4: an archived workspace's backup at its removal date. Phase one clears the row (no key is left
+   * for an object about to go) and records the object; phase two deletes the workspace's objects, keeping the one
+   * a later stop may have uploaded since (the row's current object), and waits while an upload is in flight. */
+  private async removeBackups(): Promise<number> {
+    const { store } = this.deps, storage = this.deps.checkpoints?.storage;
+    if (!storage) return 0;
+    await store.claimBackupRemovals(CLOUD_V2_ARCHIVE_BATCH);
+    let removed = 0;
+    for (const removal of await store.pendingBackupRemovals(CLOUD_V2_ARCHIVE_BATCH)) {
+      if (removal.uploadsUntil && Date.parse(removal.uploadsUntil) > (this.deps.now?.() ?? Date.now())) continue;
+      try {
+        await storage.prune(removal.workspaceId, removal.current ? [removal.current] : []);
+        await store.finishBackupRemoval(removal.id);
+        removed++;
+      } catch (error) {
+        this.deps.logger?.warn(`[cloud-v2] backup removal failed (${errorCode(error)}) workspace=${removal.workspaceId.slice(0, 8)}`);
+      }
+    }
+    return removed;
+  }
+
+  /** Retention S4's alert: a sleeping machine more than 12 days past its last stop, so its 10-day wake did not
+   * happen, once per stop. Named up to a bound, then counted. */
+  private async alertMissedWakes(): Promise<void> {
+    const { ids, total } = await this.deps.store.missedWakes(CLOUD_V2_MISSED_WAKE_NAMED);
+    if (!ids.length) return;
+    const alert = (this.deps.logger?.error ?? this.deps.logger?.warn)?.bind(this.deps.logger);
+    for (const id of ids) alert?.(`[cloud-v2] missed maintenance wake: machine past 12 days since its last stop workspace=${id.slice(0, 8)}`);
+    if (total > ids.length) alert?.(`[cloud-v2] missed maintenance wakes: ${total} in all, ${ids.length} named this run`);
+  }
+
+  private orphanCursor: string | undefined;
+  private orphanUnknown = { count: 0, ids: [] as string[], unparsed: 0 };
+  private nextOrphanReport = -Infinity;
+  /** Retention S4's orphan sweep, a page a run: prunes only a prefix whose workspace row exists and has been
+   * deleted for 7 days. A prefix with no row at all is never deleted, only counted and reported once a day (with up
+   * to 20 ids) for a person to look at; one that is not a workspace id is skipped and counted. Refuses to run at
+   * all while the listing has prefixes but the workspaces table is empty (a restored or partial database). */
+  private async sweepOrphanBackups(): Promise<void> {
+    const storage = this.deps.checkpoints?.storage;
+    if (!storage?.workspacePrefixes) return;
+    const page = await storage.workspacePrefixes(this.orphanCursor, CLOUD_V2_ORPHAN_PAGE);
+    this.orphanCursor = page.next;
+    const { prunable, missing, empty } = await this.deps.store.accountCheckpointPrefixes(page.ids);
+    const alert = (this.deps.logger?.error ?? this.deps.logger?.warn)?.bind(this.deps.logger);
+    if (empty && (page.ids.length || page.unparsed)) {
+      alert?.(`[cloud-v2] backup orphan sweep refused: ${page.ids.length + page.unparsed} prefix(es) listed but no workspace row exists`);
+      return;
+    }
+    for (const id of prunable) await storage.prune(id).catch(error =>
+      this.deps.logger?.warn(`[cloud-v2] orphan backup prune failed (${errorCode(error)}) workspace=${id.slice(0, 8)}`));
+    this.orphanUnknown.count += missing.length; this.orphanUnknown.unparsed += page.unparsed;
+    for (const id of missing) if (this.orphanUnknown.ids.length < 20) this.orphanUnknown.ids.push(id);
+    const now = this.deps.now?.() ?? Date.now();
+    if (now >= this.nextOrphanReport && (this.orphanUnknown.count || this.orphanUnknown.unparsed)) {
+      this.nextOrphanReport = now + 24 * 60 * 60_000;
+      alert?.(`[cloud-v2] backup objects with no workspace row: ${this.orphanUnknown.count} prefix(es), kept`
+        + ` (${this.orphanUnknown.ids.join(",")}); ${this.orphanUnknown.unparsed} prefix(es) not a workspace id, skipped`);
+      this.orphanUnknown = { count: 0, ids: [], unparsed: 0 };
+    }
   }
 
   /** Once an hour: how far the maintenance budget is from what is due. A workspace the budget cannot

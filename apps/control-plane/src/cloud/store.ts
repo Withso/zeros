@@ -1880,6 +1880,112 @@ export class CloudV2Store {
     });
   }
 
+  /** Retention S4, phase one of a backup's removal: for up to `limit` archived, sleeping workspaces whose removal
+   * date has come, one statement clears the row's backup (object, sealed key, digest) and records the object for
+   * deletion. Rechecks the archive and the sleeping state in that statement, so an open in flight keeps its backup. */
+  async claimBackupRemovals(limit: number): Promise<{ id: string; workspaceId: string; object: string }[]> {
+    const { rows } = await withSystemTx(this.pool, tx => tx.query<{ id: string; workspace_id: string; object: string }>(
+      `WITH due AS MATERIALIZED (
+         SELECT w.id, w.checkpoint_object AS object FROM cloud_v2_workspaces w
+         WHERE w.archived_at IS NOT NULL AND w.state IN ('stopped','failed') AND w.checkpoint_object IS NOT NULL
+           AND w.retention_started_at IS NOT NULL AND ${CLOUD_V2_BACKUP_REMOVAL_AT_SQL} <= clock_timestamp()
+           AND w.maintenance_attempt IS NULL AND NOT w.restore_pending AND w.checkpoint_retry_fork IS NULL
+         ORDER BY ${CLOUD_V2_BACKUP_REMOVAL_AT_SQL} LIMIT $1 FOR UPDATE SKIP LOCKED
+       ), cleared AS (
+         UPDATE cloud_v2_workspaces w SET checkpoint_object=NULL, checkpoint_key=NULL, checkpoint_sha256=NULL, checkpoint_bytes=NULL,
+             checkpoint_saved_at=NULL, checkpoint_reuse=NULL, checkpoint_stop_generation=NULL
+           FROM due WHERE w.id=due.id AND w.archived_at IS NOT NULL AND w.state IN ('stopped','failed') AND w.checkpoint_object=due.object
+           AND NOT w.restore_pending
+           RETURNING w.id, due.object
+       )
+       INSERT INTO cloud_v2_backup_removals (workspace_id, object) SELECT id, object FROM cleared
+       RETURNING id, workspace_id, object`, [limit]));
+    return rows.map(row => ({ id: row.id, workspaceId: row.workspace_id, object: row.object }));
+  }
+
+  /** Phase two's work list: recorded removals not yet done, with the object the row holds now (a later stop's,
+   * which the prune must keep) and the upload horizon (an upload in flight waits). */
+  async pendingBackupRemovals(limit: number): Promise<{ id: string; workspaceId: string; object: string; current: string | null; uploadsUntil: string | null }[]> {
+    const { rows } = await withSystemTx(this.pool, tx => tx.query<{ id: string; workspace_id: string; object: string; current: string | null; checkpoint_uploads: Record<string, string> }>(
+      `SELECT r.id, r.workspace_id, r.object, w.checkpoint_object AS current, w.checkpoint_uploads
+       FROM cloud_v2_backup_removals r JOIN cloud_v2_workspaces w ON w.id=r.workspace_id
+       WHERE r.done_at IS NULL ORDER BY r.requested_at LIMIT $1`, [limit]));
+    return rows.map(row => ({ id: row.id, workspaceId: row.workspace_id, object: row.object, current: row.current,
+      uploadsUntil: uploadHorizon(row.checkpoint_uploads) }));
+  }
+
+  async finishBackupRemoval(id: string): Promise<void> {
+    await withSystemTx(this.pool, tx => tx.query("UPDATE cloud_v2_backup_removals SET done_at=clock_timestamp() WHERE id=$1 AND done_at IS NULL", [id]));
+  }
+
+  /** Retention S4: a departed member's personal projects in an organization, as the membership trigger leaves them
+   * (their build secrets deleted, the project stamped), for any the trigger skipped; and a returned member's, the
+   * stamp cleared. Only that member's own personal projects. */
+  async sweepDepartedProjects(limit: number): Promise<void> {
+    await withSystemTx(this.pool, async tx => {
+      const away = `p.level='personal' AND NOT EXISTS (SELECT 1 FROM organization_members m WHERE m.org_id=p.org_id AND m.user_id=p.owner_user_id)`;
+      await tx.query(`DELETE FROM cloud_v2_ready_copy_secrets s WHERE s.project_id IN (SELECT p.id FROM cloud_projects p WHERE ${away} LIMIT $1)`, [limit]);
+      await tx.query(`UPDATE cloud_projects SET owner_left_at=clock_timestamp()
+        WHERE id IN (SELECT p.id FROM cloud_projects p WHERE p.owner_left_at IS NULL AND ${away} LIMIT $1 FOR UPDATE SKIP LOCKED)`, [limit]);
+      await tx.query(`UPDATE cloud_projects SET owner_left_at=NULL, retention_started_at=NULL
+        WHERE id IN (SELECT p.id FROM cloud_projects p WHERE p.owner_left_at IS NOT NULL AND p.level='personal'
+          AND EXISTS (SELECT 1 FROM organization_members m WHERE m.org_id=p.org_id AND m.user_id=p.owner_user_id) LIMIT $1 FOR UPDATE SKIP LOCKED)`, [limit]);
+    });
+  }
+
+  /** Retention S4: a departed member's personal project is deleted 60 days after the later of their departure and
+   * retention's first look at it (no clock from history). Its workspaces keep running without it, as when a
+   * project is removed; its copy was retired at the departure. */
+  async deleteDepartedProjects(limit: number): Promise<string[]> {
+    return withSystemTx(this.pool, async tx => {
+      await tx.query(`UPDATE cloud_projects SET retention_started_at=clock_timestamp()
+        WHERE id IN (SELECT id FROM cloud_projects WHERE owner_left_at IS NOT NULL AND retention_started_at IS NULL LIMIT $1 FOR UPDATE SKIP LOCKED)`, [limit]);
+      const { rows } = await tx.query<{ id: string }>(`SELECT p.id FROM cloud_projects p
+        WHERE p.owner_left_at IS NOT NULL AND p.retention_started_at IS NOT NULL
+          AND greatest(p.owner_left_at, p.retention_started_at) + make_interval(days => ${CLOUD_V2_BACKUP_REMOVAL_DAYS}) <= clock_timestamp()
+          AND NOT EXISTS (SELECT 1 FROM organization_members m WHERE m.org_id=p.org_id AND m.user_id=p.owner_user_id)
+        LIMIT $1 FOR UPDATE SKIP LOCKED`, [limit]);
+      const ids = rows.map(row => row.id);
+      if (!ids.length) return [];
+      await tx.query("UPDATE cloud_v2_workspaces SET project_id=NULL WHERE project_id = ANY($1::uuid[])", [ids]);
+      await tx.query("DELETE FROM cloud_projects WHERE id = ANY($1::uuid[])", [ids]);
+      return ids;
+    });
+  }
+
+  /** Retention S4's missed-wake alert: sleeping machines more than 12 days past their last stop, with no wake that
+   * found them gone since, alerted once per stop. Returns those newly alerted (at most `limit`) and how many are due. */
+  async missedWakes(limit: number): Promise<{ ids: string[]; total: number }> {
+    return withSystemTx(this.pool, async tx => {
+      const due = `w.state='stopped' AND w.boat_sandbox_id IS NOT NULL AND w.retention_started_at IS NOT NULL
+        AND greatest(w.machine_stopped_at, w.stopped_at) + interval '12 days' < clock_timestamp()
+        AND w.machine_data_expired_at IS NULL
+        AND NOT (w.archived_at IS NOT NULL AND w.archive_wake_done_at IS NOT NULL AND w.archive_wake_done_at >= w.archived_at)
+        AND NOT EXISTS (SELECT 1 FROM cloud_v2_maintenance_wakes m WHERE m.workspace_id=w.id AND m.kind='wake' AND m.outcome='gone'
+          AND m.started_at > greatest(w.machine_stopped_at, w.stopped_at))
+        AND (w.missed_wake_alerted_at IS NULL OR w.missed_wake_alerted_at < greatest(w.machine_stopped_at, w.stopped_at))`;
+      const total = (await tx.query<{ n: number }>(`SELECT count(*)::int AS n FROM cloud_v2_workspaces w WHERE ${due}`)).rows[0]!.n;
+      const { rows } = await tx.query<{ id: string }>(`UPDATE cloud_v2_workspaces SET missed_wake_alerted_at=clock_timestamp()
+        WHERE id IN (SELECT w.id FROM cloud_v2_workspaces w WHERE ${due} ORDER BY greatest(w.machine_stopped_at, w.stopped_at) LIMIT $1 FOR UPDATE SKIP LOCKED)
+        RETURNING id`, [limit]);
+      return { ids: rows.map(row => row.id), total };
+    });
+  }
+
+  /** Retention S4's orphan sweep: of these listed prefixes, which may be pruned (their workspace row exists and has
+   * been deleted for 7 days) and which have no row at all (never touched; reported). `empty`: the workspaces table
+   * has no row, so a listing must not be trusted at all. */
+  async accountCheckpointPrefixes(ids: readonly string[]): Promise<{ prunable: string[]; missing: string[]; empty: boolean }> {
+    return withSystemTx(this.pool, async tx => {
+      const empty = !(await tx.query("SELECT 1 FROM cloud_v2_workspaces LIMIT 1")).rowCount;
+      const { rows } = await tx.query<{ id: string; state: string; old: boolean }>(
+        `SELECT id::text, state, updated_at < clock_timestamp() - interval '7 days' AS old FROM cloud_v2_workspaces WHERE id = ANY($1::uuid[])`, [ids]);
+      const known = new Map(rows.map(row => [row.id, row]));
+      return { empty, prunable: ids.filter(id => known.get(id)?.state === "deleted" && known.get(id)?.old),
+        missing: ids.filter(id => !known.has(id)) };
+    });
+  }
+
   /** Retention S3: the scrub's environment files are back on the machine; a later start restores nothing. */
   async clearArchiveScrub(id: string, generation: string): Promise<void> {
     await withSystemTx(this.pool, tx => tx.query(

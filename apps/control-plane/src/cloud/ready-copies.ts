@@ -362,7 +362,15 @@ export class CloudV2ReadyCopies {
           SELECT 1 FROM organization_members m JOIN users u ON u.id=m.user_id AND u.auth_status='active' AND u.deleted_at IS NULL
           WHERE m.org_id=p.org_id AND m.user_id=p.owner_user_id)))
         ORDER BY c.id FOR UPDATE OF c)`));
-    return (rowCount ?? 0) + (orphans.rowCount ?? 0);
+    // Retention S4: a copy of a project with a repository on a GitHub App that was uninstalled (a removed connection's
+    // row is retired by its delete trigger, 0265). Its machine holds that repository's clone.
+    const uninstalled = await this.tx(tx => tx.query(`UPDATE cloud_v2_ready_copies SET state=CASE WHEN state='building' THEN 'failed' ELSE 'retired' END,
+        failure_reason=CASE WHEN state='building' THEN 'connection_removed' ELSE failure_reason END, updated_at=clock_timestamp()
+      WHERE id IN (SELECT c.id FROM cloud_v2_ready_copies c WHERE c.state IN ('building','ready')
+        AND EXISTS (SELECT 1 FROM cloud_project_repositories r JOIN cloud_github_installations i ON i.id=r.connection
+          WHERE r.project_id=c.project_id AND i.state='uninstalled')
+        ORDER BY c.id FOR UPDATE OF c)`));
+    return (rowCount ?? 0) + (orphans.rowCount ?? 0) + (uninstalled.rowCount ?? 0);
   }
 
   /** Past READY_COPY_HISTORY_LIMIT generations a row keeps its result, not its detail. */

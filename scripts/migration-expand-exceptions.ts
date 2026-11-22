@@ -2,6 +2,61 @@ import { createHash } from "node:crypto";
 
 // Each reviewed migration lists its exact exempted statements by rule.
 const reviewed: Readonly<Record<string, Readonly<Record<string, readonly string[]>>>> = {
+  "0265_cloud_v2_retention_removal.sql": {
+    "privilege-tightening": ["REVOKE ALL ON FUNCTION cloud_v2_retire_disconnected_copies() FROM PUBLIC;"],
+    "departed-private-projects": [`CREATE OR REPLACE FUNCTION cloud_v2_archive_departed_private() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER
+SET search_path = pg_catalog, public, pg_temp AS $$
+DECLARE previous_system text := current_setting('app.system',true);
+BEGIN
+  PERFORM set_config('app.system','on',true);
+  BEGIN
+    UPDATE public.cloud_v2_workspaces w SET archived_at = clock_timestamp(), archive_reason = 'member_left', keep_set_at = NULL, keep_set_by = NULL
+      WHERE w.id IN (SELECT c.id FROM public.cloud_v2_workspaces c
+        WHERE c.org_id = OLD.org_id AND c.private_owner_user_id = OLD.user_id AND c.state NOT IN ('deleting', 'deleted')
+          AND c.archived_at IS NULL
+        FOR UPDATE SKIP LOCKED);
+    DELETE FROM public.cloud_v2_ready_copy_secrets s
+      WHERE s.project_id IN (SELECT p.id FROM public.cloud_projects p
+        WHERE p.org_id = OLD.org_id AND p.level = 'personal' AND p.owner_user_id = OLD.user_id);
+    UPDATE public.cloud_projects p SET owner_left_at = coalesce(p.owner_left_at, clock_timestamp())
+      WHERE p.id IN (SELECT q.id FROM public.cloud_projects q
+        WHERE q.org_id = OLD.org_id AND q.level = 'personal' AND q.owner_user_id = OLD.user_id
+        FOR UPDATE SKIP LOCKED);
+  EXCEPTION WHEN OTHERS THEN NULL; -- Never fails the removal: the lifecycle's sweep does what this skipped.
+  END;
+  PERFORM set_config('app.system',coalesce(previous_system,''),true);
+  RETURN NULL;
+END;
+$$;`],
+    "returning-private-projects": [`CREATE OR REPLACE FUNCTION cloud_v2_restore_returning_private() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER
+SET search_path = pg_catalog, public, pg_temp AS $$
+DECLARE previous_system text := current_setting('app.system',true);
+  previous_ownership text := current_setting('app.cloud_team_ownership',true);
+BEGIN
+  PERFORM set_config('app.system','on',true);
+  PERFORM set_config('app.cloud_team_ownership','1',true);
+  BEGIN
+    UPDATE public.cloud_v2_workspaces w SET creator_user_id = NEW.user_id
+      WHERE w.id IN (SELECT c.id FROM public.cloud_v2_workspaces c
+        WHERE c.org_id = NEW.org_id AND c.private_owner_user_id = NEW.user_id AND c.creator_user_id IS NULL
+          AND c.creator_absent_reason = 'left' AND c.state NOT IN ('deleting', 'deleted')
+          AND EXISTS (SELECT 1 FROM public.users u WHERE u.id = NEW.user_id AND u.auth_status = 'active' AND u.deleted_at IS NULL)
+          AND NOT public.organization_member_on_hold(NEW.org_id, NEW.user_id, 10, 5)
+        FOR UPDATE SKIP LOCKED);
+    UPDATE public.cloud_projects p SET owner_left_at = NULL, retention_started_at = NULL
+      WHERE p.id IN (SELECT q.id FROM public.cloud_projects q
+        WHERE q.org_id = NEW.org_id AND q.level = 'personal' AND q.owner_user_id = NEW.user_id AND q.owner_left_at IS NOT NULL
+        FOR UPDATE SKIP LOCKED);
+  EXCEPTION WHEN OTHERS THEN NULL; -- Never fails the membership: the lifecycle's sweep does what this skipped.
+  END;
+  PERFORM set_config('app.cloud_team_ownership',coalesce(previous_ownership,''),true);
+  PERFORM set_config('app.system',coalesce(previous_system,''),true);
+  RETURN NULL;
+END;
+$$;`],
+  },
   "0263_cloud_v2_retention_archive.sql": {
     "privilege-tightening": [
       "REVOKE ALL ON FUNCTION cloud_v2_archive_departed_private() FROM PUBLIC;",
