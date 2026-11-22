@@ -3,7 +3,7 @@
 // request in the second repository and a rewind across both, and every copy machine gone after the projects.
 import { z } from "zod";
 import { type Bridge, type StageContext } from "./contract.js";
-import { answered, check, copyMachines, createProject, createWorkspace, deleteProject, deleteWorkspace, getWorkspace, lifecycle,
+import { answered, check, clearEnvironment, copyMachines, ENVIRONMENT_PATH, seedEnvironments, createProject, createWorkspace, deleteProject, deleteWorkspace, getWorkspace, lifecycle,
   openAndClosePull, parse, readFile, turn, until, waitCopyReady, waitState, workspaceRoot, writeFile, type WorkspaceDocument } from "./steps.js";
 
 export async function stageProjects(ctx: StageContext): Promise<Record<string, number>> {
@@ -77,6 +77,11 @@ export async function stageProjects(ctx: StageContext): Promise<Record<string, n
   const projectTwo = await createProject(ctx, { name: `${prefix}two`, level: "organization", repositories: [one, two] });
   await waitCopyReady(ctx, projectTwo.id, "copy_two_ready");
   await copyMachines(ctx, projectTwo.id);
+  // An environment file in each repository, seeded only when nothing of the account's would be overwritten.
+  ctx.step("environment_seed");
+  const seedContent = (index: number) => `${prefix}seed-${index}\n`;
+  const seed = await seedEnvironments(ctx, projectTwo.repositories.map(row => ({ repository: row.repository, repositoryId: row.repositoryId })), seedContent);
+  ctx.note(seed.seeded ? "environment:seeded" : `environment_skipped:${seed.reason}`);
   ctx.step("workspace_two");
   const pair = await createWorkspace(ctx, { name: `${prefix}two-w`, projectId: projectTwo.id, branch: `${prefix}two` });
   counts.workspaces!++;
@@ -94,6 +99,12 @@ export async function stageProjects(ctx: StageContext): Promise<Record<string, n
       const marker = `${checkout.checkoutPath}/${prefix}folder-${index}.txt`;
       await writeFile(bridge, scope, marker, `${prefix}${index}\n`, `folder_${index}_write`);
       check(await readFile(bridge, scope, marker, `folder_${index}_read`) === `${prefix}${index}\n`, `folder_${index}_read`, "content");
+    }
+    if (seed.seeded) {
+      ctx.step("environment_files");
+      for (const [index, checkout] of [first, second].entries())
+        check(await readFile(bridge, scope, `${checkout.checkoutPath}/${ENVIRONMENT_PATH}`, `environment_${index}`) === seedContent(index), `environment_${index}`, "content");
+      counts.environments = 2;
     }
     ctx.step("pull_two");
     const inTwo = { ...scope, repository: second.repository };
@@ -126,6 +137,7 @@ export async function stageProjects(ctx: StageContext): Promise<Record<string, n
   await ctx.ports.github.deleteBranch(one, `${prefix}two`).catch(() => undefined);
   ctx.step("delete_two");
   await deleteWorkspace(ctx, pair.id);
+  if (seed.seeded) for (const target of ctx.state.created.environments) await clearEnvironment(ctx, target);
 
   // A6: deleting the projects removes every copy machine they had.
   ctx.step("copies_gone");

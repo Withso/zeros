@@ -7,6 +7,7 @@ import { resetMigratedTestDatabase } from "../../test-database.js";
 import { shiftClock } from "./clock.js";
 import { RehearsalFailure, type Database, type Query } from "./contract.js";
 import { newState } from "./state.js";
+import { rlsSafe } from "./live.js";
 
 const d = process.env.TEST_DATABASE_URL ? describe : describe.skip;
 
@@ -86,5 +87,20 @@ d("rehearsal shiftClock (integration)", () => {
     await expect(shiftClock(database(), state, [randomUUID()], 1)).rejects.toMatchObject({ code: "not_this_run" });
     expect((await pool.query("SELECT id, stopped_at FROM cloud_v2_workspaces ORDER BY id")).rows).toEqual(snapshot.rows);
     expect(state.shifts).toBe(0);
+  });
+
+  it("the read role's RLS-safe form sees system-only rows that a plain read as pg_read_all_data does not", async () => {
+    const { state, user } = await fixture();
+    await pool.query("INSERT INTO cloud_projects (id, org_id, name, level, created_by) VALUES ($1,$2,$3,'organization',$4)", [randomUUID(), state.organizationId, `${state.prefix}p`, user]);
+    await pool.query("DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'zr_rehearsal_reader') THEN CREATE ROLE zr_rehearsal_reader NOLOGIN IN ROLE pg_read_all_data; END IF; END $$");
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN READ ONLY");
+      await client.query("SET LOCAL ROLE zr_rehearsal_reader");
+      const text = "SELECT count(*)::int AS projects FROM cloud_projects WHERE left(name, length($1)) = $1";
+      expect((await client.query(text, [state.prefix])).rows[0].projects).toBe(0);
+      expect((await client.query(rlsSafe(text), [state.prefix])).rows[0].projects).toBe(1);
+      await client.query("ROLLBACK");
+    } finally { client.release(); }
   });
 });

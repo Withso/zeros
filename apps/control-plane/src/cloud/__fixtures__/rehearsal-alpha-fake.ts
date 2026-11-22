@@ -8,7 +8,7 @@ type Workspace = {
   id: string; name: string; organizationId: string; state: string; branch: string; boatSandboxId: string; projectId?: string;
   archivedAt: string | null; activeAt: string; updatedAt: string; keep: boolean; archiveReason?: string;
   repositories?: { repository: string; checkoutPath: string; branch: string; baseBranch: string }[];
-  files: Map<string, string>; commits: Map<string, string[]>; pushed: Set<string>;
+  files: Map<string, string>; seeded: Map<string, string>; commits: Map<string, string[]>; pushed: Set<string>;
   // Retention, in days since the stop.
   stoppedDays: number | null; archivedAtDays?: number; probe?: "clean" | "dirty"; backup: boolean; wakes: number; scrub: string | null; machineGone: boolean; lostWork?: boolean;
 };
@@ -24,6 +24,13 @@ export class FakeAlpha {
   readonly repositories = new Map<string, { branches: Set<string>; pulls: Map<number, { head: string; open: boolean }> }>();
   readonly forks = new Set<string>();
   readonly turns: Turn[] = [];
+  /** The account's environments by repository id: what a PATCH wrote, and the revision it is at. */
+  readonly environments = new Map<string, { revision: number; files: Map<string, string> }>();
+  /** Whether the fixtures' .gitignore names .env. */
+  ignoresEnv = true;
+  /** What the stop recorded about the worker unit. */
+  workerOff = true;
+  transactions = 0;
   readonly writes: string[] = [];
   readonly shifts: { ids: string[]; days: number }[] = [];
   /** Retention S4's table: present unless a test removes it. */
@@ -104,6 +111,18 @@ export class FakeAlpha {
       if (method === "DELETE") { this.machines.get(project.machine)!.state = "deleted"; this.projects.delete(project.id); return this.reply(200, { ok: true }); }
       return this.reply(200, { project: this.project(project) });
     }
+    if (parts[2] === "organizations" && parts[4] === "environment") {
+      const environment = this.environments.get(parts[5]!) ?? { revision: 0, files: new Map<string, string>() };
+      if (method === "PATCH") {
+        if (body.expectedRevision !== environment.revision) return this.reply(409, { error: { code: "cloud_environment_conflict" } });
+        if (body.clear) environment.files.clear();
+        for (const file of (body.files ?? []) as { path: string; content: string }[]) environment.files.set(file.path, file.content);
+        environment.revision++;
+        this.environments.set(parts[5]!, environment);
+      }
+      return this.reply(200, { environment: { repositoryId: parts[5], revision: environment.revision, versionId: null, updatedAt: null, variables: [],
+        files: [...environment.files.keys()].map(path => ({ path, bytes: 1 })) } });
+    }
     if (parts[2] === "organizations" && parts[4] === "github") return this.reply(200, { organization: [{ accountLogin: "Withso", state: "active" }], personal: [] });
     if (url.pathname === "/v1/cloud-v2/workspaces" && method === "GET")
       return this.reply(200, { workspaces: [...this.workspaces.values()].filter(row => row.state !== "deleted").map(row => this.document(row)) });
@@ -116,7 +135,12 @@ export class FakeAlpha {
       const row: Workspace = { id, name: String(body.name), organizationId: this.organizationId, state: "running", branch,
         boatSandboxId: this.machine(`${this.machines.get(project.machine)!.name} fork`), projectId: project.id, archivedAt: null,
         activeAt: new Date(this.now).toISOString(), updatedAt: new Date(this.now).toISOString(), keep: false, ...(repositories ? { repositories } : {}),
-        files: new Map(), commits: new Map(), pushed: new Set(), stoppedDays: null, backup: false, wakes: 0, scrub: null, machineGone: false };
+        files: new Map(), seeded: new Map(), commits: new Map(), pushed: new Set(), stoppedDays: null, backup: false, wakes: 0, scrub: null, machineGone: false };
+      for (const [index, repository] of project.repositories.entries()) {
+        const seeded = this.environments.get(this.repositoryId(repository));
+        const folder = repositories?.[index]?.checkoutPath ?? "/home/user/p";
+        for (const [file, content] of seeded?.files ?? []) { row.files.set(`${folder}/${file}`, content); row.seeded.set(`${folder}/${file}`, content); }
+      }
       this.workspaces.set(id, row); this.forks.add(id);
       return this.reply(201, { workspace: this.document(row) });
     }
@@ -128,7 +152,9 @@ export class FakeAlpha {
       if (!action && method === "DELETE") { row.state = "deleted"; this.machines.get(row.boatSandboxId)!.state = "deleted"; return this.reply(202, { workspace: this.document(row) }); }
       if (action === "stop") {
         row.state = "stopped"; row.stoppedDays = 0;
-        row.probe = [...row.commits.values()].some(list => list.length) || [...row.files.keys()].some(file => file.endsWith(".env")) ? "dirty" : "clean";
+        // Dirty: an unpushed commit, or an ignored .env file that is not exactly what the environment seeded.
+        row.probe = [...row.commits.values()].some(list => list.length) || [...row.files].some(([file, content]) => file.endsWith(".env") && row.seeded.get(file) !== content)
+          ? "dirty" : "clean";
         this.machines.get(row.boatSandboxId)!.state = "stopped";
         return this.reply(202, { workspace: this.document(row) });
       }
@@ -151,8 +177,9 @@ export class FakeAlpha {
     return this.reply(404, { error: { code: "not_found" } });
   }
   private project(project: Project) {
-    return { id: project.id, name: project.name, level: "organization", repositories: project.repositories.map(repository => ({ repository })), readyCopy: "ready" };
+    return { id: project.id, name: project.name, level: "organization", repositories: project.repositories.map(repository => ({ repository, repositoryId: this.repositoryId(repository) })), readyCopy: "ready" };
   }
+  repositoryId(repository: string): string { return String(1000 + [...this.repositories.keys()].indexOf(repository.toLowerCase())); }
   private github(row: Workspace, body: Record<string, unknown>): ApiReply {
     const repository = String(body.repository ?? row.repositories?.[0]?.repository ?? [...this.projects.get(row.projectId!)!.repositories][0]);
     const repo = this.repositories.get(repository.toLowerCase())!;
@@ -229,13 +256,17 @@ export class FakeAlpha {
     let output = "";
     const committed = /commit -q -m '([^']+)'/.exec(data)?.[1];
     if (committed) {
-      const repository = row.repositories?.find(entry => data.length && entry.repository.endsWith("two"))?.repository ?? "";
+      // The stage commits in its second repository (R2).
+      const repository = row.repositories?.[1]?.repository ?? "";
       row.commits.set(repository, [...row.commits.get(repository) ?? [], committed]);
       const untracked = /> '([^']+untracked\.txt)'/.exec(data)?.[1]!;
       row.files.set(`${row.repositories!.find(entry => entry.repository === repository)!.checkoutPath}/${untracked}`, `${untracked.replace("untracked.txt", "untracked")}\n`);
     }
-    const ignored = /printf '%s\\n' '([^']+person-bytes)' > '([^']+)'/.exec(data);
-    if (ignored) row.files.set(`${row.repositories![0]!.checkoutPath}/${ignored[2]}`, `${ignored[1]}\n`);
+    const ignored = /printf '%s\\n' '([^']+person-bytes)' (>>?) '([^']+)'/.exec(data);
+    if (ignored) {
+      const file = `${row.repositories![0]!.checkoutPath}/${ignored[3]}`;
+      row.files.set(file, `${ignored[2] === ">>" ? row.files.get(file) ?? "" : ""}${ignored[1]}\n`);
+    }
     if (data.includes("git log")) output = [...row.commits.values()].flat().reverse().join("\r\n");
     return `${begin}\r\n${output}\r\n${end} 0\r\n`;
   }
@@ -260,10 +291,11 @@ export class FakeAlpha {
         openPulls: (name, prefix) => this.counted(() => [...this.repositories.get(name.toLowerCase())?.pulls ?? []]
           .filter(([, pull]) => pull.open && pull.head.startsWith(prefix)).map(([number]) => number)),
         closePull: (name, number) => this.counted(() => { const pull = this.repositories.get(name.toLowerCase())?.pulls.get(number); if (pull) pull.open = false; }),
+        ignores: () => this.counted(() => this.ignoresEnv),
       },
       database: {
         read: (text, values) => this.counted(() => { this.tick(); return this.sql(text, values ?? []).rows; }),
-        transaction: work => this.counted(() => work((text, values) => Promise.resolve(this.sql(text, values ?? [])))),
+        transaction: work => this.counted(() => { this.transactions++; return work((text, values) => Promise.resolve(this.sql(text, values ?? []))); }),
         close: () => Promise.resolve(),
       },
       clock: { now: () => this.now, sleep: async ms => { this.now += ms; this.tick(); } },
@@ -277,7 +309,8 @@ export class FakeAlpha {
     const ids = (values[0] ?? []) as string[];
     if (text.includes("FROM cloud_v2_ready_copies")) return rows([...this.projects.values()].filter(project => project.id === values[0]).map(project => ({ machine_id: project.machine })));
     if (text.includes("FROM cloud_v2_ready_copy_forks")) return rows([{ forks: this.forks.has(String(values[0])) ? 1 : 0 }]);
-    if (text.includes("backup_probe FROM")) return rows(ids.map(id => ({ id, backup_probe: this.workspaces.get(id)?.probe ?? null })));
+    if (text.includes("worker_off_unverified_at IS NULL AS worker_off")) return rows(ids.map(id => ({ id, backup_probe: this.workspaces.get(id)?.probe ?? null,
+      current_probe: true, worker_off: this.workerOff })));
     if (text.includes("kind = 'backup_fork'")) return rows([{ forks: this.workspaces.get(String(values[0]))?.backup ? 1 : 0 }]);
     if (text.includes("kind = 'wake'")) return rows([{ wakes: ids.reduce((sum, id) => sum + (this.workspaces.get(id)?.wakes ? 1 : 0), 0) }]);
     if (text.includes("archive_scrub FROM")) return rows(ids.map(id => ({ id, archive_scrub: this.workspaces.get(id)?.scrub ?? null })));

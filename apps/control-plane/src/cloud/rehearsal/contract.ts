@@ -56,14 +56,20 @@ export interface Github {
   /** Open pull requests of `repository` whose head branch starts with `prefix`. */
   openPulls(repository: string, prefix: string): Promise<number[]>;
   closePull(repository: string, number: number): Promise<void>;
+  /** Whether the default branch's root .gitignore names `path` with a plain rule (`.env`, `.env*`, `*.env`, `/.env`). A
+   * seeded environment file must be ignored, or the worker refuses it (cloud_environment_path_ignored_required). */
+  ignores(repository: string, path: string): Promise<boolean>;
 }
 export type Query = (text: string, values?: unknown[]) => Promise<{ rows: Record<string, unknown>[]; rowCount: number }>;
-/** The Alpha database through one temporary PlanetScale role (inherits postgres, TTL 3600), minted on first use and
- * deleted by `close()`, which the runner calls at the end of every stage, cleanup and plan. */
+/** The Alpha database, least privilege first (alpha-operator.md): reads through one temporary read-only role
+ * (pg_read_all_data, TTL 3600), minted on first read and deleted by `close()`, which the runner calls at the end of every
+ * stage, cleanup and plan; a write through its own owner-level role (inherits postgres), minted for that one
+ * transaction and deleted before `transaction` returns. Only shiftClock writes. */
 export interface Database {
-  /** One statement in a READ ONLY transaction with app.system on. */
+  /** One statement in a READ ONLY transaction, in the playbook's RLS-safe form (app.system set in a materialized CTE). */
   read(text: string, values?: unknown[]): Promise<Record<string, unknown>[]>;
-  /** One read-write transaction with app.system on; committed when `work` returns, rolled back when it throws. */
+  /** One read-write transaction with app.system on; committed when `work` returns, rolled back when it throws. Its role
+   * is deleted before this returns. */
   transaction<T>(work: (query: Query) => Promise<T>): Promise<T>;
   close(): Promise<void>;
 }
@@ -89,8 +95,12 @@ export type Created = {
   /** Fixture repositories `provision` created this run (removed by cleanup unless --keep-fixtures). */
   repositories: string[];
   branches: { repository: string; name: string }[]; pulls: { repository: string; number: number }[];
+  /** The account's environments this run seeded (each was empty before); cleanup clears them. */
+  environments: { repository: string; repositoryId: string }[];
 };
-export type StageResult = { ok: boolean; step?: string; code?: string; skipped?: string; counts?: Record<string, number> };
+export type StageResult = { ok: boolean; step?: string; code?: string; skipped?: string; counts?: Record<string, number>;
+  /** Closed codes for what a stage chose (environment_case:seeded, environment_skipped:environment_exists). */
+  notes?: string[] };
 export type RehearsalState = {
   version: 1; runId: string; prefix: string; startedAt: string;
   organizationId: string; created: Created; stages: Partial<Record<StageName, StageResult>>;
@@ -107,6 +117,8 @@ export type StageContext = {
   timing: { pollMs: number; stateMs: number; copyMs: number; turnMs: number; scanMs: number; archiveScanMs: number };
   /** Step progress: a stage reports each step's name as it starts (the runner keeps only the last). */
   step(name: string): void;
+  /** Records a closed code for what the stage chose; printed with its result. */
+  note(code: string): void;
   /** Counts a machine start before it happens; throws past the run's cap. */
   start(kind: string): void;
 };

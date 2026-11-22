@@ -1,6 +1,7 @@
 // `--plan`: what each stage would write, with the resolved names and counts, and what each account can do. It makes no
-// write to Alpha's control plane, Boat, R2 or GitHub; its only provider call that is not a read is one temporary
-// read-only database role (to count platform owners), deleted before it returns.
+// write to Alpha's control plane, Boat, R2 or GitHub; its only provider calls that are not reads are one session per
+// account (revoked) and one temporary database role inheriting only pg_read_all_data (to count platform owners), deleted
+// before it returns.
 import { z } from "zod";
 import { STAGE_SWITCH, type Api, type Database, type StageName, type Switch } from "./contract.js";
 import { safeLine } from "./guard.js";
@@ -69,23 +70,28 @@ export function refusal(stage: StageName, account: AccountSummary, switches: Rea
 export function writeLines(stage: StageName, prefix: string, repositories: { one: string; two?: string }): string[] {
   const two = repositories.two ?? FIXTURE_TWO;
   const lines: Record<StageName, string[]> = {
-    provision: [`provision would create ${two} (private, one initial commit) only if it does not exist; cleanup removes it unless --keep-fixtures`],
+    provision: [`provision would create ${two} (private, one initial commit with GitHub's Node .gitignore) only if it does not exist; cleanup removes it unless --keep-fixtures`],
     projects: [
       `projects would create project ${prefix}one (organization, ${repositories.one}) and wait for its copy (1 machine)`,
       `projects would create workspace ${prefix}one-w on branch ${prefix}one (1 machine start), 1 turn, 1 terminal, 1 file`,
       `projects would commit and push branch ${prefix}one to ${repositories.one}, open 1 draft pull request, close it unmerged, delete the branch`,
       `projects would stop, wake (1 start), archive, open (1 start) and delete ${prefix}one-w`,
       `projects would create project ${prefix}two (organization, ${repositories.one} and ${two}) and wait for its copy (1 machine)`,
+      `projects would seed the account's environment for ${repositories.one} and ${two} with one file .env each, only if both are at revision 0` +
+        " (or empty and this run's own) and both repositories ignore .env, else skip it as environment_exists or path_not_ignored; cleared after the stage and by cleanup",
       `projects would create workspace ${prefix}two-w on branch ${prefix}two (1 machine start), push ${prefix}two to ${two}, open and close 1 draft pull request`,
       `projects would run 2 turns writing 1 file in each repository and rewind the second, then delete ${prefix}two-w and both projects`,
-      "projects would read cloud_v2_ready_copy_forks and cloud_v2_ready_copies through one temporary role, deleted at the end of the stage",
+      "projects would read cloud_v2_ready_copy_forks and cloud_v2_ready_copies through one temporary pg_read_all_data role, deleted at the end of the stage; no postgres role",
     ],
     personal: ["personal: not written yet (waiting on the owner's answers)"],
     retention: [
       `retention would create project ${prefix}ret (organization, ${repositories.one} and ${two}) and its copy (1 machine)`,
+      `retention would seed the account's environment for ${repositories.one} with .env under the same rule as projects (noted as environment_case:seeded_edited` +
+        " or hand_made_ignored), cleared after the stage and by cleanup",
       `retention would create workspaces ${prefix}ret-w and ${prefix}ret-k (2 machine starts); in ${prefix}ret-w one unpushed commit and one untracked file in ${two},` +
-        ` one ignored file in ${repositories.one}`,
-      `retention would stop both, then shift their clocks 5 or 6 times (1 hour, 10.6, 31 and 10.6 days; 61 days for the removal) through one temporary role`,
+        ` and in ${repositories.one} either the seeded .env edited by hand or a hand-made ignored file`,
+      "retention would stop both, then shift their clocks 4 times (1 hour, 10.6, 31 and 10.6 days) and once more for the removal (61 days), each through its own" +
+        " temporary postgres role deleted when the shift commits; reads go through one pg_read_all_data role",
       "retention would set Keep on then off on one workspace",
       "retention would delete both workspaces' machines on Boat, then open both (2 starts), then delete both workspaces and the project",
       "retention would, when S4 is deployed, stop and archive one workspace again and wait for its backup's removal",

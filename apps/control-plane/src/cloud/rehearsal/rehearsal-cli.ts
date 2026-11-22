@@ -19,7 +19,7 @@ import { FIXTURE_TWO } from "./stage-provision.js";
 import { loadState, newState, saveState } from "./state.js";
 
 export const USAGE = "alpha:rehearse <provision|projects|personal|retention|submodules|all> [--plan] [--cleanup] [--run <id>] " +
-  "[--account owner|1..10] [--switches projects,personal,retention] [--repository owner/name] [--repository-two owner/name] " +
+  "[--account owner|1..10] [--switches projects,personal,retention] [--repository owner/name] [--repository-two owner/name (default Withso/zeros-dev-fixture-2)] " +
   "[--keep-fixtures] [--max-active <n>] [--organization <slug|id>]";
 /** `all` runs these in order; B and D are refused until written. */
 export const ALL: readonly StageName[] = ["provision", "projects", "retention"];
@@ -90,7 +90,7 @@ async function main(argv: string[]): Promise<number> {
       ...(account.organizationId ? { organizationId: account.organizationId } : {}) });
     return { session, subject, api: liveApi(session.accessToken) };
   };
-  const roleNames = (run: string) => { let n = 0; return () => `zeros-rehearsal-${run.slice(0, 8)}-${++n}-${Date.now().toString(36)}`; };
+  const roleNames = (run: string) => { let n = 0; return (kind: "read" | "write") => `zeros-rehearsal-${run.slice(0, 8)}-${kind}-${++n}-${Date.now().toString(36)}`; };
   const database = (run: string) => liveDatabase({ organization: need("PLANETSCALE_ORG"), database: need("ZEROS_PLANETSCALE_ALPHA_DATABASE"),
     tokenId: need("PLANETSCALE_SERVICE_TOKEN_ID"), token: need("PLANETSCALE_SERVICE_TOKEN"), roleName: roleNames(run) });
   const probeSelector = args.organization ?? env.ZEROS_ALPHA_PROBE_ORGANIZATION;
@@ -102,7 +102,7 @@ async function main(argv: string[]): Promise<number> {
     if (!await liveRelease()) throw new RehearsalFailure("release_identity", "not_ready");
 
     if (args.plan) {
-      log("plan: reads only; each account signs in (one session, revoked at the end) and one temporary read-only database role is minted and deleted");
+      log("plan: reads only; each account signs in (one session, revoked at the end), and one temporary database role inheriting only pg_read_all_data is minted for reads and deleted");
       const summaries = new Map<string, Awaited<ReturnType<typeof readAccount>>>();
       for (const account of accounts.values()) {
         let held: Awaited<ReturnType<typeof signIn>> | undefined;

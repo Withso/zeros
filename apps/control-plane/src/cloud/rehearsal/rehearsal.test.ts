@@ -12,6 +12,8 @@ import { cleanup, inventoryLines, readInventory, runStages, stageContext } from 
 import { parseArguments } from "./rehearsal-cli.js";
 import { FIXTURE_TWO } from "./stage-provision.js";
 import { loadState, newState, saveState } from "./state.js";
+import { liveDatabase, type DatabaseClient } from "./live.js";
+import { platformOwners } from "./plan.js";
 
 const R1 = "Withso/zeros-dev-fixture";
 const TIMING = { pollMs: 1_000, stateMs: 60_000, copyMs: 60_000, turnMs: 60_000, scanMs: 300_000, archiveScanMs: 3_900_000 };
@@ -25,7 +27,7 @@ function setup(options: { provisioned?: boolean } = {}) {
   const options_ = { switches: new Set(["projects", "personal", "retention"] as const), maxActive: 10, runCap: 30, log: (line: string) => lines.push(line) };
   return { alpha, state, ctx, lines, saved, options: options_ };
 }
-const EMPTY = { workspaces: 0, projects: 0, branches: 0, pulls: 0, machines: 0, objects: 0, databaseRows: 0, repositories: 0 };
+const EMPTY = { workspaces: 0, projects: 0, branches: 0, pulls: 0, machines: 0, objects: 0, environments: 0, databaseRows: 0, repositories: 0 };
 
 describe("rehearsal guards", () => {
   it("refuses every repository but the fixtures, by name", () => {
@@ -104,7 +106,11 @@ describe("rehearsal stages against a fake Alpha", () => {
     expect(await runStages(ctx, ["provision", "projects", "retention"], options)).toBe(true);
     expect(lines.filter(line => line.startsWith("stage "))).toEqual(["stage provision: ok", "stage projects: ok", "stage retention: ok"]);
     expect(state.created.repositories).toEqual([FIXTURE_TWO]);
-    expect(state.stages.projects?.counts).toEqual({ workspaces: 2, pulls: 2, turns: 3, copiesGone: 2 });
+    expect(state.stages.projects?.counts).toEqual({ workspaces: 2, pulls: 2, turns: 3, copiesGone: 2, environments: 2 });
+    expect(state.stages.projects?.notes).toEqual(["environment:seeded"]);
+    expect(state.stages.retention?.notes).toEqual(["environment_case:seeded_edited"]);
+    // Every environment this run seeded is empty again at the end of its stage.
+    expect([...alpha.environments.values()].every(environment => environment.files.size === 0)).toBe(true);
     expect(state.stages.retention?.counts).toMatchObject({ restored: 1, rebuilt: 1, removal: 1 });
     // Four shifts of both workspaces, then the removal's one of W alone.
     expect(alpha.shifts.map(shift => shift.ids.length)).toEqual([2, 2, 2, 2, 1]);
@@ -168,9 +174,10 @@ describe("rehearsal stages against a fake Alpha", () => {
         alpha.fault = undefined;
         if (passed) continue;
         failed++;
-        expect(lines.at(-1), `call ${at}${after ? " after" : ""}`).toMatch(/^stage \w+: failed \S+ \S+$/);
+        const failure = lines.filter(line => line.startsWith("stage ")).at(-1);
+        expect(failure, `call ${at}${after ? " after" : ""}`).toMatch(/^stage \w+: failed \S+ \S+$/);
         const { inventory } = await cleanup(ctx, { keepFixtures: true, log: () => undefined });
-        expect(inventory, `call ${at}${after ? " after" : ""}: ${lines.at(-1)}`).toEqual(EMPTY);
+        expect(inventory, `call ${at}${after ? " after" : ""}: ${failure}`).toEqual(EMPTY);
       }
       // Nearly every injected fault fails the stage (a read the stage tolerates, such as a missing file, may not).
       expect(failed).toBeGreaterThan(total * 1.5);
@@ -182,6 +189,111 @@ describe("rehearsal stages against a fake Alpha", () => {
     const inventory = await readInventory(ctx, true);
     expect(inventoryLines(inventory)).toEqual({ clean: true, lines: [...Object.keys(EMPTY).map(kind => `inventory ${kind} 0`), "inventory clean"] });
     expect(inventoryLines({ ...inventory, machines: 2, pulls: 1 }).lines.at(-1)).toBe("inventory remaining: pulls, machines");
+  });
+});
+
+describe("rehearsal environments and the worker-off record", () => {
+  it("never overwrites an account's environment: an existing one skips seeding, and retention uses a hand-made ignored file", async () => {
+    const { alpha, state, ctx, options } = setup();
+    alpha.environments.set(alpha.repositoryId(R1), { revision: 3, files: new Map([[".env", "theirs"]]) });
+    expect(await runStages(ctx, ["projects", "retention"], options)).toBe(true);
+    expect(state.stages.projects?.notes).toEqual(["environment_skipped:environment_exists"]);
+    expect(state.stages.projects?.counts?.environments).toBeUndefined();
+    expect(state.stages.retention?.notes).toEqual(["environment_case:hand_made_ignored", "environment_skipped:environment_exists"]);
+    expect(alpha.environments.get(alpha.repositoryId(R1))).toEqual({ revision: 3, files: new Map([[".env", "theirs"]]) });
+    expect(state.created.environments).toEqual([]);
+    expect((await cleanup(ctx, { keepFixtures: true, log: () => undefined })).inventory).toEqual(EMPTY);
+  });
+
+  it("skips seeding when a repository does not ignore .env", async () => {
+    const { alpha, state, ctx, options } = setup();
+    alpha.ignoresEnv = false;
+    expect(await runStages(ctx, ["projects"], options)).toBe(true);
+    expect(state.stages.projects?.notes).toEqual(["environment_skipped:path_not_ignored"]);
+    expect(alpha.writes.filter(write => write.startsWith("PATCH"))).toEqual([]);
+  });
+
+  it("cleanup clears an environment a failed stage seeded", async () => {
+    const { alpha, ctx, options } = setup();
+    // Fail the stage right after both seeds: at the second workspace create, which follows them.
+    let calls = 0;
+    const api = ctx.ports.api;
+    ctx.ports.api = { json: async (method, path, body, headers) => {
+      if (method === "POST" && path === "/v1/cloud-v2/workspaces" && ++calls === 2) throw new Error("lost");
+      return api.json(method, path, body, headers);
+    } };
+    expect(await runStages(ctx, ["projects"], options)).toBe(false);
+    expect([...alpha.environments.values()].some(environment => environment.files.size > 0)).toBe(true);
+    ctx.ports.api = api;
+    expect((await cleanup(ctx, { keepFixtures: true, log: () => undefined })).inventory).toEqual(EMPTY);
+    expect([...alpha.environments.values()].every(environment => environment.files.size === 0)).toBe(true);
+  });
+
+  it("fails the stop when the row does not record the worker unit verified off", async () => {
+    const { alpha, ctx, lines, options } = setup();
+    alpha.workerOff = false;
+    expect(await runStages(ctx, ["retention"], options)).toBe(false);
+    expect(lines).toContain("stage retention: failed stop_worker_off unverified");
+    expect(ctx.state.stages.retention).toMatchObject({ ok: false, step: "stop_worker_off", code: "unverified" });
+  });
+});
+
+describe("rehearsal database roles", () => {
+  /** A PlanetScale and a Postgres that record what was asked of them. */
+  function provider() {
+    const requests: { method: string; path: string; body?: unknown }[] = [], statements: string[] = [];
+    let next = 0;
+    const live = new Set<string>();
+    const planetScale = async (method: "GET" | "POST" | "DELETE", path: string, body?: unknown) => {
+      requests.push({ method, path, ...(body === undefined ? {} : { body }) });
+      if (path === "/databases/alpha") return { status: 200, body: { default_branch: "main" } };
+      if (method === "POST") { const id = `role-${++next}`; live.add(id); return { status: 201, body: { id, name: "n", username: "u", password: "p", access_host_url: "h.example" } }; }
+      const id = path.split("/").at(-1)!;
+      if (method === "DELETE") { live.delete(id); return { status: 204, body: null }; }
+      return { status: live.has(id) ? 200 : 404, body: null };
+    };
+    const client = (): DatabaseClient => ({
+      connect: async () => undefined, end: async () => undefined,
+      query: async text => { statements.push(text); return { rows: text.includes("session_user") ? [{ name: "u.routing" }] : [{ id: "abcdef12-0000-0000-0000-000000000000" }], rowCount: 1 }; },
+    });
+    const database = liveDatabase({ organization: "o", database: "alpha", tokenId: "t", token: "t", roleName: kind => `r-${kind}`, planetScale, client, sleep: async () => undefined });
+    const inherited = () => requests.filter(request => request.method === "POST").map(request => (request.body as { inherited_roles: string[] }).inherited_roles);
+    return { database, requests, statements, live, inherited };
+  }
+
+  it("reads through a pg_read_all_data role in the RLS-safe form, never postgres, and deletes it at close", async () => {
+    const { database, statements, live, inherited } = provider();
+    expect(await platformOwners(database)).toEqual(["abcdef12"]);
+    await database.read("SELECT 1 AS one");
+    expect(inherited()).toEqual([["pg_read_all_data"]]);
+    expect(statements).toContain("BEGIN READ ONLY");
+    const reads = statements.filter(text => text.includes("CROSS JOIN LATERAL"));
+    expect(reads).toHaveLength(2);
+    for (const text of reads) expect(text).toMatch(/^WITH cfg AS MATERIALIZED \(SELECT set_config\('app\.system','on',true\) AS v\)/);
+    expect(statements.some(text => text.startsWith("GRANT"))).toBe(false);
+    expect(live.size).toBe(1);
+    await database.close();
+    expect(live.size).toBe(0);
+  });
+
+  it("mints a postgres role only for a write transaction, grants zeros_app to its session user, and deletes it before returning", async () => {
+    const { database, statements, live, inherited } = provider();
+    expect(await database.transaction(async query => { expect(live.size).toBe(1); return (await query("SELECT 2")).rowCount; })).toBe(1);
+    expect(inherited()).toEqual([["postgres"]]);
+    expect(statements).toContain('GRANT zeros_app TO "u.routing"');
+    expect(live.size).toBe(0);
+    await expect(database.transaction(async () => { throw new RehearsalFailure("work", "failed"); })).rejects.toMatchObject({ code: "failed" });
+    expect(live.size).toBe(0);
+    expect(statements).toContain("ROLLBACK");
+  });
+
+  it("stage A never asks for a write; stage C's only writes are its shifts", async () => {
+    const projects = setup();
+    expect(await runStages(projects.ctx, ["projects"], projects.options)).toBe(true);
+    expect(projects.alpha.transactions).toBe(0);
+    const retention = setup();
+    expect(await runStages(retention.ctx, ["retention"], retention.options)).toBe(true);
+    expect(retention.alpha.transactions).toBe(retention.alpha.shifts.length);
   });
 });
 

@@ -1,11 +1,12 @@
-// Stage C, retention (CLOUD_V2_RETENTION_ENABLED): a workspace W with unpushed work in R2 and a hand-written ignored file
-// in R1, and a clean workspace K, through the stop, the backup, an invisible wake, Keep, the automatic archive, the
+// Stage C, retention (CLOUD_V2_RETENTION_ENABLED): a workspace W with unpushed work in R2 and, in R1, either the seeded
+// environment file edited by hand (when the account's environment for R1 was empty) or a hand-made ignored file, and a
+// clean workspace K, through the stop, the backup, an invisible wake, Keep, the automatic archive, the
 // archived wake's scrub, a deleted machine and the open that restores (W) or rebuilds (K); then, when S4 is deployed,
 // the backup's removal. Clocks move only through shiftClock, on these two workspaces.
 import { z } from "zod";
 import { RehearsalFailure, type StageContext } from "./contract.js";
 import { shiftClock } from "./clock.js";
-import { call, check, createProject, createWorkspace, deleteProject, deleteWorkspace, getWorkspace, lifecycle, parse, readFile, shell, until,
+import { call, check, clearEnvironment, ENVIRONMENT_PATH, seedEnvironments, createProject, createWorkspace, deleteProject, deleteWorkspace, getWorkspace, lifecycle, parse, readFile, shell, until,
   waitCopyReady, waitState, workspaceRoot, WorkspaceDocument } from "./steps.js";
 
 const HOUR_DAYS = 1 / 24;
@@ -19,15 +20,24 @@ export async function stageRetention(ctx: StageContext): Promise<Record<string, 
   ctx.step("project");
   const project = await createProject(ctx, { name: `${prefix}ret`, level: "organization", repositories: [one, two] });
   await waitCopyReady(ctx, project.id);
+  // The two cases exercise different rules: a seeded file edited by hand (the seed journal) or an unseeded ignored file.
+  ctx.step("environment_seed");
+  const r1 = project.repositories.find(row => row.repository.toLowerCase() === one.toLowerCase());
+  check(r1, "environment_seed", "repository");
+  const seedBytes = `${prefix}seed\n`, handBytes = `${prefix}person-bytes`;
+  const seed = await seedEnvironments(ctx, [{ repository: r1.repository, repositoryId: r1.repositoryId }], () => seedBytes);
+  ctx.note(seed.seeded ? "environment_case:seeded_edited" : "environment_case:hand_made_ignored");
+  if (!seed.seeded) ctx.note(`environment_skipped:${seed.reason}`);
   ctx.step("workspaces");
   const w = await createWorkspace(ctx, { name: `${prefix}ret-w`, projectId: project.id, branch: `${prefix}ret-w` });
   const k = await createWorkspace(ctx, { name: `${prefix}ret-k`, projectId: project.id, branch: `${prefix}ret-k` });
   const both = [w.id, k.id];
   const first = checkout(w, one), second = checkout(w, two);
 
-  // C1: unpushed work in R2 (a commit and an untracked file), a hand-written ignored file in R1, then stop.
+  // C1: unpushed work in R2 (a commit and an untracked file), the person's own bytes in an ignored file in R1, then stop.
   ctx.step("unpushed_work");
-  const ignored = `${prefix}hand.env`, ignoredBytes = `${prefix}person-bytes\n`;
+  const ignored = seed.seeded ? ENVIRONMENT_PATH : `${prefix}hand.env`;
+  const ignoredBytes = seed.seeded ? `${seedBytes}${handBytes}\n` : `${handBytes}\n`;
   let bridge = await ctx.ports.bridge(w.id);
   try {
     const root = await workspaceRoot(bridge, w.id), scope = { workspaceId: w.id, cwd: root };
@@ -35,18 +45,30 @@ export async function stageRetention(ctx: StageContext): Promise<Record<string, 
       `printf '%s\\n' '${prefix}committed' > '${prefix}committed.txt' && git add '${prefix}committed.txt' && ` +
       `git -c user.name=rehearsal -c user.email=rehearsal@invalid commit -q -m '${prefix}unpushed' && printf '%s\\n' '${prefix}untracked' > '${prefix}untracked.txt'`, "unpushed_r2");
     check(r2.exitCode === 0, "unpushed_r2", `exit_${r2.exitCode}`);
-    const r1 = await shell(ctx, bridge, { ...scope, cwd: first.checkoutPath }, `${prefix}pty-r1`,
-      `printf '%s\\n' '${prefix}*.env' >> "$(git rev-parse --git-path info/exclude)" && printf '%s\\n' '${prefix}person-bytes' > '${ignored}' && ` +
-      `git check-ignore -q '${ignored}'`, "ignored_r1");
-    check(r1.exitCode === 0, "ignored_r1", `exit_${r1.exitCode}`);
+    if (seed.seeded) {
+      check(await readFile(bridge, scope, `${first.checkoutPath}/${ENVIRONMENT_PATH}`, "seeded_r1") === seedBytes, "seeded_r1", "content");
+      const edit = await shell(ctx, bridge, { ...scope, cwd: first.checkoutPath }, `${prefix}pty-r1`,
+        `printf '%s\\n' '${handBytes}' >> '${ENVIRONMENT_PATH}' && git check-ignore -q '${ENVIRONMENT_PATH}'`, "edited_r1");
+      check(edit.exitCode === 0, "edited_r1", `exit_${edit.exitCode}`);
+    } else {
+      const made = await shell(ctx, bridge, { ...scope, cwd: first.checkoutPath }, `${prefix}pty-r1`,
+        `printf '%s\\n' '${prefix}*.env' >> "$(git rev-parse --git-path info/exclude)" && printf '%s\\n' '${handBytes}' > '${ignored}' && ` +
+        `git check-ignore -q '${ignored}'`, "ignored_r1");
+      check(made.exitCode === 0, "ignored_r1", `exit_${made.exitCode}`);
+    }
   } finally { bridge.close(); }
   ctx.step("stop");
   for (const id of both) await lifecycle(ctx, id, "stop", "stop");
   for (const id of both) await waitState(ctx, id, "stopped", "stopped");
   check((await ctx.ports.storage.keys(w.id)).length === 0, "stop_no_upload", "uploaded");
-  const probes = await ctx.ports.database.read(`SELECT id::text AS id, backup_probe FROM cloud_v2_workspaces WHERE id = ANY($1::uuid[])`, [both]);
+  // The stop's own record: its probe, and that it verified the worker unit stopped and disabled (a stopped machine runs no
+  // command, so the row is the evidence).
+  const probes = await ctx.ports.database.read(`SELECT id::text AS id, backup_probe, backup_probe_generation = stop_generation AS current_probe,
+      worker_off_unverified_at IS NULL AS worker_off FROM cloud_v2_workspaces WHERE id = ANY($1::uuid[])`, [both]);
   check(probes.find(row => row.id === w.id)?.backup_probe === "dirty", "stop_probe_w", "not_dirty");
   check(probes.find(row => row.id === k.id)?.backup_probe === "clean", "stop_probe_k", "not_clean");
+  check(probes.length === 2 && probes.every(row => row.current_probe === true), "stop_probe", "not_this_stop");
+  check(probes.every(row => row.worker_off === true), "stop_worker_off", "unverified");
 
   // C2: an hour later, W's backup fork runs and uploads one object; K, clean, has none.
   ctx.step("backup");
@@ -156,6 +178,7 @@ export async function stageRetention(ctx: StageContext): Promise<Record<string, 
   ctx.step("delete");
   for (const id of both) await deleteWorkspace(ctx, id);
   await deleteProject(ctx, project.id);
+  if (seed.seeded) for (const target of ctx.state.created.environments) await clearEnvironment(ctx, target);
   return counts;
 }
 

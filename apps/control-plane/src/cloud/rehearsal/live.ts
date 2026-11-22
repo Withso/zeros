@@ -164,7 +164,7 @@ export function liveGithub(input: { appId: number; privateKey: string; owner: st
       if (repo === "zeros-dev-fixture") throw new RehearsalFailure("repository_refused", "r1");
       // Created by the App, so the installation includes it; administration is asked for on R1 only, which exists.
       const admin = await token(["zeros-dev-fixture"], { metadata: "read", administration: "write" });
-      const created = await request("POST", `/orgs/${input.owner}/repos`, admin, { name: repo, private: true, auto_init: true });
+      const created = await request("POST", `/orgs/${input.owner}/repos`, admin, { name: repo, private: true, auto_init: true, gitignore_template: "Node" });
       ok(created.status, "repository_create", [201]);
     },
     async deleteRepository(repository) {
@@ -190,6 +190,15 @@ export function liveGithub(input: { appId: number; privateKey: string; owner: st
       const rows = z.array(z.object({ number: z.number(), head: z.object({ ref: z.string() }) }).passthrough()).safeParse(reply.body);
       return rows.success ? rows.data.filter(row => prefixed(prefix, row.head.ref)).map(row => row.number) : [];
     },
+    async ignores(repository, path) {
+      const reply = await request("GET", `/repos/${repository}/contents/.gitignore`, await token([name(repository)], { metadata: "read", contents: "read" }));
+      if (reply.status === 404) return false;
+      ok(reply.status, "github_gitignore", [200]);
+      const file = z.object({ content: z.string(), encoding: z.literal("base64") }).passthrough().safeParse(reply.body);
+      if (!file.success) return false;
+      const rules = new Set([path, `/${path}`, `${path}*`, `*${path.slice(path.lastIndexOf("."))}`]);
+      return Buffer.from(file.data.content, "base64").toString("utf8").split(/\r?\n/).some(line => rules.has(line.trim()));
+    },
     async closePull(repository, number) {
       const read = await request("GET", `/repos/${repository}/pulls/${number}`, await write(repository));
       const head = z.object({ head: z.object({ ref: z.string() }) }).passthrough().safeParse(read.body);
@@ -199,73 +208,97 @@ export function liveGithub(input: { appId: number; privateKey: string; owner: st
   };
 }
 
-/** One temporary PlanetScale role (inherits postgres, TTL 3600), minted on first use, granted zeros_app on its
- * session_user as the operator playbook says, and deleted by close() until a GET answers 404. */
-export function liveDatabase(input: { organization: string; database: string; tokenId: string; token: string; roleName: () => string }): Database {
-  const planetScale = planetScaleClient({ organization: input.organization, tokenId: input.tokenId, token: input.token });
-  let open: Promise<{ client: pg.Client; roleId: string; branchPath: string }> | undefined;
-  const connect = () => open ??= (async () => {
+/** The playbook's RLS-safe read: app.system is set by a materialized CTE before the statement's rows are read. */
+export const rlsSafe = (text: string) => `WITH cfg AS MATERIALIZED (SELECT set_config('app.system','on',true) AS v)
+          SELECT x.* FROM cfg CROSS JOIN LATERAL (${text}) x WHERE cfg.v = 'on'`;
+
+export type DatabaseClient = { connect(): Promise<unknown>; query(text: string, values?: unknown[]): Promise<{ rows: Record<string, unknown>[]; rowCount: number | null }>;
+  end(): Promise<void> };
+type Role = { id: string; name: string; username: string; password: string; access_host_url: string };
+
+/** Least privilege (alpha-operator.md). Reads: one temporary role inheriting only pg_read_all_data (TTL 3600), minted on
+ * the first read, every statement in the playbook's RLS-safe form inside READ ONLY, deleted by close(). A write: its own
+ * role inheriting postgres, with zeros_app granted to the session_user, for that one transaction, deleted (until a GET
+ * answers 404) before transaction() returns. */
+export function liveDatabase(input: { organization: string; database: string; tokenId: string; token: string; roleName: (kind: "read" | "write") => string;
+  planetScale?: ReturnType<typeof planetScaleClient>; client?: (connectionString: string) => DatabaseClient; sleep?: (ms: number) => Promise<void> }): Database {
+  const planetScale = input.planetScale ?? planetScaleClient({ organization: input.organization, tokenId: input.tokenId, token: input.token });
+  const client = input.client ?? (connectionString => new pg.Client({ connectionString, connectionTimeoutMillis: 15_000 }));
+  const sleep = input.sleep ?? liveClock.sleep;
+  let branchPath: Promise<string> | undefined;
+  const branch = () => branchPath ??= (async () => {
     const database = await planetScale("GET", `/databases/${input.database}`);
-    const branch = z.object({ default_branch: z.string().regex(/^[a-z0-9-]{1,64}$/) }).passthrough().safeParse(database.body);
-    if (database.status !== 200 || !branch.success) throw new RehearsalFailure("database_branch", `http_${database.status}`);
-    const branchPath = `/databases/${input.database}/branches/${branch.data.default_branch}`;
-    const created = await planetScale("POST", `${branchPath}/roles`, { name: input.roleName(), inherited_roles: ["postgres"], ttl: 3600 });
-    const role = z.object({ id: z.string(), name: z.string(), username: z.string(), password: z.string(), access_host_url: z.string() }).passthrough().safeParse(created.body);
-    if (created.status >= 300 || !role.success) throw new RehearsalFailure("database_role", `http_${created.status}`);
-    const client = new pg.Client({ connectionString: roleConnectionString(role.data), connectionTimeoutMillis: 15_000 });
-    try {
-      await client.connect();
-      const user = (await client.query<{ name: string }>("SELECT session_user::text AS name")).rows[0]!.name;
-      await client.query(`GRANT zeros_app TO "${user.replace(/"/g, '""')}"`);
-    } catch {
-      await client.end().catch(() => undefined);
-      await removeRole(branchPath, role.data.id);
-      open = undefined;
-      throw new RehearsalFailure("database_connect", "failed");
-    }
-    return { client, roleId: role.data.id, branchPath };
+    const parsed = z.object({ default_branch: z.string().regex(/^[a-z0-9-]{1,64}$/) }).passthrough().safeParse(database.body);
+    if (database.status !== 200 || !parsed.success) { branchPath = undefined; throw new RehearsalFailure("database_branch", `http_${database.status}`); }
+    return `/databases/${input.database}/branches/${parsed.data.default_branch}`;
   })();
-  const removeRole = async (branchPath: string, roleId: string) => {
-    for (let attempt = 0; attempt < 10; attempt++) {
-      await planetScale("DELETE", `${branchPath}/roles/${encodeURIComponent(roleId)}`).catch(() => undefined);
-      const read = await planetScale("GET", `${branchPath}/roles/${encodeURIComponent(roleId)}`).catch(() => ({ status: 0 }));
-      if (read.status === 404) return;
-      await liveClock.sleep(2_000);
+  const mint = async (kind: "read" | "write"): Promise<{ held: DatabaseClient; remove: () => Promise<void> }> => {
+    const path = await branch();
+    const created = await planetScale("POST", `${path}/roles`, { name: input.roleName(kind), inherited_roles: [kind === "read" ? "pg_read_all_data" : "postgres"], ttl: 3600 });
+    const role = z.object({ id: z.string(), name: z.string(), username: z.string(), password: z.string(), access_host_url: z.string() }).passthrough().safeParse(created.body);
+    const acknowledged = z.object({ id: z.string() }).passthrough().safeParse(created.body);
+    const remove = async () => {
+      if (!acknowledged.success) return;
+      for (let attempt = 0; attempt < 10; attempt++) {
+        await planetScale("DELETE", `${path}/roles/${encodeURIComponent(acknowledged.data.id)}`).catch(() => undefined);
+        const read = await planetScale("GET", `${path}/roles/${encodeURIComponent(acknowledged.data.id)}`).catch(() => ({ status: 0 }));
+        if (read.status === 404) return;
+        await sleep(2_000);
+      }
+      throw new RehearsalFailure("database_role_delete", "unconfirmed");
+    };
+    if (created.status >= 300 || !role.success) {
+      await remove().catch(() => undefined);
+      throw new RehearsalFailure(`database_${kind}_role`, `http_${created.status}`);
     }
-    throw new RehearsalFailure("database_role_delete", "unconfirmed");
+    const held = client(roleConnectionString(role.data as Role));
+    try {
+      await held.connect();
+      if (kind === "write") {
+        const user = String((await held.query("SELECT session_user::text AS name")).rows[0]?.name ?? "");
+        await held.query(`GRANT zeros_app TO "${user.replace(/"/g, '""')}"`);
+      }
+    } catch {
+      await held.end().catch(() => undefined);
+      await remove().catch(() => undefined);
+      throw new RehearsalFailure(`database_${kind}_connect`, "failed");
+    }
+    return { held, remove: async () => { await held.end().catch(() => undefined); await remove(); } };
   };
-  const query = (client: pg.Client): Query => async (text, values) => {
-    try { const result = await client.query(text, values as unknown[] | undefined); return { rows: result.rows, rowCount: result.rowCount ?? 0 }; }
+  const query = (held: DatabaseClient): Query => async (text, values) => {
+    try { const result = await held.query(text, values); return { rows: result.rows, rowCount: result.rowCount ?? 0 }; }
     catch { throw new RehearsalFailure("database", "query"); }
   };
+  let reader: Promise<Awaited<ReturnType<typeof mint>>> | undefined;
   return {
     async read(text, values) {
-      const { client } = await connect(), run = query(client);
+      const opened = reader ??= mint("read").catch(error => { reader = undefined; throw error; });
+      const { held } = await opened, run = query(held);
       await run("BEGIN READ ONLY");
       try {
-        await run("SELECT set_config('app.system','on',true)");
-        const result = await run(text, values);
+        const rows = (await run(rlsSafe(text), values)).rows;
         await run("COMMIT");
-        return result.rows;
-      } catch (error) { await client.query("ROLLBACK").catch(() => undefined); throw error; }
+        return rows;
+      } catch (error) { await held.query("ROLLBACK").catch(() => undefined); throw error; }
     },
     async transaction(work) {
-      const { client } = await connect(), run = query(client);
-      await run("BEGIN");
+      const { held, remove } = await mint("write"), run = query(held);
       try {
-        await run("SELECT set_config('app.system','on',true)");
-        const result = await work(run);
-        await run("COMMIT");
-        return result;
-      } catch (error) { await client.query("ROLLBACK").catch(() => undefined); throw error; }
+        await run("BEGIN");
+        try {
+          await run("SELECT set_config('app.system','on',true)");
+          const result = await work(run);
+          await run("COMMIT");
+          return result;
+        } catch (error) { await held.query("ROLLBACK").catch(() => undefined); throw error; }
+      } finally { await remove(); }
     },
     async close() {
-      if (!open) return;
-      const pending = open; open = undefined;
-      let held: Awaited<typeof pending>;
-      try { held = await pending; } catch { return; }
-      await held.client.end().catch(() => undefined);
-      await removeRole(held.branchPath, held.roleId);
+      if (!reader) return;
+      const pending = reader; reader = undefined;
+      let opened: Awaited<typeof pending>;
+      try { opened = await pending; } catch { return; }
+      await opened.remove();
     },
   };
 }

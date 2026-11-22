@@ -112,7 +112,7 @@ export async function listWorkspaces(api: Api, organizationId: string, step: str
 
 export const ProjectDocument = z.object({
   id: z.string().uuid(), name: z.string(), level: z.enum(["organization", "personal"]),
-  repositories: z.array(z.object({ repository: z.string() }).passthrough()), readyCopy: z.enum(["ready", "building"]).nullable().optional(),
+  repositories: z.array(z.object({ repository: z.string(), repositoryId: z.string().regex(/^[1-9][0-9]{0,15}$/) }).passthrough()), readyCopy: z.enum(["ready", "building"]).nullable().optional(),
 }).passthrough();
 const projects = (organizationId: string) => `/v1/cloud-v2/organizations/${organizationId}/cloud-projects`;
 
@@ -250,4 +250,48 @@ export async function shell(ctx: StageContext, bridge: Bridge, scope: { workspac
   const match = await until(ctx, step, ctx.timing.stateMs, ctx.timing.pollMs, async () => pattern.exec(text()));
   bridge.send("PTY_KILL", { sessionId: created.sessionId });
   return { exitCode: Number(match[2]), output: match[1]! };
+}
+
+// ── The account's environment for a repository ─────────
+
+/** The seeded file's path in each checkout. */
+export const ENVIRONMENT_PATH = ".env";
+const Environment = z.object({ environment: z.object({ revision: z.number().int().nonnegative(),
+  variables: z.array(z.object({ name: z.string() }).passthrough()), files: z.array(z.object({ path: z.string() }).passthrough()) }).passthrough() });
+const environmentPath = (ctx: StageContext, repository: string, repositoryId: string) =>
+  `/v1/cloud-v2/organizations/${ctx.state.organizationId}/environment/${repositoryId}?repository=${encodeURIComponent(repository)}`;
+
+export async function readEnvironment(ctx: StageContext, repository: string, repositoryId: string, step: string):
+  Promise<{ revision: number; empty: boolean }> {
+  const environment = parse(Environment, (await call(ctx.ports.api, "GET", environmentPath(ctx, repository, repositoryId), step)).body, step).environment;
+  return { revision: environment.revision, empty: environment.variables.length === 0 && environment.files.length === 0 };
+}
+
+/** Seeds one file into the account's environment for each repository, but only when nothing would be overwritten: every
+ * environment at revision 0 (or empty and this run's own, after an earlier stage cleared it), and the path ignored by
+ * every repository. Otherwise nothing is written and the reason is returned. */
+export async function seedEnvironments(ctx: StageContext, repositories: readonly { repository: string; repositoryId: string }[], content: (index: number) => string):
+  Promise<{ seeded: true } | { seeded: false; reason: "environment_exists" | "path_not_ignored" }> {
+  const current = [];
+  for (const target of repositories) {
+    const environment = await readEnvironment(ctx, target.repository, target.repositoryId, "environment_read");
+    const ours = ctx.state.created.environments.some(row => row.repositoryId === target.repositoryId);
+    if (!(environment.revision === 0 || ours && environment.empty)) return { seeded: false, reason: "environment_exists" };
+    if (!await ctx.ports.github.ignores(target.repository, ENVIRONMENT_PATH)) return { seeded: false, reason: "path_not_ignored" };
+    current.push({ ...target, revision: environment.revision, ours });
+  }
+  for (const [index, target] of current.entries()) {
+    // Recorded before the write, so a lost response is still cleared by cleanup.
+    if (!target.ours) { ctx.state.created.environments.push({ repository: target.repository, repositoryId: target.repositoryId }); await ctx.save(); }
+    await call(ctx.ports.api, "PATCH", environmentPath(ctx, target.repository, target.repositoryId), "environment_seed",
+      { expectedRevision: target.revision, files: [{ path: ENVIRONMENT_PATH, content: content(index) }] });
+  }
+  return { seeded: true };
+}
+
+/** Empties an environment this run seeded (cleanup and a stage's end); one that is already empty is left alone. */
+export async function clearEnvironment(ctx: StageContext, target: { repository: string; repositoryId: string }, step = "environment_clear"): Promise<void> {
+  const environment = await readEnvironment(ctx, target.repository, target.repositoryId, step);
+  if (environment.empty) return;
+  await call(ctx.ports.api, "PATCH", environmentPath(ctx, target.repository, target.repositoryId), step, { expectedRevision: environment.revision, clear: true });
 }

@@ -5,7 +5,7 @@ import { assertRepository, prefixed, safeLine, stageLine } from "./guard.js";
 import { stageProjects } from "./stage-projects.js";
 import { stageProvision } from "./stage-provision.js";
 import { stageRetention } from "./stage-retention.js";
-import { deleteProject, deleteWorkspace, getWorkspace, listProjects, listWorkspaces } from "./steps.js";
+import { clearEnvironment, deleteProject, deleteWorkspace, getWorkspace, listProjects, listWorkspaces, readEnvironment } from "./steps.js";
 
 export type Stage = (ctx: StageContext) => Promise<Record<string, number>>;
 /** Stages not written yet (B and D wait on the owner's answers) are absent and refused. */
@@ -23,12 +23,14 @@ export const DEFAULT_RUN_CAP = 30;
 const ACTIVE = new Set(["creating", "starting", "running", "stopping"]);
 
 export function stageContext(ports: Ports, state: RehearsalState, save: () => Promise<void>, repositories: StageContext["repositories"],
-  timing: StageContext["timing"], runCap: number): StageContext & { lastStep(): string } {
-  let last = "start";
+  timing: StageContext["timing"], runCap: number): StageContext & { lastStep(): string; takeNotes(): string[] } {
+  let last = "start", notes: string[] = [];
   for (const repository of [repositories.one, repositories.two, repositories.submodules]) if (repository) assertRepository(repository);
   return {
     ports, state, save, repositories, timing,
     step(name) { last = name; },
+    note(code) { if (/^[a-z0-9_:.-]{1,80}$/.test(code) && notes.length < 16) notes.push(code); },
+    takeNotes: () => { const taken = notes; notes = []; return taken; },
     start() {
       if (state.machineStarts >= runCap) throw new RehearsalFailure("machine_cap", "run_cap");
       state.machineStarts++;
@@ -56,11 +58,14 @@ export async function runStages(ctx: ReturnType<typeof stageContext>, stages: re
         // One temporary role per stage; nothing outlives it.
         await ctx.ports.database.close().catch(() => options.log("database role: close failed; run --cleanup"));
       }
+      const notes = ctx.takeNotes();
+      if (notes.length) result = { ...result, notes };
     }
     ctx.state.stages[name] = result;
     await ctx.save();
     options.log(stageLine(name, result));
     for (const [key, value] of Object.entries(result.counts ?? {})) options.log(safeLine(`  ${name} ${key} ${value}`));
+    for (const note of result.notes ?? []) options.log(safeLine(`  ${name} note ${note}`));
     if (!result.ok) return false;
   }
   return true;
@@ -74,7 +79,7 @@ async function preconditions(ctx: StageContext, options: RunOptions): Promise<vo
 
 // ── Cleanup and inventory ───────────────────────────────
 
-export type Inventory = Record<"workspaces" | "projects" | "branches" | "pulls" | "machines" | "objects" | "databaseRows" | "repositories", number>;
+export type Inventory = Record<"workspaces" | "projects" | "branches" | "pulls" | "machines" | "objects" | "environments" | "databaseRows" | "repositories", number>;
 
 /** Removes everything this run created or named with its prefix, best effort per item, then reads the inventory. */
 export async function cleanup(ctx: StageContext, options: { keepFixtures: boolean; log(line: string): void }): Promise<{ inventory: Inventory; failures: number }> {
@@ -114,6 +119,7 @@ export async function cleanup(ctx: StageContext, options: { keepFixtures: boolea
     if (row && row.state !== "deleted") await ports.boat.delete(machine);
   });
   workspaces = state.created.workspaces; projects = state.created.projects;
+  for (const target of state.created.environments) await attempt("environment", () => clearEnvironment(ctx, target, "cleanup_environment"));
   for (const id of workspaces) await attempt("objects", async () => { for (const key of await ports.storage.keys(id)) await ports.storage.delete(key); });
   if (!options.keepFixtures) for (const repository of state.created.repositories)
     await attempt("repository", () => ports.github.deleteRepository(assertRepository(repository)));
@@ -124,7 +130,7 @@ export async function cleanup(ctx: StageContext, options: { keepFixtures: boolea
 export async function readInventory(ctx: StageContext, keepFixtures: boolean): Promise<Inventory> {
   const { ports, state } = ctx;
   const repositories = fixtureRepositories(ctx);
-  let branches = 0, pulls = 0, machines = 0, objects = 0, workspaces = 0, remaining = 0;
+  let branches = 0, pulls = 0, machines = 0, objects = 0, workspaces = 0, remaining = 0, environments = 0;
   for (const repository of repositories) {
     branches += (await ports.github.branches(repository, state.prefix)).length;
     pulls += (await ports.github.openPulls(repository, state.prefix)).length;
@@ -134,6 +140,7 @@ export async function readInventory(ctx: StageContext, keepFixtures: boolean): P
     if (row && row.state !== "deleted") machines++;
   }
   for (const id of state.created.workspaces) objects += (await ports.storage.keys(id)).length;
+  for (const target of state.created.environments) if (!(await readEnvironment(ctx, target.repository, target.repositoryId, "inventory_environment")).empty) environments++;
   for (const row of await listWorkspaces(ports.api, state.organizationId, "inventory_workspaces"))
     if (prefixed(state.prefix, row.name) && row.state !== "deleted") workspaces++;
   const projects = (await listProjects(ports.api, state.organizationId, "inventory_projects")).filter(row => prefixed(state.prefix, row.name)).length;
@@ -142,7 +149,7 @@ export async function readInventory(ctx: StageContext, keepFixtures: boolean): P
       (SELECT count(*) FROM cloud_projects WHERE left(name, length($1)) = $1)::int AS projects`, [state.prefix]);
   const databaseRows = Number(rows[0]?.workspaces ?? 0) + Number(rows[0]?.projects ?? 0);
   if (!keepFixtures) for (const repository of state.created.repositories) if (await ports.github.repositoryExists(repository)) remaining++;
-  return { workspaces, projects, branches, pulls, machines, objects, databaseRows, repositories: remaining };
+  return { workspaces, projects, branches, pulls, machines, objects, environments, databaseRows, repositories: remaining };
 }
 
 export function inventoryLines(inventory: Inventory): { lines: string[]; clean: boolean } {

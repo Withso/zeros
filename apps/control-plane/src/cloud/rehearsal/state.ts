@@ -15,9 +15,10 @@ const Schema = z.object({
     projects: z.array(Uuid), workspaces: z.array(Uuid), machines: z.array(z.string().max(128)), repositories: z.array(z.string().max(201)),
     branches: z.array(z.object({ repository: z.string().max(201), name: z.string().max(255) })),
     pulls: z.array(z.object({ repository: z.string().max(201), number: z.number().int().positive() })),
+    environments: z.array(z.object({ repository: z.string().max(201), repositoryId: z.string().regex(/^[1-9][0-9]{0,15}$/) })),
   }),
   stages: z.record(z.string(), z.object({ ok: z.boolean(), step: z.string().optional(), code: z.string().optional(), skipped: z.string().optional(),
-    counts: z.record(z.string(), z.number()).optional() })),
+    counts: z.record(z.string(), z.number()).optional(), notes: z.array(z.string().regex(/^[a-z0-9_:.-]{1,80}$/)).max(16).optional() })),
   shifts: z.number().int().nonnegative(), machineStarts: z.number().int().nonnegative(),
 }).strict();
 
@@ -25,7 +26,7 @@ export const stateDirectory = (base = homedir()) => join(base, ".zeros-rehearsal
 
 export function newState(runId: string, organizationId: string, startedAt: Date): RehearsalState {
   return { version: 1, runId, prefix: runPrefix(runId.replace(/-/g, "")), startedAt: startedAt.toISOString(), organizationId,
-    organizations: [organizationId], created: { projects: [], workspaces: [], machines: [], repositories: [], branches: [], pulls: [] }, stages: {}, shifts: 0, machineStarts: 0 };
+    organizations: [organizationId], created: { projects: [], workspaces: [], machines: [], repositories: [], branches: [], pulls: [], environments: [] }, stages: {}, shifts: 0, machineStarts: 0 };
 }
 
 export async function loadState(runId: string, directory = stateDirectory()): Promise<RehearsalState> {
