@@ -1,5 +1,6 @@
 // A stateful Boat for tests. It encodes only what we rely on Boat for; each
 // assumption is listed in BOAT_FAKE_ASSUMPTIONS and nothing here talks to Boat.
+import { createHash } from "node:crypto";
 import type { CloudV2CommandResult, CloudV2Compute } from "../boat.js";
 import { BoatForkRefusedError, BoatSnapshotExpiredError } from "../boat-client.js";
 import { CloudProviderError } from "../provider-error.js";
@@ -55,6 +56,8 @@ const lost = () => new CloudProviderError("provider_request_failed", "Boat API r
 export class FakeBoat implements CloudV2Compute {
   readonly machines = new Map<string, Machine>();
   readonly snapshots = new Map<string, Map<string, string>>();
+  /** Numbers each recorded ignored-file baseline, so a test tells a new one from an inherited one. */
+  private baselines = 0;
   readonly commands: FakeCommand[] = [];
   readonly calls: { op: string; args: unknown[] }[] = [];
   private readonly keys = new Map<string, { id: string; at: number }>();
@@ -199,6 +202,18 @@ export class FakeBoat implements CloudV2Compute {
     }
     const scripted = await this.script?.(machine, command, input);
     if (scripted) return scripted;
+    // The ignored-file baseline (checkpoint.ts ignoredBaselineCommand): one file per checkout, named by its
+    // path, under the home's retention-baseline directory; an existing one is never replaced. The project
+    // builder's command (ready-copies.ts readyCopyBaselineCommand) removes the directory first.
+    if (command.includes("zeros-baseline recorded")) {
+      if (command.startsWith("rm -rf -- '/home/user/.local/share/zeros/retention-baseline' && "))
+        for (const path of [...machine.files.keys()]) if (path.startsWith("/home/user/.local/share/zeros/retention-baseline/")) machine.files.delete(path);
+      for (const path of new Set(command.match(/\/home\/user\/(?!\.local\/)[A-Za-z0-9._/-]+/g) ?? [])) {
+        const file = `/home/user/.local/share/zeros/retention-baseline/${createHash("sha256").update(path).digest("hex")}`;
+        if (!machine.files.has(file)) machine.files.set(file, `baseline ${++this.baselines} of ${path}`);
+      }
+      return { exitCode: 0, stdout: "zeros-baseline recorded\n", timedOut: false };
+    }
     if (command.includes("rev-parse HEAD"))
       return { exitCode: 0, stdout: `Cloning\nzeros-build-branch=main\n${"c".repeat(40)}\n`, timedOut: false };
     return { exitCode: 0, stdout: "", timedOut: false };
