@@ -1086,6 +1086,26 @@ d("cloud v2 retention", () => {
         expect(await columns("creator_user_id, creator_absent_reason, archive_reason")).toEqual({ creator_user_id: leaver, creator_absent_reason: null, archive_reason: "member_left" });
       });
 
+      it("leaves the transaction's own settings exactly as they were: '0', '1' or unset, through both membership triggers", async () => {
+        const leaver = await member();
+        await pool.query("UPDATE cloud_v2_workspaces SET creator_user_id=$2, private_owner_user_id=$2 WHERE id=$1", [id, leaver]);
+        for (const before of [null, "0", "1"] as const) {
+          const client = await pool.connect();
+          try {
+            await client.query("BEGIN");
+            if (before !== null) await client.query("SELECT set_config('app.system', $1, true), set_config('app.cloud_team_ownership', $1, true)", [before]);
+            // Both triggers fire in this transaction: the departure archives, the return restores.
+            await client.query("DELETE FROM organization_members WHERE org_id=$1 AND user_id=$2", [org, leaver]);
+            expect((await client.query("SELECT archive_reason FROM cloud_v2_workspaces WHERE id=$1", [id])).rows[0].archive_reason).toBe("member_left");
+            await client.query("INSERT INTO organization_members (org_id, user_id, role) VALUES ($1, $2, 'member')", [org, leaver]);
+            const after = (await client.query("SELECT current_setting('app.system', true) AS system, current_setting('app.cloud_team_ownership', true) AS ownership")).rows[0];
+            if (before === null) for (const value of [after.system, after.ownership]) expect(["on", "1"]).not.toContain(value);
+            else expect(after).toEqual({ system: before, ownership: before });
+          } finally { await client.query("ROLLBACK"); client.release(); }
+        }
+        expect((await columns("archive_reason")).archive_reason).toBeNull();
+      });
+
       it("never fails or waits on a removal while the workspace row is held (a start in progress), and archives it on the next sweep", async () => {
         const leaver = await member();
         await privateTo(leaver);
