@@ -433,6 +433,21 @@ export function cloudV2StopProbe(row: { backup_probe?: BackupProbe | null; backu
  * "all" when its machine is still there (resumed as it is), or a backup of this very stop holds everything (restored),
  * or this stop left nothing off GitHub (rebuilt without loss); otherwise "pushed": it is rebuilt from GitHub and
  * work never pushed is gone (the lostWork note). An earlier stop's backup alone is "pushed": it lacks this stop's work. */
+/** The build a workspace restores from, for both restore paths (beginRestore, pinRestoreImage): the organization's active
+ * Cloud Computer build, locked so activation and cleanup wait for the pin the caller writes in the same transaction. */
+async function restoreBuild(tx: Tx, organizationId: string): Promise<{ id: string; snapshot_name: string; source_policy_version: number; recipe: unknown } | null> {
+  return (await tx.query<{ id: string; snapshot_name: string; source_policy_version: number; recipe: unknown }>(
+    `SELECT b.id, c.snapshot_name, b.source_policy_version, b.recipe FROM cloud_v2_computers c
+     JOIN cloud_v2_computer_builds b ON b.id=c.active_build_id AND b.org_id=c.org_id
+     WHERE c.org_id=$1 AND c.snapshot_name IS NOT NULL AND b.state='succeeded' AND b.source_policy_version IN (2,3) AND b.snapshot_id=c.snapshot_name
+       AND b.snapshot_deleted_at IS NULL AND b.cleanup_requested_at IS NULL
+     FOR SHARE OF c,b`, [organizationId])).rows[0] ?? null;
+}
+const restoreImage = (build: { snapshot_name: string; source_policy_version: number; recipe: unknown },
+  workspace: { repository: string; source_repositories: string[] | null }) =>
+  cloudV2WorkspaceImage({ policy: build.source_policy_version, snapshot: build.snapshot_name, recipe: build.recipe,
+    scope: workspace.source_repositories ?? [], repository: workspace.repository });
+
 export function cloudV2Restores(row: Row, now = Date.now()): "all" | "pushed" {
   if (row.checkpoint_object && row.checkpoint_stop_generation === row.stop_generation) return "all";
   if (cloudV2StopProbe(row) === "clean") return "all";
@@ -1709,23 +1724,33 @@ export class CloudV2Store {
         return null;
       }
       // As at creation: activation and cleanup wait for this pin.
-      const active = await tx.query<{ id: string; snapshot_name: string; source_policy_version: number; recipe: unknown }>(
-        `SELECT b.id, c.snapshot_name, b.source_policy_version, b.recipe FROM cloud_v2_computers c
-         JOIN cloud_v2_computer_builds b ON b.id=c.active_build_id AND b.org_id=c.org_id
-         WHERE c.org_id=$1 AND c.snapshot_name IS NOT NULL AND b.state='succeeded' AND b.source_policy_version IN (2,3) AND b.snapshot_id=c.snapshot_name
-           AND b.snapshot_deleted_at IS NULL AND b.cleanup_requested_at IS NULL
-         FOR SHARE OF c,b`, [rows[0].org_id]);
-      if (!active.rows[0]) return "no_computer";
+      const active = await restoreBuild(tx, rows[0].org_id);
+      if (!active) return "no_computer";
       const setup = originalSetupBuild(rows[0].computer_build_id, rows[0].restore_create);
-      const image = cloudV2WorkspaceImage({ policy: active.rows[0].source_policy_version, snapshot: active.rows[0].snapshot_name,
-        recipe: active.rows[0].recipe, scope: rows[0].source_repositories ?? [], repository: rows[0].repository });
+      const image = restoreImage(active, rows[0]);
       const recorded = await tx.query<{ restore_attempt: string; restore_create: CloudV2RestoreCreate }>(
         `UPDATE cloud_v2_workspaces SET restore_pending=true, restore_attempt=$3, boat_sandbox_id=NULL, computer_build_id=$2, execution_restore_claimed_at=NULL,
            restore_create=jsonb_build_object('from',$4::text,'name',$5::text,'env',$6::jsonb,'requestedAt',clock_timestamp(),'prune',$8::jsonb) || $7::jsonb || $9::jsonb,
            worker_route_url=NULL, worker_port_token=NULL, worker_token_hash=NULL, worker_boot_id=NULL
          WHERE id=$1 RETURNING restore_attempt, restore_create`,
-        [id, active.rows[0].id, request.attempt, image.from, request.name, JSON.stringify(request.env), JSON.stringify(setup), JSON.stringify(image.prune), JSON.stringify(extra)]);
+        [id, active.id, request.attempt, image.from, request.name, JSON.stringify(request.env), JSON.stringify(setup), JSON.stringify(image.prune), JSON.stringify(extra)]);
       return { attempt: recorded.rows[0]!.restore_attempt, create: restoreCreate(recorded.rows[0]!.restore_create)! };
+    });
+  }
+
+  /** Retention's clean rebuild of a lost VM (lifecycle.ts cleanReplacement) takes its image as beginRestore does: from
+   * the organization's active Cloud Computer build, re-pinning the workspace to it in the same transaction. Never the
+   * workspace's own earlier pin: cleanup deletes a replaced build's snapshot as soon as a newer one is live, and the
+   * rebuild needs nothing from it (its checkout and branches come from GitHub). Null with no active build. */
+  async pinRestoreImage(id: string): Promise<CloudV2WorkspaceImage | null> {
+    return withSystemTx(this.pool, async tx => {
+      const row = (await tx.query<{ org_id: string; repository: string; source_repositories: string[] | null }>(
+        "SELECT org_id, repository, source_repositories FROM cloud_v2_workspaces WHERE id=$1 AND state='starting' FOR UPDATE", [id])).rows[0];
+      if (!row) return null;
+      const active = await restoreBuild(tx, row.org_id);
+      if (!active) return null;
+      await tx.query("UPDATE cloud_v2_workspaces SET computer_build_id=$2 WHERE id=$1", [id, active.id]);
+      return restoreImage(active, row);
     });
   }
 
