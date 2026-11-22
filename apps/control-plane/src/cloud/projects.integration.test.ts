@@ -71,6 +71,30 @@ d("cloud projects and GitHub at two levels", () => {
       await expectCode(action(), "not_found");
   });
 
+  it("while a member is away, keeps their personal project from everyone, without its secrets, and gives it back when they return (retention S4)", async () => {
+    await levels.connect(org, member, { installationId: 700, accountLogin: "member-gh", level: "personal" });
+    const mine = await personal(member, "Notes");
+    await pool.query("INSERT INTO cloud_v2_ready_copy_secrets (project_id, org_id, envelope, names) VALUES ($1,$2,'{}','{TOKEN}')", [mine.id, org]);
+    await pool.query("DELETE FROM organization_members WHERE org_id=$1 AND user_id=$2", [org, member]);
+    // Away: the secrets are gone at once, the project waits (stamped), and nobody else reaches it on any route.
+    expect((await pool.query("SELECT count(*)::int AS n FROM cloud_v2_ready_copy_secrets WHERE project_id=$1", [mine.id])).rows[0].n).toBe(0);
+    expect((await pool.query("SELECT owner_left_at IS NOT NULL AS left FROM cloud_projects WHERE id=$1", [mine.id])).rows[0].left).toBe(true);
+    for (const viewer of [owner, admin, other]) {
+      expect((await projects.list(org, viewer)).map(project => project.id)).not.toContain(mine.id);
+      await expectCode(projects.get(org, viewer, mine.id), "not_found");
+      // A role check may answer first (a member may not share or edit); either way exactly as for a project that does not exist.
+      const code = async (action: Promise<unknown>) => action.then(() => "ok", (error: { code?: string }) => error.code);
+      for (const act of [(projectId: string) => projects.update(org, viewer, projectId, { name: "Taken" }), (projectId: string) => projects.share(org, viewer, projectId)])
+        expect(await code(act(mine.id))).toBe(await code(act(randomUUID())));
+      await expectCode(projects.remove(org, viewer, mine.id), "not_found");
+    }
+    // Back: theirs again, with its repositories; the secrets must be entered again.
+    await pool.query("INSERT INTO organization_members (org_id, user_id, role) VALUES ($1, $2, 'member')", [org, member]);
+    expect((await projects.get(org, member, mine.id)).id).toBe(mine.id);
+    expect((await pool.query("SELECT owner_left_at FROM cloud_projects WHERE id=$1", [mine.id])).rows[0].owner_left_at).toBeNull();
+    for (const viewer of [owner, admin, other]) await expectCode(projects.get(org, viewer, mine.id), "not_found");
+  });
+
   it("keeps each repository's submodule setting, off by default; an update that omits it keeps it, and changing it is its own change", async () => {
     await connectOrganization(admin, 501);
     const created = await projects.create(org, admin, { name: "Zeros", level: "organization",
