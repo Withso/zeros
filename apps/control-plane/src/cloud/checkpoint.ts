@@ -326,7 +326,7 @@ function archiveSteps(input: ArchiveInput, revision: string): string[] {
     "c=\"$work/c\"; mkdir \"$c\"; m=\"$c/manifest\"; printf 'zeros-checkpoint 1\\n' > \"$m\"",
     // Digests of the parts outside Git; a part that cannot be read disables reuse.
     "have_repo='' tree='' staged_tree='' base_commit='' digests=1; : > \"$work/parts\"",
-    ...repositoryCapture(true, !input.backup),
+    ...repositoryCapture(`${CLOUD_V2_WORKER_STATE}/environment-seed/manifest.json`, !input.backup),
     // Before the fingerprint, which then covers every repository.
     ...otherRepositoriesCapture(input.repositories ?? [], !input.backup),
     "step=sessions",
@@ -367,7 +367,20 @@ function archiveSteps(input: ArchiveInput, revision: string): string[] {
 /** One checkout's capture: its Git state, refs, stashes, remotes and what Git
  * ignores, into "$m" and "$work"; the first repository also captures its seeded
  * environment. Leaves have_repo, tree, staged_tree, base_commit and digests set. */
-function repositoryCapture(environment: boolean, attachments = true): string[] {
+/** One checkout's seeded environment files, by its seed manifest, into "$work/environment". */
+function environmentCapture(manifest: string): string[] {
+  return [
+    "  step=environment",
+    `  node "$work/environment.mjs" capture "$repo" "$home/${manifest}" "$work/environment" || { status=$?; if [ "$status" = 3 ]; then fail checkpoint_too_large; else fail checkpoint_failed; fi; }`,
+    "  if [ -d \"$work/environment\" ]; then printf 'environment ' >> \"$work/parts\"; node \"$work/digest.mjs\" tree \"$work/environment\" -- . >> \"$work/parts\" || digests=''; fi",
+  ];
+}
+
+/** `environment`: the seed manifest under the home, for a repository whose seeded
+ * environment files are captured into environment.tar; false for none. `seededOut`
+ * (a later repository): those files are left out of ignored.tar, so they exist only
+ * in environment.tar. The first repository keeps its capture exactly as it was. */
+function repositoryCapture(environment: string | false, attachments = true, seededOut = false): string[] {
   return [
     "step=repository",
     "if [ -d \"$repo\" ] && top=$(git -C \"$repo\" rev-parse --show-toplevel) && [ \"$(cd \"$repo\" && pwd -P)\" = \"$(cd \"$top\" && pwd -P)\" ]; then",
@@ -479,20 +492,21 @@ function repositoryCapture(environment: boolean, attachments = true): string[] {
       "    printf '%s\\0' \"$path\" >> \"$work/attachments\"",
       "  done < \"$work/attachment-ignored\"",
     ] : []),
+    // A later repository's seeded files are captured first and listed, so the ignored archive leaves them out.
+    ...(environment && seededOut ? [...environmentCapture(environment),
+      "  if [ -d \"$work/environment\" ]; then node \"$work/environment.mjs\" exclude \"$repo\" \"$work/environment\" \"$work/environment-paths\" || fail checkpoint_failed; else : > \"$work/environment-paths\"; fi",
+    ] : []),
     "  step=ignored; total=0",
     "  while IFS= read -r -d '' path; do",
     "    case \"$path\" in */) continue ;; esac",
     "    if attachment_path \"$path\"; then continue; fi",
+    ...(environment && seededOut ? ["    if grep -qxF -- \"$path\" \"$work/environment-paths\"; then continue; fi"] : []),
     "    if [ -f \"$path\" ] && [ ! -L \"$path\" ]; then",
     "      size=$(stat -c %s -- \"$path\")",
     `      if [ "$size" -le ${IGNORED_FILE_BYTES} ] && [ $((total + size)) -le ${IGNORED_TOTAL_BYTES} ]; then total=$((total + size)); printf '%s\\0' "$path" >> "$work/ignored"; fi`,
     "    fi",
     "  done < <(git ls-files -z --others --ignored --exclude-standard --directory)",
-    ...(environment ? [
-    "  step=environment",
-    `  node "$work/environment.mjs" capture "$repo" "$home/${CLOUD_V2_WORKER_STATE}/environment-seed/manifest.json" "$work/environment" || { status=$?; if [ "$status" = 3 ]; then fail checkpoint_too_large; else fail checkpoint_failed; fi; }`,
-    "  if [ -d \"$work/environment\" ]; then printf 'environment ' >> \"$work/parts\"; node \"$work/digest.mjs\" tree \"$work/environment\" -- . >> \"$work/parts\" || digests=''; fi",
-    ] : []),
+    ...(environment && !seededOut ? environmentCapture(environment) : []),
     "  step=fingerprint",
     "  for part in attachments ignored; do",
     "    if [ -s \"$work/$part\" ]; then printf '%s ' \"$part\" >> \"$work/parts\"; node \"$work/digest.mjs\" files \"$repo\" \"$work/$part\" >> \"$work/parts\" || digests=''; fi",
@@ -536,7 +550,8 @@ function otherRepositoriesCapture(repositories: readonly CheckpointRepository[],
       `  outer_work=$work; work="$outer_work/r${i}"; mkdir "$work"; cp "$outer_work/digest.mjs" "$outer_work/environment.mjs" "$work/"`,
       `  c="$outer_work/c/repositories/${i}"; mkdir -p "$c"; m="$c/manifest"; printf 'zeros-checkpoint 1\\n' > "$m"`,
       "  have_repo='' tree='' staged_tree='' base_commit='' digests=1; : > \"$work/parts\"",
-      ...repositoryCapture(false, attachments).map(line => `  ${line}`),
+      // Its seeded environment files, from its own seed manifest in the worker's state for this repository.
+      ...repositoryCapture(`${CLOUD_V2_WORKER_STATE}/repositories/${i}/environment-seed/manifest.json`, attachments, true).map(line => `  ${line}`),
       ...repositoryBundle().map(line => `  ${line}`),
       `  { printf 'repository ${i}\\n'; grep -v -E '^(index|worktree) ' "$m" || true; printf 'index-tree %s\\nworktree-tree %s\\nbase %s\\n' "\${staged_tree:--}" "\${tree:--}" "\${base_commit:--}";`,
       `    cat "$work/parts"; [ -n "$digests" ] || printf 'undigested\\n'; } > "$outer_work/repository-${i}"`,
