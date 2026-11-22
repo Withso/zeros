@@ -3973,8 +3973,9 @@ function AgentChatBody({
   // A switch waits for the running turn, so the previous agent is never cut
   // off. Stop cancels the held send with the turn.
   useEffect(() => {
-    if (!chatId) return;
-    const step = heldSwitchSend(heldSwitchSendRef.current, {
+    const held = heldSwitchSendRef.current;
+    if (!chatId || !held) return;
+    const step = heldSwitchSend(held, {
       chatId, running: composerStreaming, generation: agentSessions.getSendGeneration(chatId),
     });
     if (step === "wait") return;
