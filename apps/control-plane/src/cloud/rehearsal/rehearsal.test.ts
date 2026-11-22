@@ -9,7 +9,7 @@ import { FakeAlpha } from "../__fixtures__/rehearsal-alpha-fake.js";
 import { shiftClock } from "./clock.js";
 import { RehearsalFailure, type RehearsalState, type StageName } from "./contract.js";
 import { assertRepository, safeLine } from "./guard.js";
-import { accountLines, PERSONAL_ROUTE_GAPS, readAccount, refusal, writeLines } from "./plan.js";
+import { accountLines, PERSONAL_ROUTE_GAPS, preconditionLines, readAccount, refusal, writeLines, type PreconditionFacts } from "./plan.js";
 import { cleanup, cleanupNeedsAccount, inventoryLines, NO_ACCOUNT, readInventory, runStages, stageContext } from "./runner.js";
 import { parseArguments } from "./rehearsal-cli.js";
 import { FIXTURE_TWO } from "./stage-provision.js";
@@ -34,7 +34,7 @@ function setup(options: { provisioned?: boolean; owner?: "personal" | "organizat
   const options_ = { switches: new Set(["projects", "personal", "retention"] as const), maxActive: 10, runCap: 30, log: (line: string) => lines.push(line) };
   return { alpha, state, ctx, lines, saved, options: options_ };
 }
-const EMPTY = { workspaces: 0, projects: 0, branches: 0, pulls: 0, machines: 0, objects: 0, environments: 0, githubSignIns: 0, pro: 0, databaseRows: 0 };
+const EMPTY = { workspaces: 0, projects: 0, branches: 0, pulls: 0, machines: 0, objects: 0, environments: 0, githubSignIns: 0, pro: 0, computerBase: 0, databaseRows: 0 };
 
 describe("rehearsal guards", () => {
   it("refuses every repository but the fixtures, by name", () => {
@@ -353,7 +353,8 @@ describe("rehearsal on the Personal route", () => {
     expect(await runStages(ctx, ["provision", "setup", "projects", "personal", "retention"], { ...options, ...all })).toBe(true);
     expect(lines.filter(line => line.startsWith("stage "))).toEqual(["stage provision: ok", "stage setup: ok", "stage projects: ok", "stage personal: ok", "stage retention: ok"]);
     expect(ctx.projectLevel).toBe("personal");
-    expect(state.stages.setup?.counts).toEqual({ proChanges: 1, githubSignIn: 1 });
+    expect(state.stages.setup?.counts).toEqual({ proChanges: 1, githubSignIn: 1, computerBuilt: 1 });
+    expect(state.stages.setup?.notes).toEqual(["cloud_computer:built_by_this_run"]);
     // Pro ended: the machine stopped after the 20-minute idle stop; four reads and the list were hidden from the second user.
     expect(state.stages.personal?.counts).toMatchObject({ workspaces: 1, hiddenReads: 5, minutesToStop: 20 });
     expect(state.stages.personal?.notes).toEqual(["worker_token:not_observable"]);
@@ -362,9 +363,13 @@ describe("rehearsal on the Personal route", () => {
     expect(state.created.githubSignIns).toEqual([alpha.organizationId]);
     const { inventory } = await cleanup(ctx, { log: line => lines.push(line) });
     expect(inventory).toEqual(EMPTY);
-    // Pro is back to "none" (the grant ends; there was none before), and the token sign-in is gone.
+    // Pro is back to "none" (the grant ends; there was none before), the token sign-in is gone, and the base this run built
+    // is no longer live, its Boat named snapshot deleted (the build row stays, as history).
     expect(alpha.pro()).toBe(false);
     expect(alpha.patConnected).toBe(false);
+    expect(alpha.computer.active).toBeNull();
+    expect(alpha.snapshots.size).toBe(0);
+    expect(alpha.computer.builds).toHaveLength(1);
     for (const line of lines) expect(safeLine(line)).toBe(line);
   });
 
@@ -385,6 +390,24 @@ describe("rehearsal on the Personal route", () => {
     const organization = setup();
     expect(await runStages(organization.ctx, ["submodules"], organization.options)).toBe(false);
     expect(organization.ctx.state.stages.submodules).toMatchObject({ step: "owner", code: "personal_route_only" });
+  });
+
+  it("keeps the base with --keep-base, and never builds or removes a base the organization already had", async () => {
+    const kept = setup({ owner: "personal" });
+    expect(await runStages(kept.ctx, ["setup"], { ...kept.options, ...all })).toBe(true);
+    expect((await cleanup(kept.ctx, { keepBase: true, log: () => undefined })).inventory).toEqual(EMPTY);
+    expect(kept.alpha.computer.active).not.toBeNull();
+    expect(kept.alpha.snapshots.size).toBe(1);
+    const existing = setup({ owner: "personal" });
+    existing.alpha.computer = { active: "11111111-1111-1111-1111-111111111111", builds: [{ id: "11111111-1111-1111-1111-111111111111", state: "succeeded", snapshot: "theirs", builderSandboxId: null }] };
+    existing.alpha.snapshots.add("theirs");
+    expect(await runStages(existing.ctx, ["setup"], { ...existing.options, ...all })).toBe(true);
+    expect(existing.ctx.state.stages.setup?.counts?.computerBuilt).toBe(0);
+    expect(existing.ctx.state.stages.setup?.notes).toEqual(["cloud_computer:existing"]);
+    expect(existing.ctx.state.created.computerBuild).toBeUndefined();
+    expect((await cleanup(existing.ctx, { log: () => undefined })).inventory).toEqual(EMPTY);
+    expect(existing.alpha.computer.active).toBe("11111111-1111-1111-1111-111111111111");
+    expect(existing.alpha.snapshots.has("theirs")).toBe(true);
   });
 
   it("puts back a grant that existed before the run, exactly", async () => {
@@ -596,6 +619,20 @@ describe("rehearsal GitHub token check", () => {
 });
 
 describe("rehearsal --plan", () => {
+  it("prints the preconditions block safely, for each state it can observe", () => {
+    const states: PreconditionFacts[] = [
+      { release: { sourceSha: "a".repeat(40), workerSha256: "b".repeat(64) }, runtime: { found: true, actingUser: true, syncContext: true },
+        projectsRead: "http_404_not_found:route_or_resource", computer: "http_404_not_found" },
+      { release: null, runtime: null, projectsRead: null, computer: null },
+      { release: { sourceSha: "a".repeat(40), workerSha256: "b".repeat(64) }, runtime: { found: false, actingUser: false, syncContext: false },
+        projectsRead: "200", computer: "none" },
+    ];
+    for (const facts of states) for (const line of preconditionLines(facts)) expect(safeLine(line), line).toBe(line);
+    const lines = preconditionLines(states[0]!);
+    expect(lines).toContain("  projects routes: not mounted (CLOUD_V2_READY_COPIES_ENABLED off)");
+    expect(lines.join(" ")).toContain("CLOUD_V2_READY_COPIES_ENABLED=true, CLOUD_V2_PERSONAL_CLOUD_ENABLED=true, CLOUD_V2_RETENTION_ENABLED=true");
+  });
+
   it("reads accounts with GETs only and lists every write without making one", async () => {
     const { alpha, state } = setup();
     const summary = await readAccount(alpha.api(), "owner", state.organizationId, "Withso");

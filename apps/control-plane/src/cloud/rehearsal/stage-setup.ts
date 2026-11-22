@@ -34,7 +34,40 @@ export async function stageSetup(ctx: StageContext): Promise<Record<string, numb
   const after = await githubSignIn(ctx, organizationId, "github_sign_in_after");
   check(after.methods.pat.configured && after.selectedMethod === "pat", "github_sign_in_after", "not_connected");
   counts.githubSignIn = 1;
+
+  // A project's copy builds only on the organization's own active base (ready copies on, no shared base): a Personal
+  // organization that never built one gets it here, explicitly, as one builder machine.
+  ctx.step("cloud_computer");
+  counts.computerBuilt = await ensureComputer(ctx);
   return counts;
+}
+
+const Computer = z.object({ activeBuildId: z.string().nullable(), recipeRevision: z.number().int().nonnegative(),
+  builds: z.array(z.object({ id: z.string(), state: z.string(), builderSandboxId: z.string().nullable().optional() }).passthrough()) }).passthrough();
+/** The Personal organization's active Cloud Computer, built once when it has none. Returns 1 when this run built it. */
+export async function ensureComputer(ctx: StageContext): Promise<number> {
+  const path = `/v1/cloud-v2/organizations/${ctx.state.organizationId}/computer`;
+  const read = async (step: string) => parse(Computer, (await call(ctx.ports.api, "GET", path, step)).body, step);
+  const current = await read("computer_read");
+  const active = current.activeBuildId && current.builds.find(build => build.id === current.activeBuildId);
+  if (active && active.state === "succeeded") { ctx.note("cloud_computer:existing"); return 0; }
+  if (!ctx.state.created.computerBuild) {
+    ctx.start("computer_build");
+    const requested = parse(z.object({ build: z.object({ id: z.string().uuid() }).passthrough() }),
+      (await call(ctx.ports.api, "POST", `${path}/builds`, "computer_build", { revision: current.recipeRevision })).body, "computer_build");
+    ctx.state.created.computerBuild = requested.build.id;
+    await ctx.save();
+  }
+  const id = ctx.state.created.computerBuild;
+  await until(ctx, "computer_built", ctx.timing.computerMs, ctx.timing.pollMs, async () => {
+    const overview = await read("computer_built");
+    const build = overview.builds.find(row => row.id === id);
+    if (build?.builderSandboxId && !ctx.state.created.machines.includes(build.builderSandboxId)) ctx.state.created.machines.push(build.builderSandboxId);
+    check(build && !["failed", "cancelled"].includes(build.state), "computer_built", build ? `build_${build.state}` : "build_missing");
+    return overview.activeBuildId === id && build.state === "succeeded";
+  });
+  ctx.note("cloud_computer:built_by_this_run");
+  return 1;
 }
 
 /** Pro on for a day, unless it already runs at least half a day longer; the grant before the run's first change is kept. */

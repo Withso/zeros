@@ -49,6 +49,9 @@ export interface Boat {
   /** Null when Boat no longer has the machine (404). */
   inspect(machineId: string): Promise<{ name: string | null; state: string } | null>;
   delete(machineId: string): Promise<void>;
+  /** A Cloud Computer's named snapshot: only the one this run's own base build made is ever deleted. */
+  snapshotExists(name: string): Promise<boolean>;
+  deleteSnapshot(name: string): Promise<void>;
 }
 export interface Storage {
   /** Object keys under a workspace's backup prefix. */
@@ -119,6 +122,9 @@ export type Created = {
   pro?: { before: ProGrant | null; operations: string[] };
   /** Organization ids where this run connected the account's GitHub sign-in by token; cleanup disconnects them. */
   githubSignIns: string[];
+  /** The Cloud Computer base build this run requested for the Personal organization. There is no route to remove a Cloud
+   * Computer: it and its Boat named snapshot stay after the run, and are reported as such. */
+  computerBuild?: string;
 };
 export type StageResult = { ok: boolean; step?: string; code?: string; skipped?: string; counts?: Record<string, number>;
   /** Closed codes for what a stage chose (environment_case:seeded, environment_skipped:environment_exists). */
@@ -142,7 +148,9 @@ export type StageContext = {
   /** Bounded waits; tests shrink them. */
   timing: { pollMs: number; stateMs: number; copyMs: number; turnMs: number; scanMs: number; archiveScanMs: number;
     /** Pro ended to the machine stopped: the 20-minute idle stop plus one sweep, with margin. */
-    idleStopMs: number };
+    idleStopMs: number;
+    /** A Cloud Computer base build: one builder machine from Boat's stock image installing the runtime. */
+    computerMs: number };
   /** Step progress: a stage reports each step's name as it starts (the runner keeps only the last). */
   step(name: string): void;
   /** Records a closed code for what the stage chose; printed with its result. */

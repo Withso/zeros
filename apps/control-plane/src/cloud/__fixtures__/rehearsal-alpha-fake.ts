@@ -28,6 +28,9 @@ export class FakeAlpha {
   readonly environments = new Map<string, { revision: number; files: Map<string, string> }>();
   /** Whether the fixtures' .gitignore names .env. */
   ignoresEnv = true;
+  /** The Personal organization's Cloud Computer: its active base build, and the builds; Boat's named snapshots. */
+  computer: { active: string | null; builds: { id: string; state: string; snapshot: string | null; builderSandboxId: string | null }[] } = { active: null, builds: [] };
+  readonly snapshots = new Set<string>();
   /** Whether the account has its own GitHub sign-in (on the organization route); on the Personal route, set by its token connect. */
   githubIdentity = true;
   patConnected = false;
@@ -175,6 +178,17 @@ export class FakeAlpha {
       }
       return this.reply(200, { environment: { repositoryId: parts[5], revision: environment.revision, versionId: null, updatedAt: null, variables: [],
         files: [...environment.files.keys()].map(path => ({ path, bytes: 1 })) } });
+    }
+    if (parts[2] === "organizations" && parts[4] === "computer") {
+      if (method === "POST" && parts[5] === "builds") {
+        const id = randomUUID(), snapshot = `zeros-alpha-${this.computer.builds.length + 1}`, builderSandboxId = this.machine("builder");
+        // The fake builds at once: the builder machine is gone, the snapshot saved, the build live.
+        this.machines.get(builderSandboxId)!.state = "deleted"; this.snapshots.add(snapshot);
+        this.computer.builds.unshift({ id, state: "succeeded", snapshot, builderSandboxId }); this.computer.active = id;
+        return this.reply(202, { build: { id, state: "queued" } });
+      }
+      return this.reply(200, { activeBuildId: this.computer.active, snapshotName: null, recipeRevision: 0,
+        builds: this.computer.builds.map(build => ({ id: build.id, state: build.state, builderSandboxId: build.builderSandboxId })) });
     }
     if (parts[2] === "organizations" && parts[4] === "github") return this.reply(200, { organization: [{ accountLogin: "Withso", state: "active" }], personal: [] });
     if (parts[2] === "workspaces" && parts[3] === "by-number") return this.reply(404, { error: { code: "not_found" } });
@@ -347,6 +361,8 @@ export class FakeAlpha {
       boat: {
         inspect: id => this.counted(() => { const row = this.machines.get(id); return row && row.state !== "deleted" ? { ...row } : null; }),
         delete: id => this.counted(() => { const row = this.machines.get(id); if (row) row.state = "deleted"; }),
+        snapshotExists: name => this.counted(() => this.snapshots.has(name)),
+        deleteSnapshot: name => this.counted(() => { this.snapshots.delete(name); }),
       },
       storage: {
         keys: id => this.counted(() => [...this.objects].filter(key => key.startsWith(`cloud-v2/checkpoints/${id}/`))),
@@ -389,6 +405,21 @@ export class FakeAlpha {
     if (text.includes("FROM cloud_v2_workspace_submodules")) {
       const project = this.projects.get(String(this.workspaces.get(String(values[0]))?.projectId));
       return rows(project?.submodules ? [{ path: "vendor/hello", status: "fetch", public: true }, { path: "vendor/private", status: "fetch", public: true }] : []);
+    }
+    if (text.includes("FROM cloud_v2_computer_builds b")) {
+      const build = this.computer.builds.find(row => row.id === values[0]);
+      if (!build) return rows([]);
+      return text.includes("AS active,") ? rows([{ active: this.computer.active === build.id, snapshot_id: build.snapshot }])
+        : rows([{ snapshot_id: build.snapshot, active: this.computer.active }]);
+    }
+    if (text.startsWith("UPDATE cloud_v2_computers")) {
+      const changed = this.computer.active === values[1] ? 1 : 0; if (changed) this.computer.active = null;
+      return { rows: [], rowCount: changed };
+    }
+    if (text.startsWith("UPDATE cloud_v2_computer_builds")) {
+      const build = this.computer.builds.find(row => row.id === values[0] && row.snapshot === values[2]);
+      if (build) build.snapshot = null;
+      return { rows: [], rowCount: build ? 1 : 0 };
     }
     if (text.startsWith("SELECT state FROM cloud_v2_workspaces")) return rows([{ state: this.workspaces.get(String(values[0]))?.state ?? null }]);
     if (text.includes("FROM cloud_v2_ready_copies")) return rows([...this.projects.values()].filter(project => project.id === values[0]).map(project => ({ machine_id: project.machine })));

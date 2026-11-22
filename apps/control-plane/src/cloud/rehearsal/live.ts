@@ -9,6 +9,7 @@ import type { GithubBackendConfig } from "../../config.js";
 import { createGithubAppJwt } from "../../github-app-jwt.js";
 import { planetScaleClient, roleConnectionString } from "../../manage-release-migration.js";
 import { BoatApiClient } from "../boat-client.js";
+import { readRuntimeCapabilities } from "../runtime-capabilities.js";
 import { BoatCloudV2Compute } from "../boat.js";
 import { ALPHA_PROBE_ORIGIN, alphaProbeIdentity } from "../gate0-alpha.js";
 import { BridgeProbe, Gate0Failure } from "../gate0.js";
@@ -28,6 +29,23 @@ export async function liveRelease(fetchImpl: typeof fetch = fetch): Promise<bool
     alphaProbeIdentity(await response.json());
     return true;
   } catch { return false; }
+}
+
+/** Alpha's release identity (channel alpha, ready, not in maintenance), or null. */
+export async function liveReleaseIdentity(fetchImpl: typeof fetch = fetch): Promise<{ sourceSha: string; workerSha256: string } | null> {
+  try {
+    const response = await fetchImpl(`${ALPHA_PROBE_ORIGIN}/v1/release-identity`, { redirect: "error", signal: AbortSignal.timeout(15_000) });
+    if (!response.ok) { await response.body?.cancel(); return null; }
+    return alphaProbeIdentity(await response.json());
+  } catch { return null; }
+}
+
+/** The active runtime's admission record, read-only, from the rehearsal's R2 bucket: found only when that bucket is Alpha's
+ * runtime store (where checkpoints live too). */
+export async function liveRuntimeQualification(store: { bucket: string; endpoint: string; accessKeyId: string; secretAccessKey: string }, sha256: string):
+  Promise<{ found: boolean; actingUser: boolean; syncContext: boolean }> {
+  const record = await readRuntimeCapabilities(sha256, store);
+  return { found: !!record, actingUser: !!record?.features.includes("acting-user-v1"), syncContext: !!record?.features.includes("sync-context-v1") };
 }
 
 export function liveApi(accessToken: () => Promise<string>, fetchImpl: typeof fetch = fetch): Api {
@@ -83,6 +101,12 @@ export function liveBoat(input: { apiKey: string; billingOrg?: string }): Boat {
     },
     async delete(machineId) {
       try { await compute.delete(machineId); } catch (error) { throw new RehearsalFailure("boat_delete", String((error as { code?: unknown }).code ?? "failed")); }
+    },
+    async snapshotExists(name) {
+      try { return await compute.snapshotExists(name); } catch { throw new RehearsalFailure("boat_snapshot", "failed"); }
+    },
+    async deleteSnapshot(name) {
+      try { await compute.deleteSnapshot(name); } catch (error) { throw new RehearsalFailure("boat_snapshot_delete", String((error as { code?: unknown }).code ?? "failed")); }
     },
   };
 }

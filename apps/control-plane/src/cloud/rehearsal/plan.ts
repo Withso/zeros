@@ -145,6 +145,8 @@ export function writeLines(stage: StageName, prefix: string, repositories: { one
         " recording the grant before it; cleanup puts that grant back (or ends Pro when there was none)",
       "setup would connect the test user's own GitHub sign-in in its Personal organization by token (action pat, ZEROS_REHEARSAL_GITHUB_TOKEN, fixture repositories only);" +
         " never over a sign-in it did not make; cleanup disconnects it",
+      "setup would build the Personal organization's Cloud Computer base when it has none (1 builder machine from Boat's stock image, minutes reported);" +
+        " it leaves a build row, the organization's live pointer and a Boat named snapshot; cleanup removes the pointer and the snapshot unless --keep-base",
     ] : [
       "setup (proposal, not run until approved) would let test user <n> run projects and retention in the probe organization:",
       "  1. invitation: POST /v1/organizations/<probe>/invitations role admin for user <n>, as an admin of the probe organization (today only the owner's account);" +
@@ -212,4 +214,50 @@ export async function probeDiagnostics(database: Database, organizationId: strin
     WHERE o.id = $1::uuid`, [organizationId, userId]);
   const row = rows[0] ?? {};
   return Object.fromEntries(["organization_present", "organization_active", "cloud_allowed", "member", "user_active"].map(key => [key, row[key] === true]));
+}
+
+/** What --plan could observe for the preconditions: each null when it could not be read. */
+export type PreconditionFacts = {
+  release: { sourceSha: string; workerSha256: string } | null;
+  /** The active runtime's capability record in the rehearsal's R2 bucket (cloud-v2/runtime/capabilities/<sha>.json). */
+  runtime: { found: boolean; actingUser: boolean; syncContext: boolean } | null;
+  /** The selected account's Personal organization's projects read: 200, or its closed 404 code. */
+  projectsRead: string | null;
+  /** Its Cloud Computer: has an active base, none, or the read's closed code (404 while cloud is off for it). */
+  computer: "active" | "none" | string | null;
+};
+
+/** The preconditions block: what each switch needs and what is unset on Alpha, checked live where it can be. */
+export function preconditionLines(facts: PreconditionFacts): string[] {
+  const yes = (value: boolean) => value ? "yes" : "no";
+  const lines = [
+    "preconditions:",
+    `  release: ${facts.release ? `alpha source ${facts.release.sourceSha.slice(0, 12)}, active runtime ${facts.release.workerSha256.slice(0, 12)}` : "unreadable"}`,
+    facts.runtime === null ? "  runtime qualification: unreadable (R2 read failed)"
+      : !facts.runtime.found ? "  runtime qualification: no capability record for the active runtime in ZEROS_R2_ALPHA_BUCKET (it may not be Alpha's runtime store; checkpoints live there too)"
+        : `  runtime qualification: capability record found (so ZEROS_R2_ALPHA_BUCKET is Alpha's runtime store, where checkpoints also live); acting-user-v1 ${yes(facts.runtime.actingUser)},` +
+          ` sync-context-v1 ${yes(facts.runtime.syncContext)}; the release receipt (CLOUD_V2_RUNTIME_RELEASE) is Railway's and not checked`,
+    `  projects routes: ${facts.projectsRead === null ? "unread" : facts.projectsRead === "200" ? "mounted (CLOUD_V2_READY_COPIES_ENABLED on)"
+      : facts.projectsRead.endsWith(":route_or_resource") ? "not mounted (CLOUD_V2_READY_COPIES_ENABLED off)"
+        : facts.projectsRead.endsWith(":organization") ? "mounted, but the Personal organization has no cloud (CLOUD_V2_PERSONAL_CLOUD_ENABLED off, or no Pro yet)" : facts.projectsRead}`,
+    `  Personal organization's Cloud Computer: ${facts.computer === null ? "unread" : facts.computer === "active" ? "has an active base"
+      : facts.computer === "none" ? "none: setup builds one" : `not readable yet (${facts.computer}): it has no cloud before setup's Pro and the personal switch`}`,
+    "  base: with ready copies on, a project's copy builds only on the organization's own active base_only Cloud Computer build; with none,",
+    "    the copy never queues and the project's status stays none (a workspace create answers 409 cloud_computer_build_required)",
+    "  base: setup requests one build (POST .../computer/builds, the organization's recipe revision): with CLOUD_V2_SHARED_BASE_SNAPSHOT unset, one builder",
+    "    machine from Boat's stock image installs the runtime and saves a named snapshot; the minutes are reported; cleanup removes the base unless --keep-base",
+    "  unset on Alpha, and what that means here:",
+    "    CLOUD_V2_SHARED_BASE_SNAPSHOT: each organization builds its own base (one builder machine); set, a build with no install script uses that Boat",
+    "      named snapshot with no machine; base() reads only the organization's own build either way, so a build is always needed first",
+    "    CLOUD_V2_CHECKPOINT_RETRY_ENABLED: nothing for retention; retention runs the checkpoint retry scan itself (lifecycle.ts: checkpointRetry || retention)",
+    "    CLOUD_V2_ASYNC_CREATE_ENABLED: unset means on (creates return before their GitHub checks)",
+    "    CLOUD_V2_RETENTION_BACKUP_FORKS_PER_HOUR and CLOUD_V2_RETENTION_MAINTENANCE_PER_HOUR/_PER_DAY: defaults 20, 20 and 120",
+    "  set for the run, in one Railway change after no release is running (one redeploy):",
+    "    CLOUD_V2_READY_COPIES_ENABLED=true, CLOUD_V2_PERSONAL_CLOUD_ENABLED=true, CLOUD_V2_RETENTION_ENABLED=true",
+    "  while on, Alpha-wide: retention starts for every Alpha workspace (a dirty stop takes a backup fork after an hour, its object in R2);",
+    "    every Pro user's Personal organization gets cloud; Cloud Computer builds are base only",
+    "  to put Alpha back: unset the same three in one change; left behind by design: retention stamps, backups and checkpoint objects of other",
+    "    workspaces stopped while it was on (nothing removes them with retention off); the run's own resources are removed by --cleanup",
+  ];
+  return lines.map(safeLine);
 }

@@ -19,6 +19,7 @@ const Schema = z.object({
     environments: z.array(z.object({ repository: z.string().max(201), repositoryId: z.string().regex(/^[1-9][0-9]{0,15}$/) })),
     pro: z.object({ before: Grant.nullable(), operations: z.array(Uuid).max(16) }).optional(),
     githubSignIns: z.array(Uuid).max(4),
+    computerBuild: Uuid.optional(),
   }),
   stages: z.record(z.string(), z.object({ ok: z.boolean(), step: z.string().optional(), code: z.string().optional(), skipped: z.string().optional(),
     counts: z.record(z.string(), z.number()).optional(), notes: z.array(z.string().regex(/^[a-z0-9_:.-]{1,80}$/)).max(16).optional() })),

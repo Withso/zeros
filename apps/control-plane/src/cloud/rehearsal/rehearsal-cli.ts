@@ -14,8 +14,9 @@ import { RehearsalFailure, STAGE_NEEDS_ACCOUNT, STAGES, type Api, type OwnerKind
 import { diagnose, signInAccount, signInAll, type Account, type SignedIn, type SignInDeps } from "./accounts.js";
 import { assertRepository, safeLine } from "./guard.js";
 import { checkGithubToken, tokenLines, liveApi, liveBoat, liveBridge, liveClock, liveDatabase, liveGithub, liveGithubSignIn, liveGithubToken, livePro, liveRelease, liveStorage,
-  tokenRefusal } from "./live.js";
-import { accountLines, PERSONAL_ROUTE_GAPS, platformOwners, probeDiagnostics, proActor, readAccount, refusal, resolveProbe, writeLines,
+  tokenRefusal, liveReleaseIdentity, liveRuntimeQualification } from "./live.js";
+import { errorCode } from "./steps.js";
+import { accountLines, PERSONAL_ROUTE_GAPS, preconditionLines, type PreconditionFacts, platformOwners, probeDiagnostics, proActor, readAccount, refusal, resolveProbe, writeLines,
   type AccountSummary } from "./plan.js";
 import { cleanup, cleanupNeedsAccount, DEFAULT_RUN_CAP, inventoryLines, NO_ACCOUNT, runStages, stageContext } from "./runner.js";
 import { FIXTURE_TWO } from "./stage-provision.js";
@@ -24,25 +25,25 @@ import { loadState, newState, saveState } from "./state.js";
 export const USAGE = "alpha:rehearse <provision|setup|projects|personal|retention|submodules|all> [--plan] [--cleanup] [--run <id>] " +
   "[--owner personal|organization (default personal)] [--account owner|1..10 (default 2)] [--other 1..10 (default the next configured)] " +
   "[--pro-actor <first 8 hex of the platform owner>] [--switches projects,personal,retention] [--repository owner/name] " +
-  "[--repository-two owner/name (default Withso/zeros-dev-fixture-2)] [--submodule-repository owner/name] [--submodule-fixture-repository owner/name] [--max-active <n>] [--organization <slug|id>]";
+  "[--repository-two owner/name (default Withso/zeros-dev-fixture-2)] [--submodule-repository owner/name] [--submodule-fixture-repository owner/name] [--keep-base] [--max-active <n>] [--organization <slug|id>]";
 /** `all` runs these in order on each route; D is refused until written. */
 export const ALL: Record<OwnerKind, readonly StageName[]> = {
   personal: ["provision", "setup", "projects", "personal", "retention", "submodules"], organization: ["provision", "setup", "projects", "retention"],
 };
 export const TIMING = { pollMs: 5_000, stateMs: 15 * 60_000, copyMs: 30 * 60_000, turnMs: 10 * 60_000, scanMs: 5 * 60_000, archiveScanMs: 65 * 60_000,
-  idleStopMs: 35 * 60_000 };
+  idleStopMs: 35 * 60_000, computerMs: 45 * 60_000 };
 
 export type Arguments = {
   stages: StageName[]; plan: boolean; cleanup: boolean; run?: string; owner: OwnerKind; account: "owner" | number; other?: number; proActor?: string;
   switches: Set<Switch>;
-  repository?: string; repositoryTwo?: string; submoduleRepository?: string; submoduleFixtureRepository?: string; maxActive: number; organization?: string;
+  repository?: string; repositoryTwo?: string; submoduleRepository?: string; submoduleFixtureRepository?: string; keepBase: boolean; maxActive: number; organization?: string;
 };
 export function parseArguments(argv: string[]): Arguments {
   // Private files: .env.agent at the repository root and the zeros-dev profile, both mode 0600; the profile is reached by
   // ZEROS_DEV_PROFILE_PATH (its loader refuses group- or world-readable files and does not follow a symlink).
   const { values, positionals } = parseArgs({ args: argv, allowPositionals: true, options: {
     plan: { type: "boolean" }, cleanup: { type: "boolean" }, run: { type: "string" }, account: { type: "string" }, switches: { type: "string" },
-    repository: { type: "string" }, "repository-two": { type: "string" }, "max-active": { type: "string" },
+    repository: { type: "string" }, "repository-two": { type: "string" }, "keep-base": { type: "boolean" }, "max-active": { type: "string" },
     organization: { type: "string" }, owner: { type: "string" }, "submodule-repository": { type: "string" }, "submodule-fixture-repository": { type: "string" }, other: { type: "string" }, "pro-actor": { type: "string" }, help: { type: "boolean" },
   } });
   const owner = (values.owner ?? "personal") as OwnerKind;
@@ -71,7 +72,7 @@ export function parseArguments(argv: string[]): Arguments {
     ...(values["repository-two"] ? { repositoryTwo: assertRepository(values["repository-two"]) } : {}),
     ...(values["submodule-repository"] ? { submoduleRepository: assertRepository(values["submodule-repository"]) } : {}),
     ...(values["submodule-fixture-repository"] ? { submoduleFixtureRepository: assertRepository(values["submodule-fixture-repository"]) } : {}),
-    maxActive, ...(values.organization ? { organization: values.organization } : {}) };
+    keepBase: !!values["keep-base"], maxActive, ...(values.organization ? { organization: values.organization } : {}) };
 }
 
 const Profile = z.object({
@@ -152,10 +153,21 @@ async function main(argv: string[]): Promise<number> {
         const actor = await proActor(reads, args.proActor);
         log(`pro actor (--pro-actor): ${actor.state}; github token (ZEROS_REHEARSAL_GITHUB_TOKEN): ${token ? "configured" : "absent"}`);
         const summaries = new Map<string, AccountSummary | { failed: string }>();
+      const facts: PreconditionFacts = { release: await liveReleaseIdentity(), runtime: null, projectsRead: null, computer: null };
+      if (facts.release) facts.runtime = await liveRuntimeQualification({ bucket: need("ZEROS_R2_ALPHA_BUCKET"), endpoint: need("ZEROS_R2_ALPHA_ENDPOINT"),
+        accessKeyId: need("ZEROS_R2_ALPHA_ACCESS_KEY_ID"), secretAccessKey: need("ZEROS_R2_ALPHA_SECRET_ACCESS_KEY") }, facts.release.workerSha256).catch(() => null);
         for (const result of await signInAll(accounts, signInDeps(probe))) {
           if (!result.ok) { log(`account ${result.label}: failed ${result.step} ${result.code}`); summaries.set(result.label, { failed: `${result.step}:${result.code}` }); continue; }
           try {
             const summary = await readAccount(result.api, result.label, probe.id, "Withso");
+            if (result.label === String(args.account) && summary.personal) {
+              const base = `/v1/cloud-v2/organizations/${summary.personal.id}`;
+              const projects = await result.api.json("GET", `${base}/cloud-projects`);
+              facts.projectsRead = projects.status === 200 ? "200" : errorCode(projects);
+              const computer = await result.api.json("GET", `${base}/computer`);
+              const active = z.object({ activeBuildId: z.string().nullable() }).passthrough().safeParse(computer.body);
+              facts.computer = computer.status === 200 && active.success ? (active.data.activeBuildId ? "active" : "none") : errorCode(computer);
+            }
             summaries.set(result.label, summary);
             for (const line of accountLines(summary)) log(line);
             log(`  workos organization chosen at sign-in: ${result.selected}`);
@@ -193,6 +205,7 @@ async function main(argv: string[]): Promise<number> {
           log(`stage ${stage}: ${refused ? `refused ${refused}` : "would run"}`);
           for (const line of writeLines(stage, "zr-<run>-", { one, two }, args.owner)) log(`  ${line}`);
         }
+        for (const line of preconditionLines(facts)) log(line);
         if (args.owner === "personal") for (const line of PERSONAL_ROUTE_GAPS) log(line);
       } finally { await reads.close().catch(() => log("plan database role: delete unconfirmed")); }
       return 0;
@@ -256,7 +269,8 @@ async function main(argv: string[]): Promise<number> {
       const startedAt = Date.now();
       let passed: boolean;
       if (args.cleanup) {
-        const { inventory, failures } = await cleanup(ctx, { accountless: !held, log });
+        const { inventory, failures } = await cleanup(ctx, { accountless: !held, keepBase: args.keepBase, log });
+        if (args.keepBase && run.created.computerBuild) log("cloud computer base: kept (--keep-base): its build row, live pointer and Boat named snapshot stay");
         const { lines, clean } = inventoryLines(inventory);
         for (const line of lines) log(line);
         if (failures) log(`cleanup failures ${failures}`);
