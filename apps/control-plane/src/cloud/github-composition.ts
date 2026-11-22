@@ -172,9 +172,11 @@ export function createCloudGithubServices(
       });
       await access.assertCurrent();
     },
-    mutate: async (id, userId, action) => {
+    mutate: async (id, userId, action, repository) => {
       await context(id, userId);
-      return actions.run(id, action);
+      // A later repository of a workspace of several: its own lease, by its verified identity.
+      const other = repository === undefined ? undefined : (await metadata.context(id, userId, undefined, repository)).other;
+      return actions.run(id, action, other ? { repositoryId: other.repositoryId, repository: other.repository } : undefined);
     },
   });
   const documents = createCloudGithubCatalog({ pool, metadata });

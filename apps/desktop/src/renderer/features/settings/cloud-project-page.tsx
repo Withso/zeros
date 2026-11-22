@@ -53,6 +53,9 @@ export function cloudProjectSharing(project: Pick<CloudProject, "level" | "canEd
 const setupLine = (entry: CloudProject["repositories"][number]) =>
   entry.setup?.split("\n").find(line => line.trim())?.trim() ?? (entry.setupScript ? entry.setupScript : null);
 
+/** A real limit of a project with several repositories, said where its repositories are listed. */
+export const SEVERAL_REPOSITORIES_AGENT_LIMIT = "Agents start in the project folder, so settings a repository keeps for its own agent (hooks, permissions, rules, its own MCP file) are not loaded. Instructions files are.";
+
 export function CloudProjectPage({ project, organization, userKey, connections, limits, localProjects, active, onChanged, onOpenFolder }: {
   project: CloudProject; organization: { id: string; name: string }; userKey: string;
   connections: CloudGithubLevelConnections | null | undefined; limits: CloudProjects["limits"];
@@ -87,7 +90,9 @@ export function CloudProjectPage({ project, organization, userKey, connections, 
         <ReadyCopySection organizationId={organization.id} projectId={project.id} active={active} />
       </SettingsPageSection>
 
-      <SettingsPageSection title="Repositories" description="Cloned into every workspace of this project, on the branch shown.">
+      <SettingsPageSection title="Repositories" description={project.repositories.length > 1
+        ? `Cloned into every workspace of this project, on the branch shown. ${SEVERAL_REPOSITORIES_AGENT_LIMIT}`
+        : "Cloned into every workspace of this project, on the branch shown."}>
         <SettingsGroup aria-label="Repositories">
           <SettingsRow label={`${project.repositories.length} ${project.repositories.length === 1 ? "repository" : "repositories"}`}>
             {project.canEdit && project.repositories.length < limits.repositories && (

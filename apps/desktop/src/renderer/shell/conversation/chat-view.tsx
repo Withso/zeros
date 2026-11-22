@@ -41,6 +41,7 @@ import { isRemovedAgent } from "../../features/agent/agent-runnable";
 import { AgentRemovedPanel } from "../agent-removed-panel";
 import { NoFolderPanel } from "../no-folder-panel";
 import { MessageRow } from "../../shared/ui/primitives/message-row";
+import { LostWorkNotice } from "./lost-work-notice";
 import { useChatCwd } from "../use-chat-cwd";
 import { useWorkspaceProvisioning } from "../../state/pending-workspaces";
 import { finishPreparedChatView } from "./chat-intent";
@@ -708,6 +709,12 @@ function ChatBody({
 
   return (
     <>
+      {/* A cloud workspace restored without some of its work, until its member dismisses it. */}
+      {isCloudWorkspace(cwd) && (
+        <div className="mx-auto w-full max-w-(--chat-column) shrink-0 px-7 pt-2 empty:hidden">
+          <LostWorkNotice folder={cwd} />
+        </div>
+      )}
       {/* In the transcript's column, as the shared error row. */}
       {readOnly && historyError && (
         <div className="mx-auto w-full max-w-(--chat-column) shrink-0 px-7 pt-2">

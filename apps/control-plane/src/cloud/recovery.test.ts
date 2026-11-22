@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { generateKeyPairSync, randomUUID } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import { CloudRecovery } from "./recovery.js";
 import type { RecoveryAttempt } from "./recovery-store.js";
@@ -32,13 +32,49 @@ describe("fresh checkpoint recovery coordinator", () => {
     await f.recovery.run(f.attempt.id);
     expect(f.store.fence).not.toHaveBeenCalled(); expect(f.githubToken).not.toHaveBeenCalled(); expect(f.compute.exec).not.toHaveBeenCalled();
   });
-  it("keeps a workspace of several repositories on its own VM: a replacement could restore only one", async () => {
-    const f = fixture();
-    f.store.workspace.mockResolvedValue({ id: f.attempt.workspace_id, repository: "fixture/project", baseBranch: "main", state: "running", stopGeneration: "0",
-      folder: "zeros-app", checkoutFolder: "zeros-app/project" } as never);
-    await f.recovery.run(f.attempt.id);
-    expect(f.store.fail).toHaveBeenCalledWith(f.attempt.id, "recovery_unsupported", f.attempt.lease_id);
-    expect(f.store.fence).not.toHaveBeenCalled(); expect(f.compute.stop).not.toHaveBeenCalled(); expect(f.compute.exec).not.toHaveBeenCalled();
+  describe("a workspace of several repositories", () => {
+    const several = (f: ReturnType<typeof fixture>) => {
+      f.store.workspace.mockResolvedValue({ id: f.attempt.workspace_id, repository: "fixture/project", baseBranch: "main", state: "running", stopGeneration: "0",
+        folder: "zeros-app", checkoutFolder: "zeros-app/project" } as never);
+      const repositories = vi.fn(async () => [{ repository: "fixture/web", repositoryId: "43", checkoutFolder: "zeros-app/web", baseBranch: "main" }]);
+      (f.recovery as unknown as { deps: { repositories: typeof repositories } }).deps.repositories = repositories;
+      return repositories;
+    };
+    it("recovers like a workspace of one: it is fenced, not refused", async () => {
+      const f = fixture(); several(f);
+      await f.recovery.run(f.attempt.id);
+      expect(f.store.fail).not.toHaveBeenCalled(); expect(f.store.fence).toHaveBeenCalled();
+    });
+    it("captures every repository, each in its own part of the archive", async () => {
+      const f = fixture("capturing"); several(f); f.attempt.source_stopped_at = new Date(f.now - 1);
+      f.store.upload = vi.fn(async () => true) as never; f.checkpoints.seal.mockReturnValue({} as never);
+      f.checkpoints.storage.uploadUrl.mockResolvedValue("https://r2.example.test/upload?sig=1" as never);
+      f.compute.exec.mockResolvedValue({ exitCode: 1, timedOut: false, stdout: "" });
+      await f.recovery.run(f.attempt.id);
+      const command = String(f.compute.exec.mock.calls.at(-1)![1]);
+      expect(command).toContain("/home/user/zeros-app/web");
+      expect(command).toContain("repositories/1");
+    });
+    it("restores every repository, fetching each with its own token minted for it", async () => {
+      const f = fixture("restoring"); several(f);
+      Object.assign(f.attempt, { replacement_create: { name: "fixture-recovery", env: {}, from: "snapshot-fixture" }, replacement_sandbox_id: "bx_replacement",
+        replacement_runtime_sha256: "a".repeat(64), checkpoint_object: "object-fixture", checkpoint_sha256: "b".repeat(64), checkpoint_key: {} });
+      Object.assign(f.store, { claimRestore: vi.fn(async () => true), restored: vi.fn(async () => true) });
+      f.githubToken.mockImplementation((async (_workspace: unknown, repository?: { repository: string }) =>
+        ({ token: repository ? "synthetic-web-token-0123456789" : "synthetic-first-token-0123456789" })) as never);
+      f.checkpoints.open.mockReturnValue(Buffer.alloc(32, 1) as never);
+      f.checkpoints.storage.downloadUrl.mockResolvedValue("https://r2.example.test/download?sig=1" as never);
+      f.compute.exec.mockResolvedValue({ exitCode: 0, timedOut: false, stdout: "zeros-checkpoint-restored\n" });
+      const deps = (f.recovery as unknown as { deps: { runtime: { url: ReturnType<typeof vi.fn> }; publicKeys: string[] } }).deps;
+      deps.runtime.url.mockResolvedValue("https://runtime.example.test/worker.tgz");
+      deps.publicKeys = [generateKeyPairSync("ed25519").publicKey.export({ type: "spki", format: "pem" }).toString()];
+      await f.recovery.run(f.attempt.id);
+      expect(f.store.fail.mock.calls).toEqual([]);
+      expect(f.githubToken).toHaveBeenCalledWith(expect.anything(), { repository: "fixture/web", repositoryId: "43" });
+      const command = String(f.compute.exec.mock.calls.at(-1)![1]);
+      expect(command).toContain("https://github.com/fixture/web.git");
+      expect(command).toContain(Buffer.from("synthetic-web-token-0123456789").toString("base64")); // gitleaks:allow
+    });
   });
   it("keeps the source running when the initiator lacks restore GitHub authority", async () => {
     const f = fixture(); f.githubToken.mockRejectedValue({ code: "github_access_required" });

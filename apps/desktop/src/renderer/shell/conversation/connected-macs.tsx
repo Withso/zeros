@@ -51,7 +51,7 @@ const stateText = (mac: ConnectedMac, now: number) => mac.state === "available" 
 
 /** The cloud details popup's list of Macs that may run this workspace's local
  * commands. Connect works also when the workspace is not open on that Mac. */
-export function ConnectedMacs({ macs, now, busyDeviceId, onConnect, onDisconnect, sync, onSetWanted }: {
+export function ConnectedMacs({ macs, now, busyDeviceId, onConnect, onDisconnect, sync, onSetWanted, syncUnavailable }: {
   macs: readonly ConnectedMac[];
   now: number;
   busyDeviceId?: string;
@@ -60,6 +60,8 @@ export function ConnectedMacs({ macs, now, busyDeviceId, onConnect, onDisconnect
   sync?: ThisMacSync;
   /** 12.z: another Mac's switch; that Mac starts or stops with its own default folder. */
   onSetWanted?(deviceId: string, wanted: boolean): void;
+  /** Why this workspace cannot sync to a Mac: said once, in place of every sync switch. */
+  syncUnavailable?: string;
 }) {
   return (
     <section aria-label="Connected Macs" className="mt-3 flex flex-col gap-2">
@@ -85,12 +87,13 @@ export function ConnectedMacs({ macs, now, busyDeviceId, onConnect, onDisconnect
                     aria-label={`Disconnect ${mac.name}`}>Disconnect</Button>}
               </div>
               {/* 12.z: a connected Mac's sync switch, as Conductor shows it under each Mac. */}
-              {mac.state !== "available" && (mac.thisMac ? sync && <ThisMacSyncRow mac={mac} sync={sync} />
+              {mac.state !== "available" && !syncUnavailable && (mac.thisMac ? sync && <ThisMacSyncRow mac={mac} sync={sync} />
                 : onSetWanted && <OtherMacSyncRow mac={mac} busy={busyDeviceId === mac.deviceId} onSetWanted={onSetWanted} />)}
             </li>
           ))}
         </ul>
       )}
+      {syncUnavailable && macs.length > 0 && <p className="text-fg3 text-xs leading-4.5">{syncUnavailable}</p>}
     </section>
   );
 }

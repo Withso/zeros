@@ -805,8 +805,9 @@ function cloudWorkspaceRepositories(doc: CloudWorkspaceDocument, key: string): W
     // The branch a repository is on is its checkout's, once reported; its pull request only while it is on that branch.
     const branch = entry.github?.branch ?? entry.branch;
     const github = entry.github && entry.github.branch === branch ? entry.github : undefined;
+    const environment = entry.environment?.state === "failed" || entry.environment?.state === "unavailable" ? entry.environment.state : undefined;
     return { repository: entry.repository, folder, target: `${key}/${folder}`, branch, baseBranch: entry.github?.baseBranch ?? entry.baseBranch,
-      prNumber: github?.prNumber ?? null, prState: github?.prState ?? null, prUrl: github?.prUrl ?? null };
+      prNumber: github?.prNumber ?? null, prState: github?.prState ?? null, prUrl: github?.prUrl ?? null, ...(environment ? { environment } : {}) };
   });
   return entries.every(entry => entry.folder && !entry.folder.includes("/")) && new Set(entries.map(entry => entry.folder)).size === entries.length
     ? entries : undefined;

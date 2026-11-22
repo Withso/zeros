@@ -784,6 +784,28 @@
                             "setupScript": {
                               "type": "string",
                               "maxLength": 512
+                            },
+                            "environment": {
+                              "type": "object",
+                              "properties": {
+                                "versionId": {
+                                  "type": "string",
+                                  "pattern": "^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$"
+                                },
+                                "repositoryId": {
+                                  "type": "string",
+                                  "maxLength": 16
+                                },
+                                "variables": {},
+                                "files": {}
+                              },
+                              "required": [
+                                "versionId",
+                                "repositoryId",
+                                "variables",
+                                "files"
+                              ],
+                              "additionalProperties": false
                             }
                           },
                           "required": [
@@ -1730,6 +1752,28 @@
                             "setupScript": {
                               "type": "string",
                               "maxLength": 512
+                            },
+                            "environment": {
+                              "type": "object",
+                              "properties": {
+                                "versionId": {
+                                  "type": "string",
+                                  "pattern": "^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$"
+                                },
+                                "repositoryId": {
+                                  "type": "string",
+                                  "maxLength": 16
+                                },
+                                "variables": {},
+                                "files": {}
+                              },
+                              "required": [
+                                "versionId",
+                                "repositoryId",
+                                "variables",
+                                "files"
+                              ],
+                              "additionalProperties": false
                             }
                           },
                           "required": [

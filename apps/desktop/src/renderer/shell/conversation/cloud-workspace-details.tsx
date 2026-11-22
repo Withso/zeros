@@ -128,6 +128,8 @@ export function CloudWorkspaceDetailsCard({ workspace, title, statusLabel, resou
 }
 
 /** The viewer runs this workspace's lifecycle as themself: its Creator, or a member of an activated (team writing) workspace that executes for them. */
+/** The control plane refuses a sync grant for several repositories (sync_unsupported); the person reads why where they would turn it on. */
+export const SEVERAL_REPOSITORIES_SYNC_UNAVAILABLE = "Syncing to this Mac is not available for projects with several repositories yet.";
 const runsAsViewer = (workspace: CloudWorkspaceDocument) => !workspace.sharing?.readOnly &&
   (workspace.capabilities.canManage || workspace.sharing?.teamWriting === true);
 
@@ -209,7 +211,8 @@ export function CloudWorkspaceDetails({ folder, name, title, workspace }: {
             onRename={sharing && workspace.capabilities.canManage ? name => renameSharedCloudWorkspace(target, name) : undefined} statusLabel={cloudStatusLabel(workspace.status, availability)}
             resources={running ? resources : null} changing={changing} onChange={change} />
         ) : <p className="text-fg2 text-xs">Loading workspace details…</p>}
-        {workspace && !reader && macs.macs && <ConnectedMacs macs={macs.macs} now={Date.now()} busyDeviceId={macs.busyDeviceId} onConnect={macs.connect} onDisconnect={macs.disconnect} sync={macs.sync} onSetWanted={macs.setWanted} />}
+        {workspace && !reader && macs.macs && <ConnectedMacs macs={macs.macs} now={Date.now()} busyDeviceId={macs.busyDeviceId} onConnect={macs.connect} onDisconnect={macs.disconnect} sync={macs.sync} onSetWanted={macs.setWanted}
+          {...((workspace.repositories?.length ?? 0) > 1 ? { syncUnavailable: SEVERAL_REPOSITORIES_SYNC_UNAVAILABLE } : {})} />}
       </PopoverContent>
     </Popover>
   );

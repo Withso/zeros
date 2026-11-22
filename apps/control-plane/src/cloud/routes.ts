@@ -1,5 +1,6 @@
 // Cloud workspace v2 HTTP API under /v1, so the normal authentication
 // middleware always sets c.get("user"). Execution authority belongs to the persisted rollout mode.
+import type { CloudV2SetupStatus } from "./setup-status-contract.js";
 import { CloudV2InstallScriptSchema } from "./computer.js";
 import type { CloudProjects } from "./projects.js";
 import { createProjectRoutes, type ProjectRouteDeps } from "./project-routes.js";
@@ -45,7 +46,11 @@ export type CloudGithubWorkspaceDocument = CloudV2Workspace & {
   github?: CloudGithubRepositoryState;
   /** A workspace of several repositories: the project folder, and each repository with its own checkout and pull request. */
   root?: string;
-  repositories?: { repository: string; checkoutPath: string; branch: string; baseBranch: string; github?: CloudGithubRepositoryState }[];
+  repositories?: { repository: string; checkoutPath: string; branch: string; baseBranch: string; github?: CloudGithubRepositoryState;
+    /** setup-status-v1: this repository's own setup status. */
+    setup?: CloudV2SetupStatus;
+    /** A later repository's environment files: seeded (`ready`), refused (`failed`), or not available in shared execution. */
+    environment?: { state: "ready" | "failed" | "unavailable"; errorCode?: string } }[];
   /** The project the workspace was created from, by its current name. */
   project?: { id: string; name: string };
 };
