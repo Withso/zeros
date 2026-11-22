@@ -39,6 +39,7 @@ import type { RuntimeCanaryAdmission } from "./runtime-canary.js";
 import { RUNTIME_HANDOFF_SESSION } from "./runtime-handoff-store.js";
 import { notifyCloudV2WorkerBoot, notifyCloudV2WorkerReady } from "./worker-ready.js";
 import type { CloudV2SetupStatus } from "./setup-status-contract.js";
+import { insertWorkspaceSubmodules, type WorkspaceSubmoduleRow } from "./workspace-submodules.js";
 
 export type CloudV2WorkspaceState =
   | "creating" | "running" | "stopping" | "stopped" | "starting" | "deleting" | "deleted" | "failed";
@@ -67,6 +68,8 @@ type CreateWorkspace = {
   /** workspace-layout.ts: the first checkout under /home/user, and the project folder for several repositories. */
   checkoutFolder?: string;
   folder?: string;
+  /** A project create with "fetch submodules" on: each repository's submodules as its creator could read them. */
+  submodules?: readonly WorkspaceSubmoduleRow[];
 };
 export type CloudV2CreateRepository = { repository: string; repositoryId: string; folder: string; branch: string; baseBranch: string; baseCommit?: string | null };
 type CreateReceipt = { status: 201; response: Record<string, unknown> };
@@ -613,6 +616,7 @@ export class CloudV2Store {
       else await tx.query(`INSERT INTO cloud_v2_workspace_repositories (workspace_id, position, repository, repository_id, folder, branch, base_branch, base_commit)
         VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`, [row.id, position, entry.repository, entry.repositoryId, entry.folder, entry.branch, entry.baseBranch, entry.baseCommit ?? null]);
     }
+    if (projectId && input.submodules?.length) await insertWorkspaceSubmodules(tx, row.id, input.submodules);
     // Creator path: each later repository's environment files are pinned like the first's. Shared execution has none for them yet.
     if (projectId && !executionRuntime && (input.repositories?.length ?? 0) > 1)
       await pinCloudRepositoryEnvironments(tx, workspace(row), input.repositories!.slice(1).map(entry => entry.repositoryId));

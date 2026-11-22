@@ -1,6 +1,7 @@
 // Cloud workspace v2 HTTP API under /v1, so the normal authentication
 // middleware always sets c.get("user"). Execution authority belongs to the persisted rollout mode.
 import type { CloudV2SetupStatus } from "./setup-status-contract.js";
+import type { WorkspaceSubmoduleRepositoryInput, WorkspaceSubmoduleRow } from "./workspace-submodules.js";
 import { CloudV2InstallScriptSchema } from "./computer.js";
 import type { CloudProjects } from "./projects.js";
 import { createProjectRoutes, type ProjectRouteDeps } from "./project-routes.js";
@@ -95,6 +96,9 @@ export type CloudV2RouteDeps = {
   /** Projects on: a project create's GitHub checks as its creator (github-composition projectAccess). */
   projectAccess?(organizationId: string, userId: string, repositories: readonly { repository: string; repositoryId: string; baseBranch?: string | null }[]):
     Promise<{ repository: string; repositoryId: string; baseBranch: string; baseCommit: string }[]>;
+  /** Projects on, a repository with "fetch submodules": its submodules as the creator can read them (workspace-submodules.ts). */
+  projectSubmodules?(organizationId: string, userId: string, projectId: string, repositories: readonly WorkspaceSubmoduleRepositoryInput[]):
+    Promise<WorkspaceSubmoduleRow[]>;
   /** The caller's own GitHub reading a repository: its identity and default branch. */
   resolveMemberRepository?(organizationId: string, userId: string, repository: string): Promise<{ repository: string; repositoryId: string; defaultBranch: string }>;
   /** Projects' and GitHub connections' own routes. */
@@ -107,7 +111,7 @@ export type CloudV2RouteDeps = {
     failures(organizationId: string): Promise<{ projectId: string; project: string; repository: string | null; step: string | null; generation: number;
       reason: string; detail: string | null; finishedAt: string; failures?: number; nextRetryAt?: string | null }[]>;
     /** A released desktop's recipe save rebuilds each changed project's copy alone. */
-    changed?(organizationId: string, projectId: string, change: "project_created" | "repositories_changed" | "setup_changed" | "branch_changed"): Promise<void>;
+    changed?(organizationId: string, projectId: string, change: "project_created" | "repositories_changed" | "setup_changed" | "submodules_changed" | "branch_changed"): Promise<void>;
   };
   /** Repositories the organization's active Cloud Computer has installed; null without one. */
   installedRepositories(organizationId: string): Promise<readonly CloudV2InstalledRepository[] | null>;

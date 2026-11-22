@@ -287,6 +287,18 @@ it("delivers a workspace of several repositories only to a worker that holds the
   const delivered = await (await f.request("config", undefined, { "x-zeros-worker-features": "workspace-repositories-v1" })).json();
   for (const entry of delivered.config.workspace.repositories) for (const field of ["github", "setup", "baseCommit"]) expect(entry).not.toHaveProperty(field);
 });
+it("delivers a workspace's submodule plan only to a worker that fetches them; an older one opens the workspace without it", async () => {
+  const f = fixture(), original = await f.deps.config({} as CloudV2Workspace);
+  const submodules = [{ position: 0, path: "lib", repository: "acme/lib", commit: "a".repeat(40), gitDir: `modules/${"b".repeat(64)}` }];
+  vi.mocked(f.deps.config).mockResolvedValue({ ...original, workspace: { ...original.workspace, submodules } });
+  for (const [path, input] of [["hello", { bootId: f.bootId, protocol: 2, runtimeSha256: "a".repeat(64) }], ["config", undefined]] as const) {
+    const older = await f.request(path, input, { "x-zeros-worker-features": "checkout-v2" });
+    expect(older.status).toBe(200);
+    expect((await older.json()).config.workspace).not.toHaveProperty("submodules");
+    const current = await f.request(path, input, { "x-zeros-worker-features": "checkout-v2, workspace-submodules-v1" });
+    expect((await current.json()).config.workspace.submodules).toEqual(submodules);
+  }
+});
 it("acknowledges bounded environment status only for the current authenticated boot", async () => {
   const f = fixture(), status = { versionId: randomUUID(), sequence: 1, state: "ready" };
   f.deps.environmentReport = vi.fn(async () => {});

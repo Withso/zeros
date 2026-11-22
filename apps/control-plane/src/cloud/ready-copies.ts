@@ -19,6 +19,9 @@ import { CLOUD_V2_LEASE_SECONDS, type CloudV2Compute } from "./boat.js";
 import { BoatCreateRejectedError, BoatForkRefusedError, BoatSnapshotExpiredError } from "./boat-client.js";
 import { CloudProviderError } from "./provider-error.js";
 import { asZeros, checkoutScript, shellQuote } from "./computer.js";
+import { z } from "zod";
+import { SUBMODULE_FETCHED, composeSubmodulePlan, readSubmoduleLevel, rememberedSubmoduleLevel, submoduleFetchLines, type SubmoduleLevel, type SubmodulePlan } from "./submodules.js";
+import { copySubmodulesReadable } from "./workspace-submodules.js";
 import { IGNORED_BASELINE_DIR, ignoredBaselineCommand } from "./checkpoint.js";
 import { installRuntimeCommand, type CloudV2Runtime } from "./runtime.js";
 import { cloudV2BoatSnapshotName, cloudV2SandboxName } from "./resource-names.js";
@@ -56,12 +59,14 @@ const HEARTBEAT_MS = 60_000;
 const ARCHIVE_READS = 24, ARCHIVE_WAIT_MS = 5_000;
 const READY_ATTEMPTS = 36, READY_WAIT_MS = 5_000;
 
+/** What a submodule's visibility read keeps: GitHub's repository id, name and whether it is private. */
+const PublicRepository = z.object({ id: z.number().int().positive(), full_name: z.string().max(201), private: z.boolean() });
 export type ReadyCopyState = "building" | "ready" | "failed" | "retired";
 /** Why a generation ran, stored when it was queued. */
 export type ReadyCopyTrigger = "project_created" | "repositories_changed" | "weekly_update" | "computer_build" | "setup_changed" | "branch_changed"
   | "secrets_changed" | "retry" | "manual";
 /** The step of a build that failed, with the repository it was working on. */
-export type ReadyCopyStep = "machine" | "runtime" | "clone" | "setup" | "scrub" | "secret_search" | "stop";
+export type ReadyCopyStep = "machine" | "runtime" | "clone" | "submodules" | "setup" | "scrub" | "secret_search" | "stop";
 /** Generations whose detail (setup output, location) is kept per project; older rows keep only their result. */
 export const READY_COPY_HISTORY_LIMIT = 20;
 /** The last part of a failed setup's output that is kept, redacted. */
@@ -71,7 +76,15 @@ export const READY_COPY_MANUAL_INTERVAL_MS = 10 * 60_000;
 /** What a generation cloned, per repository in position order. */
 export type ReadyCopyRepositoryResult = { repository: string; repositoryId: string; branch: string | null; commit: string | null;
   /** Where it was cloned under /home/user: <project-folder>/<repository-folder>, the layout its workspaces have. */
-  checkoutFolder?: string };
+  checkoutFolder?: string;
+  /** With "fetch submodules" on: each submodule the copy holds, and each it skipped and why. */
+  submodules?: ReadyCopySubmodule[] };
+/** A submodule of a copy's repository. A create whose creator can't read a fetched one never forks the copy. */
+export type ReadyCopySubmodule = { path: string; repository?: string; repositoryId?: string; commit?: string;
+  /** Under the checkout's .git, where a fetched one keeps its Git directory. */
+  gitDir?: string;
+  /** GitHub reported it public at the build's read; a create still asks GitHub again before trusting that. */
+  public?: true; fetched: boolean; reason?: string };
 export type CloudV2ReadyCopy = {
   id: string; organizationId: string; projectId: string; generation: number; state: ReadyCopyState;
   idempotencyKey: string; machineId: string | null; machinePending: boolean; builtFromBase: string | null;
@@ -79,6 +92,8 @@ export type CloudV2ReadyCopy = {
   failureReason: string | null; failureRepository: string | null; failureStep: ReadyCopyStep | null; failureDetail: string | null;
   stale: boolean; refresh: boolean; machineDeletedAt: Date | null;
   inputs: string | null; manualRetry: boolean; trigger: ReadyCopyTrigger | null; triggeredBy: string | null;
+  /** A finer reason for the history line: the submodules switch, which rebuilds as setup_changed. */
+  triggerDetail: "submodules_changed" | null;
   setupOutput: string | null; detailPrunedAt: Date | null;
   stoppedAt: Date | null; lastForkedAt: Date | null; createdAt: Date; startedAt: Date | null; finishedAt: Date | null;
 };
@@ -88,7 +103,7 @@ type Row = {
   computer_build_id: string | null; created_by: string | null; result: ReadyCopyRepositoryResult[] | null;
   failure_reason: string | null; failure_repository: string | null; failure_step: ReadyCopyStep | null; failure_detail: string | null;
   stale: boolean; refresh: boolean; machine_deleted_at: Date | null;
-  inputs: string | null; manual_retry: boolean; trigger: ReadyCopyTrigger | null; triggered_by: string | null;
+  inputs: string | null; manual_retry: boolean; trigger: ReadyCopyTrigger | null; triggered_by: string | null; trigger_detail: "submodules_changed" | null;
   setup_output: string | null; detail_pruned_at: Date | null;
   stopped_at: Date | null; last_forked_at: Date | null; created_at: Date; started_at: Date | null; finished_at: Date | null;
 };
@@ -98,7 +113,7 @@ const copy = (row: Row): CloudV2ReadyCopy => ({
   builtFromBase: row.built_from_base, computerBuildId: row.computer_build_id, createdBy: row.created_by, result: row.result,
   failureReason: row.failure_reason, failureRepository: row.failure_repository, failureStep: row.failure_step, failureDetail: row.failure_detail,
   stale: row.stale, refresh: row.refresh, machineDeletedAt: row.machine_deleted_at, inputs: row.inputs, manualRetry: row.manual_retry,
-  trigger: row.trigger, triggeredBy: row.triggered_by, setupOutput: row.setup_output, detailPrunedAt: row.detail_pruned_at,
+  trigger: row.trigger, triggeredBy: row.triggered_by, triggerDetail: row.trigger_detail ?? null, setupOutput: row.setup_output, detailPrunedAt: row.detail_pruned_at,
   stoppedAt: row.stopped_at, lastForkedAt: row.last_forked_at, createdAt: row.created_at, startedAt: row.started_at, finishedAt: row.finished_at,
 });
 
@@ -112,7 +127,7 @@ export type ReadyCopyBase = { buildId: string; snapshot: string; createdBy: stri
 export type ReadyCopyProject = {
   id: string; organizationId: string; name: string; level: CloudProjectLevel; ownerUserId: string | null; createdBy: string | null;
   buildable: boolean;
-  repositories: { repository: string; repositoryId: string; connectionId: string | null; defaultBranch: string | null; setup: string | null }[];
+  repositories: { repository: string; repositoryId: string; connectionId: string | null; defaultBranch: string | null; setup: string | null; fetchSubmodules: boolean }[];
 };
 
 export type ReadyCopyFork = { copyId: string; key: string; machineId: string; sandboxId: string | null; requestedAt: Date };
@@ -133,6 +148,11 @@ export class CloudV2ReadyCopies {
 
   private tx<T>(work: (tx: Tx) => Promise<T>): Promise<T> { return withSystemTx(this.pool, work); }
 
+  /** One submodule level of a repository at a commit, read only on a miss (cloud/submodules.ts). */
+  submoduleLevel(organizationId: string, repository: { repository: string; repositoryId: string }, commit: string, read: () => Promise<SubmoduleLevel>) {
+    return rememberedSubmoduleLevel(work => this.tx(work), organizationId, repository, commit, read);
+  }
+
   async base(organizationId: string): Promise<ReadyCopyBase | null> {
     const row = (await this.tx(tx => tx.query<{ id: string; snapshot_name: string; created_by: string | null; base_shared: boolean }>(
       `SELECT b.id, c.snapshot_name, b.created_by, b.base_shared FROM cloud_v2_computers c
@@ -151,11 +171,12 @@ export class CloudV2ReadyCopies {
         `SELECT p.id, p.org_id, p.name, p.level, p.owner_user_id, p.created_by, (p.level='organization' OR ${PERSONAL_BUILDABLE}) AS buildable
          FROM cloud_projects p JOIN organizations o ON o.id=p.org_id AND ${ORGANIZATION_AVAILABLE} WHERE p.id=$1`, [projectId])).rows[0];
       if (!row) return null;
-      const repositories = (await tx.query<{ repository: string; repository_id: string; connection: string | null; default_branch: string | null; setup: string | null }>(
-        "SELECT repository, repository_id, connection, default_branch, setup FROM cloud_project_repositories WHERE project_id=$1 ORDER BY position", [projectId])).rows;
+      const repositories = (await tx.query<{ repository: string; repository_id: string; connection: string | null; default_branch: string | null; setup: string | null;
+        fetch_submodules: boolean }>(
+        "SELECT repository, repository_id, connection, default_branch, setup, fetch_submodules FROM cloud_project_repositories WHERE project_id=$1 ORDER BY position", [projectId])).rows;
       return { id: row.id, organizationId: row.org_id, name: row.name, level: row.level, ownerUserId: row.owner_user_id, createdBy: row.created_by,
         buildable: row.buildable, repositories: repositories.map(entry => ({ repository: entry.repository, repositoryId: entry.repository_id,
-          connectionId: entry.connection, defaultBranch: entry.default_branch, setup: entry.setup })) };
+          connectionId: entry.connection, defaultBranch: entry.default_branch, setup: entry.setup, fetchSubmodules: entry.fetch_submodules })) };
     });
   }
 
@@ -171,19 +192,19 @@ export class CloudV2ReadyCopies {
   /** Queues a generation, or joins the one already building for this project. */
   async request(input: { organizationId: string; projectId: string; createdBy: string; computerBuildId: string;
     builtFromBase: string; refresh?: boolean; now?: Date; inputs?: string | null; manualRetry?: boolean;
-    trigger?: ReadyCopyTrigger; triggeredBy?: string | null }): Promise<CloudV2ReadyCopy> {
+    trigger?: ReadyCopyTrigger; triggerDetail?: "submodules_changed"; triggeredBy?: string | null }): Promise<CloudV2ReadyCopy> {
     const id = randomUUID();
     return this.tx(async tx => {
       await tx.query(
         `INSERT INTO cloud_v2_ready_copies (id, org_id, project_id, generation, state, idempotency_key, built_from_base,
-           computer_build_id, created_by, refresh, created_at, updated_at, inputs, manual_retry, trigger, triggered_by)
+           computer_build_id, created_by, refresh, created_at, updated_at, inputs, manual_retry, trigger, triggered_by, trigger_detail)
          SELECT $1,$2,$3,coalesce((SELECT max(generation) FROM cloud_v2_ready_copies WHERE project_id=$3),0)+1,
-           'building',$4,$5,$6,$7,$8,coalesce($9,clock_timestamp()),coalesce($9,clock_timestamp()),$10,$11,$12,$13
+           'building',$4,$5,$6,$7,$8,coalesce($9,clock_timestamp()),coalesce($9,clock_timestamp()),$10,$11,$12,$13,$14
          WHERE EXISTS (SELECT 1 FROM cloud_projects WHERE id=$3 AND org_id=$2)
          ON CONFLICT (project_id) WHERE state='building' DO NOTHING`,
         [id, input.organizationId, input.projectId, `ready-copy:${id}`, input.builtFromBase, input.computerBuildId,
           input.createdBy, input.refresh === true, input.now ?? null, input.inputs ?? null, input.manualRetry === true,
-          input.trigger ?? null, input.triggeredBy ?? null]);
+          input.trigger ?? null, input.triggeredBy ?? null, input.triggerDetail ?? null]);
       const row = (await tx.query<Row>("SELECT * FROM cloud_v2_ready_copies WHERE org_id=$1 AND project_id=$2 AND state='building'",
         [input.organizationId, input.projectId])).rows[0];
       if (!row) throw new HttpError(404, "not_found", "Project not found");
@@ -466,7 +487,9 @@ export class CloudV2ReadyCopies {
     const secrets = (await this.tx(tx => tx.query<{ updated_at: Date }>(
       "SELECT updated_at FROM cloud_v2_ready_copy_secrets WHERE org_id=$1 AND project_id=$2", [organizationId, projectId]))).rows[0];
     return createHash("sha256").update(JSON.stringify(["project", base.buildId, project.level, project.ownerUserId,
-      project.repositories.map(entry => [entry.repositoryId, entry.defaultBranch, entry.setup]), secrets?.updated_at.toISOString() ?? null])).digest("hex");
+      // Fetching submodules joins only when on, so every existing copy's inputs stay as they were.
+      project.repositories.map(entry => [entry.repositoryId, entry.defaultBranch, entry.setup, ...(entry.fetchSubmodules ? [true] : [])]),
+      secrets?.updated_at.toISOString() ?? null])).digest("hex");
   }
 
   /** Failed or retired generations whose machine can go: no fork that began
@@ -548,6 +571,12 @@ export class CloudV2ReadyCopies {
        LEFT JOIN cloud_v2_github_sources s ON s.workspace_id=r.workspace_id AND s.source_repository=lower(r.repository)
        WHERE r.workspace_id=$1 ORDER BY r.position`, [workspaceId]));
     return rows.map(row => [row.id ?? "", row.checkout]);
+  }
+
+  /** Whether every submodule a copy fetched is one this workspace's creator was shown to read at create. */
+  async submodulesReadable(workspaceId: string, result: readonly ReadyCopyRepositoryResult[]): Promise<boolean> {
+    if (!result.some(entry => entry.submodules?.some(row => row.fetched))) return true;
+    return this.tx(tx => copySubmodulesReadable(tx, workspaceId, result));
   }
 
   /** Each repository's requested base branch and checkout, for the fork's update. */
@@ -702,6 +731,12 @@ export type ReadyCopyBuilderDeps = {
   sharedCloneToken?(organizationId: string, target: CloudSourceTarget): Promise<string>;
   /** A project's build secrets; empty when none. */
   secrets?(organizationId: string, projectId: string): Promise<ReadyCopySecrets>;
+  /** GitHub's API as one token (cloud/submodules.ts reads a level with the token of that repository). */
+  githubHttp?(token: string): { json<T>(path: string, schema: z.ZodType<T>): Promise<T> };
+  /** A submodule repository the build may read: its id and a token to read and clone it, as the project's
+   * clone tokens are (the member's for a personal project, the organization's connection otherwise); null when not. */
+  submoduleRepository?(organizationId: string, project: { level: CloudProjectLevel; ownerUserId: string | null }, repository: string):
+    Promise<{ repositoryId: string; token: string } | null>;
   now?: () => number;
   sleep?: (ms: number) => Promise<void>;
   logger?: Pick<Console, "warn">;
@@ -755,7 +790,10 @@ export class CloudV2ReadyCopyBuilder {
   /** A project was created or saved, or its build secrets changed: rebuild that
    * project's copy alone, once its inputs differ from the copy's. A changed set
    * of repositories always starts from the base. */
-  async reconcile(organizationId: string, projectId: string, trigger: "project_created" | "repositories_changed" | "setup_changed" | "branch_changed" | "secrets_changed"): Promise<void> {
+  async reconcile(organizationId: string, projectId: string, change: "project_created" | "repositories_changed" | "setup_changed" | "submodules_changed" | "branch_changed" | "secrets_changed"): Promise<void> {
+    // The switch rebuilds as a setup change (the trigger's CHECK is unchanged); the history names it.
+    const trigger = change === "submodules_changed" ? "setup_changed" as const : change;
+    const triggerDetail = change === "submodules_changed" ? "submodules_changed" as const : undefined;
     const { copies } = this.deps, base = await copies.base(organizationId), project = await copies.project(projectId);
     if (!base || !project || project.organizationId !== organizationId || !project.buildable || !project.repositories.length) return;
     const inputs = await copies.inputs(organizationId, projectId);
@@ -765,7 +803,7 @@ export class CloudV2ReadyCopyBuilder {
     const ready = trigger === "repositories_changed" ? null : await copies.forkable(organizationId, projectId, this.now());
     await copies.request({ organizationId, projectId, createdBy: project.ownerUserId ?? project.createdBy ?? base.createdBy,
       computerBuildId: base.buildId, builtFromBase: ready && ready.computerBuildId === base.buildId ? `copy:${ready.id}` : `snapshot:${base.snapshot}`,
-      refresh: !!ready, inputs, trigger });
+      refresh: !!ready, inputs, trigger, ...(triggerDetail ? { triggerDetail } : {}) });
   }
 
   /** Build now (whoever may edit the project; the route checks): coalesces with
@@ -894,7 +932,7 @@ export class CloudV2ReadyCopyBuilder {
       if (installed.exitCode !== 0 || installed.timedOut) throw failure("worker_runtime_install_failed");
     }
     // Every repository is cloned in full first; a refresh fetches into the previous generation's.
-    const result: ReadyCopyRepositoryResult[] = [], layout = readyCopyLayout(project);
+    const result: ReadyCopyRepositoryResult[] = [], layout = readyCopyLayout(project), tokens: string[] = [];
     at.step = "clone";
     for (const [index, entry] of project.repositories.entries()) {
       at.repository = entry.repository;
@@ -903,6 +941,7 @@ export class CloudV2ReadyCopyBuilder {
       const token = project.level === "personal" ? await this.deps.cloneToken(job.organizationId, project.ownerUserId!, target)
         : this.deps.sharedCloneToken ? await this.deps.sharedCloneToken(job.organizationId, target)
         : await this.deps.cloneToken(job.organizationId, base.createdBy, target);
+      tokens.push(token);
       const header = `Authorization: Basic ${Buffer.from(`x-access-token:${token}`).toString("base64")}\n`;
       const clone = await compute.execLong(machineId, asZeros(checkoutScript({ repository: entry.repository, ...(entry.defaultBranch ? { ref: entry.defaultBranch } : {}) },
         homePath(layout[index]!), entry.repository)), 900, header);
@@ -911,6 +950,12 @@ export class CloudV2ReadyCopyBuilder {
       result.push({ repository: entry.repository, repositoryId: entry.repositoryId, checkoutFolder: layout[index]!,
         branch: /(?:^|\n)zeros-build-branch=([^\r\n]*)/.exec(clone.stdout)?.[1] || null, commit: /^[0-9a-f]{40}$/.test(commit) ? commit : null });
     }
+    // Then submodules where a repository fetches them, before setup, so a setup can use their files.
+    for (const [index, entry] of project.repositories.entries())
+      if (entry.fetchSubmodules && result[index]!.commit) {
+        at.step = "submodules"; at.repository = entry.repository;
+        result[index]!.submodules = await this.fetchSubmodules(machineId, job, project, { ...entry, commit: result[index]!.commit! }, homePath(layout[index]!), tokens[index]!);
+      }
     // Then each repository's setup in its own folder, in position order, with the project's build secrets.
     let values: string[] = [];
     if (project.repositories.some(entry => entry.setup)) {
@@ -954,6 +999,51 @@ export class CloudV2ReadyCopyBuilder {
     await compute.stop(machineId);
     const stoppedAt = await this.archived(machineId);
     if (!await copies.promote(job.id, { repositories: result, stoppedAt })) throw failure("ready_copy_superseded");
+  }
+
+  /** One repository's submodules on the build machine: the plan composed with the build's own access, then each
+   * fetched in order. A submodule the build can't read, or that fails, is skipped and named; its own submodules
+   * are skipped with it. A GitHub failure skips them all; the build still goes on. */
+  private async fetchSubmodules(machineId: string, job: CloudV2ReadyCopy, project: { level: CloudProjectLevel; ownerUserId: string | null },
+    root: { repository: string; repositoryId: string; commit: string }, checkout: string, rootToken: string): Promise<ReadyCopySubmodule[]> {
+    const { githubHttp, submoduleRepository, copies, compute } = this.deps;
+    if (!githubHttp || !submoduleRepository) return [];
+    const tokens = new Map([[root.repositoryId, rootToken]]);
+    let plan: SubmodulePlan;
+    try {
+      plan = await composeSubmodulePlan({ root,
+        // A public submodule has no token of its own: its levels are read with the project's, which can read it.
+        level: (repository, commit) => copies.submoduleLevel(job.organizationId, repository, commit,
+          () => readSubmoduleLevel(githubHttp(tokens.get(repository.repositoryId) ?? rootToken), repository, commit)),
+        access: async repository => {
+          // Public is GitHub's own answer for that repository, read with the token this build already holds.
+          // Then anyone may read it: no installation, no member and no token of its own. Anything else
+          // (private, unseen, or GitHub failing) keeps the private rules below.
+          const [owner, name] = repository.split("/") as [string, string];
+          const seen = await githubHttp(rootToken).json(`/repos/${encodeURIComponent(owner)}/${encodeURIComponent(name)}`, PublicRepository).catch(() => null);
+          if (seen && seen.private === false && seen.full_name.toLowerCase() === repository) return { repositoryId: String(seen.id), public: true };
+          const found = await submoduleRepository(job.organizationId, project, repository).catch(() => null);
+          if (!found) return null;
+          tokens.set(found.repositoryId, found.token);
+          return found.repositoryId;
+        } });
+    } catch (error) {
+      this.deps.logger?.warn(`[cloud-v2] ready copy of project ${job.projectId} could not read ${root.repository}'s submodules (${code(error, "failed")})`);
+      return [{ path: ".gitmodules", fetched: false, reason: "GitHub could not be read" }];
+    }
+    const outcomes: ReadyCopySubmodule[] = [...plan.notices.map(reason => ({ path: ".gitmodules", fetched: false, reason })),
+      ...plan.skipped.map(entry => ({ path: entry.path, ...(entry.repository ? { repository: entry.repository } : {}), fetched: false, reason: entry.reason }))];
+    const failed: string[] = [];
+    for (const entry of plan.submodules) {
+      const summary = { path: entry.path, repository: entry.repository, repositoryId: entry.repositoryId, commit: entry.commit, gitDir: entry.gitDir,
+        ...(entry.public ? { public: true as const } : {}) };
+      if (failed.some(parent => entry.path.startsWith(`${parent}/`))) { outcomes.push({ ...summary, fetched: false, reason: "its parent submodule was not fetched" }); failed.push(entry.path); continue; }
+      const header = entry.public ? "" : `Authorization: Basic ${Buffer.from(`x-access-token:${tokens.get(entry.repositoryId)!}`).toString("base64")}\n`;
+      const fetched = await compute.execLong(machineId, asZeros(submoduleFetchLines(checkout, entry)), 300, header).catch(() => null);
+      if (fetched && fetched.exitCode === 0 && !fetched.timedOut && fetched.stdout.includes(SUBMODULE_FETCHED)) outcomes.push({ ...summary, fetched: true });
+      else { outcomes.push({ ...summary, fetched: false, reason: "could not be fetched" }); failed.push(entry.path); }
+    }
+    return outcomes;
   }
 
   /** Once, after the last setup and before the scrub: each checkout's ignored files as the build left them,
@@ -1042,6 +1132,12 @@ export class CloudV2ReadyCopyForks<W extends ReadyCopyWorkspace = ReadyCopyWorks
     const layout = await copies.workspaceLayout(workspace.id);
     if (!ready.result || JSON.stringify(ready.result.map(entry => [entry.repositoryId, entry.checkoutFolder ?? null])) !== JSON.stringify(layout)) {
       this.deps.logger?.warn("[cloud-v2] ready copy laid out for another version of the project; cloning directly");
+      return null;
+    }
+    // A copy holds every submodule its build fetched, and whatever its setup made from them: only a creator
+    // shown at create to read each of them may have it. Anyone else's create clones directly.
+    if (!await copies.submodulesReadable(workspace.id, ready.result)) {
+      this.deps.logger?.warn("[cloud-v2] ready copy holds a submodule this workspace's creator can't read; cloning directly");
       return null;
     }
     const begun = await copies.beginFork(workspace.id, workspace.organizationId, ready.id, now);

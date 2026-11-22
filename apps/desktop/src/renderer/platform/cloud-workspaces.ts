@@ -18,7 +18,7 @@ import type { WorkspaceAddress } from "@zeros/protocol/local-orchestration";
 import { recordOrganizationSharing } from "./team-sharing-state";
 import { reportWorkspaceReadOnly } from "./team-sharing-registry";
 import { CloudWorkspaceReadOnlyError } from "./cloud-workspace-read-only";
-import { changeCloudV2Workspace, cloudV2Document, createCloudV2Workspace, getCloudV2Workspace, getCloudV2WorkspaceByNumber, listCloudV2Workspaces, setCloudV2WorkspaceKeep } from "./cloud-v2";
+import { changeCloudV2Workspace, cloudV2Document, createCloudV2WorkspaceReply, getCloudV2Workspace, getCloudV2WorkspaceByNumber, listCloudV2Workspaces, setCloudV2WorkspaceKeep } from "./cloud-v2";
 import { getTeamStoreState } from "../features/team/team-store";
 
 async function readCloudJson(response: Response, maxBytes = 4 * 1024 * 1024): Promise<unknown> {
@@ -241,10 +241,12 @@ export async function createCloudWorkspaceDocument(input: {
   /** Client-only: the project holds several repositories, so its pending row is grouped under the project. Never sent. */
   severalRepositories?: boolean;
   idempotencyKey: string;
+  /** Client-only: the create's one message for the person (submodules it skipped). Never sent. */
+  onNotice?(text: string): void;
 }): Promise<CloudWorkspaceDocument> {
   const epoch = getOrganizationStoreGeneration();
   // Creation forks the organization's Cloud Computer and requires the repository to be installed there.
-  const workspace = await createCloudV2Workspace({
+  const { workspace, submoduleNotice } = await createCloudV2WorkspaceReply({
     organizationId: input.organizationId,
     repository: `${input.repository.owner}/${input.repository.name}`,
     ...(input.baseBranch !== undefined ? { baseBranch: input.baseBranch } : {}),
@@ -256,5 +258,6 @@ export async function createCloudWorkspaceDocument(input: {
     throw new Error("Your account changed while creating the cloud workspace");
   if (workspace.organizationId !== input.organizationId)
     throw new Error("Cloud creation returned a different organization");
+  if (submoduleNotice) input.onNotice?.(submoduleNotice);
   return cloudV2Document(workspace);
 }

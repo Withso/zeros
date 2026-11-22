@@ -21,6 +21,10 @@ const COPY: Record<string, ReadyCopyFailureCopy> = {
   github_installation_suspended: { what: "The Zeros GitHub App is suspended for this repository's account.", change: "Unsuspend it in GitHub." },
   github_app_access_required: { what: "The Zeros GitHub App can't read this repository.", change: "Add it to the App's repositories in GitHub." },
   project_unavailable: { what: "The project was removed, or its member left.", change: "Nothing to change here." },
+  // Set on a build still running when its project went (or, with S4, the account that kept a personal project).
+  project_removed: { what: "The project was removed.", change: "Nothing to change here." },
+  // S4: the copy was still building when its GitHub connection was removed or the App uninstalled.
+  connection_removed: { what: "Its GitHub connection was removed.", change: "Connect GitHub again in GitHub settings, then build again." },
   organization_unavailable: { what: "The organization can't use the cloud now.", change: "Nothing to change here." },
   ready_copy_failed: { what: "The project could not be built.", change: "Build again." },
 };
@@ -31,7 +35,8 @@ const TRIGGERS: Record<string, string> = {
   project_created: "Project created", repositories_changed: "Repositories changed", weekly_update: "Weekly update", computer_build: "New Cloud Computer build",
   setup_changed: "Setup changed", branch_changed: "Branch changed", secrets_changed: "Build secrets changed", retry: "Retry",
 };
-export function readyCopyTriggerLabel(trigger: string | null, startedBy: string | null): string | null {
+export function readyCopyTriggerLabel(trigger: string | null, startedBy: string | null, triggerDetail?: string): string | null {
+  if (triggerDetail === "submodules_changed") return "Submodules setting changed";
   if (trigger === "manual") return startedBy ? `Started by ${startedBy}` : "Started by hand";
   return trigger ? TRIGGERS[trigger] ?? null : null;
 }
@@ -52,4 +57,10 @@ export function readyCopyFailureLine(failure: { reason: string; repository?: str
   const repository = failure.repository ? `${failure.repository}: ` : "";
   const where = failure.detail && failure.reason === "ready_copy_secret_left" ? ` In ${failure.detail}.` : "";
   return `${repository}${copy.what}${where} ${copy.change} ${nextRetryWords(failure.nextRetryAt ?? null, now)}`.replace(/\s+/g, " ").trim();
+}
+
+/** A build's submodules for one repository, as counts: "Submodules: 3 fetched, 1 skipped". Null without any. */
+export function readyCopySubmodulesLine(counts: { fetched: number; skipped: number } | undefined, repository?: string): string | null {
+  if (!counts || counts.fetched + counts.skipped === 0) return null;
+  return `${repository ? `${repository} s` : "S"}ubmodules: ${[`${counts.fetched} fetched`, ...(counts.skipped ? [`${counts.skipped} skipped`] : [])].join(", ")}`;
 }
