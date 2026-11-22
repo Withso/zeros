@@ -3,8 +3,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   clearCommittedDesignLivePreviewStyles,
   clearDesignLivePreview,
-  clearDesignLivePreviewPublishedBy,
-  designLivePreviewSequence,
+  clearDesignLivePreviewSettledBy,
+  noteDesignHistoryInput,
   designLivePreviewValue,
   publishDesignLivePreviewStyles,
   publishDesignGestureLivePreview,
@@ -30,20 +30,34 @@ function presentInverse(workspace: string, sequence: number, token = {}) {
   return token;
 }
 
-describe("clearing what a read now reports", () => {
+describe("what a details refresh may clear", () => {
   beforeEach(() => resetDesignLivePreviewForTests());
   afterEach(() => resetDesignLivePreviewForTests());
+  const styles = (node: string) => useDesignLivePreviewStore.getState().byOwner[JSON.stringify(["w", "home.html", node])]?.styles;
 
-  it("clears what was published by the read's start and keeps what came after, per layer and property", () => {
-    publishDesignLivePreviewStyles("w", "home.html", "a", { opacity: "0.3", color: "red" });
-    publishDesignLivePreviewStyles("w", "home.html", "b", { opacity: "0.3" });
-    const cutoff = designLivePreviewSequence();
-    publishDesignLivePreviewStyles("w", "home.html", "a", { color: "blue" });
-    clearDesignLivePreviewPublishedBy("w", "home.html", "a", cutoff);
-    clearDesignLivePreviewPublishedBy("w", "home.html", "b", cutoff);
-    const byOwner = useDesignLivePreviewStore.getState().byOwner;
-    expect(byOwner[JSON.stringify(["w", "home.html", "a"])]?.styles).toEqual({ color: "blue" });
-    expect(byOwner[JSON.stringify(["w", "home.html", "b"])]).toBeUndefined();
+  it("keeps a value the user still holds and clears one the source now holds, per layer and property", () => {
+    // Published at t0; the refresh starts later and reports what the source holds.
+    publishDesignLivePreviewStyles("w", "home.html", "a", { "border-radius": "8px", opacity: "0.5" });
+    publishDesignLivePreviewStyles("w", "home.html", "b", { "border-radius": "8px" });
+    clearDesignLivePreviewSettledBy("w", "home.html", "a", { "border-radius": "4px", opacity: "0.5" });
+    clearDesignLivePreviewSettledBy("w", "home.html", "b", { "border-radius": "8px" });
+    expect(styles("a")).toEqual({ "border-radius": "8px" });
+    expect(styles("b")).toBeUndefined();
+  });
+
+  it("clears a preview abandoned before an undo, and keeps one made after it", () => {
+    publishDesignLivePreviewStyles("w", "home.html", "a", { "border-radius": "8px" });
+    noteDesignHistoryInput("w");
+    publishDesignLivePreviewStyles("w", "home.html", "b", { "border-radius": "12px" });
+    clearDesignLivePreviewSettledBy("w", "home.html", "a", { "border-radius": "4px" });
+    clearDesignLivePreviewSettledBy("w", "home.html", "b", { "border-radius": "4px" });
+    expect(styles("a")).toBeUndefined();
+    expect(styles("b")).toEqual({ "border-radius": "12px" });
+    // Another workspace's undo is not this one's.
+    publishDesignLivePreviewStyles("w", "home.html", "c", { opacity: "0.2" });
+    noteDesignHistoryInput("other");
+    clearDesignLivePreviewSettledBy("w", "home.html", "c", { opacity: "1" });
+    expect(styles("c")).toEqual({ opacity: "0.2" });
   });
 });
 

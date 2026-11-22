@@ -78,7 +78,7 @@ import {
   presentDesignHistoryRuntime,
   setDesignHistoryPresentationOwnerReader,
 } from "./design-history-presentation";
-import { clearCommittedDesignLivePreviewStyles, designLivePreviewSequence } from "./design-live-preview";
+import { clearCommittedDesignLivePreviewStyles, noteDesignHistoryInput } from "./design-live-preview";
 import { designSourceVectorCache } from "../design-source-vector";
 import {
   designRuntimeFrameState,
@@ -2911,7 +2911,7 @@ async function applyDesignHistoryInLane(
   direction: "undo" | "redo",
 ): Promise<DesignApiMutationReplyWire> {
   const owner = designMutationOwner(workspaceId);
-  const livePreviewSequence = designLivePreviewSequence();
+  const livePreviewSequence = noteDesignHistoryInput(workspaceId);
   const view = useDesignWorkspaceUiStore.getState().byWorkspace[workspaceId];
   const selectionOwner = { ownerRevision: view?.ownerRevision, selectionEvent: view?.selectionEvent };
   const currentOwner = () => designMutationOwner(workspaceId) === owner;

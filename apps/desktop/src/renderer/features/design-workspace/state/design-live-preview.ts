@@ -13,10 +13,6 @@ let publicationSequence = 0;
 const latestPublicationByProperty = new Map<string, number>();
 const noopSubscribe = () => () => {};
 
-/** Capture at history input, before either the mutation lane or runtime reply. */
-export function designLivePreviewSequence(): number {
-  return publicationSequence;
-}
 
 export type DesignLivePreviewPublication = Readonly<Record<string, number>>;
 
@@ -275,31 +271,43 @@ export function clearDesignLivePreview(
   });
 }
 
-/** Remove the preview properties last published at or before `cutoff` (a
- * designLivePreviewSequence() taken when a read began): what that read
- * now reports supersedes them. A property published since, such as a scrub
- * step while the read was out, stays, and so does any gesture frame still
- * waiting to publish. */
-export function clearDesignLivePreviewPublishedBy(workspaceId: string, frame: string, nodeId: string, cutoff: number): void {
+const MAX_HISTORY_INPUT_OWNERS = 64;
+/** Per workspace, the publication sequence at its latest undo or redo input. */
+const historyInputByWorkspace = new Map<string, number>();
+
+/** Mark an undo or redo input, before either the mutation lane or runtime
+ * reply: a preview published before it is no longer one the user holds.
+ * Returns the sequence, which the history presentation also uses to hide
+ * such previews while the step lands. */
+export function noteDesignHistoryInput(workspaceId: string): number {
+  historyInputByWorkspace.delete(workspaceId);
+  historyInputByWorkspace.set(workspaceId, publicationSequence);
+  while (historyInputByWorkspace.size > MAX_HISTORY_INPUT_OWNERS)
+    historyInputByWorkspace.delete(historyInputByWorkspace.keys().next().value!);
+  return publicationSequence;
+}
+
+/** After a selection-details refresh: a refresh is not a commit, so it never
+ * removes a value the user still holds. It clears a previewed property only
+ * when the source now holds that value (`authored`, the refreshed layer's
+ * values), as a commit would, or when the preview was published before the
+ * workspace's latest undo or redo, so it was left behind. */
+export function clearDesignLivePreviewSettledBy(
+  workspaceId: string,
+  frame: string,
+  nodeId: string,
+  authored: Readonly<Record<string, string | undefined>>,
+): void {
   const key = ownerKey(workspaceId, frame, nodeId);
-  useDesignLivePreviewStore.setState((state) => {
-    const current = state.byOwner[key];
-    if (!current) return state;
-    const styles = { ...current.styles };
-    let changed = false;
-    for (const property of Object.keys(styles)) {
-      if ((latestPublicationByProperty.get(propertyKey(key, property)) ?? 0) > cutoff) continue;
-      delete styles[property];
-      latestPublicationByProperty.delete(propertyKey(key, property));
-      changed = true;
-    }
-    if (!changed) return state;
-    if (Object.keys(styles).length > 0)
-      return { ...state, byOwner: { ...state.byOwner, [key]: { ...current, styles } } };
-    const byOwner = { ...state.byOwner };
-    delete byOwner[key];
-    return { byOwner, ownerOrder: state.ownerOrder.filter((candidate) => candidate !== key) };
-  });
+  const current = useDesignLivePreviewStore.getState().byOwner[key];
+  if (!current) return;
+  const historyInput = historyInputByWorkspace.get(workspaceId);
+  const settled: Record<string, string | null> = {};
+  for (const [property, value] of Object.entries(current.styles)) {
+    const published = latestPublicationByProperty.get(propertyKey(key, property)) ?? 0;
+    if (authored[property] === value || (historyInput !== undefined && published <= historyInput)) settled[property] = value;
+  }
+  if (Object.keys(settled).length) clearCommittedDesignLivePreviewStyles(workspaceId, frame, nodeId, settled);
 }
 
 /** Remove only values now represented by an authoritative source commit.
@@ -467,5 +475,6 @@ export function resetDesignLivePreviewForTests(): void {
   latestPublicationByProperty.clear();
   for (const key of pendingGestures.keys()) discardPendingGesture(key);
   gesturePublishedAt.clear();
+  historyInputByWorkspace.clear();
   useDesignLivePreviewStore.setState({ byOwner: {}, ownerOrder: [] });
 }

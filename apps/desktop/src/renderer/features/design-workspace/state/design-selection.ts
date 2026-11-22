@@ -51,8 +51,7 @@ import {
 } from "./design-runtime-store";
 import {
   clearDesignLivePreview,
-  clearDesignLivePreviewPublishedBy,
-  designLivePreviewSequence,
+  clearDesignLivePreviewSettledBy,
   publishDesignLivePreviewStyles,
 } from "./design-live-preview";
 import {
@@ -512,12 +511,18 @@ function requestDesignSelectionDetails(input: {
   return demand;
 }
 
+/** What a refreshed layer's source holds per property: the winner as
+ * written, else the computed value. */
+function designRefreshedAuthoredValues(details: DesignRuntimeNodeDetails): Record<string, string | undefined> {
+  const values: Record<string, string | undefined> = { ...details.styles };
+  for (const [property, winner] of Object.entries(details.authoredStyles ?? {})) values[property] = winner.value;
+  return values;
+}
+
 function refreshDesignSelectionDetails(
   input: Parameters<typeof requestDesignSelectionDetails>[0],
 ): DesignSelectionDetailDemand {
   const version = nextSelectionVersion();
-  // Previews published from here on are newer than what this read reports.
-  const previewCutoff = designLivePreviewSequence();
   const demand = requestDesignSelectionDetails({
     ...input,
     tolerateReadErrors: true,
@@ -536,11 +541,11 @@ function refreshDesignSelectionDetails(
             candidate,
             input.frame.sourceVersion,
           );
-        clearDesignLivePreviewPublishedBy(
+        clearDesignLivePreviewSettledBy(
           input.workspaceId,
           input.frame.file,
           candidate.oid,
-          previewCutoff,
+          designRefreshedAuthoredValues(candidate),
         );
       }
       await publishDurableDesignSelection(
