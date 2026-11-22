@@ -21,9 +21,14 @@ export async function call(api: Api, method: Parameters<Api["json"]>[0], path: s
 }
 /** An HTTP failure as `http_<status>` plus the API's own closed error code when it gives one (`http_409_keep_refused_archived`). */
 export function errorCode(reply: ApiReply): string {
-  const code = z.object({ error: z.object({ code: z.string().regex(/^[a-z0-9_]{1,48}$/) }) }).safeParse(reply.body);
-  return code.success ? `http_${reply.status}_${code.data.error.code}` : `http_${reply.status}`;
+  const code = z.object({ error: z.object({ code: z.string().regex(/^[a-z0-9_]{1,48}$/), message: z.string().optional() }) }).safeParse(reply.body);
+  if (!code.success) return `http_${reply.status}`;
+  // Two 404s carry the same code: the server's own for a route it does not serve, and a route's for an organization the
+  // caller cannot use. Their fixed messages are compared, never printed.
+  const which = reply.status === 404 && code.data.error.code === "not_found" ? NOT_FOUND_MESSAGES[code.data.error.message ?? ""] : undefined;
+  return `http_${reply.status}_${code.data.error.code}${which ? `:${which}` : ""}`;
 }
+const NOT_FOUND_MESSAGES: Record<string, string> = { "Not found": "route_or_resource", "Organization not found": "organization" };
 
 export async function until<T>(ctx: Pick<StageContext, "ports">, step: string, timeoutMs: number, pollMs: number,
   probe: () => Promise<T | false | undefined | null>): Promise<T> {
@@ -116,12 +121,12 @@ export const ProjectDocument = z.object({
 }).passthrough();
 const projects = (organizationId: string) => `/v1/cloud-v2/organizations/${organizationId}/cloud-projects`;
 
-export async function createProject(ctx: StageContext, input: { name: string; level: "organization" | "personal"; repositories: string[] },
+export async function createProject(ctx: StageContext, input: { name: string; level?: "organization" | "personal"; repositories: string[] },
   step = "project_create"): Promise<z.infer<typeof ProjectDocument>> {
   check(prefixed(ctx.state.prefix, input.name), step, "unprefixed");
   ctx.start("copy");
   const reply = await call(ctx.ports.api, "POST", projects(ctx.state.organizationId), step,
-    { name: input.name, level: input.level, repositories: input.repositories.map(repository => ({ repository })) });
+    { name: input.name, level: input.level ?? ctx.projectLevel, repositories: input.repositories.map(repository => ({ repository })) });
   const project = parse(z.object({ project: ProjectDocument }), reply.body, step).project;
   ctx.state.created.projects.push(project.id);
   await ctx.save();
@@ -294,4 +299,18 @@ export async function clearEnvironment(ctx: StageContext, target: { repository: 
   const environment = await readEnvironment(ctx, target.repository, target.repositoryId, step);
   if (environment.empty) return;
   await call(ctx.ports.api, "PATCH", environmentPath(ctx, target.repository, target.repositoryId), step, { expectedRevision: environment.revision, clear: true });
+}
+
+// ── The account's own GitHub sign-in ───────────────────
+
+const SignInStatus = z.object({ generation: z.string(), selectedMethod: z.enum(["github-app", "pat"]).nullable(),
+  methods: z.object({ "github-app": z.object({ configured: z.boolean() }).passthrough(), pat: z.object({ configured: z.boolean() }).passthrough() }).passthrough() }).passthrough();
+export async function githubSignIn(ctx: StageContext, organizationId: string, step: string): Promise<z.infer<typeof SignInStatus>> {
+  return parse(SignInStatus, (await call(ctx.ports.api, "GET", `/v1/cloud-v2/github/connection?organizationId=${organizationId}`, step)).body, step);
+}
+/** Disconnects the token sign-in this run connected; one already gone is left alone. */
+export async function disconnectGithubSignIn(ctx: StageContext, organizationId: string, step = "github_disconnect"): Promise<void> {
+  const status = await githubSignIn(ctx, organizationId, step);
+  if (!status.methods.pat.configured) return;
+  await call(ctx.ports.api, "POST", "/v1/cloud-v2/github/connection", step, { organizationId, expected: status.generation, action: "disconnect", method: "pat" });
 }

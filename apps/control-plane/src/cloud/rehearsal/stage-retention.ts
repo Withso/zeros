@@ -18,7 +18,7 @@ export async function stageRetention(ctx: StageContext): Promise<Record<string, 
   const shift = async (ids: string[], days: number) => { await shiftClock(ctx.ports.database, ctx.state, ids, days); counts.shifts!++; await ctx.save(); };
 
   ctx.step("project");
-  const project = await createProject(ctx, { name: `${prefix}ret`, level: "organization", repositories: [one, two] });
+  const project = await createProject(ctx, { name: `${prefix}ret`, repositories: [one, two] });
   await waitCopyReady(ctx, project.id);
   // The two cases exercise different rules: a seeded file edited by hand (the seed journal) or an unseeded ignored file.
   ctx.step("environment_seed");

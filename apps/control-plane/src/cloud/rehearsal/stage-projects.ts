@@ -13,7 +13,7 @@ export async function stageProjects(ctx: StageContext): Promise<Record<string, n
 
   // A1: the copy.
   ctx.step("project_one");
-  const projectOne = await createProject(ctx, { name: `${prefix}one`, level: "organization", repositories: [one] });
+  const projectOne = await createProject(ctx, { name: `${prefix}one`, repositories: [one] });
   await waitCopyReady(ctx, projectOne.id);
   const copiesOne = await copyMachines(ctx, projectOne.id);
   check(copiesOne.length > 0, "copy_machine", "missing");
@@ -74,7 +74,7 @@ export async function stageProjects(ctx: StageContext): Promise<Record<string, n
 
   // A5: two repositories.
   ctx.step("project_two");
-  const projectTwo = await createProject(ctx, { name: `${prefix}two`, level: "organization", repositories: [one, two] });
+  const projectTwo = await createProject(ctx, { name: `${prefix}two`, repositories: [one, two] });
   await waitCopyReady(ctx, projectTwo.id, "copy_two_ready");
   await copyMachines(ctx, projectTwo.id);
   // An environment file in each repository, seeded only when nothing of the account's would be overwritten.

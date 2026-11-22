@@ -2,7 +2,7 @@
 // the stages use, with a retention lifecycle that advances when a test shifts a workspace's clock. Every port call is
 // counted so a test can fail the n-th one, before or after its effect.
 import { randomUUID } from "node:crypto";
-import { RehearsalFailure, type Api, type ApiReply, type Bridge, type Ports, type Query } from "../rehearsal/contract.js";
+import { RehearsalFailure, type Api, type ApiReply, type Bridge, type Ports, type ProGrant, type ProPort, type Query } from "../rehearsal/contract.js";
 
 type Workspace = {
   id: string; name: string; organizationId: string; state: string; branch: string; boatSandboxId: string; projectId?: string;
@@ -28,8 +28,13 @@ export class FakeAlpha {
   readonly environments = new Map<string, { revision: number; files: Map<string, string> }>();
   /** Whether the fixtures' .gitignore names .env. */
   ignoresEnv = true;
-  /** Whether the account has its own GitHub sign-in. */
+  /** Whether the account has its own GitHub sign-in (on the organization route); on the Personal route, set by its token connect. */
   githubIdentity = true;
+  patConnected = false;
+  readonly userId = randomUUID();
+  /** The account's operator Pro grant; null: none. */
+  proGrant: ProGrant | null | "foreign" = null;
+  private proEndedAt: number | null = null;
   /** What the stop recorded about the worker unit. */
   workerOff = true;
   transactions = 0;
@@ -61,7 +66,7 @@ export class FakeAlpha {
   private reply(status: number, body: unknown = {}): ApiReply { return { status, body }; }
   private document(row: Workspace) {
     const archived = row.archivedAt !== null;
-    return { id: row.id, name: row.name, organizationId: row.organizationId, state: row.state, branch: row.branch, boatSandboxId: row.boatSandboxId,
+    return { id: row.id, number: [...this.workspaces.keys()].indexOf(row.id) + 1, name: row.name, organizationId: row.organizationId, state: row.state, branch: row.branch, boatSandboxId: row.boatSandboxId,
       archivedAt: row.archivedAt, activeAt: row.activeAt, updatedAt: row.updatedAt, keep: row.keep, ...(row.projectId ? { projectId: row.projectId } : {}),
       ...(row.repositories ? { repositories: row.repositories } : {}), ...(archived && row.archiveReason ? { archiveReason: row.archiveReason } : {}),
       ...(archived ? { machineExpectedGoneAt: { at: new Date(this.now).toISOString(), estimate: true } } : {}),
@@ -72,6 +77,8 @@ export class FakeAlpha {
 
   /** The retention lifecycle, run on every database read and clock sleep. */
   tick(): void {
+    if (this.proEndedAt !== null && this.now - this.proEndedAt >= 20 * 60_000)
+      for (const row of this.workspaces.values()) if (row.state === "running") { row.state = "stopped"; row.stoppedDays = 0; this.machines.get(row.boatSandboxId)!.state = "stopped"; }
     for (const row of this.workspaces.values()) {
       if (row.state !== "stopped" || row.stoppedDays === null) continue;
       if (row.probe === "dirty" && !row.backup && row.stoppedDays >= 1 / 24) { row.backup = true; this.objects.add(`cloud-v2/checkpoints/${row.id}/a.zck`); }
@@ -87,6 +94,33 @@ export class FakeAlpha {
     }
   }
 
+  pro(): boolean {
+    const grant = this.proGrant;
+    return grant !== null && grant !== "foreign" && grant.enabled && (grant.validUntil === null || Date.parse(grant.validUntil) > this.now);
+  }
+  readonly proChanges: ProGrant[] = [];
+  proPort(): ProPort {
+    return {
+      read: () => this.counted(() => this.proGrant === null || this.proGrant === "foreign" ? this.proGrant : { ...this.proGrant }),
+      change: (grant, reason) => this.counted(() => {
+        if (this.proGrant === "foreign") throw new RehearsalFailure("pro_change", "foreign_grant");
+        if (reason.length < 16) throw new RehearsalFailure("pro_change", "reason");
+        const was = this.pro();
+        this.proGrant = { ...grant }; this.proChanges.push({ ...grant });
+        if (was && !this.pro()) this.proEndedAt = this.now; else if (this.pro()) this.proEndedAt = null;
+        return randomUUID();
+      }),
+    };
+  }
+  /** A second test account: a stranger to this organization, who reaches none of it. */
+  otherApi(): Api {
+    return { json: (method, path) => this.counted(() => {
+      if (method !== "GET") this.writes.push(`other ${method} ${path.replace(/[0-9a-f-]{36}/g, ":id")}`);
+      if (path.startsWith("/v1/cloud-v2/workspaces?")) return this.reply(403, { error: { code: "forbidden" } });
+      return this.reply(404, { error: { code: "not_found" } });
+    }) };
+  }
+
   api(): Api {
     return { json: (method, path, body) => this.counted(() => this.route(method, path, body as Record<string, unknown> | undefined)) };
   }
@@ -94,9 +128,19 @@ export class FakeAlpha {
   private route(method: string, path: string, body: Record<string, unknown> = {}): ApiReply {
     if (method !== "GET") this.writes.push(`${method} ${path.replace(/[0-9a-f-]{36}/g, ":id")}`);
     const url = new URL(path, "https://alpha.test"), parts = url.pathname.split("/").filter(Boolean);
-    if (url.pathname === "/v1/cloud-v2/github/connection") return this.reply(200, { generation: "a".repeat(64), selectedMethod: this.githubIdentity ? "pat" : null,
-      methods: { "github-app": { configured: false }, pat: { configured: this.githubIdentity } }, appAvailable: true, installUrl: null });
-    if (url.pathname === "/v1/me") return this.reply(200, { capabilities: { pro: false }, organizations: [{ id: this.organizationId, slug: "probe", name: "Probe", role: "owner" }] });
+    if (url.pathname === "/v1/cloud-v2/github/connection" && method === "POST") {
+      if (body.expected !== "a".repeat(64)) return this.reply(409, { error: { code: "github_connection_changed" } });
+      if (body.action === "pat") this.patConnected = true;
+      if (body.action === "disconnect" && body.method === "pat") this.patConnected = false;
+      return this.reply(200, {});
+    }
+    if (url.pathname === "/v1/cloud-v2/github/connection") {
+      const pat = this.githubIdentity || this.patConnected;
+      return this.reply(200, { generation: "a".repeat(64), selectedMethod: pat ? "pat" : null,
+        methods: { "github-app": { configured: false }, pat: { configured: pat } }, appAvailable: true, installUrl: null });
+    }
+    if (url.pathname === "/v1/me") return this.reply(200, { user: { id: this.userId }, capabilities: { pro: this.pro() },
+      organizations: [{ id: this.organizationId, slug: "user-2", name: "Zeros User-2", role: "owner", isPersonal: true, seat: this.pro() ? "pro" : "free" }] });
     if (parts[2] === "organizations" && parts[4] === "cloud-projects") {
       const id = parts[5];
       if (!id && method === "GET") return this.reply(200, { canCreateOrganization: true, personalAllowed: false,
@@ -128,6 +172,7 @@ export class FakeAlpha {
         files: [...environment.files.keys()].map(path => ({ path, bytes: 1 })) } });
     }
     if (parts[2] === "organizations" && parts[4] === "github") return this.reply(200, { organization: [{ accountLogin: "Withso", state: "active" }], personal: [] });
+    if (parts[2] === "workspaces" && parts[3] === "by-number") return this.reply(404, { error: { code: "not_found" } });
     if (url.pathname === "/v1/cloud-v2/workspaces" && method === "GET")
       return this.reply(200, { workspaces: [...this.workspaces.values()].filter(row => row.state !== "deleted").map(row => this.document(row)) });
     if (url.pathname === "/v1/cloud-v2/workspaces" && method === "POST") {
@@ -152,6 +197,8 @@ export class FakeAlpha {
       const row = this.workspaces.get(parts[3]);
       if (!row || row.state === "deleted" && method !== "GET") return this.reply(404, { error: { code: "not_found" } });
       const action = parts[4];
+      if (row.state !== "deleted" && !this.pro() && this.proGrant !== null) return this.reply(403, { error: { code: "pro_required" } });
+      if (action === "connect") return this.reply(200, { url: "wss://alpha.test/x", protocols: ["zeros.cloud.v2", "ticket.x"] });
       if (!action && method === "GET") return row.state === "deleted" ? this.reply(404) : this.reply(200, { workspace: this.document(row) });
       if (!action && method === "DELETE") { row.state = "deleted"; this.machines.get(row.boatSandboxId)!.state = "deleted"; return this.reply(202, { workspace: this.document(row) }); }
       if (action === "stop") {
@@ -303,6 +350,11 @@ export class FakeAlpha {
         close: () => Promise.resolve(),
       },
       clock: { now: () => this.now, sleep: async ms => { this.now += ms; this.tick(); } },
+      pro: this.proPort(), other: this.otherApi(),
+      githubSignIn: { connect: (organizationId, expected) => this.counted(async () => {
+        const reply = this.route("POST", "/v1/cloud-v2/github/connection", { organizationId, expected, action: "pat", token: "synthetic" });
+        if (reply.status !== 200) throw new RehearsalFailure("github_sign_in_connect", `http_${reply.status}`);
+      }) },
       ...overrides,
     };
   }
@@ -311,6 +363,7 @@ export class FakeAlpha {
   sql(text: string, values: unknown[]): Awaited<ReturnType<Query>> {
     const rows = (list: Record<string, unknown>[]) => ({ rows: list, rowCount: list.length });
     const ids = (values[0] ?? []) as string[];
+    if (text.startsWith("SELECT state FROM cloud_v2_workspaces")) return rows([{ state: this.workspaces.get(String(values[0]))?.state ?? null }]);
     if (text.includes("FROM cloud_v2_ready_copies")) return rows([...this.projects.values()].filter(project => project.id === values[0]).map(project => ({ machine_id: project.machine })));
     if (text.includes("FROM cloud_v2_ready_copy_forks")) return rows([{ forks: this.forks.has(String(values[0])) ? 1 : 0 }]);
     if (text.includes("worker_off_unverified_at IS NULL AS worker_off")) return rows(ids.map(id => ({ id, backup_probe: this.workspaces.get(id)?.probe ?? null,

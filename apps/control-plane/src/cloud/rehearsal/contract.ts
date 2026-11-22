@@ -14,10 +14,17 @@ export class RehearsalFailure extends Error {
 
 export const STAGES = ["provision", "setup", "projects", "personal", "retention", "submodules"] as const;
 export type StageName = (typeof STAGES)[number];
-/** The control-plane switch each stage needs. The control plane does not report switches: the operator declares them. */
-export const STAGE_SWITCH: Record<StageName, Switch | null> = {
-  provision: null, setup: null, projects: "projects", personal: "personal", retention: "retention", submodules: "projects",
-};
+/** Where the organization stages run: the selected test user's Personal organization (Cloud for Pro), or the probe
+ * organization (kept for later; needs the organization route's setup). */
+export type OwnerKind = "personal" | "organization";
+/** The control-plane switches a stage needs on its route. The control plane does not report switches: the operator
+ * declares them. On the Personal route every stage but provision also needs CLOUD_V2_PERSONAL_CLOUD_ENABLED. */
+export function stageSwitches(stage: StageName, owner: OwnerKind): Switch[] {
+  const own: Record<StageName, Switch[]> = { provision: [], setup: [], projects: ["projects"], personal: ["projects"], retention: ["projects", "retention"],
+    submodules: ["projects"] };
+  const needed = own[stage];
+  return stage === "provision" ? needed : owner === "personal" || stage === "personal" ? [...needed, "personal"] : needed;
+}
 /** Whether a stage signs in. provision uses only the GitHub App, so it runs whatever happens to an account's sign-in. */
 export const STAGE_NEEDS_ACCOUNT: Record<StageName, boolean> = {
   provision: false, setup: true, projects: true, personal: true, retention: true, submodules: true,
@@ -78,6 +85,14 @@ export interface Database {
   close(): Promise<void>;
 }
 export interface Clock { now(): number; sleep(ms: number): Promise<void> }
+/** An account's operator-owned Pro grant, as manage-account-pro.ts reads and writes it. */
+export type ProGrant = { enabled: boolean; validFrom: string; validUntil: string | null };
+export interface ProPort {
+  /** The current grant: null when there is none; "foreign" when billing or a migration owns it (never overwritten). */
+  read(): Promise<ProGrant | null | "foreign">;
+  /** One change, planned and executed in one process; returns the operation's id. */
+  change(grant: ProGrant, reason: string): Promise<string>;
+}
 
 export type Ports = {
   /** Alpha's /v1/release-identity: channel alpha, ready, not in maintenance, cloud healthy. */
@@ -85,6 +100,10 @@ export type Ports = {
   api: Api;
   /** A second test account, for checks that must see nothing. */
   other?: Api;
+  /** The selected account's Individual Pro, through manage-account-pro.ts (plan, then execute, then read back). */
+  pro?: ProPort;
+  /** The selected account's own GitHub sign-in by token, for the owner organization. The token stays inside the port. */
+  githubSignIn?: { connect(organizationId: string, expectedGeneration: string): Promise<void> };
   bridge(workspaceId: string): Promise<Bridge>;
   boat: Boat;
   storage: Storage;
@@ -101,13 +120,18 @@ export type Created = {
   branches: { repository: string; name: string }[]; pulls: { repository: string; number: number }[];
   /** The account's environments this run seeded (each was empty before); cleanup clears them. */
   environments: { repository: string; repositoryId: string }[];
+  /** The Pro grant before this run's first change (null: none), and the operations made; cleanup puts the grant back. */
+  pro?: { before: ProGrant | null; operations: string[] };
+  /** Organization ids where this run connected the account's GitHub sign-in by token; cleanup disconnects them. */
+  githubSignIns: string[];
 };
 export type StageResult = { ok: boolean; step?: string; code?: string; skipped?: string; counts?: Record<string, number>;
   /** Closed codes for what a stage chose (environment_case:seeded, environment_skipped:environment_exists). */
   notes?: string[] };
 export type RehearsalState = {
   version: 1; runId: string; prefix: string; startedAt: string;
-  organizationId: string; created: Created; stages: Partial<Record<StageName, StageResult>>;
+  /** The owner organization the stages run in, and which route it is. */
+  owner: OwnerKind; organizationId: string; created: Created; stages: Partial<Record<StageName, StageResult>>;
   /** Organization ids a clock shift may touch. */
   organizations: string[];
   shifts: number; machineStarts: number;
@@ -115,10 +139,14 @@ export type RehearsalState = {
 
 export type StageContext = {
   ports: Ports; state: RehearsalState; save(): Promise<void>;
+  /** Projects are "Only you" (personal) on the Personal route, organization projects on the organization route. */
+  projectLevel: "personal" | "organization";
   /** R1 always; R2 once provisioned or named; R3 for submodules. */
   repositories: { one: string; two?: string; submodules?: string };
   /** Bounded waits; tests shrink them. */
-  timing: { pollMs: number; stateMs: number; copyMs: number; turnMs: number; scanMs: number; archiveScanMs: number };
+  timing: { pollMs: number; stateMs: number; copyMs: number; turnMs: number; scanMs: number; archiveScanMs: number;
+    /** Pro ended to the machine stopped: the 20-minute idle stop plus one sweep, with margin. */
+    idleStopMs: number };
   /** Step progress: a stage reports each step's name as it starts (the runner keeps only the last). */
   step(name: string): void;
   /** Records a closed code for what the stage chose; printed with its result. */

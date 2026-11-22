@@ -3,7 +3,7 @@
 // account (revoked) and one temporary database role inheriting only pg_read_all_data (to count platform owners), deleted
 // before it returns.
 import { z } from "zod";
-import { RehearsalFailure, STAGE_NEEDS_ACCOUNT, STAGE_SWITCH, type Api, type Database, type StageName, type Switch } from "./contract.js";
+import { RehearsalFailure, STAGE_NEEDS_ACCOUNT, stageSwitches, type Api, type Database, type OwnerKind, type StageName, type Switch } from "./contract.js";
 import { safeLine } from "./guard.js";
 import { FIXTURE_TWO } from "./stage-provision.js";
 import { STAGE_RUNNERS } from "./runner.js";
@@ -19,16 +19,21 @@ export type AccountSummary = {
   /** The account's own GitHub sign-in for the probe organization (GitHub App or token): a project create reads each
    * repository as the caller, so without one it is refused (403 github_connection_required). */
   githubIdentity: boolean;
+  /** The account's Pro, and its Personal organization: the Personal route's owner. */
+  pro: boolean; personal: { id: string; seat: string | null } | null;
 };
 
 /** Each read names its step, so a failure says which (account_projects http_403, account_github_identity schema:...). */
 export async function readAccount(api: Api, label: string, probeOrganization: string, fixtureOwner: string): Promise<AccountSummary> {
-  const me = parse(z.object({ organizations: z.array(z.object({ id: z.string(), name: z.string(), role: z.string().nullable().optional(),
-    isPersonal: z.boolean().optional() }).passthrough()) }).passthrough(), (await call(api, "GET", "/v1/me", "account_me")).body, "account_me");
+  const me = parse(z.object({ capabilities: z.object({ pro: z.boolean() }).passthrough().optional(),
+    organizations: z.array(z.object({ id: z.string(), name: z.string(), role: z.string().nullable().optional(),
+    isPersonal: z.boolean().optional(), seat: z.string().optional() }).passthrough()) }).passthrough(), (await call(api, "GET", "/v1/me", "account_me")).body, "account_me");
   const probe = me.organizations.find(org => org.id === probeOrganization);
+  const own = me.organizations.find(org => org.isPersonal === true && org.role === "owner");
   const summary: AccountSummary = {
     label, organizations: me.organizations.map(org => ({ name: org.name, role: org.role ?? "none", personal: org.isPersonal === true, probe: org.id === probeOrganization })),
     admin: false, connections: { organization: 0, personal: 0, logins: [] }, activeMachines: 0, fixtureConnection: false, githubIdentity: false,
+    pro: me.capabilities?.pro === true, personal: own ? { id: own.id, seat: own.seat ?? null } : null,
   };
   if (!probe) return summary;
   summary.admin = parse(z.object({ canCreateOrganization: z.boolean() }).passthrough(),
@@ -57,19 +62,34 @@ export function accountLines(summary: AccountSummary): string[] {
     `  github connections: organization ${summary.connections.organization}, personal ${summary.connections.personal}` +
       (summary.connections.logins.length ? ` (${summary.connections.logins.join(", ")})` : ""),
     `  fixture connection active: ${summary.fixtureConnection ? "yes" : "no"}; own github sign-in: ${summary.githubIdentity ? "yes" : "no"}; active machines ${summary.activeMachines}`,
+    `  pro: ${summary.pro ? "yes" : "no"}; personal organization: ${summary.personal ? `yes, cloud seat ${summary.personal.seat ?? "none"}` : "no"}`,
   ].map(safeLine);
 }
 
+/** What the Personal route needs besides an account: the token for the account's own GitHub sign-in, and the one
+ * active platform owner for the Pro grant. */
+export type PersonalReadiness = { token: boolean; proActor: "resolved" | "none" | "ambiguous" };
+
 /** Why a stage cannot run, or null. `account` is the selected account's summary, or the reason its sign-in or read
- * failed. provision needs no account. A and C need an owner or admin of the probe organization, the fixture owner's
- * organization-level connection, and the account's own GitHub sign-in. */
-export function refusal(stage: StageName, account: AccountSummary | { failed: string }, switches: ReadonlySet<Switch>): string | null {
-  if (stage === "setup") return "awaiting_approval";
+ * failed. provision needs no account. On the Personal route the account needs its Personal organization, and setup the
+ * token and the Pro actor; A, C and B then run after setup (in this run or an earlier one). On the organization route A
+ * and C need an owner or admin of the probe organization, the fixture owner's organization-level connection and the
+ * account's own GitHub sign-in, and setup is a proposal awaiting approval. */
+export function refusal(stage: StageName, account: AccountSummary | { failed: string }, switches: ReadonlySet<Switch>, owner: OwnerKind = "personal",
+  readiness: PersonalReadiness = { token: true, proActor: "resolved" }): string | null {
+  if (stage === "setup" && owner === "organization") return "awaiting_approval";
   if (!STAGE_RUNNERS[stage]) return "not_written";
-  const needed = STAGE_SWITCH[stage];
-  if (needed && !switches.has(needed)) return `undeclared_${needed}`;
+  if (stage === "personal" && owner !== "personal") return "personal_route_only";
+  const missing = stageSwitches(stage, owner).find(needed => !switches.has(needed));
+  if (missing) return `undeclared_${missing}`;
   if (!STAGE_NEEDS_ACCOUNT[stage]) return null;
   if ("failed" in account) return `account_unavailable:${account.failed}`;
+  if (owner === "personal") {
+    if (!account.personal) return "no_personal_organization";
+    if (stage === "setup" && !readiness.token) return "no_github_token";
+    if (stage === "setup" && readiness.proActor !== "resolved") return `pro_actor_${readiness.proActor}`;
+    return null;
+  }
   if (!account.organizations.some(org => org.probe)) return "not_a_member";
   if (!account.admin) return "not_owner_or_admin";
   if (!account.fixtureConnection) return "no_fixture_connection";
@@ -77,25 +97,46 @@ export function refusal(stage: StageName, account: AccountSummary | { failed: st
   return null;
 }
 
-export function writeLines(stage: StageName, prefix: string, repositories: { one: string; two?: string }): string[] {
+/** What the Personal route does not rehearse that the organization route would. */
+export const PERSONAL_ROUTE_GAPS = [
+  "not covered on the Personal route: organization-level projects (every project is Only you), and copies shared with other members",
+  "not covered on the Personal route: the per-member access check at create (a copy holding what another member cannot read)",
+  "not covered on the Personal route: team sharing and shared execution (a Personal organization has one member)",
+  "not covered with a token sign-in: read-only submodule tokens (C4), Mac sync (github_access_required); the build's clone, pushes and pull requests use the token itself",
+];
+
+export function writeLines(stage: StageName, prefix: string, repositories: { one: string; two?: string }, owner: OwnerKind = "personal"): string[] {
   const two = repositories.two ?? FIXTURE_TWO;
+  const where = owner === "personal" ? "in the test user's Personal organization, as Only you projects" : "in the probe organization, as organization projects";
   const lines: Record<StageName, string[]> = {
     provision: [`provision would create ${two} (private, one initial commit with GitHub's Node .gitignore) only if it does not exist; cleanup removes it unless --keep-fixtures`],
     projects: [
-      `projects would create project ${prefix}one (organization, ${repositories.one}) and wait for its copy (1 machine)`,
+      `projects runs ${where}`,
+      `projects would create project ${prefix}one (${repositories.one}) and wait for its copy (1 machine)`,
       `projects would create workspace ${prefix}one-w on branch ${prefix}one (1 machine start), 1 turn, 1 terminal, 1 file`,
       `projects would commit and push branch ${prefix}one to ${repositories.one}, open 1 draft pull request, close it unmerged, delete the branch`,
       `projects would stop, wake (1 start), archive, open (1 start) and delete ${prefix}one-w`,
-      `projects would create project ${prefix}two (organization, ${repositories.one} and ${two}) and wait for its copy (1 machine)`,
+      `projects would create project ${prefix}two (${repositories.one} and ${two}) and wait for its copy (1 machine)`,
       `projects would seed the account's environment for ${repositories.one} and ${two} with one file .env each, only if both are at revision 0` +
         " (or empty and this run's own) and both repositories ignore .env, else skip it as environment_exists or path_not_ignored; cleared after the stage and by cleanup",
       `projects would create workspace ${prefix}two-w on branch ${prefix}two (1 machine start), push ${prefix}two to ${two}, open and close 1 draft pull request`,
       `projects would run 2 turns writing 1 file in each repository and rewind the second, then delete ${prefix}two-w and both projects`,
       "projects would read cloud_v2_ready_copy_forks and cloud_v2_ready_copies through one temporary pg_read_all_data role, deleted at the end of the stage; no postgres role",
     ],
-    personal: ["personal: not written yet (waiting on the owner's answers)"],
+    personal: [
+      `personal would create project ${prefix}p (Only you, ${repositories.one}) and its copy (1 machine), and workspace ${prefix}p-w (1 machine start)`,
+      "personal would read, as the second test user, the workspace, the project, the project list, the workspace list and the by-number address: each must be 404 or absent",
+      "personal would end the account's Pro through manage-account-pro.ts (1 operator change), check 403 pro_required on the workspace and its connect," +
+        " and wait up to 35 minutes for the machine to stop (the minutes are reported)",
+      "personal would put Pro back (1 operator change), open the workspace (1 machine start), then delete the workspace and the project",
+    ],
     // A proposal for the owner: what lets a test user run A and C without the owner's account in the stages themselves.
-    setup: [
+    setup: owner === "personal" ? [
+      "setup would give the selected test user Individual Pro for a day through manage-account-pro.ts (plan, execute, read back; actor the one active platform owner)," +
+        " recording the grant before it; cleanup puts that grant back (or ends Pro when there was none)",
+      "setup would connect the test user's own GitHub sign-in in its Personal organization by token (action pat, ZEROS_REHEARSAL_GITHUB_TOKEN, fixture repositories only);" +
+        " never over a sign-in it did not make; cleanup disconnects it",
+    ] : [
       "setup (proposal, not run until approved) would let test user <n> run projects and retention in the probe organization:",
       "  1. invitation: POST /v1/organizations/<probe>/invitations role admin for user <n>, as an admin of the probe organization (today only the owner's account);" +
         " the reply's one-use token is held in memory",
@@ -108,7 +149,8 @@ export function writeLines(stage: StageName, prefix: string, repositories: { one
         " and a caller with no GitHub sign-in is refused 403 github_connection_required; an admin who is not the connection's owner is not refused for that",
     ],
     retention: [
-      `retention would create project ${prefix}ret (organization, ${repositories.one} and ${two}) and its copy (1 machine)`,
+      `retention runs ${where}`,
+      `retention would create project ${prefix}ret (${repositories.one} and ${two}) and its copy (1 machine)`,
       `retention would seed the account's environment for ${repositories.one} with .env under the same rule as projects (noted as environment_case:seeded_edited` +
         " or hand_made_ignored), cleared after the stage and by cleanup",
       `retention would create workspaces ${prefix}ret-w and ${prefix}ret-k (2 machine starts); in ${prefix}ret-w one unpushed commit and one untracked file in ${two},` +
@@ -137,4 +179,22 @@ export async function resolveProbe(database: Database, selector: string): Promis
     LEFT JOIN workos_organization_links l ON l.organization_id = o.id WHERE (o.slug = $1 OR o.id::text = $1) AND o.deleted_at IS NULL`, [selector]);
   if (rows.length !== 1) throw new RehearsalFailure("probe_organization", rows.length ? "ambiguous" : "not_found");
   return { id: String(rows[0]!.id), workosOrganizationId: rows[0]!.workos_organization_id ? String(rows[0]!.workos_organization_id) : null };
+}
+
+/** The one active platform owner whose id starts with `prefix` (8 hex characters): the Pro operator's actor. */
+export async function proActor(database: Database, prefix: string | undefined): Promise<{ state: PersonalReadiness["proActor"]; id?: string }> {
+  if (!prefix || !/^[0-9a-f]{8}$/.test(prefix)) return { state: "none" };
+  const rows = await database.read(`SELECT id::text AS id FROM users WHERE staff_role = 'platform_owner' AND auth_status = 'active' AND deleted_at IS NULL
+    AND left(id::text, 8) = $1`, [prefix]);
+  return rows.length === 1 ? { state: "resolved", id: String(rows[0]!.id) } : { state: rows.length ? "ambiguous" : "none" };
+}
+
+/** Why a member's projects read can answer 404, as booleans: the probe organization's state and the member's. */
+export async function probeDiagnostics(database: Database, organizationId: string, userId: string): Promise<Record<string, boolean>> {
+  const rows = await database.read(`SELECT o.deleted_at IS NULL AS organization_present, o.lifecycle_status = 'active' AS organization_active,
+      (o.is_personal OR o.cloud_workspaces_allowed) AS cloud_allowed, m.user_id IS NOT NULL AS member, (u.auth_status = 'active' AND u.deleted_at IS NULL) AS user_active
+    FROM organizations o LEFT JOIN organization_members m ON m.org_id = o.id AND m.user_id = $2::uuid LEFT JOIN users u ON u.id = $2::uuid
+    WHERE o.id = $1::uuid`, [organizationId, userId]);
+  const row = rows[0] ?? {};
+  return Object.fromEntries(["organization_present", "organization_active", "cloud_allowed", "member", "user_active"].map(key => [key, row[key] === true]));
 }

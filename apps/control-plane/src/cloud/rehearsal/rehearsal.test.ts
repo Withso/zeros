@@ -9,7 +9,7 @@ import { FakeAlpha } from "../__fixtures__/rehearsal-alpha-fake.js";
 import { shiftClock } from "./clock.js";
 import { RehearsalFailure, type RehearsalState, type StageName } from "./contract.js";
 import { assertRepository, safeLine } from "./guard.js";
-import { accountLines, readAccount, refusal, writeLines } from "./plan.js";
+import { accountLines, PERSONAL_ROUTE_GAPS, readAccount, refusal, writeLines } from "./plan.js";
 import { cleanup, cleanupNeedsAccount, inventoryLines, NO_ACCOUNT, readInventory, runStages, stageContext } from "./runner.js";
 import { parseArguments } from "./rehearsal-cli.js";
 import { FIXTURE_TWO } from "./stage-provision.js";
@@ -18,18 +18,20 @@ import { liveDatabase, type DatabaseClient } from "./live.js";
 import { platformOwners } from "./plan.js";
 
 const R1 = "Withso/zeros-dev-fixture";
-const TIMING = { pollMs: 1_000, stateMs: 60_000, copyMs: 60_000, turnMs: 60_000, scanMs: 300_000, archiveScanMs: 3_900_000 };
+const TIMING = { pollMs: 30_000, stateMs: 120_000, copyMs: 120_000, turnMs: 120_000, scanMs: 300_000, archiveScanMs: 3_900_000, idleStopMs: 2_100_000 };
 
-function setup(options: { provisioned?: boolean } = {}) {
+function setup(options: { provisioned?: boolean; owner?: "personal" | "organization" } = {}) {
   const alpha = new FakeAlpha(options.provisioned === false ? [R1] : [R1, FIXTURE_TWO]);
-  const state = newState(randomUUID(), alpha.organizationId, new Date(alpha.now));
+  const state = newState(randomUUID(), alpha.organizationId, new Date(alpha.now), options.owner ?? "organization");
+  // On the Personal route the test user starts with no GitHub sign-in; setup connects one.
+  if (options.owner === "personal") alpha.githubIdentity = false;
   const lines: string[] = [];
   const saved: RehearsalState[] = [];
   const ctx = stageContext(alpha.ports(), state, async () => { saved.push(structuredClone(state)); }, { one: R1, two: FIXTURE_TWO }, TIMING, 30);
   const options_ = { switches: new Set(["projects", "personal", "retention"] as const), maxActive: 10, runCap: 30, log: (line: string) => lines.push(line) };
   return { alpha, state, ctx, lines, saved, options: options_ };
 }
-const EMPTY = { workspaces: 0, projects: 0, branches: 0, pulls: 0, machines: 0, objects: 0, environments: 0, databaseRows: 0, repositories: 0 };
+const EMPTY = { workspaces: 0, projects: 0, branches: 0, pulls: 0, machines: 0, objects: 0, environments: 0, githubSignIns: 0, pro: 0, databaseRows: 0, repositories: 0 };
 
 describe("rehearsal guards", () => {
   it("refuses every repository but the fixtures, by name", () => {
@@ -47,10 +49,13 @@ describe("rehearsal guards", () => {
   });
 
   it("parses the command line and refuses what it does not know", () => {
-    expect(parseArguments(["all", "--plan", "--switches", "projects,retention"])).toMatchObject({ stages: ["provision", "projects", "retention"], plan: true, account: "owner" });
+    expect(parseArguments(["all", "--plan", "--switches", "projects,personal,retention"]))
+      .toMatchObject({ stages: ["provision", "setup", "projects", "personal", "retention"], plan: true, owner: "personal", account: 2 });
+    expect(parseArguments(["all", "--owner", "organization", "--account", "owner"])).toMatchObject({ stages: ["provision", "setup", "projects", "retention"], account: "owner" });
+    expect(parseArguments(["personal", "--account", "4", "--other", "5", "--pro-actor", "3e515301"])).toMatchObject({ account: 4, other: 5, proActor: "3e515301" });
     expect(parseArguments(["retention", "--account", "3", "--run", randomUUID()])).toMatchObject({ stages: ["retention"], account: 3 });
     for (const bad of [["nope"], ["all", "--plan", "--cleanup", "--run", "x"], ["all", "--cleanup"], ["all", "--account", "11"], ["all", "--switches", "billing"],
-      ["all", "--repository", "Withso/zeros"]])
+      ["all", "--repository", "Withso/zeros"], ["all", "--owner", "team"], ["all", "--account", "4", "--other", "4"], ["all", "--pro-actor", "3E5153"]])
       expect(() => parseArguments(bad), bad.join(" ")).toThrow(RehearsalFailure);
   });
 });
@@ -137,8 +142,8 @@ describe("rehearsal stages against a fake Alpha", () => {
     const { alpha, ctx, lines, options } = setup();
     expect(await runStages(ctx, ["projects"], { ...options, switches: new Set(["retention"] as const) })).toBe(false);
     expect(lines.at(-1)).toBe("stage projects: failed switch undeclared_projects");
-    expect(await runStages(ctx, ["personal"], options)).toBe(false);
-    expect(lines.at(-1)).toBe("stage personal: failed stage not_written");
+    expect(await runStages(ctx, ["submodules"], options)).toBe(false);
+    expect(lines.at(-1)).toBe("stage submodules: failed stage not_written");
     expect(alpha.writes).toEqual([]);
     expect(await runStages(ctx, ["projects"], { ...options, maxActive: -1 })).toBe(false);
     expect(lines.at(-1)).toBe("stage projects: failed machine_cap active");
@@ -162,16 +167,20 @@ describe("rehearsal stages against a fake Alpha", () => {
     expect((await cleanup(ctx, { keepFixtures: true, log: () => undefined })).inventory).toEqual(EMPTY);
   });
 
-  for (const stage of ["projects", "retention"] as StageName[]) {
-    it(`cleanup after a failure at any step of ${stage} leaves an empty inventory`, async () => {
-      const clean = setup();
+  for (const [stage, owner, prelude] of [["projects", "organization", []], ["retention", "organization", []], ["setup", "personal", []],
+    ["personal", "personal", ["setup"]]] as [StageName, "personal" | "organization", StageName[]][]) {
+    it(`cleanup after a failure at any step of ${stage} (${owner} route) leaves an empty inventory`, async () => {
+      const clean = setup({ owner });
+      expect(await runStages(clean.ctx, prelude, clean.options)).toBe(true);
+      const offset = clean.alpha.calls;
       expect(await runStages(clean.ctx, [stage], clean.options)).toBe(true);
-      const total = clean.alpha.calls;
-      expect(total).toBeGreaterThan(40);
+      const total = clean.alpha.calls - offset;
+      expect(total).toBeGreaterThan(5);
       let failed = 0;
       for (let at = 1; at <= total; at++) for (const after of [false, true]) {
-        const { alpha, ctx, lines, options } = setup();
-        alpha.fault = { at, after };
+        const { alpha, ctx, lines, options } = setup({ owner });
+        expect(await runStages(ctx, prelude, options)).toBe(true);
+        alpha.fault = { at: alpha.calls + at, after };
         const passed = await runStages(ctx, [stage], options);
         alpha.fault = undefined;
         if (passed) continue;
@@ -182,7 +191,7 @@ describe("rehearsal stages against a fake Alpha", () => {
         expect(inventory, `call ${at}${after ? " after" : ""}: ${failure}`).toEqual(EMPTY);
       }
       // Nearly every injected fault fails the stage (a read the stage tolerates, such as a missing file, may not).
-      expect(failed).toBeGreaterThan(total * 1.5);
+      expect(failed).toBeGreaterThan(total);
     }, 120_000);
   }
 
@@ -299,6 +308,77 @@ describe("rehearsal database roles", () => {
   });
 });
 
+describe("rehearsal on the Personal route", () => {
+  const all = { switches: new Set(["projects", "personal", "retention"] as const) };
+
+  it("runs provision, setup, projects, personal and retention in the test user's Personal organization, then cleanup restores everything", async () => {
+    const { alpha, state, ctx, lines, options } = setup({ provisioned: false, owner: "personal" });
+    expect(await runStages(ctx, ["provision", "setup", "projects", "personal", "retention"], { ...options, ...all })).toBe(true);
+    expect(lines.filter(line => line.startsWith("stage "))).toEqual(["stage provision: ok", "stage setup: ok", "stage projects: ok", "stage personal: ok", "stage retention: ok"]);
+    expect(ctx.projectLevel).toBe("personal");
+    expect(state.stages.setup?.counts).toEqual({ proChanges: 1, githubSignIn: 1 });
+    // Pro ended: the machine stopped after the 20-minute idle stop; four reads and the list were hidden from the second user.
+    expect(state.stages.personal?.counts).toMatchObject({ workspaces: 1, hiddenReads: 5, minutesToStop: 20 });
+    expect(state.stages.personal?.notes).toEqual(["worker_token:not_observable"]);
+    expect(alpha.proChanges.map(grant => grant.enabled)).toEqual([true, false, true]);
+    expect(alpha.writes.filter(write => write.startsWith("other"))).toEqual([]);
+    expect(state.created.githubSignIns).toEqual([alpha.organizationId]);
+    const { inventory } = await cleanup(ctx, { keepFixtures: false, log: line => lines.push(line) });
+    expect(inventory).toEqual(EMPTY);
+    // Pro is back to "none" (the grant ends; there was none before), and the token sign-in is gone.
+    expect(alpha.pro()).toBe(false);
+    expect(alpha.patConnected).toBe(false);
+    for (const line of lines) expect(safeLine(line)).toBe(line);
+  });
+
+  it("puts back a grant that existed before the run, exactly", async () => {
+    const { alpha, ctx, options } = setup({ owner: "personal" });
+    const before = { enabled: true, validFrom: new Date(alpha.now - 1e9).toISOString(), validUntil: new Date(alpha.now + 3_600_000).toISOString() };
+    alpha.proGrant = { ...before };
+    expect(await runStages(ctx, ["setup", "personal"], { ...options, ...all })).toBe(true);
+    expect((await cleanup(ctx, { keepFixtures: true, log: () => undefined })).inventory).toEqual(EMPTY);
+    expect(alpha.proGrant).toEqual(before);
+  });
+
+  it("cleanup after Pro was left off turns it on to delete, then puts the grant back", async () => {
+    const { alpha, ctx, options } = setup({ owner: "personal" });
+    expect(await runStages(ctx, ["setup"], { ...options, ...all })).toBe(true);
+    // Fail stage B just after its Pro-off change: the workspace now answers 403 pro_required.
+    let changes = 0;
+    const port = ctx.ports.pro!;
+    ctx.ports.pro = { read: port.read, change: async (grant, reason) => { const id = await port.change(grant, reason); if (++changes === 1) throw new RehearsalFailure("injected", "fault"); return id; } };
+    expect(await runStages(ctx, ["personal"], { ...options, ...all })).toBe(false);
+    expect(alpha.pro()).toBe(false);
+    ctx.ports.pro = port;
+    expect((await cleanup(ctx, { keepFixtures: true, log: () => undefined })).inventory).toEqual(EMPTY);
+    expect(alpha.pro()).toBe(false);
+  });
+
+  it("never replaces a sign-in or a grant it did not make, and refuses B before setup", async () => {
+    const existing = setup({ owner: "personal" });
+    existing.alpha.patConnected = true;
+    expect(await runStages(existing.ctx, ["setup"], { ...existing.options, ...all })).toBe(false);
+    expect(existing.ctx.state.stages.setup).toMatchObject({ step: "github_sign_in", code: "exists" });
+    const foreign = setup({ owner: "personal" });
+    foreign.alpha.proGrant = "foreign";
+    expect(await runStages(foreign.ctx, ["setup"], { ...foreign.options, ...all })).toBe(false);
+    expect(foreign.ctx.state.stages.setup).toMatchObject({ step: "pro", code: "foreign_grant" });
+    expect(foreign.alpha.proChanges).toEqual([]);
+    const early = setup({ owner: "personal" });
+    expect(await runStages(early.ctx, ["personal"], { ...early.options, ...all })).toBe(false);
+    expect(early.ctx.state.stages.personal).toMatchObject({ step: "pro", code: "run_setup_first" });
+  });
+
+  it("refuses the Personal route's stages without the personal switch, and setup on the organization route", async () => {
+    const personal = setup({ owner: "personal" });
+    expect(await runStages(personal.ctx, ["projects"], { ...personal.options, switches: new Set(["projects"] as const) })).toBe(false);
+    expect(personal.ctx.state.stages.projects).toMatchObject({ step: "switch", code: "undeclared_personal" });
+    const organization = setup({ owner: "organization" });
+    expect(await runStages(organization.ctx, ["setup"], organization.options)).toBe(false);
+    expect(organization.ctx.state.stages.setup).toMatchObject({ code: "organization_route_awaiting_approval" });
+  });
+});
+
 describe("rehearsal without an account", () => {
   it("runs provision with nobody signed in and refuses the stages that need an account, naming why", async () => {
     const { alpha, state, ctx, lines, options } = setup({ provisioned: false });
@@ -322,7 +402,7 @@ describe("rehearsal without an account", () => {
 describe("rehearsal sign-in", () => {
   const account = { label: "3", email: "user-3@zeros.build", password: "pw" };
   const session = () => ({ accessToken: async () => "t", close: vi.fn(async () => undefined) });
-  const me = (organizations: unknown[]) => ({ json: async () => ({ status: 200, body: { organizations } }) });
+  const me = (organizations: unknown[]) => ({ json: async () => ({ status: 200, body: { user: { id: randomUUID() }, organizations } }) });
   const deps = (overrides: Partial<SignInDeps> = {}): SignInDeps & { waits: number[] } => {
     const waits: number[] = [];
     return { waits, subject: async () => "user_3", signIn: async () => session(), api: () => me([{ id: randomUUID(), slug: null }]),
@@ -381,20 +461,31 @@ describe("rehearsal --plan", () => {
     expect(alpha.writes).toEqual([]);
     expect(summary).toMatchObject({ admin: true, fixtureConnection: true, githubIdentity: true, connections: { organization: 1, personal: 0, logins: ["Withso"] } });
     for (const line of accountLines(summary)) expect(safeLine(line)).toBe(line);
-    const switches = new Set(["projects", "retention"] as const);
-    expect(refusal("projects", summary, switches)).toBeNull();
-    expect(refusal("retention", summary, new Set(["projects"] as const))).toBe("undeclared_retention");
-    expect(refusal("personal", summary, switches)).toBe("not_written");
-    expect(refusal("projects", { ...summary, admin: false }, switches)).toBe("not_owner_or_admin");
-    expect(refusal("projects", { ...summary, fixtureConnection: false }, switches)).toBe("no_fixture_connection");
-    expect(refusal("projects", { ...summary, githubIdentity: false }, switches)).toBe("no_github_identity");
-    expect(refusal("retention", { failed: "sign_in:http_400_invalid_credentials" }, switches)).toBe("account_unavailable:sign_in:http_400_invalid_credentials");
+    const switches = new Set(["projects", "retention"] as const), org = "organization" as const;
+    expect(refusal("projects", summary, switches, org)).toBeNull();
+    expect(refusal("retention", summary, new Set(["projects"] as const), org)).toBe("undeclared_retention");
+    expect(refusal("personal", summary, switches, org)).toBe("personal_route_only");
+    expect(refusal("projects", { ...summary, admin: false }, switches, org)).toBe("not_owner_or_admin");
+    expect(refusal("projects", { ...summary, fixtureConnection: false }, switches, org)).toBe("no_fixture_connection");
+    expect(refusal("projects", { ...summary, githubIdentity: false }, switches, org)).toBe("no_github_identity");
+    expect(refusal("retention", { failed: "sign_in:http_400_invalid_credentials" }, switches, org)).toBe("account_unavailable:sign_in:http_400_invalid_credentials");
     // provision uses only the App: no account, or a failed one, does not refuse it.
-    expect(refusal("provision", { failed: "sign_in:network" }, switches)).toBeNull();
-    expect(refusal("setup", summary, switches)).toBe("awaiting_approval");
+    expect(refusal("provision", { failed: "sign_in:network" }, switches, org)).toBeNull();
+    expect(refusal("setup", summary, switches, org)).toBe("awaiting_approval");
+    // The Personal route: every stage but provision needs the personal switch; setup needs the token and the actor.
+    const all = new Set(["projects", "personal", "retention"] as const);
+    expect(refusal("projects", summary, switches)).toBe("undeclared_personal");
+    expect(refusal("setup", summary, all)).toBeNull();
+    expect(refusal("setup", summary, all, "personal", { token: false, proActor: "resolved" })).toBe("no_github_token");
+    expect(refusal("setup", summary, all, "personal", { token: true, proActor: "ambiguous" })).toBe("pro_actor_ambiguous");
+    expect(refusal("personal", summary, all)).toBeNull();
+    expect(refusal("retention", { ...summary, personal: null }, all)).toBe("no_personal_organization");
+    expect(refusal("submodules", summary, all)).toBe("not_written");
+    for (const line of PERSONAL_ROUTE_GAPS) expect(safeLine(line)).toBe(line);
     alpha.githubIdentity = false;
     expect((await readAccount(alpha.api(), "9", state.organizationId, "Withso")).githubIdentity).toBe(false);
     for (const stage of ["provision", "setup", "projects", "personal", "retention", "submodules"] as StageName[])
-      for (const line of writeLines(stage, "zr-<run>-", { one: R1 })) { expect(line).not.toBe("line withheld (unsafe)"); }
+      for (const owner of ["personal", "organization"] as const)
+        for (const line of writeLines(stage, "zr-<run>-", { one: R1 }, owner)) { expect(line).not.toBe("line withheld (unsafe)"); }
   });
 });

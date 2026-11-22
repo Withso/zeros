@@ -1,6 +1,7 @@
 // The rehearsal's live adapters for Alpha. Credentials are read by the CLI from .env.agent and the private profile, held
 // in memory, and used only in request headers and connection strings; no adapter returns, logs or stores one, and no
 // failure carries a provider's message or body.
+import { randomUUID } from "node:crypto";
 import { DeleteObjectCommand, ListObjectsV2Command, S3Client } from "@aws-sdk/client-s3";
 import pg from "pg";
 import { z } from "zod";
@@ -11,7 +12,9 @@ import { BoatApiClient } from "../boat-client.js";
 import { BoatCloudV2Compute } from "../boat.js";
 import { ALPHA_PROBE_ORIGIN, alphaProbeIdentity } from "../gate0-alpha.js";
 import { BridgeProbe, Gate0Failure } from "../gate0.js";
-import { RehearsalFailure, type Api, type Boat, type Bridge, type Clock, type Database, type Github, type Query, type Storage } from "./contract.js";
+import { RehearsalFailure, type Api, type Boat, type Bridge, type Clock, type Database, type Github, type Ports, type ProGrant, type ProPort, type Query,
+  type Storage } from "./contract.js";
+import { manageAccountPro } from "../../manage-account-pro.js";
 import { assertRepository, prefixed } from "./guard.js";
 
 const TIMEOUT_MS = 30_000;
@@ -220,8 +223,15 @@ type Role = { id: string; name: string; username: string; password: string; acce
  * the first read, every statement in the playbook's RLS-safe form inside READ ONLY, deleted by close(). A write: its own
  * role inheriting postgres, with zeros_app granted to the session_user, for that one transaction, deleted (until a GET
  * answers 404) before transaction() returns. */
+/** The live database, plus one operator capability: work as a table's owner, for operators that require it
+ * (manage-account-pro.ts checks current_user owns its tables). */
+export type LiveDatabase = Database & {
+  asTableOwner<T>(table: string, work: (pool: pg.Pool, connectionString: string) => Promise<T>): Promise<T>;
+};
+
 export function liveDatabase(input: { organization: string; database: string; tokenId: string; token: string; roleName: (kind: "read" | "write") => string;
-  planetScale?: ReturnType<typeof planetScaleClient>; client?: (connectionString: string) => DatabaseClient; sleep?: (ms: number) => Promise<void> }): Database {
+  planetScale?: ReturnType<typeof planetScaleClient>; client?: (connectionString: string) => DatabaseClient; sleep?: (ms: number) => Promise<void>;
+  pool?: (connectionString: string) => pg.Pool }): LiveDatabase {
   const planetScale = input.planetScale ?? planetScaleClient({ organization: input.organization, tokenId: input.tokenId, token: input.token });
   const client = input.client ?? (connectionString => new pg.Client({ connectionString, connectionTimeoutMillis: 15_000 }));
   const sleep = input.sleep ?? liveClock.sleep;
@@ -232,10 +242,11 @@ export function liveDatabase(input: { organization: string; database: string; to
     if (database.status !== 200 || !parsed.success) { branchPath = undefined; throw new RehearsalFailure("database_branch", `http_${database.status}`); }
     return `/databases/${input.database}/branches/${parsed.data.default_branch}`;
   })();
-  const mint = async (kind: "read" | "write"): Promise<{ held: DatabaseClient; remove: () => Promise<void> }> => {
+  /** A role on the branch, and its deletion (retried until a GET answers 404). */
+  const role = async (kind: "read" | "write"): Promise<{ role: Role; remove: () => Promise<void> }> => {
     const path = await branch();
     const created = await planetScale("POST", `${path}/roles`, { name: input.roleName(kind), inherited_roles: [kind === "read" ? "pg_read_all_data" : "postgres"], ttl: 3600 });
-    const role = z.object({ id: z.string(), name: z.string(), username: z.string(), password: z.string(), access_host_url: z.string() }).passthrough().safeParse(created.body);
+    const parsedRole = z.object({ id: z.string(), name: z.string(), username: z.string(), password: z.string(), access_host_url: z.string() }).passthrough().safeParse(created.body);
     const acknowledged = z.object({ id: z.string() }).passthrough().safeParse(created.body);
     const remove = async () => {
       if (!acknowledged.success) return;
@@ -247,11 +258,15 @@ export function liveDatabase(input: { organization: string; database: string; to
       }
       throw new RehearsalFailure("database_role_delete", "unconfirmed");
     };
-    if (created.status >= 300 || !role.success) {
+    if (created.status >= 300 || !parsedRole.success) {
       await remove().catch(() => undefined);
       throw new RehearsalFailure(`database_${kind}_role`, `http_${created.status}`);
     }
-    const held = client(roleConnectionString(role.data as Role));
+    return { role: parsedRole.data as Role, remove };
+  };
+  const mint = async (kind: "read" | "write"): Promise<{ held: DatabaseClient; remove: () => Promise<void> }> => {
+    const { role: minted, remove } = await role(kind);
+    const held = client(roleConnectionString(minted));
     try {
       await held.connect();
       if (kind === "write") {
@@ -293,12 +308,90 @@ export function liveDatabase(input: { organization: string; database: string; to
         } catch (error) { await held.query("ROLLBACK").catch(() => undefined); throw error; }
       } finally { await remove(); }
     },
+    /** A postgres-inheriting role for this one operator call, its session switched (SET ROLE) to the table's owner when it
+     * may, and deleted before this returns. */
+    async asTableOwner(table, work) {
+      if (!/^public\.[a-z_]{1,63}$/.test(table)) throw new RehearsalFailure("database_owner", "table");
+      const { role: minted, remove } = await role("write");
+      const connectionString = roleConnectionString(minted);
+      const pool = (input.pool ?? (url => new pg.Pool({ connectionString: url, max: 1, connectionTimeoutMillis: 15_000 })))(connectionString);
+      try {
+        const probe = await pool.connect();
+        let owner: string;
+        try {
+          const row = (await probe.query<{ owner: string; member: boolean }>(`SELECT pg_get_userbyid(relowner) AS owner,
+              pg_has_role(session_user, relowner, 'MEMBER') AS member FROM pg_class WHERE oid = $1::regclass`, [table])).rows[0];
+          if (!row?.member) throw new RehearsalFailure("database_owner", "not_a_member");
+          owner = row.owner;
+        } finally { probe.release(true); }
+        const quoted = `"${owner.replace(/"/g, '""')}"`;
+        pool.on("connect", connection => { void connection.query(`SET ROLE ${quoted}`); });
+        return await work(pool, connectionString);
+      } catch (error) {
+        throw error instanceof RehearsalFailure ? error : new RehearsalFailure("database_owner", "failed");
+      } finally {
+        await pool.end().catch(() => undefined);
+        await remove();
+      }
+    },
     async close() {
       if (!reader) return;
       const pending = reader; reader = undefined;
       let opened: Awaited<typeof pending>;
       try { opened = await pending; } catch { return; }
       await opened.remove();
+    },
+  };
+}
+
+/** An account_entitlements row as the rehearsal compares grants: none, another authority's ("foreign"), or the operator's. */
+export function grantOf(row: { status: string; cloud_workspaces_allowed: boolean; source: string; valid_from: string | Date; valid_until: string | Date | null } | undefined):
+  ProGrant | null | "foreign" {
+  if (!row) return null;
+  if (row.source !== "operator") return "foreign";
+  const iso = (value: string | Date) => new Date(value).toISOString();
+  return { enabled: row.status === "active" && row.cloud_workspaces_allowed, validFrom: iso(row.valid_from), validUntil: row.valid_until === null ? null : iso(row.valid_until) };
+}
+
+/** The selected account's Individual Pro through manage-account-pro.ts: each change planned and executed in one process
+ * (retried once on a plan mismatch, as the playbook says), as the entitlement tables' owner, then read back. */
+export function livePro(database: LiveDatabase, input: { subjectUserId: string; expectedEmail: string; actorUserId: string }): ProPort {
+  const read = async () => grantOf((await database.read(`SELECT status, cloud_workspaces_allowed, source, valid_from, valid_until
+    FROM account_entitlements WHERE user_id = $1::uuid`, [input.subjectUserId]))[0] as Parameters<typeof grantOf>[0]);
+  return {
+    read,
+    async change(grant, reason) {
+      const operationId = randomUUID();
+      const document = { operationId, channel: "alpha", subjectUserId: input.subjectUserId, expectedEmail: input.expectedEmail, actorUserId: input.actorUserId,
+        enabled: grant.enabled, validFrom: grant.validFrom, validUntil: grant.validUntil, reason };
+      await database.asTableOwner("public.account_entitlements", async (pool, databaseUrl) => {
+        for (let attempt = 0; attempt < 2; attempt++) {
+          try {
+            const planned = await manageAccountPro(pool, document, { databaseUrl, channel: "alpha" });
+            await manageAccountPro(pool, document, { databaseUrl, channel: "alpha", execute: true, approval: planned.planSha256 });
+            return;
+          } catch (error) {
+            // The operator's messages are fixed text, never values; only the plan mismatch is retried.
+            if (attempt === 0 && error instanceof Error && error.message.startsWith("Individual Pro plan changed")) continue;
+            throw new RehearsalFailure("pro_change", error instanceof Error && /active platform owner/.test(error.message) ? "actor" :
+              error instanceof Error && /overwrite billing/.test(error.message) ? "foreign_grant" : "refused");
+          }
+        }
+      });
+      const after = await read();
+      if (after === "foreign" || !after || after.enabled !== grant.enabled || after.validFrom !== grant.validFrom || after.validUntil !== grant.validUntil)
+        throw new RehearsalFailure("pro_read_back", "mismatch");
+      return operationId;
+    },
+  };
+}
+
+/** The account's own GitHub sign-in by token. The token is used only in this request's body. */
+export function liveGithubSignIn(api: Api, token: string): NonNullable<Ports["githubSignIn"]> {
+  return {
+    async connect(organizationId, expected) {
+      const reply = await api.json("POST", "/v1/cloud-v2/github/connection", { organizationId, expected, action: "pat", token });
+      if (reply.status !== 200) throw new RehearsalFailure("github_sign_in_connect", `http_${reply.status}`);
     },
   };
 }

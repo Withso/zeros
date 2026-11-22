@@ -1,4 +1,5 @@
-// `pnpm alpha:rehearse <stage|all> [--plan] [--cleanup] [--run <id>] [--account owner|<n>] [--switches projects,retention]`
+// `pnpm alpha:rehearse <stage|all> [--plan] [--cleanup] [--run <id>] [--owner personal|organization] [--account <n>] [--other <n>]
+//   [--pro-actor <8 hex>] [--switches projects,personal,retention]`
 // The live Alpha rehearsal of Projects, Personal cloud, Retention and Submodules. Read
 // agents/zstack/playbooks/alpha-operator.md first. Alpha only, test accounts and fixture repositories only.
 // Credentials are read in memory from .env.agent (repository root) and the private zeros-dev profile, never printed.
@@ -9,24 +10,30 @@ import { pathToFileURL } from "node:url";
 import { parseArgs, parseEnv } from "node:util";
 import { z } from "zod";
 import { gate0SignIn } from "../gate0-cli.js";
-import { RehearsalFailure, STAGE_NEEDS_ACCOUNT, STAGES, type Api, type Ports, type StageName, type Switch } from "./contract.js";
+import { RehearsalFailure, STAGE_NEEDS_ACCOUNT, STAGES, type Api, type OwnerKind, type Ports, type StageName, type Switch } from "./contract.js";
 import { diagnose, signInAccount, signInAll, type Account, type SignedIn, type SignInDeps } from "./accounts.js";
 import { assertRepository, safeLine } from "./guard.js";
-import { liveApi, liveBoat, liveBridge, liveClock, liveDatabase, liveGithub, liveRelease, liveStorage } from "./live.js";
-import { accountLines, platformOwners, readAccount, refusal, resolveProbe, writeLines, type AccountSummary } from "./plan.js";
+import { liveApi, liveBoat, liveBridge, liveClock, liveDatabase, liveGithub, liveGithubSignIn, livePro, liveRelease, liveStorage } from "./live.js";
+import { accountLines, PERSONAL_ROUTE_GAPS, platformOwners, probeDiagnostics, proActor, readAccount, refusal, resolveProbe, writeLines,
+  type AccountSummary } from "./plan.js";
 import { cleanup, cleanupNeedsAccount, DEFAULT_RUN_CAP, inventoryLines, NO_ACCOUNT, runStages, stageContext } from "./runner.js";
 import { FIXTURE_TWO } from "./stage-provision.js";
 import { loadState, newState, saveState } from "./state.js";
 
 export const USAGE = "alpha:rehearse <provision|setup|projects|personal|retention|submodules|all> [--plan] [--cleanup] [--run <id>] " +
-  "[--account owner|1..10] [--switches projects,personal,retention] [--repository owner/name] [--repository-two owner/name (default Withso/zeros-dev-fixture-2)] " +
-  "[--keep-fixtures] [--max-active <n>] [--organization <slug|id>]";
-/** `all` runs these in order; B and D are refused until written. */
-export const ALL: readonly StageName[] = ["provision", "projects", "retention"];
-export const TIMING = { pollMs: 5_000, stateMs: 15 * 60_000, copyMs: 30 * 60_000, turnMs: 10 * 60_000, scanMs: 5 * 60_000, archiveScanMs: 65 * 60_000 };
+  "[--owner personal|organization (default personal)] [--account owner|1..10 (default 2)] [--other 1..10 (default the next configured)] " +
+  "[--pro-actor <first 8 hex of the platform owner>] [--switches projects,personal,retention] [--repository owner/name] " +
+  "[--repository-two owner/name (default Withso/zeros-dev-fixture-2)] [--keep-fixtures] [--max-active <n>] [--organization <slug|id>]";
+/** `all` runs these in order on each route; D is refused until written. */
+export const ALL: Record<OwnerKind, readonly StageName[]> = {
+  personal: ["provision", "setup", "projects", "personal", "retention"], organization: ["provision", "setup", "projects", "retention"],
+};
+export const TIMING = { pollMs: 5_000, stateMs: 15 * 60_000, copyMs: 30 * 60_000, turnMs: 10 * 60_000, scanMs: 5 * 60_000, archiveScanMs: 65 * 60_000,
+  idleStopMs: 35 * 60_000 };
 
 export type Arguments = {
-  stages: StageName[]; plan: boolean; cleanup: boolean; run?: string; account: "owner" | number; switches: Set<Switch>;
+  stages: StageName[]; plan: boolean; cleanup: boolean; run?: string; owner: OwnerKind; account: "owner" | number; other?: number; proActor?: string;
+  switches: Set<Switch>;
   repository?: string; repositoryTwo?: string; keepFixtures: boolean; maxActive: number; organization?: string;
 };
 export function parseArguments(argv: string[]): Arguments {
@@ -35,16 +42,21 @@ export function parseArguments(argv: string[]): Arguments {
   const { values, positionals } = parseArgs({ args: argv, allowPositionals: true, options: {
     plan: { type: "boolean" }, cleanup: { type: "boolean" }, run: { type: "string" }, account: { type: "string" }, switches: { type: "string" },
     repository: { type: "string" }, "repository-two": { type: "string" }, "keep-fixtures": { type: "boolean" }, "max-active": { type: "string" },
-    organization: { type: "string" }, help: { type: "boolean" },
+    organization: { type: "string" }, owner: { type: "string" }, other: { type: "string" }, "pro-actor": { type: "string" }, help: { type: "boolean" },
   } });
+  const owner = (values.owner ?? "personal") as OwnerKind;
+  if (!["personal", "organization"].includes(owner)) throw new RehearsalFailure("usage", "owner");
   if (values.help || positionals.length !== 1) throw new RehearsalFailure("usage", "usage");
   const stage = positionals[0]!;
-  const stages = stage === "all" ? [...ALL] : (STAGES as readonly string[]).includes(stage) ? [stage as StageName] : null;
+  const stages = stage === "all" ? [...ALL[owner]] : (STAGES as readonly string[]).includes(stage) ? [stage as StageName] : null;
   if (!stages) throw new RehearsalFailure("usage", "stage");
   if (values.plan && values.cleanup) throw new RehearsalFailure("usage", "plan_and_cleanup");
   if (values.cleanup && !values.run) throw new RehearsalFailure("usage", "cleanup_needs_run");
-  const account = values.account === undefined || values.account === "owner" ? "owner" as const : Number(values.account);
+  const account = values.account === "owner" ? "owner" as const : Number(values.account ?? 2);
   if (account !== "owner" && !(Number.isInteger(account) && account >= 1 && account <= 10)) throw new RehearsalFailure("usage", "account");
+  const other = values.other === undefined ? undefined : Number(values.other);
+  if (other !== undefined && !(Number.isInteger(other) && other >= 1 && other <= 10 && other !== account)) throw new RehearsalFailure("usage", "other");
+  if (values["pro-actor"] !== undefined && !/^[0-9a-f]{8}$/.test(values["pro-actor"])) throw new RehearsalFailure("usage", "pro_actor");
   const switches = new Set<Switch>();
   for (const name of (values.switches ?? "").split(",").filter(Boolean)) {
     if (!["projects", "personal", "retention"].includes(name)) throw new RehearsalFailure("usage", "switch");
@@ -52,7 +64,8 @@ export function parseArguments(argv: string[]): Arguments {
   }
   const maxActive = values["max-active"] === undefined ? 10 : Number(values["max-active"]);
   if (!(Number.isInteger(maxActive) && maxActive >= 0 && maxActive <= 50)) throw new RehearsalFailure("usage", "max_active");
-  return { stages, plan: !!values.plan, cleanup: !!values.cleanup, ...(values.run ? { run: values.run } : {}), account, switches,
+  return { stages, plan: !!values.plan, cleanup: !!values.cleanup, ...(values.run ? { run: values.run } : {}), owner, account,
+    ...(other !== undefined ? { other } : {}), ...(values["pro-actor"] ? { proActor: values["pro-actor"] } : {}), switches,
     ...(values.repository ? { repository: assertRepository(values.repository) } : {}),
     ...(values["repository-two"] ? { repositoryTwo: assertRepository(values["repository-two"]) } : {}),
     keepFixtures: !!values["keep-fixtures"], maxActive, ...(values.organization ? { organization: values.organization } : {}) };
@@ -97,6 +110,9 @@ async function main(argv: string[]): Promise<number> {
     ...(probe.workosOrganizationId ? { probeWorkosOrganization: probe.workosOrganizationId } : {}),
   });
 
+  const token = env.ZEROS_REHEARSAL_GITHUB_TOKEN?.trim();
+  const personalOf = (signed: SignedIn) => signed.organizations.find(org => org.personal && org.role === "owner");
+
   try {
     if (!one) throw new RehearsalFailure("configuration", "repository_one");
     if (!probeSelector) throw new RehearsalFailure("configuration", "probe_organization");
@@ -105,73 +121,104 @@ async function main(argv: string[]): Promise<number> {
     if (args.plan) {
       log("plan: reads only; each account signs in (one session, revoked at the end; 3 s apart, a throttled step retried after 5, 15 and 45 s)," +
         " and one temporary database role inheriting only pg_read_all_data is minted for reads and deleted");
+      log(`route: ${args.owner === "personal" ? "personal (the selected test user's Personal organization)" : "organization (the probe organization)"}`);
       const reads = database(randomUUID().replace(/-/g, ""));
-      let probe: { id: string; workosOrganizationId: string | null };
       try {
-        probe = await resolveProbe(reads, probeSelector);
+        const probe = await resolveProbe(reads, probeSelector);
         log(`probe organization: found; WorkOS organization ${probe.workosOrganizationId ? "linked" : "not linked"}`);
         const ids = await platformOwners(reads);
         log(`platform owners (active): ${ids.length}${ids.length ? ` ${ids.join(" ")}` : ""}`);
+        const actor = await proActor(reads, args.proActor);
+        log(`pro actor (--pro-actor): ${actor.state}; github token (ZEROS_REHEARSAL_GITHUB_TOKEN): ${token ? "configured" : "absent"}`);
+        const summaries = new Map<string, AccountSummary | { failed: string }>();
+        for (const result of await signInAll(accounts, signInDeps(probe))) {
+          if (!result.ok) { log(`account ${result.label}: failed ${result.step} ${result.code}`); summaries.set(result.label, { failed: `${result.step}:${result.code}` }); continue; }
+          try {
+            const summary = await readAccount(result.api, result.label, probe.id, "Withso");
+            summaries.set(result.label, summary);
+            for (const line of accountLines(summary)) log(line);
+            log(`  workos organization chosen at sign-in: ${result.selected}`);
+          } catch (error) {
+            const failed = diagnose(error, "account_read");
+            log(`account ${result.label}: failed ${failed.step} ${failed.code}`);
+            // Why a member's projects read answers 404, from the database: booleans only.
+            if (failed.code.startsWith("http_404")) {
+              const facts = await probeDiagnostics(reads, probe.id, result.userId).catch(() => null);
+              if (facts) log(`  probe organization facts: ${Object.entries(facts).map(([key, value]) => `${key} ${value ? "yes" : "no"}`).join(", ")}`);
+            }
+            summaries.set(result.label, { failed: `${failed.step}:${failed.code}` });
+          } finally { await result.session.close().catch(() => log(`account ${result.label}: sign-out failed`)); }
+        }
+        const selected = summaries.get(String(args.account)) ?? { failed: "account:not_configured" };
+        const otherLabel = String(args.other ?? accounts.find(row => row.label !== "owner" && row.label !== String(args.account))?.label ?? "none");
+        log(`selected account ${args.account}; second account ${otherLabel}; repositories R1 ${one}, R2 ${two}`);
+        if (args.account === "owner") log("note: the owner's own account; the run asserts its entitlement, sessions and settings are unchanged");
+        const readiness = { token: !!token, proActor: actor.state };
+        for (const stage of [...new Set<StageName>(["setup", ...args.stages])]) {
+          const refused = refusal(stage, selected, args.switches, args.owner, readiness);
+          log(`stage ${stage}: ${refused ? `refused ${refused}` : "would run"}`);
+          for (const line of writeLines(stage, "zr-<run>-", { one, two }, args.owner)) log(`  ${line}`);
+        }
+        if (args.owner === "personal") for (const line of PERSONAL_ROUTE_GAPS) log(line);
       } finally { await reads.close().catch(() => log("plan database role: delete unconfirmed")); }
-      const summaries = new Map<string, AccountSummary | { failed: string }>();
-      for (const result of await signInAll(accounts, signInDeps(probe))) {
-        if (!result.ok) { log(`account ${result.label}: failed ${result.step} ${result.code}`); summaries.set(result.label, { failed: `${result.step}:${result.code}` }); continue; }
-        try {
-          const summary = await readAccount(result.api, result.label, probe.id, "Withso");
-          summaries.set(result.label, summary);
-          for (const line of accountLines(summary)) log(line);
-          log(`  workos organization chosen at sign-in: ${result.selected}`);
-        } catch (error) {
-          const failed = diagnose(error, "account_read");
-          log(`account ${result.label}: failed ${failed.step} ${failed.code}`);
-          summaries.set(result.label, { failed: `${failed.step}:${failed.code}` });
-        } finally { await result.session.close().catch(() => log(`account ${result.label}: sign-out failed`)); }
-      }
-      const selected = summaries.get(String(args.account)) ?? { failed: "account:not_configured" };
-      log(`selected account ${args.account}; repositories R1 ${one}, R2 ${two}`);
-      if (args.account === "owner") log("note: the owner's own account; the run asserts its entitlement, sessions and settings are unchanged");
-      for (const stage of [...new Set<StageName>(["setup", ...args.stages])]) {
-        const refused = refusal(stage, selected, args.switches);
-        log(`stage ${stage}: ${refused ? `refused ${refused}` : "would run"}`);
-        for (const line of writeLines(stage, "zr-<run>-", { one, two })) log(`  ${line}`);
-      }
       return 0;
     }
 
-    // A run: the probe organization from the database, then a sign-in only when a selected stage needs one.
-    const stateReads = database(randomUUID().replace(/-/g, ""));
-    let probe: { id: string; workosOrganizationId: string | null };
-    try { probe = await resolveProbe(stateReads, probeSelector); } finally { await stateReads.close().catch(() => log("database role: delete unconfirmed")); }
-    const state = args.run ? await loadState(args.run) : newState(randomUUID(), probe.id, new Date());
-    if (state.organizationId !== probe.id) throw new RehearsalFailure("state", "organization");
-    const needsAccount = args.cleanup ? cleanupNeedsAccount(state) : args.stages.some(stage => STAGE_NEEDS_ACCOUNT[stage]);
-    let held: SignedIn | undefined, accountUnavailable: string | undefined;
-    if (needsAccount) {
-      const account = accounts.find(row => row.label === String(args.account));
-      const result = account ? await signInAccount(account, signInDeps(probe)) : { ok: false as const, label: String(args.account), step: "account", code: "not_configured" };
-      if (result.ok && !result.organizations.some(org => org.id === probe.id)) {
-        await result.session.close().catch(() => undefined);
-        accountUnavailable = "probe_organization:not_a_member";
-      } else if (result.ok) held = result;
-      else accountUnavailable = `${result.step}:${result.code}`;
-      if (accountUnavailable) log(`account ${args.account}: unavailable ${accountUnavailable}`);
-      if (args.cleanup && !held) throw new RehearsalFailure("cleanup", "account_required");
-    }
+    // A run: the probe organization and the Pro actor from the database, then sign-ins only when a selected stage needs them.
+    const startReads = database(randomUUID().replace(/-/g, ""));
+    let probe: { id: string; workosOrganizationId: string | null }, actor: Awaited<ReturnType<typeof proActor>>;
+    try { probe = await resolveProbe(startReads, probeSelector); actor = await proActor(startReads, args.proActor); }
+    finally { await startReads.close().catch(() => log("database role: delete unconfirmed")); }
+    let state = args.run ? await loadState(args.run) : undefined;
+    const owner = state?.owner ?? args.owner;
+    const needsAccount = args.cleanup ? !!state && cleanupNeedsAccount(state) : args.stages.some(stage => STAGE_NEEDS_ACCOUNT[stage]);
+    let held: SignedIn | undefined, other: SignedIn | undefined, accountUnavailable: string | undefined;
+    const sessions: SignedIn[] = [];
     try {
-      await saveState(state);
-      log(`run ${state.runId} prefix ${state.prefix}`);
+      if (needsAccount) {
+        const account = accounts.find(row => row.label === String(args.account));
+        const result = account ? await signInAccount(account, signInDeps(probe)) : { ok: false as const, label: String(args.account), step: "account", code: "not_configured" };
+        if (result.ok) sessions.push(result);
+        if (!result.ok) accountUnavailable = `${result.step}:${result.code}`;
+        else if (owner === "organization" && !result.organizations.some(org => org.id === probe.id)) accountUnavailable = "probe_organization:not_a_member";
+        else if (owner === "personal" && !personalOf(result)) accountUnavailable = "personal_organization:none";
+        else held = result;
+        if (accountUnavailable) log(`account ${args.account}: unavailable ${accountUnavailable}`);
+        if (args.cleanup && !held) throw new RehearsalFailure("cleanup", "account_required");
+      }
+      // The owner organization: the selected account's Personal organization, or the probe organization.
+      const organizationId = owner === "personal" ? (held ? personalOf(held)!.id : state?.organizationId ?? probe.id) : probe.id;
+      if (state && state.organizationId !== organizationId) {
+        // A provision-only state may move to the account's organization; anything else is refused.
+        if (cleanupNeedsAccount(state)) throw new RehearsalFailure("state", "organization");
+        state.organizationId = organizationId; state.organizations = [organizationId];
+      }
+      state ??= newState(randomUUID(), organizationId, new Date(), owner);
+      const run = state;
+      await saveState(run);
+      log(`run ${run.runId} prefix ${run.prefix} route ${owner}`);
+      if (held && args.stages.includes("personal") && !args.cleanup) {
+        const label = String(args.other ?? accounts.find(row => row.label !== "owner" && row.label !== String(args.account))?.label ?? "");
+        const account = accounts.find(row => row.label === label);
+        const result = account ? await signInAccount(account, signInDeps(probe)) : undefined;
+        if (result?.ok) { sessions.push(result); other = result; } else log(`second account ${label || "none"}: unavailable${result && !result.ok ? ` ${result.step}:${result.code}` : ""}`);
+      }
       const api = held?.api ?? NO_ACCOUNT;
+      const db = database(run.runId.replace(/-/g, ""));
       const ports: Ports = {
         release: () => liveRelease(), api, bridge: liveBridge(api), boat: liveBoat({ apiKey: profile.boat.apiKey,
           ...(profile.boat.billingOrg ? { billingOrg: profile.boat.billingOrg } : {}) }),
         storage: liveStorage({ bucket: need("ZEROS_R2_ALPHA_BUCKET"), endpoint: need("ZEROS_R2_ALPHA_ENDPOINT"), accessKeyId: need("ZEROS_R2_ALPHA_ACCESS_KEY_ID"),
-          secretAccessKey: need("ZEROS_R2_ALPHA_SECRET_ACCESS_KEY") }, () => state.created.workspaces),
+          secretAccessKey: need("ZEROS_R2_ALPHA_SECRET_ACCESS_KEY") }, () => run.created.workspaces),
         github: liveGithub({ appId: Number(need("ZEROS_GITHUB_ALPHA_APP_ID")), privateKey: Buffer.from(need("ZEROS_GITHUB_ALPHA_APP_PRIVATE_KEY_B64"), "base64").toString("utf8"),
           owner: "Withso" }),
-        database: database(state.runId.replace(/-/g, "")), clock: liveClock,
+        database: db, clock: liveClock,
+        ...(other ? { other: other.api } : {}),
+        ...(held && owner === "personal" && actor.id ? { pro: livePro(db, { subjectUserId: held.userId, expectedEmail: held.email, actorUserId: actor.id }) } : {}),
+        ...(held && token ? { githubSignIn: liveGithubSignIn(held.api, token) } : {}),
       };
-      const ctx = stageContext(ports, state, () => saveState(state), { one, two }, TIMING, DEFAULT_RUN_CAP);
-      const before = held && args.account === "owner" ? await ownerFingerprint(held.api, probe.id, profile.workos.apiKey, held.subject) : undefined;
+      const ctx = stageContext(ports, run, () => saveState(run), { one, two }, TIMING, DEFAULT_RUN_CAP);
+      const before = held && args.account === "owner" ? await ownerFingerprint(held.api, organizationId, profile.workos.apiKey, held.subject) : undefined;
       const startedAt = Date.now();
       let passed: boolean;
       if (args.cleanup) {
@@ -183,16 +230,16 @@ async function main(argv: string[]): Promise<number> {
       } else passed = await runStages(ctx, args.stages, { switches: args.switches, maxActive: args.maxActive, runCap: DEFAULT_RUN_CAP, log,
         ...(needsAccount && !held ? { accountUnavailable: accountUnavailable ?? "account:unavailable" } : {}) });
       const seconds = Math.round((Date.now() - startedAt) / 1000);
-      log(`machine starts ${state.machineStarts}; wall seconds ${seconds}; clock shifts ${state.shifts}`);
-      if (profile.boat.secondsPerDollar) log(`estimated dollars at most ${(state.machineStarts * seconds / profile.boat.secondsPerDollar).toFixed(2)} (every start running the whole time)`);
+      log(`machine starts ${run.machineStarts}; wall seconds ${seconds}; clock shifts ${run.shifts}`);
+      if (profile.boat.secondsPerDollar) log(`estimated dollars at most ${(run.machineStarts * seconds / profile.boat.secondsPerDollar).toFixed(2)} (every start running the whole time)`);
       if (before && held) {
-        const after = await ownerFingerprint(held.api, probe.id, profile.workos.apiKey, held.subject);
+        const after = await ownerFingerprint(held.api, organizationId, profile.workos.apiKey, held.subject);
         log(`owner account unchanged: ${before === after ? "yes" : "no"}`);
         if (before !== after) passed = false;
       }
-      if (!passed && !args.cleanup) log(`next: pnpm alpha:rehearse ${args.stages.length > 1 ? "all" : args.stages[0]} --cleanup --run ${state.runId}`);
+      if (!passed && !args.cleanup) log(`next: pnpm alpha:rehearse all --cleanup --run ${run.runId}`);
       return passed ? 0 : 1;
-    } finally { await held?.session.close().catch(() => log("sign-out failed")); }
+    } finally { for (const session of sessions) await session.session.close().catch(() => log(`account ${session.label}: sign-out failed`)); }
   } catch (error) {
     log(`failed ${error instanceof RehearsalFailure ? `${error.step} ${error.code}` : "unexpected"}`);
     return 1;

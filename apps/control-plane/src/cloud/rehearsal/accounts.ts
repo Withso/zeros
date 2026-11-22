@@ -7,7 +7,8 @@ import { RehearsalFailure, type Api } from "./contract.js";
 
 export type Account = { label: string; email: string; password: string; subject?: string; organizationId?: string };
 export type Session = { accessToken(): Promise<string>; close(): Promise<void> };
-export type SignedIn = { ok: true; label: string; subject: string; session: Session; api: Api; organizations: { id: string; slug: string | null }[];
+export type SignedIn = { ok: true; label: string; email: string; subject: string; userId: string; session: Session; api: Api;
+  organizations: { id: string; slug: string | null; personal: boolean; role: string | null }[];
   /** Which organization WorkOS's selection took: the probe's, another offered one, or none was asked. */
   selected: "probe" | "other" | "none" };
 export type SignInFailure = { ok: false; label: string; step: string; code: string };
@@ -26,7 +27,9 @@ export type SignInDeps = {
 export const SIGN_IN_SPACING_MS = 3_000;
 export const THROTTLE_BACKOFF_MS = [5_000, 15_000, 45_000] as const;
 
-const MeSchema = z.object({ organizations: z.array(z.object({ id: z.string().uuid(), slug: z.string().nullable().optional() }).passthrough()) }).passthrough();
+const MeSchema = z.object({ user: z.object({ id: z.string().uuid() }).passthrough(),
+  organizations: z.array(z.object({ id: z.string().uuid(), slug: z.string().nullable().optional(), isPersonal: z.boolean().optional(),
+    role: z.string().nullable().optional() }).passthrough()) }).passthrough();
 
 /** A failure as `{step, code}`: the rehearsal's and gate0's own closed classes; anything else is "unexpected". */
 export function diagnose(error: unknown, step: string): { step: string; code: string } {
@@ -72,8 +75,8 @@ export async function signInAccount(account: Account, deps: SignInDeps): Promise
       if (!parsed.success) throw new RehearsalFailure("me_read", `schema:${parsed.error.issues[0]?.path.map(String).join(".") ?? ""}`.slice(0, 80));
       return parsed.data;
     });
-    return { ok: true, label: account.label, subject, session, api, selected: choice.selected,
-      organizations: me.organizations.map(org => ({ id: org.id, slug: org.slug ?? null })) };
+    return { ok: true, label: account.label, email: account.email, subject, userId: me.user.id, session, api, selected: choice.selected,
+      organizations: me.organizations.map(org => ({ id: org.id, slug: org.slug ?? null, personal: org.isPersonal === true, role: org.role ?? null })) };
   } catch (error) {
     await session?.close().catch(() => undefined);
     return { ok: false, label: account.label, ...diagnose(error, step) };
