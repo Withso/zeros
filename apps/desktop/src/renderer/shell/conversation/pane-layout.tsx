@@ -304,11 +304,17 @@ export function ConversationPaneLayout({
   // across remounts; else the side chat's source.
   const activeIsHosted = activeChatId !== null && hostedChatIds.has(activeChatId);
   const activeInColumn = activeChatId !== null && !activeIsHosted && allChats.some((c) => c.id === activeChatId);
-  const [columnChatId, setColumnChatId] = useState(() => (layoutFolder ? columnChatFor(layoutFolder) : null));
-  if (activeInColumn && columnChatId !== activeChatId) setColumnChatId(activeChatId);
+  const [column, setColumn] = useState(() => ({
+    folder: layoutFolder,
+    id: layoutFolder ? columnChatFor(layoutFolder) : null,
+  }));
+  const columnChatId = activeInColumn
+    ? activeChatId
+    : column.folder === layoutFolder ? column.id : (layoutFolder ? columnChatFor(layoutFolder) : null);
+  if (column.folder !== layoutFolder || column.id !== columnChatId) setColumn({ folder: layoutFolder, id: columnChatId });
   useEffect(() => {
-    if (layoutFolder && columnChatId) rememberColumnChat(layoutFolder, columnChatId);
-  }, [layoutFolder, columnChatId]);
+    if (column.folder && column.id) rememberColumnChat(column.folder, column.id);
+  }, [column]);
   const hostedActive = activeIsHosted ? chats.find((c) => c.id === activeChatId) : undefined;
   const columnSelection = activeIsHosted
     ? ([columnChatId, hostedActive?.sourceChatId, hostedActive?.parentChatId].find(
