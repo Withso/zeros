@@ -3,7 +3,8 @@ import { cloudComputerV2BuildRequired, cloudComputerV2CheckFailed } from "../../
 export const ADD_CLOUD_REPOSITORY_REASON = "Add a repository to your Cloud Computer.";
 export const READY_COPY_BUILDING = "This project is still being built. New workspaces take a little longer until it is ready.";
 
-export type CreateTrayAction = "cloud-computer-settings" | "manage-repositories" | "github-settings";
+export type CreateTrayAction = "cloud-computer-settings" | "manage-repositories" | "github-settings" | "sign-in";
+export const SIGN_IN_FOR_CLOUD = "Sign in to create cloud workspaces.";
 /** GitHub edge states of the selected repository's organization connection: one fix each. */
 export const GITHUB_CONNECTION_STATES = {
   suspended: "The Zeros GitHub App is suspended for this repository's account. Unsuspend it in GitHub; workspaces clone directly meanwhile.",
@@ -48,5 +49,7 @@ export function createTrayState(input: {
     return { message: input.reason, action: "cloud-computer-settings" };
   if (input.reason === ADD_CLOUD_REPOSITORY_REASON)
     return { message: input.reason, action: "manage-repositories" };
+  if (input.reason === SIGN_IN_FOR_CLOUD)
+    return { message: input.reason, action: "sign-in" };
   return { message: input.reason, action: null };
 }

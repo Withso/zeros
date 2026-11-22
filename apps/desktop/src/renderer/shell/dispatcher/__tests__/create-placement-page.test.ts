@@ -34,7 +34,7 @@ vi.mock("../../../features/team/cloud-workspace-pause", () => ({
 vi.mock("../../../features/team/team-store", async (original) => ({
   ...(await original<typeof import("../../../features/team/team-store")>()),
   getActiveOrganizationIdSnapshot: () => (s.organization.isPersonal ? null : s.organization.id),
-  getActiveCloudOrganizationIdSnapshot: () => (s.organization.isPersonal ? s.organization.cloudOrganization?.id ?? null : s.organization.id),
+  getActiveCloudOrganizationIdSnapshot: () => (s.organization.isPersonal ? (s.organization as { cloudOrganization?: { id: string } }).cloudOrganization?.id ?? null : s.organization.id),
   getActiveOrganizationSnapshot: () => s.organization,
   useActiveOrganization: () => s.organization,
 }));

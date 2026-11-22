@@ -499,6 +499,8 @@ export function SettingsPage() {
   return <ScopedSettingsPage key={owner} owner={owner} />;
 }
 
+const PERSONAL_CLOUD_SECTIONS: readonly string[] = [...UNIFIED_PERSONAL_SECTIONS, "cloud-computer"];
+
 function ScopedSettingsPage({ owner }: { owner: string }) {
   const local = owner === "local";
   const cloudEnabled = isFeatureEnabled("cloud-workspaces");
@@ -727,7 +729,8 @@ function ScopedSettingsPage({ owner }: { owner: string }) {
     );
   };
   const unifiedGroups: Array<{ key: string; label: string; ids: readonly string[] }> = [
-    { key: "personal", label: "Personal", ids: UNIFIED_PERSONAL_SECTIONS },
+    // Personal's own cloud (with Pro) adds its Cloud Computer to the Personal group; there is no organization group.
+    { key: "personal", label: "Personal", ids: personalCloud ? PERSONAL_CLOUD_SECTIONS : UNIFIED_PERSONAL_SECTIONS },
     ...(local
       ? []
       : [{ key: "organization", label: organization?.name ?? "Organization", ids: UNIFIED_ORGANIZATION_SECTIONS }]),

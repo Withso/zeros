@@ -1,8 +1,9 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useContext, useEffect, useMemo, useRef, useState } from "react";
 import { KeyedAsyncCache } from "../../shared/lib/keyed-async-cache";
 import { useCachedRead } from "../../state/use-cached-read";
 import { getActiveCloudOrganizationIdSnapshot, useActiveOrganization } from "../../features/team/team-store";
 import { cloudOrganizationFor } from "../../features/team/personal-cloud";
+import { AuthContext } from "../../features/auth/auth-context";
 import { canCreateWorkspaceIn, cloudCreateSeatReason } from "../../features/team/organization-capabilities";
 import { cloudWorkspaceCapability } from "../../platform/cloud-capability";
 import { isCloudV2BaseBranch } from "../../platform/cloud-v2";
@@ -11,7 +12,7 @@ import { useComputerRepositorySelection } from "./cloud-computer-repository-sele
 import { useCloudComputerV2CreateGate } from "../../features/settings/cloud-computer-v2-create-gate";
 import { createCloudComputerRecovery } from "./cloud-create-request";
 import { warmCloudCreateAccess } from "./cloud-create-access-warm";
-import { ADD_CLOUD_REPOSITORY_REASON } from "./create-tray";
+import { ADD_CLOUD_REPOSITORY_REASON, SIGN_IN_FOR_CLOUD } from "./create-tray";
 import type { CloudComputerRepository } from "../../features/settings/cloud-computer-v2-create-gate";
 import { useGithubLevels } from "../../features/settings/cloud-github-levels";
 import { warmCloudProject, type CloudProject } from "../../platform/cloud-github-levels";
@@ -37,7 +38,9 @@ export function useCloudCreateAvailability(active: boolean) {
   const canCreateCloud = canCreateWorkspaceIn(selected, "cloud");
   const readCloud = active && canCreateCloud;
   const capability = useCachedRead(capabilityCache, readCloud ? "desktop" : null, cloudWorkspaceCapability, { maxAgeMs: Infinity });
-  const reason = !canCreateCloud ? cloudCreateSeatReason(cloudOrganizationFor(selected)) ?? "Select an organization with Cloud access."
+  // Personal's cloud needs an account: signed out, say so (the tray offers sign-in).
+  const signedOut = useContext(AuthContext)?.status === "unauthenticated" && !!selected?.isPersonal;
+  const reason = !canCreateCloud ? signedOut ? SIGN_IN_FOR_CLOUD : cloudCreateSeatReason(cloudOrganizationFor(selected)) ?? "Select an organization with Cloud access."
     : !capability.data?.enabled ? capability.loading ? "Checking Cloud availability…" : "Cloud workspaces are not enabled in this desktop build."
     : null;
   const warm = () => {

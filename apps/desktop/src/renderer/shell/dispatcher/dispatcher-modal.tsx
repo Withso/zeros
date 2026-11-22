@@ -2,7 +2,7 @@ import { useOrganizationProjects } from "../../state/use-organization-projects";
 // Create owns a draft before either a Local checkout or a cloud VM exists.
 // Project/source select its destination; attachment previews use app storage.
 
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { ChevronDown, Cloud, FolderOpen, Laptop, Plus } from "lucide-react";
 
 import { Button, GithubIcon } from "../../shared/ui";
@@ -106,6 +106,7 @@ import {
 } from "../../features/team/team-store";
 import { canCreateWorkspaceIn, localWorkShowsEverywhere, localWorkspaceOwner } from "../../features/team/organization-capabilities";
 import { cloudOrganizationFor } from "../../features/team/personal-cloud";
+import { AuthContext } from "../../features/auth/auth-context";
 import { CloudWorkspacePausedNotice, useOrganizationCloudPaused } from "../../features/team/cloud-workspace-pause";
 import { CreateStartBanners } from "./create-start-banners";
 import { useNativeRuntime } from "../../platform/runtime";
@@ -646,6 +647,7 @@ function ActiveDispatcherPage({
     requestUserSettingsSection(manageSection);
     dispatch({ type: "SET_ACTIVE_PAGE", page: "settings" });
   };
+  const auth = useContext(AuthContext);
   const tray = unified ? createTrayState({
     notice: computerCreateNotice?.owner === cloud.computerOwner && cloud.computerOwner ? computerCreateNotice.message : null,
     reason: placementReason,
@@ -662,6 +664,8 @@ function ActiveDispatcherPage({
       ? { label: "Manage repositories", onClick: openManageRepositories }
       : tray?.action === "github-settings"
         ? { label: "Open GitHub settings", onClick: openManageRepositories }
+      : tray?.action === "sign-in"
+        ? { label: "Sign in", onClick: () => void auth?.startBrowserSignIn().then(result => { if (!result.ok) toast.error(result.error ?? "Couldn't start sign-in."); }) }
       : null;
 
   return (
