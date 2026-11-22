@@ -10,6 +10,7 @@
 // report.json. The app talks only to a fixture control plane on 127.0.0.1, with a fixture session (no keychain, no
 // WorkOS, no signed-in session), and registers nothing with the OS. Run from a worktree of its own; --cleanup
 // removes that worktree (git worktree remove, then prune) only when it lives under the temp directory.
+/* global document -- read inside page.evaluate, which runs in the renderer */
 import { execFile, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
@@ -24,7 +25,7 @@ import { launchNativeElectron } from "./design-native-electron.mjs";
 import { localEnvironment, pickLocalPorts } from "./electron-local.mjs";
 import { createFixtureState, FIXTURE, startFixtureControlPlane } from "./native-unified/control-plane.mjs";
 import { startEgressGuard } from "./native-unified/egress.mjs";
-import { foreignSockets, killRun, runProcesses, runSockets } from "./native-unified/processes.mjs";
+import { foreignSockets, identify, killRun, runProcesses, runSockets } from "./native-unified/processes.mjs";
 import { PERSON_MUST_LOOK, isLocalUrl, scrub, table } from "./native-unified/report.mjs";
 import { CHECKS } from "./native-unified/checks.mjs";
 
@@ -120,9 +121,11 @@ async function runCheck() {
   const row = (check, result, fact) => { rows.push({ check, result, fact: String(fact) }); };
   const state = createFixtureState();
   let controlPlane, egress, vite, app, page, electronPid = null;
+  // The processes this run started, by pid and start time: a pid that a later process reuses is never one of them.
+  const roots = [];
   const teardown = async (reason) => {
     try { await Promise.race([app?.close(), delay(5000)]); } catch { /* killed below */ }
-    const stopped = await killRun([electronPid, vite?.pid].filter(Boolean), runDir);
+    const stopped = await killRun(roots, runDir);
     await controlPlane?.close().catch(() => undefined);
     await egress?.close().catch(() => undefined);
     const fact = `${reason}: stopped ${stopped.stopped} process(es) by process group; ${stopped.left} left`;
@@ -193,6 +196,7 @@ async function runCheck() {
     const viteLog = await fs.open(path.join(runDir, "vite.log"), "w");
     vite = spawn(process.execPath, [path.join(repo, "node_modules/vite/bin/vite.js"), "--config", viteConfig, "--host", "127.0.0.1", "--port", String(ports.vitePort), "--strictPort"],
       { cwd: repo, env, stdio: ["ignore", viteLog.fd, viteLog.fd], detached: true });
+    roots.push(await identify(vite.pid));
     const viteBy = Date.now() + 90_000;
     while (!(await fetch(env.ELECTRON_RENDERER_URL).then(response => response.ok, () => false))) {
       if (Date.now() > viteBy) throw new Error("The renderer's Vite server did not start within 90 s.");
@@ -205,6 +209,7 @@ async function runCheck() {
     if (process.platform === "linux") args.push("--ozone-platform=headless", "--disable-gpu", "--no-sandbox", "--password-store=basic", "--disable-dev-shm-usage");
     app = await launchNativeElectron({ args, cwd: dirs.fixtures, env, timeout: 90_000 });
     electronPid = app.process().pid;
+    roots.push(await identify(electronPid));
     page = await app.firstWindow({ timeout: 60_000 });
     page.setDefaultTimeout(CHECK_BUDGET_MS);
     page.on("request", request => { (report.rendererRequests ??= []).push(request.url()); });
@@ -241,7 +246,7 @@ async function runCheck() {
     }
 
     // N12: nothing beyond loopback, requested or listened on.
-    const processes = await runProcesses([electronPid, vite?.pid].filter(Boolean), runDir), pids = processes.map(row => row.pid);
+    const processes = await runProcesses(roots, runDir), pids = processes.map(row => row.pid);
     const nameOf = (pid) => path.basename((processes.find(row => row.pid === pid)?.command ?? "?").split(" ")[0]);
     const sockets = await runSockets(pids);
     const foreign = foreignSockets(sockets);

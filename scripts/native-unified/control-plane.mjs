@@ -87,8 +87,8 @@ function projects(state, organizationId) {
 export async function startFixtureControlPlane(state, port) {
   const server = http.createServer(async (request, response) => {
     const url = new URL(request.url ?? "/", "http://127.0.0.1");
-    let body = "";
-    for await (const chunk of request) body += chunk;
+    // Drain the body: no route reads it, and an unread request body stalls keep-alive.
+    for await (const chunk of request) void chunk;
     state.requests.push({ method: request.method, path: url.pathname, query: url.search, at: Date.now() });
     const send = (status, value) => { response.writeHead(status, { "content-type": "application/json" }); response.end(JSON.stringify(value)); };
     const path = url.pathname, method = request.method ?? "GET";

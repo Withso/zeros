@@ -1,6 +1,10 @@
-import { describe, expect, it } from "vitest";
+import { spawn, type ChildProcess } from "node:child_process";
+import { mkdtempSync, rmSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { afterEach, describe, expect, it } from "vitest";
 
-import { descendants, foreignSockets, isLauncherCommand } from "../native-unified/processes.mjs";
+import { descendants, foreignSockets, identify, isLauncherCommand, killRun, namesRunFolder, parseProcessTable, selectRunProcesses, signalTargets } from "../native-unified/processes.mjs";
 import { isLocalUrl, isLoopbackAddress, PERSON_MUST_LOOK, scrub, table } from "../native-unified/report.mjs";
 
 describe("native check: loopback only (N12)", () => {
@@ -53,15 +57,42 @@ describe("native check: output", () => {
   });
 });
 
+const T = "Sun Nov 22 17:00:00 2026", LATER = "Sun Nov 22 17:30:00 2026";
+const row = (pid: number, ppid: number, pgid: number, command: string, started = T) => ({ pid, ppid, pgid, started, command });
+
 describe("native check: teardown", () => {
+  it("reads ps with each process's start time", () => {
+    expect(parseProcessTable("  42     1    42 Sun Nov 22 17:00:00 2026 /tmp/run/bin/bun engine\n 7 1 7 Mon Nov  3 09:05:01 2026 sh -c x\n"))
+      .toEqual([row(42, 1, 42, "/tmp/run/bin/bun engine"), row(7, 1, 7, "sh -c x", "Mon Nov 3 09:05:01 2026")]);
+  });
+
   it("finds every descendant of the run's roots", () => {
-    const table = [
-      { pid: 10, ppid: 1, pgid: 10, command: "electron" },
-      { pid: 11, ppid: 10, pgid: 10, command: "bun engine" },
-      { pid: 12, ppid: 11, pgid: 12, command: "git clone" },
-      { pid: 20, ppid: 1, pgid: 20, command: "unrelated" },
-    ];
-    expect(descendants(table, [10]).map(row => row.pid).sort()).toEqual([10, 11, 12]);
+    const table = [row(10, 1, 10, "electron"), row(11, 10, 10, "bun engine"), row(12, 11, 12, "git clone"), row(20, 1, 20, "unrelated")];
+    expect(descendants(table, [{ pid: 10, started: T }]).map(entry => entry.pid).sort()).toEqual([10, 11, 12]);
+  });
+
+  it("ignores a root whose pid now belongs to a later process, and everything below it", () => {
+    // Electron (pid 10) exited; a person's typecheck under timeout was given pid 10 afterwards.
+    const table = [row(10, 300, 10, "timeout 900 pnpm typecheck", LATER), row(11, 10, 10, "tsgo --build", LATER)];
+    expect(descendants(table, [{ pid: 10, started: T }])).toEqual([]);
+    expect(selectRunProcesses(table, [{ pid: 10, started: T }], "/tmp/zeros-native-unified/run", 999)).toEqual([]);
+  });
+
+  it("names the run's folder only as a folder, never a sibling that shares its prefix", () => {
+    const root = "/home/someone/zeros";
+    expect(namesRunFolder("/home/someone/zeros/node_modules/.bin/vite", root)).toBe(true);
+    expect(namesRunFolder("electron /home/someone/zeros", root)).toBe(true);
+    expect(namesRunFolder("electron /home/someone/zeros --flag", root)).toBe(true);
+    expect(namesRunFolder("/home/someone/zeros-review-p3/node_modules/.bin/tsgo --build", root)).toBe(false);
+    expect(namesRunFolder("node /home/someone/zeros2/x.js", root)).toBe(false);
+  });
+
+  it("signals a whole group only when a run process leads it", () => {
+    const before = [row(10, 1, 10, "electron"), row(11, 10, 10, "bun engine"), row(50, 40, 40, "/run/thing in someone else's group")];
+    const table = [...before, row(40, 1, 40, "their shell"), row(999, 998, 998, "this script")];
+    const { groups, singles } = signalTargets(before, table, 999);
+    expect(groups).toEqual([10]);
+    expect(singles.map(entry => entry.pid)).toEqual([50]);
   });
 
   it("never treats the shell that started the run as the app's, even when it names the folder", () => {
@@ -70,8 +101,53 @@ describe("native check: teardown", () => {
     expect(isLauncherCommand("sh -c cd /tmp/zeros-native-unified", root)).toBe(true);
     expect(isLauncherCommand("/bin/zsh -c x", root)).toBe(true);
     expect(isLauncherCommand("timeout 900 node scripts/native-unified-check.mjs --run", root)).toBe(true);
+    expect(isLauncherCommand("/usr/bin/coreutils --coreutils-prog-shebang=timeout /usr/bin/timeout 900 node x", root)).toBe(true);
     expect(isLauncherCommand(`/bin/sh ${root}/bin/login-shell -ilc env`, root)).toBe(false);
     expect(isLauncherCommand(`${root}/bin/bun run engine`, root)).toBe(false);
     expect(isLauncherCommand("/tmp/zeros-native-unified/stage/node_modules/electron/dist/electron -r hook", root)).toBe(false);
+  });
+});
+
+describe.skipIf(process.platform === "win32")("native check: teardown against real processes", () => {
+  const started: ChildProcess[] = [];
+  const base = mkdtempSync(path.join(os.tmpdir(), "znc-teardown-"));
+  // A long-lived Node process whose command line names `file`, in a process group of its own (as a person's tool is).
+  const sleeper = (file: string) => {
+    const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)", file], { detached: true, stdio: "ignore" });
+    started.push(child);
+    return child;
+  };
+  const alive = (pid: number) => { try { process.kill(pid, 0); return true; } catch { return false; } };
+  const settle = () => new Promise(resolve => setTimeout(resolve, 300));
+  afterEach(() => {
+    for (const child of started.splice(0)) try { process.kill(-child.pid!, "SIGKILL"); } catch { /* gone */ }
+  });
+
+  it("stops the run's own process and leaves a foreign one whose path shares the folder's prefix", async () => {
+    const root = path.join(base, "zeros");
+    const own = sleeper(path.join(root, "run", "engine.js"));
+    const foreign = sleeper(path.join(`${root}-review-p3`, "node_modules", ".bin", "tsgo"));
+    await settle();
+    const result = await killRun([], root, { graceMs: 1000 });
+    await settle();
+    expect(alive(foreign.pid!)).toBe(true);
+    expect(alive(own.pid!)).toBe(false);
+    expect(result.left).toBe(0);
+  });
+
+  it("leaves a foreign process that was given a root's pid later", async () => {
+    const root = path.join(base, "zeros");
+    const foreign = sleeper(path.join(`${root}-review-p3`, "typecheck.js"));
+    await settle();
+    const now = await identify(foreign.pid!);
+    expect(now).not.toBeNull();
+    // The run's root had this pid once, at another time.
+    await killRun([{ pid: foreign.pid!, started: now!.started === T ? LATER : T }], root, { graceMs: 500 });
+    await settle();
+    expect(alive(foreign.pid!)).toBe(true);
+  });
+
+  it("cleans its temp folder", () => {
+    rmSync(base, { recursive: true, force: true });
   });
 });

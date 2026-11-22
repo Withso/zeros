@@ -1,12 +1,13 @@
 // The native check's named checks, in order. Each may prepare fixtures before the app starts (prepare) and then
 // runs against the real window (run), returning { result, fact }: what it measured, never only "ok".
+/* global document, window, localStorage -- read inside page.evaluate, which runs in the renderer */
 import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 import { FIXTURE, WORKSPACES } from "./control-plane.mjs";
-import { descendants, processTable, processVariable } from "./processes.mjs";
+import { descendants, identify, processTable, processVariable } from "./processes.mjs";
 
 const exec = promisify(execFile);
 const fail = (fact) => ({ result: "fail", fact });
@@ -288,7 +289,7 @@ const personalCheck = {
   id: "N6 personal with and without cloud",
   budgetMs: 60_000,
   async run(context) {
-    const { page, state } = context;
+    const { state } = context;
     const withCloud = await personalSurface(context);
     await shot(context, "N6-personal-with-cloud");
     state.personalCloud = false;
@@ -433,7 +434,7 @@ const isolation = {
       mainPid: process.pid }));
     // The PATH each of the app's processes really has (main, the engine, helpers): where its git and gh come from.
     const paths = new Map();
-    for (const row of descendants(await processTable(), [facts.mainPid])) {
+    for (const row of descendants(await processTable(), [await identify(facts.mainPid)])) {
       const value = await processVariable(row.pid, "PATH");
       if (value !== null) paths.set(value, [...(paths.get(value) ?? []), path.basename(row.command.split(" ")[0] ?? "?")]);
     }

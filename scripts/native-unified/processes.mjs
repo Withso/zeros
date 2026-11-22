@@ -7,60 +7,100 @@ import { isLoopbackAddress } from "./report.mjs";
 
 const exec = promisify(execFile);
 
-/** Every process: pid, parent, group and command line. */
+/** Every process: pid, parent, group, start time and command line. The start time is what tells a process apart from
+ * a later one that was given the same pid (Linux reuses pids quickly). */
 export async function processTable() {
-  const { stdout } = await exec("ps", ["-A", "-o", "pid=,ppid=,pgid=,command="], { maxBuffer: 16 * 1024 * 1024 });
-  return stdout.split("\n").map(line => /^\s*(\d+)\s+(\d+)\s+(\d+)\s+(.*)$/.exec(line)).filter(Boolean)
-    .map(([, pid, ppid, pgid, command]) => ({ pid: Number(pid), ppid: Number(ppid), pgid: Number(pgid), command }));
+  const { stdout } = await exec("ps", ["-A", "-o", "pid=,ppid=,pgid=,lstart=,command="], { maxBuffer: 16 * 1024 * 1024 });
+  return parseProcessTable(stdout);
 }
 
-/** The roots and everything below them. */
+export function parseProcessTable(stdout) {
+  return stdout.split("\n").map(line => /^\s*(\d+)\s+(\d+)\s+(\d+)\s+(\w{3}\s+\w{3}\s+\d{1,2}\s+\d{1,2}:\d{2}:\d{2}\s+\d{4})\s+(.*)$/.exec(line))
+    .filter(Boolean).map(([, pid, ppid, pgid, started, command]) => ({ pid: Number(pid), ppid: Number(ppid), pgid: Number(pgid),
+      started: started.replace(/\s+/g, " "), command }));
+}
+
+/** A process as it is now ({ pid, started }), to name it later as a root; null once it is gone. */
+export async function identify(pid) {
+  if (!pid) return null;
+  const row = (await processTable()).find(entry => entry.pid === pid);
+  return row ? { pid: row.pid, started: row.started } : null;
+}
+
+/** The roots that are still the same processes, and everything below them. A root whose pid now belongs to a process
+ * that started at another time is someone else's, and is ignored with everything below it. */
 export function descendants(table, roots) {
+  const live = roots.filter(Boolean).filter(root => table.some(row => row.pid === root.pid && row.started === root.started)).map(root => root.pid);
   const children = new Map();
   for (const row of table) children.set(row.ppid, [...(children.get(row.ppid) ?? []), row]);
-  const found = new Map(), queue = [...roots];
+  const found = new Map(), queue = [...live];
   while (queue.length) {
     const pid = queue.shift();
     for (const child of children.get(pid) ?? []) if (!found.has(child.pid)) { found.set(child.pid, child); queue.push(child.pid); }
   }
-  for (const row of table) if (roots.includes(row.pid)) found.set(row.pid, row);
+  for (const row of table) if (live.includes(row.pid)) found.set(row.pid, row);
   return [...found.values()];
+}
+
+/** The run's folder named as a folder: `<root>/…` or `<root>` alone, never `<root>-other/…` beside it. */
+export function namesRunFolder(command, root) {
+  if (!root) return false;
+  for (let at = command.indexOf(root); at >= 0; at = command.indexOf(root, at + 1)) {
+    const next = command[at + root.length];
+    if (next === undefined || next === "/" || /\s/.test(next)) return true;
+  }
+  return false;
 }
 
 /** A shell (or timeout) whose command line only names the run's folder: whoever started the run, never the app's
  * (the app's own shells are found as its descendants). The run's stub login shell is the app's. */
 export function isLauncherCommand(command, root) {
-  return /^(?:\S*\/)?(?:ba|z|da|k)?sh(?:\s|$)|^(?:\S*\/)?timeout\s/.test(command) && !command.includes(`${root}/bin/login-shell`);
+  return /^(?:\S*\/)?(?:ba|z|da|k)?sh(?:\s|$)|^(?:\S*\/)?(?:coreutils\s+\S*\s+\S*\/)?timeout\s/.test(command) && !command.includes(`${root}/bin/login-shell`);
 }
 
-/** Processes that belong to this run: below its roots, or naming its folder (a child that was reparented). */
-export async function runProcesses(roots, root) {
-  const table = await processTable();
-  // Never this script or anything above it (the shell that started it may name the folder too).
+/** The run's processes in a table: below its live roots, or naming its folder (a child that was reparented), never
+ * this script or anything above it (the shell that started it may name the folder too). */
+export function selectRunProcesses(table, roots, root, self = process.pid) {
   const parents = new Map(table.map(row => [row.pid, row.ppid])), ancestors = new Set();
-  for (let pid = process.pid; pid && !ancestors.has(pid); pid = parents.get(pid) ?? 0) ancestors.add(pid);
-  const own = new Map(descendants(table, roots.filter(Boolean)).map(row => [row.pid, row]));
-  for (const row of table) if (root && row.command.includes(root) && !own.has(row.pid) && !isLauncherCommand(row.command, root)) own.set(row.pid, row);
+  for (let pid = self; pid && !ancestors.has(pid); pid = parents.get(pid) ?? 0) ancestors.add(pid);
+  const own = new Map(descendants(table, roots).map(row => [row.pid, row]));
+  for (const row of table) if (namesRunFolder(row.command, root) && !own.has(row.pid) && !isLauncherCommand(row.command, root)) own.set(row.pid, row);
   for (const pid of ancestors) own.delete(pid);
   return [...own.values()];
 }
 
-/** Stop every process of the run: their groups first (TERM, then KILL), then any stragglers by pid. */
+export async function runProcesses(roots, root) {
+  return selectRunProcesses(await processTable(), roots, root);
+}
+
+/** What to signal: whole groups only when a run process leads them (never a group it merely sits in, nor this
+ * script's), and every other run process by its own pid. */
+export function signalTargets(before, table, self = process.pid) {
+  const ancestorsGroups = new Set();
+  for (let pid = self, row; (row = table.find(entry => entry.pid === pid)); pid = row.ppid) { ancestorsGroups.add(row.pgid); if (!row.ppid) break; }
+  const groups = new Set(before.filter(row => row.pgid > 1 && row.pgid === row.pid && !ancestorsGroups.has(row.pgid)).map(row => row.pgid));
+  const singles = before.filter(row => !groups.has(row.pgid));
+  return { groups: [...groups], singles };
+}
+
+/** Stop every process of the run: the groups its processes lead (TERM, then KILL), then the rest by pid. Each pid
+ * is checked to be the same process (same start time) right before it is signalled. */
 export async function killRun(roots, root, { graceMs = 3000 } = {}) {
   const before = await runProcesses(roots, root);
-  // Their process groups, never this script's own (nor its shell's).
-  const table = await processTable();
-  const parentsGroups = new Set(); for (let pid = process.pid, row; (row = table.find(entry => entry.pid === pid)); pid = row.ppid) { parentsGroups.add(row.pgid); if (!row.ppid) break; }
-  const groups = new Set(before.map(row => row.pgid).filter(group => group > 1 && !parentsGroups.has(group)));
-  const signal = (sig) => {
-    for (const group of groups) { try { process.kill(-group, sig); } catch { /* gone */ } }
-    for (const row of before) { if (parentsGroups.has(row.pgid)) try { process.kill(row.pid, sig); } catch { /* gone */ } }
+  const { groups, singles } = signalTargets(before, await processTable());
+  const signal = async (sig) => {
+    const now = await processTable();
+    const same = (row) => now.some(entry => entry.pid === row.pid && entry.started === row.started);
+    for (const group of groups) { const leader = before.find(row => row.pid === group); if (leader && same(leader)) try { process.kill(-group, sig); } catch { /* gone */ } }
+    for (const row of singles) if (same(row)) try { process.kill(row.pid, sig); } catch { /* gone */ }
   };
-  signal("SIGTERM");
+  await signal("SIGTERM");
   const deadline = Date.now() + graceMs;
   while (Date.now() < deadline && (await runProcesses(roots, root)).length) await new Promise(resolve => setTimeout(resolve, 200));
-  signal("SIGKILL");
-  for (const row of await runProcesses(roots, root)) { try { process.kill(row.pid, "SIGKILL"); } catch { /* gone */ } }
+  await signal("SIGKILL");
+  const left = await runProcesses(roots, root);
+  const now = await processTable();
+  for (const row of left) if (now.some(entry => entry.pid === row.pid && entry.started === row.started)) try { process.kill(row.pid, "SIGKILL"); } catch { /* gone */ }
   await new Promise(resolve => setTimeout(resolve, 300));
   return { stopped: before.length, left: (await runProcesses(roots, root)).length };
 }
