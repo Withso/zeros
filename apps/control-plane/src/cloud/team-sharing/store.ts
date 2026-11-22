@@ -60,7 +60,9 @@ export class CloudTeamSharing {
           .map(row => [row.id,{ row,view: allowed.get(row.id)! }]));
       return proofs.filter(proof => flags.has(proof.view.workspace.id)).map(proof => {
         const id = proof.view.workspace.id, { row,view } = flags.get(id)!, enriched = metadata.get(id);
-        return { ...view.workspace,...(enriched ? { repository: enriched.repository, checkoutPath: enriched.checkoutPath,
+        // Lost work is the workspace's own member's to see and dismiss, never a teammate's.
+        const { lostWork, ...workspace } = view.workspace;
+        return { ...workspace,...(lostWork && proof.user.id === view.workspace.creatorUserId ? { lostWork } : {}),...(enriched ? { repository: enriched.repository, checkoutPath: enriched.checkoutPath,
           updatedAt: Date.parse(enriched.updatedAt) > Date.parse(view.workspace.updatedAt) ? enriched.updatedAt : view.workspace.updatedAt,
           ...(enriched.github ? { github: enriched.github } : {}) } : {}),
           teamSharing: 1 as const,createdByUserId: view.createdByUserId,viewerRole: view.role,
