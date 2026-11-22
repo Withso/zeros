@@ -1700,9 +1700,11 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
   // A rule whose selector tests an attribute or class a control fills binds
   // its properties to that control whatever the current value: at a value no
   // such rule matches (a Button's default size), the winner alone says
-  // nothing. A test is removed by replacing it with :is(*); a selector with a
-  // gate test inside parentheses, or any escape, cannot be rewritten safely
-  // and is skipped. Read once per selected or written layer, never on hover.
+  // nothing. A test keeps meaning the element that carries the gate: an
+  // attribute test becomes the attribute's presence, a class test any class
+  // with the hole's prefix. A selector with a gate test inside parentheses,
+  // or any escape, cannot be rewritten safely and is skipped. Read once per
+  // selected or written layer, never on hover.
 
   var GATED_RULE_LIMIT = 4096;
   var GATED_PROPERTY_LIMIT = 128;
@@ -1743,7 +1745,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
         if (attributes.indexOf(name) >= 0) {
           if (depth > 0) return null;
           if (keys.indexOf(name) < 0) keys.push(name);
-          out += ":is(*)";
+          out += "[" + inner.slice(0, nameEnd) + "]";
         } else {
           out += complex.slice(index, end + 1);
         }
@@ -1760,7 +1762,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
         if (prefix !== null && className) {
           if (depth > 0) return null;
           if (keys.indexOf("." + prefix) < 0) keys.push("." + prefix);
-          out += ":is(*)";
+          out += ':is([class^="' + prefix + '"], [class*=" ' + prefix + '"])';
           index = identifier;
           continue;
         }
@@ -1777,8 +1779,9 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     if (!element || !gates || typeof gates !== "object") return result;
     var attributes = (Array.isArray(gates.attributes) ? gates.attributes : []).slice(0, 64)
       .filter(function (name) { return typeof name === "string" && name; }).map(function (name) { return name.toLowerCase(); });
+    // Only identifier characters, so a prefix quotes safely in a selector.
     var prefixes = (Array.isArray(gates.classPrefixes) ? gates.classPrefixes : []).slice(0, 64)
-      .filter(function (prefix) { return typeof prefix === "string" && prefix; });
+      .filter(function (prefix) { return typeof prefix === "string" && /^[A-Za-z0-9_-]+$/.test(prefix); });
     if (!attributes.length && !prefixes.length) return result;
     var rules;
     try { rules = cascadeRules(styleScopeOf(element)).rules; } catch (_error) { return result; }

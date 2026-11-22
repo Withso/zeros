@@ -14,8 +14,10 @@ const BODY = `<style>
 .btn--ghost { background: none; } .btn:not([data-size="sm"]) { color: red; }
 .other[data-size="sm"] { margin: 0; } .btn[data-tone="a"] { opacity: 0.5; }
 .btn[data-size="sm\\31"] { padding: 0; }
+[data-size="lg"] { margin-top: 1px; } .btn--lg { border-top-width: 2px; } [data-size="lg"] .icon { letter-spacing: 1px; }
 </style>
-<button class="btn btn--solid" data-oid="btn" data-size="md" data-tone="b"><span class="icon" data-oid="icon">i</span></button>`;
+<button class="btn btn--solid" data-oid="btn" data-size="md" data-tone="b"><span class="icon" data-oid="icon">i</span></button>
+<p class="plain" data-oid="other">Other</p>`;
 
 async function fixture(browser: Browser): Promise<Page> {
   const page = await browser.newPage();
@@ -74,8 +76,10 @@ describe("what rules gated on a control would set, at any value", () => {
     // :not([data-size]) puts the gate inside parentheses: skipped, as are a
     // rule another element's class decides and a gate nobody asked about. An
     // escape in a value is the browser's to normalize; the rule still counts.
-    expect(reply.result).toEqual({ height: ["data-size"], background: [".btn--"], padding: ["data-size"] });
-    expect((await gated(page, "icon", { attributes: ["data-size"], classPrefixes: [] })).result).toEqual({ width: ["data-size"] });
+    // A gate-only selector still means the layer that carries the gate.
+    expect(reply.result).toEqual({ height: ["data-size"], background: [".btn--"], padding: ["data-size"], "margin-top": ["data-size"], "border-top-width": [".btn--"] });
+    expect((await gated(page, "icon", { attributes: ["data-size"], classPrefixes: ["btn--"] })).result).toEqual({ width: ["data-size"], "letter-spacing": ["data-size"] });
+    expect((await gated(page, "other", { attributes: ["data-size"], classPrefixes: ["btn--"] })).result).toEqual({});
   });
 
   it("answers nothing without gates, and stays an opt-in method", async () => {
