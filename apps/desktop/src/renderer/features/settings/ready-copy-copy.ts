@@ -21,6 +21,10 @@ const COPY: Record<string, ReadyCopyFailureCopy> = {
   github_installation_suspended: { what: "The Zeros GitHub App is suspended for this repository's account.", change: "Unsuspend it in GitHub." },
   github_app_access_required: { what: "The Zeros GitHub App can't read this repository.", change: "Add it to the App's repositories in GitHub." },
   project_unavailable: { what: "The project was removed, or its member left.", change: "Nothing to change here." },
+  // Set on a build still running when its project went (or, with S4, the account that kept a personal project).
+  project_removed: { what: "The project was removed.", change: "Nothing to change here." },
+  // S4: the copy was still building when its GitHub connection was removed or the App uninstalled.
+  connection_removed: { what: "Its GitHub connection was removed.", change: "Connect GitHub again in GitHub settings, then build again." },
   organization_unavailable: { what: "The organization can't use the cloud now.", change: "Nothing to change here." },
   ready_copy_failed: { what: "The project could not be built.", change: "Build again." },
 };
