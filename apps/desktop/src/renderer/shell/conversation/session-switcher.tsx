@@ -32,6 +32,9 @@ import { useArchivedWorkspaces, useLiveWorkspaces } from "../../state/use-projec
 import type { Workspace } from "../../platform/git";
 import { findWorkspaceForFolder } from "../../state/workspace-resolution";
 import { workspaceLabel } from "../workspace-tabs";
+import { isCloudWorkspace } from "../../platform/bridge/cloud-workspace-key";
+import { useNativeRuntime } from "../../platform/runtime";
+import { OpenInSubmenu } from "./conversation-header";
 import type { WorkspacePlacement } from "./workspace-identity";
 
 export function sessionName(chat: ChatThread): string {
@@ -392,6 +395,8 @@ export function SessionActionsMenu({ folder, readOnly = false }: { folder: strin
     const active = state.chats.find((chat) => chat.id === state.activeChatId);
     return active?.folder === folder ? active : undefined;
   });
+  // Same gate as the pane menu: host apps cannot open a cloud workspace.
+  const showOpenIn = useNativeRuntime().ready && !isCloudWorkspace(folder);
   if (readOnly) return null;
   return (
     <DropdownMenu>
@@ -427,6 +432,12 @@ export function SessionActionsMenu({ folder, readOnly = false }: { folder: strin
             <X className="size-4" strokeWidth={1.5} />
             Close split
           </DropdownMenuItem>
+        )}
+        {showOpenIn && (
+          <>
+            <DropdownMenuSeparator />
+            <OpenInSubmenu path={folder} />
+          </>
         )}
       </DropdownMenuContent>
     </DropdownMenu>
