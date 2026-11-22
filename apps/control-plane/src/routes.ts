@@ -376,6 +376,8 @@ type OrganizationRow = {
   cloud_workspaces_allowed: boolean;
   /** cloud_organization_enabled (0262): a Personal organization's also needs its owner's Pro. */
   cloud_enabled?: boolean;
+  /** CLOUD_V2_PERSONAL_CLOUD_ENABLED, as this transaction sees it (app.cloud_personal). */
+  personal_cloud?: boolean;
   default_team_id: string | null;
   workos_sync_revision?: string | number;
 };
@@ -390,7 +392,8 @@ export type OrganizationSummary = {
   defaultTeamId: string | null;
   workspaceCapabilities: { local: boolean; cloud: boolean };
   teamCapabilities: { multiple: false; canCreate: false };
-  /** The signed-in member's Pro organization seat; absent for Personal. */
+  /** The signed-in member's Pro organization seat. For Personal only while its cloud is offered:
+   * `pro` with the owner's Pro, else `free` (which, unlike an organization's, opens nothing). */
   seat?: OrganizationSeat;
 };
 
@@ -405,7 +408,9 @@ function organizationSummary(row: OrganizationRow): OrganizationSummary {
     defaultTeamId: row.default_team_id,
     workspaceCapabilities: {
       local: row.is_personal,
-      cloud: row.cloud_enabled ?? (!row.is_personal && row.cloud_workspaces_allowed),
+      // Display only; every authorization reads cloud_organization_enabled. A Personal row says cloud
+      // is offered while the switch is on, and /v1/me adds its seat from the owner's live Pro.
+      cloud: row.is_personal ? row.personal_cloud === true : row.cloud_enabled ?? row.cloud_workspaces_allowed,
     },
     teamCapabilities: { multiple: false, canCreate: false },
   };
@@ -422,7 +427,8 @@ function requiredOrganizationSummary(
 
 const ORGANIZATION_SUMMARY_SQL = `
   SELECT o.id, o.slug, o.name, o.logo, om.role, o.is_personal,
-         o.cloud_workspaces_allowed, cloud_organization_enabled(o) AS cloud_enabled, dt.id AS default_team_id
+         o.cloud_workspaces_allowed, cloud_organization_enabled(o) AS cloud_enabled,
+         coalesce(current_setting('app.cloud_personal', true), '0') = '1' AS personal_cloud, dt.id AS default_team_id
   FROM organizations o
   JOIN organization_members om ON om.org_id = o.id
   LEFT JOIN LATERAL (
@@ -459,7 +465,8 @@ export function createRoutes(
       seats: await memberSeatsAcross(tx, user.id, collaborative),
     }));
     const organizations = result.rows.map((row) => {
-      const seat = seats.get(row.id);
+      // A Personal organization's cloud, while offered, is usable with its owner's Pro (an organization's free seat may still open its workspaces; Personal's may not).
+      const seat = row.is_personal ? row.personal_cloud ? (pro ? "pro" as const : "free" as const) : undefined : seats.get(row.id);
       return seat ? { ...organizationSummary(row), seat } : organizationSummary(row);
     });
     // Compatibility: old clients treat these tenant roots as flat Teams. The
