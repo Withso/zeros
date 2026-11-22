@@ -8,7 +8,7 @@ import { FakeBoat } from "./__fixtures__/boat-fake.js";
 import { CloudV2ComputerBuilder, CloudV2Computers, type CloudV2ComputerOptions } from "./computer.js";
 import type { CloudV2ComputerSourceResolver } from "./computer-provenance.js";
 import { CloudV2Lifecycle } from "./lifecycle.js";
-import { CloudV2ReadyCopies, CloudV2ReadyCopyBuilder, CloudV2ReadyCopyForks, READY_COPY_HISTORY_LIMIT, READY_COPY_REFRESH_STARTS, READY_COPY_RETRY_LIMIT,
+import { CloudV2ReadyCopies, CloudV2ReadyCopyBuilder, CloudV2ReadyCopyForks, readyCopyBaselineCommand, readyCopyLayout, READY_COPY_HISTORY_LIMIT, READY_COPY_REFRESH_STARTS, READY_COPY_RETRY_LIMIT,
   type ReadyCopyWorkspace } from "./ready-copies.js";
 import { CloudV2ReadyCopySecrets } from "./ready-copy-secrets.js";
 import { readyCopyHistory } from "./ready-copy-status.js";
@@ -810,6 +810,60 @@ d("cloud v2 ready copies", () => {
       expect(copy.state).toBe("ready");
       expect(copy.result![0]!.submodules).toEqual([{ path: ".gitmodules", fetched: false, reason: "GitHub could not be read" }]);
       expect(warnings).toContainEqual(expect.stringMatching(/could not read withso\/zeros's submodules/));
+    });
+  });
+
+  describe("the ignored-file baseline (retention's stop probe)", () => {
+    const BASELINE = "/home/user/.local/share/zeros/retention-baseline/";
+    const baselines = (machineId: string) => [...boat.machine(machineId)!.files].filter(([path]) => path.startsWith(BASELINE)).sort();
+
+    it("is recorded once, after the last setup and before the scrub, at the fork's paths; every fork inherits it", async () => {
+      await liveBase();
+      await copyBuilder().tick();
+      const copy = await row(1);
+      expect(copy.state).toBe("ready");
+      const own = boat.commands.filter(command => command.machineId === copy.machineId).map(command => command.command);
+      const recorded = own.flatMap((command, index) => command.includes("zeros-baseline recorded") ? [index] : []);
+      expect(recorded).toHaveLength(1);
+      expect(own[recorded[0]!]).toBe(readyCopyBaselineCommand({ name: "zeros", repositories: [{ repository: "withso/zeros" }] }));
+      expect(own[recorded[0]!]).toContain(`/home/user/${readyCopyLayout({ name: "zeros", repositories: [{ repository: "withso/zeros" }] })[0]}`);
+      expect(recorded[0]).toBeGreaterThan(own.findLastIndex(command => command.includes("pnpm install")));
+      expect(recorded[0]).toBeLessThan(own.findIndex(command => command.includes("rm -rf /tmp/zeros-command-input-*")));
+      // The scrub keeps it, so the stopped disk holds it, and a workspace's fork has it.
+      expect(baselines(copy.machineId!)).toHaveLength(1);
+      const forked = await forks().prepare(await workspace()) as { sandboxId: string };
+      expect(baselines(forked.sandboxId)).toEqual(baselines(copy.machineId!));
+    });
+
+    it("never fails the build when it cannot be recorded: the probe's default covers a missing baseline", async () => {
+      await liveBase();
+      boat.script = (_machine, command) => command.includes("zeros-baseline recorded") ? { exitCode: 1, stdout: "", timedOut: false } : undefined;
+      await copyBuilder().tick();
+      const copy = await row(1);
+      expect(copy.state).toBe("ready");
+      expect(baselines(copy.machineId!)).toEqual([]);
+      expect(warnings).toContainEqual(expect.stringMatching(/recorded no ignored-file baseline \(exit 1\)/));
+    });
+
+    it("records afresh on every build: a rebuild forked from the previous copy drops that copy's baseline; the base never holds one", async () => {
+      const computers = computersWith(), projects = new CloudProjects(pool);
+      await liveBase(computers);
+      await copyBuilder().tick();
+      const first = await row(1);
+      // A new build machine from the base starts without one: the base never held a project.
+      expect(baselines(first.machineId!)).toHaveLength(1);
+      expect([...(boat.snapshots.values())].every(files => [...files.keys()].every(path => !path.startsWith(BASELINE)))).toBe(true);
+      // A saved setup forks the previous copy: its baseline comes with the disk and is not replaced.
+      await projects.update(org, admin, zeros, { repositories: [{ repository: "withso/zeros", repositoryId: repositoryId("withso/zeros"),
+        setup: "pnpm install --frozen-lockfile" }] });
+      await copyBuilder().reconcile(org, zeros, "setup_changed");
+      await copyBuilder().tick();
+      const second = await row(2);
+      expect(second).toMatchObject({ state: "ready", builtFromBase: `copy:${first.id}` });
+      const [[firstPath, firstEntry]] = baselines(first.machineId!), recorded = baselines(second.machineId!);
+      expect(recorded).toHaveLength(1);
+      expect(recorded[0]![0]).toBe(firstPath);
+      expect(recorded[0]![1]).not.toBe(firstEntry);
     });
   });
 

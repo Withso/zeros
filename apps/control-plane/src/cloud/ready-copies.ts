@@ -10,7 +10,7 @@
 // "<source name> fork". A copy only becomes ready once stopped, and a newer
 // generation replaces it in one transaction; the old machine is deleted only
 // after every fork that began from it has its machine.
-import { projectFolderName, repositoryFolderNames } from "./workspace-layout.js";
+import { CLOUD_V2_HOME_PATH, projectFolderName, repositoryFolderNames } from "./workspace-layout.js";
 import { createHash, randomUUID } from "node:crypto";
 import type pg from "pg";
 import { withSystemTx, type Tx } from "../db.js";
@@ -22,6 +22,7 @@ import { asZeros, checkoutScript, shellQuote } from "./computer.js";
 import type { z } from "zod";
 import { SUBMODULE_FETCHED, composeSubmodulePlan, readSubmoduleLevel, rememberedSubmoduleLevel, submoduleFetchLines, type SubmoduleLevel, type SubmodulePlan } from "./submodules.js";
 import { copySubmodulesReadable } from "./workspace-submodules.js";
+import { IGNORED_BASELINE_DIR, ignoredBaselineCommand } from "./checkpoint.js";
 import { installRuntimeCommand, type CloudV2Runtime } from "./runtime.js";
 import { cloudV2BoatSnapshotName, cloudV2SandboxName } from "./resource-names.js";
 import type { CloudSourceTarget } from "./source-authority.js";
@@ -631,6 +632,8 @@ export function readyCopySetupCommand(dir: string, setup: string, withSecrets: b
   ])} 2>&1`;
 }
 /** Before stop: nothing of a build's input stays on the disk workspaces fork. */
+/** The ignored-file baseline reads at most the files a backup would (checkpoint.ts bounds them); nobody waits on a build. */
+export const READY_COPY_BASELINE_SECONDS = 60;
 export const READY_COPY_SCRUB_COMMAND = "rm -rf /tmp/zeros-command-input-* /tmp/zeros-job-* 2>/dev/null; sync";
 /** A setup can write a secret anywhere it may write. Before stop the disk is
  * searched for every value, read from standard input; only a path is printed. */
@@ -743,6 +746,12 @@ export const readyCopyLayout = (project: { name: string; repositories: readonly 
   return repositoryFolderNames(project.repositories.map(entry => entry.repository)).map(name => `${folder}/${name}`);
 };
 const homePath = (checkoutFolder: string) => `/home/user/${checkoutFolder}`;
+/** The project's ignored-file baseline at the end of its build: one per checkout, at the paths a fork's
+ * workspace has (checkpoint.ts ignoredBaselineCommand). Every build records afresh: a machine forked from the
+ * previous copy holds that copy's baseline, and on a build machine there is no person whose files it must keep
+ * out, so it is removed first (a failed removal records nothing). `home` is the machine's; tests pass their own. */
+export const readyCopyBaselineCommand = (project: { name: string; repositories: readonly { repository: string }[] }, home = CLOUD_V2_HOME_PATH) =>
+  `rm -rf -- ${shellQuote(`${home}/${IGNORED_BASELINE_DIR}`)} && ${ignoredBaselineCommand(readyCopyLayout(project).map(folder => `${home}/${folder}`), home)}`;
 
 export class CloudV2ReadyCopyBuilder {
   private closed = false;
@@ -965,6 +974,7 @@ export class CloudV2ReadyCopyBuilder {
       values = Object.values(secrets).filter(value => value.length >= READY_COPY_SECRET_MIN_SEARCH_LENGTH);
     }
     at.repository = null;
+    await this.recordIgnoredBaseline(machineId, job, project);
     at.step = "scrub";
     const scrub = await compute.exec(machineId, READY_COPY_SCRUB_COMMAND, 120);
     if (scrub.exitCode !== 0 || scrub.timedOut) throw failure("ready_copy_scrub_failed");
@@ -1022,6 +1032,19 @@ export class CloudV2ReadyCopyBuilder {
       else { outcomes.push({ ...summary, fetched: false, reason: "could not be fetched" }); failed.push(entry.path); }
     }
     return outcomes;
+  }
+
+  /** Once, after the last setup and before the scrub: each checkout's ignored files as the build left them,
+   * which every fork inherits and retention's stop probe then counts as reproducible (checkpoint.ts). The
+   * paths are the fork's. A failure never fails the build: without a baseline the probe takes a backup. */
+  private async recordIgnoredBaseline(machineId: string, job: CloudV2ReadyCopy, project: Parameters<typeof readyCopyBaselineCommand>[0]): Promise<void> {
+    let reason: string;
+    try {
+      const recorded = await this.deps.compute.exec(machineId, readyCopyBaselineCommand(project), READY_COPY_BASELINE_SECONDS);
+      if (recorded.exitCode === 0 && !recorded.timedOut && /^zeros-baseline recorded$/m.test(recorded.stdout)) return;
+      reason = recorded.timedOut ? "timed out" : `exit ${recorded.exitCode}`;
+    } catch (error) { reason = code(error, "failed"); }
+    this.deps.logger?.warn(`[cloud-v2] ready copy of project ${job.projectId} generation ${job.generation} recorded no ignored-file baseline (${reason})`);
   }
 
   private async ready(machineId: string): Promise<void> {

@@ -24,8 +24,10 @@ const COVERED_TRIGGERS: Record<string, readonly string[]> = {
   // authority_recheck_*: definer functions that only mark running R2 workspaces for re-evaluation (0253).
   organizations: ["organizations_personal_classification_immutable", "local_command_setting_changed", "execution_organization_update", "execution_organization_personal",
     "authority_recheck_organization"],
+  // cloud_v2_private_member_*: definer functions that archive a departed member's private workspaces and restore
+  // them to that member on return, skipping held rows and never failing the membership write (0263).
   organization_members: ["a1_organization_seat_refresh", "execution_member_delete", "execution_member_update", "execution_member_insert", "cloud_creator_member_loss",
-    "authority_recheck_seats"],
+    "authority_recheck_seats", "cloud_v2_private_member_left", "cloud_v2_private_member_returned"],
   users: ["cloud_actor_staff_revision", "a0_staff_pro_benefit_sync", "execution_user_fence", "cloud_creator_account_loss", "cloud_creator_account_erasure"],
 };
 

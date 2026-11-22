@@ -18,7 +18,9 @@ import type { CloudV2CheckpointFork, CloudV2CheckpointReuse, CloudV2CheckpointRe
 import { CLOUD_V2_WORKER_PORT, type CloudV2WorkerTiming, type CloudV2WorkerBootTiming } from "./contract.js";
 import { CLOUD_V2_BACKUP_PROBE_SECONDS, CLOUD_V2_CHECKPOINT_ERRORS, CLOUD_V2_CHECKPOINT_SECONDS, WORKER_OFF_COMMAND, WORKER_UNIT_CHECK, backupProbeCommand, checkpointCommand,
   cloudV2CheckpointObject, parseBackupProbe, parseCheckpointResult, parseRestoreResult, restoreCommand, workerUnitOff, type BackupProbe,
-  type CloudV2CheckpointError, type CloudV2CheckpointStorage } from "./checkpoint.js";
+  type CloudV2CheckpointError, type CloudV2CheckpointStorage, environmentRestoreCommand, parseEnvironmentRestore } from "./checkpoint.js";
+import { ARCHIVE_SCRUB_SECONDS, CHANGED_SINCE_STOP_SECONDS, archiveScrubCommand, changedSinceStopCommand, parseArchiveScrub, parseChangedSinceStop,
+  stopMarkerCommand, type ArchiveScrubResult } from "./archive-scrub.js";
 
 const CONCURRENCY = 4;
 /** A stop can spend minutes saving its checkpoint; creates and wakes, which
@@ -69,6 +71,12 @@ export const CLOUD_V2_BACKUP_FORKS_PER_HOUR = 20;
  * creates, forks and resumes against 12 a minute and 200 a day (Alpha), so creates and user wakes keep
  * at least 80 of the day's 200. */
 export const CLOUD_V2_MAINTENANCE_PER_HOUR = 20;
+/** Retention S3: no activity by anyone for this long archives a sleeping workspace. */
+export const CLOUD_V2_INACTIVE_ARCHIVE_MS = 30 * 24 * 60 * 60_000;
+/** The archive scan's cadence and per-run bound, oldest clock first: 200 an hour is 4,800 a day. */
+export const CLOUD_V2_ARCHIVE_SCAN_MS = 60 * 60_000;
+export const CLOUD_V2_ARCHIVE_BATCH = 200;
+const CLOUD_V2_RETENTION_CLOCK_BATCH = 5_000;
 export const CLOUD_V2_MAINTENANCE_PER_DAY = 120;
 /** A maintenance wake's own lease: if our stop fails, Boat archives the machine after this. */
 export const CLOUD_V2_MAINTENANCE_LEASE_SECONDS = 300;
@@ -107,7 +115,7 @@ export const CLOUD_V2_WORKER_TOKEN_PATH = "/home/user/.config/zeros/worker-token
 /** Non-secret boot settings for the worker's systemd unit (EnvironmentFile). */
 export const CLOUD_V2_WORKER_ENV_PATH = "/home/user/.config/zeros/worker.env";
 
-type LifecyclePhase = "boat_create" | "boat_resume" | "source_resolve" | "source_authorize" | "runtime_install" | "image_prepare" | "repository_prepare" | "protected_route" | "token_delivery" | "checkpoint" | "checkpoint_restore" | "maintenance_wake" | "maintenance_backlog" | "total";
+type LifecyclePhase = "boat_create" | "boat_resume" | "source_resolve" | "source_authorize" | "runtime_install" | "image_prepare" | "repository_prepare" | "protected_route" | "token_delivery" | "checkpoint" | "checkpoint_restore" | "maintenance_wake" | "maintenance_backlog" | "archive_scan" | "total";
 export type CloudV2TimingRecord = {
   workspaceId: string;
   state?: CloudV2Workspace["state"];
@@ -127,6 +135,8 @@ export type CloudV2TimingRecord = {
   /** maintenance_backlog: sleeping workspaces due a wake, past due by 2 days, found expired by Boat,
    * and those the budget cannot reach before Boat's expected deletion. */
   due?: number; overdue?: number; expired?: number; unreachable?: number;
+  /** archive_scan: workspaces archived for inactivity this run. */
+  archived?: number;
   /** maintenance_wake: how it ended. */
   outcome?: "stopped" | "adopted" | "gone" | "failed";
 } & ({
@@ -147,7 +157,8 @@ export type CloudV2LifecycleDeps = {
     | "checkpointForkCreated" | "checkpointForkGone" | "checkpointRetryNext"
     // Retention (`retention`); absent from older compositions, which never enable it.
     | "recordStopProbe" | "restoreForkRefused" | "replaceLostSandbox" | "workspaceBranches" | "recordLostWork"
-    | "claimMaintenanceWake" | "beginMaintenanceStop" | "adoptMaintenance" | "maintenanceHeld" | "finishMaintenance" | "clearStaleMaintenance" | "maintenanceBacklog" | "keepLostMachine">;
+    | "claimMaintenanceWake" | "beginMaintenanceStop" | "adoptMaintenance" | "maintenanceHeld" | "finishMaintenance"
+    | "startRetentionClocks" | "archiveInactive" | "archiveDepartedPrivate" | "restoreReturningPrivate" | "archiveForSystem" | "clearArchiveScrub" | "clearStaleMaintenance" | "maintenanceBacklog" | "keepLostMachine">;
   /** Optional for older compositions; the shipped store always provides it. */
   prompts?: CloudV2Store["prompts"];
   pruneEnvironments?: () => Promise<void>;
@@ -323,6 +334,7 @@ export class CloudV2Lifecycle {
       await this.renewing;
       await this.retrying;
       await this.maintaining;
+      await this.archiving;
       await this.building;
       await this.copying;
       await this.cleaning;
@@ -355,7 +367,7 @@ export class CloudV2Lifecycle {
     this.sweeping = true;
     let next = this.intervalMs;
     try {
-      const running = new Set([this.building, this.copying, this.cleaning, this.retrying, this.renewing, this.maintaining]);
+      const running = new Set([this.building, this.copying, this.cleaning, this.retrying, this.renewing, this.maintaining, this.archiving]);
       await this.poll();
       next = await this.nextSweep(running);
     } catch (error) {
@@ -368,13 +380,13 @@ export class CloudV2Lifecycle {
   /** Work in progress keeps the fast cadence; otherwise the next due deferral,
    * bounded by the idle sweep, decides. */
   private async nextSweep(running: ReadonlySet<Promise<void> | null>): Promise<number> {
-    const background = [this.building, this.copying, this.cleaning, this.retrying, this.renewing, this.maintaining].filter(task => task !== null && !running.has(task));
+    const background = [this.building, this.copying, this.cleaning, this.retrying, this.renewing, this.maintaining, this.archiving].filter(task => task !== null && !running.has(task));
     if (background.length) {
       let timer: NodeJS.Timeout | undefined;
       await Promise.race([Promise.allSettled(background), new Promise(resolve => { timer = setTimeout(resolve, BACKGROUND_SETTLE_MS); })]);
       clearTimeout(timer);
     }
-    if (this.inFlight.size || this.building || this.copying || this.cleaning || this.retrying || this.renewing || this.maintaining) return this.intervalMs;
+    if (this.inFlight.size || this.building || this.copying || this.cleaning || this.retrying || this.renewing || this.maintaining || this.archiving) return this.intervalMs;
     const due = await this.deps.store.nextLifecycleDue();
     return due === null ? IDLE_SWEEP_MS : Math.min(IDLE_SWEEP_MS, Math.max(this.intervalMs, due));
   }
@@ -388,6 +400,8 @@ export class CloudV2Lifecycle {
   private retrying: Promise<void> | null = null;
   private maintaining: Promise<void> | null = null;
   private nextMaintenanceScan = -Infinity;
+  private archiving: Promise<void> | null = null;
+  private nextArchiveScan = -Infinity;
   private nextBacklogReport = -Infinity;
   private nextRetryScan = -Infinity;
   private lastProviderStopScan = -Infinity;
@@ -398,6 +412,7 @@ export class CloudV2Lifecycle {
     await Promise.all(this.inFlight.values());
     await this.retrying;
     await this.maintaining;
+    await this.archiving;
   }
 
   private poll(): Promise<void> {
@@ -467,6 +482,15 @@ export class CloudV2Lifecycle {
         .then(() => this.reportBacklog(now))
         .catch(error => this.deps.logger?.warn(`[cloud-v2] maintenance wake step failed (${errorCode(error)})`))
         .finally(() => { this.maintaining = null; });
+    }
+    // Retention S3, hourly and outside the slots: a departed member's private workspaces (whatever the
+    // switch), then the 30-day clocks and the automatic archive. Nothing here touches a machine; a running
+    // archived workspace stops through the ordinary stopping step.
+    if (!this.archiving && now >= this.nextArchiveScan) {
+      this.nextArchiveScan = now + CLOUD_V2_ARCHIVE_SCAN_MS;
+      this.archiving = this.archiveScan()
+        .catch(error => this.deps.logger?.warn(`[cloud-v2] archive scan failed (${errorCode(error)})`))
+        .finally(() => { this.archiving = null; });
     }
   }
 
@@ -685,6 +709,17 @@ export class CloudV2Lifecycle {
             }
           }
         }
+        // Retention S3: an archive's scrub removed this checkout's environment files, which the backup holds.
+        // They go back before the worker starts; if that fails, the workspace is rebuilt from the backup
+        // instead, never started on a checkout that silently lacks the person's own files.
+        if (!restoring && sandboxId && workspace.archiveScrub === "backup" && !workspace.restorePending) {
+          if (await this.restoreScrubbedEnvironment(workspace, sandboxId)) await store.clearArchiveScrub(workspace.id, workspace.stopGeneration);
+          else {
+            sandboxId = await this.replacement(workspace, sandboxId, { bootEnv: boot.env });
+            if (!sandboxId) return;
+            restoring = true;
+          }
+        }
         // As on create, the route is inert until token delivery starts the worker.
         // A rare restore keeps it after the checkpoint is applied.
         const route = () => this.measure(workspace, "protected_route", () => this.host(workspace, sandboxId!));
@@ -852,6 +887,7 @@ export class CloudV2Lifecycle {
     const vm = row.boatSandboxId!, start = this.deps.now?.() ?? Date.now();
     let outcome: "stopped" | "adopted" | "gone" | "failed" = "failed", workerFoundRunning = false, workerOff: boolean | undefined;
     let machineStoppedAt: Date | null = null, snapshotAvailable: boolean | undefined, dataExpiredAt: Date | null = null;
+    let changedSinceStop: boolean | undefined, scrub: ArchiveScrubResult | undefined;
     // After every call to the machine: a person's start that took the wake over (or opened the
     // workspace) gets it at once, and nothing of the wake's runs after their worker starts.
     const held = async () => { if (!await store.maintenanceHeld(row.id, attempt)) throw new MaintenanceReleased(); };
@@ -878,6 +914,21 @@ export class CloudV2Lifecycle {
       workerOff = off;
       if (!off) (this.deps.logger?.error ?? this.deps.logger?.warn)?.call(this.deps.logger,
         `[cloud-v2] maintenance wake could not verify the worker off; stopping at once workspace=${row.id.slice(0, 8)}`);
+      // Retention S3: did anything write into a checkout while the machine was awake? Then this stop's backup
+      // or clean probe no longer describes it. Then the archived wake's scrub, after the worker is off.
+      const checkouts = [workspaceCheckoutPath(row), ...(await this.deps.repositories?.(row) ?? []).map(entry => `${CLOUD_V2_HOME}/${entry.checkoutFolder}`)];
+      const changed = await compute.exec(vm, changedSinceStopCommand(CLOUD_V2_HOME, checkouts), CHANGED_SINCE_STOP_SECONDS).catch(() => null);
+      await held();
+      changedSinceStop = !changed || changed.timedOut || parseChangedSinceStop(changed.stdout);
+      const mode = row.maintenanceWake.scrub;
+      if (mode) {
+        const scrubbed = await compute.exec(vm, archiveScrubCommand({ home: CLOUD_V2_HOME, checkoutPaths: checkouts, mode }), ARCHIVE_SCRUB_SECONDS)
+          .catch(() => null);
+        const result = scrubbed && !scrubbed.timedOut ? parseArchiveScrub(scrubbed.stdout) : "partial";
+        // A backup-mode scrub may have removed files before it failed: the open restores them either way.
+        scrub = mode === "backup" ? (result === "clean" ? "clean" : "backup") : result;
+        await held();
+      }
       // Opened meanwhile: the person's start has the running machine. Only a wake still waking on a
       // stopped workspace marks its stop, in one statement.
       if (!await store.beginMaintenanceStop(row.id, attempt)) { outcome = "adopted"; return true; }
@@ -894,11 +945,23 @@ export class CloudV2Lifecycle {
       return true;
     } finally {
       await store.finishMaintenance(row.id, attempt, { outcome, machineStoppedAt, workerFoundRunning, ...(workerOff !== undefined ? { workerOff } : {}),
-        ...(snapshotAvailable !== undefined ? { snapshotAvailable } : {}), dataExpiredAt })
+        ...(snapshotAvailable !== undefined ? { snapshotAvailable } : {}), dataExpiredAt,
+        ...(changedSinceStop !== undefined ? { changedSinceStop } : {}), ...(scrub ? { scrub } : {}) })
         .catch(error => this.deps.logger?.warn(`[cloud-v2] maintenance wake not recorded (${errorCode(error)})`));
       emitCloudV2Timing(this.deps.timing, { workspaceId: row.id.slice(0, 8), state: row.state, phase: "maintenance_wake", outcome,
         durationMs: Math.max(0, Math.round((this.deps.now?.() ?? Date.now()) - start)) });
     }
+  }
+
+  private async archiveScan(): Promise<void> {
+    const { store } = this.deps;
+    await store.restoreReturningPrivate(CLOUD_V2_ARCHIVE_BATCH);
+    for (const id of await store.archiveDepartedPrivate(CLOUD_V2_ARCHIVE_BATCH)) await store.archiveForSystem(id);
+    if (!this.retention) return;
+    await store.startRetentionClocks(CLOUD_V2_RETENTION_CLOCK_BATCH);
+    const { archived } = await store.archiveInactive({ inactiveMs: CLOUD_V2_INACTIVE_ARCHIVE_MS, limit: CLOUD_V2_ARCHIVE_BATCH });
+    if (archived.length) this.deps.logger?.warn(`[cloud-v2] archived ${archived.length} inactive workspace(s)`);
+    emitCloudV2Timing(this.deps.timing, { workspaceId: "-", phase: "archive_scan", durationMs: 0, archived: archived.length });
   }
 
   /** Once an hour: how far the maintenance budget is from what is due. A workspace the budget cannot
@@ -929,6 +992,9 @@ export class CloudV2Lifecycle {
    * Resolves false: the stop has no checkpoint of its own. */
   private async probeStop(workspace: CloudV2LifecycleWorkspace, sandboxId: string): Promise<false> {
     const workerOff = await this.switchWorkerOff(sandboxId);
+    // Retention S3: what a later maintenance wake compares the checkouts against. A failed touch leaves an
+    // older marker, so that wake can only answer "changed", which is safe.
+    await this.deps.compute.exec(sandboxId, stopMarkerCommand(CLOUD_V2_HOME), 15).catch(() => {});
     if (!workerOff) (this.deps.logger?.error ?? this.deps.logger?.warn)?.call(this.deps.logger,
       `[cloud-v2] stop could not verify the worker off; recorded for the next wake workspace=${workspace.id.slice(0, 8)}`);
     let probe: BackupProbe = "unknown";
@@ -961,6 +1027,30 @@ export class CloudV2Lifecycle {
         if (error instanceof MaintenanceReleased) throw error;
       }
     }
+    return false;
+  }
+
+  /** Retention S3: the scrubbed environment files, from the backup, onto the resumed machine before its
+   * worker starts. Twice within the open's own bound; false sends the open to the full restore. */
+  private async restoreScrubbedEnvironment(workspace: CloudV2LifecycleWorkspace, sandboxId: string): Promise<boolean> {
+    const checkpoints = this.deps.checkpoints, checkpoint = workspace.checkpoint;
+    if (!checkpoints || !checkpoint) return false;
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      let key: Buffer | undefined;
+      try {
+        key = checkpoints.open(checkpoint.key, workspace.id, checkpoint.object);
+        const others = await this.deps.repositories?.(workspace) ?? [];
+        const command = environmentRestoreCommand({ checkoutPath: workspaceCheckoutPath(workspace), home: CLOUD_V2_HOME, key,
+          sha256: checkpoint.sha256, downloadUrl: await checkpoints.storage.downloadUrl(workspace.id, checkpoint.object),
+          repositories: others.map(entry => `${CLOUD_V2_HOME}/${entry.checkoutFolder}`) });
+        const result = await this.deps.compute.exec(sandboxId, command, CLOUD_V2_CHECKPOINT_SECONDS);
+        if (result.exitCode === 0 && !result.timedOut && parseEnvironmentRestore(result.stdout)) return true;
+      } catch (error) {
+        this.deps.logger?.warn(`[cloud-v2] scrubbed environment restore failed (${errorCode(error)}) workspace=${workspace.id.slice(0, 8)}`);
+      } finally { key?.fill(0); }
+    }
+    (this.deps.logger?.error ?? this.deps.logger?.warn)?.call(this.deps.logger,
+      `[cloud-v2] could not put the scrubbed environment back; rebuilding from the backup workspace=${workspace.id.slice(0, 8)}`);
     return false;
   }
 

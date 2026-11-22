@@ -63,6 +63,9 @@ export class CloudApiService {
       createdBySessionId: saved.createdBySessionId,
       link: link ? `${link}?session=${encodeURIComponent(saved.id)}` : null };
   }
+  /** Retention S3: an API write on a workspace counts toward its 30-day clock; reads do not. */
+  private touched(id: string) { return this.deps.store.personActivity(id).catch(() => {}); }
+
   private async owned(credential: CloudApiCredential, id: string): Promise<CloudV2Workspace> {
     if (!z.string().uuid().safeParse(id).success) throw notFound();
     const execution = this.deps.store.prompts.execution;
@@ -136,7 +139,9 @@ export class CloudApiService {
     await this.owned(credential, id);
     const { name } = apiInput(ApiRenameSchema, raw);
     await this.deps.credentials.assertCurrent(credential);
-    return this.workspaceDocument(credential, await this.deps.store.rename(id, credential.userId, name));
+    const renamed = await this.deps.store.rename(id, credential.userId, name);
+    await this.touched(id);
+    return this.workspaceDocument(credential, renamed);
   }
   async lifecycle(credential: CloudApiCredential, id: string, action: "archive" | "unarchive" | "sleep" | "wake") {
     const workspace = await this.owned(credential, id);
@@ -177,11 +182,13 @@ export class CloudApiService {
     const { epoch } = await this.deps.store.api.status(credential, workspace.id, id);
     await this.deps.credentials.assertCurrent(credential);
     await this.deps.store.prompts.stop(workspace.id, credential.userId, id, epoch);
+    await this.touched(workspace.id);
     return this.sessionStatus(credential, id);
   }
   private async editSession(credential: CloudApiCredential, id: string, patch: { title?: string; archived?: boolean }) {
     const { workspace } = await this.session(credential, id);
     await this.deps.store.chatEdits.apply(credential, workspace.id, id, patch, tx => this.deps.credentials.assertCurrent(credential, tx));
+    await this.touched(workspace.id);
     return this.getSession(credential, id);
   }
   renameSession(credential: CloudApiCredential, id: string, raw: unknown) {

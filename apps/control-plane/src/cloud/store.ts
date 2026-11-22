@@ -20,7 +20,7 @@ import { securityStreamAuthority } from "../security-events.js";
 import { HttpError } from "../authz.js";
 import { CloudV2HistoryDigestsReplySchema, type CloudV2HistoryState, type CloudV2MessageRow } from "./contract.js";
 import { hashCloudV2Token, newCloudV2Token } from "./tokens.js";
-import { CLOUD_V2_CREATOR_ON_HOLD, CLOUD_V2_PERSONAL_PRO_ENDED, CLOUD_V2_CREATOR_ACCESS_SQL, CLOUD_V2_LIVE_ACCESS as LIVE_ACCESS, CLOUD_V2_LIVE_ACCESS_SQL, requireWorkspaceCreator } from "./workspace-access.js";
+import { CLOUD_V2_CREATOR_ON_HOLD, CLOUD_V2_CREATOR_ACCESS_SQL, CLOUD_V2_LIVE_ACCESS as LIVE_ACCESS, CLOUD_V2_LIVE_ACCESS_SQL, cloudV2ActorAccess, requireWorkspaceCreator, CLOUD_V2_PERSONAL_PRO_ENDED } from "./workspace-access.js";
 import { memberOnHoldSql, organizationMemberOnHold } from "../organization-seats.js";
 import { CloudV2PromptOutbox, type CloudApiPrompt } from "./prompt-outbox.js";
 import { computerSourceReviewRequired, readComputerSourceTargets } from "./computer-provenance.js";
@@ -28,6 +28,7 @@ import { CloudSourceTargetSchema, type CloudSourceTarget } from "./source-author
 import { pinCloudEnvironment, pinCloudRepositoryEnvironments, releaseCloudEnvironment } from "./environment-store.js";
 import { originalSetupBuild } from "./setup-selection.js";
 import { teamOwnershipRequired } from "./team-sharing/contract.js";
+import type { ArchiveScrubMode, ArchiveScrubResult } from "./archive-scrub.js";
 
 import { mirrorMessageSenders, mirrorMessageWindow, type MessageWindow, type WindowOptions } from "./history.js";
 import { mirrorMessageSearch, type SearchOptions } from "./history-search.js";
@@ -131,6 +132,15 @@ export type CloudV2Workspace = {
   /** Retention: a lost VM came back without the work of the stop at `stoppedAt`: nothing of it
    * (rebuilt from GitHub) or an earlier backup instead. Until dismissed or the next backup. */
   lostWork?: { restored: "none" | "earlier"; stoppedAt: string };
+  /** Retention S3: exempt from automatic archive; never true while archived. The serializer always sends it from
+   * this release; optional in the type so documents and fixtures built elsewhere stay valid. */
+  keep?: boolean;
+  /** Why it is archived; only while archivedAt is set. */
+  archiveReason?: "manual" | "inactive" | "member_left";
+  /** While archived and its machine is recorded: when Boat removes the machine. `estimate` unless Boat said so. */
+  machineExpectedGoneAt?: { at: string; estimate: boolean };
+  /** While archived with a backup, once retention applies: greatest(archive, retention's start) + 60 days. */
+  backupRemovalAt?: string;
 };
 
 /** What a checkpoint is compared by at the next stop: the fingerprint of what
@@ -176,6 +186,9 @@ export type CloudV2LifecycleWorkspace = CloudV2Workspace & {
   workerOffUnverified?: true;
   /** Retention S2: a maintenance wake in flight. A user wake that finds `stopping` waits for it. */
   maintenance?: { attempt: string; phase: "waking" | "adopting" | "stopping"; startedAt: string };
+  /** Retention S3: this stop's machine was scrubbed at its archived wake; 'backup' means an open restores the
+   * checkout's environment files from the backup before the worker starts. */
+  archiveScrub?: "backup" | "clean" | "partial";
 };
 /** `from` is null for Boat's stock image; `prune` lists the other recipe
  * checkouts a v3 image starts with. */
@@ -219,13 +232,17 @@ export type CloudV2WorkspaceRow = {
   lost_work_restored?: "none" | "earlier" | null; lost_work_since?: Date | null;
   checkout_path?: string | null;
   folder?: string | null;
+  keep_set_at?: Date | null; archive_reason?: "manual" | "inactive" | "member_left" | null;
+  stopped_at?: Date | null; machine_stopped_at?: Date | null; machine_data_expired_at?: Date | null;
+  archive_wake_done_at?: Date | null; checkpoint_object?: string | null; retention_started_at?: Date | null;
 };
 type Row = CloudV2WorkspaceRow;
 
 const WORKSPACE_COLUMNS_SQL = sql`id, org_id, creator_user_id, name, number, title, repository, branch, base_branch, state, boat_sandbox_id,
   computer_build_id, error_code, active_at, archived_at, created_at, updated_at, source_pending, created_by_session_id, setup_status,
   agent_cost_usd, agent_cost_turns, agent_cost_estimated_turns, private_owner_user_id, project_id, checkout_path, folder,
-  lost_work_restored, lost_work_since`;
+  lost_work_restored, lost_work_since, keep_set_at, archive_reason, stopped_at, machine_stopped_at, machine_data_expired_at,
+  archive_wake_done_at, checkpoint_object, retention_started_at`;
 const COLUMNS = WORKSPACE_COLUMNS_SQL.text;
 export const CLOUD_V2_WORKSPACE_COLUMNS = COLUMNS.split(",").map(value => value.trim());
 
@@ -242,13 +259,14 @@ type LifecycleRow = Row & {
   backup_probe?: BackupProbe | null; backup_probe_generation?: string | null; worker_off_unverified_at?: Date | null;
   worker_off_verified_generation?: string | null;
   maintenance_attempt?: string | null; maintenance_phase?: "waking" | "adopting" | "stopping" | null; maintenance_started_at?: Date | null;
+  archive_scrub?: "backup" | "clean" | "partial" | null; archive_scrubbed_generation?: string | null;
 };
 const LIFECYCLE_COLUMNS = `${COLUMNS}, lease_renewed_at, base_commit, restore_pending, restore_attempt, restore_create, checkpoint_uploads,
   execution_mode, execution_transition_id, execution_restore_claimed_at, execution_initiator_user_id, execution_intent_id, execution_intent_authority, access_epoch,
   stop_generation, checkpoint_stop_generation,
   checkpoint_object, checkpoint_key, checkpoint_sha256, checkpoint_bytes, checkpoint_saved_at, checkpoint_reuse, checkpoint_retry_fork,
   backup_probe, backup_probe_generation, worker_off_unverified_at, worker_off_verified_generation,
-  maintenance_attempt, maintenance_phase, maintenance_started_at`;
+  maintenance_attempt, maintenance_phase, maintenance_started_at, archive_scrub, archive_scrubbed_generation`;
 type RetryRow = LifecycleRow & { retry_stopped_at: Date; checkpoint_retry_generation: string; checkpoint_retry_attempts: number; checkpoint_retry_exhausted_at: Date | null };
 
 function uploadHorizon(uploads: Record<string, string>): string | null {
@@ -298,7 +316,8 @@ export function cloudV2LifecycleWorkspaceFromRow(row: LifecycleRow): CloudV2Life
         && row.worker_off_verified_generation !== row.stop_generation)
       ? { workerOffUnverified: true as const } : {}),
     ...(row.maintenance_attempt && row.maintenance_phase && row.maintenance_started_at
-      ? { maintenance: { attempt: row.maintenance_attempt, phase: row.maintenance_phase, startedAt: row.maintenance_started_at.toISOString() } } : {}) };
+      ? { maintenance: { attempt: row.maintenance_attempt, phase: row.maintenance_phase, startedAt: row.maintenance_started_at.toISOString() } } : {}),
+    ...(row.archive_scrub && row.archive_scrubbed_generation === row.stop_generation ? { archiveScrub: row.archive_scrub } : {}) };
 }
 const lifecycleWorkspace = cloudV2LifecycleWorkspaceFromRow;
 
@@ -341,6 +360,53 @@ function workspace(row: Row): CloudV2Workspace {
     ...(row.checkout_path ? { checkoutFolder: row.checkout_path } : {}),
     ...(row.folder ? { folder: row.folder } : {}),
     ...(row.lost_work_restored && row.lost_work_since ? { lostWork: { restored: row.lost_work_restored, stoppedAt: row.lost_work_since.toISOString() } } : {}),
+    // Retention's fields only where retention runs: with the switch off a document is exactly what it was.
+    ...(retentionDocuments ? { keep: Boolean(row.keep_set_at) && !row.archived_at, ...archiveFields(row) } : {}),
+  };
+}
+
+let retentionDocuments = false;
+/** Retention S3: whether workspace documents carry retention's fields (keep, archiveReason, machineExpectedGoneAt,
+ * backupRemovalAt). Set once at composition from CLOUD_V2_RETENTION_ENABLED; every path that serves a document
+ * (get, list, team views, the composite routes) goes through workspace(), so none can disagree. Off by default. */
+export function setCloudV2RetentionDocuments(enabled: boolean): void { retentionDocuments = enabled; }
+
+/** An archived workspace's backup is removed this long after its archive, counted from when retention first
+ * applied if that is later: no clock starts from history. S4's removal uses this same expression. */
+export const CLOUD_V2_BACKUP_REMOVAL_DAYS = 60;
+export const CLOUD_V2_BACKUP_REMOVAL_AT_SQL =
+  `greatest(w.archived_at, w.retention_started_at) + make_interval(days => ${CLOUD_V2_BACKUP_REMOVAL_DAYS})`;
+/** The same date, in the document; null until both clocks exist. */
+export function cloudV2BackupRemovalAt(archivedAt: Date | null | undefined, retentionStartedAt: Date | null | undefined): Date | null {
+  if (!(archivedAt instanceof Date) || !(retentionStartedAt instanceof Date)) return null;
+  return new Date(Math.max(archivedAt.getTime(), retentionStartedAt.getTime()) + CLOUD_V2_BACKUP_REMOVAL_DAYS * DAY_MS);
+}
+
+const DAY_MS = 24 * 60 * 60_000;
+/** Retention S3: an archived workspace's final backup is still to be taken. Settled once this stop has a
+ * backup (a wake that found the checkout changed takes that cover away), or a clean probe nothing has
+ * changed since, or this stop's retries are exhausted, or 12 days after the archive. Over alias w. */
+const FINAL_BACKUP_PENDING = `(w.archived_at IS NOT NULL AND w.archived_at > clock_timestamp() - interval '12 days'
+  AND w.checkpoint_stop_generation IS DISTINCT FROM w.stop_generation
+  AND NOT (w.backup_probe = 'clean' AND w.backup_probe_generation = w.stop_generation
+    AND w.changed_since_stop_generation IS DISTINCT FROM w.stop_generation)
+  AND NOT (w.checkpoint_retry_generation IS NOT DISTINCT FROM w.stop_generation AND w.checkpoint_retry_exhausted_at IS NOT NULL))`;
+/** Retention S3's archive fields. Boat removes a machine about 14 days after its last stop; an archived
+ * workspace still owed its one wake has it 10 days later, so 24 days from now's last stop. */
+function archiveFields(row: Row): Pick<CloudV2Workspace, "archiveReason" | "machineExpectedGoneAt" | "backupRemovalAt"> {
+  if (!row.archived_at) return {};
+  const lastStop = [row.machine_stopped_at, row.stopped_at].filter((at): at is Date => at instanceof Date)
+    .reduce<Date | null>((latest, at) => !latest || at > latest ? at : latest, null);
+  const woken = row.archive_wake_done_at instanceof Date && row.archive_wake_done_at >= row.archived_at;
+  const estimate = lastStop ? lastStop.getTime() + (woken ? 14 : 24) * DAY_MS : null;
+  // An estimate already past (an overdue wake) says nothing true: absent rather than a past date.
+  const gone = !row.boat_sandbox_id ? null : row.machine_data_expired_at ? { at: row.machine_data_expired_at.toISOString(), estimate: false }
+    : estimate !== null && estimate > Date.now() ? { at: new Date(estimate).toISOString(), estimate: true } : null;
+  const removal = row.checkpoint_object ? cloudV2BackupRemovalAt(row.archived_at, row.retention_started_at) : null;
+  return {
+    ...(row.archive_reason ? { archiveReason: row.archive_reason } : {}),
+    ...(gone ? { machineExpectedGoneAt: gone } : {}),
+    ...(removal ? { backupRemovalAt: removal.toISOString() } : {}),
   };
 }
 export { workspace as cloudV2WorkspaceFromRow };
@@ -771,6 +837,9 @@ export class CloudV2Store {
       const { rows } = await tx.query<Row>(
         `UPDATE cloud_v2_workspaces SET
            archived_at = CASE WHEN $3::boolean THEN coalesce(archived_at, clock_timestamp()) ELSE NULL END,
+           archive_reason = CASE WHEN NOT $3::boolean THEN NULL WHEN archived_at IS NULL THEN 'manual' ELSE archive_reason END,
+           keep_set_at = CASE WHEN $3::boolean THEN NULL ELSE keep_set_at END,
+           keep_set_by = CASE WHEN $3::boolean THEN NULL ELSE keep_set_by END,
            restart_stop_generation = $4::bigint,
            execution_initiator_user_id = CASE WHEN $5::uuid IS NOT NULL AND $6::boolean THEN $5 ELSE execution_initiator_user_id END,
            execution_intent_id = CASE WHEN $5::uuid IS NOT NULL AND $6::boolean THEN gen_random_uuid() ELSE execution_intent_id END,
@@ -1504,32 +1573,39 @@ export class CloudV2Store {
     Promise<(CloudV2LifecycleWorkspace & { retry: CloudV2CheckpointRetry }) | null> {
     const { rows } = await withSystemTx(this.pool, tx => tx.query<RetryRow>(
       `WITH due AS MATERIALIZED (
-         SELECT id FROM cloud_v2_workspaces
+         SELECT w.id FROM cloud_v2_workspaces w
          WHERE NOT (id = ANY($4::uuid[])) AND (
            (checkpoint_retry_fork IS NOT NULL AND state NOT IN ('deleting','deleted')
              AND coalesce(checkpoint_retry_at, '-infinity') <= clock_timestamp())
            OR (state = 'stopped' AND boat_sandbox_id IS NOT NULL AND NOT restore_pending
              AND checkpoint_stop_generation IS DISTINCT FROM stop_generation
+             -- Retention S3: an archive's final backup counts its 12 days from the archive, and goes first.
+             AND (coalesce(stopped_at, updated_at) > clock_timestamp() - make_interval(secs => $3::double precision / 1000)
+               OR ($5::boolean AND ${FINAL_BACKUP_PENDING}))
              -- Retention S2: not while a maintenance wake has the machine running.
              AND (maintenance_attempt IS NULL OR maintenance_started_at < clock_timestamp() - interval '10 minutes')
-             AND coalesce(stopped_at, updated_at) > clock_timestamp() - make_interval(secs => $3::double precision / 1000)
              AND (checkpoint_retry_generation IS DISTINCT FROM stop_generation OR checkpoint_retry_exhausted_at IS NULL)
              AND CASE WHEN checkpoint_retry_generation IS NOT DISTINCT FROM stop_generation THEN coalesce(checkpoint_retry_at, '-infinity')
+               WHEN $5::boolean AND ${FINAL_BACKUP_PENDING} THEN '-infinity'
                ELSE CASE WHEN $5::boolean THEN greatest(coalesce(stopped_at, updated_at), coalesce(retention_started_at, '-infinity'))
                  ELSE coalesce(stopped_at, updated_at) END + make_interval(secs => $2::double precision / 1000) END <= clock_timestamp()
-             AND (NOT $5::boolean OR backup_probe IS DISTINCT FROM 'clean' OR backup_probe_generation IS DISTINCT FROM stop_generation)
+             AND (NOT $5::boolean OR backup_probe IS DISTINCT FROM 'clean' OR backup_probe_generation IS DISTINCT FROM stop_generation
+               OR ${FINAL_BACKUP_PENDING})
              AND (NOT $5::boolean OR (SELECT count(*) FROM cloud_v2_workspaces f
                WHERE f.backup_forked_at > clock_timestamp() - interval '1 hour') < $6::integer)
              AND ($7::integer IS NULL OR ((SELECT count(*) FROM cloud_v2_maintenance_wakes m WHERE m.started_at > clock_timestamp() - interval '1 hour') < $7::integer
                AND (SELECT count(*) FROM cloud_v2_maintenance_wakes m WHERE m.started_at > clock_timestamp() - interval '1 day') < $8::integer))))
-         ORDER BY coalesce(checkpoint_retry_at, stopped_at, updated_at) LIMIT 1 FOR UPDATE SKIP LOCKED)
+         ORDER BY CASE WHEN $5::boolean AND ${FINAL_BACKUP_PENDING} THEN 0 ELSE 1 END, coalesce(checkpoint_retry_at, stopped_at, updated_at)
+         LIMIT 1 FOR UPDATE SKIP LOCKED)
        UPDATE cloud_v2_workspaces w SET
          checkpoint_retry_attempts = CASE WHEN w.checkpoint_retry_generation IS NOT DISTINCT FROM w.stop_generation THEN w.checkpoint_retry_attempts ELSE 0 END,
          checkpoint_retry_exhausted_at = CASE WHEN w.checkpoint_retry_generation IS NOT DISTINCT FROM w.stop_generation THEN w.checkpoint_retry_exhausted_at END,
          checkpoint_retry_generation = w.stop_generation,
          checkpoint_retry_at = clock_timestamp() + make_interval(secs => $1::double precision / 1000)
        FROM due WHERE w.id = due.id
-       RETURNING ${LIFECYCLE_COLUMNS.replace(/\b(\w+)\b/g, "w.$1")}, coalesce(w.stopped_at, w.updated_at) AS retry_stopped_at,
+       RETURNING ${LIFECYCLE_COLUMNS.replace(/\b(\w+)\b/g, "w.$1")},
+         CASE WHEN $5::boolean AND ${FINAL_BACKUP_PENDING} THEN greatest(coalesce(w.stopped_at, w.updated_at), w.archived_at)
+           ELSE coalesce(w.stopped_at, w.updated_at) END AS retry_stopped_at,
          w.checkpoint_retry_generation, w.checkpoint_retry_attempts, w.checkpoint_retry_exhausted_at`,
       [input.leaseMs, input.firstDelayMs, input.windowMs, input.excludeIds ?? [], input.retention !== undefined, input.retention?.forksPerHour ?? 0,
         input.retention?.maintenance?.perHour ?? null, input.retention?.maintenance?.perDay ?? null]));
@@ -1649,7 +1725,7 @@ export class CloudV2Store {
    * a null); an archived one on the same schedule, once per archive.
    * A wake whose mark went stale (its step died) is taken over. Serialized so the budget is exact. */
   async claimMaintenanceWake(input: { attempt: string; perHour: number; perDay: number; staleMs: number; excludeIds?: readonly string[] }):
-    Promise<(CloudV2LifecycleWorkspace & { maintenanceWake: { attempt: string; archived: boolean } }) | null> {
+    Promise<(CloudV2LifecycleWorkspace & { maintenanceWake: { attempt: string; archived: boolean; scrub?: ArchiveScrubMode } }) | null> {
     return withSystemTx(this.pool, async tx => {
       await tx.query("/* lock_purpose='cloud-v2-maintenance-claim' */ SELECT pg_advisory_xact_lock(hashtextextended('cloud-v2-maintenance-claim',0))");
       const budget = (await tx.query<{ hour: number; day: number }>(`SELECT
@@ -1667,18 +1743,27 @@ export class CloudV2Store {
              AND (m.started_at > clock_timestamp() - interval '1 hour'
                OR (m.outcome='gone' AND m.started_at > greatest(cloud_v2_workspaces.machine_stopped_at, cloud_v2_workspaces.stopped_at))))
            AND greatest(machine_stopped_at, stopped_at) + interval '10 days' + make_interval(secs => abs(hashtext(id::text)) % 43200) <= clock_timestamp()
-           -- Archived: one more wake on the machine's own schedule, then none.
+           -- Archived: one more wake on the machine's own schedule, then none. It scrubs the machine, so it
+           -- waits for the archive's final backup, but never past 12 days since the machine's stop: then
+           -- it runs as an ordinary wake (no scrub) and the next one, 10 days later, is the archived wake.
            AND (archived_at IS NULL OR archive_wake_done_at IS NULL OR archive_wake_done_at < archived_at)
+           AND (archived_at IS NULL OR NOT ${FINAL_BACKUP_PENDING.replace(/\bw\./g, "cloud_v2_workspaces.")}
+             OR greatest(machine_stopped_at, stopped_at) + interval '12 days' <= clock_timestamp())
          ORDER BY greatest(machine_stopped_at, stopped_at) LIMIT 1 FOR UPDATE SKIP LOCKED`, [input.excludeIds ?? [], input.staleMs])).rows[0];
       if (!due) return null;
       if (due.maintenance_attempt) await tx.query(`UPDATE cloud_v2_maintenance_wakes SET outcome='failed', finished_at=clock_timestamp()
         WHERE attempt=$1 AND finished_at IS NULL`, [due.maintenance_attempt]);
-      const { rows } = await tx.query<LifecycleRow>(`UPDATE cloud_v2_workspaces SET maintenance_attempt=$2, maintenance_phase='waking',
-          maintenance_started_at=clock_timestamp() WHERE id=$1 RETURNING ${LIFECYCLE_COLUMNS}`, [due.id, input.attempt]);
+      const { rows } = await tx.query<LifecycleRow & { scrub_mode: ArchiveScrubMode | null }>(`UPDATE cloud_v2_workspaces w SET maintenance_attempt=$2, maintenance_phase='waking',
+          maintenance_started_at=clock_timestamp() WHERE w.id=$1 RETURNING ${LIFECYCLE_COLUMNS.replace(/\b(\w+)\b/g, "w.$1")},
+          CASE WHEN w.archived_at IS NULL OR (w.archive_wake_done_at IS NOT NULL AND w.archive_wake_done_at >= w.archived_at) OR ${FINAL_BACKUP_PENDING} THEN NULL
+            WHEN w.checkpoint_stop_generation IS NOT DISTINCT FROM w.stop_generation THEN 'backup'
+            WHEN w.backup_probe = 'clean' AND w.backup_probe_generation = w.stop_generation
+              AND w.changed_since_stop_generation IS DISTINCT FROM w.stop_generation THEN 'reseed' ELSE 'keep' END AS scrub_mode`, [due.id, input.attempt]);
       await tx.query(`INSERT INTO cloud_v2_maintenance_wakes (workspace_id, attempt, kind, deadline_at)
         SELECT id, $2, 'wake', greatest(machine_stopped_at, stopped_at) + interval '14 days' FROM cloud_v2_workspaces WHERE id=$1`, [due.id, input.attempt]);
       const row = rows[0]!;
-      return { ...lifecycleWorkspace(row), maintenanceWake: { attempt: input.attempt, archived: row.archived_at !== null } };
+      return { ...lifecycleWorkspace(row), maintenanceWake: { attempt: input.attempt, archived: row.archived_at !== null,
+        ...(row.scrub_mode ? { scrub: row.scrub_mode } : {}) } };
     });
   }
 
@@ -1689,6 +1774,120 @@ export class CloudV2Store {
       `UPDATE cloud_v2_workspaces SET maintenance_phase='stopping' WHERE id=$1 AND state='stopped' AND maintenance_attempt=$2
          AND maintenance_phase='waking'`, [id, attempt]));
     return Boolean(result.rowCount);
+  }
+
+  /** Retention S3: a person's own call on the workspace that does not already stamp active_at, for the
+   * 30-day clock. At most every 30 seconds; inside that window it takes no lock at all, and outside it
+   * never waits for a row another transaction holds (that call simply goes unrecorded). */
+  async personActivity(id: string): Promise<void> {
+    await withSystemTx(this.pool, tx => tx.query(
+      `WITH due AS (SELECT id FROM cloud_v2_workspaces WHERE id=$1
+          AND coalesce(person_activity_at, '-infinity') < clock_timestamp() - interval '30 seconds' FOR NO KEY UPDATE SKIP LOCKED)
+       UPDATE cloud_v2_workspaces w SET person_activity_at=clock_timestamp() FROM due WHERE w.id=due.id`, [id]));
+  }
+
+  /** Retention S3: Keep, set or cleared by anyone who can use the workspace (its creator in legacy mode,
+   * any eligible member in shared execution, a personal project's member only). Counts as activity. Keep
+   * exists only for a workspace that is not archived (owner decision, 2026-11-22): setting it on an archived
+   * one is refused, clearing it there changes nothing, and every archive clears it. */
+  async setKeep(id: string, userId: string, keep: boolean): Promise<CloudV2Workspace> {
+    return withSystemTx(this.pool, async tx => {
+      const current = (await tx.query<Row>(`SELECT ${COLUMNS} FROM cloud_v2_workspaces w
+        WHERE w.id=$1 AND w.state <> 'deleted' AND ${cloudV2ActorAccess("$2")} AND ${LIVE_ACCESS} FOR UPDATE`, [id, userId])).rows[0];
+      if (!current) throw notFound();
+      if (current.state === "deleting") throw new HttpError(409, "workspace_deleting", "This cloud workspace is being deleted");
+      if (current.archived_at) {
+        if (keep) throw new HttpError(409, "keep_refused_archived", "Keep is only for a workspace that is not archived. Open it first.");
+        return workspace(current);
+      }
+      const { rows } = await tx.query<Row>(
+        `UPDATE cloud_v2_workspaces w SET keep_set_at = CASE WHEN $2::boolean THEN coalesce(keep_set_at, clock_timestamp()) END,
+           keep_set_by = CASE WHEN NOT $2::boolean THEN NULL WHEN keep_set_at IS NULL THEN $3::uuid ELSE keep_set_by END,
+           person_activity_at = clock_timestamp()
+         WHERE w.id=$1 RETURNING ${COLUMNS}`, [id, keep, userId]);
+      return workspace(rows[0]!);
+    });
+  }
+
+  /** Retention S3: the 30-day clock starts the first time retention applies to a workspace, never from
+   * its history. Bounded per call; a later start only ever archives later. */
+  async startRetentionClocks(limit: number): Promise<number> {
+    const result = await withSystemTx(this.pool, tx => tx.query(
+      `UPDATE cloud_v2_workspaces w SET retention_started_at=clock_timestamp()
+       WHERE w.id IN (SELECT id FROM cloud_v2_workspaces WHERE retention_started_at IS NULL AND state NOT IN ('deleting','deleted')
+         LIMIT $1 FOR UPDATE SKIP LOCKED)`, [limit]));
+    return result.rowCount ?? 0;
+  }
+
+  /** Retention S3's automatic archive: up to `limit` sleeping workspaces, oldest clock first, with no
+   * activity by anyone for `inactiveMs` since the later of their last activity and retention's start, not
+   * kept, with no wake, queued prompt, maintenance wake or live execution context, all rechecked in the
+   * same statement. No mail (owner decision, 2026-11-22): the document's archiveReason and dates say it. */
+  async archiveInactive(input: { inactiveMs: number; limit: number }): Promise<{ archived: { id: string; creatorUserId: string | null }[] }> {
+    return withSystemTx(this.pool, async tx => {
+      const { rows } = await tx.query<{ id: string; creator_user_id: string | null }>(
+        `WITH due AS MATERIALIZED (
+           SELECT w.id FROM cloud_v2_workspaces w
+           WHERE w.archived_at IS NULL AND w.keep_set_at IS NULL AND w.state IN ('stopped','failed') AND w.retention_started_at IS NOT NULL
+             AND greatest(w.active_at, w.person_activity_at, w.retention_started_at) < clock_timestamp() - make_interval(secs => $1::double precision / 1000)
+             AND w.maintenance_attempt IS NULL AND NOT w.restore_pending
+             AND NOT ${PENDING_WORKER_PROMPTS_SQL.text}
+             AND NOT EXISTS (SELECT 1 FROM cloud_v2_execution_contexts e WHERE e.workspace_id=w.id AND e.state='active' AND e.expires_at > clock_timestamp())
+           ORDER BY greatest(w.active_at, w.person_activity_at, w.retention_started_at) LIMIT $2 FOR UPDATE SKIP LOCKED)
+         UPDATE cloud_v2_workspaces w SET archived_at=clock_timestamp(), archive_reason='inactive', keep_set_at=NULL, keep_set_by=NULL FROM due
+         WHERE w.id=due.id AND w.archived_at IS NULL AND w.keep_set_at IS NULL AND w.state IN ('stopped','failed')
+         RETURNING w.id, w.creator_user_id`, [input.inactiveMs, input.limit]);
+      return { archived: rows.map(row => ({ id: row.id, creatorUserId: row.creator_user_id })) };
+    });
+  }
+
+  /** Retention S3: a departed member's personal-project workspaces, archived at once. The membership
+   * trigger does this in the removal's own transaction but skips a row another transaction holds; this
+   * sweep archives anything it skipped, and returns those still running or starting, for a stop. */
+  async archiveDepartedPrivate(limit: number): Promise<string[]> {
+    return withSystemTx(this.pool, async tx => {
+      const departed = `w.private_owner_user_id IS NOT NULL AND w.state NOT IN ('deleting','deleted')
+        AND NOT EXISTS (SELECT 1 FROM organization_members m WHERE m.org_id=w.org_id AND m.user_id=w.private_owner_user_id)`;
+      await tx.query(`UPDATE cloud_v2_workspaces SET archived_at=clock_timestamp(), archive_reason='member_left', keep_set_at=NULL, keep_set_by=NULL
+        WHERE id IN (SELECT w.id FROM cloud_v2_workspaces w WHERE w.archived_at IS NULL AND ${departed} LIMIT $1 FOR UPDATE SKIP LOCKED)`, [limit]);
+      return (await tx.query<{ id: string }>(`SELECT w.id FROM cloud_v2_workspaces w
+        WHERE w.archived_at IS NOT NULL AND w.state IN ('running','starting') AND ${departed} LIMIT $1`, [limit])).rows.map(row => row.id);
+    });
+  }
+
+  /** Retention S3: a member re-added gets their personal-project workspaces back (the trigger does it at
+   * once and skips a held row; this sweeps what it skipped). Only that member's own private rows. */
+  async restoreReturningPrivate(limit: number): Promise<number> {
+    return withSystemTx(this.pool, async tx => {
+      // As the membership trigger: under the team-ownership switch that cleared it, for an eligible member only.
+      await tx.query("SELECT set_config('app.cloud_team_ownership','1',true)");
+      const result = await tx.query(
+        `UPDATE cloud_v2_workspaces SET creator_user_id=private_owner_user_id
+         WHERE id IN (SELECT w.id FROM cloud_v2_workspaces w WHERE w.private_owner_user_id IS NOT NULL AND w.creator_user_id IS NULL
+           AND w.creator_absent_reason='left' AND w.state NOT IN ('deleting','deleted')
+           AND EXISTS (SELECT 1 FROM organization_members m JOIN users u ON u.id=m.user_id AND u.auth_status='active' AND u.deleted_at IS NULL
+             WHERE m.org_id=w.org_id AND m.user_id=w.private_owner_user_id AND NOT ${memberOnHoldSql("m.org_id", "m.user_id")})
+           LIMIT $1 FOR UPDATE SKIP LOCKED)`, [limit]);
+      return result.rowCount ?? 0;
+    });
+  }
+
+  /** Stops an archived workspace that is still running or starting, through the ordinary archive path
+   * (the same intent a manual archive records). Never waits for a held row: the next sweep retries. */
+  async archiveForSystem(id: string): Promise<boolean> {
+    return withSystemTx(this.pool, async tx => {
+      const row = (await tx.query<Row>(`SELECT ${COLUMNS} FROM cloud_v2_workspaces WHERE id=$1 FOR UPDATE SKIP LOCKED`, [id])).rows[0];
+      if (!row?.archived_at || (row.state !== "running" && row.state !== "starting")) return false;
+      const { moved } = await this.lifecycleIntent(tx, id, row, "archive");
+      await clearStoppedExecutionTransition(tx, id);
+      return moved;
+    });
+  }
+
+  /** Retention S3: the scrub's environment files are back on the machine; a later start restores nothing. */
+  async clearArchiveScrub(id: string, generation: string): Promise<void> {
+    await withSystemTx(this.pool, tx => tx.query(
+      "UPDATE cloud_v2_workspaces SET archive_scrub='clean' WHERE id=$1 AND archive_scrubbed_generation=$2::bigint AND archive_scrub='backup'", [id, generation]));
   }
 
   /** A person's start takes a running maintenance wake over, in one statement: the wake lets go at its
@@ -1711,20 +1910,35 @@ export class CloudV2Store {
 
   /** Ends a maintenance wake on every path: clears its mark and records what Boat reported. */
   async finishMaintenance(id: string, attempt: string, result: { outcome: "stopped" | "adopted" | "gone" | "failed"; machineStoppedAt?: Date | null;
-    workerFoundRunning?: boolean; workerOff?: boolean; snapshotAvailable?: boolean; dataExpiredAt?: Date | null }): Promise<void> {
+    workerFoundRunning?: boolean; workerOff?: boolean; snapshotAvailable?: boolean; dataExpiredAt?: Date | null;
+    /** Retention S3: a file under a checkout is newer than the stop's marker (or the check could not tell). */
+    changedSinceStop?: boolean;
+    /** Retention S3: the archived wake's scrub result; its presence makes this the archived workspace's one wake. */
+    scrub?: ArchiveScrubResult }): Promise<void> {
     await withSystemTx(this.pool, async tx => {
       await tx.query(`UPDATE cloud_v2_workspaces SET maintenance_attempt=NULL, maintenance_phase=NULL, maintenance_started_at=NULL,
           machine_stopped_at=coalesce($3::timestamptz, machine_stopped_at),
-          archive_wake_done_at=CASE WHEN archived_at IS NOT NULL AND $4 IN ('stopped','gone') THEN clock_timestamp() ELSE archive_wake_done_at END,
+          archive_wake_done_at=CASE WHEN archived_at IS NOT NULL AND ($4 = 'gone' OR $4 = 'stopped' AND $7::text IS NOT NULL) THEN clock_timestamp() ELSE archive_wake_done_at END,
+          archive_scrub=CASE WHEN $7::text IS NOT NULL THEN $7::text ELSE archive_scrub END,
+          archive_scrubbed_at=CASE WHEN $7::text IS NOT NULL THEN clock_timestamp() ELSE archive_scrubbed_at END,
+          archive_scrubbed_generation=CASE WHEN $7::text IS NOT NULL THEN stop_generation ELSE archive_scrubbed_generation END,
+          -- The machine now holds what this stop's backup may not: that backup is an earlier one from here on.
+          changed_since_stop_at=CASE WHEN $6::boolean THEN clock_timestamp() ELSE changed_since_stop_at END,
+          changed_since_stop_generation=CASE WHEN $6::boolean THEN stop_generation ELSE changed_since_stop_generation END,
+          checkpoint_stop_generation=CASE WHEN $6::boolean AND checkpoint_stop_generation = stop_generation THEN NULL ELSE checkpoint_stop_generation END,
+          machine_data_expired_at=coalesce($8::timestamptz, machine_data_expired_at),
           worker_off_verified_generation=CASE WHEN $5::boolean THEN stop_generation ELSE worker_off_verified_generation END,
           worker_off_unverified_at=CASE WHEN $5::boolean THEN NULL WHEN $5::boolean IS FALSE THEN coalesce(worker_off_unverified_at, clock_timestamp())
             ELSE worker_off_unverified_at END
-        WHERE id=$1 AND maintenance_attempt=$2`, [id, attempt, result.machineStoppedAt ?? null, result.outcome, result.workerOff ?? null]);
+        WHERE id=$1 AND maintenance_attempt=$2`, [id, attempt, result.machineStoppedAt ?? null, result.outcome, result.workerOff ?? null,
+          result.changedSinceStop === true, result.scrub ?? null, result.dataExpiredAt ?? null]);
       await tx.query(`UPDATE cloud_v2_maintenance_wakes SET finished_at=clock_timestamp(), outcome=$2, worker_found_running=$3,
+          changed_since_stop=coalesce($7, changed_since_stop), scrub=coalesce($8, scrub),
           snapshot_available=coalesce($4, snapshot_available), data_expired_at=coalesce($5, data_expired_at),
           deadline_at=coalesce($5, CASE WHEN $6::timestamptz IS NOT NULL THEN $6::timestamptz + interval '14 days' END, deadline_at)
         WHERE attempt=$1 AND finished_at IS NULL`,
-        [attempt, result.outcome, result.workerFoundRunning ?? false, result.snapshotAvailable ?? null, result.dataExpiredAt ?? null, result.machineStoppedAt ?? null]);
+        [attempt, result.outcome, result.workerFoundRunning ?? false, result.snapshotAvailable ?? null, result.dataExpiredAt ?? null, result.machineStoppedAt ?? null,
+          result.changedSinceStop ?? null, result.scrub ?? null]);
     });
   }
 

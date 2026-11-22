@@ -84,7 +84,7 @@ export type CloudV2RouteDeps = {
   workspaceSync?: CloudWorkspaceSync;
   workspaceGithubReadTokens?: CloudWorkspaceGithubReadTokens;
   localDevices?: CloudLocalDeviceRoutes;
-  store: Pick<CloudV2Store, "activeComputer" | "createWorkspace" | "createWorkspaceOnce" | "readCreateReceipt" | "get" | "promptContext" | "list" | "requestLifecycle" | "transition" | "issueToken" | "listChats" | "messageWindow" | "searchMessages" | "messageRange" | "messageSince" | "markActive"> & Partial<Pick<CloudV2Store, "prompts" | "getByNumber" | "chatEdits" | "requestExecutionLifecycle" | "dismissLostWork">>;
+  store: Pick<CloudV2Store, "activeComputer" | "createWorkspace" | "createWorkspaceOnce" | "readCreateReceipt" | "get" | "promptContext" | "list" | "requestLifecycle" | "transition" | "issueToken" | "listChats" | "messageWindow" | "searchMessages" | "messageRange" | "messageSince" | "markActive"> & Partial<Pick<CloudV2Store, "prompts" | "getByNumber" | "chatEdits" | "requestExecutionLifecycle" | "dismissLostWork" | "personActivity" | "setKeep">>;
   /** Roll out only with a runtime that advertises durable prompt delivery. */
   promptOutbox?: boolean;
   computers: Pick<CloudV2Computers, "requireMember" | "requireAdmin" | "overview" | "enqueue" | "buildConfigured" | "buildSourceTargets" | "saveRecipe" | "discardRecipe" | "reactivate" | "log" | "logRepositories">
@@ -126,6 +126,8 @@ export type CloudV2RouteDeps = {
   /** Whether a create may return before its GitHub checks, which the
    * lifecycle then runs before any VM exists (a deploy gate, as for #903). */
   asyncCreate?(): boolean;
+  /** Retention S3 (CLOUD_V2_RETENTION_ENABLED): the Keep routes exist only then; absent, they answer 404. */
+  retention?: boolean;
   /** Public wss:// base of the realtime service, e.g. wss://realtime.example.com. */
   bridgeBaseUrl: string;
   /** Default branch names start with this, e.g. "zeros/". */
@@ -143,11 +145,20 @@ function workspaceDocument(workspace: CloudGithubWorkspaceDocument, promptOutbox
     capabilities: { ...CLOUD_V2_CAPABILITIES, ...(promptOutbox ? { promptOutbox: 1 as const } : {}), ...(workspace.github ? { githubPullRequests: 1 as const } : {}) } };
 }
 
+/** A person's pull request writes, which count as workspace activity; syncs, lists, checks and reads do not. */
+const GITHUB_WRITES = new Set(["gh.prCreate", "gh.prUpdate", "gh.prMarkReady", "gh.prMerge", "gh.prComment", "gh.prRerunFailed"]);
+
 export function createCloudV2Routes(deps: CloudV2RouteDeps): Hono {
   const app = new Hono();
   const chatEdits = deps.store.chatEdits;
   const connections = new WeakMap<Context, Promise<Awaited<ReturnType<CloudExecutionContexts["connectionWorkspace"]>>>>();
   const activeWorkspaces = new WeakMap<Context, Promise<boolean>>();
+  /** Retention S3: a person's own write on the workspace counts toward its 30-day clock (reads do not: the
+   * desktop revalidates them on its own). Pull request writes stamp (GITHUB_WRITES); connect, start and restart
+   * do not: an open or a wake reaches running, which stamps active_at, and a connected running workspace's
+   * worker reports activity, so those routes keep their measured transaction budgets. Never fails or delays
+   * the call beyond one statement. */
+  const personActivity = (id: string) => deps.store.personActivity?.(id).catch(() => {});
   const activeWorkspace = (c: Context, id: string) => {
     let pending = activeWorkspaces.get(c);
     if (!pending) {
@@ -201,6 +212,7 @@ export function createCloudV2Routes(deps: CloudV2RouteDeps): Hono {
       if (user.authentication && !await securityStreamAuthority(tx, user))
         throw new HttpError(401, "session_revoked", "Authentication is no longer current");
     });
+    await personActivity(id.data);
     return c.json({ chat });
   });
 
@@ -208,7 +220,11 @@ export function createCloudV2Routes(deps: CloudV2RouteDeps): Hono {
     const id = uuid.safeParse(c.req.param("id"));
     if (!id.success || !deps.github) throw new HttpError(404, "not_found", "Cloud pull requests are not available.");
     c.header("Cache-Control", "no-store");
-    return c.json(await deps.github.service.execute(id.data, c.get("user").id, await c.req.json().catch(() => null)));
+    const body = await c.req.json().catch(() => null);
+    const result = await deps.github.service.execute(id.data, c.get("user").id, body);
+    // A person's pull request write is activity, and may happen while the workspace sleeps; reads and syncs are not.
+    if (GITHUB_WRITES.has((body as { op?: unknown } | null)?.op as string)) await personActivity(id.data);
+    return c.json(result);
   });
 
   app.get("/v1/cloud-v2/runtime-canaries/:grantId", async c => {
@@ -325,8 +341,20 @@ export function createCloudV2Routes(deps: CloudV2RouteDeps): Hono {
   if (deps.store.dismissLostWork) app.post("/v1/cloud-v2/workspaces/:id/lost-work/dismiss", async c => {
     const id = uuid.safeParse(c.req.param("id"));
     if (!id.success) throw new HttpError(404, "not_found", "Cloud workspace not found");
-    return c.json({ workspace: await document(await deps.store.dismissLostWork!(id.data, c.get("user").id)) });
+    const workspace = await deps.store.dismissLostWork!(id.data, c.get("user").id);
+    await personActivity(workspace.id);
+    return c.json({ workspace: await document(workspace) });
   });
+
+  /** Retention S3: Keep exempts a workspace that is not archived from automatic archive. Anyone who can use
+   * the workspace sets or clears it (a personal project's: its member only). On an archived workspace setting
+   * it is refused (409 keep_refused_archived) and clearing it changes nothing. */
+  if (deps.retention === true && deps.store.setKeep) for (const [method, keep] of [["put", true], ["delete", false]] as const)
+    app[method]("/v1/cloud-v2/workspaces/:id/keep", rateLimit("cloud-workspace-keep", 12, 60_000), async c => {
+      const id = uuid.safeParse(c.req.param("id"));
+      if (!id.success) throw new HttpError(404, "not_found", "Cloud workspace not found");
+      return c.json({ workspace: await document(await deps.store.setKeep!(id.data, c.get("user").id, keep)) });
+    });
 
   /** History reads from the control plane's mirror; never wakes the VM. */
   app.post("/v1/cloud-v2/workspaces/:id/history", json, async c => {
