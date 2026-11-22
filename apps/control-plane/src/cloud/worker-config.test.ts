@@ -86,6 +86,14 @@ it("keeps retention off until a deployment enables it", () => {
   expect(loadConfig({ ...base, CLOUD_V2_RETENTION_BACKUP_FORKS_PER_HOUR: "8" }).cloudV2).toMatchObject({ backupForksPerHour: 8 });
   for (const value of ["0", "201", "2.5", "many"])
     expect(() => loadConfig({ ...base, CLOUD_V2_RETENTION_BACKUP_FORKS_PER_HOUR: value })).toThrow("CLOUD_V2_RETENTION_BACKUP_FORKS_PER_HOUR");
+  // S2's shared maintenance budget: the lifecycle's 20/hour and 120/day unless set.
+  expect(loadConfig(base).cloudV2).not.toHaveProperty("maintenancePerHour");
+  expect(loadConfig(base).cloudV2).not.toHaveProperty("maintenancePerDay");
+  expect(loadConfig({ ...base, CLOUD_V2_RETENTION_MAINTENANCE_PER_HOUR: " 40 ", CLOUD_V2_RETENTION_MAINTENANCE_PER_DAY: "900" }).cloudV2)
+    .toMatchObject({ maintenancePerHour: 40, maintenancePerDay: 900 });
+  for (const [name, values] of [["CLOUD_V2_RETENTION_MAINTENANCE_PER_HOUR", ["0", "721", "2.5", "-1", "many"]],
+    ["CLOUD_V2_RETENTION_MAINTENANCE_PER_DAY", ["0", "10000", "1e3", "many"]]] as const)
+    for (const value of values) expect(() => loadConfig({ ...base, [name]: value })).toThrow(name);
 });
 
 it("uses only a dedicated public canary key on Alpha and never accepts the worker signing key for that authority", () => {

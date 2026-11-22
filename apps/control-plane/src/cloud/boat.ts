@@ -29,7 +29,8 @@ export interface CloudV2Compute {
    * machine whose disk Boat has expired still reads archived, with snapshotAvailable false and
    * dataExpiredAt set; never compute that expiry from stoppedAt (Alpha, 2026-11-21). */
   inspect(sandboxId: string): Promise<{ name: string | null; state: string; stoppedAt?: Date | null; snapshotAvailable?: boolean; dataExpiredAt?: Date | null }>;
-  resume(sandboxId: string): Promise<void>;
+  /** Re-arms the lease to `ttlSeconds` (default CLOUD_V2_LEASE_SECONDS); harmless on a running machine. */
+  resume(sandboxId: string, ttlSeconds?: number): Promise<void>;
   /** Boat sets the deadline to now + ttl, without restarting the sandbox. */
   extendLease(sandboxId: string, ttlSeconds: number): Promise<void>;
   stop(sandboxId: string): Promise<void>;
@@ -121,8 +122,9 @@ export class BoatCloudV2Compute implements CloudV2Compute {
       ...(sandbox.dataExpiredAt ? { dataExpiredAt: new Date(sandbox.dataExpiredAt) } : {}) };
   }
 
-  async resume(sandboxId: string): Promise<void> {
-    await this.client.request(`/sandboxes/${this.id(sandboxId)}/resume`, { method: "POST", body: { ttlSeconds: CLOUD_V2_LEASE_SECONDS } });
+  async resume(sandboxId: string, ttlSeconds: number = CLOUD_V2_LEASE_SECONDS): Promise<void> {
+    if (!Number.isSafeInteger(ttlSeconds) || ttlSeconds <= 0 || ttlSeconds > CLOUD_V2_LEASE_SECONDS) throw new Error("Invalid Boat lease");
+    await this.client.request(`/sandboxes/${this.id(sandboxId)}/resume`, { method: "POST", body: { ttlSeconds } });
   }
 
   async extendLease(sandboxId: string, ttlSeconds: number): Promise<void> {
