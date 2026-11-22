@@ -57,6 +57,11 @@ database("execution wake request costs", () => {
         JSON.stringify([{ repository: f.workspace.repository, repositoryId: "42" }])]);
       await pool.query("UPDATE cloud_v2_workspaces SET computer_build_id=$2 WHERE id=$1", [f.workspace.id, build]);
     }
+    // Settle the creator's agent map first. Activation's login hint refreshes it in the background, and the
+    // listener is stopped mid-flight in beforeEach: when that refresh had already landed, hello's own refresh
+    // wrote nothing (39 statements); when it hadn't, hello wrote the map and notified (40). That race, not
+    // hello, made the count vary by one. Measured from the published map, hello costs the same every run.
+    await f.cp.execution.deps.logins.refreshPresentation(f.workspace.id);
     const { value, totals } = await measure("hello", "/v2/cloud/worker/hello", () => f.worker("hello", {
       protocol: 2, bootId: f.boot, runtimeSha256: "b".repeat(64),
     }, current ? { features: `${f.features},workspace-setup-v1,runtime-update-v1,boot-timings-v1,sync-v1,sync-context-v1,chat-edit-v1,creator-agent-logins-v1,creator-agent-models-v1,creator-commit-identity-v1` } : {}));
@@ -66,6 +71,9 @@ database("execution wake request costs", () => {
     if (computer) expect(config.workspace.setup).toBe("echo fixture-ready");
     expect(totals.transactions).toBeLessThanOrEqual(8);
     expect(totals.queries).toBeLessThanOrEqual(40);
+    // Exactly main's count at 7173b7ed: cloud submodules (C4) read nothing of their own here (their plan rides in
+    // workerRepositories' statement), so a workspace without any costs hello nothing more.
+    expect(totals.queries).toBe(current ? 39 : 36);
   });
 
   it.each([false, true])("delivers clean-worker bootstrap material in at most two transactions and twenty calls (environment: %s)", async environment => {

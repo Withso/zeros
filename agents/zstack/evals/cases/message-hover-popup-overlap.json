@@ -1,0 +1,9 @@
+{
+  "id": "message-hover-popup-overlap",
+  "kind": "scenario",
+  "area": "renderer-agents",
+  "fixedBy": "pr:1248",
+  "symptom": "The message hover popup (time, copy, side chat) anchored bottom-full of its message with no reserved band, so it covered the text of the prompt or row above user, in-between and output messages.",
+  "rule": "scripts/ui-smoke-message-hover.mjs: an overlay painted outside its owner needs reserved layout space; hover every user, in-between and output message and assert the popup rect intersects no transcript text.",
+  "check": "node scripts/ui-smoke-composer.mjs --scenario=message-hover"
+}

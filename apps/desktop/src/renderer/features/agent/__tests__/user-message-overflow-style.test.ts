@@ -23,7 +23,7 @@ describe("narrow transcript message overflow", () => {
     // it, so unbroken text wraps inside that.
     const turnContainer = code("../turn-container.tsx");
     expect(turnContainer).toContain(
-      '"zeros-agent-turn-prompt group/usermsg relative flex w-full max-w-(--chat-lane) min-w-0 flex-col items-end"',
+      '"zeros-agent-turn-prompt group/usermsg flex w-full max-w-(--chat-lane) min-w-0 flex-col items-end pt-5"',
     );
     expect(turnContainer).toContain('"w-fit max-w-7/8 min-w-0 cursor-text px-3 py-2 select-text"');
 

@@ -526,7 +526,10 @@ function AgentMessageHover({ message, ctx, wrap, enabled, children }: {
   if (!wrap) return <>{children}</>;
   const from = { messageId: message.messageId ?? message.id, promptId: ctx.turnPromptId ?? null, role: "agent" as const, text: message.text };
   return (
-    <div data-agent-message="" className="group/agentmsg relative">
+    // A settled message reserves the popup's band above its text, so the popup
+    // never covers the row or prompt above. Live rows keep the loader's slot.
+    <div data-agent-message="" className={cn("group/agentmsg", enabled && "pt-6")}>
+      <div className="relative">
       {children}
       {enabled && <MessageHoverActions
         text={message.text}
@@ -536,6 +539,7 @@ function AgentMessageHover({ message, ctx, wrap, enabled, children }: {
         onSideChatIntent={ctx.warmSideChat ? () => ctx.warmSideChat?.(from) : undefined}
         revealClassName="group-focus-within/agentmsg:pointer-events-auto group-focus-within/agentmsg:opacity-100 group-hover/agentmsg:pointer-events-auto group-hover/agentmsg:opacity-100"
       />}
+      </div>
     </div>
   );
 }

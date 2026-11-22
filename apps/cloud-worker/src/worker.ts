@@ -21,6 +21,7 @@ import { HistoryMirror } from "./sessions/history-mirror";
 import type { Transport } from "./transport";
 import { ChatService } from "./workspace/chat-service";
 import { cloneMissingCheckout, prepareCheckout, type CheckoutRefresh, type CheckoutResult } from "./workspace/checkout";
+import { fetchPlannedSubmodules } from "./workspace/submodules";
 import { WorkspaceSetup, readSetupOutput, type SetupRunner } from "./workspace/setup";
 import { NotifyUserService } from "./notify-user/service";
 import { SyncService } from "./workspace/sync-service";
@@ -300,6 +301,9 @@ export class CloudWorker {
     // A repository after the first of a workspace of several: its own token, asked for by name.
     const other = repository && this.scope?.several ? this.scope.repositories.slice(1).find(entry => entry.repository.toLowerCase() === repository.toLowerCase()) : undefined;
     if (other) return this.repositoryToken(other.repository, purpose, failed, this.acting ? contextId : undefined);
+    // A submodule this workspace fetches (workspace-submodules-v1): its own token, which the control plane mints read-only.
+    const submodule = repository && purpose === "git" && this.submoduleRepositories.has(repository.toLowerCase()) ? repository : undefined;
+    if (submodule) return this.repositoryToken(submodule, purpose, failed, this.acting ? contextId : undefined);
     if (!this.acting) return this.githubCredentials.get(purpose, failed);
     if (!contextId || !this.contexts) return Promise.reject(githubAuthenticationError("connection-changed"));
     if (!this.contexts.admits(contextId)) return this.contexts.admitted(contextId).then(admitted => admitted
@@ -316,6 +320,8 @@ export class CloudWorker {
   }
 
   private readonly repositoryGithub = new Map<string, { tokens: GithubTokens; recovery: GithubCredentialRecovery }>();
+  /** The configuration's planned submodule repositories, from before the first checkout fetches them. */
+  private submoduleRepositories: ReadonlySet<string> = new Set();
   private repositoryToken(repository: string, purpose: "git" | "gh", failed: string | undefined, contextId: string | undefined): Promise<GithubToken> {
     if (this.acting && (!contextId || !this.contexts?.admits(contextId))) return Promise.reject(githubAuthenticationError("connection-changed"));
     const key = JSON.stringify([contextId ?? null, repository.toLowerCase()]);
@@ -635,6 +641,8 @@ export class CloudWorker {
     this.githubUserTokensEnabled = config.githubUserTokens === 1;
     if (this.options.workspaceId && config.workspace.id !== this.options.workspaceId) throw new Error("Workspace identity changed.");
     const scope = new WorkspaceScope(config.workspace);
+    // A public one needs no token and gets none: its fetch can't ask, and Git never names it here.
+    this.submoduleRepositories = new Set(config.workspace.submodules?.filter(entry => !entry.public).map(entry => entry.repository.toLowerCase()));
     if (this.scope && (this.scope.key !== scope.key || this.scope.root !== scope.root || this.scope.workspace.repository !== scope.workspace.repository)) throw new Error("Workspace identity changed.");
     if (this.scope && this.environmentVersion !== config.environment?.versionId) throw new EnvironmentSeedError("cloud_environment_pin_changed");
     if (this.reviews && !this.stopping) this.reviews.validateConfiguration(config.codeReview);
@@ -758,7 +766,8 @@ export class CloudWorker {
       const bootstrapEnvironment = bootstrap && { git: this.contextGit(bootstrap.contextId, bootstrap.gitIdentity), zeros: { ZEROS_EXECUTION_CONTEXT: bootstrap.contextId } };
       const asStarter = <T>(work: () => T): T => bootstrapEnvironment ? operationEnvironment.run(bootstrapEnvironment, work) : work();
       const checking = measureStartup("worker_checkout", () => this.options.runtimeResume ? Promise.resolve(undefined)
-        : asStarter(() => (this.options.prepareCheckout ?? prepareCheckout)(config.workspace, this.gitEnvironment, timing)), timing)
+        : asStarter(async () => this.withSubmodules(0, config.workspace.submodules, config.workspace.checkoutPath,
+          await (this.options.prepareCheckout ?? prepareCheckout)(config.workspace, this.gitEnvironment, timing))), timing)
         .catch(async error => {
           await this.options.transport.reportCheckoutFailure?.().catch(() => {});
           throw tagged(error, "checkout_failed");
@@ -992,6 +1001,18 @@ export class CloudWorker {
     await report(entry.repository, { versionId, sequence: 1, state: "ready" }, signal).catch(() => {});
   }
 
+  /** A new checkout's planned submodules, before its setup runs. A resumed disk's are the person's own and never
+   * moved. One that can't be fetched is skipped; a closed line, never a path. */
+  private async withSubmodules<T extends CheckoutResult | void>(position: number, planned: WorkerConfig["workspace"]["submodules"], checkoutPath: string,
+    checkout: T): Promise<T> {
+    const entries = planned?.filter(entry => entry.position === position) ?? [];
+    if (!entries.length || !checkout || !checkout.createdBranch) return checkout;
+    const outcomes = await fetchPlannedSubmodules(checkoutPath, entries, this.gitEnvironment);
+    const skipped = outcomes.filter(outcome => !outcome.fetched).length;
+    if (skipped) this.options.log?.(`[submodules] repository ${position}: ${outcomes.length - skipped} fetched, ${skipped} skipped`);
+    return checkout;
+  }
+
   /** The repositories after the first: each checkout prepared on its branch, its own
    * workspace service (state, Git, files, remote fix-up) and setup. One that cannot be
    * prepared stays unavailable without failing the workspace. */
@@ -1007,7 +1028,8 @@ export class CloudWorker {
         if (!this.options.runtimeResume)
           await asStarter(() => (this.options.cloneCheckout ?? cloneMissingCheckout)(repositoryScope.workspace, entry.repository, this.gitEnvironment));
         const checkout = this.options.runtimeResume ? undefined
-          : await asStarter(() => (this.options.prepareCheckout ?? prepareCheckout)(repositoryScope.workspace, this.gitEnvironment, timing));
+          : await asStarter(async () => this.withSubmodules(position, scope.workspace.submodules, entry.checkoutPath,
+            await (this.options.prepareCheckout ?? prepareCheckout)(repositoryScope.workspace, this.gitEnvironment, timing)));
         runtime.refresh = checkout?.refresh; runtime.createdBranch = checkout?.createdBranch === true;
         await this.seedRepositoryEnvironment(repositoryScope, directory, entry);
         const run = commandRunner(repositoryScope.root, this.gitEnvironment);

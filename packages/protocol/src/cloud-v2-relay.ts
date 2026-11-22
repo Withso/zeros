@@ -78,6 +78,9 @@ export const CREATOR_AGENT_MODELS_FEATURE = "creator-agent-models-v1";
 export const CREATOR_COMMIT_IDENTITY_FEATURE = "creator-commit-identity-v1";
 /** A workspace of several repositories: config.workspace.root and .repositories, and a repository on GitHub token requests. */
 export const WORKSPACE_REPOSITORIES_FEATURE = "workspace-repositories-v1";
+/** "Fetch submodules" on a project repository: config.workspace.submodules, each fetched into its checkout read-only, and
+ * a submodule's repository on GitHub token requests. */
+export const WORKSPACE_SUBMODULES_FEATURE = "workspace-submodules-v1";
 /** R1 push, not poll: with config pushSignals: 1 the worker long-polls prompts 60 s, reports busy/idle on change plus
  * every 5 min, sends its activity pulse every 5 min and checks for runtime updates on a pushed hint (15 min fallback). */
 export const PUSH_SIGNALS_FEATURE = "push-signals-v1";
@@ -345,6 +348,17 @@ export const CloudV2ControlFrameSchema = z.discriminatedUnion("t", [
         /** Creator path: this repository's own pinned environment, seeded into its checkout. */
         environment: CloudWorkspaceEnvironmentSchema.optional(),
       }).strict()).min(2).max(10).optional(),
+      /** workspace-submodules-v1: the submodules to bring each repository's checkout to (position 0 is the first). The
+       * worker checks every field again; a submodule's token is read-only, so pushing from one is refused. */
+      submodules: z.array(z.object({
+        position: z.number().int().min(0).max(9),
+        path: z.string().min(1).max(1024),
+        repository: z.string().regex(/^[A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100}$/),
+        commit: z.string().regex(/^([0-9a-f]{40}|[0-9a-f]{64})$/),
+        gitDir: z.string().regex(/^modules\/[0-9a-f]{64}(\/modules\/[0-9a-f]{64}){0,2}$/),
+        /** GitHub reported it public at create: fetched with no credential (no helper, no prompt, no token). */
+        public: z.literal(true).optional(),
+      }).strict()).min(1).max(320).optional(),
     }).strict(),
     agents: CloudV2AgentLoginsSchema,
   }).strict(),

@@ -4,7 +4,7 @@ import { bodyLimit } from "hono/body-limit";
 import { z } from "zod";
 import { HttpError } from "../authz.js";
 import type { Tx } from "../db.js";
-import { CLOUD_V2_MAX_FRAME_BYTES, CloudV2WorkerActivitySchema, CloudV2WorkerHelloSchema, CloudV2WorkerHistorySchema, CloudV2WorkerTimingRequestSchema, CloudV2RenewRequestSchema, CloudV2TurnLeaseRequestSchema, CloudV2TerminalLeaseRequestSchema, CloudV2ClientLeaseRequestSchema, CloudV2BootstrapLeaseRequestSchema, CloudV2RetiredRequestSchema, CloudV2BootCleanRequestSchema, CloudV2AuthorityRequestSchema, ACTING_USER_FEATURE, BOOT_TIMINGS_FEATURE, MESSAGE_AUTHORITY_FEATURE, HISTORY_DIGEST_FEATURE, HISTORY_DIGEST_DELETIONS_FEATURE, HISTORY_BATCH_FEATURE, BEGIN_LEASE_FEATURE, TURN_EVENTS_FEATURE, WORKSPACE_REPOSITORIES_FEATURE, CloudV2WorkerHistoryBatchSchema, type CloudV2TurnEvent, type CloudV2ControlFrame } from "./contract.js";
+import { CLOUD_V2_MAX_FRAME_BYTES, CloudV2WorkerActivitySchema, CloudV2WorkerHelloSchema, CloudV2WorkerHistorySchema, CloudV2WorkerTimingRequestSchema, CloudV2RenewRequestSchema, CloudV2TurnLeaseRequestSchema, CloudV2TerminalLeaseRequestSchema, CloudV2ClientLeaseRequestSchema, CloudV2BootstrapLeaseRequestSchema, CloudV2RetiredRequestSchema, CloudV2BootCleanRequestSchema, CloudV2AuthorityRequestSchema, ACTING_USER_FEATURE, BOOT_TIMINGS_FEATURE, MESSAGE_AUTHORITY_FEATURE, HISTORY_DIGEST_FEATURE, HISTORY_DIGEST_DELETIONS_FEATURE, HISTORY_BATCH_FEATURE, BEGIN_LEASE_FEATURE, TURN_EVENTS_FEATURE, WORKSPACE_REPOSITORIES_FEATURE, WORKSPACE_SUBMODULES_FEATURE, CloudV2WorkerHistoryBatchSchema, type CloudV2TurnEvent, type CloudV2ControlFrame } from "./contract.js";
 import type { AuthorityPull } from "./execution/authority-pull.js";
 import { emitCloudV2Timing, type CloudV2TimingRecord } from "./lifecycle.js";
 import type { CloudV2Store, CloudV2WorkerSession, CloudV2Workspace } from "./store.js";
@@ -180,7 +180,7 @@ async function configuration(deps: CloudV2WorkerRouteDeps, workspace: CloudV2Wor
       const { api, agentLogins, agentModels, localCommands: _localCommands, localCommandReason: _localCommandReason, notifyUser: _notifyUser, mcpServers, githubPullRequests, githubUserTokens, gitIdentity: _gitIdentity, gitIdentitySource: _gitIdentitySource, agentInteractions, codeReview, historyReplacement: _historyReplacement, historyDigest: _historyDigest, bootTimings: _bootTimings, environment, runtimeUpdate: _runtimeUpdate, pushSignals, ...legacy } = config;
       if (environment && !features.has("workspace-environment-v1"))
         throw new HttpError(409, "cloud_environment_runtime_required", "Update the cloud runtime before opening this workspace.");
-      const { setup, setupScript, baseCommit, github, root, repositories, ...workspaceConfig } = config.workspace;
+      const { setup, setupScript, baseCommit, github, root, repositories, submodules, ...workspaceConfig } = config.workspace;
       if (setupScript !== undefined && !features.has("repository-setup-v1"))
         throw new HttpError(409, "cloud_repository_setup_runtime_required", "Update the cloud runtime before opening this workspace.");
       // A workspace of several repositories needs a worker that holds them all.
@@ -192,6 +192,8 @@ async function configuration(deps: CloudV2WorkerRouteDeps, workspace: CloudV2Wor
           ...(features.has("workspace-setup-v1") ? {} : { setup: undefined }),
           ...(features.has("checkout-v2") ? {} : { baseCommit: undefined }) })).map(entry => Object.fromEntries(Object.entries(entry).filter(([, value]) => value !== undefined)) as typeof entry) } : {}),
         ...(setupScript !== undefined ? { setupScript } : {}),
+        // An older worker opens the workspace without them (and keeps a fork's at the copy's commits).
+        ...(submodules && features.has(WORKSPACE_SUBMODULES_FEATURE) ? { submodules } : {}),
         ...(features.has("github-pr-v1") && github ? { github } : {}),
         ...(features.has("workspace-setup-v1") && setup !== undefined ? { setup } : {}),
         ...(features.has("checkout-v2") && baseCommit !== undefined ? { baseCommit } : {}) },

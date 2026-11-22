@@ -80,6 +80,19 @@ describe("cloud v2 create", () => {
     await expect(createCloudWorkspaceDocument({ organizationId, idempotencyKey: "rejected-intent",
       repository: { owner: "Example", name: "Fixture" }, baseBranch: "missing/topic" })).rejects.toMatchObject({ status, code, message });
   });
+  it("hands the create's one submodules message to its caller, never sending the callback", async () => {
+    const notice = "Some submodules weren't fetched: secret (no access).";
+    const fetch = vi.fn(async (_url: string, _init?: RequestInit) => Response.json({ workspace: workspace("main"), submoduleNotice: notice }, { status: 201 }));
+    vi.stubGlobal("fetch", fetch);
+    const onNotice = vi.fn();
+    await createCloudWorkspaceDocument({ organizationId, idempotencyKey: "create-notice", repository: { owner: "Example", name: "Fixture" }, onNotice });
+    expect(onNotice).toHaveBeenCalledExactlyOnceWith(notice);
+    expect(body(fetch)).toEqual({ organizationId, repository: "Example/Fixture" });
+    // None from an older server, or with nothing skipped.
+    fetch.mockImplementation(async () => Response.json({ workspace: workspace("main") }, { status: 201 }));
+    await createCloudWorkspaceDocument({ organizationId, idempotencyKey: "create-quiet", repository: { owner: "Example", name: "Fixture" }, onNotice });
+    expect(onNotice).toHaveBeenCalledTimes(1);
+  });
   // The worker prepends origin/; a full refs/heads/ name cannot work here.
   it("sends the repository slug and a plain base branch with the caller's idempotency key", async () => {
     const fetch = vi.fn(async (_url: string, _init?: RequestInit) => Response.json({ workspace: workspace("feature/ui") }, { status: 201 }));

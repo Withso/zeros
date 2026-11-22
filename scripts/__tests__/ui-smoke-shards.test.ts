@@ -81,6 +81,7 @@ const originalOrder = [
   "personal-organization",
   "mentions",
   "composer-attachments",
+  "message-hover",
   "customize",
   "tools",
   "native-tools",

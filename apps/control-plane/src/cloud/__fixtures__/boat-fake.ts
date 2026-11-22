@@ -202,6 +202,23 @@ export class FakeBoat implements CloudV2Compute {
     }
     const scripted = await this.script?.(machine, command, input);
     if (scripted) return scripted;
+    // A planned submodule's fetch (cloud/submodules.ts submoduleFetchLines): its work tree's .git and its module
+    // directory, with the gitlink commit checked out; refused when either is already there.
+    if (command.includes("zeros-submodule-fetched")) {
+      const plain = command.replace(/'\\''/g, "'");
+      const clone = /--separate-git-dir='([^']+)' -- 'https:\/\/github\.com\/([^']+)\.git' '([^']+)'/.exec(plain);
+      const commit = /checkout --quiet --detach ([0-9a-f]{40,64})/.exec(plain)?.[1];
+      if (!clone || !commit) return { exitCode: 1, stdout: "", timedOut: false };
+      const [, gitDir, repository, target] = clone as unknown as [string, string, string, string];
+      // Already there: moved to the planned commit only when its work tree points at the planned Git directory.
+      const existing = machine.files.get(`${target}/.git`);
+      if ((existing !== undefined || machine.files.has(`${gitDir}/HEAD`)) && existing !== `gitdir: ${gitDir}`)
+        return { exitCode: 3, stdout: "zeros-submodule-refused existing\n", timedOut: false };
+      machine.files.set(`${target}/.git`, `gitdir: ${gitDir}`);
+      machine.files.set(`${gitDir}/HEAD`, commit);
+      machine.files.set(`${gitDir}/origin`, `https://github.com/${repository}.git`);
+      return { exitCode: 0, stdout: "zeros-submodule-fetched\n", timedOut: false };
+    }
     // The ignored-file baseline (checkpoint.ts ignoredBaselineCommand): one file per checkout, named by its
     // path, under the home's retention-baseline directory; an existing one is never replaced. The project
     // builder's command (ready-copies.ts readyCopyBaselineCommand) removes the directory first.

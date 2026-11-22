@@ -10,6 +10,7 @@ import { Dialog, DialogBody, DialogContent, DialogDescription, DialogFooter, Dia
 import { IconButton } from "../../shared/ui/primitives/icon-button";
 import { MessageRow } from "../../shared/ui/primitives/message-row";
 import { Field } from "../../shared/ui/primitives/field";
+import { Switch } from "../../shared/ui/primitives/switch";
 import { CodeTextarea } from "../../shared/ui/primitives/code-textarea";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../../shared/ui/primitives/select";
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "../../shared/ui/primitives/sheet";
@@ -54,6 +55,9 @@ export function cloudProjectSharing(project: Pick<CloudProject, "level" | "canEd
 
 const setupLine = (entry: CloudProject["repositories"][number]) =>
   entry.setup?.split("\n").find(line => line.trim())?.trim() ?? (entry.setupScript ? entry.setupScript : null);
+
+/** What the switch does, and its limits, in one line. */
+export const SUBMODULES_HINT = "Each workspace fetches the GitHub submodules its creator can read, read-only. Pushing from a submodule isn't available yet. Changing this rebuilds the project.";
 
 /** A real limit of a project with several repositories, said where its repositories are listed. */
 export const SEVERAL_REPOSITORIES_AGENT_LIMIT = "Agents start in the project folder, so settings a repository keeps for its own agent (hooks, permissions, rules, its own MCP file) are not loaded. Instructions files are.";
@@ -230,6 +234,12 @@ function RepositorySheet({ project, entry, userKey, busy, active, onClose, onSav
                 <Button variant="secondary" size="sm" disabled={busy || value === (entry.setup ?? "")}
                   onClick={() => void onSave({ setup: value.trim() ? value : null })}>Save</Button>
               </div>
+            </SettingsGroup>
+            <SettingsGroup title="Submodules">
+              <SettingsRow label="Fetch submodules" hint={SUBMODULES_HINT}>
+                <Switch checked={entry.fetchSubmodules === true} disabled={busy} aria-label={`Fetch ${entry.repository}'s submodules`}
+                  onCheckedChange={fetchSubmodules => void onSave({ fetchSubmodules })} />
+              </SettingsRow>
             </SettingsGroup>
             <SettingsGroup title="Remove">
               <SettingsRow label="Remove from this project"
