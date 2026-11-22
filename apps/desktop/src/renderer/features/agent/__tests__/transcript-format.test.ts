@@ -8,6 +8,8 @@ import { describe, it, expect } from "vitest";
 
 import {
   formatHandoffTranscript,
+  HANDOFF_TOOL_CALLS,
+  HANDOFF_TOOL_OUTPUT_MAX,
   formatTranscript,
   TRANSCRIPT_PAYLOAD_LINES,
   TRANSCRIPT_PAYLOAD_MAX,
@@ -867,17 +869,41 @@ describe("formatTranscript — handoff", () => {
     expect(out).toContain("handoff transcript");
   });
 
-  it("drops tool calls, commands, searches and output for one deduplicated file list per turn", () => {
+  it("keeps tool calls with their output and one deduplicated file list per turn", () => {
     const out = formatTranscript(conversation(), "handoff", { folder: "/repo" }).text;
-    expect(out).not.toContain("### Tool");
-    expect(out).not.toContain("pnpm test");
-    expect(out).not.toContain("FAIL tokenizer.test.ts");
-    expect(out).not.toContain("escape\"");
-    expect(out).not.toContain("never.ts");
-    expect(out).not.toContain("read-only.ts");
+    expect(out).toContain("### Tool · Run pnpm test");
+    expect(out).toContain("pnpm test");
+    expect(out).toContain("FAIL tokenizer.test.ts");
+    expect(out).not.toContain("never.ts\n\n### Files");
     expect(out.match(/### Files changed/g)).toHaveLength(1);
-    expect(out.match(/- src\/tokenizer\.ts/g)).toHaveLength(1);
+    expect(out.match(/^- src\/tokenizer\.ts$/gm)).toHaveLength(1);
     expect(out).toContain("- src/old.ts");
+    expect(out).not.toMatch(/^- src\/never\.ts$/m);
+    expect(out).not.toMatch(/^- src\/read-only\.ts$/m);
+  });
+
+  it("keeps only the latest tool calls, with the end of each output", () => {
+    const calls = Array.from({ length: HANDOFF_TOOL_CALLS + 5 }, (_, i) =>
+      tool({ toolCallId: `t${i}`, title: `Run step-${i}-cmd`, toolKind: "execute", rawOutput: `out-${i}` }));
+    const long = tool({ toolCallId: "long", title: "Run build", toolKind: "execute",
+      rawOutput: `HEAD-LINE\n${"x".repeat(HANDOFF_TOOL_OUTPUT_MAX)}\nBUILD PASSED` });
+    const out = formatTranscript([text("user", "go"), ...calls, long, text("agent", "done")], "handoff").text;
+    expect(out).not.toContain("step-5-cmd");
+    expect(out).toContain("step-6-cmd");
+    expect(out).toContain(`step-${HANDOFF_TOOL_CALLS + 4}-cmd`);
+    expect(out.match(/### Tool ·/g)).toHaveLength(HANDOFF_TOOL_CALLS);
+    expect(out).toContain("BUILD PASSED");
+    expect(out).not.toContain("HEAD-LINE");
+    expect(out).toMatch(/… \(\d+ earlier characters\)/);
+  });
+
+  it("never counts an agent switch row as a tool call", () => {
+    const out = formatTranscript([
+      text("user", "go"),
+      tool({ title: "Switched to Sonnet", toolKind: "harness_switch" }),
+      text("agent", "ok"),
+    ], "handoff").text;
+    expect(out).not.toContain("### Tool");
   });
 
   it("is exported as the reusable builder and leaves full and concise unchanged", () => {
@@ -900,11 +926,10 @@ describe("formatTranscript — handoff", () => {
     expect(out).toContain("### Files changed");
     expect(out).toContain("- notes.txt");
     expect(out).toContain("- b.txt");
-    expect(out).not.toContain("PLUM");
   });
 
   it("omits a turn with nothing to hand off", () => {
-    expect(formatTranscript([tool({ title: "Read" })], "handoff").count).toBe(0);
+    expect(formatTranscript([tool({ title: "Switched to Sonnet", toolKind: "harness_switch" })], "handoff").count).toBe(0);
   });
 });
 

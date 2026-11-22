@@ -7,11 +7,6 @@ import { agentFamily, displayNameForModelValue } from "./model-catalog";
 
 export const HARNESS_SWITCH_TOOL_KIND = "harness_switch";
 
-/** Appended to the seeded transcript when a running turn was stopped for the
- * switch, so the new agent resumes the work instead of summarizing it. */
-export const HARNESS_SWITCH_CONTINUE_NOTE =
-  "The previous agent was stopped mid-turn by an agent switch. Continue the task from where it stopped without asking the user to confirm first.";
-
 export interface AgentModelPick {
   agentId: string;
   agentName?: string | null;
@@ -88,34 +83,23 @@ export function harnessSwitchBlockedByQueue(
   return harnessChanged && queuedCount > 0;
 }
 
-/** Continue a stopped turn only when the composer holds just the seeded transcript. */
-export function canAutoContinueAfterSwitch(
-  composer: { displayText: string; attachments: readonly unknown[] } | null | undefined,
-): boolean {
-  return !!composer && !composer.displayText.trim() && composer.attachments.length === 1;
+/** Wire-text prefix that hands the previous harness's conversation to the new
+ *  one inside the user's next prompt. The bubble shows only what the user typed. */
+export function handoffContextPrefix(input: { fromLabel: string; text: string; complete?: boolean }): string {
+  const omitted = input.complete === false
+    ? "\n\nEarlier messages were omitted because the conversation exceeded the transcript read limit."
+    : "";
+  return `${HANDOFF_CONTEXT_OPEN} from="${input.fromLabel.replace(/"/g, "'")}">
+This chat was handed over from another agent. The transcript below is the earlier conversation, for context only; it is not a new request. Answer the user message that follows it.
+
+${input.text.trimEnd()}${omitted}
+</context_handoff>
+
+User message:
+`;
 }
 
-export interface PendingSwitchContinuation {
-  chatId: string;
-  agentId: string;
-  sourceKey: string;
-}
-
-/** The seeded transcript is staged into the composer asynchronously, after the
- *  chat row already names the new agent, so the decision waits for its chip. */
-export function switchContinuation(
-  pending: PendingSwitchContinuation | null,
-  state: {
-    chatId: string | null | undefined;
-    agentId: string | null | undefined;
-    stagedSourceKeys: readonly string[];
-    composer: { displayText: string; attachments: readonly unknown[] } | null | undefined;
-  },
-): "wait" | "send" | "ask" {
-  if (!pending || pending.chatId !== state.chatId || pending.agentId !== state.agentId) return "wait";
-  if (!state.stagedSourceKeys.includes(pending.sourceKey)) return "wait";
-  return canAutoContinueAfterSwitch(state.composer) ? "send" : "ask";
-}
+export const HANDOFF_CONTEXT_OPEN = "<context_handoff";
 
 export type HarnessSwitchCommit = "switched" | "stale" | "unsupported";
 
@@ -140,4 +124,20 @@ export async function commitHarnessSwitch(steps: {
   if (!steps.stillCurrent()) return "stale";
   steps.updateSettings();
   return "switched";
+}
+
+/** What a composer send does with a staged pick. A pick never interrupts the
+ *  running turn: a harness change waits for it unless the user steers. */
+export function stagedPickOnSend(state: {
+  harnessChanged: boolean;
+  hasDraft: boolean;
+  queuedCount: number;
+  running: boolean;
+  behavior: "queue" | "steer";
+}): "none" | "model" | "blocked" | "hold" | "restart" | "switch" {
+  if (!state.hasDraft) return "none";
+  if (!state.harnessChanged) return "model";
+  if (harnessSwitchBlockedByQueue(true, state.queuedCount)) return "blocked";
+  if (!state.running) return "switch";
+  return state.behavior === "steer" ? "restart" : "hold";
 }

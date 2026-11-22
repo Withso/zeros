@@ -114,7 +114,7 @@ import { turnGet } from "../../platform/turns";
 import { refreshChatTurnRows, turnRowCache, turnRowKey } from "../../state/read-caches";
 import { useCachedRead } from "../../state/use-cached-read";
 import { findProjectForFolder } from "../../state/workspace-resolution";
-import { Bot, Square, ArrowLeft, Check, GitBranch, RotateCw } from "lucide-react";
+import { Bot, Square, ArrowLeft, Check, GitBranch } from "lucide-react";
 import {
   encodeAttachments,
   reportSkippedAttachments,
@@ -323,11 +323,9 @@ import {
 } from "./agent-history-client";
 import {
   buildHarnessSwitchMessage,
-  switchContinuation,
-  type PendingSwitchContinuation,
-  HARNESS_SWITCH_CONTINUE_NOTE,
-  harnessSwitchBlockedByQueue,
+  handoffContextPrefix,
   harnessSwitchTranscriptMode,
+  stagedPickOnSend,
   isHarnessChange,
   isPendingPick,
   commitHarnessSwitch,
@@ -1363,14 +1361,17 @@ function AgentChatBody({
     [chatThread, chatId, session.initialize, session.setModel, session.updateConfig, updateChatSettings, maybeShowCostBumpToast],
   );
 
-  // A started chat stages agent/model picks; nothing changes until the user
-  // applies the staged pick with the rotate button.
+  // A started chat stages agent/model picks; the next send applies them, so a
+  // pick never interrupts the running turn.
   const [stagedPickState, setStagedPickState] = useState<{ chatId: string; pick: AgentModelPick } | null>(null);
   const stagedPick = stagedPickState && stagedPickState.chatId === chatId && chatThread &&
     isPendingPick(stagedPickState.pick, chatThread) ? stagedPickState.pick : null;
   const cloudChat = isCloudWorkspace(chatThread?.folder);
-  const continueAfterSwitchRef = useRef<PendingSwitchContinuation | null>(null);
-  const [continueAfterSwitch, setContinueAfterSwitch] = useState(0);
+  // A send that waits for the running turn before it changes harness, then the
+  // send the new harness receives with its handoff once the chat names it.
+  const heldSwitchSendRef = useRef<string | null>(null);
+  const switchedSendRef = useRef<{ chatId: string; agentId: string; handoff: string } | null>(null);
+  const [switchSendTick, setSwitchSendTick] = useState(0);
 
   const recordSwitchRow = useCallback(
     (targetChatId: string, row: ReturnType<typeof buildHarnessSwitchMessage>, durable: boolean) => {
@@ -1387,17 +1388,12 @@ function AgentChatBody({
     [capabilitiesBridge],
   );
 
-  const applyStagedPick = useCallback(async () => {
-    if (!chatThread || !chatId || !stagedPick) return;
-    const pick = stagedPick;
-    if (harnessSwitchBlockedByQueue(
-      isHarnessChange(chatThread.agentId, pick.agentId),
-      queuedMessages.length,
-    )) {
-      toast.warning("Send or remove queued messages before switching agent.");
-      return;
-    }
-    setStagedPickState(null);
+  /** Moves the chat to the picked harness and returns the handoff the next
+   *  prompt carries ("" when the conversation is empty), or null when the
+   *  switch did not happen. A running turn is stopped only when `stopRunning`
+   *  (an explicit steer). */
+  const switchHarness = useCallback(async (pick: AgentModelPick, stopRunning: boolean): Promise<string | null> => {
+    if (!chatThread || !chatId) return null;
     const from = { agentId: chatThread.agentId, model: chatThread.model };
     const row = buildHarnessSwitchMessage({
       id: `harness-switch-${crypto.randomUUID()}`,
@@ -1405,29 +1401,29 @@ function AgentChatBody({
       to: pick,
       now: Date.now(),
     });
-    if (!isHarnessChange(chatThread.agentId, pick.agentId)) {
-      applyModelInPlace(pick.model);
-      void recordSwitchRow(chatId, row, true);
-      return;
-    }
-    const wasRunning = session.status === "streaming";
     // A cloud worker stops the running turn itself as part of its switch.
-    if (wasRunning && !cloudChat) {
+    if (stopRunning && !cloudChat) {
       try { await agentSessions.cancel(chatId); } catch { /* Local cancellation remains best-effort. */ }
     }
     const sourceLabel = transcriptPillLabel({ title: chatThread.title, summary: "" });
-    const mode = harnessSwitchTranscriptMode();
     const transcript = loadTranscriptSnapshot({
       chatId,
-      mode,
+      mode: harnessSwitchTranscriptMode(),
       lastMessageAt: Date.now(),
       meta: { title: sourceLabel, folder: chatThread.folder },
     });
     const born = newChatBornDefaults(pick.agentId);
     const { effort, fast } = resolveModelConfiguration(pick.agentId, pick.model, null);
     // The read above observes the engine before the row is written, so the
-    // seeded transcript is the conversation the previous agent saw.
-    await transcript.catch(() => null);
+    // handoff is the conversation the previous agent saw.
+    const snapshot = await transcript.catch((error) => {
+      console.error("[Zeros] agent switch transcript failed:", error);
+      return null;
+    });
+    if (!snapshot) {
+      toast.error("Couldn't read the conversation for the new agent.");
+      return null;
+    }
     const fromAgentId = chatThread.agentId;
     let committed: HarnessSwitchCommit;
     try {
@@ -1462,35 +1458,32 @@ function AgentChatBody({
     } catch (error) {
       console.error("[Zeros] agent switch failed:", error);
       toast.error(error instanceof Error && error.message ? error.message : "Couldn't switch agent.");
-      setStagedPickState({ chatId, pick });
-      return;
+      return null;
     }
     // An older cloud worker can't switch in place: open the picked agent in a new tab.
     if (committed === "unsupported") switchAgentModel({ ...pick, agentName: pick.agentName ?? "" });
-    if (committed !== "switched") return;
-    if (wasRunning) refreshChatTurnRows(chatId);
-    const delivery = transcript.then((snapshot) => {
-      if (snapshot.count === 0) return;
-      const attachment = buildForkTranscriptAttachment({
-        sourceChatId: chatId,
-        sourceLabel,
-        text: wasRunning
-          ? `${snapshot.text.trimEnd()}\n\n${HARNESS_SWITCH_CONTINUE_NOTE}\n`
-          : snapshot.text,
-        complete: snapshot.complete,
-        mode,
-      });
-      deliverTextAttachmentToChat(chatId, attachment);
-    }).catch((error) => {
-      console.error("[Zeros] agent switch transcript failed:", error);
-      toast.error("Couldn't attach the conversation for the new agent.");
+    if (committed !== "switched") return null;
+    if (stopRunning) refreshChatTurnRows(chatId);
+    if (snapshot.count === 0) return "";
+    return handoffContextPrefix({
+      fromLabel: pickLabel({ agentId: fromAgentId ?? "", agentName: chatThread.agentName, model: chatThread.model }),
+      text: snapshot.text,
+      complete: snapshot.complete,
     });
-    trackPendingTextAttachmentDelivery(chatId, delivery);
-    if (wasRunning) {
-      continueAfterSwitchRef.current = { chatId, agentId: pick.agentId, sourceKey: transcriptSourceKey(chatId) };
-      void delivery.then(() => setContinueAfterSwitch((n) => n + 1));
-    }
-  }, [chatThread, chatId, stagedPick, queuedMessages.length, cloudChat, session.status, agentSessions, applyModelInPlace, recordSwitchRow, updateChatSettings, capabilitiesBridge, switchAgentModel]);
+  }, [chatThread, chatId, cloudChat, agentSessions, recordSwitchRow, updateChatSettings, capabilitiesBridge, switchAgentModel]);
+
+  /** A same-harness pick changes the model in place, mid-turn included. */
+  const applyModelPick = useCallback((pick: AgentModelPick) => {
+    if (!chatThread || !chatId) return;
+    const row = buildHarnessSwitchMessage({
+      id: `harness-switch-${crypto.randomUUID()}`,
+      from: { agentId: chatThread.agentId, model: chatThread.model },
+      to: pick,
+      now: Date.now(),
+    });
+    applyModelInPlace(pick.model);
+    void recordSwitchRow(chatId, row, true);
+  }, [chatThread, chatId, applyModelInPlace, recordSwitchRow]);
 
   const stagePick = useCallback(
     (pick: AgentModelPick) => {
@@ -1508,10 +1501,10 @@ function AgentChatBody({
       <>
         <ModelPill
           agents={agentsList}
-          agentId={chatThread.agentId}
-          initialize={session.initialize}
+          agentId={stagedPick?.agentId ?? chatThread.agentId}
+          initialize={stagedPick && isHarnessChange(chatThread.agentId, stagedPick.agentId) ? null : session.initialize}
           onRefreshModels={isCloudWorkspace(chatThread.folder) ? session.refreshModelCatalog : undefined}
-          value={chatThread.model}
+          value={stagedPick ? stagedPick.model : chatThread.model}
           effort={chatThread.effort}
           fast={!!chatThread.fast}
           onSelectAgentModel={(sel) => {
@@ -1532,19 +1525,6 @@ function AgentChatBody({
             }
           }}
         />
-        {stagedPick && (
-          <Tooltip label={`Switch to ${pickLabel(stagedPick)}`}>
-            <IconButton
-              type="button"
-              size="compact"
-              label={`Switch to ${pickLabel(stagedPick)}`}
-              data-composer-switch-pick=""
-              onClick={() => void applyStagedPick()}
-            >
-              <RotateCw />
-            </IconButton>
-          </Tooltip>
-        )}
         {showPermissionToggle && (
           <PermissionToggle
             agentId={chatAgentId}
@@ -1572,7 +1552,6 @@ function AgentChatBody({
     cloudChat,
     stagePick,
     stagedPick,
-    applyStagedPick,
     applyModelInPlace,
     chatAgentId,
     showPermissionToggle,
@@ -3490,6 +3469,8 @@ function AgentChatBody({
        *  handed to the local session. A failure after this is retried by its
        *  owner, so the caller must not send the same text again. */
       onCommitted?: () => void;
+      /** The previous harness's conversation, prepended to the wire text only. */
+      handoffContext?: string;
       /** Summary imports from prior chats, prepended as <from_previous_chat> blocks. */
       imports?: import("../../state/store").SummaryImport[];
       /** Attachments from another surface (browser capture), encoded like paste and
@@ -3622,7 +3603,7 @@ function AgentChatBody({
           return;
         }
       }
-      const prefix = extras?.imports?.map(s => `<from_previous_chat name="${(s.title || "prior chat").replace(/"/g, "'")}"${s.agentId ? ` agent="${s.agentId}"` : ""}>\n${s.summary}\n</from_previous_chat>`).join("\n\n");
+      const prefix = (extras?.handoffContext ?? "") + (extras?.imports ?? []).map(s => `<from_previous_chat name="${(s.title || "prior chat").replace(/"/g, "'")}"${s.agentId ? ` agent="${s.agentId}"` : ""}>\n${s.summary}\n</from_previous_chat>`).join("\n\n");
       const queued = cloudQueuedPrompt({ cwd: chatThread!.folder, chatId, agentId: session.agentId ?? chatThread?.agentId,
         text: (prefix ? `${prefix}\n\n` : "") + expandMentionsInText(displayText, browserPickerSelection), displayText, snapshot,
         stagedAttachments: extras?.stagedAttachments, extraAttachments: extras?.extraAttachments,
@@ -3784,7 +3765,7 @@ function AgentChatBody({
             .join("\n\n") + "\n\n"
         : "";
     const wireText =
-      importPrefix + expandMentionsInText(displayText, browserPickerSelection);
+      (extras?.handoffContext ?? "") + importPrefix + expandMentionsInText(displayText, browserPickerSelection);
     let submittedDesignAttachments: ComposerAttachment[] = [];
     if (submittedDesignFrame) {
       if (!capabilitiesBridge) throw new Error("The frame context connection is unavailable.");
@@ -3909,25 +3890,67 @@ function AgentChatBody({
     }
   };
 
-  // A turn stopped by an agent switch continues under the new agent once the
-  // chat row names it and the seeded transcript is staged.
-  useEffect(() => {
-    const decision = switchContinuation(continueAfterSwitchRef.current, {
-      chatId,
-      agentId: chatThread?.agentId,
-      stagedSourceKeys,
-      composer: serializeComposerState(),
-    });
-    if (decision === "wait") return;
-    continueAfterSwitchRef.current = null;
-    // A draft the user is still writing is theirs to send.
-    if (decision === "ask") {
-      toast.info("The conversation is attached. Send to continue with the new agent.");
-      return;
+  /** The composer's own send. A staged pick applies here, so it never
+   *  interrupts the running turn: a model change goes with this message, and
+   *  a harness change waits for the turn unless the user steers. */
+  const submitComposer = async (
+    extras?: Parameters<typeof runSend>[1],
+    recordActivity = true,
+  ): Promise<boolean> => {
+    if (!readOnly && !sendInFlightRef.current && stagedPick && chatId) {
+      const pick = stagedPick;
+      const composer = serializeComposerState();
+      const action = stagedPickOnSend({
+        harnessChanged: isHarnessChange(chatThread?.agentId, pick.agentId),
+        hasDraft: !!composer && (!!composer.displayText.trim() || composer.attachments.length > 0),
+        queuedCount: queuedMessages.length,
+        running: composerStreaming,
+        behavior: extras?.followUpBehavior ?? getFollowUpBehavior(),
+      });
+      if (action === "model") applyModelPick(pick);
+      if (action === "blocked") {
+        toast.warning("Send or remove queued messages before switching agent.");
+        return false;
+      }
+      if (action === "hold") {
+        heldSwitchSendRef.current = chatId;
+        setSwitchSendTick((n) => n + 1);
+        toast.info(`Sends to ${pickLabel(pick)} when this turn finishes.`, { id: `switch-held-${chatId}` });
+        return false;
+      }
+      if (action === "switch" || action === "restart") {
+        sendInFlightRef.current = true;
+        try {
+          const handoff = await switchHarness(pick, action === "restart");
+          if (handoff === null) return false;
+          switchedSendRef.current = { chatId, agentId: pick.agentId, handoff };
+          setSwitchSendTick((n) => n + 1);
+        } finally {
+          sendInFlightRef.current = false;
+        }
+        return true;
+      }
     }
-    void handleSend();
+    return handleSend(undefined, extras, recordActivity);
+  };
+
+  // A switch waits for the running turn, so the previous agent is never cut off.
+  useEffect(() => {
+    if (!chatId || heldSwitchSendRef.current !== chatId || composerStreaming) return;
+    heldSwitchSendRef.current = null;
+    void submitComposer();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [continueAfterSwitch, chatId, chatThread?.agentId, stagedSourceKeys]);
+  }, [chatId, composerStreaming, switchSendTick]);
+
+  // The new harness's first prompt goes once the chat row names it, carrying
+  // the conversation hidden in the prompt.
+  useEffect(() => {
+    const pending = switchedSendRef.current;
+    if (!pending || pending.chatId !== chatId || pending.agentId !== chatThread?.agentId) return;
+    switchedSendRef.current = null;
+    void handleSend(undefined, { handoffContext: pending.handoff });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [switchSendTick, chatId, chatThread?.agentId]);
 
   /** Leave queued-edit mode. Restores the stashed pre-edit draft, releases
    *  the provider-side queue hold, and hands focus back to the composer. */
@@ -4137,7 +4160,7 @@ function AgentChatBody({
       if (editingQueuedRef.current) return false;
       const selected = queueSelectedRef.current;
       if (selected != null) void sendNowQueued(selected);
-      else void handleSend(undefined, {
+      else void submitComposer({
         followUpBehavior: getFollowUpBehavior() === "queue" ? "steer" : "queue",
       });
       return true;
@@ -4220,7 +4243,7 @@ function AgentChatBody({
       startQueuedEdit(selected);
       return;
     }
-    void handleSend(undefined, undefined, recordActivity);
+    void submitComposer(undefined, recordActivity);
   };
 
   // InlineEdit, the feedback pill and the empty-state composer send through this
@@ -4938,7 +4961,7 @@ function AgentChatBody({
                     void saveQueuedEdit();
                     return;
                   }
-                  handleSend();
+                  void submitComposer();
                 }}
               >
                 <PromptInputBody className="items-stretch rounded-none border-0 bg-transparent p-0 shadow-none has-[[data-slot=input-group-control]:focus-visible]:ring-0">

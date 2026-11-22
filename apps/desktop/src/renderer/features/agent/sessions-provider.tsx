@@ -2364,7 +2364,7 @@ export function AgentSessionsProvider({
         const queuedMsg: AgentTextMessage = {
           id: bubbleId, kind: "text", role: "user", text: displayText ?? text,
           createdAt: Date.now(), queued: true,
-          queuedEditable: !autoAction && !text.trimStart().startsWith("<from_previous_chat"),
+          queuedEditable: !autoAction && !/^\s*<(?:from_previous_chat|context_handoff)/.test(text),
           ...(bubbleAttachments?.length ? { attachments: bubbleAttachments } : {}),
           ...(segments?.length ? { segments } : {}), ...(autoAction ? { autoAction } : {}),
         };
@@ -2496,7 +2496,7 @@ export function AgentSessionsProvider({
           // mentions re-expand. A send carrying an invisible import preamble
           // (<from_previous_chat>) stays uneditable, or editing would drop it.
           queuedEditable:
-            !autoAction && !text.trimStart().startsWith("<from_previous_chat"),
+            !autoAction && !/^\s*<(?:from_previous_chat|context_handoff)/.test(text),
           ...(bubbleAttachments && bubbleAttachments.length > 0
             ? { attachments: bubbleAttachments }
             : {}),
@@ -2590,7 +2590,7 @@ export function AgentSessionsProvider({
                 : {}),
               queuedEditable:
                 !autoAction &&
-                !text.trimStart().startsWith("<from_previous_chat"),
+                !/^\s*<(?:from_previous_chat|context_handoff)/.test(text),
               ...(bubbleAttachments && bubbleAttachments.length > 0
                 ? { attachments: bubbleAttachments }
                 : {}),
@@ -3544,7 +3544,7 @@ export function AgentSessionsProvider({
               const queued = slot && queueBehindRunningTurn({
                 messages: slot.messages,
                 bubbleId: userMessage.id,
-                editable: !autoAction && !text.trimStart().startsWith("<from_previous_chat"),
+                editable: !autoAction && !/^\s*<(?:from_previous_chat|context_handoff)/.test(text),
                 activeTurn: resp.activeTurn,
               });
               if (queued) {
