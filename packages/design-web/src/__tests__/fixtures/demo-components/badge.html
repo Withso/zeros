@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Badge</title>
+<template data-zd-options>
+<zd-option name="text" type="text" label="Text" default="Beta"></zd-option>
+<zd-option name="look" type="choice" label="Look" choices="soft solid outline" choice-labels="Soft|Solid|Outline" default="soft"></zd-option>
+<zd-option name="dot" type="boolean" label="Leading dot" default="false"></zd-option>
+<zd-option name="count" type="number" label="Count" default="0"></zd-option>
+<zd-option name="ink" type="color" label="Ink" group="Colour" default="var(--accent)"></zd-option>
+<zd-option name="wash" type="color" label="Wash" group="Colour" default="var(--accent-soft)"></zd-option>
+<zd-variant name="success" text="Live" ink="var(--success)" wash="var(--success-soft)" dot="true"></zd-variant>
+<zd-variant name="warning" text="Paused" ink="var(--warning)" wash="var(--warning-soft)"></zd-variant>
+<zd-variant name="danger" text="Failed" ink="var(--danger)" wash="var(--danger-soft)" look="solid"></zd-variant>
+<zd-variant name="neutral" text="Draft" ink="var(--fg-default)" wash="var(--bg-raised)" look="outline"></zd-variant>
+</template>
+<link rel="stylesheet" href="../tokens.css">
+<link rel="stylesheet" href="../ui.css">
+<style>
+.badge { vertical-align: middle; }
+/* The option hooks set the Badge's own markup: .stage is this frame's body
+   and zd-badge an instance. Zeros limits a component's style to its
+   instances anyway, so other .badge elements keep their tone classes. */
+:where(.stage, zd-badge) > .badge { --badge-ink: var(--zd-ink); --badge-wash: var(--zd-wash); }
+.badge-count { min-width: 16px; padding: 0 4px; border-radius: var(--radius-full); background: var(--bg-surface); color: var(--fg-strong); font-variant-numeric: tabular-nums; text-align: center; }
+</style>
+</head>
+<body class="stage">
+<span class="badge badge--soft" data-oid="badge-soft" data-name="Badge (soft)" data-zd-if="look == 'soft'"><span class="badge-dot" data-oid="badge-soft-dot" data-zd-if="dot"></span><span data-oid="badge-soft-text">{{ text }}</span><span class="badge-count" data-oid="badge-soft-count" data-zd-if="count > 0">{{ count }}</span></span>
+<span class="badge badge--solid" data-oid="badge-solid" data-name="Badge (solid)" data-zd-if="look == 'solid'"><span class="badge-dot" data-oid="badge-solid-dot" data-zd-if="dot"></span><span data-oid="badge-solid-text">{{ text }}</span><span class="badge-count" data-oid="badge-solid-count" data-zd-if="count > 0">{{ count }}</span></span>
+<span class="badge badge--outline" data-oid="badge-outline" data-name="Badge (outline)" data-zd-if="look == 'outline'"><span class="badge-dot" data-oid="badge-outline-dot" data-zd-if="dot"></span><span data-oid="badge-outline-text">{{ text }}</span><span class="badge-count" data-oid="badge-outline-count" data-zd-if="count > 0">{{ count }}</span></span>
+</body>
+</html>

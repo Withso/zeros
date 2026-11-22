@@ -32,7 +32,7 @@ describe("linting components with options", () => {
 
   it("warns that a frame declaring options is not registered, and says how to register it", async () => {
     const frame = await createDesignFrame(root, { title: "Chat composer" });
-    await write(frame.file, doc('<div data-oid="c">x</div>', options(['<zd-option name="width" type="number" default="1"></zd-option>'])));
+    await write(frame.file, doc('<div data-oid="c">{{ width }}</div>', options(['<zd-option name="width" type="number" default="1"></zd-option>'])));
     expect(await lint(frame.file)).toEqual([expect.objectContaining({
       ruleId: "component-unregistered",
       severity: "warning",
@@ -70,7 +70,7 @@ describe("linting components with options", () => {
 
   it("reports a broken expression in a main frame where it is written", async () => {
     const main = await createDesignFrame(root, { title: "Chat composer" });
-    await write(main.file, doc('<div data-oid="c">\n<p data-oid="p">{{ width-1 }}</p></div>', options(['<zd-option name="width" type="number" default="1"></zd-option>'])));
+    await write(main.file, doc('<div data-oid="c">\n<p data-oid="p">{{ width-1 }} {{ width }}</p></div>', options(['<zd-option name="width" type="number" default="1"></zd-option>'])));
     await register(main.file, "chat-composer");
     expect(await lint(main.file)).toEqual([expect.objectContaining({
       ruleId: "component-expression-invalid", line: 4,
@@ -86,7 +86,7 @@ describe("linting components with options", () => {
     await write(host.file, doc('<zd-chip data-oid="ws" tone="loud" class="x" data-note="n"></zd-chip>'));
     expect(await lint(host.file)).toEqual([expect.objectContaining({
       ruleId: "component-value-invalid", severity: "warning", oid: "ws",
-      message: 'This component has no option tone; tone="loud" is ignored.',
+      message: 'This component has no control tone (no <zd-option name="tone">); tone="loud" is ignored.',
     })]);
     const listed = (await readDesignWorkspaceSnapshot(root)).frames.find((frame) => frame.file === host.file)!;
     expect(listed.instances?.hosts.ws).toEqual({ component: "chip", attributes: {}, ignored: { tone: "loud" } });

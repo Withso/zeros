@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  COMPONENT_INSTANCE_HOST_STYLE_PROPERTIES,
+  componentInstanceHostStyleAllowed,
+  componentInstanceOlderOverride,
   COMPONENT_OPTION_LIMITS,
   COMPONENT_STATE_PRESETS,
   componentInheritedValues,
@@ -148,7 +151,7 @@ describe("an instance's values", () => {
 
   it("leave host attributes alone and warn about names that are not options", () => {
     const { problems } = componentOptionValues(declaration, attributes({ class: "x", "data-oid": "c1", style: "color: red", widht: "800" }));
-    expect(problems).toEqual([{ message: 'This component has no option widht; widht="800" is ignored.', severity: "warning" }]);
+    expect(problems).toEqual([{ message: 'This component has no control widht (no <zd-option name="widht">); widht="800" is ignored.', severity: "warning" }]);
   });
 });
 
@@ -210,5 +213,42 @@ describe("option values in CSS", () => {
       "hsl(210deg 50% 40% / 80%)", "oklch(0.7 0.1 200)", "lab(50% 40 59.5)", "hwb(12 50% 0%)"]) {
       expect(problems([option({ name: "c", type: "color", default: color })]), color).toEqual([]);
     }
+  });
+});
+
+describe("what an app may write in an instance host's own style", () => {
+  it("is its placement, size and layout-child sizing, and nothing visual", () => {
+    for (const property of ["left", "top", "position", "inset", "rotate", "transform", "transform-origin", "translate",
+      "width", "height", "min-width", "max-height", "aspect-ratio", "flex", "flex-grow", "flex-basis", "align-self", "justify-self", "grid-area"])
+      expect(COMPONENT_INSTANCE_HOST_STYLE_PROPERTIES.has(property)).toBe(true);
+    for (const property of ["opacity", "scale", "margin", "padding", "gap", "background", "background-color", "color", "border-radius", "display", "--gap"])
+      expect(COMPONENT_INSTANCE_HOST_STYLE_PROPERTIES.has(property)).toBe(false);
+  });
+
+  it("accepts the app's own layout bookkeeping, and no other custom property", () => {
+    for (const property of ["--zeros-layout-origin-flow", "--zeros-layout-x", "--zeros-layout-y", "width", "transform"])
+      expect(componentInstanceHostStyleAllowed(property)).toBe(true);
+    for (const property of ["--zd-x", "--anything", "--zeros-layoutx", "--zeros-other", "opacity", "-zeros-layout-x"])
+      expect(componentInstanceHostStyleAllowed(property)).toBe(false);
+  });
+
+  it("is an older override outside those, or over a property a control sets on the root", () => {
+    const width = ["width"];
+    for (const property of ["opacity", "--anything", "width", "min-width", "max-width", "inline-size"])
+      expect(componentInstanceOlderOverride(property, width)).toBe(true);
+    for (const property of ["height", "min-height", "left", "transform", "flex-grow", "--zeros-layout-x"])
+      expect(componentInstanceOlderOverride(property, width)).toBe(false);
+    expect(componentInstanceOlderOverride("width", [])).toBe(false);
+    // Only min-width bound: a raw width sits over it, a max-width does not.
+    expect(componentInstanceOlderOverride("width", ["min-width"])).toBe(true);
+    expect(componentInstanceOlderOverride("max-width", ["min-width"])).toBe(false);
+    // aspect-ratio is a size; layout-child sizing is never an override.
+    expect(componentInstanceOlderOverride("aspect-ratio", ["aspect-ratio"])).toBe(true);
+    expect(componentInstanceOlderOverride("aspect-ratio", ["opacity"])).toBe(false);
+    for (const property of ["flex-basis", "flex-grow", "flex", "align-self", "grid-area"])
+      expect(componentInstanceOlderOverride(property, ["width", "height", "flex-basis", "flex", "aspect-ratio"])).toBe(false);
+    // Its place is its own, whatever a control binds on the root.
+    for (const property of ["left", "top", "inset", "transform", "translate", "rotate", "position"])
+      expect(componentInstanceOlderOverride(property, ["left", "transform", "inset", "translate", "rotate", "position", "top"])).toBe(false);
   });
 });

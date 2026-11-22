@@ -3,6 +3,7 @@
 // a parent or a reset), the Styled-by line and its filter, and what Reset
 // removes. Built once per selection; fields read it from context.
 
+import { cssPropertiesOverlap } from "@zeros/design-core/css-longhands";
 import { createContext, useCallback, useContext, useMemo, useSyncExternalStore } from "react";
 
 import type { DesignRuntimeNodeDetails } from "@zeros/protocol/design-runtime";
@@ -19,13 +20,13 @@ import {
 import { designStyleOriginLabel } from "./design-style-provenance";
 import { designWorkspaceSnapshotCache } from "./state/design-workspace-cache";
 
-/** `forced` and `computed` make the field read only (design-style-card.tsx
- * keeps edits out and opens the card on a press). */
-export type DesignFieldMark = "changed" | "dimmed" | "forced" | "computed";
+/** `forced`, `computed` and `control` make the field read only
+ * (design-style-card.tsx keeps edits out and opens the card on a press). */
+export type DesignFieldMark = "changed" | "dimmed" | "forced" | "computed" | "control";
 
 /** Why a field is read only, about the layer that makes it so. */
 export interface DesignFieldLock {
-  kind: "forced" | "computed";
+  kind: "forced" | "computed" | "control";
   nodeId: string;
   layer: string;
   /** The value as written: what a computed field shows. */
@@ -35,6 +36,10 @@ export interface DesignFieldLock {
   /** The forcing rule and where it is written. */
   rule?: string;
   source?: string;
+  /** A control's: the labels of the controls that set it. */
+  controls?: readonly string[];
+  /** A control's on a main's root: its card also opens the Controls tab. */
+  openControls?: true;
 }
 
 export interface DesignFieldOrigins {
@@ -167,6 +172,44 @@ export function designFieldOrigins(
       return hidden.get(property)!;
     },
   };
+}
+
+const withControls = new WeakMap<DesignFieldOrigins, { key: string; origins: DesignFieldOrigins }>();
+
+/** On a main, a field a control sets is read only and names the controls
+ * (labels by property, matched by the longhands each sets); that lock
+ * comes before any other. The same object returns while the bindings do. */
+export function designFieldOriginsWithControls(
+  origins: DesignFieldOrigins,
+  bound: { nodeId: string; layer: string; controls: Readonly<Record<string, readonly string[]>>; openControls: boolean },
+): DesignFieldOrigins {
+  const entries = Object.entries(bound.controls).filter(([, labels]) => labels.length > 0);
+  if (!entries.length) return origins;
+  const key = JSON.stringify([bound.nodeId, bound.layer, bound.openControls, entries.sort(([a], [b]) => a.localeCompare(b))]);
+  const cached = withControls.get(origins);
+  if (cached?.key === key) return cached.origins;
+  const byProperty = new Map(entries);
+  const locks = new Map<string, DesignFieldLock | null>();
+  const controlLock = (property: string): DesignFieldLock | null => {
+    if (locks.has(property)) return locks.get(property)!;
+    const labels = new Set<string>();
+    for (const [declared, names] of byProperty)
+      if (cssPropertiesOverlap(declared, property)) for (const name of names) labels.add(name);
+    const controls = [...labels];
+    const lock: DesignFieldLock | null = controls.length
+      ? { kind: "control", nodeId: bound.nodeId, layer: bound.layer, text: "", why: `Set by ${listed(controls)}`, controls,
+          ...(bound.openControls ? { openControls: true as const } : {}) }
+      : null;
+    locks.set(property, lock);
+    return lock;
+  };
+  const result: DesignFieldOrigins = {
+    ...origins,
+    mark: (property) => (controlLock(property) ? "control" : origins.mark(property)),
+    lock: (property) => controlLock(property) ?? origins.lock(property),
+  };
+  withControls.set(origins, { key, origins: result });
+  return result;
 }
 
 /** Reset or Clear for one field: on each layer that changed it, or set it

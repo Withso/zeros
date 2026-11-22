@@ -146,7 +146,7 @@ export interface DesignComponentExpansionOptions {
 }
 
 /** What an expansion learned about the frame's own instances. */
-interface DesignComponentExpansionUsage {
+export interface DesignComponentExpansionUsage {
   templated: boolean;
   /** Kept in Maps while a frame expands: layer ids and component names are
    * authored text, and a plain object would take "__proto__" as its
@@ -1116,7 +1116,7 @@ function recordInstance(
   recordHost(usage, definition.name, instance, new Set([...declaration.options.map((option) => option.name), COMPONENT_VARIANT_ATTRIBUTE]), () => {
     const summary = definition.template.summary?.() ?? null;
     return { elements: withDesignSlotOptions(summary?.elements ?? [], shape.names, designSlotOptionElement), reach: summary?.reach ?? {},
-      file, frame: registry.get(definition.name) === file };
+      file, frame: registry.get(definition.name) === file, ...(summary?.bindings ? { bindings: summary.bindings } : {}) };
   }, { ...(failed ? { failed: true } : {}), ...(text !== undefined ? { text, ...(mixedChildren(instance) ? { mixedText: true as const } : {}) } : {}), ...(slotted ? { slotted } : {}) });
 }
 

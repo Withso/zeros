@@ -129,7 +129,7 @@ describe("an instance whose component is gone", () => {
 describe("an instance attribute that names no option", () => {
   it("says which attribute and value the component ignores", () => {
     expect(designInstanceIgnoredAttributes({ component: "chip", attributes: { mood: "calm" }, ignored: { tone: "loud" } }))
-      .toEqual(['This component has no option tone; tone="loud" is ignored.']);
+      .toEqual(['This component has no control tone (no <zd-option name="tone">); tone="loud" is ignored.']);
     expect(designInstanceIgnoredAttributes({ component: "chip", attributes: {} })).toEqual([]);
     const optionsSource = readFileSync(resolve(process.cwd(), "apps/desktop/src/renderer/features/design-workspace/design-component-options.tsx"), "utf8");
     expect(optionsSource).toContain("designInstanceIgnoredAttributes(host)");
@@ -246,21 +246,21 @@ describe("a component whose options do not apply", () => {
   } });
 
   it("says on its main frame what the frame shows instead", () => {
-    expect(designFrameOptionsProblem(main("last-good"))).toBe("These options could not be applied. The frame shows its last good render.");
-    expect(designFrameOptionsProblem(main("defaults"))).toBe("These options could not be applied. The frame shows the component's defaults.");
+    expect(designFrameOptionsProblem(main("last-good"))).toBe("These controls could not be applied. The frame shows its last good render.");
+    expect(designFrameOptionsProblem(main("defaults"))).toBe("These controls could not be applied. The frame shows the component's defaults.");
     expect(designFrameOptionsProblem(main())).toBeNull();
     expect(designFrameOptionsProblem({})).toBeNull();
   });
 
   it("says a main or an instance whose template fails with no last good render shows nothing", () => {
-    expect(designFrameOptionsProblem(main("nothing"))).toBe("These options could not be applied. The frame shows nothing in its place.");
-    expect(designFrameOptionsProblem(hosting(true, "nothing"))).toBe("The options of zd-card could not be applied. The frame shows nothing in its place.");
+    expect(designFrameOptionsProblem(main("nothing"))).toBe("These controls could not be applied. The frame shows nothing in its place.");
+    expect(designFrameOptionsProblem(hosting(true, "nothing"))).toBe("The controls of zd-card could not be applied. The frame shows nothing in its place.");
   });
 
   it("says on every frame hosting a failed instance which component and what it shows", () => {
-    expect(designFrameOptionsProblem(hosting(true, "last-good"))).toBe("The options of zd-card could not be applied. The frame shows its last good render.");
+    expect(designFrameOptionsProblem(hosting(true, "last-good"))).toBe("The controls of zd-card could not be applied. The frame shows its last good render.");
     // A host that failed with no fallback named shows the defaults, as its Options section says.
-    expect(designFrameOptionsProblem(hosting(true))).toBe("The options of zd-card could not be applied. The frame shows the component's defaults.");
+    expect(designFrameOptionsProblem(hosting(true))).toBe("The controls of zd-card could not be applied. The frame shows the component's defaults.");
     expect(designFrameOptionsProblem(hosting(false))).toBeNull();
     // The same record answers the same text, so the canvas can compare it cheaply.
     const frame = hosting(true, "last-good");
@@ -268,7 +268,7 @@ describe("a component whose options do not apply", () => {
   });
 
   it("is a closed mark kind carrying the reason as its title and accessible name", () => {
-    const message = "These options could not be applied. The frame shows its last good render.";
+    const message = "These controls could not be applied. The frame shows its last good render.";
     const mark = renderToStaticMarkup(createElement(DesignFrameProblemMark, { kind: "options-not-applied", message }));
     expect(mark).toContain('data-design-frame-problem="options-not-applied"');
     expect(mark).toContain(`title="${message}"`);
@@ -287,9 +287,9 @@ describe("a component whose options do not apply", () => {
 describe("a component whose declaration is too large to show", () => {
   it("says in its Options why there are none to show, for the main and its instances", () => {
     expect(designComponentRecordProblem({ elements: [], reach: {}, exceeds: "elements" }, "QA Chip"))
-      .toBe("The options of QA Chip cannot be shown: its declaration has more than 160 elements.");
+      .toBe("The controls of QA Chip cannot be shown: its declaration has more than 160 elements.");
     expect(designComponentRecordProblem({ elements: [], reach: {}, file: "page-1/chip.html", frame: true, exceeds: "attribute-value" }, "Chip"))
-      .toBe("The options of Chip cannot be shown: a declaration attribute's value is longer than 2,048 characters.");
+      .toBe("The controls of Chip cannot be shown: a declaration attribute's value is longer than 2,048 characters.");
     expect(designComponentRecordProblem({ elements: [], reach: {} }, "Chip")).toBeNull();
     const optionsSource = readFileSync(resolve(process.cwd(), "apps/desktop/src/renderer/features/design-workspace/design-component-options.tsx"), "utf8");
     expect(optionsSource).toContain("designComponentRecordProblem(target.component, title)");
@@ -327,7 +327,7 @@ describe("the Options section of a plain component's instance", () => {
       .toBe("Overridden here. Reset to inherit Card/Default: Continue.");
   });
 
-  it("offers a separate Use Default action when an instance variant is active", () => {
+  it("offers no separate Use Default action when an instance variant is active", () => {
     const host = document.createElement("div");
     host.innerHTML = renderToStaticMarkup(createElement(DesignComponentOptions, {
       workspaceId: "local", directory: "Zeros - Design", lint: null, disabled: false,
@@ -338,7 +338,8 @@ describe("the Options section of a plain component's instance", () => {
       frame: { file: "start/welcome.html", frameId: "welcome", pageId: "page", title: "Welcome", kind: "frame", x: 0, y: 0, width: 100, height: 100,
         z: 0, nodeCount: 1, modifiedAt: 0, sourceVersion: "a".repeat(24) } as DesignCanvasFrameWire,
     }));
-    expect(host.querySelector("[data-design-options-use-default]")?.textContent).toBe("Use Default");
+    expect(host.querySelector("[data-design-options-variant]")).not.toBeNull();
+    expect(host.querySelector("[data-design-options-use-default]")).toBeNull();
   });
 
   it("explains an instance with no options or variants without hiding main declaration controls", () => {
@@ -357,7 +358,7 @@ describe("the Options section of a plain component's instance", () => {
       host: { component: "empty", attributes: {} }, component: { ...component, file: "components/empty.html", frame: false } });
     const empty = instance.querySelector("[data-design-options-empty]");
     expect(empty).not.toBeNull();
-    expect(empty?.textContent ?? "").toContain("no declared options or variants");
+    expect(empty?.textContent ?? "").toContain("no declared controls or variants");
     expect(instance.querySelector("[data-design-options-variant]")).toBeNull();
 
     const main = markup({ kind: "main", component });
@@ -380,7 +381,7 @@ describe("the Options section of a component it cannot list", () => {
   /** The element and everything in it can wrap: nothing cuts its text to one line. */
   const wraps = (element: Element) => [element, ...element.querySelectorAll("*")]
     .every((node) => !/\b(truncate|text-ellipsis|whitespace-nowrap|line-clamp-\d)\b/.test(node.getAttribute("class") ?? ""));
-  const SENTENCE = "The options of QA Big cannot be shown: its declaration has more than 160 elements.";
+  const SENTENCE = "The controls of QA Big cannot be shown: its declaration has more than 160 elements.";
 
   it("says why in full, and offers no variants it cannot read, on the main", () => {
     const section = sectionOf({ kind: "main", component: { elements: [], reach: {}, exceeds: "elements" } });
@@ -402,7 +403,7 @@ describe("the Options section of a component it cannot list", () => {
     expect(message.textContent).toBe(SENTENCE);
     expect(wraps(message)).toBe(true);
     const ignored = section.querySelector("[data-design-options-ignored]")!;
-    expect(ignored.textContent).toBe('This component has no option tone; tone="loud" is ignored.');
+    expect(ignored.textContent).toBe('This component has no control tone (no <zd-option name="tone">); tone="loud" is ignored.');
     expect(wraps(ignored)).toBe(true);
     expect(section.querySelector("[data-design-options-variant]")).toBeNull();
   });

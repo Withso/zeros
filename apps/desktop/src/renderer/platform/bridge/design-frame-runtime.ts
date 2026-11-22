@@ -161,7 +161,14 @@ export interface DesignFrameRuntimeConnection {
   previewComponentInstanceOptions?(target: string, properties: Readonly<Record<string, string>> | null, signal?: AbortSignal): Promise<DesignRuntimeComponentOptionsPreview>;
   /** The part of an instance under a frame point, as a layer to read but not
    * write. Opt-in: check `supports("getComponentPartAtLoc")`. */
-  getComponentPartAtLoc?(x: number, y: number, hostNodeId: string, signal?: AbortSignal): Promise<DesignRuntimeNodeDetails | null>;
+  getComponentPartAtLoc?(x: number, y: number, hostNodeId: string, signal?: AbortSignal,
+    /** Main layer ids of the parts that may be chosen; slots always may. An
+     * older runtime ignores it, so check the result too. */
+    selectable?: readonly string[]): Promise<DesignRuntimeNodeDetails | null>;
+  /** Properties rules gated on these attributes or class prefixes would set
+   * on a layer at some value, to the gates (".prefix" for a class).
+   * Opt-in: check `supports("getGatedStyles")`. */
+  getGatedStyles?(nodeId: string, gates: { attributes: readonly string[]; classPrefixes: readonly string[] }, signal?: AbortSignal): Promise<Record<string, string[]>>;
   previewStyles(
     nodeId: string,
     styles: Record<string, string | null>,
@@ -836,9 +843,19 @@ class DesignRuntimeConnectionImpl implements DesignFrameRuntimeConnection {
     return result;
   }
 
-  async getComponentPartAtLoc(x: number, y: number, hostNodeId: string, signal?: AbortSignal): Promise<DesignRuntimeNodeDetails | null> {
+  async getGatedStyles(nodeId: string, gates: { attributes: readonly string[]; classPrefixes: readonly string[] }, signal?: AbortSignal): Promise<Record<string, string[]>> {
+    if (!this.supports("getGatedStyles")) throw runtimeError("getGatedStyles is not supported", "METHOD_NOT_SUPPORTED");
+    const result = await this.request("getGatedStyles", { nodeId, gates: { attributes: [...gates.attributes], classPrefixes: [...gates.classPrefixes] } }, signal);
+    const entries = result && typeof result === "object" && !Array.isArray(result) ? Object.entries(result as Record<string, unknown>) : null;
+    if (!entries || entries.length > 128 || !entries.every(([property, keys]) => property.length <= 128 && Array.isArray(keys) && keys.length <= 8 &&
+      keys.every((key) => typeof key === "string" && key.length > 0 && key.length <= 130)))
+      throw runtimeError("getGatedStyles returned malformed data");
+    return Object.fromEntries(entries) as Record<string, string[]>;
+  }
+
+  async getComponentPartAtLoc(x: number, y: number, hostNodeId: string, signal?: AbortSignal, selectable?: readonly string[]): Promise<DesignRuntimeNodeDetails | null> {
     if (!this.supports("getComponentPartAtLoc")) throw runtimeError("getComponentPartAtLoc is not supported", "METHOD_NOT_SUPPORTED");
-    const result = await this.request("getComponentPartAtLoc", { x, y, hostNodeId }, signal);
+    const result = await this.request("getComponentPartAtLoc", { x, y, hostNodeId, ...(selectable ? { selectable: [...selectable] } : {}) }, signal);
     if (result === null) return null;
     if (!isNodeDetails(result) || result.sourceVersion !== this.expectedSourceVersion ||
       (!designComponentPartOf(result.oid) && !designComponentSlotOf(result.oid))) {
@@ -1268,6 +1285,11 @@ class DesignRuntimeConnectionImpl implements DesignFrameRuntimeConnection {
     this.destroy();
   }
 
+  /** Live and past a validated handshake. */
+  handshaken(): boolean {
+    return !this.destroyed && this.methods !== null;
+  }
+
   revive(): boolean {
     if (!this.destroyed || !this.teardownDeferred) return false;
     this.teardownDeferred = false;
@@ -1330,7 +1352,12 @@ export function connectDesignFrameRuntime(
   const source = iframe.contentWindow;
   if (!source) throw runtimeError("iframe has no content window");
   const key = frameKey(workspaceId, frame);
-  connectingByFrame.get(key)?.destroy();
+  // A document that may not take the frame (the displayed buffer reloading
+  // while its replacement connects) never displaces one that may: loading
+  // after it would otherwise strand the replacement until its watchdog.
+  const pending = connectingByFrame.get(key);
+  const yields = callbacks.isActive?.() === false && !!pending && pending.isActive();
+  if (!yields) pending?.destroy();
   const connection = new DesignRuntimeConnectionImpl(
     source,
     sourceVersion,
@@ -1353,9 +1380,12 @@ export function connectDesignFrameRuntime(
     },
   );
   // Even an HTTP error fires iframe.onload; only a validated handshake can transfer editable authority.
-  connectingByFrame.set(key, connection);
+  if (!yields) connectingByFrame.set(key, connection);
   connection.reinstate = () => {
-    if (!connection.revive()) return false;
+    // A retired connection comes back; so does one that yielded, handshook
+    // and was never registered, when the replacement it yielded to is gone.
+    const unregistered = connection.handshaken() && connectionsByFrame.get(key) !== connection && connectingByFrame.get(key) !== connection;
+    if (!connection.revive() && !unregistered) return false;
     const current = connectionsByFrame.get(key);
     if (current !== connection) {
       current?.retire();

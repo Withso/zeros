@@ -38,3 +38,26 @@ it("reads a pending sizing preview's mode from its previewed size", () => {
   act(() => { publishDesignLivePreviewStyles("w", "home.html", "button", { width: "210px" }); });
   expect(sizing()).toBe("Width sizing: Fixed");
 });
+
+it("renders only W, H and their sizing menus when asked for Size alone", async () => {
+  const { DesignStyleEditor } = await import("../design-style-editor");
+  const host = document.createElement("div");
+  document.body.append(host);
+  root = createRoot(host);
+  const fields: string[] = [];
+  act(() => root!.render(React.createElement(TooltipProvider, null, React.createElement(DesignStyleEditor, {
+    details,
+    only: "size",
+    renderField: (label: string) => { fields.push(label); return React.createElement("input", { "aria-label": label }); },
+    onLayoutAction: async () => {},
+    onPreviewStyles: () => {},
+    onCancelStylePreview: () => {},
+    onCommitStyles: async () => {},
+  } as never))));
+  expect(host.querySelector("[data-design-size-section]")?.textContent).toContain("Size");
+  expect([...host.querySelectorAll("[data-design-size-axis]")].map((axis) => axis.getAttribute("data-design-size-axis"))).toEqual(["x", "y"]);
+  expect(host.querySelector('[aria-label^="Width sizing: "]')).not.toBeNull();
+  expect(fields).toEqual(["W", "H"]);
+  for (const other of ["[data-design-layout-section]", "[data-design-style-editor]"]) expect(host.querySelector(other)).toBeNull();
+  expect(host.textContent).not.toMatch(/Fill|Typography|Position|Appearance|Flow/);
+});

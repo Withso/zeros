@@ -37,7 +37,7 @@ const CARD_CLOSE_DELAY = 300;
 const FIELD_MESSAGE_DURATION = 3_000;
 const FIELD = "[data-design-style-property]";
 /** A field whose value is computed or forced: read only, its card one press away. */
-const LOCKED = '[data-design-origin="forced"], [data-design-origin="computed"]';
+const LOCKED = '[data-design-origin="forced"], [data-design-origin="computed"], [data-design-origin="control"]';
 /** Keys that leave a locked field's value alone: moving on, the caret. */
 const LOCKED_PASSING = new Set(["Tab", "Escape", "ArrowLeft", "ArrowRight", "Home", "End", "Shift", "Meta", "Control", "Alt", "CapsLock"]);
 /** Events that would change a locked field, besides its keys and presses. */
@@ -103,6 +103,7 @@ export function DesignFieldOverlays({
   onReset,
   onEditInCss,
   onAskAgent,
+  onOpenControls,
   apiRef,
   children,
 }: {
@@ -120,10 +121,13 @@ export function DesignFieldOverlays({
    * a gradient), so a token chosen here lands the same way. */
   onChooseToken: (properties: readonly string[], name: string, companion?: Record<string, string>) => void;
   onReset: (properties: readonly string[]) => void;
-  /** A computed value's card: show the CSS tab. */
+  /** A computed value's card: show the CSS tab. Without one (a component's
+   * layers have no CSS tab) the card asks the agent instead. */
   onEditInCss?: () => void;
-  /** A forced value's card: ask the agent to free it. */
+  /** A forced value's card, or one a control sets: ask the agent. */
   onAskAgent?: (properties: readonly string[]) => void;
+  /** A control's value on a main's root: show the Controls tab. */
+  onOpenControls?: () => void;
   /** The API, for the panel around the provider (what a commit says). */
   apiRef?: React.MutableRefObject<DesignFieldOverlaysApi | null>;
   children: React.ReactNode;
@@ -464,6 +468,7 @@ export function DesignFieldOverlays({
             closeCard();
             api.openPickerForField(card.field);
           }}
+          cssAvailable={onEditInCss !== undefined}
           onEditInCss={() => {
             closeCard();
             onEditInCss?.();
@@ -471,6 +476,10 @@ export function DesignFieldOverlays({
           onAskAgent={() => {
             closeCard();
             onAskAgent?.(fieldProperties(card.field));
+          }}
+          onOpenControls={() => {
+            closeCard();
+            onOpenControls?.();
           }}
         />
       ) : null}
@@ -547,16 +556,19 @@ const DesignStyleCardContent = React.forwardRef<
     onClose: () => void;
     onReset: () => void;
     onUseToken: () => void;
+    /** Edit in CSS has somewhere to go. */
+    cssAvailable: boolean;
     onEditInCss: () => void;
     onAskAgent: () => void;
+    onOpenControls: () => void;
   }
 >(function DesignStyleCardContent(
-  { id, target, panel, origins, catalog, disabled, readOnly, onKeep, onLeave, onClose, onReset, onUseToken, onEditInCss, onAskAgent },
+  { id, target, panel, origins, catalog, disabled, readOnly, cssAvailable, onKeep, onLeave, onClose, onReset, onUseToken, onEditInCss, onAskAgent, onOpenControls },
   ref,
 ) {
   const { field, property } = target;
   const edge = useMemo(() => designFieldEdgeAnchor(field, panel), [field, panel]);
-  const content = designStyleCardContent(readDesignCardField(field, property), origins, catalog, readOnly);
+  const content = designStyleCardContent(readDesignCardField(field, property), origins, catalog, readOnly, { css: cssAvailable });
   const detach = useDesignTokenDetach();
   const actions = detach ? content.actions : content.actions.filter((action) => action.kind !== "detach");
   return (
@@ -616,6 +628,7 @@ const DesignStyleCardContent = React.forwardRef<
                         else if (action.kind === "token" || action.kind === "pick") onUseToken();
                         else if (action.kind === "css") onEditInCss();
                         else if (action.kind === "agent") onAskAgent();
+                        else if (action.kind === "controls") onOpenControls();
                         else {
                           onClose();
                           // The field's own Detach does the same: each selected
@@ -645,7 +658,7 @@ export interface DesignStyleCardText {
   rows: { key: string; text: string }[];
   notes: string[];
   foot?: string;
-  actions: { kind: "reset" | "clear" | "token" | "pick" | "detach" | "css" | "agent"; label: string; keys?: string; shortcut?: string }[];
+  actions: { kind: "reset" | "clear" | "token" | "pick" | "detach" | "css" | "agent" | "controls"; label: string; keys?: string; shortcut?: string }[];
 }
 
 /** What a field shows that the card speaks to, read from its markup. */
@@ -710,6 +723,9 @@ export function designStyleCardContent(
   /** A held layer state: where the value comes from, and nothing the card
    * could do about it. */
   readOnly = false,
+  /** Whether the selection has a CSS tab; without one a computed value is
+   * the agent's to change. */
+  { css = true }: { css?: boolean } = {},
 ): DesignStyleCardText {
   const mixedRows = [{ key: "Value", text: "Mixed: the selected layers differ" }];
   const origin = origins.origin(property);
@@ -723,7 +739,8 @@ export function designStyleCardContent(
     const notes = [lock.why, ...themeNotes];
     const actions: DesignStyleCardText["actions"] = readOnly
       ? []
-      : [lock.kind === "computed" ? { kind: "css", label: "Edit in CSS" } : { kind: "agent", label: "Ask agent to change" }];
+      : [lock.kind === "computed" && css ? { kind: "css", label: "Edit in CSS" } : { kind: "agent", label: "Ask agent to change" },
+          ...(lock.openControls ? [{ kind: "controls" as const, label: "Open in Controls" }] : [])];
     return { label, rows, notes, foot: origin?.card.foot, actions };
   }
   const notes: string[] = [...themeNotes];

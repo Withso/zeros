@@ -124,6 +124,15 @@ describe("instances and variants through the engine", () => {
     return { main, host };
   };
 
+  it("carries which controls each main layer reads on the main's record and on every instance frame's", async () => {
+    const { main, host } = await setUp();
+    const frames = (await readDesignWorkspaceSnapshot(root)).frames;
+    const expected = { root: "root", layers: { root: { attributes: ["attachments"], styles: { padding: ["gap"], width: ["width"] } }, b: { text: ["label"] } },
+      gates: { "data-many": ["attachments"] }, unread: ["accent", "motion"] };
+    expect(frames.find((candidate) => candidate.file === main.file)!.component?.bindings).toEqual(expected);
+    expect(frames.find((candidate) => candidate.file === host.file)!.instances?.components["chat-composer"]?.bindings).toEqual(expected);
+  });
+
   it("records no host under a name every object already has, and keeps the record a plain map", async () => {
     const { host } = await setUp();
     // Layer ids are authored text: these would otherwise replace the record's
