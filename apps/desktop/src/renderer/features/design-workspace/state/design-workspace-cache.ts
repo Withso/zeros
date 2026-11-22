@@ -3,7 +3,7 @@ import type { DesignMovementGuard } from "@zeros/protocol/design-relocation";
 import { normalizeDesignPagesSnapshot } from "@zeros/protocol/design-pages";
 import { isDesignComponentVariantName } from "@zeros/protocol/design-path";
 import { isDesignComponentPartNodeId, refuseDesignComponentPartWrite, refuseDesignInstanceHostStyleWrite } from "./design-component-parts";
-import { refuseDesignBoundStyleWrite } from "./design-component-bindings";
+import { completeDesignRuntimeBindings, refuseDesignBoundStyleWrite } from "./design-component-bindings";
 import { forgetDesignLayerDisclosure } from "./design-layer-disclosure";
 import { rememberDesignDirectoryIdentity, setDesignKnownPagesReader, type DesignCanvasItemInput } from "../../../platform/bridge/design-bridge";
 // Canvas, inspector and the Layers panel consume one aggregate engine response.
@@ -1919,6 +1919,21 @@ function refuseDesignComponentWrite(
   if (frame && typeof frame.sourceVersion === "string") refuseDesignBoundStyleWrite(workspaceId, frame as never, write);
 }
 
+/** Before the fence decides, the live runtime reports the winners of each
+ * written layer this generation has not (bounded in the bindings module);
+ * only frames a component or instances own read anything. */
+async function completeDesignComponentWrite(
+  workspaceId: string,
+  file: string,
+  write: { nodeId: string; styles: Readonly<Record<string, string | null>> } | readonly unknown[],
+): Promise<void> {
+  const frame = designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data?.frames.find((candidate) => candidate.file === file);
+  if (!frame || typeof frame.sourceVersion !== "string" || (!frame.component && !frame.instances)) return;
+  const runtime = designFrameRuntime(workspaceId, file);
+  if (!runtime) return;
+  await completeDesignRuntimeBindings(workspaceId, frame as never, write, (nodeId) => runtime.getNodeDetails(nodeId));
+}
+
 export async function updateDesignNodeStylesCached(
   workspaceId: string,
   input: {
@@ -1944,6 +1959,9 @@ export async function updateDesignNodeStylesCached(
       ),
       async (sourceVersion) => {
         assertOwner();
+        await completeDesignComponentWrite(workspaceId, input.frame, input);
+        assertOwner();
+        refuseDesignComponentWrite(workspaceId, input.frame, input);
         rememberDesignEditSelection(workspaceId, input.frame, sourceVersion);
         const beforeState = historyStateKey(
           designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data,
@@ -2499,6 +2517,8 @@ async function applyPreparedDesignTransactionCached(
       presentation.ready = false;
       const transaction = await prepare({ assertCurrent });
       if (!transaction) return null;
+      await completeDesignComponentWrite(workspaceId, frame, transaction.operations);
+      assertCurrent();
       refuseDesignComponentWrite(workspaceId, frame, transaction.operations);
       const visual = transactionRuntimeAdoption(transaction, runtimeInserts, structurePreviewId);
       presentation.ready = !!visual && !visual.patch?.tokens && !visual.patch?.keyframes;

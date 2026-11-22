@@ -3,6 +3,7 @@
 // a parent or a reset), the Styled-by line and its filter, and what Reset
 // removes. Built once per selection; fields read it from context.
 
+import { cssPropertiesOverlap } from "@zeros/design-core/css-longhands";
 import { createContext, useCallback, useContext, useMemo, useSyncExternalStore } from "react";
 
 import type { DesignRuntimeNodeDetails } from "@zeros/protocol/design-runtime";
@@ -176,7 +177,7 @@ export function designFieldOrigins(
 const withControls = new WeakMap<DesignFieldOrigins, { key: string; origins: DesignFieldOrigins }>();
 
 /** On a main, a field a control sets is read only and names the controls
- * (labels by property, a shorthand's covering its longhands); that lock
+ * (labels by property, matched by the longhands each sets); that lock
  * comes before any other. The same object returns while the bindings do. */
 export function designFieldOriginsWithControls(
   origins: DesignFieldOrigins,
@@ -193,7 +194,7 @@ export function designFieldOriginsWithControls(
     if (locks.has(property)) return locks.get(property)!;
     const labels = new Set<string>();
     for (const [declared, names] of byProperty)
-      if (declared === property || property.startsWith(`${declared}-`)) for (const name of names) labels.add(name);
+      if (cssPropertiesOverlap(declared, property)) for (const name of names) labels.add(name);
     const controls = [...labels];
     const lock: DesignFieldLock | null = controls.length
       ? { kind: "control", nodeId: bound.nodeId, layer: bound.layer, text: "", why: `Set by ${listed(controls)}`, controls,

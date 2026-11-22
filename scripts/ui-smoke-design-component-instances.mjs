@@ -160,6 +160,20 @@ export async function runDesignComponentInstancesSmoke({ page, check }) {
     (await page.locator("[data-design-inline-text-editor]").count()) === 0);
   await quiet();
 
+  // Writes compare the longhands each property sets, and a layer never
+  // selected is read from the runtime before the fence decides.
+  const writesBeforeLonghands = await writes();
+  const refusedWrites = await page.evaluate(async () => {
+    const cache = await import("/apps/desktop/src/renderer/features/design-workspace/state/design-workspace-cache.ts");
+    const frame = cache.designWorkspaceSnapshotCache.peekSnapshot("ws_design_harness").data.frames.find((candidate) => candidate.file === "pricing.html");
+    const attempt = (nodeId, styles) => cache.updateDesignNodeStylesCached("ws_design_harness", { frame: "pricing.html", nodeId, sourceVersion: frame.sourceVersion, styles })
+      .then(() => "written", (error) => String(error?.message ?? error));
+    return [await attempt("cc-root", { "row-gap": "20px" }), await attempt("cc-send", { "background-color": "red" }), await attempt("cc-chips", { "border-radius": "5px" })];
+  });
+  check("a longhand over a bound shorthand, and a layer never selected whose binding only the runtime sees, are refused",
+    /Gap/.test(refusedWrites[0]) && /Accent/.test(refusedWrites[1]) && /Gap/.test(refusedWrites[2]) && (await writes()) === writesBeforeLonghands,
+    JSON.stringify(refusedWrites));
+
   // A layer of the main a control reaches only through a linked stylesheet:
   // its winner reads the main's own --chip-round, which Gap sets. Once the
   // layer is selected its Corner radius field is the Gap control, and a raw
@@ -239,6 +253,10 @@ export async function runDesignComponentInstancesSmoke({ page, check }) {
   // On the main's root the card also opens the Controls tab.
   await selectMain();
   await page.locator('[data-design-inspector] [role="tab"]').filter({ hasText: "Style" }).click();
+  // The root's gap (row-gap in auto layout) is Gap's: the control in its place, no raw field to detach.
+  check("on a main's root, the gap field is the Gap control, not a raw field",
+    (await stylePanel.locator("[data-design-embedded-controls]").getByLabel("Gap", { exact: true }).count()) >= 1 &&
+      (await stylePanel.locator('[data-design-style-property="row-gap"]:not([data-design-origin="control"])').count()) === 0);
   const lockedInk = stylePanel.locator('[data-design-style-property="color"]').first();
   await expect(lockedInk).toHaveAttribute("data-design-origin", "control");
   await lockedInk.scrollIntoViewIfNeeded();

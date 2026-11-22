@@ -82,6 +82,22 @@ describe("linting what changes a component from outside", () => {
     }), expect.objectContaining({ ruleId: "component-instance-override", oid: "i1", message: "This instance overrides margin on dot, which no control sets." })]);
   });
 
+  it("compares properties by the longhands they set: a corner over a bound radius, a colour over a bound background", async () => {
+    const file = await main(
+      '<span data-oid="b" class="badge" style="border-top-left-radius: 2px"><i data-oid="dot" class="dot"></i>x</span>',
+      [round, tone],
+      ".badge { border-radius: calc(var(--zd-radius) * 1px) } .badge[data-tone=\"danger\"] .dot { background: red }",
+    );
+    await write(file, doc('<span data-oid="b" class="badge" data-tone="{{ tone }}" style="border-top-left-radius: 2px"><i data-oid="dot" class="dot"></i>x</span>',
+      `${options([round, tone])}<style>.badge { border-radius: calc(var(--zd-radius) * 1px); gap: var(--zd-radius) } .badge[data-tone="danger"] .dot { background: red }</style>`));
+    expect(await lint(file)).toEqual([expect.objectContaining({ ruleId: "component-control-shadowed", oid: "b",
+      message: "border-top-left-radius on this layer sits over Radius." })]);
+    const host = await createDesignFrame(root, { title: "Workspace" });
+    await write(host.file, doc('<zd-badge data-oid="i1" style="row-gap: 4px" zd-style-dot="background-color: blue"></zd-badge>'));
+    expect(await lint(host.file)).toEqual([expect.objectContaining({ ruleId: "component-control-shadowed", oid: "i1",
+      message: "This instance sets row-gap, background-color on dot over Radius, Tone." })]);
+  });
+
   it("warns about an instance's size over a bound axis, and separately about overrides no control sets, never its place", async () => {
     const main = await createDesignFrame(root, { title: "Text field" });
     await write(main.file, await readFile(path.join(DEMO, "text-field.html"), "utf8"));

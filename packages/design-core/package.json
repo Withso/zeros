@@ -10,6 +10,7 @@
     "./component-expressions": "./src/component-expressions.ts",
     "./component-options": "./src/component-options.ts",
     "./components": "./src/components.ts",
+    "./css-longhands": "./src/css-longhands.ts",
     "./geometry": "./src/geometry.ts",
     "./history": "./src/history.ts",
     "./schema": "./src/schema.ts",

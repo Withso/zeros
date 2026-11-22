@@ -137,6 +137,86 @@ describe("bindings a selected layer's runtime winners complete", () => {
   });
 });
 
+describe("a write over a control compares the longhands each property sets", () => {
+  const V = "d".repeat(24);
+  const option = (name: string, label: string) => ({ tag: "zd-option", attributes: [{ name: "name", value: name }, { name: "label", value: label }] });
+  // The harness main: .composer { gap: var(--zd-gap); transition: … } and .send { border-radius: …; background: var(--zd-accent) }.
+  const main = { file: "pricing.html", sourceVersion: V, component: {
+    elements: [option("gap", "Gap"), option("motion", "Easing"), option("send-radius", "Corner radius"), option("accent", "Accent"), option("tone", "Tone")], reach: {},
+    bindings: { root: "cc-root", layers: {
+      "cc-root": { styles: { gap: ["gap"], transition: ["motion"] } },
+      "cc-send": { styles: { "border-radius": ["send-radius"], background: ["accent"] } },
+      "cc-chip": { styles: { "border-top-left-radius": ["tone"], "inline-size": ["tone"] } },
+    } } } };
+
+  it("refuses a longhand over a bound shorthand, and a shorthand over a bound longhand", async () => {
+    const { refuseDesignBoundStyleWrite } = await import("../state/design-component-bindings");
+    for (const [nodeId, styles, control] of [
+      ["cc-root", { "row-gap": "20px" }, "Gap"], ["cc-root", { "column-gap": "20px" }, "Gap"], ["cc-root", { gap: "20px" }, "Gap"],
+      ["cc-send", { "background-color": "red" }, "Accent"], ["cc-send", { background: "red" }, "Accent"],
+      ["cc-send", { "border-top-left-radius": "2px" }, "Corner radius"], ["cc-root", { "transition-duration": "1s" }, "Easing"],
+      ["cc-chip", { "border-radius": "4px" }, "Tone"], ["cc-chip", { width: "40px" }, "Tone"],
+    ] as const)
+      expect(() => refuseDesignBoundStyleWrite("ws", main, { nodeId, styles }), `${nodeId} ${Object.keys(styles)[0]}`).toThrow(control);
+    for (const [nodeId, styles] of [["cc-root", { "padding-left": "4px" }], ["cc-send", { color: "red" }], ["cc-root", { "row-gap": null }], ["cc-chip", { height: "4px" }]] as const)
+      expect(() => refuseDesignBoundStyleWrite("ws", main, { nodeId, styles })).not.toThrow();
+  });
+
+  it("keeps the same comparison for size axes, layout actions and the root size controls", async () => {
+    const { designBoundSizeAxes, designBoundControlsFor, designRootSizeControls, designWithoutBoundStyles } = await import("../state/design-component-bindings");
+    expect(designBoundSizeAxes("ws", main, "cc-chip")).toEqual({ width: true, height: false });
+    expect(designWithoutBoundStyles("ws", main, "cc-root", { "row-gap": "4px", "padding-top": "2px" })).toEqual({ "padding-top": "2px" });
+    expect(designRootSizeControls({ root: "r", layers: { r: { styles: { "inline-size": ["w"] } } } })).toEqual({ width: ["w"], height: [] });
+    expect(designBoundControlsFor({ gap: ["gap"], "row-gap": ["density"] }, "row-gap")).toEqual(["density", "gap"]);
+  });
+});
+
+describe("a write to a layer whose runtime winners were never read", () => {
+  const V = "e".repeat(24);
+  const winner = (value: string) => ({ origin: "frame" as const, value, selector: ".chips" });
+  const main = { file: "pricing.html", sourceVersion: V, component: {
+    elements: [{ tag: "zd-option", attributes: [{ name: "name", value: "gap" }, { name: "label", value: "Gap" }] }], reach: {},
+    bindings: { root: "cc-root", layers: { "cc-root": { styles: { gap: ["gap"] } } }, vars: { "--chip-round": ["gap"] } } } };
+  const write = (nodeIds: readonly string[], value: string | null = "5px") =>
+    nodeIds.map((nodeId) => ({ type: "node.set-styles", nodeId, styles: { "border-radius": value } }));
+
+  it("reads each untracked target once, in parallel, before the fence decides", async () => {
+    const { completeDesignRuntimeBindings, refuseDesignBoundStyleWrite, resetDesignRuntimeBindingsForTests } = await import("../state/design-component-bindings");
+    resetDesignRuntimeBindingsForTests();
+    const reads: string[] = [];
+    let open = 0, most = 0;
+    const read = async (nodeId: string) => {
+      reads.push(nodeId); open += 1; most = Math.max(most, open);
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      open -= 1;
+      return { oid: nodeId, sourceVersion: V, authoredStyles: nodeId === "cc-chips" ? { "border-radius": winner("var(--chip-round)") } : {} } as never;
+    };
+    // A layer never selected: only the static half knows it, and that half says nothing.
+    expect(() => refuseDesignBoundStyleWrite("ws", main, write(["cc-chips"]))).not.toThrow();
+    await completeDesignRuntimeBindings("ws", main, [...write(["cc-chips", "cc-chips", "cc-prompt"]), ...write(["cc-mode"], null)], read);
+    expect(reads.sort()).toEqual(["cc-chips", "cc-prompt"]);
+    expect(most).toBe(2);
+    expect(() => refuseDesignBoundStyleWrite("ws", main, write(["cc-chips"]))).toThrow("Gap");
+    // Known at this generation, an empty answer included: no second read.
+    await completeDesignRuntimeBindings("ws", main, write(["cc-chips", "cc-prompt"]), read);
+    expect(reads).toHaveLength(2);
+  });
+
+  it("reads at most 32 targets a write, and nothing in a frame without a component or instances", async () => {
+    const { completeDesignRuntimeBindings, DESIGN_BOUND_COMPLETION_LIMIT, resetDesignRuntimeBindingsForTests } = await import("../state/design-component-bindings");
+    resetDesignRuntimeBindingsForTests();
+    expect(DESIGN_BOUND_COMPLETION_LIMIT).toBe(32);
+    const reads: string[] = [];
+    const read = async (nodeId: string) => { reads.push(nodeId); return null; };
+    await completeDesignRuntimeBindings("ws", main, write(Array.from({ length: 40 }, (_, index) => `n${index}`)), read);
+    // Past the limit the static bindings decide alone.
+    expect(reads).toHaveLength(32);
+    reads.length = 0;
+    await completeDesignRuntimeBindings("ws", { file: "plain.html", sourceVersion: V }, write(["a", "b"]), read);
+    expect(reads).toEqual([]);
+  });
+});
+
 describe("deleting a main's layers that controls drive", () => {
   it("names the controls bound to the selection and the layers inside it, and nothing for unbound layers", async () => {
     const { designDeleteBoundControls, resetDesignRuntimeBindingsForTests } = await import("../state/design-component-bindings");

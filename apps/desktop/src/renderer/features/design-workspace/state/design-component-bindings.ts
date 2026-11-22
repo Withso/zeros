@@ -7,6 +7,7 @@
 // closed: with no `bindings` (an older engine, or a record past its limits)
 // no part is selectable and every control stays at the instance's level.
 
+import { cssOverlappingProperties } from "@zeros/design-core/css-longhands";
 import type { DesignComponentBindings, DesignFrameComponent, DesignFrameInstances } from "@zeros/protocol/design-catalog";
 import { designComponentPartOf, designComponentSlotOf, type DesignRuntimeNodeDetails, type DesignRuntimeTreeNode } from "@zeros/protocol/design-runtime";
 
@@ -82,13 +83,20 @@ export function designMainLayerControls(component: DesignFrameComponent | undefi
   return designBindingControls(rest);
 }
 
+/** The controls a property-keyed record gives a written property, by the
+ * longhands each sets: bindings keep properties as authored (`gap`), and the
+ * panel writes longhands (`row-gap`), or the reverse. */
+export function designBoundControlsFor(bound: Readonly<Record<string, readonly string[]>>, property: string): string[] {
+  const keys = cssOverlappingProperties(bound, property);
+  return keys.length ? [...new Set(keys.flatMap((key) => bound[key]!))].sort() : [];
+}
+
 /** The controls that drive the root's width and height: an instance's Size
  * shows them in place of a raw field, and nothing writes that axis raw. */
 export function designRootSizeControls(bindings: DesignComponentBindings | null | undefined): { width: string[]; height: string[] } {
   const root = bindings?.root;
   const styles = root && Object.hasOwn(bindings!.layers, root) ? bindings!.layers[root]!.styles ?? {} : {};
-  const read = (property: string) => Object.hasOwn(styles, property) ? [...styles[property]!] : [];
-  return { width: read("width"), height: read("height") };
+  return { width: designBoundControlsFor(styles, "width"), height: designBoundControlsFor(styles, "height") };
 }
 
 const treesByNodes = new WeakMap<readonly DesignRuntimeTreeNode[], WeakMap<DesignFrameInstances, readonly DesignRuntimeTreeNode[]>>();
@@ -224,10 +232,38 @@ export function rememberDesignRuntimeBindings(workspaceId: string, frame: Bindin
   if (!target) return;
   const bound = designRuntimeBoundStyles(target.record, details.authoredStyles);
   const key = rememberedKey(workspaceId, frame.file, frame.sourceVersion, details.oid);
-  if (bound === EMPTY && !remembered.has(key)) return;
   remembered.delete(key);
   remembered.set(key, bound);
   while (remembered.size > REMEMBERED_LIMIT) remembered.delete(remembered.keys().next().value!);
+}
+
+/** Untracked targets one write reads; past this the static bindings decide
+ * for the rest, so a large selection costs a bounded number of reads. */
+export const DESIGN_BOUND_COMPLETION_LIMIT = 32;
+
+/** Before the fence decides on a write, read the runtime winners of each
+ * target this generation has not reported (a child a parent's layout action
+ * moves, a multi-select's other layers): once each, in parallel, and only
+ * where a component owns the layer. A failed read leaves the static half. */
+export async function completeDesignRuntimeBindings(
+  workspaceId: string,
+  frame: BindingFrame,
+  write: readonly unknown[] | { nodeId: string; styles: Readonly<Record<string, string | null>> },
+  read: (nodeId: string) => Promise<DesignRuntimeNodeDetails | null>,
+): Promise<void> {
+  const targets = new Set<string>();
+  for (const entry of Array.isArray(write) ? write : [write]) {
+    const operation = entry as { type?: unknown; nodeId?: unknown; styles?: unknown };
+    if (Array.isArray(write) && operation.type !== "node.set-styles") continue;
+    if (typeof operation.nodeId !== "string" || !operation.styles || typeof operation.styles !== "object") continue;
+    if (!Object.values(operation.styles as Record<string, unknown>).some((value) => value !== null)) continue;
+    if (remembered.has(rememberedKey(workspaceId, frame.file, frame.sourceVersion, operation.nodeId)) || !bindingTarget(frame, operation.nodeId)) continue;
+    targets.add(operation.nodeId);
+    if (targets.size >= DESIGN_BOUND_COMPLETION_LIMIT) break;
+  }
+  if (!targets.size) return;
+  const details = await Promise.all([...targets].map((nodeId) => read(nodeId).catch(() => null)));
+  for (const entry of details) rememberDesignRuntimeBindings(workspaceId, frame, entry);
 }
 
 export function resetDesignRuntimeBindingsForTests(): void {
@@ -257,7 +293,7 @@ export function designLayerBoundStyles(workspaceId: string, frame: BindingFrame 
  * main's layer), for the canvas. */
 export function designBoundSizeAxes(workspaceId: string, frame: BindingFrame | null | undefined, nodeId: string): { width: boolean; height: boolean } {
   const bound = designLayerBoundStyles(workspaceId, frame, nodeId);
-  return { width: Object.hasOwn(bound, "width"), height: Object.hasOwn(bound, "height") };
+  return { width: designBoundControlsFor(bound, "width").length > 0, height: designBoundControlsFor(bound, "height").length > 0 };
 }
 
 /** A layout action's styles for one layer, without what a control drives:
@@ -270,7 +306,7 @@ export function designWithoutBoundStyles(
   styles: Readonly<Record<string, string | null>>,
 ): Record<string, string | null> | null {
   const bound = designLayerBoundStyles(workspaceId, frame, nodeId);
-  const kept = Object.fromEntries(Object.entries(styles).filter(([property, value]) => value === null || !Object.hasOwn(bound, property)));
+  const kept = Object.fromEntries(Object.entries(styles).filter(([property, value]) => value === null || !designBoundControlsFor(bound, property).length));
   return Object.keys(kept).length ? kept : null;
 }
 
@@ -316,9 +352,11 @@ export function refuseDesignBoundStyleWrite(
     if (Array.isArray(write) && operation.type !== "node.set-styles") continue;
     if (typeof operation.nodeId !== "string" || !operation.styles || typeof operation.styles !== "object") continue;
     const bound = designLayerBoundStyles(workspaceId, frame, operation.nodeId);
-    for (const [property, value] of Object.entries(operation.styles as Record<string, unknown>))
-      if (value !== null && Object.hasOwn(bound, property))
-        throw new DesignControlBoundWriteError(property, designControlLabels(frame, operation.nodeId, bound[property]!));
+    for (const [property, value] of Object.entries(operation.styles as Record<string, unknown>)) {
+      if (value === null) continue;
+      const controls = designBoundControlsFor(bound, property);
+      if (controls.length) throw new DesignControlBoundWriteError(property, designControlLabels(frame, operation.nodeId, controls));
+    }
   }
 }
 

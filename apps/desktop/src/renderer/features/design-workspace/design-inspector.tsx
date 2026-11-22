@@ -224,7 +224,7 @@ import { designComponentPartOf, designComponentSlotOf } from "@zeros/protocol/de
 import { useDesignHistoryPresentation } from "./state/design-history-presentation";
 import { designComponentDisplayTitle, designComponentIdentityLabel, designComponentInstanceIdentity, designComponentSlotLabel, designFrameComponentPresentation,
   designComponentTextLock, designMissingComponentOf, isDesignComponentPartNodeId } from "./state/design-component-parts";
-import { designBindingLayerId, designControlLabels, designLayerBoundStyles, designMainLayerControls, designPartControls, designRuntimeBoundStyles, designWithoutBoundStyles, rememberDesignRuntimeBindings } from "./state/design-component-bindings";
+import { designBindingLayerId, designBoundControlsFor, designControlLabels, designLayerBoundStyles, designMainLayerControls, designPartControls, designRuntimeBoundStyles, designWithoutBoundStyles, rememberDesignRuntimeBindings } from "./state/design-component-bindings";
 import { MessageRow } from "../../shared/ui/primitives/message-row";
 import type { DesignComponentOptionsTarget } from "./design-component-options";
 import {
@@ -3156,7 +3156,7 @@ export const DesignInspector = React.memo(function DesignInspector({
     // On a main, a value a control drives is that control's: the field shows
     // the control while the winner reads it, and otherwise is locked, its
     // card naming what sets it.
-    const boundControls = [...new Set([property, ...(options?.linkedProperties ?? [])].flatMap((name) => mainBoundStyles[name] ?? []))];
+    const boundControls = [...new Set([property, ...(options?.linkedProperties ?? [])].flatMap((name) => designBoundControlsFor(mainBoundStyles, name)))];
     const boundControl = boundControls.length ? boundStyleField(label, property, boundControls) : null;
     if (boundControl) return boundControl;
     // A main's W and H are its root's, the component's own size; its X and Y
@@ -3794,7 +3794,7 @@ export const DesignInspector = React.memo(function DesignInspector({
     </React.Suspense>
   ) : undefined;
   const instanceBound = selectionKind === "instance" && instanceNodeId && workspaceId ? designLayerBoundStyles(workspaceId, frame, instanceNodeId) : null;
-  const instanceRootSize = instanceBound ? { width: [...(instanceBound.width ?? [])], height: [...(instanceBound.height ?? [])] } : null;
+  const instanceRootSize = instanceBound ? { width: designBoundControlsFor(instanceBound, "width"), height: designBoundControlsFor(instanceBound, "height") } : null;
   const instanceBoundSize = instanceRootSize && (instanceRootSize.width.length || instanceRootSize.height.length)
     ? { x: boundSizeControl(instanceRootSize.width, "x"), y: boundSizeControl(instanceRootSize.height, "y") }
     : undefined;
@@ -3855,11 +3855,12 @@ export const DesignInspector = React.memo(function DesignInspector({
       return current?.key === mainLayerKey && current.controls.join("\u0000") === leftover.join("\u0000") ? current : { key: mainLayerKey, controls: leftover };
     });
   });
+  const mainSizeControls = { width: designBoundControlsFor(mainBoundStyles, "width"), height: designBoundControlsFor(mainBoundStyles, "height") };
   const mainBoundSize = selectionKind === "main-root" || selectionKind === "main-layer"
-    ? { x: mainBoundStyles.width ? mainControl(mainBoundStyles.width, "size:x", "Width") : undefined,
-        y: mainBoundStyles.height ? mainControl(mainBoundStyles.height, "size:y", "Height") : undefined }
+    ? { x: mainSizeControls.width.length ? mainControl(mainSizeControls.width, "size:x", "Width") : undefined,
+        y: mainSizeControls.height.length ? mainControl(mainSizeControls.height, "size:y", "Height") : undefined }
     : undefined;
-  if (mainBoundSize) for (const name of [...(mainBoundStyles.width ?? []), ...(mainBoundStyles.height ?? [])]) inPlaceRef.current.add(name);
+  if (mainBoundSize) for (const name of [...mainSizeControls.width, ...mainSizeControls.height]) inPlaceRef.current.add(name);
 
   // Width, placement, and the popover boundary belong to the floating panel
   // that stacks this inspector below Layers.

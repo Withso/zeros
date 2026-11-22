@@ -7,6 +7,7 @@
 
 import postcss from "postcss";
 import { componentInstanceHostStyleAllowed } from "@zeros/design-core/component-options";
+import { cssOverlappingProperties, cssPropertiesOverlap } from "@zeros/design-core/css-longhands";
 import type { DesignComponentBindings, DesignFrameInstances } from "@zeros/protocol/design-catalog";
 
 import type { DesignLintViolation } from "./document-model";
@@ -16,7 +17,11 @@ type Elements = readonly { tag: string; attributes: readonly { name: string; val
 
 const PROPERTY_LIMIT = 6;
 /** An instance's own size: its own unless a control sets that axis on the root. */
-const SIZE_AXES: ReadonlySet<string> = new Set(["width", "height"]);
+const sizeAxis = (property: string) => cssPropertiesOverlap(property, "width") || cssPropertiesOverlap(property, "height");
+/** The controls a bound record gives a written property, by overlap (a
+ * longhand over a bound shorthand, or the reverse); empty when none. */
+const controlsOver = (bound: Readonly<Record<string, readonly string[]>>, property: string) =>
+  [...new Set(cssOverlappingProperties(bound, property).flatMap((key) => bound[key]!))];
 
 /** Each property a declaration list sets, as written. */
 function declaredProperties(list: string, readsControl: (value: string) => boolean = () => false): string[] {
@@ -73,11 +78,11 @@ export function designMainControlViolations(input: {
     const tag = new RegExp(`<[a-z][^>]*\\sdata-oid=["']${escapeRegExp(oid)}["'][^>]*>`, "i").exec(source);
     const style = tag ? /\sstyle=(["'])([\s\S]*?)\1/i.exec(tag[0])?.[2] : undefined;
     const shadowed = [...(style ? declaredProperties(style, readsControl) : []), ...ownRuleProperties(source, oid, readsControl)]
-      .filter((property) => Object.hasOwn(bound, property));
+      .filter((property) => controlsOver(bound, property).length > 0);
     if (!shadowed.length) continue;
     const unique = [...new Set(shadowed)].slice(0, PROPERTY_LIMIT);
     violations.push(violation("component-control-shadowed",
-      `${unique.join(", ")} on this layer ${unique.length === 1 ? "sits" : "sit"} over ${controlsFor(elements, unique.flatMap((property) => bound[property]!))}.`,
+      `${unique.join(", ")} on this layer ${unique.length === 1 ? "sits" : "sit"} over ${controlsFor(elements, unique.flatMap((property) => controlsOver(bound, property)))}.`,
       lineAt(tag?.index ?? 0),
       "Remove the layer's own value so the control sets it, or ask for a new control.", oid));
   }
@@ -124,13 +129,15 @@ export function designInstanceControlViolations(input: {
     // is over the root's bindings or an override no control stands for.
     const root = bindings.root ? layers.get(bindings.root.toLowerCase()) ?? {} : {};
     for (const property of host.style ? declaredProperties(host.style) : []) {
-      if (Object.hasOwn(root, property) && (SIZE_AXES.has(property) || !componentInstanceHostStyleAllowed(property))) shadowed.push([property, root[property]!]);
+      const controls = controlsOver(root, property);
+      if (controls.length && (sizeAxis(property) || !componentInstanceHostStyleAllowed(property))) shadowed.push([property, controls]);
       else if (!componentInstanceHostStyleAllowed(property)) overrides.push(property);
     }
     for (const [part, declarations] of Object.entries(host.overrides ?? {})) {
       const bound = layers.get(part) ?? {};
       for (const property of declaredProperties(declarations)) {
-        if (Object.hasOwn(bound, property)) shadowed.push([`${property} on ${part}`, bound[property]!]);
+        const controls = controlsOver(bound, property);
+        if (controls.length) shadowed.push([`${property} on ${part}`, controls]);
         else overrides.push(`${property} on ${part}`);
       }
     }

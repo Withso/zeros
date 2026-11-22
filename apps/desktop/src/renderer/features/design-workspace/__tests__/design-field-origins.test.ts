@@ -103,14 +103,19 @@ describe("values the panel cannot edit", () => {
     const origins = designFieldOriginsWithControls(base, { nodeId: "dot", layer: "Dot", controls, openControls: false });
     expect(origins.mark("border-radius")).toBe("control");
     expect(origins.lock("border-radius")).toEqual({ kind: "control", nodeId: "dot", layer: "Dot", text: "", why: "Set by Radius and Size", controls: ["Radius", "Size"] });
-    // A longhand field reads its shorthand's binding.
+    // A longhand field reads its shorthand's binding, and the reverse.
     expect(origins.lock("padding-left")).toMatchObject({ kind: "control", why: "Set by Size" });
+    expect(origins.lock("border-top-left-radius")).toMatchObject({ kind: "control", why: "Set by Radius and Size" });
     expect(origins.lock("color")).toBeNull();
     expect(origins.mark("color")).toBe(base.mark("color"));
     expect(designFieldOriginsWithControls(base, { nodeId: "dot", layer: "Dot", controls: {}, openControls: false })).toBe(base);
     // One object per origins and bindings, so fields reading it from context do not re-render.
     expect(designFieldOriginsWithControls(base, { nodeId: "dot", layer: "Dot", controls: { ...controls }, openControls: false })).toBe(origins);
     expect(designFieldOriginsWithControls(base, { nodeId: "dot", layer: "Dot", controls, openControls: true }).lock("padding")).toMatchObject({ openControls: true });
+    expect(designFieldOriginsWithControls(base, { nodeId: "dot", layer: "Dot", controls: { "row-gap": ["Gap"] }, openControls: false }).lock("gap"))
+      .toMatchObject({ kind: "control", why: "Set by Gap" });
+    expect(designFieldOriginsWithControls(base, { nodeId: "dot", layer: "Dot", controls: { background: ["Accent"] }, openControls: false }).lock("background-color"))
+      .toMatchObject({ kind: "control", why: "Set by Accent" });
   });
 
   it("marks a field whose plain value differs by theme, and says what an edit changes", () => {
