@@ -8,6 +8,7 @@ import { formatMessageTime } from "../message-hover-actions";
 import {
   boundSeeds,
   createSideChat,
+  forgetSideChatSeed,
   getSideChatSeed,
   markSideChatSeedSent,
   openSideChat,
@@ -157,6 +158,14 @@ describe("side chat handoff", () => {
     resetSideChatSeedsForTesting();
     expect(raw).toBeTruthy();
     expect(getSideChatSeed(chat.id)?.messageId).toBe("m1");
+  });
+
+  it("forgets a deleted side chat's seed", () => {
+    const chat = openSideChat(local, { messageId: "m1", promptId: "m1", role: "user", text: "hi" }, deps())!;
+    forgetSideChatSeed(chat.id);
+    expect(getSideChatSeed(chat.id)).toBeNull();
+    resetSideChatSeedsForTesting();
+    expect(getSideChatSeed(chat.id)).toBeNull();
   });
 });
 
