@@ -16,6 +16,7 @@
 // ──────────────────────────────────────────────────────────
 
 import type { AgentMessage, AgentTextMessage } from "./use-agent-session";
+import { isHarnessSwitchMessage } from "./harness-switch";
 import { isLegacyEnvironmentConnection, isRoutineNativeSleep, withoutRedundantAgentTasks } from "./renderers/tool-readiness";
 
 export interface Turn {
@@ -111,8 +112,11 @@ export function groupMessagesIntoTurns(messages: AgentMessage[]): Turn[] {
         continue;
       }
       const metadata = recordedMetadata(current, m);
-      if (current && !isSleepOnlySystemTurn(current)) turns.push(current);
-      const events: AgentMessage[] = m.localNote ? [m] : [];
+      // A switch applied with this message is recorded just before it. Show it
+      // in this turn, after the previous turn's footer, with its first work.
+      const switches = current && !m.localNote ? takeTrailingSwitches(current.events) : [];
+      if (current && !isEmptyTurn(current) && !isSleepOnlySystemTurn(current)) turns.push(current);
+      const events: AgentMessage[] = m.localNote ? [m] : switches;
       current = {
         userPrompt: m.localNote ? null : m,
         recordedTurnId: steeredTurnId ?? m.id,
@@ -147,6 +151,16 @@ export function groupMessagesIntoTurns(messages: AgentMessage[]): Turn[] {
       : preceding;
   }
   return turns;
+}
+
+function takeTrailingSwitches(events: AgentMessage[]): AgentMessage[] {
+  let start = events.length;
+  while (start > 0 && isHarnessSwitchMessage(events[start - 1])) start -= 1;
+  return start < events.length ? events.splice(start) : [];
+}
+
+function isEmptyTurn(turn: Turn): boolean {
+  return !turn.userPrompt && turn.events.length === 0;
 }
 
 /** Keep sleeps in owned turns for duration/identity, but don't manufacture an
