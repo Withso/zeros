@@ -59,8 +59,9 @@ These instructions apply to the entire repository. Read and follow
   remain readable. Explicit Design authoring upgrades them recoverably.
 
 Each cloud workspace has one Boat VM. Its standalone worker, agents, tools and
-terminals run as the stock non-root user `user`, in `/home/user/<owner>/<name>`,
-with full permissions inside the VM. The control plane connects in to the
+terminals run as the stock non-root user `user`, in `/home/user/<owner>/<name>`
+(a workspace of several repositories: the project folder,
+`/home/user/<project>/<repository>` for each), with full permissions inside the VM. The control plane connects in to the
 worker through Boat's protected port route; the worker listens on loopback
 only, checks a short-lived grant the control plane signs, keeps outbound HTTPS
 for history, activity and credentials, and never imports the Local engine
@@ -69,7 +70,15 @@ boundary; session directories and child environment allowlists do not isolate
 agents from other sessions or credentials delivered to that VM. Claude and
 Cursor receive their selected credentials; Codex uses the control-plane proxy.
 Access is limited to the creator while they remain an organization member.
-Each organization has one Cloud Computer recipe and active snapshot. On
+Each organization has one Cloud Computer recipe and active snapshot. With
+`CLOUD_V2_READY_COPIES_ENABLED` off (the default), its builds install every
+repository and a workspace holds one repository. With it on, the Cloud
+Computer holds tools only (runtime, Git LFS, install script); cloud work is
+organized in projects, each project's build is a stopped machine its
+workspaces fork, and a workspace may hold several repositories, each with its
+own checkout, token, pull request and setup. Agents then start in the project
+folder, so a repository's own agent settings (hooks, permissions, rules, its
+own MCP file) are not loaded; instructions files are. On
 create and wake, the runtime is fetched at boot and verified against its
 SHA-256 pin before the worker starts. A wake may instead start the release's
 previous pin when that VM already holds it, verified at its own install, and
