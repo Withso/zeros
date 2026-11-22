@@ -137,8 +137,6 @@ export function columnChatFor(folder: string): string | null {
   return columnChatByFolder.get(folder) ?? null;
 }
 
-/** A side chat that is running or has unsent messages asks before it closes,
- *  as a chat tab does. */
 export function sideChatCloseConfirmation(
   sessions: { getCloseActivity(chatId: string): { running: boolean; queuedCount: number } },
   chatId: string,
