@@ -79,3 +79,19 @@ it("discovers bundled system skills in the VM's custom Codex home", async () => 
   await skill(join(provider, "skills", ".system"), "review");
   expect((await listWorkspaceSkills(scope, "codex")).skills.map(s => s.id)).toEqual(["review"]);
 });
+
+it("offers every repository's skills in a workspace of several, each named by its folder and read from its own files", async () => {
+  const project = join(directory, "zeros-app"), api = join(project, "api"), web = join(project, "web");
+  await mkdir(api, { recursive: true }); await mkdir(web, { recursive: true });
+  const apiSkill = await skill(join(api, ".claude", "skills"), "deploy", "---\nname: deploy\ndescription: api deploy\n---\nAPI body\n");
+  const webSkill = await skill(join(web, ".agents", "skills"), "deploy", "---\nname: deploy\ndescription: web deploy\n---\nWeb body\n");
+  const repository = (name: string, checkoutPath: string) => ({ repository: `withso/${name}`, checkoutPath, branch: "zeros/app", baseBranch: "main" });
+  const several = new WorkspaceScope({ ...config.workspace, repository: "withso/api", checkoutPath: api, root: project,
+    repositories: [repository("api", api), repository("web", web)] });
+  const { skills } = await listWorkspaceSkills(several, "claude");
+  expect(skills.map(entry => [entry.name, entry.path, entry.body])).toEqual([
+    ["api:deploy", apiSkill, "API body\n"], ["web:deploy", webSkill, "Web body\n"]]);
+  // A workspace of one repository keeps its names.
+  await skill(join(root, ".claude", "skills"), "lint");
+  expect((await listWorkspaceSkills(scope, "claude")).skills.map(entry => entry.name)).toEqual(["lint"]);
+});
