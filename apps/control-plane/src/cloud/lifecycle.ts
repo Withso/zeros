@@ -1003,7 +1003,7 @@ export class CloudV2Lifecycle {
     try {
       const others = await this.deps.repositories?.(workspace) ?? [];
       const result = await this.deps.compute.exec(sandboxId,
-        backupProbeCommand([workspaceCheckoutPath(workspace), ...others.map(entry => `${CLOUD_V2_HOME}/${entry.checkoutFolder}`)]), CLOUD_V2_BACKUP_PROBE_SECONDS);
+        backupProbeCommand([workspaceCheckoutPath(workspace), ...others.map(entry => `${CLOUD_V2_HOME}/${entry.checkoutFolder}`)], CLOUD_V2_HOME), CLOUD_V2_BACKUP_PROBE_SECONDS);
       if (result.exitCode === 0 && !result.timedOut) probe = parseBackupProbe(result.stdout);
     } catch (error) {
       this.deps.logger?.warn(`[cloud-v2] stop probe failed (${errorCode(error)}) workspace=${workspace.id.slice(0, 8)}`);
