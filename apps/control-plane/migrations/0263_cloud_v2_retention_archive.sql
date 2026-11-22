@@ -4,8 +4,8 @@ SET LOCAL lock_timeout = '5s';
 -- person_activity_at: a person's own call on the workspace that does not already stamp active_at (connect, start,
 -- chat edit, pull request, Keep, team management, the public API's writes). The retention clock is the latest of
 -- active_at, person_activity_at and retention_started_at; active_at keeps its meaning for the idle stop.
--- keep_set_at/keep_set_by: Keep, set by anyone who can use the workspace; it exempts it from automatic archive and
--- from backup removal.
+-- keep_set_at/keep_set_by: Keep, set by anyone who can use the workspace; it exempts it from automatic archive. It
+-- exists only while the workspace is not archived: every archive clears it, in the statement that sets archived_at.
 -- archive_reason: why archived_at is set ('manual', 'inactive', 'member_left'); shown only while archived.
 -- changed_since_stop_at/_generation: a maintenance wake found a file under a checkout newer than the stop's
 -- marker, so the stop's backup or clean probe no longer describes the machine.
@@ -46,7 +46,7 @@ DECLARE previous_system text := current_setting('app.system',true);
 BEGIN
   PERFORM set_config('app.system','on',true);
   BEGIN
-    UPDATE public.cloud_v2_workspaces w SET archived_at = clock_timestamp(), archive_reason = 'member_left'
+    UPDATE public.cloud_v2_workspaces w SET archived_at = clock_timestamp(), archive_reason = 'member_left', keep_set_at = NULL, keep_set_by = NULL
       WHERE w.id IN (SELECT c.id FROM public.cloud_v2_workspaces c
         WHERE c.org_id = OLD.org_id AND c.private_owner_user_id = OLD.user_id AND c.state NOT IN ('deleting', 'deleted')
           AND c.archived_at IS NULL

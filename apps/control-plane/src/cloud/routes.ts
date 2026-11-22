@@ -332,8 +332,9 @@ export function createCloudV2Routes(deps: CloudV2RouteDeps): Hono {
     return c.json({ workspace: await document(workspace) });
   });
 
-  /** Retention S3: Keep exempts the workspace from automatic archive and from backup removal. Anyone
-   * who can use the workspace sets or clears it (a personal project's: its member only). */
+  /** Retention S3: Keep exempts a workspace that is not archived from automatic archive. Anyone who can use
+   * the workspace sets or clears it (a personal project's: its member only). On an archived workspace setting
+   * it is refused (409 keep_refused_archived) and clearing it changes nothing. */
   if (deps.store.setKeep) for (const [method, keep] of [["put", true], ["delete", false]] as const)
     app[method]("/v1/cloud-v2/workspaces/:id/keep", rateLimit("cloud-workspace-keep", 12, 60_000), async c => {
       const id = uuid.safeParse(c.req.param("id"));

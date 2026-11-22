@@ -129,14 +129,14 @@ export type CloudV2Workspace = {
   /** Retention: a lost VM came back without the work of the stop at `stoppedAt`: nothing of it
    * (rebuilt from GitHub) or an earlier backup instead. Until dismissed or the next backup. */
   lostWork?: { restored: "none" | "earlier"; stoppedAt: string };
-  /** Retention S3: exempt from automatic archive and from backup removal. The serializer always sends it from
+  /** Retention S3: exempt from automatic archive; never true while archived. The serializer always sends it from
    * this release; optional in the type so documents and fixtures built elsewhere stay valid. */
   keep?: boolean;
   /** Why it is archived; only while archivedAt is set. */
   archiveReason?: "manual" | "inactive" | "member_left";
   /** While archived and its machine is recorded: when Boat removes the machine. `estimate` unless Boat said so. */
   machineExpectedGoneAt?: { at: string; estimate: boolean };
-  /** While archived, not kept, with a backup: when the backup is removed (archive + 60 days). */
+  /** While archived with a backup: when the backup is removed (archive + 60 days). */
   backupRemovalAt?: string;
 };
 
@@ -357,7 +357,7 @@ function workspace(row: Row): CloudV2Workspace {
     ...(row.checkout_path ? { checkoutFolder: row.checkout_path } : {}),
     ...(row.folder ? { folder: row.folder } : {}),
     ...(row.lost_work_restored && row.lost_work_since ? { lostWork: { restored: row.lost_work_restored, stoppedAt: row.lost_work_since.toISOString() } } : {}),
-    keep: Boolean(row.keep_set_at),
+    keep: Boolean(row.keep_set_at) && !row.archived_at,
     ...archiveFields(row),
   };
 }
@@ -383,7 +383,7 @@ function archiveFields(row: Row): Pick<CloudV2Workspace, "archiveReason" | "mach
   return {
     ...(row.archive_reason ? { archiveReason: row.archive_reason } : {}),
     ...(gone ? { machineExpectedGoneAt: gone } : {}),
-    ...(!row.keep_set_at && row.checkpoint_object ? { backupRemovalAt: new Date(row.archived_at.getTime() + 60 * DAY_MS).toISOString() } : {}),
+    ...(row.checkpoint_object ? { backupRemovalAt: new Date(row.archived_at.getTime() + 60 * DAY_MS).toISOString() } : {}),
   };
 }
 export { workspace as cloudV2WorkspaceFromRow };
@@ -807,6 +807,8 @@ export class CloudV2Store {
         `UPDATE cloud_v2_workspaces SET
            archived_at = CASE WHEN $3::boolean THEN coalesce(archived_at, clock_timestamp()) ELSE NULL END,
            archive_reason = CASE WHEN NOT $3::boolean THEN NULL WHEN archived_at IS NULL THEN 'manual' ELSE archive_reason END,
+           keep_set_at = CASE WHEN $3::boolean THEN NULL ELSE keep_set_at END,
+           keep_set_by = CASE WHEN $3::boolean THEN NULL ELSE keep_set_by END,
            restart_stop_generation = $4::bigint,
            execution_initiator_user_id = CASE WHEN $5::uuid IS NOT NULL AND $6::boolean THEN $5 ELSE execution_initiator_user_id END,
            execution_intent_id = CASE WHEN $5::uuid IS NOT NULL AND $6::boolean THEN gen_random_uuid() ELSE execution_intent_id END,
@@ -1753,19 +1755,25 @@ export class CloudV2Store {
   }
 
   /** Retention S3: Keep, set or cleared by anyone who can use the workspace (its creator in legacy mode,
-   * any eligible member in shared execution, a personal project's member only). Counts as activity. */
+   * any eligible member in shared execution, a personal project's member only). Counts as activity. Keep
+   * exists only for a workspace that is not archived (owner decision, 2026-11-22): setting it on an archived
+   * one is refused, clearing it there changes nothing, and every archive clears it. */
   async setKeep(id: string, userId: string, keep: boolean): Promise<CloudV2Workspace> {
     return withSystemTx(this.pool, async tx => {
+      const current = (await tx.query<Row>(`SELECT ${COLUMNS} FROM cloud_v2_workspaces w
+        WHERE w.id=$1 AND w.state <> 'deleted' AND ${cloudV2ActorAccess("$2")} AND ${LIVE_ACCESS} FOR UPDATE`, [id, userId])).rows[0];
+      if (!current) throw notFound();
+      if (current.state === "deleting") throw new HttpError(409, "workspace_deleting", "This cloud workspace is being deleted");
+      if (current.archived_at) {
+        if (keep) throw new HttpError(409, "keep_refused_archived", "Keep is only for a workspace that is not archived. Open it first.");
+        return workspace(current);
+      }
       const { rows } = await tx.query<Row>(
-        `UPDATE cloud_v2_workspaces w SET keep_set_at = CASE WHEN $3::boolean THEN coalesce(keep_set_at, clock_timestamp()) END,
-           keep_set_by = CASE WHEN NOT $3::boolean THEN NULL WHEN keep_set_at IS NULL THEN $2::uuid ELSE keep_set_by END,
+        `UPDATE cloud_v2_workspaces w SET keep_set_at = CASE WHEN $2::boolean THEN coalesce(keep_set_at, clock_timestamp()) END,
+           keep_set_by = CASE WHEN NOT $2::boolean THEN NULL WHEN keep_set_at IS NULL THEN $3::uuid ELSE keep_set_by END,
            person_activity_at = clock_timestamp()
-         WHERE w.id=$1 AND w.state NOT IN ('deleting','deleted') AND ${cloudV2ActorAccess("$2")} AND ${LIVE_ACCESS}
-         RETURNING ${COLUMNS}`, [id, userId, keep]);
-      if (rows[0]) return workspace(rows[0]);
-      const deleting = await tx.query(`SELECT 1 FROM cloud_v2_workspaces w WHERE w.id=$1 AND w.state='deleting'
-        AND ${cloudV2ActorAccess("$2")} AND ${LIVE_ACCESS}`, [id, userId]);
-      throw deleting.rowCount ? new HttpError(409, "workspace_deleting", "This cloud workspace is being deleted") : notFound();
+         WHERE w.id=$1 RETURNING ${COLUMNS}`, [id, keep, userId]);
+      return workspace(rows[0]!);
     });
   }
 
@@ -1794,7 +1802,7 @@ export class CloudV2Store {
              AND NOT ${PENDING_WORKER_PROMPTS_SQL.text}
              AND NOT EXISTS (SELECT 1 FROM cloud_v2_execution_contexts e WHERE e.workspace_id=w.id AND e.state='active' AND e.expires_at > clock_timestamp())
            ORDER BY greatest(w.active_at, w.person_activity_at, w.retention_started_at) LIMIT $2 FOR UPDATE SKIP LOCKED)
-         UPDATE cloud_v2_workspaces w SET archived_at=clock_timestamp(), archive_reason='inactive' FROM due
+         UPDATE cloud_v2_workspaces w SET archived_at=clock_timestamp(), archive_reason='inactive', keep_set_at=NULL, keep_set_by=NULL FROM due
          WHERE w.id=due.id AND w.archived_at IS NULL AND w.keep_set_at IS NULL AND w.state IN ('stopped','failed')
          RETURNING w.id, w.creator_user_id`, [input.inactiveMs, input.limit]);
       return { archived: rows.map(row => ({ id: row.id, creatorUserId: row.creator_user_id })) };
@@ -1808,7 +1816,7 @@ export class CloudV2Store {
     return withSystemTx(this.pool, async tx => {
       const departed = `w.private_owner_user_id IS NOT NULL AND w.state NOT IN ('deleting','deleted')
         AND NOT EXISTS (SELECT 1 FROM organization_members m WHERE m.org_id=w.org_id AND m.user_id=w.private_owner_user_id)`;
-      await tx.query(`UPDATE cloud_v2_workspaces SET archived_at=clock_timestamp(), archive_reason='member_left'
+      await tx.query(`UPDATE cloud_v2_workspaces SET archived_at=clock_timestamp(), archive_reason='member_left', keep_set_at=NULL, keep_set_by=NULL
         WHERE id IN (SELECT w.id FROM cloud_v2_workspaces w WHERE w.archived_at IS NULL AND ${departed} LIMIT $1 FOR UPDATE SKIP LOCKED)`, [limit]);
       return (await tx.query<{ id: string }>(`SELECT w.id FROM cloud_v2_workspaces w
         WHERE w.archived_at IS NOT NULL AND w.state IN ('running','starting') AND ${departed} LIMIT $1`, [limit])).rows.map(row => row.id);

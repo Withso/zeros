@@ -926,6 +926,42 @@ d("cloud v2 retention", () => {
       });
     });
 
+    describe("Keep and archive (owner decision, 2026-11-22: Keep only while not archived)", () => {
+      it("clears Keep at a manual archive, sets the backup's removal date, and an open does not bring it back", async () => {
+        await stop();
+        await pool.query(`UPDATE cloud_v2_workspaces SET checkpoint_object=$2, checkpoint_key='{"sealed":true}', checkpoint_sha256=$3, checkpoint_bytes=100,
+          checkpoint_saved_at=clock_timestamp(), checkpoint_stop_generation=stop_generation WHERE id=$1`, [id, `cloud-v2/checkpoints/${id}/${randomUUID()}.zck`, "e".repeat(64)]);
+        expect((await store.setKeep(id, user, true)).keep).toBe(true);
+        await store.requestLifecycle(id, user, "archive");
+        const archived = await store.get(id, user);
+        expect(archived).toMatchObject({ keep: false, archiveReason: "manual" });
+        expect(Date.parse(archived.backupRemovalAt!) - Date.parse(archived.archivedAt!)).toBe(60 * DAY);
+        expect(await columns("keep_set_at, keep_set_by")).toEqual({ keep_set_at: null, keep_set_by: null });
+        await store.requestLifecycle(id, user, "start");
+        expect((await store.get(id, user)).keep).toBe(false);
+      });
+
+      it("refuses Keep on every kind of archived workspace: manual, inactive and a returning member's", async () => {
+        await stop();
+        await store.requestLifecycle(id, user, "archive");
+        await expect(store.setKeep(id, user, true)).rejects.toMatchObject({ status: 409, code: "keep_refused_archived" });
+        await store.requestLifecycle(id, user, "start");
+        await pool.query("UPDATE cloud_v2_workspaces SET state='stopped' WHERE id=$1", [id]);
+        await ago(31);
+        await store.archiveInactive({ inactiveMs: 30 * DAY, limit: 200 });
+        await expect(store.setKeep(id, user, true)).rejects.toMatchObject({ status: 409, code: "keep_refused_archived" });
+        await store.requestLifecycle(id, user, "start");
+        // A member's personal-project workspace, archived when they left, theirs again when re-added.
+        const leaver = await member();
+        await pool.query("UPDATE cloud_v2_workspaces SET creator_user_id=$2, private_owner_user_id=$2 WHERE id=$1", [id, leaver]);
+        expect((await store.setKeep(id, leaver, true)).keep).toBe(true);
+        await pool.query("DELETE FROM organization_members WHERE org_id=$1 AND user_id=$2", [org, leaver]);
+        expect(await columns("archive_reason, keep_set_at")).toEqual({ archive_reason: "member_left", keep_set_at: null });
+        await pool.query("INSERT INTO organization_members (org_id, user_id, role) VALUES ($1, $2, 'member')", [org, leaver]);
+        await expect(store.setKeep(id, leaver, true)).rejects.toMatchObject({ status: 409, code: "keep_refused_archived" });
+      });
+    });
+
     describe("automatic archive", () => {
       it("archives only a quiet one: not during a maintenance wake, nor once a start is pending", async () => {
         await stop();
@@ -958,7 +994,7 @@ d("cloud v2 retention", () => {
         expect(Number((await pool.query("SELECT count(*) AS n FROM security_notification_outbox")).rows[0].n)).toBe(0);
       });
 
-      it("carries the archive's fields on the document, and none while Keep is set", async () => {
+      it("carries the archive's fields on the document, and refuses Keep while archived", async () => {
         await stop();
         await pool.query(`UPDATE cloud_v2_workspaces SET checkpoint_object=$2, checkpoint_key='{"sealed":true}', checkpoint_sha256=$3, checkpoint_bytes=100,
           checkpoint_saved_at=clock_timestamp(), checkpoint_stop_generation=stop_generation WHERE id=$1`, [id, `cloud-v2/checkpoints/${id}/${randomUUID()}.zck`, "e".repeat(64)]);
@@ -971,9 +1007,9 @@ d("cloud v2 retention", () => {
         // Not yet woken: the archived wake at 10 days, then Boat's 14.
         const stops = await columns("greatest(machine_stopped_at, stopped_at) AS last");
         expect(Date.parse(archived.machineExpectedGoneAt!.at) - stops.last.getTime()).toBe(24 * DAY);
-        const kept = await store.setKeep(id, user, true);
-        expect(kept).toMatchObject({ keep: true, archiveReason: "inactive" });
-        expect(kept).not.toHaveProperty("backupRemovalAt");
+        // Keep exists only while not archived: refused here, and clearing it changes nothing.
+        await expect(store.setKeep(id, user, true)).rejects.toMatchObject({ status: 409, code: "keep_refused_archived" });
+        expect(await store.setKeep(id, user, false)).toMatchObject({ keep: false, archiveReason: "inactive", backupRemovalAt: archived.backupRemovalAt });
         // Opening un-archives it, and the reason goes with it.
         await store.requestLifecycle(id, user, "start");
         const opened = await store.get(id, user);
