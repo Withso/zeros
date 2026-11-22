@@ -113,7 +113,13 @@ function setup(claimed: (CloudV2LifecycleWorkspace & { attempts: number })[], op
     checkpointForkCreated: vi.fn(async () => true),
     checkpointForkGone: vi.fn(async () => {}),
     checkpointRetryNext: vi.fn(async () => {}),
-  };
+    // Retention S3's hourly archive scan: nothing departed, returned or due here.
+    restoreReturningPrivate: vi.fn(async () => 0),
+    archiveDepartedPrivate: vi.fn(async () => []),
+    archiveForSystem: vi.fn(async () => false),
+    startRetentionClocks: vi.fn(async () => 0),
+    archiveInactive: vi.fn(async () => ({ archived: [], notices: 0 })),
+  } as CloudV2LifecycleDeps["store"];
   const stopWorker = vi.fn(async () => true);
   const logs: { warn: string[]; error: string[] } = { warn: [], error: [] };
   const lifecycle = new CloudV2Lifecycle({

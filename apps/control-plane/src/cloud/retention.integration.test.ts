@@ -5,14 +5,14 @@
 // not on GitHub, and an archive is the set of such files it captured.
 import { generateKeyPairSync, randomUUID } from "node:crypto";
 import pg from "pg";
-import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { CloudProviderError } from "./provider-error.js";
 import { resetMigratedTestDatabase } from "../test-database.js";
 import { grantTestPro } from "../test-pro.js";
 import { FakeBoat } from "./__fixtures__/boat-fake.js";
 import { CLOUD_V2_BACKUP_DELAY_MS, CLOUD_V2_CHECKPOINT_RETRY_WINDOW_MS, CLOUD_V2_LOSS_CONFIRM_MS, CLOUD_V2_LOSS_UNCONFIRMED_ALERT, CLOUD_V2_MAINTENANCE_LEASE_SECONDS,
   CLOUD_V2_MAINTENANCE_ADOPT_STALE_MS, CLOUD_V2_MAINTENANCE_STALE_MS, CloudV2Lifecycle, type CloudV2LifecycleDeps, type CloudV2TimingRecord } from "./lifecycle.js";
-import { CloudV2Store } from "./store.js";
+import { CLOUD_V2_BACKUP_REMOVAL_AT_SQL, CloudV2Store, setCloudV2RetentionDocuments } from "./store.js";
 
 const d = process.env.TEST_DATABASE_URL ? describe : describe.skip;
 const HOME = "/home/user";
@@ -30,12 +30,19 @@ d("cloud v2 retention", () => {
   /** Branches GitHub has, by checkout path. */
   let remoteBranches: Set<string>;
   let backupFails: boolean;
+  /** Retention S3: machines whose stop marker exists; machines something wrote to since; the change check timing out;
+   * the environment restore failing; the bytes the server seeded, by path. */
+  let markers: Set<string>, written: Set<string>, changeTimesOut: boolean, environmentRestoreFails: boolean, seeded: Map<string, string>;
 
   beforeAll(() => { pool = new pg.Pool({ connectionString: process.env.TEST_DATABASE_URL, max: 4 }); });
   afterAll(() => pool.end());
+  // As composition does with CLOUD_V2_RETENTION_ENABLED on; off again after, for any later file in this worker.
+  afterEach(() => setCloudV2RetentionDocuments(false));
   beforeEach(async () => {
+    setCloudV2RetentionDocuments(true);
     await resetMigratedTestDatabase(pool);
     archives = new Map(); uploads = []; errors = []; warnings = []; timings = []; remoteBranches = new Set(); backupFails = false;
+    markers = new Set(); written = new Set(); changeTimesOut = false; environmentRestoreFails = false; seeded = new Map();
     boat = new FakeBoat();
     boat.script = (machine, command, input) => {
       if (command.includes("zeros-backup-probe")) {
@@ -45,7 +52,7 @@ d("cloud v2 retention", () => {
       if (command.includes("zeros-checkpoint-saved")) {
         if (backupFails) return { exitCode: 3, stdout: "zeros-checkpoint-error checkpoint_upload_failed upload\n", timedOut: false };
         const object = OBJECT.exec(command)![0];
-        archives.set(object, new Map([...machine.files].filter(([file]) => file.endsWith("/UNPUSHED")
+        archives.set(object, new Map([...machine.files].filter(([file]) => (file.endsWith("/UNPUSHED") || file.endsWith("/.env"))
           && REPOS.some(repo => command.includes(path(repo.folder)) && file.startsWith(`${path(repo.folder)}/`)))));
         return { exitCode: 0, stdout: `zeros-checkpoint-saved bytes=100 sha256=${"e".repeat(64)}\n`, timedOut: false };
       }
@@ -53,6 +60,29 @@ d("cloud v2 retention", () => {
         const object = OBJECT.exec(command)![0];
         for (const [file, content] of archives.get(object) ?? []) machine.files.set(file, content);
         return { exitCode: 0, stdout: "zeros-checkpoint-restored\n", timedOut: false };
+      }
+      // Retention S3's commands on the machine.
+      if (command.includes("zeros-stop-marker") && !command.includes("zeros-changed")) { markers.add(machine.id); written.delete(machine.id); return { exitCode: 0, stdout: "", timedOut: false }; }
+      if (command.includes("zeros-changed")) {
+        if (changeTimesOut) return { exitCode: 124, stdout: "", timedOut: true };
+        const changed = !markers.has(machine.id) || written.has(machine.id);
+        markers.add(machine.id);
+        return { exitCode: 0, stdout: `zeros-changed ${changed ? "yes" : "no"}\n`, timedOut: false };
+      }
+      if (command.includes("zeros-archive-scrub")) {
+        const mode = /scrub\.mjs" '\\''(backup|reseed|keep)'/.exec(command)?.[1];
+        machine.files.delete("/home/user/.claude/.credentials.json");
+        const env = [...machine.files.keys()].filter(file => file.endsWith("/.env"));
+        let result = "partial";
+        if (mode === "backup") { for (const file of env) machine.files.delete(file); result = env.length ? "backup" : "clean"; }
+        if (mode === "reseed" && env.every(file => machine.files.get(file) === seeded.get(file))) { for (const file of env) machine.files.delete(file); result = "clean"; }
+        return { exitCode: 0, stdout: `zeros-archive-scrub ${result}\n`, timedOut: false };
+      }
+      if (command.includes("zeros-environment-restored")) {
+        if (environmentRestoreFails) return { exitCode: 3, stdout: "zeros-checkpoint-error checkpoint_download_failed download\n", timedOut: false };
+        const object = OBJECT.exec(command)![0];
+        for (const [file, content] of archives.get(object) ?? []) if (file.endsWith("/.env")) machine.files.set(file, content);
+        return { exitCode: 0, stdout: "zeros-environment-restored\n", timedOut: false };
       }
       if (command.includes("ls-remote --exit-code")) {
         expect(input).toMatch(/^Authorization: Basic /);
@@ -805,6 +835,462 @@ d("cloud v2 retention", () => {
       expect(boat.machine((await row()).boat_sandbox_id)!.files.get(`${path("app")}/UNPUSHED`)).toBe("older work");
       expect(deletes()).not.toContain(vm);
       expect((await pool.query("SELECT lost_work_machine FROM cloud_v2_workspaces WHERE id=$1", [id])).rows[0].lost_work_machine).toBe(vm);
+    });
+  });
+
+  describe("activity, Keep and archive (S3)", () => {
+    const DAY = 24 * 60 * 60_000;
+    const columns = async (names: string) => (await pool.query(`SELECT ${names} FROM cloud_v2_workspaces WHERE id=$1`, [id])).rows[0];
+    /** Moves every clock of the workspace `days` into the past. */
+    const ago = (days: number, names = "stopped_at, active_at, person_activity_at, retention_started_at") => pool.query(
+      `UPDATE cloud_v2_workspaces SET ${names.split(",").map(name => `${name.trim()}=${name.trim()} - make_interval(secs => $2::double precision)`).join(", ")} WHERE id=$1`,
+      [id, days * DAY / 1000]);
+    async function member(role = "member") {
+      const other = randomUUID();
+      await pool.query("INSERT INTO users (id, email, display_name) VALUES ($1, $2, 'M')", [other, `m-${other}@example.test`]);
+      await pool.query("INSERT INTO organization_members (org_id, user_id, role) VALUES ($1, $2, $3)", [org, other, role]);
+      return other;
+    }
+    const forksOf = () => boat.calls.filter(call => call.op === "fork" && call.args[0] === vm).length;
+
+    describe("activity", () => {
+      it("stamps a person's call at most every 30 seconds, and never waits for a row the lifecycle holds", async () => {
+        await store.personActivity(id);
+        const first = (await columns("person_activity_at")).person_activity_at;
+        expect(first).toBeInstanceOf(Date);
+        await store.personActivity(id);
+        expect((await columns("person_activity_at")).person_activity_at).toEqual(first);
+        await pool.query("UPDATE cloud_v2_workspaces SET person_activity_at=person_activity_at - interval '1 minute' WHERE id=$1", [id]);
+        const holder = await pool.connect();
+        try {
+          await holder.query("BEGIN"); await holder.query("SELECT 1 FROM cloud_v2_workspaces WHERE id=$1 FOR UPDATE", [id]);
+          const started = Date.now();
+          await store.personActivity(id);
+          expect(Date.now() - started).toBeLessThan(2_000);
+        } finally { await holder.query("ROLLBACK"); holder.release(); }
+      });
+
+      it("starts the clock at switch-on: a workspace asleep 90 days, its machine long gone, is archived 30 days after, not at once and not never", async () => {
+        await stop();
+        await pool.query("UPDATE cloud_v2_workspaces SET retention_started_at=NULL, stopped_at=clock_timestamp() - interval '90 days', active_at=clock_timestamp() - interval '90 days' WHERE id=$1", [id]);
+        boat.machine(vm)!.expired = true;
+        // A maintenance wake in the same pass may hold the row; a scan never waits for it, the next takes it.
+        await lifecycle().tick();
+        await lifecycle().tick();
+        const started = await columns("retention_started_at, archived_at");
+        expect(started.retention_started_at.getTime()).toBeGreaterThan(Date.now() - 60_000);
+        expect(started.archived_at).toBeNull();
+        await ago(29, "retention_started_at");
+        await lifecycle().tick();
+        expect((await columns("archived_at")).archived_at).toBeNull();
+        await ago(1.1, "retention_started_at");
+        await lifecycle().tick();
+        expect(await columns("archive_reason")).toEqual({ archive_reason: "inactive" });
+      });
+    });
+
+    it("never reads access: a workspace whose creator lost it is still backed up, woken and archived on schedule", async () => {
+      boat.write(vm, `${path("app")}/UNPUSHED`, "work");
+      await stop();
+      // The creator is on Hold, or their Pro ended: they cannot use the workspace now.
+      await pool.query("UPDATE organizations SET cloud_workspaces_allowed=false WHERE id=$1", [org]);
+      await earlier(CLOUD_V2_BACKUP_DELAY_MS + 60_000);
+      await lifecycle().tick();
+      expect(forksOf()).toBe(1);
+      await pool.query(`UPDATE cloud_v2_workspaces SET stopped_at=stopped_at - interval '10 days 14 hours',
+        retention_started_at=retention_started_at - interval '31 days', active_at=active_at - interval '31 days' WHERE id=$1`, [id]);
+      await lifecycle().tick();
+      await lifecycle().tick();
+      expect(boat.calls.some(call => call.op === "resume" && call.args[0] === vm && call.args[1] === CLOUD_V2_MAINTENANCE_LEASE_SECONDS)).toBe(true);
+      expect((await columns("archive_reason")).archive_reason).toBe("inactive");
+    });
+
+    describe("Keep", () => {
+      it("exempts a workspace from automatic archive, set and cleared by anyone who can use it, and counts as activity", async () => {
+        await stop();
+        await ago(31);
+        const kept = await store.setKeep(id, user, true);
+        expect(kept.keep).toBe(true);
+        await ago(31);
+        await lifecycle().tick();
+        expect((await columns("archived_at")).archived_at).toBeNull();
+        expect((await store.setKeep(id, user, false)).keep).toBe(false);
+        await ago(31);
+        await lifecycle().tick();
+        expect((await columns("archive_reason")).archive_reason).toBe("inactive");
+      });
+
+      it("refuses everyone else: another member of a creator's workspace, and anyone but its member on a personal project's", async () => {
+        const other = await member();
+        await expect(store.setKeep(id, other, true)).rejects.toMatchObject({ status: 404 });
+        await pool.query("UPDATE cloud_v2_workspaces SET creator_user_id=$2, private_owner_user_id=$2 WHERE id=$1", [id, other]);
+        await expect(store.setKeep(id, user, true)).rejects.toMatchObject({ status: 404 });
+        expect((await store.setKeep(id, other, true)).keep).toBe(true);
+      });
+    });
+
+    describe("Keep and archive (owner decision, 2026-11-22: Keep only while not archived)", () => {
+      it("clears Keep at a manual archive, sets the backup's removal date, and an open does not bring it back", async () => {
+        await stop();
+        await pool.query(`UPDATE cloud_v2_workspaces SET checkpoint_object=$2, checkpoint_key='{"sealed":true}', checkpoint_sha256=$3, checkpoint_bytes=100,
+          checkpoint_saved_at=clock_timestamp(), checkpoint_stop_generation=stop_generation WHERE id=$1`, [id, `cloud-v2/checkpoints/${id}/${randomUUID()}.zck`, "e".repeat(64)]);
+        expect((await store.setKeep(id, user, true)).keep).toBe(true);
+        await store.requestLifecycle(id, user, "archive");
+        const archived = await store.get(id, user);
+        expect(archived).toMatchObject({ keep: false, archiveReason: "manual" });
+        expect(Date.parse(archived.backupRemovalAt!) - Date.parse(archived.archivedAt!)).toBe(60 * DAY);
+        expect(await columns("keep_set_at, keep_set_by")).toEqual({ keep_set_at: null, keep_set_by: null });
+        await store.requestLifecycle(id, user, "start");
+        expect((await store.get(id, user)).keep).toBe(false);
+      });
+
+      it("refuses Keep on every kind of archived workspace: manual, inactive and a returning member's", async () => {
+        await stop();
+        await store.requestLifecycle(id, user, "archive");
+        await expect(store.setKeep(id, user, true)).rejects.toMatchObject({ status: 409, code: "keep_refused_archived" });
+        await store.requestLifecycle(id, user, "start");
+        await pool.query("UPDATE cloud_v2_workspaces SET state='stopped' WHERE id=$1", [id]);
+        await ago(31);
+        await store.archiveInactive({ inactiveMs: 30 * DAY, limit: 200 });
+        await expect(store.setKeep(id, user, true)).rejects.toMatchObject({ status: 409, code: "keep_refused_archived" });
+        await store.requestLifecycle(id, user, "start");
+        // A member's personal-project workspace, archived when they left, theirs again when re-added.
+        const leaver = await member();
+        await pool.query("UPDATE cloud_v2_workspaces SET creator_user_id=$2, private_owner_user_id=$2 WHERE id=$1", [id, leaver]);
+        expect((await store.setKeep(id, leaver, true)).keep).toBe(true);
+        await pool.query("DELETE FROM organization_members WHERE org_id=$1 AND user_id=$2", [org, leaver]);
+        expect(await columns("archive_reason, keep_set_at")).toEqual({ archive_reason: "member_left", keep_set_at: null });
+        await pool.query("INSERT INTO organization_members (org_id, user_id, role) VALUES ($1, $2, 'member')", [org, leaver]);
+        await expect(store.setKeep(id, leaver, true)).rejects.toMatchObject({ status: 409, code: "keep_refused_archived" });
+      });
+    });
+
+    describe("automatic archive", () => {
+      it("archives only a quiet one: not during a maintenance wake, nor once a start is pending", async () => {
+        await stop();
+        await ago(31);
+        await pool.query("UPDATE cloud_v2_workspaces SET maintenance_attempt=$2, maintenance_phase='waking', maintenance_started_at=clock_timestamp() WHERE id=$1", [id, randomUUID()]);
+        await store.archiveInactive({ inactiveMs: 30 * DAY, limit: 200 });
+        expect((await columns("archived_at")).archived_at).toBeNull();
+        await pool.query("UPDATE cloud_v2_workspaces SET maintenance_attempt=NULL, maintenance_phase=NULL, maintenance_started_at=NULL WHERE id=$1", [id]);
+        // Opened meanwhile: a start is pending.
+        await store.transition(id, ["stopped"], "starting");
+        await store.archiveInactive({ inactiveMs: 30 * DAY, limit: 200 });
+        expect((await columns("archived_at")).archived_at).toBeNull();
+        await pool.query("UPDATE cloud_v2_workspaces SET state='stopped' WHERE id=$1", [id]);
+        await store.archiveInactive({ inactiveMs: 30 * DAY, limit: 200 });
+        expect((await columns("archive_reason")).archive_reason).toBe("inactive");
+      });
+
+      it("works the herd 200 a run, oldest clock first, and sends no mail", async () => {
+        await stop();
+        await ago(40);
+        for (let index = 0; index < 204; index++)
+          await pool.query(`INSERT INTO cloud_v2_workspaces (id, org_id, creator_user_id, name, repository, branch, base_branch, state, stopped_at, retention_started_at)
+            VALUES ($1,$2,$3,$4,'acme/app','zeros/h','main','stopped', clock_timestamp() - interval '35 days', clock_timestamp() - interval '35 days')`, [randomUUID(), org, user, `h${index}`]);
+        const first = await store.archiveInactive({ inactiveMs: 30 * DAY, limit: 200 });
+        expect(first.archived).toHaveLength(200);
+        // The oldest clock (this workspace, 40 days) is in the first run.
+        expect(first.archived.map(entry => entry.id)).toContain(id);
+        expect((await store.archiveInactive({ inactiveMs: 30 * DAY, limit: 200 })).archived).toHaveLength(5);
+        // Owner decision (2026-11-22): the archive is shown in the app, never mailed.
+        expect(Number((await pool.query("SELECT count(*) AS n FROM security_notification_outbox")).rows[0].n)).toBe(0);
+      });
+
+      it("carries no retention field at all with the switch off: the document is exactly what it was", async () => {
+        await stop();
+        await pool.query(`UPDATE cloud_v2_workspaces SET checkpoint_object=$2, checkpoint_key='{"sealed":true}', checkpoint_sha256=$3, checkpoint_bytes=100,
+          checkpoint_saved_at=clock_timestamp(), checkpoint_stop_generation=stop_generation WHERE id=$1`, [id, `cloud-v2/checkpoints/${id}/${randomUUID()}.zck`, "e".repeat(64)]);
+        await store.requestLifecycle(id, user, "archive");
+        setCloudV2RetentionDocuments(false);
+        const plain = await store.get(id, user);
+        for (const field of ["keep", "archiveReason", "machineExpectedGoneAt", "backupRemovalAt"]) expect(plain).not.toHaveProperty(field);
+        setCloudV2RetentionDocuments(true);
+        expect(await store.get(id, user)).toMatchObject({ keep: false, archiveReason: "manual" });
+      });
+
+      it("counts the backup's removal from the switch, never from history, and drops an estimate already past", async () => {
+        await stop();
+        await pool.query(`UPDATE cloud_v2_workspaces SET checkpoint_object=$2, checkpoint_key='{"sealed":true}', checkpoint_sha256=$3, checkpoint_bytes=100,
+          checkpoint_saved_at=clock_timestamp(), checkpoint_stop_generation=stop_generation WHERE id=$1`, [id, `cloud-v2/checkpoints/${id}/${randomUUID()}.zck`, "e".repeat(64)]);
+        // Archived 100 days before retention applied to it.
+        await pool.query(`UPDATE cloud_v2_workspaces SET archived_at=clock_timestamp() - interval '100 days', archive_reason='manual', retention_started_at=NULL,
+          stopped_at=clock_timestamp() - interval '101 days' WHERE id=$1`, [id]);
+        expect(await store.get(id, user)).not.toHaveProperty("backupRemovalAt");
+        await store.startRetentionClocks(10);
+        const started = (await columns("retention_started_at")).retention_started_at as Date;
+        const document = await store.get(id, user);
+        expect(Date.parse(document.backupRemovalAt!) - started.getTime()).toBe(60 * DAY);
+        // The SQL expression S4 removes by is the same date.
+        const sql = (await pool.query(`SELECT ${CLOUD_V2_BACKUP_REMOVAL_AT_SQL} AS at FROM cloud_v2_workspaces w WHERE w.id=$1`, [id])).rows[0].at as Date;
+        expect(sql.toISOString()).toBe(document.backupRemovalAt);
+        // Its machine's estimate (101 days since its stop) is long past: no date rather than a wrong one.
+        expect(document).not.toHaveProperty("machineExpectedGoneAt");
+      });
+
+      it("carries the archive's fields on the document, and refuses Keep while archived", async () => {
+        await stop();
+        await pool.query(`UPDATE cloud_v2_workspaces SET checkpoint_object=$2, checkpoint_key='{"sealed":true}', checkpoint_sha256=$3, checkpoint_bytes=100,
+          checkpoint_saved_at=clock_timestamp(), checkpoint_stop_generation=stop_generation WHERE id=$1`, [id, `cloud-v2/checkpoints/${id}/${randomUUID()}.zck`, "e".repeat(64)]);
+        await ago(31);
+        await lifecycle().tick();
+        await lifecycle().tick();
+        const archived = await store.get(id, user);
+        expect(archived).toMatchObject({ keep: false, archiveReason: "inactive", machineExpectedGoneAt: { estimate: true } });
+        expect(Date.parse(archived.backupRemovalAt!) - Date.parse(archived.archivedAt!)).toBe(60 * DAY);
+        // Boat's 14 days after the machine's last stop, plus the archived wake's 10 while that wake is still owed.
+        // The same pass may archive the workspace and then give it that wake, or wake it first: both are right.
+        const stops = await columns("greatest(machine_stopped_at, stopped_at) AS last, archive_wake_done_at >= archived_at AS woken");
+        expect(Date.parse(archived.machineExpectedGoneAt!.at) - stops.last.getTime()).toBe((stops.woken ? 14 : 24) * DAY);
+        // Once the archived wake is recorded, only Boat's 14 days remain.
+        await pool.query("UPDATE cloud_v2_workspaces SET archive_wake_done_at=clock_timestamp() WHERE id=$1", [id]);
+        expect(Date.parse((await store.get(id, user)).machineExpectedGoneAt!.at) - stops.last.getTime()).toBe(14 * DAY);
+        // Keep exists only while not archived: refused here, and clearing it changes nothing.
+        await expect(store.setKeep(id, user, true)).rejects.toMatchObject({ status: 409, code: "keep_refused_archived" });
+        expect(await store.setKeep(id, user, false)).toMatchObject({ keep: false, archiveReason: "inactive", backupRemovalAt: archived.backupRemovalAt });
+        // Opening un-archives it, and the reason goes with it.
+        await store.requestLifecycle(id, user, "start");
+        const opened = await store.get(id, user);
+        expect(opened.archivedAt).toBeNull();
+        expect(opened).not.toHaveProperty("archiveReason");
+      });
+    });
+
+    describe("a member who leaves", () => {
+      async function privateTo(person: string) {
+        await pool.query("UPDATE cloud_v2_workspaces SET creator_user_id=$2, private_owner_user_id=$2 WHERE id=$1", [id, person]);
+      }
+
+      it("archives their personal project's workspace at once, stops it the ordinary way, and with retention off still uploads its checkpoint", async () => {
+        const leaver = await member();
+        await privateTo(leaver);
+        await pool.query("DELETE FROM organization_members WHERE org_id=$1 AND user_id=$2", [org, leaver]);
+        expect(await columns("archive_reason, state")).toEqual({ archive_reason: "member_left", state: "running" });
+        await lifecycle({ retention: false }).tick();
+        expect((await columns("state")).state).toBe("stopping");
+        await lifecycle({ retention: false }).tick();
+        expect(await columns("state, archive_reason")).toEqual({ state: "stopped", archive_reason: "member_left" });
+        expect(uploads.length).toBeGreaterThan(0);
+      });
+
+      it("never lets anyone else in, admins included, and gives the member their workspace back when re-added", async () => {
+        const leaver = await member(), admin = await member("admin");
+        await privateTo(leaver);
+        await pool.query("DELETE FROM organization_members WHERE org_id=$1 AND user_id=$2", [org, leaver]);
+        for (const person of [user, admin, leaver]) await expect(store.setKeep(id, person, true)).rejects.toMatchObject({ status: 404 });
+        // Shared execution's creator-loss trigger clears the creator when they leave; their return restores it.
+        await pool.query("UPDATE cloud_v2_workspaces SET execution_mode='active', creator_user_id=NULL, creator_absent_reason='left', creator_absent_at=clock_timestamp() WHERE id=$1", [id]);
+        await member();
+        expect((await columns("creator_user_id")).creator_user_id).toBeNull();
+        await pool.query("INSERT INTO organization_members (org_id, user_id, role) VALUES ($1, $2, 'member')", [org, leaver]);
+        expect(await columns("creator_user_id, creator_absent_reason, archive_reason")).toEqual({ creator_user_id: leaver, creator_absent_reason: null, archive_reason: "member_left" });
+      });
+
+      it("leaves the transaction's own settings exactly as they were: '0', '1' or unset, through both membership triggers", async () => {
+        const leaver = await member();
+        await pool.query("UPDATE cloud_v2_workspaces SET creator_user_id=$2, private_owner_user_id=$2 WHERE id=$1", [id, leaver]);
+        for (const before of [null, "0", "1"] as const) {
+          const client = await pool.connect();
+          try {
+            await client.query("BEGIN");
+            if (before !== null) await client.query("SELECT set_config('app.system', $1, true), set_config('app.cloud_team_ownership', $1, true)", [before]);
+            // Both triggers fire in this transaction: the departure archives, the return restores.
+            await client.query("DELETE FROM organization_members WHERE org_id=$1 AND user_id=$2", [org, leaver]);
+            expect((await client.query("SELECT archive_reason FROM cloud_v2_workspaces WHERE id=$1", [id])).rows[0].archive_reason).toBe("member_left");
+            await client.query("INSERT INTO organization_members (org_id, user_id, role) VALUES ($1, $2, 'member')", [org, leaver]);
+            const after = (await client.query("SELECT current_setting('app.system', true) AS system, current_setting('app.cloud_team_ownership', true) AS ownership")).rows[0];
+            if (before === null) for (const value of [after.system, after.ownership]) expect(["on", "1"]).not.toContain(value);
+            else expect(after).toEqual({ system: before, ownership: before });
+          } finally { await client.query("ROLLBACK"); client.release(); }
+        }
+        expect((await columns("archive_reason")).archive_reason).toBeNull();
+      });
+
+      it("never fails or waits on a removal while the workspace row is held (a start in progress), and archives it on the next sweep", async () => {
+        const leaver = await member();
+        await privateTo(leaver);
+        await pool.query("UPDATE cloud_v2_workspaces SET state='starting' WHERE id=$1", [id]);
+        const holder = await pool.connect();
+        try {
+          await holder.query("BEGIN"); await holder.query("SELECT 1 FROM cloud_v2_workspaces WHERE id=$1 FOR UPDATE", [id]);
+          const remover = await pool.connect();
+          try {
+            await remover.query("SET statement_timeout = '3s'");
+            await remover.query("DELETE FROM organization_members WHERE org_id=$1 AND user_id=$2", [org, leaver]);
+          } finally { await remover.query("RESET statement_timeout"); remover.release(); }
+        } finally { await holder.query("ROLLBACK"); holder.release(); }
+        expect((await columns("archived_at")).archived_at).toBeNull();
+        expect(await store.archiveDepartedPrivate(200)).toEqual([id]);
+        expect(await columns("archive_reason")).toEqual({ archive_reason: "member_left" });
+        expect(await store.archiveForSystem(id)).toBe(true);
+        expect((await columns("state")).state).toBe("stopping");
+      });
+
+      it("leaves a manual archive exactly as before, but for its reason", async () => {
+        for (const state of ["running", "stopped"] as const) {
+          if (state === "stopped") await stop();
+          const before = (await pool.query("SELECT * FROM cloud_v2_workspaces WHERE id=$1", [id])).rows[0];
+          await store.requestLifecycle(id, user, "archive");
+          const after = (await pool.query("SELECT * FROM cloud_v2_workspaces WHERE id=$1", [id])).rows[0];
+          const changed = Object.keys(after).filter(key => JSON.stringify(after[key]) !== JSON.stringify(before[key])).sort();
+          expect(changed).toEqual(state === "running"
+            ? ["archive_reason", "archived_at", "execution_intent_id", "state", "stop_generation", "updated_at"].filter(key => key in after && (key !== "execution_intent_id" || after[key] !== before[key])).sort()
+            : ["archive_reason", "archived_at", "updated_at"]);
+          expect(after.archive_reason).toBe("manual");
+          await store.requestLifecycle(id, user, "start");
+          if (state === "running") { await pool.query("UPDATE cloud_v2_workspaces SET state='running' WHERE id=$1", [id]); }
+        }
+      });
+    });
+
+    describe("final backup and scrub", () => {
+      const ENV = `${path("app")}/.env`;
+      const archive = () => store.requestLifecycle(id, user, "archive");
+      const sleepFor = (days: number) => pool.query(`UPDATE cloud_v2_workspaces SET stopped_at=stopped_at - make_interval(secs => $2::double precision),
+        machine_stopped_at=machine_stopped_at - make_interval(secs => $2::double precision),
+        archived_at=archived_at - make_interval(secs => $2::double precision),
+        retention_started_at=retention_started_at - make_interval(secs => $2::double precision) WHERE id=$1`, [id, days * DAY / 1000]);
+      const wakeRows = async () => (await pool.query("SELECT outcome, changed_since_stop, scrub FROM cloud_v2_maintenance_wakes WHERE workspace_id=$1 AND kind='wake' ORDER BY started_at", [id])).rows;
+
+      it("takes no fork at archive when this stop's backup is settled and nothing changed since", async () => {
+        boat.write(vm, `${path("app")}/UNPUSHED`, "work");
+        await stop();
+        await earlier(CLOUD_V2_BACKUP_DELAY_MS + 60_000);
+        await lifecycle().tick();
+        expect(forksOf()).toBe(1);
+        await archive();
+        await lifecycle().tick();
+        expect(forksOf()).toBe(1);
+      });
+
+      it("takes exactly one backup for a running workspace stopped by its archive", async () => {
+        boat.write(vm, `${path("app")}/UNPUSHED`, "work");
+        await archive();
+        await lifecycle().tick();
+        expect((await columns("state")).state).toBe("stopped");
+        // The archive's backup goes first, without the hour's delay.
+        await lifecycle().tick();
+        expect(forksOf()).toBe(1);
+        await earlier(CLOUD_V2_BACKUP_DELAY_MS + 60_000);
+        await lifecycle().tick();
+        expect(forksOf()).toBe(1);
+      });
+
+      for (const [name, setup] of [
+        ["a file written while a wake had the machine awake", () => { written.add(vm); }],
+        ["the change check timing out", () => { changeTimesOut = true; }],
+      ] as const) it(`takes one at archive after ${name}, though the stop's probe was clean`, async () => {
+        await stop();
+        expect(markers.has(vm)).toBe(true);
+        setup();
+        await sleepFor(10.6);
+        await lifecycle().tick();
+        expect(await wakeRows()).toMatchObject([{ outcome: "stopped", changed_since_stop: true }]);
+        changeTimesOut = false;
+        await archive();
+        await lifecycle().tick();
+        expect(forksOf()).toBe(1);
+      });
+
+      it("scrubs the machine at its one archived wake, and an open puts the person's own environment file back before the worker starts", async () => {
+        boat.write(vm, ENV, "TOKEN=the person's own edit");
+        seeded.set(ENV, "TOKEN=from the server");
+        boat.write(vm, "/home/user/.claude/.credentials.json", "{}");
+        boat.write(vm, `${path("app")}/UNPUSHED`, "work");
+        await stop();
+        await earlier(CLOUD_V2_BACKUP_DELAY_MS + 60_000);
+        await lifecycle().tick();
+        await archive();
+        await sleepFor(10.6);
+        await lifecycle().tick();
+        expect(await wakeRows()).toMatchObject([{ outcome: "stopped", scrub: "backup" }]);
+        expect(boat.machine(vm)!.files.has(ENV)).toBe(false);
+        expect(boat.machine(vm)!.files.has("/home/user/.claude/.credentials.json")).toBe(false);
+        expect(await columns("archive_scrub")).toEqual({ archive_scrub: "backup" });
+        // Never woken again.
+        await sleepFor(11);
+        await pool.query("UPDATE cloud_v2_maintenance_wakes SET started_at=started_at - interval '2 hours' WHERE workspace_id=$1", [id]);
+        await lifecycle().tick();
+        expect(await wakeRows()).toHaveLength(1);
+        // Opened: the person's bytes come back before the token reaches the worker.
+        await store.requestLifecycle(id, user, "start");
+        await lifecycle().tick();
+        expect(boat.machine(vm)!.files.get(ENV)).toBe("TOKEN=the person's own edit");
+        const commands = boat.commands.filter(command => command.machineId === vm).map(command => command.command);
+        const restoredAt = commands.findIndex(command => command.includes("zeros-environment-restored"));
+        const tokenAt = commands.findLastIndex(command => command.includes("worker-token") && !command.includes("zeros-archive-scrub"));
+        expect(restoredAt).toBeGreaterThanOrEqual(0);
+        expect(tokenAt).toBeGreaterThan(restoredAt);
+        expect(await columns("archive_scrub")).toEqual({ archive_scrub: "clean" });
+      });
+
+      it("does the same for a second repository: its hand-edited environment file is scrubbed, then comes back on open", async () => {
+        const API_ENV = `${path("api")}/.env`;
+        boat.write(vm, API_ENV, "API_TOKEN=the person's own edit");
+        boat.write(vm, `${path("api")}/UNPUSHED`, "work");
+        await stop();
+        await earlier(CLOUD_V2_BACKUP_DELAY_MS + 60_000);
+        await lifecycle().tick();
+        await archive();
+        await sleepFor(10.6);
+        await lifecycle().tick();
+        expect(await wakeRows()).toMatchObject([{ outcome: "stopped", scrub: "backup" }]);
+        expect(boat.machine(vm)!.files.has(API_ENV)).toBe(false);
+        // The scrub was given every checkout, each with its own seed journal.
+        const scrubbed = boat.commands.find(command => command.machineId === vm && command.command.includes("zeros-archive-scrub"))!.command;
+        for (const repo of REPOS) expect(scrubbed).toContain(path(repo.folder));
+        expect(scrubbed).toContain("repositories/2/environment-seed/manifest.json");
+        await store.requestLifecycle(id, user, "start");
+        await lifecycle().tick();
+        expect(boat.machine(vm)!.files.get(API_ENV)).toBe("API_TOKEN=the person's own edit");
+        const restore = boat.commands.find(command => command.machineId === vm && command.command.includes("zeros-environment-restored"))!.command;
+        expect(restore).toContain("repositories/1/environment.tar");
+      });
+
+      it("rebuilds from the backup when the scrubbed files cannot be put back, never starting a checkout without them", async () => {
+        boat.write(vm, ENV, "TOKEN=the person's own edit");
+        boat.write(vm, `${path("app")}/UNPUSHED`, "work");
+        await stop();
+        await earlier(CLOUD_V2_BACKUP_DELAY_MS + 60_000);
+        await lifecycle().tick();
+        await archive();
+        await sleepFor(10.6);
+        await lifecycle().tick();
+        environmentRestoreFails = true;
+        await store.requestLifecycle(id, user, "start");
+        await lifecycle().tick();
+        expect(boat.commands.filter(command => command.machineId === vm && command.command.includes("zeros-environment-restored"))).toHaveLength(2);
+        expect(boat.commands.some(command => command.machineId === vm && command.command.includes("worker-token") && command.command.includes("zw2w_"))).toBe(false);
+        const replaced = (await columns("boat_sandbox_id, restore_pending")).boat_sandbox_id;
+        expect(replaced).not.toBe(vm);
+      });
+
+      it("never starves the archived wake: unsettled by day 12, it wakes without scrubbing, and the next is the one archived wake (2 at most)", async () => {
+        boat.write(vm, `${path("app")}/UNPUSHED`, "work");
+        backupFails = true;
+        await stop();
+        // Archived five days after the stop; its backup keeps failing, so it stays unsettled until 12 days after the archive.
+        await pool.query("UPDATE cloud_v2_workspaces SET stopped_at=stopped_at - interval '5 days', retention_started_at=retention_started_at - interval '5 days' WHERE id=$1", [id]);
+        await archive();
+        await lifecycle().tick();
+        await pool.query("UPDATE cloud_v2_workspaces SET checkpoint_retry_at=clock_timestamp() + interval '30 days' WHERE id=$1", [id]);
+        await sleepFor(5.6);
+        await lifecycle().tick();
+        expect(await wakeRows()).toEqual([]);
+        await sleepFor(1.5);
+        await lifecycle().tick();
+        expect(await wakeRows()).toMatchObject([{ outcome: "stopped", scrub: null }]);
+        expect((await columns("archive_wake_done_at")).archive_wake_done_at).toBeNull();
+        await pool.query("UPDATE cloud_v2_maintenance_wakes SET started_at=started_at - interval '11 days' WHERE workspace_id=$1", [id]);
+        await sleepFor(10.6);
+        await lifecycle().tick();
+        expect(await wakeRows()).toMatchObject([{ scrub: null }, { outcome: "stopped", scrub: "partial" }]);
+        expect((await columns("archive_wake_done_at")).archive_wake_done_at).toBeInstanceOf(Date);
+        await pool.query("UPDATE cloud_v2_maintenance_wakes SET started_at=started_at - interval '11 days' WHERE workspace_id=$1", [id]);
+        await sleepFor(11);
+        await lifecycle().tick();
+        expect(await wakeRows()).toHaveLength(2);
+      });
     });
   });
 });

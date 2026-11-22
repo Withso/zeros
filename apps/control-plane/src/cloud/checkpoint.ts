@@ -994,6 +994,54 @@ export function restoreCommand(input: RestoreInput & { downloadUrl: string }): s
   ].join("\n"))}`;
 }
 
+/** Retention S3: puts back, before the worker starts, the environment files an archive's scrub removed
+ * from the machine, from the backup that holds the person's own bytes: each repository's own environment
+ * part (the first's environment.tar, the i-th later one's repositories/<i>/environment.tar) into its own
+ * checkout; nothing else in the archive is touched. `repositories`: the later checkouts, in capture order.
+ * One result line: zeros-environment-restored, or a zeros-checkpoint-error. */
+export function environmentRestoreCommand(input: CheckpointPaths & { key: Buffer; sha256: string; downloadUrl: string; repositories?: readonly string[] }): string {
+  const url = https(input.downloadUrl);
+  return `bash -c ${quote(environmentRestoreSteps(input, [
+    `curl -fsS --retry 3 --retry-delay 2 --connect-timeout 10 --max-time 420 -o "$work/checkpoint.zck" ${quote(url)} || fail checkpoint_download_failed`,
+  ]).join("\n"))}`;
+}
+
+/** environmentRestoreCommand's steps; `fetch` places the backup at "$work/checkpoint.zck". */
+export function environmentRestoreSteps(input: CheckpointPaths & { key: Buffer; sha256: string; repositories?: readonly string[] }, fetch: readonly string[]): string[] {
+  if (!/^[0-9a-f]{64}$/.test(input.sha256)) throw new Error("Invalid checkpoint digest");
+  const checkouts = [input.checkoutPath, ...(input.repositories ?? []).map(checkedPath)];
+  return [
+    ...prologue("restore", paths(input)),
+    "step=download",
+    ...fetch,
+    `printf '%s  %s\\n' ${input.sha256} "$work/checkpoint.zck" | sha256sum -c --status || fail checkpoint_corrupt`,
+    `printf %s ${quote(dataKey(input.key))} > "$work/key"`,
+    "step=decrypt",
+    "node \"$work/stream.mjs\" decrypt \"$work/key\" \"$work/checkpoint.zck\" \"$work/plain\" || fail checkpoint_corrupt",
+    "rm -f \"$work/checkpoint.zck\" \"$work/key\"; c=\"$work/c\"; mkdir \"$c\"",
+    // Only the manifest and the environment parts present (a repository with no seeded files has none).
+    "tar -tzf \"$work/plain\" > \"$work/members\" || fail checkpoint_corrupt",
+    "grep -xE '(\\./)?(manifest|environment\\.tar|repositories/[0-9]+/environment\\.tar)' \"$work/members\" > \"$work/wanted\" || fail checkpoint_corrupt",
+    "tar -xzf \"$work/plain\" -C \"$c\" --no-same-owner -T \"$work/wanted\" || fail checkpoint_corrupt",
+    "rm -f \"$work/plain\"",
+    "[ \"$(head -n 1 \"$c/manifest\")\" = 'zeros-checkpoint 1' ] || fail checkpoint_corrupt",
+    "step=environment",
+    `printf %s ${quote(b64(ENVIRONMENT_CHECKPOINT_SCRIPT))} | base64 -d > "$work/environment.mjs"`,
+    "apply() {",
+    "  [ -f \"$c/$1\" ] || return 0",
+    "  rm -rf \"$work/environment\"; mkdir \"$work/environment\"; tar -xf \"$c/$1\" -C \"$work/environment\" --no-same-owner || fail checkpoint_corrupt",
+    "  node \"$work/environment.mjs\" restore \"$2\" \"$work/environment\" || fail checkpoint_restore_failed",
+    "}",
+    ...checkouts.map((checkout, index) => `apply ${index === 0 ? "environment.tar" : `repositories/${index}/environment.tar`} ${quote(checkout)}`),
+    "report zeros-environment-restored",
+  ];
+}
+
+export function parseEnvironmentRestore(stdout: string): boolean {
+  const lines = stdout.split(/\r?\n/).filter(line => line.startsWith("zeros-environment-restored") || line.startsWith("zeros-checkpoint-error"));
+  return lines.length === 1 && lines[0] === "zeros-environment-restored";
+}
+
 export type CheckpointResult =
   /** A new object, with what a later stop can compare it by when the VM could tell. */
   | { ok: true; unchanged?: never; bytes: number; sha256: string; reuse?: CheckpointReuse }
