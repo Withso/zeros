@@ -8,7 +8,7 @@
 // production components.
 
 import { DESIGN_MAX_FRAMES_PER_PAGE } from "@zeros/protocol/design-pages";
-import { DESIGN_COMPONENT_IDENTITY_CAPABILITY } from "@zeros/protocol/design-catalog";
+import { DESIGN_COMPONENT_BINDINGS_CAPABILITY, DESIGN_COMPONENT_IDENTITY_CAPABILITY } from "@zeros/protocol/design-catalog";
 import "../../../../../styles/zeros-tokens.css";
 import "../../../../../styles/semantic-tokens.css";
 import "../../../../../styles/globals.css";
@@ -282,6 +282,15 @@ const olderOverridesHarness = componentOptionsHarness && new URLSearchParams(win
 // With ?frameRootInstance the home frame's root is the instance itself, as a
 // duplicated main is: the frame's one root layer, marked data-zeros-frame-root.
 const frameRootInstanceHarness = componentOptionsHarness && new URLSearchParams(window.location.search).has("frameRootInstance");
+// With ?noBindings the engine predates bindings: it advertises none and its records carry none.
+const noBindingsHarness = new URLSearchParams(window.location.search).has("noBindings");
+/** A component's record as the engine reports it, with or without bindings. */
+function harnessComponentSummary(source: string): ReturnType<typeof designComponentSummaryOf> {
+  const summary = designComponentSummaryOf(source);
+  if (!summary || !noBindingsHarness) return summary;
+  const { bindings: _bindings, ...rest } = summary;
+  return rest;
+}
 const HARNESS_FRAME_IDENTITY = frameRootInstanceHarness ? { kind: "instance" as const, nodeId: "home-composer" } : null;
 const COMPONENT_OPTIONS_SOURCE = `<!doctype html>
 <html lang="en">
@@ -449,7 +458,7 @@ function harnessPartStyleSource(source: string, nodeId: string, styles: Record<s
 
 /** What the engine reports about the home frame's instance. */
 function harnessInstancesRecord(source: string, notApplied?: "last-good" | "defaults") {
-  const summary = designComponentSummaryOf(harnessComponentDefinition)!;
+  const summary = harnessComponentSummary(harnessComponentDefinition)!;
   const slotted = harnessSlottedLayers(source);
   const hosts = Object.fromEntries([...harnessInstanceAttributes(source)].map(([oid, attributes]) => {
     const overrides = harnessPartOverrides(attributes);
@@ -463,7 +472,7 @@ function harnessInstancesRecord(source: string, notApplied?: "last-good" | "defa
   if (!Object.keys(hosts).length) return undefined;
   const legacy = legacyMainHarness && !harnessMainMoved;
   const record = { components: { "chat-composer": { elements: summary.elements, reach: summary.reach,
-    file: legacy ? "components/chat-composer.html" : "pricing.html", frame: !legacy } }, hosts,
+    file: legacy ? "components/chat-composer.html" : "pricing.html", frame: !legacy, ...(summary.bindings ? { bindings: summary.bindings } : {}) } }, hosts,
     ...(notApplied ? { notApplied } : {}) };
   let hash = 0x811c9dc5;
   for (const character of JSON.stringify(record)) hash = Math.imul(hash ^ character.charCodeAt(0), 0x01000193) >>> 0;
@@ -846,7 +855,7 @@ async function main() {
         modifiedAt: 2,
         sourceVersion: PRICING_SOURCE_VERSION,
         componentIdentity: componentOptionsHarness && !legacyMainHarness ? { kind: "main", name: "chat-composer" } : null,
-        ...(componentOptionsHarness ? { component: designComponentSummaryOf(pricingSource)! } : {}),
+        ...(componentOptionsHarness ? { component: harnessComponentSummary(pricingSource)! } : {}),
       },
     ],
     tokens: tokenPillsHarness || styleOriginsHarness
@@ -1274,7 +1283,7 @@ async function main() {
     componentGeneration += 1;
     const sourceVersion = componentGeneration.toString(16).padStart(24, "c").slice(-24);
     const previous = currentWorkspaceSnapshot.frames.find((frame) => frame.file === "pricing.html")!;
-    const summary = designComponentSummaryOf(source)!;
+    const summary = harnessComponentSummary(source)!;
     const frame = { ...previous, sourceVersion, modifiedAt: previous.modifiedAt + 1,
       componentIdentity: componentOptionsHarness && (!legacyMainHarness || harnessMainMoved) ? { kind: "main" as const, name: "chat-composer" } : null,
       component: notApplied ? { ...summary, notApplied } : summary };
@@ -1464,6 +1473,7 @@ async function main() {
     supportsEngineCapability: (capability: string) => capability === "design.copy-placement.v1" ||
       capability === "design.linked-component-copy.v1" ||
       capability === DESIGN_COMPONENT_IDENTITY_CAPABILITY ||
+      !noBindingsHarness && capability === DESIGN_COMPONENT_BINDINGS_CAPABILITY ||
       pagesHarness && capability === "design.canvas-items.v1" ||
       scopedMutationsHarness && capability === "design.mutation-snapshots.v1" ||
       lazyPreparationHarness && ["design.preparation.v1", "design.catalog.read.v1"].includes(capability),

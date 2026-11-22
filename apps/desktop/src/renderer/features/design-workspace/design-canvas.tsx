@@ -122,6 +122,7 @@ import {
   designResizeAnchor,
   designResizeLayoutOffset,
   designResizeStyleAxes,
+  designUnboundResizeHandle,
   designRevealRectViewport,
   designGestureRectUnchanged,
   designSafeViewportRect,
@@ -366,6 +367,7 @@ import {
   type DesignCanvasProps,
   type DesignCanvasZoomActions,
 } from "./design-workspace-types";
+import { designBoundSizeAxes, designSelectableLayerTree } from "./state/design-component-bindings";
 
 type DesignCanvasHoverSample = {
   workspaceId: string;
@@ -738,8 +740,8 @@ export const DesignCanvas = React.memo(function DesignCanvas({
       : undefined,
   );
   const selectedNavigationTree = useMemo(
-    () => designFrameLayerChildren(selectedRuntimeTree, selectedFrameRootId),
-    [selectedRuntimeTree, selectedFrameRootId],
+    () => designSelectableLayerTree(designFrameLayerChildren(selectedRuntimeTree, selectedFrameRootId), selectedFrame),
+    [selectedRuntimeTree, selectedFrameRootId, selectedFrame],
   );
   const selectedParentId = useMemo(
     () =>
@@ -3284,7 +3286,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
     (
       event: React.PointerEvent<HTMLElement>,
       frame: DesignCanvasFrameWire,
-      mode: FrameGestureMode,
+      requestedMode: FrameGestureMode,
     ) => {
       if (
         !workspaceId ||
@@ -3294,6 +3296,16 @@ export const DesignCanvas = React.memo(function DesignCanvas({
         !event.isPrimary ||
         event.button !== 0
       ) {
+        return;
+      }
+      // A frame whose root is an instance keeps its box on the root: an axis
+      // a control drives does not resize from the frame edge either.
+      const rootInstance = frame.componentIdentity?.kind === "instance" ? frame.componentIdentity.nodeId : null;
+      const mode = requestedMode === "move" || !rootInstance ? requestedMode
+        : designUnboundResizeHandle(requestedMode, designBoundSizeAxes(frame, rootInstance));
+      if (!mode) {
+        event.preventDefault();
+        event.stopPropagation();
         return;
       }
       event.preventDefault();
@@ -5498,7 +5510,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
       event: React.PointerEvent<HTMLElement>,
       frame: DesignCanvasFrameWire,
       details: DesignRuntimeNodeDetails,
-      gestureMode: "move" | DesignResizeHandle,
+      requestedMode: "move" | DesignResizeHandle,
     ) => {
       if (
         !workspaceId ||
@@ -5508,6 +5520,14 @@ export const DesignCanvas = React.memo(function DesignCanvas({
         event.button !== 0 ||
         isDesignComponentPartNodeId(details.oid)
       ) {
+        return;
+      }
+      // An instance's axis a control drives is the control's: the handle
+      // resizes only the other one, and nothing when both are bound.
+      const gestureMode = requestedMode === "move" ? requestedMode : designUnboundResizeHandle(requestedMode, designBoundSizeAxes(frame, details.oid));
+      if (!gestureMode) {
+        event.preventDefault();
+        event.stopPropagation();
         return;
       }
       if (gestureMode === "move") {
@@ -6842,7 +6862,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
           const tree =
             frame.kind === "text"
               ? rawTree
-              : designFrameLayerChildren(rawTree, runtimeSnapshot?.frame.oid);
+              : designSelectableLayerTree(designFrameLayerChildren(rawTree, runtimeSnapshot?.frame.oid), frame);
           const path = details ? designLayerPathIds(tree, details.oid) : [];
           const byId = new Map(
             flattenDesignLayerTree(tree).map((layer) => [

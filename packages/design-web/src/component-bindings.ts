@@ -31,6 +31,7 @@ const ROOT_ALIASES = new Set([":root", ":host", "html", "body"]);
 /** Layer ids that would become an object's prototype or constructor as keys. */
 const UNSAFE_KEYS = new Set(["__proto__", "constructor", "prototype"]);
 const MAX_VAR_DEPTH = 8;
+const ENCODER = new TextEncoder();
 
 interface LayerFacts {
   oid: string;
@@ -497,13 +498,16 @@ export function componentBindingsOf(document: DefaultTreeAdapterTypes.Document, 
   const unread = [...optionNames].filter((name) => !used.has(name)).sort();
   if (unread.length) result.unread = unread.slice(0, LIMITS.unread);
 
-  // An overall budget: drop the largest layers' entries until it fits.
-  let size = JSON.stringify(result).length;
-  if (size > LIMITS.bytes) {
+  // An overall budget in UTF-8 bytes, as the record is sent: drop the
+  // largest layers' entries until it fits with room left for `truncated`.
+  const bytes = (value: unknown) => ENCODER.encode(JSON.stringify(value)).length;
+  const budget = LIMITS.bytes - bytes({ truncated: true });
+  let size = bytes(result);
+  if (size > LIMITS.bytes || (truncated && size > budget)) {
     truncated = true;
-    for (const [oid, entry] of Object.entries(result.layers).sort(([, a], [, b]) => JSON.stringify(b).length - JSON.stringify(a).length)) {
-      if (size <= LIMITS.bytes) break;
-      size -= JSON.stringify(entry).length + oid.length + 4;
+    for (const [oid, entry] of Object.entries(result.layers).sort(([, a], [, b]) => bytes(b) - bytes(a))) {
+      if (size <= budget) break;
+      size -= bytes({ [oid]: entry }) - 1;
       delete result.layers[oid];
     }
   }

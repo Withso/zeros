@@ -392,6 +392,13 @@ export function designAuthoredResizeAxis(input: {
  * Keeping the untouched axis authored as-is is especially important for text:
  * a horizontal resize must allow auto-height reflow instead of freezing and
  * clipping the old line box. */
+/** A resize handle without the axes a control drives: "se" with a bound
+ * width is "s"; null when nothing is left to resize. */
+export function designUnboundResizeHandle(handle: DesignResizeHandle, bound: { width: boolean; height: boolean }): DesignResizeHandle | null {
+  const kept = handle.split("").filter((edge) => !((edge === "e" || edge === "w") && bound.width) && !((edge === "n" || edge === "s") && bound.height)).join("");
+  return kept ? (kept as DesignResizeHandle) : null;
+}
+
 export function designResizeStyleAxes(handle: DesignResizeHandle): {
   width: boolean;
   height: boolean;

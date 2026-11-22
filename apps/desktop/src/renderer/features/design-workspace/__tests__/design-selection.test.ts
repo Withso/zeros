@@ -431,7 +431,8 @@ describe("design selection workflows", () => {
 
   it("enters a selected instance on a double-click, picks the part under the pointer, and leaves with a click outside", async () => {
     const { designComponentPartNodeId } = await import("@zeros/protocol/design-runtime");
-    const instances = { key: "0".repeat(16), components: { chat: { elements: [], reach: {}, file: "main.html", frame: true } },
+    const bindings = { layers: { "cc-send": { text: ["label"] }, "cc-chip": { visible: ["attachments"] } } };
+    const instances = { key: "0".repeat(16), components: { chat: { elements: [], reach: {}, file: "main.html", frame: true, bindings } },
       hosts: { inst: { component: "chat", attributes: {} } } };
     const frame = { ...FRAME, instances };
     const send = designComponentPartNodeId("inst", "cc-send");
@@ -448,7 +449,7 @@ describe("design selection workflows", () => {
     const input = { workspaceId: "workspace-a", folder: "/design/a", frame, y: 10 };
     await selectDesignNode({ ...input, nodeId: "inst", details: details("inst") });
     expect((await selectDesignFrameBodyAtLocation({ ...input, x: 10, intent: "descend" }))?.oid).toBe(send);
-    expect(runtime.getComponentPartAtLoc).toHaveBeenLastCalledWith(10, 10, "inst");
+    expect(runtime.getComponentPartAtLoc).toHaveBeenLastCalledWith(10, 10, "inst", undefined, ["cc-chip", "cc-send"]);
     expect(designWorkspaceView("workspace-a").selectedNodeId).toBe(send);
     // Inside the instance, a click picks another part, and so does a press
     // that may become a drag: the drag then finds a part, which never moves.
@@ -468,6 +469,57 @@ describe("design selection workflows", () => {
     await selectDesignNode({ ...input, frame: FRAME, nodeId: "inst", details: details("inst") });
     await selectDesignFrameBodyAtLocation({ ...input, frame: FRAME, x: 10, intent: "descend" });
     expect(runtime.getComponentPartAtLoc).not.toHaveBeenCalled();
+  });
+
+  it("enters only parts a control drives, and none when the component has no bindings", async () => {
+    const { designComponentPartNodeId } = await import("@zeros/protocol/design-runtime");
+    const wrapper = designComponentPartNodeId("inst", "cc-wrapper");
+    const runtime = {
+      sourceVersion: FRAME.sourceVersion,
+      supports: (method: string) => method === "getComponentPartAtLoc",
+      // An older runtime ignores the list and answers the deepest part.
+      getElementAtLoc: vi.fn(async () => details("inst")),
+      getComponentPartAtLoc: vi.fn(async () => details(wrapper)),
+      getNodeDetails: vi.fn(async (nodeId: string) => details(nodeId)),
+      captureScreenshot: vi.fn(async () => null),
+    };
+    mocks.designFrameRuntime.mockReturnValue(runtime);
+    for (const bindings of [{ layers: { "cc-send": { text: ["label"] } } }, undefined]) {
+      const frame = { ...FRAME, instances: { key: "0".repeat(16),
+        components: { chat: { elements: [], reach: {}, file: "main.html", frame: true, ...(bindings ? { bindings } : {}) } },
+        hosts: { inst: { component: "chat", attributes: {} } } } };
+      const input = { workspaceId: "workspace-a", folder: "/design/a", frame, y: 10 };
+      await selectDesignNode({ ...input, nodeId: "inst", details: details("inst") });
+      await selectDesignFrameBodyAtLocation({ ...input, x: 10, intent: "descend" });
+      expect(designWorkspaceView("workspace-a").selectedNodeId).toBe("inst");
+      expect(runtime.getComponentPartAtLoc).toHaveBeenLastCalledWith(10, 10, "inst", undefined, bindings ? ["cc-send"] : []);
+    }
+    // A deep select that reaches such a part lands on its instance too.
+    runtime.getElementAtLoc.mockImplementation(async () => details(wrapper));
+    const frame = { ...FRAME, instances: { key: "0".repeat(16),
+      components: { chat: { elements: [], reach: {}, file: "main.html", frame: true, bindings: { layers: { "cc-send": { text: ["label"] } } } } },
+      hosts: { inst: { component: "chat", attributes: {} } } } };
+    const input = { workspaceId: "workspace-a", folder: "/design/a", frame, y: 10 };
+    await selectDesignNode({ ...input, nodeId: "other", details: details("other") });
+    await selectDesignFrameBodyAtLocation({ ...input, x: 10, intent: "deepest" });
+    expect(designWorkspaceView("workspace-a").selectedNodeId).toBe("inst");
+  });
+
+  it("lands a restored selection of a part no control drives on its instance", async () => {
+    const { designComponentPartNodeId } = await import("@zeros/protocol/design-runtime");
+    const { selectDesignTargets } = await import("../state/design-selection");
+    const frame = { ...FRAME, instances: { key: "0".repeat(16),
+      components: { chat: { elements: [], reach: {}, file: "main.html", frame: true, bindings: { layers: { "cc-send": { text: ["label"] } } } } },
+      hosts: { inst: { component: "chat", attributes: {} } } } };
+    mocks.designFrameRuntime.mockReturnValue({ sourceVersion: FRAME.sourceVersion, getNodeDetails: vi.fn(async (nodeId: string) => details(nodeId)),
+      captureScreenshot: vi.fn(async () => null) });
+    const send = designComponentPartNodeId("inst", "cc-send");
+    await selectDesignTargets({ workspaceId: "workspace-a", folder: "/design/a", frames: [frame] as never,
+      targets: [{ frame: FRAME.file, nodeId: designComponentPartNodeId("inst", "cc-wrapper") }], explicit: false });
+    expect(designWorkspaceView("workspace-a").selectedNodeId).toBe("inst");
+    await selectDesignTargets({ workspaceId: "workspace-a", folder: "/design/a", frames: [frame] as never,
+      targets: [{ frame: FRAME.file, nodeId: send }], explicit: false });
+    expect(designWorkspaceView("workspace-a").selectedNodeId).toBe(send);
   });
 
   it("captures no still of a main component frame while it shows a variant", async () => {

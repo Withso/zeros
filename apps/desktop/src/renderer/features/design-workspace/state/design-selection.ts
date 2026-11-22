@@ -8,6 +8,7 @@
 // after the user has already selected B.
 
 import { designShownComponentVariant } from "./design-component-variants";
+import { designPartSelectable, designSelectablePartLayers } from "./design-component-bindings";
 import { designComponentPartHost, isDesignComponentPartNodeId } from "./design-component-parts";
 import { designBackgroundWork } from "./design-background-work";
 import { designFrameViews, isPreparedDesignFrame, type DesignFrameView } from "./design-frame-view";
@@ -1221,6 +1222,26 @@ export async function toggleDesignNodeSelection(input: {
   });
 }
 
+/** A restored or remembered selection of a part no control drives (it has
+ * no row and cannot be clicked) lands on its instance; one host stands for
+ * several of its parts. Other targets are unchanged. */
+function selectableDesignTargets(targets: readonly DesignSelectionTarget[], frames: readonly DesignFrameView[]): readonly DesignSelectionTarget[] {
+  if (!targets.some((target) => target.nodeId && isDesignComponentPartNodeId(target.nodeId))) return targets;
+  const seen = new Set<string>();
+  const next: DesignSelectionTarget[] = [];
+  for (const target of targets) {
+    const frame = target.nodeId && isDesignComponentPartNodeId(target.nodeId) ? frames.find((candidate) => candidate.file === target.frame) : undefined;
+    const kept = frame && isPreparedDesignFrame(frame) && !designPartSelectable(frame, target.nodeId!)
+      ? { ...target, nodeId: designComponentPartHost(target.nodeId!) }
+      : target;
+    const key = designSelectionTargetKey(kept);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    next.push(kept);
+  }
+  return next;
+}
+
 export async function selectDesignTargets(input: {
   workspaceId: string;
   folder: string;
@@ -1232,9 +1253,11 @@ export async function selectDesignTargets(input: {
 }): Promise<DesignRuntimeNodeDetails[] | null> {
   const owner = input.owner ?? captureDesignPageOwner(input.workspaceId);
   if (owner.workspaceId !== input.workspaceId || !selectionPageOwnerIsCurrent(owner)) return null;
-  const targets = normalizeDesignSelectedTargets(input.targets, input.explicit === false ? undefined : reportDesignSelectionLimit);
+  const frames = input.frames ?? designFrameViews(readSelectionSnapshot(input.workspaceId));
+  const targets = normalizeDesignSelectedTargets(selectableDesignTargets(input.targets, frames),
+    input.explicit === false ? undefined : reportDesignSelectionLimit);
   const primary = targets[0];
-  const frame = (input.frames ?? designFrameViews(readSelectionSnapshot(input.workspaceId))).find(candidate => candidate.file === primary?.frame);
+  const frame = frames.find(candidate => candidate.file === primary?.frame);
   if (primary?.nodeId && frame && isPreparedDesignFrame(frame)) return selectDesignNodes({ ...input, targets, frame,
     nodeIds: targets.filter(target => target.frame === frame.file && target.nodeId).map(target => target.nodeId!),
     primaryNodeId: primary.nodeId, reveal: input.explicit !== false,
@@ -1401,10 +1424,13 @@ export async function selectDesignFrameBodyAtLocation(
       return retryAdoptedClick();
     }
     if (!details) return selectFrame();
+    // Only a part a control drives, or a slot, can be entered; without
+    // bindings no part can (fail closed), and the instance stays selected.
+    const selectable = enteredHost ? designSelectablePartLayers(frame, enteredHost) : null;
     if (enteredHost && details.oid === enteredHost && runtime.supports?.("getComponentPartAtLoc") && runtime.getComponentPartAtLoc) {
-      const part = await runtime.getComponentPartAtLoc(input.x, input.y, enteredHost);
+      const part = await runtime.getComponentPartAtLoc(input.x, input.y, enteredHost, undefined, selectable ?? []);
       if (!isCurrent() || (part && part.sourceVersion !== frame.sourceVersion)) return retryAdoptedClick();
-      if (part) return selectDesignNode({ ...input, owner, nodeId: part.oid, details: part });
+      if (part && designPartSelectable(frame, part.oid)) return selectDesignNode({ ...input, owner, nodeId: part.oid, details: part });
     }
     const snapshot = designRuntimeFrameState(workspaceId, frame.file)?.snapshot;
     const exactSnapshot =
@@ -1452,6 +1478,12 @@ export async function selectDesignFrameBodyAtLocation(
       return retryAdoptedClick();
     }
     if (!details || isFrameOwner(details)) return selectFrame();
+    // Any route (a deep select included) that lands on a part no control
+    // drives selects its instance instead.
+    if (isDesignComponentPartNodeId(details.oid) && !designPartSelectable(frame, details.oid)) {
+      details = await runtime.getNodeDetails(designComponentPartHost(details.oid));
+      if (!isCurrent() || details.sourceVersion !== frame.sourceVersion) return retryAdoptedClick();
+    }
     if (input.additive) {
       const selection = await toggleDesignNodeSelection({
         ...input,
@@ -1765,7 +1797,9 @@ export async function hoverDesignNodeAtLocation(input: {
       mode: "deepest",
     });
     if (enteredHost && details?.oid === enteredHost && runtime.supports?.("getComponentPartAtLoc") && runtime.getComponentPartAtLoc) {
-      details = (await runtime.getComponentPartAtLoc(input.x, input.y, enteredHost)) ?? details;
+      const part = await runtime.getComponentPartAtLoc(input.x, input.y, enteredHost, undefined,
+        designSelectablePartLayers(input.frame, enteredHost) ?? []);
+      if (part && designPartSelectable(input.frame, part.oid)) details = part;
     } else if (details) {
       const snapshot = designRuntimeFrameState(input.workspaceId, input.frame.file)?.snapshot;
       if (snapshot?.sourceVersion === input.frame.sourceVersion) {

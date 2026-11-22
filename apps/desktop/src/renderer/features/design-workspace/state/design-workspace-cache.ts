@@ -1912,7 +1912,7 @@ function refuseDesignComponentWrite(
   refuseDesignComponentPartWrite(Array.isArray(write) || !write ? write : (write as { nodeId: string }).nodeId);
   if (!write) return;
   const frame = designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data?.frames.find((candidate) => candidate.file === file);
-  refuseDesignInstanceHostStyleWrite(frame?.instances?.hosts, write);
+  refuseDesignInstanceHostStyleWrite(frame?.instances, write);
 }
 
 export async function updateDesignNodeStylesCached(

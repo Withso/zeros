@@ -56,7 +56,7 @@ import {
 import { cn } from "../../shared/ui/cn";
 import { pillVariants } from "../../shared/ui/primitives/pill";
 import type { DesignCanvasFrameWire, DesignLintReportWire } from "../../platform/git";
-import { designComponentOptionsBrief, designComponentOptionsFixBrief, type DesignAgentBrief } from "./design-agent-brief";
+import { designComponentAddControlBrief, designComponentOptionsBrief, designComponentOptionsFixBrief, type DesignAgentBrief } from "./design-agent-brief";
 import { DesignColorPicker } from "./design-color-picker";
 import { DesignColorSwatch } from "./design-color-swatch";
 import { InspectorIconButton, InspectorSection } from "./design-inspector-kit";
@@ -142,6 +142,9 @@ export function DesignComponentOptions({
   disabled,
   active = true,
   shownVariant = null,
+  only,
+  except,
+  embedded = false,
   onAskAgent,
 }: {
   workspaceId: string;
@@ -152,6 +155,12 @@ export function DesignComponentOptions({
   disabled: boolean;
   active?: boolean;
   shownVariant?: string | null;
+  /** A layer of the component is selected: only the controls bound to it. */
+  only?: { controls: readonly string[]; layer: { id: string; name: string } };
+  /** Only the rows, for a control shown in another section (Size). */
+  embedded?: boolean;
+  /** Controls another section already shows (an instance's size controls). */
+  except?: readonly string[];
   onAskAgent?: (brief: DesignAgentBrief) => void;
 }) {
   const instance = target.kind === "instance" ? target : null;
@@ -304,6 +313,10 @@ export function DesignComponentOptions({
 
   const title = instance ? instance.title : frame.title;
   const askToChange = onAskAgent && !instance ? () => onAskAgent(designComponentOptionsBrief({ directory, frame: frame.file, title })) : undefined;
+  // An instance's controls are its main's to add; the brief names the main, and the layer when one is selected.
+  const askToAdd = onAskAgent && instance
+    ? () => onAskAgent(designComponentAddControlBrief({ directory, file: instance.component.file, title: instance.title, ...(only ? { layer: only.layer } : {}) }))
+    : undefined;
   const askToFix =
     onAskAgent && notApplied
       ? () =>
@@ -321,7 +334,9 @@ export function DesignComponentOptions({
 
   const rows: React.ReactNode[] = [];
   let group: string | undefined;
-  for (const option of declaration.options) {
+  const shownOptions = declaration.options.filter((option) =>
+    (!only || only.controls.includes(option.name)) && !except?.includes(option.name));
+  for (const option of shownOptions) {
     if (option.group !== group) {
       group = option.group;
       if (group) {
@@ -398,6 +413,7 @@ export function DesignComponentOptions({
   const ignored = useMemo(() => (host ? designInstanceIgnoredAttributes(host) : []), [host]);
   const tooLarge = designComponentRecordProblem(target.component, title);
 
+  if (embedded) return <div data-design-embedded-controls="" className="flex flex-col gap-1.5">{rows}</div>;
   return (
     <>
       <InspectorSection
@@ -455,7 +471,7 @@ export function DesignComponentOptions({
         </OptionsNotice>
       ))}
       {/* Without its declaration the section cannot list the variants the file declares. */}
-      {!tooLarge && (!instance || variants.length) ? (
+      {!tooLarge && !only && (!instance || variants.length) ? (
         <OptionVariantRow
           variant={variant}
           variants={variants}
@@ -467,18 +483,18 @@ export function DesignComponentOptions({
           onSave={creatable ? () => setNaming(true) : undefined}
         />
       ) : null}
-      {instance && !tooLarge && declaration.options.length === 0 && variants.length === 0 ? (
+      {instance && !only && !tooLarge && declaration.options.length === 0 && variants.length === 0 ? (
         <p className="text-fg3 px-2 py-1 text-3xxs" data-design-options-empty="" role="status">
           This component has no declared controls or variants.
         </p>
       ) : null}
       {naming && !tooLarge ? <OptionEntryRow label="Name" inputLabel="Variant name" placeholder="Compact" onSubmit={saveVariant} onCancel={() => setNaming(false)} /> : null}
       {rows}
-      {defaultSlotted ? (
+      {defaultSlotted && !only ? (
         <OptionSlotRow label={designComponentSlotLabel("")} layers={defaultSlotted} disabled={actionDisabled}
           onReset={(layers) => resetSlot(designComponentSlotLabel(""), layers)} />
       ) : null}
-      {instance && instance.host.text !== undefined ? (
+      {instance && !only && instance.host.text !== undefined ? (
         <div className="flex min-w-0 items-center gap-1">
           <div className="min-w-0 flex-1">
             <OptionTextRow
@@ -502,8 +518,13 @@ export function DesignComponentOptions({
           </Tooltip>
         </div>
       ) : null}
-      {/* Controls are the main's to change, so an instance does not offer it. */}
-      {instance ? null : (
+      {/* Controls are the main's to change; an instance asks for one on its main. */}
+      {instance ? (
+        <OptionActionRow disabled={actionDisabled || !askToAdd} onClick={askToAdd} data-design-options-ask-add="">
+          <Sparkles aria-hidden="true" />
+          Ask agent to add a control
+        </OptionActionRow>
+      ) : only ? null : (
         <OptionActionRow disabled={actionDisabled || !askToChange} onClick={askToChange} data-design-options-ask="">
           <Sparkles aria-hidden="true" />
           Ask agent to change controls

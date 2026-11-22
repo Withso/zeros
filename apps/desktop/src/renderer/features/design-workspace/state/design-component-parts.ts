@@ -11,6 +11,7 @@
 import type { DesignComponentIdentity, DesignFrameComponent, DesignFrameInstances } from "@zeros/protocol/design-catalog";
 import { componentInstanceHostStyleAllowed } from "@zeros/design-core/component-options";
 import { designComponentPartOf, designComponentSlotOf } from "@zeros/protocol/design-runtime";
+import { designInstanceBindings, designRootSizeControls } from "./design-component-bindings";
 import { designRuntimeLayerDisplayName } from "../design-layer-label";
 
 /** A layer inside an instance: one of its parts, or one of its slots, which
@@ -64,9 +65,10 @@ export function designCanvasStyleToolsBlocked(
  * "constructor" is not a host). Accepts one write's styles by node, or a
  * transaction's operations. */
 export function refuseDesignInstanceHostStyleWrite(
-  hosts: DesignFrameInstances["hosts"] | undefined,
+  instances: DesignFrameInstances | undefined,
   write: { nodeId: string; styles: Readonly<Record<string, string | null>> } | readonly unknown[],
 ): void {
+  const hosts = instances?.hosts;
   if (!hosts) return;
   const writes = Array.isArray(write) ? write : [write];
   for (const entry of writes) {
@@ -83,6 +85,19 @@ export function refuseDesignInstanceHostStyleWrite(
       .filter(([property, value]) => value !== null && !componentInstanceHostStyleAllowed(property))
       .map(([property]) => property);
     if (refused.length) throw new DesignInstanceHostStyleError(refused);
+    // A size a control drives is the control's: a raw one would sit over it.
+    const bound = designRootSizeControls(designInstanceBindings({ instances }, operation.nodeId));
+    const styles = operation.styles as Record<string, unknown>;
+    for (const [property, controls] of [["width", bound.width], ["height", bound.height]] as const)
+      if (controls.length && styles[property] !== undefined && styles[property] !== null)
+        throw new DesignInstanceBoundSizeError(property, controls);
+  }
+}
+
+export class DesignInstanceBoundSizeError extends Error {
+  constructor(readonly property: "width" | "height", readonly controls: readonly string[]) {
+    super(`This instance's ${property} is set by its ${controls.join(", ")} control. Change it there.`);
+    this.name = "DesignInstanceBoundSizeError";
   }
 }
 
@@ -134,7 +149,10 @@ export function designComponentTextLock(
   nodeId: string,
 ): { kind: "part"; message: string } | { kind: "option"; message: string } | null {
   if (isDesignComponentPartNodeId(nodeId)) return { kind: "part", message: new DesignComponentPartWriteError().message };
-  const options = frame.component?.boundText?.[nodeId];
+  // Bindings also see text a wrapping template shows, which boundText misses.
+  const layers = frame.component?.bindings?.layers;
+  const bound = layers && Object.hasOwn(layers, nodeId) ? layers[nodeId]!.text : undefined;
+  const options = bound ?? (frame.component?.boundText && Object.hasOwn(frame.component.boundText, nodeId) ? frame.component.boundText[nodeId] : undefined);
   if (!options || !frame.component) return null;
   return { kind: "option", message: options.length
     ? `Set by control ${options.map((name) => optionLabel(frame.component!, name)).join(", ")}`

@@ -223,6 +223,7 @@ import { designComponentPartOf, designComponentSlotOf } from "@zeros/protocol/de
 import { useDesignHistoryPresentation } from "./state/design-history-presentation";
 import { designComponentDisplayTitle, designComponentIdentityLabel, designComponentInstanceIdentity, designComponentSlotLabel, designFrameComponentPresentation,
   designComponentTextLock, designMissingComponentOf, isDesignComponentPartNodeId } from "./state/design-component-parts";
+import { designBindingLayerId, designInstanceBindings, designMainLayerControls, designPartControls, designRootSizeControls, designWithoutBoundSize } from "./state/design-component-bindings";
 import { MessageRow } from "../../shared/ui/primitives/message-row";
 import type { DesignComponentOptionsTarget } from "./design-component-options";
 import {
@@ -2983,6 +2984,11 @@ export const DesignInspector = React.memo(function DesignInspector({
             }),
           );
         }
+        for (const [nodeId, styles] of [...updates]) {
+          const kept = designWithoutBoundSize(currentFrame, nodeId, styles);
+          if (kept) updates.set(nodeId, kept);
+          else updates.delete(nodeId);
+        }
         if (updates.size === 0 || held.blocked()) return null;
         const fittedRoot =
           action.type === "resize-fit" && !stateContext
@@ -3411,10 +3417,19 @@ export const DesignInspector = React.memo(function DesignInspector({
     : mainRootSelected
       ? { kind: "main", component: mainComponent!, ...(frame.component ? {} : { undeclared: true as const }) }
       : instanceSelected ? instanceOptionsTarget : null;
-  // A part or slot shows its instance's Controls.
+  // A part or slot shows its instance's Controls: a part only those bound to
+  // it, once the record says which (without bindings, all of them).
   const controlsTarget = optionsTarget ?? (selectionKind === "component-inner" && workspaceId && active && panelVisible
     ? instanceOptionsTarget
     : null);
+  const partControls = selectedPart && frame ? designPartControls(frame, selectedNodeId!) : null;
+  const layerControls = partControls?.length && selectedPart
+    ? { controls: partControls, layer: { id: designBindingLayerId(selectedPart.part), name: selectionTitle ?? selectionName } }
+    : undefined;
+  // A layer inside a main shows the controls bound to it above its Style.
+  const mainLayerControls = selectionKind === "main-layer" && frame && selectedNodeId && workspaceId && active && panelVisible
+    ? designMainLayerControls(mainComponent, selectedNodeId)
+    : null;
   const optionsFrame = controlsTarget ? frame : null;
   const componentIdentity = optionsTarget?.kind === "main" && frame
     ? designComponentIdentityLabel(frame.title, shownVariant)
@@ -3511,6 +3526,40 @@ export const DesignInspector = React.memo(function DesignInspector({
       toast.error("Couldn't show the layer", { description: errorMessage(error) });
     });
   };
+  const zoomMenu = (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <Button
+          type="button"
+          variant="ghost"
+          size="sm"
+          className="text-fg2 h-7 min-w-12 px-2 text-xs tabular-nums"
+          disabled={!active || !workspaceId}
+          aria-label={`Canvas zoom ${zoomPercentage}%`}
+        >
+          {zoomPercentage}%
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent data-design-history-owner={workspaceId ?? undefined} align="end" className="w-48">
+        <DropdownMenuItem
+          disabled={zoom >= DESIGN_MAX_ZOOM}
+          aria-label="Zoom in"
+          onSelect={() => zoomActionsRef.current?.zoomIn()}
+        >
+          <span>Zoom in</span>
+          <DropdownMenuShortcut>+</DropdownMenuShortcut>
+        </DropdownMenuItem>
+        <DropdownMenuItem
+          disabled={zoom <= DESIGN_MIN_ZOOM}
+          aria-label="Zoom out"
+          onSelect={() => zoomActionsRef.current?.zoomOut()}
+        >
+          <span>Zoom out</span>
+          <DropdownMenuShortcut>−</DropdownMenuShortcut>
+        </DropdownMenuItem>
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
   const inspectorSelectionHeader = (
     <section className="border-border1 shrink-0 border-b">
       <div
@@ -3569,6 +3618,7 @@ export const DesignInspector = React.memo(function DesignInspector({
             <span data-design-hidden="ancestor" className="text-fg3 shrink-0 text-3xxs leading-4">In a hidden layer</span>
           ) : null}
         </>}
+        {inspectorTabs.length > 1 ? null : zoomMenu}
       </div>
       {missingComponent ? (
         <MessageRow
@@ -3618,7 +3668,7 @@ export const DesignInspector = React.memo(function DesignInspector({
   /** The style fields for the selection, with the providers their marks,
    * cards and tokens read; an instance and several selected instances get only
    * their Size. */
-  const styleEditor = (only?: "size") => {
+  const styleEditor = (only?: "size", boundSize?: { x?: React.ReactNode; y?: React.ReactNode }) => {
     const details = presentedElementDetails;
     if (!styleContext || !details) return null;
     return (
@@ -3643,6 +3693,7 @@ export const DesignInspector = React.memo(function DesignInspector({
                 <DesignStyleEditor
                   key={styleOwner.key}
                   only={only}
+                  boundSize={boundSize}
                   details={shownDetails ?? details}
                   livePreviewOwner={
                     styleContext
@@ -3678,6 +3729,27 @@ export const DesignInspector = React.memo(function DesignInspector({
     );
   };
   const optionsPanel = designInspectorPanelState(activeTab, "options");
+  // An instance's root size a control drives shows that control in Size.
+  const boundSizeControl = (controls: readonly string[], axis: "x" | "y") => controls.length && optionsFrame && controlsTarget?.kind === "instance" && workspaceId ? (
+    <React.Suspense key={axis} fallback={null}>
+      <DesignComponentOptions
+        workspaceId={workspaceId}
+        frame={optionsFrame}
+        target={controlsTarget}
+        directory=""
+        lint={lint}
+        active={active && optionsPanel.active}
+        disabled={!active || !optionsPanel.active}
+        only={{ controls, layer: { id: controlsTarget.nodeId, name: controlsTarget.title } }}
+        embedded
+      />
+    </React.Suspense>
+  ) : undefined;
+  const instanceRootSize = selectionKind === "instance" && instanceNodeId ? designRootSizeControls(designInstanceBindings(frame, instanceNodeId)) : null;
+  const instanceBoundSize = instanceRootSize && (instanceRootSize.width.length || instanceRootSize.height.length)
+    ? { x: boundSizeControl(instanceRootSize.width, "x"), y: boundSizeControl(instanceRootSize.height, "y") }
+    : undefined;
+  const instanceSizeControls = instanceBoundSize ? [...(instanceRootSize?.width ?? []), ...(instanceRootSize?.height ?? [])] : [];
   const stylePanel = designInspectorPanelState(activeTab, "style");
   const cssPanel = designInspectorPanelState(activeTab, "css");
 
@@ -3694,9 +3766,9 @@ export const DesignInspector = React.memo(function DesignInspector({
     >
       <Tabs value={activeTab} onValueChange={(value) => selectInspectorTab(value as DesignInspectorTab)} className="flex min-h-0 flex-1 flex-col">
         {inspectorSelectionHeader}
-        <PanelHeader data-design-style-panel-header="" size="window">
-          {/* One panel needs no tab bar; the zoom stays either way. */}
-          {inspectorTabs.length > 1 ? (
+        {/* One panel needs no tab bar: the zoom then sits in the header row. */}
+        {inspectorTabs.length > 1 ? (
+          <PanelHeader data-design-style-panel-header="" size="window">
             <TabsList aria-label="Inspector" className="h-7">
               {inspectorTabs.includes("options") ? <TabsTrigger value="options">Controls</TabsTrigger> : null}
               <TabsTrigger value="style">Style</TabsTrigger>
@@ -3704,42 +3776,9 @@ export const DesignInspector = React.memo(function DesignInspector({
                 <TabsTrigger value="css" disabled={!styleContext && !cssActive}>CSS</TabsTrigger>
               ) : null}
             </TabsList>
-          ) : null}
-          <div className="ml-auto flex items-center gap-0.5">
-            <DropdownMenu>
-              <DropdownMenuTrigger asChild>
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="sm"
-                  className="text-fg2 h-7 min-w-12 px-2 text-xs tabular-nums"
-                  disabled={!active || !workspaceId}
-                  aria-label={`Canvas zoom ${zoomPercentage}%`}
-                >
-                  {zoomPercentage}%
-                </Button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent data-design-history-owner={workspaceId ?? undefined} align="end" className="w-48">
-                <DropdownMenuItem
-                  disabled={zoom >= DESIGN_MAX_ZOOM}
-                  aria-label="Zoom in"
-                  onSelect={() => zoomActionsRef.current?.zoomIn()}
-                >
-                  <span>Zoom in</span>
-                  <DropdownMenuShortcut>+</DropdownMenuShortcut>
-                </DropdownMenuItem>
-                <DropdownMenuItem
-                  disabled={zoom <= DESIGN_MIN_ZOOM}
-                  aria-label="Zoom out"
-                  onSelect={() => zoomActionsRef.current?.zoomOut()}
-                >
-                  <span>Zoom out</span>
-                  <DropdownMenuShortcut>−</DropdownMenuShortcut>
-                </DropdownMenuItem>
-              </DropdownMenuContent>
-            </DropdownMenu>
-          </div>
-        </PanelHeader>
+            <div className="ml-auto flex items-center gap-0.5">{zoomMenu}</div>
+          </PanelHeader>
+        ) : null}
         {/* A shown state changes what Options and Style both display. */}
         {shownState && frame && workspaceId ? (
           <DesignStateVariantNote state={shownState} onBack={() => showDesignComponentVariant(workspaceId, frame.file, null)} />
@@ -3749,7 +3788,7 @@ export const DesignInspector = React.memo(function DesignInspector({
             data-design-options-panel="" className="mt-0 min-h-0 flex-1 overflow-hidden data-[state=active]:flex data-[state=inactive]:!hidden">
             <ScrollArea className="min-h-0 flex-1">
               <div className="flex flex-col pb-6">
-              {selectionKind === "instance" ? styleEditor("size") : null}
+              {selectionKind === "instance" ? styleEditor("size", instanceBoundSize) : null}
               {optionsFrame && controlsTarget ? (
                 <DesignTokenCatalogContext.Provider value={tokenCatalog}>
                   <React.Suspense fallback={null}>
@@ -3764,6 +3803,8 @@ export const DesignInspector = React.memo(function DesignInspector({
                       active={active && optionsPanel.active}
                       shownVariant={shownVariant}
                       disabled={!active || !optionsPanel.active}
+                      {...(layerControls ? { only: layerControls } : {})}
+                      {...(instanceSizeControls.length ? { except: instanceSizeControls } : {})}
                       onAskAgent={onAskAgent}
                     />
                   </React.Suspense>
@@ -3784,6 +3825,25 @@ export const DesignInspector = React.memo(function DesignInspector({
             ) : null}
             {heldState && heldChanges ? (
               <DesignHeldStateNote state={heldState} count={heldChanges.count} onBack={() => pickLayerState(null)} />
+            ) : null}
+            {mainLayerControls?.length && frame && workspaceId && mainComponent ? (
+              <DesignTokenCatalogContext.Provider value={tokenCatalog}>
+                <React.Suspense fallback={null}>
+                  <DesignComponentOptions
+                    key={JSON.stringify([workspaceId, frame.file, "main-layer"])}
+                    workspaceId={workspaceId}
+                    frame={frame}
+                    target={{ kind: "main", component: mainComponent, ...(frame.component ? {} : { undeclared: true as const }) }}
+                    directory={designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data?.directory ?? ""}
+                    lint={lint}
+                    active={active && stylePanel.active}
+                    shownVariant={shownVariant}
+                    disabled={!active || !stylePanel.active}
+                    only={{ controls: mainLayerControls, layer: { id: selectedNodeId!, name: selectionTitle ?? selectionName } }}
+                    onAskAgent={onAskAgent}
+                  />
+                </React.Suspense>
+              </DesignTokenCatalogContext.Provider>
             ) : null}
             {styleContext && presentedElementDetails && defaultOrigins.styledBy ? (
               <DesignStyledByLine

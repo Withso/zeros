@@ -161,7 +161,10 @@ export interface DesignFrameRuntimeConnection {
   previewComponentInstanceOptions?(target: string, properties: Readonly<Record<string, string>> | null, signal?: AbortSignal): Promise<DesignRuntimeComponentOptionsPreview>;
   /** The part of an instance under a frame point, as a layer to read but not
    * write. Opt-in: check `supports("getComponentPartAtLoc")`. */
-  getComponentPartAtLoc?(x: number, y: number, hostNodeId: string, signal?: AbortSignal): Promise<DesignRuntimeNodeDetails | null>;
+  getComponentPartAtLoc?(x: number, y: number, hostNodeId: string, signal?: AbortSignal,
+    /** Main layer ids of the parts that may be chosen; slots always may. An
+     * older runtime ignores it, so check the result too. */
+    selectable?: readonly string[]): Promise<DesignRuntimeNodeDetails | null>;
   previewStyles(
     nodeId: string,
     styles: Record<string, string | null>,
@@ -836,9 +839,9 @@ class DesignRuntimeConnectionImpl implements DesignFrameRuntimeConnection {
     return result;
   }
 
-  async getComponentPartAtLoc(x: number, y: number, hostNodeId: string, signal?: AbortSignal): Promise<DesignRuntimeNodeDetails | null> {
+  async getComponentPartAtLoc(x: number, y: number, hostNodeId: string, signal?: AbortSignal, selectable?: readonly string[]): Promise<DesignRuntimeNodeDetails | null> {
     if (!this.supports("getComponentPartAtLoc")) throw runtimeError("getComponentPartAtLoc is not supported", "METHOD_NOT_SUPPORTED");
-    const result = await this.request("getComponentPartAtLoc", { x, y, hostNodeId }, signal);
+    const result = await this.request("getComponentPartAtLoc", { x, y, hostNodeId, ...(selectable ? { selectable: [...selectable] } : {}) }, signal);
     if (result === null) return null;
     if (!isNodeDetails(result) || result.sourceVersion !== this.expectedSourceVersion ||
       (!designComponentPartOf(result.oid) && !designComponentSlotOf(result.oid))) {

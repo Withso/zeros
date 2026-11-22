@@ -34,7 +34,8 @@ export async function runDesignComponentInstancesSmoke({ page, check }) {
   const frame = (file) => page.frameLocator(`[data-design-frame="${file}"] iframe`).first();
   const style = (file, selector, property) =>
     frame(file).locator(selector).first().evaluate((element, name) => getComputedStyle(element)[name], property).catch(() => null);
-  const slider = (name) => section.getByRole("slider", { name, exact: true });
+  // A control can sit in Controls or, when it drives the size, in Size.
+  const slider = (name) => page.locator("[data-design-inspector]").getByRole("slider", { name, exact: true });
   const variantRow = () => section.getByRole("button", { name: "Variant", exact: true });
   const sendButton = () => frame("pricing.html").locator(".send");
   const quiet = async () => {
@@ -194,7 +195,7 @@ export async function runDesignComponentInstancesSmoke({ page, check }) {
   const markOps = await page.evaluate((before) => (window.__zerosHarnessWorkbenchOperations ?? []).slice(before.length), opsBeforeMarks);
   check("showing or leaving the mark makes no engine request", markOps.every((op) => !/component|instance/i.test(op)), JSON.stringify(markOps));
   await selectInstance();
-  const dot = (label) => section.locator("[data-option-row]").filter({ hasText: label }).first().locator("[data-option-changed]");
+  const dot = (label) => page.locator("[data-design-inspector] [data-option-row]").filter({ hasText: label }).first().locator("[data-option-changed]");
   check("a dot marks each value the instance sets apart from what it inherits",
     (await dot("Width").count()) === 1 && (await dot("Mode").count()) === 1 && (await dot("Gap").count()) === 0);
   check("the instance's rows show its values", (await slider("Width").getAttribute("aria-valuenow")) === "800");
@@ -203,16 +204,22 @@ export async function runDesignComponentInstancesSmoke({ page, check }) {
   // ── One box: the instance is its main's root layer ──
   const rootBox = frame("home.html").locator('[data-oid="home-composer"] > [data-zd-root]');
   if (!(await page.locator('[data-design-layer-id^="::zeros-part:home-composer:"]').count())) await layer("home-composer").locator("[data-layer-disclosure]").click();
-  await expect(page.locator('[data-design-layer-id="::zeros-part:home-composer:cc-chips"]')).toHaveCount(1);
+  await expect(page.locator('[data-design-layer-id="::zeros-part:home-composer:cc-chip"]')).toHaveCount(1);
   check("an instance is one Layers row: its main's root layer has no row of its own, and its layers sit under the instance",
     (await page.locator('[data-design-layer-id="::zeros-part:home-composer:cc-root"]').count()) === 0);
+  // Only layers a control drives have rows; the chips' wrapper gives its row to the chip it holds.
+  check("Layers lists only the instance's layers a control drives, hoisting them out of unbound wrappers",
+    (await page.locator('[data-design-layer-id="::zeros-part:home-composer:cc-chips"], [data-design-layer-id="::zeros-part:home-composer:cc-prompt"]').count()) === 0 &&
+      (await page.locator('[data-design-layer-id="::zeros-part:home-composer:cc-toolbar"]').count()) === 1);
   check("the host lays out no box of its own; the root is the instance's box",
     (await frame("home.html").locator('[data-oid="home-composer"]').evaluate((element) => getComputedStyle(element).display)) === "contents" &&
       (await rootBox.count()) === 1);
   const inspectorPanel = page.locator("[data-design-inspector]");
-  check("the instance's width reads its root's, which its Width option sets",
-    (await inspectorPanel.locator('[data-design-size-axis="x"]').innerText()).includes("zd-width"),
-    await inspectorPanel.locator('[data-design-size-axis="x"]').innerText());
+  // Its Width control sets its root's width, so Size shows that control instead of W, and Controls does not repeat it.
+  check("an instance's Size shows the control that drives its width in place of W",
+    (await inspectorPanel.locator('[data-design-size-section] [data-design-embedded-controls]').getByRole("slider", { name: "Width", exact: true }).count()) === 1 &&
+      (await inspectorPanel.locator('[data-design-size-section] [data-design-size-axis="x"]').count()) === 0 &&
+      (await section.getByRole("slider", { name: "Width", exact: true }).count()) === 0);
   // An instance has no tabs: its Size, then its Controls, and nothing else.
   check("an instance shows Size then Controls, with no tabs, Style or CSS",
     (await inspectorPanel.getByRole("tab").count()) === 0 && (await inspectorPanel.locator("[data-design-size-section]").count()) === 1 &&
@@ -325,11 +332,15 @@ export async function runDesignComponentInstancesSmoke({ page, check }) {
   check("a double-click enters the instance and selects the part under the pointer, named in one header row with Edit main",
     /Chat composer\/[^·]+·\s*\S/.test(partHeader) && layerNameShown && (await page.locator("[data-design-component-of]").count()) === 1 &&
       (await page.locator("[data-design-select-instance]").count()) === 0 &&
-      (await header.locator("[data-design-edit-main]").count()) === 1 && (await header.getByRole("button").count()) === 1, partHeader);
+      (await header.locator("[data-design-edit-main]").count()) === 1 &&
+      (await header.getByRole("button").count()) === 1 + (await header.getByRole("button", { name: /^Canvas zoom/ }).count()), partHeader);
   await expect(section).toHaveAttribute("data-design-component-options", "instance");
-  check("a part shows its instance's Controls, and no Style, CSS or Size",
+  check("a part shows only the controls bound to it, and no Style, CSS or Size",
     (await inspectorPanel.getByRole("tab").count()) === 0 && (await inspectorPanel.locator("[data-design-size-section], [data-design-style-panel]").count()) === 0 &&
-      (await inspectorPanel.getByLabel("Opacity", { exact: true }).count()) === 0);
+      (await inspectorPanel.getByLabel("Opacity", { exact: true }).count()) === 0 &&
+      (await section.getByRole("slider", { name: "Corner radius", exact: true }).count()) === 1 &&
+      (await section.getByRole("radiogroup", { name: "Mode" }).count()) === 0 && (await section.getByRole("slider", { name: "Gap", exact: true }).count()) === 0 &&
+      (await section.getByRole("button", { name: "Ask agent to add a control" }).count()) === 1);
   check("Layers lists the selected part once, under its one instance row",
     (await page.locator('[data-design-layer-id="::zeros-part:home-composer:cc-send"]').count()) === 1 && (await layer("home-composer").count()) === 1);
   check("a part has no resize, spacing or rotation handle",
@@ -338,8 +349,9 @@ export async function runDesignComponentInstancesSmoke({ page, check }) {
   const writesBeforePartControl = await writes();
   const mainBeforePartControl = await main();
   const homeBeforePartControl = await home();
-  const modes = section.getByRole("radiogroup", { name: "Mode" }).getByRole("radio");
-  await ((await modes.nth(0).getAttribute("aria-checked")) === "true" ? modes.nth(1) : modes.nth(0)).click();
+  const partLabel = section.getByLabel("Label", { exact: true });
+  await partLabel.fill(`${await partLabel.inputValue()}!`);
+  await partLabel.press("Enter");
   await expect.poll(writes).toBe(writesBeforePartControl + 1);
   const hostOf = (source) => source.match(/<zd-chat-composer data-oid="home-composer"[^>]*>/)?.[0];
   check("a part's Controls write its instance's attribute, and the main is unchanged",
@@ -400,14 +412,18 @@ export async function runDesignComponentInstancesSmoke({ page, check }) {
   await unchanged("a drag");
 
   // Inside the instance a click picks another part; Escape leaves it.
-  await at(frame("home.html").locator('[data-zd-instance] [data-zd-part="cc-prompt"]'), "click");
-  await expect.poll(selected).toBe("::zeros-part:home-composer:cc-prompt");
+  await at(frame("home.html").locator('[data-zd-instance] [data-zd-part="cc-mode"]'), "click");
+  await expect.poll(selected).toBe("::zeros-part:home-composer:cc-mode");
   await expect(line).toHaveAttribute("data-design-component-of", "part");
   check("inside the instance a click picks another part", true);
   await canvas.focus();
   await page.keyboard.press("Escape");
   await expect(line).toHaveAttribute("data-design-component-of", "instance");
   check("Escape leaves the part for its instance", true);
+  // A layer no control drives is not entered: the instance stays selected.
+  await at(frame("home.html").locator('[data-zd-instance] [data-zd-part="cc-prompt"]'), "dblclick");
+  await page.waitForTimeout(300);
+  check("a double-click on a layer no control drives keeps the instance selected", (await selected()) === "home-composer", await selected());
   await at(sendPart, "dblclick");
   await expect(line).toHaveAttribute("data-design-component-of", "part");
   await page.locator("[data-design-edit-main]").click();

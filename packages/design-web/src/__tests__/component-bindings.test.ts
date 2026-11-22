@@ -89,6 +89,18 @@ describe("the controls each layer of a main reads", () => {
     expect(record.bindings).toEqual(summary.bindings);
   });
 
+  it("keeps the whole record within its byte budget as sent, counting non-ASCII text in UTF-8", () => {
+    // 256 layers of long non-ASCII names, each bound to several controls: far past the budget in bytes.
+    const options = Array.from({ length: 8 }, (_, index) => `<zd-option name="o${index}" type="text" default="x"></zd-option>`).join("");
+    const holes = Array.from({ length: 8 }, (_, index) => `{{ o${index} }}`).join("");
+    const css = Array.from({ length: 16 }, (_, index) => `--é${"界".repeat(40)}${index}: var(--zd-o0);`).join(" ");
+    const layers = Array.from({ length: 256 }, (_, index) => `<p data-oid="${"層".repeat(80)}-${index}" class="p">${holes}</p>`).join("");
+    const bindings = bindingsOf(main(options, `.p { ${css} }`, `<div>${layers}</div>`))!;
+    expect(new TextEncoder().encode(JSON.stringify(bindings)).length).toBeLessThanOrEqual(DESIGN_COMPONENT_BINDINGS_LIMITS.bytes);
+    expect(bindings.truncated).toBe(true);
+    expect(Object.keys(bindings.layers).length).toBeGreaterThan(0);
+  });
+
   it("drops only bindings that still fail the record's schema, keeping the controls", () => {
     const record = designComponentRecordWithinLimits({ elements: [], reach: {}, bindings: { layers: { a: { text: [] } } } });
     expect("exceeds" in record).toBe(false);

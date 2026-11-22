@@ -12,7 +12,8 @@ vi.mock("../../../platform/bridge/active-bridge", () => ({ onActiveBridgeConnect
 // inspector asks for, and where.
 vi.mock("../design-style-editor", async () => {
   const { createElement } = await import("react");
-  return { DesignStyleEditor: ({ only }: { only?: string }) => createElement("div", { "data-test-style-editor": only ?? "all" }) };
+  return { DesignStyleEditor: ({ only, boundSize }: { only?: string; boundSize?: { x?: unknown; y?: unknown } }) =>
+    createElement("div", { "data-test-style-editor": only ?? "all" }, boundSize?.x as never, boundSize?.y as never) };
 });
 vi.mock("../state/design-workspace-cache", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../state/design-workspace-cache")>()),
@@ -256,7 +257,8 @@ describe("the Options section across new generations of the same target", () => 
     const header = () => container.querySelector<HTMLElement>("[data-design-inspector-header]")!;
     const once = () => {
       expect(container.querySelectorAll("[data-design-component-of]")).toHaveLength(1);
-      expect(header().querySelectorAll("button")).toHaveLength(1);
+      // Its one action is Edit main; the zoom sits here too when there are no tabs.
+      expect([...header().querySelectorAll("button")].filter((button) => !button.getAttribute("aria-label")?.startsWith("Canvas zoom"))).toHaveLength(1);
       expect(header().querySelector("[data-design-edit-main]")?.textContent).toBe("Edit main");
       expect(container.querySelector("[data-design-select-instance]")).toBeNull();
       expect(container.querySelector("[data-design-part-reset]")).toBeNull();
@@ -344,6 +346,45 @@ describe("the Options section across new generations of the same target", () => 
     expect(panel.querySelector("[data-test-style-editor]")?.getAttribute("data-test-style-editor")).toBe("size");
     expect(panel.querySelector('[data-design-component-options="instance"]')).not.toBeNull();
     expect(container.querySelector("[data-design-style-panel]")).toBeNull();
+  });
+
+  const bound = (chip: DesignFrameComponent) => ({ ...chip,
+    bindings: { root: "root", layers: { root: { styles: { width: ["radius"] } }, "cc-label": { text: ["label"] } } } });
+
+  it("shows a part only the controls bound to it, and offers to add one on the main", async () => {
+    const record = instances(bound(CHIP));
+    await act(async () => {
+      render({ file: "home/page.html", nodeId: designComponentPartNodeId("chip-1", "cc-label"), sourceVersion: V1, instances: record,
+        componentIdentity: { kind: "instance", nodeId: "chip-1" } });
+      await loadDesignComponentOptions();
+    });
+    await act(async () => {});
+    const section = container.querySelector<HTMLElement>('[data-design-component-options="instance"]')!;
+    expect(field("Label")).not.toBeNull();
+    expect(radiusRow()).toBeNull();
+    expect(section.querySelector("[data-design-options-variant]")).toBeNull();
+    expect(section.querySelector("[data-design-options-ask-add]")?.textContent?.trim()).toBe("Ask agent to add a control");
+  });
+
+  it("shows the control that drives an instance's width in Size, in place of W, and not again in Controls", async () => {
+    await show({ file: "home/page.html", nodeId: "chip-1", sourceVersion: V1, instances: instances(bound(CHIP)) });
+    const size = container.querySelector<HTMLElement>('[data-test-style-editor="size"]')!;
+    expect(size.querySelector('[data-design-embedded-controls] [aria-label="Radius"]')).not.toBeNull();
+    expect(container.querySelector('[data-design-component-options="instance"] [aria-label="Radius"]')).toBeNull();
+    expect(field("Label")).not.toBeNull();
+  });
+
+  it("shows a layer inside a main the controls bound to it, above its Style", async () => {
+    await show({ file: "components/chip.html", nodeId: "cc-label", sourceVersion: V1, component: bound(CHIP),
+      componentIdentity: { kind: "main", name: "chip" } });
+    expect(tabs()).toEqual([]);
+    const controls = container.querySelector<HTMLElement>('[data-design-style-panel] [data-design-component-options="main"]')!;
+    expect(controls.querySelector('input[aria-label="Label"]')).not.toBeNull();
+    expect(controls.querySelector('[aria-label="Radius"]')).toBeNull();
+    expect(controls.compareDocumentPosition(container.querySelector('[data-test-style-editor="all"]')!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    await show({ file: "components/chip.html", nodeId: "other-layer", sourceVersion: V1, component: bound(CHIP),
+      componentIdentity: { kind: "main", name: "chip" } });
+    expect(container.querySelector('[data-design-style-panel] [data-design-component-options]')).toBeNull();
   });
 
   it("gives a main Controls and Style, a layer inside it Style alone, and a plain layer Style and CSS", async () => {
@@ -491,7 +532,7 @@ describe("the Options section across new generations of the same target", () => 
     await show({ file: "home/page.html", nodeId: designComponentPartNodeId("chip-1", "cc-label"), sourceVersion: V1,
       instances: instances(CHIP), componentIdentity: { kind: "instance", nodeId: "chip-1" } });
     expect(container.querySelector('[data-design-component-options="instance"]')).not.toBeNull();
-    expect(container.querySelector('[data-design-style-panel-header]')).not.toBeNull();
+    expect(container.querySelector('[data-design-inspector-header] [aria-label^="Canvas zoom"]')).not.toBeNull();
     await show({ file: "home/page.html", sourceVersion: V1, component: CHIP, instances: instances(CHIP), componentIdentity: null, runtime: null });
     expect(container.querySelector("[data-design-component-options]")).toBeNull();
   });
@@ -500,7 +541,7 @@ describe("the Options section across new generations of the same target", () => 
     await show({ file: "home/page.html", nodeId: "mixed", sourceVersion: V1, instances: instances(CHIP),
       componentIdentity: { kind: "instance", nodeId: "chip-1" } });
     expect(container.querySelector("[data-design-component-options]")).toBeNull();
-    expect(container.querySelector('[data-design-style-panel-header]')).not.toBeNull();
+    expect(container.querySelector('[data-design-inspector-header] [aria-label^="Canvas zoom"]')).not.toBeNull();
   });
 
   it("does not write to the previous workspace after an owner switch", async () => {

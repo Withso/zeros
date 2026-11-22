@@ -78,6 +78,8 @@ interface DesignStyleEditorProps {
   details: DesignRuntimeNodeDetails;
   /** Only the Size fields: an instance is sized from outside, never styled. */
   only?: "size";
+  /** With only Size: an axis a control drives shows that control. */
+  boundSize?: { x?: React.ReactNode; y?: React.ReactNode };
   livePreviewOwner?: DesignLivePreviewOwner;
   renderField: (
     label: string,
@@ -226,6 +228,7 @@ function LiveTransformSection(
 export function DesignStyleEditor({
   details,
   only,
+  boundSize,
   livePreviewOwner,
   renderField,
   onPreviewStyles,
@@ -333,6 +336,7 @@ export function DesignStyleEditor({
       <InspectorSection title="Size" data-design-size-section="">
         <DesignAutoLayoutControls
           only="size"
+          boundSize={boundSize}
           details={details}
           livePreviewOwner={livePreviewOwner}
           renderField={renderField}

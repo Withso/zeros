@@ -66,6 +66,8 @@ interface Props {
   details: DesignRuntimeNodeDetails;
   /** Only W, H, their sizing menus and limits. */
   only?: "size";
+  /** An axis a control drives shows that control instead of its raw field. */
+  boundSize?: { x?: React.ReactNode; y?: React.ReactNode };
   livePreviewOwner?: { workspaceId: string; frame: string; nodeId: string };
   renderField: (
     label: string,
@@ -187,6 +189,7 @@ function TrackCount({
 
 export function DesignAutoLayoutControls({
   only,
+  boundSize,
   details: confirmedDetails,
   livePreviewOwner,
   renderField,
@@ -509,10 +512,14 @@ export function DesignAutoLayoutControls({
 
   const sizeFields = (
     <>
-      <div className="grid grid-cols-2 gap-2">
-        {resize("x")}
-        {resize("y")}
-      </div>
+      {boundSize?.x}
+      {boundSize?.y}
+      {boundSize?.x && boundSize?.y ? null : (
+        <div className="grid grid-cols-2 gap-2">
+          {boundSize?.x ? null : resize("x")}
+          {boundSize?.y ? null : resize("y")}
+        </div>
+      )}
       {limits.length > 0 ? (
       <div
         data-design-layout-limits=""

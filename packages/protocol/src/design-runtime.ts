@@ -1793,12 +1793,15 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     return mark > 0 ? elementsByOid.get(copy.slice(0, mark)) || null : null;
   }
 
-  function componentPartAtLoc(x, y, hostNodeId) {
+  // With selectable (main layer ids), only those parts and slots count; a
+  // part outside it gives way to the nearest part in it, else the host.
+  function componentPartAtLoc(x, y, hostNodeId, selectable) {
     if (!Number.isFinite(x) || !Number.isFinite(y)) {
       throw new Error("x and y must be finite frame coordinates.");
     }
     var host = elementForOid(hostNodeId);
     if (!host.hasAttribute("data-zd-instance")) throw typedError("BAD_REQUEST", "That layer is not a component instance.", false);
+    var allowed = Array.isArray(selectable) ? selectable.slice(0, 256).map(String) : null;
     var found = null;
     visitElementsFromPoint(x, y, function (element) {
       if (element === host || !host.contains(element)) return false;
@@ -1806,6 +1809,8 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
         // The root is the instance's own box, not a part inside it.
         if (rootInstanceOf(current) === host) return true;
         if ((current.hasAttribute("data-zd-part") || current.hasAttribute("data-zd-slot")) && partOwnerOf(current) === host) {
+          var part = current.getAttribute("data-zd-part");
+          if (allowed && part !== null && !current.hasAttribute("data-zd-slot") && allowed.indexOf(part.replace(/#[\d.]+$/, "")) < 0) continue;
           found = current;
           return true;
         }
@@ -7286,7 +7291,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
         return previewComponentInstanceOptions(args);
       case "getComponentPartAtLoc":
         if (enabledOptInMethods.indexOf("getComponentPartAtLoc") < 0) throw new Error("Unknown design runtime method: getComponentPartAtLoc");
-        return componentPartAtLoc(Number(args.x), Number(args.y), args.hostNodeId);
+        return componentPartAtLoc(Number(args.x), Number(args.y), args.hostNodeId, args.selectable);
       case "getFrameChanges":
         if (enabledOptInMethods.indexOf("getFrameChanges") < 0) throw new Error("Unknown design runtime method: getFrameChanges");
         // Read as Default: a held state's copies are no layer's own value.

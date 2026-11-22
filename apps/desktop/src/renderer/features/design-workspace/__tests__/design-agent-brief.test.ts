@@ -124,3 +124,16 @@ describe("Design agent briefs", () => {
       .toContain("could not be applied; the frame shows nothing in its place. Run design validate to see why.");
   });
 });
+
+describe("asking for a new control from an instance", () => {
+  it("names the main and its file, the layer when one is selected, and points at the skill's heading", async () => {
+    const { designComponentAddControlBrief } = await import("../design-agent-brief");
+    const brief = designComponentAddControlBrief({ directory: "Zeros - Design", file: "options/button.html", title: "Button",
+      layer: { id: "btn-label", name: "Label" } });
+    expect(brief.label).toBe("Add a control to Button");
+    expect(brief.text).toContain('"options/button.html"');
+    expect(brief.text).toContain('for its layer "Label" (data-oid "btn-label")');
+    expect(brief.text).toContain('Follow "Change a component\'s options" in the Zeros Design skill');
+    expect(designComponentAddControlBrief({ directory: "", file: "b.html", title: "B" }).text).not.toContain("for its layer");
+  });
+});

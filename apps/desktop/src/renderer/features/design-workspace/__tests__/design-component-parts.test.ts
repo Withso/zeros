@@ -38,6 +38,9 @@ describe("what a person may not type over in a component", () => {
     expect(designComponentTextLock({ component }, "cc-send")).toEqual({ kind: "option", message: "Set by control Label" });
     expect(designComponentTextLock({ component }, "cc-mode")).toEqual({ kind: "option", message: "Set by control Mode" });
     expect(designComponentTextLock({ component }, "cc-chip")).toEqual({ kind: "option", message: "Set by the component's template" });
+    // Text a wrapping template shows is in bindings only.
+    const wrapped = { ...component, bindings: { layers: { "cc-hole": { text: ["send-label"], visible: ["send-label"] } } } };
+    expect(designComponentTextLock({ component: wrapped }, "cc-hole")).toEqual({ kind: "option", message: "Set by control Label" });
     expect(designComponentTextLock({ component }, "cc-prompt")).toBeNull();
     expect(designComponentTextLock({}, "cc-send")).toBeNull();
   });
