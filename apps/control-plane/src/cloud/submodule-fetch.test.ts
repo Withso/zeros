@@ -84,6 +84,17 @@ describe("fetching one planned submodule", () => {
     expect(f.run(submoduleFetchLines(f.checkout, f.entry)).stdout).toContain("zeros-submodule-refused existing");
   });
 
+  it("fetches a public one with no credential: no header read, and Git can neither use a helper nor prompt", () => {
+    const f = fixture();
+    const lines = submoduleFetchLines(f.checkout, { ...f.entry, public: true });
+    expect(lines.join("\n")).not.toMatch(/ZEROS_GITHUB_AUTH_HEADER|extraHeader/);
+    expect(lines.join("\n")).toContain("-c credential.helper= -c core.askPass=");
+    // With nothing on standard input it still fetches.
+    const result = f.run(lines, "");
+    expect(result.stdout).toContain(SUBMODULE_FETCHED);
+    expect(f.git(join(f.checkout, "vendor/lib"), "rev-parse", "HEAD")).toBe(f.first);
+  });
+
   it("never builds a command for an unsafe entry", () => {
     const f = fixture();
     for (const bad of [{ path: "../x" }, { path: ".git/hooks" }, { repository: "acme/lib;rm" }, { commit: "HEAD" }, { gitDir: "../../x" }, { gitDir: "modules/abc" }])

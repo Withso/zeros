@@ -263,7 +263,11 @@ export async function readSubmoduleLevel(http: Http, parent: { repository: strin
 }
 
 /** A submodule in a composed plan; `path` and `gitDir` are relative to the top checkout and its `.git`. */
-export type SubmodulePlanEntry = { path: string; name: string; repository: string; repositoryId: string; commit: string; depth: number; gitDir: string };
+export type SubmodulePlanEntry = { path: string; name: string; repository: string; repositoryId: string; commit: string; depth: number; gitDir: string;
+  /** GitHub reported it public at this resolve: anyone may read it, so it is fetched with no credential and needs no token. */
+  public?: true };
+/** A caller's answer for one submodule repository: its id (private, readable by the caller), or that it is public. */
+export type SubmoduleAccess = string | { repositoryId: string; public: boolean } | null;
 export type SubmoduleSkip = { path: string; repository?: string; reason: string };
 export type SubmodulePlan = { submodules: SubmodulePlanEntry[]; skipped: SubmoduleSkip[]; notices: string[] };
 
@@ -274,7 +278,7 @@ export type SubmodulePlan = { submodules: SubmodulePlanEntry[]; skipped: Submodu
 export async function composeSubmodulePlan(input: {
   root: { repository: string; repositoryId: string; commit: string };
   level(repository: { repository: string; repositoryId: string }, commit: string): Promise<SubmoduleLevel>;
-  access(repository: string): Promise<string | null>;
+  access(repository: string): Promise<SubmoduleAccess>;
 }): Promise<SubmodulePlan> {
   const plan: SubmodulePlan = { submodules: [], skipped: [], notices: [] };
   const queue = [{ repository: input.root.repository, repositoryId: input.root.repositoryId, commit: input.root.commit, prefix: "", gitDir: "", depth: 1 }];
@@ -292,10 +296,12 @@ export async function composeSubmodulePlan(input: {
       seen.add(folded);
       if (current.depth > SUBMODULE_LIMITS.maxDepth) { skip(`nested deeper than ${SUBMODULE_LIMITS.maxDepth} levels`); continue; }
       if (plan.submodules.length >= SUBMODULE_LIMITS.maxCount) { skip(`more than ${SUBMODULE_LIMITS.maxCount} submodules`); continue; }
-      const repositoryId = await input.access(entry.repository);
-      if (!repositoryId) { skip("no access"); continue; }
+      const access = await input.access(entry.repository);
+      if (!access) { skip("no access"); continue; }
+      const repositoryId = typeof access === "string" ? access : access.repositoryId;
       const gitDir = `${current.gitDir ? `${current.gitDir}/` : ""}modules/${submoduleGitDirName(entry.name)}`;
-      plan.submodules.push({ path: path!, name: entry.name, repository: entry.repository, repositoryId, commit: entry.commit, depth: current.depth, gitDir });
+      plan.submodules.push({ path: path!, name: entry.name, repository: entry.repository, repositoryId, commit: entry.commit, depth: current.depth, gitDir,
+        ...(typeof access !== "string" && access.public ? { public: true as const } : {}) });
       if (current.depth < SUBMODULE_LIMITS.maxDepth)
         queue.push({ repository: entry.repository, repositoryId, commit: entry.commit, prefix: path!, gitDir, depth: current.depth + 1 });
     }
@@ -327,14 +333,17 @@ const quote = (value: string) => `'${value.replace(/'/g, "'\\''")}'`;
  * directory under the top repository's `.git` keyed by digest, then a detached checkout of the gitlink commit.
  * Refused unless the target is a real, empty directory inside the checkout and its Git directory is new.
  */
-export function submoduleFetchLines(checkout: string, entry: Pick<SubmodulePlanEntry, "path" | "repository" | "commit" | "gitDir">): string[] {
+export function submoduleFetchLines(checkout: string, entry: Pick<SubmodulePlanEntry, "path" | "repository" | "commit" | "gitDir" | "public">): string[] {
   if (submodulePathProblem(entry.path) || !/^[a-z0-9_.-]{1,100}\/[a-z0-9_.-]{1,100}$/.test(entry.repository)
     || !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(entry.commit) || !/^modules\/[0-9a-f]{64}(?:\/modules\/[0-9a-f]{64}){0,2}$/.test(entry.gitDir))
     throw new Error("Invalid submodule");
   const target = `${checkout}/${entry.path}`, gitDir = `${checkout}/.git/${entry.gitDir}`, q = quote;
-  const git = "git -c protocol.allow=never -c protocol.https.allow=always -c core.hooksPath=/dev/null --config-env=http.extraHeader=ZEROS_GITHUB_AUTH_HEADER";
+  // A public one carries no credential at all: no header, no helper and no prompt, so Git can never ask for one.
+  const git = `git -c protocol.allow=never -c protocol.https.allow=always -c core.hooksPath=/dev/null ${entry.public
+    ? "-c credential.helper= -c core.askPass=" : "--config-env=http.extraHeader=ZEROS_GITHUB_AUTH_HEADER"}`;
   return [
-    "set -eu", "IFS= read -r ZEROS_GITHUB_AUTH_HEADER", "export ZEROS_GITHUB_AUTH_HEADER",
+    "set -eu", ...(entry.public ? ["export GIT_TERMINAL_PROMPT=0", "unset GIT_ASKPASS SSH_ASKPASS"]
+      : ["IFS= read -r ZEROS_GITHUB_AUTH_HEADER", "export ZEROS_GITHUB_AUTH_HEADER"]),
     "refused() { echo \"zeros-submodule-refused $1\"; exit 3; }",
     `root=$(cd -- ${q(checkout)} && pwd -P) || refused checkout`,
     // Every component a real directory under the checkout (a symlink resolves elsewhere), and the folder empty.

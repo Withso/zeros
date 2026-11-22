@@ -11,7 +11,7 @@ const modules = (entries: [string, string][]) => entries.map(([name, url]) => `[
 type Tree = Record<string, Record<string, { gitmodules?: string; links?: Record<string, string> }>>;
 
 /** A counting GitHub: contents reads from a tree, the creator's repository reads by name and by id. */
-function github(tree: Tree, ids: (repository: string) => string, denied: ReadonlySet<string> = new Set()) {
+function github(tree: Tree, ids: (repository: string) => string, denied: ReadonlySet<string> = new Set(), publicNow: ReadonlySet<string> = new Set()) {
   const requests: string[] = [];
   const http = { async json<T>(path: string, schema: z.ZodType<T>): Promise<T> {
     requests.push(path);
@@ -32,10 +32,14 @@ function github(tree: Tree, ids: (repository: string) => string, denied: Readonl
       if (!remembered.has(key)) remembered.set(key, await readSubmoduleLevel(http, repository, commit));
       return remembered.get(key)!;
     },
-    resolve: async (repository: string) => { requests.push(`/repos/${repository}`); return denied.has(repository) ? null : ids(repository); },
+    resolve: async (repository: string) => { requests.push(`/repos/${repository}`); return denied.has(repository) ? null : { repositoryId: ids(repository), public: false }; },
     readable: async (target: { repository: string; repositoryId: string }) => {
       requests.push(`/repositories/${target.repositoryId}`);
       if (denied.has(target.repository)) throw new HttpError(404, "not_found", "Not found");
+    },
+    visibility: async (target: { repository: string; repositoryId: string }): Promise<"public" | "private"> => {
+      requests.push(`visibility /repositories/${target.repositoryId}`);
+      return publicNow.has(target.repository) ? "public" : "private";
     },
   };
   return { requests, deps, remembered };
@@ -102,6 +106,50 @@ describe("a create's submodules, per repository", () => {
       .toEqual({ position: 0, path: ".gitmodules", status: "skipped", reason: "kept at the project's build: GitHub could not be read" });
     expect(await resolveWorkspaceSubmodules({ ...ROOT, baseCommit: sha(2), copy: null }, failing))
       .toEqual([{ position: 0, path: ".gitmodules", status: "skipped", reason: "kept at the project's build: GitHub could not be read" }]);
+  });
+});
+
+describe("a public submodule at create", () => {
+  const ids = (repository: string) => ({ "acme/lib": "501", "oss/vendor": "900" })[repository]!;
+  const tree: Tree = { "1": { [sha(1)]: { gitmodules: modules([["lib", "https://github.com/acme/lib"], ["vendor", "https://github.com/oss/vendor"]]),
+    links: { lib: sha(10), vendor: sha(40) } } } };
+  const copy: WorkspaceSubmoduleRepository["copy"] = { commit: sha(1), submodules: [
+    { path: "lib", repository: "acme/lib", repositoryId: "501", commit: sha(10), gitDir: gitDir("lib"), fetched: true },
+    { path: "vendor", repository: "oss/vendor", repositoryId: "900", commit: sha(40), gitDir: gitDir("vendor"), public: true, fetched: true }] };
+
+  it("asks GitHub whether it is still public, and then needs no access of the creator's own", async () => {
+    const gh = github(tree, ids, new Set(["oss/vendor"]), new Set(["oss/vendor"]));
+    expect(await resolveWorkspaceSubmodules({ ...ROOT, baseCommit: sha(1), copy }, gh.deps)).toEqual([
+      { position: 0, path: "lib", status: "fetch", repository: "acme/lib", repositoryId: "501", commit: sha(10), gitDir: gitDir("lib") },
+      { position: 0, path: "vendor", status: "fetch", repository: "oss/vendor", repositoryId: "900", commit: sha(40), gitDir: gitDir("vendor"), public: true }]);
+    // One visibility read for it, and no access check; acme/lib keeps its own.
+    expect(gh.requests.sort()).toEqual(["/repositories/501", "visibility /repositories/900"]);
+  });
+
+  it("treats one that turned private, or whose visibility GitHub doesn't answer, as private: the access check decides", async () => {
+    const turned = github(tree, ids, new Set(["oss/vendor"]));
+    expect((await resolveWorkspaceSubmodules({ ...ROOT, baseCommit: sha(1), copy }, turned.deps)).find(row => row.path === "vendor"))
+      .toEqual({ position: 0, path: "vendor", status: "skipped", repository: "oss/vendor", repositoryId: "900", reason: "no access" });
+    expect(turned.requests).toContain("/repositories/900");
+    const silent = github(tree, ids);
+    const unanswered = { ...silent.deps, visibility: async (): Promise<"public" | "private"> => { throw new HttpError(503, "github_unavailable", "GitHub could not be reached."); } };
+    // A member who can read it privately still gets it, as a private one (with a token).
+    expect((await resolveWorkspaceSubmodules({ ...ROOT, baseCommit: sha(1), copy }, unanswered)).find(row => row.path === "vendor"))
+      .toEqual({ position: 0, path: "vendor", status: "fetch", repository: "oss/vendor", repositoryId: "900", commit: sha(40), gitDir: gitDir("vendor") });
+  });
+
+  it("resolves a public one at a moved base from the same read that finds it, and a PAT creator still fetches it", async () => {
+    const gh = github({ "1": { [sha(2)]: tree["1"]![sha(1)]! } }, ids);
+    const resolving = { ...gh.deps, resolve: async (repository: string) => ({ repositoryId: ids(repository), public: repository === "oss/vendor" }) };
+    const rows = await resolveWorkspaceSubmodules({ ...ROOT, baseCommit: sha(2), copy: null }, resolving);
+    expect(rows.find(row => row.path === "vendor")).toMatchObject({ status: "fetch", public: true });
+    expect(withoutReadOnlyToken(rows, true)).toEqual([
+      { position: 0, path: "lib", status: "readable", repository: "acme/lib", repositoryId: "501" },
+      { position: 0, path: "vendor", status: "fetch", repository: "oss/vendor", repositoryId: "900", commit: sha(40), gitDir: gitDir("vendor"), public: true },
+      { position: 0, path: ".gitmodules", status: "skipped", reason: SUBMODULES_NEED_APP_SIGN_IN }]);
+    // Only public ones: a PAT fetches them all and is told nothing.
+    const onlyPublic = rows.filter(row => row.public);
+    expect(withoutReadOnlyToken(onlyPublic, true)).toEqual(onlyPublic);
   });
 });
 

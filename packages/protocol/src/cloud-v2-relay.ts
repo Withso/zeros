@@ -356,6 +356,8 @@ export const CloudV2ControlFrameSchema = z.discriminatedUnion("t", [
         repository: z.string().regex(/^[A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100}$/),
         commit: z.string().regex(/^([0-9a-f]{40}|[0-9a-f]{64})$/),
         gitDir: z.string().regex(/^modules\/[0-9a-f]{64}(\/modules\/[0-9a-f]{64}){0,2}$/),
+        /** GitHub reported it public at create: fetched with no credential (no helper, no prompt, no token). */
+        public: z.literal(true).optional(),
       }).strict()).min(1).max(320).optional(),
     }).strict(),
     agents: CloudV2AgentLoginsSchema,

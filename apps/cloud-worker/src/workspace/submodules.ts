@@ -1,9 +1,11 @@
 // "Fetch submodules" (workspace-submodules-v1): after a new checkout, each planned submodule is brought to its
 // commit the way the project build fetches it (control-plane cloud/submodules.ts submoduleFetchLines): HTTPS
 // only, its own Git directory under the checkout's .git/modules/<digest>, no hooks, no recursion, no symlink in
-// its path, and only into an empty folder or the submodule already planned there. Git asks the broker for that
-// repository's token by name (credential.useHttpPath); the control plane mints it read-only, and a pre-push
-// hook says so in a sentence. A submodule that fails is skipped with its own submodules; the checkout goes on.
+// its path, and only into an empty folder or the submodule already planned there. For a private one Git asks the
+// broker for that repository's token by name (credential.useHttpPath); the control plane mints it read-only, and
+// a pre-push hook says so in a sentence. A public one (GitHub's answer at create) is fetched with no credential:
+// Git runs without askpass, broker, helper or prompt, so it can't ask. A submodule that fails is skipped with its
+// own submodules; the checkout goes on.
 import { chmod, lstat, mkdir, readdir, realpath, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { checkoutGit } from "./checkout";
@@ -14,6 +16,7 @@ export type SubmoduleOutcome = { path: string; fetched: boolean };
 export const SUBMODULE_PUSH_REFUSED = "Pushing from a submodule isn't available in cloud workspaces yet. Push it from your own computer.";
 const FETCH_TIMEOUT_MS = 15 * 60_000;
 const SAFE = ["-c", "protocol.allow=never", "-c", "protocol.https.allow=always", "-c", "core.hooksPath=/dev/null"];
+const NO_CREDENTIAL = ["-c", "credential.helper=", "-c", "core.askPass="];
 // Characters Git (and HFS+) ignore when comparing a path component with ".git".
 const IGNORED = /[\u200b-\u200f\u202a-\u202e\u2060-\u206f\ufeff]/g;
 
@@ -35,6 +38,7 @@ const kind = (path: string) => lstat(path).then(stat => stat.isSymbolicLink() ? 
 
 async function fetchOne(root: string, entry: WorkerSubmodule, environment: NodeJS.ProcessEnv): Promise<boolean> {
   const target = join(root, entry.path), gitDir = join(root, ".git", entry.gitDir);
+  const network = entry.public ? { credentials: false as const } : {}, hardened = entry.public ? [...SAFE, ...NO_CREDENTIAL] : SAFE;
   // Every component a real directory under the checkout: a symlink anywhere resolves elsewhere.
   if (await realpath(target).catch(() => null) !== target || await kind(join(root, ".git")) !== "dir") return false;
   const [link, directory] = await Promise.all([kind(join(target, ".git")), kind(gitDir)]);
@@ -47,12 +51,12 @@ async function fetchOne(root: string, entry: WorkerSubmodule, environment: NodeJ
     if ((await readdir(target)).length) return false;
     await mkdir(dirname(gitDir), { recursive: true });
     if (await realpath(dirname(gitDir)) !== dirname(gitDir)) return false;
-    await checkoutGit(root, environment, FETCH_TIMEOUT_MS)([...SAFE, "clone", "--quiet", "--no-checkout", "--no-recurse-submodules", "--template=",
+    await checkoutGit(root, environment, FETCH_TIMEOUT_MS, network)([...hardened, "clone", "--quiet", "--no-checkout", "--no-recurse-submodules", "--template=",
       `--separate-git-dir=${gitDir}`, "--", `https://github.com/${entry.repository}.git`, target]);
   }
   const run = checkoutGit(target, environment, FETCH_TIMEOUT_MS);
   const present = await run(["cat-file", "-e", `${entry.commit}^{commit}`]).then(() => true, () => false);
-  if (!present) await run([...SAFE, "fetch", "--quiet", "--no-recurse-submodules", "origin", entry.commit]);
+  if (!present) await checkoutGit(target, environment, FETCH_TIMEOUT_MS, network)([...hardened, "fetch", "--quiet", "--no-recurse-submodules", "origin", entry.commit]);
   await run([...SAFE, "-c", "advice.detachedHead=false", "checkout", "--quiet", "--detach", entry.commit]);
   await mkdir(join(gitDir, "hooks"), { recursive: true });
   const hook = join(gitDir, "hooks", "pre-push");

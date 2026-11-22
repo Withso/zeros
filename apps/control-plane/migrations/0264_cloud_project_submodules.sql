@@ -13,7 +13,8 @@ SET LOCAL lock_timeout = '5s';
 -- cloud_v2_workspace_submodules: each workspace repository's submodules as its
 -- creator could read them at create. 'fetch' rows are the plan the worker brings
 -- its checkouts to, and the only submodule repositories a token is minted for
--- (read-only); 'readable' rows are submodules the project's copy holds that the
+-- (read-only), unless GitHub reported the repository public, which is fetched with no credential and no token;
+-- 'readable' rows are submodules the project's copy holds that the
 -- creator can read; 'skipped' rows are named to the person. A copy holding a
 -- submodule the creator can't read is never forked for this workspace. A
 -- submodule is never in cloud_v2_github_sources, so execution signatures, source
@@ -50,6 +51,8 @@ CREATE TABLE cloud_v2_workspace_submodules (
   commit text CHECK (commit IS NULL OR commit ~ '^([0-9a-f]{40}|[0-9a-f]{64})$'),
   git_dir text CHECK (git_dir IS NULL OR git_dir ~ '^modules/[0-9a-f]{64}(/modules/[0-9a-f]{64}){0,2}$'),
   reason text CHECK (reason IS NULL OR char_length(reason) <= 200),
+  -- GitHub reported the repository public at this create: fetched with no credential and never a token target.
+  public boolean NOT NULL DEFAULT false CHECK (NOT public OR status IN ('fetch','readable')),
   CHECK (status <> 'fetch' OR (repository IS NOT NULL AND repository_id IS NOT NULL AND commit IS NOT NULL AND git_dir IS NOT NULL)),
   CHECK (status <> 'readable' OR repository_id IS NOT NULL),
   PRIMARY KEY (workspace_id, position, path)

@@ -19,7 +19,7 @@ import { CloudProjects } from "./projects.js";
 import { scheduleCloudDeletion } from "./deletion.js";
 import { withSystemTx } from "../db.js";
 import { otherRepositories, workerRepositories, workspaceTokenSource } from "./workspace-repositories.js";
-import { insertWorkspaceSubmodules, workerSubmodules, workspaceSubmoduleSource } from "./workspace-submodules.js";
+import { insertWorkspaceSubmodules, resolveWorkspaceSubmodules, workerSubmodules, workspaceSubmoduleSource } from "./workspace-submodules.js";
 import { submoduleGitDirName } from "./submodules.js";
 import { CloudGithubPrStore } from "./github-pr-store.js";
 import { hashCloudV2Token } from "./tokens.js";
@@ -666,20 +666,26 @@ d("cloud v2 ready copies", () => {
   });
 
   describe("submodules (C4)", () => {
-    const COMMIT = "c".repeat(40), LIB = "a".repeat(40);
+    const COMMIT = "c".repeat(40), LIB = "a".repeat(40), VENDOR = "e".repeat(40);
     /** GitHub contents for the project's repository at the clone's commit, and a submodule repository at its gitlink. */
-    function github(fail = false) {
+    /** With `vendor`, the project also vendors oss/vendor: a repository of an account with no Zeros App installation,
+     * public (anyone can read it) or turned private. Only a public repository answers a token that isn't its own. */
+    function github(fail = false, vendor?: "public" | "private") {
       const requests: { token: string; path: string }[] = [];
+      const modules = "[submodule \"lib\"]\n\tpath = lib\n\turl = https://github.com/acme/lib\n[submodule \"secret\"]\n\tpath = secret\n\turl = git@github.com:acme/secret.git\n"
+        + (vendor ? "[submodule \"vendor\"]\n\tpath = vendor\n\turl = https://github.com/oss/vendor.git\n" : "");
       const files: Record<string, Record<string, { type: string; [key: string]: unknown }>> = {
         [`${repositoryId("withso/zeros")}:${COMMIT}`]: {
-          ".gitmodules": { type: "file", encoding: "base64", size: 120, content: Buffer.from(
-            "[submodule \"lib\"]\n\tpath = lib\n\turl = https://github.com/acme/lib\n[submodule \"secret\"]\n\tpath = secret\n\turl = git@github.com:acme/secret.git\n").toString("base64") },
-          "lib": { type: "submodule", sha: LIB, path: "lib" }, "secret": { type: "submodule", sha: "b".repeat(40), path: "secret" } },
-        [`501:${LIB}`]: {},
+          ".gitmodules": { type: "file", encoding: "base64", size: modules.length, content: Buffer.from(modules).toString("base64") },
+          "lib": { type: "submodule", sha: LIB, path: "lib" }, "secret": { type: "submodule", sha: "b".repeat(40), path: "secret" },
+          ...(vendor ? { "vendor": { type: "submodule", sha: VENDOR, path: "vendor" } } : {}) },
+        [`501:${LIB}`]: {}, [`900:${VENDOR}`]: {},
       };
       const githubHttp = (token: string) => ({ async json<T>(path: string, schema: import("zod").ZodType<T>): Promise<T> {
         requests.push({ token, path });
         if (fail) throw new HttpError(503, "github_unavailable", "GitHub could not be reached.");
+        if (path === "/repos/oss/vendor" && vendor) return schema.parse({ id: 900, full_name: "oss/vendor", private: vendor === "private" });
+        if (path.startsWith("/repos/")) throw new HttpError(404, "not_found", "Not found");
         const match = /^\/repositories\/(\d+)\/contents\/(.+)\?ref=([0-9a-f]+)$/.exec(path)!;
         const found = files[`${match[1]}:${match[3]}`]?.[decodeURIComponent(match[2]!)];
         if (!found) throw new HttpError(404, "not_found", "Not found");
@@ -738,10 +744,14 @@ d("cloud v2 ready copies", () => {
       expect(own[fetch]!.input).toBe(`Authorization: Basic ${Buffer.from("x-access-token:synthetic-lib-token").toString("base64")}\n`);
       expect(own.some(command => command.command.includes("acme/secret"))).toBe(false);
       // Levels read with each repository's own token: the project's from its clone, the submodule's from its lookup.
+      // Each submodule's visibility is GitHub's answer to the clone token; private ones (unseen by it) go on to
+      // the lookup as before.
       expect(gh.requests.map(request => [request.token, request.path.split("?")[0]])).toEqual([
         ["synthetic-clone-token", `/repositories/${repositoryId("withso/zeros")}/contents/.gitmodules`],
         ["synthetic-clone-token", `/repositories/${repositoryId("withso/zeros")}/contents/lib`],
         ["synthetic-clone-token", `/repositories/${repositoryId("withso/zeros")}/contents/secret`],
+        ["synthetic-clone-token", "/repos/acme/lib"],
+        ["synthetic-clone-token", "/repos/acme/secret"],
         ["synthetic-lib-token", "/repositories/501/contents/.gitmodules"]]);
       expect(boat.machine(copy.machineId!)!.files.get("/home/user/zeros/zeros/lib/.git")).toMatch(/^gitdir: \/home\/user\/zeros\/zeros\/\.git\/modules\/[0-9a-f]{64}$/);
       const reader = await workspace();
@@ -764,7 +774,8 @@ d("cloud v2 ready copies", () => {
       expect(rebuilt).toMatchObject({ state: "ready", builtFromBase: `copy:${copy.id}` });
       // Forked from the previous copy, the submodule is already there and is kept at the planned commit.
       expect(rebuilt.result![0]!.submodules!.find(entry => entry.path === "lib")).toMatchObject({ fetched: true });
-      expect(gh.requests.length).toBe(before);
+      // Remembered levels: no contents read. Visibility is GitHub's answer at each resolve, never remembered.
+      expect(gh.requests.slice(before).map(request => request.path)).toEqual(["/repos/acme/lib", "/repos/acme/secret"]);
     });
 
     it("writes a create's submodules with the workspace, gives the worker its plan parents first, and names what it skipped", async () => {
@@ -790,6 +801,81 @@ d("cloud v2 ready copies", () => {
         branch: "zeros/sub-2", baseBranch: "main", computerBuildId: base.buildId, projectId: zeros,
         ...one("withso/zeros", "zeros/sub-2"), submodules: [{ ...readable(LIB), gitDir: "../escape" }] })).rejects.toThrow();
       expect((await pool.query("SELECT count(*)::int AS n FROM cloud_v2_workspaces WHERE branch='zeros/sub-2'")).rows[0].n).toBe(0);
+    });
+
+    it("fetches a public submodule of an account without the App at build with no token, and forks it for a member with no relation to its owner", async () => {
+      await fetchSubmodulesOn();
+      await liveBase();
+      const gh = github(false, "public");
+      await copyBuilder(gh.deps).tick();
+      const copy = await row(1);
+      expect(copy.state).toBe("ready");
+      expect(copy.result![0]!.submodules!.find(entry => entry.path === "vendor")).toEqual({ path: "vendor", repository: "oss/vendor", repositoryId: "900",
+        commit: VENDOR, gitDir: `modules/${submoduleGitDirName("vendor")}`, public: true, fetched: true });
+      // Public from GitHub's own answer, read with the project's clone token: no installation lookup, no token for it.
+      expect(gh.lookups).not.toContain("oss/vendor");
+      expect(gh.requests.filter(request => request.path.includes("oss/vendor") || request.path.startsWith("/repositories/900/")).map(request => request.token))
+        .toEqual(["synthetic-clone-token", "synthetic-clone-token"]);
+      const own = boat.commands.filter(command => command.machineId === copy.machineId && command.command.includes("oss/vendor"));
+      expect(own).toHaveLength(1);
+      expect(own[0]!.input ?? "").toBe("");
+      expect(own[0]!.command).not.toMatch(/extraHeader|ZEROS_GITHUB_AUTH_HEADER/);
+      expect(boat.machine(copy.machineId!)!.files.get("/home/user/zeros/zeros/vendor/.git")).toMatch(/modules\/[0-9a-f]{64}$/);
+      // A member who can read acme/lib, and has nothing to do with oss: their create checks oss/vendor's visibility
+      // (with their own GitHub), never their access to it, and their machine descends from the copy.
+      const asked: string[] = [];
+      const rows = await resolveWorkspaceSubmodules({ position: 0, repository: "withso/zeros", repositoryId: repositoryId("withso/zeros"), baseCommit: COMMIT,
+        fetchSubmodules: true, copy: { commit: COMMIT, submodules: copy.result![0]!.submodules! } }, {
+        level: async () => { throw new Error("unmoved: no level read"); },
+        resolve: async () => null,
+        readable: async target => { asked.push(target.repository); if (target.repository !== "acme/lib") throw new HttpError(404, "not_found", "Not found"); },
+        visibility: async target => target.repository === "oss/vendor" ? "public" : "private",
+      });
+      expect(asked).toEqual(["acme/lib"]);
+      expect(rows.find(entry => entry.path === "vendor")).toMatchObject({ status: "fetch", repository: "oss/vendor", public: true });
+      const member = await workspace();
+      await withSystemTx(pool, tx => insertWorkspaceSubmodules(tx, member.id, rows));
+      expect(await forks().prepare(member)).toMatchObject({ sandboxId: expect.any(String) });
+      // Its plan reaches the worker as public; no token is ever minted for it.
+      await withSystemTx(pool, async tx => {
+        expect((await workerSubmodules(tx, member.id)).submodules!.find(entry => entry.path === "vendor")).toMatchObject({ repository: "oss/vendor", public: true });
+        expect(await workspaceSubmoduleSource(tx, member.id, "oss/vendor")).toBeNull();
+      });
+    });
+
+    it("never forks a copy whose fetched submodule has no repository id: nothing a create checked names it", async () => {
+      const member = await workspace();
+      await withSystemTx(pool, tx => insertWorkspaceSubmodules(tx, member.id, [readable(LIB)]));
+      const result = (id?: string) => [{ repository: "withso/zeros", repositoryId: repositoryId("withso/zeros"), branch: "main", commit: COMMIT,
+        submodules: [{ path: "lib", repository: "acme/lib", ...(id ? { repositoryId: id } : {}), commit: LIB, fetched: true }] }];
+      expect(await copies.submodulesReadable(member.id, result("501"))).toBe(true);
+      expect(await copies.submodulesReadable(member.id, result())).toBe(false);
+      // Not fetched, it is on no disk: no reason to refuse.
+      expect(await copies.submodulesReadable(member.id, [{ ...result()[0]!, submodules: [{ path: "lib", fetched: false, reason: "no access" }] }])).toBe(true);
+    });
+
+    it("keeps a submodule that was public and is now private to the access check: a member who can't read it never gets the copy", async () => {
+      await fetchSubmodulesOn();
+      await liveBase();
+      await copyBuilder(github(false, "public").deps).tick();
+      const copy = await row(1);
+      const rows = await resolveWorkspaceSubmodules({ position: 0, repository: "withso/zeros", repositoryId: repositoryId("withso/zeros"), baseCommit: COMMIT,
+        fetchSubmodules: true, copy: { commit: COMMIT, submodules: copy.result![0]!.submodules! } }, {
+        level: async () => { throw new Error("unmoved: no level read"); }, resolve: async () => null,
+        readable: async target => { if (target.repository !== "acme/lib") throw new HttpError(404, "not_found", "Not found"); },
+        // Since the build, oss/vendor turned private.
+        visibility: async () => "private",
+      });
+      expect(rows.find(entry => entry.path === "vendor")).toMatchObject({ status: "skipped", reason: "no access" });
+      const member = await workspace();
+      await withSystemTx(pool, tx => insertWorkspaceSubmodules(tx, member.id, rows));
+      expect(await forks().prepare(member)).toBeNull();
+      // And a build after the change treats it as any private repository: no installation, so it is skipped.
+      const gh = github(false, "private");
+      await copyBuilder(gh.deps).buildNow(org, zeros, admin);
+      await copyBuilder(gh.deps).tick();
+      expect((await row(2)).result![0]!.submodules!.find(entry => entry.path === "vendor")).toMatchObject({ fetched: false, reason: "no access" });
+      expect(gh.lookups).toContain("oss/vendor");
     });
 
     it("makes no GitHub request and no lookup with the setting off", async () => {

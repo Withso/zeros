@@ -20,10 +20,11 @@ type Git = (args: string[], signal?: AbortSignal) => Promise<string>;
 
 /** No shell or stderr in errors. Background Git owns a process group so a
  * cancelled fetch cannot leave a remote helper writing the checkout at Stop. */
-export function checkoutGit(cwd: string, environment: NodeJS.ProcessEnv, timeoutMs = 120_000): Git {
+export function checkoutGit(cwd: string, environment: NodeJS.ProcessEnv, timeoutMs = 120_000, options: { credentials?: false } = {}): Git {
   // Activated: the bootstrap lease's person and context (team sharing); none otherwise.
   const operation = operationEnvironment.getStore();
   const env = operation ? workerChildEnvironment(undefined, mergeGitEnvironment(environment, operation.git), {}, operation.zeros) : workerChildEnvironment(undefined, environment);
+  if (options.credentials === false) withoutCredentials(env);
   return (args, signal) => new Promise((resolve, reject) => {
     const failure = (code = -1) => Object.assign(new Error("Git command failed."), { code });
     if (signal?.aborted) { reject(failure()); return; }
@@ -51,6 +52,12 @@ export function checkoutGit(cwd: string, environment: NodeJS.ProcessEnv, timeout
       else resolve(Buffer.concat(chunks).toString("utf8"));
     });
   });
+}
+
+/** A child that can't ask for a credential: no askpass, no broker socket, no configured helper and no prompt. */
+function withoutCredentials(env: NodeJS.ProcessEnv): void {
+  for (const name of Object.keys(env)) if (/^(GIT_ASKPASS|SSH_ASKPASS|GH_ZEROS_BROKER_SOCKET|GIT_CONFIG_(COUNT|KEY_\d+|VALUE_\d+))$/.test(name)) delete env[name];
+  env.GIT_TERMINAL_PROMPT = "0";
 }
 
 class BackgroundRefresh implements CheckoutRefresh {

@@ -845,6 +845,10 @@
                             "gitDir": {
                               "type": "string",
                               "pattern": "^modules\\/[0-9a-f]{64}(\\/modules\\/[0-9a-f]{64}){0,2}$"
+                            },
+                            "public": {
+                              "type": "boolean",
+                              "const": true
                             }
                           },
                           "required": [
@@ -1853,6 +1857,10 @@
                             "gitDir": {
                               "type": "string",
                               "pattern": "^modules\\/[0-9a-f]{64}(\\/modules\\/[0-9a-f]{64}){0,2}$"
+                            },
+                            "public": {
+                              "type": "boolean",
+                              "const": true
                             }
                           },
                           "required": [

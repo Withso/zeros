@@ -20,6 +20,8 @@ import { composeSubmodulePlan, type SubmoduleLevel, type SubmodulePlan } from ".
 export type WorkspaceSubmoduleRow = {
   position: number; path: string; status: "fetch" | "readable" | "skipped";
   repository?: string; repositoryId?: string; commit?: string; gitDir?: string; reason?: string;
+  /** GitHub reported it public at this create: fetched with no credential, never a token target. */
+  public?: true;
 };
 /** Create-time resolution is a safety net, never the plan: past this, submodules stay at the copy's commits. */
 export const WORKSPACE_SUBMODULE_RESOLVE_MS = 8_000;
@@ -49,10 +51,14 @@ const bounded = <T>(work: Promise<T>, deadline: number): Promise<T | typeof TIME
  */
 export async function resolveWorkspaceSubmodules(entry: WorkspaceSubmoduleRepository, deps: {
   level(repository: { repository: string; repositoryId: string }, commit: string): Promise<SubmoduleLevel>;
-  /** The creator's GitHub resolving a repository by name: its id, or null when they can't read it. */
-  resolve(repository: string): Promise<string | null>;
-  /** The creator's access to a known repository (the source authority's cached check); throws when denied. */
+  /** The creator's GitHub resolving a repository by name: its id and whether GitHub says it is public, or null
+   * when they can't read it. */
+  resolve(repository: string): Promise<{ repositoryId: string; public: boolean } | null>;
+  /** The creator's access to a known private repository (the source authority's cached check); throws when denied. */
   readable(target: { repository: string; repositoryId: string }): Promise<void>;
+  /** GitHub's answer now, by id with the creator's own GitHub, for a repository the build saw public. Asked on
+   * every create and never remembered, so one that turned private meets the access check again. */
+  visibility(target: { repository: string; repositoryId: string }): Promise<"public" | "private">;
   boundMs?: number;
 }): Promise<WorkspaceSubmoduleRow[]> {
   if (!entry.fetchSubmodules) return [];
@@ -60,11 +66,21 @@ export async function resolveWorkspaceSubmodules(entry: WorkspaceSubmoduleReposi
   const copy = entry.copy?.submodules ?? [];
   const fetched = copy.filter(row => row.fetched && row.repository && row.repositoryId && row.commit);
   const moved = entry.baseCommit !== null && entry.baseCommit !== (entry.copy?.commit ?? null);
-  // One check per repository, shared by the copy's rows and the plan's names it already knows.
-  const checks = new Map<string, Promise<boolean>>();
+  // One check per repository, shared by the copy's rows and the plan's names it already knows. One the build
+  // saw public is public only if GitHub still says so now; otherwise (private now, or no answer) it takes the
+  // private check, so unknown visibility is never read as public.
+  const checks = new Map<string, Promise<"public" | "readable" | false>>();
+  const wasPublic = new Set(fetched.filter(row => row.public).map(row => row.repositoryId!));
   const check = (repository: string, repositoryId: string) => {
     let pending = checks.get(repositoryId);
-    if (!pending) { pending = deps.readable({ repository, repositoryId }).then(() => true, () => false); checks.set(repositoryId, pending); }
+    if (!pending) {
+      const target = { repository, repositoryId };
+      pending = (async (): Promise<"public" | "readable" | false> => {
+        if (wasPublic.has(repositoryId) && await deps.visibility(target).catch(() => "private") === "public") return "public";
+        return deps.readable(target).then(() => "readable" as const, () => false as const);
+      })();
+      checks.set(repositoryId, pending);
+    }
     return pending;
   };
   const known = new Map(fetched.map(row => [row.repository!, row.repositoryId!]));
@@ -72,7 +88,10 @@ export async function resolveWorkspaceSubmodules(entry: WorkspaceSubmoduleReposi
     level: deps.level,
     access: async repository => {
       const id = known.get(repository);
-      if (id) return await check(repository, id) ? id : null;
+      if (id) {
+        const seen = await check(repository, id);
+        return seen === "public" ? { repositoryId: id, public: true } : seen ? id : null;
+      }
       return deps.resolve(repository).catch(() => null);
     } }), deadline).catch((): typeof FAILED => FAILED) : Promise.resolve(null);
   const copyChecks = Promise.all(fetched.map(async row => ({ row, readable: await bounded(check(row.repository!, row.repositoryId!), deadline) })));
@@ -82,18 +101,19 @@ export async function resolveWorkspaceSubmodules(entry: WorkspaceSubmoduleReposi
   const add = (row: Omit<WorkspaceSubmoduleRow, "position">) => { if (!seen.has(row.path)) { seen.add(row.path); rows.push({ position, ...row }); } };
   if (composed) {
     for (const submodule of composed.submodules) add({ path: submodule.path, status: "fetch", repository: submodule.repository,
-      repositoryId: submodule.repositoryId, commit: submodule.commit, gitDir: submodule.gitDir });
+      repositoryId: submodule.repositoryId, commit: submodule.commit, gitDir: submodule.gitDir, ...(submodule.public ? { public: true as const } : {}) });
     for (const skipped of composed.skipped) add({ path: skipped.path, status: "skipped", ...(skipped.repository ? { repository: skipped.repository } : {}), reason: skipped.reason });
     for (const notice of composed.notices) add({ path: ".gitmodules", status: "skipped", reason: notice });
   } else if (moved) add({ path: ".gitmodules", status: "skipped",
     reason: `kept at the project's build: GitHub could not be read${resolved === TIMED_OUT ? " in time" : ""}` });
   for (const { row, readable } of checked) {
+    const seen = readable === "public" ? { public: true as const } : {};
     const target = { repository: row.repository!, repositoryId: row.repositoryId! };
     if (readable === TIMED_OUT) add({ path: row.path, status: "skipped", ...target, reason: "access could not be checked in time" });
     else if (!readable) add({ path: row.path, status: "skipped", ...target, reason: "no access" });
     // Unmoved, or unresolved in time: the copy's own commits are the plan.
-    else if (!composed && row.gitDir) add({ path: row.path, status: "fetch", ...target, commit: row.commit!, gitDir: row.gitDir });
-    else add({ path: row.path, status: "readable", ...target });
+    else if (!composed && row.gitDir) add({ path: row.path, status: "fetch", ...target, commit: row.commit!, gitDir: row.gitDir, ...seen });
+    else add({ path: row.path, status: "readable", ...target, ...seen });
   }
   if (!composed) for (const row of copy) if (!row.fetched)
     add({ path: row.path, status: "skipped", ...(row.repository ? { repository: row.repository } : {}), reason: row.reason ?? "not fetched" });
@@ -102,16 +122,17 @@ export async function resolveWorkspaceSubmodules(entry: WorkspaceSubmoduleReposi
 
 export async function insertWorkspaceSubmodules(tx: Tx, workspaceId: string, rows: readonly WorkspaceSubmoduleRow[]): Promise<void> {
   for (const row of rows)
-    await tx.query(`INSERT INTO cloud_v2_workspace_submodules (workspace_id, position, path, status, repository, repository_id, commit, git_dir, reason)
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT (workspace_id, position, path) DO NOTHING`,
+    await tx.query(`INSERT INTO cloud_v2_workspace_submodules (workspace_id, position, path, status, repository, repository_id, commit, git_dir, reason, public)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) ON CONFLICT (workspace_id, position, path) DO NOTHING`,
       [workspaceId, row.position, row.path, row.status, row.repository ?? null, row.repositoryId ?? null, row.commit ?? null, row.gitDir ?? null,
-        row.reason?.slice(0, 200) ?? null]);
+        row.reason?.slice(0, 200) ?? null, row.public === true]);
 }
 
-/** The repository a submodule token is minted for: only a 'fetch' row of this workspace, by name. */
+/** The repository a submodule token is minted for: only a private 'fetch' row of this workspace, by name. A public
+ * one needs none and never gets one. */
 export async function workspaceSubmoduleSource(tx: Tx, workspaceId: string, repository: string): Promise<{ repository: string; repositoryId: string } | null> {
   const { rows } = await tx.query<{ repository: string; repositoryId: string }>(`SELECT repository, repository_id AS "repositoryId"
-    FROM cloud_v2_workspace_submodules WHERE workspace_id=$1 AND status='fetch' AND repository=lower($2) LIMIT 1`, [workspaceId, repository]);
+    FROM cloud_v2_workspace_submodules WHERE workspace_id=$1 AND status='fetch' AND NOT public AND repository=lower($2) LIMIT 1`, [workspaceId, repository]);
   return rows[0] ?? null;
 }
 
@@ -138,7 +159,9 @@ export async function workspaceRepositoryToken(pool: pg.Pool, token: ReturnType<
 export const readOnlyToken = (granted: { token: string; expiresAt: number }) =>
   ({ token: granted.token, expiresAt: Math.min(granted.expiresAt, Date.now() + TOKEN_CACHE_MS) });
 
-/** Whether a copy may be forked for this workspace: every submodule the copy fetched is one its creator can read. */
+/** Whether a copy may be forked for this workspace: every submodule the copy fetched is one its creator can read
+ * (or that GitHub said was public at this create). A fetched row with no repository id names nothing a create
+ * could have checked, so it counts as unreadable and the copy is not forked. */
 export async function copySubmodulesReadable(tx: Tx, workspaceId: string, copy: readonly { submodules?: readonly ReadyCopySubmodule[] }[]): Promise<boolean> {
   const fetched = copy.flatMap(entry => (entry.submodules ?? []).filter(row => row.fetched).map(row => row.repositoryId ?? ""));
   if (!fetched.length) return true;
@@ -149,11 +172,11 @@ export async function copySubmodulesReadable(tx: Tx, workspaceId: string, copy: 
 }
 
 /** The plan delivered to the worker (workspace-submodules-v1): parents before their own submodules. */
-export async function workerSubmodules(tx: Tx, workspaceId: string): Promise<{ submodules?: { position: number; path: string; repository: string; commit: string; gitDir: string }[] }> {
-  const { rows } = await tx.query<{ position: number; path: string; repository: string; commit: string; gitDir: string }>(
-    `SELECT position, path, repository, commit, git_dir AS "gitDir" FROM cloud_v2_workspace_submodules WHERE workspace_id=$1 AND status='fetch'
+export async function workerSubmodules(tx: Tx, workspaceId: string): Promise<{ submodules?: { position: number; path: string; repository: string; commit: string; gitDir: string; public?: true }[] }> {
+  const { rows } = await tx.query<{ position: number; path: string; repository: string; commit: string; gitDir: string; public: boolean }>(
+    `SELECT position, path, repository, commit, git_dir AS "gitDir", public FROM cloud_v2_workspace_submodules WHERE workspace_id=$1 AND status='fetch'
      ORDER BY position, char_length(git_dir), path LIMIT 320`, [workspaceId]);
-  return rows.length ? { submodules: rows } : {};
+  return rows.length ? { submodules: rows.map(({ public: isPublic, ...row }) => isPublic ? { ...row, public: true as const } : row) } : {};
 }
 
 /** The reason a creator signed in with a personal access token fetches no submodule. */
@@ -165,10 +188,12 @@ export const SUBMODULES_NEED_APP_SIGN_IN = "submodules need a GitHub sign-in thr
  * them, at its commits) and the reason is named once.
  */
 export function withoutReadOnlyToken(rows: readonly WorkspaceSubmoduleRow[], pat: boolean): WorkspaceSubmoduleRow[] {
-  if (!pat || !rows.some(row => row.status === "fetch")) return [...rows];
-  const positions = [...new Set(rows.filter(row => row.status === "fetch").map(row => row.position))];
+  // A public submodule needs no token, so a PAT fetches it as anyone would.
+  const needsToken = (row: WorkspaceSubmoduleRow) => row.status === "fetch" && !row.public;
+  if (!pat || !rows.some(needsToken)) return [...rows];
+  const positions = [...new Set(rows.filter(needsToken).map(row => row.position))];
   const readable = ({ commit: _commit, gitDir: _gitDir, ...row }: WorkspaceSubmoduleRow): WorkspaceSubmoduleRow => ({ ...row, status: "readable" });
-  return [...rows.map(row => row.status === "fetch" ? readable(row) : row),
+  return [...rows.map(row => needsToken(row) ? readable(row) : row),
     ...positions.filter(position => !rows.some(row => row.position === position && row.path === ".gitmodules"))
       .map(position => ({ position, path: ".gitmodules", status: "skipped" as const, reason: SUBMODULES_NEED_APP_SIGN_IN }))];
 }

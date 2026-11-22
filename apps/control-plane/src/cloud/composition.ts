@@ -186,7 +186,7 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
   const memberGithub = (organizationId: string, userId: string) => github.connections.access({ organizationId, userId });
   const resolveMemberRepository = async (organizationId: string, userId: string, repository: string) => {
     const identity = await (await memberGithub(organizationId, userId)).api.repository({ repository });
-    return { repository: identity.repository.toLowerCase(), repositoryId: identity.repositoryId, defaultBranch: identity.defaultBranch };
+    return { repository: identity.repository.toLowerCase(), repositoryId: identity.repositoryId, defaultBranch: identity.defaultBranch, private: identity.private };
   };
   const InstallationsPage = z.object({ installations: z.array(z.object({ id: z.number().int().positive(), app_id: z.number().int(),
     account: z.object({ login: z.string().max(100) }), suspended_at: z.string().nullable().optional() }).passthrough()).max(100) }).passthrough();
@@ -246,11 +246,19 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
           ? { commit: built.commit, submodules: built.submodules ?? [] } : null }, {
           level: async (repository, commit) => readyCopies!.submoduleLevel(organizationId, repository, commit,
             async () => readSubmoduleLevel(await member(), repository, commit)),
+          // The same read says whether GitHub reports it public: then it needs no access of the creator's own.
           resolve: async repository => {
-            try { return (await resolveMemberRepository(organizationId, userId, repository)).repositoryId; }
-            catch (error) { if (error instanceof HttpError && [403, 404].includes(error.status)) return null; throw error; }
+            try {
+              const identity = await resolveMemberRepository(organizationId, userId, repository);
+              return { repositoryId: identity.repositoryId, public: identity.private === false };
+            } catch (error) { if (error instanceof HttpError && [403, 404].includes(error.status)) return null; throw error; }
           },
           readable: target => source.targets(organizationId, userId, [target], false, { parallel: true }),
+          // By id with the creator's own GitHub, on every create: a repository that turned private is private.
+          visibility: async target => {
+            const identity = await (await (access ??= memberGithub(organizationId, userId))).api.repository(target);
+            return identity.private === false && identity.repositoryId === target.repositoryId ? "public" : "private";
+          },
         });
       }));
       const method = rows.some(entry => entry.some(row => row.status === "fetch"))

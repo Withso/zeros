@@ -2,17 +2,17 @@
 // build fetches them. github.com is a local origin for the test only, through the test's own global Git config.
 import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
-import { mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { fetchPlannedSubmodules, SUBMODULE_PUSH_REFUSED, type WorkerSubmodule } from "../submodules";
 
 const run = promisify(execFile);
 const directories: string[] = [];
-afterEach(async () => { for (const dir of directories.splice(0)) await rm(dir, { recursive: true, force: true }); });
+afterEach(async () => { vi.unstubAllEnvs(); for (const dir of directories.splice(0)) await rm(dir, { recursive: true, force: true }); });
 const digest = (name: string) => createHash("sha256").update(name).digest("hex");
 
 async function fixture() {
@@ -29,7 +29,8 @@ async function fixture() {
   const first = await git(seed, "rev-parse", "HEAD");
   await writeFile(join(seed, "lib.txt"), "two\n"); await git(seed, "commit", "-qam", "two"); await git(seed, "push", "-q", "origin", "main");
   const second = await git(seed, "rev-parse", "HEAD");
-  await writeFile(gitconfig, `[url "file://${origin}"]\n\tinsteadOf = https://github.com/acme/lib.git\n[protocol "file"]\n\tallow = always\n`);
+  // oss/vendor (public, an account without the App) is the same origin for the test.
+  await writeFile(gitconfig, `[url "file://${origin}"]\n\tinsteadOf = https://github.com/acme/lib.git\n\tinsteadOf = https://github.com/oss/vendor.git\n[protocol "file"]\n\tallow = always\n`);
   // The workspace's checkout, with the gitlink folder its clone left empty.
   const checkout = join(root, "home", "zeros", "app");
   await mkdir(join(checkout, "vendor", "lib"), { recursive: true });
@@ -54,6 +55,29 @@ describe("a new checkout's planned submodules", () => {
     const pushed = await f.git(target, "push", "origin", "HEAD:refs/heads/mine").then(() => null, (error: { stderr: string }) => error.stderr);
     expect(pushed).toContain(SUBMODULE_PUSH_REFUSED);
     expect(await f.git(join(f.root, "lib.git"), "branch", "--list", "mine")).toBe("");
+  });
+
+  it("fetches a public one with no way to ask for a credential, and a private one through the broker as before", async () => {
+    const f = await fixture();
+    // Every Git the worker starts, with what it could ask a credential from.
+    const bin = join(f.root, "bin"), log = join(f.root, "git.log");
+    const realGit = (await run("sh", ["-c", "command -v git"])).stdout.trim();
+    await mkdir(bin);
+    await writeFile(join(bin, "git"), `#!/bin/sh\necho "$* | askpass=\${GIT_ASKPASS:-} broker=\${GH_ZEROS_BROKER_SOCKET:-} config=\${GIT_CONFIG_COUNT:-} prompt=\${GIT_TERMINAL_PROMPT:-}" >> '${log}'\nexec '${realGit}' "$@"\n`);
+    await chmod(join(bin, "git"), 0o755);
+    vi.stubEnv("PATH", `${bin}:${process.env.PATH ?? ""}`);
+    await mkdir(join(f.checkout, "vendor", "pub"), { recursive: true });
+    const broker = { ...f.environment, GIT_ASKPASS: join(f.root, "askpass"), GH_ZEROS_BROKER_SOCKET: join(f.root, "github.sock"), GIT_TERMINAL_PROMPT: "0",
+      GIT_CONFIG_COUNT: "1", GIT_CONFIG_KEY_0: "credential.https://github.com.helper", GIT_CONFIG_VALUE_0: `!${join(f.root, "git-credential")}` };
+    const pub = { position: 0, path: "vendor/pub", repository: "oss/vendor", commit: f.first, gitDir: `modules/${digest("vendor/pub")}`, public: true as const };
+    expect(await fetchPlannedSubmodules(f.checkout, [f.entry, pub], broker)).toEqual([{ path: "vendor/lib", fetched: true }, { path: "vendor/pub", fetched: true }]);
+    expect(await readFile(join(f.checkout, "vendor/pub/lib.txt"), "utf8")).toBe("one\n");
+    const clones = (await readFile(log, "utf8")).split("\n").filter(line => line.split(" | ")[0]!.includes(" clone "));
+    const publicClone = clones.find(line => line.includes("oss/vendor.git"))!, privateClone = clones.find(line => line.includes("acme/lib.git"))!;
+    expect(clones).toHaveLength(2);
+    expect(publicClone).toContain("credential.helper=");
+    expect(publicClone.split(" | ")[1]).toBe(`askpass= broker= config= prompt=0`);
+    expect(privateClone.split(" | ")[1]).toBe(`askpass=${join(f.root, "askpass")} broker=${join(f.root, "github.sock")} config=1 prompt=0`);
   });
 
   it("moves its own submodule to a new planned commit (a fork whose base moved), and never takes over another Git directory", async () => {

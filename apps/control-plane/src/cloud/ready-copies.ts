@@ -19,7 +19,7 @@ import { CLOUD_V2_LEASE_SECONDS, type CloudV2Compute } from "./boat.js";
 import { BoatCreateRejectedError, BoatForkRefusedError, BoatSnapshotExpiredError } from "./boat-client.js";
 import { CloudProviderError } from "./provider-error.js";
 import { asZeros, checkoutScript, shellQuote } from "./computer.js";
-import type { z } from "zod";
+import { z } from "zod";
 import { SUBMODULE_FETCHED, composeSubmodulePlan, readSubmoduleLevel, rememberedSubmoduleLevel, submoduleFetchLines, type SubmoduleLevel, type SubmodulePlan } from "./submodules.js";
 import { copySubmodulesReadable } from "./workspace-submodules.js";
 import { IGNORED_BASELINE_DIR, ignoredBaselineCommand } from "./checkpoint.js";
@@ -59,6 +59,8 @@ const HEARTBEAT_MS = 60_000;
 const ARCHIVE_READS = 24, ARCHIVE_WAIT_MS = 5_000;
 const READY_ATTEMPTS = 36, READY_WAIT_MS = 5_000;
 
+/** What a submodule's visibility read keeps: GitHub's repository id, name and whether it is private. */
+const PublicRepository = z.object({ id: z.number().int().positive(), full_name: z.string().max(201), private: z.boolean() });
 export type ReadyCopyState = "building" | "ready" | "failed" | "retired";
 /** Why a generation ran, stored when it was queued. */
 export type ReadyCopyTrigger = "project_created" | "repositories_changed" | "weekly_update" | "computer_build" | "setup_changed" | "branch_changed"
@@ -80,7 +82,9 @@ export type ReadyCopyRepositoryResult = { repository: string; repositoryId: stri
 /** A submodule of a copy's repository. A create whose creator can't read a fetched one never forks the copy. */
 export type ReadyCopySubmodule = { path: string; repository?: string; repositoryId?: string; commit?: string;
   /** Under the checkout's .git, where a fetched one keeps its Git directory. */
-  gitDir?: string; fetched: boolean; reason?: string };
+  gitDir?: string;
+  /** GitHub reported it public at the build's read; a create still asks GitHub again before trusting that. */
+  public?: true; fetched: boolean; reason?: string };
 export type CloudV2ReadyCopy = {
   id: string; organizationId: string; projectId: string; generation: number; state: ReadyCopyState;
   idempotencyKey: string; machineId: string | null; machinePending: boolean; builtFromBase: string | null;
@@ -1008,9 +1012,16 @@ export class CloudV2ReadyCopyBuilder {
     let plan: SubmodulePlan;
     try {
       plan = await composeSubmodulePlan({ root,
+        // A public submodule has no token of its own: its levels are read with the project's, which can read it.
         level: (repository, commit) => copies.submoduleLevel(job.organizationId, repository, commit,
-          () => readSubmoduleLevel(githubHttp(tokens.get(repository.repositoryId)!), repository, commit)),
+          () => readSubmoduleLevel(githubHttp(tokens.get(repository.repositoryId) ?? rootToken), repository, commit)),
         access: async repository => {
+          // Public is GitHub's own answer for that repository, read with the token this build already holds.
+          // Then anyone may read it: no installation, no member and no token of its own. Anything else
+          // (private, unseen, or GitHub failing) keeps the private rules below.
+          const [owner, name] = repository.split("/") as [string, string];
+          const seen = await githubHttp(rootToken).json(`/repos/${encodeURIComponent(owner)}/${encodeURIComponent(name)}`, PublicRepository).catch(() => null);
+          if (seen && seen.private === false && seen.full_name.toLowerCase() === repository) return { repositoryId: String(seen.id), public: true };
           const found = await submoduleRepository(job.organizationId, project, repository).catch(() => null);
           if (!found) return null;
           tokens.set(found.repositoryId, found.token);
@@ -1024,9 +1035,10 @@ export class CloudV2ReadyCopyBuilder {
       ...plan.skipped.map(entry => ({ path: entry.path, ...(entry.repository ? { repository: entry.repository } : {}), fetched: false, reason: entry.reason }))];
     const failed: string[] = [];
     for (const entry of plan.submodules) {
-      const summary = { path: entry.path, repository: entry.repository, repositoryId: entry.repositoryId, commit: entry.commit, gitDir: entry.gitDir };
+      const summary = { path: entry.path, repository: entry.repository, repositoryId: entry.repositoryId, commit: entry.commit, gitDir: entry.gitDir,
+        ...(entry.public ? { public: true as const } : {}) };
       if (failed.some(parent => entry.path.startsWith(`${parent}/`))) { outcomes.push({ ...summary, fetched: false, reason: "its parent submodule was not fetched" }); failed.push(entry.path); continue; }
-      const header = `Authorization: Basic ${Buffer.from(`x-access-token:${tokens.get(entry.repositoryId)!}`).toString("base64")}\n`;
+      const header = entry.public ? "" : `Authorization: Basic ${Buffer.from(`x-access-token:${tokens.get(entry.repositoryId)!}`).toString("base64")}\n`;
       const fetched = await compute.execLong(machineId, asZeros(submoduleFetchLines(checkout, entry)), 300, header).catch(() => null);
       if (fetched && fetched.exitCode === 0 && !fetched.timedOut && fetched.stdout.includes(SUBMODULE_FETCHED)) outcomes.push({ ...summary, fetched: true });
       else { outcomes.push({ ...summary, fetched: false, reason: "could not be fetched" }); failed.push(entry.path); }

@@ -641,7 +641,8 @@ export class CloudWorker {
     this.githubUserTokensEnabled = config.githubUserTokens === 1;
     if (this.options.workspaceId && config.workspace.id !== this.options.workspaceId) throw new Error("Workspace identity changed.");
     const scope = new WorkspaceScope(config.workspace);
-    this.submoduleRepositories = new Set(config.workspace.submodules?.map(entry => entry.repository.toLowerCase()));
+    // A public one needs no token and gets none: its fetch can't ask, and Git never names it here.
+    this.submoduleRepositories = new Set(config.workspace.submodules?.filter(entry => !entry.public).map(entry => entry.repository.toLowerCase()));
     if (this.scope && (this.scope.key !== scope.key || this.scope.root !== scope.root || this.scope.workspace.repository !== scope.workspace.repository)) throw new Error("Workspace identity changed.");
     if (this.scope && this.environmentVersion !== config.environment?.versionId) throw new EnvironmentSeedError("cloud_environment_pin_changed");
     if (this.reviews && !this.stopping) this.reviews.validateConfiguration(config.codeReview);
