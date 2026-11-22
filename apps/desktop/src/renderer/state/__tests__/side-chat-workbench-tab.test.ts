@@ -143,4 +143,26 @@ describe("OPEN_SIDE_CHAT", () => {
     expect(closed).toEqual(["side-close"]);
     expect(state.activeChatId).toBe("source-close");
   });
+
+  it("closes a cloud side chat in its cloud workspace and returns focus to its source", async () => {
+    const target = { organizationId: "33333333-3333-4333-8333-333333333333", workspaceId: "44444444-4444-4444-8444-444444444444" };
+    const folder = cloudWorkspaceKey(target);
+    const source = thread(cloudScopedId(target, "source-close"), folder);
+    const side = thread(cloudScopedId(target, "side-close"), folder, { sourceChatId: source.id });
+    dispatch({ type: "ADD_CHAT", chat: source });
+    dispatch({ type: "OPEN_SIDE_CHAT", chat: side });
+    const scopeKey = workbenchScopeForFolder(folder);
+    const tab = useWorkspaceStore.getState().workbenchByScope[scopeKey]!.tabs.find((item) => item.chatId === side.id)!;
+    let stopped = false;
+    closeSideChat(dispatch, {
+      closeSession: async () => { stopped = true; return true; },
+      getCloseActivity: () => ({ running: true, queuedCount: 0 }),
+    }, tab.id, side.id);
+    await Promise.resolve();
+    const state = useWorkspaceStore.getState();
+    expect(stopped).toBe(true);
+    expect(state.workbenchByScope[scopeKey]!.tabs.some((item) => item.chatId === side.id)).toBe(false);
+    expect(state.chats.find((chat) => chat.id === side.id)?.archived).toBe(true);
+    expect(state.activeChatId).toBe(source.id);
+  });
 });

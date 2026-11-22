@@ -150,8 +150,21 @@ export function closeSideChat(
   dispatch({ type: "REMOVE_WORKBENCH_TAB", id: tabId });
   if (!chat || chat.archived) return;
   const activity = sessions.getCloseActivity(chatId);
-  void sessions.closeSession(chatId);
-  editChat(dispatch, chatId, { archived: true }, { busy: activity.running || activity.queuedCount > 0 });
+  const busy = activity.running || activity.queuedCount > 0;
+  const closing = sessions.closeSession(chatId);
+  editChat(dispatch, chatId, { archived: true }, { busy });
+  if (busy && closing instanceof Promise) {
+    void closing.then((confirmed) => {
+      if (confirmed !== false) return;
+      toast.error("Couldn't confirm the side chat stopped", {
+        description: "It may still be running in the cloud workspace.",
+        action: { label: "Reopen side chat", onClick: () => {
+          editChat(dispatch, chatId, { archived: false });
+          publishSideChat(dispatch, { ...chat, archived: false });
+        } },
+      });
+    }).catch(() => {});
+  }
   if (!wasActive) return;
   const live = useWorkspaceStore.getState().chats;
   const back = [columnChatFor(chat.folder), chat.sourceChatId, chat.parentChatId].find(
