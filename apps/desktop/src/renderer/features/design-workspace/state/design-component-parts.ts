@@ -70,7 +70,12 @@ export function refuseDesignInstanceHostStyleWrite(
   if (!hosts) return;
   const writes = Array.isArray(write) ? write : [write];
   for (const entry of writes) {
-    const operation = entry as { type?: unknown; nodeId?: unknown; styles?: unknown };
+    const operation = entry as { type?: unknown; nodeId?: unknown; styles?: unknown; attribute?: unknown; value?: unknown };
+    // A part override is a style too: the app only removes older ones.
+    if (Array.isArray(write) && operation.type === "node.set-attribute" && typeof operation.nodeId === "string" &&
+      Object.hasOwn(hosts, operation.nodeId) && typeof operation.attribute === "string" &&
+      operation.attribute.toLowerCase().startsWith("zd-style-") && operation.value !== null)
+      throw new DesignInstanceHostStyleError([operation.attribute]);
     if (Array.isArray(write) && operation.type !== "node.set-styles") continue;
     if (typeof operation.nodeId !== "string" || !Object.hasOwn(hosts, operation.nodeId)) continue;
     if (!operation.styles || typeof operation.styles !== "object") continue;

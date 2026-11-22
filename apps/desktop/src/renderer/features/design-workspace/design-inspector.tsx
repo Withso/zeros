@@ -221,7 +221,7 @@ import {
 } from "./state/design-selection";
 import { designComponentPartOf, designComponentSlotOf } from "@zeros/protocol/design-runtime";
 import { useDesignHistoryPresentation } from "./state/design-history-presentation";
-import { designComponentDisplayTitle, designComponentIdentityLabel, designComponentInstanceIdentity, designFrameComponentPresentation,
+import { designComponentDisplayTitle, designComponentIdentityLabel, designComponentInstanceIdentity, designComponentSlotLabel, designFrameComponentPresentation,
   designComponentTextLock, designMissingComponentOf, isDesignComponentPartNodeId } from "./state/design-component-parts";
 import { MessageRow } from "../../shared/ui/primitives/message-row";
 import type { DesignComponentOptionsTarget } from "./design-component-options";
@@ -1634,7 +1634,8 @@ export function designInspectorSelectionKind(evidence: {
   /** A part or slot is selected (alone, or among several layers). */
   inner: boolean;
 }): DesignInspectorSelectionKind {
-  if (evidence.count > 1) return evidence.inner ? "component-inner-many" : evidence.instance ? "instances" : "ordinary";
+  if (evidence.count > 1)
+    return evidence.inner ? "component-inner-many" : evidence.instance ? "instances" : evidence.mainLayer ? "main-layer" : "ordinary";
   if (evidence.inner) return "component-inner";
   if (evidence.instance) return "instance";
   if (evidence.mainRoot) return "main-root";
@@ -3531,7 +3532,10 @@ export const DesignInspector = React.memo(function DesignInspector({
             // The identity gives way first, so the layer's name always shows.
             <span data-design-inspector-title="" className="text-violet-primary flex min-w-0 flex-1 gap-1 text-xs font-medium">
               <span data-design-inspector-title-identity="" className="min-w-0 truncate">{componentHeader.identity}</span>
-              <span data-design-inspector-title-layer="" className="max-w-1/2 shrink-0 truncate">{`· ${selectionTitle ?? selectionName}`}</span>
+              <span data-design-inspector-title-layer="" className="max-w-1/2 shrink-0 truncate">
+                {/* A slot reads as Layers names it, not by its frame. */}
+                {`· ${componentHeader.slot !== null ? `${designComponentSlotLabel(componentHeader.slot)} slot` : selectionTitle ?? selectionName}`}
+              </span>
             </span>
           ) : (
             <span data-design-inspector-title="" className={cn(componentHeader || optionsTarget?.kind === "main" ? "text-violet-primary" : "text-fg1", "min-w-0 flex-1 truncate text-xs font-medium")}>

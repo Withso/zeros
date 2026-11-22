@@ -65,6 +65,8 @@ describe("component inspector tab ownership", () => {
     expect(designInspectorSelectionKind({ ...none, instance: true })).toBe("instance");
     expect(designInspectorSelectionKind({ ...none, inner: true })).toBe("component-inner");
     expect(designInspectorSelectionKind({ ...none, count: 3 })).toBe("ordinary");
+    // Several layers inside a main are still the main's: Style only.
+    expect(designInspectorSelectionKind({ ...none, count: 2, mainLayer: true })).toBe("main-layer");
     expect(designInspectorSelectionKind({ ...none, count: 2, instance: true })).toBe("instances");
     expect(designInspectorSelectionKind({ ...none, count: 2, instance: true, inner: true })).toBe("component-inner-many");
   });

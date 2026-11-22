@@ -142,6 +142,17 @@ describe("an instance host takes only placement and size styles", () => {
       await expect(styles("inst", { [property]: "1px" })).rejects.toThrow(hostRefused);
   });
 
+  it("refuses a new part override on a host, and lets one be removed", async () => {
+    const attribute = (value: string | null) => transaction({ type: "node.set-attribute", nodeId: "inst", attribute: "zd-style-cc-send", value });
+    await expect(applyDesignEditCached("ws", frame, attribute("opacity: 0.5") as never)).rejects.toThrow(hostRefused);
+    await expect(applyDesignTransactionCached("ws", frame.file, attribute("opacity: 0.5") as never)).rejects.toThrow(hostRefused);
+    expect(bridge.applyTransaction).not.toHaveBeenCalled();
+    await expect(applyDesignTransactionCached("ws", frame.file, attribute(null) as never)).rejects.toBe(engineReached);
+    // Other attributes are the instance's controls.
+    await expect(applyDesignTransactionCached("ws", frame.file, transaction({ type: "node.set-attribute", nodeId: "inst", attribute: "width", value: "40" }) as never))
+      .rejects.toBe(engineReached);
+  });
+
   it("checks each host in a transaction and leaves plain layers alone", async () => {
     const two = (hostStyles: Record<string, string>) => ({ ...transaction({ type: "node.set-styles", nodeId: "inst", styles: hostStyles }),
       operations: [{ operationId: "a", type: "node.set-styles", nodeId: "inst", styles: hostStyles }, { operationId: "b", type: "node.set-styles", nodeId: "card", styles: { opacity: "0.5" } }] });

@@ -286,7 +286,7 @@ describe("the Options section across new generations of the same target", () => 
     await show({ file: "home/page.html", nodeId: designComponentSlotNodeId("chip-1", "extras"), sourceVersion: V1,
       instances: overridden, componentIdentity: { kind: "instance", nodeId: "chip-1" } });
     expect(header().getAttribute("data-design-component-of")).toBe("slot");
-    expect(container.querySelector("[data-design-inspector-title-layer]")?.textContent).toMatch(/^· \S/);
+    expect(container.querySelector("[data-design-inspector-title-layer]")?.textContent).toBe("· Extras slot");
     once();
     expect(container.textContent).not.toContain("Drop or draw layers");
   });
