@@ -175,5 +175,9 @@ describe("OPEN_SIDE_CHAT", () => {
     expect(sideChatCloseConfirmation(activity(true, 2), "side-confirm")?.description).toContain("stop Claude and discard 2 queued messages");
     expect(sideChatCloseConfirmation(activity(false, 1), "side-confirm")?.description).toContain("discard its queued message");
     expect(sideChatCloseConfirmation(activity(true, 0), "missing-side-chat")).toBeNull();
+    const target = { organizationId: "55555555-5555-4555-8555-555555555555", workspaceId: "66666666-6666-4666-8666-666666666666" };
+    const cloudSide = thread(cloudScopedId(target, "side-confirm"), cloudWorkspaceKey(target), { agentName: "Codex" });
+    dispatch({ type: "OPEN_SIDE_CHAT", chat: cloudSide });
+    expect(sideChatCloseConfirmation(activity(true, 0), cloudSide.id)?.description).toContain("stop Codex");
   });
 });
