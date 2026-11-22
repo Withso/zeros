@@ -35,7 +35,7 @@ const ACTIVE = new Set(["creating", "starting", "running", "stopping"]);
 export function stageContext(ports: Ports, state: RehearsalState, save: () => Promise<void>, repositories: StageContext["repositories"],
   timing: StageContext["timing"], runCap: number): StageContext & { lastStep(): string; takeNotes(): string[] } {
   let last = "start", notes: string[] = [];
-  for (const repository of [repositories.one, repositories.two, repositories.submodules, repositories.privateSubmodule]) if (repository) assertRepository(repository);
+  for (const repository of [repositories.one, repositories.two, repositories.submodules, repositories.submoduleFixture]) if (repository) assertRepository(repository);
   return {
     ports, state, save, repositories, timing, projectLevel: state.owner === "personal" ? "personal" : "organization",
     step(name) { last = name; },
@@ -92,7 +92,7 @@ async function preconditions(ctx: StageContext, options: RunOptions, account: bo
 // ── Cleanup and inventory ───────────────────────────────
 
 export type Inventory = Record<"workspaces" | "projects" | "branches" | "pulls" | "machines" | "objects" | "environments" | "githubSignIns" | "pro" |
-  "databaseRows" | "repositories", number>;
+  "databaseRows", number>;
 
 /** Removes everything this run created or named with its prefix, best effort per item, then reads the inventory. */
 /** Whether cleanup needs a signed-in account: anything recorded that only the API removes, or a create attempted (a
@@ -102,7 +102,7 @@ export const cleanupNeedsAccount = (state: RehearsalState) =>
   state.created.workspaces.length + state.created.projects.length + state.created.environments.length + state.created.githubSignIns.length +
     (state.created.pro?.operations.length ?? 0) + state.machineStarts > 0;
 
-export async function cleanup(ctx: StageContext, options: { keepFixtures: boolean; accountless?: boolean; log(line: string): void }): Promise<{ inventory: Inventory; failures: number }> {
+export async function cleanup(ctx: StageContext, options: { accountless?: boolean; log(line: string): void }): Promise<{ inventory: Inventory; failures: number }> {
   const { ports, state } = ctx;
   if (options.accountless && cleanupNeedsAccount(state)) throw new RehearsalFailure("cleanup", "account_required");
   let failures = 0;
@@ -161,17 +161,16 @@ export async function cleanup(ctx: StageContext, options: { keepFixtures: boolea
     await changePro(ctx, before ?? { enabled: false, validFrom: new Date(ports.clock.now() - 60_000).toISOString(), validUntil: null }, "restore");
   });
   for (const id of workspaces) await attempt("objects", async () => { for (const key of await ports.storage.keys(id)) await ports.storage.delete(key); });
-  if (!options.keepFixtures) for (const repository of state.created.repositories)
-    await attempt("repository", () => ports.github.deleteRepository(assertRepository(repository)));
-  const inventory = await readInventory(ctx, options.keepFixtures, options.accountless === true).finally(() => ports.database.close().catch(() => { failures++; }));
+  const inventory = await readInventory(ctx, options.accountless === true).finally(() => ports.database.close().catch(() => { failures++; }));
   return { inventory, failures };
 }
 
-/** Accountless (a provision-only run): the API's kinds are read from the database only, where prefixed rows still count. */
-export async function readInventory(ctx: StageContext, keepFixtures: boolean, accountless = false): Promise<Inventory> {
+/** Accountless (a provision-only run): the API's kinds are read from the database only, where prefixed rows still count. The
+ * fixture repositories are never created or deleted by the rehearsal, so they are not part of the inventory. */
+export async function readInventory(ctx: StageContext, accountless = false): Promise<Inventory> {
   const { ports, state } = ctx;
   const repositories = fixtureRepositories(ctx);
-  let branches = 0, pulls = 0, machines = 0, objects = 0, workspaces = 0, remaining = 0, environments = 0, githubSignIns = 0, pro = 0;
+  let branches = 0, pulls = 0, machines = 0, objects = 0, workspaces = 0, environments = 0, githubSignIns = 0, pro = 0;
   for (const repository of repositories) {
     branches += (await ports.github.branches(repository, state.prefix)).length;
     pulls += (await ports.github.openPulls(repository, state.prefix)).length;
@@ -196,8 +195,7 @@ export async function readInventory(ctx: StageContext, keepFixtures: boolean, ac
       (SELECT count(*) FROM cloud_v2_workspaces WHERE left(name, length($1)) = $1 AND state <> 'deleted')::int AS workspaces,
       (SELECT count(*) FROM cloud_projects WHERE left(name, length($1)) = $1)::int AS projects`, [state.prefix]);
   const databaseRows = Number(rows[0]?.workspaces ?? 0) + Number(rows[0]?.projects ?? 0);
-  if (!keepFixtures) for (const repository of state.created.repositories) if (await ports.github.repositoryExists(repository)) remaining++;
-  return { workspaces, projects, branches, pulls, machines, objects, environments, githubSignIns, pro, databaseRows, repositories: remaining };
+  return { workspaces, projects, branches, pulls, machines, objects, environments, githubSignIns, pro, databaseRows };
 }
 
 export function inventoryLines(inventory: Inventory): { lines: string[]; clean: boolean } {
@@ -210,6 +208,6 @@ export function inventoryLines(inventory: Inventory): { lines: string[]; clean: 
 }
 
 function fixtureRepositories(ctx: StageContext): string[] {
-  return [...new Set([ctx.repositories.one, ctx.repositories.two, ctx.repositories.submodules, ctx.repositories.privateSubmodule, ...ctx.state.created.repositories]
+  return [...new Set([ctx.repositories.one, ctx.repositories.two, ctx.repositories.submodules, ctx.repositories.submoduleFixture]
     .filter((value): value is string => !!value).map(assertRepository))];
 }

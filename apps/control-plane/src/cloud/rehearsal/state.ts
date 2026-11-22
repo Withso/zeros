@@ -13,7 +13,7 @@ const Schema = z.object({
   version: z.literal(1), runId: Uuid, prefix: z.string().regex(/^zr-[0-9a-f]{8}-$/), startedAt: z.string(),
   owner: z.enum(["personal", "organization"]), organizationId: Uuid, organizations: z.array(Uuid).max(4),
   created: z.object({
-    projects: z.array(Uuid), workspaces: z.array(Uuid), machines: z.array(z.string().max(128)), repositories: z.array(z.string().max(201)),
+    projects: z.array(Uuid), workspaces: z.array(Uuid), machines: z.array(z.string().max(128)),
     branches: z.array(z.object({ repository: z.string().max(201), name: z.string().max(255) })),
     pulls: z.array(z.object({ repository: z.string().max(201), number: z.number().int().positive() })),
     environments: z.array(z.object({ repository: z.string().max(201), repositoryId: z.string().regex(/^[1-9][0-9]{0,15}$/) })),
@@ -29,7 +29,7 @@ export const stateDirectory = (base = homedir()) => join(base, ".zeros-rehearsal
 
 export function newState(runId: string, organizationId: string, startedAt: Date, owner: OwnerKind = "personal"): RehearsalState {
   return { version: 1, runId, prefix: runPrefix(runId.replace(/-/g, "")), startedAt: startedAt.toISOString(), owner, organizationId,
-    organizations: [organizationId], created: { projects: [], workspaces: [], machines: [], repositories: [], branches: [], pulls: [], environments: [], githubSignIns: [] }, stages: {}, shifts: 0, machineStarts: 0 };
+    organizations: [organizationId], created: { projects: [], workspaces: [], machines: [], branches: [], pulls: [], environments: [], githubSignIns: [] }, stages: {}, shifts: 0, machineStarts: 0 };
 }
 
 export async function loadState(runId: string, directory = stateDirectory()): Promise<RehearsalState> {

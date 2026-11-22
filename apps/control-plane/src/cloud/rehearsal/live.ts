@@ -116,85 +116,51 @@ export function liveStorage(input: { bucket: string; endpoint: string; accessKey
   };
 }
 
-/** The Alpha GitHub App on the Withso installation, with tokens scoped to the fixture repositories only. */
-export function liveGithub(input: { appId: number; privateKey: string; owner: string }, fetchImpl: typeof fetch = fetch): Github {
-  const api = "https://api.github.com";
-  const config = { appId: input.appId, privateKey: input.privateKey } as GithubBackendConfig;
-  let installation: number | undefined;
-  const tokens = new Map<string, { token: string; until: number }>();
-  const request = async (method: string, path: string, token: string, body?: unknown) => {
-    const response = await fetchImpl(`${api}${path}`, { method, redirect: "error", signal: AbortSignal.timeout(TIMEOUT_MS),
-      headers: { accept: "application/vnd.github+json", authorization: `Bearer ${token}`, "x-github-api-version": "2022-11-28",
-        ...(body === undefined ? {} : { "content-type": "application/json" }) }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
-    const raw = await response.text();
-    let parsed: unknown = null;
-    try { parsed = raw ? JSON.parse(raw) : null; } catch { parsed = null; }
-    return { status: response.status, body: parsed };
+type GithubRequest = (method: string, path: string, token: string, body?: unknown) => Promise<{ status: number; body: unknown }>;
+const githubRequest = (fetchImpl: typeof fetch): GithubRequest => async (method, path, token, body) => {
+  const response = await fetchImpl(`https://api.github.com${path}`, { method, redirect: "error", signal: AbortSignal.timeout(TIMEOUT_MS),
+    headers: { accept: "application/vnd.github+json", authorization: `Bearer ${token}`, "x-github-api-version": "2022-11-28",
+      ...(body === undefined ? {} : { "content-type": "application/json" }) }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
+  const raw = await response.text();
+  let parsed: unknown = null;
+  try { parsed = raw ? JSON.parse(raw) : null; } catch { parsed = null; }
+  return { status: response.status, body: parsed };
+};
+
+/** The fixture repositories through one identity: `tokenFor` answers the token for a repository and an access level. The
+ * rehearsal reads and cleans up only: it never creates, renames or deletes a repository. */
+function githubPort(request: GithubRequest, owner: string, tokenFor: (repository: string, access: "read" | "write") => Promise<string>): Github {
+  const checked = (repository: string) => {
+    const name = assertRepository(repository);
+    if (name.split("/")[0]!.toLowerCase() !== owner.toLowerCase()) throw new RehearsalFailure("repository_refused", "owner");
+    return name;
   };
-  const installationId = async () => {
-    if (installation) return installation;
-    const listed = await request("GET", "/app/installations?per_page=100", createGithubAppJwt(config));
-    const rows = z.array(z.object({ id: z.number(), account: z.object({ login: z.string() }).nullable() }).passthrough()).safeParse(listed.body);
-    const found = rows.success ? rows.data.find(row => row.account?.login.toLowerCase() === input.owner.toLowerCase()) : undefined;
-    if (!found) throw new RehearsalFailure("github_installation", `http_${listed.status}`);
-    return installation = found.id;
-  };
-  /** A token for `names` only (repository names under the owner), or the installation's administration token for creates. */
-  const token = async (names: readonly string[], permissions: Record<string, string>) => {
-    const key = `${names.join(",")}|${JSON.stringify(permissions)}`, cached = tokens.get(key);
-    if (cached && cached.until > Date.now()) return cached.token;
-    const minted = await request("POST", `/app/installations/${await installationId()}/access_tokens`, createGithubAppJwt(config),
-      { repositories: names, permissions });
-    const body = z.object({ token: z.string().min(1) }).passthrough().safeParse(minted.body);
-    if (minted.status !== 201 || !body.success) throw new RehearsalFailure("github_token", `http_${minted.status}`);
-    tokens.set(key, { token: body.data.token, until: Date.now() + 40 * 60_000 });
-    return body.data.token;
-  };
-  const name = (repository: string) => {
-    const [owner, repo] = assertRepository(repository).split("/");
-    if (owner!.toLowerCase() !== input.owner.toLowerCase()) throw new RehearsalFailure("repository_refused", "owner");
-    return repo!;
-  };
-  const write = (repository: string) => token([name(repository)], { metadata: "read", contents: "write", pull_requests: "write" });
   const ok = (status: number, step: string, allowed: number[]) => { if (!allowed.includes(status)) throw new RehearsalFailure(step, `http_${status}`); };
+  const write = (repository: string) => tokenFor(checked(repository), "write");
   return {
     async repositoryExists(repository) {
-      try { return (await request("GET", `/repos/${repository}`, await token([name(repository)], { metadata: "read" }))).status === 200; }
+      try { return (await request("GET", `/repos/${checked(repository)}`, await tokenFor(checked(repository), "read"))).status === 200; }
       catch (error) { if (error instanceof RehearsalFailure && error.step === "github_token") return false; throw error; }
     },
-    async createRepository(repository) {
-      const repo = name(repository);
-      if (repo === "zeros-dev-fixture") throw new RehearsalFailure("repository_refused", "r1");
-      // Created by the App, so the installation includes it; administration is asked for on R1 only, which exists.
-      const admin = await token(["zeros-dev-fixture"], { metadata: "read", administration: "write" });
-      const created = await request("POST", `/orgs/${input.owner}/repos`, admin, { name: repo, private: true, auto_init: true, gitignore_template: "Node" });
-      ok(created.status, "repository_create", [201]);
-    },
-    async deleteRepository(repository) {
-      const repo = name(repository);
-      if (repo === "zeros-dev-fixture") throw new RehearsalFailure("repository_refused", "r1");
-      const removed = await request("DELETE", `/repos/${input.owner}/${repo}`, await token([repo], { metadata: "read", administration: "write" }));
-      ok(removed.status, "repository_delete", [204, 404]);
-    },
     async branches(repository, prefix) {
-      const reply = await request("GET", `/repos/${repository}/git/matching-refs/heads/${encodeURIComponent(prefix)}`, await write(repository));
+      const reply = await request("GET", `/repos/${checked(repository)}/git/matching-refs/heads/${encodeURIComponent(prefix)}`, await write(repository));
       ok(reply.status, "github_branches", [200]);
       const refs = z.array(z.object({ ref: z.string() }).passthrough()).safeParse(reply.body);
       return refs.success ? refs.data.map(row => row.ref.replace(/^refs\/heads\//, "")).filter(branch => prefixed(prefix, branch)) : [];
     },
     async deleteBranch(repository, branch) {
       if (!/^zr-[0-9a-f]{8}-/.test(branch)) throw new RehearsalFailure("branch_refused", "unprefixed");
-      const reply = await request("DELETE", `/repos/${repository}/git/refs/heads/${branch.split("/").map(encodeURIComponent).join("/")}`, await write(repository));
+      const reply = await request("DELETE", `/repos/${checked(repository)}/git/refs/heads/${branch.split("/").map(encodeURIComponent).join("/")}`, await write(repository));
       ok(reply.status, "branch_delete", [204, 404, 422]);
     },
     async openPulls(repository, prefix) {
-      const reply = await request("GET", `/repos/${repository}/pulls?state=open&per_page=100`, await write(repository));
+      const reply = await request("GET", `/repos/${checked(repository)}/pulls?state=open&per_page=100`, await write(repository));
       ok(reply.status, "github_pulls", [200]);
       const rows = z.array(z.object({ number: z.number(), head: z.object({ ref: z.string() }) }).passthrough()).safeParse(reply.body);
       return rows.success ? rows.data.filter(row => prefixed(prefix, row.head.ref)).map(row => row.number) : [];
     },
     async ignores(repository, path) {
-      const reply = await request("GET", `/repos/${repository}/contents/.gitignore`, await token([name(repository)], { metadata: "read", contents: "read" }));
+      const reply = await request("GET", `/repos/${checked(repository)}/contents/.gitignore`, await tokenFor(checked(repository), "read"));
       if (reply.status === 404) return false;
       ok(reply.status, "github_gitignore", [200]);
       const file = z.object({ content: z.string(), encoding: z.literal("base64") }).passthrough().safeParse(reply.body);
@@ -203,12 +169,89 @@ export function liveGithub(input: { appId: number; privateKey: string; owner: st
       return Buffer.from(file.data.content, "base64").toString("utf8").split(/\r?\n/).some(line => rules.has(line.trim()));
     },
     async closePull(repository, number) {
-      const read = await request("GET", `/repos/${repository}/pulls/${number}`, await write(repository));
+      const read = await request("GET", `/repos/${checked(repository)}/pulls/${number}`, await write(repository));
       const head = z.object({ head: z.object({ ref: z.string() }) }).passthrough().safeParse(read.body);
       if (!head.success || !/^zr-[0-9a-f]{8}-/.test(head.data.head.ref)) throw new RehearsalFailure("pull_refused", "unprefixed");
-      ok((await request("PATCH", `/repos/${repository}/pulls/${number}`, await write(repository), { state: "closed" })).status, "pull_close", [200]);
+      ok((await request("PATCH", `/repos/${checked(repository)}/pulls/${number}`, await write(repository), { state: "closed" })).status, "pull_close", [200]);
     },
   };
+}
+
+/** The fixtures through the Alpha GitHub App on the owner's installation, with tokens scoped to one repository each. Works
+ * only for repositories the App's installation selects. */
+export function liveGithub(input: { appId: number; privateKey: string; owner: string }, fetchImpl: typeof fetch = fetch): Github {
+  const request = githubRequest(fetchImpl);
+  const config = { appId: input.appId, privateKey: input.privateKey } as GithubBackendConfig;
+  let installation: number | undefined;
+  const tokens = new Map<string, { token: string; until: number }>();
+  const installationId = async () => {
+    if (installation) return installation;
+    const listed = await request("GET", "/app/installations?per_page=100", createGithubAppJwt(config));
+    const rows = z.array(z.object({ id: z.number(), account: z.object({ login: z.string() }).nullable() }).passthrough()).safeParse(listed.body);
+    const found = rows.success ? rows.data.find(row => row.account?.login.toLowerCase() === input.owner.toLowerCase()) : undefined;
+    if (!found) throw new RehearsalFailure("github_installation", `http_${listed.status}`);
+    return installation = found.id;
+  };
+  return githubPort(request, input.owner, async (repository, access) => {
+    const permissions = access === "write" ? { metadata: "read", contents: "write", pull_requests: "write" } : { metadata: "read", contents: "read" };
+    const key = `${repository}|${access}`, cached = tokens.get(key);
+    if (cached && cached.until > Date.now()) return cached.token;
+    const minted = await request("POST", `/app/installations/${await installationId()}/access_tokens`, createGithubAppJwt(config),
+      { repositories: [repository.split("/")[1]], permissions });
+    const body = z.object({ token: z.string().min(1) }).passthrough().safeParse(minted.body);
+    if (minted.status !== 201 || !body.success) throw new RehearsalFailure("github_token", `http_${minted.status}`);
+    tokens.set(key, { token: body.data.token, until: Date.now() + 40 * 60_000 });
+    return body.data.token;
+  });
+}
+
+/** The fixtures through ZEROS_REHEARSAL_GITHUB_TOKEN, the same token the test user's sign-in uses: no dependence on the
+ * App's selected repositories. */
+export function liveGithubToken(token: string, owner: string, fetchImpl: typeof fetch = fetch): Github {
+  return githubPort(githubRequest(fetchImpl), owner, async () => token);
+}
+
+export type TokenCheck = {
+  /** fine_grained (github_pat_), classic (ghp_) or other: only the kind, never the value. */
+  kind: "fine_grained" | "classic" | "other";
+  /** Repositories the token reaches, by full name (GitHub's /user/repos as the token). */
+  reachable: string[];
+  /** Per fixture: whether the token may write contents and pull requests, probed by requests GitHub refuses on validation
+   * (a ref to the all-zero commit, a pull request from a branch that does not exist): they change nothing. */
+  fixtures: { repository: string; reachable: boolean; contentsWrite: boolean; pullRequestsWrite: boolean }[];
+};
+/** Verifies the token without printing it: what kind it is, everything it reaches, and its write access on each fixture. */
+export async function checkGithubToken(token: string, fixtures: readonly string[], fetchImpl: typeof fetch = fetch): Promise<TokenCheck> {
+  const request = githubRequest(fetchImpl);
+  const kind = token.startsWith("github_pat_") ? "fine_grained" : token.startsWith("ghp_") ? "classic" : "other";
+  const reachable: string[] = [];
+  for (let page = 1; page <= 10; page++) {
+    const reply = await request("GET", `/user/repos?per_page=100&page=${page}&affiliation=owner,collaborator,organization_member`, token);
+    if (reply.status !== 200) throw new RehearsalFailure("github_token_repositories", `http_${reply.status}`);
+    const rows = z.array(z.object({ full_name: z.string().max(201) }).passthrough()).safeParse(reply.body);
+    if (!rows.success) throw new RehearsalFailure("github_token_repositories", "schema");
+    reachable.push(...rows.data.map(row => row.full_name));
+    if (rows.data.length < 100) break;
+  }
+  const results: TokenCheck["fixtures"] = [];
+  for (const repository of fixtures.map(assertRepository)) {
+    const exists = (await request("GET", `/repos/${repository}`, token)).status === 200;
+    if (!exists) { results.push({ repository, reachable: false, contentsWrite: false, pullRequestsWrite: false }); continue; }
+    // 422 is GitHub validating a request the token may make; 403 or 404 is the permission refusing it. Neither changes anything.
+    const ref = await request("POST", `/repos/${repository}/git/refs`, token, { ref: "refs/heads/zr-token-check", sha: "0".repeat(40) });
+    const pull = await request("POST", `/repos/${repository}/pulls`, token, { title: "zr-token-check", head: "zr-token-check-absent", base: "main" });
+    results.push({ repository, reachable: true, contentsWrite: ref.status === 422, pullRequestsWrite: pull.status === 422 });
+  }
+  return { kind, reachable, fixtures: results };
+}
+
+/** Why a token check refuses, or null: a classic token, a repository outside the fixtures, or a fixture it cannot write. */
+export function tokenRefusal(check: TokenCheck, fixtures: readonly string[]): string | null {
+  if (check.kind !== "fine_grained") return `kind_${check.kind}`;
+  const allowed = new Set(fixtures.map(name => name.toLowerCase()));
+  if (check.reachable.some(name => !allowed.has(name.toLowerCase()))) return "reaches_outside_fixtures";
+  const missing = check.fixtures.find(row => !row.reachable || !row.contentsWrite || !row.pullRequestsWrite);
+  return missing ? `fixture_${!missing.reachable ? "unreachable" : !missing.contentsWrite ? "contents_read_only" : "pull_requests_read_only"}` : null;
 }
 
 /** A database failure's closed class: its SQLSTATE (five characters, never the message), or "connection" when it has none. */

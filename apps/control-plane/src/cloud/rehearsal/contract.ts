@@ -58,9 +58,6 @@ export interface Storage {
 export interface Github {
   /** Whether a repository exists (and the App's installation can read it). */
   repositoryExists(repository: string): Promise<boolean>;
-  /** Creates a private fixture repository with one initial commit; never another owner's. */
-  createRepository(repository: string): Promise<void>;
-  deleteRepository(repository: string): Promise<void>;
   /** Branches of `repository` whose names start with `prefix`. */
   branches(repository: string, prefix: string): Promise<string[]>;
   deleteBranch(repository: string, branch: string): Promise<void>;
@@ -115,8 +112,6 @@ export type Ports = {
 /** Everything a run created, by kind, so cleanup and the inventory never depend on names a provider chose. */
 export type Created = {
   projects: string[]; workspaces: string[]; machines: string[];
-  /** Fixture repositories `provision` created this run (removed by cleanup unless --keep-fixtures). */
-  repositories: string[];
   branches: { repository: string; name: string }[]; pulls: { repository: string; number: number }[];
   /** The account's environments this run seeded (each was empty before); cleanup clears them. */
   environments: { repository: string; repositoryId: string }[];
@@ -141,9 +136,9 @@ export type StageContext = {
   ports: Ports; state: RehearsalState; save(): Promise<void>;
   /** Projects are "Only you" (personal) on the Personal route, organization projects on the organization route. */
   projectLevel: "personal" | "organization";
-  /** R1 always; R2 once provisioned or named; R3 (with one public and one private submodule) and that private submodule's
-   * repository for stage D, by name. */
-  repositories: { one: string; two?: string; submodules?: string; privateSubmodule?: string };
+  /** R1 always; R2 by name; for stage D, R3 (two public submodules) and the Withso fixture that
+   * is one of them, by name. Every fixture is public. */
+  repositories: { one: string; two?: string; submodules?: string; submoduleFixture?: string };
   /** Bounded waits; tests shrink them. */
   timing: { pollMs: number; stateMs: number; copyMs: number; turnMs: number; scanMs: number; archiveScanMs: number;
     /** Pro ended to the machine stopped: the 20-minute idle stop plus one sweep, with margin. */

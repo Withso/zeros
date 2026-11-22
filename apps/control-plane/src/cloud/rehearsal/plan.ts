@@ -69,7 +69,9 @@ export function accountLines(summary: AccountSummary): string[] {
 /** What the Personal route needs besides an account: the token for the account's own GitHub sign-in, and the one
  * active platform owner for the Pro grant. */
 export type PersonalReadiness = { token: boolean; proActor: "resolved" | "none" | "ambiguous";
-  /** Stage D's two fixture repositories (R3 and its private submodule), as the GitHub App sees them. */
+  /** Why the token check refused it (kind_classic, reaches_outside_fixtures, fixture_contents_read_only, ...). */
+  tokenRefusal?: string;
+  /** Stage D's two fixture repositories (R3 and the Withso fixture that is one of its submodules), as the run's GitHub identity sees them. */
   submoduleFixtures?: "present" | "missing" | "not_named" };
 
 /** Why a stage cannot run, or null. `account` is the selected account's summary, or the reason its sign-in or read
@@ -90,6 +92,7 @@ export function refusal(stage: StageName, account: AccountSummary | { failed: st
   if (owner === "personal") {
     if (!account.personal) return "no_personal_organization";
     if (stage === "setup" && !readiness.token) return "no_github_token";
+    if (stage === "setup" && readiness.tokenRefusal) return `github_token_${readiness.tokenRefusal}`;
     if (stage === "setup" && readiness.proActor !== "resolved") return `pro_actor_${readiness.proActor}`;
     return null;
   }
@@ -106,13 +109,16 @@ export const PERSONAL_ROUTE_GAPS = [
   "not covered on the Personal route: the per-member access check at create (a copy holding what another member cannot read)",
   "not covered on the Personal route: team sharing and shared execution (a Personal organization has one member)",
   "not covered with a token sign-in: read-only submodule tokens (C4), Mac sync (github_access_required); the build's clone, pushes and pull requests use the token itself",
+  "not covered on any route: a private repository; every fixture is public, so no private clone at build, no private submodule and no token-scoped read",
+  "not covered: private submodules (no private submodule fixture): read-only submodule tokens and the creator-cannot-read path",
 ];
 
 export function writeLines(stage: StageName, prefix: string, repositories: { one: string; two?: string }, owner: OwnerKind = "personal"): string[] {
   const two = repositories.two ?? FIXTURE_TWO;
   const where = owner === "personal" ? "in the test user's Personal organization, as Only you projects" : "in the probe organization, as organization projects";
   const lines: Record<StageName, string[]> = {
-    provision: [`provision would create ${two} (private, one initial commit with GitHub's Node .gitignore) only if it does not exist; cleanup removes it unless --keep-fixtures`],
+    provision: [`provision is check-only: ${repositories.one}, ${two} and the stage D fixtures must exist (the rehearsal never creates or deletes a repository;` +
+      " the App has no administration permission)"],
     projects: [
       `projects runs ${where}`,
       `projects would create project ${prefix}one (${repositories.one}) and wait for its copy (1 machine)`,
@@ -165,12 +171,12 @@ export function writeLines(stage: StageName, prefix: string, repositories: { one
       "retention would, when S4 is deployed, stop and archive one workspace again and wait for its backup's removal",
     ],
     submodules: [
-      `submodules would create project ${prefix}sub (Only you, R3 with fetch submodules on) and its copy (1 machine); the copy's record must show both submodules fetched`,
-      `submodules would create workspace ${prefix}sub-w (1 machine start), forked from the copy, and read git submodule status: both initialized at their gitlink commits`,
-      "submodules: with a token sign-in the private submodule is readable through the copy, and the create names that it fetched none itself;" +
-        " D3 (a second member who cannot read it) is not rehearsed on this route",
-      "submodules needs R3 (--submodule-repository) and its private submodule (--private-submodule-repository), both existing and in the token's scope",
+      `submodules would create project ${prefix}sub (Only you, R3 with fetch submodules on) and its copy (1 machine); the copy's record must show both submodules fetched, as public`,
+      `submodules would create workspace ${prefix}sub-w (1 machine start), forked from the copy, fetching both public submodules itself, and read git submodule status:` +
+        " both initialized at their gitlink commits",
+      "submodules needs R3 (--submodule-repository) and the Withso fixture that is one of its submodules (--submodule-fixture-repository), both existing",
     ],
+
   };
   return lines[stage].map(safeLine);
 }

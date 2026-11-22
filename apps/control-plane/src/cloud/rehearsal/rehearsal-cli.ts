@@ -13,7 +13,8 @@ import { gate0SignIn } from "../gate0-cli.js";
 import { RehearsalFailure, STAGE_NEEDS_ACCOUNT, STAGES, type Api, type OwnerKind, type Ports, type StageName, type Switch } from "./contract.js";
 import { diagnose, signInAccount, signInAll, type Account, type SignedIn, type SignInDeps } from "./accounts.js";
 import { assertRepository, safeLine } from "./guard.js";
-import { liveApi, liveBoat, liveBridge, liveClock, liveDatabase, liveGithub, liveGithubSignIn, livePro, liveRelease, liveStorage } from "./live.js";
+import { checkGithubToken, liveApi, liveBoat, liveBridge, liveClock, liveDatabase, liveGithub, liveGithubSignIn, liveGithubToken, livePro, liveRelease, liveStorage,
+  tokenRefusal } from "./live.js";
 import { accountLines, PERSONAL_ROUTE_GAPS, platformOwners, probeDiagnostics, proActor, readAccount, refusal, resolveProbe, writeLines,
   type AccountSummary } from "./plan.js";
 import { cleanup, cleanupNeedsAccount, DEFAULT_RUN_CAP, inventoryLines, NO_ACCOUNT, runStages, stageContext } from "./runner.js";
@@ -23,7 +24,7 @@ import { loadState, newState, saveState } from "./state.js";
 export const USAGE = "alpha:rehearse <provision|setup|projects|personal|retention|submodules|all> [--plan] [--cleanup] [--run <id>] " +
   "[--owner personal|organization (default personal)] [--account owner|1..10 (default 2)] [--other 1..10 (default the next configured)] " +
   "[--pro-actor <first 8 hex of the platform owner>] [--switches projects,personal,retention] [--repository owner/name] " +
-  "[--repository-two owner/name (default Withso/zeros-dev-fixture-2)] [--submodule-repository owner/name] [--private-submodule-repository owner/name] [--keep-fixtures] [--max-active <n>] [--organization <slug|id>]";
+  "[--repository-two owner/name (default Withso/zeros-dev-fixture-2)] [--submodule-repository owner/name] [--submodule-fixture-repository owner/name] [--max-active <n>] [--organization <slug|id>]";
 /** `all` runs these in order on each route; D is refused until written. */
 export const ALL: Record<OwnerKind, readonly StageName[]> = {
   personal: ["provision", "setup", "projects", "personal", "retention", "submodules"], organization: ["provision", "setup", "projects", "retention"],
@@ -34,15 +35,15 @@ export const TIMING = { pollMs: 5_000, stateMs: 15 * 60_000, copyMs: 30 * 60_000
 export type Arguments = {
   stages: StageName[]; plan: boolean; cleanup: boolean; run?: string; owner: OwnerKind; account: "owner" | number; other?: number; proActor?: string;
   switches: Set<Switch>;
-  repository?: string; repositoryTwo?: string; submoduleRepository?: string; privateSubmoduleRepository?: string; keepFixtures: boolean; maxActive: number; organization?: string;
+  repository?: string; repositoryTwo?: string; submoduleRepository?: string; submoduleFixtureRepository?: string; maxActive: number; organization?: string;
 };
 export function parseArguments(argv: string[]): Arguments {
   // Private files: .env.agent at the repository root and the zeros-dev profile, both mode 0600; the profile is reached by
   // ZEROS_DEV_PROFILE_PATH (its loader refuses group- or world-readable files and does not follow a symlink).
   const { values, positionals } = parseArgs({ args: argv, allowPositionals: true, options: {
     plan: { type: "boolean" }, cleanup: { type: "boolean" }, run: { type: "string" }, account: { type: "string" }, switches: { type: "string" },
-    repository: { type: "string" }, "repository-two": { type: "string" }, "keep-fixtures": { type: "boolean" }, "max-active": { type: "string" },
-    organization: { type: "string" }, owner: { type: "string" }, "submodule-repository": { type: "string" }, "private-submodule-repository": { type: "string" }, other: { type: "string" }, "pro-actor": { type: "string" }, help: { type: "boolean" },
+    repository: { type: "string" }, "repository-two": { type: "string" }, "max-active": { type: "string" },
+    organization: { type: "string" }, owner: { type: "string" }, "submodule-repository": { type: "string" }, "submodule-fixture-repository": { type: "string" }, other: { type: "string" }, "pro-actor": { type: "string" }, help: { type: "boolean" },
   } });
   const owner = (values.owner ?? "personal") as OwnerKind;
   if (!["personal", "organization"].includes(owner)) throw new RehearsalFailure("usage", "owner");
@@ -69,8 +70,8 @@ export function parseArguments(argv: string[]): Arguments {
     ...(values.repository ? { repository: assertRepository(values.repository) } : {}),
     ...(values["repository-two"] ? { repositoryTwo: assertRepository(values["repository-two"]) } : {}),
     ...(values["submodule-repository"] ? { submoduleRepository: assertRepository(values["submodule-repository"]) } : {}),
-    ...(values["private-submodule-repository"] ? { privateSubmoduleRepository: assertRepository(values["private-submodule-repository"]) } : {}),
-    keepFixtures: !!values["keep-fixtures"], maxActive, ...(values.organization ? { organization: values.organization } : {}) };
+    ...(values["submodule-fixture-repository"] ? { submoduleFixtureRepository: assertRepository(values["submodule-fixture-repository"]) } : {}),
+    maxActive, ...(values.organization ? { organization: values.organization } : {}) };
 }
 
 const Profile = z.object({
@@ -105,6 +106,11 @@ async function main(argv: string[]): Promise<number> {
   const probeSelector = args.organization ?? env.ZEROS_ALPHA_PROBE_ORGANIZATION;
   const one = args.repository ?? (env.ZEROS_REHEARSAL_REPOSITORY ? assertRepository(env.ZEROS_REHEARSAL_REPOSITORY) : undefined);
   const two = args.repositoryTwo ?? (env.ZEROS_REHEARSAL_REPOSITORY_2 ? assertRepository(env.ZEROS_REHEARSAL_REPOSITORY_2) : FIXTURE_TWO);
+  const githubToken = env.ZEROS_REHEARSAL_GITHUB_TOKEN?.trim();
+  // The fixtures' reads and clean-up (exists, branches, pull requests, branch deletion): the token when set, so the
+  // Personal route does not depend on the App's selected repositories; the App otherwise.
+  const fixtureGithub = () => githubToken ? liveGithubToken(githubToken, "Withso")
+    : liveGithub({ appId: Number(need("ZEROS_GITHUB_ALPHA_APP_ID")), privateKey: Buffer.from(need("ZEROS_GITHUB_ALPHA_APP_PRIVATE_KEY_B64"), "base64").toString("utf8"), owner: "Withso" });
   const signInDeps = (probe: { workosOrganizationId: string | null }): SignInDeps => ({
     subject: email => workosSubject(profile.workos.apiKey, email),
     signIn: input => gate0SignIn({ clientId: profile.workos.webClientId, apiKey: profile.workos.apiKey, ...input }),
@@ -112,7 +118,7 @@ async function main(argv: string[]): Promise<number> {
     ...(probe.workosOrganizationId ? { probeWorkosOrganization: probe.workosOrganizationId } : {}),
   });
 
-  const token = env.ZEROS_REHEARSAL_GITHUB_TOKEN?.trim();
+  const token = githubToken;
   const personalOf = (signed: SignedIn) => signed.organizations.find(org => org.personal && org.role === "owner");
 
   try {
@@ -124,6 +130,21 @@ async function main(argv: string[]): Promise<number> {
       log("plan: reads only; each account signs in (one session, revoked at the end; 3 s apart, a throttled step retried after 5, 15 and 45 s)," +
         " and one temporary database role inheriting only pg_read_all_data is minted for reads and deleted");
       log(`route: ${args.owner === "personal" ? "personal (the selected test user's Personal organization)" : "organization (the probe organization)"}`);
+      // The token first, before any other read: its kind, everything it reaches, and its write access on each fixture.
+      const fixtures = [one, two, args.submoduleRepository, args.submoduleFixtureRepository].filter((name): name is string => !!name);
+      let tokenState: string | null = githubToken ? null : "absent";
+      if (githubToken) {
+        try {
+          const checked = await checkGithubToken(githubToken, fixtures);
+          log(`github token: kind ${checked.kind}; reaches ${checked.reachable.length} repositories${checked.reachable.length ? `: ${checked.reachable.join(", ")}` : ""}`);
+          for (const row of checked.fixtures) log(`  github token on ${row.repository}: ${row.reachable ? "reachable" : "unreachable"}, contents write ${
+            row.contentsWrite ? "yes" : "no"}, pull requests write ${row.pullRequestsWrite ? "yes" : "no"} (probed with requests GitHub refuses on validation; nothing changes)`);
+          tokenState = tokenRefusal(checked, fixtures);
+        } catch (error) { const failed = diagnose(error, "github_token"); tokenState = `${failed.step}:${failed.code}`; }
+      }
+      log(`github token: ${tokenState === null ? "accepted" : tokenState === "absent" ? "absent" : `refused ${tokenState}`}`);
+      log(`fixture reads and clean-up (exists, branches, pull requests, branch deletion): ${githubToken ? "the token" : "the GitHub App (its selected repositories only)"}`);
+      log("pushes and pull requests: the test user's own GitHub sign-in by that token (stage setup); stage D's builds fetch public submodules with no credential");
       const reads = database(randomUUID().replace(/-/g, ""));
       try {
         const probe = await resolveProbe(reads, probeSelector);
@@ -160,15 +181,15 @@ async function main(argv: string[]): Promise<number> {
         const otherLabel = String(args.other ?? accounts.find(row => row.label !== "owner" && row.label !== String(args.account))?.label ?? "none");
         log(`selected account ${args.account}; second account ${otherLabel}; repositories R1 ${one}, R2 ${two}`);
         if (args.account === "owner") log("note: the owner's own account; the run asserts its entitlement, sessions and settings are unchanged");
-        // Stage D's fixtures, read through the GitHub App (a repository read; nothing is written).
-        const named = args.submoduleRepository && args.privateSubmoduleRepository ? [args.submoduleRepository, args.privateSubmoduleRepository] : null;
+        // Stage D's fixtures, read through the run's fixture identity (a repository read; nothing is written).
+        const named = args.submoduleRepository && args.submoduleFixtureRepository ? [args.submoduleRepository, args.submoduleFixtureRepository] : null;
         let submoduleFixtures: "present" | "missing" | "not_named" = "not_named";
         if (named) {
-          const app = liveGithub({ appId: Number(need("ZEROS_GITHUB_ALPHA_APP_ID")), privateKey: Buffer.from(need("ZEROS_GITHUB_ALPHA_APP_PRIVATE_KEY_B64"), "base64").toString("utf8"), owner: "Withso" });
-          submoduleFixtures = (await Promise.all(named.map(repository => app.repositoryExists(repository).catch(() => false)))).every(Boolean) ? "present" : "missing";
+          const github = fixtureGithub();
+          submoduleFixtures = (await Promise.all(named.map(repository => github.repositoryExists(repository).catch(() => false)))).every(Boolean) ? "present" : "missing";
         }
         log(`submodule fixtures: ${submoduleFixtures}`);
-        const readiness = { token: !!token, proActor: actor.state, submoduleFixtures };
+        const readiness = { token: !!token, ...(tokenState && tokenState !== "absent" ? { tokenRefusal: tokenState } : {}), proActor: actor.state, submoduleFixtures };
         for (const stage of [...new Set<StageName>(["setup", ...args.stages])]) {
           const refused = refusal(stage, selected, args.switches, args.owner, readiness);
           log(`stage ${stage}: ${refused ? `refused ${refused}` : "would run"}`);
@@ -225,20 +246,19 @@ async function main(argv: string[]): Promise<number> {
           ...(profile.boat.billingOrg ? { billingOrg: profile.boat.billingOrg } : {}) }),
         storage: liveStorage({ bucket: need("ZEROS_R2_ALPHA_BUCKET"), endpoint: need("ZEROS_R2_ALPHA_ENDPOINT"), accessKeyId: need("ZEROS_R2_ALPHA_ACCESS_KEY_ID"),
           secretAccessKey: need("ZEROS_R2_ALPHA_SECRET_ACCESS_KEY") }, () => run.created.workspaces),
-        github: liveGithub({ appId: Number(need("ZEROS_GITHUB_ALPHA_APP_ID")), privateKey: Buffer.from(need("ZEROS_GITHUB_ALPHA_APP_PRIVATE_KEY_B64"), "base64").toString("utf8"),
-          owner: "Withso" }),
+        github: fixtureGithub(),
         database: db, clock: liveClock,
         ...(other ? { other: other.api } : {}),
         ...(held && owner === "personal" && actor.id ? { pro: livePro(db, { subjectUserId: held.userId, expectedEmail: held.email, actorUserId: actor.id }) } : {}),
         ...(held && token ? { githubSignIn: liveGithubSignIn(held.api, token) } : {}),
       };
       const ctx = stageContext(ports, run, () => saveState(run), { one, two, ...(args.submoduleRepository ? { submodules: args.submoduleRepository } : {}),
-        ...(args.privateSubmoduleRepository ? { privateSubmodule: args.privateSubmoduleRepository } : {}) }, TIMING, DEFAULT_RUN_CAP);
+        ...(args.submoduleFixtureRepository ? { submoduleFixture: args.submoduleFixtureRepository } : {}) }, TIMING, DEFAULT_RUN_CAP);
       const before = held && args.account === "owner" ? await ownerFingerprint(held.api, organizationId, profile.workos.apiKey, held.subject) : undefined;
       const startedAt = Date.now();
       let passed: boolean;
       if (args.cleanup) {
-        const { inventory, failures } = await cleanup(ctx, { keepFixtures: args.keepFixtures, accountless: !held, log });
+        const { inventory, failures } = await cleanup(ctx, { accountless: !held, log });
         const { lines, clean } = inventoryLines(inventory);
         for (const line of lines) log(line);
         if (failures) log(`cleanup failures ${failures}`);

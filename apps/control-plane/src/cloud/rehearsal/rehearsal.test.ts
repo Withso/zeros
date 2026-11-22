@@ -14,26 +14,27 @@ import { cleanup, cleanupNeedsAccount, inventoryLines, NO_ACCOUNT, readInventory
 import { parseArguments } from "./rehearsal-cli.js";
 import { FIXTURE_TWO } from "./stage-provision.js";
 import { loadState, newState, saveState } from "./state.js";
-import { databaseErrorCode, liveDatabase, type DatabaseClient } from "./live.js";
+import { checkGithubToken, databaseErrorCode, liveDatabase, tokenRefusal, type DatabaseClient } from "./live.js";
 import { platformOwners } from "./plan.js";
 
 const R1 = "Withso/zeros-dev-fixture";
 const TIMING = { pollMs: 30_000, stateMs: 120_000, copyMs: 120_000, turnMs: 120_000, scanMs: 300_000, archiveScanMs: 3_900_000, idleStopMs: 2_100_000 };
 
-const R3 = "Withso/zeros-dev-fixture-submodules", PRIVATE_SUB = "Withso/zeros-dev-fixture-private-sub";
+// Every fixture is public; vendor/private's repository is a public Withso fixture despite its name.
+const R3 = "Withso/zeros-dev-fixture-submodules", SUBMODULE_FIXTURE = "Withso/zeros-dev-fixture-private-sub";
 function setup(options: { provisioned?: boolean; owner?: "personal" | "organization"; submodules?: boolean } = {}) {
-  const alpha = new FakeAlpha([R1, ...options.provisioned === false ? [] : [FIXTURE_TWO], ...options.submodules === false ? [] : [R3, PRIVATE_SUB]]);
+  const alpha = new FakeAlpha([R1, ...options.provisioned === false ? [] : [FIXTURE_TWO], ...options.submodules === false ? [] : [R3, SUBMODULE_FIXTURE]]);
   const state = newState(randomUUID(), alpha.organizationId, new Date(alpha.now), options.owner ?? "organization");
   // On the Personal route the test user starts with no GitHub sign-in; setup connects one.
   if (options.owner === "personal") alpha.githubIdentity = false;
   const lines: string[] = [];
   const saved: RehearsalState[] = [];
   const ctx = stageContext(alpha.ports(), state, async () => { saved.push(structuredClone(state)); },
-    { one: R1, two: FIXTURE_TWO, submodules: R3, privateSubmodule: PRIVATE_SUB }, TIMING, 30);
+    { one: R1, two: FIXTURE_TWO, submodules: R3, submoduleFixture: SUBMODULE_FIXTURE }, TIMING, 30);
   const options_ = { switches: new Set(["projects", "personal", "retention"] as const), maxActive: 10, runCap: 30, log: (line: string) => lines.push(line) };
   return { alpha, state, ctx, lines, saved, options: options_ };
 }
-const EMPTY = { workspaces: 0, projects: 0, branches: 0, pulls: 0, machines: 0, objects: 0, environments: 0, githubSignIns: 0, pro: 0, databaseRows: 0, repositories: 0 };
+const EMPTY = { workspaces: 0, projects: 0, branches: 0, pulls: 0, machines: 0, objects: 0, environments: 0, githubSignIns: 0, pro: 0, databaseRows: 0 };
 
 describe("rehearsal guards", () => {
   it("refuses every repository but the fixtures, by name", () => {
@@ -111,10 +112,10 @@ describe("shiftClock refusals", () => {
 
 describe("rehearsal stages against a fake Alpha", () => {
   it("runs provision, projects and retention in order, then cleanup leaves an empty inventory", async () => {
-    const { alpha, state, ctx, lines, options } = setup({ provisioned: false });
+    const { alpha, state, ctx, lines, options } = setup();
     expect(await runStages(ctx, ["provision", "projects", "retention"], options)).toBe(true);
     expect(lines.filter(line => line.startsWith("stage "))).toEqual(["stage provision: ok", "stage projects: ok", "stage retention: ok"]);
-    expect(state.created.repositories).toEqual([FIXTURE_TWO]);
+    expect(state.stages.provision?.counts).toEqual({ present: 4 });
     expect(state.stages.projects?.counts).toEqual({ workspaces: 2, pulls: 2, turns: 3, copiesGone: 2, environments: 2 });
     expect(state.stages.projects?.notes).toEqual(["environment:seeded"]);
     expect(state.stages.retention?.notes).toEqual(["environment_case:seeded_edited"]);
@@ -124,10 +125,19 @@ describe("rehearsal stages against a fake Alpha", () => {
     // Four shifts of both workspaces, then the removal's one of W alone.
     expect(alpha.shifts.map(shift => shift.ids.length)).toEqual([2, 2, 2, 2, 1]);
     expect(state.machineStarts).toBe(11);
-    const { inventory } = await cleanup(ctx, { keepFixtures: false, log: line => lines.push(line) });
+    const { inventory } = await cleanup(ctx, { log: line => lines.push(line) });
     expect(inventory).toEqual(EMPTY);
-    expect(alpha.repositories.has(FIXTURE_TWO.toLowerCase())).toBe(false);
+    // Fixtures are never created or deleted.
+    expect([...alpha.repositories.keys()].sort()).toEqual([R1, FIXTURE_TWO, R3, SUBMODULE_FIXTURE].map(name => name.toLowerCase()).sort());
     for (const line of lines) expect(safeLine(line)).toBe(line);
+  });
+
+  it("provision is check-only: a missing fixture fails it and nothing is written", async () => {
+    const { alpha, ctx, options } = setup({ provisioned: false });
+    expect(await runStages(ctx, ["provision"], options)).toBe(false);
+    expect(ctx.state.stages.provision).toMatchObject({ step: "repository_missing", code: "create_it_by_hand" });
+    expect(alpha.writes).toEqual([]);
+    expect(alpha.repositories.has(FIXTURE_TWO.toLowerCase())).toBe(false);
   });
 
   it("skips the backup removal when S4 is not deployed, and cleanup removes the backup it leaves", async () => {
@@ -136,7 +146,7 @@ describe("rehearsal stages against a fake Alpha", () => {
     expect(await runStages(ctx, ["retention"], options)).toBe(true);
     expect(ctx.state.stages.retention?.counts?.removal).toBe(0);
     expect(alpha.objects.size).toBe(1);
-    expect((await cleanup(ctx, { keepFixtures: true, log: () => undefined })).inventory).toEqual(EMPTY);
+    expect((await cleanup(ctx, { log: () => undefined })).inventory).toEqual(EMPTY);
     expect(alpha.objects.size).toBe(0);
   });
 
@@ -166,7 +176,7 @@ describe("rehearsal stages against a fake Alpha", () => {
     expect(await runStages(ctx, ["projects"], { switches: new Set(["projects"] as const), maxActive: 10, runCap: 3, log: line => lines.push(line) })).toBe(false);
     expect(lines.at(-1)).toMatch(/^stage projects: failed machine_cap run_cap$/);
     expect(state.machineStarts).toBe(3);
-    expect((await cleanup(ctx, { keepFixtures: true, log: () => undefined })).inventory).toEqual(EMPTY);
+    expect((await cleanup(ctx, { log: () => undefined })).inventory).toEqual(EMPTY);
   });
 
   for (const [stage, owner, prelude] of [["projects", "organization", []], ["retention", "organization", []], ["setup", "personal", []],
@@ -189,7 +199,7 @@ describe("rehearsal stages against a fake Alpha", () => {
         failed++;
         const failure = lines.filter(line => line.startsWith("stage ")).at(-1);
         expect(failure, `call ${at}${after ? " after" : ""}`).toMatch(/^stage \w+: failed \S+ \S+$/);
-        const { inventory } = await cleanup(ctx, { keepFixtures: true, log: () => undefined });
+        const { inventory } = await cleanup(ctx, { log: () => undefined });
         expect(inventory, `call ${at}${after ? " after" : ""}: ${failure}`).toEqual(EMPTY);
       }
       // Nearly every injected fault fails the stage (a read the stage tolerates, such as a missing file, may not).
@@ -215,7 +225,7 @@ describe("rehearsal environments and the worker-off record", () => {
     expect(state.stages.retention?.notes).toEqual(["environment_case:hand_made_ignored", "environment_skipped:environment_exists"]);
     expect(alpha.environments.get(alpha.repositoryId(R1))).toEqual({ revision: 3, files: new Map([[".env", "theirs"]]) });
     expect(state.created.environments).toEqual([]);
-    expect((await cleanup(ctx, { keepFixtures: true, log: () => undefined })).inventory).toEqual(EMPTY);
+    expect((await cleanup(ctx, { log: () => undefined })).inventory).toEqual(EMPTY);
   });
 
   it("skips seeding when a repository does not ignore .env", async () => {
@@ -238,7 +248,7 @@ describe("rehearsal environments and the worker-off record", () => {
     expect(await runStages(ctx, ["projects"], options)).toBe(false);
     expect([...alpha.environments.values()].some(environment => environment.files.size > 0)).toBe(true);
     ctx.ports.api = api;
-    expect((await cleanup(ctx, { keepFixtures: true, log: () => undefined })).inventory).toEqual(EMPTY);
+    expect((await cleanup(ctx, { log: () => undefined })).inventory).toEqual(EMPTY);
     expect([...alpha.environments.values()].every(environment => environment.files.size === 0)).toBe(true);
   });
 
@@ -339,7 +349,7 @@ describe("rehearsal on the Personal route", () => {
   const all = { switches: new Set(["projects", "personal", "retention"] as const) };
 
   it("runs provision, setup, projects, personal and retention in the test user's Personal organization, then cleanup restores everything", async () => {
-    const { alpha, state, ctx, lines, options } = setup({ provisioned: false, owner: "personal" });
+    const { alpha, state, ctx, lines, options } = setup({ owner: "personal" });
     expect(await runStages(ctx, ["provision", "setup", "projects", "personal", "retention"], { ...options, ...all })).toBe(true);
     expect(lines.filter(line => line.startsWith("stage "))).toEqual(["stage provision: ok", "stage setup: ok", "stage projects: ok", "stage personal: ok", "stage retention: ok"]);
     expect(ctx.projectLevel).toBe("personal");
@@ -350,7 +360,7 @@ describe("rehearsal on the Personal route", () => {
     expect(alpha.proChanges.map(grant => grant.enabled)).toEqual([true, false, true]);
     expect(alpha.writes.filter(write => write.startsWith("other"))).toEqual([]);
     expect(state.created.githubSignIns).toEqual([alpha.organizationId]);
-    const { inventory } = await cleanup(ctx, { keepFixtures: false, log: line => lines.push(line) });
+    const { inventory } = await cleanup(ctx, { log: line => lines.push(line) });
     expect(inventory).toEqual(EMPTY);
     // Pro is back to "none" (the grant ends; there was none before), and the token sign-in is gone.
     expect(alpha.pro()).toBe(false);
@@ -361,9 +371,10 @@ describe("rehearsal on the Personal route", () => {
   it("rehearses submodules: the copy fetched both, the forked workspace holds both at their commits, the token sign-in named", async () => {
     const { ctx, state, options } = setup({ owner: "personal" });
     expect(await runStages(ctx, ["setup", "submodules"], { ...options, ...all })).toBe(true);
-    expect(state.stages.submodules?.counts).toEqual({ copyFetched: 2, workspaceInitialized: 2 });
-    expect(state.stages.submodules?.notes).toEqual(["submodules:token_sign_in_named", "d3:not_rehearsed_single_member"]);
-    expect((await cleanup(ctx, { keepFixtures: true, log: () => undefined })).inventory).toEqual(EMPTY);
+    expect(state.stages.submodules?.counts).toEqual({ copyFetched: 2, copyPublic: 2, workspaceFetched: 2, workspaceInitialized: 2 });
+    // There is no private submodule fixture: reported, not failed.
+    expect(state.stages.submodules?.notes).toEqual(["private_submodule:not_rehearsed_no_fixture"]);
+    expect((await cleanup(ctx, { log: () => undefined })).inventory).toEqual(EMPTY);
   });
 
   it("refuses submodules until its fixtures exist, and off the Personal route", async () => {
@@ -381,7 +392,7 @@ describe("rehearsal on the Personal route", () => {
     const before = { enabled: true, validFrom: new Date(alpha.now - 1e9).toISOString(), validUntil: new Date(alpha.now + 3_600_000).toISOString() };
     alpha.proGrant = { ...before };
     expect(await runStages(ctx, ["setup", "personal"], { ...options, ...all })).toBe(true);
-    expect((await cleanup(ctx, { keepFixtures: true, log: () => undefined })).inventory).toEqual(EMPTY);
+    expect((await cleanup(ctx, { log: () => undefined })).inventory).toEqual(EMPTY);
     expect(alpha.proGrant).toEqual(before);
   });
 
@@ -395,7 +406,7 @@ describe("rehearsal on the Personal route", () => {
     expect(await runStages(ctx, ["personal"], { ...options, ...all })).toBe(false);
     expect(alpha.pro()).toBe(false);
     ctx.ports.pro = port;
-    expect((await cleanup(ctx, { keepFixtures: true, log: () => undefined })).inventory).toEqual(EMPTY);
+    expect((await cleanup(ctx, { log: () => undefined })).inventory).toEqual(EMPTY);
     expect(alpha.pro()).toBe(false);
   });
 
@@ -426,21 +437,20 @@ describe("rehearsal on the Personal route", () => {
 
 describe("rehearsal without an account", () => {
   it("runs provision with nobody signed in and refuses the stages that need an account, naming why", async () => {
-    const { alpha, state, ctx, lines, options } = setup({ provisioned: false });
+    const { alpha, state, ctx, lines, options } = setup();
     ctx.ports.api = NO_ACCOUNT;
     expect(await runStages(ctx, ["provision", "projects"], { ...options, accountUnavailable: "sign_in:http_429_rate_limit_exceeded" })).toBe(false);
     expect(lines.filter(line => line.startsWith("stage "))).toEqual(["stage provision: ok",
       "stage projects: failed account_unavailable sign_in:http_429_rate_limit_exceeded"]);
     expect(alpha.writes).toEqual([]);
     expect(cleanupNeedsAccount(state)).toBe(false);
-    expect((await cleanup(ctx, { keepFixtures: false, accountless: true, log: () => undefined })).inventory).toEqual(EMPTY);
-    expect(alpha.repositories.has(FIXTURE_TWO.toLowerCase())).toBe(false);
+    expect((await cleanup(ctx, { accountless: true, log: () => undefined })).inventory).toEqual(EMPTY);
   });
 
   it("refuses an accountless cleanup of a run that created anything only the API removes", async () => {
     const { ctx, state } = setup();
     state.machineStarts = 1;
-    await expect(cleanup(ctx, { keepFixtures: true, accountless: true, log: () => undefined })).rejects.toMatchObject({ code: "account_required" });
+    await expect(cleanup(ctx, { accountless: true, log: () => undefined })).rejects.toMatchObject({ code: "account_required" });
   });
 });
 
@@ -496,6 +506,62 @@ describe("rehearsal sign-in", () => {
     const results = await signInAll([account, { ...account, label: "4" }, { ...account, label: "5" }], spaced);
     expect(results.map(result => result.ok)).toEqual([false, true, true]);
     expect(spaced.waits).toEqual([3_000, 3_000]);
+  });
+});
+
+describe("what the rehearsal publishes on public fixtures", () => {
+  // Every fixture is public: a branch, commit, committed file, pull request title or body carries fixed test text only.
+  const FIXED = [/^zr-[0-9a-f]{8}-[a-z0-9-]{1,40}(\.txt)?\n?$/, /^Alpha rehearsal fixture; closed unmerged\.$/];
+  const FORBIDDEN = [/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i, /@/, /:\/\//, /\.(build|test|com|dev)\b/i, /\d{4}-\d{2}-\d{2}/,
+    /zeros user|probe|alpha\.test/i];
+  for (const owner of ["organization", "personal"] as const) it(`on the ${owner} route: branches, commits, files and pull requests carry fixed test text only`, async () => {
+    const { alpha, ctx, options } = setup({ owner });
+    const stages: StageName[] = owner === "personal" ? ["setup", "projects", "personal", "retention", "submodules"] : ["projects", "retention"];
+    expect(await runStages(ctx, stages, { ...options, switches: new Set(["projects", "personal", "retention"] as const) })).toBe(true);
+    expect(alpha.published.length).toBeGreaterThan(5);
+    for (const text of alpha.published) {
+      expect(FIXED.some(pattern => pattern.test(text)), text).toBe(true);
+      for (const pattern of FORBIDDEN) expect(pattern.test(text), `${pattern} in ${text}`).toBe(false);
+    }
+  });
+});
+
+describe("rehearsal GitHub token check", () => {
+  const fixtures = [R1, FIXTURE_TWO, R3, SUBMODULE_FIXTURE];
+  /** GitHub as a fine-grained token sees it: the repositories it reaches, and 422 (validation) for writes it may make. */
+  const github = (token: { reaches: string[]; writable: string[]; pulls?: string[] }) => vi.fn<typeof fetch>(async (input, init) => {
+    const url = new URL(String(input)), method = init?.method ?? "GET";
+    if (url.pathname === "/user/repos") return Response.json(url.searchParams.get("page") === "1" ? token.reaches.map(full_name => ({ full_name })) : []);
+    const name = url.pathname.split("/").slice(2, 4).join("/");
+    if (!token.reaches.includes(name)) return Response.json({ message: "Not Found" }, { status: 404 });
+    if (method === "GET") return Response.json({ full_name: name });
+    const allowed = url.pathname.endsWith("/pulls") ? (token.pulls ?? token.writable) : token.writable;
+    return Response.json({ message: "x" }, { status: allowed.includes(name) ? 422 : 403 });
+  });
+
+  it("accepts a fine-grained token that reaches the fixtures only, with contents and pull requests write on each; changes nothing", async () => {
+    const fetchImpl = github({ reaches: fixtures, writable: fixtures });
+    const checked = await checkGithubToken("github_pat_synthetic", fixtures, fetchImpl);
+    expect(checked).toMatchObject({ kind: "fine_grained", reachable: fixtures });
+    expect(checked.fixtures.every(row => row.contentsWrite && row.pullRequestsWrite)).toBe(true);
+    expect(tokenRefusal(checked, fixtures)).toBeNull();
+    // Its only writes are the two probes per fixture, both refused by GitHub's validation (the all-zero commit, an absent branch).
+    const writes = fetchImpl.mock.calls.filter(([, init]) => (init?.method ?? "GET") !== "GET");
+    expect(writes).toHaveLength(fixtures.length * 2);
+    for (const [, init] of writes) expect(String(init?.body)).toMatch(/0{40}|zr-token-check-absent/);
+  });
+
+  it("refuses a classic token, one that reaches anything else, and one without write on a fixture", async () => {
+    const classic = await checkGithubToken("ghp_synthetic", fixtures, github({ reaches: fixtures, writable: fixtures }));
+    expect(tokenRefusal(classic, fixtures)).toBe("kind_classic");
+    const wide = await checkGithubToken("github_pat_synthetic", fixtures, github({ reaches: [...fixtures, "Withso/zeros"], writable: fixtures }));
+    expect(tokenRefusal(wide, fixtures)).toBe("reaches_outside_fixtures");
+    const readOnly = await checkGithubToken("github_pat_synthetic", fixtures, github({ reaches: fixtures, writable: fixtures.slice(1) }));
+    expect(tokenRefusal(readOnly, fixtures)).toBe("fixture_contents_read_only");
+    const noPulls = await checkGithubToken("github_pat_synthetic", fixtures, github({ reaches: fixtures, writable: fixtures, pulls: [] }));
+    expect(tokenRefusal(noPulls, fixtures)).toBe("fixture_pull_requests_read_only");
+    const missing = await checkGithubToken("github_pat_synthetic", fixtures, github({ reaches: fixtures.slice(0, 3), writable: fixtures }));
+    expect(tokenRefusal(missing, fixtures)).toBe("fixture_unreachable");
   });
 });
 

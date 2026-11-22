@@ -40,6 +40,10 @@ export class FakeAlpha {
   transactions = 0;
   readonly writes: string[] = [];
   readonly shifts: { ids: string[]; days: number }[] = [];
+  /** Every string the run made visible on GitHub (all fixtures are public): pushed branch names, commit messages and
+   * committed file contents, and pull request titles and bodies. */
+  readonly published: string[] = [];
+  private readonly unpushed = new Map<string, string[]>();
   /** Retention S4's table: present unless a test removes it. */
   s4 = true;
   now = 1_700_000_000_000;
@@ -242,10 +246,12 @@ export class FakeAlpha {
       if (!repo.branches.has(row.branch)) return this.reply(409, { error: { code: "github_checkout_unavailable" } });
       const number = this.nextPull++;
       repo.pulls.set(number, { head: row.branch, open: true });
+      this.published.push(String(params.title), String(params.body));
       return this.reply(200, { authority, result: { number, headSha: "a".repeat(40), baseSha: "b".repeat(40), state: "draft", headBranch: row.branch } });
     }
     if (body.op === "gh.prUpdate") {
       const pull = repo.pulls.get(Number(params.prNumber))!; pull.open = params.state !== "closed";
+      for (const key of ["title", "body"] as const) if (typeof params[key] === "string") this.published.push(params[key] as string);
       return this.reply(200, { authority, result: { number: params.prNumber, headSha: "a".repeat(40), baseSha: "b".repeat(40), state: pull.open ? "draft" : "closed", headBranch: pull.head } });
     }
     return this.reply(400);
@@ -262,8 +268,19 @@ export class FakeAlpha {
           case "workspace.list": return { workspaces: [{ id: row.id, path: "/home/user/p" }] };
           case "file.write": row.files.set(String(params.path), String(params.content)); return { kind: "success" };
           case "file.read": return row.files.has(String(params.path)) ? { kind: "text", content: row.files.get(String(params.path)) } : (() => { throw new RehearsalFailure("file.read", "missing"); })();
-          case "git.commit": { const repo = repositoryOf(params); row.commits.set(repo, [...row.commits.get(repo) ?? [], String(params.message)]); return {}; }
-          case "git.push": { const repo = repositoryOf(params); this.repositories.get(repo.toLowerCase())!.branches.add(row.branch); row.commits.set(repo, []); return {}; }
+          case "git.commit": {
+            const repo = repositoryOf(params); row.commits.set(repo, [...row.commits.get(repo) ?? [], String(params.message)]);
+            const key = `${row.id}:${repo}`;
+            this.unpushed.set(key, [...this.unpushed.get(key) ?? [], String(params.message),
+              ...((params.files ?? []) as string[]).flatMap(file => [file.split("/").at(-1)!, row.files.get(file) ?? ""])]);
+            return {};
+          }
+          case "git.push": {
+            const repo = repositoryOf(params), key = `${row.id}:${repo}`;
+            this.repositories.get(repo.toLowerCase())!.branches.add(row.branch); row.commits.set(repo, []);
+            this.published.push(row.branch, ...this.unpushed.get(key) ?? []); this.unpushed.delete(key);
+            return {};
+          }
           case "chats.upsert": return {};
           case "messages.window": return { messages: [{ msgId: "1", kind: "text", payload: JSON.stringify({ role: "agent", text: "ok." }) }] };
           case "turns.list": return { turns: this.turns.map(turn => ({ ...turn })) };
@@ -320,7 +337,7 @@ export class FakeAlpha {
       row.files.set(file, `${ignored[2] === ">>" ? row.files.get(file) ?? "" : ""}${ignored[1]}\n`);
     }
     if (data.includes("git log")) output = [...row.commits.values()].flat().reverse().join("\r\n");
-    if (data.includes("git submodule status")) output = [` ${"a".repeat(40)} vendor/private (heads/main)`, ` ${"b".repeat(40)} vendor/public (v1.0.0)`].join("\r\n");
+    if (data.includes("git submodule status")) output = [` ${"7fd1a60b01f91b314f59955a4e4d4e80d8edf11d"} vendor/hello (heads/master)`, ` ${"b".repeat(40)} vendor/private (heads/main)`].join("\r\n");
     return `${begin}\r\n${output}\r\n${end} 0\r\n`;
   }
 
@@ -337,8 +354,6 @@ export class FakeAlpha {
       },
       github: {
         repositoryExists: name => this.counted(() => this.repositories.has(name.toLowerCase())),
-        createRepository: name => this.counted(() => { this.repositories.set(name.toLowerCase(), { branches: new Set(["main"]), pulls: new Map() }); }),
-        deleteRepository: name => this.counted(() => { this.repositories.delete(name.toLowerCase()); }),
         branches: (name, prefix) => this.counted(() => [...this.repositories.get(name.toLowerCase())?.branches ?? []].filter(branch => branch.startsWith(prefix))),
         deleteBranch: (name, branch) => this.counted(() => { this.repositories.get(name.toLowerCase())?.branches.delete(branch); }),
         openPulls: (name, prefix) => this.counted(() => [...this.repositories.get(name.toLowerCase())?.pulls ?? []]
@@ -369,11 +384,11 @@ export class FakeAlpha {
     if (text.startsWith("SELECT result FROM cloud_v2_ready_copies")) {
       const project = this.projects.get(String(values[0]));
       return rows(project ? [{ result: project.repositories.map(repository => ({ repository,
-        ...(project.submodules ? { submodules: [{ path: "vendor/public", fetched: true }, { path: "vendor/private", fetched: true }] } : {}) })) }] : []);
+        ...(project.submodules ? { submodules: [{ path: "vendor/hello", fetched: true, public: true }, { path: "vendor/private", fetched: true, public: true }] } : {}) })) }] : []);
     }
     if (text.includes("FROM cloud_v2_workspace_submodules")) {
       const project = this.projects.get(String(this.workspaces.get(String(values[0]))?.projectId));
-      return rows(project?.submodules ? [{ path: ".gitmodules", status: "skipped" }, { path: "vendor/private", status: "readable" }, { path: "vendor/public", status: "fetch" }] : []);
+      return rows(project?.submodules ? [{ path: "vendor/hello", status: "fetch", public: true }, { path: "vendor/private", status: "fetch", public: true }] : []);
     }
     if (text.startsWith("SELECT state FROM cloud_v2_workspaces")) return rows([{ state: this.workspaces.get(String(values[0]))?.state ?? null }]);
     if (text.includes("FROM cloud_v2_ready_copies")) return rows([...this.projects.values()].filter(project => project.id === values[0]).map(project => ({ machine_id: project.machine })));
