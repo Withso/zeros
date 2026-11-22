@@ -201,7 +201,8 @@ async function runCheck() {
     // Electron's own -r loads the hook into main (Playwright drops NODE_OPTIONS).
     const args = ["-r", path.join(repo, "scripts", "native-unified", "main-hook.cjs"), path.join(root, "stage"), `--log-net-log=${path.join(runDir, "netlog.json")}`];
     if (process.platform === "darwin") args.push("--use-mock-keychain");
-    if (process.platform === "linux") args.push("--ozone-platform=headless", "--disable-gpu", "--no-sandbox", "--password-store=basic");
+    // Linux containers give /dev/shm tens of MB, which a Chromium renderer outgrows: it uses temp files instead.
+    if (process.platform === "linux") args.push("--ozone-platform=headless", "--disable-gpu", "--no-sandbox", "--password-store=basic", "--disable-dev-shm-usage");
     app = await launchNativeElectron({ args, cwd: dirs.fixtures, env, timeout: 90_000 });
     electronPid = app.process().pid;
     page = await app.firstWindow({ timeout: 60_000 });
@@ -209,6 +210,9 @@ async function runCheck() {
     page.on("request", request => { (report.rendererRequests ??= []).push(request.url()); });
     page.on("console", message => { if (message.type() === "error") (report.console ??= []).push(message.text().slice(0, 300)); });
     page.on("pageerror", error => { (report.pageErrors ??= []).push(String(error).slice(0, 300)); });
+    // A crashed renderer fails the check it happened in; the later window checks say they did not run.
+    let current = "start-up", crashed = null;
+    page.on("crash", () => { crashed ??= current; });
     page.on("response", response => { if (response.status() >= 400) (report.failedResponses ??= []).push(`${response.status()} ${response.url()}`); });
     context.page = page;
     await page.waitForFunction(() => document.querySelector("#root")?.childElementCount > 0, null, { timeout: 60_000 });
@@ -220,12 +224,14 @@ async function runCheck() {
     for (const check of CHECKS) {
       if (!check.run) continue;
       if (only && !only.some(prefix => check.id.startsWith(prefix))) { row(check.id, "n/a", "left out by ZEROS_NATIVE_CHECK_ONLY"); continue; }
+      if (crashed && !check.windowless) { row(check.id, "fail", `not run: the renderer crashed during ${crashed}`); continue; }
+      current = check.id;
       const started = Date.now();
       try {
         const outcome = await Promise.race([check.run(context), delay(check.budgetMs ?? 45_000).then(() => { throw new Error(`no result within ${(check.budgetMs ?? 45_000) / 1000} s`); })]);
         if (outcome) row(check.id, outcome.result, outcome.fact);
       } catch (error) {
-        row(check.id, "fail", `${error instanceof Error ? error.message.split("\n")[0] : String(error)}`);
+        row(check.id, "fail", crashed === check.id ? "the renderer crashed (see report.json console)" : `${error instanceof Error ? error.message.split("\n")[0] : String(error)}`);
         await page.screenshot({ path: path.join(dirs.shots, `${check.id}-failure.png`) }).catch(() => undefined);
         // Development aid: the visible controls' accessible names at the failure.
         if (process.env.ZEROS_NATIVE_CHECK_DUMP) (report.dom ??= {})[check.id] = await page.evaluate(() => [...document.querySelectorAll("button, [role=tab], [role=tablist], [role=menuitem], a, [role=switch]")]

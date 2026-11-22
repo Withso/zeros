@@ -44,15 +44,20 @@ async function reload(context) {
   await page.getByRole("button", { name: "Switch organization", exact: true }).first().waitFor({ timeout: 60_000 });
   await page.waitForTimeout(1000);
 }
+const settingsRailLocator = (page) => page.locator("[aria-label=\"Settings sections\"]").first();
 async function openSettings(page) {
-  if (await page.locator("[aria-label=\"Settings sections\"]").first().isVisible().catch(() => false)) return;
-  await page.getByRole("button", { name: /settings/i }).last().click();
-  await page.locator("[aria-label=\"Settings sections\"]").first().waitFor();
+  if (await settingsRailLocator(page).isVisible().catch(() => false)) return;
+  // The account row's gear; "<project> settings" buttons in the sidebar open a repository's page instead.
+  await page.getByRole("button", { name: "Open settings", exact: true }).first().click();
+  await settingsRailLocator(page).waitFor();
 }
 async function closeSettings(page) {
-  const back = page.getByRole("button", { name: "Back", exact: true });
-  if (await back.isVisible().catch(() => false)) await back.click();
-  await page.waitForTimeout(300);
+  for (let attempt = 0; attempt < 3 && await settingsRailLocator(page).isVisible().catch(() => false); attempt++) {
+    await page.keyboard.press("Escape");
+    await page.getByRole("button", { name: "Back", exact: true }).first().click({ timeout: 3_000 }).catch(() => undefined);
+    await settingsRailLocator(page).waitFor({ state: "hidden", timeout: 3_000 }).catch(() => undefined);
+  }
+  if (await settingsRailLocator(page).isVisible().catch(() => false)) throw new Error("Settings did not close");
 }
 /** The rail as the person sees it: each group's heading and its entries. */
 async function settingsRail(page) {
@@ -344,11 +349,13 @@ const preloadCheck = {
 
 // ── N9-N11 (C2.3) ───────────────────────────────────────────────────────────────
 async function menuOf(page, title) {
-  await page.getByText(title, { exact: true }).first().click({ button: "right" });
+  // The sidebar row's own button carries the workspace's context menu.
+  await page.getByRole("button", { name: `Open workspace ${title}`, exact: true }).first().click({ button: "right" });
   await page.getByRole("menu").first().waitFor();
-  const items = (await page.getByRole("menuitem").allInnerTexts()).map(text => text.trim());
-  const keepChecked = await page.getByRole("menuitem", { name: /^Keep/ }).locator("[aria-label='On']").count().catch(() => 0);
-  return { items, keepChecked: keepChecked > 0 };
+  const items = (await page.locator("[role=menu] [role=menuitem]").allInnerTexts()).map(text => text.trim());
+  // Keep shows a check labelled "On" while it is kept.
+  const keepChecked = (await page.getByRole("menuitem", { name: /^Keep/ }).locator("[aria-label='On']").count()) > 0;
+  return { items, keepChecked };
 }
 const keepCheck = {
   id: "N9 keep in the native menu",
@@ -417,6 +424,8 @@ const ruleCheck = {
 // ── N13 ────────────────────────────────────────────────────────────────────────
 const isolation = {
   id: "N13 isolation",
+  // Reads main and the processes, not the window: it still runs after a renderer crash.
+  windowless: true,
   async run({ app, root, gitconfig, env }) {
     const facts = await app.evaluate(({ app }) => ({ userData: app.getPath("userData"), home: process.env.HOME,
       mockKeychain: app.commandLine.hasSwitch("use-mock-keychain"),
