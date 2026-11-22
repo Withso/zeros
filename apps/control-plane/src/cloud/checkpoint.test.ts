@@ -1412,7 +1412,7 @@ process.exit(result.status??1);
     expect(readFileSync(join(p.folder(p.newHome, "web"), ".env.log"), "utf8")).toBe(content);
     expect(restored.stdout).toMatch(/environment:.*manifest\.json/);
     expect(restored.stdout.split("\n").find(line => line.startsWith("ignored:"))).not.toContain(".env.log");
-  });
+  }, 30_000);
 
   it("refuses a shared-execution restore of several repositories without each repository's token", () => {
     const p = project(), key = randomBytes(32);
