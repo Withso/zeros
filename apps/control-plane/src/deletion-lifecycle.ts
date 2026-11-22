@@ -273,7 +273,7 @@ async function assertAccountCloudPurgeReady(tx: Tx, userId: string): Promise<voi
   if(pending.rowCount) throw new Error("account_cloud_deletion_not_verified");
 }
 
-async function assertOrganizationCloudPurgeReady(tx: Tx, organizationId: string): Promise<void> {
+export async function assertOrganizationCloudPurgeReady(tx: Tx, organizationId: string): Promise<void> {
   const pending=await tx.query("SELECT 1 FROM cloud_v2_workspaces WHERE org_id=$1 AND state<>'deleted' LIMIT 1 FOR UPDATE",[organizationId]);
   if(pending.rowCount) throw new Error("organization_cloud_deletion_not_verified");
   const computers=await tx.query(`SELECT 1 FROM cloud_v2_computer_builds WHERE org_id=$1 AND

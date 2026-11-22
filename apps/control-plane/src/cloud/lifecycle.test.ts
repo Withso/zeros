@@ -119,6 +119,14 @@ function setup(claimed: (CloudV2LifecycleWorkspace & { attempts: number })[], op
     archiveForSystem: vi.fn(async () => false),
     startRetentionClocks: vi.fn(async () => 0),
     archiveInactive: vi.fn(async () => ({ archived: [], notices: 0 })),
+    // Retention S4: nothing to remove, sweep, alert or account for here.
+    claimBackupRemovals: vi.fn(async () => []),
+    pendingBackupRemovals: vi.fn(async () => []),
+    finishBackupRemoval: vi.fn(async () => {}),
+    sweepDepartedProjects: vi.fn(async () => {}),
+    deleteDepartedProjects: vi.fn(async () => []),
+    missedWakes: vi.fn(async () => ({ ids: [], total: 0 })),
+    accountCheckpointPrefixes: vi.fn(async () => ({ prunable: [], missing: [], empty: false })),
   } as CloudV2LifecycleDeps["store"];
   const stopWorker = vi.fn(async () => true);
   const logs: { warn: string[]; error: string[] } = { warn: [], error: [] };

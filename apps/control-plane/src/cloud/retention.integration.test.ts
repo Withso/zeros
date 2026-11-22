@@ -13,6 +13,10 @@ import { FakeBoat } from "./__fixtures__/boat-fake.js";
 import { CLOUD_V2_BACKUP_DELAY_MS, CLOUD_V2_CHECKPOINT_RETRY_WINDOW_MS, CLOUD_V2_LOSS_CONFIRM_MS, CLOUD_V2_LOSS_UNCONFIRMED_ALERT, CLOUD_V2_MAINTENANCE_LEASE_SECONDS,
   CLOUD_V2_MAINTENANCE_ADOPT_STALE_MS, CLOUD_V2_MAINTENANCE_STALE_MS, CloudV2Lifecycle, type CloudV2LifecycleDeps, type CloudV2TimingRecord } from "./lifecycle.js";
 import { CLOUD_V2_BACKUP_REMOVAL_AT_SQL, CloudV2Store, setCloudV2RetentionDocuments } from "./store.js";
+import { scheduleCloudDeletion } from "./deletion.js";
+import { CloudV2ReadyCopies } from "./ready-copies.js";
+import { assertOrganizationCloudPurgeReady } from "../deletion-lifecycle.js";
+import { withSystemTx } from "../db.js";
 
 const d = process.env.TEST_DATABASE_URL ? describe : describe.skip;
 const HOME = "/home/user";
@@ -32,6 +36,8 @@ d("cloud v2 retention", () => {
   let backupFails: boolean;
   /** Retention S3: machines whose stop marker exists; machines something wrote to since; the change check timing out;
    * the environment restore failing; the bytes the server seeded, by path. */
+  /** Retention S4: prefixes listed in the bucket with no object of their own here (orphans, non-ids). */
+  let extraPrefixes: Set<string>;
   let markers: Set<string>, written: Set<string>, changeTimesOut: boolean, environmentRestoreFails: boolean, seeded: Map<string, string>;
 
   beforeAll(() => { pool = new pg.Pool({ connectionString: process.env.TEST_DATABASE_URL, max: 4 }); });
@@ -42,7 +48,7 @@ d("cloud v2 retention", () => {
     setCloudV2RetentionDocuments(true);
     await resetMigratedTestDatabase(pool);
     archives = new Map(); uploads = []; errors = []; warnings = []; timings = []; remoteBranches = new Set(); backupFails = false;
-    markers = new Set(); written = new Set(); changeTimesOut = false; environmentRestoreFails = false; seeded = new Map();
+    markers = new Set(); written = new Set(); extraPrefixes = new Set(); changeTimesOut = false; environmentRestoreFails = false; seeded = new Map();
     boat = new FakeBoat();
     boat.script = (machine, command, input) => {
       if (command.includes("zeros-backup-probe")) {
@@ -121,7 +127,16 @@ d("cloud v2 retention", () => {
       downloadUrl: async (_workspace, object) => `https://storage.example.test/download/${object}?sig=1`,
       size: async (_workspace, object) => archives.has(object) ? 100 : null,
       delete: async (_workspace, object) => { archives.delete(object); },
-      prune: async () => {},
+      // As R2: every object under the workspace's prefix but those kept.
+      prune: async (workspace, keep = []) => {
+        for (const object of [...archives.keys()]) if (object.startsWith(`cloud-v2/checkpoints/${workspace}/`) && !keep.includes(object)) archives.delete(object);
+      },
+      workspacePrefixes: async (after, limit) => {
+        const names = [...new Set([...archives.keys()].map(object => object.split("/")[2]!)), ...extraPrefixes].sort();
+        const page = names.filter(name => !after || `cloud-v2/checkpoints/${name}/` > after).slice(0, limit);
+        const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+        return { ids: page.filter(name => uuid.test(name)), unparsed: page.filter(name => !uuid.test(name)).length };
+      },
     },
     seal: () => ({ sealed: true }),
     open: () => Buffer.alloc(32, 7),
@@ -1291,6 +1306,349 @@ d("cloud v2 retention", () => {
         await lifecycle().tick();
         expect(await wakeRows()).toHaveLength(2);
       });
+    });
+  });
+
+  describe("backup removal, clean-up and alerts (S4)", () => {
+    const DAY = 24 * 60 * 60_000;
+    const columns = async (names: string) => (await pool.query(`SELECT ${names} FROM cloud_v2_workspaces WHERE id=$1`, [id])).rows[0];
+    const backup = async (object = `cloud-v2/checkpoints/${id}/${randomUUID()}.zck`) => {
+      archives.set(object, new Map([[`${path("app")}/UNPUSHED`, "only in the backup"]]));
+      await pool.query(`UPDATE cloud_v2_workspaces SET checkpoint_object=$2, checkpoint_key='{"sealed":true}', checkpoint_sha256=$3, checkpoint_bytes=100,
+        checkpoint_saved_at=clock_timestamp(), checkpoint_stop_generation=stop_generation WHERE id=$1`, [id, object, "e".repeat(64)]);
+      return object;
+    };
+    /** Archived `days` ago, retention having applied since before that. */
+    const archivedAgo = (days: number) => pool.query(`UPDATE cloud_v2_workspaces SET archived_at=clock_timestamp() - make_interval(secs => $2::double precision),
+      archive_reason='manual', retention_started_at=clock_timestamp() - make_interval(secs => $2::double precision + 3600)
+      WHERE id=$1`, [id, days * DAY / 1000]);
+    const removals = async () => (await pool.query("SELECT object, done_at IS NOT NULL AS done FROM cloud_v2_backup_removals WHERE workspace_id=$1", [id])).rows;
+
+    describe("removal at greatest(archive, retention's start) + 60 days", () => {
+      it("clears the row's backup first, then deletes its objects, and the archived document shows no removal date after", async () => {
+        await stop();
+        const object = await backup();
+        const stale = `cloud-v2/checkpoints/${id}/${randomUUID()}.zck`; archives.set(stale, new Map());
+        await archivedAgo(59);
+        await lifecycle().tick();
+        expect(archives.has(object)).toBe(true);
+        await archivedAgo(61);
+        await lifecycle().tick();
+        expect(await columns("checkpoint_object, checkpoint_key, checkpoint_sha256")).toEqual({ checkpoint_object: null, checkpoint_key: null, checkpoint_sha256: null });
+        expect(await removals()).toEqual([{ object, done: true }]);
+        // Every object of the workspace went, the earlier one included; the machine is untouched.
+        expect([...archives.keys()].filter(key => key.includes(id))).toEqual([]);
+        expect(deletes()).not.toContain(vm);
+        const document = await store.get(id, user);
+        expect(document).toMatchObject({ archiveReason: "manual" });
+        expect(document).not.toHaveProperty("backupRemovalAt");
+      });
+
+      it("never cuts off an open: a workspace starting keeps its backup", async () => {
+        await stop();
+        const object = await backup();
+        await archivedAgo(61);
+        await store.requestLifecycle(id, user, "start");
+        expect(await store.claimBackupRemovals(10)).toEqual([]);
+        expect((await columns("checkpoint_object")).checkpoint_object).toBe(object);
+      });
+
+      it("keeps an object a later stop uploaded between the claim and the prune", async () => {
+        await stop();
+        const object = await backup();
+        await archivedAgo(61);
+        expect(await store.claimBackupRemovals(10)).toMatchObject([{ workspaceId: id, object }]);
+        // Opened (which un-archives it) and stopped again meanwhile: a new backup for the new stop.
+        await pool.query("UPDATE cloud_v2_workspaces SET archived_at=NULL, archive_reason=NULL WHERE id=$1", [id]);
+        const later = await backup();
+        await lifecycle().tick();
+        expect(archives.has(object)).toBe(false);
+        expect(archives.has(later)).toBe(true);
+        expect((await columns("checkpoint_object")).checkpoint_object).toBe(later);
+      });
+
+      it("never backs up that archived stop again", async () => {
+        boat.write(vm, `${path("app")}/UNPUSHED`, "work");
+        await stop();
+        await backup();
+        await archivedAgo(61);
+        await lifecycle().tick();
+        expect((await columns("checkpoint_object")).checkpoint_object).toBeNull();
+        const forksBefore = boat.calls.filter(call => call.op === "fork").length;
+        for (let run = 0; run < 3; run++) await lifecycle().tick();
+        expect(boat.calls.filter(call => call.op === "fork").length).toBe(forksBefore);
+      });
+
+      it("after removal, opens from GitHub with the lost-work note when the stop's work was only in the backup", async () => {
+        boat.write(vm, `${path("app")}/UNPUSHED`, "work");
+        await stop();
+        await backup();
+        await archivedAgo(61);
+        await lifecycle().tick();
+        boat.machine(vm)!.expired = true;
+        await store.requestLifecycle(id, user, "start");
+        for (let step = 0; step < 4 && (await columns("boat_sandbox_id")).boat_sandbox_id === vm; step++) {
+          await pool.query("UPDATE cloud_v2_workspaces SET next_attempt_at=NULL WHERE id=$1", [id]);
+          await lifecycle().tick();
+        }
+        expect((await columns("boat_sandbox_id")).boat_sandbox_id).not.toBe(vm);
+        expect((await store.get(id, user)).lostWork).toMatchObject({ restored: "none" });
+      });
+    });
+
+    describe("a departed member's personal project", () => {
+      async function personal(owner: string) {
+        const project = randomUUID();
+        await pool.query("INSERT INTO cloud_projects (id, org_id, name, level, owner_user_id, created_by) VALUES ($1,$2,'Mine','personal',$3,$3)", [project, org, owner]);
+        await pool.query("INSERT INTO cloud_v2_ready_copy_secrets (project_id, org_id, envelope, names) VALUES ($1,$2,'{}','{TOKEN}')", [project, org]);
+        await pool.query("UPDATE cloud_v2_workspaces SET project_id=$2 WHERE id=$1", [id, project]);
+        return project;
+      }
+      const projectRow = async (project: string) => (await pool.query("SELECT owner_left_at IS NOT NULL AS left, retention_started_at IS NOT NULL AS clock FROM cloud_projects WHERE id=$1", [project])).rows[0];
+      const secrets = async (project: string) => Number((await pool.query("SELECT count(*) AS n FROM cloud_v2_ready_copy_secrets WHERE project_id=$1", [project])).rows[0].n);
+
+      it("loses its build secrets at once, waits for the member, and is deleted 60 days after retention first sees it", async () => {
+        const leaver = randomUUID();
+        await pool.query("INSERT INTO users (id, email, display_name) VALUES ($1, $2, 'L')", [leaver, `l-${leaver}@example.test`]);
+        await pool.query("INSERT INTO organization_members (org_id, user_id, role) VALUES ($1, $2, 'member')", [org, leaver]);
+        const project = await personal(leaver);
+        await pool.query("DELETE FROM organization_members WHERE org_id=$1 AND user_id=$2", [org, leaver]);
+        expect(await secrets(project)).toBe(0);
+        expect(await projectRow(project)).toEqual({ left: true, clock: false });
+        // Theirs again when re-added: the stamp goes; the secrets must be entered again.
+        await pool.query("INSERT INTO organization_members (org_id, user_id, role) VALUES ($1, $2, 'member')", [org, leaver]);
+        expect(await projectRow(project)).toEqual({ left: false, clock: false });
+        await pool.query("DELETE FROM organization_members WHERE org_id=$1 AND user_id=$2", [org, leaver]);
+        // Retention's clock starts at its first look; 59 days after, the project is still there; 61, gone.
+        await lifecycle().tick();
+        expect(await projectRow(project)).toEqual({ left: true, clock: true });
+        await pool.query("UPDATE cloud_projects SET owner_left_at=owner_left_at - interval '59 days', retention_started_at=retention_started_at - interval '59 days' WHERE id=$1", [project]);
+        await lifecycle().tick();
+        expect(await projectRow(project)).toBeDefined();
+        await pool.query("UPDATE cloud_projects SET owner_left_at=owner_left_at - interval '2 days', retention_started_at=retention_started_at - interval '2 days' WHERE id=$1", [project]);
+        await lifecycle().tick();
+        expect(await projectRow(project)).toBeUndefined();
+        expect((await columns("project_id")).project_id).toBeNull();
+      });
+
+      it("never starts the 60 days with retention off", async () => {
+        const leaver = randomUUID();
+        await pool.query("INSERT INTO users (id, email, display_name) VALUES ($1, $2, 'L')", [leaver, `l-${leaver}@example.test`]);
+        await pool.query("INSERT INTO organization_members (org_id, user_id, role) VALUES ($1, $2, 'member')", [org, leaver]);
+        const project = await personal(leaver);
+        await pool.query("DELETE FROM organization_members WHERE org_id=$1 AND user_id=$2", [org, leaver]);
+        await pool.query("UPDATE cloud_projects SET owner_left_at=owner_left_at - interval '90 days' WHERE id=$1", [project]);
+        await lifecycle({ retention: false }).tick();
+        expect(await projectRow(project)).toEqual({ left: true, clock: false });
+        // Switched on: the clock starts now, never from the 90 days before.
+        await lifecycle().tick();
+        expect(await projectRow(project)).toEqual({ left: true, clock: true });
+      });
+    });
+
+    describe("account deletion", () => {
+      async function privateWorkspaceOf(owner: string, mode: "legacy" | "active") {
+        await pool.query("INSERT INTO organization_members (org_id, user_id, role) VALUES ($1, $2, 'member') ON CONFLICT DO NOTHING", [org, owner]);
+        const other = randomUUID();
+        await pool.query(`INSERT INTO cloud_v2_workspaces (id, org_id, creator_user_id, private_owner_user_id, name, repository, branch, base_branch, state, execution_mode)
+          VALUES ($1,$2,$3,$3,'p','acme/app','zeros/p','main','stopped',$4)`, [other, org, owner, mode]);
+        return other;
+      }
+      for (const ownership of [false, true]) it(`deletes the account's private workspaces, with team ownership ${ownership ? "on" : "off"}, and never another member's organization workspace`, async () => {
+        const leaver = randomUUID();
+        await pool.query("INSERT INTO users (id, email, display_name) VALUES ($1, $2, 'L')", [leaver, `l-${leaver}@example.test`]);
+        const mine = await privateWorkspaceOf(leaver, ownership ? "active" : "legacy");
+        await withSystemTx(pool, async tx => {
+          if (ownership) await tx.query("SELECT set_config('app.cloud_team_ownership','1',true)");
+          await scheduleCloudDeletion(tx, { userId: leaver });
+        });
+        expect((await pool.query("SELECT state FROM cloud_v2_workspaces WHERE id=$1", [mine])).rows[0].state).toBe("deleting");
+        // The organization's own workspace, created by someone else and used by the leaver, is untouched.
+        expect((await columns("state")).state).not.toBe("deleting");
+      });
+
+      it("deletes the account's personal projects, their secrets and copies, and its personal connections", async () => {
+        const leaver = randomUUID(), project = randomUUID(), copy = randomUUID(), installation = randomUUID();
+        await pool.query("INSERT INTO users (id, email, display_name) VALUES ($1, $2, 'L')", [leaver, `l-${leaver}@example.test`]);
+        await pool.query("INSERT INTO cloud_projects (id, org_id, name, level, owner_user_id, created_by) VALUES ($1,$2,'Mine','personal',$3,$3)", [project, org, leaver]);
+        await pool.query("INSERT INTO cloud_v2_ready_copy_secrets (project_id, org_id, envelope, names) VALUES ($1,$2,'{}','{TOKEN}')", [project, org]);
+        await pool.query("INSERT INTO cloud_v2_ready_copies (id, org_id, project_id, generation, state, idempotency_key, machine_id) VALUES ($1,$2,$3,1,'ready',$4,'bx_copy')", [copy, org, project, `k-${copy}`]);
+        await pool.query("INSERT INTO cloud_github_installations (id, org_id, account_login, level, owner_user_id) VALUES ($1,$2,'leaver','personal',$3)", [installation, org, leaver]);
+        await withSystemTx(pool, tx => scheduleCloudDeletion(tx, { userId: leaver }));
+        expect((await pool.query("SELECT count(*)::int AS n FROM cloud_projects WHERE id=$1", [project])).rows[0].n).toBe(0);
+        expect((await pool.query("SELECT count(*)::int AS n FROM cloud_v2_ready_copy_secrets WHERE project_id=$1", [project])).rows[0].n).toBe(0);
+        expect((await pool.query("SELECT state FROM cloud_v2_ready_copies WHERE id=$1", [copy])).rows[0].state).toBe("retired");
+        expect((await pool.query("SELECT count(*)::int AS n FROM cloud_github_installations WHERE id=$1", [installation])).rows[0].n).toBe(0);
+      });
+
+      it("keeps an organization until every ready copy's machine is confirmed deleted", async () => {
+        const project = randomUUID(), copy = randomUUID();
+        await pool.query("INSERT INTO cloud_projects (id, org_id, name, level, created_by) VALUES ($1,$2,'Shared','organization',$3)", [project, org, user]);
+        await pool.query("INSERT INTO cloud_v2_ready_copies (id, org_id, project_id, generation, state, idempotency_key, machine_id) VALUES ($1,$2,$3,1,'retired',$4,'bx_copy2')", [copy, org, project, `k-${copy}`]);
+        await pool.query("UPDATE cloud_v2_workspaces SET state='deleted' WHERE org_id=$1", [org]);
+        // Every Cloud Computer resource is confirmed deleted; only the copy's machine is left.
+        await pool.query("UPDATE cloud_v2_computer_builds SET snapshot_id=NULL, snapshot_deleted_at=clock_timestamp() WHERE org_id=$1", [org]);
+        await expect(withSystemTx(pool, tx => assertOrganizationCloudPurgeReady(tx, org))).rejects.toThrow("organization_cloud_copy_deletion_not_verified");
+        await pool.query("UPDATE cloud_v2_ready_copies SET machine_deleted_at=clock_timestamp() WHERE id=$1", [copy]);
+        await expect(withSystemTx(pool, tx => assertOrganizationCloudPurgeReady(tx, org))).resolves.toBeUndefined();
+      });
+    });
+
+    describe("a GitHub connection removed", () => {
+      it("retires the copies built through it, deleted or uninstalled; the next workspace opened queues a new one", async () => {
+        const copies = new CloudV2ReadyCopies(pool);
+        const make = async () => {
+          const installation = randomUUID(), project = randomUUID(), copy = randomUUID();
+          await pool.query("INSERT INTO cloud_github_installations (id, org_id, account_login, level) VALUES ($1,$2,$3,'organization')", [installation, org, `acme-${installation.slice(0, 6)}`]);
+          await pool.query("INSERT INTO cloud_projects (id, org_id, name, level, created_by) VALUES ($1,$2,$3,'organization',$4)", [project, org, `P-${project.slice(0, 6)}`, user]);
+          await pool.query("INSERT INTO cloud_project_repositories (project_id, position, repository, repository_id, connection) VALUES ($1,0,'acme/app','42',$2)", [project, installation]);
+          await pool.query("INSERT INTO cloud_v2_ready_copies (id, org_id, project_id, generation, state, idempotency_key, machine_id) VALUES ($1,$2,$3,1,'ready',$4,$5)",
+            [copy, org, project, `k-${copy}`, `bx_${copy.slice(0, 8)}`]);
+          return { installation, project, copy };
+        };
+        const state = async (copy: string) => (await pool.query("SELECT state FROM cloud_v2_ready_copies WHERE id=$1", [copy])).rows[0].state;
+        const removed = await make(), uninstalled = await make(), untouched = await make();
+        await pool.query("DELETE FROM cloud_github_installations WHERE id=$1", [removed.installation]);
+        expect(await state(removed.copy)).toBe("retired");
+        await pool.query("UPDATE cloud_github_installations SET state='uninstalled' WHERE id=$1", [uninstalled.installation]);
+        await copies.retireUnavailable();
+        expect(await state(uninstalled.copy)).toBe("retired");
+        expect(await state(untouched.copy)).toBe("ready");
+        // The project page shows no ready copy now; the next fork request may queue one.
+        expect(await copies.mayQueueFirst(removed.project, new Date())).toBe(true);
+        expect(await copies.mayQueueFirst(untouched.project, new Date())).toBe(false);
+      });
+    });
+
+    describe("alerts", () => {
+      it("alerts a missed wake once per stop, and again after a new stop", async () => {
+        await stop();
+        // No wake can run: the maintenance budget is spent.
+        await pool.query("UPDATE cloud_v2_workspaces SET stopped_at=stopped_at - interval '12 days 1 hour', retention_started_at=retention_started_at - interval '13 days' WHERE id=$1", [id]);
+        const alerts = () => errors.filter(line => line.startsWith("[cloud-v2] missed maintenance wake:"));
+        await lifecycle({ maintenancePerDay: 1, maintenancePerHour: 1 }).tick();
+        // (The wake itself may run once; block any more and re-age the stop.)
+        await pool.query("UPDATE cloud_v2_workspaces SET machine_stopped_at=NULL, stopped_at=clock_timestamp() - interval '12 days 1 hour', missed_wake_alerted_at=NULL WHERE id=$1", [id]);
+        await pool.query("INSERT INTO cloud_v2_maintenance_wakes (workspace_id, attempt, kind) SELECT $1, gen_random_uuid(), 'backup_fork' FROM generate_series(1, 5)", [id]);
+        errors.length = 0;
+        await lifecycle({ maintenancePerDay: 1, maintenancePerHour: 1 }).tick();
+        expect(alerts()).toHaveLength(1);
+        await lifecycle({ maintenancePerDay: 1, maintenancePerHour: 1 }).tick();
+        expect(alerts()).toHaveLength(1);
+        // A new stop, 12 days old in turn: alerted again.
+        await pool.query("UPDATE cloud_v2_workspaces SET stopped_at=clock_timestamp() - interval '12 days 1 hour', missed_wake_alerted_at=clock_timestamp() - interval '13 days' WHERE id=$1", [id]);
+        await lifecycle({ maintenancePerDay: 1, maintenancePerHour: 1 }).tick();
+        expect(alerts()).toHaveLength(2);
+      });
+    });
+
+    describe("the orphan sweep", () => {
+      it("prunes only a prefix whose workspace was deleted 7 days ago; keeps and reports one with no row; skips a non-id", async () => {
+        const old = randomUUID(), recent = randomUUID(), missing = randomUUID();
+        for (const [workspace, days] of [[old, 8], [recent, 2]] as const) {
+          await pool.query(`INSERT INTO cloud_v2_workspaces (id, org_id, creator_user_id, name, repository, branch, base_branch, state, updated_at)
+            VALUES ($1,$2,$3,'d','acme/app','zeros/d','main','deleted', clock_timestamp() - make_interval(days => $4))`, [workspace, org, user, days]);
+        }
+        for (const workspace of [old, recent, missing]) archives.set(`cloud-v2/checkpoints/${workspace}/${randomUUID()}.zck`, new Map());
+        extraPrefixes.add("not-a-workspace");
+        await lifecycle().tick();
+        const kept = (workspace: string) => [...archives.keys()].some(key => key.includes(workspace));
+        expect([kept(old), kept(recent), kept(missing)]).toEqual([false, true, true]);
+        const report = errors.find(line => line.startsWith("[cloud-v2] backup objects with no workspace row:"))!;
+        expect(report).toContain(missing);
+        expect(report).toMatch(/1 prefix\(es\), kept .* 1 prefix\(es\) not a workspace id, skipped/);
+      });
+
+      it("refuses to run at all while the listing has prefixes but no workspace row exists", async () => {
+        const lone = randomUUID();
+        archives.set(`cloud-v2/checkpoints/${lone}/${randomUUID()}.zck`, new Map());
+        await pool.query("DELETE FROM cloud_v2_workspaces");
+        await lifecycle().tick();
+        expect([...archives.keys()].some(key => key.includes(lone))).toBe(true);
+        expect(errors.some(line => line.startsWith("[cloud-v2] backup orphan sweep refused:"))).toBe(true);
+      });
+    });
+
+    describe("end to end, on a controlled clock", () => {
+      /** Time passes: every clock of the workspace and of its wake records moves `days` into the past. */
+      const travel = async (days: number) => {
+        const secs = days * DAY / 1000;
+        await pool.query(`UPDATE cloud_v2_workspaces SET
+            stopped_at=stopped_at - make_interval(secs => $2), machine_stopped_at=machine_stopped_at - make_interval(secs => $2),
+            active_at=active_at - make_interval(secs => $2), person_activity_at=person_activity_at - make_interval(secs => $2),
+            retention_started_at=retention_started_at - make_interval(secs => $2), archived_at=archived_at - make_interval(secs => $2),
+            archive_wake_done_at=archive_wake_done_at - make_interval(secs => $2), backup_forked_at=backup_forked_at - make_interval(secs => $2),
+            checkpoint_saved_at=checkpoint_saved_at - make_interval(secs => $2), keep_set_at=keep_set_at - make_interval(secs => $2),
+            checkpoint_retry_at=checkpoint_retry_at - make_interval(secs => $2), archive_scrubbed_at=archive_scrubbed_at - make_interval(secs => $2),
+            missed_wake_alerted_at=missed_wake_alerted_at - make_interval(secs => $2), next_attempt_at=NULL
+          WHERE id=$1`, [id, secs]);
+        await pool.query("UPDATE cloud_v2_maintenance_wakes SET started_at=started_at - make_interval(secs => $2), finished_at=finished_at - make_interval(secs => $2) WHERE workspace_id=$1", [id, secs]);
+      };
+      const wakes = async () => (await pool.query("SELECT outcome, scrub FROM cloud_v2_maintenance_wakes WHERE workspace_id=$1 AND kind='wake' ORDER BY started_at", [id])).rows;
+      const document = () => store.get(id, user);
+
+      it("stop, backup at an hour, wakes at 10 and 20 days, archive at 30, the archived wake, machine gone, backup removed, open from GitHub", async () => {
+        boat.write(vm, `${path("app")}/UNPUSHED`, "work only on the machine");
+        await stop();
+        expect(await document()).toMatchObject({ state: "stopped", archivedAt: null, keep: false });
+        await travel(1 / 24 + 0.01);
+        await lifecycle().tick();
+        expect(boat.calls.filter(call => call.op === "fork" && call.args[0] === vm)).toHaveLength(1);
+        expect((await columns("checkpoint_object")).checkpoint_object).not.toBeNull();
+        for (const day of [10, 20]) {
+          await travel(10.6);
+          await lifecycle().tick();
+          expect((await wakes()).length, `wake at ${day} days`).toBe(day / 10);
+          expect(await document()).toMatchObject({ state: "stopped", archivedAt: null });
+        }
+        // 30 days without activity: archived, with its reason and both dates; the stop's backup is final.
+        await travel(9);
+        await lifecycle().tick();
+        await lifecycle().tick();
+        const archived = await document();
+        expect(archived).toMatchObject({ state: "stopped", archiveReason: "inactive", keep: false, machineExpectedGoneAt: { estimate: true } });
+        expect(archived.backupRemovalAt).toEqual(expect.any(String));
+        expect(boat.calls.filter(call => call.op === "fork" && call.args[0] === vm)).toHaveLength(1);
+        // The one archived wake, with its scrub; then none.
+        await travel(10.6);
+        await lifecycle().tick();
+        expect((await wakes()).at(-1)).toMatchObject({ outcome: "stopped", scrub: expect.any(String) });
+        const after = (await wakes()).length;
+        await travel(11);
+        await lifecycle().tick();
+        expect(await wakes()).toHaveLength(after);
+        // Boat removes the machine; 60 days after the archive the backup goes.
+        boat.machine(vm)!.expired = true;
+        await travel(40);
+        await lifecycle().tick();
+        expect((await columns("checkpoint_object")).checkpoint_object).toBeNull();
+        const removed = await document();
+        expect(removed).toMatchObject({ archiveReason: "inactive" });
+        expect(removed).not.toHaveProperty("backupRemovalAt");
+        // Opened: rebuilt from GitHub, with the note that the stop's work did not come back.
+        await store.requestLifecycle(id, user, "start");
+        for (let step = 0; step < 4 && (await columns("boat_sandbox_id")).boat_sandbox_id === vm; step++) {
+          await pool.query("UPDATE cloud_v2_workspaces SET next_attempt_at=NULL WHERE id=$1", [id]);
+          await lifecycle().tick();
+        }
+        expect(await document()).toMatchObject({ archivedAt: null, lostWork: { restored: "none" } });
+      }, 60_000);
+
+      it("with Keep set while in use, nothing is archived: the wakes go on and the backup stays", async () => {
+        boat.write(vm, `${path("app")}/UNPUSHED`, "work only on the machine");
+        await stop();
+        expect((await store.setKeep(id, user, true)).keep).toBe(true);
+        await travel(1 / 24 + 0.01);
+        await lifecycle().tick();
+        for (let day = 10; day <= 90; day += 10) {
+          await travel(10.6);
+          await lifecycle().tick();
+          await lifecycle().tick();
+          expect(await document(), `at ${day} days`).toMatchObject({ archivedAt: null, keep: true });
+        }
+        expect((await wakes()).length).toBeGreaterThanOrEqual(8);
+        expect((await columns("checkpoint_object")).checkpoint_object).not.toBeNull();
+      }, 60_000);
     });
   });
 });
