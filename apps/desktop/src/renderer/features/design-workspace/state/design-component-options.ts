@@ -200,7 +200,7 @@ async function prepareDesignInstanceReset(
   const optionState = designInstanceOptionState(declaration, host.attributes);
   const parts = Object.keys(host.overrides ?? {});
   const properties = kind === "all" ? designInstanceVisualStyleProperties(host.style)
-    : designInstanceOlderOverrideProperties(host.style, designLayerBoundStyles(workspaceId, currentFrame as never, nodeId));
+    : designInstanceOlderOverrideProperties(host.style, designLayerBoundStyles(workspaceId, currentFrame as never, nodeId, { confirmed: true }));
   const styleUpdates: Record<string, string | null> = Object.fromEntries(properties.map((property) => [property, null]));
 
   // Reset all removes a legacy transform, so its offset folds into the pins;

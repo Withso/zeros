@@ -510,13 +510,11 @@ describe("design workspace interaction wiring", () => {
     // A text frame's branch deletes the whole frame; a confirmation from
     // another workspace or an outdated selection must never reach it.
     const body = source.slice(source.indexOf("const deleteSelectedNode = useCallback"));
-    const check = body.indexOf("if (confirmed && (!active || !designPendingDeletionFor(confirmed, workspaceId))) return;");
+    const check = body.indexOf("if (confirmed && !boundDeleteConfirmable(confirmed)) return;");
     expect(check).toBeGreaterThan(0);
     expect(check).toBeLessThan(body.indexOf('frame?.kind === "text"'));
-    expect(source).toContain("if (!designPendingDeletionFor(boundDelete.pending, workspaceId)) setBoundDelete(null);");
-    // A retained surface another workspace replaced closes it and never shows it.
-    expect(source).toContain("if (!workspaceId || !active) {\n      setBoundDelete(null);");
-    expect(source).toContain("controls={active ? boundDelete?.controls ?? null : null}");
+    // The question itself (closing when inactive or stale) is mounted in design-bound-delete.test.ts.
+    expect(source).toContain("const boundDelete = useDesignBoundDelete(workspaceId, active);");
   });
 
   it("rotates from outside every corner instead of one floating button", () => {

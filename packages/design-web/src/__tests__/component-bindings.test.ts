@@ -91,7 +91,7 @@ describe("the controls each layer of a main reads", () => {
     const bindings = bindingsOf(main(
       `<zd-option name="w" type="number" default="1"></zd-option>`,
       `.card:not(.card:hover) { width: var(--zd-w); } .card:not(.card) { height: var(--zd-w); }`,
-      `<div class="card" data-oid="card">c</div>`))!;
+      `<div data-oid="root"><div class="card" data-oid="card">c</div></div>`))!;
     // :hover was dropped from the negated compound, so it may not match: keep the layer.
     expect(bindings.layers.card!.styles).toEqual({ width: ["w"] });
   });
@@ -105,6 +105,17 @@ describe("the controls each layer of a main reads", () => {
     // data-kind is a gate (a hole fills it), so the rule depends on K as well.
     expect(bindings.layers.filled!.styles).toEqual({ width: ["k", "w"] });
     expect(bindings.layers.bare!.styles).toEqual({ width: ["k", "w"] });
+  });
+
+  it("never excludes the root by a class test: an instance adds its host's classes to the root", () => {
+    const bindings = bindingsOf(main(
+      `<zd-option name="w" type="number" default="1"></zd-option>`,
+      `.card:not([class="card"]) { width: var(--zd-w); } .card:not(.card) { height: var(--zd-w); } .inner:not(.inner) { gap: var(--zd-w); }`,
+      `<div class="card" data-oid="card"><span class="inner" data-oid="inner">i</span></div>`))!;
+    expect(bindings.root).toBe("card");
+    expect(bindings.layers.card!.styles).toEqual({ height: ["w"], width: ["w"] });
+    // An inner layer's classes are its own: .inner:not(.inner) still excludes it.
+    expect(bindings.layers.inner).toBeUndefined();
   });
 
   it("evaluates attribute operators on layer identity, keeping the layer when an operator is unknown", () => {
@@ -155,7 +166,11 @@ describe("the controls each layer of a main reads", () => {
       `:root { ${many} } .box { width: var(--m0); } .plain { height: var(--not-declared-here); }`,
       `<div class="box" data-oid="box">b</div><div class="plain" data-oid="plain">p</div><span data-oid="t">{{ tone }}</span>`))!;
     expect(bindings.truncated).toBe(true);
-    expect(bindings.layers.box!.styles).toEqual({ width: ["tone", "w"] });
+    // Bound by that guess only: kept apart from what is known, so a fence can
+    // refuse a write while nothing destructive rests on it.
+    expect(bindings.layers.box).toEqual({ assumed: { width: ["tone", "w"] } });
+    expect(Object.keys(bindings.assumedVars!)).toHaveLength(64);
+    expect(bindings.vars).toBeUndefined();
     // A property the main's CSS does not declare (a token) is not one of its own.
     expect(bindings.layers.plain).toBeUndefined();
   });
@@ -182,6 +197,16 @@ describe("the controls each layer of a main reads", () => {
       `<div data-oid="box" style="width: var(--zd-w)"></div>`))!;
     expect(bindings.layers).toEqual({ box: { styles: { width: ["w"] } } });
     expect(bindings.unread).toEqual(["idle"]);
+  });
+
+  it("keeps a layer's authored properties ahead of custom-property links under its styles cap", () => {
+    const links = Array.from({ length: 20 }, (_, index) => `--link-${index}: var(--zd-ink);`).join(" ");
+    const bindings = bindingsOf(main(`<zd-option name="ink" type="color" default="red"></zd-option>`,
+      `.box { ${links} color: var(--zd-ink); }`, `<div data-oid="root"><div class="box" data-oid="box">b</div></div>`))!;
+    const styles = bindings.layers.box!.styles!;
+    expect(Object.keys(styles)).toHaveLength(16);
+    expect(styles.color).toEqual(["ink"]);
+    expect(bindings.truncated).toBe(true);
   });
 
   it("bounds every list while collecting, and never touches the declaration", () => {

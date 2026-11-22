@@ -353,9 +353,16 @@ export const designComponentBindingsSchema = z.object({
     /** CSS property (or custom property the layer sets) to the options its declaration reaches:
      * through var(--zd-*), the custom properties in `vars`, or a selector testing a `gates` attribute. */
     styles: boundedRecord(z.string().min(1).max(BINDINGS.property), bindingOptionsSchema, BINDINGS.styles).optional(),
+    /** Properties bound only by the conservative guess a truncated record
+     * makes (every control, past the custom-property graph's caps): a
+     * fence refuses raw writes to them, but nothing destructive (older
+     * overrides, Reset, lint) rests on them. */
+    assumed: boundedRecord(z.string().min(1).max(BINDINGS.property), bindingOptionsSchema, BINDINGS.styles).optional(),
   }).strict(), BINDINGS.layers),
   /** Custom properties of the main's own CSS that reach controls, for winners read from other sheets. */
   vars: boundedRecord(z.string().regex(/^--[A-Za-z0-9_-]{1,126}$/), bindingOptionsSchema, BINDINGS.vars).optional(),
+  /** As `vars`, for custom properties bound only by that guess. */
+  assumedVars: boundedRecord(z.string().regex(/^--[A-Za-z0-9_-]{1,126}$/), bindingOptionsSchema, BINDINGS.vars).optional(),
   /** Attributes a hole fills on some layer ("class" for class holes) to the options it reads. */
   gates: boundedRecord(z.string().min(1).max(LIMITS.attributeName), bindingOptionsSchema, BINDINGS.gates).optional(),
   /** The fixed start of each class a class hole fills (`btn--` for

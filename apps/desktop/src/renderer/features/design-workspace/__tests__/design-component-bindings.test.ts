@@ -229,6 +229,22 @@ describe("a write to a layer whose runtime winners were never read", () => {
   });
 });
 
+describe("a binding only a truncated record guesses", () => {
+  it("is refused by the fence and left out of what destructive actions read", async () => {
+    const { designLayerBoundStyles, refuseDesignBoundStyleWrite, rememberDesignRuntimeBindings, resetDesignRuntimeBindingsForTests } = await import("../state/design-component-bindings");
+    resetDesignRuntimeBindingsForTests();
+    const V = "c".repeat(24);
+    const main = { file: "big.html", sourceVersion: V, component: { elements: [{ tag: "zd-option", attributes: [{ name: "name", value: "w" }, { name: "label", value: "Width" }] }], reach: {},
+      bindings: { truncated: true as const, layers: { box: { assumed: { width: ["w"] } } }, assumedVars: { "--far": ["w"] } } } };
+    expect(() => refuseDesignBoundStyleWrite("ws", main, { nodeId: "box", styles: { width: "40px" } })).toThrow("Width");
+    expect(designLayerBoundStyles("ws", main, "box", { confirmed: true })).toEqual({});
+    // The same for a winner that reads a guessed custom property.
+    rememberDesignRuntimeBindings("ws", main, { oid: "box", sourceVersion: V, authoredStyles: { height: { origin: "frame", value: "var(--far)", selector: ".box" } } } as never);
+    expect(designLayerBoundStyles("ws", main, "box")).toEqual({ height: ["w"], width: ["w"] });
+    expect(designLayerBoundStyles("ws", main, "box", { confirmed: true })).toEqual({});
+  });
+});
+
 describe("rules gated on a control, at a value none of them matches", () => {
   const V = "f".repeat(24);
   const option = (name: string, label: string) => ({ tag: "zd-option", attributes: [{ name: "name", value: name }, { name: "label", value: label }] });

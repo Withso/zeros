@@ -510,14 +510,17 @@ export function componentInstanceHostStyleAllowed(property: string): boolean {
   return COMPONENT_INSTANCE_HOST_STYLE_PROPERTIES.has(property) || property.startsWith("--zeros-layout-");
 }
 
-/** A size or size limit: what an instance's own Size writes. */
-const sizes = (property: string) => cssPropertiesOverlap(property, "width") || cssPropertiesOverlap(property, "height");
+/** A size, a size limit or the aspect ratio: what sets an instance's box
+ * size. Layout-child sizing (flex, align-self) is its place in a layout. */
+const sizes = (property: string) =>
+  property === "aspect-ratio" || cssPropertiesOverlap(property, "width") || cssPropertiesOverlap(property, "height");
 
 /** Whether a property in an instance host's own style is an older override,
  * one the app no longer writes and Reset removes: anything outside the
- * allowlist, and a size or size limit over a size a control sets on the
- * root (the root's bound properties, as recorded). Its place is never one,
- * whatever a control binds, so Reset never moves an instance. */
+ * allowlist, and a size, size limit or aspect ratio over one a control sets
+ * on the root (the root's bound properties, as recorded). Its place and its
+ * layout-child sizing are never one, whatever a control binds, so Reset
+ * never moves an instance. */
 export function componentInstanceOlderOverride(property: string, boundProperties: Iterable<string>): boolean {
   if (!componentInstanceHostStyleAllowed(property)) return true;
   if (!sizes(property)) return false;

@@ -274,7 +274,7 @@ export function DesignComponentOptions({
   // A raw size over what a control sets counts too: it sits over that
   // control. On a part, the line is that part's override alone.
   const older = instance
-    ? designInstanceOlderOverridesIn(instance.host, designLayerBoundStyles(workspaceId, frame as never, instance.nodeId), only?.layer.id)
+    ? designInstanceOlderOverridesIn(instance.host, designLayerBoundStyles(workspaceId, frame as never, instance.nodeId, { confirmed: true }), only?.layer.id)
     : { parts: [], style: [] };
   const olderCount = older.parts.length + older.style.length;
   const canResetOlder = olderCount > 0 &&

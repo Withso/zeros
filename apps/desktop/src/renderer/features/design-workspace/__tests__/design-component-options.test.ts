@@ -272,6 +272,17 @@ describe("variants and instances", () => {
     expect(designInstanceOlderOverrideProperties("width: 200px; max-width: 300px", { "min-width": ["size"] })).toEqual(["width"]);
   });
 
+  it("rests no Reset on a binding only a truncated record guesses", async () => {
+    const frame = { file: "home.html", sourceVersion: V1 } as never;
+    prepareResetSnapshot("home.html", "inst", { style: "width: 200px; opacity: .5" },
+      { ...VARIANTS, bindings: { root: "card-root", truncated: true, layers: { "card-root": { assumed: { width: ["width"] } } } } });
+    await commitDesignInstanceOlderOverridesReset("w", frame, "inst");
+    // The guessed width is kept; the visual override goes.
+    expect(latestCapturedEdit().operations).toEqual([
+      expect.objectContaining({ type: "node.set-styles", nodeId: "inst", styles: { opacity: null } }),
+    ]);
+  });
+
   it("never counts or resets the instance's place, whatever a control binds on the root", async () => {
     const style = "position: absolute; left: 4px; transform: matrix(1, 0, 0, 1, 6, 8); opacity: .5";
     // A single-root main whose gated rule binds the root's placement (a Button's size).

@@ -166,6 +166,17 @@ describe("linting what changes a component from outside", () => {
     expect(await lint(host.file)).toEqual([expect.objectContaining({ ruleId: "component-instance-override", oid: "c1", line: 2 })]);
   });
 
+  it("rests no warning on a binding only a truncated record guesses", async () => {
+    const many = Array.from({ length: 1100 }, (_, index) => `--m${index}: var(--m${index + 1});`).join(" ");
+    const frame = await createDesignFrame(root, { title: "Card" });
+    await write(frame.file, doc('<div data-oid="card" class="card">{{ w }}</div>',
+      `${options(['<zd-option name="w" label="Width" type="number" default="1"></zd-option>'])}<style>:root { ${many} } .card { width: var(--m0) }</style>`));
+    await register(frame.file, "card");
+    const host = await createDesignFrame(root, { title: "Workspace" });
+    await write(host.file, doc('<zd-card data-oid="c1" style="width: 200px"></zd-card>'));
+    expect(await lint(host.file)).toEqual([]);
+  });
+
   it("re-lints an instance's frame when only its main changes", async () => {
     const file = await main('<span data-oid="b" class="badge">x</span>', [round], ".badge { border-radius: 4px }");
     const host = await createDesignFrame(root, { title: "Workspace" });

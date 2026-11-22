@@ -45,6 +45,8 @@ interface LayerFacts {
   visible: Set<string>;
   holes: Set<string>;
   styles: Map<string, Set<string>>;
+  /** What only the overflow guess binds. */
+  assumed: Map<string, Set<string>>;
 }
 
 /** The options a set of expression names reaches, through derived values. */
@@ -274,8 +276,10 @@ function attributeTest(test: { value: string | null; operator: string | null; ca
 
 /** The layer matches this compound whatever its holes fill: tag, ids and
  * static classes only. */
-function certainlyMatches(compound: Compound, layer: LayerFacts): boolean {
+function certainlyMatches(compound: Compound, layer: LayerFacts, root: string | undefined): boolean {
   if (compound.partial || compound.root || compound.nested.length || compound.negatedText.length) return false;
+  // An instance adds its host's classes to the root, so no class test there is certain.
+  if (layer.oid === root && (compound.classes.length || compound.attributes.some((test) => test.name === "class"))) return false;
   if (!compound.tag && !compound.ids.length && !compound.classes.length && !compound.attributes.length) return false;
   // An attribute test is certain only against a value the layer holds as
   // written; one a hole fills may be anything.
@@ -288,7 +292,7 @@ function certainlyMatches(compound: Compound, layer: LayerFacts): boolean {
 }
 
 function compoundMatches(compound: Compound, layer: LayerFacts, root: string | undefined): boolean {
-  if (compound.negated.some((negated) => certainlyMatches(negated, layer))) return false;
+  if (compound.negated.some((negated) => certainlyMatches(negated, layer, root))) return false;
   if (compound.root) return layer.oid === root;
   if (compound.tag && compound.tag !== layer.tag) return false;
   for (const id of compound.ids) if (layer.attributes.get("id") !== id) return false;
@@ -351,7 +355,7 @@ export function componentBindingsOf(document: DefaultTreeAdapterTypes.Document, 
       else classHoles.push(token.slice(0, hole));
     }
     const facts: LayerFacts = { oid, element, tag: element.tagName, classes, classHoles, attributes,
-      text: new Set(), visible: new Set(), holes: new Set(), styles: new Map() };
+      text: new Set(), visible: new Set(), holes: new Set(), styles: new Map(), assumed: new Map() };
     layers.set(oid, facts);
     return facts;
   };
@@ -502,18 +506,24 @@ export function componentBindingsOf(document: DefaultTreeAdapterTypes.Document, 
   }
   const resolve = (name: string): Set<string> => {
     if (name.startsWith("--zd-")) return new Set(zdVarOptions(name, declaration));
-    if (overflow) return new Set(edges.has(name) ? everyControl : []);
-    return reached.get(name) ?? new Set();
+    return overflow ? new Set() : reached.get(name) ?? new Set();
   };
+  const assumedBy = (name: string) => overflow && !name.startsWith("--zd-") && edges.has(name);
   const valueOptions = (value: string) => {
-    const found = new Set<string>();
-    for (const match of value.matchAll(VAR)) for (const option of resolve(match[1]!)) found.add(option);
-    return found;
+    const read = new Set<string>();
+    let assumed = false;
+    for (const match of value.matchAll(VAR)) {
+      for (const option of resolve(match[1]!)) read.add(option);
+      if (assumedBy(match[1]!)) assumed = true;
+    }
+    return { read, assumed: assumed ? new Set(everyControl.filter((option) => !read.has(option))) : new Set<string>() };
   };
   const vars = new Map<string, Set<string>>();
+  const assumedVars = new Map<string, Set<string>>();
   for (const name of edges.keys()) if (!name.startsWith("--zd-")) {
     const options = resolve(name);
     if (options.size) vars.set(name, options);
+    else if (assumedBy(name)) assumedVars.set(name, new Set(everyControl));
   }
 
   const layerList = [...layers.values()];
@@ -521,7 +531,7 @@ export function componentBindingsOf(document: DefaultTreeAdapterTypes.Document, 
     // What a value reads holds for every arm of the list; a gate only for
     // the arm that tests it, so `.badge[data-tone], .caption` leaves
     // .caption's value unbound.
-    const values: Array<[string, Set<string>]> = [];
+    const values: Array<[string, ReturnType<typeof valueOptions>]> = [];
     rule.each((child) => {
       if (child.type !== "decl") return;
       const declaration = child as Declaration;
@@ -532,16 +542,19 @@ export function componentBindingsOf(document: DefaultTreeAdapterTypes.Document, 
     for (const arm of splitList(rule.selector)) {
       const gated = gateOptions(arm);
       const declarations = values
-        .map(([property, read]): [string, Set<string>] => [property, new Set([...read, ...gated])])
-        .filter(([, options]) => options.size > 0);
+        .map(([property, { read, assumed }]): [string, Set<string>, Set<string>] => [property, new Set([...read, ...gated]), assumed])
+        .filter(([, options, assumed]) => options.size > 0 || assumed.size > 0);
       if (!declarations.length) continue;
       const subjects = subjectsOf(arm);
       for (const layer of layerList) {
         if (!subjects.some((subject) => compoundMatches(subject, layer, root))) continue;
-        for (const [property, options] of declarations) {
-          const entry = layer.styles.get(property) ?? new Set<string>();
-          for (const option of options) entry.add(option);
-          layer.styles.set(property, entry);
+        for (const [property, options, assumed] of declarations) {
+          for (const [target, names] of [[layer.styles, options], [layer.assumed, assumed]] as const) {
+            if (!names.size) continue;
+            const entry = target.get(property) ?? new Set<string>();
+            for (const option of names) entry.add(option);
+            target.set(property, entry);
+          }
         }
       }
     }
@@ -552,10 +565,15 @@ export function componentBindingsOf(document: DefaultTreeAdapterTypes.Document, 
     if (sorted.length > LIMITS.options) truncated = true;
     return sorted.slice(0, LIMITS.options);
   };
-  const boundedMap = (entries: Map<string, Set<string>>, max: number, keyOk: (key: string) => boolean) => {
+  // In a layer's styles, authored properties come before custom-property
+  // links, so a long chain of links cannot push a property such as color
+  // out at the cap.
+  const linkLast = (a: string, b: string) => Number(a.startsWith("--")) - Number(b.startsWith("--")) || a.localeCompare(b);
+  const boundedMap = (entries: Map<string, Set<string>>, max: number, keyOk: (key: string) => boolean,
+    order: (a: string, b: string) => number = (a, b) => a.localeCompare(b)) => {
     const out: Record<string, string[]> = {};
     let count = 0;
-    for (const [key, options] of [...entries].sort(([a], [b]) => a.localeCompare(b))) {
+    for (const [key, options] of [...entries].sort(([a], [b]) => order(a, b))) {
       const names = list(options);
       if (!names.length || !keyOk(key)) continue;
       if (count >= max) { truncated = true; break; }
@@ -573,22 +591,33 @@ export function componentBindingsOf(document: DefaultTreeAdapterTypes.Document, 
     const text = list(layer.text);
     const visible = list(layer.visible);
     const attributes = list(layer.holes);
-    const styles = boundedMap(layer.styles, LIMITS.styles, (property) => property.length <= LIMITS.property);
+    const styles = boundedMap(layer.styles, LIMITS.styles, (property) => property.length <= LIMITS.property, linkLast);
+    // Only what the guess adds beyond what is known.
+    const guessed = new Map([...layer.assumed].map(([property, names]): [string, Set<string>] =>
+      [property, new Set([...names].filter((name) => !layer.styles.get(property)?.has(name)))]));
+    const assumed = boundedMap(guessed, LIMITS.styles, (property) => property.length <= LIMITS.property, linkLast);
     if (text.length) entry.text = text;
     if (visible.length) entry.visible = visible;
     if (attributes.length) entry.attributes = attributes;
     if (styles) entry.styles = styles;
+    if (assumed) entry.assumed = assumed;
     if (!Object.keys(entry).length) continue;
     if (layerCount >= LIMITS.layers) { truncated = true; continue; }
     result.layers[layer.oid] = entry;
     layerCount += 1;
-    for (const names of [text, visible, attributes, ...Object.values(styles ?? {})]) for (const name of names) used.add(name);
+    // A guessed binding counts as read, so the guess warns about nothing.
+    for (const names of [text, visible, attributes, ...Object.values(styles ?? {}), ...Object.values(assumed ?? {})]) for (const name of names) used.add(name);
   }
   if (root) result.root = root;
   const varsRecord = boundedMap(vars, LIMITS.vars, (key) => /^--[A-Za-z0-9_-]{1,126}$/.test(key));
   if (varsRecord) {
     result.vars = varsRecord;
     for (const names of Object.values(varsRecord)) for (const name of names) used.add(name);
+  }
+  const assumedVarsRecord = boundedMap(assumedVars, LIMITS.vars, (key) => /^--[A-Za-z0-9_-]{1,126}$/.test(key));
+  if (assumedVarsRecord) {
+    result.assumedVars = assumedVarsRecord;
+    for (const names of Object.values(assumedVarsRecord)) for (const name of names) used.add(name);
   }
   const classGate = new Set(classGates.flatMap((gate) => [...gate.options]));
   if (classGate.size) gates.set("class", new Set([...(gates.get("class") ?? []), ...classGate]));

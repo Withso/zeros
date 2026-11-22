@@ -156,7 +156,9 @@ type BoundStyles = Readonly<Record<string, readonly string[]>>;
 const RUNTIME_VAR = /var\(\s*(--[A-Za-z0-9_-]+)/g;
 const SELECTOR_ATTRIBUTE = /\[\s*([^\s~|^$*=\]]+)/g;
 const REMEMBERED_LIMIT = 512;
-const remembered = new Map<string, BoundStyles>();
+/** Per key, what the winners bind, and the same without bindings only a
+ * truncated record's guess makes (`assumedVars`). */
+const remembered = new Map<string, { all: BoundStyles; confirmed: BoundStyles }>();
 /** What rules gated on a control's attribute or class would set, whatever
  * the value now (getGatedStyles), per the same key; bounded alike. */
 const rememberedGated = new Map<string, BoundStyles>();
@@ -244,10 +246,13 @@ function selectorGateOptions(selector: string, gates: Readonly<Record<string, re
   return found;
 }
 
-/** The properties a layer's authored winners bind, and to which controls. */
-export function designRuntimeBoundStyles(record: BindingRecord, authored: DesignRuntimeNodeDetails["authoredStyles"]): BoundStyles {
+/** The properties a layer's authored winners bind, and to which controls;
+ * `assumed: false` leaves out what only a truncated record's guess binds. */
+export function designRuntimeBoundStyles(record: BindingRecord, authored: DesignRuntimeNodeDetails["authoredStyles"], { assumed = true } = {}): BoundStyles {
   if (!authored) return EMPTY;
-  const vars = componentVarOptions(record);
+  const confirmed = componentVarOptions(record);
+  const guessed = assumed ? record.bindings?.assumedVars : undefined;
+  const vars = guessed ? new Map([...confirmed, ...Object.entries(guessed)]) : confirmed;
   const gates = record.bindings?.gates ?? {};
   const out: Record<string, string[]> = {};
   for (const [property, winner] of Object.entries(authored)) {
@@ -284,10 +289,11 @@ export function rememberDesignRuntimeBindings(workspaceId: string, frame: Bindin
   if (!details || details.sourceVersion !== frame.sourceVersion) return;
   const target = bindingTarget(frame, details.oid);
   if (!target) return;
-  const bound = designRuntimeBoundStyles(target.record, details.authoredStyles);
+  const all = designRuntimeBoundStyles(target.record, details.authoredStyles);
+  const confirmed = target.record.bindings?.assumedVars ? designRuntimeBoundStyles(target.record, details.authoredStyles, { assumed: false }) : all;
   const key = rememberedKey(workspaceId, frame.file, frame.sourceVersion, details.oid);
   remembered.delete(key);
-  remembered.set(key, bound);
+  remembered.set(key, { all, confirmed });
   while (remembered.size > REMEMBERED_LIMIT) remembered.delete(remembered.keys().next().value!);
 }
 
@@ -390,19 +396,28 @@ export function resetDesignRuntimeBindingsForTests(): void {
 /** Every property a control drives on this layer, to the controls: what the
  * engine found in the main's own markup and CSS, and what the runtime
  * reported for it at this generation. An instance host answers for its
- * root. Empty for a layer no component owns. */
-export function designLayerBoundStyles(workspaceId: string, frame: BindingFrame | null | undefined, nodeId: string): BoundStyles {
+ * root. Empty for a layer no component owns. A fence takes everything,
+ * including what a truncated record only guesses; `confirmed` leaves that
+ * guess out, for anything destructive (older overrides and their Reset). */
+export function designLayerBoundStyles(workspaceId: string, frame: BindingFrame | null | undefined, nodeId: string, { confirmed = false } = {}): BoundStyles {
   if (!frame) return EMPTY;
   const target = bindingTarget(frame, nodeId);
   if (!target) return EMPTY;
   const layers = target.record.bindings?.layers;
-  const own = target.layer && layers && Object.hasOwn(layers, target.layer) ? layers[target.layer]!.styles ?? {} : {};
+  const entry = target.layer && layers && Object.hasOwn(layers, target.layer) ? layers[target.layer]! : undefined;
+  const ownStyles = entry?.styles ?? {};
+  const own = !confirmed && entry?.assumed ? mergeBound([ownStyles, entry.assumed]) : ownStyles;
   const key = rememberedKey(workspaceId, frame.file, frame.sourceVersion, nodeId);
-  const runtime = remembered.get(key) ?? EMPTY;
+  const winners = remembered.get(key);
+  const runtime = (confirmed ? winners?.confirmed : winners?.all) ?? EMPTY;
   const gated = rememberedGated.get(key) ?? EMPTY;
   if (runtime === EMPTY && gated === EMPTY) return Object.keys(own).length ? own : EMPTY;
+  return mergeBound([own, runtime, gated]);
+}
+
+function mergeBound(sources: readonly BoundStyles[]): Record<string, string[]> {
   const merged: Record<string, string[]> = {};
-  for (const source of [own, runtime, gated])
+  for (const source of sources)
     for (const [property, controls] of Object.entries(source))
       merged[property] = [...new Set([...(merged[property] ?? []), ...controls])].sort();
   return merged;

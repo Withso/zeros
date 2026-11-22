@@ -242,6 +242,11 @@ describe("what an app may write in an instance host's own style", () => {
     // Only min-width bound: a raw width sits over it, a max-width does not.
     expect(componentInstanceOlderOverride("width", ["min-width"])).toBe(true);
     expect(componentInstanceOlderOverride("max-width", ["min-width"])).toBe(false);
+    // aspect-ratio is a size; layout-child sizing is never an override.
+    expect(componentInstanceOlderOverride("aspect-ratio", ["aspect-ratio"])).toBe(true);
+    expect(componentInstanceOlderOverride("aspect-ratio", ["opacity"])).toBe(false);
+    for (const property of ["flex-basis", "flex-grow", "flex", "align-self", "grid-area"])
+      expect(componentInstanceOlderOverride(property, ["width", "height", "flex-basis", "flex", "aspect-ratio"])).toBe(false);
     // Its place is its own, whatever a control binds on the root.
     for (const property of ["left", "top", "inset", "transform", "translate", "rotate", "position"])
       expect(componentInstanceOlderOverride(property, ["left", "transform", "inset", "translate", "rotate", "position", "top"])).toBe(false);
