@@ -1130,6 +1130,29 @@ d("cloud v2 retention", () => {
         expect(await columns("archive_scrub")).toEqual({ archive_scrub: "clean" });
       });
 
+      it("does the same for a second repository: its hand-edited environment file is scrubbed, then comes back on open", async () => {
+        const API_ENV = `${path("api")}/.env`;
+        boat.write(vm, API_ENV, "API_TOKEN=the person's own edit");
+        boat.write(vm, `${path("api")}/UNPUSHED`, "work");
+        await stop();
+        await earlier(CLOUD_V2_BACKUP_DELAY_MS + 60_000);
+        await lifecycle().tick();
+        await archive();
+        await sleepFor(10.6);
+        await lifecycle().tick();
+        expect(await wakeRows()).toMatchObject([{ outcome: "stopped", scrub: "backup" }]);
+        expect(boat.machine(vm)!.files.has(API_ENV)).toBe(false);
+        // The scrub was given every checkout, each with its own seed journal.
+        const scrubbed = boat.commands.find(command => command.machineId === vm && command.command.includes("zeros-archive-scrub"))!.command;
+        for (const repo of REPOS) expect(scrubbed).toContain(path(repo.folder));
+        expect(scrubbed).toContain("repositories/2/environment-seed/manifest.json");
+        await store.requestLifecycle(id, user, "start");
+        await lifecycle().tick();
+        expect(boat.machine(vm)!.files.get(API_ENV)).toBe("API_TOKEN=the person's own edit");
+        const restore = boat.commands.find(command => command.machineId === vm && command.command.includes("zeros-environment-restored"))!.command;
+        expect(restore).toContain("repositories/1/environment.tar");
+      });
+
       it("rebuilds from the backup when the scrubbed files cannot be put back, never starting a checkout without them", async () => {
         boat.write(vm, ENV, "TOKEN=the person's own edit");
         boat.write(vm, `${path("app")}/UNPUSHED`, "work");

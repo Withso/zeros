@@ -7,7 +7,7 @@
 // (files named .credentials.json or auth.json under ~/.claude, ~/.codex, ~/.cursor and ~/.config/cursor).
 // Zeros-delivered agent logins are never on disk.
 //
-// The checkout's seeded environment files (the seed journal's), by mode:
+// Every checkout's seeded environment files (each checkout's own seed journal), by mode, for the whole workspace:
 // - "backup": a settled backup of this stop holds their exact bytes. They are removed; an open restores them
 //   from it before the worker starts. Reports backup, or clean when the journal listed none.
 // - "reseed": there is no backup, only a clean probe. Removed with the journal only if every one still equals
@@ -23,7 +23,9 @@ const b64 = (value: string) => Buffer.from(value).toString("base64");
 const SCRUB_SCRIPT = String.raw`
 import { constants, closeSync, fstatSync, lstatSync, openSync, readSync, unlinkSync } from "node:fs";
 import { createHash } from "node:crypto";
-const [mode, root, journalPath] = process.argv.slice(2);
+// Pairs of checkout and its own seed journal, after the mode: one decision for the whole workspace.
+const [mode, ...pairs] = process.argv.slice(2);
+let root;
 const info = path => { try { return lstatSync(path); } catch (error) { if (error.code === "ENOENT") return undefined; throw error; } };
 const validPath = value => typeof value === "string" && Buffer.byteLength(value) <= 1024 &&
   /^(?:[A-Za-z0-9_.-]+\/)*\.env(?:\.[A-Za-z0-9_.-]+)?$/.exec(value)?.[0] === value && value.split("/").length <= 16 &&
@@ -52,30 +54,34 @@ const parent = path => {
   } catch (error) { closeSync(fd); throw error; }
 };
 let result = "partial";
+const present = [], journals = [];
 try {
-  if (mode === "keep" || !info(journalPath)) { result = mode === "keep" ? "partial" : "clean"; }
-  else {
+  if (mode === "keep" || pairs.length % 2 || !pairs.length) throw new Error("keep");
+  let equal = true;
+  // Every checkout first, nothing removed: a re-seed is all-or-nothing across the workspace too.
+  for (let index = 0; index < pairs.length; index += 2) {
+    root = pairs[index]; const journalPath = pairs[index + 1];
+    if (!info(journalPath)) continue;
+    journals.push(journalPath);
     const journal = JSON.parse(read(journalPath, 32768).toString("utf8"));
     if (!Array.isArray(journal.files) || journal.files.length > 16 || journal.files.some(file => !validPath(file.path))) throw new Error();
-    const present = [];
-    let equal = true;
     for (const file of journal.files) {
       const fd = parent(file.path);
       if (fd === undefined) continue;
       const name = "/proc/self/fd/" + fd + "/" + file.path.split("/").at(-1), stat = info(name);
       if (!stat) { closeSync(fd); continue; }
-      if (!stat.isFile()) { closeSync(fd); throw new Error(); }
-      if (mode === "reseed" && !(typeof file.sha256 === "string" && createHash("sha256").update(read(name, 1 << 20)).digest("hex") === file.sha256)) equal = false;
       present.push({ fd, name });
+      if (!stat.isFile()) throw new Error();
+      if (mode === "reseed" && !(typeof file.sha256 === "string" && createHash("sha256").update(read(name, 1 << 20)).digest("hex") === file.sha256)) equal = false;
     }
-    if (mode === "backup" || (mode === "reseed" && equal)) {
-      for (const entry of present) unlinkSync(entry.name);
-      if (mode === "reseed") unlinkSync(journalPath);
-      result = mode === "backup" && present.length ? "backup" : "clean";
-    }
-    for (const entry of present) closeSync(entry.fd);
+  }
+  if (mode === "backup" || (mode === "reseed" && equal)) {
+    for (const entry of present) unlinkSync(entry.name);
+    if (mode === "reseed") for (const journalPath of journals) unlinkSync(journalPath);
+    result = mode === "backup" && present.length ? "backup" : "clean";
   }
 } catch { result = "partial"; }
+for (const entry of present) { try { closeSync(entry.fd); } catch {} }
 process.stdout.write("zeros-archive-scrub " + result + "\n");
 `;
 
@@ -83,8 +89,11 @@ export type ArchiveScrubMode = "backup" | "reseed" | "keep";
 export type ArchiveScrubResult = "backup" | "clean" | "partial";
 export const ARCHIVE_SCRUB_SECONDS = 30;
 
-export function archiveScrubCommand(input: { home: string; checkoutPath: string; mode: ArchiveScrubMode }): string {
-  for (const value of [input.home, input.checkoutPath])
+/** `checkoutPaths`: the workspace's checkouts in the order its backup captures them; the first's seed journal
+ * is the workspace's, the i-th later one's is under the worker state's repositories/<i>/. */
+export function archiveScrubCommand(input: { home: string; checkoutPaths: readonly string[]; mode: ArchiveScrubMode }): string {
+  if (!input.checkoutPaths.length) throw new Error("Invalid scrub path");
+  for (const value of [input.home, ...input.checkoutPaths])
     if (!value.startsWith("/") || /[\n\0]/.test(value) || value.split("/").some(part => part === "..")) throw new Error("Invalid scrub path");
   const home = quote(input.home);
   return `bash -c ${quote([
@@ -100,7 +109,8 @@ export function archiveScrubCommand(input: { home: string; checkoutPath: string;
     "work=$(mktemp -d \"$home/.cache/zeros-scrub.XXXXXX\" 2>/dev/null || mktemp -d) || { printf 'zeros-archive-scrub partial\\n' >&3; exit 0; }",
     "trap 'rm -rf \"$work\"' EXIT",
     `printf %s ${quote(b64(SCRUB_SCRIPT))} | base64 -d > "$work/scrub.mjs"`,
-    `node "$work/scrub.mjs" ${quote(input.mode)} ${quote(input.checkoutPath)} "$home/${CLOUD_V2_WORKER_STATE}/environment-seed/manifest.json" >&3`
+    `node "$work/scrub.mjs" ${quote(input.mode)} ${input.checkoutPaths.map((checkout, index) => `${quote(checkout)} "$home/${CLOUD_V2_WORKER_STATE}/${
+      index === 0 ? "" : `repositories/${index}/`}environment-seed/manifest.json"`).join(" ")} >&3`
       + " || printf 'zeros-archive-scrub partial\\n' >&3",
   ].join("\n"))}`;
 }

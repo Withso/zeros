@@ -1,11 +1,12 @@
 import { execFileSync, spawnSync } from "node:child_process";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { archiveScrubCommand, parseArchiveScrub } from "./archive-scrub.js";
 import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, renameSync, rmSync, symlinkSync, truncateSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
-  CHECKPOINT_SAVED_REPORT, WORKER_SERVICE_OFF, backupProbeCommand, checkpointArchiveSteps, checkpointCommand, parseBackupProbe, checkpointRestoreSteps, cloudV2CheckpointObject, openCheckpointKey,
+  CHECKPOINT_SAVED_REPORT, WORKER_SERVICE_OFF, backupProbeCommand, environmentRestoreSteps, parseEnvironmentRestore, checkpointArchiveSteps, checkpointCommand, parseBackupProbe, checkpointRestoreSteps, cloudV2CheckpointObject, openCheckpointKey,
   parseCheckpointResult, parseRestoreResult, restoreCommand, sealCheckpointKey, type CheckpointReuse, type RestoreInput,
 } from "./checkpoint.js";
 
@@ -1413,6 +1414,64 @@ process.exit(result.status??1);
     expect(restored.stdout).toMatch(/environment:.*manifest\.json/);
     expect(restored.stdout.split("\n").find(line => line.startsWith("ignored:"))).not.toContain(".env.log");
   }, 30_000);
+
+  describe("an archive's scrub and the open after it (retention S3)", () => {
+    /** Each repository's seeded .env.log (ignored by the fixture's *.log rule) and its own seed journal. */
+    function seeded(p: ReturnType<typeof project>, contents: { api: string; web: string }) {
+      for (const [name, index] of [["api", 0], ["web", 1]] as const) {
+        p.write(join(p.folder(p.oldHome, name), ".env.log"), contents[name]);
+        p.write(join(p.oldHome, `.local/share/zeros/cloud-worker/${index ? `repositories/${index}/` : ""}environment-seed/manifest.json`), JSON.stringify({
+          version: 2, versionId: randomUUID(), complete: true,
+          files: [{ path: ".env.log", alias: randomUUID(), phase: "complete", sha256: createHash("sha256").update(contents[name]).digest("hex") }] }));
+      }
+    }
+    const checkouts = (p: ReturnType<typeof project>) => [p.folder(p.oldHome, "api"), p.folder(p.oldHome, "web")];
+    const scrub = (p: ReturnType<typeof project>, mode: "backup" | "reseed" | "keep") => {
+      const result = spawnSync("bash", ["-c", `eval "$1"`, "scrub", archiveScrubCommand({ home: p.oldHome, checkoutPaths: checkouts(p), mode })], { env: p.env, encoding: "utf8" });
+      return parseArchiveScrub(result.stdout);
+    };
+    const journals = (p: ReturnType<typeof project>) => [".local/share/zeros/cloud-worker/environment-seed/manifest.json",
+      ".local/share/zeros/cloud-worker/repositories/1/environment-seed/manifest.json"].map(path => existsSync(join(p.oldHome, path)));
+
+    it("removes every repository's seeded files a backup holds, and puts each back into its own checkout before the worker starts", () => {
+      const p = project(), key = randomBytes(32), out = join(p.root, "checkpoint.zck");
+      seeded(p, { api: "API=edited by hand\n", web: "WEB=edited by hand\n" });
+      p.write(join(p.oldHome, ".claude/.credentials.json"), "{}");
+      const saved = run([...checkpointArchiveSteps({ checkoutPath: checkouts(p)[0]!, home: p.oldHome, baseBranch: "main", key, backup: true,
+        repositories: [{ checkoutPath: checkouts(p)[1]!, baseBranch: "main" }] }), `cp "$work/checkpoint.zck" '${out}'`, CHECKPOINT_SAVED_REPORT], p.env);
+      expect(parseCheckpointResult(saved.stdout)).toMatchObject({ ok: true });
+      expect(scrub(p, "backup")).toBe("backup");
+      for (const checkout of checkouts(p)) expect(existsSync(join(checkout, ".env.log"))).toBe(false);
+      expect(existsSync(join(p.oldHome, ".claude/.credentials.json"))).toBe(false);
+      // The journals stay, so the worker's seed writes nothing over what comes back.
+      expect(journals(p)).toEqual([true, true]);
+      const restored = run(environmentRestoreSteps({ checkoutPath: checkouts(p)[0]!, home: p.oldHome, key, sha256: sha(out), repositories: [checkouts(p)[1]!] },
+        [`cp '${out}' "$work/checkpoint.zck"`]), p.env);
+      expect(parseEnvironmentRestore(restored.stdout)).toBe(true);
+      expect(readFileSync(join(checkouts(p)[0]!, ".env.log"), "utf8")).toBe("API=edited by hand\n");
+      expect(readFileSync(join(checkouts(p)[1]!, ".env.log"), "utf8")).toBe("WEB=edited by hand\n");
+    }, 30_000);
+
+    it("re-seeds only when every repository's files are the server's: one edit anywhere keeps them all", () => {
+      const p = project();
+      seeded(p, { api: "API=server\n", web: "WEB=server\n" });
+      p.write(join(checkouts(p)[1]!, ".env.log"), "WEB=edited by hand\n");
+      expect(scrub(p, "reseed")).toBe("partial");
+      for (const checkout of checkouts(p)) expect(existsSync(join(checkout, ".env.log"))).toBe(true);
+      expect(journals(p)).toEqual([true, true]);
+      p.write(join(checkouts(p)[1]!, ".env.log"), "WEB=server\n");
+      expect(scrub(p, "reseed")).toBe("clean");
+      for (const checkout of checkouts(p)) expect(existsSync(join(checkout, ".env.log"))).toBe(false);
+      expect(journals(p)).toEqual([false, false]);
+    });
+
+    it("keeps every environment file with no copy to restore from", () => {
+      const p = project();
+      seeded(p, { api: "API=edited\n", web: "WEB=edited\n" });
+      expect(scrub(p, "keep")).toBe("partial");
+      for (const checkout of checkouts(p)) expect(existsSync(join(checkout, ".env.log"))).toBe(true);
+    });
+  });
 
   it("refuses a shared-execution restore of several repositories without each repository's token", () => {
     const p = project(), key = randomBytes(32);

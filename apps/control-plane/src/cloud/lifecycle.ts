@@ -924,7 +924,7 @@ export class CloudV2Lifecycle {
       changedSinceStop = !changed || changed.timedOut || parseChangedSinceStop(changed.stdout);
       const mode = row.maintenanceWake.scrub;
       if (mode) {
-        const scrubbed = await compute.exec(vm, archiveScrubCommand({ home: CLOUD_V2_HOME, checkoutPath: workspaceCheckoutPath(row), mode }), ARCHIVE_SCRUB_SECONDS)
+        const scrubbed = await compute.exec(vm, archiveScrubCommand({ home: CLOUD_V2_HOME, checkoutPaths: checkouts, mode }), ARCHIVE_SCRUB_SECONDS)
           .catch(() => null);
         const result = scrubbed && !scrubbed.timedOut ? parseArchiveScrub(scrubbed.stdout) : "partial";
         // A backup-mode scrub may have removed files before it failed: the open restores them either way.
@@ -1041,8 +1041,10 @@ export class CloudV2Lifecycle {
       let key: Buffer | undefined;
       try {
         key = checkpoints.open(checkpoint.key, workspace.id, checkpoint.object);
+        const others = await this.deps.repositories?.(workspace) ?? [];
         const command = environmentRestoreCommand({ checkoutPath: workspaceCheckoutPath(workspace), home: CLOUD_V2_HOME, key,
-          sha256: checkpoint.sha256, downloadUrl: await checkpoints.storage.downloadUrl(workspace.id, checkpoint.object) });
+          sha256: checkpoint.sha256, downloadUrl: await checkpoints.storage.downloadUrl(workspace.id, checkpoint.object),
+          repositories: others.map(entry => `${CLOUD_V2_HOME}/${entry.checkoutFolder}`) });
         const result = await this.deps.compute.exec(sandboxId, command, CLOUD_V2_CHECKPOINT_SECONDS);
         if (result.exitCode === 0 && !result.timedOut && parseEnvironmentRestore(result.stdout)) return true;
       } catch (error) {
