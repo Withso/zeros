@@ -144,3 +144,30 @@ export function stagedPickOnSend(state: {
   if (!state.running) return "switch";
   return state.behavior === "steer" ? "restart" : "hold";
 }
+
+/** A send held for the running turn goes once the turn ends, unless Stop
+ *  (a new cancel generation) cancelled it with the turn. */
+export function heldSwitchSend(
+  held: { chatId: string; generation: number | undefined } | null,
+  state: { chatId: string; running: boolean; generation: number | undefined },
+): "wait" | "send" | "drop" {
+  if (!held || held.chatId !== state.chatId || state.running) return "wait";
+  return held.generation === state.generation ? "send" : "drop";
+}
+
+/** The handoff the new harness has not received yet. `auto` is its one
+ *  automatic send; later composer sends carry it until one is accepted. */
+export interface PendingHandoff {
+  chatId: string;
+  agentId: string;
+  handoff: string;
+  auto: boolean;
+}
+
+export function handoffAppliesTo(
+  pending: PendingHandoff | null,
+  chatId: string | null | undefined,
+  agentId: string | null | undefined,
+): pending is PendingHandoff {
+  return !!pending && pending.chatId === chatId && pending.agentId === agentId;
+}

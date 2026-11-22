@@ -3,6 +3,8 @@ import {
   buildHarnessSwitchMessage,
   handoffContextPrefix,
   stagedPickOnSend,
+  heldSwitchSend,
+  handoffAppliesTo,
   commitHarnessSwitch,
   type HarnessSwitchCommit,
   harnessSwitchBlockedByQueue,
@@ -99,6 +101,31 @@ describe("handoff context prefix", () => {
     expect(`${prefix}hello`.endsWith("User message:\nhello")).toBe(true);
     expect(prefix).not.toContain("omitted");
     expect(handoffContextPrefix({ fromLabel: "a", text: "t", complete: false })).toContain("omitted");
+  });
+});
+
+describe("held switch send", () => {
+  const held = { chatId: "c", generation: 3 };
+  it("waits while the turn runs, then sends", () => {
+    expect(heldSwitchSend(held, { chatId: "c", running: true, generation: 3 })).toBe("wait");
+    expect(heldSwitchSend(held, { chatId: "c", running: false, generation: 3 })).toBe("send");
+  });
+  it("drops the held send when Stop ended the turn", () => {
+    expect(heldSwitchSend(held, { chatId: "c", running: false, generation: 4 })).toBe("drop");
+  });
+  it("ignores another chat and an empty hold", () => {
+    expect(heldSwitchSend(held, { chatId: "d", running: false, generation: 3 })).toBe("wait");
+    expect(heldSwitchSend(null, { chatId: "c", running: false, generation: 3 })).toBe("wait");
+  });
+});
+
+describe("pending handoff", () => {
+  const pending = { chatId: "c", agentId: "cursor", handoff: "<context_handoff>", auto: false };
+  it("rides the next send to the new harness only", () => {
+    expect(handoffAppliesTo(pending, "c", "cursor")).toBe(true);
+    expect(handoffAppliesTo(pending, "c", "codex")).toBe(false);
+    expect(handoffAppliesTo(pending, "d", "cursor")).toBe(false);
+    expect(handoffAppliesTo(null, "c", "cursor")).toBe(false);
   });
 });
 

@@ -327,6 +327,9 @@ import {
   handoffContextPrefix,
   harnessSwitchTranscriptMode,
   stagedPickOnSend,
+  heldSwitchSend,
+  handoffAppliesTo,
+  type PendingHandoff,
   isHarnessChange,
   isPendingPick,
   commitHarnessSwitch,
@@ -1373,7 +1376,7 @@ function AgentChatBody({
   const heldSwitchSendRef = useRef<{ chatId: string; generation: number | undefined } | null>(null);
   // Kept until a prompt carrying it is accepted, so a slash command or a failed
   // send doesn't drop the conversation.
-  const switchedSendRef = useRef<{ chatId: string; agentId: string; handoff: string; auto: boolean } | null>(null);
+  const switchedSendRef = useRef<PendingHandoff | null>(null);
   const [switchSendTick, setSwitchSendTick] = useState(0);
 
   const recordSwitchRow = useCallback(
@@ -1500,6 +1503,14 @@ function AgentChatBody({
   // same pills.
   const editToolbarPills = useMemo(() => {
     if (!chatThread) return null;
+    // A staged pick shows the target model's own settings, as send applies them.
+    const stagedConfiguration = stagedPick
+      ? stagedPick.configuration ?? resolveModelConfiguration(
+        stagedPick.agentId,
+        stagedPick.model,
+        isHarnessChange(chatThread.agentId, stagedPick.agentId) ? null : session.initialize,
+      )
+      : null;
     return (
       <>
         <ModelPill
@@ -1508,8 +1519,8 @@ function AgentChatBody({
           initialize={stagedPick && isHarnessChange(chatThread.agentId, stagedPick.agentId) ? null : session.initialize}
           onRefreshModels={isCloudWorkspace(chatThread.folder) ? session.refreshModelCatalog : undefined}
           value={stagedPick ? stagedPick.model : chatThread.model}
-          effort={stagedPick?.configuration?.effort ?? chatThread.effort}
-          fast={stagedPick?.configuration?.fast ?? !!chatThread.fast}
+          effort={stagedConfiguration?.effort ?? chatThread.effort}
+          fast={stagedConfiguration ? stagedConfiguration.fast : !!chatThread.fast}
           onSelectAgentModel={(sel) => {
             if (conversationStarted) stagePick(sel);
             else switchAgentModel(sel);
@@ -3908,7 +3919,7 @@ function AgentChatBody({
     recordActivity = true,
   ): Promise<boolean> => {
     const handoff = switchedSendRef.current;
-    if (handoff && handoff.chatId === chatId && handoff.agentId === chatThread?.agentId) {
+    if (handoffAppliesTo(handoff, chatId, chatThread?.agentId)) {
       return sendWithHandoff(handoff, extras, recordActivity);
     }
     if (!readOnly && !sendInFlightRef.current && stagedPick && chatId) {
@@ -3950,7 +3961,7 @@ function AgentChatBody({
   };
 
   const sendWithHandoff = async (
-    handoff: { chatId: string; agentId: string; handoff: string; auto: boolean },
+    handoff: PendingHandoff,
     extras?: Parameters<typeof runSend>[1],
     recordActivity = true,
   ): Promise<boolean> => {
@@ -3962,11 +3973,13 @@ function AgentChatBody({
   // A switch waits for the running turn, so the previous agent is never cut
   // off. Stop cancels the held send with the turn.
   useEffect(() => {
-    const held = heldSwitchSendRef.current;
-    if (!chatId || held?.chatId !== chatId || composerStreaming) return;
+    if (!chatId) return;
+    const step = heldSwitchSend(heldSwitchSendRef.current, {
+      chatId, running: composerStreaming, generation: agentSessions.getSendGeneration(chatId),
+    });
+    if (step === "wait") return;
     heldSwitchSendRef.current = null;
-    if (held.generation !== agentSessions.getSendGeneration(chatId)) return;
-    void submitComposer();
+    if (step === "send") void submitComposer();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [chatId, composerStreaming, switchSendTick]);
 
@@ -3974,7 +3987,7 @@ function AgentChatBody({
   // the conversation hidden in the prompt.
   useEffect(() => {
     const pending = switchedSendRef.current;
-    if (!pending?.auto || pending.chatId !== chatId || pending.agentId !== chatThread?.agentId) return;
+    if (!pending?.auto || !handoffAppliesTo(pending, chatId, chatThread?.agentId)) return;
     pending.auto = false;
     void sendWithHandoff(pending);
     // eslint-disable-next-line react-hooks/exhaustive-deps
