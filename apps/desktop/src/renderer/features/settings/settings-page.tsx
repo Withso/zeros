@@ -4,6 +4,8 @@ import {
   UNIFIED_ORGANIZATION_SECTIONS,
   UNIFIED_PERSONAL_SECTIONS,
 } from "./settings-section-availability";
+import { CloudRetentionRule } from "./cloud-retention-rule";
+import { cloudOrganizationFor } from "../team/personal-cloud";
 import { LocalStoragePanel } from "./local-storage-panel";
 import {
   cancelLocalStorageMeasurement,
@@ -1014,6 +1016,7 @@ function GeneralPanel({ surfaceActive = true, unified = false }: { surfaceActive
         {sections.includes("workspace-api-access") && <WorkspaceApiAccessSetting organizationId={organization!.id} surfaceActive={surfaceActive} />}
         <ComputerUseSettingsSection surfaceActive={surfaceActive} withPermissions />
         {sections.includes("always-allow-local-commands") && <AlwaysAllowLocalCommands surfaceActive={surfaceActive} />}
+        <CloudRetentionRule organizationId={organization?.id} />
       </div>
     );
   }
@@ -1032,6 +1035,7 @@ function LocalGeneralPanel({ surfaceActive }: { surfaceActive: boolean }) {
       </SettingsGroup>
       <ComputerUseSettingsSection surfaceActive={surfaceActive} />
       <PrivacyGroup surfaceActive={surfaceActive} />
+      <PersonalCloudRetentionRule />
     </div>
   );
 }
@@ -1050,8 +1054,15 @@ function PersonalGeneralPanel() {
         <RestartOnUpdateRow />
         <AnalyticsRow />
       </SettingsGroup>
+      <PersonalCloudRetentionRule />
     </div>
   );
+}
+
+/** Personal's own cloud (C3): the rule for its cloud owner, when its server runs retention. */
+function PersonalCloudRetentionRule() {
+  const organization = useActiveOrganization();
+  return <CloudRetentionRule organizationId={organization?.isPersonal ? cloudOrganizationFor(organization)?.id : null} />;
 }
 
 function ShowInBetweenMessagesRow() {
@@ -1128,6 +1139,7 @@ function OrganizationGeneralPanel({ surfaceActive = true }: { surfaceActive?: bo
     <div className="flex flex-col gap-8">
       {sections.includes("workspace-api-access") && <WorkspaceApiAccessSetting organizationId={organization.id} surfaceActive={surfaceActive} />}
       {sections.includes("always-allow-local-commands") && <AlwaysAllowLocalCommands surfaceActive={surfaceActive} />}
+      <CloudRetentionRule organizationId={organization.id} />
     </div>
   );
 }
