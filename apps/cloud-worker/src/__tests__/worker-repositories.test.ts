@@ -168,3 +168,47 @@ it("rereads every repository's GitHub state after a gh mutation, not only the fi
   await vi.waitFor(() => expect(changed).toHaveBeenCalledTimes(2));
   changed.mockRestore();
 });
+
+it("asks for a planned submodule's own token by name, and brings a new checkout's submodules before its setup, never a resumed one's", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "worker-submodules-"));
+  cleanups.push(() => rm(directory, { recursive: true, force: true }));
+  const checkout = join(directory, "app");
+  await mkdir(checkout);
+  const submodules = [{ position: 0, path: "vendor/lib", repository: "acme/lib", commit: "a".repeat(40), gitDir: `modules/${"b".repeat(64)}` }];
+  const run = async (createdBranch: boolean) => {
+    const relay = new FakeRelay(), log = vi.fn(), state = await mkdtemp(join(directory, "state-"));
+    const prepareCheckout = vi.fn(async () => ({ createdBranch }));
+    const worker = new CloudWorker({ directory: state, homeDirectory: directory, transport: relay, prepareCheckout, cloneCheckout: vi.fn(async () => false),
+      setupRunner: vi.fn(async () => 0), drivers: {}, workspaceServices: { watch: false }, log,
+      // GitHub answers /user with 403 for an installation token (only a 401 means a dead token).
+      githubFetch: vi.fn(async () => new Response(null, { status: 403 })) });
+    cleanups.push(() => worker.dispose());
+    worker.start();
+    await relay.receive({ ...config, agents: {}, githubUserTokens: 1, workspace: { ...config.workspace, checkoutPath: checkout, submodules } });
+    return { relay, log, prepareCheckout };
+  };
+  // A new checkout: the planned submodule is attempted (here its folder is missing, so it is skipped, named by count only).
+  const fresh = await run(true);
+  await vi.waitFor(() => expect(fresh.log).toHaveBeenCalledWith("[submodules] repository 0: 0 fetched, 1 skipped"));
+  const { brokerRequest } = await import("../credentials/broker");
+  const socket = (fresh.prepareCheckout.mock.calls[0] as unknown as [unknown, NodeJS.ProcessEnv])[1].GH_ZEROS_BROKER_SOCKET!;
+  const asked = (repository?: string) => {
+    const pending = brokerRequest(socket, "token", undefined, repository);
+    pending.catch(() => {});
+    return pending;
+  };
+  const tokenRequests = () => fresh.relay.frames.filter(frame => frame.t === "request" && frame.kind === "github-token") as { id: string; repository?: string }[];
+  const planned = asked("acme/lib");
+  await vi.waitFor(() => expect(tokenRequests()).toHaveLength(1));
+  expect(tokenRequests()[0]).toMatchObject({ purpose: "git", repository: "acme/lib" });
+  await fresh.relay.receive({ t: "reply", id: tokenRequests()[0]!.id, token: "synthetic-read-only", expiresAt: Date.now() + 120_000 });
+  expect(await planned).toMatchObject({ token: "synthetic-read-only" });
+  // Any other repository Git names gets no token of its own: the workspace's, as before.
+  void asked("acme/unplanned");
+  await vi.waitFor(() => expect(tokenRequests()).toHaveLength(2));
+  expect(tokenRequests()[1]).not.toHaveProperty("repository");
+  // A resumed disk (its branch already there): the person's submodules are left as they are.
+  const resumed = await run(false);
+  await vi.waitFor(() => expect(resumed.prepareCheckout).toHaveBeenCalled());
+  expect(resumed.log.mock.calls.filter(([line]) => String(line).startsWith("[submodules]"))).toEqual([]);
+});

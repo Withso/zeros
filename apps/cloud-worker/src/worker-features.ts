@@ -1,4 +1,4 @@
-import { WORKSPACE_REPOSITORIES_FEATURE, ACTING_USER_FEATURE, BOOT_TIMINGS_FEATURE, CLOUD_RECOVERY_QUIESCE_FEATURE, HISTORY_DIGEST_DELETIONS_FEATURE, HISTORY_DIGEST_FEATURE, CREATOR_AGENT_LOGINS_FEATURE, CREATOR_AGENT_MODELS_FEATURE, CREATOR_COMMIT_IDENTITY_FEATURE, MESSAGE_AUTHORITY_FEATURE, PUSH_SIGNALS_FEATURE, HISTORY_BATCH_FEATURE, BEGIN_LEASE_FEATURE, TURN_EVENTS_FEATURE } from "@zeros/protocol/cloud-v2-relay";
+import { WORKSPACE_REPOSITORIES_FEATURE, ACTING_USER_FEATURE, BOOT_TIMINGS_FEATURE, CLOUD_RECOVERY_QUIESCE_FEATURE, HISTORY_DIGEST_DELETIONS_FEATURE, HISTORY_DIGEST_FEATURE, CREATOR_AGENT_LOGINS_FEATURE, CREATOR_AGENT_MODELS_FEATURE, CREATOR_COMMIT_IDENTITY_FEATURE, MESSAGE_AUTHORITY_FEATURE, PUSH_SIGNALS_FEATURE, HISTORY_BATCH_FEATURE, BEGIN_LEASE_FEATURE, TURN_EVENTS_FEATURE, WORKSPACE_SUBMODULES_FEATURE } from "@zeros/protocol/cloud-v2-relay";
 
 /** Advertised on hello and on the relay's inbound dial. The control plane gates
  * each configuration on the list it saw, so the two must be identical. */
@@ -33,4 +33,6 @@ export const CLOUD_WORKER_FEATURES = ["prompt-outbox-v1", "mcp-v1", "workspace-s
   /** Outcomes and retirements ride in history batches, one transaction with the rows (with config.turnEvents). */
   TURN_EVENTS_FEATURE,
   /** A workspace of several repositories: a checkout, services and setup per repository, and a repository on each token request. */
-  WORKSPACE_REPOSITORIES_FEATURE].join(",");
+  WORKSPACE_REPOSITORIES_FEATURE,
+  /** Fetches config.workspace.submodules into a new checkout, and asks for a submodule's (read-only) token by name. */
+  WORKSPACE_SUBMODULES_FEATURE].join(",");

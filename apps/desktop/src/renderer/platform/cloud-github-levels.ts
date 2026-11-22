@@ -17,6 +17,8 @@ const ConnectionsSchema = z.object({ organization: z.array(CloudGithubLevelConne
 export type CloudGithubLevelConnections = z.infer<typeof ConnectionsSchema>;
 const ProjectRepositorySchema = z.object({ repository: z.string().max(201), repositoryId: z.string().max(20), connectionId: uuid.nullable(),
   defaultBranch: z.string().max(255).nullable(), setup: z.string().max(8_000).nullable(), setupScript: z.string().max(512).nullable(),
+  /** Absent from a server before cloud submodules: off. */
+  fetchSubmodules: z.boolean().catch(false).optional(),
   position: z.number().int() }).passthrough();
 export const CloudProjectSchema = z.object({
   id: uuid, name: z.string().max(100), level: z.enum(["organization", "personal"]), ownerUserId: uuid.nullable(), canEdit: z.boolean(),
@@ -66,7 +68,8 @@ export const shareCloudProject = (organizationId: string, projectId: string) =>
   cloudAccountRequest(`${base(organizationId)}/cloud-projects/${uuid.parse(projectId)}/share`, z.object({ project: CloudProjectSchema }).passthrough(),
     { body: {}, idempotencyKey: key() });
 /** A repository as a project names it; its GitHub ID is read by the server as the caller. */
-export type CloudProjectRepositoryInput = { repository: string; defaultBranch?: string | null; setup?: string | null; setupScript?: string | null };
+/** `fetchSubmodules` absent keeps the repository's current setting. */
+export type CloudProjectRepositoryInput = { repository: string; defaultBranch?: string | null; setup?: string | null; setupScript?: string | null; fetchSubmodules?: boolean };
 const ProjectReplySchema = z.object({ project: CloudProjectSchema }).passthrough();
 export const createCloudProject = async (organizationId: string, input: { name: string; level: "organization" | "personal"; repositories: CloudProjectRepositoryInput[] }) =>
   (await cloudAccountRequest(`${base(organizationId)}/cloud-projects`, ProjectReplySchema, { body: input, idempotencyKey: key() })).project;
@@ -94,8 +97,12 @@ const ReadyCopySchema = z.object({
   }).passthrough(),
   history: z.array(z.object({ generation: z.number().int(), state: z.enum(["building", "ready", "failed", "retired"]), startedAt: z.string().nullable(),
     finishedAt: z.string().nullable(), trigger: z.string().nullable(), startedBy: z.string().nullable(),
+    /** A finer reason than `trigger` (the submodules switch rebuilds as setup_changed); absent from older servers. */
+    triggerDetail: z.string().max(64).optional().catch(undefined),
     /** What each repository was cloned at; null until the generation is ready. */
-    repositories: z.array(z.object({ repository: z.string().max(201), branch: z.string().max(255).nullable(), commit: z.string().max(40).nullable() }).passthrough())
+    repositories: z.array(z.object({ repository: z.string().max(201), branch: z.string().max(255).nullable(), commit: z.string().max(40).nullable(),
+      /** With "fetch submodules" on: how many the build fetched and skipped (never their names). */
+      submoduleCounts: z.object({ fetched: z.number().int().min(0), skipped: z.number().int().min(0) }).optional().catch(undefined) }).passthrough())
       .max(10).nullable().catch(null),
     failure: z.object({ reason: z.string(), repository: z.string().max(201).nullable().catch(null), step: z.string().max(32).nullable().catch(null),
       detail: z.string().nullable() }).nullable(), output: z.boolean() }).passthrough()).max(50).optional(),
