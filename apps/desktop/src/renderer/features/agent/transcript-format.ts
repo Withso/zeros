@@ -3,10 +3,11 @@
 // Full mode is every visible message in order; concise alternates each prompt
 // with its turn's concluding answer, using partitionTurn's boundary so it
 // matches a collapsed turn. Handoff sits between them: every prompt, thinking
-// block, in-between message and answer, with tool calls replaced by one
-// "Files changed" list per turn. Visibility mirrors agent-chat.tsx's
-// `visibleMessages`, and volume follows what the user saw: prose is generous,
-// while tool payloads are bounded and say what they dropped.
+// block, in-between message and answer, the chat's latest tool calls with the
+// end of their output, and one "Files changed" list per turn. Visibility
+// mirrors agent-chat.tsx's `visibleMessages`, and volume follows what the user
+// saw: prose is generous, while tool payloads are bounded and say what they
+// dropped.
 
 import {
   readQuestionStamp,
@@ -25,6 +26,7 @@ import { toolPresentationReady, withoutRedundantAgentTasks } from "./renderers/t
 import { pendingChecksMessage } from "./renderers/tool-pending-checks";
 import { isLegacyAuthenticationNotice, isUsageNotice, usageStatusChanges } from "./transcript-notices";
 import { isTurnFailureNotice, turnFailureForCard } from "./turn-failure";
+import { HARNESS_SWITCH_TOOL_KIND } from "./harness-switch";
 import { authenticationTurn, authenticationTurnOutput, authenticationTurnState, latestAuthenticationRecoveryTurn } from "./auth-prompt-recovery";
 
 export type TranscriptMode = "full" | "concise" | "handoff";
@@ -59,6 +61,12 @@ export const TRANSCRIPT_TEXT_MAX = 20_000;
  *  test run read as the whole run. */
 export const TRANSCRIPT_PAYLOAD_LINES = 40;
 export const TRANSCRIPT_PAYLOAD_MAX = 2_000;
+
+/** A handoff keeps only the chat's latest tool calls, so the next agent sees
+ *  where the work stood without the whole command history. Their output keeps
+ *  its END, where a command reports its result. */
+export const HANDOFF_TOOL_CALLS = 20;
+export const HANDOFF_TOOL_OUTPUT_MAX = 2_000;
 
 /** Whole-document cap. A pathological chat (20k messages × large tool
  *  payloads) would otherwise build a string big enough to stall the renderer
@@ -174,9 +182,18 @@ function clipPayload(s: string): string {
   return `${head}\n… (${missing})`;
 }
 
+/** The last `max` code units of `s`, marking what was dropped above them. */
+function clipTail(s: string, max: number): string {
+  if (s.length <= max) return s;
+  let start = s.length - max;
+  const c = s.charCodeAt(start);
+  if (c >= 0xdc00 && c <= 0xdfff) start += 1;
+  return `… (${start} earlier characters)\n${s.slice(start)}`;
+}
+
 /** Fenced code block for a tool payload, or "" when there's nothing to show. */
-function block(body: string, lang = ""): string {
-  const trimmed = clipPayload(body).trimEnd();
+function block(body: string, lang = "", clip: (s: string) => string = clipPayload): string {
+  const trimmed = clip(body).trimEnd();
   if (!trimmed) return "";
   const f = fenceFor(trimmed);
   return `${f}${lang}\n${trimmed}\n${f}`;
@@ -539,7 +556,30 @@ function handoffProse(m: AgentMessage): boolean {
   return m.redacted === true || (typeof m.text === "string" && m.text.trim().length > 0);
 }
 
-function handoffTurn(prompt: AgentTextMessage | null, events: AgentMessage[], root: string | undefined): string {
+/** A tool call the agent ran, as opposed to a Zeros row that only looks like one. */
+function handoffToolCall(m: AgentMessage): m is AgentToolMessage {
+  return m.kind === "tool" && !m.parentToolId && m.toolKind !== HARNESS_SWITCH_TOOL_KIND &&
+    !readQuestionStamp(m.rawOutput);
+}
+
+function handoffTool(tool: AgentToolMessage, root: string | undefined): string {
+  const rawTitle = tool.title || tool.toolKind || "tool";
+  const status = tool.status === "completed" ? "" : ` — ${tool.status.replace("_", " ")}`;
+  const out = [`### Tool · ${relativize(rawTitle, root)}${status}`];
+  const input = inputIsRedundant(tool.rawInput, rawTitle) ? "" : payloadText(tool.rawInput).trim();
+  const inputBlock = input ? block(input, isJsonObject(tool.rawInput) ? "json" : "") : "";
+  if (inputBlock) out.push("", "Input:", inputBlock);
+  const outputBlock = block(toolOutputText(tool), "", (s) => clipTail(s, HANDOFF_TOOL_OUTPUT_MAX));
+  if (outputBlock) out.push("", "Output:", outputBlock);
+  return out.join("\n");
+}
+
+function handoffTurn(
+  prompt: AgentTextMessage | null,
+  events: AgentMessage[],
+  root: string | undefined,
+  keptTools: ReadonlySet<string>,
+): string {
   const parts: string[] = [];
   if (prompt) parts.push(safeSection(() => renderUser(prompt), "prompt"));
   const files = new Set<string>();
@@ -547,6 +587,10 @@ function handoffTurn(prompt: AgentTextMessage | null, events: AgentMessage[], ro
     if (m.kind === "tool") {
       if (m.parentToolId) continue;
       for (const path of changedPaths(m)) files.add(relativize(path, root));
+      if (keptTools.has(m.toolCallId)) {
+        const section = safeSection(() => handoffTool(m, root), "tool");
+        if (section) parts.push(section);
+      }
       // A native ask-tool's answers exist only on its stamp.
       const stamp = readQuestionStamp(m.rawOutput);
       if (stamp) {
@@ -564,7 +608,7 @@ function handoffTurn(prompt: AgentTextMessage | null, events: AgentMessage[], ro
 }
 
 /** Markdown for handing a conversation to another agent, model or harness:
- *  the reasoning and conversation without tool noise. */
+ *  the reasoning and conversation, and only the latest tool calls. */
 export function formatHandoffTranscript(
   messages: AgentMessage[],
   meta?: TranscriptMeta,
@@ -654,8 +698,9 @@ export function formatTranscript(
 
   if (mode === "handoff") {
     const root = meta?.folder?.trim() || undefined;
+    const keptTools = new Set(top.filter(handoffToolCall).slice(-HANDOFF_TOOL_CALLS).map((m) => m.toolCallId));
     const sections = turns
-      .map((turn) => handoffTurn(turn.userPrompt, turn.events, root))
+      .map((turn) => handoffTurn(turn.userPrompt, turn.events, root, keptTools))
       .filter((s) => s.length > 0);
     const { text, truncated, used } = assemble(head, sections);
     return { text: `${text}\n`, count: used, truncated };
