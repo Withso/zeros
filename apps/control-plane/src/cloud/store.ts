@@ -136,7 +136,7 @@ export type CloudV2Workspace = {
   archiveReason?: "manual" | "inactive" | "member_left";
   /** While archived and its machine is recorded: when Boat removes the machine. `estimate` unless Boat said so. */
   machineExpectedGoneAt?: { at: string; estimate: boolean };
-  /** While archived with a backup: when the backup is removed (archive + 60 days). */
+  /** While archived with a backup, once retention applies: greatest(archive, retention's start) + 60 days. */
   backupRemovalAt?: string;
 };
 
@@ -231,7 +231,7 @@ export type CloudV2WorkspaceRow = {
   folder?: string | null;
   keep_set_at?: Date | null; archive_reason?: "manual" | "inactive" | "member_left" | null;
   stopped_at?: Date | null; machine_stopped_at?: Date | null; machine_data_expired_at?: Date | null;
-  archive_wake_done_at?: Date | null; checkpoint_object?: string | null;
+  archive_wake_done_at?: Date | null; checkpoint_object?: string | null; retention_started_at?: Date | null;
 };
 type Row = CloudV2WorkspaceRow;
 
@@ -239,7 +239,7 @@ const WORKSPACE_COLUMNS_SQL = sql`id, org_id, creator_user_id, name, number, tit
   computer_build_id, error_code, active_at, archived_at, created_at, updated_at, source_pending, created_by_session_id, setup_status,
   agent_cost_usd, agent_cost_turns, agent_cost_estimated_turns, private_owner_user_id, project_id, checkout_path, folder,
   lost_work_restored, lost_work_since, keep_set_at, archive_reason, stopped_at, machine_stopped_at, machine_data_expired_at,
-  archive_wake_done_at, checkpoint_object`;
+  archive_wake_done_at, checkpoint_object, retention_started_at`;
 const COLUMNS = WORKSPACE_COLUMNS_SQL.text;
 export const CLOUD_V2_WORKSPACE_COLUMNS = COLUMNS.split(",").map(value => value.trim());
 
@@ -357,9 +357,26 @@ function workspace(row: Row): CloudV2Workspace {
     ...(row.checkout_path ? { checkoutFolder: row.checkout_path } : {}),
     ...(row.folder ? { folder: row.folder } : {}),
     ...(row.lost_work_restored && row.lost_work_since ? { lostWork: { restored: row.lost_work_restored, stoppedAt: row.lost_work_since.toISOString() } } : {}),
-    keep: Boolean(row.keep_set_at) && !row.archived_at,
-    ...archiveFields(row),
+    // Retention's fields only where retention runs: with the switch off a document is exactly what it was.
+    ...(retentionDocuments ? { keep: Boolean(row.keep_set_at) && !row.archived_at, ...archiveFields(row) } : {}),
   };
+}
+
+let retentionDocuments = false;
+/** Retention S3: whether workspace documents carry retention's fields (keep, archiveReason, machineExpectedGoneAt,
+ * backupRemovalAt). Set once at composition from CLOUD_V2_RETENTION_ENABLED; every path that serves a document
+ * (get, list, team views, the composite routes) goes through workspace(), so none can disagree. Off by default. */
+export function setCloudV2RetentionDocuments(enabled: boolean): void { retentionDocuments = enabled; }
+
+/** An archived workspace's backup is removed this long after its archive, counted from when retention first
+ * applied if that is later: no clock starts from history. S4's removal uses this same expression. */
+export const CLOUD_V2_BACKUP_REMOVAL_DAYS = 60;
+export const CLOUD_V2_BACKUP_REMOVAL_AT_SQL =
+  `greatest(w.archived_at, w.retention_started_at) + make_interval(days => ${CLOUD_V2_BACKUP_REMOVAL_DAYS})`;
+/** The same date, in the document; null until both clocks exist. */
+export function cloudV2BackupRemovalAt(archivedAt: Date | null | undefined, retentionStartedAt: Date | null | undefined): Date | null {
+  if (!(archivedAt instanceof Date) || !(retentionStartedAt instanceof Date)) return null;
+  return new Date(Math.max(archivedAt.getTime(), retentionStartedAt.getTime()) + CLOUD_V2_BACKUP_REMOVAL_DAYS * DAY_MS);
 }
 
 const DAY_MS = 24 * 60 * 60_000;
@@ -378,12 +395,15 @@ function archiveFields(row: Row): Pick<CloudV2Workspace, "archiveReason" | "mach
   const lastStop = [row.machine_stopped_at, row.stopped_at].filter((at): at is Date => at instanceof Date)
     .reduce<Date | null>((latest, at) => !latest || at > latest ? at : latest, null);
   const woken = row.archive_wake_done_at instanceof Date && row.archive_wake_done_at >= row.archived_at;
+  const estimate = lastStop ? lastStop.getTime() + (woken ? 14 : 24) * DAY_MS : null;
+  // An estimate already past (an overdue wake) says nothing true: absent rather than a past date.
   const gone = !row.boat_sandbox_id ? null : row.machine_data_expired_at ? { at: row.machine_data_expired_at.toISOString(), estimate: false }
-    : lastStop ? { at: new Date(lastStop.getTime() + (woken ? 14 : 24) * DAY_MS).toISOString(), estimate: true } : null;
+    : estimate !== null && estimate > Date.now() ? { at: new Date(estimate).toISOString(), estimate: true } : null;
+  const removal = row.checkpoint_object ? cloudV2BackupRemovalAt(row.archived_at, row.retention_started_at) : null;
   return {
     ...(row.archive_reason ? { archiveReason: row.archive_reason } : {}),
     ...(gone ? { machineExpectedGoneAt: gone } : {}),
-    ...(row.checkpoint_object ? { backupRemovalAt: new Date(row.archived_at.getTime() + 60 * DAY_MS).toISOString() } : {}),
+    ...(removal ? { backupRemovalAt: removal.toISOString() } : {}),
   };
 }
 export { workspace as cloudV2WorkspaceFromRow };

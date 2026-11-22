@@ -5,14 +5,14 @@
 // not on GitHub, and an archive is the set of such files it captured.
 import { generateKeyPairSync, randomUUID } from "node:crypto";
 import pg from "pg";
-import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { CloudProviderError } from "./provider-error.js";
 import { resetMigratedTestDatabase } from "../test-database.js";
 import { grantTestPro } from "../test-pro.js";
 import { FakeBoat } from "./__fixtures__/boat-fake.js";
 import { CLOUD_V2_BACKUP_DELAY_MS, CLOUD_V2_CHECKPOINT_RETRY_WINDOW_MS, CLOUD_V2_LOSS_CONFIRM_MS, CLOUD_V2_LOSS_UNCONFIRMED_ALERT, CLOUD_V2_MAINTENANCE_LEASE_SECONDS,
   CLOUD_V2_MAINTENANCE_ADOPT_STALE_MS, CLOUD_V2_MAINTENANCE_STALE_MS, CloudV2Lifecycle, type CloudV2LifecycleDeps, type CloudV2TimingRecord } from "./lifecycle.js";
-import { CloudV2Store } from "./store.js";
+import { CLOUD_V2_BACKUP_REMOVAL_AT_SQL, CloudV2Store, setCloudV2RetentionDocuments } from "./store.js";
 
 const d = process.env.TEST_DATABASE_URL ? describe : describe.skip;
 const HOME = "/home/user";
@@ -36,7 +36,10 @@ d("cloud v2 retention", () => {
 
   beforeAll(() => { pool = new pg.Pool({ connectionString: process.env.TEST_DATABASE_URL, max: 4 }); });
   afterAll(() => pool.end());
+  // As composition does with CLOUD_V2_RETENTION_ENABLED on; off again after, for any later file in this worker.
+  afterEach(() => setCloudV2RetentionDocuments(false));
   beforeEach(async () => {
+    setCloudV2RetentionDocuments(true);
     await resetMigratedTestDatabase(pool);
     archives = new Map(); uploads = []; errors = []; warnings = []; timings = []; remoteBranches = new Set(); backupFails = false;
     markers = new Set(); written = new Set(); changeTimesOut = false; environmentRestoreFails = false; seeded = new Map();
@@ -992,6 +995,37 @@ d("cloud v2 retention", () => {
         expect((await store.archiveInactive({ inactiveMs: 30 * DAY, limit: 200 })).archived).toHaveLength(5);
         // Owner decision (2026-11-22): the archive is shown in the app, never mailed.
         expect(Number((await pool.query("SELECT count(*) AS n FROM security_notification_outbox")).rows[0].n)).toBe(0);
+      });
+
+      it("carries no retention field at all with the switch off: the document is exactly what it was", async () => {
+        await stop();
+        await pool.query(`UPDATE cloud_v2_workspaces SET checkpoint_object=$2, checkpoint_key='{"sealed":true}', checkpoint_sha256=$3, checkpoint_bytes=100,
+          checkpoint_saved_at=clock_timestamp(), checkpoint_stop_generation=stop_generation WHERE id=$1`, [id, `cloud-v2/checkpoints/${id}/${randomUUID()}.zck`, "e".repeat(64)]);
+        await store.requestLifecycle(id, user, "archive");
+        setCloudV2RetentionDocuments(false);
+        const plain = await store.get(id, user);
+        for (const field of ["keep", "archiveReason", "machineExpectedGoneAt", "backupRemovalAt"]) expect(plain).not.toHaveProperty(field);
+        setCloudV2RetentionDocuments(true);
+        expect(await store.get(id, user)).toMatchObject({ keep: false, archiveReason: "manual" });
+      });
+
+      it("counts the backup's removal from the switch, never from history, and drops an estimate already past", async () => {
+        await stop();
+        await pool.query(`UPDATE cloud_v2_workspaces SET checkpoint_object=$2, checkpoint_key='{"sealed":true}', checkpoint_sha256=$3, checkpoint_bytes=100,
+          checkpoint_saved_at=clock_timestamp(), checkpoint_stop_generation=stop_generation WHERE id=$1`, [id, `cloud-v2/checkpoints/${id}/${randomUUID()}.zck`, "e".repeat(64)]);
+        // Archived 100 days before retention applied to it.
+        await pool.query(`UPDATE cloud_v2_workspaces SET archived_at=clock_timestamp() - interval '100 days', archive_reason='manual', retention_started_at=NULL,
+          stopped_at=clock_timestamp() - interval '101 days' WHERE id=$1`, [id]);
+        expect(await store.get(id, user)).not.toHaveProperty("backupRemovalAt");
+        await store.startRetentionClocks(10);
+        const started = (await columns("retention_started_at")).retention_started_at as Date;
+        const document = await store.get(id, user);
+        expect(Date.parse(document.backupRemovalAt!) - started.getTime()).toBe(60 * DAY);
+        // The SQL expression S4 removes by is the same date.
+        const sql = (await pool.query(`SELECT ${CLOUD_V2_BACKUP_REMOVAL_AT_SQL} AS at FROM cloud_v2_workspaces w WHERE w.id=$1`, [id])).rows[0].at as Date;
+        expect(sql.toISOString()).toBe(document.backupRemovalAt);
+        // Its machine's estimate (101 days since its stop) is long past: no date rather than a wrong one.
+        expect(document).not.toHaveProperty("machineExpectedGoneAt");
       });
 
       it("carries the archive's fields on the document, and refuses Keep while archived", async () => {

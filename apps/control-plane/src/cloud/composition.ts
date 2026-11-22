@@ -50,7 +50,7 @@ import { LiveRecoverySignals } from "./live-recovery-signals.js";
 import { LiveRecoveryStore } from "./live-recovery-store.js";
 import { cloudV2Runtime } from "./runtime.js";
 import type { CloudV2RouteDeps } from "./routes.js";
-import { CloudV2Store, cloudV2WorkspaceFromRow, type CloudV2LifecycleWorkspace, type CloudV2WorkerSession, type CloudV2Workspace } from "./store.js";
+import { CloudV2Store, cloudV2WorkspaceFromRow, setCloudV2RetentionDocuments, type CloudV2LifecycleWorkspace, type CloudV2WorkerSession, type CloudV2Workspace } from "./store.js";
 import { CloudV2WorkerSigner } from "./worker-auth.js";
 import { openPortToken, sealPortToken } from "./worker-port-token.js";
 import type { CloudV2WorkerRouteDeps } from "./worker-routes.js";
@@ -128,6 +128,8 @@ export const CLOUD_V2_ASYNC_CREATE_DELAY_MS = 10 * 60_000;
 export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boolean; lifecycle: boolean }, securityEvents?: PostgresSecurityEventBroker, listenerPool: pg.Pool = pool, lockPool: pg.Pool = pool) {
   const v2 = config.cloudV2;
   if (!v2) return null;
+  // Retention's document fields and Keep routes exist only where retention runs (CLOUD_V2_RETENTION_ENABLED).
+  setCloudV2RetentionDocuments(v2.retention === true);
   const localOwner = config.development && !("generation" in config.development) ? config.development.owner : undefined;
   const keys = cloudAgentCredentialKeys(config.cloudAgentCredentials ?? null);
   if (!keys) throw new Error("Cloud v2 requires the credential encryption keyring");
@@ -398,6 +400,7 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
   const asyncCreateFrom = Date.now() + (v2.asyncCreateDelayMs ?? (config.deploymentChannel === "development" ? 0 : CLOUD_V2_ASYNC_CREATE_DELAY_MS));
   const teamSharing = new CloudTeamSharing(pool,store,github,listenerPool,undefined,{ ownership: v2.teamOwnership === true });
   const routes: CloudV2RouteDeps = {
+    retention: v2.retention === true,
     actingUserDefault: v2.actingUserDefault === true,
     activeCreateRuntime,
     teamSharing,

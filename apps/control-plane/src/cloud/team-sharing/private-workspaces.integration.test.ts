@@ -38,6 +38,20 @@ database("a personal project's workspace on every team route", () => {
     }
   });
 
+  /** Every team route on the private workspace, reads and writes. */
+  const everyRoute = async (creatorUserId: string | null): Promise<[string, string, unknown?][]> => {
+    const number = (await pool.query("SELECT number FROM cloud_v2_workspaces WHERE id=$1", [f.own.id])).rows[0].number;
+    const slug = `org-${f.organizationId}`, path = `/v1/cloud-v2/workspaces/${f.own.id}`;
+    return [
+      [path, "GET"], [`/v1/cloud-v2/workspaces/by-number/${slug}/${number}`, "GET"], [`${path}/followers`, "GET"],
+      [`${path}/prompts?chatId=chat`, "GET"], [`${path}/activity`, "POST", {}], [`${path}/history`, "POST", {}],
+      [`${path}/start`, "POST", {}], [`${path}/stop`, "POST", {}], [`${path}/archive`, "POST", {}], [`${path}/rename`, "POST", { name: "Renamed" }],
+      [`${path}/follow`, "POST", {}], [`${path}/pin`, "POST", {}], [`${path}/keep`, "PUT"], [`${path}/keep`, "DELETE"], [path, "DELETE"],
+      [`${path}/reassign-candidates?limit=10`, "GET"],
+      [`${path}/reassign`, "POST", { requestId: randomUUID(), toUserId: f.admin.id, expectedCreatorUserId: creatorUserId, expectedCreatorRevision: "1" }],
+    ];
+  };
+
   it("answers not found to the owner and an admin on every workspace route, and refuses reassign to its member", async () => {
     const number = (await pool.query("SELECT number FROM cloud_v2_workspaces WHERE id=$1", [f.own.id])).rows[0].number;
     const slug = `org-${f.organizationId}`, path = `/v1/cloud-v2/workspaces/${f.own.id}`;
@@ -87,19 +101,41 @@ database("a personal project's workspace on every team route", () => {
     expect((await pool.query("SELECT count(*)::int AS n FROM cloud_v2_reassignments WHERE workspace_id=$1", [f.own.id])).rows[0].n).toBe(0);
   });
 
-  it("archives a departed member's private workspace at once, lets nobody else in, and gives it back to them when re-added (retention S3)", async () => {
+  it("archives a departed member's private workspace at once, lets nobody else reach it anywhere, and gives it back to them when re-added (retention S3)", async () => {
     await pool.query("UPDATE cloud_v2_workspaces SET execution_mode='active' WHERE id=$1", [f.own.id]);
+    const member = await f.actor();
+    // Registered, so its requests act as it (an unknown actor would fall back to the fixture's default, the workspace's own member).
+    f.actors.set(member.id, member);
+    await pool.query("INSERT INTO organization_members (org_id, user_id, role) VALUES ($1, $2, 'member')", [f.organizationId, member.id]);
     await withSystemTx(pool, tx => tx.query("DELETE FROM organization_members WHERE org_id=$1 AND user_id=$2", [f.organizationId, f.viewer.id]));
     const row = async () => (await pool.query("SELECT creator_user_id, archive_reason, archived_at IS NOT NULL AS archived FROM cloud_v2_workspaces WHERE id=$1", [f.own.id])).rows[0];
     expect(await row()).toEqual({ creator_user_id: null, archive_reason: "member_left", archived: true });
     const path = `/v1/cloud-v2/workspaces/${f.own.id}`;
-    for (const user of [f.creator, f.admin, f.outsider, f.viewer])
-      for (const [route, method] of [[path, "GET"], [`${path}/keep`, "PUT"], [`${path}/keep`, "DELETE"], [`${path}/start`, "POST"]] as [string, string][])
-        expect([route, method, (await call(route, user, method, method === "POST" ? {} : undefined)).status]).toEqual([route, method, 404]);
-    // Their return gives it back to them alone (another person joining restores nothing: retention.integration.test.ts).
+    // The owner, an admin, another member: every team route refuses it, and no list or the public API's reads show it.
+    const others = [f.creator, f.admin, member];
+    for (const user of others) {
+      for (const [route, method, body] of await everyRoute(null))
+        expect([user.id, route, method, (await call(route, user, method, body)).status]).toEqual([user.id, route, method, 404]);
+      for (const query of ["", "&creator=none", "&archived=include"]) {
+        const page = await (await call(`/v1/cloud-v2/workspaces?organizationId=${f.organizationId}${query}`, user)).json();
+        expect((page.workspaces ?? []).map((entry: { id: string }) => entry.id)).not.toContain(f.own.id);
+      }
+      await expect(f.store.get(f.own.id, user.id)).rejects.toMatchObject({ status: 404 });
+      expect((await f.store.listApiWorkspaces(f.organizationId, user.id, { limit: 50, archived: true } as never)).map(entry => entry.id)).not.toContain(f.own.id);
+    }
+    // The departed member reaches nothing either, until they return.
+    expect((await call(path, f.viewer)).status).toBe(404);
     await withSystemTx(pool, tx => tx.query("INSERT INTO organization_members (org_id, user_id, role) VALUES ($1, $2, 'member')", [f.organizationId, f.viewer.id]));
     expect(await row()).toEqual({ creator_user_id: f.viewer.id, archive_reason: "member_left", archived: true });
-    for (const user of [f.creator, f.admin, f.outsider]) expect((await call(path, user)).status).toBe(404);
+    const opened = await call(path, f.viewer);
+    expect(opened.status).toBe(200);
+    // With retention off (every deployment at merge), the document is what it was before retention, and Keep has no route.
+    const document = (await opened.json()).workspace;
+    for (const field of ["keep", "archiveReason", "machineExpectedGoneAt", "backupRemovalAt"]) expect(document).not.toHaveProperty(field);
+    expect((await call(`${path}/keep`, f.viewer, "PUT")).status).toBe(404);
+    expect([200, 202]).toContain((await call(`${path}/start`, f.viewer, "POST", {})).status);
+    expect((await pool.query("SELECT state, archived_at FROM cloud_v2_workspaces WHERE id=$1", [f.own.id])).rows[0]).toMatchObject({ state: "starting", archived_at: null });
+    for (const user of others) expect([user.id, (await call(path, user)).status]).toEqual([user.id, 404]);
   });
 
   it("keeps it to its member under shared execution in every actor-access check, and lets nobody in once they leave", async () => {

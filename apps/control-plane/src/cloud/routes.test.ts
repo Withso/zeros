@@ -646,7 +646,8 @@ describe("cloud v2 lost-work notice", () => {
 
 describe("cloud v2 Keep (retention S3)", () => {
   const id = "66666666-6666-4666-8666-666666666666", member = "77777777-7777-4777-8777-777777777777";
-  function setup(refused = false) {
+  function setup(refused = false, retention = true) {
+    const github = { service: { execute: vi.fn(async () => ({ ok: true })) }, documents: vi.fn(async (workspaces: unknown[]) => workspaces) };
     const store = {
       setKeep: vi.fn(async (_id: string, _user: string, keep: boolean) => {
         if (refused) throw new HttpError(404, "not_found", "Cloud workspace not found");
@@ -659,8 +660,8 @@ describe("cloud v2 Keep (retention S3)", () => {
     app.use("*", async (c, next) => { c.set("user", { id: member } as never); await next(); });
     app.onError((error, c) => error instanceof HttpError
       ? c.json({ error: { code: error.code } }, error.status) : c.json({ error: { code: "internal" } }, 500));
-    app.route("/", createCloudV2Routes({ store, bridgeBaseUrl: "wss://dev.example.test" } as unknown as CloudV2RouteDeps));
-    return { app, store };
+    app.route("/", createCloudV2Routes({ store, github, retention, bridgeBaseUrl: "wss://dev.example.test" } as unknown as CloudV2RouteDeps));
+    return { app, store, github };
   }
 
   it("sets and clears Keep for the person asking, and returns the workspace document", async () => {
@@ -678,6 +679,21 @@ describe("cloud v2 Keep (retention S3)", () => {
     const { app, store } = setup();
     expect((await app.request("/v1/cloud-v2/workspaces/nope/keep", { method: "PUT" })).status).toBe(404);
     expect(store.setKeep).not.toHaveBeenCalled();
+  });
+
+  it("has no Keep route at all with retention off: 404 like any absent route", async () => {
+    const { app, store } = setup(false, false);
+    for (const method of ["PUT", "DELETE"]) expect((await app.request(`/v1/cloud-v2/workspaces/${id}/keep`, { method })).status).toBe(404);
+    expect(store.setKeep).not.toHaveBeenCalled();
+  });
+
+  it("counts a person's pull request write as activity, and never a sync or a read", async () => {
+    const { app, store } = setup();
+    const send = (op: string) => app.request(`/v1/cloud-v2/workspaces/${id}/github`, { method: "POST", body: JSON.stringify({ op, params: {} }) });
+    for (const op of ["gh.prSync", "gh.prList", "gh.prGet", "gh.prChecks"]) await send(op);
+    expect(store.personActivity).not.toHaveBeenCalled();
+    for (const op of ["gh.prCreate", "gh.prMerge", "gh.prMarkReady"]) await send(op);
+    expect(store.personActivity).toHaveBeenCalledTimes(3);
   });
 
   it("counts a person's own write as activity, after its access check", async () => {

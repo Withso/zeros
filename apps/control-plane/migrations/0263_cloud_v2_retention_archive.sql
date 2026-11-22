@@ -1,8 +1,9 @@
 -- zeros-migration: expand
 SET LOCAL lock_timeout = '5s';
 -- Retention S3 (CLOUD_V2_RETENTION_ENABLED, src/cloud/lifecycle.ts): activity, Keep and archive.
--- person_activity_at: a person's own call on the workspace that does not already stamp active_at (connect, start,
--- chat edit, pull request, Keep, team management, the public API's writes). The retention clock is the latest of
+-- person_activity_at: a person's own write on the workspace that does not already stamp active_at (a chat edit, a
+-- pull request write, Keep, team management, the public API's writes; never a read, and not connect or start, which
+-- reach running and stamp active_at there). The retention clock is the latest of
 -- active_at, person_activity_at and retention_started_at; active_at keeps its meaning for the idle stop.
 -- keep_set_at/keep_set_by: Keep, set by anyone who can use the workspace; it exempts it from automatic archive. It
 -- exists only while the workspace is not archived: every archive clears it, in the statement that sets archived_at.

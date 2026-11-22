@@ -73,8 +73,6 @@ export const CLOUD_V2_BACKUP_FORKS_PER_HOUR = 20;
 export const CLOUD_V2_MAINTENANCE_PER_HOUR = 20;
 /** Retention S3: no activity by anyone for this long archives a sleeping workspace. */
 export const CLOUD_V2_INACTIVE_ARCHIVE_MS = 30 * 24 * 60 * 60_000;
-/** An archived workspace's backup is removed this long after the archive (S4), unless it is kept. */
-export const CLOUD_V2_BACKUP_REMOVAL_MS = 60 * 24 * 60 * 60_000;
 /** The archive scan's cadence and per-run bound, oldest clock first: 200 an hour is 4,800 a day. */
 export const CLOUD_V2_ARCHIVE_SCAN_MS = 60 * 60_000;
 export const CLOUD_V2_ARCHIVE_BATCH = 200;
