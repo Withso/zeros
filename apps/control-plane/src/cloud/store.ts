@@ -25,7 +25,7 @@ import { memberOnHoldSql, organizationMemberOnHold } from "../organization-seats
 import { CloudV2PromptOutbox, type CloudApiPrompt } from "./prompt-outbox.js";
 import { computerSourceReviewRequired, readComputerSourceTargets } from "./computer-provenance.js";
 import { CloudSourceTargetSchema, type CloudSourceTarget } from "./source-authority.js";
-import { pinCloudEnvironment, releaseCloudEnvironment } from "./environment-store.js";
+import { pinCloudEnvironment, pinCloudRepositoryEnvironments, releaseCloudEnvironment } from "./environment-store.js";
 import { originalSetupBuild } from "./setup-selection.js";
 import { teamOwnershipRequired } from "./team-sharing/contract.js";
 
@@ -528,6 +528,9 @@ export class CloudV2Store {
       else await tx.query(`INSERT INTO cloud_v2_workspace_repositories (workspace_id, position, repository, repository_id, folder, branch, base_branch, base_commit)
         VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`, [row.id, position, entry.repository, entry.repositoryId, entry.folder, entry.branch, entry.baseBranch, entry.baseCommit ?? null]);
     }
+    // Creator path: each later repository's environment files are pinned like the first's. Shared execution has none for them yet.
+    if (projectId && !input.executionRuntime && (input.repositories?.length ?? 0) > 1)
+      await pinCloudRepositoryEnvironments(tx, workspace(row), input.repositories!.slice(1).map(entry => entry.repositoryId));
     if (input.runtimeCanary) await consumeRuntimeCanary(tx, workspace(row), input.runtimeCanary, sourceRepositoryId, createKey);
     let promptAdmission;
     if (input.executionRuntime) {
