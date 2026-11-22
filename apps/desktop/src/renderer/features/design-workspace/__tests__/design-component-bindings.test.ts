@@ -237,6 +237,7 @@ describe("rules gated on a control, at a value none of them matches", () => {
     bindings: { root: "btn", layers: { btn: { attributes: ["size"] } }, gates: { "data-size": ["size"], class: ["tone"] }, classGates: { "btn--": ["tone"] } } };
   const home = { file: "home.html", sourceVersion: V, instances: { key: "0".repeat(16), components: { button }, hosts: { b1: { component: "button", attributes: {} } } } };
   const runtime = (answer: Record<string, string[]>, calls: unknown[] = []) => ({
+    sourceVersion: V,
     supports: (method: string) => method === "getGatedStyles",
     getGatedStyles: async (nodeId: string, gates: unknown) => { calls.push([nodeId, gates]); return answer; },
   });
@@ -264,10 +265,25 @@ describe("rules gated on a control, at a value none of them matches", () => {
     expect(designBoundSizeAxes("ws", { ...home, sourceVersion: "9".repeat(24) }, "b1")).toEqual({ width: false, height: false });
   });
 
+  it("asks only a runtime at the frame's generation, and keeps no answer that arrives from another", async () => {
+    const { designLayerBoundStyles, readDesignGatedBindings, resetDesignRuntimeBindingsForTests } = await import("../state/design-component-bindings");
+    resetDesignRuntimeBindingsForTests();
+    const calls: unknown[] = [];
+    await readDesignGatedBindings("ws", home, "b1", { ...runtime({ height: ["data-size"] }, calls), sourceVersion: "8".repeat(24) });
+    expect(calls).toEqual([]);
+    // The document moves on while the read is out: the reply is dropped.
+    const moving = { ...runtime({}, calls), getGatedStyles: async () => { moving.sourceVersion = "7".repeat(24); return { height: ["data-size"] }; } };
+    await readDesignGatedBindings("ws", home, "b1", moving);
+    expect(designLayerBoundStyles("ws", home, "b1")).toEqual({});
+    // Nothing was remembered, so the current generation asks again.
+    await readDesignGatedBindings("ws", home, "b1", runtime({ height: ["data-size"] }, calls));
+    expect(designLayerBoundStyles("ws", home, "b1")).toEqual({ height: ["size"] });
+  });
+
   it("keeps today's answer with an older runtime, and reads gates with a write's other untracked targets", async () => {
     const { completeDesignRuntimeBindings, designLayerBoundStyles, readDesignGatedBindings, resetDesignRuntimeBindingsForTests } = await import("../state/design-component-bindings");
     resetDesignRuntimeBindingsForTests();
-    await readDesignGatedBindings("ws", home, "b1", { supports: () => false });
+    await readDesignGatedBindings("ws", home, "b1", { sourceVersion: V, supports: () => false });
     expect(designLayerBoundStyles("ws", home, "b1")).toEqual({});
     const calls: unknown[] = [];
     await completeDesignRuntimeBindings("ws", home, [{ type: "node.set-styles", nodeId: "b1", styles: { height: "40px" } }],

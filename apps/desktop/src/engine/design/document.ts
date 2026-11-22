@@ -1883,7 +1883,8 @@ function lineAndColumnAt(
 
 /** Whether this frame's registration as a component holds, and whether a
  * frame declaring options is registered at all. */
-async function designComponentRegistrationViolations(workspacePath: string, file: string, source: string, known?: CanvasDocument): Promise<DesignLintViolation[]> {
+async function designComponentRegistrationViolations(workspacePath: string, file: string, source: string, known?: CanvasDocument,
+  located?: DefaultTreeAdapterTypes.Document): Promise<DesignLintViolation[]> {
   let canvas: CanvasDocument;
   try {
     canvas = known ?? (await readSharedCanvasContext(workspacePath)).canvas;
@@ -1907,7 +1908,7 @@ async function designComponentRegistrationViolations(workspacePath: string, file
     violations.push(violationAt(file, "component-option-invalid", designComponentRecordLimitMessage(name ?? file, reported.exceeds), null, {
       severity: "warning", fix: "Shorten the component's declaration or the layer ids its text holes fill." }));
   if (summary && !(reported && "exceeds" in reported))
-    violations.push(...designMainControlViolations({ file, source, elements: summary.elements, bindings: summary.bindings,
+    violations.push(...designMainControlViolations({ file, source, elements: summary.elements, bindings: summary.bindings, document: located,
       lineAt: (offset) => lineAndColumnAt(source, offset) }));
   if (!name && !registry.problems.some((problem) => problem.file === file) && designSourceDeclaresOptions(source)) {
     const suggested = path.posix.basename(file, ".html").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").replace(/^(?=\d)/, "c-") || "component";
@@ -2127,7 +2128,7 @@ async function lintFrame(
     instanceUsage,
   );
   if (instanceUsage.instances?.hosts.size)
-    violations.push(...designInstanceControlViolations({ file, source,
+    violations.push(...designInstanceControlViolations({ file, source, document,
       instances: { components: Object.fromEntries(instanceUsage.instances.components), hosts: Object.fromEntries(instanceUsage.instances.hosts) },
       lineAt: (offset) => lineAndColumnAt(source, offset) }));
   // Only an error can leave a component's markup or CSS out of the
@@ -2299,7 +2300,7 @@ async function lintFrame(
       ),
     );
   }
-  if (canvas !== null) violations.push(...await designComponentRegistrationViolations(workspacePath, file, source, canvas));
+  if (canvas !== null) violations.push(...await designComponentRegistrationViolations(workspacePath, file, source, canvas, document));
   return { violations, healedOids };
 }
 

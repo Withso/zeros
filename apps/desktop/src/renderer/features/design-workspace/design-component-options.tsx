@@ -15,7 +15,7 @@
 // Mounted only for one selected component frame or instance; a folded group
 // mounts no rows. Local only.
 
-import { designBoundSizeAxes } from "./state/design-component-bindings";
+import { designLayerBoundStyles } from "./state/design-component-bindings";
 import { useEffect, useMemo, useState } from "react";
 import { MoreHorizontal, Plus, RotateCcw, Sparkles } from "lucide-react";
 import { COMPONENT_STATE_PRESETS, componentInheritedValues } from "@zeros/design-core/component-options";
@@ -79,12 +79,12 @@ import {
   designComponentVariantName,
   designInstanceVisualStyleProperties,
   designInstanceIgnoredAttributes,
-  designInstanceOlderOverrideProperties,
+  designInstanceOlderOverridesIn,
   designInstanceOptionState,
   readDesignFrameComponent,
   sameDesignComponentValue,
 } from "./state/design-component-options";
-import { DESIGN_OPTIONS_NOT_APPLIED_MESSAGES, designComponentSlotLabel } from "./state/design-component-parts";
+import { DESIGN_OPTIONS_NOT_APPLIED_MESSAGES, designComponentSlotLabel, designPartOverrideAttribute } from "./state/design-component-parts";
 import { showDesignComponentVariant } from "./state/design-component-variants";
 
 const EASINGS = [
@@ -271,13 +271,22 @@ export function DesignComponentOptions({
   // Older overrides: styles an earlier app wrote on this instance or its
   // parts. They still render; the app no longer writes them, so it only
   // offers to remove them, in one step.
-  // A raw size over an axis a control drives counts too: it sits over that control.
-  const olderStyle = designInstanceOlderOverrideProperties(ownStyle, instance ? designBoundSizeAxes(workspaceId, frame as never, instance.nodeId) : undefined).length;
-  const olderCount = overridden.length + olderStyle;
+  // A raw size over what a control sets counts too: it sits over that
+  // control. On a part, the line is that part's override alone.
+  const older = instance
+    ? designInstanceOlderOverridesIn(instance.host, designLayerBoundStyles(workspaceId, frame as never, instance.nodeId), only?.layer.id)
+    : { parts: [], style: [] };
+  const olderCount = older.parts.length + older.style.length;
   const canResetOlder = olderCount > 0 &&
-    designInstanceResetAllFits({ options: 0, parts: overridden.length, style: olderStyle > 0, slotted: 0, text: false });
+    designInstanceResetAllFits({ options: 0, parts: older.parts.length, style: older.style.length > 0, slotted: 0, text: false });
   const resetOlder = () => {
     if (!instance || !canResetOlder || !active) return;
+    if (only) {
+      void commitDesignInstanceAttributes(workspaceId, frame, instance.nodeId,
+        Object.fromEntries(older.parts.map((part) => [designPartOverrideAttribute(part), null])), "Reset older override")
+        .catch(failed("the older override"));
+      return;
+    }
     void commitDesignInstanceOlderOverridesReset(workspaceId, frame, instance.nodeId)
       .catch(failed("the older overrides"));
   };

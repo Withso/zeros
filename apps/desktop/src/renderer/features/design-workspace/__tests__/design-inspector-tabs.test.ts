@@ -4,6 +4,8 @@ import { describe, expect, it } from "vitest";
 import { Tabs, TabsContent } from "../../../shared/ui/primitives";
 import {
   designInspectorActiveTab,
+  designInspectorPendingGeometry,
+  designInspectorMainRootSelected,
   designInspectorPanelState,
   designInspectorSelectionKind,
   designInspectorSimilarTabKey,
@@ -69,6 +71,25 @@ describe("component inspector tab ownership", () => {
     expect(designInspectorSelectionKind({ ...none, count: 2, mainLayer: true })).toBe("main-layer");
     expect(designInspectorSelectionKind({ ...none, count: 2, instance: true })).toBe("instances");
     expect(designInspectorSelectionKind({ ...none, count: 2, instance: true, inner: true })).toBe("component-inner-many");
+  });
+
+  it("knows a main's root selected as its frame, or as a layer from Layers or a restore", () => {
+    const main = { main: true, frameSelected: true, selectedNodeId: null, layoutRootId: "root", count: 0 };
+    expect(designInspectorMainRootSelected(main)).toBe(true);
+    expect(designInspectorMainRootSelected({ ...main, selectedNodeId: "root", count: 1 })).toBe(true);
+    // Selected as a node (frameSelected false): still the main, Controls and Style.
+    expect(designInspectorMainRootSelected({ ...main, frameSelected: false, selectedNodeId: "root", count: 1 })).toBe(true);
+    expect(designInspectorMainRootSelected({ ...main, frameSelected: false, selectedNodeId: "child", count: 1 })).toBe(false);
+    expect(designInspectorMainRootSelected({ ...main, frameSelected: false, selectedNodeId: "root", layoutRootId: null, count: 1 })).toBe(false);
+    expect(designInspectorMainRootSelected({ ...main, main: false })).toBe(false);
+    expect(designInspectorMainRootSelected({ ...main, selectedNodeId: "root", count: 2 })).toBe(false);
+  });
+
+  it("never offers a frame's X and Y for layers whose details are pending", () => {
+    expect(designInspectorPendingGeometry({ frameSelected: true, selectedNodeId: null, count: 0 })).toBe("frame");
+    // Several layers, an instance among them, still reading: Size, disabled.
+    expect(designInspectorPendingGeometry({ frameSelected: false, selectedNodeId: "inst", count: 2 })).toBe("size");
+    expect(designInspectorPendingGeometry({ frameSelected: false, selectedNodeId: "layer", count: 1 })).toBe("size");
   });
 
   it("offers the tabs each selection has, Controls first on a main", () => {

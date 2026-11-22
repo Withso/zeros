@@ -38,6 +38,7 @@ import {
   commitDesignInstanceOlderOverridesReset,
   designInstanceOlderOverrideCount,
   designInstanceOlderOverrideProperties,
+  designInstanceOlderOverridesIn,
   commitDesignInstanceSlotReset,
   commitDesignInstanceText,
   designInstanceResetAllFits,
@@ -263,10 +264,19 @@ describe("variants and instances", () => {
 
   it("counts a size or size limit on an axis a control drives as an older override, keeping the other axis and the place", () => {
     const style = "width: 200px; min-width: 100px; max-height: 80px; height: 40px; left: 4px; opacity: .5";
-    const bound = { width: true, height: false };
+    const bound = { width: ["width"] };
     expect(designInstanceOlderOverrideProperties(style, bound)).toEqual(["width", "min-width", "opacity"]);
     expect(designInstanceOlderOverrideCount({ component: "card", attributes: {}, style }, bound)).toBe(3);
     expect(designInstanceOlderOverrideProperties(style)).toEqual(["opacity"]);
+    // Only min-width bound: Reset keeps a max-width, and a raw width still counts.
+    expect(designInstanceOlderOverrideProperties("width: 200px; max-width: 300px", { "min-width": ["size"] })).toEqual(["width"]);
+  });
+
+  it("scopes older overrides to a part: only its own override counts and resets there", () => {
+    const host = { component: "card", attributes: {}, overrides: { "cc-send": "opacity: .5", "cc-chip": "color: red" }, style: "opacity: .8; left: 4px" };
+    expect(designInstanceOlderOverridesIn(host, {})).toEqual({ parts: ["cc-send", "cc-chip"], style: ["opacity"] });
+    expect(designInstanceOlderOverridesIn(host, {}, "cc-Send")).toEqual({ parts: ["cc-send"], style: [] });
+    expect(designInstanceOlderOverridesIn(host, {}, "cc-prompt")).toEqual({ parts: [], style: [] });
   });
 
   it("resets a raw size over a bound axis with the other older overrides", async () => {

@@ -5,6 +5,7 @@
 // no control stands for. They read the bindings the engine already computes
 // for the main; all are warnings, so they never block a save.
 
+import { parse, type DefaultTreeAdapterTypes } from "parse5";
 import postcss from "postcss";
 import { componentInstanceOlderOverride } from "@zeros/design-core/component-options";
 import { cssOverlappingProperties } from "@zeros/design-core/css-longhands";
@@ -45,7 +46,50 @@ function labelOf(elements: Elements, name: string): string {
 }
 
 const controlsFor = (elements: Elements, names: readonly string[]) => [...new Set(names)].map((name) => labelOf(elements, name)).join(", ");
-const escapeRegExp = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+type Element = DefaultTreeAdapterTypes.Element;
+type ParentNode = DefaultTreeAdapterTypes.ParentNode;
+
+/** Where things are in a source, from one parse (no pattern over the source,
+ * so the cost stays linear in its size): each layer's first element by
+ * data-oid with its style, each <zd-option> by name, and every <style> text. */
+interface SourceIndex {
+  layers: Map<string, { offset: number; style?: string }>;
+  options: Map<string, number>;
+  styles: string[];
+}
+
+/** `parsed` is the lint's own located parse of this source, when it has one. */
+function indexSource(source: string, parsed?: DefaultTreeAdapterTypes.Document): SourceIndex {
+  const index: SourceIndex = { layers: new Map(), options: new Map(), styles: [] };
+  let document: DefaultTreeAdapterTypes.Document;
+  try {
+    document = parsed ?? parse(source, { sourceCodeLocationInfo: true });
+  } catch {
+    return index;
+  }
+  // Depth first in document order, so a repeated id or name keeps its first.
+  const pending: ParentNode[] = [document];
+  while (pending.length) {
+    const node = pending.pop()!;
+    if ("tagName" in node) {
+      const element = node as Element;
+      const offset = element.sourceCodeLocation?.startOffset ?? 0;
+      const attribute = (name: string) => element.attrs.find((entry) => entry.name === name)?.value;
+      const oid = attribute("data-oid");
+      const style = attribute("style");
+      if (oid !== undefined && !index.layers.has(oid)) index.layers.set(oid, { offset, ...(style !== undefined ? { style } : {}) });
+      const name = element.tagName === "zd-option" ? attribute("name") : undefined;
+      if (name !== undefined && !index.options.has(name)) index.options.set(name, offset);
+      if (element.tagName === "style")
+        index.styles.push(element.childNodes.map((text) => ("value" in text ? (text as DefaultTreeAdapterTypes.TextNode).value : "")).join(""));
+    }
+    const children = node.nodeName === "template" ? (node as DefaultTreeAdapterTypes.Template).content.childNodes : node.childNodes;
+    for (let child = children.length - 1; child >= 0; child -= 1)
+      if ("childNodes" in children[child]!) pending.push(children[child] as ParentNode);
+  }
+  return index;
+}
 
 /** On a main: controls nothing reads, and inline or own-rule styles over a bound property. */
 export function designMainControlViolations(input: {
@@ -54,54 +98,66 @@ export function designMainControlViolations(input: {
   elements: Elements;
   bindings: DesignComponentBindings | undefined;
   lineAt: (offset: number) => Location;
+  /** The lint's located parse of `source`, so it is not parsed again. */
+  document?: DefaultTreeAdapterTypes.Document;
 }): DesignLintViolation[] {
   const { file, source, elements, bindings, lineAt } = input;
   if (!bindings) return [];
   const readsControl = controlReader(bindings);
   const violations: DesignLintViolation[] = [];
-  const at = (needle: RegExp) => lineAt(needle.exec(source)?.index ?? 0);
+  const found = indexSource(source, input.document);
+  const ownRules = ownRuleProperties(found.styles, readsControl);
   const violation = (ruleId: DesignLintViolation["ruleId"], message: string, location: Location, fix: string, oid?: string): DesignLintViolation => ({
     ruleId, severity: "warning", message, file, line: location.startLine, column: location.startCol, ...(oid ? { oid } : {}), fix,
   });
   for (const name of bindings.unread ?? [])
     violations.push(violation("component-control-unread",
       `Control ${labelOf(elements, name)} is declared but nothing in the main reads it.`,
-      at(new RegExp(`<zd-option\\b[^>]*\\sname=["']${escapeRegExp(name)}["']`)),
+      lineAt(found.options.get(name) ?? 0),
       `Read it in the main ({{ ${name} }}, data-zd-if, an attribute, or var(--zd-${name}) in its CSS), or remove its <zd-option>.`));
   // A layer's own declarations (its style attribute, or a rule that targets
   // only it) sit over any rule a control reaches, in every variant.
   for (const [oid, layer] of Object.entries(bindings.layers)) {
     const bound = layer.styles ?? {};
     if (!Object.keys(bound).length) continue;
-    const tag = new RegExp(`<[a-z][^>]*\\sdata-oid=["']${escapeRegExp(oid)}["'][^>]*>`, "i").exec(source);
-    const style = tag ? /\sstyle=(["'])([\s\S]*?)\1/i.exec(tag[0])?.[2] : undefined;
-    const shadowed = [...(style ? declaredProperties(style, readsControl) : []), ...ownRuleProperties(source, oid, readsControl)]
+    const layerAt = found.layers.get(oid);
+    const style = layerAt?.style;
+    const shadowed = [...(style ? declaredProperties(style, readsControl) : []), ...(ownRules.get(oid) ?? [])]
       .filter((property) => controlsOver(bound, property).length > 0);
     if (!shadowed.length) continue;
     const unique = [...new Set(shadowed)].slice(0, PROPERTY_LIMIT);
     violations.push(violation("component-control-shadowed",
       `${unique.join(", ")} on this layer ${unique.length === 1 ? "sits" : "sit"} over ${controlsFor(elements, unique.flatMap((property) => controlsOver(bound, property)))}.`,
-      lineAt(tag?.index ?? 0),
+      lineAt(layerAt?.offset ?? 0),
       "Remove the layer's own value so the control sets it, or ask for a new control.", oid));
   }
   return violations;
 }
 
-function ownRuleProperties(source: string, oid: string, readsControl: (value: string) => boolean): string[] {
-  const properties: string[] = [];
-  for (const match of source.matchAll(/<style\b[^>]*>([\s\S]*?)<\/style>/gi)) {
+/** The properties each layer's own rule (`[data-oid="…"]` alone) sets,
+ * other than values that read a control. */
+function ownRuleProperties(styles: readonly string[], readsControl: (value: string) => boolean): Map<string, string[]> {
+  const byLayer = new Map<string, string[]>();
+  for (const text of styles) {
     try {
-      postcss.parse(match[1]!).walkRules((rule) => {
-        const own = /^\[data-oid=(["'])([\s\S]*)\1\]$/.exec(rule.selector.trim());
-        if (own?.[2] === oid) rule.walkDecls((declaration) => {
-          if (!readsControl(declaration.value)) properties.push(declaration.prop.toLowerCase());
+      postcss.parse(text).walkRules((rule) => {
+        const selector = rule.selector.trim();
+        if (!selector.startsWith("[data-oid=") || !selector.endsWith("]")) return;
+        const quoted = selector.slice("[data-oid=".length, -1);
+        const quote = quoted[0];
+        if ((quote !== '"' && quote !== "'") || quoted.length < 2 || quoted[quoted.length - 1] !== quote) return;
+        const oid = quoted.slice(1, -1);
+        const list = byLayer.get(oid) ?? [];
+        rule.walkDecls((declaration) => {
+          if (!readsControl(declaration.value)) list.push(declaration.prop.toLowerCase());
         });
+        byLayer.set(oid, list);
       });
     } catch {
       // CSS that does not parse is reported elsewhere.
     }
   }
-  return properties;
+  return byLayer;
 }
 
 /** On a frame that places instances: host styles and older part overrides
@@ -111,9 +167,12 @@ export function designInstanceControlViolations(input: {
   source: string;
   instances: Pick<DesignFrameInstances, "components" | "hosts">;
   lineAt: (offset: number) => Location;
+  /** The lint's located parse of `source`, so it is not parsed again. */
+  document?: DefaultTreeAdapterTypes.Document;
 }): DesignLintViolation[] {
   const { file, source, instances, lineAt } = input;
   const violations: DesignLintViolation[] = [];
+  let found: SourceIndex | null = null;
   for (const [oid, host] of Object.entries(instances.hosts)) {
     if (!Object.hasOwn(instances.components, host.component)) continue;
     const component = instances.components[host.component]!;
@@ -129,9 +188,9 @@ export function designInstanceControlViolations(input: {
     // is over the root's bindings or an override no control stands for.
     const root = bindings.root ? layers.get(bindings.root.toLowerCase()) ?? {} : {};
     // The same classification as the app's older overrides and their Reset.
-    const axes = { width: controlsOver(root, "width").length > 0, height: controlsOver(root, "height").length > 0 };
+    const rootProperties = Object.keys(root);
     for (const property of host.style ? declaredProperties(host.style) : []) {
-      if (!componentInstanceOlderOverride(property, axes)) continue;
+      if (!componentInstanceOlderOverride(property, rootProperties)) continue;
       const controls = controlsOver(root, property);
       if (controls.length) shadowed.push([property, controls]);
       else overrides.push(property);
@@ -145,8 +204,8 @@ export function designInstanceControlViolations(input: {
       }
     }
     if (!shadowed.length && !overrides.length) continue;
-    const tag = new RegExp(`<zd-[a-z0-9-]+\\b[^>]*\\sdata-oid=["']${escapeRegExp(oid)}["']`, "i").exec(source);
-    const location = lineAt(tag?.index ?? 0);
+    found ??= indexSource(source, input.document);
+    const location = lineAt(found.layers.get(oid)?.offset ?? 0);
     const at = { file, line: location.startLine, column: location.startCol, oid };
     if (shadowed.length) {
       const shown = shadowed.slice(0, PROPERTY_LIMIT);

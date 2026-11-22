@@ -232,12 +232,15 @@ describe("what an app may write in an instance host's own style", () => {
       expect(componentInstanceHostStyleAllowed(property)).toBe(false);
   });
 
-  it("is an older override outside those, or as a size or size limit on an axis a control drives", () => {
-    const width = { width: true, height: false };
+  it("is an older override outside those, or over a property a control sets on the root", () => {
+    const width = ["width"];
     for (const property of ["opacity", "--anything", "width", "min-width", "max-width", "inline-size"])
       expect(componentInstanceOlderOverride(property, width)).toBe(true);
     for (const property of ["height", "min-height", "left", "transform", "flex-grow", "--zeros-layout-x"])
       expect(componentInstanceOlderOverride(property, width)).toBe(false);
-    expect(componentInstanceOlderOverride("width", { width: false, height: false })).toBe(false);
+    expect(componentInstanceOlderOverride("width", [])).toBe(false);
+    // Only min-width bound: a raw width sits over it, a max-width does not.
+    expect(componentInstanceOlderOverride("width", ["min-width"])).toBe(true);
+    expect(componentInstanceOlderOverride("max-width", ["min-width"])).toBe(false);
   });
 });

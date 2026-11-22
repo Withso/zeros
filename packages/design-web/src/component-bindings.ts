@@ -23,7 +23,6 @@ type Element = DefaultTreeAdapterTypes.Element;
 type Template = DefaultTreeAdapterTypes.Template;
 type Declaration_ = ReturnType<typeof readComponentDeclaration>["declaration"];
 
-const HOLE = /\{\{([\s\S]*?)\}\}/g;
 const LOOP = /^\s*([^\s]+)\s+in\s+([\s\S]+)$/;
 const RAW_TEXT = new Set(["style", "script", "xmp", "iframe", "noembed", "noframes", "noscript", "plaintext"]);
 const VAR = /var\(\s*(--[A-Za-z0-9_-]+)/g;
@@ -87,9 +86,32 @@ function zdVarOptions(name: string, declaration: Declaration_): string[] {
   return declaration.derived.some((entry) => entry.name === bare) ? optionsOfNames(new Set([bare]), declaration) : [];
 }
 
-const holesIn = (text: string) => [...text.matchAll(HOLE)].map((match) => match[1]!);
+/** Each `{{ … }}` in text as [start, end) spans, in one forward scan: past
+ * an unclosed `{{` there is no other hole, so the cost stays linear. */
+function holeSpans(text: string): Array<[number, number]> {
+  const spans: Array<[number, number]> = [];
+  let from = 0;
+  for (;;) {
+    const open = text.indexOf("{{", from);
+    if (open < 0) break;
+    const close = text.indexOf("}}", open + 2);
+    if (close < 0) break;
+    spans.push([open, close + 2]);
+    from = close + 2;
+  }
+  return spans;
+}
+const holesIn = (text: string) => holeSpans(text).map(([start, end]) => text.slice(start + 2, end - 2));
 /** A class list's tokens, a hole kept whole within its token. */
-const classTokens = (value: string) => value.replace(HOLE, (hole) => hole.replace(/\s+/g, "")).split(/\s+/).filter(Boolean);
+const classTokens = (value: string) => {
+  let joined = "";
+  let from = 0;
+  for (const [start, end] of holeSpans(value)) {
+    joined += value.slice(from, start) + value.slice(start, end).replace(/\s+/g, "");
+    from = end;
+  }
+  return (joined + value.slice(from)).split(/\s+/).filter(Boolean);
+};
 
 /** One selector's compound parts: tag, ids, classes, attribute tests and the
  * :is()/:where() lists it nests. Pseudo-classes and elements are dropped. */
@@ -97,10 +119,16 @@ interface Compound {
   tag: string | null;
   ids: string[];
   classes: string[];
-  attributes: Array<{ name: string; value: string | null }>;
+  attributes: Array<{ name: string; value: string | null; operator: string | null; caseInsensitive: boolean }>;
   nested: string[][];
   /** Simple :not() compounds: a layer that certainly matches one is excluded. */
   negated: Compound[];
+  /** Every :not() argument as written: the attributes it tests are still
+   * what the rule depends on. */
+  negatedText: string[];
+  /** The parser dropped a condition (a pseudo-class it does not model, an
+   * attribute test it could not read), so a match is never certain. */
+  partial: boolean;
   root: boolean;
 }
 
@@ -158,7 +186,8 @@ function compoundsOf(selector: string): string[] {
 const unquote = (value: string) => value.trim().replace(/^(['"])([\s\S]*)\1$/, "$2");
 
 function parseCompound(text: string): Compound {
-  const compound: Compound = { tag: null, ids: [], classes: [], attributes: [], nested: [], negated: [], root: ROOT_ALIASES.has(text.toLowerCase()) };
+  const compound: Compound = { tag: null, ids: [], classes: [], attributes: [], nested: [], negated: [], negatedText: [], partial: false,
+    root: ROOT_ALIASES.has(text.toLowerCase()) };
   let index = 0;
   const name = () => {
     const match = /^(?:\\.|[A-Za-z0-9_\-\u00a0-\uffff])+/.exec(text.slice(index));
@@ -184,18 +213,23 @@ function parseCompound(text: string): Compound {
       const end = text.indexOf("]", index);
       const body = text.slice(index + 1, end < 0 ? text.length : end);
       index = end < 0 ? text.length : end + 1;
-      const test = /^\s*([^\s~|^$*=]+)\s*(?:[~|^$*]?=\s*([\s\S]*?))?\s*(?:\s[iIsS])?\s*$/.exec(body);
-      if (test) compound.attributes.push({ name: test[1]!.toLowerCase(), value: test[2] === undefined ? null : unquote(test[2]) });
+      const test = /^\s*([^\s~|^$*=]+)\s*(?:([~|^$*]?=)\s*([\s\S]*?))?\s*(?:\s([iIsS]))?\s*$/.exec(body);
+      if (test) compound.attributes.push({ name: test[1]!.toLowerCase(), value: test[3] === undefined ? null : unquote(test[3]),
+        operator: test[2] ?? null, caseInsensitive: test[4] === "i" || test[4] === "I" });
+      else compound.partial = true;
     } else if (character === ":") {
       const element = text[index + 1] === ":";
       index += element ? 2 : 1;
       const pseudo = name().toLowerCase();
       const argument = text[index] === "(" ? group() : null;
       if (!element && argument !== null && (pseudo === "is" || pseudo === "where" || pseudo === "matches")) compound.nested.push(splitList(argument));
-      if (!element && argument !== null && pseudo === "not")
-        for (const alternative of splitList(argument))
+      else if (!element && argument !== null && pseudo === "not") {
+        for (const alternative of splitList(argument)) {
+          compound.negatedText.push(alternative);
           if (compoundsOf(alternative).length === 1) compound.negated.push(parseCompound(alternative));
-      if (!element && (pseudo === "root" || pseudo === "host")) compound.root = true;
+        }
+      } else if (!element && (pseudo === "root" || pseudo === "host")) compound.root = true;
+      else compound.partial = true;
     } else index += 1;
   }
   return compound;
@@ -210,20 +244,37 @@ function selectorTests(selector: string): { attributes: string[]; classes: strin
       const compound = parseCompound(text);
       attributes.push(...compound.attributes.map((test) => test.name));
       classes.push(...compound.classes);
-      for (const list of compound.nested)
-        for (const nested of list) {
-          const inner = selectorTests(nested);
-          attributes.push(...inner.attributes);
-          classes.push(...inner.classes);
-        }
+      for (const nested of [...compound.nested.flat(), ...compound.negatedText]) {
+        const inner = selectorTests(nested);
+        attributes.push(...inner.attributes);
+        classes.push(...inner.classes);
+      }
     }
   return { attributes, classes };
+}
+
+/** An attribute selector's test against a known value: null for an operator
+ * not modelled, which keeps the layer rather than drop a binding. */
+function attributeTest(test: { value: string | null; operator: string | null; caseInsensitive: boolean }, actual: string): boolean | null {
+  if (test.value === null) return true;
+  const fold = (text: string) => (test.caseInsensitive ? text.toLowerCase() : text);
+  const value = fold(test.value);
+  const subject = fold(actual);
+  switch (test.operator) {
+    case "=": return subject === value;
+    case "^=": return value !== "" && subject.startsWith(value);
+    case "$=": return value !== "" && subject.endsWith(value);
+    case "*=": return value !== "" && subject.includes(value);
+    case "~=": return subject.split(/[\t\n\f\r ]+/).includes(value);
+    case "|=": return subject === value || subject.startsWith(`${value}-`);
+    default: return null;
+  }
 }
 
 /** The layer matches this compound whatever its holes fill: tag, ids and
  * static classes only. */
 function certainlyMatches(compound: Compound, layer: LayerFacts): boolean {
-  if (compound.root || compound.attributes.length || compound.nested.length || compound.negated.length) return false;
+  if (compound.partial || compound.root || compound.attributes.length || compound.nested.length || compound.negatedText.length) return false;
   if (!compound.tag && !compound.ids.length && !compound.classes.length) return false;
   return (!compound.tag || compound.tag === layer.tag) && compound.ids.every((id) => layer.attributes.get("id") === id) &&
     compound.classes.every((name) => layer.classes.has(name));
@@ -239,11 +290,12 @@ function compoundMatches(compound: Compound, layer: LayerFacts, root: string | u
     if (!layer.classes.has(name) && !layer.classHoles.some((prefix) => name.startsWith(prefix))) return false;
   for (const test of compound.attributes) {
     if (test.name === "data-oid") {
-      if (test.value !== null && test.value !== layer.oid) return false;
+      if (test.value !== null && attributeTest(test, layer.oid) === false) return false;
       continue;
     }
     if (test.name === "data-zd-part") {
-      if (test.value !== null && test.value.replace(/#[\d.]+$/, "") !== layer.oid) return false;
+      // A part's id carries a repeat's "#n"; its layer is the id without it.
+      if (test.value !== null && attributeTest({ ...test, value: test.value.replace(/#[\d.]+$/, "") }, layer.oid) === false) return false;
       continue;
     }
     if (!layer.attributes.has(test.name)) return false;
@@ -401,17 +453,25 @@ export function componentBindingsOf(document: DefaultTreeAdapterTypes.Document, 
       }
     });
   }
+  // A chain is followed to MAX_VAR_DEPTH. A result cut there is never kept
+  // as what a property reads, and the record says it was cut.
   const resolved = new Map<string, Set<string>>();
+  let capped = false;
   const resolve = (name: string, depth = 0, stack = new Set<string>()): Set<string> => {
     if (resolved.has(name)) return resolved.get(name)!;
     if (name.startsWith("--zd-")) return new Set(zdVarOptions(name, declaration));
     const found = new Set<string>(gatedVars.get(name) ?? []);
-    if (depth < MAX_VAR_DEPTH && !stack.has(name)) {
-      stack.add(name);
-      for (const next of edges.get(name) ?? []) for (const option of resolve(next, depth + 1, stack)) found.add(option);
-      stack.delete(name);
+    if (depth === 0) capped = false;
+    if (!stack.has(name)) {
+      if (depth >= MAX_VAR_DEPTH) {
+        if (edges.get(name)?.size) { capped = true; truncated = true; }
+      } else {
+        stack.add(name);
+        for (const next of edges.get(name) ?? []) for (const option of resolve(next, depth + 1, stack)) found.add(option);
+        stack.delete(name);
+      }
     }
-    if (depth === 0) resolved.set(name, found);
+    if (depth === 0 && !capped) resolved.set(name, found);
     return found;
   };
   const valueOptions = (value: string) => {

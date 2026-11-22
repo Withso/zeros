@@ -299,6 +299,8 @@ function gatesOf(record: BindingRecord): { attributes: string[]; classPrefixes: 
 }
 
 type GatedReader = {
+  /** The document generation it reads. */
+  readonly sourceVersion: string;
   supports(method: string): boolean;
   getGatedStyles?(nodeId: string, gates: { attributes: readonly string[]; classPrefixes: readonly string[] }): Promise<Record<string, string[]>>;
 };
@@ -319,8 +321,11 @@ export async function readDesignGatedBindings(workspaceId: string, frame: Bindin
   const gates = target && gatesOf(target.record);
   const key = rememberedKey(workspaceId, frame.file, frame.sourceVersion, nodeId);
   if (!target || !gates || rememberedGated.has(key) || !runtime?.supports("getGatedStyles") || !runtime.getGatedStyles) return;
+  // Only this generation's document answers for this generation's key,
+  // when asked and when it replies.
+  if (runtime.sourceVersion !== frame.sourceVersion) return;
   const gated = await runtime.getGatedStyles(nodeId, gates).catch(() => null);
-  if (!gated) return;
+  if (!gated || runtime.sourceVersion !== frame.sourceVersion) return;
   const options: Record<string, string[]> = {};
   const gateOptions = target.record.bindings?.gates ?? {};
   const classOptions = target.record.bindings?.classGates ?? {};

@@ -1631,6 +1631,27 @@ export function rememberDesignInspectorTab(
   }
 }
 
+/** What stands in for the Style editor while details are pending: the
+ * frame's own geometry only when the frame itself is selected, otherwise a
+ * disabled Size until the layers' details arrive. */
+export function designInspectorPendingGeometry(input: { frameSelected: boolean; selectedNodeId: string | null | undefined; count: number }): "frame" | "size" {
+  return input.frameSelected && !input.selectedNodeId && input.count <= 1 ? "frame" : "size";
+}
+
+/** A main's root is the component: selected as its frame, or as a layer
+ * (from Layers, Escape or a restore), it is the main. */
+export function designInspectorMainRootSelected(input: {
+  main: boolean;
+  frameSelected: boolean;
+  selectedNodeId: string | null | undefined;
+  layoutRootId: string | null | undefined;
+  count: number;
+}): boolean {
+  if (!input.main || input.count > 1) return false;
+  const isRoot = !!input.selectedNodeId && input.selectedNodeId === input.layoutRootId;
+  return input.frameSelected ? !input.selectedNodeId || isRoot : isRoot;
+}
+
 export function designInspectorSelectionKind(evidence: {
   count: number;
   mainRoot: boolean;
@@ -3453,8 +3474,8 @@ export const DesignInspector = React.memo(function DesignInspector({
     ? EMPTY_COMPONENT_DECLARATION
     : undefined);
   // The main's root is the component, so selecting it selects the main.
-  const mainRootSelected = !!frame && frameSelected && frameComponentPresentation?.kind === "main" &&
-    (!selectedNodeId || selectedNodeId === layoutRootId) && styleNodeIds.length <= 1;
+  const mainRootSelected = !!frame && designInspectorMainRootSelected({ main: frameComponentPresentation?.kind === "main",
+    frameSelected, selectedNodeId, layoutRootId, count: styleNodeIds.length });
   const instanceSelected = !mainRootSelected && !selectedPart && !selectedSlot && !!instanceNodeId && !!instanceHost &&
     (styleNodeIds.length === 1 || (frameSelected && explicitFrameIdentityNodeId === instanceNodeId && styleNodeIds.length === 0));
   const selectionKind = designInspectorSelectionKind({
@@ -4021,6 +4042,14 @@ export const DesignInspector = React.memo(function DesignInspector({
                 onCancelPreview={cancelCanvasBackgroundPreview}
                 onCommit={commitCanvasBackground}
               />
+            ) : frame && workspaceId && designInspectorPendingGeometry({ frameSelected, selectedNodeId, count: styleNodeIds.length }) === "size" ? (
+              <InspectorSection title="Size" data-design-size-section="" data-design-size-pending="">
+                <div className="grid grid-cols-2 gap-2">
+                  {(["W", "H"] as const).map((label) => (
+                    <Input key={label} aria-label={label} placeholder={label} disabled />
+                  ))}
+                </div>
+              </InspectorSection>
             ) : frame && workspaceId ? (
               <InspectorSection title="Frame">
                 <div className="grid grid-cols-2 gap-2">

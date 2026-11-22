@@ -78,6 +78,60 @@ describe("the controls each layer of a main reads", () => {
     expect(bindings.layers.caption!.styles).toEqual({ color: ["ink"] });
   });
 
+  it("counts a gate inside :not() as what a rule depends on, without matching the negated layer", () => {
+    const bindings = bindingsOf(main(
+      `<zd-option name="tone" type="choice" choices="info danger" default="info"></zd-option>`,
+      `.badge:not([data-tone="danger"]) { opacity: .5; } .other:not(.badge) { color: red; }`,
+      `<div data-oid="root"><span class="badge" data-oid="badge" data-tone="{{ tone }}">x</span><p class="other" data-oid="other">o</p></div>`))!;
+    expect(bindings.layers.badge!.styles).toEqual({ opacity: ["tone"] });
+    expect(bindings.layers.other).toBeUndefined();
+  });
+
+  it("excludes a layer only by a :not() it fully understands", () => {
+    const bindings = bindingsOf(main(
+      `<zd-option name="w" type="number" default="1"></zd-option>`,
+      `.card:not(.card:hover) { width: var(--zd-w); } .card:not(.card) { height: var(--zd-w); }`,
+      `<div class="card" data-oid="card">c</div>`))!;
+    // :hover was dropped from the negated compound, so it may not match: keep the layer.
+    expect(bindings.layers.card!.styles).toEqual({ width: ["w"] });
+  });
+
+  it("evaluates attribute operators on layer identity, keeping the layer when an operator is unknown", () => {
+    const bindings = bindingsOf(main(
+      `<zd-option name="w" type="number" default="1"></zd-option>`,
+      `[data-oid^="card-"] { width: var(--zd-w); } [data-oid$="-x"] { height: var(--zd-w); } [data-oid*="ar"] { gap: var(--zd-w); }
+       [data-oid~="card-a"] { padding: var(--zd-w); } [data-oid|="card"] { margin: var(--zd-w); } [data-oid="CARD-A" i] { opacity: var(--zd-w); }`,
+      `<div data-oid="card-a">a</div><div data-oid="other">o</div>`))!;
+    expect(bindings.layers["card-a"]!.styles).toEqual({ gap: ["w"], margin: ["w"], opacity: ["w"], padding: ["w"], width: ["w"] });
+    expect(bindings.layers.other).toBeUndefined();
+  });
+
+  it("resolves custom properties whatever order they are declared in, and marks a chain cut short", () => {
+    const ordered = bindingsOf(main(
+      `<zd-option name="w" type="number" default="1"></zd-option>`,
+      `.box { width: var(--a); } :root { --a: var(--b); } :root { --b: var(--zd-w); }`,
+      `<div class="box" data-oid="box">b</div>`))!;
+    expect(ordered.layers.box!.styles!.width).toEqual(["w"]);
+    expect(ordered.truncated).toBeUndefined();
+    const chain = Array.from({ length: 12 }, (_, index) => `--v${index}: var(--v${index + 1});`).join(" ");
+    const deep = bindingsOf(main(
+      `<zd-option name="w" type="number" default="1"></zd-option>`,
+      `:root { ${chain} --v12: var(--zd-w); } .box { width: var(--v0); } .near { height: var(--v10); }`,
+      `<div class="box" data-oid="box">b</div><div class="near" data-oid="near">n</div>`))!;
+    // Past the depth limit nothing is confirmed as reading nothing: the record says it was cut.
+    expect(deep.truncated).toBe(true);
+    expect(deep.layers.near!.styles!.height).toEqual(["w"]);
+  });
+
+  it("scans template holes in time linear in the source, unclosed ones included", () => {
+    const flood = "{{ ".repeat(200_000);
+    const started = performance.now();
+    const bindings = bindingsOf(main(`<zd-option name="t" type="text" default="x"></zd-option>`, "",
+      `<p data-oid="p" class="a {{ ${"{{".repeat(50_000)}">${flood}{{ t }}</p>`));
+    expect(performance.now() - started).toBeLessThan(3_000);
+    expect(bindings?.unread).toEqual(["t"]);
+  });
+
   it("reads inline styles, ignores keyframe offsets, and lists the controls nothing reads", () => {
     const bindings = bindingsOf(main(
       `<zd-option name="w" type="number" default="1"></zd-option><zd-option name="idle" type="boolean" default="false"></zd-option>`,

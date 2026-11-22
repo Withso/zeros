@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
+import { designInstanceControlViolations, designMainControlViolations } from "../component-control-lint";
 import { createDesignFrame, DESIGN_DIRECTORY_NAME, lintDesignDocument } from "../document";
 import { readCanvas, writeCanvas } from "../document-storage";
 
@@ -151,6 +152,18 @@ describe("linting what changes a component from outside", () => {
     expect(await lint(host.file)).toEqual([expect.objectContaining({ ruleId: "component-instance-override", oid: "i1" })]);
     await write(file, doc('<span data-oid="b" class="badge">x</span>', `${options([round])}<style>.badge { border-radius: calc(var(--zd-radius) * 1px) }</style>`));
     expect(await lint(host.file)).toEqual([expect.objectContaining({ ruleId: "component-control-shadowed", oid: "i1" })]);
+  });
+
+  it("finds layers, hosts and declarations in time linear in an adversarial source", () => {
+    const flood = '<a data-oid="x" '.repeat(60_000) + "<zd-x data-oid=".repeat(20_000);
+    const source = `<!doctype html><html><head><style>[data-oid="b"] { color: red }</style></head><body>${flood}<b data-oid="b" style="color: blue">b</b></body></html>`;
+    const lineAt = () => ({ startLine: 1, startCol: 1 });
+    const started = performance.now();
+    designMainControlViolations({ file: "f.html", source, elements: [], lineAt,
+      bindings: { layers: Object.fromEntries(Array.from({ length: 200 }, (_, index) => [`l${index}`, { styles: { color: ["c"] } }])) } });
+    designInstanceControlViolations({ file: "f.html", source, lineAt, instances: { components: { x: { elements: [], reach: {}, file: "x.html", frame: true } },
+      hosts: Object.fromEntries(Array.from({ length: 200 }, (_, index) => [`h${index}`, { component: "x", attributes: {}, style: "opacity: 0.5" }])) } });
+    expect(performance.now() - started).toBeLessThan(3_000);
   });
 
   it("finds nothing to warn about in the demo components", async () => {

@@ -512,12 +512,13 @@ export function componentInstanceHostStyleAllowed(property: string): boolean {
 
 /** Whether a property in an instance host's own style is an older override,
  * one the app no longer writes and Reset removes: anything outside the
- * allowlist, and a size or size limit on an axis a control drives on the
- * root, which would sit over that control. Its place, and an axis no
- * control drives, are its own. */
-export function componentInstanceOlderOverride(property: string, bound: { width: boolean; height: boolean }): boolean {
+ * allowlist, and anything that sets what a control sets on the root (the
+ * root's bound properties, as recorded), which would sit over that control.
+ * Its place, and a size no control reaches, are its own. */
+export function componentInstanceOlderOverride(property: string, boundProperties: Iterable<string>): boolean {
   if (!componentInstanceHostStyleAllowed(property)) return true;
-  return (bound.width && cssPropertiesOverlap(property, "width")) || (bound.height && cssPropertiesOverlap(property, "height"));
+  for (const bound of boundProperties) if (cssPropertiesOverlap(property, bound)) return true;
+  return false;
 }
 
 /** Why an instance's attribute has no effect, naming the value it ignores. */

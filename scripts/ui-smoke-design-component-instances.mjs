@@ -211,6 +211,30 @@ export async function runDesignComponentInstancesSmoke({ page, check }) {
     /Toolbar/.test(deleteText) && /Label/.test(deleteText) && (await writes()) === writesBeforeDelete &&
       (await layer("cc-toolbar").getAttribute("aria-selected")) === "true", deleteText);
 
+  // The question is about that one deletion. A selection that changes while
+  // it is open (in the same main, or to another frame) closes it, and
+  // nothing is deleted: not the layer asked about, not the new selection.
+  for (const [file, nodeId] of [["pricing.html", "cc-prompt"], ["home.html", "home-composer"]]) {
+    await expect(async () => {
+      await selectMain();
+      await layer("cc-toolbar").click({ timeout: 2_000 });
+      await expect(layer("cc-toolbar")).toHaveAttribute("aria-selected", "true", { timeout: 2_000 });
+    }).toPass({ timeout: 15_000 });
+    await page.getByLabel("Design canvas", { exact: true }).focus();
+    await page.keyboard.press("Backspace");
+    await expect(deleteDialog).toBeVisible();
+    const writesBeforeChange = await writes();
+    await page.evaluate(async ({ file, nodeId }) => {
+      const ui = await import("/apps/desktop/src/renderer/features/design-workspace/state/design-workspace-ui.ts");
+      ui.useDesignWorkspaceUiStore.getState().setSelection("ws_design_harness", file, nodeId);
+    }, { file, nodeId });
+    await expect(deleteDialog).toHaveCount(0);
+    await page.waitForTimeout(300);
+    check(`a selection change to ${nodeId} while Delete is asked closes the question and deletes nothing`,
+      (await writes()) === writesBeforeChange && (await main()).includes('data-oid="cc-toolbar"') &&
+        (file === "pricing.html" ? (await main()).includes(`data-oid="${nodeId}"`) : (await home()).includes(`data-oid="${nodeId}"`)));
+  }
+
   // A main layer shows each control once: Label (its text) above its Style
   // and, since a text layer has no radius or fill field, Corner radius and
   // Accent there too; Settle, which its transition shorthand reads, appears
@@ -273,6 +297,18 @@ export async function runDesignComponentInstancesSmoke({ page, check }) {
   await styleCard.locator('[data-design-card-action="controls"]').click();
   await expect(page.locator('[data-design-inspector] [role="tab"][aria-selected="true"]')).toHaveText("Controls");
   check("on a main's root, a locked field's card opens Controls", (await section.getByText("Ink", { exact: true }).count()) >= 1);
+
+  // The root selected as a layer, as a restored or programmatic selection
+  // names it ({ frame, nodeId: root }), is still the main: Controls and
+  // Style, no CSS tab.
+  await page.evaluate(async () => {
+    const ui = await import("/apps/desktop/src/renderer/features/design-workspace/state/design-workspace-ui.ts");
+    ui.useDesignWorkspaceUiStore.getState().setSelection("ws_design_harness", "pricing.html", "cc-root");
+  });
+  await expect(section).toHaveAttribute("data-design-component-options", "main");
+  const rootTabs = await page.locator('[data-design-inspector] [role="tab"]').allInnerTexts();
+  check("the main's root selected as a layer (a restored selection) is still the main, with Controls and Style and no CSS tab",
+    rootTabs.join(",") === "Controls,Style", rootTabs.join(","));
 
   // ── An instance in another frame ──
   await selectInstance();
@@ -685,7 +721,8 @@ export async function runDesignComponentInstancesSmoke({ page, check }) {
   };
   await olderAt(olderSendPart, "dblclick");
   await expect(line).toHaveAttribute("data-design-component-of", "part");
-  check("a part shows its instance's older overrides too", (await older.getAttribute("data-design-older-overrides")) === "2");
+  // On a part the line is that part's own override; the instance's stay on the instance.
+  check("a part shows only its own older override", (await older.getAttribute("data-design-older-overrides")) === "1");
   // Resizing writes the host's size, which is not an older override.
   await selectInstance();
   const olderHeight = page.locator("[data-design-inspector] [data-design-size-section]").getByLabel("H", { exact: true });
