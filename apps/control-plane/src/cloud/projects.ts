@@ -72,7 +72,8 @@ const repositoryUnreachable = (repository: string) =>
   new HttpError(409, "organization_connection_required", `Connect ${owner(repository)} on GitHub for the organization to use ${repository}.`);
 
 /** What changed in a project's repositories, so only that project's copy is rebuilt. */
-export type CloudProjectChange = "project_created" | "repositories_changed" | "setup_changed" | "branch_changed" | null;
+/** submodules_changed: only the "fetch submodules" switch; its copy rebuilds as setup_changed, named finer in the history. */
+export type CloudProjectChange = "project_created" | "repositories_changed" | "setup_changed" | "submodules_changed" | "branch_changed" | null;
 
 export class CloudProjects {
   constructor(private readonly pool: pg.Pool) {}
@@ -214,10 +215,9 @@ export class CloudProjects {
         const previous = new Map(before.map(entry => [entry.repository_id, entry.fetch_submodules]));
         for (const entry of repositories) entry.fetchSubmodules ??= previous.get(entry.repositoryId) ?? false;
         if (before.length !== repositories.length || before.some((entry, index) => !same(entry, repositories[index]!))) change = "repositories_changed";
-        // Fetching submodules is part of a repository's setup: changing it rebuilds the copy the same way.
         else if (before.some((entry, index) => (entry.setup ?? null) !== (repositories[index]!.setup ?? null)
-          || (entry.setup_script ?? null) !== (repositories[index]!.setupScript ?? null)
-          || entry.fetch_submodules !== repositories[index]!.fetchSubmodules)) change = "setup_changed";
+          || (entry.setup_script ?? null) !== (repositories[index]!.setupScript ?? null))) change = "setup_changed";
+        else if (before.some((entry, index) => entry.fetch_submodules !== repositories[index]!.fetchSubmodules)) change = "submodules_changed";
         else if (before.some((entry, index) => (entry.default_branch ?? null) !== (repositories[index]!.defaultBranch ?? null))) change = "branch_changed";
         await tx.query("DELETE FROM cloud_project_repositories WHERE project_id=$1", [projectId]);
         await this.writeRepositories(tx, projectId, repositories, connections);

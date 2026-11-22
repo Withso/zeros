@@ -84,6 +84,8 @@ export type CloudV2ReadyCopy = {
   failureReason: string | null; failureRepository: string | null; failureStep: ReadyCopyStep | null; failureDetail: string | null;
   stale: boolean; refresh: boolean; machineDeletedAt: Date | null;
   inputs: string | null; manualRetry: boolean; trigger: ReadyCopyTrigger | null; triggeredBy: string | null;
+  /** A finer reason for the history line: the submodules switch, which rebuilds as setup_changed. */
+  triggerDetail: "submodules_changed" | null;
   setupOutput: string | null; detailPrunedAt: Date | null;
   stoppedAt: Date | null; lastForkedAt: Date | null; createdAt: Date; startedAt: Date | null; finishedAt: Date | null;
 };
@@ -93,7 +95,7 @@ type Row = {
   computer_build_id: string | null; created_by: string | null; result: ReadyCopyRepositoryResult[] | null;
   failure_reason: string | null; failure_repository: string | null; failure_step: ReadyCopyStep | null; failure_detail: string | null;
   stale: boolean; refresh: boolean; machine_deleted_at: Date | null;
-  inputs: string | null; manual_retry: boolean; trigger: ReadyCopyTrigger | null; triggered_by: string | null;
+  inputs: string | null; manual_retry: boolean; trigger: ReadyCopyTrigger | null; triggered_by: string | null; trigger_detail: "submodules_changed" | null;
   setup_output: string | null; detail_pruned_at: Date | null;
   stopped_at: Date | null; last_forked_at: Date | null; created_at: Date; started_at: Date | null; finished_at: Date | null;
 };
@@ -103,7 +105,7 @@ const copy = (row: Row): CloudV2ReadyCopy => ({
   builtFromBase: row.built_from_base, computerBuildId: row.computer_build_id, createdBy: row.created_by, result: row.result,
   failureReason: row.failure_reason, failureRepository: row.failure_repository, failureStep: row.failure_step, failureDetail: row.failure_detail,
   stale: row.stale, refresh: row.refresh, machineDeletedAt: row.machine_deleted_at, inputs: row.inputs, manualRetry: row.manual_retry,
-  trigger: row.trigger, triggeredBy: row.triggered_by, setupOutput: row.setup_output, detailPrunedAt: row.detail_pruned_at,
+  trigger: row.trigger, triggeredBy: row.triggered_by, triggerDetail: row.trigger_detail ?? null, setupOutput: row.setup_output, detailPrunedAt: row.detail_pruned_at,
   stoppedAt: row.stopped_at, lastForkedAt: row.last_forked_at, createdAt: row.created_at, startedAt: row.started_at, finishedAt: row.finished_at,
 });
 
@@ -182,19 +184,19 @@ export class CloudV2ReadyCopies {
   /** Queues a generation, or joins the one already building for this project. */
   async request(input: { organizationId: string; projectId: string; createdBy: string; computerBuildId: string;
     builtFromBase: string; refresh?: boolean; now?: Date; inputs?: string | null; manualRetry?: boolean;
-    trigger?: ReadyCopyTrigger; triggeredBy?: string | null }): Promise<CloudV2ReadyCopy> {
+    trigger?: ReadyCopyTrigger; triggerDetail?: "submodules_changed"; triggeredBy?: string | null }): Promise<CloudV2ReadyCopy> {
     const id = randomUUID();
     return this.tx(async tx => {
       await tx.query(
         `INSERT INTO cloud_v2_ready_copies (id, org_id, project_id, generation, state, idempotency_key, built_from_base,
-           computer_build_id, created_by, refresh, created_at, updated_at, inputs, manual_retry, trigger, triggered_by)
+           computer_build_id, created_by, refresh, created_at, updated_at, inputs, manual_retry, trigger, triggered_by, trigger_detail)
          SELECT $1,$2,$3,coalesce((SELECT max(generation) FROM cloud_v2_ready_copies WHERE project_id=$3),0)+1,
-           'building',$4,$5,$6,$7,$8,coalesce($9,clock_timestamp()),coalesce($9,clock_timestamp()),$10,$11,$12,$13
+           'building',$4,$5,$6,$7,$8,coalesce($9,clock_timestamp()),coalesce($9,clock_timestamp()),$10,$11,$12,$13,$14
          WHERE EXISTS (SELECT 1 FROM cloud_projects WHERE id=$3 AND org_id=$2)
          ON CONFLICT (project_id) WHERE state='building' DO NOTHING`,
         [id, input.organizationId, input.projectId, `ready-copy:${id}`, input.builtFromBase, input.computerBuildId,
           input.createdBy, input.refresh === true, input.now ?? null, input.inputs ?? null, input.manualRetry === true,
-          input.trigger ?? null, input.triggeredBy ?? null]);
+          input.trigger ?? null, input.triggeredBy ?? null, input.triggerDetail ?? null]);
       const row = (await tx.query<Row>("SELECT * FROM cloud_v2_ready_copies WHERE org_id=$1 AND project_id=$2 AND state='building'",
         [input.organizationId, input.projectId])).rows[0];
       if (!row) throw new HttpError(404, "not_found", "Project not found");
@@ -766,7 +768,10 @@ export class CloudV2ReadyCopyBuilder {
   /** A project was created or saved, or its build secrets changed: rebuild that
    * project's copy alone, once its inputs differ from the copy's. A changed set
    * of repositories always starts from the base. */
-  async reconcile(organizationId: string, projectId: string, trigger: "project_created" | "repositories_changed" | "setup_changed" | "branch_changed" | "secrets_changed"): Promise<void> {
+  async reconcile(organizationId: string, projectId: string, change: "project_created" | "repositories_changed" | "setup_changed" | "submodules_changed" | "branch_changed" | "secrets_changed"): Promise<void> {
+    // The switch rebuilds as a setup change (the trigger's CHECK is unchanged); the history names it.
+    const trigger = change === "submodules_changed" ? "setup_changed" as const : change;
+    const triggerDetail = change === "submodules_changed" ? "submodules_changed" as const : undefined;
     const { copies } = this.deps, base = await copies.base(organizationId), project = await copies.project(projectId);
     if (!base || !project || project.organizationId !== organizationId || !project.buildable || !project.repositories.length) return;
     const inputs = await copies.inputs(organizationId, projectId);
@@ -776,7 +781,7 @@ export class CloudV2ReadyCopyBuilder {
     const ready = trigger === "repositories_changed" ? null : await copies.forkable(organizationId, projectId, this.now());
     await copies.request({ organizationId, projectId, createdBy: project.ownerUserId ?? project.createdBy ?? base.createdBy,
       computerBuildId: base.buildId, builtFromBase: ready && ready.computerBuildId === base.buildId ? `copy:${ready.id}` : `snapshot:${base.snapshot}`,
-      refresh: !!ready, inputs, trigger });
+      refresh: !!ready, inputs, trigger, ...(triggerDetail ? { triggerDetail } : {}) });
   }
 
   /** Build now (whoever may edit the project; the route checks): coalesces with

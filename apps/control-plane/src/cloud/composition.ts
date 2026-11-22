@@ -410,7 +410,7 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
     ...(projects && projectRoutes ? { projects, resolveMemberRepository, projectRoutes, projectAccess: github.projectAccess } : {}),
     ...(readyCopies ? { readyCopies: { status: (organizationId: string, viewer?: string | null) => readyCopies.status(organizationId, viewer ?? null),
       failures: (organizationId: string) => readyCopies.failureSummaries(organizationId, new Date()),
-      changed: async (organizationId: string, projectId: string, change: "project_created" | "repositories_changed" | "setup_changed" | "branch_changed") => {
+      changed: async (organizationId: string, projectId: string, change: "project_created" | "repositories_changed" | "setup_changed" | "submodules_changed" | "branch_changed") => {
         await readyCopyBuilder?.reconcile(organizationId, projectId, change);
       } } } : {}),
     authorizeRepository, authorizeRepositories, authorizeSourceTargets, authorizeBuildRepository, authorizeSource, continueSource,

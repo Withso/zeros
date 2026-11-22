@@ -73,7 +73,7 @@ export function ReadyCopySection({ organizationId, projectId, active }: { organi
           {copy.history.map(row => (
             <BuildHistoryItem key={row.generation} state={RESULT[row.state]} title={`Build #${row.generation}`}
               // Why it ran first, then when and how long.
-              details={[readyCopyTriggerLabel(row.trigger, row.startedBy), relativeAge(row.startedAt, now), duration(row.startedAt, row.finishedAt),
+              details={[readyCopyTriggerLabel(row.trigger, row.startedBy, row.triggerDetail), relativeAge(row.startedAt, now), duration(row.startedAt, row.finishedAt),
                 row.failure ? readyCopyFailureLine({ ...row.failure, nextRetryAt: null }, now).split(".")[0]! : null,
                 ...(row.repositories ?? []).map(entry => entry.branch && entry.commit
                   ? `${row.repositories!.length > 1 ? `${entry.repository} ` : ""}${entry.branch} @ ${entry.commit.slice(0, 7)}` : null)]}

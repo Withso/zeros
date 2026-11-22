@@ -71,7 +71,7 @@ d("cloud projects and GitHub at two levels", () => {
       await expectCode(action(), "not_found");
   });
 
-  it("keeps each repository's submodule setting, off by default; an update that omits it keeps it, and changing it rebuilds like a setup", async () => {
+  it("keeps each repository's submodule setting, off by default; an update that omits it keeps it, and changing it is its own change", async () => {
     await connectOrganization(admin, 501);
     const created = await projects.create(org, admin, { name: "Zeros", level: "organization",
       repositories: [{ ...repo("withso/zeros", "42"), fetchSubmodules: true }, repo("withso/web", "43")] });
@@ -81,10 +81,10 @@ d("cloud projects and GitHub at two levels", () => {
     expect(kept.change).toBeNull();
     expect(kept.project.repositories.map(entry => entry.fetchSubmodules)).toEqual([true, false]);
     const turned = await projects.update(org, admin, created.id, { repositories: [repo("withso/zeros", "42"), { ...repo("withso/web", "43"), fetchSubmodules: true }] });
-    expect(turned.change).toBe("setup_changed");
+    expect(turned.change).toBe("submodules_changed");
     expect(turned.project.repositories.map(entry => entry.fetchSubmodules)).toEqual([true, true]);
     const off = await projects.update(org, admin, created.id, { repositories: [{ ...repo("withso/zeros", "42"), fetchSubmodules: false }, repo("withso/web", "43")] });
-    expect(off.change).toBe("setup_changed");
+    expect(off.change).toBe("submodules_changed");
     expect(off.project.repositories.map(entry => entry.fetchSubmodules)).toEqual([false, true]);
   });
 

@@ -106,7 +106,7 @@ export type CloudV2RouteDeps = {
     failures(organizationId: string): Promise<{ projectId: string; project: string; repository: string | null; step: string | null; generation: number;
       reason: string; detail: string | null; finishedAt: string; failures?: number; nextRetryAt?: string | null }[]>;
     /** A released desktop's recipe save rebuilds each changed project's copy alone. */
-    changed?(organizationId: string, projectId: string, change: "project_created" | "repositories_changed" | "setup_changed" | "branch_changed"): Promise<void>;
+    changed?(organizationId: string, projectId: string, change: "project_created" | "repositories_changed" | "setup_changed" | "submodules_changed" | "branch_changed"): Promise<void>;
   };
   /** Repositories the organization's active Cloud Computer has installed; null without one. */
   installedRepositories(organizationId: string): Promise<readonly CloudV2InstalledRepository[] | null>;

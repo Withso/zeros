@@ -31,7 +31,8 @@ const TRIGGERS: Record<string, string> = {
   project_created: "Project created", repositories_changed: "Repositories changed", weekly_update: "Weekly update", computer_build: "New Cloud Computer build",
   setup_changed: "Setup changed", branch_changed: "Branch changed", secrets_changed: "Build secrets changed", retry: "Retry",
 };
-export function readyCopyTriggerLabel(trigger: string | null, startedBy: string | null): string | null {
+export function readyCopyTriggerLabel(trigger: string | null, startedBy: string | null, triggerDetail?: string): string | null {
+  if (triggerDetail === "submodules_changed") return "Submodules setting changed";
   if (trigger === "manual") return startedBy ? `Started by ${startedBy}` : "Started by hand";
   return trigger ? TRIGGERS[trigger] ?? null : null;
 }

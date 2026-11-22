@@ -17,9 +17,14 @@ SET LOCAL lock_timeout = '5s';
 --
 -- Down path (never run automatically):
 --   DROP TABLE cloud_v2_workspace_submodule_sources, cloud_submodule_levels;
+--   ALTER TABLE cloud_v2_ready_copies DROP COLUMN trigger_detail;
 --   ALTER TABLE cloud_project_repositories DROP COLUMN fetch_submodules;
 
 ALTER TABLE cloud_project_repositories ADD COLUMN fetch_submodules boolean NOT NULL DEFAULT false;
+
+-- Changing the switch rebuilds the copy under trigger 'setup_changed' (its CHECK is left as it is); this
+-- names the finer reason for the project page's history only.
+ALTER TABLE cloud_v2_ready_copies ADD COLUMN trigger_detail text CHECK (trigger_detail IS NULL OR trigger_detail IN ('submodules_changed'));
 
 CREATE TABLE cloud_submodule_levels (
   org_id uuid NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,

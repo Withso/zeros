@@ -141,7 +141,7 @@ describe("composing a plan per caller", () => {
     const { http, requests } = github(tree);
     const ids = (repository: string) => { const m = /^acme\/(m|inner|deep)(\d+)$/.exec(repository)!; return String({ m: 1000, inner: 2000, deep: 3000 }[m[1] as "m"] + Number(m[2])); };
     const access = async (repository: string) => { requests.push(`/repos/${repository}`); return ids(repository); };
-    return { requests, compose: (level = (r: { repository: string; repositoryId: string }, c: string) => readSubmoduleLevel(http, r, c)) =>
+    return { requests, http, compose: (level = (r: { repository: string; repositoryId: string }, c: string) => readSubmoduleLevel(http, r, c)) =>
       composeSubmodulePlan({ root: { repository: "acme/app", repositoryId: "1", commit: sha(1) }, level, access }) };
   }
 
@@ -154,6 +154,21 @@ describe("composing a plan per caller", () => {
       expect(plan.submodules).toHaveLength(Math.min(32, depth === 1 ? n : n * 3));
       expect(p.requests).toHaveLength(expected);
     });
+
+  it("resolves an unchanged tree a second time with no contents read: only each caller's access checks", async () => {
+    const p = project(8, 3), remembered = new Map<string, SubmoduleLevel>();
+    const level = async (r: { repository: string; repositoryId: string }, c: string) => {
+      const key = `${r.repositoryId}:${c}`;
+      if (!remembered.has(key)) remembered.set(key, await readSubmoduleLevel(p.http, r, c));
+      return remembered.get(key)!;
+    };
+    expect((await p.compose(level)).submodules).toHaveLength(24);
+    const cold = p.requests.length;
+    expect((await p.compose(level)).submodules).toHaveLength(24);
+    const second = p.requests.slice(cold);
+    expect(second.filter(path => path.includes("/contents/"))).toEqual([]);
+    expect(second).toHaveLength(24);
+  });
 
   it("reads a level only after access, and composes each caller's own tree from the same remembered levels", async () => {
     const remembered = new Map<string, SubmoduleLevel>(), reads: string[] = [];

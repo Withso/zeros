@@ -11,6 +11,7 @@ import { CloudV2Lifecycle } from "./lifecycle.js";
 import { CloudV2ReadyCopies, CloudV2ReadyCopyBuilder, CloudV2ReadyCopyForks, READY_COPY_HISTORY_LIMIT, READY_COPY_REFRESH_STARTS, READY_COPY_RETRY_LIMIT,
   type ReadyCopyWorkspace } from "./ready-copies.js";
 import { CloudV2ReadyCopySecrets } from "./ready-copy-secrets.js";
+import { readyCopyHistory } from "./ready-copy-status.js";
 import { CloudEnvironments } from "./environment-store.js";
 import { CloudV2Store } from "./store.js";
 import { CloudRepositoryLevels } from "./repository-levels.js";
@@ -720,8 +721,11 @@ d("cloud v2 ready copies", () => {
       expect(boat.machine(forked.sandboxId)!.files.get("/home/user/zeros/zeros/lib/.git")).toBe(boat.machine(copy.machineId!)!.files.get("/home/user/zeros/zeros/lib/.git"));
       // A rebuild reads its levels from what is remembered.
       const before = gh.requests.length;
+      // Turning it off then on again: the switch rebuilds as a setup change, named finer for the history.
       await pool.query("UPDATE cloud_project_repositories SET setup='pnpm install --frozen-lockfile' WHERE project_id=$1", [zeros]);
-      await copyBuilder(gh.deps).reconcile(org, zeros, "setup_changed");
+      await copyBuilder(gh.deps).reconcile(org, zeros, "submodules_changed");
+      expect(await row(2)).toMatchObject({ trigger: "setup_changed", triggerDetail: "submodules_changed" });
+      expect(readyCopyHistory([await row(2)], new Map())[0]).toMatchObject({ trigger: "setup_changed", triggerDetail: "submodules_changed" });
       await copyBuilder(gh.deps).tick();
       const rebuilt = await row(2);
       expect(rebuilt).toMatchObject({ state: "ready", builtFromBase: `copy:${copy.id}` });

@@ -94,6 +94,8 @@ const ReadyCopySchema = z.object({
   }).passthrough(),
   history: z.array(z.object({ generation: z.number().int(), state: z.enum(["building", "ready", "failed", "retired"]), startedAt: z.string().nullable(),
     finishedAt: z.string().nullable(), trigger: z.string().nullable(), startedBy: z.string().nullable(),
+    /** A finer reason than `trigger` (the submodules switch rebuilds as setup_changed); absent from older servers. */
+    triggerDetail: z.string().max(64).optional().catch(undefined),
     /** What each repository was cloned at; null until the generation is ready. */
     repositories: z.array(z.object({ repository: z.string().max(201), branch: z.string().max(255).nullable(), commit: z.string().max(40).nullable() }).passthrough())
       .max(10).nullable().catch(null),
