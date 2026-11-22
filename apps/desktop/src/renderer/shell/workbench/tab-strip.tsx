@@ -71,7 +71,9 @@ import {
   useConversationBrowserActivity,
 } from "../../features/browser/browser-session-activity-store";
 import { useAgentSessions } from "../../features/agent/sessions-hooks";
-import { closeSideChat } from "../../features/agent/side-chat";
+import { closeSideChat, sideChatCloseConfirmation } from "../../features/agent/side-chat";
+import { ChatCloseDialog } from "../conversation/chat-close-dialog";
+import type { ChatCloseConfirmationCopy } from "../conversation/chat-close";
 import { leaveSimulatorAnnotation } from "../../features/simulators/simulator-annotation-actions";
 import { nativeInvoke } from "../../platform/runtime";
 import {
@@ -121,6 +123,17 @@ export function WorkbenchTabStrip({
   const fileStatuses = React.useMemo(() => fileStatusesForFolder(gitStatus.data, folderKey, gitRoot), [gitStatus.data, folderKey, gitRoot]);
 
   const stripSessions = useAgentSessions();
+  const [pendingSideChatClose, setPendingSideChatClose] = React.useState<{
+    tabId: string;
+    chatId: string;
+    copy: ChatCloseConfirmationCopy;
+  } | null>(null);
+  const confirmSideChatClose = React.useCallback(() => {
+    const pending = pendingSideChatClose;
+    setPendingSideChatClose(null);
+    if (pending) closeSideChat(dispatch, stripSessions, pending.tabId, pending.chatId);
+  }, [dispatch, pendingSideChatClose, stripSessions]);
+  const cancelSideChatClose = React.useCallback(() => setPendingSideChatClose(null), []);
   const strip = useStickyTabStrip({
     activeKey: activeId,
     resetKey: folderKey,
@@ -135,8 +148,13 @@ export function WorkbenchTabStrip({
   ) => {
     e.stopPropagation();
     if (tab.type === "chat") {
-      if (tab.chatId) closeSideChat(dispatch, stripSessions, tab.id, tab.chatId);
-      else dispatch({ type: "REMOVE_WORKBENCH_TAB", id: tab.id });
+      if (!tab.chatId) {
+        dispatch({ type: "REMOVE_WORKBENCH_TAB", id: tab.id });
+        return;
+      }
+      const copy = sideChatCloseConfirmation(stripSessions, tab.chatId);
+      if (copy) setPendingSideChatClose({ tabId: tab.id, chatId: tab.chatId, copy });
+      else closeSideChat(dispatch, stripSessions, tab.id, tab.chatId);
       return;
     }
     if (tab.type === "terminal" && tab.terminalId) {
@@ -235,6 +253,13 @@ export function WorkbenchTabStrip({
         />
       </div>
       <div className="min-w-0 flex-1" aria-hidden="true" />
+      {pendingSideChatClose && (
+        <ChatCloseDialog
+          copy={pendingSideChatClose.copy}
+          onCancel={cancelSideChatClose}
+          onConfirm={confirmSideChatClose}
+        />
+      )}
     </div>
   );
 }
