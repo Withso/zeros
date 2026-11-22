@@ -74,14 +74,15 @@ export function ChatDeck({
     [allChats, workspaceOwners, projects],
   );
   // A side chat's Workbench tab owns its only view; never mount it twice.
+  // History mode has no Workbench, so its side chats stay in the deck.
   const workbenchByScope = useWorkspaceStore((state) => state.workbenchByScope);
   const chats = useMemo(
     () =>
-      allChats.filter(
-        (chat) =>
-          (!chat.archived || !!historyOwners.get(chat.id)) &&
-          !chatIdsHostedBy(workbenchByScope[workbenchScopeForFolder(chat.folder)]?.tabs).has(chat.id),
-      ),
+      allChats.filter((chat) => {
+        if (historyOwners.get(chat.id)) return true;
+        return !chat.archived &&
+          !chatIdsHostedBy(workbenchByScope[workbenchScopeForFolder(chat.folder)]?.tabs).has(chat.id);
+      }),
     [allChats, historyOwners, workbenchByScope],
   );
   const activeFolder = useWorkspaceStore(selectActiveFolder);
@@ -162,9 +163,16 @@ export function ChatDeck({
   // effect, after removed ChatViews have flushed drafts/queue holds and after
   // newly-retained views exist. Recent switching remains the exact same 12-view
   // DOM deck; this merely bounds the transcript arrays behind older slots.
+  // The active workspace's side chat tabs mount their own views; keep their
+  // transcripts too.
+  const activeWorkbenchTabs = activeFolder ? workbenchByScope[workbenchScopeForFolder(activeFolder)]?.tabs : undefined;
+  const sessionRetainedChatIds = useMemo(() => {
+    const hosted = chatIdsHostedBy(activeWorkbenchTabs);
+    return hosted.size === 0 ? retainedChatIds : [...new Set([...retainedChatIds, ...hosted])];
+  }, [activeWorkbenchTabs, retainedChatIds]);
   useEffect(() => {
-    setRetainedChatIds(retainedChatIds);
-  }, [retainedChatIds, setRetainedChatIds]);
+    setRetainedChatIds(sessionRetainedChatIds);
+  }, [sessionRetainedChatIds, setRetainedChatIds]);
   useEffect(() => () => setRetainedChatIdsRef.current([]), []);
 
   return (
