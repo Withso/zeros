@@ -284,9 +284,16 @@ export const DashboardListRow = forwardRef<
             >
               {row.title}
             </span>
-            <span className="text-fg3 text-3xxs min-w-0 shrink-[100] truncate leading-4 font-normal" title={archiveLine ?? undefined}>
-              {archiveLine ?? row.branch}
-            </span>
+            {archiveLine ? (
+              // Only the room the title leaves: the title never gives way to it.
+              <span className="text-fg3 text-3xxs min-w-0 flex-1 basis-0 truncate leading-4 font-normal" title={archiveLine}>
+                {archiveLine}
+              </span>
+            ) : (
+              <span className="text-fg3 text-3xxs min-w-0 shrink-[100] truncate leading-4 font-normal">
+                {row.branch}
+              </span>
+            )}
           </span>
           <DashboardPlacement workspace={w} active={active} />
         </Button>
