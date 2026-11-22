@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   COMPONENT_INSTANCE_HOST_STYLE_PROPERTIES,
   componentInstanceHostStyleAllowed,
+  componentInstanceOlderOverride,
   COMPONENT_OPTION_LIMITS,
   COMPONENT_STATE_PRESETS,
   componentInheritedValues,
@@ -229,5 +230,14 @@ describe("what an app may write in an instance host's own style", () => {
       expect(componentInstanceHostStyleAllowed(property)).toBe(true);
     for (const property of ["--zd-x", "--anything", "--zeros-layoutx", "--zeros-other", "opacity", "-zeros-layout-x"])
       expect(componentInstanceHostStyleAllowed(property)).toBe(false);
+  });
+
+  it("is an older override outside those, or as a size or size limit on an axis a control drives", () => {
+    const width = { width: true, height: false };
+    for (const property of ["opacity", "--anything", "width", "min-width", "max-width", "inline-size"])
+      expect(componentInstanceOlderOverride(property, width)).toBe(true);
+    for (const property of ["height", "min-height", "left", "transform", "flex-grow", "--zeros-layout-x"])
+      expect(componentInstanceOlderOverride(property, width)).toBe(false);
+    expect(componentInstanceOlderOverride("width", { width: false, height: false })).toBe(false);
   });
 });

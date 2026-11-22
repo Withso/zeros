@@ -18,7 +18,7 @@ import {
   type ComponentEasing,
   type ComponentOptionValue,
   type ComponentVariantState,
-  componentInstanceHostStyleAllowed,
+  componentInstanceOlderOverride,
 } from "@zeros/design-core/component-options";
 import {
   designComponentRecordLimitMessage,
@@ -29,6 +29,7 @@ import { designComponentSlotNodeId, DESIGN_RUNTIME_INSTANCE_TARGET } from "@zero
 
 import { designFrameRuntime, waitForDesignFrameRuntime } from "../../../platform/bridge/design-frame-runtime";
 import { designBackgroundWork } from "./design-background-work";
+import { designBoundSizeAxes } from "./design-component-bindings";
 import { designPartOverrideAttribute } from "./design-component-parts";
 import { applyDesignEditCached, designWorkspaceSnapshotCache } from "./design-workspace-cache";
 import { preparedDesignSnapshot } from "./design-frame-view";
@@ -198,7 +199,8 @@ async function prepareDesignInstanceReset(
   const declaration = readDesignFrameComponent(component).declaration;
   const optionState = designInstanceOptionState(declaration, host.attributes);
   const parts = Object.keys(host.overrides ?? {});
-  const properties = kind === "all" ? designInstanceVisualStyleProperties(host.style) : designInstanceOlderOverrideProperties(host.style);
+  const properties = kind === "all" ? designInstanceVisualStyleProperties(host.style)
+    : designInstanceOlderOverrideProperties(host.style, designBoundSizeAxes(workspaceId, currentFrame as never, nodeId));
   const styleUpdates: Record<string, string | null> = Object.fromEntries(properties.map((property) => [property, null]));
 
   // Reset all removes a legacy transform, so its offset folds into the pins;
@@ -296,16 +298,19 @@ export function designInstanceVisualStyleProperties(style: string | undefined): 
   return style ? designDeclaredProperties(style).filter((property) => !INSTANCE_PLACEMENT_PROPERTIES.has(property)) : [];
 }
 
+const NO_BOUND_AXES = { width: false, height: false } as const;
+
 /** The host style properties the app no longer writes: anything outside its
- * placement, size and layout-child sizing. */
-export function designInstanceOlderOverrideProperties(style: string | undefined): string[] {
-  return style ? designDeclaredProperties(style).filter((property) => !componentInstanceHostStyleAllowed(property)) : [];
+ * placement, size and layout-child sizing, and a size on an axis a control
+ * drives (`bound`, from designBoundSizeAxes). */
+export function designInstanceOlderOverrideProperties(style: string | undefined, bound: { width: boolean; height: boolean } = NO_BOUND_AXES): string[] {
+  return style ? designDeclaredProperties(style).filter((property) => componentInstanceOlderOverride(property, bound)) : [];
 }
 
 /** Older overrides: each part's zd-style-<part>, and each such host style
  * property. The engine still renders them; the app only offers to reset them. */
-export function designInstanceOlderOverrideCount(host: DesignFrameInstances["hosts"][string]): number {
-  return Object.keys(host.overrides ?? {}).length + designInstanceOlderOverrideProperties(host.style).length;
+export function designInstanceOlderOverrideCount(host: DesignFrameInstances["hosts"][string], bound: { width: boolean; height: boolean } = NO_BOUND_AXES): number {
+  return Object.keys(host.overrides ?? {}).length + designInstanceOlderOverrideProperties(host.style, bound).length;
 }
 
 /** Reset an instance's older overrides in one step, keeping its size and place. */

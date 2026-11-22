@@ -427,23 +427,31 @@ export function componentBindingsOf(document: DefaultTreeAdapterTypes.Document, 
 
   const layerList = [...layers.values()];
   for (const rule of rules) {
-    const gated = gateOptions(rule.selector);
-    const declarations: Array<[string, Set<string>]> = [];
+    // What a value reads holds for every arm of the list; a gate only for
+    // the arm that tests it, so `.badge[data-tone], .caption` leaves
+    // .caption's value unbound.
+    const values: Array<[string, Set<string>]> = [];
     rule.each((child) => {
       if (child.type !== "decl") return;
       const declaration = child as Declaration;
-      const options = new Set([...valueOptions(declaration.value), ...gated]);
       if (declaration.prop.startsWith("--zd-")) return;
-      if (options.size) declarations.push([declaration.prop.toLowerCase().startsWith("--") ? declaration.prop : declaration.prop.toLowerCase(), options]);
+      values.push([declaration.prop.toLowerCase().startsWith("--") ? declaration.prop : declaration.prop.toLowerCase(), valueOptions(declaration.value)]);
     });
-    if (!declarations.length) continue;
-    const subjects = subjectsOf(rule.selector);
-    for (const layer of layerList) {
-      if (!subjects.some((subject) => compoundMatches(subject, layer, root))) continue;
-      for (const [property, options] of declarations) {
-        const entry = layer.styles.get(property) ?? new Set<string>();
-        for (const option of options) entry.add(option);
-        layer.styles.set(property, entry);
+    if (!values.length) continue;
+    for (const arm of splitList(rule.selector)) {
+      const gated = gateOptions(arm);
+      const declarations = values
+        .map(([property, read]): [string, Set<string>] => [property, new Set([...read, ...gated])])
+        .filter(([, options]) => options.size > 0);
+      if (!declarations.length) continue;
+      const subjects = subjectsOf(arm);
+      for (const layer of layerList) {
+        if (!subjects.some((subject) => compoundMatches(subject, layer, root))) continue;
+        for (const [property, options] of declarations) {
+          const entry = layer.styles.get(property) ?? new Set<string>();
+          for (const option of options) entry.add(option);
+          layer.styles.set(property, entry);
+        }
       }
     }
   }

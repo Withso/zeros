@@ -173,10 +173,10 @@ type CapturedEdit = {
 const latestCapturedEdit = () =>
   (mocks.resolved ?? (mocks.apply.mock.calls as unknown as [string, unknown, CapturedEdit][]).at(-1)![2]) as CapturedEdit;
 
-const prepareResetSnapshot = (file: string, nodeId: string, host: Record<string, unknown>) => {
+const prepareResetSnapshot = (file: string, nodeId: string, host: Record<string, unknown>, component: unknown = VARIANTS) => {
   mocks.snapshot = {
     frames: [{ file, sourceVersion: V1, frameId: "frame", instances: {
-      components: { card: VARIANTS },
+      components: { card: component },
       hosts: { [nodeId]: { component: "card", attributes: {}, ...host } },
     } }],
   };
@@ -259,6 +259,24 @@ describe("variants and instances", () => {
     expect(designInstanceOlderOverrideCount({ component: "card", attributes: {}, overrides: { "cc-send": "x", "chip#1": "y" }, style })).toBe(7);
     expect(designInstanceOlderOverrideCount({ component: "card", attributes: {}, style: "width: 200px; left: 4px" })).toBe(0);
     expect(designInstanceOlderOverrideCount({ component: "card", attributes: {} })).toBe(0);
+  });
+
+  it("counts a size or size limit on an axis a control drives as an older override, keeping the other axis and the place", () => {
+    const style = "width: 200px; min-width: 100px; max-height: 80px; height: 40px; left: 4px; opacity: .5";
+    const bound = { width: true, height: false };
+    expect(designInstanceOlderOverrideProperties(style, bound)).toEqual(["width", "min-width", "opacity"]);
+    expect(designInstanceOlderOverrideCount({ component: "card", attributes: {}, style }, bound)).toBe(3);
+    expect(designInstanceOlderOverrideProperties(style)).toEqual(["opacity"]);
+  });
+
+  it("resets a raw size over a bound axis with the other older overrides", async () => {
+    const frame = { file: "home.html", sourceVersion: V1 } as never;
+    prepareResetSnapshot("home.html", "inst", { style: "width: 200px; min-width: 100px; height: 40px; left: 4px; opacity: .5" },
+      { ...VARIANTS, bindings: { root: "card-root", layers: { "card-root": { styles: { width: ["width"] } } } } });
+    await commitDesignInstanceOlderOverridesReset("w", frame, "inst");
+    expect(latestCapturedEdit().operations).toEqual([
+      expect.objectContaining({ type: "node.set-styles", nodeId: "inst", styles: { width: null, "min-width": null, opacity: null } }),
+    ]);
   });
 
   it("resets an instance's older overrides in one transaction, keeping its size and place", async () => {

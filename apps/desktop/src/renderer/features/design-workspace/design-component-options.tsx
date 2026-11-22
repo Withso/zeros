@@ -15,6 +15,7 @@
 // Mounted only for one selected component frame or instance; a folded group
 // mounts no rows. Local only.
 
+import { designBoundSizeAxes } from "./state/design-component-bindings";
 import { useEffect, useMemo, useState } from "react";
 import { MoreHorizontal, Plus, RotateCcw, Sparkles } from "lucide-react";
 import { COMPONENT_STATE_PRESETS, componentInheritedValues } from "@zeros/design-core/component-options";
@@ -270,7 +271,8 @@ export function DesignComponentOptions({
   // Older overrides: styles an earlier app wrote on this instance or its
   // parts. They still render; the app no longer writes them, so it only
   // offers to remove them, in one step.
-  const olderStyle = designInstanceOlderOverrideProperties(ownStyle).length;
+  // A raw size over an axis a control drives counts too: it sits over that control.
+  const olderStyle = designInstanceOlderOverrideProperties(ownStyle, instance ? designBoundSizeAxes(workspaceId, frame as never, instance.nodeId) : undefined).length;
   const olderCount = overridden.length + olderStyle;
   const canResetOlder = olderCount > 0 &&
     designInstanceResetAllFits({ options: 0, parts: overridden.length, style: olderStyle > 0, slotted: 0, text: false });
@@ -584,7 +586,8 @@ function OptionVariantRow({ variant, variants, states, addable, disabled, onChoo
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end" className="w-48">
         <DropdownMenuRadioGroup value={variant ?? ""} onValueChange={(next) => onChoose(next || null)}>
-          <DropdownMenuRadioItem value="">Default</DropdownMenuRadioItem>
+          {/* The attribute the Use Default button carried, kept for its selectors. */}
+          <DropdownMenuRadioItem value="" data-design-options-use-default="">Default</DropdownMenuRadioItem>
           {variants.map((name) => (
             <DropdownMenuRadioItem key={name} value={name}>{variantLabel(name)}</DropdownMenuRadioItem>
           ))}

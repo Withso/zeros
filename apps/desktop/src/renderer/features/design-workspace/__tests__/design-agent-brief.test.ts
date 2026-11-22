@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   designComponentOptionsBrief,
   designComponentOptionsFixBrief,
+  designComputedValueBrief,
   designControlBoundValueBrief,
   designForcedValueBrief,
   designSourceFixBrief,
@@ -94,6 +95,17 @@ describe("Design agent briefs", () => {
     expect(brief.text).toContain("Do not stage or commit.");
     expect(designControlBoundValueBrief({ directory: "D", file: "f.html", title: "T", layer: "L", nodeId: "n", property: "color", label: "Text", controls: ["Ink"] }).text)
       .toContain('the control "Ink"');
+  });
+
+  it("asks to change a value written with a CSS function on a layer with no CSS tab", () => {
+    const brief = designComputedValueBrief({ directory: "Shop - Design", frame: "button.html", layer: "Label", nodeId: "btn-label",
+      property: "width", label: "Width", value: "calc(100% - 24px)" });
+    expect(brief.label).toBe("Change Width on Label");
+    expect(brief.text).toContain('"button.html" in the Design directory "Shop - Design"');
+    expect(brief.text).toContain('layer "Label" (data-oid "btn-label")');
+    expect(brief.text).toContain('"width": "calc(100% - 24px)"');
+    expect(brief.text).toContain("Ask me what to change first");
+    expect(brief.text).toContain("Ask before changing application code.");
   });
 
   it("asks to tidy a frame's changes made by hand through the skill, listing each one", () => {

@@ -7,6 +7,7 @@
 // grammar. Text, choices and booleans never reach CSS. A slot takes layers,
 // not a value: the instance's own layers placed in it.
 
+import { cssPropertiesOverlap } from "./css-longhands";
 import {
   COMPONENT_EXPRESSION_RESERVED_NAMES,
   ComponentExpressionError,
@@ -507,6 +508,16 @@ export const COMPONENT_INSTANCE_HOST_STYLE_PROPERTIES: ReadonlySet<string> = new
  * changes). Every other custom property is refused. */
 export function componentInstanceHostStyleAllowed(property: string): boolean {
   return COMPONENT_INSTANCE_HOST_STYLE_PROPERTIES.has(property) || property.startsWith("--zeros-layout-");
+}
+
+/** Whether a property in an instance host's own style is an older override,
+ * one the app no longer writes and Reset removes: anything outside the
+ * allowlist, and a size or size limit on an axis a control drives on the
+ * root, which would sit over that control. Its place, and an axis no
+ * control drives, are its own. */
+export function componentInstanceOlderOverride(property: string, bound: { width: boolean; height: boolean }): boolean {
+  if (!componentInstanceHostStyleAllowed(property)) return true;
+  return (bound.width && cssPropertiesOverlap(property, "width")) || (bound.height && cssPropertiesOverlap(property, "height"));
 }
 
 /** Why an instance's attribute has no effect, naming the value it ignores. */

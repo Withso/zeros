@@ -113,7 +113,7 @@ import {
 } from "./design-token-picker";
 import { DesignFieldOverlays, readDesignCardField } from "./design-style-card";
 import { designInputResetsOnAltBackspace, useDesignFieldOverlays, type DesignFieldOverlaysApi } from "./design-field-overlays";
-import { designControlBoundValueBrief, designForcedValueBrief } from "./design-agent-brief";
+import { designComputedValueBrief, designControlBoundValueBrief, designForcedValueBrief } from "./design-agent-brief";
 import { DesignStyledByLine } from "./design-styled-by";
 import { DesignHeldStateNote, DesignStateVariantNote, useDesignHeldReadOnly } from "./design-state-picker";
 import { designDeclaredVariants, showDesignComponentVariant, useDesignComponentVariantStore, useDesignShownComponentState } from "./state/design-component-variants";
@@ -225,7 +225,7 @@ import { designComponentPartOf, designComponentSlotOf } from "@zeros/protocol/de
 import { useDesignHistoryPresentation } from "./state/design-history-presentation";
 import { designComponentDisplayTitle, designComponentIdentityLabel, designComponentInstanceIdentity, designComponentSlotLabel, designFrameComponentPresentation,
   designComponentTextLock, designMissingComponentOf, isDesignComponentPartNodeId } from "./state/design-component-parts";
-import { designBindingLayerId, designBoundControlsFor, designControlLabels, designGatedReadPending, designRuntimeBindingsVersion, readDesignGatedBindings, subscribeDesignRuntimeBindings, designLayerBoundStyles, designMainLayerControls, designPartControls, designRuntimeBoundStyles, designWithoutBoundStyles, rememberDesignRuntimeBindings } from "./state/design-component-bindings";
+import { designBindingLayerId, designBoundControlsFor, designSizeAxisControls, designControlLabels, designGatedReadPending, designRuntimeBindingsVersion, readDesignGatedBindings, subscribeDesignRuntimeBindings, designLayerBoundStyles, designMainLayerControls, designPartControls, designRuntimeBoundStyles, designSizingTargets, designWithoutBoundStyles, rememberDesignRuntimeBindings } from "./state/design-component-bindings";
 import { MessageRow } from "../../shared/ui/primitives/message-row";
 import type { DesignComponentOptionsTarget } from "./design-component-options";
 import {
@@ -1583,6 +1583,8 @@ function designInspectorHistoryOwnerKey(
 
 type DesignInspectorTab = "options" | "style" | "css";
 const NO_BOUND_STYLES: Readonly<Record<string, readonly string[]>> = Object.freeze({});
+/** H when the control W shows sets it too: no raw field and no second copy. */
+const SHARED_HEIGHT = <span key="size:y" data-design-size-axis-shared="y" hidden />;
 /** What the inspector edits for a selection. A control is the only way to
  * change a component from outside, so an instance shows its size and Controls,
  * a part or slot its instance's Controls, and a main Controls and Style with
@@ -2224,7 +2226,8 @@ export const DesignInspector = React.memo(function DesignInspector({
   const askAgentRef = useRef(onAskAgent);
   askAgentRef.current = onAskAgent;
   /** A forced value's card: the agent frees it, as the person sees it. A
-   * value a control sets: the agent changes the control on the main. */
+   * value a control sets: the agent changes the control on the main. A
+   * computed value on a layer with no CSS tab: the agent edits its source. */
   const askAgentToChange = useCallback(
     (properties: readonly string[]) => {
       const property = properties[0];
@@ -2242,6 +2245,19 @@ export const DesignInspector = React.memo(function DesignInspector({
           property,
           label: designStylePropertyLabel(property),
           controls: lock.controls,
+        }));
+        return;
+      }
+      // A component's layers have no CSS tab, so their computed card asks the agent.
+      if (lock?.kind === "computed") {
+        askAgent(designComputedValueBrief({
+          directory: designWorkspaceSnapshotCache.peekSnapshot(owner).data?.directory ?? "",
+          frame: shown.file,
+          layer: lock.layer,
+          nodeId: lock.nodeId,
+          property,
+          label: designStylePropertyLabel(property),
+          value: lock.text,
         }));
         return;
       }
@@ -2833,7 +2849,8 @@ export const DesignInspector = React.memo(function DesignInspector({
         const runtimeState = useDesignRuntimeStore.getState().byWorkspace[workspaceId]?.frames[capturedFrame.file];
         const frameRuntime = designFrameRuntime(workspaceId, capturedFrame.file);
         const { axis, mode } = action;
-        for (const nodeId of styleNodeIds) {
+        // A target whose axis a control drives is not changed, so not previewed.
+        for (const nodeId of designSizingTargets(workspaceId, capturedFrame, styleNodeIds.map((oid) => ({ oid })), axis).map((node) => node.oid)) {
           const cached =
             runtimeState?.detailsByNode[nodeId] ??
             (nodeId === currentContext.selectedNodeId ? currentContext.elementDetails : null);
@@ -2920,11 +2937,13 @@ export const DesignInspector = React.memo(function DesignInspector({
         } else if (action.type === "sizing" && action.mode === "relative") {
           // A percentage resolves against the parent, so each layer reads its
           // own parent's padding.
-          const parents = await measureConfirmed(details.flatMap((node) =>
+          const sized = designSizingTargets(workspaceId, currentFrame, details, action.axis);
+          if (!sized.length) return null;
+          const parents = await measureConfirmed(sized.flatMap((node) =>
             node.layout?.parentId ? [node.layout.parentId] : [],
           ));
           updates = new Map(
-            details.map((node) => [
+            sized.map((node) => [
               node.oid,
               designRelativeSizeStyles(node, parents.get(node.layout?.parentId ?? "") ?? null, action.axis),
             ]),
@@ -2932,8 +2951,10 @@ export const DesignInspector = React.memo(function DesignInspector({
         } else if (action.type === "sizing") {
           const { mode } = action;
           if (mode === "relative") return null;
+          const sized = designSizingTargets(workspaceId, currentFrame, details, action.axis);
+          if (!sized.length) return null;
           updates = new Map(
-            details.map((node) => [
+            sized.map((node) => [
               node.oid,
               designSizingStyles(node, action.axis, mode),
             ]),
@@ -2941,7 +2962,7 @@ export const DesignInspector = React.memo(function DesignInspector({
           if (action.mode === "fill") {
             const parentIds = [
               ...new Set(
-                details.flatMap((node) =>
+                sized.flatMap((node) =>
                   node.layout?.parentId ? [node.layout.parentId] : [],
                 ),
               ),
@@ -3806,8 +3827,9 @@ export const DesignInspector = React.memo(function DesignInspector({
   ) : undefined;
   const instanceBound = selectionKind === "instance" && instanceNodeId && workspaceId ? designLayerBoundStyles(workspaceId, frame, instanceNodeId) : null;
   const instanceRootSize = instanceBound ? { width: designBoundControlsFor(instanceBound, "width"), height: designBoundControlsFor(instanceBound, "height") } : null;
-  const instanceBoundSize = instanceRootSize && (instanceRootSize.width.length || instanceRootSize.height.length)
-    ? { x: boundSizeControl(instanceRootSize.width, "x"), y: boundSizeControl(instanceRootSize.height, "y") }
+  const instanceAxes = instanceRootSize ? designSizeAxisControls(instanceRootSize) : null;
+  const instanceBoundSize = instanceAxes && (instanceAxes.width.length || instanceAxes.height.length || instanceAxes.heightShared)
+    ? { x: boundSizeControl(instanceAxes.width, "x"), y: instanceAxes.heightShared ? SHARED_HEIGHT : boundSizeControl(instanceAxes.height, "y") }
     : undefined;
   const instanceSizeControls = instanceBoundSize ? [...(instanceRootSize?.width ?? []), ...(instanceRootSize?.height ?? [])] : [];
   const stylePanel = designInspectorPanelState(activeTab, "style");
@@ -3866,10 +3888,11 @@ export const DesignInspector = React.memo(function DesignInspector({
       return current?.key === mainLayerKey && current.controls.join("\u0000") === leftover.join("\u0000") ? current : { key: mainLayerKey, controls: leftover };
     });
   });
-  const mainSizeControls = { width: designBoundControlsFor(mainBoundStyles, "width"), height: designBoundControlsFor(mainBoundStyles, "height") };
+  const mainSizeControls = designSizeAxisControls({ width: designBoundControlsFor(mainBoundStyles, "width"), height: designBoundControlsFor(mainBoundStyles, "height") });
   const mainBoundSize = selectionKind === "main-root" || selectionKind === "main-layer"
     ? { x: mainSizeControls.width.length ? mainControl(mainSizeControls.width, "size:x", "Width") : undefined,
-        y: mainSizeControls.height.length ? mainControl(mainSizeControls.height, "size:y", "Height") : undefined }
+        y: mainSizeControls.heightShared ? SHARED_HEIGHT
+          : mainSizeControls.height.length ? mainControl(mainSizeControls.height, "size:y", "Height") : undefined }
     : undefined;
   if (mainBoundSize) for (const name of [...mainSizeControls.width, ...mainSizeControls.height]) inPlaceRef.current.add(name);
 

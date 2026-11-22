@@ -69,6 +69,15 @@ describe("the controls each layer of a main reads", () => {
     expect(bindings.layers.label).toBeUndefined();
   });
 
+  it("gives each arm of a selector list its own gates, and shares what a value reads", () => {
+    const bindings = bindingsOf(main(
+      `<zd-option name="tone" type="choice" choices="info danger" default="info"></zd-option><zd-option name="ink" type="color" default="red"></zd-option>`,
+      `.badge[data-tone="danger"], .caption { opacity: .7; } .badge, .caption { color: var(--zd-ink); }`,
+      `<div data-oid="root"><span class="badge" data-oid="badge" data-tone="{{ tone }}">x</span><p class="caption" data-oid="caption">c</p></div>`))!;
+    expect(bindings.layers.badge!.styles).toEqual({ color: ["ink"], opacity: ["tone"] });
+    expect(bindings.layers.caption!.styles).toEqual({ color: ["ink"] });
+  });
+
   it("reads inline styles, ignores keyframe offsets, and lists the controls nothing reads", () => {
     const bindings = bindingsOf(main(
       `<zd-option name="w" type="number" default="1"></zd-option><zd-option name="idle" type="boolean" default="false"></zd-option>`,

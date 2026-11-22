@@ -134,6 +134,16 @@ describe("linting what changes a component from outside", () => {
     expect(await lint(host.file)).toEqual([]);
   });
 
+  it("reports overrides on an instance of a main that declares no controls", async () => {
+    const frame = await createDesignFrame(root, { title: "Card" });
+    await write(frame.file, doc('<div data-oid="card" class="card"><h2 data-oid="card-title">Plans</h2></div>', "<style>.card { padding: 8px }</style>"));
+    await register(frame.file, "card");
+    const host = await createDesignFrame(root, { title: "Workspace" });
+    await write(host.file, doc('<zd-card data-oid="c1" style="left: 4px; opacity: 0.5" zd-style-card-title="color: red"></zd-card>'));
+    expect(await lint(host.file)).toEqual([expect.objectContaining({ ruleId: "component-instance-override", oid: "c1",
+      message: "This instance overrides opacity, color on card-title, which no control sets." })]);
+  });
+
   it("re-lints an instance's frame when only its main changes", async () => {
     const file = await main('<span data-oid="b" class="badge">x</span>', [round], ".badge { border-radius: 4px }");
     const host = await createDesignFrame(root, { title: "Workspace" });

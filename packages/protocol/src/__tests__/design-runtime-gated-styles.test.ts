@@ -14,10 +14,11 @@ const BODY = `<style>
 .btn--ghost { background: none; } .btn:not([data-size="sm"]) { color: red; }
 .other[data-size="sm"] { margin: 0; } .btn[data-tone="a"] { opacity: 0.5; }
 .btn[data-size="sm\\31"] { padding: 0; }
-[data-size="lg"] { margin-top: 1px; } .btn--lg { border-top-width: 2px; } [data-size="lg"] .icon { letter-spacing: 1px; }
+.btn[data-size="xl"], .plain { outline-width: 1px; } [data-size="lg"] { margin-top: 1px; } .btn--lg { border-top-width: 2px; } [data-size="lg"] .icon { letter-spacing: 1px; }
 </style>
 <button class="btn btn--solid" data-oid="btn" data-size="md" data-tone="b"><span class="icon" data-oid="icon">i</span></button>
-<p class="plain" data-oid="other">Other</p>`;
+<p class="plain" data-oid="other">Other</p>
+<p class="plain" data-oid="plain-too">Plain</p>`;
 
 async function fixture(browser: Browser): Promise<Page> {
   const page = await browser.newPage();
@@ -77,9 +78,11 @@ describe("what rules gated on a control would set, at any value", () => {
     // rule another element's class decides and a gate nobody asked about. An
     // escape in a value is the browser's to normalize; the rule still counts.
     // A gate-only selector still means the layer that carries the gate.
-    expect(reply.result).toEqual({ height: ["data-size"], background: [".btn--"], padding: ["data-size"], "margin-top": ["data-size"], "border-top-width": [".btn--"] });
+    expect(reply.result).toEqual({ height: ["data-size"], background: [".btn--"], padding: ["data-size"], "margin-top": ["data-size"], "border-top-width": [".btn--"], "outline-width": ["data-size"] });
     expect((await gated(page, "icon", { attributes: ["data-size"], classPrefixes: ["btn--"] })).result).toEqual({ width: ["data-size"], "letter-spacing": ["data-size"] });
     expect((await gated(page, "other", { attributes: ["data-size"], classPrefixes: ["btn--"] })).result).toEqual({});
+    // Each arm of a list stands alone: .plain matches through an arm with no gate.
+    expect((await gated(page, "plain-too", { attributes: ["data-size"], classPrefixes: [] })).result).toEqual({});
   });
 
   it("answers nothing without gates, and stays an opt-in method", async () => {

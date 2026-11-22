@@ -6,8 +6,8 @@
 // for the main; all are warnings, so they never block a save.
 
 import postcss from "postcss";
-import { componentInstanceHostStyleAllowed } from "@zeros/design-core/component-options";
-import { cssOverlappingProperties, cssPropertiesOverlap } from "@zeros/design-core/css-longhands";
+import { componentInstanceOlderOverride } from "@zeros/design-core/component-options";
+import { cssOverlappingProperties } from "@zeros/design-core/css-longhands";
 import type { DesignComponentBindings, DesignFrameInstances } from "@zeros/protocol/design-catalog";
 
 import type { DesignLintViolation } from "./document-model";
@@ -16,8 +16,6 @@ type Location = { startLine: number; startCol: number };
 type Elements = readonly { tag: string; attributes: readonly { name: string; value: string }[] }[];
 
 const PROPERTY_LIMIT = 6;
-/** An instance's own size: its own unless a control sets that axis on the root. */
-const sizeAxis = (property: string) => cssPropertiesOverlap(property, "width") || cssPropertiesOverlap(property, "height");
 /** The controls a bound record gives a written property, by overlap (a
  * longhand over a bound shorthand, or the reverse); empty when none. */
 const controlsOver = (bound: Readonly<Record<string, readonly string[]>>, property: string) =>
@@ -119,7 +117,9 @@ export function designInstanceControlViolations(input: {
   for (const [oid, host] of Object.entries(instances.hosts)) {
     if (!Object.hasOwn(instances.components, host.component)) continue;
     const component = instances.components[host.component]!;
-    const bindings = component.bindings;
+    // A main with no controls binds nothing, but its instances' overrides
+    // are still overrides. A components/ file's host keeps its own box.
+    const bindings = component.bindings ?? (component.frame ? { layers: {} } : null);
     if (!bindings) continue;
     const layers = new Map(Object.entries(bindings.layers).map(([layer, entry]) => [layer.toLowerCase(), entry.styles ?? {}]));
     const shadowed: Array<[string, readonly string[]]> = [];
@@ -128,10 +128,13 @@ export function designInstanceControlViolations(input: {
     // the root (the renderer's fence refuses that write too); anything else
     // is over the root's bindings or an override no control stands for.
     const root = bindings.root ? layers.get(bindings.root.toLowerCase()) ?? {} : {};
+    // The same classification as the app's older overrides and their Reset.
+    const axes = { width: controlsOver(root, "width").length > 0, height: controlsOver(root, "height").length > 0 };
     for (const property of host.style ? declaredProperties(host.style) : []) {
+      if (!componentInstanceOlderOverride(property, axes)) continue;
       const controls = controlsOver(root, property);
-      if (controls.length && (sizeAxis(property) || !componentInstanceHostStyleAllowed(property))) shadowed.push([property, controls]);
-      else if (!componentInstanceHostStyleAllowed(property)) overrides.push(property);
+      if (controls.length) shadowed.push([property, controls]);
+      else overrides.push(property);
     }
     for (const [part, declarations] of Object.entries(host.overrides ?? {})) {
       const bound = layers.get(part) ?? {};

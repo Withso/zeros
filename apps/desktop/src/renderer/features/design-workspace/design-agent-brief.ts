@@ -175,6 +175,29 @@ export function designComponentAddControlBrief(input: { directory: string; file:
   };
 }
 
+/** A value written with a CSS function on a layer with no CSS tab (a
+ * component's): the agent changes it in source. */
+export function designComputedValueBrief(input: {
+  directory: string;
+  frame: string;
+  layer: string;
+  nodeId: string;
+  property: string;
+  /** The field's name in the panel, for the chat label. */
+  label: string;
+  /** The value as written. */
+  value: string;
+}): DesignAgentBrief {
+  return {
+    label: `Change ${inline(input.label)} on ${inline(input.layer)}`,
+    text: [
+      `In the frame ${quoted(input.frame)} in the Design directory ${quoted(input.directory)}, the layer ${quoted(input.layer)} (data-oid ${quoted(input.nodeId)}) shows ${quoted(input.property)}: ${quoted(input.value)}, written with a CSS function, so the Style panel cannot edit it. Ask me what to change first.`,
+      "Change it in the source without changing how other layers look, and tell me what you changed. Do not stage or commit.",
+      CODE_RULE,
+    ].join("\n"),
+  };
+}
+
 /** A value a control sets on a main's layer: the agent changes the control
  * or how the main reads it; the panel never writes over it. */
 export function designControlBoundValueBrief(input: {

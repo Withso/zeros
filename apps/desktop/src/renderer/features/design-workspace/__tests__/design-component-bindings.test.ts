@@ -8,6 +8,7 @@ import {
   designPartSelectable,
   designRootSizeControls,
   designSelectablePartLayers,
+  designSizeAxisControls,
 } from "../state/design-component-bindings";
 
 const bindings: DesignComponentBindings = {
@@ -48,6 +49,10 @@ describe("which controls a component's layers read", () => {
     expect(designRootSizeControls({ layers: {} })).toEqual({ width: [], height: [] });
     expect(designRootSizeControls(undefined)).toEqual({ width: [], height: [] });
     expect(designMainLayerControls({ elements: [], reach: {}, bindings }, "tf-label")).toEqual(["label"]);
+    // One control that sets both axes (an Avatar's Size) shows once, on W; H still takes no raw value.
+    expect(designSizeAxisControls({ width: ["size"], height: ["size"] })).toEqual({ width: ["size"], height: [], heightShared: true });
+    expect(designSizeAxisControls({ width: ["w"], height: ["h", "w"] })).toEqual({ width: ["w"], height: ["h"], heightShared: false });
+    expect(designSizeAxisControls({ width: [], height: ["h"] })).toEqual({ width: [], height: ["h"], heightShared: false });
     // A control a layer's style reads shows in its field's place, not here as well.
     expect(designMainLayerControls({ elements: [], reach: {}, bindings }, "tf")).toEqual([]);
     expect(designMainLayerControls({ elements: [], reach: {}, bindings: { layers: { x: { text: ["a"], styles: { color: ["a", "b"] } } } } }, "x")).toEqual(["a"]);
@@ -125,6 +130,13 @@ describe("bindings a selected layer's runtime winners complete", () => {
       bindings: { layers: {}, vars: { "--badge-ink": ["ink"], "--badge-wash": ["wash"] } } } };
     rememberDesignRuntimeBindings("ws", badge, details("badge-soft", { color: winner("var(--badge-ink)", ".badge--soft"), "background-color": winner("var(--badge-wash)", ".badge--soft") }));
     expect(designLayerBoundStyles("ws", badge, "badge-soft")).toEqual({ color: ["ink"], "background-color": ["wash"] });
+  });
+
+  it("binds a winner through its selector's gates only when every arm of the list tests one", async () => {
+    const { designRuntimeBoundStyles } = await import("../state/design-component-bindings");
+    const record = { elements: [option("tone", "choice", "Tone")], reach: {}, bindings: { layers: {}, gates: { "data-tone": ["tone"] } } };
+    expect(designRuntimeBoundStyles(record, { opacity: winner("0.7", '.badge[data-tone="danger"], .caption') })).toEqual({});
+    expect(designRuntimeBoundStyles(record, { opacity: winner("0.7", '.badge[data-tone="danger"], .badge[data-tone="info"]') })).toEqual({ opacity: ["tone"] });
   });
 
   it("refuses a raw write on a layer a truncated record dropped, once its winners show the binding", async () => {
@@ -299,6 +311,13 @@ describe("size writers on an instance whose width a control drives", () => {
     const gesture = { frame: record, nodeId: "inst", width: 200, height: 40, dw: 10, dh: 5 };
     expect(designKeyboardResizeStyles("ws", gesture)).toEqual({ height: "45px" });
     expect(designKeyboardResizeStyles("ws", { ...gesture, nodeId: "plain" })).toEqual({ width: "210px", height: "45px" });
+  });
+
+  it("leaves a target whose requested axis a control drives out of a Size mode change, whole", async () => {
+    const { designSizingTargets } = await import("../state/design-component-bindings");
+    const nodes = [{ oid: "inst" }, { oid: "plain" }];
+    expect(designSizingTargets("ws", record, nodes, "x").map((node) => node.oid)).toEqual(["plain"]);
+    expect(designSizingTargets("ws", record, nodes, "y").map((node) => node.oid)).toEqual(["inst", "plain"]);
   });
 
   it("keeps a group's plain layers and the instance's other axis when the group resizes", async () => {

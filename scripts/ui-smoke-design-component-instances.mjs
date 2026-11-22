@@ -359,7 +359,9 @@ export async function runDesignComponentInstancesSmoke({ page, check }) {
   await variantRow().click();
   check("an instance's Variant menu does not offer to save", (await page.getByRole("menuitem", { name: "Save current as variant…" }).count()) === 0);
   check("an instance returns to Default from its Variant menu, with no separate Use Default button",
-    (await page.getByRole("menuitemradio", { name: "Default" }).count()) === 1 && (await page.locator("[data-design-options-use-default]").count()) === 0);
+    (await page.getByRole("menuitemradio", { name: "Default" }).count()) === 1 &&
+      (await page.locator('[role="menuitemradio"][data-design-options-use-default]').count()) === 1 &&
+      (await page.locator("[data-design-options-use-default]").count()) === 1);
   await page.getByRole("menuitemradio", { name: "Tall" }).click();
   await expect.poll(writes).toBe(writesBeforeInstanceVariant + 1);
   await expect.poll(home).toContain('zd-variant="tall"');

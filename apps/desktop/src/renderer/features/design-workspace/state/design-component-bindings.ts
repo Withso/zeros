@@ -91,6 +91,13 @@ export function designBoundControlsFor(bound: Readonly<Record<string, readonly s
   return keys.length ? [...new Set(keys.flatMap((key) => bound[key]!))].sort() : [];
 }
 
+/** Size's controls per axis, each shown once: height lists only those width
+ * does not, and `heightShared` says H is taken by a control W shows. */
+export function designSizeAxisControls(axes: { width: readonly string[]; height: readonly string[] }): { width: string[]; height: string[]; heightShared: boolean } {
+  const height = axes.height.filter((name) => !axes.width.includes(name));
+  return { width: [...axes.width], height, heightShared: axes.height.length > 0 && height.length === 0 };
+}
+
 /** The controls that drive the root's width and height: an instance's Size
  * shows them in place of a raw field, and nothing writes that axis raw. */
 export function designRootSizeControls(bindings: DesignComponentBindings | null | undefined): { width: string[]; height: string[] } {
@@ -201,6 +208,42 @@ function componentVarOptions(record: BindingRecord): ReadonlyMap<string, readonl
   return vars;
 }
 
+/** A selector list's top-level arms, outside brackets, parentheses and quotes. */
+function selectorArms(selector: string): string[] {
+  const arms: string[] = [];
+  let depth = 0;
+  let quote = "";
+  let start = 0;
+  for (let index = 0; index < selector.length; index += 1) {
+    const character = selector[index]!;
+    if (character === "\\") { index += 1; continue; }
+    if (quote) { if (character === quote) quote = ""; continue; }
+    if (character === '"' || character === "'") quote = character;
+    else if (character === "(" || character === "[") depth += 1;
+    else if (character === ")" || character === "]") depth = Math.max(0, depth - 1);
+    else if (character === "," && depth === 0) { arms.push(selector.slice(start, index)); start = index + 1; }
+  }
+  arms.push(selector.slice(start));
+  return arms.map((arm) => arm.trim()).filter(Boolean);
+}
+
+/** The options a winner's selector gates on. The winner does not say which
+ * arm of a list matched, so a list binds only when every arm tests a gate;
+ * getGatedStyles answers per arm for the rest. */
+function selectorGateOptions(selector: string, gates: Readonly<Record<string, readonly string[]>>): Set<string> {
+  const found = new Set<string>();
+  for (const arm of selectorArms(selector)) {
+    const options = new Set<string>();
+    for (const match of arm.matchAll(SELECTOR_ATTRIBUTE)) {
+      const name = match[1]!.toLowerCase();
+      if (name !== "class" && Object.hasOwn(gates, name)) for (const option of gates[name]!) options.add(option);
+    }
+    if (!options.size) return new Set();
+    for (const option of options) found.add(option);
+  }
+  return found;
+}
+
 /** The properties a layer's authored winners bind, and to which controls. */
 export function designRuntimeBoundStyles(record: BindingRecord, authored: DesignRuntimeNodeDetails["authoredStyles"]): BoundStyles {
   if (!authored) return EMPTY;
@@ -210,10 +253,7 @@ export function designRuntimeBoundStyles(record: BindingRecord, authored: Design
   for (const [property, winner] of Object.entries(authored)) {
     const found = new Set<string>();
     for (const match of winner.value.matchAll(RUNTIME_VAR)) for (const option of vars.get(match[1]!) ?? []) found.add(option);
-    for (const match of (winner.selector ?? "").matchAll(SELECTOR_ATTRIBUTE)) {
-      const name = match[1]!.toLowerCase();
-      if (name !== "class" && Object.hasOwn(gates, name)) for (const option of gates[name]!) found.add(option);
-    }
+    for (const option of selectorGateOptions(winner.selector ?? "", gates)) found.add(option);
     if (found.size) out[property] = [...found].sort();
   }
   return Object.keys(out).length ? out : EMPTY;
@@ -368,6 +408,14 @@ export function designLayerBoundStyles(workspaceId: string, frame: BindingFrame 
 export function designBoundSizeAxes(workspaceId: string, frame: BindingFrame | null | undefined, nodeId: string): { width: boolean; height: boolean } {
   const bound = designLayerBoundStyles(workspaceId, frame, nodeId);
   return { width: designBoundControlsFor(bound, "width").length > 0, height: designBoundControlsFor(bound, "height").length > 0 };
+}
+
+/** The layers a Size mode change (Fill, Hug, Fixed, relative) on one axis
+ * may touch: one whose axis a control drives is left out whole, its flex
+ * sizing, alignment and any parent change made for it included, since each
+ * would sit over the control as a sizing input. */
+export function designSizingTargets<T extends { oid: string }>(workspaceId: string, frame: BindingFrame | null | undefined, nodes: readonly T[], axis: "x" | "y"): T[] {
+  return nodes.filter((node) => !designBoundSizeAxes(workspaceId, frame, node.oid)[axis === "x" ? "width" : "height"]);
 }
 
 /** A layout action's styles for one layer, without what a control drives:
