@@ -33,6 +33,8 @@ import {
   useWorkspaceStore,
   type ChatThread,
 } from "../../state/store";
+import { workbenchScopeForFolder } from "../../state/workspace-store";
+import { chatIdsHostedBy } from "../workbench/tab-model";
 import {
   spawnDefaultChatForWorkspace,
   spawnNewChatTab,
@@ -57,6 +59,7 @@ import { ptyKill } from "../../platform/pty";
 import { useAgentSessions } from "../../features/agent/sessions-hooks";
 import { useSessionsStore } from "../../features/agent/sessions-store";
 import { getLiveChatDraft } from "../../features/agent/composer-live-drafts";
+import { columnChatFor, rememberColumnChat } from "../../features/agent/side-chat";
 import {
   MAX_PANES,
   type PaneLayout,
@@ -279,6 +282,10 @@ export function ConversationPaneLayout({
   // order). Visible = live tabs, history = archived (newest first).
   const layoutFolder =
     readOnly && workspace ? workspace.path : activeWorkspacePath;
+  // Side chats open as Workbench tabs, so their chat column never lists them.
+  const workbenchTabs = useWorkspaceStore((state) =>
+    layoutFolder ? state.workbenchByScope[workbenchScopeForFolder(layoutFolder)]?.tabs : undefined);
+  const hostedChatIds = useMemo(() => chatIdsHostedBy(workbenchTabs), [workbenchTabs]);
   const allChats = useMemo(() => {
     if (!layoutFolder) return EMPTY_CHATS;
     return chats
@@ -286,20 +293,41 @@ export function ConversationPaneLayout({
         readOnly && workspace
           ? c.kind !== "terminal" &&
             workspaceOwnsFolder(workspace, c.folder, projects)
-          : c.folder === layoutFolder,
+          : c.folder === layoutFolder && !hostedChatIds.has(c.id),
       )
       .sort((a, b) => a.createdAt - b.createdAt);
-  }, [layoutFolder, chats, readOnly, workspace, projects]);
+  }, [layoutFolder, chats, readOnly, workspace, projects, hostedChatIds]);
 
   // A closed chat may be previewed without reopening it or changing its
   // durable archive flag. Empty history never manufactures an Untitled chat.
+  // While a side chat tab has focus, the column keeps the chat it last showed,
+  // across remounts; else the side chat's source.
+  const activeIsHosted = activeChatId !== null && hostedChatIds.has(activeChatId);
+  const activeInColumn = activeChatId !== null && !activeIsHosted && allChats.some((c) => c.id === activeChatId);
+  const [column, setColumn] = useState(() => ({
+    folder: layoutFolder,
+    id: layoutFolder ? columnChatFor(layoutFolder) : null,
+  }));
+  const columnChatId = activeInColumn
+    ? activeChatId
+    : column.folder === layoutFolder ? column.id : (layoutFolder ? columnChatFor(layoutFolder) : null);
+  if (column.folder !== layoutFolder || column.id !== columnChatId) setColumn({ folder: layoutFolder, id: columnChatId });
+  useEffect(() => {
+    if (column.folder && column.id) rememberColumnChat(column.folder, column.id);
+  }, [column]);
+  const hostedActive = activeIsHosted ? chats.find((c) => c.id === activeChatId) : undefined;
+  const columnSelection = activeIsHosted
+    ? ([columnChatId, hostedActive?.sourceChatId, hostedActive?.parentChatId].find(
+        (id) => !!id && allChats.some((c) => c.id === id && !c.archived),
+      ) ?? null)
+    : null;
   const selectedChatId = readOnly
     ? ((
         allChats.find((chat) => chat.id === activeChatId) ??
         allChats.find((chat) => !chat.archived) ??
         allChats[0]
       )?.id ?? null)
-    : activeChatId;
+    : activeIsHosted ? columnSelection : activeChatId;
 
   const visibleChats = useMemo(
     () =>
@@ -343,7 +371,8 @@ export function ConversationPaneLayout({
       return;
     }
     const selectionValid =
-      activeChatId !== null && visibleChats.some((c) => c.id === activeChatId);
+      activeChatId !== null &&
+      (visibleChats.some((c) => c.id === activeChatId) || hostedChatIds.has(activeChatId));
     if (!selectionValid) {
       const restoreId =
         selectChatToRestoreForFolder(
@@ -364,6 +393,7 @@ export function ConversationPaneLayout({
     pendingWorkspaceValidationFolder,
     sessions,
     dispatch,
+    hostedChatIds,
   ]);
 
   const layout = usePaneLayout(layoutFolder);
@@ -645,7 +675,8 @@ export function ConversationPaneLayout({
       const paneChats = chatsByPane.get(paneId) ?? EMPTY_CHATS;
       if (paneChats.length >= 2) {
         // Move this pane's active tab into the new pane.
-        const globalActive = useWorkspaceStore.getState().activeChatId;
+        const fresh = useWorkspaceStore.getState().activeChatId;
+        const globalActive = fresh && hostedChatIds.has(fresh) ? selectedChatId : fresh;
         const moved =
           resolvePaneActiveChatId(layout, paneId, globalActive, paneChats) ??
           paneChats[paneChats.length - 1]!.id;
@@ -691,6 +722,8 @@ export function ConversationPaneLayout({
       moveChatToPane,
       sessions,
       dispatch,
+      hostedChatIds,
+      selectedChatId,
     ],
   );
 

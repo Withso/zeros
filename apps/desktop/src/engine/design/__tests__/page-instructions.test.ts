@@ -15,6 +15,7 @@ import {
   PREVIOUS_PER_PAGE_DESIGN_RULES,
   PREVIOUS_CONTRACT_DESIGN_RULES,
   PREVIOUS_MAIN_FRAME_DESIGN_RULES,
+  PREVIOUS_GLOBAL_CLASSES_DESIGN_RULES,
   upgradedDesignRules,
 } from "../design-rules";
 
@@ -61,6 +62,11 @@ describe("page authoring guidance", () => {
       "81632af0c14ea995c968834d14a3c80c8f6a898b317c746d39b3ea062cdbd55d",
     );
     expect(GENERATED_DESIGN_RULES).toContain(PREVIOUS_MAIN_FRAME_DESIGN_RULES);
+    // The global-classes contract, before controls were the only way to change an instance.
+    expect(createHash("sha256").update(PREVIOUS_GLOBAL_CLASSES_DESIGN_RULES).digest("hex")).toBe(
+      "0db1c28c905cddcb9df0956ea58c6414c35bd3b4440569a60dfd1833be5dda06",
+    );
+    expect(GENERATED_DESIGN_RULES).toContain(PREVIOUS_GLOBAL_CLASSES_DESIGN_RULES);
     for (const previous of [
       ROOT_DESIGN_RULES,
       LEGACY_DESIGN_RULES,
@@ -69,6 +75,7 @@ describe("page authoring guidance", () => {
       PREVIOUS_PER_PAGE_DESIGN_RULES,
       PREVIOUS_CONTRACT_DESIGN_RULES,
       PREVIOUS_MAIN_FRAME_DESIGN_RULES,
+      PREVIOUS_GLOBAL_CLASSES_DESIGN_RULES,
     ])
       expect(upgradedDesignRules(previous + "\nKeep our brand.\n", 2)).toBe(
         DESIGN_RULES + "\nKeep our brand.\n",
@@ -105,6 +112,25 @@ describe("page authoring guidance", () => {
     expect(upgradedDesignRules(ROOT_DESIGN_RULES + project, 1)).toBe(ROOT_DESIGN_RULES + project);
   });
 
+  it("upgrades the global-classes rules to the controls contract, keeping a project's tail and an edited file", () => {
+    expect(upgradedDesignRules(PREVIOUS_GLOBAL_CLASSES_DESIGN_RULES, 2)).toBe(DESIGN_RULES);
+    const tail = "\n## Project\nKeep the supplied brand.\n";
+    expect(upgradedDesignRules(PREVIOUS_GLOBAL_CLASSES_DESIGN_RULES + tail, 2)).toBe(DESIGN_RULES + tail);
+    const edited = PREVIOUS_GLOBAL_CLASSES_DESIGN_RULES.replace("Commit this folder together.", "Commit this folder with the app.");
+    expect(upgradedDesignRules(edited, 2)).toBe(edited);
+  });
+
+  it("makes controls the only way to change an instance from outside", () => {
+    for (const rule of [
+      "Anything an instance should change is a control",
+      "Never write zd-style-<part>",
+      "its own style holds only its place and size",
+      "design validate warns",
+    ])
+      expect(DESIGN_RULES).toContain(rule);
+    expect(DESIGN_RULES).not.toContain("name the parts its instances override");
+  });
+
   it("has agents author components as main frames on the canvas, never new components/ files", () => {
     expect(DESIGN_RULES).toContain('"component":"card"');
     expect(DESIGN_RULES).toContain("<template data-zd-options>");
@@ -116,6 +142,8 @@ describe("page authoring guidance", () => {
     expect(DESIGN_RULES).not.toContain("with <slot> and data-zd-attr");
     expect(DESIGN_GUIDES.components).toContain('"component"');
     expect(DESIGN_GUIDES.components).not.toContain("Define a reusable component as one direct components/name.html file");
+    expect(DESIGN_GUIDES.components).not.toContain("an instance restyles a part with zd-style-<part>");
+    expect(DESIGN_GUIDES.components).toContain("Anything an instance should change is a control");
   });
 
   it("keeps frame and workflow guides aligned with the active directory's pages", () => {

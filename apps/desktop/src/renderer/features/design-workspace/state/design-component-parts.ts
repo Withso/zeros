@@ -1,14 +1,15 @@
-// PURPOSE: An instance's inner parts can be selected, restyled and hidden,
-// as in Figma: a style write on a part becomes an override on its instance
-// (the host's zd-style-<part>), and the Layers eye hides it on the canvas.
-// Its layers, structure and text belong to the main component (text that
-// an option sets is changed in Options). A frame the main marks as a slot
-// takes layers instead: one moved or drawn into it lands in the instance
-// with slot="<name>". Every node write the canvas and the Style panel make
-// goes through the workspace cache, which refuses any other write that
-// names a part or slot before anything is sent.
+// PURPOSE: An instance is changed from outside only through its Controls
+// (host attributes), its size and place, and its slots. Its inner parts can be
+// selected and hidden on the canvas (the Layers eye), but nothing writes to
+// them: their layers, structure, text and styles belong to the main component.
+// A frame the main marks as a slot takes layers instead: one moved or drawn
+// into it lands in the instance with slot="<name>". Every node write the
+// canvas and the inspector make goes through the workspace cache, which
+// refuses a write that names a part or slot, or that styles an instance host
+// beyond its size and place, before anything is sent.
 
 import type { DesignComponentIdentity, DesignFrameComponent, DesignFrameInstances } from "@zeros/protocol/design-catalog";
+import { componentInstanceHostStyleAllowed } from "@zeros/design-core/component-options";
 import { designComponentPartOf, designComponentSlotOf } from "@zeros/protocol/design-runtime";
 import { designRuntimeLayerDisplayName } from "../design-layer-label";
 
@@ -34,8 +35,55 @@ export function designComponentSlotLabel(name: string): string {
 
 export class DesignComponentPartWriteError extends Error {
   constructor() {
-    super("That layer is part of a component instance. Change its style here, its text with the instance's Options, and anything else on the main component.");
+    super("That layer is part of a component instance. Change it with the instance's Controls, or on the main component.");
     this.name = "DesignComponentPartWriteError";
+  }
+}
+
+export class DesignInstanceHostStyleError extends Error {
+  constructor(readonly properties: readonly string[]) {
+    super(`Make component instance changes through its Controls. Here you can change its size and place, not ${properties.slice(0, 3).join(", ")}.`);
+    this.name = "DesignInstanceHostStyleError";
+  }
+}
+
+/** Whether the canvas's style tools (padding and gap handles with their
+ * entry, the motion timeline) stay away from a selection: any of it is an
+ * instance host, which takes only size and place, or a part or slot, which
+ * take nothing. Their writes would be refused, so they are not offered. */
+export function designCanvasStyleToolsBlocked(
+  frame: { instances?: DesignFrameInstances } | null | undefined,
+  nodeIds: readonly (string | null | undefined)[],
+): boolean {
+  const hosts = frame?.instances?.hosts;
+  return nodeIds.some((nodeId) => isDesignComponentPartNodeId(nodeId) || (!!nodeId && !!hosts && Object.hasOwn(hosts, nodeId)));
+}
+
+/** Throw when a style write sets a property outside the host allowlist on
+ * one of the frame's instance hosts (own entries only, so a layer id such as
+ * "constructor" is not a host). Accepts one write's styles by node, or a
+ * transaction's operations. */
+export function refuseDesignInstanceHostStyleWrite(
+  instances: DesignFrameInstances | undefined,
+  write: { nodeId: string; styles: Readonly<Record<string, string | null>> } | readonly unknown[],
+): void {
+  const hosts = instances?.hosts;
+  if (!hosts) return;
+  const writes = Array.isArray(write) ? write : [write];
+  for (const entry of writes) {
+    const operation = entry as { type?: unknown; nodeId?: unknown; styles?: unknown; attribute?: unknown; value?: unknown };
+    // A part override is a style too: the app only removes older ones.
+    if (Array.isArray(write) && operation.type === "node.set-attribute" && typeof operation.nodeId === "string" &&
+      Object.hasOwn(hosts, operation.nodeId) && typeof operation.attribute === "string" &&
+      operation.attribute.toLowerCase().startsWith("zd-style-") && operation.value !== null)
+      throw new DesignInstanceHostStyleError([operation.attribute]);
+    if (Array.isArray(write) && operation.type !== "node.set-styles") continue;
+    if (typeof operation.nodeId !== "string" || !Object.hasOwn(hosts, operation.nodeId)) continue;
+    if (!operation.styles || typeof operation.styles !== "object") continue;
+    const refused = Object.entries(operation.styles as Record<string, unknown>)
+      .filter(([property, value]) => value !== null && !componentInstanceHostStyleAllowed(property))
+      .map(([property]) => property);
+    if (refused.length) throw new DesignInstanceHostStyleError(refused);
   }
 }
 
@@ -48,9 +96,10 @@ export function designPartOverrideKey(part: string): string {
 export const designPartOverrideAttribute = (part: string) => `zd-style-${designPartOverrideKey(part)}`;
 
 /** Throw when a write's input names a part or slot anywhere a layer id can
- * go, except a style write on a part, which the engine stores as the
- * instance's override, a slot as the parent a layer moves into or the layer
- * drawn layers are added to, and direct text on the default slot. */
+ * go, except a slot as the parent a layer moves into or the layer drawn
+ * layers are added to, and direct text on the default slot. The engine still
+ * applies a part's style write as the instance's override for older callers;
+ * the app no longer makes one. */
 export function refuseDesignComponentPartWrite(input: unknown, depth = 0): void {
   if (typeof input === "string") {
     if (isDesignComponentPartNodeId(input)) throw new DesignComponentPartWriteError();
@@ -58,10 +107,6 @@ export function refuseDesignComponentPartWrite(input: unknown, depth = 0): void 
   }
   if (!input || typeof input !== "object" || depth > 3) return;
   const operation = input as { type?: unknown; nodeId?: unknown; mode?: unknown };
-  if (operation.type === "node.set-styles") {
-    if (isDesignComponentSlotNodeId(operation.nodeId)) throw new DesignComponentPartWriteError();
-    return;
-  }
   const appendsToSlot = operation.type === "node.set-html" && operation.mode === "append" && isDesignComponentSlotNodeId(operation.nodeId);
   const setsDefaultSlotText = operation.type === "node.set-text" && typeof operation.nodeId === "string" &&
     designComponentSlotOf(operation.nodeId)?.name === "";
@@ -90,10 +135,13 @@ export function designComponentTextLock(
   nodeId: string,
 ): { kind: "part"; message: string } | { kind: "option"; message: string } | null {
   if (isDesignComponentPartNodeId(nodeId)) return { kind: "part", message: new DesignComponentPartWriteError().message };
-  const options = frame.component?.boundText?.[nodeId];
+  // Bindings also see text a wrapping template shows, which boundText misses.
+  const layers = frame.component?.bindings?.layers;
+  const bound = layers && Object.hasOwn(layers, nodeId) ? layers[nodeId]!.text : undefined;
+  const options = bound ?? (frame.component?.boundText && Object.hasOwn(frame.component.boundText, nodeId) ? frame.component.boundText[nodeId] : undefined);
   if (!options || !frame.component) return null;
   return { kind: "option", message: options.length
-    ? `Set by option ${options.map((name) => optionLabel(frame.component!, name)).join(", ")}`
+    ? `Set by control ${options.map((name) => optionLabel(frame.component!, name)).join(", ")}`
     : "Set by the component's template" };
 }
 
@@ -279,7 +327,7 @@ export function designFrameMissingComponents(frame: { instances?: DesignFrameIns
   return result;
 }
 
-/** What a frame shows when options did not apply, as its Options section
+/** What a frame shows when options did not apply, as its Controls section
  * and its canvas mark say it. */
 export const DESIGN_OPTIONS_NOT_APPLIED_MESSAGES = Object.freeze({
   "last-good": "The frame shows its last good render.",
@@ -295,16 +343,16 @@ const optionsProblemByInstances = new WeakMap<DesignFrameInstances, string | nul
  * those frames answers here before anything is selected. */
 export function designFrameOptionsProblem(frame: { component?: DesignFrameComponent; instances?: DesignFrameInstances }): string | null {
   const own = frame.component?.notApplied;
-  if (own) return `These options could not be applied. ${DESIGN_OPTIONS_NOT_APPLIED_MESSAGES[own]}`;
+  if (own) return `These controls could not be applied. ${DESIGN_OPTIONS_NOT_APPLIED_MESSAGES[own]}`;
   const instances = frame.instances;
   if (!instances) return null;
   const known = optionsProblemByInstances.get(instances);
   if (known !== undefined) return known;
   const names = [...new Set(Object.values(instances.hosts).filter((host) => host.failed).map((host) => `zd-${host.component}`))];
-  // As the instance's Options section reads it: a failed host with nothing
+  // As the instance's Controls section reads it: a failed host with nothing
   // named shows the defaults.
   const problem = names.length
-    ? `The options of ${names.join(", ")} could not be applied. ${DESIGN_OPTIONS_NOT_APPLIED_MESSAGES[instances.notApplied ?? "defaults"]}`
+    ? `The controls of ${names.join(", ")} could not be applied. ${DESIGN_OPTIONS_NOT_APPLIED_MESSAGES[instances.notApplied ?? "defaults"]}`
     : null;
   optionsProblemByInstances.set(instances, problem);
   return problem;

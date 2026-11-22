@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
 import type { ChangesHistory } from "@zeros/protocol/changes-history";
-import { DESIGN_OPTIONS_SHOW_NOTHING_CAPABILITY, DESIGN_OPTIONS_SHOW_NOTHING_PARAM } from "@zeros/protocol/design-catalog";
+import { DESIGN_COMPONENT_BINDINGS_CAPABILITY, DESIGN_COMPONENT_BINDINGS_PARAM, DESIGN_OPTIONS_SHOW_NOTHING_CAPABILITY, DESIGN_OPTIONS_SHOW_NOTHING_PARAM } from "@zeros/protocol/design-catalog";
 import {
   requestWorkspaceList,
   bridgeFileTree,
@@ -296,6 +296,28 @@ describe("workspace mode transition budget", () => {
     await bridgeWorkspaceSetMode(bridge(true), { workspaceId: cloud, mode: "design" });
     expect(sent).toEqual([
       { workspaceId: "ws1", mode: "design", [DESIGN_OPTIONS_SHOW_NOTHING_PARAM]: true },
+      { workspaceId: "ws1", mode: "design" },
+      { workspaceId: cloud, mode: "design" },
+    ]);
+  });
+});
+
+describe("which controls each main layer reads", () => {
+  it("is asked for only from a Local engine that advertises it", async () => {
+    const sent: unknown[] = [];
+    const bridge = (capable: boolean) => ({
+      supportsEngineCapability: (capability: string) => capable && capability === DESIGN_COMPONENT_BINDINGS_CAPABILITY,
+      request: async (msg: { params?: unknown }) => {
+        sent.push(msg.params);
+        return { type: "WORKSPACE_RESPONSE", op: "workspace.setMode", result: { ok: true, mode: "design" } };
+      },
+    }) as unknown as RuntimeClient;
+    await bridgeWorkspaceSetMode(bridge(true), { workspaceId: "ws1", mode: "design" });
+    await bridgeWorkspaceSetMode(bridge(false), { workspaceId: "ws1", mode: "design" });
+    const cloud = cloudWorkspaceKey({ organizationId: "11111111-1111-4111-8111-111111111111", workspaceId: "22222222-2222-4222-8222-222222222222" });
+    await bridgeWorkspaceSetMode(bridge(true), { workspaceId: cloud, mode: "design" });
+    expect(sent).toEqual([
+      { workspaceId: "ws1", mode: "design", [DESIGN_COMPONENT_BINDINGS_PARAM]: true },
       { workspaceId: "ws1", mode: "design" },
       { workspaceId: cloud, mode: "design" },
     ]);

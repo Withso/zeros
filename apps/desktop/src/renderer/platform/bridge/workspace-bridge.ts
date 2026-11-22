@@ -7,7 +7,7 @@ import type {
 
 import type { RuntimeClient } from "./ws-client";
 import { cloudWorkspaceKey, isCloudWorkspace, parseCloudScopedId } from "./cloud-workspace-key";
-import { DESIGN_INSTANCE_SLOT_TEXT_CAPABILITY, DESIGN_INSTANCE_SLOT_TEXT_PARAM, DESIGN_OPTIONS_SHOW_NOTHING_CAPABILITY, DESIGN_OPTIONS_SHOW_NOTHING_PARAM } from "@zeros/protocol/design-catalog";
+import { DESIGN_COMPONENT_BINDINGS_CAPABILITY, DESIGN_COMPONENT_BINDINGS_PARAM, DESIGN_INSTANCE_SLOT_TEXT_CAPABILITY, DESIGN_INSTANCE_SLOT_TEXT_PARAM, DESIGN_OPTIONS_SHOW_NOTHING_CAPABILITY, DESIGN_OPTIONS_SHOW_NOTHING_PARAM } from "@zeros/protocol/design-catalog";
 import { CLOUD_GITHUB_PR_OPERATIONS } from "@zeros/protocol/cloud-github-pr";
 import { isWorkspaceNumber } from "@zeros/protocol/local-orchestration";
 import { requestCloudGithubPr, cloudGithubPrAuthority, cloudGithubPrRoute } from "../cloud-github-pr";
@@ -1993,13 +1993,15 @@ export async function bridgeWorkspaceReassignLocalOrganization(
   )) as { changes: number; repoSlugs: string[] };
 }
 
-/** Frame records may say a frame shows nothing, or report text beside an
- * instance host's children, only to a renderer that asks. */
+/** Frame records may say a frame shows nothing, report text beside an
+ * instance host's children, or carry which controls each main layer reads,
+ * only to a renderer that asks. */
 export function showsNothingParam(bridge: RuntimeClient, workspaceId: unknown) {
   if (typeof workspaceId !== "string" || isCloudWorkspace(workspaceId)) return {};
   return {
     ...(bridge.supportsEngineCapability?.(DESIGN_OPTIONS_SHOW_NOTHING_CAPABILITY, workspaceId) ? { [DESIGN_OPTIONS_SHOW_NOTHING_PARAM]: true } : {}),
     ...(bridge.supportsEngineCapability?.(DESIGN_INSTANCE_SLOT_TEXT_CAPABILITY, workspaceId) ? { [DESIGN_INSTANCE_SLOT_TEXT_PARAM]: true } : {}),
+    ...(bridge.supportsEngineCapability?.(DESIGN_COMPONENT_BINDINGS_CAPABILITY, workspaceId) ? { [DESIGN_COMPONENT_BINDINGS_PARAM]: true } : {}),
   };
 }
 

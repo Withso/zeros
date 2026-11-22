@@ -50,19 +50,19 @@ function listed(items: readonly string[]): string {
   return items.length <= 1 ? (items[0] ?? "") : `${items.slice(0, -1).join(", ")} and ${items.at(-1)}`;
 }
 
-/** "3 changes made by hand" and "Corner radius, Fill and Gap, on 2 layers.";
- * null with none. */
+/** "3 changes by hand", with "Corner radius, Fill and Gap, on 2 layers." as
+ * the title's tooltip; null with none. */
 export function designFrameChangesSummary(
   changes: readonly DesignFrameChange[],
   truncated: boolean,
-): { title: string; body: string } | null {
+): { title: string; detail: string } | null {
   if (changes.length === 0) return null;
   const fields = [...new Set(changes.map((change) => change.field))];
   const layers = new Set(changes.map((change) => change.oid)).size;
-  const body = `${listed(fields)}, on ${layers} ${layers === 1 ? "layer" : "layers"}.`;
+  const detail = `${listed(fields)}, on ${layers} ${layers === 1 ? "layer" : "layers"}.`;
   return {
-    title: `${changes.length} ${changes.length === 1 ? "change" : "changes"} made by hand`,
-    body: truncated ? `${body} Not every layer was checked, so there may be more.` : body,
+    title: `${changes.length} ${changes.length === 1 ? "change" : "changes"} by hand`,
+    detail: truncated ? `${detail} Not every layer was checked, so there may be more.` : detail,
   };
 }
 

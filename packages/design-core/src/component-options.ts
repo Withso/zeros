@@ -7,6 +7,7 @@
 // grammar. Text, choices and booleans never reach CSS. A slot takes layers,
 // not a value: the instance's own layers placed in it.
 
+import { cssPropertiesOverlap } from "./css-longhands";
 import {
   COMPONENT_EXPRESSION_RESERVED_NAMES,
   ComponentExpressionError,
@@ -487,9 +488,49 @@ export function componentIgnoresAttribute(name: string): boolean {
   return !HOST_ATTRIBUTES.has(name) && !/^(?:data|aria|zd)-/.test(name) && !/^on/.test(name);
 }
 
+/** The only properties an app may set in an instance host's own style: its
+ * placement (move, nudge and rotation, with the rotation origin), its size,
+ * and how it sizes as a layout child. Anything else would sit over what the
+ * main and its controls set. Shared by the Design renderer, which refuses
+ * other writes, and the engine lint, which reports them. */
+export const COMPONENT_INSTANCE_HOST_STYLE_PROPERTIES: ReadonlySet<string> = new Set([
+  "bottom", "inset", "inset-block", "inset-block-end", "inset-block-start", "inset-inline",
+  "inset-inline-end", "inset-inline-start", "left", "position", "right", "top",
+  "rotate", "transform", "transform-origin", "translate",
+  "width", "height", "min-width", "min-height", "max-width", "max-height", "aspect-ratio",
+  "flex", "flex-grow", "flex-shrink", "flex-basis", "align-self", "justify-self", "order",
+  "grid-area", "grid-column", "grid-column-start", "grid-column-end", "grid-row", "grid-row-start", "grid-row-end",
+]);
+
+/** Whether an app may set this property in an instance host's own style:
+ * one of the properties above, or the app's own layout bookkeeping
+ * (`--zeros-layout-*`, written on each child when its parent's layout
+ * changes). Every other custom property is refused. */
+export function componentInstanceHostStyleAllowed(property: string): boolean {
+  return COMPONENT_INSTANCE_HOST_STYLE_PROPERTIES.has(property) || property.startsWith("--zeros-layout-");
+}
+
+/** A size, a size limit or the aspect ratio: what sets an instance's box
+ * size. Layout-child sizing (flex, align-self) is its place in a layout. */
+const sizes = (property: string) =>
+  property === "aspect-ratio" || cssPropertiesOverlap(property, "width") || cssPropertiesOverlap(property, "height");
+
+/** Whether a property in an instance host's own style is an older override,
+ * one the app no longer writes and Reset removes: anything outside the
+ * allowlist, and a size, size limit or aspect ratio over one a control sets
+ * on the root (the root's bound properties, as recorded). Its place and its
+ * layout-child sizing are never one, whatever a control binds, so Reset
+ * never moves an instance. */
+export function componentInstanceOlderOverride(property: string, boundProperties: Iterable<string>): boolean {
+  if (!componentInstanceHostStyleAllowed(property)) return true;
+  if (!sizes(property)) return false;
+  for (const bound of boundProperties) if (sizes(bound) && cssPropertiesOverlap(property, bound)) return true;
+  return false;
+}
+
 /** Why an instance's attribute has no effect, naming the value it ignores. */
 export function componentIgnoredAttributeMessage(name: string, value: string): string {
-  return `This component has no option ${name}; ${name}="${value.length > 64 ? `${value.slice(0, 63)}…` : value}" is ignored.`;
+  return `This component has no control ${name} (no <zd-option name="${name}">); ${name}="${value.length > 64 ? `${value.slice(0, 63)}…` : value}" is ignored.`;
 }
 
 /** An instance's values from its attributes: each option attribute over its

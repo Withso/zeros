@@ -166,7 +166,7 @@ import {
 } from "./composer-text-attachment-delivery";
 import { registerLiveChatFileStager } from "./composer-file-attachment-delivery";
 import { buildForkTranscriptAttachment, createForkedChat } from "./fork-chat";
-import { markSideChatSeedSent, openSideChat as openSideChatFrom, sideChatHandoffFor, useSideChatSeed, warmSideChat as warmSideChatFrom, type SideChatSource } from "./side-chat";
+import { markSideChatSeedSent, openSideChat as openSideChatFrom, publishSideChat, sideChatHandoffFor, useSideChatSeed, warmSideChat as warmSideChatFrom, type SideChatSource } from "./side-chat";
 import { SideChatBranchBanner } from "./side-chat-banner";
 import { hasParentContext } from "./add-child-session";
 import { resolveComposerPlaceholder } from "./composer-placeholder";
@@ -2184,7 +2184,7 @@ function AgentChatBody({
     (from: SideChatSource) => {
       if (!chatThread) return;
       openSideChatFrom(chatThread, from, {
-        publishChat: (chat) => dispatch({ type: "ADD_CHAT", chat }),
+        publishChat: (chat) => publishSideChat(dispatch, chat),
       });
     },
     [chatThread, dispatch],

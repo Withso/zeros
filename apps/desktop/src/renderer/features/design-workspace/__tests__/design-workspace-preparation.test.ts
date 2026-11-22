@@ -46,6 +46,24 @@ it("keeps other frames' confirmed lint across a scoped mutation", () => {
   expect(projectDesignMutationSnapshot({ ...previous, directoryId: "design_other" }, next).lint.violations).toEqual([]);
 });
 
+it("remembers the frames already linted across a scoped mutation with no rows to keep", async () => {
+  const previous = { ...snapshot(), frames: [frame("f0.html"), frame("f1.html"), frame("f2.html")],
+    lint: { workspacePath: "/fixture", checkedFiles: ["f1.html", "f2.html"], violations: [], healedOids: 0 } };
+  const edited = { ...frame("f0.html"), sourceVersion: "b".repeat(24) };
+  const next = { ...snapshot(), preparation: undefined, frames: [edited], mutationCatalog: { revision: "a".repeat(64),
+    frames: [edited, frame("f1.html"), frame("f2.html")].map((frame, order) => ({ ...frame, id: frame.frameId!, pageId: frame.pageId!, source: frame.file,
+      kind: "html" as const, order, preparation: "unprepared" as const })) } };
+  let current = projectDesignMutationSnapshot(previous, next);
+  expect(current.lint.checkedFiles).toEqual(["f1.html", "f2.html"]);
+  // The next preparation of those frames asks for no lint, so a control
+  // change does not re-lint the page's other frames.
+  const prepare = vi.fn(async (_workspace: string, _directory: string, _revision: string, files: readonly string[], _lintFiles?: readonly string[]) => reply(files));
+  const coordinator = new DesignFramePreparation({ snapshot: () => current, publish: (_, value) => { current = value; }, canPrepare: () => true, prepare });
+  coordinator.setDemand({}, { workspaceId: "local", files: ["f1.html", "f2.html"] });
+  await vi.waitFor(() => expect(prepare).toHaveBeenCalled());
+  expect(prepare.mock.calls[0]!.length).toBe(4);
+});
+
 it("does not fabricate a prepared generation from metadata or a previous matching hash", () => {
   const value = snapshot(); value.frames = [frame("f0.html")];
   const views = designFrameViews(value);

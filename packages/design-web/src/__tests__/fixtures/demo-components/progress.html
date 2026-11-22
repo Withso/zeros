@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Progress</title>
+<template data-zd-options>
+<zd-option name="label" type="text" label="Label" default="Uploading assets"></zd-option>
+<zd-option name="value" type="number" label="Value" default="64" min="0" max="100" step="1" unit="%"></zd-option>
+<zd-option name="show-value" type="boolean" label="Show value" default="true"></zd-option>
+<zd-option name="tone" type="choice" label="Tone" choices="accent success warning danger" default="accent"></zd-option>
+<zd-option name="shape" type="choice" label="Shape" choices="bar ring" default="bar"></zd-option>
+<zd-option name="ring-size" type="number" label="Ring size" group="Ring" default="96" min="48" max="160" step="8" unit="px"></zd-option>
+<zd-option name="start-angle" type="number" label="Start angle" group="Ring" default="0" min="0" max="360" step="15" unit="deg"></zd-option>
+<zd-option name="striped" type="boolean" label="Striped" group="Stripes" default="false"></zd-option>
+<zd-option name="speed" type="number" label="Stripe speed" group="Stripes" default="1" min="0.5" max="4" step="0.5" unit="s"></zd-option>
+<zd-option name="fill-motion" type="easing" label="Fill motion" default="ease-in-out 400ms"></zd-option>
+<zd-derive name="remaining" value="100 - value"></zd-derive>
+<zd-derive name="done" value="value >= 100"></zd-derive>
+<zd-derive name="status" value="done ? 'Complete' : value == 0 ? 'Not started' : 'In progress'"></zd-derive>
+<zd-variant name="complete" value="100" tone="success" label="Upload complete"></zd-variant>
+<zd-variant name="empty" value="0" show-value="false" label="Waiting to start"></zd-variant>
+<zd-variant name="ring" shape="ring" value="72" label="Storage used"></zd-variant>
+</template>
+<link rel="stylesheet" href="../tokens.css">
+<link rel="stylesheet" href="../ui.css">
+<style>
+zd-progress { display: block; }
+.progress { --progress-ink: var(--accent); display: flex; flex-direction: column; gap: var(--space-2); width: 100%; min-width: 240px; }
+.progress[data-tone="success"] { --progress-ink: var(--success); }
+.progress[data-tone="warning"] { --progress-ink: var(--warning); }
+.progress[data-tone="danger"] { --progress-ink: var(--danger); }
+.progress-head { display: flex; align-items: baseline; justify-content: space-between; gap: var(--space-3); color: var(--fg-strong); font-size: var(--text-small); line-height: var(--text-small--line-height); font-weight: var(--weight-medium); }
+.progress-value { color: var(--fg-muted); font-variant-numeric: tabular-nums; }
+.progress-track { height: 8px; overflow: hidden; border-radius: var(--radius-full); background: var(--bg-raised); }
+.progress-fill { width: var(--zd-value); height: 100%; border-radius: inherit; background-color: var(--progress-ink); transition: width var(--zd-fill-motion-duration) var(--zd-fill-motion-easing); }
+.progress[data-striped="true"] .progress-fill { background-image: linear-gradient(45deg, rgb(255 255 255 / 0.28) 25%, transparent 25%, transparent 50%, rgb(255 255 255 / 0.28) 50%, rgb(255 255 255 / 0.28) 75%, transparent 75%, transparent); background-size: 16px 16px; animation: progress-stripes var(--zd-speed) linear infinite; }
+@keyframes progress-stripes { from { background-position: 16px 0; } to { background-position: 0 0; } }
+.progress-ring { display: grid; place-items: center; width: var(--zd-ring-size); height: var(--zd-ring-size); align-self: center; border-radius: var(--radius-full); background: conic-gradient(from var(--zd-start-angle), var(--progress-ink) var(--zd-value), var(--bg-raised) 0); }
+.progress-ring-hole { display: grid; place-items: center; width: 74%; height: 74%; border-radius: var(--radius-full); background: var(--bg-canvas); color: var(--fg-strong); font-size: var(--text-small); font-weight: var(--weight-bold); font-variant-numeric: tabular-nums; }
+.progress-status { display: flex; align-items: center; gap: var(--space-1); color: var(--fg-muted); font-size: var(--text-caption); line-height: var(--text-caption--line-height); }
+.progress-status svg { width: 14px; height: 14px; color: var(--success); }
+</style>
+</head>
+<body class="stage">
+<div class="progress" data-oid="progress" data-name="Progress" data-tone="{{ tone }}" data-striped="{{ striped }}">
+<div class="progress-head" data-oid="progress-head" data-name="Header">
+<span data-oid="progress-label" data-name="Label">{{ label }}</span>
+<span class="progress-value" data-oid="progress-value" data-name="Value" data-zd-if="show-value && shape == 'bar'">{{ value }}%</span>
+</div>
+<div class="progress-track" data-oid="progress-track" data-name="Track" role="progressbar" aria-valuenow="{{ value }}" aria-valuemin="0" aria-valuemax="100" data-zd-if="shape == 'bar'"><div class="progress-fill" data-oid="progress-fill" data-name="Fill"></div></div>
+<div class="progress-ring" data-oid="progress-ring" data-name="Ring" role="progressbar" aria-valuenow="{{ value }}" aria-valuemin="0" aria-valuemax="100" data-zd-if="shape == 'ring'"><span class="progress-ring-hole" data-oid="progress-ring-hole" data-name="Ring value"><template data-zd-if="show-value">{{ value }}%</template></span></div>
+<p class="progress-status" data-oid="progress-status" data-name="Status"><svg data-oid="progress-done" data-zd-if="done" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 8.5l3 3 7-7" data-oid="o-126f742e7"/></svg>{{ status }}<template data-zd-if="!done && value > 0"> · {{ remaining }}% left</template></p>
+</div>
+</body>
+</html>

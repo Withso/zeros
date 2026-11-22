@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Data table</title>
+<template data-zd-options>
+<zd-option name="caption" type="text" label="Caption" default="Deploys this week"></zd-option>
+<zd-option name="rows" type="number" label="Rows" default="4" min="1" max="8" step="1"></zd-option>
+<zd-option name="columns" type="number" label="Columns" default="5" min="2" max="6" step="1"></zd-option>
+<zd-option name="first-col" type="number" label="First column width" default="2" min="1" max="3" step="0.5" unit="fr"></zd-option>
+<zd-option name="header" type="boolean" label="Header row" default="true"></zd-option>
+<zd-option name="zebra" type="boolean" label="Zebra rows" default="false"></zd-option>
+<zd-option name="density" type="choice" label="Density" choices="compact comfortable spacious" default="comfortable"></zd-option>
+<zd-derive name="rest" value="columns - 1"></zd-derive>
+<zd-derive name="cells" value="rows * columns"></zd-derive>
+<zd-variant name="dense" density="compact" rows="8" zebra="true"></zd-variant>
+<zd-variant name="summary" rows="2" columns="3" header="false" caption="Totals"></zd-variant>
+</template>
+<link rel="stylesheet" href="../tokens.css">
+<link rel="stylesheet" href="../ui.css">
+<style>
+zd-data-table { display: block; }
+.dtable { --dtable-pad: var(--space-2) var(--space-3); display: flex; flex-direction: column; gap: var(--space-2); width: 100%; margin: 0; }
+.dtable[data-density="compact"] { --dtable-pad: var(--space-1) var(--space-2); }
+.dtable[data-density="spacious"] { --dtable-pad: var(--space-3) var(--space-4); }
+.dtable-caption { color: var(--fg-muted); font-size: var(--text-caption); line-height: var(--text-caption--line-height); }
+.dtable-grid { overflow: hidden; border: 1px solid var(--border-subtle); border-radius: var(--radius-md); background: var(--bg-surface); }
+.dtable-row { display: grid; grid-template-columns: var(--zd-first-col) repeat(var(--zd-rest), minmax(0, 1fr)); border-top: 1px solid var(--border-subtle); }
+.dtable-row:first-child { border-top: 0; }
+.dtable-row.is-head { background: var(--bg-raised); color: var(--fg-muted); font-weight: var(--weight-medium); }
+.dtable[data-zebra="true"] .dtable-row:nth-child(even):not(.is-head) { background: var(--bg-canvas); }
+.dtable-cell { padding: var(--dtable-pad); color: var(--fg-default); font-size: var(--text-small); line-height: var(--text-small--line-height); font-variant-numeric: tabular-nums; }
+.dtable-row.is-head .dtable-cell { color: var(--fg-muted); }
+</style>
+</head>
+<body class="stage">
+<figure class="dtable" data-oid="dtable" data-name="Data table" data-density="{{ density }}" data-zebra="{{ zebra }}">
+<figcaption class="dtable-caption" data-oid="dtable-caption" data-name="Caption">{{ caption }} · {{ rows }} rows × {{ columns }} columns = {{ cells }} cells</figcaption>
+<div class="dtable-grid" data-oid="dtable-grid" data-name="Grid" role="table">
+<div class="dtable-row is-head" data-oid="dtable-head" data-name="Header row" role="row" data-zd-if="header"><span class="dtable-cell" data-oid="dtable-head-cell" data-name="Header cell" role="columnheader" data-zd-for="c in range(columns)">{{ c == 0 ? 'Service' : 'Day ' + c }}</span></div>
+<div class="dtable-row" data-oid="dtable-row" data-name="Row" role="row" data-zd-for="r in range(rows)"><span class="dtable-cell" data-oid="dtable-cell" data-name="Cell" role="cell" data-zd-for="c in range(columns)">{{ c == 0 ? 'service-' + (r + 1) : (r * 7 + c * 3) % 10 }}</span></div>
+</div>
+</figure>
+</body>
+</html>
