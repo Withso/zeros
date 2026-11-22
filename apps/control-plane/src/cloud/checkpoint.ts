@@ -480,14 +480,7 @@ function repositoryCapture(environment: boolean, attachments = true): string[] {
       "  done < \"$work/attachment-ignored\"",
     ] : []),
     "  step=ignored; total=0",
-    "  while IFS= read -r -d '' path; do",
-    "    case \"$path\" in */) continue ;; esac",
-    "    if attachment_path \"$path\"; then continue; fi",
-    "    if [ -f \"$path\" ] && [ ! -L \"$path\" ]; then",
-    "      size=$(stat -c %s -- \"$path\")",
-    `      if [ "$size" -le ${IGNORED_FILE_BYTES} ] && [ $((total + size)) -le ${IGNORED_TOTAL_BYTES} ]; then total=$((total + size)); printf '%s\\0' "$path" >> "$work/ignored"; fi`,
-    "    fi",
-    "  done < <(git ls-files -z --others --ignored --exclude-standard --directory)",
+    ...ignoredFiles(`printf '%s\\0' "$path" >> "$work/ignored"`),
     ...(environment ? [
     "  step=environment",
     `  node "$work/environment.mjs" capture "$repo" "$home/${CLOUD_V2_WORKER_STATE}/environment-seed/manifest.json" "$work/environment" || { status=$?; if [ "$status" = 3 ]; then fail checkpoint_too_large; else fail checkpoint_failed; fi; }`,
@@ -587,21 +580,109 @@ export const WORKER_OFF_COMMAND = `bash -c ${quote(WORKER_SERVICE_OFF.join("\n")
 
 /** Whether a stop left work that is not on GitHub, in any repository. */
 export type BackupProbe = "clean" | "dirty" | "unknown";
+/** The ignored files a checkpoint captures from the checkout it runs in: small regular files outside ignored
+ * directories (Git lists such a directory as one entry ending in "/"), within the per-file and total bounds,
+ * not attachments. `take` runs for each, with "$path". The capture and the backup probe both enumerate
+ * through this one definition, so what the probe judges is exactly what a backup would hold. */
+function ignoredFiles(take: string): string[] {
+  return [
+    "  while IFS= read -r -d '' path; do",
+    "    case \"$path\" in */) continue ;; esac",
+    "    if attachment_path \"$path\"; then continue; fi",
+    "    if [ -f \"$path\" ] && [ ! -L \"$path\" ]; then",
+    "      size=$(stat -c %s -- \"$path\")",
+    `      if [ "$size" -le ${IGNORED_FILE_BYTES} ] && [ $((total + size)) -le ${IGNORED_TOTAL_BYTES} ]; then total=$((total + size)); ${take}; fi`,
+    "    fi",
+    "  done < <(git ls-files -z --others --ignored --exclude-standard --directory)",
+  ];
+}
+
+/** Where a checkout's ignored-file baseline lives: outside every checkout and outside the worker state a
+ * backup holds. One file per checkout, named by the digest of its path. */
+const IGNORED_BASELINE_DIR = ".local/share/zeros/retention-baseline";
+
+/** Judges every ignored file the backup would capture from one checkout (NUL-separated paths in `list`,
+ * relative to `repo`): reproducible only when it is a seeded file whose bytes are the seed journal's, or a
+ * file whose bytes are the ones the checkout's baseline recorded. Exit 0: all reproducible; 1: some file is
+ * not; anything else: could not tell. `baseline` mode instead records the list's digests as the checkout's
+ * baseline, once: an existing baseline is never replaced. */
+const IGNORED_SCRIPT = String.raw`
+import { constants, closeSync, fstatSync, lstatSync, mkdirSync, openSync, readSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+const [mode, repo, list, journalPath, baselineDir] = process.argv.slice(2);
+const digest = path => {
+  const fd = openSync(repo + "/" + path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+  try {
+    const stat = fstatSync(fd);
+    if (!stat.isFile() || stat.size > 1048576) throw new Error();
+    const bytes = Buffer.alloc(stat.size); let length = 0;
+    while (length < bytes.length) { const n = readSync(fd, bytes, length, bytes.length - length, length); if (!n) break; length += n; }
+    return createHash("sha256").update(bytes.subarray(0, length)).digest("hex");
+  } finally { closeSync(fd); }
+};
+const exists = path => { try { lstatSync(path); return true; } catch (error) { if (error.code === "ENOENT") return false; throw error; } };
+try {
+  const paths = readFileSync(list).toString("utf8").split(" ").filter(Boolean);
+  const baseline = baselineDir + "/" + createHash("sha256").update(repo).digest("hex") + ".json";
+  if (mode === "baseline") {
+    if (exists(baseline)) process.exit(0);
+    mkdirSync(baselineDir, { recursive: true, mode: 0o700 });
+    const files = Object.fromEntries(paths.map(path => [path, digest(path)]));
+    const temporary = baseline + "." + process.pid;
+    writeFileSync(temporary, JSON.stringify({ version: 1, repo, files }), { flag: "wx", mode: 0o600 });
+    renameSync(temporary, baseline);
+    process.exit(0);
+  }
+  if (mode !== "judge") process.exit(2);
+  const seeded = new Map();
+  if (journalPath && exists(journalPath)) {
+    const journal = JSON.parse(readFileSync(journalPath, "utf8"));
+    for (const file of Array.isArray(journal.files) ? journal.files : [])
+      if (typeof file.path === "string" && typeof file.sha256 === "string") seeded.set(file.path, file.sha256);
+  }
+  const recorded = exists(baseline) ? JSON.parse(readFileSync(baseline, "utf8")) : null;
+  const known = recorded && recorded.version === 1 && recorded.repo === repo && recorded.files && typeof recorded.files === "object" ? recorded.files : {};
+  for (const path of paths) {
+    const sum = digest(path);
+    if (seeded.get(path) === sum || (Object.hasOwn(known, path) && known[path] === sum)) continue;
+    process.exit(1);
+  }
+  process.exit(0);
+} catch { process.exit(2); }
+`;
+
 /** A probe answers within a few seconds or counts as unknown, which backs up. */
 export const CLOUD_V2_BACKUP_PROBE_SECONDS = 15;
 
-/** Run at a retention stop, once the worker service is off: reports whether
- * any repository holds Git work that is not on GitHub: tracked changes, untracked files Git does not ignore, a
- * stash, or a commit on a branch or HEAD that no remote-tracking ref reaches.
- * Ignored files never count. Read-only: no optional index writes, no
- * fsmonitor. Any doubt reports unknown; it never fails. */
-export function backupProbeCommand(checkoutPaths: readonly string[]): string {
+/** Run at a retention stop, once the worker service is off: reports whether a backup would hold anything a
+ * rebuild from GitHub would not reproduce. Dirty for Git work not on GitHub (tracked changes, untracked files
+ * Git does not ignore, a stash, a commit on a branch or HEAD no remote-tracking ref reaches), and for any
+ * ignored file the backup would capture (the same enumeration, ignoredFiles) unless it is a seeded file the
+ * seed journal says is the server's bytes, or a file the checkout's baseline recorded, unchanged. With no
+ * baseline, every other such file is dirty. Read-only: no optional index writes, no fsmonitor. Any doubt,
+ * error or the time bound reports unknown; it never fails. The first checkout's seed journal is the workspace's. */
+export function backupProbeCommand(checkoutPaths: readonly string[], home = "/home/user"): string {
   if (!checkoutPaths.length) throw new Error("Invalid backup probe");
+  if (!home.startsWith("/") || /[\n\0]/.test(home) || home.split("/").some(part => part === "..")) throw new Error("Invalid backup probe");
   const script = [
     "set -u", "exec 3>&1 >/dev/null 2>&1",
     "export GIT_OPTIONAL_LOCKS=0 GIT_TERMINAL_PROMPT=0",
     "g() { git -c core.fsmonitor=false \"$@\"; }",
-    "state=clean",
+    `home=${quote(home)}`,
+    "state=clean first=1",
+    "command -v node >/dev/null || { printf 'zeros-backup-probe unknown\\n' >&3; exit 0; }",
+    "work=$(mktemp -d) || { printf 'zeros-backup-probe unknown\\n' >&3; exit 0; }",
+    "trap 'rm -rf \"$work\"' EXIT",
+    `printf %s ${quote(b64(IGNORED_SCRIPT))} | base64 -d > "$work/ignored.mjs"`,
+    // What the backup would capture of the ignored files, judged by the journal and the baseline.
+    "ignored() {",
+    "  local path size total=0 journal=''",
+    "  : > \"$work/list\"",
+    ...ignoredFiles(`printf '%s\\0' "$path" >> "$work/list"`),
+    `  if [ -n "$first" ]; then journal="$home/${CLOUD_V2_WORKER_STATE}/environment-seed/manifest.json"; fi`,
+    `  node "$work/ignored.mjs" judge "$1" "$work/list" "$journal" "$home/${IGNORED_BASELINE_DIR}"`,
+    "  case $? in 0) ;; 1) state=dirty ;; *) return 1 ;; esac",
+    "}",
     "probe() {",
     "  [ -d \"$1\" ] && cd -- \"$1\" && [ \"$(pwd -P)\" = \"$(cd \"$(g rev-parse --show-toplevel)\" && pwd -P)\" ] || return 1",
     "  local changes head ahead",
@@ -610,15 +691,41 @@ export function backupProbeCommand(checkoutPaths: readonly string[]): string {
     "  if g rev-parse -q --verify refs/stash >/dev/null; then state=dirty; return 0; fi",
     "  head=$(g rev-parse -q --verify 'HEAD^{commit}' || true)",
     "  ahead=$(g rev-list -n 1 --branches ${head:+\"$head\"} --not --remotes) || return 1",
-    "  if [ -n \"$ahead\" ]; then state=dirty; fi",
+    "  if [ -n \"$ahead\" ]; then state=dirty; return 0; fi",
+    "  ignored \"$(pwd -P)\" || return 1",
     "}",
     `for repo in ${checkoutPaths.map(path => quote(checkedPath(path))).join(" ")}; do`,
     "  probe \"$repo\" || { printf 'zeros-backup-probe unknown\\n' >&3; exit 0; }",
     "  [ \"$state\" = clean ] || break",
+    "  first=''",
     "done",
     "printf 'zeros-backup-probe %s\\n' \"$state\" >&3",
   ];
   return `bash -c ${quote(script.join("\n"))}`;
+}
+
+/** Records each checkout's ignored-file baseline (what the backup would capture of its ignored files, with
+ * their digests), once a create has finished its setup and seeding: the probe then counts those files, unchanged,
+ * as reproducible. Never replaces an existing baseline. Prints zeros-baseline recorded, or nothing. */
+export function ignoredBaselineCommand(checkoutPaths: readonly string[], home = "/home/user"): string {
+  if (!checkoutPaths.length) throw new Error("Invalid baseline");
+  if (!home.startsWith("/") || /[\n\0]/.test(home) || home.split("/").some(part => part === "..")) throw new Error("Invalid baseline");
+  return `bash -c ${quote([
+    "set -u", "exec 3>&1 >/dev/null 2>&1",
+    "export GIT_OPTIONAL_LOCKS=0 GIT_TERMINAL_PROMPT=0",
+    `home=${quote(home)}`,
+    "command -v node >/dev/null || exit 0",
+    "work=$(mktemp -d) || exit 0",
+    "trap 'rm -rf \"$work\"' EXIT",
+    `printf %s ${quote(b64(IGNORED_SCRIPT))} | base64 -d > "$work/ignored.mjs"`,
+    `for repo in ${checkoutPaths.map(path => quote(checkedPath(path))).join(" ")}; do`,
+    "  cd -- \"$repo\" 2>/dev/null || exit 0",
+    "  total=0; : > \"$work/list\"",
+    ...ignoredFiles(`printf '%s\\0' "$path" >> "$work/list"`),
+    `  node "$work/ignored.mjs" baseline "$(pwd -P)" "$work/list" '' "$home/${IGNORED_BASELINE_DIR}" || exit 0`,
+    "done",
+    "printf 'zeros-baseline recorded\\n' >&3",
+  ].join("\n"))}`;
 }
 
 export function parseBackupProbe(stdout: string): BackupProbe {
