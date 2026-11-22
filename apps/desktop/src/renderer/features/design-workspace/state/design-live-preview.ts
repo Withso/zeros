@@ -275,6 +275,33 @@ export function clearDesignLivePreview(
   });
 }
 
+/** Remove the preview properties last published at or before `cutoff` (a
+ * designLivePreviewSequence() taken when a read began): what that read
+ * now reports supersedes them. A property published since, such as a scrub
+ * step while the read was out, stays, and so does any gesture frame still
+ * waiting to publish. */
+export function clearDesignLivePreviewPublishedBy(workspaceId: string, frame: string, nodeId: string, cutoff: number): void {
+  const key = ownerKey(workspaceId, frame, nodeId);
+  useDesignLivePreviewStore.setState((state) => {
+    const current = state.byOwner[key];
+    if (!current) return state;
+    const styles = { ...current.styles };
+    let changed = false;
+    for (const property of Object.keys(styles)) {
+      if ((latestPublicationByProperty.get(propertyKey(key, property)) ?? 0) > cutoff) continue;
+      delete styles[property];
+      latestPublicationByProperty.delete(propertyKey(key, property));
+      changed = true;
+    }
+    if (!changed) return state;
+    if (Object.keys(styles).length > 0)
+      return { ...state, byOwner: { ...state.byOwner, [key]: { ...current, styles } } };
+    const byOwner = { ...state.byOwner };
+    delete byOwner[key];
+    return { byOwner, ownerOrder: state.ownerOrder.filter((candidate) => candidate !== key) };
+  });
+}
+
 /** Remove only values now represented by an authoritative source commit.
  * A different property or a newer value can remain speculative while the
  * workspace mutation queue persists earlier input. */

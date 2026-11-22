@@ -3,6 +3,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   clearCommittedDesignLivePreviewStyles,
   clearDesignLivePreview,
+  clearDesignLivePreviewPublishedBy,
+  designLivePreviewSequence,
   designLivePreviewValue,
   publishDesignLivePreviewStyles,
   publishDesignGestureLivePreview,
@@ -27,6 +29,23 @@ function presentInverse(workspace: string, sequence: number, token = {}) {
   }, sequence);
   return token;
 }
+
+describe("clearing what a read now reports", () => {
+  beforeEach(() => resetDesignLivePreviewForTests());
+  afterEach(() => resetDesignLivePreviewForTests());
+
+  it("clears what was published by the read's start and keeps what came after, per layer and property", () => {
+    publishDesignLivePreviewStyles("w", "home.html", "a", { opacity: "0.3", color: "red" });
+    publishDesignLivePreviewStyles("w", "home.html", "b", { opacity: "0.3" });
+    const cutoff = designLivePreviewSequence();
+    publishDesignLivePreviewStyles("w", "home.html", "a", { color: "blue" });
+    clearDesignLivePreviewPublishedBy("w", "home.html", "a", cutoff);
+    clearDesignLivePreviewPublishedBy("w", "home.html", "b", cutoff);
+    const byOwner = useDesignLivePreviewStore.getState().byOwner;
+    expect(byOwner[JSON.stringify(["w", "home.html", "a"])]?.styles).toEqual({ color: "blue" });
+    expect(byOwner[JSON.stringify(["w", "home.html", "b"])]).toBeUndefined();
+  });
+});
 
 describe("design live preview", () => {
   beforeEach(() => {

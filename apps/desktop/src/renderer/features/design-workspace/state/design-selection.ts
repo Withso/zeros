@@ -51,6 +51,8 @@ import {
 } from "./design-runtime-store";
 import {
   clearDesignLivePreview,
+  clearDesignLivePreviewPublishedBy,
+  designLivePreviewSequence,
   publishDesignLivePreviewStyles,
 } from "./design-live-preview";
 import {
@@ -514,6 +516,8 @@ function refreshDesignSelectionDetails(
   input: Parameters<typeof requestDesignSelectionDetails>[0],
 ): DesignSelectionDetailDemand {
   const version = nextSelectionVersion();
+  // Previews published from here on are newer than what this read reports.
+  const previewCutoff = designLivePreviewSequence();
   const demand = requestDesignSelectionDetails({
     ...input,
     tolerateReadErrors: true,
@@ -532,10 +536,11 @@ function refreshDesignSelectionDetails(
             candidate,
             input.frame.sourceVersion,
           );
-        clearDesignLivePreview(
+        clearDesignLivePreviewPublishedBy(
           input.workspaceId,
           input.frame.file,
           candidate.oid,
+          previewCutoff,
         );
       }
       await publishDurableDesignSelection(
