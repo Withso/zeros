@@ -19,6 +19,8 @@ import { CLOUD_V2_LEASE_SECONDS, type CloudV2Compute } from "./boat.js";
 import { BoatCreateRejectedError, BoatForkRefusedError, BoatSnapshotExpiredError } from "./boat-client.js";
 import { CloudProviderError } from "./provider-error.js";
 import { asZeros, checkoutScript, shellQuote } from "./computer.js";
+import type { z } from "zod";
+import { SUBMODULE_FETCHED, composeSubmodulePlan, readSubmoduleLevel, rememberedSubmoduleLevel, submoduleFetchLines, type SubmoduleLevel, type SubmodulePlan } from "./submodules.js";
 import { installRuntimeCommand, type CloudV2Runtime } from "./runtime.js";
 import { cloudV2BoatSnapshotName, cloudV2SandboxName } from "./resource-names.js";
 import type { CloudSourceTarget } from "./source-authority.js";
@@ -60,7 +62,7 @@ export type ReadyCopyState = "building" | "ready" | "failed" | "retired";
 export type ReadyCopyTrigger = "project_created" | "repositories_changed" | "weekly_update" | "computer_build" | "setup_changed" | "branch_changed"
   | "secrets_changed" | "retry" | "manual";
 /** The step of a build that failed, with the repository it was working on. */
-export type ReadyCopyStep = "machine" | "runtime" | "clone" | "setup" | "scrub" | "secret_search" | "stop";
+export type ReadyCopyStep = "machine" | "runtime" | "clone" | "submodules" | "setup" | "scrub" | "secret_search" | "stop";
 /** Generations whose detail (setup output, location) is kept per project; older rows keep only their result. */
 export const READY_COPY_HISTORY_LIMIT = 20;
 /** The last part of a failed setup's output that is kept, redacted. */
@@ -70,7 +72,11 @@ export const READY_COPY_MANUAL_INTERVAL_MS = 10 * 60_000;
 /** What a generation cloned, per repository in position order. */
 export type ReadyCopyRepositoryResult = { repository: string; repositoryId: string; branch: string | null; commit: string | null;
   /** Where it was cloned under /home/user: <project-folder>/<repository-folder>, the layout its workspaces have. */
-  checkoutFolder?: string };
+  checkoutFolder?: string;
+  /** With "fetch submodules" on: each submodule the copy holds, and each it skipped and why. */
+  submodules?: ReadyCopySubmodule[] };
+/** A submodule of a copy's repository. A create whose creator can't read a fetched one never forks the copy. */
+export type ReadyCopySubmodule = { path: string; repository?: string; repositoryId?: string; commit?: string; fetched: boolean; reason?: string };
 export type CloudV2ReadyCopy = {
   id: string; organizationId: string; projectId: string; generation: number; state: ReadyCopyState;
   idempotencyKey: string; machineId: string | null; machinePending: boolean; builtFromBase: string | null;
@@ -131,6 +137,11 @@ export class CloudV2ReadyCopies {
   constructor(private readonly pool: pg.Pool) {}
 
   private tx<T>(work: (tx: Tx) => Promise<T>): Promise<T> { return withSystemTx(this.pool, work); }
+
+  /** One submodule level of a repository at a commit, read only on a miss (cloud/submodules.ts). */
+  submoduleLevel(organizationId: string, repository: { repository: string; repositoryId: string }, commit: string, read: () => Promise<SubmoduleLevel>) {
+    return rememberedSubmoduleLevel(work => this.tx(work), organizationId, repository, commit, read);
+  }
 
   async base(organizationId: string): Promise<ReadyCopyBase | null> {
     const row = (await this.tx(tx => tx.query<{ id: string; snapshot_name: string; created_by: string | null; base_shared: boolean }>(
@@ -702,6 +713,12 @@ export type ReadyCopyBuilderDeps = {
   sharedCloneToken?(organizationId: string, target: CloudSourceTarget): Promise<string>;
   /** A project's build secrets; empty when none. */
   secrets?(organizationId: string, projectId: string): Promise<ReadyCopySecrets>;
+  /** GitHub's API as one token (cloud/submodules.ts reads a level with the token of that repository). */
+  githubHttp?(token: string): { json<T>(path: string, schema: z.ZodType<T>): Promise<T> };
+  /** A submodule repository the build may read: its id and a token to read and clone it, as the project's
+   * clone tokens are (the member's for a personal project, the organization's connection otherwise); null when not. */
+  submoduleRepository?(organizationId: string, project: { level: CloudProjectLevel; ownerUserId: string | null }, repository: string):
+    Promise<{ repositoryId: string; token: string } | null>;
   now?: () => number;
   sleep?: (ms: number) => Promise<void>;
   logger?: Pick<Console, "warn">;
@@ -888,7 +905,7 @@ export class CloudV2ReadyCopyBuilder {
       if (installed.exitCode !== 0 || installed.timedOut) throw failure("worker_runtime_install_failed");
     }
     // Every repository is cloned in full first; a refresh fetches into the previous generation's.
-    const result: ReadyCopyRepositoryResult[] = [], layout = readyCopyLayout(project);
+    const result: ReadyCopyRepositoryResult[] = [], layout = readyCopyLayout(project), tokens: string[] = [];
     at.step = "clone";
     for (const [index, entry] of project.repositories.entries()) {
       at.repository = entry.repository;
@@ -897,6 +914,7 @@ export class CloudV2ReadyCopyBuilder {
       const token = project.level === "personal" ? await this.deps.cloneToken(job.organizationId, project.ownerUserId!, target)
         : this.deps.sharedCloneToken ? await this.deps.sharedCloneToken(job.organizationId, target)
         : await this.deps.cloneToken(job.organizationId, base.createdBy, target);
+      tokens.push(token);
       const header = `Authorization: Basic ${Buffer.from(`x-access-token:${token}`).toString("base64")}\n`;
       const clone = await compute.execLong(machineId, asZeros(checkoutScript({ repository: entry.repository, ...(entry.defaultBranch ? { ref: entry.defaultBranch } : {}) },
         homePath(layout[index]!), entry.repository)), 900, header);
@@ -905,6 +923,12 @@ export class CloudV2ReadyCopyBuilder {
       result.push({ repository: entry.repository, repositoryId: entry.repositoryId, checkoutFolder: layout[index]!,
         branch: /(?:^|\n)zeros-build-branch=([^\r\n]*)/.exec(clone.stdout)?.[1] || null, commit: /^[0-9a-f]{40}$/.test(commit) ? commit : null });
     }
+    // Then submodules where a repository fetches them, before setup, so a setup can use their files.
+    for (const [index, entry] of project.repositories.entries())
+      if (entry.fetchSubmodules && result[index]!.commit) {
+        at.step = "submodules"; at.repository = entry.repository;
+        result[index]!.submodules = await this.fetchSubmodules(machineId, job, project, { ...entry, commit: result[index]!.commit! }, homePath(layout[index]!), tokens[index]!);
+      }
     // Then each repository's setup in its own folder, in position order, with the project's build secrets.
     let values: string[] = [];
     if (project.repositories.some(entry => entry.setup)) {
@@ -947,6 +971,43 @@ export class CloudV2ReadyCopyBuilder {
     await compute.stop(machineId);
     const stoppedAt = await this.archived(machineId);
     if (!await copies.promote(job.id, { repositories: result, stoppedAt })) throw failure("ready_copy_superseded");
+  }
+
+  /** One repository's submodules on the build machine: the plan composed with the build's own access, then each
+   * fetched in order. A submodule the build can't read, or that fails, is skipped and named; its own submodules
+   * are skipped with it. A GitHub failure skips them all; the build still goes on. */
+  private async fetchSubmodules(machineId: string, job: CloudV2ReadyCopy, project: { level: CloudProjectLevel; ownerUserId: string | null },
+    root: { repository: string; repositoryId: string; commit: string }, checkout: string, rootToken: string): Promise<ReadyCopySubmodule[]> {
+    const { githubHttp, submoduleRepository, copies, compute } = this.deps;
+    if (!githubHttp || !submoduleRepository) return [];
+    const tokens = new Map([[root.repositoryId, rootToken]]);
+    let plan: SubmodulePlan;
+    try {
+      plan = await composeSubmodulePlan({ root,
+        level: (repository, commit) => copies.submoduleLevel(job.organizationId, repository, commit,
+          () => readSubmoduleLevel(githubHttp(tokens.get(repository.repositoryId)!), repository, commit)),
+        access: async repository => {
+          const found = await submoduleRepository(job.organizationId, project, repository).catch(() => null);
+          if (!found) return null;
+          tokens.set(found.repositoryId, found.token);
+          return found.repositoryId;
+        } });
+    } catch (error) {
+      this.deps.logger?.warn(`[cloud-v2] ready copy of project ${job.projectId} could not read ${root.repository}'s submodules (${code(error, "failed")})`);
+      return [{ path: ".gitmodules", fetched: false, reason: "GitHub could not be read" }];
+    }
+    const outcomes: ReadyCopySubmodule[] = [...plan.notices.map(reason => ({ path: ".gitmodules", fetched: false, reason })),
+      ...plan.skipped.map(entry => ({ path: entry.path, ...(entry.repository ? { repository: entry.repository } : {}), fetched: false, reason: entry.reason }))];
+    const failed: string[] = [];
+    for (const entry of plan.submodules) {
+      const summary = { path: entry.path, repository: entry.repository, repositoryId: entry.repositoryId, commit: entry.commit };
+      if (failed.some(parent => entry.path.startsWith(`${parent}/`))) { outcomes.push({ ...summary, fetched: false, reason: "its parent submodule was not fetched" }); failed.push(entry.path); continue; }
+      const header = `Authorization: Basic ${Buffer.from(`x-access-token:${tokens.get(entry.repositoryId)!}`).toString("base64")}\n`;
+      const fetched = await compute.execLong(machineId, asZeros(submoduleFetchLines(checkout, entry)), 300, header).catch(() => null);
+      if (fetched && fetched.exitCode === 0 && !fetched.timedOut && fetched.stdout.includes(SUBMODULE_FETCHED)) outcomes.push({ ...summary, fetched: true });
+      else { outcomes.push({ ...summary, fetched: false, reason: "could not be fetched" }); failed.push(entry.path); }
+    }
+    return outcomes;
   }
 
   private async ready(machineId: string): Promise<void> {

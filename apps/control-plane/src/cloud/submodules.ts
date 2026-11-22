@@ -9,8 +9,10 @@
 // them. The tree is composed per request, and a level is read only after the
 // caller's access to that repository is checked.
 import { createHash } from "node:crypto";
+import { posix } from "node:path";
 import { z } from "zod";
 import { HttpError } from "../authz.js";
+import type { Tx } from "../db.js";
 
 export const SUBMODULE_LIMITS = { maxDepth: 3, maxCount: 32 } as const;
 export const MAX_GITMODULES_BYTES = 64 * 1024;
@@ -299,4 +301,58 @@ export async function composeSubmodulePlan(input: {
     }
   }
   return plan;
+}
+
+/** A level, remembered once per organization, repository and commit; `read` runs only on a miss. */
+export async function rememberedSubmoduleLevel(tx: (work: (tx: Tx) => Promise<unknown>) => Promise<unknown>, organizationId: string,
+  repository: { repository: string; repositoryId: string }, commit: string, read: () => Promise<SubmoduleLevel>): Promise<SubmoduleLevel> {
+  const stored = await tx(db => db.query<{ level: SubmoduleLevel }>("SELECT level FROM cloud_submodule_levels WHERE org_id=$1 AND repository_id=$2 AND commit=$3",
+    [organizationId, repository.repositoryId, commit])) as { rows: { level: SubmoduleLevel }[] };
+  if (stored.rows[0]) return stored.rows[0].level;
+  const level = await read();
+  await tx(db => db.query(`INSERT INTO cloud_submodule_levels (org_id, repository_id, commit, level) VALUES ($1,$2,$3,$4)
+    ON CONFLICT (org_id, repository_id, commit) DO NOTHING`, [organizationId, repository.repositoryId, commit, JSON.stringify(level)]));
+  return level;
+}
+
+/** Marks a submodule the build or worker fetched; anything else printed is a refusal or Git's failure. */
+export const SUBMODULE_FETCHED = "zeros-submodule-fetched";
+
+const quote = (value: string) => `'${value.replace(/'/g, "'\\''")}'`;
+
+/**
+ * Fetches one planned submodule into `checkout` (the top repository's work tree), as Local does: no `git
+ * submodule`, no `submodule.*` config, a hardened clone over HTTPS of exactly `https://github.com/<repo>.git`
+ * with the token in a per-command header read from standard input (never saved, never an SSH key), its Git
+ * directory under the top repository's `.git` keyed by digest, then a detached checkout of the gitlink commit.
+ * Refused unless the target is a real, empty directory inside the checkout and its Git directory is new.
+ */
+export function submoduleFetchLines(checkout: string, entry: Pick<SubmodulePlanEntry, "path" | "repository" | "commit" | "gitDir">): string[] {
+  if (submodulePathProblem(entry.path) || !/^[a-z0-9_.-]{1,100}\/[a-z0-9_.-]{1,100}$/.test(entry.repository)
+    || !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(entry.commit) || !/^modules\/[0-9a-f]{64}(?:\/modules\/[0-9a-f]{64}){0,2}$/.test(entry.gitDir))
+    throw new Error("Invalid submodule");
+  const target = `${checkout}/${entry.path}`, gitDir = `${checkout}/.git/${entry.gitDir}`, q = quote;
+  const git = "git -c protocol.allow=never -c protocol.https.allow=always -c core.hooksPath=/dev/null --config-env=http.extraHeader=ZEROS_GITHUB_AUTH_HEADER";
+  return [
+    "set -eu", "IFS= read -r ZEROS_GITHUB_AUTH_HEADER", "export ZEROS_GITHUB_AUTH_HEADER",
+    "refused() { echo \"zeros-submodule-refused $1\"; exit 3; }",
+    `root=$(cd -- ${q(checkout)} && pwd -P) || refused checkout`,
+    // Every component a real directory under the checkout (a symlink resolves elsewhere), and the folder empty.
+    `[ "$(cd -- ${q(target)} 2>/dev/null && pwd -P)" = "$root"/${q(entry.path)} ] || refused target`,
+    `parent=${q(posix.dirname(gitDir))}`,
+    // Already there (a rebuild forked from the previous copy, or a fork whose base moved): only when its work
+    // tree's Git directory is exactly the planned one; then it moves to the planned commit below.
+    `if [ -e ${q(`${target}/.git`)} ] || [ -e ${q(gitDir)} ] || [ -L ${q(gitDir)} ]; then`,
+    `  [ -f ${q(`${target}/.git`)} ] && [ ! -L ${q(`${target}/.git`)} ] && [ -d ${q(gitDir)} ] && [ ! -L ${q(gitDir)} ] || refused existing`,
+    `  [ "$(git -C ${q(target)} rev-parse --absolute-git-dir 2>/dev/null)" = "$(cd -- ${q(gitDir)} && pwd -P)" ] || refused existing`,
+    "else",
+    `  [ -z "$(ls -A -- ${q(target)})" ] || refused target`,
+    "  mkdir -p -- \"$parent\"",
+    `  [ ! -L "$parent" ] && [ "$(cd -- "$parent" && pwd -P)" = "$root"/.git/${q(posix.dirname(entry.gitDir))} ] || refused gitdir`,
+    `  ${git} clone --quiet --no-checkout --no-recurse-submodules --template= --separate-git-dir=${q(gitDir)} -- ${q(`https://github.com/${entry.repository}.git`)} ${q(target)}`,
+    "fi",
+    `git -C ${q(target)} cat-file -e ${entry.commit}^{commit} 2>/dev/null || ${git} -C ${q(target)} fetch --quiet --no-recurse-submodules origin ${entry.commit}`,
+    `git -C ${q(target)} -c advice.detachedHead=false -c core.hooksPath=/dev/null checkout --quiet --detach ${entry.commit}`,
+    `echo ${SUBMODULE_FETCHED}`,
+  ];
 }

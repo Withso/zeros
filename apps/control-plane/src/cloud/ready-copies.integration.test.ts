@@ -2,6 +2,7 @@ import { createHash, generateKeyPairSync, randomBytes, randomUUID } from "node:c
 import pg from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { resetMigratedTestDatabase } from "../test-database.js";
+import { HttpError } from "../authz.js";
 import { grantTestPro } from "../test-pro.js";
 import { FakeBoat } from "./__fixtures__/boat-fake.js";
 import { CloudV2ComputerBuilder, CloudV2Computers, type CloudV2ComputerOptions } from "./computer.js";
@@ -659,6 +660,95 @@ d("cloud v2 ready copies", () => {
     expect(await forks().prepare(await workspace())).toEqual({ waitMs: 3_000 });
     const older = await workspace({ createdAt: new Date(clock - 91_000).toISOString() });
     expect(await forks().prepare(older)).toBeNull();
+  });
+
+  describe("submodules (C4)", () => {
+    const COMMIT = "c".repeat(40), LIB = "a".repeat(40);
+    /** GitHub contents for the project's repository at the clone's commit, and a submodule repository at its gitlink. */
+    function github(fail = false) {
+      const requests: { token: string; path: string }[] = [];
+      const files: Record<string, Record<string, { type: string; [key: string]: unknown }>> = {
+        [`${repositoryId("withso/zeros")}:${COMMIT}`]: {
+          ".gitmodules": { type: "file", encoding: "base64", size: 120, content: Buffer.from(
+            "[submodule \"lib\"]\n\tpath = lib\n\turl = https://github.com/acme/lib\n[submodule \"secret\"]\n\tpath = secret\n\turl = git@github.com:acme/secret.git\n").toString("base64") },
+          "lib": { type: "submodule", sha: LIB, path: "lib" }, "secret": { type: "submodule", sha: "b".repeat(40), path: "secret" } },
+        [`501:${LIB}`]: {},
+      };
+      const githubHttp = (token: string) => ({ async json<T>(path: string, schema: import("zod").ZodType<T>): Promise<T> {
+        requests.push({ token, path });
+        if (fail) throw new HttpError(503, "github_unavailable", "GitHub could not be reached.");
+        const match = /^\/repositories\/(\d+)\/contents\/(.+)\?ref=([0-9a-f]+)$/.exec(path)!;
+        const found = files[`${match[1]}:${match[3]}`]?.[decodeURIComponent(match[2]!)];
+        if (!found) throw new HttpError(404, "not_found", "Not found");
+        return schema.parse(found);
+      } });
+      const lookups: string[] = [];
+      const submoduleRepository = async (_org: string, _project: unknown, repository: string) => {
+        lookups.push(repository);
+        return repository === "acme/lib" ? { repositoryId: "501", token: "synthetic-lib-token" } : null;
+      };
+      return { requests, lookups, deps: { githubHttp, submoduleRepository } };
+    }
+    const fetchSubmodulesOn = () => pool.query("UPDATE cloud_project_repositories SET fetch_submodules=true WHERE project_id=$1", [zeros]);
+
+    it("fetches each readable submodule before setup with its own token, names the rest, and every fork inherits them", async () => {
+      await fetchSubmodulesOn();
+      await liveBase();
+      const gh = github();
+      await copyBuilder(gh.deps).tick();
+      const copy = await row(1);
+      expect(copy.state).toBe("ready");
+      expect(copy.result![0]!.submodules).toEqual([
+        { path: "secret", repository: "acme/secret", fetched: false, reason: "no access" },
+        { path: "lib", repository: "acme/lib", repositoryId: "501", commit: LIB, fetched: true }]);
+      const own = boat.commands.filter(command => command.machineId === copy.machineId);
+      const fetch = own.findIndex(command => command.command.includes("zeros-submodule-fetched"));
+      expect(fetch).toBeGreaterThan(own.findIndex(command => command.command.includes(" clone ")));
+      expect(fetch).toBeLessThan(own.findIndex(command => command.command.includes("pnpm install")));
+      // Over HTTPS with the submodule's own token, though .gitmodules named it over SSH for the other.
+      expect(own[fetch]!.command).toContain("https://github.com/acme/lib.git");
+      expect(own[fetch]!.input).toBe(`Authorization: Basic ${Buffer.from("x-access-token:synthetic-lib-token").toString("base64")}\n`);
+      expect(own.some(command => command.command.includes("acme/secret"))).toBe(false);
+      // Levels read with each repository's own token: the project's from its clone, the submodule's from its lookup.
+      expect(gh.requests.map(request => [request.token, request.path.split("?")[0]])).toEqual([
+        ["synthetic-clone-token", `/repositories/${repositoryId("withso/zeros")}/contents/.gitmodules`],
+        ["synthetic-clone-token", `/repositories/${repositoryId("withso/zeros")}/contents/lib`],
+        ["synthetic-clone-token", `/repositories/${repositoryId("withso/zeros")}/contents/secret`],
+        ["synthetic-lib-token", "/repositories/501/contents/.gitmodules"]]);
+      expect(boat.machine(copy.machineId!)!.files.get("/home/user/zeros/zeros/lib/.git")).toMatch(/^gitdir: \/home\/user\/zeros\/zeros\/\.git\/modules\/[0-9a-f]{64}$/);
+      const forked = await forks().prepare(await workspace()) as { sandboxId: string };
+      expect(boat.machine(forked.sandboxId)!.files.get("/home/user/zeros/zeros/lib/.git")).toBe(boat.machine(copy.machineId!)!.files.get("/home/user/zeros/zeros/lib/.git"));
+      // A rebuild reads its levels from what is remembered.
+      const before = gh.requests.length;
+      await pool.query("UPDATE cloud_project_repositories SET setup='pnpm install --frozen-lockfile' WHERE project_id=$1", [zeros]);
+      await copyBuilder(gh.deps).reconcile(org, zeros, "setup_changed");
+      await copyBuilder(gh.deps).tick();
+      const rebuilt = await row(2);
+      expect(rebuilt).toMatchObject({ state: "ready", builtFromBase: `copy:${copy.id}` });
+      // Forked from the previous copy, the submodule is already there and is kept at the planned commit.
+      expect(rebuilt.result![0]!.submodules!.find(entry => entry.path === "lib")).toMatchObject({ fetched: true });
+      expect(gh.requests.length).toBe(before);
+    });
+
+    it("makes no GitHub request and no lookup with the setting off", async () => {
+      await liveBase();
+      const gh = github();
+      await copyBuilder(gh.deps).tick();
+      expect((await row(1)).state).toBe("ready");
+      expect((await row(1)).result![0]!.submodules).toBeUndefined();
+      expect(gh.requests).toEqual([]);
+      expect(gh.lookups).toEqual([]);
+    });
+
+    it("still builds when GitHub can't be read, and says so", async () => {
+      await fetchSubmodulesOn();
+      await liveBase();
+      await copyBuilder(github(true).deps).tick();
+      const copy = await row(1);
+      expect(copy.state).toBe("ready");
+      expect(copy.result![0]!.submodules).toEqual([{ path: ".gitmodules", fetched: false, reason: "GitHub could not be read" }]);
+      expect(warnings).toContainEqual(expect.stringMatching(/could not read withso\/zeros's submodules/));
+    });
   });
 
   it("stores why each generation ran, and rebuilds one project's copy when its setup, repositories or secrets are saved", async () => {

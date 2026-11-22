@@ -30,7 +30,8 @@ import { CloudV2ReadyCopies, CloudV2ReadyCopyBuilder, CloudV2ReadyCopyForks } fr
 import { CloudV2ReadyCopySecrets } from "./ready-copy-secrets.js";
 import { CloudRepositoryLevels } from "./repository-levels.js";
 import { CloudProjects, migrateProjects } from "./projects.js";
-import { organizationCloneToken } from "./organization-github.js";
+import { organizationCloneToken, organizationSubmoduleRepository } from "./organization-github.js";
+import { CloudGithubHttp } from "./github-http.js";
 import { createCloudGithubServices } from "./github-composition.js";
 import { CLOUD_V2_READY_CHANNEL, CLOUD_V2_BOOT_CHANNEL, WorkerReadySignals, notifyCloudV2WorkerBoot } from "./worker-ready.js";
 import { hydrateCloudRepository, type CloudSourceProof, type CloudSourceTarget } from "./source-authority.js";
@@ -691,6 +692,17 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
     cloneToken: copyCloneToken,
     ...(repositoryLevels ? { sharedCloneToken: organizationCloneToken({ levels: repositoryLevels, config: config.github ?? null }) } : {}),
     ...(readyCopySecrets ? { secrets: (organizationId: string, projectId: string) => readyCopySecrets.open(organizationId, projectId) } : {}),
+    // Submodules (C4): each level read with the token of its own repository, each repository reached as the project's clones are.
+    githubHttp: (token: string) => new CloudGithubHttp({ apiBaseUrl: config.github?.apiBaseUrl ?? "https://api.github.com", token, assertCurrent: async () => {} }),
+    submoduleRepository: async (organizationId: string, project: { level: "organization" | "personal"; ownerUserId: string | null }, repository: string) => {
+      if (project.level === "personal") {
+        const identity = await resolveMemberRepository(organizationId, project.ownerUserId!, repository).catch(() => null);
+        if (!identity) return null;
+        const target = { repository: identity.repository, repositoryId: identity.repositoryId };
+        return { repositoryId: identity.repositoryId, token: await copyCloneToken(organizationId, project.ownerUserId!, target) };
+      }
+      return repositoryLevels ? organizationSubmoduleRepository({ levels: repositoryLevels, config: config.github ?? null })(organizationId, repository) : null;
+    },
     logger: console,
   }) : null;
   const readyCopyForks = roles.lifecycle && readyCopies ? new CloudV2ReadyCopyForks({
