@@ -33,6 +33,8 @@ import {
   useWorkspaceStore,
   type ChatThread,
 } from "../../state/store";
+import { workbenchScopeForFolder } from "../../state/workspace-store";
+import { chatIdsHostedBy } from "../workbench/tab-model";
 import {
   spawnDefaultChatForWorkspace,
   spawnNewChatTab,
@@ -279,6 +281,10 @@ export function ConversationPaneLayout({
   // order). Visible = live tabs, history = archived (newest first).
   const layoutFolder =
     readOnly && workspace ? workspace.path : activeWorkspacePath;
+  // Side chats open as Workbench tabs, so their chat column never lists them.
+  const workbenchTabs = useWorkspaceStore((state) =>
+    layoutFolder ? state.workbenchByScope[workbenchScopeForFolder(layoutFolder)]?.tabs : undefined);
+  const hostedChatIds = useMemo(() => chatIdsHostedBy(workbenchTabs), [workbenchTabs]);
   const allChats = useMemo(() => {
     if (!layoutFolder) return EMPTY_CHATS;
     return chats
@@ -286,10 +292,10 @@ export function ConversationPaneLayout({
         readOnly && workspace
           ? c.kind !== "terminal" &&
             workspaceOwnsFolder(workspace, c.folder, projects)
-          : c.folder === layoutFolder,
+          : c.folder === layoutFolder && !hostedChatIds.has(c.id),
       )
       .sort((a, b) => a.createdAt - b.createdAt);
-  }, [layoutFolder, chats, readOnly, workspace, projects]);
+  }, [layoutFolder, chats, readOnly, workspace, projects, hostedChatIds]);
 
   // A closed chat may be previewed without reopening it or changing its
   // durable archive flag. Empty history never manufactures an Untitled chat.
@@ -343,7 +349,8 @@ export function ConversationPaneLayout({
       return;
     }
     const selectionValid =
-      activeChatId !== null && visibleChats.some((c) => c.id === activeChatId);
+      activeChatId !== null &&
+      (visibleChats.some((c) => c.id === activeChatId) || hostedChatIds.has(activeChatId));
     if (!selectionValid) {
       const restoreId =
         selectChatToRestoreForFolder(
@@ -364,6 +371,7 @@ export function ConversationPaneLayout({
     pendingWorkspaceValidationFolder,
     sessions,
     dispatch,
+    hostedChatIds,
   ]);
 
   const layout = usePaneLayout(layoutFolder);

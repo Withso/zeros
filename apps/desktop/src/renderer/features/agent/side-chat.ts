@@ -2,7 +2,8 @@
 // branches there, and the source transcript through that message travels
 // hidden in its first prompt; a blank one offers Add chat transcripts.
 
-import type { ChatThread } from "../../state/store";
+import type { Action, ChatThread } from "../../state/store";
+import { requestWorkbenchReveal } from "../../shell/workbench/workbench-visibility-controller";
 import { useWorkspaceStore } from "../../state/store";
 import { threadToRow } from "../../state/chat-row-wire";
 import { toast } from "@/renderer/shared/ui/primitives/elements";
@@ -121,6 +122,12 @@ export function createSideChat(source: ChatThread, branched: boolean, now = Date
   }
   const { sourceChatId, ...child } = createChildChat(source, undefined, now);
   return { ...(branched ? { ...child, sourceChatId } : child), title: SIDE_CHAT_TITLE };
+}
+
+/** Open a side chat as a focused tab in its workspace's Workbench. */
+export function publishSideChat(dispatch: (action: Action) => void, chat: ChatThread): void {
+  dispatch({ type: "OPEN_SIDE_CHAT", chat });
+  requestWorkbenchReveal();
 }
 
 export function canOpenSideChat(source: ChatThread | null | undefined): source is ChatThread {

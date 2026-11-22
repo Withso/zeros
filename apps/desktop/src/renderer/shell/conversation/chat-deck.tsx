@@ -21,6 +21,8 @@ import {
 } from "../../state/store";
 import { DEFAULT_PANE_LAYOUT, paneForChat } from "../../state/chat-panes";
 import { useChatPanesStore } from "../../state/chat-panes-store";
+import { workbenchScopeForFolder } from "../../state/workspace-store";
+import { chatIdsHostedBy } from "../workbench/tab-model";
 import { ChatView } from "./chat-view";
 import { usePanePortalsStore } from "./pane-portal-store";
 import { useRetainedViewKeySet } from "../use-retained-view-keys";
@@ -71,10 +73,16 @@ export function ChatDeck({
       ),
     [allChats, workspaceOwners, projects],
   );
+  // A side chat's Workbench tab owns its only view; never mount it twice.
+  const workbenchByScope = useWorkspaceStore((state) => state.workbenchByScope);
   const chats = useMemo(
     () =>
-      allChats.filter((chat) => !chat.archived || !!historyOwners.get(chat.id)),
-    [allChats, historyOwners],
+      allChats.filter(
+        (chat) =>
+          (!chat.archived || !!historyOwners.get(chat.id)) &&
+          !chatIdsHostedBy(workbenchByScope[workbenchScopeForFolder(chat.folder)]?.tabs).has(chat.id),
+      ),
+    [allChats, historyOwners, workbenchByScope],
   );
   const activeFolder = useWorkspaceStore(selectActiveFolder);
   const activePage = useActivePage();

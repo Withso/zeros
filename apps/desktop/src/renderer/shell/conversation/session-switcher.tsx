@@ -21,7 +21,7 @@ import {
   DropdownMenuTrigger,
 } from "../../shared/ui/primitives/dropdown-menu";
 import { addChildSession, canAddChildSession } from "../../features/agent/add-child-session";
-import { canOpenSideChat, openSideChat } from "../../features/agent/side-chat";
+import { canOpenSideChat, openSideChat, publishSideChat } from "../../features/agent/side-chat";
 import { spawnNewChatTab } from "../../state/spawn-default-chat";
 import { editChat } from "../../state/cloud-chat-edits";
 import { openSession } from "../../state/open-session";
@@ -420,7 +420,7 @@ export function SessionActionsMenu({ folder, readOnly = false }: { folder: strin
         {canOpenSideChat(parent) && (
           <DropdownMenuItem
             data-session-side-chat=""
-            onSelect={() => openSideChat(parent, null, { publishChat: (chat) => dispatch({ type: "ADD_CHAT", chat }) })}
+            onSelect={() => openSideChat(parent, null, { publishChat: (chat) => publishSideChat(dispatch, chat) })}
           >
             <MessageSquarePlus className="size-4" strokeWidth={1.5} />
             New side chat

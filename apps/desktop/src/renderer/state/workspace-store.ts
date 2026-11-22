@@ -27,6 +27,8 @@ import { setSetting } from "../platform/settings";
 import { ACTIVE_CHAT_KEY } from "./chats-local-cache";
 import {
   blankFixedFilesTab,
+  chatIdsHostedBy,
+  createSideChatTab,
   loadScopes,
   saveScopes,
   defaultScopeFor,
@@ -221,6 +223,8 @@ export type Action =
       recordWorkspaceActivity?: boolean;
     }
   | { type: "SET_ACTIVE_CHAT"; id: string | null }
+  /** Publish a side chat and its Workbench tab, focused, in one transition. */
+  | { type: "OPEN_SIDE_CHAT"; chat: ChatThread }
   | { type: "DELETE_CHAT"; id: string }
   | { type: "ARCHIVE_CHAT"; id: string }
   | { type: "UNARCHIVE_CHAT"; id: string }
@@ -703,6 +707,25 @@ export function selectWorkbench(s: WorkspaceState): WorkbenchScopeState {
   return s.workbenchByScope[scope] ?? defaultScopeFor(scope);
 }
 
+/** Chats shown as side chat tabs in a workspace's Workbench, not its chat column. */
+export function workbenchHostedChatIds(s: WorkspaceState, folder: string | null): ReadonlySet<string> {
+  return chatIdsHostedBy(s.workbenchByScope[workbenchScopeForFolder(folder)]?.tabs);
+}
+
+/** Bring a side chat's Workbench tab forward when the chat is selected. */
+function activateHostingTab(state: WorkspaceState, chatId: string | null): WorkspaceState {
+  const folder = chatId ? state.chats.find((chat) => chat.id === chatId)?.folder : undefined;
+  if (!folder) return state;
+  const scope = workbenchScopeForFolder(folder);
+  const cur = state.workbenchByScope[scope];
+  const host = cur?.tabs.find((tab) => tab.type === "chat" && tab.chatId === chatId);
+  if (!cur || !host || cur.activeId === host.id) return state;
+  return {
+    ...state,
+    workbenchByScope: setWorkbenchScope(state.workbenchByScope, scope, { ...cur, activeId: host.id }),
+  };
+}
+
 /** Remove one or more tabs while preserving the close-neighbor policy: if the
  *  active tab is removed, prefer the first survivor to its right, then the
  *  nearest survivor to its left. Shared by ordinary close, invariant repair,
@@ -756,7 +779,7 @@ function removeConversationBrowserTabs(
   for (const [scope, value] of Object.entries(record)) {
     const cleaned = removeWorkbenchTabs(
       value,
-      (tab) => tab.browserConversationId === conversationId,
+      (tab) => tab.browserConversationId === conversationId || tab.chatId === conversationId,
     );
     if (cleaned === value) continue;
     if (next === record) next = { ...record };
@@ -772,7 +795,7 @@ function retainBrowserTabsForConversations(
   let next = record;
   for (const [scope, value] of Object.entries(record)) {
     const cleaned = removeWorkbenchTabs(value, (tab) => {
-      const owner = tab.browserConversationId;
+      const owner = tab.browserConversationId ?? tab.chatId;
       return owner ? !conversationIds.has(owner) : false;
     });
     if (cleaned === value) continue;
@@ -1370,11 +1393,30 @@ function reducer(state: WorkspaceState, action: Action): WorkspaceState {
       // Activating an existing chat also clears the scope override;
       // the user left the new-agent surface. Only the empty case
       // preserves the override so "+" on a workspace flows through.
-      return {
+      return activateHostingTab({
         ...state,
         activeChatId: action.id,
         newAgentFolder: action.id === null ? state.newAgentFolder : null,
+      }, action.id);
+    case "OPEN_SIDE_CHAT": {
+      const scope = workbenchScopeForFolder(action.chat.folder);
+      const cur = state.workbenchByScope[scope] ?? defaultScopeFor(scope);
+      const existing = cur.tabs.find((tab) => tab.type === "chat" && tab.chatId === action.chat.id);
+      const tab = existing ?? createSideChatTab(action.chat.id, action.chat.title || "Side chat");
+      return {
+        ...state,
+        chats: state.chats.some((chat) => chat.id === action.chat.id)
+          ? state.chats
+          : [...state.chats, action.chat],
+        activeChatId: action.chat.id,
+        newAgentFolder: null,
+        workbenchByScope: setWorkbenchScope(state.workbenchByScope, scope, {
+          ...cur,
+          tabs: existing ? cur.tabs : orderWorkbenchTabs([...cur.tabs, tab]),
+          activeId: tab.id,
+        }),
       };
+    }
     case "DELETE_CHAT": {
       const deleted = state.chats.find((c) => c.id === action.id);
       const next = state.chats.filter((c) => c.id !== action.id);
