@@ -21,6 +21,7 @@ import { CloudProviderError } from "./provider-error.js";
 import { asZeros, checkoutScript, shellQuote } from "./computer.js";
 import type { z } from "zod";
 import { SUBMODULE_FETCHED, composeSubmodulePlan, readSubmoduleLevel, rememberedSubmoduleLevel, submoduleFetchLines, type SubmoduleLevel, type SubmodulePlan } from "./submodules.js";
+import { copySubmodulesReadable } from "./workspace-submodules.js";
 import { installRuntimeCommand, type CloudV2Runtime } from "./runtime.js";
 import { cloudV2BoatSnapshotName, cloudV2SandboxName } from "./resource-names.js";
 import type { CloudSourceTarget } from "./source-authority.js";
@@ -76,7 +77,9 @@ export type ReadyCopyRepositoryResult = { repository: string; repositoryId: stri
   /** With "fetch submodules" on: each submodule the copy holds, and each it skipped and why. */
   submodules?: ReadyCopySubmodule[] };
 /** A submodule of a copy's repository. A create whose creator can't read a fetched one never forks the copy. */
-export type ReadyCopySubmodule = { path: string; repository?: string; repositoryId?: string; commit?: string; fetched: boolean; reason?: string };
+export type ReadyCopySubmodule = { path: string; repository?: string; repositoryId?: string; commit?: string;
+  /** Under the checkout's .git, where a fetched one keeps its Git directory. */
+  gitDir?: string; fetched: boolean; reason?: string };
 export type CloudV2ReadyCopy = {
   id: string; organizationId: string; projectId: string; generation: number; state: ReadyCopyState;
   idempotencyKey: string; machineId: string | null; machinePending: boolean; builtFromBase: string | null;
@@ -565,6 +568,12 @@ export class CloudV2ReadyCopies {
     return rows.map(row => [row.id ?? "", row.checkout]);
   }
 
+  /** Whether every submodule a copy fetched is one this workspace's creator was shown to read at create. */
+  async submodulesReadable(workspaceId: string, result: readonly ReadyCopyRepositoryResult[]): Promise<boolean> {
+    if (!result.some(entry => entry.submodules?.some(row => row.fetched))) return true;
+    return this.tx(tx => copySubmodulesReadable(tx, workspaceId, result));
+  }
+
   /** Each repository's requested base branch and checkout, for the fork's update. */
   async workspaceBases(workspaceId: string): Promise<{ repository: string; baseBranch: string; checkoutFolder: string | null; first: boolean }[]> {
     const { rows } = await this.tx(tx => tx.query<{ position: number; repository: string; base_branch: string; checkout: string | null }>(
@@ -1005,7 +1014,7 @@ export class CloudV2ReadyCopyBuilder {
       ...plan.skipped.map(entry => ({ path: entry.path, ...(entry.repository ? { repository: entry.repository } : {}), fetched: false, reason: entry.reason }))];
     const failed: string[] = [];
     for (const entry of plan.submodules) {
-      const summary = { path: entry.path, repository: entry.repository, repositoryId: entry.repositoryId, commit: entry.commit };
+      const summary = { path: entry.path, repository: entry.repository, repositoryId: entry.repositoryId, commit: entry.commit, gitDir: entry.gitDir };
       if (failed.some(parent => entry.path.startsWith(`${parent}/`))) { outcomes.push({ ...summary, fetched: false, reason: "its parent submodule was not fetched" }); failed.push(entry.path); continue; }
       const header = `Authorization: Basic ${Buffer.from(`x-access-token:${tokens.get(entry.repositoryId)!}`).toString("base64")}\n`;
       const fetched = await compute.execLong(machineId, asZeros(submoduleFetchLines(checkout, entry)), 300, header).catch(() => null);
@@ -1088,6 +1097,12 @@ export class CloudV2ReadyCopyForks<W extends ReadyCopyWorkspace = ReadyCopyWorks
     const layout = await copies.workspaceLayout(workspace.id);
     if (!ready.result || JSON.stringify(ready.result.map(entry => [entry.repositoryId, entry.checkoutFolder ?? null])) !== JSON.stringify(layout)) {
       this.deps.logger?.warn("[cloud-v2] ready copy laid out for another version of the project; cloning directly");
+      return null;
+    }
+    // A copy holds every submodule its build fetched, and whatever its setup made from them: only a creator
+    // shown at create to read each of them may have it. Anyone else's create clones directly.
+    if (!await copies.submodulesReadable(workspace.id, ready.result)) {
+      this.deps.logger?.warn("[cloud-v2] ready copy holds a submodule this workspace's creator can't read; cloning directly");
       return null;
     }
     const begun = await copies.beginFork(workspace.id, workspace.organizationId, ready.id, now);

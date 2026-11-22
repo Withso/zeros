@@ -136,6 +136,12 @@ export function createCloudWorkspaceOperations(deps: CloudV2RouteDeps) {
       const checked = await deps.projectAccess(input.organizationId, userId, project.repositories.map((entry, index) => ({
         repository: entry.repository, repositoryId: entry.repositoryId, baseBranch: branchFor(entry, index) })));
       if (runtimeCanary && runtimeCanary.repositoryId !== first.repositoryId) throw refuseRuntimeCanary();
+      // Bounded in time, never failing the create: the plan for each base commit, as this creator can read it.
+      const submodules = deps.projectSubmodules && project.repositories.some(entry => entry.fetchSubmodules)
+        ? await deps.projectSubmodules(input.organizationId, userId, project.id, checked.map((entry, position) => ({ position,
+          repository: project.repositories[position]!.repository, repositoryId: entry.repositoryId, baseCommit: entry.baseCommit,
+          fetchSubmodules: project.repositories[position]!.fetchSubmodules })))
+        : [];
       const executionRuntime = deps.actingUserDefault ? await deps.activeCreateRuntime?.(runtimeCanary) : undefined;
       if (deps.actingUserDefault && !executionRuntime) throw executionWorkerRequired();
       const id = randomUUID(), several = project.repositories.length > 1;
@@ -147,7 +153,7 @@ export function createCloudWorkspaceOperations(deps: CloudV2RouteDeps) {
         baseBranch: checked[0]!.baseBranch, computerBuildId: computer.buildId, sourceRepositoryId: first.repositoryId, projectId: project.id,
         repositories: checked.map((entry, index) => ({ repository: project.repositories[index]!.repository, repositoryId: entry.repositoryId,
           folder: folders[index]!, branch, baseBranch: entry.baseBranch, baseCommit: entry.baseCommit })),
-        checkoutFolder: `${folder}/${folders[0]}`, ...(several ? { folder } : {}),
+        checkoutFolder: `${folder}/${folders[0]}`, ...(several ? { folder } : {}), ...(submodules.length ? { submodules } : {}),
         ...(runtimeCanary ? { runtimeCanary } : {}), ...(executionRuntime ? { executionRuntime } : {}) });
     }
     // Without projects a create names its repository.

@@ -19,6 +19,9 @@ export const HISTORY_BATCH_FEATURE = "history-batch-v1";
 export const BEGIN_LEASE_FEATURE = "begin-lease-v1";
 /** A workspace of several repositories: config.workspace.root and .repositories, and a repository on GitHub token requests. */
 export const WORKSPACE_REPOSITORIES_FEATURE = "workspace-repositories-v1";
+/** "Fetch submodules" on a project repository: config.workspace.submodules, each fetched into its checkout read-only, and
+ * a submodule's repository on GitHub token requests. */
+export const WORKSPACE_SUBMODULES_FEATURE = "workspace-submodules-v1";
 export const CLOUD_V2_MAX_HISTORY_BATCH_FRAMES = 50;
 export const BOOT_TIMINGS_FEATURE = "boot-timings-v1";
 /** R2: the worker holds who may act from authority freshness instead of renewing each context. */
@@ -239,6 +242,15 @@ export const CloudV2ControlFrameSchema = z.discriminatedUnion("t", [
         /** Creator path: this repository's own pinned environment, seeded into its checkout. */
         environment: CloudWorkspaceEnvironmentSchema.optional(),
       }).strict()).min(2).max(10).optional(),
+      /** workspace-submodules-v1: the submodules to bring each repository's checkout to (position 0 is the first). The
+       * worker checks every field again; a submodule's token is read-only, so pushing from one is refused. */
+      submodules: z.array(z.object({
+        position: z.number().int().min(0).max(9),
+        path: z.string().min(1).max(1024),
+        repository: z.string().regex(/^[A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100}$/),
+        commit: z.string().regex(/^([0-9a-f]{40}|[0-9a-f]{64})$/),
+        gitDir: z.string().regex(/^modules\/[0-9a-f]{64}(\/modules\/[0-9a-f]{64}){0,2}$/),
+      }).strict()).min(1).max(320).optional(),
     }).strict(),
     agents: CloudV2AgentLoginsSchema,
   }).strict(),

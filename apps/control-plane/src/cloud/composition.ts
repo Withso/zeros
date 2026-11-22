@@ -31,7 +31,9 @@ import { CloudV2ReadyCopySecrets } from "./ready-copy-secrets.js";
 import { CloudRepositoryLevels } from "./repository-levels.js";
 import { CloudProjects, migrateProjects } from "./projects.js";
 import { organizationCloneToken, organizationSubmoduleRepository } from "./organization-github.js";
-import { CloudGithubHttp } from "./github-http.js";
+import { readSubmoduleLevel } from "./submodules.js";
+import { CloudGithubHttp, withGithubReadScope } from "./github-http.js";
+import { readOnlyToken, resolveWorkspaceSubmodules, workerSubmodules, workspaceRepositoryToken, workspaceSubmoduleSource, type WorkspaceSubmoduleRepositoryInput } from "./workspace-submodules.js";
 import { createCloudGithubServices } from "./github-composition.js";
 import { CLOUD_V2_READY_CHANNEL, CLOUD_V2_BOOT_CHANNEL, WorkerReadySignals, notifyCloudV2WorkerBoot } from "./worker-ready.js";
 import { hydrateCloudRepository, type CloudSourceProof, type CloudSourceTarget } from "./source-authority.js";
@@ -167,11 +169,8 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
   const environments = new CloudEnvironments(pool, keys, github.connections.authorizeRepositoryConfiguration.bind(github.connections));
   const githubToken = async (workspace: CloudV2Workspace, purpose: "git" | "gh" = "git", failedTokenSha256?: string, repository?: string) => {
     if (!repository || repository.toLowerCase() === workspace.repository.toLowerCase()) return github.workspaceToken(workspace, "user", purpose, failedTokenSha256);
-    // Another repository of a workspace of several: only one of its own sources, checked as its creator.
-    requireWorkspaceCreator(workspace);
-    const target = await withSystemTx(pool, tx => workspaceTokenSource(tx, workspace.id, repository));
-    if (!target) throw new HttpError(403, "github_repository_access_required", "This repository is not part of this workspace.");
-    return github.token({ organizationId: workspace.organizationId, userId: workspace.creatorUserId }, target, "user", purpose, () => authorizeSource(workspace), failedTokenSha256);
+    // Another repository of a workspace of several, checked as its creator, or a submodule it fetches (read-only).
+    return workspaceRepositoryToken(pool, github.token, workspace, repository, purpose, () => authorizeSource(workspace), failedTokenSha256);
   };
   const proxyBase = `${v2.apiUrl}${CLOUD_V2_PROXY_PREFIX}`;
   const computers = new CloudV2Computers(pool, lockPool, github.resolveRepository, github.resolveRecentRepository,
@@ -233,6 +232,27 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
     } } : {}),
   } : null;
   const source = github.source;
+  // A create's submodules: read with the creator's own GitHub, each repository's access checked as theirs.
+  const projectSubmodules = (organizationId: string, userId: string, projectId: string, repositories: readonly WorkspaceSubmoduleRepositoryInput[]) =>
+    withGithubReadScope(async () => {
+      const copy = await readyCopies!.forkable(organizationId, projectId, new Date());
+      let http: Promise<Parameters<typeof readSubmoduleLevel>[0]> | undefined;
+      const member = () => http ??= memberGithub(organizationId, userId).then(access => access.api.http);
+      const rows = await Promise.all(repositories.map(entry => {
+        const built = copy?.result?.[entry.position];
+        return resolveWorkspaceSubmodules({ ...entry, copy: built && built.repositoryId === entry.repositoryId
+          ? { commit: built.commit, submodules: built.submodules ?? [] } : null }, {
+          level: async (repository, commit) => readyCopies!.submoduleLevel(organizationId, repository, commit,
+            async () => readSubmoduleLevel(await member(), repository, commit)),
+          resolve: async repository => {
+            try { return (await resolveMemberRepository(organizationId, userId, repository)).repositoryId; }
+            catch (error) { if (error instanceof HttpError && [403, 404].includes(error.status)) return null; throw error; }
+          },
+          readable: target => source.targets(organizationId, userId, [target], false, { parallel: true }),
+        });
+      }));
+      return rows.flat();
+    });
   const authorizeRepository = async (org: string, user: string, repository: string) => {
     await source.repository(org, user, repository);
   };
@@ -264,11 +284,16 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
         await check(tx);
         // The workspace's first repository, or the one named, which must be one of its own.
         const row = await workspaceTokenSource(tx, context.workspace_id, repository ?? null);
-        if (!row) throw new HttpError(409, "actor_changed", "Execution source changed");
-        return row;
+        if (row) return { ...row, submodule: false };
+        // Or a submodule it fetches, read-only and for Git alone.
+        const submodule = repository && purpose === "git" ? await workspaceSubmoduleSource(tx, context.workspace_id, repository) : null;
+        if (!submodule) throw new HttpError(409, "actor_changed", "Execution source changed");
+        return { ...submodule, submodule: true };
       });
       await check();
-      return github.token({ organizationId: context.org_id, userId: context.user_id! }, target, "user", purpose, () => check(), failed);
+      const scope = { organizationId: context.org_id, userId: context.user_id! }, { submodule, ...repositoryTarget } = target;
+      return submodule ? readOnlyToken(await github.token(scope, repositoryTarget, "read", "sync", () => check(), failed))
+        : github.token(scope, repositoryTarget, "user", purpose, () => check(), failed);
     },
     ...(mcp ? { mcpAuthorization: async (context, check, id, force) => {
       const { workspace } = await execution.workspace(context.workspace_id, context.user_id!);
@@ -333,6 +358,7 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
               }) : null;
             const localCommandsEnabled = v2.promptOutbox && commandsAllowed;
             const layout = await workerRepositories(tx, workspace, { forked: await forkedFromCopy(workspace.id) });
+            const submodules = await workerSubmodules(tx, workspace.id);
             return { t: "config", actingUser: 1, bootstrapContextId, agents: {}, ...availability?.presentation, gitIdentity,
               gitIdentitySource: creatorUserId ? "creator" : "actor",
               loginRevision: availability?.loginRevision ?? workspace.loginRevision ?? "0",
@@ -341,7 +367,7 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
               workspace: { id: workspace.id, organizationId: workspace.organizationId, repository: workspace.repository,
                 checkoutPath: workspaceCheckoutPath(workspace), branch: workspace.branch, baseBranch: workspace.baseBranch,
                 github: { ...target, previousRepositories: [workspace.repository] }, ...(setup ?? layout.firstSetup ?? {}), ...(baseCommit ? { baseCommit } : {}),
-                ...repositoriesConfig(layout, { ...target, previousRepositories: [workspace.repository] }) } } satisfies ConfigFrame;
+                ...repositoriesConfig(layout, { ...target, previousRepositories: [workspace.repository] }), ...submodules } } satisfies ConfigFrame;
           }, { serializable: true }));
         } catch (error) {
           if (!(error && typeof error === "object" && "code" in error && error.code === "40001") || attempt === 2) throw error;
@@ -359,8 +385,9 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
     const [access, setup] = await Promise.all([github.workerConfiguration(workspace), github.workspaceSetup(workspace, computers)]);
     const { repositoryBinding } = access;
     const forked = await forkedFromCopy(workspace.id);
-    const { selectedLogins, baseCommit, environment, mcpServers, layout, repositoryEnvironments } = await withSystemTx(pool, async tx => ({
+    const { selectedLogins, baseCommit, environment, mcpServers, layout, repositoryEnvironments, submodules } = await withSystemTx(pool, async tx => ({
       layout: await workerRepositories(tx, workspace, { forked }),
+      submodules: await workerSubmodules(tx, workspace.id),
       // Creator path: each later repository's own pinned environment.
       repositoryEnvironments: await environments.resolveRepositories(workspace, tx),
       selectedLogins: await logins.all(workspace.creatorUserId, workspace.organizationId, tx),
@@ -387,6 +414,7 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
         ...(setup ?? layout.firstSetup ?? {}),
         ...(baseCommit ? { baseCommit } : {}),
         ...repositoriesConfig(layout, repositoryBinding, repositoryEnvironments),
+        ...submodules,
       },
       agents,
       ...(environment ? { environment } : {}),
@@ -408,6 +436,7 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
     ...(v2.asyncCreate !== false ? { asyncCreate: () => Date.now() >= asyncCreateFrom } : {}),
     installedRepositories: organizationId => store.installedRepositories(organizationId),
     ...(projects && projectRoutes ? { projects, resolveMemberRepository, projectRoutes, projectAccess: github.projectAccess } : {}),
+    ...(projects && readyCopies ? { projectSubmodules } : {}),
     ...(readyCopies ? { readyCopies: { status: (organizationId: string, viewer?: string | null) => readyCopies.status(organizationId, viewer ?? null),
       failures: (organizationId: string) => readyCopies.failureSummaries(organizationId, new Date()),
       changed: async (organizationId: string, projectId: string, change: "project_created" | "repositories_changed" | "setup_changed" | "submodules_changed" | "branch_changed") => {

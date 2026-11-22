@@ -19,6 +19,8 @@ import { CloudProjects } from "./projects.js";
 import { scheduleCloudDeletion } from "./deletion.js";
 import { withSystemTx } from "../db.js";
 import { otherRepositories, workerRepositories, workspaceTokenSource } from "./workspace-repositories.js";
+import { insertWorkspaceSubmodules, workerSubmodules, workspaceSubmoduleNotice, workspaceSubmoduleSource } from "./workspace-submodules.js";
+import { submoduleGitDirName } from "./submodules.js";
 import { CloudGithubPrStore } from "./github-pr-store.js";
 import { hashCloudV2Token } from "./tokens.js";
 
@@ -691,6 +693,31 @@ d("cloud v2 ready copies", () => {
       return { requests, lookups, deps: { githubHttp, submoduleRepository } };
     }
     const fetchSubmodulesOn = () => pool.query("UPDATE cloud_project_repositories SET fetch_submodules=true WHERE project_id=$1", [zeros]);
+    /** acme/lib as a create writes it for a creator who can read it. */
+    const readable = (commit: string) => ({ position: 0, path: "lib", status: "fetch" as const, repository: "acme/lib", repositoryId: "501", commit,
+      gitDir: `modules/${submoduleGitDirName("lib")}` });
+
+    it("forks a copy holding a submodule only for a creator shown at create to read it; anyone else's create clones directly", async () => {
+      await fetchSubmodulesOn();
+      await liveBase();
+      await copyBuilder(github().deps).tick();
+      const copy = await row(1);
+      const forksOf = () => boat.calls.filter(call => call.op === "fork" && call.args[0] === copy.machineId).length;
+      // The member who can't read acme/lib: their machine never descends from the copy.
+      const outsider = await workspace();
+      await withSystemTx(pool, tx => insertWorkspaceSubmodules(tx, outsider.id,
+        [{ position: 0, path: "lib", status: "skipped", repository: "acme/lib", repositoryId: "501", reason: "no access" }]));
+      expect(await forks().prepare(outsider)).toBeNull();
+      // A workspace with no rows (created with the setting off, or before it) is no reader either.
+      expect(await forks().prepare(await workspace())).toBeNull();
+      expect(forksOf()).toBe(0);
+      expect(warnings.filter(line => line.includes("submodule this workspace's creator can't read"))).toHaveLength(2);
+      // A member who can read everything the copy holds still forks it.
+      const reader = await workspace();
+      await withSystemTx(pool, tx => insertWorkspaceSubmodules(tx, reader.id, [readable(LIB)]));
+      expect(await forks().prepare(reader)).toMatchObject({ sandboxId: expect.any(String) });
+      expect(forksOf()).toBe(1);
+    });
 
     it("fetches each readable submodule before setup with its own token, names the rest, and every fork inherits them", async () => {
       await fetchSubmodulesOn();
@@ -701,7 +728,7 @@ d("cloud v2 ready copies", () => {
       expect(copy.state).toBe("ready");
       expect(copy.result![0]!.submodules).toEqual([
         { path: "secret", repository: "acme/secret", fetched: false, reason: "no access" },
-        { path: "lib", repository: "acme/lib", repositoryId: "501", commit: LIB, fetched: true }]);
+        { path: "lib", repository: "acme/lib", repositoryId: "501", commit: LIB, gitDir: `modules/${submoduleGitDirName("lib")}`, fetched: true }]);
       const own = boat.commands.filter(command => command.machineId === copy.machineId);
       const fetch = own.findIndex(command => command.command.includes("zeros-submodule-fetched"));
       expect(fetch).toBeGreaterThan(own.findIndex(command => command.command.includes(" clone ")));
@@ -717,7 +744,9 @@ d("cloud v2 ready copies", () => {
         ["synthetic-clone-token", `/repositories/${repositoryId("withso/zeros")}/contents/secret`],
         ["synthetic-lib-token", "/repositories/501/contents/.gitmodules"]]);
       expect(boat.machine(copy.machineId!)!.files.get("/home/user/zeros/zeros/lib/.git")).toMatch(/^gitdir: \/home\/user\/zeros\/zeros\/\.git\/modules\/[0-9a-f]{64}$/);
-      const forked = await forks().prepare(await workspace()) as { sandboxId: string };
+      const reader = await workspace();
+      await withSystemTx(pool, tx => insertWorkspaceSubmodules(tx, reader.id, [readable(LIB)]));
+      const forked = await forks().prepare(reader) as { sandboxId: string };
       expect(boat.machine(forked.sandboxId)!.files.get("/home/user/zeros/zeros/lib/.git")).toBe(boat.machine(copy.machineId!)!.files.get("/home/user/zeros/zeros/lib/.git"));
       // A rebuild reads its levels from what is remembered.
       const before = gh.requests.length;
@@ -732,6 +761,32 @@ d("cloud v2 ready copies", () => {
       // Forked from the previous copy, the submodule is already there and is kept at the planned commit.
       expect(rebuilt.result![0]!.submodules!.find(entry => entry.path === "lib")).toMatchObject({ fetched: true });
       expect(gh.requests.length).toBe(before);
+    });
+
+    it("writes a create's submodules with the workspace, gives the worker its plan parents first, and names what it skipped", async () => {
+      await liveBase();
+      const base = (await copies.base(org))!;
+      const id = randomUUID(), nested = `modules/${submoduleGitDirName("lib")}/modules/${submoduleGitDirName("inner")}`;
+      await new CloudV2Store(pool).createWorkspace({ id, organizationId: org, creatorUserId: member, name: "zeros", repository: "withso/zeros", branch: "zeros/sub-1",
+        baseBranch: "main", computerBuildId: base.buildId, projectId: zeros, ...one("withso/zeros", "zeros/sub-1"),
+        submodules: [
+          { position: 0, path: "lib/inner", status: "fetch", repository: "acme/inner", repositoryId: "503", commit: "d".repeat(40), gitDir: nested },
+          readable(LIB),
+          { position: 0, path: "secret", status: "skipped", repository: "acme/secret", reason: "no access" }] });
+      await withSystemTx(pool, async tx => {
+        expect(await workerSubmodules(tx, id)).toEqual({ submodules: [
+          { position: 0, path: "lib", repository: "acme/lib", commit: LIB, gitDir: `modules/${submoduleGitDirName("lib")}` },
+          { position: 0, path: "lib/inner", repository: "acme/inner", commit: "d".repeat(40), gitDir: nested }] });
+        expect(await workspaceSubmoduleNotice(tx, id)).toBe("Submodules not fetched: secret (no access).");
+        // Only a planned submodule's repository is ever a token target, and never by another workspace.
+        expect(await workspaceSubmoduleSource(tx, id, "Acme/Lib")).toEqual({ repository: "acme/lib", repositoryId: "501" });
+        expect(await workspaceSubmoduleSource(tx, id, "acme/secret")).toBeNull();
+      });
+      // A row the schema can't hold fails the create with nothing written.
+      await expect(new CloudV2Store(pool).createWorkspace({ id: randomUUID(), organizationId: org, creatorUserId: member, name: "zeros", repository: "withso/zeros",
+        branch: "zeros/sub-2", baseBranch: "main", computerBuildId: base.buildId, projectId: zeros,
+        ...one("withso/zeros", "zeros/sub-2"), submodules: [{ ...readable(LIB), gitDir: "../escape" }] })).rejects.toThrow();
+      expect((await pool.query("SELECT count(*)::int AS n FROM cloud_v2_workspaces WHERE branch='zeros/sub-2'")).rows[0].n).toBe(0);
     });
 
     it("makes no GitHub request and no lookup with the setting off", async () => {

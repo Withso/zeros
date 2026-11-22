@@ -148,6 +148,24 @@ describe("a create from a project", () => {
     expect(input.branch).toMatch(/^zeros\/zeros-app-[0-9a-f]{8}$/);
   });
 
+  it("resolves submodules at create only for a repository with the setting on, and writes them with the workspace", async () => {
+    const rows = [{ position: 1, path: "lib", status: "fetch", repository: "acme/lib", repositoryId: "501", commit: "a".repeat(40), gitDir: `modules/${"b".repeat(64)}` }];
+    const projectSubmodules = vi.fn(async () => rows);
+    // Off everywhere: no submodule step at all, so no GitHub request for it.
+    const off = create(alice, APP, { projectSubmodules });
+    expect((await off.send({ organizationId: org, projectId: P2 })).status).toBe(201);
+    expect(projectSubmodules).not.toHaveBeenCalled();
+    expect(off.createWorkspace.mock.calls[0]![0]).not.toHaveProperty("submodules");
+    // On for withso/web: every repository passes with its base commit and whether it is on.
+    const on = create(alice, { ...APP, repositories: APP.repositories.map((entry, index) => ({ ...entry, fetchSubmodules: index === 1 })) }, { projectSubmodules });
+    expect((await on.send({ organizationId: org, projectId: P2 })).status).toBe(201);
+    expect(projectSubmodules).toHaveBeenCalledWith(org, alice, P2, [
+      { position: 0, repository: "withso/api", repositoryId: "43", baseCommit: "c".repeat(38) + "43", fetchSubmodules: false },
+      { position: 1, repository: "withso/web", repositoryId: "44", baseCommit: "c".repeat(38) + "44", fetchSubmodules: true },
+      { position: 2, repository: "acme/web", repositoryId: "45", baseCommit: "c".repeat(38) + "45", fetchSubmodules: false }]);
+    expect(on.createWorkspace).toHaveBeenCalledWith(expect.objectContaining({ submodules: rows }));
+  });
+
   it("refuses a repository in no project, one the creator can't read (named), and a project's repository given out of place", async () => {
     expect((await create(alice, null).send({ organizationId: org, repository: "withso/zeros" })).body.error.code).toBe("repository_not_in_project");
     const denied = create(alice, APP, { projectAccess: async () => {
