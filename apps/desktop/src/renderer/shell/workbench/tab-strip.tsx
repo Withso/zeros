@@ -71,6 +71,7 @@ import {
   useConversationBrowserActivity,
 } from "../../features/browser/browser-session-activity-store";
 import { useAgentSessions } from "../../features/agent/sessions-hooks";
+import { closeSideChat } from "../../features/agent/side-chat";
 import { leaveSimulatorAnnotation } from "../../features/simulators/simulator-annotation-actions";
 import { nativeInvoke } from "../../platform/runtime";
 import {
@@ -119,6 +120,7 @@ export function WorkbenchTabStrip({
   const gitStatus = useWorkspaceReviewStatus({ cwd: folderKey, workspaceId, active: tabs.some(tab => tab.type === "files" && !tab.fixed && !!tab.filePath && !tab.skillSource), refreshKey, read: statusForGeneration });
   const fileStatuses = React.useMemo(() => fileStatusesForFolder(gitStatus.data, folderKey, gitRoot), [gitStatus.data, folderKey, gitRoot]);
 
+  const stripSessions = useAgentSessions();
   const strip = useStickyTabStrip({
     activeKey: activeId,
     resetKey: folderKey,
@@ -132,6 +134,11 @@ export function WorkbenchTabStrip({
     browserSessionId?: string,
   ) => {
     e.stopPropagation();
+    if (tab.type === "chat") {
+      if (tab.chatId) closeSideChat(dispatch, stripSessions, tab.id, tab.chatId);
+      else dispatch({ type: "REMOVE_WORKBENCH_TAB", id: tab.id });
+      return;
+    }
     if (tab.type === "terminal" && tab.terminalId) {
       closeWorkbenchTerminal(folderKey, tab.id, tab.terminalId, scope);
       return;
@@ -187,6 +194,7 @@ export function WorkbenchTabStrip({
                 canClose={
                   tab.type === "terminal" ||
                   tab.type === "browser" ||
+                  tab.type === "chat" ||
                   // Closing leaves the device running; idle shutdown stops
                   // one Zeros booted.
                   tab.type === "simulator" ||

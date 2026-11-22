@@ -74,6 +74,7 @@ import {
   nextWorkbenchColumnState,
   onWorkbenchCollapseRequest,
   onWorkbenchRestoreRequest,
+  onWorkbenchRevealRequest,
   persistedWorkbenchCollapsed,
   type WorkbenchColumnEvent,
   type WorkbenchColumnState,
@@ -788,6 +789,10 @@ function ShellRouter() {
   );
   React.useEffect(
     () => onWorkbenchRestoreRequest(() => updateWorkbenchColumn("floats-closed")),
+    [updateWorkbenchColumn],
+  );
+  React.useEffect(
+    () => onWorkbenchRevealRequest(() => updateWorkbenchColumn("reveal")),
     [updateWorkbenchColumn],
   );
 
