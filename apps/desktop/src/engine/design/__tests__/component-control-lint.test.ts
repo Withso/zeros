@@ -145,6 +145,27 @@ describe("linting what changes a component from outside", () => {
       message: "This instance overrides opacity, color on card-title, which no control sets." })]);
   });
 
+  it("never counts an instance's place, even where a control binds the root's placement", async () => {
+    const frame = await createDesignFrame(root, { title: "Card" });
+    // One root whose gated rule binds its placement to Size, as a Button's large size does.
+    await write(frame.file, doc('<div data-oid="card" class="card" data-size="{{ size }}">c</div>',
+      `${options(['<zd-option name="size" label="Size" type="choice" choices="md lg" default="md"></zd-option>'])}<style>.card[data-size="lg"] { position: relative; left: 2px; transform: translateX(1px) }</style>`));
+    await register(frame.file, "card");
+    const host = await createDesignFrame(root, { title: "Workspace" });
+    await write(host.file, doc('<zd-card data-oid="c1" style="position: absolute; left: 12px; transform: translate(5px); opacity: 0.5"></zd-card>'));
+    expect(await lint(host.file)).toEqual([expect.objectContaining({ ruleId: "component-instance-override", oid: "c1",
+      message: "This instance overrides opacity, which no control sets." })]);
+  });
+
+  it("still reports when the frame holds a template with no template content, as SVG metadata does", async () => {
+    const frame = await createDesignFrame(root, { title: "Card" });
+    await write(frame.file, doc('<div data-oid="card" class="card">c</div>', "<style>.card { padding: 8px }</style>"));
+    await register(frame.file, "card");
+    const host = await createDesignFrame(root, { title: "Workspace" });
+    await write(host.file, doc('<svg data-oid="art"><metadata><template>m</template></metadata></svg>\n<zd-card data-oid="c1" style="opacity: 0.5"></zd-card>'));
+    expect(await lint(host.file)).toEqual([expect.objectContaining({ ruleId: "component-instance-override", oid: "c1", line: 2 })]);
+  });
+
   it("re-lints an instance's frame when only its main changes", async () => {
     const file = await main('<span data-oid="b" class="badge">x</span>', [round], ".badge { border-radius: 4px }");
     const host = await createDesignFrame(root, { title: "Workspace" });

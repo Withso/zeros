@@ -84,7 +84,9 @@ function indexSource(source: string, parsed?: DefaultTreeAdapterTypes.Document):
       if (element.tagName === "style")
         index.styles.push(element.childNodes.map((text) => ("value" in text ? (text as DefaultTreeAdapterTypes.TextNode).value : "")).join(""));
     }
-    const children = node.nodeName === "template" ? (node as DefaultTreeAdapterTypes.Template).content.childNodes : node.childNodes;
+    // A template in foreign content (SVG metadata) has no template content.
+    const content = node.nodeName === "template" ? (node as Partial<DefaultTreeAdapterTypes.Template>).content : undefined;
+    const children = content?.childNodes ?? node.childNodes;
     for (let child = children.length - 1; child >= 0; child -= 1)
       if ("childNodes" in children[child]!) pending.push(children[child] as ParentNode);
   }

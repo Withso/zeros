@@ -29,7 +29,8 @@ const VAR = /var\(\s*(--[A-Za-z0-9_-]+)/g;
 const ROOT_ALIASES = new Set([":root", ":host", "html", "body"]);
 /** Layer ids that would become an object's prototype or constructor as keys. */
 const UNSAFE_KEYS = new Set(["__proto__", "constructor", "prototype"]);
-const MAX_VAR_DEPTH = 8;
+/** Bounds on the custom-property graph walked for one main. */
+const VAR_GRAPH_LIMITS = { properties: 1024, edges: 8192 };
 const ENCODER = new TextEncoder();
 
 interface LayerFacts {
@@ -274,8 +275,14 @@ function attributeTest(test: { value: string | null; operator: string | null; ca
 /** The layer matches this compound whatever its holes fill: tag, ids and
  * static classes only. */
 function certainlyMatches(compound: Compound, layer: LayerFacts): boolean {
-  if (compound.partial || compound.root || compound.attributes.length || compound.nested.length || compound.negatedText.length) return false;
-  if (!compound.tag && !compound.ids.length && !compound.classes.length) return false;
+  if (compound.partial || compound.root || compound.nested.length || compound.negatedText.length) return false;
+  if (!compound.tag && !compound.ids.length && !compound.classes.length && !compound.attributes.length) return false;
+  // An attribute test is certain only against a value the layer holds as
+  // written; one a hole fills may be anything.
+  for (const test of compound.attributes) {
+    const actual = test.name === "data-oid" ? layer.oid : layer.attributes.get(test.name);
+    if (actual === undefined || actual.includes("{{") || attributeTest(test, actual) !== true) return false;
+  }
   return (!compound.tag || compound.tag === layer.tag) && compound.ids.every((id) => layer.attributes.get("id") === id) &&
     compound.classes.every((name) => layer.classes.has(name));
 }
@@ -377,8 +384,9 @@ export function componentBindingsOf(document: DefaultTreeAdapterTypes.Document, 
         }
       }
       if (element.tagName === "template") {
-        // A wrapping template stands in for its content: what it tests applies there.
-        visit((element as Template).content.childNodes, owner, new Set([...wrapping, ...directives]));
+        // A wrapping template stands in for its content: what it tests applies
+        // there. One in foreign content (SVG metadata) has no template content.
+        visit((element as Partial<Template>).content?.childNodes ?? element.childNodes, owner, new Set([...wrapping, ...directives]));
         continue;
       }
       const facts = factsFor(element);
@@ -453,26 +461,49 @@ export function componentBindingsOf(document: DefaultTreeAdapterTypes.Document, 
       }
     });
   }
-  // A chain is followed to MAX_VAR_DEPTH. A result cut there is never kept
-  // as what a property reads, and the record says it was cut.
-  const resolved = new Map<string, Set<string>>();
-  let capped = false;
-  const resolve = (name: string, depth = 0, stack = new Set<string>()): Set<string> => {
-    if (resolved.has(name)) return resolved.get(name)!;
-    if (name.startsWith("--zd-")) return new Set(zdVarOptions(name, declaration));
-    const found = new Set<string>(gatedVars.get(name) ?? []);
-    if (depth === 0) capped = false;
-    if (!stack.has(name)) {
-      if (depth >= MAX_VAR_DEPTH) {
-        if (edges.get(name)?.size) { capped = true; truncated = true; }
-      } else {
-        stack.add(name);
-        for (const next of edges.get(name) ?? []) for (const option of resolve(next, depth + 1, stack)) found.add(option);
-        stack.delete(name);
+  // What each of the main's custom properties reaches, propagated over the
+  // graph of what it reads until nothing grows: a chain of any depth
+  // resolves, and a property is revisited only when its set grows, so the
+  // work is bounded by the edges times the controls. Past the graph's caps it
+  // is not walked: each property the main declares then reads every control,
+  // and the record says it was cut.
+  let edgeCount = 0;
+  for (const reads of edges.values()) edgeCount += reads.size;
+  const overflow = edges.size > VAR_GRAPH_LIMITS.properties || edgeCount > VAR_GRAPH_LIMITS.edges;
+  if (overflow) truncated = true;
+  const everyControl = [...optionNames];
+  const reached = new Map<string, Set<string>>();
+  if (!overflow) {
+    const readers = new Map<string, string[]>();
+    for (const [name, reads] of edges)
+      for (const read of reads) {
+        const list = readers.get(read);
+        if (list) list.push(name);
+        else readers.set(read, [name]);
       }
+    const pending: string[] = [];
+    const add = (name: string, options: Iterable<string>) => {
+      let set = reached.get(name);
+      if (!set) reached.set(name, set = new Set());
+      let grew = false;
+      for (const option of options) if (!set.has(option)) { set.add(option); grew = true; }
+      if (grew) pending.push(name);
+    };
+    for (const [name, reads] of edges) {
+      const direct = new Set(gatedVars.get(name) ?? []);
+      for (const read of reads) if (read.startsWith("--zd-")) for (const option of zdVarOptions(read, declaration)) direct.add(option);
+      add(name, direct);
     }
-    if (depth === 0 && !capped) resolved.set(name, found);
-    return found;
+    while (pending.length) {
+      const name = pending.pop()!;
+      const options = [...reached.get(name)!];
+      for (const reader of readers.get(name) ?? []) add(reader, options);
+    }
+  }
+  const resolve = (name: string): Set<string> => {
+    if (name.startsWith("--zd-")) return new Set(zdVarOptions(name, declaration));
+    if (overflow) return new Set(edges.has(name) ? everyControl : []);
+    return reached.get(name) ?? new Set();
   };
   const valueOptions = (value: string) => {
     const found = new Set<string>();

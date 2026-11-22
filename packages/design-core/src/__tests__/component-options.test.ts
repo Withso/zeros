@@ -242,5 +242,8 @@ describe("what an app may write in an instance host's own style", () => {
     // Only min-width bound: a raw width sits over it, a max-width does not.
     expect(componentInstanceOlderOverride("width", ["min-width"])).toBe(true);
     expect(componentInstanceOlderOverride("max-width", ["min-width"])).toBe(false);
+    // Its place is its own, whatever a control binds on the root.
+    for (const property of ["left", "top", "inset", "transform", "translate", "rotate", "position"])
+      expect(componentInstanceOlderOverride(property, ["left", "transform", "inset", "translate", "rotate", "position", "top"])).toBe(false);
   });
 });

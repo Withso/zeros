@@ -229,7 +229,11 @@ export async function runDesignComponentInstancesSmoke({ page, check }) {
       ui.useDesignWorkspaceUiStore.getState().setSelection("ws_design_harness", file, nodeId);
     }, { file, nodeId });
     await expect(deleteDialog).toHaveCount(0);
-    await page.waitForTimeout(300);
+    // The completion boundary: no edit in flight for the workspace.
+    await expect.poll(() => page.evaluate(async () => {
+      const cache = await import("/apps/desktop/src/renderer/features/design-workspace/state/design-workspace-cache.ts");
+      return cache.hasPendingDesignEdits("ws_design_harness");
+    })).toBe(false);
     check(`a selection change to ${nodeId} while Delete is asked closes the question and deletes nothing`,
       (await writes()) === writesBeforeChange && (await main()).includes('data-oid="cc-toolbar"') &&
         (file === "pricing.html" ? (await main()).includes(`data-oid="${nodeId}"`) : (await home()).includes(`data-oid="${nodeId}"`)));

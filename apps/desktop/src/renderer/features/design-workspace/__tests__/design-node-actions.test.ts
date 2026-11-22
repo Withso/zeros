@@ -8,7 +8,7 @@ vi.mock("../state/design-workspace-cache", () => ({
   designWorkspaceSnapshotCache: { peekSnapshot: (id: string) => ({ data: mocks.snapshots.get(id) }) },
 }));
 vi.mock("../state/design-selection", () => ({ selectDesignNodes: mocks.selectNodes, selectDesignFrame: mocks.selectFrame }));
-import { applyDesignNodeAction, captureDesignPendingDeletion, designPendingDeletionCurrent } from "../state/design-node-actions";
+import { applyDesignNodeAction, captureDesignPendingDeletion, designPendingDeletionCurrent, designPendingDeletionFor } from "../state/design-node-actions";
 
 const frame = { file: "a.html", sourceVersion: "a".repeat(24), title: "A", x: 0, y: 0, width: 200, height: 100, z: 0, nodeCount: 2, modifiedAt: 1 };
 const other = { ...frame, file: "b.html" };
@@ -45,6 +45,14 @@ describe("a deletion a person confirms", () => {
     expect(designPendingDeletionCurrent(again)).toBe(false);
     await applyDesignNodeAction({ workspaceId: "local", folder: "/design", action: "delete", expect: again });
     expect(mocks.edit).not.toHaveBeenCalled();
+  });
+
+  it("belongs to the workspace it was asked in: another workspace's canvas confirms nothing", () => {
+    const pending = captureDesignPendingDeletion("local")!;
+    expect(designPendingDeletionFor(pending, "local")).toBe(true);
+    useDesignWorkspaceUiStore.getState().setSelection("other", "text.html", null);
+    expect(designPendingDeletionFor(pending, "other")).toBe(false);
+    expect(designPendingDeletionFor(pending, null)).toBe(false);
   });
 
   it("deletes nothing once the selection moved to another frame or the page changed", async () => {

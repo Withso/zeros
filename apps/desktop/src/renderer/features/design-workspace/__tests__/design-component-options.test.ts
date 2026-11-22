@@ -272,6 +272,22 @@ describe("variants and instances", () => {
     expect(designInstanceOlderOverrideProperties("width: 200px; max-width: 300px", { "min-width": ["size"] })).toEqual(["width"]);
   });
 
+  it("never counts or resets the instance's place, whatever a control binds on the root", async () => {
+    const style = "position: absolute; left: 4px; transform: matrix(1, 0, 0, 1, 6, 8); opacity: .5";
+    // A single-root main whose gated rule binds the root's placement (a Button's size).
+    const bound = { position: ["size"], left: ["size"], transform: ["size"] };
+    expect(designInstanceOlderOverrideProperties(style, bound)).toEqual(["opacity"]);
+    expect(designInstanceOlderOverrideCount({ component: "card", attributes: {}, style }, bound)).toBe(1);
+    const frame = { file: "home.html", sourceVersion: V1 } as never;
+    prepareResetSnapshot("home.html", "inst", { style },
+      { ...VARIANTS, bindings: { root: "card-root", layers: { "card-root": { styles: bound } } } });
+    await commitDesignInstanceOlderOverridesReset("w", frame, "inst");
+    expect(latestCapturedEdit().operations).toEqual([
+      expect.objectContaining({ type: "node.set-styles", nodeId: "inst", styles: { opacity: null } }),
+    ]);
+    expect(mocks.waitRuntime).not.toHaveBeenCalled();
+  });
+
   it("scopes older overrides to a part: only its own override counts and resets there", () => {
     const host = { component: "card", attributes: {}, overrides: { "cc-send": "opacity: .5", "cc-chip": "color: red" }, style: "opacity: .8; left: 4px" };
     expect(designInstanceOlderOverridesIn(host, {})).toEqual({ parts: ["cc-send", "cc-chip"], style: ["opacity"] });

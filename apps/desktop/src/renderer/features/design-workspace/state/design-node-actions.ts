@@ -35,6 +35,12 @@ export function captureDesignPendingDeletion(workspaceId: string): DesignPending
     selectionEvent: selection.selectionEvent, nodeIds: [...selection.selectedNodeIds] };
 }
 
+/** A pending deletion a canvas showing `workspaceId` may confirm: asked in
+ * that workspace, and still current there. */
+export function designPendingDeletionFor(pending: DesignPendingDeletion, workspaceId: string | null | undefined): boolean {
+  return !!workspaceId && pending.owner.workspaceId === workspaceId && designPendingDeletionCurrent(pending);
+}
+
 /** Whether the owner, frame, generation and selection a pending deletion
  * was asked about all still stand. */
 export function designPendingDeletionCurrent(pending: DesignPendingDeletion): boolean {
@@ -58,7 +64,7 @@ export async function applyDesignNodeAction(input: {
   expect?: DesignPendingDeletion;
 }): Promise<void> {
   const { workspaceId, folder, action } = input;
-  if (input.expect && (input.expect.owner.workspaceId !== workspaceId || !designPendingDeletionCurrent(input.expect))) return;
+  if (input.expect && !designPendingDeletionFor(input.expect, workspaceId)) return;
   const selection = designWorkspaceView(workspaceId);
   // Before any preview: an instance's part is read only.
   if (selection.selectedNodeIds.some(isDesignComponentPartNodeId)) throw new DesignComponentPartWriteError();

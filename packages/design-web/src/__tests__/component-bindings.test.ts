@@ -96,6 +96,17 @@ describe("the controls each layer of a main reads", () => {
     expect(bindings.layers.card!.styles).toEqual({ width: ["w"] });
   });
 
+  it("excludes a layer by :not() on an attribute it holds as a fixed value, never on one a hole fills", () => {
+    const bindings = bindingsOf(main(
+      `<zd-option name="w" type="number" default="1"></zd-option><zd-option name="k" type="text" default="a"></zd-option>`,
+      `.card:not([data-kind="fixed"]) { width: var(--zd-w); }`,
+      `<div class="card" data-oid="fixed" data-kind="fixed">f</div><div class="card" data-oid="filled" data-kind="{{ k }}">h</div><div class="card" data-oid="bare">b</div>`))!;
+    expect(bindings.layers.fixed).toBeUndefined();
+    // data-kind is a gate (a hole fills it), so the rule depends on K as well.
+    expect(bindings.layers.filled!.styles).toEqual({ width: ["k", "w"] });
+    expect(bindings.layers.bare!.styles).toEqual({ width: ["k", "w"] });
+  });
+
   it("evaluates attribute operators on layer identity, keeping the layer when an operator is unknown", () => {
     const bindings = bindingsOf(main(
       `<zd-option name="w" type="number" default="1"></zd-option>`,
@@ -113,14 +124,46 @@ describe("the controls each layer of a main reads", () => {
       `<div class="box" data-oid="box">b</div>`))!;
     expect(ordered.layers.box!.styles!.width).toEqual(["w"]);
     expect(ordered.truncated).toBeUndefined();
+    // A chain of any depth resolves.
     const chain = Array.from({ length: 12 }, (_, index) => `--v${index}: var(--v${index + 1});`).join(" ");
     const deep = bindingsOf(main(
       `<zd-option name="w" type="number" default="1"></zd-option>`,
       `:root { ${chain} --v12: var(--zd-w); } .box { width: var(--v0); } .near { height: var(--v10); }`,
       `<div class="box" data-oid="box">b</div><div class="near" data-oid="near">n</div>`))!;
-    // Past the depth limit nothing is confirmed as reading nothing: the record says it was cut.
-    expect(deep.truncated).toBe(true);
+    expect(deep.layers.box!.styles!.width).toEqual(["w"]);
     expect(deep.layers.near!.styles!.height).toEqual(["w"]);
+    expect(deep.truncated).toBeUndefined();
+  });
+
+  it("resolves a wide fan-out of custom properties once each, in bounded time", () => {
+    // 16 levels of 7 properties, each reading all 7 of the next level.
+    const levels = Array.from({ length: 16 }, (_, level) => Array.from({ length: 7 }, (_, index) =>
+      `--l${level}-${index}: ${level === 15 ? "var(--zd-w)" : Array.from({ length: 7 }, (_, next) => `var(--l${level + 1}-${next})`).join(" ")};`).join(" ")).join(" ");
+    const started = performance.now();
+    const bindings = bindingsOf(main(`<zd-option name="w" type="number" default="1"></zd-option>`,
+      `:root { ${levels} } .box { width: var(--l0-3); }`, `<div class="box" data-oid="box">b</div><div data-oid="other">o</div>`))!;
+    expect(performance.now() - started).toBeLessThan(2_000);
+    expect(bindings.layers.box!.styles).toEqual({ width: ["w"] });
+    // 112 properties reach Width; the record lists at most its vars limit of them.
+    expect(Object.keys(bindings.vars!)).toHaveLength(64);
+  });
+
+  it("binds every control to a custom property past the graph's caps, and says the record was cut", () => {
+    const many = Array.from({ length: 1100 }, (_, index) => `--m${index}: var(--m${index + 1});`).join(" ");
+    const bindings = bindingsOf(main(
+      `<zd-option name="w" type="number" default="1"></zd-option><zd-option name="tone" type="choice" choices="a b" default="a"></zd-option>`,
+      `:root { ${many} } .box { width: var(--m0); } .plain { height: var(--not-declared-here); }`,
+      `<div class="box" data-oid="box">b</div><div class="plain" data-oid="plain">p</div><span data-oid="t">{{ tone }}</span>`))!;
+    expect(bindings.truncated).toBe(true);
+    expect(bindings.layers.box!.styles).toEqual({ width: ["tone", "w"] });
+    // A property the main's CSS does not declare (a token) is not one of its own.
+    expect(bindings.layers.plain).toBeUndefined();
+  });
+
+  it("reads a main that holds a template with no template content, as SVG metadata does", () => {
+    const bindings = bindingsOf(main(`<zd-option name="t" type="text" default="x"></zd-option>`, "",
+      `<div data-oid="root"><svg data-oid="art"><metadata><template>m</template></metadata></svg><p data-oid="p">{{ t }}</p></div>`))!;
+    expect(bindings.layers.p!.text).toEqual(["t"]);
   });
 
   it("scans template holes in time linear in the source, unclosed ones included", () => {

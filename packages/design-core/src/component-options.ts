@@ -510,14 +510,18 @@ export function componentInstanceHostStyleAllowed(property: string): boolean {
   return COMPONENT_INSTANCE_HOST_STYLE_PROPERTIES.has(property) || property.startsWith("--zeros-layout-");
 }
 
+/** A size or size limit: what an instance's own Size writes. */
+const sizes = (property: string) => cssPropertiesOverlap(property, "width") || cssPropertiesOverlap(property, "height");
+
 /** Whether a property in an instance host's own style is an older override,
  * one the app no longer writes and Reset removes: anything outside the
- * allowlist, and anything that sets what a control sets on the root (the
- * root's bound properties, as recorded), which would sit over that control.
- * Its place, and a size no control reaches, are its own. */
+ * allowlist, and a size or size limit over a size a control sets on the
+ * root (the root's bound properties, as recorded). Its place is never one,
+ * whatever a control binds, so Reset never moves an instance. */
 export function componentInstanceOlderOverride(property: string, boundProperties: Iterable<string>): boolean {
   if (!componentInstanceHostStyleAllowed(property)) return true;
-  for (const bound of boundProperties) if (cssPropertiesOverlap(property, bound)) return true;
+  if (!sizes(property)) return false;
+  for (const bound of boundProperties) if (sizes(bound) && cssPropertiesOverlap(property, bound)) return true;
   return false;
 }
 

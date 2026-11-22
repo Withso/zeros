@@ -197,7 +197,8 @@ export function renderComponentTemplate(markup: string, options: ComponentTempla
     }
     if (element.tagName === "template" && (condition !== undefined || element.attrs.some((entry) => entry.name === "data-zd-for"))) {
       // A template used only to wrap: its content stands in for it.
-      return emitChildren((element as Template).content.childNodes, scope, copy, loops);
+      // One in foreign content (SVG metadata) has no template content.
+      return emitChildren((element as Partial<Template>).content?.childNodes ?? element.childNodes, scope, copy, loops);
     }
     const repeated = copy.some((index) => index !== 0);
     if (!location) return emitChildren(element.childNodes, scope, copy, loops);
@@ -270,7 +271,7 @@ export function componentTemplateExpressions(markup: string, options: { document
           if (loop) found.push(loop[2]!.trim());
         } else holes(attribute.value);
       }
-      visit(element.tagName === "template" ? (element as Template).content.childNodes : element.childNodes);
+      visit(element.tagName === "template" ? (element as Partial<Template>).content?.childNodes ?? element.childNodes : element.childNodes);
       if (found.length > COMPONENT_TEMPLATE_LIMITS.holes * 4) return;
     }
   };
@@ -342,7 +343,7 @@ function boundTextOf(document: DefaultTreeAdapterTypes.Document, declaration: Re
           count += 1;
         }
       }
-      visit(element.tagName === "template" ? (element as Template).content.childNodes : element.childNodes);
+      visit(element.tagName === "template" ? (element as Partial<Template>).content?.childNodes ?? element.childNodes : element.childNodes);
     }
   };
   visit(document.childNodes);

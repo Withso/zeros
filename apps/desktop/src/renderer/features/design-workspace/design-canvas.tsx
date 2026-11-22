@@ -55,7 +55,7 @@ import {
 
 import { retainDesignResource } from "./state/design-resource-counters";
 import { designFrameRuntime, waitForDesignFrameRuntime, type DesignFrameRuntimeConnection } from "../../platform/bridge/design-frame-runtime";
-import { applyDesignNodeAction, captureDesignPendingDeletion, designPendingDeletionCurrent, type DesignPendingDeletion } from "./state/design-node-actions";
+import { applyDesignNodeAction, captureDesignPendingDeletion, designPendingDeletionFor, type DesignPendingDeletion } from "./state/design-node-actions";
 import {
   type DesignCanvasFrameWire,
   type DesignFrameGeometryWire,
@@ -2610,15 +2610,25 @@ export const DesignCanvas = React.memo(function DesignCanvas({
   // The question is about one deletion: a change of owner, frame,
   // generation or selection closes it without deleting anything.
   useEffect(() => {
-    if (!boundDelete || !workspaceId) return;
-    const close = () => { if (!designPendingDeletionCurrent(boundDelete.pending)) setBoundDelete(null); };
+    if (!boundDelete) return;
+    // A retained surface another workspace replaced keeps its own id, so
+    // leaving the active surface closes it as well.
+    if (!workspaceId || !active) {
+      setBoundDelete(null);
+      return;
+    }
+    // Another workspace's canvas closes it too: it was asked there.
+    const close = () => { if (!designPendingDeletionFor(boundDelete.pending, workspaceId)) setBoundDelete(null); };
     const stopUi = useDesignWorkspaceUiStore.subscribe(close);
     const stopSnapshot = designWorkspaceSnapshotCache.subscribe(workspaceId, close);
     close();
     return () => { stopUi(); stopSnapshot(); };
-  }, [boundDelete, workspaceId]);
+  }, [boundDelete, workspaceId, active]);
   const deleteSelectedNode = useCallback(async (confirmed?: DesignPendingDeletion) => {
     if (!workspaceId || !folder) return;
+    // Before any branch that deletes: a confirmation must be this
+    // workspace's, for the selection it asked about.
+    if (confirmed && (!active || !designPendingDeletionFor(confirmed, workspaceId))) return;
     const selected = designWorkspaceView(workspaceId);
     const frame = designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data?.frames.find(candidate => candidate.file === selected.selectedFrame);
     if (frame?.kind === "text") {
@@ -2644,7 +2654,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
     } catch (error) {
       toast.error("Couldn't delete the element", { description: errorMessage(error) });
     }
-  }, [workspaceId, folder, deleteSelectedFrame, savedEditingSession]);
+  }, [workspaceId, folder, active, deleteSelectedFrame, savedEditingSession]);
 
   const navigateToNode = useCallback(
     (nodeId: string) => {
@@ -9617,7 +9627,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
           onActiveThemeChange={changeActiveTheme}
         />
         <DesignBoundDeleteDialog
-          controls={boundDelete?.controls ?? null}
+          controls={active ? boundDelete?.controls ?? null : null}
           onCancel={() => setBoundDelete(null)}
           onDelete={() => {
             const pending = boundDelete?.pending;
