@@ -1,5 +1,6 @@
 // Every ready copy failure in plain words, in one place: what failed and what
 // to change. The UI never shows a raw code; an unknown one reads as the last line.
+import { buildFailure } from "./cloud-computer-model";
 export type ReadyCopyFailureCopy = { what: string; change: string };
 
 const COPY: Record<string, ReadyCopyFailureCopy> = {
@@ -63,4 +64,13 @@ export function readyCopyFailureLine(failure: { reason: string; repository?: str
 export function readyCopySubmodulesLine(counts: { fetched: number; skipped: number } | undefined, repository?: string): string | null {
   if (!counts || counts.fetched + counts.skipped === 0) return null;
   return `${repository ? `${repository} s` : "S"}ubmodules: ${[`${counts.fetched} fetched`, ...(counts.skipped ? [`${counts.skipped} skipped`] : [])].join(", ")}`;
+}
+
+/** A project with no copy waits for its organization's Cloud Computer, which Zeros prepares: never a silent "not built". */
+export function readyCopyBaseLine(base: { state: "preparing" | "failed" | "unavailable"; reason?: string | undefined; nextAttemptAt?: string | undefined },
+  now: number): { label: string; hint: string } {
+  if (base.state === "failed") return { label: "The Cloud Computer could not be prepared",
+    hint: `${buildFailure(base.reason ?? null)} Zeros tries again automatically.${base.nextAttemptAt ? ` ${nextRetryWords(base.nextAttemptAt, now)}` : ""}` };
+  if (base.state === "unavailable") return { label: "Cloud workspaces are off", hint: "This organization does not run cloud workspaces now." };
+  return { label: "Preparing the Cloud Computer…", hint: "This project's build starts as soon as it is ready. Workspaces can be created meanwhile." };
 }

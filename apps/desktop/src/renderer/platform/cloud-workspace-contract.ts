@@ -93,6 +93,8 @@ export const CloudWorkspaceDocumentSchema = z.object({
   agentCost: lenient(z.object(CloudV2AgentCostSchema.shape)),
   /** Retention: a restore came back without some work; its own member sees it until they dismiss it. */
   lostWork: lenient(CloudLostWorkSchema),
+  /** Ready copies: created while its organization's Cloud Computer was being prepared, and waiting for it. */
+  preparing: lenient(z.literal("computer")),
   sharing: lenient(CloudWorkspaceSharingSchema),
   version: z.number().int().nonnegative(),
   error: z.object({ code: z.string(), message: z.string() }).nullable(),

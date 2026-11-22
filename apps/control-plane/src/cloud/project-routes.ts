@@ -222,9 +222,12 @@ export function createProjectRoutes(deps: ProjectRouteDeps): Hono {
     const history = await readyCopies.copies.history(org, project.id);
     const retry = await readyCopies.copies.retryState(project.id, await readyCopies.copies.inputs(org, project.id), now);
     const copyStatus = readyCopyStatus(history, retry, now, project.canEdit);
-    if (!project.canEdit) return c.json({ status: copyStatus });
+    // Never a silent "none": a project with no copy says what it waits for, the organization's Cloud Computer.
+    const base = !history.length && readyCopies.base ? baseView(await readyCopies.base(org)) : undefined;
+    const waiting = base && base.state !== "ready" ? { base } : {};
+    if (!project.canEdit) return c.json({ status: copyStatus, ...waiting });
     const people = await deps.levels.people(org, history.flatMap(row => row.triggeredBy ? [row.triggeredBy] : []));
-    return c.json({ status: copyStatus, history: readyCopyHistory(history, people), canBuild: true });
+    return c.json({ status: copyStatus, history: readyCopyHistory(history, people), canBuild: true, ...waiting });
   });
 
   app.get(`${projects}/:project/ready-copy/output`, rateLimit("cloud-ready-copy-read", 120, 60_000), async c => {
