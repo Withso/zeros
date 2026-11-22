@@ -1314,7 +1314,7 @@ function reducer(state: WorkspaceState, action: Action): WorkspaceState {
       // authorized conversation list has not arrived yet.
       if (confirmed) for (const scope of Object.values(state.workbenchByScope)) {
         for (const tab of scope.tabs) {
-          const owner = tab.browserConversationId;
+          const owner = tab.browserConversationId ?? tab.chatId;
           const folder = cloudFolderForChatId(owner ?? null);
           if (owner && folder && !confirmed.includes(folder)) conversationIds.add(owner);
           if (owner && !folder && action.confirmedLocalChats === false) conversationIds.add(owner);

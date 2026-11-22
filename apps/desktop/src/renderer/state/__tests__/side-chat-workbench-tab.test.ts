@@ -23,6 +23,7 @@ import {
   workbenchScopeForFolder,
 } from "../workspace-store";
 import type { Action, ChatThread } from "../store";
+import { cloudScopedId, cloudWorkspaceKey } from "../../platform/bridge/cloud-workspace-key";
 
 const dispatch = (action: Action) => useWorkspaceStore.getState().dispatch(action);
 const thread = (id: string, folder: string, over: Partial<ChatThread> = {}): ChatThread => ({
@@ -90,5 +91,23 @@ describe("OPEN_SIDE_CHAT", () => {
     dispatch({ type: "SET_ACTIVE_CHAT", id: "source-select" });
     dispatch({ type: "SET_ACTIVE_CHAT", id: "side-select" });
     expect(useWorkspaceStore.getState().workbenchByScope[scopeKey]!.activeId).toBe(chatTab);
+  });
+
+  it("opens a cloud side chat in its cloud workspace's Workbench and keeps it until that workspace confirms", () => {
+    const target = { organizationId: "11111111-1111-4111-8111-111111111111", workspaceId: "22222222-2222-4222-8222-222222222222" };
+    const folder = cloudWorkspaceKey(target);
+    const source = thread(cloudScopedId(target, "source"), folder);
+    const side = thread(cloudScopedId(target, "side"), folder, { sourceChatId: source.id, title: "Side chat" });
+    dispatch({ type: "ADD_CHAT", chat: source });
+    dispatch({ type: "OPEN_SIDE_CHAT", chat: side });
+    const scopeKey = workbenchScopeForFolder(folder);
+    expect(useWorkspaceStore.getState().workbenchByScope[scopeKey]!.tabs.some((tab) => tab.chatId === side.id)).toBe(true);
+    expect([...workbenchHostedChatIds(useWorkspaceStore.getState(), folder)]).toEqual([side.id]);
+
+    // A refresh that has not confirmed this cloud workspace keeps its side chat tab.
+    dispatch({ type: "HYDRATE_CHATS", chats: [source], activeChatId: source.id, confirmedCloudWorkspaces: [] });
+    expect(useWorkspaceStore.getState().workbenchByScope[scopeKey]!.tabs.some((tab) => tab.chatId === side.id)).toBe(true);
+    dispatch({ type: "HYDRATE_CHATS", chats: [source], activeChatId: source.id, confirmedCloudWorkspaces: [folder] });
+    expect(useWorkspaceStore.getState().workbenchByScope[scopeKey]!.tabs.some((tab) => tab.chatId === side.id)).toBe(false);
   });
 });
