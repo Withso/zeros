@@ -11,7 +11,7 @@ import { resetMigratedTestDatabase } from "../test-database.js";
 import { grantTestPro } from "../test-pro.js";
 import { FakeBoat } from "./__fixtures__/boat-fake.js";
 import { CLOUD_V2_BACKUP_DELAY_MS, CLOUD_V2_CHECKPOINT_RETRY_WINDOW_MS, CLOUD_V2_LOSS_CONFIRM_MS, CLOUD_V2_LOSS_UNCONFIRMED_ALERT, CLOUD_V2_MAINTENANCE_LEASE_SECONDS,
-  CLOUD_V2_MAINTENANCE_STALE_MS, CloudV2Lifecycle, type CloudV2LifecycleDeps, type CloudV2TimingRecord } from "./lifecycle.js";
+  CLOUD_V2_MAINTENANCE_ADOPT_STALE_MS, CLOUD_V2_MAINTENANCE_STALE_MS, CloudV2Lifecycle, type CloudV2LifecycleDeps, type CloudV2TimingRecord } from "./lifecycle.js";
 import { CloudV2Store } from "./store.js";
 
 const d = process.env.TEST_DATABASE_URL ? describe : describe.skip;
@@ -566,14 +566,27 @@ d("cloud v2 retention", () => {
       expect((await store.lifecycleWorkspace(id))?.workerOffUnverified).toBeUndefined();
     });
 
-    it("records a machine Boat already expired as gone, from Boat's own fields, and does not try again for that stop", async () => {
+    it("records a machine Boat already expired as gone only after two reads, from Boat's own fields, and does not try again for that stop", async () => {
       await sleeping(10.6);
       boat.machine(vm)!.expired = true;
-      await lifecycle().tick();
+      const sleeps: number[] = [];
+      await lifecycle({ sleep: async ms => { sleeps.push(ms); } }).tick();
+      expect(sleeps).toContain(CLOUD_V2_LOSS_CONFIRM_MS);
+      expect(boat.calls.filter(call => call.op === "inspect" && call.args[0] === vm).length).toBeGreaterThanOrEqual(2);
       expect(await wakes()).toMatchObject([{ outcome: "gone", snapshot_available: false }]);
       await pool.query("UPDATE cloud_v2_maintenance_wakes SET started_at=started_at - interval '2 hours' WHERE workspace_id=$1", [id]);
       await lifecycle().tick();
       expect(await wakes()).toHaveLength(1);
+    });
+
+    it("does not record one wrong 404 as gone: the wake failed, and is tried again after its hour", async () => {
+      await sleeping(10.6);
+      vi.spyOn(boat, "resume").mockRejectedValueOnce(notFound());
+      await lifecycle().tick();
+      expect(await wakes()).toMatchObject([{ outcome: "failed" }]);
+      await pool.query("UPDATE cloud_v2_maintenance_wakes SET started_at=started_at - interval '2 hours' WHERE workspace_id=$1", [id]);
+      await lifecycle().tick();
+      expect(await wakes()).toMatchObject([{ outcome: "failed" }, { outcome: "stopped" }]);
     });
 
     it("expires a mark left by a wake that died between the mark and Boat's resume, and records that wake failed", async () => {
@@ -605,26 +618,66 @@ d("cloud v2 retention", () => {
         expect(resumes()).toEqual([{ op: "resume", args: [vm] }]);
       });
 
-      it("during the wake: adopts the running machine, re-arms its full lease, and the wake never stops it", async () => {
+      /** The person opens the workspace at `point` of a wake; their own step runs at once. It must not
+       * touch the machine until the wake has let go, after which their worker runs as usual. */
+      async function openDuring(point: "after the resume" | "between the worker-off commands" | "before the stop mark"): Promise<void> {
         await sleeping(10.6);
-        const real = boat.exec.bind(boat);
+        const touched: string[] = [];
         let opened = false;
-        boat.exec = async (sandbox, command, timeout) => {
-          if (!opened && sandbox === vm && command.includes("zeros-worker-unit")) {
-            opened = true;
-            // The short maintenance lease is armed while the wake runs.
-            expect(boat.machine(vm)!.leaseUntil! - Date.now()).toBeLessThanOrEqual(CLOUD_V2_MAINTENANCE_LEASE_SECONDS * 1000);
-            await store.transition(id, ["stopped"], "starting");
-          }
-          return real(sandbox, command, timeout);
+        const open = async () => {
+          opened = true;
+          await store.transition(id, ["stopped"], "starting");
+          const before = boat.calls.length;
+          await lifecycle().tick();
+          await lifecycle().tick();
+          touched.push(...boat.calls.slice(before).filter(call => call.args[0] === vm && call.op !== "inspect").map(call => call.op));
         };
+        const realExec = boat.exec.bind(boat);
+        boat.exec = async (sandbox, command, timeout) => {
+          if (!opened && sandbox === vm && point === "after the resume" && command.includes("zeros-worker-unit")) await open();
+          const result = await realExec(sandbox, command, timeout);
+          if (!opened && sandbox === vm && point === "between the worker-off commands" && isOffStep(command)) await open();
+          return result;
+        };
+        const realBegin = store.beginMaintenanceStop.bind(store);
+        vi.spyOn(store, "beginMaintenanceStop").mockImplementation(async (workspace, attempt) => {
+          if (!opened && point === "before the stop mark") await open();
+          return realBegin(workspace, attempt);
+        });
         await lifecycle().tick();
-        expect(await wakes()).toMatchObject([{ outcome: "adopted" }]);
-        expect(boat.calls.filter(call => call.op === "stop" && call.args[0] === vm)).toHaveLength(1); // the user's own earlier stop only
-        await lifecycle().tick();
+        expect(opened).toBe(true);
+        // While the wake held the machine, the person's start made no call to it.
+        expect(touched).toEqual([]);
+        expect(await wakes()).toMatchObject([{ outcome: "adopted", worker_found_running: false }]);
+        // The wake let go: the person's start now resumes the running machine on its full lease and starts the worker.
+        for (let step = 0; step < 4 && !boat.machine(vm)!.worker.active; step++) {
+          await pool.query("UPDATE cloud_v2_workspaces SET next_attempt_at=NULL WHERE id=$1", [id]);
+          await lifecycle().tick();
+        }
+        expect(boat.machine(vm)!.worker).toEqual({ enabled: true, active: true });
+        expect(boat.machine(vm)!.state).toBe("running");
         expect(resumes().at(-1)).toEqual({ op: "resume", args: [vm] });
         expect(boat.machine(vm)!.leaseUntil! - Date.now()).toBeGreaterThan(23 * 60 * 60_000);
-        expect((await row()).state).toBe("starting");
+        expect(boat.calls.filter(call => call.op === "stop" && call.args[0] === vm)).toHaveLength(1); // the person's own earlier stop only
+        expect(errors.filter(line => line.includes("worker found running"))).toEqual([]);
+        expect((await pool.query("SELECT maintenance_attempt FROM cloud_v2_workspaces WHERE id=$1", [id])).rows[0].maintenance_attempt).toBeNull();
+      }
+
+      it("after the wake's resume, before its unit check: the wake lets go, and the person's worker runs", () => openDuring("after the resume"));
+      it("between the wake's worker-off commands: the wake lets go, and the person's worker runs", () => openDuring("between the worker-off commands"));
+      it("just before the wake's stop mark: the wake lets go, and the person's worker runs", () => openDuring("before the stop mark"));
+
+      it("waits on a fresh takeover until the wake lets go, and takes over one whose wake died", async () => {
+        await sleeping(10.6);
+        await pool.query("UPDATE cloud_v2_workspaces SET maintenance_attempt=$2, maintenance_phase='adopting', maintenance_started_at=clock_timestamp() WHERE id=$1", [id, randomUUID()]);
+        await store.transition(id, ["stopped"], "starting");
+        await lifecycle().tick();
+        expect(resumes()).toEqual([]);
+        await pool.query(`UPDATE cloud_v2_workspaces SET next_attempt_at=NULL,
+          maintenance_started_at=clock_timestamp() - make_interval(secs => $2::double precision / 1000) WHERE id=$1`, [id, CLOUD_V2_MAINTENANCE_ADOPT_STALE_MS + 10_000]);
+        await lifecycle().tick();
+        expect(resumes()).toEqual([{ op: "resume", args: [vm] }]);
+        expect((await pool.query("SELECT maintenance_attempt FROM cloud_v2_workspaces WHERE id=$1", [id])).rows[0].maintenance_attempt).toBeNull();
       });
 
       it("between the stop mark and the stop call: waits, then resumes the stopped machine", async () => {
@@ -669,12 +722,14 @@ d("cloud v2 retention", () => {
       });
     });
 
-    it("wakes an archived workspace exactly once, 10 days after its archive", async () => {
-      await sleeping(3);
-      await pool.query("UPDATE cloud_v2_workspaces SET archived_at=clock_timestamp() - interval '5 days' WHERE id=$1", [id]);
+    it("wakes an archived workspace once more, on its machine's own 10 days, then never", async () => {
+      // Archived five days after its last stop: the one wake comes five days after the archive.
+      await sleeping(5);
+      await pool.query("UPDATE cloud_v2_workspaces SET archived_at=clock_timestamp() WHERE id=$1", [id]);
       await lifecycle().tick();
       expect(resumes()).toEqual([]);
-      await pool.query("UPDATE cloud_v2_workspaces SET archived_at=clock_timestamp() - interval '10 days 1 hour' WHERE id=$1", [id]);
+      await pool.query(`UPDATE cloud_v2_workspaces SET stopped_at=stopped_at - interval '5 days 14 hours',
+        archived_at=archived_at - interval '5 days 14 hours' WHERE id=$1`, [id]);
       await lifecycle().tick();
       expect(resumes()).toHaveLength(1);
       expect((await pool.query("SELECT archive_wake_done_at FROM cloud_v2_workspaces WHERE id=$1", [id])).rows[0].archive_wake_done_at).toBeInstanceOf(Date);
@@ -685,9 +740,9 @@ d("cloud v2 retention", () => {
       expect(resumes()).toHaveLength(1);
     });
 
-    it("gives a workspace archived again its own one wake, 10 days after that archive", async () => {
-      await sleeping(3);
-      await pool.query(`UPDATE cloud_v2_workspaces SET archived_at=clock_timestamp() - interval '10 days 1 hour',
+    it("gives a workspace archived again its own one wake, when its machine is due", async () => {
+      await sleeping(10.6);
+      await pool.query(`UPDATE cloud_v2_workspaces SET archived_at=clock_timestamp() - interval '2 days',
         archive_wake_done_at=clock_timestamp() - interval '40 days' WHERE id=$1`, [id]);
       await lifecycle().tick();
       expect(resumes()).toHaveLength(1);

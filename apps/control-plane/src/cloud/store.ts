@@ -172,7 +172,7 @@ export type CloudV2LifecycleWorkspace = CloudV2Workspace & {
    * with it running or enabled; a wake must switch it off before treating the machine as safe. */
   workerOffUnverified?: true;
   /** Retention S2: a maintenance wake in flight. A user wake that finds `stopping` waits for it. */
-  maintenance?: { attempt: string; phase: "waking" | "stopping"; startedAt: string };
+  maintenance?: { attempt: string; phase: "waking" | "adopting" | "stopping"; startedAt: string };
 };
 /** `from` is null for Boat's stock image; `prune` lists the other recipe
  * checkouts a v3 image starts with. */
@@ -238,7 +238,7 @@ type LifecycleRow = Row & {
   checkpoint_reuse: unknown; checkpoint_retry_fork: unknown;
   backup_probe?: BackupProbe | null; backup_probe_generation?: string | null; worker_off_unverified_at?: Date | null;
   worker_off_verified_generation?: string | null;
-  maintenance_attempt?: string | null; maintenance_phase?: "waking" | "stopping" | null; maintenance_started_at?: Date | null;
+  maintenance_attempt?: string | null; maintenance_phase?: "waking" | "adopting" | "stopping" | null; maintenance_started_at?: Date | null;
 };
 const LIFECYCLE_COLUMNS = `${COLUMNS}, lease_renewed_at, base_commit, restore_pending, restore_attempt, restore_create, checkpoint_uploads,
   execution_mode, execution_transition_id, execution_restore_claimed_at, execution_initiator_user_id, execution_intent_id, execution_intent_authority, access_epoch,
@@ -1631,7 +1631,7 @@ export class CloudV2Store {
   /** Retention S2: the next due maintenance wake, deadline-first, within the shared budget of machine
    * starts (wakes and backup forks). Due: a sleeping workspace 10 days (plus a stable 0–12 h spread)
    * after its machine last stopped (a person's stop or a wake's, whichever is later; greatest() skips
-   * a null); an archived one exactly once per archive, 10 days after it.
+   * a null); an archived one on the same schedule, once per archive.
    * A wake whose mark went stale (its step died) is taken over. Serialized so the budget is exact. */
   async claimMaintenanceWake(input: { attempt: string; perHour: number; perDay: number; staleMs: number; excludeIds?: readonly string[] }):
     Promise<(CloudV2LifecycleWorkspace & { maintenanceWake: { attempt: string; archived: boolean } }) | null> {
@@ -1651,9 +1651,9 @@ export class CloudV2Store {
            AND NOT EXISTS (SELECT 1 FROM cloud_v2_maintenance_wakes m WHERE m.workspace_id=cloud_v2_workspaces.id AND m.kind='wake'
              AND (m.started_at > clock_timestamp() - interval '1 hour'
                OR (m.outcome='gone' AND m.started_at > greatest(cloud_v2_workspaces.machine_stopped_at, cloud_v2_workspaces.stopped_at))))
-           AND CASE WHEN archived_at IS NULL
-             THEN greatest(machine_stopped_at, stopped_at) + interval '10 days' + make_interval(secs => abs(hashtext(id::text)) % 43200) <= clock_timestamp()
-             ELSE (archive_wake_done_at IS NULL OR archive_wake_done_at < archived_at) AND archived_at + interval '10 days' <= clock_timestamp() END
+           AND greatest(machine_stopped_at, stopped_at) + interval '10 days' + make_interval(secs => abs(hashtext(id::text)) % 43200) <= clock_timestamp()
+           -- Archived: one more wake on the machine's own schedule, then none.
+           AND (archived_at IS NULL OR archive_wake_done_at IS NULL OR archive_wake_done_at < archived_at)
          ORDER BY greatest(machine_stopped_at, stopped_at) LIMIT 1 FOR UPDATE SKIP LOCKED`, [input.excludeIds ?? [], input.staleMs])).rows[0];
       if (!due) return null;
       if (due.maintenance_attempt) await tx.query(`UPDATE cloud_v2_maintenance_wakes SET outcome='failed', finished_at=clock_timestamp()
@@ -1671,8 +1671,27 @@ export class CloudV2Store {
    * this wake still owns it, in the same statement that checks both. */
   async beginMaintenanceStop(id: string, attempt: string): Promise<boolean> {
     const result = await withSystemTx(this.pool, tx => tx.query(
-      `UPDATE cloud_v2_workspaces SET maintenance_phase='stopping' WHERE id=$1 AND state='stopped' AND maintenance_attempt=$2`, [id, attempt]));
+      `UPDATE cloud_v2_workspaces SET maintenance_phase='stopping' WHERE id=$1 AND state='stopped' AND maintenance_attempt=$2
+         AND maintenance_phase='waking'`, [id, attempt]));
     return Boolean(result.rowCount);
+  }
+
+  /** A person's start takes a running maintenance wake over, in one statement: the wake lets go at its
+   * next check and makes no further call to the machine. Restamped, so a takeover whose wake died
+   * expires on its own, shorter clock. */
+  async adoptMaintenance(id: string, attempt: string): Promise<boolean> {
+    const result = await withSystemTx(this.pool, tx => tx.query(
+      `UPDATE cloud_v2_workspaces SET maintenance_phase='adopting', maintenance_started_at=clock_timestamp()
+       WHERE id=$1 AND maintenance_attempt=$2 AND maintenance_phase='waking'`, [id, attempt]));
+    return Boolean(result.rowCount);
+  }
+
+  /** Whether a maintenance wake may still act on the machine: still its mark, still waking, and the
+   * workspace still asleep. Checked after every call to the machine. */
+  async maintenanceHeld(id: string, attempt: string): Promise<boolean> {
+    const { rows } = await withSystemTx(this.pool, tx => tx.query(
+      `SELECT 1 FROM cloud_v2_workspaces WHERE id=$1 AND maintenance_attempt=$2 AND maintenance_phase='waking' AND state='stopped'`, [id, attempt]));
+    return rows.length > 0;
   }
 
   /** Ends a maintenance wake on every path: clears its mark and records what Boat reported. */
@@ -1714,7 +1733,8 @@ export class CloudV2Store {
     return withSystemTx(this.pool, async tx => {
       const due = (await tx.query<{ deadline: Date; overdue: boolean }>(`SELECT greatest(machine_stopped_at, stopped_at) + interval '14 days' AS deadline,
           greatest(machine_stopped_at, stopped_at) + interval '12 days' < clock_timestamp() AS overdue
-        FROM cloud_v2_workspaces WHERE state='stopped' AND boat_sandbox_id IS NOT NULL AND archived_at IS NULL AND maintenance_attempt IS NULL
+        FROM cloud_v2_workspaces WHERE state='stopped' AND boat_sandbox_id IS NOT NULL AND maintenance_attempt IS NULL
+          AND (archived_at IS NULL OR archive_wake_done_at IS NULL OR archive_wake_done_at < archived_at)
           AND greatest(machine_stopped_at, stopped_at) + interval '10 days' <= clock_timestamp()
         ORDER BY 1 LIMIT 20000`)).rows;
       const expired = (await tx.query<{ n: number }>(`SELECT count(DISTINCT workspace_id)::int AS n FROM cloud_v2_maintenance_wakes m

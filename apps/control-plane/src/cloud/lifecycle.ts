@@ -76,6 +76,14 @@ export const CLOUD_V2_MAINTENANCE_LEASE_SECONDS = 300;
 export const CLOUD_V2_MAINTENANCE_STALE_MS = 10 * 60_000;
 /** A user wake that finds a maintenance stop under way waits this long between checks. */
 const MAINTENANCE_WAIT_MS = 5_000;
+/** A start that took a wake over waits this long between looks: the wake lets go within its call in flight. */
+const MAINTENANCE_ADOPT_WAIT_MS = 1_000;
+/** A takeover whose wake never let go (its step died) expires after this. Every call a wake makes is
+ * bounded well under it (an exec by its 15–30 s timeout), so a live wake has always let go by then. */
+export const CLOUD_V2_MAINTENANCE_ADOPT_STALE_MS = 2 * 60_000;
+
+/** Thrown inside a maintenance wake the moment a person's start has taken it over. */
+class MaintenanceReleased extends Error {}
 /** Retention: before rebuilding a workspace whose unbacked work only its machine held, the
  * machine must read as gone twice this far apart, after the resume that failed. */
 export const CLOUD_V2_LOSS_CONFIRM_MS = 30_000;
@@ -139,7 +147,7 @@ export type CloudV2LifecycleDeps = {
     | "checkpointForkCreated" | "checkpointForkGone" | "checkpointRetryNext"
     // Retention (`retention`); absent from older compositions, which never enable it.
     | "recordStopProbe" | "restoreForkRefused" | "replaceLostSandbox" | "workspaceBranches" | "recordLostWork"
-    | "claimMaintenanceWake" | "beginMaintenanceStop" | "finishMaintenance" | "clearStaleMaintenance" | "maintenanceBacklog" | "keepLostMachine">;
+    | "claimMaintenanceWake" | "beginMaintenanceStop" | "adoptMaintenance" | "maintenanceHeld" | "finishMaintenance" | "clearStaleMaintenance" | "maintenanceBacklog" | "keepLostMachine">;
   /** Optional for older compositions; the shipped store always provides it. */
   prompts?: CloudV2Store["prompts"];
   pruneEnvironments?: () => Promise<void>;
@@ -606,14 +614,20 @@ export class CloudV2Lifecycle {
         return;
       }
       case "starting": {
-        // A maintenance wake marked its stop before this user wake: let it finish (stopped then
-        // resumed), or take over a mark whose step died. Never resume under a stop in flight.
-        if (workspace.maintenance?.phase === "stopping") {
-          if (now - Date.parse(workspace.maintenance.startedAt) < CLOUD_V2_MAINTENANCE_STALE_MS) {
-            await store.defer(workspace.id, "starting", MAINTENANCE_WAIT_MS);
+        // A maintenance wake has the machine. While it is waking, take it over in one statement and
+        // wait for it to let go (within its call in flight); once it has marked its stop, let that
+        // finish (stopped, then resumed here). Never touch the machine before the mark is gone; a
+        // mark whose step died is taken over.
+        const mark = workspace.maintenance;
+        if (mark) {
+          const staleMs = mark.phase === "adopting" ? CLOUD_V2_MAINTENANCE_ADOPT_STALE_MS : CLOUD_V2_MAINTENANCE_STALE_MS;
+          if (now - Date.parse(mark.startedAt) < staleMs) {
+            // Lost to a stop mark set meanwhile, the next look finds 'stopping' and waits for that.
+            if (mark.phase === "waking") await store.adoptMaintenance(workspace.id, mark.attempt);
+            await store.defer(workspace.id, "starting", mark.phase === "stopping" ? MAINTENANCE_WAIT_MS : MAINTENANCE_ADOPT_WAIT_MS);
             return;
           }
-          await store.clearStaleMaintenance(workspace.id, CLOUD_V2_MAINTENANCE_STALE_MS);
+          await store.clearStaleMaintenance(workspace.id, staleMs);
         }
         let sandboxId = workspace.boatSandboxId, restoring = workspace.restorePending;
         const deadline = restoring || (!sandboxId && workspace.checkpoint) ? RESTORE_DEADLINE_MS : BOOT_DEADLINE_MS;
@@ -838,31 +852,43 @@ export class CloudV2Lifecycle {
     const vm = row.boatSandboxId!, start = this.deps.now?.() ?? Date.now();
     let outcome: "stopped" | "adopted" | "gone" | "failed" = "failed", workerFoundRunning = false, workerOff: boolean | undefined;
     let machineStoppedAt: Date | null = null, snapshotAvailable: boolean | undefined, dataExpiredAt: Date | null = null;
+    // After every call to the machine: a person's start that took the wake over (or opened the
+    // workspace) gets it at once, and nothing of the wake's runs after their worker starts.
+    const held = async () => { if (!await store.maintenanceHeld(row.id, attempt)) throw new MaintenanceReleased(); };
     try {
       try { await compute.resume(vm, CLOUD_V2_MAINTENANCE_LEASE_SECONDS); }
       catch (error) {
         if (!sandboxLost(error)) throw error;
-        // Boat's own answer is recorded; a later user wake decides what a lost machine means.
-        const inspected = await compute.inspect(vm).catch(() => null);
-        snapshotAvailable = inspected?.snapshotAvailable; dataExpiredAt = inspected?.dataExpiredAt ?? null;
+        // One 404 is not proof, and "gone" stops further wakes for this stop: Boat must say so twice.
+        // Boat's own fields are recorded either way; a later user wake decides what a lost machine means.
+        const gone = await this.confirmedGone(vm, inspected => { snapshotAvailable = inspected.snapshotAvailable; dataExpiredAt = inspected.dataExpiredAt ?? null; });
+        if (!gone) throw error;
         outcome = "gone";
         return true;
       }
+      await held();
       // Anything the user left running outside the worker's service also runs for this minute.
       const unit = await compute.exec(vm, WORKER_UNIT_CHECK, 30).catch(() => null);
-      workerFoundRunning = !!unit && /\bactive=active\b/.test(unit.stdout);
-      if (workerFoundRunning) (this.deps.logger?.error ?? this.deps.logger?.warn)?.call(this.deps.logger,
+      await held();
+      const running = !!unit && /\bactive=active\b/.test(unit.stdout);
+      if (running) (this.deps.logger?.error ?? this.deps.logger?.warn)?.call(this.deps.logger,
         `[cloud-v2] worker found running during a maintenance wake; switching it off workspace=${row.id.slice(0, 8)}`);
-      workerOff = await this.switchWorkerOff(vm);
-      if (!workerOff) (this.deps.logger?.error ?? this.deps.logger?.warn)?.call(this.deps.logger,
+      workerFoundRunning = running;
+      const off = await this.switchWorkerOff(vm, held);
+      workerOff = off;
+      if (!off) (this.deps.logger?.error ?? this.deps.logger?.warn)?.call(this.deps.logger,
         `[cloud-v2] maintenance wake could not verify the worker off; stopping at once workspace=${row.id.slice(0, 8)}`);
-      // Opened meanwhile: the person's wake has the running machine.
+      // Opened meanwhile: the person's start has the running machine. Only a wake still waking on a
+      // stopped workspace marks its stop, in one statement.
       if (!await store.beginMaintenanceStop(row.id, attempt)) { outcome = "adopted"; return true; }
       await compute.stop(vm);
       machineStoppedAt = await this.untilArchived(vm);
       outcome = "stopped";
       return true;
     } catch (error) {
+      // Taken over: no further call to the machine, and nothing about its worker is recorded (the
+      // person's start owns it now).
+      if (error instanceof MaintenanceReleased) { outcome = "adopted"; workerOff = undefined; return true; }
       // The short lease archives the machine if our stop did not.
       this.deps.logger?.warn(`[cloud-v2] maintenance wake failed (${errorCode(error)}) workspace=${row.id.slice(0, 8)}`);
       return true;
@@ -922,13 +948,18 @@ export class CloudV2Lifecycle {
   /** Stops and disables the worker service, then checks both took (boat-fake.ts, "worker unit stays
    * disabled": an explicit stop freezes a running worker and resume restores it; a fork or a cold
    * resume starts an enabled one). Two attempts, each bounded by its commands' timeouts. */
-  private async switchWorkerOff(sandboxId: string): Promise<boolean> {
+  private async switchWorkerOff(sandboxId: string, between?: () => Promise<void>): Promise<boolean> {
     for (let attempt = 1; attempt <= 2; attempt++) {
       try {
         await this.deps.compute.exec(sandboxId, WORKER_OFF_COMMAND, CLOUD_V2_BACKUP_PROBE_SECONDS);
+        await between?.();
         const unit = await this.deps.compute.exec(sandboxId, WORKER_UNIT_CHECK, CLOUD_V2_BACKUP_PROBE_SECONDS);
+        await between?.();
         if (unit.exitCode === 0 && !unit.timedOut && workerUnitOff(unit.stdout)) return true;
-      } catch { /* Retried once, then recorded as unverified. */ }
+      } catch (error) {
+        // A maintenance wake taken over stops here; anything else is retried once, then recorded as unverified.
+        if (error instanceof MaintenanceReleased) throw error;
+      }
     }
     return false;
   }
@@ -1195,10 +1226,11 @@ export class CloudV2Lifecycle {
    * deleted, or archived with no snapshot left (Boat's own snapshotAvailable; an expired disk still
    * reads archived). An archived machine whose snapshot is available is never gone, whatever a
    * resume said. */
-  private async confirmedGone(sandboxId: string): Promise<boolean> {
+  private async confirmedGone(sandboxId: string, seen?: (inspected: Awaited<ReturnType<CloudV2Compute["inspect"]>>) => void): Promise<boolean> {
     const gone = async () => {
       try {
         const inspected = await this.deps.compute.inspect(sandboxId);
+        seen?.(inspected);
         return inspected.state === "deleted" || (inspected.state === "archived" && inspected.snapshotAvailable === false);
       } catch (error) { if (sandboxLost(error)) return true; throw error; }
     };

@@ -6,13 +6,15 @@ SET LOCAL lock_timeout = '5s';
 -- push trigger (0248) watches.
 -- machine_stopped_at: Boat's stoppedAt after the latest maintenance wake (stopped_at stays the user's stop). The next
 -- wake counts from whichever of the two is later.
--- maintenance_attempt/maintenance_phase/maintenance_started_at: the wake in flight. 'stopping' is set in the same
--- statement that checks state='stopped'; a user wake that finds it waits for it to clear or takes it over.
--- archive_wake_done_at: an archived workspace is woken exactly once per archive, 10 days after it.
+-- maintenance_attempt/maintenance_phase/maintenance_started_at: the wake in flight. A person's start that finds
+-- 'waking' takes it over in one statement ('adopting', restamped) and waits; the wake checks its mark after every
+-- call to the machine and lets go at once. 'stopping' is set only from 'waking', in the same statement that checks
+-- state='stopped'; a start that finds it waits for the stop to finish. A mark whose step died is taken over.
+-- archive_wake_done_at: an archived workspace gets exactly one more wake per archive, when its machine is next due.
 ALTER TABLE cloud_v2_workspaces
   ADD COLUMN machine_stopped_at timestamptz,
   ADD COLUMN maintenance_attempt uuid,
-  ADD COLUMN maintenance_phase text CHECK (maintenance_phase IN ('waking', 'stopping')),
+  ADD COLUMN maintenance_phase text CHECK (maintenance_phase IN ('waking', 'adopting', 'stopping')),
   ADD COLUMN maintenance_started_at timestamptz,
   ADD COLUMN archive_wake_done_at timestamptz,
   -- A maintenance wake verified the worker service off for this stop generation (the stop itself may not have).
