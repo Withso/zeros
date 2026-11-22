@@ -158,10 +158,6 @@ export function closeSideChat(
       if (confirmed !== false) return;
       toast.error("Couldn't confirm the side chat stopped", {
         description: "It may still be running in the cloud workspace.",
-        action: { label: "Reopen side chat", onClick: () => {
-          editChat(dispatch, chatId, { archived: false });
-          publishSideChat(dispatch, { ...chat, archived: false });
-        } },
       });
     }).catch(() => {});
   }
