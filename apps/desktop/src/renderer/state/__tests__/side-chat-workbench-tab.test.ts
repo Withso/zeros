@@ -153,14 +153,14 @@ describe("OPEN_SIDE_CHAT", () => {
     dispatch({ type: "OPEN_SIDE_CHAT", chat: side });
     const scopeKey = workbenchScopeForFolder(folder);
     const tab = useWorkspaceStore.getState().workbenchByScope[scopeKey]!.tabs.find((item) => item.chatId === side.id)!;
-    let stopped = false;
+    let stopped: string | null = null;
     closeSideChat(dispatch, {
-      closeSession: async () => { stopped = true; return true; },
+      closeSession: async (id) => { stopped = id; return true; },
       getCloseActivity: () => ({ running: true, queuedCount: 0 }),
     }, tab.id, side.id);
     await Promise.resolve();
     const state = useWorkspaceStore.getState();
-    expect(stopped).toBe(true);
+    expect(stopped).toBe(side.id);
     expect(state.workbenchByScope[scopeKey]!.tabs.some((item) => item.chatId === side.id)).toBe(false);
     expect(state.chats.find((chat) => chat.id === side.id)?.archived).toBe(true);
     expect(state.activeChatId).toBe(source.id);
