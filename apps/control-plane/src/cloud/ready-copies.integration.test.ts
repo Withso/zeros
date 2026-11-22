@@ -789,7 +789,8 @@ d("cloud v2 ready copies", () => {
           readable(LIB),
           { position: 0, path: "secret", status: "skipped", repository: "acme/secret", reason: "no access" }] });
       await withSystemTx(pool, async tx => {
-        expect(await workerSubmodules(tx, id)).toEqual({ submodules: [
+        const layout = await workerRepositories(tx, await new CloudV2Store(pool).get(id, member), { forked: false });
+        expect(workerSubmodules(layout)).toEqual({ submodules: [
           { position: 0, path: "lib", repository: "acme/lib", commit: LIB, gitDir: `modules/${submoduleGitDirName("lib")}` },
           { position: 0, path: "lib/inner", repository: "acme/inner", commit: "d".repeat(40), gitDir: nested }] });
         // Only a planned submodule's repository is ever a token target, and never by another workspace.
@@ -838,7 +839,9 @@ d("cloud v2 ready copies", () => {
       expect(await forks().prepare(member)).toMatchObject({ sandboxId: expect.any(String) });
       // Its plan reaches the worker as public; no token is ever minted for it.
       await withSystemTx(pool, async tx => {
-        expect((await workerSubmodules(tx, member.id)).submodules!.find(entry => entry.path === "vendor")).toMatchObject({ repository: "oss/vendor", public: true });
+        // The fixture's row has what workerRepositories reads: its project, checkout and repository.
+        const layout = await workerRepositories(tx, member as unknown as import("./store.js").CloudV2Workspace, { forked: false });
+        expect(workerSubmodules(layout).submodules!.find(entry => entry.path === "vendor")).toMatchObject({ repository: "oss/vendor", public: true });
         expect(await workspaceSubmoduleSource(tx, member.id, "oss/vendor")).toBeNull();
       });
     });

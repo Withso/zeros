@@ -370,7 +370,6 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
               }) : null;
             const localCommandsEnabled = v2.promptOutbox && commandsAllowed;
             const layout = await workerRepositories(tx, workspace, { forked: await forkedFromCopy(workspace.id) });
-            const submodules = await workerSubmodules(tx, workspace.id);
             return { t: "config", actingUser: 1, bootstrapContextId, agents: {}, ...availability?.presentation, gitIdentity,
               gitIdentitySource: creatorUserId ? "creator" : "actor",
               loginRevision: availability?.loginRevision ?? workspace.loginRevision ?? "0",
@@ -379,7 +378,7 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
               workspace: { id: workspace.id, organizationId: workspace.organizationId, repository: workspace.repository,
                 checkoutPath: workspaceCheckoutPath(workspace), branch: workspace.branch, baseBranch: workspace.baseBranch,
                 github: { ...target, previousRepositories: [workspace.repository] }, ...(setup ?? layout.firstSetup ?? {}), ...(baseCommit ? { baseCommit } : {}),
-                ...repositoriesConfig(layout, { ...target, previousRepositories: [workspace.repository] }), ...submodules } } satisfies ConfigFrame;
+                ...repositoriesConfig(layout, { ...target, previousRepositories: [workspace.repository] }), ...workerSubmodules(layout) } } satisfies ConfigFrame;
           }, { serializable: true }));
         } catch (error) {
           if (!(error && typeof error === "object" && "code" in error && error.code === "40001") || attempt === 2) throw error;
@@ -397,9 +396,8 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
     const [access, setup] = await Promise.all([github.workerConfiguration(workspace), github.workspaceSetup(workspace, computers)]);
     const { repositoryBinding } = access;
     const forked = await forkedFromCopy(workspace.id);
-    const { selectedLogins, baseCommit, environment, mcpServers, layout, repositoryEnvironments, submodules } = await withSystemTx(pool, async tx => ({
+    const { selectedLogins, baseCommit, environment, mcpServers, layout, repositoryEnvironments } = await withSystemTx(pool, async tx => ({
       layout: await workerRepositories(tx, workspace, { forked }),
-      submodules: await workerSubmodules(tx, workspace.id),
       // Creator path: each later repository's own pinned environment.
       repositoryEnvironments: await environments.resolveRepositories(workspace, tx),
       selectedLogins: await logins.all(workspace.creatorUserId, workspace.organizationId, tx),
@@ -426,7 +424,7 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
         ...(setup ?? layout.firstSetup ?? {}),
         ...(baseCommit ? { baseCommit } : {}),
         ...repositoriesConfig(layout, repositoryBinding, repositoryEnvironments),
-        ...submodules,
+        ...workerSubmodules(layout),
       },
       agents,
       ...(environment ? { environment } : {}),

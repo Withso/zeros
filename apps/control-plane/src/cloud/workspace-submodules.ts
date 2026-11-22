@@ -13,7 +13,7 @@ import { withSystemTx, type Tx } from "../db.js";
 import type { createSelectedCloudGithubTokens } from "./github-selected-tokens.js";
 import type { CloudV2Workspace } from "./store.js";
 import { requireWorkspaceCreator } from "./workspace-access.js";
-import { workspaceTokenSource } from "./workspace-repositories.js";
+import { workspaceTokenSource, type WorkerSubmodule } from "./workspace-repositories.js";
 import type { ReadyCopySubmodule } from "./ready-copies.js";
 import { composeSubmodulePlan, type SubmoduleLevel, type SubmodulePlan } from "./submodules.js";
 
@@ -171,12 +171,10 @@ export async function copySubmodulesReadable(tx: Tx, workspaceId: string, copy: 
   return fetched.every(id => readable.has(id));
 }
 
-/** The plan delivered to the worker (workspace-submodules-v1): parents before their own submodules. */
-export async function workerSubmodules(tx: Tx, workspaceId: string): Promise<{ submodules?: { position: number; path: string; repository: string; commit: string; gitDir: string; public?: true }[] }> {
-  const { rows } = await tx.query<{ position: number; path: string; repository: string; commit: string; gitDir: string; public: boolean }>(
-    `SELECT position, path, repository, commit, git_dir AS "gitDir", public FROM cloud_v2_workspace_submodules WHERE workspace_id=$1 AND status='fetch'
-     ORDER BY position, char_length(git_dir), path LIMIT 320`, [workspaceId]);
-  return rows.length ? { submodules: rows.map(({ public: isPublic, ...row }) => isPublic ? { ...row, public: true as const } : row) } : {};
+/** The plan delivered to the worker (workspace-submodules-v1), parents first: read by workerRepositories in the
+ * statement the configuration already makes, never a statement of its own. */
+export function workerSubmodules(layout: { submodules?: WorkerSubmodule[] }): { submodules?: WorkerSubmodule[] } {
+  return layout.submodules?.length ? { submodules: layout.submodules.slice(0, 320) } : {};
 }
 
 /** The reason a creator signed in with a personal access token fetches no submodule. */
