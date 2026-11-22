@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { setCloudV2RetentionDocuments } from "../store.js";
 import pg from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { withSystemTx, withUserTx } from "../../db.js";
@@ -40,6 +41,19 @@ database("team follows, pins, provenance and paging", () => {
       .workspaces.find((row: { id: string }) => row.id === f.workspace.id);
     expect(await list(f.creator)).toMatchObject({ lostWork: { restored: "earlier" } });
     expect(await list()).not.toHaveProperty("lostWork");
+  });
+
+  it("says on the team list that this server runs retention exactly when documents carry it; off, the reply is what it was", async () => {
+    const reply = async () => await (await f.call(`/v1/cloud-v2/workspaces?organizationId=${f.organizationId}`)).json() as Record<string, unknown>;
+    const off = await reply();
+    expect(off).not.toHaveProperty("retention");
+    setCloudV2RetentionDocuments(true);
+    try {
+      const on = await reply();
+      expect(on.retention).toBe(true);
+      expect((on.workspaces as { keep?: unknown }[]).every(row => typeof row.keep === "boolean")).toBe(true);
+    } finally { setCloudV2RetentionDocuments(false); }
+    expect(await reply()).toEqual(off);
   });
 
   it("applies filters and binds opaque keyset cursors to the person and filters", async () => {
