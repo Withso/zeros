@@ -317,7 +317,10 @@ export const TurnPromptHeader = memo(function TurnPromptHeader({
     </div>
   );
   return (
-    <div className="zeros-agent-turn-prompt group/usermsg relative flex w-full max-w-(--chat-lane) min-w-0 flex-col items-end">
+    // The top padding reserves the popup's band, so it never covers the
+    // output above.
+    <div className="zeros-agent-turn-prompt group/usermsg flex w-full max-w-(--chat-lane) min-w-0 flex-col items-end pt-5">
+      <div className="relative flex w-full min-w-0 flex-col items-end">
       {localFrom ? (
         // A sender line, as in a chat app: the sending chat's name and logo,
         // right-aligned above its bubble. "Sent from" is for screen readers.
@@ -355,6 +358,7 @@ export const TurnPromptHeader = memo(function TurnPromptHeader({
           revealClassName="group-focus-within/usermsg:pointer-events-auto group-focus-within/usermsg:opacity-100 group-hover/usermsg:pointer-events-auto group-hover/usermsg:opacity-100"
         />
       )}
+      </div>
     </div>
   );
 });
