@@ -705,8 +705,10 @@ export function backupProbeCommand(checkoutPaths: readonly string[], home = "/ho
 }
 
 /** Records each checkout's ignored-file baseline (what the backup would capture of its ignored files, with
- * their digests), once a create has finished its setup and seeding: the probe then counts those files, unchanged,
- * as reproducible. Never replaces an existing baseline. Prints zeros-baseline recorded, or nothing. */
+ * their digests): the probe then counts those files, unchanged, as reproducible. Not called yet. Its caller is
+ * the project builder (ready-copies.ts), once, on the build machine after the last setup and before the build's
+ * scrub and stop: no person exists during a build, and every fork inherits the file (its checkout paths must
+ * be the fork's). Never replaces an existing baseline. Prints zeros-baseline recorded, or nothing. */
 export function ignoredBaselineCommand(checkoutPaths: readonly string[], home = "/home/user"): string {
   if (!checkoutPaths.length) throw new Error("Invalid baseline");
   if (!home.startsWith("/") || /[\n\0]/.test(home) || home.split("/").some(part => part === "..")) throw new Error("Invalid baseline");
