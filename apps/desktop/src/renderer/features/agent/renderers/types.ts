@@ -130,6 +130,13 @@ export interface RendererContext {
     attachments: import("../composer-attachments").ComposerAttachment[],
     segments?: import("../composer-editor").ComposerSegment[],
   ) => void;
+  /** Opens a side chat branched at a message; absent where the transcript
+   *  is read-only or detached from a chat. */
+  openSideChat?: (from: import("../side-chat").SideChatSource) => void;
+  warmSideChat?: (from: import("../side-chat").SideChatSource) => void;
+  /** Opening prompt of the turn being rendered: a side chat's fallback cut
+   *  when its exact message is outside the loaded history. */
+  turnPromptId?: string | null;
   /** Open a full-screen image preview overlay
    *  for a sent user-bubble image attachment. Same lightbox the
    *  composer uses; lifted to the chat level so any sent image is

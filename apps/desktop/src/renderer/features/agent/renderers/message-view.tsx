@@ -67,6 +67,7 @@ export const MessageView = memo(
       prev.ctx.attachmentCwd !== next.ctx.attachmentCwd ||
       prev.ctx.chatId !== next.ctx.chatId
       || prev.ctx.liveTextSource !== next.ctx.liveTextSource
+      || prev.ctx.openSideChat !== next.ctx.openSideChat
     )
       return false;
     if (prev.ctx.liveTextSource && prev.ctx.isStreaming !== next.ctx.isStreaming) return false;

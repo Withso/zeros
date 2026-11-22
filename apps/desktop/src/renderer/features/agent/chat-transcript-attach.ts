@@ -146,6 +146,7 @@ interface CacheEntry {
   chatId: string;
   mode: TranscriptMode;
   throughMessageId: string | null;
+  cut: TranscriptCut;
   promise: Promise<TranscriptSnapshot>;
 }
 
@@ -163,9 +164,14 @@ function cacheKey(
   mode: TranscriptMode,
   lastMessageAt: number,
   throughMessageId: string | null = null,
+  cut: TranscriptCut = "turn",
 ) {
-  return JSON.stringify([chatId, mode, lastMessageAt, throughMessageId]);
+  return JSON.stringify([chatId, mode, lastMessageAt, throughMessageId, cut]);
 }
+
+/** "turn" ends after the whole turn opened by `throughMessageId`; "message"
+ *  ends at that exact message (a side chat branched from any message). */
+export type TranscriptCut = "turn" | "message";
 
 export interface LoadTranscriptInput {
   chatId: string;
@@ -176,7 +182,23 @@ export interface LoadTranscriptInput {
    *  current end of the chat. Used by a historical footer's Zeros-native fork
    *  so later turns can never leak into the staged handoff. */
   throughMessageId?: string;
+  cut?: TranscriptCut;
   meta: TranscriptMeta;
+}
+
+/** Bound a chronological transcript through one exact message. A missing
+ * target fails closed, like transcriptMessagesThroughTurn. */
+export function transcriptMessagesThroughMessage(
+  messages: AgentMessage[],
+  throughMessageId: string,
+): AgentMessage[] {
+  const target = messages.findIndex((message) => message.id === throughMessageId);
+  if (target === -1) {
+    throw new Error(
+      `Transcript message ${throughMessageId} is outside the loaded history.`,
+    );
+  }
+  return messages.slice(0, target + 1);
 }
 
 /** Bound a chronological transcript through one exact user-owned turn.
@@ -223,11 +245,13 @@ export function loadTranscriptSnapshot(
   input: LoadTranscriptInput,
 ): Promise<TranscriptSnapshot> {
   const throughMessageId = input.throughMessageId ?? null;
+  const cut = input.cut ?? "turn";
   const key = cacheKey(
     input.chatId,
     input.mode,
     input.lastMessageAt,
     throughMessageId,
+    cut,
   );
   const hitAt = cache.findIndex((e) => e.key === key);
   if (hitAt !== -1) {
@@ -240,9 +264,11 @@ export function loadTranscriptSnapshot(
 
   const promise = (async (): Promise<TranscriptSnapshot> => {
     const { messages, complete } = await loadFullTranscript(input.chatId);
-    const bounded = throughMessageId
-      ? transcriptMessagesThroughTurn(messages, throughMessageId)
-      : messages;
+    const bounded = !throughMessageId
+      ? messages
+      : cut === "message"
+        ? transcriptMessagesThroughMessage(messages, throughMessageId)
+        : transcriptMessagesThroughTurn(messages, throughMessageId);
     const { text, count, truncated } = formatTranscript(
       bounded,
       input.mode,
@@ -260,7 +286,8 @@ export function loadTranscriptSnapshot(
     if (
       cache[i].chatId === input.chatId &&
       cache[i].mode === input.mode &&
-      cache[i].throughMessageId === throughMessageId
+      cache[i].throughMessageId === throughMessageId &&
+      cache[i].cut === cut
     ) {
       cache.splice(i, 1);
     }
@@ -270,6 +297,7 @@ export function loadTranscriptSnapshot(
     chatId: input.chatId,
     mode: input.mode,
     throughMessageId,
+    cut,
     promise,
   };
   cache.push(entry);

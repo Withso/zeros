@@ -133,7 +133,7 @@ function harness(cloud = true, status = "stopped", resident = true) {
       sendPrompt: cloud ? (...args: unknown[]) => provider.actions.sendPrompt("chat", ...args.slice(0, 5), undefined, args[5], args[6], args[7], args[8], args[9]) : localSend },
     agentSessions: { getSendGeneration: () => cancellation }, cloudWorkspaceDocument: () => doc, parseCloudWorkspaceKey, isCloudWorkspace,
     cloudQueuedPrompt, redactLogSecrets: (s: string) => s, setCloudSendError: cloudError,
-    notifyAgentSendFailure: failureNotice, crypto: provider.crypto,
+    notifyAgentSendFailure: failureNotice, crypto: provider.crypto, sideChatHandoffFor: async () => "", markSideChatSeedSent: vi.fn(),
     designFrameContext: { capture: () => null, pin: vi.fn(), consume: vi.fn() }, hasPendingTextAttachmentDelivery: () => false, transcriptAttachesRef: { current: new Set() },
     composerAttachmentsReading: () => false, waitForComposerAttachmentReads: vi.fn(async () => {}), waitForPendingTextAttachmentDeliveries: vi.fn(async () => {}),
     useSessionsStore: { getState: () => store }, useWorkspaceStore: { getState: () => workspace }, transcriptParkedChatRef: { current: null },
