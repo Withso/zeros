@@ -1,8 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   buildHarnessSwitchMessage,
-  canAutoContinueAfterSwitch,
-  switchContinuation,
+  handoffContextPrefix,
+  stagedPickOnSend,
+  heldSwitchSend,
+  handoffAppliesTo,
   commitHarnessSwitch,
   type HarnessSwitchCommit,
   harnessSwitchBlockedByQueue,
@@ -88,27 +90,62 @@ describe("harness switch guards", () => {
     expect(harnessSwitchBlockedByQueue(false, 2)).toBe(false);
   });
 
-  it("auto-continues only with the seeded transcript alone", () => {
-    const transcript = { name: "transcript.md" };
-    expect(canAutoContinueAfterSwitch({ displayText: "  ", attachments: [transcript] })).toBe(true);
-    expect(canAutoContinueAfterSwitch({ displayText: "half a thought", attachments: [transcript] })).toBe(false);
-    expect(canAutoContinueAfterSwitch({ displayText: "", attachments: [transcript, { name: "a.png" }] })).toBe(false);
-    expect(canAutoContinueAfterSwitch({ displayText: "", attachments: [] })).toBe(false);
-    expect(canAutoContinueAfterSwitch(null)).toBe(false);
-  });
+});
 
-  it("waits for the seeded transcript to reach the composer before deciding", () => {
-    const pending = { chatId: "c1", agentId: "cursor", sourceKey: "transcript:c1" };
-    const empty = { displayText: "", attachments: [] };
-    const seeded = { displayText: " ", attachments: [{ name: "c1.handoff.txt" }] };
-    const at = (over: Partial<Parameters<typeof switchContinuation>[1]> = {}) =>
-      switchContinuation(pending, { chatId: "c1", agentId: "cursor", stagedSourceKeys: [], composer: empty, ...over });
-    expect(at()).toBe("wait");
-    expect(at({ agentId: "codex", stagedSourceKeys: ["transcript:c1"], composer: seeded })).toBe("wait");
-    expect(at({ chatId: "c2", stagedSourceKeys: ["transcript:c1"], composer: seeded })).toBe("wait");
-    expect(at({ stagedSourceKeys: ["transcript:c1"], composer: seeded })).toBe("send");
-    expect(at({ stagedSourceKeys: ["transcript:c1"], composer: { ...seeded, displayText: "mine" } })).toBe("ask");
-    expect(switchContinuation(null, { chatId: "c1", agentId: "cursor", stagedSourceKeys: [], composer: empty })).toBe("wait");
+describe("handoff context prefix", () => {
+  it("frames the earlier conversation as context before the user's message", () => {
+    const prefix = handoffContextPrefix({ fromLabel: 'GPT "6"', text: "## User\n\nfix it\n" });
+    expect(prefix.startsWith('<context_handoff from="GPT \'6\'">')).toBe(true);
+    expect(prefix).toContain("not a new request");
+    expect(prefix).toContain("## User\n\nfix it\n</context_handoff>");
+    expect(`${prefix}hello`.endsWith("User message:\nhello")).toBe(true);
+    expect(prefix).not.toContain("omitted");
+    expect(handoffContextPrefix({ fromLabel: "a", text: "t", complete: false })).toContain("omitted");
+  });
+});
+
+describe("held switch send", () => {
+  const held = { chatId: "c", generation: 3 };
+  it("waits while the turn runs, then sends", () => {
+    expect(heldSwitchSend(held, { chatId: "c", running: true, generation: 3 })).toBe("wait");
+    expect(heldSwitchSend(held, { chatId: "c", running: false, generation: 3 })).toBe("send");
+  });
+  it("drops the held send when Stop ended the turn", () => {
+    expect(heldSwitchSend(held, { chatId: "c", running: false, generation: 4 })).toBe("drop");
+  });
+  it("ignores another chat and an empty hold", () => {
+    expect(heldSwitchSend(held, { chatId: "d", running: false, generation: 3 })).toBe("wait");
+    expect(heldSwitchSend(null, { chatId: "c", running: false, generation: 3 })).toBe("wait");
+  });
+});
+
+describe("pending handoff", () => {
+  const pending = { chatId: "c", agentId: "cursor", handoff: "<context_handoff>", auto: false };
+  it("rides the next send to the new harness only", () => {
+    expect(handoffAppliesTo(pending, "c", "cursor")).toBe(true);
+    expect(handoffAppliesTo(pending, "c", "codex")).toBe(false);
+    expect(handoffAppliesTo(pending, "d", "cursor")).toBe(false);
+    expect(handoffAppliesTo(null, "c", "cursor")).toBe(false);
+  });
+});
+
+describe("staged pick on send", () => {
+  const base = { harnessChanged: true, hasDraft: true, queuedCount: 0, running: false, behavior: "queue" as const };
+  it("changes the model with the message, even mid-turn", () => {
+    expect(stagedPickOnSend({ ...base, harnessChanged: false, running: true })).toBe("model");
+  });
+  it("leaves an empty composer and the staged pick alone", () => {
+    expect(stagedPickOnSend({ ...base, hasDraft: false })).toBe("none");
+  });
+  it("waits for the running turn instead of stopping it", () => {
+    expect(stagedPickOnSend({ ...base, running: true })).toBe("hold");
+  });
+  it("restarts in the new harness only on an explicit steer", () => {
+    expect(stagedPickOnSend({ ...base, running: true, behavior: "steer" })).toBe("restart");
+    expect(stagedPickOnSend(base)).toBe("switch");
+  });
+  it("refuses a harness change while follow-ups are queued", () => {
+    expect(stagedPickOnSend({ ...base, queuedCount: 1 })).toBe("blocked");
   });
 });
 
