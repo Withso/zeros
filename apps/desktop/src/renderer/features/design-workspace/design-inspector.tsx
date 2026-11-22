@@ -223,7 +223,7 @@ import { designComponentPartOf, designComponentSlotOf } from "@zeros/protocol/de
 import { useDesignHistoryPresentation } from "./state/design-history-presentation";
 import { designComponentDisplayTitle, designComponentIdentityLabel, designComponentInstanceIdentity, designComponentSlotLabel, designFrameComponentPresentation,
   designComponentTextLock, designMissingComponentOf, isDesignComponentPartNodeId } from "./state/design-component-parts";
-import { designBindingLayerId, designInstanceBindings, designMainLayerControls, designPartControls, designRootSizeControls, designWithoutBoundSize } from "./state/design-component-bindings";
+import { designBindingLayerId, designControlLabels, designLayerBoundStyles, designMainLayerControls, designPartControls, designRuntimeBoundStyles, designWithoutBoundStyles, rememberDesignRuntimeBindings } from "./state/design-component-bindings";
 import { MessageRow } from "../../shared/ui/primitives/message-row";
 import type { DesignComponentOptionsTarget } from "./design-component-options";
 import {
@@ -1580,6 +1580,7 @@ function designInspectorHistoryOwnerKey(
 }
 
 type DesignInspectorTab = "options" | "style" | "css";
+const NO_BOUND_STYLES: Readonly<Record<string, readonly string[]>> = Object.freeze({});
 /** What the inspector edits for a selection. A control is the only way to
  * change a component from outside, so an instance shows its size and Controls,
  * a part or slot its instance's Controls, and a main Controls and Style with
@@ -1794,6 +1795,9 @@ export const DesignInspector = React.memo(function DesignInspector({
   const elementDetails = styleTargetNodeId && details?.oid === styleTargetNodeId && currentReadback(details.sourceVersion)
     ? details
     : null;
+  // The selected layer's winners complete what its component's bindings say
+  // (rules in linked stylesheets); the cache refuses by the same answer.
+  if (workspaceId && frame && elementDetails) rememberDesignRuntimeBindings(workspaceId, frame, elementDetails);
   const frameComponentPresentation = frame ? designFrameComponentPresentation(frame, (file) =>
     designWorkspaceSnapshotCache.peekSnapshot(workspaceId ?? "").data?.frames.find((candidate) => candidate.file === file)?.title) : null;
   const errors = useMemo(
@@ -2985,7 +2989,7 @@ export const DesignInspector = React.memo(function DesignInspector({
           );
         }
         for (const [nodeId, styles] of [...updates]) {
-          const kept = designWithoutBoundSize(currentFrame, nodeId, styles);
+          const kept = designWithoutBoundStyles(workspaceId, currentFrame, nodeId, styles);
           if (kept) updates.set(nodeId, kept);
           else updates.delete(nodeId);
         }
@@ -3133,6 +3137,10 @@ export const DesignInspector = React.memo(function DesignInspector({
     options?: DesignLayoutFieldOptions,
   ) => {
     if (!styleContext) return null;
+    // On a main, a value a control drives is that control's: the field shows
+    // the control while the winner reads it, and otherwise says what sets it.
+    const boundControls = [...new Set([property, ...(options?.linkedProperties ?? [])].flatMap((name) => mainBoundStyles[name] ?? []))];
+    if (boundControls.length) return boundStyleField(label, property, boundControls);
     // A main's W and H are its root's, the component's own size; its X and Y
     // still place the frame.
     const frameGeometryProperty = frameStyleTarget &&
@@ -3757,13 +3765,52 @@ export const DesignInspector = React.memo(function DesignInspector({
       />
     </React.Suspense>
   ) : undefined;
-  const instanceRootSize = selectionKind === "instance" && instanceNodeId ? designRootSizeControls(designInstanceBindings(frame, instanceNodeId)) : null;
+  const instanceBound = selectionKind === "instance" && instanceNodeId && workspaceId ? designLayerBoundStyles(workspaceId, frame, instanceNodeId) : null;
+  const instanceRootSize = instanceBound ? { width: [...(instanceBound.width ?? [])], height: [...(instanceBound.height ?? [])] } : null;
   const instanceBoundSize = instanceRootSize && (instanceRootSize.width.length || instanceRootSize.height.length)
     ? { x: boundSizeControl(instanceRootSize.width, "x"), y: boundSizeControl(instanceRootSize.height, "y") }
     : undefined;
   const instanceSizeControls = instanceBoundSize ? [...(instanceRootSize?.width ?? []), ...(instanceRootSize?.height ?? [])] : [];
   const stylePanel = designInspectorPanelState(activeTab, "style");
   const cssPanel = designInspectorPanelState(activeTab, "css");
+  // A main's own layers: what its controls drive, statically and as the
+  // runtime reported for this layer.
+  const mainBoundStyles = workspaceId && frame && styleContext && frameComponentPresentation?.kind === "main" && mainComponent
+    ? designLayerBoundStyles(workspaceId, frame, styleContext.nodeId)
+    : NO_BOUND_STYLES;
+  const mainControl = (controls: readonly string[], key: string, name: string) => workspaceId && frame && mainComponent ? (
+    <React.Suspense key={key} fallback={null}>
+      <DesignComponentOptions
+        workspaceId={workspaceId}
+        frame={frame}
+        target={{ kind: "main", component: mainComponent, ...(frame.component ? {} : { undeclared: true as const }) }}
+        directory=""
+        lint={lint}
+        active={active && stylePanel.active}
+        shownVariant={shownVariant}
+        disabled={!active || !stylePanel.active}
+        only={{ controls, layer: { id: styleContext?.nodeId ?? "", name } }}
+        embedded
+      />
+    </React.Suspense>
+  ) : null;
+  const boundStyleField = (label: string, property: string, controls: readonly string[]) => {
+    const winner = presentedElementDetails?.authoredStyles?.[property];
+    const reads = mainComponent && winner && Object.keys(designRuntimeBoundStyles(mainComponent, { [property]: winner })).length > 0;
+    if (reads) return mainControl(controls, `bound:${property}`, label);
+    // Bound in some variant, state or condition, but not what wins now: read only.
+    const labels = frame ? designControlLabels(frame, styleContext?.nodeId ?? "", controls) : [...controls];
+    return (
+      <div key={`bound:${property}`} data-design-bound-field={property} className="bg-bg2 text-fg3 flex min-h-7 min-w-0 items-center gap-2 rounded-md px-2 text-xs">
+        <span className="text-fg2 shrink-0">{label}</span>
+        <span className="min-w-0 truncate">{`Set by ${labels.join(", ")}`}</span>
+      </div>
+    );
+  };
+  const mainBoundSize = selectionKind === "main-root" || selectionKind === "main-layer"
+    ? { x: mainBoundStyles.width ? mainControl(mainBoundStyles.width, "size:x", "Width") : undefined,
+        y: mainBoundStyles.height ? mainControl(mainBoundStyles.height, "size:y", "Height") : undefined }
+    : undefined;
 
   // Width, placement, and the popover boundary belong to the floating panel
   // that stacks this inspector below Layers.
@@ -3880,7 +3927,7 @@ export const DesignInspector = React.memo(function DesignInspector({
             ) : null}
 
             {styleContext && presentedElementDetails ? (
-              styleEditor(selectionKind === "instances" ? "size" : undefined)
+              styleEditor(selectionKind === "instances" ? "size" : undefined, mainBoundSize)
             ) : workspaceId && !frameSelected && !selectedNodeId ? (
               <DesignCanvasBackgroundEditor
                 key={activePageId ?? "legacy"}

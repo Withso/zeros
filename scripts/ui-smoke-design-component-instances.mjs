@@ -86,9 +86,9 @@ export async function runDesignComponentInstancesSmoke({ page, check }) {
   await expect(layer("cc-chips")).toHaveCount(1);
   check("a main's frame row is its root layer: the root has no row of its own and its layers sit under the frame",
     (await layer("cc-root").count()) === 0);
-  check("selecting a main edits its root: W reads the root's width, which its Width option sets",
-    (await page.locator('[data-design-inspector] [data-design-size-axis="x"]').innerText()).includes("zd-width"),
-    await page.locator('[data-design-inspector] [data-design-size-axis="x"]').innerText());
+  check("selecting a main edits its root: its Style shows the Width control in place of W, since Width sets the root's width",
+    (await page.locator('[data-design-style-panel] [data-design-embedded-controls] [data-option-row]').filter({ hasText: "Width" }).count()) === 1 &&
+      (await page.locator('[data-design-style-panel] [data-design-size-axis="x"]').count()) === 0);
   await expect(variantRow()).toContainText("Default");
   await variantRow().click();
   const items = await page.getByRole("menuitemradio").allInnerTexts();
@@ -159,6 +159,43 @@ export async function runDesignComponentInstancesSmoke({ page, check }) {
   check("text a hole fills is read only on the canvas and says which option sets it",
     (await page.locator("[data-design-inline-text-editor]").count()) === 0);
   await quiet();
+
+  // A layer of the main a control reaches only through a linked stylesheet:
+  // its winner reads the main's own --chip-round, which Gap sets. Once the
+  // layer is selected its Corner radius field is the Gap control, and a raw
+  // write is refused before anything is sent.
+  await expect(async () => {
+    await layer("cc-chips").click({ timeout: 2_000 });
+    await expect(layer("cc-chips")).toHaveAttribute("aria-selected", "true", { timeout: 2_000 });
+  }).toPass({ timeout: 15_000 });
+  const linkedGap = page.locator('[data-design-style-panel] [data-design-embedded-controls]').getByLabel("Gap", { exact: true });
+  await expect(linkedGap).toHaveCount(1);
+  const writesBeforeRefused = await writes();
+  const refused = await page.evaluate(async () => {
+    const cache = await import("/apps/desktop/src/renderer/features/design-workspace/state/design-workspace-cache.ts");
+    const frame = cache.designWorkspaceSnapshotCache.peekSnapshot("ws_design_harness").data.frames.find((candidate) => candidate.file === "pricing.html");
+    return cache.updateDesignNodeStylesCached("ws_design_harness", { frame: "pricing.html", nodeId: "cc-chips", sourceVersion: frame.sourceVersion,
+      styles: { "border-radius": "9px" } }).then(() => "written", (error) => String(error?.message ?? error));
+  });
+  check("a property a control reaches through a linked sheet shows that control on the main, and a raw write is refused",
+    refused.includes("Gap") && (await writes()) === writesBeforeRefused, refused);
+
+  // Deleting a layer controls drive asks first; Cancel keeps it and its selection.
+  await expect(async () => {
+    await layer("cc-toolbar").click({ timeout: 2_000 });
+    await expect(layer("cc-toolbar")).toHaveAttribute("aria-selected", "true", { timeout: 2_000 });
+  }).toPass({ timeout: 15_000 });
+  const writesBeforeDelete = await writes();
+  await page.getByLabel("Design canvas", { exact: true }).focus();
+  await page.keyboard.press("Backspace");
+  const deleteDialog = page.locator("[data-design-bound-delete]");
+  await expect(deleteDialog).toBeVisible();
+  const deleteText = await deleteDialog.innerText();
+  await deleteDialog.getByRole("button", { name: "Cancel" }).click();
+  await expect(deleteDialog).toHaveCount(0);
+  check("deleting a main's layer that controls drive names them and asks; Cancel keeps the layer and its selection",
+    /Toolbar/.test(deleteText) && /Label/.test(deleteText) && (await writes()) === writesBeforeDelete &&
+      (await layer("cc-toolbar").getAttribute("aria-selected")) === "true", deleteText);
 
   // ── An instance in another frame ──
   await selectInstance();

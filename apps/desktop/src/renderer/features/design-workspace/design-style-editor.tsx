@@ -78,7 +78,7 @@ interface DesignStyleEditorProps {
   details: DesignRuntimeNodeDetails;
   /** Only the Size fields: an instance is sized from outside, never styled. */
   only?: "size";
-  /** With only Size: an axis a control drives shows that control. */
+  /** An axis a control drives shows that control in Size. */
   boundSize?: { x?: React.ReactNode; y?: React.ReactNode };
   livePreviewOwner?: DesignLivePreviewOwner;
   renderField: (
@@ -385,6 +385,7 @@ export function DesignStyleEditor({
         }
       >
         <DesignAutoLayoutControls
+          boundSize={boundSize}
           details={details}
           livePreviewOwner={livePreviewOwner}
           renderField={renderField}

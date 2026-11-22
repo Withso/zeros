@@ -158,12 +158,12 @@ describe("an instance host takes only placement and size styles", () => {
       instances: { key: "0".repeat(16), components: { chip: { elements: [], reach: {}, file: "chip.html", frame: true,
         bindings: { root: "chip", layers: { chip: { styles: { width: ["width"] } } } } } },
       hosts: { inst: { component: "chip", attributes: {} } } } }] } as never);
-    await expect(styles("inst", { width: "40px" })).rejects.toThrow(/width is set by its width control/);
+    await expect(styles("inst", { width: "40px" })).rejects.toThrow(/Width is set by the Width control/);
     // A frame-root instance's frame edge on that axis is the same write.
     await expect(applyDesignTransactionCached("ws", frame.file, { ...transaction({ type: "node.set-styles", nodeId: "inst", styles: { width: "40px" } }),
       operations: [{ operationId: "a", type: "node.set-styles", nodeId: "inst", styles: { width: "40px" } },
         { operationId: "b", type: "frame.set-geometry", frame: frame.file, geometry: { x: 0, y: 0, width: 40, height: 10, z: 0 } }] } as never))
-      .rejects.toThrow(/width is set by its width control/);
+      .rejects.toThrow(/Width is set by the Width control/);
     expect(bridge.updateStyles).not.toHaveBeenCalled();
     expect(bridge.applyTransaction).not.toHaveBeenCalled();
     await expect(styles("inst", { height: "40px", width: null })).rejects.toBe(engineReached);

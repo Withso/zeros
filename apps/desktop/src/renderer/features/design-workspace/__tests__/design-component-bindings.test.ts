@@ -74,41 +74,106 @@ describe("the layer tree people navigate inside an instance", () => {
 
 describe("a layout action over an instance whose size a control drives", () => {
   it("keeps the instance's place and drops only the bound axis", async () => {
-    const { designWithoutBoundSize } = await import("../state/design-component-bindings");
-    const record = { instances: { key: "0".repeat(16),
+    const { designWithoutBoundStyles } = await import("../state/design-component-bindings");
+    const record = { file: "home.html", sourceVersion: "a".repeat(24), instances: { key: "0".repeat(16),
       components: { "text-field": { elements: [], reach: {}, file: "tf.html", frame: true, bindings: { root: "tf", layers: { tf: { styles: { width: ["width"] } } } } } },
       hosts: { inst: { component: "text-field", attributes: {} } } } };
-    expect(designWithoutBoundSize(record, "inst", { position: "absolute", left: "4px", width: "200px", height: "40px", "--zeros-layout-x": "4px" }))
+    expect(designWithoutBoundStyles("ws", record, "inst", { position: "absolute", left: "4px", width: "200px", height: "40px", "--zeros-layout-x": "4px" }))
       .toEqual({ position: "absolute", left: "4px", height: "40px", "--zeros-layout-x": "4px" });
-    expect(designWithoutBoundSize(record, "inst", { width: "200px" })).toBeNull();
-    expect(designWithoutBoundSize(record, "inst", { width: null })).toEqual({ width: null });
-    expect(designWithoutBoundSize(record, "card", { width: "200px" })).toEqual({ width: "200px" });
+    expect(designWithoutBoundStyles("ws", record, "inst", { width: "200px" })).toBeNull();
+    expect(designWithoutBoundStyles("ws", record, "inst", { width: null })).toEqual({ width: null });
+    expect(designWithoutBoundStyles("ws", record, "card", { width: "200px" })).toEqual({ width: "200px" });
+  });
+});
+
+describe("bindings a selected layer's runtime winners complete", () => {
+  const V = "a".repeat(24);
+  const option = (name: string, type: string, label: string) =>
+    ({ tag: "zd-option", attributes: [{ name: "name", value: name }, { name: "type", value: type }, { name: "label", value: label }] });
+  const winner = (value: string, selector?: string) => ({ origin: "frame" as const, value, ...(selector ? { selector } : {}) });
+  const details = (oid: string, authoredStyles: Record<string, ReturnType<typeof winner>>) =>
+    ({ oid, sourceVersion: V, authoredStyles }) as never;
+
+  it("binds a Button instance's height through a gated rule in a linked sheet, so its H is the Size control", async () => {
+    const { designLayerBoundStyles, rememberDesignRuntimeBindings, resetDesignRuntimeBindingsForTests } = await import("../state/design-component-bindings");
+    resetDesignRuntimeBindingsForTests();
+    const button = { elements: [option("size", "choice", "Size"), option("radius", "number", "Radius")], reach: {}, file: "button.html", frame: true,
+      bindings: { root: "btn", layers: { btn: { attributes: ["size"] } }, gates: { "data-size": ["size"] }, vars: { "--btn-radius": ["radius"] } } };
+    const home = { file: "home.html", sourceVersion: V, instances: { key: "0".repeat(16), components: { button }, hosts: { b1: { component: "button", attributes: {} } } } };
+    expect(designLayerBoundStyles("ws", home, "b1")).toEqual({});
+    rememberDesignRuntimeBindings("ws", home, details("b1", { height: winner("30px", '.btn[data-size="sm"]'), "border-radius": winner("var(--btn-radius, 6px)", ".btn"), color: winner("white", ".btn") }));
+    expect(designLayerBoundStyles("ws", home, "b1")).toEqual({ height: ["size"], "border-radius": ["radius"] });
+    // Another generation knows nothing yet.
+    expect(designLayerBoundStyles("ws", { ...home, sourceVersion: "b".repeat(24) }, "b1")).toEqual({});
+  });
+
+  it("binds a Button main's Corner radius to Radius and a Badge's colours to Ink and Wash through own custom properties", async () => {
+    const { designLayerBoundStyles, rememberDesignRuntimeBindings, refuseDesignBoundStyleWrite } = await import("../state/design-component-bindings");
+    const main = { file: "button.html", sourceVersion: V, component: { elements: [option("radius", "number", "Radius")], reach: {},
+      bindings: { root: "btn", layers: { btn: { styles: { "--btn-radius": ["radius"] } } }, vars: { "--btn-radius": ["radius"] } } } };
+    rememberDesignRuntimeBindings("ws", main, details("btn", { "border-radius": winner("var(--btn-radius, 6px)", ".btn") }));
+    expect(designLayerBoundStyles("ws", main, "btn")["border-radius"]).toEqual(["radius"]);
+    expect(() => refuseDesignBoundStyleWrite("ws", main, { nodeId: "btn", styles: { "border-radius": "12px" } })).toThrow("Border-radius is set by the Radius control");
+    expect(() => refuseDesignBoundStyleWrite("ws", main, { nodeId: "btn", styles: { "border-radius": null } })).not.toThrow();
+    // A state variant's rule is the same write: refused too.
+    expect(() => refuseDesignBoundStyleWrite("ws", main, [{ type: "node.set-styles", nodeId: "btn", stateContext: "hover", styles: { "border-radius": "2px" } }]))
+      .toThrow(/Radius/);
+    const badge = { file: "badge.html", sourceVersion: V, component: { elements: [option("ink", "color", "Ink"), option("wash", "color", "Wash")], reach: {},
+      bindings: { layers: {}, vars: { "--badge-ink": ["ink"], "--badge-wash": ["wash"] } } } };
+    rememberDesignRuntimeBindings("ws", badge, details("badge-soft", { color: winner("var(--badge-ink)", ".badge--soft"), "background-color": winner("var(--badge-wash)", ".badge--soft") }));
+    expect(designLayerBoundStyles("ws", badge, "badge-soft")).toEqual({ color: ["ink"], "background-color": ["wash"] });
+  });
+
+  it("refuses a raw write on a layer a truncated record dropped, once its winners show the binding", async () => {
+    const { rememberDesignRuntimeBindings, refuseDesignBoundStyleWrite } = await import("../state/design-component-bindings");
+    const main = { file: "big.html", sourceVersion: V, component: { elements: [option("width", "number", "Width")], reach: {},
+      bindings: { layers: {}, truncated: true as const } } };
+    expect(() => refuseDesignBoundStyleWrite("ws", main, { nodeId: "far", styles: { width: "40px" } })).not.toThrow();
+    rememberDesignRuntimeBindings("ws", main, details("far", { width: winner("var(--zd-width)", ".far") }));
+    expect(() => refuseDesignBoundStyleWrite("ws", main, { nodeId: "far", styles: { width: "40px" } })).toThrow("Width is set by the Width control");
+  });
+});
+
+describe("deleting a main's layers that controls drive", () => {
+  it("names the controls bound to the selection and the layers inside it, and nothing for unbound layers", async () => {
+    const { designDeleteBoundControls, resetDesignRuntimeBindingsForTests } = await import("../state/design-component-bindings");
+    resetDesignRuntimeBindingsForTests();
+    const node = (oid: string, children: DesignRuntimeTreeNode[] = []): DesignRuntimeTreeNode => ({ oid, tag: "div", name: oid, text: null, visible: true, children });
+    const option = (name: string, label: string) => ({ tag: "zd-option", attributes: [{ name: "name", value: name }, { name: "type", value: "text" }, { name: "label", value: label }] });
+    const main = { file: "button.html", sourceVersion: "a".repeat(24), component: { elements: [option("label", "Label"), option("icon", "Icon")], reach: {},
+      bindings: { root: "btn", layers: { "btn-label": { text: ["label"] }, "btn-icon": { visible: ["icon"] } } } } };
+    const tree = [node("btn", [node("btn-wrap", [node("btn-label")]), node("btn-icon"), node("btn-spacer")])];
+    expect(designDeleteBoundControls("ws", main, tree, ["btn-label"])).toEqual(["Label"]);
+    expect(designDeleteBoundControls("ws", main, tree, ["btn-wrap"])).toEqual(["Label"]);
+    expect(designDeleteBoundControls("ws", main, tree, ["btn"])).toEqual(["Icon", "Label"]);
+    expect(designDeleteBoundControls("ws", main, tree, ["btn-spacer"])).toEqual([]);
+    expect(designDeleteBoundControls("ws", { ...main, component: undefined }, tree, ["btn-label"])).toEqual([]);
   });
 });
 
 describe("size writers on an instance whose width a control drives", () => {
-  const record = { instances: { key: "0".repeat(16),
+  const record = { file: "home.html", sourceVersion: "c".repeat(24), instances: { key: "0".repeat(16),
     components: { "text-field": { elements: [], reach: {}, file: "tf.html", frame: true, bindings: { root: "tf", layers: { tf: { styles: { width: ["width"] } } } } } },
     hosts: { inst: { component: "text-field", attributes: {} } } } };
 
   it("lets a frame-root instance's frame edge size its height and drops only the width a frame edge carries along", async () => {
-    const { designWithoutBoundSize } = await import("../state/design-component-bindings");
-    expect(designWithoutBoundSize(record, "inst", { width: "100%", height: "320px" })).toEqual({ height: "320px" });
+    const { designWithoutBoundStyles } = await import("../state/design-component-bindings");
+    expect(designWithoutBoundStyles("ws", record, "inst", { width: "100%", height: "320px" })).toEqual({ height: "320px" });
     // East edge: nothing but the frame's own box is left.
-    expect(designWithoutBoundSize(record, "inst", { width: "100%" })).toBeNull();
+    expect(designWithoutBoundStyles("ws", record, "inst", { width: "100%" })).toBeNull();
   });
 
   it("resizes the other axis from the keyboard and makes the bound axis's key do nothing", async () => {
     const { designKeyboardResizeStyles } = await import("../state/design-component-bindings");
     const gesture = { frame: record, nodeId: "inst", width: 200, height: 40, dw: 10, dh: 5 };
-    expect(designKeyboardResizeStyles(gesture)).toEqual({ height: "45px" });
-    expect(designKeyboardResizeStyles({ ...gesture, nodeId: "plain" })).toEqual({ width: "210px", height: "45px" });
+    expect(designKeyboardResizeStyles("ws", gesture)).toEqual({ height: "45px" });
+    expect(designKeyboardResizeStyles("ws", { ...gesture, nodeId: "plain" })).toEqual({ width: "210px", height: "45px" });
   });
 
   it("keeps a group's plain layers and the instance's other axis when the group resizes", async () => {
-    const { designWithoutBoundSize } = await import("../state/design-component-bindings");
+    const { designWithoutBoundStyles } = await import("../state/design-component-bindings");
     const group = [["inst", { left: "4px", width: "220px", height: "48px" }], ["plain", { left: "300px", width: "80px", height: "48px" }]] as const;
-    expect(group.map(([nodeId, styles]) => designWithoutBoundSize(record, nodeId, styles))).toEqual([
+    expect(group.map(([nodeId, styles]) => designWithoutBoundStyles("ws", record, nodeId, styles))).toEqual([
       { left: "4px", height: "48px" }, { left: "300px", width: "80px", height: "48px" }]);
   });
 });

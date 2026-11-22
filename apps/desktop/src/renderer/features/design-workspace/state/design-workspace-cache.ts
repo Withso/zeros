@@ -3,6 +3,7 @@ import type { DesignMovementGuard } from "@zeros/protocol/design-relocation";
 import { normalizeDesignPagesSnapshot } from "@zeros/protocol/design-pages";
 import { isDesignComponentVariantName } from "@zeros/protocol/design-path";
 import { isDesignComponentPartNodeId, refuseDesignComponentPartWrite, refuseDesignInstanceHostStyleWrite } from "./design-component-parts";
+import { refuseDesignBoundStyleWrite } from "./design-component-bindings";
 import { forgetDesignLayerDisclosure } from "./design-layer-disclosure";
 import { rememberDesignDirectoryIdentity, setDesignKnownPagesReader, type DesignCanvasItemInput } from "../../../platform/bridge/design-bridge";
 // Canvas, inspector and the Layers panel consume one aggregate engine response.
@@ -1913,6 +1914,9 @@ function refuseDesignComponentWrite(
   if (!write) return;
   const frame = designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data?.frames.find((candidate) => candidate.file === file);
   refuseDesignInstanceHostStyleWrite(frame?.instances, write);
+  // What a control drives stays the control's, from the engine's bindings
+  // and what the runtime reported for the selected layer.
+  if (frame && typeof frame.sourceVersion === "string") refuseDesignBoundStyleWrite(workspaceId, frame as never, write);
 }
 
 export async function updateDesignNodeStylesCached(

@@ -11,7 +11,6 @@
 import type { DesignComponentIdentity, DesignFrameComponent, DesignFrameInstances } from "@zeros/protocol/design-catalog";
 import { componentInstanceHostStyleAllowed } from "@zeros/design-core/component-options";
 import { designComponentPartOf, designComponentSlotOf } from "@zeros/protocol/design-runtime";
-import { designInstanceBindings, designRootSizeControls } from "./design-component-bindings";
 import { designRuntimeLayerDisplayName } from "../design-layer-label";
 
 /** A layer inside an instance: one of its parts, or one of its slots, which
@@ -85,19 +84,6 @@ export function refuseDesignInstanceHostStyleWrite(
       .filter(([property, value]) => value !== null && !componentInstanceHostStyleAllowed(property))
       .map(([property]) => property);
     if (refused.length) throw new DesignInstanceHostStyleError(refused);
-    // A size a control drives is the control's: a raw one would sit over it.
-    const bound = designRootSizeControls(designInstanceBindings({ instances }, operation.nodeId));
-    const styles = operation.styles as Record<string, unknown>;
-    for (const [property, controls] of [["width", bound.width], ["height", bound.height]] as const)
-      if (controls.length && styles[property] !== undefined && styles[property] !== null)
-        throw new DesignInstanceBoundSizeError(property, controls);
-  }
-}
-
-export class DesignInstanceBoundSizeError extends Error {
-  constructor(readonly property: "width" | "height", readonly controls: readonly string[]) {
-    super(`This instance's ${property} is set by its ${controls.join(", ")} control. Change it there.`);
-    this.name = "DesignInstanceBoundSizeError";
   }
 }
 

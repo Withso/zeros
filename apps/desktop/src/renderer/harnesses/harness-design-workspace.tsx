@@ -315,7 +315,7 @@ const COMPONENT_OPTIONS_SOURCE = `<!doctype html>
     <style>
       :root { --blue-primary: royalblue; }
       body { margin: 0; font-family: system-ui, sans-serif; background: white; }
-      .composer { box-sizing: border-box; width: var(--zd-width); display: flex; flex-direction: column; gap: var(--zd-gap); padding: 16px;
+      .composer { box-sizing: border-box; width: var(--zd-width); --chip-round: var(--zd-gap); display: flex; flex-direction: column; gap: var(--zd-gap); padding: 16px;
         color: var(--zd-ink); transition: box-shadow var(--zd-motion-duration) var(--zd-motion-easing); }
       .chips { display: flex; gap: 6px; }
       .chip { padding: 2px 8px; border-radius: 6px; background: gainsboro; }
@@ -350,7 +350,11 @@ function renderHarnessComponentFrame(source: string, variant: string | null = nu
   const rendered = renderComponentTemplate(source, { scope, ids: "copy", budget: createComponentTemplateBudget(), document: true });
   const shownState = componentStateVariantOf(declaration, variant)?.state;
   const html = shownState ? showDesignComponentState(rendered, shownState) : rendered;
-  return html.replace(/<\/head>/i, `<style data-zeros-options>:root { ${componentOptionCss(declaration, values, scope)} }</style></head>`);
+  // As a stylesheet the main links (ui.css) would: a rule the engine never
+  // reads, which reaches the Gap control only through the main's own
+  // --chip-round, so only the runtime can bind cc-chips' corner radius.
+  return html.replace(/<\/head>/i, `<style data-zeros-options>:root { ${componentOptionCss(declaration, values, scope)} }</style>` +
+    `<style data-harness-linked>.chips { border-radius: var(--chip-round); }</style></head>`);
 }
 
 // The home frame places one Chat composer, expanded as the engine expands an
