@@ -744,6 +744,7 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
     checkpointRetry: v2.checkpointRetry === true,
     // Retention (CLOUD_V2_RETENTION_ENABLED): absent while off, so stops checkpoint and restores create as before.
     ...(v2.retention === true ? { retention: true, ...(v2.backupForksPerHour ? { backupForksPerHour: v2.backupForksPerHour } : {}),
+      ...(v2.maintenancePerHour ? { maintenancePerHour: v2.maintenancePerHour } : {}), ...(v2.maintenancePerDay ? { maintenancePerDay: v2.maintenancePerDay } : {}),
       ...(readyCopies ? { restoreSource: readyCopyRestoreSource(readyCopies) } : {}) } : {}),
     publicKeys: signer.publicKeys, sealPortToken: (token, id) => sealPortToken(token, id, keys),
     stopWorker: workspace => connections!.stopWorkspace(workspace),
