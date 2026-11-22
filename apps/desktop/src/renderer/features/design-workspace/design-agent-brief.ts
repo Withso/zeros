@@ -175,6 +175,34 @@ export function designComponentAddControlBrief(input: { directory: string; file:
   };
 }
 
+/** A value a control sets on a main's layer: the agent changes the control
+ * or how the main reads it; the panel never writes over it. */
+export function designControlBoundValueBrief(input: {
+  directory: string;
+  file: string;
+  title: string;
+  layer: string;
+  nodeId: string;
+  property: string;
+  /** The field's name in the panel, for the chat label. */
+  label: string;
+  /** The labels of the controls that set it. */
+  controls: readonly string[];
+}): DesignAgentBrief {
+  const names = input.controls.map(quoted);
+  const controls = names.length === 1
+    ? `the control ${names[0]}`
+    : `the controls ${names.slice(0, -1).join(", ")} and ${names.at(-1)}`;
+  return {
+    label: `Change ${inline(input.label)} on ${inline(input.title)}`,
+    text: [
+      `In the main component ${quoted(input.title)} (${quoted(input.file)} in the Design directory ${quoted(input.directory)}), ${controls} set ${quoted(input.property)} on the layer ${quoted(input.layer)} (data-oid ${quoted(input.nodeId)}), so the Style panel does not edit it. Ask me what to change first.`,
+      'Change the control or how the main reads it, following "Change a component\'s options" in the Zeros Design skill. Do not stage or commit.',
+      CODE_RULE,
+    ].join("\n"),
+  };
+}
+
 /** "Ask agent to fix": options that could not be applied. */
 export function designComponentOptionsFixBrief(input: {
   directory: string;

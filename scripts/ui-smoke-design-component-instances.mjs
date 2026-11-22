@@ -197,6 +197,58 @@ export async function runDesignComponentInstancesSmoke({ page, check }) {
     /Toolbar/.test(deleteText) && /Label/.test(deleteText) && (await writes()) === writesBeforeDelete &&
       (await layer("cc-toolbar").getAttribute("aria-selected")) === "true", deleteText);
 
+  // A main layer shows each control once: Label (its text) above its Style
+  // and, since a text layer has no radius or fill field, Corner radius and
+  // Accent there too; Settle, which its transition shorthand reads, appears
+  // as a locked Duration whose card names it, and above as well, since no
+  // field shows it in place.
+  const stylePanel = page.locator("[data-design-style-panel]");
+  const styleCard = page.locator("[data-design-style-card]");
+  await expect(async () => {
+    if (!(await layer("cc-send").count())) await layer("cc-toolbar").locator("[data-layer-disclosure]").click({ timeout: 2_000 });
+    await layer("cc-send").click({ timeout: 2_000 });
+    await expect(layer("cc-send")).toHaveAttribute("aria-selected", "true", { timeout: 2_000 });
+  }).toPass({ timeout: 15_000 });
+  const compactRows = stylePanel.locator('[data-design-component-options="main"] [data-option-row]');
+  await expect.poll(() => compactRows.count()).toBeGreaterThan(1);
+  const lockedDuration = stylePanel.locator('[data-design-style-property="transition-duration"]').first();
+  await expect(lockedDuration).toHaveAttribute("data-design-origin", "control");
+  const compactLabels = await compactRows.locator("[data-option-row-label]").allInnerTexts();
+  check("a main layer lists its text, visibility and attribute controls above its Style, and those no field shows in place, each once",
+    ["Accent", "Corner radius", "Label"].every((name) => compactLabels.includes(name)) &&
+      (await stylePanel.locator('[data-design-component-options="main"]').innerText()).includes("Settle") &&
+      (await stylePanel.locator("[data-design-embedded-controls]").count()) === 0, compactLabels.join(" | "));
+  const promptsBeforeLock = await page.evaluate(() => (window.__zerosHarnessAgentPrompts ?? []).length);
+  const writesBeforeLock = await writes();
+  // A scroll closes an open card: bring the field into view before the press.
+  await lockedDuration.scrollIntoViewIfNeeded();
+  await page.waitForTimeout(200);
+  await lockedDuration.locator("input").first().click();
+  await styleCard.waitFor();
+  const lockCard = (await styleCard.textContent()) ?? "";
+  check("a field a control sets is locked, its card names the control and offers only Ask agent to change on a layer",
+    lockCard.includes("Set by Settle") && (await styleCard.locator("[data-design-card-action]").count()) === 1 &&
+      (await styleCard.locator('[data-design-card-action="agent"]').count()) === 1, lockCard);
+  await styleCard.locator('[data-design-card-action="agent"]').click();
+  await expect.poll(() => page.evaluate(() => (window.__zerosHarnessAgentPrompts ?? []).length)).toBe(promptsBeforeLock + 1);
+  const lockBrief = await page.evaluate(() => window.__zerosHarnessAgentPrompts.at(-1));
+  check("its brief names the main, the layer and the property, and nothing was written",
+    lockBrief.text.includes('main component "Chat composer"') && lockBrief.text.includes('(data-oid "cc-send")') &&
+      lockBrief.text.includes('"transition-duration"') && lockBrief.text.includes('the control "Settle"') && (await writes()) === writesBeforeLock,
+    lockBrief.text.slice(0, 300));
+  // On the main's root the card also opens the Controls tab.
+  await selectMain();
+  await page.locator('[data-design-inspector] [role="tab"]').filter({ hasText: "Style" }).click();
+  const lockedInk = stylePanel.locator('[data-design-style-property="color"]').first();
+  await expect(lockedInk).toHaveAttribute("data-design-origin", "control");
+  await lockedInk.scrollIntoViewIfNeeded();
+  await page.waitForTimeout(200);
+  await lockedInk.locator("input").first().click();
+  await styleCard.waitFor();
+  await styleCard.locator('[data-design-card-action="controls"]').click();
+  await expect(page.locator('[data-design-inspector] [role="tab"][aria-selected="true"]')).toHaveText("Controls");
+  check("on a main's root, a locked field's card opens Controls", (await section.getByText("Ink", { exact: true }).count()) >= 1);
+
   // ── An instance in another frame ──
   await selectInstance();
   const instanceHeader = await header.innerText();

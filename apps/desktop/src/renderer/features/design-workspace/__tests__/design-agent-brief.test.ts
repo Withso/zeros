@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   designComponentOptionsBrief,
   designComponentOptionsFixBrief,
+  designControlBoundValueBrief,
   designForcedValueBrief,
   designSourceFixBrief,
   designSyncBrief,
@@ -77,6 +78,22 @@ describe("Design agent briefs", () => {
     // Without a named source the rule stands alone.
     expect(designForcedValueBrief({ directory: "D", frame: "f.html", layer: "L", nodeId: "n", property: "color", label: "Text color", value: "red", rule: ".x" }).text)
       .toContain('forced by ".x" with !important');
+  });
+
+  it("asks to change a value a control sets on the main, naming the main, the layer, the property and the controls", () => {
+    const brief = designControlBoundValueBrief({
+      directory: "Shop - Design", file: "badge.html", title: "Badge", layer: "Dot", nodeId: "badge-dot",
+      property: "background-color", label: "Fill", controls: ["Tone", "Ink"],
+    });
+    expect(brief.label).toBe("Change Fill on Badge");
+    expect(brief.text).toContain('main component "Badge" ("badge.html" in the Design directory "Shop - Design")');
+    expect(brief.text).toContain('layer "Dot" (data-oid "badge-dot")');
+    expect(brief.text).toContain('"background-color"');
+    expect(brief.text).toContain('the controls "Tone" and "Ink"');
+    expect(brief.text).toContain("Ask me what to change first");
+    expect(brief.text).toContain("Do not stage or commit.");
+    expect(designControlBoundValueBrief({ directory: "D", file: "f.html", title: "T", layer: "L", nodeId: "n", property: "color", label: "Text", controls: ["Ink"] }).text)
+      .toContain('the control "Ink"');
   });
 
   it("asks to tidy a frame's changes made by hand through the skill, listing each one", () => {

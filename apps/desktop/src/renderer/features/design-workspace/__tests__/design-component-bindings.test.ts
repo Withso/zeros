@@ -48,6 +48,9 @@ describe("which controls a component's layers read", () => {
     expect(designRootSizeControls({ layers: {} })).toEqual({ width: [], height: [] });
     expect(designRootSizeControls(undefined)).toEqual({ width: [], height: [] });
     expect(designMainLayerControls({ elements: [], reach: {}, bindings }, "tf-label")).toEqual(["label"]);
+    // A control a layer's style reads shows in its field's place, not here as well.
+    expect(designMainLayerControls({ elements: [], reach: {}, bindings }, "tf")).toEqual([]);
+    expect(designMainLayerControls({ elements: [], reach: {}, bindings: { layers: { x: { text: ["a"], styles: { color: ["a", "b"] } } } } }, "x")).toEqual(["a"]);
     expect(designMainLayerControls({ elements: [], reach: {} }, "tf-label")).toBeNull();
     expect(designBindingControls({ text: ["a"], styles: { color: ["b", "a"] } })).toEqual(["a", "b"]);
   });

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { DesignRuntimeNodeDetails } from "@zeros/protocol/design-runtime";
-import { designFieldOrigins, designResetStyles } from "../design-field-origins";
+import { designFieldOrigins, designFieldOriginsWithControls, designResetStyles } from "../design-field-origins";
 import type { DesignStyleOriginsContext } from "../design-style-origins";
 
 const context: DesignStyleOriginsContext = {
@@ -95,6 +95,22 @@ describe("values the panel cannot edit", () => {
     expect(both.mark("border-radius")).toBe("forced");
     expect(both.lock("border-radius")?.why).toBe("Card is forced by .legacy-card");
     expect(both.lock("gap")).toBeNull();
+  });
+
+  it("locks a field a control sets on a main, naming the controls, before any other lock", () => {
+    const base = designFieldOrigins([layer("dot", { "border-radius": forced, color: { ...btn, value: "red" } }, { name: "Dot" })], context, null);
+    const controls = { padding: ["Size"], "border-radius": ["Radius", "Size"] };
+    const origins = designFieldOriginsWithControls(base, { nodeId: "dot", layer: "Dot", controls, openControls: false });
+    expect(origins.mark("border-radius")).toBe("control");
+    expect(origins.lock("border-radius")).toEqual({ kind: "control", nodeId: "dot", layer: "Dot", text: "", why: "Set by Radius and Size", controls: ["Radius", "Size"] });
+    // A longhand field reads its shorthand's binding.
+    expect(origins.lock("padding-left")).toMatchObject({ kind: "control", why: "Set by Size" });
+    expect(origins.lock("color")).toBeNull();
+    expect(origins.mark("color")).toBe(base.mark("color"));
+    expect(designFieldOriginsWithControls(base, { nodeId: "dot", layer: "Dot", controls: {}, openControls: false })).toBe(base);
+    // One object per origins and bindings, so fields reading it from context do not re-render.
+    expect(designFieldOriginsWithControls(base, { nodeId: "dot", layer: "Dot", controls: { ...controls }, openControls: false })).toBe(origins);
+    expect(designFieldOriginsWithControls(base, { nodeId: "dot", layer: "Dot", controls, openControls: true }).lock("padding")).toMatchObject({ openControls: true });
   });
 
   it("marks a field whose plain value differs by theme, and says what an edit changes", () => {

@@ -71,11 +71,15 @@ export function designSelectablePartLayers(frame: InstancesFrame | null | undefi
   return layers;
 }
 
-/** What a layer of a main reads, from the main's own record; null without bindings. */
+/** The controls above a main layer's Style: those that set its text, whether
+ * it shows, or its attributes; null without bindings. A control its style
+ * reads takes that field's place instead, so none shows twice. */
 export function designMainLayerControls(component: DesignFrameComponent | undefined, oid: string): string[] | null {
   const bindings = component?.bindings;
   if (!bindings) return null;
-  return Object.hasOwn(bindings.layers, oid) ? designBindingControls(bindings.layers[oid]) : [];
+  if (!Object.hasOwn(bindings.layers, oid)) return [];
+  const { styles: _styles, ...rest } = bindings.layers[oid]!;
+  return designBindingControls(rest);
 }
 
 /** The controls that drive the root's width and height: an instance's Size

@@ -112,7 +112,7 @@ import {
 } from "./design-token-picker";
 import { DesignFieldOverlays, readDesignCardField } from "./design-style-card";
 import { designInputResetsOnAltBackspace, useDesignFieldOverlays, type DesignFieldOverlaysApi } from "./design-field-overlays";
-import { designForcedValueBrief } from "./design-agent-brief";
+import { designControlBoundValueBrief, designForcedValueBrief } from "./design-agent-brief";
 import { DesignStyledByLine } from "./design-styled-by";
 import { DesignHeldStateNote, DesignStateVariantNote, useDesignHeldReadOnly } from "./design-state-picker";
 import { designDeclaredVariants, showDesignComponentVariant, useDesignComponentVariantStore, useDesignShownComponentState } from "./state/design-component-variants";
@@ -130,6 +130,7 @@ import {
 import {
   DesignFieldOriginsContext,
   designFieldOrigins,
+  designFieldOriginsWithControls,
   designResetStyles,
   useDesignFieldOrigin,
   useDesignStyleOriginsContext,
@@ -2211,14 +2212,29 @@ export const DesignInspector = React.memo(function DesignInspector({
   const overlaysApiRef = useRef<DesignFieldOverlaysApi | null>(null);
   const askAgentRef = useRef(onAskAgent);
   askAgentRef.current = onAskAgent;
-  /** A forced value's card: the agent frees it, as the person sees it. */
+  /** A forced value's card: the agent frees it, as the person sees it. A
+   * value a control sets: the agent changes the control on the main. */
   const askAgentToChange = useCallback(
     (properties: readonly string[]) => {
       const property = properties[0];
       const lock = property ? fieldOriginsRef.current.lock(property) : null;
       const { workspaceId: owner, frame: shown } = styleEditContextRef.current;
       const askAgent = askAgentRef.current;
-      if (!askAgent || !property || lock?.kind !== "forced" || !lock.rule || !owner || !shown) return;
+      if (!askAgent || !property || !owner || !shown) return;
+      if (lock?.kind === "control" && lock.controls?.length) {
+        askAgent(designControlBoundValueBrief({
+          directory: designWorkspaceSnapshotCache.peekSnapshot(owner).data?.directory ?? "",
+          file: shown.file,
+          title: shown.title,
+          layer: lock.layer,
+          nodeId: lock.nodeId,
+          property,
+          label: designStylePropertyLabel(property),
+          controls: lock.controls,
+        }));
+        return;
+      }
+      if (lock?.kind !== "forced" || !lock.rule) return;
       askAgent(designForcedValueBrief({
         directory: designWorkspaceSnapshotCache.peekSnapshot(owner).data?.directory ?? "",
         frame: shown.file,
@@ -3138,9 +3154,11 @@ export const DesignInspector = React.memo(function DesignInspector({
   ) => {
     if (!styleContext) return null;
     // On a main, a value a control drives is that control's: the field shows
-    // the control while the winner reads it, and otherwise says what sets it.
+    // the control while the winner reads it, and otherwise is locked, its
+    // card naming what sets it.
     const boundControls = [...new Set([property, ...(options?.linkedProperties ?? [])].flatMap((name) => mainBoundStyles[name] ?? []))];
-    if (boundControls.length) return boundStyleField(label, property, boundControls);
+    const boundControl = boundControls.length ? boundStyleField(label, property, boundControls) : null;
+    if (boundControl) return boundControl;
     // A main's W and H are its root's, the component's own size; its X and Y
     // still place the frame.
     const frameGeometryProperty = frameStyleTarget &&
@@ -3434,10 +3452,19 @@ export const DesignInspector = React.memo(function DesignInspector({
   const layerControls = partControls?.length && selectedPart
     ? { controls: partControls, layer: { id: designBindingLayerId(selectedPart.part), name: selectionTitle ?? selectionName } }
     : undefined;
-  // A layer inside a main shows the controls bound to it above its Style.
-  const mainLayerControls = selectionKind === "main-layer" && frame && selectedNodeId && workspaceId && active && panelVisible
-    ? designMainLayerControls(mainComponent, selectedNodeId)
+  // A layer inside a main shows above its Style the controls that set its
+  // text, visibility or attributes, and any its style reads that no field
+  // showed in its place (measured after layout: a text layer has no radius).
+  const mainLayerKey = selectionKind === "main-layer" && frame && selectedNodeId && workspaceId && active && panelVisible
+    ? JSON.stringify([workspaceId, frame.file, selectedNodeId])
     : null;
+  const [notInPlace, setNotInPlace] = useState<{ key: string; controls: readonly string[] } | null>(null);
+  const inPlaceRef = useRef(new Set<string>());
+  inPlaceRef.current = new Set();
+  const mainLayerBase = mainLayerKey ? designMainLayerControls(mainComponent, selectedNodeId!) : null;
+  const mainLayerControls = mainLayerBase && notInPlace?.key === mainLayerKey && notInPlace.controls.length
+    ? [...mainLayerBase, ...notInPlace.controls]
+    : mainLayerBase;
   const optionsFrame = controlsTarget ? frame : null;
   const componentIdentity = optionsTarget?.kind === "main" && frame
     ? designComponentIdentityLabel(frame.title, shownVariant)
@@ -3693,14 +3720,14 @@ export const DesignInspector = React.memo(function DesignInspector({
     if (!styleContext || !details) return null;
     return (
             <DesignStyleOriginLabelContext.Provider value={styleOriginLabel}>
-              <DesignFieldOriginsContext.Provider value={fieldOrigins}>
+              <DesignFieldOriginsContext.Provider value={controlOrigins}>
               <DesignTokenCatalogContext.Provider value={tokenCatalog}>
               <DesignTokenDetachContext.Provider value={detachSelectedToken}>
               <DesignFieldOverlays
                 rootRef={inspectorRef}
                 active={active && styleActive}
                 ownerKey={styleOwnerKey}
-                origins={fieldOrigins}
+                origins={controlOrigins}
                 disabled={styleEditsDisabled || !styleActive}
                 readOnly={holding}
                 apiRef={overlaysApiRef}
@@ -3708,6 +3735,7 @@ export const DesignInspector = React.memo(function DesignInspector({
                 onReset={resetField}
                 onEditInCss={inspectorTabs.includes("css") ? editInCss : undefined}
                 onAskAgent={askAgentToChange}
+                onOpenControls={selectionKind === "main-root" ? () => selectInspectorTab("options") : undefined}
               >
                 <DesignColorRevalidatingContext.Provider value={!elementDetails && !editsDisabled && styleActive}>
                 <DesignStyleEditor
@@ -3794,23 +3822,44 @@ export const DesignInspector = React.memo(function DesignInspector({
       />
     </React.Suspense>
   ) : null;
+  /** The control in a field's place while the winner reads it; otherwise
+   * null, and the field shows locked (controlOrigins). */
   const boundStyleField = (label: string, property: string, controls: readonly string[]) => {
     const winner = presentedElementDetails?.authoredStyles?.[property];
     const reads = mainComponent && winner && Object.keys(designRuntimeBoundStyles(mainComponent, { [property]: winner })).length > 0;
-    if (reads) return mainControl(controls, `bound:${property}`, label);
-    // Bound in some variant, state or condition, but not what wins now: read only.
-    const labels = frame ? designControlLabels(frame, styleContext?.nodeId ?? "", controls) : [...controls];
-    return (
-      <div key={`bound:${property}`} data-design-bound-field={property} className="bg-bg2 text-fg3 flex min-h-7 min-w-0 items-center gap-2 rounded-md px-2 text-xs">
-        <span className="text-fg2 shrink-0">{label}</span>
-        <span className="min-w-0 truncate">{`Set by ${labels.join(", ")}`}</span>
-      </div>
-    );
+    if (!reads) return null;
+    for (const name of controls) inPlaceRef.current.add(name);
+    return mainControl(controls, `bound:${property}`, label);
   };
+  // Bound in some variant, state or condition, or through a field with no
+  // control of its own: read only, naming the controls.
+  const controlOrigins = mainBoundStyles !== NO_BOUND_STYLES && frame && styleContext
+    ? designFieldOriginsWithControls(fieldOrigins, {
+        nodeId: styleContext.nodeId,
+        layer: presentedElementDetails?.name ?? styleContext.nodeId,
+        controls: Object.fromEntries(Object.entries(mainBoundStyles).map(([property, names]) => [property, designControlLabels(frame, styleContext.nodeId, names)])),
+        openControls: selectionKind === "main-root",
+      })
+    : fieldOrigins;
+  fieldOriginsRef.current = controlOrigins;
+  const styleOnlyControls = mainLayerBase
+    ? [...new Set(Object.values(mainBoundStyles).flat())].filter((name) => !mainLayerBase.includes(name)).sort()
+    : [];
+  // After every commit, before paint: inPlaceRef fills while the Style
+  // editor renders its fields. The update settles in one pass.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useLayoutEffect(() => {
+    const leftover = mainLayerKey && stylePanel.active ? styleOnlyControls.filter((name) => !inPlaceRef.current.has(name)) : [];
+    setNotInPlace((current) => {
+      if (!mainLayerKey || !leftover.length) return current === null ? current : null;
+      return current?.key === mainLayerKey && current.controls.join("\u0000") === leftover.join("\u0000") ? current : { key: mainLayerKey, controls: leftover };
+    });
+  });
   const mainBoundSize = selectionKind === "main-root" || selectionKind === "main-layer"
     ? { x: mainBoundStyles.width ? mainControl(mainBoundStyles.width, "size:x", "Width") : undefined,
         y: mainBoundStyles.height ? mainControl(mainBoundStyles.height, "size:y", "Height") : undefined }
     : undefined;
+  if (mainBoundSize) for (const name of [...(mainBoundStyles.width ?? []), ...(mainBoundStyles.height ?? [])]) inPlaceRef.current.add(name);
 
   // Width, placement, and the popover boundary belong to the floating panel
   // that stacks this inspector below Layers.
