@@ -199,4 +199,36 @@ suite("cloud in a Personal organization", () => {
     const again = await computers.enqueue(fixture.organizationId, fixture.creator.id, { repositories: [{ repository: "example/project", branch: "main", setup: "" }] });
     expect((await computers.claim())?.id).toBe(again.id);
   });
+
+  it("gives an outsider byte-identical team-route answers for a Personal workspace's id and an id that does not exist", async () => {
+    const fixture = await setup();
+    const team = { "X-Zeros-Team-Sharing": "1", "X-Zeros-Team-Ownership": "1" };
+    const routes: [string, string, unknown?][] = [
+      ["", "GET"], ["/reassign-candidates", "GET"], ["/reassign", "POST", { requestId: randomUUID(), toUserId: fixture.outsider.id, expectedCreatorUserId: fixture.creator.id, expectedCreatorRevision: "1" }],
+      ["/events", "GET"], ["/activity", "POST", {}], ["/history", "POST", { chatIds: [] }], ["/prompts?chatId=chat", "GET"],
+      ...["connect", "start", "restart", "prompts", "prompts/stop", "github", "stop", "archive"].map(action => [`/${action}`, "POST", {}] as [string, string, unknown]),
+      ["/rename", "POST", { name: "Renamed" }], ["", "DELETE", {}], ["/chats/chat/edit", "POST", { title: "Renamed" }],
+      ...["follow", "unfollow", "pin", "unpin"].map(verb => [`/${verb}`, "POST", {}] as [string, string, unknown]), ["/followers", "GET"],
+    ];
+    const answer = async (id: string, [path, method, body]: [string, string, unknown?]) => {
+      const response = await fixture.call(`/v1/cloud-v2/workspaces/${id}${path}`, method, body, fixture.outsider, team);
+      return `${response.status} ${await response.text()}`;
+    };
+    for (const route of routes) {
+      const personal = await answer(fixture.workspace.id, route), missing = await answer(randomUUID(), route);
+      expect(personal, `${route[1]} ${route[0]}`).toBe(missing);
+      expect(personal.startsWith("2"), `${route[1]} ${route[0]}`).toBe(false);
+    }
+    const slug = (await pool.query("SELECT slug FROM organizations WHERE id=$1", [fixture.organizationId])).rows[0].slug;
+    const byNumber = async (organization: string) => {
+      const response = await fixture.call(`/v1/cloud-v2/workspaces/by-number/${organization}/1`, "GET", undefined, fixture.outsider, team);
+      return `${response.status} ${await response.text()}`;
+    };
+    expect(await byNumber(slug)).toBe(await byNumber(`missing-${randomUUID().slice(0, 8)}`));
+    const list = async (organizationId: string) => {
+      const response = await fixture.call(`/v1/cloud-v2/workspaces?organizationId=${organizationId}&archived=include&limit=200`, "GET", undefined, fixture.outsider, team);
+      return `${response.status} ${await response.text()}`;
+    };
+    expect(await list(fixture.organizationId)).toBe(await list(randomUUID()));
+  });
 });
