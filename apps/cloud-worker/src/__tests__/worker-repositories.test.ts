@@ -157,3 +157,14 @@ it("seeds a later repository's own environment into its own checkout, reported u
   expect(await readFile(join(f.root, "web", ".env.local"), "utf8")).toBe("WEB_VALUE=synthetic-web\n");
   await expect(readFile(join(f.root, "api", ".env.local"))).rejects.toMatchObject({ code: "ENOENT" });
 });
+
+it("rereads every repository's GitHub state after a gh mutation, not only the first's", async () => {
+  const { WorkspaceService } = await import("../workspace/service");
+  const changed = vi.spyOn(WorkspaceService.prototype, "githubChanged");
+  const f = await fixture();
+  const socket = (f.prepareCheckout.mock.calls[0] as unknown as [unknown, NodeJS.ProcessEnv])[1].GH_ZEROS_BROKER_SOCKET!;
+  const { brokerRequest } = await import("../credentials/broker");
+  await brokerRequest(socket, "changed");
+  await vi.waitFor(() => expect(changed).toHaveBeenCalledTimes(2));
+  changed.mockRestore();
+});

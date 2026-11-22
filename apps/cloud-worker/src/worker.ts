@@ -211,7 +211,11 @@ export class CloudWorker {
     this.instanceId = options.runtimeResume?.instanceId ?? randomUUID();
     this.tokens = new GithubTokens((frame, timeoutMs) => this.send(frame, timeoutMs));
     this.githubCredentials = new GithubCredentialRecovery(this.tokens, { fetch: options.githubFetch, supportsRecovery: () => this.githubUserTokensEnabled });
-    this.github = new GithubBroker(`/tmp/zeros-github-${this.instanceId}/github.sock`, (purpose, failed, contextId, repository) => this.githubToken(purpose, failed, contextId, repository), () => this.workspace?.githubChanged());
+    this.github = new GithubBroker(`/tmp/zeros-github-${this.instanceId}/github.sock`, (purpose, failed, contextId, repository) => this.githubToken(purpose, failed, contextId, repository), () => {
+      // A gh mutation can be in any repository of a workspace of several: each one rereads its own.
+      this.workspace?.githubChanged();
+      for (const entry of this.repositories.values()) entry.service?.githubChanged();
+    });
     this.gitEnvironment = githubEnvironment(this.github.socketPath, options.gitAskpassPath ?? fileURLToPath(new URL("../bin/git-askpass", import.meta.url)));
     this.personal = new PersonalEnvironments(options.homeDirectory ?? homedir());
     this.commitIdentities = new ContextCommitIdentities(options.homeDirectory ?? homedir());
