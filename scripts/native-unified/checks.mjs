@@ -22,15 +22,27 @@ async function git(context, cwd, ...args) {
     GIT_COMMITTER_EMAIL: FIXTURE.email } })).stdout.trim();
 }
 const renderer = (page, fn, arg) => page.evaluate(fn, arg);
+/** The owner as a person picks it: the sidebar's "Switch organization" menu. Throws when it did not become active. */
 async function selectOwner(page, id) {
-  await renderer(page, async ([owner, personal]) => (await import("/apps/desktop/src/renderer/features/team/active-team.ts"))
-    .setActiveOrganizationSelection(owner, owner === personal), [id, PERSONAL]);
+  const personal = id === PERSONAL;
+  const trigger = page.getByRole("button", { name: "Switch organization", exact: true }).first();
+  const label = async () => (await trigger.innerText().catch(() => "")).trim();
+  const wanted = personal ? /^(Fixture|Personal)$/ : /^Native Org$/;
+  if (wanted.test(await label())) return;
+  await trigger.click();
+  await page.getByRole("menuitem", { name: wanted }).first().click();
+  await page.waitForFunction(([pattern]) => new RegExp(pattern).test(document.querySelector("[aria-label='Switch organization']")?.textContent?.trim() ?? ""),
+    [wanted.source], { timeout: 10_000 });
   await page.waitForTimeout(600);
 }
-async function reload(page) {
+/** A fresh renderer, as after quitting and opening the app: its HTTP cache cleared first, because a reload that
+ * revalidates every Vite dev module at once runs Chromium out of request slots (ERR_INSUFFICIENT_RESOURCES). */
+async function reload(context) {
+  const { app, page } = context;
+  await app.evaluate(({ session }) => session.defaultSession.clearCache());
   await page.reload();
-  await page.waitForFunction(() => document.querySelector("#root")?.childElementCount > 0);
-  await page.waitForTimeout(1500);
+  await page.getByRole("button", { name: "Switch organization", exact: true }).first().waitFor({ timeout: 60_000 });
+  await page.waitForTimeout(1000);
 }
 async function openSettings(page) {
   if (await page.locator("[aria-label=\"Settings sections\"]").first().isVisible().catch(() => false)) return;
@@ -108,13 +120,13 @@ const projectsCheck = {
 
 // ── N3 ─────────────────────────────────────────────────────────────────────────
 async function createTray(page, side) {
-  await page.getByRole("button", { name: "Create", exact: true }).first().click();
+  await page.getByRole("button", { name: "Create workspace", exact: true }).first().click();
   const placement = page.getByRole("tablist", { name: "Where the workspace runs", exact: true });
   await placement.waitFor();
-  await placement.getByRole("tab", { name: side, exact: true }).click();
-  await page.waitForTimeout(800);
+  await placement.getByRole("tab", { name: side === "Local" ? "This Mac" : side, exact: true }).click();
+  await page.waitForTimeout(1200);
   const project = await page.getByRole("button", { name: "Choose project", exact: true }).innerText().catch(() => "");
-  const create = page.locator("[data-dispatcher-composer] button", { hasText: /^Create/ }).last();
+  const create = page.getByRole("button", { name: "Create", exact: true }).last();
   return { project: project.trim(), createEnabled: await create.isEnabled().catch(() => null) };
 }
 const createCheck = {
@@ -128,7 +140,7 @@ const createCheck = {
     await shot(context, "N3-create-cloud-project");
     // No project in the organization: the tray says so.
     state.noProjects = true;
-    await reload(page);
+    await reload(context);
     await selectOwner(page, FIXTURE.organization);
     await createTray(page, "Cloud");
     const body1 = await page.locator("body").innerText();
@@ -136,13 +148,13 @@ const createCheck = {
     state.noProjects = false;
     // Personal without Pro: the tray says Pro.
     state.personalSeat = "free";
-    await reload(page);
+    await reload(context);
     await selectOwner(page, PERSONAL);
     const withoutPro = await createTray(page, "Cloud");
     const body2 = await page.locator("body").innerText();
     await shot(context, "N3-create-personal-without-pro");
     state.personalSeat = "pro";
-    await reload(page);
+    await reload(context);
     const sawNoProject = body1.includes("Create a project to start a cloud workspace.");
     const sawPro = body2.includes("Creating a cloud workspace requires Pro.");
     const ok = /Native/.test(cloud.project) && cloud.createEnabled !== false && sawNoProject && sawPro;
@@ -243,6 +255,8 @@ const severalCheck = {
       const { useWorkspaceStore } = await import("/apps/desktop/src/renderer/state/workspace-store.ts");
       useWorkspaceStore.getState().dispatch({ type: "OPEN_WORKSPACE", folder, repoRoot: folder, chatId: null });
     }, cloudKey(FIXTURE.organization, WORKSPACES.several));
+    // The switcher sits in the pull request row, which Changes shows.
+    await page.getByRole("tab", { name: "Changes", exact: true }).first().click();
     const switcher = page.getByRole("button", { name: /^Repository:/ }).first();
     await switcher.waitFor({ timeout: 20_000 });
     await switcher.click();
@@ -273,11 +287,11 @@ const personalCheck = {
     const withCloud = await personalSurface(context);
     await shot(context, "N6-personal-with-cloud");
     state.personalCloud = false;
-    await reload(page);
+    await reload(context);
     const without = await personalSurface(context);
     await shot(context, "N6-personal-without-cloud");
     state.personalCloud = true;
-    await reload(page);
+    await reload(context);
     const ok = withCloud.cloudComputer && withCloud.row && !without.cloudComputer && !without.row;
     return { result: ok ? "pass" : "fail", fact: `with its cloud: Cloud Computer=${withCloud.cloudComputer}, cloud workspace row=${withCloud.row}; `
       + `without: Cloud Computer=${without.cloudComputer}, cloud workspace row=${without.row}` };
@@ -299,11 +313,15 @@ const deepLinkCheck = {
       const { useWorkspaceStore } = await import("/apps/desktop/src/renderer/state/workspace-store.ts");
       return useWorkspaceStore.getState().lastWorkspaceFolder === expected;
     }, folder, { timeout: 15_000 });
-    const owner = await renderer(page, async () => (await import("/apps/desktop/src/renderer/features/team/team-store.ts")).getActiveOrganizationSnapshot()?.id ?? null);
+    // The owner as the person sees it: the switcher's label (Personal shows the account's name), once it has re-rendered.
+    await page.waitForFunction(() => /^(Fixture|Personal)$/.test(document.querySelector("[aria-label='Switch organization']")?.textContent?.trim() ?? ""),
+      undefined, { timeout: 10_000 }).catch(() => undefined);
+    const owner = (await page.getByRole("button", { name: "Switch organization", exact: true }).first().innerText().catch(() => "")).trim();
+    const personalOwner = /^(Fixture|Personal)$/.test(owner);
     const title = await page.getByText("Personal cloud", { exact: true }).first().isVisible().catch(() => false);
     await shot(context, "N7-deep-link");
-    return { result: owner === PERSONAL && title ? "pass" : "fail",
-      fact: `${url.replace(/[0-9a-f-]{36}/g, "<id>")} → active owner ${owner === PERSONAL ? "Personal" : owner}, open workspace = Personal's cloud workspace, its title shown=${title}` };
+    return { result: personalOwner && title ? "pass" : "fail",
+      fact: `${url.replace(/[0-9a-f-]{36}/g, "<id>")} from Native Org → switcher shows "${owner}"${personalOwner ? " (Personal)" : ""}, open workspace = Personal's cloud workspace, its title shown=${title}` };
   },
 };
 
@@ -347,12 +365,12 @@ const keepCheck = {
     await shot(context, "N9-menu-keep-on");
     await page.keyboard.press("Escape");
     state.retention = false;
-    await reload(page);
+    await reload(context);
     await selectOwner(page, FIXTURE.organization);
     const disabled = await menuOf(page, "Live");
     await page.keyboard.press("Escape");
     state.retention = true;
-    await reload(page);
+    await reload(context);
     const ok = off.items.includes("Keep") && !off.keepChecked && puts === 1 && on.keepChecked && !disabled.items.includes("Keep");
     return { result: ok ? "pass" : "fail", fact: `menu [${off.items.join(", ")}] Keep checked=${off.keepChecked}; click → PUT /keep ×${puts}; then checked=${on.keepChecked}; `
       + `retention off: [${disabled.items.join(", ")}]` };
@@ -365,7 +383,7 @@ const archivedCheck = {
     const { page } = context;
     await selectOwner(page, FIXTURE.organization);
     await page.evaluate(() => localStorage.setItem("zeros:dashboard-show-archived", "1"));
-    await reload(page);
+    await reload(context);
     await selectOwner(page, FIXTURE.organization);
     await page.getByRole("button", { name: "Home", exact: true }).first().click();
     await page.getByText("Archived after 30 days without activity.", { exact: false }).first().waitFor();

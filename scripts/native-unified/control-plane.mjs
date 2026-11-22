@@ -114,6 +114,16 @@ export async function startFixtureControlPlane(state, port) {
     }
     const listProjects = /^\/v1\/cloud-v2\/organizations\/([0-9a-f-]{36})\/cloud-projects$/.exec(path);
     if (listProjects && method === "GET") return send(200, projects(state, listProjects[1]));
+    // With projects on, the server answers the Cloud Computer's repositories from the organization's projects.
+    const installed = /^\/v1\/cloud-v2\/organizations\/([0-9a-f-]{36})\/computer\/repositories$/.exec(path);
+    if (installed && method === "GET") return send(200, { repositories: projects(state, installed[1]).projects
+      .flatMap(project => project.repositories.map(entry => ({ repository: entry.repository, defaultBranch: entry.defaultBranch, readyCopy: "ready", level: "shared" }))) });
+    if (/^\/v1\/cloud-v2\/organizations\/[0-9a-f-]{36}\/github\/connections$/.test(path) && method === "GET")
+      return send(200, { organization: [], personal: [], solo: false });
+    // No fixture workspace has a machine: a connect is answered as the server answers a stopped one (routes.ts).
+    if (/^\/v1\/cloud-v2\/workspaces\/[0-9a-f-]{36}\/connect$/.test(path) && method === "POST")
+      return send(409, { error: { code: "cloud_workspace_not_running", message: "This cloud workspace is not ready for a connection" } });
+    (state.unserved ??= new Set()).add(`${method} ${path.replace(/[0-9a-f]{8}-[0-9a-f-]{27}/g, ":id")}`);
     send(404, { error: { code: "not_found", message: "Not served by the native check's fixture control plane" } });
   });
   await new Promise((resolve, reject) => { server.once("error", reject); server.listen(port, "127.0.0.1", resolve); });

@@ -255,6 +255,7 @@ async function runCheck() {
     await page?.screenshot({ path: path.join(dirs.shots, "setup-failure.png") }).catch(() => undefined);
   }
   report.controlPlaneRequests = state.requests.map(request => `${request.method} ${request.path}`);
+  report.unserved = [...(state.unserved ?? [])];
   clearTimeout(deadline);
   await teardown("end of run");
   finish(rows, runDir, report, rows.some(entry => entry.result === "fail") ? 1 : 0);
