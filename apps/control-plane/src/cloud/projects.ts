@@ -29,6 +29,8 @@ export type CloudProjectLevel = "organization" | "personal";
 export type CloudProjectRepository = {
   repository: string; repositoryId: string; connectionId: string | null; defaultBranch: string | null;
   setup: string | null; setupScript: string | null; position: number;
+  /** Its builds and creates fetch its submodules (cloud/submodules.ts). */
+  fetchSubmodules: boolean;
 };
 export type CloudProject = {
   id: string; organizationId: string; name: string; level: CloudProjectLevel; ownerUserId: string | null;
@@ -38,7 +40,9 @@ export type CloudProject = {
  * project whose every repository an active organization connection reaches. */
 export type CloudProjectView = CloudProject & { canEdit: boolean; canShare: boolean };
 export type CloudProjectRepositoryInput = { repository: string; repositoryId: string; connectionId?: string | null | undefined;
-  defaultBranch?: string | null | undefined; setup?: string | null | undefined; setupScript?: string | null | undefined };
+  defaultBranch?: string | null | undefined; setup?: string | null | undefined; setupScript?: string | null | undefined;
+  /** Absent keeps the repository's current value, so a client that never sends it changes nothing. */
+  fetchSubmodules?: boolean | undefined };
 
 const name = z.string().trim().min(1).max(100);
 const repositoryName = z.string().max(201).regex(/^[A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100}$/);
@@ -48,11 +52,12 @@ export const CloudProjectRepositoryInputSchema = z.object({
   repository: repositoryName, repositoryId, connectionId: z.string().uuid().nullable().optional(),
   defaultBranch: branch.nullable().optional(), setup: z.string().max(8_000).nullable().optional(),
   setupScript: RepositorySetupPathSchema.nullable().optional(),
+  fetchSubmodules: z.boolean().optional(),
 }).strict();
 
 type ProjectRow = { id: string; org_id: string; name: string; level: CloudProjectLevel; owner_user_id: string | null; created_at: Date; updated_at: Date };
 type RepositoryRow = { project_id: string; position: number; repository: string; repository_id: string; connection: string | null;
-  default_branch: string | null; setup: string | null; setup_script: string | null };
+  default_branch: string | null; setup: string | null; setup_script: string | null; fetch_submodules: boolean };
 const owner = (repository: string) => repository.split("/")[0]!.toLowerCase();
 
 export const personalProjectsForbidden = () =>
@@ -114,7 +119,7 @@ export class CloudProjects {
         && repositories.filter(entry => entry.project_id === row.id).every(entry => reachable.has(owner(entry.repository))),
       repositories: repositories.filter(entry => entry.project_id === row.id).map(entry => ({
         repository: entry.repository, repositoryId: entry.repository_id, connectionId: entry.connection, defaultBranch: entry.default_branch,
-        setup: entry.setup, setupScript: entry.setup_script, position: entry.position })),
+        setup: entry.setup, setupScript: entry.setup_script, position: entry.position, fetchSubmodules: entry.fetch_submodules })),
     }));
   }
 
@@ -205,9 +210,14 @@ export class CloudProjects {
         const before = (await tx.query<RepositoryRow>("SELECT * FROM cloud_project_repositories WHERE project_id=$1 ORDER BY position", [projectId])).rows;
         const connections = await this.connections(tx, organizationId, userId, row.level, repositories);
         const same = (a: RepositoryRow, b: CloudProjectRepositoryInput) => a.repository_id === b.repositoryId;
+        // A repository's submodule setting rides with it; a client that never sends it keeps it.
+        const previous = new Map(before.map(entry => [entry.repository_id, entry.fetch_submodules]));
+        for (const entry of repositories) entry.fetchSubmodules ??= previous.get(entry.repositoryId) ?? false;
         if (before.length !== repositories.length || before.some((entry, index) => !same(entry, repositories[index]!))) change = "repositories_changed";
+        // Fetching submodules is part of a repository's setup: changing it rebuilds the copy the same way.
         else if (before.some((entry, index) => (entry.setup ?? null) !== (repositories[index]!.setup ?? null)
-          || (entry.setup_script ?? null) !== (repositories[index]!.setupScript ?? null))) change = "setup_changed";
+          || (entry.setup_script ?? null) !== (repositories[index]!.setupScript ?? null)
+          || entry.fetch_submodules !== repositories[index]!.fetchSubmodules)) change = "setup_changed";
         else if (before.some((entry, index) => (entry.default_branch ?? null) !== (repositories[index]!.defaultBranch ?? null))) change = "branch_changed";
         await tx.query("DELETE FROM cloud_project_repositories WHERE project_id=$1", [projectId]);
         await this.writeRepositories(tx, projectId, repositories, connections);
@@ -364,9 +374,9 @@ export class CloudProjects {
 
   private async writeRepositories(tx: Tx, projectId: string, repositories: readonly CloudProjectRepositoryInput[], connections: readonly (string | null)[]): Promise<void> {
     for (const [position, entry] of repositories.entries())
-      await tx.query(`INSERT INTO cloud_project_repositories (project_id, position, repository, repository_id, connection, default_branch, setup, setup_script)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`, [projectId, position, entry.repository, entry.repositoryId, connections[position] ?? null,
-        entry.defaultBranch ?? null, entry.setup || null, entry.setupScript || null]);
+      await tx.query(`INSERT INTO cloud_project_repositories (project_id, position, repository, repository_id, connection, default_branch, setup, setup_script, fetch_submodules)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`, [projectId, position, entry.repository, entry.repositoryId, connections[position] ?? null,
+        entry.defaultBranch ?? null, entry.setup || null, entry.setupScript || null, entry.fetchSubmodules === true]);
   }
 
   private async editable(tx: Tx, organizationId: string, userId: string, projectId: string, role: string): Promise<ProjectRow> {

@@ -111,7 +111,7 @@ export type ReadyCopyBase = { buildId: string; snapshot: string; createdBy: stri
 export type ReadyCopyProject = {
   id: string; organizationId: string; name: string; level: CloudProjectLevel; ownerUserId: string | null; createdBy: string | null;
   buildable: boolean;
-  repositories: { repository: string; repositoryId: string; connectionId: string | null; defaultBranch: string | null; setup: string | null }[];
+  repositories: { repository: string; repositoryId: string; connectionId: string | null; defaultBranch: string | null; setup: string | null; fetchSubmodules: boolean }[];
 };
 
 export type ReadyCopyFork = { copyId: string; key: string; machineId: string; sandboxId: string | null; requestedAt: Date };
@@ -150,11 +150,12 @@ export class CloudV2ReadyCopies {
         `SELECT p.id, p.org_id, p.name, p.level, p.owner_user_id, p.created_by, (p.level='organization' OR ${PERSONAL_BUILDABLE}) AS buildable
          FROM cloud_projects p JOIN organizations o ON o.id=p.org_id AND ${ORGANIZATION_AVAILABLE} WHERE p.id=$1`, [projectId])).rows[0];
       if (!row) return null;
-      const repositories = (await tx.query<{ repository: string; repository_id: string; connection: string | null; default_branch: string | null; setup: string | null }>(
-        "SELECT repository, repository_id, connection, default_branch, setup FROM cloud_project_repositories WHERE project_id=$1 ORDER BY position", [projectId])).rows;
+      const repositories = (await tx.query<{ repository: string; repository_id: string; connection: string | null; default_branch: string | null; setup: string | null;
+        fetch_submodules: boolean }>(
+        "SELECT repository, repository_id, connection, default_branch, setup, fetch_submodules FROM cloud_project_repositories WHERE project_id=$1 ORDER BY position", [projectId])).rows;
       return { id: row.id, organizationId: row.org_id, name: row.name, level: row.level, ownerUserId: row.owner_user_id, createdBy: row.created_by,
         buildable: row.buildable, repositories: repositories.map(entry => ({ repository: entry.repository, repositoryId: entry.repository_id,
-          connectionId: entry.connection, defaultBranch: entry.default_branch, setup: entry.setup })) };
+          connectionId: entry.connection, defaultBranch: entry.default_branch, setup: entry.setup, fetchSubmodules: entry.fetch_submodules })) };
     });
   }
 
@@ -465,7 +466,9 @@ export class CloudV2ReadyCopies {
     const secrets = (await this.tx(tx => tx.query<{ updated_at: Date }>(
       "SELECT updated_at FROM cloud_v2_ready_copy_secrets WHERE org_id=$1 AND project_id=$2", [organizationId, projectId]))).rows[0];
     return createHash("sha256").update(JSON.stringify(["project", base.buildId, project.level, project.ownerUserId,
-      project.repositories.map(entry => [entry.repositoryId, entry.defaultBranch, entry.setup]), secrets?.updated_at.toISOString() ?? null])).digest("hex");
+      // Fetching submodules joins only when on, so every existing copy's inputs stay as they were.
+      project.repositories.map(entry => [entry.repositoryId, entry.defaultBranch, entry.setup, ...(entry.fetchSubmodules ? [true] : [])]),
+      secrets?.updated_at.toISOString() ?? null])).digest("hex");
   }
 
   /** Failed or retired generations whose machine can go: no fork that began
