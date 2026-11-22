@@ -17,6 +17,7 @@ vi.mock("../../team/control-plane", () => ({ CONTROL_PLANE_URL: "https://control
 vi.mock("../../team/team-store", () => ({
   getTeamStoreState: () => ({ me: { user: { id: fixture.account } } }), getOrganizationStoreGeneration: () => fixture.generation,
   getActiveOrganizationIdSnapshot: () => fixture.organization,
+  getActiveCloudOrganizationIdSnapshot: () => fixture.organization,
   subscribeOrganizationSnapshots: (listener: () => void) => { fixture.accounts.add(listener); return () => fixture.accounts.delete(listener); },
 }));
 vi.mock("../../team/active-team", () => ({ subscribeActiveTeam: (listener: () => void) => { fixture.selection.add(listener); return () => fixture.selection.delete(listener); } }));

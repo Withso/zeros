@@ -46,6 +46,9 @@ export type OrganizationSummary = {
   legacyPersonalOrganizationIds?: readonly string[];
   /** Mixed-version marker for a pre-hierarchy flat Team response. */
   legacyFlat?: boolean;
+  /** Renderer-only, on the device Personal entry: the signed-in account's server
+   * Personal organization while it offers cloud (`personalEntryWithCloud`). */
+  cloudOrganization?: OrganizationSummary;
   defaultTeamId: string | null;
   workspaceCapabilities: { local: boolean; cloud: boolean };
   teamCapabilities: { multiple: false; canCreate: false };

@@ -2,6 +2,7 @@ import { useCallback, useLayoutEffect } from "react";
 import { getActiveOrganizationSnapshot } from "../features/team/team-store";
 import { filterRowsForOrganization, localWorkShowsEverywhere } from "../features/team/organization-capabilities";
 import type { OrganizationSummary } from "../features/team/control-plane";
+import { cloudOrganizationFor } from "../features/team/personal-cloud";
 import { isCloudWorkspace, parseCloudWorkspaceKey } from "../platform/bridge/cloud-workspace-key";
 import { canReadCloudWorkspace, cloudWorkspaceCatalogConfirmed, cloudWorkspaceDocument } from "./cloud-workspace-catalog";
 import { getOrganizationDestination, rememberOrganizationDestination } from "./organization-destination-cache";
@@ -15,7 +16,8 @@ import { findProjectForFolder, findWorkspaceForFolder } from "./workspace-resolu
 function knownDestination(organization: OrganizationSummary, folder: string): { repoRoot: string; validationPending: boolean } | null {
   if (isCloudWorkspace(folder)) {
     const target = parseCloudWorkspaceKey(folder);
-    return target?.organizationId === organization.id && canReadCloudWorkspace(cloudWorkspaceDocument(target))
+    // Personal remembers its own account's Personal cloud workspaces.
+    return target && target.organizationId === (cloudOrganizationFor(organization)?.id ?? organization.id) && canReadCloudWorkspace(cloudWorkspaceDocument(target))
       ? { repoRoot: folder, validationPending: !cloudWorkspaceCatalogConfirmed() } : null;
   }
   const projects = loadProjects();

@@ -9,7 +9,10 @@ vi.mock("../../../config/release-channel", async (original) => ({
 }));
 
 import { normalizeOrganizationSummary, personalCloudOffer, type OrganizationSummaryWire } from "../organization-summary";
-import { cloudOrganizationFor, isPersonalCloudOrganization, personalCloudOrganization } from "../personal-cloud";
+import { cloudOrganizationFor as resolve, isPersonalCloudOrganization, personalCloudOrganization, personalEntryWithCloud } from "../personal-cloud";
+
+const cloudOrganizationFor = (selected: OrganizationSummary | null, account: Me | null) =>
+  resolve(selected?.isPersonal ? personalEntryWithCloud(selected, account) : selected);
 import { PERSONAL_ORGANIZATION } from "../personal-organization";
 
 const PERSONAL = "33333333-3333-4333-8333-333333333333", OTHER = "44444444-4444-4444-8444-444444444444";
@@ -54,9 +57,11 @@ describe("cloudOrganizationFor", () => {
     expect(isPersonalCloudOrganization(OTHER, account)).toBe(false);
   });
 
-  it("returns the same object for the same account snapshot", () => {
+  it("returns the same objects for the same account snapshot", () => {
     const account = me([row("pro")]);
     expect(personalCloudOrganization(account)).toBe(personalCloudOrganization(account));
+    expect(personalEntryWithCloud(PERSONAL_ORGANIZATION, account)).toBe(personalEntryWithCloud(PERSONAL_ORGANIZATION, account));
+    expect(personalEntryWithCloud(PERSONAL_ORGANIZATION, null)).toBe(PERSONAL_ORGANIZATION);
   });
 
   it("leaves an organization as it is and never changes the device's Personal entry", () => {

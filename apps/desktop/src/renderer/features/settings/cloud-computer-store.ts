@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { KeyedAsyncCache } from "../../shared/lib/keyed-async-cache";
 import { useRecoveringRead } from "../../state/use-recovering-read";
 import { getOrganizationStoreGeneration, getTeamStoreState } from "../team/team-store";
+import { personalCloudOrganization } from "../team/personal-cloud";
 import { CONTROL_PLANE_URL, ControlPlaneError } from "../team/control-plane";
 import { getCloudV2Computer, saveCloudV2ComputerRecipe, type CloudV2Computer, type CloudV2RepositoryDraft } from "../../platform/cloud-v2";
 import { editableRepositories, newerRecipe, RecipeSaveQueue } from "./cloud-computer-model";
@@ -13,14 +14,24 @@ export const TYPING_SAVE_MS = 600;
 export const computerKey = (userId: string, organizationId: string) => JSON.stringify([CONTROL_PLANE_URL, getOrganizationStoreGeneration(), userId, organizationId]);
 export function assertComputerOwner(key: string, organizationId: string): void {
   const me = getTeamStoreState().me, organization = (me?.organizations ?? me?.teams)?.find(row => row.id === organizationId);
-  if (!me || key !== computerKey(me.user.id, organizationId) || !organization || organization.isPersonal ||
-      (organization.role !== "owner" && organization.role !== "admin")) throw new Error("The Cloud Computer account changed. Reopen its settings.");
+  // A Personal organization's Computer is its owner's, only while its cloud is usable (Pro).
+  const personal = organization?.isPersonal ? personalCloudOrganization(me) : null;
+  if (!me || key !== computerKey(me.user.id, organizationId) || !organization ||
+      (organization.isPersonal ? personal?.id !== organizationId || personal.seat !== "pro" : organization.role !== "owner" && organization.role !== "admin"))
+    throw new Error("The Cloud Computer account changed. Reopen its settings.");
 }
 // Start intent warming only for organization managers.
-export function prefetchCloudComputer(userId: string, organization: { id: string; isPersonal: boolean; role?: string }): void {
-  if (organization.isPersonal || (organization.role !== "owner" && organization.role !== "admin")) return;
+export function prefetchCloudComputer(userId: string, organization: ComputerOwner): void {
+  if (!managesComputer(organization)) return;
   void computers.load(computerKey(userId, organization.id), () => getCloudV2Computer(organization.id), { maxAgeMs: 30_000 })
     .catch(() => undefined);
+}
+
+type ComputerOwner = { id: string; isPersonal: boolean; role?: string; seat?: string; workspaceCapabilities?: { cloud: boolean } };
+/** An organization's owners and admins manage its Computer; a Personal cloud's owner does, with Pro. */
+function managesComputer(organization: ComputerOwner): boolean {
+  if (organization.isPersonal) return organization.workspaceCapabilities?.cloud === true && organization.seat === "pro";
+  return organization.role === "owner" || organization.role === "admin";
 }
 
 export function message(error: unknown): string {
@@ -88,9 +99,9 @@ export function useRecipeDraft(organizationId: string, key: string, data: CloudV
 }
 
 
-export function useCloudComputerRepositories(userId: string | null, organization: { id: string; isPersonal: boolean; role?: string } | null,
+export function useCloudComputerRepositories(userId: string | null, organization: ComputerOwner | null,
   enabled: boolean): string[] {
-  const manages = !!userId && !!organization && !organization.isPersonal && (organization.role === "owner" || organization.role === "admin");
+  const manages = !!userId && !!organization && managesComputer(organization);
   const read = useRecoveringRead(computers, manages ? computerKey(userId!, organization!.id) : null,
     (key) => getCloudV2Computer((JSON.parse(key) as string[])[3]!), { enabled, maxAgeMs: 30_000 });
   const data = read.data;

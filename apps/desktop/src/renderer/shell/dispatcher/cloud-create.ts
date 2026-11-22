@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { KeyedAsyncCache } from "../../shared/lib/keyed-async-cache";
 import { useCachedRead } from "../../state/use-cached-read";
-import { getActiveOrganizationIdSnapshot, useActiveOrganization } from "../../features/team/team-store";
+import { getActiveCloudOrganizationIdSnapshot, useActiveOrganization } from "../../features/team/team-store";
+import { cloudOrganizationFor } from "../../features/team/personal-cloud";
 import { canCreateWorkspaceIn, cloudCreateSeatReason } from "../../features/team/organization-capabilities";
 import { cloudWorkspaceCapability } from "../../platform/cloud-capability";
 import { isCloudV2BaseBranch } from "../../platform/cloud-v2";
@@ -30,17 +31,19 @@ const NO_BASES: Readonly<Record<string, string>> = Object.freeze({});
 
 /** Whether this desktop build and the active organization can create in cloud. */
 export function useCloudCreateAvailability(active: boolean) {
-  const organization = useActiveOrganization();
-  const canCreateCloud = canCreateWorkspaceIn(organization, "cloud");
+  const selected = useActiveOrganization();
+  // The cloud owner: the selected organization, or the Personal entry's account Personal cloud.
+  const organization = cloudOrganizationFor(selected) ?? selected;
+  const canCreateCloud = canCreateWorkspaceIn(selected, "cloud");
   const readCloud = active && canCreateCloud;
   const capability = useCachedRead(capabilityCache, readCloud ? "desktop" : null, cloudWorkspaceCapability, { maxAgeMs: Infinity });
-  const reason = !canCreateCloud ? cloudCreateSeatReason(organization) ?? "Select an organization with Cloud access."
+  const reason = !canCreateCloud ? cloudCreateSeatReason(cloudOrganizationFor(selected)) ?? "Select an organization with Cloud access."
     : !capability.data?.enabled ? capability.loading ? "Checking Cloud availability…" : "Cloud workspaces are not enabled in this desktop build."
     : null;
   const warm = () => {
     if (readCloud) void capabilityCache.load("desktop", cloudWorkspaceCapability, { maxAgeMs: Infinity }).catch(() => {});
   };
-  return { organization, canCreateCloud, reason, warm, checking: readCloud && !capability.data && !capability.error };
+  return { organization, cloudOrganization: cloudOrganizationFor(selected), canCreateCloud, reason, warm, checking: readCloud && !capability.data && !capability.error };
 }
 
 /** The v2 worker runs `git switch -c <branch> origin/<baseBranch>`, so a source
@@ -71,7 +74,7 @@ export function useCloudCreate(
   const availability = useCloudCreateAvailability(active);
   const computerMode = placement
     ? placement === "cloud"
-    : Boolean(availability.organization && !availability.organization.isPersonal || getActiveOrganizationIdSnapshot() !== null);
+    : Boolean(availability.cloudOrganization || getActiveCloudOrganizationIdSnapshot() !== null);
   const selection = useComputerRepositorySelection(computer.key ?? null, computer.repositories, active, preferredRepositoryId, selectionIntent);
   // Projects (the control plane lists them): Create picks a project; one repository works exactly as a repository did.
   const identity = computer.key ? JSON.parse(computer.key) as [string, string] : null;
@@ -133,6 +136,8 @@ export function useCloudCreate(
     reason,
     checking: availability.checking || computer.checking,
     organization: availability.organization,
+    /** The cloud owner when there is one: an organization, or the Personal entry's account Personal cloud. */
+    cloudOrganization: availability.cloudOrganization,
     repository,
     baseBranch: source.baseBranch,
     computerMode,

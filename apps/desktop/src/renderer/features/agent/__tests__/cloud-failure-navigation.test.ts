@@ -20,6 +20,7 @@ vi.mock("../../team/team-store", () => ({
   getTeamStoreState: () => ({ me: { user: { id: fixture.account } } }),
   getOrganizationStoreGeneration: () => fixture.generation,
   getActiveOrganizationIdSnapshot: () => fixture.organization,
+  getActiveCloudOrganizationIdSnapshot: () => fixture.organization,
   subscribeOrganizationSnapshots: (listener: () => void) => { fixture.accounts.add(listener); return () => fixture.accounts.delete(listener); },
 }));
 vi.mock("../../settings/settings-navigation", () => ({ requestProviderSettings: fixture.provider }));

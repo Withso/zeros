@@ -8,6 +8,7 @@ vi.mock("../../team/active-team", () => ({ getActiveTeamId: () => f.organization
 vi.mock("../../team/team-store", () => ({
   getTeamStoreState: () => ({ me: { user: { id: f.user }, organizations: f.member ? [{ id: f.organization, isPersonal: false, workspaceCapabilities: { cloud: true } }] : [] } }),
   getOrganizationStoreGeneration: () => f.epoch,
+  getActiveOrganizationSnapshot: () => ({ id: f.organization, isPersonal: false, workspaceCapabilities: { local: false, cloud: true } }),
   subscribeOrganizationSnapshots: (callback: () => void) => { f.listeners.add(callback); return () => f.listeners.delete(callback); },
 }));
 vi.mock("../../../platform/cloud-workspaces", () => ({ cloudAccountRequest: f.request }));
