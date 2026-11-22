@@ -22,6 +22,21 @@ export function onWorkbenchCollapseRequest(listener: Listener): () => void {
   };
 }
 
+const revealListeners = new Set<Listener>();
+
+/** Ask the shell to show Workbench, such as for a newly opened side chat. */
+export function requestWorkbenchReveal(): void {
+  for (const listener of [...revealListeners]) listener();
+}
+
+/** Shell-side subscription. Returns an unsubscribe. */
+export function onWorkbenchRevealRequest(listener: Listener): () => void {
+  revealListeners.add(listener);
+  return () => {
+    revealListeners.delete(listener);
+  };
+}
+
 /** Tell the shell the last float closed. It shows the column again only if
  * a float hid it and the user has not shown or hidden it since. */
 export function requestWorkbenchRestore(): void {

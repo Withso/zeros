@@ -4,6 +4,7 @@ import {
   FileDiff,
   GitPullRequestArrow,
   Globe,
+  MessageSquare,
   PenTool,
   Smartphone,
   Terminal,
@@ -104,6 +105,16 @@ export const WORKBENCH_STATUS_ADAPTERS = {
       unavailable: "The simulator isn't available.",
     },
     icon: Smartphone,
+  },
+  chat: {
+    noun: "the side chat",
+    subject: "The side chat",
+    empty: {
+      pending: "The side chat opens when the workspace is ready.",
+      retryable: "Retry to load the side chat.",
+      unavailable: "The side chat isn't available.",
+    },
+    icon: MessageSquare,
   },
 } satisfies Record<
   WorkbenchTabType,
