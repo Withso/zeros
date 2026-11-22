@@ -78,7 +78,7 @@ export type CloudV2RouteDeps = {
   workspaceSync?: CloudWorkspaceSync;
   workspaceGithubReadTokens?: CloudWorkspaceGithubReadTokens;
   localDevices?: CloudLocalDeviceRoutes;
-  store: Pick<CloudV2Store, "activeComputer" | "createWorkspace" | "createWorkspaceOnce" | "readCreateReceipt" | "get" | "promptContext" | "list" | "requestLifecycle" | "transition" | "issueToken" | "listChats" | "messageWindow" | "searchMessages" | "messageRange" | "messageSince" | "markActive"> & Partial<Pick<CloudV2Store, "prompts" | "getByNumber" | "chatEdits" | "requestExecutionLifecycle" | "dismissLostWork">>;
+  store: Pick<CloudV2Store, "activeComputer" | "createWorkspace" | "createWorkspaceOnce" | "readCreateReceipt" | "get" | "promptContext" | "list" | "requestLifecycle" | "transition" | "issueToken" | "listChats" | "messageWindow" | "searchMessages" | "messageRange" | "messageSince" | "markActive"> & Partial<Pick<CloudV2Store, "prompts" | "getByNumber" | "chatEdits" | "requestExecutionLifecycle" | "dismissLostWork" | "personActivity" | "setKeep">>;
   /** Roll out only with a runtime that advertises durable prompt delivery. */
   promptOutbox?: boolean;
   computers: Pick<CloudV2Computers, "requireMember" | "requireAdmin" | "overview" | "enqueue" | "buildConfigured" | "buildSourceTargets" | "saveRecipe" | "discardRecipe" | "reactivate" | "log" | "logRepositories">
@@ -139,6 +139,9 @@ export function createCloudV2Routes(deps: CloudV2RouteDeps): Hono {
   const chatEdits = deps.store.chatEdits;
   const connections = new WeakMap<Context, Promise<Awaited<ReturnType<CloudExecutionContexts["connectionWorkspace"]>>>>();
   const activeWorkspaces = new WeakMap<Context, Promise<boolean>>();
+  /** Retention S3: a person's own call on the workspace counts toward its 30-day clock (reads do not:
+   * the desktop revalidates them on its own). Never fails or delays the call beyond one statement. */
+  const personActivity = (id: string) => deps.store.personActivity?.(id).catch(() => {});
   const activeWorkspace = (c: Context, id: string) => {
     let pending = activeWorkspaces.get(c);
     if (!pending) {
@@ -192,6 +195,7 @@ export function createCloudV2Routes(deps: CloudV2RouteDeps): Hono {
       if (user.authentication && !await securityStreamAuthority(tx, user))
         throw new HttpError(401, "session_revoked", "Authentication is no longer current");
     });
+    await personActivity(id.data);
     return c.json({ chat });
   });
 
@@ -199,7 +203,9 @@ export function createCloudV2Routes(deps: CloudV2RouteDeps): Hono {
     const id = uuid.safeParse(c.req.param("id"));
     if (!id.success || !deps.github) throw new HttpError(404, "not_found", "Cloud pull requests are not available.");
     c.header("Cache-Control", "no-store");
-    return c.json(await deps.github.service.execute(id.data, c.get("user").id, await c.req.json().catch(() => null)));
+    const result = await deps.github.service.execute(id.data, c.get("user").id, await c.req.json().catch(() => null));
+    await personActivity(id.data);
+    return c.json(result);
   });
 
   app.get("/v1/cloud-v2/runtime-canaries/:grantId", async c => {
@@ -275,6 +281,7 @@ export function createCloudV2Routes(deps: CloudV2RouteDeps): Hono {
     if (explicitWake && (workspace.archivedAt || workspace.state === "stopping" || (!wake && workspace.state === "stopped")))
       throw new HttpError(409, "cloud_workspace_not_running", "This cloud workspace is not ready for a connection");
     if (workspace.state === "deleting" || workspace.state === "failed") throw new HttpError(409, "workspace_unavailable", "This cloud workspace is unavailable");
+    await personActivity(workspace.id);
     if (wake && workspace.state === "stopped") {
       if (acting) await deps.store.requestExecutionLifecycle!(workspace.id, userId, "start", acting.proof, c.get("user"), explicitWake);
       else if (!explicitWake) await deps.store.transition(workspace.id, ["stopped"], "starting");
@@ -316,8 +323,19 @@ export function createCloudV2Routes(deps: CloudV2RouteDeps): Hono {
   if (deps.store.dismissLostWork) app.post("/v1/cloud-v2/workspaces/:id/lost-work/dismiss", async c => {
     const id = uuid.safeParse(c.req.param("id"));
     if (!id.success) throw new HttpError(404, "not_found", "Cloud workspace not found");
-    return c.json({ workspace: await document(await deps.store.dismissLostWork!(id.data, c.get("user").id)) });
+    const workspace = await deps.store.dismissLostWork!(id.data, c.get("user").id);
+    await personActivity(workspace.id);
+    return c.json({ workspace: await document(workspace) });
   });
+
+  /** Retention S3: Keep exempts the workspace from automatic archive and from backup removal. Anyone
+   * who can use the workspace sets or clears it (a personal project's: its member only). */
+  if (deps.store.setKeep) for (const [method, keep] of [["put", true], ["delete", false]] as const)
+    app[method]("/v1/cloud-v2/workspaces/:id/keep", rateLimit("cloud-workspace-keep", 12, 60_000), async c => {
+      const id = uuid.safeParse(c.req.param("id"));
+      if (!id.success) throw new HttpError(404, "not_found", "Cloud workspace not found");
+      return c.json({ workspace: await document(await deps.store.setKeep!(id.data, c.get("user").id, keep)) });
+    });
 
   /** History reads from the control plane's mirror; never wakes the VM. */
   app.post("/v1/cloud-v2/workspaces/:id/history", json, async c => {
@@ -335,6 +353,7 @@ export function createCloudV2Routes(deps: CloudV2RouteDeps): Hono {
       const ownership = c.req.header(TEAM_SHARING_HEADER) === "1" && c.req.header(TEAM_OWNERSHIP_HEADER) === "1";
       const { workspace, moved } = active ? await deps.store.requestExecutionLifecycle!(id.data, user.id, action, undefined, user, false, ownership)
         : await deps.store.requestLifecycle(id.data, user.id, action);
+      if (action === "start" || action === "restart") await personActivity(id.data);
       if (active && ownership && deps.teamSharing) return c.json({
         workspace: workspaceDocument(await deps.teamSharing.lifecycleDocument(id.data,user),deps.promptOutbox === true,!!chatEdits),
         teamSharing: 1,teamOwnership: 1,

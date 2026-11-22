@@ -643,3 +643,46 @@ describe("cloud v2 lost-work notice", () => {
     expect(store.dismissLostWork).not.toHaveBeenCalled();
   });
 });
+
+describe("cloud v2 Keep (retention S3)", () => {
+  const id = "66666666-6666-4666-8666-666666666666", member = "77777777-7777-4777-8777-777777777777";
+  function setup(refused = false) {
+    const store = {
+      setKeep: vi.fn(async (_id: string, _user: string, keep: boolean) => {
+        if (refused) throw new HttpError(404, "not_found", "Cloud workspace not found");
+        return { id, state: "stopped", keep };
+      }),
+      dismissLostWork: vi.fn(async () => ({ id, state: "running" })),
+      personActivity: vi.fn(async () => {}),
+    };
+    const app = new Hono();
+    app.use("*", async (c, next) => { c.set("user", { id: member } as never); await next(); });
+    app.onError((error, c) => error instanceof HttpError
+      ? c.json({ error: { code: error.code } }, error.status) : c.json({ error: { code: "internal" } }, 500));
+    app.route("/", createCloudV2Routes({ store, bridgeBaseUrl: "wss://dev.example.test" } as unknown as CloudV2RouteDeps));
+    return { app, store };
+  }
+
+  it("sets and clears Keep for the person asking, and returns the workspace document", async () => {
+    const { app, store } = setup();
+    const set = await app.request(`/v1/cloud-v2/workspaces/${id}/keep`, { method: "PUT" });
+    expect(set.status).toBe(200);
+    expect(await set.json()).toMatchObject({ workspace: { id, keep: true, placement: "cloud", version: 2 } });
+    const cleared = await app.request(`/v1/cloud-v2/workspaces/${id}/keep`, { method: "DELETE" });
+    expect(await cleared.json()).toMatchObject({ workspace: { keep: false } });
+    expect(store.setKeep.mock.calls).toEqual([[id, member, true], [id, member, false]]);
+  });
+
+  it("refuses anyone the store refuses, and an invalid id", async () => {
+    expect((await setup(true).app.request(`/v1/cloud-v2/workspaces/${id}/keep`, { method: "PUT" })).status).toBe(404);
+    const { app, store } = setup();
+    expect((await app.request("/v1/cloud-v2/workspaces/nope/keep", { method: "PUT" })).status).toBe(404);
+    expect(store.setKeep).not.toHaveBeenCalled();
+  });
+
+  it("counts a person's own write as activity, after its access check", async () => {
+    const { app, store } = setup();
+    await app.request(`/v1/cloud-v2/workspaces/${id}/lost-work/dismiss`, { method: "POST" });
+    expect(store.personActivity).toHaveBeenCalledWith(id);
+  });
+});

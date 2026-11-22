@@ -1394,13 +1394,18 @@ export class CloudV2Store {
   /** Retention S3: a member re-added gets their personal-project workspaces back (the trigger does it at
    * once and skips a held row; this sweeps what it skipped). Only that member's own private rows. */
   async restoreReturningPrivate(limit: number): Promise<number> {
-    const result = await withSystemTx(this.pool, tx => tx.query(
-      `UPDATE cloud_v2_workspaces SET creator_user_id=private_owner_user_id, creator_absent_reason=NULL
-       WHERE id IN (SELECT w.id FROM cloud_v2_workspaces w WHERE w.private_owner_user_id IS NOT NULL AND w.creator_user_id IS NULL
-         AND w.creator_absent_reason='left' AND w.state NOT IN ('deleting','deleted')
-         AND EXISTS (SELECT 1 FROM organization_members m WHERE m.org_id=w.org_id AND m.user_id=w.private_owner_user_id)
-         LIMIT $1 FOR UPDATE SKIP LOCKED)`, [limit]));
-    return result.rowCount ?? 0;
+    return withSystemTx(this.pool, async tx => {
+      // As the membership trigger: under the team-ownership switch that cleared it, for an eligible member only.
+      await tx.query("SELECT set_config('app.cloud_team_ownership','1',true)");
+      const result = await tx.query(
+        `UPDATE cloud_v2_workspaces SET creator_user_id=private_owner_user_id
+         WHERE id IN (SELECT w.id FROM cloud_v2_workspaces w WHERE w.private_owner_user_id IS NOT NULL AND w.creator_user_id IS NULL
+           AND w.creator_absent_reason='left' AND w.state NOT IN ('deleting','deleted')
+           AND EXISTS (SELECT 1 FROM organization_members m JOIN users u ON u.id=m.user_id AND u.auth_status='active' AND u.deleted_at IS NULL
+             WHERE m.org_id=w.org_id AND m.user_id=w.private_owner_user_id AND NOT ${memberOnHoldSql("m.org_id", "m.user_id")})
+           LIMIT $1 FOR UPDATE SKIP LOCKED)`, [limit]);
+      return result.rowCount ?? 0;
+    });
   }
 
   /** Stops an archived workspace that is still running or starting, through the ordinary archive path

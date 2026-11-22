@@ -77,11 +77,14 @@ export function createCloudTeamRoutes(sharing: CloudTeamSharing, document: (valu
     const proof = await sharing.authority.admit(id,user);
     return rateLimit("cloud-team-reassign",10,60_000,() => `${user.id}:${proof.view.workspace.organizationId}`)(c,async () => {
       const result = await sharing.ownership.reassign(id,user,input);
+      await touched(id);
       c.res = c.json({ ...result,workspace: document(result.workspace) });
     });
   }));
   app.get(`${path}/events`,share(c => sharing.events.open(c,uuid(c.req.param("id")!))));
   const activityLimit = rateLimit("cloud-workspace-activity",12,60_000);
+  /** Retention S3: a manager's own change to the workspace counts toward its 30-day clock. */
+  const touched = (id: string) => sharing.workspaces.personActivity(id).catch(() => {});
   app.post(`${path}/activity`,share(async c => activityLimit(c,async () => {
     c.res = c.json(await sharing.activity(uuid(c.req.param("id")!),c.get("user")));
   })));
@@ -114,6 +117,7 @@ export function createCloudTeamRoutes(sharing: CloudTeamSharing, document: (valu
   app.post(`${path}/rename`,share(async c => {
     const input = await body(c,ApiRenameSchema), id = uuid(c.req.param("id")!), user = c.get("user");
     await sharing.manage(id,user,"rename",input.name);
+    await touched(id);
     return c.json({ workspace: document(await sharing.get(id,user,owns(c))),teamSharing: 1,...marker(c) });
   }));
   app.delete(path,share(async c => {
@@ -132,6 +136,7 @@ export function createCloudTeamRoutes(sharing: CloudTeamSharing, document: (valu
     if (!active && proof.view.role === "member") throw teamManagementDenied();
     const chat = await sharing.workspaces.chatEdits.applyForManager({ organizationId: proof.view.workspace.organizationId,userId: user.id },id,parsed.data,
       { ...(patch.title === undefined ? {} : { title: patch.title }),...(patch.archived === undefined ? {} : { archived: patch.archived }) },async tx => { if (active) await sharing.authority.assert(proof,tx); else await sharing.manager(proof,tx); });
+    await touched(id);
     return c.json({ chat });
   }));
   for (const verb of ["follow","unfollow","pin","unpin"] as const) app.post(`${path}/${verb}`,share(async c => {

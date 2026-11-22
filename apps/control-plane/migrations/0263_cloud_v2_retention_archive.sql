@@ -45,11 +45,14 @@ SET search_path = pg_catalog, public, pg_temp AS $$
 DECLARE previous_system text := current_setting('app.system',true);
 BEGIN
   PERFORM set_config('app.system','on',true);
-  UPDATE public.cloud_v2_workspaces w SET archived_at = clock_timestamp(), archive_reason = 'member_left'
-    WHERE w.id IN (SELECT c.id FROM public.cloud_v2_workspaces c
-      WHERE c.org_id = OLD.org_id AND c.private_owner_user_id = OLD.user_id AND c.state NOT IN ('deleting', 'deleted')
-        AND c.archived_at IS NULL
-      FOR UPDATE SKIP LOCKED);
+  BEGIN
+    UPDATE public.cloud_v2_workspaces w SET archived_at = clock_timestamp(), archive_reason = 'member_left'
+      WHERE w.id IN (SELECT c.id FROM public.cloud_v2_workspaces c
+        WHERE c.org_id = OLD.org_id AND c.private_owner_user_id = OLD.user_id AND c.state NOT IN ('deleting', 'deleted')
+          AND c.archived_at IS NULL
+        FOR UPDATE SKIP LOCKED);
+  EXCEPTION WHEN OTHERS THEN NULL; -- Never fails the removal: the lifecycle's sweep archives what this skipped.
+  END;
   PERFORM set_config('app.system',coalesce(previous_system,''),true);
   RETURN NULL;
 END;
@@ -66,13 +69,23 @@ CREATE FUNCTION cloud_v2_restore_returning_private() RETURNS trigger
 LANGUAGE plpgsql SECURITY DEFINER
 SET search_path = pg_catalog, public, pg_temp AS $$
 DECLARE previous_system text := current_setting('app.system',true);
+  previous_ownership text := current_setting('app.cloud_team_ownership',true);
 BEGIN
   PERFORM set_config('app.system','on',true);
-  UPDATE public.cloud_v2_workspaces w SET creator_user_id = NEW.user_id, creator_absent_reason = NULL
-    WHERE w.id IN (SELECT c.id FROM public.cloud_v2_workspaces c
-      WHERE c.org_id = NEW.org_id AND c.private_owner_user_id = NEW.user_id AND c.creator_user_id IS NULL
-        AND c.creator_absent_reason = 'left' AND c.state NOT IN ('deleting', 'deleted')
-      FOR UPDATE SKIP LOCKED);
+  -- A creator is cleared on departure only under the team-ownership switch (0246); restoring the same member
+  -- uses it too, and guard_cloud_creator_ownership still checks they are eligible.
+  PERFORM set_config('app.cloud_team_ownership','1',true);
+  BEGIN
+    UPDATE public.cloud_v2_workspaces w SET creator_user_id = NEW.user_id
+      WHERE w.id IN (SELECT c.id FROM public.cloud_v2_workspaces c
+        WHERE c.org_id = NEW.org_id AND c.private_owner_user_id = NEW.user_id AND c.creator_user_id IS NULL
+          AND c.creator_absent_reason = 'left' AND c.state NOT IN ('deleting', 'deleted')
+          AND EXISTS (SELECT 1 FROM public.users u WHERE u.id = NEW.user_id AND u.auth_status = 'active' AND u.deleted_at IS NULL)
+          AND NOT public.organization_member_on_hold(NEW.org_id, NEW.user_id, 10, 5)
+        FOR UPDATE SKIP LOCKED);
+  EXCEPTION WHEN OTHERS THEN NULL; -- Never fails the membership: the lifecycle's sweep restores what this skipped.
+  END;
+  PERFORM set_config('app.cloud_team_ownership',coalesce(previous_ownership,''),true);
   PERFORM set_config('app.system',coalesce(previous_system,''),true);
   RETURN NULL;
 END;
