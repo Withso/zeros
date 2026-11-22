@@ -187,15 +187,23 @@ describe("linting what changes a component from outside", () => {
   });
 
   it("finds layers, hosts and declarations in time linear in an adversarial source", () => {
-    const flood = '<a data-oid="x" '.repeat(60_000) + "<zd-x data-oid=".repeat(20_000);
-    const source = `<!doctype html><html><head><style>[data-oid="b"] { color: red }</style></head><body>${flood}<b data-oid="b" style="color: blue">b</b></body></html>`;
     const lineAt = () => ({ startLine: 1, startCol: 1 });
-    const started = performance.now();
-    designMainControlViolations({ file: "f.html", source, elements: [], lineAt,
-      bindings: { layers: Object.fromEntries(Array.from({ length: 200 }, (_, index) => [`l${index}`, { styles: { color: ["c"] } }])) } });
-    designInstanceControlViolations({ file: "f.html", source, lineAt, instances: { components: { x: { elements: [], reach: {}, file: "x.html", frame: true } },
-      hosts: Object.fromEntries(Array.from({ length: 200 }, (_, index) => [`h${index}`, { component: "x", attributes: {}, style: "opacity: 0.5" }])) } });
-    expect(performance.now() - started).toBeLessThan(3_000);
+    const layers = Object.fromEntries(Array.from({ length: 200 }, (_, index) => [`l${index}`, { styles: { color: ["c"] } }]));
+    const hosts = Object.fromEntries(Array.from({ length: 200 }, (_, index) => [`h${index}`, { component: "x", attributes: {}, style: "opacity: 0.5" }]));
+    const lintSource = (size: number) => {
+      const source = `<!doctype html><html><head><style>[data-oid="b"] { color: red }</style></head><body>${'<a data-oid="x" '.repeat(size)}${"<zd-x data-oid=".repeat(size / 3)}<b data-oid="b" style="color: blue">b</b></body></html>`;
+      designMainControlViolations({ file: "f.html", source, elements: [], lineAt, bindings: { layers } });
+      designInstanceControlViolations({ file: "f.html", source, lineAt, instances: { components: { x: { elements: [], reach: {}, file: "x.html", frame: true } }, hosts } });
+    };
+    // The smallest of five timings each, so one slow sample on a loaded machine cannot decide.
+    const fastest = (size: number) => Math.min(...Array.from({ length: 5 }, () => {
+      const started = performance.now();
+      lintSource(size);
+      return performance.now() - started;
+    }));
+    // Linear: four times the source costs at most about six times as much (quadratic: sixteen).
+    const small = fastest(6_000);
+    expect(fastest(24_000)).toBeLessThanOrEqual(6 * Math.max(small, 10));
   });
 
   it("finds nothing to warn about in the demo components", async () => {

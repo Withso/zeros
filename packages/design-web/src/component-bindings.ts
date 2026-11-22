@@ -29,6 +29,13 @@ const VAR = /var\(\s*(--[A-Za-z0-9_-]+)/g;
 const ROOT_ALIASES = new Set([":root", ":host", "html", "body"]);
 /** Layer ids that would become an object's prototype or constructor as keys. */
 const UNSAFE_KEYS = new Set(["__proto__", "constructor", "prototype"]);
+/** The custom-property propagation steps the last bindings pass took, so
+ * tests can bound the work by the graph's size rather than by a clock. */
+let propagationSteps = 0;
+export function componentBindingsPropagationStepsForTests(): number {
+  return propagationSteps;
+}
+
 /** Bounds on the custom-property graph walked for one main. */
 const VAR_GRAPH_LIMITS = { properties: 1024, edges: 8192 };
 const ENCODER = new TextEncoder();
@@ -477,6 +484,7 @@ export function componentBindingsOf(document: DefaultTreeAdapterTypes.Document, 
   if (overflow) truncated = true;
   const everyControl = [...optionNames];
   const reached = new Map<string, Set<string>>();
+  propagationSteps = 0;
   if (!overflow) {
     const readers = new Map<string, string[]>();
     for (const [name, reads] of edges)
@@ -487,6 +495,7 @@ export function componentBindingsOf(document: DefaultTreeAdapterTypes.Document, 
       }
     const pending: string[] = [];
     const add = (name: string, options: Iterable<string>) => {
+      propagationSteps += 1;
       let set = reached.get(name);
       if (!set) reached.set(name, set = new Set());
       let grew = false;

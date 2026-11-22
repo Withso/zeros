@@ -2,7 +2,24 @@ import { readdirSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import { designComponentRecordWithinLimits, DESIGN_COMPONENT_BINDINGS_LIMITS, designFrameComponentSchema } from "@zeros/protocol/design-catalog";
+import { parse } from "parse5";
+import { readComponentDeclaration } from "@zeros/design-core/components";
+import { componentBindingsOf, componentBindingsPropagationStepsForTests } from "../component-bindings";
 import { designComponentSummaryOf } from "../component-template";
+
+/** The smallest of `samples` timings: one slow sample on a loaded machine cannot decide. */
+const fastest = (run: () => void, samples = 5) => Math.min(...Array.from({ length: samples }, () => {
+  const started = performance.now();
+  run();
+  return performance.now() - started;
+}));
+/** Linear in the input: four times the input costs at most about six times as much (a
+ * quadratic scan costs sixteen), with a floor so tiny timings are not compared as noise. */
+const expectLinear = (run: (size: number) => void, size: number) => {
+  const small = fastest(() => run(size));
+  const large = fastest(() => run(size * 4));
+  expect(large).toBeLessThanOrEqual(6 * Math.max(small, 10));
+};
 
 const FIXTURES = resolve(__dirname, "fixtures/demo-components");
 const bindingsOf = (source: string) => designComponentSummaryOf(source)?.bindings;
@@ -146,14 +163,15 @@ describe("the controls each layer of a main reads", () => {
     expect(deep.truncated).toBeUndefined();
   });
 
-  it("resolves a wide fan-out of custom properties once each, in bounded time", () => {
-    // 16 levels of 7 properties, each reading all 7 of the next level.
+  it("resolves a wide fan-out of custom properties once each, in work bounded by the graph", () => {
+    // 16 levels of 7 properties, each reading all 7 of the next level: 112 properties, 742 edges.
     const levels = Array.from({ length: 16 }, (_, level) => Array.from({ length: 7 }, (_, index) =>
       `--l${level}-${index}: ${level === 15 ? "var(--zd-w)" : Array.from({ length: 7 }, (_, next) => `var(--l${level + 1}-${next})`).join(" ")};`).join(" ")).join(" ");
-    const started = performance.now();
     const bindings = bindingsOf(main(`<zd-option name="w" type="number" default="1"></zd-option>`,
       `:root { ${levels} } .box { width: var(--l0-3); }`, `<div class="box" data-oid="box">b</div><div data-oid="other">o</div>`))!;
-    expect(performance.now() - started).toBeLessThan(2_000);
+    // Each property is revisited only when its set grows (once here), so the
+    // steps stay within the properties plus the edges; a walk per path would take 7^15.
+    expect(componentBindingsPropagationStepsForTests()).toBeLessThanOrEqual(2 * (112 + 742));
     expect(bindings.layers.box!.styles).toEqual({ width: ["w"] });
     // 112 properties reach Width; the record lists at most its vars limit of them.
     expect(Object.keys(bindings.vars!)).toHaveLength(64);
@@ -182,12 +200,13 @@ describe("the controls each layer of a main reads", () => {
   });
 
   it("scans template holes in time linear in the source, unclosed ones included", () => {
-    const flood = "{{ ".repeat(200_000);
-    const started = performance.now();
-    const bindings = bindingsOf(main(`<zd-option name="t" type="text" default="x"></zd-option>`, "",
-      `<p data-oid="p" class="a {{ ${"{{".repeat(50_000)}">${flood}{{ t }}</p>`));
-    expect(performance.now() - started).toBeLessThan(3_000);
-    expect(bindings?.unread).toEqual(["t"]);
+    // The bindings pass alone, on a parsed main: its own forward hole scan.
+    const declaration = readComponentDeclaration([{ tag: "zd-option", offset: 0,
+      attributes: [{ name: "name", value: "t" }, { name: "type", value: "text" }, { name: "default", value: "x" }] }]).declaration;
+    const parsed = (size: number) => parse(`<!doctype html><html><head></head><body><p data-oid="p" class="a {{ ${"{{".repeat(size / 4)}">${"{{ ".repeat(size)}{{ t }}</p></body></html>`);
+    expect(componentBindingsOf(parsed(1_000), declaration)?.unread).toEqual(["t"]);
+    const documents = new Map([25_000, 100_000].map((size) => [size, parsed(size)]));
+    expectLinear((size) => { componentBindingsOf(documents.get(size)!, declaration); }, 25_000);
   });
 
   it("reads inline styles, ignores keyframe offsets, and lists the controls nothing reads", () => {
