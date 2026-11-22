@@ -17,6 +17,12 @@ describe("a v2 reply becomes the popup's document", () => {
     expect(document.setup).toEqual(setup);
     expect(document.agentCost).toEqual(agentCost);
   });
+  it("carries lost work through the same mapping, and drops a malformed one", () => {
+    const lostWork = { restored: "earlier", stoppedAt: "2026-11-20T15:04:00.000Z" };
+    const parse = (value: unknown) => CloudWorkspaceDocumentSchema.parse(cloudV2Document(CloudV2WorkspaceSchema.parse({ ...reply, lostWork: value })));
+    expect(parse(lostWork).lostWork).toEqual(lostWork);
+    expect(parse({ restored: "earlier" })).not.toHaveProperty("lostWork");
+  });
   it("drops a malformed field alone, and keeps absent fields absent", () => {
     const document = CloudWorkspaceDocumentSchema.parse(cloudV2Document(CloudV2WorkspaceSchema.parse({ ...reply, setup: { state: "paused" }, agentCost: -1 })));
     expect(document).not.toHaveProperty("setup");

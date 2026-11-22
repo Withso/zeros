@@ -904,3 +904,23 @@ describe("a workspace of several repositories", () => {
     expect(cloudRepositoryLayout(target)).toBeUndefined();
   });
 });
+
+describe("lost work", () => {
+  beforeEach(() => clearCloudWorkspaceCatalog());
+  it("tells the workspace's member, in plain words, which work could not be recovered", async () => {
+    const { renderToStaticMarkup } = await import("react-dom/server");
+    const React = await import("react");
+    const { LostWorkNotice, lostWorkMessage } = await import("../../shell/conversation/lost-work-notice");
+    const { CloudWorkspaceDocumentSchema } = await import("../../platform/cloud-workspace-contract");
+    const key = `cloud://${target.organizationId}/${target.workspaceId}`, stoppedAt = "2026-11-20T15:04:00.000Z";
+    const rendered = () => renderToStaticMarkup(React.createElement(LostWorkNotice, { folder: key }));
+    acceptCloudWorkspaceDocument(doc(1));
+    expect(rendered()).toBe("");
+    acceptCloudWorkspaceDocument({ ...doc(2), lostWork: { restored: "none", stoppedAt } });
+    expect(rendered()).toContain("This workspace was rebuilt from GitHub. Work that was not pushed before ");
+    expect(rendered()).toContain(">Dismiss<");
+    expect(lostWorkMessage({ restored: "earlier", stoppedAt })).toMatch(/^This workspace was restored from an earlier backup\. Work after .+ that was not pushed could not be recovered\.$/);
+    // A value from a newer server that this release does not know reads as none.
+    expect(CloudWorkspaceDocumentSchema.parse({ ...doc(3), lostWork: { restored: "partial", stoppedAt } }).lostWork).toBeUndefined();
+  });
+});

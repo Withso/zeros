@@ -14,7 +14,7 @@ import { nativeCloudChatCache } from "./cloud-chat-cache";
 import { readNativeCloudHistory } from "./cloud-chat-cache-history";
 import type { CloudCacheKnown } from "../../../shared/cloud-chat-cache";
 import { NativeCloudCacheError } from "./cloud-chat-cache-client";
-import type { CloudWorkspaceDocument } from "./cloud-workspace-contract";
+import { CloudLostWorkSchema, type CloudWorkspaceDocument } from "./cloud-workspace-contract";
 import type { CloudWorkspaceTarget } from "./bridge/cloud-workspace-key";
 
 const uuid = z.string().uuid();
@@ -144,6 +144,7 @@ export function cloudV2Document(workspace: CloudV2Workspace): CloudWorkspaceDocu
     ...(sharing ? { sharing } : {}),
     ...topLevel("setup", CloudV2SetupStatusSchema, (workspace as Record<string, unknown>).setup),
     ...topLevel("agentCost", CloudV2AgentCostSchema, (workspace as Record<string, unknown>).agentCost),
+    ...topLevel("lostWork", CloudLostWorkSchema, (workspace as Record<string, unknown>).lostWork),
     generation: {
       number: 1,
       architecture: "linux/amd64",
@@ -237,6 +238,15 @@ export async function createCloudV2Workspace(input: {
     ...(input.name ? { name: input.name } : {}),
   };
   return (await cloudAccountRequest("/v1/cloud-v2/workspaces", one, { body, idempotencyKey })).workspace;
+}
+
+/** Retention: the person has seen that a restore came back without some work. */
+export async function dismissCloudV2LostWork(target: CloudWorkspaceTarget): Promise<CloudV2Workspace> {
+  const id = uuid.parse(target.workspaceId);
+  const { workspace } = await cloudAccountRequest(`/v1/cloud-v2/workspaces/${id}/lost-work/dismiss`, one, { body: {}, idempotencyKey: key() }, sharingFor(id));
+  if (workspace.id !== target.workspaceId || workspace.organizationId !== target.organizationId)
+    throw new Error("Cloud workspace response changed identity");
+  return workspace;
 }
 
 export async function changeCloudV2Workspace(target: CloudWorkspaceTarget, action: "start" | "stop" | "restart" | "archive" | "delete"): Promise<CloudV2Workspace> {

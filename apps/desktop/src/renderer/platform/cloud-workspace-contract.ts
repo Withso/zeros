@@ -21,6 +21,10 @@ const CloudCheckoutPathSchema = z.string().regex(/^\/home\/user\/[A-Za-z0-9_.-]+
 /** A project folder: one segment under the home folder. */
 const CloudHomeFolderSchema = z.string().regex(/^\/home\/user\/[A-Za-z0-9_.-]+$/).refine(safeSegments);
 
+/** `none`: rebuilt from GitHub; `earlier`: restored from an earlier backup. `stoppedAt`: since when work could be lost. */
+export const CloudLostWorkSchema = z.object({ restored: z.enum(["none", "earlier"]), stoppedAt: z.string().datetime() });
+export type CloudLostWork = z.infer<typeof CloudLostWorkSchema>;
+
 export const CloudWorkspaceDocumentSchema = z.object({
   id: z.string().uuid(),
   organizationId: z.string().uuid(),
@@ -87,6 +91,8 @@ export const CloudWorkspaceDocumentSchema = z.object({
   setup: lenient(z.object(CloudV2SetupStatusSchema.shape)),
   /** Running total of mirrored turns that reported a cost; absent before any did. */
   agentCost: lenient(z.object(CloudV2AgentCostSchema.shape)),
+  /** Retention: a restore came back without some work; its own member sees it until they dismiss it. */
+  lostWork: lenient(CloudLostWorkSchema),
   sharing: lenient(CloudWorkspaceSharingSchema),
   version: z.number().int().nonnegative(),
   error: z.object({ code: z.string(), message: z.string() }).nullable(),
