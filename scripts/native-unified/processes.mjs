@@ -114,3 +114,9 @@ export function foreignSockets(sockets) {
   return sockets.filter(socket => socket.state === "LISTEN" ? !isLoopbackAddress(socket.local)
     : socket.remote && !isLoopbackAddress(socket.remote));
 }
+
+/** One variable of a run process's environment (ps shows it for this user's own processes on macOS and Linux). */
+export async function processVariable(pid, name) {
+  const { stdout } = await exec("ps", ["eww", "-o", "command=", "-p", String(pid)], { maxBuffer: 4 * 1024 * 1024 }).catch(() => ({ stdout: "" }));
+  return new RegExp(`(?:^|\\s)${name}=(\\S*)`).exec(stdout)?.[1] ?? null;
+}

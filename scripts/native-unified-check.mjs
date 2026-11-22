@@ -148,7 +148,13 @@ async function runCheck() {
     await fs.mkdir(bin, { recursive: true });
     // git and the stubs log each run (N13 reports which ran); security is a stub too, so the keychain CLI is unreachable.
     const calls = path.join(runDir, "tool-calls.log");
-    await fs.writeFile(path.join(bin, "git"), `#!/bin/sh\necho git >> '${calls}'\nexec '${await realGit()}' "$@"\n`, { mode: 0o755 });
+    // The engine drops every GIT_* variable before it runs Git (git-exec.ts gitChildEnv), so the run's config is
+    // set here, after that: every Git in the run reads this run's global file and no system file.
+    await fs.writeFile(path.join(bin, "git"), `#!/bin/sh\necho git >> '${calls}'\nGIT_CONFIG_GLOBAL='${gitconfig}'\nGIT_CONFIG_NOSYSTEM=1\n`
+      + `export GIT_CONFIG_GLOBAL GIT_CONFIG_NOSYSTEM\n`
+      // Dev aid: Git's own trace of every command the app runs (the run has no credentials to show).
+      + (process.env.ZEROS_NATIVE_CHECK_GIT_TRACE ? `GIT_TRACE='${path.join(runDir, "git-trace.log")}'\nexport GIT_TRACE\nexec 2>>'${path.join(runDir, "git-stderr.log")}'\n` : "")
+      + `exec '${await realGit()}' "$@"\n`, { mode: 0o755 });
     await fs.symlink(process.execPath, path.join(bin, "node"));
     await fs.symlink(path.join(root, "bun", "node_modules", ".bin", "bun"), path.join(bin, "bun"));
     await fs.writeFile(path.join(bin, "gh"), `#!/bin/sh\necho gh >> '${calls}'\necho 'You are not logged into any GitHub hosts. To log in, run: gh auth login' >&2\nexit 1\n`, { mode: 0o755 });
@@ -166,6 +172,9 @@ async function runCheck() {
       HOME: dirs.home, TMPDIR: dirs.tmp, XDG_CONFIG_HOME: dirs["xdg-config"], XDG_DATA_HOME: dirs["xdg-data"], XDG_CACHE_HOME: dirs["xdg-cache"],
       GIT_CONFIG_GLOBAL: gitconfig, GIT_CONFIG_NOSYSTEM: "1", GIT_TERMINAL_PROMPT: "0",
       GIT_AUTHOR_NAME: "Native Check", GIT_AUTHOR_EMAIL: FIXTURE.email, GIT_COMMITTER_NAME: "Native Check", GIT_COMMITTER_EMAIL: FIXTURE.email,
+      // Main puts this Node's folder first on PATH (shell-path.ts): the run's own link, not the folder Node lives in
+      // (on a Mac that can be Homebrew's, with the person's gh).
+      ZEROS_DEV_NODE_EXECUTABLE: path.join(bin, "node"),
       ZEROS_NATIVE_CHECK_HOOK_LOG: path.join(runDir, "hook.log"),
       // Every proxy-aware client (git, bun's fetch, CLIs) reaches only the egress guard, which refuses and records.
       HTTPS_PROXY: egress.url, HTTP_PROXY: egress.url, ALL_PROXY: egress.url, https_proxy: egress.url, http_proxy: egress.url, all_proxy: egress.url,

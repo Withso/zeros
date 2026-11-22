@@ -1,5 +1,7 @@
-// Loaded into the native check's Electron main process only (electron -r). It changes three things, each
+// Loaded into the native check's Electron main process only (electron -r). It changes four things, each
 // recorded for the report:
+// - the login shell is the run's stub: main's PATH hydration (fix-path → default-shell) asks os.userInfo() for the
+//   account's shell before $SHELL, and the person's real shell would load system profiles (and their PATH, with its gh);
 // - no OS-level registration: setAsDefaultProtocolClient would write this Mac's LaunchServices (zeros-dev://);
 // - no spellcheck dictionary download from Google (Linux only; macOS uses the system spellchecker);
 // - a fixture session: every auth_* command answers a synthetic fixture user, so nothing reads or writes the
@@ -10,6 +12,13 @@ if (process.versions.electron && process.type === "browser" && process.env.ZEROS
   const fs = require("node:fs");
   const log = process.env.ZEROS_NATIVE_CHECK_HOOK_LOG;
   const record = (entry) => { if (log) try { fs.appendFileSync(log, `${JSON.stringify({ at: Date.now(), ...entry })}\n`); } catch { /* best effort */ } };
+  const os = require("node:os"), userInfo = os.userInfo, stub = process.env.SHELL;
+  if (stub) {
+    os.userInfo = (...args) => ({ ...userInfo(...args), shell: stub });
+    // ESM importers (default-shell) read the builtin's named exports, which only follow after a sync.
+    require("node:module").syncBuiltinESMExports();
+    record({ kind: "user-shell-redirected" });
+  }
   electron.app.setAsDefaultProtocolClient = (scheme) => { record({ kind: "protocol-client-refused", scheme }); return false; };
   electron.app.removeAsDefaultProtocolClient = () => false;
   if (process.platform !== "darwin") electron.app.on("session-created", (session) => {

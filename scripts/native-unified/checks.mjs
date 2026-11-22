@@ -6,6 +6,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 import { FIXTURE, WORKSPACES } from "./control-plane.mjs";
+import { descendants, processTable, processVariable } from "./processes.mjs";
 
 const exec = promisify(execFile);
 const fail = (fact) => ({ result: "fail", fact });
@@ -170,9 +171,10 @@ const submodules = {
       return { origin, commit: await git(context, seed, "rev-parse", "HEAD") };
     };
     const lib = await bare("lib"), sshlib = await bare("sshlib");
-    // github.com, for this run only, is these local repositories (with and without .git; the longest prefix wins).
+    // github.com, for this run only, is these local repositories (with and without .git, and the SSH spelling the
+    // engine follows as written; the longest prefix wins). Nothing reaches github.com over HTTPS or SSH.
     await fs.appendFile(context.gitconfig, `[url "file://${lib.origin}"]\n\tinsteadOf = https://github.com/fixture/lib.git\n\tinsteadOf = https://github.com/fixture/lib\n`
-      + `[url "file://${sshlib.origin}"]\n\tinsteadOf = https://github.com/fixture/sshlib.git\n\tinsteadOf = https://github.com/fixture/sshlib\n`);
+      + `[url "file://${sshlib.origin}"]\n\tinsteadOf = https://github.com/fixture/sshlib.git\n\tinsteadOf = https://github.com/fixture/sshlib\n\tinsteadOf = git@github.com:fixture/sshlib.git\n`);
     const app = path.join(base, "app");
     await git(context, base, "init", "-q", "-b", "main", app);
     await fs.writeFile(path.join(app, "README.md"), "native check\n");
@@ -216,16 +218,16 @@ const submodules = {
     await page.waitForTimeout(1000);
     const lines = (await page.locator("body").innerText()).split("\n");
     const at = lines.findIndex(line => /^Submodules:/.test(line.trim()));
-    const note = at < 0 ? "" : lines.slice(at, at + 5).map(line => line.trim()).filter(Boolean).join(" / ");
+    const note = at < 0 ? "" : lines.slice(at, at + 12).map(line => line.trim()).filter(Boolean).join(" / ");
     await shot(context, "N4-setup-note");
     const head = async (name) => existsSync(path.join(worktree, name, ".git")) ? git(context, path.join(worktree, name), "rev-parse", "HEAD").catch(() => "") : "";
     const libHead = await head("lib"), sshHead = await head("sshlib");
     const gitfile = await fs.readFile(path.join(worktree, "lib", ".git"), "utf8").catch(() => "");
     const escaped = [path.join(path.dirname(worktree), "escape"), path.join(n4.base, "escape")].filter(existsSync);
     const sshOrigin = sshHead ? await git(context, path.join(worktree, "sshlib"), "config", "--get", "remote.origin.url").catch(() => "") : "";
-    const ok = libHead === n4.lib.commit && sshHead === n4.sshlib.commit && /^gitdir: .*modules\//.test(gitfile) && !escaped.length && !sshOrigin.startsWith("git@");
+    const ok = libHead === n4.lib.commit && sshHead === n4.sshlib.commit && /^gitdir: .*modules\//.test(gitfile) && !escaped.length && /Submodules: 2 fetched, 1 skipped, 0 failed/.test(note);
     return { result: ok ? "pass" : "fail", fact: `lib HEAD=${libHead.slice(0, 8) || "missing"} (gitlink ${n4.lib.commit.slice(0, 8)}); `
-      + `sshlib (written git@github.com:…) HEAD=${sshHead.slice(0, 8) || "missing"}, origin ${sshOrigin.startsWith("https://github.com/") ? "https://github.com/… (rewritten)" : sshOrigin || "none"}; `
+      + `sshlib (written git@github.com:…) HEAD=${sshHead.slice(0, 8) || "missing"}, origin ${sshOrigin || "none"} (as written; fetched through the run's insteadOf); `
       + `lib .git → ${gitfile.includes("/modules/") ? `…${gitfile.trim().slice(gitfile.indexOf("/modules/"))}` : "not a gitdir file"}; `
       + `../escape: ${escaped.length ? "CREATED outside the checkout" : "nothing outside the checkout"}; setting saved to ${path.relative(n4.app, created.settingsPath ?? "") || created.settingsPath}; engine's note: ${note || "none"}` };
   },
@@ -369,8 +371,8 @@ const archivedCheck = {
     await page.getByText("Archived after 30 days without activity.", { exact: false }).first().waitFor();
     const body = await page.locator("body").innerText();
     await shot(context, "N10-archived-list");
-    const expected = ["Archived after 30 days without activity.", "Archived when its creator left the organization.", "Opening it restores everything.",
-      "Opening it rebuilds it from GitHub. Work that was never pushed is gone.", "Backup kept until", "Its machine was removed on"];
+    const expected = ["Archived after 30 days without activity.", "Archived when its creator left the organization.", "Unarchiving it restores everything.",
+      "Unarchiving it rebuilds it from GitHub. Work that was never pushed is gone.", "Backup kept until", "Its machine was removed on"];
     const seen = expected.filter(text => body.includes(text));
     return { result: seen.length === expected.length ? "pass" : "fail", fact: `seen ${seen.length}/${expected.length}: ${expected.map(text => `${seen.includes(text) ? "+" : "-"}"${text.slice(0, 32)}"`).join(" ")}` };
   },
@@ -400,24 +402,35 @@ const isolation = {
   async run({ app, root, gitconfig, env }) {
     const facts = await app.evaluate(({ app }) => ({ userData: app.getPath("userData"), home: process.env.HOME,
       mockKeychain: app.commandLine.hasSwitch("use-mock-keychain"),
-      secrets: Object.keys(process.env).filter(name => /TOKEN|SECRET|PASSWORD|API_?KEY|_PAT$|CREDENTIAL|SSH_AUTH_SOCK|CONDUCTOR/i.test(name)) }));
-    const cleanEnv = { PATH: env.PATH, GIT_CONFIG_GLOBAL: gitconfig, GIT_CONFIG_NOSYSTEM: "1", HOME: env.HOME };
-    const config = async (...args) => (await exec("git", ["config", ...args], { cwd: root, env: cleanEnv }).catch(() => ({ stdout: "" }))).stdout.trim();
-    const email = await config("--global", "--get", "user.email");
-    const helpers = await config("--global", "--get-all", "credential.helper");
-    const hooksPath = await config("--global", "--get", "core.hooksPath");
-    const excludes = await config("--global", "--get", "core.excludesFile");
+      secrets: Object.keys(process.env).filter(name => /TOKEN|SECRET|PASSWORD|API_?KEY|_PAT$|CREDENTIAL|SSH_AUTH_SOCK|CONDUCTOR/i.test(name)),
+      mainPid: process.pid }));
+    // The PATH each of the app's processes really has (main, the engine, helpers): where its git and gh come from.
+    const paths = new Map();
+    for (const row of descendants(await processTable(), [facts.mainPid])) {
+      const value = await processVariable(row.pid, "PATH");
+      if (value !== null) paths.set(value, [...(paths.get(value) ?? []), path.basename(row.command.split(" ")[0] ?? "?")]);
+    }
+    // Git as the engine runs it: the run's git, with every GIT_* variable removed first (git-exec.ts gitChildEnv).
+    const runBin = path.join(root, "bin");
+    const engineEnv = { PATH: env.PATH, HOME: env.HOME, XDG_CONFIG_HOME: env.XDG_CONFIG_HOME };
+    const config = async (...args) => (await exec(path.join(runBin, "git"), ["config", ...args], { cwd: root, env: engineEnv }).catch(() => ({ stdout: "" }))).stdout.trim();
+    const email = await config("--get", "user.email");
+    const helpers = await config("--get-all", "credential.helper");
+    const hooksPath = await config("--get", "core.hooksPath");
+    const excludes = await config("--get", "core.excludesFile");
+    const files = [...new Set((await config("--show-origin", "--list")).split("\n").map(line => line.split("\t")[0]?.replace(/^file:/, "")).filter(Boolean))];
     const resolve = async (tool) => (await exec("/bin/sh", ["-c", `command -v ${tool} || true`], { env: { PATH: env.PATH } })).stdout.trim();
     const [gitPath, ghPath, securityPath] = [await resolve("git"), await resolve("gh"), await resolve("security")];
     const log = (await fs.readFile(path.join(root, "tool-calls.log"), "utf8").catch(() => "")).split("\n").filter(Boolean);
     const hookLog = await fs.readFile(env.ZEROS_NATIVE_CHECK_HOOK_LOG, "utf8").catch(() => "");
     const refused = hookLog.split("\n").filter(line => line.includes("protocol-client-refused")).length;
-    const runBin = path.join(root, "bin");
-    const ok = under(facts.userData, root) && under(facts.home, root) && email === FIXTURE.email && hookLog.includes("invoke-wrapped") && facts.secrets.length === 0
+    const strayPaths = [...paths].filter(([value]) => value.split(path.delimiter)[0] !== runBin);
+    const ok = !strayPaths.length && paths.size > 0 && files.length === 1 && files[0] === gitconfig && under(facts.userData, root) && under(facts.home, root) && email === FIXTURE.email && hookLog.includes("invoke-wrapped") && facts.secrets.length === 0
       && helpers === "" && hooksPath === "" && excludes === "" && path.dirname(gitPath) === runBin && path.dirname(ghPath) === runBin
       && (securityPath === "" || path.dirname(securityPath) === runBin) && (process.platform !== "darwin" || facts.mockKeychain);
-    return { result: ok ? "pass" : "fail", fact: `userData=${facts.userData} home=${facts.home}; git: user.email=${email === FIXTURE.email ? "fixture" : "NOT the fixture (withheld)"}, `
+    return { result: ok ? "pass" : "fail", fact: `userData=${facts.userData} home=${facts.home}; config files the engine's Git reads: [${files.join(", ")}]; git: user.email=${email === FIXTURE.email ? "fixture" : "NOT the fixture (withheld)"}, `
       + `credential.helper=${JSON.stringify(helpers)}, core.hooksPath=${JSON.stringify(hooksPath)}, core.excludesFile=${JSON.stringify(excludes)}; `
+      + `app processes' PATH: ${paths.size} distinct, ${strayPaths.length ? `NOT starting at ${runBin}: ${strayPaths.map(([value, names]) => `${[...new Set(names)].join("/")} → ${value.split(path.delimiter).slice(0, 3).join(path.delimiter)}…`).join("; ")}` : `all start at ${runBin}`}; `
       + `on the app's PATH: git=${gitPath}, gh=${ghPath}, security=${securityPath || "absent"}; `
       + `tools run: ${log.filter(line => line.startsWith("git")).length}× ${runBin}/git, ${log.filter(line => line.startsWith("gh")).length}× ${runBin}/gh (stub); `
       + `mock keychain=${facts.mockKeychain}${process.platform === "darwin" ? "" : " (Linux: basic password store)"}; protocol registrations refused=${refused}; `
