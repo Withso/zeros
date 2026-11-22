@@ -8,17 +8,17 @@ import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { parseArgs, parseEnv } from "node:util";
 import { z } from "zod";
-import { alphaProbeOrganization } from "../gate0-alpha.js";
 import { gate0SignIn } from "../gate0-cli.js";
-import { RehearsalFailure, STAGES, type Api, type Ports, type StageName, type Switch } from "./contract.js";
+import { RehearsalFailure, STAGE_NEEDS_ACCOUNT, STAGES, type Api, type Ports, type StageName, type Switch } from "./contract.js";
+import { diagnose, signInAccount, signInAll, type Account, type SignedIn, type SignInDeps } from "./accounts.js";
 import { assertRepository, safeLine } from "./guard.js";
 import { liveApi, liveBoat, liveBridge, liveClock, liveDatabase, liveGithub, liveRelease, liveStorage } from "./live.js";
-import { accountLines, platformOwners, readAccount, refusal, writeLines } from "./plan.js";
-import { cleanup, DEFAULT_RUN_CAP, inventoryLines, runStages, stageContext } from "./runner.js";
+import { accountLines, platformOwners, readAccount, refusal, resolveProbe, writeLines, type AccountSummary } from "./plan.js";
+import { cleanup, cleanupNeedsAccount, DEFAULT_RUN_CAP, inventoryLines, NO_ACCOUNT, runStages, stageContext } from "./runner.js";
 import { FIXTURE_TWO } from "./stage-provision.js";
 import { loadState, newState, saveState } from "./state.js";
 
-export const USAGE = "alpha:rehearse <provision|projects|personal|retention|submodules|all> [--plan] [--cleanup] [--run <id>] " +
+export const USAGE = "alpha:rehearse <provision|setup|projects|personal|retention|submodules|all> [--plan] [--cleanup] [--run <id>] " +
   "[--account owner|1..10] [--switches projects,personal,retention] [--repository owner/name] [--repository-two owner/name (default Withso/zeros-dev-fixture-2)] " +
   "[--keep-fixtures] [--max-active <n>] [--organization <slug|id>]";
 /** `all` runs these in order; B and D are refused until written. */
@@ -30,6 +30,8 @@ export type Arguments = {
   repository?: string; repositoryTwo?: string; keepFixtures: boolean; maxActive: number; organization?: string;
 };
 export function parseArguments(argv: string[]): Arguments {
+  // Private files: .env.agent at the repository root and the zeros-dev profile, both mode 0600; the profile is reached by
+  // ZEROS_DEV_PROFILE_PATH (its loader refuses group- or world-readable files and does not follow a symlink).
   const { values, positionals } = parseArgs({ args: argv, allowPositionals: true, options: {
     plan: { type: "boolean" }, cleanup: { type: "boolean" }, run: { type: "string" }, account: { type: "string" }, switches: { type: "string" },
     repository: { type: "string" }, "repository-two": { type: "string" }, "keep-fixtures": { type: "boolean" }, "max-active": { type: "string" },
@@ -62,88 +64,105 @@ const Profile = z.object({
   fixture: z.object({ workosUserId: z.string(), expectedEmail: z.string().email(), workosOrganizationId: z.string().optional() }).passthrough(),
 }).passthrough();
 
-type Account = { label: string; email: string; password: string; subject?: string; organizationId?: string };
-
 async function main(argv: string[]): Promise<number> {
   const log = (line: string) => console.log(`[rehearse] ${safeLine(line)}`);
   let args: Arguments;
   try { args = parseArguments(argv); } catch { console.log(USAGE); return 2; }
   const root = resolve(import.meta.dirname, "../../../../..");
   let profile: z.infer<typeof Profile>, env: NodeJS.Dict<string>;
-  try {
-    const { loadProfile } = await import(pathToFileURL(resolve(root, "scripts/dev-environment/profile.mjs")).href);
-    profile = Profile.parse(loadProfile(undefined, { root, env: process.env }));
-    env = parseEnv(readFileSync(resolve(root, ".env.agent"), "utf8"));
-  } catch { log("failed private_configuration"); return 1; }
+  // The profile loader refuses a file readable by group or others and opens it without following a symlink: keep both
+  // private files at mode 0600 and point ZEROS_DEV_PROFILE_PATH at the profile itself.
+  try { profile = Profile.parse((await import(pathToFileURL(resolve(root, "scripts/dev-environment/profile.mjs")).href)).loadProfile(undefined, { root, env: process.env })); }
+  catch { log("failed private_configuration profile (mode 0600, reached by ZEROS_DEV_PROFILE_PATH, not a symlink)"); return 1; }
+  try { env = parseEnv(readFileSync(resolve(root, ".env.agent"), "utf8")); } catch { log("failed private_configuration env_agent"); return 1; }
   const need = (name: string) => { const value = env[name]?.trim(); if (!value) throw new RehearsalFailure("configuration", name.toLowerCase()); return value; };
 
-  const accounts = new Map<string, Account>();
-  if (env.ZEROS_DEV_PASSWORD) accounts.set("owner", { label: "owner", email: profile.fixture.expectedEmail, password: env.ZEROS_DEV_PASSWORD,
+  const accounts: Account[] = [];
+  if (env.ZEROS_DEV_PASSWORD) accounts.push({ label: "owner", email: profile.fixture.expectedEmail, password: env.ZEROS_DEV_PASSWORD,
     subject: profile.fixture.workosUserId, ...(profile.fixture.workosOrganizationId ? { organizationId: profile.fixture.workosOrganizationId } : {}) });
   for (let n = 1; n <= 10; n++) {
     const password = env[`ZEROS_TEST_USER_${n}_PASSWORD`];
-    if (password) accounts.set(String(n), { label: String(n), email: `user-${n}@zeros.build`, password });
+    if (password) accounts.push({ label: String(n), email: `user-${n}@zeros.build`, password });
   }
-  const signIn = async (account: Account) => {
-    const subject = account.subject ?? await workosSubject(profile.workos.apiKey, account.email);
-    const session = await gate0SignIn({ clientId: profile.workos.webClientId, apiKey: profile.workos.apiKey, email: account.email, password: account.password, subject,
-      ...(account.organizationId ? { organizationId: account.organizationId } : {}) });
-    return { session, subject, api: liveApi(session.accessToken) };
-  };
   const roleNames = (run: string) => { let n = 0; return (kind: "read" | "write") => `zeros-rehearsal-${run.slice(0, 8)}-${kind}-${++n}-${Date.now().toString(36)}`; };
   const database = (run: string) => liveDatabase({ organization: need("PLANETSCALE_ORG"), database: need("ZEROS_PLANETSCALE_ALPHA_DATABASE"),
     tokenId: need("PLANETSCALE_SERVICE_TOKEN_ID"), token: need("PLANETSCALE_SERVICE_TOKEN"), roleName: roleNames(run) });
   const probeSelector = args.organization ?? env.ZEROS_ALPHA_PROBE_ORGANIZATION;
   const one = args.repository ?? (env.ZEROS_REHEARSAL_REPOSITORY ? assertRepository(env.ZEROS_REHEARSAL_REPOSITORY) : undefined);
   const two = args.repositoryTwo ?? (env.ZEROS_REHEARSAL_REPOSITORY_2 ? assertRepository(env.ZEROS_REHEARSAL_REPOSITORY_2) : FIXTURE_TWO);
+  const signInDeps = (probe: { workosOrganizationId: string | null }): SignInDeps => ({
+    subject: email => workosSubject(profile.workos.apiKey, email),
+    signIn: input => gate0SignIn({ clientId: profile.workos.webClientId, apiKey: profile.workos.apiKey, ...input }),
+    api: session => liveApi(session.accessToken), sleep: liveClock.sleep,
+    ...(probe.workosOrganizationId ? { probeWorkosOrganization: probe.workosOrganizationId } : {}),
+  });
 
   try {
     if (!one) throw new RehearsalFailure("configuration", "repository_one");
+    if (!probeSelector) throw new RehearsalFailure("configuration", "probe_organization");
     if (!await liveRelease()) throw new RehearsalFailure("release_identity", "not_ready");
 
     if (args.plan) {
-      log("plan: reads only; each account signs in (one session, revoked at the end), and one temporary database role inheriting only pg_read_all_data is minted for reads and deleted");
-      const summaries = new Map<string, Awaited<ReturnType<typeof readAccount>>>();
-      for (const account of accounts.values()) {
-        let held: Awaited<ReturnType<typeof signIn>> | undefined;
+      log("plan: reads only; each account signs in (one session, revoked at the end; 3 s apart, a throttled step retried after 5, 15 and 45 s)," +
+        " and one temporary database role inheriting only pg_read_all_data is minted for reads and deleted");
+      const reads = database(randomUUID().replace(/-/g, ""));
+      let probe: { id: string; workosOrganizationId: string | null };
+      try {
+        probe = await resolveProbe(reads, probeSelector);
+        log(`probe organization: found; WorkOS organization ${probe.workosOrganizationId ? "linked" : "not linked"}`);
+        const ids = await platformOwners(reads);
+        log(`platform owners (active): ${ids.length}${ids.length ? ` ${ids.join(" ")}` : ""}`);
+      } finally { await reads.close().catch(() => log("plan database role: delete unconfirmed")); }
+      const summaries = new Map<string, AccountSummary | { failed: string }>();
+      for (const result of await signInAll(accounts, signInDeps(probe))) {
+        if (!result.ok) { log(`account ${result.label}: failed ${result.step} ${result.code}`); summaries.set(result.label, { failed: `${result.step}:${result.code}` }); continue; }
         try {
-          held = await signIn(account);
-          const me = z.object({ organizations: z.array(z.object({ id: z.string().uuid(), slug: z.string() })) }).parse((await held.api.json("GET", "/v1/me")).body);
-          const probe = probeSelector ? me.organizations.find(org => org.slug === probeSelector || org.id === probeSelector) : undefined;
-          const summary = await readAccount(held.api, account.label, probe?.id ?? "", "Withso");
-          summaries.set(account.label, summary);
+          const summary = await readAccount(result.api, result.label, probe.id, "Withso");
+          summaries.set(result.label, summary);
           for (const line of accountLines(summary)) log(line);
-        } catch (error) { log(`account ${account.label}: sign-in or read failed ${error instanceof RehearsalFailure ? error.code : "failed"}`); }
-        finally { await held?.session.close().catch(() => log(`account ${account.label}: sign-out failed`)); }
+          log(`  workos organization chosen at sign-in: ${result.selected}`);
+        } catch (error) {
+          const failed = diagnose(error, "account_read");
+          log(`account ${result.label}: failed ${failed.step} ${failed.code}`);
+          summaries.set(result.label, { failed: `${failed.step}:${failed.code}` });
+        } finally { await result.session.close().catch(() => log(`account ${result.label}: sign-out failed`)); }
       }
-      const owners = database(randomUUID().replace(/-/g, ""));
-      try { const ids = await platformOwners(owners); log(`platform owners (active): ${ids.length}${ids.length ? ` ${ids.join(" ")}` : ""}`); }
-      catch (error) { log(`platform owners: read failed ${error instanceof RehearsalFailure ? error.code : "failed"}`); }
-      finally { await owners.close().catch(() => log("plan database role: delete unconfirmed")); }
-      const selected = summaries.get(String(args.account));
+      const selected = summaries.get(String(args.account)) ?? { failed: "account:not_configured" };
       log(`selected account ${args.account}; repositories R1 ${one}, R2 ${two}`);
       if (args.account === "owner") log("note: the owner's own account; the run asserts its entitlement, sessions and settings are unchanged");
-      for (const stage of args.stages) {
-        const refused = selected ? refusal(stage, selected, args.switches) : "account_unavailable";
+      for (const stage of [...new Set<StageName>(["setup", ...args.stages])]) {
+        const refused = refusal(stage, selected, args.switches);
         log(`stage ${stage}: ${refused ? `refused ${refused}` : "would run"}`);
         for (const line of writeLines(stage, "zr-<run>-", { one, two })) log(`  ${line}`);
       }
       return 0;
     }
 
-    const account = accounts.get(String(args.account));
-    if (!account) throw new RehearsalFailure("account", "unavailable");
-    const held = await signIn(account);
+    // A run: the probe organization from the database, then a sign-in only when a selected stage needs one.
+    const stateReads = database(randomUUID().replace(/-/g, ""));
+    let probe: { id: string; workosOrganizationId: string | null };
+    try { probe = await resolveProbe(stateReads, probeSelector); } finally { await stateReads.close().catch(() => log("database role: delete unconfirmed")); }
+    const state = args.run ? await loadState(args.run) : newState(randomUUID(), probe.id, new Date());
+    if (state.organizationId !== probe.id) throw new RehearsalFailure("state", "organization");
+    const needsAccount = args.cleanup ? cleanupNeedsAccount(state) : args.stages.some(stage => STAGE_NEEDS_ACCOUNT[stage]);
+    let held: SignedIn | undefined, accountUnavailable: string | undefined;
+    if (needsAccount) {
+      const account = accounts.find(row => row.label === String(args.account));
+      const result = account ? await signInAccount(account, signInDeps(probe)) : { ok: false as const, label: String(args.account), step: "account", code: "not_configured" };
+      if (result.ok && !result.organizations.some(org => org.id === probe.id)) {
+        await result.session.close().catch(() => undefined);
+        accountUnavailable = "probe_organization:not_a_member";
+      } else if (result.ok) held = result;
+      else accountUnavailable = `${result.step}:${result.code}`;
+      if (accountUnavailable) log(`account ${args.account}: unavailable ${accountUnavailable}`);
+      if (args.cleanup && !held) throw new RehearsalFailure("cleanup", "account_required");
+    }
     try {
-      const me = z.object({ organizations: z.array(z.object({ id: z.string().uuid(), slug: z.string() })) }).parse((await held.api.json("GET", "/v1/me")).body);
-      let organization;
-      try { organization = alphaProbeOrganization(me, probeSelector); } catch { throw new RehearsalFailure("probe_organization", "not_found"); }
-      const state = args.run ? await loadState(args.run) : newState(randomUUID(), organization.id, new Date());
-      if (state.organizationId !== organization.id) throw new RehearsalFailure("state", "organization");
       await saveState(state);
       log(`run ${state.runId} prefix ${state.prefix}`);
+      const api = held?.api ?? NO_ACCOUNT;
       const ports: Ports = {
-        release: () => liveRelease(), api: held.api, bridge: liveBridge(held.api), boat: liveBoat({ apiKey: profile.boat.apiKey,
+        release: () => liveRelease(), api, bridge: liveBridge(api), boat: liveBoat({ apiKey: profile.boat.apiKey,
           ...(profile.boat.billingOrg ? { billingOrg: profile.boat.billingOrg } : {}) }),
         storage: liveStorage({ bucket: need("ZEROS_R2_ALPHA_BUCKET"), endpoint: need("ZEROS_R2_ALPHA_ENDPOINT"), accessKeyId: need("ZEROS_R2_ALPHA_ACCESS_KEY_ID"),
           secretAccessKey: need("ZEROS_R2_ALPHA_SECRET_ACCESS_KEY") }, () => state.created.workspaces),
@@ -152,27 +171,28 @@ async function main(argv: string[]): Promise<number> {
         database: database(state.runId.replace(/-/g, "")), clock: liveClock,
       };
       const ctx = stageContext(ports, state, () => saveState(state), { one, two }, TIMING, DEFAULT_RUN_CAP);
-      const before = args.account === "owner" ? await ownerFingerprint(held.api, organization.id, profile.workos.apiKey, held.subject) : undefined;
+      const before = held && args.account === "owner" ? await ownerFingerprint(held.api, probe.id, profile.workos.apiKey, held.subject) : undefined;
       const startedAt = Date.now();
       let passed: boolean;
       if (args.cleanup) {
-        const { inventory, failures } = await cleanup(ctx, { keepFixtures: args.keepFixtures, log });
+        const { inventory, failures } = await cleanup(ctx, { keepFixtures: args.keepFixtures, accountless: !held, log });
         const { lines, clean } = inventoryLines(inventory);
         for (const line of lines) log(line);
         if (failures) log(`cleanup failures ${failures}`);
         passed = clean && failures === 0;
-      } else passed = await runStages(ctx, args.stages, { switches: args.switches, maxActive: args.maxActive, runCap: DEFAULT_RUN_CAP, log });
+      } else passed = await runStages(ctx, args.stages, { switches: args.switches, maxActive: args.maxActive, runCap: DEFAULT_RUN_CAP, log,
+        ...(needsAccount && !held ? { accountUnavailable: accountUnavailable ?? "account:unavailable" } : {}) });
       const seconds = Math.round((Date.now() - startedAt) / 1000);
       log(`machine starts ${state.machineStarts}; wall seconds ${seconds}; clock shifts ${state.shifts}`);
       if (profile.boat.secondsPerDollar) log(`estimated dollars at most ${(state.machineStarts * seconds / profile.boat.secondsPerDollar).toFixed(2)} (every start running the whole time)`);
-      if (before) {
-        const after = await ownerFingerprint(held.api, organization.id, profile.workos.apiKey, held.subject);
+      if (before && held) {
+        const after = await ownerFingerprint(held.api, probe.id, profile.workos.apiKey, held.subject);
         log(`owner account unchanged: ${before === after ? "yes" : "no"}`);
         if (before !== after) passed = false;
       }
       if (!passed && !args.cleanup) log(`next: pnpm alpha:rehearse ${args.stages.length > 1 ? "all" : args.stages[0]} --cleanup --run ${state.runId}`);
       return passed ? 0 : 1;
-    } finally { await held.session.close().catch(() => log("sign-out failed")); }
+    } finally { await held?.session.close().catch(() => log("sign-out failed")); }
   } catch (error) {
     log(`failed ${error instanceof RehearsalFailure ? `${error.step} ${error.code}` : "unexpected"}`);
     return 1;
@@ -181,11 +201,15 @@ async function main(argv: string[]): Promise<number> {
 
 /** The test user's WorkOS subject, read by email with the Alpha WorkOS key. */
 async function workosSubject(apiKey: string, email: string): Promise<string> {
-  const response = await fetch(`https://api.workos.com/user_management/users?email=${encodeURIComponent(email)}`, { redirect: "error",
-    signal: AbortSignal.timeout(15_000), headers: { authorization: `Bearer ${apiKey}` } });
+  let response: Response;
+  try {
+    response = await fetch(`https://api.workos.com/user_management/users?email=${encodeURIComponent(email)}`, { redirect: "error",
+      signal: AbortSignal.timeout(15_000), headers: { authorization: `Bearer ${apiKey}` } });
+  } catch { throw new RehearsalFailure("subject_lookup", "network"); }
   const body = z.object({ data: z.array(z.object({ id: z.string(), email: z.string() }).passthrough()) }).safeParse(await response.json().catch(() => null));
   const found = body.success ? body.data.data.find(row => row.email.toLowerCase() === email.toLowerCase()) : undefined;
-  if (!response.ok || !found) throw new RehearsalFailure("workos_user", `http_${response.status}`);
+  if (!response.ok) throw new RehearsalFailure("subject_lookup", `http_${response.status}`);
+  if (!found) throw new RehearsalFailure("subject_lookup", "not_found");
   return found.id;
 }
 

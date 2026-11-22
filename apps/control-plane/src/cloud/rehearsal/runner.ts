@@ -1,6 +1,6 @@
 // The rehearsal's runner: preconditions, one stage at a time (stopping at the first failure), cleanup of everything
 // with the run's prefix, and the final inventory. Every line it prints goes through safeLine.
-import { RehearsalFailure, STAGE_SWITCH, type Ports, type RehearsalState, type StageContext, type StageName, type Switch } from "./contract.js";
+import { RehearsalFailure, STAGE_NEEDS_ACCOUNT, STAGE_SWITCH, type Api, type Ports, type RehearsalState, type StageContext, type StageName, type Switch } from "./contract.js";
 import { assertRepository, prefixed, safeLine, stageLine } from "./guard.js";
 import { stageProjects } from "./stage-projects.js";
 import { stageProvision } from "./stage-provision.js";
@@ -18,7 +18,12 @@ export type RunOptions = {
   /** Machine starts one run may cause, in all its stages. */
   runCap: number;
   log(line: string): void;
+  /** Absent when signed in; otherwise why the account is unavailable (sign_in:http_400_invalid_credentials). Stages that
+   * need an account are then refused, and the others still run. */
+  accountUnavailable?: string;
 };
+/** The API port when nobody is signed in: every call is refused before it leaves the process. */
+export const NO_ACCOUNT: Api = { json: async () => { throw new RehearsalFailure("account", "not_signed_in"); } };
 export const DEFAULT_RUN_CAP = 30;
 const ACTIVE = new Set(["creating", "starting", "running", "stopping"]);
 
@@ -47,9 +52,10 @@ export async function runStages(ctx: ReturnType<typeof stageContext>, stages: re
     let result: RehearsalState["stages"][StageName];
     if (!runner) result = { ok: false, step: "stage", code: "not_written" };
     else if (needed && !options.switches.has(needed)) result = { ok: false, step: "switch", code: `undeclared_${needed}` };
+    else if (STAGE_NEEDS_ACCOUNT[name] && options.accountUnavailable) result = { ok: false, step: "account_unavailable", code: options.accountUnavailable };
     else {
       try {
-        await preconditions(ctx, options);
+        await preconditions(ctx, options, STAGE_NEEDS_ACCOUNT[name]);
         result = { ok: true, counts: await runner(ctx) };
       } catch (error) {
         const failure = error instanceof RehearsalFailure ? error : new RehearsalFailure(ctx.lastStep(), "unexpected");
@@ -71,8 +77,9 @@ export async function runStages(ctx: ReturnType<typeof stageContext>, stages: re
   return true;
 }
 
-async function preconditions(ctx: StageContext, options: RunOptions): Promise<void> {
+async function preconditions(ctx: StageContext, options: RunOptions, account: boolean): Promise<void> {
   if (!await ctx.ports.release()) throw new RehearsalFailure("release_identity", "not_ready");
+  if (!account) return;
   const active = (await listWorkspaces(ctx.ports.api, ctx.state.organizationId, "machine_cap")).filter(row => ACTIVE.has(row.state)).length;
   if (active > options.maxActive) throw new RehearsalFailure("machine_cap", "active");
 }
@@ -82,8 +89,15 @@ async function preconditions(ctx: StageContext, options: RunOptions): Promise<vo
 export type Inventory = Record<"workspaces" | "projects" | "branches" | "pulls" | "machines" | "objects" | "environments" | "databaseRows" | "repositories", number>;
 
 /** Removes everything this run created or named with its prefix, best effort per item, then reads the inventory. */
-export async function cleanup(ctx: StageContext, options: { keepFixtures: boolean; log(line: string): void }): Promise<{ inventory: Inventory; failures: number }> {
+/** Whether cleanup needs a signed-in account: anything recorded that only the API removes, or a create attempted (a
+ * machine start is counted before its request, so a lost response is found by listing the prefix). A provision-only
+ * run does not. */
+export const cleanupNeedsAccount = (state: RehearsalState) =>
+  state.created.workspaces.length + state.created.projects.length + state.created.environments.length + state.machineStarts > 0;
+
+export async function cleanup(ctx: StageContext, options: { keepFixtures: boolean; accountless?: boolean; log(line: string): void }): Promise<{ inventory: Inventory; failures: number }> {
   const { ports, state } = ctx;
+  if (options.accountless && cleanupNeedsAccount(state)) throw new RehearsalFailure("cleanup", "account_required");
   let failures = 0;
   const attempt = async (what: string, work: () => Promise<unknown>) => {
     try { await work(); } catch (error) {
@@ -98,7 +112,7 @@ export async function cleanup(ctx: StageContext, options: { keepFixtures: boolea
   }
   // Workspaces: the recorded ids, and any prefixed workspace a lost create response left unrecorded.
   let workspaces = [...state.created.workspaces];
-  await attempt("workspace_list", async () => {
+  if (!options.accountless) await attempt("workspace_list", async () => {
     for (const row of await listWorkspaces(ports.api, state.organizationId, "cleanup_list"))
       if (prefixed(state.prefix, row.name) && !workspaces.includes(row.id)) { workspaces.push(row.id); state.created.workspaces.push(row.id); }
   });
@@ -107,7 +121,7 @@ export async function cleanup(ctx: StageContext, options: { keepFixtures: boolea
     await deleteWorkspace(ctx, id, "cleanup_workspace");
   });
   let projects = [...state.created.projects];
-  await attempt("project_list", async () => {
+  if (!options.accountless) await attempt("project_list", async () => {
     for (const row of await listProjects(ports.api, state.organizationId, "cleanup_projects"))
       if (prefixed(state.prefix, row.name) && !projects.includes(row.id)) { projects.push(row.id); state.created.projects.push(row.id); }
   });
@@ -123,11 +137,12 @@ export async function cleanup(ctx: StageContext, options: { keepFixtures: boolea
   for (const id of workspaces) await attempt("objects", async () => { for (const key of await ports.storage.keys(id)) await ports.storage.delete(key); });
   if (!options.keepFixtures) for (const repository of state.created.repositories)
     await attempt("repository", () => ports.github.deleteRepository(assertRepository(repository)));
-  const inventory = await readInventory(ctx, options.keepFixtures).finally(() => ports.database.close().catch(() => { failures++; }));
+  const inventory = await readInventory(ctx, options.keepFixtures, options.accountless === true).finally(() => ports.database.close().catch(() => { failures++; }));
   return { inventory, failures };
 }
 
-export async function readInventory(ctx: StageContext, keepFixtures: boolean): Promise<Inventory> {
+/** Accountless (a provision-only run): the API's kinds are read from the database only, where prefixed rows still count. */
+export async function readInventory(ctx: StageContext, keepFixtures: boolean, accountless = false): Promise<Inventory> {
   const { ports, state } = ctx;
   const repositories = fixtureRepositories(ctx);
   let branches = 0, pulls = 0, machines = 0, objects = 0, workspaces = 0, remaining = 0, environments = 0;
@@ -141,9 +156,9 @@ export async function readInventory(ctx: StageContext, keepFixtures: boolean): P
   }
   for (const id of state.created.workspaces) objects += (await ports.storage.keys(id)).length;
   for (const target of state.created.environments) if (!(await readEnvironment(ctx, target.repository, target.repositoryId, "inventory_environment")).empty) environments++;
-  for (const row of await listWorkspaces(ports.api, state.organizationId, "inventory_workspaces"))
+  if (!accountless) for (const row of await listWorkspaces(ports.api, state.organizationId, "inventory_workspaces"))
     if (prefixed(state.prefix, row.name) && row.state !== "deleted") workspaces++;
-  const projects = (await listProjects(ports.api, state.organizationId, "inventory_projects")).filter(row => prefixed(state.prefix, row.name)).length;
+  const projects = accountless ? 0 : (await listProjects(ports.api, state.organizationId, "inventory_projects")).filter(row => prefixed(state.prefix, row.name)).length;
   const rows = await ports.database.read(`SELECT
       (SELECT count(*) FROM cloud_v2_workspaces WHERE left(name, length($1)) = $1 AND state <> 'deleted')::int AS workspaces,
       (SELECT count(*) FROM cloud_projects WHERE left(name, length($1)) = $1)::int AS projects`, [state.prefix]);

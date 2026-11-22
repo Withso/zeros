@@ -76,7 +76,21 @@ const OrganizationSelection = z.object({ code: z.literal("organization_selection
 /** A separate test login. Never reads, rotates or writes the shared saved
  * zeros-dev session; only this probe's newly issued session is revoked. A
  * member of several WorkOS organizations finishes inside `organizationId`. */
-export async function gate0SignIn(input: { clientId: string; apiKey: string; email: string; password: string; subject: string; organizationId?: string },
+/** WorkOS error names a failed sign-in may report. Only these are shown: anything else in a body (which could echo a
+ * credential) is discarded. */
+const WORKOS_ERRORS = new Set(["invalid_credentials", "invalid_grant", "invalid_client", "unauthorized_client", "email_verification_required",
+  "mfa_enrollment", "mfa_challenge", "sso_required", "organization_authentication_methods_required", "organization_selection_required",
+  "user_not_found", "rate_limit_exceeded", "invalid_request", "access_denied"]);
+/** WorkOS's error code name (`code`, or OAuth's `error`) as `_<name>` when it is a known one; the body is otherwise discarded. */
+function workosErrorCode(body: unknown): string {
+  const value = body as { code?: unknown; error?: unknown } | null;
+  const code = typeof value?.code === "string" ? value.code : typeof value?.error === "string" ? value.error : "";
+  return WORKOS_ERRORS.has(code) ? `_${code}` : "";
+}
+
+export async function gate0SignIn(input: { clientId: string; apiKey: string; email: string; password: string; subject: string; organizationId?: string;
+  /** When WorkOS asks a member of several organizations to choose and no organizationId is given: which offered one to take. */
+  selectOrganization?(offered: readonly string[]): string | undefined },
   fetchImpl: typeof fetch = fetch) {
   const origin = "https://api.workos.com/user_management";
   let accessToken = "", refreshToken = "", sessionId = "", expiresAt = 0;
@@ -85,37 +99,47 @@ export async function gate0SignIn(input: { clientId: string; apiKey: string; ema
       const response = await fetchImpl(`${origin}/${path}`, { method: "POST", redirect: "error", signal: AbortSignal.timeout(15_000),
         headers: { "content-type": "application/json", ...(revoke ? { authorization: `Bearer ${input.apiKey}` } : {}) }, body: JSON.stringify(body) });
       // WorkOS asks a member of several organizations to choose one; that reply issues no session.
-      if (!revoke && response.status === 403) return OrganizationSelection.parse(await response.json());
-      if (!response.ok) { await response.body?.cancel(); throw new Error(); }
+      if (!revoke && response.status === 403) {
+        const body: unknown = await response.json().catch(() => null), selection = OrganizationSelection.safeParse(body);
+        if (selection.success) return selection.data;
+        throw new Gate0Failure("sign_in", `http_403${workosErrorCode(body)}`);
+      }
+      // A failure is http_<status>, plus WorkOS's own error code name when it gives one (never its message or body).
+      if (!response.ok) throw new Gate0Failure(revoke ? "sign_out" : "sign_in", `http_${response.status}${workosErrorCode(await response.json().catch(() => null))}`);
       if (revoke) { await response.body?.cancel(); return undefined; }
       return await response.json();
-    } catch { throw new Gate0Failure(revoke ? "sign_out" : "sign_in"); }
+    } catch (error) { throw error instanceof Gate0Failure ? error : new Gate0Failure(revoke ? "sign_out" : "sign_in", "network"); }
   };
+  let chosen: string | undefined;
   const authenticate = async (grant: Record<string, string>) => {
     let reply: unknown = await request("authenticate", { client_id: input.clientId, client_secret: input.apiKey, ...grant });
     const selection = grant.grant_type === "password" ? OrganizationSelection.safeParse(reply) : undefined;
     if (selection?.success) {
       const pending = selection.data;
-      if (pending.user.id !== input.subject || pending.user.email.toLowerCase() !== input.email.toLowerCase()) throw new Gate0Failure("sign_in_identity");
-      if (!input.organizationId || !pending.organizations.some(org => org.id === input.organizationId)) throw new Gate0Failure("sign_in_organization");
+      if (pending.user.id !== input.subject || pending.user.email.toLowerCase() !== input.email.toLowerCase()) throw new Gate0Failure("sign_in_identity", "user");
+      chosen = input.organizationId ?? input.selectOrganization?.(pending.organizations.map(org => org.id));
+      if (!chosen) throw new Gate0Failure("sign_in_organization", "selection_required");
+      if (!pending.organizations.some(org => org.id === chosen)) throw new Gate0Failure("sign_in_organization", "not_offered");
       reply = await request("authenticate", { client_id: input.clientId, client_secret: input.apiKey,
         grant_type: "urn:workos:oauth:grant-type:organization-selection",
-        pending_authentication_token: pending.pending_authentication_token, organization_id: input.organizationId });
+        pending_authentication_token: pending.pending_authentication_token, organization_id: chosen });
     }
     const parsed = z.object({ access_token: z.string().min(16), refresh_token: z.string().min(16),
       user: z.object({ id: z.string(), email: z.string(), email_verified: z.literal(true) }),
       authentication_method: z.string().optional(), organization_id: z.string().optional() }).safeParse(reply);
-    if (!parsed.success) throw new Gate0Failure("sign_in");
+    if (!parsed.success) throw new Gate0Failure("sign_in", "schema");
     const value = parsed.data;
     let claims;
-    try { claims = decodeJwt(value.access_token); } catch { throw new Gate0Failure("sign_in"); }
-    if (typeof claims.sid !== "string" || !/^[A-Za-z0-9_-]{1,512}$/.test(claims.sid)) throw new Gate0Failure("sign_in");
+    try { claims = decodeJwt(value.access_token); } catch { throw new Gate0Failure("sign_in", "token"); }
+    if (typeof claims.sid !== "string" || !/^[A-Za-z0-9_-]{1,512}$/.test(claims.sid)) throw new Gate0Failure("sign_in", "session");
     // Retain the SID for cleanup even if the intended identity check fails.
     sessionId = claims.sid;
-    if (value.user.id !== input.subject || value.user.email.toLowerCase() !== input.email.toLowerCase() ||
-        (grant.grant_type === "password" && value.authentication_method !== "Password") ||
-        (selection?.success && value.organization_id !== input.organizationId) ||
-        typeof claims.exp !== "number" || claims.exp * 1000 <= Date.now()) throw new Gate0Failure("sign_in_identity");
+    // Which identity check failed, as a closed name.
+    const mismatch = value.user.id !== input.subject || value.user.email.toLowerCase() !== input.email.toLowerCase() ? "user"
+      : grant.grant_type === "password" && value.authentication_method !== "Password" ? "method"
+        : selection?.success && value.organization_id !== chosen ? "organization"
+          : typeof claims.exp !== "number" || claims.exp * 1000 <= Date.now() ? "expired" : undefined;
+    if (mismatch) throw new Gate0Failure("sign_in_identity", mismatch);
     accessToken = value.access_token; refreshToken = value.refresh_token; expiresAt = claims.exp * 1000;
   };
   const close = async () => { if (sessionId) await request("sessions/revoke", { session_id: sessionId }, true); };

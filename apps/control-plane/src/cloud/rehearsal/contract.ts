@@ -12,11 +12,15 @@ export class RehearsalFailure extends Error {
   }
 }
 
-export const STAGES = ["provision", "projects", "personal", "retention", "submodules"] as const;
+export const STAGES = ["provision", "setup", "projects", "personal", "retention", "submodules"] as const;
 export type StageName = (typeof STAGES)[number];
 /** The control-plane switch each stage needs. The control plane does not report switches: the operator declares them. */
 export const STAGE_SWITCH: Record<StageName, Switch | null> = {
-  provision: null, projects: "projects", personal: "personal", retention: "retention", submodules: "projects",
+  provision: null, setup: null, projects: "projects", personal: "personal", retention: "retention", submodules: "projects",
+};
+/** Whether a stage signs in. provision uses only the GitHub App, so it runs whatever happens to an account's sign-in. */
+export const STAGE_NEEDS_ACCOUNT: Record<StageName, boolean> = {
+  provision: false, setup: true, projects: true, personal: true, retention: true, submodules: true,
 };
 export type Switch = "projects" | "personal" | "retention";
 

@@ -28,6 +28,8 @@ export class FakeAlpha {
   readonly environments = new Map<string, { revision: number; files: Map<string, string> }>();
   /** Whether the fixtures' .gitignore names .env. */
   ignoresEnv = true;
+  /** Whether the account has its own GitHub sign-in. */
+  githubIdentity = true;
   /** What the stop recorded about the worker unit. */
   workerOff = true;
   transactions = 0;
@@ -92,6 +94,8 @@ export class FakeAlpha {
   private route(method: string, path: string, body: Record<string, unknown> = {}): ApiReply {
     if (method !== "GET") this.writes.push(`${method} ${path.replace(/[0-9a-f-]{36}/g, ":id")}`);
     const url = new URL(path, "https://alpha.test"), parts = url.pathname.split("/").filter(Boolean);
+    if (url.pathname === "/v1/cloud-v2/github/connection") return this.reply(200, { generation: "a".repeat(64), selectedMethod: this.githubIdentity ? "pat" : null,
+      methods: { "github-app": { configured: false }, pat: { configured: this.githubIdentity } }, appAvailable: true, installUrl: null });
     if (url.pathname === "/v1/me") return this.reply(200, { capabilities: { pro: false }, organizations: [{ id: this.organizationId, slug: "probe", name: "Probe", role: "owner" }] });
     if (parts[2] === "organizations" && parts[4] === "cloud-projects") {
       const id = parts[5];

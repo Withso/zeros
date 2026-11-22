@@ -2,13 +2,15 @@ import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { Gate0Failure } from "../gate0.js";
+import { signInAccount, signInAll, type SignInDeps } from "./accounts.js";
 import { FakeAlpha } from "../__fixtures__/rehearsal-alpha-fake.js";
 import { shiftClock } from "./clock.js";
 import { RehearsalFailure, type RehearsalState, type StageName } from "./contract.js";
 import { assertRepository, safeLine } from "./guard.js";
 import { accountLines, readAccount, refusal, writeLines } from "./plan.js";
-import { cleanup, inventoryLines, readInventory, runStages, stageContext } from "./runner.js";
+import { cleanup, cleanupNeedsAccount, inventoryLines, NO_ACCOUNT, readInventory, runStages, stageContext } from "./runner.js";
 import { parseArguments } from "./rehearsal-cli.js";
 import { FIXTURE_TWO } from "./stage-provision.js";
 import { loadState, newState, saveState } from "./state.js";
@@ -297,12 +299,87 @@ describe("rehearsal database roles", () => {
   });
 });
 
+describe("rehearsal without an account", () => {
+  it("runs provision with nobody signed in and refuses the stages that need an account, naming why", async () => {
+    const { alpha, state, ctx, lines, options } = setup({ provisioned: false });
+    ctx.ports.api = NO_ACCOUNT;
+    expect(await runStages(ctx, ["provision", "projects"], { ...options, accountUnavailable: "sign_in:http_429_rate_limit_exceeded" })).toBe(false);
+    expect(lines.filter(line => line.startsWith("stage "))).toEqual(["stage provision: ok",
+      "stage projects: failed account_unavailable sign_in:http_429_rate_limit_exceeded"]);
+    expect(alpha.writes).toEqual([]);
+    expect(cleanupNeedsAccount(state)).toBe(false);
+    expect((await cleanup(ctx, { keepFixtures: false, accountless: true, log: () => undefined })).inventory).toEqual(EMPTY);
+    expect(alpha.repositories.has(FIXTURE_TWO.toLowerCase())).toBe(false);
+  });
+
+  it("refuses an accountless cleanup of a run that created anything only the API removes", async () => {
+    const { ctx, state } = setup();
+    state.machineStarts = 1;
+    await expect(cleanup(ctx, { keepFixtures: true, accountless: true, log: () => undefined })).rejects.toMatchObject({ code: "account_required" });
+  });
+});
+
+describe("rehearsal sign-in", () => {
+  const account = { label: "3", email: "user-3@zeros.build", password: "pw" };
+  const session = () => ({ accessToken: async () => "t", close: vi.fn(async () => undefined) });
+  const me = (organizations: unknown[]) => ({ json: async () => ({ status: 200, body: { organizations } }) });
+  const deps = (overrides: Partial<SignInDeps> = {}): SignInDeps & { waits: number[] } => {
+    const waits: number[] = [];
+    return { waits, subject: async () => "user_3", signIn: async () => session(), api: () => me([{ id: randomUUID(), slug: null }]),
+      sleep: async ms => { waits.push(ms); }, ...overrides };
+  };
+
+  it("names the failed step and its closed code, and closes a session it opened", async () => {
+    expect(await signInAccount(account, deps({ subject: async () => { throw new RehearsalFailure("subject_lookup", "not_found"); } })))
+      .toEqual({ ok: false, label: "3", step: "subject_lookup", code: "not_found" });
+    expect(await signInAccount(account, deps({ signIn: async () => { throw new Gate0Failure("sign_in", "http_400_invalid_credentials"); } })))
+      .toEqual({ ok: false, label: "3", step: "sign_in", code: "http_400_invalid_credentials" });
+    expect(await signInAccount(account, deps({ signIn: async () => { throw new Error("pw leaked"); } })))
+      .toEqual({ ok: false, label: "3", step: "sign_in", code: "unexpected" });
+    const opened = session();
+    expect(await signInAccount(account, deps({ signIn: async () => opened, api: () => ({ json: async () => ({ status: 401, body: null }) }) })))
+      .toEqual({ ok: false, label: "3", step: "me_read", code: "http_401" });
+    expect(opened.close).toHaveBeenCalledTimes(1);
+    expect(await signInAccount(account, deps({ api: () => me([{ id: "not-a-uuid" }]) }))).toEqual({ ok: false, label: "3", step: "me_read", code: "schema:organizations.0.id" });
+    // An organization without a slug is not a failure.
+    expect(await signInAccount(account, deps())).toMatchObject({ ok: true, organizations: [{ slug: null }], selected: "none" });
+  });
+
+  it("retries a throttled step after 5, 15 and 45 seconds, then reports it", async () => {
+    let calls = 0;
+    const throttledOnce = deps({ signIn: async () => { if (++calls === 1) throw new Gate0Failure("sign_in", "http_429_rate_limit_exceeded"); return session(); } });
+    expect(await signInAccount(account, throttledOnce)).toMatchObject({ ok: true });
+    expect(throttledOnce.waits).toEqual([5_000]);
+    const always = deps({ signIn: async () => { throw new Gate0Failure("sign_in", "http_429"); } });
+    expect(await signInAccount(account, always)).toEqual({ ok: false, label: "3", step: "sign_in", code: "http_429" });
+    expect(always.waits).toEqual([5_000, 15_000, 45_000]);
+    const notThrottled = deps({ signIn: async () => { throw new Gate0Failure("sign_in", "http_400"); } });
+    await signInAccount(account, notThrottled);
+    expect(notThrottled.waits).toEqual([]);
+  });
+
+  it("chooses the probe's WorkOS organization when WorkOS asks, else the first offered, and says which", async () => {
+    const choosing = (offered: string[], probe?: string) => deps({ ...(probe ? { probeWorkosOrganization: probe } : {}),
+      signIn: async input => { expect(input.selectOrganization(offered)).toBe(probe && offered.includes(probe) ? probe : offered[0]); return session(); } });
+    expect(await signInAccount(account, choosing(["org_a", "org_probe"], "org_probe"))).toMatchObject({ selected: "probe" });
+    expect(await signInAccount(account, choosing(["org_a"], "org_probe"))).toMatchObject({ selected: "other" });
+  });
+
+  it("signs accounts in one at a time, three seconds apart, and keeps going after a failure", async () => {
+    let n = 0;
+    const spaced = deps({ signIn: async () => { if (++n === 1) throw new Gate0Failure("sign_in", "http_400"); return session(); } });
+    const results = await signInAll([account, { ...account, label: "4" }, { ...account, label: "5" }], spaced);
+    expect(results.map(result => result.ok)).toEqual([false, true, true]);
+    expect(spaced.waits).toEqual([3_000, 3_000]);
+  });
+});
+
 describe("rehearsal --plan", () => {
   it("reads accounts with GETs only and lists every write without making one", async () => {
     const { alpha, state } = setup();
     const summary = await readAccount(alpha.api(), "owner", state.organizationId, "Withso");
     expect(alpha.writes).toEqual([]);
-    expect(summary).toMatchObject({ admin: true, fixtureConnection: true, connections: { organization: 1, personal: 0, logins: ["Withso"] } });
+    expect(summary).toMatchObject({ admin: true, fixtureConnection: true, githubIdentity: true, connections: { organization: 1, personal: 0, logins: ["Withso"] } });
     for (const line of accountLines(summary)) expect(safeLine(line)).toBe(line);
     const switches = new Set(["projects", "retention"] as const);
     expect(refusal("projects", summary, switches)).toBeNull();
@@ -310,7 +387,14 @@ describe("rehearsal --plan", () => {
     expect(refusal("personal", summary, switches)).toBe("not_written");
     expect(refusal("projects", { ...summary, admin: false }, switches)).toBe("not_owner_or_admin");
     expect(refusal("projects", { ...summary, fixtureConnection: false }, switches)).toBe("no_fixture_connection");
-    for (const stage of ["provision", "projects", "personal", "retention", "submodules"] as StageName[])
+    expect(refusal("projects", { ...summary, githubIdentity: false }, switches)).toBe("no_github_identity");
+    expect(refusal("retention", { failed: "sign_in:http_400_invalid_credentials" }, switches)).toBe("account_unavailable:sign_in:http_400_invalid_credentials");
+    // provision uses only the App: no account, or a failed one, does not refuse it.
+    expect(refusal("provision", { failed: "sign_in:network" }, switches)).toBeNull();
+    expect(refusal("setup", summary, switches)).toBe("awaiting_approval");
+    alpha.githubIdentity = false;
+    expect((await readAccount(alpha.api(), "9", state.organizationId, "Withso")).githubIdentity).toBe(false);
+    for (const stage of ["provision", "setup", "projects", "personal", "retention", "submodules"] as StageName[])
       for (const line of writeLines(stage, "zr-<run>-", { one: R1 })) { expect(line).not.toBe("line withheld (unsafe)"); }
   });
 });
