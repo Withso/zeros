@@ -9,27 +9,39 @@ export type WorkerRepositoryConfig = {
   setup?: string; setupScript?: string;
 };
 type Row = { position: number; repository: string; repository_id: string | null; folder: string | null; branch: string; base_branch: string;
-  base_commit: string | null; setup: string | null; setup_script: string | null };
+  base_commit: string | null; setup: string | null; setup_script: string | null;
+  /** C4: this repository's planned submodules (cloud_v2_workspace_submodules 'fetch' rows), parents first; null without any. */
+  submodules: Omit<WorkerSubmodule, "position">[] | null };
+/** One planned submodule as the worker gets it (workspace-submodules-v1). */
+export type WorkerSubmodule = { position: number; path: string; repository: string; commit: string; gitDir: string; public?: true };
 
 /** Each repository's checkout, branch and GitHub identity, and, unless the
  * workspace started from its project's ready copy (whose build already ran
  * them), each repository's setup from the project. A workspace made before
  * projects has none of this: its worker configuration is unchanged. */
 export async function workerRepositories(tx: Tx, workspace: CloudV2Workspace, options: { forked: boolean }):
-  Promise<{ root?: string; repositories?: WorkerRepositoryConfig[]; firstSetup?: { setup?: string; setupScript?: string } }> {
+  Promise<{ root?: string; repositories?: WorkerRepositoryConfig[]; firstSetup?: { setup?: string; setupScript?: string }; submodules?: WorkerSubmodule[] }> {
   if (!workspace.projectId || !workspace.checkoutFolder) return {};
+  // The submodules ride in this same statement: a workspace's hello costs no more for them (and a workspace with
+  // none costs nothing at all). Only project workspaces have them.
   const { rows } = await tx.query<Row>(`SELECT r.position, r.repository, coalesce(r.repository_id, s.repository_id)::text AS repository_id, r.folder,
-      r.branch, r.base_branch, r.base_commit, p.setup, p.setup_script
+      r.branch, r.base_branch, r.base_commit, p.setup, p.setup_script,
+      (SELECT jsonb_agg(jsonb_build_object('path', m.path, 'repository', m.repository, 'commit', m.commit, 'gitDir', m.git_dir, 'public', m.public)
+          ORDER BY char_length(m.git_dir), m.path)
+        FROM cloud_v2_workspace_submodules m WHERE m.workspace_id=r.workspace_id AND m.position=r.position AND m.status='fetch') AS submodules
     FROM cloud_v2_workspace_repositories r
     LEFT JOIN cloud_v2_github_sources s ON s.workspace_id=r.workspace_id AND s.source_repository=lower(r.repository)
     LEFT JOIN cloud_project_repositories p ON p.project_id=$2 AND p.repository_id=coalesce(r.repository_id, s.repository_id)::text
     WHERE r.workspace_id=$1 ORDER BY r.position`, [workspace.id, workspace.projectId]);
   const setupOf = (row: Row) => options.forked ? {} : { ...(row.setup ? { setup: row.setup } : {}), ...(row.setup_script ? { setupScript: row.setup_script } : {}) };
+  const planned: WorkerSubmodule[] = rows.flatMap(row => (row.submodules ?? []).slice(0, 32).map(({ public: isPublic, ...entry }) =>
+    ({ position: row.position, ...entry, ...(isPublic ? { public: true as const } : {}) })));
+  const submodules = planned.length ? { submodules: planned } : {};
   const first = rows[0];
-  if (!workspace.folder || rows.length < 2) return first ? { firstSetup: setupOf(first) } : {};
+  if (!workspace.folder || rows.length < 2) return first ? { firstSetup: setupOf(first), ...submodules } : {};
   return {
     root: `${CLOUD_V2_HOME_PATH}/${workspace.folder}`,
-    firstSetup: setupOf(first!),
+    firstSetup: setupOf(first!), ...submodules,
     repositories: rows.map((row, index) => ({
       repository: index === 0 ? workspace.repository : row.repository,
       checkoutPath: index === 0 ? workspaceCheckoutPath(workspace) : `${CLOUD_V2_HOME_PATH}/${workspace.folder}/${row.folder}`,

@@ -20,10 +20,11 @@ type Git = (args: string[], signal?: AbortSignal) => Promise<string>;
 
 /** No shell or stderr in errors. Background Git owns a process group so a
  * cancelled fetch cannot leave a remote helper writing the checkout at Stop. */
-function git(cwd: string, environment: NodeJS.ProcessEnv, timeoutMs = 120_000): Git {
+export function checkoutGit(cwd: string, environment: NodeJS.ProcessEnv, timeoutMs = 120_000, options: { credentials?: false } = {}): Git {
   // Activated: the bootstrap lease's person and context (team sharing); none otherwise.
   const operation = operationEnvironment.getStore();
   const env = operation ? workerChildEnvironment(undefined, mergeGitEnvironment(environment, operation.git), {}, operation.zeros) : workerChildEnvironment(undefined, environment);
+  if (options.credentials === false) withoutCredentials(env);
   return (args, signal) => new Promise((resolve, reject) => {
     const failure = (code = -1) => Object.assign(new Error("Git command failed."), { code });
     if (signal?.aborted) { reject(failure()); return; }
@@ -51,6 +52,12 @@ function git(cwd: string, environment: NodeJS.ProcessEnv, timeoutMs = 120_000): 
       else resolve(Buffer.concat(chunks).toString("utf8"));
     });
   });
+}
+
+/** A child that can't ask for a credential: no askpass, no broker socket, no configured helper and no prompt. */
+function withoutCredentials(env: NodeJS.ProcessEnv): void {
+  for (const name of Object.keys(env)) if (/^(GIT_ASKPASS|SSH_ASKPASS|GH_ZEROS_BROKER_SOCKET|GIT_CONFIG_(COUNT|KEY_\d+|VALUE_\d+))$/.test(name)) delete env[name];
+  env.GIT_TERMINAL_PROMPT = "0";
 }
 
 class BackgroundRefresh implements CheckoutRefresh {
@@ -138,14 +145,14 @@ export async function cloneMissingCheckout(workspace: WorkerConfig["workspace"],
   const parent = dirname(workspace.checkoutPath);
   await mkdir(parent, { recursive: true });
   try {
-    await git(parent, gitEnvironment, CLONE_TIMEOUT_MS)(
+    await checkoutGit(parent, gitEnvironment, CLONE_TIMEOUT_MS)(
       ["clone", "--quiet", "--no-recurse-submodules", "--template=", "--origin", "origin", "--", origin, workspace.checkoutPath]);
   } catch { throw new WorkspaceError("WORKSPACE_UNAVAILABLE", "This repository could not be cloned. Check that its GitHub connection can read it."); }
   return true;
 }
 
 export async function prepareCheckout(workspace: WorkerConfig["workspace"], gitEnvironment: NodeJS.ProcessEnv = {}, timing?: StartupTimingObserver): Promise<CheckoutResult> {
-  const run = git(workspace.checkoutPath, gitEnvironment), { branch, baseBranch, baseCommit } = workspace;
+  const run = checkoutGit(workspace.checkoutPath, gitEnvironment), { branch, baseBranch, baseCommit } = workspace;
   for (const name of [branch, baseBranch]) {
     if (name.startsWith("-")) throw new WorkspaceError("VALIDATION_FAILED", "Invalid workspace branch.");
     try { await run(["check-ref-format", `refs/heads/${name}`]); }

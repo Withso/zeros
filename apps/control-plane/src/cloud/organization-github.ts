@@ -6,7 +6,7 @@ import { z } from "zod";
 import type { GithubBackendConfig } from "../config.js";
 import { HttpError } from "../authz.js";
 import { createGithubAppJwt } from "../github-app-jwt.js";
-import { githubHeaders, mintGithubInstallationToken } from "../github-installation-tokens.js";
+import { githubHeaders, mintGithubInstallationToken, revokeGithubInstallationToken } from "../github-installation-tokens.js";
 import type { CloudSourceTarget } from "./source-authority.js";
 import type { CloudRepositoryLevels } from "./repository-levels.js";
 import { organizationConnectionRequired } from "./repository-levels.js";
@@ -67,5 +67,33 @@ export function organizationCloneToken(deps: { levels: Pick<CloudRepositoryLevel
       if (error instanceof HttpError && error.status === 403) throw repositoryNotSelected(target.repository);
       throw error;
     }
+  };
+}
+
+/** A submodule repository an organization project's build may read (C4): through the organization's own
+ * connection for its owner, its id read with a metadata-only token, then a contents-read token for it exactly
+ * as `organizationCloneToken` mints one. Null when the organization's connection doesn't reach it. */
+export function organizationSubmoduleRepository(deps: { levels: Pick<CloudRepositoryLevels, "organizationInstallation" | "bindInstallation" | "installationState">;
+  config: GithubBackendConfig | null; fetch?: typeof fetch; now?: () => number }) {
+  const fetchImpl = deps.fetch ?? fetch, now = () => deps.now?.() ?? Date.now(), cloneToken = organizationCloneToken(deps);
+  return async (organizationId: string, repository: string): Promise<{ repositoryId: string; token: string } | null> => {
+    if (!deps.config || !await deps.levels.organizationInstallation(organizationId, repository)) return null;
+    const reported = await repositoryInstallation(fetchImpl, deps.config, repository, now());
+    if (!reported || reported.suspended) return null;
+    const [owner, name] = repository.split("/") as [string, string];
+    let probe: string;
+    try {
+      probe = (await mintGithubInstallationToken(fetchImpl, deps.config, { installationId: reported.installationId, repositories: [name],
+        permissions: { metadata: "read" }, nowMs: now() })).token;
+    } catch (error) { if (error instanceof HttpError && error.status === 403) return null; throw error; }
+    const config = deps.config;
+    const response = await fetchImpl(`${config.apiBaseUrl}/repos/${encodeURIComponent(owner)}/${encodeURIComponent(name)}`, { headers: githubHeaders(probe) })
+      .finally(() => { void revokeGithubInstallationToken(fetchImpl, config, probe).catch(() => {}); });
+    if (response.status === 404 || response.status === 403) { await response.body?.cancel(); return null; }
+    if (!response.ok) { await response.body?.cancel(); throw new HttpError(503, "github_unavailable", "GitHub could not be reached."); }
+    const id = z.object({ id: z.number().int().positive(), full_name: z.string().max(201) }).safeParse(await response.json().catch(() => null));
+    if (!id.success || id.data.full_name.toLowerCase() !== repository.toLowerCase()) return null;
+    const repositoryId = String(id.data.id);
+    return { repositoryId, token: await cloneToken(organizationId, { repository, repositoryId }) };
   };
 }
