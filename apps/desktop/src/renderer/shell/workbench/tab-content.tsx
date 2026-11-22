@@ -8,6 +8,7 @@ import { ChangesWorkbenchSurface } from "./tabs/changes-surface";
 import { FilesTab } from "./tabs/files-tab";
 import { ReviewSurface } from "./tabs/review-surface";
 import { AgentsTab } from "./tabs/agents-tab";
+import { SideChatTab } from "./tabs/side-chat-tab";
 import type { WorkbenchTab, WorkbenchTabType } from "./tab-model";
 import { useWorkspaceStore, selectActiveFolder } from "../../state/store";
 import { WorkbenchTabFrame } from "./tab-status";
@@ -40,6 +41,7 @@ const TAB_BODY_MAP: Record<
   browser: BrowserTab,
   files: FilesTab,
   simulator: SimulatorTab,
+  chat: SideChatTab,
 };
 
 function TabContentFrame({
@@ -97,6 +99,7 @@ const TAB_CONTENT_MAP: Record<
   browser: TabContentFrame,
   terminal: TabContentFrame,
   simulator: TabContentFrame,
+  chat: TabContentFrame,
 };
 
 export function WorkbenchTabContent(props: TabBodyProps) {

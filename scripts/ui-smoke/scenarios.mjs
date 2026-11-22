@@ -287,6 +287,7 @@ export const scenarioRegistry = [
     "composer-attachments",
     "runComposerAttachmentsSmoke",
   ),
+  fresh("message-hover", "message-hover", "runMessageHoverSmoke", 1100, 900),
   shared("customize", "customize", "runCustomizeSmoke"),
   shared("tools", "tools", "runToolsSmoke"),
   shared("native-tools", "native-tools", "runNativeToolsSmoke"),
