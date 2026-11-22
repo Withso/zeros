@@ -214,44 +214,78 @@ export function liveGithubToken(token: string, owner: string, fetchImpl: typeof 
 export type TokenCheck = {
   /** fine_grained (github_pat_), classic (ghp_) or other: only the kind, never the value. */
   kind: "fine_grained" | "classic" | "other";
-  /** Repositories the token reaches, by full name (GitHub's /user/repos as the token). */
-  reachable: string[];
-  /** Per fixture: whether the token may write contents and pull requests, probed by requests GitHub refuses on validation
-   * (a ref to the all-zero commit, a pull request from a branch that does not exist): they change nothing. */
-  fixtures: { repository: string; reachable: boolean; contentsWrite: boolean; pullRequestsWrite: boolean }[];
+  /** Every repository the token lists (GitHub's /user/repos as the token), with whether it is private. A fine-grained token
+   * lists public repositories it can merely read, as anyone can: those are probed for write, not refused for being listed. */
+  reachable: { repository: string; private: boolean }[];
+  /** Per fixture: reachable, and whether the token may write contents and pull requests. */
+  fixtures: WriteProbe[];
+  /** Per public repository outside the fixtures: the same two write probes (both must be refused). Private ones are not probed. */
+  outside: WriteProbe[];
 };
-/** Verifies the token without printing it: what kind it is, everything it reaches, and its write access on each fixture. */
+export type WriteProbe = { repository: string; reachable: boolean; contentsWrite: boolean; pullRequestsWrite: boolean };
+/** At most this many public repositories outside the fixtures are probed; more refuses the token as too broad to check. */
+export const OUTSIDE_PROBE_LIMIT = 50;
+
+/** Write access probed with requests GitHub refuses on validation (a ref to the all-zero commit, a pull request from a branch
+ * that does not exist): 422 is the permission there, 403 or 404 the permission refusing it. Neither changes anything. */
+async function probeWrite(request: GithubRequest, token: string, repository: string): Promise<WriteProbe> {
+  if ((await request("GET", `/repos/${repository}`, token)).status !== 200) return { repository, reachable: false, contentsWrite: false, pullRequestsWrite: false };
+  const ref = await request("POST", `/repos/${repository}/git/refs`, token, { ref: "refs/heads/zr-token-check", sha: "0".repeat(40) });
+  const pull = await request("POST", `/repos/${repository}/pulls`, token, { title: "zr-token-check", head: "zr-token-check-absent", base: "main" });
+  return { repository, reachable: true, contentsWrite: ref.status === 422, pullRequestsWrite: pull.status === 422 };
+}
+
+/** Verifies the token without printing it: its kind, everything it lists, its write access on each fixture, and that it can
+ * write nothing outside them. */
 export async function checkGithubToken(token: string, fixtures: readonly string[], fetchImpl: typeof fetch = fetch): Promise<TokenCheck> {
   const request = githubRequest(fetchImpl);
   const kind = token.startsWith("github_pat_") ? "fine_grained" : token.startsWith("ghp_") ? "classic" : "other";
-  const reachable: string[] = [];
+  const reachable: TokenCheck["reachable"] = [];
   for (let page = 1; page <= 10; page++) {
     const reply = await request("GET", `/user/repos?per_page=100&page=${page}&affiliation=owner,collaborator,organization_member`, token);
     if (reply.status !== 200) throw new RehearsalFailure("github_token_repositories", `http_${reply.status}`);
-    const rows = z.array(z.object({ full_name: z.string().max(201) }).passthrough()).safeParse(reply.body);
+    const rows = z.array(z.object({ full_name: z.string().max(201), private: z.boolean() }).passthrough()).safeParse(reply.body);
     if (!rows.success) throw new RehearsalFailure("github_token_repositories", "schema");
-    reachable.push(...rows.data.map(row => row.full_name));
+    reachable.push(...rows.data.map(row => ({ repository: row.full_name, private: row.private })));
     if (rows.data.length < 100) break;
   }
-  const results: TokenCheck["fixtures"] = [];
-  for (const repository of fixtures.map(assertRepository)) {
-    const exists = (await request("GET", `/repos/${repository}`, token)).status === 200;
-    if (!exists) { results.push({ repository, reachable: false, contentsWrite: false, pullRequestsWrite: false }); continue; }
-    // 422 is GitHub validating a request the token may make; 403 or 404 is the permission refusing it. Neither changes anything.
-    const ref = await request("POST", `/repos/${repository}/git/refs`, token, { ref: "refs/heads/zr-token-check", sha: "0".repeat(40) });
-    const pull = await request("POST", `/repos/${repository}/pulls`, token, { title: "zr-token-check", head: "zr-token-check-absent", base: "main" });
-    results.push({ repository, reachable: true, contentsWrite: ref.status === 422, pullRequestsWrite: pull.status === 422 });
-  }
-  return { kind, reachable, fixtures: results };
+  const fixtureSet = new Set(fixtures.map(name => name.toLowerCase()));
+  const fixtureProbes: WriteProbe[] = [];
+  for (const repository of fixtures.map(assertRepository)) fixtureProbes.push(await probeWrite(request, token, repository));
+  const publicOutside = reachable.filter(row => !fixtureSet.has(row.repository.toLowerCase()) && !row.private);
+  if (publicOutside.length > OUTSIDE_PROBE_LIMIT) throw new RehearsalFailure("github_token", "too_broad_to_check");
+  const outside: WriteProbe[] = [];
+  for (const row of publicOutside) outside.push(await probeWrite(request, token, row.repository));
+  return { kind, reachable, fixtures: fixtureProbes, outside };
 }
 
-/** Why a token check refuses, or null: a classic token, a repository outside the fixtures, or a fixture it cannot write. */
+/** Why a token check refuses, or null: a classic token, a private repository outside the fixtures, write on any public one
+ * outside them, or a fixture it cannot reach or write. */
 export function tokenRefusal(check: TokenCheck, fixtures: readonly string[]): string | null {
   if (check.kind !== "fine_grained") return `kind_${check.kind}`;
   const allowed = new Set(fixtures.map(name => name.toLowerCase()));
-  if (check.reachable.some(name => !allowed.has(name.toLowerCase()))) return "reaches_outside_fixtures";
+  if (check.reachable.some(row => row.private && !allowed.has(row.repository.toLowerCase()))) return "reaches_private_outside_fixtures";
+  if (check.outside.some(row => row.contentsWrite || row.pullRequestsWrite)) return "writes_outside_fixtures";
   const missing = check.fixtures.find(row => !row.reachable || !row.contentsWrite || !row.pullRequestsWrite);
   return missing ? `fixture_${!missing.reachable ? "unreachable" : !missing.contentsWrite ? "contents_read_only" : "pull_requests_read_only"}` : null;
+}
+
+/** The token check as printed lines: counts and the few names that matter, never the token. */
+export function tokenLines(check: TokenCheck, fixtures: readonly string[]): string[] {
+  const allowed = new Set(fixtures.map(name => name.toLowerCase()));
+  const privateOutside = check.reachable.filter(row => row.private && !allowed.has(row.repository.toLowerCase())).map(row => row.repository);
+  const writable = check.outside.filter(row => row.contentsWrite || row.pullRequestsWrite).map(row => row.repository);
+  const readOnly = check.outside.filter(row => !row.contentsWrite && !row.pullRequestsWrite).map(row => row.repository);
+  const few = (names: string[]) => names.length ? `: ${names.slice(0, 3).join(", ")}${names.length > 3 ? ", …" : ""}` : "";
+  return [
+    `github token: kind ${check.kind}; lists ${check.reachable.length} repositories: ${check.fixtures.filter(row => row.reachable).length} fixtures, ` +
+      `${privateOutside.length} private outside the fixtures${privateOutside.length ? `: ${privateOutside.join(", ")}` : ""}, ${check.outside.length} public outside`,
+    ...check.fixtures.map(row => `  github token on ${row.repository}: ${row.reachable ? "reachable" : "unreachable"}, contents write ${row.contentsWrite ? "yes" : "no"},` +
+      ` pull requests write ${row.pullRequestsWrite ? "yes" : "no"}`),
+    `  public outside the fixtures, read only (both write probes refused): ${readOnly.length}${few(readOnly)}`,
+    ...(writable.length ? [`  public outside the fixtures it can write: ${writable.join(", ")}`] : []),
+    "  write probes are requests GitHub refuses on validation (a ref to the all-zero commit, a pull request from an absent branch): nothing changes",
+  ];
 }
 
 /** A database failure's closed class: its SQLSTATE (five characters, never the message), or "connection" when it has none. */

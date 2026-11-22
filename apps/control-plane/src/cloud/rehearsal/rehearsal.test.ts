@@ -14,7 +14,7 @@ import { cleanup, cleanupNeedsAccount, inventoryLines, NO_ACCOUNT, readInventory
 import { parseArguments } from "./rehearsal-cli.js";
 import { FIXTURE_TWO } from "./stage-provision.js";
 import { loadState, newState, saveState } from "./state.js";
-import { checkGithubToken, databaseErrorCode, liveDatabase, tokenRefusal, type DatabaseClient } from "./live.js";
+import { checkGithubToken, databaseErrorCode, liveDatabase, OUTSIDE_PROBE_LIMIT, tokenLines, tokenRefusal, type DatabaseClient } from "./live.js";
 import { platformOwners } from "./plan.js";
 
 const R1 = "Withso/zeros-dev-fixture";
@@ -528,40 +528,70 @@ describe("what the rehearsal publishes on public fixtures", () => {
 
 describe("rehearsal GitHub token check", () => {
   const fixtures = [R1, FIXTURE_TWO, R3, SUBMODULE_FIXTURE];
-  /** GitHub as a fine-grained token sees it: the repositories it reaches, and 422 (validation) for writes it may make. */
-  const github = (token: { reaches: string[]; writable: string[]; pulls?: string[] }) => vi.fn<typeof fetch>(async (input, init) => {
+  /** GitHub as a fine-grained token sees it: what it lists (with visibility), and 422 (validation) for the writes it may make. */
+  const github = (token: { lists: { name: string; private?: boolean }[]; writable: string[]; pulls?: string[] }) => vi.fn<typeof fetch>(async (input, init) => {
     const url = new URL(String(input)), method = init?.method ?? "GET";
-    if (url.pathname === "/user/repos") return Response.json(url.searchParams.get("page") === "1" ? token.reaches.map(full_name => ({ full_name })) : []);
+    if (url.pathname === "/user/repos") return Response.json(url.searchParams.get("page") === "1"
+      ? token.lists.map(row => ({ full_name: row.name, private: row.private ?? false })) : []);
     const name = url.pathname.split("/").slice(2, 4).join("/");
-    if (!token.reaches.includes(name)) return Response.json({ message: "Not Found" }, { status: 404 });
+    if (!token.lists.some(row => row.name === name)) return Response.json({ message: "Not Found" }, { status: 404 });
     if (method === "GET") return Response.json({ full_name: name });
     const allowed = url.pathname.endsWith("/pulls") ? (token.pulls ?? token.writable) : token.writable;
     return Response.json({ message: "x" }, { status: allowed.includes(name) ? 422 : 403 });
   });
+  const scoped = fixtures.map(name => ({ name }));
 
-  it("accepts a fine-grained token that reaches the fixtures only, with contents and pull requests write on each; changes nothing", async () => {
-    const fetchImpl = github({ reaches: fixtures, writable: fixtures });
+  it("accepts a token that writes the fixtures and only reads public repositories outside them; changes nothing", async () => {
+    const lists = [...scoped, { name: "Withso/zeros" }, { name: "someone/public-thing" }];
+    const fetchImpl = github({ lists, writable: fixtures });
     const checked = await checkGithubToken("github_pat_synthetic", fixtures, fetchImpl);
-    expect(checked).toMatchObject({ kind: "fine_grained", reachable: fixtures });
+    expect(checked.kind).toBe("fine_grained");
     expect(checked.fixtures.every(row => row.contentsWrite && row.pullRequestsWrite)).toBe(true);
+    expect(checked.outside).toEqual([
+      { repository: "Withso/zeros", reachable: true, contentsWrite: false, pullRequestsWrite: false },
+      { repository: "someone/public-thing", reachable: true, contentsWrite: false, pullRequestsWrite: false }]);
     expect(tokenRefusal(checked, fixtures)).toBeNull();
-    // Its only writes are the two probes per fixture, both refused by GitHub's validation (the all-zero commit, an absent branch).
+    const lines = tokenLines(checked, fixtures);
+    expect(lines[0]).toBe("github token: kind fine_grained; lists 6 repositories: 4 fixtures, 0 private outside the fixtures, 2 public outside");
+    expect(lines).toContain("  public outside the fixtures, read only (both write probes refused): 2: Withso/zeros, someone/public-thing");
+    for (const line of lines) expect(safeLine(line)).toBe(line);
+    // Its only writes are the two probes per repository, both refused by GitHub's validation (the all-zero commit, an absent branch).
     const writes = fetchImpl.mock.calls.filter(([, init]) => (init?.method ?? "GET") !== "GET");
-    expect(writes).toHaveLength(fixtures.length * 2);
+    expect(writes).toHaveLength((fixtures.length + 2) * 2);
     for (const [, init] of writes) expect(String(init?.body)).toMatch(/0{40}|zr-token-check-absent/);
   });
 
-  it("refuses a classic token, one that reaches anything else, and one without write on a fixture", async () => {
-    const classic = await checkGithubToken("ghp_synthetic", fixtures, github({ reaches: fixtures, writable: fixtures }));
-    expect(tokenRefusal(classic, fixtures)).toBe("kind_classic");
-    const wide = await checkGithubToken("github_pat_synthetic", fixtures, github({ reaches: [...fixtures, "Withso/zeros"], writable: fixtures }));
-    expect(tokenRefusal(wide, fixtures)).toBe("reaches_outside_fixtures");
-    const readOnly = await checkGithubToken("github_pat_synthetic", fixtures, github({ reaches: fixtures, writable: fixtures.slice(1) }));
-    expect(tokenRefusal(readOnly, fixtures)).toBe("fixture_contents_read_only");
-    const noPulls = await checkGithubToken("github_pat_synthetic", fixtures, github({ reaches: fixtures, writable: fixtures, pulls: [] }));
-    expect(tokenRefusal(noPulls, fixtures)).toBe("fixture_pull_requests_read_only");
-    const missing = await checkGithubToken("github_pat_synthetic", fixtures, github({ reaches: fixtures.slice(0, 3), writable: fixtures }));
-    expect(tokenRefusal(missing, fixtures)).toBe("fixture_unreachable");
+  it("refuses a private repository outside the fixtures, naming it, and does not probe it", async () => {
+    const fetchImpl = github({ lists: [...scoped, { name: "someone/secret", private: true }], writable: fixtures });
+    const checked = await checkGithubToken("github_pat_synthetic", fixtures, fetchImpl);
+    expect(tokenRefusal(checked, fixtures)).toBe("reaches_private_outside_fixtures");
+    expect(tokenLines(checked, fixtures)[0]).toContain("1 private outside the fixtures: someone/secret");
+    expect(fetchImpl.mock.calls.some(([input]) => String(input).includes("someone/secret"))).toBe(false);
+  });
+
+  it("refuses write on a public repository outside the fixtures, naming it", async () => {
+    const pullsOnly = await checkGithubToken("github_pat_synthetic", fixtures,
+      github({ lists: [...scoped, { name: "Withso/zeros" }], writable: fixtures, pulls: [...fixtures, "Withso/zeros"] }));
+    expect(tokenRefusal(pullsOnly, fixtures)).toBe("writes_outside_fixtures");
+    expect(tokenLines(pullsOnly, fixtures)).toContain("  public outside the fixtures it can write: Withso/zeros");
+    const contents = await checkGithubToken("github_pat_synthetic", fixtures, github({ lists: [...scoped, { name: "Withso/zeros" }], writable: [...fixtures, "Withso/zeros"] }));
+    expect(tokenRefusal(contents, fixtures)).toBe("writes_outside_fixtures");
+  });
+
+  it("refuses a classic token, and one without write on a fixture", async () => {
+    expect(tokenRefusal(await checkGithubToken("ghp_synthetic", fixtures, github({ lists: scoped, writable: fixtures })), fixtures)).toBe("kind_classic");
+    expect(tokenRefusal(await checkGithubToken("github_pat_synthetic", fixtures, github({ lists: scoped, writable: fixtures.slice(1) })), fixtures))
+      .toBe("fixture_contents_read_only");
+    expect(tokenRefusal(await checkGithubToken("github_pat_synthetic", fixtures, github({ lists: scoped, writable: fixtures, pulls: [] })), fixtures))
+      .toBe("fixture_pull_requests_read_only");
+    expect(tokenRefusal(await checkGithubToken("github_pat_synthetic", fixtures, github({ lists: scoped.slice(0, 3), writable: fixtures })), fixtures))
+      .toBe("fixture_unreachable");
+  });
+
+  it("refuses a token too broad to probe", async () => {
+    const many = Array.from({ length: OUTSIDE_PROBE_LIMIT + 1 }, (_, index) => ({ name: `someone/public-${index}` }));
+    await expect(checkGithubToken("github_pat_synthetic", fixtures, github({ lists: [...scoped, ...many], writable: fixtures })))
+      .rejects.toMatchObject({ code: "too_broad_to_check" });
   });
 });
 

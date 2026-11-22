@@ -13,7 +13,7 @@ import { gate0SignIn } from "../gate0-cli.js";
 import { RehearsalFailure, STAGE_NEEDS_ACCOUNT, STAGES, type Api, type OwnerKind, type Ports, type StageName, type Switch } from "./contract.js";
 import { diagnose, signInAccount, signInAll, type Account, type SignedIn, type SignInDeps } from "./accounts.js";
 import { assertRepository, safeLine } from "./guard.js";
-import { checkGithubToken, liveApi, liveBoat, liveBridge, liveClock, liveDatabase, liveGithub, liveGithubSignIn, liveGithubToken, livePro, liveRelease, liveStorage,
+import { checkGithubToken, tokenLines, liveApi, liveBoat, liveBridge, liveClock, liveDatabase, liveGithub, liveGithubSignIn, liveGithubToken, livePro, liveRelease, liveStorage,
   tokenRefusal } from "./live.js";
 import { accountLines, PERSONAL_ROUTE_GAPS, platformOwners, probeDiagnostics, proActor, readAccount, refusal, resolveProbe, writeLines,
   type AccountSummary } from "./plan.js";
@@ -136,9 +136,7 @@ async function main(argv: string[]): Promise<number> {
       if (githubToken) {
         try {
           const checked = await checkGithubToken(githubToken, fixtures);
-          log(`github token: kind ${checked.kind}; reaches ${checked.reachable.length} repositories${checked.reachable.length ? `: ${checked.reachable.join(", ")}` : ""}`);
-          for (const row of checked.fixtures) log(`  github token on ${row.repository}: ${row.reachable ? "reachable" : "unreachable"}, contents write ${
-            row.contentsWrite ? "yes" : "no"}, pull requests write ${row.pullRequestsWrite ? "yes" : "no"} (probed with requests GitHub refuses on validation; nothing changes)`);
+          for (const line of tokenLines(checked, fixtures)) log(line);
           tokenState = tokenRefusal(checked, fixtures);
         } catch (error) { const failed = diagnose(error, "github_token"); tokenState = `${failed.step}:${failed.code}`; }
       }
