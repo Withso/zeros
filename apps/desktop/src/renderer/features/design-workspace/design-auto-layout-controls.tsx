@@ -64,6 +64,10 @@ import { designRuntimeLayerLabel } from "./design-layer-label";
 
 interface Props {
   details: DesignRuntimeNodeDetails;
+  /** Only W, H, their sizing menus and limits. */
+  only?: "size";
+  /** An axis a control drives shows that control instead of its raw field. */
+  boundSize?: { x?: React.ReactNode; y?: React.ReactNode };
   livePreviewOwner?: { workspaceId: string; frame: string; nodeId: string };
   renderField: (
     label: string,
@@ -184,6 +188,8 @@ function TrackCount({
 }
 
 export function DesignAutoLayoutControls({
+  only,
+  boundSize,
   details: confirmedDetails,
   livePreviewOwner,
   renderField,
@@ -504,6 +510,67 @@ export function DesignAutoLayoutControls({
     </PopoverContent>
   ) : null;
 
+  const sizeFields = (
+    <>
+      {boundSize?.x}
+      {boundSize?.y}
+      {boundSize?.x && boundSize?.y ? null : (
+        <div className="grid grid-cols-2 gap-2">
+          {boundSize?.x ? null : resize("x")}
+          {boundSize?.y ? null : resize("y")}
+        </div>
+      )}
+      {limits.length > 0 ? (
+      <div
+        data-design-layout-limits=""
+        className="grid grid-cols-2 gap-2"
+      >
+        {limits.map((property) => (
+          <div
+            key={property}
+            className={cn(
+              "zd-limit-field relative min-w-0",
+              property.endsWith("width") ? "col-start-1" : "col-start-2",
+              property.startsWith("min") ? "row-start-1" : "row-start-2",
+            )}
+          >
+            {renderField(
+              property
+                .replace("min-width", "Min W")
+                .replace("min-height", "Min H")
+                .replace("max-width", "Max W")
+                .replace("max-height", "Max H"),
+              property,
+              value(property, property.startsWith("min") ? "0px" : "none"),
+              {
+                whole: true,
+                compact: true,
+                shortLabel: property.startsWith("min") ? "Min" : "Max",
+              },
+            )}
+            <span className="zd-limit-remove">
+              <InspectorIconButton
+                label={`Remove ${property.replace("-", " ")}`}
+                size="inline"
+                disabled={disabled}
+                onClick={() => {
+                  setAddedLimits((current) =>
+                    current.filter((entry) => entry !== property),
+                  );
+                  onCommit({ [property]: null });
+                }}
+              >
+                <Minus />
+              </InspectorIconButton>
+            </span>
+          </div>
+        ))}
+      </div>
+      ) : null}
+    </>
+  );
+  const sizeGroup = <InspectorGroup label="Size">{sizeFields}</InspectorGroup>;
+  if (only === "size") return <div data-design-auto-layout className="flex flex-col gap-2">{sizeFields}</div>;
   return (
     <div data-design-auto-layout className="flex flex-col gap-3">
       {container ? (
@@ -586,59 +653,7 @@ export function DesignAutoLayoutControls({
           ) : null}
         </InspectorGroup>
       ) : null}
-      <InspectorGroup label="Size">
-        <div className="grid grid-cols-2 gap-2">
-          {resize("x")}
-          {resize("y")}
-        </div>
-        {limits.length > 0 ? (
-        <div
-          data-design-layout-limits=""
-          className="grid grid-cols-2 gap-2"
-        >
-          {limits.map((property) => (
-            <div
-              key={property}
-              className={cn(
-                "zd-limit-field relative min-w-0",
-                property.endsWith("width") ? "col-start-1" : "col-start-2",
-                property.startsWith("min") ? "row-start-1" : "row-start-2",
-              )}
-            >
-              {renderField(
-                property
-                  .replace("min-width", "Min W")
-                  .replace("min-height", "Min H")
-                  .replace("max-width", "Max W")
-                  .replace("max-height", "Max H"),
-                property,
-                value(property, property.startsWith("min") ? "0px" : "none"),
-                {
-                  whole: true,
-                  compact: true,
-                  shortLabel: property.startsWith("min") ? "Min" : "Max",
-                },
-              )}
-              <span className="zd-limit-remove">
-                <InspectorIconButton
-                  label={`Remove ${property.replace("-", " ")}`}
-                  size="inline"
-                  disabled={disabled}
-                  onClick={() => {
-                    setAddedLimits((current) =>
-                      current.filter((entry) => entry !== property),
-                    );
-                    onCommit({ [property]: null });
-                  }}
-                >
-                  <Minus />
-                </InspectorIconButton>
-              </span>
-            </div>
-          ))}
-        </div>
-        ) : null}
-      </InspectorGroup>
+      {sizeGroup}
       {autoLayout ? (
         <InspectorGroup label="Alignment">
           <div className="grid grid-cols-[64px_minmax(0,1fr)] items-start gap-2">

@@ -110,6 +110,7 @@ import {
   useDesignLayerRevealRequest,
   useDesignWorkspaceDisclosure,
 } from "./state/design-layer-disclosure";
+import { designSelectableLayerTree } from "./state/design-component-bindings";
 
 const NO_PANEL_ROWS: readonly DesignPanelRow[] = Object.freeze([]);
 
@@ -638,12 +639,14 @@ function OwnedDesignWorkspaceSidebarPanels({
     const presented = { ...rawTreesByFile };
     for (const [file, inverse] of historyRuntime ?? []) if (inverse.tree) presented[file] = inverse.tree;
     for (const [file, tree] of Object.entries(presented)) {
-      trees[file] = designFrameLayerChildren(
+      const frame = frames.find((candidate) => candidate.file === file);
+      // Inside an instance, only the layers a control drives have rows.
+      trees[file] = designSelectableLayerTree(designFrameLayerChildren(
         tree,
-        frames.find((frame) => frame.file === file)?.kind === "text"
+        frame?.kind === "text"
           ? null
           : rootIdsByFile[file],
-      );
+      ), designPresentedFrame(frame));
     }
     return trees;
   }, [frames, historyRuntime, rawTreesByFile, rootIdsByFile]);

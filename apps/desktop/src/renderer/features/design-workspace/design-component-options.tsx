@@ -15,6 +15,7 @@
 // Mounted only for one selected component frame or instance; a folded group
 // mounts no rows. Local only.
 
+import { designLayerBoundStyles } from "./state/design-component-bindings";
 import { useEffect, useMemo, useState } from "react";
 import { MoreHorizontal, Plus, RotateCcw, Sparkles } from "lucide-react";
 import { COMPONENT_STATE_PRESETS, componentInheritedValues } from "@zeros/design-core/component-options";
@@ -56,7 +57,7 @@ import {
 import { cn } from "../../shared/ui/cn";
 import { pillVariants } from "../../shared/ui/primitives/pill";
 import type { DesignCanvasFrameWire, DesignLintReportWire } from "../../platform/git";
-import { designComponentOptionsBrief, designComponentOptionsFixBrief, type DesignAgentBrief } from "./design-agent-brief";
+import { designComponentAddControlBrief, designComponentOptionsBrief, designComponentOptionsFixBrief, type DesignAgentBrief } from "./design-agent-brief";
 import { DesignColorPicker } from "./design-color-picker";
 import { DesignColorSwatch } from "./design-color-swatch";
 import { InspectorIconButton, InspectorSection } from "./design-inspector-kit";
@@ -66,6 +67,7 @@ import {
   commitDesignComponentVariant,
   commitDesignInstanceAllOverridesReset,
   commitDesignInstanceAttributes,
+  commitDesignInstanceOlderOverridesReset,
   commitDesignInstanceSlotReset,
   commitDesignInstanceText,
   designInstanceResetAllFits,
@@ -77,11 +79,12 @@ import {
   designComponentVariantName,
   designInstanceVisualStyleProperties,
   designInstanceIgnoredAttributes,
+  designInstanceOlderOverridesIn,
   designInstanceOptionState,
   readDesignFrameComponent,
   sameDesignComponentValue,
 } from "./state/design-component-options";
-import { DESIGN_OPTIONS_NOT_APPLIED_MESSAGES, designComponentSlotLabel } from "./state/design-component-parts";
+import { DESIGN_OPTIONS_NOT_APPLIED_MESSAGES, designComponentSlotLabel, designPartOverrideAttribute } from "./state/design-component-parts";
 import { showDesignComponentVariant } from "./state/design-component-variants";
 
 const EASINGS = [
@@ -140,6 +143,9 @@ export function DesignComponentOptions({
   disabled,
   active = true,
   shownVariant = null,
+  only,
+  except,
+  embedded = false,
   onAskAgent,
 }: {
   workspaceId: string;
@@ -150,6 +156,12 @@ export function DesignComponentOptions({
   disabled: boolean;
   active?: boolean;
   shownVariant?: string | null;
+  /** A layer of the component is selected: only the controls bound to it. */
+  only?: { controls: readonly string[]; layer: { id: string; name: string } };
+  /** Only the rows, for a control shown in another section (Size). */
+  embedded?: boolean;
+  /** Controls another section already shows (an instance's size controls). */
+  except?: readonly string[];
   onAskAgent?: (brief: DesignAgentBrief) => void;
 }) {
   const instance = target.kind === "instance" ? target : null;
@@ -238,11 +250,13 @@ export function DesignComponentOptions({
     void commitDesignInstanceAttributes(workspaceId, frame, instance.nodeId, { "zd-variant": next }, next ? `Use variant ${next}` : "Use Default")
       .catch(failed("the variant"));
   };
-  const reset = instance && instanceState?.resettable
+  // On a part, Reset takes back only the controls listed for it.
+  const resettable = instanceState ? [...instanceState.overridden].filter((name) => !only || only.controls.includes(name)) : [];
+  const reset = instance && resettable.length
     ? () => {
         if (!active) return;
-        const removed: Record<string, null> = Object.fromEntries([...instanceState.overridden].map((name) => [name, null]));
-        void commitDesignInstanceAttributes(workspaceId, frame, instance.nodeId, removed, `Reset ${instance.title}`).catch(failed("the options"));
+        const removed: Record<string, null> = Object.fromEntries(resettable.map((name) => [name, null]));
+        void commitDesignInstanceAttributes(workspaceId, frame, instance.nodeId, removed, `Reset ${instance.title}`).catch(failed("the controls"));
       }
     : undefined;
   const overridden = instance ? Object.keys(instance.host.overrides ?? {}) : [];
@@ -254,6 +268,28 @@ export function DesignComponentOptions({
   const hasSuppliedContent = designInstanceHasSuppliedContent(slottedLayers, instance?.host.text);
   const canResetAll = Boolean(instance && ((instanceState?.overridden.size ?? 0) > 0 || overridden.length > 0 || visualStyleCount > 0 || slottedLayers.length > 0 || resetText)) &&
     designInstanceResetAllFits({ options: instanceState?.overridden.size ?? 0, parts: overridden.length, style: visualStyleCount > 0, slotted: slottedLayers.length, text: resetText });
+  // Older overrides: styles an earlier app wrote on this instance or its
+  // parts. They still render; the app no longer writes them, so it only
+  // offers to remove them, in one step.
+  // A raw size over what a control sets counts too: it sits over that
+  // control. On a part, the line is that part's override alone.
+  const older = instance
+    ? designInstanceOlderOverridesIn(instance.host, designLayerBoundStyles(workspaceId, frame as never, instance.nodeId, { confirmed: true }), only?.layer.id)
+    : { parts: [], style: [] };
+  const olderCount = older.parts.length + older.style.length;
+  const canResetOlder = olderCount > 0 &&
+    designInstanceResetAllFits({ options: 0, parts: older.parts.length, style: older.style.length > 0, slotted: 0, text: false });
+  const resetOlder = () => {
+    if (!instance || !canResetOlder || !active) return;
+    if (only) {
+      void commitDesignInstanceAttributes(workspaceId, frame, instance.nodeId,
+        Object.fromEntries(older.parts.map((part) => [designPartOverrideAttribute(part), null])), "Reset older override")
+        .catch(failed("the older override"));
+      return;
+    }
+    void commitDesignInstanceOlderOverridesReset(workspaceId, frame, instance.nodeId)
+      .catch(failed("the older overrides"));
+  };
   const resetAll = () => {
     if (!instance || !canResetAll || !active) return;
     setConfirmResetAll(false);
@@ -290,6 +326,10 @@ export function DesignComponentOptions({
 
   const title = instance ? instance.title : frame.title;
   const askToChange = onAskAgent && !instance ? () => onAskAgent(designComponentOptionsBrief({ directory, frame: frame.file, title })) : undefined;
+  // An instance's controls are its main's to add; the brief names the main, and the layer when one is selected.
+  const askToAdd = onAskAgent && instance
+    ? () => onAskAgent(designComponentAddControlBrief({ directory, file: instance.component.file, title: instance.title, ...(only ? { layer: only.layer } : {}) }))
+    : undefined;
   const askToFix =
     onAskAgent && notApplied
       ? () =>
@@ -307,7 +347,9 @@ export function DesignComponentOptions({
 
   const rows: React.ReactNode[] = [];
   let group: string | undefined;
-  for (const option of declaration.options) {
+  const shownOptions = declaration.options.filter((option) =>
+    (!only || only.controls.includes(option.name)) && !except?.includes(option.name));
+  for (const option of shownOptions) {
     if (option.group !== group) {
       group = option.group;
       if (group) {
@@ -384,36 +426,50 @@ export function DesignComponentOptions({
   const ignored = useMemo(() => (host ? designInstanceIgnoredAttributes(host) : []), [host]);
   const tooLarge = designComponentRecordProblem(target.component, title);
 
+  if (embedded) return <div data-design-embedded-controls="" className="flex flex-col gap-1.5">{rows}</div>;
   return (
     <>
       <InspectorSection
-      title="Options"
+      title="Controls"
       data-design-component-options={instance ? "instance" : "main"}
       bodyClassName="gap-1.5"
       actions={instance ? (
         <>
-          <InspectorIconButton label="Reset options" data-design-options-reset="" disabled={actionDisabled || !reset} onClick={reset}>
+          <InspectorIconButton label="Reset controls" data-design-options-reset="" disabled={actionDisabled || !reset} onClick={reset}>
             <RotateCcw />
           </InspectorIconButton>
-          <DropdownMenu>
-            <DropdownMenuTrigger asChild>
-              <InspectorIconButton label="More component actions" data-design-component-actions="" disabled={actionDisabled}>
-                <MoreHorizontal />
-              </InspectorIconButton>
-            </DropdownMenuTrigger>
-            <DropdownMenuContent align="end">
-              <DropdownMenuItem disabled={!canResetAll} onSelect={requestResetAll} data-design-reset-all-overrides="">
-                <RotateCcw aria-hidden="true" />
-                Reset all overrides
-              </DropdownMenuItem>
-            </DropdownMenuContent>
-          </DropdownMenu>
+          {/* Reset all is the instance's, not offered from one of its parts. */}
+          {only ? null : (
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <InspectorIconButton label="More component actions" data-design-component-actions="" disabled={actionDisabled}>
+                  <MoreHorizontal />
+                </InspectorIconButton>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end">
+                <DropdownMenuItem disabled={!canResetAll} onSelect={requestResetAll} data-design-reset-all-overrides="">
+                  <RotateCcw aria-hidden="true" />
+                  Reset all overrides
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
+          )}
         </>
       ) : undefined}
     >
+      {instance && olderCount > 0 ? (
+        <div data-design-older-overrides={olderCount} className="text-fg2 flex min-h-7 min-w-0 items-center gap-2 px-2 text-xs">
+          <Tooltip label="Styles set on this instance or its layers outside its controls. They still apply; Reset removes them.">
+            <span tabIndex={0} className="min-w-0 flex-1 truncate">{olderCount} older {olderCount === 1 ? "override" : "overrides"}</span>
+          </Tooltip>
+          <Button type="button" variant="secondary" size="compact" data-design-older-overrides-reset="" disabled={actionDisabled || !canResetOlder} onClick={resetOlder}>
+            Reset
+          </Button>
+        </div>
+      ) : null}
       {notApplied ? (
         <OptionsNotice tone="error" role="alert" data-design-options-not-applied={notApplied}>
-          <p>These options could not be applied. {DESIGN_OPTIONS_NOT_APPLIED_MESSAGES[notApplied]}</p>
+          <p>These controls could not be applied. {DESIGN_OPTIONS_NOT_APPLIED_MESSAGES[notApplied]}</p>
           <Button type="button" variant="secondary" size="compact" disabled={actionDisabled || !askToFix} onClick={askToFix}>
             <Sparkles aria-hidden="true" />
             Ask agent to fix
@@ -431,7 +487,7 @@ export function DesignComponentOptions({
         </OptionsNotice>
       ))}
       {/* Without its declaration the section cannot list the variants the file declares. */}
-      {!tooLarge && (!instance || variants.length) ? (
+      {!tooLarge && !only && (!instance || variants.length) ? (
         <OptionVariantRow
           variant={variant}
           variants={variants}
@@ -443,26 +499,18 @@ export function DesignComponentOptions({
           onSave={creatable ? () => setNaming(true) : undefined}
         />
       ) : null}
-      {instance && variant ? (
-        <div className="flex justify-end">
-          <Button type="button" variant="secondary" size="compact" data-design-options-use-default=""
-            disabled={actionDisabled} onClick={() => chooseVariant(null)}>
-            Use Default
-          </Button>
-        </div>
-      ) : null}
-      {instance && !tooLarge && declaration.options.length === 0 && variants.length === 0 ? (
+      {instance && !only && !tooLarge && declaration.options.length === 0 && variants.length === 0 ? (
         <p className="text-fg3 px-2 py-1 text-3xxs" data-design-options-empty="" role="status">
-          This component has no declared options or variants.
+          This component has no declared controls or variants.
         </p>
       ) : null}
       {naming && !tooLarge ? <OptionEntryRow label="Name" inputLabel="Variant name" placeholder="Compact" onSubmit={saveVariant} onCancel={() => setNaming(false)} /> : null}
       {rows}
-      {defaultSlotted ? (
+      {defaultSlotted && !only ? (
         <OptionSlotRow label={designComponentSlotLabel("")} layers={defaultSlotted} disabled={actionDisabled}
           onReset={(layers) => resetSlot(designComponentSlotLabel(""), layers)} />
       ) : null}
-      {instance && instance.host.text !== undefined ? (
+      {instance && !only && instance.host.text !== undefined ? (
         <div className="flex min-w-0 items-center gap-1">
           <div className="min-w-0 flex-1">
             <OptionTextRow
@@ -486,11 +534,16 @@ export function DesignComponentOptions({
           </Tooltip>
         </div>
       ) : null}
-      {/* Options are the main's to change, so an instance does not offer it. */}
-      {instance ? null : (
+      {/* Controls are the main's to change; an instance asks for one on its main. */}
+      {instance ? (
+        <OptionActionRow disabled={actionDisabled || !askToAdd} onClick={askToAdd} data-design-options-ask-add="">
+          <Sparkles aria-hidden="true" />
+          Ask agent to add a control
+        </OptionActionRow>
+      ) : only ? null : (
         <OptionActionRow disabled={actionDisabled || !askToChange} onClick={askToChange} data-design-options-ask="">
           <Sparkles aria-hidden="true" />
-          Ask agent to change options
+          Ask agent to change controls
         </OptionActionRow>
       )}
       </InspectorSection>
@@ -499,7 +552,7 @@ export function DesignComponentOptions({
           <DialogHeader>
             <DialogTitle>Reset all overrides?</DialogTitle>
             <DialogDescription>
-              This removes supplied slot layers and text from this instance, and resets its declared options and visual styles. The main component and other instances are unchanged.
+              This removes supplied slot layers and text from this instance, and resets its controls and visual styles. The main component and other instances are unchanged.
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>
@@ -542,7 +595,8 @@ function OptionVariantRow({ variant, variants, states, addable, disabled, onChoo
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end" className="w-48">
         <DropdownMenuRadioGroup value={variant ?? ""} onValueChange={(next) => onChoose(next || null)}>
-          <DropdownMenuRadioItem value="">Default</DropdownMenuRadioItem>
+          {/* The attribute the Use Default button carried, kept for its selectors. */}
+          <DropdownMenuRadioItem value="" data-design-options-use-default="">Default</DropdownMenuRadioItem>
           {variants.map((name) => (
             <DropdownMenuRadioItem key={name} value={name}>{variantLabel(name)}</DropdownMenuRadioItem>
           ))}

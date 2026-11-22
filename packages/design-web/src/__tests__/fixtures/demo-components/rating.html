@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Rating</title>
+<template data-zd-options>
+<zd-option name="value" type="number" label="Value" default="3.5" min="0" max="10" step="0.5"></zd-option>
+<zd-option name="count" type="number" label="Stars" default="5" min="1" max="10" step="1"></zd-option>
+<zd-option name="size" type="number" label="Star size" default="1.25" min="0.75" max="2.5" step="0.25" unit="rem"></zd-option>
+<zd-option name="gap" type="number" label="Gap" default="0.2" min="0" max="0.6" step="0.2" unit="em"></zd-option>
+<zd-option name="color" type="color" label="Star colour" default="#f5a524"></zd-option>
+<zd-option name="show-label" type="boolean" label="Show label" default="true"></zd-option>
+<zd-derive name="shown" value="min(value, count)"></zd-derive>
+<zd-derive name="label" value="shown + ' out of ' + count"></zd-derive>
+<zd-variant name="ten" count="10" value="7"></zd-variant>
+<zd-variant name="rose" color="rgb(225 29 72)" value="4"></zd-variant>
+</template>
+<link rel="stylesheet" href="../tokens.css">
+<link rel="stylesheet" href="../ui.css">
+<style>
+.rating { display: inline-flex; vertical-align: middle; align-items: center; gap: var(--space-2); }
+.rating-stars { display: inline-flex; gap: var(--zd-gap); font-size: var(--zd-size); }
+.rating-star { position: relative; width: 1em; height: 1em; }
+.rating-star svg { position: absolute; inset: 0; width: 1em; height: 1em; }
+.rating-star .star-base { color: var(--border-default); }
+.rating-star .star-fill { color: var(--zd-color); }
+.rating-star[data-fill="empty"] .star-fill { display: none; }
+.rating-star[data-fill="half"] .star-fill { clip-path: inset(0 50% 0 0); }
+.rating-label { color: var(--fg-muted); font-size: var(--text-small); font-variant-numeric: tabular-nums; }
+</style>
+</head>
+<body class="stage">
+<div class="rating" data-oid="rating" data-name="Rating" role="img" aria-label="{{ label }}">
+<span class="rating-stars" data-oid="rating-stars" data-name="Stars">
+<span class="rating-star" data-oid="rating-star" data-name="Star" data-zd-for="i in range(count)" data-fill="{{ shown >= i + 1 ? 'full' : shown > i ? 'half' : 'empty' }}"><svg class="star-base" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true" data-oid="o-c4d21f051"><path d="M10 1.5l2.6 5.5 6 .7-4.4 4.1 1.2 5.9L10 14.8l-5.4 2.9 1.2-5.9L1.4 7.7l6-.7z" data-oid="o-9db7a0a42"/></svg><svg class="star-fill" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true" data-oid="o-394c2eb25"><path d="M10 1.5l2.6 5.5 6 .7-4.4 4.1 1.2 5.9L10 14.8l-5.4 2.9 1.2-5.9L1.4 7.7l6-.7z" data-oid="o-1d893c62b"/></svg></span>
+</span>
+<span class="rating-label" data-oid="rating-label" data-name="Label" data-zd-if="show-label">{{ label }}</span>
+</div>
+</body>
+</html>

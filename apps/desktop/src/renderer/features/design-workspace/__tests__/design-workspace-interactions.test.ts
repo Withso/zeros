@@ -506,6 +506,17 @@ describe("design workspace interaction wiring", () => {
     expect(source).toContain("finishInlineTextTool(frame, details)");
   });
 
+  it("checks a confirmed deletion against its workspace before any branch can delete", () => {
+    // A text frame's branch deletes the whole frame; a confirmation from
+    // another workspace or an outdated selection must never reach it.
+    const body = source.slice(source.indexOf("const deleteSelectedNode = useCallback"));
+    const check = body.indexOf("if (confirmed && !boundDeleteConfirmable(confirmed)) return;");
+    expect(check).toBeGreaterThan(0);
+    expect(check).toBeLessThan(body.indexOf('frame?.kind === "text"'));
+    // The question itself (closing when inactive or stale) is mounted in design-bound-delete.test.ts.
+    expect(source).toContain("const boundDelete = useDesignBoundDelete(workspaceId, active);");
+  });
+
   it("rotates from outside every corner instead of one floating button", () => {
     // No separate rotate button, and no icon import left behind for one.
     expect(source).not.toContain("DesignRotateHandle");

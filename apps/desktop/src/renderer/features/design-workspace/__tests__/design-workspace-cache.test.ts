@@ -137,7 +137,6 @@ import {
 import { resetDesignSelectionWorkflowsForTests } from "../state/design-selection";
 import {
   commitDesignInstanceAllOverridesReset,
-  commitDesignInstanceOverridesReset,
 } from "../state/design-component-options";
 
 function snapshot(
@@ -1063,7 +1062,7 @@ describe("design workspace cache", () => {
 
       const undo = applyDesignHistoryCached(workspace, frame.file, "undo");
       await historyBegan;
-      const reset = commitDesignInstanceOverridesReset(workspace, frame, "host");
+      const reset = commitDesignInstanceAllOverridesReset(workspace, frame, "host");
       await Promise.resolve();
       expect(runtimeMocks.waitForDesignFrameRuntime).not.toHaveBeenCalled();
       expect(platformMocks.applyTransaction).not.toHaveBeenCalled();
@@ -1128,7 +1127,7 @@ describe("design workspace cache", () => {
         })
         .mockResolvedValueOnce({ result: null, snapshot: freshSnapshot });
 
-      const pending = commitDesignInstanceOverridesReset(workspace, oldSnapshot.frames[0]!, "host");
+      const pending = commitDesignInstanceAllOverridesReset(workspace, oldSnapshot.frames[0]!, "host");
       await began;
       currentRuntime = freshRuntime;
       designWorkspaceSnapshotCache.setData(workspace, freshSnapshot);
@@ -1177,7 +1176,7 @@ describe("design workspace cache", () => {
       });
       const undo = applyDesignHistoryCached(workspace, "home.html", "undo");
       await historyBegan;
-      const reset = commitDesignInstanceOverridesReset(workspace, before.frames[0]!, "host");
+      const reset = commitDesignInstanceAllOverridesReset(workspace, before.frames[0]!, "host");
       await Promise.resolve();
       expect(runtimeMocks.waitForDesignFrameRuntime).not.toHaveBeenCalled();
       expect(platformMocks.applyTransaction).not.toHaveBeenCalled();
@@ -1212,7 +1211,7 @@ describe("design workspace cache", () => {
       let release!: () => void;
       runtimeMocks.waitForDesignFrameRuntime.mockReturnValue(new Promise((resolve) => { release = () => resolve(runtime); }));
 
-      const pending = commitDesignInstanceOverridesReset(workspace, current.frames[0]!, "host");
+      const pending = commitDesignInstanceAllOverridesReset(workspace, current.frames[0]!, "host");
       await vi.waitFor(() => expect(runtimeMocks.waitForDesignFrameRuntime).toHaveBeenCalledOnce());
       useDesignWorkspaceUiStore.getState().setSelection(workspace, "home.html", "other");
       release();
@@ -1224,7 +1223,7 @@ describe("design workspace cache", () => {
       platformMocks.applyTransaction.mockReset();
       platformMocks.applyTransaction.mockResolvedValue({ result: null, snapshot: current });
       runtimeMocks.waitForDesignFrameRuntime.mockReturnValue(new Promise((resolve) => { release = () => resolve(runtime); }));
-      const cancelled = commitDesignInstanceOverridesReset(workspace, current.frames[0]!, "host");
+      const cancelled = commitDesignInstanceAllOverridesReset(workspace, current.frames[0]!, "host");
       await vi.waitFor(() => expect(runtimeMocks.waitForDesignFrameRuntime).toHaveBeenCalledTimes(2));
       useDesignWorkspaceUiStore.getState().bindDirectory(workspace, "other-directory");
       release();

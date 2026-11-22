@@ -101,9 +101,23 @@ describe("Zeros Design skill package", () => {
     const format = reference("format.md");
     expect(format).toContain('type="slot"');
     expect(format).toContain("data-zd-slot");
-    expect(format).toContain("zd-style-<part>");
+    expect(format).toContain("**Older part overrides.**");
+    expect(format).toContain("Never write new ones");
+    expect(reference("editor.md")).toContain("no control appears twice");
     expect(format).toContain("Move main to canvas");
     expect(reference("editor.md")).not.toContain("Its inner parts never appear in Layers");
+  });
+
+  it("makes controls the only way to change an instance, and documents both warnings", () => {
+    const skillFile = path.join(process.cwd(), DESIGN_SKILL_SOURCE, DESIGN_SKILL_FILE);
+    const reference = (page: string) => readFileSync(path.join(path.dirname(skillFile), "reference", page), "utf8");
+    const format = reference("format.md");
+    expect(format).toContain("**Controls are the only way in.**");
+    for (const ruleId of ["component-control-unread", "component-control-shadowed", "component-instance-override"]) {
+      expect(format).toContain(`\`${ruleId}\``);
+      expect(reference("verify.md")).toContain(`\`${ruleId}\``);
+    }
+    expect(readFileSync(skillFile, "utf8")).toContain("Never write `zd-style-<part>` or a visual style on an instance");
   });
 
   it("keeps SKILL.md a short contract whose table links every shipped reference page", () => {

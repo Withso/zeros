@@ -3,13 +3,18 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import { Tabs, TabsContent } from "../../../shared/ui/primitives";
 import {
-  designInspectorCssStateMismatch,
-  designInspectorDefaultTab,
+  designInspectorActiveTab,
+  designInspectorPendingGeometry,
+  designInspectorMainRootSelected,
   designInspectorPanelState,
+  designInspectorSelectionKind,
+  designInspectorSimilarTabKey,
+  designInspectorTabForSelection,
   designInspectorTabKey,
+  designInspectorTabs,
+  rememberDesignInspectorSelectionTab,
   rememberDesignInspectorTab,
 } from "../design-inspector";
-import * as designInspector from "../design-inspector";
 
 describe("component inspector tab ownership", () => {
   const owner = {
@@ -54,71 +59,79 @@ describe("component inspector tab ownership", () => {
     expect(preferences.get("owner-0")).toBe("css");
   });
 
-  it("defaults component roots to Options and other selections to Style", () => {
-    expect(designInspectorDefaultTab(true)).toBe("options");
-    expect(designInspectorDefaultTab(false)).toBe("style");
+  const none = { count: 1, mainRoot: false, mainLayer: false, instance: false, inner: false };
+  it("knows each selection's kind from component evidence, not a selected node id", () => {
+    expect(designInspectorSelectionKind(none)).toBe("ordinary");
+    expect(designInspectorSelectionKind({ ...none, mainRoot: true })).toBe("main-root");
+    expect(designInspectorSelectionKind({ ...none, mainLayer: true })).toBe("main-layer");
+    expect(designInspectorSelectionKind({ ...none, instance: true })).toBe("instance");
+    expect(designInspectorSelectionKind({ ...none, inner: true })).toBe("component-inner");
+    expect(designInspectorSelectionKind({ ...none, count: 3 })).toBe("ordinary");
+    // Several layers inside a main are still the main's: Style only.
+    expect(designInspectorSelectionKind({ ...none, count: 2, mainLayer: true })).toBe("main-layer");
+    expect(designInspectorSelectionKind({ ...none, count: 2, instance: true })).toBe("instances");
+    expect(designInspectorSelectionKind({ ...none, count: 2, instance: true, inner: true })).toBe("component-inner-many");
   });
 
-  it("classifies similar-target preferences from component evidence, not a selected node id", () => {
-    const api = designInspector as unknown as {
-      designInspectorSelectionIsComponentLike?: (evidence: {
-        frameIsComponent: boolean;
-        instanceHost: boolean;
-        selectedPart: boolean;
-        selectedSlot: boolean;
-      }) => boolean;
-      designInspectorTabPreferenceKind?: (hasOptionsTarget: boolean, componentContext: boolean) => string;
-    };
-    const classify = api.designInspectorSelectionIsComponentLike;
+  it("knows a main's root selected as its frame, or as a layer from Layers or a restore", () => {
+    const main = { main: true, frameSelected: true, selectedNodeId: null, layoutRootId: "root", count: 0 };
+    expect(designInspectorMainRootSelected(main)).toBe(true);
+    expect(designInspectorMainRootSelected({ ...main, selectedNodeId: "root", count: 1 })).toBe(true);
+    // Selected as a node (frameSelected false): still the main, Controls and Style.
+    expect(designInspectorMainRootSelected({ ...main, frameSelected: false, selectedNodeId: "root", count: 1 })).toBe(true);
+    expect(designInspectorMainRootSelected({ ...main, frameSelected: false, selectedNodeId: "child", count: 1 })).toBe(false);
+    expect(designInspectorMainRootSelected({ ...main, frameSelected: false, selectedNodeId: "root", layoutRootId: null, count: 1 })).toBe(false);
+    expect(designInspectorMainRootSelected({ ...main, main: false })).toBe(false);
+    expect(designInspectorMainRootSelected({ ...main, selectedNodeId: "root", count: 2 })).toBe(false);
+  });
 
-    expect(classify?.({ frameIsComponent: false, instanceHost: false, selectedPart: false, selectedSlot: false })).toBe(false);
-    expect(classify?.({ frameIsComponent: true, instanceHost: false, selectedPart: false, selectedSlot: false })).toBe(true);
-    expect(classify?.({ frameIsComponent: false, instanceHost: true, selectedPart: false, selectedSlot: false })).toBe(true);
-    expect(classify?.({ frameIsComponent: false, instanceHost: false, selectedPart: true, selectedSlot: false })).toBe(true);
-    expect(classify?.({ frameIsComponent: false, instanceHost: false, selectedPart: false, selectedSlot: true })).toBe(true);
-    expect(api.designInspectorTabPreferenceKind?.(false, classify?.({ frameIsComponent: false, instanceHost: false, selectedPart: false, selectedSlot: false }) ?? false)).toBe("ordinary");
+  it("never offers a frame's X and Y for layers whose details are pending", () => {
+    expect(designInspectorPendingGeometry({ frameSelected: true, selectedNodeId: null, count: 0 })).toBe("frame");
+    // Several layers, an instance among them, still reading: Size, disabled.
+    expect(designInspectorPendingGeometry({ frameSelected: false, selectedNodeId: "inst", count: 2 })).toBe("size");
+    expect(designInspectorPendingGeometry({ frameSelected: false, selectedNodeId: "layer", count: 1 })).toBe("size");
+  });
+
+  it("offers the tabs each selection has, Controls first on a main", () => {
+    expect(designInspectorTabs("ordinary")).toEqual(["style", "css"]);
+    expect(designInspectorTabs("main-root")).toEqual(["options", "style"]);
+    expect(designInspectorTabs("main-layer")).toEqual(["style"]);
+    expect(designInspectorTabs("instance")).toEqual(["options"]);
+    expect(designInspectorTabs("component-inner")).toEqual(["options"]);
+    expect(designInspectorTabs("instances")).toEqual(["style"]);
+    expect(designInspectorTabs("component-inner-many")).toEqual([]);
+  });
+
+  it("falls back to the selection's default when a stored tab no longer applies", () => {
+    expect(designInspectorActiveTab("main-root", null)).toBe("options");
+    expect(designInspectorActiveTab("main-root", "style")).toBe("style");
+    expect(designInspectorActiveTab("main-root", "css")).toBe("options");
+    expect(designInspectorActiveTab("main-layer", "css")).toBe("style");
+    expect(designInspectorActiveTab("instance", "style")).toBe("options");
+    expect(designInspectorActiveTab("component-inner", "css")).toBe("options");
+    expect(designInspectorActiveTab("ordinary", "css")).toBe("css");
+    expect(designInspectorActiveTab("ordinary", "options")).toBe("style");
+    expect(designInspectorActiveTab("component-inner-many", "style")).toBeNull();
   });
 
   it("reuses a bounded owner-and-kind preference without replacing exact target choices", () => {
-    const api = designInspector as unknown as {
-      designInspectorSimilarTabKey?: (owner: { workspaceId: string | null; directoryId: string | undefined }, kind: string) => string;
-      designInspectorTabForSelection?: (preferences: Map<string, "options" | "style" | "css">, exactKey: string, similarKey: string) => "options" | "style" | "css" | null;
-      rememberDesignInspectorSelectionTab?: (preferences: Map<string, "options" | "style" | "css">, exactKey: string, similarKey: string, value: "options" | "style" | "css") => void;
-      designInspectorTabPreferenceKind?: (hasOptionsTarget: boolean, componentContext: boolean) => string;
-    };
-    const preferenceKey = (kind: string) =>
-      api.designInspectorSimilarTabKey?.({ workspaceId: owner.workspaceId, directoryId: owner.directoryId }, kind)
-      ?? JSON.stringify(["similar", owner.workspaceId, owner.directoryId, kind]);
-    const remember = api.rememberDesignInspectorSelectionTab
-      ?? ((preferences: Map<string, "options" | "style" | "css">, exactKey: string, _similarKey: string, value: "options" | "style" | "css") => rememberDesignInspectorTab(preferences, exactKey, value));
-    const forSelection = api.designInspectorTabForSelection
-      ?? ((preferences: Map<string, "options" | "style" | "css">, exactKey: string) => preferences.get(exactKey) ?? null);
     const preferences = new Map<string, "options" | "style" | "css">();
     const exactA = designInspectorTabKey({ ...owner, selection: ["component-a"] });
     const exactB = designInspectorTabKey({ ...owner, frameFile: "components/card.html", selection: ["component-b"] });
-    const similarRoot = preferenceKey("component-root");
+    const similarRoot = designInspectorSimilarTabKey({ workspaceId: owner.workspaceId, directoryId: owner.directoryId }, "main-root");
 
-    expect(api.designInspectorTabPreferenceKind?.(true, true)).toBe("component-root");
-    expect(api.designInspectorTabPreferenceKind?.(false, true)).toBe("component-inner");
-    expect(api.designInspectorTabPreferenceKind?.(false, false)).toBe("ordinary");
-
-    remember(preferences, exactA, similarRoot, "style");
-    expect(forSelection(preferences, exactB, similarRoot)).toBe("style");
-    remember(preferences, exactB, similarRoot, "css");
-    expect(forSelection(preferences, exactA, similarRoot)).toBe("style");
-    expect(forSelection(preferences, exactB, similarRoot)).toBe("css");
+    rememberDesignInspectorSelectionTab(preferences, exactA, similarRoot, "style");
+    expect(designInspectorTabForSelection(preferences, exactB, similarRoot)).toBe("style");
+    rememberDesignInspectorSelectionTab(preferences, exactB, similarRoot, "options");
+    expect(designInspectorTabForSelection(preferences, exactA, similarRoot)).toBe("style");
+    expect(designInspectorTabForSelection(preferences, exactB, similarRoot)).toBe("options");
 
     const otherOwner = { ...owner, workspaceId: "workspace-b" };
     const otherExact = designInspectorTabKey({ ...otherOwner, selection: ["component-c"] });
-    const otherSimilar = api.designInspectorSimilarTabKey?.(otherOwner, "component-root")
-      ?? JSON.stringify(["similar", otherOwner.workspaceId, otherOwner.directoryId, "component-root"]);
-    expect(forSelection(preferences, otherExact, otherSimilar)).toBeNull();
+    expect(designInspectorTabForSelection(preferences, otherExact, designInspectorSimilarTabKey(otherOwner, "main-root"))).toBeNull();
 
-    const innerKind = api.designInspectorTabPreferenceKind?.(false, true);
-    const innerSimilar = preferenceKey(innerKind ?? "component-inner");
-    const exactInner = designInspectorTabKey({ ...owner, selection: ["inner-layer"] });
-    expect(forSelection(preferences, exactInner, innerSimilar)).toBeNull();
-    expect(designInspectorDefaultTab(false)).toBe("style");
+    const exactLayer = designInspectorTabKey({ ...owner, selection: ["inner-layer"] });
+    expect(designInspectorTabForSelection(preferences, exactLayer, designInspectorSimilarTabKey(owner, "main-layer"))).toBeNull();
   });
 
   it("keeps inactive retained panels mounted but inert and hidden", () => {
@@ -139,10 +152,5 @@ describe("component inspector tab ownership", () => {
     expect(markup).toContain('data-design-style-panel=""');
     expect(markup).toContain('aria-hidden="true"');
     expect(markup).toContain("inert");
-  });
-
-  it("gates Base CSS on interaction-state context, not a named option preset", () => {
-    expect(designInspectorCssStateMismatch(null)).toBe(false);
-    expect(designInspectorCssStateMismatch("hover")).toBe(true);
   });
 });

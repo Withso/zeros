@@ -71,6 +71,7 @@ import {
   useDesignWorkspaceUiStore,
 } from "../state/design-workspace-ui";
 import type { DesignWorkspaceSnapshotWire } from "../../../platform/git";
+import { publishDesignLivePreviewStyles, resetDesignLivePreviewForTests, useDesignLivePreviewStore } from "../state/design-live-preview";
 
 function deferred<Value>() {
   let resolve!: (value: Value) => void;
@@ -195,6 +196,40 @@ describe("selected-detail convergence after hot adoption", () => {
     resetDesignWorkspaceUiForTests();
     resetDesignLayerDisclosureForTests();
     vi.clearAllMocks();
+  });
+
+  it("never removes a previewed value the user still holds when a selection-details refresh lands, on each layer", async () => {
+    resetDesignLivePreviewForTests();
+    const reads = new Map<string, ReturnType<typeof deferred<DesignRuntimeNodeDetails>>>();
+    const runtime = {
+      sourceVersion: INITIAL_VERSION,
+      isActive: () => true,
+      getNodeDetails: vi.fn((nodeId: string) => {
+        const read = deferred<DesignRuntimeNodeDetails>();
+        reads.set(nodeId, read);
+        return read.promise;
+      }),
+    };
+    mocks.designFrameRuntime.mockReturnValue(runtime);
+    const snapshot = workspaceSnapshot(INITIAL_VERSION);
+    designWorkspaceSnapshotCache.setData(WORKSPACE, snapshot);
+    useDesignRuntimeStore.getState().publishSnapshot(WORKSPACE, FOLDER, FRAME.file, runtimeSnapshot(INITIAL_VERSION), INITIAL_VERSION);
+    useDesignWorkspaceUiStore.getState().setSelection(WORKSPACE, FRAME.file, "heading", ["heading", "home-hero"]);
+    // t0: the drag's last step, pointer held still. The refresh starts after it (t1) and lands later (t2).
+    for (const oid of ["heading", "home-hero"]) publishDesignLivePreviewStyles(WORKSPACE, FRAME.file, oid, { "border-radius": "8px" });
+    primeDesignWorkspaceSnapshot(WORKSPACE, snapshot);
+    await vi.waitFor(() => expect(reads.size).toBe(2));
+    const withRadius = (oid: string, value: string): DesignRuntimeNodeDetails => ({ ...nodeDetails(oid, INITIAL_VERSION),
+      authoredStyles: { "border-radius": { origin: "frame", value, selector: `[data-oid="${oid}"]` } } as DesignRuntimeNodeDetails["authoredStyles"] });
+    // The source still holds 4px under heading (a value the user holds), and 8px under home-hero (committed).
+    reads.get("heading")!.resolve(withRadius("heading", "4px"));
+    reads.get("home-hero")!.resolve(withRadius("home-hero", "8px"));
+    await vi.waitFor(() => expect(useDesignRuntimeStore.getState().byWorkspace[WORKSPACE]?.frames[FRAME.file]?.detailsByNode["home-hero"]).toBeDefined());
+    await Promise.resolve();
+    const styles = (oid: string) => useDesignLivePreviewStore.getState().byOwner[JSON.stringify([WORKSPACE, FRAME.file, oid])]?.styles;
+    expect(styles("heading")).toEqual({ "border-radius": "8px" });
+    expect(styles("home-hero")).toBeUndefined();
+    resetDesignLivePreviewForTests();
   });
 
   it("refreshes cached exact-version text capabilities before selected runtime readiness settles", async () => {

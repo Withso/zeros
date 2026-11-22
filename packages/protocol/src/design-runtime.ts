@@ -829,12 +829,15 @@ export type DesignRuntimeMethod =
   /** Opt-in: an instance's part under a point. A host that asks for it also
    * gets part ids in every node read, and a repeated copy of a main
    * component's layer hits as its source. */
-  | "getComponentPartAtLoc";
+  | "getComponentPartAtLoc"
+  /** Opt-in: the properties rules gated on a control's attribute or class
+   * would set on a layer at some value, to the gates. */
+  | "getGatedStyles";
 
 /** Methods a runtime advertises only when the host's handshake lists them
  * in `features`, so a host that predates them still accepts the runtime's
  * capabilities. */
-export const DESIGN_RUNTIME_OPT_IN_METHODS = ["previewStylesheet", "setPlayback", "previewInsert", "clearPreviewInserts", "previewHistory", "commitStructure", "previewStructure", "clearPreviewStructure", "holdNodeState", "releaseNodeState", "getFrameChanges", "previewComponentOptions", "previewComponentInstanceOptions", "getComponentPartAtLoc", "measureLayout"] as const;
+export const DESIGN_RUNTIME_OPT_IN_METHODS = ["previewStylesheet", "setPlayback", "previewInsert", "clearPreviewInserts", "previewHistory", "commitStructure", "previewStructure", "clearPreviewStructure", "holdNodeState", "releaseNodeState", "getFrameChanges", "previewComponentOptions", "previewComponentInstanceOptions", "getComponentPartAtLoc", "measureLayout", "getGatedStyles"] as const;
 
 export interface DesignRuntimePlaybackStopped {
   sourceVersion: string;
@@ -928,6 +931,7 @@ const DESIGN_RUNTIME_METHODS = new Set<DesignRuntimeMethod>([
   "previewComponentOptions",
   "previewComponentInstanceOptions",
   "getComponentPartAtLoc",
+  "getGatedStyles",
 ]);
 
 export interface DesignRuntimeHostRequest {
@@ -1444,7 +1448,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
   ];
   // Advertised only to a host whose handshake asks for them, so a host that
   // predates a method still accepts these capabilities.
-  var OPT_IN_METHODS = ["previewStylesheet", "setPlayback", "previewInsert", "clearPreviewInserts", "previewHistory", "commitStructure", "previewStructure", "clearPreviewStructure", "holdNodeState", "releaseNodeState", "getFrameChanges", "previewComponentOptions", "previewComponentInstanceOptions", "getComponentPartAtLoc", "measureLayout"];
+  var OPT_IN_METHODS = ["previewStylesheet", "setPlayback", "previewInsert", "clearPreviewInserts", "previewHistory", "commitStructure", "previewStructure", "clearPreviewStructure", "holdNodeState", "releaseNodeState", "getFrameChanges", "previewComponentOptions", "previewComponentInstanceOptions", "getComponentPartAtLoc", "measureLayout", "getGatedStyles"];
   var enabledOptInMethods = [];
   var MAX_PREVIEW_STYLESHEET_CHARS = 4194304;
   // Everything one frame of direct manipulation paints from. Deliberately tiny:
@@ -1692,6 +1696,121 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
   var SLOT_PREFIX = ${JSON.stringify(DESIGN_COMPONENT_SLOT_PREFIX)};
   var componentMarks = false;
 
+  // ── Gated candidates ──────────────────────────────────────
+  // A rule whose selector tests an attribute or class a control fills binds
+  // its properties to that control whatever the current value: at a value no
+  // such rule matches (a Button's default size), the winner alone says
+  // nothing. A test keeps meaning the element that carries the gate: an
+  // attribute test becomes the attribute's presence, a class test any class
+  // with the hole's prefix. A selector with a gate test inside parentheses,
+  // or any escape, cannot be rewritten safely and is skipped. Read once per
+  // selected or written layer, never on hover.
+
+  var GATED_RULE_LIMIT = 4096;
+  var GATED_PROPERTY_LIMIT = 128;
+  var GATED_KEYS_PER_PROPERTY = 8;
+
+  /** One complex selector with its gate tests removed, and which gates; null
+   * when it tests none or cannot be rewritten. */
+  function withoutGateTests(complex, attributes, prefixes) {
+    if (complex.indexOf(String.fromCharCode(92)) >= 0) return null;
+    var out = "";
+    var keys = [];
+    var depth = 0;
+    var index = 0;
+    while (index < complex.length) {
+      var character = complex[index];
+      if (character === '"' || character === "'") {
+        var close = complex.indexOf(character, index + 1);
+        if (close < 0) return null;
+        out += complex.slice(index, close + 1);
+        index = close + 1;
+        continue;
+      }
+      if (character === "(") depth += 1;
+      else if (character === ")") depth = Math.max(0, depth - 1);
+      if (character === "[") {
+        var end = index + 1;
+        var quote = "";
+        while (end < complex.length && (quote || complex[end] !== "]")) {
+          if (quote) { if (complex[end] === quote) quote = ""; }
+          else if (complex[end] === '"' || complex[end] === "'") quote = complex[end];
+          end += 1;
+        }
+        if (end >= complex.length) return null;
+        var inner = complex.slice(index + 1, end).trim();
+        var nameEnd = 0;
+        while (nameEnd < inner.length && "=~|^$*] ".indexOf(inner[nameEnd]) < 0) nameEnd += 1;
+        var name = inner.slice(0, nameEnd).toLowerCase();
+        if (attributes.indexOf(name) >= 0) {
+          if (depth > 0) return null;
+          if (keys.indexOf(name) < 0) keys.push(name);
+          out += "[" + inner.slice(0, nameEnd) + "]";
+        } else {
+          out += complex.slice(index, end + 1);
+        }
+        index = end + 1;
+        continue;
+      }
+      if (character === ".") {
+        var identifier = index + 1;
+        while (identifier < complex.length && /[A-Za-z0-9_-]/.test(complex[identifier])) identifier += 1;
+        var className = complex.slice(index + 1, identifier);
+        var prefix = null;
+        for (var candidate = 0; candidate < prefixes.length; candidate += 1)
+          if (className.indexOf(prefixes[candidate]) === 0) { prefix = prefixes[candidate]; break; }
+        if (prefix !== null && className) {
+          if (depth > 0) return null;
+          if (keys.indexOf("." + prefix) < 0) keys.push("." + prefix);
+          out += ':is([class^="' + prefix + '"], [class*=" ' + prefix + '"])';
+          index = identifier;
+          continue;
+        }
+      }
+      out += character;
+      index += 1;
+    }
+    return keys.length ? { selector: out, keys: keys } : null;
+  }
+
+  /** Property to the gates whose rules would set it on this element at some value. */
+  function gatedStylesOf(element, gates) {
+    var result = {};
+    if (!element || !gates || typeof gates !== "object") return result;
+    var attributes = (Array.isArray(gates.attributes) ? gates.attributes : []).slice(0, 64)
+      .filter(function (name) { return typeof name === "string" && name; }).map(function (name) { return name.toLowerCase(); });
+    // Only identifier characters, so a prefix quotes safely in a selector.
+    var prefixes = (Array.isArray(gates.classPrefixes) ? gates.classPrefixes : []).slice(0, 64)
+      .filter(function (prefix) { return typeof prefix === "string" && /^[A-Za-z0-9_-]+$/.test(prefix); });
+    if (!attributes.length && !prefixes.length) return result;
+    var rules;
+    try { rules = cascadeRules(styleScopeOf(element)).rules; } catch (_error) { return result; }
+    var count = 0;
+    for (var index = 0; index < rules.length && index < GATED_RULE_LIMIT; index += 1) {
+      var entry = rules[index];
+      if (!entry.selector || entry.uncertain) continue;
+      var complexes = splitTopLevel(entry.selector, ",");
+      for (var part = 0; part < complexes.length; part += 1) {
+        var rewritten = withoutGateTests(complexes[part], attributes, prefixes);
+        if (!rewritten) continue;
+        var matches = false;
+        try { matches = element.matches(rewritten.selector); } catch (_error) { matches = false; }
+        if (!matches) continue;
+        for (var declared = 0; declared < entry.declared.length; declared += 1) {
+          var property = entry.declared[declared];
+          var keys = result[property];
+          if (!keys) {
+            if (count >= GATED_PROPERTY_LIMIT) continue;
+            keys = result[property] = [];
+            count += 1;
+          }
+          rewritten.keys.forEach(function (key) { if (keys.length < GATED_KEYS_PER_PROPERTY && keys.indexOf(key) < 0) keys.push(key); });
+        }
+      }
+    }
+    return result;
+  }
+
   function componentAddressing() {
     return enabledOptInMethods.indexOf("getComponentPartAtLoc") >= 0;
   }
@@ -1793,12 +1912,15 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     return mark > 0 ? elementsByOid.get(copy.slice(0, mark)) || null : null;
   }
 
-  function componentPartAtLoc(x, y, hostNodeId) {
+  // With selectable (main layer ids), only those parts and slots count; a
+  // part outside it gives way to the nearest part in it, else the host.
+  function componentPartAtLoc(x, y, hostNodeId, selectable) {
     if (!Number.isFinite(x) || !Number.isFinite(y)) {
       throw new Error("x and y must be finite frame coordinates.");
     }
     var host = elementForOid(hostNodeId);
     if (!host.hasAttribute("data-zd-instance")) throw typedError("BAD_REQUEST", "That layer is not a component instance.", false);
+    var allowed = Array.isArray(selectable) ? selectable.slice(0, 256).map(String) : null;
     var found = null;
     visitElementsFromPoint(x, y, function (element) {
       if (element === host || !host.contains(element)) return false;
@@ -1806,6 +1928,8 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
         // The root is the instance's own box, not a part inside it.
         if (rootInstanceOf(current) === host) return true;
         if ((current.hasAttribute("data-zd-part") || current.hasAttribute("data-zd-slot")) && partOwnerOf(current) === host) {
+          var part = current.getAttribute("data-zd-part");
+          if (allowed && part !== null && !current.hasAttribute("data-zd-slot") && allowed.indexOf(part.replace(/#[\d.]+$/, "")) < 0) continue;
           found = current;
           return true;
         }
@@ -7284,9 +7408,14 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
       case "previewComponentInstanceOptions":
         if (enabledOptInMethods.indexOf("previewComponentInstanceOptions") < 0) throw new Error("Unknown design runtime method: previewComponentInstanceOptions");
         return previewComponentInstanceOptions(args);
+      case "getGatedStyles": {
+        if (enabledOptInMethods.indexOf("getGatedStyles") < 0) throw new Error("Unknown design runtime method: getGatedStyles");
+        // An instance is read through its root box, as its details are.
+        return gatedStylesOf(layerBoxOf(layerOwnerOf(elementForOid(args.nodeId))), args.gates);
+      }
       case "getComponentPartAtLoc":
         if (enabledOptInMethods.indexOf("getComponentPartAtLoc") < 0) throw new Error("Unknown design runtime method: getComponentPartAtLoc");
-        return componentPartAtLoc(Number(args.x), Number(args.y), args.hostNodeId);
+        return componentPartAtLoc(Number(args.x), Number(args.y), args.hostNodeId, args.selectable);
       case "getFrameChanges":
         if (enabledOptInMethods.indexOf("getFrameChanges") < 0) throw new Error("Unknown design runtime method: getFrameChanges");
         // Read as Default: a held state's copies are no layer's own value.
