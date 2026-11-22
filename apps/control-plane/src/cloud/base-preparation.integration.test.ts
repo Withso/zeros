@@ -118,10 +118,6 @@ d("ready copies: a safe switch-on", () => {
   } as unknown as CloudV2RouteDeps);
   const create = (computers: CloudV2Computers, user: string, body: { repository?: string; projectId?: string }) =>
     operations(computers).create(user, { organizationId: org, ...body }, { document: workspace => workspace as never, receiptDocument: workspace => workspace as never });
-  const snapshotOfBuild = async (id: string) => {
-    const stored = (await pool.query<{ snapshot_id: string }>("SELECT snapshot_id FROM cloud_v2_computer_builds WHERE id=$1", [id])).rows[0]!.snapshot_id;
-    return stored.split("@")[0]!;
-  };
   const workspaceRow = async (id: string) => (await pool.query<{ project_id: string | null; waiting_for_base_at: Date | null; computer_build_id: string; state: string }>(
     "SELECT project_id, waiting_for_base_at, computer_build_id, state FROM cloud_v2_workspaces WHERE id=$1", [id])).rows[0]!;
   const outcomeOf = async (id: string): Promise<Outcome> => {
@@ -213,6 +209,8 @@ d("ready copies: a safe switch-on", () => {
     sandboxName: () => `zeros-fixture-${randomUUID()}`, sleep: async () => {}, now: () => clock });
   const due = (id: string) => pool.query("UPDATE cloud_v2_workspaces SET next_attempt_at=clock_timestamp() WHERE id=$1", [id]);
   const creates = () => boat.calls.filter(call => call.op === "create").map(call => call.args[0] as { from?: string; name: string });
+  /** Workspace machines only (the lifecycle names them zeros-fixture-…), not the builder that makes a base. */
+  const workspaceMachines = () => creates().filter(call => call.name.startsWith("zeros-fixture-"));
   /** A project workspace created while the organization's base is being prepared (no shared base). */
   async function waiting(installScript: string | null = null) {
     if (installScript) await pool.query("INSERT INTO cloud_v2_computers (org_id, recipe_revision, install_script) VALUES ($1, 1, $2)", [org, installScript]);
@@ -266,21 +264,49 @@ d("ready copies: a safe switch-on", () => {
       expect((await pool.query("SELECT count(*)::int AS n FROM cloud_v2_workspaces w JOIN cloud_v2_computer_builds b ON b.id=w.computer_build_id WHERE w.state='creating' AND b.state IN ('failed','cancelled')")).rows[0].n).toBe(0);
     });
 
-    it("lets stop, archive and delete end the wait cleanly: stop changes nothing, archive is refused as for any create, delete deletes", async () => {
+    it("lets stop, archive and delete end the wait cleanly: stop ends the create with no machine, archive is refused, delete deletes", async () => {
       const { computers, id } = await waiting();
-      expect((await store.requestLifecycle(id, member, "stop")).moved).toBe(false);
       await expect(store.requestLifecycle(id, member, "archive")).rejects.toMatchObject({ code: "workspace_unavailable" });
-      expect((await workspaceRow(id)).state).toBe("creating");
+      expect((await store.requestLifecycle(id, member, "stop")).moved).toBe(true);
+      expect((await pool.query("SELECT state, error_code, waiting_for_base_at FROM cloud_v2_workspaces WHERE id=$1", [id])).rows[0])
+        .toEqual({ state: "failed", error_code: "cloud_create_stopped", waiting_for_base_at: null });
       const other = (await create(computers, member, { projectId: (await pool.query("SELECT id FROM cloud_projects WHERE org_id=$1 LIMIT 1", [org])).rows[0].id })).response as unknown as { id: string };
       await store.manage(other.id, "delete", async () => {});
       await lifecycle().tick();
       expect((await workspaceRow(other.id)).state).toBe("deleted");
-      // The stopped one boots once its base is live; nothing is left creating on a build that will never be live.
+      // The base still goes live for the organization; neither stopped nor deleted create makes a machine from it.
       await builder(computers).tick();
       await due(id);
       await lifecycle().tick();
-      expect(creates()).toHaveLength(2);
-      expect((await pool.query("SELECT count(*)::int AS n FROM cloud_v2_workspaces w JOIN cloud_v2_computer_builds b ON b.id=w.computer_build_id WHERE w.state='creating' AND b.state<>'succeeded'")).rows[0].n).toBe(0);
+      expect(workspaceMachines()).toEqual([]);
+      expect((await pool.query("SELECT count(*)::int AS n FROM cloud_v2_workspaces w JOIN cloud_v2_computer_builds b ON b.id=w.computer_build_id WHERE w.state='creating'")).rows[0].n).toBe(0);
+    });
+
+    it("gives up before any machine when its member leaves while it waits: their private workspace is archived", async () => {
+      const mine = await project(["withso/notes"], { level: "personal", owner: member });
+      const computers = computersWith();
+      const id = ((await create(computers, member, { projectId: mine })).response as unknown as { id: string }).id;
+      expect(await outcomeOf(id)).toBe("waits");
+      await pool.query("DELETE FROM organization_members WHERE org_id=$1 AND user_id=$2", [org, member]);
+      await builder(computers).tick();
+      await due(id);
+      await lifecycle().tick();
+      expect((await pool.query("SELECT state, error_code FROM cloud_v2_workspaces WHERE id=$1", [id])).rows[0])
+        .toEqual({ state: "failed", error_code: "cloud_create_archived" });
+      expect(workspaceMachines()).toEqual([]);
+    });
+
+    it("gives up before any machine when Pro ends while it waits in a Personal organization", async () => {
+      configureCloudPersonal(pool, true);
+      org = await organization({ personal: true });
+      const computers = computersWith();
+      const id = ((await create(computers, admin, { projectId: await project() })).response as unknown as { id: string }).id;
+      expect(await outcomeOf(id)).toBe("waits");
+      await pool.query("UPDATE account_entitlements SET status='cancelled' WHERE user_id=$1", [admin]);
+      await lifecycle().tick();
+      expect((await pool.query("SELECT state, error_code FROM cloud_v2_workspaces WHERE id=$1", [id])).rows[0])
+        .toEqual({ state: "failed", error_code: "cloud_creator_access_lost" });
+      expect(workspaceMachines()).toEqual([]);
     });
   });
 
@@ -433,34 +459,7 @@ d("ready copies: a safe switch-on", () => {
     });
   });
 
-  describe("an image whose snapshot is gone", () => {
-    it("starts a pre-switch workspace, and one on an older base, from the organization's base with every repository cloned", async () => {
-      const pre = await preSwitchBuild();
-      const off = createCloudWorkspaceOperations({ store, computers: computersWith({ readyCopies: false }),
-        authorizeBuildRepository: async (_o: string, _u: string, _b: string, repository: string) => ({ repository, repositoryId: repositoryId(repository) }),
-        remoteHead: async () => "d".repeat(40) } as unknown as CloudV2RouteDeps);
-      const old = (await off.create(admin, { organizationId: org, repository: "withso/zeros" }, { document: w => w as never, receiptDocument: w => w as never })).response as unknown as { id: string };
-      await pool.query("UPDATE cloud_v2_computer_builds SET snapshot_id=NULL, snapshot_deleted_at=clock_timestamp() WHERE id=$1", [pre.id]);
-      // No base yet: it cannot be made, as before.
-      expect(await store.workspaceImage(old.id)).toBeNull();
-      await pool.query("INSERT INTO cloud_v2_computers (org_id, recipe_revision) VALUES ($1, 1) ON CONFLICT (org_id) DO UPDATE SET install_script='echo tools'", [org]);
-      const on = computersWith();
-      await on.ensureBase(org);
-      await builder(on).tick();
-      const first = (await on.overview(org)).activeBuildId!;
-      const base = await snapshotOfBuild(first);
-      expect(await store.workspaceImage(old.id)).toEqual({ from: base, prune: [], checkout: false });
-      // A workspace on that base; a later base retires its snapshot: it starts from the newer one.
-      const projectId = (await pool.query("SELECT id FROM cloud_projects WHERE org_id=$1 LIMIT 1", [org])).rows[0].id;
-      const onBase = (await create(on, admin, { projectId })).response as unknown as { id: string };
-      await on.enqueue(org, admin, { repositories: [] });
-      await builder(on).tick();
-      const second = (await on.overview(org)).activeBuildId!;
-      expect(second).not.toBe(first);
-      await pool.query("UPDATE cloud_v2_computer_builds SET snapshot_id=NULL, snapshot_deleted_at=clock_timestamp() WHERE id=$1", [first]);
-      expect(await store.workspaceImage(onBase.id)).toEqual({ from: await snapshotOfBuild(second), prune: [], checkout: false });
-    });
-
+  describe("ready copies off", () => {
     it("starts a project workspace of several repositories, with ready copies off, from its base with every repository cloned", async () => {
       boat.snapshots.set(SHARED, new Map());
       const on = computersWith({ shared: true });

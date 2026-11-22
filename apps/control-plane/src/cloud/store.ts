@@ -856,6 +856,13 @@ export class CloudV2Store {
     executionAuthority?: ExecutionIntentAuthority) {
       if (action === "stop" || action === "archive") await cancelExecutionActivation(tx, id);
       else await assertNoExecutionTransition(tx, id);
+      // A create still waiting for its organization's base has no machine to stop: stop ends it, plainly, with none made.
+      if (action === "stop" && current.state === "creating" && current.boat_sandbox_id === null && current.waiting_for_base_at) {
+        const stopped = (await tx.query<Row>(`UPDATE cloud_v2_workspaces SET state='failed', error_code='cloud_create_stopped',
+            waiting_for_base_at=NULL, attempts=0, next_attempt_at=NULL, updated_at=clock_timestamp()
+          WHERE id=$1 AND state='creating' AND boat_sandbox_id IS NULL AND waiting_for_base_at IS NOT NULL RETURNING ${COLUMNS}`, [id])).rows[0];
+        if (stopped) return { workspace: workspace(stopped), moved: true };
+      }
       const intent = (await tx.query<{ stop_generation: string; restart_stop_generation: string | null; execution_mode: string }>(
         "SELECT stop_generation::text,restart_stop_generation::text,execution_mode FROM cloud_v2_workspaces WHERE id=$1", [id])).rows[0]!;
       const priorRestart = intent.restart_stop_generation;
@@ -2237,12 +2244,10 @@ export class CloudV2Store {
    * pinned build (see cloudV2WorkspaceImage); null when that build is gone. */
   async workspaceImage(workspaceId: string): Promise<CloudV2WorkspaceImage | null> {
     const { rows } = await withSystemTx(this.pool, tx => tx.query<{ org_id: string; computer_build_id: string | null; repository: string;
-      source_repositories: string[] | null; snapshot_id: string | null; source_policy_version: number | null; recipe: unknown; snapshot_gone: boolean }>(
-      `SELECT w.org_id, w.computer_build_id, w.repository, w.source_repositories, b.snapshot_id, b.source_policy_version, b.recipe,
-         (pinned.state='succeeded' AND pinned.snapshot_deleted_at IS NOT NULL AND pinned.cleanup_requested_at IS NULL) AS snapshot_gone
+      source_repositories: string[] | null; snapshot_id: string | null; source_policy_version: number | null; recipe: unknown }>(
+      `SELECT w.org_id, w.computer_build_id, w.repository, w.source_repositories, b.snapshot_id, b.source_policy_version, b.recipe
        FROM cloud_v2_workspaces w LEFT JOIN cloud_v2_computer_builds b ON b.id=w.computer_build_id AND b.org_id=w.org_id
          AND b.state='succeeded' AND b.source_policy_version IN (2,3) AND b.snapshot_deleted_at IS NULL AND b.cleanup_requested_at IS NULL
-       LEFT JOIN cloud_v2_computer_builds pinned ON pinned.id=w.computer_build_id AND pinned.org_id=w.org_id
        WHERE w.id=$1`, [workspaceId]));
     const row = rows[0];
     if (!row) return null;
@@ -2250,21 +2255,9 @@ export class CloudV2Store {
       const legacy = await this.computerSnapshot(row.org_id, null);
       return legacy ? { from: legacy, prune: [], checkout: false } : null;
     }
-    if (!row.snapshot_id || row.source_policy_version === null) {
-      // Its build went live once and a later build retired its snapshot: the organization's base, and every repository
-      // cloned, as a create on that base is. Without a base it cannot be made, as before.
-      return row.snapshot_gone ? this.baseImage(row.org_id) : null;
-    }
+    if (!row.snapshot_id || row.source_policy_version === null) return null;
     return cloudV2WorkspaceImage({ policy: row.source_policy_version, snapshot: row.snapshot_id, recipe: row.recipe,
       scope: row.source_repositories ?? [], repository: row.repository });
-  }
-
-  private async baseImage(organizationId: string): Promise<CloudV2WorkspaceImage | null> {
-    const { rows } = await withSystemTx(this.pool, tx => tx.query<{ snapshot_id: string }>(
-      `SELECT b.snapshot_id FROM cloud_v2_computers c JOIN cloud_v2_computer_builds b ON b.id=c.active_build_id AND b.org_id=c.org_id
-         AND b.state='succeeded' AND b.base_only AND b.snapshot_id IS NOT NULL AND b.snapshot_deleted_at IS NULL AND b.cleanup_requested_at IS NULL
-       WHERE c.org_id=$1`, [organizationId]));
-    return rows[0] ? { from: cloudV2BoatSnapshotName(rows[0].snapshot_id), prune: [], checkout: false } : null;
   }
 
   /** The build a creating workspace is bound to, while it may still be on its way (an organization's base being prepared). */
@@ -2273,6 +2266,14 @@ export class CloudV2Store {
       `SELECT b.id, b.state, b.finished_at FROM cloud_v2_workspaces w JOIN cloud_v2_computer_builds b ON b.id=w.computer_build_id AND b.org_id=w.org_id
        WHERE w.id=$1`, [workspaceId]));
     return rows[0] ? { buildId: rows[0].id, state: rows[0].state, finishedAt: rows[0].finished_at } : null;
+  }
+
+  /** A create that waited for its base may go on only while it is not archived (a member who left has theirs archived)
+   * and its creator (or, in shared execution, its organization) still has cloud: what changed, or null. */
+  async deferredCreateChange(workspaceId: string): Promise<"archived" | "access" | null> {
+    const row = (await withSystemTx(this.pool, tx => tx.query<{ archived: boolean; live: boolean }>(
+      `SELECT w.archived_at IS NOT NULL AS archived, ${LIVE_ACCESS} AS live FROM cloud_v2_workspaces w WHERE w.id=$1`, [workspaceId]))).rows[0];
+    return !row ? null : row.archived ? "archived" : row.live ? null : "access";
   }
 
   /** Its base is live (or gone): it no longer says it is waiting for it. */

@@ -78,6 +78,10 @@ const STATUS: Record<CloudV2Workspace["state"], string> = {
 
 const ERRORS: Record<string, string> = {
   cloud_computer_build_required: "Build the Cloud Computer first.",
+  cloud_computer_preparation_failed: "The Cloud Computer could not be prepared, so this workspace was not created. Zeros tries again; create the workspace again later.",
+  cloud_create_stopped: "Stopped while the Cloud Computer was being prepared, so this workspace was never created. Create a new one when you need it.",
+  cloud_create_archived: "Archived while the Cloud Computer was being prepared, so this workspace was never created.",
+  cloud_creator_access_lost: "Its creator no longer has cloud access, so this workspace was never created.",
   cloud_computer_changed: "The Cloud Computer was just rebuilt. Create the workspace again.",
   cloud_source_access_denied: "Your GitHub connection can no longer read this repository. Check repository access in Settings → GitHub, then create a new workspace.",
   repository_branch_not_found: "The base branch no longer exists on GitHub. Choose another branch and create a new workspace.",

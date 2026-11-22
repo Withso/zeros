@@ -17,6 +17,7 @@ import { scheduleCloudDeletion } from "./deletion.js";
 import { CloudV2ReadyCopies } from "./ready-copies.js";
 import { assertOrganizationCloudPurgeReady } from "../deletion-lifecycle.js";
 import { withSystemTx } from "../db.js";
+import { workspaceSetupBuild } from "./setup-selection.js";
 
 const d = process.env.TEST_DATABASE_URL ? describe : describe.skip;
 const HOME = "/home/user";
@@ -41,6 +42,10 @@ d("cloud v2 retention", () => {
   /** When each stored object was last written (R2's LastModified); absent means long ago. */
   let objectTimes: Map<string, number>;
   let markers: Set<string>, written: Set<string>, changeTimesOut: boolean, environmentRestoreFails: boolean, seeded: Map<string, string>;
+  /** The checkouts the machine's commands look at: the project's three by default; a pre-switch workspace has its own. */
+  let checkouts: string[];
+  /** A pre-switch workspace's branch ref, kept by its backup as its unpushed commit. */
+  let keepRefs: boolean;
 
   beforeAll(() => { pool = new pg.Pool({ connectionString: process.env.TEST_DATABASE_URL, max: 4 }); });
   afterAll(() => pool.end());
@@ -51,17 +56,18 @@ d("cloud v2 retention", () => {
     await resetMigratedTestDatabase(pool);
     archives = new Map(); uploads = []; errors = []; warnings = []; timings = []; remoteBranches = new Set(); backupFails = false;
     markers = new Set(); written = new Set(); extraPrefixes = new Set(); objectTimes = new Map(); changeTimesOut = false; environmentRestoreFails = false; seeded = new Map();
+    checkouts = REPOS.map(repo => path(repo.folder)); keepRefs = false;
     boat = new FakeBoat();
     boat.script = (machine, command, input) => {
       if (command.includes("zeros-backup-probe")) {
-        const dirty = REPOS.some(repo => command.includes(path(repo.folder)) && machine.files.has(`${path(repo.folder)}/UNPUSHED`));
+        const dirty = checkouts.some(checkout => command.includes(checkout) && machine.files.has(`${checkout}/UNPUSHED`));
         return { exitCode: 0, stdout: `zeros-backup-probe ${dirty ? "dirty" : "clean"}\n`, timedOut: false };
       }
       if (command.includes("zeros-checkpoint-saved")) {
         if (backupFails) return { exitCode: 3, stdout: "zeros-checkpoint-error checkpoint_upload_failed upload\n", timedOut: false };
         const object = OBJECT.exec(command)![0];
-        archives.set(object, new Map([...machine.files].filter(([file]) => (file.endsWith("/UNPUSHED") || file.endsWith("/.env"))
-          && REPOS.some(repo => command.includes(path(repo.folder)) && file.startsWith(`${path(repo.folder)}/`)))));
+        archives.set(object, new Map([...machine.files].filter(([file]) => (file.endsWith("/UNPUSHED") || file.endsWith("/.env")
+          || (keepRefs && file.includes("/.git/refs/heads/"))) && checkouts.some(checkout => command.includes(checkout) && file.startsWith(`${checkout}/`)))));
         return { exitCode: 0, stdout: `zeros-checkpoint-saved bytes=100 sha256=${"e".repeat(64)}\n`, timedOut: false };
       }
       if (command.includes("zeros-checkpoint-restored")) {
@@ -1821,5 +1827,48 @@ d("cloud v2 retention", () => {
         expect((await columns("checkpoint_object")).checkpoint_object).not.toBeNull();
       }, 60_000);
     });
+  });
+
+  it("restores a pre-switch workspace's backup onto a base: its files and unpushed commit, its own checkout path and original setup", async () => {
+    // Before the switch: a Cloud Computer that installs acme/app with its setup, and the workspace made from it, laid out as then.
+    const pre = randomUUID(), checkout = `${HOME}/acme/app`;
+    await pool.query(`INSERT INTO cloud_v2_computer_builds (id, org_id, version, recipe, state, created_by, source_policy_version, snapshot_id, source_targets)
+      VALUES ($1,$2,2,$3,'succeeded',$4,3,'zeros-pre',$5)`, [pre, org, JSON.stringify({ repositories: [{ repository: "acme/app", setup: "pnpm install",
+        branch: "main", commit: "c".repeat(40) }] }), user, JSON.stringify([{ repository: "acme/app", repositoryId: "42" }])]);
+    await pool.query("UPDATE cloud_v2_computers SET active_build_id=$2, snapshot_name='zeros-pre' WHERE org_id=$1", [org, pre]);
+    await pool.query("DELETE FROM cloud_v2_workspace_repositories WHERE workspace_id=$1 AND position>0", [id]);
+    await pool.query("UPDATE cloud_v2_workspace_repositories SET folder=NULL WHERE workspace_id=$1", [id]);
+    await pool.query("UPDATE cloud_v2_workspaces SET computer_build_id=$2, checkout_path=NULL, folder=NULL WHERE id=$1", [id, pre]);
+    checkouts = [checkout]; keepRefs = true;
+    const single = { repositories: async () => [] };
+    boat.write(vm, `${checkout}/UNPUSHED`, "app work");
+    boat.write(vm, `${checkout}/.git/refs/heads/zeros/w`, "unpushed commit");
+    await store.transition(id, ["running"], "stopping");
+    await lifecycle(single).tick();
+    await earlier(CLOUD_V2_BACKUP_DELAY_MS + 60_000);
+    await lifecycle(single).tick();
+    const saved = await row();
+    expect([...archives.get(saved.checkpoint_object)!.keys()].sort()).toEqual([`${checkout}/.git/refs/heads/zeros/w`, `${checkout}/UNPUSHED`]);
+    // The switch: the organization's live build is now a base, with no repository; the pre-switch build is its legacy build.
+    const base = randomUUID();
+    await pool.query(`INSERT INTO cloud_v2_computer_builds (id, org_id, version, recipe, state, created_by, source_policy_version, snapshot_id, source_targets, base_only, automatic)
+      VALUES ($1,$2,3,'{"repositories":[]}','succeeded',NULL,2,'zeros-base-2','[]',true,true)`, [base, org]);
+    await pool.query("UPDATE cloud_v2_computers SET active_build_id=$2, snapshot_name='zeros-base-2', legacy_build_id=$3, base_live_at=clock_timestamp() WHERE org_id=$1", [org, base, pre]);
+    // Boat loses the machine; opening it restores onto the base.
+    boat.machine(vm)!.state = "deleted";
+    await store.transition(id, ["stopped"], "starting");
+    await lifecycle({ ...single, restoreSource: async () => null }).tick();
+    const restored = (await pool.query(`SELECT boat_sandbox_id, computer_build_id, restore_pending, restore_create->>'setupBuildId' AS setup_build, checkout_path
+      FROM cloud_v2_workspaces WHERE id=$1`, [id])).rows[0];
+    expect(restored).toMatchObject({ computer_build_id: base, restore_pending: false, setup_build: pre, checkout_path: null });
+    const replacement = boat.machine(restored.boat_sandbox_id)!;
+    expect(replacement.files.get(`${checkout}/UNPUSHED`)).toBe("app work");
+    expect(replacement.files.get(`${checkout}/.git/refs/heads/zeros/w`)).toBe("unpushed commit");
+    // Made from the base (a restore's machine is named for its attempt).
+    expect(boat.calls.filter(call => call.op === "create" && (call.args[0] as { key: string }).key.startsWith(`restore:${id}:`))
+      .map(call => (call.args[0] as { from?: string }).from)).toEqual(["zeros-base-2"]);
+    expect(boat.commands.filter(command => command.machineId === replacement.id).some(command => command.command.includes(checkout))).toBe(true);
+    // Its setup is still read from the pre-switch build (whose recipe runs pnpm install in acme/app), not the base's.
+    expect(await workspaceSetupBuild(pool, await store.get(id, user))).toEqual({ setupBuildId: pre });
   });
 });

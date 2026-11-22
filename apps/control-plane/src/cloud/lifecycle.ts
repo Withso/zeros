@@ -169,7 +169,7 @@ export type CloudV2LifecycleDeps = {
     | "startRetentionClocks" | "archiveInactive" | "archiveDepartedPrivate" | "restoreReturningPrivate" | "archiveForSystem" | "clearArchiveScrub"
     | "claimBackupRemovals" | "pendingBackupRemovals" | "finishBackupRemoval" | "sweepDepartedProjects" | "deleteDepartedProjects" | "missedWakes"
     | "accountCheckpointPrefixes" | "retireDisconnectedCopies" | "clearStaleMaintenance" | "maintenanceBacklog" | "keepLostMachine">
-    & Partial<Pick<CloudV2Store, "workspaceBuildWait" | "rebindToBase" | "baseWaitOver">>;
+    & Partial<Pick<CloudV2Store, "workspaceBuildWait" | "rebindToBase" | "baseWaitOver" | "deferredCreateChange">>;
   /** Optional for older compositions; the shipped store always provides it. */
   prompts?: CloudV2Store["prompts"];
   pruneEnvironments?: () => Promise<void>;
@@ -586,6 +586,13 @@ export class CloudV2Lifecycle {
       case "creating": {
         // Ready copies: a base being prepared for this create. It waits ("Preparing the Cloud Computer…"), and its boot
         // deadline counts from when that base went live.
+        // Before any machine is made for it: archived meanwhile (a member who left), or its creator lost cloud (left,
+        // or Pro ended in a Personal organization), and it gives up, plainly, with none made.
+        const changed = workspace.preparing ? await store.deferredCreateChange?.(workspace.id) : null;
+        if (changed) {
+          await store.transition(workspace.id, ["creating"], "failed", { errorCode: changed === "archived" ? "cloud_create_archived" : "cloud_creator_access_lost" });
+          return;
+        }
         const base = workspace.preparing ? await store.workspaceBuildWait?.(workspace.id) : null;
         if (base && (base.state === "queued" || base.state === "building")) {
           if (now - Date.parse(workspace.createdAt) > BASE_WAIT_DEADLINE_MS) {
