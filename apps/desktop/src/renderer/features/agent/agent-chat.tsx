@@ -166,7 +166,7 @@ import {
 } from "./composer-text-attachment-delivery";
 import { registerLiveChatFileStager } from "./composer-file-attachment-delivery";
 import { buildForkTranscriptAttachment, createForkedChat } from "./fork-chat";
-import { markSideChatSeedSent, openSideChat as openSideChatFrom, sideChatHandoffFor, useSideChatSeed, warmSideChat as warmSideChatFrom, type SideChatSource } from "./side-chat";
+import { SIDE_CHAT_TITLE, markSideChatSeedSent, openSideChat as openSideChatFrom, sideChatHandoffFor, useSideChatSeed, warmSideChat as warmSideChatFrom, type SideChatSource } from "./side-chat";
 import { SideChatBranchBanner } from "./side-chat-banner";
 import { hasParentContext } from "./add-child-session";
 import { resolveComposerPlaceholder } from "./composer-placeholder";
@@ -562,7 +562,7 @@ function AgentChatBody({
   const activity = readOnly ? null : agentActivity(session, pendingLocalTurnId);
   const backgroundContinuationActive = agentFamily(session.agentId) === "claude" && activity !== null && session.status !== "streaming";
   const waitingForBackgroundTasks = activity === "waiting";
-  const untitled = chatThread?.title === "Untitled" || chatThread?.title === "New chat";
+  const untitled = chatThread?.title === "Untitled" || chatThread?.title === "New chat" || chatThread?.title === SIDE_CHAT_TITLE;
   // Recomputed per streamed chunk, but the request below re-arms only when
   // the chosen prompt itself changes.
   const titleCandidate = useMemo(
@@ -3509,6 +3509,9 @@ function AgentChatBody({
        *  handed to the local session. A failure after this is retried by its
        *  owner, so the caller must not send the same text again. */
       onCommitted?: () => void;
+      /** Called once the cloud outbox holds the message, without changing how
+       *  the send settles. */
+      onDurable?: () => void;
       /** The previous harness's conversation, prepended to the wire text only. */
       handoffContext?: string;
       /** Summary imports from prior chats, prepended as <from_previous_chat> blocks. */
@@ -3656,6 +3659,7 @@ function AgentChatBody({
       const releaseSubmittedComposer = () => {
         if (composerReleased) return;
         composerReleased = true;
+        extras?.onDurable?.();
         extras?.onCommitted?.();
         const unchanged = override === undefined && snapshot && isSubmittedComposerDocument(snapshot.json, serializeComposerState()?.json);
         if (unchanged) {
@@ -3917,7 +3921,9 @@ function AgentChatBody({
       const sideChatContext = await sideChatHandoffFor(chatId, folder);
       const sent = (await runSend(
         override,
-        sideChatContext ? { ...extras, handoffContext: sideChatContext + (extras?.handoffContext ?? "") } : extras,
+        sideChatContext && chatId
+          ? { ...extras, handoffContext: sideChatContext + (extras?.handoffContext ?? ""), onDurable: () => markSideChatSeedSent(chatId) }
+          : extras,
         recordActivity,
       )) === true;
       if (sent && sideChatContext && chatId) markSideChatSeedSent(chatId);
