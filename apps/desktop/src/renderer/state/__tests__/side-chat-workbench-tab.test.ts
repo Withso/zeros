@@ -110,4 +110,17 @@ describe("OPEN_SIDE_CHAT", () => {
     dispatch({ type: "HYDRATE_CHATS", chats: [source], activeChatId: source.id, confirmedCloudWorkspaces: [folder] });
     expect(useWorkspaceStore.getState().workbenchByScope[scopeKey]!.tabs.some((tab) => tab.chatId === side.id)).toBe(false);
   });
+
+  it("keeps a Local side chat tab until the Local chat list confirms", () => {
+    const folder = "/repo/side-chat-unconfirmed";
+    const source = thread("source-unconfirmed", folder);
+    dispatch({ type: "ADD_CHAT", chat: source });
+    dispatch({ type: "OPEN_SIDE_CHAT", chat: thread("side-unconfirmed", folder, { parentChatId: source.id }) });
+    const scopeKey = workbenchScopeForFolder(folder);
+    const hasTab = () => useWorkspaceStore.getState().workbenchByScope[scopeKey]!.tabs.some((tab) => tab.chatId === "side-unconfirmed");
+    dispatch({ type: "HYDRATE_CHATS", chats: [source], activeChatId: source.id, confirmedCloudWorkspaces: [], confirmedLocalChats: false });
+    expect(hasTab()).toBe(true);
+    dispatch({ type: "HYDRATE_CHATS", chats: [source], activeChatId: source.id, confirmedCloudWorkspaces: [], confirmedLocalChats: true });
+    expect(hasTab()).toBe(false);
+  });
 });
