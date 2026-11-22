@@ -132,6 +132,8 @@ export type CloudV2Workspace = {
   /** Retention: a lost VM came back without the work of the stop at `stoppedAt`: nothing of it
    * (rebuilt from GitHub) or an earlier backup instead. Until dismissed or the next backup. */
   lostWork?: { restored: "none" | "earlier"; stoppedAt: string };
+  /** Ready copies: created while its organization's base was being prepared, and waiting for it. */
+  preparing?: "computer";
   /** Retention S3: exempt from automatic archive; never true while archived. The serializer always sends it from
    * this release; optional in the type so documents and fixtures built elsewhere stay valid. */
   keep?: boolean;
@@ -238,7 +240,7 @@ export type CloudV2WorkspaceRow = {
   stopped_at?: Date | null; machine_stopped_at?: Date | null; machine_data_expired_at?: Date | null;
   archive_wake_done_at?: Date | null; checkpoint_object?: string | null; retention_started_at?: Date | null;
   backup_probe?: BackupProbe | null; backup_probe_generation?: string | null; stop_generation?: string; checkpoint_stop_generation?: string | null;
-  changed_since_stop_generation?: string | null; machine_gone_at?: Date | null;
+  changed_since_stop_generation?: string | null; machine_gone_at?: Date | null; waiting_for_base_at?: Date | null;
 };
 type Row = CloudV2WorkspaceRow;
 
@@ -247,7 +249,7 @@ const WORKSPACE_COLUMNS_SQL = sql`id, org_id, creator_user_id, name, number, tit
   agent_cost_usd, agent_cost_turns, agent_cost_estimated_turns, private_owner_user_id, project_id, checkout_path, folder,
   lost_work_restored, lost_work_since, keep_set_at, archive_reason, stopped_at, machine_stopped_at, machine_data_expired_at,
   archive_wake_done_at, checkpoint_object, retention_started_at, backup_probe, backup_probe_generation, stop_generation,
-  checkpoint_stop_generation, changed_since_stop_generation, machine_gone_at`;
+  checkpoint_stop_generation, changed_since_stop_generation, machine_gone_at, waiting_for_base_at`;
 const COLUMNS = WORKSPACE_COLUMNS_SQL.text;
 export const CLOUD_V2_WORKSPACE_COLUMNS = COLUMNS.split(",").map(value => value.trim());
 
@@ -365,6 +367,7 @@ function workspace(row: Row): CloudV2Workspace {
     ...(row.checkout_path ? { checkoutFolder: row.checkout_path } : {}),
     ...(row.folder ? { folder: row.folder } : {}),
     ...(row.lost_work_restored && row.lost_work_since ? { lostWork: { restored: row.lost_work_restored, stoppedAt: row.lost_work_since.toISOString() } } : {}),
+    ...(row.waiting_for_base_at && row.state === "creating" ? { preparing: "computer" as const } : {}),
     // Retention's fields only where retention runs: with the switch off a document is exactly what it was.
     ...(retentionDocuments ? { keep: Boolean(row.keep_set_at) && !row.archived_at, ...archiveFields(row) } : {}),
   };
@@ -604,8 +607,9 @@ export class CloudV2Store {
           (SELECT jsonb_agg(jsonb_build_object('repository', r.repository, 'repositoryId', r.repository_id) ORDER BY r.position)
              FROM cloud_project_repositories r WHERE r.project_id=p.id) AS repositories
         FROM cloud_projects p JOIN organizations o ON o.id=p.org_id
-        JOIN cloud_v2_computers c ON c.org_id=p.org_id AND c.active_build_id=$4
-        JOIN cloud_v2_computer_builds b ON b.id=c.active_build_id AND b.base_only AND b.state='succeeded'
+        -- The live base, or the base being prepared that this workspace waits for (the lifecycle defers until it is live).
+        JOIN cloud_v2_computer_builds b ON b.id=$4 AND b.org_id=p.org_id AND b.base_only AND (b.state IN ('queued','building')
+          OR (b.state='succeeded' AND EXISTS (SELECT 1 FROM cloud_v2_computers c WHERE c.org_id=p.org_id AND c.active_build_id=b.id)))
         WHERE p.id=$1 AND p.org_id=$2 AND (p.level='organization' OR (p.owner_user_id=$3 AND o.cloud_personal_projects_allowed))
         FOR SHARE OF p`, [input.projectId, input.organizationId, input.creatorUserId, input.computerBuildId])).rows[0];
       const matches = !!project?.repositories && project.repositories.length === requested.length && requested.length > 0
@@ -625,10 +629,11 @@ export class CloudV2Store {
     if (Object.keys(input.env ?? {}).length && sourceRepositoryId === undefined)
       throw new HttpError(409, "cloud_source_review_required", "A workspace environment requires a verified repository identity.");
     const row = (await tx.query<Row>(
-      `INSERT INTO cloud_v2_workspaces (id, org_id, creator_user_id, name, repository, branch, base_branch, state, computer_build_id, source_repositories, source_pending, api_access, created_by_session_id, execution_initiator_user_id, execution_intent_id, execution_mode, private_owner_user_id, project_id, checkout_path, folder, base_commit)
+      `INSERT INTO cloud_v2_workspaces (id, org_id, creator_user_id, name, repository, branch, base_branch, state, computer_build_id, source_repositories, source_pending, api_access, created_by_session_id, execution_initiator_user_id, execution_intent_id, execution_mode, private_owner_user_id, project_id, checkout_path, folder, base_commit, waiting_for_base_at)
        VALUES ($1, $2, $3, $4, $5, $6, $7, 'creating', $8, $9::text[], $10,
          coalesce((SELECT workspace_api_access FROM cloud_api_access_settings WHERE org_id=$2 AND user_id=$3),true), $11, $3, gen_random_uuid(), $12, $13, $14,
-         $15, $16, $17) RETURNING ${COLUMNS}`,
+         $15, $16, $17, CASE WHEN $14::uuid IS NOT NULL AND EXISTS (SELECT 1 FROM cloud_v2_computer_builds b WHERE b.id=$8 AND b.state IN ('queued','building'))
+           THEN clock_timestamp() END) RETURNING ${COLUMNS}`,
       [input.id, input.organizationId, input.creatorUserId, input.name, input.repository, input.branch,
         input.baseBranch, input.computerBuildId,
         pending ? null : (scope ?? [{ repository: input.repository }]).map(source => source.repository.toLowerCase()), pending, input.createdBySessionId ?? null,
@@ -2226,10 +2231,12 @@ export class CloudV2Store {
    * pinned build (see cloudV2WorkspaceImage); null when that build is gone. */
   async workspaceImage(workspaceId: string): Promise<CloudV2WorkspaceImage | null> {
     const { rows } = await withSystemTx(this.pool, tx => tx.query<{ org_id: string; computer_build_id: string | null; repository: string;
-      source_repositories: string[] | null; snapshot_id: string | null; source_policy_version: number | null; recipe: unknown }>(
-      `SELECT w.org_id, w.computer_build_id, w.repository, w.source_repositories, b.snapshot_id, b.source_policy_version, b.recipe
+      source_repositories: string[] | null; snapshot_id: string | null; source_policy_version: number | null; recipe: unknown; snapshot_gone: boolean }>(
+      `SELECT w.org_id, w.computer_build_id, w.repository, w.source_repositories, b.snapshot_id, b.source_policy_version, b.recipe,
+         (pinned.state='succeeded' AND pinned.snapshot_deleted_at IS NOT NULL AND pinned.cleanup_requested_at IS NULL) AS snapshot_gone
        FROM cloud_v2_workspaces w LEFT JOIN cloud_v2_computer_builds b ON b.id=w.computer_build_id AND b.org_id=w.org_id
          AND b.state='succeeded' AND b.source_policy_version IN (2,3) AND b.snapshot_deleted_at IS NULL AND b.cleanup_requested_at IS NULL
+       LEFT JOIN cloud_v2_computer_builds pinned ON pinned.id=w.computer_build_id AND pinned.org_id=w.org_id
        WHERE w.id=$1`, [workspaceId]));
     const row = rows[0];
     if (!row) return null;
@@ -2237,9 +2244,45 @@ export class CloudV2Store {
       const legacy = await this.computerSnapshot(row.org_id, null);
       return legacy ? { from: legacy, prune: [], checkout: false } : null;
     }
-    if (!row.snapshot_id || row.source_policy_version === null) return null;
+    if (!row.snapshot_id || row.source_policy_version === null) {
+      // Its build went live once and a later build retired its snapshot: the organization's base, and every repository
+      // cloned, as a create on that base is. Without a base it cannot be made, as before.
+      return row.snapshot_gone ? this.baseImage(row.org_id) : null;
+    }
     return cloudV2WorkspaceImage({ policy: row.source_policy_version, snapshot: row.snapshot_id, recipe: row.recipe,
       scope: row.source_repositories ?? [], repository: row.repository });
+  }
+
+  private async baseImage(organizationId: string): Promise<CloudV2WorkspaceImage | null> {
+    const { rows } = await withSystemTx(this.pool, tx => tx.query<{ snapshot_id: string }>(
+      `SELECT b.snapshot_id FROM cloud_v2_computers c JOIN cloud_v2_computer_builds b ON b.id=c.active_build_id AND b.org_id=c.org_id
+         AND b.state='succeeded' AND b.base_only AND b.snapshot_id IS NOT NULL AND b.snapshot_deleted_at IS NULL AND b.cleanup_requested_at IS NULL
+       WHERE c.org_id=$1`, [organizationId]));
+    return rows[0] ? { from: cloudV2BoatSnapshotName(rows[0].snapshot_id), prune: [], checkout: false } : null;
+  }
+
+  /** The build a creating workspace is bound to, while it may still be on its way (an organization's base being prepared). */
+  async workspaceBuildWait(workspaceId: string): Promise<{ buildId: string; state: string; finishedAt: Date | null } | null> {
+    const { rows } = await withSystemTx(this.pool, tx => tx.query<{ id: string; state: string; finished_at: Date | null }>(
+      `SELECT b.id, b.state, b.finished_at FROM cloud_v2_workspaces w JOIN cloud_v2_computer_builds b ON b.id=w.computer_build_id AND b.org_id=w.org_id
+       WHERE w.id=$1`, [workspaceId]));
+    return rows[0] ? { buildId: rows[0].id, state: rows[0].state, finishedAt: rows[0].finished_at } : null;
+  }
+
+  /** Its base is live (or gone): it no longer says it is waiting for it. */
+  async baseWaitOver(workspaceId: string): Promise<void> {
+    await withSystemTx(this.pool, tx => tx.query("UPDATE cloud_v2_workspaces SET waiting_for_base_at=NULL WHERE id=$1 AND waiting_for_base_at IS NOT NULL", [workspaceId]));
+  }
+
+  /** A creating workspace whose base failed moves to the organization's live base, in one statement, so the build it
+   * leaves and the one it takes are never both unpinned. False when there is none (or it already moved). */
+  async rebindToBase(workspaceId: string, fromBuildId: string): Promise<boolean> {
+    const { rowCount } = await withSystemTx(this.pool, tx => tx.query(
+      `UPDATE cloud_v2_workspaces w SET computer_build_id=b.id, updated_at=clock_timestamp()
+       FROM cloud_v2_computers c JOIN cloud_v2_computer_builds b ON b.id=c.active_build_id AND b.org_id=c.org_id AND b.state='succeeded' AND b.base_only
+       WHERE w.id=$1 AND w.computer_build_id=$2 AND w.state='creating' AND w.boat_sandbox_id IS NULL AND c.org_id=w.org_id AND b.id<>$2`,
+      [workspaceId, fromBuildId]));
+    return (rowCount ?? 0) > 0;
   }
 
   async computerSnapshot(organizationId: string, buildId: string | null = null): Promise<string | null> {
@@ -2258,10 +2301,25 @@ export class CloudV2Store {
 
   /** One selection supplies the build pin and its installed repositories. */
   async activeComputer(organizationId: string): Promise<{ buildId: string; repositories: CloudV2InstalledRepository[]; baseOnly?: true } | null> {
+    return this.computerBuild(organizationId, "active");
+  }
+
+  /** With ready copies off, an organization whose live build is a base still creates as before the switch: from the
+   * legacy build that base replaced, while it is kept. Null without one. */
+  async legacyComputer(organizationId: string): Promise<{ buildId: string; repositories: CloudV2InstalledRepository[]; baseOnly?: true } | null> {
+    return this.computerBuild(organizationId, "legacy");
+  }
+
+  private async computerBuild(organizationId: string, which: "active" | "legacy"): Promise<{ buildId: string; repositories: CloudV2InstalledRepository[]; baseOnly?: true } | null> {
     const { rows } = await withSystemTx(this.pool, tx => tx.query<{ id: string; base_only: boolean; recipe: { repositories?: { repository?: unknown; branch?: unknown }[] } }>(
-      `SELECT build.id, build.base_only, build.recipe FROM cloud_v2_computers computer
+      which === "active" ? `SELECT build.id, build.base_only, build.recipe FROM cloud_v2_computers computer
        JOIN cloud_v2_computer_builds build ON build.id = computer.active_build_id AND build.org_id = computer.org_id
-       WHERE computer.org_id = $1 AND computer.snapshot_name IS NOT NULL AND build.state = 'succeeded' AND build.source_policy_version IN (2,3)`,
+       WHERE computer.org_id = $1 AND computer.snapshot_name IS NOT NULL AND build.state = 'succeeded' AND build.source_policy_version IN (2,3)`
+      : `SELECT build.id, build.base_only, build.recipe FROM cloud_v2_computers computer
+       JOIN cloud_v2_computer_builds live ON live.id = computer.active_build_id AND live.org_id = computer.org_id AND live.base_only
+       JOIN cloud_v2_computer_builds build ON build.id = computer.legacy_build_id AND build.org_id = computer.org_id
+       WHERE computer.org_id = $1 AND build.state = 'succeeded' AND build.source_policy_version IN (2,3) AND NOT build.base_only
+         AND build.snapshot_id IS NOT NULL AND build.snapshot_deleted_at IS NULL AND build.cleanup_requested_at IS NULL`,
       [organizationId],
     ));
     if (!rows[0]) return null;

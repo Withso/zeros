@@ -84,10 +84,10 @@ export type CloudV2RouteDeps = {
   workspaceSync?: CloudWorkspaceSync;
   workspaceGithubReadTokens?: CloudWorkspaceGithubReadTokens;
   localDevices?: CloudLocalDeviceRoutes;
-  store: Pick<CloudV2Store, "activeComputer" | "createWorkspace" | "createWorkspaceOnce" | "readCreateReceipt" | "get" | "promptContext" | "list" | "requestLifecycle" | "transition" | "issueToken" | "listChats" | "messageWindow" | "searchMessages" | "messageRange" | "messageSince" | "markActive"> & Partial<Pick<CloudV2Store, "prompts" | "getByNumber" | "chatEdits" | "requestExecutionLifecycle" | "dismissLostWork" | "personActivity" | "setKeep">>;
+  store: Pick<CloudV2Store, "activeComputer" | "legacyComputer" | "createWorkspace" | "createWorkspaceOnce" | "readCreateReceipt" | "get" | "promptContext" | "list" | "requestLifecycle" | "transition" | "issueToken" | "listChats" | "messageWindow" | "searchMessages" | "messageRange" | "messageSince" | "markActive"> & Partial<Pick<CloudV2Store, "prompts" | "getByNumber" | "chatEdits" | "requestExecutionLifecycle" | "dismissLostWork" | "personActivity" | "setKeep">>;
   /** Roll out only with a runtime that advertises durable prompt delivery. */
   promptOutbox?: boolean;
-  computers: Pick<CloudV2Computers, "requireMember" | "requireAdmin" | "overview" | "enqueue" | "buildConfigured" | "buildSourceTargets" | "saveRecipe" | "discardRecipe" | "reactivate" | "log" | "logRepositories">
+  computers: Pick<CloudV2Computers, "requireMember" | "requireAdmin" | "overview" | "enqueue" | "buildConfigured" | "buildSourceTargets" | "saveRecipe" | "discardRecipe" | "reactivate" | "log" | "logRepositories" | "ensureBase" | "baseState">
     & Partial<Pick<CloudV2Computers, "saveInstallScript">>;
   /** Projects (ready copies on): the Cloud Computer is tools only, and creates,
    * repository lists and the old recipe are answered from projects. */
@@ -434,7 +434,9 @@ export function createCloudV2Routes(deps: CloudV2RouteDeps): Hono {
     const organizationId = org(c.req.param("org"));
     await deps.computers.requireMember(organizationId, c.get("user").id);
     if (deps.projects) return c.json({ repositories: await projectRepositories(organizationId, c.get("user").id) });
-    const computer = await deps.store.activeComputer(organizationId);
+    let computer = await deps.store.activeComputer(organizationId);
+    // Ready copies off, on a base from when they were on: the legacy build it replaced, as creates use.
+    if (computer?.baseOnly) computer = (await deps.store.legacyComputer(organizationId)) ?? computer;
     if (!computer) {
       const error = await computerUnavailable(organizationId, c.get("user").id);
       if (error.code === "cloud_computer_rebuild_required") throw error;

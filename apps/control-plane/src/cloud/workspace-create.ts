@@ -8,6 +8,7 @@ import { refuseRuntimeCanary } from "./runtime-canary.js";
 import { projectFolderName, repositoryFolderNames } from "./workspace-layout.js";
 import { executionWorkerRequired } from "./execution/errors.js";
 import { workspaceSubmoduleNotice } from "./workspace-submodules.js";
+import type { CloudV2BaseState } from "./computer.js";
 
 const uuid = z.string().uuid();
 const branchName = z.string().min(1).max(255).regex(/^(?!-)(?!.*\.\.)(?!.*\/\/)(?!.*\.lock$)[A-Za-z0-9._/-]+$/);
@@ -48,6 +49,15 @@ type CreateOptions = {
   receiptDocument(workspace: CloudV2Workspace): Record<string, unknown>;
   document(workspace: CloudV2Workspace): Promise<Record<string, unknown>> | Record<string, unknown>;
 };
+
+/** No base yet, and none queued for this create to wait on: being prepared behind another build, or failed (Zeros
+ * tries again on its backoff). Neither asks anyone to press a button. */
+function basePreparation(base: CloudV2BaseState): HttpError {
+  if (base.state === "failed")
+    return new HttpError(409, "cloud_computer_preparation_failed", `The Cloud Computer could not be prepared (${base.errorCode}). Zeros tries again automatically.`);
+  if (base.state === "unavailable") return new HttpError(409, "cloud_unavailable", "Cloud workspaces are not available for this organization.");
+  return new HttpError(409, "cloud_computer_preparing", "Preparing the Cloud Computer… Try again in a minute.");
+}
 
 function slug(value: string): string {
   return value.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 40) || "workspace";
@@ -100,8 +110,10 @@ export function createCloudWorkspaceOperations(deps: CloudV2RouteDeps) {
     }
     const runtimeCanary = canary === undefined ? undefined : deps.runtimeCanary!.verify(canary,
       { creatorUserId: userId, organizationId: input.organizationId, createKey: key });
-    const computer = await deps.store.activeComputer(input.organizationId);
-    if (!computer) throw await computerUnavailable(input.organizationId, userId);
+    let computer = await deps.store.activeComputer(input.organizationId);
+    // Ready copies off, on a base from when they were on: creates come from the legacy build it replaced, as before.
+    if (!deps.projects && computer?.baseOnly) computer = (await deps.store.legacyComputer(input.organizationId)) ?? computer;
+    if (!computer && !deps.projects) throw await computerUnavailable(input.organizationId, userId);
     const record = async (create: Parameters<CloudV2RouteDeps["store"]["createWorkspace"]>[0]) => {
       await options.authorize?.();
       // The one message naming submodules this create skipped; a replayed receipt says it again.
@@ -123,6 +135,7 @@ export function createCloudWorkspaceOperations(deps: CloudV2RouteDeps) {
     // Ready copies: the Cloud Computer is tools only and a create is answered
     // from the one-repository project for this repository, the organization's
     // first, then the caller's own. Access is checked as the caller's own GitHub.
+    let legacyRepository: string | undefined;
     if (deps.projects) {
       const project = input.projectId ? await deps.projects.get(input.organizationId, userId, input.projectId)
         : await deps.projects.forRepository(input.organizationId, userId, input.repository!);
@@ -133,35 +146,47 @@ export function createCloudWorkspaceOperations(deps: CloudV2RouteDeps) {
       // Each entry only picks a base branch for one of the project's own repositories.
       const unknown = input.repositories?.find(requested => !project.repositories.some(entry => entry.repository === requested.repository.toLowerCase()));
       if (unknown) throw new HttpError(422, "invalid_request", `${unknown.repository} is not one of this project's repositories.`);
-      if (!computer.baseOnly) throw await computerUnavailable(input.organizationId, userId);
-      if (!deps.projectAccess) throw new HttpError(503, "github_unavailable", "Repository access could not be verified.");
-      const branchFor = (entry: (typeof project.repositories)[number], index: number) => (index === 0 ? input.baseBranch : undefined)
-        ?? input.repositories?.find(requested => requested.repository.toLowerCase() === entry.repository)?.baseBranch ?? entry.defaultBranch ?? null;
-      const checked = await deps.projectAccess(input.organizationId, userId, project.repositories.map((entry, index) => ({
-        repository: entry.repository, repositoryId: entry.repositoryId, baseBranch: branchFor(entry, index) })));
-      if (runtimeCanary && runtimeCanary.repositoryId !== first.repositoryId) throw refuseRuntimeCanary();
-      // Bounded in time, never failing the create: the plan for each base commit, as this creator can read it.
-      const submodules = deps.projectSubmodules && project.repositories.some(entry => entry.fetchSubmodules)
-        ? await deps.projectSubmodules(input.organizationId, userId, project.id, checked.map((entry, position) => ({ position,
-          repository: project.repositories[position]!.repository, repositoryId: entry.repositoryId, baseCommit: entry.baseCommit,
-          fetchSubmodules: project.repositories[position]!.fetchSubmodules })))
-        : [];
-      const executionRuntime = deps.actingUserDefault ? await deps.activeCreateRuntime?.(runtimeCanary) : undefined;
-      if (deps.actingUserDefault && !executionRuntime) throw executionWorkerRequired();
-      const id = randomUUID(), several = project.repositories.length > 1;
-      const name = input.name ?? (several ? project.name : first.repository.split("/")[1]!);
-      // One branch name in every repository; the folders are fixed now, whatever the project is called later.
-      const branch = input.branch ?? `${prefix}${slug(name)}-${id.slice(0, 8)}`;
-      const folder = projectFolderName(project.name), folders = repositoryFolderNames(project.repositories.map(entry => entry.repository));
-      return record({ id, organizationId: input.organizationId, creatorUserId: userId, name, repository: first.repository, branch,
-        baseBranch: checked[0]!.baseBranch, computerBuildId: computer.buildId, sourceRepositoryId: first.repositoryId, projectId: project.id,
-        repositories: checked.map((entry, index) => ({ repository: project.repositories[index]!.repository, repositoryId: entry.repositoryId,
-          folder: folders[index]!, branch, baseBranch: entry.baseBranch, baseCommit: entry.baseCommit })),
-        checkoutFolder: `${folder}/${folders[0]}`, ...(several ? { folder } : {}), ...(submodules.length ? { submodules } : {}),
-        ...(runtimeCanary ? { runtimeCanary } : {}), ...(executionRuntime ? { executionRuntime } : {}) });
+      // The base, made sure of now: nobody presses Build for it (base-preparation in computer.ts).
+      const base = await deps.computers.ensureBase(input.organizationId);
+      // Until a base is live, a repository the organization's pre-switch build installs is created exactly as before
+      // the switch; once one is live, never again, so every organization converges.
+      const named = input.repository ?? (project.repositories.length === 1 ? first.repository : undefined);
+      if (base.state !== "ready" && computer && !computer.baseOnly && named
+        && computer.repositories.some(entry => entry.repository.toLowerCase() === named.toLowerCase())) legacyRepository = named;
+      else {
+        // Ready, or being prepared: the workspace waits for it ("Preparing the Cloud Computer…"). Never a button.
+        const computerBuildId = base.state === "ready" ? base.buildId : base.state === "preparing" ? base.buildId : null;
+        if (!computerBuildId) throw basePreparation(base);
+        if (!deps.projectAccess) throw new HttpError(503, "github_unavailable", "Repository access could not be verified.");
+        const branchFor = (entry: (typeof project.repositories)[number], index: number) => (index === 0 ? input.baseBranch : undefined)
+          ?? input.repositories?.find(requested => requested.repository.toLowerCase() === entry.repository)?.baseBranch ?? entry.defaultBranch ?? null;
+        const checked = await deps.projectAccess(input.organizationId, userId, project.repositories.map((entry, index) => ({
+          repository: entry.repository, repositoryId: entry.repositoryId, baseBranch: branchFor(entry, index) })));
+        if (runtimeCanary && runtimeCanary.repositoryId !== first.repositoryId) throw refuseRuntimeCanary();
+        // Bounded in time, never failing the create: the plan for each base commit, as this creator can read it.
+        const submodules = deps.projectSubmodules && project.repositories.some(entry => entry.fetchSubmodules)
+          ? await deps.projectSubmodules(input.organizationId, userId, project.id, checked.map((entry, position) => ({ position,
+            repository: project.repositories[position]!.repository, repositoryId: entry.repositoryId, baseCommit: entry.baseCommit,
+            fetchSubmodules: project.repositories[position]!.fetchSubmodules })))
+          : [];
+        const executionRuntime = deps.actingUserDefault ? await deps.activeCreateRuntime?.(runtimeCanary) : undefined;
+        if (deps.actingUserDefault && !executionRuntime) throw executionWorkerRequired();
+        const id = randomUUID(), several = project.repositories.length > 1;
+        const name = input.name ?? (several ? project.name : first.repository.split("/")[1]!);
+        // One branch name in every repository; the folders are fixed now, whatever the project is called later.
+        const branch = input.branch ?? `${prefix}${slug(name)}-${id.slice(0, 8)}`;
+        const folder = projectFolderName(project.name), folders = repositoryFolderNames(project.repositories.map(entry => entry.repository));
+        return record({ id, organizationId: input.organizationId, creatorUserId: userId, name, repository: first.repository, branch,
+          baseBranch: checked[0]!.baseBranch, computerBuildId, sourceRepositoryId: first.repositoryId, projectId: project.id,
+          repositories: checked.map((entry, index) => ({ repository: project.repositories[index]!.repository, repositoryId: entry.repositoryId,
+            folder: folders[index]!, branch, baseBranch: entry.baseBranch, baseCommit: entry.baseCommit })),
+          checkoutFolder: `${folder}/${folders[0]}`, ...(several ? { folder } : {}), ...(submodules.length ? { submodules } : {}),
+          ...(runtimeCanary ? { runtimeCanary } : {}), ...(executionRuntime ? { executionRuntime } : {}) });
+      }
     }
-    // Without projects a create names its repository.
-    const requestedRepository = input.repository;
+    // Without projects (or before a base is live) a create names its repository.
+    if (!computer) throw await computerUnavailable(input.organizationId, userId);
+    const requestedRepository = legacyRepository ?? input.repository;
     if (requestedRepository === undefined) throw new HttpError(400, "invalid_request", "Invalid cloud workspace request");
     const named = (entry: CloudV2InstalledRepository) => entry.repository.toLowerCase() === requestedRepository.toLowerCase();
     // Returns before its GitHub checks, which the lifecycle runs before any VM

@@ -175,8 +175,19 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
     return workspaceRepositoryToken(pool, github.token, workspace, repository, purpose, () => authorizeSource(workspace), failedTokenSha256);
   };
   const proxyBase = `${v2.apiUrl}${CLOUD_V2_PROXY_PREFIX}`;
+  // Whether Boat has the shared base, asked at most once a minute (a base made from it costs no machine).
+  const sharedBase = v2.sharedBaseSnapshot;
+  let sharedBaseSeen: { at: number; present: boolean } | null = null;
+  const sharedBaseAvailable = async () => {
+    if (!sharedBase || !compute.snapshotExists) return false;
+    if (sharedBaseSeen && Date.now() - sharedBaseSeen.at < 60_000) return sharedBaseSeen.present;
+    const present = await compute.snapshotExists(sharedBase).catch(() => false);
+    sharedBaseSeen = { at: Date.now(), present };
+    return present;
+  };
   const computers = new CloudV2Computers(pool, lockPool, github.resolveRepository, github.resolveRecentRepository,
-    { readyCopies: v2.readyCopies === true, ...(v2.sharedBaseSnapshot ? { sharedBaseSnapshot: v2.sharedBaseSnapshot } : {}) });
+    { readyCopies: v2.readyCopies === true, ...(sharedBase ? { sharedBaseSnapshot: sharedBase } : {}),
+      ...(v2.readyCopies === true ? { sharedBaseAvailable, runtimeSha256: runtime.sha256 } : {}) });
   // Ready copies (CLOUD_V2_READY_COPIES_ENABLED): absent while off, so creates and builds run as before.
   const readyCopies = v2.readyCopies === true ? new CloudV2ReadyCopies(pool) : null;
   const readyCopySecrets = readyCopies ? new CloudV2ReadyCopySecrets(pool, keys) : null;
@@ -224,8 +235,11 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
     },
     ...(readyCopies && readyCopySecrets ? { readyCopies: { copies: readyCopies, secrets: readyCopySecrets,
       changed: async (organizationId: string, projectId: string, change: Parameters<CloudV2ReadyCopyBuilder["reconcile"]>[2]) => {
+        // A project's copy needs a base: made sure of first, so it never waits on a button.
+        await computers.ensureBase(organizationId).catch(() => undefined);
         await readyCopyBuilder?.reconcile(organizationId, projectId, change);
       },
+      base: (organizationId: string) => computers.baseState(organizationId),
       buildNow: async (organizationId: string, projectId: string, userId: string) => {
         if (!readyCopyBuilder) throw new HttpError(503, "ready_copies_unavailable", "Ready copies are not built on this server.");
         return readyCopyBuilder.buildNow(organizationId, projectId, userId);
@@ -451,6 +465,8 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
     ...(readyCopies ? { readyCopies: { status: (organizationId: string, viewer?: string | null) => readyCopies.status(organizationId, viewer ?? null),
       failures: (organizationId: string) => readyCopies.failureSummaries(organizationId, new Date()),
       changed: async (organizationId: string, projectId: string, change: "project_created" | "repositories_changed" | "setup_changed" | "submodules_changed" | "branch_changed") => {
+        // A project's copy needs a base: made sure of first, so it never waits on a button.
+        await computers.ensureBase(organizationId).catch(() => undefined);
         await readyCopyBuilder?.reconcile(organizationId, projectId, change);
       } } } : {}),
     authorizeRepository, authorizeRepositories, authorizeSourceTargets, authorizeBuildRepository, authorizeSource, continueSource,
@@ -745,6 +761,10 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
     },
     logger: console,
   }) : null;
+  // A base made inline (the shared one, by ensureBase) queues first copies as one the builder made does.
+  if (readyCopies) computers.baseActivated = async (organizationId: string) => {
+    if (readyCopyBuilder) await readyCopyBuilder.baseActivated(organizationId, "manual");
+  };
   const readyCopyForks = roles.lifecycle && readyCopies ? new CloudV2ReadyCopyForks({
     copies: readyCopies, compute,
     ...(readyCopyBuilder ? { queueFirst: (organizationId: string, projectId: string) => readyCopyBuilder.queueFirst(organizationId, projectId) } : {}),

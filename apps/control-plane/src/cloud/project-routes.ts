@@ -13,6 +13,7 @@ import type { CloudRepositoryLevels } from "./repository-levels.js";
 import { CloudProjectRepositoryInputSchema, PERSONAL_PROJECT_LIMIT, PROJECT_REPOSITORY_LIMIT, type CloudProjectChange, type CloudProjectRepositoryInput,
   type CloudProjects, type CloudProjectView } from "./projects.js";
 import type { CloudV2ReadyCopies } from "./ready-copies.js";
+import type { CloudV2BaseState } from "./computer.js";
 import { ReadyCopySecretsSchema, type CloudV2ReadyCopySecrets } from "./ready-copy-secrets.js";
 import { readyCopyHistory, readyCopyStatus } from "./ready-copy-status.js";
 
@@ -38,6 +39,8 @@ export type ProjectRouteDeps = {
     changed(organizationId: string, projectId: string, change: Exclude<CloudProjectChange, null> | "secrets_changed"): Promise<void>;
     buildNow(organizationId: string, projectId: string, userId: string): Promise<unknown>;
     retryNow(organizationId: string, projectId: string, userId: string): Promise<unknown>;
+    /** The organization's base (computer.ts baseState): what a project without a copy is waiting for. */
+    base?(organizationId: string): Promise<CloudV2BaseState | { state: "none" }>;
   };
 };
 
@@ -113,6 +116,11 @@ export function createProjectRoutes(deps: ProjectRouteDeps): Hono {
 
   // ── Projects ────────────────────────────────────────────
 
+  /** What the project page says while a project has no copy: the base being prepared, or why it is not ready yet. */
+  const baseView = (base: CloudV2BaseState | { state: "none" }) => base.state === "failed"
+    ? { state: "failed" as const, reason: base.errorCode, nextAttemptAt: base.nextAttemptAt }
+    : { state: base.state === "ready" ? "ready" as const : base.state === "unavailable" ? "unavailable" as const : "preparing" as const };
+
   const status = async (org: string, user: string, list: readonly CloudProjectView[]) => {
     const copies = deps.readyCopies ? await deps.readyCopies.copies.status(org, user) : null;
     return list.map(project => ({ ...project, ...(copies ? { readyCopy: copies.get(project.id) ?? null } : {}) }));
@@ -135,8 +143,9 @@ export function createProjectRoutes(deps: ProjectRouteDeps): Hono {
   app.get(projects, rateLimit("cloud-projects-read", 120, 60_000), async c => {
     const org = organization(c.req.param("org")), user = c.get("user").id;
     const list = await deps.projects.list(org, user), levels = await deps.levels.access(org, user);
+    const base = deps.readyCopies?.base ? await deps.readyCopies.base(org) : undefined;
     return c.json({ projects: await status(org, user, list), personalAllowed: levels.personalAllowed, canCreateOrganization: levels.admin,
-      limits: { personal: PERSONAL_PROJECT_LIMIT, repositories: PROJECT_REPOSITORY_LIMIT } });
+      limits: { personal: PERSONAL_PROJECT_LIMIT, repositories: PROJECT_REPOSITORY_LIMIT }, ...(base ? { base: baseView(base) } : {}) });
   });
 
   app.post(projects, json, rateLimit("cloud-projects-write", 30, 60_000), async c => {
