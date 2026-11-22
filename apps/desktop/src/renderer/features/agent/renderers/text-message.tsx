@@ -169,7 +169,7 @@ export const TextMessage: Renderer<AgentTextMessage> = memo(
     );
 
     return (
-      <AgentMessageHover message={message} ctx={ctx} wrap={useMarkdown} enabled={!live && !!text.trim()}>
+      <AgentMessageHover message={message} ctx={ctx} wrap={useMarkdown} enabled={!ctx.isStreaming && !!text.trim()}>
         <Message from={role}>
           {/* The assistant joins the user in variant="flat" — agent
             output is free-flow body copy, no card chrome. System keeps
