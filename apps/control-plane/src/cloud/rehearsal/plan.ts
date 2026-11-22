@@ -169,6 +169,8 @@ export function writeLines(stage: StageName, prefix: string, repositories: { one
       "retention would stop both, then shift their clocks 4 times (1 hour, 10.6, 31 and 10.6 days) and once more for the removal (61 days), each through its own" +
         " temporary postgres role deleted when the shift commits; reads go through one pg_read_all_data role",
       "retention would set Keep on then off on one workspace",
+      "retention would rebuild the Cloud Computer once (1 builder machine) before the opens, and wait for the replaced build's snapshot to be cleaned up:" +
+        " the clean workspace's open must then rebuild from the live build",
       "retention would delete both workspaces' machines on Boat, then open both (2 starts), then delete both workspaces and the project",
       "retention would, when S4 is deployed, stop and archive one workspace again and wait for its backup's removal",
     ],

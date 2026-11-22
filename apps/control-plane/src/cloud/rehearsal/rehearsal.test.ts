@@ -25,8 +25,11 @@ const R3 = "Withso/zeros-dev-fixture-submodules", SUBMODULE_FIXTURE = "Withso/ze
 function setup(options: { provisioned?: boolean; owner?: "personal" | "organization"; submodules?: boolean } = {}) {
   const alpha = new FakeAlpha([R1, ...options.provisioned === false ? [] : [FIXTURE_TWO], ...options.submodules === false ? [] : [R3, SUBMODULE_FIXTURE]]);
   const state = newState(randomUUID(), alpha.organizationId, new Date(alpha.now), options.owner ?? "organization");
-  // On the Personal route the test user starts with no GitHub sign-in; setup connects one.
+  // On the Personal route the test user starts with no GitHub sign-in; setup connects one and builds the base. The probe
+  // organization already has its Cloud Computer.
   if (options.owner === "personal") alpha.githubIdentity = false;
+  else { alpha.computer = { active: "22222222-2222-2222-2222-222222222222", builds: [{ id: "22222222-2222-2222-2222-222222222222", state: "succeeded",
+    snapshot: "zeros-probe-base", builderSandboxId: null }] }; alpha.snapshots.add("zeros-probe-base"); }
   const lines: string[] = [];
   const saved: RehearsalState[] = [];
   const ctx = stageContext(alpha.ports(), state, async () => { saved.push(structuredClone(state)); },
@@ -124,7 +127,9 @@ describe("rehearsal stages against a fake Alpha", () => {
     expect(state.stages.retention?.counts).toMatchObject({ restored: 1, rebuilt: 1, removal: 1 });
     // Four shifts of both workspaces, then the removal's one of W alone.
     expect(alpha.shifts.map(shift => shift.ids.length)).toEqual([2, 2, 2, 2, 1]);
-    expect(state.machineStarts).toBe(11);
+    // Two copies, five workspace starts and opens in A, two copies' worth in C, plus C's Cloud Computer rebuild.
+    expect(state.machineStarts).toBe(12);
+    expect(state.stages.retention?.counts?.computerRebuilt).toBe(1);
     const { inventory } = await cleanup(ctx, { log: line => lines.push(line) });
     expect(inventory).toEqual(EMPTY);
     // Fixtures are never created or deleted.
@@ -369,7 +374,8 @@ describe("rehearsal on the Personal route", () => {
     expect(alpha.patConnected).toBe(false);
     expect(alpha.computer.active).toBeNull();
     expect(alpha.snapshots.size).toBe(0);
-    expect(alpha.computer.builds).toHaveLength(1);
+    // Setup's base and retention's rebuild; both build rows stay, as history.
+    expect(alpha.computer.builds).toHaveLength(2);
     for (const line of lines) expect(safeLine(line)).toBe(line);
   });
 
@@ -408,6 +414,14 @@ describe("rehearsal on the Personal route", () => {
     expect((await cleanup(existing.ctx, { log: () => undefined })).inventory).toEqual(EMPTY);
     expect(existing.alpha.computer.active).toBe("11111111-1111-1111-1111-111111111111");
     expect(existing.alpha.snapshots.has("theirs")).toBe(true);
+  });
+
+  it("fails retention when a clean open after the Cloud Computer rebuild is not rebuilt from the live build", async () => {
+    const { alpha, ctx, options } = setup({ owner: "personal" });
+    alpha.staleRestorePin = true;
+    expect(await runStages(ctx, ["setup", "retention"], { ...options, ...all })).toBe(false);
+    expect(ctx.state.stages.retention).toMatchObject({ step: "rebuilt_pin", code: "not_live_build" });
+    expect((await cleanup(ctx, { log: () => undefined })).inventory).toEqual(EMPTY);
   });
 
   it("puts back a grant that existed before the run, exactly", async () => {

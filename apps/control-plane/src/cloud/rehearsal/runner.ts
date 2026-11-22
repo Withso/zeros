@@ -153,7 +153,9 @@ export async function cleanup(ctx: StageContext, options: { accountless?: boolea
   for (const organizationId of state.created.githubSignIns) await attempt("github_sign_in", () => disconnectGithubSignIn(ctx, organizationId, "cleanup_github_sign_in"));
   // The Cloud Computer base this run built, unless --keep-base: as the product's own baseMissing does, the organization's
   // live pointer goes, then that build's Boat named snapshot, then the build records it gone. The build row stays (history).
-  if (state.created.computerBuild && !options.keepBase) await attempt("cloud_computer", () => removeBase(ctx, state.created.computerBuild!));
+  // A rebuild this run made later replaced it: the live one is then the run's newest build.
+  if (state.created.computerBuild && !options.keepBase)
+    await attempt("cloud_computer", () => removeBase(ctx, state.created.computerRebuilds?.at(-1) ?? state.created.computerBuild!));
   // The Pro grant last: everything above may need the account's cloud.
   if (state.created.pro?.operations.length) await attempt("pro", async () => {
     if (!ports.pro) throw new RehearsalFailure("cleanup_pro", "pro_actor_required");
@@ -200,8 +202,9 @@ export async function readInventory(ctx: StageContext, accountless = false, keep
   const databaseRows = Number(rows[0]?.workspaces ?? 0) + Number(rows[0]?.projects ?? 0);
   let computerBase = 0;
   if (state.created.computerBuild && !keepBase) {
+    const live = state.created.computerRebuilds?.at(-1) ?? state.created.computerBuild;
     const row = (await ports.database.read(`SELECT coalesce(c.active_build_id = b.id, false) AS active, b.snapshot_id FROM cloud_v2_computer_builds b
-      LEFT JOIN cloud_v2_computers c ON c.org_id = b.org_id WHERE b.id = $1::uuid AND b.org_id = $2::uuid`, [state.created.computerBuild, state.organizationId]))[0];
+      LEFT JOIN cloud_v2_computers c ON c.org_id = b.org_id WHERE b.id = $1::uuid AND b.org_id = $2::uuid`, [live, state.organizationId]))[0];
     if (row && (row.active === true || (row.snapshot_id && await ports.boat.snapshotExists(String(row.snapshot_id))))) computerBase = 1;
   }
   return { workspaces, projects, branches, pulls, machines, objects, environments, githubSignIns, pro, computerBase, databaseRows };

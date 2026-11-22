@@ -10,6 +10,8 @@ type Workspace = {
   repositories?: { repository: string; checkoutPath: string; branch: string; baseBranch: string }[];
   files: Map<string, string>; seeded: Map<string, string>; commits: Map<string, string[]>; pushed: Set<string>;
   // Retention, in days since the stop.
+  /** The Cloud Computer build it was created or last rebuilt from. */
+  computerBuildId?: string | null;
   stoppedDays: number | null; archivedAtDays?: number; probe?: "clean" | "dirty"; backup: boolean; wakes: number; scrub: string | null; machineGone: boolean; lostWork?: boolean;
 };
 type Project = { id: string; name: string; organizationId: string; repositories: string[]; machine: string; submodules: boolean };
@@ -31,6 +33,8 @@ export class FakeAlpha {
   /** The Personal organization's Cloud Computer: its active base build, and the builds; Boat's named snapshots. */
   computer: { active: string | null; builds: { id: string; state: string; snapshot: string | null; builderSandboxId: string | null }[] } = { active: null, builds: [] };
   readonly snapshots = new Set<string>();
+  /** Behave as main did before the clean-restore fix: a rebuilt workspace keeps its earlier pin. */
+  staleRestorePin = false;
   /** Whether the account has its own GitHub sign-in (on the organization route); on the Personal route, set by its token connect. */
   githubIdentity = true;
   patConnected = false;
@@ -182,8 +186,10 @@ export class FakeAlpha {
     if (parts[2] === "organizations" && parts[4] === "computer") {
       if (method === "POST" && parts[5] === "builds") {
         const id = randomUUID(), snapshot = `zeros-alpha-${this.computer.builds.length + 1}`, builderSandboxId = this.machine("builder");
-        // The fake builds at once: the builder machine is gone, the snapshot saved, the build live.
+        // The fake builds at once: the builder machine is gone, the snapshot saved, the build live; the replaced
+        // build's snapshot is cleaned up, as the product's cleanup does once nobody is creating from it.
         this.machines.get(builderSandboxId)!.state = "deleted"; this.snapshots.add(snapshot);
+        for (const old of this.computer.builds) if (old.snapshot) { this.snapshots.delete(old.snapshot); old.snapshot = null; }
         this.computer.builds.unshift({ id, state: "succeeded", snapshot, builderSandboxId }); this.computer.active = id;
         return this.reply(202, { build: { id, state: "queued" } });
       }
@@ -209,6 +215,7 @@ export class FakeAlpha {
         const folder = repositories?.[index]?.checkoutPath ?? "/home/user/p";
         for (const [file, content] of seeded?.files ?? []) { row.files.set(`${folder}/${file}`, content); row.seeded.set(`${folder}/${file}`, content); }
       }
+      row.computerBuildId = this.computer.active;
       this.workspaces.set(id, row); this.forks.add(id);
       return this.reply(201, { workspace: this.document(row) });
     }
@@ -232,6 +239,8 @@ export class FakeAlpha {
       if (action === "start") {
         if (this.machines.get(row.boatSandboxId)?.state === "deleted") {
           row.boatSandboxId = this.machine(`${row.name} restored`);
+          // The bug the rehearsal looks for: a clean rebuild that keeps the workspace's replaced build.
+          if (!this.staleRestorePin) row.computerBuildId = this.computer.active;
           if (!row.backup) { row.files = new Map(); row.commits = new Map(); }
         }
         row.state = "running"; row.archivedAt = null; row.stoppedDays = null; row.scrub = null;
@@ -406,6 +415,11 @@ export class FakeAlpha {
       const project = this.projects.get(String(this.workspaces.get(String(values[0]))?.projectId));
       return rows(project?.submodules ? [{ path: "vendor/hello", status: "fetch", public: true }, { path: "vendor/private", status: "fetch", public: true }] : []);
     }
+    if (text.includes("snapshot_deleted_at IS NOT NULL AS gone")) {
+      const build = this.computer.builds.find(row => row.id === values[0]);
+      return rows(build ? [{ gone: build.snapshot === null }] : []);
+    }
+    if (text.includes("computer_build_id::text AS build")) return rows(ids.map(id => ({ id, build: this.workspaces.get(id)?.computerBuildId ?? null })));
     if (text.includes("FROM cloud_v2_computer_builds b")) {
       const build = this.computer.builds.find(row => row.id === values[0]);
       if (!build) return rows([]);

@@ -125,6 +125,8 @@ export type Created = {
   /** The Cloud Computer base build this run requested for the Personal organization. There is no route to remove a Cloud
    * Computer: it and its Boat named snapshot stay after the run, and are reported as such. */
   computerBuild?: string;
+  /** Later Cloud Computer builds this run requested (stage C's rebuild); each replaces the live one. */
+  computerRebuilds?: string[];
 };
 export type StageResult = { ok: boolean; step?: string; code?: string; skipped?: string; counts?: Record<string, number>;
   /** Closed codes for what a stage chose (environment_case:seeded, environment_skipped:environment_exists). */

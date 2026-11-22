@@ -101,3 +101,28 @@ export function sameGrant(left: ProGrant | null, right: ProGrant | null): boolea
   if (!left?.enabled && !right?.enabled) return true;
   return !!left && !!right && left.enabled === right.enabled && left.validFrom === right.validFrom && left.validUntil === right.validUntil;
 }
+
+/** Rebuilds the organization's Cloud Computer once more (one builder machine), as a runtime change or the daily refresh
+ * does, and waits until the new build is live and the replaced one's snapshot has been cleaned up. Returns both ids. */
+export async function rebuildComputer(ctx: StageContext): Promise<{ previous: string; current: string }> {
+  const path = `/v1/cloud-v2/organizations/${ctx.state.organizationId}/computer`;
+  const read = async (step: string) => parse(Computer, (await call(ctx.ports.api, "GET", path, step)).body, step);
+  const before = await read("computer_rebuild_read");
+  check(before.activeBuildId, "computer_rebuild", "no_active_build");
+  ctx.start("computer_build");
+  const requested = parse(z.object({ build: z.object({ id: z.string().uuid() }).passthrough() }),
+    (await call(ctx.ports.api, "POST", `${path}/builds`, "computer_rebuild", { revision: before.recipeRevision })).body, "computer_rebuild");
+  (ctx.state.created.computerRebuilds ??= []).push(requested.build.id);
+  await ctx.save();
+  await until(ctx, "computer_rebuilt", ctx.timing.computerMs, ctx.timing.pollMs, async () => {
+    const overview = await read("computer_rebuilt");
+    const build = overview.builds.find(row => row.id === requested.build.id);
+    if (build?.builderSandboxId && !ctx.state.created.machines.includes(build.builderSandboxId)) ctx.state.created.machines.push(build.builderSandboxId);
+    check(build && !["failed", "cancelled"].includes(build.state), "computer_rebuilt", build ? `build_${build.state}` : "build_missing");
+    return overview.activeBuildId === requested.build.id && build.state === "succeeded";
+  });
+  // The product's cleanup deletes a replaced build's snapshot once nobody is creating from it.
+  await until(ctx, "computer_previous_cleaned", ctx.timing.scanMs, ctx.timing.pollMs, async () =>
+    (await ctx.ports.database.read("SELECT snapshot_deleted_at IS NOT NULL AS gone FROM cloud_v2_computer_builds WHERE id = $1::uuid", [before.activeBuildId]))[0]?.gone === true);
+  return { previous: before.activeBuildId!, current: requested.build.id };
+}

@@ -6,6 +6,7 @@
 import { z } from "zod";
 import { RehearsalFailure, type StageContext } from "./contract.js";
 import { shiftClock } from "./clock.js";
+import { rebuildComputer } from "./stage-setup.js";
 import { call, check, clearEnvironment, ENVIRONMENT_PATH, seedEnvironments, createProject, createWorkspace, deleteProject, deleteWorkspace, getWorkspace, lifecycle, parse, readFile, shell, until,
   waitCopyReady, waitState, workspaceRoot, WorkspaceDocument } from "./steps.js";
 
@@ -129,6 +130,11 @@ export async function stageRetention(ctx: StageContext): Promise<Record<string, 
   counts.wakes! += 2;
 
   // C7: W's machine deleted (the run's one deliberate machine deletion), then opened: restored from its backup.
+  // The Cloud Computer is rebuilt (as a runtime change or the daily refresh does): the workspaces' own builds are replaced
+  // and their snapshots cleaned up, so the opens below must rebuild from the live build, never fail for want of an image.
+  ctx.step("computer_rebuild");
+  const computer = await rebuildComputer(ctx);
+  counts.computerRebuilt = 1;
   ctx.step("restore");
   const machineW = (await getWorkspace(ctx, w.id, "restore_machine"))?.boatSandboxId;
   const machineK = (await getWorkspace(ctx, k.id, "rebuild_machine"))?.boatSandboxId;
@@ -154,6 +160,9 @@ export async function stageRetention(ctx: StageContext): Promise<Record<string, 
   await lifecycle(ctx, k.id, "start", "rebuild_open");
   const rebuilt = await waitState(ctx, k.id, "running", "rebuilt");
   check(!rebuilt.archivedAt && !rebuilt.lostWork, "rebuilt", rebuilt.lostWork ? "lost_work" : "still_archived");
+  // K had nothing off GitHub: its open rebuilt from the live Cloud Computer and is pinned to it.
+  const pins = await ctx.ports.database.read("SELECT id::text AS id, computer_build_id::text AS build FROM cloud_v2_workspaces WHERE id = ANY($1::uuid[])", [both]);
+  check(pins.find(row => row.id === k.id)?.build === computer.current, "rebuilt_pin", "not_live_build");
   counts.rebuilt!++;
 
   // C9: S4 (#1246) deployed: an archived backup is removed at 60 days, and `restores` says what opening would bring back.
