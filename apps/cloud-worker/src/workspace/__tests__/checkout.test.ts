@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { promisify } from "node:util";
 import { afterEach, expect, it, vi } from "vitest";
-import { prepareCheckout } from "../checkout";
+import { cloneMissingCheckout, prepareCheckout } from "../checkout";
 import { config } from "../../__tests__/worker-fixtures";
 
 const run = promisify(execFile);
@@ -241,4 +241,31 @@ it("rejects option-like and invalid branch names before invoking checkout", asyn
   const { checkout, git, workspace } = await fixture();
   for (const branch of ["--force", "main~1", "../outside"]) await expect(prepareCheckout({ ...workspace, branch })).rejects.toThrow();
   expect(await git(checkout, "branch", "--show-current")).toBe("main");
+});
+
+it("clones a repository that is not on disk, then prepares its branch; leaves a checkout alone and never clones over other files", async () => {
+  const f = await fixture();
+  const missing = { ...f.workspace, checkoutPath: join(f.root, "project", "web"), branch: "zeros/app", baseBranch: "main" };
+  expect(await cloneMissingCheckout(missing, "withso/web", {}, f.source)).toBe(true);
+  expect(await readFile(join(missing.checkoutPath, "file.txt"), "utf8")).toBe("initial\n");
+  await expect(prepareCheckout(missing)).resolves.toMatchObject({ createdBranch: true });
+  expect(await f.git(missing.checkoutPath, "branch", "--show-current")).toBe("zeros/app");
+  expect(await f.git(missing.checkoutPath, "status", "--porcelain")).toBe("");
+  // Present: untouched, even when the origin moved.
+  await f.advance();
+  expect(await cloneMissingCheckout(missing, "withso/web", {}, f.source)).toBe(false);
+  expect(await readFile(join(missing.checkoutPath, "file.txt"), "utf8")).toBe("initial\n");
+  // A folder holding anything else is never cloned over.
+  const occupied = { ...missing, checkoutPath: join(f.root, "project", "docs") };
+  await mkdir(occupied.checkoutPath, { recursive: true }); await writeFile(join(occupied.checkoutPath, "notes.txt"), "mine\n");
+  await expect(cloneMissingCheckout(occupied, "withso/docs", {}, f.source)).rejects.toThrow(/already holds other files/);
+  expect(await readFile(join(occupied.checkoutPath, "notes.txt"), "utf8")).toBe("mine\n");
+  // Only a GitHub owner/name.
+  for (const name of ["../etc", "withso/..", "withso", "-x/y"])
+    await expect(cloneMissingCheckout({ ...missing, checkoutPath: join(f.root, "x") }, name, {}, f.source)).rejects.toThrow(/Invalid repository/);
+  // A name may start with a dot, like .github.
+  expect(await cloneMissingCheckout({ ...missing, checkoutPath: join(f.root, "dot") }, "withso/.github", {}, f.source)).toBe(true);
+  // A clone that fails says so without a path or Git's text.
+  await expect(cloneMissingCheckout({ ...missing, checkoutPath: join(f.root, "y") }, "withso/y", {}, join(f.root, "absent")))
+    .rejects.toThrow("This repository could not be cloned. Check that its GitHub connection can read it.");
 });

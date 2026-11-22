@@ -4,7 +4,7 @@
 import { ChevronDown } from "lucide-react";
 import type { Workspace, WorkspaceRepository } from "../../platform/git";
 import { Button, GithubIcon } from "../../shared/ui";
-import { DropdownMenu, DropdownMenuContent, DropdownMenuRadioGroup, DropdownMenuRadioItem, DropdownMenuTrigger } from "../../shared/ui/primitives";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuLabel, DropdownMenuRadioGroup, DropdownMenuRadioItem, DropdownMenuSeparator, DropdownMenuTrigger } from "../../shared/ui/primitives";
 import { useWorkspaceDispatch, useWorkspaceStore } from "../../state/store";
 import { repositoryWorkspace, selectedRepository, workspaceRepositories } from "../../state/workspace-repositories";
 import { useWorkspaceChangeLines } from "../use-workspace-change-lines";
@@ -36,8 +36,27 @@ export function RepositorySwitcher({ workspace, active }: { workspace: Workspace
             </DropdownMenuRadioItem>
           ))}
         </DropdownMenuRadioGroup>
+        <RepositoryNotes repositories={repositories} />
       </DropdownMenuContent>
     </DropdownMenu>
+  );
+}
+
+/** Said once per repository whose environment files are missing, under the list. */
+export function repositoryEnvironmentNote(repository: WorkspaceRepository): string | null {
+  if (repository.environment === "unavailable") return `${repository.folder}: Environment files are not available for this repository in shared workspaces yet.`;
+  if (repository.environment === "failed") return `${repository.folder}: Its environment files could not be added. Check them in the repository's environment settings.`;
+  return null;
+}
+
+function RepositoryNotes({ repositories }: { repositories: readonly WorkspaceRepository[] }) {
+  const notes = repositories.flatMap(entry => { const note = repositoryEnvironmentNote(entry); return note ? [{ key: entry.target, note }] : []; });
+  if (!notes.length) return null;
+  return (
+    <>
+      <DropdownMenuSeparator />
+      {notes.map(({ key, note }) => <DropdownMenuLabel key={key} className="text-fg3 max-w-80 font-normal whitespace-normal">{note}</DropdownMenuLabel>)}
+    </>
   );
 }
 

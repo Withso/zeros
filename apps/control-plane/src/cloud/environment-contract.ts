@@ -99,6 +99,11 @@ export const CloudEnvironmentReportSchema = z.object({ versionId, sequence: z.nu
   state: z.enum(["ready", "failed"]), errorCode: z.enum(CLOUD_ENVIRONMENT_SEED_ERRORS).optional(),
 }).strict().refine(value => value.state === "failed" ? value.errorCode !== undefined : value.errorCode === undefined);
 export type CloudEnvironmentReport = z.infer<typeof CloudEnvironmentReportSchema>;
+/** workspace-repositories-v1: a repository after the first of a workspace of several, by name. */
+export const CloudRepositoryEnvironmentReportSchema = z.object({
+  repository: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,99}\/(?!\.\.?$)[A-Za-z0-9._-]{1,100}$/),
+  report: CloudEnvironmentReportSchema,
+}).strict();
 
 export const CloudEnvironmentMetadataSchema = z.object({ repositoryId: CloudEnvironmentRepositoryIdSchema,
   revision: z.number().int().nonnegative().safe(), versionId: versionId.nullable(), updatedAt: z.string().nullable(),

@@ -99,19 +99,38 @@ async function prune(tx: Tx, scope: Scope): Promise<void> {
   await tx.query(`DELETE FROM cloud_environment_versions v WHERE org_id=$1 AND owner_user_id=$2 AND repository_id=$3
     AND NOT EXISTS (SELECT 1 FROM cloud_environment_heads h WHERE h.version_id=v.id)
     AND NOT EXISTS (SELECT 1 FROM cloud_workspace_environment_pins p WHERE p.version_id=v.id)
+    AND NOT EXISTS (SELECT 1 FROM cloud_workspace_environment_repository_pins p WHERE p.version_id=v.id)
       AND NOT EXISTS (SELECT 1 FROM cloud_v2_execution_contexts e WHERE e.environment_version_id=v.id)`, params(scope));
 }
 
 /** Callers hold the workspace row before the creator lock, matching deletion. */
 export async function releaseCloudEnvironment(tx: Tx, workspaceId: string): Promise<void> {
-  const row = (await tx.query<{ org_id: string; owner_user_id: string; repository_id: string }>(
+  // Every repository's pin, the first's and each later one's, all the creator's.
+  const rows = (await tx.query<{ org_id: string; owner_user_id: string; repository_id: string }>(
     `SELECT p.org_id,p.owner_user_id,p.repository_id::text FROM cloud_workspace_environment_pins p
-     JOIN cloud_v2_workspaces w ON w.id=p.workspace_id WHERE w.id=$1 AND w.state='deleted'`, [workspaceId])).rows[0];
-  if (!row) return;
-  const scope = { organizationId: row.org_id, userId: row.owner_user_id, repositoryId: row.repository_id };
-  await lockScope(tx, scope);
+       JOIN cloud_v2_workspaces w ON w.id=p.workspace_id WHERE w.id=$1 AND w.state='deleted'
+     UNION SELECT p.org_id,p.owner_user_id,p.repository_id::text FROM cloud_workspace_environment_repository_pins p
+       JOIN cloud_v2_workspaces w ON w.id=p.workspace_id WHERE w.id=$1 AND w.state='deleted'`, [workspaceId])).rows;
+  if (!rows.length) return;
+  await lockScope(tx, { organizationId: rows[0]!.org_id, userId: rows[0]!.owner_user_id });
   await tx.query("DELETE FROM cloud_workspace_environment_pins WHERE workspace_id=$1", [workspaceId]);
-  await prune(tx, scope);
+  await tx.query("DELETE FROM cloud_workspace_environment_repository_pins WHERE workspace_id=$1", [workspaceId]);
+  for (const row of rows) await prune(tx, { organizationId: row.org_id, userId: row.owner_user_id, repositoryId: row.repository_id });
+}
+
+/** Creator path: each repository after the first of a workspace of several is pinned to
+ * its creator's current version, in the creation transaction like the first repository. */
+export async function pinCloudRepositoryEnvironments(tx: Tx, workspace: Pick<CloudV2Workspace, "id" | "organizationId" | "creatorUserId">,
+  repositoryIds: readonly string[]): Promise<void> {
+  requireWorkspaceCreator(workspace);
+  if (!repositoryIds.length) return;
+  await lockScope(tx, { organizationId: workspace.organizationId, userId: workspace.creatorUserId });
+  for (const repositoryId of repositoryIds) {
+    const scope = target(workspace.organizationId, workspace.creatorUserId, repositoryId);
+    await tx.query(`INSERT INTO cloud_workspace_environment_repository_pins(workspace_id,org_id,owner_user_id,repository_id,version_id)
+      SELECT $4,org_id,owner_user_id,repository_id,version_id FROM cloud_environment_heads
+      WHERE org_id=$1 AND owner_user_id=$2 AND repository_id=$3 AND version_id IS NOT NULL ON CONFLICT DO NOTHING`, [...params(scope), workspace.id]);
+  }
 }
 
 export class CloudEnvironments {
@@ -121,8 +140,10 @@ export class CloudEnvironments {
     // Older writers cannot release pins. Physical deletion can also leave an
     // unreferenced version after the pin's cascading foreign key fires.
     const deleted = await withSystemTx(this.pool, tx => tx.query<{ id: string }>(
-      `SELECT w.id FROM cloud_v2_workspaces w JOIN cloud_workspace_environment_pins p ON p.workspace_id=w.id
-       WHERE w.state='deleted' ORDER BY w.id LIMIT 100`));
+      `SELECT w.id FROM cloud_v2_workspaces w WHERE w.state='deleted' AND (
+         EXISTS (SELECT 1 FROM cloud_workspace_environment_pins p WHERE p.workspace_id=w.id)
+         OR EXISTS (SELECT 1 FROM cloud_workspace_environment_repository_pins p WHERE p.workspace_id=w.id))
+       ORDER BY w.id LIMIT 100`));
     for (const { id } of deleted.rows) await withSystemTx(this.pool, async tx => {
       const locked = await tx.query("SELECT id FROM cloud_v2_workspaces WHERE id=$1 AND state='deleted' FOR UPDATE SKIP LOCKED", [id]);
       if (locked.rowCount) await releaseCloudEnvironment(tx, id);
@@ -131,6 +152,7 @@ export class CloudEnvironments {
       `SELECT DISTINCT v.org_id,v.owner_user_id,v.repository_id::text FROM cloud_environment_versions v
        WHERE NOT EXISTS (SELECT 1 FROM cloud_environment_heads h WHERE h.version_id=v.id)
        AND NOT EXISTS (SELECT 1 FROM cloud_workspace_environment_pins p WHERE p.version_id=v.id)
+       AND NOT EXISTS (SELECT 1 FROM cloud_workspace_environment_repository_pins p WHERE p.version_id=v.id)
       AND NOT EXISTS (SELECT 1 FROM cloud_v2_execution_contexts e WHERE e.environment_version_id=v.id) LIMIT 100`));
     for (const row of unused.rows) await withSystemTx(this.pool, async tx => {
       const scope = { organizationId: row.org_id, userId: row.owner_user_id, repositoryId: row.repository_id };
@@ -212,6 +234,56 @@ export class CloudEnvironments {
       } catch { throw unreadable(); }
     };
     return transaction ? read(transaction) : withSystemTx(this.pool, read);
+  }
+
+  /** Creator path: each later repository's pinned environment, by repository id. Only the
+   * creator's pins of this workspace's own repositories; never in shared execution, where a
+   * person's environment is their context's (and later repositories have none yet). */
+  async resolveRepositories(workspace: CloudV2Workspace, tx: Tx): Promise<Map<string, CloudWorkspaceEnvironment>> {
+    requireWorkspaceCreator(workspace);
+    const rows = (await tx.query<{ id: string; repository_id: string; revision: string; envelope: CloudEnvironmentEnvelope }>(
+      `SELECT v.id,p.repository_id::text,v.revision::text,v.envelope FROM cloud_workspace_environment_repository_pins p
+       JOIN cloud_v2_workspaces w ON w.id=p.workspace_id AND w.org_id=p.org_id AND w.creator_user_id=p.owner_user_id
+       JOIN cloud_v2_workspace_repositories r ON r.workspace_id=w.id AND r.position > 0
+       JOIN cloud_v2_github_sources s ON s.workspace_id=w.id AND s.source_repository=lower(r.repository) AND s.repository_id=p.repository_id
+       JOIN cloud_environment_versions v ON v.id=p.version_id AND v.org_id=p.org_id AND v.owner_user_id=p.owner_user_id AND v.repository_id=p.repository_id
+       WHERE w.id=$1 AND w.org_id=$2 AND w.creator_user_id=$3 AND w.execution_mode <> 'active'
+         AND w.state IN ('creating','starting','running') AND ${CLOUD_V2_LIVE_ACCESS}`,
+      [workspace.id, workspace.organizationId, workspace.creatorUserId])).rows;
+    const out = new Map<string, CloudWorkspaceEnvironment>();
+    for (const row of rows) {
+      try {
+        out.set(row.repository_id, { versionId: row.id, repositoryId: row.repository_id, ...openCloudEnvironment(row.envelope,
+          { organizationId: workspace.organizationId, userId: workspace.creatorUserId, repositoryId: row.repository_id, versionId: row.id, revision: Number(row.revision) }, this.keys) });
+      } catch { throw unreadable(); }
+    }
+    return out;
+  }
+
+  /** A later repository's own seeding report: recorded on its pin only. The workspace's
+   * state and readiness stay the first repository's. */
+  async reportRepository(token: string, bootId: string, repository: string, raw: unknown): Promise<void> {
+    const parsed = CloudEnvironmentReportSchema.safeParse(raw);
+    if (!parsed.success) throw new HttpError(422, "cloud_environment_report_invalid", "Invalid environment status.");
+    const report = parsed.data, boot = uuid(bootId);
+    await withSystemTx(this.pool, async tx => {
+      const row = (await tx.query<{ workspace_id: string; repository_id: string; version_id: string; ready_boot_id: string | null; report_boot_id: string | null;
+        report_sequence: string | null; report_state: string | null; report_error: string | null }>(
+        `SELECT p.workspace_id,p.repository_id::text,p.version_id,p.ready_boot_id,p.report_boot_id,p.report_sequence::text,p.report_state,p.report_error
+         FROM cloud_v2_workspaces w
+         JOIN cloud_v2_workspace_repositories r ON r.workspace_id=w.id AND r.position > 0 AND lower(r.repository)=lower($3)
+         JOIN cloud_v2_github_sources s ON s.workspace_id=w.id AND s.source_repository=lower(r.repository)
+         JOIN cloud_workspace_environment_repository_pins p ON p.workspace_id=w.id AND p.repository_id=s.repository_id
+         WHERE w.worker_token_hash=$1 AND w.worker_boot_id=$2 AND w.state IN ('creating','starting','running') AND ${CLOUD_V2_LIVE_ACCESS}
+         FOR UPDATE OF w,p`, [hashCloudV2Token(token), boot, repository])).rows[0];
+      if (!row || row.version_id !== report.versionId) throw new HttpError(401, "worker_unauthorized", "Worker authorization changed.");
+      if (row.report_boot_id === boot && Number(row.report_sequence) === report.sequence && row.report_state === report.state && row.report_error === (report.errorCode ?? null)) return;
+      if ((row.report_boot_id === boot && Number(row.report_sequence) >= report.sequence) || (row.ready_boot_id === boot && report.state !== "ready"))
+        throw new HttpError(409, "cloud_environment_report_stale", "Environment status is already settled.");
+      await tx.query(`UPDATE cloud_workspace_environment_repository_pins SET report_boot_id=$3,report_sequence=$4,report_state=$5,report_error=$6,
+        ready_boot_id=CASE WHEN $5='ready' THEN $3::uuid ELSE NULL END WHERE workspace_id=$1 AND repository_id=$2`,
+        [row.workspace_id, row.repository_id, boot, report.sequence, report.state, report.errorCode ?? null]);
+    });
   }
 
   async resolveExecution(workspace: CloudV2Workspace, userId: string, contextId: string, tx: Tx): Promise<CloudWorkspaceEnvironment | undefined> {

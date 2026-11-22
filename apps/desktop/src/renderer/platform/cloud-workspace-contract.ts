@@ -21,6 +21,10 @@ const CloudCheckoutPathSchema = z.string().regex(/^\/home\/user\/[A-Za-z0-9_.-]+
 /** A project folder: one segment under the home folder. */
 const CloudHomeFolderSchema = z.string().regex(/^\/home\/user\/[A-Za-z0-9_.-]+$/).refine(safeSegments);
 
+/** `none`: rebuilt from GitHub; `earlier`: restored from an earlier backup. `stoppedAt`: since when work could be lost. */
+export const CloudLostWorkSchema = z.object({ restored: z.enum(["none", "earlier"]), stoppedAt: z.string().datetime() });
+export type CloudLostWork = z.infer<typeof CloudLostWorkSchema>;
+
 export const CloudWorkspaceDocumentSchema = z.object({
   id: z.string().uuid(),
   organizationId: z.string().uuid(),
@@ -69,6 +73,8 @@ export const CloudWorkspaceDocumentSchema = z.object({
     branch: z.string().min(1).max(255),
     baseBranch: z.string().min(1).max(255),
     github: GithubStateSchema.optional(),
+    /** A later repository's environment files: seeded, refused, or not available in shared workspaces yet. */
+    environment: lenient(z.object({ state: z.enum(["ready", "failed", "unavailable"]), errorCode: z.string().max(100).optional() })),
   })).min(2).max(10)),
   generation: z.object({
     number: z.number().int().positive(),
@@ -85,6 +91,8 @@ export const CloudWorkspaceDocumentSchema = z.object({
   setup: lenient(z.object(CloudV2SetupStatusSchema.shape)),
   /** Running total of mirrored turns that reported a cost; absent before any did. */
   agentCost: lenient(z.object(CloudV2AgentCostSchema.shape)),
+  /** Retention: a restore came back without some work; its own member sees it until they dismiss it. */
+  lostWork: lenient(CloudLostWorkSchema),
   sharing: lenient(CloudWorkspaceSharingSchema),
   version: z.number().int().nonnegative(),
   error: z.object({ code: z.string(), message: z.string() }).nullable(),

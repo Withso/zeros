@@ -48,10 +48,12 @@ export interface CloudGithubPrDependencies {
     pr: CloudGithubPullRequest | null,
     access: CloudGithubPrAccess,
   ): Promise<void>;
+  /** `repository`: one after the first of a workspace of several, by name; its writes hold its own lease. */
   mutate<T>(
     workspaceId: string,
     userId: string,
     action: () => Promise<T>,
+    repository?: string,
   ): Promise<T>;
 }
 const changed = () =>
@@ -90,7 +92,7 @@ export class CloudGithubPrService {
     return CLOUD_GITHUB_PR_WRITES.has(request.op)
       ? this.deps.mutate(workspaceId, userId, () =>
           this.run(workspaceId, userId, request, named),
-        )
+        named)
       : this.run(workspaceId, userId, request, named);
   }
 

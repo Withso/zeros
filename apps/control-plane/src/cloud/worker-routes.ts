@@ -14,7 +14,7 @@ import { CLOUD_V2_PROMPT_POLL_MS, CloudV2PromptAckSchema, CloudV2PromptBeginSche
 import { CloudGithubCheckoutSchema, type CloudGithubCheckout } from "./github-pr-contract.js";
 import type { CloudSourceContinuation, CloudSourceProof } from "./source-authority.js";
 import { cloudGithubFailure } from "./github-failure.js";
-import { CloudEnvironmentReportSchema, type CloudEnvironmentReport } from "./environment-contract.js";
+import { CloudEnvironmentReportSchema, CloudRepositoryEnvironmentReportSchema, type CloudEnvironmentReport } from "./environment-contract.js";
 import type { RuntimeAdoption } from "./runtime-adoption.js";
 import type { RuntimeHandoffStore } from "./runtime-handoff-store.js";
 import { CloudRuntimeUpdateRequestSchema } from "./runtime-update-contract.js";
@@ -24,7 +24,8 @@ import { localBody, localUuid, localRouteError } from "./local-commands/routes.j
 import { requestSignal, type CloudLocalCommandSignals } from "./local-commands/signals.js";
 import { NOTIFY_USER_FEATURE, NotifyUserWorkerRequestSchema } from "./notify-user/contract.js";
 import { NotificationRateLimit, type CloudNotifyUser } from "./notify-user/store.js";
-import { CloudV2SetupStatusSchema } from "./setup-status-contract.js";
+import { CloudV2RepositorySetupStatusSchema, CloudV2SetupStatusSchema } from "./setup-status-contract.js";
+import type { RepositorySetupReport } from "./workspace-repository-setup.js";
 import { CLOUD_RECOVERY_QUIESCE_FEATURE, CloudRecoveryRequestSchema, CloudRecoveryReplySchema,
   type CloudRecoveryHint, type CloudRecoveryRequest, type CloudRecoveryReply } from "./recovery-quiesce-contract.js";
 import type { CloudWorkspaceSync } from "./workspace-sync/store.js";
@@ -64,6 +65,8 @@ export type CloudV2WorkerRouteDeps = {
   localCommands?: { requests: CloudLocalCommands; signals: CloudLocalCommandSignals };
   notifications?: CloudNotifyUser;
   workspaceSync?: Pick<CloudWorkspaceSync, "advertise">;
+  /** workspace-repositories-v1: a repository after the first reports its own setup status. */
+  repositorySetup?: RepositorySetupReport;
   timing?: (record: CloudV2TimingRecord) => void;
   appliedReady?(workspaceId: string, bootId: string): Promise<void>;
   helloTransaction?<T>(work: (tx?: Tx) => Promise<T>): Promise<T>;
@@ -77,6 +80,8 @@ export type CloudV2WorkerRouteDeps = {
   githubToken(workspace: CloudV2Workspace, purpose?: "git" | "gh", failedTokenSha256?: string, repository?: string): Promise<{ token: string; expiresAt: number }>;
   githubCheckout?(token: string, bootId: string, value: CloudGithubCheckout): Promise<void>;
   environmentReport?(token: string, bootId: string, value: CloudEnvironmentReport): Promise<void>;
+  /** workspace-repositories-v1: a repository after the first reports its own seeding. */
+  repositoryEnvironmentReport?(token: string, bootId: string, repository: string, value: CloudEnvironmentReport): Promise<void>;
   mcpAuthorization?(workspace: CloudV2Workspace, id: string, force: boolean): Promise<{ headers: Record<string, string>; expiresAt?: number }>;
 };
 const unauthorized = () => new HttpError(401, "worker_unauthorized", "Worker authorization is no longer current");
@@ -496,6 +501,13 @@ export function createCloudV2WorkerRoutes(deps: CloudV2WorkerRouteDeps): Hono {
     await deps.environmentReport(auth.token, auth.bootId, report);
     return c.json({ sequence: report.sequence });
   });
+  app.post(`${CLOUD_V2_WORKER_API}/repository-environment`, async c => {
+    if (!workerFeatures(c).has(WORKSPACE_REPOSITORIES_FEATURE) || !deps.repositoryEnvironmentReport)
+      throw new HttpError(404, "not_found", "Environment status is unavailable.");
+    const auth = await session(c, deps, true), input = await body(c, CloudRepositoryEnvironmentReportSchema);
+    await deps.repositoryEnvironmentReport(auth.token, auth.bootId, input.repository, input.report);
+    return c.json({ sequence: input.report.sequence });
+  });
   app.post(`${CLOUD_V2_WORKER_API}/setup`, async c => {
     if (!workerFeatures(c).has("setup-status-v1") || !deps.store.reportWorkerSetup)
       throw new HttpError(404, "not_found", "Setup status is unavailable.");
@@ -504,6 +516,16 @@ export function createCloudV2WorkerRoutes(deps: CloudV2WorkerRouteDeps): Hono {
     await deps.store.reportWorkerSetup(auth.token, auth.bootId, report,
       { accessEpoch: auth.workspace.accessEpoch, ...(handoff ? { handoff } : {}) });
     if (auth.workspace.recoveryAttemptId) await deps.recovery?.setup(auth.token, auth.bootId, auth.workspace.recoveryAttemptId, report);
+    return c.body(null, 204);
+  });
+  app.post(`${CLOUD_V2_WORKER_API}/repository-setup`, async c => {
+    const features = workerFeatures(c);
+    if (!features.has("setup-status-v1") || !features.has(WORKSPACE_REPOSITORIES_FEATURE) || !deps.repositorySetup)
+      throw new HttpError(404, "not_found", "Setup status is unavailable.");
+    const auth = await session(c, deps, true), report = await body(c, CloudV2RepositorySetupStatusSchema);
+    const handoff = c.req.header("x-zeros-runtime-handoff");
+    await deps.repositorySetup(auth.token, auth.bootId, report.repository, report.status,
+      { accessEpoch: auth.workspace.accessEpoch, ...(handoff ? { handoff } : {}) });
     return c.body(null, 204);
   });
   app.post(`${CLOUD_V2_WORKER_API}/history`, async c => {

@@ -32,7 +32,10 @@ export type CloudRecoveryDeps = {
   publicKeys: readonly string[];
   checkpoints: NonNullable<CloudV2LifecycleDeps["checkpoints"]>;
   authorize(workspace: CloudV2LifecycleWorkspace): Promise<void>;
-  githubToken(workspace: CloudV2LifecycleWorkspace): Promise<{ token: string }>;
+  /** `repository`: one after the first of a workspace of several, for its own fetch. */
+  githubToken(workspace: CloudV2LifecycleWorkspace, repository?: { repository: string; repositoryId: string }): Promise<{ token: string }>;
+  /** A workspace of several repositories: every one after the first, in order. */
+  repositories?(workspace: CloudV2LifecycleWorkspace): Promise<{ repository: string; repositoryId: string; checkoutFolder: string; baseBranch: string }[]>;
   bootEnv(workspace: CloudV2LifecycleWorkspace, runtime: CloudV2Runtime): Promise<Record<string, string>>;
   sandboxName(workspace: CloudV2LifecycleWorkspace, attempt: string): string;
   sealToken(token: string, workspaceId: string): unknown;
@@ -105,9 +108,6 @@ export class CloudRecovery {
       if (terminal(a)) { delay = await this.cleanup(a); return; }
       if (a.deadline_at.getTime() <= this.now()) throw fail("recovery_deadline");
       const w = await this.current(a);
-      // A replacement restores in shared execution, which holds one repository: a workspace of
-      // several keeps its own VM rather than lose a repository's changes.
-      if (w.folder) throw fail("recovery_unsupported");
       switch (a.phase) {
         case "waiting":
           if (this.now() - a.created_at.getTime() >= RECOVERY_WAIT_MS) throw fail("recovery_busy");
@@ -156,8 +156,11 @@ export class CloudRecovery {
     try {
       if (!await store.upload(a.id, a.lease_id!, { object, key: checkpoints.seal(key, w.id, object), until: new Date(this.now() + UPLOAD_HORIZON_MS) }))
         throw fail("recovery_binding_changed");
+      // Every repository of a workspace of several, each in its own part of the archive.
+      const others = await this.deps.repositories?.(w) ?? [];
       const command = recoveryCheckpointCommand({ ...binding, checkoutPath: workspaceCheckoutPath(w), home: CLOUD_V2_HOME,
-        baseBranch: w.baseBranch, key, uploadUrl: await checkpoints.storage.uploadUrl(w.id, object) });
+        baseBranch: w.baseBranch, key, uploadUrl: await checkpoints.storage.uploadUrl(w.id, object),
+        ...(others.length ? { repositories: others.map(entry => ({ checkoutPath: `${CLOUD_V2_HOME}/${entry.checkoutFolder}`, baseBranch: entry.baseBranch })) } : {}) });
       await this.current(a);
       const result = await compute.exec(a.source_sandbox_id, command, CLOUD_V2_CHECKPOINT_SECONDS);
       const saved = parseCheckpointResult(result.stdout);
@@ -205,11 +208,16 @@ export class CloudRecovery {
     if (!request.from) { await compute.exec(sandbox, GIT_LFS_INSTALL_COMMAND, 300).catch(() => {}); await this.current(a); }
     if (!await store.claimRestore(a.id, a.lease_id!)) throw fail("checkpoint_restore_unconfirmed");
     const github = await this.deps.githubToken(w), object = a.checkpoint_object!;
+    // Each repository after the first fetches with its own token, before any checkpoint content exists.
+    const repositories = await Promise.all((await this.deps.repositories?.(w) ?? []).map(async entry => ({
+      checkoutPath: `${CLOUD_V2_HOME}/${entry.checkoutFolder}`, repositoryUrl: `https://github.com/${entry.repository}.git`,
+      githubToken: (await this.deps.githubToken(w, { repository: entry.repository, repositoryId: entry.repositoryId })).token })));
     const key = checkpoints.open(a.checkpoint_key, w.id, object);
     try {
       const command = restoreCommand({ checkoutPath: workspaceCheckoutPath(w), home: CLOUD_V2_HOME, key,
         sha256: a.checkpoint_sha256!, downloadUrl: await checkpoints.storage.downloadUrl(w.id, object),
-        repositoryUrl: `https://github.com/${w.repository}.git`, githubToken: github.token, active: true, recovery: true });
+        repositoryUrl: `https://github.com/${w.repository}.git`, githubToken: github.token, active: true, recovery: true,
+        ...(repositories.length ? { repositories } : {}) });
       await this.current(a);
       const result = await compute.exec(sandbox, command, CLOUD_V2_CHECKPOINT_SECONDS);
       await this.current(a);
