@@ -868,6 +868,29 @@ d("cloud v2 retention", () => {
     }
     const forksOf = () => boat.calls.filter(call => call.op === "fork" && call.args[0] === vm).length;
 
+    /** Runs `statement` while another connection holds the workspace row FOR UPDATE, and says whether it resolved while
+     * that lock was still held. Ordering, not duration: the lock is kept until the statement resolves, so a statement
+     * that waited for it could only reach the fallback (which then releases it) and never pass slowly. */
+    const whileRowHeld = async (statement: () => Promise<unknown>, fallbackMs = 25_000): Promise<"resolved while held" | "waited for the lock"> => {
+      const holder = await pool.connect();
+      let held = true;
+      try {
+        await holder.query("BEGIN"); await holder.query("SELECT 1 FROM cloud_v2_workspaces WHERE id=$1 FOR UPDATE", [id]);
+        const resolved = statement().then(() => held ? "resolved while held" as const : "waited for the lock" as const);
+        const outcome = await Promise.race([resolved, new Promise<"waited for the lock">(resolve => setTimeout(() => resolve("waited for the lock"), fallbackMs))]);
+        held = false;
+        await holder.query("ROLLBACK");
+        await resolved;
+        return outcome;
+      } finally { if (held) await holder.query("ROLLBACK").catch(() => {}); holder.release(); }
+    };
+
+    it("tells a statement that waits for the held row from one that does not (the helper the two no-wait tests use)", async () => {
+      // An update of the held row must wait: it can never resolve while the lock is held, however fast the machine.
+      expect(await whileRowHeld(() => pool.query("UPDATE cloud_v2_workspaces SET name=name WHERE id=$1", [id]), 1_500)).toBe("waited for the lock");
+      expect(await whileRowHeld(() => pool.query("SELECT 1"))).toBe("resolved while held");
+    }, 30_000);
+
     describe("activity", () => {
       it("stamps a person's call at most every 30 seconds, and never waits for a row the lifecycle holds", async () => {
         await store.personActivity(id);
@@ -876,14 +899,8 @@ d("cloud v2 retention", () => {
         await store.personActivity(id);
         expect((await columns("person_activity_at")).person_activity_at).toEqual(first);
         await pool.query("UPDATE cloud_v2_workspaces SET person_activity_at=person_activity_at - interval '1 minute' WHERE id=$1", [id]);
-        const holder = await pool.connect();
-        try {
-          await holder.query("BEGIN"); await holder.query("SELECT 1 FROM cloud_v2_workspaces WHERE id=$1 FOR UPDATE", [id]);
-          const started = Date.now();
-          await store.personActivity(id);
-          expect(Date.now() - started).toBeLessThan(2_000);
-        } finally { await holder.query("ROLLBACK"); holder.release(); }
-      });
+        expect(await whileRowHeld(() => store.personActivity(id))).toBe("resolved while held");
+      }, 30_000);
 
       it("starts the clock at switch-on: a workspace asleep 90 days, its machine long gone, is archived 30 days after, not at once and not never", async () => {
         await stop();
@@ -1125,21 +1142,14 @@ d("cloud v2 retention", () => {
         const leaver = await member();
         await privateTo(leaver);
         await pool.query("UPDATE cloud_v2_workspaces SET state='starting' WHERE id=$1", [id]);
-        const holder = await pool.connect();
-        try {
-          await holder.query("BEGIN"); await holder.query("SELECT 1 FROM cloud_v2_workspaces WHERE id=$1 FOR UPDATE", [id]);
-          const remover = await pool.connect();
-          try {
-            await remover.query("SET statement_timeout = '3s'");
-            await remover.query("DELETE FROM organization_members WHERE org_id=$1 AND user_id=$2", [org, leaver]);
-          } finally { await remover.query("RESET statement_timeout"); remover.release(); }
-        } finally { await holder.query("ROLLBACK"); holder.release(); }
+        expect(await whileRowHeld(() => pool.query("DELETE FROM organization_members WHERE org_id=$1 AND user_id=$2", [org, leaver])))
+          .toBe("resolved while held");
         expect((await columns("archived_at")).archived_at).toBeNull();
         expect(await store.archiveDepartedPrivate(200)).toEqual([id]);
         expect(await columns("archive_reason")).toEqual({ archive_reason: "member_left" });
         expect(await store.archiveForSystem(id)).toBe(true);
         expect((await columns("state")).state).toBe("stopping");
-      });
+      }, 30_000);
 
       it("leaves a manual archive exactly as before, but for its reason", async () => {
         for (const state of ["running", "stopped"] as const) {
