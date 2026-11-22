@@ -139,8 +139,10 @@ export function createCloudV2Routes(deps: CloudV2RouteDeps): Hono {
   const chatEdits = deps.store.chatEdits;
   const connections = new WeakMap<Context, Promise<Awaited<ReturnType<CloudExecutionContexts["connectionWorkspace"]>>>>();
   const activeWorkspaces = new WeakMap<Context, Promise<boolean>>();
-  /** Retention S3: a person's own call on the workspace counts toward its 30-day clock (reads do not:
-   * the desktop revalidates them on its own). Never fails or delays the call beyond one statement. */
+  /** Retention S3: a person's own write on the workspace counts toward its 30-day clock (reads do not: the
+   * desktop revalidates them on its own). Not on connect, start, restart or GitHub: an open or a wake reaches
+   * running, which stamps active_at, and a connected running workspace's worker reports activity; those
+   * routes keep their measured transaction budgets. Never fails or delays the call beyond one statement. */
   const personActivity = (id: string) => deps.store.personActivity?.(id).catch(() => {});
   const activeWorkspace = (c: Context, id: string) => {
     let pending = activeWorkspaces.get(c);
@@ -203,9 +205,7 @@ export function createCloudV2Routes(deps: CloudV2RouteDeps): Hono {
     const id = uuid.safeParse(c.req.param("id"));
     if (!id.success || !deps.github) throw new HttpError(404, "not_found", "Cloud pull requests are not available.");
     c.header("Cache-Control", "no-store");
-    const result = await deps.github.service.execute(id.data, c.get("user").id, await c.req.json().catch(() => null));
-    await personActivity(id.data);
-    return c.json(result);
+    return c.json(await deps.github.service.execute(id.data, c.get("user").id, await c.req.json().catch(() => null)));
   });
 
   app.get("/v1/cloud-v2/runtime-canaries/:grantId", async c => {
@@ -281,7 +281,6 @@ export function createCloudV2Routes(deps: CloudV2RouteDeps): Hono {
     if (explicitWake && (workspace.archivedAt || workspace.state === "stopping" || (!wake && workspace.state === "stopped")))
       throw new HttpError(409, "cloud_workspace_not_running", "This cloud workspace is not ready for a connection");
     if (workspace.state === "deleting" || workspace.state === "failed") throw new HttpError(409, "workspace_unavailable", "This cloud workspace is unavailable");
-    await personActivity(workspace.id);
     if (wake && workspace.state === "stopped") {
       if (acting) await deps.store.requestExecutionLifecycle!(workspace.id, userId, "start", acting.proof, c.get("user"), explicitWake);
       else if (!explicitWake) await deps.store.transition(workspace.id, ["stopped"], "starting");
@@ -353,7 +352,6 @@ export function createCloudV2Routes(deps: CloudV2RouteDeps): Hono {
       const ownership = c.req.header(TEAM_SHARING_HEADER) === "1" && c.req.header(TEAM_OWNERSHIP_HEADER) === "1";
       const { workspace, moved } = active ? await deps.store.requestExecutionLifecycle!(id.data, user.id, action, undefined, user, false, ownership)
         : await deps.store.requestLifecycle(id.data, user.id, action);
-      if (action === "start" || action === "restart") await personActivity(id.data);
       if (active && ownership && deps.teamSharing) return c.json({
         workspace: workspaceDocument(await deps.teamSharing.lifecycleDocument(id.data,user),deps.promptOutbox === true,!!chatEdits),
         teamSharing: 1,teamOwnership: 1,

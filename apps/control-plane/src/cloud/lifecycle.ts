@@ -968,6 +968,8 @@ export class CloudV2Lifecycle {
     const { archived, notices } = await store.archiveInactive({ inactiveMs: CLOUD_V2_INACTIVE_ARCHIVE_MS, limit: CLOUD_V2_ARCHIVE_BATCH, run,
       notify: this.deps.archiveNotices === true, backupRemovalMs: CLOUD_V2_BACKUP_REMOVAL_MS });
     if (archived.length) this.deps.logger?.warn(`[cloud-v2] archived ${archived.length} inactive workspace(s); ${notices} notice(s) queued run=${run.slice(0, 8)}`);
+    // Switch-on precondition: the notice needs the security notification outbox's processor in this deployment.
+    if (this.deps.archiveNotices !== true) this.deps.logger?.warn("[cloud-v2] archive notices are not being queued: no security notification outbox processor runs here");
     emitCloudV2Timing(this.deps.timing, { workspaceId: "-", phase: "archive_scan", durationMs: 0, archived: archived.length, notices });
   }
 

@@ -148,7 +148,6 @@ export class CloudApiService {
     const operation = action === "archive" ? "archive" : action === "sleep" ? "stop" : "start";
     await this.deps.credentials.assertCurrent(credential);
     const result = await this.deps.store.requestLifecycle(id, credential.userId, operation);
-    if (operation === "start") await this.touched(id);
     return this.workspaceDocument(credential, result.workspace);
   }
 

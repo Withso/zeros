@@ -1297,129 +1297,6 @@ export class CloudV2Store {
        AND coalesce(active_at,'-infinity') < clock_timestamp() - interval '30 seconds'`, [id]));
   }
 
-  /** Retention S3: a person's own call on the workspace that does not already stamp active_at, for the
-   * 30-day clock. At most every 30 seconds; inside that window it takes no lock at all, and outside it
-   * never waits for a row another transaction holds (that call simply goes unrecorded). */
-  async personActivity(id: string): Promise<void> {
-    await withSystemTx(this.pool, tx => tx.query(
-      `WITH due AS (SELECT id FROM cloud_v2_workspaces WHERE id=$1
-          AND coalesce(person_activity_at, '-infinity') < clock_timestamp() - interval '30 seconds' FOR NO KEY UPDATE SKIP LOCKED)
-       UPDATE cloud_v2_workspaces w SET person_activity_at=clock_timestamp() FROM due WHERE w.id=due.id`, [id]));
-  }
-
-  /** Retention S3: Keep, set or cleared by anyone who can use the workspace (its creator in legacy mode,
-   * any eligible member in shared execution, a personal project's member only). Counts as activity. */
-  async setKeep(id: string, userId: string, keep: boolean): Promise<CloudV2Workspace> {
-    return withSystemTx(this.pool, async tx => {
-      const { rows } = await tx.query<Row>(
-        `UPDATE cloud_v2_workspaces w SET keep_set_at = CASE WHEN $3::boolean THEN coalesce(keep_set_at, clock_timestamp()) END,
-           keep_set_by = CASE WHEN NOT $3::boolean THEN NULL WHEN keep_set_at IS NULL THEN $2::uuid ELSE keep_set_by END,
-           person_activity_at = clock_timestamp()
-         WHERE w.id=$1 AND w.state NOT IN ('deleting','deleted') AND ${cloudV2ActorAccess("$2")} AND ${LIVE_ACCESS}
-         RETURNING ${COLUMNS}`, [id, userId, keep]);
-      if (rows[0]) return workspace(rows[0]);
-      const deleting = await tx.query(`SELECT 1 FROM cloud_v2_workspaces w WHERE w.id=$1 AND w.state='deleting'
-        AND ${cloudV2ActorAccess("$2")} AND ${LIVE_ACCESS}`, [id, userId]);
-      throw deleting.rowCount ? new HttpError(409, "workspace_deleting", "This cloud workspace is being deleted") : notFound();
-    });
-  }
-
-  /** Retention S3: the 30-day clock starts the first time retention applies to a workspace, never from
-   * its history. Bounded per call; a later start only ever archives later. */
-  async startRetentionClocks(limit: number): Promise<number> {
-    const result = await withSystemTx(this.pool, tx => tx.query(
-      `UPDATE cloud_v2_workspaces w SET retention_started_at=clock_timestamp()
-       WHERE w.id IN (SELECT id FROM cloud_v2_workspaces WHERE retention_started_at IS NULL AND state NOT IN ('deleting','deleted')
-         LIMIT $1 FOR UPDATE SKIP LOCKED)`, [limit]));
-    return result.rowCount ?? 0;
-  }
-
-  /** Retention S3's automatic archive: up to `limit` sleeping workspaces, oldest clock first, with no
-   * activity by anyone for `inactiveMs` since the later of their last activity and retention's start, not
-   * kept, with no wake, queued prompt, maintenance wake or live execution context, all rechecked in the
-   * same statement. Each archived workspace's creator, still a member, gets one notice for this run. */
-  async archiveInactive(input: { inactiveMs: number; limit: number; run: string; notify: boolean; backupRemovalMs: number }):
-    Promise<{ archived: { id: string; creatorUserId: string | null }[]; notices: number }> {
-    return withSystemTx(this.pool, async tx => {
-      const { rows } = await tx.query<{ id: string; label: string; org_id: string; creator_user_id: string | null; archived_at: Date }>(
-        `WITH due AS MATERIALIZED (
-           SELECT w.id FROM cloud_v2_workspaces w
-           WHERE w.archived_at IS NULL AND w.keep_set_at IS NULL AND w.state IN ('stopped','failed') AND w.retention_started_at IS NOT NULL
-             AND greatest(w.active_at, w.person_activity_at, w.retention_started_at) < clock_timestamp() - make_interval(secs => $1::double precision / 1000)
-             AND w.maintenance_attempt IS NULL AND NOT w.restore_pending
-             AND NOT ${PENDING_WORKER_PROMPTS_SQL.text}
-             AND NOT EXISTS (SELECT 1 FROM cloud_v2_execution_contexts e WHERE e.workspace_id=w.id AND e.state='active' AND e.expires_at > clock_timestamp())
-           ORDER BY greatest(w.active_at, w.person_activity_at, w.retention_started_at) LIMIT $2 FOR UPDATE SKIP LOCKED)
-         UPDATE cloud_v2_workspaces w SET archived_at=clock_timestamp(), archive_reason='inactive' FROM due
-         WHERE w.id=due.id AND w.archived_at IS NULL AND w.keep_set_at IS NULL AND w.state IN ('stopped','failed')
-         RETURNING w.id, coalesce(w.title, w.name) AS label, w.org_id, w.creator_user_id, w.archived_at`, [input.inactiveMs, input.limit]);
-      let notices = 0;
-      if (input.notify) {
-        const people = new Map<string, typeof rows>();
-        for (const row of rows) if (row.creator_user_id) people.set(row.creator_user_id, [...people.get(row.creator_user_id) ?? [], row]);
-        for (const [person, archived] of people) {
-          const organizations = new Map((await tx.query<{ id: string; name: string }>(
-            `SELECT o.id, o.name FROM organizations o JOIN organization_members m ON m.org_id=o.id AND m.user_id=$2
-             WHERE o.id = ANY($1::uuid[])`, [[...new Set(archived.map(row => row.org_id))], person])).rows.map(row => [row.id, row.name]));
-          const named = archived.filter(row => organizations.has(row.org_id));
-          if (!named.length) continue;
-          const payload = cloudArchiveNotice(input.run, named.map(row => ({ name: row.label, organization: organizations.get(row.org_id)! })),
-            new Date(named[0]!.archived_at.getTime() + input.backupRemovalMs));
-          const sent = await tx.query(
-            `INSERT INTO security_notification_outbox (user_id, destination_email, template, payload)
-             SELECT u.id, u.email, 'cloud_workspaces_archived', $2::jsonb FROM users u
-             WHERE u.id=$1 AND u.auth_status='active' AND u.deleted_at IS NULL
-             ON CONFLICT ((payload->>'run'), user_id) WHERE template='cloud_workspaces_archived' DO NOTHING`, [person, JSON.stringify(payload)]);
-          notices += sent.rowCount ?? 0;
-        }
-      }
-      return { archived: rows.map(row => ({ id: row.id, creatorUserId: row.creator_user_id })), notices };
-    });
-  }
-
-  /** Retention S3: a departed member's personal-project workspaces, archived at once. The membership
-   * trigger does this in the removal's own transaction but skips a row another transaction holds; this
-   * sweep archives anything it skipped, and returns those still running or starting, for a stop. */
-  async archiveDepartedPrivate(limit: number): Promise<string[]> {
-    return withSystemTx(this.pool, async tx => {
-      const departed = `w.private_owner_user_id IS NOT NULL AND w.state NOT IN ('deleting','deleted')
-        AND NOT EXISTS (SELECT 1 FROM organization_members m WHERE m.org_id=w.org_id AND m.user_id=w.private_owner_user_id)`;
-      await tx.query(`UPDATE cloud_v2_workspaces SET archived_at=clock_timestamp(), archive_reason='member_left'
-        WHERE id IN (SELECT w.id FROM cloud_v2_workspaces w WHERE w.archived_at IS NULL AND ${departed} LIMIT $1 FOR UPDATE SKIP LOCKED)`, [limit]);
-      return (await tx.query<{ id: string }>(`SELECT w.id FROM cloud_v2_workspaces w
-        WHERE w.archived_at IS NOT NULL AND w.state IN ('running','starting') AND ${departed} LIMIT $1`, [limit])).rows.map(row => row.id);
-    });
-  }
-
-  /** Retention S3: a member re-added gets their personal-project workspaces back (the trigger does it at
-   * once and skips a held row; this sweeps what it skipped). Only that member's own private rows. */
-  async restoreReturningPrivate(limit: number): Promise<number> {
-    return withSystemTx(this.pool, async tx => {
-      // As the membership trigger: under the team-ownership switch that cleared it, for an eligible member only.
-      await tx.query("SELECT set_config('app.cloud_team_ownership','1',true)");
-      const result = await tx.query(
-        `UPDATE cloud_v2_workspaces SET creator_user_id=private_owner_user_id
-         WHERE id IN (SELECT w.id FROM cloud_v2_workspaces w WHERE w.private_owner_user_id IS NOT NULL AND w.creator_user_id IS NULL
-           AND w.creator_absent_reason='left' AND w.state NOT IN ('deleting','deleted')
-           AND EXISTS (SELECT 1 FROM organization_members m JOIN users u ON u.id=m.user_id AND u.auth_status='active' AND u.deleted_at IS NULL
-             WHERE m.org_id=w.org_id AND m.user_id=w.private_owner_user_id AND NOT ${memberOnHoldSql("m.org_id", "m.user_id")})
-           LIMIT $1 FOR UPDATE SKIP LOCKED)`, [limit]);
-      return result.rowCount ?? 0;
-    });
-  }
-
-  /** Stops an archived workspace that is still running or starting, through the ordinary archive path
-   * (the same intent a manual archive records). Never waits for a held row: the next sweep retries. */
-  async archiveForSystem(id: string): Promise<boolean> {
-    return withSystemTx(this.pool, async tx => {
-      const row = (await tx.query<Row>(`SELECT ${COLUMNS} FROM cloud_v2_workspaces WHERE id=$1 FOR UPDATE SKIP LOCKED`, [id])).rows[0];
-      if (!row?.archived_at || (row.state !== "running" && row.state !== "starting")) return false;
-      const { moved } = await this.lifecycleIntent(tx, id, row, "archive");
-      await clearStoppedExecutionTransition(tx, id);
-      return moved;
-    });
-  }
-
   /** Workspaces running with no activity since `before`. */
   async idleSince(before: Date, limit = 50): Promise<CloudV2Workspace[]> {
     const { rows } = await withSystemTx(this.pool, tx => tx.query<Row>(
@@ -1868,6 +1745,129 @@ export class CloudV2Store {
       `UPDATE cloud_v2_workspaces SET maintenance_phase='stopping' WHERE id=$1 AND state='stopped' AND maintenance_attempt=$2
          AND maintenance_phase='waking'`, [id, attempt]));
     return Boolean(result.rowCount);
+  }
+
+  /** Retention S3: a person's own call on the workspace that does not already stamp active_at, for the
+   * 30-day clock. At most every 30 seconds; inside that window it takes no lock at all, and outside it
+   * never waits for a row another transaction holds (that call simply goes unrecorded). */
+  async personActivity(id: string): Promise<void> {
+    await withSystemTx(this.pool, tx => tx.query(
+      `WITH due AS (SELECT id FROM cloud_v2_workspaces WHERE id=$1
+          AND coalesce(person_activity_at, '-infinity') < clock_timestamp() - interval '30 seconds' FOR NO KEY UPDATE SKIP LOCKED)
+       UPDATE cloud_v2_workspaces w SET person_activity_at=clock_timestamp() FROM due WHERE w.id=due.id`, [id]));
+  }
+
+  /** Retention S3: Keep, set or cleared by anyone who can use the workspace (its creator in legacy mode,
+   * any eligible member in shared execution, a personal project's member only). Counts as activity. */
+  async setKeep(id: string, userId: string, keep: boolean): Promise<CloudV2Workspace> {
+    return withSystemTx(this.pool, async tx => {
+      const { rows } = await tx.query<Row>(
+        `UPDATE cloud_v2_workspaces w SET keep_set_at = CASE WHEN $3::boolean THEN coalesce(keep_set_at, clock_timestamp()) END,
+           keep_set_by = CASE WHEN NOT $3::boolean THEN NULL WHEN keep_set_at IS NULL THEN $2::uuid ELSE keep_set_by END,
+           person_activity_at = clock_timestamp()
+         WHERE w.id=$1 AND w.state NOT IN ('deleting','deleted') AND ${cloudV2ActorAccess("$2")} AND ${LIVE_ACCESS}
+         RETURNING ${COLUMNS}`, [id, userId, keep]);
+      if (rows[0]) return workspace(rows[0]);
+      const deleting = await tx.query(`SELECT 1 FROM cloud_v2_workspaces w WHERE w.id=$1 AND w.state='deleting'
+        AND ${cloudV2ActorAccess("$2")} AND ${LIVE_ACCESS}`, [id, userId]);
+      throw deleting.rowCount ? new HttpError(409, "workspace_deleting", "This cloud workspace is being deleted") : notFound();
+    });
+  }
+
+  /** Retention S3: the 30-day clock starts the first time retention applies to a workspace, never from
+   * its history. Bounded per call; a later start only ever archives later. */
+  async startRetentionClocks(limit: number): Promise<number> {
+    const result = await withSystemTx(this.pool, tx => tx.query(
+      `UPDATE cloud_v2_workspaces w SET retention_started_at=clock_timestamp()
+       WHERE w.id IN (SELECT id FROM cloud_v2_workspaces WHERE retention_started_at IS NULL AND state NOT IN ('deleting','deleted')
+         LIMIT $1 FOR UPDATE SKIP LOCKED)`, [limit]));
+    return result.rowCount ?? 0;
+  }
+
+  /** Retention S3's automatic archive: up to `limit` sleeping workspaces, oldest clock first, with no
+   * activity by anyone for `inactiveMs` since the later of their last activity and retention's start, not
+   * kept, with no wake, queued prompt, maintenance wake or live execution context, all rechecked in the
+   * same statement. Each archived workspace's creator, still a member, gets one notice for this run. */
+  async archiveInactive(input: { inactiveMs: number; limit: number; run: string; notify: boolean; backupRemovalMs: number }):
+    Promise<{ archived: { id: string; creatorUserId: string | null }[]; notices: number }> {
+    return withSystemTx(this.pool, async tx => {
+      const { rows } = await tx.query<{ id: string; label: string; org_id: string; creator_user_id: string | null; archived_at: Date }>(
+        `WITH due AS MATERIALIZED (
+           SELECT w.id FROM cloud_v2_workspaces w
+           WHERE w.archived_at IS NULL AND w.keep_set_at IS NULL AND w.state IN ('stopped','failed') AND w.retention_started_at IS NOT NULL
+             AND greatest(w.active_at, w.person_activity_at, w.retention_started_at) < clock_timestamp() - make_interval(secs => $1::double precision / 1000)
+             AND w.maintenance_attempt IS NULL AND NOT w.restore_pending
+             AND NOT ${PENDING_WORKER_PROMPTS_SQL.text}
+             AND NOT EXISTS (SELECT 1 FROM cloud_v2_execution_contexts e WHERE e.workspace_id=w.id AND e.state='active' AND e.expires_at > clock_timestamp())
+           ORDER BY greatest(w.active_at, w.person_activity_at, w.retention_started_at) LIMIT $2 FOR UPDATE SKIP LOCKED)
+         UPDATE cloud_v2_workspaces w SET archived_at=clock_timestamp(), archive_reason='inactive' FROM due
+         WHERE w.id=due.id AND w.archived_at IS NULL AND w.keep_set_at IS NULL AND w.state IN ('stopped','failed')
+         RETURNING w.id, coalesce(w.title, w.name) AS label, w.org_id, w.creator_user_id, w.archived_at`, [input.inactiveMs, input.limit]);
+      let notices = 0;
+      if (input.notify) {
+        const people = new Map<string, typeof rows>();
+        for (const row of rows) if (row.creator_user_id) people.set(row.creator_user_id, [...people.get(row.creator_user_id) ?? [], row]);
+        for (const [person, archived] of people) {
+          const organizations = new Map((await tx.query<{ id: string; name: string }>(
+            `SELECT o.id, o.name FROM organizations o JOIN organization_members m ON m.org_id=o.id AND m.user_id=$2
+             WHERE o.id = ANY($1::uuid[])`, [[...new Set(archived.map(row => row.org_id))], person])).rows.map(row => [row.id, row.name]));
+          const named = archived.filter(row => organizations.has(row.org_id));
+          if (!named.length) continue;
+          const payload = cloudArchiveNotice(input.run, named.map(row => ({ name: row.label, organization: organizations.get(row.org_id)! })),
+            new Date(named[0]!.archived_at.getTime() + input.backupRemovalMs));
+          const sent = await tx.query(
+            `INSERT INTO security_notification_outbox (user_id, destination_email, template, payload)
+             SELECT u.id, u.email, 'cloud_workspaces_archived', $2::jsonb FROM users u
+             WHERE u.id=$1 AND u.auth_status='active' AND u.deleted_at IS NULL
+             ON CONFLICT ((payload->>'run'), user_id) WHERE template='cloud_workspaces_archived' DO NOTHING`, [person, JSON.stringify(payload)]);
+          notices += sent.rowCount ?? 0;
+        }
+      }
+      return { archived: rows.map(row => ({ id: row.id, creatorUserId: row.creator_user_id })), notices };
+    });
+  }
+
+  /** Retention S3: a departed member's personal-project workspaces, archived at once. The membership
+   * trigger does this in the removal's own transaction but skips a row another transaction holds; this
+   * sweep archives anything it skipped, and returns those still running or starting, for a stop. */
+  async archiveDepartedPrivate(limit: number): Promise<string[]> {
+    return withSystemTx(this.pool, async tx => {
+      const departed = `w.private_owner_user_id IS NOT NULL AND w.state NOT IN ('deleting','deleted')
+        AND NOT EXISTS (SELECT 1 FROM organization_members m WHERE m.org_id=w.org_id AND m.user_id=w.private_owner_user_id)`;
+      await tx.query(`UPDATE cloud_v2_workspaces SET archived_at=clock_timestamp(), archive_reason='member_left'
+        WHERE id IN (SELECT w.id FROM cloud_v2_workspaces w WHERE w.archived_at IS NULL AND ${departed} LIMIT $1 FOR UPDATE SKIP LOCKED)`, [limit]);
+      return (await tx.query<{ id: string }>(`SELECT w.id FROM cloud_v2_workspaces w
+        WHERE w.archived_at IS NOT NULL AND w.state IN ('running','starting') AND ${departed} LIMIT $1`, [limit])).rows.map(row => row.id);
+    });
+  }
+
+  /** Retention S3: a member re-added gets their personal-project workspaces back (the trigger does it at
+   * once and skips a held row; this sweeps what it skipped). Only that member's own private rows. */
+  async restoreReturningPrivate(limit: number): Promise<number> {
+    return withSystemTx(this.pool, async tx => {
+      // As the membership trigger: under the team-ownership switch that cleared it, for an eligible member only.
+      await tx.query("SELECT set_config('app.cloud_team_ownership','1',true)");
+      const result = await tx.query(
+        `UPDATE cloud_v2_workspaces SET creator_user_id=private_owner_user_id
+         WHERE id IN (SELECT w.id FROM cloud_v2_workspaces w WHERE w.private_owner_user_id IS NOT NULL AND w.creator_user_id IS NULL
+           AND w.creator_absent_reason='left' AND w.state NOT IN ('deleting','deleted')
+           AND EXISTS (SELECT 1 FROM organization_members m JOIN users u ON u.id=m.user_id AND u.auth_status='active' AND u.deleted_at IS NULL
+             WHERE m.org_id=w.org_id AND m.user_id=w.private_owner_user_id AND NOT ${memberOnHoldSql("m.org_id", "m.user_id")})
+           LIMIT $1 FOR UPDATE SKIP LOCKED)`, [limit]);
+      return result.rowCount ?? 0;
+    });
+  }
+
+  /** Stops an archived workspace that is still running or starting, through the ordinary archive path
+   * (the same intent a manual archive records). Never waits for a held row: the next sweep retries. */
+  async archiveForSystem(id: string): Promise<boolean> {
+    return withSystemTx(this.pool, async tx => {
+      const row = (await tx.query<Row>(`SELECT ${COLUMNS} FROM cloud_v2_workspaces WHERE id=$1 FOR UPDATE SKIP LOCKED`, [id])).rows[0];
+      if (!row?.archived_at || (row.state !== "running" && row.state !== "starting")) return false;
+      const { moved } = await this.lifecycleIntent(tx, id, row, "archive");
+      await clearStoppedExecutionTransition(tx, id);
+      return moved;
+    });
   }
 
   /** Retention S3: the scrub's environment files are back on the machine; a later start restores nothing. */

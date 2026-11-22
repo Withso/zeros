@@ -884,6 +884,9 @@ d("cloud v2 retention", () => {
         await ago(1.1, "retention_started_at");
         await lifecycle().tick();
         expect(await columns("archive_reason")).toEqual({ archive_reason: "inactive" });
+        // No outbox processor in this deployment: every run says so, and no notice is queued.
+        expect(warnings).toContain("[cloud-v2] archive notices are not being queued: no security notification outbox processor runs here");
+        expect(await outbox()).toEqual([]);
       });
     });
 
