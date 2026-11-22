@@ -17,9 +17,8 @@ import type { ChatTitleSeedWire } from "../../platform/bridge/workspace-bridge";
 import type { Action } from "../../state/workspace-store";
 import type { ChatThread } from "../../state/store";
 import type { requestAiChatTitle } from "./chat-title";
-import { SIDE_CHAT_TITLE } from "./side-chat-seeds";
 
-const SEEDED_TITLES = new Set(["Untitled", "New chat", SIDE_CHAT_TITLE]);
+const SEEDED_TITLES = new Set(["Untitled", "New chat"]);
 /** Older Untitled chats are not worth a paid request each at every launch. */
 const RECENT_MS = 14 * 24 * 3_600_000;
 const FLUSH_DELAY_MS = 1_000;

@@ -166,7 +166,7 @@ import {
 } from "./composer-text-attachment-delivery";
 import { registerLiveChatFileStager } from "./composer-file-attachment-delivery";
 import { buildForkTranscriptAttachment, createForkedChat } from "./fork-chat";
-import { SIDE_CHAT_TITLE, markSideChatSeedSent, openSideChat as openSideChatFrom, sideChatHandoffFor, useSideChatSeed, warmSideChat as warmSideChatFrom, type SideChatSource } from "./side-chat";
+import { markSideChatSeedSent, openSideChat as openSideChatFrom, sideChatHandoffFor, useSideChatSeed, warmSideChat as warmSideChatFrom, type SideChatSource } from "./side-chat";
 import { SideChatBranchBanner } from "./side-chat-banner";
 import { hasParentContext } from "./add-child-session";
 import { resolveComposerPlaceholder } from "./composer-placeholder";
@@ -562,7 +562,7 @@ function AgentChatBody({
   const activity = readOnly ? null : agentActivity(session, pendingLocalTurnId);
   const backgroundContinuationActive = agentFamily(session.agentId) === "claude" && activity !== null && session.status !== "streaming";
   const waitingForBackgroundTasks = activity === "waiting";
-  const untitled = chatThread?.title === "Untitled" || chatThread?.title === "New chat" || chatThread?.title === SIDE_CHAT_TITLE;
+  const untitled = chatThread?.title === "Untitled" || chatThread?.title === "New chat";
   // Recomputed per streamed chunk, but the request below re-arms only when
   // the chosen prompt itself changes.
   const titleCandidate = useMemo(
