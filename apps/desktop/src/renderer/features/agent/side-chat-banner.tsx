@@ -1,7 +1,6 @@
 import { GitBranch } from "lucide-react";
 import type { SideChatSeed } from "./side-chat";
 
-/** "Branched from message" above a side chat, quoting where it branched. */
 export function SideChatBranchBanner({ seed }: { seed: SideChatSeed }) {
   return (
     <div data-side-chat-banner="" className="flex w-full max-w-(--chat-lane) min-w-0 flex-col gap-1.5 self-center">
