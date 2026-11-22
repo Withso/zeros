@@ -22,3 +22,9 @@ it("preserves unchanged Local and authoritative message references", () => {
   const confirmed = { message, ctx: { ...context, transcriptReadOnly: false } };
   expect(compare(confirmed, { ...confirmed, ctx: { ...confirmed.ctx } })).toBe(true);
 });
+
+it("re-renders earlier agent text when its turn stops streaming", () => {
+  const text = { id: "a1", kind: "text", role: "agent", text: "done" } as AgentMessage;
+  const streaming = { message: text, ctx: { ...context, isStreaming: true, lastMessageId: "a2" } };
+  expect(compare(streaming, { message: text, ctx: { ...streaming.ctx, isStreaming: false } })).toBe(false);
+});

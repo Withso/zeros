@@ -24,7 +24,7 @@ const shared: TranscriptTurnShared = {
     pendingQuestionToolCallIds: new Set(), respondToQuestion: vi.fn(), respondToPermission: vi.fn(),
     retrySafetyReview: async () => {}, recordPolicy: vi.fn(), chatId, setMode: null, subagentChildren: new Map(), editAndResubmit: vi.fn() },
   actions: { editAndResubmit: vi.fn(), retryTurn: async () => {}, warmRetryTranscript: vi.fn(), continueTurn: vi.fn(),
-    forkToNewTab: vi.fn(), warmForkToNewTab: vi.fn(), signIn: vi.fn() },
+    forkToNewTab: vi.fn(), warmForkToNewTab: vi.fn(), openSideChat: vi.fn(), warmSideChat: vi.fn(), signIn: vi.fn() },
 };
 function render(index = 0) {
   const state = store(), slot = projectCloudPromptSession(state.sessions[chatId]!);
@@ -77,6 +77,15 @@ it("mounts the exact native terminal footer while the receipt remains accepted a
 it("offers the existing sent-prompt edit control for a canonical cloud turn", () => {
   terminal();
   expect(render()).toContain('aria-label="Edit message"');
+});
+
+it("offers Side chat in the sent-prompt popup and on agent output", () => {
+  terminal();
+  store().patchSession(chatId, { messages: [...store().sessions[chatId]!.messages,
+    { id: "answer", kind: "text", role: "agent", phase: "final_answer", text: "Final text", createdAt: 29_000 }] });
+  const html = render();
+  expect(html).toContain('aria-label="Message actions"');
+  expect(html.match(/aria-label="Side chat from here"/g)?.length ?? 0).toBeGreaterThanOrEqual(2);
 });
 
 it("does not settle from final text or another turn's native terminal", () => {
