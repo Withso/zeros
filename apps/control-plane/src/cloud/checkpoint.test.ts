@@ -1,11 +1,11 @@
 import { execFileSync, spawnSync } from "node:child_process";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
-import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, renameSync, rmSync, symlinkSync, truncateSync, utimesSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, readdirSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, renameSync, rmSync, symlinkSync, truncateSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
-  CHECKPOINT_SAVED_REPORT, WORKER_SERVICE_OFF, backupProbeCommand, checkpointArchiveSteps, checkpointCommand, parseBackupProbe, checkpointRestoreSteps, cloudV2CheckpointObject, openCheckpointKey,
+  CHECKPOINT_SAVED_REPORT, WORKER_SERVICE_OFF, backupProbeCommand, ignoredBaselineCommand, checkpointArchiveSteps, checkpointCommand, parseBackupProbe, checkpointRestoreSteps, cloudV2CheckpointObject, openCheckpointKey,
   parseCheckpointResult, parseRestoreResult, restoreCommand, sealCheckpointKey, type CheckpointReuse, type RestoreInput,
 } from "./checkpoint.js";
 
@@ -1496,22 +1496,104 @@ describe("retention backups and the stop probe", () => {
   });
 
   describe("the probe", () => {
-    const probe = (paths: string[], env: NodeJS.ProcessEnv) => {
-      const result = spawnSync("bash", ["-c", `eval "$1"`, "probe", backupProbeCommand(paths)], { env, encoding: "utf8" });
+    const probe = (paths: string[], env: NodeJS.ProcessEnv, home = env.HOME!) => {
+      const result = spawnSync("bash", ["-c", `eval "$1"`, "probe", backupProbeCommand(paths, home)], { env, encoding: "utf8" });
       expect(result.status).toBe(0);
       return parseBackupProbe(result.stdout);
     };
 
-    it("is clean for a fresh checkout, a new branch with no commits, ignored files and pushed commits", () => {
+    it("is clean for a fresh checkout, a new branch with no commits, an ignored directory and pushed commits", () => {
       const w = workspaces();
-      expect(probe([w.oldRepo], w.env)).toBe("clean");
+      expect(probe([w.oldRepo], w.env, w.oldHome)).toBe("clean");
       w.git(w.oldRepo, "switch", "-q", "-c", "zeros/new");
-      w.write(join(w.oldRepo, ".env.local"), "IGNORED=1\n");
+      // A whole ignored directory is never in a backup, so it never counts.
       w.write(join(w.oldRepo, "node_modules/pkg/index.js"), "ignored\n");
-      expect(probe([w.oldRepo], w.env)).toBe("clean");
+      expect(probe([w.oldRepo], w.env, w.oldHome)).toBe("clean");
       w.write(join(w.oldRepo, "pushed.txt"), "x\n"); w.git(w.oldRepo, "add", "pushed.txt"); w.git(w.oldRepo, "commit", "-q", "-m", "pushed");
       w.git(w.oldRepo, "push", "-q", "origin", "zeros/new");
-      expect(probe([w.oldRepo], w.env)).toBe("clean");
+      expect(probe([w.oldRepo], w.env, w.oldHome)).toBe("clean");
+    });
+
+    describe("ignored files a backup would capture", () => {
+      const journal = (w: ReturnType<typeof workspaces>, files: Record<string, string>) => w.write(
+        join(w.oldHome, ".local/share/zeros/cloud-worker/environment-seed/manifest.json"),
+        JSON.stringify({ version: 2, files: Object.entries(files).map(([path, content]) => ({ path, sha256: createHash("sha256").update(content).digest("hex") })) }));
+      const baseline = (w: ReturnType<typeof workspaces>) => {
+        const result = spawnSync("bash", ["-c", `eval "$1"`, "baseline", ignoredBaselineCommand([w.oldRepo], w.oldHome)], { env: w.env, encoding: "utf8" });
+        expect(result.stdout).toBe("zeros-baseline recorded\n");
+      };
+
+      it("is dirty for an ignored file a person made, with no baseline: a rebuild would not have it", () => {
+        const w = workspaces();
+        w.write(join(w.oldRepo, ".env.local"), "MINE=1\n");
+        expect(probe([w.oldRepo], w.env, w.oldHome)).toBe("dirty");
+      });
+
+      it("is clean for a seeded file whose bytes are the server's, and dirty once the person edits it", () => {
+        const w = workspaces();
+        w.write(join(w.oldRepo, ".env"), "TOKEN=server\n");
+        journal(w, { ".env": "TOKEN=server\n" });
+        expect(probe([w.oldRepo], w.env, w.oldHome)).toBe("clean");
+        w.write(join(w.oldRepo, ".env"), "TOKEN=edited by hand\n");
+        expect(probe([w.oldRepo], w.env, w.oldHome)).toBe("dirty");
+      });
+
+      it("is clean for a file the create's baseline recorded, unchanged, and dirty once it changes or another appears", () => {
+        const w = workspaces();
+        w.write(join(w.oldRepo, "build.log"), "made by setup\n");
+        baseline(w);
+        expect(probe([w.oldRepo], w.env, w.oldHome)).toBe("clean");
+        // Recorded once: a later baseline never takes in what a person made since.
+        w.write(join(w.oldRepo, ".env.local"), "MINE=1\n");
+        baseline(w);
+        expect(probe([w.oldRepo], w.env, w.oldHome)).toBe("dirty");
+        rmSync(join(w.oldRepo, ".env.local"));
+        expect(probe([w.oldRepo], w.env, w.oldHome)).toBe("clean");
+        w.write(join(w.oldRepo, "build.log"), "changed since\n");
+        expect(probe([w.oldRepo], w.env, w.oldHome)).toBe("dirty");
+      });
+
+      it("is clean for an ignored chat attachment alone: a backup drops attachments", () => {
+        const w = workspaces();
+        // Ignored by file pattern, so Git lists the attachment itself rather than one ignored directory.
+        w.write(join(w.oldRepo, ".gitignore"), "node_modules/\n.env*\n*.log\n*.png\n");
+        w.git(w.oldRepo, "commit", "-q", "-am", "ignore attachments"); w.git(w.oldRepo, "push", "-q", "origin", "HEAD");
+        w.write(join(w.oldRepo, ".context/attachments/upload-1/photo.png"), "png\n");
+        expect(probe([w.oldRepo], w.env, w.oldHome)).toBe("clean");
+      });
+
+      it("defines everything it calls: each generated script, on a real repository, writes nothing to stderr", () => {
+        const w = workspaces();
+        w.write(join(w.oldRepo, ".env.local"), "MINE=1\n");
+        w.write(join(w.oldRepo, "build.log"), "made\n");
+        // The scripts discard their own stderr; run them with it kept.
+        const keep = (command: string) => command.replace("exec 3>&1 >/dev/null 2>&1", "exec 3>&1 >/dev/null");
+        for (const command of [ignoredBaselineCommand([w.oldRepo], w.oldHome), backupProbeCommand([w.oldRepo], w.oldHome)]) {
+          expect(command).toContain("exec 3>&1 >/dev/null 2>&1");
+          const result = spawnSync("bash", ["-c", `eval "$1"`, "script", keep(command)], { env: w.env, encoding: "utf8" });
+          expect(result.stderr).toBe("");
+          // The baseline just recorded these files, so the probe after it is clean.
+          expect(result.stdout).toMatch(/^zeros-(baseline recorded|backup-probe clean)\n$/);
+        }
+      });
+
+      it("judges a second repository by its own seed journal, and is unknown when it cannot read one", () => {
+        const w = workspaces(), second = join(w.oldHome, "acme", "api");
+        w.git(w.root, "clone", "-q", w.origin, second);
+        const own = join(w.oldHome, ".local/share/zeros/cloud-worker/repositories/1/environment-seed/manifest.json");
+        w.write(join(second, ".env"), "SECOND=server\n");
+        // The first repository's journal does not speak for the second's files.
+        journal(w, { ".env": "SECOND=server\n" });
+        expect(probe([w.oldRepo, second], w.env, w.oldHome)).toBe("dirty");
+        // Its own journal does: seeded and equal is clean, edited is dirty.
+        w.write(own, JSON.stringify({ version: 2, files: [{ path: ".env", sha256: createHash("sha256").update("SECOND=server\n").digest("hex") }] }));
+        rmSync(join(w.oldHome, ".local/share/zeros/cloud-worker/environment-seed/manifest.json"));
+        expect(probe([w.oldRepo, second], w.env, w.oldHome)).toBe("clean");
+        w.write(join(second, ".env"), "SECOND=edited by hand\n");
+        expect(probe([w.oldRepo, second], w.env, w.oldHome)).toBe("dirty");
+        w.write(own, "{not json");
+        expect(probe([w.oldRepo, second], w.env, w.oldHome)).toBe("unknown");
+      });
     });
 
     it.each([
@@ -1530,7 +1612,7 @@ describe("retention backups and the stop probe", () => {
     ])("is dirty for %s", (_name, change) => {
       const w = workspaces();
       change(w);
-      expect(probe([w.oldRepo], w.env)).toBe("dirty");
+      expect(probe([w.oldRepo], w.env, w.oldHome)).toBe("dirty");
     });
 
     it("is dirty when any one of several repositories has work, and unknown when one cannot be read", () => {
@@ -1553,4 +1635,17 @@ describe("retention backups and the stop probe", () => {
       expect(() => backupProbeCommand(["relative/path"])).toThrow();
     });
   });
+});
+
+it("keeps every control-plane source file text: no NUL byte anywhere under src", () => {
+  const offenders: string[] = [];
+  const walk = (directory: string) => {
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      const file = join(directory, entry.name);
+      if (entry.isDirectory()) { if (entry.name !== "node_modules") walk(file); }
+      else if (/\.(ts|mts|mjs|js|sql|json)$/.test(entry.name) && readFileSync(file).includes(0)) offenders.push(file);
+    }
+  };
+  walk(join(__dirname, ".."));
+  expect(offenders).toEqual([]);
 });
