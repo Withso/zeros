@@ -374,6 +374,8 @@ type OrganizationRow = {
   role: OrganizationRole;
   is_personal: boolean;
   cloud_workspaces_allowed: boolean;
+  /** cloud_organization_enabled (0262): a Personal organization's also needs its owner's Pro. */
+  cloud_enabled?: boolean;
   default_team_id: string | null;
   workos_sync_revision?: string | number;
 };
@@ -403,7 +405,7 @@ function organizationSummary(row: OrganizationRow): OrganizationSummary {
     defaultTeamId: row.default_team_id,
     workspaceCapabilities: {
       local: row.is_personal,
-      cloud: !row.is_personal && row.cloud_workspaces_allowed,
+      cloud: row.cloud_enabled ?? (!row.is_personal && row.cloud_workspaces_allowed),
     },
     teamCapabilities: { multiple: false, canCreate: false },
   };
@@ -420,7 +422,7 @@ function requiredOrganizationSummary(
 
 const ORGANIZATION_SUMMARY_SQL = `
   SELECT o.id, o.slug, o.name, o.logo, om.role, o.is_personal,
-         o.cloud_workspaces_allowed, dt.id AS default_team_id
+         o.cloud_workspaces_allowed, cloud_organization_enabled(o) AS cloud_enabled, dt.id AS default_team_id
   FROM organizations o
   JOIN organization_members om ON om.org_id = o.id
   LEFT JOIN LATERAL (

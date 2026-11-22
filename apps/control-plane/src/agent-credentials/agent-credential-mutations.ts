@@ -83,7 +83,7 @@ async function lockOwner(tx: Tx, userId: string) {
 export const serializeCloudAgentCredentialSourceMutation = lockOwner;
 async function organization(tx: Tx, userId: string, organizationId: string) {
   if ((await tx.query(`SELECT 1 FROM organization_members member JOIN organizations organization ON organization.id=member.org_id
-    WHERE member.org_id=$1 AND member.user_id=$2 AND NOT organization.is_personal AND organization.deleted_at IS NULL
+    WHERE member.org_id=$1 AND member.user_id=$2 AND (NOT organization.is_personal OR cloud_organization_enabled(organization)) AND organization.deleted_at IS NULL
     FOR SHARE OF member,organization`, [organizationId, userId])).rowCount !== 1) denied();
 }
 /** Freeze only verified nonsecret source identities. The public request never

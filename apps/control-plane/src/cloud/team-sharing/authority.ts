@@ -10,7 +10,7 @@ import type { CloudGithubConnectionStore } from "../github-connections-store.js"
 import { CLOUD_V2_WORKSPACE_COLUMNS, cloudV2WorkspaceFromRow, type CloudV2Workspace, type CloudV2WorkspaceRow } from "../store.js";
 import { CLOUD_V2_LIVE_ACCESS } from "../workspace-access.js";
 import { CloudSourceTargetSchema, type CloudSourceTarget, type CloudV2SourceAuthority } from "../source-authority.js";
-import { teamNotFound, teamUnavailable } from "./contract.js";
+import { TeamSharingAbsent, teamNotFound, teamUnavailable } from "./contract.js";
 
 export type TeamView = {
   workspace: CloudV2Workspace; createdByUserId: string | null; role: "creator" | "admin" | "member";
@@ -54,6 +54,9 @@ export class CloudTeamAuthority {
         -- A private repository's workspace exists for its member only, admins included.
         AND (w.private_owner_user_id IS NULL OR w.private_owner_user_id=$1)`, [...securityStreamParameters(user),ids])).rows;
     if (!rows.length && !await securityStreamAuthority(tx,user)) throw new HttpError(401,"session_revoked","Authentication is no longer current");
+    // A Personal organization's workspace, admitted or not (its owner's Pro may have ended): the creator routes answer.
+    if (rows.some(row => (row.organization_policy as unknown[])[0] === true) || !rows.length && (await tx.query(`SELECT 1 FROM cloud_v2_workspaces w
+      JOIN organizations o ON o.id=w.org_id WHERE w.id=ANY($1::uuid[]) AND o.is_personal LIMIT 1`,[ids])).rowCount) throw new TeamSharingAbsent();
     return new Map(rows.map(row => {
       const targets = z.array(CloudSourceTargetSchema).max(100).safeParse(row.sources);
       const names = row.source_repositories?.map(name => name.toLowerCase()).sort() ?? [];

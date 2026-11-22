@@ -8,7 +8,7 @@ import { isIP } from "node:net";
 import type pg from "pg";
 
 import type { Config } from "./config.js";
-import { configureCloudTeamOwnership } from "./db-context.js";
+import { configureCloudPersonal, configureCloudTeamOwnership } from "./db-context.js";
 import { DatabaseAcquireTimeoutError } from "./db.js";
 import { createReleaseIdentityRoutes } from "./release-identity.js";
 import { ClientCompatibility, createClientCompatibilityMiddleware } from "./client-compatibility.js";
@@ -108,6 +108,7 @@ export function createApp(
   dependencies: CreateAppDependencies = {},
 ): ControlPlaneApp {
   configureCloudTeamOwnership(pool, config.cloudV2?.teamOwnership === true);
+  configureCloudPersonal(pool, config.cloudV2?.personalCloud === true);
   const app: ControlPlaneApp = new Hono();
   const databaseTimingReporter = createDatabaseTimingReporter();
   const timing = requestTiming({ slowMs: config.slowRequestLogMs ?? DEFAULT_SLOW_REQUEST_LOG_MS,

@@ -20,7 +20,7 @@ import { securityStreamAuthority } from "../security-events.js";
 import { HttpError } from "../authz.js";
 import { CloudV2HistoryDigestsReplySchema, type CloudV2HistoryState, type CloudV2MessageRow } from "./contract.js";
 import { hashCloudV2Token, newCloudV2Token } from "./tokens.js";
-import { CLOUD_V2_CREATOR_ON_HOLD, CLOUD_V2_CREATOR_ACCESS_SQL, CLOUD_V2_LIVE_ACCESS as LIVE_ACCESS, CLOUD_V2_LIVE_ACCESS_SQL, requireWorkspaceCreator } from "./workspace-access.js";
+import { CLOUD_V2_CREATOR_ON_HOLD, CLOUD_V2_PERSONAL_PRO_ENDED, CLOUD_V2_CREATOR_ACCESS_SQL, CLOUD_V2_LIVE_ACCESS as LIVE_ACCESS, CLOUD_V2_LIVE_ACCESS_SQL, requireWorkspaceCreator } from "./workspace-access.js";
 import { memberOnHoldSql, organizationMemberOnHold } from "../organization-seats.js";
 import { CloudV2PromptOutbox, type CloudApiPrompt } from "./prompt-outbox.js";
 import { computerSourceReviewRequired, readComputerSourceTargets } from "./computer-provenance.js";
@@ -355,13 +355,16 @@ async function ownedRow(tx: Tx, id: string, userId: string, lock = false): Promi
     [id, userId],
   );
   if (rows[0]) return rows[0];
-  // Tell a creator on Hold why their own workspace is unavailable.
-  const held = await tx.query(
-    `SELECT 1 FROM cloud_v2_workspaces w
-     WHERE w.id = $1 AND w.creator_user_id = $2 AND w.state <> 'deleted' AND ${CLOUD_V2_CREATOR_ON_HOLD}`,
+  // Tell a creator on Hold why their own workspace is unavailable, and the owner
+  // of a Personal organization whose Pro ended (only with the switch on).
+  const reason = (await tx.query<{ held: boolean; pro_required: boolean }>(
+    `SELECT ${CLOUD_V2_CREATOR_ON_HOLD} AS held, ${CLOUD_V2_PERSONAL_PRO_ENDED} AS pro_required
+     FROM cloud_v2_workspaces w WHERE w.id = $1 AND w.creator_user_id = $2 AND w.state <> 'deleted'`,
     [id, userId],
-  );
-  throw held.rowCount ? organizationMemberOnHold() : notFound();
+  )).rows[0];
+  if (reason?.held) throw organizationMemberOnHold();
+  if (reason?.pro_required) throw new HttpError(403, "pro_required", "Cloud workspaces need Pro. This workspace opens again when Pro is active.");
+  throw notFound();
 }
 
 /** Titles a chat carries before it is named; they never name a workspace. */
@@ -413,17 +416,18 @@ export class CloudV2Store {
   }
 
   /** Shared by insertion and a pending create's resolution. */
-  private async admitCreator(tx: Tx, organizationId: string, creatorUserId: string, serializeCreates = false): Promise<void> {
-    const member = await tx.query<{ pro: boolean; held: boolean }>(
-      `SELECT account_pro_active(m.user_id) AS pro, ${memberOnHoldSql("m.org_id", "m.user_id")} AS held
+  private async admitCreator(tx: Tx, organizationId: string, creatorUserId: string, serializeCreates = false): Promise<{ personal: boolean }> {
+    const member = await tx.query<{ pro: boolean; held: boolean; personal: boolean }>(
+      `SELECT account_pro_active(m.user_id) AS pro, ${memberOnHoldSql("m.org_id", "m.user_id")} AS held, o.is_personal AS personal
        FROM organization_members m JOIN organizations o ON o.id = m.org_id AND o.deleted_at IS NULL
-       WHERE m.org_id = $1 AND m.user_id = $2 AND NOT o.is_personal AND o.cloud_workspaces_allowed
+       WHERE m.org_id = $1 AND m.user_id = $2 AND cloud_organization_enabled(o)
        FOR SHARE OF o ${serializeCreates ? "FOR UPDATE OF m" : "FOR SHARE OF m"}`,
       [organizationId, creatorUserId],
     );
     if (!member.rows[0]) throw new HttpError(404, "not_found", "Organization not found");
     if (member.rows[0].held) throw organizationMemberOnHold();
     if (!member.rows[0].pro) throw new HttpError(403, "pro_required", "Creating a cloud workspace requires Pro");
+    return { personal: member.rows[0].personal };
   }
 
   /** The build's ID for this repository, and the scope a v3 image needs. */
@@ -465,7 +469,10 @@ export class CloudV2Store {
     if (pending && (!input.computerBuildId || input.sourceRepositoryId !== undefined || input.runtimeCanary || input.executionRuntime || Object.keys(input.env ?? {}).length))
       throw new Error("A pending create needs a Computer build and no verified source");
     let sourceRepositoryId = input.sourceRepositoryId, scope: readonly CloudSourceTarget[] | undefined;
-    await this.admitCreator(tx, input.organizationId, input.creatorUserId, input.workspaceTokenCreate);
+    const { personal } = await this.admitCreator(tx, input.organizationId, input.creatorUserId, input.workspaceTokenCreate);
+    // A Personal organization runs cloud on the creator path only: shared
+    // execution is refused there, so the deployment's default never applies.
+    const executionRuntime = personal ? undefined : input.executionRuntime;
     if (input.workspaceTokenCreate) {
       // Membership locking serializes this budget across tokens and replicas;
       // the fresh statement also sees any creator admitted before the lock.
@@ -515,7 +522,7 @@ export class CloudV2Store {
       [input.id, input.organizationId, input.creatorUserId, input.name, input.repository, input.branch,
         input.baseBranch, input.computerBuildId,
         pending ? null : (scope ?? [{ repository: input.repository }]).map(source => source.repository.toLowerCase()), pending, input.createdBySessionId ?? null,
-        input.executionRuntime ? "active" : "legacy", privateOwner, projectId,
+        executionRuntime ? "active" : "legacy", privateOwner, projectId,
         projectId ? input.checkoutFolder ?? null : null, projectId && (input.repositories?.length ?? 0) > 1 ? input.folder ?? null : null,
         projectId ? input.repositories?.[0]?.baseCommit ?? null : null],
     )).rows[0]!;
@@ -529,15 +536,15 @@ export class CloudV2Store {
         VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`, [row.id, position, entry.repository, entry.repositoryId, entry.folder, entry.branch, entry.baseBranch, entry.baseCommit ?? null]);
     }
     // Creator path: each later repository's environment files are pinned like the first's. Shared execution has none for them yet.
-    if (projectId && !input.executionRuntime && (input.repositories?.length ?? 0) > 1)
+    if (projectId && !executionRuntime && (input.repositories?.length ?? 0) > 1)
       await pinCloudRepositoryEnvironments(tx, workspace(row), input.repositories!.slice(1).map(entry => entry.repositoryId));
     if (input.runtimeCanary) await consumeRuntimeCanary(tx, workspace(row), input.runtimeCanary, sourceRepositoryId, createKey);
     let promptAdmission;
-    if (input.executionRuntime) {
+    if (executionRuntime) {
       if (!this.prompts.execution) throw new HttpError(503, "execution_unavailable", "Shared execution is unavailable");
       const authority = await this.prompts.execution.deps.authority.creation(tx, row.id, input.creatorUserId);
       await tx.query("UPDATE cloud_v2_workspaces SET execution_intent_authority=$2 WHERE id=$1", [row.id, executionIntentAuthority(authority)]);
-      await recordExecutionCreation(tx, row.id, input.executionRuntime);
+      await recordExecutionCreation(tx, row.id, executionRuntime);
       if (input.initialPrompt) promptAdmission = await this.prompts.execution.creationPrompt(tx, authority, input.initialPrompt);
     }
     if (input.initialPrompt) await this.prompts.enqueueApi(row.id, input.creatorUserId, input.initialPrompt, tx, undefined, promptAdmission);
@@ -600,7 +607,7 @@ export class CloudV2Store {
     return workspace(await withSystemTx(this.pool, async tx => {
       const { rows } = await tx.query<{ id: string }>(
         `SELECT w.id FROM cloud_v2_workspaces w JOIN organizations o ON o.id = w.org_id
-         WHERE o.slug = $1 AND o.deleted_at IS NULL AND NOT o.is_personal AND w.number = $2`,
+         WHERE o.slug = $1 AND o.deleted_at IS NULL AND (NOT o.is_personal OR cloud_organization_enabled(o)) AND w.number = $2`,
         [organizationSlug, number],
       );
       if (!rows[0]) throw notFound();

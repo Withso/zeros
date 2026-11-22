@@ -110,3 +110,12 @@ it("reads the release's previous runtime pin only when it is a distinct publishe
   expect(loadConfig({ ...base, CLOUD_V2_RUNTIME_PREVIOUS_SHA256: "a".repeat(64) }).cloudV2?.runtime.previousSha256).toBeUndefined();
   expect(() => loadConfig({ ...base, CLOUD_V2_RUNTIME_PREVIOUS_SHA256: "previous" })).toThrow("CLOUD_V2_RUNTIME_PREVIOUS_SHA256");
 });
+
+it("keeps cloud in Personal organizations off until a deployment enables it", () => {
+  const key = generateKeyPairSync("ed25519").privateKey.export({ format: "der", type: "pkcs8" }).toString("base64");
+  const base = { ...env, CLOUD_V2_WORKER_SIGNING_KEY: key };
+  expect(loadConfig(base).cloudV2).toMatchObject({ personalCloud: false });
+  expect(loadConfig({ ...base, CLOUD_V2_PERSONAL_CLOUD_ENABLED: " TRUE " }).cloudV2).toMatchObject({ personalCloud: true });
+  expect(loadConfig({ ...base, CLOUD_V2_PERSONAL_CLOUD_ENABLED: "false" }).cloudV2).toMatchObject({ personalCloud: false });
+  expect(() => loadConfig({ ...base, CLOUD_V2_PERSONAL_CLOUD_ENABLED: "1" })).toThrow("CLOUD_V2_PERSONAL_CLOUD_ENABLED");
+});

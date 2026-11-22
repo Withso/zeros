@@ -6,14 +6,17 @@ import type { AuthedUser } from "../../auth.js";
 import { HttpError } from "../../authz.js";
 import { resetMigratedTestDatabase } from "../../test-database.js";
 import { grantTestPro } from "../../test-pro.js";
+import { configureCloudPersonal } from "../../db-context.js";
 import { CloudV2Store } from "../store.js";
 import { CloudV2Computers } from "../computer.js";
 import { createCloudGithubServices } from "../github-composition.js";
 import { createCloudV2Routes } from "../routes.js";
 import { CloudTeamSharing } from "./store.js";
 
-export async function teamSharingFixture(pool: pg.Pool, options: { eventNow?: () => number; ownership?: boolean } = {}) {
+export async function teamSharingFixture(pool: pg.Pool, options: { eventNow?: () => number; ownership?: boolean; personal?: boolean } = {}) {
   await resetMigratedTestDatabase(pool);
+  // personal: the organization is the creator's Personal one (its only member), with the switch on.
+  configureCloudPersonal(pool, options.personal === true);
   const store = new CloudV2Store(pool), organizationId = randomUUID();
   async function actor(): Promise<AuthedUser> {
     const id = randomUUID(), subject = `user_${id}`, sessionId = `session_${randomUUID()}`;
@@ -29,8 +32,9 @@ export async function teamSharingFixture(pool: pg.Pool, options: { eventNow?: ()
   const creator = await actor(), viewer = await actor(), admin = await actor(), outsider = await actor();
   const actors = new Map([creator,viewer,admin,outsider].map(user => [user.id,user]));
   await pool.query(`INSERT INTO organizations(id,slug,name,created_by,is_personal,cloud_workspaces_allowed)
-    VALUES($1,$2,'Fixture',$3,false,true)`, [organizationId, `org-${organizationId}`, creator.id]);
-  await pool.query("INSERT INTO organization_members(org_id,user_id,role) VALUES($1,$2,'owner'),($1,$3,'member'),($1,$4,'admin')", [organizationId,creator.id,viewer.id,admin.id]);
+    VALUES($1,$2,'Fixture',$3,$4,$5)`, [organizationId, `org-${organizationId}`, creator.id, options.personal === true, options.personal !== true]);
+  if (options.personal) await pool.query("INSERT INTO organization_members(org_id,user_id,role) VALUES($1,$2,'owner')", [organizationId,creator.id]);
+  else await pool.query("INSERT INTO organization_members(org_id,user_id,role) VALUES($1,$2,'owner'),($1,$3,'member'),($1,$4,'admin')", [organizationId,creator.id,viewer.id,admin.id]);
   const denied = new Set<string>(), unavailable = new Set<string>();
   const fetcher = vi.fn(async (value: string | URL | Request, init?: RequestInit): Promise<Response> => {
     const url = new URL(String(value)), person = new Headers(init?.headers).get("authorization")?.replace("Bearer synthetic-", "");
@@ -44,14 +48,14 @@ export async function teamSharingFixture(pool: pg.Pool, options: { eventNow?: ()
   });
   const keys = { currentKeyVersion: 1, keys: { 1: Buffer.alloc(32,27).toString("base64url") } };
   const github = createCloudGithubServices(pool,null,keys,store,fetcher);
-  for (const user of [creator,viewer,admin]) {
+  for (const user of options.personal ? [creator] : [creator,viewer,admin]) {
     const scope = { organizationId,userId: user.id };
     await github.connections.store.save(scope,await github.connections.store.fingerprint(scope),
       { id: "12",login: "fixture" },{ method: "pat",accessToken: `synthetic-${user.id}`,expiresAt: null });
   }
   const workspace = await store.createWorkspace({ id: randomUUID(),organizationId,creatorUserId: creator.id,name: "Team workspace",
     repository: "example/project",sourceRepositoryId: "42",branch: "work",baseBranch: "main",computerBuildId: null });
-  const own = await store.createWorkspace({ id: randomUUID(),organizationId,creatorUserId: viewer.id,name: "My workspace",
+  const own = await store.createWorkspace({ id: randomUUID(),organizationId,creatorUserId: options.personal ? creator.id : viewer.id,name: "My workspace",
     repository: "example/project",sourceRepositoryId: "42",branch: "mine",baseBranch: "main",computerBuildId: null });
   for (const item of [workspace,own]) await store.transition(item.id,["creating"],"stopped");
   const app = new Hono();
