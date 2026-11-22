@@ -616,7 +616,7 @@ function ignoredFiles(take: string, skip?: string): string[] {
 
 /** Where a checkout's ignored-file baseline lives: outside every checkout and outside the worker state a
  * backup holds. One file per checkout, named by the digest of its path. */
-const IGNORED_BASELINE_DIR = ".local/share/zeros/retention-baseline";
+export const IGNORED_BASELINE_DIR = ".local/share/zeros/retention-baseline";
 
 /** Judges every ignored file the backup would capture from one checkout (NUL-separated paths in `list`,
  * relative to `repo`): reproducible only when it is a seeded file whose bytes are the seed journal's, or a
@@ -727,8 +727,8 @@ export function backupProbeCommand(checkoutPaths: readonly string[], home = "/ho
 }
 
 /** Records each checkout's ignored-file baseline (what the backup would capture of its ignored files, with
- * their digests): the probe then counts those files, unchanged, as reproducible. Not called yet. Its caller is
- * the project builder (ready-copies.ts), once, on the build machine after the last setup and before the build's
+ * their digests): the probe then counts those files, unchanged, as reproducible. The project builder
+ * (ready-copies.ts readyCopyBaselineCommand) calls it once, on the build machine after the last setup and before the build's
  * scrub and stop: no person exists during a build, and every fork inherits the file (its checkout paths must
  * be the fork's). Never replaces an existing baseline. Prints zeros-baseline recorded, or nothing. */
 export function ignoredBaselineCommand(checkoutPaths: readonly string[], home = "/home/user"): string {
