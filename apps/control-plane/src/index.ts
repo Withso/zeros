@@ -5,7 +5,8 @@ import { createCloudV2 } from "./cloud/composition.js";
 import { workerPollingOptions } from "./worker-polling-config.js";
 import { startWorkerNotifications } from "./worker-notifications.js";
 import { loadConfig } from "./config.js";
-import { createPool, createMigrationPool } from "./db.js";
+import { createMigrationPool } from "./db.js";
+import { createServerPools } from "./server-pools.js";
 import { assertHostedDatabaseOwnership } from "./development-environment.js";
 import { runServiceBootMigrations, verifyMigrations, type ServiceBootMigrationResult } from "./migrate.js";
 import { loadEmailConfig } from "./email.js";
@@ -27,24 +28,12 @@ if (config.tracesUrl) {
 // the HTTP API and never start durable queue consumers (realtime.md).
 const servesApi = processRole !== "worker";
 const servesHttpApi = processRole === "api" || processRole === "combined";
-const workerPool = processRole === "worker" || processRole === "combined"
-  ? createPool(config.databaseUrl, { workload: "worker", applicationName: "zeros-workers" }) : null;
-// A worker-only process uses its worker pool for readiness. It never creates
-// an unused API pool, and API replicas never start durable queue consumers.
-const pool = servesApi ? createPool(config.databaseUrl, {
-  workload: "api", maxConnections: config.databasePoolMax ?? 6,
-  ...(processRole === "realtime" ? { applicationName: "zeros-realtime" } : {}),
-}) : workerPool!;
+const { pool, workerPool, listenerPool, cloud: cloudPool, advisoryLockPool } = createServerPools(config, processRole);
 if (config.development && "generation" in config.development) {
   await assertHostedDatabaseOwnership(pool, config.development);
 }
 const emailConfig = loadEmailConfig();
 
-// LISTEN is session-scoped and must bypass transaction poolers. All consumers
-// share one disposable session, in an isolated pool using runtime privileges.
-const listenerPool = createPool(config.databaseListenUrl ?? config.databaseUrl, {
-  workload: "listener", maxConnections: 2, applicationName: "zeros-notifications", keepAlive: true,
-});
 const securityEventBroker = new PostgresSecurityEventBroker(listenerPool);
 const workosProvider = config.workos
   ? new RailwayWorkOSProvider(config.auth, config.workos)
@@ -98,8 +87,8 @@ const cloudV2Lifecycle = processRole === "worker" || processRole === "combined";
 // two connections, one build and one cleanup, keep those locks out of the
 // worker pool's query slots.
 const computerLockPool = runtimeReady && config.cloudV2 && cloudV2Lifecycle
-  ? createPool(config.databaseUrl, { workload: "advisory-lock", applicationName: "zeros-computer-locks" }) : null;
-const cloudV2 = runtimeReady ? createCloudV2(config, workerPool ?? pool, {
+  ? advisoryLockPool() : null;
+const cloudV2 = runtimeReady ? createCloudV2(config, cloudPool, {
   relay: processRole === "realtime" || processRole === "combined",
   lifecycle: cloudV2Lifecycle,
 }, securityEventBroker, listenerPool, ...(computerLockPool ? [computerLockPool] : [])) : null;

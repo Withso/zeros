@@ -36,7 +36,7 @@ export class GithubRepositoryAuthority {
       JOIN users u ON u.id=i.owner_user_id AND u.auth_status='active' AND u.deleted_at IS NULL
       LEFT JOIN cloud_github_connections c ON c.installation_id=i.id AND c.owner_user_id=i.owner_user_id AND c.org_id=$4::uuid
       LEFT JOIN organization_members m ON m.org_id=c.org_id AND m.user_id=c.owner_user_id
-      LEFT JOIN organizations o ON o.id=m.org_id AND o.deleted_at IS NULL AND NOT o.is_personal
+      LEFT JOIN organizations o ON o.id=m.org_id AND o.deleted_at IS NULL AND (NOT o.is_personal OR cloud_organization_enabled(o))
       WHERE i.owner_user_id=$1 AND i.app_variant=$2 AND i.suspended_at IS NULL
         AND ($3::bigint IS NULL OR i.github_installation_id=$3)
         AND ($5::text IS NULL OR lower(i.account_login)=lower($5))

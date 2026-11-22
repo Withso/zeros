@@ -34,6 +34,7 @@ import {
 import { upsertProject } from "../../state/projects-store";
 import { ZerosSpinner } from "@/renderer/shared/ui/loading";
 import { getActiveOrganizationSnapshot, getOrganizationStoreGeneration, useActiveOrganization, useTeams } from "../../features/team/team-store";
+import { cloudOrganizationFor } from "../../features/team/personal-cloud";
 import { parseRemote } from "../pr/github-url";
 import { createCloudWorkspaceDocument } from "../../platform/cloud-workspaces";
 import { useCloudCreateAvailability } from "../dispatcher/cloud-create";
@@ -103,7 +104,8 @@ function ScopedOpenGithubProjectDialog({
   const [parentFolder, setParentFolder] = useState(defaultParentFolder());
   const [busy, setBusy] = useState(false);
   const organization = useActiveOrganization();
-  const cloud = Boolean(organization && !organization.isPersonal) && !local;
+  // An organization, or the Personal entry with its account's Personal cloud.
+  const cloud = Boolean(cloudOrganizationFor(organization)) && !local;
   const source = useMemo(() => parseRemote(url.trim()), [url]);
   const availability = useCloudCreateAvailability(open && cloud);
   const computer = useCloudComputerV2CreateGate(open && cloud);
@@ -146,27 +148,28 @@ function ScopedOpenGithubProjectDialog({
     if (owner?.id !== organization?.id) return;
     setBusy(true);
     try {
-      if (owner && !owner.isPersonal && !local) {
+      const cloudOwner = cloudOrganizationFor(owner);
+      if (cloudOwner && !local) {
         const epoch = getOrganizationStoreGeneration();
         if (source?.host !== "github.com") throw new Error("Choose a GitHub repository.");
-        const fingerprint = JSON.stringify([epoch, owner.id, source.owner.toLowerCase(), source.repo.toLowerCase()]);
+        const fingerprint = JSON.stringify([epoch, cloudOwner.id, source.owner.toLowerCase(), source.repo.toLowerCase()]);
         if (cloudIntent.current?.fingerprint !== fingerprint) {
           if (!installed) throw new Error("Add this repository to your Cloud Computer first.");
           // No base branch: the server starts from the branch its Computer installed.
           cloudIntent.current = { fingerprint, key: crypto.randomUUID(), repository: { owner: installed.owner, name: installed.name } };
         }
         const intent = cloudIntent.current;
-        const workspace = await createCloudWorkspaceDocument({ organizationId: owner.id,
+        const workspace = await createCloudWorkspaceDocument({ organizationId: cloudOwner.id,
           repository: intent.repository, idempotencyKey: intent.key });
         if (epoch !== getOrganizationStoreGeneration()) return;
         acceptCloudWorkspaceDocument(workspace);
         cloudIntent.current = null;
         const folder = cloudWorkspaceKey({ organizationId: workspace.organizationId, workspaceId: workspace.id });
         const project = cloudProjectForFolder(folder);
-        if (getActiveOrganizationSnapshot()?.id === owner.id && project) {
+        if (cloudOrganizationFor(getActiveOrganizationSnapshot())?.id === cloudOwner.id && project) {
           spawnPreparedDefaultChat({ folder, repoRoot: project.repoRoot, dispatch });
         } else {
-          toast.success(`Cloud workspace created in ${owner.name}`);
+          toast.success(`Cloud workspace created in ${owner!.name}`);
         }
         notifyProjectsChanged();
         notifyWorkspacesChanged();

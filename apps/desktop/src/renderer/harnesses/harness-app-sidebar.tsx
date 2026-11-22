@@ -605,6 +605,28 @@ if (params.has("organizations")) {
   Object.assign(auth, { status: "authenticated", storedUser: user, userId: user.sub, email: user.email });
 }
 
+// ?personalCloud=pro|free: an account whose control plane offers its Personal
+// organization's cloud (CLOUD_V2_PERSONAL_CLOUD_ENABLED), with or without Pro.
+if (params.has("personalCloud")) {
+  const { accountPresentationOwner, bindAccountPresentationOwner } = await import("../platform/account-presentation-cache");
+  const { acceptOrganizationSnapshot } = await import("../features/team/team-store");
+  const { setActiveOrganizationSelection } = await import("../features/team/active-team");
+  const { controlPlane } = await import("../features/team/control-plane");
+  const { normalizeOrganizationSummary, personalCloudOffer } = await import("../features/team/organization-summary");
+  const seat = params.get("personalCloud") === "free" ? "free" as const : "pro" as const;
+  const accountRows = [{ id: "99999999-9999-4999-8999-999999999999", slug: "ada", name: "Ada", logo: null, role: "owner" as const, isPersonal: true,
+    defaultTeamId: null, workspaceCapabilities: { local: true, cloud: true }, teamCapabilities: { multiple: false, canCreate: false }, seat }];
+  const organizations = accountRows.map(normalizeOrganizationSummary), personalCloud = personalCloudOffer(accountRows)!;
+  const user = { sub: "personal-cloud-account", email: "ada@example.test", name: "Ada", provider: "workos" as const };
+  const me = { user: { id: user.sub, email: user.email, displayName: "Ada", staffRole: null }, capabilities: { createOrganization: seat === "pro", pro: seat === "pro" },
+    organizations, teams: organizations, personalCloud };
+  bindAccountPresentationOwner(accountPresentationOwner("https://api.example.test", user.sub));
+  acceptOrganizationSnapshot(me);
+  setActiveOrganizationSelection("local-personal", true);
+  controlPlane.me = async () => me;
+  Object.assign(auth, { status: "authenticated", storedUser: user, userId: user.sub, email: user.email });
+}
+
 Object.assign(window, {
   dashboardReleaseArchives: (fail = false, keepDeferred = false) => {
     deferDashboardArchives = keepDeferred;

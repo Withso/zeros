@@ -1,5 +1,5 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
-import { Bot, ChevronRight, Cloud, Columns2, Ellipsis, GitBranchPlus, Laptop, PencilLine, Plus, Rows2, X } from "lucide-react";
+import { Bot, ChevronRight, Cloud, Columns2, Ellipsis, GitBranchPlus, Laptop, MessageSquarePlus, PencilLine, Plus, Rows2, X } from "lucide-react";
 import { leafIds } from "../../state/chat-panes";
 import { useChatPanesStore } from "../../state/chat-panes-store";
 import { IconButton } from "@/renderer/shared/ui/primitives/icon-button";
@@ -21,6 +21,7 @@ import {
   DropdownMenuTrigger,
 } from "../../shared/ui/primitives/dropdown-menu";
 import { addChildSession, canAddChildSession } from "../../features/agent/add-child-session";
+import { canOpenSideChat, openSideChat } from "../../features/agent/side-chat";
 import { spawnNewChatTab } from "../../state/spawn-default-chat";
 import { editChat } from "../../state/cloud-chat-edits";
 import { openSession } from "../../state/open-session";
@@ -32,6 +33,9 @@ import { useArchivedWorkspaces, useLiveWorkspaces } from "../../state/use-projec
 import type { Workspace } from "../../platform/git";
 import { findWorkspaceForFolder } from "../../state/workspace-resolution";
 import { workspaceLabel } from "../workspace-tabs";
+import { isCloudWorkspace } from "../../platform/bridge/cloud-workspace-key";
+import { useNativeRuntime } from "../../platform/runtime";
+import { OpenInSubmenu } from "./conversation-header";
 import type { WorkspacePlacement } from "./workspace-identity";
 
 export function sessionName(chat: ChatThread): string {
@@ -392,6 +396,8 @@ export function SessionActionsMenu({ folder, readOnly = false }: { folder: strin
     const active = state.chats.find((chat) => chat.id === state.activeChatId);
     return active?.folder === folder ? active : undefined;
   });
+  // Same gate as the pane menu: host apps cannot open a cloud workspace.
+  const showOpenIn = useNativeRuntime().ready && !isCloudWorkspace(folder);
   if (readOnly) return null;
   return (
     <DropdownMenu>
@@ -402,18 +408,25 @@ export function SessionActionsMenu({ folder, readOnly = false }: { folder: strin
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end" sideOffset={6}>
         {canAddChildSession(parent) && (
-          <>
-            <DropdownMenuItem
-              data-session-add-child=""
-              onSelect={() => addChildSession(parent, { publishChat: (chat) => dispatch({ type: "ADD_CHAT", chat }) })}
-            >
-              <GitBranchPlus className="size-4" strokeWidth={1.5} />
-              Add child session
-              <DropdownMenuShortcut>⌥⌘T</DropdownMenuShortcut>
-            </DropdownMenuItem>
-            <DropdownMenuSeparator />
-          </>
+          <DropdownMenuItem
+            data-session-add-child=""
+            onSelect={() => addChildSession(parent, { publishChat: (chat) => dispatch({ type: "ADD_CHAT", chat }) })}
+          >
+            <GitBranchPlus className="size-4" strokeWidth={1.5} />
+            Add child session
+            <DropdownMenuShortcut>⌥⌘T</DropdownMenuShortcut>
+          </DropdownMenuItem>
         )}
+        {canOpenSideChat(parent) && (
+          <DropdownMenuItem
+            data-session-side-chat=""
+            onSelect={() => openSideChat(parent, null, { publishChat: (chat) => dispatch({ type: "ADD_CHAT", chat }) })}
+          >
+            <MessageSquarePlus className="size-4" strokeWidth={1.5} />
+            New side chat
+          </DropdownMenuItem>
+        )}
+        {(canAddChildSession(parent) || canOpenSideChat(parent)) && <DropdownMenuSeparator />}
         <DropdownMenuItem onSelect={() => requestFocusedPaneSplit("right")}>
           <Columns2 className="size-4" strokeWidth={1.5} />
           Split right
@@ -427,6 +440,12 @@ export function SessionActionsMenu({ folder, readOnly = false }: { folder: strin
             <X className="size-4" strokeWidth={1.5} />
             Close split
           </DropdownMenuItem>
+        )}
+        {showOpenIn && (
+          <>
+            <DropdownMenuSeparator />
+            <OpenInSubmenu path={folder} />
+          </>
         )}
       </DropdownMenuContent>
     </DropdownMenu>

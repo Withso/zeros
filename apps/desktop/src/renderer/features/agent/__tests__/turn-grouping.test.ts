@@ -269,3 +269,45 @@ describe("a mirrored cloud prompt row carrying turnSummary.usage (B3)", () => {
     expect(turn?.recordedSummary).toEqual(turnSummary);
   });
 });
+
+describe("harness switch rows", () => {
+  const switchRow = (id: string): AgentMessage => ({
+    ...(event(id) as object),
+    title: "Switched to Codex",
+    toolKind: "harness_switch",
+  }) as AgentMessage;
+
+  it("moves a switch recorded before a prompt into that prompt's turn", () => {
+    const turns = groupMessagesIntoTurns([
+      user("u1", "first"), event("e1"), switchRow("s1"), user("u2", "second"), event("e2"),
+    ]);
+    expect(turns.map((t) => t.events.map((e) => e.id))).toEqual([["e1"], ["s1", "e2"]]);
+    expect(turns[0].providerEvents.map((e) => e.id)).toEqual(["e1"]);
+  });
+
+  it("keeps a mid-turn switch where it happened", () => {
+    const turns = groupMessagesIntoTurns([
+      user("u1", "first"), event("e1"), switchRow("s1"), event("e2"), user("u2", "second"),
+    ]);
+    expect(turns[0].events.map((e) => e.id)).toEqual(["e1", "s1", "e2"]);
+  });
+
+  it("creates no empty turn for a switch before the first prompt", () => {
+    const turns = groupMessagesIntoTurns([switchRow("s1"), user("u1", "first")]);
+    expect(turns).toHaveLength(1);
+    expect(turns[0].events.map((e) => e.id)).toEqual(["s1"]);
+  });
+
+  it("keeps a switch with its prompt when that turn stopped before any output", () => {
+    const turns = groupMessagesIntoTurns([
+      user("u1", "first"), event("e1"), switchRow("s1"), user("u2", "second"), user("u3", "third"),
+    ]);
+    expect(turns.map((t) => t.events.map((e) => e.id))).toEqual([["e1"], ["s1"], []]);
+  });
+
+  it("stays at the end when no prompt follows yet", () => {
+    const turns = groupMessagesIntoTurns([user("u1", "first"), event("e1"), switchRow("s1")]);
+    expect(turns[0].events.map((e) => e.id)).toEqual(["e1", "s1"]);
+  });
+});
+

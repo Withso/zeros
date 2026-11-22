@@ -126,6 +126,14 @@ describe("settings sections with unified-workspaces", () => {
     expect(isSettingsSectionAvailable("cloud-computer", { ...organization, cloudEnabled: false })).toBe(false);
   });
 
+  it("shows the Cloud Computer under Personal only for its own cloud with Pro, and never the organization pages", () => {
+    expect(isSettingsSectionAvailable("cloud-computer", { ...unified, personalCloud: true })).toBe(true);
+    expect(isSettingsSectionAvailable("cloud-computer", { ...unified, personalCloud: false })).toBe(false);
+    expect(isSettingsSectionAvailable("cloud-computer", { ...unified, personalCloud: true, cloudEnabled: false })).toBe(false);
+    expect(isSettingsSectionAvailable("org-general", { ...unified, personalCloud: true, organizationGeneral: true })).toBe(false);
+    expect(isSettingsSectionAvailable("org-github", { ...unified, personalCloud: true, organizationGithub: true })).toBe(false);
+  });
+
   it("folds Terminal Agents into Agents and keeps the other gates", () => {
     expect(isSettingsSectionAvailable("terminal-agents", unified)).toBe(false);
     expect(settingsSectionForRail("terminal-agents", true)).toBe("providers");

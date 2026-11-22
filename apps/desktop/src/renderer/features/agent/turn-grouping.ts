@@ -16,6 +16,7 @@
 // ──────────────────────────────────────────────────────────
 
 import type { AgentMessage, AgentTextMessage } from "./use-agent-session";
+import { isHarnessSwitchMessage } from "./harness-switch";
 import { isLegacyEnvironmentConnection, isRoutineNativeSleep, withoutRedundantAgentTasks } from "./renderers/tool-readiness";
 
 export interface Turn {
@@ -89,6 +90,7 @@ function recordedMetadata(current: Turn | null, prompt: AgentTextMessage): Pick<
 export function groupMessagesIntoTurns(messages: AgentMessage[]): Turn[] {
   const turns: Turn[] = [];
   let current: Turn | null = null;
+  const moved = new Set<AgentMessage>();
   for (const m of withoutRedundantAgentTasks(uniqueDurableMessages(messages))) {
     if (m.kind === "tool" && isLegacyEnvironmentConnection(m)) continue;
     if (m.kind === "error_notice" && m.code === "mcp_startup_status") {
@@ -111,8 +113,11 @@ export function groupMessagesIntoTurns(messages: AgentMessage[]): Turn[] {
         continue;
       }
       const metadata = recordedMetadata(current, m);
-      if (current && !isSleepOnlySystemTurn(current)) turns.push(current);
-      const events: AgentMessage[] = m.localNote ? [m] : [];
+      // A switch applied with this message is recorded just before it. Show it
+      // in this turn, after the previous turn's footer, with its first work.
+      const switches = current && !m.localNote ? takeTrailingSwitches(current.events, moved) : [];
+      if (current && !isEmptyTurn(current) && !isSleepOnlySystemTurn(current)) turns.push(current);
+      const events: AgentMessage[] = m.localNote ? [m] : switches;
       current = {
         userPrompt: m.localNote ? null : m,
         recordedTurnId: steeredTurnId ?? m.id,
@@ -147,6 +152,20 @@ export function groupMessagesIntoTurns(messages: AgentMessage[]): Turn[] {
       : preceding;
   }
   return turns;
+}
+
+/** A switch moves once: a prompt that stopped before any output must not hand
+ * its own switch on to the next prompt. */
+function takeTrailingSwitches(events: AgentMessage[], moved: Set<AgentMessage>): AgentMessage[] {
+  let start = events.length;
+  while (start > 0 && isHarnessSwitchMessage(events[start - 1]) && !moved.has(events[start - 1])) start -= 1;
+  const taken = start < events.length ? events.splice(start) : [];
+  for (const event of taken) moved.add(event);
+  return taken;
+}
+
+function isEmptyTurn(turn: Turn): boolean {
+  return !turn.userPrompt && turn.events.length === 0;
 }
 
 /** Keep sleeps in owned turns for duration/identity, but don't manufacture an

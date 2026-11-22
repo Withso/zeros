@@ -400,12 +400,34 @@ const createOrganizations = ["11111111-1111-4111-8111-111111111111", "22222222-2
   workspaceCapabilities: { local: true as const, cloud: true },
   teamCapabilities: { multiple: false as const, canCreate: false as const },
 }));
+async function seedNoCloudProjects() {
+  const key = JSON.stringify([CLOUD_USER, CLOUD_ORG]);
+  const { cloudComputerRepositoriesCache } = await import("../features/settings/cloud-computer-v2-create-gate");
+  const { cloudProjects, githubLevelConnections } = await import("../features/settings/cloud-github-levels");
+  cloudComputerRepositoriesCache.setData(key, []);
+  githubLevelConnections.setData(key, { organization: [], personal: [], solo: true });
+  cloudProjects.setData(key, { ...CLOUD_PROJECTS, projects: [] } as never);
+}
 Object.assign(window, {
   seedCloudProjects,
+  seedNoCloudProjects,
   openCloudProjectWorkspace,
-  setCreateOrganization: (selection: "personal" | "organization" | "other" | "sign-out") => {
+  setCreateOrganization: (selection: "personal" | "organization" | "other" | "sign-out" | "personal-cloud-pro" | "personal-cloud-free") => {
     if (selection === "sign-out") {
       clearTeamStore({ resetSelection: true });
+      return;
+    }
+    if (selection === "personal-cloud-pro" || selection === "personal-cloud-free") {
+      // A control plane offering the account's Personal organization's cloud (CLOUD_V2_PERSONAL_CLOUD_ENABLED).
+      const seat = selection === "personal-cloud-pro" ? "pro" as const : "free" as const;
+      const personal = { ...createOrganizations[0]!, slug: "fixture", name: "Fixture", isPersonal: true,
+        workspaceCapabilities: { local: true as const, cloud: false }, seat };
+      acceptOrganizationSnapshot({
+        user: { id: CLOUD_USER, email: "fixture@example.test", displayName: "Fixture", staffRole: null },
+        organizations: [personal], teams: [personal],
+        personalCloud: { organizationId: CLOUD_ORG, slug: "fixture", seat },
+      });
+      setActiveOrganizationSelection(null, true);
       return;
     }
     acceptOrganizationSnapshot({

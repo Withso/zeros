@@ -8,7 +8,9 @@ import { isFeatureEnabled } from "../config/release-channel";
 import { setActiveOrganizationSelection } from "../features/team/active-team";
 import { cloudWorkspaceAccountAccess } from "../features/team/cloud-workspace-account-access";
 import { ControlPlaneError } from "../features/team/control-plane";
-import { getActiveOrganizationSnapshot, getTeamStoreState } from "../features/team/team-store";
+import { getActiveCloudOrganizationIdSnapshot, getTeamStoreState } from "../features/team/team-store";
+import { isPersonalCloudOrganization } from "../features/team/personal-cloud";
+import { PERSONAL_ORGANIZATION_ID } from "../features/team/personal-organization";
 import {
   cloudScopedId,
   cloudWorkspaceKey,
@@ -63,13 +65,15 @@ export async function navigateCloudWorkspaceLink(
     ? organizations.find((candidate) => candidate.id === link.organizationId)
     : isCloudWorkspacePageOwner(link.address.owner)
       ? organizations.find((candidate) =>
-          !candidate.isPersonal && candidate.slug?.toLowerCase() === link.address.owner)
+          (!candidate.isPersonal || isPersonalCloudOrganization(candidate.id, me)) && candidate.slug?.toLowerCase() === link.address.owner)
       : undefined;
-  if (!organization || organization.isPersonal) {
+  // The account's own Personal cloud opens under the Personal entry; any other Personal organization never opens.
+  const personal = !!organization?.isPersonal && isPersonalCloudOrganization(organization.id, me);
+  if (!organization || organization.isPersonal && !personal) {
     toast.error(unavailable);
     return;
   }
-  const name = organization.name.trim() || "this organization";
+  const name = personal ? "Personal" : organization.name.trim() || "this organization";
   if (!cloudWorkspaceAccountAccess(me, organization.id)) {
     toast.error(`Cloud workspaces aren't available in ${name}.`);
     return;
@@ -103,8 +107,8 @@ export async function navigateCloudWorkspaceLink(
   }
   options.beforeCommit();
   try {
-    setActiveOrganizationSelection(organization.id, false);
-    if (getActiveOrganizationSnapshot()?.id !== organization.id) {
+    setActiveOrganizationSelection(personal ? PERSONAL_ORGANIZATION_ID : organization.id, personal);
+    if (getActiveCloudOrganizationIdSnapshot() !== organization.id) {
       toast.info(`Select ${name} to open this link.`);
       return;
     }

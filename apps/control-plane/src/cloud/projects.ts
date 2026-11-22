@@ -64,7 +64,7 @@ export const projectRepositoryLimit = () =>
 export const projectNameTaken = () => new HttpError(409, "project_name_taken", "A project with this name already exists.");
 const projectNotFound = () => new HttpError(404, "not_found", "Project not found");
 const repositoryUnreachable = (repository: string) =>
-  new HttpError(409, "organization_connection_required", `Connect ${owner(repository)} on GitHub for the organization to use ${repository}.`);
+  new HttpError(409, "organization_connection_required", `Connect ${owner(repository)} on GitHub for projects to use ${repository}.`);
 
 /** What changed in a project's repositories, so only that project's copy is rebuilt. */
 export type CloudProjectChange = "project_created" | "repositories_changed" | "setup_changed" | "branch_changed" | null;
@@ -92,7 +92,7 @@ export class CloudProjects {
     const row = (await tx.query<{ role: string; name: string; personal: boolean }>(
       `SELECT m.role, o.name, o.cloud_personal_projects_allowed AS personal FROM organization_members m
        JOIN users u ON u.id=m.user_id AND u.auth_status='active' AND u.deleted_at IS NULL
-       JOIN organizations o ON o.id=m.org_id AND o.deleted_at IS NULL AND o.lifecycle_status='active' AND o.cloud_workspaces_allowed
+       JOIN organizations o ON o.id=m.org_id AND o.deleted_at IS NULL AND o.lifecycle_status='active' AND cloud_organization_enabled(o)
        WHERE m.org_id=$1 AND m.user_id=$2 ${lock ? "FOR UPDATE OF o" : ""}`, [organizationId, userId])).rows[0];
     if (!row) throw new HttpError(404, "not_found", "Organization not found");
     return { role: row.role, name: row.name, personalAllowed: row.personal };

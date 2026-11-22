@@ -9,7 +9,7 @@ import { promptStatusQuery } from "../prompt-status-query.js";
 import { ApiRenameSchema } from "../api/contract.js";
 import type { CloudTeamSharing } from "./store.js";
 import { TEAM_SHARING_HEADER, TEAM_OWNERSHIP_HEADER, TeamListSchema, TeamPageSchema, TeamCandidatesQuerySchema, TeamReassignSchema,
-  teamNotFound, teamReadOnly, teamManagementDenied, teamOwnershipRequired, teamUnavailable } from "./contract.js";
+  TeamSharingAbsent, teamNotFound, teamReadOnly, teamManagementDenied, teamOwnershipRequired, teamUnavailable } from "./contract.js";
 
 const uuid = (input: string) => { const parsed = z.string().uuid().safeParse(input); if (!parsed.success) throw teamNotFound(); return parsed.data; };
 async function body<T>(c: Context, schema: z.ZodType<T>, optional = false): Promise<T> {
@@ -32,6 +32,8 @@ export function createCloudTeamRoutes(sharing: CloudTeamSharing, document: (valu
     c.header("Cache-Control","no-store");
     try { return await handler(c,next); }
     catch (error) {
+      // Thrown by the handler's first read, before it changes anything.
+      if (error instanceof TeamSharingAbsent) return next();
       const failure = error instanceof HttpError ? error : teamUnavailable();
       if (failure.status === 503) c.header("Retry-After","5");
       if (failure.status === 429 && !c.res.headers.has("Retry-After")) c.header("Retry-After","60");

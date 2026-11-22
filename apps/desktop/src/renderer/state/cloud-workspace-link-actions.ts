@@ -8,6 +8,7 @@ import {
   numberedCloudWorkspacePageUrl,
 } from "../features/team/organization-links";
 import { getTeamStoreState, subscribeOrganizationSnapshots } from "../features/team/team-store";
+import { isPersonalCloudOrganization } from "../features/team/personal-cloud";
 import {
   parseCloudScopedId,
   parseCloudWorkspaceKey,
@@ -40,7 +41,7 @@ const readAccount = (): AccountSnapshot => getTeamStoreState().me;
 /** The organization's ID (slug), the owner segment of its workspaces' pages. */
 function organizationSlug(organizationId: string, me: AccountSnapshot = getTeamStoreState().me): string | null {
   const slug = (me?.organizations ?? me?.teams ?? []).find(
-    (organization) => organization.id === organizationId && !organization.isPersonal,
+    (organization) => organization.id === organizationId && (!organization.isPersonal || isPersonalCloudOrganization(organizationId, me)),
   )?.slug?.toLowerCase();
   return isCloudWorkspacePageOwner(slug) ? slug : null;
 }

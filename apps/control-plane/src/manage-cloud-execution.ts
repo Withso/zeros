@@ -44,6 +44,9 @@ export async function manageCloudExecution(pool: pg.Pool, raw: unknown,
     if (operator?.staff_role !== "platform_owner" || operator.auth_status !== "active" || operator.deleted_at) throw new Error("Execution activation requires an active platform owner");
     const workspace = (await client.query("SELECT * FROM cloud_v2_workspaces WHERE id=$1 AND org_id=$2 FOR UPDATE", [input.workspaceId,input.organizationId])).rows[0];
     if (!workspace) throw new Error("Execution plan workspace not found");
+    // Shared execution is refused in a Personal organization; its workspaces stay on the creator path.
+    if (action !== "rollback" && (await client.query("SELECT 1 FROM organizations WHERE id=$1 AND is_personal", [input.organizationId])).rowCount)
+      throw new Error("A Personal organization's cloud workspaces run on the creator path only");
     const previous = (await client.query("SELECT * FROM cloud_v2_execution_activations WHERE id=$1 FOR UPDATE", [input.activationId])).rows[0];
     const legacyRecovery = legacyTargetFingerprint !== undefined && previous &&
       previous.prepared_snapshot.targetFingerprintVersion === undefined && previous.target_fingerprint === legacyTargetFingerprint;

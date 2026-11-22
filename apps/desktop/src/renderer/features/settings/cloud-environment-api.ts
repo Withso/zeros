@@ -6,7 +6,8 @@ import { cloudAccountRequest } from "../../platform/cloud-workspaces";
 import { KeyedAsyncCache } from "../../shared/lib/keyed-async-cache";
 import { CONTROL_PLANE_URL } from "../team/control-plane";
 import { getActiveTeamId, subscribeActiveTeam } from "../team/active-team";
-import { getOrganizationStoreGeneration, getTeamStoreState, subscribeOrganizationSnapshots } from "../team/team-store";
+import { getActiveOrganizationSnapshot, getOrganizationStoreGeneration, getTeamStoreState, subscribeOrganizationSnapshots } from "../team/team-store";
+import { usableCloudOrganization } from "../team/personal-cloud";
 
 export const cloudEnvironmentCache = new KeyedAsyncCache<CloudEnvironmentMetadata>({ maxEntries: 32 });
 export type EnvironmentRepository = { id: string; owner: string; name: string };
@@ -18,8 +19,12 @@ const scopeSchema = z.tuple([z.string(), z.string(), z.number(), z.string().uuid
 function assertScope(key: string) {
   const [backend, user, epoch, organization, repositoryId, repository] = scopeSchema.parse(JSON.parse(key));
   const me = getTeamStoreState().me;
+  // An organization's environment, or Personal's own cloud's with Pro, while it is the active cloud owner.
+  const personal = usableCloudOrganization(getActiveOrganizationSnapshot());
   if (backend !== CONTROL_PLANE_URL || user !== me?.user.id || epoch !== getOrganizationStoreGeneration() ||
-      organization !== getActiveTeamId() || !(me.organizations ?? me.teams).some(org => org.id === organization && !org.isPersonal && org.workspaceCapabilities.cloud))
+      organization !== (personal?.isPersonal ? personal.id : getActiveTeamId()) ||
+      !(personal?.isPersonal ? personal.id === organization
+        : (me.organizations ?? me.teams).some(org => org.id === organization && !org.isPersonal && org.workspaceCapabilities.cloud)))
     throw new Error("The environment selection changed. Reopen its settings.");
   return { organization, repositoryId, repository };
 }

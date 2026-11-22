@@ -6,6 +6,7 @@ import { getSession } from "../features/auth/auth-store";
 import { CLIENT_TOKEN_ROLLOVER_FEATURE } from "@zeros/protocol/cloud-v2-relay";
 import { controlPlaneFetch } from "../features/update/control-plane-fetch";
 import { getOrganizationStoreGeneration } from "../features/team/team-store";
+import { personalCloudOrganization } from "../features/team/personal-cloud";
 import {
   CONTROL_PLANE_URL,
   ControlPlaneError,
@@ -179,9 +180,10 @@ export async function listCloudWorkspaceCatalogSnapshot(organizationId?: string)
   const me = getTeamStoreState().me;
   const generation = getOrganizationStoreGeneration();
   if (organizationId === undefined && !me) throw new Error("Cloud organization memberships have not loaded");
+  const personal = personalCloudOrganization(me);
   const organizations = organizationId !== undefined ? [organizationId]
-    : (me?.organizations ?? me?.teams ?? [])
-      .filter(org => !org.isPersonal && org.workspaceCapabilities.cloud).map(org => org.id);
+    : [...(me?.organizations ?? me?.teams ?? [])
+      .filter(org => !org.isPersonal && org.workspaceCapabilities.cloud).map(org => org.id), ...(personal ? [personal.id] : [])];
   const workspaces: CloudWorkspaceDocument[] = [];
   let complete = true;
   for (const id of organizations) {

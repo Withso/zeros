@@ -9,12 +9,12 @@ import type { PromptSender } from "./use-prompt-sender";
 import React, { memo, useCallback, useEffect, useRef, useState } from "react";
 import { IconButton } from "@/renderer/shared/ui/primitives/icon-button";
 import type { LocalMessageChatRef } from "@zeros/protocol/agent-messages";
-import { Plus, Pencil, Copy, Check } from "lucide-react";
+import { Plus } from "lucide-react";
 import type {
   AgentTextMessageAttachment,
   MessageContentSegment,
 } from "./use-agent-session";
-import { formatCompactAge } from "./format-age";
+import { MessageHoverActions } from "./message-hover-actions";
 import { autoActionIcon } from "./auto-action";
 import { cn } from "@/renderer/shared/ui/cn";
 import { Tooltip } from "@/renderer/shared/ui/primitives";
@@ -107,9 +107,10 @@ export const TurnContainer = memo(function TurnContainer({
   // the active turn always renders. `auto` in contain-intrinsic-size makes a
   // skipped turn keep its last rendered height instead of the 240px estimate,
   // so hiding and revealing a chat no longer shifts the reading position.
+  // Hover/focus lift the paint clip so the prompt's popup above the turn shows.
   const className = isActive
     ? "zeros-agent-turn zeros-agent-turn-active flex flex-col gap-4 relative [content-visibility:visible] [contain-intrinsic-size:auto_0px_auto_240px]"
-    : "zeros-agent-turn flex flex-col gap-4 relative [content-visibility:auto] [contain-intrinsic-size:auto_0px_auto_240px]";
+    : "zeros-agent-turn flex flex-col gap-4 relative [content-visibility:auto] hover:[content-visibility:visible] focus-within:[content-visibility:visible] [contain-intrinsic-size:auto_0px_auto_240px]";
   // data-checkpoint-id is CheckpointRail's anchor. It sits on this
   // content-visibility boundary because measuring a descendant would force
   // layout of every skipped turn; the prompt is the first child, so their tops
@@ -169,6 +170,8 @@ export const TurnPromptHeader = memo(function TurnPromptHeader({
   localFrom,
   sender,
   surfaceActive = true,
+  onSideChat,
+  onSideChatIntent,
 }: {
   children: React.ReactNode;
   /** With messageId, keys the edit-draft stash in the workspace store so a draft
@@ -176,8 +179,8 @@ export const TurnPromptHeader = memo(function TurnPromptHeader({
   chatId?: string;
   /** Only the header whose id matches the parent's editingMessageId edits. */
   messageId?: string;
-  /** Epoch-ms the user message was created. Rendered as a compact
-   *  age ("6s" / "6m" / "6h" / "6d" / "6y") in the hover actions row. */
+  /** Epoch-ms the user message was created, shown as the sent time in the
+   *  hover popup. */
   createdAt?: number;
   /** Lifted to the parent, so opening one turn's edit closes any other; null
    *  means none. */
@@ -218,6 +221,9 @@ export const TurnPromptHeader = memo(function TurnPromptHeader({
    *  composer uses this to keep hidden attachment previews inert. Defaults
    *  true for callers that do not track surfacing. */
   surfaceActive?: boolean;
+  /** Opens a side chat branched at this message. */
+  onSideChat?: () => void;
+  onSideChatIntent?: () => void;
 }) {
   // Edit drafts live in the workspace store, keyed by chatId:messageId, so they
   // survive the chat view remounting on a chat switch; local state died with it.
@@ -339,77 +345,19 @@ export const TurnPromptHeader = memo(function TurnPromptHeader({
         bubble
       )}
       {typeof originalText === "string" && (
-        <UserMessageActions
+        <MessageHoverActions
           text={originalText}
           createdAt={createdAt}
-          canEdit={editable}
-          onEdit={beginEdit}
+          timeLabel="Sent"
+          onEdit={editable ? beginEdit : undefined}
+          onSideChat={onSideChat}
+          onSideChatIntent={onSideChatIntent}
+          revealClassName="group-focus-within/usermsg:pointer-events-auto group-focus-within/usermsg:opacity-100 group-hover/usermsg:pointer-events-auto group-hover/usermsg:opacity-100"
         />
       )}
     </div>
   );
 });
-
-// The hover row beneath a sent user bubble: edit, copy and a compact age. It is
-// absolutely positioned and takes pointer events only on hover, so the hidden
-// row never intercepts clicks.
-function UserMessageActions({
-  text,
-  createdAt,
-  canEdit,
-  onEdit,
-}: {
-  /** Plain text copied to the clipboard by the copy button. */
-  text: string;
-  /** Epoch-ms; rendered as a compact age. Omitted/0 hides the badge. */
-  createdAt?: number;
-  /** Whether the edit affordance is offered (false when no onEdit wired). */
-  canEdit: boolean;
-  onEdit: () => void;
-}) {
-  const [copied, setCopied] = useState(false);
-  const age = typeof createdAt === "number" ? formatCompactAge(createdAt) : "";
-
-  const copy = useCallback(async () => {
-    try {
-      // Trim trailing whitespace to match the rendered bubble; edit keeps the raw
-      // text.
-      await navigator.clipboard.writeText(text.trimEnd());
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1500);
-    } catch {
-      /* clipboard may be blocked under some sandbox configs */
-    }
-  }, [text]);
-
-  // 20px inline icon buttons 2px under the bubble, so the row hangs no
-  // further into the turn gap than the old 16px marks did.
-  return (
-    <div className="pointer-events-none absolute top-full right-0 z-[2] flex items-center gap-0.5 pt-0.5 opacity-0 transition-opacity duration-150 ease-out group-focus-within/usermsg:pointer-events-auto group-focus-within/usermsg:opacity-100 group-hover/usermsg:pointer-events-auto group-hover/usermsg:opacity-100">
-      {canEdit && (
-        <Tooltip label="Edit message">
-          <IconButton size="inline" onClick={onEdit} label="Edit message">
-            <Pencil strokeWidth={2} />
-          </IconButton>
-        </Tooltip>
-      )}
-      <Tooltip label={copied ? "Copied" : "Copy message"}>
-        <IconButton size="inline" onClick={copy} label={copied ? "Copied" : "Copy message"}>
-          {copied ? <Check strokeWidth={2} /> : <Copy strokeWidth={2} />}
-        </IconButton>
-      </Tooltip>
-      {age && (
-        <Tooltip
-          label={createdAt ? new Date(createdAt).toLocaleString() : undefined}
-        >
-          <span className="text-muted-fg px-1 text-3xxs leading-4 tabular-nums select-none">
-            {age}
-          </span>
-        </Tooltip>
-      )}
-    </div>
-  );
-}
 
 function TurnPromptEditor({
   chatId,

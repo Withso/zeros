@@ -4,6 +4,7 @@ import { useRecoveringRead } from "../../state/use-recovering-read";
 import { useWorkspaceDispatch } from "../../state/store";
 import { Button } from "../../shared/ui";
 import { useActiveOrganization, useTeams } from "../team/team-store";
+import { usableCloudOrganization } from "../team/personal-cloud";
 import { requestUserSettingsSection } from "./settings-navigation";
 import { isFeatureEnabled } from "../../config/release-channel";
 import { CONTROL_PLANE_URL, ControlPlaneError } from "../team/control-plane";
@@ -68,10 +69,11 @@ export function cloudComputerV2CreateReason(
 }
 
 export function useCloudComputerV2CreateGate(active: boolean) {
-  const organization = useActiveOrganization();
+  // The cloud owner; a Personal cloud without Pro reads no Cloud Computer.
+  const organization = usableCloudOrganization(useActiveOrganization());
   const { me } = useTeams();
   const enabled =
-    isFeatureEnabled("cloud-workspaces") && Boolean(organization && !organization.isPersonal && me);
+    isFeatureEnabled("cloud-workspaces") && Boolean(organization && me);
   const shown = useSyncExternalStore(active ? subscribeVisibility : () => () => {}, visible, () => true);
   const key = enabled ? cloudComputerRepositoriesKey(me!.user.id, organization!.id) : null;
   const read = useRecoveringRead(cloudComputerRepositoriesCache, key, readInstalled,
