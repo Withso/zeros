@@ -495,6 +495,11 @@ export function componentBindingsOf(document: DefaultTreeAdapterTypes.Document, 
   if (classGate.size) gates.set("class", new Set([...(gates.get("class") ?? []), ...classGate]));
   const gatesRecord = boundedMap(gates, LIMITS.gates, (key) => key.length <= DESIGN_COMPONENT_RECORD_LIMITS.attributeName);
   if (gatesRecord) result.gates = gatesRecord;
+  // An empty prefix (a hole at a class's start) names no class to test.
+  const prefixes = new Map<string, Set<string>>();
+  for (const gate of classGates) if (gate.prefix) prefixes.set(gate.prefix, new Set([...(prefixes.get(gate.prefix) ?? []), ...gate.options]));
+  const classGatesRecord = boundedMap(prefixes, LIMITS.gates, (key) => key.length <= LIMITS.property);
+  if (classGatesRecord) result.classGates = classGatesRecord;
   const unread = [...optionNames].filter((name) => !used.has(name)).sort();
   if (unread.length) result.unread = unread.slice(0, LIMITS.unread);
 

@@ -1931,7 +1931,7 @@ async function completeDesignComponentWrite(
   if (!frame || typeof frame.sourceVersion !== "string" || (!frame.component && !frame.instances)) return;
   const runtime = designFrameRuntime(workspaceId, file);
   if (!runtime) return;
-  await completeDesignRuntimeBindings(workspaceId, frame as never, write, (nodeId) => runtime.getNodeDetails(nodeId));
+  await completeDesignRuntimeBindings(workspaceId, frame as never, write, (nodeId) => runtime.getNodeDetails(nodeId), runtime);
 }
 
 export async function updateDesignNodeStylesCached(

@@ -114,8 +114,11 @@ describe("linting what changes a component from outside", () => {
     ]);
     expect(JSON.stringify(found)).not.toContain("left");
     // Its place, an unbound axis and the control itself are its own.
-    await write(host.file, doc('<zd-text-field data-oid="tf1" width="40" style="left: 10px; top: 4px; height: 40px; min-width: 120px"></zd-text-field>'));
+    await write(host.file, doc('<zd-text-field data-oid="tf1" width="40" style="left: 10px; top: 4px; height: 40px; min-height: 20px"></zd-text-field>'));
     expect(await lint(host.file)).toEqual([]);
+    // A limit on the bound axis clamps the control.
+    await write(host.file, doc('<zd-text-field data-oid="tf1" width="40" style="max-width: 120px"></zd-text-field>'));
+    expect(await lint(host.file)).toEqual([expect.objectContaining({ ruleId: "component-control-shadowed", message: "This instance sets max-width over Width." })]);
   });
 
   it("finds nothing to warn about in frames that place the demo components by their controls", async () => {

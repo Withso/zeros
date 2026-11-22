@@ -358,6 +358,9 @@ export const designComponentBindingsSchema = z.object({
   vars: boundedRecord(z.string().regex(/^--[A-Za-z0-9_-]{1,126}$/), bindingOptionsSchema, BINDINGS.vars).optional(),
   /** Attributes a hole fills on some layer ("class" for class holes) to the options it reads. */
   gates: boundedRecord(z.string().min(1).max(LIMITS.attributeName), bindingOptionsSchema, BINDINGS.gates).optional(),
+  /** The fixed start of each class a class hole fills (`btn--` for
+   * `btn--{{ size }}`) to the options it reads; the "class" gate's detail. */
+  classGates: boundedRecord(z.string().min(1).max(BINDINGS.property), bindingOptionsSchema, BINDINGS.gates).optional(),
   /** Some layers or entries were dropped at a limit: a layer missing here may still be bound. */
   truncated: z.literal(true).optional(),
   /** Declared options nothing in the main reads. */

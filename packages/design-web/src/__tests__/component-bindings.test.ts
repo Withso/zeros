@@ -64,6 +64,8 @@ describe("the controls each layer of a main reads", () => {
     expect(bindings.root).toBe("btn");
     expect(bindings.layers.btn!.styles).toEqual({ color: ["tone"], height: ["size"] });
     expect(bindings.gates).toEqual({ class: ["tone"], "data-size": ["size"] });
+    // The prefix tells the runtime which classes are the hole's.
+    expect(bindings.classGates).toEqual({ "btn-": ["tone"] });
     expect(bindings.layers.label).toBeUndefined();
   });
 

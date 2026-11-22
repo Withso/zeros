@@ -150,7 +150,21 @@ const RUNTIME_VAR = /var\(\s*(--[A-Za-z0-9_-]+)/g;
 const SELECTOR_ATTRIBUTE = /\[\s*([^\s~|^$*=\]]+)/g;
 const REMEMBERED_LIMIT = 512;
 const remembered = new Map<string, BoundStyles>();
+/** What rules gated on a control's attribute or class would set, whatever
+ * the value now (getGatedStyles), per the same key; bounded alike. */
+const rememberedGated = new Map<string, BoundStyles>();
 const EMPTY: BoundStyles = Object.freeze({});
+const listeners = new Set<() => void>();
+let rememberedVersion = 0;
+
+/** Changes when a gated read lands, so a panel showing that layer re-reads it. */
+export function subscribeDesignRuntimeBindings(listener: () => void): () => void {
+  listeners.add(listener);
+  return () => listeners.delete(listener);
+}
+export function designRuntimeBindingsVersion(): number {
+  return rememberedVersion;
+}
 
 /** Which options each of a component's own custom properties carries. */
 const varsByRecord = new WeakMap<object, ReadonlyMap<string, readonly string[]>>();
@@ -237,6 +251,55 @@ export function rememberDesignRuntimeBindings(workspaceId: string, frame: Bindin
   while (remembered.size > REMEMBERED_LIMIT) remembered.delete(remembered.keys().next().value!);
 }
 
+/** The gates a record's controls fill, as the runtime takes them; null when none. */
+function gatesOf(record: BindingRecord): { attributes: string[]; classPrefixes: string[] } | null {
+  const attributes = Object.keys(record.bindings?.gates ?? {}).filter((name) => name !== "class");
+  const classPrefixes = Object.keys(record.bindings?.classGates ?? {});
+  return attributes.length || classPrefixes.length ? { attributes, classPrefixes } : null;
+}
+
+type GatedReader = {
+  supports(method: string): boolean;
+  getGatedStyles?(nodeId: string, gates: { attributes: readonly string[]; classPrefixes: readonly string[] }): Promise<Record<string, string[]>>;
+};
+
+/** Whether a layer's component has gates this generation has not read
+ * there yet: the one check before a panel asks the runtime. */
+export function designGatedReadPending(workspaceId: string, frame: BindingFrame, nodeId: string): boolean {
+  const target = bindingTarget(frame, nodeId);
+  return !!target && !!gatesOf(target.record) && !rememberedGated.has(rememberedKey(workspaceId, frame.file, frame.sourceVersion, nodeId));
+}
+
+/** Read once per layer and generation what the rules gated on its
+ * component's controls would set there at some value: at a value no gated
+ * rule matches (a Button at its default size) the winners name nothing. An
+ * older runtime has no such read, and the winners alone decide. */
+export async function readDesignGatedBindings(workspaceId: string, frame: BindingFrame, nodeId: string, runtime: GatedReader | null | undefined): Promise<void> {
+  const target = bindingTarget(frame, nodeId);
+  const gates = target && gatesOf(target.record);
+  const key = rememberedKey(workspaceId, frame.file, frame.sourceVersion, nodeId);
+  if (!target || !gates || rememberedGated.has(key) || !runtime?.supports("getGatedStyles") || !runtime.getGatedStyles) return;
+  const gated = await runtime.getGatedStyles(nodeId, gates).catch(() => null);
+  if (!gated) return;
+  const options: Record<string, string[]> = {};
+  const gateOptions = target.record.bindings?.gates ?? {};
+  const classOptions = target.record.bindings?.classGates ?? {};
+  for (const [property, keys] of Object.entries(gated)) {
+    const found = new Set<string>();
+    for (const gate of keys) {
+      const record = gate.startsWith(".") ? classOptions : gateOptions;
+      const name = gate.startsWith(".") ? gate.slice(1) : gate;
+      if (Object.hasOwn(record, name)) for (const option of record[name]!) found.add(option);
+    }
+    if (found.size) options[property] = [...found].sort();
+  }
+  rememberedGated.delete(key);
+  rememberedGated.set(key, Object.keys(options).length ? options : EMPTY);
+  while (rememberedGated.size > REMEMBERED_LIMIT) rememberedGated.delete(rememberedGated.keys().next().value!);
+  rememberedVersion += 1;
+  for (const listener of [...listeners]) listener();
+}
+
 /** Untracked targets one write reads; past this the static bindings decide
  * for the rest, so a large selection costs a bounded number of reads. */
 export const DESIGN_BOUND_COMPLETION_LIMIT = 32;
@@ -250,24 +313,33 @@ export async function completeDesignRuntimeBindings(
   frame: BindingFrame,
   write: readonly unknown[] | { nodeId: string; styles: Readonly<Record<string, string | null>> },
   read: (nodeId: string) => Promise<DesignRuntimeNodeDetails | null>,
+  runtime?: GatedReader | null,
 ): Promise<void> {
   const targets = new Set<string>();
+  const gated = new Set<string>();
   for (const entry of Array.isArray(write) ? write : [write]) {
     const operation = entry as { type?: unknown; nodeId?: unknown; styles?: unknown };
     if (Array.isArray(write) && operation.type !== "node.set-styles") continue;
     if (typeof operation.nodeId !== "string" || !operation.styles || typeof operation.styles !== "object") continue;
     if (!Object.values(operation.styles as Record<string, unknown>).some((value) => value !== null)) continue;
-    if (remembered.has(rememberedKey(workspaceId, frame.file, frame.sourceVersion, operation.nodeId)) || !bindingTarget(frame, operation.nodeId)) continue;
-    targets.add(operation.nodeId);
-    if (targets.size >= DESIGN_BOUND_COMPLETION_LIMIT) break;
+    const key = rememberedKey(workspaceId, frame.file, frame.sourceVersion, operation.nodeId);
+    const target = bindingTarget(frame, operation.nodeId);
+    if (!target) continue;
+    if (!remembered.has(key)) targets.add(operation.nodeId);
+    if (runtime && gatesOf(target.record) && !rememberedGated.has(key)) gated.add(operation.nodeId);
+    if (new Set([...targets, ...gated]).size >= DESIGN_BOUND_COMPLETION_LIMIT) break;
   }
-  if (!targets.size) return;
-  const details = await Promise.all([...targets].map((nodeId) => read(nodeId).catch(() => null)));
+  if (!targets.size && !gated.size) return;
+  const [details] = await Promise.all([
+    Promise.all([...targets].map((nodeId) => read(nodeId).catch(() => null))),
+    Promise.all([...gated].map((nodeId) => readDesignGatedBindings(workspaceId, frame, nodeId, runtime))),
+  ]);
   for (const entry of details) rememberDesignRuntimeBindings(workspaceId, frame, entry);
 }
 
 export function resetDesignRuntimeBindingsForTests(): void {
   remembered.clear();
+  rememberedGated.clear();
 }
 
 /** Every property a control drives on this layer, to the controls: what the
@@ -280,10 +352,12 @@ export function designLayerBoundStyles(workspaceId: string, frame: BindingFrame 
   if (!target) return EMPTY;
   const layers = target.record.bindings?.layers;
   const own = target.layer && layers && Object.hasOwn(layers, target.layer) ? layers[target.layer]!.styles ?? {} : {};
-  const runtime = remembered.get(rememberedKey(workspaceId, frame.file, frame.sourceVersion, nodeId)) ?? EMPTY;
-  if (runtime === EMPTY) return Object.keys(own).length ? own : EMPTY;
+  const key = rememberedKey(workspaceId, frame.file, frame.sourceVersion, nodeId);
+  const runtime = remembered.get(key) ?? EMPTY;
+  const gated = rememberedGated.get(key) ?? EMPTY;
+  if (runtime === EMPTY && gated === EMPTY) return Object.keys(own).length ? own : EMPTY;
   const merged: Record<string, string[]> = {};
-  for (const source of [own, runtime])
+  for (const source of [own, runtime, gated])
     for (const [property, controls] of Object.entries(source))
       merged[property] = [...new Set([...(merged[property] ?? []), ...controls])].sort();
   return merged;

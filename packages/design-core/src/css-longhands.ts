@@ -133,11 +133,23 @@ export function cssPropertyLonghands(property: string): ReadonlySet<string> {
   return found;
 }
 
+/** A size's limits clamp it, so writing one changes what the size sets;
+ * the limits themselves stay apart. */
+const LIMITS_OF: ReadonlyArray<[string, readonly string[]]> = [
+  ["width", ["min-width", "max-width"]],
+  ["height", ["min-height", "max-height"]],
+];
+
+function clamps(size: ReadonlySet<string>, limits: ReadonlySet<string>): boolean {
+  return LIMITS_OF.some(([axis, names]) => size.has(axis) && names.some((name) => limits.has(name)));
+}
+
 /** Whether writing one property can change what the other sets. */
 export function cssPropertiesOverlap(a: string, b: string): boolean {
   const left = cssPropertyLonghands(a);
-  for (const longhand of cssPropertyLonghands(b)) if (left.has(longhand)) return true;
-  return false;
+  const right = cssPropertyLonghands(b);
+  for (const longhand of right) if (left.has(longhand)) return true;
+  return clamps(left, right) || clamps(right, left);
 }
 
 /** The keys of a property-keyed record that overlap a property. */

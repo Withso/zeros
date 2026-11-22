@@ -165,6 +165,10 @@ export interface DesignFrameRuntimeConnection {
     /** Main layer ids of the parts that may be chosen; slots always may. An
      * older runtime ignores it, so check the result too. */
     selectable?: readonly string[]): Promise<DesignRuntimeNodeDetails | null>;
+  /** Properties rules gated on these attributes or class prefixes would set
+   * on a layer at some value, to the gates (".prefix" for a class).
+   * Opt-in: check `supports("getGatedStyles")`. */
+  getGatedStyles?(nodeId: string, gates: { attributes: readonly string[]; classPrefixes: readonly string[] }, signal?: AbortSignal): Promise<Record<string, string[]>>;
   previewStyles(
     nodeId: string,
     styles: Record<string, string | null>,
@@ -837,6 +841,16 @@ class DesignRuntimeConnectionImpl implements DesignFrameRuntimeConnection {
       throw runtimeError("previewComponentInstanceOptions returned malformed data");
     }
     return result;
+  }
+
+  async getGatedStyles(nodeId: string, gates: { attributes: readonly string[]; classPrefixes: readonly string[] }, signal?: AbortSignal): Promise<Record<string, string[]>> {
+    if (!this.supports("getGatedStyles")) throw runtimeError("getGatedStyles is not supported", "METHOD_NOT_SUPPORTED");
+    const result = await this.request("getGatedStyles", { nodeId, gates: { attributes: [...gates.attributes], classPrefixes: [...gates.classPrefixes] } }, signal);
+    const entries = result && typeof result === "object" && !Array.isArray(result) ? Object.entries(result as Record<string, unknown>) : null;
+    if (!entries || entries.length > 128 || !entries.every(([property, keys]) => property.length <= 128 && Array.isArray(keys) && keys.length <= 8 &&
+      keys.every((key) => typeof key === "string" && key.length > 0 && key.length <= 130)))
+      throw runtimeError("getGatedStyles returned malformed data");
+    return Object.fromEntries(entries) as Record<string, string[]>;
   }
 
   async getComponentPartAtLoc(x: number, y: number, hostNodeId: string, signal?: AbortSignal, selectable?: readonly string[]): Promise<DesignRuntimeNodeDetails | null> {

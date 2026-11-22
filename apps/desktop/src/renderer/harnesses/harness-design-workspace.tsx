@@ -282,6 +282,11 @@ const olderOverridesHarness = componentOptionsHarness && new URLSearchParams(win
 // With ?frameRootInstance the home frame's root is the instance itself, as a
 // duplicated main is: the frame's one root layer, marked data-zeros-frame-root.
 const frameRootInstanceHarness = componentOptionsHarness && new URLSearchParams(window.location.search).has("frameRootInstance");
+// With ?gatedSize a sheet the engine never reads sizes the composer only at a
+// Density no default shows (a Button at its default size): only the runtime's
+// gated candidates bind its height, on the main and on the instance.
+const gatedSizeHarness = componentOptionsHarness && new URLSearchParams(window.location.search).has("gatedSize");
+const GATED_SIZE_RULE = '.composer[data-density="compact"] { height: 200px; }';
 // With ?noBindings the engine predates bindings: it advertises none and its records carry none.
 const noBindingsHarness = new URLSearchParams(window.location.search).has("noBindings");
 /** A component's record as the engine reports it, with or without bindings. */
@@ -354,7 +359,7 @@ function renderHarnessComponentFrame(source: string, variant: string | null = nu
   // reads, which reaches the Gap control only through the main's own
   // --chip-round, so only the runtime can bind cc-chips' corner radius.
   return html.replace(/<\/head>/i, `<style data-zeros-options>:root { ${componentOptionCss(declaration, values, scope)} }</style>` +
-    `<style data-harness-linked>.chips { border-radius: var(--chip-round); }</style></head>`);
+    `<style data-harness-linked>.chips { border-radius: var(--chip-round); }${gatedSizeHarness ? ` ${GATED_SIZE_RULE}` : ""}</style></head>`);
 }
 
 // The home frame places one Chat composer, expanded as the engine expands an
@@ -544,7 +549,7 @@ const STYLE_ORIGINS_HOME_SOURCE = `<!doctype html>
     </main>
   </body>
 </html>`;
-const homeSource = styleOriginsHarness && frameRootInstanceHarness
+const homeAuthoredSource = styleOriginsHarness && frameRootInstanceHarness
   ? STYLE_ORIGINS_HOME_SOURCE.replace(/<main data-oid="home-main" data-zeros-frame-root>[\s\S]*<\/main>/,
     HARNESS_INSTANCE.replace('data-oid="home-composer"', 'data-oid="home-composer" data-zeros-frame-root'))
   : styleOriginsHarness && componentOptionsHarness
@@ -627,6 +632,7 @@ const homeSource = styleOriginsHarness && frameRootInstanceHarness
     </main>
   </body>
 </html>`;
+const homeSource = gatedSizeHarness ? homeAuthoredSource.replace(/<\/head>/i, `<style data-harness-linked>${GATED_SIZE_RULE}</style></head>`) : homeAuthoredSource;
 
 const pricingSource = componentOptionsHarness ? COMPONENT_OPTIONS_SOURCE : `<!doctype html>
 <html data-oid="pricing-html">

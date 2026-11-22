@@ -253,10 +253,17 @@ export async function runDesignComponentInstancesSmoke({ page, check }) {
   // On the main's root the card also opens the Controls tab.
   await selectMain();
   await page.locator('[data-design-inspector] [role="tab"]').filter({ hasText: "Style" }).click();
-  // The root's gap (row-gap in auto layout) is Gap's: the control in its place, no raw field to detach.
-  check("on a main's root, the gap field is the Gap control, not a raw field",
+  // The root's own gap declaration is Gap's: More styles shows the Gap
+  // control in that row, and the auto-layout gap field (row-gap, a longhand
+  // of the bound gap) is locked with the lock mark and no Detach.
+  check("on a main's root, More styles' gap row is the Gap control, and no row-gap field is left editable",
     (await stylePanel.locator("[data-design-embedded-controls]").getByLabel("Gap", { exact: true }).count()) >= 1 &&
       (await stylePanel.locator('[data-design-style-property="row-gap"]:not([data-design-origin="control"])').count()) === 0);
+  const autoLayoutGap = stylePanel.locator('[data-design-auto-layout] [data-design-style-property="row-gap"]').first();
+  await expect(autoLayoutGap).toHaveAttribute("data-design-origin", "control");
+  const gapLock = await autoLayoutGap.evaluate((element) => getComputedStyle(element, "::after").maskImage);
+  check("the auto-layout gap field is locked, with the lock mark and no Detach",
+    gapLock.includes("svg") && (await autoLayoutGap.locator(".zd-field-token-detach").count()) === 0, gapLock.slice(0, 40));
   const lockedInk = stylePanel.locator('[data-design-style-property="color"]').first();
   await expect(lockedInk).toHaveAttribute("data-design-origin", "control");
   await lockedInk.scrollIntoViewIfNeeded();
@@ -774,4 +781,51 @@ export async function runDesignComponentInstancesSmoke({ page, check }) {
   check("a frame-root instance offers no padding or gap handles, and no motion timeline",
     (await page.locator("[data-design-layout-tools-key], [data-design-spacing-hover-zone]").count()) === 0 &&
       (await page.getByRole("button", { name: "Toggle motion timeline" }).isDisabled()));
+}
+
+/** A Button at its default size: a sheet the engine never reads sizes the
+ * composer's root only at a Density no default shows. The runtime's gated
+ * candidates still bind its height to Density, on the instance and on the
+ * main, so H is that control and a raw height is refused. */
+export async function runDesignGatedSizeSmoke({ page, check }) {
+  const origin = new URL(page.url()).origin;
+  await page.goto(`${origin}/apps/desktop/src/renderer/harnesses/harness-design-workspace.html?styleOrigins&componentOptions&gatedSize`, { waitUntil: "networkidle" });
+  await openLayersDrawer(page);
+  const section = page.locator("[data-design-component-options]");
+  const inspector = page.locator("[data-design-inspector]");
+  const frameRow = (file) => page.locator(`[data-design-frame-row="${file}"]`);
+  const layer = (id) => page.locator(`[data-design-layer-id="${id}"]`);
+  const writes = () => page.evaluate(() => (window.__zerosHarnessWorkbenchOperations ?? []).filter((op) => op === "design.transaction.apply" || op === "design.node.styles").length);
+  const rawHeight = (file, nodeId) => page.evaluate(async ({ file, nodeId }) => {
+    const cache = await import("/apps/desktop/src/renderer/features/design-workspace/state/design-workspace-cache.ts");
+    const frame = cache.designWorkspaceSnapshotCache.peekSnapshot("ws_design_harness").data.frames.find((candidate) => candidate.file === file);
+    return cache.updateDesignNodeStylesCached("ws_design_harness", { frame: file, nodeId, sourceVersion: frame.sourceVersion, styles: { height: "320px" } })
+      .then(() => "written", (error) => String(error?.message ?? error));
+  }, { file, nodeId });
+
+  await expect(async () => {
+    if (!(await layer("home-composer").count())) await frameRow("home.html").locator("[data-layer-disclosure]").click();
+    if (!(await layer("home-composer").count())) await layer("home-main").locator("[data-layer-disclosure]").click();
+    await layer("home-composer").click();
+    await expect(section).toHaveAttribute("data-design-component-options", "instance", { timeout: 2_000 });
+  }).toPass();
+  await expect(inspector.locator('[data-design-size-section] [data-design-size-axis="y"]')).toHaveCount(0);
+  const writesBeforeInstance = await writes();
+  const instanceRefused = await rawHeight("home.html", "home-composer");
+  check("at a Density no gated rule matches, the instance's H is the Density control and a raw height is refused",
+    (await inspector.locator("[data-design-size-section] [data-design-embedded-controls]").getByText("Density").count()) >= 1 &&
+      /Density/.test(instanceRefused) && (await writes()) === writesBeforeInstance, instanceRefused);
+
+  await expect(async () => {
+    if ((await frameRow("pricing.html").getAttribute("aria-selected")) !== "true") await frameRow("pricing.html").click();
+    await expect(section).toHaveAttribute("data-design-component-options", "main", { timeout: 2_000 });
+  }).toPass();
+  await inspector.locator('[role="tab"]').filter({ hasText: "Style" }).click();
+  const stylePanel = page.locator("[data-design-style-panel]");
+  await expect(stylePanel.locator('[data-design-size-axis="y"]')).toHaveCount(0);
+  const writesBeforeMain = await writes();
+  const mainRefused = await rawHeight("pricing.html", "cc-root");
+  check("the same on the main: its root's H is the Density control and a raw height is refused",
+    (await stylePanel.locator("[data-design-embedded-controls]").getByText("Density").count()) >= 1 &&
+      /Density/.test(mainRefused) && (await writes()) === writesBeforeMain, mainRefused);
 }

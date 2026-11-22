@@ -27,6 +27,7 @@ import React, {
   useMemo,
   useRef,
   useState,
+  useSyncExternalStore,
 } from "react";
 
 import {
@@ -224,7 +225,7 @@ import { designComponentPartOf, designComponentSlotOf } from "@zeros/protocol/de
 import { useDesignHistoryPresentation } from "./state/design-history-presentation";
 import { designComponentDisplayTitle, designComponentIdentityLabel, designComponentInstanceIdentity, designComponentSlotLabel, designFrameComponentPresentation,
   designComponentTextLock, designMissingComponentOf, isDesignComponentPartNodeId } from "./state/design-component-parts";
-import { designBindingLayerId, designBoundControlsFor, designControlLabels, designLayerBoundStyles, designMainLayerControls, designPartControls, designRuntimeBoundStyles, designWithoutBoundStyles, rememberDesignRuntimeBindings } from "./state/design-component-bindings";
+import { designBindingLayerId, designBoundControlsFor, designControlLabels, designGatedReadPending, designRuntimeBindingsVersion, readDesignGatedBindings, subscribeDesignRuntimeBindings, designLayerBoundStyles, designMainLayerControls, designPartControls, designRuntimeBoundStyles, designWithoutBoundStyles, rememberDesignRuntimeBindings } from "./state/design-component-bindings";
 import { MessageRow } from "../../shared/ui/primitives/message-row";
 import type { DesignComponentOptionsTarget } from "./design-component-options";
 import {
@@ -1067,7 +1068,7 @@ export function InspectorEditField({
         />
         )}
         {suffix && !tokenShown ? <span className="zd-field-suffix">{suffix}</span> : null}
-        {tokenShown && token ? (
+        {tokenShown && token && origin.lock?.kind !== "control" ? (
           <span
             className="zd-field-token-detach"
             data-design-token-action={token.missing ? "always" : "hover"}
@@ -1799,6 +1800,16 @@ export const DesignInspector = React.memo(function DesignInspector({
   // The selected layer's winners complete what its component's bindings say
   // (rules in linked stylesheets); the cache refuses by the same answer.
   if (workspaceId && frame && elementDetails) rememberDesignRuntimeBindings(workspaceId, frame, elementDetails);
+  // And what rules gated on its controls would set at another value: read
+  // once per layer and generation, while shown; the panel re-reads on arrival.
+  useSyncExternalStore(subscribeDesignRuntimeBindings, designRuntimeBindingsVersion, designRuntimeBindingsVersion);
+  const gatedReadKey = workspaceId && frame && elementDetails && active && designGatedReadPending(workspaceId, frame, elementDetails.oid)
+    ? JSON.stringify([workspaceId, frame.file, frame.sourceVersion, elementDetails.oid])
+    : null;
+  useEffect(() => {
+    if (!gatedReadKey || !workspaceId || !frame || !elementDetails) return;
+    void readDesignGatedBindings(workspaceId, frame, elementDetails.oid, designFrameRuntime(workspaceId, frame.file));
+  }, [gatedReadKey]); // eslint-disable-line react-hooks/exhaustive-deps
   const frameComponentPresentation = frame ? designFrameComponentPresentation(frame, (file) =>
     designWorkspaceSnapshotCache.peekSnapshot(workspaceId ?? "").data?.frames.find((candidate) => candidate.file === file)?.title) : null;
   const errors = useMemo(

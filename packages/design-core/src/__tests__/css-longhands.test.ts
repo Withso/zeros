@@ -18,9 +18,16 @@ describe("whether two CSS properties set the same thing", () => {
 
   it("keeps different properties apart", () => {
     for (const [a, b] of [["gap", "padding"], ["background", "color"], ["border-radius", "border-width"], ["row-gap", "column-gap"],
-      ["width", "min-width"], ["transition", "animation"], ["--zd-gap", "gap"], ["--a", "--A"]])
+      ["min-width", "max-width"], ["min-width", "height"], ["transition", "animation"], ["--zd-gap", "gap"], ["--a", "--A"]])
       expect(cssPropertiesOverlap(a!, b!)).toBe(false);
     expect(cssPropertiesOverlap("--chip-round", "--chip-round")).toBe(true);
+  });
+
+  it("counts a size's limits as setting it, since they clamp it", () => {
+    for (const [size, limit] of [["width", "min-width"], ["width", "max-width"], ["height", "min-height"], ["height", "max-height"], ["inline-size", "max-width"], ["width", "min-inline-size"]]) {
+      expect(cssPropertiesOverlap(size!, limit!)).toBe(true);
+      expect(cssPropertiesOverlap(limit!, size!)).toBe(true);
+    }
   });
 
   it("treats a logical property as either physical side, and sizes as their axis", () => {
