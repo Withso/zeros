@@ -210,6 +210,8 @@ interface DashboardListRowProps extends Omit<
   onWarm?: () => void;
   actions: ReactNode;
   busy?: boolean;
+  /** An archived cloud workspace's retention line, shown where its branch is (the row keeps its height). */
+  archiveLine?: string | null;
 }
 
 // Forward the native row props/ref so the shared context menu can own its
@@ -227,6 +229,7 @@ export const DashboardListRow = forwardRef<
     onWarm,
     actions,
     busy = false,
+    archiveLine,
     ...rowProps
   },
   ref,
@@ -281,8 +284,8 @@ export const DashboardListRow = forwardRef<
             >
               {row.title}
             </span>
-            <span className="text-fg3 text-3xxs min-w-0 shrink-[100] truncate leading-4 font-normal">
-              {row.branch}
+            <span className="text-fg3 text-3xxs min-w-0 shrink-[100] truncate leading-4 font-normal" title={archiveLine ?? undefined}>
+              {archiveLine ?? row.branch}
             </span>
           </span>
           <DashboardPlacement workspace={w} active={active} />
