@@ -2,9 +2,12 @@
 // concise transcript". Pure and React-free, so it unit-tests without a DOM.
 // Full mode is every visible message in order; concise alternates each prompt
 // with its turn's concluding answer, using partitionTurn's boundary so it
-// matches a collapsed turn. Visibility mirrors agent-chat.tsx's
-// `visibleMessages`, and volume follows what the user saw: prose is generous,
-// while tool payloads are bounded and say what they dropped.
+// matches a collapsed turn. Handoff sits between them: every prompt, thinking
+// block, in-between message and answer, the chat's latest tool calls with the
+// end of their output, and one "Files changed" list per turn. Visibility
+// mirrors agent-chat.tsx's `visibleMessages`, and volume follows what the user
+// saw: prose is generous, while tool payloads are bounded and say what they
+// dropped.
 
 import {
   readQuestionStamp,
@@ -21,11 +24,12 @@ import { fallbackProse } from "./model-fallback";
 import { wakeupDisplayText } from "./wakeup-notice";
 import { toolPresentationReady, withoutRedundantAgentTasks } from "./renderers/tool-readiness";
 import { pendingChecksMessage } from "./renderers/tool-pending-checks";
-import { isUsageNotice, usageStatusChanges } from "./transcript-notices";
+import { isLegacyAuthenticationNotice, isUsageNotice, usageStatusChanges } from "./transcript-notices";
 import { isTurnFailureNotice, turnFailureForCard } from "./turn-failure";
+import { HARNESS_SWITCH_TOOL_KIND } from "./harness-switch";
 import { authenticationTurn, authenticationTurnOutput, authenticationTurnState, latestAuthenticationRecoveryTurn } from "./auth-prompt-recovery";
 
-export type TranscriptMode = "full" | "concise";
+export type TranscriptMode = "full" | "concise" | "handoff";
 
 export interface TranscriptMeta {
   /** Chat tab title. Falls back to "Untitled chat". */
@@ -39,7 +43,7 @@ export interface TranscriptMeta {
 
 export interface FormattedTranscript {
   text: string;
-  /** Messages rendered (full) or turns rendered (concise) — for the toast. */
+  /** Messages rendered (full) or turns rendered (concise, handoff). */
   count: number;
   /** True when TRANSCRIPT_TOTAL_MAX cut the document short. */
   truncated: boolean;
@@ -57,6 +61,12 @@ export const TRANSCRIPT_TEXT_MAX = 20_000;
  *  test run read as the whole run. */
 export const TRANSCRIPT_PAYLOAD_LINES = 40;
 export const TRANSCRIPT_PAYLOAD_MAX = 2_000;
+
+/** A handoff keeps only the chat's latest tool calls, so the next agent sees
+ *  where the work stood without the whole command history. Their output keeps
+ *  its END, where a command reports its result. */
+export const HANDOFF_TOOL_CALLS = 20;
+export const HANDOFF_TOOL_OUTPUT_MAX = 2_000;
 
 /** Whole-document cap. A pathological chat (20k messages × large tool
  *  payloads) would otherwise build a string big enough to stall the renderer
@@ -172,9 +182,18 @@ function clipPayload(s: string): string {
   return `${head}\n… (${missing})`;
 }
 
+/** The last `max` code units of `s`, marking what was dropped above them. */
+function clipTail(s: string, max: number): string {
+  if (s.length <= max) return s;
+  let start = s.length - max;
+  const c = s.charCodeAt(start);
+  if (c >= 0xdc00 && c <= 0xdfff) start += 1;
+  return `… (${start} earlier characters)\n${s.slice(start)}`;
+}
+
 /** Fenced code block for a tool payload, or "" when there's nothing to show. */
-function block(body: string, lang = ""): string {
-  const trimmed = clipPayload(body).trimEnd();
+function block(body: string, lang = "", clip: (s: string) => string = clipPayload): string {
+  const trimmed = clip(body).trimEnd();
   if (!trimmed) return "";
   const f = fenceFor(trimmed);
   return `${f}${lang}\n${trimmed}\n${f}`;
@@ -511,6 +530,92 @@ function renderMessage(m: AgentMessage, ctx: Ctx, depth: Depth): string {
   }
 }
 
+// A failed tool changed nothing worth reporting.
+function changedPaths(tool: AgentToolMessage): string[] {
+  if (tool.status === "failed") return [];
+  const diffs = ((tool.content ?? []) as ToolCallContent[])
+    .flatMap((c) => (c.type === "diff" && typeof c.path === "string" && c.path ? [c.path] : []));
+  if (diffs.length) return diffs;
+  if (tool.toolKind !== "edit" && tool.toolKind !== "delete" && tool.toolKind !== "move") return [];
+  const located = (tool.locations ?? []).flatMap((l) => (typeof l?.path === "string" && l.path ? [l.path] : []));
+  if (located.length) return located;
+  // Codex apply_patch carries its paths only in rawInput.changes[].
+  const changes = (tool.rawInput as { changes?: unknown } | null | undefined)?.changes;
+  return Array.isArray(changes)
+    ? changes.flatMap((c) => (typeof c?.path === "string" && c.path ? [c.path as string] : []))
+    : [];
+}
+
+/** Prose the model or user wrote in a turn's feed. Zeros and runtime notices
+ *  (usage, sign-in, wake-ups) are status, not conversation. */
+function handoffProse(m: AgentMessage): boolean {
+  if (m.kind === "thinking") return true;
+  if (m.kind !== "text" || m.wakeupNotice || m.parentToolId) return false;
+  if (m.role === "user") return Boolean(m.localNote || m.localFrom);
+  if (m.role === "system" || isUsageNotice(m) || isLegacyAuthenticationNotice(m)) return false;
+  return m.redacted === true || (typeof m.text === "string" && m.text.trim().length > 0);
+}
+
+/** A tool call the agent ran, as opposed to a Zeros row that only looks like one. */
+function handoffToolCall(m: AgentMessage): m is AgentToolMessage {
+  return m.kind === "tool" && !m.parentToolId && m.toolKind !== HARNESS_SWITCH_TOOL_KIND &&
+    !readQuestionStamp(m.rawOutput);
+}
+
+function handoffTool(tool: AgentToolMessage, root: string | undefined): string {
+  const rawTitle = tool.title || tool.toolKind || "tool";
+  const status = tool.status === "completed" ? "" : ` — ${tool.status.replace("_", " ")}`;
+  const out = [`### Tool · ${relativize(rawTitle, root)}${status}`];
+  const input = inputIsRedundant(tool.rawInput, rawTitle) ? "" : payloadText(tool.rawInput).trim();
+  const inputBlock = input ? block(input, isJsonObject(tool.rawInput) ? "json" : "") : "";
+  if (inputBlock) out.push("", "Input:", inputBlock);
+  const outputBlock = block(toolOutputText(tool), "", (s) => clipTail(s, HANDOFF_TOOL_OUTPUT_MAX));
+  if (outputBlock) out.push("", "Output:", outputBlock);
+  return out.join("\n");
+}
+
+function handoffTurn(
+  prompt: AgentTextMessage | null,
+  events: AgentMessage[],
+  root: string | undefined,
+  keptTools: ReadonlySet<string>,
+): string {
+  const parts: string[] = [];
+  if (prompt) parts.push(safeSection(() => renderUser(prompt), "prompt"));
+  const files = new Set<string>();
+  for (const m of events) {
+    if (m.kind === "tool") {
+      if (m.parentToolId) continue;
+      for (const path of changedPaths(m)) files.add(relativize(path, root));
+      if (keptTools.has(m.toolCallId)) {
+        const section = safeSection(() => handoffTool(m, root), "tool");
+        if (section) parts.push(section);
+      }
+      // A native ask-tool's answers exist only on its stamp.
+      const stamp = readQuestionStamp(m.rawOutput);
+      if (stamp) {
+        parts.push(["### Question", "", `Question ${stamp.outcome}.`,
+          ...(stamp.answers ?? []).map((a) => `- ${clipField(a.prompt)} → ${clipField(a.value)}`)].join("\n"));
+      }
+    } else if (m.kind === "question" || handoffProse(m)) {
+      const section = safeSection(() => renderMessage(m, { children: undefined, root }, 0), "message");
+      if (section) parts.push(section);
+    }
+  }
+  if (parts.length === 0 && files.size === 0) return "";
+  if (files.size) parts.push(["### Files changed", "", ...[...files].map((f) => `- ${f}`)].join("\n"));
+  return parts.join("\n\n");
+}
+
+/** Markdown for handing a conversation to another agent, model or harness:
+ *  the reasoning and conversation, and only the latest tool calls. */
+export function formatHandoffTranscript(
+  messages: AgentMessage[],
+  meta?: TranscriptMeta,
+): FormattedTranscript {
+  return formatTranscript(messages, "handoff", meta);
+}
+
 /** `2026-07-29T22:26Z`, or "" for a missing/unrepresentable stamp. UTC and
  *  minute-precision on purpose: unambiguous in a pasted document and stable
  *  to assert in tests. Date#toISOString THROWS outside ±8.64e15 ms, so the
@@ -531,7 +636,7 @@ function header(
   if (meta?.folder) detail.push(meta.folder);
   const stamp = isoMinute(meta?.exportedAt);
   if (stamp) detail.push(stamp);
-  detail.push(mode === "concise" ? "concise transcript" : "full transcript");
+  detail.push(`${mode} transcript`);
   lines.push(detail.join(" · "), "", "---");
   return lines.join("\n");
 }
@@ -590,6 +695,16 @@ export function formatTranscript(
   const { top, children } = selectVisible(messages);
   const head = header(mode, meta);
   const turns = groupMessagesIntoTurns(top);
+
+  if (mode === "handoff") {
+    const root = meta?.folder?.trim() || undefined;
+    const keptTools = new Set(top.filter(handoffToolCall).slice(-HANDOFF_TOOL_CALLS).map((m) => m.toolCallId));
+    const sections = turns
+      .map((turn) => handoffTurn(turn.userPrompt, turn.events, root, keptTools))
+      .filter((s) => s.length > 0);
+    const { text, truncated, used } = assemble(head, sections);
+    return { text: `${text}\n`, count: used, truncated };
+  }
 
   if (mode === "concise") {
     const sections: string[] = [];

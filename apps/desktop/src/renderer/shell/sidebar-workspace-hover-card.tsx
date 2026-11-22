@@ -26,6 +26,7 @@ import { sidebarPreviewChat, sidebarPreviewText, sidebarWorkspaceDisplayId } fro
 import { workspaceLabel } from "./workspace-tabs";
 import { isGithubDotComRemote } from "./pr/github-url";
 import { parsePrUrl } from "./pr/pr-url-match";
+import { pullRequestTarget } from "../state/workspace-repositories";
 
 /** Mounted only while the hover surface is visible. The row supplies its
  * confirmed All Changes totals; history joins the existing exact-chat hydrate. */
@@ -79,7 +80,7 @@ export function SidebarWorkspaceHoverCard({
   const age = formatCompactAge(at);
   const prUrl = workspace.prUrl && parsePrUrl(workspace.prUrl)?.number === workspace.prNumber
     ? workspace.prUrl : null;
-  const prTone = workspacePrTone(workspace, usePrIslandKind(workspace.id, workspace.prNumber));
+  const prTone = workspacePrTone(workspace, usePrIslandKind(pullRequestTarget(workspace), workspace.prNumber));
   const commitAndPush = () => {
     const bubble = promptActionBubble("commit-and-push")!;
     const sent = sendToChat(chat?.id ?? null, {

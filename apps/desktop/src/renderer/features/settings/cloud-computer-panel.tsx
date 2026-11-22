@@ -1,3 +1,4 @@
+import { useGithubLevels } from "./cloud-github-levels";
 import { useCallback, useState } from "react";
 import { IconButton } from "@/renderer/shared/ui/primitives/icon-button";
 import { ChevronDown, ChevronUp, CircleX, LoaderCircle, TriangleAlert, X } from "lucide-react";
@@ -13,7 +14,7 @@ import { readyCopyFailureLine } from "./ready-copy-copy";
 import { retryCloudReadyCopy } from "../../platform/cloud-github-levels";
 
 /** With projects on, the Cloud Computer holds tools only. */
-export const CLOUD_COMPUTER_TOOLS_ONLY = "The Cloud Computer holds tools only: the runtime, Git LFS and your install script. Repositories belong to projects, each with its own ready copy.";
+export const CLOUD_COMPUTER_TOOLS_ONLY = "The Cloud Computer holds tools only: the runtime, Git LFS and your install script. Repositories belong to projects, each built on its own.";
 import { CloudRepositoryChooser } from "./cloud-repository-chooser";
 import type { ChooserRepository } from "./cloud-repository-chooser-model";
 import {
@@ -25,19 +26,22 @@ import { computerChanges, computerStatus, editableRepositories, historyNote, rel
 import { useFocusRefresh } from "./use-focus-refresh";
 export { prefetchCloudComputer } from "./cloud-computer-store";
 
-export function CloudComputerPanel({ surfaceActive = true, openCloudRepository }: {
+export function CloudComputerPanel({ surfaceActive = true, openCloudRepository, onNewProject }: {
   surfaceActive?: boolean; openCloudRepository?(repository: string): void;
+  /** Projects: opens the New project dialog. */
+  onNewProject?(): void;
 }) {
   const organization = useActiveOrganization();
   const { me } = useTeams();
   if (!organization || organization.isPersonal || !me) return null;
   const canManage = organization.role === "owner" || organization.role === "admin";
-  return <CloudComputerScope key={computerKey(me.user.id, organization.id)} userId={me.user.id}
-    organizationId={organization.id} canManage={canManage} active={surfaceActive} openRepository={openCloudRepository} />;
+  return <CloudComputerScope key={computerKey(me.user.id, organization.id)} userId={me.user.id} organizationName={organization.name}
+    organizationId={organization.id} canManage={canManage} active={surfaceActive} openRepository={openCloudRepository} onNewProject={onNewProject} />;
 }
 
-function CloudComputerScope({ userId, organizationId, canManage, active, openRepository }: {
-  userId: string; organizationId: string; canManage: boolean; active: boolean; openRepository?(repository: string): void;
+function CloudComputerScope({ userId, organizationId, organizationName, canManage, active, openRepository, onNewProject }: {
+  userId: string; organizationId: string; organizationName: string; canManage: boolean; active: boolean; openRepository?(repository: string): void;
+  onNewProject?(): void;
 }) {
   const key = computerKey(userId, organizationId);
   const computer = useRecoveringRead(computers, canManage ? key : null, () => getCloudV2Computer(organizationId),
@@ -157,7 +161,7 @@ function CloudComputerScope({ userId, organizationId, canManage, active, openRep
       </SettingsGroup>
 
       {data?.readyCopies && (data.readyCopyFailures?.length ?? 0) > 0 && (
-        <SettingsGroup title="Ready copies" description="A project whose ready copy failed keeps the previous one; new workspaces clone directly until one is ready.">
+        <SettingsGroup title="Project builds" description="A project whose build failed keeps its last build; new workspaces clone directly until one succeeds.">
           {data.readyCopyFailures!.map(failure => (
             <SettingsRow key={failure.projectId} label={failure.project} hint={readyCopyFailureLine(failure, Date.now())}>
               <Button variant="ghost" size="sm" disabled={busy}
@@ -174,9 +178,7 @@ function CloudComputerScope({ userId, organizationId, canManage, active, openRep
 
       {/* Projects: the Cloud Computer is tools only; repositories belong to projects. */}
       {data?.readyCopies && (
-        <SettingsGroup title="Repositories">
-          <SettingsRow label="Tools only" hint={CLOUD_COMPUTER_TOOLS_ONLY} />
-        </SettingsGroup>
+        <CloudComputerProjects userId={userId} organizationId={organizationId} organizationName={organizationName} active={active} onNewProject={onNewProject} />
       )}
       {!data?.readyCopies && <SettingsGroup title="Repositories" description="Changes apply after the next build.">
         <CloudRepositoryChooser userId={userId} organizationId={organizationId} active={active}
@@ -268,3 +270,23 @@ function HistoryRow({ build, active, disabled, onActivate }: {
         )} />
   );
 }
+
+/** Where the repositories went: the projects that hold them, and a new one. */
+function CloudComputerProjects({ userId, organizationId, organizationName, active, onNewProject }: {
+  userId: string; organizationId: string; organizationName: string; active: boolean; onNewProject?(): void;
+}) {
+  const levels = useGithubLevels(userId, organizationId, active);
+  const projects = levels.projects;
+  const count = projects?.projects.length;
+  return (
+    <SettingsGroup title="Projects">
+      <SettingsRow label={count === undefined ? "Projects" : `${count} ${count === 1 ? "project" : "projects"} in ${organizationName}`}
+        hint="The Cloud Computer holds tools only. Repositories, setup scripts and build secrets belong to projects.">
+        {onNewProject && projects && (projects.canCreateOrganization || projects.personalAllowed) && (
+          <Button variant="ghost" size="sm" onClick={onNewProject}>New project</Button>
+        )}
+      </SettingsRow>
+    </SettingsGroup>
+  );
+}
+

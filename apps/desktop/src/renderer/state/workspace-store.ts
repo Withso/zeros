@@ -21,6 +21,8 @@ import {
 } from "./chat-boot-cache";
 import { cloudFolderForChatId, resolveBootActiveChatId } from "./boot-active-chat";
 import { cloudWorkspaceKey, isCloudWorkspace, parseCloudScopedId } from "../platform/bridge/cloud-workspace-key";
+import type { Workspace as GitWorkspace, WorkspaceRepository } from "../platform/git";
+import { selectedRepository } from "./workspace-repositories";
 import { setSetting } from "../platform/settings";
 import { ACTIVE_CHAT_KEY } from "./chats-local-cache";
 import {
@@ -164,6 +166,12 @@ export type Action =
       type: "SET_REPO_PAGE_VIEW";
       projectId: string;
       view: RepoPageView;
+    }
+  /** Remember a workspace's current repository; null returns it to its first. */
+  | {
+      type: "SET_CURRENT_REPOSITORY";
+      workspaceId: string;
+      repository: string | null;
     }
   | {
       type: "REMOVE_REPO_UI_STATE";
@@ -495,6 +503,7 @@ const initialState: WorkspaceState = {
   // an id reads back as the Dashboard.
   activeRepoId: persistedUiState.activeRepoId ?? null,
   repoPageViewByProject: persistedUiState.repoPageViewByProject ?? {},
+  currentRepositoryByWorkspace: persistedUiState.currentRepositoryByWorkspace ?? {},
   isLoading: false,
   aiSettings: loadAiSettings(),
   // SQLite stays authoritative and revalidates in ChatsPersistence; this snapshot
@@ -572,6 +581,12 @@ export function selectLastWorkspaceFolderForRepo(
   repoRoot: string,
 ): string | null {
   return s.lastWorkspaceByRepoRoot[repoRoot] ?? null;
+}
+
+/** A workspace's current repository: its saved one while it is still one of the
+ * workspace's repositories, else its first. */
+export function selectCurrentRepository(s: WorkspaceState, workspace: GitWorkspace): WorkspaceRepository {
+  return selectedRepository(workspace, s.currentRepositoryByWorkspace[workspace.id]);
 }
 
 /** Repository hub view with an independent default per project. */
@@ -998,6 +1013,16 @@ function reducer(state: WorkspaceState, action: Action): WorkspaceState {
     case "SET_REPO_PAGE_VIEW": {
       return rememberRepoPageView(state, action.projectId, action.view);
     }
+    case "SET_CURRENT_REPOSITORY": {
+      const repository = action.repository?.toLowerCase() ?? null;
+      if ((state.currentRepositoryByWorkspace[action.workspaceId] ?? null) === repository) return state;
+      return {
+        ...state,
+        currentRepositoryByWorkspace: repository
+          ? setBoundedRecord(state.currentRepositoryByWorkspace, action.workspaceId, repository)
+          : removeRecordKey(state.currentRepositoryByWorkspace, action.workspaceId),
+      };
+    }
     case "REMOVE_REPO_UI_STATE": {
       const removedFolders = [
         action.repoRoot,
@@ -1131,6 +1156,10 @@ function reducer(state: WorkspaceState, action: Action): WorkspaceState {
           state.workbenchByScope,
           folderWasRemoved,
         ),
+        currentRepositoryByWorkspace: removeRecordKeysMatching(
+          state.currentRepositoryByWorkspace,
+          folderWasRemoved,
+        ),
         pendingWorkspaceValidationFolder:
           state.pendingWorkspaceValidationFolder &&
           folderWasRemoved(state.pendingWorkspaceValidationFolder)
@@ -1191,6 +1220,11 @@ function reducer(state: WorkspaceState, action: Action): WorkspaceState {
         ),
         workbenchByScope: moveRecordKeysMatching(
           state.workbenchByScope,
+          belongsToMovedWorkspace,
+          moveFolder,
+        ),
+        currentRepositoryByWorkspace: moveRecordKeysMatching(
+          state.currentRepositoryByWorkspace,
           belongsToMovedWorkspace,
           moveFolder,
         ),
@@ -1690,6 +1724,7 @@ function reducer(state: WorkspaceState, action: Action): WorkspaceState {
       if (
         action.tab.type === "changes" ||
         action.tab.type === "review" ||
+        action.tab.type === "agents" ||
         action.tab.type === "design"
       ) {
         const existing = cur.tabs.find((t) => t.type === action.tab.type);
@@ -1714,6 +1749,7 @@ function reducer(state: WorkspaceState, action: Action): WorkspaceState {
       const tab =
         action.tab.type === "changes" ||
         action.tab.type === "review" ||
+        action.tab.type === "agents" ||
         action.tab.type === "design"
           ? { ...action.tab, pinned: true }
           : action.tab.pinned || action.tab.fixed
@@ -1757,6 +1793,7 @@ function reducer(state: WorkspaceState, action: Action): WorkspaceState {
       if (
         target.type === "changes" ||
         target.type === "review" ||
+        target.type === "agents" ||
         target.type === "design"
       )
         return state;
@@ -1985,6 +2022,7 @@ function reducer(state: WorkspaceState, action: Action): WorkspaceState {
         pinned:
           target.type === "changes" ||
           target.type === "review" ||
+          target.type === "agents" ||
           target.type === "design",
         // Permanence is born with the slice (defaultTabs/normalizeWorkbenchTabs):
         // updates can neither demote the fixed Files home nor mint a new one.
@@ -2278,6 +2316,7 @@ useWorkspaceStore.subscribe((s, prev) => {
     s.lastHomePage !== prev.lastHomePage ||
     s.activeRepoId !== prev.activeRepoId ||
     s.repoPageViewByProject !== prev.repoPageViewByProject ||
+    s.currentRepositoryByWorkspace !== prev.currentRepositoryByWorkspace ||
     s.activeChatId !== prev.activeChatId ||
     s.newAgentFolder !== prev.newAgentFolder ||
     s.lastWorkspaceFolder !== prev.lastWorkspaceFolder ||

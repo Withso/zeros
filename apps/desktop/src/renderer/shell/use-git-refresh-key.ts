@@ -22,6 +22,7 @@
 // Changes therefore advance as one coherent generation instead of the file
 // tree serving a deleted path for the cache's remaining TTL.
 
+import { cloudRepositoryTargets } from "../platform/bridge/cloud-repository-routing";
 import { useCallback, useEffect, useRef, useSyncExternalStore } from "react";
 import { useShallow } from "zustand/react/shallow";
 
@@ -300,7 +301,10 @@ function publishRefreshForWorkspaceIds(
     changedWorkspaceIds
       .filter((id): id is string => typeof id === "string")
       .map(normalizeWorkspaceId)
-      .filter((id): id is string => id !== null),
+      .filter((id): id is string => id !== null)
+      // Every repository of a workspace of several shares its worker's ID, so a
+      // change to the workspace reaches each repository's own key.
+      .flatMap(id => [id, ...cloudRepositoryTargets(id)]),
   );
   if (workspaceIds.size === 0) {
     publishRefresh(undefined, true);

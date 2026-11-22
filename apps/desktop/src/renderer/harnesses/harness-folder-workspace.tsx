@@ -55,6 +55,75 @@ if (createFixture) {
     JSON.stringify({ agents, at: Date.now() }),
   );
 }
+// A cloud workspace of several repositories (projects): each repository's own changes and files.
+const CLOUD_ORG = "11111111-1111-4111-8111-111111111111";
+const CLOUD_USER = "22222222-2222-4222-8222-222222222222";
+const CLOUD_WORKSPACE = "44444444-4444-4444-8444-444444444444";
+const CLOUD_PROJECT = "88888888-8888-4888-8888-888888888881";
+const CLOUD_REPOSITORIES = [
+  { repository: "withso/zeros", folder: "zeros", baseBranch: "main", pr: null as null | { number: number; state: "draft" | "ready" },
+    changes: [{ path: "apps/desktop/src/renderer/features/settings/appearance-panel.tsx", status: "modified", additions: 40, deletions: 6 },
+      { path: "styles/dark-tokens.css", status: "added", additions: 8, deletions: 0 }],
+    files: ["AGENTS.md", "package.json", "apps/desktop/src/renderer/features/settings/appearance-panel.tsx", "styles/dark-tokens.css"] },
+  { repository: "withso/zeros-design-demo", folder: "zeros-design-demo", baseBranch: "release", pr: { number: 9, state: "draft" as const },
+    changes: [{ path: "frames/home.html", status: "added", additions: 12, deletions: 0 }],
+    files: ["rules.md", "frames/home.html"] },
+];
+const cloudRepository = (repository: string, id: string, setup: string | null, position: number) =>
+  ({ repository, repositoryId: id, connectionId: null, defaultBranch: "main", setup, setupScript: null, position });
+const CLOUD_PROJECTS = {
+  projects: [
+    { id: CLOUD_PROJECT, name: "Zeros", level: "organization", ownerUserId: null, canEdit: true, canShare: false, readyCopy: "ready",
+      repositories: [cloudRepository("withso/zeros", "101", "pnpm install", 0), cloudRepository("withso/zeros-design-demo", "102", null, 1)] },
+    { id: "88888888-8888-4888-8888-888888888882", name: "Okit", level: "organization", ownerUserId: null, canEdit: true, canShare: false, readyCopy: "ready",
+      repositories: [cloudRepository("withso/okit", "103", "npm ci", 0)] },
+    { id: "88888888-8888-4888-8888-888888888883", name: "client-app", level: "personal", ownerUserId: CLOUD_USER, canEdit: true, canShare: false, readyCopy: "ready",
+      repositories: [cloudRepository("acme/client-app", "201", "npm ci", 0), cloudRepository("acme/client-api", "202", null, 1), cloudRepository("acme/design-tokens", "203", null, 2)] },
+  ],
+  personalAllowed: true, canCreateOrganization: true, limits: { personal: 20, repositories: 10 },
+};
+async function seedCloudProjects() {
+  const key = JSON.stringify([CLOUD_USER, CLOUD_ORG]);
+  const { cloudComputerRepositoriesCache } = await import("../features/settings/cloud-computer-v2-create-gate");
+  const { cloudProjects, githubLevelConnections } = await import("../features/settings/cloud-github-levels");
+  cloudComputerRepositoriesCache.setData(key, []);
+  githubLevelConnections.setData(key, { organization: [{ id: "c1c1c1c1-c1c1-4c1c-8c1c-c1c1c1c1c1c1", installationId: 77, accountLogin: "withso",
+    level: "organization", state: "active", mine: false }], personal: [], solo: false });
+  cloudProjects.setData(key, CLOUD_PROJECTS as never);
+}
+/** Lists and opens the workspace of several repositories, the way the catalog presents it. */
+async function openCloudProjectWorkspace() {
+  const { accountPresentationOwner, bindAccountPresentationOwner, isolateAccountPresentationStorageForTests } =
+    await import("../platform/account-presentation-cache");
+  // The signed-in account whose cloud reads the workspace's files belong to.
+  isolateAccountPresentationStorageForTests();
+  bindAccountPresentationOwner(accountPresentationOwner("https://api.example.test", CLOUD_USER));
+  const { acceptCloudWorkspaceDocument, getCloudWorkspaceRows } = await import("../state/cloud-workspace-catalog");
+  const { setWorkspaceRowsForTesting, notifyProjectsChanged } = await import("../state/use-projects");
+  const key = `cloud://${CLOUD_ORG}/${CLOUD_WORKSPACE}`, now = new Date().toISOString();
+  acceptCloudWorkspaceDocument({
+    id: CLOUD_WORKSPACE, organizationId: CLOUD_ORG, teamId: CLOUD_ORG, name: "tokyo", number: 7, title: "Dark mode",
+    createdBy: CLOUD_USER, ownerUserId: CLOUD_USER, placement: "cloud", status: "ready", version: 1, error: null,
+    createdAt: now, updatedAt: now, deletedAt: null,
+    capabilities: { canWrite: true, canEdit: true, canManage: true, canStart: false, startUnavailableReason: null, githubPullRequests: 1 },
+    repository: { forge: "github.com", owner: "withso", name: "zeros", revision: "main" },
+    checkoutPath: "/home/user/zeros/zeros", root: "/home/user/zeros", project: { id: CLOUD_PROJECT, name: "Zeros" },
+    repositories: CLOUD_REPOSITORIES.map((entry, index) => ({ repository: entry.repository, checkoutPath: `/home/user/zeros/${entry.folder}`,
+      branch: "arun/dark-mode", baseBranch: entry.baseBranch,
+      github: { repositoryId: String(101 + index), branch: "arun/dark-mode", baseBranch: entry.baseBranch, headSha: "a".repeat(40),
+        prNumber: entry.pr?.number ?? null, prState: entry.pr?.state ?? null, prUrl: entry.pr ? `https://github.com/${entry.repository}/pull/${entry.pr.number}` : null } })),
+    github: { repositoryId: "101", branch: "arun/dark-mode", baseBranch: "main", headSha: "a".repeat(40), prNumber: null, prState: null, prUrl: null },
+    generation: { number: 1, architecture: "linux/amd64", resources: { cpuMillicores: 4000, memoryMiB: 8192, storageMiB: 32768 },
+      observedState: "running", lastObservedAt: now },
+  } as never);
+  // The catalog's confirmed list, as a read would publish it.
+  const rows = getCloudWorkspaceRows();
+  setWorkspaceRowsForTesting(rows[0]!.repoSlug, [...rows]);
+  notifyProjectsChanged();
+  useWorkspaceStore.getState().dispatch({ type: "OPEN_WORKSPACE", folder: key, repoRoot: key, chatId: null });
+  // Files and the refresh bus read the workspace's folder from the new-agent slot without a chat.
+  useWorkspaceStore.getState().dispatch({ type: "SET_NEW_AGENT_FOLDER", folder: key });
+}
 const requests: { op: string; params?: Record<string, unknown> }[] = [];
 let inspection = {
   isRepo: false,
@@ -166,6 +235,23 @@ const fixtureBridge = {
   }) => {
     requests.push(message);
     let result: unknown = {};
+    // A cloud workspace of several repositories: each repository answers with its own changes and files.
+    const cloudRepository = typeof message.params?.workspaceId === "string" && message.params.workspaceId.startsWith("cloud://")
+      ? String(message.params.repository ?? CLOUD_REPOSITORIES[0]!.repository) : null;
+    if (cloudRepository) {
+      const fixture = CLOUD_REPOSITORIES.find(entry => entry.repository === cloudRepository) ?? CLOUD_REPOSITORIES[0]!;
+      if (message.op === "git.status") return { type: "WORKSPACE_RESPONSE", result: { staged: [], untracked: [], conflicted: [], conflictState: null,
+        unstaged: fixture.changes.map(change => ({ path: change.path, status: change.status })) } };
+      if (message.op === "git.diff") return { type: "WORKSPACE_RESPONSE", result: { hunks: [], summary: true,
+        files: fixture.changes.map(change => ({ ...change, binary: false })) } };
+      if (message.op === "git.changeCounts") return { type: "WORKSPACE_RESPONSE", result: { all: fixture.changes.length, uncommitted: fixture.changes.length,
+        staged: 0, unstaged: fixture.changes.length } };
+      if (message.op === "git.changeLineCounts") return { type: "WORKSPACE_RESPONSE", result: { additions: fixture.changes.reduce((sum, change) => sum + change.additions, 0),
+        deletions: fixture.changes.reduce((sum, change) => sum + change.deletions, 0) } };
+      if (message.op === "git.hasChanges") return { type: "WORKSPACE_RESPONSE", result: { hasChanges: fixture.changes.length > 0 } };
+      if (message.op === "file.tree") return { type: "WORKSPACE_RESPONSE", result: { files: fixture.files, truncated: false } };
+      if (message.op === "file.ignored") return { type: "WORKSPACE_RESPONSE", result: { entries: [] } };
+    }
     if (message.op === "workspace.list")
       result = {
         workspaces: createdRows.filter(
@@ -271,6 +357,18 @@ const fixtureBridge = {
 Object.defineProperty(RuntimeClient.prototype, "status", { get: () => "connected" });
 RuntimeClient.prototype.connect = () => Promise.resolve();
 WorkspaceRuntimeClient.prototype.request = fixtureBridge.request;
+// The cloud workspace's peer counts as connected (its reads are answered by the stub).
+const workspaceStatus = WorkspaceRuntimeClient.prototype.statusForWorkspace;
+WorkspaceRuntimeClient.prototype.statusForWorkspace = function (this: WorkspaceRuntimeClient, folder?: string | null) {
+  return folder?.startsWith(`cloud://${CLOUD_ORG}/${CLOUD_WORKSPACE}`) ? "connected" : workspaceStatus.call(this, folder);
+} as typeof workspaceStatus;
+// Connected-only reads (the Files listing) of the cloud workspace answer from the same stub; local ones are unchanged.
+const connectedRequest = WorkspaceRuntimeClient.prototype.requestConnected;
+WorkspaceRuntimeClient.prototype.requestConnected = function (this: WorkspaceRuntimeClient, message: never, timeout?: never) {
+  const workspaceId = (message as { params?: { workspaceId?: unknown } }).params?.workspaceId;
+  return typeof workspaceId === "string" && workspaceId.startsWith("cloud://")
+    ? fixtureBridge.request(message, timeout) as never : connectedRequest.call(this, message, timeout);
+} as typeof connectedRequest;
 setActiveBridge(fixtureBridge);
 const { useWorkspaceStore, selectActiveFolder } =
   await import("../state/store");
@@ -303,6 +401,8 @@ const createOrganizations = ["11111111-1111-4111-8111-111111111111", "22222222-2
   teamCapabilities: { multiple: false as const, canCreate: false as const },
 }));
 Object.assign(window, {
+  seedCloudProjects,
+  openCloudProjectWorkspace,
   setCreateOrganization: (selection: "personal" | "organization" | "other" | "sign-out") => {
     if (selection === "sign-out") {
       clearTeamStore({ resetSelection: true });

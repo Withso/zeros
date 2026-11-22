@@ -418,6 +418,39 @@ describe("cloud v2 connect wake intent", () => {
     return { app, store };
   }
 
+  describe("a workspace of several repositories", () => {
+    const several = () => ({ id, state: "stopped", archivedAt: null, folder: "zeros-app", checkoutFolder: "zeros-app/api" });
+    const connect = (app: Hono, features?: string) => app.request(path, { method: "POST", headers: { "content-type": "application/json",
+      ...(features ? { "X-Zeros-Client-Features": features } : {}) }, body: JSON.stringify({ wake: true }) });
+
+    it("refuses a desktop that does not declare several repositories, before any wake or ticket", async () => {
+      for (const features of [undefined, "client-token-rollover-v1", "workspace-repositories-v0"]) {
+        const { app, store } = setup();
+        store.get.mockResolvedValue(several() as never);
+        const response = await connect(app, features);
+        expect([features, response.status]).toEqual([features, 409]);
+        expect(await response.json()).toEqual({ error: { code: "client_update_required" } });
+        expect(store.transition).not.toHaveBeenCalled();
+        expect(store.issueToken).not.toHaveBeenCalled();
+      }
+    });
+
+    it("admits a desktop that declares several repositories, alone or beside other features", async () => {
+      for (const features of ["workspace-repositories-v1", "client-token-rollover-v1, workspace-repositories-v1"]) {
+        const { app, store } = setup();
+        store.get.mockResolvedValue(several() as never);
+        expect((await connect(app, features)).status).toBe(200);
+        expect(store.issueToken).toHaveBeenCalledOnce();
+      }
+    });
+
+    it("changes nothing for a workspace of one repository", async () => {
+      const { app, store } = setup();
+      expect((await connect(app)).status).toBe(200);
+      expect(store.transition).toHaveBeenCalledWith(id, ["stopped"], "starting");
+    });
+  });
+
   it("issues a pending create's ticket without a source check", async () => {
     const store = {
       get: vi.fn(async () => ({ id, state: "creating", archivedAt: null, sourcePending: true })),
@@ -577,5 +610,36 @@ describe("cloud v2 focused-window activity", () => {
     const other = setup("running", true);
     expect((await ping(other.app)).status).toBe(404);
     expect(other.store.markActive).not.toHaveBeenCalled();
+  });
+});
+
+describe("cloud v2 lost-work notice", () => {
+  const id = "55555555-5555-4555-8555-555555555555";
+  function setup(refused = false) {
+    const store = {
+      dismissLostWork: vi.fn(async () => { if (refused) throw new HttpError(404, "not_found", "Cloud workspace not found"); return { id, state: "running" }; }),
+    };
+    const app = new Hono();
+    app.use("*", async (c, next) => { c.set("user", { id: member } as never); await next(); });
+    app.onError((error, c) => error instanceof HttpError
+      ? c.json({ error: { code: error.code } }, error.status) : c.json({ error: { code: "internal" } }, 500));
+    app.route("/", createCloudV2Routes({ store, bridgeBaseUrl: "wss://dev.example.test" } as unknown as CloudV2RouteDeps));
+    return { app, store };
+  }
+  const dismiss = (app: Hono, target = id) => app.request(`/v1/cloud-v2/workspaces/${target}/lost-work/dismiss`, { method: "POST" });
+
+  it("clears the notice for the person the workspace belongs to and returns its document", async () => {
+    const { app, store } = setup();
+    const response = await dismiss(app);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ workspace: { id, placement: "cloud", version: 2 } });
+    expect(store.dismissLostWork).toHaveBeenCalledWith(id, member);
+  });
+
+  it("refuses anyone else and an invalid id", async () => {
+    expect((await dismiss(setup(true).app)).status).toBe(404);
+    const { app, store } = setup();
+    expect((await dismiss(app, "not-a-uuid")).status).toBe(404);
+    expect(store.dismissLostWork).not.toHaveBeenCalled();
   });
 });

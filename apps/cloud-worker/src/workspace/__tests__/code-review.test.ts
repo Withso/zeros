@@ -111,3 +111,29 @@ describe("activated workspaces: each review mutation is its requester's", () => 
     expect(f.list().threads).toHaveLength(1);
   });
 });
+
+describe("a workspace of several repositories", () => {
+  it("anchors threads in the project folder, so the same file name in two repositories is two threads, each on its own file", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "zeros-review-several-"));
+    cleanups.push(() => rm(directory, { recursive: true, force: true }));
+    const root = join(directory, "project"), state = join(directory, "state");
+    for (const name of ["api", "web"]) { await mkdir(join(root, name, "src"), { recursive: true }); await writeFile(join(root, name, "src", "a.ts"), `${name}\n`); }
+    await mkdir(state);
+    const repository = (name: string) => ({ repository: `withso/${name}`, checkoutPath: join(root, name), branch: "zeros/app", baseBranch: "main" });
+    const scope = new WorkspaceScope({ ...config.workspace, repository: "withso/api", checkoutPath: join(root, "api"), branch: "zeros/app", baseBranch: "main",
+      root, repositories: [repository("api"), repository("web")] });
+    const store = new WorkerCodeReview(scope, state, vi.fn(), CLOUD_REVIEW_LIMITS);
+    cleanups.push(() => store.close());
+    await store.configure(user);
+    const create = (path: string) => store.handle("codeReview.create", { workspaceId: scope.key, anchor: { ...anchor, path }, body: path }) as CodeReviewThread;
+    const web = create("web/src/a.ts"), api = create("api/src/a.ts");
+    expect([web.anchor.path, api.anchor.path]).toEqual(["web/src/a.ts", "api/src/a.ts"]);
+    expect(web.id).not.toBe(api.id);
+    expect((store.handle("codeReview.list", { workspaceId: scope.key, path: "web/src/a.ts" }) as CodeReviewListResult).threads.map(thread => thread.id)).toEqual([web.id]);
+    // A path outside every repository's folder, or one that leaves the project folder, is refused.
+    expect(() => create("src/a.ts")).toThrow();
+    expect(() => create("../outside.ts")).toThrow();
+    // The agent's review tools work in the same folder the agent does.
+    expect(store.tools({ agentId: "claude", conversationId: "c", executionId: "e", assertCurrent: () => {} })).toBeDefined();
+  });
+});

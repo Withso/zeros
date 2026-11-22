@@ -6,6 +6,7 @@ import {
   transcriptSourceKey,
 } from "./chat-transcript-attach";
 import type { LiveTextAttachmentInput } from "./composer-text-attachment-delivery";
+import type { TranscriptMode } from "./transcript-format";
 
 /** Build a fresh Zeros conversation carrying only user-owned product settings.
  * Provider binding, live execution identity, title/pin/archive state, messages,
@@ -42,6 +43,7 @@ export function buildForkTranscriptAttachment(input: {
   sourceLabel: string;
   text: string;
   complete?: boolean;
+  mode?: TranscriptMode;
 }): LiveTextAttachmentInput {
   const text =
     input.complete === false
@@ -49,7 +51,7 @@ export function buildForkTranscriptAttachment(input: {
       : input.text;
   return {
     sourceKey: transcriptSourceKey(input.sourceChatId),
-    name: transcriptFileName(input.sourceLabel, "concise"),
+    name: transcriptFileName(input.sourceLabel, input.mode ?? "concise"),
     text,
   };
 }

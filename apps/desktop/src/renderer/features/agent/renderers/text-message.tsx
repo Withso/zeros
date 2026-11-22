@@ -27,8 +27,8 @@
 // to bind.
 // ──────────────────────────────────────────────────────────
 
-import { memo, useContext, useMemo, useRef, type SyntheticEvent } from "react";
-import { AlarmClock } from "lucide-react";
+import { memo, useContext, useLayoutEffect, useMemo, useRef, useState, type SyntheticEvent } from "react";
+import { AlarmClock, ChevronDown, ChevronUp, CornerDownRight } from "lucide-react";
 import type { Renderer, RendererContext } from "./types";
 import type {
   AgentTextMessage,
@@ -64,6 +64,8 @@ import { fallbackDisplayText } from "../model-fallback";
 import { wakeupDisplayText } from "../wakeup-notice";
 import { LocalLinkHtml, LocalLinkText } from "../local-links/text";
 import { LocalNoteRow } from "../local-links/note-row";
+import { parseReply, previewText } from "../chat-selection";
+import { IconButton } from "@/renderer/shared/ui/primitives/icon-button";
 
 type ChatRole = "user" | "assistant" | "system";
 
@@ -143,6 +145,14 @@ export const TextMessage: Renderer<AgentTextMessage> = memo(
         message.segments ? groupMessageSegments(trimTrailingSegments(message.segments)) : undefined,
       [message.segments],
     );
+    // A reply to selected transcript text: a Markdown quote, a blank line, then
+    // the reply, with no pills in between.
+    const reply = useMemo(() => {
+      if (message.role !== "user") return null;
+      if (!displaySegments || displaySegments.length === 0) return parseReply(text);
+      const only = displaySegments.length === 1 ? displaySegments[0] : null;
+      return only?.type === "text" ? parseReply(only.text) : null;
+    }, [message.role, displaySegments, text]);
 
     // Session-continuity notices (resumeBoundary) never render — session
     // rebuilds are invisible by design, with no resume or continuation UI.
@@ -177,7 +187,9 @@ export const TextMessage: Renderer<AgentTextMessage> = memo(
                 : undefined
             }
           >
-            {message.role === "user" &&
+            {reply && !message.attachments?.length ? (
+              <ReplyMessageText quote={reply.quote} reply={reply.reply} active={ctx.attachmentImagesActive !== false} />
+            ) : message.role === "user" &&
             displaySegments &&
             displaySegments.length > 0 ? (
               // 2026-06-08 — inline render: text + mention/attachment pills
@@ -264,11 +276,13 @@ export const TextMessage: Renderer<AgentTextMessage> = memo(
                   // trailing whitespace so stray end-of-message newlines/spaces
                   // don't balloon the bubble; interior/leading spacing is kept.
                   // wrap-anywhere: see the segments branch above.
-                  <div className={cn(message.role === "system" ? "leading-5" : "text-reading", "wrap-anywhere whitespace-pre-wrap")}>
-                    <LocalLinkText text={message.role === "user"
-                      ? text.trimEnd()
-                      : text} />
-                  </div>
+                  reply ? <ReplyMessageText quote={reply.quote} reply={reply.reply} active={ctx.attachmentImagesActive !== false} /> : (
+                    <div className={cn(message.role === "system" ? "leading-5" : "text-reading", "wrap-anywhere whitespace-pre-wrap")}>
+                      <LocalLinkText text={message.role === "user"
+                        ? text.trimEnd()
+                        : text} />
+                    </div>
+                  )
                 )}
               </>
             )}
@@ -281,6 +295,68 @@ export const TextMessage: Renderer<AgentTextMessage> = memo(
     );
   },
 );
+
+/** Whether a one-line truncating element cuts its text at its current width.
+ *  Observed only while `watch` (collapsed and shown); a narrow split pane
+ *  clips short text too. */
+function useClipped<T extends HTMLElement>(watch: boolean) {
+  const [element, ref] = useState<T | null>(null);
+  const [value, setValue] = useState(false);
+  useLayoutEffect(() => {
+    if (!element || !watch) return;
+    const measure = () => setValue(element.scrollWidth > element.clientWidth + 1);
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, [element, watch]);
+  return { ref, value };
+}
+
+/** A sent reply: the quoted text on one muted line, then ↳ and the reply.
+ *  A quote that doesn't fit expands in place, so none of it is lost. */
+function ReplyMessageText({ quote, reply, active }: { quote: string; reply: string; active: boolean }) {
+  const [expanded, setExpanded] = useState(false);
+  const line = previewText(quote);
+  // Retained hidden chats measure nothing; the last answer stands until shown.
+  const clipped = useClipped<HTMLSpanElement>(!expanded && active);
+  const folds = line !== quote || clipped.value || expanded;
+  return (
+    <div data-reply-message="" className="flex min-w-0 flex-col gap-0.5">
+      <div className="flex min-w-0 items-start gap-1">
+        <blockquote
+          data-reply-quote=""
+          data-expanded={expanded || undefined}
+          className={cn("text-fg3 min-w-0 flex-1 text-sm", expanded ? "whitespace-pre-wrap wrap-anywhere" : "flex")}
+        >
+          {expanded ? `“${quote}”` : (
+            <>
+              <span aria-hidden="true">“</span>
+              <span ref={clipped.ref} className="min-w-0 truncate">{line}</span>
+              <span aria-hidden="true">”</span>
+            </>
+          )}
+        </blockquote>
+        {folds && (
+          <IconButton
+            size="inline"
+            label={expanded ? "Show less of the quote" : "Show the whole quote"}
+            aria-expanded={expanded}
+            onClick={() => setExpanded((open) => !open)}
+          >
+            {expanded ? <ChevronUp /> : <ChevronDown />}
+          </IconButton>
+        )}
+      </div>
+      <div className="flex min-w-0 items-start gap-1.5">
+        <CornerDownRight aria-hidden="true" className="text-fg3 mt-1 size-3.5 shrink-0" />
+        <div className="text-reading min-w-0 wrap-anywhere whitespace-pre-wrap">
+          <LocalLinkText text={reply} />
+        </div>
+      </div>
+    </div>
+  );
+}
 
 /** Single chip on a user bubble showing an attached file. Same
  *  pill shape as the composer's chips so the UI reads as one

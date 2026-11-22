@@ -19,7 +19,7 @@ const exec = promisify(execFile);
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
 
-async function fixture() {
+async function fixture(options: { setup?: boolean; environment?: boolean; acting?: boolean } = {}) {
   const directory = await mkdtemp(join(tmpdir(), "worker-repositories-"));
   cleanups.push(() => rm(directory, { recursive: true, force: true }));
   const root = join(directory, "zeros-app"), state = join(directory, "state");
@@ -32,15 +32,23 @@ async function fixture() {
     await git("config", "user.name", "Fixture"); await git("config", "user.email", "fixture@example.invalid");
     await writeFile(join(checkout, "readme.txt"), `${name}\n`);
     if (name === "web") await writeFile(join(checkout, "CLAUDE.md"), "web instructions\n");
+    await writeFile(join(checkout, ".gitignore"), ".env.local\n");
     await git("add", "."); await git("commit", "-m", "initial");
     await git("switch", "-c", "zeros/app");
   }
-  const repository = (name: string, owner = "withso") => ({ repository: `${owner}/${name}`, checkoutPath: join(root, name), branch: "zeros/app", baseBranch: "main" });
+  const repository = (name: string, owner = "withso") => ({ repository: `${owner}/${name}`, checkoutPath: join(root, name), branch: "zeros/app", baseBranch: "main",
+    ...(options.setup && name === "web" ? { setup: "true" } : {}),
+    ...(options.environment && name === "web" ? { environment: { versionId: "88888888-8888-4888-8888-888888888888", repositoryId: "43",
+      variables: {}, files: [{ path: ".env.local", content: "WEB_VALUE=synthetic-web\n" }] } } : {}) });
   const workspace = { ...config.workspace, repository: "withso/api", checkoutPath: join(root, "api"), branch: "zeros/app", baseBranch: "main",
     root, repositories: [repository("api"), repository("web")] };
-  const relay = new FakeRelay();
-  const prepareCheckout = vi.fn(async () => ({ createdBranch: false }));
-  const worker = new CloudWorker({ directory: state, homeDirectory: directory, transport: relay, prepareCheckout, drivers: {}, workspaceServices: { watch: false } });
+  const relay = Object.assign(new FakeRelay(), {
+    reportSetup: vi.fn(async (_status: unknown) => {}), reportRepositorySetup: vi.fn(async (_repository: string, _status: unknown) => {}),
+    reportRepositoryEnvironment: vi.fn(async (_repository: string, _report: unknown) => {}) });
+  const prepareCheckout = vi.fn(async () => ({ createdBranch: options.setup === true }));
+  const cloneCheckout = vi.fn(async () => false);
+  const setupRunner = vi.fn(async () => 0);
+  const worker = new CloudWorker({ directory: state, homeDirectory: directory, transport: relay, prepareCheckout, cloneCheckout, setupRunner, drivers: {}, workspaceServices: { watch: false } });
   cleanups.push(() => worker.dispose());
   worker.start();
   await relay.receive({ ...config, agents: {}, workspace });
@@ -50,7 +58,7 @@ async function fixture() {
     return relay.response(frame.id) as Extract<BridgeMessage, { type: "WORKSPACE_RESPONSE" | "WORKSPACE_ERROR" }>;
   };
   await relay.receive({ t: "open", clientId: CLIENT_A });
-  return { root, workspace, prepareCheckout, request };
+  return { root, workspace, relay, prepareCheckout, cloneCheckout, setupRunner, request };
 }
 const changed = (reply: { type: string; result?: unknown }) => JSON.stringify(reply.result);
 
@@ -58,6 +66,10 @@ it("prepares every repository's checkout and sends each Git request to the repos
   const f = await fixture();
   expect(f.prepareCheckout.mock.calls.map(call => (call as unknown as [{ checkoutPath: string; repository: string }])[0]).map(entry => [entry.repository, entry.checkoutPath]))
     .toEqual([["withso/api", join(f.root, "api")], ["withso/web", join(f.root, "web")]]);
+  // Only a repository after the first is cloned when missing, by its own name, into its own folder, before its branch is prepared.
+  expect(f.cloneCheckout.mock.calls.map(call => { const [workspace, repository] = call as unknown as [{ checkoutPath: string }, string]; return [repository, workspace.checkoutPath]; }))
+    .toEqual([["withso/web", join(f.root, "web")]]);
+  expect(f.cloneCheckout.mock.invocationCallOrder[0]).toBeLessThan(f.prepareCheckout.mock.invocationCallOrder[1]!);
   await writeFile(join(f.root, "web", "only-web.txt"), "new\n");
   const first = await f.request("git.status");
   expect(first.type).toBe("WORKSPACE_RESPONSE");
@@ -128,4 +140,31 @@ it("refuses a request naming a repository that is not the workspace's own, with 
     // GitHub compares names case-insensitively: the first's own name is the first.
     for (const repository of ["withso/api", "Withso/API"]) expect(scope.repositoryFor({ repository })).toBe(scope.several ? scope.repositories[0] : undefined);
   }
+});
+
+it("reports a later repository's setup under its own name, never as the workspace's", async () => {
+  const f = await fixture({ setup: true });
+  await vi.waitFor(() => expect(f.relay.reportRepositorySetup.mock.calls.map(([, status]) => (status as { state: string }).state)).toContain("succeeded"));
+  expect(new Set(f.relay.reportRepositorySetup.mock.calls.map(([repository]) => repository))).toEqual(new Set(["withso/web"]));
+  // The first repository has no setup here: nothing reports as the workspace's own.
+  expect(f.relay.reportSetup.mock.calls.filter(([status]) => (status as { state?: string } | undefined)?.state === "succeeded")).toEqual([]);
+});
+
+it("seeds a later repository's own environment into its own checkout, reported under its name", async () => {
+  const f = await fixture({ environment: true });
+  await vi.waitFor(() => expect(f.relay.reportRepositoryEnvironment).toHaveBeenCalled());
+  expect(f.relay.reportRepositoryEnvironment.mock.calls.map(call => call.slice(0, 2))).toEqual([["withso/web", { versionId: "88888888-8888-4888-8888-888888888888", sequence: 1, state: "ready" }]]);
+  expect(await readFile(join(f.root, "web", ".env.local"), "utf8")).toBe("WEB_VALUE=synthetic-web\n");
+  await expect(readFile(join(f.root, "api", ".env.local"))).rejects.toMatchObject({ code: "ENOENT" });
+});
+
+it("rereads every repository's GitHub state after a gh mutation, not only the first's", async () => {
+  const { WorkspaceService } = await import("../workspace/service");
+  const changed = vi.spyOn(WorkspaceService.prototype, "githubChanged");
+  const f = await fixture();
+  const socket = (f.prepareCheckout.mock.calls[0] as unknown as [unknown, NodeJS.ProcessEnv])[1].GH_ZEROS_BROKER_SOCKET!;
+  const { brokerRequest } = await import("../credentials/broker");
+  await brokerRequest(socket, "changed");
+  await vi.waitFor(() => expect(changed).toHaveBeenCalledTimes(2));
+  changed.mockRestore();
 });

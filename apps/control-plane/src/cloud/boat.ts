@@ -25,9 +25,12 @@ export interface CloudV2Compute {
    * source is not resumed. Idempotent per key, like create. Boat names every
    * fork "<source name> fork", whatever name is requested. */
   fork(sourceId: string, input: { key: string; name?: string; ttlSeconds: number }): Promise<{ sandboxId: string }>;
-  /** A sandbox's name and state, e.g. "archiving" until a stop completes, then "archived". */
-  inspect(sandboxId: string): Promise<{ name: string | null; state: string; stoppedAt?: Date | null }>;
-  resume(sandboxId: string): Promise<void>;
+  /** A sandbox's name and state, e.g. "archiving" until a stop completes, then "archived". A stopped
+   * machine whose disk Boat has expired still reads archived, with snapshotAvailable false and
+   * dataExpiredAt set; never compute that expiry from stoppedAt (Alpha, 2026-11-21). */
+  inspect(sandboxId: string): Promise<{ name: string | null; state: string; stoppedAt?: Date | null; snapshotAvailable?: boolean; dataExpiredAt?: Date | null }>;
+  /** Re-arms the lease to `ttlSeconds` (default CLOUD_V2_LEASE_SECONDS); harmless on a running machine. */
+  resume(sandboxId: string, ttlSeconds?: number): Promise<void>;
   /** Boat sets the deadline to now + ttl, without restarting the sandbox. */
   extendLease(sandboxId: string, ttlSeconds: number): Promise<void>;
   stop(sandboxId: string): Promise<void>;
@@ -51,7 +54,9 @@ const Created = z.object({ sandbox: z.object({ id: z.string().regex(SANDBOX_ID) 
 const Forked = z.object({ sandbox: z.object({ id: z.string().regex(SANDBOX_ID) }).passthrough().optional(),
   sandboxId: z.string().regex(SANDBOX_ID).optional() }).passthrough();
 const Inspected = z.object({ sandbox: z.object({ name: z.string().max(256).nullable().optional(), state: z.string().min(1).max(64),
-  stoppedAt: z.string().datetime({ offset: true }).nullable().optional().catch(null) }).passthrough() }).passthrough();
+  stoppedAt: z.string().datetime({ offset: true }).nullable().optional().catch(null),
+  snapshotAvailable: z.boolean().optional().catch(undefined),
+  dataExpiredAt: z.string().datetime({ offset: true }).nullable().optional().catch(null) }).passthrough() }).passthrough();
 const Listed = z.object({
   sandboxes: z.array(z.object({ id: z.string(), name: z.string().nullable().optional(), createdAt: z.string() }).passthrough()),
   pageInfo: z.object({ nextCursor: z.string().nullable().optional(), hasMore: z.boolean() }).passthrough(),
@@ -110,13 +115,16 @@ export class BoatCloudV2Compute implements CloudV2Compute {
     return { sandboxId: child };
   }
 
-  async inspect(sandboxId: string): Promise<{ name: string | null; state: string; stoppedAt: Date | null }> {
+  async inspect(sandboxId: string): Promise<{ name: string | null; state: string; stoppedAt: Date | null; snapshotAvailable?: boolean; dataExpiredAt?: Date }> {
     const { sandbox } = Inspected.parse(await this.client.request(`/sandboxes/${this.id(sandboxId)}`, { method: "GET" }));
-    return { name: sandbox.name ?? null, state: sandbox.state, stoppedAt: sandbox.stoppedAt ? new Date(sandbox.stoppedAt) : null };
+    return { name: sandbox.name ?? null, state: sandbox.state, stoppedAt: sandbox.stoppedAt ? new Date(sandbox.stoppedAt) : null,
+      ...(sandbox.snapshotAvailable !== undefined ? { snapshotAvailable: sandbox.snapshotAvailable } : {}),
+      ...(sandbox.dataExpiredAt ? { dataExpiredAt: new Date(sandbox.dataExpiredAt) } : {}) };
   }
 
-  async resume(sandboxId: string): Promise<void> {
-    await this.client.request(`/sandboxes/${this.id(sandboxId)}/resume`, { method: "POST", body: { ttlSeconds: CLOUD_V2_LEASE_SECONDS } });
+  async resume(sandboxId: string, ttlSeconds: number = CLOUD_V2_LEASE_SECONDS): Promise<void> {
+    if (!Number.isSafeInteger(ttlSeconds) || ttlSeconds <= 0 || ttlSeconds > CLOUD_V2_LEASE_SECONDS) throw new Error("Invalid Boat lease");
+    await this.client.request(`/sandboxes/${this.id(sandboxId)}/resume`, { method: "POST", body: { ttlSeconds } });
   }
 
   async extendLease(sandboxId: string, ttlSeconds: number): Promise<void> {

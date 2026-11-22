@@ -4103,6 +4103,38 @@ describe("WorkspaceService", () => {
     }
   });
 
+  it("creates a Local child session with its parent link in one operation", async () => {
+    const { setZerosDbPathForTesting, closeZerosDb } = await import("../../db");
+    const { getChat, listChats, withChatLineage } = await import("../../db/chats");
+    setZerosDbPathForTesting(path.join(dir, "zeros-create-child.db"));
+    try {
+      expect(svc.isRemoteAllowed("chats.createChild")).toBe(false);
+      await svc.handle("chats.upsert", { chat: { id: "parent", folder: dir, title: "Parent" } });
+      expect(await svc.handle("chats.createChild", { chat: { id: "child", folder: dir, sourceChatId: "parent" }, parentChatId: "parent" }))
+        .toMatchObject({ ok: true, parentChatId: "parent", rootChatId: "parent" });
+      expect(await svc.handle("chats.createChild", { chat: { id: "grandchild", folder: dir }, parentChatId: "child" }))
+        .toMatchObject({ parentChatId: "child", rootChatId: "parent" });
+      expect(getChat("child")?.sourceChatId).toBe("parent");
+      const lineage = new Map(withChatLineage(listChats()).map((row) => [row.id, [row.parentChatId, row.rootChatId]]));
+      expect(lineage.get("child")).toEqual(["parent", "parent"]);
+      expect(lineage.get("grandchild")).toEqual(["child", "parent"]);
+
+      await expect(svc.handle("chats.createChild", { chat: { id: "child", folder: dir }, parentChatId: "grandchild" }))
+        .rejects.toThrow("already has a parent");
+      await expect(svc.handle("chats.createChild", { chat: { id: "elsewhere", folder: `${dir}/other` }, parentChatId: "parent" }))
+        .rejects.toThrow("another workspace");
+      await expect(svc.handle("chats.createChild", { chat: { id: "cloud", folder: "cloud://org/ws" }, parentChatId: "parent" }))
+        .rejects.toThrow("Local only");
+      await expect(svc.handle("chats.createChild", { chat: { id: "remote", folder: dir }, parentChatId: "parent" }, { remote: true }))
+        .rejects.toThrow();
+      expect(getChat("elsewhere")).toBeNull();
+      expect(getChat("remote")).toBeNull();
+    } finally {
+      closeZerosDb();
+      setZerosDbPathForTesting(null);
+    }
+  });
+
   it("clears provider identity only through an explicit compare-and-clear operation", async () => {
     const { setZerosDbPathForTesting, closeZerosDb } = await import("../../db");
     setZerosDbPathForTesting(path.join(dir, "zeros-provider-clear.db"));

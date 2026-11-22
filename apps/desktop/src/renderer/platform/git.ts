@@ -7,8 +7,8 @@ import type {
 } from "@zeros/protocol/github-auth";
 import { refreshDetectedOpenApps } from "./open-apps";
 import { getActiveBridge } from "./bridge/active-bridge";
-import { isCloudWorkspace, cloudTargetForValue } from "./bridge/cloud-workspace-key";
-import { requestCloudGithubPr } from "./cloud-github-pr";
+import { isCloudWorkspace } from "./bridge/cloud-workspace-key";
+import { requestCloudGithubPrFor } from "./cloud-github-pr";
 import type { DesignCanvasItemInput } from "./bridge/design-bridge";
 import type {
   WorkingDirectoriesWire,
@@ -267,6 +267,31 @@ export interface Workspace {
   hasChanges?: boolean;
   /** Local only: the workspace whose agent created this one (`zeros local`). */
   parentWorkspaceId?: string | null;
+  /** The cloud project it was created from, by its current name. */
+  project?: { id: string; name: string };
+  /** A cloud workspace of several repositories, the first being this row's own
+   * branch and pull request; absent with one (a Local workspace always has
+   * one). Read through `workspaceRepositories()`. */
+  repositories?: readonly WorkspaceRepository[];
+}
+
+/** One repository of a workspace. */
+export interface WorkspaceRepository {
+  /** `owner/name`, as GitHub names it. */
+  repository: string;
+  /** Its folder's name inside the workspace's project folder. */
+  folder: string;
+  /** What Git, pull request and file requests for this repository target: its
+   * folder's key inside the workspace (`<workspace key>/<folder>`), or the
+   * workspace's own key when the workspace has one repository. */
+  target: string;
+  branch: string;
+  baseBranch: string;
+  prNumber: number | null;
+  prState: PrState | null;
+  prUrl: string | null;
+  /** A later repository of a cloud workspace of several: whether its environment files could be added. */
+  environment?: "failed" | "unavailable";
 }
 
 export interface WorkspaceSetupInfo {
@@ -1682,9 +1707,9 @@ export async function gitClean(args: {
 }
 
 export async function ghAuthStatus(workspaceId?: string): Promise<AuthStatusResult> {
-  const cloud = cloudTargetForValue(workspaceId);
+  const cloud = requestCloudGithubPrFor(workspaceId, "gh.authStatus");
   if (cloud) {
-    try { return await requestCloudGithubPr(cloud, "gh.authStatus", {}) as AuthStatusResult; }
+    try { return await cloud as AuthStatusResult; }
     catch (error) {
       if (isGitErrorShape(error) && error.code === "NOT_AUTHENTICATED") return { authenticated: false };
       throw error;
@@ -1846,8 +1871,8 @@ export async function ghPrCreate(args: {
 export async function ghRepoAccess(
   workspaceId: string,
 ): Promise<GithubRepoAccess> {
-  const cloud = cloudTargetForValue(workspaceId);
-  if (cloud) return requestCloudGithubPr(cloud, "gh.repoAccess", {}).catch(() => ({ state: "unknown" })) as Promise<GithubRepoAccess>;
+  const cloud = requestCloudGithubPrFor(workspaceId, "gh.repoAccess");
+  if (cloud) return cloud.catch(() => ({ state: "unknown" })) as Promise<GithubRepoAccess>;
   const bridge = getActiveBridge();
   if (!bridge) return { state: "unknown" };
   try {
@@ -1894,8 +1919,8 @@ export async function ghPrMarkReady(args: {
   workspaceId: string;
   prNumber: number;
 }): Promise<PR> {
-  const cloud = cloudTargetForValue(args.workspaceId);
-  if (cloud) return requestCloudGithubPr(cloud, "gh.prMarkReady", args) as Promise<PR>;
+  const cloud = requestCloudGithubPrFor(args.workspaceId, "gh.prMarkReady", args);
+  if (cloud) return cloud as Promise<PR>;
   return bridgeGhPrMarkReady(
     requireBridge("mark the pull request ready"),
     args,
@@ -1907,8 +1932,8 @@ export async function ghPrUpdate(args: {
   prNumber: number;
   body: string;
 }): Promise<PR> {
-  const cloud = cloudTargetForValue(args.workspaceId);
-  if (cloud) return requestCloudGithubPr(cloud, "gh.prUpdate", args) as Promise<PR>;
+  const cloud = requestCloudGithubPrFor(args.workspaceId, "gh.prUpdate", args);
+  if (cloud) return cloud as Promise<PR>;
   return bridgeGhPrUpdate(requireBridge("update the pull request"), args);
 }
 
@@ -1921,8 +1946,8 @@ export async function ghPrGet(args: {
   workspaceId: string;
   prNumber: number;
 }): Promise<PR> {
-  const cloud = cloudTargetForValue(args.workspaceId);
-  if (cloud) return requestCloudGithubPr(cloud, "gh.prGet", args) as Promise<PR>;
+  const cloud = requestCloudGithubPrFor(args.workspaceId, "gh.prGet", args);
+  if (cloud) return cloud as Promise<PR>;
   const bridge = requireBridge("read the pull request");
   const key = `${args.workspaceId}#${args.prNumber}`;
   const pending = inflightPrGets.get(key);
@@ -1936,8 +1961,8 @@ export async function ghPrGet(args: {
 
 /** Reconcile external PR transitions into durable workspace state, including activity outside ghPrCreate. */
 export async function ghPrSync(workspaceId: string): Promise<PR | null> {
-  const cloud = cloudTargetForValue(workspaceId);
-  if (cloud) return requestCloudGithubPr(cloud, "gh.prSync", {}) as Promise<PR | null>;
+  const cloud = requestCloudGithubPrFor(workspaceId, "gh.prSync");
+  if (cloud) return cloud as Promise<PR | null>;
   const pending = inflightPrSyncs.get(workspaceId);
   if (pending) return pending;
   const request = bridgeGhPrSync(
@@ -1964,8 +1989,8 @@ export async function ghPrList(args: {
   originUrl?: string;
   state?: "open" | "closed" | "all";
 }): Promise<PR[]> {
-  const cloud = cloudTargetForValue(args.workspaceId);
-  if (cloud) return requestCloudGithubPr(cloud, "gh.prList", args) as Promise<PR[]>;
+  const cloud = requestCloudGithubPrFor(args.workspaceId, "gh.prList", args);
+  if (cloud) return cloud as Promise<PR[]>;
   return bridgeGhPrList(requireBridge("list pull requests"), args);
 }
 
@@ -1976,8 +2001,8 @@ export async function ghPrMerge(args: {
   commitTitle?: string;
   commitMessage?: string;
 }): Promise<{ sha: string }> {
-  const cloud = cloudTargetForValue(args.workspaceId);
-  if (cloud) return requestCloudGithubPr(cloud, "gh.prMerge", args) as Promise<{ sha: string }>;
+  const cloud = requestCloudGithubPrFor(args.workspaceId, "gh.prMerge", args);
+  if (cloud) return cloud as Promise<{ sha: string }>;
   return bridgeGhPrMerge(requireBridge("merge the pull request"), args);
 }
 
@@ -2051,8 +2076,8 @@ export async function ghPrChecks(args: {
   workspaceId: string;
   prNumber: number;
 }): Promise<PrChecksResult> {
-  const cloud = cloudTargetForValue(args.workspaceId);
-  if (cloud) return requestCloudGithubPr(cloud, "gh.prChecks", args) as Promise<PrChecksResult>;
+  const cloud = requestCloudGithubPrFor(args.workspaceId, "gh.prChecks", args);
+  if (cloud) return cloud as Promise<PrChecksResult>;
   const bridge = requireBridge("read pull-request checks");
   const key = `${args.workspaceId}#${args.prNumber}`;
   const pending = inflightPrChecks.get(key);
@@ -2070,8 +2095,8 @@ export async function ghPrRerunFailed(args: {
   prNumber: number;
   headSha: string;
 }): Promise<{ rerun: number }> {
-  const cloud = cloudTargetForValue(args.workspaceId);
-  if (cloud) return requestCloudGithubPr(cloud, "gh.prRerunFailed", args) as Promise<{ rerun: number }>;
+  const cloud = requestCloudGithubPrFor(args.workspaceId, "gh.prRerunFailed", args);
+  if (cloud) return cloud as Promise<{ rerun: number }>;
   return bridgeGhPrRerunFailed(requireBridge("re-run the failed checks"), args);
 }
 
@@ -2079,8 +2104,8 @@ export async function ghPrCommits(args: {
   workspaceId: string;
   prNumber: number;
 }): Promise<PrCommitSummary[]> {
-  const cloud = cloudTargetForValue(args.workspaceId);
-  if (cloud) return requestCloudGithubPr(cloud, "gh.prCommits", args) as Promise<PrCommitSummary[]>;
+  const cloud = requestCloudGithubPrFor(args.workspaceId, "gh.prCommits", args);
+  if (cloud) return cloud as Promise<PrCommitSummary[]>;
   return bridgeGhPrCommits(requireBridge("read pull-request commits"), args);
 }
 
@@ -2088,8 +2113,8 @@ export async function ghPrReviews(args: {
   workspaceId: string;
   prNumber: number;
 }): Promise<PrTimelineItem[]> {
-  const cloud = cloudTargetForValue(args.workspaceId);
-  if (cloud) return requestCloudGithubPr(cloud, "gh.prReviews", args) as Promise<PrTimelineItem[]>;
+  const cloud = requestCloudGithubPrFor(args.workspaceId, "gh.prReviews", args);
+  if (cloud) return cloud as Promise<PrTimelineItem[]>;
   return bridgeGhPrReviews(requireBridge("read pull-request reviews"), args);
 }
 
@@ -2098,8 +2123,8 @@ export async function ghPrComment(args: {
   prNumber: number;
   body: string;
 }): Promise<{ id: number; url: string }> {
-  const cloud = cloudTargetForValue(args.workspaceId);
-  if (cloud) return requestCloudGithubPr(cloud, "gh.prComment", args) as Promise<{ id: number; url: string }>;
+  const cloud = requestCloudGithubPrFor(args.workspaceId, "gh.prComment", args);
+  if (cloud) return cloud as Promise<{ id: number; url: string }>;
   return bridgeGhPrComment(
     requireBridge("post the pull-request comment"),
     args,

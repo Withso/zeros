@@ -6,6 +6,7 @@ import {
   Square,
 } from "lucide-react";
 import { useActiveWorkspace } from "../../state/use-active-workspace";
+import { repositoryOriginUrl } from "../workbench/repository-switcher";
 import {
   useWorkspaceStore,
   workbenchScopeForFolder,
@@ -62,7 +63,7 @@ export function SummaryContents({
   active: boolean;
   onNavigate: () => void;
 }) {
-  const { workspace, project } = useActiveWorkspace();
+  const { workspace, project, repositoryWorkspace } = useActiveWorkspace();
   const { actions, actionsReady, actionsError, startRun, stopRun, runIdFor } =
     useRunControl(folder, folder);
   const { statuses } = useRunStatuses(workspace, folder, actions, active);
@@ -294,9 +295,10 @@ export function SummaryContents({
 
       {project?.isGitRepository !== false && supportsSummaryGitStatus(workspace) && (
         <SummaryGitStatus
-          key={workspace.id}
-          workspace={workspace}
-          originUrl={project?.originUrl ?? null}
+          // A workspace of several repositories: its current repository's branch and pull request.
+          key={(repositoryWorkspace ?? workspace).id}
+          workspace={repositoryWorkspace ?? workspace}
+          originUrl={repositoryOriginUrl(workspace, repositoryWorkspace, project?.originUrl ?? null)}
           active={active}
           onNavigate={onNavigate}
         />

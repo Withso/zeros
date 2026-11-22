@@ -1,5 +1,6 @@
 // Cloud workspace v2 HTTP API under /v1, so the normal authentication
 // middleware always sets c.get("user"). Execution authority belongs to the persisted rollout mode.
+import type { CloudV2SetupStatus } from "./setup-status-contract.js";
 import { CloudV2InstallScriptSchema } from "./computer.js";
 import type { CloudProjects } from "./projects.js";
 import { createProjectRoutes, type ProjectRouteDeps } from "./project-routes.js";
@@ -10,6 +11,7 @@ import { Hono, type Context } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import { z } from "zod";
 import { CLOUD_CLIENT_ROLLOVER_FEATURE } from "./client-auth-contract.js";
+import { WORKSPACE_REPOSITORIES_FEATURE } from "./contract.js";
 import type { CloudWorkspaceSync } from "./workspace-sync/store.js";
 import { createCloudWorkspaceSyncRoutes } from "./workspace-sync/routes.js";
 import type { CloudWorkspaceGithubReadTokens } from "./workspace-sync/github-read-token.js";
@@ -44,12 +46,20 @@ export type CloudGithubWorkspaceDocument = CloudV2Workspace & {
   github?: CloudGithubRepositoryState;
   /** A workspace of several repositories: the project folder, and each repository with its own checkout and pull request. */
   root?: string;
-  repositories?: { repository: string; checkoutPath: string; branch: string; baseBranch: string; github?: CloudGithubRepositoryState }[];
+  repositories?: { repository: string; checkoutPath: string; branch: string; baseBranch: string; github?: CloudGithubRepositoryState;
+    /** setup-status-v1: this repository's own setup status. */
+    setup?: CloudV2SetupStatus;
+    /** A later repository's environment files: seeded (`ready`), refused (`failed`), or not available in shared execution. */
+    environment?: { state: "ready" | "failed" | "unavailable"; errorCode?: string } }[];
+  /** The project the workspace was created from, by its current name. */
+  project?: { id: string; name: string };
 };
 export type CloudGithubRepositoryState = { repositoryId: string; branch: string | null; baseBranch: string; headSha: string | null;
   prNumber: number | null; prState: "draft" | "ready" | "merged" | "closed" | null; prUrl: string | null };
 
 const CONNECT_TICKET_TTL_MS = 60_000;
+/** A released desktop shows this as its open failure's description. */
+export const CLIENT_UPDATE_REQUIRED_MESSAGE = "Update Zeros to open this workspace.";
 export const CLOUD_V2_CAPABILITIES: CloudV2Capabilities = {
   design: false, browser: false, simulators: false, terminal: true, files: true, git: true,
   agents: ["codex", "claude", "cursor"],
@@ -73,7 +83,7 @@ export type CloudV2RouteDeps = {
   workspaceSync?: CloudWorkspaceSync;
   workspaceGithubReadTokens?: CloudWorkspaceGithubReadTokens;
   localDevices?: CloudLocalDeviceRoutes;
-  store: Pick<CloudV2Store, "activeComputer" | "createWorkspace" | "createWorkspaceOnce" | "readCreateReceipt" | "get" | "promptContext" | "list" | "requestLifecycle" | "transition" | "issueToken" | "listChats" | "messageWindow" | "searchMessages" | "messageRange" | "messageSince" | "markActive"> & Partial<Pick<CloudV2Store, "prompts" | "getByNumber" | "chatEdits" | "requestExecutionLifecycle">>;
+  store: Pick<CloudV2Store, "activeComputer" | "createWorkspace" | "createWorkspaceOnce" | "readCreateReceipt" | "get" | "promptContext" | "list" | "requestLifecycle" | "transition" | "issueToken" | "listChats" | "messageWindow" | "searchMessages" | "messageRange" | "messageSince" | "markActive"> & Partial<Pick<CloudV2Store, "prompts" | "getByNumber" | "chatEdits" | "requestExecutionLifecycle" | "dismissLostWork">>;
   /** Roll out only with a runtime that advertises durable prompt delivery. */
   promptOutbox?: boolean;
   computers: Pick<CloudV2Computers, "requireMember" | "requireAdmin" | "overview" | "enqueue" | "buildConfigured" | "buildSourceTargets" | "saveRecipe" | "discardRecipe" | "reactivate" | "log" | "logRepositories">
@@ -261,6 +271,11 @@ export function createCloudV2Routes(deps: CloudV2RouteDeps): Hono {
     const acting = await connectionWorkspace(c, id.data);
     const active = Boolean(acting);
     const workspace = acting?.workspace ?? await deps.store.get(id.data, userId);
+    const clientFeatures = c.req.header("X-Zeros-Client-Features")?.split(",").map(value => value.trim()) ?? [];
+    // A desktop that does not declare several repositories would root at the first
+    // checkout while the chats live in the project folder: refused before any wake or ticket.
+    if (workspace.folder && !clientFeatures.includes(WORKSPACE_REPOSITORIES_FEATURE))
+      throw new HttpError(409, "client_update_required", CLIENT_UPDATE_REQUIRED_MESSAGE);
     const explicitWake = c.req.query("wakePolicy") === "explicit";
     if (explicitWake && (workspace.archivedAt || workspace.state === "stopping" || (!wake && workspace.state === "stopped")))
       throw new HttpError(409, "cloud_workspace_not_running", "This cloud workspace is not ready for a connection");
@@ -275,7 +290,6 @@ export function createCloudV2Routes(deps: CloudV2RouteDeps): Hono {
       }
     }
     let clientInstanceId: string | undefined;
-    const clientFeatures = c.req.header("X-Zeros-Client-Features")?.split(",").map(value => value.trim()) ?? [];
     if (active && clientFeatures.includes(CLOUD_CLIENT_ROLLOVER_FEATURE)) {
       const instance = uuid.safeParse(c.req.header("X-Zeros-Client-Instance"));
       if (!instance.success) throw new HttpError(400, "invalid_request", "Invalid cloud connection binding");
@@ -301,6 +315,13 @@ export function createCloudV2Routes(deps: CloudV2RouteDeps): Hono {
     const running = workspace.state === "running";
     if (running) await deps.store.markActive(workspace.id);
     return c.json({ running });
+  });
+
+  /** Retention: the person has seen that a restore came back without some work (`lostWork`). */
+  if (deps.store.dismissLostWork) app.post("/v1/cloud-v2/workspaces/:id/lost-work/dismiss", async c => {
+    const id = uuid.safeParse(c.req.param("id"));
+    if (!id.success) throw new HttpError(404, "not_found", "Cloud workspace not found");
+    return c.json({ workspace: await document(await deps.store.dismissLostWork!(id.data, c.get("user").id)) });
   });
 
   /** History reads from the control plane's mirror; never wakes the VM. */

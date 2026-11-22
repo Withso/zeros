@@ -1,6 +1,9 @@
 import { z } from "zod";
 import { CloudGithubUnavailableReasonSchema } from "@zeros/protocol/cloud-github-connection";
-import { CloudV2AgentCostSchema, CloudV2SetupStatusSchema, RepositorySetupPathSchema } from "@zeros/protocol/cloud-v2-relay";
+import { CloudV2AgentCostSchema, CloudV2SetupStatusSchema, RepositorySetupPathSchema, WORKSPACE_REPOSITORIES_FEATURE } from "@zeros/protocol/cloud-v2-relay";
+
+/** Declared on connect: the control plane refuses a workspace of several repositories to a desktop without it. */
+export const WORKSPACE_REPOSITORIES_CLIENT_FEATURE = WORKSPACE_REPOSITORIES_FEATURE;
 import { ownershipOf, sharingOf } from "./team-sharing-schema";
 import { sharingFor } from "./team-sharing-registry";
 import { isCloudWorkspacePageOwner } from "@zeros/protocol/cloud-workspace-link";
@@ -11,7 +14,7 @@ import { nativeCloudChatCache } from "./cloud-chat-cache";
 import { readNativeCloudHistory } from "./cloud-chat-cache-history";
 import type { CloudCacheKnown } from "../../../shared/cloud-chat-cache";
 import { NativeCloudCacheError } from "./cloud-chat-cache-client";
-import type { CloudWorkspaceDocument } from "./cloud-workspace-contract";
+import { CloudLostWorkSchema, type CloudWorkspaceDocument } from "./cloud-workspace-contract";
 import type { CloudWorkspaceTarget } from "./bridge/cloud-workspace-key";
 
 const uuid = z.string().uuid();
@@ -53,6 +56,15 @@ export const CloudV2WorkspaceSchema = z.object({
   chatEdits: z.literal(1).optional().catch(undefined),
   /** A private repository's workspace: its member's alone; never shared or reassigned. */
   privateOwnerUserId: uuid.optional().catch(undefined),
+  /** The project it was created from, by its current name. */
+  project: z.object({ id: uuid, name: z.string().min(1).max(100) }).optional().catch(undefined),
+  /** A workspace of several repositories: the project folder, and each repository with its checkout and pull request. */
+  root: z.string().optional().catch(undefined),
+  repositories: z.array(z.object({
+    repository: z.string().regex(/^[^/]+\/[^/]+$/), checkoutPath: z.string(), branch: z.string().min(1).max(255), baseBranch: z.string().min(1).max(255),
+    github: z.object({ repositoryId: z.string().regex(/^[1-9][0-9]*$/), branch: z.string().nullable(), baseBranch: z.string(), headSha: z.string().nullable(),
+      prNumber: z.number().int().positive().nullable(), prState: z.enum(["draft", "ready", "merged", "closed"]).nullable(), prUrl: z.string().url().nullable() }).optional(),
+  })).min(2).max(10).optional().catch(undefined),
 }).passthrough()
   // A missing Creator is never accepted without well-formed team ownership and a known creator of record.
   .refine(value => value.creatorUserId !== null || (!!ownershipOf(value) && typeof value.createdByUserId === "string" && uuid.safeParse(value.createdByUserId).success),
@@ -126,10 +138,13 @@ export function cloudV2Document(workspace: CloudV2Workspace): CloudWorkspaceDocu
     ...(workspace.github ? { github: workspace.github } : {}),
     ...(workspace.githubUnavailableReason ? { githubUnavailableReason: workspace.githubUnavailableReason } : {}),
     ...(workspace.checkoutPath ? { checkoutPath: workspace.checkoutPath } : {}),
+    ...(workspace.project ? { project: workspace.project } : {}),
+    ...(workspace.root && workspace.repositories ? { root: workspace.root, repositories: workspace.repositories } : {}),
     // Malformed optional setup or agent cost must not invalidate the workspace document.
     ...(sharing ? { sharing } : {}),
     ...topLevel("setup", CloudV2SetupStatusSchema, (workspace as Record<string, unknown>).setup),
     ...topLevel("agentCost", CloudV2AgentCostSchema, (workspace as Record<string, unknown>).agentCost),
+    ...topLevel("lostWork", CloudLostWorkSchema, (workspace as Record<string, unknown>).lostWork),
     generation: {
       number: 1,
       architecture: "linux/amd64",
@@ -210,15 +225,28 @@ export function isCloudV2BaseBranch(value: string): boolean {
 /** Without a base branch the server uses the branch its Cloud Computer installed. */
 export async function createCloudV2Workspace(input: {
   organizationId: string; repository: string; baseBranch?: string; name?: string;
+  /** Projects: the project to create from (`repository` is its first), and a base branch for any of its other repositories. */
+  projectId?: string; repositories?: readonly { repository: string; baseBranch: string }[];
 }, idempotencyKey: string = key()): Promise<CloudV2Workspace> {
-  if (input.baseBranch !== undefined && !isCloudV2BaseBranch(input.baseBranch))
+  if ([input.baseBranch, ...(input.repositories ?? []).map(entry => entry.baseBranch)].some(branch => branch !== undefined && !isCloudV2BaseBranch(branch)))
     throw new Error("Choose a branch from GitHub for this cloud workspace.");
   const body = {
     organizationId: uuid.parse(input.organizationId), repository: input.repository,
+    ...(input.projectId ? { projectId: uuid.parse(input.projectId) } : {}),
     ...(input.baseBranch !== undefined ? { baseBranch: input.baseBranch } : {}),
+    ...(input.repositories?.length ? { repositories: input.repositories.map(entry => ({ repository: entry.repository, baseBranch: entry.baseBranch })) } : {}),
     ...(input.name ? { name: input.name } : {}),
   };
   return (await cloudAccountRequest("/v1/cloud-v2/workspaces", one, { body, idempotencyKey })).workspace;
+}
+
+/** Retention: the person has seen that a restore came back without some work. */
+export async function dismissCloudV2LostWork(target: CloudWorkspaceTarget): Promise<CloudV2Workspace> {
+  const id = uuid.parse(target.workspaceId);
+  const { workspace } = await cloudAccountRequest(`/v1/cloud-v2/workspaces/${id}/lost-work/dismiss`, one, { body: {}, idempotencyKey: key() }, sharingFor(id));
+  if (workspace.id !== target.workspaceId || workspace.organizationId !== target.organizationId)
+    throw new Error("Cloud workspace response changed identity");
+  return workspace;
 }
 
 export async function changeCloudV2Workspace(target: CloudWorkspaceTarget, action: "start" | "stop" | "restart" | "archive" | "delete"): Promise<CloudV2Workspace> {
@@ -271,6 +299,8 @@ export async function connectCloudV2Workspace(target: CloudWorkspaceTarget, opti
 }) {
   return cloudAccountRequest(`/v1/cloud-v2/workspaces/${uuid.parse(target.workspaceId)}/connect?wakePolicy=explicit`, CloudV2ConnectSchema,
     { body: { wake: options.wake }, idempotencyKey: key() }, { ...sharingFor(target.workspaceId), signal: options.signal,
+      // This desktop opens a workspace of several repositories at its project folder.
+      clientFeatures: [WORKSPACE_REPOSITORIES_CLIENT_FEATURE],
       ...(options.clientInstance ? { clientInstance: options.clientInstance } : {}),
       ...(options.notExpiringBefore ? { notExpiringBefore: options.notExpiringBefore } : {}),
       ...(options.presentedTokenExpiry ? { presentedTokenExpiry: options.presentedTokenExpiry } : {}) });

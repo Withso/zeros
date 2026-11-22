@@ -180,10 +180,12 @@ describe("workbench default slice", () => {
       ["design", "Design"],
       ["changes", "Changes"],
       ["review", "Review"],
+      ["agents", "Agents"],
       ["terminal", "Setup"],
     ]);
     expect(tabs.map((tab) => Boolean(tab.pinned))).toEqual([
       false,
+      true,
       true,
       true,
       true,
@@ -209,6 +211,7 @@ describe("workbench default slice", () => {
       "Design",
       "Changes",
       "Review",
+      "Agents",
       "Setup",
     ]);
     expect(slice().activeId).toBe(slice().tabs[0].id);
@@ -354,6 +357,7 @@ describe("ADD_WORKBENCH_TAB", () => {
       "design",
       "changes",
       "review",
+      "agents",
       "terminal",
       "files",
     ]);
@@ -394,6 +398,7 @@ describe("ADD_WORKBENCH_TAB", () => {
         { type: "design" },
         { type: "changes" },
         { type: "review" },
+        { type: "agents" },
         { type: "terminal", terminalId: "setup" },
         { id: fileA.id, fileTreeVisible: false },
       ],
@@ -579,6 +584,7 @@ describe("REMOVE/UPDATE/ACTIVATE_WORKBENCH_TAB", () => {
       "design",
       "changes",
       "review",
+      "agents",
       "terminal",
     ]);
   });
@@ -1013,6 +1019,7 @@ describe("REORDER_WORKBENCH_TABS", () => {
       slice().tabs.find((tab) => tab.type === "design")!.id,
       changes.id,
       review.id,
+      slice().tabs.find((tab) => tab.type === "agents")!.id,
       browser.id,
       second.id,
       first.id,

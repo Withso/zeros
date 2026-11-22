@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { writeWorkspaceInstructions } from "./workspace/instructions";
 import { access, lstat, rm } from "node:fs/promises";
-import { join } from "node:path";
+import { join, relative } from "node:path";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { CloudV2ClientOperationSchema, CloudV2ControlFrameSchema, type CloudV2BootCleanRefusal, type CloudV2ClientLease, CLOUD_V2_RELAY_PROTOCOL, CLOUD_WORKSPACE_RESOURCES_CAPABILITY, CLOUD_WORKSPACE_RESOURCES_PUSH_MS, CLOUD_WORKSPACE_RESOURCES_WATCH_CAPABILITY, PUSH_SIGNALS_REPORT_MS, type CloudV2ControlFrame, type CloudV2SetupStatus, type CloudV2WorkerFrame, type RuntimeMcpServer } from "@zeros/protocol/cloud-v2-relay";
@@ -20,13 +20,13 @@ import { SessionStore } from "./sessions/session-store";
 import { HistoryMirror } from "./sessions/history-mirror";
 import type { Transport } from "./transport";
 import { ChatService } from "./workspace/chat-service";
-import { prepareCheckout, type CheckoutRefresh, type CheckoutResult } from "./workspace/checkout";
+import { cloneMissingCheckout, prepareCheckout, type CheckoutRefresh, type CheckoutResult } from "./workspace/checkout";
 import { WorkspaceSetup, readSetupOutput, type SetupRunner } from "./workspace/setup";
 import { NotifyUserService } from "./notify-user/service";
 import { SyncService } from "./workspace/sync-service";
 import { SyncTransferActivity } from "./workspace/sync-activity";
 import { SYNC_CAPABILITY, SYNC_HINT_KIND, SYNC_BATCH_CAPABILITY, SYNC_HAVE_V2_CAPABILITY, SYNC_TRANSFER_OPS } from "@zeros/protocol/workspace-sync";
-import { WorkspaceError, WorkspaceScope, type WorkerConfig } from "./workspace/scope";
+import { unsupported, WorkspaceError, WorkspaceScope, type WorkerConfig, type WorkerRepository } from "./workspace/scope";
 import { WorkspaceService, type WorkspaceServiceOptions } from "./workspace/service";
 import { isGitMutation } from "./workspace/git";
 import { GithubBroker, GithubTokens, githubEnvironment, type GithubToken } from "./credentials/github";
@@ -80,6 +80,8 @@ interface WorkerOptions {
   transport: Transport;
   drivers?: DriverFactories;
   prepareCheckout?: (workspace: WorkerConfig["workspace"], gitEnvironment: NodeJS.ProcessEnv, timing?: StartupTimingObserver) => Promise<CheckoutResult | void>;
+  /** A repository after the first that is not on disk: cloned before its branch is prepared. */
+  cloneCheckout?: (workspace: WorkerConfig["workspace"], repository: string, gitEnvironment: NodeJS.ProcessEnv) => Promise<boolean>;
   setupRunner?: SetupRunner;
   gitAskpassPath?: string;
   githubFetch?: typeof fetch;
@@ -209,7 +211,11 @@ export class CloudWorker {
     this.instanceId = options.runtimeResume?.instanceId ?? randomUUID();
     this.tokens = new GithubTokens((frame, timeoutMs) => this.send(frame, timeoutMs));
     this.githubCredentials = new GithubCredentialRecovery(this.tokens, { fetch: options.githubFetch, supportsRecovery: () => this.githubUserTokensEnabled });
-    this.github = new GithubBroker(`/tmp/zeros-github-${this.instanceId}/github.sock`, (purpose, failed, contextId, repository) => this.githubToken(purpose, failed, contextId, repository), () => this.workspace?.githubChanged());
+    this.github = new GithubBroker(`/tmp/zeros-github-${this.instanceId}/github.sock`, (purpose, failed, contextId, repository) => this.githubToken(purpose, failed, contextId, repository), () => {
+      // A gh mutation can be in any repository of a workspace of several: each one rereads its own.
+      this.workspace?.githubChanged();
+      for (const entry of this.repositories.values()) entry.service?.githubChanged();
+    });
     this.gitEnvironment = githubEnvironment(this.github.socketPath, options.gitAskpassPath ?? fileURLToPath(new URL("../bin/git-askpass", import.meta.url)));
     this.personal = new PersonalEnvironments(options.homeDirectory ?? homedir());
     this.commitIdentities = new ContextCommitIdentities(options.homeDirectory ?? homedir());
@@ -338,6 +344,7 @@ export class CloudWorker {
           capabilities: { design: false, browser: false, simulators: false, terminal: true, files: true, git: true, agents: ["codex", "claude", "cursor"], mcp: 1 } });
         // setup-status-v1: once after each hello; a first hello has no workspace yet and configuration reports it.
         void this.setup?.reportCurrent();
+        for (const entry of this.repositories.values()) void entry.setup?.reportCurrent();
       },
       frame: (raw) => this.receive(raw),
       runtimeUpdate: () => { this.runtimeUpdater?.hint(); void this.runtimeUpdater?.tick(); },
@@ -842,7 +849,7 @@ export class CloudWorker {
       await measureStartup("worker_services_mcp", () => mcp!.configure(config.mcpServers ?? [], config.loginRevision), timing);
       if (this.disposed || this.stopping) return false;
       agents = new Agents(store, rootScope, this.options.drivers ?? {
-        codex: () => new CodexDriver({ gitEnvironment: this.gitEnvironment }), claude: () => new ClaudeDriver({ gitEnvironment: this.gitEnvironment }),
+        codex: () => new CodexDriver({ gitEnvironment: this.gitEnvironment }), claude: () => new ClaudeDriver({ gitEnvironment: this.gitEnvironment, checkNativeSessions: true }),
         cursor: () => new CursorDriver({ gitEnvironment: this.gitEnvironment }),
       }, config,
         (frame) => this.broadcast(frame), () => { this.runtimeGate.activity(); void this.reportIdle(); }, this.options.onTiming, this.options.modelDiscovery,
@@ -967,6 +974,24 @@ export class CloudWorker {
     return { handle: (op: string) => runtime.service!.handle(op, rest) };
   }
 
+  /** Creator path: a repository after the first seeds its own pinned environment from its own
+   * state directory, and reports under its name. A failure marks only that repository; it never
+   * stops the workspace. Activated (shared execution), no file is ever seeded for a repository
+   * after the first: whatever a configuration carried, it is not this person's. */
+  private async seedRepositoryEnvironment(scope: WorkspaceScope, directory: string, entry: WorkerRepository): Promise<void> {
+    if (!entry.environment || this.acting) return;
+    const report = this.options.transport.reportRepositoryEnvironment?.bind(this.options.transport);
+    if (!report) return;
+    const signal = this.environmentLifetime.signal, versionId = entry.environment.versionId;
+    try { await seedEnvironment(scope, directory, entry.environment, signal); }
+    catch (error) {
+      if (!(error instanceof EnvironmentSeedError) || signal.aborted) throw error;
+      await report(entry.repository, { versionId, sequence: 1, state: "failed", errorCode: error.code }, signal).catch(() => {});
+      return;
+    }
+    await report(entry.repository, { versionId, sequence: 1, state: "ready" }, signal).catch(() => {});
+  }
+
   /** The repositories after the first: each checkout prepared on its branch, its own
    * workspace service (state, Git, files, remote fix-up) and setup. One that cannot be
    * prepared stays unavailable without failing the workspace. */
@@ -978,9 +1003,13 @@ export class CloudWorker {
       const runtime = new RepositoryRuntime(repositoryScope);
       opened.set(entry.repository.toLowerCase(), runtime);
       try {
+        // Not on disk yet (no project build was forked): cloned first, as the starter, with its own token.
+        if (!this.options.runtimeResume)
+          await asStarter(() => (this.options.cloneCheckout ?? cloneMissingCheckout)(repositoryScope.workspace, entry.repository, this.gitEnvironment));
         const checkout = this.options.runtimeResume ? undefined
           : await asStarter(() => (this.options.prepareCheckout ?? prepareCheckout)(repositoryScope.workspace, this.gitEnvironment, timing));
         runtime.refresh = checkout?.refresh; runtime.createdBranch = checkout?.createdBranch === true;
+        await this.seedRepositoryEnvironment(repositoryScope, directory, entry);
         const run = commandRunner(repositoryScope.root, this.gitEnvironment);
         runtime.service = await WorkspaceService.open(repositoryScope, directory, {
           onStartupTiming: timing, nextCheckoutSequence: () => ++this.checkoutSequence,
@@ -991,12 +1020,17 @@ export class CloudWorker {
             return run(program, args, options);
           },
           publish: frame => { if (this.repositories.get(entry.repository.toLowerCase()) === runtime) void this.broadcast(frame); },
+          // Its own turn history: the project folder's turns, restricted to this repository's folder.
+          historyDiff: params => this.agents ? this.agents.turns.historyDiff(params, relative(scope.workspaceRoot, entry.checkoutPath)) : unsupported(),
           // Its own checkout report, so its pull request follows its branch.
           ...(pullRequests && this.options.transport.reportGithubCheckout && /^[A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100}$/.test(entry.repository)
             ? { reportGithubCheckout: value => this.options.transport.reportGithubCheckout!({ ...value, repository: entry.repository }) } : {}),
         });
+        const reportRepositorySetup = this.options.transport.reportRepositorySetup?.bind(this.options.transport);
         runtime.setup = new WorkspaceSetup({ directory, workspace: repositoryScope.workspace, gitEnvironment: this.gitEnvironment,
           application: new ApplicationEnvironment(undefined), signal: this.environmentLifetime.signal,
+          // Its own status, under its name; the first repository's stays the workspace's.
+          ...(reportRepositorySetup ? { report: (status: CloudV2SetupStatus) => reportRepositorySetup(entry.repository, status) } : {}),
           runner: this.options.setupRunner, activity: () => { void this.reportIdle(); }, onStorageError: () => this.options.onError?.("storage"),
           beforeRun: async () => { await runtime.refresh?.touch(); } });
       } catch {

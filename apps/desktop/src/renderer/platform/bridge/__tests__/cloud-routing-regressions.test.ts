@@ -1,6 +1,18 @@
 import { afterEach, expect, it, vi } from "vitest";
 const cloudGithub = vi.hoisted(() => ({ request: vi.fn(async (_target: unknown, op: string) => op === "gh.prGet" ? { number: 12, title: "Cloud PR" } : op === "gh.authStatus" ? { authenticated: true, login: "cloud-user" } : {}) }));
-vi.mock("../../cloud-github-pr", () => ({ requestCloudGithubPr: cloudGithub.request }));
+// A workspace of one repository: every cloud pull request request goes to its workspace, through the transport stub.
+vi.mock("../../cloud-github-pr", async () => {
+  const { cloudTargetForValue } = await import("../cloud-workspace-key");
+  const cloudGithubPrRoute = (id: unknown) => { const target = cloudTargetForValue(id); return target ? { target } : null; };
+  return {
+    requestCloudGithubPr: cloudGithub.request,
+    cloudGithubPrRoute,
+    requestCloudGithubPrFor: (id: unknown, op: string, input: Record<string, unknown> = {}) => {
+      const scope = cloudGithubPrRoute(id);
+      return scope ? (cloudGithub.request as (...args: unknown[]) => Promise<unknown>)(scope.target, op, input) : null;
+    },
+  };
+});
 import { RuntimeClient } from "@/renderer/platform/bridge/ws-client";
 import {
   WorkspaceRuntimeClient,
@@ -398,4 +410,14 @@ it("does not publish a late aggregate after account replacement", async () => {
     result: { chats: [], chatDeletions: [] },
   } as never);
   await rejection;
+});
+
+it.each(["github:owner/repo", "project:77777777-7777-4777-8777-777777777777"])("never asks Local for a cloud group's workspaces before the catalog is confirmed (%s)", async rest => {
+  const local = vi.spyOn(RuntimeClient.prototype, "request").mockResolvedValue({ type: "WORKSPACE_RESPONSE", result: { workspaces: [] } } as never);
+  const client = new WorkspaceRuntimeClient({ open: vi.fn(), workspaces: () => [], workspacesConfirmed: () => false });
+  clients.push(client);
+  await expect(client.request({ type: "WORKSPACE_REQUEST", op: "workspace.list",
+    params: { repoSlug: `cloud-11111111-1111-4111-8111-111111111111:${rest}` } })).rejects.toThrow(/not confirmed/);
+  expect(local).not.toHaveBeenCalled();
+  local.mockRestore();
 });

@@ -14,9 +14,12 @@ import {
 } from "./cloud-github-pr-capability";
 import { getOrganizationStoreGeneration } from "../features/team/team-store";
 import {
+  cloudTargetForValue,
   cloudWorkspaceKey,
+  parseCloudWorkspaceKey,
   type CloudWorkspaceTarget,
 } from "./bridge/cloud-workspace-key";
+import { cloudRepositoryLayout } from "./bridge/cloud-repository-routing";
 import { forgetPrCachesForWorkspace } from "../shell/pr/pr-cache-forget";
 import { forgetReviewCachesForFolders } from "../features/code-review/review-cache-forget";
 import { invalidateCloudGithubPrScope } from "./cloud-github-pr-scope";
@@ -31,6 +34,9 @@ const snapshots = new Map<string, Snapshot>(),
   flights = new Map<string, Promise<unknown>>(),
   scopeEpochs = new Map<string, number>();
 let epoch = 0;
+// Loaded lazily to avoid an import cycle, once, so a fan-out's requests share it.
+let transportModule: Promise<typeof import("./cloud-workspaces")> | undefined;
+const transport = () => (transportModule ??= import("./cloud-workspaces"));
 const changed = () =>
   new Error(
     "Your GitHub connection or workspace changed. Refresh before continuing.",
@@ -57,25 +63,102 @@ const errorCodes: Record<string, string> = {
 export function cloudGithubPrAvailable(target: CloudWorkspaceTarget): boolean {
   return hasCloudGithubPrCapability(target);
 }
+/** `repository`: one repository of a workspace of several, by its key and name; its
+ * authority and revisions are its own. The first repository of a workspace of one
+ * keeps the workspace's key. */
+export type CloudGithubPrRepository = { key: string; repository: string };
 export function cloudGithubPrAuthority(
   target: CloudWorkspaceTarget,
+  repository?: CloudGithubPrRepository,
 ): CloudGithubPrAuthority | undefined {
-  const snapshot = snapshots.get(cloudWorkspaceKey(target));
-  const authority = snapshot?.catalog === cloudGithubPrCatalogContext(target) ? snapshot?.authority : undefined;
+  const snapshot = snapshots.get(repository?.key ?? cloudWorkspaceKey(target));
+  const authority = snapshot?.catalog === cloudGithubPrCatalogContext(target, repository?.key) ? snapshot?.authority : undefined;
   return authority ? { ...authority } : undefined;
 }
-function forgetPresentation(key: string): void {
+
+export type CloudGithubPrRoute = { target: CloudWorkspaceTarget; repository?: CloudGithubPrRepository };
+/** Only `gh.authStatus` is about the connection; every other operation is one repository's. */
+const CONNECTION_OPERATIONS = new Set(["gh.authStatus"]);
+
+/**
+ * The repository a pull request request for this workspace id is for, or null
+ * for an id that is not a cloud workspace. Every cloud pull request request and
+ * authority read goes through here. In a workspace of several repositories:
+ * - a repository's key (`<key>/<folder>`) is that repository;
+ * - the workspace key with `repository` set is the repository of that name;
+ * - the bare workspace key is the first repository for connection reads, and
+ *   `gh.prSync` syncs every repository (see `requestCloudGithubPrFor`);
+ * - anything else is refused, never served as the first repository: a pull
+ *   request number on the bare key may be another repository's (the combined
+ *   mark), and a folder that is not a repository names none.
+ * Each repository's state is kept under its own key. A workspace of one
+ * repository keeps its workspace key, as before.
+ */
+export function cloudGithubPrRoute(workspaceId: unknown, op: string, input: Record<string, unknown> = {}): CloudGithubPrRoute | null {
+  const target = cloudTargetForValue(workspaceId);
+  if (!target) return null;
+  const folder = parseCloudWorkspaceKey(workspaceId)?.relativePath;
+  const layout = cloudRepositoryLayout(target);
+  const named = typeof input.repository === "string" ? input.repository.toLowerCase() : null;
+  const root = cloudWorkspaceKey(target);
+  const scope = (entry: { repository: string; folder: string }): CloudGithubPrRoute =>
+    ({ target, repository: { key: `${root}/${entry.folder}`, repository: entry.repository } });
+  if (folder) {
+    const entry = layout?.repositories.find(row => row.folder === folder);
+    if (!entry || (named !== null && named !== entry.repository.toLowerCase()))
+      throw new Error("This folder is not one of the workspace's repositories.");
+    return scope(entry);
+  }
+  if (!layout) return { target };
+  if (named !== null) {
+    const entry = layout.repositories.find(row => row.repository.toLowerCase() === named);
+    if (!entry) throw new Error("This repository is not part of this workspace.");
+    return scope(entry);
+  }
+  if (CONNECTION_OPERATIONS.has(op) || op === "gh.prSync") return scope(layout.repositories[0]!);
+  throw new Error("Choose which of this workspace's repositories this pull request is in.");
+}
+
+/** A workspace id's pull request request, or null for a Local id. A refusal is a rejected promise. */
+export function requestCloudGithubPrFor(workspaceId: unknown, op: string, input: Record<string, unknown> = {}): Promise<unknown> | null {
+  let scope: CloudGithubPrRoute | null;
+  try { scope = cloudGithubPrRoute(workspaceId, op, input); }
+  catch (error) { return Promise.reject(error); }
+  if (!scope) return null;
+  const layout = cloudRepositoryLayout(scope.target);
+  if (op === "gh.prSync" && layout && !parseCloudWorkspaceKey(workspaceId)?.relativePath && typeof input.repository !== "string") {
+    // Syncing the workspace syncs each repository, so a pull request opened in any of them is found.
+    const root = cloudWorkspaceKey(scope.target);
+    return Promise.all(layout.repositories.map(entry =>
+      requestCloudGithubPr(scope.target, op, input, { key: `${root}/${entry.folder}`, repository: entry.repository })))
+      .then(results => results.find(result => result != null) ?? null);
+  }
+  return requestCloudGithubPr(scope.target, op, input, ...(scope.repository ? [scope.repository] : []));
+}
+
+/** The last confirmed authority for a workspace id, resolved the same way as its requests. */
+export function cloudGithubPrAuthorityFor(workspaceId: unknown, op = "gh.repoAccess"): CloudGithubPrAuthority | undefined {
+  let scope: CloudGithubPrRoute | null;
+  try { scope = cloudGithubPrRoute(workspaceId, op); } catch { return undefined; }
+  return scope ? cloudGithubPrAuthority(scope.target, scope.repository) : undefined;
+}
+/** `exact`: only this key, not the repositories of a workspace of several under it. */
+function forgetPresentation(key: string, exact = false): void {
   forgetPrCachesForWorkspace(key);
   forgetReviewCachesForFolders(
-    (folder) => folder === key || folder.startsWith(`${key}/`),
+    (folder) => folder === key || (!exact && folder.startsWith(`${key}/`)),
   );
   invalidateCloudGithubPrScope(key);
 }
 onCloudGithubPrContextChange((key, retainPresentation) => {
   // A new HEAD invalidates request authority, not the same branch's last confirmed presentation.
   if (retainPresentation) return;
-  snapshots.delete(key);
-  forgetPresentation(key);
+  // Each repository of a workspace of several has its own context and change;
+  // the workspace's own change reaches them only when the workspace is gone.
+  const repositories = [...cloudGithubPrCatalogKeys()].some(each => each.startsWith(`${key}/`));
+  for (const each of [...snapshots.keys()])
+    if (each === key || (!repositories && each.startsWith(`${key}/`))) { snapshots.delete(each); if (each !== key) forgetPresentation(each); }
+  forgetPresentation(key, repositories);
 });
 export function clearCloudGithubPr(organizationId?: string): void {
   if (organizationId)
@@ -105,6 +188,7 @@ export function requestCloudGithubPr(
   target: CloudWorkspaceTarget,
   op: string,
   input: Record<string, unknown>,
+  repository?: CloudGithubPrRepository,
 ): Promise<unknown> {
   if (!CLOUD_GITHUB_PR_OPERATIONS.has(op) || !cloudGithubPrAvailable(target))
     return Promise.reject(
@@ -112,19 +196,19 @@ export function requestCloudGithubPr(
         "Pull requests are not available for this cloud workspace. Update its cloud runtime and try again.",
       ),
     );
-  const key = cloudWorkspaceKey(target),
+  const key = repository?.key ?? cloudWorkspaceKey(target),
     account = getOrganizationStoreGeneration(),
     startEpoch = epoch,
     scopeEpoch = scopeEpochs.get(target.organizationId) ?? 0;
-  const context = cloudGithubPrCatalogContext(target);
+  const context = cloudGithubPrCatalogContext(target, repository?.key);
   const current = () =>
     account === getOrganizationStoreGeneration() &&
     epoch === startEpoch &&
     scopeEpoch === (scopeEpochs.get(target.organizationId) ?? 0) &&
-    context === cloudGithubPrCatalogContext(target);
+    context === cloudGithubPrCatalogContext(target, repository?.key);
   const captured = snapshots.get(key),
     write = CLOUD_GITHUB_PR_WRITES.has(op);
-  const { workspaceId: _workspaceId, ...params } = input;
+  const { workspaceId: _workspaceId, repository: _repository, ...params } = input;
   // A caller's remote is only a Local hint; cloud uses the server-pinned repository.
   if (op === "gh.prList") {
     delete params.owner;
@@ -171,13 +255,13 @@ export function requestCloudGithubPr(
   if (existing) return existing;
   if (flights.size >= 256)
     return Promise.reject(new Error("GitHub is busy. Try again shortly."));
-    const pending = import("./cloud-workspaces")
+  const pending = transport()
     .then(({ cloudAccountRequest }) => {
       if (!current()) throw changed();
       return cloudAccountRequest(
         `/v1/cloud-v2/workspaces/${target.workspaceId}/github`,
         CloudGithubPrResponseSchema,
-        { body: parsed.data, idempotencyKey: crypto.randomUUID() },
+        { body: repository ? { ...parsed.data, repository: repository.repository } : parsed.data, idempotencyKey: crypto.randomUUID() },
         {
           ...sharingFor(target.workspaceId),
           githubPullRequest: true,
@@ -238,7 +322,7 @@ export function requestCloudGithubPr(
       if (write || op === "gh.prSync")
         await import("../state/cloud-workspace-catalog")
           .then(({ refreshCloudWorkspace, cloudWorkspaceDocument }) =>
-            write || prSyncChangesDocument(cloudWorkspaceDocument(target)?.github, result) ? refreshCloudWorkspace(target) : undefined)
+            write || prSyncChangesDocument(documentPullRequest(cloudWorkspaceDocument(target), repository), result) ? refreshCloudWorkspace(target) : undefined)
           .catch(() => {});
       if (!current() && !write) throw changed();
       return result;
@@ -299,3 +383,11 @@ function prSyncChangesDocument(github: { prNumber: number | null; prState: strin
   const pr = result as { number?: unknown; url?: unknown; state?: unknown };
   return pr.number !== github.prNumber || pr.url !== github.prUrl || pr.state !== github.prState;
 }
+
+/** The pull request the document shows for this request's repository: its own entry for one of several. */
+function documentPullRequest(document: { github?: Parameters<typeof prSyncChangesDocument>[0]; repositories?: { repository: string; github?: Parameters<typeof prSyncChangesDocument>[0] }[] } | undefined,
+  repository: CloudGithubPrRepository | undefined): Parameters<typeof prSyncChangesDocument>[0] {
+  if (!repository) return document?.github;
+  return document?.repositories?.find(entry => entry.repository.toLowerCase() === repository.repository.toLowerCase())?.github;
+}
+

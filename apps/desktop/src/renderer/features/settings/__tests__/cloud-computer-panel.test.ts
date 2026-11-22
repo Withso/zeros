@@ -7,10 +7,12 @@ const state = vi.hoisted(() => ({
   role: "owner" as string,
   data: undefined as CloudV2Computer | undefined,
   error: null as Error | null,
+  projects: null as null | { projects: unknown[]; canCreateOrganization: boolean; personalAllowed: boolean },
 }));
+vi.mock("../cloud-github-levels", () => ({ useGithubLevels: () => ({ projects: state.projects }) }));
 vi.mock("../../team/team-store", () => ({
   getOrganizationStoreGeneration: () => 0,
-  useActiveOrganization: () => ({ id: "11111111-1111-4111-8111-111111111111", isPersonal: false, role: state.role }),
+  useActiveOrganization: () => ({ id: "11111111-1111-4111-8111-111111111111", name: "Withso", isPersonal: false, role: state.role }),
   useTeams: () => ({ me: { user: { id: "22222222-2222-4222-8222-222222222222" } } }),
 }));
 vi.mock("../../../state/use-cached-read", () => ({
@@ -58,7 +60,17 @@ describe("Cloud Computer settings panel", () => {
     expect(page).toContain("Install script");
     expect(html).toContain("sudo -n apt-get install -y jq");
     expect(html).not.toContain("data-chooser");
-    expect(page).toContain("The Cloud Computer holds tools only: the runtime, Git LFS and your install script. Repositories belong to projects, each with its own ready copy.");
+    expect(page).toContain("The Cloud Computer holds tools only. Repositories, setup scripts and build secrets belong to projects.");
+    state.projects = { projects: [{}, {}, {}], canCreateOrganization: true, personalAllowed: true };
+    const onNewProject = vi.fn();
+    const withProjects = text(renderToStaticMarkup(createElement(CloudComputerPanel, { onNewProject })));
+    expect(withProjects).toContain("3 projects in Withso");
+    expect(withProjects).toContain("New project");
+    state.projects = { projects: [{}], canCreateOrganization: false, personalAllowed: false };
+    const member = text(renderToStaticMarkup(createElement(CloudComputerPanel, { onNewProject })));
+    expect(member).toContain("1 project in Withso");
+    expect(member).not.toContain("New project");
+    state.projects = null;
   });
 
   it("names where a ready copy kept a build secret and how to avoid it", () => {
@@ -69,7 +81,7 @@ describe("Cloud Computer settings panel", () => {
       { projectId: "88888888-8888-4888-8888-888888888882", project: "app", repository: "withso/web", step: "setup", generation: 5,
         reason: "ready_copy_setup_failed", detail: null, finishedAt: ago(day), failures: 5, nextRetryAt: null }] };
     const page = text(render()).replace(/&#x27;/g, "'");
-    expect(page).toContain("Ready copies");
+    expect(page).toContain("Project builds");
     expect(page).toContain("withso/zeros: A build secret was left on the disk. In /home/user/withso/zeros/.npmrc. Read it from the environment in setup; don't write it to a file. Next try in 2 hours.");
     expect(page).toContain("withso/web: Setup failed. Check the setup command and its output, then save it or build again. Automatic retries stopped; change something or retry now.");
     expect(page).not.toMatch(/ready_copy_/);

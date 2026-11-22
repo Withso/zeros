@@ -360,6 +360,8 @@ interface WorkspaceFileTreeProps {
   reloadKey?: number;
   /** One shared workspace snapshot, mapped to paths relative to this tree. */
   fileStatuses?: ReadonlyMap<string, FileChangeStatus>;
+  /** A label at the end of a folder's row (a repository folder's branch). */
+  folderDecorations?: ReadonlyMap<string, { text: string; title: string }>;
   /** Owner-keyed scroll memory for the library's Shadow-DOM virtual scroller.
    * Omit for launcher trees whose short-lived position is not navigation. */
   scrollMemoryKey?: string;
@@ -421,6 +423,7 @@ const WorkspaceFileTreeForScope = React.forwardRef<
     deselectAfterOpen,
     reloadKey,
     fileStatuses = EMPTY_FILE_STATUSES,
+    folderDecorations,
     scrollMemoryKey,
     designFilter,
     paddingTop = TREE_CONTENT_PAD_TOP,
@@ -500,6 +503,8 @@ const WorkspaceFileTreeForScope = React.forwardRef<
   const searchRef = useRef(search === true);
   const fileStatusesRef = useRef(fileStatuses);
   fileStatusesRef.current = fileStatuses;
+  const folderDecorationsRef = useRef(folderDecorations);
+  folderDecorationsRef.current = folderDecorations;
   const gitStatus = useMemo<GitStatusEntry[]>(() => [...fileStatuses].map(([path, status]) => ({
     path,
     status: status === "conflicted" ? "modified" : status,
@@ -523,6 +528,7 @@ const WorkspaceFileTreeForScope = React.forwardRef<
         icons: FILE_ICON_TREE_CONFIG,
         unsafeCSS: TREE_SHADOW_CSS,
         renderRowDecoration: ({ item }: FileTreeRowDecorationContext) => {
+          if (item.kind !== "file") return folderDecorationsRef.current?.get(item.path.replace(/\/+$/, "")) ?? null;
           const status = item.kind === "file" ? fileStatusesRef.current.get(item.path) : undefined;
           if (!status) return null;
           const { letter, label } = FILE_STATUS_PRESENTATION[status];

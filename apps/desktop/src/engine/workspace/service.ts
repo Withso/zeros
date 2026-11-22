@@ -352,6 +352,7 @@ import {
   setChatWorkspaceResolver,
   type ChatRow,
 } from "../db/chats";
+import { insertLocalLink } from "../db/local-orchestration";
 import { openZerosDb } from "../db";
 import { getConversationContext, resetConversationContext } from "../db/conversation-context";
 import { headRev, tombstonesSince } from "../db/sync";
@@ -4031,6 +4032,28 @@ export class WorkspaceService {
         if (titled) refreshWorktreeSeed(titled);
         // A workspace that just took this chat's title is a workspace change.
         return titled ? { ok: true, workspaceIds: [titled] } : { ok: true };
+      }
+      // LOCAL-ONLY (not on any remote allowlist): Add child session. The row
+      // and its Local orchestration link land together, so the first pull
+      // already nests the child under its parent.
+      case "chats.createChild": {
+        if (remote) throw new Error("Child sessions are created on this Mac.");
+        const c = coerceChatRow(params.chat);
+        const parentChatId = reqStr(params, "parentChatId");
+        if (!c || c.id === parentChatId) throw new Error("Invalid child session.");
+        if (c.folder.startsWith("cloud://")) throw new Error("Child sessions are Local only.");
+        const parent = getChat(parentChatId);
+        if (parent && parent.folder !== c.folder) throw new Error("The parent session is in another workspace.");
+        const link = insertLocalLink({ chatId: c.id, parentChatId });
+        if (link.parentChatId !== parentChatId) throw new Error("That session already has a parent.");
+        const titled = upsertChat(preserveProviderIdentity(c));
+        if (titled) refreshWorktreeSeed(titled);
+        return {
+          ok: true,
+          parentChatId: link.parentChatId,
+          rootChatId: link.rootChatId,
+          ...(titled ? { workspaceIds: [titled] } : {}),
+        };
       }
       case "chats.setComposerMode": {
         const mode = reqStr(params, "mode");

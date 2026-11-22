@@ -87,6 +87,17 @@ export function isCloudRepositorySlug(value: unknown): value is string {
   return repository.length === 2 && repository.every(part => /^[A-Za-z0-9_.-]+$/.test(part) && part !== "." && part !== "..");
 }
 
+/** A project group's namespace (`cloud-<organization>:project:<project id or
+ * folder>`), the catalog's slug for a workspace of several repositories. */
+export function isCloudProjectSlug(value: unknown): value is string {
+  return typeof value === "string" && new RegExp(`^cloud-${UUID}:project:[A-Za-z0-9_.-]{1,100}$`, "i").test(value) && !/:project:\.{1,2}$/.test(value);
+}
+
+/** Any cloud catalog namespace: a repository's or a project group's. */
+export function isCloudOwnedSlug(value: unknown): value is string {
+  return isCloudRepositorySlug(value) || isCloudProjectSlug(value);
+}
+
 export function cloudTargetForValue(
   value: unknown,
 ): CloudWorkspaceTarget | null {

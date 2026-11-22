@@ -7,6 +7,7 @@ import { peekWorkspacesFor, setWorkspaceRowsForTesting } from "../use-projects";
 import { cloudGithubPrScope } from "../../platform/cloud-github-pr-scope";
 import { cloudGithubPrCatalogContext } from "../../platform/cloud-github-pr-capability";
 import { clearCloudGithubPr } from "../../platform/cloud-github-pr";
+import { cloudRepositoryLayout } from "../../platform/bridge/cloud-repository-routing";
 import { githubReviewCache, githubReviewKey } from "../../features/code-review/github-review-cache";
 const api = vi.hoisted(() => ({ list: vi.fn(), read: vi.fn(), lifecycle: vi.fn(), forget: vi.fn(), projects: vi.fn(() => [] as unknown[]), rollout: false, complete: true }));
 vi.mock("../../platform/cloud-workspace-access", async importOriginal => ({
@@ -830,4 +831,96 @@ it("unchanged list polls retain details while status-only changes notify documen
     expect(documents).toHaveBeenCalledOnce();
     expect(rows).not.toHaveBeenCalled();
   } finally { off.forEach(stop => stop()); }
+});
+
+describe("a workspace of several repositories", () => {
+  const key = `cloud://${target.organizationId}/${target.workspaceId}`;
+  const project = { id: "33333333-3333-4333-8333-333333333333", name: "Zeros App" };
+  function several(version: number, name = project.name): CloudWorkspaceDocument {
+    return { ...doc(version), repository: { forge: "github.com", owner: "withso", name: "api", revision: "main" }, project: { ...project, name },
+      checkoutPath: "/home/user/zeros-app/api", root: "/home/user/zeros-app",
+      repositories: [
+        { repository: "withso/api", checkoutPath: "/home/user/zeros-app/api", branch: "zeros/app-1", baseBranch: "main" },
+        { repository: "withso/web", checkoutPath: "/home/user/zeros-app/web", branch: "zeros/app-1", baseBranch: "next",
+          github: { repositoryId: "44", branch: "zeros/app-1", baseBranch: "release", headSha: "b".repeat(40), prNumber: 9, prState: "draft",
+            prUrl: "https://github.com/withso/web/pull/9" } },
+      ] };
+  }
+  beforeEach(() => clearCloudWorkspaceCatalog());
+
+  it("lists each repository as a folder of the project folder with its own branch and pull request, and groups the workspace under its project", () => {
+    acceptCloudWorkspaceDocument(several(1));
+    const [row] = getCloudWorkspaceRows();
+    expect(row!.project).toEqual(project);
+    expect(row!.repositories).toEqual([
+      expect.objectContaining({ repository: "withso/api", folder: "api", target: `${key}/api`, branch: "zeros/app-1", baseBranch: "main", prNumber: null }),
+      { repository: "withso/web", folder: "web", target: `${key}/web`, branch: "zeros/app-1", baseBranch: "release", prNumber: 9, prState: "draft",
+        prUrl: "https://github.com/withso/web/pull/9" }]);
+    // Its one mark: web's open draft, whichever repository is current.
+    expect(row).toMatchObject({ prNumber: 9, prState: "draft", prUrl: "https://github.com/withso/web/pull/9" });
+    const [group] = getCloudProjects();
+    // Its project, never a repository: no remote, so it joins no Mac folder.
+    expect(group).toMatchObject({ id: `cloud-project:${target.organizationId}:project:${project.id}`, name: "Zeros App", originUrl: null });
+    expect(cloudRepositoryLayout(target)).toEqual({ repositories: [{ repository: "withso/api", folder: "api" }, { repository: "withso/web", folder: "web" }] });
+  });
+
+  it("carries a later repository's missing environment files, and the switcher says it once under the list", async () => {
+    const { repositoryEnvironmentNote } = await import("../../shell/workbench/repository-switcher");
+    const document = several(1);
+    document.repositories![1] = { ...document.repositories![1]!, environment: { state: "unavailable" } };
+    acceptCloudWorkspaceDocument(document);
+    const repositories = getCloudWorkspaceRows()[0]!.repositories!;
+    expect(repositories.map(entry => entry.environment)).toEqual([undefined, "unavailable"]);
+    expect(repositories.map(repositoryEnvironmentNote)).toEqual([null, "web: Environment files are not available for this repository in shared workspaces yet."]);
+    // Seeded files say nothing; an unknown state from a newer server is ignored.
+    for (const environment of [{ state: "ready" }, { state: "later" }]) {
+      clearCloudWorkspaceCatalog();
+      const next = several(2);
+      next.repositories![1] = { ...next.repositories![1]!, environment: environment as never };
+      acceptCloudWorkspaceDocument(next);
+      expect(getCloudWorkspaceRows()[0]!.repositories![1]!.environment).toBeUndefined();
+    }
+  });
+
+  it("keeps the project group's identity and follows a rename, and keeps a workspace of one repository under its repository", () => {
+    acceptCloudWorkspaceDocument(several(1));
+    const first = getCloudProjects()[0]!;
+    acceptCloudWorkspaceDocument(several(2));
+    expect(getCloudProjects()[0]).toBe(first);
+    acceptCloudWorkspaceDocument(several(3, "Zeros Studio"));
+    expect(getCloudProjects()[0]).toMatchObject({ id: first.id, name: "Zeros Studio", repoRoot: first.repoRoot });
+    clearCloudWorkspaceCatalog();
+    acceptCloudWorkspaceDocument({ ...doc(4), project: { ...project, name: "fixture" } });
+    expect(getCloudProjects()[0]).toMatchObject({ id: `cloud-repository:${target.organizationId}:github.com:example/fixture`, originUrl: "https://github.com/example/fixture.git" });
+    expect(getCloudWorkspaceRows()[0]!.repositories).toBeUndefined();
+    expect(cloudRepositoryLayout(target)).toBeUndefined();
+  });
+
+  it("reads a malformed repository list as one repository, never as a misplaced folder", () => {
+    const bad = several(1);
+    bad.repositories![1] = { ...bad.repositories![1]!, checkoutPath: "/home/user/elsewhere/web" };
+    acceptCloudWorkspaceDocument(bad);
+    expect(getCloudWorkspaceRows()[0]!.repositories).toBeUndefined();
+    expect(cloudRepositoryLayout(target)).toBeUndefined();
+  });
+});
+
+describe("lost work", () => {
+  beforeEach(() => clearCloudWorkspaceCatalog());
+  it("tells the workspace's member, in plain words, which work could not be recovered", async () => {
+    const { renderToStaticMarkup } = await import("react-dom/server");
+    const React = await import("react");
+    const { LostWorkNotice, lostWorkMessage } = await import("../../shell/conversation/lost-work-notice");
+    const { CloudWorkspaceDocumentSchema } = await import("../../platform/cloud-workspace-contract");
+    const key = `cloud://${target.organizationId}/${target.workspaceId}`, stoppedAt = "2026-11-20T15:04:00.000Z";
+    const rendered = () => renderToStaticMarkup(React.createElement(LostWorkNotice, { folder: key }));
+    acceptCloudWorkspaceDocument(doc(1));
+    expect(rendered()).toBe("");
+    acceptCloudWorkspaceDocument({ ...doc(2), lostWork: { restored: "none", stoppedAt } });
+    expect(rendered()).toContain("This workspace was rebuilt from GitHub. Work that was not pushed before ");
+    expect(rendered()).toContain(">Dismiss<");
+    expect(lostWorkMessage({ restored: "earlier", stoppedAt })).toMatch(/^This workspace was restored from an earlier backup\. Work after .+ that was not pushed could not be recovered\.$/);
+    // A value from a newer server that this release does not know reads as none.
+    expect(CloudWorkspaceDocumentSchema.parse({ ...doc(3), lostWork: { restored: "partial", stoppedAt } }).lostWork).toBeUndefined();
+  });
 });

@@ -108,8 +108,8 @@ export function ModelPill({
   /** A pick under a DIFFERENT agent (the unified dropdown lists them all).
    *  Omitted ⇒ cross-agent rows still render but picking one is a no-op. */
   onSelectAgentModel?: (sel: AgentModelSelection) => void;
-  /** True once the chat's session has started (first prompt sent) — other
-   *  agents' models then show a ↗ in the dropdown ("opens a new chat"). */
+  /** True when a pick under another agent opens a new chat (a started cloud
+   *  chat) — those rows then show a ↗ in the dropdown. */
   redirectCrossAgent?: boolean;
   active?: boolean;
 }) {

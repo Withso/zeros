@@ -3,6 +3,7 @@
     "full-disk-access",
     "local-links",
     "text-selection",
+    "chat-selection",
     "design-inline-tools",
     "code-review",
     "cloud-github",
@@ -29,7 +30,8 @@
     "design-gpu-canvas",
     "cloud-workspace-details",
     "team-sharing",
-    "team-writing"
+    "team-writing",
+    "cloud-projects"
   ],
   [
     "design-motion-refinements",

@@ -300,6 +300,18 @@ export function turnRowKey(chatId: string, turnId: string): string {
   return `${chatId}\u0000${turnId}`;
 }
 
+/** Mark a chat's cached turn rows stale. `runningOnly` limits it to rows read
+ *  before their turn finalized: a stopped turn that is no longer the tail has
+ *  no live stop reason to fall back on, so its footer needs the final row. */
+export function refreshChatTurnRows(chatId: string, runningOnly = false): void {
+  const prefix = turnRowKey(chatId, "");
+  for (const key of turnRowCache.keys()) {
+    if (!key.startsWith(prefix)) continue;
+    if (runningOnly && turnRowCache.peekSnapshot(key).data?.status !== "running") continue;
+    turnRowCache.invalidate(key);
+  }
+}
+
 /** A reset (or its undo) rewrites the target turn's row AND removes/restores
  *  every later one, so no single key describes the change. */
 export function invalidateTurnRows(): void {

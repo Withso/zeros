@@ -16,7 +16,7 @@ vi.mock("../../../platform/git", () => ({
   isWorkspaceOpStillRunning: (error: unknown) => error instanceof Error && error.message === "Request timeout: WORKSPACE_REQUEST",
 }));
 vi.mock("../../../platform/app", () => ({ shellOpenUrl: fixture.open }));
-vi.mock("../../../platform/cloud-github-pr", () => ({ cloudGithubPrAuthority: fixture.authority }));
+vi.mock("../../../platform/cloud-github-pr", () => ({ cloudGithubPrAuthorityFor: fixture.authority }));
 vi.mock("../../../platform/cloud-github-pr-scope", () => ({ cloudGithubPrScope: fixture.scope }));
 vi.mock("../../../features/settings/use-git-remote", () => ({ useGitRemote: () => "origin" }));
 vi.mock("../../../features/settings/settings-navigation", () => ({ requestUserSettingsSection: vi.fn() }));

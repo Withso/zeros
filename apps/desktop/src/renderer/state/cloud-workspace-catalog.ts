@@ -1,6 +1,8 @@
 import type { WorkspaceAddress } from "@zeros/protocol/local-orchestration";
 import { clearChatSenders } from "../platform/chat-senders";
-import type { Workspace } from "../platform/git";
+import type { Workspace, WorkspaceRepository } from "../platform/git";
+import { publishCloudRepositoryLayouts, type CloudRepositoryLayout } from "../platform/bridge/cloud-repository-routing";
+import { combinedPullRequest } from "./workspace-repositories";
 import { publishCloudGithubPrCapabilities } from "../platform/cloud-github-pr-capability";
 import {
   CloudWorkspaceDocumentSchema,
@@ -192,6 +194,7 @@ function rebuild(documentsChanged = false, { pruneRepositoryFilters = true } = {
   const nextProjects = new Map<string, Project>();
   const nextFilterOwners = new Map<string, string>();
   const nextOwners = new Map<string, Project>();
+  const layouts = new Map<string, CloudRepositoryLayout>();
   const prior = new Map(rows.map((row) => [row.id, row]));
   const nextRows = documents
     .filter(canReadCloudWorkspace)
@@ -201,21 +204,25 @@ function rebuild(documentsChanged = false, { pruneRepositoryFilters = true } = {
         workspaceId: doc.id,
       });
       const slug = `${doc.repository.owner}/${doc.repository.name}`;
-      const originUrl = `https://${doc.repository.forge}/${slug}.git`;
-      const projectKey = `${doc.organizationId}:${doc.repository.forge}:${slug.toLowerCase()}`;
-      const project = nextProjects.get(projectKey) ??
-        projects.find(
-          (p) =>
-            p.id === `cloud-repository:${projectKey}` &&
-            knownKeys.has(p.repoRoot),
-        ) ?? {
-          id: `cloud-repository:${projectKey}`,
-          name: doc.repository.name,
-          repoRoot: key,
+      const several = cloudWorkspaceRepositories(doc, key);
+      if (several) layouts.set(key, { repositories: several.map(entry => ({ repository: entry.repository, folder: entry.folder })) });
+      // A workspace of several repositories is grouped under its project, which
+      // joins no Mac folder (Local workspaces hold one repository); one of one
+      // repository stays under its repository, as before projects.
+      const projectKey = several
+        ? `${doc.organizationId}:project:${doc.project?.id ?? doc.root!.split("/").pop()!}`
+        : `${doc.organizationId}:${doc.repository.forge}:${slug.toLowerCase()}`;
+      const id = several ? `cloud-project:${projectKey}` : `cloud-repository:${projectKey}`;
+      const name = several ? doc.project?.name ?? doc.root!.split("/").pop()! : doc.repository.name;
+      const known = projects.find(p => p.id === id && knownKeys.has(p.repoRoot));
+      const project = nextProjects.get(projectKey) ?? (known && (!several || known.name === name) ? known : undefined) ?? {
+          id,
+          name,
+          repoRoot: known?.repoRoot ?? key,
           repoSlug: `cloud-${projectKey}`,
-          originUrl,
+          originUrl: several ? null : `https://${doc.repository.forge}/${slug}.git`,
           isGitRepository: true,
-          addedAt: Date.parse(doc.createdAt),
+          addedAt: known?.addedAt ?? Date.parse(doc.createdAt),
         };
       nextProjects.set(projectKey, project);
       nextFilterOwners.set(project.id, sidebarRepositoryFilterOwner(doc.createdBy, doc.organizationId));
@@ -248,6 +255,11 @@ function rebuild(documentsChanged = false, { pruneRepositoryFilters = true } = {
         agentId: engine?.agentId ?? null,
         lastActiveAt: engine?.lastActiveAt ?? null,
         present: true,
+        ...(doc.project ? { project: doc.project } : {}),
+        ...(several ? { repositories: several.map((entry, index) => index === 0 ? { ...entry, branch: engine?.branch || doc.github?.branch || entry.branch,
+          baseBranch: engine?.baseBranch || github?.baseBranch || entry.baseBranch,
+          prNumber: github ? github.prNumber : engine?.prNumber ?? null, prState: github ? github.prState : engine?.prState ?? null,
+          prUrl: github ? github.prUrl : engine?.prUrl ?? null } : entry) } : {}),
         setupState:
           ["failed", "error"].includes(doc.status)
             ? "failed"
@@ -255,12 +267,15 @@ function rebuild(documentsChanged = false, { pruneRepositoryFilters = true } = {
               ? "passed"
               : "running",
       };
+      // One mark for a workspace of several repositories (combinedPullRequest states the rule).
+      if (row.repositories) Object.assign(row, combinedPullRequest(row.repositories));
       const old = prior.get(key);
       const next = old && catalogOnlyRows.has(old) === !engine && JSON.stringify(old) === JSON.stringify(row) ? old : row;
       if (!engine) catalogOnlyRows.add(next);
       return next;
     });
   ownerByKey = nextOwners;
+  publishCloudRepositoryLayouts(layouts);
   const newProjects = [...nextProjects.values()];
   const projectsChanged =
     newProjects.length !== projects.length ||
@@ -779,3 +794,22 @@ subscribeWorkspaceReadOnly(workspaceId => {
   const doc = cloudWorkspaceDocumentById(workspaceId);
   if (doc) void refreshCloudWorkspace({ organizationId: doc.organizationId, workspaceId }).catch(() => {});
 });
+
+/** A workspace of several repositories' repositories, each a folder of its project
+ * folder keyed `<workspace key>/<folder>`; undefined for one repository. */
+function cloudWorkspaceRepositories(doc: CloudWorkspaceDocument, key: string): WorkspaceRepository[] | undefined {
+  const root = doc.root, list = doc.repositories;
+  if (!root || !list || list.length < 2) return undefined;
+  const entries = list.map(entry => {
+    const folder = entry.checkoutPath.startsWith(`${root}/`) ? entry.checkoutPath.slice(root.length + 1) : "";
+    // The branch a repository is on is its checkout's, once reported; its pull request only while it is on that branch.
+    const branch = entry.github?.branch ?? entry.branch;
+    const github = entry.github && entry.github.branch === branch ? entry.github : undefined;
+    const environment = entry.environment?.state === "failed" || entry.environment?.state === "unavailable" ? entry.environment.state : undefined;
+    return { repository: entry.repository, folder, target: `${key}/${folder}`, branch, baseBranch: entry.github?.baseBranch ?? entry.baseBranch,
+      prNumber: github?.prNumber ?? null, prState: github?.prState ?? null, prUrl: github?.prUrl ?? null, ...(environment ? { environment } : {}) };
+  });
+  return entries.every(entry => entry.folder && !entry.folder.includes("/")) && new Set(entries.map(entry => entry.folder)).size === entries.length
+    ? entries : undefined;
+}
+

@@ -111,6 +111,8 @@ export const defaultRegistry: RendererRegistry = {
     // The per-turn budget cap ended the turn cleanly. "Turn
     // stopped · BUDGET · CLAUDE" record right above the footer.
     budget_stop: BudgetStopRecordCard,
+    // A user-applied agent/model switch: one static "Switched to <model>" row.
+    harness_switch: EventRowRenderer as any,
     // Session-level live background work settles into this ordinary,
     // expandable transcript tool row (no provider-specific terminal chrome).
     background_task: BackgroundTaskRecord,

@@ -169,6 +169,12 @@ export const CloudV2SetupStatusSchema = z.object({
   reason: z.enum(["timed_out", "script_refused", "source_changed"]).optional(),
 }).strict();
 export type CloudV2SetupStatus = z.infer<typeof CloudV2SetupStatusSchema>;
+/** workspace-repositories-v1: a repository after the first of a workspace of several reports its own setup. */
+export const CloudV2RepositorySetupStatusSchema = z.object({
+  repository: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,99}\/(?!\.\.?$)[A-Za-z0-9._-]{1,100}$/),
+  status: CloudV2SetupStatusSchema,
+}).strict();
+export type CloudV2RepositorySetupStatus = z.infer<typeof CloudV2RepositorySetupStatusSchema>;
 
 /** The workspace document's top-level `agentCost`: the running total of turns
  * whose mirrored prompt row carried `turnSummary.usage.totalCostUsd`. */
@@ -336,6 +342,8 @@ export const CloudV2ControlFrameSchema = z.discriminatedUnion("t", [
         baseCommit: z.string().regex(/^[0-9a-f]{40}$/).optional(),
         setup: z.string().max(8000).optional(),
         setupScript: RepositorySetupPathSchema.optional(),
+        /** Creator path: this repository's own pinned environment, seeded into its checkout. */
+        environment: CloudWorkspaceEnvironmentSchema.optional(),
       }).strict()).min(2).max(10).optional(),
     }).strict(),
     agents: CloudV2AgentLoginsSchema,

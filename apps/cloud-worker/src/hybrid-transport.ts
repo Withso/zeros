@@ -15,7 +15,7 @@ import { CloudGithubCheckoutSchema, type CloudGithubCheckout } from "@zeros/prot
 import { mcpFailure, mcpFailureError } from "./mcp/failure";
 import { CloudGithubUnavailableReasonSchema, type CloudGithubUnavailableReason } from "@zeros/protocol/cloud-github-connection";
 import { GITHUB_HTTP_TIMEOUT_MS } from "./credentials/github-failure";
-import { CloudEnvironmentReportSchema, CloudV2SetupStatusSchema, type CloudEnvironmentReport, type CloudV2SetupStatus } from "@zeros/protocol/cloud-v2-relay";
+import { CloudEnvironmentReportSchema, CloudRepositoryEnvironmentReportSchema, CloudV2SetupStatusSchema, CloudV2RepositorySetupStatusSchema, type CloudEnvironmentReport, type CloudV2SetupStatus } from "@zeros/protocol/cloud-v2-relay";
 import { CloudRecoveryReplySchema, CloudRecoveryRequestSchema, CloudRuntimeUpdateReplySchema, type CloudRecoveryReply, type CloudRecoveryRequest, type CloudRuntimeUpdateRequest, type CloudRuntimeUpdateReply } from "@zeros/protocol/cloud-v2-relay";
 import { PUSH_SIGNALS_REPORT_MS } from "@zeros/protocol/cloud-v2-relay";
 
@@ -326,6 +326,11 @@ export class HybridTransport implements Transport {
       throw error;
     }
   }
+  async reportRepositoryEnvironment(repository: string, value: CloudEnvironmentReport, signal?: AbortSignal): Promise<void> {
+    const input = CloudRepositoryEnvironmentReportSchema.parse({ repository, report: value });
+    const reply = await this.request("repository-environment", input, signal);
+    if (reply.sequence !== input.report.sequence) throw new Error("Invalid environment acknowledgement.");
+  }
   /** Slice B: leases, renew and retirement (worker bearer + boot, like every control request). */
   contextRequest(path: string, body: unknown): Promise<unknown> {
     if (!isContextPath(path)) return Promise.reject(new Error("Not a context route."));
@@ -430,6 +435,9 @@ export class HybridTransport implements Transport {
   }
   async reportSetup(status: CloudV2SetupStatus): Promise<void> {
     await this.request("setup", CloudV2SetupStatusSchema.parse(status), undefined, 10_000);
+  }
+  async reportRepositorySetup(repository: string, status: CloudV2SetupStatus): Promise<void> {
+    await this.request("repository-setup", CloudV2RepositorySetupStatusSchema.parse({ repository, status }), undefined, 10_000);
   }
   async reportCheckoutFailure(): Promise<void> {
     this.checkoutFailed = true;

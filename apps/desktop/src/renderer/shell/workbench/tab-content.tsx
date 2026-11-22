@@ -7,6 +7,7 @@ import { BrowserTab } from "./tabs/browser-tab";
 import { ChangesWorkbenchSurface } from "./tabs/changes-surface";
 import { FilesTab } from "./tabs/files-tab";
 import { ReviewSurface } from "./tabs/review-surface";
+import { AgentsTab } from "./tabs/agents-tab";
 import type { WorkbenchTab, WorkbenchTabType } from "./tab-model";
 import { useWorkspaceStore, selectActiveFolder } from "../../state/store";
 import { WorkbenchTabFrame } from "./tab-status";
@@ -35,6 +36,7 @@ const TAB_BODY_MAP: Record<
   design: () => null,
   changes: ChangesWorkbenchSurface,
   review: ReviewSurface,
+  agents: AgentsTab,
   browser: BrowserTab,
   files: FilesTab,
   simulator: SimulatorTab,
@@ -90,6 +92,7 @@ const TAB_CONTENT_MAP: Record<
   files: TabContentFrame,
   changes: ChangesTabContent,
   review: ReviewTabContent,
+  agents: TabContentFrame,
   design: TabContentFrame,
   browser: TabContentFrame,
   terminal: TabContentFrame,

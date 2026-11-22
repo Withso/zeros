@@ -1,6 +1,18 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 const github = vi.hoisted(() => ({ request: vi.fn(async () => ({})) }));
-vi.mock("../../cloud-github-pr", () => ({ requestCloudGithubPr: github.request }));
+// A workspace of one repository: every cloud pull request request goes to its workspace, through the transport stub.
+vi.mock("../../cloud-github-pr", async () => {
+  const { cloudTargetForValue } = await import("../cloud-workspace-key");
+  const cloudGithubPrRoute = (id: unknown) => { const target = cloudTargetForValue(id); return target ? { target } : null; };
+  return {
+    requestCloudGithubPr: github.request,
+    cloudGithubPrRoute,
+    requestCloudGithubPrFor: (id: unknown, op: string, input: Record<string, unknown> = {}) => {
+      const scope = cloudGithubPrRoute(id);
+      return scope ? (github.request as (...args: unknown[]) => Promise<unknown>)(scope.target, op, input) : null;
+    },
+  };
+});
 import { RuntimeClient, type ConnectionStatus } from "../ws-client";
 import { classifyRpcError, isRecoverable } from "../failure";
 import {

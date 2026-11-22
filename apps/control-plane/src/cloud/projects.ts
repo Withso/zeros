@@ -34,7 +34,9 @@ export type CloudProject = {
   id: string; organizationId: string; name: string; level: CloudProjectLevel; ownerUserId: string | null;
   repositories: CloudProjectRepository[]; createdAt: string; updatedAt: string;
 };
-export type CloudProjectView = CloudProject & { canEdit: boolean };
+/** `canShare`: "Share with <organization>" can succeed now: an admin's own personal
+ * project whose every repository an active organization connection reaches. */
+export type CloudProjectView = CloudProject & { canEdit: boolean; canShare: boolean };
 export type CloudProjectRepositoryInput = { repository: string; repositoryId: string; connectionId?: string | null | undefined;
   defaultBranch?: string | null | undefined; setup?: string | null | undefined; setupScript?: string | null | undefined };
 
@@ -101,10 +103,15 @@ export class CloudProjects {
     if (!rows.length) return [];
     const repositories = (await tx.query<RepositoryRow>(
       "SELECT * FROM cloud_project_repositories WHERE project_id = ANY($1::uuid[]) ORDER BY project_id, position", [rows.map(row => row.id)])).rows;
+    const shareable = this.admin(role) && rows.some(row => row.level === "personal" && row.owner_user_id === userId);
+    const reachable = shareable ? new Set((await tx.query<{ login: string }>(`SELECT lower(account_login) AS login FROM cloud_github_installations
+      WHERE org_id=$1 AND level='organization' AND state='active'`, [rows[0]!.org_id])).rows.map(row => row.login)) : null;
     return rows.map(row => ({
       id: row.id, organizationId: row.org_id, name: row.name, level: row.level, ownerUserId: row.owner_user_id,
       createdAt: row.created_at.toISOString(), updatedAt: row.updated_at.toISOString(),
       canEdit: row.level === "personal" ? row.owner_user_id === userId : this.admin(role),
+      canShare: !!reachable && row.level === "personal" && row.owner_user_id === userId
+        && repositories.filter(entry => entry.project_id === row.id).every(entry => reachable.has(owner(entry.repository))),
       repositories: repositories.filter(entry => entry.project_id === row.id).map(entry => ({
         repository: entry.repository, repositoryId: entry.repository_id, connectionId: entry.connection, defaultBranch: entry.default_branch,
         setup: entry.setup, setupScript: entry.setup_script, position: entry.position })),

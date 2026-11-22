@@ -130,4 +130,22 @@ database("durable cloud PR action leases", () => {
       "released",
     );
   });
+
+  it("leases each later repository of a workspace of several on its own: its writes never wait on another repository's", async () => {
+    const web = { repositoryId: "43", repository: "withso/web" }, docs = { repositoryId: "44", repository: "withso/docs" };
+    const held = latch(), started = latch();
+    const first = actions.run(workspaceId, async () => { started.release(); await held.promise; return "first"; });
+    await started.promise;
+    // The first repository's write is running: web and docs each go at once, and each checks its own lease.
+    expect(await actions.run(workspaceId, async () => { await actions.assertCurrent(workspaceId); return "web"; }, web)).toBe("web");
+    const webHeld = latch(), webStarted = latch();
+    const webWrite = actions.run(workspaceId, async () => { webStarted.release(); await webHeld.promise; return "web"; }, web);
+    await webStarted.promise;
+    // A second write to web waits for web's; docs does not.
+    await expect(actions.run(workspaceId, async () => "again", web)).rejects.toMatchObject({ code: "github_action_in_progress" });
+    expect(await actions.run(workspaceId, async () => "docs", docs)).toBe("docs");
+    held.release(); webHeld.release();
+    expect([await first, await webWrite]).toEqual(["first", "web"]);
+    expect((await pool.query("SELECT count(*)::int AS n FROM cloud_v2_github_workspace_repositories WHERE workspace_id=$1 AND mutation_lease IS NOT NULL", [workspaceId])).rows[0].n).toBe(0);
+  });
 });

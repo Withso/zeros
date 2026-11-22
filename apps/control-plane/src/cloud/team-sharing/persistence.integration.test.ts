@@ -31,6 +31,17 @@ database("team follows, pins, provenance and paging", () => {
     expect((await (await f.call(path())).json()).workspace).toMatchObject({ following: false,pinned: false,followerIds: [],followerCount: 0 });
   });
 
+  it("shows lost work only to the workspace's own member, never to a teammate who can read it", async () => {
+    await pool.query("UPDATE cloud_v2_workspaces SET lost_work_restored='earlier', lost_work_since=now() WHERE id=$1", [f.workspace.id]);
+    const read = async (user?: Parameters<typeof f.call>[3]) => (await (await f.call(path(), "GET", undefined, user)).json()).workspace;
+    expect(await read(f.creator)).toMatchObject({ lostWork: { restored: "earlier", stoppedAt: expect.any(String) } });
+    for (const user of [undefined, f.admin]) expect(await read(user)).not.toHaveProperty("lostWork");
+    const list = async (user?: Parameters<typeof f.call>[3]) => (await (await f.call(`/v1/cloud-v2/workspaces?organizationId=${f.organizationId}`, "GET", undefined, user)).json())
+      .workspaces.find((row: { id: string }) => row.id === f.workspace.id);
+    expect(await list(f.creator)).toMatchObject({ lostWork: { restored: "earlier" } });
+    expect(await list()).not.toHaveProperty("lostWork");
+  });
+
   it("applies filters and binds opaque keyset cursors to the person and filters", async () => {
     await f.call(`${path()}/follow`,"POST"); await f.call(`${path()}/pin`,"POST");
     const list = async (query = "",user = f.viewer) => (await f.call(`/v1/cloud-v2/workspaces?organizationId=${f.organizationId}${query}`,"GET",undefined,user)).json();

@@ -3,6 +3,7 @@
 const CHAT_MUTATIONS = new Set([
   "chats.setComposerMode",
   "chats.upsert",
+  "chats.createChild",
   "chats.delete",
   "chats.bulkUpsert",
   "chats.clearProviderIdentity",

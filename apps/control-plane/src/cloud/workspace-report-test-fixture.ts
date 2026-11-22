@@ -7,12 +7,13 @@ import { CloudApiService } from "./api/service.js";
 import { CloudV2Computers } from "./computer.js";
 import { localCommandsFixture } from "./local-commands/test-fixture.js";
 import { createCloudV2WorkerRoutes } from "./worker-routes.js";
+import { repositorySetupReports } from "./workspace-repository-setup.js";
 import type { CloudV2Workspace } from "./store.js";
 import type { CloudV2Capabilities } from "./contract.js";
 
 export async function cloudWorkspaceReportFixture(pool: pg.Pool) {
   const f = await localCommandsFixture(pool);
-  f.app.route("/", createCloudV2WorkerRoutes({ store: f.store, runtimeSha256: "a".repeat(64),
+  f.app.route("/", createCloudV2WorkerRoutes({ store: f.store, runtimeSha256: "a".repeat(64), repositorySetup: repositorySetupReports(pool),
     config: async () => { throw new Error("unused fixture configuration"); }, githubToken: async () => { throw new Error("unused fixture credential"); } }));
   const credentials = new CloudApiCredentials(pool);
   const key = (await credentials.create(f.organizationId, f.owner.id, "Report fixture")).key;

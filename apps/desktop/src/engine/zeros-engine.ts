@@ -6952,6 +6952,11 @@ export class ZerosEngine {
         bubble.displayText != null ||
         bubble.retryText != null ||
         bubble.autoAction != null);
+    if (bubble?.displayText === "" && bubble.attachments?.length) {
+      // An attachment-only prompt has no text for the chunk reducer to append.
+      this.persistSteeredUserPrompt(sessionId, prompt, bubble, userMessageId, undefined, startedAt);
+      return;
+    }
     if (hasRich && bubble) {
       // Rich-bubble path: persist ONE user message that mirrors the composer
       // exactly — `displayText` (mention TOKENS, not their wire expansion) plus
@@ -7037,6 +7042,7 @@ export class ZerosEngine {
     bubble?: AgentPromptBubble,
     userMessageId?: string,
     steeredTurnId?: string,
+    createdAt?: number,
   ): void {
     this.sessionUpdateBatcher?.flush(sessionId);
     const chatId = this.sessionChat.get(sessionId);
@@ -7050,7 +7056,7 @@ export class ZerosEngine {
       kind: "text",
       role: "user",
       text,
-      createdAt: Date.now(),
+      createdAt: createdAt ?? Date.now(),
       ...(steeredTurnId ? { steeredTurnId } : {}),
       ...(bubble?.segments && bubble.segments.length > 0
         ? { segments: bubble.segments }

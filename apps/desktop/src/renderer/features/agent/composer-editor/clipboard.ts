@@ -236,6 +236,7 @@ export function prepareClipboardPaste(
           mimeType: pasted.mimeType,
           kind: pasted.kind,
           sourceKey: pasted.sourceKey ?? "",
+          label: copies.length === 1 && typeof node.attrs?.label === "string" ? node.attrs.label.slice(0, 512) : "",
           ...(copies.length > 1 ? { attachmentIds: copies.map(a => a.id), groupId: `group-${crypto.randomUUID()}` } : {}),
         },
       };

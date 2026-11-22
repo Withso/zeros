@@ -14,8 +14,8 @@ import { CloudComputerPanel } from "./cloud-computer-panel";
 import { prefetchCloudComputer, useCloudComputerRepositories } from "./cloud-computer-store";
 import { CLOUD_REPOSITORY_TABS, CloudRepositoryPanel, type CloudRepositoryTab } from "./cloud-repository-panel";
 import { CloudGithubSection } from "./cloud-github-section";
-import { GithubConnectionsSection, PersonalProjectsSetting, useGithubLevels } from "./cloud-github-levels";
-import { projectForRepository, shareCloudProject } from "../../platform/cloud-github-levels";
+import { GithubConnectionsSection, PersonalProjectsSetting, patchCloudProject, useGithubLevels } from "./cloud-github-levels";
+import { projectForRepository, shareCloudProject, type CloudProject } from "../../platform/cloud-github-levels";
 import { EnvironmentPanel } from "./environment-panel";
 import { KeepAwakeSetting } from "./keep-awake-setting";
 
@@ -201,6 +201,7 @@ import { popoverBoundaryProps } from "@/renderer/shared/ui/popover-boundary";
 import { CHANNEL, isFeatureEnabled } from "../../config/release-channel";
 import { PlaceLabel } from "./settings-ui";
 import { ProjectPage, settingsProjects, type SettingsProject } from "./project-page";
+import { CloudProjectPage, NewProjectDialog, cloudProjectSubtitle } from "./cloud-project-page";
 import { useCloudComputerV2CreateGate } from "./cloud-computer-v2-create-gate";
 import { shellOpenUrl } from "../../platform/app";
 import { APP_BASE_URL, organizationDashboardUrl } from "../team/organization-links";
@@ -238,7 +239,7 @@ type SectionDef = {
   icon: NavIcon;
   unifiedIcon?: NavIcon;
   navClassName?: string;
-  Panel: ComponentType<{ surfaceActive?: boolean; unified?: boolean; openCloudRepository?(repository: string): void }>;
+  Panel: ComponentType<{ surfaceActive?: boolean; unified?: boolean; openCloudRepository?(repository: string): void; onNewProject?(): void }>;
 };
 
 function GithubNavIcon({ size }: { size?: number }) {
@@ -450,6 +451,7 @@ function parseSelection(active: string, fallback: SectionId = "general", unified
 const PAGE_HEADING_CLS = "m-0 text-lg leading-6 font-medium text-fg1";
 const NO_CLOUD_REPOSITORIES: readonly string[] = [];
 const NO_SETTINGS_PROJECTS: SettingsProject[] = [];
+const NO_CLOUD_PROJECTS: CloudProject[] = [];
 
 const HINT_CLS = "m-0 text-3xxs leading-4 text-fg3";
 
@@ -593,13 +595,16 @@ function ScopedSettingsPage({ owner }: { owner: string }) {
   const organizationGithub = !!githubLevels.connections && !githubLevels.connections.solo;
   const canManageOrganization = organization?.role === "owner" || organization?.role === "admin";
   /** Projects: a repository's cloud settings are its one-repository project's, the organization's unless only the caller's. */
+  // A project kept for one member says only "Only you"; "Share with" appears only where it can succeed.
   const projectSharing = (project: SettingsProject) => {
     const found = projectForRepository(githubLevels.projects, project.cloudRepository);
     if (!found || !organization || organization.isPersonal) return null;
-    return { level: found.level === "personal" ? "private" as const : "shared" as const, organizationName: organization.name, canShare: canManageOrganization,
-      onShare: () => { if (found.level === "personal") void shareCloudProject(organization.id, found.id).then(githubLevels.refresh, cause => toast.error(cause instanceof Error ? cause.message : String(cause))); },
-      onAskAdmin: () => void shellOpenUrl(organizationDashboardUrl(APP_BASE_URL, { organizationId: organization.id, section: "members" })) };
+    return { level: found.level === "personal" ? "private" as const : "shared" as const, organizationName: organization.name, canShare: found.canShare === true,
+      onShare: () => { if (found.level === "personal") void shareCloudProject(organization.id, found.id).then(githubLevels.refresh, cause => toast.error(cause instanceof Error ? cause.message : String(cause))); } };
   };
+  // Cloud projects no joined page shows: several repositories, or one kept only for this member that no Mac folder joins.
+  const [newProject, setNewProject] = useState(false);
+  const canCreateProject = !!githubLevels.projects && (githubLevels.projects.canCreateOrganization || githubLevels.projects.personalAllowed);
   const organizationGeneral =
     unified &&
     unifiedOrganizationGeneralSections(
@@ -638,6 +643,13 @@ function ScopedSettingsPage({ owner }: { owner: string }) {
     () => (unified ? settingsProjects(projects, projectCloudNames) : NO_SETTINGS_PROJECTS),
     [unified, projects, projectCloudNames],
   );
+  // A cloud project gets its own page unless a joined page already shows it (one repository, the one its page names).
+  const cloudOnlyProjects = useMemo(() => !unified || !githubLevels.projects ? NO_CLOUD_PROJECTS
+    : githubLevels.projects.projects.filter(project => !joinedProjects.some(joined =>
+      projectForRepository(githubLevels.projects, joined.cloudRepository ?? joined.github)?.id === project.id)),
+  [unified, githubLevels.projects, joinedProjects]);
+  const currentCloudProject = unified && selection.scope === "project" && selection.key.startsWith("cloud:")
+    ? githubLevels.projects?.projects.find(project => project.id === selection.key.slice("cloud:".length)) : undefined;
   const currentProject: SettingsProject | undefined = !unified ? undefined
     : selection.scope === "project" ? joinedProjects.find(project => project.key === selection.key)
     : selection.scope === "repo" ? joinedProjects.find(project => project.local.some(folder => folder.id === selection.repoId))
@@ -650,7 +662,7 @@ function ScopedSettingsPage({ owner }: { owner: string }) {
     selection.scope === "user"
       ? (availableSections.find((s) => s.id === selection.section) ??
         fallbackSection)
-      : currentProject ? null
+      : currentProject || currentCloudProject ? null
       : unified ? fallbackSection
       : local || selection.scope === "cloud-repo" ? null : fallbackSection;
   // Persist the fallback so reopening a gate cannot restore a retired selection.
@@ -777,7 +789,7 @@ function ScopedSettingsPage({ owner }: { owner: string }) {
                     </React.Fragment>
                   );
                 })}
-                {joinedProjects.length > 0 && (
+                {(joinedProjects.length > 0 || cloudOnlyProjects.length > 0) && (
                   <>
                     <div className={SETTINGS_GROUP_HEADER_CLS}>Projects</div>
                     <div className="flex flex-col gap-0.5">
@@ -785,6 +797,11 @@ function ScopedSettingsPage({ owner }: { owner: string }) {
                         <SectionNavButton key={project.key} icon={FolderGit2} label={project.label}
                           isActive={currentProject?.key === project.key}
                           onClick={() => setActive(`project:${project.key}`)} />
+                      ))}
+                      {cloudOnlyProjects.map((project) => (
+                        <SectionNavButton key={project.id} icon={FolderGit2} label={project.name}
+                          isActive={currentCloudProject?.id === project.id}
+                          onClick={() => setActive(`project:cloud:${project.id}`)} />
                       ))}
                     </div>
                   </>
@@ -862,6 +879,23 @@ function ScopedSettingsPage({ owner }: { owner: string }) {
                     onOpenEnvironment={() => setActive(userSelection("environment"))} />
                 </div>
               )}
+              {currentCloudProject && organization && githubLevels.projects && (
+                <div className="flex flex-col gap-8">
+                  <header className="flex min-w-0 flex-col gap-1">
+                    <h1 className={PAGE_HEADING_CLS}>{currentCloudProject.name}</h1>
+                    <p className="text-fg2 m-0 truncate text-xs leading-4.5">{cloudProjectSubtitle(currentCloudProject, organization.name)}</p>
+                  </header>
+                  <CloudProjectPage key={currentCloudProject.id} project={currentCloudProject} organization={organization} userKey={githubLevels.key}
+                    connections={githubLevels.connections} limits={githubLevels.projects.limits} localProjects={projects} active={pageActive}
+                    onChanged={next => { if (next) patchCloudProject(githubLevels.key, next); githubLevels.refresh(); }}
+                    onOpenFolder={folder => setActive(repoSelection(folder.id, REPO_OVERVIEW))} />
+                </div>
+              )}
+              {newProject && organization && githubLevels.projects && (
+                <NewProjectDialog organization={organization} userKey={githubLevels.key} connections={githubLevels.connections}
+                  projects={githubLevels.projects} active={pageActive} onClose={() => setNewProject(false)}
+                  onCreated={created => { setNewProject(false); patchCloudProject(githubLevels.key, created); githubLevels.refresh(); setActive(`project:cloud:${created.id}`); }} />
+              )}
               {!unified && selection.scope === "cloud-repo" && (
                 <div className="flex flex-col gap-8">
                   <header className="flex min-w-0 flex-col gap-1">
@@ -903,7 +937,8 @@ function ScopedSettingsPage({ owner }: { owner: string }) {
                       {!(unified && organizationPage) && fileScopeControls}
                     </header>
                     {!local && !cloudEnabled && <CloudWorkspacePausedNotice />}
-                    <Panel surfaceActive={pageActive && isActive} unified={unified} openCloudRepository={openCloudRepository} />
+                    <Panel surfaceActive={pageActive && isActive} unified={unified} openCloudRepository={openCloudRepository}
+                      onNewProject={canCreateProject ? () => setNewProject(true) : undefined} />
                   </div>
                 );
               })}

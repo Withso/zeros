@@ -1,11 +1,11 @@
 import { execFileSync, spawnSync } from "node:child_process";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
-import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, renameSync, rmSync, symlinkSync, truncateSync, utimesSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, readdirSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, renameSync, rmSync, symlinkSync, truncateSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
-  CHECKPOINT_SAVED_REPORT, checkpointArchiveSteps, checkpointCommand, checkpointRestoreSteps, cloudV2CheckpointObject, openCheckpointKey,
+  CHECKPOINT_SAVED_REPORT, WORKER_SERVICE_OFF, backupProbeCommand, ignoredBaselineCommand, checkpointArchiveSteps, checkpointCommand, parseBackupProbe, checkpointRestoreSteps, cloudV2CheckpointObject, openCheckpointKey,
   parseCheckpointResult, parseRestoreResult, restoreCommand, sealCheckpointKey, type CheckpointReuse, type RestoreInput,
 } from "./checkpoint.js";
 
@@ -1322,6 +1322,105 @@ describe("a workspace of several repositories", () => {
     expect(readFileSync(join(p.folder(p.newHome, "web"), "work.txt"), "utf8")).toBe("work\n");
   });
 
+  /** Shared execution: each GitHub remote is served from its own origin, and each fetch shows which token it was given. */
+  function activeProbe(p: ReturnType<typeof project>) {
+    const bin = join(p.root, "probe-bin"), log = join(p.root, "restore-events.jsonl"), git = "/usr/bin/git";
+    const tar = execFileSync("which", ["tar"], { encoding: "utf8" }).trim();
+    const remotes = { "https://github.com/withso/api.git": { origin: p.origins.api, token: `synthetic-restore-${randomUUID()}` },
+      "https://github.com/withso/web.git": { origin: p.origins.web, token: `synthetic-restore-${randomUUID()}` } };
+    const script = `#!${process.execPath}
+const fs = require('node:fs'), cp = require('node:child_process');
+const args = process.argv.slice(2), isGit = process.argv[1].endsWith('/git');
+const log = ${JSON.stringify(log)}, remotes = ${JSON.stringify(remotes)};
+const emit = value => fs.appendFileSync(log, JSON.stringify(value)+'\\n');
+if (isGit && args.includes('fetch') && process.env.ZEROS_RESTORE_TOKEN_FILE) {
+  const url = args.find(arg => remotes[arg]), file = process.env.ZEROS_RESTORE_TOKEN_FILE;
+  const token = url && fs.readFileSync(file, 'utf8');
+  emit({ event: 'fetch', url, own: !!url && token === remotes[url].token, directory: require('node:path').dirname(file) });
+  if (!url) process.exit(2);
+  args[args.indexOf(url)] = remotes[url].origin;
+  args.unshift('-c','protocol.file.allow=always');
+  process.env.GIT_ALLOW_PROTOCOL='file';
+}
+if (!isGit && args.some(arg=>/^-.*x/.test(arg))) {
+  const entries = fs.existsSync(log) ? fs.readFileSync(log,'utf8').trim().split('\\n').map(JSON.parse) : [];
+  emit({ event: 'unpack', authGone: entries.filter(row=>row.event==='fetch').every(row=>!fs.existsSync(row.directory)) });
+}
+const result=cp.spawnSync(isGit?${JSON.stringify(git)}:${JSON.stringify(tar)},args,{stdio:'inherit',env:process.env});
+process.exit(result.status??1);
+`;
+    for (const name of ["git", "tar"]) { p.write(join(bin, name), script); chmodSync(join(bin, name), 0o755); }
+    return { remotes, env: { ...p.env, PATH: `${bin}:${p.env.PATH}` },
+      events: () => existsSync(log) ? readFileSync(log, "utf8").trim().split("\n").map(line => JSON.parse(line) as Record<string, unknown>) : [] };
+  }
+  const activeLoad = (p: ReturnType<typeof project>, probe: ReturnType<typeof activeProbe>, key: Buffer, from: string, webToken?: string) =>
+    run([`export PATH='${probe.env.PATH}'`, ...checkpointRestoreSteps({ checkoutPath: p.folder(p.newHome, "api"), home: p.newHome, key, sha256: sha(from), active: true,
+      repositoryUrl: "https://github.com/withso/api.git", githubToken: probe.remotes["https://github.com/withso/api.git"].token,
+      repositories: [{ checkoutPath: p.folder(p.newHome, "web"), repositoryUrl: "https://github.com/withso/web.git",
+        githubToken: webToken ?? probe.remotes["https://github.com/withso/web.git"].token }] },
+      [`cp '${from}' "$work/checkpoint.zck"`]), "report zeros-checkpoint-restored"], probe.env);
+
+  it.each([false, true])("restores every repository in shared execution, each fetched with its own token before anything is unpacked (backup: %s)", backup => {
+    const p = project(), key = randomBytes(32), out = join(p.root, "checkpoint.zck");
+    const web = p.folder(p.oldHome, "web"), api = p.folder(p.oldHome, "api");
+    p.write(join(web, "page.html"), "<p>committed</p>\n"); p.git(web, "add", "page.html"); p.git(web, "commit", "-q", "-m", "page");
+    p.write(join(web, "staged.txt"), "staged\n"); p.git(web, "add", "staged.txt");
+    p.write(join(api, "README.md"), "api edited\n");
+    const saved = run([...checkpointArchiveSteps({ checkoutPath: api, home: p.oldHome, baseBranch: "main", key, backup,
+      repositories: [{ checkoutPath: web, baseBranch: "main" }] }), `cp "$work/checkpoint.zck" '${out}'`, CHECKPOINT_SAVED_REPORT], p.env);
+    expect(parseCheckpointResult(saved.stdout)).toMatchObject({ ok: true });
+    // A replacement VM holds neither repository: shared execution fetches both.
+    const probe = activeProbe(p);
+    const restored = activeLoad(p, probe, key, out);
+    expect(parseRestoreResult(restored.stdout), JSON.stringify(probe.events())).toEqual({ ok: true });
+    const events = probe.events(), firstUnpack = events.findIndex(event => event.event === "unpack");
+    expect(events.filter(event => event.event === "fetch").map(event => [event.url, event.own]))
+      .toEqual([["https://github.com/withso/api.git", true], ["https://github.com/withso/web.git", true]]);
+    expect(events.slice(0, firstUnpack).filter(event => event.event === "fetch")).toHaveLength(2);
+    for (const event of events.filter(event => event.event === "unpack")) expect(event.authGone).toBe(true);
+    for (const token of Object.values(probe.remotes).map(entry => entry.token)) expect(restored.stdout).not.toContain(token);
+    const newWeb = p.folder(p.newHome, "web"), newApi = p.folder(p.newHome, "api");
+    expect(p.git(newWeb, "log", "-1", "--format=%s")).toBe("page");
+    expect(sorted(p.git(newWeb, "diff", "--cached", "--name-only"))).toEqual(["staged.txt"]);
+    expect(readFileSync(join(newApi, "README.md"), "utf8")).toBe("api edited\n");
+  });
+
+  it("keeps a later repository's seeded environment files in its own environment.tar: an active restore leaves them off disk, a creator restore applies them", () => {
+    const p = project(), key = randomBytes(32), out = join(p.root, "checkpoint.zck");
+    const web = p.folder(p.oldHome, "web"), content = "SYNTHETIC_SEED=creator-only\n";
+    // Ignored by the fixture's *.log rule, as seeded files are.
+    p.write(join(web, ".env.log"), content);
+    p.write(join(p.oldHome, ".local/share/zeros/cloud-worker/repositories/1/environment-seed/manifest.json"), JSON.stringify({
+      version: 2, versionId: randomUUID(), complete: true,
+      files: [{ path: ".env.log", alias: randomUUID(), phase: "complete", sha256: createHash("sha256").update(content).digest("hex") }] }));
+    const saved = run([...checkpointArchiveSteps({ checkoutPath: p.folder(p.oldHome, "api"), home: p.oldHome, baseBranch: "main", key,
+      repositories: [{ checkoutPath: web, baseBranch: "main" }] }), `cp "$work/checkpoint.zck" '${out}'`, CHECKPOINT_SAVED_REPORT], p.env);
+    expect(parseCheckpointResult(saved.stdout)).toMatchObject({ ok: true });
+    // Shared execution: another person's restore never gets the creator's file.
+    const probe = activeProbe(p);
+    expect(parseRestoreResult(activeLoad(p, probe, key, out).stdout), JSON.stringify(probe.events())).toEqual({ ok: true });
+    expect(existsSync(join(p.folder(p.newHome, "web"), ".env.log"))).toBe(false);
+    // The creator's own restore puts it back.
+    rmSync(p.newHome, { recursive: true, force: true });
+    mkdirSync(join(p.newHome, "zeros-app"), { recursive: true });
+    for (const name of ["api", "web"] as const) p.git(p.root, "clone", "-q", p.origins[name], p.folder(p.newHome, name));
+    const restored = run([...checkpointRestoreSteps({ checkoutPath: p.folder(p.newHome, "api"), home: p.newHome, key, sha256: sha(out),
+      repositories: [{ checkoutPath: p.folder(p.newHome, "web") }] }, [`cp '${out}' "$work/checkpoint.zck"`]), "report zeros-checkpoint-restored",
+      // What the archive held for the later repository: the seeded file only in its own environment.tar.
+      `{ printf 'ignored:'; { tar -tf "$work/c/repositories/1/ignored.tar" 2>/dev/null || true; } | tr '\\n' ' '; printf '\\nenvironment:'; tar -tf "$work/c/repositories/1/environment.tar" | tr '\\n' ' '; printf '\\n'; } >&3`], p.env);
+    expect(parseRestoreResult(restored.stdout)).toEqual({ ok: true });
+    expect(readFileSync(join(p.folder(p.newHome, "web"), ".env.log"), "utf8")).toBe(content);
+    expect(restored.stdout).toMatch(/environment:.*manifest\.json/);
+    expect(restored.stdout.split("\n").find(line => line.startsWith("ignored:"))).not.toContain(".env.log");
+  }, 30_000);
+
+  it("refuses a shared-execution restore of several repositories without each repository's token", () => {
+    const p = project(), key = randomBytes(32);
+    expect(() => checkpointRestoreSteps({ checkoutPath: p.folder(p.newHome, "api"), home: p.newHome, key, sha256: "a".repeat(64), active: true,
+      repositoryUrl: "https://github.com/withso/api.git", githubToken: "synthetic-token-0123456789",
+      repositories: [{ checkoutPath: p.folder(p.newHome, "web"), repositoryUrl: "https://github.com/withso/web.git" }] }, [])).toThrow(/GitHub credential/);
+  });
+
   it("restores a checkpoint made before the workspace had a repository, and an older one-repository checkpoint, unchanged", () => {
     const w = workspaces(), key = randomBytes(32), out = join(w.root, "checkpoint.zck");
     w.write(join(w.oldRepo, "a.txt"), "edited\n");
@@ -1334,4 +1433,219 @@ describe("a workspace of several repositories", () => {
     expect(readFileSync(join(w.newRepo, "a.txt"), "utf8")).toBe("edited\n");
     expect(w.git(second, "status", "--porcelain")).toBe("");
   });
+});
+
+describe("retention backups and the stop probe", () => {
+  const PIN = { checkoutPath: "/home/user/acme/app", home: "/home/user", baseBranch: "main", key: Buffer.alloc(32, 7), uploadUrl: "https://r2.example.test/upload?sig=1" };
+  const digest = (value: string) => createHash("sha256").update(value).digest("hex");
+
+  it("keeps the stop checkpoint command byte for byte without the backup option, for one repository and for several", () => {
+    // Digests of the command as it was before retention backups existed.
+    expect(digest(checkpointCommand(PIN))).toBe("fefc12a759c38abc8217d209ec18ef24a3e34bf6860b2f17a726b7ca64039a56");
+    expect(digest(checkpointCommand({ ...PIN, checkoutPath: "/home/user/project/app", repositories: [
+      { checkoutPath: "/home/user/project/api", baseBranch: "trunk" }, { checkoutPath: "/home/user/project/docs", baseBranch: "main" }] })))
+      // Later repositories capture their own seeded environment files (environment.tar, left out of ignored.tar);
+      // the first repository's part of the command is unchanged, as the one-repository digest above shows.
+      .toBe("1e25ac142a6aa3c7dbec5b6f950118d512b46de158c7453dd2c97cdbfbb72a37");
+    expect(digest(checkpointCommand({ ...PIN, reuse: { fingerprint: "f".repeat(64), base: "a".repeat(40) } })))
+      .toBe("b6e28ffb57f9b435ae69b616cecb9e09827b66a39ccca776f78b57fd87d5a524");
+    expect(checkpointCommand({ ...PIN, backup: false })).toBe(checkpointCommand(PIN));
+    // The stop checkpoint switches the worker off before anything is read; a retention stop does it as its own step.
+    expect(checkpointCommand(PIN).indexOf(WORKER_SERVICE_OFF[1])).toBeLessThan(checkpointCommand(PIN).indexOf("git"));
+    expect(backupProbeCommand([PIN.checkoutPath])).not.toContain("systemctl");
+  });
+
+  it("saves every repository's work, small ignored files and the worker's chats, but no provider sessions or ignored attachments, and today's restore applies it", () => {
+    const w = workspaces(), key = randomBytes(32), archive = join(w.root, "backup.zck");
+    const other = join(w.oldHome, "acme", "api"), otherNew = join(w.newHome, "acme", "api");
+    w.git(w.root, "clone", "-q", w.origin, other);
+    w.write(join(w.oldRepo, "notes.md"), "first repository's work\n");
+    w.write(join(w.oldRepo, ".env.local"), "SMALL=ignored\n");
+    w.write(join(other, "a.txt"), "second repository's edit\n");
+    w.write(join(w.oldRepo, ".gitignore"), "node_modules/\n.env*\n*.log\n.context/\n");
+    w.write(join(w.oldRepo, ".context/attachments/upload-1/photo.png"), "attachment\n");
+    w.write(join(w.oldHome, ".claude/projects/-home-user-acme-app/session.jsonl"), "{}\n");
+    w.write(join(w.oldHome, ".local/share/zeros/cloud-worker/sessions/chats.db"), "rows\n");
+    const saved = run([
+      ...checkpointArchiveSteps({ checkoutPath: w.oldRepo, home: w.oldHome, baseBranch: "main", key, backup: true,
+        repositories: [{ checkoutPath: other, baseBranch: "main" }] }),
+      `cp "$work/checkpoint.zck" '${archive}'`, CHECKPOINT_SAVED_REPORT,
+    ], w.env);
+    expect(parseCheckpointResult(saved.stdout)).toMatchObject({ ok: true });
+    w.git(w.root, "clone", "-q", w.origin, w.newRepo); w.git(w.root, "clone", "-q", w.origin, otherNew);
+    const restored = run([...checkpointRestoreSteps({ checkoutPath: w.newRepo, home: w.newHome, key, sha256: sha(archive),
+      repositories: [{ checkoutPath: otherNew }] }, [`cp '${archive}' "$work/checkpoint.zck"`]), "report zeros-checkpoint-restored"], w.env);
+    expect(parseRestoreResult(restored.stdout)).toEqual({ ok: true });
+    expect(readFileSync(join(w.newRepo, "notes.md"), "utf8")).toBe("first repository's work\n");
+    expect(readFileSync(join(w.newRepo, ".env.local"), "utf8")).toBe("SMALL=ignored\n");
+    expect(readFileSync(join(otherNew, "a.txt"), "utf8")).toBe("second repository's edit\n");
+    expect(existsSync(join(w.newRepo, ".context/attachments/upload-1/photo.png"))).toBe(false);
+    expect(existsSync(join(w.newHome, ".claude/projects"))).toBe(false);
+    // The worker's own chat metadata stays, so each conversation still opens.
+    expect(readFileSync(join(w.newHome, ".local/share/zeros/cloud-worker/sessions/chats.db"), "utf8")).toBe("rows\n");
+  });
+
+  it("is never judged unchanged against a full checkpoint of the same files", () => {
+    const w = workspaces(), key = randomBytes(32);
+    const fingerprint = (backup: boolean) => /fingerprint=([0-9a-f]{64})/.exec(run([
+      ...checkpointArchiveSteps({ checkoutPath: w.oldRepo, home: w.oldHome, baseBranch: "main", key, backup }), CHECKPOINT_SAVED_REPORT], w.env).stdout)?.[1];
+    const full = fingerprint(false), backup = fingerprint(true);
+    expect(full).toMatch(/^[0-9a-f]{64}$/);
+    expect(backup).toMatch(/^[0-9a-f]{64}$/);
+    expect(backup).not.toBe(full);
+  });
+
+  describe("the probe", () => {
+    const probe = (paths: string[], env: NodeJS.ProcessEnv, home = env.HOME!) => {
+      const result = spawnSync("bash", ["-c", `eval "$1"`, "probe", backupProbeCommand(paths, home)], { env, encoding: "utf8" });
+      expect(result.status).toBe(0);
+      return parseBackupProbe(result.stdout);
+    };
+
+    it("is clean for a fresh checkout, a new branch with no commits, an ignored directory and pushed commits", () => {
+      const w = workspaces();
+      expect(probe([w.oldRepo], w.env, w.oldHome)).toBe("clean");
+      w.git(w.oldRepo, "switch", "-q", "-c", "zeros/new");
+      // A whole ignored directory is never in a backup, so it never counts.
+      w.write(join(w.oldRepo, "node_modules/pkg/index.js"), "ignored\n");
+      expect(probe([w.oldRepo], w.env, w.oldHome)).toBe("clean");
+      w.write(join(w.oldRepo, "pushed.txt"), "x\n"); w.git(w.oldRepo, "add", "pushed.txt"); w.git(w.oldRepo, "commit", "-q", "-m", "pushed");
+      w.git(w.oldRepo, "push", "-q", "origin", "zeros/new");
+      expect(probe([w.oldRepo], w.env, w.oldHome)).toBe("clean");
+    });
+
+    describe("ignored files a backup would capture", () => {
+      const journal = (w: ReturnType<typeof workspaces>, files: Record<string, string>) => w.write(
+        join(w.oldHome, ".local/share/zeros/cloud-worker/environment-seed/manifest.json"),
+        JSON.stringify({ version: 2, files: Object.entries(files).map(([path, content]) => ({ path, sha256: createHash("sha256").update(content).digest("hex") })) }));
+      const baseline = (w: ReturnType<typeof workspaces>) => {
+        const result = spawnSync("bash", ["-c", `eval "$1"`, "baseline", ignoredBaselineCommand([w.oldRepo], w.oldHome)], { env: w.env, encoding: "utf8" });
+        expect(result.stdout).toBe("zeros-baseline recorded\n");
+      };
+
+      it("is dirty for an ignored file a person made, with no baseline: a rebuild would not have it", () => {
+        const w = workspaces();
+        w.write(join(w.oldRepo, ".env.local"), "MINE=1\n");
+        expect(probe([w.oldRepo], w.env, w.oldHome)).toBe("dirty");
+      });
+
+      it("is clean for a seeded file whose bytes are the server's, and dirty once the person edits it", () => {
+        const w = workspaces();
+        w.write(join(w.oldRepo, ".env"), "TOKEN=server\n");
+        journal(w, { ".env": "TOKEN=server\n" });
+        expect(probe([w.oldRepo], w.env, w.oldHome)).toBe("clean");
+        w.write(join(w.oldRepo, ".env"), "TOKEN=edited by hand\n");
+        expect(probe([w.oldRepo], w.env, w.oldHome)).toBe("dirty");
+      });
+
+      it("is clean for a file the create's baseline recorded, unchanged, and dirty once it changes or another appears", () => {
+        const w = workspaces();
+        w.write(join(w.oldRepo, "build.log"), "made by setup\n");
+        baseline(w);
+        expect(probe([w.oldRepo], w.env, w.oldHome)).toBe("clean");
+        // Recorded once: a later baseline never takes in what a person made since.
+        w.write(join(w.oldRepo, ".env.local"), "MINE=1\n");
+        baseline(w);
+        expect(probe([w.oldRepo], w.env, w.oldHome)).toBe("dirty");
+        rmSync(join(w.oldRepo, ".env.local"));
+        expect(probe([w.oldRepo], w.env, w.oldHome)).toBe("clean");
+        w.write(join(w.oldRepo, "build.log"), "changed since\n");
+        expect(probe([w.oldRepo], w.env, w.oldHome)).toBe("dirty");
+      });
+
+      it("is clean for an ignored chat attachment alone: a backup drops attachments", () => {
+        const w = workspaces();
+        // Ignored by file pattern, so Git lists the attachment itself rather than one ignored directory.
+        w.write(join(w.oldRepo, ".gitignore"), "node_modules/\n.env*\n*.log\n*.png\n");
+        w.git(w.oldRepo, "commit", "-q", "-am", "ignore attachments"); w.git(w.oldRepo, "push", "-q", "origin", "HEAD");
+        w.write(join(w.oldRepo, ".context/attachments/upload-1/photo.png"), "png\n");
+        expect(probe([w.oldRepo], w.env, w.oldHome)).toBe("clean");
+      });
+
+      it("defines everything it calls: each generated script, on a real repository, writes nothing to stderr", () => {
+        const w = workspaces();
+        w.write(join(w.oldRepo, ".env.local"), "MINE=1\n");
+        w.write(join(w.oldRepo, "build.log"), "made\n");
+        // The scripts discard their own stderr; run them with it kept.
+        const keep = (command: string) => command.replace("exec 3>&1 >/dev/null 2>&1", "exec 3>&1 >/dev/null");
+        for (const command of [ignoredBaselineCommand([w.oldRepo], w.oldHome), backupProbeCommand([w.oldRepo], w.oldHome)]) {
+          expect(command).toContain("exec 3>&1 >/dev/null 2>&1");
+          const result = spawnSync("bash", ["-c", `eval "$1"`, "script", keep(command)], { env: w.env, encoding: "utf8" });
+          expect(result.stderr).toBe("");
+          // The baseline just recorded these files, so the probe after it is clean.
+          expect(result.stdout).toMatch(/^zeros-(baseline recorded|backup-probe clean)\n$/);
+        }
+      });
+
+      it("judges a second repository by its own seed journal, and is unknown when it cannot read one", () => {
+        const w = workspaces(), second = join(w.oldHome, "acme", "api");
+        w.git(w.root, "clone", "-q", w.origin, second);
+        const own = join(w.oldHome, ".local/share/zeros/cloud-worker/repositories/1/environment-seed/manifest.json");
+        w.write(join(second, ".env"), "SECOND=server\n");
+        // The first repository's journal does not speak for the second's files.
+        journal(w, { ".env": "SECOND=server\n" });
+        expect(probe([w.oldRepo, second], w.env, w.oldHome)).toBe("dirty");
+        // Its own journal does: seeded and equal is clean, edited is dirty.
+        w.write(own, JSON.stringify({ version: 2, files: [{ path: ".env", sha256: createHash("sha256").update("SECOND=server\n").digest("hex") }] }));
+        rmSync(join(w.oldHome, ".local/share/zeros/cloud-worker/environment-seed/manifest.json"));
+        expect(probe([w.oldRepo, second], w.env, w.oldHome)).toBe("clean");
+        w.write(join(second, ".env"), "SECOND=edited by hand\n");
+        expect(probe([w.oldRepo, second], w.env, w.oldHome)).toBe("dirty");
+        w.write(own, "{not json");
+        expect(probe([w.oldRepo, second], w.env, w.oldHome)).toBe("unknown");
+      });
+    });
+
+    it.each([
+      ["an untracked file Git does not ignore", (w: ReturnType<typeof workspaces>) => w.write(join(w.oldRepo, "todo.md"), "x\n")],
+      ["a tracked edit", (w: ReturnType<typeof workspaces>) => w.write(join(w.oldRepo, "a.txt"), "edited\n")],
+      ["a staged deletion", (w: ReturnType<typeof workspaces>) => w.git(w.oldRepo, "rm", "-q", "b.txt")],
+      ["a stash", (w: ReturnType<typeof workspaces>) => { w.write(join(w.oldRepo, "a.txt"), "stashed\n"); w.git(w.oldRepo, "stash", "push", "-q"); }],
+      ["an unpushed commit", (w: ReturnType<typeof workspaces>) => { w.write(join(w.oldRepo, "c.txt"), "c2\n"); w.git(w.oldRepo, "commit", "-q", "-am", "local"); }],
+      ["a commit only on another local branch", (w: ReturnType<typeof workspaces>) => {
+        w.git(w.oldRepo, "switch", "-q", "-c", "side"); w.write(join(w.oldRepo, "c.txt"), "side\n"); w.git(w.oldRepo, "commit", "-q", "-am", "side");
+        w.git(w.oldRepo, "switch", "-q", "main");
+      }],
+      ["a detached commit", (w: ReturnType<typeof workspaces>) => {
+        w.git(w.oldRepo, "switch", "-q", "--detach"); w.write(join(w.oldRepo, "c.txt"), "detached\n"); w.git(w.oldRepo, "commit", "-q", "-am", "detached");
+      }],
+    ])("is dirty for %s", (_name, change) => {
+      const w = workspaces();
+      change(w);
+      expect(probe([w.oldRepo], w.env, w.oldHome)).toBe("dirty");
+    });
+
+    it("is dirty when any one of several repositories has work, and unknown when one cannot be read", () => {
+      const w = workspaces(), second = join(w.oldHome, "acme", "api");
+      w.git(w.root, "clone", "-q", w.origin, second);
+      expect(probe([w.oldRepo, second], w.env)).toBe("clean");
+      w.write(join(second, "todo.md"), "x\n");
+      expect(probe([w.oldRepo, second], w.env)).toBe("dirty");
+      expect(probe([w.oldRepo, join(w.oldHome, "acme", "missing")], w.env)).toBe("unknown");
+      mkdirSync(join(w.oldHome, "plain"));
+      expect(probe([join(w.oldHome, "plain")], w.env)).toBe("unknown");
+    });
+
+    it("reads nothing but its own single result line", () => {
+      expect(parseBackupProbe("zeros-backup-probe clean\n")).toBe("clean");
+      expect(parseBackupProbe("zeros-backup-probe dirty")).toBe("dirty");
+      for (const output of ["", "zeros-backup-probe maybe\n", "zeros-backup-probe clean\nzeros-backup-probe clean\n", "clean\n"])
+        expect(parseBackupProbe(output)).toBe("unknown");
+      expect(() => backupProbeCommand([])).toThrow();
+      expect(() => backupProbeCommand(["relative/path"])).toThrow();
+    });
+  });
+});
+
+it("keeps every control-plane source file text: no NUL byte anywhere under src", () => {
+  const offenders: string[] = [];
+  const walk = (directory: string) => {
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      const file = join(directory, entry.name);
+      if (entry.isDirectory()) { if (entry.name !== "node_modules") walk(file); }
+      else if (/\.(ts|mts|mjs|js|sql|json)$/.test(entry.name) && readFileSync(file).includes(0)) offenders.push(file);
+    }
+  };
+  walk(join(__dirname, ".."));
+  expect(offenders).toEqual([]);
 });

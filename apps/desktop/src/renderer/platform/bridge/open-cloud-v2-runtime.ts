@@ -1,3 +1,4 @@
+import type { CloudWorkspaceDocument } from "../cloud-workspace-contract";
 import type { CloudV2ConnectionTarget } from "@zeros/protocol/cloud-runtime-connection";
 import { connectCloudV2Workspace } from "../cloud-v2";
 import { ControlPlaneError } from "../../features/team/control-plane";
@@ -213,7 +214,7 @@ export async function openCloudV2Runtime(
     opened = true;
     return {
       client,
-      scope: { ...target, root: workspace.path, engineWorkspaceId: workspace.id },
+      scope: { ...target, root: cloudRuntimeRoot(cloudWorkspaceDocument(target), workspace.path), engineWorkspaceId: workspace.id },
       runtimeId: target.workspaceId,
       generation: 1,
       release,
@@ -224,3 +225,15 @@ export async function openCloudV2Runtime(
     throw beforeReady.signal.aborted ? beforeReady.signal.reason : error;
   } finally { waiting.dispose(); }
 }
+
+/** A workspace of several repositories is rooted at its project folder, so each
+ * repository is a folder of the workspace (`<key>/<folder>`) and file paths are
+ * relative to the project folder. Only when the worker's confirmed checkout is
+ * the document's first repository, directly inside that folder; otherwise the
+ * confirmed checkout, as for one repository. */
+export function cloudRuntimeRoot(document: Pick<CloudWorkspaceDocument, "root" | "repositories"> | null | undefined, checkout: string): string {
+  const root = document?.root, first = document?.repositories?.[0];
+  return root && first && first.checkoutPath === checkout && checkout.startsWith(`${root}/`) && !checkout.slice(root.length + 1).includes("/")
+    ? root : checkout;
+}
+

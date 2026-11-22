@@ -1,7 +1,7 @@
 import { cloudComputerV2BuildRequired, cloudComputerV2CheckFailed } from "../../features/settings/cloud-computer-v2-create-gate";
 
 export const ADD_CLOUD_REPOSITORY_REASON = "Add a repository to your Cloud Computer.";
-export const READY_COPY_BUILDING = "This repository is still getting ready in the cloud. New workspaces take a little longer until it is.";
+export const READY_COPY_BUILDING = "This project is still being built. New workspaces take a little longer until it is ready.";
 
 export type CreateTrayAction = "cloud-computer-settings" | "manage-repositories" | "github-settings";
 /** GitHub edge states of the selected repository's organization connection: one fix each. */

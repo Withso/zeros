@@ -155,22 +155,22 @@ describe("project page", () => {
     expect(text).toContain("local-git:first");
   });
 
-  it("shows who a cloud repository is for: shared, or only you with Share for admins and Ask an admin for members", () => {
+  it("shows who a cloud repository is for: shared, or only you, with Share only where it can succeed and never Ask an admin", () => {
     const sharing = (level: "shared" | "private", canShare: boolean) =>
-      ({ level, organizationName: "Withso", canShare, onShare: vi.fn(), onAskAdmin: vi.fn() });
+      ({ level, organizationName: "Withso", canShare, onShare: vi.fn() });
     expect(render(both, { sharing: sharing("shared", true) })).toContain("Shared with Withso");
     expect(button("Share with Withso")).toBeUndefined();
-    const admin = sharing("private", true);
-    expect(render(both, { sharing: admin })).toContain("Only you");
+    const shareable = sharing("private", true);
+    expect(render(both, { sharing: shareable })).toContain("Only you");
     act(() => button("Share with Withso")!.click());
-    expect(admin.onShare).toHaveBeenCalledOnce();
+    expect(shareable.onShare).toHaveBeenCalledOnce();
     // A private repository has no organization setup to edit.
     expect(container.textContent).not.toContain("cloud-setup:");
-    const member = sharing("private", false);
-    render(both, { sharing: member, canManageCloud: false });
+    // Not shareable now (a member, or a repository no organization connection reaches): "Only you" and nothing else.
+    render(both, { sharing: sharing("private", false), canManageCloud: false });
+    expect(container.textContent).toContain("Only you");
     expect(button("Share with Withso")).toBeUndefined();
-    act(() => button("Ask an admin to share")!.click());
-    expect(member.onAskAdmin).toHaveBeenCalledOnce();
+    expect(container.textContent).not.toContain("Ask an admin");
   });
 
   it("shows the cloud repository's build in a Cloud build section, and nothing new for a local-only project", () => {
