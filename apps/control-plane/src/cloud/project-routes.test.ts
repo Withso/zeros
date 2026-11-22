@@ -164,6 +164,9 @@ describe("a create from a project", () => {
       { position: 1, repository: "withso/web", repositoryId: "44", baseCommit: "c".repeat(38) + "44", fetchSubmodules: true },
       { position: 2, repository: "acme/web", repositoryId: "45", baseCommit: "c".repeat(38) + "45", fetchSubmodules: false }]);
     expect(on.createWorkspace).toHaveBeenCalledWith(expect.objectContaining({ submodules: rows }));
+    const skipping = create(alice, { ...APP, repositories: APP.repositories.map((entry, index) => ({ ...entry, fetchSubmodules: index === 1 })) },
+      { projectSubmodules: async () => [{ position: 1, path: "secret", status: "skipped", reason: "no access" }] });
+    expect((await skipping.send({ organizationId: org, projectId: P2 })).body).toMatchObject({ submoduleNotice: "Some submodules weren't fetched: secret (no access)." });
   });
 
   it("refuses a repository in no project, one the creator can't read (named), and a project's repository given out of place", async () => {

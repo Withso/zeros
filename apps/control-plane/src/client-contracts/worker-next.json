@@ -2,7 +2,7 @@
   "version": 1,
   "client": "worker",
   "headers": {
-    "X-Zeros-Worker-Features": "prompt-outbox-v1,mcp-v1,workspace-setup-v1,checkout-v2,agent-interactions-v1,github-pr-v1,git-identity-v1,github-user-token-v1,code-review-v1,history-replace-v1,workspace-environment-v1,repository-setup-v1,runtime-update-v1,worker-push-v1,workspace-api-v1,session-name-v1,chat-edit-v1,local-commands-v1,setup-status-v1,notify-user-v1,sync-v1,local-commands-reason-v1,acting-user-v1,sync-context-v1,creator-agent-logins-v1,creator-agent-models-v1,creator-commit-identity-v1,push-signals-v1,recovery-quiesce-v1,history-digest-v1,history-digest-deletions-v1,boot-timings-v1,message-authority-v1,history-batch-v1,begin-lease-v1,turn-events-v1,workspace-repositories-v1"
+    "X-Zeros-Worker-Features": "prompt-outbox-v1,mcp-v1,workspace-setup-v1,checkout-v2,agent-interactions-v1,github-pr-v1,git-identity-v1,github-user-token-v1,code-review-v1,history-replace-v1,workspace-environment-v1,repository-setup-v1,runtime-update-v1,worker-push-v1,workspace-api-v1,session-name-v1,chat-edit-v1,local-commands-v1,setup-status-v1,notify-user-v1,sync-v1,local-commands-reason-v1,acting-user-v1,sync-context-v1,creator-agent-logins-v1,creator-agent-models-v1,creator-commit-identity-v1,push-signals-v1,recovery-quiesce-v1,history-digest-v1,history-digest-deletions-v1,boot-timings-v1,message-authority-v1,history-batch-v1,begin-lease-v1,turn-events-v1,workspace-repositories-v1,workspace-submodules-v1"
   },
   "entries": [
     {
@@ -813,6 +813,46 @@
                             "checkoutPath",
                             "branch",
                             "baseBranch"
+                          ],
+                          "additionalProperties": false
+                        }
+                      },
+                      "submodules": {
+                        "minItems": 1,
+                        "maxItems": 320,
+                        "type": "array",
+                        "items": {
+                          "type": "object",
+                          "properties": {
+                            "position": {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 9
+                            },
+                            "path": {
+                              "type": "string",
+                              "minLength": 1,
+                              "maxLength": 1024
+                            },
+                            "repository": {
+                              "type": "string",
+                              "pattern": "^[A-Za-z0-9_.-]{1,100}\\/[A-Za-z0-9_.-]{1,100}$"
+                            },
+                            "commit": {
+                              "type": "string",
+                              "pattern": "^([0-9a-f]{40}|[0-9a-f]{64})$"
+                            },
+                            "gitDir": {
+                              "type": "string",
+                              "pattern": "^modules\\/[0-9a-f]{64}(\\/modules\\/[0-9a-f]{64}){0,2}$"
+                            }
+                          },
+                          "required": [
+                            "position",
+                            "path",
+                            "repository",
+                            "commit",
+                            "gitDir"
                           ],
                           "additionalProperties": false
                         }
@@ -1781,6 +1821,46 @@
                             "checkoutPath",
                             "branch",
                             "baseBranch"
+                          ],
+                          "additionalProperties": false
+                        }
+                      },
+                      "submodules": {
+                        "minItems": 1,
+                        "maxItems": 320,
+                        "type": "array",
+                        "items": {
+                          "type": "object",
+                          "properties": {
+                            "position": {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 9
+                            },
+                            "path": {
+                              "type": "string",
+                              "minLength": 1,
+                              "maxLength": 1024
+                            },
+                            "repository": {
+                              "type": "string",
+                              "pattern": "^[A-Za-z0-9_.-]{1,100}\\/[A-Za-z0-9_.-]{1,100}$"
+                            },
+                            "commit": {
+                              "type": "string",
+                              "pattern": "^([0-9a-f]{40}|[0-9a-f]{64})$"
+                            },
+                            "gitDir": {
+                              "type": "string",
+                              "pattern": "^modules\\/[0-9a-f]{64}(\\/modules\\/[0-9a-f]{64}){0,2}$"
+                            }
+                          },
+                          "required": [
+                            "position",
+                            "path",
+                            "repository",
+                            "commit",
+                            "gitDir"
                           ],
                           "additionalProperties": false
                         }

@@ -9,7 +9,7 @@ import { buildCloudReadyCopy, getCloudReadyCopy, getCloudReadyCopyOutput, type C
 import { message } from "./cloud-computer-store";
 import { relativeAge } from "./cloud-computer-model";
 import { BuildHistoryItem } from "./build-history";
-import { readyCopyFailureLine, readyCopyTriggerLabel } from "./ready-copy-copy";
+import { readyCopyFailureLine, readyCopySubmodulesLine, readyCopyTriggerLabel } from "./ready-copy-copy";
 import { SettingsGroup, SettingsRow } from "./settings-ui";
 
 /** Null: no ready copies here (setting off, older control plane, or not visible to this reader). */
@@ -75,8 +75,9 @@ export function ReadyCopySection({ organizationId, projectId, active }: { organi
               // Why it ran first, then when and how long.
               details={[readyCopyTriggerLabel(row.trigger, row.startedBy, row.triggerDetail), relativeAge(row.startedAt, now), duration(row.startedAt, row.finishedAt),
                 row.failure ? readyCopyFailureLine({ ...row.failure, nextRetryAt: null }, now).split(".")[0]! : null,
-                ...(row.repositories ?? []).map(entry => entry.branch && entry.commit
-                  ? `${row.repositories!.length > 1 ? `${entry.repository} ` : ""}${entry.branch} @ ${entry.commit.slice(0, 7)}` : null)]}
+                ...(row.repositories ?? []).flatMap(entry => [entry.branch && entry.commit
+                  ? `${row.repositories!.length > 1 ? `${entry.repository} ` : ""}${entry.branch} @ ${entry.commit.slice(0, 7)}` : null,
+                  readyCopySubmodulesLine(entry.submoduleCounts, row.repositories!.length > 1 ? entry.repository : undefined)])]}
               // Only a failed build keeps its setup output.
               action={row.state === "failed" && row.output ? <Button variant="ghost" size="compact" onClick={() => void show(row.generation)}>Output</Button> : undefined} />
           ))}

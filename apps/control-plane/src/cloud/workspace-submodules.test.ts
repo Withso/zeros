@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import { z } from "zod";
 import { HttpError } from "../authz.js";
 import { readSubmoduleLevel, submoduleGitDirName, type SubmoduleLevel } from "./submodules.js";
-import { resolveWorkspaceSubmodules, type WorkspaceSubmoduleRepository } from "./workspace-submodules.js";
+import { resolveWorkspaceSubmodules, SUBMODULES_NEED_APP_SIGN_IN, withoutReadOnlyToken, workspaceSubmoduleNotice, type WorkspaceSubmoduleRepository } from "./workspace-submodules.js";
 
 const sha = (n: number) => n.toString(16).padStart(40, "0");
 const gitDir = (...paths: string[]) => paths.map(path => `modules/${submoduleGitDirName(path)}`).join("/");
@@ -102,6 +102,30 @@ describe("a create's submodules, per repository", () => {
       .toEqual({ position: 0, path: ".gitmodules", status: "skipped", reason: "kept at the project's build: GitHub could not be read" });
     expect(await resolveWorkspaceSubmodules({ ...ROOT, baseCommit: sha(2), copy: null }, failing))
       .toEqual([{ position: 0, path: ".gitmodules", status: "skipped", reason: "kept at the project's build: GitHub could not be read" }]);
+  });
+});
+
+describe("the one message a create gives", () => {
+  it("names each skipped submodule and why, and says nothing when every one was fetched", () => {
+    const skipped = (path: string, reason: string) => ({ position: 0, path, status: "skipped" as const, reason });
+    expect(workspaceSubmoduleNotice([{ position: 0, path: "lib", status: "fetch", repository: "acme/lib", repositoryId: "501", commit: sha(1), gitDir: gitDir("lib") }])).toBeNull();
+    expect(workspaceSubmoduleNotice([skipped("secret", "no access"), skipped(".gitmodules", "kept at the project's build: GitHub could not be read in time")]))
+      .toBe("Some submodules weren't fetched: secret (no access), .gitmodules (kept at the project's build: GitHub could not be read in time).");
+    expect(workspaceSubmoduleNotice(Array.from({ length: 10 }, (_v, i) => skipped(`m${i}`, "no access"))))
+      .toMatch(/m7 \(no access\), and 2 more\.$/);
+  });
+});
+
+describe("a creator signed in with a personal access token", () => {
+  it("fetches no submodule (none gets a read-only token) but may still have the copy, and is told why once per repository", () => {
+    const fetch = (position: number, path: string) => ({ position, path, status: "fetch" as const, repository: `acme/${path}`, repositoryId: "501", commit: sha(1), gitDir: gitDir(path) });
+    const rows = [fetch(0, "lib"), fetch(0, "other"), { position: 1, path: "x", status: "skipped" as const, reason: "no access" }];
+    expect(withoutReadOnlyToken(rows, false)).toEqual(rows);
+    expect(withoutReadOnlyToken(rows, true)).toEqual([
+      { position: 0, path: "lib", status: "readable", repository: "acme/lib", repositoryId: "501" },
+      { position: 0, path: "other", status: "readable", repository: "acme/other", repositoryId: "501" },
+      { position: 1, path: "x", status: "skipped", reason: "no access" },
+      { position: 0, path: ".gitmodules", status: "skipped", reason: SUBMODULES_NEED_APP_SIGN_IN }]);
   });
 });
 

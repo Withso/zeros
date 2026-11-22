@@ -228,6 +228,15 @@ export async function createCloudV2Workspace(input: {
   /** Projects: the project to create from (`repository` is its first), and a base branch for any of its other repositories. */
   projectId?: string; repositories?: readonly { repository: string; baseBranch: string }[];
 }, idempotencyKey: string = key()): Promise<CloudV2Workspace> {
+  return (await createCloudV2WorkspaceReply(input, idempotencyKey)).workspace;
+}
+
+const CreateReplySchema = CloudV2WorkspaceReplySchema.extend({
+  /** Cloud submodules: the one sentence naming those this create skipped; absent when none (or from an older server). */
+  submoduleNotice: z.string().max(4000).optional().catch(undefined),
+});
+/** The create's whole reply: the workspace, and what it says to the person once. */
+export async function createCloudV2WorkspaceReply(input: Parameters<typeof createCloudV2Workspace>[0], idempotencyKey: string = key()) {
   if ([input.baseBranch, ...(input.repositories ?? []).map(entry => entry.baseBranch)].some(branch => branch !== undefined && !isCloudV2BaseBranch(branch)))
     throw new Error("Choose a branch from GitHub for this cloud workspace.");
   const body = {
@@ -237,7 +246,7 @@ export async function createCloudV2Workspace(input: {
     ...(input.repositories?.length ? { repositories: input.repositories.map(entry => ({ repository: entry.repository, baseBranch: entry.baseBranch })) } : {}),
     ...(input.name ? { name: input.name } : {}),
   };
-  return (await cloudAccountRequest("/v1/cloud-v2/workspaces", one, { body, idempotencyKey })).workspace;
+  return cloudAccountRequest("/v1/cloud-v2/workspaces", CreateReplySchema, { body, idempotencyKey });
 }
 
 /** Retention: the person has seen that a restore came back without some work. */

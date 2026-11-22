@@ -54,3 +54,9 @@ export function readyCopyFailureLine(failure: { reason: string; repository?: str
   const where = failure.detail && failure.reason === "ready_copy_secret_left" ? ` In ${failure.detail}.` : "";
   return `${repository}${copy.what}${where} ${copy.change} ${nextRetryWords(failure.nextRetryAt ?? null, now)}`.replace(/\s+/g, " ").trim();
 }
+
+/** A build's submodules for one repository, as counts: "Submodules: 3 fetched, 1 skipped". Null without any. */
+export function readyCopySubmodulesLine(counts: { fetched: number; skipped: number } | undefined, repository?: string): string | null {
+  if (!counts || counts.fetched + counts.skipped === 0) return null;
+  return `${repository ? `${repository} s` : "S"}ubmodules: ${[`${counts.fetched} fetched`, ...(counts.skipped ? [`${counts.skipped} skipped`] : [])].join(", ")}`;
+}

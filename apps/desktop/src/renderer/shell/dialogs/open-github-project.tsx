@@ -160,7 +160,7 @@ function ScopedOpenGithubProjectDialog({
         }
         const intent = cloudIntent.current;
         const workspace = await createCloudWorkspaceDocument({ organizationId: cloudOwner.id,
-          repository: intent.repository, idempotencyKey: intent.key });
+          repository: intent.repository, idempotencyKey: intent.key, onNotice: text => toast.info(text) });
         if (epoch !== getOrganizationStoreGeneration()) return;
         acceptCloudWorkspaceDocument(workspace);
         cloudIntent.current = null;

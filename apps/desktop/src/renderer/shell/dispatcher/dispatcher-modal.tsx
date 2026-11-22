@@ -359,7 +359,7 @@ function ActiveDispatcherPage({
     setComputerCreateNotice(null);
     setBusy(true);
     try {
-      const document = await createCloudWorkspaceWithPending({ ...request, idempotencyKey }, createMode);
+      const document = await createCloudWorkspaceWithPending({ ...request, idempotencyKey, onNotice: text => toast.info(text) }, createMode);
       if (creationGeneration !== getOrganizationStoreGeneration()) return;
       const folder = cloudWorkspaceKey({ organizationId: document.organizationId, workspaceId: document.id });
       markWorkspaceSettling(folder);

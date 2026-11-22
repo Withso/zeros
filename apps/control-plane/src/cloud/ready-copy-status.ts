@@ -17,10 +17,13 @@ export type ReadyCopyStatus = {
   /** Full view only: the failure, where, how many in a row, and the next automatic retry (null: stopped). */
   failure?: { reason: string; repository: string | null; step: ReadyCopyStep | null; detail: string | null; failures: number; nextRetryAt: string | null };
 };
+/** A repository's line in the history: its submodules as counts only. Their names and reasons are the build's;
+ * a member who can't read a private submodule never learns of it here. */
+export type ReadyCopyHistoryRepository = Omit<ReadyCopyRepositoryResult, "submodules"> & { submoduleCounts?: { fetched: number; skipped: number } };
 export type ReadyCopyHistoryRow = {
   generation: number; state: CloudV2ReadyCopy["state"]; startedAt: string | null; finishedAt: string | null;
   /** What each repository was cloned at; null until the generation is ready. */
-  repositories: ReadyCopyRepositoryResult[] | null; trigger: ReadyCopyTrigger | null;
+  repositories: ReadyCopyHistoryRepository[] | null; trigger: ReadyCopyTrigger | null;
   /** A finer reason the history line shows instead of `trigger` (the submodules switch). */
   triggerDetail?: "submodules_changed"; startedBy: string | null;
   failure: { reason: string; repository: string | null; step: ReadyCopyStep | null; detail: string | null } | null; output: boolean;
@@ -47,7 +50,9 @@ export function readyCopyStatus(history: readonly CloudV2ReadyCopy[], retry: Rea
 export function readyCopyHistory(history: readonly CloudV2ReadyCopy[], people: ReadonlyMap<string, string>): ReadyCopyHistoryRow[] {
   return history.map(row => ({
     generation: row.generation, state: row.state, startedAt: row.startedAt?.toISOString() ?? null, finishedAt: row.finishedAt?.toISOString() ?? null,
-    repositories: row.result, trigger: row.trigger, ...(row.triggerDetail ? { triggerDetail: row.triggerDetail } : {}),
+    repositories: row.result?.map(({ submodules, ...entry }) => submodules
+      ? { ...entry, submoduleCounts: { fetched: submodules.filter(item => item.fetched).length, skipped: submodules.filter(item => !item.fetched).length } }
+      : entry) ?? null, trigger: row.trigger, ...(row.triggerDetail ? { triggerDetail: row.triggerDetail } : {}),
     startedBy: row.trigger === "manual" && row.triggeredBy ? people.get(row.triggeredBy) ?? "A member" : null,
     failure: row.state === "failed" ? { reason: row.failureReason ?? "ready_copy_failed", repository: row.failureRepository, step: row.failureStep,
       detail: row.failureDetail } : null,

@@ -156,11 +156,27 @@ export async function workerSubmodules(tx: Tx, workspaceId: string): Promise<{ s
   return rows.length ? { submodules: rows } : {};
 }
 
-/** One sentence naming every submodule a workspace did not fetch, for the person; null when none. */
-export async function workspaceSubmoduleNotice(tx: Tx, workspaceId: string): Promise<string | null> {
-  const { rows } = await tx.query<{ path: string; reason: string | null }>(
-    "SELECT path, reason FROM cloud_v2_workspace_submodules WHERE workspace_id=$1 AND status='skipped' ORDER BY position, path LIMIT 33", [workspaceId]);
-  if (!rows.length) return null;
-  const named = rows.slice(0, 32).map(row => `${row.path} (${row.reason ?? "not fetched"})`).join(", ");
-  return `Submodules not fetched: ${named}${rows.length > 32 ? ", and more" : ""}.`;
+/** The reason a creator signed in with a personal access token fetches no submodule. */
+export const SUBMODULES_NEED_APP_SIGN_IN = "submodules need a GitHub sign-in through the Zeros App; a personal access token can't fetch them read-only";
+
+/**
+ * A read-only submodule token is an installation token, which a personal access token is never turned into.
+ * Such a creator's would-be fetches stay readable (they can read them, so the copy may still be forked for
+ * them, at its commits) and the reason is named once.
+ */
+export function withoutReadOnlyToken(rows: readonly WorkspaceSubmoduleRow[], pat: boolean): WorkspaceSubmoduleRow[] {
+  if (!pat || !rows.some(row => row.status === "fetch")) return [...rows];
+  const positions = [...new Set(rows.filter(row => row.status === "fetch").map(row => row.position))];
+  const readable = ({ commit: _commit, gitDir: _gitDir, ...row }: WorkspaceSubmoduleRow): WorkspaceSubmoduleRow => ({ ...row, status: "readable" });
+  return [...rows.map(row => row.status === "fetch" ? readable(row) : row),
+    ...positions.filter(position => !rows.some(row => row.position === position && row.path === ".gitmodules"))
+      .map(position => ({ position, path: ".gitmodules", status: "skipped" as const, reason: SUBMODULES_NEED_APP_SIGN_IN }))];
+}
+
+/** One sentence naming every submodule a create skipped and why, for the person; null when none. */
+export function workspaceSubmoduleNotice(rows: readonly WorkspaceSubmoduleRow[]): string | null {
+  const skipped = rows.filter(row => row.status === "skipped");
+  if (!skipped.length) return null;
+  const named = skipped.slice(0, 8).map(row => `${row.path} (${row.reason ?? "not fetched"})`).join(", ");
+  return `Some submodules weren't fetched: ${named}${skipped.length > 8 ? `, and ${skipped.length - 8} more` : ""}.`;
 }

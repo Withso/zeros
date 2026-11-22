@@ -7,6 +7,7 @@ import { CloudSourceTargetSchema } from "./source-authority.js";
 import { refuseRuntimeCanary } from "./runtime-canary.js";
 import { projectFolderName, repositoryFolderNames } from "./workspace-layout.js";
 import { executionWorkerRequired } from "./execution/errors.js";
+import { workspaceSubmoduleNotice } from "./workspace-submodules.js";
 
 const uuid = z.string().uuid();
 const branchName = z.string().min(1).max(255).regex(/^(?!-)(?!.*\.\.)(?!.*\/\/)(?!.*\.lock$)[A-Za-z0-9._/-]+$/);
@@ -103,18 +104,21 @@ export function createCloudWorkspaceOperations(deps: CloudV2RouteDeps) {
     if (!computer) throw await computerUnavailable(input.organizationId, userId);
     const record = async (create: Parameters<CloudV2RouteDeps["store"]["createWorkspace"]>[0]) => {
       await options.authorize?.();
+      // The one message naming submodules this create skipped; a replayed receipt says it again.
+      const notice = workspaceSubmoduleNotice(create.submodules ?? []);
+      const noticed = (document: Record<string, unknown>) => notice ? { ...document, submoduleNotice: notice } : document;
       if (options.initialPrompt) create = { ...create, initialPrompt: options.initialPrompt };
       if (options.workspaceTokenCreate) create = { ...create, workspaceTokenCreate: true };
       if (options.createdBySessionId) create = { ...create, createdBySessionId: options.createdBySessionId };
       if (options.env) create = { ...create, env: options.env };
       if (key) {
-        const receipt = await deps.store.createWorkspaceOnce(create, key, hash, options.receiptDocument);
+        const receipt = await deps.store.createWorkspaceOnce(create, key, hash, workspace => noticed(options.receiptDocument(workspace)));
         // Another request may have committed this key after our initial read.
         await authorizeReceipt(receipt.response, userId, input.organizationId);
         return receipt;
       }
       const workspace = await deps.store.createWorkspace(create);
-      return { status: 201 as const, response: await options.document(workspace) };
+      return { status: 201 as const, response: noticed(await options.document(workspace)) };
     };
     // Ready copies: the Cloud Computer is tools only and a create is answered
     // from the one-repository project for this repository, the organization's

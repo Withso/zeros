@@ -19,7 +19,7 @@ import { CloudProjects } from "./projects.js";
 import { scheduleCloudDeletion } from "./deletion.js";
 import { withSystemTx } from "../db.js";
 import { otherRepositories, workerRepositories, workspaceTokenSource } from "./workspace-repositories.js";
-import { insertWorkspaceSubmodules, workerSubmodules, workspaceSubmoduleNotice, workspaceSubmoduleSource } from "./workspace-submodules.js";
+import { insertWorkspaceSubmodules, workerSubmodules, workspaceSubmoduleSource } from "./workspace-submodules.js";
 import { submoduleGitDirName } from "./submodules.js";
 import { CloudGithubPrStore } from "./github-pr-store.js";
 import { hashCloudV2Token } from "./tokens.js";
@@ -755,6 +755,10 @@ d("cloud v2 ready copies", () => {
       await copyBuilder(gh.deps).reconcile(org, zeros, "submodules_changed");
       expect(await row(2)).toMatchObject({ trigger: "setup_changed", triggerDetail: "submodules_changed" });
       expect(readyCopyHistory([await row(2)], new Map())[0]).toMatchObject({ trigger: "setup_changed", triggerDetail: "submodules_changed" });
+      // The history counts a copy's submodules; it never names one, so a member can't learn of a private one there.
+      const history = readyCopyHistory([copy], new Map())[0]!;
+      expect(history.repositories![0]).toMatchObject({ submoduleCounts: { fetched: 1, skipped: 1 } });
+      expect(JSON.stringify(history)).not.toMatch(/acme\/secret|acme\/lib|no access/);
       await copyBuilder(gh.deps).tick();
       const rebuilt = await row(2);
       expect(rebuilt).toMatchObject({ state: "ready", builtFromBase: `copy:${copy.id}` });
@@ -777,7 +781,6 @@ d("cloud v2 ready copies", () => {
         expect(await workerSubmodules(tx, id)).toEqual({ submodules: [
           { position: 0, path: "lib", repository: "acme/lib", commit: LIB, gitDir: `modules/${submoduleGitDirName("lib")}` },
           { position: 0, path: "lib/inner", repository: "acme/inner", commit: "d".repeat(40), gitDir: nested }] });
-        expect(await workspaceSubmoduleNotice(tx, id)).toBe("Submodules not fetched: secret (no access).");
         // Only a planned submodule's repository is ever a token target, and never by another workspace.
         expect(await workspaceSubmoduleSource(tx, id, "Acme/Lib")).toEqual({ repository: "acme/lib", repositoryId: "501" });
         expect(await workspaceSubmoduleSource(tx, id, "acme/secret")).toBeNull();

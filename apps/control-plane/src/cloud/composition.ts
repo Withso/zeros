@@ -33,7 +33,7 @@ import { CloudProjects, migrateProjects } from "./projects.js";
 import { organizationCloneToken, organizationSubmoduleRepository } from "./organization-github.js";
 import { readSubmoduleLevel } from "./submodules.js";
 import { CloudGithubHttp, withGithubReadScope } from "./github-http.js";
-import { readOnlyToken, resolveWorkspaceSubmodules, workerSubmodules, workspaceRepositoryToken, workspaceSubmoduleSource, type WorkspaceSubmoduleRepositoryInput } from "./workspace-submodules.js";
+import { readOnlyToken, resolveWorkspaceSubmodules, withoutReadOnlyToken, workerSubmodules, workspaceRepositoryToken, workspaceSubmoduleSource, type WorkspaceSubmoduleRepositoryInput } from "./workspace-submodules.js";
 import { createCloudGithubServices } from "./github-composition.js";
 import { CLOUD_V2_READY_CHANNEL, CLOUD_V2_BOOT_CHANNEL, WorkerReadySignals, notifyCloudV2WorkerBoot } from "./worker-ready.js";
 import { hydrateCloudRepository, type CloudSourceProof, type CloudSourceTarget } from "./source-authority.js";
@@ -236,8 +236,8 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
   const projectSubmodules = (organizationId: string, userId: string, projectId: string, repositories: readonly WorkspaceSubmoduleRepositoryInput[]) =>
     withGithubReadScope(async () => {
       const copy = await readyCopies!.forkable(organizationId, projectId, new Date());
-      let http: Promise<Parameters<typeof readSubmoduleLevel>[0]> | undefined;
-      const member = () => http ??= memberGithub(organizationId, userId).then(access => access.api.http);
+      let access: ReturnType<typeof memberGithub> | undefined;
+      const member = async () => (await (access ??= memberGithub(organizationId, userId))).api.http;
       const rows = await Promise.all(repositories.map(entry => {
         const built = copy?.result?.[entry.position];
         return resolveWorkspaceSubmodules({ ...entry, copy: built && built.repositoryId === entry.repositoryId
@@ -251,7 +251,9 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
           readable: target => source.targets(organizationId, userId, [target], false, { parallel: true }),
         });
       }));
-      return rows.flat();
+      const method = rows.some(entry => entry.some(row => row.status === "fetch"))
+        ? await (access ??= memberGithub(organizationId, userId)).then(grant => grant.material.method, () => null) : null;
+      return withoutReadOnlyToken(rows.flat(), method === "pat");
     });
   const authorizeRepository = async (org: string, user: string, repository: string) => {
     await source.repository(org, user, repository);
