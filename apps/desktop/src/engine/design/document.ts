@@ -67,8 +67,9 @@ import { withDesignDirectoryNameLease } from "./directory-registry";
 import { withDesignDocumentWrite as withDocumentWrite } from "./document-write-lock";
 
 import { designComponentSummaryOf, designFrameOptionPropertyNames, designIgnoredOptionsTemplates, designSourceDeclaresOptions,
-  expandDesignComponents } from "./components";
+  expandDesignComponents, type DesignComponentExpansionUsage } from "./components";
 import { designComponentRegistry } from "./component-registry";
+import { designInstanceControlViolations, designMainControlViolations } from "./component-control-lint";
 import {
   DESIGN_CANVAS_FILE as CANVAS_MARKER_FILE,
   DEFAULT_DESIGN_DIRECTORY_NAME,
@@ -1905,6 +1906,9 @@ async function designComponentRegistrationViolations(workspacePath: string, file
   if (reported && "exceeds" in reported)
     violations.push(violationAt(file, "component-option-invalid", designComponentRecordLimitMessage(name ?? file, reported.exceeds), null, {
       severity: "warning", fix: "Shorten the component's declaration or the layer ids its text holes fill." }));
+  if (summary && !(reported && "exceeds" in reported))
+    violations.push(...designMainControlViolations({ file, source, elements: summary.elements, bindings: summary.bindings,
+      lineAt: (offset) => lineAndColumnAt(source, offset) }));
   if (!name && !registry.problems.some((problem) => problem.file === file) && designSourceDeclaresOptions(source)) {
     const suggested = path.posix.basename(file, ".html").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").replace(/^(?=\d)/, "c-") || "component";
     violations.push(violationAt(file, "component-unregistered",
@@ -2113,13 +2117,19 @@ async function lintFrame(
   // Component definitions are loaded through the same bounded, symlink-free
   // expander used by the renderer. This keeps lint and preview availability
   // identical and surfaces cycles or unsafe component markup before save.
+  const instanceUsage: DesignComponentExpansionUsage = { templated: false };
   const componentExpansion = await expandDesignComponents(
     workspacePath,
     source,
     undefined,
     file,
     canvas ? { registry: designComponentRegistry(canvas).files } : {},
+    instanceUsage,
   );
+  if (instanceUsage.instances?.hosts.size)
+    violations.push(...designInstanceControlViolations({ file, source,
+      instances: { components: Object.fromEntries(instanceUsage.instances.components), hosts: Object.fromEntries(instanceUsage.instances.hosts) },
+      lineAt: (offset) => lineAndColumnAt(source, offset) }));
   // Only an error can leave a component's markup or CSS out of the
   // expansion; a warning (an ignored attribute) changes nothing it renders.
   const availableClasses = !componentExpansion.errors.some((error) => (error.severity ?? "error") === "error")
@@ -2722,7 +2732,7 @@ export const DESIGN_GUIDES = Object.freeze({
   layout: `Use normal HTML flow and flexbox for structural layout. Prefer flex containers, gap, padding, alignment, and intrinsic sizing over absolute positioning inside a frame.`,
   tokens: `Use var(--token) from tokens.css whenever a matching color, spacing, radius, or type token exists. Add typed @property declarations before introducing a new token.`,
   workflow: `Read the active Design directory's rules.md, meta/canvas.json page catalog and relevant sources. Follow the active page named in context unless the user says otherwise; always supply an explicit pageId to frame API writes when several pages exist. Inspect the live element selection and frames and make targeted HTML/CSS edits in that directory. Call lint_design, re-read the affected frame using its full page-folder path, use screenshot_frame to visually verify it, then call lint_design again so exact-generation browser contrast, overflow, and spacing checks are included. Resolve errors and review non-blocking advisories. JavaScript and external URLs are not part of design documents.`,
-  components: `Make a reusable component a main frame: an ordinary page frame whose meta/canvas.json record adds "component": "name". Declare options in <head> inside <template data-zd-options>, one <zd-option name="label" type="text" default="Save"></zd-option> per line, and use them as {{ label }} in text and attributes. Mark a frame data-zd-slot="body" to let instances place their own layers there (slot="body"); what the main's frame holds is the default. Keep the main's data-oid values stable: an instance restyles a part with zd-style-<part>, named by them. Give the main one root layer: an instance is that root's box, so size or place an instance with its own style="…", not with CSS on zd-name. Place an instance with <zd-name data-oid="stable-instance" label="Buy">. Existing components/name.html files stay readable; do not add new ones (component.create writes that older form and remains for existing callers), and Move main to canvas converts one into a main. Keep scripts, event handlers and external URLs out of components.`,
+  components: `Make a reusable component a main frame: an ordinary page frame whose meta/canvas.json record adds "component": "name". Declare options in <head> inside <template data-zd-options>, one <zd-option name="label" type="text" default="Save"></zd-option> per line, and use them as {{ label }} in text and attributes. Mark a frame data-zd-slot="body" to let instances place their own layers there (slot="body"); what the main's frame holds is the default. Anything an instance should change is a control: declare it and read it in the main as {{ name }}, data-zd-if, an attribute hole tested in CSS, or var(--zd-name) in the main's CSS. Keep the main's data-oid values stable, and keep a layer's own style off properties a control sets. Give the main one root layer: an instance is that root's box, so size or place an instance with its own style="…", not with CSS on zd-name; that style holds only its place and size. Never write zd-style-<part> or a visual style on an instance; older ones still render and design validate warns about them. Place an instance with <zd-name data-oid="stable-instance" label="Buy">. Existing components/name.html files stay readable; do not add new ones (component.create writes that older form and remains for existing callers), and Move main to canvas converts one into a main. Keep scripts, event handlers and external URLs out of components.`,
 });
 
 export type DesignGuideTopic = keyof typeof DESIGN_GUIDES;

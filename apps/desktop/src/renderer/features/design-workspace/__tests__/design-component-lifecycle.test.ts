@@ -129,7 +129,7 @@ describe("an instance whose component is gone", () => {
 describe("an instance attribute that names no option", () => {
   it("says which attribute and value the component ignores", () => {
     expect(designInstanceIgnoredAttributes({ component: "chip", attributes: { mood: "calm" }, ignored: { tone: "loud" } }))
-      .toEqual(['This component has no option tone; tone="loud" is ignored.']);
+      .toEqual(['This component has no control tone (no <zd-option name="tone">); tone="loud" is ignored.']);
     expect(designInstanceIgnoredAttributes({ component: "chip", attributes: {} })).toEqual([]);
     const optionsSource = readFileSync(resolve(process.cwd(), "apps/desktop/src/renderer/features/design-workspace/design-component-options.tsx"), "utf8");
     expect(optionsSource).toContain("designInstanceIgnoredAttributes(host)");
@@ -287,9 +287,9 @@ describe("a component whose options do not apply", () => {
 describe("a component whose declaration is too large to show", () => {
   it("says in its Options why there are none to show, for the main and its instances", () => {
     expect(designComponentRecordProblem({ elements: [], reach: {}, exceeds: "elements" }, "QA Chip"))
-      .toBe("The options of QA Chip cannot be shown: its declaration has more than 160 elements.");
+      .toBe("The controls of QA Chip cannot be shown: its declaration has more than 160 elements.");
     expect(designComponentRecordProblem({ elements: [], reach: {}, file: "page-1/chip.html", frame: true, exceeds: "attribute-value" }, "Chip"))
-      .toBe("The options of Chip cannot be shown: a declaration attribute's value is longer than 2,048 characters.");
+      .toBe("The controls of Chip cannot be shown: a declaration attribute's value is longer than 2,048 characters.");
     expect(designComponentRecordProblem({ elements: [], reach: {} }, "Chip")).toBeNull();
     const optionsSource = readFileSync(resolve(process.cwd(), "apps/desktop/src/renderer/features/design-workspace/design-component-options.tsx"), "utf8");
     expect(optionsSource).toContain("designComponentRecordProblem(target.component, title)");
@@ -381,7 +381,7 @@ describe("the Options section of a component it cannot list", () => {
   /** The element and everything in it can wrap: nothing cuts its text to one line. */
   const wraps = (element: Element) => [element, ...element.querySelectorAll("*")]
     .every((node) => !/\b(truncate|text-ellipsis|whitespace-nowrap|line-clamp-\d)\b/.test(node.getAttribute("class") ?? ""));
-  const SENTENCE = "The options of QA Big cannot be shown: its declaration has more than 160 elements.";
+  const SENTENCE = "The controls of QA Big cannot be shown: its declaration has more than 160 elements.";
 
   it("says why in full, and offers no variants it cannot read, on the main", () => {
     const section = sectionOf({ kind: "main", component: { elements: [], reach: {}, exceeds: "elements" } });
@@ -403,7 +403,7 @@ describe("the Options section of a component it cannot list", () => {
     expect(message.textContent).toBe(SENTENCE);
     expect(wraps(message)).toBe(true);
     const ignored = section.querySelector("[data-design-options-ignored]")!;
-    expect(ignored.textContent).toBe('This component has no option tone; tone="loud" is ignored.');
+    expect(ignored.textContent).toBe('This component has no control tone (no <zd-option name="tone">); tone="loud" is ignored.');
     expect(wraps(ignored)).toBe(true);
     expect(section.querySelector("[data-design-options-variant]")).toBeNull();
   });

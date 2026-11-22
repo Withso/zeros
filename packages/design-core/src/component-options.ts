@@ -511,7 +511,7 @@ export function componentInstanceHostStyleAllowed(property: string): boolean {
 
 /** Why an instance's attribute has no effect, naming the value it ignores. */
 export function componentIgnoredAttributeMessage(name: string, value: string): string {
-  return `This component has no option ${name}; ${name}="${value.length > 64 ? `${value.slice(0, 63)}…` : value}" is ignored.`;
+  return `This component has no control ${name} (no <zd-option name="${name}">); ${name}="${value.length > 64 ? `${value.slice(0, 63)}…` : value}" is ignored.`;
 }
 
 /** An instance's values from its attributes: each option attribute over its

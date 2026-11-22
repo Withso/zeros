@@ -412,17 +412,17 @@ export function designComponentRecordWithinLimits<T extends { elements: unknown[
 export function designComponentRecordLimitMessage(component: string, limit: DesignComponentRecordLimit): string {
   switch (limit) {
     case "elements":
-      return `The options of ${component} cannot be shown: its declaration has more than ${LIMITS.elements} elements.`;
+      return `The controls of ${component} cannot be shown: its declaration has more than ${LIMITS.elements} elements.`;
     case "tag":
-      return `The options of ${component} cannot be shown: a declaration element's tag is longer than ${LIMITS.tag} characters.`;
+      return `The controls of ${component} cannot be shown: a declaration element's tag is longer than ${LIMITS.tag} characters.`;
     case "attributes":
-      return `The options of ${component} cannot be shown: a declaration element has more than ${LIMITS.attributes} attributes.`;
+      return `The controls of ${component} cannot be shown: a declaration element has more than ${LIMITS.attributes} attributes.`;
     case "attribute-name":
-      return `The options of ${component} cannot be shown: a declaration attribute's name is longer than ${LIMITS.attributeName} characters.`;
+      return `The controls of ${component} cannot be shown: a declaration attribute's name is longer than ${LIMITS.attributeName} characters.`;
     case "attribute-value":
-      return `The options of ${component} cannot be shown: a declaration attribute's value is longer than ${LIMITS.attributeValue.toLocaleString("en-US")} characters.`;
+      return `The controls of ${component} cannot be shown: a declaration attribute's value is longer than ${LIMITS.attributeValue.toLocaleString("en-US")} characters.`;
     case "layer-id":
-      return `The options of ${component} cannot be shown: a layer whose text an option sets has a data-oid longer than ${LIMITS.layerId} characters.`;
+      return `The controls of ${component} cannot be shown: a layer whose text a control sets has a data-oid longer than ${LIMITS.layerId} characters.`;
   }
 }
 

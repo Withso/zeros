@@ -146,7 +146,7 @@ export interface DesignComponentExpansionOptions {
 }
 
 /** What an expansion learned about the frame's own instances. */
-interface DesignComponentExpansionUsage {
+export interface DesignComponentExpansionUsage {
   templated: boolean;
   /** Kept in Maps while a frame expands: layer ids and component names are
    * authored text, and a plain object would take "__proto__" as its

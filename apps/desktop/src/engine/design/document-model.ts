@@ -52,6 +52,8 @@ export interface DesignLintViolation {
     | "component-expression-invalid"
     | "component-value-invalid"
     | "component-unregistered"
+    | "component-control-shadowed"
+    | "component-control-unread"
     | "render-budget"
     | "contrast"
     | "overflow"

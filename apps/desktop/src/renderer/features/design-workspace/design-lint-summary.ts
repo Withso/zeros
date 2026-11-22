@@ -15,6 +15,8 @@ const RULE_LABELS: Record<DesignLintViolationWire["ruleId"], string> = {
   "component-expression-invalid": "Component expressions",
   "component-invalid": "Component definition",
   "component-class": "Component classes",
+  "component-control-shadowed": "Styles over a control",
+  "component-control-unread": "Unread controls",
   "component-option-invalid": "Component controls",
   "component-undefined": "Missing component",
   "component-unregistered": "Unregistered component",
