@@ -141,8 +141,9 @@ export type StageContext = {
   ports: Ports; state: RehearsalState; save(): Promise<void>;
   /** Projects are "Only you" (personal) on the Personal route, organization projects on the organization route. */
   projectLevel: "personal" | "organization";
-  /** R1 always; R2 once provisioned or named; R3 for submodules. */
-  repositories: { one: string; two?: string; submodules?: string };
+  /** R1 always; R2 once provisioned or named; R3 (with one public and one private submodule) and that private submodule's
+   * repository for stage D, by name. */
+  repositories: { one: string; two?: string; submodules?: string; privateSubmodule?: string };
   /** Bounded waits; tests shrink them. */
   timing: { pollMs: number; stateMs: number; copyMs: number; turnMs: number; scanMs: number; archiveScanMs: number;
     /** Pro ended to the machine stopped: the 20-minute idle stop plus one sweep, with margin. */

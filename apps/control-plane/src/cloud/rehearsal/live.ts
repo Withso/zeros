@@ -211,6 +211,13 @@ export function liveGithub(input: { appId: number; privateKey: string; owner: st
   };
 }
 
+/** A database failure's closed class: its SQLSTATE (five characters, never the message), or "connection" when it has none. */
+export function databaseErrorCode(error: unknown): string {
+  const state = (error as { code?: unknown } | null)?.code;
+  if (typeof state !== "string" || !/^[0-9A-Z]{5}$/.test(state)) return "connection";
+  return state.startsWith("08") || state === "57P01" ? "connection" : `sqlstate_${state}`;
+}
+
 /** The playbook's RLS-safe read: app.system is set by a materialized CTE before the statement's rows are read. */
 export const rlsSafe = (text: string) => `WITH cfg AS MATERIALIZED (SELECT set_config('app.system','on',true) AS v)
           SELECT x.* FROM cfg CROSS JOIN LATERAL (${text}) x WHERE cfg.v = 'on'`;
@@ -282,19 +289,28 @@ export function liveDatabase(input: { organization: string; database: string; to
   };
   const query = (held: DatabaseClient): Query => async (text, values) => {
     try { const result = await held.query(text, values); return { rows: result.rows, rowCount: result.rowCount ?? 0 }; }
-    catch { throw new RehearsalFailure("database", "query"); }
+    catch (error) { throw new RehearsalFailure("database", databaseErrorCode(error)); }
   };
   let reader: Promise<Awaited<ReturnType<typeof mint>>> | undefined;
   return {
     async read(text, values) {
-      const opened = reader ??= mint("read").catch(error => { reader = undefined; throw error; });
-      const { held } = await opened, run = query(held);
-      await run("BEGIN READ ONLY");
-      try {
-        const rows = (await run(rlsSafe(text), values)).rows;
-        await run("COMMIT");
-        return rows;
-      } catch (error) { await held.query("ROLLBACK").catch(() => undefined); throw error; }
+      for (let attempt = 0; ; attempt++) {
+        const opened = reader ??= mint("read").catch(error => { reader = undefined; throw error; });
+        const current = await opened, run = query(current.held);
+        try {
+          await run("BEGIN READ ONLY");
+          try {
+            const rows = (await run(rlsSafe(text), values)).rows;
+            await run("COMMIT");
+            return rows;
+          } catch (error) { await current.held.query("ROLLBACK").catch(() => undefined); throw error; }
+        } catch (error) {
+          // A dropped connection (the read role idles through the sign-ins) is replaced once: its role deleted, a new one minted.
+          if (attempt > 0 || !(error instanceof RehearsalFailure && error.code === "connection")) throw error;
+          if (reader === opened) reader = undefined;
+          await current.remove().catch(() => undefined);
+        }
+      }
     },
     async transaction(work) {
       const { held, remove } = await mint("write"), run = query(held);

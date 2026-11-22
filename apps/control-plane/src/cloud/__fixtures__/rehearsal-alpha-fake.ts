@@ -12,7 +12,7 @@ type Workspace = {
   // Retention, in days since the stop.
   stoppedDays: number | null; archivedAtDays?: number; probe?: "clean" | "dirty"; backup: boolean; wakes: number; scrub: string | null; machineGone: boolean; lostWork?: boolean;
 };
-type Project = { id: string; name: string; organizationId: string; repositories: string[]; machine: string };
+type Project = { id: string; name: string; organizationId: string; repositories: string[]; machine: string; submodules: boolean };
 type Turn = { chatId: string; turnId: string; startedAt: number; files: string[] };
 
 export class FakeAlpha {
@@ -147,7 +147,8 @@ export class FakeAlpha {
         projects: [...this.projects.values()].map(project => this.project(project)) });
       if (!id && method === "POST") {
         const project: Project = { id: randomUUID(), name: String(body.name), organizationId: this.organizationId,
-          repositories: (body.repositories as { repository: string }[]).map(row => row.repository), machine: "" };
+          repositories: (body.repositories as { repository: string }[]).map(row => row.repository), machine: "",
+          submodules: (body.repositories as { fetchSubmodules?: boolean }[]).some(row => row.fetchSubmodules === true) };
         project.machine = this.machine(`copy ${project.name}`);
         this.machines.get(project.machine)!.state = "stopped";
         this.projects.set(project.id, project);
@@ -319,6 +320,7 @@ export class FakeAlpha {
       row.files.set(file, `${ignored[2] === ">>" ? row.files.get(file) ?? "" : ""}${ignored[1]}\n`);
     }
     if (data.includes("git log")) output = [...row.commits.values()].flat().reverse().join("\r\n");
+    if (data.includes("git submodule status")) output = [` ${"a".repeat(40)} vendor/private (heads/main)`, ` ${"b".repeat(40)} vendor/public (v1.0.0)`].join("\r\n");
     return `${begin}\r\n${output}\r\n${end} 0\r\n`;
   }
 
@@ -363,6 +365,16 @@ export class FakeAlpha {
   sql(text: string, values: unknown[]): Awaited<ReturnType<Query>> {
     const rows = (list: Record<string, unknown>[]) => ({ rows: list, rowCount: list.length });
     const ids = (values[0] ?? []) as string[];
+    // Stage D: the copy's record of its submodules, and a workspace's submodule rows (a token sign-in's create).
+    if (text.startsWith("SELECT result FROM cloud_v2_ready_copies")) {
+      const project = this.projects.get(String(values[0]));
+      return rows(project ? [{ result: project.repositories.map(repository => ({ repository,
+        ...(project.submodules ? { submodules: [{ path: "vendor/public", fetched: true }, { path: "vendor/private", fetched: true }] } : {}) })) }] : []);
+    }
+    if (text.includes("FROM cloud_v2_workspace_submodules")) {
+      const project = this.projects.get(String(this.workspaces.get(String(values[0]))?.projectId));
+      return rows(project?.submodules ? [{ path: ".gitmodules", status: "skipped" }, { path: "vendor/private", status: "readable" }, { path: "vendor/public", status: "fetch" }] : []);
+    }
     if (text.startsWith("SELECT state FROM cloud_v2_workspaces")) return rows([{ state: this.workspaces.get(String(values[0]))?.state ?? null }]);
     if (text.includes("FROM cloud_v2_ready_copies")) return rows([...this.projects.values()].filter(project => project.id === values[0]).map(project => ({ machine_id: project.machine })));
     if (text.includes("FROM cloud_v2_ready_copy_forks")) return rows([{ forks: this.forks.has(String(values[0])) ? 1 : 0 }]);

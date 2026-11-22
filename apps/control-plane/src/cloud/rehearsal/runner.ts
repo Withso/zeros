@@ -6,14 +6,15 @@ import { stageProjects } from "./stage-projects.js";
 import { stageProvision } from "./stage-provision.js";
 import { stagePersonal } from "./stage-personal.js";
 import { stageRetention } from "./stage-retention.js";
+import { stageSubmodules } from "./stage-submodules.js";
 import { changePro, sameGrant, stageSetup } from "./stage-setup.js";
 import { clearEnvironment, disconnectGithubSignIn, githubSignIn, deleteProject, deleteWorkspace, getWorkspace, listProjects, listWorkspaces, readEnvironment } from "./steps.js";
 
 export type Stage = (ctx: StageContext) => Promise<Record<string, number>>;
-/** Stages not written yet (D waits on #1247's deployment and the fixtures) are absent and refused. setup refuses itself
- * on the organization route. */
+/** Every stage. setup refuses itself on the organization route; personal and submodules run on the Personal route only,
+ * and submodules refuses itself until its fixtures exist. */
 export const STAGE_RUNNERS: Partial<Record<StageName, Stage>> = { provision: stageProvision, setup: stageSetup, projects: stageProjects,
-  personal: stagePersonal, retention: stageRetention };
+  personal: stagePersonal, retention: stageRetention, submodules: stageSubmodules };
 
 export type RunOptions = {
   switches: ReadonlySet<Switch>;
@@ -34,7 +35,7 @@ const ACTIVE = new Set(["creating", "starting", "running", "stopping"]);
 export function stageContext(ports: Ports, state: RehearsalState, save: () => Promise<void>, repositories: StageContext["repositories"],
   timing: StageContext["timing"], runCap: number): StageContext & { lastStep(): string; takeNotes(): string[] } {
   let last = "start", notes: string[] = [];
-  for (const repository of [repositories.one, repositories.two, repositories.submodules]) if (repository) assertRepository(repository);
+  for (const repository of [repositories.one, repositories.two, repositories.submodules, repositories.privateSubmodule]) if (repository) assertRepository(repository);
   return {
     ports, state, save, repositories, timing, projectLevel: state.owner === "personal" ? "personal" : "organization",
     step(name) { last = name; },
@@ -209,6 +210,6 @@ export function inventoryLines(inventory: Inventory): { lines: string[]; clean: 
 }
 
 function fixtureRepositories(ctx: StageContext): string[] {
-  return [...new Set([ctx.repositories.one, ctx.repositories.two, ctx.repositories.submodules, ...ctx.state.created.repositories]
+  return [...new Set([ctx.repositories.one, ctx.repositories.two, ctx.repositories.submodules, ctx.repositories.privateSubmodule, ...ctx.state.created.repositories]
     .filter((value): value is string => !!value).map(assertRepository))];
 }

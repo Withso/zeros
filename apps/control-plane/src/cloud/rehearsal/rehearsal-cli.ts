@@ -23,10 +23,10 @@ import { loadState, newState, saveState } from "./state.js";
 export const USAGE = "alpha:rehearse <provision|setup|projects|personal|retention|submodules|all> [--plan] [--cleanup] [--run <id>] " +
   "[--owner personal|organization (default personal)] [--account owner|1..10 (default 2)] [--other 1..10 (default the next configured)] " +
   "[--pro-actor <first 8 hex of the platform owner>] [--switches projects,personal,retention] [--repository owner/name] " +
-  "[--repository-two owner/name (default Withso/zeros-dev-fixture-2)] [--keep-fixtures] [--max-active <n>] [--organization <slug|id>]";
+  "[--repository-two owner/name (default Withso/zeros-dev-fixture-2)] [--submodule-repository owner/name] [--private-submodule-repository owner/name] [--keep-fixtures] [--max-active <n>] [--organization <slug|id>]";
 /** `all` runs these in order on each route; D is refused until written. */
 export const ALL: Record<OwnerKind, readonly StageName[]> = {
-  personal: ["provision", "setup", "projects", "personal", "retention"], organization: ["provision", "setup", "projects", "retention"],
+  personal: ["provision", "setup", "projects", "personal", "retention", "submodules"], organization: ["provision", "setup", "projects", "retention"],
 };
 export const TIMING = { pollMs: 5_000, stateMs: 15 * 60_000, copyMs: 30 * 60_000, turnMs: 10 * 60_000, scanMs: 5 * 60_000, archiveScanMs: 65 * 60_000,
   idleStopMs: 35 * 60_000 };
@@ -34,7 +34,7 @@ export const TIMING = { pollMs: 5_000, stateMs: 15 * 60_000, copyMs: 30 * 60_000
 export type Arguments = {
   stages: StageName[]; plan: boolean; cleanup: boolean; run?: string; owner: OwnerKind; account: "owner" | number; other?: number; proActor?: string;
   switches: Set<Switch>;
-  repository?: string; repositoryTwo?: string; keepFixtures: boolean; maxActive: number; organization?: string;
+  repository?: string; repositoryTwo?: string; submoduleRepository?: string; privateSubmoduleRepository?: string; keepFixtures: boolean; maxActive: number; organization?: string;
 };
 export function parseArguments(argv: string[]): Arguments {
   // Private files: .env.agent at the repository root and the zeros-dev profile, both mode 0600; the profile is reached by
@@ -42,7 +42,7 @@ export function parseArguments(argv: string[]): Arguments {
   const { values, positionals } = parseArgs({ args: argv, allowPositionals: true, options: {
     plan: { type: "boolean" }, cleanup: { type: "boolean" }, run: { type: "string" }, account: { type: "string" }, switches: { type: "string" },
     repository: { type: "string" }, "repository-two": { type: "string" }, "keep-fixtures": { type: "boolean" }, "max-active": { type: "string" },
-    organization: { type: "string" }, owner: { type: "string" }, other: { type: "string" }, "pro-actor": { type: "string" }, help: { type: "boolean" },
+    organization: { type: "string" }, owner: { type: "string" }, "submodule-repository": { type: "string" }, "private-submodule-repository": { type: "string" }, other: { type: "string" }, "pro-actor": { type: "string" }, help: { type: "boolean" },
   } });
   const owner = (values.owner ?? "personal") as OwnerKind;
   if (!["personal", "organization"].includes(owner)) throw new RehearsalFailure("usage", "owner");
@@ -68,6 +68,8 @@ export function parseArguments(argv: string[]): Arguments {
     ...(other !== undefined ? { other } : {}), ...(values["pro-actor"] ? { proActor: values["pro-actor"] } : {}), switches,
     ...(values.repository ? { repository: assertRepository(values.repository) } : {}),
     ...(values["repository-two"] ? { repositoryTwo: assertRepository(values["repository-two"]) } : {}),
+    ...(values["submodule-repository"] ? { submoduleRepository: assertRepository(values["submodule-repository"]) } : {}),
+    ...(values["private-submodule-repository"] ? { privateSubmoduleRepository: assertRepository(values["private-submodule-repository"]) } : {}),
     keepFixtures: !!values["keep-fixtures"], maxActive, ...(values.organization ? { organization: values.organization } : {}) };
 }
 
@@ -143,8 +145,13 @@ async function main(argv: string[]): Promise<number> {
             log(`account ${result.label}: failed ${failed.step} ${failed.code}`);
             // Why a member's projects read answers 404, from the database: booleans only.
             if (failed.code.startsWith("http_404")) {
-              const facts = await probeDiagnostics(reads, probe.id, result.userId).catch(() => null);
-              if (facts) log(`  probe organization facts: ${Object.entries(facts).map(([key, value]) => `${key} ${value ? "yes" : "no"}`).join(", ")}`);
+              try {
+                const facts = await probeDiagnostics(reads, probe.id, result.userId);
+                log(`  probe organization facts: ${Object.entries(facts).map(([key, value]) => `${key} ${value ? "yes" : "no"}`).join(", ")}`);
+              } catch (factsError) {
+                const unavailable = diagnose(factsError, "probe_facts");
+                log(`  probe organization facts: unavailable ${unavailable.step} ${unavailable.code}`);
+              }
             }
             summaries.set(result.label, { failed: `${failed.step}:${failed.code}` });
           } finally { await result.session.close().catch(() => log(`account ${result.label}: sign-out failed`)); }
@@ -153,7 +160,15 @@ async function main(argv: string[]): Promise<number> {
         const otherLabel = String(args.other ?? accounts.find(row => row.label !== "owner" && row.label !== String(args.account))?.label ?? "none");
         log(`selected account ${args.account}; second account ${otherLabel}; repositories R1 ${one}, R2 ${two}`);
         if (args.account === "owner") log("note: the owner's own account; the run asserts its entitlement, sessions and settings are unchanged");
-        const readiness = { token: !!token, proActor: actor.state };
+        // Stage D's fixtures, read through the GitHub App (a repository read; nothing is written).
+        const named = args.submoduleRepository && args.privateSubmoduleRepository ? [args.submoduleRepository, args.privateSubmoduleRepository] : null;
+        let submoduleFixtures: "present" | "missing" | "not_named" = "not_named";
+        if (named) {
+          const app = liveGithub({ appId: Number(need("ZEROS_GITHUB_ALPHA_APP_ID")), privateKey: Buffer.from(need("ZEROS_GITHUB_ALPHA_APP_PRIVATE_KEY_B64"), "base64").toString("utf8"), owner: "Withso" });
+          submoduleFixtures = (await Promise.all(named.map(repository => app.repositoryExists(repository).catch(() => false)))).every(Boolean) ? "present" : "missing";
+        }
+        log(`submodule fixtures: ${submoduleFixtures}`);
+        const readiness = { token: !!token, proActor: actor.state, submoduleFixtures };
         for (const stage of [...new Set<StageName>(["setup", ...args.stages])]) {
           const refused = refusal(stage, selected, args.switches, args.owner, readiness);
           log(`stage ${stage}: ${refused ? `refused ${refused}` : "would run"}`);
@@ -217,7 +232,8 @@ async function main(argv: string[]): Promise<number> {
         ...(held && owner === "personal" && actor.id ? { pro: livePro(db, { subjectUserId: held.userId, expectedEmail: held.email, actorUserId: actor.id }) } : {}),
         ...(held && token ? { githubSignIn: liveGithubSignIn(held.api, token) } : {}),
       };
-      const ctx = stageContext(ports, run, () => saveState(run), { one, two }, TIMING, DEFAULT_RUN_CAP);
+      const ctx = stageContext(ports, run, () => saveState(run), { one, two, ...(args.submoduleRepository ? { submodules: args.submoduleRepository } : {}),
+        ...(args.privateSubmoduleRepository ? { privateSubmodule: args.privateSubmoduleRepository } : {}) }, TIMING, DEFAULT_RUN_CAP);
       const before = held && args.account === "owner" ? await ownerFingerprint(held.api, organizationId, profile.workos.apiKey, held.subject) : undefined;
       const startedAt = Date.now();
       let passed: boolean;

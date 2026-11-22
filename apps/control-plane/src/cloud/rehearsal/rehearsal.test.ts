@@ -14,20 +14,22 @@ import { cleanup, cleanupNeedsAccount, inventoryLines, NO_ACCOUNT, readInventory
 import { parseArguments } from "./rehearsal-cli.js";
 import { FIXTURE_TWO } from "./stage-provision.js";
 import { loadState, newState, saveState } from "./state.js";
-import { liveDatabase, type DatabaseClient } from "./live.js";
+import { databaseErrorCode, liveDatabase, type DatabaseClient } from "./live.js";
 import { platformOwners } from "./plan.js";
 
 const R1 = "Withso/zeros-dev-fixture";
 const TIMING = { pollMs: 30_000, stateMs: 120_000, copyMs: 120_000, turnMs: 120_000, scanMs: 300_000, archiveScanMs: 3_900_000, idleStopMs: 2_100_000 };
 
-function setup(options: { provisioned?: boolean; owner?: "personal" | "organization" } = {}) {
-  const alpha = new FakeAlpha(options.provisioned === false ? [R1] : [R1, FIXTURE_TWO]);
+const R3 = "Withso/zeros-dev-fixture-submodules", PRIVATE_SUB = "Withso/zeros-dev-fixture-private-sub";
+function setup(options: { provisioned?: boolean; owner?: "personal" | "organization"; submodules?: boolean } = {}) {
+  const alpha = new FakeAlpha([R1, ...options.provisioned === false ? [] : [FIXTURE_TWO], ...options.submodules === false ? [] : [R3, PRIVATE_SUB]]);
   const state = newState(randomUUID(), alpha.organizationId, new Date(alpha.now), options.owner ?? "organization");
   // On the Personal route the test user starts with no GitHub sign-in; setup connects one.
   if (options.owner === "personal") alpha.githubIdentity = false;
   const lines: string[] = [];
   const saved: RehearsalState[] = [];
-  const ctx = stageContext(alpha.ports(), state, async () => { saved.push(structuredClone(state)); }, { one: R1, two: FIXTURE_TWO }, TIMING, 30);
+  const ctx = stageContext(alpha.ports(), state, async () => { saved.push(structuredClone(state)); },
+    { one: R1, two: FIXTURE_TWO, submodules: R3, privateSubmodule: PRIVATE_SUB }, TIMING, 30);
   const options_ = { switches: new Set(["projects", "personal", "retention"] as const), maxActive: 10, runCap: 30, log: (line: string) => lines.push(line) };
   return { alpha, state, ctx, lines, saved, options: options_ };
 }
@@ -50,7 +52,7 @@ describe("rehearsal guards", () => {
 
   it("parses the command line and refuses what it does not know", () => {
     expect(parseArguments(["all", "--plan", "--switches", "projects,personal,retention"]))
-      .toMatchObject({ stages: ["provision", "setup", "projects", "personal", "retention"], plan: true, owner: "personal", account: 2 });
+      .toMatchObject({ stages: ["provision", "setup", "projects", "personal", "retention", "submodules"], plan: true, owner: "personal", account: 2 });
     expect(parseArguments(["all", "--owner", "organization", "--account", "owner"])).toMatchObject({ stages: ["provision", "setup", "projects", "retention"], account: "owner" });
     expect(parseArguments(["personal", "--account", "4", "--other", "5", "--pro-actor", "3e515301"])).toMatchObject({ account: 4, other: 5, proActor: "3e515301" });
     expect(parseArguments(["retention", "--account", "3", "--run", randomUUID()])).toMatchObject({ stages: ["retention"], account: 3 });
@@ -143,7 +145,7 @@ describe("rehearsal stages against a fake Alpha", () => {
     expect(await runStages(ctx, ["projects"], { ...options, switches: new Set(["retention"] as const) })).toBe(false);
     expect(lines.at(-1)).toBe("stage projects: failed switch undeclared_projects");
     expect(await runStages(ctx, ["submodules"], options)).toBe(false);
-    expect(lines.at(-1)).toBe("stage submodules: failed stage not_written");
+    expect(lines.at(-1)).toBe("stage submodules: failed owner personal_route_only");
     expect(alpha.writes).toEqual([]);
     expect(await runStages(ctx, ["projects"], { ...options, maxActive: -1 })).toBe(false);
     expect(lines.at(-1)).toBe("stage projects: failed machine_cap active");
@@ -168,7 +170,7 @@ describe("rehearsal stages against a fake Alpha", () => {
   });
 
   for (const [stage, owner, prelude] of [["projects", "organization", []], ["retention", "organization", []], ["setup", "personal", []],
-    ["personal", "personal", ["setup"]]] as [StageName, "personal" | "organization", StageName[]][]) {
+    ["personal", "personal", ["setup"]], ["submodules", "personal", ["setup"]]] as [StageName, "personal" | "organization", StageName[]][]) {
     it(`cleanup after a failure at any step of ${stage} (${owner} route) leaves an empty inventory`, async () => {
       const clean = setup({ owner });
       expect(await runStages(clean.ctx, prelude, clean.options)).toBe(true);
@@ -251,7 +253,7 @@ describe("rehearsal environments and the worker-off record", () => {
 
 describe("rehearsal database roles", () => {
   /** A PlanetScale and a Postgres that record what was asked of them. */
-  function provider() {
+  function provider(custom?: () => DatabaseClient) {
     const requests: { method: string; path: string; body?: unknown }[] = [], statements: string[] = [];
     let next = 0;
     const live = new Set<string>();
@@ -267,7 +269,8 @@ describe("rehearsal database roles", () => {
       connect: async () => undefined, end: async () => undefined,
       query: async text => { statements.push(text); return { rows: text.includes("session_user") ? [{ name: "u.routing" }] : [{ id: "abcdef12-0000-0000-0000-000000000000" }], rowCount: 1 }; },
     });
-    const database = liveDatabase({ organization: "o", database: "alpha", tokenId: "t", token: "t", roleName: kind => `r-${kind}`, planetScale, client, sleep: async () => undefined });
+    const database = liveDatabase({ organization: "o", database: "alpha", tokenId: "t", token: "t", roleName: kind => `r-${kind}`, planetScale,
+      client: custom ?? client, sleep: async () => undefined });
     const inherited = () => requests.filter(request => request.method === "POST").map(request => (request.body as { inherited_roles: string[] }).inherited_roles);
     return { database, requests, statements, live, inherited };
   }
@@ -296,6 +299,30 @@ describe("rehearsal database roles", () => {
     await expect(database.transaction(async () => { throw new RehearsalFailure("work", "failed"); })).rejects.toMatchObject({ code: "failed" });
     expect(live.size).toBe(0);
     expect(statements).toContain("ROLLBACK");
+  });
+
+  it("names a database failure by SQLSTATE only, and replaces a dropped read connection once", async () => {
+    expect(databaseErrorCode({ code: "42501", message: "permission denied for table users" })).toBe("sqlstate_42501");
+    expect(databaseErrorCode({ code: "57P01" })).toBe("connection");
+    expect(databaseErrorCode({ code: "08006" })).toBe("connection");
+    expect(databaseErrorCode(new Error("read ECONNRESET"))).toBe("connection");
+    let dropped = false;
+    const { database: flaky, live, inherited } = provider(() => ({ connect: async () => undefined, end: async () => undefined,
+      query: async text => {
+        if (text.includes("LATERAL") && !dropped) { dropped = true; throw Object.assign(new Error("terminated"), { code: "57P01" }); }
+        return { rows: [{ one: 1 }], rowCount: 1 };
+      } }));
+    expect(await flaky.read("SELECT 1 AS one")).toEqual([{ one: 1 }]);
+    // Two read roles minted, the first deleted when its connection dropped.
+    expect(inherited()).toEqual([["pg_read_all_data"], ["pg_read_all_data"]]);
+    expect(live.size).toBe(1);
+    await flaky.close();
+    expect(live.size).toBe(0);
+    // A refused query is not retried: its SQLSTATE is the code.
+    const { database: refused, inherited: once } = provider(() => ({ connect: async () => undefined, end: async () => undefined,
+      query: async text => { if (text.includes("LATERAL")) throw Object.assign(new Error("permission denied"), { code: "42501" }); return { rows: [], rowCount: 0 }; } }));
+    await expect(refused.read("SELECT 1")).rejects.toMatchObject({ step: "database", code: "sqlstate_42501" });
+    expect(once()).toHaveLength(1);
   });
 
   it("stage A never asks for a write; stage C's only writes are its shifts", async () => {
@@ -329,6 +356,24 @@ describe("rehearsal on the Personal route", () => {
     expect(alpha.pro()).toBe(false);
     expect(alpha.patConnected).toBe(false);
     for (const line of lines) expect(safeLine(line)).toBe(line);
+  });
+
+  it("rehearses submodules: the copy fetched both, the forked workspace holds both at their commits, the token sign-in named", async () => {
+    const { ctx, state, options } = setup({ owner: "personal" });
+    expect(await runStages(ctx, ["setup", "submodules"], { ...options, ...all })).toBe(true);
+    expect(state.stages.submodules?.counts).toEqual({ copyFetched: 2, workspaceInitialized: 2 });
+    expect(state.stages.submodules?.notes).toEqual(["submodules:token_sign_in_named", "d3:not_rehearsed_single_member"]);
+    expect((await cleanup(ctx, { keepFixtures: true, log: () => undefined })).inventory).toEqual(EMPTY);
+  });
+
+  it("refuses submodules until its fixtures exist, and off the Personal route", async () => {
+    const missing = setup({ owner: "personal", submodules: false });
+    expect(await runStages(missing.ctx, ["submodules"], { ...missing.options, ...all })).toBe(false);
+    expect(missing.ctx.state.stages.submodules).toMatchObject({ step: "fixtures", code: "missing" });
+    expect(missing.alpha.writes).toEqual([]);
+    const organization = setup();
+    expect(await runStages(organization.ctx, ["submodules"], organization.options)).toBe(false);
+    expect(organization.ctx.state.stages.submodules).toMatchObject({ step: "owner", code: "personal_route_only" });
   });
 
   it("puts back a grant that existed before the run, exactly", async () => {
@@ -480,7 +525,10 @@ describe("rehearsal --plan", () => {
     expect(refusal("setup", summary, all, "personal", { token: true, proActor: "ambiguous" })).toBe("pro_actor_ambiguous");
     expect(refusal("personal", summary, all)).toBeNull();
     expect(refusal("retention", { ...summary, personal: null }, all)).toBe("no_personal_organization");
-    expect(refusal("submodules", summary, all)).toBe("not_written");
+    expect(refusal("submodules", summary, all)).toBe("fixtures_not_named");
+    expect(refusal("submodules", summary, all, "personal", { token: true, proActor: "resolved", submoduleFixtures: "missing" })).toBe("fixtures_missing");
+    expect(refusal("submodules", summary, all, "personal", { token: true, proActor: "resolved", submoduleFixtures: "present" })).toBeNull();
+    expect(refusal("submodules", summary, all, "organization")).toBe("personal_route_only");
     for (const line of PERSONAL_ROUTE_GAPS) expect(safeLine(line)).toBe(line);
     alpha.githubIdentity = false;
     expect((await readAccount(alpha.api(), "9", state.organizationId, "Withso")).githubIdentity).toBe(false);

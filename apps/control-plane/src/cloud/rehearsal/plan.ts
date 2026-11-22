@@ -68,7 +68,9 @@ export function accountLines(summary: AccountSummary): string[] {
 
 /** What the Personal route needs besides an account: the token for the account's own GitHub sign-in, and the one
  * active platform owner for the Pro grant. */
-export type PersonalReadiness = { token: boolean; proActor: "resolved" | "none" | "ambiguous" };
+export type PersonalReadiness = { token: boolean; proActor: "resolved" | "none" | "ambiguous";
+  /** Stage D's two fixture repositories (R3 and its private submodule), as the GitHub App sees them. */
+  submoduleFixtures?: "present" | "missing" | "not_named" };
 
 /** Why a stage cannot run, or null. `account` is the selected account's summary, or the reason its sign-in or read
  * failed. provision needs no account. On the Personal route the account needs its Personal organization, and setup the
@@ -79,7 +81,8 @@ export function refusal(stage: StageName, account: AccountSummary | { failed: st
   readiness: PersonalReadiness = { token: true, proActor: "resolved" }): string | null {
   if (stage === "setup" && owner === "organization") return "awaiting_approval";
   if (!STAGE_RUNNERS[stage]) return "not_written";
-  if (stage === "personal" && owner !== "personal") return "personal_route_only";
+  if ((stage === "personal" || stage === "submodules") && owner !== "personal") return "personal_route_only";
+  if (stage === "submodules" && readiness.submoduleFixtures !== "present") return `fixtures_${readiness.submoduleFixtures ?? "not_named"}`;
   const missing = stageSwitches(stage, owner).find(needed => !switches.has(needed));
   if (missing) return `undeclared_${missing}`;
   if (!STAGE_NEEDS_ACCOUNT[stage]) return null;
@@ -161,7 +164,13 @@ export function writeLines(stage: StageName, prefix: string, repositories: { one
       "retention would delete both workspaces' machines on Boat, then open both (2 starts), then delete both workspaces and the project",
       "retention would, when S4 is deployed, stop and archive one workspace again and wait for its backup's removal",
     ],
-    submodules: ["submodules: not written yet (after #1247 is deployed)"],
+    submodules: [
+      `submodules would create project ${prefix}sub (Only you, R3 with fetch submodules on) and its copy (1 machine); the copy's record must show both submodules fetched`,
+      `submodules would create workspace ${prefix}sub-w (1 machine start), forked from the copy, and read git submodule status: both initialized at their gitlink commits`,
+      "submodules: with a token sign-in the private submodule is readable through the copy, and the create names that it fetched none itself;" +
+        " D3 (a second member who cannot read it) is not rehearsed on this route",
+      "submodules needs R3 (--submodule-repository) and its private submodule (--private-submodule-repository), both existing and in the token's scope",
+    ],
   };
   return lines[stage].map(safeLine);
 }

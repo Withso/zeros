@@ -121,12 +121,14 @@ export const ProjectDocument = z.object({
 }).passthrough();
 const projects = (organizationId: string) => `/v1/cloud-v2/organizations/${organizationId}/cloud-projects`;
 
-export async function createProject(ctx: StageContext, input: { name: string; level?: "organization" | "personal"; repositories: string[] },
+export async function createProject(ctx: StageContext, input: { name: string; level?: "organization" | "personal";
+  repositories: (string | { repository: string; fetchSubmodules: boolean })[] },
   step = "project_create"): Promise<z.infer<typeof ProjectDocument>> {
   check(prefixed(ctx.state.prefix, input.name), step, "unprefixed");
   ctx.start("copy");
   const reply = await call(ctx.ports.api, "POST", projects(ctx.state.organizationId), step,
-    { name: input.name, level: input.level ?? ctx.projectLevel, repositories: input.repositories.map(repository => ({ repository })) });
+    { name: input.name, level: input.level ?? ctx.projectLevel,
+      repositories: input.repositories.map(entry => typeof entry === "string" ? { repository: entry } : entry) });
   const project = parse(z.object({ project: ProjectDocument }), reply.body, step).project;
   ctx.state.created.projects.push(project.id);
   await ctx.save();
