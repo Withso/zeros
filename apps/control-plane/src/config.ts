@@ -265,6 +265,10 @@ export type CloudV2Config = {
   /** CLOUD_V2_RETENTION_BACKUP_FORKS_PER_HOUR: retention's cap on backup forks begun per hour
    * across the deployment (1-200). Unset uses the lifecycle's default of 20. */
   backupForksPerHour?: number;
+  /** CLOUD_V2_RETENTION_MAINTENANCE_PER_HOUR / _PER_DAY: the shared budget of maintenance machine
+   * starts (10-day wakes and backup forks) against Boat's creation-request limits; unset uses 20 and 120. */
+  maintenancePerHour?: number;
+  maintenancePerDay?: number;
   /** CLOUD_V2_SHARED_BASE_SNAPSHOT: the Boat named snapshot organizations
    * without an install script start from when ready copies are on. Unset,
    * each organization builds its own base. */
@@ -309,6 +313,14 @@ function loadCloudV2Config(env: NodeJS.ProcessEnv, channel: string): CloudV2Conf
   if (readyCopies && !["true", "false"].includes(readyCopies)) throw new Error("Invalid environment: CLOUD_V2_READY_COPIES_ENABLED must be true or false");
   const retention = env.CLOUD_V2_RETENTION_ENABLED?.trim().toLowerCase();
   if (retention && !["true", "false"].includes(retention)) throw new Error("Invalid environment: CLOUD_V2_RETENTION_ENABLED must be true or false");
+  const maintenanceLimit = (name: string, max: number): number | undefined => {
+    const value = env[name]?.trim();
+    if (!value) return undefined;
+    if (!/^\d{1,4}$/.test(value) || Number(value) < 1 || Number(value) > max) throw new Error(`Invalid environment: ${name} must be an integer from 1 to ${max}`);
+    return Number(value);
+  };
+  const maintenancePerHour = maintenanceLimit("CLOUD_V2_RETENTION_MAINTENANCE_PER_HOUR", 720);
+  const maintenancePerDay = maintenanceLimit("CLOUD_V2_RETENTION_MAINTENANCE_PER_DAY", 9999);
   const backupForks = env.CLOUD_V2_RETENTION_BACKUP_FORKS_PER_HOUR?.trim();
   if (backupForks && (!/^\d{1,3}$/.test(backupForks) || Number(backupForks) < 1 || Number(backupForks) > 200))
     throw new Error("Invalid environment: CLOUD_V2_RETENTION_BACKUP_FORKS_PER_HOUR must be an integer from 1 to 200");
@@ -360,6 +372,7 @@ function loadCloudV2Config(env: NodeJS.ProcessEnv, channel: string): CloudV2Conf
     readyCopies: readyCopies === "true",
     retention: retention === "true",
     ...(backupForks ? { backupForksPerHour: Number(backupForks) } : {}),
+    ...(maintenancePerHour ? { maintenancePerHour } : {}), ...(maintenancePerDay ? { maintenancePerDay } : {}),
     ...(sharedBaseSnapshot ? { sharedBaseSnapshot } : {}),
     asyncCreate: asyncCreate !== "false",
     executionAuthCache: executionAuthCache as "off" | "shadow" | "on",

@@ -171,6 +171,8 @@ export type CloudV2LifecycleWorkspace = CloudV2Workspace & {
   /** Retention: the latest stop could not verify the worker service off, so the machine may resume
    * with it running or enabled; a wake must switch it off before treating the machine as safe. */
   workerOffUnverified?: true;
+  /** Retention S2: a maintenance wake in flight. A user wake that finds `stopping` waits for it. */
+  maintenance?: { attempt: string; phase: "waking" | "adopting" | "stopping"; startedAt: string };
 };
 /** `from` is null for Boat's stock image; `prune` lists the other recipe
  * checkouts a v3 image starts with. */
@@ -235,12 +237,15 @@ type LifecycleRow = Row & {
   checkpoint_object: string | null; checkpoint_key: unknown; checkpoint_sha256: string | null; checkpoint_bytes: string | null; checkpoint_saved_at: Date | null;
   checkpoint_reuse: unknown; checkpoint_retry_fork: unknown;
   backup_probe?: BackupProbe | null; backup_probe_generation?: string | null; worker_off_unverified_at?: Date | null;
+  worker_off_verified_generation?: string | null;
+  maintenance_attempt?: string | null; maintenance_phase?: "waking" | "adopting" | "stopping" | null; maintenance_started_at?: Date | null;
 };
 const LIFECYCLE_COLUMNS = `${COLUMNS}, lease_renewed_at, base_commit, restore_pending, restore_attempt, restore_create, checkpoint_uploads,
   execution_mode, execution_transition_id, execution_restore_claimed_at, execution_initiator_user_id, execution_intent_id, execution_intent_authority, access_epoch,
   stop_generation, checkpoint_stop_generation,
   checkpoint_object, checkpoint_key, checkpoint_sha256, checkpoint_bytes, checkpoint_saved_at, checkpoint_reuse, checkpoint_retry_fork,
-  backup_probe, backup_probe_generation, worker_off_unverified_at`;
+  backup_probe, backup_probe_generation, worker_off_unverified_at, worker_off_verified_generation,
+  maintenance_attempt, maintenance_phase, maintenance_started_at`;
 type RetryRow = LifecycleRow & { retry_stopped_at: Date; checkpoint_retry_generation: string; checkpoint_retry_attempts: number; checkpoint_retry_exhausted_at: Date | null };
 
 function uploadHorizon(uploads: Record<string, string>): string | null {
@@ -286,8 +291,11 @@ export function cloudV2LifecycleWorkspaceFromRow(row: LifecycleRow): CloudV2Life
     ...(row.backup_probe && row.backup_probe_generation === row.stop_generation ? { stopProbe: row.backup_probe } : {}),
     // Unverified unless this generation's stop ran the verified worker-off step: Boat's own stop,
     // a restore-pending stop and one from before retention never did.
-    ...(row.worker_off_unverified_at || (row.backup_probe_generation !== undefined && row.backup_probe_generation !== row.stop_generation)
-      ? { workerOffUnverified: true as const } : {}) };
+    ...(row.worker_off_unverified_at || (row.backup_probe_generation !== undefined && row.backup_probe_generation !== row.stop_generation
+        && row.worker_off_verified_generation !== row.stop_generation)
+      ? { workerOffUnverified: true as const } : {}),
+    ...(row.maintenance_attempt && row.maintenance_phase && row.maintenance_started_at
+      ? { maintenance: { attempt: row.maintenance_attempt, phase: row.maintenance_phase, startedAt: row.maintenance_started_at.toISOString() } } : {}) };
 }
 const lifecycleWorkspace = cloudV2LifecycleWorkspaceFromRow;
 
@@ -1480,7 +1488,7 @@ export class CloudV2Store {
   async claimCheckpointRetry(input: { leaseMs: number; firstDelayMs: number; windowMs: number; excludeIds?: readonly string[];
     /** Retention backups: the first waits `firstDelayMs` after the later of the stop and retention's start, a stop whose probe
      * found nothing is never backed up, and no backup is claimed while `forksPerHour` forks began in the last hour. */
-    retention?: { forksPerHour: number } }):
+    retention?: { forksPerHour: number; maintenance?: { perHour: number; perDay: number } } }):
     Promise<(CloudV2LifecycleWorkspace & { retry: CloudV2CheckpointRetry }) | null> {
     const { rows } = await withSystemTx(this.pool, tx => tx.query<RetryRow>(
       `WITH due AS MATERIALIZED (
@@ -1490,6 +1498,8 @@ export class CloudV2Store {
              AND coalesce(checkpoint_retry_at, '-infinity') <= clock_timestamp())
            OR (state = 'stopped' AND boat_sandbox_id IS NOT NULL AND NOT restore_pending
              AND checkpoint_stop_generation IS DISTINCT FROM stop_generation
+             -- Retention S2: not while a maintenance wake has the machine running.
+             AND (maintenance_attempt IS NULL OR maintenance_started_at < clock_timestamp() - interval '10 minutes')
              AND coalesce(stopped_at, updated_at) > clock_timestamp() - make_interval(secs => $3::double precision / 1000)
              AND (checkpoint_retry_generation IS DISTINCT FROM stop_generation OR checkpoint_retry_exhausted_at IS NULL)
              AND CASE WHEN checkpoint_retry_generation IS NOT DISTINCT FROM stop_generation THEN coalesce(checkpoint_retry_at, '-infinity')
@@ -1497,7 +1507,9 @@ export class CloudV2Store {
                  ELSE coalesce(stopped_at, updated_at) END + make_interval(secs => $2::double precision / 1000) END <= clock_timestamp()
              AND (NOT $5::boolean OR backup_probe IS DISTINCT FROM 'clean' OR backup_probe_generation IS DISTINCT FROM stop_generation)
              AND (NOT $5::boolean OR (SELECT count(*) FROM cloud_v2_workspaces f
-               WHERE f.backup_forked_at > clock_timestamp() - interval '1 hour') < $6::integer)))
+               WHERE f.backup_forked_at > clock_timestamp() - interval '1 hour') < $6::integer)
+             AND ($7::integer IS NULL OR ((SELECT count(*) FROM cloud_v2_maintenance_wakes m WHERE m.started_at > clock_timestamp() - interval '1 hour') < $7::integer
+               AND (SELECT count(*) FROM cloud_v2_maintenance_wakes m WHERE m.started_at > clock_timestamp() - interval '1 day') < $8::integer))))
          ORDER BY coalesce(checkpoint_retry_at, stopped_at, updated_at) LIMIT 1 FOR UPDATE SKIP LOCKED)
        UPDATE cloud_v2_workspaces w SET
          checkpoint_retry_attempts = CASE WHEN w.checkpoint_retry_generation IS NOT DISTINCT FROM w.stop_generation THEN w.checkpoint_retry_attempts ELSE 0 END,
@@ -1507,7 +1519,8 @@ export class CloudV2Store {
        FROM due WHERE w.id = due.id
        RETURNING ${LIFECYCLE_COLUMNS.replace(/\b(\w+)\b/g, "w.$1")}, coalesce(w.stopped_at, w.updated_at) AS retry_stopped_at,
          w.checkpoint_retry_generation, w.checkpoint_retry_attempts, w.checkpoint_retry_exhausted_at`,
-      [input.leaseMs, input.firstDelayMs, input.windowMs, input.excludeIds ?? [], input.retention !== undefined, input.retention?.forksPerHour ?? 0]));
+      [input.leaseMs, input.firstDelayMs, input.windowMs, input.excludeIds ?? [], input.retention !== undefined, input.retention?.forksPerHour ?? 0,
+        input.retention?.maintenance?.perHour ?? null, input.retention?.maintenance?.perDay ?? null]));
     const row = rows[0];
     return row ? { ...lifecycleWorkspace(row), retry: { generation: row.checkpoint_retry_generation, attempts: row.checkpoint_retry_attempts,
       stoppedAt: row.retry_stopped_at.toISOString(), exhaustedAt: row.checkpoint_retry_exhausted_at?.toISOString() ?? null } } : null;
@@ -1516,14 +1529,20 @@ export class CloudV2Store {
   /** Records a retry's fork before it is requested, while the latest stop of
    * `source` still lacks a checkpoint and no other fork is recorded. */
   async beginCheckpointFork(id: string, generation: string, fork: Pick<CloudV2CheckpointFork, "attempt" | "name" | "source">, retention = false): Promise<CloudV2CheckpointFork | null> {
-    const { rows } = await withSystemTx(this.pool, tx => tx.query<{ checkpoint_retry_fork: unknown }>(
+    const { rows } = await withSystemTx(this.pool, async tx => {
+      const begun = await tx.query<{ checkpoint_retry_fork: unknown }>(
       `UPDATE cloud_v2_workspaces SET checkpoint_retry_attempts = checkpoint_retry_attempts + 1,
          backup_forked_at = CASE WHEN $6::boolean THEN clock_timestamp() ELSE backup_forked_at END,
          checkpoint_retry_fork = jsonb_build_object('attempt',$3::text,'name',$4::text,'source',$2::text,'requestedAt',clock_timestamp())
        WHERE id=$1 AND state='stopped' AND boat_sandbox_id=$2 AND NOT restore_pending AND stop_generation=$5::bigint
          AND checkpoint_stop_generation IS DISTINCT FROM stop_generation AND checkpoint_retry_generation=$5::bigint
          AND checkpoint_retry_fork IS NULL
-       RETURNING checkpoint_retry_fork`, [id, fork.source, fork.attempt, fork.name, generation, retention]));
+       RETURNING checkpoint_retry_fork`, [id, fork.source, fork.attempt, fork.name, generation, retention]);
+      // Retention counts each backup fork in the shared maintenance budget, as a machine start.
+      if (begun.rows[0] && retention) await tx.query(
+        "INSERT INTO cloud_v2_maintenance_wakes (workspace_id, attempt, kind) VALUES ($1, $2, 'backup_fork') ON CONFLICT (attempt) DO NOTHING", [id, fork.attempt]);
+      return begun;
+    });
     return rows[0] ? checkpointFork(rows[0].checkpoint_retry_fork) : null;
   }
 
@@ -1612,6 +1631,123 @@ export class CloudV2Store {
     return Boolean(result.rowCount);
   }
 
+  /** Retention S2: the next due maintenance wake, deadline-first, within the shared budget of machine
+   * starts (wakes and backup forks). Due: a sleeping workspace 10 days (plus a stable 0–12 h spread)
+   * after its machine last stopped (a person's stop or a wake's, whichever is later; greatest() skips
+   * a null); an archived one on the same schedule, once per archive.
+   * A wake whose mark went stale (its step died) is taken over. Serialized so the budget is exact. */
+  async claimMaintenanceWake(input: { attempt: string; perHour: number; perDay: number; staleMs: number; excludeIds?: readonly string[] }):
+    Promise<(CloudV2LifecycleWorkspace & { maintenanceWake: { attempt: string; archived: boolean } }) | null> {
+    return withSystemTx(this.pool, async tx => {
+      await tx.query("/* lock_purpose='cloud-v2-maintenance-claim' */ SELECT pg_advisory_xact_lock(hashtextextended('cloud-v2-maintenance-claim',0))");
+      const budget = (await tx.query<{ hour: number; day: number }>(`SELECT
+        count(*) FILTER (WHERE started_at > clock_timestamp() - interval '1 hour')::int AS hour, count(*)::int AS day
+        FROM cloud_v2_maintenance_wakes WHERE started_at > clock_timestamp() - interval '1 day'`)).rows[0]!;
+      if (budget.hour >= input.perHour || budget.day >= input.perDay) return null;
+      const due = (await tx.query<{ id: string; maintenance_attempt: string | null }>(
+        `SELECT id, maintenance_attempt FROM cloud_v2_workspaces
+         WHERE state='stopped' AND boat_sandbox_id IS NOT NULL AND NOT restore_pending AND checkpoint_retry_fork IS NULL
+           AND NOT (id = ANY($1::uuid[]))
+           AND (maintenance_attempt IS NULL OR maintenance_started_at < clock_timestamp() - make_interval(secs => $2::double precision / 1000))
+           AND greatest(machine_stopped_at, stopped_at) IS NOT NULL
+           -- A failed wake backs off an hour; one that found the machine gone is not repeated for this stop.
+           AND NOT EXISTS (SELECT 1 FROM cloud_v2_maintenance_wakes m WHERE m.workspace_id=cloud_v2_workspaces.id AND m.kind='wake'
+             AND (m.started_at > clock_timestamp() - interval '1 hour'
+               OR (m.outcome='gone' AND m.started_at > greatest(cloud_v2_workspaces.machine_stopped_at, cloud_v2_workspaces.stopped_at))))
+           AND greatest(machine_stopped_at, stopped_at) + interval '10 days' + make_interval(secs => abs(hashtext(id::text)) % 43200) <= clock_timestamp()
+           -- Archived: one more wake on the machine's own schedule, then none.
+           AND (archived_at IS NULL OR archive_wake_done_at IS NULL OR archive_wake_done_at < archived_at)
+         ORDER BY greatest(machine_stopped_at, stopped_at) LIMIT 1 FOR UPDATE SKIP LOCKED`, [input.excludeIds ?? [], input.staleMs])).rows[0];
+      if (!due) return null;
+      if (due.maintenance_attempt) await tx.query(`UPDATE cloud_v2_maintenance_wakes SET outcome='failed', finished_at=clock_timestamp()
+        WHERE attempt=$1 AND finished_at IS NULL`, [due.maintenance_attempt]);
+      const { rows } = await tx.query<LifecycleRow>(`UPDATE cloud_v2_workspaces SET maintenance_attempt=$2, maintenance_phase='waking',
+          maintenance_started_at=clock_timestamp() WHERE id=$1 RETURNING ${LIFECYCLE_COLUMNS}`, [due.id, input.attempt]);
+      await tx.query(`INSERT INTO cloud_v2_maintenance_wakes (workspace_id, attempt, kind, deadline_at)
+        SELECT id, $2, 'wake', greatest(machine_stopped_at, stopped_at) + interval '14 days' FROM cloud_v2_workspaces WHERE id=$1`, [due.id, input.attempt]);
+      const row = rows[0]!;
+      return { ...lifecycleWorkspace(row), maintenanceWake: { attempt: input.attempt, archived: row.archived_at !== null } };
+    });
+  }
+
+  /** The fence a user wake honors: 'stopping' is set only while the workspace is still stopped and
+   * this wake still owns it, in the same statement that checks both. */
+  async beginMaintenanceStop(id: string, attempt: string): Promise<boolean> {
+    const result = await withSystemTx(this.pool, tx => tx.query(
+      `UPDATE cloud_v2_workspaces SET maintenance_phase='stopping' WHERE id=$1 AND state='stopped' AND maintenance_attempt=$2
+         AND maintenance_phase='waking'`, [id, attempt]));
+    return Boolean(result.rowCount);
+  }
+
+  /** A person's start takes a running maintenance wake over, in one statement: the wake lets go at its
+   * next check and makes no further call to the machine. Restamped, so a takeover whose wake died
+   * expires on its own, shorter clock. */
+  async adoptMaintenance(id: string, attempt: string): Promise<boolean> {
+    const result = await withSystemTx(this.pool, tx => tx.query(
+      `UPDATE cloud_v2_workspaces SET maintenance_phase='adopting', maintenance_started_at=clock_timestamp()
+       WHERE id=$1 AND maintenance_attempt=$2 AND maintenance_phase='waking'`, [id, attempt]));
+    return Boolean(result.rowCount);
+  }
+
+  /** Whether a maintenance wake may still act on the machine: still its mark, still waking, and the
+   * workspace still asleep. Checked after every call to the machine. */
+  async maintenanceHeld(id: string, attempt: string): Promise<boolean> {
+    const { rows } = await withSystemTx(this.pool, tx => tx.query(
+      `SELECT 1 FROM cloud_v2_workspaces WHERE id=$1 AND maintenance_attempt=$2 AND maintenance_phase='waking' AND state='stopped'`, [id, attempt]));
+    return rows.length > 0;
+  }
+
+  /** Ends a maintenance wake on every path: clears its mark and records what Boat reported. */
+  async finishMaintenance(id: string, attempt: string, result: { outcome: "stopped" | "adopted" | "gone" | "failed"; machineStoppedAt?: Date | null;
+    workerFoundRunning?: boolean; workerOff?: boolean; snapshotAvailable?: boolean; dataExpiredAt?: Date | null }): Promise<void> {
+    await withSystemTx(this.pool, async tx => {
+      await tx.query(`UPDATE cloud_v2_workspaces SET maintenance_attempt=NULL, maintenance_phase=NULL, maintenance_started_at=NULL,
+          machine_stopped_at=coalesce($3::timestamptz, machine_stopped_at),
+          archive_wake_done_at=CASE WHEN archived_at IS NOT NULL AND $4 IN ('stopped','gone') THEN clock_timestamp() ELSE archive_wake_done_at END,
+          worker_off_verified_generation=CASE WHEN $5::boolean THEN stop_generation ELSE worker_off_verified_generation END,
+          worker_off_unverified_at=CASE WHEN $5::boolean THEN NULL WHEN $5::boolean IS FALSE THEN coalesce(worker_off_unverified_at, clock_timestamp())
+            ELSE worker_off_unverified_at END
+        WHERE id=$1 AND maintenance_attempt=$2`, [id, attempt, result.machineStoppedAt ?? null, result.outcome, result.workerOff ?? null]);
+      await tx.query(`UPDATE cloud_v2_maintenance_wakes SET finished_at=clock_timestamp(), outcome=$2, worker_found_running=$3,
+          snapshot_available=coalesce($4, snapshot_available), data_expired_at=coalesce($5, data_expired_at),
+          deadline_at=coalesce($5, CASE WHEN $6::timestamptz IS NOT NULL THEN $6::timestamptz + interval '14 days' END, deadline_at)
+        WHERE attempt=$1 AND finished_at IS NULL`,
+        [attempt, result.outcome, result.workerFoundRunning ?? false, result.snapshotAvailable ?? null, result.dataExpiredAt ?? null, result.machineStoppedAt ?? null]);
+    });
+  }
+
+  /** A user wake takes over a maintenance mark whose step died (older than `staleMs`). */
+  async clearStaleMaintenance(id: string, staleMs: number): Promise<boolean> {
+    return withSystemTx(this.pool, async tx => {
+      const { rows } = await tx.query<{ attempt: string }>(`UPDATE cloud_v2_workspaces w SET maintenance_attempt=NULL, maintenance_phase=NULL, maintenance_started_at=NULL
+        FROM (SELECT maintenance_attempt AS attempt FROM cloud_v2_workspaces WHERE id=$1 FOR UPDATE) prior
+        WHERE w.id=$1 AND w.maintenance_attempt IS NOT NULL
+          AND w.maintenance_started_at < clock_timestamp() - make_interval(secs => $2::double precision / 1000) RETURNING prior.attempt`, [id, staleMs]);
+      if (rows[0]) await tx.query(`UPDATE cloud_v2_maintenance_wakes SET outcome='failed', finished_at=clock_timestamp()
+        WHERE attempt=$1 AND finished_at IS NULL`, [rows[0].attempt]);
+      return rows.length > 0;
+    });
+  }
+
+  /** Retention S2's health, for its summary and S4's alert: sleeping workspaces due a wake, those past
+   * due by 2 days, those whose last wake found Boat had expired the disk, and the Boat deletion
+   * estimates (oldest first) of everything due, which the lifecycle compares with its budget. */
+  async maintenanceBacklog(): Promise<{ due: number; overdue: number; expired: number; usedToday: number; deadlines: Date[] }> {
+    return withSystemTx(this.pool, async tx => {
+      const due = (await tx.query<{ deadline: Date; overdue: boolean }>(`SELECT greatest(machine_stopped_at, stopped_at) + interval '14 days' AS deadline,
+          greatest(machine_stopped_at, stopped_at) + interval '12 days' < clock_timestamp() AS overdue
+        FROM cloud_v2_workspaces WHERE state='stopped' AND boat_sandbox_id IS NOT NULL AND maintenance_attempt IS NULL
+          AND (archived_at IS NULL OR archive_wake_done_at IS NULL OR archive_wake_done_at < archived_at)
+          AND greatest(machine_stopped_at, stopped_at) + interval '10 days' <= clock_timestamp()
+        ORDER BY 1 LIMIT 20000`)).rows;
+      const expired = (await tx.query<{ n: number }>(`SELECT count(DISTINCT workspace_id)::int AS n FROM cloud_v2_maintenance_wakes m
+        WHERE m.kind='wake' AND m.snapshot_available IS FALSE AND m.started_at > clock_timestamp() - interval '30 days'`)).rows[0]!.n;
+      const usedToday = (await tx.query<{ n: number }>(`SELECT count(*)::int AS n FROM cloud_v2_maintenance_wakes
+        WHERE started_at > clock_timestamp() - interval '1 day'`)).rows[0]!.n;
+      return { due: due.length, overdue: due.filter(entry => entry.overdue).length, expired, usedToday, deadlines: due.map(entry => entry.deadline) };
+    });
+  }
+
   /** Retention: a lost VM's replacement for a workspace whose latest stop left nothing off GitHub, or
    * that has no backup at all (then it records that the latest stop's work did not come back). It
    * needs no checkpoint and no pending restore: it is recorded only once it holds the workspace. */
@@ -1630,6 +1766,11 @@ export class CloudV2Store {
   async recordLostWork(id: string, restored: "earlier"): Promise<void> {
     await withSystemTx(this.pool, tx => tx.query(
       "UPDATE cloud_v2_workspaces SET lost_work_restored=$2, lost_work_since=coalesce(stopped_at, updated_at) WHERE id=$1", [id, restored]));
+  }
+
+  /** A machine Boat reported gone that may still hold work: kept on the row, never deleted by us. */
+  async keepLostMachine(id: string, machine: string): Promise<void> {
+    await withSystemTx(this.pool, tx => tx.query("UPDATE cloud_v2_workspaces SET lost_work_machine=$2 WHERE id=$1", [id, machine]));
   }
 
   /** The person has seen that a restore came back without some work. */
