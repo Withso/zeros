@@ -6,6 +6,7 @@ import type { Action, ChatThread } from "../../state/store";
 import { requestWorkbenchReveal } from "../../shell/workbench/workbench-visibility-controller";
 import { useWorkspaceStore } from "../../state/store";
 import { editChat } from "../../state/cloud-chat-edits";
+import { chatCloseConfirmation, type ChatCloseConfirmationCopy } from "../../shell/conversation/chat-close";
 import { threadToRow } from "../../state/chat-row-wire";
 import { toast } from "@/renderer/shared/ui/primitives/elements";
 import { dbCreateChildChat } from "./agent-history-client";
@@ -134,6 +135,18 @@ export function rememberColumnChat(folder: string, chatId: string): void {
 
 export function columnChatFor(folder: string): string | null {
   return columnChatByFolder.get(folder) ?? null;
+}
+
+/** A side chat that is running or has unsent messages asks before it closes,
+ *  as a chat tab does. */
+export function sideChatCloseConfirmation(
+  sessions: { getCloseActivity(chatId: string): { running: boolean; queuedCount: number } },
+  chatId: string,
+): ChatCloseConfirmationCopy | null {
+  const chat = useWorkspaceStore.getState().chats.find((row) => row.id === chatId && !row.archived);
+  if (!chat) return null;
+  const agentName = chat.agentName?.trim() || chat.agentId?.trim() || "the agent";
+  return chatCloseConfirmation({ agentName, ...sessions.getCloseActivity(chatId) });
 }
 
 /** Closing a side chat tab closes the side chat, as closing a chat tab does,

@@ -23,7 +23,7 @@ import {
   workbenchScopeForFolder,
 } from "../workspace-store";
 import type { Action, ChatThread } from "../store";
-import { closeSideChat } from "../../features/agent/side-chat";
+import { closeSideChat, sideChatCloseConfirmation } from "../../features/agent/side-chat";
 import { cloudScopedId, cloudWorkspaceKey } from "../../platform/bridge/cloud-workspace-key";
 
 const dispatch = (action: Action) => useWorkspaceStore.getState().dispatch(action);
@@ -164,5 +164,16 @@ describe("OPEN_SIDE_CHAT", () => {
     expect(state.workbenchByScope[scopeKey]!.tabs.some((item) => item.chatId === side.id)).toBe(false);
     expect(state.chats.find((chat) => chat.id === side.id)?.archived).toBe(true);
     expect(state.activeChatId).toBe(source.id);
+  });
+
+  it("asks before closing a side chat that is running or has queued messages", () => {
+    const folder = "/repo/side-chat-confirm";
+    dispatch({ type: "OPEN_SIDE_CHAT", chat: thread("side-confirm", folder, { agentName: "Claude" }) });
+    const activity = (running: boolean, queuedCount: number) => ({ getCloseActivity: () => ({ running, queuedCount }) });
+    expect(sideChatCloseConfirmation(activity(false, 0), "side-confirm")).toBeNull();
+    expect(sideChatCloseConfirmation(activity(true, 0), "side-confirm")?.title).toBe("Close running chat?");
+    expect(sideChatCloseConfirmation(activity(true, 2), "side-confirm")?.description).toContain("stop Claude and discard 2 queued messages");
+    expect(sideChatCloseConfirmation(activity(false, 1), "side-confirm")?.description).toContain("discard its queued message");
+    expect(sideChatCloseConfirmation(activity(true, 0), "missing-side-chat")).toBeNull();
   });
 });
