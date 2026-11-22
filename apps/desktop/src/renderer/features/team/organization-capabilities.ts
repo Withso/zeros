@@ -3,6 +3,7 @@ import { getKnownPersonalOrganizationIds } from "./organization-membership-histo
 import { PERSONAL_ORGANIZATION_ID } from "./personal-organization";
 import { isCloudWorkspace, parseCloudWorkspaceKey } from "../../platform/bridge/cloud-workspace-key";
 import { isFeatureEnabled } from "../../config/release-channel";
+import { cloudOrganizationFor } from "./personal-cloud";
 
 /** `unified-workspaces`: Local work belongs to this device, so unowned Local
  * rows and projects show under every owner while cloud and historical
@@ -19,10 +20,12 @@ export function filterProjectsForOrganization<T extends { repoRoot: string }>(
   const owner = organization?.isPersonal ? null : organization?.id ?? confirmedOrganizationId;
   const local = !owner || owner === PERSONAL_ORGANIZATION_ID || getKnownPersonalOrganizationIds().includes(owner);
   const everywhere = localWorkShowsEverywhere();
+  // Personal's cloud projects: only the signed-in account's own Personal cloud.
+  const cloudOwner = local ? organization?.cloudOrganization?.id ?? null : owner;
   const filtered = projects.filter(project => {
     if (!isCloudWorkspace(project.repoRoot)) return local || everywhere;
-    if (local || !isFeatureEnabled("cloud-workspaces")) return false;
-    try { return parseCloudWorkspaceKey(project.repoRoot)?.organizationId === owner?.toLowerCase(); }
+    if (!cloudOwner || !isFeatureEnabled("cloud-workspaces")) return false;
+    try { return parseCloudWorkspaceKey(project.repoRoot)?.organizationId === cloudOwner.toLowerCase(); }
     catch { return false; }
   });
   return filtered.length === projects.length ? projects as T[] : filtered;
@@ -49,12 +52,13 @@ export function canCreateWorkspaceIn(
   placement: WorkspacePlacement,
 ): boolean {
   if (placement === "local") return !organization || organization.isPersonal || localWorkShowsEverywhere();
+  // The Personal entry creates in its account's Personal cloud only when it carries one.
+  const cloud = cloudOrganizationFor(organization);
   return Boolean(
     isFeatureEnabled("cloud-workspaces") &&
-    organization &&
-    !organization.isPersonal &&
-    organization.workspaceCapabilities.cloud &&
-    !cloudCreateSeatReason(organization),
+    cloud &&
+    cloud.workspaceCapabilities.cloud &&
+    !cloudCreateSeatReason(cloud),
   );
 }
 
@@ -118,12 +122,15 @@ export function filterRowsForOrganization<T extends OrganizationOwned>(
   const unownedLocal = !organization.isPersonal && localWorkShowsEverywhere()
     ? new Set(getKnownPersonalOrganizationIds())
     : null;
+  // Personal's cloud rows: only the signed-in account's own Personal cloud, never a known earlier Personal id.
+  const personalCloud = organization.isPersonal ? organization.cloudOrganization?.id.toLowerCase() ?? null : null;
   const filtered = rows.filter((row) =>
     organization.isPersonal
-      ? row.placement !== "cloud" &&
-        (row.organizationId == null ||
+      ? row.placement === "cloud"
+        ? personalCloud !== null && row.organizationId?.toLowerCase() === personalCloud
+        : row.organizationId == null ||
           row.organizationId === organization.id ||
-          personalIds!.has(row.organizationId))
+          personalIds!.has(row.organizationId!)
       : unownedLocal
         ? row.organizationId === organization.id ||
           (row.placement !== "cloud" &&

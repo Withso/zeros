@@ -144,6 +144,7 @@ import { JoinTeamDialog } from "../team/join-team-dialog";
 import { OrganizationSwitcher } from "../team/organization-switcher";
 import { TRAFFIC_LIGHT_RESERVE_CLS } from "../../shell/sidebar-toggle";
 import { getActiveOrganizationIdSnapshot, useActiveOrganization, useTeams } from "../team/team-store";
+import { usableCloudOrganization } from "../team/personal-cloud";
 import { WorkspaceApiAccessSetting } from "./workspace-api-access-setting";
 import { AlwaysAllowLocalCommands } from "./local-commands-settings";
 import { organizationGeneralSections, unifiedOrganizationGeneralSections } from "./organization-general";
@@ -498,6 +499,8 @@ export function SettingsPage() {
   return <ScopedSettingsPage key={owner} owner={owner} />;
 }
 
+const PERSONAL_CLOUD_SECTIONS: readonly string[] = [...UNIFIED_PERSONAL_SECTIONS, "cloud-computer"];
+
 function ScopedSettingsPage({ owner }: { owner: string }) {
   const local = owner === "local";
   const cloudEnabled = isFeatureEnabled("cloud-workspaces");
@@ -590,8 +593,11 @@ function ScopedSettingsPage({ owner }: { owner: string }) {
     if (!pageActive) cancelLocalStorageMeasurement();
   }, [pageActive]);
   // Two GitHub levels: the organization's own page, unless it is one person (then one page, under Personal).
-  const githubLevels = useGithubLevels(me?.user.id ?? "", organization && !organization.isPersonal ? organization.id : "",
-    pageActive && unified && !local && !!me && !!organization && !organization.isPersonal);
+  // The cloud owner of this settings scope: the organization, or Personal's own cloud with Pro.
+  const cloudOrganization = usableCloudOrganization(organization);
+  const personalCloud = local && !!cloudOrganization;
+  const githubLevels = useGithubLevels(me?.user.id ?? "", cloudOrganization?.id ?? "",
+    pageActive && unified && (!local || personalCloud) && !!me && !!cloudOrganization);
   const organizationGithub = !!githubLevels.connections && !githubLevels.connections.solo;
   const canManageOrganization = organization?.role === "owner" || organization?.role === "admin";
   /** Projects: a repository's cloud settings are its one-repository project's, the organization's unless only the caller's. */
@@ -616,11 +622,11 @@ function ScopedSettingsPage({ owner }: { owner: string }) {
     () =>
       SECTIONS.filter((section) => isSettingsSectionAvailable(section.id, {
         local, cloudEnabled, terminalAgentsEnabled, computerUseSectionActive,
-        simulatorsActive, internalUser, localStorageSupported, unified, organizationGeneral, organizationGithub,
+        simulatorsActive, internalUser, localStorageSupported, unified, organizationGeneral, organizationGithub, personalCloud,
       })),
     [
       terminalAgentsEnabled, internalUser, local, cloudEnabled,
-      computerUseSectionActive, simulatorsActive, localStorageSupported, unified, organizationGeneral, organizationGithub,
+      computerUseSectionActive, simulatorsActive, localStorageSupported, unified, organizationGeneral, organizationGithub, personalCloud,
     ],
   );
   const fallbackSection =
@@ -631,11 +637,11 @@ function ScopedSettingsPage({ owner }: { owner: string }) {
     [availableSections],
   );
   const cloudRepositories = useCloudComputerRepositories(me?.user.id ?? null,
-    !local && availableSectionIds.has("cloud-computer") ? organization : null, pageActive);
+    availableSectionIds.has("cloud-computer") ? cloudOrganization : null, pageActive);
   // unified-workspaces: one page per joined project. Members read the installed
   // repositories; owners and admins also see what their recipe adds.
-  const installedCloud = useCloudComputerV2CreateGate(pageActive && unified && !local).repositories;
-  const projectCloudKey = unified && !local
+  const installedCloud = useCloudComputerV2CreateGate(pageActive && unified && (!local || personalCloud)).repositories;
+  const projectCloudKey = unified && (!local || personalCloud)
     ? [...new Set([...cloudRepositories, ...(installedCloud ?? []).map(row => `${row.owner}/${row.name}`)])].join("\n")
     : "";
   const projectCloudNames = useMemo(() => (projectCloudKey ? projectCloudKey.split("\n") : NO_CLOUD_REPOSITORIES), [projectCloudKey]);
@@ -709,8 +715,8 @@ function ScopedSettingsPage({ owner }: { owner: string }) {
           ? prefetchGithubAuthSnapshot
           : section.id === "local-storage"
             ? warmLocalStorage
-          : section.id === "cloud-computer" && organization && me
-            ? () => prefetchCloudComputer(me.user.id, organization)
+          : section.id === "cloud-computer" && cloudOrganization && me
+            ? () => prefetchCloudComputer(me.user.id, cloudOrganization)
           : undefined
       }
     />
@@ -723,7 +729,8 @@ function ScopedSettingsPage({ owner }: { owner: string }) {
     );
   };
   const unifiedGroups: Array<{ key: string; label: string; ids: readonly string[] }> = [
-    { key: "personal", label: "Personal", ids: UNIFIED_PERSONAL_SECTIONS },
+    // Personal's own cloud (with Pro) adds its Cloud Computer to the Personal group; there is no organization group.
+    { key: "personal", label: "Personal", ids: personalCloud ? PERSONAL_CLOUD_SECTIONS : UNIFIED_PERSONAL_SECTIONS },
     ...(local
       ? []
       : [{ key: "organization", label: organization?.name ?? "Organization", ids: UNIFIED_ORGANIZATION_SECTIONS }]),
@@ -870,8 +877,8 @@ function ScopedSettingsPage({ owner }: { owner: string }) {
                     canManageCloud={organization?.role === "owner" || organization?.role === "admin"}
                     sharing={projectSharing(currentProject)}
                     readyCopy={(() => {
-                      const found = organization && !organization.isPersonal ? projectForRepository(githubLevels.projects, currentProject.cloudRepository) : null;
-                      return found && organization ? { organizationId: organization.id, projectId: found.id } : null;
+                      const found = cloudOrganization ? projectForRepository(githubLevels.projects, currentProject.cloudRepository) : null;
+                      return found && cloudOrganization ? { organizationId: cloudOrganization.id, projectId: found.id } : null;
                     })()}
                     onAddToCloud={() => setActive(userSelection(!githubLevels.connections ? "cloud-computer"
                       : canManageOrganization && organizationGithub ? "org-github" : "integrations"))}
@@ -879,20 +886,20 @@ function ScopedSettingsPage({ owner }: { owner: string }) {
                     onOpenEnvironment={() => setActive(userSelection("environment"))} />
                 </div>
               )}
-              {currentCloudProject && organization && githubLevels.projects && (
+              {currentCloudProject && cloudOrganization && githubLevels.projects && (
                 <div className="flex flex-col gap-8">
                   <header className="flex min-w-0 flex-col gap-1">
                     <h1 className={PAGE_HEADING_CLS}>{currentCloudProject.name}</h1>
-                    <p className="text-fg2 m-0 truncate text-xs leading-4.5">{cloudProjectSubtitle(currentCloudProject, organization.name)}</p>
+                    <p className="text-fg2 m-0 truncate text-xs leading-4.5">{cloudProjectSubtitle(currentCloudProject, cloudOrganization.name, cloudOrganization.isPersonal)}</p>
                   </header>
-                  <CloudProjectPage key={currentCloudProject.id} project={currentCloudProject} organization={organization} userKey={githubLevels.key}
+                  <CloudProjectPage key={currentCloudProject.id} project={currentCloudProject} organization={cloudOrganization} userKey={githubLevels.key}
                     connections={githubLevels.connections} limits={githubLevels.projects.limits} localProjects={projects} active={pageActive}
                     onChanged={next => { if (next) patchCloudProject(githubLevels.key, next); githubLevels.refresh(); }}
                     onOpenFolder={folder => setActive(repoSelection(folder.id, REPO_OVERVIEW))} />
                 </div>
               )}
-              {newProject && organization && githubLevels.projects && (
-                <NewProjectDialog organization={organization} userKey={githubLevels.key} connections={githubLevels.connections}
+              {newProject && cloudOrganization && githubLevels.projects && (
+                <NewProjectDialog organization={cloudOrganization} userKey={githubLevels.key} connections={githubLevels.connections}
                   projects={githubLevels.projects} active={pageActive} onClose={() => setNewProject(false)}
                   onCreated={created => { setNewProject(false); patchCloudProject(githubLevels.key, created); githubLevels.refresh(); setActive(`project:cloud:${created.id}`); }} />
               )}
@@ -1401,23 +1408,28 @@ function OrganizationGithubPanel({ surfaceActive = true }: { surfaceActive?: boo
 function IntegrationsPanel({ surfaceActive = true, unified = false }: { surfaceActive?: boolean; unified?: boolean }) {
   const organization = useActiveOrganization();
   const { me } = useTeams();
-  const organizationId = organization?.isPersonal ? null : organization?.id ?? getActiveOrganizationIdSnapshot();
+  // Personal's cloud GitHub is its own Personal cloud's, with Pro.
+  const organizationId = organization ? usableCloudOrganization(organization)?.id ?? null : getActiveOrganizationIdSnapshot();
   const cloud = !!organizationId && isFeatureEnabled("cloud-workspaces") && !!me;
   const levels = useGithubLevels(me?.user.id ?? "", organizationId ?? "", surfaceActive && unified && cloud);
   if (unified) {
     const canManage = organization?.role === "owner" || organization?.role === "admin";
     return <div className="flex flex-col gap-8">
       <GitHubSection surfaceActive={surfaceActive} title={<PlaceLabel place="mac" />} />
-      {cloud && <CloudGithubSection key={`${me!.user.id}:${organizationId}`}
+      {cloud && <CloudGithubSection key={`${me!.user.id}:${organizationId}`} personal={!!organization?.isPersonal}
         userId={me!.user.id} organizationId={organizationId!} surfaceActive={surfaceActive} title={<PlaceLabel place="cloud" />} />}
       {/* A one-person organization shows both GitHub levels here, as one page. */}
       {cloud && levels.connections?.solo && (
         <GithubConnectionsSection userId={me!.user.id} organizationId={organizationId!} level="organization" canManage={canManage} active={surfaceActive}
-          title={`Shared with ${organization?.name ?? "the organization"}`} description="Organization projects pick their repositories from these." />
+          personal={!!organization?.isPersonal}
+          title={organization?.isPersonal ? "Projects" : `Shared with ${organization?.name ?? "the organization"}`}
+          description={organization?.isPersonal ? "Your cloud projects pick their repositories from these." : "Organization projects pick their repositories from these."} />
       )}
       {cloud && levels.connections && (
         <GithubConnectionsSection userId={me!.user.id} organizationId={organizationId!} level="personal" canManage active={surfaceActive}
-          title="Only you" description="Your own GitHub accounts. Projects only you use pick from these; nobody else sees them, admins included." />
+          personal={!!organization?.isPersonal}
+          title="Only you" description={organization?.isPersonal ? "Your own GitHub accounts, for projects only you use."
+            : "Your own GitHub accounts. Projects only you use pick from these; nobody else sees them, admins included."} />
       )}
     </div>;
   }

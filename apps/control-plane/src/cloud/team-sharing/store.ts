@@ -9,7 +9,7 @@ import type { createCloudGithubServices } from "../github-composition.js";
 import type { CloudV2Store } from "../store.js";
 import { CLOUD_V2_LIVE_ACCESS } from "../workspace-access.js";
 import { CloudTeamAuthority, TEAM_MEMBER, type TeamAdmission } from "./authority.js";
-import { readTeamCursor, writeTeamCursor, teamCursorKey, teamNotFound, teamManagementDenied, teamOwnershipRequired, teamOwnershipDenied, teamUnavailable, type TeamList } from "./contract.js";
+import { readTeamCursor, writeTeamCursor, teamCursorKey, teamNotFound, TeamSharingAbsent, teamManagementDenied, teamOwnershipRequired, teamOwnershipDenied, teamUnavailable, type TeamList } from "./contract.js";
 import { CloudTeamSignals } from "./signals.js";
 import { CloudTeamEvents } from "./events.js";
 import { CloudTeamOwnership } from "./ownership.js";
@@ -34,10 +34,13 @@ export class CloudTeamSharing {
 
   async organization(tx: Tx, org: string, user: AuthedUser): Promise<void> {
     if (!await securityStreamAuthority(tx,user)) throw new HttpError(401,"session_revoked","Authentication is no longer current");
-    const found = await tx.query(`SELECT 1 FROM organization_members m JOIN organizations o ON o.id=m.org_id
-      WHERE m.org_id=$1 AND m.user_id=$2 AND o.deleted_at IS NULL AND NOT o.is_personal AND o.cloud_workspaces_allowed
-        AND NOT ${memberOnHoldSql("m.org_id","m.user_id")}`,[org,user.id]);
-    if (!found.rowCount) throw teamNotFound();
+    const found = await tx.query<{ personal: boolean; allowed: boolean }>(`SELECT o.is_personal AS personal,
+        cloud_organization_enabled(o) AND NOT ${memberOnHoldSql("m.org_id","m.user_id")} AS allowed
+      FROM organization_members m JOIN organizations o ON o.id=m.org_id
+      WHERE m.org_id=$1 AND m.user_id=$2 AND o.deleted_at IS NULL`,[org,user.id]);
+    // Whatever its owner's Pro: the creator routes answer for a Personal organization.
+    if (found.rows[0]?.personal) throw new TeamSharingAbsent();
+    if (!found.rows[0]?.allowed) throw teamNotFound();
   }
 
   async documents(proofs: readonly TeamAdmission[], omitDenied = false, ownership = false, transaction?: Tx) {

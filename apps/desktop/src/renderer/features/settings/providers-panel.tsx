@@ -44,6 +44,7 @@ import { InlineLoginTerminal } from "./inline-login-terminal";
 import { ProviderConnectionDialog } from "./provider-connection-dialog";
 import { CloudAgentConnection, CloudProviderConnections } from "./cloud-provider-connections";
 import { getActiveOrganizationIdSnapshot, useActiveOrganization, useTeams } from "../team/team-store";
+import { usableCloudOrganization } from "../team/personal-cloud";
 import {
   connectionLabel,
   connectionMethod,
@@ -242,9 +243,11 @@ function AgentsPanel({ surfaceActive }: { surfaceActive: boolean }) {
   const { me } = useTeams();
   const [terminalAgents] = useExperimentalFeature("terminalAgents");
   const [owner] = useState(activeSettingsOwner);
+  // The organization's cloud logins, or Personal's own cloud's with Pro.
+  const cloudOrganization = usableCloudOrganization(organization);
   const cloudOrganizationId =
-    isFeatureEnabled("cloud-workspaces") && organization && !organization.isPersonal && me
-      ? organization.id
+    isFeatureEnabled("cloud-workspaces") && cloudOrganization && me
+      ? cloudOrganization.id
       : null;
   return (
     <LocalProvidersPanel

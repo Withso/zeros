@@ -21,6 +21,7 @@ import {
   Copy,
   Check,
   GitFork,
+  MessageSquarePlus,
   MoreHorizontal,
   Play,
   RotateCcw,
@@ -462,6 +463,9 @@ interface TurnFooterProps {
   onFork?: () => void;
   /** Warm the exact historical transcript when the menu item gains intent. */
   onForkIntent?: () => void;
+  /** Opens a side chat branched at this turn's answer. */
+  onSideChat?: () => void;
+  onSideChatIntent?: () => void;
 }
 
 export const TurnFooter = memo(function TurnFooter({
@@ -493,6 +497,8 @@ export const TurnFooter = memo(function TurnFooter({
   onContinue,
   onFork,
   onForkIntent,
+  onSideChat,
+  onSideChatIntent,
 }: TurnFooterProps) {
   // Stable actions context — identity doesn't change on store mutations, so
   // reading it here doesn't defeat this component's memo. Used to cancel an
@@ -771,6 +777,21 @@ export const TurnFooter = memo(function TurnFooter({
             {copied ? <Check strokeWidth={2} /> : <Copy strokeWidth={2} />}
           </IconButton>
         </Tooltip>
+        {!readOnly && onSideChat && (
+          <Tooltip label="Side chat from here">
+            <IconButton
+              type="button"
+              onClick={onSideChat}
+              onPointerEnter={onSideChatIntent}
+              onFocus={onSideChatIntent}
+              disabled={live}
+              label="Side chat from here"
+              className="flex shrink-0"
+            >
+              <MessageSquarePlus strokeWidth={2} />
+            </IconButton>
+          </Tooltip>
+        )}
         {!readOnly && (onFork || turnId) && (
           <DropdownMenu>
             <DropdownMenuTrigger asChild>

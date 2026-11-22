@@ -3,6 +3,7 @@ import { CloudGithubRepositoryPageSchema } from "@zeros/protocol/cloud-github-co
 import { getSetting, setSetting } from "../../platform/settings";
 import { CONTROL_PLANE_URL } from "../team/control-plane";
 import { getTeamStoreState, subscribeOrganizationSnapshots } from "../team/team-store";
+import { personalCloudOrganization } from "../team/personal-cloud";
 
 const key = "settings:environment-selection:v1";
 const entry = z.object({ backend: z.string(), user: z.string(), organization: z.string(), scope: z.enum(["local", "cloud"]),
@@ -23,6 +24,7 @@ export function saveEnvironmentSelection(user: string, organization: string, sel
 subscribeOrganizationSnapshots(() => {
   const me = getTeamStoreState().me;
   if (!me) return;
-  const organizations = new Set((me.organizations ?? me.teams).filter(org => !org.isPersonal).map(org => org.id));
+  const personal = personalCloudOrganization(me);
+  const organizations = new Set([...(me.organizations ?? me.teams).filter(org => !org.isPersonal).map(org => org.id), ...(personal ? [personal.id] : [])]);
   setSetting(key, entries().filter(row => row.backend !== CONTROL_PLANE_URL || row.user !== me.user.id || organizations.has(row.organization)));
 });

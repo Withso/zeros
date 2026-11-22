@@ -11,7 +11,7 @@ const LIVE_CREATOR = sql`SELECT 1 FROM organization_members m
   JOIN organizations o ON o.id = m.org_id AND o.deleted_at IS NULL
   JOIN users u ON u.id = m.user_id AND u.auth_status = 'active' AND u.deleted_at IS NULL
   WHERE m.org_id = w.org_id AND m.user_id = w.creator_user_id
-    AND NOT o.is_personal AND o.cloud_workspaces_allowed`;
+    AND cloud_organization_enabled(o)`;
 const ON_HOLD = sql`organization_member_on_hold(m.org_id, m.user_id,
   ${SqlFragment.integer(PRO_ORGANIZATION_MEMBER_LIMIT, 1, Number.MAX_SAFE_INTEGER)},
   ${SqlFragment.integer(PRO_ORGANIZATION_FREE_MEMBER_LIMIT, 0, Number.MAX_SAFE_INTEGER)})`;
@@ -24,7 +24,7 @@ export const CLOUD_V2_CREATOR_ACCESS_SQL = sql`EXISTS (
 // one person's departure must not invalidate another person's running turn.
 export const CLOUD_V2_LIVE_ACCESS_SQL = sql`(
   (w.execution_mode='active' AND EXISTS (SELECT 1 FROM organizations o
-    WHERE o.id=w.org_id AND o.deleted_at IS NULL AND NOT o.is_personal AND o.cloud_workspaces_allowed))
+    WHERE o.id=w.org_id AND o.deleted_at IS NULL AND NOT o.is_personal AND cloud_organization_enabled(o)))
   OR (w.execution_mode<>'active' AND ${CLOUD_V2_CREATOR_ACCESS_SQL}))`;
 export const CLOUD_V2_LIVE_ACCESS = CLOUD_V2_LIVE_ACCESS_SQL.text;
 
@@ -38,6 +38,13 @@ export function cloudV2ActorAccess(parameter: "$1" | "$2" | "$3") {
       AND NOT ${memberOnHoldSql("am.org_id", "am.user_id")}))
     AND (w.private_owner_user_id IS NULL OR w.private_owner_user_id=${parameter}))`;
 }
+
+/** The owner's own workspace in their own Personal organization, with the switch
+ * on, after their Pro ended: listed with its state and answered pro_required, to
+ * them alone. Pro again restores access with no repair step. */
+export const CLOUD_V2_PERSONAL_PRO_ENDED = sql`EXISTS (SELECT 1 FROM organizations o
+  WHERE o.id = w.org_id AND o.is_personal AND o.created_by = w.creator_user_id AND o.deleted_at IS NULL
+    AND coalesce(current_setting('app.cloud_personal', true), '0') = '1' AND NOT account_pro_active(w.creator_user_id))`.text;
 
 /** Live access fails only because the creator is on Hold. */
 export const CLOUD_V2_CREATOR_ON_HOLD = sql`EXISTS (

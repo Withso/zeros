@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { cloudComputerV2BuildRequired, cloudComputerV2CheckFailed } from "../../../features/settings/cloud-computer-v2-create-gate";
-import { ADD_CLOUD_REPOSITORY_REASON, GITHUB_CONNECTION_STATES, READY_COPY_BUILDING, createTrayState } from "../create-tray";
+import { ADD_CLOUD_REPOSITORY_REASON, GITHUB_CONNECTION_STATES, READY_COPY_BUILDING, SIGN_IN_FOR_CLOUD, createTrayState } from "../create-tray";
 
 const base = {
   notice: null,
@@ -46,6 +46,10 @@ describe("Create tray", () => {
       message: ADD_CLOUD_REPOSITORY_REASON,
       action: "manage-repositories",
     });
+  });
+
+  it("offers sign-in when Personal's cloud needs an account", () => {
+    expect(createTrayState({ ...base, reason: SIGN_IN_FOR_CLOUD })).toEqual({ message: "Sign in to create cloud workspaces.", action: "sign-in" });
   });
 
   it("offers the Cloud Computer settings when the Cloud Computer could not be checked", () => {

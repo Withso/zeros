@@ -1,4 +1,4 @@
-import type { OrganizationSeat, OrganizationSummary, TeamRole } from "./control-plane";
+import type { OrganizationSeat, OrganizationSummary, PersonalCloudOffer, TeamRole } from "./control-plane";
 
 const SEATS: ReadonlySet<unknown> = new Set<OrganizationSeat>(["pro", "free", "hold"]);
 
@@ -49,4 +49,14 @@ export function normalizeOrganizationSummary(
     teamCapabilities: { multiple: false, canCreate: false },
     ...(!isPersonal && value.seat && SEATS.has(value.seat) ? { seat: value.seat } : {}),
   };
+}
+
+/** The server Personal organization's cloud offer, from the raw /v1/me rows: its
+ * Personal row says cloud only while the control plane's switch is on, with a
+ * seat from the owner's live Pro. Read beside, never through, the normalized
+ * row, which keeps a Personal organization local-only as released desktops do. */
+export function personalCloudOffer(rows: readonly OrganizationSummaryWire[]): PersonalCloudOffer | null {
+  const row = rows.find(candidate => candidate.isPersonal === true);
+  if (!row || row.workspaceCapabilities?.cloud !== true || typeof row.id !== "string" || typeof row.slug !== "string") return null;
+  return { organizationId: row.id, slug: row.slug, seat: row.seat === "pro" ? "pro" : "free" };
 }

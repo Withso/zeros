@@ -1,7 +1,7 @@
 import { CloudMcpFailureSchema, type CloudMcpFailure } from "@zeros/protocol/cloud-v2-relay";
 import { parseCloudWorkspaceKey } from "../../platform/bridge/cloud-workspace-key";
 import { subscribeActiveTeam } from "../team/active-team";
-import { getActiveOrganizationIdSnapshot, getOrganizationStoreGeneration, getTeamStoreState, subscribeOrganizationSnapshots } from "../team/team-store";
+import { getActiveCloudOrganizationIdSnapshot, getOrganizationStoreGeneration, getTeamStoreState, subscribeOrganizationSnapshots } from "../team/team-store";
 import { requestProviderSettings } from "../settings/settings-navigation";
 
 let selection = 0;
@@ -24,7 +24,7 @@ function observeOwner(): void {
 export function captureCloudFailureOwner(folder: string | null | undefined): string | null {
   observeOwner();
   const target = parseCloudWorkspaceKey(folder), userId = getTeamStoreState().me?.user.id;
-  if (!target || !userId || getActiveOrganizationIdSnapshot() !== target.organizationId) return null;
+  if (!target || !userId || getActiveCloudOrganizationIdSnapshot() !== target.organizationId) return null;
   return JSON.stringify([userId, getOrganizationStoreGeneration(), selection, folder]);
 }
 

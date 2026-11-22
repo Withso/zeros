@@ -29,6 +29,9 @@ describe("a cloud project's page", () => {
     expect(cloudProjectSharing({ level: "organization", canEdit: false, canShare: false }, "Withso").hint).toBe("Managed by admins");
     expect(cloudProjectSubtitle(project(), "Withso")).toBe("Withso · 2 repositories");
     expect(cloudProjectSubtitle(project({ level: "personal", repositories: [repository("acme/app")] }), "Withso")).toBe("Only you · 1 repository");
+    // Personal's own cloud: one person, so every project is only theirs and none is shared.
+    expect(cloudProjectSharing({ level: "organization", canEdit: true, canShare: true }, "Personal", true)).toEqual({ label: "Only you", hint: null, share: false });
+    expect(cloudProjectSubtitle(project(), "Personal", true)).toBe("Only you · 2 repositories");
   });
 
   it("says once, only for several repositories, that each repository's own agent settings are not loaded", () => {

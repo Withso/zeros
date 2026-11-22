@@ -32,6 +32,12 @@ describe("team ownership requests", () => {
     expect([headers(0).get("x-zeros-team-sharing"), headers(0).get("x-zeros-team-ownership")]).toEqual(["1", "1"]);
   });
 
+  it("accepts the catalog's rows whatever the case of the organization id it was asked for", async () => {
+    respond({ body: { workspaces: [ws()], teamSharing: 1, nextCursor: null } });
+    const snapshot = await listCloudWorkspaceCatalogSnapshot(org.toUpperCase());
+    expect(snapshot.workspaces.map(row => row.id)).toEqual([workspaceId]);
+  });
+
   it("lists the reassign candidates across pages of one Creator revision, with each ineligible reason and the agents they could run", async () => {
     respond({ body: { candidates: [{ userId: sam, eligible: true, agentLogins: { claude: true } }, { userId: kim, eligible: false, reason: "on_hold" }], nextCursor: "c2", creatorRevision: "7" } },
       { body: { candidates: [{ userId: alex, eligible: false, reason: "repository_access_required" }], nextCursor: null, creatorRevision: "7" } });
