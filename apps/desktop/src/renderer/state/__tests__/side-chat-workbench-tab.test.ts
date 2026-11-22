@@ -23,6 +23,7 @@ import {
   workbenchScopeForFolder,
 } from "../workspace-store";
 import type { Action, ChatThread } from "../store";
+import { closeSideChat } from "../../features/agent/side-chat";
 import { cloudScopedId, cloudWorkspaceKey } from "../../platform/bridge/cloud-workspace-key";
 
 const dispatch = (action: Action) => useWorkspaceStore.getState().dispatch(action);
@@ -122,5 +123,24 @@ describe("OPEN_SIDE_CHAT", () => {
     expect(hasTab()).toBe(true);
     dispatch({ type: "HYDRATE_CHATS", chats: [source], activeChatId: source.id, confirmedCloudWorkspaces: [], confirmedLocalChats: true });
     expect(hasTab()).toBe(false);
+  });
+
+  it("closing a side chat tab closes the chat and returns focus to its source", () => {
+    const folder = "/repo/side-chat-close";
+    dispatch({ type: "ADD_CHAT", chat: thread("source-close", folder, { updatedAt: 1 }) });
+    dispatch({ type: "ADD_CHAT", chat: thread("newer-close", folder, { updatedAt: 5 }) });
+    dispatch({ type: "OPEN_SIDE_CHAT", chat: thread("side-close", folder, { parentChatId: "source-close", sourceChatId: "source-close" }) });
+    const scopeKey = workbenchScopeForFolder(folder);
+    const tab = useWorkspaceStore.getState().workbenchByScope[scopeKey]!.tabs.find((item) => item.chatId === "side-close")!;
+    const closed: string[] = [];
+    closeSideChat(dispatch, {
+      closeSession: (id) => void closed.push(id),
+      getCloseActivity: () => ({ running: false, queuedCount: 0 }),
+    }, tab.id, "side-close");
+    const state = useWorkspaceStore.getState();
+    expect(state.workbenchByScope[scopeKey]!.tabs.some((item) => item.chatId === "side-close")).toBe(false);
+    expect(state.chats.find((chat) => chat.id === "side-close")?.archived).toBe(true);
+    expect(closed).toEqual(["side-close"]);
+    expect(state.activeChatId).toBe("source-close");
   });
 });

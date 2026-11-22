@@ -59,6 +59,7 @@ import { ptyKill } from "../../platform/pty";
 import { useAgentSessions } from "../../features/agent/sessions-hooks";
 import { useSessionsStore } from "../../features/agent/sessions-store";
 import { getLiveChatDraft } from "../../features/agent/composer-live-drafts";
+import { columnChatFor, rememberColumnChat } from "../../features/agent/side-chat";
 import {
   MAX_PANES,
   type PaneLayout,
@@ -299,17 +300,28 @@ export function ConversationPaneLayout({
 
   // A closed chat may be previewed without reopening it or changing its
   // durable archive flag. Empty history never manufactures an Untitled chat.
-  // While a side chat tab has focus, the column keeps the chat it last showed.
-  const [columnChatId, setColumnChatId] = useState(activeChatId);
+  // While a side chat tab has focus, the column keeps the chat it last showed,
+  // across remounts; else the side chat's source.
   const activeIsHosted = activeChatId !== null && hostedChatIds.has(activeChatId);
-  if (!activeIsHosted && columnChatId !== activeChatId) setColumnChatId(activeChatId);
+  const activeInColumn = activeChatId !== null && !activeIsHosted && allChats.some((c) => c.id === activeChatId);
+  const [columnChatId, setColumnChatId] = useState(() => (layoutFolder ? columnChatFor(layoutFolder) : null));
+  if (activeInColumn && columnChatId !== activeChatId) setColumnChatId(activeChatId);
+  useEffect(() => {
+    if (layoutFolder && columnChatId) rememberColumnChat(layoutFolder, columnChatId);
+  }, [layoutFolder, columnChatId]);
+  const hostedActive = activeIsHosted ? chats.find((c) => c.id === activeChatId) : undefined;
+  const columnSelection = activeIsHosted
+    ? ([columnChatId, hostedActive?.sourceChatId, hostedActive?.parentChatId].find(
+        (id) => !!id && allChats.some((c) => c.id === id && !c.archived),
+      ) ?? null)
+    : null;
   const selectedChatId = readOnly
     ? ((
         allChats.find((chat) => chat.id === activeChatId) ??
         allChats.find((chat) => !chat.archived) ??
         allChats[0]
       )?.id ?? null)
-    : activeIsHosted ? columnChatId : activeChatId;
+    : activeIsHosted ? columnSelection : activeChatId;
 
   const visibleChats = useMemo(
     () =>
@@ -657,7 +669,8 @@ export function ConversationPaneLayout({
       const paneChats = chatsByPane.get(paneId) ?? EMPTY_CHATS;
       if (paneChats.length >= 2) {
         // Move this pane's active tab into the new pane.
-        const globalActive = useWorkspaceStore.getState().activeChatId;
+        const fresh = useWorkspaceStore.getState().activeChatId;
+        const globalActive = fresh && hostedChatIds.has(fresh) ? selectedChatId : fresh;
         const moved =
           resolvePaneActiveChatId(layout, paneId, globalActive, paneChats) ??
           paneChats[paneChats.length - 1]!.id;
@@ -703,6 +716,8 @@ export function ConversationPaneLayout({
       moveChatToPane,
       sessions,
       dispatch,
+      hostedChatIds,
+      selectedChatId,
     ],
   );
 
