@@ -1361,6 +1361,7 @@ process.exit(result.status??1);
         githubToken: webToken ?? probe.remotes["https://github.com/withso/web.git"].token }] },
       [`cp '${from}' "$work/checkpoint.zck"`]), "report zeros-checkpoint-restored"], probe.env);
 
+  // Real repositories, a real archive and a full restore of each: sized like the neighbouring restores, not the 5 s default.
   it.each([false, true])("restores every repository in shared execution, each fetched with its own token before anything is unpacked (backup: %s)", backup => {
     const p = project(), key = randomBytes(32), out = join(p.root, "checkpoint.zck");
     const web = p.folder(p.oldHome, "web"), api = p.folder(p.oldHome, "api");
@@ -1384,7 +1385,7 @@ process.exit(result.status??1);
     expect(p.git(newWeb, "log", "-1", "--format=%s")).toBe("page");
     expect(sorted(p.git(newWeb, "diff", "--cached", "--name-only"))).toEqual(["staged.txt"]);
     expect(readFileSync(join(newApi, "README.md"), "utf8")).toBe("api edited\n");
-  });
+  }, 30_000);
 
   it("keeps a later repository's seeded environment files in its own environment.tar: an active restore leaves them off disk, a creator restore applies them", () => {
     const p = project(), key = randomBytes(32), out = join(p.root, "checkpoint.zck");
