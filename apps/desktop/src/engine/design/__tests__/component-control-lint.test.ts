@@ -25,7 +25,7 @@ describe("linting what changes a component from outside", () => {
   };
   const lint = async (file: string) =>
     (await lintDesignDocument(root, file, { healOids: false, includeRuntimeAudits: false })).violations
-      .filter((violation) => violation.ruleId.startsWith("component-control"));
+      .filter((violation) => violation.ruleId.startsWith("component-control") || violation.ruleId === "component-instance-override");
   const main = async (body: string, declared: string[], style = "") => {
     const frame = await createDesignFrame(root, { title: "Badge" });
     await write(frame.file, doc(body, `${options(declared)}${style ? `<style>${style}</style>` : ""}`));
@@ -73,20 +73,53 @@ describe("linting what changes a component from outside", () => {
     await write(file, doc('<span data-oid="b" class="badge" data-tone="{{ tone }}"><i data-oid="dot" class="dot"></i>x</span>',
       `${options([round, tone])}<style>.badge { border-radius: calc(var(--zd-radius) * 1px); width: calc(var(--zd-radius) * 4px) } .badge[data-tone="danger"] .dot { background: red }</style>`));
     const host = await createDesignFrame(root, { title: "Workspace" });
-    await write(host.file, doc('<p data-oid="p">a</p>\n<zd-badge data-oid="i1" style="width: 40px; left: 4px"></zd-badge>'));
+    await write(host.file, doc('<p data-oid="p">a</p>\n<zd-badge data-oid="i1" style="height: 40px; left: 4px"></zd-badge>'));
     expect(await lint(host.file)).toEqual([]);
     await write(host.file, doc('<p data-oid="p">a</p>\n<zd-badge data-oid="i1" style="width: 40px; border-radius: 0" zd-style-DOT="background: blue; margin: 0"></zd-badge>'));
     expect(await lint(host.file)).toEqual([expect.objectContaining({
       ruleId: "component-control-shadowed", severity: "warning", oid: "i1", line: 2,
-      message: "This instance sets border-radius, background on dot over Radius, Tone.",
-    })]);
+      message: "This instance sets width, border-radius, background on dot over Radius, Tone.",
+    }), expect.objectContaining({ ruleId: "component-instance-override", oid: "i1", message: "This instance overrides margin on dot, which no control sets." })]);
+  });
+
+  it("warns about an instance's size over a bound axis, and separately about overrides no control sets, never its place", async () => {
+    const main = await createDesignFrame(root, { title: "Text field" });
+    await write(main.file, await readFile(path.join(DEMO, "text-field.html"), "utf8"));
+    await register(main.file, "text-field");
+    const host = await createDesignFrame(root, { title: "Settings" });
+    await write(host.file, doc('<p data-oid="p">a</p>\n<zd-text-field data-oid="tf1" width="40" style="width: 200px; opacity: 0.5; left: 10px" zd-style-tf-label="color: red"></zd-text-field>'));
+    const found = await lint(host.file);
+    expect(found).toEqual([
+      expect.objectContaining({ ruleId: "component-control-shadowed", severity: "warning", oid: "tf1", line: 2,
+        message: "This instance sets width over Width." }),
+      expect.objectContaining({ ruleId: "component-instance-override", severity: "warning", oid: "tf1", line: 2,
+        message: "This instance overrides opacity, color on tf-label, which no control sets.",
+        fix: "Make it a control on the main, or remove it (Reset in its Controls)." }),
+    ]);
+    expect(JSON.stringify(found)).not.toContain("left");
+    // Its place, an unbound axis and the control itself are its own.
+    await write(host.file, doc('<zd-text-field data-oid="tf1" width="40" style="left: 10px; top: 4px; height: 40px; min-width: 120px"></zd-text-field>'));
+    expect(await lint(host.file)).toEqual([]);
+  });
+
+  it("finds nothing to warn about in frames that place the demo components by their controls", async () => {
+    const names = (await readdir(DEMO)).filter((name) => name.endsWith(".html")).map((name) => name.replace(/\.html$/, ""));
+    for (const name of names) {
+      const frame = await createDesignFrame(root, { title: name });
+      await write(frame.file, await readFile(path.join(DEMO, `${name}.html`), "utf8"));
+      await register(frame.file, name);
+    }
+    const host = await createDesignFrame(root, { title: "Gallery" });
+    await write(host.file, doc(names.map((name, index) =>
+      `<zd-${name} data-oid="i-${name}" style="position: absolute; left: ${index * 10}px; top: 8px${name === "text-field" ? "" : "; width: 240px"}"></zd-${name}>`).join("\n")));
+    expect(await lint(host.file)).toEqual([]);
   });
 
   it("re-lints an instance's frame when only its main changes", async () => {
     const file = await main('<span data-oid="b" class="badge">x</span>', [round], ".badge { border-radius: 4px }");
     const host = await createDesignFrame(root, { title: "Workspace" });
     await write(host.file, doc('<zd-badge data-oid="i1" style="border-radius: 0"></zd-badge>'));
-    expect(await lint(host.file)).toEqual([]);
+    expect(await lint(host.file)).toEqual([expect.objectContaining({ ruleId: "component-instance-override", oid: "i1" })]);
     await write(file, doc('<span data-oid="b" class="badge">x</span>', `${options([round])}<style>.badge { border-radius: calc(var(--zd-radius) * 1px) }</style>`));
     expect(await lint(host.file)).toEqual([expect.objectContaining({ ruleId: "component-control-shadowed", oid: "i1" })]);
   });

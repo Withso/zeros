@@ -113,7 +113,7 @@ describe("Zeros Design skill package", () => {
     const reference = (page: string) => readFileSync(path.join(path.dirname(skillFile), "reference", page), "utf8");
     const format = reference("format.md");
     expect(format).toContain("**Controls are the only way in.**");
-    for (const ruleId of ["component-control-unread", "component-control-shadowed"]) {
+    for (const ruleId of ["component-control-unread", "component-control-shadowed", "component-instance-override"]) {
       expect(format).toContain(`\`${ruleId}\``);
       expect(reference("verify.md")).toContain(`\`${ruleId}\``);
     }

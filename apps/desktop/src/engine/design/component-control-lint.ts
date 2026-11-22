@@ -1,9 +1,9 @@
-// Warnings that keep a component's controls the only way to change it:
-// a declared control nothing in the main reads, and a style that sits over a
-// property a control drives (on a main's layer, an instance host's own style
-// outside its place and size, or an older zd-style-<part> override on a bound
-// layer). They read the bindings the engine already computes for the main;
-// both are warnings, so they never block a save.
+// Warnings that keep a component's controls the only way to change it: a
+// declared control nothing in the main reads; a style over a property a
+// control drives (on a main's layer, an instance host's own style, or an
+// older zd-style-<part> override on a bound layer); and an instance override
+// no control stands for. They read the bindings the engine already computes
+// for the main; all are warnings, so they never block a save.
 
 import postcss from "postcss";
 import { componentInstanceHostStyleAllowed } from "@zeros/design-core/component-options";
@@ -15,6 +15,8 @@ type Location = { startLine: number; startCol: number };
 type Elements = readonly { tag: string; attributes: readonly { name: string; value: string }[] }[];
 
 const PROPERTY_LIMIT = 6;
+/** An instance's own size: its own unless a control sets that axis on the root. */
+const SIZE_AXES: ReadonlySet<string> = new Set(["width", "height"]);
 
 /** Each property a declaration list sets, as written. */
 function declaredProperties(list: string, readsControl: (value: string) => boolean = () => false): string[] {
@@ -99,7 +101,8 @@ function ownRuleProperties(source: string, oid: string, readsControl: (value: st
   return properties;
 }
 
-/** On a frame that places instances: host styles and older part overrides over a bound property. */
+/** On a frame that places instances: host styles and older part overrides
+ * over a bound property, and those no control stands for. */
 export function designInstanceControlViolations(input: {
   file: string;
   source: string;
@@ -115,29 +118,46 @@ export function designInstanceControlViolations(input: {
     if (!bindings) continue;
     const layers = new Map(Object.entries(bindings.layers).map(([layer, entry]) => [layer.toLowerCase(), entry.styles ?? {}]));
     const shadowed: Array<[string, readonly string[]]> = [];
-    // Place and size are the host's own; anything else over the root's bindings.
+    const overrides: string[] = [];
+    // Place and size are the host's own, except an axis a control sets on
+    // the root (the renderer's fence refuses that write too); anything else
+    // is over the root's bindings or an override no control stands for.
     const root = bindings.root ? layers.get(bindings.root.toLowerCase()) ?? {} : {};
-    for (const property of host.style ? declaredProperties(host.style) : [])
-      if (!componentInstanceHostStyleAllowed(property) && Object.hasOwn(root, property)) shadowed.push([property, root[property]!]);
+    for (const property of host.style ? declaredProperties(host.style) : []) {
+      if (Object.hasOwn(root, property) && (SIZE_AXES.has(property) || !componentInstanceHostStyleAllowed(property))) shadowed.push([property, root[property]!]);
+      else if (!componentInstanceHostStyleAllowed(property)) overrides.push(property);
+    }
     for (const [part, declarations] of Object.entries(host.overrides ?? {})) {
       const bound = layers.get(part) ?? {};
-      for (const property of declaredProperties(declarations))
+      for (const property of declaredProperties(declarations)) {
         if (Object.hasOwn(bound, property)) shadowed.push([`${property} on ${part}`, bound[property]!]);
+        else overrides.push(`${property} on ${part}`);
+      }
     }
-    if (!shadowed.length) continue;
+    if (!shadowed.length && !overrides.length) continue;
     const tag = new RegExp(`<zd-[a-z0-9-]+\\b[^>]*\\sdata-oid=["']${escapeRegExp(oid)}["']`, "i").exec(source);
-    const shown = shadowed.slice(0, PROPERTY_LIMIT);
     const location = lineAt(tag?.index ?? 0);
-    violations.push({
-      ruleId: "component-control-shadowed",
-      severity: "warning",
-      message: `This instance sets ${shown.map(([property]) => property).join(", ")} over ${controlsFor(component.elements, shown.flatMap(([, controls]) => controls))}.`,
-      file,
-      line: location.startLine,
-      column: location.startCol,
-      oid,
-      fix: "Remove those styles (Reset in its Controls, or delete them from style and zd-style-<part>) and set the controls instead.",
-    });
+    const at = { file, line: location.startLine, column: location.startCol, oid };
+    if (shadowed.length) {
+      const shown = shadowed.slice(0, PROPERTY_LIMIT);
+      violations.push({
+        ruleId: "component-control-shadowed",
+        severity: "warning",
+        message: `This instance sets ${shown.map(([property]) => property).join(", ")} over ${controlsFor(component.elements, shown.flatMap(([, controls]) => controls))}.`,
+        ...at,
+        fix: "Remove those styles (Reset in its Controls, or delete them from style and zd-style-<part>) and set the controls instead.",
+      });
+    }
+    if (overrides.length) {
+      const shown = [...new Set(overrides)];
+      violations.push({
+        ruleId: "component-instance-override",
+        severity: "warning",
+        message: `This instance overrides ${shown.slice(0, PROPERTY_LIMIT).join(", ")}${shown.length > PROPERTY_LIMIT ? ` and ${shown.length - PROPERTY_LIMIT} more` : ""}, which no control sets.`,
+        ...at,
+        fix: "Make it a control on the main, or remove it (Reset in its Controls).",
+      });
+    }
   }
   return violations;
 }

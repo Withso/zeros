@@ -54,6 +54,7 @@ export interface DesignLintViolation {
     | "component-unregistered"
     | "component-control-shadowed"
     | "component-control-unread"
+    | "component-instance-override"
     | "render-budget"
     | "contrast"
     | "overflow"

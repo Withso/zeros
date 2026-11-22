@@ -14,6 +14,7 @@ const RULE_LABELS: Record<DesignLintViolationWire["ruleId"], string> = {
   "canvas-item-link-unsafe": "Unsafe link cards",
   "component-expression-invalid": "Component expressions",
   "component-invalid": "Component definition",
+  "component-instance-override": "Instance overrides",
   "component-class": "Component classes",
   "component-control-shadowed": "Styles over a control",
   "component-control-unread": "Unread controls",
