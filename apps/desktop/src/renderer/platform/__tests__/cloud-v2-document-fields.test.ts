@@ -40,4 +40,16 @@ describe("default activation: a refused first boot", () => {
       expect(document.capabilities).toMatchObject({ canStart: true, startUnavailableReason: null });
     }
   });
+  it("carries retention only from a server that runs it, each field dropped alone when malformed", () => {
+    const parse = (fields: Record<string, unknown>) => CloudWorkspaceDocumentSchema.parse(cloudV2Document(CloudV2WorkspaceSchema.parse({ ...reply, ...fields })));
+    // An older server, or retention off: no keep, no retention at all.
+    expect(parse({})).not.toHaveProperty("retention");
+    expect(parse({ archiveReason: "inactive" })).not.toHaveProperty("retention");
+    expect(parse({ keep: true }).retention).toEqual({ keep: true });
+    const archived = { keep: false, archiveReason: "inactive", restores: "pushed", machineExpectedGoneAt: { at: "2026-12-06T00:00:00.000Z", estimate: true },
+      backupRemovalAt: "2027-01-21T00:00:00.000Z" };
+    expect(parse(archived).retention).toEqual(archived);
+    expect(parse({ ...archived, archiveReason: "unknown_reason", restores: "some", machineExpectedGoneAt: { at: "soon" }, backupRemovalAt: 5 }).retention)
+      .toEqual({ keep: false });
+  });
 });

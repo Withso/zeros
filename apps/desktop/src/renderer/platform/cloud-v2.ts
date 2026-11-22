@@ -14,7 +14,7 @@ import { nativeCloudChatCache } from "./cloud-chat-cache";
 import { readNativeCloudHistory } from "./cloud-chat-cache-history";
 import type { CloudCacheKnown } from "../../../shared/cloud-chat-cache";
 import { NativeCloudCacheError } from "./cloud-chat-cache-client";
-import { CloudLostWorkSchema, type CloudWorkspaceDocument } from "./cloud-workspace-contract";
+import { CloudLostWorkSchema, CloudWorkspaceRetentionSchema, type CloudWorkspaceDocument, type CloudWorkspaceRetention } from "./cloud-workspace-contract";
 import type { CloudWorkspaceTarget } from "./bridge/cloud-workspace-key";
 
 const uuid = z.string().uuid();
@@ -146,6 +146,7 @@ export function cloudV2Document(workspace: CloudV2Workspace): CloudWorkspaceDocu
     ...topLevel("agentCost", CloudV2AgentCostSchema, (workspace as Record<string, unknown>).agentCost),
     ...topLevel("lostWork", CloudLostWorkSchema, (workspace as Record<string, unknown>).lostWork),
     ...topLevel("preparing", z.literal("computer"), (workspace as Record<string, unknown>).preparing),
+    ...retentionOf(workspace as Record<string, unknown>),
     generation: {
       number: 1,
       architecture: "linux/amd64",
@@ -160,6 +161,17 @@ export function cloudV2Document(workspace: CloudV2Workspace): CloudWorkspaceDocu
     updatedAt: iso(workspace.updatedAt),
     deletedAt: workspace.state === "deleted" ? iso(workspace.updatedAt) : null,
   };
+}
+
+/** Only a server that runs retention sends `keep`; each other field is dropped alone when malformed. */
+function retentionOf(raw: Record<string, unknown>): { retention?: CloudWorkspaceRetention } {
+  if (typeof raw.keep !== "boolean") return {};
+  const parsed = CloudWorkspaceRetentionSchema.safeParse({ keep: raw.keep, archiveReason: raw.archiveReason,
+    machineExpectedGoneAt: raw.machineExpectedGoneAt, backupRemovalAt: raw.backupRemovalAt, restores: raw.restores });
+  if (!parsed.success) return {};
+  const { archiveReason, machineExpectedGoneAt, backupRemovalAt, restores } = parsed.data;
+  return { retention: { keep: parsed.data.keep, ...(archiveReason ? { archiveReason } : {}),
+    ...(machineExpectedGoneAt ? { machineExpectedGoneAt } : {}), ...(backupRemovalAt ? { backupRemovalAt } : {}), ...(restores ? { restores } : {}) } };
 }
 
 function topLevel<K extends string, T>(key: K, schema: z.ZodType<T>, value: unknown): Partial<Record<K, T>> {
@@ -179,16 +191,18 @@ export const CloudV2WorkspaceListReplySchema = z.object({ workspaces: z.array(Cl
   nextCursor: z.unknown().optional() }).passthrough();
 
 /** A pre-sharing server ignores the opt-in and returns only the Creator's workspaces. */
-export async function listCloudV2Workspaces(organizationId: string): Promise<{ workspaces: CloudV2Workspace[]; teamSharing: boolean; complete: boolean }> {
+export async function listCloudV2Workspaces(organizationId: string): Promise<{ workspaces: CloudV2Workspace[]; teamSharing: boolean; complete: boolean; retention: boolean }> {
   const workspaces: CloudV2Workspace[] = [];
-  let cursor: string | null = null, teamSharing = false, complete = true;
+  let cursor: string | null = null, teamSharing = false, complete = true, retention = false;
   for (let page = 0; ; page++) {
     const query = `organizationId=${uuid.parse(organizationId)}&archived=include&limit=200${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`;
-    const reply: { workspaces: CloudV2Workspace[]; teamSharing?: unknown; nextCursor?: unknown } = await cloudAccountRequest(`/v1/cloud-v2/workspaces?${query}`,
+    const reply: { workspaces: CloudV2Workspace[]; teamSharing?: unknown; nextCursor?: unknown; retention?: unknown } = await cloudAccountRequest(`/v1/cloud-v2/workspaces?${query}`,
       CloudV2WorkspaceListReplySchema, undefined, { teamSharing: true });
     if (reply.workspaces.some(row => row.organizationId.toLowerCase() !== organizationId.toLowerCase())) throw new Error("Cloud catalog returned another organization");
     workspaces.push(...reply.workspaces);
     teamSharing = reply.teamSharing === 1;
+    // Its server runs retention (absent from an older server, or with retention off).
+    retention = reply.retention === true;
     const next = typeof reply.nextCursor === "string" && reply.nextCursor.length <= 2048 ? reply.nextCursor : null;
     // The legacy creator-only list has no continuation; a full page cannot prove omission.
     if (!teamSharing) { if (reply.workspaces.length >= 200) complete = false; break; }
@@ -196,7 +210,7 @@ export async function listCloudV2Workspaces(organizationId: string): Promise<{ w
     if (page >= 49) { complete = false; break; }
     cursor = next;
   }
-  return { workspaces, teamSharing, complete };
+  return { workspaces, teamSharing, complete, retention };
 }
 
 export async function getCloudV2Workspace(target: CloudWorkspaceTarget): Promise<CloudV2Workspace> {
@@ -254,6 +268,16 @@ export async function createCloudV2WorkspaceReply(input: Parameters<typeof creat
 export async function dismissCloudV2LostWork(target: CloudWorkspaceTarget): Promise<CloudV2Workspace> {
   const id = uuid.parse(target.workspaceId);
   const { workspace } = await cloudAccountRequest(`/v1/cloud-v2/workspaces/${id}/lost-work/dismiss`, one, { body: {}, idempotencyKey: key() }, sharingFor(id));
+  if (workspace.id !== target.workspaceId || workspace.organizationId !== target.organizationId)
+    throw new Error("Cloud workspace response changed identity");
+  return workspace;
+}
+
+/** Retention S3: Keep on (PUT) or off (DELETE). The reply is the workspace as the server now has it. */
+export async function setCloudV2WorkspaceKeep(target: CloudWorkspaceTarget, keep: boolean): Promise<CloudV2Workspace> {
+  const id = uuid.parse(target.workspaceId);
+  const { workspace } = await cloudAccountRequest(`/v1/cloud-v2/workspaces/${id}/keep`, one,
+    { body: {}, idempotencyKey: key(), method: keep ? "PUT" : "DELETE" }, sharingFor(id));
   if (workspace.id !== target.workspaceId || workspace.organizationId !== target.organizationId)
     throw new Error("Cloud workspace response changed identity");
   return workspace;

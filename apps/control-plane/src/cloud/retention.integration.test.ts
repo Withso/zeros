@@ -1471,6 +1471,29 @@ d("cloud v2 retention", () => {
       }, 30_000);
     });
 
+    it("a connection's removal whose copy retire fails still records the project, and the lane retires it", async () => {
+      const installation = randomUUID(), project = randomUUID(), copy = randomUUID();
+      await pool.query("INSERT INTO cloud_github_installations (id, org_id, account_login, level) VALUES ($1,$2,'failing-acme','organization')", [installation, org]);
+      await pool.query("INSERT INTO cloud_projects (id, org_id, name, level, created_by) VALUES ($1,$2,'Failing','organization',$3)", [project, org, user]);
+      await pool.query("INSERT INTO cloud_project_repositories (project_id, position, repository, repository_id, connection) VALUES ($1,0,'acme/app','42',$2)", [project, installation]);
+      await pool.query("INSERT INTO cloud_v2_ready_copies (id, org_id, project_id, generation, state, idempotency_key, machine_id) VALUES ($1,$2,$3,1,'ready',$4,'bx_failing')", [copy, org, project, `k-${copy}`]);
+      // The trigger's retire fails (any error inside its UPDATE); the removal itself must still succeed.
+      await pool.query(`CREATE FUNCTION pg_temp_fail_copy_update() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'copy update refused'; END $$`);
+      await pool.query("CREATE TRIGGER zz_fail_copy_update BEFORE UPDATE ON cloud_v2_ready_copies FOR EACH ROW EXECUTE FUNCTION pg_temp_fail_copy_update()");
+      try {
+        await pool.query("DELETE FROM cloud_github_installations WHERE id=$1", [installation]);
+        expect((await pool.query("SELECT state FROM cloud_v2_ready_copies WHERE id=$1", [copy])).rows[0].state).toBe("ready");
+        // The record the lane needs survives the failed retire.
+        expect((await pool.query("SELECT count(*)::int AS n FROM cloud_v2_disconnected_projects WHERE project_id=$1", [project])).rows[0].n).toBe(1);
+      } finally {
+        await pool.query("DROP TRIGGER IF EXISTS zz_fail_copy_update ON cloud_v2_ready_copies");
+        await pool.query("DROP FUNCTION IF EXISTS pg_temp_fail_copy_update()");
+      }
+      await lifecycle({ retention: false }).tick();
+      expect((await pool.query("SELECT state FROM cloud_v2_ready_copies WHERE id=$1", [copy])).rows[0].state).toBe("retired");
+      expect((await pool.query("SELECT count(*)::int AS n FROM cloud_v2_disconnected_projects WHERE project_id=$1", [project])).rows[0].n).toBe(0);
+    }, 30_000);
+
     describe("restores: what opening an archived workspace brings back, as the open does", () => {
       /** Archive, then let one wake run: it records Boat's answer (the machine there, or gone). */
       const archiveAndWake = async (expired: boolean) => {

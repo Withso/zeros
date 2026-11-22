@@ -1,8 +1,9 @@
 import React, { useRef, type MouseEvent, type ReactNode } from "react";
 import { isLocalMainWorkspace } from "../../state/local-main-workspace";
-import { Archive, BellOff, BellRing, Check, Link, Pin, PinOff, RotateCw, UserRoundCog } from "lucide-react";
+import { Archive, BellOff, BellRing, Check, Link, Pin, PinOff, RotateCw, ShieldCheck, UserRoundCog } from "lucide-react";
 import { openReassignDialog } from "../../platform/reassign-dialog-signal";
 import { useCloudFolderSharedDocument } from "../../state/cloud-workspace-creators";
+import { setCloudWorkspaceKept, useCloudKeepDocument } from "../../state/cloud-retention";
 import { setCloudWorkspaceSharingFlag } from "../../state/team-sharing-actions";
 import { parseCloudWorkspaceKey } from "../../platform/bridge/cloud-workspace-key";
 import { copyLocalLink, useCanCopyLocalLink } from "../../state/local-link-actions";
@@ -81,6 +82,8 @@ export function WorkspaceContextMenu({
   const archiveInert = archiveDisabled || archiving;
   // Team sharing: a reader cannot set status or restart; only managers archive; anyone follows (but its Creator) and pins.
   const shared = useCloudFolderSharedDocument(workspace.path);
+  // Retention: Keep, only on a cloud workspace that is not archived, from a server that runs retention.
+  const keepDocument = useCloudKeepDocument(workspace.path);
   const sharedTarget = shared ? parseCloudWorkspaceKey(workspace.path) : null;
   const reader = shared?.sharing?.readOnly === true;
   const canArchive = !shared || shared.capabilities.canManage;
@@ -206,6 +209,15 @@ export function WorkspaceContextMenu({
               </ContextMenuItem>
             )}
           </>
+        )}
+
+        {keepDocument && (
+          <ContextMenuItem onSelect={() => void setCloudWorkspaceKept({ organizationId: keepDocument.organizationId, workspaceId: keepDocument.id },
+            !keepDocument.retention!.keep)}>
+            <ShieldCheck />
+            <span>Keep</span>
+            {keepDocument.retention!.keep && <Check className="text-fg1 ml-auto size-3.5" aria-label="On" />}
+          </ContextMenuItem>
         )}
 
         {!folderWorkspace && !reader && onRestart && (

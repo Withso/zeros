@@ -1,4 +1,5 @@
 export * from "./cloud-workspace-contract";
+import { recordOrganizationRetention } from "./cloud-retention-state";
 import type { CloudWorkspaceDocument } from "./cloud-workspace-contract";
 import { z } from "zod";
 import { SYNC_FIELD_HEADERS, TEAM_SHARING_HEADERS } from "./control-plane-headers";
@@ -17,7 +18,7 @@ import type { WorkspaceAddress } from "@zeros/protocol/local-orchestration";
 import { recordOrganizationSharing } from "./team-sharing-state";
 import { reportWorkspaceReadOnly } from "./team-sharing-registry";
 import { CloudWorkspaceReadOnlyError } from "./cloud-workspace-read-only";
-import { changeCloudV2Workspace, cloudV2Document, createCloudV2WorkspaceReply, getCloudV2Workspace, getCloudV2WorkspaceByNumber, listCloudV2Workspaces } from "./cloud-v2";
+import { changeCloudV2Workspace, cloudV2Document, createCloudV2WorkspaceReply, getCloudV2Workspace, getCloudV2WorkspaceByNumber, listCloudV2Workspaces, setCloudV2WorkspaceKeep } from "./cloud-v2";
 import { getTeamStoreState } from "../features/team/team-store";
 
 async function readCloudJson(response: Response, maxBytes = 4 * 1024 * 1024): Promise<unknown> {
@@ -192,9 +193,14 @@ export async function listCloudWorkspaceCatalogSnapshot(organizationId?: string)
       throw new Error("Cloud organization memberships changed while loading");
     // Keep omitted rows on incomplete reads, including creator-only replies after shared rows were confirmed.
     if (!page.complete || recordOrganizationSharing(id, page.teamSharing).keepShared) complete = false;
+    recordOrganizationRetention(id, page.retention);
     workspaces.push(...page.workspaces.map(cloudV2Document));
   }
   return { workspaces, catalogVersion: null, complete };
+}
+
+export async function setCloudWorkspaceKeep(target: CloudWorkspaceTarget, keep: boolean): Promise<CloudWorkspaceDocument> {
+  return cloudV2Document(await setCloudV2WorkspaceKeep(target, keep));
 }
 
 export async function getCloudWorkspaceDocument(

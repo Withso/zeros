@@ -378,6 +378,10 @@ let retentionDocuments = false;
  * backupRemovalAt). Set once at composition from CLOUD_V2_RETENTION_ENABLED; every path that serves a document
  * (get, list, team views, the composite routes) goes through workspace(), so none can disagree. Off by default. */
 export function setCloudV2RetentionDocuments(enabled: boolean): void { retentionDocuments = enabled; }
+/** The organization-level signal on the workspace list (both its routes): `retention: true` exactly when documents
+ * carry retention's fields, from the same flag, so the desktop can state the rule for an organization with no
+ * workspaces. Off, the list reply is what it was. */
+export function cloudV2RetentionListSignal(): { retention?: true } { return retentionDocuments ? { retention: true } : {}; }
 
 /** An archived workspace's backup is removed this long after its archive, counted from when retention first
  * applied if that is later: no clock starts from history. S4's removal uses this same expression. */

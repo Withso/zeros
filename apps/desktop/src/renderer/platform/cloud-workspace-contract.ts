@@ -5,6 +5,19 @@ import { CloudWorkspaceSharingSchema } from "./team-sharing-schema";
 
 // An optional field this build cannot parse drops only itself, not the workspace document.
 const lenient = <T extends z.ZodType>(schema: T) => schema.optional().catch(undefined);
+/** Retention S3: Keep (only on a workspace that is not archived), and while archived why and what goes when. */
+export const CloudWorkspaceRetentionSchema = z.object({
+  keep: z.boolean(),
+  archiveReason: lenient(z.enum(["manual", "inactive", "member_left"])),
+  /** When its machine is removed: `estimate` true for Boat's usual 14 days; absent once an estimate is past. */
+  machineExpectedGoneAt: lenient(z.object({ at: z.string().datetime(), estimate: z.boolean() })),
+  /** When its backup is deleted: only with a backup, once retention's clock has started. */
+  backupRemovalAt: lenient(z.string().datetime()),
+  /** While archived, what opening brings back: "all" (a backup, a clean last stop, or the machine still there), or
+   * "pushed" (rebuilt from GitHub; unpushed work is gone). Absent from a server before it: say neither. */
+  restores: lenient(z.enum(["all", "pushed"])),
+});
+export type CloudWorkspaceRetention = z.infer<typeof CloudWorkspaceRetentionSchema>;
 
 // Pure response schemas shared by desktop and the Alpha Linux harness.
 
@@ -95,6 +108,8 @@ export const CloudWorkspaceDocumentSchema = z.object({
   lostWork: lenient(CloudLostWorkSchema),
   /** Ready copies: created while its organization's Cloud Computer was being prepared, and waiting for it. */
   preparing: lenient(z.literal("computer")),
+  /** Retention (CLOUD_V2_RETENTION_ENABLED): present only from a server that runs it; absent means no Keep and no dates. */
+  retention: lenient(CloudWorkspaceRetentionSchema),
   sharing: lenient(CloudWorkspaceSharingSchema),
   version: z.number().int().nonnegative(),
   error: z.object({ code: z.string(), message: z.string() }).nullable(),
