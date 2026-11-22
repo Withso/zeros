@@ -5,6 +5,7 @@ import {
   type ComponentPropsWithoutRef,
   type ReactNode,
 } from "react";
+import { ArchiveLineUnits } from "./archive-line";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { Archive, Folder, FolderX } from "lucide-react";
 import { cn } from "../../shared/ui/cn";
@@ -285,10 +286,8 @@ export const DashboardListRow = forwardRef<
               {row.title}
             </span>
             {archiveLine ? (
-              // Only the room the title leaves: the title never gives way to it.
-              <span className="text-fg3 text-3xxs min-w-0 flex-1 basis-0 truncate leading-4 font-normal" title={archiveLine}>
-                {archiveLine}
-              </span>
+              // Only the room the title leaves (the title never gives way to it), in whole sentences.
+              <ArchiveLineUnits line={archiveLine} className="text-fg3 text-3xxs h-4 flex-1 basis-0 leading-4 font-normal" />
             ) : (
               <span className="text-fg3 text-3xxs min-w-0 shrink-[100] truncate leading-4 font-normal">
                 {row.branch}

@@ -29,11 +29,11 @@ describe("retention's rule on General", () => {
 });
 
 describe("an archived cloud workspace's line", () => {
-  it("says why for each reason, and what opening it brings back", () => {
+  it("says why for each reason, and what unarchiving it brings back", () => {
     expect(cloudArchiveLine({ keep: false, archiveReason: "inactive", restores: "all" }, true, NOW, "en-US"))
-      .toBe("Archived after 30 days without activity. Opening it restores everything.");
+      .toBe("Archived after 30 days without activity. Unarchiving it restores everything.");
     expect(cloudArchiveLine({ keep: false, archiveReason: "member_left", restores: "pushed" }, true, NOW, "en-US"))
-      .toBe("Archived when its creator left the organization. Opening it rebuilds it from GitHub. Work that was never pushed is gone.");
+      .toBe("Archived when its creator left the organization. Unarchiving it rebuilds it from GitHub. Work that was never pushed is gone.");
     expect(cloudArchiveLine({ keep: false, archiveReason: "manual" }, true, NOW, "en-US")).toBe("Archived.");
   });
 
@@ -48,12 +48,22 @@ describe("an archived cloud workspace's line", () => {
 
   it("after the backup is gone says it rebuilds from GitHub, and shows no backup date", () => {
     expect(cloudArchiveLine({ keep: false, archiveReason: "inactive", restores: "pushed", backupRemovalAt: later(1) }, true, NOW, "en-US"))
-      .toBe("Archived after 30 days without activity. Opening it rebuilds it from GitHub. Work that was never pushed is gone.");
+      .toBe("Archived after 30 days without activity. Unarchiving it rebuilds it from GitHub. Work that was never pushed is gone.");
   });
 
   it("says nothing without retention, for a workspace that is not archived, or with nothing to say", () => {
     expect(cloudArchiveLine(undefined, true, NOW)).toBeNull();
     expect(cloudArchiveLine({ keep: true }, false, NOW)).toBeNull();
     expect(cloudArchiveLine({ keep: false }, true, NOW)).toBeNull();
+  });
+});
+
+describe("the archived line in a one-line row", () => {
+  it("splits into whole sentences, so a date is never cut mid-way", async () => {
+    const { archiveLineUnits } = await import("../../dashboard/archive-line");
+    const line = cloudArchiveLine({ keep: false, archiveReason: "inactive", restores: "all", machineExpectedGoneAt: { at: later(14), estimate: true },
+      backupRemovalAt: later(60) }, true, NOW, "en-US")!;
+    expect(archiveLineUnits(line)).toEqual(["Archived after 30 days without activity.", "Unarchiving it restores everything.",
+      "Its machine is removed around Dec 6, 2026.", "Backup kept until Jan 21, 2027.", "After that, only what was pushed to GitHub can be restored."]);
   });
 });

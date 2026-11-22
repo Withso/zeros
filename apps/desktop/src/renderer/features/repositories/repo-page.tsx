@@ -32,6 +32,7 @@
 // context menu ("Repository Settings"), and the legacy `repo:<id>:<section>`
 // settings deep links (settings-page redirects them here).
 
+import { ArchiveLineUnits } from "../dashboard/archive-line";
 import { useCloudArchiveLine } from "../../state/cloud-retention";
 import { isCloudWorkspace } from "../../platform/bridge/cloud-workspace-key";
 import { localWorkShowsEverywhere } from "../team/organization-capabilities";
@@ -229,7 +230,7 @@ function RepoWorkspaceRow({
       </span>
       {archiveLine ? (
         // A cloud workspace's retention line, where its branch would be: the row keeps its height.
-        <span className="text-muted-fg min-w-0 truncate text-xs" title={archiveLine}>{archiveLine}</span>
+        <ArchiveLineUnits line={archiveLine} className="text-muted-fg h-4.5 flex-1 basis-0 text-xs" />
       ) : row.branch !== row.title && (
         <span className="text-muted-fg hidden min-w-0 truncate font-mono text-xs sm:block">
           {row.branch}

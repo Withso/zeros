@@ -64,7 +64,7 @@ describe("Keep in a cloud workspace's menu", () => {
 describe("an archived cloud workspace's line in the lists", () => {
   it("comes from the document, and is absent for a workspace that isn't archived or a server without retention", () => {
     h.doc = doc({ status: "archived", retention: { keep: false, archiveReason: "inactive", restores: "all" } });
-    expect(cloudArchiveLineFor(folder)).toBe("Archived after 30 days without activity. Opening it restores everything.");
+    expect(cloudArchiveLineFor(folder)).toBe("Archived after 30 days without activity. Unarchiving it restores everything.");
     h.doc = doc();
     expect(cloudArchiveLineFor(folder)).toBeNull();
     h.doc = doc({ status: "archived", retention: undefined });

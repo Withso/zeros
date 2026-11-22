@@ -40,7 +40,7 @@ export async function setCloudWorkspaceKept(target: CloudWorkspaceTarget, keep: 
   }
 }
 
-/** An archived cloud workspace's line (why, what opening it brings back, and when what goes), or null: a Local
+/** An archived cloud workspace's line (why, what unarchiving it brings back, and when what goes), or null: a Local
  * workspace, one not archived, or a server without retention. A string, so the snapshot stays stable. */
 export function cloudArchiveLineFor(folder: string | null | undefined, now = Date.now()): string | null {
   const target = folder ? parseCloudWorkspaceKey(folder) : null;

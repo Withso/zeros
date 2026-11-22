@@ -13,9 +13,9 @@ export const CLOUD_RETENTION_BACKUP_DAYS = 60;
  * clause is about an archived workspace or about Keep: an open or stopped one loses nothing. */
 export const CLOUD_RETENTION_RULE_LABELS: readonly string[] = [`After ${CLOUD_RETENTION_INACTIVE_DAYS} days without use`, "Once archived", "Keep"];
 export const CLOUD_RETENTION_RULE: readonly string[] = [
-  `A cloud workspace nobody uses for ${CLOUD_RETENTION_INACTIVE_DAYS} days is archived. Opening it brings it back.`,
+  `A cloud workspace nobody uses for ${CLOUD_RETENTION_INACTIVE_DAYS} days is archived. Unarchiving it brings it back.`,
   `After a workspace is archived, its machine is removed within about ${CLOUD_RETENTION_MACHINE_DAYS} days and its backup after ${CLOUD_RETENTION_BACKUP_DAYS} days. `
-    + "Until the backup is removed, opening the workspace restores everything. After that, it is rebuilt from GitHub, and work that was never pushed is gone.",
+    + "Until the backup is removed, unarchiving the workspace restores everything. After that, it is rebuilt from GitHub, and work that was never pushed is gone.",
   "Keep a workspace from its menu so it is never archived for inactivity.",
 ];
 
@@ -28,7 +28,7 @@ const REASON: Record<NonNullable<CloudWorkspaceRetention["archiveReason"]>, stri
 const day = (at: string, locale?: string) => new Date(at).toLocaleDateString(locale, { month: "short", day: "numeric", year: "numeric" });
 
 /**
- * An archived cloud workspace's line: why, what opening it brings back, and what goes when. Each part only when
+ * An archived cloud workspace's line: why, what unarchiving it brings back, and what goes when. Each part only when
  * the server says it (an older server sends less, and says less). Null for a workspace that is not archived or
  * from a server without retention.
  */
@@ -36,8 +36,8 @@ export function cloudArchiveLine(retention: CloudWorkspaceRetention | undefined,
   if (!retention || !archived) return null;
   const parts: string[] = [];
   if (retention.archiveReason) parts.push(REASON[retention.archiveReason]);
-  if (retention.restores === "all") parts.push("Opening it restores everything.");
-  else if (retention.restores === "pushed") parts.push("Opening it rebuilds it from GitHub. Work that was never pushed is gone.");
+  if (retention.restores === "all") parts.push("Unarchiving it restores everything.");
+  else if (retention.restores === "pushed") parts.push("Unarchiving it rebuilds it from GitHub. Work that was never pushed is gone.");
   const machine = retention.machineExpectedGoneAt;
   if (machine) parts.push(Date.parse(machine.at) <= now ? `Its machine was removed on ${day(machine.at, locale)}.`
     : `Its machine is removed ${machine.estimate ? "around" : "on"} ${day(machine.at, locale)}.`);
