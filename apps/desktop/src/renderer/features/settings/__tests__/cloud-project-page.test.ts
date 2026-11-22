@@ -31,6 +31,12 @@ describe("a cloud project's page", () => {
     expect(cloudProjectSubtitle(project({ level: "personal", repositories: [repository("acme/app")] }), "Withso")).toBe("Only you · 1 repository");
   });
 
+  it("says once, only for several repositories, that each repository's own agent settings are not loaded", () => {
+    const limit = "Agents start in the project folder, so settings a repository keeps for its own agent (hooks, permissions, rules, its own MCP file) are not loaded. Instructions files are.";
+    expect(render(project())).toContain(limit);
+    expect(render(project({ repositories: [repository("withso/zeros")] }))).not.toContain("Agents start in the project folder");
+  });
+
   it("lets an editor change each repository's branch and setup, add repositories and manage build secrets", () => {
     const page = render(project());
     expect(page).toContain("ready-copy:88888888-8888-4888-8888-888888888881");
