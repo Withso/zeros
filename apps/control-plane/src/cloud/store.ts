@@ -1249,9 +1249,10 @@ export class CloudV2Store {
     const { rows } = await withSystemTx(this.pool, tx => tx.query<Row>(
       `SELECT ${COLUMNS} FROM cloud_v2_workspaces w
        WHERE state = 'running' AND coalesce(active_at, updated_at) < $1
-         AND NOT EXISTS (SELECT 1 FROM cloud_v2_prompt_outbox p WHERE p.workspace_id=w.id
+         -- Pending work holds the stop only while it can still be reported: without live access the worker is refused.
+         AND (NOT ${LIVE_ACCESS} OR NOT EXISTS (SELECT 1 FROM cloud_v2_prompt_outbox p WHERE p.workspace_id=w.id
            AND p.state IN ('queued','inboxed','dispatching','accepted') AND p.access_epoch=w.access_epoch)
-         AND NOT EXISTS (SELECT 1 FROM local_command_requests r WHERE r.workspace_id=w.id AND r.phase IN ('pending','claimed'))
+         AND NOT EXISTS (SELECT 1 FROM local_command_requests r WHERE r.workspace_id=w.id AND r.phase IN ('pending','claimed')))
          AND NOT EXISTS (SELECT 1 FROM cloud_v2_execution_contexts e WHERE e.workspace_id=w.id AND w.execution_mode='active'
            AND e.state='active' AND e.expires_at>clock_timestamp() AND e.worker_boot_id=w.worker_boot_id
            AND e.access_epoch=w.access_epoch AND e.stop_generation=w.stop_generation
@@ -1271,9 +1272,9 @@ export class CloudV2Store {
       await tx.query(`UPDATE cloud_v2_workspaces w SET state='stopping',attempts=0,stop_generation=stop_generation+1,
       next_attempt_at=NULL,updated_at=clock_timestamp()
       WHERE id=$1 AND state='running' AND coalesce(active_at,updated_at)<$2
-        AND NOT EXISTS (SELECT 1 FROM cloud_v2_prompt_outbox p WHERE p.workspace_id=w.id
+        AND (NOT ${LIVE_ACCESS} OR NOT EXISTS (SELECT 1 FROM cloud_v2_prompt_outbox p WHERE p.workspace_id=w.id
           AND p.state IN ('queued','inboxed','dispatching','accepted') AND p.access_epoch=w.access_epoch)
-        AND NOT EXISTS (SELECT 1 FROM local_command_requests r WHERE r.workspace_id=w.id AND r.phase IN ('pending','claimed'))
+        AND NOT EXISTS (SELECT 1 FROM local_command_requests r WHERE r.workspace_id=w.id AND r.phase IN ('pending','claimed')))
         AND NOT EXISTS (SELECT 1 FROM cloud_v2_execution_contexts e WHERE e.workspace_id=w.id AND w.execution_mode='active'
           AND e.state='active' AND e.expires_at>clock_timestamp() AND e.worker_boot_id=w.worker_boot_id
           AND e.access_epoch=w.access_epoch AND e.stop_generation=w.stop_generation
