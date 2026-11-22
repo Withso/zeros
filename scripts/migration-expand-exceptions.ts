@@ -17,8 +17,9 @@ BEGIN
           AND c.archived_at IS NULL
         FOR UPDATE SKIP LOCKED);
     DELETE FROM public.cloud_v2_ready_copy_secrets s
-      WHERE s.project_id IN (SELECT p.id FROM public.cloud_projects p
-        WHERE p.org_id = OLD.org_id AND p.level = 'personal' AND p.owner_user_id = OLD.user_id);
+      WHERE s.project_id IN (SELECT q.project_id FROM public.cloud_v2_ready_copy_secrets q JOIN public.cloud_projects p ON p.id = q.project_id
+        WHERE p.org_id = OLD.org_id AND p.level = 'personal' AND p.owner_user_id = OLD.user_id
+        FOR UPDATE OF q SKIP LOCKED);
     UPDATE public.cloud_projects p SET owner_left_at = coalesce(p.owner_left_at, clock_timestamp())
       WHERE p.id IN (SELECT q.id FROM public.cloud_projects q
         WHERE q.org_id = OLD.org_id AND q.level = 'personal' AND q.owner_user_id = OLD.user_id

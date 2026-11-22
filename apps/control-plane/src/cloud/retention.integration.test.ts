@@ -38,6 +38,8 @@ d("cloud v2 retention", () => {
    * the environment restore failing; the bytes the server seeded, by path. */
   /** Retention S4: prefixes listed in the bucket with no object of their own here (orphans, non-ids). */
   let extraPrefixes: Set<string>;
+  /** When each stored object was last written (R2's LastModified); absent means long ago. */
+  let objectTimes: Map<string, number>;
   let markers: Set<string>, written: Set<string>, changeTimesOut: boolean, environmentRestoreFails: boolean, seeded: Map<string, string>;
 
   beforeAll(() => { pool = new pg.Pool({ connectionString: process.env.TEST_DATABASE_URL, max: 4 }); });
@@ -48,7 +50,7 @@ d("cloud v2 retention", () => {
     setCloudV2RetentionDocuments(true);
     await resetMigratedTestDatabase(pool);
     archives = new Map(); uploads = []; errors = []; warnings = []; timings = []; remoteBranches = new Set(); backupFails = false;
-    markers = new Set(); written = new Set(); extraPrefixes = new Set(); changeTimesOut = false; environmentRestoreFails = false; seeded = new Map();
+    markers = new Set(); written = new Set(); extraPrefixes = new Set(); objectTimes = new Map(); changeTimesOut = false; environmentRestoreFails = false; seeded = new Map();
     boat = new FakeBoat();
     boat.script = (machine, command, input) => {
       if (command.includes("zeros-backup-probe")) {
@@ -128,8 +130,10 @@ d("cloud v2 retention", () => {
       size: async (_workspace, object) => archives.has(object) ? 100 : null,
       delete: async (_workspace, object) => { archives.delete(object); },
       // As R2: every object under the workspace's prefix but those kept.
-      prune: async (workspace, keep = []) => {
-        for (const object of [...archives.keys()]) if (object.startsWith(`cloud-v2/checkpoints/${workspace}/`) && !keep.includes(object)) archives.delete(object);
+      prune: async (workspace, keep = [], before) => {
+        for (const object of [...archives.keys()])
+          if (object.startsWith(`cloud-v2/checkpoints/${workspace}/`) && !keep.includes(object) && (!before || (objectTimes.get(object) ?? 0) < before.getTime()))
+            archives.delete(object);
       },
       workspacePrefixes: async (after, limit) => {
         const names = [...new Set([...archives.keys()].map(object => object.split("/")[2]!)), ...extraPrefixes].sort();
@@ -1404,6 +1408,67 @@ d("cloud v2 retention", () => {
         expect((await columns("boat_sandbox_id")).boat_sandbox_id).not.toBe(vm);
         expect((await store.get(id, user)).lostWork).toMatchObject({ restored: "none" });
       });
+    });
+
+    /** As S3's whileRowHeld, for any row: `lock` takes it FOR UPDATE on another connection, kept until `statement`
+     * resolves; the answer says whether it resolved while the lock was still held (ordering, not duration). */
+    const whileHeld = async (lock: [string, unknown[]], statement: () => Promise<unknown>): Promise<"resolved while held" | "waited for the lock"> => {
+      const holder = await pool.connect();
+      let held = true;
+      try {
+        await holder.query("BEGIN"); await holder.query(lock[0], lock[1]);
+        const resolved = statement().then(() => held ? "resolved while held" as const : "waited for the lock" as const);
+        const outcome = await Promise.race([resolved, new Promise<"waited for the lock">(resolve => setTimeout(() => resolve("waited for the lock"), 25_000))]);
+        held = false;
+        await holder.query("ROLLBACK");
+        await resolved;
+        return outcome;
+      } finally { if (held) await holder.query("ROLLBACK").catch(() => {}); holder.release(); }
+    };
+
+    it("keeps an upload that finished after the claim, even before the row records it", async () => {
+      await stop();
+      const object = await backup();
+      await archivedAgo(61);
+      expect(await store.claimBackupRemovals(10)).toMatchObject([{ object }]);
+      // The workspace was opened and stopped again; its new upload has finished, but the row does not name it yet.
+      await new Promise(resolve => setTimeout(resolve, 20));
+      const later = `cloud-v2/checkpoints/${id}/${randomUUID()}.zck`;
+      archives.set(later, new Map()); objectTimes.set(later, Date.now());
+      await lifecycle().tick();
+      expect(archives.has(object)).toBe(false);
+      expect(archives.has(later)).toBe(true);
+    }, 30_000);
+
+    describe("never waits for a row another transaction holds", () => {
+      it("a member's removal with one of their personal projects' secret rows held: the lane finishes it", async () => {
+        const leaver = randomUUID(), project = randomUUID();
+        await pool.query("INSERT INTO users (id, email, display_name) VALUES ($1, $2, 'L')", [leaver, `l-${leaver}@example.test`]);
+        await pool.query("INSERT INTO organization_members (org_id, user_id, role) VALUES ($1, $2, 'member')", [org, leaver]);
+        await pool.query("INSERT INTO cloud_projects (id, org_id, name, level, owner_user_id, created_by) VALUES ($1,$2,'Mine','personal',$3,$3)", [project, org, leaver]);
+        await pool.query("INSERT INTO cloud_v2_ready_copy_secrets (project_id, org_id, envelope, names) VALUES ($1,$2,'{}','{TOKEN}')", [project, org]);
+        expect(await whileHeld(["SELECT 1 FROM cloud_v2_ready_copy_secrets WHERE project_id=$1 FOR UPDATE", [project]],
+          () => pool.query("DELETE FROM organization_members WHERE org_id=$1 AND user_id=$2", [org, leaver]))).toBe("resolved while held");
+        // Skipped while held; the lane's sweep deletes them.
+        expect((await pool.query("SELECT count(*)::int AS n FROM cloud_v2_ready_copy_secrets WHERE project_id=$1", [project])).rows[0].n).toBe(1);
+        await lifecycle({ retention: false }).tick();
+        expect((await pool.query("SELECT count(*)::int AS n FROM cloud_v2_ready_copy_secrets WHERE project_id=$1", [project])).rows[0].n).toBe(0);
+      }, 30_000);
+
+      it("a connection's removal with a copy row held: the lane retires it from the record", async () => {
+        const installation = randomUUID(), project = randomUUID(), copy = randomUUID();
+        await pool.query("INSERT INTO cloud_github_installations (id, org_id, account_login, level) VALUES ($1,$2,'held-acme','organization')", [installation, org]);
+        await pool.query("INSERT INTO cloud_projects (id, org_id, name, level, created_by) VALUES ($1,$2,'Held','organization',$3)", [project, org, user]);
+        await pool.query("INSERT INTO cloud_project_repositories (project_id, position, repository, repository_id, connection) VALUES ($1,0,'acme/app','42',$2)", [project, installation]);
+        await pool.query("INSERT INTO cloud_v2_ready_copies (id, org_id, project_id, generation, state, idempotency_key, machine_id) VALUES ($1,$2,$3,1,'ready',$4,'bx_held')", [copy, org, project, `k-${copy}`]);
+        expect(await whileHeld(["SELECT 1 FROM cloud_v2_ready_copies WHERE id=$1 FOR UPDATE", [copy]],
+          () => pool.query("DELETE FROM cloud_github_installations WHERE id=$1", [installation]))).toBe("resolved while held");
+        expect((await pool.query("SELECT state FROM cloud_v2_ready_copies WHERE id=$1", [copy])).rows[0].state).toBe("ready");
+        expect((await pool.query("SELECT count(*)::int AS n FROM cloud_v2_disconnected_projects WHERE project_id=$1", [project])).rows[0].n).toBe(1);
+        await lifecycle({ retention: false }).tick();
+        expect((await pool.query("SELECT state FROM cloud_v2_ready_copies WHERE id=$1", [copy])).rows[0].state).toBe("retired");
+        expect((await pool.query("SELECT count(*)::int AS n FROM cloud_v2_disconnected_projects WHERE project_id=$1", [project])).rows[0].n).toBe(0);
+      }, 30_000);
     });
 
     describe("a departed member's personal project", () => {

@@ -1086,9 +1086,10 @@ export interface CloudV2CheckpointStorage {
   /** The stored size, or null when the object does not exist. */
   size(workspaceId: string, object: string): Promise<number | null>;
   delete(workspaceId: string, object: string): Promise<void>;
-  /** Deletes every checkpoint object of the workspace, for its deletion; with `keep`, every one but those
-   * (retention S4's backup removal keeps an object a later stop uploaded meanwhile). */
-  prune(workspaceId: string, keep?: readonly string[]): Promise<void>;
+  /** Deletes every checkpoint object of the workspace, for its deletion. Retention S4's backup removal narrows it:
+   * never those in `keep`, and with `before`, only objects last modified before then (an upload finished after the
+   * removal was claimed, for a later stop, always survives). */
+  prune(workspaceId: string, keep?: readonly string[], before?: Date): Promise<void>;
   /** Retention S4's orphan sweep: workspace prefixes under cloud-v2/checkpoints/, a page at a time, after `after`.
    * `unparsed` counts prefixes that are not a workspace id (never touched). */
   workspacePrefixes?(after: string | undefined, limit: number): Promise<{ ids: string[]; unparsed: number; next?: string }>;
@@ -1106,14 +1107,16 @@ export function cloudV2CheckpointStorage(client: S3Client, store: Pick<CloudV2Ru
     async delete(workspaceId, object) {
       await client.send(new DeleteObjectCommand({ Bucket, Key: objectOf(workspaceId, object) }));
     },
-    async prune(workspaceId, keep = []) {
+    async prune(workspaceId, keep = [], before) {
       const Prefix = checkpointPrefix(workspaceId);
       const kept = new Set(keep.map(object => objectOf(workspaceId, object)));
       let ContinuationToken: string | undefined;
       do {
         const page = await client.send(new ListObjectsV2Command({ Bucket, Prefix, ContinuationToken, MaxKeys: 1000 }));
         for (const object of page.Contents ?? [])
-          if (object.Key?.startsWith(Prefix) && !kept.has(object.Key)) await client.send(new DeleteObjectCommand({ Bucket, Key: object.Key }));
+          if (object.Key?.startsWith(Prefix) && !kept.has(object.Key)
+            && (!before || (object.LastModified instanceof Date && object.LastModified < before)))
+            await client.send(new DeleteObjectCommand({ Bucket, Key: object.Key }));
         ContinuationToken = page.IsTruncated ? page.NextContinuationToken : undefined;
       } while (ContinuationToken);
     },

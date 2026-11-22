@@ -165,7 +165,7 @@ export type CloudV2LifecycleDeps = {
     | "claimMaintenanceWake" | "beginMaintenanceStop" | "adoptMaintenance" | "maintenanceHeld" | "finishMaintenance"
     | "startRetentionClocks" | "archiveInactive" | "archiveDepartedPrivate" | "restoreReturningPrivate" | "archiveForSystem" | "clearArchiveScrub"
     | "claimBackupRemovals" | "pendingBackupRemovals" | "finishBackupRemoval" | "sweepDepartedProjects" | "deleteDepartedProjects" | "missedWakes"
-    | "accountCheckpointPrefixes" | "clearStaleMaintenance" | "maintenanceBacklog" | "keepLostMachine">;
+    | "accountCheckpointPrefixes" | "retireDisconnectedCopies" | "clearStaleMaintenance" | "maintenanceBacklog" | "keepLostMachine">;
   /** Optional for older compositions; the shipped store always provides it. */
   prompts?: CloudV2Store["prompts"];
   pruneEnvironments?: () => Promise<void>;
@@ -966,6 +966,8 @@ export class CloudV2Lifecycle {
     for (const id of await store.archiveDepartedPrivate(CLOUD_V2_ARCHIVE_BATCH)) await store.archiveForSystem(id);
     // A departed member's build secrets never wait, whatever the switch (as the membership trigger).
     await store.sweepDepartedProjects(CLOUD_V2_ARCHIVE_BATCH);
+    // And a removed connection's copies the removal's trigger skipped (held by another transaction).
+    await store.retireDisconnectedCopies(CLOUD_V2_ARCHIVE_BATCH);
     if (!this.retention) return;
     await store.startRetentionClocks(CLOUD_V2_RETENTION_CLOCK_BATCH);
     const { archived } = await store.archiveInactive({ inactiveMs: CLOUD_V2_INACTIVE_ARCHIVE_MS, limit: CLOUD_V2_ARCHIVE_BATCH });
@@ -989,7 +991,8 @@ export class CloudV2Lifecycle {
     for (const removal of await store.pendingBackupRemovals(CLOUD_V2_ARCHIVE_BATCH)) {
       if (removal.uploadsUntil && Date.parse(removal.uploadsUntil) > (this.deps.now?.() ?? Date.now())) continue;
       try {
-        await storage.prune(removal.workspaceId, removal.current ? [removal.current] : []);
+        // Only objects older than the claim: one a later stop uploaded since, recorded on the row yet or not, survives.
+        await storage.prune(removal.workspaceId, removal.current ? [removal.current] : [], removal.requestedAt);
         await store.finishBackupRemoval(removal.id);
         removed++;
       } catch (error) {

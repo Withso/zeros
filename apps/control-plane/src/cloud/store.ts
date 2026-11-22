@@ -1905,13 +1905,28 @@ export class CloudV2Store {
 
   /** Phase two's work list: recorded removals not yet done, with the object the row holds now (a later stop's,
    * which the prune must keep) and the upload horizon (an upload in flight waits). */
-  async pendingBackupRemovals(limit: number): Promise<{ id: string; workspaceId: string; object: string; current: string | null; uploadsUntil: string | null }[]> {
-    const { rows } = await withSystemTx(this.pool, tx => tx.query<{ id: string; workspace_id: string; object: string; current: string | null; checkpoint_uploads: Record<string, string> }>(
-      `SELECT r.id, r.workspace_id, r.object, w.checkpoint_object AS current, w.checkpoint_uploads
+  async pendingBackupRemovals(limit: number): Promise<{ id: string; workspaceId: string; object: string; current: string | null; uploadsUntil: string | null;
+    requestedAt: Date }[]> {
+    const { rows } = await withSystemTx(this.pool, tx => tx.query<{ id: string; workspace_id: string; object: string; current: string | null; checkpoint_uploads: Record<string, string>; requested_at: Date }>(
+      `SELECT r.id, r.workspace_id, r.object, w.checkpoint_object AS current, w.checkpoint_uploads, r.requested_at
        FROM cloud_v2_backup_removals r JOIN cloud_v2_workspaces w ON w.id=r.workspace_id
        WHERE r.done_at IS NULL ORDER BY r.requested_at LIMIT $1`, [limit]));
     return rows.map(row => ({ id: row.id, workspaceId: row.workspace_id, object: row.object, current: row.current,
-      uploadsUntil: uploadHorizon(row.checkpoint_uploads) }));
+      uploadsUntil: uploadHorizon(row.checkpoint_uploads), requestedAt: row.requested_at }));
+  }
+
+  /** Retention S4: the copies of a project whose GitHub connection was removed, for any the removal's trigger skipped
+   * (a copy another transaction held). Never waits; a record goes once its project has no copy building or ready. */
+  async retireDisconnectedCopies(limit: number): Promise<number> {
+    return withSystemTx(this.pool, async tx => {
+      const retired = await tx.query(`UPDATE cloud_v2_ready_copies SET state=CASE WHEN state='building' THEN 'failed' ELSE 'retired' END,
+          failure_reason=CASE WHEN state='building' THEN 'connection_removed' ELSE failure_reason END, updated_at=clock_timestamp()
+        WHERE id IN (SELECT c.id FROM cloud_v2_ready_copies c JOIN cloud_v2_disconnected_projects d ON d.project_id=c.project_id
+          WHERE c.state IN ('building','ready') ORDER BY c.id LIMIT $1 FOR UPDATE OF c SKIP LOCKED)`, [limit]);
+      await tx.query(`DELETE FROM cloud_v2_disconnected_projects d WHERE NOT EXISTS (SELECT 1 FROM cloud_v2_ready_copies c
+        WHERE c.project_id=d.project_id AND c.state IN ('building','ready'))`);
+      return retired.rowCount ?? 0;
+    });
   }
 
   async finishBackupRemoval(id: string): Promise<void> {

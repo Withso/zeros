@@ -127,6 +127,7 @@ function setup(claimed: (CloudV2LifecycleWorkspace & { attempts: number })[], op
     deleteDepartedProjects: vi.fn(async () => []),
     missedWakes: vi.fn(async () => ({ ids: [], total: 0 })),
     accountCheckpointPrefixes: vi.fn(async () => ({ prunable: [], missing: [], empty: false })),
+    retireDisconnectedCopies: vi.fn(async () => 0),
   } as CloudV2LifecycleDeps["store"];
   const stopWorker = vi.fn(async () => true);
   const logs: { warn: string[]; error: string[] } = { warn: [], error: [] };

@@ -43,8 +43,9 @@ BEGIN
           AND c.archived_at IS NULL
         FOR UPDATE SKIP LOCKED);
     DELETE FROM public.cloud_v2_ready_copy_secrets s
-      WHERE s.project_id IN (SELECT p.id FROM public.cloud_projects p
-        WHERE p.org_id = OLD.org_id AND p.level = 'personal' AND p.owner_user_id = OLD.user_id);
+      WHERE s.project_id IN (SELECT q.project_id FROM public.cloud_v2_ready_copy_secrets q JOIN public.cloud_projects p ON p.id = q.project_id
+        WHERE p.org_id = OLD.org_id AND p.level = 'personal' AND p.owner_user_id = OLD.user_id
+        FOR UPDATE OF q SKIP LOCKED);
     UPDATE public.cloud_projects p SET owner_left_at = coalesce(p.owner_left_at, clock_timestamp())
       WHERE p.id IN (SELECT q.id FROM public.cloud_projects q
         WHERE q.org_id = OLD.org_id AND q.level = 'personal' AND q.owner_user_id = OLD.user_id
@@ -84,22 +85,36 @@ BEGIN
 END;
 $$;
 
--- A GitHub connection removed: every ready copy of a project with a repository on it is retired before the foreign
--- key clears the reference (a copy's machine holds that repository's clone; the copy builder's cleanup deletes it).
--- Copies are locked in id order (CloudV2ReadyCopies lock order); the next workspace opened from the project queues
--- a new copy.
+-- A GitHub connection removed: every ready copy of a project with a repository on it is retired, and the project is
+-- recorded, before the foreign key clears the reference (after which a NULL connection says nothing: many are NULL
+-- from the start). A copy's machine holds that repository's clone; the copy builder's cleanup deletes it. The trigger
+-- never waits for a copy another transaction holds (SKIP LOCKED) and never fails the removal; the lifecycle retires
+-- what it skipped from the record, then clears it. The next workspace opened from the project queues a new copy.
+CREATE TABLE cloud_v2_disconnected_projects (
+  project_id uuid PRIMARY KEY REFERENCES cloud_projects(id) ON DELETE CASCADE,
+  recorded_at timestamptz NOT NULL DEFAULT clock_timestamp()
+);
+ALTER TABLE cloud_v2_disconnected_projects ENABLE ROW LEVEL SECURITY;
+CREATE POLICY cloud_v2_disconnected_projects_system ON cloud_v2_disconnected_projects FOR ALL
+  USING (app_is_system()) WITH CHECK (app_is_system());
 CREATE FUNCTION cloud_v2_retire_disconnected_copies() RETURNS trigger
 LANGUAGE plpgsql SECURITY DEFINER
 SET search_path = pg_catalog, public, pg_temp AS $$
 DECLARE previous_system text := current_setting('app.system',true);
 BEGIN
   PERFORM set_config('app.system','on',true);
-  UPDATE public.cloud_v2_ready_copies SET state = CASE WHEN state = 'building' THEN 'failed' ELSE 'retired' END,
-      failure_reason = CASE WHEN state = 'building' THEN 'connection_removed' ELSE failure_reason END, updated_at = clock_timestamp()
-    WHERE id IN (SELECT c.id FROM public.cloud_v2_ready_copies c
-      WHERE c.state IN ('building', 'ready') AND EXISTS (SELECT 1 FROM public.cloud_project_repositories r
-        WHERE r.project_id = c.project_id AND r.connection = OLD.id)
-      ORDER BY c.id FOR UPDATE);
+  BEGIN
+    INSERT INTO public.cloud_v2_disconnected_projects (project_id)
+      SELECT DISTINCT r.project_id FROM public.cloud_project_repositories r WHERE r.connection = OLD.id
+      ON CONFLICT (project_id) DO NOTHING;
+    UPDATE public.cloud_v2_ready_copies SET state = CASE WHEN state = 'building' THEN 'failed' ELSE 'retired' END,
+        failure_reason = CASE WHEN state = 'building' THEN 'connection_removed' ELSE failure_reason END, updated_at = clock_timestamp()
+      WHERE id IN (SELECT c.id FROM public.cloud_v2_ready_copies c
+        WHERE c.state IN ('building', 'ready') AND EXISTS (SELECT 1 FROM public.cloud_project_repositories r
+          WHERE r.project_id = c.project_id AND r.connection = OLD.id)
+        ORDER BY c.id FOR UPDATE SKIP LOCKED);
+  EXCEPTION WHEN OTHERS THEN NULL; -- Never fails the removal: the recorded projects' copies are retired by the lifecycle.
+  END;
   PERFORM set_config('app.system',coalesce(previous_system,''),true);
   RETURN OLD;
 END;
