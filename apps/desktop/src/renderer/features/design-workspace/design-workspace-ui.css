@@ -1960,7 +1960,8 @@
 }
 
 /* A value the panel cannot edit. Computed (calc(), clamp()…) shows as
- * written, dimmed; forced by !important carries a lock at the field's end.
+ * written, dimmed; forced by !important, or set by a control on a main,
+ * carries a lock at the field's end, and a control's has no Detach.
  * Neither edits: design-style-card.tsx keeps edits out and opens the card
  * on a press, Enter or Space. A plain value that differs by theme carries a
  * theme mark there too. Lucide's lock and circle-half, as masks, so the
@@ -1970,21 +1971,25 @@
 }
 
 .zd-field[data-design-origin="computed"] :is(input, button),
-.zd-field[data-design-origin="forced"] :is(input, button) {
+.zd-field:is([data-design-origin="forced"], [data-design-origin="control"]) :is(input, button) {
   cursor: default;
 }
 
-.zd-field[data-design-origin="forced"],
+.zd-field[data-design-origin="control"] .zd-field-token-detach {
+  display: none;
+}
+
+.zd-field:is([data-design-origin="forced"], [data-design-origin="control"]),
 .zd-field[data-design-theme-mark] {
   --zd-field-mark-size: 12px;
   padding-right: calc(var(--zd-field-mark-size) + 6px);
 }
 
-.zd-field[data-design-origin="forced"][data-design-theme-mark] {
+.zd-field:is([data-design-origin="forced"], [data-design-origin="control"])[data-design-theme-mark] {
   padding-right: calc(var(--zd-field-mark-size) * 2 + 10px);
 }
 
-.zd-field[data-design-origin="forced"]::after,
+.zd-field:is([data-design-origin="forced"], [data-design-origin="control"])::after,
 .zd-field[data-design-theme-mark]::before {
   content: "";
   position: absolute;
@@ -1999,7 +2004,7 @@
   pointer-events: none;
 }
 
-.zd-field[data-design-origin="forced"]::after {
+.zd-field:is([data-design-origin="forced"], [data-design-origin="control"])::after {
   mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Crect x='4' y='11' width='16' height='10' rx='2'/%3E%3Cpath d='M8 11V7a4 4 0 0 1 8 0v4'/%3E%3C/svg%3E");
 }
 
@@ -2007,7 +2012,7 @@
   mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='12' cy='12' r='9'/%3E%3Cpath d='M12 3v18'/%3E%3C/svg%3E");
 }
 
-.zd-field[data-design-origin="forced"][data-design-theme-mark]::before {
+.zd-field:is([data-design-origin="forced"], [data-design-origin="control"])[data-design-theme-mark]::before {
   right: calc(var(--zd-field-mark-size) + 10px);
 }
 

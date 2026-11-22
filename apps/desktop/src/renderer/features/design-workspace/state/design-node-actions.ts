@@ -16,6 +16,42 @@ interface NodeCommandLane {
 const commands = new Map<string, NodeCommandLane>();
 let sequence = 0;
 
+/** A deletion a person is asked to confirm: the layers it would delete and
+ * everything that must still stand for Delete to mean them. */
+export interface DesignPendingDeletion {
+  owner: ReturnType<typeof captureDesignPageOwner>;
+  frame: string;
+  sourceVersion: string;
+  selectionEvent: number | undefined;
+  nodeIds: readonly string[];
+}
+
+/** The current selection's deletion, captured when a person is asked. */
+export function captureDesignPendingDeletion(workspaceId: string): DesignPendingDeletion | null {
+  const selection = designWorkspaceView(workspaceId);
+  const frame = designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data?.frames.find(candidate => candidate.file === selection.selectedFrame);
+  if (!frame || typeof frame.sourceVersion !== "string" || !selection.selectedNodeIds.length) return null;
+  return { owner: captureDesignPageOwner(workspaceId), frame: frame.file, sourceVersion: frame.sourceVersion,
+    selectionEvent: selection.selectionEvent, nodeIds: [...selection.selectedNodeIds] };
+}
+
+/** A pending deletion a canvas showing `workspaceId` may confirm: asked in
+ * that workspace, and still current there. */
+export function designPendingDeletionFor(pending: DesignPendingDeletion, workspaceId: string | null | undefined): boolean {
+  return !!workspaceId && pending.owner.workspaceId === workspaceId && designPendingDeletionCurrent(pending);
+}
+
+/** Whether the owner, frame, generation and selection a pending deletion
+ * was asked about all still stand. */
+export function designPendingDeletionCurrent(pending: DesignPendingDeletion): boolean {
+  const { workspaceId } = pending.owner;
+  const selection = designWorkspaceView(workspaceId);
+  const frame = designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data?.frames.find(candidate => candidate.file === pending.frame);
+  return isCurrentDesignPageOwner(pending.owner) && selection.selectedFrame === pending.frame && frame?.sourceVersion === pending.sourceVersion &&
+    selection.selectionEvent === pending.selectionEvent && selection.selectedNodeIds.length === pending.nodeIds.length &&
+    selection.selectedNodeIds.every((nodeId, index) => nodeId === pending.nodeIds[index]);
+}
+
 /** Keyboard actions resolve semantic identity at the input boundary. React's
  * last painted frame may still be the source of a just-completed transfer. */
 export async function applyDesignNodeAction(input: {
@@ -23,8 +59,12 @@ export async function applyDesignNodeAction(input: {
   folder: string;
   action: "duplicate" | "delete";
   copy?: boolean;
+  /** A confirmed deletion: it deletes exactly these layers, or nothing once
+   * anything it was asked about changed. */
+  expect?: DesignPendingDeletion;
 }): Promise<void> {
   const { workspaceId, folder, action } = input;
+  if (input.expect && !designPendingDeletionFor(input.expect, workspaceId)) return;
   const selection = designWorkspaceView(workspaceId);
   // Before any preview: an instance's part is read only.
   if (selection.selectedNodeIds.some(isDesignComponentPartNodeId)) throw new DesignComponentPartWriteError();

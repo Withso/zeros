@@ -1156,3 +1156,14 @@ describe("workbench persistence compatibility", () => {
     expect(values.has("column3-active-tab-id")).toBe(false);
   });
 });
+
+describe("side chat tabs", () => {
+  it("restore with their chat and drop without one", () => {
+    const out = normalizeWorkbenchTabs([
+      { id: "side", type: "chat", title: "Side chat", chatId: "chat-1", filePath: "x.ts" },
+      { id: "orphan", type: "chat", title: "Side chat" },
+    ]);
+    expect(out.find((tab) => tab.id === "side")).toEqual({ id: "side", type: "chat", title: "Side chat", chatId: "chat-1" });
+    expect(out.some((tab) => tab.id === "orphan")).toBe(false);
+  });
+});

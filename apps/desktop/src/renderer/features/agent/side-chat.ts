@@ -2,8 +2,11 @@
 // branches there, and the source transcript through that message travels
 // hidden in its first prompt; a blank one offers Add chat transcripts.
 
-import type { ChatThread } from "../../state/store";
+import type { Action, ChatThread } from "../../state/store";
+import { requestWorkbenchReveal } from "../../shell/workbench/workbench-visibility-controller";
 import { useWorkspaceStore } from "../../state/store";
+import { editChat } from "../../state/cloud-chat-edits";
+import { chatCloseConfirmation, type ChatCloseConfirmationCopy } from "../../shell/conversation/chat-close";
 import { threadToRow } from "../../state/chat-row-wire";
 import { toast } from "@/renderer/shared/ui/primitives/elements";
 import { dbCreateChildChat } from "./agent-history-client";
@@ -121,6 +124,66 @@ export function createSideChat(source: ChatThread, branched: boolean, now = Date
   }
   const { sourceChatId, ...child } = createChildChat(source, undefined, now);
   return { ...(branched ? { ...child, sourceChatId } : child), title: SIDE_CHAT_TITLE };
+}
+
+const columnChatByFolder = new Map<string, string>();
+
+/** The chat column's own selection, kept while a side chat tab has focus. */
+export function rememberColumnChat(folder: string, chatId: string): void {
+  columnChatByFolder.set(folder, chatId);
+}
+
+export function columnChatFor(folder: string): string | null {
+  return columnChatByFolder.get(folder) ?? null;
+}
+
+export function sideChatCloseConfirmation(
+  sessions: { getCloseActivity(chatId: string): { running: boolean; queuedCount: number } },
+  chatId: string,
+): ChatCloseConfirmationCopy | null {
+  const chat = useWorkspaceStore.getState().chats.find((row) => row.id === chatId && !row.archived);
+  if (!chat) return null;
+  const agentName = chat.agentName?.trim() || chat.agentId?.trim() || "the agent";
+  return chatCloseConfirmation({ agentName, ...sessions.getCloseActivity(chatId) });
+}
+
+/** Closing a side chat tab closes the side chat, as closing a chat tab does,
+ *  and hands focus back to the chat column. */
+export function closeSideChat(
+  dispatch: (action: Action) => void,
+  sessions: { closeSession(chatId: string): unknown; getCloseActivity(chatId: string): { running: boolean; queuedCount: number } },
+  tabId: string,
+  chatId: string,
+): void {
+  const state = useWorkspaceStore.getState();
+  const chat = state.chats.find((row) => row.id === chatId);
+  const wasActive = state.activeChatId === chatId;
+  dispatch({ type: "REMOVE_WORKBENCH_TAB", id: tabId });
+  if (!chat || chat.archived) return;
+  const activity = sessions.getCloseActivity(chatId);
+  const busy = activity.running || activity.queuedCount > 0;
+  const closing = sessions.closeSession(chatId);
+  editChat(dispatch, chatId, { archived: true }, { busy });
+  if (busy && closing instanceof Promise) {
+    void closing.then((confirmed) => {
+      if (confirmed !== false) return;
+      toast.error("Couldn't confirm the side chat stopped", {
+        description: "It may still be running in the cloud workspace.",
+      });
+    }).catch(() => {});
+  }
+  if (!wasActive) return;
+  const live = useWorkspaceStore.getState().chats;
+  const back = [columnChatFor(chat.folder), chat.sourceChatId, chat.parentChatId].find(
+    (id) => !!id && live.some((row) => row.id === id && !row.archived && row.folder === chat.folder),
+  );
+  if (back) dispatch({ type: "SET_ACTIVE_CHAT", id: back });
+}
+
+/** Open a side chat as a focused tab in its workspace's Workbench. */
+export function publishSideChat(dispatch: (action: Action) => void, chat: ChatThread): void {
+  dispatch({ type: "OPEN_SIDE_CHAT", chat });
+  requestWorkbenchReveal();
 }
 
 export function canOpenSideChat(source: ChatThread | null | undefined): source is ChatThread {

@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Button</title>
+<template data-zd-options>
+<zd-option name="label" type="text" label="Label" default="Save changes"></zd-option>
+<zd-option name="tone" type="choice" label="Tone" choices="neutral accent danger" default="accent"></zd-option>
+<zd-option name="size" type="choice" label="Size" choices="xs sm md lg xl" choice-labels="Extra small|Small|Medium|Large|Extra large" default="md"></zd-option>
+<zd-option name="state" type="choice" label="Drawn state" choices="rest hover pressed focus disabled" choice-labels="Rest|Hover|Pressed|Focus|Disabled" default="rest"></zd-option>
+<zd-option name="loading" type="boolean" label="Loading" group="Loading" default="false"></zd-option>
+<zd-option name="spin" type="easing" label="Spinner motion" group="Loading" default="steps(8, end) 800ms"></zd-option>
+<zd-option name="icon" type="boolean" label="Show icon" group="Icon" default="true"></zd-option>
+<zd-option name="icon-side" type="choice" label="Icon side" group="Icon" choices="start end" choice-labels="Start|End" default="start"></zd-option>
+<zd-option name="radius" type="number" label="Corner radius" group="Shape and motion" default="8" min="0" max="24" step="1" unit="px"></zd-option>
+<zd-option name="accent" type="color" label="Accent fill" group="Shape and motion" default="var(--accent)"></zd-option>
+<zd-option name="press" type="easing" label="Press motion" group="Shape and motion" default="ease-out 120ms"></zd-option>
+<zd-variant name="secondary" tone="neutral" label="Cancel" icon="false"></zd-variant>
+<zd-variant name="destructive" tone="danger" label="Delete project"></zd-variant>
+<zd-variant name="compact" size="sm" icon="false" radius="6"></zd-variant>
+<zd-variant name="pill" size="lg" radius="24"></zd-variant>
+</template>
+<link rel="stylesheet" href="../tokens.css">
+<link rel="stylesheet" href="../ui.css">
+<style>
+.btn { vertical-align: middle; }
+/* The option hooks set the Button's own markup: .stage is this frame's body
+   and zd-button an instance. */
+:where(.stage, zd-button) > .btn { --btn-radius: var(--zd-radius); --btn-accent: var(--zd-accent); --btn-easing: var(--zd-press-easing); --btn-duration: var(--zd-press-duration); }
+:where(.stage, zd-button) > .btn .spinner { --spinner-easing: var(--zd-spin-easing); --spinner-duration: var(--zd-spin-duration); }
+</style>
+</head>
+<body class="stage">
+<button class="btn" type="button" data-oid="btn" data-name="Button" data-tone="{{ tone }}" data-size="{{ size }}" data-state="{{ state }}" aria-busy="{{ loading }}">
+<span class="spinner" data-oid="btn-spinner" data-name="Spinner" data-zd-if="loading"></span>
+<svg class="btn-icon" data-oid="btn-icon-start" data-name="Icon (start)" data-zd-if="icon && icon-side == 'start' && !loading" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 8.5l3 3 7-7" data-oid="o-99101737f"/></svg>
+<span data-oid="btn-label" data-name="Label">{{ label }}</span>
+<svg class="btn-icon" data-oid="btn-icon-end" data-name="Icon (end)" data-zd-if="icon && icon-side == 'end' && !loading" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 3.5l4.5 4.5L6 12.5" data-oid="o-6b0e54ae2"/></svg>
+</button>
+</body>
+</html>

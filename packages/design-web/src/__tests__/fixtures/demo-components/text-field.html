@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Text field</title>
+<template data-zd-options>
+<zd-option name="label" type="text" label="Label" default="Project name"></zd-option>
+<zd-option name="value" type="text" label="Value" default="orbit-web"></zd-option>
+<zd-option name="placeholder" type="text" label="Placeholder" default="my-project"></zd-option>
+<zd-option name="hint" type="text" label="Hint" default="Lowercase letters, digits and hyphens."></zd-option>
+<zd-option name="state" type="choice" label="Drawn state" choices="rest hover focus error disabled" choice-labels="Rest|Hover|Focus|Error|Disabled" default="rest"></zd-option>
+<zd-option name="required" type="boolean" label="Required" default="false"></zd-option>
+<zd-option name="width" type="number" label="Width" default="32" min="16" max="60" step="2" unit="ch"></zd-option>
+<zd-derive name="invalid" value="state == 'error'"></zd-derive>
+<zd-variant name="empty" value=""></zd-variant>
+<zd-variant name="error" state="error" value="Orbit Web" hint="Use lowercase letters, digits and hyphens only."></zd-variant>
+<zd-variant name="locked" state="disabled" hint="Renaming is turned off for this workspace."></zd-variant>
+</template>
+<link rel="stylesheet" href="../tokens.css">
+<link rel="stylesheet" href="../ui.css">
+<style>
+zd-text-field { display: block; }
+.text-field { width: var(--zd-width); max-width: 100%; }
+.tf-required { color: var(--danger); }
+</style>
+</head>
+<body class="stage">
+<div class="field text-field" data-oid="text-field" data-name="Text field">
+<label class="field-label" data-oid="tf-label" data-name="Label">{{ label }}<span class="tf-required" data-oid="tf-required" data-zd-if="required"> *</span></label>
+<input class="input" data-oid="tf-input" data-name="Input" type="text" value="{{ value }}" placeholder="{{ placeholder }}" data-state="{{ state }}" aria-invalid="{{ invalid }}" data-zd-if="state != 'disabled'">
+<input class="input" data-oid="tf-input-disabled" data-name="Input (disabled)" type="text" value="{{ value }}" placeholder="{{ placeholder }}" data-state="disabled" disabled data-zd-if="state == 'disabled'">
+<p class="field-hint" data-oid="tf-hint" data-name="Hint" data-zd-if="!invalid">{{ hint }}</p>
+<p class="field-hint is-error" data-oid="tf-error" data-name="Error" data-zd-if="invalid">{{ hint }}</p>
+</div>
+</body>
+</html>

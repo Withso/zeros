@@ -185,8 +185,9 @@ async function runDesignCopyChecks({ page, check }) {
   await expect(frame.locator('[data-oid^="copy-"]')).toHaveCount(0);
   check("Option drag inside a selected instance copies the instance", true);
   frame = await load(page, "home-composer", "styleOrigins&componentOptions");
-  // The root is the instance's own box, so a double-click enters a layer inside it.
-  const instance = await designFrameElementBox(page.locator(displayed), frame.locator('[data-oid="home-composer"] [data-zd-part="cc-prompt"]'));
+  // The root is the instance's own box, so a double-click enters a layer
+  // inside it: one a control drives (its Label sets cc-send's text).
+  const instance = await designFrameElementBox(page.locator(displayed), frame.locator('[data-oid="home-composer"] [data-zd-part="cc-send"]'));
   await page.mouse.dblclick(instance.x + instance.width / 2, instance.y + instance.height / 2);
   await expect.poll(() => selection(page)).toMatch(/^::zeros-part:home-composer:/);
   const instanceBefore = await frame.locator('[data-oid="home-composer"]').evaluate(node => node.outerHTML);

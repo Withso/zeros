@@ -35,7 +35,10 @@ import {
   commitDesignComponentVariant,
   commitDesignInstanceAllOverridesReset,
   commitDesignInstanceAttributes,
-  commitDesignInstanceOverridesReset,
+  commitDesignInstanceOlderOverridesReset,
+  designInstanceOlderOverrideCount,
+  designInstanceOlderOverrideProperties,
+  designInstanceOlderOverridesIn,
   commitDesignInstanceSlotReset,
   commitDesignInstanceText,
   designInstanceResetAllFits,
@@ -171,10 +174,10 @@ type CapturedEdit = {
 const latestCapturedEdit = () =>
   (mocks.resolved ?? (mocks.apply.mock.calls as unknown as [string, unknown, CapturedEdit][]).at(-1)![2]) as CapturedEdit;
 
-const prepareResetSnapshot = (file: string, nodeId: string, host: Record<string, unknown>) => {
+const prepareResetSnapshot = (file: string, nodeId: string, host: Record<string, unknown>, component: unknown = VARIANTS) => {
   mocks.snapshot = {
     frames: [{ file, sourceVersion: V1, frameId: "frame", instances: {
-      components: { card: VARIANTS },
+      components: { card: component },
       hosts: { [nodeId]: { component: "card", attributes: {}, ...host } },
     } }],
   };
@@ -251,21 +254,82 @@ describe("variants and instances", () => {
     ]);
   });
 
-  it("resets an instance's overrides in one transaction: each part's attribute, and each property its own style sets on its root", async () => {
+  it("counts an instance's older overrides: each part override and each host style outside its size and place", () => {
+    const style = 'position: absolute; left: 12px; top: 24px; width: 300px; height: 120px; flex-grow: 1; rotate: 5deg; transform: rotate(5deg); transform-origin: 0 0; translate: 1px 2px; margin: 8px; opacity: .5; scale: 2; background: url("a;b.png"); --Gap: 2px';
+    expect(designInstanceOlderOverrideProperties(style)).toEqual(["margin", "opacity", "scale", "background", "--Gap"]);
+    expect(designInstanceOlderOverrideCount({ component: "card", attributes: {}, overrides: { "cc-send": "x", "chip#1": "y" }, style })).toBe(7);
+    expect(designInstanceOlderOverrideCount({ component: "card", attributes: {}, style: "width: 200px; left: 4px" })).toBe(0);
+    expect(designInstanceOlderOverrideCount({ component: "card", attributes: {} })).toBe(0);
+  });
+
+  it("counts a size or size limit on an axis a control drives as an older override, keeping the other axis and the place", () => {
+    const style = "width: 200px; min-width: 100px; max-height: 80px; height: 40px; left: 4px; opacity: .5";
+    const bound = { width: ["width"] };
+    expect(designInstanceOlderOverrideProperties(style, bound)).toEqual(["width", "min-width", "opacity"]);
+    expect(designInstanceOlderOverrideCount({ component: "card", attributes: {}, style }, bound)).toBe(3);
+    expect(designInstanceOlderOverrideProperties(style)).toEqual(["opacity"]);
+    // Only min-width bound: Reset keeps a max-width, and a raw width still counts.
+    expect(designInstanceOlderOverrideProperties("width: 200px; max-width: 300px", { "min-width": ["size"] })).toEqual(["width"]);
+  });
+
+  it("rests no Reset on a binding only a truncated record guesses", async () => {
     const frame = { file: "home.html", sourceVersion: V1 } as never;
-    prepareResetSnapshot("home.html", "inst", { overrides: { "cc-send": "x", "chip#1": "y" }, style: 'position: absolute; left: 12px; top: 24px; width: 300px; height: 120px; margin: 8px; transform: rotate(5deg); background: url("a;b.png"); --Gap: 2px' });
-    await commitDesignInstanceOverridesReset("w", frame, "inst");
-    expect(latestCapturedEdit().intent).toBe("Reset overrides");
+    prepareResetSnapshot("home.html", "inst", { style: "width: 200px; opacity: .5" },
+      { ...VARIANTS, bindings: { root: "card-root", truncated: true, layers: { "card-root": { assumed: { width: ["width"] } } } } });
+    await commitDesignInstanceOlderOverridesReset("w", frame, "inst");
+    // The guessed width is kept; the visual override goes.
+    expect(latestCapturedEdit().operations).toEqual([
+      expect.objectContaining({ type: "node.set-styles", nodeId: "inst", styles: { opacity: null } }),
+    ]);
+  });
+
+  it("never counts or resets the instance's place, whatever a control binds on the root", async () => {
+    const style = "position: absolute; left: 4px; transform: matrix(1, 0, 0, 1, 6, 8); opacity: .5";
+    // A single-root main whose gated rule binds the root's placement (a Button's size).
+    const bound = { position: ["size"], left: ["size"], transform: ["size"] };
+    expect(designInstanceOlderOverrideProperties(style, bound)).toEqual(["opacity"]);
+    expect(designInstanceOlderOverrideCount({ component: "card", attributes: {}, style }, bound)).toBe(1);
+    const frame = { file: "home.html", sourceVersion: V1 } as never;
+    prepareResetSnapshot("home.html", "inst", { style },
+      { ...VARIANTS, bindings: { root: "card-root", layers: { "card-root": { styles: bound } } } });
+    await commitDesignInstanceOlderOverridesReset("w", frame, "inst");
+    expect(latestCapturedEdit().operations).toEqual([
+      expect.objectContaining({ type: "node.set-styles", nodeId: "inst", styles: { opacity: null } }),
+    ]);
+    expect(mocks.waitRuntime).not.toHaveBeenCalled();
+  });
+
+  it("scopes older overrides to a part: only its own override counts and resets there", () => {
+    const host = { component: "card", attributes: {}, overrides: { "cc-send": "opacity: .5", "cc-chip": "color: red" }, style: "opacity: .8; left: 4px" };
+    expect(designInstanceOlderOverridesIn(host, {})).toEqual({ parts: ["cc-send", "cc-chip"], style: ["opacity"] });
+    expect(designInstanceOlderOverridesIn(host, {}, "cc-Send")).toEqual({ parts: ["cc-send"], style: [] });
+    expect(designInstanceOlderOverridesIn(host, {}, "cc-prompt")).toEqual({ parts: [], style: [] });
+  });
+
+  it("resets a raw size over a bound axis with the other older overrides", async () => {
+    const frame = { file: "home.html", sourceVersion: V1 } as never;
+    prepareResetSnapshot("home.html", "inst", { style: "width: 200px; min-width: 100px; height: 40px; left: 4px; opacity: .5" },
+      { ...VARIANTS, bindings: { root: "card-root", layers: { "card-root": { styles: { width: ["width"] } } } } });
+    await commitDesignInstanceOlderOverridesReset("w", frame, "inst");
+    expect(latestCapturedEdit().operations).toEqual([
+      expect.objectContaining({ type: "node.set-styles", nodeId: "inst", styles: { width: null, "min-width": null, opacity: null } }),
+    ]);
+  });
+
+  it("resets an instance's older overrides in one transaction, keeping its size and place", async () => {
+    const frame = { file: "home.html", sourceVersion: V1 } as never;
+    prepareResetSnapshot("home.html", "inst", { overrides: { "cc-send": "x", "chip#1": "y" }, style: 'position: absolute; left: 12px; top: 24px; width: 300px; height: 120px; margin: 8px; transform: matrix(1, 0, 0, 1, 6, 8); background: url("a;b.png"); --Gap: 2px' });
+    await commitDesignInstanceOlderOverridesReset("w", frame, "inst");
+    expect(latestCapturedEdit().intent).toBe("Reset older overrides");
     expect(latestCapturedEdit().operations).toEqual([
       expect.objectContaining({ type: "node.set-attribute", nodeId: "inst", attribute: "zd-style-cc-send", value: null }),
       expect.objectContaining({ type: "node.set-attribute", nodeId: "inst", attribute: "zd-style-chip", value: null }),
-      expect.objectContaining({ type: "node.set-styles", nodeId: "inst", scope: "inline", styles: {
-        width: null, height: null, margin: null, transform: null, background: null, "--Gap": null,
-      } }),
+      expect.objectContaining({ type: "node.set-styles", nodeId: "inst", scope: "inline", styles: { margin: null, background: null, "--Gap": null } }),
     ]);
+    // Placement stays, so a legacy translate needs no fold.
     expect(mocks.waitRuntime).not.toHaveBeenCalled();
-    prepareResetSnapshot("home.html", "inst", { overrides: { "cc-send": "x" } });
-    await commitDesignInstanceOverridesReset("w", frame, "inst");
+    prepareResetSnapshot("home.html", "inst", { overrides: { "cc-send": "x" }, style: "width: 300px" });
+    await commitDesignInstanceOlderOverridesReset("w", frame, "inst");
     expect(latestCapturedEdit().operations).toHaveLength(1);
   });
 
@@ -289,7 +353,7 @@ describe("variants and instances", () => {
     mocks.runtime.mockReturnValue(runtime);
     mocks.waitRuntime.mockResolvedValue(runtime);
     prepareResetSnapshot("home.html", "inst", { style: "position: absolute; left: 10px; top: 20px; transform: matrix(1, 0, 0, 1, 6, 8); width: 100px" });
-    await commitDesignInstanceOverridesReset("w", { file: "home.html", sourceVersion: V1 }, "inst");
+    await commitDesignInstanceAllOverridesReset("w", { file: "home.html", sourceVersion: V1 }, "inst");
     const styles = latestCapturedEdit().operations.find((operation) => operation.type === "node.set-styles") as Extract<DesignOperation, { type: "node.set-styles" }>;
     expect(styles.styles).toMatchObject({ left: "16px", top: "28px", width: null, transform: null });
     expect(mocks.waitRuntime).toHaveBeenCalledWith("w", "home.html", 2_000, { sourceVersion: V1 });
@@ -317,7 +381,7 @@ describe("variants and instances", () => {
     mocks.waitRuntime.mockResolvedValue(runtime);
     prepareResetSnapshot("home.html", "inst", { style: "position: relative; transform: matrix(1, 0, 0, 1, 6, 8); width: 100px" });
 
-    await commitDesignInstanceOverridesReset("w", { file: "home.html", sourceVersion: V1 }, "inst");
+    await commitDesignInstanceAllOverridesReset("w", { file: "home.html", sourceVersion: V1 }, "inst");
 
     const styles = latestCapturedEdit().operations.find((operation) => operation.type === "node.set-styles") as Extract<DesignOperation, { type: "node.set-styles" }>;
     expect(styles.styles).toMatchObject({ transform: null, width: null });
@@ -345,7 +409,7 @@ describe("variants and instances", () => {
     mocks.waitRuntime.mockResolvedValue(runtime);
     prepareResetSnapshot("home.html", "inst", { style: "position: absolute; transform: matrix(1, 0, 0, 1, 6, 8)" });
 
-    await expect(commitDesignInstanceOverridesReset("w", { file: "home.html", sourceVersion: V1 }, "inst"))
+    await expect(commitDesignInstanceAllOverridesReset("w", { file: "home.html", sourceVersion: V1 }, "inst"))
       .rejects.toThrow(/runtime details for inst are stale/);
     expect(mocks.apply).toHaveBeenCalledOnce();
     expect(mocks.resolved).toBeUndefined();
@@ -372,13 +436,13 @@ describe("variants and instances", () => {
     mocks.waitRuntime.mockResolvedValue(runtime);
     prepareResetSnapshot("home.html", "inst", { style: "position: absolute; transform: matrix(1, 0, 0, 1, 6, 8)" });
 
-    await expect(commitDesignInstanceOverridesReset("w", { file: "home.html", sourceVersion: V1 }, "inst"))
+    await expect(commitDesignInstanceAllOverridesReset("w", { file: "home.html", sourceVersion: V1 }, "inst"))
       .rejects.toThrow(/runtime details for inst are stale/);
     expect(mocks.resolved).toBeUndefined();
   });
 
   it("fails closed when the captured frame or host is no longer current", async () => {
-    await expect(commitDesignInstanceOverridesReset("w", { file: "home.html", sourceVersion: V1, frameId: "old" }, "inst"))
+    await expect(commitDesignInstanceOlderOverridesReset("w", { file: "home.html", sourceVersion: V1, frameId: "old" }, "inst"))
       .rejects.toThrow(/no longer available/);
     mocks.snapshot = {
       frames: [{ file: "home.html", sourceVersion: V1, instances: {
@@ -386,10 +450,10 @@ describe("variants and instances", () => {
         hosts: { inst: { component: "card", attributes: {}, style: "width: 10px" } },
       } }],
     };
-    await expect(commitDesignInstanceOverridesReset("w", { file: "home.html", sourceVersion: V1, frameId: "old" }, "inst"))
+    await expect(commitDesignInstanceOlderOverridesReset("w", { file: "home.html", sourceVersion: V1, frameId: "old" }, "inst"))
       .rejects.toThrow(/no longer available/);
     prepareResetSnapshot("home.html", "other", { style: "width: 10px" });
-    await expect(commitDesignInstanceOverridesReset("w", { file: "home.html", sourceVersion: V1 }, "inst"))
+    await expect(commitDesignInstanceAllOverridesReset("w", { file: "home.html", sourceVersion: V1 }, "inst"))
       .rejects.toThrow(/no longer available/);
   });
 

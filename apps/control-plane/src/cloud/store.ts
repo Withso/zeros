@@ -141,6 +141,8 @@ export type CloudV2Workspace = {
   machineExpectedGoneAt?: { at: string; estimate: boolean };
   /** While archived with a backup, once retention applies: greatest(archive, retention's start) + 60 days. */
   backupRemovalAt?: string;
+  /** While archived: what opening it now would bring back, by the server's best knowledge (cloudV2Restores). */
+  restores?: "all" | "pushed";
 };
 
 /** What a checkpoint is compared by at the next stop: the fingerprint of what
@@ -235,6 +237,8 @@ export type CloudV2WorkspaceRow = {
   keep_set_at?: Date | null; archive_reason?: "manual" | "inactive" | "member_left" | null;
   stopped_at?: Date | null; machine_stopped_at?: Date | null; machine_data_expired_at?: Date | null;
   archive_wake_done_at?: Date | null; checkpoint_object?: string | null; retention_started_at?: Date | null;
+  backup_probe?: BackupProbe | null; backup_probe_generation?: string | null; stop_generation?: string; checkpoint_stop_generation?: string | null;
+  changed_since_stop_generation?: string | null; machine_gone_at?: Date | null;
 };
 type Row = CloudV2WorkspaceRow;
 
@@ -242,7 +246,8 @@ const WORKSPACE_COLUMNS_SQL = sql`id, org_id, creator_user_id, name, number, tit
   computer_build_id, error_code, active_at, archived_at, created_at, updated_at, source_pending, created_by_session_id, setup_status,
   agent_cost_usd, agent_cost_turns, agent_cost_estimated_turns, private_owner_user_id, project_id, checkout_path, folder,
   lost_work_restored, lost_work_since, keep_set_at, archive_reason, stopped_at, machine_stopped_at, machine_data_expired_at,
-  archive_wake_done_at, checkpoint_object, retention_started_at`;
+  archive_wake_done_at, checkpoint_object, retention_started_at, backup_probe, backup_probe_generation, stop_generation,
+  checkpoint_stop_generation, changed_since_stop_generation, machine_gone_at`;
 const COLUMNS = WORKSPACE_COLUMNS_SQL.text;
 export const CLOUD_V2_WORKSPACE_COLUMNS = COLUMNS.split(",").map(value => value.trim());
 
@@ -309,7 +314,7 @@ export function cloudV2LifecycleWorkspaceFromRow(row: LifecycleRow): CloudV2Life
     checkpoint, restorePending: row.restore_pending, restoreAttempt: row.restore_attempt, restoreCreate: restoreCreate(row.restore_create),
     stopGeneration: row.stop_generation, checkpointUploadUntil: uploadHorizon(row.checkpoint_uploads),
     checkpointRetryFork: checkpointFork(row.checkpoint_retry_fork),
-    ...(row.backup_probe && row.backup_probe_generation === row.stop_generation ? { stopProbe: row.backup_probe } : {}),
+    ...(cloudV2StopProbe(row) ? { stopProbe: cloudV2StopProbe(row)! } : {}),
     // Unverified unless this generation's stop ran the verified worker-off step: Boat's own stop,
     // a restore-pending stop and one from before retention never did.
     ...(row.worker_off_unverified_at || (row.backup_probe_generation !== undefined && row.backup_probe_generation !== row.stop_generation
@@ -370,6 +375,10 @@ let retentionDocuments = false;
  * backupRemovalAt). Set once at composition from CLOUD_V2_RETENTION_ENABLED; every path that serves a document
  * (get, list, team views, the composite routes) goes through workspace(), so none can disagree. Off by default. */
 export function setCloudV2RetentionDocuments(enabled: boolean): void { retentionDocuments = enabled; }
+/** The organization-level signal on the workspace list (both its routes): `retention: true` exactly when documents
+ * carry retention's fields, from the same flag, so the desktop can state the rule for an organization with no
+ * workspaces. Off, the list reply is what it was. */
+export function cloudV2RetentionListSignal(): { retention?: true } { return retentionDocuments ? { retention: true } : {}; }
 
 /** An archived workspace's backup is removed this long after its archive, counted from when retention first
  * applied if that is later: no clock starts from history. S4's removal uses this same expression. */
@@ -393,7 +402,7 @@ const FINAL_BACKUP_PENDING = `(w.archived_at IS NOT NULL AND w.archived_at > clo
   AND NOT (w.checkpoint_retry_generation IS NOT DISTINCT FROM w.stop_generation AND w.checkpoint_retry_exhausted_at IS NOT NULL))`;
 /** Retention S3's archive fields. Boat removes a machine about 14 days after its last stop; an archived
  * workspace still owed its one wake has it 10 days later, so 24 days from now's last stop. */
-function archiveFields(row: Row): Pick<CloudV2Workspace, "archiveReason" | "machineExpectedGoneAt" | "backupRemovalAt"> {
+function archiveFields(row: Row): Pick<CloudV2Workspace, "archiveReason" | "machineExpectedGoneAt" | "backupRemovalAt" | "restores"> {
   if (!row.archived_at) return {};
   const lastStop = [row.machine_stopped_at, row.stopped_at].filter((at): at is Date => at instanceof Date)
     .reduce<Date | null>((latest, at) => !latest || at > latest ? at : latest, null);
@@ -407,7 +416,35 @@ function archiveFields(row: Row): Pick<CloudV2Workspace, "archiveReason" | "mach
     ...(row.archive_reason ? { archiveReason: row.archive_reason } : {}),
     ...(gone ? { machineExpectedGoneAt: gone } : {}),
     ...(removal ? { backupRemovalAt: removal.toISOString() } : {}),
+    restores: cloudV2Restores(row),
   };
+}
+
+/** The latest stop's probe as every restore decision reads it: the probe of this stop generation, and "clean" only
+ * while no maintenance wake has found the checkout changed since (S3), when it reads "unknown". The lifecycle's
+ * restore path (cleanRestore, unbacked, onlyOnMachine) and the document's `restores` both use this. */
+export function cloudV2StopProbe(row: { backup_probe?: BackupProbe | null; backup_probe_generation?: string | null; stop_generation?: string;
+  changed_since_stop_generation?: string | null }): BackupProbe | undefined {
+  if (!row.backup_probe || row.backup_probe_generation !== row.stop_generation) return undefined;
+  return row.backup_probe === "clean" && row.changed_since_stop_generation === row.stop_generation ? "unknown" : row.backup_probe;
+}
+
+/** What opening the workspace now would bring back, as S1's restore path decides it (tested against it):
+ * "all" when its machine is still there (resumed as it is), or a backup of this very stop holds everything (restored),
+ * or this stop left nothing off GitHub (rebuilt without loss); otherwise "pushed": it is rebuilt from GitHub and
+ * work never pushed is gone (the lostWork note). An earlier stop's backup alone is "pushed": it lacks this stop's work. */
+export function cloudV2Restores(row: Row, now = Date.now()): "all" | "pushed" {
+  if (row.checkpoint_object && row.checkpoint_stop_generation === row.stop_generation) return "all";
+  if (cloudV2StopProbe(row) === "clean") return "all";
+  const lastStop = [row.machine_stopped_at, row.stopped_at].filter((at): at is Date => at instanceof Date)
+    .reduce<Date | null>((latest, at) => !latest || at > latest ? at : latest, null);
+  const woken = row.archived_at instanceof Date && row.archive_wake_done_at instanceof Date && row.archive_wake_done_at >= row.archived_at;
+  // Boat's word on this machine, never an earlier one's: both are later than the stop they describe.
+  const after = (at: Date | null | undefined) => at instanceof Date && !!lastStop && at >= lastStop;
+  const gone = !row.boat_sandbox_id || !lastStop || after(row.machine_gone_at)
+    || (after(row.machine_data_expired_at) && row.machine_data_expired_at!.getTime() <= now)
+    || lastStop.getTime() + (woken ? 14 : 24) * DAY_MS <= now;
+  return gone ? "pushed" : "all";
 }
 export { workspace as cloudV2WorkspaceFromRow };
 
@@ -1884,6 +1921,127 @@ export class CloudV2Store {
     });
   }
 
+  /** Retention S4, phase one of a backup's removal: for up to `limit` archived, sleeping workspaces whose removal
+   * date has come, one statement clears the row's backup (object, sealed key, digest) and records the object for
+   * deletion. Rechecks the archive and the sleeping state in that statement, so an open in flight keeps its backup. */
+  async claimBackupRemovals(limit: number): Promise<{ id: string; workspaceId: string; object: string }[]> {
+    const { rows } = await withSystemTx(this.pool, tx => tx.query<{ id: string; workspace_id: string; object: string }>(
+      `WITH due AS MATERIALIZED (
+         SELECT w.id, w.checkpoint_object AS object FROM cloud_v2_workspaces w
+         WHERE w.archived_at IS NOT NULL AND w.state IN ('stopped','failed') AND w.checkpoint_object IS NOT NULL
+           AND w.retention_started_at IS NOT NULL AND ${CLOUD_V2_BACKUP_REMOVAL_AT_SQL} <= clock_timestamp()
+           AND w.maintenance_attempt IS NULL AND NOT w.restore_pending AND w.checkpoint_retry_fork IS NULL
+         ORDER BY ${CLOUD_V2_BACKUP_REMOVAL_AT_SQL} LIMIT $1 FOR UPDATE SKIP LOCKED
+       ), cleared AS (
+         UPDATE cloud_v2_workspaces w SET checkpoint_object=NULL, checkpoint_key=NULL, checkpoint_sha256=NULL, checkpoint_bytes=NULL,
+             checkpoint_saved_at=NULL, checkpoint_reuse=NULL, checkpoint_stop_generation=NULL
+           FROM due WHERE w.id=due.id AND w.archived_at IS NOT NULL AND w.state IN ('stopped','failed') AND w.checkpoint_object=due.object
+           AND NOT w.restore_pending
+           RETURNING w.id, due.object
+       )
+       INSERT INTO cloud_v2_backup_removals (workspace_id, object) SELECT id, object FROM cleared
+       RETURNING id, workspace_id, object`, [limit]));
+    return rows.map(row => ({ id: row.id, workspaceId: row.workspace_id, object: row.object }));
+  }
+
+  /** Phase two's work list: recorded removals not yet done, with the object the row holds now (a later stop's,
+   * which the prune must keep) and the upload horizon (an upload in flight waits). */
+  async pendingBackupRemovals(limit: number): Promise<{ id: string; workspaceId: string; object: string; current: string | null; uploadsUntil: string | null;
+    requestedAt: Date }[]> {
+    const { rows } = await withSystemTx(this.pool, tx => tx.query<{ id: string; workspace_id: string; object: string; current: string | null; checkpoint_uploads: Record<string, string>; requested_at: Date }>(
+      `SELECT r.id, r.workspace_id, r.object, w.checkpoint_object AS current, w.checkpoint_uploads, r.requested_at
+       FROM cloud_v2_backup_removals r JOIN cloud_v2_workspaces w ON w.id=r.workspace_id
+       WHERE r.done_at IS NULL ORDER BY r.requested_at LIMIT $1`, [limit]));
+    return rows.map(row => ({ id: row.id, workspaceId: row.workspace_id, object: row.object, current: row.current,
+      uploadsUntil: uploadHorizon(row.checkpoint_uploads), requestedAt: row.requested_at }));
+  }
+
+  /** Retention S4: the copies of a project whose GitHub connection was removed, for any the removal's trigger skipped
+   * (a copy another transaction held). Never waits; a record goes once its project has no copy building or ready. */
+  async retireDisconnectedCopies(limit: number): Promise<number> {
+    return withSystemTx(this.pool, async tx => {
+      const retired = await tx.query(`UPDATE cloud_v2_ready_copies SET state=CASE WHEN state='building' THEN 'failed' ELSE 'retired' END,
+          failure_reason=CASE WHEN state='building' THEN 'connection_removed' ELSE failure_reason END, updated_at=clock_timestamp()
+        WHERE id IN (SELECT c.id FROM cloud_v2_ready_copies c JOIN cloud_v2_disconnected_projects d ON d.project_id=c.project_id
+          WHERE c.state IN ('building','ready') ORDER BY c.id LIMIT $1 FOR UPDATE OF c SKIP LOCKED)`, [limit]);
+      await tx.query(`DELETE FROM cloud_v2_disconnected_projects d WHERE NOT EXISTS (SELECT 1 FROM cloud_v2_ready_copies c
+        WHERE c.project_id=d.project_id AND c.state IN ('building','ready'))`);
+      return retired.rowCount ?? 0;
+    });
+  }
+
+  async finishBackupRemoval(id: string): Promise<void> {
+    await withSystemTx(this.pool, tx => tx.query("UPDATE cloud_v2_backup_removals SET done_at=clock_timestamp() WHERE id=$1 AND done_at IS NULL", [id]));
+  }
+
+  /** Retention S4: a departed member's personal projects in an organization, as the membership trigger leaves them
+   * (their build secrets deleted, the project stamped), for any the trigger skipped; and a returned member's, the
+   * stamp cleared. Only that member's own personal projects. */
+  async sweepDepartedProjects(limit: number): Promise<void> {
+    await withSystemTx(this.pool, async tx => {
+      const away = `p.level='personal' AND NOT EXISTS (SELECT 1 FROM organization_members m WHERE m.org_id=p.org_id AND m.user_id=p.owner_user_id)`;
+      await tx.query(`DELETE FROM cloud_v2_ready_copy_secrets s WHERE s.project_id IN (SELECT p.id FROM cloud_projects p WHERE ${away} LIMIT $1)`, [limit]);
+      await tx.query(`UPDATE cloud_projects SET owner_left_at=clock_timestamp()
+        WHERE id IN (SELECT p.id FROM cloud_projects p WHERE p.owner_left_at IS NULL AND ${away} LIMIT $1 FOR UPDATE SKIP LOCKED)`, [limit]);
+      await tx.query(`UPDATE cloud_projects SET owner_left_at=NULL, retention_started_at=NULL
+        WHERE id IN (SELECT p.id FROM cloud_projects p WHERE p.owner_left_at IS NOT NULL AND p.level='personal'
+          AND EXISTS (SELECT 1 FROM organization_members m WHERE m.org_id=p.org_id AND m.user_id=p.owner_user_id) LIMIT $1 FOR UPDATE SKIP LOCKED)`, [limit]);
+    });
+  }
+
+  /** Retention S4: a departed member's personal project is deleted 60 days after the later of their departure and
+   * retention's first look at it (no clock from history). Its workspaces keep running without it, as when a
+   * project is removed; its copy was retired at the departure. */
+  async deleteDepartedProjects(limit: number): Promise<string[]> {
+    return withSystemTx(this.pool, async tx => {
+      await tx.query(`UPDATE cloud_projects SET retention_started_at=clock_timestamp()
+        WHERE id IN (SELECT id FROM cloud_projects WHERE owner_left_at IS NOT NULL AND retention_started_at IS NULL LIMIT $1 FOR UPDATE SKIP LOCKED)`, [limit]);
+      const { rows } = await tx.query<{ id: string }>(`SELECT p.id FROM cloud_projects p
+        WHERE p.owner_left_at IS NOT NULL AND p.retention_started_at IS NOT NULL
+          AND greatest(p.owner_left_at, p.retention_started_at) + make_interval(days => ${CLOUD_V2_BACKUP_REMOVAL_DAYS}) <= clock_timestamp()
+          AND NOT EXISTS (SELECT 1 FROM organization_members m WHERE m.org_id=p.org_id AND m.user_id=p.owner_user_id)
+        LIMIT $1 FOR UPDATE SKIP LOCKED`, [limit]);
+      const ids = rows.map(row => row.id);
+      if (!ids.length) return [];
+      await tx.query("UPDATE cloud_v2_workspaces SET project_id=NULL WHERE project_id = ANY($1::uuid[])", [ids]);
+      await tx.query("DELETE FROM cloud_projects WHERE id = ANY($1::uuid[])", [ids]);
+      return ids;
+    });
+  }
+
+  /** Retention S4's missed-wake alert: sleeping machines more than 12 days past their last stop, with no wake that
+   * found them gone since, alerted once per stop. Returns those newly alerted (at most `limit`) and how many are due. */
+  async missedWakes(limit: number): Promise<{ ids: string[]; total: number }> {
+    return withSystemTx(this.pool, async tx => {
+      const due = `w.state='stopped' AND w.boat_sandbox_id IS NOT NULL AND w.retention_started_at IS NOT NULL
+        AND greatest(w.machine_stopped_at, w.stopped_at) + interval '12 days' < clock_timestamp()
+        AND w.machine_data_expired_at IS NULL
+        AND NOT (w.archived_at IS NOT NULL AND w.archive_wake_done_at IS NOT NULL AND w.archive_wake_done_at >= w.archived_at)
+        AND NOT EXISTS (SELECT 1 FROM cloud_v2_maintenance_wakes m WHERE m.workspace_id=w.id AND m.kind='wake' AND m.outcome='gone'
+          AND m.started_at > greatest(w.machine_stopped_at, w.stopped_at))
+        AND (w.missed_wake_alerted_at IS NULL OR w.missed_wake_alerted_at < greatest(w.machine_stopped_at, w.stopped_at))`;
+      const total = (await tx.query<{ n: number }>(`SELECT count(*)::int AS n FROM cloud_v2_workspaces w WHERE ${due}`)).rows[0]!.n;
+      const { rows } = await tx.query<{ id: string }>(`UPDATE cloud_v2_workspaces SET missed_wake_alerted_at=clock_timestamp()
+        WHERE id IN (SELECT w.id FROM cloud_v2_workspaces w WHERE ${due} ORDER BY greatest(w.machine_stopped_at, w.stopped_at) LIMIT $1 FOR UPDATE SKIP LOCKED)
+        RETURNING id`, [limit]);
+      return { ids: rows.map(row => row.id), total };
+    });
+  }
+
+  /** Retention S4's orphan sweep: of these listed prefixes, which may be pruned (their workspace row exists and has
+   * been deleted for 7 days) and which have no row at all (never touched; reported). `empty`: the workspaces table
+   * has no row, so a listing must not be trusted at all. */
+  async accountCheckpointPrefixes(ids: readonly string[]): Promise<{ prunable: string[]; missing: string[]; empty: boolean }> {
+    return withSystemTx(this.pool, async tx => {
+      const empty = !(await tx.query("SELECT 1 FROM cloud_v2_workspaces LIMIT 1")).rowCount;
+      const { rows } = await tx.query<{ id: string; state: string; old: boolean }>(
+        `SELECT id::text, state, updated_at < clock_timestamp() - interval '7 days' AS old FROM cloud_v2_workspaces WHERE id = ANY($1::uuid[])`, [ids]);
+      const known = new Map(rows.map(row => [row.id, row]));
+      return { empty, prunable: ids.filter(id => known.get(id)?.state === "deleted" && known.get(id)?.old),
+        missing: ids.filter(id => !known.has(id)) };
+    });
+  }
+
   /** Retention S3: the scrub's environment files are back on the machine; a later start restores nothing. */
   async clearArchiveScrub(id: string, generation: string): Promise<void> {
     await withSystemTx(this.pool, tx => tx.query(
@@ -1927,6 +2085,7 @@ export class CloudV2Store {
           changed_since_stop_generation=CASE WHEN $6::boolean THEN stop_generation ELSE changed_since_stop_generation END,
           checkpoint_stop_generation=CASE WHEN $6::boolean AND checkpoint_stop_generation = stop_generation THEN NULL ELSE checkpoint_stop_generation END,
           machine_data_expired_at=coalesce($8::timestamptz, machine_data_expired_at),
+          machine_gone_at=CASE WHEN $4 = 'gone' THEN coalesce(machine_gone_at, clock_timestamp()) ELSE machine_gone_at END,
           worker_off_verified_generation=CASE WHEN $5::boolean THEN stop_generation ELSE worker_off_verified_generation END,
           worker_off_unverified_at=CASE WHEN $5::boolean THEN NULL WHEN $5::boolean IS FALSE THEN coalesce(worker_off_unverified_at, clock_timestamp())
             ELSE worker_off_unverified_at END

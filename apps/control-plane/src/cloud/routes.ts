@@ -21,6 +21,7 @@ import { HttpError } from "../authz.js";
 import { securityStreamAuthority } from "../security-events.js";
 import type { CloudV2Capabilities } from "./contract.js";
 import type { CloudV2InstalledRepository, CloudV2Store, CloudV2Workspace } from "./store.js";
+import { cloudV2RetentionListSignal } from "./store.js";
 import { CloudV2DraftSchema, CloudV2RecipeSchema, type CloudV2Computers } from "./computer.js";
 import { readCloudV2History } from "./history.js";
 import { CLOUD_V2_BRIDGE_PROTOCOL } from "./relay.js";
@@ -251,7 +252,7 @@ export function createCloudV2Routes(deps: CloudV2RouteDeps): Hono {
     const organizationId = uuid.safeParse(c.req.query("organizationId"));
     if (!organizationId.success) throw new HttpError(400, "invalid_request", "organizationId is required");
     const workspaces = await deps.store.list(organizationId.data, c.get("user").id);
-    return c.json({ workspaces: await documents(workspaces) });
+    return c.json({ workspaces: await documents(workspaces), ...cloudV2RetentionListSignal() });
   });
 
   /** The workspace page's read by its shareable address, `<slug>/w/<n>`. */

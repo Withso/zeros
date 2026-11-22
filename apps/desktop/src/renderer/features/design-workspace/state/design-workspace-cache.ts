@@ -2,7 +2,8 @@ import { useDesignWorkspaceUiStore } from "./design-workspace-ui";
 import type { DesignMovementGuard } from "@zeros/protocol/design-relocation";
 import { normalizeDesignPagesSnapshot } from "@zeros/protocol/design-pages";
 import { isDesignComponentVariantName } from "@zeros/protocol/design-path";
-import { isDesignComponentPartNodeId, refuseDesignComponentPartWrite } from "./design-component-parts";
+import { isDesignComponentPartNodeId, refuseDesignComponentPartWrite, refuseDesignInstanceHostStyleWrite } from "./design-component-parts";
+import { completeDesignRuntimeBindings, refuseDesignBoundStyleWrite } from "./design-component-bindings";
 import { forgetDesignLayerDisclosure } from "./design-layer-disclosure";
 import { rememberDesignDirectoryIdentity, setDesignKnownPagesReader, type DesignCanvasItemInput } from "../../../platform/bridge/design-bridge";
 // Canvas, inspector and the Layers panel consume one aggregate engine response.
@@ -77,7 +78,7 @@ import {
   presentDesignHistoryRuntime,
   setDesignHistoryPresentationOwnerReader,
 } from "./design-history-presentation";
-import { clearCommittedDesignLivePreviewStyles, designLivePreviewSequence } from "./design-live-preview";
+import { clearCommittedDesignLivePreviewStyles, noteDesignHistoryInput } from "./design-live-preview";
 import { designSourceVectorCache } from "../design-source-vector";
 import {
   designRuntimeFrameState,
@@ -1900,6 +1901,39 @@ export async function transferDesignNodeCached(
   });
 }
 
+/** The one fence for every node write the app makes: nothing names an
+ * instance's part or slot, and an instance host is styled only within its
+ * size and place. Hosts come from the confirmed snapshot, read synchronously,
+ * so the check never waits on the runtime. */
+function refuseDesignComponentWrite(
+  workspaceId: string,
+  file: string,
+  write: { nodeId: string; styles: Readonly<Record<string, string | null>> } | readonly unknown[],
+): void {
+  refuseDesignComponentPartWrite(Array.isArray(write) || !write ? write : (write as { nodeId: string }).nodeId);
+  if (!write) return;
+  const frame = designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data?.frames.find((candidate) => candidate.file === file);
+  refuseDesignInstanceHostStyleWrite(frame?.instances, write);
+  // What a control drives stays the control's, from the engine's bindings
+  // and what the runtime reported for the selected layer.
+  if (frame && typeof frame.sourceVersion === "string") refuseDesignBoundStyleWrite(workspaceId, frame as never, write);
+}
+
+/** Before the fence decides, the live runtime reports the winners of each
+ * written layer this generation has not (bounded in the bindings module);
+ * only frames a component or instances own read anything. */
+async function completeDesignComponentWrite(
+  workspaceId: string,
+  file: string,
+  write: { nodeId: string; styles: Readonly<Record<string, string | null>> } | readonly unknown[],
+): Promise<void> {
+  const frame = designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data?.frames.find((candidate) => candidate.file === file);
+  if (!frame || typeof frame.sourceVersion !== "string" || (!frame.component && !frame.instances)) return;
+  const runtime = designFrameRuntime(workspaceId, file);
+  if (!runtime) return;
+  await completeDesignRuntimeBindings(workspaceId, frame as never, write, (nodeId) => runtime.getNodeDetails(nodeId), runtime);
+}
+
 export async function updateDesignNodeStylesCached(
   workspaceId: string,
   input: {
@@ -1909,6 +1943,11 @@ export async function updateDesignNodeStylesCached(
     styles: Record<string, string | null>;
   },
 ): Promise<DesignMutationResultWire> {
+  try {
+    refuseDesignComponentWrite(workspaceId, input.frame, input);
+  } catch (error) {
+    return Promise.reject(error);
+  }
   return runLocalDesignMutation(workspaceId, async (assertOwner) =>
     executeWithFreshGenerationRetry(
       workspaceId,
@@ -1920,6 +1959,9 @@ export async function updateDesignNodeStylesCached(
       ),
       async (sourceVersion) => {
         assertOwner();
+        await completeDesignComponentWrite(workspaceId, input.frame, input);
+        assertOwner();
+        refuseDesignComponentWrite(workspaceId, input.frame, input);
         rememberDesignEditSelection(workspaceId, input.frame, sourceVersion);
         const beforeState = historyStateKey(
           designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data,
@@ -2389,7 +2431,7 @@ export function applyDesignEditCached(
       : staticIntent;
     if (intentFactory) assertIntentCurrent();
     if (!resolved) return null;
-    refuseDesignComponentPartWrite(resolved.operations);
+    refuseDesignComponentWrite(workspaceId, file, resolved.operations);
     const editSourceVersion = measured
       ? sourceVersion
       : preparedSourceVersion ?? resolveLocalFrameSourceVersion(workspaceId, file, sourceVersion);
@@ -2421,7 +2463,7 @@ export function applyDesignTransactionCached(
   },
 ): Promise<DesignApiMutationReplyWire> {
   try {
-    refuseDesignComponentPartWrite(transaction.operations);
+    refuseDesignComponentWrite(workspaceId, frame, transaction.operations);
   } catch (error) {
     return Promise.reject(error);
   }
@@ -2475,7 +2517,9 @@ async function applyPreparedDesignTransactionCached(
       presentation.ready = false;
       const transaction = await prepare({ assertCurrent });
       if (!transaction) return null;
-      refuseDesignComponentPartWrite(transaction.operations);
+      await completeDesignComponentWrite(workspaceId, frame, transaction.operations);
+      assertCurrent();
+      refuseDesignComponentWrite(workspaceId, frame, transaction.operations);
       const visual = transactionRuntimeAdoption(transaction, runtimeInserts, structurePreviewId);
       presentation.ready = !!visual && !visual.patch?.tokens && !visual.patch?.keyframes;
       assertCurrent();
@@ -2867,7 +2911,7 @@ async function applyDesignHistoryInLane(
   direction: "undo" | "redo",
 ): Promise<DesignApiMutationReplyWire> {
   const owner = designMutationOwner(workspaceId);
-  const livePreviewSequence = designLivePreviewSequence();
+  const livePreviewSequence = noteDesignHistoryInput(workspaceId);
   const view = useDesignWorkspaceUiStore.getState().byWorkspace[workspaceId];
   const selectionOwner = { ownerRevision: view?.ownerRevision, selectionEvent: view?.selectionEvent };
   const currentOwner = () => designMutationOwner(workspaceId) === owner;

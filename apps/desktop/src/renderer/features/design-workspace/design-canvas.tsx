@@ -55,7 +55,7 @@ import {
 
 import { retainDesignResource } from "./state/design-resource-counters";
 import { designFrameRuntime, waitForDesignFrameRuntime, type DesignFrameRuntimeConnection } from "../../platform/bridge/design-frame-runtime";
-import { applyDesignNodeAction } from "./state/design-node-actions";
+import { applyDesignNodeAction, captureDesignPendingDeletion, type DesignPendingDeletion } from "./state/design-node-actions";
 import {
   type DesignCanvasFrameWire,
   type DesignFrameGeometryWire,
@@ -122,6 +122,7 @@ import {
   designResizeAnchor,
   designResizeLayoutOffset,
   designResizeStyleAxes,
+  designUnboundResizeHandle,
   designRevealRectViewport,
   designGestureRectUnchanged,
   designSafeViewportRect,
@@ -213,7 +214,7 @@ import {
   type DesignMotionTimelineDraft,
 } from "./design-motion-timeline";
 import { canEditDesignNodeText } from "./design-node-capabilities";
-import { designComponentIdentityLabel, designComponentInstanceIdentity, designComponentSelectionIdentity, designComponentPartHost, designComponentTextLock, designFrameComponentPresentation, designFrameMissingComponents, designFrameOptionsProblem, isDesignComponentPartNodeId } from "./state/design-component-parts";
+import { designCanvasStyleToolsBlocked, designComponentIdentityLabel, designComponentInstanceIdentity, designComponentSelectionIdentity, designComponentPartHost, designComponentTextLock, designFrameComponentPresentation, designFrameMissingComponents, designFrameOptionsProblem, isDesignComponentPartNodeId } from "./state/design-component-parts";
 import { designDeclaredVariants, useDesignComponentVariantStore } from "./state/design-component-variants";
 import { resolveDesignSelectionShortcut } from "./design-selection-shortcuts";
 import { captureDesignFrameComponentCopy } from "./state/design-component-variants";
@@ -366,6 +367,8 @@ import {
   type DesignCanvasProps,
   type DesignCanvasZoomActions,
 } from "./design-workspace-types";
+import { designBoundSizeAxes, designDeleteBoundControls, designKeyboardResizeStyles, designSelectableLayerTree, designWithoutBoundStyles, rememberDesignRuntimeBindings } from "./state/design-component-bindings";
+import { DesignBoundDeleteDialog, useDesignBoundDelete } from "./design-bound-delete-dialog";
 
 type DesignCanvasHoverSample = {
   workspaceId: string;
@@ -660,12 +663,20 @@ export const DesignCanvas = React.memo(function DesignCanvas({
   // Motion uses the inspector's style target, including the outer frame root.
   // Selection, rather than runtime readback readiness, keeps the timeline open.
   const motionNodeDetails = selectedNodeDetails ?? frameLayoutOwnerDetails;
-  const motionTargetSelected = view.frameSelected || Boolean(view.selectedNodeId);
+  // A frame-root instance is its frame's root layer, named before its
+  // readback arrives.
+  const frameRootNodeId = selectedFrame?.componentIdentity?.kind === "instance"
+    ? selectedFrame.componentIdentity.nodeId
+    : frameLayoutOwnerDetails?.oid ?? null;
+  const componentStyleTarget = designCanvasStyleToolsBlocked(selectedFrame,
+    view.selectedNodeIds.length ? view.selectedNodeIds : [view.selectedNodeId ?? (view.frameSelected ? frameRootNodeId : null)]);
+  const motionTargetSelected = (view.frameSelected || Boolean(view.selectedNodeId)) && !componentStyleTarget;
   /** The one auto-layout owner whose padding and gaps the canvas edits: a
    * single selected layer, or the selected frame's root. A multi-selection
-   * has none — editing its primary alone would surprise. */
+   * has none — editing its primary alone would surprise — and nor does an
+   * instance host or part, whose padding and gaps are its main's. */
   const layoutOwnerDetails =
-    view.selectedNodeIds.length > 1
+    view.selectedNodeIds.length > 1 || componentStyleTarget
       ? null
       : (selectedNodeDetails ?? frameLayoutOwnerDetails);
   const layoutOwnerId = layoutOwnerDetails?.oid ?? null;
@@ -730,8 +741,8 @@ export const DesignCanvas = React.memo(function DesignCanvas({
       : undefined,
   );
   const selectedNavigationTree = useMemo(
-    () => designFrameLayerChildren(selectedRuntimeTree, selectedFrameRootId),
-    [selectedRuntimeTree, selectedFrameRootId],
+    () => designSelectableLayerTree(designFrameLayerChildren(selectedRuntimeTree, selectedFrameRootId), selectedFrame),
+    [selectedRuntimeTree, selectedFrameRootId, selectedFrame],
   );
   const selectedParentId = useMemo(
     () =>
@@ -2595,22 +2606,39 @@ export const DesignCanvas = React.memo(function DesignCanvas({
     await onDeleteFrame(frame);
   }, [workspaceId, onDeleteFrame]);
 
-  const deleteSelectedNode = useCallback(async () => {
+  const boundDelete = useDesignBoundDelete(workspaceId, active);
+  const { ask: askBoundDelete, confirmable: boundDeleteConfirmable } = boundDelete;
+  const deleteSelectedNode = useCallback(async (confirmed?: DesignPendingDeletion) => {
     if (!workspaceId || !folder) return;
+    // Before any branch that deletes: a confirmation must be this
+    // workspace's, for the selection it asked about, on the active surface.
+    if (confirmed && !boundDeleteConfirmable(confirmed)) return;
     const selected = designWorkspaceView(workspaceId);
     const frame = designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data?.frames.find(candidate => candidate.file === selected.selectedFrame);
     if (frame?.kind === "text") {
       await deleteSelectedFrame(frame);
       return;
     }
+    // A main's layer that controls drive (or one holding such layers) is
+    // deleted only once a person confirms; the selection stays meanwhile.
+    if (!confirmed && frame && typeof frame.sourceVersion === "string") {
+      const tree = useDesignRuntimeStore.getState().byWorkspace[workspaceId]?.frames[frame.file]?.snapshot?.tree ?? [];
+      const nodeIds = selected.selectedNodeIds.length ? selected.selectedNodeIds : selected.selectedNodeId ? [selected.selectedNodeId] : [];
+      const controls = designDeleteBoundControls(workspaceId, frame as never, tree, nodeIds);
+      const pending = controls.length ? captureDesignPendingDeletion(workspaceId) : null;
+      if (pending) {
+        askBoundDelete(controls, pending);
+        return;
+      }
+    }
     try {
-      const save = applyDesignNodeAction({ workspaceId, folder, action: "delete" });
+      const save = applyDesignNodeAction({ workspaceId, folder, action: "delete", ...(confirmed ? { expect: confirmed } : {}) });
       savedEditingSession?.retain(save);
       await save;
     } catch (error) {
       toast.error("Couldn't delete the element", { description: errorMessage(error) });
     }
-  }, [workspaceId, folder, deleteSelectedFrame, savedEditingSession]);
+  }, [workspaceId, folder, boundDeleteConfirmable, askBoundDelete, deleteSelectedFrame, savedEditingSession]);
 
   const navigateToNode = useCallback(
     (nodeId: string) => {
@@ -2944,6 +2972,12 @@ export const DesignCanvas = React.memo(function DesignCanvas({
         return false;
       }
       if (isDesignComponentPartNodeId(selectedNodeDetails.oid)) return true;
+      // An axis a control drives does not resize from the keyboard either:
+      // that key does nothing, and the other axis still resizes.
+      const bound = designBoundSizeAxes(workspaceId, selectedFrame, selectedNodeDetails.oid);
+      if (bound.width) deltaWidth = 0;
+      if (bound.height) deltaHeight = 0;
+      if (!deltaWidth && !deltaHeight) return true;
       const current = nudgeGestureRef.current;
       const gesture: NonNullable<typeof nudgeGestureRef.current> =
         current?.mode === "resize" &&
@@ -2983,10 +3017,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
         frame: gesture.frame.file,
         sourceVersion: gesture.frame.sourceVersion,
         nodeId: gesture.nodeId,
-        styles: preserveDesignLayoutPins(gesture.details, {
-          width: `${Math.max(1, Math.round(gesture.width + gesture.dw))}px`,
-          height: `${Math.max(1, Math.round(gesture.height + gesture.dh))}px`,
-        }),
+        styles: preserveDesignLayoutPins(gesture.details, designKeyboardResizeStyles(workspaceId, gesture)),
       }).catch(() => {});
       return true;
     },
@@ -3056,7 +3087,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
       }
       const updates = gesture.mode === "move"
         ? gesture.nodes.map((node) => ({ nodeId: node.nodeId, styles: designNodeMovementStyles(node.details, { x: gesture.dx, y: gesture.dy }) }))
-        : [{ nodeId: gesture.nodeId, styles: preserveDesignLayoutPins(gesture.details, { width: `${Math.max(1, Math.round(gesture.width + gesture.dw))}px`, height: `${Math.max(1, Math.round(gesture.height + gesture.dh))}px` }) }];
+        : [{ nodeId: gesture.nodeId, styles: preserveDesignLayoutPins(gesture.details, designKeyboardResizeStyles(workspaceId, gesture)) }];
       const operations: DesignOperation[] = updates.map((update) => ({ operationId: crypto.randomUUID(), type: "node.set-styles", nodeId: update.nodeId, styles: update.styles, scope: "auto", responsiveContext: "base", stateContext: "default" }));
       const result = await applyDesignEditCached(workspaceId, gesture.frame, { schemaVersion: 1, transactionId: `desktop:${crypto.randomUUID()}`, actor: { kind: "human", id: "desktop" }, intent: `Move ${updates.length} selected layers`, createdAt: Date.now(), operations }, {
         movementGuard: { sourceVersion: gesture.frame.sourceVersion, geometry: frameGeometry(gesture.frame) },
@@ -3276,7 +3307,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
     (
       event: React.PointerEvent<HTMLElement>,
       frame: DesignCanvasFrameWire,
-      mode: FrameGestureMode,
+      requestedMode: FrameGestureMode,
     ) => {
       if (
         !workspaceId ||
@@ -3286,6 +3317,20 @@ export const DesignCanvas = React.memo(function DesignCanvas({
         !event.isPrimary ||
         event.button !== 0
       ) {
+        return;
+      }
+      // A frame whose root is an instance keeps its box on the root: an axis
+      // a control drives does not resize from the frame edge either.
+      // A main's frame is its root's box too, so a control driving the root's
+      // size locks that edge the same way.
+      const rootInstance = frame.componentIdentity?.kind === "instance" ? frame.componentIdentity.nodeId
+        : frame.component ? useDesignRuntimeStore.getState().byWorkspace[workspaceId]?.frames[frame.file]?.snapshot?.frame.oid ?? null
+        : null;
+      const mode = requestedMode === "move" || !rootInstance ? requestedMode
+        : designUnboundResizeHandle(requestedMode, designBoundSizeAxes(workspaceId, frame, rootInstance));
+      if (!mode) {
+        event.preventDefault();
+        event.stopPropagation();
         return;
       }
       event.preventDefault();
@@ -3445,8 +3490,12 @@ export const DesignCanvas = React.memo(function DesignCanvas({
             });
         });
       };
+      // A root size a control drives stays the control's: only the other
+      // axis is written, or just the frame's box.
+      const unboundRootStyles = (styles: ReturnType<typeof designFrameResizeRootStyles>) =>
+        styles && resizeRoot ? designWithoutBoundStyles(workspaceId, frame, resizeRoot.oid, styles) as typeof styles : styles;
       const previewRootSizing = (geometry: DesignFrameGeometryWire) => {
-        const fixed = designFrameResizeRootStyles(resizeRoot, start, geometry);
+        const fixed = unboundRootStyles(designFrameResizeRootStyles(resizeRoot, start, geometry));
         paintDesignLabelText(
           badge,
           designSizeBadgeText(geometry.w, geometry.h, {
@@ -3725,11 +3774,11 @@ export const DesignCanvas = React.memo(function DesignCanvas({
             }, { isCurrent: ownerIsCurrent, movementGuard: { sourceVersion: acknowledgedFrame.sourceVersion, geometry: frameGeometry(acknowledgedFrame) } });
             return result.snapshot?.frames.find((candidate) => candidate.file === frame.file);
           }
-          const rootStyles = designFrameResizeRootStyles(
+          const rootStyles = unboundRootStyles(designFrameResizeRootStyles(
             resizeRoot,
             start,
             latest,
-          );
+          ));
           if (resizeRoot && rootStyles) {
             // A quick release must not let the drag's preview land after the
             // committed generation.
@@ -5263,12 +5312,12 @@ export const DesignCanvas = React.memo(function DesignCanvas({
           }
         }
       };
+      // An instance's axis a control drives stays the control's; the rest of
+      // the group, and its other axis, still resize.
       const updates = () =>
-        starts.map((start) => {
+        starts.flatMap((start) => {
           const rect = latestRects.get(start.details.oid) ?? start.details.rect;
-          return {
-            nodeId: start.details.oid,
-            styles: preserveDesignLayoutPins(start.details, {
+          const styles = designWithoutBoundStyles(workspaceId, frame, start.details.oid, preserveDesignLayoutPins(start.details, {
               position: start.position,
               left: `${Math.round(
                 start.left + rect.x - start.details.rect.x,
@@ -5288,8 +5337,8 @@ export const DesignCanvas = React.memo(function DesignCanvas({
                   rect.height,
                 ),
               )}px`,
-            }),
-          };
+            }));
+          return styles ? [{ nodeId: start.details.oid, styles }] : [];
         });
       // The whole group is one flight: its members must never land a frame apart.
       const loop = createDesignGestureLoop<unknown>({
@@ -5490,7 +5539,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
       event: React.PointerEvent<HTMLElement>,
       frame: DesignCanvasFrameWire,
       details: DesignRuntimeNodeDetails,
-      gestureMode: "move" | DesignResizeHandle,
+      requestedMode: "move" | DesignResizeHandle,
     ) => {
       if (
         !workspaceId ||
@@ -5500,6 +5549,15 @@ export const DesignCanvas = React.memo(function DesignCanvas({
         event.button !== 0 ||
         isDesignComponentPartNodeId(details.oid)
       ) {
+        return;
+      }
+      // An instance's axis a control drives is the control's: the handle
+      // resizes only the other one, and nothing when both are bound.
+      rememberDesignRuntimeBindings(workspaceId, frame, details);
+      const gestureMode = requestedMode === "move" ? requestedMode : designUnboundResizeHandle(requestedMode, designBoundSizeAxes(workspaceId, frame, details.oid));
+      if (!gestureMode) {
+        event.preventDefault();
+        event.stopPropagation();
         return;
       }
       if (gestureMode === "move") {
@@ -6834,7 +6892,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
           const tree =
             frame.kind === "text"
               ? rawTree
-              : designFrameLayerChildren(rawTree, runtimeSnapshot?.frame.oid);
+              : designSelectableLayerTree(designFrameLayerChildren(rawTree, runtimeSnapshot?.frame.oid), frame);
           const path = details ? designLayerPathIds(tree, details.oid) : [];
           const byId = new Map(
             flattenDesignLayerTree(tree).map((layer) => [
@@ -8809,6 +8867,8 @@ export const DesignCanvas = React.memo(function DesignCanvas({
                   // An instance's part is outlined only: no handle, and a
                   // click goes through to the frame to pick another part.
                   const partOutline = isDesignComponentPartNodeId(details.oid);
+                  // An instance's padding and gaps are its main's, not the canvas's to edit.
+                  const spacingToolsAllowed = !designCanvasStyleToolsBlocked(frame, [details.oid]);
                   const componentOwnerId = partOutline ? designComponentPartHost(details.oid) : details.oid;
                   const mainComponentRoot = frameComponentPresentation?.kind === "main" && componentOwnerId === selectedFrameRootId;
                   const instanceComponentIdentity = mainComponentRoot ? null : designComponentInstanceIdentity(frame, componentOwnerId, (file) =>
@@ -8917,11 +8977,13 @@ export const DesignCanvas = React.memo(function DesignCanvas({
                       <DesignOverlayGeometrySync overlay={overlayFrame} />
                       {primarySelection && !editingThisElement && !partOutline ? (
                         <>
-                          <span
-                            data-design-spacing-hover-zone=""
-                            className="absolute inset-0"
-                            aria-hidden="true"
-                          />
+                          {spacingToolsAllowed ? (
+                            <span
+                              data-design-spacing-hover-zone=""
+                              className="absolute inset-0"
+                              aria-hidden="true"
+                            />
+                          ) : null}
                           {motionTimelineOpen && currentMotionOverlay?.draft ? (
                             <DesignMotionCanvasOverlay
                               owner={motionOverlayOwner}
@@ -8947,7 +9009,8 @@ export const DesignCanvas = React.memo(function DesignCanvas({
                             componentKind={mainComponentRoot ? "main" : "instance"}
                             onSpacingPointerDown={
                               selectedElements.length === 1 &&
-                              activeTool === "select"
+                              activeTool === "select" &&
+                              spacingToolsAllowed
                                 ? (event, control) =>
                                     startInlineSpacingGesture(
                                       event,
@@ -9060,6 +9123,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
 
                 {frameSelectedOnly &&
                 frameLayoutOwnerDetails &&
+                !designCanvasStyleToolsBlocked(frame, [frameLayoutOwnerDetails.oid]) &&
                 workspaceId &&
                 activeTool === "select" &&
                 inlineTextEdit?.frame !== frame.file &&
@@ -9545,6 +9609,11 @@ export const DesignCanvas = React.memo(function DesignCanvas({
           open={themeEditorOpen}
           onOpenChange={setThemeEditorOpenWithFocus}
           onActiveThemeChange={changeActiveTheme}
+        />
+        <DesignBoundDeleteDialog
+          controls={boundDelete.controls}
+          onCancel={boundDelete.cancel}
+          onDelete={() => boundDelete.confirm((pending) => void deleteSelectedNode(pending))}
         />
       </div>
     </div>

@@ -3,12 +3,18 @@ import React, { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { DesignComponentIdentity, DesignFrameComponent, DesignFrameInstances } from "@zeros/protocol/design-catalog";
-import { designComponentPartNodeId, type DesignRuntimeNodeDetails, type DesignRuntimeSnapshot } from "@zeros/protocol/design-runtime";
+import { designComponentPartNodeId, designComponentSlotNodeId, type DesignRuntimeNodeDetails, type DesignRuntimeSnapshot } from "@zeros/protocol/design-runtime";
 
 const mocks = vi.hoisted(() => ({ runtime: vi.fn(), applyEdit: vi.fn(async () => ({})) }));
 vi.mock("../../../platform/bridge/design-frame-runtime", () => ({ designFrameRuntime: mocks.runtime }));
 vi.mock("../../../platform/bridge/active-bridge", () => ({ onActiveBridgeConnected: vi.fn(() => () => {}) }));
-vi.mock("../design-style-editor", () => ({ DesignStyleEditor: () => null }));
+// The style fields themselves are tested on their own; here, which ones the
+// inspector asks for, and where.
+vi.mock("../design-style-editor", async () => {
+  const { createElement } = await import("react");
+  return { DesignStyleEditor: ({ only, boundSize }: { only?: string; boundSize?: { x?: unknown; y?: unknown } }) =>
+    createElement("div", { "data-test-style-editor": only ?? "all" }, boundSize?.x as never, boundSize?.y as never) };
+});
 vi.mock("../state/design-workspace-cache", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../state/design-workspace-cache")>()),
   applyDesignEditCached: mocks.applyEdit,
@@ -77,7 +83,8 @@ function render(target: Target) {
     useDesignRuntimeStore.getState().publishSnapshot(target.workspaceId ?? "w", "/repo", target.file, snapshot, runtimeSourceVersion);
   }
   const selectedNodeIds = target.nodeId
-    ? target.nodeId === "mixed" ? ["chip-1", "other-node"] : [target.nodeId]
+    ? target.nodeId === "mixed" ? ["chip-1", "other-node"]
+      : target.nodeId === "mixed-part" ? [designComponentPartNodeId("chip-1", "cc-label"), "other-node"] : [target.nodeId]
     : [];
   reactRoot ??= createRoot(container);
   reactRoot.render(
@@ -237,30 +244,224 @@ describe("the Options section across new generations of the same target", () => 
     expect(container.querySelector('[data-design-component-options="instance"] [data-option-changed]')).not.toBeNull();
   });
 
-  it("uses a separate Use Default action to clear only the selected variant", async () => {
+  it("offers Default in the Variant menu only, with no separate Use Default button", async () => {
     const primary = element("zd-variant", { name: "primary", label: "Primary" });
     await show({ file: "home/page.html", nodeId: "chip-1", sourceVersion: V1,
       instances: instances(component(LABEL, RADIUS, primary), { "zd-variant": "primary" }) });
-    const useDefault = container.querySelector<HTMLButtonElement>("[data-design-options-use-default]")!;
-    act(() => useDefault.click());
-    expect(written()[0]!.operations).toContainEqual(expect.objectContaining({
-      type: "node.set-attribute", nodeId: "chip-1", attribute: "zd-variant", value: null,
-    }));
+    expect(container.querySelector("[data-design-options-variant]")).not.toBeNull();
+    expect(container.querySelector("[data-design-options-use-default]")).toBeNull();
+    expect(container.textContent).not.toContain("Use Default");
   });
 
-  it("offers whole-instance Style reset only from the instance root", async () => {
-    const styled = instances(CHIP, {}, "background: red");
-    await show({ file: "home/page.html", nodeId: "chip-1", sourceVersion: V1, instances: styled });
-    const styleTab = [...container.querySelectorAll<HTMLElement>('[role="tab"]')]
-      .find((tab) => tab.textContent?.trim() === "Style")!;
-    act(() => {
-      styleTab.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, button: 0 }));
-      styleTab.click();
-    });
-    expect(container.querySelector("[data-design-reset-style]")).not.toBeNull();
+  it("names an instance, its part and its slot in one header row whose one button is Edit main", async () => {
+    const header = () => container.querySelector<HTMLElement>("[data-design-inspector-header]")!;
+    const once = () => {
+      expect(container.querySelectorAll("[data-design-component-of]")).toHaveLength(1);
+      // Its one action is Edit main; the zoom sits here too when there are no tabs.
+      expect([...header().querySelectorAll("button")].filter((button) => !button.getAttribute("aria-label")?.startsWith("Canvas zoom"))).toHaveLength(1);
+      expect(header().querySelector("[data-design-edit-main]")?.textContent).toBe("Edit main");
+      expect(container.querySelector("[data-design-select-instance]")).toBeNull();
+      expect(container.querySelector("[data-design-part-reset]")).toBeNull();
+    };
+    const overridden = instances(CHIP);
+    overridden.hosts["chip-1"]!.overrides = { "cc-label": "opacity: 0.5" };
+    await show({ file: "home/page.html", sourceVersion: V1, instances: overridden,
+      componentIdentity: { kind: "instance", nodeId: "chip-1" }, runtime: null });
+    expect(header().getAttribute("data-design-component-of")).toBe("instance");
+    expect(container.querySelector("[data-design-inspector-title]")?.textContent).toBe("Chip/Default");
+    once();
+    expect(container.textContent).not.toContain("Instance ·");
 
-    await show({ file: "home/page.html", nodeId: designComponentPartNodeId("chip-1", "cc-label"), sourceVersion: V1, instances: styled });
+    await show({ file: "home/page.html", nodeId: designComponentPartNodeId("chip-1", "cc-label"), sourceVersion: V1,
+      instances: overridden, componentIdentity: { kind: "instance", nodeId: "chip-1" } });
+    expect(header().getAttribute("data-design-component-of")).toBe("part");
+    // The identity truncates; the layer's name has its own span that does not.
+    const title = container.querySelector<HTMLElement>("[data-design-inspector-title]")!;
+    expect(title.querySelector("[data-design-inspector-title-identity]")?.textContent).toBe("Chip/Default");
+    const layerName = title.querySelector<HTMLElement>("[data-design-inspector-title-layer]")!;
+    expect(layerName.textContent).toMatch(/^· \S/);
+    expect(layerName.className).toContain("shrink-0");
+    expect(title.querySelector("[data-design-inspector-title-identity]")!.className).toContain("truncate");
+    once();
+    expect(container.textContent).not.toContain("Part of");
+
+    await show({ file: "home/page.html", nodeId: designComponentSlotNodeId("chip-1", "extras"), sourceVersion: V1,
+      instances: overridden, componentIdentity: { kind: "instance", nodeId: "chip-1" } });
+    expect(header().getAttribute("data-design-component-of")).toBe("slot");
+    expect(container.querySelector("[data-design-inspector-title-layer]")?.textContent).toBe("· Extras slot");
+    once();
+    expect(container.textContent).not.toContain("Drop or draw layers");
+  });
+
+  it("shows no main-component scope row under a main's header", async () => {
+    await show({ file: "components/chip.html", sourceVersion: V1, component: CHIP,
+      componentIdentity: { kind: "main", name: "chip" }, runtime: null });
+    expect(container.querySelector('[data-design-component-options="main"]')).not.toBeNull();
+    expect(container.querySelector("[data-design-component-scope]")).toBeNull();
+    expect(container.textContent).not.toContain("changes update inheriting instances");
+  });
+
+  it("calls the section and its tab Controls, keeping the options wire names", async () => {
+    await show({ file: "components/chip.html", sourceVersion: V1, component: CHIP,
+      componentIdentity: { kind: "main", name: "chip" }, runtime: null });
+    const mainTabs = [...container.querySelectorAll<HTMLElement>('[role="tab"]')].map((tab) => tab.textContent?.trim());
+    expect(mainTabs).toContain("Controls");
+    expect(mainTabs).not.toContain("Options");
+    await show({ file: "home/page.html", sourceVersion: V1, instances: instances(CHIP, { label: "Hi" }),
+      componentIdentity: { kind: "instance", nodeId: "chip-1" }, runtime: null });
+    const section = container.querySelector<HTMLElement>('[data-design-component-options="instance"]')!;
+    expect(section.textContent).toContain("Controls");
+    expect(section.textContent).not.toMatch(/\bOptions\b/);
+    expect(section.querySelector("[data-design-options-reset]")?.getAttribute("aria-label")).toBe("Reset controls");
+
+    await show({ file: "components/chip.html", sourceVersion: V1, component: CHIP,
+      componentIdentity: { kind: "main", name: "chip" }, runtime: null });
+    expect(container.querySelector("[data-design-options-ask]")?.textContent?.trim()).toBe("Ask agent to change controls");
+  });
+
+  const tabs = () => [...container.querySelectorAll<HTMLElement>('[role="tab"]')].map((tab) => tab.textContent?.trim());
+  const editor = () => container.querySelector("[data-test-style-editor]")?.getAttribute("data-test-style-editor") ?? null;
+  const zoom = () => container.querySelector('[aria-label^="Canvas zoom"]');
+
+  it("shows an instance its Size and then its Controls, with no tabs and no Style or CSS", async () => {
+    await show({ file: "home/page.html", nodeId: "chip-1", sourceVersion: V1, instances: instances(CHIP) });
+    expect(tabs()).toEqual([]);
+    expect(zoom()).not.toBeNull();
+    const panel = container.querySelector<HTMLElement>("[data-design-options-panel]")!;
+    expect(panel.querySelector("[data-test-style-editor]")?.getAttribute("data-test-style-editor")).toBe("size");
+    const controls = panel.querySelector('[data-design-component-options="instance"]')!;
+    expect(panel.querySelector("[data-test-style-editor]")!.compareDocumentPosition(controls) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(container.querySelector("[data-design-style-panel]")).toBeNull();
+    expect(container.querySelector("[data-design-style-panel-css-mode]")).toBeNull();
     expect(container.querySelector("[data-design-reset-style]")).toBeNull();
+  });
+
+  it("treats a frame whose root is an instance as that instance: Size, then Controls, no tabs", async () => {
+    await show({ file: "home/copy.html", sourceVersion: V1, instances: instances(CHIP),
+      componentIdentity: { kind: "instance", nodeId: "chip-1" }, runtime: { rootOid: "chip-1" } });
+    expect(container.querySelector("[data-design-inspector-header]")?.getAttribute("data-design-component-of")).toBe("instance");
+    expect(tabs()).toEqual([]);
+    expect(zoom()).not.toBeNull();
+    const panel = container.querySelector<HTMLElement>("[data-design-options-panel]")!;
+    expect(panel.querySelector("[data-test-style-editor]")?.getAttribute("data-test-style-editor")).toBe("size");
+    expect(panel.querySelector('[data-design-component-options="instance"]')).not.toBeNull();
+    expect(container.querySelector("[data-design-style-panel]")).toBeNull();
+  });
+
+  const bound = (chip: DesignFrameComponent) => ({ ...chip,
+    bindings: { root: "root", layers: { root: { styles: { width: ["radius"] } }, "cc-label": { text: ["label"] } } } });
+
+  it("shows a part only the controls bound to it, and offers to add one on the main", async () => {
+    const record = instances(bound(CHIP));
+    await act(async () => {
+      render({ file: "home/page.html", nodeId: designComponentPartNodeId("chip-1", "cc-label"), sourceVersion: V1, instances: record,
+        componentIdentity: { kind: "instance", nodeId: "chip-1" } });
+      await loadDesignComponentOptions();
+    });
+    await act(async () => {});
+    const section = container.querySelector<HTMLElement>('[data-design-component-options="instance"]')!;
+    expect(field("Label")).not.toBeNull();
+    expect(radiusRow()).toBeNull();
+    expect(section.querySelector("[data-design-options-variant]")).toBeNull();
+    expect(section.querySelector("[data-design-options-ask-add]")?.textContent?.trim()).toBe("Ask agent to add a control");
+  });
+
+  it("keeps an instance's variant readable, offers Export on the instance only, and scopes a part's Reset to its own controls", async () => {
+    const record = instances(bound(CHIP), { label: "Go", radius: "12" });
+    await show({ file: "home/page.html", nodeId: "chip-1", sourceVersion: V1, instances: record });
+    const title = container.querySelector<HTMLElement>("[data-design-inspector-title]")!;
+    expect(title.querySelector("[data-design-inspector-title-identity]")?.textContent).toBe("Chip");
+    expect(title.querySelector("[data-design-inspector-title-variant]")?.textContent).toBe("/Default");
+    expect(title.querySelector("[data-design-inspector-title-variant]")!.className).toContain("shrink-0");
+    expect(container.querySelector("[data-design-export-section]")).not.toBeNull();
+    expect(container.querySelector("[data-design-component-actions]")).not.toBeNull();
+
+    await show({ file: "home/page.html", nodeId: designComponentPartNodeId("chip-1", "cc-label"), sourceVersion: V1, instances: record,
+      componentIdentity: { kind: "instance", nodeId: "chip-1" } });
+    expect(container.querySelector("[data-design-export-section]")).toBeNull();
+    expect(container.querySelector("[data-design-component-actions]")).toBeNull();
+    act(() => container.querySelector<HTMLButtonElement>("[data-design-options-reset]")!.click());
+    expect(written().at(-1)!.operations).toEqual([expect.objectContaining({ type: "node.set-attribute", nodeId: "chip-1", attribute: "label", value: null })]);
+  });
+
+  it("shows the control that drives an instance's width in Size, in place of W, and not again in Controls", async () => {
+    await show({ file: "home/page.html", nodeId: "chip-1", sourceVersion: V1, instances: instances(bound(CHIP)) });
+    const size = container.querySelector<HTMLElement>('[data-test-style-editor="size"]')!;
+    expect(size.querySelector('[data-design-embedded-controls] [aria-label="Radius"]')).not.toBeNull();
+    expect(container.querySelector('[data-design-component-options="instance"] [aria-label="Radius"]')).toBeNull();
+    expect(field("Label")).not.toBeNull();
+  });
+
+  it("shows a layer inside a main the controls bound to it, above its Style", async () => {
+    await show({ file: "components/chip.html", nodeId: "cc-label", sourceVersion: V1, component: bound(CHIP),
+      componentIdentity: { kind: "main", name: "chip" } });
+    expect(tabs()).toEqual([]);
+    const controls = container.querySelector<HTMLElement>('[data-design-style-panel] [data-design-component-options="main"]')!;
+    expect(controls.querySelector('input[aria-label="Label"]')).not.toBeNull();
+    expect(controls.querySelector('[aria-label="Radius"]')).toBeNull();
+    expect(controls.compareDocumentPosition(container.querySelector('[data-test-style-editor="all"]')!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    await show({ file: "components/chip.html", nodeId: "other-layer", sourceVersion: V1, component: bound(CHIP),
+      componentIdentity: { kind: "main", name: "chip" } });
+    expect(container.querySelector('[data-design-style-panel] [data-design-component-options]')).toBeNull();
+  });
+
+  it("gives a main Controls and Style, a layer inside it Style alone, and a plain layer Style and CSS", async () => {
+    await show({ file: "components/chip.html", sourceVersion: V1, component: CHIP, componentIdentity: { kind: "main", name: "chip" } });
+    expect(tabs()).toEqual(["Controls", "Style"]);
+    await show({ file: "components/chip.html", nodeId: "label-1", sourceVersion: V1, component: CHIP, componentIdentity: { kind: "main", name: "chip" } });
+    expect(tabs()).toEqual([]);
+    expect(zoom()).not.toBeNull();
+    expect(editor()).toBe("all");
+    expect(container.querySelector("[data-design-style-panel-css-mode]")).toBeNull();
+    await show({ file: "home/page.html", nodeId: "card", sourceVersion: V1, instances: instances(CHIP) });
+    expect(tabs()).toEqual(["Style", "CSS"]);
+    expect(editor()).toBe("all");
+    expect(container.querySelector("[data-design-component-options]")).toBeNull();
+  });
+
+  it("shows a part or slot its instance's Controls, and no Style, CSS or Size", async () => {
+    for (const nodeId of [designComponentPartNodeId("chip-1", "cc-label"), designComponentSlotNodeId("chip-1", "extras")]) {
+      await show({ file: "home/page.html", nodeId, sourceVersion: V1, instances: instances(CHIP, { label: "Hi" }) });
+      expect(tabs()).toEqual([]);
+      expect(container.querySelector('[data-design-component-options="instance"]')).not.toBeNull();
+      expect(field("Label")!.disabled).toBe(false);
+      expect(editor()).toBeNull();
+      expect(container.querySelector("[data-design-style-panel]")).toBeNull();
+    }
+    type(field("Label")!, "Go");
+    press(field("Label")!, "Enter");
+    expect(written().at(-1)!.operations).toEqual([expect.objectContaining({ type: "node.set-attribute", nodeId: "chip-1", attribute: "label", value: "Go" })]);
+  });
+
+  it("sizes several layers with an instance among them, and edits nothing when a part is among them", async () => {
+    await show({ file: "home/page.html", nodeId: "mixed", sourceVersion: V1, instances: instances(CHIP) });
+    expect(tabs()).toEqual([]);
+    expect(editor()).toBe("size");
+    expect(container.querySelector("[data-design-component-options]")).toBeNull();
+    await show({ file: "home/page.html", nodeId: "mixed-part", sourceVersion: V1, instances: instances(CHIP) });
+    expect(tabs()).toEqual([]);
+    expect(editor()).toBeNull();
+    expect(container.querySelector("[data-design-component-options]")).toBeNull();
+    expect(container.querySelector("[data-design-inspector-header]")).not.toBeNull();
+  });
+
+  it("counts older overrides apart from size and place, and resets them in one transaction", async () => {
+    const older = instances(CHIP, {}, "position: absolute; left: 10px; width: 200px; opacity: 0.5");
+    older.hosts["chip-1"]!.overrides = { "cc-label": "color: red" };
+    for (const nodeId of ["chip-1", designComponentPartNodeId("chip-1", "cc-label")]) {
+      await show({ file: "home/page.html", nodeId, sourceVersion: V1, instances: older });
+      const line = container.querySelector<HTMLElement>("[data-design-older-overrides]")!;
+      expect(line.getAttribute("data-design-older-overrides")).toBe("2");
+      expect(line.textContent).toContain("2 older overrides");
+    }
+    // One prepared transaction (its operations are tested with the helper).
+    act(() => container.querySelector<HTMLButtonElement>("[data-design-older-overrides-reset]")!.click());
+    expect(mocks.applyEdit).toHaveBeenCalledTimes(1);
+    expect((mocks.applyEdit.mock.calls[0] as unknown as [string, { file: string }, unknown])[1].file).toBe("home/page.html");
+    expect(typeof (mocks.applyEdit.mock.calls[0] as unknown as unknown[])[2]).toBe("function");
+
+    await show({ file: "home/page.html", nodeId: "chip-1", sourceVersion: V1, instances: instances(CHIP, {}, "width: 200px; left: 4px") });
+    expect(container.querySelector("[data-design-older-overrides]")).toBeNull();
   });
 
   it("shows Options for an explicit instance before any runtime snapshot exists", async () => {
@@ -342,23 +543,23 @@ describe("the Options section across new generations of the same target", () => 
     expect(container.textContent).toContain("Chip/Compact");
   });
 
-  it("retargets frame to inner part to ordinary without retaining Options", async () => {
+  it("retargets frame to inner part to ordinary, the part keeping its instance's Controls", async () => {
     await show({ file: "home/page.html", sourceVersion: V1, instances: instances(CHIP),
       componentIdentity: { kind: "instance", nodeId: "chip-1" }, runtime: null });
     expect(container.querySelector('[data-design-component-options="instance"]')).not.toBeNull();
     await show({ file: "home/page.html", nodeId: designComponentPartNodeId("chip-1", "cc-label"), sourceVersion: V1,
       instances: instances(CHIP), componentIdentity: { kind: "instance", nodeId: "chip-1" } });
-    expect(container.querySelector("[data-design-component-options]")).toBeNull();
-    expect(container.querySelector('[data-design-style-panel-header]')).not.toBeNull();
+    expect(container.querySelector('[data-design-component-options="instance"]')).not.toBeNull();
+    expect(container.querySelector('[data-design-inspector-header] [aria-label^="Canvas zoom"]')).not.toBeNull();
     await show({ file: "home/page.html", sourceVersion: V1, component: CHIP, instances: instances(CHIP), componentIdentity: null, runtime: null });
     expect(container.querySelector("[data-design-component-options]")).toBeNull();
   });
 
-  it("keeps mixed instance selections on Style instead of instance Options", async () => {
+  it("keeps mixed instance selections out of instance Controls", async () => {
     await show({ file: "home/page.html", nodeId: "mixed", sourceVersion: V1, instances: instances(CHIP),
       componentIdentity: { kind: "instance", nodeId: "chip-1" } });
     expect(container.querySelector("[data-design-component-options]")).toBeNull();
-    expect(container.querySelector('[data-design-style-panel-header]')).not.toBeNull();
+    expect(container.querySelector('[data-design-inspector-header] [aria-label^="Canvas zoom"]')).not.toBeNull();
   });
 
   it("does not write to the previous workspace after an owner switch", async () => {

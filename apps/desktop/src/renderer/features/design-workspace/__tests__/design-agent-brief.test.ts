@@ -3,6 +3,8 @@ import { describe, expect, it } from "vitest";
 import {
   designComponentOptionsBrief,
   designComponentOptionsFixBrief,
+  designComputedValueBrief,
+  designControlBoundValueBrief,
   designForcedValueBrief,
   designSourceFixBrief,
   designSyncBrief,
@@ -79,6 +81,33 @@ describe("Design agent briefs", () => {
       .toContain('forced by ".x" with !important');
   });
 
+  it("asks to change a value a control sets on the main, naming the main, the layer, the property and the controls", () => {
+    const brief = designControlBoundValueBrief({
+      directory: "Shop - Design", file: "badge.html", title: "Badge", layer: "Dot", nodeId: "badge-dot",
+      property: "background-color", label: "Fill", controls: ["Tone", "Ink"],
+    });
+    expect(brief.label).toBe("Change Fill on Badge");
+    expect(brief.text).toContain('main component "Badge" ("badge.html" in the Design directory "Shop - Design")');
+    expect(brief.text).toContain('layer "Dot" (data-oid "badge-dot")');
+    expect(brief.text).toContain('"background-color"');
+    expect(brief.text).toContain('the controls "Tone" and "Ink"');
+    expect(brief.text).toContain("Ask me what to change first");
+    expect(brief.text).toContain("Do not stage or commit.");
+    expect(designControlBoundValueBrief({ directory: "D", file: "f.html", title: "T", layer: "L", nodeId: "n", property: "color", label: "Text", controls: ["Ink"] }).text)
+      .toContain('the control "Ink"');
+  });
+
+  it("asks to change a value written with a CSS function on a layer with no CSS tab", () => {
+    const brief = designComputedValueBrief({ directory: "Shop - Design", frame: "button.html", layer: "Label", nodeId: "btn-label",
+      property: "width", label: "Width", value: "calc(100% - 24px)" });
+    expect(brief.label).toBe("Change Width on Label");
+    expect(brief.text).toContain('"button.html" in the Design directory "Shop - Design"');
+    expect(brief.text).toContain('layer "Label" (data-oid "btn-label")');
+    expect(brief.text).toContain('"width": "calc(100% - 24px)"');
+    expect(brief.text).toContain("Ask me what to change first");
+    expect(brief.text).toContain("Ask before changing application code.");
+  });
+
   it("asks to tidy a frame's changes made by hand through the skill, listing each one", () => {
     const brief = designTidyBrief({
       directory: "Shop - Design",
@@ -122,5 +151,18 @@ describe("Design agent briefs", () => {
       .toContain("the frame shows its last good render. Run design validate to see why.");
     expect(designComponentOptionsFixBrief({ directory: "D", frame: "a.html", title: "A", shows: "nothing", problems: [] }).text)
       .toContain("could not be applied; the frame shows nothing in its place. Run design validate to see why.");
+  });
+});
+
+describe("asking for a new control from an instance", () => {
+  it("names the main and its file, the layer when one is selected, and points at the skill's heading", async () => {
+    const { designComponentAddControlBrief } = await import("../design-agent-brief");
+    const brief = designComponentAddControlBrief({ directory: "Zeros - Design", file: "options/button.html", title: "Button",
+      layer: { id: "btn-label", name: "Label" } });
+    expect(brief.label).toBe("Add a control to Button");
+    expect(brief.text).toContain('"options/button.html"');
+    expect(brief.text).toContain('for its layer "Label" (data-oid "btn-label")');
+    expect(brief.text).toContain('Follow "Change a component\'s options" in the Zeros Design skill');
+    expect(designComponentAddControlBrief({ directory: "", file: "b.html", title: "B" }).text).not.toContain("for its layer");
   });
 });

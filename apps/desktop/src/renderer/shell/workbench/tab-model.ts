@@ -22,6 +22,7 @@ import {
   File as FileIcon,
   Bot,
   GitPullRequestArrow,
+  MessageSquare,
   Smartphone,
   Terminal,
   PenTool,
@@ -36,7 +37,8 @@ export type WorkbenchTabType =
   | "browser"
   | "terminal"
   | "files"
-  | "simulator";
+  | "simulator"
+  | "chat";
 export type ReviewSubtab =
   | "overview"
   | "description"
@@ -166,6 +168,8 @@ export interface WorkbenchTab {
   /** Simulator tab: the attached device, as DeviceHub names it. Absent shows
    * the setup screen; a device that no longer exists shows it too. */
   simulatorDeviceId?: string;
+  /** Side chat tab: the chat it shows. Its main-column tab is hidden. */
+  chatId?: string;
 }
 
 /** A bounded, per-workspace browser history used by the + quick-open menu.
@@ -517,6 +521,19 @@ export function createAgentsTab(): WorkbenchTab {
   };
 }
 
+/** A side chat, shown in the Workbench beside the chat it branched from. */
+export function createSideChatTab(chatId: string, title: string): WorkbenchTab {
+  return { id: nextId("chat"), type: "chat", title, chatId };
+}
+
+const NO_HOSTED_CHATS: ReadonlySet<string> = new Set();
+
+/** The chats a Workbench's side chat tabs show. */
+export function chatIdsHostedBy(tabs: readonly WorkbenchTab[] | undefined): ReadonlySet<string> {
+  const ids = tabs?.flatMap((tab) => (tab.type === "chat" && tab.chatId ? [tab.chatId] : []));
+  return ids?.length ? new Set(ids) : NO_HOSTED_CHATS;
+}
+
 /** The path a tab's strip icon resolves from, or null for the type's own glyph.
  *  A File tab showing a file wears that file's type glyph, as in the tree and
  *  mention pills; a blank tab keeps the generic one. */
@@ -571,6 +588,10 @@ export const TAB_TYPE_META: Record<WorkbenchTabType, TabTypeMeta> = {
     label: "Simulator",
     icon: Smartphone,
   },
+  chat: {
+    label: "Side chat",
+    icon: MessageSquare,
+  },
 };
 
 // Per-worktree tab state lives under ONE key as a { [folder]: slice } map (see
@@ -597,6 +618,7 @@ const CURRENT_TAB_TYPES = new Set<WorkbenchTabType>([
   "browser",
   "files",
   "simulator",
+  "chat",
 ]);
 const REVIEW_SUBTABS = new Set<ReviewSubtab>([
   "overview",
@@ -782,6 +804,7 @@ export function normalizeWorkbenchTabs(parsed: WorkbenchTab[]): WorkbenchTab[] {
   const closable: WorkbenchTab[] = tabs
     .filter((t) => {
       if (t.type === "simulator") return isSimulatorPlatform(t.simulatorPlatform);
+      if (t.type === "chat") return typeof t.chatId === "string" && !!t.chatId;
       if (t.type !== "terminal")
         return t.type === "files" || t.type === "browser";
       const id = t.terminalId;
@@ -801,6 +824,14 @@ export function normalizeWorkbenchTabs(parsed: WorkbenchTab[]): WorkbenchTab[] {
       return true;
     })
     .map((tab) => {
+      if (tab.type === "chat") {
+        return {
+          id: tab.id,
+          type: tab.type,
+          title: tab.title.trim().slice(0, 512) || "Side chat",
+          chatId: tab.chatId,
+        };
+      }
       if (tab.type === "simulator") {
         // Only its own identity survives: a simulator tab never carries file,
         // browser or terminal state, whatever an older build or an edit left.

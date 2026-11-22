@@ -21,7 +21,8 @@ import {
   type ComponentExpressionBudget,
   type ComponentExpressionValue,
 } from "@zeros/design-core/components";
-import { DESIGN_COMPONENT_BOUND_TEXT_LIMIT, DESIGN_COMPONENT_RECORD_LIMITS } from "@zeros/protocol/design-catalog";
+import { DESIGN_COMPONENT_BOUND_TEXT_LIMIT, DESIGN_COMPONENT_RECORD_LIMITS, type DesignComponentBindings } from "@zeros/protocol/design-catalog";
+import { componentBindingsOf } from "./component-bindings";
 import { designSlotOptionElement, designSlotsOfNodes, withDesignSlotOptions } from "./component-slots";
 
 export const COMPONENT_TEMPLATE_LIMITS = Object.freeze({
@@ -196,7 +197,8 @@ export function renderComponentTemplate(markup: string, options: ComponentTempla
     }
     if (element.tagName === "template" && (condition !== undefined || element.attrs.some((entry) => entry.name === "data-zd-for"))) {
       // A template used only to wrap: its content stands in for it.
-      return emitChildren((element as Template).content.childNodes, scope, copy, loops);
+      // One in foreign content (SVG metadata) has no template content.
+      return emitChildren((element as Partial<Template>).content?.childNodes ?? element.childNodes, scope, copy, loops);
     }
     const repeated = copy.some((index) => index !== 0);
     if (!location) return emitChildren(element.childNodes, scope, copy, loops);
@@ -269,7 +271,7 @@ export function componentTemplateExpressions(markup: string, options: { document
           if (loop) found.push(loop[2]!.trim());
         } else holes(attribute.value);
       }
-      visit(element.tagName === "template" ? (element as Template).content.childNodes : element.childNodes);
+      visit(element.tagName === "template" ? (element as Partial<Template>).content?.childNodes ?? element.childNodes : element.childNodes);
       if (found.length > COMPONENT_TEMPLATE_LIMITS.holes * 4) return;
     }
   };
@@ -288,6 +290,9 @@ export interface DesignComponentSummary {
    * reads, through any derived value (none for a loop's own name). A person
    * cannot type over them. */
   boundText?: Record<string, string[]>;
+  /** Which controls each layer reads (component-bindings.ts). Sent only to
+   * renderers that negotiated them. */
+  bindings?: DesignComponentBindings;
 }
 
 /** The options an expression reads, through derived values. */
@@ -338,7 +343,7 @@ function boundTextOf(document: DefaultTreeAdapterTypes.Document, declaration: Re
           count += 1;
         }
       }
-      visit(element.tagName === "template" ? (element as Template).content.childNodes : element.childNodes);
+      visit(element.tagName === "template" ? (element as Partial<Template>).content?.childNodes ?? element.childNodes : element.childNodes);
     }
   };
   visit(document.childNodes);
@@ -371,5 +376,6 @@ export function designComponentSummaryOf(source: string): DesignComponentSummary
     }
   }
   const boundText = boundTextOf(document, declaration);
-  return { elements, reach: componentOptionReach(declaration, names), ...(boundText ? { boundText } : {}) };
+  const bindings = componentBindingsOf(document, declaration);
+  return { elements, reach: componentOptionReach(declaration, names), ...(boundText ? { boundText } : {}), ...(bindings ? { bindings } : {}) };
 }

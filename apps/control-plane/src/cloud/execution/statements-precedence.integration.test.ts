@@ -306,6 +306,35 @@ database("begin, lease and send refuse a removal exactly as before statements-1"
     await assertBeginRolledBack(begin, chatId, before);
   });
 
+  it("D1 begin rejects a payer account changed after selection and before its context is written, and rolls back", async () => {
+    // The race D1 can lose: the payer's revision commits after begin pinned it in the selection and before the INSERT, whose
+    // payer guard (0245) then refuses with 23514 cloud_execution_payer_changed. That is an authority change: 409 actor_changed.
+    const action = mutationActions().find(candidate => candidate.name === "payer-account")!;
+    const chatId = "before-insert-payer-account";
+    const { input, begin } = await delivered(f.viewer, f.prompt(randomUUID(), { chatId }));
+    const before = await beginState(input.userMessageId, chatId);
+    assertInboxBeforeBegin(before);
+    const logins = f.cp.execution.deps.logins;
+    const forWorkspace = logins.forWorkspace.bind(logins);
+    let hookRuns = 0;
+    const spy = vi.spyOn(logins, "forWorkspace").mockImplementation(async (...args) => {
+      const result = await forWorkspace(...args);
+      // The first call builds the selection that the INSERT carries; commit the payer's change right after it.
+      if (args[3] === undefined && hookRuns++ === 0) {
+        const changed = await action.run();
+        expect(changed.rowCount, "payer account row count").toBe(action.expectedRows);
+      }
+      return result;
+    });
+    const response = await readBeginResponse(await f.worker("prompts/begin", begin, { features: features() }));
+    expect(hookRuns).toBe(1);
+    // The INSERT refused, so the re-check after it never ran.
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(response.status, JSON.stringify(response.body)).toBe(409);
+    expect(response.body.error?.code).toBe("actor_changed");
+    await assertBeginRolledBack(begin, chatId, before);
+  });
+
   it("D1 begin racing account and membership changes: no deadlock", async () => {
     const deadlocks = async () => { await new Promise(resolve => setTimeout(resolve, 1500));
       return Number((await pool.query("SELECT deadlocks FROM pg_stat_database WHERE datname=current_database()")).rows[0].deadlocks); };
