@@ -1268,6 +1268,11 @@ class DesignRuntimeConnectionImpl implements DesignFrameRuntimeConnection {
     this.destroy();
   }
 
+  /** Live and past a validated handshake. */
+  handshaken(): boolean {
+    return !this.destroyed && this.methods !== null;
+  }
+
   revive(): boolean {
     if (!this.destroyed || !this.teardownDeferred) return false;
     this.teardownDeferred = false;
@@ -1330,7 +1335,12 @@ export function connectDesignFrameRuntime(
   const source = iframe.contentWindow;
   if (!source) throw runtimeError("iframe has no content window");
   const key = frameKey(workspaceId, frame);
-  connectingByFrame.get(key)?.destroy();
+  // A document that may not take the frame (the displayed buffer reloading
+  // while its replacement connects) never displaces one that may: loading
+  // after it would otherwise strand the replacement until its watchdog.
+  const pending = connectingByFrame.get(key);
+  const yields = callbacks.isActive?.() === false && !!pending && pending.isActive();
+  if (!yields) pending?.destroy();
   const connection = new DesignRuntimeConnectionImpl(
     source,
     sourceVersion,
@@ -1353,9 +1363,12 @@ export function connectDesignFrameRuntime(
     },
   );
   // Even an HTTP error fires iframe.onload; only a validated handshake can transfer editable authority.
-  connectingByFrame.set(key, connection);
+  if (!yields) connectingByFrame.set(key, connection);
   connection.reinstate = () => {
-    if (!connection.revive()) return false;
+    // A retired connection comes back; so does one that yielded, handshook
+    // and was never registered, when the replacement it yielded to is gone.
+    const unregistered = connection.handshaken() && connectionsByFrame.get(key) !== connection && connectingByFrame.get(key) !== connection;
+    if (!connection.revive() && !unregistered) return false;
     const current = connectionsByFrame.get(key);
     if (current !== connection) {
       current?.retire();
