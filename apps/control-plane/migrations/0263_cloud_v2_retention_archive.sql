@@ -9,10 +9,11 @@ SET LOCAL lock_timeout = '5s';
 -- archive_reason: why archived_at is set ('manual', 'inactive', 'member_left'); shown only while archived.
 -- changed_since_stop_at/_generation: a maintenance wake found a file under a checkout newer than the stop's
 -- marker, so the stop's backup or clean probe no longer describes the machine.
--- final_backup_settled_generation: the archive's backup for that stop generation is settled (taken, not needed,
--- or its retries exhausted); the archived wake's scrub waits for it, bounded.
--- archive_scrub/_at/_generation: the archived wake removed logins and environment values from the machine
--- ('complete'), or only what had no other copy to lose ('partial'); an open after it restores from the backup.
+-- archive_scrub/_at/_generation: the archived wake removed logins and environment values from the machine.
+-- 'backup': the checkout's environment files too, which a settled backup holds; an open restores them from it
+-- before the worker starts. 'clean': nothing an open must restore (none listed, or a re-seed writes them back
+-- exactly). 'partial': environment files kept, having no other copy. The archive's final backup is settled
+-- (taken, not needed, or retries exhausted) by rule, not by a column; the scrub waits for it, bounded.
 ALTER TABLE cloud_v2_workspaces
   ADD COLUMN person_activity_at timestamptz,
   ADD COLUMN keep_set_at timestamptz,
@@ -20,8 +21,7 @@ ALTER TABLE cloud_v2_workspaces
   ADD COLUMN archive_reason text CHECK (archive_reason IN ('manual', 'inactive', 'member_left')),
   ADD COLUMN changed_since_stop_at timestamptz,
   ADD COLUMN changed_since_stop_generation bigint,
-  ADD COLUMN final_backup_settled_generation bigint,
-  ADD COLUMN archive_scrub text CHECK (archive_scrub IN ('complete', 'partial')),
+  ADD COLUMN archive_scrub text CHECK (archive_scrub IN ('backup', 'clean', 'partial')),
   ADD COLUMN archive_scrubbed_at timestamptz,
   ADD COLUMN archive_scrubbed_generation bigint,
   -- Boat's dataExpiredAt for the machine, when a maintenance wake's inspect reported one.
@@ -32,7 +32,7 @@ CREATE INDEX cloud_v2_workspaces_archive_scan ON cloud_v2_workspaces (org_id)
   WHERE archived_at IS NULL AND keep_set_at IS NULL AND state IN ('stopped', 'failed');
 ALTER TABLE cloud_v2_maintenance_wakes
   ADD COLUMN changed_since_stop boolean,
-  ADD COLUMN scrub text CHECK (scrub IN ('complete', 'partial'));
+  ADD COLUMN scrub text CHECK (scrub IN ('backup', 'clean', 'partial'));
 
 -- A member who leaves: their personal projects' workspaces in that organization are archived at once, whatever
 -- the retention switch says. One bounded statement that never waits for a row another transaction holds (SKIP

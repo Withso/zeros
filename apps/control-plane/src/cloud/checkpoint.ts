@@ -852,6 +852,38 @@ export function restoreCommand(input: RestoreInput & { downloadUrl: string }): s
   ].join("\n"))}`;
 }
 
+/** Retention S3: puts back, before the worker starts, the environment files an archive's scrub removed
+ * from the machine, from the backup that holds the person's own bytes. Only the first repository's
+ * environment part is applied (the seed journal is that repository's); nothing else in the archive is
+ * touched. One result line: zeros-environment-restored, or a zeros-checkpoint-error. */
+export function environmentRestoreCommand(input: CheckpointPaths & { key: Buffer; sha256: string; downloadUrl: string }): string {
+  if (!/^[0-9a-f]{64}$/.test(input.sha256)) throw new Error("Invalid checkpoint digest");
+  const url = https(input.downloadUrl);
+  return `bash -c ${quote([
+    ...prologue("restore", paths(input)),
+    "step=download",
+    `curl -fsS --retry 3 --retry-delay 2 --connect-timeout 10 --max-time 420 -o "$work/checkpoint.zck" ${quote(url)} || fail checkpoint_download_failed`,
+    `printf '%s  %s\\n' ${input.sha256} "$work/checkpoint.zck" | sha256sum -c --status || fail checkpoint_corrupt`,
+    `printf %s ${quote(dataKey(input.key))} > "$work/key"`,
+    "step=decrypt",
+    "node \"$work/stream.mjs\" decrypt \"$work/key\" \"$work/checkpoint.zck\" \"$work/plain\" || fail checkpoint_corrupt",
+    "rm -f \"$work/checkpoint.zck\" \"$work/key\"; c=\"$work/c\"; mkdir \"$c\"",
+    "tar -xzf \"$work/plain\" -C \"$c\" --no-same-owner environment.tar manifest || fail checkpoint_corrupt",
+    "rm -f \"$work/plain\"",
+    "[ \"$(head -n 1 \"$c/manifest\")\" = 'zeros-checkpoint 1' ] || fail checkpoint_corrupt",
+    "step=environment",
+    "mkdir \"$work/environment\"; tar -xf \"$c/environment.tar\" -C \"$work/environment\" --no-same-owner || fail checkpoint_corrupt",
+    `printf %s ${quote(b64(ENVIRONMENT_CHECKPOINT_SCRIPT))} | base64 -d > "$work/environment.mjs"`,
+    "node \"$work/environment.mjs\" restore \"$repo\" \"$work/environment\" || fail checkpoint_restore_failed",
+    "report zeros-environment-restored",
+  ].join("\n"))}`;
+}
+
+export function parseEnvironmentRestore(stdout: string): boolean {
+  const lines = stdout.split(/\r?\n/).filter(line => line.startsWith("zeros-environment-restored") || line.startsWith("zeros-checkpoint-error"));
+  return lines.length === 1 && lines[0] === "zeros-environment-restored";
+}
+
 export type CheckpointResult =
   /** A new object, with what a later stop can compare it by when the VM could tell. */
   | { ok: true; unchanged?: never; bytes: number; sha256: string; reuse?: CheckpointReuse }
