@@ -177,6 +177,15 @@ const CURRENT_RETRY_INTENT = `(b.retry_of IS NULL OR (
   AND NOT EXISTS(SELECT 1 FROM cloud_v2_computer_builds newer WHERE newer.org_id=b.org_id AND newer.version>b.version)))`;
 /** A create is waiting on this automatic base: it is a create's machine, not the sweep's, and goes first. */
 const AUTOMATIC_WAITED_ON = `EXISTS (SELECT 1 FROM cloud_v2_workspaces w WHERE w.computer_build_id=b.id AND w.org_id=b.org_id AND w.state='creating')`;
+/** Whether something will still start a machine from this build's snapshot: a workspace with no machine that is
+ * creating, or restoring from its checkpoint, on it; or a recovery about to create one from it. The one rule that keeps
+ * a build's snapshot (resources().pinned, for cleanup) and an organization's legacy build (releaseLegacyBuilds). */
+const pinnedBuild = (build: string, org: string) => `(EXISTS (SELECT 1 FROM cloud_v2_workspaces w WHERE w.computer_build_id=${build} AND w.org_id=${org}
+        AND w.boat_sandbox_id IS NULL AND (w.state='creating' OR (w.restore_pending AND w.state<>'deleted')))
+        OR EXISTS (SELECT 1 FROM cloud_v2_recovery_attempts a WHERE a.org_id=${org}
+          AND a.replacement_create->>'computerBuildId'=${build}::text AND a.replacement_sandbox_id IS NULL
+          AND a.replacement_create->>'createRejectedAt' IS NULL
+          AND (a.completed_at IS NULL OR a.replacement_create->>'createIssuedAt' IS NOT NULL)))`;
 const build = (row: Row): CloudV2Build => ({
   id: row.id, organizationId: row.org_id, version: row.version, recipe: row.recipe, state: row.state,
   builderSandboxId: row.builder_sandbox_id, snapshotId: row.snapshot_id, errorCode: row.error_code, createdBy: row.created_by,
@@ -565,8 +574,10 @@ export class CloudV2Computers {
       `UPDATE cloud_v2_computers c SET legacy_build_id = NULL
        WHERE c.legacy_build_id IS NOT NULL AND c.base_live_at < clock_timestamp() - interval '30 days'
          AND EXISTS (SELECT 1 FROM cloud_v2_computer_builds b WHERE b.id = c.active_build_id AND b.org_id = c.org_id AND b.base_only)
-         AND NOT EXISTS (SELECT 1 FROM cloud_v2_workspaces w WHERE w.org_id = c.org_id AND w.computer_build_id = c.legacy_build_id
-           AND w.state <> 'deleted')`));
+         -- Only what still starts a machine from its snapshot holds it: a workspace with no machine that is creating or
+         -- restoring from it, or a recovery about to create one (the rule cleanup keeps snapshots by). A workspace that
+         -- has its machine never reads the image again, and a restore re-pins to the active build (#1257).
+         AND NOT ${pinnedBuild("c.legacy_build_id", "c.org_id")}`));
     return rowCount ?? 0;
   }
 
@@ -1079,12 +1090,7 @@ export class CloudV2Computers {
     const { rows } = await withSystemTx(this.pool, tx => tx.query<Resources>(`SELECT b.*,
       EXISTS (SELECT 1 FROM cloud_v2_computers c WHERE c.active_build_id=b.id) AS active,
       EXISTS (SELECT 1 FROM cloud_v2_computers c WHERE c.legacy_build_id=b.id) AS legacy,
-      (EXISTS (SELECT 1 FROM cloud_v2_workspaces w WHERE w.computer_build_id=b.id AND w.org_id=b.org_id AND w.boat_sandbox_id IS NULL
-        AND (w.state='creating' OR (w.restore_pending AND w.state<>'deleted')))
-        OR EXISTS (SELECT 1 FROM cloud_v2_recovery_attempts a WHERE a.org_id=b.org_id
-          AND a.replacement_create->>'computerBuildId'=b.id::text AND a.replacement_sandbox_id IS NULL
-          AND a.replacement_create->>'createRejectedAt' IS NULL
-          AND (a.completed_at IS NULL OR a.replacement_create->>'createIssuedAt' IS NOT NULL))) AS pinned
+      ${pinnedBuild("b.id", "b.org_id")} AS pinned
       FROM cloud_v2_computer_builds b WHERE b.id=$1`, [id]));
     return rows[0] ?? null;
   }

@@ -549,6 +549,59 @@ d("ready copies: a safe switch-on", () => {
       await builder(on).tick();
       expect(await snapshotOf(pre.id)).toBeNull();
     });
+
+    it("after its 30 days, a stopped workspace on it no longer keeps it; it then opens from the live base, with or without a backup", async () => {
+      const pre = await preSwitchBuild();
+      const on = computersWith({ shared: true });
+      boat.snapshots.set(SHARED, new Map());
+      await on.ensureBase(org);
+      const live = (await computersWith({ shared: true }).overview(org)).activeBuildId!;
+      // Two workspaces created from the legacy build with the setting off, both stopped with their machines.
+      const ids: string[] = [];
+      for (const _ of [0, 1]) ids.push(((await offCreate()).response as unknown as { id: string }).id);
+      await pool.query("UPDATE cloud_v2_workspaces SET state='stopped', boat_sandbox_id='bx_' || substr(md5(id::text), 1, 10) WHERE id = ANY($1::uuid[])", [ids]);
+      await pool.query("UPDATE cloud_v2_computers SET base_live_at=clock_timestamp()-interval '31 days' WHERE org_id=$1", [org]);
+      // A machine already made never reads the image again: they hold nothing, and the legacy snapshot goes.
+      expect(await on.releaseLegacyBuilds()).toBe(1);
+      await builder(on).tick();
+      expect(await snapshotOf(pre.id)).toBeNull();
+      // Both machines lost; each opens from the live base: one rebuilt clean, one from its backup.
+      const [clean, backedUp] = ids as [string, string];
+      await pool.query("UPDATE cloud_v2_workspaces SET state='starting' WHERE id = ANY($1::uuid[])", [ids]);
+      await pool.query(`UPDATE cloud_v2_workspaces SET checkpoint_object=$2, checkpoint_key='{"sealed":"fixture"}', checkpoint_sha256=$3,
+        checkpoint_bytes=100, checkpoint_saved_at=clock_timestamp() WHERE id=$1`, [backedUp, `cloud-v2/checkpoints/${backedUp}/${randomUUID()}.zck`, "a".repeat(64)]);
+      const image = await store.pinRestoreImage(clean);
+      expect(image).not.toBeNull();
+      expect((await workspaceRow(clean)).computer_build_id).toBe(live);
+      const lost = (await pool.query<{ boat_sandbox_id: string }>("SELECT boat_sandbox_id FROM cloud_v2_workspaces WHERE id=$1", [backedUp])).rows[0]!.boat_sandbox_id;
+      const begun = await store.beginRestore(backedUp, lost, { attempt: randomUUID(), name: "zeros-restore", env: {} });
+      expect(begun).not.toBe("no_computer");
+      expect(begun).not.toBeNull();
+      expect((await workspaceRow(backedUp)).computer_build_id).toBe(live);
+    });
+
+    it("after its 30 days, still kept while a workspace is creating or restoring from it with no machine yet", async () => {
+      const pre = await preSwitchBuild();
+      const on = computersWith({ shared: true });
+      boat.snapshots.set(SHARED, new Map());
+      await on.ensureBase(org);
+      const restoring = ((await offCreate()).response as unknown as { id: string }).id;
+      const creating = ((await offCreate()).response as unknown as { id: string }).id;
+      await pool.query(`UPDATE cloud_v2_workspaces SET state='stopped', boat_sandbox_id=NULL, restore_pending=true, restore_attempt=gen_random_uuid(),
+        restore_create=jsonb_build_object('from', null, 'name', 'zeros-restore', 'env', '{}'::jsonb, 'requestedAt', clock_timestamp()), checkpoint_object=$2,
+        checkpoint_key='{"sealed":"fixture"}', checkpoint_sha256=$3, checkpoint_bytes=100, checkpoint_saved_at=clock_timestamp() WHERE id=$1`,
+        [restoring, `cloud-v2/checkpoints/${restoring}/${randomUUID()}.zck`, "a".repeat(64)]);
+      await pool.query("UPDATE cloud_v2_computers SET base_live_at=clock_timestamp()-interval '31 days' WHERE org_id=$1", [org]);
+      expect(await on.releaseLegacyBuilds()).toBe(0);
+      // The create gets its machine; the restore is still waiting for its own: kept.
+      await pool.query("UPDATE cloud_v2_workspaces SET boat_sandbox_id='bx_created01', state='running' WHERE id=$1", [creating]);
+      expect(await on.releaseLegacyBuilds()).toBe(0);
+      await builder(on).tick();
+      expect(await snapshotOf(pre.id)).not.toBeNull();
+      // The restore has its machine: nothing reads the legacy image any more.
+      await pool.query("UPDATE cloud_v2_workspaces SET boat_sandbox_id='bx_restored1', restore_pending=false, state='running' WHERE id=$1", [restoring]);
+      expect(await on.releaseLegacyBuilds()).toBe(1);
+    });
   });
 
   describe("with the setting on", () => {
