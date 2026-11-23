@@ -405,7 +405,8 @@ function repositoryCapture(environment: string | false, attachments = true, seed
     // Edits Git was told to ignore are still the user's work. A skip-worktree
     // file missing from disk is sparse, not deleted, so it keeps its mark.
     "  unhide() {",
-    "    { scratch ls-files -z -v | grep -z '^[a-z] ' || true; } | cut -z -c3- | scratch update-index -z --no-assume-unchanged --stdin",
+    // Called where errexit is off (`if ! { ... && unhide && addall; }`): a failed step must fail it, for the fallback below.
+    "    { scratch ls-files -z -v | grep -z '^[a-z] ' || true; } | cut -z -c3- | scratch update-index -z --no-assume-unchanged --stdin || return 1",
     "    while IFS= read -r -d '' path; do if [ -e \"$path\" ] || [ -L \"$path\" ]; then printf '%s\\0' \"$path\"; fi; done \\",
     "      < <(scratch ls-files -z -t | grep -z '^S ' | cut -z -c3- || true) | scratch update-index -z --no-skip-worktree --stdin",
     "  }",
