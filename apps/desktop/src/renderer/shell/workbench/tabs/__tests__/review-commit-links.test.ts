@@ -137,7 +137,7 @@ describe("Activity", () => {
     const onViewChecks = vi.fn();
     await act(async () => root.render(createElement(ReviewTimelineSection, {
       pr, prNumber: 42, commits: [commit(SHA, "failed")], timeline: [], loading: false, error: null,
-      scrollKey: "activity", hostLabel: "GitHub", onAddToChat: () => {}, onPostComment: async () => {}, onRetry: () => {},
+      scrollKey: "activity", hostLabel: "GitHub", onAddCommentsToChat: () => {}, cwd: "/repo", onPostComment: async () => {}, onRetry: () => {},
       checks: { checks: [failed("test (ubuntu-latest)", Date.now() - 1000)], deployments: [], total: 1, passed: 0, failed: 1, pending: 0 },
       chats: new Map([[SHA, { chatId: "c1", title: "Fix login redirect", agentId: "claude" }]]), onOpenChat, onViewChecks,
     })));

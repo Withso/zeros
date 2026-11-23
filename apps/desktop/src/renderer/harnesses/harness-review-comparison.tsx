@@ -219,7 +219,7 @@ setActiveBridge({
       if (fixtureParams.has("holdMetadata")) await metadataReady;
       result = {
         ...comparisonFor(Number(params.prNumber)),
-        threads: [],
+        threads: rich ? richThreads() : [],
         annotations: [],
         threadsTruncated: false,
         annotationsTruncated: false,
@@ -279,6 +279,31 @@ setActiveBridge({
     return { type: "WORKSPACE_RESPONSE", op, result };
   },
 } as unknown as RuntimeClient);
+
+// A review app's line comment with a reply, and a person's resolved one.
+function richThreads(): PrInlineReview["threads"] {
+  const comment = (id: string, login: string, kind: "human" | "bot", body: string, ago: number) => ({
+    id, databaseId: id.length, body, url: `https://github.com/example/fixture/pull/42#discussion_${id}`,
+    createdAt: Date.now() - ago, updatedAt: Date.now() - ago, commitSha: null,
+    author: { login, avatarUrl: null, kind },
+  });
+  return [
+    {
+      id: "PRRT_devin", path: "src/example.ts", side: "RIGHT", startLine: null, line: 2, originalStartLine: null, originalLine: 2,
+      isResolved: false, isOutdated: false, canResolve: true, canUnresolve: false, commentsTruncated: false,
+      context: "  return 'a';",
+      comments: [
+        comment("c1", "devin-ai-integration", "bot", "🔍 **Unbounded smoke wait** for reveal setting\n\nIf the fixture stops updating `data-text-reveal`, `watch` polls indefinitely.", DAY / 3),
+        comment("c2", "alex-morgan", "human", "Good catch, adding a timeout.", DAY / 5),
+      ],
+    },
+    {
+      id: "PRRT_priya", path: "src/example.ts", side: "LEFT", startLine: null, line: 2, originalStartLine: null, originalLine: 2,
+      isResolved: true, isOutdated: false, canResolve: false, canUnresolve: true, commentsTruncated: false,
+      comments: [comment("c3", "priya-shah", "human", "Why drop the base value?", DAY / 2)],
+    },
+  ];
+}
 
 async function refreshInline(prNumber: number): Promise<void> {
   await githubReviewCache.load(

@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, it } from "vitest";
 import { CHECKOUT_WARMUP_SCRIPT, checkoutWarmupCommand } from "./lifecycle.js";
+import { OFFLINE_GIT_ENV } from "./__fixtures__/offline-git.js";
 
 // The warm-up runs beside the worker's own checkout, so it must never write the
 // index, a submodule's index or anything else, nor run an fsmonitor command.
@@ -39,7 +40,7 @@ it("reads a restored checkout without changing its branch, index or files", asyn
 
 it("leaves a populated submodule's index and a configured fsmonitor alone", async () => {
   const root = await temporary("zeros-warmup-submodule-");
-  const env = { ...process.env, ...identity, GIT_CONFIG_NOSYSTEM: "1", HOME: root };
+  const env = { ...process.env, ...identity, GIT_CONFIG_NOSYSTEM: "1", ...OFFLINE_GIT_ENV, HOME: root };
   const git = (cwd: string, ...args: string[]) => execFileSync("git", args, { cwd, env, encoding: "utf8" });
   await mkdir(join(root, "sub")); await mkdir(join(root, "super"));
   git(join(root, "sub"), "init", "-q", "-b", "main"); await writeFile(join(root, "sub", "a.txt"), "a\n");

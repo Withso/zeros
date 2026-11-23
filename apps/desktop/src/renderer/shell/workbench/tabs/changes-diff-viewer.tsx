@@ -79,6 +79,14 @@ import type { CodeReviewExternalSource } from "@/renderer/features/code-review/r
 import { reviewContentRevision } from "@/renderer/features/code-review/review-anchors";
 import { ConflictNavigator } from "@/renderer/features/code-review/conflict-navigator";
 import {
+  cloudTargetForValue,
+  cloudWorkspaceKey,
+} from "@/renderer/platform/bridge/cloud-workspace-key";
+import {
+  consumeReviewCommentReveal,
+  useReviewCommentReveal,
+} from "@/renderer/features/code-review/review-comment-reveal";
+import {
   ConflictAnnotationView,
   conflictAnnotations,
   conflictRowsStyle,
@@ -143,6 +151,16 @@ function conflictCard(file: FileContents, readOnly: boolean): ConflictCard {
 }
 
 const initialData = new WeakMap<ChangedFile, ChangesDiffData>();
+/** Cloud keys compare case-insensitively; Local ids and roots are exact. */
+function revealOwner(value: string): string {
+  try {
+    const cloud = cloudTargetForValue(value);
+    return cloud ? cloudWorkspaceKey(cloud) : value;
+  } catch {
+    return value;
+  }
+}
+
 function initial(file: ChangedFile) {
   let data = initialData.get(file);
   if (!data) {
@@ -511,6 +529,42 @@ export function ChangesDiffViewer({
     });
     view.current?.scrollTo({ type: "item", id: selected, align: "start" });
   }, [active, selected, selectionRequest, scroller, byPath]);
+  // A comment pill or the Overview list asked for a line: once its file is
+  // a renderable diff here (seeded from the patch or hydrated), unfold it and
+  // bring the line (and its thread) up.
+  const reveal = useReviewCommentReveal(active);
+  const revealFence = useRef({ active, ownerKey });
+  revealFence.current = { active, ownerKey };
+  useLayoutEffect(() => {
+    if (!reveal || !scroller) return;
+    if (revealOwner(reveal.owner) !== revealOwner(workspaceId)) return;
+    if (!items.some((item) => item.id === reveal.path && item.type === "diff")) return;
+    consumeReviewCommentReveal(reveal.id);
+    setFolds((old) => {
+      if (old.all === old.exceptions.has(reveal.path)) return old;
+      const exceptions = new Set(old.exceptions);
+      if (old.all) exceptions.add(reveal.path);
+      else exceptions.delete(reveal.path);
+      return { ...old, exceptions };
+    });
+    // Consuming re-renders this effect, so the scroll must not be cancelled
+    // by its cleanup; it waits a frame for the unfolded item to lay out.
+    const target = reveal;
+    const owner = ownerKey;
+    requestAnimationFrame(() => {
+      // A retained viewer hidden or re-owned before the frame stays inert.
+      const fence = revealFence.current;
+      if (!fence.active || fence.ownerKey !== owner) return;
+      view.current?.scrollTo({
+        type: "line",
+        id: target.path,
+        lineNumber: target.line,
+        side: target.side === "old" ? "deletions" : "additions",
+        align: "center",
+      });
+      scroller.dataset.reviewRevealed = `${target.path}:${target.line}`;
+    });
+  }, [reveal, scroller, items, workspaceId, ownerKey]);
   const allCollapsed =
     files.length > 0 && files.every((file) => collapsed(file.path));
   const renderHeader = useCallback(

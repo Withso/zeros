@@ -15,6 +15,8 @@
 
 import { NodeViewWrapper, type NodeViewProps } from "@tiptap/react";
 import {
+  lazy,
+  Suspense,
   useCallback,
   useMemo,
   useEffect,
@@ -50,6 +52,19 @@ import {
 } from "./attachment-text-preview";
 import { ImageHoverCard, imagePreviewMimeType } from "../image-hover-card";
 import { filePillPath, openFilePill, warmFilePill } from "@/renderer/shell/workbench/file-pill-navigation";
+import {
+  parseReviewCommentReference,
+  reviewCommentLocation,
+  type ReviewCommentReference,
+} from "@/renderer/features/code-review/review-comment-reference";
+import { revealReviewComment } from "@/renderer/features/code-review/review-comment-open";
+
+// The preview renders Markdown; load it only when a comment pill opens one.
+const ReviewCommentPreviewDialog = lazy(() =>
+  import("@/renderer/features/code-review/review-comment-preview").then((module) => ({
+    default: module.ReviewCommentPreviewDialog,
+  })),
+);
 import { openSkillPill, warmSkillPill } from "@/renderer/shell/workbench/skill-pill-navigation";
 import { validSkillSource } from "../../../platform/skill-source";
 import { closeHistory } from "@tiptap/pm/history";
@@ -190,7 +205,84 @@ export function SkillPill(props: NodeViewProps) {
 
 export function AttachmentPill(props: NodeViewProps) {
   if (attachmentNodeIds(props.node.attrs).length > 1) return <AttachmentGroupPill {...props} />;
+  const reference = parseReviewCommentReference(props.node.attrs.reference);
+  if (reference) return <ReviewCommentPill {...props} reference={reference} />;
   return <SingleAttachmentPill {...props} />;
+}
+
+/** A pull request comment: its file (or "Comment") quietly, then its first
+ *  line. A line comment opens at its line in Changes; a conversation comment
+ *  opens its preview. The agent reads the attached file. */
+function ReviewCommentPill(props: NodeViewProps & { reference: ReviewCommentReference }) {
+  const { reference } = props;
+  const ctx = useComposerEditorContext();
+  const [previewOpen, setPreviewOpen] = useState(false);
+  // A retained composer that goes inactive closes its preview.
+  useEffect(() => {
+    if (!ctx.attachmentImagesActive) setPreviewOpen(false);
+  }, [ctx.attachmentImagesActive]);
+  const att = ctx.getAttachment(String(props.node.attrs.attachmentId));
+  const invalid = att ? !att.validation.ok : false;
+  const where = reviewCommentLocation(reference);
+  const name = reference.path ? reference.path.split("/").pop() ?? reference.path : "Comment";
+  const label = `${reference.author.name}: ${reference.title}`;
+  return (
+    <>
+      <Tooltip
+        label={
+          invalid && att?.validation.reason
+            ? `${label} — ${att.validation.reason}`
+            : `${reference.author.name} · ${reviewCommentLocation(reference, true) ?? `PR #${reference.prNumber}`}`
+        }
+      >
+        <NodeViewWrapper
+          as="span"
+          data-attachment-pill=""
+          data-review-comment-pill=""
+          contentEditable={false}
+          className={cn(
+            PILL_SHELL,
+            "composer-pill", COMPOSER_PILL_SPACING,
+            PILL_HOVER, props.selected && PILL_SELECTED,
+            invalid && "border-yellow-icon/40 hover:border-yellow-icon/40 text-fg2 opacity-85",
+          )}
+        >
+          <PillRemoveButton label={label} disabled={!ctx.editable} onRemove={() => removePill(props)}>
+            {reference.path ? (
+              <FileTypeIcon name={reference.path} kind="file" size={13} />
+            ) : (
+              <MessageSquare size={13} />
+            )}
+          </PillRemoveButton>
+          <Button
+            variant="ghost"
+            type="button"
+            aria-label={`Open comment: ${label}`}
+            disabled={!ctx.attachmentImagesActive}
+            onMouseDown={(event) => event.preventDefault()}
+            onClick={() => {
+              if (!revealReviewComment(ctx.cwd, reference)) setPreviewOpen(true);
+            }}
+            className="m-0 inline-flex min-w-0 items-center gap-1.5 border-0 bg-transparent p-0 font-[inherit] text-inherit hover:bg-transparent disabled:cursor-default disabled:opacity-100"
+          >
+            <span className="text-fg3 max-w-[10rem] shrink-0 truncate">
+              {where ? name : "Comment"}
+            </span>
+            <span className="max-w-[16rem] truncate">{reference.title}</span>
+          </Button>
+        </NodeViewWrapper>
+      </Tooltip>
+      {previewOpen && ctx.attachmentImagesActive ? (
+        <Suspense fallback={null}>
+          <ReviewCommentPreviewDialog
+            reference={reference}
+            open
+            onOpenChange={setPreviewOpen}
+          />
+        </Suspense>
+      ) : null}
+    </>
+  );
 }
 
 function AttachmentGroupPill(props: NodeViewProps) {

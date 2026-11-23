@@ -203,3 +203,18 @@ export function workspaceSubmoduleNotice(rows: readonly WorkspaceSubmoduleRow[])
   const named = skipped.slice(0, 8).map(row => `${row.path} (${row.reason ?? "not fetched"})`).join(", ");
   return `Some submodules weren't fetched: ${named}${skipped.length > 8 ? `, and ${skipped.length - 8} more` : ""}.`;
 }
+
+/**
+ * C4: the lifecycle's read-only token for one submodule a workspace fetches (its restore clones and fetches with it):
+ * only for a planned, non-public submodule ('fetch' row), minted as the worker's own route mints it, never for any
+ * other repository, the workspace's own included. `mint` makes the installation token (as the actor in shared
+ * execution, else the creator).
+ */
+export function lifecycleSubmoduleToken<W extends { id: string }>(pool: pg.Pool,
+  mint: (workspace: W, target: { repository: string; repositoryId: string }) => Promise<{ token: string; expiresAt: number }>) {
+  return async (workspace: W, repository: string): Promise<{ token: string; expiresAt: number }> => {
+    const target = await withSystemTx(pool, tx => workspaceSubmoduleSource(tx, workspace.id, repository));
+    if (!target) throw new HttpError(403, "github_repository_access_required", "This repository is not a submodule this workspace fetches.");
+    return readOnlyToken(await mint(workspace, target));
+  };
+}

@@ -7,8 +7,12 @@ import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   backupProbeCommand, CHECKPOINT_SAVED_REPORT, checkpointArchiveSteps, checkpointCommand, checkpointRestoreSteps, cloudV2CheckpointObject, environmentRestoreSteps, ignoredBaselineCommand, openCheckpointKey, parseBackupProbe, parseEnvironmentRestore, WORKER_SERVICE_OFF,
-  parseCheckpointResult, parseRestoreResult, restoreCommand, sealCheckpointKey, type CheckpointReuse, type RestoreInput,
+  heldSubmodulesCommand, parseCheckpointResult, parseRestoreResult, parseSubmoduleRestore, parseUnrestoredSubmodules, restoreCommand, sealCheckpointKey, SUBMODULE_PUSH_REFUSED, type CheckpointReuse, type RestoreInput,
+  type RestoreSubmodule,
 } from "./checkpoint.js";
+import { OFFLINE_GIT_ENV, pinnedEnv, pinnedPath } from "./__fixtures__/offline-git.js";
+import { restoreBranchCommand } from "./lifecycle.js";
+import { fetchPlannedSubmodules } from "../../../cloud-worker/src/workspace/submodules.js";
 
 const roots: string[] = [];
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
@@ -20,6 +24,7 @@ function fixture() {
   writeFileSync(gitconfig, "");
   const env = {
     PATH: process.env.PATH ?? "/usr/bin:/bin", LANG: "C.UTF-8", GIT_CONFIG_GLOBAL: gitconfig, GIT_CONFIG_NOSYSTEM: "1",
+    ...OFFLINE_GIT_ENV,
     GIT_AUTHOR_NAME: "Dev", GIT_AUTHOR_EMAIL: "dev@example.test", GIT_COMMITTER_NAME: "Dev", GIT_COMMITTER_EMAIL: "dev@example.test",
   };
   const git = (cwd: string, ...args: string[]) => execFileSync("git", args, { cwd, env, encoding: "utf8" }).trim();
@@ -49,7 +54,7 @@ function workspaces() {
 }
 
 function run(script: string[], env: NodeJS.ProcessEnv) {
-  const result = spawnSync("bash", ["-c", script.join("\n")], { env, encoding: "utf8" });
+  const result = spawnSync("bash", ["-c", [...pinnedPath(), ...script].join("\n")], { env: pinnedEnv(env), encoding: "utf8" });
   return { status: result.status, stdout: result.stdout };
 }
 
@@ -1747,4 +1752,620 @@ it("keeps every control-plane source file text: no NUL byte anywhere under src",
   };
   walk(join(__dirname, ".."));
   expect(offenders).toEqual([]);
+});
+
+// Real Git on several machines' worth of checkouts: some of these take seconds.
+// C4B: without submodules, the capture, the probe and the restore are byte for byte main's (first pinned at fb6bac9e,
+// after the errexit fix #1262; recomputed unchanged on main at cf8dc9c4), so every existing fingerprint and checkpoint
+// stays as it was.
+it("keeps the one-repository capture, probe and restore byte for byte as main's", () => {
+  const digest = (value: string) => createHash("sha256").update(value).digest("hex"), key = Buffer.alloc(32, 7);
+  expect({
+    archive: digest(checkpointArchiveSteps({ checkoutPath: "/home/user/acme/app", home: "/home/user", baseBranch: "main", key }).join("\n")),
+    probe: digest(backupProbeCommand(["/home/user/acme/app"], "/home/user")),
+    restore: digest(restoreCommand({ checkoutPath: "/home/user/acme/app", home: "/home/user", key, sha256: "a".repeat(64),
+      downloadUrl: "https://r2.example.test/get?sig=1", repositoryUrl: "https://github.com/acme/app.git", githubToken: "synthetic-token-0123456789" })),
+  }).toEqual({
+    archive: "053903c2aaf430b5845c9e74fe6da3a4d85995634a99facd3504a3be28678efe",
+    probe: "d13797b8ef26c61aa72a8b30c2bf83c8189448e7e3c8a97d2a5a5afef435f7ef",
+    restore: "0141e28d299a60bd65f1727044dd1701cac9d84368e31ccb393df2f020d3c008",
+  });
+});
+
+describe("a workspace's submodules (C4)", { timeout: 30_000 }, () => {
+  const digest = (name: string) => createHash("sha256").update(name).digest("hex");
+  /** A project's first repository with acme/lib at lib and lib's own acme/inner at lib/inner, each fetched the worker's way:
+   * a gitdir file in its folder, its Git directory under the superproject's .git/modules. */
+  function project() {
+    const f = fixture();
+    const make = (name: string, files: Record<string, string>) => {
+      const origin = join(f.root, `${name}.git`), seed = join(f.root, `seed-${name}`);
+      f.git(f.root, "init", "-q", "--bare", "-b", "main", origin);
+      f.git(f.root, "clone", "-q", origin, seed);
+      for (const [file, content] of Object.entries(files)) f.write(join(seed, file), content);
+      f.git(seed, "add", "-A"); f.git(seed, "commit", "-q", "-m", "base"); f.git(seed, "push", "-q", "origin", "main");
+      return { origin, seed, commit: f.git(seed, "rev-parse", "HEAD") };
+    };
+    const inner = make("inner", { "inner.txt": "inner\n" });
+    const lib = make("lib", { "lib.txt": "lib\n", ".gitignore": "*.log\n" });
+    f.git(lib.seed, "update-index", "--add", "--cacheinfo", `160000,${inner.commit},inner`);
+    f.git(lib.seed, "commit", "-q", "-m", "inner"); f.git(lib.seed, "push", "-q", "origin", "main");
+    lib.commit = f.git(lib.seed, "rev-parse", "HEAD");
+    const app = make("app", { "README.md": "app\n" });
+    f.git(app.seed, "update-index", "--add", "--cacheinfo", `160000,${lib.commit},lib`);
+    f.git(app.seed, "commit", "-q", "-m", "lib"); f.git(app.seed, "push", "-q", "origin", "main");
+    const oldHome = join(f.root, "old-home"), newHome = join(f.root, "new-home"), folder = (home: string) => join(home, "app", "app");
+    mkdirSync(join(oldHome, "app"), { recursive: true });
+    f.git(f.root, "clone", "-q", app.origin, folder(oldHome));
+    const gitDirs = { lib: `modules/${digest("lib")}`, inner: `modules/${digest("lib")}/modules/${digest("inner")}` };
+    const fetch = (repo: string, path: string, origin: string, gitDir: string, commit: string) => {
+      mkdirSync(join(repo, path), { recursive: true }); mkdirSync(dirname(join(repo, ".git", gitDir)), { recursive: true });
+      f.git(repo, "clone", "-q", "--no-checkout", "--no-recurse-submodules", "--template=", `--separate-git-dir=${join(repo, ".git", gitDir)}`, origin, join(repo, path));
+      f.git(join(repo, path), "-c", "advice.detachedHead=false", "checkout", "-q", "--detach", commit);
+    };
+    fetch(folder(oldHome), "lib", lib.origin, gitDirs.lib, lib.commit);
+    fetch(folder(oldHome), "lib/inner", inner.origin, gitDirs.inner, inner.commit);
+    const submodules = (home: string) => [
+      { position: 0, checkoutPath: join(folder(home), "lib"), repositoryPath: folder(home), gitDir: gitDirs.lib, baseCommit: lib.commit },
+      { position: 0, checkoutPath: join(folder(home), "lib", "inner"), repositoryPath: folder(home), gitDir: gitDirs.inner, baseCommit: inner.commit }];
+    return { ...f, lib, inner, app, oldHome, newHome, folder, gitDirs, submodules, fetch };
+  }
+  const save = (p: ReturnType<typeof project>, key: Buffer, out: string, submodules = p.submodules(p.oldHome)) => {
+    const result = run([...checkpointArchiveSteps({ checkoutPath: p.folder(p.oldHome), home: p.oldHome, baseBranch: "main", key, submodules }),
+      `cp "$work/checkpoint.zck" '${out}'`, CHECKPOINT_SAVED_REPORT], p.env);
+    return { ...result, parsed: parseCheckpointResult(result.stdout) };
+  };
+  /** The archive's parts, as a restore onto a fresh clone of the first repository unpacks them. */
+  const parts = (p: ReturnType<typeof project>, key: Buffer, out: string) => {
+    mkdirSync(join(p.newHome, "app"), { recursive: true });
+    if (!existsSync(p.folder(p.newHome))) p.git(p.root, "clone", "-q", p.app.origin, p.folder(p.newHome));
+    const result = run([...checkpointRestoreSteps({ checkoutPath: p.folder(p.newHome), home: p.newHome, key, sha256: sha(out), repositoryUrl: undefined },
+      [`cp '${out}' "$work/checkpoint.zck"`]), "report zeros-checkpoint-restored",
+      `{ printf 'manifest:'; grep '^submodule ' "$work/c/manifest" | tr '\\n' '|'; printf '\\nfiles:'; (cd "$work/c" && find submodules -type f 2>/dev/null | sort | tr '\\n' ' '); printf '\\n';`,
+      `  for k in 1 2; do if [ -f "$work/c/submodules/$k/repo.bundle" ]; then printf 'heads-%s:' "$k"; git bundle list-heads "$work/c/submodules/$k/repo.bundle" | cut -d' ' -f2 | sort | tr '\\n' ' '; printf '\\n'; fi; done; } >&3`], p.env);
+    return { ...result, parsed: parseRestoreResult(result.stdout) };
+  };
+
+  it("captures each submodule where the worker put it, its edits, index, stash, branch and detached commits, a nested one too", () => {
+    const p = project(), key = randomBytes(32), out = join(p.root, "checkpoint.zck"), lib = join(p.folder(p.oldHome), "lib");
+    // Work in lib: a commit on a branch of its own, a stash, a new commit at a detached HEAD, an edit, a staged file and an untracked one.
+    p.git(lib, "switch", "-q", "-c", "mine"); p.write(join(lib, "branch.txt"), "branch\n"); p.git(lib, "add", "branch.txt"); p.git(lib, "commit", "-q", "-m", "on mine");
+    p.git(lib, "-c", "advice.detachedHead=false", "checkout", "-q", "--detach", p.lib.commit);
+    p.write(join(lib, "lib.txt"), "stashed\n"); p.git(lib, "stash", "-q");
+    p.write(join(lib, "detached.txt"), "detached\n"); p.git(lib, "add", "detached.txt"); p.git(lib, "commit", "-q", "-m", "detached");
+    p.write(join(lib, "lib.txt"), "edited\n"); p.write(join(lib, "staged.txt"), "staged\n"); p.git(lib, "add", "staged.txt"); p.write(join(lib, "new.txt"), "new\n");
+    p.write(join(lib, "inner", "inner.txt"), "inner edited\n");
+    const saved = save(p, key, out);
+    expect(saved.parsed).toMatchObject({ ok: true });
+    // Nothing temporary stays in any checkout.
+    for (const repo of [p.folder(p.oldHome), lib, join(lib, "inner")]) expect(p.git(repo, "for-each-ref", "refs/zeros-checkpoint/")).toBe("");
+    const shown = parts(p, key, out);
+    expect(shown.parsed).toEqual({ ok: true });
+    const b64 = (value: string) => Buffer.from(value).toString("base64");
+    expect(shown.stdout).toContain(`manifest:submodule 1 0 ${b64("lib")} ${p.lib.commit} captured|submodule 2 0 ${b64("lib/inner")} ${p.inner.commit} captured|`);
+    expect(shown.stdout).toMatch(/files:submodules\/1\/manifest submodules\/1\/repo\.bundle submodules\/2\/manifest submodules\/2\/repo\.bundle/);
+    const heads = shown.stdout.split("\n").find(line => line.startsWith("heads-1:"))!;
+    for (const ref of ["refs/heads/mine", "refs/zeros-checkpoint/head", "refs/zeros-checkpoint/index", "refs/zeros-checkpoint/worktree", "refs/zeros-checkpoint/stash-0"])
+      expect(heads).toContain(ref);
+  });
+
+  it("skips an absent or empty folder with a line and still saves the repository; with none, the archive is exactly as before", () => {
+    const p = project(), key = randomBytes(32), out = join(p.root, "checkpoint.zck");
+    const gone = { position: 0, checkoutPath: join(p.folder(p.oldHome), "vendor", "gone"), repositoryPath: p.folder(p.oldHome),
+      gitDir: `modules/${digest("gone")}`, baseCommit: p.lib.commit };
+    const empty = { ...gone, checkoutPath: join(p.folder(p.oldHome), "vendor", "empty"), gitDir: `modules/${digest("empty")}` };
+    mkdirSync(empty.checkoutPath, { recursive: true });
+    p.write(join(p.folder(p.oldHome), "README.md"), "app edited\n");
+    expect(save(p, key, out, [gone, empty]).parsed).toMatchObject({ ok: true });
+    const shown = parts(p, key, out);
+    const b64 = (value: string) => Buffer.from(value).toString("base64");
+    expect(shown.stdout).toContain(`manifest:submodule 1 0 ${b64("vendor/gone")} ${p.lib.commit} absent|submodule 2 0 ${b64("vendor/empty")} ${p.lib.commit} empty|`);
+    expect(readFileSync(join(p.folder(p.newHome), "README.md"), "utf8")).toBe("app edited\n");
+    // No submodules: the same steps, so the same fingerprint, as before this change.
+    const input = { checkoutPath: p.folder(p.oldHome), home: p.oldHome, baseBranch: "main", key };
+    expect(checkpointArchiveSteps({ ...input, submodules: [] })).toEqual(checkpointArchiveSteps(input));
+  });
+
+  it("captures nothing from a folder that is not the worker's: its own clone, or a Git directory elsewhere", () => {
+    const p = project(), key = randomBytes(32), out = join(p.root, "checkpoint.zck"), lib = join(p.folder(p.oldHome), "lib");
+    // The person replaced lib with a clone of their own.
+    rmSync(lib, { recursive: true, force: true }); p.git(p.root, "clone", "-q", p.lib.origin, lib);
+    expect(save(p, key, out, [p.submodules(p.oldHome)[0]!]).parsed).toMatchObject({ ok: true });
+    const b64 = (value: string) => Buffer.from(value).toString("base64");
+    expect(parts(p, key, out).stdout).toContain(`manifest:submodule 1 0 ${b64("lib")} ${p.lib.commit} foreign|`);
+  });
+
+  describe("the restore", () => {
+    /** Git as GitHub answers it: https://github.com/acme/<name>.git is the fixture's <name>.git. Each clone or fetch is
+     * recorded with the credential Git could use (whether askpass answers with the token, never the token itself). */
+    function github(p: ReturnType<typeof project>, token: string) {
+      const bin = join(p.root, "github-bin"), log = join(p.root, "network.jsonl");
+      const script = `#!${process.execPath}
+const fs = require('node:fs'), cp = require('node:child_process');
+const args = process.argv.slice(2), log = ${JSON.stringify(log)};
+const network = args.includes('clone') || args.includes('fetch');
+if (network) {
+  const at = args.findIndex(arg => /^https:\\/\\/github\\.com\\/acme\\/[a-z]+\\.git$/.test(arg));
+  const askpass = process.env.GIT_ASKPASS || null;
+  let answers = null;
+  if (askpass) { try { answers = cp.execFileSync(askpass, ['Password for https://github.com: '], { encoding: 'utf8' }).trim() === ${JSON.stringify(token)} ? 'token' : 'other'; } catch { answers = 'failed'; } }
+  const tokenFile = process.env.ZEROS_RESTORE_TOKEN_FILE || null;
+  fs.appendFileSync(log, JSON.stringify({ op: args.includes('clone') ? 'clone' : 'fetch', repository: at < 0 ? null : args[at].slice(24, -4), askpass: !!askpass, answers,
+    noAskpass: args.includes('core.askPass='), noHelper: args.includes('credential.helper='), tokenFile: !!tokenFile,
+    argvSafe: !args.some(arg => arg.includes(${JSON.stringify(token)})) }) + '\\n');
+  if (at >= 0) args[at] = ${JSON.stringify(p.root)} + '/' + args[at].slice(24);
+  else if (args.some(arg => arg.startsWith('https:'))) process.exit(2);
+  args.unshift('-c', 'protocol.file.allow=always');
+  process.env.GIT_ALLOW_PROTOCOL = 'file:https';
+}
+const result = cp.spawnSync('/usr/bin/git', args, { stdio: 'inherit', env: process.env });
+process.exit(result.status ?? 1);
+`;
+      p.write(join(bin, "git"), script); chmodSync(join(bin, "git"), 0o755);
+      // Belt and braces: any https URL left unmapped resolves to a path no protocol rule allows, so nothing reaches a network.
+      return { env: { ...p.env, PATH: `${bin}:${p.env.PATH}`, GIT_CONFIG_COUNT: "1", GIT_CONFIG_KEY_0: "url./nonexistent/no-network/.insteadOf", GIT_CONFIG_VALUE_0: "https://" },
+        calls: () => existsSync(log) ? readFileSync(log, "utf8").trim().split("\n").map(line => JSON.parse(line)) : [] };
+    }
+    const TOKEN = ["synthetic", "submodule", "token", randomUUID()].join("-");
+    /** The plan at the new home: lib private, with its own token; inner public. */
+    const planned = (p: ReturnType<typeof project>, home: string, extra: Partial<Record<"lib" | "inner", Partial<RestoreSubmodule>>> = {}): RestoreSubmodule[] => {
+      const [lib, inner] = p.submodules(home);
+      return [{ ...lib!, repository: "acme/lib", githubToken: TOKEN, ...extra.lib }, { ...inner!, repository: "acme/inner", public: true, ...extra.inner }];
+    };
+    const load = (p: ReturnType<typeof project>, key: Buffer, from: string, env: NodeJS.ProcessEnv, submodules: RestoreSubmodule[], extra: Partial<RestoreInput> = {}) => {
+      const result = run([...checkpointRestoreSteps({ checkoutPath: p.folder(p.newHome), home: p.newHome, key, sha256: sha(from), repositoryUrl: undefined,
+        submodules, ...extra }, [`cp '${from}' "$work/checkpoint.zck"`]), "report zeros-checkpoint-restored"], env);
+      return { ...result, parsed: parseRestoreResult(result.stdout), unrestored: parseUnrestoredSubmodules(result.stdout) };
+    };
+    /** The person's work in both submodules, saved. */
+    const worked = () => {
+      const p = project(), key = randomBytes(32), out = join(p.root, "checkpoint.zck"), lib = join(p.folder(p.oldHome), "lib");
+      p.git(lib, "switch", "-q", "-c", "mine"); p.write(join(lib, "branch.txt"), "branch\n"); p.git(lib, "add", "branch.txt"); p.git(lib, "commit", "-q", "-m", "on mine");
+      p.git(lib, "-c", "advice.detachedHead=false", "checkout", "-q", "--detach", p.lib.commit);
+      p.write(join(lib, "lib.txt"), "stashed\n"); p.git(lib, "stash", "-q");
+      p.write(join(lib, "detached.txt"), "detached\n"); p.git(lib, "add", "detached.txt"); p.git(lib, "commit", "-q", "-m", "detached");
+      p.write(join(lib, "lib.txt"), "edited\n"); p.write(join(lib, "staged.txt"), "staged\n"); p.git(lib, "add", "staged.txt"); p.write(join(lib, "new.txt"), "new\n");
+      p.write(join(lib, "debug.log"), "ignored\n");
+      p.write(join(lib, "inner", "inner.txt"), "inner edited\n");
+      const was = { head: p.git(lib, "rev-parse", "HEAD"), mine: p.git(lib, "rev-parse", "mine"), stash: p.git(lib, "rev-parse", "refs/stash") };
+      expect(save(p, key, out).parsed).toMatchObject({ ok: true });
+      // A new machine: the first repository as the base gives it, with an empty folder for each gitlink.
+      mkdirSync(join(p.newHome, "app"), { recursive: true });
+      p.git(p.root, "clone", "-q", p.app.origin, p.folder(p.newHome));
+      return { p, key, out, was };
+    };
+    const expectRestored = (p: ReturnType<typeof project>, was: { head: string; mine: string; stash: string }) => {
+      const lib = join(p.folder(p.newHome), "lib"), inner = join(lib, "inner");
+      expect(p.git(lib, "rev-parse", "--absolute-git-dir")).toBe(join(p.folder(p.newHome), ".git", p.gitDirs.lib));
+      expect(p.git(lib, "rev-parse", "HEAD")).toBe(was.head);
+      expect(spawnSync("git", ["-C", lib, "symbolic-ref", "-q", "HEAD"], { env: p.env }).status).not.toBe(0);
+      expect(p.git(lib, "rev-parse", "mine")).toBe(was.mine);
+      expect(p.git(lib, "rev-parse", "refs/stash")).toBe(was.stash);
+      expect(readFileSync(join(lib, "lib.txt"), "utf8")).toBe("edited\n");
+      expect(readFileSync(join(lib, "detached.txt"), "utf8")).toBe("detached\n");
+      expect(readFileSync(join(lib, "debug.log"), "utf8")).toBe("ignored\n");
+      expect(sorted(p.git(lib, "diff", "--cached", "--name-only"))).toEqual(["staged.txt"]);
+      expect(sorted(p.git(lib, "diff", "--name-only", "--ignore-submodules=all"))).toEqual(["lib.txt"]);
+      expect(sorted(p.git(lib, "ls-files", "--others", "--exclude-standard"))).toEqual(["new.txt"]);
+      expect(p.git(inner, "rev-parse", "--absolute-git-dir")).toBe(join(p.folder(p.newHome), ".git", p.gitDirs.inner));
+      expect(readFileSync(join(inner, "inner.txt"), "utf8")).toBe("inner edited\n");
+      // Pushing from either is refused with the worker's sentence.
+      for (const gitDir of [p.gitDirs.lib, p.gitDirs.inner]) {
+        const refused = spawnSync(join(p.folder(p.newHome), ".git", gitDir, "hooks", "pre-push"), { encoding: "utf8" });
+        expect({ status: refused.status, stderr: refused.stderr }).toEqual({ status: 1, stderr: `${SUBMODULE_PUSH_REFUSED}\n` });
+      }
+    };
+
+    it("puts each submodule back onto an empty machine: cloned the worker's way, its work tree, index, stash, branch and detached commit, a nested one too", () => {
+      const { p, key, out, was } = worked(), net = github(p, TOKEN);
+      const restored = load(p, key, out, net.env, planned(p, p.newHome));
+      expect(restored.parsed).toEqual({ ok: true });
+      expect(restored.unrestored).toEqual([]);
+      expectRestored(p, was);
+      // The private one through its own token; the public one with no credential at all.
+      const clones = net.calls().filter(call => call.op === "clone");
+      expect(clones).toEqual([
+        expect.objectContaining({ repository: "lib", askpass: true, answers: "token", noHelper: true, argvSafe: true }),
+        expect.objectContaining({ repository: "inner", askpass: false, noAskpass: true, noHelper: true, tokenFile: false })]);
+      expect(restored.stdout).not.toContain(TOKEN);
+      for (const gitDir of [p.gitDirs.lib, p.gitDirs.inner]) expect(readFileSync(join(p.folder(p.newHome), ".git", gitDir, "config"), "utf8")).not.toContain(TOKEN);
+      // Nothing of the restore stays behind: no work folder, so no token file.
+      expect(readdirSync(join(p.newHome, ".cache")).filter(name => name.startsWith("zeros-restore"))).toEqual([]);
+    });
+
+    it("restores into a folder whose Git directory is there but whose folder is empty, and into one the worker already fetched", () => {
+      const { p, key, out, was } = worked(), net = github(p, TOKEN), lib = join(p.folder(p.newHome), "lib");
+      // The worker's fetch (a fork of the project's build) of lib, then everything in its folder gone: the Git directory stays.
+      p.fetch(p.folder(p.newHome), "lib", p.lib.origin, p.gitDirs.lib, p.lib.commit);
+      for (const name of readdirSync(lib)) rmSync(join(lib, name), { recursive: true, force: true });
+      expect(existsSync(join(p.folder(p.newHome), ".git", p.gitDirs.lib))).toBe(true);
+      const restored = load(p, key, out, net.env, planned(p, p.newHome));
+      expect(restored).toMatchObject({ parsed: { ok: true }, unrestored: [] });
+      expectRestored(p, was);
+      // lib was not cloned again: only inner, whose folder was empty with no Git directory.
+      expect(net.calls().filter(call => call.op === "clone").map(call => call.repository)).toEqual(["inner"]);
+    });
+
+    it("opens with the rest restored when one submodule cannot be, names it once and leaves it for the worker to fetch", () => {
+      const { p, key, out } = worked(), net = github(p, TOKEN), inner = join(p.folder(p.newHome), "lib", "inner");
+      // inner's repository is gone from GitHub.
+      const restored = load(p, key, out, net.env, planned(p, p.newHome, { inner: { repository: "acme/gone" } }));
+      expect(restored).toMatchObject({ parsed: { ok: true }, unrestored: [2] });
+      expect(restored.stdout.split("\n").filter(line => line.startsWith("zeros-submodule-unrestored"))).toEqual(["zeros-submodule-unrestored 2 checkpoint_repository_missing"]);
+      expect(readFileSync(join(p.folder(p.newHome), "lib", "lib.txt"), "utf8")).toBe("edited\n");
+      // Missing, as the worker fetches it: an empty folder and no Git directory.
+      expect(readdirSync(inner)).toEqual([]);
+      expect(existsSync(join(p.folder(p.newHome), ".git", p.gitDirs.inner))).toBe(false);
+    });
+
+    it("a pushed restore runs nothing for them: the branch from GitHub, then the worker's fetch puts each at the gitlink that branch records", async () => {
+      const p = project(), app = p.folder(p.oldHome), lib = join(app, "lib");
+      // The person moved lib to a newer commit they pushed, and pushed the workspace branch recording it.
+      p.write(join(p.lib.seed, "lib.txt"), "newer\n"); p.git(p.lib.seed, "add", "lib.txt"); p.git(p.lib.seed, "commit", "-q", "-m", "newer");
+      p.git(p.lib.seed, "push", "-q", "origin", "main");
+      const newer = p.git(p.lib.seed, "rev-parse", "HEAD");
+      p.git(lib, "fetch", "-q", "origin"); p.git(lib, "-c", "advice.detachedHead=false", "checkout", "-q", "--detach", newer);
+      p.git(app, "switch", "-q", "-c", "zeros/w"); p.git(app, "add", "lib"); p.git(app, "commit", "-q", "-m", "lib newer"); p.git(app, "push", "-q", "origin", "zeros/w");
+      // The machine is lost with nothing unpushed. A new one: the base's clone on main, an empty folder for each gitlink.
+      mkdirSync(join(p.newHome, "app"), { recursive: true });
+      const fresh = p.folder(p.newHome);
+      p.git(p.root, "clone", "-q", p.app.origin, fresh);
+      // The pushed restore (lifecycle restoreBranches): the workspace branch from GitHub, and nothing for any submodule.
+      const branch = spawnSync("bash", ["-c", [...pinnedPath(), restoreBranchCommand(fresh, "zeros/w")].join("\n")],
+        { env: pinnedEnv(p.env), input: "Authorization: Basic fixture\n", encoding: "utf8" });
+      expect(branch.status).toBe(0);
+      expect(restoreBranchCommand(fresh, "zeros/w")).not.toContain("lib");
+      // The worker's start: its branch, then each planned submodule still missing, at the gitlink its repository records.
+      p.git(fresh, "switch", "-q", "zeros/w");
+      expect(readdirSync(join(fresh, "lib"))).toEqual([]);
+      p.write(p.env.GIT_CONFIG_GLOBAL, `[url "${p.lib.origin}"]\n\tinsteadOf = https://github.com/acme/lib.git\n[url "${p.inner.origin}"]\n\tinsteadOf = https://github.com/acme/inner.git\n[protocol "file"]\n\tallow = always\n`);
+      const plan = (["lib", "lib/inner"] as const).map((path, index) => ({ position: 0, path, repository: index ? "acme/inner" : "acme/lib",
+        commit: index ? p.inner.commit : p.lib.commit, gitDir: index ? p.gitDirs.inner : p.gitDirs.lib }));
+      expect(await fetchPlannedSubmodules(fresh, plan, p.env, { onlyMissing: true })).toEqual([{ path: "lib", fetched: true }, { path: "lib/inner", fetched: true }]);
+      expect(p.git(join(fresh, "lib"), "rev-parse", "HEAD")).toBe(newer);
+      expect(readFileSync(join(fresh, "lib", "lib.txt"), "utf8")).toBe("newer\n");
+      expect(p.git(join(fresh, "lib", "inner"), "rev-parse", "HEAD")).toBe(p.inner.commit);
+      expect(p.git(fresh, "status", "--porcelain")).toBe("");
+    });
+
+    describe("what counts as the person's: the gitlink alone, less the clone's copies of GitHub's branches", () => {
+      /** GitHub's lib moves on after the create; the old machine's lib fetched it, its local main at GitHub's tip. */
+      const moved = () => {
+        const p = project(), lib = join(p.folder(p.oldHome), "lib");
+        p.write(join(p.lib.seed, "upstream.txt"), "upstream\n"); p.git(p.lib.seed, "add", "upstream.txt"); p.git(p.lib.seed, "commit", "-q", "-m", "upstream");
+        p.git(p.lib.seed, "push", "-q", "origin", "main");
+        p.git(lib, "fetch", "-q", "origin"); p.git(lib, "branch", "-f", "main", "origin/main");
+        return { p, lib, upstream: p.git(p.lib.seed, "rev-parse", "HEAD") };
+      };
+      const probed = (p: ReturnType<typeof project>) => {
+        const result = spawnSync("bash", ["-c", `eval "$1"`, "probe", backupProbeCommand([p.folder(p.oldHome)], p.oldHome, p.submodules(p.oldHome))], { env: p.env, encoding: "utf8" });
+        return parseBackupProbe(result.stdout);
+      };
+
+      it("is clean, and bundles none of GitHub's commits, with a local default branch ahead of the gitlink", () => {
+        const { p, upstream } = moved(), key = randomBytes(32), out = join(p.root, "checkpoint.zck");
+        expect(probed(p)).toBe("clean");
+        expect(save(p, key, out).parsed).toMatchObject({ ok: true });
+        const shown = parts(p, key, out);
+        const heads = shown.stdout.split("\n").find(line => line.startsWith("heads-1:"))!;
+        expect(heads).not.toContain("refs/heads/main");
+        // The bundle's own objects: GitHub's newer commit is not among them.
+        const scratch = join(p.root, "scratch.git"); p.git(p.root, "init", "-q", "--bare", scratch);
+        const bundle = join(p.root, "lib.bundle"), pack = join(p.root, "lib.pack");
+        run([...checkpointRestoreSteps({ checkoutPath: p.folder(p.newHome), home: p.newHome, key, sha256: sha(out), repositoryUrl: undefined },
+          [`cp '${out}' "$work/checkpoint.zck"`]), `cp "$work/c/submodules/1/repo.bundle" '${bundle}'`, "report zeros-checkpoint-restored"], p.env);
+        const bytes = readFileSync(bundle);
+        writeFileSync(pack, bytes.subarray(bytes.indexOf("\n\n") + 2));
+        p.git(scratch, "index-pack", "-o", join(p.root, "lib.idx"), pack);
+        const objects = execFileSync("git", ["show-index"], { input: readFileSync(join(p.root, "lib.idx")), encoding: "utf8" });
+        expect(objects).not.toContain(upstream);
+        expect(objects.trim().split("\n").length).toBeLessThan(12);
+      });
+
+      it("keeps a commit on that branch even after GitHub's branch moved back", () => {
+        const { p, lib } = moved(), key = randomBytes(32), out = join(p.root, "checkpoint.zck");
+        p.git(lib, "switch", "-q", "main"); p.write(join(lib, "mine.txt"), "mine\n"); p.git(lib, "add", "mine.txt"); p.git(lib, "commit", "-q", "-m", "mine");
+        const mine = p.git(lib, "rev-parse", "HEAD");
+        expect(probed(p)).toBe("dirty");
+        expect(save(p, key, out).parsed).toMatchObject({ ok: true });
+        // GitHub's main is force-pushed back to the gitlink: the commit it held is gone from GitHub.
+        p.git(p.lib.seed, "push", "-q", "-f", "origin", `${p.lib.commit}:refs/heads/main`);
+        mkdirSync(join(p.newHome, "app"), { recursive: true }); p.git(p.root, "clone", "-q", p.app.origin, p.folder(p.newHome));
+        const net = github(p, TOKEN);
+        expect(load(p, key, out, net.env, planned(p, p.newHome).slice(0, 1))).toMatchObject({ parsed: { ok: true }, unrestored: [] });
+        expect(p.git(join(p.folder(p.newHome), "lib"), "rev-parse", "main")).toBe(mine);
+        expect(readFileSync(join(p.folder(p.newHome), "lib", "mine.txt"), "utf8")).toBe("mine\n");
+      });
+
+      it("restores commits on a feature branch whose upstream was squash-merged and deleted", () => {
+        const p = project(), lib = join(p.folder(p.oldHome), "lib"), key = randomBytes(32), out = join(p.root, "checkpoint.zck");
+        p.git(lib, "switch", "-q", "-c", "feature");
+        p.write(join(lib, "a.txt"), "pushed\n"); p.git(lib, "add", "a.txt"); p.git(lib, "commit", "-q", "-m", "pushed"); p.git(lib, "push", "-q", "origin", "feature");
+        p.write(join(lib, "b.txt"), "unpushed\n"); p.git(lib, "add", "b.txt"); p.git(lib, "commit", "-q", "-m", "unpushed");
+        const tip = p.git(lib, "rev-parse", "HEAD");
+        p.git(lib, "-c", "advice.detachedHead=false", "checkout", "-q", "--detach", p.lib.commit);
+        expect(probed(p)).toBe("dirty");
+        expect(save(p, key, out).parsed).toMatchObject({ ok: true });
+        // Squash-merged on GitHub and the branch deleted: its pushed commit is gone from GitHub too.
+        p.git(p.lib.seed, "push", "-q", "origin", ":refs/heads/feature");
+        mkdirSync(join(p.newHome, "app"), { recursive: true }); p.git(p.root, "clone", "-q", p.app.origin, p.folder(p.newHome));
+        const net = github(p, TOKEN);
+        expect(load(p, key, out, net.env, planned(p, p.newHome).slice(0, 1))).toMatchObject({ parsed: { ok: true }, unrestored: [] });
+        const restored = join(p.folder(p.newHome), "lib");
+        expect(p.git(restored, "rev-parse", "feature")).toBe(tip);
+        expect(p.git(restored, "log", "--format=%s", "-2", "feature")).toBe("unpushed\npushed");
+      });
+
+      it("counts a stash or a branch GitHub never had as the person's, as before", () => {
+        const { p, lib } = moved();
+        p.write(join(lib, "lib.txt"), "stashed\n"); p.git(lib, "stash", "-q");
+        expect(probed(p)).toBe("dirty");
+        const other = moved();
+        other.p.git(other.lib, "switch", "-q", "-c", "local-only", other.p.lib.commit);
+        other.p.git(other.lib, "commit", "-q", "--allow-empty", "-m", "x");
+        other.p.git(other.lib, "-c", "advice.detachedHead=false", "checkout", "-q", "--detach", other.p.lib.commit);
+        expect(probed(other.p)).toBe("dirty");
+      });
+    });
+
+    describe("a deinitialised submodule: its folder empty, its Git directory still the person's", () => {
+      /** `git submodule deinit -f lib`, as far as the disk goes: the folder emptied, its Git directory kept. */
+      const deinit = (p: ReturnType<typeof project>, lib: string) => { for (const name of readdirSync(lib)) rmSync(join(lib, name), { recursive: true, force: true }); };
+      const probed = (p: ReturnType<typeof project>) => parseBackupProbe(spawnSync("bash", ["-c", `eval "$1"`, "probe",
+        backupProbeCommand([p.folder(p.oldHome)], p.oldHome, p.submodules(p.oldHome).slice(0, 1))], { env: p.env, encoding: "utf8" }).stdout);
+
+      it("probes dirty, and its branch, detached HEAD and stash come back into its Git directory, the folder still empty", () => {
+        const p = project(), lib = join(p.folder(p.oldHome), "lib"), key = randomBytes(32), out = join(p.root, "checkpoint.zck");
+        p.git(lib, "switch", "-q", "-c", "mine"); p.write(join(lib, "m.txt"), "mine\n"); p.git(lib, "add", "m.txt"); p.git(lib, "commit", "-q", "-m", "mine");
+        p.git(lib, "-c", "advice.detachedHead=false", "checkout", "-q", "--detach", p.lib.commit);
+        p.write(join(lib, "lib.txt"), "stashed\n"); p.git(lib, "stash", "-q", "-m", "kept for later");
+        const was = { mine: p.git(lib, "rev-parse", "mine"), stash: p.git(lib, "rev-parse", "refs/stash") };
+        deinit(p, lib);
+        expect(probed(p)).toBe("dirty");
+        expect(save(p, key, out, p.submodules(p.oldHome).slice(0, 1)).parsed).toMatchObject({ ok: true });
+        mkdirSync(join(p.newHome, "app"), { recursive: true }); p.git(p.root, "clone", "-q", p.app.origin, p.folder(p.newHome));
+        const net = github(p, TOKEN);
+        expect(load(p, key, out, net.env, planned(p, p.newHome).slice(0, 1))).toMatchObject({ parsed: { ok: true }, unrestored: [] });
+        const gitDir = join(p.folder(p.newHome), ".git", p.gitDirs.lib), gd = (...args: string[]) => p.git(p.root, `--git-dir=${gitDir}`, ...args);
+        expect(gd("rev-parse", "mine")).toBe(was.mine);
+        expect(gd("rev-parse", "refs/stash")).toBe(was.stash);
+        expect(gd("log", "-g", "--format=%gs", "refs/stash")).toBe("On (no branch): kept for later");
+        expect(gd("rev-parse", "HEAD")).toBe(p.lib.commit);
+        expect(readdirSync(join(p.folder(p.newHome), "lib"))).toEqual([]);
+        expect(net.calls().map(call => call.repository)).toEqual(["lib"]);
+      });
+
+      it("on an active restore, puts its Git directory back from what was fetched before the download, the folder emptied", () => {
+        const p = project(), lib = join(p.folder(p.oldHome), "lib"), key = randomBytes(32), out = join(p.root, "checkpoint.zck");
+        p.git(lib, "switch", "-q", "-c", "mine"); p.write(join(lib, "m.txt"), "mine\n"); p.git(lib, "add", "m.txt"); p.git(lib, "commit", "-q", "-m", "mine");
+        const mine = p.git(lib, "rev-parse", "mine");
+        p.git(lib, "-c", "advice.detachedHead=false", "checkout", "-q", "--detach", p.lib.commit);
+        deinit(p, lib);
+        expect(save(p, key, out, p.submodules(p.oldHome).slice(0, 1)).parsed).toMatchObject({ ok: true });
+        // A fork of the project's build, where lib is fetched and checked out.
+        mkdirSync(join(p.newHome, "app"), { recursive: true }); p.git(p.root, "clone", "-q", p.app.origin, p.folder(p.newHome));
+        p.fetch(p.folder(p.newHome), "lib", p.lib.origin, p.gitDirs.lib, p.lib.commit);
+        const net = github(p, TOKEN);
+        const restored = load(p, key, out, net.env, planned(p, p.newHome).slice(0, 1), { active: true, githubToken: TOKEN, repositoryUrl: "https://github.com/acme/app.git" });
+        expect(restored, restored.stdout).toMatchObject({ parsed: { ok: true }, unrestored: [] });
+        const gitDir = join(p.folder(p.newHome), ".git", p.gitDirs.lib);
+        expect(p.git(p.root, `--git-dir=${gitDir}`, "rev-parse", "mine")).toBe(mine);
+        expect(readdirSync(join(p.folder(p.newHome), "lib"))).toEqual([]);
+      });
+
+      it("stays clean, with no part, when its Git directory holds only GitHub's work at the gitlink", () => {
+        const p = project(), lib = join(p.folder(p.oldHome), "lib"), key = randomBytes(32), out = join(p.root, "checkpoint.zck");
+        deinit(p, lib);
+        expect(probed(p)).toBe("clean");
+        expect(save(p, key, out, p.submodules(p.oldHome).slice(0, 1)).parsed).toMatchObject({ ok: true });
+        const b64 = (value: string) => Buffer.from(value).toString("base64");
+        expect(parts(p, key, out).stdout).toContain(`manifest:submodule 1 0 ${b64("lib")} ${p.lib.commit} empty|`);
+      });
+    });
+
+    it("refuses pushes with exactly the worker's sentence", () => {
+      const worker = readFileSync(join(__dirname, "../../../cloud-worker/src/workspace/submodules.ts"), "utf8");
+      expect(worker).toContain(`export const SUBMODULE_PUSH_REFUSED = ${JSON.stringify(SUBMODULE_PUSH_REFUSED)};`);
+    });
+
+    it("holds a part it could not put back, so the next stop still saves it, and puts it back at a later open once it can", () => {
+      const { p, key, out, was } = worked(), net = github(p, TOKEN);
+      const machine = (name: string) => { const home = join(p.root, name); mkdirSync(join(home, "app"), { recursive: true }); p.git(p.root, "clone", "-q", p.app.origin, join(home, "app", "app")); return home; };
+      const restoreOn = (home: string, from: string, submodules: RestoreSubmodule[]) => {
+        const result = run([...checkpointRestoreSteps({ checkoutPath: p.folder(home), home, key, sha256: sha(from), repositoryUrl: undefined, submodules },
+          [`cp '${from}' "$work/checkpoint.zck"`]), "report zeros-checkpoint-restored"], net.env);
+        return { parsed: parseRestoreResult(result.stdout), unrestored: parseUnrestoredSubmodules(result.stdout) };
+      };
+      const held = (home: string) => readdirSync(join(home, ".local/share/zeros/cloud-worker/submodule-holdover"));
+      // First open: lib's repository cannot be fetched. The rest opens; lib and its child are held, not lost.
+      const first = machine("first");
+      expect(restoreOn(first, out, planned(p, first, { lib: { repository: "acme/gone" } }))).toEqual({ parsed: { ok: true }, unrestored: [1, 2] });
+      expect(held(first)).toHaveLength(2);
+      expect(readdirSync(join(p.folder(first), "lib"))).toEqual([]);
+      // Its stop: the probe says a backup is needed, and the backup carries what is held.
+      const probe = spawnSync("bash", ["-c", `eval "$1"`, "probe", backupProbeCommand([p.folder(first)], first, p.submodules(first))], { env: p.env, encoding: "utf8" });
+      expect(parseBackupProbe(probe.stdout)).toBe("dirty");
+      const second = join(p.root, "second.zck");
+      expect(parseCheckpointResult(run([...checkpointArchiveSteps({ checkoutPath: p.folder(first), home: first, baseBranch: "main", key, submodules: p.submodules(first) }),
+        `cp "$work/checkpoint.zck" '${second}'`, CHECKPOINT_SAVED_REPORT], p.env).stdout)).toMatchObject({ ok: true });
+      // A later open, with the cause gone: both come back as they were saved, and nothing is held any more.
+      const later = machine("later");
+      expect(restoreOn(later, second, planned(p, later))).toEqual({ parsed: { ok: true }, unrestored: [] });
+      const lib = join(p.folder(later), "lib");
+      expect(p.git(lib, "rev-parse", "HEAD")).toBe(was.head);
+      expect(p.git(lib, "rev-parse", "refs/stash")).toBe(was.stash);
+      expect(readFileSync(join(lib, "lib.txt"), "utf8")).toBe("edited\n");
+      expect(readFileSync(join(lib, "inner", "inner.txt"), "utf8")).toBe("inner edited\n");
+      expect(held(later)).toEqual([]);
+    });
+
+    describe("on the same machine, a later start puts a held part back once it can", () => {
+      const held = (home: string) => readdirSync(join(home, ".local/share/zeros/cloud-worker/submodule-holdover"));
+      /** The first open of `worked()`'s new machine, where lib's repository cannot be fetched. */
+      const firstOpen = (p: ReturnType<typeof project>, key: Buffer, out: string, net: ReturnType<typeof github>) => {
+        const result = run([...checkpointRestoreSteps({ checkoutPath: p.folder(p.newHome), home: p.newHome, key, sha256: sha(out), repositoryUrl: undefined,
+          submodules: planned(p, p.newHome, { lib: { repository: "acme/gone" } }) }, [`cp '${out}' "$work/checkpoint.zck"`]), "report zeros-checkpoint-restored"], net.env);
+        return parseSubmoduleRestore(result.stdout);
+      };
+      const start = (p: ReturnType<typeof project>, net: ReturnType<typeof github>, submodules = planned(p, p.newHome)) => {
+        // Its script run in this shell, after the PATH pin: a nested bash would get /bin first again on some machines.
+        const command = heldSubmodulesCommand({ checkoutPath: p.folder(p.newHome), home: p.newHome, submodules });
+        const result = spawnSync("bash", ["-c", [...pinnedPath(), `set -- ${command.slice("bash -c ".length)}`, 'eval "$1"'].join("\n")],
+          { env: pinnedEnv(net.env), encoding: "utf8" });
+        expect(result.stdout).toContain("zeros-submodules-held");
+        return parseSubmoduleRestore(result.stdout);
+      };
+
+      it("restores lib and its child, held after a failed restore, once lib's repository can be fetched", () => {
+        const { p, key, out, was } = worked(), net = github(p, TOKEN);
+        expect(firstOpen(p, key, out, net)).toEqual({ unrestored: [{ place: 1, reason: "checkpoint_repository_missing" }, { place: 2, reason: "checkpoint_restore_failed" }], held: [] });
+        expect(held(p.newHome)).toHaveLength(2);
+        // Started again on the same machine: still unreachable, so both stay held and are named again.
+        expect(start(p, net, planned(p, p.newHome, { lib: { repository: "acme/gone" } })).held).toEqual([]);
+        expect(held(p.newHome)).toHaveLength(2);
+        // With the cause gone: both back, nothing held.
+        expect(start(p, net)).toEqual({ unrestored: [], held: [1, 2] });
+        expectRestored(p, was);
+        expect(held(p.newHome)).toEqual([]);
+      });
+
+      it("applies over the gitlink the restored repository records, when the person had moved and committed it", () => {
+        const p = project(), app = p.folder(p.oldHome), lib = join(app, "lib"), key = randomBytes(32), out = join(p.root, "checkpoint.zck");
+        p.write(join(p.lib.seed, "newer.txt"), "newer\n"); p.git(p.lib.seed, "add", "newer.txt"); p.git(p.lib.seed, "commit", "-q", "-m", "newer");
+        p.git(p.lib.seed, "push", "-q", "origin", "main");
+        const newer = p.git(p.lib.seed, "rev-parse", "HEAD");
+        p.git(lib, "fetch", "-q", "origin"); p.git(lib, "-c", "advice.detachedHead=false", "checkout", "-q", "--detach", newer);
+        p.git(app, "add", "lib"); p.git(app, "commit", "-q", "-m", "lib moved");
+        p.write(join(lib, "newer.txt"), "stashed\n"); p.git(lib, "stash", "-q");
+        const stash = p.git(lib, "rev-parse", "refs/stash");
+        expect(save(p, key, out, p.submodules(p.oldHome).slice(0, 1)).parsed).toMatchObject({ ok: true });
+        const net = github(p, TOKEN);
+        mkdirSync(join(p.newHome, "app"), { recursive: true }); p.git(p.root, "clone", "-q", p.app.origin, p.folder(p.newHome));
+        const first = run([...checkpointRestoreSteps({ checkoutPath: p.folder(p.newHome), home: p.newHome, key, sha256: sha(out), repositoryUrl: undefined,
+          submodules: planned(p, p.newHome, { lib: { repository: "acme/gone" } }).slice(0, 1) }, [`cp '${out}' "$work/checkpoint.zck"`]), "report zeros-checkpoint-restored"], net.env);
+        expect(parseSubmoduleRestore(first.stdout).unrestored).toHaveLength(1);
+        // The worker then checks lib out at the gitlink the restored repository records: the person's own, not the plan's.
+        p.fetch(p.folder(p.newHome), "lib", p.lib.origin, p.gitDirs.lib, newer);
+        expect(start(p, net, planned(p, p.newHome).slice(0, 1))).toEqual({ unrestored: [], held: [1] });
+        expect(p.git(join(p.folder(p.newHome), "lib"), "rev-parse", "refs/stash")).toBe(stash);
+      });
+    });
+
+    it("leaves a submodule the archive does not hold, or no longer planned there, as it is, and is exactly as before with none", () => {
+      const p = project(), key = randomBytes(32), out = join(p.root, "checkpoint.zck");
+      // Saved before C4B: no submodule parts at all.
+      expect(save(p, key, out, []).parsed).toMatchObject({ ok: true });
+      mkdirSync(join(p.newHome, "app"), { recursive: true });
+      p.git(p.root, "clone", "-q", p.app.origin, p.folder(p.newHome));
+      const net = github(p, TOKEN), restored = load(p, key, out, net.env, planned(p, p.newHome));
+      expect(restored).toMatchObject({ parsed: { ok: true }, unrestored: [] });
+      // Left for the worker's fetch at the gitlink: nothing cloned here.
+      expect(net.calls()).toEqual([]);
+      expect(readdirSync(join(p.folder(p.newHome), "lib"))).toEqual([]);
+      const input = { checkoutPath: p.folder(p.newHome), home: p.newHome, key, sha256: "a".repeat(64) };
+      expect(checkpointRestoreSteps({ ...input, submodules: [] }, ["true"])).toEqual(checkpointRestoreSteps(input, ["true"]));
+      expect(restoreCommand({ ...input, downloadUrl: "https://storage.example.test/x", submodules: [] }))
+        .toBe(restoreCommand({ ...input, downloadUrl: "https://storage.example.test/x" }));
+      // A public one never carries a token.
+      expect(() => checkpointRestoreSteps({ ...input, submodules: planned(p, p.newHome, { inner: { githubToken: TOKEN } }) }, ["true"])).toThrow();
+    });
+
+    it("on an active restore, fetches each submodule before the download and puts it back into the repository's new Git directory", () => {
+      const { p, key, out, was } = worked(), net = github(p, TOKEN);
+      // A fork of the project's build: both already fetched there, at the plan's commits.
+      p.fetch(p.folder(p.newHome), "lib", p.lib.origin, p.gitDirs.lib, p.lib.commit);
+      p.fetch(p.folder(p.newHome), "lib/inner", p.inner.origin, p.gitDirs.inner, p.inner.commit);
+      const restored = load(p, key, out, net.env, planned(p, p.newHome),
+        { active: true, githubToken: TOKEN, repositoryUrl: "https://github.com/acme/app.git" });
+      expect(restored, restored.stdout).toMatchObject({ parsed: { ok: true }, unrestored: [] });
+      expectRestored(p, was);
+      const fetches = net.calls().filter(call => call.op === "fetch" && call.repository);
+      expect(fetches.map(call => call.repository)).toEqual(["app", "lib", "inner"]);
+      expect(fetches[1]).toMatchObject({ askpass: true, answers: "token", tokenFile: true, argvSafe: true });
+      expect(fetches[2]).toMatchObject({ askpass: false, noAskpass: true, tokenFile: false });
+      expect(restored.stdout).not.toContain(TOKEN);
+    });
+
+    it("on a live recovery's restore (active, onto a new machine), puts back a submodule's edit, stash and branch commit into the new Git directory", () => {
+      const { p, key, out, was } = worked(), net = github(p, TOKEN);
+      // The recovery's new machine is created from the Cloud Computer: each planned submodule folder empty, no Git directory.
+      const restored = load(p, key, out, net.env, planned(p, p.newHome),
+        { active: true, recovery: true, githubToken: TOKEN, repositoryUrl: "https://github.com/acme/app.git" });
+      expect(restored, restored.stdout).toMatchObject({ parsed: { ok: true }, unrestored: [] });
+      expectRestored(p, was);
+      expect(restored.stdout).not.toContain(TOKEN);
+    });
+
+    it("on an active restore, empties a planned submodule the archive does not hold, so the worker fetches it", () => {
+      const p = project(), key = randomBytes(32), out = join(p.root, "checkpoint.zck");
+      // Saved with lib only: inner has no part.
+      expect(save(p, key, out, p.submodules(p.oldHome).slice(0, 1)).parsed).toMatchObject({ ok: true });
+      mkdirSync(join(p.newHome, "app"), { recursive: true });
+      p.git(p.root, "clone", "-q", p.app.origin, p.folder(p.newHome));
+      p.fetch(p.folder(p.newHome), "lib", p.lib.origin, p.gitDirs.lib, p.lib.commit);
+      p.fetch(p.folder(p.newHome), "lib/inner", p.inner.origin, p.gitDirs.inner, p.inner.commit);
+      const net = github(p, TOKEN), restored = load(p, key, out, net.env, planned(p, p.newHome),
+        { active: true, githubToken: TOKEN, repositoryUrl: "https://github.com/acme/app.git" });
+      expect(restored, restored.stdout).toMatchObject({ parsed: { ok: true }, unrestored: [] });
+      expect(readFileSync(join(p.folder(p.newHome), "lib", "lib.txt"), "utf8")).toBe("lib\n");
+      // Its Git directory went with the repository's: missing now, as the worker's fetch wants it.
+      expect(readdirSync(join(p.folder(p.newHome), "lib", "inner"))).toEqual([]);
+      expect(existsSync(join(p.folder(p.newHome), ".git", p.gitDirs.inner))).toBe(false);
+    });
+  });
+
+  describe("the stop probe", () => {
+    const probe = (p: ReturnType<typeof project>, submodules = p.submodules(p.oldHome)) => {
+      const result = spawnSync("bash", ["-c", `eval "$1"`, "probe", backupProbeCommand([p.folder(p.oldHome)], p.oldHome, submodules)], { env: p.env, encoding: "utf8" });
+      expect(result.status).toBe(0);
+      return parseBackupProbe(result.stdout);
+    };
+
+    it("is clean for submodules as the worker fetched them, even when no branch reaches the gitlink", () => {
+      const p = project(), lib = join(p.folder(p.oldHome), "lib");
+      expect(probe(p)).toBe("clean");
+      // The gitlink is a commit no remote-tracking branch holds: still nothing to back up.
+      for (const ref of p.git(lib, "for-each-ref", "--format=%(refname)", "refs/remotes/").split("\n").filter(Boolean)) p.git(lib, "update-ref", "-d", ref);
+      expect(probe(p)).toBe("clean");
+      // Without its gitlink, the same submodule would be dirty: the gitlink is what makes it clean.
+      expect(probe(p, p.submodules(p.oldHome).map(entry => ({ ...entry, baseCommit: p.app.commit })))).toBe("dirty");
+    });
+
+    it("is dirty for a submodule's stash, a branch commit, an ignored file or an edit, each on its own", () => {
+      const stash = project(), lib = (p: ReturnType<typeof project>) => join(p.folder(p.oldHome), "lib");
+      stash.write(join(lib(stash), "lib.txt"), "stashed\n"); stash.git(lib(stash), "stash", "-q");
+      expect(stash.git(stash.folder(stash.oldHome), "status", "--porcelain", "--ignore-submodules=none")).toBe("");
+      expect(probe(stash)).toBe("dirty");
+      // The gap this closes: the repository alone probes clean.
+      expect(probe(stash, [])).toBe("clean");
+      const branch = project();
+      branch.git(lib(branch), "switch", "-q", "-c", "mine"); branch.write(join(lib(branch), "b.txt"), "b\n");
+      branch.git(lib(branch), "add", "b.txt"); branch.git(lib(branch), "commit", "-q", "-m", "mine");
+      branch.git(lib(branch), "-c", "advice.detachedHead=false", "checkout", "-q", "--detach", branch.lib.commit);
+      expect(branch.git(branch.folder(branch.oldHome), "status", "--porcelain", "--ignore-submodules=none")).toBe("");
+      expect(probe(branch)).toBe("dirty");
+      expect(probe(branch, [])).toBe("clean");
+      const ignored = project();
+      ignored.write(join(lib(ignored), "debug.log"), "log\n");
+      expect(ignored.git(ignored.folder(ignored.oldHome), "status", "--porcelain", "--ignore-submodules=none")).toBe("");
+      expect(probe(ignored)).toBe("dirty");
+      expect(probe(ignored, [])).toBe("clean");
+      const edit = project();
+      edit.write(join(lib(edit), "inner", "inner.txt"), "edited\n");
+      expect(probe(edit, edit.submodules(edit.oldHome).slice(1))).toBe("dirty");
+    });
+
+    it("is clean for an absent or empty folder, unknown for one that is not the worker's, and unchanged with none", () => {
+      const p = project(), lib = join(p.folder(p.oldHome), "lib");
+      const gone = { position: 0, checkoutPath: join(p.folder(p.oldHome), "vendor", "gone"), repositoryPath: p.folder(p.oldHome),
+        gitDir: `modules/${digest("gone")}`, baseCommit: p.lib.commit };
+      const empty = { ...gone, checkoutPath: join(p.folder(p.oldHome), "vendor", "empty"), gitDir: `modules/${digest("empty")}` };
+      mkdirSync(empty.checkoutPath, { recursive: true });
+      expect(probe(p, [gone, empty])).toBe("clean");
+      rmSync(lib, { recursive: true, force: true }); p.git(p.root, "clone", "-q", p.lib.origin, lib);
+      expect(probe(p, [p.submodules(p.oldHome)[0]!])).toBe("unknown");
+      expect(backupProbeCommand([p.folder(p.oldHome)], p.oldHome, [])).toBe(backupProbeCommand([p.folder(p.oldHome)], p.oldHome));
+      expect(() => backupProbeCommand([p.folder(p.oldHome)], p.oldHome, [{ ...gone, gitDir: "../elsewhere" }])).toThrow();
+    });
+  });
 });

@@ -18,7 +18,7 @@ import {
   buildFixCheckPrompt,
   buildReviewCommentContext,
 } from "../../pr/pr-action-prompts";
-import type { CodeReviewThreadItem } from "../../../features/code-review/review-thread-model";
+import type { PrReviewThread } from "@zeros/protocol/github-review";
 
 // ── time formatting ──────────────────────────────────────────
 
@@ -231,6 +231,8 @@ export type ReviewTimelineEvent =
   | { kind: "check"; at: number; check: PrCheck; sha: string }
   | { kind: "review"; at: number; item: PrTimelineItem }
   | { kind: "comment"; at: number; item: PrTimelineItem }
+  /** A line comment and its replies, at the time it was started. */
+  | { kind: "thread"; at: number; thread: PrReviewThread }
   | { kind: "merged"; at: number }
   | { kind: "closed"; at: number };
 
@@ -240,9 +242,14 @@ export function composeTimeline(args: {
   items: PrTimelineItem[];
   /** The head commit's checks; their failures join the stream. */
   checks?: PrChecksResult | null;
+  /** Line comments from the inline review read. Null while it is unread. */
+  threads?: readonly PrReviewThread[] | null;
+  /** The read listed every thread and every comment in them. */
+  threadsComplete?: boolean;
 }): ReviewTimelineEvent[] {
   const events: ReviewTimelineEvent[] = [];
-  const { pr, commits, items, checks } = args;
+  const { pr, commits, items, checks, threads } = args;
+  const lineCommenters = lineCommentAuthors(threads, args.threadsComplete);
   if (pr && pr.createdAt > 0) {
     events.push({ kind: "opened", at: pr.createdAt, author: pr.authorLogin });
   }
@@ -257,7 +264,14 @@ export function composeTimeline(args: {
         events.push({ kind: "check", at: check.completedAt, check, sha: pr.headSha });
     }
   }
+  for (const thread of threads ?? []) {
+    const first = thread.comments[0];
+    if (first) events.push({ kind: "thread", at: first.createdAt, thread });
+  }
   for (const it of items) {
+    // GitHub records each line comment as a review without a body. Once the
+    // line comments themselves are known, that empty review says nothing more.
+    if (isEmptyCommentReview(it) && lineCommenters?.has(authorKey(it.author))) continue;
     events.push({
       kind: it.kind === "review" ? "review" : "comment",
       at: it.createdAt,
@@ -277,6 +291,44 @@ export function composeTimeline(args: {
     .map((e, i) => [e, i] as const)
     .sort((a, b) => a[0].at - b[0].at || a[1] - b[1])
     .map(([e]) => e);
+}
+
+function authorKey(login: string): string {
+  return login.replace(/\[bot\]$/i, "").toLowerCase();
+}
+
+/** Who wrote a line comment, but only from a complete read: a partial one
+ *  can't vouch that an empty review's comments are shown. */
+function lineCommentAuthors(
+  threads: readonly PrReviewThread[] | null | undefined,
+  complete: boolean | undefined,
+): ReadonlySet<string> | null {
+  if (!threads || !complete) return null;
+  return new Set(
+    threads.flatMap((thread) => thread.comments.map((comment) => authorKey(comment.author.login))),
+  );
+}
+
+/** Reviews, comments and line comments as Activity lists them. */
+export function activityCount(
+  items: readonly PrTimelineItem[] | null,
+  threads: readonly PrReviewThread[] | null | undefined,
+  threadsComplete?: boolean,
+): number | null {
+  if (!items && !threads) return null;
+  const lineCommenters = lineCommentAuthors(threads, threadsComplete);
+  const listed = (items ?? []).filter(
+    (item) => !(isEmptyCommentReview(item) && lineCommenters?.has(authorKey(item.author))),
+  );
+  return listed.length + (threads?.filter((thread) => thread.comments.length > 0).length ?? 0);
+}
+
+function isEmptyCommentReview(item: PrTimelineItem): boolean {
+  return (
+    item.kind === "review" &&
+    item.state.toUpperCase() === "COMMENTED" &&
+    !item.body.trim()
+  );
 }
 
 // ── live-refresh pacing ──────────────────────────────────────
@@ -425,66 +477,14 @@ export function derivePrStatusView(args: {
   return { title: "Checking mergeability…", detail: null, tone: "neutral", action: "merge", blockers, done };
 }
 
-// ── Overview · Findings ──────────────────────────────────────
-
-export interface ReviewFinding {
-  key: string;
-  /** Who wrote it: an agent (its provider names the mark), a review app or a
-   *  code-scanning check. */
-  author: { name: string; kind: "agent" | "bot" | "check"; provider?: string };
-  title: string;
-  /** "login.ts:18" or "login.ts:18–21". */
-  location: string;
-  resolved: boolean;
-  /** What Add to chat drops in the composer. */
-  chatText: string;
-}
-
-function findingTitle(body: string): string {
-  const line =
-    body
-      .split("\n")
-      .map((text) => text.replace(/\*\*|__/g, "").replace(/^\s*(?:#+|[-*>]|\d+\.)\s+/, "").trim())
-      .find(Boolean) ?? "";
-  return line.length > 160 ? `${line.slice(0, 159)}…` : line;
-}
-
-/** Findings are comments from agents, review apps and code scanning; people's
- * reviews stay in Activity. Unresolved first, each in thread order. */
-export function reviewFindings(
-  threads: readonly CodeReviewThreadItem[],
-  prNumber: number,
-): ReviewFinding[] {
-  const findings: ReviewFinding[] = [];
-  for (const thread of threads) {
-    const first = thread.comments[0];
-    if (!first) continue;
-    const kind =
-      thread.source === "check"
-        ? "check"
-        : thread.source === "github" && first.author.kind === "integration"
-          ? "bot"
-          : thread.source === "workspace" && first.author.kind === "agent"
-            ? "agent"
-            : null;
-    if (!kind) continue;
-    const { path, startLine, endLine } = thread.anchor;
-    const base = path.split("/").pop() ?? path;
-    const lines = endLine > startLine ? `${startLine}–${endLine}` : `${startLine}`;
-    const quoted = first.body
-      .split("\n")
-      .map((text) => `> ${text}`)
-      .join("\n");
-    findings.push({
-      key: `${thread.source}:${thread.id}`,
-      author: { name: first.author.name, kind, ...(first.author.provider ? { provider: first.author.provider } : {}) },
-      title: findingTitle(first.body),
-      location: `${base}:${lines}`,
-      resolved: thread.resolved,
-      chatText: `PR #${prNumber} — ${first.author.name} on \`${path}:${lines}\`:\n${quoted}\n\n`,
-    });
-  }
-  return findings.sort((a, b) => Number(a.resolved) - Number(b.resolved));
+/** The chat whose composer takes Add to chat: the active one, unless it is
+ *  a terminal tab, which mounts no composer and would swallow the handoff. */
+export function composerChatFor(
+  chats: readonly { id: string; kind?: "chat" | "terminal" }[],
+  activeChatId: string | null | undefined,
+): string | null {
+  const chat = activeChatId ? chats.find((item) => item.id === activeChatId) : undefined;
+  return chat && chat.kind !== "terminal" ? chat.id : null;
 }
 
 // ── Activity · people and bots ───────────────────────────────
@@ -510,9 +510,23 @@ function eventActor(event: ReviewTimelineEvent): string | null {
     case "review":
     case "comment":
       return event.item.author;
+    case "thread":
+      return event.thread.comments[0]?.author.login ?? null;
     default:
       return null;
   }
+}
+
+/** GraphQL names an App by its bare login and marks it a Bot; REST appends
+ *  `[bot]`. Either way it is an App. */
+export function isBotEvent(event: ReviewTimelineEvent): boolean {
+  if (event.kind === "thread")
+    return (
+      event.thread.comments[0]?.author.kind === "bot" ||
+      isBotLogin(event.thread.comments[0]?.author.login ?? "")
+    );
+  const actor = eventActor(event);
+  return actor != null && isBotLogin(actor);
 }
 
 /** People keeps every event no App took, including the authorless merged and
@@ -525,8 +539,7 @@ export function filterTimelineEvents(
   return events.filter((event) => {
     // A check result is neither a person's nor an App's comment.
     if (event.kind === "check") return false;
-    const actor = eventActor(event);
-    const bot = actor != null && isBotLogin(actor);
+    const bot = isBotEvent(event);
     return filter === "bots" ? bot : !bot;
   });
 }

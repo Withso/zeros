@@ -66,6 +66,26 @@ suite("versioned release build drain", () => {
     await computers.createRefused(job.id);
     expect(await inspectBuildDrain(pool, drain.lease)).toMatchObject({ liveCount: 0, unresolvedCount: 0, ready: true });
   });
+  it("does not wait for an organization's kept legacy build, but does for one whose cleanup is requested and for any other leftover snapshot", async () => {
+    // As #1260 leaves an organization once its base goes live: the build that installed repositories is kept (with its
+    // snapshot) for the setting being turned off again, for 30 days. Nothing is in flight on it.
+    const legacy = randomUUID(), base = randomUUID(), other = randomUUID();
+    const insert = (id: string, version: number, snapshot: string, baseOnly: boolean) => pool.query(`INSERT INTO cloud_v2_computer_builds
+        (id, org_id, version, recipe, state, created_by, reason, source_targets, source_policy_version, base_only, snapshot_id, started_at, finished_at)
+      VALUES ($1, $2, $3, '{"repositories":[]}', 'succeeded', $4, 'manual', '[]', 2, $5, $6, clock_timestamp(), clock_timestamp())`, [id, org, version, user, baseOnly, snapshot]);
+    await insert(legacy, 1, "zeros-test-org-v1", false); await insert(base, 2, "zeros-test-org-v2", true);
+    await pool.query("INSERT INTO cloud_v2_computers (org_id, active_build_id, legacy_build_id, snapshot_name, base_live_at) VALUES ($1, $2, $3, 'zeros-test-org-v2', clock_timestamp())",
+      [org, base, legacy]);
+    const drain = await beginBuildDrain(pool, input());
+    try {
+      expect(drain).toMatchObject({ liveCount: 0, unresolvedCount: 0, ready: true });
+      await pool.query("UPDATE cloud_v2_computer_builds SET cleanup_requested_at = clock_timestamp() WHERE id = $1", [legacy]);
+      expect(await inspectBuildDrain(pool, drain.lease)).toMatchObject({ unresolvedCount: 1, ready: false });
+      await pool.query("UPDATE cloud_v2_computer_builds SET cleanup_requested_at = NULL WHERE id = $1", [legacy]);
+      await insert(other, 3, "zeros-test-org-v3", true);
+      expect(await inspectBuildDrain(pool, drain.lease)).toMatchObject({ unresolvedCount: 1, ready: false });
+    } finally { await endBuildDrain(pool, drain.lease); }
+  });
   it("expires without silently extending a lost-response retry", async () => {
     const request = { ...input(), ttlMs: 1000 }, first = await beginBuildDrain(pool, request);
     await expect.poll(async () => (await inspectBuildDrain(pool, first.lease)).state, { timeout: 2500 }).toBe("expired");

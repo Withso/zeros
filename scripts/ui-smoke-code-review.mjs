@@ -357,6 +357,35 @@ export async function runCodeReviewSmoke({
     true,
   );
 
+  // A local comparison (the Changes tab) posts to the pull request by
+  // default; choosing Workspace is remembered for the next comment.
+  const openMapped = async () => {
+    await page.goto(`${base}/harness-code-review.html?mapped`);
+    await expect(page.getByTestId("code-review-harness")).toBeVisible();
+    await page.getByTestId("review-mode-diff").click();
+    await page.getByTestId("review-toggle-split").click();
+    await commentOnRange(11, 11, "additions");
+  };
+  const target = (name) => composer().getByRole("tab", { name, exact: true });
+  await openMapped();
+  await expect(target("Pull request")).toHaveAttribute("aria-selected", "true");
+  await input().fill("Posted from Changes.");
+  await input().press("Control+Enter");
+  await expect(last()).toHaveText("github create new 11–11");
+  await openMapped();
+  await target("Workspace").click();
+  await input().fill("Private note.");
+  await input().press("Control+Enter");
+  await expect(last()).toHaveText("workspace create new 11–11");
+  await openMapped();
+  await expect(target("Workspace")).toHaveAttribute("aria-selected", "true");
+  await target("Pull request").click();
+  await input().press("Escape");
+  check(
+    "Changes comments post to the pull request by default and remember a Workspace choice",
+    true,
+  );
+
   await open();
   await page.getByTestId("review-mode-edit").click();
   const editorLine = (number) =>

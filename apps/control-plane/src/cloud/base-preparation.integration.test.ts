@@ -497,7 +497,7 @@ d("ready copies: a safe switch-on", () => {
       expect((await pool.query("SELECT b.state FROM cloud_v2_workspaces w JOIN cloud_v2_computer_builds b ON b.id=w.computer_build_id WHERE w.id=$1", [id])).rows[0].state).toBe("succeeded");
     });
 
-    it("gives a base only to organizations with cloud and some use, never a Personal one, and the shared base to any number at no machine", async () => {
+    it("gives a base only to organizations with cloud and some use, a Personal one only with a project, and the shared base to any number at no machine", async () => {
       const without = await organization({ cloud: false }); await project(["withso/zeros"], { at: without });
       const unused = await organization();
       const old = await organization();
@@ -514,10 +514,68 @@ d("ready copies: a safe switch-on", () => {
       await tickAt(computers, clock + 61_000);
       const based = new Set((await pool.query<{ org_id: string }>("SELECT org_id FROM cloud_v2_computer_builds")).rows.map(row => row.org_id));
       expect(used.every(id => based.has(id))).toBe(true);
-      for (const id of [without, unused, old, personal]) expect(based.has(id)).toBe(false);
+      for (const id of [without, unused, old]) expect(based.has(id)).toBe(false);
+      // A Personal organization with a project is swept too: its project's copy waits for the base.
+      expect(based.has(personal)).toBe(true);
       expect(creates()).toEqual([]);
-      // The Personal organization gets its base at first use.
       expect((await computers.ensureBase(personal)).state).toBe("ready");
+    });
+  });
+
+  describe("a base when cloud comes back, or the shared base is ready", () => {
+    const failedBase = (organizationId: string, state: "failed" | "cancelled", errorCode: string) => pool.query(
+      `INSERT INTO cloud_v2_computer_builds (id, org_id, version, recipe, state, created_by, source_targets, source_policy_version,
+         base_only, automatic, error_code, finished_at) VALUES ($1,$2,1,'{"repositories":[]}',$3,NULL,'[]',2,true,true,$4,clock_timestamp())`,
+      [randomUUID(), organizationId, state, errorCode]);
+
+    it("does not count a base cancelled because cloud ended: when it returns, the base is made at once, shared, with no machine", async () => {
+      configureCloudPersonal(pool, true);
+      const personal = await organization({ personal: true });
+      await project(["withso/zeros"], { at: personal });
+      const computers = computersWith({ shared: true });
+      expect((await computers.ensureBase(personal)).state).toBe("preparing");
+      // Pro ends while it is queued: cancelled, computer_cloud_unavailable.
+      await pool.query("UPDATE account_entitlements SET status='cancelled' WHERE user_id=$1", [admin]);
+      await builder(computers).tick();
+      expect((await pool.query("SELECT state, error_code FROM cloud_v2_computer_builds WHERE org_id=$1", [personal])).rows)
+        .toEqual([{ state: "cancelled", error_code: "computer_cloud_unavailable" }]);
+      // Pro is back, the shared base is ready, and the person creates a project (ensureBase, not a create).
+      await grantTestPro(pool, admin);
+      boat.snapshots.set(SHARED, new Map());
+      expect((await computers.ensureBase(personal)).state).toBe("ready");
+      expect(creates()).toEqual([]);
+    });
+
+    it("adopts the ready shared base inside a failure backoff when the organization has no install script, and only then", async () => {
+      await project();
+      await failedBase(org, "failed", "computer_build_failed");
+      boat.snapshots.set(SHARED, new Map());
+      expect((await computersWith({ shared: true }).ensureBase(org)).state).toBe("ready");
+      // With an install script its own base is a machine: the backoff holds.
+      const scripted = await organization();
+      await project(["withso/zeros"], { at: scripted });
+      await pool.query("INSERT INTO cloud_v2_computers (org_id, recipe_revision, install_script) VALUES ($1, 1, 'echo hi')", [scripted]);
+      await failedBase(scripted, "failed", "computer_install_script_failed");
+      expect((await computersWith({ shared: true }).ensureBase(scripted)).state).toBe("failed");
+      expect(creates()).toEqual([]);
+    });
+
+    it("sweeps an organization whose last base was cancelled because cloud ended, and a Personal organization with a project", async () => {
+      await project();
+      await failedBase(org, "cancelled", "computer_cloud_unavailable");
+      configureCloudPersonal(pool, true);
+      const personal = await organization({ personal: true });
+      await project(["withso/zeros"], { at: personal });
+      // Another person's Personal organization, with Pro and no project: still left to its first use.
+      const other = randomUUID(), unusedPersonal = randomUUID();
+      await pool.query("INSERT INTO users (id, email, display_name) VALUES ($1, $2, 'Other')", [other, `${other}@example.test`]);
+      await grantTestPro(pool, other);
+      await pool.query("INSERT INTO organizations (id, slug, name, created_by, is_personal, cloud_workspaces_allowed) VALUES ($1, $2, 'Org', $3, true, false)",
+        [unusedPersonal, `org-${unusedPersonal}`, other]);
+      await pool.query("INSERT INTO organization_members (org_id, user_id, role) VALUES ($1, $2, 'owner')", [unusedPersonal, other]);
+      const candidates = (await computersWith().sweepCandidates(25)).map(row => row.organizationId);
+      expect(candidates).toEqual(expect.arrayContaining([org, personal]));
+      expect(candidates).not.toContain(unusedPersonal);
     });
   });
 

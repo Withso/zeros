@@ -1,5 +1,6 @@
 import {
   useCallback,
+  useEffect,
   useMemo,
   useRef,
   useState,
@@ -26,6 +27,7 @@ import {
   canPostReviewSelection,
   postCapturedReview,
 } from "./review-public-post";
+import { loadReviewCommentDestination } from "./review-comment-destination";
 
 export function useInlineReview(
   review: CodeReviewController,
@@ -33,7 +35,10 @@ export function useInlineReview(
   itemIds: string | readonly string[],
 ) {
   const commentsAvailable = review.commentsAvailable !== false;
-  const canCreate = review.workspaceCommentsAvailable !== false || !!review.external?.postComment;
+  const canCreate =
+    review.workspaceCommentsAvailable !== false ||
+    !!review.external?.postComment ||
+    !!review.external?.postMappedComment;
   const threads = commentsAvailable ? review.threads : EMPTY_REVIEW_THREADS;
   const [record, setRecord] = useState<{
     owner: string;
@@ -67,6 +72,15 @@ export function useInlineReview(
   );
   const latest = useRef({ review, active, selection, snapshots, visibleItems });
   latest.current = { review, active, selection, snapshots, visibleItems };
+  // A post pending when this viewer unmounts (another comparison replaced
+  // it) must not validate against the comparison it no longer shows.
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
 
   const select = useCallback(
     (
@@ -86,8 +100,13 @@ export function useInlineReview(
         return;
       }
       const snapshot = current.snapshots.get(itemId);
-      if (current.review.workspaceCommentsAvailable === false &&
-        (snapshot?.kind !== "diff" || !snapshot.confirmedRevision || !current.review.external?.postComment)) return;
+      const external = current.review.external;
+      const publishable =
+        snapshot?.kind === "diff" &&
+        (snapshot.confirmedRevision
+          ? !!external?.postComment
+          : !!external?.postMappedComment);
+      if (current.review.workspaceCommentsAvailable === false && !publishable) return;
       const anchor = snapshot && anchorFromSelection(snapshot, range);
       native.current = {
         owner: current.review.ownerKey,
@@ -98,15 +117,25 @@ export function useInlineReview(
         return;
       }
       setIssue(null);
-      const target: ReviewSelectionTarget = {
+      const captured: ReviewSelectionTarget = {
         itemId,
         anchor,
         mode,
-        ...(current.review.workspaceCommentsAvailable === false ? { postToPr: true } : {}),
         ...(snapshot.kind === "diff" && snapshot.confirmedRevision
           ? { confirmedRevision: snapshot.confirmedRevision }
-          : {}),
+          : external?.mappedTarget
+            ? { mappedTarget: external.mappedTarget }
+            : {}),
       };
+      // A comment the pull request accepts posts there by default, as the
+      // person's own GitHub account; Workspace keeps it private.
+      const postToPr =
+        current.review.workspaceCommentsAvailable === false ||
+        (canPostReviewSelection(captured, snapshot, external) &&
+          loadReviewCommentDestination() === "pr");
+      const target: ReviewSelectionTarget = postToPr
+        ? { ...captured, postToPr: true }
+        : captured;
       if (mode === "composer")
         current.review.drafts.requestFocus(`new:${reviewSelectionKey(target)}`);
       setRecord((old) => {
@@ -202,6 +231,13 @@ export function useInlineReview(
                     now,
                     live.review.external,
                     body,
+                    () =>
+                      mounted.current
+                        ? {
+                            snapshot: latest.current.snapshots.get(captured.itemId),
+                            external: latest.current.review.external,
+                          }
+                        : { snapshot: undefined, external: undefined },
                   );
                 }
               : undefined

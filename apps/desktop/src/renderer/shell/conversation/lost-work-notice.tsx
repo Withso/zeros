@@ -1,10 +1,12 @@
 // Retention: a cloud workspace restored without some of its work says so once,
 // in plain words, until its own member dismisses it. The control plane shows
-// `lostWork` only to that member, so a teammate never sees it.
+// `lostWork` only to that member, so a teammate never sees it. The same row names
+// any submodule a restore could not bring back yet (`unrestoredSubmodules`): that
+// part has nothing to dismiss, and goes once a later open puts them back.
 import { useState, useSyncExternalStore } from "react";
 import { cloudTargetForValue } from "../../platform/bridge/cloud-workspace-key";
 import { cloudV2Document, dismissCloudV2LostWork } from "../../platform/cloud-v2";
-import type { CloudLostWork } from "../../platform/cloud-workspace-contract";
+import type { CloudLostWork, CloudUnrestoredSubmodules } from "../../platform/cloud-workspace-contract";
 import { Button } from "../../shared/ui/primitives";
 import { toast } from "../../shared/ui/primitives/elements";
 import { MessageRow } from "../../shared/ui/primitives/message-row";
@@ -19,14 +21,25 @@ export function lostWorkMessage(lostWork: CloudLostWork): string {
     : `This workspace was restored from an earlier backup. Work after ${when(lostWork.stoppedAt)} that was not pushed could not be recovered.`;
 }
 
+/** The submodules part: how many, the first three by folder (below the VM user's home), and that Zeros tries again. */
+export function unrestoredSubmodulesMessage(submodules: CloudUnrestoredSubmodules): string {
+  const names = submodules.slice(0, 3).map(entry => entry.path.replace(/^\/home\/user\//, ""));
+  const more = submodules.length > 3 ? ` and ${submodules.length - 3} more` : "";
+  const count = submodules.length === 1 ? "1 submodule" : `${submodules.length} submodules`;
+  return `${count} could not be brought back yet (${names.join(", ")}${more}). Zeros tries again each time this workspace opens.`;
+}
+
 export function LostWorkNotice({ folder }: { folder: string | null | undefined }) {
   let target: ReturnType<typeof cloudTargetForValue> = null;
   try { target = cloudTargetForValue(folder); } catch { target = null; }
   const read = () => (target ? cloudWorkspaceDocument(target)?.lostWork : undefined);
+  const readSubmodules = () => (target ? cloudWorkspaceDocument(target)?.unrestoredSubmodules : undefined);
   const lostWork = useSyncExternalStore(subscribeCloudWorkspaces, read, read);
+  const unrestored = useSyncExternalStore(subscribeCloudWorkspaces, readSubmodules, readSubmodules);
   const [busy, setBusy] = useState(false);
-  if (!target || !lostWork) return null;
-  const message = lostWorkMessage(lostWork);
+  if (!target || (!lostWork && !unrestored?.length)) return null;
+  const message = [lostWork ? lostWorkMessage(lostWork) : null, unrestored?.length ? unrestoredSubmodulesMessage(unrestored) : null]
+    .filter(Boolean).join(" ");
   const dismiss = async () => {
     setBusy(true);
     try { acceptCloudWorkspaceDocument(cloudV2Document(await dismissCloudV2LostWork(target!))); }
@@ -35,7 +48,7 @@ export function LostWorkNotice({ folder }: { folder: string | null | undefined }
   };
   return (
     <MessageRow tone="warning" flush role="status" title={message}
-      actions={<Button variant="ghost" size="compact" disabled={busy} onClick={() => void dismiss()}>Dismiss</Button>}>
+      actions={lostWork ? <Button variant="ghost" size="compact" disabled={busy} onClick={() => void dismiss()}>Dismiss</Button> : undefined}>
       {message}
     </MessageRow>
   );

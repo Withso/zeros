@@ -14,7 +14,7 @@ import { nativeCloudChatCache } from "./cloud-chat-cache";
 import { readNativeCloudHistory } from "./cloud-chat-cache-history";
 import type { CloudCacheKnown } from "../../../shared/cloud-chat-cache";
 import { NativeCloudCacheError } from "./cloud-chat-cache-client";
-import { CloudLostWorkSchema, CloudWorkspaceRetentionSchema, type CloudWorkspaceDocument, type CloudWorkspaceRetention } from "./cloud-workspace-contract";
+import { CloudLostWorkSchema, CloudUnrestoredSubmodulesSchema, CloudWorkspaceRetentionSchema, type CloudWorkspaceDocument, type CloudWorkspaceRetention } from "./cloud-workspace-contract";
 import type { CloudWorkspaceTarget } from "./bridge/cloud-workspace-key";
 
 const uuid = z.string().uuid();
@@ -149,6 +149,7 @@ export function cloudV2Document(workspace: CloudV2Workspace): CloudWorkspaceDocu
     ...topLevel("setup", CloudV2SetupStatusSchema, (workspace as Record<string, unknown>).setup),
     ...topLevel("agentCost", CloudV2AgentCostSchema, (workspace as Record<string, unknown>).agentCost),
     ...topLevel("lostWork", CloudLostWorkSchema, (workspace as Record<string, unknown>).lostWork),
+    ...topLevel("unrestoredSubmodules", CloudUnrestoredSubmodulesSchema, (workspace as Record<string, unknown>).unrestoredSubmodules),
     ...topLevel("preparing", z.literal("computer"), (workspace as Record<string, unknown>).preparing),
     ...retentionOf(workspace as Record<string, unknown>),
     generation: {

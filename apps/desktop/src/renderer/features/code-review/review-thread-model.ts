@@ -47,6 +47,22 @@ export interface CodeReviewExternalSource {
   /** Opaque exact provider/workspace/PR/base/head identity of the rendered diff. */
   confirmedRevision?: string;
   postComment?: (anchor: CodeReviewAnchor, body: string) => Promise<void>;
+  /** Posts a comment selected on a local comparison (the Changes tab) after
+   *  matching its lines against the published pull request diff. */
+  postMappedComment?: (
+    anchor: CodeReviewAnchor,
+    body: string,
+    /** The displayed text of one line on the anchor's side, if shown. */
+    localLine: (line: number) => string | null,
+    /** Rechecked after the PR diff read, just before posting: the live
+     *  comparison still shows the captured text for the same PR. */
+    stillCurrent: () => boolean,
+  ) => Promise<void>;
+  /** The pull request a mapped comment posts to; a draft keeps the one it
+   *  was opened for and refuses to post anywhere else. */
+  mappedTarget?: string;
+  /** The GitHub account a new comment posts as, when known. */
+  postAs?: { name: string; avatarUrl?: string | null } | null;
   /** Kept explicit for adapters that supply a destination-specific composer. */
   createLabel?: string;
 }

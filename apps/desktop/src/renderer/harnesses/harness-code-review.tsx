@@ -441,6 +441,11 @@ function Harness() {
       ...(confirmed ? { confirmedRevision: publishedRevision } : {}),
       createLabel: "Post to PR",
       postComment: (selected, body) => create(selected, body, "github"),
+      // `?mapped`: a local comparison (the Changes tab) whose comments are
+      // matched to the published PR diff when posted.
+      ...(params.has("mapped")
+        ? { mappedTarget: "fixture-pr", postMappedComment: (selected: CodeReviewAnchor, body: string) => create(selected, body, "github") }
+        : {}),
       error: externalError
         ? "Fixture GitHub read failed. Last confirmed comments are retained."
         : null,

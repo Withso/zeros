@@ -3,10 +3,11 @@
 // ──────────────────────────────────────────────────────────
 //
 // One chronological activity stream (composeTimeline): opened → commits →
-// reviews/comments → merged/closed, drawn on a connector rail with avatars.
+// reviews, comments and line comments → merged/closed, drawn on a connector
+// rail with avatars. A line comment names its file and line and opens there.
 // All, People and Bots filter it once an App has taken part; an App's review
 // or comment folds to one line until Show. Review + comment bodies render as
-// sanitised markdown cards with "Add to chat" (quoted context lands in the
+// sanitised markdown cards with "Add to chat" (a comment pill lands in the
 // active composer — the user adds instructions and sends). The composer at
 // the bottom posts optimistically: the comment appears instantly, reconciles
 // against GitHub in the background, and rolls back (keeping the draft) if the
@@ -35,12 +36,21 @@ import {
 } from "@/renderer/shared/ui/primitives";
 import { cn } from "@/renderer/shared/ui/cn";
 import { renderMarkdown } from "@/renderer/features/agent/markdown";
-import { buildReviewCommentContext } from "../../pr/pr-action-prompts";
+import type { PrReviewThread } from "@zeros/protocol/github-review";
+import {
+  reviewCommentLocation,
+  reviewCommentTitle,
+  timelineCommentItems,
+  type ReviewCommentItem,
+} from "@/renderer/features/code-review/review-comment-reference";
+import { revealReviewComment } from "@/renderer/features/code-review/review-comment-open";
 import { humanGitError, type ReviewTimelineEntry } from "./review-data";
 import {
+  activityCount,
   appDisplayName,
   composeTimeline,
   filterTimelineEvents,
+  isBotEvent,
   isBotLogin,
   relTime,
   type ReviewTimelineEvent,
@@ -67,7 +77,10 @@ export function ReviewTimelineSection({
   scrollKey,
   hostLabel,
   viewer = null,
-  onAddToChat,
+  onAddCommentsToChat,
+  threads = null,
+  threadsComplete = false,
+  cwd,
   onPostComment,
   onRetry,
   checks = null,
@@ -87,7 +100,14 @@ export function ReviewTimelineSection({
   hostLabel: string;
   /** The account a comment posts as, beside the comment box. */
   viewer?: { login: string; avatarUrl: string | null } | null;
-  onAddToChat: (text: string) => void;
+  /** Stages comments as composer pills. */
+  onAddCommentsToChat: (items: readonly ReviewCommentItem[]) => void;
+  /** Line comments from the inline review read; null while unread. */
+  threads?: readonly PrReviewThread[] | null;
+  /** That read listed every thread and comment. */
+  threadsComplete?: boolean;
+  /** Where a line comment's file opens. */
+  cwd: string;
   onPostComment: (body: string) => Promise<void>;
   onRetry: () => void;
   /** The head commit's checks; its failures join the stream. */
@@ -106,8 +126,10 @@ export function ReviewTimelineSection({
         commits: commits ?? [],
         items: timeline ?? [],
         checks,
+        threads,
+        threadsComplete,
       }),
-    [pr, commits, timeline, checks],
+    [pr, commits, timeline, checks, threads, threadsComplete],
   );
   const optimisticIds = useMemo(
     () =>
@@ -148,7 +170,8 @@ export function ReviewTimelineSection({
               (e.kind === "comment" || e.kind === "review") &&
               optimisticIds.has(e.item.id)
             }
-            onAddToChat={onAddToChat}
+            onAddCommentsToChat={onAddCommentsToChat}
+            cwd={cwd}
             chat={e.kind === "commit" ? chats?.get(e.commit.sha) : undefined}
             onOpenChat={onOpenChat}
             onViewChecks={onViewChecks}
@@ -181,7 +204,7 @@ export function ReviewTimelineSection({
           {error && <ErrorCallout text={error} onRetry={onRetry} />}
           <ReviewSection
             title="Activity"
-            count={timeline?.length}
+            count={activityCount(timeline, threads, threadsComplete) ?? undefined}
             action={filterSwitch}
           >
             {body}
@@ -202,6 +225,8 @@ function eventKey(e: ReviewTimelineEvent, i: number): string {
     case "review":
     case "comment":
       return `${e.kind}-${e.item.id}`;
+    case "thread":
+      return `thread-${e.thread.id}`;
     default:
       return `${e.kind}-${i}`;
   }
@@ -215,7 +240,8 @@ function TimelineRow({
   last,
   prNumber,
   optimistic,
-  onAddToChat,
+  onAddCommentsToChat,
+  cwd,
   chat,
   onOpenChat,
   onViewChecks,
@@ -224,13 +250,15 @@ function TimelineRow({
   last: boolean;
   prNumber: number;
   optimistic: boolean;
-  onAddToChat: (text: string) => void;
+  onAddCommentsToChat: (items: readonly ReviewCommentItem[]) => void;
+  cwd: string;
   /** The chat whose turn made this commit. */
   chat?: ReviewCommitChat;
   onOpenChat?: (chatId: string) => void;
   onViewChecks?: () => void;
 }) {
-  const isCard = event.kind === "review" || event.kind === "comment";
+  const isCard =
+    event.kind === "review" || event.kind === "comment" || event.kind === "thread";
   return (
     <li className="relative flex gap-2.5 pb-1">
       {/* rail */}
@@ -245,7 +273,8 @@ function TimelineRow({
           event={event}
           prNumber={prNumber}
           optimistic={optimistic}
-          onAddToChat={onAddToChat}
+          onAddCommentsToChat={onAddCommentsToChat}
+          cwd={cwd}
           chat={chat}
           onOpenChat={onOpenChat}
           onViewChecks={onViewChecks}
@@ -286,6 +315,12 @@ function EventGlyph({
           avatarUrl={event.item.authorAvatarUrl}
         />
       );
+    case "thread": {
+      const author = event.thread.comments[0]?.author;
+      return (
+        <AuthorAvatar login={author?.login ?? ""} avatarUrl={author?.avatarUrl ?? null} />
+      );
+    }
   }
 }
 
@@ -293,7 +328,8 @@ function EventBody({
   event,
   prNumber,
   optimistic,
-  onAddToChat,
+  onAddCommentsToChat,
+  cwd,
   chat,
   onOpenChat,
   onViewChecks,
@@ -301,7 +337,8 @@ function EventBody({
   event: ReviewTimelineEvent;
   prNumber: number;
   optimistic: boolean;
-  onAddToChat: (text: string) => void;
+  onAddCommentsToChat: (items: readonly ReviewCommentItem[]) => void;
+  cwd: string;
   chat?: ReviewCommitChat;
   onOpenChat?: (chatId: string) => void;
   onViewChecks?: () => void;
@@ -381,14 +418,24 @@ function EventBody({
         <BotTimelineCard
           item={event.item}
           prNumber={prNumber}
-          onAddToChat={onAddToChat}
+          onAddCommentsToChat={onAddCommentsToChat}
         />
       ) : (
         <TimelineCard
           item={event.item}
           prNumber={prNumber}
           optimistic={optimistic}
-          onAddToChat={onAddToChat}
+          onAddCommentsToChat={onAddCommentsToChat}
+        />
+      );
+    case "thread":
+      return (
+        <ThreadTimelineCard
+          thread={event.thread}
+          prNumber={prNumber}
+          bot={isBotEvent(event)}
+          cwd={cwd}
+          onAddCommentsToChat={onAddCommentsToChat}
         />
       );
   }
@@ -442,11 +489,11 @@ const VERDICT: Record<string, { label: string; cls: string }> = {
 function BotTimelineCard({
   item,
   prNumber,
-  onAddToChat,
+  onAddCommentsToChat,
 }: {
   item: ReviewTimelineEntry;
   prNumber: number;
-  onAddToChat: (text: string) => void;
+  onAddCommentsToChat: (items: readonly ReviewCommentItem[]) => void;
 }) {
   const [open, setOpen] = useState(false);
   if (open)
@@ -455,7 +502,7 @@ function BotTimelineCard({
         item={item}
         prNumber={prNumber}
         optimistic={false}
-        onAddToChat={onAddToChat}
+        onAddCommentsToChat={onAddCommentsToChat}
         onHide={() => setOpen(false)}
       />
     );
@@ -489,13 +536,13 @@ function TimelineCard({
   item,
   prNumber,
   optimistic,
-  onAddToChat,
+  onAddCommentsToChat,
   onHide,
 }: {
   item: ReviewTimelineEntry;
   prNumber: number;
   optimistic: boolean;
-  onAddToChat: (text: string) => void;
+  onAddCommentsToChat: (items: readonly ReviewCommentItem[]) => void;
   /** Folds an App's card back to its one line. */
   onHide?: () => void;
 }) {
@@ -535,14 +582,7 @@ function TimelineCard({
             size="compact"
             className="text-fg2"
             onClick={() =>
-              onAddToChat(
-                buildReviewCommentContext({
-                  prNumber,
-                  author: item.author,
-                  state: item.kind === "review" ? item.state : "",
-                  body: item.body,
-                }),
-              )
+              onAddCommentsToChat(timelineCommentItems([item], prNumber))
             }
           >
             Add to chat
@@ -575,6 +615,128 @@ function TimelineCard({
         </p>
       )}
     </div>
+  );
+}
+
+/** A line comment and its replies: who, where (opens at the line in
+ *  Changes), the comment, then each reply. An App's thread folds to one line
+ *  until Show, like its other activity. */
+function ThreadTimelineCard({
+  thread,
+  prNumber,
+  bot,
+  cwd,
+  onAddCommentsToChat,
+}: {
+  thread: PrReviewThread;
+  prNumber: number;
+  bot: boolean;
+  cwd: string;
+  onAddCommentsToChat: (items: readonly ReviewCommentItem[]) => void;
+}) {
+  const [open, setOpen] = useState(!bot);
+  const [first, ...replies] = thread.comments;
+  const html = useMemo(() => (open && first ? renderMarkdown(first.body) : ""), [open, first]);
+  if (!first) return null;
+  const line = thread.line ?? thread.originalLine;
+  const reference = {
+    path: thread.path,
+    line: line ?? undefined,
+    startLine: (thread.line !== null ? thread.startLine : thread.originalStartLine) ?? undefined,
+  };
+  const location = reviewCommentLocation(reference, true) ?? thread.path;
+  const item: ReviewCommentItem = {
+    source: "github",
+    replies: replies.map((reply) => ({ author: reply.author.login, body: reply.body })),
+    fullBody: first.body,
+    reference: {
+      kind: "pr-comment",
+      key: `github:${thread.id}`,
+      prNumber,
+      author: { name: first.author.login, avatarUrl: first.author.avatarUrl, bot },
+      createdAt: first.createdAt,
+      url: first.url,
+      title: reviewCommentTitle(first.body) || "Comment",
+      path: thread.path,
+      ...(line
+        ? { side: thread.side === "LEFT" ? ("old" as const) : ("new" as const), line, startLine: reference.startLine ?? line }
+        : {}),
+      body: first.body.slice(0, 20_000),
+      resolved: thread.isResolved,
+    },
+  };
+  const header = (
+    <div className="flex min-h-9 min-w-0 items-center gap-1.5 pt-1.5 pr-1.5 pl-3 text-xs">
+      <span className="text-fg1 shrink-0 font-medium">{appDisplayName(first.author.login)}</span>
+      {bot && <Badge variant="neutral">Bot</Badge>}
+      <span className="text-fg2 shrink-0">commented on</span>
+      <ReviewTextLink
+        onClick={() => void revealReviewComment(cwd, item.reference)}
+        label={`Open ${location} in Changes`}
+      >
+        <span className="font-mono text-2xxs">{location}</span>
+      </ReviewTextLink>
+      {thread.isResolved ? <Badge variant="neutral">Resolved</Badge> : thread.isOutdated ? <Badge variant="neutral">Outdated</Badge> : null}
+      <span className="text-muted-fg shrink-0">{relTime(first.createdAt)}</span>
+      <div className="flex-1" />
+      {open ? (
+        <Button variant="ghost" size="compact" className="text-fg2" onClick={() => onAddCommentsToChat([item])}>
+          Add to chat
+        </Button>
+      ) : null}
+      {bot ? (
+        <Button variant="ghost" size="compact" className="text-fg2" aria-expanded={open} onClick={() => setOpen(!open)}>
+          {open ? "Hide" : "Show"}
+        </Button>
+      ) : null}
+    </div>
+  );
+  return (
+    <div data-review-thread-event="" className={cn(REVIEW_CARD, !open && "pb-1.5")}>
+      {header}
+      {open ? (
+        <div className="px-3 pt-1 pb-2.5">
+          <div className="zeros-agent-md zeros-agent-md--panel [&_.zeros-md-prose>:first-child]:mt-0 [&_.zeros-md-prose>:last-child]:mb-0">
+            <div className="zeros-md-prose text-sm" dangerouslySetInnerHTML={{ __html: html }} />
+          </div>
+          {replies.length ? (
+            <ol className="border-border1 m-0 mt-2 flex list-none flex-col gap-2 border-t p-0 pt-2">
+              {replies.map((reply) => (
+                <ThreadReply key={reply.id} login={reply.author.login} avatarUrl={reply.author.avatarUrl} body={reply.body} at={reply.createdAt} />
+              ))}
+            </ol>
+          ) : null}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function ThreadReply({
+  login,
+  avatarUrl,
+  body,
+  at,
+}: {
+  login: string;
+  avatarUrl: string | null;
+  body: string;
+  at: number;
+}) {
+  const html = useMemo(() => renderMarkdown(body), [body]);
+  return (
+    <li className="flex min-w-0 gap-2">
+      <AuthorAvatar login={login} avatarUrl={avatarUrl} className="mt-0.5 shrink-0" />
+      <div className="min-w-0 flex-1">
+        <div className="flex items-center gap-1.5 text-xs">
+          <span className="text-fg1 font-medium">{appDisplayName(login)}</span>
+          <span className="text-muted-fg">{relTime(at)}</span>
+        </div>
+        <div className="zeros-agent-md zeros-agent-md--panel [&_.zeros-md-prose>:first-child]:mt-0 [&_.zeros-md-prose>:last-child]:mb-0">
+          <div className="zeros-md-prose text-sm" dangerouslySetInnerHTML={{ __html: html }} />
+        </div>
+      </div>
+    </li>
   );
 }
 

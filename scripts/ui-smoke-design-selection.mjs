@@ -155,10 +155,11 @@ export async function runDesignDescentHoverSmoke({ page, check }) {
   );
 
   await page.locator('[data-design-sidebar-panel] [data-design-layer-id="home-hero"]').click();
-  const heading = await box("home-heading");
+  const hero = await box("home-hero");
   const copy = await box("home-copy");
-  // The gap between the hero's heading and copy belongs to the hero itself.
-  const gap = { x: copy.x + copy.width / 2, y: (heading.y + heading.height + copy.y) / 2 };
+  // Beside the copy line, inside the hero, is the hero's own area. The gap
+  // between heading and copy is only a few pixels with some fonts.
+  const gap = { x: (copy.x + copy.width + hero.x + hero.width) / 2, y: copy.y + copy.height / 2 };
   await page.mouse.move(gap.x, gap.y, { steps: 3 });
   await settle();
   const overParent = await hovered();

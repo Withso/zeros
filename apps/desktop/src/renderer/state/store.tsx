@@ -327,6 +327,15 @@ export type PendingComposerAppend = {
   /** Keep focus where it is: a code reference added from an editor leaves
    *  the next keystroke in that editor. */
   preserveFocus?: boolean;
+  /** Text files staged as pills after `text` (pull request comments). The
+   *  same sourceKey replaces its pill instead of adding a second one. */
+  attachments?: readonly {
+    sourceKey: string;
+    name: string;
+    text: string;
+    /** Saved on the pill; its owner decides what a click opens. */
+    reference?: unknown;
+  }[];
 };
 
 export type PendingChatSubmission = {

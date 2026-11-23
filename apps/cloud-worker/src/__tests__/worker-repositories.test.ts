@@ -14,6 +14,13 @@ import { CLIENT_A, FakeRelay, browserFrame, config } from "./worker-fixtures";
 import { workerChildEnvironment } from "../drivers/shared/agent-environment";
 import { WorkspaceScope } from "../workspace/scope";
 import { gitCredential } from "../credentials/broker";
+import { fetchPlannedSubmodules } from "../workspace/submodules";
+
+// The real fetch, observed: which checkouts ask for every planned submodule and which only for missing ones.
+vi.mock("../workspace/submodules", async importOriginal => {
+  const actual = await importOriginal<typeof import("../workspace/submodules")>();
+  return { ...actual, fetchPlannedSubmodules: vi.fn(actual.fetchPlannedSubmodules) };
+});
 
 const exec = promisify(execFile);
 const cleanups: Array<() => Promise<void>> = [];
@@ -169,12 +176,14 @@ it("rereads every repository's GitHub state after a gh mutation, not only the fi
   changed.mockRestore();
 });
 
-it("asks for a planned submodule's own token by name, and brings a new checkout's submodules before its setup, never a resumed one's", async () => {
+it("asks for a planned submodule's own token by name, and brings a new checkout's submodules before its setup, a restored one's only if missing", async () => {
   const directory = await mkdtemp(join(tmpdir(), "worker-submodules-"));
   cleanups.push(() => rm(directory, { recursive: true, force: true }));
   const checkout = join(directory, "app");
   await mkdir(checkout);
   const submodules = [{ position: 0, path: "vendor/lib", repository: "acme/lib", commit: "a".repeat(40), gitDir: `modules/${"b".repeat(64)}` }];
+  const fetching = vi.mocked(fetchPlannedSubmodules);
+  fetching.mockClear();
   const run = async (createdBranch: boolean) => {
     const relay = new FakeRelay(), log = vi.fn(), state = await mkdtemp(join(directory, "state-"));
     const prepareCheckout = vi.fn(async () => ({ createdBranch }));
@@ -207,8 +216,14 @@ it("asks for a planned submodule's own token by name, and brings a new checkout'
   void asked("acme/unplanned");
   await vi.waitFor(() => expect(tokenRequests()).toHaveLength(2));
   expect(tokenRequests()[1]).not.toHaveProperty("repository");
-  // A resumed disk (its branch already there): the person's submodules are left as they are.
+  expect(fetching.mock.calls[0]!.slice(0, 2)).toEqual([checkout, submodules]);
+  expect(fetching.mock.calls[0]![3]).toBeUndefined();
+  // Its branch already there (a restore, which leaves each gitlink's folder empty): only a submodule still missing is
+  // fetched, any that exists is left as it is. Here its folder is absent, so it is kept, and no line is written.
   const resumed = await run(false);
-  await vi.waitFor(() => expect(resumed.prepareCheckout).toHaveBeenCalled());
+  await vi.waitFor(() => expect(fetching).toHaveBeenCalledTimes(2));
+  expect(fetching.mock.calls[1]!.slice(0, 2)).toEqual([checkout, submodules]);
+  expect(fetching.mock.calls[1]![3]).toEqual({ onlyMissing: true });
+  expect(await fetching.mock.results[1]!.value).toEqual([{ path: "vendor/lib", fetched: false, kept: true }]);
   expect(resumed.log.mock.calls.filter(([line]) => String(line).startsWith("[submodules]"))).toEqual([]);
 });

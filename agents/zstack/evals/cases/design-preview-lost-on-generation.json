@@ -1,0 +1,9 @@
+{
+  "id": "design-preview-lost-on-generation",
+  "kind": "replay",
+  "area": "desktop-design",
+  "fixedBy": "pr:1222",
+  "symptom": "A Mixed scrub in the Design inspector snapped back mid-drag and saved values it never showed when a new frame generation (an undo finishing, another edit) replaced the document under it; the Mixed scrub smoke failed about one run in four.",
+  "rule": "A gesture's live preview belongs to its owner until it commits or restores, and is shown again on any document that replaces the previewed one (renderer invariant: retain the last confirmed state while revalidating).",
+  "check": "pnpm exec vitest run --config vitest.config.ts apps/desktop/src/renderer/features/design-workspace/__tests__/design-inspector-scrub-renders.test.ts apps/desktop/src/renderer/features/design-workspace/__tests__/design-gesture-preview.test.ts"
+}

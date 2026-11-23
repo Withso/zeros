@@ -9,6 +9,7 @@ import pg from "pg";
 import WebSocket from "ws";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { syncFixture, type SyncFixture } from "./test-fixture.js";
+import { OFFLINE_GIT_ENV } from "../__fixtures__/offline-git.js";
 
 // Integration uses ordinary relative sources. The override joins isolated
 // worktrees to the same real clients, not copies or substitute decoders.
@@ -62,7 +63,7 @@ suite("desktop direct sync client, worker and control-plane routes joined", () =
     const checkout = join(directory, "checkout"), state = join(directory, "state");
     await mkdir(checkout); await mkdir(state);
     const git = async (...args: string[]) => exec("git", ["-c", "core.hooksPath=/dev/null", "-c", "commit.gpgsign=false", ...args], {
-      cwd: checkout, timeout: 10_000, env: { ...process.env, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null", GIT_TERMINAL_PROMPT: "0" } });
+      cwd: checkout, timeout: 10_000, env: { ...process.env, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null", GIT_TERMINAL_PROMPT: "0", ...OFFLINE_GIT_ENV } });
     await git("init", "--initial-branch=main");
     await git("config", "user.name", "Fixture"); await git("config", "user.email", "fixture@example.invalid");
     await writeFile(join(checkout, "readme.txt"), "joined sync fixture\n");
