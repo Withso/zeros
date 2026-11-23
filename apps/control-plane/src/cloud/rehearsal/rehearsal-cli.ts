@@ -25,7 +25,7 @@ import { launcherModules, localStack, type LocalStack } from "./local-stack.js";
 
 export const USAGE = "alpha:rehearse <provision|setup|projects|personal|retention|submodules|waiting|all> [--local (this checkout's Dev stack; the Personal route needs no --organization)] [--plan] [--cleanup] [--run <id>] " +
   "[--owner personal|organization (default personal)] [--account owner|1..10 (default 2)] [--other 1..10 (default the next configured)] " +
-  "[--waiting-account 1..10 (default 3)] " +
+  "[--waiting-account 1..10 (default 3)] [--pro-actor-account 1..10 (--local: default the first configured account the run does not use)] " +
   "[--pro-actor <first 8 hex of the platform owner>] [--switches projects,personal,retention] --repository owner/name (R1, required unless ZEROS_REHEARSAL_REPOSITORY is set) " +
   "[--repository-two owner/name (default Withso/zeros-dev-fixture-2)] [--submodule-repository owner/name] [--submodule-fixture-repository owner/name] [--keep-base] [--max-active <n>] [--organization <slug|id>]";
 /** `all` runs these in order on each route; D is refused until written. */
@@ -39,6 +39,8 @@ export type Arguments = {
   stages: StageName[]; plan: boolean; cleanup: boolean; run?: string;
   /** The Dev stack this checkout runs (pnpm electron:cloud) instead of Alpha. */
   local: boolean; owner: OwnerKind; account: "owner" | number; other?: number; proActor?: string;
+  /** --local: the numbered account made the stack's platform owner for the run, to act for Pro (never one under test). */
+  proActorAccount?: number;
   /** Stage waiting's account: its own fresh Personal organization. */
   waitingAccount: number;
   switches: Set<Switch>;
@@ -51,7 +53,7 @@ export function parseArguments(argv: string[]): Arguments {
     plan: { type: "boolean" }, cleanup: { type: "boolean" }, run: { type: "string" }, local: { type: "boolean" }, account: { type: "string" }, switches: { type: "string" },
     repository: { type: "string" }, "repository-two": { type: "string" }, "keep-base": { type: "boolean" }, "max-active": { type: "string" },
     organization: { type: "string" }, owner: { type: "string" }, "submodule-repository": { type: "string" }, "submodule-fixture-repository": { type: "string" }, other: { type: "string" }, "pro-actor": { type: "string" }, help: { type: "boolean" },
-    "waiting-account": { type: "string" },
+    "waiting-account": { type: "string" }, "pro-actor-account": { type: "string" },
   } });
   const owner = (values.owner ?? "personal") as OwnerKind;
   if (!["personal", "organization"].includes(owner)) throw new RehearsalFailure("usage", "owner");
@@ -68,6 +70,8 @@ export function parseArguments(argv: string[]): Arguments {
   if (values["pro-actor"] !== undefined && !/^[0-9a-f]{8}$/.test(values["pro-actor"])) throw new RehearsalFailure("usage", "pro_actor");
   const waitingAccount = Number(values["waiting-account"] ?? (account === 3 ? 4 : 3));
   if (!(Number.isInteger(waitingAccount) && waitingAccount >= 1 && waitingAccount <= 10 && waitingAccount !== account)) throw new RehearsalFailure("usage", "waiting_account");
+  const proActorAccount = values["pro-actor-account"] === undefined ? undefined : Number(values["pro-actor-account"]);
+  if (proActorAccount !== undefined && !(Number.isInteger(proActorAccount) && proActorAccount >= 1 && proActorAccount <= 10)) throw new RehearsalFailure("usage", "pro_actor_account");
   const switches = new Set<Switch>();
   for (const name of (values.switches ?? "").split(",").filter(Boolean)) {
     if (!["projects", "personal", "retention"].includes(name)) throw new RehearsalFailure("usage", "switch");
@@ -76,12 +80,34 @@ export function parseArguments(argv: string[]): Arguments {
   const maxActive = values["max-active"] === undefined ? 10 : Number(values["max-active"]);
   if (!(Number.isInteger(maxActive) && maxActive >= 0 && maxActive <= 50)) throw new RehearsalFailure("usage", "max_active");
   return { stages, plan: !!values.plan, cleanup: !!values.cleanup, local: !!values.local, ...(values.run ? { run: values.run } : {}), owner, account, waitingAccount,
-    ...(other !== undefined ? { other } : {}), ...(values["pro-actor"] ? { proActor: values["pro-actor"] } : {}), switches,
+    ...(other !== undefined ? { other } : {}), ...(values["pro-actor"] ? { proActor: values["pro-actor"] } : {}),
+    ...(proActorAccount !== undefined ? { proActorAccount } : {}), switches,
     ...(values.repository ? { repository: assertRepository(values.repository) } : {}),
     ...(values["repository-two"] ? { repositoryTwo: assertRepository(values["repository-two"]) } : {}),
     ...(values["submodule-repository"] ? { submoduleRepository: assertRepository(values["submodule-repository"]) } : {}),
     ...(values["submodule-fixture-repository"] ? { submoduleFixtureRepository: assertRepository(values["submodule-fixture-repository"]) } : {}),
     keepBase: !!values["keep-base"], maxActive, ...(values.organization ? { organization: values.organization } : {}) };
+}
+
+/** The second account: --other, or the first configured numbered account that is not the selected one. */
+export function otherLabelOf(configured: readonly string[], args: Pick<Arguments, "account" | "other">): string {
+  return String(args.other ?? configured.find(label => label !== "owner" && label !== String(args.account)) ?? "");
+}
+
+/** --local: the account that acts for Pro as the stack's platform owner. A platform owner has the staff Pro benefit, so its
+ * own Pro never reads as ended: it is never the selected, the second or the waiting account. --pro-actor-account, or the
+ * first configured numbered account the run does not use; one under test is refused, named. */
+export function localProActorLabel(configured: readonly string[], args: Pick<Arguments, "account" | "other" | "waitingAccount" | "proActorAccount">): string {
+  const underTest = new Set([String(args.account), otherLabelOf(configured, args), String(args.waitingAccount)].filter(Boolean));
+  if (args.proActorAccount !== undefined) {
+    const label = String(args.proActorAccount);
+    if (underTest.has(label)) throw new RehearsalFailure("pro_actor", "account_under_test");
+    if (!configured.includes(label)) throw new RehearsalFailure("pro_actor", "not_configured");
+    return label;
+  }
+  const label = configured.find(name => name !== "owner" && !underTest.has(name));
+  if (!label) throw new RehearsalFailure("pro_actor", "no_free_account");
+  return label;
 }
 
 const Profile = z.object({
@@ -149,6 +175,9 @@ async function main(argv: string[]): Promise<number> {
     if (!one) throw new RehearsalFailure("configuration", "repository_one");
     if (!probeSelector && !(stack && args.owner === "personal")) throw new RehearsalFailure("configuration", "probe_organization");
     if (!await liveRelease(fetch, target)) throw new RehearsalFailure("release_identity", "not_ready");
+    // --local: the Pro actor is chosen before anything is made, and is never an account under test.
+    const labels = accounts.map(row => row.label);
+    const actorLabel = stack && !args.proActor && !args.plan && !args.cleanup ? localProActorLabel(labels, args) : undefined;
 
     if (args.plan) {
       log("plan: reads only; each account signs in (one session, revoked at the end; 3 s apart, a throttled step retried after 5, 15 and 45 s)," +
@@ -222,7 +251,7 @@ async function main(argv: string[]): Promise<number> {
           } finally { await result.session.close().catch(() => log(`account ${result.label}: sign-out failed`)); }
         }
         const selected = summaries.get(String(args.account)) ?? { failed: "account:not_configured" };
-        const otherLabel = String(args.other ?? accounts.find(row => row.label !== "owner" && row.label !== String(args.account))?.label ?? "none");
+        const otherLabel = otherLabelOf(labels, args) || "none";
         log(`selected account ${args.account}; second account ${otherLabel}; waiting account ${args.waitingAccount} (${waitingAccount}); repositories R1 ${one}, R2 ${two}`);
         log(agentCredentials.length ? `agent credentials: ${agentCredentials.map(entry => `${entry.source} (${entry.kind})`).join(", ")}; setup connects each for account ${args.account} in its Personal organization, cleanup removes each`
           : `agent credentials: none (set any of ${AGENT_CREDENTIAL_SOURCES.map(source => source.name).join(", ")} in .env.agent)`);
@@ -290,14 +319,21 @@ async function main(argv: string[]): Promise<number> {
       const run = state;
       await saveState(run);
       log(`run ${run.runId} prefix ${run.prefix} route ${owner}${stack ? " target local" : ""}`);
-      // --local: a fresh stack's database has no platform owner, and the Pro operator needs one. The selected account
-      // becomes it for this run, as the launcher's own seed makes its fixture account staff: its current role read and
-      // recorded first, then changed; cleanup puts that role back last. A run that already did so reuses it.
+      // --local: a fresh stack's database has no platform owner, and the Pro operator needs one. Another account, never
+      // one under test (a platform owner keeps the staff Pro benefit, so its own Pro would never read as ended), becomes it
+      // for this run, as the launcher's own seed makes its fixture account staff: its current role read and recorded first,
+      // then changed; cleanup puts that role back last. A run that already did so reuses it.
       if (stack && !actor.id) {
         const grant = run.created.staffGrant;
+        const actorAccount = actorLabel ? accounts.find(row => row.label === actorLabel) : undefined;
+        const signed = !grant && held && !args.cleanup && owner === "personal" && actorAccount ? await signInAccount(actorAccount, signInDeps(probe)) : undefined;
+        if (signed?.ok) sessions.push(signed);
+        else if (signed) log(`pro actor account ${actorLabel}: unavailable ${signed.step}:${signed.code}`);
+        const actorSession = signed?.ok ? signed : undefined;
         if (grant) actor = { state: "resolved", id: grant.userId };
-        else if (held && !args.cleanup && owner === "personal" && personalOf(held)) {
+        else if (actorSession) {
           const staffDb = database(run.runId.replace(/-/g, ""));
+          const held = actorSession;
           try {
             const previous = (await staffDb.read("SELECT staff_role FROM users WHERE id = $1::uuid", [held.userId]))[0]?.staff_role ?? null;
             const owned = (await staffDb.read(`SELECT o.id::text AS id FROM organizations o JOIN organization_members m ON m.org_id = o.id AND m.user_id = $1::uuid
@@ -308,12 +344,12 @@ async function main(argv: string[]): Promise<number> {
             run.created.staffGrant = record; await saveState(run);
             await localStaffRole(staffDb, record, "platform_owner");
             actor = { state: "resolved", id: held.userId };
-            log("local stack: the selected account is its platform owner for this run (the Pro operator's actor); cleanup puts its role back");
+            log(`local stack: account ${actorLabel} is its platform owner for this run (the Pro operator's actor); cleanup puts its role back`);
           } finally { await staffDb.close().catch(() => undefined); }
         }
       }
       if (held && args.stages.includes("personal") && !args.cleanup) {
-        const label = String(args.other ?? accounts.find(row => row.label !== "owner" && row.label !== String(args.account))?.label ?? "");
+        const label = otherLabelOf(labels, args);
         const account = accounts.find(row => row.label === label);
         const result = account ? await signInAccount(account, signInDeps(probe)) : undefined;
         if (result?.ok) { sessions.push(result); other = result; } else log(`second account ${label || "none"}: unavailable${result && !result.ok ? ` ${result.step}:${result.code}` : ""}`);
@@ -332,6 +368,18 @@ async function main(argv: string[]): Promise<number> {
       }
       const api = held?.api ?? NO_ACCOUNT;
       const db = database(run.runId.replace(/-/g, ""));
+      // --local: no account under test is the Pro actor or staff at all (a resumed run's grant, --pro-actor, or a role left
+      // from before): its Pro would never read as ended. Refused before any stage, named; a cleanup still runs.
+      if (stack && !args.cleanup) {
+        const underTest = [held, other, waiting].filter((entry): entry is SignedIn => !!entry).map(entry => entry.userId);
+        const staff = underTest.length ? Number((await db.read(`SELECT count(*)::int AS n FROM users WHERE id = ANY($1::uuid[]) AND staff_role IS NOT NULL`,
+          [underTest]))[0]?.n ?? 0) : 0;
+        if ((actor.id && underTest.includes(actor.id)) || staff) {
+          await db.close().catch(() => undefined);
+          log(`next: pnpm alpha:rehearse all --local --cleanup --run ${run.runId} puts back any role this run changed`);
+          throw new RehearsalFailure("pro_actor", actor.id && underTest.includes(actor.id) ? "account_under_test" : "account_under_test_staff");
+        }
+      }
       const ports: Ports = {
         release: () => liveRelease(fetch, target), api, bridge: liveBridge(api, undefined, undefined, undefined, target.loopback ? { loopback: target.loopback } : {}),
         networkRetries: () => networkRetries.take(), boat: liveBoat({ apiKey: profile.boat.apiKey,

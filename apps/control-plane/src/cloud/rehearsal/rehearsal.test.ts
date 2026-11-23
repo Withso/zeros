@@ -12,7 +12,7 @@ import { RehearsalFailure, type Database, type RehearsalState, type StageName } 
 import { assertRepository, safeLine } from "./guard.js";
 import { accountLines, turnLine, PERSONAL_ROUTE_GAPS, preconditionLines, readAccount, refusal, writeLines, type PreconditionFacts } from "./plan.js";
 import { cleanup, cleanupNeedsAccount, inventoryLines, NO_ACCOUNT, readInventory, runStages, stageContext, timingLines } from "./runner.js";
-import { parseArguments, sharedBaseFacts, targetPorts } from "./rehearsal-cli.js";
+import { localProActorLabel, parseArguments, sharedBaseFacts, targetPorts } from "./rehearsal-cli.js";
 import { CONNECT_CLIENT_FEATURES, call, until, checkText, connectWorkspace, createProject, createWorkspace, fileTarget, frameCode, openBridge, waitState, writeFile } from "./steps.js";
 import { FIXTURE_TWO } from "./stage-provision.js";
 import { loadState, newState, saveState, stateTarget } from "./state.js";
@@ -424,6 +424,46 @@ describe("rehearsal stages against a fake Alpha", () => {
       ctx.ports.networkRetries = () => calls++ === 0 ? 5 : 2;
       expect(await runStages(ctx, ["provision"], options)).toBe(true);
       expect(lines.filter(line => line.includes("network retries"))).toEqual(["  provision network retries 2"]);
+    });
+  });
+
+  it("--local: the Pro actor is another account, never one under test; one under test is refused at start, named", () => {
+    const configured = ["owner", "1", "2", "3", "4", "5"];
+    // Defaults: selected 2, second 1 (the first other), waiting 3; the actor is the first one free.
+    const defaults = parseArguments(["personal", "--local"]);
+    expect(localProActorLabel(configured, defaults)).toBe("4");
+    expect(localProActorLabel(configured, parseArguments(["personal", "--local", "--other", "4"]))).toBe("1");
+    expect(localProActorLabel(configured, parseArguments(["personal", "--local", "--pro-actor-account", "5"]))).toBe("5");
+    for (const argv of [["--pro-actor-account", "2"], ["--pro-actor-account", "1"], ["--pro-actor-account", "3"],
+      ["--account", "5", "--pro-actor-account", "5"], ["--other", "5", "--pro-actor-account", "5"], ["--waiting-account", "5", "--pro-actor-account", "5"]])
+      expect(() => localProActorLabel(configured, parseArguments(["personal", "--local", ...argv]))).toThrow(expect.objectContaining({ step: "pro_actor", code: "account_under_test" }));
+    expect(() => localProActorLabel(configured, parseArguments(["personal", "--local", "--pro-actor-account", "9"]))).toThrow(expect.objectContaining({ code: "not_configured" }));
+    expect(() => localProActorLabel(["owner", "1", "2", "3"], defaults)).toThrow(expect.objectContaining({ code: "no_free_account" }));
+    expect(() => parseArguments(["personal", "--pro-actor-account", "11"])).toThrow(expect.objectContaining({ code: "pro_actor_account" }));
+  });
+
+  describe("a copy the product's guard refused for its archive", () => {
+    it("is retried once through the project's own route, noted and counted, and the stage goes on", async () => {
+      const { alpha, ctx, lines, options } = setup();
+      alpha.copyFailures = ["ready_copy_archive_incomplete"];
+      expect(await runStages(ctx, ["provision", "projects"], options)).toBe(true);
+      expect(alpha.copyRetries).toBe(1);
+      expect(lines).toContain("  projects note copy_retry:ready_copy_archive_incomplete");
+      expect(lines).toContain("  projects copyRetries 1");
+    });
+    it("fails the stage when the retried copy fails again, with the reason in the code", async () => {
+      const { alpha, ctx, options } = setup();
+      alpha.copyFailures = ["ready_copy_stop_incomplete", "ready_copy_archive_incomplete"];
+      expect(await runStages(ctx, ["provision", "projects"], options)).toBe(false);
+      expect(alpha.copyRetries).toBe(1);
+      expect(ctx.state.stages.projects).toMatchObject({ ok: false, step: "copy_ready", code: "copy_failed:ready_copy_archive_incomplete", counts: { copyRetries: 1 } });
+    });
+    it("never retries any other failure", async () => {
+      const { alpha, ctx, options } = setup();
+      alpha.copyFailures = ["ready_copy_setup_failed"];
+      expect(await runStages(ctx, ["provision", "projects"], options)).toBe(false);
+      expect(alpha.copyRetries).toBe(0);
+      expect(ctx.state.stages.projects).toMatchObject({ ok: false, step: "copy_ready", code: "copy_failed:ready_copy_setup_failed" });
     });
   });
 

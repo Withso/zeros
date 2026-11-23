@@ -256,14 +256,30 @@ export async function createProject(ctx: StageContext, input: { name: string; le
   await ctx.save();
   return project;
 }
+/** Copy failures the product's own guard gives when the provider's archive or stop had not completed: it fails closed and
+ * retries such a copy itself after its backoff. The rehearsal asks for that retry at once, as Try again does, once. */
+export const RETRIED_COPY_FAILURES: ReadonlySet<string> = new Set(["ready_copy_archive_incomplete", "ready_copy_stop_incomplete"]);
 export async function waitCopyReady(ctx: StageContext, projectId: string, step = "copy_ready"): Promise<void> {
-  await until(ctx, step, ctx.timing.copyMs, ctx.timing.pollMs, async () => {
-    const reply = await call(ctx.ports.api, "GET", `${projects(ctx.state.organizationId)}/${projectId}/ready-copy`, step);
-    const status = parse(z.object({ status: z.object({ state: z.string() }).passthrough() }), reply.body, step).status;
-    // none, getting_ready, updating, ready, failed, update_failed (ready-copy-status.ts).
-    check(status.state !== "failed", step, "copy_failed");
-    return status.state === "ready";
-  });
+  const path = `${projects(ctx.state.organizationId)}/${projectId}/ready-copy`;
+  for (let retried = false; ; retried = true) {
+    const outcome = await until(ctx, step, ctx.timing.copyMs, ctx.timing.pollMs, async () => {
+      const reply = await call(ctx.ports.api, "GET", path, step);
+      const status = parse(z.object({ status: z.object({ state: z.string(), failure: z.object({ reason: z.string() }).passthrough().optional() })
+        .passthrough() }), reply.body, step).status;
+      // none, getting_ready, updating, ready, failed, update_failed (ready-copy-status.ts).
+      if (status.state === "failed") {
+        const reason = status.failure?.reason;
+        return { failed: !reason ? "unknown" : /^[a-z0-9_]{1,48}$/.test(reason) ? reason : "other" };
+      }
+      return status.state === "ready" ? { failed: null } : false;
+    });
+    if (!outcome.failed) return;
+    if (retried || !RETRIED_COPY_FAILURES.has(outcome.failed)) throw new RehearsalFailure(step, `copy_failed:${outcome.failed}`);
+    // The desktop's Try again: the project's own retry route (a new generation whatever the backoff), with its own key.
+    await call(ctx.ports.api, "POST", `${path}/retry`, `${step}_retry`, {}, { headers: { "Idempotency-Key": randomUUID() } });
+    ctx.note(`copy_retry:${outcome.failed}`);
+    ctx.count?.("copyRetries");
+  }
 }
 export async function deleteProject(ctx: StageContext, projectId: string, step = "project_delete"): Promise<void> {
   await call(ctx.ports.api, "DELETE", `${projects(ctx.state.organizationId)}/${projectId}`, step, undefined, { ok: [200, 404] });

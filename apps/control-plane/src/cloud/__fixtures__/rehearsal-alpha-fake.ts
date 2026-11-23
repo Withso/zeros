@@ -22,7 +22,9 @@ type Workspace = {
 };
 type Build = { id: string; state: string; snapshot: string | null; builderSandboxId: string | null; automatic?: boolean; shared?: boolean;
   createdAt?: number; readyAt?: number };
-type Project = { id: string; name: string; organizationId: string; repositories: string[]; machine: string; submodules: boolean };
+type Project = { id: string; name: string; organizationId: string; repositories: string[]; machine: string; submodules: boolean;
+  /** Its latest copy's failure reason, or null when it is ready. */
+  copyFailed?: string | null };
 type Turn = { chatId: string; turnId: string; startedAt: number; files: string[] };
 
 export class FakeAlpha {
@@ -63,6 +65,9 @@ export class FakeAlpha {
   forkFallback = false;
   /** A create whose fork lacked a checkout: cloned directly, and the copy it forked marked stale (#1263's distrust). */
   copyDistrusted = false;
+  /** Failure reasons the next copies fail with, one per copy build (a create, then each retry); empty: ready. */
+  copyFailures: string[] = [];
+  copyRetries = 0;
   /** What the provider said of the copy's archive when it was promoted (cloud_v2_ready_copies.archive_snapshot). */
   copyArchive: string | null = "completed";
   /** The organization's install script (#1260: with one, its base is its own build, never the shared one). */
@@ -286,13 +291,19 @@ export class FakeAlpha {
         // A project's copy needs a base: made sure of first (composition.ts changed → ensureBase).
         this.ensureBase();
         project.machine = this.machine(`copy ${project.name}`);
+        project.copyFailed = this.copyFailures.shift() ?? null;
         this.machines.get(project.machine)!.state = "stopped";
         this.projects.set(project.id, project);
         return this.reply(201, { project: this.project(project) });
       }
       const project = id ? this.projects.get(id) : undefined;
       if (!project) return this.reply(404, { error: { code: "not_found" } });
-      if (parts[6] === "ready-copy") return this.reply(200, { status: { state: "ready" } });
+      if (parts[6] === "ready-copy" && parts[7] === "retry" && method === "POST") {
+        this.copyRetries++; project.copyFailed = this.copyFailures.shift() ?? null;
+        return this.reply(202, { ok: true });
+      }
+      if (parts[6] === "ready-copy") return this.reply(200, { status: project.copyFailed
+        ? { state: "failed", failure: { reason: project.copyFailed, repository: null, step: "stop", detail: null, failures: 1, nextRetryAt: null } } : { state: "ready" } });
       if (method === "DELETE") { this.machines.get(project.machine)!.state = "deleted"; this.projects.delete(project.id); return this.reply(200, { ok: true }); }
       return this.reply(200, { project: this.project(project) });
     }

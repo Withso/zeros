@@ -35,11 +35,12 @@ export const DEFAULT_RUN_CAP = 30;
 const ACTIVE = new Set(["creating", "starting", "running", "stopping"]);
 
 export function stageContext(ports: Ports, state: RehearsalState, save: () => Promise<void>, repositories: StageContext["repositories"],
-  timing: StageContext["timing"], runCap: number): StageContext & { lastStep(): string; takeNotes(): string[];
+  timing: StageContext["timing"], runCap: number): StageContext & { lastStep(): string; takeNotes(): string[]; takeCounts(): Record<string, number>;
     /** Each finished step's elapsed time, in order (the current one closed now), and cleared for the next stage. */
     takeTimings(): { step: string; ms: number }[];
     /** Called as each step finishes, with its elapsed milliseconds. */
     onStep?: (step: string, ms: number) => void } {
+  let counts: Record<string, number> = {};
   let last = "start", notes: string[] = [], startedAt = ports.clock.now(), timings: { step: string; ms: number }[] = [];
   const finish = () => {
     const ms = Math.max(0, ports.clock.now() - startedAt);
@@ -52,6 +53,8 @@ export function stageContext(ports: Ports, state: RehearsalState, save: () => Pr
     takeTimings: () => { finish(); const taken = timings; timings = []; last = "start"; startedAt = ports.clock.now(); return taken; },
     note(code) { if (/^[a-z0-9_:.-]{1,80}$/.test(code) && notes.length < 16) notes.push(code); },
     takeNotes: () => { const taken = notes; notes = []; return taken; },
+    count(name) { if (/^[a-zA-Z0-9_]{1,40}$/.test(name)) counts[name] = (counts[name] ?? 0) + 1; },
+    takeCounts: () => { const taken = counts; counts = {}; return taken; },
     start() {
       if (state.machineStarts >= runCap) throw new RehearsalFailure("machine_cap", "run_cap");
       state.machineStarts++;
@@ -82,7 +85,7 @@ export async function runStages(ctx: ReturnType<typeof stageContext>, stages: re
     else if (STAGE_NEEDS_ACCOUNT[name] && options.accountUnavailable) result = { ok: false, step: "account_unavailable", code: options.accountUnavailable };
     else {
       // Every step prints its elapsed time as it finishes; the stage ends with its slowest steps and its total.
-      ctx.takeTimings(); ctx.ports.networkRetries?.();
+      ctx.takeTimings(); ctx.takeCounts(); ctx.ports.networkRetries?.();
       ctx.onStep = (step, ms) => { if (step !== "start" || ms >= 1_000) options.log(safeLine(`  ${name} step ${step} ${seconds(ms)}`)); };
       try {
         await preconditions(ctx, options, STAGE_NEEDS_ACCOUNT[name]);
@@ -96,6 +99,8 @@ export async function runStages(ctx: ReturnType<typeof stageContext>, stages: re
       }
       const notes = ctx.takeNotes();
       if (notes.length) result = { ...result, notes };
+      const counted = ctx.takeCounts();
+      if (Object.keys(counted).length) result = { ...result, counts: { ...result.counts, ...counted } };
       const timings = ctx.takeTimings();
       delete ctx.onStep;
       for (const line of timingLines(name, timings)) options.log(safeLine(line));

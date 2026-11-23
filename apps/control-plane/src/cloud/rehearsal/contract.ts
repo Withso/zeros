@@ -200,6 +200,8 @@ export type StageContext = {
   step(name: string): void;
   /** Records a closed code for what the stage chose; printed with its result. */
   note(code: string): void;
+  /** Adds one to a named count, printed with the stage's result whether it passed or failed. */
+  count?(name: string): void;
   /** Counts a machine start before it happens; throws past the run's cap. */
   start(kind: string): void;
 };
