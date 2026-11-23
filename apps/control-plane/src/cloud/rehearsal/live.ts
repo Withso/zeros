@@ -16,6 +16,7 @@ import { BridgeProbe, Gate0Failure } from "../gate0.js";
 import { RehearsalFailure, type AgentCredentialPort, type Api, type Boat, type Bridge, type Clock, type Database, type Github, type Ports, type ProGrant, type ProPort, type Query,
   type Storage } from "./contract.js";
 import { manageAccountPro } from "../../manage-account-pro.js";
+import { manageStaffRole, validateStaffRoleRequest } from "../../manage-staff.js";
 import { assertRepository, prefixed } from "./guard.js";
 import { connectWorkspace } from "./steps.js";
 
@@ -23,21 +24,31 @@ const TIMEOUT_MS = 30_000;
 
 export const liveClock: Clock = { now: () => Date.now(), sleep: ms => new Promise(resolve => setTimeout(resolve, ms)) };
 
-export async function liveRelease(fetchImpl: typeof fetch = fetch): Promise<boolean> {
-  try {
-    const response = await fetchImpl(`${ALPHA_PROBE_ORIGIN}/v1/release-identity`, { redirect: "error", signal: AbortSignal.timeout(15_000) });
-    if (!response.ok) { await response.body?.cancel(); return false; }
-    alphaProbeIdentity(await response.json());
-    return true;
-  } catch { return false; }
+/** Where a run goes: Alpha, or the Dev stack this checkout runs (`pnpm electron:cloud`, `--local`). Every request the
+ * rehearsal's API, release and Pro ports make goes to `origin` with `channel`'s identity; nothing else is reached. */
+export type RehearsalTarget = { kind: "alpha" | "local"; origin: string; channel: "alpha" | "development" };
+export const ALPHA_TARGET: RehearsalTarget = Object.freeze({ kind: "alpha", origin: ALPHA_PROBE_ORIGIN, channel: "alpha" });
+
+/** A release identity of the target's own channel: ready, not in maintenance, its cloud healthy. Alpha's check is gate0's. */
+export function targetIdentity(target: RehearsalTarget, value: unknown): { sourceSha: string; workerSha256: string } {
+  if (target.kind === "alpha") return alphaProbeIdentity(value);
+  const checked = z.object({ channel: z.literal(target.channel), ready: z.literal(true), maintenance: z.literal(false), sourceSha: z.string().regex(/^[a-f0-9]{40}$/),
+    cloud: z.object({ enabled: z.literal(true), ready: z.literal(true), state: z.literal("healthy") }),
+    worker: z.object({ sha256: z.string().regex(/^[a-f0-9]{64}$/) }) }).safeParse(value);
+  if (!checked.success) throw new RehearsalFailure("release_identity", "not_ready");
+  return { sourceSha: checked.data.sourceSha, workerSha256: checked.data.worker.sha256 };
 }
 
-/** Alpha's release identity (channel alpha, ready, not in maintenance), or null. */
-export async function liveReleaseIdentity(fetchImpl: typeof fetch = fetch): Promise<{ sourceSha: string; workerSha256: string } | null> {
+export async function liveRelease(fetchImpl: typeof fetch = fetch, target: RehearsalTarget = ALPHA_TARGET): Promise<boolean> {
+  return await liveReleaseIdentity(fetchImpl, target) !== null;
+}
+
+/** The target's release identity (its channel, ready, not in maintenance), or null. */
+export async function liveReleaseIdentity(fetchImpl: typeof fetch = fetch, target: RehearsalTarget = ALPHA_TARGET): Promise<{ sourceSha: string; workerSha256: string } | null> {
   try {
-    const response = await fetchImpl(`${ALPHA_PROBE_ORIGIN}/v1/release-identity`, { redirect: "error", signal: AbortSignal.timeout(15_000) });
+    const response = await fetchImpl(`${target.origin}/v1/release-identity`, { redirect: "error", signal: AbortSignal.timeout(15_000) });
     if (!response.ok) { await response.body?.cancel(); return null; }
-    return alphaProbeIdentity(await response.json());
+    return targetIdentity(target, await response.json());
   } catch { return null; }
 }
 
@@ -49,11 +60,11 @@ export async function liveRuntimeQualification(store: { bucket: string; endpoint
   return { found: !!record, actingUser: !!record?.features.includes("acting-user-v1"), syncContext: !!record?.features.includes("sync-context-v1") };
 }
 
-export function liveApi(accessToken: () => Promise<string>, fetchImpl: typeof fetch = fetch): Api {
+export function liveApi(accessToken: () => Promise<string>, fetchImpl: typeof fetch = fetch, target: RehearsalTarget = ALPHA_TARGET): Api {
   return {
     async json(method, path, body, headers = {}) {
       if (!path.startsWith("/v1/")) throw new RehearsalFailure("api", "path");
-      const response = await fetchImpl(`${ALPHA_PROBE_ORIGIN}${path}`, { method, redirect: "error", signal: AbortSignal.timeout(TIMEOUT_MS),
+      const response = await fetchImpl(`${target.origin}${path}`, { method, redirect: "error", signal: AbortSignal.timeout(TIMEOUT_MS),
         headers: { authorization: `Bearer ${await accessToken()}`, "content-type": "application/json", ...headers },
         ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
       const raw = await response.text();
@@ -557,20 +568,108 @@ export function grantOf(row: { status: string; cloud_workspaces_allowed: boolean
 
 /** The selected account's Individual Pro through manage-account-pro.ts: each change planned and executed in one process
  * (retried once on a plan mismatch, as the playbook says), as the entitlement tables' owner, then read back. */
-export function livePro(database: LiveDatabase, input: { subjectUserId: string; expectedEmail: string; actorUserId: string }): ProPort {
+/** The Dev stack's own PostgreSQL, directly: no provider role is minted. Reads go through the stack's runtime login in the
+ * same RLS-safe form as Alpha's (READ ONLY, `set_config('app.system','on',true)` as its own statement, then the read);
+ * a write (a clock shift) and the Pro operator run as the stack's migration login, which owns the tables, as Alpha's
+ * operator roles do. */
+export function localDatabase(input: { readUrl: string; ownerUrl: string; client?: (connectionString: string) => DatabaseClient;
+  pool?: (connectionString: string) => pg.Pool }): LiveDatabase {
+  const client = input.client ?? (connectionString => new pg.Client({ connectionString, connectionTimeoutMillis: 15_000 }));
+  const run = (held: DatabaseClient) => async (text: string, values?: unknown[]) => {
+    try { const result = await held.query(text, values); return { rows: result.rows, rowCount: result.rowCount ?? 0 }; }
+    catch (error) { throw new RehearsalFailure("database", databaseErrorCode(error)); }
+  };
+  let reader: Promise<DatabaseClient> | undefined;
+  const open = async (url: string) => {
+    const held = client(url);
+    try { await held.connect(); } catch (error) { throw new RehearsalFailure("database", databaseErrorCode(error)); }
+    return held;
+  };
+  return {
+    async read(text, values) {
+      const held = await (reader ??= open(input.readUrl).catch(error => { reader = undefined; throw error; })), query = run(held);
+      await query("BEGIN READ ONLY");
+      try {
+        await query(SET_APP_SYSTEM);
+        const rows = (await query(text, values)).rows;
+        await query("COMMIT");
+        return rows;
+      } catch (error) { await held.query("ROLLBACK").catch(() => undefined); throw error; }
+    },
+    async transaction(work) {
+      const held = await open(input.ownerUrl), query = run(held);
+      try {
+        await query("BEGIN");
+        try {
+          await query(SET_APP_SYSTEM);
+          const result = await work(query);
+          await query("COMMIT");
+          return result;
+        } catch (error) { await held.query("ROLLBACK").catch(() => undefined); throw error; }
+      } finally { await held.end().catch(() => undefined); }
+    },
+    async asTableOwner(table, work) {
+      if (!/^public\.[a-z_]{1,63}$/.test(table)) throw new RehearsalFailure("database_owner", "table");
+      const pool = (input.pool ?? (url => new pg.Pool({ connectionString: url, max: 1, connectionTimeoutMillis: 15_000 })))(input.ownerUrl);
+      try {
+        const owner = (await pool.query<{ owner: boolean }>("SELECT pg_get_userbyid(relowner) = current_user AS owner FROM pg_class WHERE oid = $1::regclass", [table])).rows[0];
+        if (owner?.owner !== true) throw new RehearsalFailure("database_owner", "not_owner");
+        return await work(pool, input.ownerUrl);
+      } catch (error) {
+        throw error instanceof RehearsalFailure ? error : new RehearsalFailure("database_owner", "failed");
+      } finally { await pool.end().catch(() => undefined); }
+    },
+    async close() {
+      const held = reader; reader = undefined;
+      if (held) await (await held.catch(() => undefined))?.end().catch(() => undefined);
+    },
+  };
+}
+
+/** --local: a non-personal organization owned by the account, in the Dev stack's own database (a platform owner must own one,
+ * and a fresh stack's accounts have only their Personal organization). Named with the run's prefix; kept afterwards, as
+ * the staff role's audit refers to it. */
+export async function localStaffOrganization(database: LiveDatabase, input: { userId: string; prefix: string }): Promise<string> {
+  const id = randomUUID(), slug = `${input.prefix}staff`;
+  await database.transaction(async query => {
+    await query("INSERT INTO organizations (id, slug, name, created_by, is_personal, cloud_workspaces_allowed) VALUES ($1::uuid, $2, $3, $4::uuid, false, false)",
+      [id, slug, slug, input.userId]);
+    await query("INSERT INTO organization_members (org_id, user_id, role) VALUES ($1::uuid, $2::uuid, 'owner')", [id, input.userId]);
+  });
+  return id;
+}
+
+/** --local: an account's staff role on the Dev stack, through the staff operator (manage-staff.ts) as the launcher's own seed
+ * uses it, as the table owner, on the development channel; the account is its own actor (an active user) and owns the
+ * organization named. Returns the role it had. */
+export async function localStaffRole(database: LiveDatabase, input: { userId: string; email: string; organizationId: string },
+  nextRole: "platform_owner" | "developer" | "support_admin" | "none"): Promise<"platform_owner" | "developer" | "support_admin" | null> {
+  return database.asTableOwner("public.users", async (pool, databaseUrl) => {
+    const base = { databaseUrl, channel: "development", subjectUserId: input.userId, expectedEmail: input.email, actorUserId: input.userId,
+      nextRole, ownerOrganizationId: input.organizationId, reason: "Zeros rehearsal on this checkout's Dev stack: the Pro operator's actor" };
+    try {
+      const plan = await manageStaffRole(pool, validateStaffRoleRequest({ ...base, execute: false }));
+      if (plan.state !== "unchanged") await manageStaffRole(pool, validateStaffRoleRequest({ ...base, execute: true, approval: plan.approval ?? undefined }));
+      return (plan.previousRole ?? null) as "platform_owner" | "developer" | "support_admin" | null;
+    } catch (error) { throw error instanceof RehearsalFailure ? error : new RehearsalFailure("staff_role", databaseRefusal(error) ?? "refused"); }
+  });
+}
+
+export function livePro(database: LiveDatabase, input: { subjectUserId: string; expectedEmail: string; actorUserId: string },
+  channel: RehearsalTarget["channel"] = "alpha"): ProPort {
   const read = async () => grantOf((await database.read(`SELECT status, cloud_workspaces_allowed, source, valid_from, valid_until
     FROM account_entitlements WHERE user_id = $1::uuid`, [input.subjectUserId]))[0] as Parameters<typeof grantOf>[0]);
   return {
     read,
     async change(grant, reason) {
       const operationId = randomUUID();
-      const document = { operationId, channel: "alpha", subjectUserId: input.subjectUserId, expectedEmail: input.expectedEmail, actorUserId: input.actorUserId,
+      const document = { operationId, channel, subjectUserId: input.subjectUserId, expectedEmail: input.expectedEmail, actorUserId: input.actorUserId,
         enabled: grant.enabled, validFrom: grant.validFrom, validUntil: grant.validUntil, reason };
       await database.asTableOwner("public.account_entitlements", async (pool, databaseUrl) => {
         for (let attempt = 0; attempt < 2; attempt++) {
           try {
-            const planned = await manageAccountPro(pool, document, { databaseUrl, channel: "alpha" });
-            await manageAccountPro(pool, document, { databaseUrl, channel: "alpha", execute: true, approval: planned.planSha256 });
+            const planned = await manageAccountPro(pool, document, { databaseUrl, channel });
+            await manageAccountPro(pool, document, { databaseUrl, channel, execute: true, approval: planned.planSha256 });
             return;
           } catch (error) {
             // The operator's messages are fixed text, never values; only the plan mismatch is retried.

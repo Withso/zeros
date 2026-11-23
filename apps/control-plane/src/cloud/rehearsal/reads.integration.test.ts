@@ -6,7 +6,8 @@ import pg from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { resetMigratedTestDatabase } from "../../test-database.js";
 import { REHEARSAL_READS, type ReadSeed } from "../__fixtures__/rehearsal-reads.js";
-import { liveDatabase, type DatabaseClient } from "./live.js";
+import { liveDatabase, localDatabase, localStaffOrganization, localStaffRole, type DatabaseClient } from "./live.js";
+import { proActor } from "./plan.js";
 import { BACKUP_STATE } from "./stage-retention.js";
 
 const d = process.env.TEST_DATABASE_URL ? describe : describe.skip;
@@ -85,6 +86,21 @@ d("every rehearsal read, as the read role (integration)", () => {
     } finally { await database.close(); }
     expect(blind).toEqual([]);
     expect(REHEARSAL_READS.length).toBeGreaterThanOrEqual(28);
+  });
+
+  it("--local: makes an account its stack's platform owner through the staff operator, reads it back as the Pro actor, and puts its role back", async () => {
+    const s = await seed();
+    const database = localDatabase({ readUrl: process.env.TEST_DATABASE_URL!, ownerUrl: process.env.TEST_DATABASE_URL! });
+    try {
+      const email = (await pool.query("SELECT email FROM users WHERE id = $1", [s.user])).rows[0].email as string;
+      // A Personal organization cannot hold a platform owner: refused, named; the one made for it can.
+      await expect(localStaffRole(database, { userId: s.user, email, organizationId: s.org }, "platform_owner")).rejects.toMatchObject({ step: "staff_role" });
+      const grant = { userId: s.user, email, organizationId: await localStaffOrganization(database, { userId: s.user, prefix: s.prefix }) };
+      expect(await localStaffRole(database, grant, "platform_owner")).toBeNull();
+      expect((await proActor(database, s.user.slice(0, 8))).id).toBe(s.user);
+      expect(await localStaffRole(database, grant, "none")).toBe("platform_owner");
+      expect((await database.read("SELECT staff_role FROM users WHERE id = $1::uuid", [s.user]))[0]?.staff_role ?? null).toBeNull();
+    } finally { await database.close(); }
   });
 
   it("reads a backup fork's result from the workspace row: its maintenance-wakes row is never finished", async () => {

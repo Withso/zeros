@@ -158,12 +158,20 @@ export type Created = {
   /** Agent credentials this run made and connected (recorded before the write); cleanup removes each from the
    * organization, revokes it, and reads both back. */
   agentLogins?: { organizationId: string; provider: "claude" | "codex" | "cursor"; credentialId: string }[];
+  /** --local only: the selected account made the Dev stack's platform owner (a fresh stack has none, and the Pro operator
+   * needs one), recorded before the change with the role it had; cleanup puts that role back last. */
+  staffGrant?: { userId: string; email: string; organizationId: string; previousRole: "platform_owner" | "developer" | "support_admin" | null;
+    /** The prefixed organization made for it (a platform owner owns a non-personal one); kept, as the role's audit refers to it. */
+    madeOrganization?: boolean };
 };
 export type StageResult = { ok: boolean; step?: string; code?: string; skipped?: string; counts?: Record<string, number>;
   /** Closed codes for what a stage chose (environment_case:seeded, environment_skipped:environment_exists). */
   notes?: string[] };
 export type RehearsalState = {
   version: 1; runId: string; prefix: string; startedAt: string;
+  /** Where the run went: Alpha, or this checkout's Dev stack (--local). Absent in a state file from before --local: Alpha.
+   * Cleanup refuses a state file of the other target. */
+  target?: "alpha" | "local";
   /** The owner organization the stages run in, and which route it is. */
   owner: OwnerKind; organizationId: string; created: Created; stages: Partial<Record<StageName, StageResult>>;
   /** Organization ids a clock shift may touch. */

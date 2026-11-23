@@ -11,12 +11,13 @@ import { shiftClock } from "./clock.js";
 import { RehearsalFailure, type Database, type RehearsalState, type StageName } from "./contract.js";
 import { assertRepository, safeLine } from "./guard.js";
 import { accountLines, turnLine, PERSONAL_ROUTE_GAPS, preconditionLines, readAccount, refusal, writeLines, type PreconditionFacts } from "./plan.js";
-import { cleanup, cleanupNeedsAccount, inventoryLines, NO_ACCOUNT, readInventory, runStages, stageContext } from "./runner.js";
-import { parseArguments, sharedBaseFacts } from "./rehearsal-cli.js";
+import { cleanup, cleanupNeedsAccount, inventoryLines, NO_ACCOUNT, readInventory, runStages, stageContext, timingLines } from "./runner.js";
+import { parseArguments, sharedBaseFacts, targetPorts } from "./rehearsal-cli.js";
 import { CONNECT_CLIENT_FEATURES, checkText, connectWorkspace, createProject, createWorkspace, fileTarget, frameCode, openBridge, waitState, writeFile } from "./steps.js";
 import { FIXTURE_TWO } from "./stage-provision.js";
-import { loadState, newState, saveState } from "./state.js";
-import { agentCredentialsFromEnv, checkGithubToken, databaseErrorCode, databaseRefusal, liveBridge, liveDatabase, OUTSIDE_PROBE_LIMIT, SET_APP_SYSTEM, tokenLines, tokenRefusal, type DatabaseClient } from "./live.js";
+import { loadState, newState, saveState, stateTarget } from "./state.js";
+import { localStack } from "./local-stack.js";
+import { agentCredentialsFromEnv, checkGithubToken, databaseErrorCode, databaseRefusal, liveApi, liveBridge, liveRelease, targetIdentity, liveDatabase, OUTSIDE_PROBE_LIMIT, SET_APP_SYSTEM, tokenLines, tokenRefusal, type DatabaseClient } from "./live.js";
 import { platformOwners, probeDiagnostics, proActor, resolveProbe } from "./plan.js";
 
 const R1 = "Withso/zeros-dev-fixture";
@@ -249,6 +250,71 @@ describe("rehearsal stages against a fake Alpha", () => {
     await expect(bridge.op("chats.upsert", {})).rejects.toMatchObject({ code: expect.stringMatching(/^bridge_closed_4001:open_\d+s:pings_0$/) });
     expect(connects).toHaveLength(3);
     expect(connects.every(path => path.endsWith("/connect?wakePolicy=explicit"))).toBe(true);
+  });
+
+  it("prints each step's elapsed time as it finishes, and ends each stage with its total and slowest steps", async () => {
+    const { ctx, lines, options } = setup();
+    expect(await runStages(ctx, ["provision", "projects"], options)).toBe(true);
+    const projects = lines.filter(line => line.startsWith("  projects "));
+    expect(projects.some(line => /^ {2}projects step project_one \d+(\.\d)?s$/.test(line))).toBe(true);
+    const total = projects.find(line => line.startsWith("  projects timing total "));
+    expect(total).toMatch(/^ {2}projects timing total \d+(\.\d)?s over \d+ steps$/);
+    const rows = projects.filter(line => /^ {2}projects timing (?!total)/.test(line));
+    expect(rows.length).toBeGreaterThan(0); expect(rows.length).toBeLessThanOrEqual(5);
+    // Slowest first.
+    const secondsOf = (line: string) => Number(/ (\d+(?:\.\d)?)s /.exec(line)![1]);
+    expect(rows.map(secondsOf)).toEqual([...rows.map(secondsOf)].sort((a, b) => b - a));
+    expect(timingLines("x", [{ step: "a", ms: 2_500 }, { step: "b", ms: 61_000 }])).toEqual(["  x timing total 64s over 2 steps",
+      `  x timing ${"b".padEnd(24)}    61s 96%`, `  x timing ${"a".padEnd(24)}   2.5s 4%`]);
+  });
+
+  it("--local reaches only the Dev stack: its origin, its own database, the profile's store; never PlanetScale, R2 for Alpha or Alpha's origin", async () => {
+    const launcher = {
+      workspace: () => ({ state: { owner: "o", status: "active", launcher: {}, ports: { api: 4100, database: 54329 },
+        cloudSwitches: { CLOUD_V2_READY_COPIES_ENABLED: "true", CLOUD_V2_PERSONAL_CLOUD_ENABLED: "true", CLOUD_V2_RETENTION_ENABLED: "false", CLOUD_V2_SHARED_BASE_SNAPSHOT: "auto" } } }),
+      origin: () => "https://api.o.dev.example.test",
+      databaseUrl: (_w: unknown, port: number, role: string) => `postgresql://${role}:x@127.0.0.1:${port}/zeros_dev_o`,
+      storage: () => ({ endpoint: "https://store.example.test", bucket: "dev", accessKeyId: "id", secretAccessKey: "secret" }),
+    };
+    const stack = localStack(launcher);
+    expect(stack.target).toEqual({ kind: "local", origin: "https://api.o.dev.example.test", channel: "development" });
+    expect([...stack.switches].sort()).toEqual(["personal", "projects"]);
+    // Every Alpha input is behind `need`, which throws here: none is read.
+    const ports = targetPorts(stack, name => { throw new Error(`reached ${name}`); }, { client: url => {
+      const opened: string[] = [];
+      return { connect: async () => { opened.push(url); }, end: async () => undefined,
+        query: async (text: string) => ({ rows: text.startsWith("SELECT 1") ? [{ one: 1 }] : [], rowCount: 0 }) };
+    } });
+    expect(ports.target).toBe(stack.target);
+    expect(ports.storageConfig()).toEqual(launcher.storage());
+    const database = ports.database("run");
+    expect(await database.read("SELECT 1 AS one")).toEqual([{ one: 1 }]);
+    await database.close();
+    // The release identity and the API go to the stack's origin only, and accept its own channel.
+    const fetched: string[] = [];
+    const fetchImpl = (async (url: string) => {
+      fetched.push(String(url));
+      if (!String(url).startsWith(stack.target.origin)) throw new Error("left the stack");
+      return new Response(JSON.stringify({ channel: "development", ready: true, maintenance: false, sourceSha: "a".repeat(40),
+        cloud: { enabled: true, ready: true, state: "healthy" }, worker: { sha256: "b".repeat(64) } }), { status: 200 });
+    }) as typeof fetch;
+    expect(await liveRelease(fetchImpl, stack.target)).toBe(true);
+    await liveApi(async () => "token", fetchImpl, stack.target).json("GET", "/v1/me");
+    expect(fetched.every(url => url.startsWith("https://api.o.dev.example.test/"))).toBe(true);
+    // Alpha's identity is refused on the local target, and the local one on Alpha's.
+    expect(() => targetIdentity(stack.target, { channel: "alpha", ready: true, maintenance: false, sourceSha: "a".repeat(40),
+      cloud: { enabled: true, ready: true, state: "healthy" }, worker: { sha256: "b".repeat(64) } })).toThrow();
+    // A stack that is not running, or has no store in the profile, is named.
+    expect(() => localStack({ ...launcher, workspace: () => null })).toThrow(expect.objectContaining({ code: "not_set_up" }));
+    expect(() => localStack({ ...launcher, workspace: () => ({ state: { owner: "o", status: "active" } }) })).toThrow(expect.objectContaining({ code: "not_running" }));
+    expect(() => localStack({ ...launcher, storage: () => ({}) })).toThrow(expect.objectContaining({ code: "profile_storage" }));
+  });
+
+  it("refuses a state file from the other target, and records the target on a new one", async () => {
+    expect(stateTarget(newState(randomUUID(), randomUUID(), new Date(), "personal", "local"))).toBe("local");
+    const old = newState(randomUUID(), randomUUID(), new Date(), "personal");
+    delete (old as { target?: string }).target;
+    expect(stateTarget(old)).toBe("alpha");
   });
 
   it("declares on connect exactly the client features today's desktop declares, by the protocol's constants", async () => {

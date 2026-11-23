@@ -20,10 +20,12 @@ const Created = z.object({
   computerRebuilds: z.array(Uuid).max(8).optional(),
   bases: z.array(Uuid).max(8).optional(),
   installScript: z.boolean().optional(),
+  staffGrant: z.object({ userId: Uuid, email: z.string().email(), organizationId: Uuid,
+    previousRole: z.enum(["platform_owner", "developer", "support_admin"]).nullable(), madeOrganization: z.boolean().optional() }).strict().optional(),
   agentLogins: z.array(z.object({ organizationId: Uuid, provider: z.enum(["claude", "codex", "cursor"]), credentialId: Uuid }).strict()).max(8).optional(),
 });
 const Schema = z.object({
-  version: z.literal(1), runId: Uuid, prefix: z.string().regex(/^zr-[0-9a-f]{8}-$/), startedAt: z.string(),
+  version: z.literal(1), runId: Uuid, prefix: z.string().regex(/^zr-[0-9a-f]{8}-$/), startedAt: z.string(), target: z.enum(["alpha", "local"]).optional(),
   owner: z.enum(["personal", "organization"]), organizationId: Uuid, organizations: z.array(Uuid).max(4),
   created: Created,
   stages: z.record(z.string(), z.object({ ok: z.boolean(), step: z.string().optional(), code: z.string().optional(), skipped: z.string().optional(),
@@ -34,10 +36,13 @@ const Schema = z.object({
 
 export const stateDirectory = (base = homedir()) => join(base, ".zeros-rehearsal");
 
-export function newState(runId: string, organizationId: string, startedAt: Date, owner: OwnerKind = "personal"): RehearsalState {
-  return { version: 1, runId, prefix: runPrefix(runId.replace(/-/g, "")), startedAt: startedAt.toISOString(), owner, organizationId,
+export function newState(runId: string, organizationId: string, startedAt: Date, owner: OwnerKind = "personal", target: "alpha" | "local" = "alpha"): RehearsalState {
+  return { version: 1, runId, prefix: runPrefix(runId.replace(/-/g, "")), startedAt: startedAt.toISOString(), target, owner, organizationId,
     organizations: [organizationId], created: { projects: [], workspaces: [], machines: [], branches: [], pulls: [], environments: [], githubSignIns: [] }, stages: {}, shifts: 0, machineStarts: 0 };
 }
+
+/** A run's target: a state file from before --local is Alpha's. */
+export const stateTarget = (state: Pick<RehearsalState, "target">) => state.target ?? "alpha";
 
 export async function loadState(runId: string, directory = stateDirectory()): Promise<RehearsalState> {
   if (!Uuid.safeParse(runId).success) throw new RehearsalFailure("state", "invalid_run");

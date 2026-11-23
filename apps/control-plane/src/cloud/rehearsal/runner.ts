@@ -35,12 +35,21 @@ export const DEFAULT_RUN_CAP = 30;
 const ACTIVE = new Set(["creating", "starting", "running", "stopping"]);
 
 export function stageContext(ports: Ports, state: RehearsalState, save: () => Promise<void>, repositories: StageContext["repositories"],
-  timing: StageContext["timing"], runCap: number): StageContext & { lastStep(): string; takeNotes(): string[] } {
-  let last = "start", notes: string[] = [];
+  timing: StageContext["timing"], runCap: number): StageContext & { lastStep(): string; takeNotes(): string[];
+    /** Each finished step's elapsed time, in order (the current one closed now), and cleared for the next stage. */
+    takeTimings(): { step: string; ms: number }[];
+    /** Called as each step finishes, with its elapsed milliseconds. */
+    onStep?: (step: string, ms: number) => void } {
+  let last = "start", notes: string[] = [], startedAt = ports.clock.now(), timings: { step: string; ms: number }[] = [];
+  const finish = () => {
+    const ms = Math.max(0, ports.clock.now() - startedAt);
+    timings.push({ step: last, ms }); context.onStep?.(last, ms);
+  };
   for (const repository of [repositories.one, repositories.two, repositories.submodules, repositories.submoduleFixture]) if (repository) assertRepository(repository);
-  return {
+  const context: ReturnType<typeof stageContext> = {
     ports, state, save, repositories, timing, projectLevel: state.owner === "personal" ? "personal" : "organization",
-    step(name) { last = name; },
+    step(name) { finish(); last = name; startedAt = ports.clock.now(); },
+    takeTimings: () => { finish(); const taken = timings; timings = []; last = "start"; startedAt = ports.clock.now(); return taken; },
     note(code) { if (/^[a-z0-9_:.-]{1,80}$/.test(code) && notes.length < 16) notes.push(code); },
     takeNotes: () => { const taken = notes; notes = []; return taken; },
     start() {
@@ -49,6 +58,17 @@ export function stageContext(ports: Ports, state: RehearsalState, save: () => Pr
     },
     lastStep: () => last,
   };
+  return context;
+}
+
+/** A step's or a stage's elapsed seconds as printed: one decimal under ten seconds, whole seconds above. */
+const seconds = (ms: number) => ms < 10_000 ? `${(ms / 1000).toFixed(1)}s` : `${Math.round(ms / 1000)}s`;
+/** The stage's timing table: its total, then its slowest steps (at most five), each with its share. */
+export function timingLines(stage: string, timings: readonly { step: string; ms: number }[]): string[] {
+  const total = timings.reduce((sum, entry) => sum + entry.ms, 0);
+  const slowest = [...timings].filter(entry => entry.step !== "start" || entry.ms >= 1_000).sort((a, b) => b.ms - a.ms).slice(0, 5);
+  return [`  ${stage} timing total ${seconds(total)} over ${timings.length} steps`,
+    ...slowest.map(entry => `  ${stage} timing ${entry.step.padEnd(24)} ${seconds(entry.ms).padStart(6)} ${total ? Math.round(entry.ms * 100 / total) : 0}%`)];
 }
 
 /** Runs the named stages in order; stops at the first failure. Returns whether every stage passed. */
@@ -61,6 +81,9 @@ export async function runStages(ctx: ReturnType<typeof stageContext>, stages: re
     else if (missing) result = { ok: false, step: "switch", code: `undeclared_${missing}` };
     else if (STAGE_NEEDS_ACCOUNT[name] && options.accountUnavailable) result = { ok: false, step: "account_unavailable", code: options.accountUnavailable };
     else {
+      // Every step prints its elapsed time as it finishes; the stage ends with its slowest steps and its total.
+      ctx.takeTimings();
+      ctx.onStep = (step, ms) => { if (step !== "start" || ms >= 1_000) options.log(safeLine(`  ${name} step ${step} ${seconds(ms)}`)); };
       try {
         await preconditions(ctx, options, STAGE_NEEDS_ACCOUNT[name]);
         result = { ok: true, counts: await runner(ctx) };
@@ -73,6 +96,9 @@ export async function runStages(ctx: ReturnType<typeof stageContext>, stages: re
       }
       const notes = ctx.takeNotes();
       if (notes.length) result = { ...result, notes };
+      const timings = ctx.takeTimings();
+      delete ctx.onStep;
+      for (const line of timingLines(name, timings)) options.log(safeLine(line));
     }
     ctx.state.stages[name] = result;
     await ctx.save();

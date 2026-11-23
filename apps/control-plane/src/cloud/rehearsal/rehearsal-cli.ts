@@ -13,16 +13,17 @@ import { gate0SignIn } from "../gate0-cli.js";
 import { RehearsalFailure, STAGE_NEEDS_ACCOUNT, STAGES, type Api, type Database, type OwnerKind, type Ports, type StageName, type Switch } from "./contract.js";
 import { diagnose, signInAccount, signInAll, type Account, type SignedIn, type SignInDeps } from "./accounts.js";
 import { assertRepository, safeLine } from "./guard.js";
-import { AGENT_CREDENTIAL_SOURCES, agentCredentialsFromEnv, checkGithubToken, tokenLines, liveApi, liveBoat, liveBridge, liveClock, liveDatabase, liveGithub, liveGithubSignIn, liveGithubToken, livePro, liveRelease, liveStorage,
+import { ALPHA_TARGET, localDatabase, localStaffOrganization, localStaffRole, type DatabaseClient, type LiveDatabase, AGENT_CREDENTIAL_SOURCES, agentCredentialsFromEnv, checkGithubToken, tokenLines, liveApi, liveBoat, liveBridge, liveClock, liveDatabase, liveGithub, liveGithubSignIn, liveGithubToken, livePro, liveRelease, liveStorage,
   tokenRefusal, liveReleaseIdentity, liveRuntimeQualification } from "./live.js";
 import { errorCode } from "./steps.js";
 import { accountLines, turnLine, PERSONAL_ROUTE_GAPS, preconditionLines, type PreconditionFacts, platformOwners, probeDiagnostics, proActor, readAccount, refusal, resolveProbe, writeLines,
   type AccountSummary } from "./plan.js";
 import { cleanup, cleanupNeedsAccount, DEFAULT_RUN_CAP, inventoryLines, NO_ACCOUNT, runStages, stageContext } from "./runner.js";
 import { FIXTURE_TWO } from "./stage-provision.js";
-import { loadState, newState, saveState } from "./state.js";
+import { loadState, newState, saveState, stateTarget } from "./state.js";
+import { launcherModules, localStack, type LocalStack } from "./local-stack.js";
 
-export const USAGE = "alpha:rehearse <provision|setup|projects|personal|retention|submodules|waiting|all> [--plan] [--cleanup] [--run <id>] " +
+export const USAGE = "alpha:rehearse <provision|setup|projects|personal|retention|submodules|waiting|all> [--local] [--plan] [--cleanup] [--run <id>] " +
   "[--owner personal|organization (default personal)] [--account owner|1..10 (default 2)] [--other 1..10 (default the next configured)] " +
   "[--waiting-account 1..10 (default 3)] " +
   "[--pro-actor <first 8 hex of the platform owner>] [--switches projects,personal,retention] --repository owner/name (R1, required unless ZEROS_REHEARSAL_REPOSITORY is set) " +
@@ -35,7 +36,9 @@ export const TIMING = { pollMs: 5_000, stateMs: 15 * 60_000, copyMs: 30 * 60_000
   idleStopMs: 35 * 60_000, computerMs: 45 * 60_000 };
 
 export type Arguments = {
-  stages: StageName[]; plan: boolean; cleanup: boolean; run?: string; owner: OwnerKind; account: "owner" | number; other?: number; proActor?: string;
+  stages: StageName[]; plan: boolean; cleanup: boolean; run?: string;
+  /** The Dev stack this checkout runs (pnpm electron:cloud) instead of Alpha. */
+  local: boolean; owner: OwnerKind; account: "owner" | number; other?: number; proActor?: string;
   /** Stage waiting's account: its own fresh Personal organization. */
   waitingAccount: number;
   switches: Set<Switch>;
@@ -45,7 +48,7 @@ export function parseArguments(argv: string[]): Arguments {
   // Private files: .env.agent at the repository root and the zeros-dev profile, both mode 0600; the profile is reached by
   // ZEROS_DEV_PROFILE_PATH (its loader refuses group- or world-readable files and does not follow a symlink).
   const { values, positionals } = parseArgs({ args: argv, allowPositionals: true, options: {
-    plan: { type: "boolean" }, cleanup: { type: "boolean" }, run: { type: "string" }, account: { type: "string" }, switches: { type: "string" },
+    plan: { type: "boolean" }, cleanup: { type: "boolean" }, run: { type: "string" }, local: { type: "boolean" }, account: { type: "string" }, switches: { type: "string" },
     repository: { type: "string" }, "repository-two": { type: "string" }, "keep-base": { type: "boolean" }, "max-active": { type: "string" },
     organization: { type: "string" }, owner: { type: "string" }, "submodule-repository": { type: "string" }, "submodule-fixture-repository": { type: "string" }, other: { type: "string" }, "pro-actor": { type: "string" }, help: { type: "boolean" },
     "waiting-account": { type: "string" },
@@ -72,7 +75,7 @@ export function parseArguments(argv: string[]): Arguments {
   }
   const maxActive = values["max-active"] === undefined ? 10 : Number(values["max-active"]);
   if (!(Number.isInteger(maxActive) && maxActive >= 0 && maxActive <= 50)) throw new RehearsalFailure("usage", "max_active");
-  return { stages, plan: !!values.plan, cleanup: !!values.cleanup, ...(values.run ? { run: values.run } : {}), owner, account, waitingAccount,
+  return { stages, plan: !!values.plan, cleanup: !!values.cleanup, local: !!values.local, ...(values.run ? { run: values.run } : {}), owner, account, waitingAccount,
     ...(other !== undefined ? { other } : {}), ...(values["pro-actor"] ? { proActor: values["pro-actor"] } : {}), switches,
     ...(values.repository ? { repository: assertRepository(values.repository) } : {}),
     ...(values["repository-two"] ? { repositoryTwo: assertRepository(values["repository-two"]) } : {}),
@@ -107,9 +110,19 @@ async function main(argv: string[]): Promise<number> {
     const password = env[`ZEROS_TEST_USER_${n}_PASSWORD`];
     if (password) accounts.push({ label: String(n), email: `user-${n}@zeros.build`, password });
   }
-  const roleNames = (run: string) => { let n = 0; return (kind: "read" | "write") => `zeros-rehearsal-${run.slice(0, 8)}-${kind}-${++n}-${Date.now().toString(36)}`; };
-  const database = (run: string) => liveDatabase({ organization: need("PLANETSCALE_ORG"), database: need("ZEROS_PLANETSCALE_ALPHA_DATABASE"),
-    tokenId: need("PLANETSCALE_SERVICE_TOKEN_ID"), token: need("PLANETSCALE_SERVICE_TOKEN"), roleName: roleNames(run) });
+  // --local: this checkout's running Dev stack, read from the launcher's own state; never Railway, PlanetScale or Alpha.
+  let stack: LocalStack | undefined;
+  if (args.local) {
+    try { stack = localStack(await launcherModules(root, process.env)); }
+    catch (error) { log(`failed ${error instanceof RehearsalFailure ? `${error.step} ${error.code}` : "local_stack unreadable"}`); return 1; }
+    log(`target: local Dev stack ${stack.target.origin}; switches it runs with: ${Object.keys(stack.started).sort().join(", ") || "none"}`);
+    if (args.switches.size) log("--switches is ignored with --local: the running stack's own switches are used");
+    args.switches = stack.switches;
+  }
+  const { target, database, storageConfig } = targetPorts(stack, need);
+  // A fresh Dev stack has no probe organization: the Personal route does not need one.
+  const NO_PROBE = { id: "00000000-0000-0000-0000-000000000000", workosOrganizationId: null };
+  const findProbe = async (reads: Database) => probeSelector ? resolveProbe(reads, probeSelector) : NO_PROBE;
   const probeSelector = args.organization ?? env.ZEROS_ALPHA_PROBE_ORGANIZATION;
   const one = args.repository ?? (env.ZEROS_REHEARSAL_REPOSITORY ? assertRepository(env.ZEROS_REHEARSAL_REPOSITORY) : undefined);
   const two = args.repositoryTwo ?? (env.ZEROS_REHEARSAL_REPOSITORY_2 ? assertRepository(env.ZEROS_REHEARSAL_REPOSITORY_2) : FIXTURE_TWO);
@@ -123,7 +136,7 @@ async function main(argv: string[]): Promise<number> {
   const signInDeps = (probe: { workosOrganizationId: string | null }): SignInDeps => ({
     subject: email => workosSubject(profile.workos.apiKey, email),
     signIn: input => gate0SignIn({ clientId: profile.workos.webClientId, apiKey: profile.workos.apiKey, ...input }),
-    api: session => liveApi(session.accessToken), sleep: liveClock.sleep,
+    api: session => liveApi(session.accessToken, fetch, target), sleep: liveClock.sleep,
     ...(probe.workosOrganizationId ? { probeWorkosOrganization: probe.workosOrganizationId } : {}),
   });
 
@@ -132,8 +145,8 @@ async function main(argv: string[]): Promise<number> {
 
   try {
     if (!one) throw new RehearsalFailure("configuration", "repository_one");
-    if (!probeSelector) throw new RehearsalFailure("configuration", "probe_organization");
-    if (!await liveRelease()) throw new RehearsalFailure("release_identity", "not_ready");
+    if (!probeSelector && !(stack && args.owner === "personal")) throw new RehearsalFailure("configuration", "probe_organization");
+    if (!await liveRelease(fetch, target)) throw new RehearsalFailure("release_identity", "not_ready");
 
     if (args.plan) {
       log("plan: reads only; each account signs in (one session, revoked at the end; 3 s apart, a throttled step retried after 5, 15 and 45 s)," +
@@ -154,17 +167,16 @@ async function main(argv: string[]): Promise<number> {
       log("pushes and pull requests: the test user's own GitHub sign-in by that token (stage setup); stage D's builds fetch public submodules with no credential");
       const reads = database(randomUUID().replace(/-/g, ""));
       try {
-        const probe = await resolveProbe(reads, probeSelector);
+        const probe = await findProbe(reads);
         log(`probe organization: found; WorkOS organization ${probe.workosOrganizationId ? "linked" : "not linked"}`);
         const ids = await platformOwners(reads);
         log(`platform owners (active): ${ids.length}${ids.length ? ` ${ids.join(" ")}` : ""}`);
         const actor = await proActor(reads, args.proActor);
         log(`pro actor (--pro-actor): ${actor.state}; github token (ZEROS_REHEARSAL_GITHUB_TOKEN): ${token ? "configured" : "absent"}`);
         const summaries = new Map<string, AccountSummary | { failed: string }>();
-      const facts: PreconditionFacts = { release: await liveReleaseIdentity(), runtime: null, projectsRead: null, computer: null, sharedBaseInUse: null };
+      const facts: PreconditionFacts = { release: await liveReleaseIdentity(fetch, target), runtime: null, projectsRead: null, computer: null, sharedBaseInUse: null };
       let waitingAccount = "account_not_configured";
-      if (facts.release) facts.runtime = await liveRuntimeQualification({ bucket: need("ZEROS_R2_ALPHA_BUCKET"), endpoint: need("ZEROS_R2_ALPHA_ENDPOINT"),
-        accessKeyId: need("ZEROS_R2_ALPHA_ACCESS_KEY_ID"), secretAccessKey: need("ZEROS_R2_ALPHA_SECRET_ACCESS_KEY") }, facts.release.workerSha256).catch(() => null);
+      if (facts.release) facts.runtime = await liveRuntimeQualification(storageConfig(), facts.release.workerSha256).catch(() => null);
         for (const result of await signInAll(accounts, signInDeps(probe))) {
           if (!result.ok) {
             log(`account ${result.label}: failed ${result.step} ${result.code}`); summaries.set(result.label, { failed: `${result.step}:${result.code}` });
@@ -241,9 +253,14 @@ async function main(argv: string[]): Promise<number> {
     // A run: the probe organization and the Pro actor from the database, then sign-ins only when a selected stage needs them.
     const startReads = database(randomUUID().replace(/-/g, ""));
     let probe: { id: string; workosOrganizationId: string | null }, actor: Awaited<ReturnType<typeof proActor>>;
-    try { probe = await resolveProbe(startReads, probeSelector); actor = await proActor(startReads, args.proActor); }
+    try { probe = await findProbe(startReads); actor = await proActor(startReads, args.proActor); }
     finally { await startReads.close().catch(() => log("database role: delete unconfirmed")); }
+    // A fresh Dev stack's database has no platform owner until one is granted; the Pro steps then refuse, named.
+    if (stack && !actor.id) log(`pro actor: ${actor.state} in the Dev stack's database (needs --pro-actor <first 8 hex of an active platform owner there>;` +
+      " a fresh stack has none until an operator grants one, and the Pro steps of setup, personal and waiting refuse without it)");
     let state = args.run ? await loadState(args.run) : undefined;
+    // A state file belongs to the target it ran on: a cleanup or a resume on the other one is refused.
+    if (state && stateTarget(state) !== target.kind) throw new RehearsalFailure("state", `other_target:${stateTarget(state)}`);
     const owner = state?.owner ?? args.owner;
     const needsAccount = args.cleanup ? !!state && cleanupNeedsAccount(state) : args.stages.some(stage => STAGE_NEEDS_ACCOUNT[stage]);
     let held: SignedIn | undefined, other: SignedIn | undefined, accountUnavailable: string | undefined;
@@ -267,10 +284,32 @@ async function main(argv: string[]): Promise<number> {
         if (cleanupNeedsAccount(state)) throw new RehearsalFailure("state", "organization");
         state.organizationId = organizationId; state.organizations = [organizationId];
       }
-      state ??= newState(randomUUID(), organizationId, new Date(), owner);
+      state ??= newState(randomUUID(), organizationId, new Date(), owner, target.kind);
       const run = state;
       await saveState(run);
-      log(`run ${run.runId} prefix ${run.prefix} route ${owner}`);
+      log(`run ${run.runId} prefix ${run.prefix} route ${owner}${stack ? " target local" : ""}`);
+      // --local: a fresh stack's database has no platform owner, and the Pro operator needs one. The selected account
+      // becomes it for this run, as the launcher's own seed makes its fixture account staff: its current role read and
+      // recorded first, then changed; cleanup puts that role back last. A run that already did so reuses it.
+      if (stack && !actor.id) {
+        const grant = run.created.staffGrant;
+        if (grant) actor = { state: "resolved", id: grant.userId };
+        else if (held && !args.cleanup && owner === "personal" && personalOf(held)) {
+          const staffDb = database(run.runId.replace(/-/g, ""));
+          try {
+            const previous = (await staffDb.read("SELECT staff_role FROM users WHERE id = $1::uuid", [held.userId]))[0]?.staff_role ?? null;
+            const owned = (await staffDb.read(`SELECT o.id::text AS id FROM organizations o JOIN organization_members m ON m.org_id = o.id AND m.user_id = $1::uuid
+              WHERE m.role = 'owner' AND NOT o.is_personal AND o.deleted_at IS NULL AND o.lifecycle_status = 'active' ORDER BY o.created_at LIMIT 1`, [held.userId]))[0]?.id;
+            const record: NonNullable<typeof run.created.staffGrant> = { userId: held.userId, email: held.email, organizationId: typeof owned === "string" ? owned : "",
+              previousRole: (previous ?? null) as NonNullable<typeof run.created.staffGrant>["previousRole"] };
+            if (!record.organizationId) { record.organizationId = await localStaffOrganization(staffDb, { userId: held.userId, prefix: run.prefix }); record.madeOrganization = true; }
+            run.created.staffGrant = record; await saveState(run);
+            await localStaffRole(staffDb, record, "platform_owner");
+            actor = { state: "resolved", id: held.userId };
+            log("local stack: the selected account is its platform owner for this run (the Pro operator's actor); cleanup puts its role back");
+          } finally { await staffDb.close().catch(() => undefined); }
+        }
+      }
       if (held && args.stages.includes("personal") && !args.cleanup) {
         const label = String(args.other ?? accounts.find(row => row.label !== "owner" && row.label !== String(args.account))?.label ?? "");
         const account = accounts.find(row => row.label === label);
@@ -292,18 +331,17 @@ async function main(argv: string[]): Promise<number> {
       const api = held?.api ?? NO_ACCOUNT;
       const db = database(run.runId.replace(/-/g, ""));
       const ports: Ports = {
-        release: () => liveRelease(), api, bridge: liveBridge(api), boat: liveBoat({ apiKey: profile.boat.apiKey,
+        release: () => liveRelease(fetch, target), api, bridge: liveBridge(api), boat: liveBoat({ apiKey: profile.boat.apiKey,
           ...(profile.boat.billingOrg ? { billingOrg: profile.boat.billingOrg } : {}) }),
-        storage: liveStorage({ bucket: need("ZEROS_R2_ALPHA_BUCKET"), endpoint: need("ZEROS_R2_ALPHA_ENDPOINT"), accessKeyId: need("ZEROS_R2_ALPHA_ACCESS_KEY_ID"),
-          secretAccessKey: need("ZEROS_R2_ALPHA_SECRET_ACCESS_KEY") }, () => run.created.workspaces),
+        storage: liveStorage(storageConfig(), () => run.created.workspaces),
         github: fixtureGithub(),
         database: db, clock: liveClock,
         ...(other ? { other: other.api } : {}),
-        ...(held && owner === "personal" && actor.id ? { pro: livePro(db, { subjectUserId: held.userId, expectedEmail: held.email, actorUserId: actor.id }) } : {}),
+        ...(held && owner === "personal" && actor.id ? { pro: livePro(db, { subjectUserId: held.userId, expectedEmail: held.email, actorUserId: actor.id }, target.channel) } : {}),
         ...(held && token ? { githubSignIn: liveGithubSignIn(held.api, token) } : {}),
         ...(held && agentCredentials.length ? { agentCredentials } : {}),
         ...(waiting ? { waiting: { organizationId: personalOf(waiting)!.id, ports: { api: waiting.api, bridge: liveBridge(waiting.api),
-          ...(actor.id ? { pro: livePro(db, { subjectUserId: waiting.userId, expectedEmail: waiting.email, actorUserId: actor.id }) } : {}),
+          ...(actor.id ? { pro: livePro(db, { subjectUserId: waiting.userId, expectedEmail: waiting.email, actorUserId: actor.id }, target.channel) } : {}),
           ...(token ? { githubSignIn: liveGithubSignIn(waiting.api, token) } : {}) } } } : {}),
       };
       const ctx = stageContext(ports, run, () => saveState(run), { one, two, ...(args.submoduleRepository ? { submodules: args.submoduleRepository } : {}),
@@ -312,7 +350,18 @@ async function main(argv: string[]): Promise<number> {
       const startedAt = Date.now();
       let passed: boolean;
       if (args.cleanup) {
-        const { inventory, failures } = await cleanup(ctx, { accountless: !held, keepBase: args.keepBase, log });
+        const { inventory, failures: cleanupFailures } = await cleanup(ctx, { accountless: !held, keepBase: args.keepBase, log });
+        let failures = cleanupFailures;
+        // Last, after the Pro grant went back (its actor was this role): the selected account's staff role as it was.
+        const grant = run.created.staffGrant;
+        if (stack && grant) {
+          try {
+            await localStaffRole(db, grant, grant.previousRole ?? "none");
+            delete run.created.staffGrant; await saveState(run);
+            log("cleanup staff role: put back");
+          } catch (error) { failures++; log(`cleanup staff_role: ${error instanceof RehearsalFailure ? error.code : "failed"}`); }
+          finally { await db.close().catch(() => undefined); }
+        }
         if (args.keepBase) log("cloud computer bases the run caused: kept (--keep-base): their build rows, live pointers and Boat named snapshots stay");
         const { lines, clean } = inventoryLines(inventory);
         for (const line of lines) log(line);
@@ -335,6 +384,20 @@ async function main(argv: string[]): Promise<number> {
     log(`failed ${error instanceof RehearsalFailure ? `${error.step} ${error.code}` : "unexpected"}`);
     return 1;
   }
+}
+
+/** What a run reaches, by target: Alpha's origin, PlanetScale roles and runtime store (each named by `need`), or the local
+ * stack's origin, own PostgreSQL and the profile's store. A local target reads nothing through `need` and mints no role. */
+export function targetPorts(stack: LocalStack | undefined, need: (name: string) => string, options: { client?: (url: string) => DatabaseClient } = {}) {
+  const roleNames = (run: string) => { let n = 0; return (kind: "read" | "write") => `zeros-rehearsal-${run.slice(0, 8)}-${kind}-${++n}-${Date.now().toString(36)}`; };
+  return {
+    target: stack?.target ?? ALPHA_TARGET,
+    database: (run: string): LiveDatabase => stack ? localDatabase({ readUrl: stack.readUrl, ownerUrl: stack.ownerUrl, ...(options.client ? { client: options.client } : {}) })
+      : liveDatabase({ organization: need("PLANETSCALE_ORG"), database: need("ZEROS_PLANETSCALE_ALPHA_DATABASE"),
+        tokenId: need("PLANETSCALE_SERVICE_TOKEN_ID"), token: need("PLANETSCALE_SERVICE_TOKEN"), roleName: roleNames(run) }),
+    storageConfig: () => stack ? stack.storage : { bucket: need("ZEROS_R2_ALPHA_BUCKET"), endpoint: need("ZEROS_R2_ALPHA_ENDPOINT"),
+      accessKeyId: need("ZEROS_R2_ALPHA_ACCESS_KEY_ID"), secretAccessKey: need("ZEROS_R2_ALPHA_SECRET_ACCESS_KEY") },
+  };
 }
 
 /** The shared base for the pinned runtime, read-only: its row (0268), whether Boat has it, and organizations per shared base. */
