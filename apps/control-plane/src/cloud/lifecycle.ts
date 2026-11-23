@@ -16,12 +16,13 @@ import { pruneCloudRepositories } from "./source-authority.js";
 import type { PendingSourceOutcome } from "./pending-create.js";
 import type { CloudV2ReadyCopyForks } from "./ready-copies.js";
 import type { CloudV2CheckpointFork, CloudV2CheckpointReuse, CloudV2CheckpointRetry, CloudV2CheckpointScope, CloudV2Store, CloudV2Workspace,
-  CloudV2LifecycleWorkspace, CloudV2RestoreCreate, CloudV2UnrestoredReason } from "./store.js";
+  CloudV2LifecycleWorkspace, CloudV2RestoreCreate } from "./store.js";
 import { CLOUD_V2_WORKER_PORT, type CloudV2WorkerTiming, type CloudV2WorkerBootTiming } from "./contract.js";
 import type { WorkspaceCheckouts, WorkspaceSubmoduleCheckout } from "./workspace-repositories.js";
+import { checkpointSubmodules, restoreSubmodules, submoduleOutcome, unrestoredPlace } from "./submodule-checkpoints.js";
 import { CLOUD_V2_BACKUP_PROBE_SECONDS, CLOUD_V2_CHECKPOINT_ERRORS, CLOUD_V2_CHECKPOINT_SECONDS, WORKER_OFF_COMMAND, WORKER_UNIT_CHECK, backupProbeCommand, checkpointCommand,
-  cloudV2CheckpointObject, heldSubmodulesCommand, parseBackupProbe, parseCheckpointResult, parseRestoreResult, parseSubmoduleRestore, restoreCommand, workerUnitOff, type BackupProbe,
-  CHECKPOINT_PARTIAL, type CheckpointSubmodule, type CloudV2CheckpointError, type RestoreSubmodule, type CloudV2CheckpointStorage, environmentRestoreCommand, parseEnvironmentRestore } from "./checkpoint.js";
+  cloudV2CheckpointObject, heldSubmodulesCommand, parseBackupProbe, parseCheckpointResult, parseRestoreResult, restoreCommand, workerUnitOff, type BackupProbe,
+  CHECKPOINT_PARTIAL, type CloudV2CheckpointError, type RestoreSubmodule, type CloudV2CheckpointStorage, environmentRestoreCommand, parseEnvironmentRestore } from "./checkpoint.js";
 import { ARCHIVE_SCRUB_SECONDS, CHANGED_SINCE_STOP_SECONDS, archiveScrubCommand, changedSinceStopCommand, parseArchiveScrub, parseChangedSinceStop,
   stopMarkerCommand, type ArchiveScrubResult } from "./archive-scrub.js";
 
@@ -123,21 +124,6 @@ export const CLOUD_V2_HOME = "/home/user";
 
 /** A held apply touches only the recorded submodules, each at most a clone and a restore. */
 const HELD_SUBMODULES_SECONDS = 300;
-/** Where a planned submodule is, as its unrestored record names it. */
-function unrestoredPlace(entry: WorkspaceSubmoduleCheckout): { position: number; path: string; folder: string } {
-  return { position: entry.position, path: entry.checkoutFolder.slice(entry.repositoryFolder.length + 1), folder: `${CLOUD_V2_HOME}/${entry.checkoutFolder}` };
-}
-/** The restore's closed failure codes, as the record and the document name them. */
-function unrestoredReason(code: string): CloudV2UnrestoredReason {
-  return code === "checkpoint_repository_missing" ? "repository_unavailable" : code === "checkpoint_prerequisites_missing" ? "commits_unavailable"
-    : code === "checkpoint_corrupt" ? "archive_corrupt" : "restore_failed";
-}
-
-/** A workspace's planned submodule checkouts as the checkpoint scripts take them: absolute paths on the VM. */
-function checkpointSubmodules(submodules: readonly WorkspaceSubmoduleCheckout[]): CheckpointSubmodule[] {
-  return submodules.map(entry => ({ position: entry.position, checkoutPath: `${CLOUD_V2_HOME}/${entry.checkoutFolder}`,
-    repositoryPath: `${CLOUD_V2_HOME}/${entry.repositoryFolder}`, gitDir: entry.gitDir, baseCommit: entry.baseCommit }));
-}
 /** Boat's stock image runs commands as its one user, `user`. The worker and
  * agents run as that user too, so its credential lives in its config dir. */
 export const CLOUD_V2_WORKER_TOKEN_PATH = "/home/user/.config/zeros/worker-token";
@@ -1619,13 +1605,7 @@ export class CloudV2Lifecycle {
    * with the count only, never a path; no query when nothing changed. */
   private async recordSubmoduleOutcome(workspace: CloudV2LifecycleWorkspace, planned: readonly WorkspaceSubmoduleCheckout[], stdout: string,
     kind: "restore" | "start"): Promise<void> {
-    const outcome = parseSubmoduleRestore(stdout);
-    const place = (index: number) => planned[index - 1];
-    const failed = outcome.unrestored.flatMap(({ place: index, reason }) => {
-      const entry = place(index);
-      return entry ? [{ ...unrestoredPlace(entry), reason: unrestoredReason(reason) }] : [];
-    });
-    const restored = outcome.held.flatMap(index => place(index) ? [unrestoredPlace(place(index)!)] : []);
+    const { failed, restored } = submoduleOutcome(planned, stdout);
     if (failed.length) this.deps.logger?.warn(`[cloud-v2] ${kind} left ${failed.length} submodule(s) unrestored workspace=${workspace.id.slice(0, 8)}`);
     if (failed.length || restored.length) await this.deps.store.recordUnrestoredSubmodules(workspace.id, { failed, restored });
   }
@@ -1651,11 +1631,8 @@ export class CloudV2Lifecycle {
 
   /** Each planned submodule as a restore takes it: a private one with its own read-only token (none when it cannot be
    * had: it then fails on its own if it needs one), a public one with none. */
-  private async restoreSubmodules(workspace: CloudV2LifecycleWorkspace, planned: readonly WorkspaceSubmoduleCheckout[]): Promise<RestoreSubmodule[]> {
-    return Promise.all(planned.map(async entry => {
-      const token = entry.public ? null : await this.deps.submoduleToken?.(workspace, entry.repository).catch(() => null) ?? null;
-      return { ...checkpointSubmodules([entry])[0]!, repository: entry.repository, ...(entry.public ? { public: true } : {}), ...(token ? { githubToken: token.token } : {}) };
-    }));
+  private restoreSubmodules(workspace: CloudV2LifecycleWorkspace, planned: readonly WorkspaceSubmoduleCheckout[]): Promise<RestoreSubmodule[]> {
+    return restoreSubmodules(planned, async repository => this.deps.submoduleToken?.(workspace, repository));
   }
 
   private async lookupBaseCommit(workspace: CloudV2LifecycleWorkspace): Promise<string | null> {

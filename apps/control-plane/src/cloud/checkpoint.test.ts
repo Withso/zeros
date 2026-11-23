@@ -2285,6 +2285,16 @@ process.exit(result.status ?? 1);
       expect(restored.stdout).not.toContain(TOKEN);
     });
 
+    it("on a live recovery's restore (active, onto a new machine), puts back a submodule's edit, stash and branch commit into the new Git directory", () => {
+      const { p, key, out, was } = worked(), net = github(p, TOKEN);
+      // The recovery's new machine is created from the Cloud Computer: each planned submodule folder empty, no Git directory.
+      const restored = load(p, key, out, net.env, planned(p, p.newHome),
+        { active: true, recovery: true, githubToken: TOKEN, repositoryUrl: "https://github.com/acme/app.git" });
+      expect(restored, restored.stdout).toMatchObject({ parsed: { ok: true }, unrestored: [] });
+      expectRestored(p, was);
+      expect(restored.stdout).not.toContain(TOKEN);
+    });
+
     it("on an active restore, empties a planned submodule the archive does not hold, so the worker fetches it", () => {
       const p = project(), key = randomBytes(32), out = join(p.root, "checkpoint.zck");
       // Saved with lib only: inner has no part.

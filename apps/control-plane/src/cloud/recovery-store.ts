@@ -29,6 +29,8 @@ export type RecoveryAttempt = {
   worker_generation: string | null; sealed_at: Date | null; source_stopped_at: Date | null;
   checkpoint_object: string | null; checkpoint_key: unknown; checkpoint_sha256: string | null; checkpoint_bytes: string | null;
   checkpoint_upload_until: Date | null; checkpoint_saved_at: Date | null;
+  /** C4B: the capture left out a planned submodule folder holding a person's own clone (0271). */
+  checkpoint_partial?: boolean;
   replacement_create: RecoveryCreate | null; replacement_sandbox_id: string | null; replacement_token_hash: Buffer | null;
   replacement_token: unknown; replacement_runtime_sha256: string | null; replacement_boot_id: string | null;
   replacement_route_url: string | null; replacement_port_token: unknown;
@@ -236,11 +238,12 @@ export class CloudRecoveryStore {
         WHERE id=$1`, [a.workspace_id, input.object, input.until]);
     });
   }
-  async captured(id: string, lease: string, input: { object: string; sha256: string; bytes: number }): Promise<boolean> {
+  async captured(id: string, lease: string, input: { object: string; sha256: string; bytes: number; partial?: boolean }): Promise<boolean> {
     return this.mutate(id, lease, ["capturing"], async (tx, a) => {
       if (a.checkpoint_object !== input.object || !a.source_stopped_at) throw changed();
       await tx.query(`UPDATE cloud_v2_recovery_attempts SET checkpoint_sha256=$2,checkpoint_bytes=$3,checkpoint_saved_at=clock_timestamp(),
-        checkpoint_upload_until=NULL,phase='restoring',updated_at=clock_timestamp() WHERE id=$1`, [id, input.sha256, input.bytes]);
+        checkpoint_partial=$4,checkpoint_upload_until=NULL,phase='restoring',updated_at=clock_timestamp() WHERE id=$1`,
+        [id, input.sha256, input.bytes, input.partial === true]);
       await tx.query("UPDATE cloud_v2_workspaces SET checkpoint_uploads=checkpoint_uploads-$2 WHERE id=$1", [a.workspace_id, input.object]);
     });
   }
@@ -302,10 +305,11 @@ export class CloudRecoveryStore {
         worker_route_url=$5,worker_port_token=$6,worker_runtime_sha256=$7,worker_runtime_boot_id=NULL,setup_status=NULL,
         computer_build_id=$8,restore_create=$9,restore_attempt=$2,restore_pending=false,execution_restore_claimed_at=NULL,
         checkpoint_object=$10,checkpoint_key=$11,checkpoint_sha256=$12,checkpoint_bytes=$13,checkpoint_saved_at=$14,
-        checkpoint_stop_generation=stop_generation,checkpoint_reuse=NULL,lease_renewed_at=clock_timestamp(),state='starting',updated_at=clock_timestamp(),next_attempt_at=$15
+        checkpoint_partial=$16,checkpoint_stop_generation=stop_generation,checkpoint_reuse=NULL,lease_renewed_at=clock_timestamp(),state='starting',updated_at=clock_timestamp(),next_attempt_at=$15
         WHERE id=$1 AND recovery_attempt_id=$2`, [a.workspace_id, id, a.replacement_sandbox_id, a.replacement_token_hash,
         route.url, JSON.stringify(route.token), a.replacement_runtime_sha256, a.replacement_create!.computerBuildId, JSON.stringify(a.replacement_create),
-        a.checkpoint_object, JSON.stringify(a.checkpoint_key), a.checkpoint_sha256, a.checkpoint_bytes, a.checkpoint_saved_at, a.deadline_at]);
+        a.checkpoint_object, JSON.stringify(a.checkpoint_key), a.checkpoint_sha256, a.checkpoint_bytes, a.checkpoint_saved_at, a.deadline_at,
+        a.checkpoint_partial === true]);
     });
   }
   async delivered(id: string, lease: string): Promise<boolean> {

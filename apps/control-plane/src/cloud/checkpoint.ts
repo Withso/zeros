@@ -851,6 +851,9 @@ export function backupProbeCommand(checkoutPaths: readonly string[], home = "/ho
  * baseline). An absent or empty folder holds nothing (clean); one whose Git directory is not the one the worker
  * made is unknown, which backs up. Nothing at all without submodules, so the probe stays byte-identical. */
 function submodulesProbe(submodules: readonly CheckpointSubmodule[]): string[] {
+  // The holdover check below sits here, so a probe with no planned submodules stays byte-identical to before. That is
+  // safe only while a workspace's submodule rows never change after its create: only a planned submodule's restore
+  // writes a holdover, so none can exist without one. A change that lets rows go must move the check out.
   if (!submodules.length) return [];
   const calls = submodules.map(entry => {
     const folder = checkedPath(entry.checkoutPath), repository = checkedPath(entry.repositoryPath);

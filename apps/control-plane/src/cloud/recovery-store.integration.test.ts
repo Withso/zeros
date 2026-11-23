@@ -188,6 +188,28 @@ suite("checkpoint recovery fences with PostgreSQL", () => {
     expect(await f.recovery.workspace(a.id, next.lease_id!, 60000)).toMatchObject({ id: f.workspace.id });
   });
 
+  for (const partial of [true, false]) it(`publishes the capture's own partial flag (${partial}) onto the workspace, never the previous checkpoint's`, async () => {
+    const f = await fixture(), a = (await f.recovery.begin(f.route))!;
+    const computers = new CloudV2Computers(pool, pool, async (_org, _user, target) => ({ repository: target.repository, repositoryId: "42" }));
+    const build = await computers.enqueue(f.org, f.user, { repositories: [{ repository: "fixture/repo", branch: "main", commit: "a".repeat(40) }] });
+    await computers.claim(); await computers.setRuntime(build.id, "a".repeat(64)); await computers.activate(build.id, "snapshot-fixture");
+    // The previous checkpoint's flag is the opposite.
+    await pool.query("UPDATE cloud_v2_workspaces SET checkpoint_partial=$2 WHERE id=$1", [f.workspace.id, !partial]);
+    await f.recovery.fence(a.id); await f.recovery.request(f.token, f.boot, { op: "seal", id: a.id, generation: 4 });
+    const lease = (await f.recovery.claim(a.id, 60000))!.lease_id!;
+    await f.recovery.startCapture(a.id, lease); await f.recovery.stopped(a.id, lease);
+    const object = cloudV2CheckpointObject(f.workspace.id, randomUUID());
+    await f.recovery.upload(a.id, lease, { object, key: sealCheckpointKey(Buffer.alloc(32, 8), f.workspace.id, object, keys), until: new Date(Date.now() + 60000) });
+    await f.recovery.captured(a.id, lease, { object, sha256: "a".repeat(64), bytes: 16, ...(partial ? { partial } : {}) });
+    const token = newCloudV2Token("worker");
+    await f.recovery.prepare(a.id, lease, { name: "fixture-recovery", env: {}, runtime: "a".repeat(64), tokenHash: token.hash, token: sealPortToken(token.token, f.workspace.id, keys) });
+    await f.recovery.creating(a.id, lease); await f.recovery.created(a.id, "bx_replacementfixture");
+    await f.recovery.claimRestore(a.id, lease); await f.recovery.restored(a.id, lease);
+    expect(await f.recovery.publish(a.id, lease, { url: "https://replacement.example.test", token: sealPortToken("replacement-port-token", f.workspace.id, keys) })).toBe(true);
+    const row = (await pool.query("SELECT checkpoint_object, checkpoint_partial FROM cloud_v2_workspaces WHERE id=$1", [f.workspace.id])).rows[0];
+    expect(row).toEqual({ checkpoint_object: object, checkpoint_partial: partial });
+  });
+
   it("pins the replacement image, retains the source until setup/readiness, then purges only the reconciled 24-hour receipt", async () => {
     const f = await fixture(), a = (await f.recovery.begin(f.route))!;
     const computers = new CloudV2Computers(pool, pool, async (_org, _user, target) => ({ repository: target.repository, repositoryId: "42" }));

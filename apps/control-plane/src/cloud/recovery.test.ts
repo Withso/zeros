@@ -1,6 +1,7 @@
 import { generateKeyPairSync, randomUUID } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import { CloudRecovery } from "./recovery.js";
+import { CHECKPOINT_PARTIAL, SUBMODULE_UNRESTORED } from "./checkpoint.js";
 import type { RecoveryAttempt } from "./recovery-store.js";
 
 function fixture(phase: RecoveryAttempt["phase"] = "waiting") {
@@ -74,6 +75,52 @@ describe("fresh checkpoint recovery coordinator", () => {
       const command = String(f.compute.exec.mock.calls.at(-1)![1]);
       expect(command).toContain("https://github.com/fixture/web.git");
       expect(command).toContain(Buffer.from("synthetic-web-token-0123456789").toString("base64")); // gitleaks:allow
+    });
+  });
+  describe("a workspace with fetched submodules (C4B)", () => {
+    const GIT_DIR = `modules/${"d".repeat(64)}`;
+    const lib = { position: 0, repository: "acme/lib", repositoryId: "42", checkoutFolder: "fixture/project/lib", repositoryFolder: "fixture/project",
+      baseCommit: "c".repeat(40), gitDir: GIT_DIR };
+    const withSubmodules = (f: ReturnType<typeof fixture>) => {
+      const deps = (f.recovery as unknown as { deps: Record<string, unknown> }).deps;
+      const recorded = vi.fn(async () => {}), submoduleToken = vi.fn(async () => ({ token: "synthetic-lib-token-0123456789" }));
+      Object.assign(deps, { checkouts: vi.fn(async () => ({ repositories: [], submodules: [lib] })), submoduleToken, recordUnrestoredSubmodules: recorded });
+      return { recorded, submoduleToken };
+    };
+    it("captures each fetched submodule as a stop does, and keeps a capture that left one out as partial", async () => {
+      const f = fixture("capturing"); withSubmodules(f); f.attempt.source_stopped_at = new Date(f.now - 1);
+      f.attempt.checkpoint_object = null;
+      const captured = vi.fn(async () => true);
+      Object.assign(f.store, { upload: vi.fn(async () => true), captured });
+      f.checkpoints.seal.mockReturnValue({} as never);
+      f.checkpoints.storage.uploadUrl.mockResolvedValue("https://r2.example.test/upload?sig=1" as never);
+      f.checkpoints.storage.size.mockResolvedValue(100 as never);
+      f.compute.exec.mockResolvedValue({ exitCode: 0, timedOut: false, stdout: `${CHECKPOINT_PARTIAL}\nzeros-checkpoint-saved bytes=100 sha256=${"e".repeat(64)}\n` });
+      await f.recovery.run(f.attempt.id);
+      const command = String(f.compute.exec.mock.calls.at(-1)![1]);
+      expect(command).toContain("/home/user/fixture/project/lib");
+      expect(command).toContain(GIT_DIR);
+      expect(captured).toHaveBeenCalledWith(f.attempt.id, f.attempt.lease_id, expect.objectContaining({ partial: true }));
+    });
+    it("restores each fetched submodule into the new Git directory with its own token, and records one it could not put back", async () => {
+      const f = fixture("restoring"); const { recorded, submoduleToken } = withSubmodules(f);
+      Object.assign(f.attempt, { replacement_create: { name: "fixture-recovery", env: {}, from: "snapshot-fixture" }, replacement_sandbox_id: "bx_replacement",
+        replacement_runtime_sha256: "a".repeat(64), checkpoint_object: "object-fixture", checkpoint_sha256: "b".repeat(64), checkpoint_key: {} });
+      Object.assign(f.store, { claimRestore: vi.fn(async () => true), restored: vi.fn(async () => true) });
+      f.checkpoints.open.mockReturnValue(Buffer.alloc(32, 1) as never);
+      f.checkpoints.storage.downloadUrl.mockResolvedValue("https://r2.example.test/download?sig=1" as never);
+      f.compute.exec.mockResolvedValue({ exitCode: 0, timedOut: false, stdout: `zeros-checkpoint-restored\n${SUBMODULE_UNRESTORED} 1 checkpoint_repository_missing\n` });
+      const deps = (f.recovery as unknown as { deps: { runtime: { url: ReturnType<typeof vi.fn> }; publicKeys: string[] } }).deps;
+      deps.runtime.url.mockResolvedValue("https://runtime.example.test/worker.tgz");
+      deps.publicKeys = [generateKeyPairSync("ed25519").publicKey.export({ type: "spki", format: "pem" }).toString()];
+      await f.recovery.run(f.attempt.id);
+      expect(f.store.fail.mock.calls).toEqual([]);
+      expect(submoduleToken).toHaveBeenCalledWith(expect.anything(), "acme/lib");
+      const command = String(f.compute.exec.mock.calls.at(-1)![1]);
+      expect(command).toContain("https://github.com/acme/lib.git");
+      expect(command).toContain(GIT_DIR);
+      expect(recorded).toHaveBeenCalledWith(f.attempt.workspace_id, { restored: [],
+        failed: [{ position: 0, path: "lib", folder: "/home/user/fixture/project/lib", reason: "repository_unavailable" }] });
     });
   });
   it("keeps the source running when the initiator lacks restore GitHub authority", async () => {

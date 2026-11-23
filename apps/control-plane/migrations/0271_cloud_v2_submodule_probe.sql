@@ -28,3 +28,7 @@ ALTER TABLE cloud_v2_workspaces ADD COLUMN IF NOT EXISTS checkpoint_partial bool
 -- While it is set every open, a plain start included, tries the held parts again before the worker starts.
 ALTER TABLE cloud_v2_workspaces ADD COLUMN IF NOT EXISTS submodules_unrestored jsonb
   CHECK (submodules_unrestored IS NULL OR (jsonb_typeof(submodules_unrestored) = 'array' AND jsonb_array_length(submodules_unrestored) BETWEEN 1 AND 320));
+
+-- C4B: a live recovery's capture left out a planned submodule folder holding a person's own clone; its publish carries
+-- this onto the workspace's checkpoint_partial, as a stop's backup does.
+ALTER TABLE cloud_v2_recovery_attempts ADD COLUMN IF NOT EXISTS checkpoint_partial boolean NOT NULL DEFAULT false;
