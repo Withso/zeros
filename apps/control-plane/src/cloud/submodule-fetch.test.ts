@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { SUBMODULE_FETCHED, submoduleFetchLines, submoduleGitDirName } from "./submodules.js";
+import { OFFLINE_GIT_ENV } from "./__fixtures__/offline-git.js";
 
 const roots: string[] = [];
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
@@ -14,7 +15,7 @@ function fixture() {
   const root = mkdtempSync(join(tmpdir(), "zeros-submodule-fetch-"));
   roots.push(root);
   const gitconfig = join(root, "gitconfig");
-  const env = { PATH: process.env.PATH ?? "/usr/bin:/bin", LANG: "C.UTF-8", GIT_CONFIG_GLOBAL: gitconfig, GIT_CONFIG_NOSYSTEM: "1",
+  const env = { PATH: process.env.PATH ?? "/usr/bin:/bin", LANG: "C.UTF-8", GIT_CONFIG_GLOBAL: gitconfig, GIT_CONFIG_NOSYSTEM: "1", ...OFFLINE_GIT_ENV,
     GIT_AUTHOR_NAME: "Dev", GIT_AUTHOR_EMAIL: "dev@example.test", GIT_COMMITTER_NAME: "Dev", GIT_COMMITTER_EMAIL: "dev@example.test" };
   const git = (cwd: string, ...args: string[]) => execFileSync("git", args, { cwd, env, encoding: "utf8" }).trim();
   // The submodule's origin, published at "https://github.com/acme/lib.git" for this test.

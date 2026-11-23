@@ -10,6 +10,7 @@ import {
   parseCheckpointResult, parseRestoreResult, parseUnrestoredSubmodules, restoreCommand, sealCheckpointKey, SUBMODULE_PUSH_REFUSED, type CheckpointReuse, type RestoreInput,
   type RestoreSubmodule,
 } from "./checkpoint.js";
+import { OFFLINE_GIT_ENV, pinnedPath } from "./__fixtures__/offline-git.js";
 
 const roots: string[] = [];
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
@@ -21,6 +22,7 @@ function fixture() {
   writeFileSync(gitconfig, "");
   const env = {
     PATH: process.env.PATH ?? "/usr/bin:/bin", LANG: "C.UTF-8", GIT_CONFIG_GLOBAL: gitconfig, GIT_CONFIG_NOSYSTEM: "1",
+    ...OFFLINE_GIT_ENV,
     GIT_AUTHOR_NAME: "Dev", GIT_AUTHOR_EMAIL: "dev@example.test", GIT_COMMITTER_NAME: "Dev", GIT_COMMITTER_EMAIL: "dev@example.test",
   };
   const git = (cwd: string, ...args: string[]) => execFileSync("git", args, { cwd, env, encoding: "utf8" }).trim();
@@ -50,7 +52,7 @@ function workspaces() {
 }
 
 function run(script: string[], env: NodeJS.ProcessEnv) {
-  const result = spawnSync("bash", ["-c", script.join("\n")], { env, encoding: "utf8" });
+  const result = spawnSync("bash", ["-c", [...pinnedPath(env.PATH), ...script].join("\n")], { env, encoding: "utf8" });
   return { status: result.status, stdout: result.stdout };
 }
 
@@ -1873,9 +1875,7 @@ process.exit(result.status ?? 1);
       return [{ ...lib!, repository: "acme/lib", githubToken: TOKEN, ...extra.lib }, { ...inner!, repository: "acme/inner", public: true, ...extra.inner }];
     };
     const load = (p: ReturnType<typeof project>, key: Buffer, from: string, env: NodeJS.ProcessEnv, submodules: RestoreSubmodule[], extra: Partial<RestoreInput> = {}) => {
-      // The system shell's startup may put /bin first: the wrapper must stay the Git every command runs.
-      const toolchain = [`export PATH='${env.PATH}'`];
-      const result = run([...toolchain, ...checkpointRestoreSteps({ checkoutPath: p.folder(p.newHome), home: p.newHome, key, sha256: sha(from), repositoryUrl: undefined,
+      const result = run([...checkpointRestoreSteps({ checkoutPath: p.folder(p.newHome), home: p.newHome, key, sha256: sha(from), repositoryUrl: undefined,
         submodules, ...extra }, [`cp '${from}' "$work/checkpoint.zck"`]), "report zeros-checkpoint-restored"], env);
       return { ...result, parsed: parseRestoreResult(result.stdout), unrestored: parseUnrestoredSubmodules(result.stdout) };
     };
