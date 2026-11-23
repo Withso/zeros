@@ -13,6 +13,7 @@ import { FakeBoat } from "./__fixtures__/boat-fake.js";
 import { CLOUD_V2_BACKUP_DELAY_MS, CLOUD_V2_CHECKPOINT_RETRY_WINDOW_MS, CLOUD_V2_LOSS_CONFIRM_MS, CLOUD_V2_LOSS_UNCONFIRMED_ALERT, CLOUD_V2_MAINTENANCE_LEASE_SECONDS,
   CLOUD_V2_MAINTENANCE_ADOPT_STALE_MS, CLOUD_V2_MAINTENANCE_STALE_MS, CloudV2Lifecycle, type CloudV2LifecycleDeps, type CloudV2TimingRecord } from "./lifecycle.js";
 import { CLOUD_V2_BACKUP_REMOVAL_AT_SQL, CloudV2Store, setCloudV2RetentionDocuments } from "./store.js";
+import { cloudV2BoatSnapshotName } from "./resource-names.js";
 import { scheduleCloudDeletion } from "./deletion.js";
 import { CloudV2ReadyCopies } from "./ready-copies.js";
 import { assertOrganizationCloudPurgeReady } from "../deletion-lifecycle.js";
@@ -262,6 +263,93 @@ d("cloud v2 retention", () => {
     expect(replacement.files.get(`${path("app")}/.git/refs/heads/zeros/w`)).toBe("from GitHub");
     expect(replacement.files.has(`${path("api")}/UNPUSHED`)).toBe(false);
     expect(await lostWork()).toEqual({ restored: "none", stoppedAt: stoppedAt.toISOString() });
+  });
+
+  describe("a clean rebuild after the Cloud Computer was rebuilt takes the live build, as a backup restore does", () => {
+    /** A newer build goes live, as a runtime change or the daily refresh does; with `cleaned`, the workspace's own build's
+     * snapshot is gone, as cleanup leaves a replaced build nobody is creating from. */
+    const rebuildComputer = async (cleaned: boolean) => {
+      const newer = randomUUID();
+      await pool.query("INSERT INTO cloud_v2_computer_builds (id, org_id, version, recipe, state, created_by, source_policy_version, snapshot_id) VALUES ($1,$2,2,'{\"repositories\":[]}','succeeded',$3,2,'zeros-base-2')",
+        [newer, org, user]);
+      await pool.query("UPDATE cloud_v2_computers SET active_build_id=$2, snapshot_name='zeros-base-2' WHERE org_id=$1", [org, newer]);
+      if (cleaned) await pool.query("UPDATE cloud_v2_computer_builds SET snapshot_deleted_at=clock_timestamp() WHERE org_id=$1 AND id<>$2", [org, newer]);
+      return newer;
+    };
+    // A workspace with no project's ready copy to fork rebuilds from the Cloud Computer and clones its checkout.
+    let cloned: string[] = [];
+    const clean = () => lifecycle({ restoreSource: async () => null, prepareRepository: async (_workspace, sandboxId) => { cloned.push(sandboxId); } });
+    beforeEach(() => { cloned = []; });
+    const columns = async (names: string) => (await pool.query(`SELECT ${names} FROM cloud_v2_workspaces WHERE id=$1`, [id])).rows[0];
+    const rebuilt = async (newer: string) => {
+      const restored = await row();
+      const pin = await columns("computer_build_id, error_code");
+      expect(restored.state, `error_code ${pin.error_code}`).toBe("starting");
+      expect(restored.boat_sandbox_id).not.toBe(vm);
+      expect(boat.machine(restored.boat_sandbox_id)!.from).toBe(cloudV2BoatSnapshotName("zeros-base-2"));
+      expect(pin.computer_build_id).toBe(newer);
+      expect(cloned).toEqual([restored.boat_sandbox_id]);
+    };
+
+    it("rebuilds a lost VM from the organization's live Computer when its own build was replaced and cleaned up", async () => {
+      remoteBranches.add(path("app"));
+      await stop();
+      expect((await row()).backup_probe).toBe("clean");
+      const newer = await rebuildComputer(true);
+      boat.machine(vm)!.state = "deleted";
+      await store.transition(id, ["stopped"], "starting");
+      await clean().tick();
+      await rebuilt(newer);
+    });
+
+    it("takes the live build even while its own build's snapshot still exists: the rebuild needs nothing from the older one", async () => {
+      await stop();
+      const newer = await rebuildComputer(false);
+      boat.machine(vm)!.state = "deleted";
+      await store.transition(id, ["stopped"], "starting");
+      await clean().tick();
+      await rebuilt(newer);
+    });
+
+    it("opens an archived workspace whose machine expired: restores reads pushed, and the open rebuilds from GitHub with the lost-work note", async () => {
+      remoteBranches.add(path("app"));
+      boat.write(vm, `${path("app")}/UNPUSHED`, "work");
+      await stop();
+      await store.requestLifecycle(id, user, "archive");
+      const newer = await rebuildComputer(true);
+      // Twelve days on, Boat has expired the machine; the archived wake records it gone.
+      await pool.query(`UPDATE cloud_v2_workspaces SET stopped_at=stopped_at - interval '12 days 1 hour', archived_at=archived_at - interval '12 days',
+        retention_started_at=retention_started_at - interval '13 days' WHERE id=$1`, [id]);
+      boat.machine(vm)!.expired = true;
+      await clean().tick();
+      expect(await columns("machine_gone_at IS NOT NULL AS gone")).toEqual({ gone: true });
+      // Before the open, the document says what opening brings back: what was pushed, not the machine's unpushed work.
+      expect((await store.get(id, user)).restores).toBe("pushed");
+      await store.requestLifecycle(id, user, "start");
+      for (let step = 0; step < 3 && (await row()).boat_sandbox_id === vm; step++) {
+        await pool.query("UPDATE cloud_v2_workspaces SET next_attempt_at=NULL WHERE id=$1", [id]);
+        await clean().tick();
+      }
+      await rebuilt(newer);
+      // And the open did exactly that: rebuilt from GitHub, the unpushed work not back, the note recorded.
+      expect(boat.machine((await row()).boat_sandbox_id)!.files.has(`${path("app")}/UNPUSHED`)).toBe(false);
+      expect((await store.get(id, user)).lostWork).toMatchObject({ restored: "none" });
+    }, 30_000);
+
+    it("a workspace the earlier code failed with cloud_computer_build_required stays failed until opened again, then rebuilds", async () => {
+      await stop();
+      const newer = await rebuildComputer(true);
+      boat.machine(vm)!.state = "deleted";
+      // What the earlier code left: the open failed with no usable image.
+      await store.transition(id, ["stopped"], "starting");
+      await pool.query("UPDATE cloud_v2_workspaces SET state='failed', error_code='cloud_computer_build_required' WHERE id=$1", [id]);
+      await clean().tick();
+      expect((await row()).state).toBe("failed");
+      // Opening it again (the desktop's Open, or Start on the API) rebuilds it.
+      await store.requestLifecycle(id, user, "start");
+      await clean().tick();
+      await rebuilt(newer);
+    });
   });
 
   const notFound = () => new CloudProviderError("provider_not_found", "Boat API request did not succeed", false, { httpStatus: 404 });
