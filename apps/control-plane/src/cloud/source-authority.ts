@@ -494,8 +494,9 @@ export function pruneCloudRepositories(repositories: readonly string[]): string 
       throw new Error("Invalid repository");
     const directory = `/home/user/${repository}`;
     return `if [ -L ${q(directory)} ]; then rm -f -- ${q(directory)}; elif [ -e ${q(directory)} ]; then `
-      + `rm -rf -- ${q(`${directory}/.git`)} && mv -T -- ${q(directory)} "$trash/$((n += 1))"; fi`
-      + ` && { rmdir -- ${q(directory.slice(0, directory.lastIndexOf("/")))} 2>/dev/null || true; }`;
+      // Each step its own command: under set -e, bash goes on past a failure partway through a `&&` list.
+      + `rm -rf -- ${q(`${directory}/.git`)}; mv -T -- ${q(directory)} "$trash/$((n += 1))"; fi`
+      + `; { rmdir -- ${q(directory.slice(0, directory.lastIndexOf("/")))} 2>/dev/null || true; }`;
   });
   return `bash -lc ${q(["set -eu", "trash=$(mktemp -d /home/user/.zeros-pruned.XXXXXXXX)", "n=0", ...steps,
     // Detached with its own output, so the command returns at once.
