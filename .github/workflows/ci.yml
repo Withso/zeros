@@ -445,15 +445,17 @@ jobs:
       - name: Fetch origin/main (for the migration forward-only guard)
         # Compare with the main this commit was built on, not the current tip:
         # a run can start after later merges, whose new migrations would then
-        # look deleted here. A main push uses the main it was pushed onto; a
-        # pull request's merge commit uses its first parent. Other events keep
-        # comparing with the fetched main.
+        # look deleted here. A main or release-branch push uses the commit it was
+        # pushed onto; a pull request's merge commit uses its first parent. Other
+        # events keep comparing with the fetched main.
         if: matrix.part == 1
         env:
           EVENT_NAME: ${{ github.event_name }}
           PUSH_BEFORE: ${{ github.event.before }}
         run: |
-          if [ "$EVENT_NAME" = push ] && [ "$GITHUB_REF" = refs/heads/main ]; then
+          # A release branch carries its own line's ladder (a patch adds that line's next number), so a push there
+          # compares with the commit it was pushed onto, as a main push does: never with today's main.
+          if [ "$EVENT_NAME" = push ] && { [ "$GITHUB_REF" = refs/heads/main ] || [[ "$GITHUB_REF" == refs/heads/release/* ]]; }; then
             base="$PUSH_BEFORE"
             if ! [[ "$base" =~ ^[0-9a-f]{40}$ ]] || [[ "$base" =~ ^0+$ ]] ||
                ! git cat-file -e "${base}^{commit}" 2>/dev/null; then
