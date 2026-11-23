@@ -12,6 +12,7 @@ import { sealCheckpointKey, cloudV2CheckpointObject } from "./checkpoint.js";
 import { newCloudV2Token } from "./tokens.js";
 import { CloudRecovery } from "./recovery.js";
 import { withSystemTx, withUserTx } from "../db.js";
+import { lifecycleCheckouts } from "./workspace-repositories.js";
 
 const keys = { currentKeyVersion: 1, keys: { 1: Buffer.alloc(32, 7).toString("base64url") } };
 
@@ -208,6 +209,27 @@ suite("checkpoint recovery fences with PostgreSQL", () => {
     expect(await f.recovery.publish(a.id, lease, { url: "https://replacement.example.test", token: sealPortToken("replacement-port-token", f.workspace.id, keys) })).toBe(true);
     const row = (await pool.query("SELECT checkpoint_object, checkpoint_partial FROM cloud_v2_workspaces WHERE id=$1", [f.workspace.id])).rows[0];
     expect(row).toEqual({ checkpoint_object: object, checkpoint_partial: partial });
+  });
+
+  it("loads a one-repository project workspace with a fetched submodule so its checkouts name the submodule, with and without a lease", async () => {
+    const f = await fixture(), a = (await f.recovery.begin(f.route))!;
+    // A project workspace of one repository (no folder) whose create fetched a submodule.
+    const project = randomUUID();
+    await pool.query("INSERT INTO cloud_projects(id,org_id,name,level,migrated) VALUES($1,$2,'Fixture','organization',false)", [project, f.org]);
+    await pool.query("UPDATE cloud_v2_workspaces SET project_id=$2, checkout_path='fixture/repo' WHERE id=$1", [f.workspace.id, project]);
+    await pool.query(`INSERT INTO cloud_v2_workspace_submodules(workspace_id,position,path,status,repository,repository_id,commit,git_dir)
+      VALUES($1,0,'lib','fetch','acme/lib','42',$2,$3)`, [f.workspace.id, "c".repeat(40), `modules/${"d".repeat(64)}`]);
+    const lease = (await f.recovery.claim(a.id, 60000))!.lease_id!;
+    for (const loaded of [await f.recovery.workspace(a.id), await f.recovery.workspace(a.id, lease, 60000)]) {
+      expect(loaded).toMatchObject({ submoduleFetches: 1 });
+      const { submodules } = await lifecycleCheckouts(pool)(loaded!);
+      expect(submodules.map(entry => [entry.repository, entry.checkoutFolder])).toEqual([["acme/lib", "fixture/repo/lib"]]);
+      // A loader that did not count them: not known, so asked, never taken as none.
+      const { submoduleFetches: _counted, ...uncounted } = loaded!;
+      expect((await lifecycleCheckouts(pool)(uncounted)).submodules).toHaveLength(1);
+      // Only a counted zero skips the query.
+      expect((await lifecycleCheckouts(pool)({ ...loaded!, submoduleFetches: 0 })).submodules).toEqual([]);
+    }
   });
 
   it("pins the replacement image, retains the source until setup/readiness, then purges only the reconciled 24-hour receipt", async () => {

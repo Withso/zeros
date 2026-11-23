@@ -106,11 +106,12 @@ export type WorkspaceCheckouts = {
 
 /**
  * A workspace's checkouts after the first, and the submodules it fetched, in one statement. No query without a
- * project, nor for a workspace with one repository and no submodule (its lifecycle loader counted them).
+ * project, nor for a workspace with one repository whose loader counted no submodule. An absent count is not known,
+ * never none: a workspace from a loader that does not count them is asked, so it costs a query, never its submodules.
  */
 type CheckoutsWorkspace = Pick<CloudV2Workspace, "id" | "projectId" | "checkoutFolder" | "folder"> & { submoduleFetches?: number };
 const hasCheckouts = (workspace: CheckoutsWorkspace) =>
-  !!workspace.projectId && !!workspace.checkoutFolder && (!!workspace.folder || !!workspace.submoduleFetches);
+  !!workspace.projectId && !!workspace.checkoutFolder && (!!workspace.folder || workspace.submoduleFetches !== 0);
 
 export async function workspaceCheckouts(tx: Tx, workspace: CheckoutsWorkspace): Promise<WorkspaceCheckouts> {
   if (!hasCheckouts(workspace)) return { repositories: [], submodules: [] };

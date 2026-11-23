@@ -1081,7 +1081,8 @@ d("cloud v2 ready copies", () => {
 
       it("costs a workspace with one repository and no submodule, or none from before projects, no query at all", async () => {
         const one = (await store().lifecycleWorkspace(await made([], false)))!;
-        expect(one).not.toHaveProperty("submoduleFetches");
+        // Counted, and zero: the only answer that skips the query.
+        expect(one.submoduleFetches).toBe(0);
         expect(await queries(() => lifecycleCheckouts(pool)(one))).toEqual({ result: { repositories: [], submodules: [] }, count: 0 });
         const legacy = { ...one, projectId: undefined, checkoutFolder: undefined, folder: undefined };
         expect(await queries(() => lifecycleCheckouts(pool)(legacy))).toEqual({ result: { repositories: [], submodules: [] }, count: 0 });

@@ -5,7 +5,7 @@ import { withSystemTx, type Tx } from "../db.js";
 import { CLOUD_V2_LIVE_ACCESS } from "./workspace-access.js";
 import { hashCloudV2Token } from "./tokens.js";
 import type { ExecutionIntentAuthority } from "./execution/authority.js";
-import { cloudV2LifecycleWorkspaceFromRow, cloudV2WorkspaceImage, type CloudV2LifecycleWorkspace, type CloudV2RestoreCreate } from "./store.js";
+import { cloudV2LifecycleWorkspaceFromRow, cloudV2WorkspaceImage, lifecycleSubmodules, type CloudV2LifecycleWorkspace, type CloudV2RestoreCreate } from "./store.js";
 import { originalSetupBuild } from "./setup-selection.js";
 import type { WorkerRoute } from "./worker-connection.js";
 import type { CloudRecoveryReply, CloudRecoveryRequest } from "./recovery-quiesce-contract.js";
@@ -102,8 +102,8 @@ export class CloudRecoveryStore {
       const row = (await (lease ? tx.query<WorkspaceRow>(`UPDATE cloud_v2_recovery_attempts a
         SET lease_until=least(a.deadline_at,clock_timestamp()+$3*interval '1 millisecond') FROM cloud_v2_workspaces w
         WHERE a.id=$1 AND a.lease_id=$2 AND a.lease_until>clock_timestamp() AND a.deadline_at>clock_timestamp()
-          AND a.phase IN ${ACTIVE} AND ${BINDING} RETURNING w.*`, [id, lease, leaseMs])
-        : tx.query<WorkspaceRow>(`SELECT w.* FROM cloud_v2_recovery_attempts a JOIN cloud_v2_workspaces w ON w.id=a.workspace_id
+          AND a.phase IN ${ACTIVE} AND ${BINDING} RETURNING w.*, ${lifecycleSubmodules("w")}`, [id, lease, leaseMs])
+        : tx.query<WorkspaceRow>(`SELECT w.*, ${lifecycleSubmodules("w")} FROM cloud_v2_recovery_attempts a JOIN cloud_v2_workspaces w ON w.id=a.workspace_id
         WHERE a.id=$1 AND a.phase IN ${ACTIVE} AND a.deadline_at>clock_timestamp() AND ${BINDING}`, [id]))).rows[0];
       return row ? { ...cloudV2LifecycleWorkspaceFromRow(row), recoveryAttemptId: id } : null;
     });

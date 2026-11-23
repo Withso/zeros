@@ -308,7 +308,7 @@ type LifecycleRow = Row & {
 /** C4: how many submodules a workspace fetched, read inside the statement that loads it for the lifecycle, so its stop,
  * backup and restore read their checkouts only when there are some: a workspace without any costs no query for them.
  * `table` names the workspace row in that statement. */
-const lifecycleSubmodules = (table: string) =>
+export const lifecycleSubmodules = (table: string) =>
   `(SELECT count(*)::int FROM cloud_v2_workspace_submodules s WHERE s.workspace_id=${table}.id AND s.status='fetch') AS submodule_fetches`;
 const LIFECYCLE_COLUMNS = `${COLUMNS}, lease_renewed_at, base_commit, restore_pending, restore_attempt, restore_create, checkpoint_uploads,
   execution_mode, execution_transition_id, execution_restore_claimed_at, execution_initiator_user_id, execution_intent_id, execution_intent_authority, access_epoch,
@@ -356,7 +356,8 @@ export function cloudV2LifecycleWorkspaceFromRow(row: LifecycleRow): CloudV2Life
     ...(row.execution_mode === "active" ? { executionIntent: { id: row.execution_intent_id, userId: row.execution_initiator_user_id,
       accessEpoch: row.access_epoch, authority: row.execution_intent_authority } } : {}),
     checkpoint, restorePending: row.restore_pending, restoreAttempt: row.restore_attempt, restoreCreate: restoreCreate(row.restore_create),
-    ...(row.submodule_fetches ? { submoduleFetches: row.submodule_fetches } : {}),
+    // Counted (0 included) by every loader that asks; absent means not known, and the checkouts read asks (hasCheckouts).
+    ...(typeof row.submodule_fetches === "number" ? { submoduleFetches: row.submodule_fetches } : {}),
     ...(unrestoredSubmodules(row.submodules_unrestored).length ? { submodulesUnrestored: unrestoredSubmodules(row.submodules_unrestored) } : {}),
     ...(row.base_ready_at ? { baseReadyAt: row.base_ready_at.toISOString() } : {}),
     ...(cloudV2CheckpointLossy(row) ? { checkpointLossy: true as const } : {}),
