@@ -32,11 +32,15 @@ export const ALPHA_TARGET: RehearsalTarget = Object.freeze({ kind: "alpha", orig
 /** A release identity of the target's own channel: ready, not in maintenance, its cloud healthy. Alpha's check is gate0's. */
 export function targetIdentity(target: RehearsalTarget, value: unknown): { sourceSha: string; workerSha256: string } {
   if (target.kind === "alpha") return alphaProbeIdentity(value);
-  const checked = z.object({ channel: z.literal(target.channel), ready: z.literal(true), maintenance: z.literal(false), sourceSha: z.string().regex(/^[a-f0-9]{40}$/),
-    cloud: z.object({ enabled: z.literal(true), ready: z.literal(true), state: z.literal("healthy") }),
-    worker: z.object({ sha256: z.string().regex(/^[a-f0-9]{64}$/) }) }).safeParse(value);
-  if (!checked.success) throw new RehearsalFailure("release_identity", "not_ready");
-  return { sourceSha: checked.data.sourceSha, workerSha256: checked.data.worker.sha256 };
+  // A Dev stack is never "ready" by the route's own rule (release-identity.ts: ready needs a deployed source sha, which only
+  // a hosted deploy has), so it answers 503 with ready false and no source sha. What it can show is checked instead: its
+  // own channel, no maintenance, every migration applied (head = expected head), its cloud on, and a pinned worker.
+  const checked = z.object({ channel: z.literal(target.channel), maintenance: z.literal(false),
+    migrations: z.object({ state: z.literal("current"), head: z.string().min(1), expectedHead: z.string().min(1) }).passthrough(),
+    cloud: z.object({ enabled: z.literal(true) }).passthrough(),
+    worker: z.object({ sha256: z.string().regex(/^[a-f0-9]{64}$/) }).passthrough() }).passthrough().safeParse(value);
+  if (!checked.success || checked.data.migrations.head !== checked.data.migrations.expectedHead) throw new RehearsalFailure("release_identity", "not_ready");
+  return { sourceSha: "local", workerSha256: checked.data.worker.sha256 };
 }
 
 export async function liveRelease(fetchImpl: typeof fetch = fetch, target: RehearsalTarget = ALPHA_TARGET): Promise<boolean> {
@@ -47,7 +51,8 @@ export async function liveRelease(fetchImpl: typeof fetch = fetch, target: Rehea
 export async function liveReleaseIdentity(fetchImpl: typeof fetch = fetch, target: RehearsalTarget = ALPHA_TARGET): Promise<{ sourceSha: string; workerSha256: string } | null> {
   try {
     const response = await fetchImpl(`${target.origin}/v1/release-identity`, { redirect: "error", signal: AbortSignal.timeout(15_000) });
-    if (!response.ok) { await response.body?.cancel(); return null; }
+    // A Dev stack answers its identity with 503 (never "ready"; targetIdentity checks what it can show).
+    if (!response.ok && !(target.kind === "local" && response.status === 503)) { await response.body?.cancel(); return null; }
     return targetIdentity(target, await response.json());
   } catch { return null; }
 }

@@ -17,7 +17,7 @@ import { CONNECT_CLIENT_FEATURES, checkText, connectWorkspace, createProject, cr
 import { FIXTURE_TWO } from "./stage-provision.js";
 import { loadState, newState, saveState, stateTarget } from "./state.js";
 import { localStack } from "./local-stack.js";
-import { agentCredentialsFromEnv, checkGithubToken, databaseErrorCode, databaseRefusal, liveApi, liveBridge, liveRelease, targetIdentity, liveDatabase, OUTSIDE_PROBE_LIMIT, SET_APP_SYSTEM, tokenLines, tokenRefusal, type DatabaseClient } from "./live.js";
+import { agentCredentialsFromEnv, ALPHA_TARGET, checkGithubToken, databaseErrorCode, databaseRefusal, liveApi, liveBridge, liveRelease, targetIdentity, liveDatabase, OUTSIDE_PROBE_LIMIT, SET_APP_SYSTEM, tokenLines, tokenRefusal, type DatabaseClient } from "./live.js";
 import { platformOwners, probeDiagnostics, proActor, resolveProbe } from "./plan.js";
 
 const R1 = "Withso/zeros-dev-fixture";
@@ -295,10 +295,19 @@ describe("rehearsal stages against a fake Alpha", () => {
     const fetchImpl = (async (url: string) => {
       fetched.push(String(url));
       if (!String(url).startsWith(stack.target.origin)) throw new Error("left the stack");
-      return new Response(JSON.stringify({ channel: "development", ready: true, maintenance: false, sourceSha: "a".repeat(40),
-        cloud: { enabled: true, ready: true, state: "healthy" }, worker: { sha256: "b".repeat(64) } }), { status: 200 });
+      // A Dev stack's real answer: never ready (no deployed source sha), so 503, but current migrations and a pinned worker.
+      return new Response(JSON.stringify(devIdentity), { status: 503 });
     }) as typeof fetch;
+    const devIdentity: Record<string, unknown> = { version: 1, ready: false, sourceSha: null, channel: "development", maintenance: false,
+      migrations: { state: "current", head: "0271_x.sql", expectedHead: "0271_x.sql", manifestSha256: "c".repeat(64) },
+      cloud: { enabled: true, ready: false, state: "unready" }, worker: { sha256: "b".repeat(64), sourceSha: null, sourceSha256: null, qualification: null } };
     expect(await liveRelease(fetchImpl, stack.target)).toBe(true);
+    // Migrations behind, maintenance, cloud off or another channel: not ready.
+    for (const change of [{ migrations: { state: "pending", head: "0270_x.sql", expectedHead: "0271_x.sql" } }, { maintenance: true },
+      { cloud: { enabled: false } }, { channel: "alpha" }, { migrations: { state: "current", head: "0270_x.sql", expectedHead: "0271_x.sql" } }])
+      expect(() => targetIdentity(stack.target, { ...devIdentity, ...change })).toThrow();
+    // Alpha's check is unchanged: the same answer is not Alpha's.
+    expect(() => targetIdentity(ALPHA_TARGET, { ...devIdentity, channel: "alpha" })).toThrow();
     await liveApi(async () => "token", fetchImpl, stack.target).json("GET", "/v1/me");
     expect(fetched.every(url => url.startsWith("https://api.o.dev.example.test/"))).toBe(true);
     // Alpha's identity is refused on the local target, and the local one on Alpha's.

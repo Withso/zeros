@@ -23,7 +23,7 @@ import { FIXTURE_TWO } from "./stage-provision.js";
 import { loadState, newState, saveState, stateTarget } from "./state.js";
 import { launcherModules, localStack, type LocalStack } from "./local-stack.js";
 
-export const USAGE = "alpha:rehearse <provision|setup|projects|personal|retention|submodules|waiting|all> [--local] [--plan] [--cleanup] [--run <id>] " +
+export const USAGE = "alpha:rehearse <provision|setup|projects|personal|retention|submodules|waiting|all> [--local (this checkout's Dev stack; the Personal route needs no --organization)] [--plan] [--cleanup] [--run <id>] " +
   "[--owner personal|organization (default personal)] [--account owner|1..10 (default 2)] [--other 1..10 (default the next configured)] " +
   "[--waiting-account 1..10 (default 3)] " +
   "[--pro-actor <first 8 hex of the platform owner>] [--switches projects,personal,retention] --repository owner/name (R1, required unless ZEROS_REHEARSAL_REPOSITORY is set) " +
@@ -115,7 +115,8 @@ async function main(argv: string[]): Promise<number> {
   if (args.local) {
     try { stack = localStack(await launcherModules(root, process.env)); }
     catch (error) { log(`failed ${error instanceof RehearsalFailure ? `${error.step} ${error.code}` : "local_stack unreadable"}`); return 1; }
-    log(`target: local Dev stack ${stack.target.origin}; switches it runs with: ${Object.keys(stack.started).sort().join(", ") || "none"}`);
+    // No origin here: a URL never passes safeLine, and the host names this checkout's owner.
+    log(`target local (this checkout's Dev stack); switches it runs with: ${Object.keys(stack.started).sort().join(", ") || "none"}`);
     if (args.switches.size) log("--switches is ignored with --local: the running stack's own switches are used");
     args.switches = stack.switches;
   }
@@ -123,7 +124,8 @@ async function main(argv: string[]): Promise<number> {
   // A fresh Dev stack has no probe organization: the Personal route does not need one.
   const NO_PROBE = { id: "00000000-0000-0000-0000-000000000000", workosOrganizationId: null };
   const findProbe = async (reads: Database) => probeSelector ? resolveProbe(reads, probeSelector) : NO_PROBE;
-  const probeSelector = args.organization ?? env.ZEROS_ALPHA_PROBE_ORGANIZATION;
+  // The env file's probe organization is Alpha's: with --local only --organization names one.
+  const probeSelector = args.local ? args.organization : args.organization ?? env.ZEROS_ALPHA_PROBE_ORGANIZATION;
   const one = args.repository ?? (env.ZEROS_REHEARSAL_REPOSITORY ? assertRepository(env.ZEROS_REHEARSAL_REPOSITORY) : undefined);
   const two = args.repositoryTwo ?? (env.ZEROS_REHEARSAL_REPOSITORY_2 ? assertRepository(env.ZEROS_REHEARSAL_REPOSITORY_2) : FIXTURE_TWO);
   const githubToken = env.ZEROS_REHEARSAL_GITHUB_TOKEN?.trim();
