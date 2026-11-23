@@ -11,7 +11,7 @@ import {
   acquireWorkspaceLock, ensureWorkspace, privateDirectory, readPrivateJson,
   saveWorkspace, writePrivateFile,
 } from "../dev-environment/state.mjs";
-import { publicDevProfile } from "../dev-environment/profile.mjs";
+import { cloudV2Switches, publicDevProfile } from "../dev-environment/profile.mjs";
 
 const roots: string[] = [];
 afterEach(() => { for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true }); });
@@ -169,7 +169,7 @@ function launcher({ startupFailure = false, cleanupFailure = false, cancelAtRead
     migratePostgres: async () => {}, ensureTunnel: async () => ({ tokenFile: "/unused" }), configureTunnel: async () => {},
     ensureWorkosWebhook: () => workos.ensureWorkosWebhook(f.workspace, f.profile, f.request),
     enableWorkosWebhook: enable, pauseWorkosWebhook: pause,
-    publicDevProfile, backendEnvironment: () => ({ CLOUD_V2_RUNTIME_SHA256: "a".repeat(64) }), webEnvironment: () => ({}),
+    publicDevProfile, cloudV2Switches, backendEnvironment: () => ({ CLOUD_V2_RUNTIME_SHA256: "a".repeat(64) }), webEnvironment: () => ({}),
     waitForHttp: async () => {}, waitForDevSignIn: async () => {
       if (startupFailure) throw new Error("public sign-in unavailable");
       if (cancelAtReadiness) controller.abort(new Error("Development shutdown requested"));

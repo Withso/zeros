@@ -16,6 +16,12 @@ const ALLOWED: Record<string, string> = {
   "src/db.ts#withSystemStatement": "The helper itself: sets the system RLS context on the acquired client.",
   "src/db.ts#withSystemTx": "The helper itself: sets the system RLS context on the acquired client.",
   "src/app.ts#createApp": "Health and readiness probes run SELECT 1 only.",
+  "src/cloud/rehearsal/live.ts#liveDatabase":
+    "The rehearsal (operator tooling, never the server): its own read client sets app.system as its own statement in each read transaction (SET_APP_SYSTEM).",
+  "src/cloud/rehearsal/live.ts#localDatabase":
+    "The rehearsal against a local Dev stack: the same client, and each read or write transaction sets app.system first (SET_APP_SYSTEM).",
+  "src/cloud/rehearsal/live.ts#asTableOwner":
+    "The rehearsal's Pro operator: reads the table's owner from pg_class (no RLS), then hands the pool to manageAccountPro, which sets its own context.",
   "src/postgres-notifications.ts#acquire": "Dedicated LISTEN session; it issues only LISTEN/UNLISTEN.",
   "src/workos-provider-locks.ts#connectBeforeDeadline": "Session holder for WorkOS advisory locks; it never reads tables.",
   "src/cloud/computer.ts#withBuildLock": "Session holder for Computer build/erasure advisory locks only; table access uses separate withSystemTx connections.",
