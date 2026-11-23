@@ -1,3 +1,4 @@
+/* global document, innerWidth, innerHeight */
 export async function designFrameElementBox(iframe, element) {
   // Playwright's cross-frame boundingBox applies iframe CSS zoom twice. Map
   // the authored viewport into the actual outer rectangle, including the
@@ -171,4 +172,33 @@ export async function clickFramePlay(play) {
   const box = await frame.boundingBox();
   await play.page().mouse.move(box.x + box.width - 12, box.y + 12);
   await play.click();
+}
+
+// Press an inspector "Scrub …" label and prove its gesture began. hover() waits
+// until the label is visible, stable and the element at its centre, so the
+// press lands on it; a box read once and pressed later can be stale on a slow
+// runner. Every scrub gesture sets the body's ew-resize cursor as it begins, so
+// a press that did not start one fails here, naming what it landed on.
+export async function pressDesignScrub(page, scrub) {
+  await scrub.hover();
+  const box = await scrub.boundingBox();
+  const start = { x: box.x + box.width / 2, y: box.y + box.height / 2 };
+  await page.mouse.down();
+  try {
+    await page.waitForFunction(() => document.body.style.cursor === "ew-resize", null, { timeout: 2_000 });
+  } catch {
+    const facts = await page.evaluate(([x, y]) => {
+      const element = document.elementFromPoint(x, y);
+      const label = element?.closest("button.zd-field-scrub");
+      const name = (node) => node
+        ? `${node.tagName.toLowerCase()}${node.getAttribute("aria-label") ? `[aria-label="${node.getAttribute("aria-label")}"]` : ""}`
+        : "nothing";
+      return { atPress: name(element), onScrub: Boolean(label), label: name(label), disabled: label?.disabled ?? null };
+    }, [start.x, start.y]);
+    const scrubName = await scrub.getAttribute("aria-label");
+    throw new Error(facts.onScrub && facts.label.includes(`"${scrubName}"`)
+      ? `${scrubName} was pressed but its gesture did not begin: ${JSON.stringify({ ...facts, box })}`
+      : `the press landed on ${facts.atPress}, not ${scrubName}: ${JSON.stringify({ ...facts, box })}`);
+  }
+  return start;
 }

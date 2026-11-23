@@ -1,5 +1,5 @@
 import { expect } from "@playwright/test";
-import { addDesignSection, openLayersDrawer } from "./ui-smoke-design-helpers.mjs";
+import { addDesignSection, openLayersDrawer, pressDesignScrub } from "./ui-smoke-design-helpers.mjs";
 
 async function openHeading(page) {
   await page.goto(
@@ -47,15 +47,12 @@ export async function runDesignTransformCommitSmoke({ page, check }) {
   await expect
     .poll(() => savedStyle(page, "transform"))
     .toBe("translate(1px, 0px)");
-  const scrub = await page
-    .getByRole("button", { name: "Scrub Translate X", exact: true })
-    .boundingBox();
+  const scrubLabel = page.getByRole("button", { name: "Scrub Translate X", exact: true });
   await x.focus();
-  await page.mouse.move(scrub.x + scrub.width / 2, scrub.y + scrub.height / 2);
-  await page.mouse.down();
+  const start = await pressDesignScrub(page, scrubLabel);
   await page.mouse.move(
-    scrub.x + scrub.width / 2 + 40,
-    scrub.y + scrub.height / 2,
+    start.x + 40,
+    start.y,
     { steps: 5 },
   );
   await page.mouse.up();
@@ -98,10 +95,8 @@ export async function runDesignScrubLeadingPreviewSmoke({ page, check }) {
       return previewGeometry(...args);
     };
   });
-  const scrub = await page.getByRole("button", { name: "Scrub Size", exact: true }).boundingBox();
-  const start = { x: scrub.x + scrub.width / 2, y: scrub.y + scrub.height / 2 };
-  await page.mouse.move(start.x, start.y);
-  await page.mouse.down();
+  const sizeLabel = page.getByRole("button", { name: "Scrub Size", exact: true });
+  const start = await pressDesignScrub(page, sizeLabel);
   await page.mouse.move(start.x + 12, start.y);
   await expect.poll(() => page.evaluate(() => window.__scrubOrdering.previews.length)).toBeGreaterThan(0);
   const first = await page.evaluate(() => window.__scrubOrdering.previews[0]);
