@@ -269,3 +269,11 @@ it("clones a repository that is not on disk, then prepares its branch; leaves a 
   await expect(cloneMissingCheckout({ ...missing, checkoutPath: join(f.root, "y") }, "withso/y", {}, join(f.root, "absent")))
     .rejects.toThrow("This repository could not be cloned. Check that its GitHub connection can read it.");
 });
+
+it("names a missing checkout folder as missing, never as an invalid branch name", async () => {
+  const { root, workspace } = await fixture();
+  // A fork whose archive lacked its checkout: nothing at the path.
+  await expect(prepareCheckout({ ...workspace, checkoutPath: join(root, "absent") })).rejects.toMatchObject({ code: "CHECKOUT_MISSING" });
+  await writeFile(join(root, "a-file"), "not a folder\n");
+  await expect(prepareCheckout({ ...workspace, checkoutPath: join(root, "a-file") })).rejects.toMatchObject({ code: "CHECKOUT_MISSING" });
+});

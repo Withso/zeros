@@ -16,6 +16,7 @@ import type pg from "pg";
 import { withSystemTx, type Tx } from "../db.js";
 import { HttpError } from "../authz.js";
 import { CLOUD_V2_LEASE_SECONDS, type CloudV2Compute } from "./boat.js";
+import { diskSettled, stopKeepingWrites, type BoatStop } from "./boat-disk.js";
 import { BoatCreateRejectedError, BoatForkRefusedError, BoatSnapshotExpiredError } from "./boat-client.js";
 import { CloudProviderError } from "./provider-error.js";
 import { asZeros, checkoutScript, shellQuote } from "./computer.js";
@@ -368,7 +369,7 @@ export class CloudV2ReadyCopies {
 
   /** The atomic pointer switch: the previous ready generation retires in the
    * same transaction this one becomes ready. */
-  async promote(id: string, result: { repositories: ReadyCopyRepositoryResult[]; stoppedAt: Date }): Promise<boolean> {
+  async promote(id: string, result: { repositories: ReadyCopyRepositoryResult[]; stoppedAt: Date; archive?: { attemptAt: string | null; status: string | null } }): Promise<boolean> {
     return this.tx(async tx => {
       const target = (await tx.query<{ project_id: string }>("SELECT project_id FROM cloud_v2_ready_copies WHERE id=$1", [id])).rows[0];
       if (!target) return false;
@@ -379,8 +380,9 @@ export class CloudV2ReadyCopies {
       if (!row || row.state !== "building" || !row.machine_id) return false;
       await tx.query(`UPDATE cloud_v2_ready_copies SET state='retired', updated_at=clock_timestamp() WHERE project_id=$1 AND state='ready' AND id<>$2`,
         [row.project_id, id]);
-      await tx.query(`UPDATE cloud_v2_ready_copies SET state='ready', stale=false, result=$2, stopped_at=$3,
-        finished_at=clock_timestamp(), updated_at=clock_timestamp() WHERE id=$1`, [id, JSON.stringify(result.repositories), result.stoppedAt]);
+      await tx.query(`UPDATE cloud_v2_ready_copies SET state='ready', stale=false, result=$2, stopped_at=$3, archive_snapshot=$4,
+        finished_at=clock_timestamp(), updated_at=clock_timestamp() WHERE id=$1`,
+        [id, JSON.stringify(result.repositories), result.stoppedAt, result.archive ? JSON.stringify(result.archive) : null]);
       await this.pruneDetail(tx, id);
       return true;
     });
@@ -440,6 +442,11 @@ export class CloudV2ReadyCopies {
          AND created_at > $2::timestamptz - make_interval(secs => $3::double precision / 1000)) AS recent`,
       [projectId, now, READY_COPY_MANUAL_INTERVAL_MS]));
     return !rows[0]?.recent;
+  }
+
+  /** A fork of this generation lacked a checkout, or held another commit: never forked again, and rebuilt. */
+  async distrust(id: string): Promise<void> {
+    await this.tx(tx => tx.query("UPDATE cloud_v2_ready_copies SET stale=true, updated_at=clock_timestamp() WHERE id=$1 AND state='ready'", [id]));
   }
 
   /** A new Cloud Computer base: every ready copy is rebuilt from it. */
@@ -671,6 +678,24 @@ export function readyCopySetupCommand(dir: string, setup: string, withSecrets: b
 /** The ignored-file baseline reads at most the files a backup would (checkpoint.ts bounds them); nobody waits on a build. */
 export const READY_COPY_BASELINE_SECONDS = 60;
 export const READY_COPY_SCRUB_COMMAND = "rm -rf /tmp/zeros-command-input-* /tmp/zeros-job-* 2>/dev/null; sync";
+
+/** Reads each checkout's HEAD (in order), or "missing", after a sync. Read-only. */
+export function readyCopyCheckoutsCommand(dirs: readonly string[]): string[] {
+  return ["sync", ...dirs.map((dir, index) => {
+    const at = `zeros-checkout-at ${shellQuote(dir)}`;
+    return `if [ -d ${shellQuote(`${dir}/.git`)} ] && h=$(git -C ${shellQuote(dir)} rev-parse --verify -q HEAD); then echo "zeros-checkout ${index} $h"; else echo "zeros-checkout ${index} missing"; fi # ${at}`;
+  }), "echo zeros-checkouts-read"];
+}
+
+/** Whether a checkouts read shows every one present at its recorded commit (any commit when none was recorded). */
+export function checkoutsMatch(stdout: string, result: readonly Pick<ReadyCopyRepositoryResult, "commit">[]): boolean {
+  const lines = stdout.split("\n");
+  if (!lines.includes("zeros-checkouts-read")) return false;
+  return result.every((entry, index) => {
+    const head = lines.find(line => line.startsWith(`zeros-checkout ${index} `))?.slice(`zeros-checkout ${index} `.length).trim();
+    return !!head && head !== "missing" && /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(head) && (!entry.commit || head === entry.commit);
+  });
+}
 /** A setup can write a secret anywhere it may write. Before stop the disk is
  * searched for every value, read from standard input; only a path is printed. */
 /**
@@ -753,6 +778,8 @@ export function readyCopySecretLocation(printed: string, values: readonly string
 export type ReadyCopyBuilderDeps = {
   copies: CloudV2ReadyCopies;
   compute: CloudV2Compute;
+  /** Before a copy is promoted, read its checkouts back through one throwaway fork of its archive (off by default). */
+  verifyArchiveByFork?: boolean;
   channel: string;
   localOwner?: string | undefined;
   runtime: CloudV2Runtime;
@@ -1045,10 +1072,41 @@ export class CloudV2ReadyCopyBuilder {
       // Fails closed: a copy that was not searched in full never becomes ready.
       if (searched.exitCode !== 0 || searched.timedOut || !found.complete) throw failure("ready_copy_secret_search_incomplete");
     }
+    // Never promoted on trust (boat-disk.ts): the machine hydrated with no snapshot attempt in progress, every checkout
+    // read back at its recorded commit, then a stop whose own attempt completed with none reported failed during it.
     at.step = "stop";
-    await compute.stop(machineId);
-    const stoppedAt = await this.archived(machineId);
-    if (!await copies.promote(job.id, { repositories: result, stoppedAt })) throw failure("ready_copy_superseded");
+    const wait = { sleep: (ms: number) => this.sleep(ms) };
+    if (await diskSettled(compute, machineId, wait) !== "settled") throw failure("ready_copy_archive_incomplete");
+    if (!await this.checkoutsHeld(machineId, result)) throw failure("ready_copy_checkout_missing");
+    let stopped: BoatStop;
+    try { stopped = await stopKeepingWrites(compute, machineId, { ...wait, archiveReads: ARCHIVE_READS, archiveIntervalMs: ARCHIVE_WAIT_MS }); }
+    catch (error) { if ((error as { code?: unknown } | null)?.code === "provider_stop_incomplete") throw failure("ready_copy_stop_incomplete"); throw error; }
+    if (stopped.holds !== true) {
+      this.deps.logger?.warn(`[cloud-v2] ready copy archive incomplete (${stopped.failed ? "failed_attempt" : stopped.holds === null ? "unknown" : "no_completed_attempt"})`);
+      throw failure("ready_copy_archive_incomplete");
+    }
+    // Switchable: one throwaway fork reads the checkouts back from the archive itself.
+    if (this.deps.verifyArchiveByFork && !await this.archiveHoldsByFork(machineId, job, result)) throw failure("ready_copy_archive_incomplete");
+    const archive = { attemptAt: stopped.attemptAt?.toISOString() ?? null, status: stopped.status };
+    if (!await copies.promote(job.id, { repositories: result, stoppedAt: stopped.stoppedAt ?? this.now(), archive })) throw failure("ready_copy_superseded");
+  }
+
+  /** Whether every checkout of `result` is on the machine at its recorded commit (any commit when none was recorded). */
+  private async checkoutsHeld(machineId: string, result: readonly ReadyCopyRepositoryResult[]): Promise<boolean> {
+    if (result.some(entry => !entry.checkoutFolder)) return false;
+    const read = await this.deps.compute.exec(machineId, asZeros(readyCopyCheckoutsCommand(result.map(entry => homePath(entry.checkoutFolder!)))), 120);
+    return read.exitCode === 0 && !read.timedOut && checkoutsMatch(read.stdout, result);
+  }
+
+  /** The archive read back through a fork of it, settled, then deleted. */
+  private async archiveHoldsByFork(machineId: string, job: CloudV2ReadyCopy, result: readonly ReadyCopyRepositoryResult[]): Promise<boolean> {
+    const { compute } = this.deps;
+    const { sandboxId } = await compute.fork(machineId, { key: `${job.idempotencyKey}:verify`, ttlSeconds: 600 });
+    try {
+      await this.ready(sandboxId);
+      await diskSettled(compute, sandboxId, { sleep: ms => this.sleep(ms) });
+      return await this.checkoutsHeld(sandboxId, result);
+    } finally { await compute.delete(sandboxId).catch(() => undefined); }
   }
 
   /** One repository's submodules on the build machine: the plan composed with the build's own access, then each
@@ -1120,16 +1178,6 @@ export class CloudV2ReadyCopyBuilder {
     }
   }
 
-  /** Boat's stop time, which starts its 14-day clock; ours if it gives none. */
-  private async archived(machineId: string): Promise<Date> {
-    for (let read = 1; read <= ARCHIVE_READS; read++) {
-      const inspected = await this.deps.compute.inspect(machineId);
-      if (inspected.state === "archived") return inspected.stoppedAt ?? this.now();
-      if (inspected.state !== "archiving") break;
-      await this.sleep(ARCHIVE_WAIT_MS);
-    }
-    throw failure("ready_copy_stop_incomplete");
-  }
 }
 
 // ── Workspace forks ───────────────────────────────────────
@@ -1147,6 +1195,7 @@ export class CloudV2ReadyCopyForks<W extends ReadyCopyWorkspace = ReadyCopyWorks
     /** A repository token for the creator, to fetch the base branch: the first repository's, or the one named. */
     githubToken?(workspace: W, repository?: string): Promise<{ token: string }>;
     now?: () => number;
+    sleep?: (ms: number) => Promise<void>;
     logger?: Pick<Console, "warn">;
   }) {}
 
@@ -1213,6 +1262,24 @@ export class CloudV2ReadyCopyForks<W extends ReadyCopyWorkspace = ReadyCopyWorks
    * before the worker starts. A failure is not the workspace's, and one
    * repository's never stops another's: that checkout opens on the copy's
    * commit and the worker's own refresh retries the fetch in the background. */
+  /** Right after the fork, with no wait (a fork serves its archive's files from its first second): whether it holds every
+   * checkout its copy recorded, at the recorded commit. One command, and no read of the machine. When not, that generation is never forked again and is rebuilt, and the caller clones directly. True for a
+   * workspace that did not fork a copy. */
+  async verify(workspace: W, sandboxId: string): Promise<boolean> {
+    const fork = await this.deps.copies.forkOf(workspace.id);
+    if (!fork) return true;
+    const copy = await this.deps.copies.get(fork.copyId);
+    // A copy recorded before its folders were (or with none) cannot be read back: taken as before.
+    if (!copy?.result?.length || copy.result.some(entry => !entry.checkoutFolder)) return true;
+    // A failed read distrusts a good copy too: the cost is a rebuild and one direct clone, never anyone's data.
+    const read = await this.deps.compute.exec(sandboxId, asZeros(readyCopyCheckoutsCommand(copy.result.map(entry => homePath(entry.checkoutFolder!)))), 120)
+      .catch(() => null);
+    if (read && read.exitCode === 0 && !read.timedOut && checkoutsMatch(read.stdout, copy.result)) return true;
+    await this.deps.copies.distrust(copy.id);
+    this.deps.logger?.warn(`[cloud-v2] ready copy fork lacks a checkout; cloning directly, and the copy is rebuilt copy=${copy.id.slice(0, 8)}`);
+    return false;
+  }
+
   async fetchBase(workspace: W, sandboxId: string): Promise<boolean> {
     if (!this.deps.githubToken) return false;
     const repositories = await this.deps.copies.workspaceBases(workspace.id);

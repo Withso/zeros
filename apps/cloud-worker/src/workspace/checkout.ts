@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { lstat, mkdir, readdir } from "node:fs/promises";
+import { lstat, mkdir, readdir, stat } from "node:fs/promises";
 import { dirname } from "node:path";
 import { workerChildEnvironment, mergeGitEnvironment } from "../drivers/shared/agent-environment";
 import { WorkspaceError, type WorkerConfig } from "./scope";
@@ -153,6 +153,9 @@ export async function cloneMissingCheckout(workspace: WorkerConfig["workspace"],
 
 export async function prepareCheckout(workspace: WorkerConfig["workspace"], gitEnvironment: NodeJS.ProcessEnv = {}, timing?: StartupTimingObserver): Promise<CheckoutResult> {
   const run = checkoutGit(workspace.checkoutPath, gitEnvironment), { branch, baseBranch, baseCommit } = workspace;
+  // Every Git command below runs in the checkout; without it each fails, which read as an invalid branch name.
+  if (!await stat(workspace.checkoutPath).then(found => found.isDirectory(), () => false))
+    throw new WorkspaceError("CHECKOUT_MISSING", "The workspace's repository checkout is missing.");
   for (const name of [branch, baseBranch]) {
     if (name.startsWith("-")) throw new WorkspaceError("VALIDATION_FAILED", "Invalid workspace branch.");
     try { await run(["check-ref-format", `refs/heads/${name}`]); }
