@@ -232,6 +232,10 @@ export type Config = {
   cloudV2?: CloudV2Config | null;
 };
 
+/** CLOUD_V2_SHARED_BASE_SNAPSHOT: off, a pinned name, or auto (the builder's own base; the default on hosted channels,
+ * and what a Local control plane needs to build one at all). */
+export type CloudV2SharedBaseOverride = { kind: "off" } | { kind: "auto" } | { kind: "name"; name: string };
+
 export type CloudV2Config = {
   /** Applies only to new organization cloud workspaces on this channel. */
   actingUserDefault?: boolean;
@@ -279,10 +283,13 @@ export type CloudV2Config = {
    * Unset uses 4 and 30 (computer.ts CLOUD_V2_AUTOMATIC_BASE_BUDGET). */
   automaticBasePerHour?: number;
   automaticBasePerDay?: number;
-  /** CLOUD_V2_SHARED_BASE_SNAPSHOT: the Boat named snapshot organizations
-   * without an install script start from when ready copies are on. Unset,
+  /** CLOUD_V2_SHARED_BASE_SNAPSHOT when it names a snapshot: the Boat named snapshot organizations
+   * without an install script start from when ready copies are on. Unset (or off),
    * each organization builds its own base. */
   sharedBaseSnapshot?: string;
+  /** CLOUD_V2_SHARED_BASE_SNAPSHOT read as an override of the shared base the builder makes
+   * (cloud/shared-base.ts): a name pins that snapshot, off turns the shared base off; null when unset. */
+  sharedBaseOverride?: CloudV2SharedBaseOverride | null;
   /** Execution token verdicts served from memory (cloud/execution/authorization-cache.ts). Default off. */
   executionAuthCache?: "off" | "shadow" | "on";
   /** Finish the stop when Boat archives a running VM on its own (cloud/provider-stop.ts). Default off. */
@@ -338,9 +345,12 @@ function loadCloudV2Config(env: NodeJS.ProcessEnv, channel: string): CloudV2Conf
   const backupForks = env.CLOUD_V2_RETENTION_BACKUP_FORKS_PER_HOUR?.trim();
   if (backupForks && (!/^\d{1,3}$/.test(backupForks) || Number(backupForks) < 1 || Number(backupForks) > 200))
     throw new Error("Invalid environment: CLOUD_V2_RETENTION_BACKUP_FORKS_PER_HOUR must be an integer from 1 to 200");
-  const sharedBaseSnapshot = env.CLOUD_V2_SHARED_BASE_SNAPSHOT?.trim() || undefined;
-  if (sharedBaseSnapshot && !/^[a-z0-9][a-z0-9-]{0,61}[a-z0-9]$/.test(sharedBaseSnapshot))
-    throw new Error("Invalid environment: CLOUD_V2_SHARED_BASE_SNAPSHOT must be a Boat snapshot name");
+  const sharedBaseSetting = env.CLOUD_V2_SHARED_BASE_SNAPSHOT?.trim() || undefined;
+  if (sharedBaseSetting && sharedBaseSetting !== "off" && sharedBaseSetting !== "auto" && !/^[a-z0-9][a-z0-9-]{0,61}[a-z0-9]$/.test(sharedBaseSetting))
+    throw new Error("Invalid environment: CLOUD_V2_SHARED_BASE_SNAPSHOT must be a Boat snapshot name, off or auto");
+  const sharedBaseSnapshot = sharedBaseSetting === "off" || sharedBaseSetting === "auto" ? undefined : sharedBaseSetting;
+  const sharedBaseOverride: CloudV2SharedBaseOverride | null = sharedBaseSetting === "off" ? { kind: "off" }
+    : sharedBaseSetting === "auto" ? { kind: "auto" } : sharedBaseSetting ? { kind: "name", name: sharedBaseSetting } : null;
   const executionAuthCache = env.CLOUD_V2_EXECUTION_AUTH_CACHE?.trim().toLowerCase() || "off";
   if (!["off", "shadow", "on"].includes(executionAuthCache)) throw new Error("Invalid environment: CLOUD_V2_EXECUTION_AUTH_CACHE must be off, shadow or on");
   const providerStopRecovery = env.CLOUD_V2_PROVIDER_STOP_RECOVERY?.trim().toLowerCase() || "off";
@@ -390,6 +400,7 @@ function loadCloudV2Config(env: NodeJS.ProcessEnv, channel: string): CloudV2Conf
     ...(maintenancePerHour ? { maintenancePerHour } : {}), ...(maintenancePerDay ? { maintenancePerDay } : {}),
     ...(automaticBasePerHour ? { automaticBasePerHour } : {}), ...(automaticBasePerDay ? { automaticBasePerDay } : {}),
     ...(sharedBaseSnapshot ? { sharedBaseSnapshot } : {}),
+    sharedBaseOverride,
     asyncCreate: asyncCreate !== "false",
     executionAuthCache: executionAuthCache as "off" | "shadow" | "on",
     providerStopRecovery: providerStopRecovery as "off" | "observe" | "on",

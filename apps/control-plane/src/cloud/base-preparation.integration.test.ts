@@ -9,6 +9,7 @@ import { configureCloudPersonal } from "../db-context.js";
 import { grantTestPro } from "../test-pro.js";
 import { FakeBoat } from "./__fixtures__/boat-fake.js";
 import { CloudV2ComputerBuilder, CloudV2Computers, type CloudV2BaseState, type CloudV2ComputerOptions } from "./computer.js";
+import { CloudV2SharedBaseResolver, CloudV2SharedBases, sharedBaseBuilds, type SharedBaseState } from "./shared-base.js";
 import type { CloudV2ComputerSourceResolver } from "./computer-provenance.js";
 import { CloudV2Lifecycle } from "./lifecycle.js";
 import { CloudV2ReadyCopies, CloudV2ReadyCopyBuilder } from "./ready-copies.js";
@@ -221,6 +222,116 @@ d("ready copies: a safe switch-on", () => {
     expect(await outcomeOf(id)).toBe("waits");
     return { computers, id, buildId: (await workspaceRow(id)).computer_build_id };
   }
+
+  describe("a workspace waiting for the shared base that is still being built", () => {
+    // The builder's shared base for the pinned runtime, as its resolver reports it.
+    const resolved = (initial: SharedBaseState) => {
+      const holder = { state: initial };
+      const computers = new CloudV2Computers(pool, pool, resolveRepository, resolveRepository, { readyCopies: true, runtimeSha256: runtime.sha256,
+        sharedBase: { state: async () => holder.state }, sharedBaseAvailable: async (name?: string) => !!name && boat.snapshots.has(name) });
+      return { holder, computers };
+    };
+
+    it("waits on its organization's base row, held unclaimed; when the shared base is ready that row goes live on it with no machine", async () => {
+      const { holder, computers } = resolved({ state: "building" });
+      const projectId = await project();
+      const created = await create(computers, member, { projectId });
+      const id = (created.response as unknown as { id: string }).id;
+      // The ordinary waiting path: the workspace waits, bound to the organization's own queued base row.
+      expect(await outcomeOf(id)).toBe("waits");
+      const row = (await workspaceRow(id)).computer_build_id;
+      expect((await pool.query("SELECT state, automatic, base_shared FROM cloud_v2_computer_builds WHERE id=$1", [row])).rows[0])
+        .toEqual({ state: "queued", automatic: true, base_shared: false });
+      // While the shared base is building the row is held: no builder machine, no claim.
+      await builder(computers).tick();
+      expect((await pool.query("SELECT state FROM cloud_v2_computer_builds WHERE id=$1", [row])).rows[0].state).toBe("queued");
+      expect(creates()).toEqual([]);
+      await lifecycle().tick();
+      expect(await workspaceRow(id)).toMatchObject({ state: "creating", computer_build_id: row });
+      // Ready (and at Boat): the same row becomes the shared base, with no machine; the workspace boots from it.
+      holder.state = { state: "ready", name: SHARED, source: "database" };
+      boat.snapshots.set(SHARED, new Map());
+      await builder(computers).tick();
+      expect((await pool.query("SELECT state, base_shared, snapshot_id FROM cloud_v2_computer_builds WHERE id=$1", [row])).rows[0])
+        .toMatchObject({ state: "succeeded", base_shared: true, snapshot_id: `${SHARED}@${row}` });
+      expect(creates()).toEqual([]);
+      await due(id);
+      await lifecycle().tick();
+      expect(creates().at(-1)).toMatchObject({ from: SHARED });
+      expect(await workspaceRow(id)).toMatchObject({ computer_build_id: row, waiting_for_base_at: null });
+    });
+
+    it("builds the organization's own base on that same row when the shared build has failed, or after 30 minutes held", async () => {
+      for (const after of ["failed", "held"] as const) {
+        org = await organization();
+        const { holder, computers } = resolved({ state: "building" });
+        const created = await create(computers, member, { projectId: await project() });
+        const id = (created.response as unknown as { id: string }).id;
+        const row = (await workspaceRow(id)).computer_build_id;
+        if (after === "failed") holder.state = { state: "failed", nextAttemptAt: null };
+        else await pool.query("UPDATE cloud_v2_computer_builds SET created_at=clock_timestamp()-interval '31 minutes' WHERE id=$1", [row]);
+        const before = creates().length;
+        await builder(computers).tick();
+        // Its own builder machine, on the row the workspace is bound to: never re-bound.
+        expect(creates().length).toBe(before + 1);
+        expect((await pool.query("SELECT state, base_shared FROM cloud_v2_computer_builds WHERE id=$1", [row])).rows[0])
+          .toEqual({ state: "succeeded", base_shared: false });
+        expect((await workspaceRow(id)).computer_build_id).toBe(row);
+      }
+    });
+
+    it("goes live at once on the newest ready shared base when it is an older runtime's, which the re-point moves on later", async () => {
+      const older = "zeros-alpha-base-0123456789ab";
+      boat.snapshots.set(older, new Map());
+      const { computers } = resolved({ state: "ready", name: older, source: "database", runtimeSha256: "0".repeat(64) });
+      expect(await computers.ensureBase(org)).toMatchObject({ state: "ready" });
+      const live = (await pool.query<{ snapshot_name: string }>("SELECT snapshot_name FROM cloud_v2_computers WHERE org_id=$1", [org])).rows[0]!;
+      expect(live.snapshot_name.startsWith(`${older}@`)).toBe(true);
+      expect(creates()).toEqual([]);
+    });
+
+    it("on a Local control plane not asked to build one: no shared base is building, so the organization's own base is claimed at once", async () => {
+      const owner = "a".repeat(24), local = { channel: "development", localOwner: owner };
+      const withResolver = (override: { kind: "auto" } | null) => new CloudV2Computers(pool, pool, resolveRepository, resolveRepository, {
+        readyCopies: true, runtimeSha256: runtime.sha256,
+        sharedBase: new CloudV2SharedBaseResolver(new CloudV2SharedBases(pool), { ...local, runtimeSha256: runtime.sha256, override }),
+        sharedBaseAvailable: async (name?: string) => !!name && boat.snapshots.has(name) });
+      expect(sharedBaseBuilds(local, null)).toBe(false);
+      expect(sharedBaseBuilds(local, { kind: "auto" })).toBe(true);
+      expect(sharedBaseBuilds({ channel: "development" }, null)).toBe(true);
+      // No setting: off, never "building": ensureBase queues the organization's own base and the builder claims it now.
+      const computers = withResolver(null);
+      expect(await computers.sharedBaseNow()).toEqual({ name: null, building: false });
+      const created = await create(computers, member, { projectId: await project() });
+      const id = (created.response as unknown as { id: string }).id;
+      const row = (await workspaceRow(id)).computer_build_id;
+      await builder(computers).tick();
+      expect((await pool.query("SELECT state, base_shared FROM cloud_v2_computer_builds WHERE id=$1", [row])).rows[0]).toEqual({ state: "succeeded", base_shared: false });
+      // With a ready row the CLI made, that is its shared base.
+      org = await organization();
+      const name = `zeros-local-${owner}-base-${runtime.sha256.slice(0, 12)}`;
+      await pool.query(`INSERT INTO cloud_v2_shared_bases (name, channel, runtime_sha256, state, ready_at) VALUES ($1, 'development', $2, 'ready', clock_timestamp())`,
+        [name, runtime.sha256]);
+      boat.snapshots.set(name, new Map());
+      expect(await withResolver(null).ensureBase(org)).toMatchObject({ state: "ready" });
+      expect(((await pool.query<{ snapshot_name: string }>("SELECT snapshot_name FROM cloud_v2_computers WHERE org_id=$1", [org])).rows[0]!).snapshot_name.startsWith(`${name}@`)).toBe(true);
+      // Asked with auto (and no ready row for another scope): as Alpha, a base being built is waited for.
+      await pool.query("DELETE FROM cloud_v2_shared_bases");
+      expect(await withResolver({ kind: "auto" }).sharedBaseNow()).toEqual({ name: null, building: true });
+    });
+
+    it("never queues for an organization without an install script from the sweep while the shared base is building", async () => {
+      const { holder, computers } = resolved({ state: "building" });
+      await project();
+      await builder(computers).tick();
+      expect((await pool.query("SELECT count(*)::int AS n FROM cloud_v2_computer_builds WHERE org_id=$1", [org])).rows[0].n).toBe(0);
+      // Once the shared build has failed, the sweep gives it its own base.
+      holder.state = { state: "failed", nextAttemptAt: null };
+      clock += 61_000;
+      await builder(computers).tick();
+      expect((await pool.query("SELECT count(*)::int AS n FROM cloud_v2_computer_builds WHERE org_id=$1", [org])).rows[0].n).toBe(1);
+    });
+  });
 
   describe("a workspace waiting for its base", () => {
     it("waits while the base is prepared, then boots from it, its boot deadline counted from when the base went live", async () => {
@@ -548,6 +659,62 @@ d("ready copies: a safe switch-on", () => {
       expect((await legacy()).legacy_build_id).toBeNull();
       await builder(on).tick();
       expect(await snapshotOf(pre.id)).toBeNull();
+      // Turned off after that: the organization has only its base, which installs no repository. An old-style create is
+      // refused until someone builds the Cloud Computer with its repositories again: why the legacy build is kept 30 days.
+      await expect(offCreate()).rejects.toMatchObject({ code: "repository_not_installed" });
+    });
+
+    it("after its 30 days, a stopped workspace on it no longer keeps it; it then opens from the live base, with or without a backup", async () => {
+      const pre = await preSwitchBuild();
+      const on = computersWith({ shared: true });
+      boat.snapshots.set(SHARED, new Map());
+      await on.ensureBase(org);
+      const live = (await computersWith({ shared: true }).overview(org)).activeBuildId!;
+      // Two workspaces created from the legacy build with the setting off, both stopped with their machines.
+      const ids: string[] = [];
+      for (const _ of [0, 1]) ids.push(((await offCreate()).response as unknown as { id: string }).id);
+      await pool.query("UPDATE cloud_v2_workspaces SET state='stopped', boat_sandbox_id='bx_' || substr(md5(id::text), 1, 10) WHERE id = ANY($1::uuid[])", [ids]);
+      await pool.query("UPDATE cloud_v2_computers SET base_live_at=clock_timestamp()-interval '31 days' WHERE org_id=$1", [org]);
+      // A machine already made never reads the image again: they hold nothing, and the legacy snapshot goes.
+      expect(await on.releaseLegacyBuilds()).toBe(1);
+      await builder(on).tick();
+      expect(await snapshotOf(pre.id)).toBeNull();
+      // Both machines lost; each opens from the live base: one rebuilt clean, one from its backup.
+      const [clean, backedUp] = ids as [string, string];
+      await pool.query("UPDATE cloud_v2_workspaces SET state='starting' WHERE id = ANY($1::uuid[])", [ids]);
+      await pool.query(`UPDATE cloud_v2_workspaces SET checkpoint_object=$2, checkpoint_key='{"sealed":"fixture"}', checkpoint_sha256=$3,
+        checkpoint_bytes=100, checkpoint_saved_at=clock_timestamp() WHERE id=$1`, [backedUp, `cloud-v2/checkpoints/${backedUp}/${randomUUID()}.zck`, "a".repeat(64)]);
+      const image = await store.pinRestoreImage(clean);
+      expect(image).not.toBeNull();
+      expect((await workspaceRow(clean)).computer_build_id).toBe(live);
+      const lost = (await pool.query<{ boat_sandbox_id: string }>("SELECT boat_sandbox_id FROM cloud_v2_workspaces WHERE id=$1", [backedUp])).rows[0]!.boat_sandbox_id;
+      const begun = await store.beginRestore(backedUp, lost, { attempt: randomUUID(), name: "zeros-restore", env: {} });
+      expect(begun).not.toBe("no_computer");
+      expect(begun).not.toBeNull();
+      expect((await workspaceRow(backedUp)).computer_build_id).toBe(live);
+    });
+
+    it("after its 30 days, still kept while a workspace is creating or restoring from it with no machine yet", async () => {
+      const pre = await preSwitchBuild();
+      const on = computersWith({ shared: true });
+      boat.snapshots.set(SHARED, new Map());
+      await on.ensureBase(org);
+      const restoring = ((await offCreate()).response as unknown as { id: string }).id;
+      const creating = ((await offCreate()).response as unknown as { id: string }).id;
+      await pool.query(`UPDATE cloud_v2_workspaces SET state='stopped', boat_sandbox_id=NULL, restore_pending=true, restore_attempt=gen_random_uuid(),
+        restore_create=jsonb_build_object('from', null, 'name', 'zeros-restore', 'env', '{}'::jsonb, 'requestedAt', clock_timestamp()), checkpoint_object=$2,
+        checkpoint_key='{"sealed":"fixture"}', checkpoint_sha256=$3, checkpoint_bytes=100, checkpoint_saved_at=clock_timestamp() WHERE id=$1`,
+        [restoring, `cloud-v2/checkpoints/${restoring}/${randomUUID()}.zck`, "a".repeat(64)]);
+      await pool.query("UPDATE cloud_v2_computers SET base_live_at=clock_timestamp()-interval '31 days' WHERE org_id=$1", [org]);
+      expect(await on.releaseLegacyBuilds()).toBe(0);
+      // The create gets its machine; the restore is still waiting for its own: kept.
+      await pool.query("UPDATE cloud_v2_workspaces SET boat_sandbox_id='bx_created01', state='running' WHERE id=$1", [creating]);
+      expect(await on.releaseLegacyBuilds()).toBe(0);
+      await builder(on).tick();
+      expect(await snapshotOf(pre.id)).not.toBeNull();
+      // The restore has its machine: nothing reads the legacy image any more.
+      await pool.query("UPDATE cloud_v2_workspaces SET boat_sandbox_id='bx_restored1', restore_pending=false, state='running' WHERE id=$1", [restoring]);
+      expect(await on.releaseLegacyBuilds()).toBe(1);
     });
   });
 

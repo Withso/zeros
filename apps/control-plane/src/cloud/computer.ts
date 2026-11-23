@@ -16,6 +16,7 @@ import { CloudSourceTargetSchema, type CloudSourceTarget } from "./source-author
 import { computerSourceReviewRequired, readComputerSourceTargets, type CloudV2ComputerSourceResolver } from "./computer-provenance.js";
 import { RepositorySetupPathSchema } from "./repository-setup-contract.js";
 import { buildClaimAllowed } from "./runtime-build-drain.js";
+import type { SharedBaseState } from "./shared-base.js";
 export { cloudV2SnapshotName } from "./resource-names.js";
 
 const MAX_LOG_BYTES = 1024 * 1024;
@@ -124,10 +125,14 @@ export const CloudV2InstallScriptSchema = z.string().max(CLOUD_V2_INSTALL_SCRIPT
 export type CloudV2ComputerOptions = {
   /** CloudV2Config.readyCopies: builds make the base only. */
   readyCopies?: boolean;
-  /** CloudV2Config.sharedBaseSnapshot: the base of organizations without an install script. */
+  /** CloudV2Config.sharedBaseSnapshot: the base of organizations without an install script (a pinned name; the
+   * resolver below supersedes it). */
   sharedBaseSnapshot?: string;
-  /** Whether Boat has the shared base now (ensureBase reads it before taking any lock). */
-  sharedBaseAvailable?: () => Promise<boolean>;
+  /** The shared base the builder makes for the pinned runtime (shared-base.ts CloudV2SharedBaseResolver): ready with its
+   * name, building, failed or off. With it, sharedBaseSnapshot is not read. */
+  sharedBase?: { state(): Promise<SharedBaseState> };
+  /** Whether Boat has that shared base now (ensureBase reads it before taking any lock). */
+  sharedBaseAvailable?: (name?: string) => Promise<boolean>;
   /** The runtime a base made now records (the shared base made inline caches none of its own). */
   runtimeSha256?: string;
   /** Automatic base builds that need a machine, across the deployment (CLOUD_V2_AUTOMATIC_BASE_BUDGET). */
@@ -177,6 +182,15 @@ const CURRENT_RETRY_INTENT = `(b.retry_of IS NULL OR (
   AND NOT EXISTS(SELECT 1 FROM cloud_v2_computer_builds newer WHERE newer.org_id=b.org_id AND newer.version>b.version)))`;
 /** A create is waiting on this automatic base: it is a create's machine, not the sweep's, and goes first. */
 const AUTOMATIC_WAITED_ON = `EXISTS (SELECT 1 FROM cloud_v2_workspaces w WHERE w.computer_build_id=b.id AND w.org_id=b.org_id AND w.state='creating')`;
+/** Whether something will still start a machine from this build's snapshot: a workspace with no machine that is
+ * creating, or restoring from its checkpoint, on it; or a recovery about to create one from it. The one rule that keeps
+ * a build's snapshot (resources().pinned, for cleanup) and an organization's legacy build (releaseLegacyBuilds). */
+const pinnedBuild = (build: string, org: string) => `(EXISTS (SELECT 1 FROM cloud_v2_workspaces w WHERE w.computer_build_id=${build} AND w.org_id=${org}
+        AND w.boat_sandbox_id IS NULL AND (w.state='creating' OR (w.restore_pending AND w.state<>'deleted')))
+        OR EXISTS (SELECT 1 FROM cloud_v2_recovery_attempts a WHERE a.org_id=${org}
+          AND a.replacement_create->>'computerBuildId'=${build}::text AND a.replacement_sandbox_id IS NULL
+          AND a.replacement_create->>'createRejectedAt' IS NULL
+          AND (a.completed_at IS NULL OR a.replacement_create->>'createIssuedAt' IS NOT NULL)))`;
 const build = (row: Row): CloudV2Build => ({
   id: row.id, organizationId: row.org_id, version: row.version, recipe: row.recipe, state: row.state,
   builderSandboxId: row.builder_sandbox_id, snapshotId: row.snapshot_id, errorCode: row.error_code, createdBy: row.created_by,
@@ -244,7 +258,9 @@ export class CloudV2Computers {
   }
 
   async overview(organizationId: string): Promise<CloudV2ComputerOverview> {
-    const overview = await this.readOverview(organizationId);
+    const read = await this.readOverview(organizationId);
+    // A release re-points organizations on the shared base: consecutive re-points read as one history row.
+    const overview = { ...read, builds: foldSharedRepoints(read.builds, new Set(read.activeBuildId ? [read.activeBuildId] : [])) };
     return this.options.readyCopies ? { ...overview, base: await this.baseState(organizationId) } : overview;
   }
 
@@ -420,9 +436,10 @@ export class CloudV2Computers {
    */
   async ensureBase(organizationId: string, now: Date = new Date(), options: { create?: boolean } = {}): Promise<CloudV2BaseState> {
     if (!this.options.readyCopies) return { state: "unavailable" };
-    const shared = this.options.sharedBaseSnapshot;
-    // Boat is asked before any lock is taken.
-    const sharedAvailable = shared && this.options.sharedBaseAvailable ? await this.options.sharedBaseAvailable().catch(() => false) : false;
+    // The shared base and Boat are asked before any lock is taken. One still being built is waited for: the base queued
+    // below for an organization without an install script is held by claim() until it is ready (or 30 minutes pass).
+    const { name: shared } = await this.sharedBaseNow();
+    const sharedAvailable = shared !== null;
     let activated = false;
     const state = await withSystemTx(this.pool, async (tx): Promise<CloudV2BaseState> => {
       // A create that finds the first failure of a run asks for one try now, rather than waiting out its 15 minutes;
@@ -437,6 +454,19 @@ export class CloudV2Computers {
     });
     if (activated) await this.baseActivated?.(organizationId).catch(() => undefined);
     return state;
+  }
+
+  /** The shared base to activate now (ready, and present at Boat), and whether one is being built for the pinned runtime
+   * (its organizations' bases are then held: claim(..., { holdShared })). */
+  async sharedBaseNow(): Promise<{ name: string | null; building: boolean }> {
+    const available = async (name: string) => this.options.sharedBaseAvailable ? await this.options.sharedBaseAvailable(name).catch(() => false) : false;
+    if (this.options.sharedBase) {
+      const state = await this.options.sharedBase.state().catch(() => null);
+      if (state?.state === "ready") return { name: await available(state.name) ? state.name : null, building: false };
+      return { name: null, building: state?.state === "building" };
+    }
+    const pinned = this.options.sharedBaseSnapshot;
+    return { name: pinned && await available(pinned) ? pinned : null, building: false };
   }
 
   /** The organization's base as ensureBase would find it, changing nothing: "none" when nothing exists or is building. */
@@ -565,8 +595,10 @@ export class CloudV2Computers {
       `UPDATE cloud_v2_computers c SET legacy_build_id = NULL
        WHERE c.legacy_build_id IS NOT NULL AND c.base_live_at < clock_timestamp() - interval '30 days'
          AND EXISTS (SELECT 1 FROM cloud_v2_computer_builds b WHERE b.id = c.active_build_id AND b.org_id = c.org_id AND b.base_only)
-         AND NOT EXISTS (SELECT 1 FROM cloud_v2_workspaces w WHERE w.org_id = c.org_id AND w.computer_build_id = c.legacy_build_id
-           AND w.state <> 'deleted')`));
+         -- Only what still starts a machine from its snapshot holds it: a workspace with no machine that is creating or
+         -- restoring from it, or a recovery about to create one (the rule cleanup keeps snapshots by). A workspace that
+         -- has its machine never reads the image again, and a restore re-pins to the active build (#1257).
+         AND NOT ${pinnedBuild("c.legacy_build_id", "c.org_id")}`));
     return rowCount ?? 0;
   }
 
@@ -890,7 +922,11 @@ export class CloudV2Computers {
     return rows[0].log;
   }
 
-  async claim(runtimeSha256?: string): Promise<CloudV2Build | null> {
+  /** `holdShared`: the shared base for the pinned runtime is being built, so an automatic base with no install script
+   * (which will be that shared base, at no machine) waits for it, for at most 30 minutes from its queueing; after that,
+   * or once the shared build has failed, it is claimed and builds the organization's own. A create bound to it waits
+   * through the ordinary waiting path meanwhile (waiting_for_base_at), and is never re-bound. */
+  async claim(runtimeSha256?: string, options: { holdShared?: boolean } = {}): Promise<CloudV2Build | null> {
     const budget = this.options.automaticBaseBudget ?? CLOUD_V2_AUTOMATIC_BASE_BUDGET;
     // Old claimers lock build rows before the drain; cancellation must precede it.
     await withSystemTx(this.pool, async tx => {
@@ -905,13 +941,14 @@ export class CloudV2Computers {
        WHERE id = (SELECT b.id FROM cloud_v2_computer_builds b JOIN organizations o ON o.id=b.org_id
          WHERE b.state='queued' AND b.cleanup_requested_at IS NULL AND o.deleted_at IS NULL
            AND ${CURRENT_RETRY_INTENT}
+           AND NOT ($4 AND b.automatic AND b.base_only AND b.install_script IS NULL AND b.created_at > clock_timestamp() - interval '30 minutes')
            AND (NOT b.automatic OR ${AUTOMATIC_WAITED_ON} OR (
              (SELECT count(*) FROM cloud_v2_computer_builds a WHERE a.automatic AND NOT a.base_shared
                AND a.started_at > clock_timestamp() - interval '1 hour') < $2
              AND (SELECT count(*) FROM cloud_v2_computer_builds a WHERE a.automatic AND NOT a.base_shared
                AND a.started_at > clock_timestamp() - interval '1 day') < $3))
          ORDER BY (b.automatic AND NOT ${AUTOMATIC_WAITED_ON}), b.created_at LIMIT 1 FOR UPDATE OF b SKIP LOCKED)
-       RETURNING ${COLUMNS}`, [runtimeSha256 ?? null, budget.perHour, budget.perDay]);
+       RETURNING ${COLUMNS}`, [runtimeSha256 ?? null, budget.perHour, budget.perDay, options.holdShared === true]);
     });
     return rows[0] ? build(rows[0]) : null;
   }
@@ -1079,12 +1116,7 @@ export class CloudV2Computers {
     const { rows } = await withSystemTx(this.pool, tx => tx.query<Resources>(`SELECT b.*,
       EXISTS (SELECT 1 FROM cloud_v2_computers c WHERE c.active_build_id=b.id) AS active,
       EXISTS (SELECT 1 FROM cloud_v2_computers c WHERE c.legacy_build_id=b.id) AS legacy,
-      (EXISTS (SELECT 1 FROM cloud_v2_workspaces w WHERE w.computer_build_id=b.id AND w.org_id=b.org_id AND w.boat_sandbox_id IS NULL
-        AND (w.state='creating' OR (w.restore_pending AND w.state<>'deleted')))
-        OR EXISTS (SELECT 1 FROM cloud_v2_recovery_attempts a WHERE a.org_id=b.org_id
-          AND a.replacement_create->>'computerBuildId'=b.id::text AND a.replacement_sandbox_id IS NULL
-          AND a.replacement_create->>'createRejectedAt' IS NULL
-          AND (a.completed_at IS NULL OR a.replacement_create->>'createIssuedAt' IS NOT NULL))) AS pinned
+      ${pinnedBuild("b.id", "b.org_id")} AS pinned
       FROM cloud_v2_computer_builds b WHERE b.id=$1`, [id]));
     return rows[0] ?? null;
   }
@@ -1177,6 +1209,66 @@ export function shellQuote(value: string): string {
  * commands as the stock image's user, the same user the worker runs as. */
 export function asZeros(lines: readonly string[]): string {
   return `bash -lc ${shellQuote(lines.join("\n"))}`;
+}
+
+export type InstallBaseHooks = {
+  log(text: string): Promise<void>;
+  assertHeld(): void;
+  /** Computer builds record the runtime they installed (CloudV2Computers.setRuntime). */
+  runtimeInstalled?(sha256: string): Promise<void>;
+  /** Asked before the install script runs: false means the build was cancelled meanwhile. */
+  running?(): Promise<boolean>;
+};
+
+/**
+ * The one definition of what a base installs on Boat's stock image: the worker runtime (bounded at 300 s, a failure
+ * fails the build), Git LFS (300 s, a failure is tolerated: the worker then tells LFS repositories how to fetch their
+ * files) and, for an organization's own base, its install script. Returns false when the build stopped before the script.
+ */
+export async function installBase(compute: CloudV2Compute, sandboxId: string,
+  input: { runtime: { sha256: string; url: string }; publicKeys?: readonly string[]; installScript?: string | null },
+  hooks: InstallBaseHooks): Promise<boolean> {
+  const { sha256, url } = input.runtime;
+  const installed = await compute.exec(sandboxId, installRuntimeCommand({ sha256, url, ...(input.publicKeys ? { publicKeys: input.publicKeys } : {}) }), 300);
+  if (installed.exitCode !== 0 || installed.timedOut) throw Object.assign(new Error("runtime install failed"), { code: "worker_runtime_install_failed" });
+  await hooks.runtimeInstalled?.(sha256);
+  await hooks.log(`[zeros] runtime ${sha256.slice(0, 12)} installed\n`);
+  const lfs = await compute.exec(sandboxId, GIT_LFS_INSTALL_COMMAND, 300);
+  await hooks.log(lfs.exitCode === 0 && !lfs.timedOut ? "[zeros] git-lfs installed\n"
+    : "[zeros] git-lfs could not be installed; Git LFS files stay placeholders until a later build adds it\n");
+  if (input.installScript) {
+    hooks.assertHeld();
+    if (hooks.running && !await hooks.running()) return false;
+    await hooks.log("[zeros] running the install script\n");
+    const script = await compute.execLong(sandboxId, `${asZeros(["cd /home/user", input.installScript])} 2>&1`, 3600);
+    await hooks.log(script.stdout.slice(-64 * 1024) + `\n[zeros] install script: exit ${script.exitCode}\n`);
+    if (script.exitCode !== 0 || script.timedOut) throw Object.assign(new Error("install script failed"), { code: "computer_install_script_failed" });
+  }
+  return true;
+}
+
+/** Overview history: an automatic re-point to a newer shared base, one per runtime release for every organization on it. */
+export function isSharedRepoint(build: Pick<CloudV2Build, "reason" | "state" | "snapshotId" | "createdBy"> & { automatic?: true }): boolean {
+  return build.reason === "runtime" && build.state === "succeeded" && build.createdBy === null && build.automatic === true
+    && typeof build.snapshotId === "string" && build.snapshotId.includes("@");
+}
+
+/**
+ * Folds each run of consecutive shared re-points (newest first, as the overview lists builds) into its newest row,
+ * which counts the ones it stands for. A build in `keep` (the live one) is never folded away.
+ */
+export function foldSharedRepoints<T extends Pick<CloudV2Build, "id" | "reason" | "state" | "snapshotId" | "createdBy"> & { automatic?: true }>(
+  builds: readonly T[], keep: ReadonlySet<string> = new Set()): (T & { repoints?: number })[] {
+  const folded: (T & { repoints?: number })[] = [];
+  for (const build of builds) {
+    const head = folded[folded.length - 1];
+    if (head && isSharedRepoint(build) && isSharedRepoint(head) && !keep.has(build.id)) {
+      folded[folded.length - 1] = { ...head, repoints: (head.repoints ?? 1) + 1 };
+      continue;
+    }
+    folded.push(build);
+  }
+  return folded;
 }
 
 /** Reuse checkouts so ignored dependencies survive; credentials stay in a
@@ -1278,6 +1370,8 @@ export class CloudV2ComputerBuilder {
     logger?: Pick<Console, "warn"> & Partial<Pick<Console, "error">>;
     /** Ready copies: a base went live. Queues first copies and marks the rest stale. */
     onActivated?(build: { organizationId: string; reason: CloudV2BuildReason }): Promise<void>;
+    /** The shared base's hooks (shared-base.ts CloudV2SharedBaseSweeper), each at its own cadence, beside admission. */
+    sharedBases?: { tick(): Promise<void> };
   }) {
     this.lastRefreshScan = (deps.now?.() ?? Date.now()) - REFRESH_SCAN_MS + (deps.refreshDelayMs ?? REFRESH_SCAN_MS);
   }
@@ -1291,6 +1385,8 @@ export class CloudV2ComputerBuilder {
     if (this.closed) return;
     await this.sweepBases().catch(() => this.deps.logger?.warn("[cloud-v2] base sweep will retry"));
     if (this.closed) return;
+    await this.deps.sharedBases?.tick().catch(() => this.deps.logger?.warn("[cloud-v2] shared base sweep will retry"));
+    if (this.closed) return;
     // GitHub reads can be slow; a scan runs beside admission, never before it.
     this.refreshing ??= this.scheduleRefreshes()
       .catch(() => this.deps.logger?.warn("[cloud-v2] Computer refresh scan will retry"))
@@ -1298,7 +1394,7 @@ export class CloudV2ComputerBuilder {
     const jobs: CloudV2Build[] = [];
     for (let index = 0; index < BUILD_CONCURRENCY; index++) {
       if (this.closed) break;
-      const job = await computers.claim(this.deps.runtime.sha256);
+      const job = await computers.claim(this.deps.runtime.sha256, { holdShared: (await computers.sharedBaseNow().catch(() => ({ building: false }))).building });
       if (!job) break;
       if (this.closed) { await computers.returnUnstarted(job.id); break; }
       jobs.push(job);
@@ -1320,11 +1416,14 @@ export class CloudV2ComputerBuilder {
     if (now - this.lastSweep < BASE_SWEEP_MS) return;
     this.lastSweep = now;
     await computers.releaseLegacyBuilds();
-    const shared = computers.options.sharedBaseSnapshot && computers.options.sharedBaseAvailable
-      ? await computers.options.sharedBaseAvailable().catch(() => false) : false;
+    const now_ = await computers.sharedBaseNow().catch(() => ({ name: null, building: false }));
+    const shared = now_.name !== null;
     let machines = await computers.automaticBudgetRemaining();
     for (const candidate of await computers.sweepCandidates(BASE_SWEEP_PAGE)) {
       if (this.closed) return;
+      // While the shared base is being built, an organization without an install script waits for it: nothing is queued
+      // for it by the sweep (a create still queues one, held by claim, so the create can wait).
+      if (now_.building && !candidate.installScript) continue;
       const free = shared && !candidate.installScript;
       if (!free && machines <= 0) continue;
       const state = await computers.ensureBase(candidate.organizationId).catch(() => null);
@@ -1470,7 +1569,13 @@ export class CloudV2ComputerBuilder {
     const log = (text: string) => computers.append(job.id, text);
     if (job.automatic) await log("[zeros] prepared automatically by Zeros: Boat's stock image and this organization's install script, no repository\n");
     await log(`[zeros] building Cloud Computer v${job.version}${REASON_LABEL[job.reason]}\n`);
-    const base = await computers.buildBase(job.id), shared = computers.options.sharedBaseSnapshot;
+    const base = await computers.buildBase(job.id);
+    // The shared base the builder made for the pinned runtime (present at Boat), else a pinned name. With the builder's
+    // shared base configured but not ready (failed, off, missing, or held past its 30 minutes), this organization's own
+    // base is built instead, on this same row: a create waiting on it is never re-bound.
+    const resolved = base.baseOnly && !base.installScript && computers.options.sharedBase ? await computers.sharedBaseNow().catch(() => ({ name: null })) : null;
+    const shared = resolved ? resolved.name : computers.options.sharedBaseSnapshot;
+    if (resolved && !resolved.name) await log("[zeros] Zeros's shared base is not ready, so this organization's own base is built\n");
     if (base.baseOnly && !base.installScript && shared) {
       // Nothing of the organization's own to install: no machine at all.
       assertHeld();
@@ -1512,25 +1617,11 @@ export class CloudV2ComputerBuilder {
     // A refresh installs the runtime it was queued for, even when a process
     // still on another pin picks it up during a deploy.
     const sha256 = job.runtimeSha256 ?? this.deps.runtime.sha256;
-    const installed = await compute.exec(sandboxId, installRuntimeCommand({ sha256, url: await this.deps.runtime.url(sha256),
-      ...(this.deps.publicKeys ? { publicKeys: this.deps.publicKeys } : {}) }), 300);
-    if (installed.exitCode !== 0 || installed.timedOut) throw Object.assign(new Error("runtime install failed"), { code: "worker_runtime_install_failed" });
-    await computers.setRuntime(job.id, sha256);
-    await log(`[zeros] runtime ${sha256.slice(0, 12)} installed\n`);
-    // Boat's stock image has no git-lfs. A build that can't add it still goes
-    // live; the worker then tells LFS repositories how to fetch their files.
-    const lfs = await compute.exec(sandboxId, GIT_LFS_INSTALL_COMMAND, 300);
-    await log(lfs.exitCode === 0 && !lfs.timedOut ? "[zeros] git-lfs installed\n"
-      : "[zeros] git-lfs could not be installed; Git LFS files stay placeholders until a later build adds it\n");
+    // The one definition (installBase): runtime, Git LFS, then the organization's install script; the shared base runs the same.
     const base = await computers.buildBase(job.id);
-    if (base.installScript) {
-      assertHeld();
-      if (!await computers.running(job.id)) return;
-      await log("[zeros] running the install script\n");
-      const script = await compute.execLong(sandboxId, `${asZeros(["cd /home/user", base.installScript])} 2>&1`, 3600);
-      await log(script.stdout.slice(-64 * 1024) + `\n[zeros] install script: exit ${script.exitCode}\n`);
-      if (script.exitCode !== 0 || script.timedOut) throw Object.assign(new Error("install script failed"), { code: "computer_install_script_failed" });
-    }
+    if (!await installBase(compute, sandboxId, { runtime: { sha256, url: await this.deps.runtime.url(sha256) },
+      ...(this.deps.publicKeys ? { publicKeys: this.deps.publicKeys } : {}), installScript: base.installScript },
+      { log, assertHeld, runtimeInstalled: installed => computers.setRuntime(job.id, installed), running: () => computers.running(job.id) })) return;
     const policy = await computers.sourcePolicy(job.id);
     const name = cloudV2SnapshotName(this.deps.channel, job.organizationId, job.version, this.deps.localOwner);
     const capture = async (): Promise<boolean> => {
