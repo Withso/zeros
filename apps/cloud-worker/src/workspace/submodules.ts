@@ -6,13 +6,20 @@
 // a pre-push hook says so in a sentence. A public one (GitHub's answer at create) is fetched with no credential:
 // Git runs without askpass, broker, helper or prompt, so it can't ask. A submodule that fails is skipped with its
 // own submodules; the checkout goes on.
+// A checkout whose branch was already there (a restore, or a later start on the same disk) passes onlyMissing:
+// only a submodule still missing is fetched, i.e. its folder a real, empty directory (what a restore's read-tree
+// leaves for a gitlink) with no .git in it and its planned Git directory absent. Any other is left exactly as it
+// is, with no Git command run in it: a folder that is absent (the person may have removed it), non-empty, holding a
+// .git, or whose Git directory exists. A nested one is fetched only into its parent's planned Git directory.
 import { chmod, lstat, mkdir, readdir, realpath, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { checkoutGit } from "./checkout";
 import type { WorkerConfig } from "./scope";
 
 export type WorkerSubmodule = NonNullable<WorkerConfig["workspace"]["submodules"]>[number];
-export type SubmoduleOutcome = { path: string; fetched: boolean };
+/** kept: left as it was found (onlyMissing), neither fetched nor skipped. */
+export type SubmoduleOutcome = { path: string; fetched: boolean; kept?: true };
+export type FetchSubmodulesOptions = { onlyMissing?: boolean };
 export const SUBMODULE_PUSH_REFUSED = "Pushing from a submodule isn't available in cloud workspaces yet. Push it from your own computer.";
 const FETCH_TIMEOUT_MS = 15 * 60_000;
 const SAFE = ["-c", "protocol.allow=never", "-c", "protocol.https.allow=always", "-c", "core.hooksPath=/dev/null"];
@@ -65,15 +72,34 @@ async function fetchOne(root: string, entry: WorkerSubmodule, environment: NodeJ
   return true;
 }
 
-/** One checkout's planned submodules, parents first (the plan's order). Never throws: each is fetched or skipped. */
-export async function fetchPlannedSubmodules(checkoutPath: string, entries: readonly WorkerSubmodule[], environment: NodeJS.ProcessEnv = {}): Promise<SubmoduleOutcome[]> {
+/** Still missing: a real, empty folder with no .git, and no planned Git directory. Only reads the disk. */
+async function missing(root: string, entry: WorkerSubmodule): Promise<boolean> {
+  const target = join(root, entry.path), gitDir = join(root, ".git", entry.gitDir);
+  if (await realpath(target).catch(() => null) !== target || await kind(join(root, ".git")) !== "dir") return false;
+  if (await kind(join(target, ".git")) !== "none" || await kind(gitDir) !== "none" || (await readdir(target)).length) return false;
+  // A nested one's Git directory lives in its parent's: never created for a parent that isn't the planned one.
+  const parent = dirname(dirname(gitDir));
+  return entry.gitDir.split("/").length === 2 || await realpath(parent).catch(() => null) === parent && await kind(parent) === "dir";
+}
+
+/** One checkout's planned submodules, parents first (the plan's order). Never throws: each is fetched or skipped
+ * (or, with onlyMissing, kept as it is unless still missing; a child of one fetched in this pass as without it). */
+export async function fetchPlannedSubmodules(checkoutPath: string, entries: readonly WorkerSubmodule[], environment: NodeJS.ProcessEnv = {},
+  options: FetchSubmodulesOptions = {}): Promise<SubmoduleOutcome[]> {
   if (!entries.length) return [];
   const root = await realpath(checkoutPath).catch(() => null);
-  const outcomes: SubmoduleOutcome[] = [], failed: string[] = [];
+  const outcomes: SubmoduleOutcome[] = [], failed: string[] = [], fetchedNow: string[] = [];
+  const under = (entry: WorkerSubmodule, parents: readonly string[]) => parents.some(parent => entry.path.startsWith(`${parent}/`));
   for (const entry of entries) {
-    const fetched = root !== null && safe(entry) && !failed.some(parent => entry.path.startsWith(`${parent}/`))
+    if (options.onlyMissing && root !== null && safe(entry) && !under(entry, failed) && !under(entry, fetchedNow)
+      && !await missing(root, entry).catch(() => false)) {
+      outcomes.push({ path: entry.path, fetched: false, kept: true });
+      continue;
+    }
+    const fetched = root !== null && safe(entry) && !under(entry, failed)
       && await fetchOne(root, entry, environment).catch(() => false);
     if (!fetched) failed.push(entry.path);
+    else fetchedNow.push(entry.path);
     outcomes.push({ path: entry.path, fetched });
   }
   return outcomes;
