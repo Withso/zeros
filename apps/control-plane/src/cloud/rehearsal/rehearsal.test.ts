@@ -13,7 +13,7 @@ import { assertRepository, safeLine } from "./guard.js";
 import { accountLines, turnLine, PERSONAL_ROUTE_GAPS, preconditionLines, readAccount, refusal, writeLines, type PreconditionFacts } from "./plan.js";
 import { cleanup, cleanupNeedsAccount, inventoryLines, NO_ACCOUNT, readInventory, runStages, stageContext } from "./runner.js";
 import { parseArguments, sharedBaseFacts } from "./rehearsal-cli.js";
-import { CONNECT_CLIENT_FEATURES, connectWorkspace, createProject, createWorkspace, frameCode, openBridge, waitState } from "./steps.js";
+import { CONNECT_CLIENT_FEATURES, checkText, connectWorkspace, createProject, createWorkspace, fileTarget, frameCode, openBridge, waitState, writeFile } from "./steps.js";
 import { FIXTURE_TWO } from "./stage-provision.js";
 import { loadState, newState, saveState } from "./state.js";
 import { checkGithubToken, databaseErrorCode, liveBridge, liveDatabase, OUTSIDE_PROBE_LIMIT, SET_APP_SYSTEM, tokenLines, tokenRefusal, type DatabaseClient } from "./live.js";
@@ -222,6 +222,29 @@ describe("rehearsal stages against a fake Alpha", () => {
     const value = (name: string) => new RegExp(`export const ${alias(name)} = "([^"]+)";`).exec(protocol)?.[1];
     expect(names.length).toBeGreaterThan(0);
     expect(names.map(value)).toEqual([...CONNECT_CLIENT_FEATURES]);
+  });
+
+  it("addresses a file in the second repository as the desktop does, and names a reply of another kind", async () => {
+    const { ctx } = setup();
+    const project = await createProject(ctx, { name: `${ctx.state.prefix}files`, repositories: [R1, FIXTURE_TWO] });
+    const pair = await createWorkspace(ctx, { name: `${ctx.state.prefix}files-w`, projectId: project.id, branch: `${ctx.state.prefix}files` });
+    const second = pair.repositories!.find(row => row.repository === FIXTURE_TWO)!;
+    const bridge = await openBridge(ctx, pair.id), scope = { workspaceId: pair.id, cwd: "/home/user/p" };
+    const path = `${second.checkoutPath}/x.txt`;
+    // As run b7a1fa7b sent it: the project folder as cwd and the path absolute, served by the first repository.
+    await expect(writeFile(bridge, scope, path, "x\n", "write_old")).rejects.toMatchObject({ step: "write_old", code: "reply:error" });
+    expect(fileTarget(scope, path, pair)).toEqual({ workspaceId: pair.id, repository: FIXTURE_TWO, path: "x.txt" });
+    await writeFile(bridge, scope, path, "x\n", "write", pair);
+    await checkText(bridge, scope, path, "x\n", "read", "content", pair);
+    await expect(checkText(bridge, scope, `${second.checkoutPath}/absent.txt`, "x", "read_absent", "content", pair)).rejects.toMatchObject({ code: "reply:error" });
+    bridge.close();
+  });
+
+  it("seeds an environment an earlier run's cleanup left empty at a revision above 0, and never one that holds anything", async () => {
+    const { alpha, state, ctx, options } = setup();
+    for (const repository of [R1, FIXTURE_TWO]) alpha.environments.set(alpha.repositoryId(repository), { revision: 4, files: new Map() });
+    expect(await runStages(ctx, ["projects"], options)).toBe(true);
+    expect(state.stages.projects?.notes).toContain("environment:seeded");
   });
 
   it("names a session reply that is not a session by its type and code, closed values only", async () => {

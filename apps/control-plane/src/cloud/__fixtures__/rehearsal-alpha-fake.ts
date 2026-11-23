@@ -386,16 +386,38 @@ export class FakeAlpha {
       if (!row || row.state !== "running") throw new RehearsalFailure("connect", "http_409");
       const frames: { type: string; [key: string]: unknown }[] = [], sessions = new Map<string, string>();
       const repositoryOf = (params: Record<string, unknown>) => String(params.repository ?? row.repositories?.[0]?.repository ?? this.projects.get(row.projectId!)!.repositories[0]);
+      // As the worker (scope.ts repositoryFor, worker.ts workspaceFor): a named repository's request goes to that repository's
+      // service, rooted at its checkout, whose scope holds no other folder; any other goes to the first repository's (or the
+      // only one's), rooted at its checkout. A path outside the serving checkout answers kind error.
+      const fileAt = (params: Record<string, unknown>): string | null => {
+        const checkouts = row.repositories ?? [], named = typeof params.repository === "string"
+          ? checkouts.find(entry => entry.repository.toLowerCase() === String(params.repository).toLowerCase()) : undefined;
+        if (typeof params.repository === "string" && checkouts.length > 1 && !named) throw new RehearsalFailure("file", "reply_WORKSPACE_ERROR");
+        const base = named?.checkoutPath ?? checkouts[0]?.checkoutPath ?? "/home/user/p";
+        if (named && named !== checkouts[0] && params.cwd !== undefined && params.cwd !== base) throw new RehearsalFailure("file", "reply_WORKSPACE_ERROR");
+        const path = String(params.path);
+        const target = path.startsWith("/") ? path : `${base}/${path}`;
+        return target.startsWith(`${base}/`) ? target : null;
+      };
       const op = (name: string, params: Record<string, unknown> = {}): unknown => {
         switch (name) {
           case "workspace.list": return { workspaces: [{ id: row.id, path: "/home/user/p" }] };
-          case "file.write": row.files.set(String(params.path), String(params.content)); return { kind: "success" };
-          case "file.read": return row.files.has(String(params.path)) ? { kind: "text", content: row.files.get(String(params.path)) } : (() => { throw new RehearsalFailure("file.read", "missing"); })();
+          case "file.write": {
+            const target = fileAt(params);
+            if (!target) return { kind: "error", path: String(params.path), bytes: 0, error: "The file could not be written within this workspace." };
+            row.files.set(target, String(params.content)); return { kind: "success", path: params.path, bytes: String(params.content).length };
+          }
+          case "file.read": {
+            const target = fileAt(params);
+            return target && row.files.has(target) ? { kind: "text", path: params.path, content: row.files.get(target) }
+              : { kind: "error", path: String(params.path), bytes: 0, error: "The file could not be read within this workspace." };
+          }
           case "git.commit": {
             const repo = repositoryOf(params); row.commits.set(repo, [...row.commits.get(repo) ?? [], String(params.message)]);
             const key = `${row.id}:${repo}`;
             this.unpushed.set(key, [...this.unpushed.get(key) ?? [], String(params.message),
-              ...((params.files ?? []) as string[]).flatMap(file => [file.split("/").at(-1)!, row.files.get(file) ?? ""])]);
+              ...((params.files ?? []) as string[]).flatMap(file => { const at = file.startsWith("/") ? file : fileAt({ ...params, path: file }) ?? file;
+                return [file.split("/").at(-1)!, row.files.get(at) ?? ""]; })]);
             return {};
           }
           case "git.push": {

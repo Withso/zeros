@@ -8,7 +8,7 @@ import { RehearsalFailure, type StageContext } from "./contract.js";
 import { shiftClock } from "./clock.js";
 import { rebuildComputer } from "./stage-setup.js";
 import { reportMachineSnapshot } from "./steps.js";
-import { openBridge, call, check, clearEnvironment, ENVIRONMENT_PATH, seedEnvironments, createProject, createWorkspace, deleteProject, deleteWorkspace, getWorkspace, lifecycle, parse, readFile, shell, until,
+import { openBridge, call, check, checkText, clearEnvironment, ENVIRONMENT_PATH, seedEnvironments, createProject, createWorkspace, deleteProject, deleteWorkspace, getWorkspace, lifecycle, parse, shell, until,
   waitCopyReady, waitState, workspaceRoot, WorkspaceDocument } from "./steps.js";
 
 const HOUR_DAYS = 1 / 24;
@@ -48,7 +48,7 @@ export async function stageRetention(ctx: StageContext): Promise<Record<string, 
       `git -c user.name=rehearsal -c user.email=rehearsal@invalid commit -q -m '${prefix}unpushed' && printf '%s\\n' '${prefix}untracked' > '${prefix}untracked.txt'`, "unpushed_r2");
     check(r2.exitCode === 0, "unpushed_r2", `exit_${r2.exitCode}`);
     if (seed.seeded) {
-      check(await readFile(bridge, scope, `${first.checkoutPath}/${ENVIRONMENT_PATH}`, "seeded_r1") === seedBytes, "seeded_r1", "content");
+      await checkText(bridge, scope, `${first.checkoutPath}/${ENVIRONMENT_PATH}`, seedBytes, "seeded_r1", "content", w);
       const edit = await shell(ctx, bridge, { ...scope, cwd: first.checkoutPath }, `${prefix}pty-r1`,
         `printf '%s\\n' '${handBytes}' >> '${ENVIRONMENT_PATH}' && git check-ignore -q '${ENVIRONMENT_PATH}'`, "edited_r1");
       check(edit.exitCode === 0, "edited_r1", `exit_${edit.exitCode}`);
@@ -147,7 +147,7 @@ export async function stageRetention(ctx: StageContext): Promise<Record<string, 
     const root = await workspaceRoot(bridge, w.id), scope = { workspaceId: w.id, cwd: root };
     const log = await shell(ctx, bridge, { ...scope, cwd: second.checkoutPath }, `${prefix}pty-own`, "git log --format=%s -n 20", "own_disk_commit");
     check(log.output.split(/\r?\n/).some(line => line.trim() === `${prefix}unpushed`), "own_disk_commit", "missing");
-    check(await readFile(bridge, scope, `${second.checkoutPath}/${prefix}untracked.txt`, "own_disk_untracked") === `${prefix}untracked\n`, "own_disk_untracked", "missing");
+    await checkText(bridge, scope, `${second.checkoutPath}/${prefix}untracked.txt`, `${prefix}untracked\n`, "own_disk_untracked", "missing", w);
   } finally { bridge.close(); }
   counts.ownDiskKept = 1;
   await lifecycle(ctx, w.id, "stop", "own_disk_stop");
@@ -174,8 +174,8 @@ export async function stageRetention(ctx: StageContext): Promise<Record<string, 
     const root = await workspaceRoot(bridge, w.id), scope = { workspaceId: w.id, cwd: root };
     const log = await shell(ctx, bridge, { ...scope, cwd: second.checkoutPath }, `${prefix}pty-log`, "git log --format=%s -n 20", "restored_commit");
     check(log.output.split(/\r?\n/).some(line => line.trim() === `${prefix}unpushed`), "restored_commit", "missing");
-    check(await readFile(bridge, scope, `${second.checkoutPath}/${prefix}untracked.txt`, "restored_untracked") === `${prefix}untracked\n`, "restored_untracked", "missing");
-    check(await readFile(bridge, scope, `${first.checkoutPath}/${ignored}`, "restored_ignored") === ignoredBytes, "restored_ignored", "bytes");
+    await checkText(bridge, scope, `${second.checkoutPath}/${prefix}untracked.txt`, `${prefix}untracked\n`, "restored_untracked", "missing", w);
+    await checkText(bridge, scope, `${first.checkoutPath}/${ignored}`, ignoredBytes, "restored_ignored", "bytes", w);
   } finally { bridge.close(); }
   counts.restored!++;
 

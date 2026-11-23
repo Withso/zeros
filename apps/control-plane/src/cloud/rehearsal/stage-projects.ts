@@ -4,7 +4,7 @@
 import { z } from "zod";
 import { type Bridge, type StageContext } from "./contract.js";
 import { reportMachineSnapshot, skipTurns, turnAgent, type TurnAgent } from "./steps.js";
-import { openBridge, answered, check, clearEnvironment, copyMachines, ENVIRONMENT_PATH, seedEnvironments, createProject, createWorkspace, deleteProject, deleteWorkspace, getWorkspace, lifecycle,
+import { openBridge, answered, check, checkText, clearEnvironment, copyMachines, ENVIRONMENT_PATH, seedEnvironments, createProject, createWorkspace, deleteProject, deleteWorkspace, getWorkspace, lifecycle,
   openAndClosePull, parse, readFile, turn, until, waitCopyReady, waitState, workspaceRoot, writeFile, type WorkspaceDocument } from "./steps.js";
 
 export async function stageProjects(ctx: StageContext): Promise<Record<string, number>> {
@@ -45,7 +45,7 @@ export async function stageProjects(ctx: StageContext): Promise<Record<string, n
     ctx.step("files");
     path = `${root}/${prefix}file.txt`; content = `${prefix}content\n`;
     await writeFile(bridge, scope, path, content, "file_write");
-    check(await readFile(bridge, scope, path, "file_read") === content, "file_read", "content");
+    await checkText(bridge, scope, path, content, "file_read", "content");
 
     // A3: commit, push, a pull request opened then closed unmerged, then the branch deleted.
     ctx.step("pull_one");
@@ -65,7 +65,7 @@ export async function stageProjects(ctx: StageContext): Promise<Record<string, n
   bridge = await openBridge(ctx, workspace.id);
   try {
     const root = await workspaceRoot(bridge, workspace.id);
-    check(await readFile(bridge, { workspaceId: workspace.id, cwd: root }, path, "wake_file") === content, "wake_file", "content");
+    await checkText(bridge, { workspaceId: workspace.id, cwd: root }, path, content, "wake_file", "content");
   } finally { bridge.close(); }
   ctx.step("archive_open");
   await lifecycle(ctx, workspace.id, "archive", "archive");
@@ -105,20 +105,21 @@ export async function stageProjects(ctx: StageContext): Promise<Record<string, n
     ctx.step("both_folders");
     for (const [index, checkout] of [first, second].entries()) {
       const marker = `${checkout.checkoutPath}/${prefix}folder-${index}.txt`;
-      await writeFile(bridge, scope, marker, `${prefix}${index}\n`, `folder_${index}_write`);
-      check(await readFile(bridge, scope, marker, `folder_${index}_read`) === `${prefix}${index}\n`, `folder_${index}_read`, "content");
+      await writeFile(bridge, scope, marker, `${prefix}${index}\n`, `folder_${index}_write`, pair);
+      await checkText(bridge, scope, marker, `${prefix}${index}\n`, `folder_${index}_read`, "content", pair);
     }
     if (seed.seeded) {
       ctx.step("environment_files");
       for (const [index, checkout] of [first, second].entries())
-        check(await readFile(bridge, scope, `${checkout.checkoutPath}/${ENVIRONMENT_PATH}`, `environment_${index}`) === seedContent(index), `environment_${index}`, "content");
+        await checkText(bridge, scope, `${checkout.checkoutPath}/${ENVIRONMENT_PATH}`, seedContent(index), `environment_${index}`, "content", pair);
       counts.environments = 2;
     }
     ctx.step("pull_two");
-    const inTwo = { ...scope, repository: second.repository };
+    // As the desktop sends a Git request about a path in the second repository: that repository named, the path relative.
+    const inTwo = { workspaceId: pair.id, repository: second.repository };
     const pullFile = `${second.checkoutPath}/${prefix}pull.txt`;
-    await writeFile(bridge, scope, pullFile, `${prefix}pull\n`, "pull_two_write");
-    await bridge.op("git.commit", { ...inTwo, message: `${prefix}commit-two`, files: [pullFile] });
+    await writeFile(bridge, scope, pullFile, `${prefix}pull\n`, "pull_two_write", pair);
+    await bridge.op("git.commit", { ...inTwo, message: `${prefix}commit-two`, files: [`${prefix}pull.txt`] });
     await bridge.op("git.push", { ...inTwo, setUpstream: true });
     await openAndClosePull(ctx, pair.id, second.repository, `${prefix}pull-two`, "pull_two");
     counts.pulls!++;
@@ -133,15 +134,15 @@ export async function stageProjects(ctx: StageContext): Promise<Record<string, n
       await turn(ctx, bridge, pair, root, chatId, `Create the file ${firstFile} containing the single line one. Then reply with exactly: ok.`, "rewind_turn_1", agent);
       await turn(ctx, bridge, pair, root, chatId, `Create the file ${secondFile} containing the single line two. Then reply with exactly: ok.`, "rewind_turn_2", agent);
       counts.turns! += 2;
-      check(await readFile(bridge, scope, firstFile, "rewind_file_1") !== null, "rewind_file_1", "not_written");
-      check(await readFile(bridge, scope, secondFile, "rewind_file_2") !== null, "rewind_file_2", "not_written");
+      check(await readFile(bridge, scope, firstFile, "rewind_file_1", pair) !== null, "rewind_file_1", "not_written");
+      check(await readFile(bridge, scope, secondFile, "rewind_file_2", pair) !== null, "rewind_file_2", "not_written");
       const turns = parse(z.object({ turns: z.array(z.object({ chatId: z.string(), turnId: z.string(), startedAt: z.number() }).passthrough()) }),
         await bridge.op("turns.list", { ...scope, limit: 100 }), "rewind_turns").turns
         .filter(row => row.chatId === chatId).sort((left, right) => left.startedAt - right.startedAt);
       check(turns.length === 2, "rewind_turns", `count_${turns.length}`);
       await bridge.op("turns.reset", { ...scope, chatId, turnId: turns[1]!.turnId, mode: "filesAndTranscript" });
-      check(await readFile(bridge, scope, secondFile, "rewind_after_2") === null, "rewind_after_2", "kept");
-      check(await readFile(bridge, scope, firstFile, "rewind_after_1") !== null, "rewind_after_1", "removed");
+      check(await readFile(bridge, scope, secondFile, "rewind_after_2", pair) === null, "rewind_after_2", "kept");
+      check(await readFile(bridge, scope, firstFile, "rewind_after_1", pair) !== null, "rewind_after_1", "removed");
     }
   } finally { bridge.close(); }
   await ctx.ports.github.deleteBranch(two, `${prefix}two`);

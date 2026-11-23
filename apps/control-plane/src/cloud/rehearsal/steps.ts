@@ -286,17 +286,50 @@ export async function workspaceRoot(bridge: Bridge, workspaceId: string, step = 
   check(row, step, "identity");
   return row.path;
 }
-export async function writeFile(bridge: Bridge, scope: Record<string, unknown>, path: string, content: string, step: string): Promise<void> {
-  parse(z.object({ kind: z.literal("success") }).passthrough(), await bridge.op("file.write", { ...scope, path, content }), step);
+/** A workspace whose files may live in several repositories (its document's `repositories`). */
+export type FileWorkspace = { id: string; repositories?: readonly { repository: string; checkoutPath: string }[] | undefined };
+
+/** A file request as today's desktop sends it (apps/desktop/src/renderer/platform/bridge/cloud-repository-routing.ts): in a
+ * workspace of several repositories, the repository that holds the path is named and the path goes relative to its
+ * checkout, with no cwd (the worker serves each repository from its own checkout, rooted there; the workspace's own
+ * service is rooted at the first and refuses a path in another). A workspace of one repository is sent as it is. */
+export function fileTarget(scope: Record<string, unknown>, path: string, workspace?: FileWorkspace): Record<string, unknown> {
+  const repositories = workspace?.repositories ?? [];
+  if (repositories.length < 2) return { ...scope, path };
+  const entry = repositories.find(row => path.startsWith(`${row.checkoutPath}/`));
+  if (!entry) throw new RehearsalFailure("file_route", "outside_repositories");
+  return { workspaceId: workspace!.id, repository: entry.repository, path: path.slice(entry.checkoutPath.length + 1) };
 }
-export async function readFile(bridge: Bridge, scope: Record<string, unknown>, path: string, step: string): Promise<string | null> {
-  try {
-    const file = parse(z.object({ kind: z.string(), content: z.string().optional() }).passthrough(), await bridge.op("file.read", { ...scope, path }), step);
-    return file.kind === "text" && typeof file.content === "string" ? file.content : null;
-  } catch (error) {
-    if (error instanceof RehearsalFailure && error.step === step) throw error;
-    return null;
-  }
+
+/** A file reply of a kind other than the one expected, by closed values: `reply:<kind>[:<code>]`. */
+function replyCode(reply: unknown): string {
+  const value = reply as { kind?: unknown; code?: unknown; error?: unknown } | null;
+  const closed = (item: unknown) => typeof item === "string" && /^[A-Za-z0-9_.-]{1,48}$/.test(item) ? item : "other";
+  const code = typeof value?.code === "string" ? value.code : typeof (value?.error as { code?: unknown } | undefined)?.code === "string"
+    ? (value!.error as { code: string }).code : undefined;
+  return `reply:${closed(value?.kind)}${code === undefined ? "" : `:${closed(code)}`}`.slice(0, 80);
+}
+
+export async function writeFile(bridge: Bridge, scope: Record<string, unknown>, path: string, content: string, step: string,
+  workspace?: FileWorkspace): Promise<void> {
+  const reply = await bridge.op("file.write", { ...fileTarget(scope, path, workspace), content });
+  if ((reply as { kind?: unknown } | null)?.kind !== "success") throw new RehearsalFailure(step, replyCode(reply));
+}
+/** A file's text; null when the worker answers `error` (it answers that for a missing file as for any it cannot read).
+ * Any other kind that is not text (binary, too-large, image) fails as `reply:<kind>`. */
+export async function readFile(bridge: Bridge, scope: Record<string, unknown>, path: string, step: string, workspace?: FileWorkspace): Promise<string | null> {
+  const reply = await bridge.op("file.read", fileTarget(scope, path, workspace));
+  const file = reply as { kind?: unknown; content?: unknown } | null;
+  if (file?.kind === "text" && typeof file.content === "string") return file.content;
+  if (file?.kind === "error") return null;
+  throw new RehearsalFailure(step, replyCode(reply));
+}
+/** A file that must hold `expected`: an unreadable one fails as reply:error, other text as `code`. */
+export async function checkText(bridge: Bridge, scope: Record<string, unknown>, path: string, expected: string, step: string, code: string,
+  workspace?: FileWorkspace): Promise<void> {
+  const text = await readFile(bridge, scope, path, step, workspace);
+  check(text !== null, step, "reply:error");
+  check(text === expected, step, code);
 }
 /** The agents a turn may use, in order of preference. Each runs only on a credential its person connected for the
  * organization (Claude and Cursor receive it; Codex goes through the control plane's proxy with it): none runs without one. */
@@ -422,15 +455,16 @@ export async function readEnvironment(ctx: StageContext, repository: string, rep
 }
 
 /** Seeds one file into the account's environment for each repository, but only when nothing would be overwritten: every
- * environment at revision 0 (or empty and this run's own, after an earlier stage cleared it), and the path ignored by
- * every repository. Otherwise nothing is written and the reason is returned. */
+ * environment empty (no variable and no file, at any revision: a cleanup clears one and leaves its revision above 0, and
+ * a later run must still be able to seed it), and the path ignored by every repository. Otherwise nothing is written and
+ * the reason is returned. */
 export async function seedEnvironments(ctx: StageContext, repositories: readonly { repository: string; repositoryId: string }[], content: (index: number) => string):
   Promise<{ seeded: true } | { seeded: false; reason: "environment_exists" | "path_not_ignored" }> {
   const current = [];
   for (const target of repositories) {
     const environment = await readEnvironment(ctx, target.repository, target.repositoryId, "environment_read");
     const ours = ctx.state.created.environments.some(row => row.repositoryId === target.repositoryId);
-    if (!(environment.revision === 0 || ours && environment.empty)) return { seeded: false, reason: "environment_exists" };
+    if (!environment.empty) return { seeded: false, reason: "environment_exists" };
     if (!await ctx.ports.github.ignores(target.repository, ENVIRONMENT_PATH)) return { seeded: false, reason: "path_not_ignored" };
     current.push({ ...target, revision: environment.revision, ours });
   }
