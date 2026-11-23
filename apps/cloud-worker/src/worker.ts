@@ -1011,7 +1011,9 @@ export class CloudWorker {
     if (!entries.length || !checkout) return checkout;
     const outcomes = await fetchPlannedSubmodules(checkoutPath, entries, this.gitEnvironment, checkout.createdBranch ? undefined : { onlyMissing: true });
     const fetched = outcomes.filter(outcome => outcome.fetched).length, skipped = outcomes.filter(outcome => !outcome.fetched && !outcome.kept).length;
-    if (skipped) this.options.log?.(`[submodules] repository ${position}: ${fetched} fetched, ${skipped} skipped`);
+    // atPlan: after a restore, the gitlink its superproject records could not be fetched, so it is at the planned commit.
+    const atPlan = outcomes.filter(outcome => outcome.atPlan).length;
+    if (skipped || atPlan) this.options.log?.(`[submodules] repository ${position}: ${fetched} fetched, ${skipped} skipped${atPlan ? `, ${atPlan} at the planned commit` : ""}`);
     return checkout;
   }
 

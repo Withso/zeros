@@ -140,7 +140,9 @@ async function gitLog(root: string) {
 describe("a checkout whose branch was already there (a restore): only missing submodules", () => {
   it("fetches one a restore left empty, with no Git directory, at its gitlink commit with the pre-push refusal", async () => {
     // An older control plane's restore: the gitlink's folder empty (read-tree -u), .git/modules absent, branch not created.
+    // The restored index records the gitlink, as every restore writes it.
     const f = await fixture();
+    await f.git(f.checkout, "update-index", "--add", "--cacheinfo", `160000,${f.first},vendor/lib`);
     expect(await fetchPlannedSubmodules(f.checkout, [f.entry], f.environment, { onlyMissing: true })).toEqual([{ path: "vendor/lib", fetched: true }]);
     const target = join(f.checkout, "vendor/lib"), gitDir = join(f.checkout, ".git", f.entry.gitDir);
     expect(await f.git(target, "rev-parse", "HEAD")).toBe(f.first);
@@ -195,21 +197,29 @@ describe("a checkout whose branch was already there (a restore): only missing su
     // The parent is there (kept); its child's folder is empty and its Git directory absent: fetched into the parent's.
     await fetchPlannedSubmodules(f.checkout, [f.entry], f.environment);
     await mkdir(join(f.checkout, "vendor/lib/inner"));
+    // The kept parent's own index records its child's gitlink.
+    await f.git(join(f.checkout, "vendor/lib"), "update-index", "--add", "--cacheinfo", `160000,${f.first},inner`);
     const child = { ...f.entry, path: "vendor/lib/inner", gitDir: `${f.entry.gitDir}/modules/${digest("inner")}` };
+    // A planned child the kept parent's index no longer records as a submodule: left alone.
+    await mkdir(join(f.checkout, "vendor/lib/gone"));
+    const gone = { ...f.entry, path: "vendor/lib/gone", gitDir: `${f.entry.gitDir}/modules/${digest("gone")}` };
     const parentHead = await f.git(join(f.checkout, "vendor/lib"), "rev-parse", "HEAD");
-    expect(await fetchPlannedSubmodules(f.checkout, [f.entry, child], f.environment, { onlyMissing: true }))
-      .toEqual([{ path: "vendor/lib", fetched: false, kept: true }, { path: "vendor/lib/inner", fetched: true }]);
+    expect(await fetchPlannedSubmodules(f.checkout, [f.entry, child, gone], f.environment, { onlyMissing: true }))
+      .toEqual([{ path: "vendor/lib", fetched: false, kept: true }, { path: "vendor/lib/inner", fetched: true }, { path: "vendor/lib/gone", fetched: false, kept: true }]);
+    expect(existsSync(join(f.checkout, ".git", gone.gitDir))).toBe(false);
     expect(await f.git(join(f.checkout, "vendor/lib/inner"), "rev-parse", "--absolute-git-dir")).toBe(join(f.checkout, ".git", child.gitDir));
     expect(await f.git(join(f.checkout, "vendor/lib"), "rev-parse", "HEAD")).toBe(parentHead);
     // Missing parent, fetched now: its child follows the created-branch rule (here its folder isn't in the parent's tree).
     const other = { ...f.entry, path: "vendor/other", gitDir: `modules/${digest("vendor/other")}` };
     await mkdir(join(f.checkout, "vendor/other"));
+    await f.git(f.checkout, "update-index", "--add", "--cacheinfo", `160000,${f.first},vendor/other`);
     const otherChild = { ...other, path: "vendor/other/inner", gitDir: `${other.gitDir}/modules/${digest("inner")}` };
     expect(await fetchPlannedSubmodules(f.checkout, [other, otherChild], f.environment, { onlyMissing: true }))
       .toEqual([{ path: "vendor/other", fetched: true }, { path: "vendor/other/inner", fetched: false }]);
     // Missing but unreachable, or unsafe: skipped (not kept), and so are its submodules.
     const broken = { ...f.entry, path: "vendor/broken", repository: "acme/missing", gitDir: `modules/${digest("vendor/broken")}` };
     await mkdir(join(f.checkout, "vendor/broken"));
+    await f.git(f.checkout, "update-index", "--add", "--cacheinfo", `160000,${f.first},vendor/broken`);
     const brokenChild = { ...broken, path: "vendor/broken/inner", repository: "acme/lib", gitDir: `${broken.gitDir}/modules/${digest("inner")}` };
     await writeFile(join(f.root, "gitconfig"), `${await readFile(join(f.root, "gitconfig"), "utf8")}[url "file://${join(f.root, "nothing.git")}"]\n\tinsteadOf = https://github.com/acme/missing.git\n`);
     expect(await fetchPlannedSubmodules(f.checkout, [broken, brokenChild, { ...f.entry, commit: "HEAD" }], f.environment, { onlyMissing: true }))

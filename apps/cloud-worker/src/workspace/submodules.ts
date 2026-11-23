@@ -17,8 +17,9 @@ import { checkoutGit } from "./checkout";
 import type { WorkerConfig } from "./scope";
 
 export type WorkerSubmodule = NonNullable<WorkerConfig["workspace"]["submodules"]>[number];
-/** kept: left as it was found (onlyMissing), neither fetched nor skipped. */
-export type SubmoduleOutcome = { path: string; fetched: boolean; kept?: true };
+/** kept: left as it was found (onlyMissing), neither fetched nor skipped. atPlan: after a restore, the gitlink its
+ * superproject records could not be fetched (a commit never pushed), so it is at the create-time plan's commit. */
+export type SubmoduleOutcome = { path: string; fetched: boolean; kept?: true; atPlan?: true };
 export type FetchSubmodulesOptions = { onlyMissing?: boolean };
 export const SUBMODULE_PUSH_REFUSED = "Pushing from a submodule isn't available in cloud workspaces yet. Push it from your own computer.";
 const FETCH_TIMEOUT_MS = 15 * 60_000;
@@ -82,6 +83,24 @@ async function missing(root: string, entry: WorkerSubmodule): Promise<boolean> {
   return entry.gitDir.split("/").length === 2 || await realpath(parent).catch(() => null) === parent && await kind(parent) === "dir";
 }
 
+/** The gitlink a superproject's index records at `path` (relative to `containing`, its work tree): the commit to check
+ * out after a restore, which may not be the create-time plan's (the person moved it). Null when the path is no longer a
+ * submodule there. Read-only, in the superproject only; never runs Git in the submodule's folder. */
+async function recordedGitlink(containing: string, path: string, environment: NodeJS.ProcessEnv): Promise<string | null> {
+  const listed = await checkoutGit(containing, environment)(["ls-files", "-s", "--", path]).catch(() => "");
+  const match = /^160000 ([0-9a-f]{40}|[0-9a-f]{64}) 0\t(.*)$/.exec(listed.split("\n")[0] ?? "");
+  return match && match[2] === path ? match[1]! : null;
+}
+
+/** Where a planned submodule's gitlink is recorded: the checkout itself, or the planned parent whose Git directory holds
+ * its own (a nested one's gitDir is its parent's plus modules/<digest>). Null when that parent is not planned. */
+function containingRepository(root: string, entry: WorkerSubmodule, entries: readonly WorkerSubmodule[]): { path: string; relative: string } | null {
+  if (entry.gitDir.split("/").length === 2) return { path: root, relative: entry.path };
+  const parentDir = entry.gitDir.split("/").slice(0, -2).join("/");
+  const parent = entries.find(candidate => candidate.gitDir === parentDir && entry.path.startsWith(`${candidate.path}/`));
+  return parent ? { path: join(root, parent.path), relative: entry.path.slice(parent.path.length + 1) } : null;
+}
+
 /** One checkout's planned submodules, parents first (the plan's order). Never throws: each is fetched or skipped
  * (or, with onlyMissing, kept as it is unless still missing; a child of one fetched in this pass as without it). */
 export async function fetchPlannedSubmodules(checkoutPath: string, entries: readonly WorkerSubmodule[], environment: NodeJS.ProcessEnv = {},
@@ -96,11 +115,23 @@ export async function fetchPlannedSubmodules(checkoutPath: string, entries: read
       outcomes.push({ path: entry.path, fetched: false, kept: true });
       continue;
     }
-    const fetched = root !== null && safe(entry) && !under(entry, failed)
-      && await fetchOne(root, entry, environment).catch(() => false);
+    // After a restore: the gitlink the restored superproject records, which the person may have moved since the create.
+    // No gitlink there any more: the path is no longer a submodule, and its folder is left alone.
+    let recorded: string | null | undefined;
+    if (options.onlyMissing && root !== null && safe(entry) && !under(entry, failed) && !under(entry, fetchedNow)) {
+      const containing = containingRepository(root, entry, entries);
+      recorded = containing ? await recordedGitlink(containing.path, containing.relative, environment) : null;
+      if (recorded === null) { outcomes.push({ path: entry.path, fetched: false, kept: true }); continue; }
+    }
+    let atPlan = false;
+    let fetched = root !== null && safe(entry) && !under(entry, failed)
+      && await fetchOne(root, recorded ? { ...entry, commit: recorded } : entry, environment).catch(() => false);
+    // A recorded commit nobody can fetch (never pushed, and no backup held it): the plan's commit instead, said once.
+    if (!fetched && recorded && recorded !== entry.commit && root !== null)
+      fetched = atPlan = await fetchOne(root, entry, environment).catch(() => false);
     if (!fetched) failed.push(entry.path);
     else fetchedNow.push(entry.path);
-    outcomes.push({ path: entry.path, fetched });
+    outcomes.push({ path: entry.path, fetched, ...(atPlan ? { atPlan: true as const } : {}) });
   }
   return outcomes;
 }
