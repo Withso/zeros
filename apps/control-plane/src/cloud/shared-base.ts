@@ -429,7 +429,8 @@ export function foldSharedRepoints<T extends Pick<CloudV2Build, "id" | "reason" 
 }
 
 
-/** How often the builder's hooks run; the build claim runs every tick. */
+/** How often the builder's hooks run. */
+export const SHARED_BASE_CLAIM_MS = 60_000;
 export const SHARED_BASE_REPOINT_MS = 60_000;
 export const SHARED_BASE_MISSING_SCAN_MS = 10 * 60_000;
 export const SHARED_BASE_DELETION_MS = 60 * 60_000;
@@ -692,13 +693,13 @@ export async function dailySnapshotInventory(deps: Pick<SharedBaseSweepDeps, "po
 }
 
 /**
- * The builder's shared base hooks at their cadences, for one tick: cleanup and the build claim (in the background,
- * one at a time), the re-point every minute, the missing-base check every 10 minutes, deletion hourly and the
+ * The builder's shared base hooks at their cadences, for one tick: cleanup and the build claim every minute (in the
+ * background, one at a time), the re-point every minute, the missing-base check every 10 minutes, deletion hourly and the
  * inventory daily. Each hook's failure is logged and retried at its next turn; none blocks the others.
  */
 export class CloudV2SharedBaseSweeper {
   private building: Promise<unknown> | null = null;
-  private readonly last = { repoint: -Infinity, missing: -Infinity, deletion: -Infinity, inventory: -Infinity };
+  private readonly last = { claim: -Infinity, repoint: -Infinity, missing: -Infinity, deletion: -Infinity, inventory: -Infinity };
 
   constructor(private readonly deps: SharedBaseSweepDeps & { onRepointed?(organizationId: string): Promise<void>; now?: () => number }) {}
 
@@ -710,7 +711,8 @@ export class CloudV2SharedBaseSweeper {
       return true;
     };
     const warn = (what: string) => () => deps.logger?.warn(`[cloud-v2] shared base ${what} will retry`);
-    this.building ??= claimSharedBaseBuild(deps).catch(warn("build")).finally(() => { this.building = null; });
+    if (!this.building && due("claim", SHARED_BASE_CLAIM_MS))
+      this.building = claimSharedBaseBuild(deps).catch(warn("build")).finally(() => { this.building = null; });
     if (due("repoint", SHARED_BASE_REPOINT_MS)) {
       const current = await sharedBaseState(deps.bases, { ...deps.scope, runtimeSha256: deps.runtime.sha256, override: deps.override ?? null }).catch(() => null);
       if (current?.state === "ready")
