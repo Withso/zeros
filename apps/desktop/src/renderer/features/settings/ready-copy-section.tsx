@@ -9,7 +9,7 @@ import { buildCloudReadyCopy, getCloudReadyCopy, getCloudReadyCopyOutput, type C
 import { message } from "./cloud-computer-store";
 import { relativeAge } from "./cloud-computer-model";
 import { BuildHistoryItem } from "./build-history";
-import { readyCopyFailureLine, readyCopySubmodulesLine, readyCopyTriggerLabel } from "./ready-copy-copy";
+import { readyCopyBaseLine, readyCopyFailureLine, readyCopySubmodulesLine, readyCopyTriggerLabel } from "./ready-copy-copy";
 import { SettingsGroup, SettingsRow } from "./settings-ui";
 
 /** Null: no ready copies here (setting off, older control plane, or not visible to this reader). */
@@ -58,7 +58,11 @@ export function ReadyCopySection({ organizationId, projectId, active }: { organi
   const show = async (generation: number) => {
     try { setOutput({ generation, text: await getCloudReadyCopyOutput(organizationId, projectId, generation) }); } catch (cause) { setError(message(cause)); }
   };
-  if (!status && !copy.history?.length) return null;
+  if (!status && !copy.history?.length) {
+    if (!copy.base) return null;
+    const waiting = readyCopyBaseLine(copy.base, now);
+    return <SettingsGroup><SettingsRow label={waiting.label} hint={waiting.hint} /></SettingsGroup>;
+  }
   return (
     <SettingsGroup>
       {error && <MessageRow tone="error" role="alert" flush>{error}</MessageRow>}

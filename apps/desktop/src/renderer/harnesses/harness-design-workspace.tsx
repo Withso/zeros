@@ -8,7 +8,7 @@
 // production components.
 
 import { DESIGN_MAX_FRAMES_PER_PAGE } from "@zeros/protocol/design-pages";
-import { DESIGN_COMPONENT_IDENTITY_CAPABILITY } from "@zeros/protocol/design-catalog";
+import { DESIGN_COMPONENT_BINDINGS_CAPABILITY, DESIGN_COMPONENT_IDENTITY_CAPABILITY } from "@zeros/protocol/design-catalog";
 import "../../../../../styles/zeros-tokens.css";
 import "../../../../../styles/semantic-tokens.css";
 import "../../../../../styles/globals.css";
@@ -276,6 +276,27 @@ const styleOriginsHarness = new URLSearchParams(window.location.search).has(
 // every option kind, rendered with the engine's own template layer.
 const componentOptionsHarness = new URLSearchParams(window.location.search).has("componentOptions");
 const legacyMainHarness = componentOptionsHarness && new URLSearchParams(window.location.search).has("legacyMain");
+// With ?olderOverrides the instance carries what an earlier app wrote: a part
+// override and a visual style on its host, beside a size the app still writes.
+const olderOverridesHarness = componentOptionsHarness && new URLSearchParams(window.location.search).has("olderOverrides");
+// With ?frameRootInstance the home frame's root is the instance itself, as a
+// duplicated main is: the frame's one root layer, marked data-zeros-frame-root.
+const frameRootInstanceHarness = componentOptionsHarness && new URLSearchParams(window.location.search).has("frameRootInstance");
+// With ?gatedSize a sheet the engine never reads sizes the composer only at a
+// Density no default shows (a Button at its default size): only the runtime's
+// gated candidates bind its height, on the main and on the instance.
+const gatedSizeHarness = componentOptionsHarness && new URLSearchParams(window.location.search).has("gatedSize");
+const GATED_SIZE_RULE = '.composer[data-density="compact"] { height: 200px; }';
+// With ?noBindings the engine predates bindings: it advertises none and its records carry none.
+const noBindingsHarness = new URLSearchParams(window.location.search).has("noBindings");
+/** A component's record as the engine reports it, with or without bindings. */
+function harnessComponentSummary(source: string): ReturnType<typeof designComponentSummaryOf> {
+  const summary = designComponentSummaryOf(source);
+  if (!summary || !noBindingsHarness) return summary;
+  const { bindings: _bindings, ...rest } = summary;
+  return rest;
+}
+const HARNESS_FRAME_IDENTITY = frameRootInstanceHarness ? { kind: "instance" as const, nodeId: "home-composer" } : null;
 const COMPONENT_OPTIONS_SOURCE = `<!doctype html>
 <html lang="en">
   <head>
@@ -299,7 +320,7 @@ const COMPONENT_OPTIONS_SOURCE = `<!doctype html>
     <style>
       :root { --blue-primary: royalblue; }
       body { margin: 0; font-family: system-ui, sans-serif; background: white; }
-      .composer { box-sizing: border-box; width: var(--zd-width); display: flex; flex-direction: column; gap: var(--zd-gap); padding: 16px;
+      .composer { box-sizing: border-box; width: var(--zd-width); --chip-round: var(--zd-gap); display: flex; flex-direction: column; gap: var(--zd-gap); padding: 16px;
         color: var(--zd-ink); transition: box-shadow var(--zd-motion-duration) var(--zd-motion-easing); }
       .chips { display: flex; gap: 6px; }
       .chip { padding: 2px 8px; border-radius: 6px; background: gainsboro; }
@@ -334,14 +355,20 @@ function renderHarnessComponentFrame(source: string, variant: string | null = nu
   const rendered = renderComponentTemplate(source, { scope, ids: "copy", budget: createComponentTemplateBudget(), document: true });
   const shownState = componentStateVariantOf(declaration, variant)?.state;
   const html = shownState ? showDesignComponentState(rendered, shownState) : rendered;
-  return html.replace(/<\/head>/i, `<style data-zeros-options>:root { ${componentOptionCss(declaration, values, scope)} }</style></head>`);
+  // As a stylesheet the main links (ui.css) would: a rule the engine never
+  // reads, which reaches the Gap control only through the main's own
+  // --chip-round, so only the runtime can bind cc-chips' corner radius.
+  return html.replace(/<\/head>/i, `<style data-zeros-options>:root { ${componentOptionCss(declaration, values, scope)} }</style>` +
+    `<style data-harness-linked>.chips { border-radius: var(--chip-round); }${gatedSizeHarness ? ` ${GATED_SIZE_RULE}` : ""}</style></head>`);
 }
 
 // The home frame places one Chat composer, expanded as the engine expands an
 // instance: the definition's markup with the instance's values, its inner
 // layers as parts with its part overrides, and its values on a
 // zero-specificity rule for its host.
-const HARNESS_INSTANCE = '<zd-chat-composer data-oid="home-composer" width="800" mode="plan"></zd-chat-composer>';
+const HARNESS_INSTANCE = olderOverridesHarness
+  ? '<zd-chat-composer data-oid="home-composer" width="800" mode="plan" zd-style-cc-send="opacity: 0.5" style="height: 300px; opacity: 0.8"></zd-chat-composer>'
+  : '<zd-chat-composer data-oid="home-composer" width="800" mode="plan"></zd-chat-composer>';
 let harnessComponentDefinition = COMPONENT_OPTIONS_SOURCE;
 // With ?legacyMain the composer starts as a components/ file, not a main frame.
 let harnessMainMoved = false;
@@ -351,7 +378,7 @@ const harnessInstanceFailures = new Set<string>();
 function harnessInstanceAttributes(source: string): Map<string, Map<string, string>> {
   const hosts = new Map<string, Map<string, string>>();
   for (const element of new DOMParser().parseFromString(source, "text/html").querySelectorAll("zd-chat-composer[data-oid]"))
-    hosts.set(element.getAttribute("data-oid")!, new Map([...element.attributes].filter((attribute) => attribute.name !== "data-oid").map((attribute) => [attribute.name, attribute.value])));
+    hosts.set(element.getAttribute("data-oid")!, new Map([...element.attributes].filter((attribute) => !attribute.name.startsWith("data-")).map((attribute) => [attribute.name, attribute.value])));
   return hosts;
 }
 
@@ -440,7 +467,7 @@ function harnessPartStyleSource(source: string, nodeId: string, styles: Record<s
 
 /** What the engine reports about the home frame's instance. */
 function harnessInstancesRecord(source: string, notApplied?: "last-good" | "defaults") {
-  const summary = designComponentSummaryOf(harnessComponentDefinition)!;
+  const summary = harnessComponentSummary(harnessComponentDefinition)!;
   const slotted = harnessSlottedLayers(source);
   const hosts = Object.fromEntries([...harnessInstanceAttributes(source)].map(([oid, attributes]) => {
     const overrides = harnessPartOverrides(attributes);
@@ -454,7 +481,7 @@ function harnessInstancesRecord(source: string, notApplied?: "last-good" | "defa
   if (!Object.keys(hosts).length) return undefined;
   const legacy = legacyMainHarness && !harnessMainMoved;
   const record = { components: { "chat-composer": { elements: summary.elements, reach: summary.reach,
-    file: legacy ? "components/chat-composer.html" : "pricing.html", frame: !legacy } }, hosts,
+    file: legacy ? "components/chat-composer.html" : "pricing.html", frame: !legacy, ...(summary.bindings ? { bindings: summary.bindings } : {}) } }, hosts,
     ...(notApplied ? { notApplied } : {}) };
   let hash = 0x811c9dc5;
   for (const character of JSON.stringify(record)) hash = Math.imul(hash ^ character.charCodeAt(0), 0x01000193) >>> 0;
@@ -522,7 +549,10 @@ const STYLE_ORIGINS_HOME_SOURCE = `<!doctype html>
     </main>
   </body>
 </html>`;
-const homeSource = styleOriginsHarness && componentOptionsHarness
+const homeAuthoredSource = styleOriginsHarness && frameRootInstanceHarness
+  ? STYLE_ORIGINS_HOME_SOURCE.replace(/<main data-oid="home-main" data-zeros-frame-root>[\s\S]*<\/main>/,
+    HARNESS_INSTANCE.replace('data-oid="home-composer"', 'data-oid="home-composer" data-zeros-frame-root'))
+  : styleOriginsHarness && componentOptionsHarness
   ? STYLE_ORIGINS_HOME_SOURCE.replace(/(\s*)<\/main>/, `$1  ${HARNESS_INSTANCE}$1</main>`)
   : styleOriginsHarness
   ? STYLE_ORIGINS_HOME_SOURCE
@@ -602,6 +632,7 @@ const homeSource = styleOriginsHarness && componentOptionsHarness
     </main>
   </body>
 </html>`;
+const homeSource = gatedSizeHarness ? homeAuthoredSource.replace(/<\/head>/i, `<style data-harness-linked>${GATED_SIZE_RULE}</style></head>`) : homeAuthoredSource;
 
 const pricingSource = componentOptionsHarness ? COMPONENT_OPTIONS_SOURCE : `<!doctype html>
 <html data-oid="pricing-html">
@@ -819,7 +850,7 @@ async function main() {
         nodeCount: 12,
         modifiedAt: 1,
         sourceVersion: HOME_SOURCE_VERSION,
-        componentIdentity: null,
+        componentIdentity: HARNESS_FRAME_IDENTITY,
         ...(componentOptionsHarness ? { instances: harnessInstancesRecord(homeSource) } : {}),
       },
       {
@@ -834,7 +865,7 @@ async function main() {
         modifiedAt: 2,
         sourceVersion: PRICING_SOURCE_VERSION,
         componentIdentity: componentOptionsHarness && !legacyMainHarness ? { kind: "main", name: "chat-composer" } : null,
-        ...(componentOptionsHarness ? { component: designComponentSummaryOf(pricingSource)! } : {}),
+        ...(componentOptionsHarness ? { component: harnessComponentSummary(pricingSource)! } : {}),
       },
     ],
     tokens: tokenPillsHarness || styleOriginsHarness
@@ -1023,7 +1054,7 @@ async function main() {
       nodeCount: 12,
       modifiedAt: 1,
       sourceVersion: HOME_SOURCE_VERSION,
-      componentIdentity: null,
+      componentIdentity: HARNESS_FRAME_IDENTITY,
       source: homeSource,
       srcDoc: withDesignRuntime(homeSource, HOME_SOURCE_VERSION),
       tree: [],
@@ -1262,7 +1293,7 @@ async function main() {
     componentGeneration += 1;
     const sourceVersion = componentGeneration.toString(16).padStart(24, "c").slice(-24);
     const previous = currentWorkspaceSnapshot.frames.find((frame) => frame.file === "pricing.html")!;
-    const summary = designComponentSummaryOf(source)!;
+    const summary = harnessComponentSummary(source)!;
     const frame = { ...previous, sourceVersion, modifiedAt: previous.modifiedAt + 1,
       componentIdentity: componentOptionsHarness && (!legacyMainHarness || harnessMainMoved) ? { kind: "main" as const, name: "chat-composer" } : null,
       component: notApplied ? { ...summary, notApplied } : summary };
@@ -1452,6 +1483,7 @@ async function main() {
     supportsEngineCapability: (capability: string) => capability === "design.copy-placement.v1" ||
       capability === "design.linked-component-copy.v1" ||
       capability === DESIGN_COMPONENT_IDENTITY_CAPABILITY ||
+      !noBindingsHarness && capability === DESIGN_COMPONENT_BINDINGS_CAPABILITY ||
       pagesHarness && capability === "design.canvas-items.v1" ||
       scopedMutationsHarness && capability === "design.mutation-snapshots.v1" ||
       lazyPreparationHarness && ["design.preparation.v1", "design.catalog.read.v1"].includes(capability),
@@ -1583,10 +1615,12 @@ async function main() {
         designShortcutOperations.push("frames:confirmed");
         return { type: "WORKSPACE_RESPONSE", result: { snapshot: currentWorkspaceSnapshot } };
       }
-      if (layoutGestureHarness && message.op === "design.canvas.update") {
+      // A frame's box alone, as a frame-root instance's edge writes it when a
+      // control drives the root's size on the other axis.
+      if ((layoutGestureHarness || componentOptionsHarness) && message.op === "design.canvas.update") {
         const params = message.params!;
         designShortcutOperations.push("canvas:waiting");
-        if (!measureManipulationHarness)
+        if (layoutGestureHarness && !measureManipulationHarness)
           await new Promise((resolve) => window.setTimeout(resolve, 700));
         // Record the request, then clamp exactly like the engine route.
         const requests = ((window as typeof window & {
@@ -2169,13 +2203,15 @@ async function main() {
           operation.type === "component.set-option" || operation.type === "component.save-variant" ||
           (operation.type === "node.set-styles" && transaction.documentId === "harness:pricing.html" && (operation.stateContext ?? "default") !== "default"));
         // A slot's writes as the adapter makes them: a layer moved or drawn
-        // into it, and the layers a Reset to default deletes.
+        // into it, and the layers a Reset to default deletes. A reset of an
+        // instance's own style is one of its writes too, so undo restores it.
         const slotted = new Set([...harnessSlottedLayers(currentHomeSource).values()].flatMap((slots) => Object.values(slots).flat()));
         const movedIntoSlot = new Set((transaction?.operations ?? []).flatMap((operation) =>
           operation.type === "node.move" && designSlotOfNodeId(String(operation.parentId ?? "")) ? [String(operation.nodeId)] : []));
         const instanceWrite = transaction?.operations?.length && transaction.documentId === "harness:home.html" &&
           transaction.operations.every((operation) => operation.type === "node.set-attribute" ||
-            (operation.type === "node.set-styles" && (!!designPartOfNodeId(String(operation.nodeId ?? "")) || movedIntoSlot.has(String(operation.nodeId)))) ||
+            (operation.type === "node.set-styles" && (!!designPartOfNodeId(String(operation.nodeId ?? "")) || movedIntoSlot.has(String(operation.nodeId)) ||
+              harnessInstanceAttributes(currentHomeSource).has(String(operation.nodeId)))) ||
             (operation.type === "node.move" && !!designSlotOfNodeId(String(operation.parentId ?? ""))) ||
             (operation.type === "node.set-html" && operation.mode === "append" && !!designSlotOfNodeId(String(operation.nodeId ?? ""))) ||
             (operation.type === "node.delete" && slotted.has(String(operation.nodeId ?? ""))));

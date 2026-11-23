@@ -1,3 +1,4 @@
+import { cloudV2RetentionListSignal } from "../store.js";
 import { Hono, type Context, type Handler } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import { z } from "zod";
@@ -58,7 +59,7 @@ export function createCloudTeamRoutes(sharing: CloudTeamSharing, document: (valu
     const parsed = TeamListSchema.safeParse(c.req.query());
     if (!parsed.success) throw new HttpError(400,"invalid_request","Invalid workspace filters");
     const result = await sharing.list(c.get("user"),parsed.data,owns(c));
-    return c.json({ ...result,workspaces: result.workspaces.map(document) });
+    return c.json({ ...result,workspaces: result.workspaces.map(document),...cloudV2RetentionListSignal() });
   }));
   app.get("/v1/cloud-v2/workspaces/by-number/:organization/:number",share(async c => {
     const slug = c.req.param("organization")!, number = c.req.param("number")!;

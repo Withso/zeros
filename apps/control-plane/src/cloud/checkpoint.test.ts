@@ -442,6 +442,24 @@ describe("cloud v2 checkpoints", () => {
     expect(readFileSync(join(w.newRepo, "k.txt"), "utf8")).toBe("kept\n");
   });
 
+  it("still saves an edit Git was told to assume unchanged when clearing that mark fails", () => {
+    const w = workspaces(), key = randomBytes(32), archive = join(w.root, "assumed.zck");
+    w.git(w.oldRepo, "update-index", "--assume-unchanged", "a.txt");
+    w.write(join(w.oldRepo, "a.txt"), "assumed edit\n");
+    // Git fails only where the capture clears the mark: it must fall back to the index it builds itself, not go on.
+    const bin = join(w.root, "failing-bin");
+    w.write(join(bin, "git"), `#!/bin/sh\ncase " $* " in *" --no-assume-unchanged "*) exit 1 ;; esac\nexec ${execFileSync("which", ["git"], { encoding: "utf8" }).trim()} "$@"\n`);
+    chmodSync(join(bin, "git"), 0o755);
+    const env = { ...w.env, PATH: `${bin}:${w.env.PATH}` };
+    // The system shell's startup may put /bin first: the failing Git must stay the one the capture runs.
+    const result = run([`export PATH='${env.PATH}'`, ...checkpointArchiveSteps({ checkoutPath: w.oldRepo, home: w.oldHome, baseBranch: "main", key }),
+      `cp "$work/checkpoint.zck" '${archive}'`, "report \"zeros-checkpoint-saved bytes=$bytes sha256=$sha\""], env);
+    expect(parseCheckpointResult(result.stdout).ok).toBe(true);
+    w.git(w.root, "clone", "-q", w.origin, w.newRepo);
+    expect(restore({ home: w.newHome, repo: w.newRepo, key, sha256: sha(archive), from: archive }, w.env).parsed).toEqual({ ok: true });
+    expect(readFileSync(join(w.newRepo, "a.txt"), "utf8")).toBe("assumed edit\n");
+  });
+
   it("refuses a checkpoint that was changed, cut short, or opened with another key", () => {
     const w = workspaces();
     w.write(join(w.oldRepo, "notes.txt"), randomBytes(2 * 1024 * 1024 + 5).toString("hex"));
@@ -1291,6 +1309,26 @@ describe("a workspace of several repositories", () => {
     expect(readFileSync(join(newApi, "README.md"), "utf8")).toBe("api\n");
   });
 
+  it("fails the capture when a step in a later repository fails, even one with no check of its own", () => {
+    const p = project(), key = randomBytes(32), out = join(p.root, "checkpoint.zck"), web = p.folder(p.oldHome, "web");
+    p.write(join(web, "page.html"), "<p>committed</p>\n"); p.git(web, "add", "page.html"); p.git(web, "commit", "-q", "-m", "page");
+    // A commit object the bundle needs is gone: only `git bundle create` notices, and nothing checks it but errexit.
+    const commit = p.git(web, "rev-parse", "HEAD");
+    rmSync(join(web, ".git", "objects", commit.slice(0, 2), commit.slice(2)));
+    expect(save(p, key, out).parsed).toMatchObject({ ok: false, code: "checkpoint_failed" });
+  });
+
+  it("fails the restore when a step in a later repository fails, even one with no check of its own", () => {
+    const p = project(), key = randomBytes(32), out = join(p.root, "checkpoint.zck");
+    p.write(join(p.folder(p.oldHome, "web"), "README.md"), "web edited\n");
+    expect(save(p, key, out).parsed).toMatchObject({ ok: true });
+    mkdirSync(join(p.newHome, "zeros-app"), { recursive: true });
+    for (const name of ["api", "web"] as const) p.git(p.root, "clone", "-q", p.origins[name], p.folder(p.newHome, name));
+    // Another Git holds the second checkout's index: its read-tree fails, and nothing checks it but errexit.
+    p.write(join(p.folder(p.newHome, "web"), ".git", "index.lock"), "");
+    expect(load(p, key, out, sha(out)).parsed).toEqual({ ok: false, code: "checkpoint_restore_failed" });
+  });
+
   it("is reused only while every repository is unchanged", () => {
     const p = project(), key = randomBytes(32), out = join(p.root, "checkpoint.zck");
     const first = save(p, key, out);
@@ -1500,15 +1538,16 @@ describe("retention backups and the stop probe", () => {
   const digest = (value: string) => createHash("sha256").update(value).digest("hex");
 
   it("keeps the stop checkpoint command byte for byte without the backup option, for one repository and for several", () => {
-    // Digests of the command as it was before retention backups existed.
-    expect(digest(checkpointCommand(PIN))).toBe("fefc12a759c38abc8217d209ec18ef24a3e34bf6860b2f17a726b7ca64039a56");
-    expect(digest(checkpointCommand({ ...PIN, checkoutPath: "/home/user/project/app", repositories: [
-      { checkoutPath: "/home/user/project/api", baseBranch: "trunk" }, { checkoutPath: "/home/user/project/docs", baseBranch: "main" }] })))
-      // Later repositories capture their own seeded environment files (environment.tar, left out of ignored.tar);
-      // the first repository's part of the command is unchanged, as the one-repository digest above shows.
-      .toBe("1e25ac142a6aa3c7dbec5b6f950118d512b46de158c7453dd2c97cdbfbb72a37");
-    expect(digest(checkpointCommand({ ...PIN, reuse: { fingerprint: "f".repeat(64), base: "a".repeat(40) } })))
-      .toBe("b6e28ffb57f9b435ae69b616cecb9e09827b66a39ccca776f78b57fd87d5a524");
+    const several = checkpointCommand({ ...PIN, checkoutPath: "/home/user/project/app", repositories: [
+      { checkoutPath: "/home/user/project/api", baseBranch: "trunk" }, { checkoutPath: "/home/user/project/docs", baseBranch: "main" }] });
+    const reused = checkpointCommand({ ...PIN, reuse: { fingerprint: "f".repeat(64), base: "a".repeat(40) } });
+    // The commands from before retention backups existed, changed once by the errexit fix: unhide's failure is its own,
+    // and each later repository's part runs with errexit on (both change the fingerprint template, hence every digest).
+    // Later repositories capture their own seeded environment files (environment.tar, left out of ignored.tar).
+    expect([digest(checkpointCommand(PIN)), digest(several), digest(reused)]).toEqual([
+      "b7eabab230886643483f17ab8ca3f1621ca989372b253197e7e45efff2232d4e",
+      "c1437d45491dd1fa41735a8ff5d489ec410b18de87e570da87eda4efed2338d9",
+      "f044f7a1204cbfbb15231d78e9f0a7c64b9dddb96a8218f2a2b748aecd33e152"]);
     expect(checkpointCommand({ ...PIN, backup: false })).toBe(checkpointCommand(PIN));
     // The stop checkpoint switches the worker off before anything is read; a retention stop does it as its own step.
     expect(checkpointCommand(PIN).indexOf(WORKER_SERVICE_OFF[1])).toBeLessThan(checkpointCommand(PIN).indexOf("git"));

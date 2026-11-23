@@ -122,6 +122,18 @@ it("removes only the named checkouts, and their owner directory once it is empty
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
+it("fails, rather than leave a checkout in place, when its Git data cannot be removed", async () => {
+  const root = await mkdtemp(join(tmpdir(), "zeros-prune-fail-")), shims = await mkdtemp(join(tmpdir(), "zeros-prune-fail-shims-"));
+  try {
+    await mkdir(join(root, "withso/zeros/.git"), { recursive: true });
+    await writeFile(join(root, "withso/zeros/README.md"), "kept?\n");
+    await writeFile(join(shims, "rm"), `#!/bin/bash\ncase "$*" in *"/.git"*) exit 1 ;; esac\nexec /bin/rm "$@"\n`, { mode: 0o755 });
+    const command = pruneCloudRepositories(["withso/zeros"]).replaceAll("/home/user", root).replace("bash -lc", "bash -c");
+    // The system shell's startup may put /bin first: the failing rm must stay the one used.
+    await expect(promisify(execFile)("bash", ["-c", `export PATH='${shims}:${process.env.PATH}'; ${command}`])).rejects.toThrow();
+  } finally { await rm(root, { recursive: true, force: true }); await rm(shims, { recursive: true, force: true }); }
+});
+
 it("removes a pruned checkout's Git data at once and deletes its files off the create's critical path", async () => {
   // Deleting a large checkout on a lazily restored disk took 16.6 s on Alpha.
   const root = await mkdtemp(join(tmpdir(), "zeros-prune-slow-")), shims = await mkdtemp(join(tmpdir(), "zeros-prune-shims-"));

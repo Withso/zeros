@@ -97,9 +97,9 @@ function scopedLint(previous: DesignWorkspaceSnapshotWire, lint: DesignWorkspace
   const frames = new Set([...(previous.preparation?.descriptions ?? []).map(description => description.file), ...previous.frames.map(frame => frame.file)]);
   const keeps = (file: string) => !checked.has(file) && (!frames.has(file) || catalog.has(file));
   const violations = previous.lint.violations.filter(violation => keeps(violation.file));
-  if (violations.length === 0) return lint;
+  // Files checked clean stay checked too, or the next preparation re-lints them.
   return { ...lint, checkedFiles: [...new Set([...previous.lint.checkedFiles.filter(keeps), ...lint.checkedFiles])],
-    violations: [...violations, ...lint.violations] };
+    violations: violations.length ? [...violations, ...lint.violations] : lint.violations };
 }
 
 /** Each page lists exactly its descriptions, in order, and no description

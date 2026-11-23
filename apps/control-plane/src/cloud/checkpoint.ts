@@ -396,7 +396,8 @@ function repositoryCapture(environment: string | false, attachments = true, seed
     // Edits Git was told to ignore are still the user's work. A skip-worktree
     // file missing from disk is sparse, not deleted, so it keeps its mark.
     "  unhide() {",
-    "    { scratch ls-files -z -v | grep -z '^[a-z] ' || true; } | cut -z -c3- | scratch update-index -z --no-assume-unchanged --stdin",
+    // Called where errexit is off (`if ! { ... && unhide && addall; }`): a failed step must fail it, for the fallback below.
+    "    { scratch ls-files -z -v | grep -z '^[a-z] ' || true; } | cut -z -c3- | scratch update-index -z --no-assume-unchanged --stdin || return 1",
     "    while IFS= read -r -d '' path; do if [ -e \"$path\" ] || [ -L \"$path\" ]; then printf '%s\\0' \"$path\"; fi; done \\",
     "      < <(scratch ls-files -z -t | grep -z '^S ' | cut -z -c3- || true) | scratch update-index -z --no-skip-worktree --stdin",
     "  }",
@@ -536,7 +537,7 @@ function otherRepositoriesCapture(repositories: readonly CheckpointRepository[],
     if (!/^[^\0\r\n]{1,255}$/.test(entry.baseBranch) || entry.baseBranch.startsWith("-")) throw new Error("Invalid checkpoint base branch");
     return [
       `step=repository-${i}`,
-      "(",
+      "set +e; (", "  set -e",
       `  repo=${quote(checkedPath(entry.checkoutPath))} base=${quote(entry.baseBranch)} cleanup_refs='' reported=''`,
       "  trap 'code=$?; if [ -n \"$cleanup_refs\" ]; then git -C \"$repo\" for-each-ref --format=\"%(refname)\" refs/zeros-checkpoint/ 2>/dev/null | while read -r ref; do git -C \"$repo\" update-ref -d \"$ref\" || true; done; fi; if [ \"$code\" -ne 0 ] && [ -z \"$reported\" ]; then printf \"zeros-checkpoint-error checkpoint_failed %s\\n\" \"$step\" >&3; fi' EXIT",
       // outer_work: names the capture itself uses (parent, scratch, own, keep) must not be taken here.
@@ -548,12 +549,16 @@ function otherRepositoriesCapture(repositories: readonly CheckpointRepository[],
       ...repositoryBundle().map(line => `  ${line}`),
       `  { printf 'repository ${i}\\n'; grep -v -E '^(index|worktree) ' "$m" || true; printf 'index-tree %s\\nworktree-tree %s\\nbase %s\\n' "\${staged_tree:--}" "\${tree:--}" "\${base_commit:--}";`,
       `    cat "$work/parts"; [ -n "$digests" ] || printf 'undigested\\n'; } > "$outer_work/repository-${i}"`,
-      ") || { reported=1; exit 3; }",
+      ...SUBSHELL_END,
       `if grep -qx undigested "$work/repository-${i}"; then digests=''; fi`,
       `cat "$work/repository-${i}" >> "$work/parts"`,
     ];
   });
 }
+
+/** Closes a `set +e; ( set -e ... )` part: bash ignores errexit inside a subshell whose status `||` or `if` tests, so
+ * the part runs with it on and its status is checked here. A failed part has already printed its one error line. */
+const SUBSHELL_END = [")", "code=$?; set -e; [ \"$code\" -eq 0 ] || { reported=1; exit 3; }"];
 
 function checkedPath(path: string): string {
   if (!path.startsWith("/") || path.includes("\n") || path.includes("\0") || path.split("/").some(part => part === "..")) throw new Error("Invalid checkpoint path");
@@ -962,7 +967,7 @@ function otherRepositoriesRestore(input: RestoreInput): string[] {
     const remote = entry.repositoryUrl === undefined ? "" : https(entry.repositoryUrl);
     return [
       `step=repository-${i}`,
-      `if [ -f "$c/repositories/${i}/manifest" ]; then (`,
+      `if [ -f "$c/repositories/${i}/manifest" ]; then set +e; (`, "  set -e",
       `  repo=${quote(checkedPath(entry.checkoutPath))} c="$c/repositories/${i}" reported=''`,
       "  trap 'code=$?; if [ \"$code\" -ne 0 ] && [ -z \"$reported\" ]; then printf \"zeros-checkpoint-error checkpoint_restore_failed %s\\n\" \"$step\" >&3; fi' EXIT",
       "  m=\"$c/manifest\"; [ \"$(head -n 1 \"$m\")\" = 'zeros-checkpoint 1' ] || fail checkpoint_corrupt",
@@ -976,7 +981,7 @@ function otherRepositoriesRestore(input: RestoreInput): string[] {
       ] : ["  remote_git() { git -c credential.helper= \"$@\"; }"]),
       "  fetched=''",
       ...repositoryRestore(input, remote).map(line => `  ${line}`),
-      ") || { reported=1; exit 3; }; fi",
+      ...SUBSHELL_END, "fi",
       `rm -f "$work/repository-${i}/token-${i}" "$work/repository-${i}/askpass-${i}"`,
     ];
   });

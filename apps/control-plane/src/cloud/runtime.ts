@@ -100,21 +100,22 @@ export function installRuntimeCommand(runtime: { sha256: string; url: string; pu
       + (sha === runtime.sha256 ? "" : ` \\\n  && [ ! -f ${RUNTIMES}/${runtime.sha256}/.complete ]`)
       + `; then ${sha === runtime.sha256 ? "" : "echo runtime-kept; "}exit 0; fi`),
     ...prepare,
+    // Every step below is its own command, never part of an `&&` list: under set -e, bash goes on past a failure there.
     "sudo -n rm -f /opt/zeros/worker-runtime.env",
     ...(keys ? [
       `printf %s ${quote(b64(JSON.stringify(keys)))} | base64 -d | sudo -n tee /opt/zeros/worker-auth.json.next >/dev/null`,
-      "sudo -n chown root:root /opt/zeros/worker-auth.json.next && sudo -n chmod 0644 /opt/zeros/worker-auth.json.next && sudo -n mv -T /opt/zeros/worker-auth.json.next /opt/zeros/worker-auth.json",
+      "sudo -n chown root:root /opt/zeros/worker-auth.json.next; sudo -n chmod 0644 /opt/zeros/worker-auth.json.next; sudo -n mv -T /opt/zeros/worker-auth.json.next /opt/zeros/worker-auth.json",
     ] : []),
     `if [ "$(cat /etc/systemd/system/zeros-worker.service 2>/dev/null)" != "$unit" ]; then`,
     `  printf '%s\\n' "$unit" | sudo -n tee /etc/systemd/system/zeros-worker.service >/dev/null`,
-    "  sudo -n systemctl daemon-reload && sudo -n systemctl enable zeros-worker.service >/dev/null 2>&1",
+    "  sudo -n systemctl daemon-reload; sudo -n systemctl enable zeros-worker.service >/dev/null 2>&1",
     "fi",
     `printf %s ${quote(b64(PROFILE))} | base64 -d | sudo -n tee /etc/profile.d/zeros-worker.sh >/dev/null`,
     `previous=$(readlink ${CURRENT} 2>/dev/null || true)`,
     `if [ "$previous" != "$dir" ]; then`,
     `  if [ -n "$previous" ]; then sudo -n ln -sfn "$previous" /opt/zeros/worker-previous; fi`,
     `  if [ -e ${CURRENT} ] && [ ! -L ${CURRENT} ]; then sudo -n rm -rf ${CURRENT}; fi`,
-    `  sudo -n ln -sfn "$dir" ${CURRENT}.next && sudo -n mv -T ${CURRENT}.next ${CURRENT}`,
+    `  sudo -n ln -sfn "$dir" ${CURRENT}.next; sudo -n mv -T ${CURRENT}.next ${CURRENT}`,
     `  rm -rf ${COMPILE_CACHE} 2>/dev/null || true`,
     ...(options.restart === false ? [] : ["  sudo -n systemctl try-restart zeros-worker.service || true"]),
     `  for old in ${RUNTIMES}/*; do [ "$old" = "$dir" ] || [ "$old" = "$previous" ] || sudo -n rm -rf "$old"; done`,
@@ -134,20 +135,21 @@ function runtimePreparation(runtime: { sha256: string; url: string }): string[] 
   const url = new URL(runtime.url);
   if (url.protocol !== "https:" || url.username || url.password) throw new Error("Invalid runtime URL");
   const dir = `${RUNTIMES}/${runtime.sha256}`;
+  // Each step its own command, never part of an `&&` list: under set -e, bash goes on past a failure there.
   return [
     "set -eu",
     `sudo -n mkdir -p ${RUNTIMES}`,
-    `sudo -n touch ${RUNTIMES}/.install.lock && sudo -n chmod 0644 ${RUNTIMES}/.install.lock`,
+    `sudo -n touch ${RUNTIMES}/.install.lock; sudo -n chmod 0644 ${RUNTIMES}/.install.lock`,
     `exec 9<${RUNTIMES}/.install.lock; flock -x 9`,
     `dir=${dir}`,
     `if [ ! -f "$dir/.complete" ]; then`,
     `  tmp=$(mktemp -d); trap 'rm -rf "$tmp"; sudo -n rm -rf "$dir.partial"' EXIT`,
     `  curl -fsS --retry 3 --retry-delay 2 --connect-timeout 10 --max-time 300 -o "$tmp/runtime.tar.gz" ${quote(url.href)}`,
     `  printf '%s  %s\\n' ${runtime.sha256} "$tmp/runtime.tar.gz" | sha256sum -c --status`,
-    `  sudo -n rm -rf "$dir.partial" && sudo -n mkdir -p "$dir.partial"`,
+    `  sudo -n rm -rf "$dir.partial"; sudo -n mkdir -p "$dir.partial"`,
     `  sudo -n tar -xzf "$tmp/runtime.tar.gz" -C "$dir.partial" --no-same-owner`,
-    `  sudo -n chown -R root:root "$dir.partial" && sudo -n chmod -R a+rX,go-w "$dir.partial"`,
-    `  sudo -n touch "$dir.partial/.complete" && sudo -n rm -rf "$dir" && sudo -n mv "$dir.partial" "$dir"`,
+    `  sudo -n chown -R root:root "$dir.partial"; sudo -n chmod -R a+rX,go-w "$dir.partial"`,
+    `  sudo -n touch "$dir.partial/.complete"; sudo -n rm -rf "$dir"; sudo -n mv "$dir.partial" "$dir"`,
     "fi",
     `current=$(readlink ${CURRENT} 2>/dev/null || true); previous=$(readlink /opt/zeros/worker-previous 2>/dev/null || true)`,
     `for old in ${RUNTIMES}/*; do [ "$old" = "$dir" ] || [ "$old" = "$current" ] || [ "$old" = "$previous" ] || sudo -n rm -rf "$old"; done`,
@@ -172,8 +174,9 @@ export function activateRuntimeCommand(input: { sha256: string; previousSha256: 
     // The marker precedes restart. An uncertain provider reply may inspect it,
     // but must not restart the same boot again and consume its one-use identity.
     `if [ -f ${marker} ]; then echo activation-recorded; exit 0; fi`,
+    // Each step below its own command, never part of an `&&` list: under set -e, bash goes on past a failure there.
     `printf %s ${quote(Buffer.from(environment).toString("base64"))} | base64 -d | sudo -n tee /opt/zeros/worker-runtime.env.next >/dev/null`,
-    "sudo -n chown root:root /opt/zeros/worker-runtime.env.next && sudo -n chmod 0644 /opt/zeros/worker-runtime.env.next",
+    "sudo -n chown root:root /opt/zeros/worker-runtime.env.next; sudo -n chmod 0644 /opt/zeros/worker-runtime.env.next",
     `test "$(sha256sum /home/user/.config/zeros/worker-token | cut -d ' ' -f 1)" = ${input.tokenSha256}`,
     `boot=$(cat /home/user/.local/share/zeros/cloud-worker/runtime-boot)`,
     input.expectedBootIds.map(boot => `test "$boot" = ${boot}`).join(" || "),
@@ -182,7 +185,7 @@ export function activateRuntimeCommand(input: { sha256: string; previousSha256: 
     ]),
     "sudo -n mv -T /opt/zeros/worker-runtime.env.next /opt/zeros/worker-runtime.env",
     `sudo -n ln -sfn ${RUNTIMES}/${input.previousSha256} /opt/zeros/worker-previous`,
-    `sudo -n ln -sfn ${RUNTIMES}/${input.sha256} ${CURRENT}.next && sudo -n mv -T ${CURRENT}.next ${CURRENT}`,
+    `sudo -n ln -sfn ${RUNTIMES}/${input.sha256} ${CURRENT}.next; sudo -n mv -T ${CURRENT}.next ${CURRENT}`,
     `sudo -n touch ${marker}`,
     `sync -f /opt/zeros; sync -f ${permits}`,
     `rm -rf ${COMPILE_CACHE} 2>/dev/null || true`,

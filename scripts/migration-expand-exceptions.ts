@@ -2,6 +2,33 @@ import { createHash } from "node:crypto";
 
 // Each reviewed migration lists its exact exempted statements by rule.
 const reviewed: Readonly<Record<string, Readonly<Record<string, readonly string[]>>>> = {
+  "0266_cloud_v2_disconnect_record.sql": {
+    "disconnect-record": [`CREATE OR REPLACE FUNCTION cloud_v2_retire_disconnected_copies() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER
+SET search_path = pg_catalog, public, pg_temp AS $$
+DECLARE previous_system text := current_setting('app.system',true);
+BEGIN
+  PERFORM set_config('app.system','on',true);
+  BEGIN
+    INSERT INTO public.cloud_v2_disconnected_projects (project_id)
+      SELECT DISTINCT r.project_id FROM public.cloud_project_repositories r WHERE r.connection = OLD.id
+      ON CONFLICT (project_id) DO NOTHING;
+  EXCEPTION WHEN OTHERS THEN NULL; -- Never fails the removal.
+  END;
+  BEGIN
+    UPDATE public.cloud_v2_ready_copies SET state = CASE WHEN state = 'building' THEN 'failed' ELSE 'retired' END,
+        failure_reason = CASE WHEN state = 'building' THEN 'connection_removed' ELSE failure_reason END, updated_at = clock_timestamp()
+      WHERE id IN (SELECT c.id FROM public.cloud_v2_ready_copies c
+        WHERE c.state IN ('building', 'ready') AND EXISTS (SELECT 1 FROM public.cloud_project_repositories r
+          WHERE r.project_id = c.project_id AND r.connection = OLD.id)
+        ORDER BY c.id FOR UPDATE SKIP LOCKED);
+  EXCEPTION WHEN OTHERS THEN NULL; -- Never fails the removal: the recorded projects' copies are retired by the lifecycle.
+  END;
+  PERFORM set_config('app.system',coalesce(previous_system,''),true);
+  RETURN OLD;
+END;
+$$;`],
+  },
   "0265_cloud_v2_retention_removal.sql": {
     "privilege-tightening": ["REVOKE ALL ON FUNCTION cloud_v2_retire_disconnected_copies() FROM PUBLIC;"],
     "departed-private-projects": [`CREATE OR REPLACE FUNCTION cloud_v2_archive_departed_private() RETURNS trigger

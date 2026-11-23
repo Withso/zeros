@@ -1,7 +1,7 @@
 // A stateful Boat for tests. It encodes only what we rely on Boat for; each
 // assumption is listed in BOAT_FAKE_ASSUMPTIONS and nothing here talks to Boat.
 import { createHash } from "node:crypto";
-import type { CloudV2CommandResult, CloudV2Compute } from "../boat.js";
+import type { BoatNamedSnapshotList, CloudV2CommandResult, CloudV2Compute } from "../boat.js";
 import { BoatForkRefusedError, BoatSnapshotExpiredError } from "../boat-client.js";
 import { CloudProviderError } from "../provider-error.js";
 import { READY_COPY_SECRET_PATHS } from "../ready-copies.js";
@@ -33,6 +33,10 @@ export const BOAT_FAKE_ASSUMPTIONS = [
   { verified: "2026-11-21", assumption: "delete succeeds when the machine is already gone and inspect then answers 404 not_found" },
   { verified: false, assumption: "findSandbox returns the newest machine with that exact name" },
   { verified: false, assumption: "GET /named-snapshots/<name> answers status \"ready\" for a snapshot that can start a machine and 404 for none, also for the shared Zeros base saved under another Boat organization" },
+  // Read on Alpha (read-only): 7 named snapshots, all ready, the oldest 26.9 days old; no expiry field and no paging.
+  { verified: true, assumption: "GET /named-snapshots/<name> answers status \"ready\" for this account's own snapshot and 404 with a code for none" },
+  { verified: true, assumption: "GET /named-snapshots lists every named snapshot of the account with an allowance { included, free, used, extra, pricePerExtraMonthlyDollars, pricePerExtraDailyDollars }; snapshots beyond included are billed" },
+  { verified: false, assumption: "a named snapshot does not expire while it is not deleted" },
   { verified: false, assumption: "a machine's disk holds a project's 10 full clones with their dependencies (about 20-30 GB)" },
 ] as const;
 
@@ -69,6 +73,14 @@ export class FakeBoat implements CloudV2Compute {
   failCommand: ((machine: Machine, command: string) => boolean) | null = null;
   /** Whether stop goes through "archiving" before "archived". */
   archivingReads = 0;
+  /** The next saveSnapshot fails with this code after Boat recorded the name, as a failed or timed-out save can. */
+  failNextSave: "computer_snapshot_failed" | "computer_snapshot_timeout" | null = null;
+  /** The next create is refused outright, before anything exists. */
+  refuseNextCreate = false;
+  /** Named snapshots Boat bills beyond this many. */
+  includedSnapshots = 10;
+  /** Names other deployments or people saved on the same account: listed, never this deployment's. */
+  readonly foreignSnapshots = new Set<string>();
 
   constructor(public clock: () => number = () => Date.now()) {}
 
@@ -108,6 +120,10 @@ export class FakeBoat implements CloudV2Compute {
     this.record("create", input);
     const known = this.keyed(input.key);
     if (known) return this.replied("create", { sandboxId: known });
+    if (this.refuseNextCreate) {
+      this.refuseNextCreate = false;
+      throw new CloudProviderError("provider_request_failed", "Boat API request did not succeed", false, { httpStatus: 400 });
+    }
     const files = new Map(input.from ? this.snapshots.get(input.from) ?? [] : []);
     const id = this.make(input.key, { name: input.name, env: { ...input.env }, files, from: input.from ?? null, source: null });
     return this.replied("create", { sandboxId: id });
@@ -239,11 +255,28 @@ export class FakeBoat implements CloudV2Compute {
   async saveSnapshot(sandboxId: string, name: string) {
     this.record("saveSnapshot", sandboxId, name);
     this.snapshots.set(name, new Map(this.live(sandboxId).files));
+    const failure = this.failNextSave;
+    if (failure) { this.failNextSave = null; throw Object.assign(new Error("snapshot save failed"), { code: failure }); }
+  }
+
+  async listNamedSnapshots(): Promise<BoatNamedSnapshotList> {
+    this.record("listNamedSnapshots");
+    const names = [...this.snapshots.keys(), ...[...this.foreignSnapshots].filter(name => !this.snapshots.has(name))];
+    return {
+      snapshots: names.map(name => ({ name, status: "ready", createdAt: new Date(this.clock()).toISOString() })),
+      allowance: { included: this.includedSnapshots, used: names.length, extra: Math.max(0, names.length - this.includedSnapshots), pricePerExtraMonthlyDollars: 1.68 },
+    };
   }
 
   async deleteSnapshot(name: string) { this.record("deleteSnapshot", name); this.snapshots.delete(name); }
 
-  async snapshotExists(name: string) { this.record("snapshotExists", name); return this.snapshots.has(name); }
+  async snapshotExists(name: string) { this.record("snapshotExists", name); return this.snapshots.has(name) && !this.notReady.has(name); }
+  /** Names Boat lists but not as ready (a status other than ready): snapshotState answers unknown for them. */
+  readonly notReady = new Set<string>();
+  async snapshotState(name: string): Promise<"present" | "absent" | "unknown"> {
+    this.record("snapshotState", name);
+    return !this.snapshots.has(name) ? "absent" : this.notReady.has(name) ? "unknown" : "present";
+  }
 
   async hostPort(sandboxId: string, input: { port: number }) {
     this.record("hostPort", sandboxId, input);

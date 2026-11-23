@@ -2,8 +2,10 @@ import { expect } from "@playwright/test";
 
 import { openLayersDrawer } from "./ui-smoke-design-helpers.mjs";
 
-// The frame info panel above Layers: a selected frame's changes made by hand
-// and Tidy. It shows only for a frame (not a layer in it) with such changes,
+// The frame info panel above Layers: one row with a selected frame's count of
+// changes made by hand and Tidy, the detail on the title's tooltip and the
+// button's description. It shows
+// only for a frame (not a layer in it) with such changes,
 // follows edits and undo, sends exactly one brief and writes nothing, and
 // nothing appears on the canvas or as a toast. Runs after the field marks
 // smoke on the same page.
@@ -28,6 +30,8 @@ export async function runDesignFrameChangesSmoke({ page, check }) {
       ).length,
     );
   const prompts = () => page.evaluate(() => (window.__zerosHarnessAgentPrompts ?? []).slice());
+  // The detail is the title's hover tooltip and the row's button's description.
+  const detail = () => info.getByRole("button").getAttribute("aria-description");
   // After an undo and then a layer click, a click on a frame's row is
   // sometimes dropped (also without this panel, at the base commit); clicking
   // again selects it.
@@ -45,8 +49,8 @@ export async function runDesignFrameChangesSmoke({ page, check }) {
   await expect(info).toHaveAttribute("data-design-frame-info", "waiting");
   const waiting = (await info.textContent()) ?? "";
   check(
-    "a frame with changes made by hand shows how many and which, above Layers",
-    waiting.includes("2 changes made by hand") && waiting.includes("Corner radius and Text color, on 2 layers.") &&
+    "a frame with changes made by hand shows how many in one row above Layers, and which on the title's tooltip",
+    waiting.includes("2 changes by hand") && !waiting.includes("Corner radius") && (await detail()) === "Corner radius and Text color, on 2 layers." &&
       (await info.evaluate((element) => element.nextElementSibling?.hasAttribute("data-design-layers-slot") ?? false)),
     waiting,
   );
@@ -56,12 +60,12 @@ export async function runDesignFrameChangesSmoke({ page, check }) {
   await gap.fill("20");
   await gap.press("Enter");
   // A new count means the edit saved and the frame moved to its generation.
-  await expect(info).toContainText("3 changes made by hand");
-  check("the count follows an edit", ((await info.textContent()) ?? "").includes("Gap, Corner radius and Text color, on 3 layers."), await info.textContent());
+  await expect(info).toContainText("3 changes by hand");
+  check("the count follows an edit", (await detail()) === "Gap, Corner radius and Text color, on 3 layers.", await detail());
   const undone = () => page.evaluate(() => (window.__zerosHarnessDesignShortcutOperations ?? []).filter((op) => op === "history:confirmed").length);
   const undoneBefore = await undone();
   await undo();
-  await expect(info).toContainText("2 changes made by hand");
+  await expect(info).toContainText("2 changes by hand");
   check("the count follows an undo", true);
   // The undo settles with its own selection; later selections come after it.
   await expect.poll(undone).toBeGreaterThan(undoneBefore);
@@ -99,8 +103,8 @@ export async function runDesignFrameChangesSmoke({ page, check }) {
   );
   check(
     "while the agent works the panel says so, with View chat",
-    running.includes("Tidying 2 changes") && running.includes("The agent is moving them into tokens, classes or the component.") &&
-      (await info.getByRole("button", { name: "View chat" }).isEnabled()),
+    running.includes("Tidying 2 changes") && !running.includes("The agent is moving") &&
+      (await info.getByRole("button").count()) === 1 && (await info.getByRole("button", { name: "View chat" }).isEnabled()),
     running,
   );
   check(
@@ -121,9 +125,9 @@ export async function runDesignFrameChangesSmoke({ page, check }) {
   await expect(info).toHaveAttribute("data-design-frame-info", "done");
   const done = (await info.textContent()) ?? "";
   check(
-    "when the turn ends the panel says what moved, offers Review, and commits nothing",
-    done.includes("Tidied") && done.includes("2 stay on their layer. Nothing is committed.") &&
-      (await info.getByRole("button", { name: "Review" }).count()) === 1 && (await writes()) === beforeWrites,
+    "when the turn ends the panel offers Review, says what moved on the title's tooltip, and commits nothing",
+    done.includes("Tidied") && !done.includes("Nothing is committed") && ((await detail()) ?? "").includes("2 stay on their layer. Nothing is committed.") &&
+      (await info.getByRole("button").count()) === 1 && (await info.getByRole("button", { name: "Review" }).count()) === 1 && (await writes()) === beforeWrites,
     done,
   );
   check("still no toast", (await toasts.count()) === 0);
@@ -133,5 +137,5 @@ export async function runDesignFrameChangesSmoke({ page, check }) {
   await expect(info).toHaveCount(0);
   await selectFrame("home.html");
   await expect(info).toHaveAttribute("data-design-frame-info", "waiting");
-  check("Done is dismissed by selecting something else", ((await info.textContent()) ?? "").includes("2 changes made by hand"));
+  check("Done is dismissed by selecting something else", ((await info.textContent()) ?? "").includes("2 changes by hand"));
 }

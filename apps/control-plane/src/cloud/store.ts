@@ -132,6 +132,8 @@ export type CloudV2Workspace = {
   /** Retention: a lost VM came back without the work of the stop at `stoppedAt`: nothing of it
    * (rebuilt from GitHub) or an earlier backup instead. Until dismissed or the next backup. */
   lostWork?: { restored: "none" | "earlier"; stoppedAt: string };
+  /** Ready copies: created while its organization's base was being prepared, and waiting for it. */
+  preparing?: "computer";
   /** Retention S3: exempt from automatic archive; never true while archived. The serializer always sends it from
    * this release; optional in the type so documents and fixtures built elsewhere stay valid. */
   keep?: boolean;
@@ -162,6 +164,8 @@ export type CloudV2CheckpointRetry = { generation: string; attempts: number; sto
 
 /** Internal lifecycle metadata is never included in public workspace documents. */
 export type CloudV2LifecycleWorkspace = CloudV2Workspace & {
+  /** Ready copies: when the base its create waited for went live; its boot deadline counts from then. */
+  baseReadyAt?: string;
   recoveryAttemptId?: string;
   executionTransitionId?: string;
   executionRestoreClaimed?: true;
@@ -238,7 +242,7 @@ export type CloudV2WorkspaceRow = {
   stopped_at?: Date | null; machine_stopped_at?: Date | null; machine_data_expired_at?: Date | null;
   archive_wake_done_at?: Date | null; checkpoint_object?: string | null; retention_started_at?: Date | null;
   backup_probe?: BackupProbe | null; backup_probe_generation?: string | null; stop_generation?: string; checkpoint_stop_generation?: string | null;
-  changed_since_stop_generation?: string | null; machine_gone_at?: Date | null;
+  changed_since_stop_generation?: string | null; machine_gone_at?: Date | null; waiting_for_base_at?: Date | null;
 };
 type Row = CloudV2WorkspaceRow;
 
@@ -247,11 +251,12 @@ const WORKSPACE_COLUMNS_SQL = sql`id, org_id, creator_user_id, name, number, tit
   agent_cost_usd, agent_cost_turns, agent_cost_estimated_turns, private_owner_user_id, project_id, checkout_path, folder,
   lost_work_restored, lost_work_since, keep_set_at, archive_reason, stopped_at, machine_stopped_at, machine_data_expired_at,
   archive_wake_done_at, checkpoint_object, retention_started_at, backup_probe, backup_probe_generation, stop_generation,
-  checkpoint_stop_generation, changed_since_stop_generation, machine_gone_at`;
+  checkpoint_stop_generation, changed_since_stop_generation, machine_gone_at, waiting_for_base_at`;
 const COLUMNS = WORKSPACE_COLUMNS_SQL.text;
 export const CLOUD_V2_WORKSPACE_COLUMNS = COLUMNS.split(",").map(value => value.trim());
 
 type LifecycleRow = Row & {
+  base_ready_at?: Date | null;
   execution_transition_id: string | null;
   execution_restore_claimed_at: Date | null;
   execution_mode: string; execution_initiator_user_id: string | null; execution_intent_id: string | null;
@@ -271,7 +276,7 @@ const LIFECYCLE_COLUMNS = `${COLUMNS}, lease_renewed_at, base_commit, restore_pe
   stop_generation, checkpoint_stop_generation,
   checkpoint_object, checkpoint_key, checkpoint_sha256, checkpoint_bytes, checkpoint_saved_at, checkpoint_reuse, checkpoint_retry_fork,
   backup_probe, backup_probe_generation, worker_off_unverified_at, worker_off_verified_generation,
-  maintenance_attempt, maintenance_phase, maintenance_started_at, archive_scrub, archive_scrubbed_generation`;
+  maintenance_attempt, maintenance_phase, maintenance_started_at, archive_scrub, archive_scrubbed_generation, base_ready_at`;
 type RetryRow = LifecycleRow & { retry_stopped_at: Date; checkpoint_retry_generation: string; checkpoint_retry_attempts: number; checkpoint_retry_exhausted_at: Date | null };
 
 function uploadHorizon(uploads: Record<string, string>): string | null {
@@ -312,6 +317,7 @@ export function cloudV2LifecycleWorkspaceFromRow(row: LifecycleRow): CloudV2Life
     ...(row.execution_mode === "active" ? { executionIntent: { id: row.execution_intent_id, userId: row.execution_initiator_user_id,
       accessEpoch: row.access_epoch, authority: row.execution_intent_authority } } : {}),
     checkpoint, restorePending: row.restore_pending, restoreAttempt: row.restore_attempt, restoreCreate: restoreCreate(row.restore_create),
+    ...(row.base_ready_at ? { baseReadyAt: row.base_ready_at.toISOString() } : {}),
     stopGeneration: row.stop_generation, checkpointUploadUntil: uploadHorizon(row.checkpoint_uploads),
     checkpointRetryFork: checkpointFork(row.checkpoint_retry_fork),
     ...(cloudV2StopProbe(row) ? { stopProbe: cloudV2StopProbe(row)! } : {}),
@@ -365,6 +371,7 @@ function workspace(row: Row): CloudV2Workspace {
     ...(row.checkout_path ? { checkoutFolder: row.checkout_path } : {}),
     ...(row.folder ? { folder: row.folder } : {}),
     ...(row.lost_work_restored && row.lost_work_since ? { lostWork: { restored: row.lost_work_restored, stoppedAt: row.lost_work_since.toISOString() } } : {}),
+    ...(row.waiting_for_base_at && row.state === "creating" ? { preparing: "computer" as const } : {}),
     // Retention's fields only where retention runs: with the switch off a document is exactly what it was.
     ...(retentionDocuments ? { keep: Boolean(row.keep_set_at) && !row.archived_at, ...archiveFields(row) } : {}),
   };
@@ -375,6 +382,10 @@ let retentionDocuments = false;
  * backupRemovalAt). Set once at composition from CLOUD_V2_RETENTION_ENABLED; every path that serves a document
  * (get, list, team views, the composite routes) goes through workspace(), so none can disagree. Off by default. */
 export function setCloudV2RetentionDocuments(enabled: boolean): void { retentionDocuments = enabled; }
+/** The organization-level signal on the workspace list (both its routes): `retention: true` exactly when documents
+ * carry retention's fields, from the same flag, so the desktop can state the rule for an organization with no
+ * workspaces. Off, the list reply is what it was. */
+export function cloudV2RetentionListSignal(): { retention?: true } { return retentionDocuments ? { retention: true } : {}; }
 
 /** An archived workspace's backup is removed this long after its archive, counted from when retention first
  * applied if that is later: no clock starts from history. S4's removal uses this same expression. */
@@ -429,6 +440,23 @@ export function cloudV2StopProbe(row: { backup_probe?: BackupProbe | null; backu
  * "all" when its machine is still there (resumed as it is), or a backup of this very stop holds everything (restored),
  * or this stop left nothing off GitHub (rebuilt without loss); otherwise "pushed": it is rebuilt from GitHub and
  * work never pushed is gone (the lostWork note). An earlier stop's backup alone is "pushed": it lacks this stop's work. */
+/** The build a workspace restores from, for both restore paths (beginRestore, pinRestoreImage): the organization's active
+ * Cloud Computer build, locked so activation and cleanup wait for the pin the caller writes in the same transaction.
+ * With ready copies on that may be a base that holds no repository (base_only, policy 2), built or the shared one: its
+ * image clones every repository, and nothing else is needed (retention.integration.test.ts covers both). */
+async function restoreBuild(tx: Tx, organizationId: string): Promise<{ id: string; snapshot_name: string; source_policy_version: number; recipe: unknown } | null> {
+  return (await tx.query<{ id: string; snapshot_name: string; source_policy_version: number; recipe: unknown }>(
+    `SELECT b.id, c.snapshot_name, b.source_policy_version, b.recipe FROM cloud_v2_computers c
+     JOIN cloud_v2_computer_builds b ON b.id=c.active_build_id AND b.org_id=c.org_id
+     WHERE c.org_id=$1 AND c.snapshot_name IS NOT NULL AND b.state='succeeded' AND b.source_policy_version IN (2,3) AND b.snapshot_id=c.snapshot_name
+       AND b.snapshot_deleted_at IS NULL AND b.cleanup_requested_at IS NULL
+     FOR SHARE OF c,b`, [organizationId])).rows[0] ?? null;
+}
+const restoreImage = (build: { snapshot_name: string; source_policy_version: number; recipe: unknown },
+  workspace: { repository: string; source_repositories: string[] | null }) =>
+  cloudV2WorkspaceImage({ policy: build.source_policy_version, snapshot: build.snapshot_name, recipe: build.recipe,
+    scope: workspace.source_repositories ?? [], repository: workspace.repository });
+
 export function cloudV2Restores(row: Row, now = Date.now()): "all" | "pushed" {
   if (row.checkpoint_object && row.checkpoint_stop_generation === row.stop_generation) return "all";
   if (cloudV2StopProbe(row) === "clean") return "all";
@@ -547,9 +575,11 @@ export class CloudV2Store {
     // pin before it can retire an inactive source snapshot.
     const selected = await tx.query<{ recipe: { repositories: { repository: string }[] }; source_targets: unknown; source_policy_version: number }>(
       `SELECT b.recipe,b.source_targets,b.source_policy_version FROM cloud_v2_computers c
-       JOIN cloud_v2_computer_builds b ON b.id=c.active_build_id AND b.org_id=c.org_id
-       WHERE c.org_id=$1 AND c.active_build_id=$2 AND c.snapshot_name IS NOT NULL
-         AND b.state='succeeded' AND b.source_policy_version IN (2,3) AND b.snapshot_id=c.snapshot_name AND b.snapshot_deleted_at IS NULL AND b.cleanup_requested_at IS NULL
+       JOIN cloud_v2_computer_builds b ON b.id=$2 AND b.org_id=c.org_id
+       WHERE c.org_id=$1 AND b.state='succeeded' AND b.source_policy_version IN (2,3) AND b.snapshot_deleted_at IS NULL AND b.cleanup_requested_at IS NULL
+         -- The live build, or (ready copies turned off again) the legacy build its base replaced, which is kept for this.
+         AND ((c.active_build_id=$2 AND c.snapshot_name IS NOT NULL AND b.snapshot_id=c.snapshot_name)
+           OR (c.legacy_build_id=$2 AND b.snapshot_id IS NOT NULL AND NOT b.base_only))
        FOR SHARE OF c,b`, [organizationId, computerBuildId]);
     if (!selected.rowCount) throw new HttpError(409, "cloud_computer_changed", "The Cloud Computer changed. Create the workspace again.");
     const build = selected.rows[0]!;
@@ -604,8 +634,10 @@ export class CloudV2Store {
           (SELECT jsonb_agg(jsonb_build_object('repository', r.repository, 'repositoryId', r.repository_id) ORDER BY r.position)
              FROM cloud_project_repositories r WHERE r.project_id=p.id) AS repositories
         FROM cloud_projects p JOIN organizations o ON o.id=p.org_id
-        JOIN cloud_v2_computers c ON c.org_id=p.org_id AND c.active_build_id=$4
-        JOIN cloud_v2_computer_builds b ON b.id=c.active_build_id AND b.base_only AND b.state='succeeded'
+        -- The live base, or the base being prepared that this workspace waits for (the lifecycle defers until it is live,
+        -- or, if it failed since the create's check, re-binds or fails plainly: cloud_computer_preparation_failed).
+        JOIN cloud_v2_computer_builds b ON b.id=$4 AND b.org_id=p.org_id AND b.base_only AND (b.state IN ('queued','building','failed','cancelled')
+          OR (b.state='succeeded' AND EXISTS (SELECT 1 FROM cloud_v2_computers c WHERE c.org_id=p.org_id AND c.active_build_id=b.id)))
         WHERE p.id=$1 AND p.org_id=$2 AND (p.level='organization' OR (p.owner_user_id=$3 AND o.cloud_personal_projects_allowed))
         FOR SHARE OF p`, [input.projectId, input.organizationId, input.creatorUserId, input.computerBuildId])).rows[0];
       const matches = !!project?.repositories && project.repositories.length === requested.length && requested.length > 0
@@ -625,10 +657,11 @@ export class CloudV2Store {
     if (Object.keys(input.env ?? {}).length && sourceRepositoryId === undefined)
       throw new HttpError(409, "cloud_source_review_required", "A workspace environment requires a verified repository identity.");
     const row = (await tx.query<Row>(
-      `INSERT INTO cloud_v2_workspaces (id, org_id, creator_user_id, name, repository, branch, base_branch, state, computer_build_id, source_repositories, source_pending, api_access, created_by_session_id, execution_initiator_user_id, execution_intent_id, execution_mode, private_owner_user_id, project_id, checkout_path, folder, base_commit)
+      `INSERT INTO cloud_v2_workspaces (id, org_id, creator_user_id, name, repository, branch, base_branch, state, computer_build_id, source_repositories, source_pending, api_access, created_by_session_id, execution_initiator_user_id, execution_intent_id, execution_mode, private_owner_user_id, project_id, checkout_path, folder, base_commit, waiting_for_base_at)
        VALUES ($1, $2, $3, $4, $5, $6, $7, 'creating', $8, $9::text[], $10,
          coalesce((SELECT workspace_api_access FROM cloud_api_access_settings WHERE org_id=$2 AND user_id=$3),true), $11, $3, gen_random_uuid(), $12, $13, $14,
-         $15, $16, $17) RETURNING ${COLUMNS}`,
+         $15, $16, $17, CASE WHEN $14::uuid IS NOT NULL AND EXISTS (SELECT 1 FROM cloud_v2_computer_builds b WHERE b.id=$8 AND b.state IN ('queued','building','failed','cancelled'))
+           THEN clock_timestamp() END) RETURNING ${COLUMNS}`,
       [input.id, input.organizationId, input.creatorUserId, input.name, input.repository, input.branch,
         input.baseBranch, input.computerBuildId,
         pending ? null : (scope ?? [{ repository: input.repository }]).map(source => source.repository.toLowerCase()), pending, input.createdBySessionId ?? null,
@@ -845,6 +878,13 @@ export class CloudV2Store {
     executionAuthority?: ExecutionIntentAuthority) {
       if (action === "stop" || action === "archive") await cancelExecutionActivation(tx, id);
       else await assertNoExecutionTransition(tx, id);
+      // A create still waiting for its organization's base has no machine to stop: stop ends it, plainly, with none made.
+      if (action === "stop" && current.state === "creating" && current.boat_sandbox_id === null && current.waiting_for_base_at) {
+        const stopped = (await tx.query<Row>(`UPDATE cloud_v2_workspaces SET state='failed', error_code='cloud_create_stopped',
+            waiting_for_base_at=NULL, attempts=0, next_attempt_at=NULL, updated_at=clock_timestamp()
+          WHERE id=$1 AND state='creating' AND boat_sandbox_id IS NULL AND waiting_for_base_at IS NOT NULL RETURNING ${COLUMNS}`, [id])).rows[0];
+        if (stopped) return { workspace: workspace(stopped), moved: true };
+      }
       const intent = (await tx.query<{ stop_generation: string; restart_stop_generation: string | null; execution_mode: string }>(
         "SELECT stop_generation::text,restart_stop_generation::text,execution_mode FROM cloud_v2_workspaces WHERE id=$1", [id])).rows[0]!;
       const priorRestart = intent.restart_stop_generation;
@@ -1705,23 +1745,33 @@ export class CloudV2Store {
         return null;
       }
       // As at creation: activation and cleanup wait for this pin.
-      const active = await tx.query<{ id: string; snapshot_name: string; source_policy_version: number; recipe: unknown }>(
-        `SELECT b.id, c.snapshot_name, b.source_policy_version, b.recipe FROM cloud_v2_computers c
-         JOIN cloud_v2_computer_builds b ON b.id=c.active_build_id AND b.org_id=c.org_id
-         WHERE c.org_id=$1 AND c.snapshot_name IS NOT NULL AND b.state='succeeded' AND b.source_policy_version IN (2,3) AND b.snapshot_id=c.snapshot_name
-           AND b.snapshot_deleted_at IS NULL AND b.cleanup_requested_at IS NULL
-         FOR SHARE OF c,b`, [rows[0].org_id]);
-      if (!active.rows[0]) return "no_computer";
+      const active = await restoreBuild(tx, rows[0].org_id);
+      if (!active) return "no_computer";
       const setup = originalSetupBuild(rows[0].computer_build_id, rows[0].restore_create);
-      const image = cloudV2WorkspaceImage({ policy: active.rows[0].source_policy_version, snapshot: active.rows[0].snapshot_name,
-        recipe: active.rows[0].recipe, scope: rows[0].source_repositories ?? [], repository: rows[0].repository });
+      const image = restoreImage(active, rows[0]);
       const recorded = await tx.query<{ restore_attempt: string; restore_create: CloudV2RestoreCreate }>(
         `UPDATE cloud_v2_workspaces SET restore_pending=true, restore_attempt=$3, boat_sandbox_id=NULL, computer_build_id=$2, execution_restore_claimed_at=NULL,
            restore_create=jsonb_build_object('from',$4::text,'name',$5::text,'env',$6::jsonb,'requestedAt',clock_timestamp(),'prune',$8::jsonb) || $7::jsonb || $9::jsonb,
            worker_route_url=NULL, worker_port_token=NULL, worker_token_hash=NULL, worker_boot_id=NULL
          WHERE id=$1 RETURNING restore_attempt, restore_create`,
-        [id, active.rows[0].id, request.attempt, image.from, request.name, JSON.stringify(request.env), JSON.stringify(setup), JSON.stringify(image.prune), JSON.stringify(extra)]);
+        [id, active.id, request.attempt, image.from, request.name, JSON.stringify(request.env), JSON.stringify(setup), JSON.stringify(image.prune), JSON.stringify(extra)]);
       return { attempt: recorded.rows[0]!.restore_attempt, create: restoreCreate(recorded.rows[0]!.restore_create)! };
+    });
+  }
+
+  /** Retention's clean rebuild of a lost VM (lifecycle.ts cleanReplacement) takes its image as beginRestore does: from
+   * the organization's active Cloud Computer build, re-pinning the workspace to it in the same transaction. Never the
+   * workspace's own earlier pin: cleanup deletes a replaced build's snapshot as soon as a newer one is live, and the
+   * rebuild needs nothing from it (its checkout and branches come from GitHub). Null with no active build. */
+  async pinRestoreImage(id: string): Promise<CloudV2WorkspaceImage | null> {
+    return withSystemTx(this.pool, async tx => {
+      const row = (await tx.query<{ org_id: string; repository: string; source_repositories: string[] | null }>(
+        "SELECT org_id, repository, source_repositories FROM cloud_v2_workspaces WHERE id=$1 AND state='starting' FOR UPDATE", [id])).rows[0];
+      if (!row) return null;
+      const active = await restoreBuild(tx, row.org_id);
+      if (!active) return null;
+      await tx.query("UPDATE cloud_v2_workspaces SET computer_build_id=$2 WHERE id=$1", [id, active.id]);
+      return restoreImage(active, row);
     });
   }
 
@@ -2242,6 +2292,40 @@ export class CloudV2Store {
       scope: row.source_repositories ?? [], repository: row.repository });
   }
 
+  /** The build a creating workspace is bound to, while it may still be on its way (an organization's base being prepared). */
+  async workspaceBuildWait(workspaceId: string): Promise<{ buildId: string; state: string; finishedAt: Date | null } | null> {
+    const { rows } = await withSystemTx(this.pool, tx => tx.query<{ id: string; state: string; finished_at: Date | null }>(
+      `SELECT b.id, b.state, b.finished_at FROM cloud_v2_workspaces w JOIN cloud_v2_computer_builds b ON b.id=w.computer_build_id AND b.org_id=w.org_id
+       WHERE w.id=$1`, [workspaceId]));
+    return rows[0] ? { buildId: rows[0].id, state: rows[0].state, finishedAt: rows[0].finished_at } : null;
+  }
+
+  /** A create that waited for its base may go on only while it is not archived (a member who left has theirs archived)
+   * and its creator (or, in shared execution, its organization) still has cloud: what changed, or null. */
+  async deferredCreateChange(workspaceId: string): Promise<"archived" | "access" | null> {
+    const row = (await withSystemTx(this.pool, tx => tx.query<{ archived: boolean; live: boolean }>(
+      `SELECT w.archived_at IS NOT NULL AS archived, ${LIVE_ACCESS} AS live FROM cloud_v2_workspaces w WHERE w.id=$1`, [workspaceId]))).rows[0];
+    return !row ? null : row.archived ? "archived" : row.live ? null : "access";
+  }
+
+  /** Its base is live (or gone): it no longer says it is waiting, and keeps when this tick saw that, which its boot
+   * deadline counts from on every later tick (never the base's finish: a lifecycle that was down sees it late). */
+  async baseWaitOver(workspaceId: string): Promise<void> {
+    await withSystemTx(this.pool, tx => tx.query(`UPDATE cloud_v2_workspaces SET waiting_for_base_at=NULL, base_ready_at=clock_timestamp()
+      WHERE id=$1 AND waiting_for_base_at IS NOT NULL`, [workspaceId]));
+  }
+
+  /** A creating workspace whose base failed moves to the organization's live base, in one statement, so the build it
+   * leaves and the one it takes are never both unpinned. False when there is none (or it already moved). */
+  async rebindToBase(workspaceId: string, fromBuildId: string): Promise<boolean> {
+    const { rowCount } = await withSystemTx(this.pool, tx => tx.query(
+      `UPDATE cloud_v2_workspaces w SET computer_build_id=b.id, updated_at=clock_timestamp()
+       FROM cloud_v2_computers c JOIN cloud_v2_computer_builds b ON b.id=c.active_build_id AND b.org_id=c.org_id AND b.state='succeeded' AND b.base_only
+       WHERE w.id=$1 AND w.computer_build_id=$2 AND w.state='creating' AND w.boat_sandbox_id IS NULL AND c.org_id=w.org_id AND b.id<>$2`,
+      [workspaceId, fromBuildId]));
+    return (rowCount ?? 0) > 0;
+  }
+
   async computerSnapshot(organizationId: string, buildId: string | null = null): Promise<string | null> {
     if (buildId) {
       const { rows } = await withSystemTx(this.pool, tx => tx.query<{ snapshot_id: string | null }>(
@@ -2258,10 +2342,25 @@ export class CloudV2Store {
 
   /** One selection supplies the build pin and its installed repositories. */
   async activeComputer(organizationId: string): Promise<{ buildId: string; repositories: CloudV2InstalledRepository[]; baseOnly?: true } | null> {
+    return this.computerBuild(organizationId, "active");
+  }
+
+  /** With ready copies off, an organization whose live build is a base still creates as before the switch: from the
+   * legacy build that base replaced, while it is kept. Null without one. */
+  async legacyComputer(organizationId: string): Promise<{ buildId: string; repositories: CloudV2InstalledRepository[]; baseOnly?: true } | null> {
+    return this.computerBuild(organizationId, "legacy");
+  }
+
+  private async computerBuild(organizationId: string, which: "active" | "legacy"): Promise<{ buildId: string; repositories: CloudV2InstalledRepository[]; baseOnly?: true } | null> {
     const { rows } = await withSystemTx(this.pool, tx => tx.query<{ id: string; base_only: boolean; recipe: { repositories?: { repository?: unknown; branch?: unknown }[] } }>(
-      `SELECT build.id, build.base_only, build.recipe FROM cloud_v2_computers computer
+      which === "active" ? `SELECT build.id, build.base_only, build.recipe FROM cloud_v2_computers computer
        JOIN cloud_v2_computer_builds build ON build.id = computer.active_build_id AND build.org_id = computer.org_id
-       WHERE computer.org_id = $1 AND computer.snapshot_name IS NOT NULL AND build.state = 'succeeded' AND build.source_policy_version IN (2,3)`,
+       WHERE computer.org_id = $1 AND computer.snapshot_name IS NOT NULL AND build.state = 'succeeded' AND build.source_policy_version IN (2,3)`
+      : `SELECT build.id, build.base_only, build.recipe FROM cloud_v2_computers computer
+       JOIN cloud_v2_computer_builds live ON live.id = computer.active_build_id AND live.org_id = computer.org_id AND live.base_only
+       JOIN cloud_v2_computer_builds build ON build.id = computer.legacy_build_id AND build.org_id = computer.org_id
+       WHERE computer.org_id = $1 AND build.state = 'succeeded' AND build.source_policy_version IN (2,3) AND NOT build.base_only
+         AND build.snapshot_id IS NOT NULL AND build.snapshot_deleted_at IS NULL AND build.cleanup_requested_at IS NULL`,
       [organizationId],
     ));
     if (!rows[0]) return null;

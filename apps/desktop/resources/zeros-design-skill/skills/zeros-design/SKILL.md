@@ -25,16 +25,16 @@ Provider permissions and Plan mode still apply. Saving never stages or commits; 
 
 ## Authoring contract
 
-Every frame in a directory follows these rules, so people and agents share one vocabulary. `design validate` warns when a frame breaks rule 1, 3, 4 or 8; the warnings never fail validation or block a save.
+Every frame in a directory follows these rules, so people and agents share one vocabulary. `design validate` warns when a frame breaks rule 1, 3, 4 or 8, or when a component changes other than through its controls; the warnings never fail validation or block a save.
 
 1. **Classes are global or a component's.** A global class lives in a Design stylesheet the frames link (`styles.css`, `tokens.css`) or a style source; a component's class lives in its main frame's `<style>` and is used only inside that component and its instances. Other frames define no classes of their own, and no class gets a second name: cards are `.card` in every frame, not `.tile` in the next.
 2. **States on the same markup.** Set a state with an attribute or a state class, never a second copy: `<button class="btn is-active" data-state="open">`. A component's hover, pressed, focus and disabled looks are its state variants (`<zd-variant name="hover" zd-state="hover">` with `:hover` rules in its main; `reference/states.md`).
 3. **Tokens, not their values.** Write `var(--name)` wherever a token holds the value: `color: var(--fg2)`, not the hex it resolves to.
 4. **Inline style for one-offs.** Inline declarations are for single values and for people's Style panel edits; anything used on several elements is a class: `.row { display: flex; gap: var(--space-2); }`.
-5. **`data-oid` only where needed.** Keep existing values; add stable ones only where selection must survive a restructure. A main frame's `data-oid` values name the parts its instances override, so keep them stable. Existing `components/` files use `data-zid`.
+5. **`data-oid` only where needed.** Keep existing values; add stable ones only where selection must survive a restructure. A main frame's `data-oid` values name the layers its controls bind, so keep them stable. Existing `components/` files use `data-zid`.
 6. **Name meaningful layers.** `<section data-name="Pricing table">` (up to 80 characters).
 7. **Mark captured markup.** Markup captured or pasted from a site or an app carries `data-zd-captured` on its root, optionally naming its source (`<main data-zd-captured="zeros renderer">`); its classes are not this directory's vocabulary. A title such as `"Settings — captured"` tells people. The contract warnings skip marked markup, so mark only markup that really came from elsewhere, never the directory's own frames.
-8. **Three repeats make a component.** Markup repeated three or more times becomes a main frame: a frame whose `meta/canvas.json` record adds `"component": "card"`, with options for the values that change and slots for content, placed as `<zd-card heading="Plans"><p slot="body">Body</p></zd-card>` (`reference/format.md`, Components). Never add `components/<name>.html`; Zeros evaluates the template itself, so a component still holds no JavaScript.
+8. **Three repeats make a component.** Markup repeated three or more times becomes a main frame: a frame whose `meta/canvas.json` record adds `"component": "card"`, with options for the values that change and slots for content, placed as `<zd-card heading="Plans"><p slot="body">Body</p></zd-card>` (`reference/format.md`, Components). Never add `components/<name>.html`; Zeros evaluates the template itself, so a component still holds no JavaScript. Anything an instance should change is a control: declare it and read it in the main (`{{ name }}`, `data-zd-if`, an attribute, or `var(--zd-name)` in its CSS). Never write `zd-style-<part>` or a visual style on an instance; its own `style` holds only its place and size.
 
 ## Workflow
 

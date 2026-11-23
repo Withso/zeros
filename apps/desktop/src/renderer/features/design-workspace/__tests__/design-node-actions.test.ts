@@ -8,7 +8,7 @@ vi.mock("../state/design-workspace-cache", () => ({
   designWorkspaceSnapshotCache: { peekSnapshot: (id: string) => ({ data: mocks.snapshots.get(id) }) },
 }));
 vi.mock("../state/design-selection", () => ({ selectDesignNodes: mocks.selectNodes, selectDesignFrame: mocks.selectFrame }));
-import { applyDesignNodeAction } from "../state/design-node-actions";
+import { applyDesignNodeAction, captureDesignPendingDeletion, designPendingDeletionCurrent, designPendingDeletionFor } from "../state/design-node-actions";
 
 const frame = { file: "a.html", sourceVersion: "a".repeat(24), title: "A", x: 0, y: 0, width: 200, height: 100, z: 0, nodeCount: 2, modifiedAt: 1 };
 const other = { ...frame, file: "b.html" };
@@ -22,6 +22,52 @@ beforeEach(() => {
   mocks.edit.mockResolvedValue({ snapshot: { frames: [frame, other] } });
   mocks.selectNodes.mockResolvedValue(null);
   mocks.selectFrame.mockResolvedValue(undefined);
+});
+
+describe("a deletion a person confirms", () => {
+  it("deletes exactly the layers it asked about, while their owner and selection stand", async () => {
+    const pending = captureDesignPendingDeletion("local")!;
+    expect(pending).toMatchObject({ frame: "a.html", sourceVersion: frame.sourceVersion, nodeIds: ["nested"] });
+    expect(designPendingDeletionCurrent(pending)).toBe(true);
+    await applyDesignNodeAction({ workspaceId: "local", folder: "/design", action: "delete", expect: pending });
+    expect(mocks.edit).toHaveBeenCalledWith("local", frame, expect.objectContaining({ operations: [expect.objectContaining({ type: "node.delete", nodeId: "nested" })] }), undefined, undefined);
+  });
+
+  it("deletes nothing once the selection, the frame or its generation changed", async () => {
+    const pending = captureDesignPendingDeletion("local")!;
+    useDesignWorkspaceUiStore.getState().setSelection("local", frame.file, "other-layer");
+    expect(designPendingDeletionCurrent(pending)).toBe(false);
+    await applyDesignNodeAction({ workspaceId: "local", folder: "/design", action: "delete", expect: pending });
+    expect(mocks.edit).not.toHaveBeenCalled();
+    useDesignWorkspaceUiStore.getState().setSelection("local", frame.file, "nested");
+    const again = captureDesignPendingDeletion("local")!;
+    mocks.snapshots.set("local", { frames: [{ ...frame, sourceVersion: "b".repeat(24) }, other] });
+    expect(designPendingDeletionCurrent(again)).toBe(false);
+    await applyDesignNodeAction({ workspaceId: "local", folder: "/design", action: "delete", expect: again });
+    expect(mocks.edit).not.toHaveBeenCalled();
+  });
+
+  it("belongs to the workspace it was asked in: another workspace's canvas confirms nothing", () => {
+    const pending = captureDesignPendingDeletion("local")!;
+    expect(designPendingDeletionFor(pending, "local")).toBe(true);
+    useDesignWorkspaceUiStore.getState().setSelection("other", "text.html", null);
+    expect(designPendingDeletionFor(pending, "other")).toBe(false);
+    expect(designPendingDeletionFor(pending, null)).toBe(false);
+  });
+
+  it("deletes nothing once the selection moved to another frame or the page changed", async () => {
+    const pending = captureDesignPendingDeletion("local")!;
+    useDesignWorkspaceUiStore.getState().setSelection("local", other.file, "elsewhere");
+    expect(designPendingDeletionCurrent(pending)).toBe(false);
+    await applyDesignNodeAction({ workspaceId: "local", folder: "/design", action: "delete", expect: pending });
+    expect(mocks.edit).not.toHaveBeenCalled();
+    useDesignWorkspaceUiStore.getState().setSelection("local", frame.file, "nested");
+    const again = captureDesignPendingDeletion("local")!;
+    // Another page is another owner, even with the same frame and layer named.
+    expect(designPendingDeletionCurrent({ ...again, owner: { ...again.owner, pageId: "another-page" } })).toBe(false);
+    await applyDesignNodeAction({ workspaceId: "local", folder: "/design", action: "delete", expect: { ...again, owner: { ...again.owner, pageId: "another-page" } } });
+    expect(mocks.edit).not.toHaveBeenCalled();
+  });
 });
 
 describe("canvas node commands", () => {

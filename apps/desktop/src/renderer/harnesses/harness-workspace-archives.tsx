@@ -61,6 +61,7 @@ rows.push(
     path: `/Users/dev/zeros/workspaces/example/${id}`,
   })),
 );
+let cloudRows: (repoSlug?: string) => Workspace[] = () => [];
 let selectedFolder: string | null = null;
 Object.assign(window, {
   __ZEROS_NATIVE__: {
@@ -87,7 +88,8 @@ setActiveBridge({
     let result: unknown = {};
     if (message.op === "workspace.list")
       result = {
-        workspaces: rows.filter((owner) =>
+        // Retention mode: the catalog's cloud rows are listed too, as production discovery sees them.
+        workspaces: [...rows, ...cloudRows()].filter((owner) =>
           message.params?.archived === true
             ? owner.archivedAt != null
             : owner.archivedAt == null,
@@ -202,6 +204,58 @@ if (cloudStoppedReference) {
       resources: { cpuMillicores: 2000, memoryMiB: 4096, storageMiB: 20480 },
     },
   });
+}
+// ?cloud-retention=on|off (C2.3): the archived rows are cloud workspaces, one per archive reason (the manual one
+// after its backup is gone), and one live cloud workspace carries Keep (?keep=1 for on). With "off" the server
+// runs no retention: the same rows carry no retention fields. ?general=org|personal opens that General page.
+const retentionMode = new URLSearchParams(location.search).get("cloud-retention");
+if (retentionMode) {
+  const on = retentionMode === "on", kept = new URLSearchParams(location.search).has("keep");
+  const { acceptCloudWorkspaceDocument } = await import("../state/cloud-workspace-catalog");
+  const { recordOrganizationRetention } = await import("../platform/cloud-retention-state");
+  const day = 86_400_000, iso = (offset: number) => new Date(now + offset * day).toISOString();
+  const fixtures = [
+    { id: "33333333-3333-4333-8333-333333333331", branch: "example/Idle", archived: true,
+      retention: { keep: false, archiveReason: "inactive", restores: "all", machineExpectedGoneAt: { at: iso(20), estimate: true }, backupRemovalAt: iso(58) } },
+    { id: "33333333-3333-4333-8333-333333333332", branch: "example/Former member", archived: true,
+      retention: { keep: false, archiveReason: "member_left", restores: "all", machineExpectedGoneAt: { at: iso(9), estimate: true }, backupRemovalAt: iso(51) } },
+    { id: "33333333-3333-4333-8333-333333333333", branch: "example/Backup gone", archived: true,
+      retention: { keep: false, archiveReason: "manual", restores: "pushed", machineExpectedGoneAt: { at: iso(-30), estimate: false } } },
+    { id: "33333333-3333-4333-8333-333333333334", branch: "example/Live", archived: false, retention: { keep: kept } },
+  ];
+  // Only cloud rows: the catalog makes them from the documents below.
+  rows = [];
+  for (const fixture of fixtures) acceptCloudWorkspaceDocument({
+    id: fixture.id, organizationId: cloudTarget.organizationId, teamId: cloudTarget.organizationId, createdBy: cloudTarget.organizationId,
+    name: fixture.branch.replace("example/", ""), placement: "cloud", status: fixture.archived ? "archived" : "in-progress", version: 1,
+    error: null, createdAt: "2026-09-28T00:00:00Z", updatedAt: "2026-09-28T00:00:00Z", deletedAt: null,
+    capabilities: { canWrite: true, canManage: true, canStart: true, startUnavailableReason: null },
+    repository: { forge: "github.com", owner: "example", name: "project", revision: "refs/heads/main" },
+    generation: { number: 1, architecture: "linux/amd64", observedState: fixture.archived ? "stopped" : "running", lastObservedAt: null,
+      resources: { cpuMillicores: 2000, memoryMiB: 4096, storageMiB: 20480 } },
+    ...(on ? { retention: fixture.retention } : {}),
+  } as Parameters<typeof acceptCloudWorkspaceDocument>[0]);
+  recordOrganizationRetention(cloudTarget.organizationId, on);
+  // The cloud organization is the active one (or, with ?general=personal, Personal with this as its own cloud).
+  const { acceptOrganizationSnapshot } = await import("../features/team/team-store");
+  const { setActiveTeamId } = await import("../features/team/active-team");
+  const personalView = new URLSearchParams(location.search).get("general") === "personal";
+  const userId = "55555555-5555-4555-8555-555555555555", personalId = "66666666-6666-4666-8666-666666666666";
+  const caps = { workspaceCapabilities: { local: true, cloud: true }, teamCapabilities: { multiple: false as const, canCreate: false as const } };
+  const cloudOrg = { id: cloudTarget.organizationId, slug: "acme", name: "Acme", logo: null, role: "owner" as const, isPersonal: false, defaultTeamId: null, ...caps };
+  const personal = { id: personalId, slug: "personal", name: "Personal", logo: null, role: "owner" as const, isPersonal: true, defaultTeamId: null, ...caps };
+  const membership = personalView ? [personal] : [personal, cloudOrg];
+  // Personal's own cloud (C3) is the account's personalCloud offer, owned by this organization id.
+  acceptOrganizationSnapshot({ user: { id: userId, email: "fixture@example.test", displayName: "Fixture", staffRole: null }, organizations: membership,
+    teams: membership, ...(personalView ? { personalCloud: { organizationId: cloudTarget.organizationId, slug: "personal-cloud", seat: "pro" } } : {}),
+  } as Parameters<typeof acceptOrganizationSnapshot>[0]);
+  setActiveTeamId(personalView ? personalId : cloudTarget.organizationId);
+  // Mirror the production catalog into the shared read cache, as the sidebar harness does.
+  const { getCloudProjects, getCloudWorkspaceRows } = await import("../state/cloud-workspace-catalog");
+  const { notifyProjectsChanged, setWorkspaceRowsForTesting } = await import("../state/use-projects");
+  cloudRows = slug => getCloudWorkspaceRows().filter(row => slug === undefined || row.repoSlug === slug);
+  for (const project of getCloudProjects()) setWorkspaceRowsForTesting(project.repoSlug, cloudRows(project.repoSlug));
+  notifyProjectsChanged();
 }
 const chats = rows.map((row) => ({
   id: cloudStoppedReference && row.id === "recent" ? cloudScopedId(cloudTarget, "recent-chat") : `${row.id}-chat`,

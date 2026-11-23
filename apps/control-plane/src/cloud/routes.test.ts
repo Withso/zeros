@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import { HttpError } from "../authz.js";
 import { createCloudV2Routes, type CloudV2RouteDeps } from "./routes.js";
 import type { CloudV2Workspace } from "./store.js";
+import { setCloudV2RetentionDocuments } from "./store.js";
 
 const org = "11111111-1111-4111-8111-111111111111";
 const member = "22222222-2222-4222-8222-222222222222";
@@ -559,6 +560,21 @@ describe("cloud v2 archive routes", () => {
     const response = await app.request(`${path}/archive`, { method: "POST" });
     expect(response.status).toBe(status);
     expect(store.requestLifecycle).toHaveBeenCalledWith(id, member, "archive");
+  });
+
+  it("says on the workspace list, from the same switch as the documents, that this server runs retention; off, the reply is what it was", async () => {
+    const { app } = setup();
+    const list = async () => await (await app.request(`/v1/cloud-v2/workspaces?organizationId=${org}`)).text();
+    const off = await list();
+    expect(Object.keys(JSON.parse(off))).toEqual(["workspaces"]);
+    setCloudV2RetentionDocuments(true);
+    try {
+      const on = JSON.parse(await list());
+      expect(on.retention).toBe(true);
+      // Nothing else in the reply changes but the documents' own retention fields.
+      expect(Object.keys(on)).toEqual(["workspaces", "retention"]);
+    } finally { setCloudV2RetentionDocuments(false); }
+    expect(await list()).toBe(off);
   });
 
   it("returns the restored document from start and includes archive metadata in list/get", async () => {

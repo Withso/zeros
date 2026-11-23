@@ -8,6 +8,7 @@ import { useOrganizationProjects } from "../../state/use-organization-projects";
 // The board groups by persisted lifecycle status; archive is an independent
 // flag. Rows preserve the workspace's normal open, history and lifecycle actions.
 
+import { useCloudArchiveLine } from "../../state/cloud-retention";
 import { projectGroupLookup } from "../../state/project-identity";
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useWarmWorkspaceHistory } from "../../state/use-warm-workspace-history";
@@ -727,6 +728,8 @@ function ArchivedCard({
 }) {
   const warmHistory = useWarmWorkspaceHistory();
   const w = row.workspace;
+  // Cloud retention: why it was archived, what opening it brings back, and when what goes.
+  const archiveLine = useCloudArchiveLine(w.path);
   const [restoring, setRestoring] = useState(false);
   const [snapshotToDelete, setSnapshotToDelete] = useState<{
     archiveSnapshot: string;
@@ -857,6 +860,7 @@ function ArchivedCard({
       {view === "list" ? (
         <DashboardListRow
           row={row}
+          archiveLine={archiveLine}
           aria-rowindex={rowIndex}
           display={display}
           ownerName={ownerName}
@@ -903,7 +907,7 @@ function ArchivedCard({
           </div>
           <div className={CARD_TITLE_CLS}>{row.title}</div>
           <div className="text-fg3 mt-1 text-xs leading-4.5">
-            {w.archivedAt == null ? "Folder missing" : "Archived"}
+            {w.archivedAt == null ? "Folder missing" : archiveLine ?? "Archived"}
           </div>
           <DashboardCardMetadata
             row={row}

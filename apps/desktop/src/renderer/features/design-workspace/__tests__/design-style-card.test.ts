@@ -112,11 +112,25 @@ describe("the Style panel's hover card", () => {
     expect(card.actions).toEqual([{ kind: "agent", label: "Ask agent to change" }]);
   });
 
+  it("names the controls that set a main's value and offers the agent, and Controls on the main's root", async () => {
+    const { designFieldOriginsWithControls } = await import("../design-field-origins");
+    const lock = { nodeId: "btn", layer: "Button", controls: { "border-color": ["Tone"] } };
+    const layerCard = designStyleCardContent(field("border-color"), designFieldOriginsWithControls(origins, { ...lock, openControls: false }), catalog);
+    expect(layerCard.notes).toEqual(["Set by Tone"]);
+    expect(layerCard.actions).toEqual([{ kind: "agent", label: "Ask agent to change" }]);
+    const rootCard = designStyleCardContent(field("border-color"), designFieldOriginsWithControls(origins, { ...lock, openControls: true }), catalog);
+    expect(rootCard.actions).toEqual([{ kind: "agent", label: "Ask agent to change" }, { kind: "controls", label: "Open in Controls" }]);
+    expect(designStyleCardContent(field("border-color"), designFieldOriginsWithControls(origins, { ...lock, openControls: true }), catalog, true).actions).toEqual([]);
+  });
+
   it("says a computed value is written with a CSS function and offers the CSS tab only", () => {
     const sized: DesignRuntimeNodeDetails = { ...layer, authoredStyles: { ...layer.authoredStyles, width: { ...btn, value: "calc(100% - 48px)" } } };
     const card = designStyleCardContent(field("width"), designFieldOrigins([sized], context, null), catalog);
     expect(card.notes).toEqual(["Uses calc()."]);
     expect(card.actions).toEqual([{ kind: "css", label: "Edit in CSS" }]);
+    // A component's layers have no CSS tab: the agent changes it instead.
+    const main = designStyleCardContent(field("width"), designFieldOrigins([sized], context, null), catalog, false, { css: false });
+    expect(main.actions).toEqual([{ kind: "agent", label: "Ask agent to change" }]);
   });
 
   it("names which layer makes a field of several read only, and why", () => {

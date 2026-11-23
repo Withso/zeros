@@ -21,6 +21,7 @@ import { HttpError } from "../authz.js";
 import { securityStreamAuthority } from "../security-events.js";
 import type { CloudV2Capabilities } from "./contract.js";
 import type { CloudV2InstalledRepository, CloudV2Store, CloudV2Workspace } from "./store.js";
+import { cloudV2RetentionListSignal } from "./store.js";
 import { CloudV2DraftSchema, CloudV2RecipeSchema, type CloudV2Computers } from "./computer.js";
 import { readCloudV2History } from "./history.js";
 import { CLOUD_V2_BRIDGE_PROTOCOL } from "./relay.js";
@@ -84,10 +85,10 @@ export type CloudV2RouteDeps = {
   workspaceSync?: CloudWorkspaceSync;
   workspaceGithubReadTokens?: CloudWorkspaceGithubReadTokens;
   localDevices?: CloudLocalDeviceRoutes;
-  store: Pick<CloudV2Store, "activeComputer" | "createWorkspace" | "createWorkspaceOnce" | "readCreateReceipt" | "get" | "promptContext" | "list" | "requestLifecycle" | "transition" | "issueToken" | "listChats" | "messageWindow" | "searchMessages" | "messageRange" | "messageSince" | "markActive"> & Partial<Pick<CloudV2Store, "prompts" | "getByNumber" | "chatEdits" | "requestExecutionLifecycle" | "dismissLostWork" | "personActivity" | "setKeep">>;
+  store: Pick<CloudV2Store, "activeComputer" | "legacyComputer" | "createWorkspace" | "createWorkspaceOnce" | "readCreateReceipt" | "get" | "promptContext" | "list" | "requestLifecycle" | "transition" | "issueToken" | "listChats" | "messageWindow" | "searchMessages" | "messageRange" | "messageSince" | "markActive"> & Partial<Pick<CloudV2Store, "prompts" | "getByNumber" | "chatEdits" | "requestExecutionLifecycle" | "dismissLostWork" | "personActivity" | "setKeep">>;
   /** Roll out only with a runtime that advertises durable prompt delivery. */
   promptOutbox?: boolean;
-  computers: Pick<CloudV2Computers, "requireMember" | "requireAdmin" | "overview" | "enqueue" | "buildConfigured" | "buildSourceTargets" | "saveRecipe" | "discardRecipe" | "reactivate" | "log" | "logRepositories">
+  computers: Pick<CloudV2Computers, "requireMember" | "requireAdmin" | "overview" | "enqueue" | "buildConfigured" | "buildSourceTargets" | "saveRecipe" | "discardRecipe" | "reactivate" | "log" | "logRepositories" | "ensureBase" | "baseState">
     & Partial<Pick<CloudV2Computers, "saveInstallScript">>;
   /** Projects (ready copies on): the Cloud Computer is tools only, and creates,
    * repository lists and the old recipe are answered from projects. */
@@ -251,7 +252,7 @@ export function createCloudV2Routes(deps: CloudV2RouteDeps): Hono {
     const organizationId = uuid.safeParse(c.req.query("organizationId"));
     if (!organizationId.success) throw new HttpError(400, "invalid_request", "organizationId is required");
     const workspaces = await deps.store.list(organizationId.data, c.get("user").id);
-    return c.json({ workspaces: await documents(workspaces) });
+    return c.json({ workspaces: await documents(workspaces), ...cloudV2RetentionListSignal() });
   });
 
   /** The workspace page's read by its shareable address, `<slug>/w/<n>`. */
@@ -434,7 +435,9 @@ export function createCloudV2Routes(deps: CloudV2RouteDeps): Hono {
     const organizationId = org(c.req.param("org"));
     await deps.computers.requireMember(organizationId, c.get("user").id);
     if (deps.projects) return c.json({ repositories: await projectRepositories(organizationId, c.get("user").id) });
-    const computer = await deps.store.activeComputer(organizationId);
+    let computer = await deps.store.activeComputer(organizationId);
+    // Ready copies off, on a base from when they were on: the legacy build it replaced, as creates use.
+    if (computer?.baseOnly) computer = (await deps.store.legacyComputer(organizationId)) ?? computer;
     if (!computer) {
       const error = await computerUnavailable(organizationId, c.get("user").id);
       if (error.code === "cloud_computer_rebuild_required") throw error;

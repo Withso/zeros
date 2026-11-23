@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Alert</title>
+<template data-zd-options>
+<zd-option name="tone" type="choice" label="Tone" choices="info success warning danger" choice-labels="Information|Success|Warning|Error" default="warning"></zd-option>
+<zd-option name="heading" type="text" label="Heading" default="Deploy paused"></zd-option>
+<zd-option name="message" type="text" label="Message" default="Production is waiting for one more approval before it ships."></zd-option>
+<zd-option name="icon" type="boolean" label="Icon" default="true"></zd-option>
+<zd-option name="dismissible" type="boolean" label="Close button" default="true"></zd-option>
+<zd-option name="actions" type="choice" label="Actions" group="Actions" choices="none one two" choice-labels="None|One button|Two buttons" default="two"></zd-option>
+<zd-option name="primary" type="text" label="Primary label" group="Actions" default="Approve"></zd-option>
+<zd-option name="secondary" type="text" label="Secondary label" group="Actions" default="View details"></zd-option>
+<zd-option name="entrance" type="easing" label="Entrance" group="Motion" default="cubic-bezier(0.3, 0, 0, 1.4) 420ms"></zd-option>
+<zd-option name="delay" type="number" label="Entrance delay" group="Motion" default="0" min="0" max="1000" step="50" unit="ms"></zd-option>
+<zd-derive name="has-actions" value="actions != 'none'"></zd-derive>
+<zd-variant name="shipped" tone="success" heading="Deploy finished" message="Version 2.4.0 is live in every region." actions="one" primary="Open release"></zd-variant>
+<zd-variant name="failed" tone="danger" heading="Build failed" message="The type check found 3 errors in app/routes.ts." primary="Retry"></zd-variant>
+<zd-variant name="tip" tone="info" heading="Tip" message="Press ⌘K to search frames, pages and tokens." actions="none" dismissible="false"></zd-variant>
+</template>
+<link rel="stylesheet" href="../tokens.css">
+<link rel="stylesheet" href="../ui.css">
+<style>
+zd-alert { display: block; }
+.alert { --alert-ink: var(--accent); --alert-wash: var(--accent-soft); display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: start; gap: var(--space-3); width: 100%; padding: var(--space-4); border: 1px solid var(--border-subtle); border-left: 3px solid var(--alert-ink); border-radius: var(--radius-md); background: var(--bg-surface); box-shadow: var(--shadow-sm); animation: alert-in var(--zd-entrance-duration) var(--zd-entrance-easing) var(--zd-delay) both; }
+.alert[data-tone="success"] { --alert-ink: var(--success); --alert-wash: var(--success-soft); }
+.alert[data-tone="warning"] { --alert-ink: var(--warning); --alert-wash: var(--warning-soft); }
+.alert[data-tone="danger"] { --alert-ink: var(--danger); --alert-wash: var(--danger-soft); }
+@keyframes alert-in { from { opacity: 0; translate: 0 -8px; } }
+.alert-icon { display: grid; place-items: center; width: 28px; height: 28px; border-radius: var(--radius-full); background: var(--alert-wash); color: var(--alert-ink); }
+.alert-icon svg { width: 16px; height: 16px; }
+.alert-text { display: flex; flex-direction: column; gap: var(--space-1); grid-column: 2; }
+.alert-heading { color: var(--fg-strong); font-size: var(--text-small); line-height: var(--text-small--line-height); font-weight: var(--weight-bold); }
+.alert-message { color: var(--fg-default); font-size: var(--text-small); line-height: var(--text-small--line-height); }
+.alert-actions { display: flex; gap: var(--space-2); margin-top: var(--space-2); }
+.alert-close { grid-column: 3; display: grid; place-items: center; width: 24px; height: 24px; padding: 0; border: 0; border-radius: var(--radius-sm); background: transparent; color: var(--fg-muted); }
+.alert-close svg { width: 14px; height: 14px; }
+</style>
+</head>
+<body class="stage">
+<div class="alert" data-oid="alert" data-name="Alert" data-tone="{{ tone }}" role="status">
+<span class="alert-icon" data-oid="alert-icon" data-name="Icon" data-zd-if="icon"><svg data-oid="alert-icon-check" data-zd-if="tone == 'success'" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 8.5l3 3 7-7" data-oid="o-e881397dc"/></svg><svg data-oid="alert-icon-mark" data-zd-if="tone != 'success'" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M8 4v5" data-oid="o-8231f628f"/><path d="M8 11.5v.5" data-oid="o-e003eb816"/></svg></span>
+<div class="alert-text" data-oid="alert-text" data-name="Text">
+<p class="alert-heading" data-oid="alert-heading" data-name="Heading">{{ heading }}</p>
+<p class="alert-message" data-oid="alert-message" data-name="Message">{{ message }}</p>
+<div class="alert-actions" data-oid="alert-actions" data-name="Actions" data-zd-if="has-actions">
+<zd-button tone="accent" size="sm" icon="false" label="{{ primary }}" data-oid="o-5a89b0492"></zd-button>
+<zd-button data-zd-if="actions == 'two'" zd-variant="secondary" size="sm" label="{{ secondary }}" data-oid="o-95ff3510d"></zd-button>
+</div>
+</div>
+<button class="alert-close" type="button" data-oid="alert-close" data-name="Close" aria-label="Dismiss" data-zd-if="dismissible"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true" data-oid="o-002eec497"><path d="M4 4l8 8M12 4l-8 8" data-oid="o-d7bfbbf71"/></svg></button>
+</div>
+</body>
+</html>

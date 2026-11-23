@@ -25,7 +25,8 @@ import type { CloudAgentCredentialMaterial } from "../agent-credentials/agent-cr
 import { createCloudV2AgentLogins, createCloudV2CodexRefresh } from "./agent-logins.js";
 import { BoatCloudV2Compute } from "./boat.js";
 import type { CloudV2ControlFrame } from "./contract.js";
-import { CloudV2ComputerBuilder, CloudV2Computers } from "./computer.js";
+import { CLOUD_V2_AUTOMATIC_BASE_BUDGET, CloudV2ComputerBuilder, CloudV2Computers } from "./computer.js";
+import { CloudV2SharedBaseResolver, CloudV2SharedBases, CloudV2SharedBaseSweeper } from "./shared-base.js";
 import { CloudV2ReadyCopies, CloudV2ReadyCopyBuilder, CloudV2ReadyCopyForks } from "./ready-copies.js";
 import { CloudV2ReadyCopySecrets } from "./ready-copy-secrets.js";
 import { CloudRepositoryLevels } from "./repository-levels.js";
@@ -175,8 +176,26 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
     return workspaceRepositoryToken(pool, github.token, workspace, repository, purpose, () => authorizeSource(workspace), failedTokenSha256);
   };
   const proxyBase = `${v2.apiUrl}${CLOUD_V2_PROXY_PREFIX}`;
+  // Zeros's shared base for the pinned runtime (shared-base.ts): the builder makes it whatever the ready-copies switch
+  // says; CLOUD_V2_SHARED_BASE_SNAPSHOT may pin a name or turn it off. Read through one resolver (cached a minute).
+  const sharedBaseScope = { channel: config.deploymentChannel, ...(localOwner ? { localOwner } : {}) };
+  const sharedBases = new CloudV2SharedBases(pool);
+  const sharedBase = new CloudV2SharedBaseResolver(sharedBases, { ...sharedBaseScope, runtimeSha256: runtime.sha256, override: v2.sharedBaseOverride ?? null });
+  // Whether Boat has a shared base, asked at most once a minute per name (a base made from it costs no machine).
+  const sharedBaseSeen = new Map<string, { at: number; present: boolean }>();
+  const sharedBaseAvailable = async (name?: string) => {
+    if (!name || !compute.snapshotExists) return false;
+    const seen = sharedBaseSeen.get(name);
+    if (seen && Date.now() - seen.at < 60_000) return seen.present;
+    const present = await compute.snapshotExists(name).catch(() => false);
+    sharedBaseSeen.set(name, { at: Date.now(), present });
+    return present;
+  };
   const computers = new CloudV2Computers(pool, lockPool, github.resolveRepository, github.resolveRecentRepository,
-    { readyCopies: v2.readyCopies === true, ...(v2.sharedBaseSnapshot ? { sharedBaseSnapshot: v2.sharedBaseSnapshot } : {}) });
+    { readyCopies: v2.readyCopies === true, sharedBase,
+      ...(v2.readyCopies === true ? { sharedBaseAvailable, runtimeSha256: runtime.sha256 } : {}),
+      ...(v2.automaticBasePerHour || v2.automaticBasePerDay ? { automaticBaseBudget: { perHour: v2.automaticBasePerHour ?? CLOUD_V2_AUTOMATIC_BASE_BUDGET.perHour,
+        perDay: v2.automaticBasePerDay ?? CLOUD_V2_AUTOMATIC_BASE_BUDGET.perDay } } : {}) });
   // Ready copies (CLOUD_V2_READY_COPIES_ENABLED): absent while off, so creates and builds run as before.
   const readyCopies = v2.readyCopies === true ? new CloudV2ReadyCopies(pool) : null;
   const readyCopySecrets = readyCopies ? new CloudV2ReadyCopySecrets(pool, keys) : null;
@@ -224,8 +243,11 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
     },
     ...(readyCopies && readyCopySecrets ? { readyCopies: { copies: readyCopies, secrets: readyCopySecrets,
       changed: async (organizationId: string, projectId: string, change: Parameters<CloudV2ReadyCopyBuilder["reconcile"]>[2]) => {
+        // A project's copy needs a base: made sure of first, so it never waits on a button.
+        await computers.ensureBase(organizationId).catch(() => undefined);
         await readyCopyBuilder?.reconcile(organizationId, projectId, change);
       },
+      base: (organizationId: string) => computers.baseState(organizationId),
       buildNow: async (organizationId: string, projectId: string, userId: string) => {
         if (!readyCopyBuilder) throw new HttpError(503, "ready_copies_unavailable", "Ready copies are not built on this server.");
         return readyCopyBuilder.buildNow(organizationId, projectId, userId);
@@ -451,6 +473,8 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
     ...(readyCopies ? { readyCopies: { status: (organizationId: string, viewer?: string | null) => readyCopies.status(organizationId, viewer ?? null),
       failures: (organizationId: string) => readyCopies.failureSummaries(organizationId, new Date()),
       changed: async (organizationId: string, projectId: string, change: "project_created" | "repositories_changed" | "setup_changed" | "submodules_changed" | "branch_changed") => {
+        // A project's copy needs a base: made sure of first, so it never waits on a button.
+        await computers.ensureBase(organizationId).catch(() => undefined);
         await readyCopyBuilder?.reconcile(organizationId, projectId, change);
       } } } : {}),
     authorizeRepository, authorizeRepositories, authorizeSourceTargets, authorizeBuildRepository, authorizeSource, continueSource,
@@ -721,6 +745,10 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
       if (readyCopyBuilder) await readyCopyBuilder.baseActivated(organizationId, reason);
       else await readyCopies.markStale(organizationId);
     } } : {}),
+    // The shared base: built for each pinned runtime, organizations re-pointed onto it, missing ones repaired, old ones
+    // deleted once nothing refers to them, and Boat's named snapshots inventoried daily (shared-base.ts).
+    sharedBases: new CloudV2SharedBaseSweeper({ bases: sharedBases, compute, pool, scope: sharedBaseScope, runtime, publicKeys: signer.publicKeys,
+      ...(v2.runtime.previousSha256 ? { previousRuntimeSha256: v2.runtime.previousSha256 } : {}), override: v2.sharedBaseOverride ?? null, logger: console }),
     logger: console,
   }) : null;
   const copyCloneToken = async (organizationId: string, userId: string, target: CloudSourceTarget) =>
@@ -745,6 +773,10 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
     },
     logger: console,
   }) : null;
+  // A base made inline (the shared one, by ensureBase) queues first copies as one the builder made does.
+  if (readyCopies) computers.baseActivated = async (organizationId: string) => {
+    if (readyCopyBuilder) await readyCopyBuilder.baseActivated(organizationId, "manual");
+  };
   const readyCopyForks = roles.lifecycle && readyCopies ? new CloudV2ReadyCopyForks({
     copies: readyCopies, compute,
     ...(readyCopyBuilder ? { queueFirst: (organizationId: string, projectId: string) => readyCopyBuilder.queueFirst(organizationId, projectId) } : {}),

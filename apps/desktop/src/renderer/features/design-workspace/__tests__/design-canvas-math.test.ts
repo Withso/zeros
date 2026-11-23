@@ -53,6 +53,7 @@ import {
   designOriginFraction,
   designOriginTranslationShift,
   designResizeStyleAxes,
+  designUnboundResizeHandle,
   designResizeAnchor,
   designResizeLayoutOffset,
   designRotatedResizeOrigin,
@@ -742,6 +743,11 @@ describe("design canvas viewport math", () => {
 
   it("authors only the dimensions controlled by the active resize edge", () => {
     expect(designResizeStyleAxes("e")).toEqual({ width: true, height: false });
+    // An axis a control drives is not resized from a handle.
+    expect(designUnboundResizeHandle("se", { width: true, height: false })).toBe("s");
+    expect(designUnboundResizeHandle("nw", { width: false, height: true })).toBe("w");
+    expect(designUnboundResizeHandle("e", { width: true, height: false })).toBeNull();
+    expect(designUnboundResizeHandle("ne", { width: false, height: false })).toBe("ne");
     expect(designResizeStyleAxes("n")).toEqual({ width: false, height: true });
     expect(designResizeStyleAxes("sw")).toEqual({ width: true, height: true });
   });

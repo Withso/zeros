@@ -1,3 +1,4 @@
+/* global window, document, MutationObserver, getComputedStyle */
 import { expect } from "@playwright/test";
 
 import { openLayersDrawer } from "./ui-smoke-design-helpers.mjs";
@@ -142,12 +143,54 @@ export async function runDesignFieldStatesSmoke({ page, check }) {
   const scrub = field("border-radius").locator("button.zd-field-scrub");
   // The scrub takes a press only once both layers' details are current.
   await expect(scrub).toBeEnabled();
+  // What the label goes through from here, kept for a failure's message only.
+  await scrub.evaluate((button) => {
+    const facts = { pressed: false, captureLost: false, disabledFlips: 0 };
+    const observer = new MutationObserver(() => { facts.disabledFlips += 1; });
+    observer.observe(button, { attributes: true, attributeFilter: ["disabled"] });
+    button.addEventListener("pointerdown", () => { facts.pressed = true; }, { once: true });
+    button.addEventListener("lostpointercapture", () => { facts.captureLost = true; }, { once: true });
+    window.__designScrubFacts = { facts, stop: () => observer.disconnect() };
+  });
+  // hover() waits until the label is visible, stable and the element at its
+  // centre, so the press lands on it; a box read once and pressed later can be
+  // stale on a slow runner, where the panel still lays out after the button is enabled.
+  await scrub.hover();
   const box = await scrub.boundingBox();
-  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+  const press = { x: box.x + box.width / 2, y: box.y + box.height / 2 };
+  const scrubFacts = () => page.evaluate(([x, y]) => {
+    const element = document.elementFromPoint(x, y);
+    const label = document.querySelector('[data-design-style-property="border-radius"] button.zd-field-scrub');
+    const rect = label?.getBoundingClientRect();
+    const name = (node) => node ? `${node.tagName.toLowerCase()}${node.getAttribute("aria-label") ? `[aria-label="${node.getAttribute("aria-label")}"]` : ""}${
+      typeof node.className === "string" && node.className ? `.${node.className.trim().split(/\s+/).slice(0, 3).join(".")}` : ""}` : "nothing";
+    return { ...window.__designScrubFacts?.facts, atPress: name(element), onLabel: !!label && !!element && (element === label || label.contains(element)),
+      labelNow: rect ? [Math.round(rect.x), Math.round(rect.y), Math.round(rect.width), Math.round(rect.height)] : null,
+      cursor: document.body.style.cursor };
+  }, [press.x, press.y]);
+  const readBox = [Math.round(box.x), Math.round(box.y), Math.round(box.width), Math.round(box.height)];
   await page.mouse.down();
-  await page.mouse.move(box.x + box.width / 2 + 8, box.y + box.height / 2, { steps: 4 });
+  // The Mixed scrub's gesture sets the ew-resize cursor the moment it begins.
+  try {
+    await expect.poll(() => page.evaluate(() => document.body.style.cursor), { timeout: 2_000 }).toBe("ew-resize");
+  } catch {
+    const facts = await scrubFacts();
+    throw new Error(facts.pressed
+      ? `the Mixed scrub was pressed but its gesture did not begin: ${JSON.stringify({ ...facts, readBox })}`
+      : `the press landed on ${facts.atPress}, not the Scrub border radius label: ${JSON.stringify({ ...facts, readBox })}`);
+  }
+  await page.mouse.move(press.x + 8, press.y, { steps: 4 });
   const moved = () => radii().then((now) => now.map((value, index) => Number.parseFloat(value) - Number.parseFloat(start[index])));
-  await expect.poll(async () => (await moved())[0]).toBeGreaterThan(0);
+  try {
+    await expect.poll(async () => (await moved())[0]).toBeGreaterThan(0);
+  } catch {
+    const facts = await scrubFacts();
+    throw new Error(facts.captureLost || facts.cursor !== "ew-resize"
+      ? `the Mixed scrub began and was cancelled before it moved a layer (capture lost or the field disabled mid-drag): ${JSON.stringify({ ...facts, readBox, moved: await moved() })}`
+      : `the Mixed scrub began and was not cancelled, but no layer moved (its preview was not applied): ${JSON.stringify({ ...facts, readBox, moved: await moved() })}`);
+  } finally {
+    await page.evaluate(() => window.__designScrubFacts?.stop());
+  }
   const deltas = await moved();
   const scrubbedValue = await input("border-radius").inputValue();
   check(

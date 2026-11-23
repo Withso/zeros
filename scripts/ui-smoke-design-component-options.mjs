@@ -2,7 +2,7 @@ import { expect } from "@playwright/test";
 
 import { openLayersDrawer } from "./ui-smoke-design-helpers.mjs";
 
-// The Options section of a component frame (pricing.html as "Chat composer"
+// The Controls section of a component frame (pricing.html as "Chat composer"
 // in the harness): present only for the frame itself, every row writes once
 // on commit, a CSS-only number previews through the frame's runtime with no
 // engine request, a structural one updates on release, Escape writes
@@ -215,15 +215,15 @@ export async function runDesignComponentOptionsSmoke({ page, check }) {
   // The one authoring affordance asks the agent.
   const prompts = () => page.evaluate(() => (window.__zerosHarnessAgentPrompts ?? []).length);
   const promptsBefore = await prompts();
-  await section.getByRole("button", { name: "Ask agent to change options" }).click();
+  await section.getByRole("button", { name: "Ask agent to change controls" }).click();
   await expect.poll(prompts).toBe(promptsBefore + 1);
   const sent = await page.evaluate(() => window.__zerosHarnessAgentPrompts.at(-1));
-  check("Ask agent to change options sends one brief", sent.displayText === "Change the options of Chat composer" && sent.text.includes("Change a component's options"), JSON.stringify(sent).slice(0, 200));
+  check("Ask agent to change controls sends one brief", sent.displayText === "Change the options of Chat composer" && sent.text.includes("Change a component's options"), JSON.stringify(sent).slice(0, 200));
 
   // Options that could not be applied, in both cases; rows stay adjustable.
   for (const [shows, line] of [
-    ["last-good", "These options could not be applied. The frame shows its last good render."],
-    ["defaults", "These options could not be applied. The frame shows the component's defaults."],
+    ["last-good", "These controls could not be applied. The frame shows its last good render."],
+    ["defaults", "These controls could not be applied. The frame shows the component's defaults."],
   ]) {
     await page.evaluate((value) => window.__zerosHarnessComponentNotApplied(value), shows);
     const alert = section.getByRole("alert");

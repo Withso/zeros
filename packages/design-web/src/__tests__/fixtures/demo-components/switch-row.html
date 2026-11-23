@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Switch row</title>
+<template data-zd-options>
+<zd-option name="label" type="text" label="Label" default="Email notifications"></zd-option>
+<zd-option name="hint" type="text" label="Hint" default="A summary every morning at 9:00."></zd-option>
+<zd-option name="checked" type="boolean" label="On" default="true"></zd-option>
+<zd-option name="disabled" type="boolean" label="Disabled" default="false"></zd-option>
+<zd-option name="track" type="color" label="Track when on" group="Look" default="var(--accent)"></zd-option>
+<zd-option name="motion" type="easing" label="Knob motion" group="Look" default="spring(0.3) 320ms"></zd-option>
+<zd-variant name="off" checked="false"></zd-variant>
+<zd-variant name="locked" disabled="true" hint="Your organisation manages this setting."></zd-variant>
+<zd-variant name="bare" hint=""></zd-variant>
+</template>
+<link rel="stylesheet" href="../tokens.css">
+<link rel="stylesheet" href="../ui.css">
+<style>
+zd-switch-row { display: block; }
+.switch-row { display: flex; align-items: center; justify-content: space-between; gap: var(--space-4); width: 100%; padding: var(--space-3) var(--space-4); border: 1px solid var(--border-subtle); border-radius: var(--radius-md); background: var(--bg-surface); }
+.switch-row[aria-disabled="true"] { opacity: var(--opacity-disabled); }
+.switch-row-text { display: flex; flex-direction: column; min-width: 0; }
+.switch-row .switch, .switch-row .switch::after { transition-duration: var(--zd-motion-duration); transition-timing-function: var(--zd-motion-easing); }
+.switch-row .switch[aria-checked="true"] { background: var(--zd-track); }
+</style>
+</head>
+<body class="stage">
+<div class="switch-row" data-oid="switch-row" data-name="Switch row" aria-disabled="{{ disabled }}">
+<span class="switch-row-text" data-oid="switch-row-text" data-name="Text">
+<span class="field-label" data-oid="switch-row-label" data-name="Label">{{ label }}</span>
+<span class="field-hint" data-oid="switch-row-hint" data-name="Hint" data-zd-if="len(hint) > 0">{{ hint }}</span>
+</span>
+<span class="switch" data-oid="switch-row-switch" data-name="Switch" role="switch" aria-checked="{{ checked }}" aria-label="{{ label }}"></span>
+</div>
+</body>
+</html>

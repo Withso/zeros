@@ -1,5 +1,5 @@
 import { expect } from "@playwright/test";
-import { designCanvasPoint, openLayersDrawer } from "./ui-smoke-design-helpers.mjs";
+import { designCanvasPoint, openLayersDrawer, pressDesignScrub } from "./ui-smoke-design-helpers.mjs";
 
 async function openDesign(page) {
   await page.setViewportSize({ width: 1440, height: 900 });
@@ -147,14 +147,8 @@ export async function runDesignInspectorScrubIntegritySmoke({ page, check }) {
   const size = page.getByRole("textbox", { name: "Size", exact: true });
   const scrub = page.getByRole("button", { name: "Scrub Size", exact: true });
   await scrub.scrollIntoViewIfNeeded();
-  const bounds = await scrub.boundingBox();
-  const start = {
-    x: bounds.x + bounds.width / 2,
-    y: bounds.y + bounds.height / 2,
-  };
   for (const cancellation of ["escape", "blur", "capture"]) {
-    await page.mouse.move(start.x, start.y);
-    await page.mouse.down();
+    const start = await pressDesignScrub(page, scrub);
     await page.mouse.move(start.x + 24, start.y);
     await expect(size).toHaveValue("112");
     if (cancellation === "escape") await page.keyboard.press("Escape");
@@ -165,8 +159,7 @@ export async function runDesignInspectorScrubIntegritySmoke({ page, check }) {
     await expect(size).toHaveValue("88");
     expect(await styleWrites(page)).toBe(0);
   }
-  await page.mouse.move(start.x, start.y);
-  await page.mouse.down();
+  const start = await pressDesignScrub(page, scrub);
   await page.mouse.move(start.x + 12, start.y);
   await page.mouse.up();
   await expect(size).toHaveValue("100");

@@ -438,13 +438,20 @@ export class CloudExecutionContexts {
         if (BigInt(generation) < 1n || BigInt(generation) > 9223372036854775806n) throw actorChanged();
         const contextId = randomUUID();
         assertExecutionLifetime(proof.until);
+        // The payer guard (0245) refuses a payer that changed since the selection read above with 23514 cloud_execution_payer_changed;
+        // a change that commits in between is an authority change like any other (409 actor_changed), never a 500. Its RAISE names
+        // no constraint, so its exact message is matched. cloud_execution_payer_required stays a 500: during a rolling deploy an
+        // N-1 replica's selection is refused that way, and the worker retries the same dispatch until an upgraded replica admits it.
         const context = (await tx.query<ExecutionContext>(`INSERT INTO cloud_v2_execution_contexts(id,workspace_id,org_id,user_id,kind,chat_id,user_message_id,dispatch_id,
           generation,chat_epoch,access_epoch,stop_generation,worker_boot_id,worker_token_hash,authority,source_fingerprint,agent,selection,credential_id,
           sender_device_id,sender_registration_id,sender_binding_generation,expires_at)
           VALUES($1,$2,$3,$4,'turn',$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22) RETURNING *`,
         [contextId, workspace.id, workspace.org_id, row.creator_user_id, row.chat_id, row.user_message_id, input.dispatchId, generation, chat.epoch,
           workspace.access_epoch, workspace.stop_generation, identity.bootId, workspace.worker_token_hash, executionContextAuthority(proof.person), proof.source?.fingerprint ?? null,
-          agent, selection, selection.source === "personal" ? selection.credentialId : null, row.sender_device_id, row.sender_registration_id, row.sender_binding_generation, new Date(proof.until)])).rows[0]!;
+          agent, selection, selection.source === "personal" ? selection.credentialId : null, row.sender_device_id, row.sender_registration_id, row.sender_binding_generation, new Date(proof.until)])
+          .catch((error: { code?: unknown; message?: unknown } | null) => {
+            throw error?.code === "23514" && error.message === "cloud_execution_payer_changed" ? actorChanged() : error;
+          })).rows[0]!;
         await tx.query("UPDATE cloud_v2_prompt_chats SET acting_user_id=$3,acting_generation=$4,active_context_id=$5 WHERE workspace_id=$1 AND chat_id=$2",
           [workspace.id, row.chat_id, row.creator_user_id, generation, contextId]);
         await tx.query(`UPDATE cloud_v2_prompt_outbox SET state='dispatching',dispatch_id=$3,execution_context_id=$4,updated_at=clock_timestamp()

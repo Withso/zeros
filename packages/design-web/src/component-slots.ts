@@ -41,7 +41,7 @@ export function designSlotsOfNodes(nodes: readonly DefaultTreeAdapterTypes.Child
       if (!("tagName" in node)) continue;
       const name = node.attrs.find((attribute) => attribute.name === DESIGN_SLOT_ATTRIBUTE)?.value;
       if (name && isDesignSlotName(name) && !names.includes(name)) names.push(name);
-      if (!node.tagName.startsWith("zd-")) visit(node.tagName === "template" ? (node as DefaultTreeAdapterTypes.Template).content.childNodes : node.childNodes);
+      if (!node.tagName.startsWith("zd-")) visit(node.tagName === "template" ? (node as Partial<DefaultTreeAdapterTypes.Template>).content?.childNodes ?? node.childNodes : node.childNodes);
     }
   };
   visit(nodes);
