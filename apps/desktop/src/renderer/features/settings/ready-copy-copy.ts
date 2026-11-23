@@ -11,6 +11,8 @@ const COPY: Record<string, ReadyCopyFailureCopy> = {
   ready_copy_scrub_failed: { what: "The build could not be cleaned up before it was saved.", change: "Build again." },
   ready_copy_boot_timeout: { what: "The build's machine did not start in time.", change: "Build again." },
   ready_copy_stop_incomplete: { what: "The build's machine did not stop.", change: "Build again." },
+  ready_copy_checkout_missing: { what: "A repository's checkout was not on the build's machine when it was saved.", change: "Build again." },
+  ready_copy_archive_incomplete: { what: "The build's machine could not be saved in full.", change: "Build again; it is also retried automatically." },
   ready_copy_interrupted: { what: "The build was interrupted.", change: "It is retried automatically." },
   ready_copy_superseded: { what: "A newer build replaced this one.", change: "Nothing to change." },
   ready_copy_base_changed: { what: "The Cloud Computer changed while this built.", change: "It is rebuilt from the new Cloud Computer." },

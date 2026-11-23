@@ -441,17 +441,23 @@ describe("cloud v2 lifecycle", () => {
 
   it("marks a stop stopped only once Boat reports the VM archived", async () => {
     const f = setup([workspace("stopping", { boatSandboxId: "bx_abc1", checkpoint: SAVED })]);
-    vi.mocked(f.compute.inspect).mockResolvedValueOnce({ name: "zeros-alpha-6f2b7c1e", state: "archiving" });
+    vi.mocked(f.compute.inspect).mockResolvedValueOnce({ name: "zeros-alpha-6f2b7c1e", state: "running" })
+      .mockResolvedValueOnce({ name: "zeros-alpha-6f2b7c1e", state: "archiving" });
     await f.lifecycle.tick();
-    expect(f.compute.inspect).toHaveBeenCalledTimes(2);
-    expect(f.compute.stop).toHaveBeenCalledBefore(vi.mocked(f.compute.inspect));
+    // One read before the stop (hydrated, no snapshot attempt in progress: boat-disk.ts), then until archived.
+    expect(f.compute.inspect).toHaveBeenCalledTimes(3);
+    const order = vi.mocked(f.compute.inspect).mock.invocationCallOrder, stopped = vi.mocked(f.compute.stop).mock.invocationCallOrder[0]!;
+    expect(order[0]).toBeLessThan(stopped);
+    expect(order[1]).toBeGreaterThan(stopped);
     expect(f.store.transition).toHaveBeenCalledExactlyOnceWith(WS, ["stopping"], "stopped", { stopGeneration: "2", revoke: true });
   });
 
   it("keeps stopping, and asks Boat again, while Boat has not archived the VM after accepting the stop", async () => {
-    for (const states of [["idle"], Array(13).fill("archiving")]) {
+    // Past every read the stop makes: 10 quick reads right after it (boat-disk.ts), then ARCHIVE_CONFIRM_READS (12).
+    for (const states of [["idle"], Array(23).fill("archiving")]) {
       const f = setup([workspace("stopping", { boatSandboxId: "bx_abc1", checkpoint: SAVED })], { logs: true });
-      for (const state of states) vi.mocked(f.compute.inspect).mockResolvedValueOnce({ name: "zeros-alpha-6f2b7c1e", state });
+      // The read before the stop, then the answers after it.
+      for (const state of ["running", ...states]) vi.mocked(f.compute.inspect).mockResolvedValueOnce({ name: "zeros-alpha-6f2b7c1e", state });
       await f.lifecycle.tick();
       expect(f.store.transition).not.toHaveBeenCalled();
       expect(f.store.revoke).not.toHaveBeenCalled();
@@ -460,7 +466,7 @@ describe("cloud v2 lifecycle", () => {
     }
     // A stop that never takes ends failed, never stopped with the VM still running.
     const last = setup([workspace("stopping", { boatSandboxId: "bx_abc1", checkpoint: SAVED, attempts: 8 })]);
-    vi.mocked(last.compute.inspect).mockResolvedValueOnce({ name: "zeros-alpha-6f2b7c1e", state: "idle" });
+    vi.mocked(last.compute.inspect).mockResolvedValueOnce({ name: "zeros-alpha-6f2b7c1e", state: "running" }).mockResolvedValueOnce({ name: "zeros-alpha-6f2b7c1e", state: "idle" });
     await last.lifecycle.tick();
     expect(last.store.transition).toHaveBeenCalledExactlyOnceWith(WS, ["stopping"], "failed", { errorCode: "provider_stop_incomplete", stopGeneration: "2" });
   });

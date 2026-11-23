@@ -6,6 +6,8 @@
 import { workspaceCheckoutPath } from "./workspace-layout.js";
 import { randomBytes, randomUUID } from "node:crypto";
 import { CLOUD_V2_LEASE_SECONDS, type CloudV2Compute, type CloudV2CommandResult } from "./boat.js";
+import { archiveSuspect, diskSettled, stopKeepingWrites } from "./boat-disk.js";
+import { checkoutsMatch, readyCopyCheckoutsCommand } from "./ready-copies.js";
 import { BoatBootPendingError, BoatCreateRejectedError, BoatForkRefusedError, BoatSnapshotExpiredError } from "./boat-client.js";
 import { CloudProviderError } from "./provider-error.js";
 import { installRuntimeCommand, prepareRuntimeCommand, type CloudV2Runtime } from "./runtime.js";
@@ -114,6 +116,8 @@ const FORK_READY_ATTEMPTS = 36;
 const ARCHIVING_RECHECK_MS = 60_000;
 /** A stop waits this long for Boat to finish archiving before trying again. */
 const ARCHIVE_CONFIRM_READS = 12, ARCHIVE_CONFIRM_MS = 5_000;
+/** Reads, a second apart, a stop waits while Boat has a snapshot attempt of the machine in progress (boat-disk.ts). */
+const STOP_SETTLE_READS = 15;
 /** Boat's stock image home; repositories live at <home>/<owner>/<name>. */
 export const CLOUD_V2_HOME = "/home/user";
 
@@ -184,6 +188,7 @@ export type CloudV2LifecycleDeps = {
     | "checkpointForkCreated" | "checkpointForkGone" | "checkpointRetryNext"
     // Retention (`retention`); absent from older compositions, which never enable it.
     | "recordStopProbe" | "restoreForkRefused" | "replaceLostSandbox" | "workspaceBranches" | "recordLostWork" | "recordUnrestoredSubmodules"
+    | "recordStopArchiveFailed"
     | "claimMaintenanceWake" | "beginMaintenanceStop" | "adoptMaintenance" | "maintenanceHeld" | "finishMaintenance"
     | "startRetentionClocks" | "archiveInactive" | "archiveDepartedPrivate" | "restoreReturningPrivate" | "archiveForSystem" | "clearArchiveScrub"
     | "claimBackupRemovals" | "pendingBackupRemovals" | "finishBackupRemoval" | "sweepDepartedProjects" | "deleteDepartedProjects" | "missedWakes"
@@ -235,7 +240,7 @@ export type CloudV2LifecycleDeps = {
   builds?: { tick(): Promise<void>; cleanup?(): Promise<void>; close?(): void };
   /** Ready copies (CloudV2Config.readyCopies): creates fork a repository's
    * stopped, set-up machine; their builds run beside Cloud Computer builds. */
-  readyCopies?: Pick<CloudV2ReadyCopyForks<CloudV2LifecycleWorkspace>, "prepare" | "fetchBase">;
+  readyCopies?: Pick<CloudV2ReadyCopyForks<CloudV2LifecycleWorkspace>, "prepare" | "fetchBase"> & Partial<Pick<CloudV2ReadyCopyForks<CloudV2LifecycleWorkspace>, "verify">>;
   readyCopyBuilds?: { tick(): Promise<void>; close?(): void };
   runtimeUpdates?: { tick(): Promise<void>; close(): void };
   recovery?: { start(): () => Promise<void> };
@@ -688,9 +693,12 @@ export class CloudV2Lifecycle {
         if (warmup) void this.deps.compute.exec(sandboxId, warmup, 30).catch(() => undefined);
         if (!forked && (image.prune.length || !image.from)) await this.measure(workspace, "image_prepare", () => this.prepareImage(sandboxId, image));
         if (forked) await this.measure(workspace, "repository_prepare", () => this.deps.readyCopies!.fetchBase(workspace, sandboxId));
+        // Never on a copy's word: a fork whose checkout is missing, or at another
+        // commit, clones directly, and that copy is rebuilt.
+        const intact = !forked || await (this.deps.readyCopies!.verify?.(workspace, sandboxId) ?? Promise.resolve(true));
         // An active create obtains the initiator's repository material through
         // its bootstrap lease, after the worker has proved boot cleanup.
-        if (this.deps.prepareRepository && !image.checkout && !workspace.executionIntent) {
+        if (this.deps.prepareRepository && (!image.checkout || !intact) && !workspace.executionIntent) {
           await store.defer(workspace.id, "creating", 17 * 60_000);
           await this.measure(workspace, "repository_prepare", () => this.deps.prepareRepository!(workspace, sandboxId));
         }
@@ -821,7 +829,7 @@ export class CloudV2Lifecycle {
         return;
       }
       case "stopping": {
-        let sandboxId = workspace.boatSandboxId, stoppedAt: Date | null = null;
+        let sandboxId = workspace.boatSandboxId, stoppedAt: Date | null = null, archiveFailed = false;
         if (workspace.restorePending && !sandboxId) sandboxId = await this.replacement(workspace, undefined, { find: true });
         if (sandboxId) {
           await this.deps.stopWorker({ ...workspace, boatSandboxId: sandboxId });
@@ -832,7 +840,17 @@ export class CloudV2Lifecycle {
           // A stop that a later one has replaced leaves the VM to that one,
           // whose checkpoint may still be running on it.
           if (!await store.stopCurrent(workspace.id, workspace.stopGeneration)) return;
-          try { await compute.stop(sandboxId); stoppedAt = await this.untilArchived(sandboxId); }
+          try {
+            // Never a stop while a snapshot attempt is in progress: its archive may lack the machine's last writes.
+            const stopped = await stopKeepingWrites(compute, sandboxId, { sleep: ms => this.pause(ms), reads: STOP_SETTLE_READS,
+              archiveReads: ARCHIVE_CONFIRM_READS, archiveIntervalMs: ARCHIVE_CONFIRM_MS });
+            stoppedAt = stopped.stoppedAt;
+            if (archiveSuspect(stopped)) {
+              archiveFailed = true;
+              (this.deps.logger?.error ?? this.deps.logger?.warn)?.call(this.deps.logger,
+                `[cloud-v2] stop archive may lack the machine's last writes (${stopped.failed ? "failed_attempt" : "attempt_before_stop"}) workspace=${workspace.id.slice(0, 8)}`);
+            }
+          }
           catch (error) {
             // Nothing is left to stop; the next wake restores the checkpoint, or under retention rebuilds without one.
             if (!sandboxLost(error) || !(workspace.checkpoint || saved || (this.retention && workspace.executionIntent === undefined))) throw error;
@@ -841,7 +859,7 @@ export class CloudV2Lifecycle {
         // Credentials go only with this stop's own completion. Retention keeps
         // Boat's stoppedAt, the time its 14-day deletion counts from.
         await store.transition(workspace.id, ["stopping"], "stopped", { stopGeneration: workspace.stopGeneration, revoke: true,
-          ...(this.retention && stoppedAt ? { stoppedAt } : {}) });
+          ...(this.retention && stoppedAt ? { stoppedAt } : {}), ...(archiveFailed ? { archiveFailed: true } : {}) });
         return;
       }
       case "deleting": {
@@ -997,8 +1015,15 @@ export class CloudV2Lifecycle {
       // Opened meanwhile: the person's start has the running machine. Only a wake still waking on a
       // stopped workspace marks its stop, in one statement.
       if (!await store.beginMaintenanceStop(row.id, attempt)) { outcome = "adopted"; return true; }
-      await compute.stop(vm);
-      machineStoppedAt = await this.untilArchived(vm);
+      // As a person's stop: never while a snapshot attempt is in progress, and a failed one is recorded.
+      const stopped = await stopKeepingWrites(compute, vm, { sleep: ms => this.pause(ms), reads: STOP_SETTLE_READS,
+        archiveReads: ARCHIVE_CONFIRM_READS, archiveIntervalMs: ARCHIVE_CONFIRM_MS });
+      machineStoppedAt = stopped.stoppedAt;
+      if (archiveSuspect(stopped)) {
+        (this.deps.logger?.error ?? this.deps.logger?.warn)?.call(this.deps.logger,
+          `[cloud-v2] stop archive may lack the machine's last writes (${stopped.failed ? "failed_attempt" : "attempt_before_stop"}) workspace=${row.id.slice(0, 8)}`);
+        await store.recordStopArchiveFailed(row.id);
+      }
       outcome = "stopped";
       return true;
     } catch (error) {
@@ -1340,6 +1365,8 @@ export class CloudV2Lifecycle {
       fork.sandboxId = sandboxId;
       await store.checkpointForkCreated(row.id, attempt, sandboxId);
       await this.untilReady(sandboxId);
+      // The capture reads the fork once its restore settled (boat-disk.ts); it goes on either way.
+      await diskSettled(this.deps.compute, sandboxId, { sleep: ms => this.pause(ms) }).catch(() => "unknown");
       // A fork is a fresh boot that starts every enabled unit (boat-fake.ts, "worker unit stays
       // disabled"). The fork is ours and goes afterwards: a worker it started is switched off
       // there first; one that will not switch off is never used.
@@ -1411,6 +1438,8 @@ export class CloudV2Lifecycle {
    * it then, e.g. refusing one without a recent snapshot of its own. Only
    * `archived` makes the workspace stopped. */
   /** Resolves Boat's stoppedAt: set only once archived, it is the archive's end, not when the stop was asked for. */
+  private pause(ms: number): Promise<void> { return (this.deps.sleep ?? (value => new Promise(resolve => setTimeout(resolve, value))))(ms); }
+
   private async untilArchived(sandboxId: string): Promise<Date | null> {
     for (let read = 1; read <= ARCHIVE_CONFIRM_READS; read++) {
       const { state, stoppedAt } = await this.deps.compute.inspect(sandboxId);
@@ -1485,6 +1514,7 @@ export class CloudV2Lifecycle {
         if (!neverCreated(error)) throw error;
         this.deps.logger?.warn(`[cloud-v2] ready copy fork refused for a restore; creating from the Cloud Computer (${errorCode(error)})`);
       }
+      if (sandboxId) await this.forkCheckoutsOrClone(workspace, sandboxId);
     }
     if (!sandboxId) {
       // The organization's live Cloud Computer, as a backup restore uses (store.pinRestoreImage): never the
@@ -1509,6 +1539,17 @@ export class CloudV2Lifecycle {
     emitCloudV2Timing(this.deps.timing, { workspaceId: workspace.id.slice(0, 8), state: workspace.state, phase: "checkpoint_restore",
       durationMs: Math.max(0, Math.round((this.deps.now?.() ?? Date.now()) - start)), checkpoint: "none" });
     return sandboxId;
+  }
+
+  /** A fork of a ready copy, read at once (a fork serves its archive's files from its first second): every checkout of the
+   * workspace there, or a direct clone of the missing ones (a copy's archive may lack what its build wrote). */
+  private async forkCheckoutsOrClone(workspace: CloudV2LifecycleWorkspace, sandboxId: string): Promise<void> {
+    const paths = [workspaceCheckoutPath(workspace), ...(await this.deps.repositories?.(workspace) ?? []).map(entry => `${CLOUD_V2_HOME}/${entry.checkoutFolder}`)];
+    const read = await this.deps.compute.exec(sandboxId, `bash -c ${shellQuote(readyCopyCheckoutsCommand(paths).join("\n"))}`, 120).catch(() => null);
+    if (read && read.exitCode === 0 && !read.timedOut && checkoutsMatch(read.stdout, paths.map(() => ({ commit: null })))) return;
+    this.deps.logger?.warn(`[cloud-v2] ready copy fork lacks a checkout; cloning directly workspace=${workspace.id.slice(0, 8)}`);
+    if (!this.deps.prepareRepository) throw Object.assign(new Error("no clone path"), { code: "cloud_source_checkout_failed" });
+    await this.deps.prepareRepository(workspace, sandboxId);
   }
 
   /** A restore without a checkpoint: every repository's workspace branch is

@@ -258,6 +258,9 @@ export type CloudV2Config = {
    * repository gets a stopped machine cloned and set up from it, and creates
    * fork that machine, falling back to the direct clone when none is ready. */
   readyCopies?: boolean;
+  /** Before a ready copy is promoted, read its checkouts back through one throwaway fork of its archive,
+   * CLOUD_V2_READY_COPY_VERIFY_FORK=true. Default off. */
+  readyCopyVerifyFork?: boolean;
   /** Retention (cloud/lifecycle.ts), CLOUD_V2_RETENTION_ENABLED=true. Default off: off,
    * stop, checkpoint, wake, archive and delete behave as before. On, a stop
    * uploads nothing: it switches the worker service off and probes for work not
@@ -328,6 +331,8 @@ function loadCloudV2Config(env: NodeJS.ProcessEnv, channel: string): CloudV2Conf
   if (asyncCreate && !["true", "false"].includes(asyncCreate)) throw new Error("Invalid environment: CLOUD_V2_ASYNC_CREATE_ENABLED must be true or false");
   const readyCopies = env.CLOUD_V2_READY_COPIES_ENABLED?.trim().toLowerCase();
   if (readyCopies && !["true", "false"].includes(readyCopies)) throw new Error("Invalid environment: CLOUD_V2_READY_COPIES_ENABLED must be true or false");
+  const readyCopyVerifyFork = env.CLOUD_V2_READY_COPY_VERIFY_FORK?.trim().toLowerCase();
+  if (readyCopyVerifyFork && !["true", "false"].includes(readyCopyVerifyFork)) throw new Error("Invalid environment: CLOUD_V2_READY_COPY_VERIFY_FORK must be true or false");
   const personalCloud = env.CLOUD_V2_PERSONAL_CLOUD_ENABLED?.trim().toLowerCase();
   if (personalCloud && !["true", "false"].includes(personalCloud)) throw new Error("Invalid environment: CLOUD_V2_PERSONAL_CLOUD_ENABLED must be true or false");
   const retention = env.CLOUD_V2_RETENTION_ENABLED?.trim().toLowerCase();
@@ -394,6 +399,7 @@ function loadCloudV2Config(env: NodeJS.ProcessEnv, channel: string): CloudV2Conf
     messageAuthority: messageAuthority !== "false",
     checkpointRetry: checkpointRetry === "true",
     readyCopies: readyCopies === "true",
+    ...(readyCopyVerifyFork === "true" ? { readyCopyVerifyFork: true } : {}),
     retention: retention === "true",
     personalCloud: personalCloud === "true",
     ...(backupForks ? { backupForksPerHour: Number(backupForks) } : {}),

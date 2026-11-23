@@ -268,6 +268,7 @@ export type CloudV2WorkspaceRow = {
   archive_wake_done_at?: Date | null; checkpoint_object?: string | null; retention_started_at?: Date | null;
   backup_probe?: BackupProbe | null; backup_probe_generation?: string | null; stop_generation?: string; checkpoint_stop_generation?: string | null;
   changed_since_stop_generation?: string | null; machine_gone_at?: Date | null; waiting_for_base_at?: Date | null;
+  stop_archive_failed_generation?: string | null;
   checkpoint_partial?: boolean | null;
   submodules_unrestored?: unknown;
 };
@@ -278,7 +279,8 @@ const WORKSPACE_COLUMNS_SQL = sql`id, org_id, creator_user_id, name, number, tit
   agent_cost_usd, agent_cost_turns, agent_cost_estimated_turns, private_owner_user_id, project_id, checkout_path, folder,
   lost_work_restored, lost_work_since, keep_set_at, archive_reason, stopped_at, machine_stopped_at, machine_data_expired_at,
   archive_wake_done_at, checkpoint_object, retention_started_at, backup_probe, backup_probe_generation, stop_generation,
-  checkpoint_stop_generation, changed_since_stop_generation, machine_gone_at, waiting_for_base_at, checkpoint_partial, submodules_unrestored`;
+  checkpoint_stop_generation, changed_since_stop_generation, machine_gone_at, waiting_for_base_at, stop_archive_failed_generation, checkpoint_partial,
+  submodules_unrestored`;
 const COLUMNS = WORKSPACE_COLUMNS_SQL.text;
 export const CLOUD_V2_WORKSPACE_COLUMNS = COLUMNS.split(",").map(value => value.trim());
 
@@ -469,9 +471,11 @@ function archiveFields(row: Row): Pick<CloudV2Workspace, "archiveReason" | "mach
  * while no maintenance wake has found the checkout changed since (S3), when it reads "unknown". The lifecycle's
  * restore path (cleanRestore, unbacked, onlyOnMachine) and the document's `restores` both use this. */
 export function cloudV2StopProbe(row: { backup_probe?: BackupProbe | null; backup_probe_generation?: string | null; stop_generation?: string;
-  changed_since_stop_generation?: string | null }): BackupProbe | undefined {
+  changed_since_stop_generation?: string | null; stop_archive_failed_generation?: string | null }): BackupProbe | undefined {
   if (!row.backup_probe || row.backup_probe_generation !== row.stop_generation) return undefined;
-  return row.backup_probe === "clean" && row.changed_since_stop_generation === row.stop_generation ? "unknown" : row.backup_probe;
+  // A stop whose archive may lack its last writes (a failed snapshot attempt was reported during it) is never clean.
+  return row.backup_probe === "clean" && (row.changed_since_stop_generation === row.stop_generation
+    || row.stop_archive_failed_generation === row.stop_generation) ? "unknown" : row.backup_probe;
 }
 
 /** What opening the workspace now would bring back, as S1's restore path decides it (tested against it):
@@ -977,7 +981,9 @@ export class CloudV2Store {
   async transition(id: string, from: readonly CloudV2WorkspaceState[], to: CloudV2WorkspaceState,
     patch: { boatSandboxId?: string | null; expectedSandboxId?: string | null; errorCode?: string | null; stopGeneration?: string; revoke?: boolean; unarchived?: boolean;
       /** Retention: Boat's own stoppedAt, read once the machine is archived. */
-      stoppedAt?: Date } = {}): Promise<CloudV2Workspace | null> {
+      stoppedAt?: Date;
+      /** A failed snapshot attempt was reported during this stop: its archive may lack the machine's last writes. */
+      archiveFailed?: boolean } = {}): Promise<CloudV2Workspace | null> {
     return withSystemTx(this.pool, async tx => {
     if (to === "starting") {
       await tx.query("SELECT id FROM cloud_v2_workspaces WHERE id=$1 FOR UPDATE", [id]);
@@ -1011,6 +1017,8 @@ export class CloudV2Store {
         patch.expectedSandboxId !== undefined, patch.expectedSandboxId ?? null, patch.revoke ?? false, patch.stoppedAt ?? null],
     );
     if (!rows[0]) return null;
+    if (patch.archiveFailed && to === "stopped")
+      await tx.query("UPDATE cloud_v2_workspaces SET stop_archive_failed_generation = stop_generation WHERE id = $1", [id]);
     if (to === "deleting") await cancelExecutionActivation(tx, id);
     if (to === "deleted") await releaseCloudEnvironment(tx, id);
     if (patch.revoke) {
@@ -1645,6 +1653,12 @@ export class CloudV2Store {
       }
       await tx.query("UPDATE cloud_v2_workspaces SET submodules_unrestored=$2 WHERE id=$1", [id, entries.length ? JSON.stringify(entries.slice(0, 320)) : null]);
     });
+  }
+
+  /** A failed snapshot attempt was reported during a stop of this workspace's machine that changed no stop generation
+   * (a maintenance wake's): the current stop's archive may lack its last writes. */
+  async recordStopArchiveFailed(id: string): Promise<void> {
+    await withSystemTx(this.pool, tx => tx.query("UPDATE cloud_v2_workspaces SET stop_archive_failed_generation = stop_generation WHERE id = $1", [id]));
   }
 
   /** The VM found everything as `object` holds it: that checkpoint now also

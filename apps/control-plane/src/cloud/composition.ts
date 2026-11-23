@@ -757,7 +757,7 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
   // Every role queues generations through it (Build now, Retry now, saves); only the lifecycle role runs its loop.
   const readyCopyBuilder = readyCopies ? new CloudV2ReadyCopyBuilder({
     copies: readyCopies, compute, channel: config.deploymentChannel, localOwner, runtime, publicKeys: signer.publicKeys,
-    cloneToken: copyCloneToken,
+    cloneToken: copyCloneToken, ...(v2.readyCopyVerifyFork ? { verifyArchiveByFork: true } : {}),
     ...(repositoryLevels ? { sharedCloneToken: organizationCloneToken({ levels: repositoryLevels, config: config.github ?? null }) } : {}),
     ...(readyCopySecrets ? { secrets: (organizationId: string, projectId: string) => readyCopySecrets.open(organizationId, projectId) } : {}),
     // Submodules (C4): each level read with the token of its own repository, each repository reached as the project's clones are.

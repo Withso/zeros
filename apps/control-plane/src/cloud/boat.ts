@@ -28,7 +28,7 @@ export interface CloudV2Compute {
   /** A sandbox's name and state, e.g. "archiving" until a stop completes, then "archived". A stopped
    * machine whose disk Boat has expired still reads archived, with snapshotAvailable false and
    * dataExpiredAt set; never compute that expiry from stoppedAt (Alpha, 2026-11-21). */
-  inspect(sandboxId: string): Promise<{ name: string | null; state: string; stoppedAt?: Date | null; snapshotAvailable?: boolean; dataExpiredAt?: Date | null }>;
+  inspect(sandboxId: string): Promise<BoatInspection>;
   /** Re-arms the lease to `ttlSeconds` (default CLOUD_V2_LEASE_SECONDS); harmless on a running machine. */
   resume(sandboxId: string, ttlSeconds?: number): Promise<void>;
   /** Boat sets the deadline to now + ttl, without restarting the sandbox. */
@@ -72,7 +72,15 @@ const Forked = z.object({ sandbox: z.object({ id: z.string().regex(SANDBOX_ID) }
 const Inspected = z.object({ sandbox: z.object({ name: z.string().max(256).nullable().optional(), state: z.string().min(1).max(64),
   stoppedAt: z.string().datetime({ offset: true }).nullable().optional().catch(null),
   snapshotAvailable: z.boolean().optional().catch(undefined),
-  dataExpiredAt: z.string().datetime({ offset: true }).nullable().optional().catch(null) }).passthrough() }).passthrough();
+  dataExpiredAt: z.string().datetime({ offset: true }).nullable().optional().catch(null),
+  // Its disk: whether it is hydrated, and the latest snapshot attempt of it.
+  hydrated: z.boolean().optional().catch(undefined),
+  lastSnapshotAttemptAt: z.string().datetime({ offset: true }).nullable().optional().catch(undefined),
+  lastSnapshotStatus: z.string().max(32).nullable().optional().catch(undefined) }).passthrough() }).passthrough();
+/** What Boat says of a machine. `hydrated`, `snapshotAttemptAt` and `snapshotStatus` describe its disk: absent when
+ * Boat did not say (boat-disk.ts then cannot tell). */
+export type BoatInspection = { name: string | null; state: string; stoppedAt?: Date | null; snapshotAvailable?: boolean; dataExpiredAt?: Date | null;
+  hydrated?: boolean; snapshotAttemptAt?: Date | null; snapshotStatus?: string | null };
 const Listed = z.object({
   sandboxes: z.array(z.object({ id: z.string(), name: z.string().nullable().optional(), createdAt: z.string() }).passthrough()),
   pageInfo: z.object({ nextCursor: z.string().nullable().optional(), hasMore: z.boolean() }).passthrough(),
@@ -131,11 +139,14 @@ export class BoatCloudV2Compute implements CloudV2Compute {
     return { sandboxId: child };
   }
 
-  async inspect(sandboxId: string): Promise<{ name: string | null; state: string; stoppedAt: Date | null; snapshotAvailable?: boolean; dataExpiredAt?: Date }> {
+  async inspect(sandboxId: string): Promise<BoatInspection & { stoppedAt: Date | null }> {
     const { sandbox } = Inspected.parse(await this.client.request(`/sandboxes/${this.id(sandboxId)}`, { method: "GET" }));
     return { name: sandbox.name ?? null, state: sandbox.state, stoppedAt: sandbox.stoppedAt ? new Date(sandbox.stoppedAt) : null,
       ...(sandbox.snapshotAvailable !== undefined ? { snapshotAvailable: sandbox.snapshotAvailable } : {}),
-      ...(sandbox.dataExpiredAt ? { dataExpiredAt: new Date(sandbox.dataExpiredAt) } : {}) };
+      ...(sandbox.dataExpiredAt ? { dataExpiredAt: new Date(sandbox.dataExpiredAt) } : {}),
+      ...(sandbox.hydrated !== undefined ? { hydrated: sandbox.hydrated } : {}),
+      ...(sandbox.lastSnapshotAttemptAt !== undefined ? { snapshotAttemptAt: sandbox.lastSnapshotAttemptAt ? new Date(sandbox.lastSnapshotAttemptAt) : null } : {}),
+      ...(sandbox.lastSnapshotStatus !== undefined ? { snapshotStatus: sandbox.lastSnapshotStatus } : {}) };
   }
 
   async resume(sandboxId: string, ttlSeconds: number = CLOUD_V2_LEASE_SECONDS): Promise<void> {

@@ -134,7 +134,8 @@ d("cloud v2 retention", () => {
     // The workspace's own running VM, with the worker running as token delivery left it.
     ({ sandboxId: vm } = await boat.create({ key: id, name: `zeros-ws-${id.slice(0, 8)}`, env: { ZEROS_WORKSPACE_ID: id } }));
     boat.machine(vm)!.worker = { enabled: true, active: true };
-    readyCopy = boat.stopped("zeros-ready-copy");
+    // The project's ready copy: stopped, with every repository checked out.
+    readyCopy = boat.stopped("zeros-ready-copy", Object.fromEntries(REPOS.map(repo => [`${path(repo.folder)}/.git/HEAD`, "c".repeat(40)])));
     await pool.query(`INSERT INTO cloud_v2_workspaces (id, org_id, creator_user_id, name, repository, branch, base_branch, state, computer_build_id, boat_sandbox_id, checkout_path, folder)
       VALUES ($1,$2,$3,'w','acme/app','zeros/w','main','running',$4,$5,'proj/app','proj')`, [id, org, user, build, vm]);
     await pool.query("UPDATE cloud_v2_workspace_repositories SET folder='app' WHERE workspace_id=$1 AND position=0", [id]);
@@ -543,7 +544,7 @@ d("cloud v2 retention", () => {
     /** Before this change: the lifecycle knew no submodules, so its probe and backup never looked at one. */
     const before = { checkouts: async () => ({ repositories: others, submodules: [] }) };
     const sub = `${path("app")}/lib`;
-    const migration = () => pool.query(readFileSync(new URL("../../migrations/0269_cloud_v2_submodule_probe.sql", import.meta.url), "utf8")
+    const migration = () => pool.query(readFileSync(new URL("../../migrations/0271_cloud_v2_submodule_probe.sql", import.meta.url), "utf8")
       .replace("SET LOCAL lock_timeout = '5s';", ""));
     const fetched = () => pool.query(`INSERT INTO cloud_v2_workspace_submodules (workspace_id, position, path, status, repository, repository_id, commit, git_dir)
       VALUES ($1, 0, 'lib', 'fetch', 'acme/lib', '42', $2, $3)`, [id, lib.baseCommit, lib.gitDir]);
@@ -570,7 +571,7 @@ d("cloud v2 retention", () => {
       expect(boat.machine((await row()).boat_sandbox_id)!.files.get(`${sub}/UNPUSHED`)).toBe("stash");
     });
 
-    it("0269: a stop probed clean before this change is unknown for that stop, and its next maintenance backs it up within the budget", async () => {
+    it("0271: a stop probed clean before this change is unknown for that stop, and its next maintenance backs it up within the budget", async () => {
       boat.write(vm, `${sub}/UNPUSHED`, "stash");
       await stopWith(before);
       const stopped = await row();
@@ -593,7 +594,7 @@ d("cloud v2 retention", () => {
       expect(boat.machine((await row()).boat_sandbox_id)!.files.get(`${sub}/UNPUSHED`)).toBe("stash");
     });
 
-    it("0269: once that machine is gone, opening says so: no clean rebuild without the note", async () => {
+    it("0271: once that machine is gone, opening says so: no clean rebuild without the note", async () => {
       remoteBranches.add(path("app"));
       boat.write(vm, `${sub}/UNPUSHED`, "stash");
       await stopWith(before);
@@ -620,7 +621,7 @@ d("cloud v2 retention", () => {
       return saved;
     };
 
-    it("0269: a backup the old capture made is this stop's no more, so maintenance backs the stop up again and the stash survives", async () => {
+    it("0271: a backup the old capture made is this stop's no more, so maintenance backs the stop up again and the stash survives", async () => {
       const saved = await oldBackup();
       await fetched();
       await migration();
@@ -637,7 +638,7 @@ d("cloud v2 retention", () => {
       expect(boat.machine((await row()).boat_sandbox_id)!.files.get(`${sub}/UNPUSHED`)).toBe("stash");
     });
 
-    it("0269: archived, its machine gone, restores answers pushed, and the open says the latest stop's work is missing", async () => {
+    it("0271: archived, its machine gone, restores answers pushed, and the open says the latest stop's work is missing", async () => {
       await oldBackup();
       await fetched();
       await store.requestLifecycle(id, user, "archive");
@@ -706,11 +707,44 @@ d("cloud v2 retention", () => {
       expect((await store.get(id, user)).unrestoredSubmodules).toBeUndefined();
     });
 
-    it("0269: leaves a clean stop alone without a fetched submodule", async () => {
+    it("0271: leaves a clean stop alone without a fetched submodule", async () => {
       await stopWith(before);
       await pool.query(`INSERT INTO cloud_v2_workspace_submodules (workspace_id, position, path, status, reason) VALUES ($1, 0, 'vendor/x', 'skipped', 'no access')`, [id]);
       await migration();
       expect((await row()).backup_probe).toBe("clean");
+    });
+  });
+
+  describe("a stop keeps what the machine wrote", () => {
+    it("waits out a snapshot attempt in progress, so the stopped machine and its forks hold the last write", async () => {
+      boat.write(vm, `${path("app")}/UNPUSHED`, "before");
+      boat.beginSnapshotAttempt(vm, 2);
+      boat.write(vm, `${path("app")}/LATE`, "written while Boat was saving");
+      await stop();
+      expect((await pool.query("SELECT stop_archive_failed_generation FROM cloud_v2_workspaces WHERE id=$1", [id])).rows[0].stop_archive_failed_generation).toBeNull();
+      const fork = await boat.fork(vm, { key: "probe", ttlSeconds: 60 });
+      expect(boat.machine(fork.sandboxId)!.files.get(`${path("app")}/LATE`)).toBe("written while Boat was saving");
+    });
+
+    it("records a stop met by an attempt that began just before it, though none is reported failed", async () => {
+      boat.attemptAtStop = { inProgressReads: 1, failedReads: 0 };
+      await stop();
+      const stopped = (await pool.query("SELECT stop_generation, stop_archive_failed_generation FROM cloud_v2_workspaces WHERE id=$1", [id])).rows[0];
+      expect(stopped.stop_archive_failed_generation).toBe(stopped.stop_generation);
+      expect(errors.filter(line => line.includes("(attempt_before_stop)"))).toHaveLength(1);
+    });
+
+    it("records a stop during which Boat reported a failed attempt, and never calls that stop clean", async () => {
+      boat.beginSnapshotAttempt(vm, Number.POSITIVE_INFINITY);
+      await stop();
+      const stopped = (await pool.query("SELECT stop_generation, stop_archive_failed_generation, backup_probe FROM cloud_v2_workspaces WHERE id=$1", [id])).rows[0];
+      expect(stopped.stop_archive_failed_generation).toBe(stopped.stop_generation);
+      expect(errors.filter(line => line.startsWith("[cloud-v2] stop archive may lack the machine's last writes"))).toHaveLength(1);
+      // The probe found nothing off GitHub, yet nothing calls this archive good: an archived open would not say "all".
+      expect(stopped.backup_probe).toBe("clean");
+      await store.requestLifecycle(id, user, "archive");
+      await pool.query("UPDATE cloud_v2_workspaces SET machine_gone_at=clock_timestamp() WHERE id=$1", [id]);
+      expect((await store.get(id, user)).restores).toBe("pushed");
     });
   });
 
@@ -795,6 +829,31 @@ d("cloud v2 retention", () => {
     const branchCommands = boat.commands.filter(command => command.machineId === replacement.id && command.command.includes("ls-remote --exit-code"));
     expect(branchCommands).toHaveLength(3);
     expect(timings).toContainEqual(expect.objectContaining({ phase: "checkpoint_restore", checkpoint: "none" }));
+  });
+
+  it("rebuilds from a ready copy fork only with its checkouts there: one missing is cloned directly", async () => {
+    // The copy's archive holds two of its three checkouts.
+    readyCopy = boat.stopped("zeros-ready-copy", { [`${path("api")}/.git/HEAD`]: "c".repeat(40), [`${path("docs")}/.git/HEAD`]: "c".repeat(40) });
+    const prepareRepository = vi.fn(async (_workspace: unknown, sandboxId: string) => { boat.write(sandboxId, `${path("app")}/.git/HEAD`, "d".repeat(40)); });
+    await stop();
+    boat.machine(vm)!.state = "deleted";
+    await store.transition(id, ["stopped"], "starting");
+    await lifecycle({ prepareRepository }).tick();
+    const restored = await row();
+    expect(boat.machine(restored.boat_sandbox_id)!.source).toBe(readyCopy);
+    expect(prepareRepository).toHaveBeenCalledOnce();
+    expect(prepareRepository.mock.calls[0]![1]).toBe(restored.boat_sandbox_id);
+    expect(warnings.filter(line => line.includes("ready copy fork lacks a checkout"))).toHaveLength(1);
+    // With every checkout there, nothing is cloned.
+    prepareRepository.mockClear();
+    await pool.query("UPDATE cloud_v2_workspaces SET state='running', restore_pending=false WHERE id=$1", [id]);
+    vm = restored.boat_sandbox_id;
+    await stop();
+    boat.machine(vm)!.state = "deleted";
+    readyCopy = boat.stopped("zeros-ready-copy", Object.fromEntries(REPOS.map(repo => [`${path(repo.folder)}/.git/HEAD`, "c".repeat(40)])));
+    await store.transition(id, ["stopped"], "starting");
+    await lifecycle({ prepareRepository }).tick();
+    expect(prepareRepository).not.toHaveBeenCalled();
   });
 
   it("falls back to the Cloud Computer when the ready copy can no longer be forked", async () => {
@@ -897,6 +956,56 @@ d("cloud v2 retention", () => {
       // The next one is 10 days after Boat's new stop, not before.
       await lifecycle().tick();
       expect(resumes()).toHaveLength(1);
+    });
+
+    describe("its stop keeps what the wake wrote", () => {
+      /** A snapshot attempt begins as the wake checks the machine (and writes its new stop marker), completing after
+       * `reads` reads. */
+      const attemptAtMarker = (reads: number) => {
+        const answer = boat.script!;
+        boat.script = (machine, command, input) => {
+          if (command.includes("zeros-changed")) {
+            boat.beginSnapshotAttempt(machine.id, reads);
+            machine.files.set("/home/user/.local/share/zeros/WAKE-MARK", "written by the wake");
+          }
+          return answer(machine, command, input);
+        };
+      };
+
+      it("stops a woken machine only once it is hydrated with no attempt in progress, so its archive holds the wake's writes", async () => {
+        await sleeping(10.6);
+        boat.hydrationReads = 3;
+        attemptAtMarker(2);
+        let hydratedAtStop: boolean | null = null;
+        const stop = boat.stop.bind(boat);
+        boat.stop = async (sandboxId: string) => { hydratedAtStop = boat.machine(sandboxId)!.hydrateReads === 0
+          && boat.machine(sandboxId)!.attempt.status !== "in_progress"; return stop(sandboxId); };
+        await lifecycle().tick();
+        expect(await wakes()).toMatchObject([{ kind: "wake", outcome: "stopped" }]);
+        expect(hydratedAtStop).toBe(true);
+        const fork = await boat.fork(vm, { key: "probe", ttlSeconds: 60 });
+        expect(boat.machine(fork.sandboxId)!.files.get("/home/user/.local/share/zeros/WAKE-MARK")).toBe("written by the wake");
+        expect((await pool.query("SELECT stop_archive_failed_generation FROM cloud_v2_workspaces WHERE id=$1", [id])).rows[0].stop_archive_failed_generation).toBeNull();
+      });
+
+      it("records an attempt that began just before its stop, though none is reported failed", async () => {
+        await sleeping(10.6);
+        boat.attemptAtStop = { inProgressReads: 1, failedReads: 0 };
+        await lifecycle().tick();
+        expect(await wakes()).toMatchObject([{ kind: "wake", outcome: "stopped" }]);
+        const recorded = (await pool.query("SELECT stop_generation, stop_archive_failed_generation FROM cloud_v2_workspaces WHERE id=$1", [id])).rows[0];
+        expect(recorded.stop_archive_failed_generation).toBe(recorded.stop_generation);
+      });
+
+      it("records a failed attempt during its stop, so nothing calls that archive good", async () => {
+        await sleeping(10.6);
+        attemptAtMarker(Number.POSITIVE_INFINITY);
+        await lifecycle().tick();
+        expect(await wakes()).toMatchObject([{ kind: "wake", outcome: "stopped" }]);
+        const recorded = (await pool.query("SELECT stop_generation, stop_archive_failed_generation FROM cloud_v2_workspaces WHERE id=$1", [id])).rows[0];
+        expect(recorded.stop_archive_failed_generation).toBe(recorded.stop_generation);
+        expect(errors.filter(line => line.startsWith("[cloud-v2] stop archive may lack the machine's last writes"))).toHaveLength(1);
+      });
     });
 
     it("counts from the latest stop: a person's stop after a wake restarts the 10 days", async () => {
