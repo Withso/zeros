@@ -151,6 +151,18 @@ describe("cloud v2 Boat compute", () => {
     expect(inspect.request).toHaveBeenCalledWith("/sandboxes/bx_abc12345", { method: "GET" });
   });
 
+  it("reads a machine's disk: hydrated and its latest snapshot attempt, and drops a malformed field alone", async () => {
+    const inspect = client();
+    inspect.request.mockResolvedValueOnce({ sandbox: { id: "bx_abc12345", state: "running", hydrated: false,
+      lastSnapshotAttemptAt: "2026-11-23T10:32:00.884Z", lastSnapshotStatus: "in_progress", hydration: { phase: "dvol" } } })
+      .mockResolvedValueOnce({ sandbox: { id: "bx_abc12345", state: "archived", hydrated: "yes", lastSnapshotAttemptAt: "soon", lastSnapshotStatus: "completed" } });
+    const compute = new BoatCloudV2Compute(inspect);
+    expect(await compute.inspect("bx_abc12345")).toEqual({ name: null, state: "running", stoppedAt: null, hydrated: false,
+      snapshotAttemptAt: new Date("2026-11-23T10:32:00.884Z"), snapshotStatus: "in_progress" });
+    // Malformed: that field is absent, the rest is read.
+    expect(await compute.inspect("bx_abc12345")).toEqual({ name: null, state: "archived", stoppedAt: null, snapshotStatus: "completed" });
+  });
+
   it("reports Boat's refusal to fork a VM that is still being archived as nothing created", async () => {
     const { BoatForkRefusedError } = await import("./boat-client.js");
     const fetcher = vi.fn(async () => Response.json({ ok: false, type: "sandbox.error", status: 409, code: "fork_failed" }, { status: 409 }));
