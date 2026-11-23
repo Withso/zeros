@@ -1729,8 +1729,15 @@ export class CloudV2Store {
 
   /** Boat confirmed that fork is gone, or it was never created. */
   async checkpointForkGone(id: string, attempt: string): Promise<void> {
-    await withSystemTx(this.pool, tx => tx.query(
-      `UPDATE cloud_v2_workspaces SET checkpoint_retry_fork=NULL WHERE id=$1 AND checkpoint_retry_fork->>'attempt'=$2`, [id, attempt]));
+    await withSystemTx(this.pool, async tx => {
+      await tx.query(`UPDATE cloud_v2_workspaces SET checkpoint_retry_fork=NULL WHERE id=$1 AND checkpoint_retry_fork->>'attempt'=$2`, [id, attempt]);
+      // Retention's record of that fork's machine time (beginCheckpointFork counted it) ends with it: "stopped" when the
+      // workspace now has this stop's backup, "failed" otherwise. Only once, and only for this fork's own row.
+      await tx.query(`UPDATE cloud_v2_maintenance_wakes m SET finished_at=clock_timestamp(),
+          outcome=CASE WHEN w.checkpoint_stop_generation IS NOT DISTINCT FROM w.stop_generation THEN 'stopped' ELSE 'failed' END
+        FROM cloud_v2_workspaces w WHERE w.id=m.workspace_id AND m.workspace_id=$1 AND m.attempt::text=$2 AND m.kind='backup_fork'
+          AND m.finished_at IS NULL`, [id, attempt]);
+    });
   }
 
   /** Schedules this stop's next retry, ends its retries, or records that they
