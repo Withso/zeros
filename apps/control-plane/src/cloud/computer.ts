@@ -463,15 +463,17 @@ export class CloudV2Computers {
       [organizationId])).rows[0];
     if (busy) return { kind: "known", state: { state: "preparing", buildId: busy.base_only ? busy.id : null } };
     // Base builds that failed in a row since the last one that went live: the latest says why, and when to try again.
-    const recent = (await tx.query<{ id: string; state: string; error_code: string | null; finished_at: Date | null }>(
-      `SELECT id, state, error_code, finished_at FROM cloud_v2_computer_builds WHERE org_id=$1 AND base_only ORDER BY version DESC LIMIT 20`,
-      [organizationId])).rows;
+    // The database's clock, as the sweep's own exclusion uses (sweepCandidates): one rule, one clock.
+    const recent = (await tx.query<{ id: string; state: string; error_code: string | null; finished_at: Date | null; at: Date }>(
+      `SELECT id, state, error_code, finished_at, clock_timestamp() AS at FROM cloud_v2_computer_builds WHERE org_id=$1 AND base_only
+       ORDER BY version DESC LIMIT 20`, [organizationId])).rows;
     const failed = [];
     for (const row of recent) { if (row.state !== "failed" && row.state !== "cancelled") break; failed.push(row); }
     const last = failed[0];
     if (last && !(retryFirstFailure && failed.length === 1)) {
-      const nextAt = new Date((last.finished_at ?? now).getTime() + automaticBaseRetryDelay(failed.length));
-      if (nextAt > now) return { kind: "known", state: { state: "failed", buildId: last.id, errorCode: last.error_code ?? "computer_build_failed",
+      const at = last.at ?? now;
+      const nextAt = new Date((last.finished_at ?? at).getTime() + automaticBaseRetryDelay(failed.length));
+      if (nextAt > at) return { kind: "known", state: { state: "failed", buildId: last.id, errorCode: last.error_code ?? "computer_build_failed",
         failures: failed.length, nextAttemptAt: nextAt.toISOString() } };
     }
     return { kind: "none", installScript: computer?.install_script ?? null, snapshotName: computer?.snapshot_name ?? null };
