@@ -77,6 +77,37 @@ function readableText(body: string): string {
   return out;
 }
 
+/** `[label](url)` and `![alt](src)` become their label, in one pass: each
+ *  bracket is visited once and each URL is skipped by one forward search, so
+ *  unclosed brackets can't make it rescan. Nested badges (`[![a](b)](c)`)
+ *  keep their inner label. */
+function linkLabels(line: string): string {
+  const out: string[] = [];
+  const open: number[][] = [];
+  let noParen = false;
+  for (let at = 0; at < line.length; at++) {
+    const char = line[at]!;
+    if (char === "!" && line[at + 1] === "[") {
+      open.push([out.length, out.length + 1]);
+      out.push("!", "[");
+      at++;
+    } else if (char === "[") {
+      open.push([out.length]);
+      out.push("[");
+    } else if (char === "]" && line[at + 1] === "(" && open.length && !noParen) {
+      const close = line.indexOf(")", at + 2);
+      if (close === -1) {
+        noParen = true;
+        out.push(char);
+        continue;
+      }
+      for (const index of open.pop()!) out[index] = "";
+      at = close;
+    } else out.push(char);
+  }
+  return out.join("");
+}
+
 /** One readable line from a Markdown/HTML comment: review apps open with HTML
  *  comments, badges and headings that say nothing on their own. */
 export function reviewCommentTitle(body: string): string {
@@ -85,10 +116,7 @@ export function reviewCommentTitle(body: string): string {
       .split("\n")
       .slice(0, 200)
       .map((value) =>
-        value
-          .slice(0, 2_000)
-          .replace(/!\[([^\]]*)\]\([^)]*\)/g, "$1")
-          .replace(/\[([^\]]+)\]\([^)]*\)/g, "$1")
+        linkLabels(value.slice(0, 2_000))
           .replace(/\*\*|__|~~/g, "")
           .replace(/^\s*(?:#+|[-*>]|\d+\.)\s+/, "")
           .replace(/\s+/g, " ")

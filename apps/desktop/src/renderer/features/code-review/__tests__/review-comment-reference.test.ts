@@ -65,6 +65,12 @@ describe("review comment references", () => {
     expect(reviewCommentTitle("if a < b and c > d")).toBe("if a < b and c > d");
     expect(reviewCommentTitle('<img alt="Screenshot of the bug" src="x.png">')).toBe("Screenshot of the bug");
     expect(reviewCommentTitle("<script>alert(1)</script>Fix")).toBe("alert(1)Fix");
+    expect(reviewCommentTitle("See [the docs](https://x) and ![shot](a.png)")).toBe("See the docs and shot");
+    expect(reviewCommentTitle("[ ] unchecked [x] done")).toBe("[ ] unchecked [x] done");
+    const started = performance.now();
+    reviewCommentTitle(`${"[".repeat(1_999)}`);
+    reviewCommentTitle(`${"[a](".repeat(500)}`);
+    expect(performance.now() - started).toBeLessThan(50);
   });
 
   it("reads malformed markup in linear time", () => {

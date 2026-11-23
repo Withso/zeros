@@ -254,7 +254,8 @@ export function CommentsSection({
       </div>
       {preview ? (
         <ReviewCommentPreviewDialog
-          reference={preview.reference}
+          // The list keeps a bounded copy; the preview reads the whole comment.
+          reference={{ ...preview.reference, body: preview.fullBody }}
           open
           onOpenChange={(value) => {
             if (!value) setPreview(null);
