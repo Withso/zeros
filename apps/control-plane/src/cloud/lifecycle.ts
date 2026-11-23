@@ -19,7 +19,7 @@ import { CLOUD_V2_WORKER_PORT, type CloudV2WorkerTiming, type CloudV2WorkerBootT
 import type { WorkspaceCheckouts, WorkspaceSubmoduleCheckout } from "./workspace-repositories.js";
 import { CLOUD_V2_BACKUP_PROBE_SECONDS, CLOUD_V2_CHECKPOINT_ERRORS, CLOUD_V2_CHECKPOINT_SECONDS, WORKER_OFF_COMMAND, WORKER_UNIT_CHECK, backupProbeCommand, checkpointCommand,
   cloudV2CheckpointObject, parseBackupProbe, parseCheckpointResult, parseRestoreResult, parseUnrestoredSubmodules, restoreCommand, workerUnitOff, type BackupProbe,
-  type CheckpointSubmodule, type CloudV2CheckpointError, type CloudV2CheckpointStorage, environmentRestoreCommand, parseEnvironmentRestore } from "./checkpoint.js";
+  CHECKPOINT_PARTIAL, type CheckpointSubmodule, type CloudV2CheckpointError, type CloudV2CheckpointStorage, environmentRestoreCommand, parseEnvironmentRestore } from "./checkpoint.js";
 import { ARCHIVE_SCRUB_SECONDS, CHANGED_SINCE_STOP_SECONDS, archiveScrubCommand, changedSinceStopCommand, parseArchiveScrub, parseChangedSinceStop,
   stopMarkerCommand, type ArchiveScrubResult } from "./archive-scrub.js";
 
@@ -1244,7 +1244,8 @@ export class CloudV2Lifecycle {
       if (await checkpoints.storage.size(workspace.id, object) !== saved.bytes) { cause = "size"; throw checkpointError("checkpoint_upload_failed"); }
       // Only this stop, or a retry of it, records it: a late save from an earlier stop is refused.
       const recorded = await store.saveCheckpoint(workspace.id, owner, generation,
-        { object, key: checkpoints.seal(key, workspace.id, object), sha256: saved.sha256, bytes: saved.bytes, ...(saved.reuse ? { reuse: saved.reuse } : {}) },
+        { object, key: checkpoints.seal(key, workspace.id, object), sha256: saved.sha256, bytes: saved.bytes, ...(saved.reuse ? { reuse: saved.reuse } : {}),
+          ...(result.stdout.split(/\r?\n/).includes(CHECKPOINT_PARTIAL) ? { partial: true } : {}) },
         ...scoped);
       // Only the checkpoint this one replaced is retired, never anything newer;
       // anything a crashed upload left goes with the workspace.

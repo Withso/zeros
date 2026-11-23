@@ -1736,7 +1736,8 @@ it("keeps every control-plane source file text: no NUL byte anywhere under src",
   expect(offenders).toEqual([]);
 });
 
-describe("a workspace's submodules (C4)", () => {
+// Real Git on several machines' worth of checkouts: some of these take seconds.
+describe("a workspace's submodules (C4)", { timeout: 30_000 }, () => {
   const digest = (name: string) => createHash("sha256").update(name).digest("hex");
   /** A project's first repository with acme/lib at lib and lib's own acme/inner at lib/inner, each fetched the worker's way:
    * a gitdir file in its folder, its Git directory under the superproject's .git/modules. */

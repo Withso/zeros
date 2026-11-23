@@ -153,7 +153,9 @@ export type CloudV2CheckpointReuse = { fingerprint: string; base: string | null 
 /** The last confirmed checkpoint; the key is still sealed. `reuse` is present
  * only when it was recorded for this exact object. */
 export type CloudV2Checkpoint = { object: string; key: unknown; sha256: string; bytes: number; savedAt: string; stopGeneration: string | null;
-  reuse?: CloudV2CheckpointReuse };
+  reuse?: CloudV2CheckpointReuse;
+  /** C4B: it left out a planned submodule folder holding a person's own clone, so it does not hold everything. */
+  partial?: boolean };
 /** A fork of a stopped VM that a checkpoint retry requested, recorded before
  * the request. `sandboxId` is null until Boat's reply arrives. */
 export type CloudV2CheckpointFork = { attempt: string; name: string; source: string; requestedAt: string; sandboxId: string | null };
@@ -245,6 +247,7 @@ export type CloudV2WorkspaceRow = {
   archive_wake_done_at?: Date | null; checkpoint_object?: string | null; retention_started_at?: Date | null;
   backup_probe?: BackupProbe | null; backup_probe_generation?: string | null; stop_generation?: string; checkpoint_stop_generation?: string | null;
   changed_since_stop_generation?: string | null; machine_gone_at?: Date | null; waiting_for_base_at?: Date | null;
+  checkpoint_partial?: boolean | null;
 };
 type Row = CloudV2WorkspaceRow;
 
@@ -253,7 +256,7 @@ const WORKSPACE_COLUMNS_SQL = sql`id, org_id, creator_user_id, name, number, tit
   agent_cost_usd, agent_cost_turns, agent_cost_estimated_turns, private_owner_user_id, project_id, checkout_path, folder,
   lost_work_restored, lost_work_since, keep_set_at, archive_reason, stopped_at, machine_stopped_at, machine_data_expired_at,
   archive_wake_done_at, checkpoint_object, retention_started_at, backup_probe, backup_probe_generation, stop_generation,
-  checkpoint_stop_generation, changed_since_stop_generation, machine_gone_at, waiting_for_base_at`;
+  checkpoint_stop_generation, changed_since_stop_generation, machine_gone_at, waiting_for_base_at, checkpoint_partial`;
 const COLUMNS = WORKSPACE_COLUMNS_SQL.text;
 export const CLOUD_V2_WORKSPACE_COLUMNS = COLUMNS.split(",").map(value => value.trim());
 
@@ -468,7 +471,8 @@ const restoreImage = (build: { snapshot_name: string; source_policy_version: num
     scope: workspace.source_repositories ?? [], repository: workspace.repository });
 
 export function cloudV2Restores(row: Row, now = Date.now()): "all" | "pushed" {
-  if (row.checkpoint_object && row.checkpoint_stop_generation === row.stop_generation) return "all";
+  // C4B: a backup that left out a submodule folder holding a person's own clone does not bring everything back.
+  if (row.checkpoint_object && row.checkpoint_stop_generation === row.stop_generation && !row.checkpoint_partial) return "all";
   if (cloudV2StopProbe(row) === "clean") return "all";
   const lastStop = [row.machine_stopped_at, row.stopped_at].filter((at): at is Date => at instanceof Date)
     .reduce<Date | null>((latest, at) => !latest || at > latest ? at : latest, null);
@@ -1591,9 +1595,9 @@ export class CloudV2Store {
       const reuse = checkpoint.reuse ? { object: checkpoint.object, fingerprint: checkpoint.reuse.fingerprint, base: checkpoint.reuse.base } : null;
       await tx.query(
         `UPDATE cloud_v2_workspaces SET checkpoint_object=$2, checkpoint_key=$3, checkpoint_sha256=$4, checkpoint_bytes=$5, checkpoint_reuse=$6,
-           checkpoint_saved_at=clock_timestamp(), checkpoint_stop_generation=stop_generation, checkpoint_error=NULL,
+           checkpoint_saved_at=clock_timestamp(), checkpoint_stop_generation=stop_generation, checkpoint_error=NULL, checkpoint_partial=$7,
            lost_work_restored=NULL, lost_work_since=NULL, lost_work_machine=NULL WHERE id=$1`,
-        [id, checkpoint.object, JSON.stringify(checkpoint.key), checkpoint.sha256, checkpoint.bytes, reuse ? JSON.stringify(reuse) : null]);
+        [id, checkpoint.object, JSON.stringify(checkpoint.key), checkpoint.sha256, checkpoint.bytes, reuse ? JSON.stringify(reuse) : null, !!checkpoint.partial]);
       return { replaced: rows[0].checkpoint_object };
     });
   }

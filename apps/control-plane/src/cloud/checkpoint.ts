@@ -187,6 +187,8 @@ export type CheckpointPaths = {
 };
 /** A repository after the first of a workspace of several, captured in its own part of the archive. */
 export type CheckpointRepository = { checkoutPath: string; baseBranch: string };
+/** Printed by a capture that left out a planned submodule folder holding a person's own clone (state foreign). */
+export const CHECKPOINT_PARTIAL = "zeros-checkpoint-partial";
 /** C4: one submodule checkout the worker fetched: its folder, the checkout of the repository it belongs to (its Git
  * directory is that checkout's `.git/<gitDir>`), and the gitlink its create recorded. */
 export type CheckpointSubmodule = { position: number; checkoutPath: string; repositoryPath: string; gitDir: string; baseCommit: string };
@@ -659,6 +661,8 @@ function submodulesCapture(submodules: readonly CheckpointSubmodule[]): string[]
       "  fi",
       ...SUBSHELL_END,
       `printf 'submodule ${k} ${entry.position} ${b64(path)} ${entry.baseCommit} %s\\n' "$(cat "$work/submodule-${k}-state")" >> "$m"`,
+      // A person's own clone there is not in the archive: the control plane must not say it holds everything.
+      `if [ "$(cat "$work/submodule-${k}-state")" = foreign ]; then printf '${CHECKPOINT_PARTIAL}\\n' >&3; fi`,
       `if [ -f "$work/submodule-${k}" ]; then if grep -qx undigested "$work/submodule-${k}"; then digests=''; fi; cat "$work/submodule-${k}" >> "$work/parts"; fi`,
     ];
   });
