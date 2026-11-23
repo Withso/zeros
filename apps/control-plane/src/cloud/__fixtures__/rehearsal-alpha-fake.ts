@@ -28,6 +28,7 @@ type Project = { id: string; name: string; organizationId: string; repositories:
 type Turn = { chatId: string; turnId: string; startedAt: number; files: string[] };
 
 const DEFAULT_HEAD = "c".repeat(40);
+const SUBMODULE_GITLINKS: Record<string, string> = { "vendor/hello": "7fd1a60b01f91b314f59955a4e4d4e80d8edf11d", "vendor/private": "b".repeat(40) };
 export class FakeAlpha {
   readonly organizationId = randomUUID();
   readonly workspaces = new Map<string, Workspace>();
@@ -73,6 +74,9 @@ export class FakeAlpha {
   ptyNoise = false;
   /** The commit a shell's `git rev-parse HEAD` reads (the repositories' default head unless a test moves it). */
   rebuiltHead = DEFAULT_HEAD;
+  /** A submodule's HEAD (or "none": no checkout) and the superproject's change count for it, when a test moves them. */
+  submoduleHeads: Record<string, string> = {};
+  submoduleChanges: Record<string, number> = {};
   /** What the provider said of the copy's archive when it was promoted (cloud_v2_ready_copies.archive_snapshot). */
   copyArchive: string | null = "completed";
   /** The organization's install script (#1260: with one, its base is its own build, never the shared one). */
@@ -557,7 +561,10 @@ export class FakeAlpha {
     if (data.includes(`printf 'zr-head %s\\n' "$(git rev-parse HEAD)"`)) output = `zr-head ${this.rebuiltHead}`;
     const counted = /git --no-pager log --format=%s -n 20 \| grep -cxF '([^']+)'/.exec(data)?.[1];
     if (counted) output = `zr-count ${[...row.commits.values()].flat().filter(subject => subject === counted).length}`;
-    if (data.includes("git --no-pager submodule status")) output = [` ${"7fd1a60b01f91b314f59955a4e4d4e80d8edf11d"} vendor/hello (heads/master)`, ` ${"b".repeat(40)} vendor/private (heads/main)`].join("\r\n");
+    // As the product lays submodules out: fetched at their gitlinks, not registered in .git/config (status prints "-").
+    if (data.includes("git --no-pager submodule status")) output = [`-${SUBMODULE_GITLINKS["vendor/hello"]} vendor/hello`, `-${SUBMODULE_GITLINKS["vendor/private"]} vendor/private`].join("\r\n");
+    if (data.includes("zr-sub %s")) output = Object.entries(SUBMODULE_GITLINKS).map(([path, gitlink]) =>
+      `zr-sub ${path} ${gitlink} ${this.submoduleHeads[path] ?? gitlink} ${this.submoduleChanges[path] ?? 0}`).join("\r\n");
     // A terminal's own escape sequences around the output (a prompt's colour, a title), as a real one sends.
     if (this.ptyNoise) output = `\x1b]0;user@machine\x07\x1b[?2004l${output.replace(/\n/g, "\x1b[K\n")}\x1b[0m`;
     return `${begin}\r\n${output}\r\n${end} 0\r\n`;

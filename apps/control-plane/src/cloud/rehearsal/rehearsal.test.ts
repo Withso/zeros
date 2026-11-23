@@ -16,6 +16,7 @@ import { cleanup, cleanupNeedsAccount, inventoryLines, NO_ACCOUNT, readInventory
 import { localProActorLabel, parseArguments, sharedBaseFacts, targetPorts } from "./rehearsal-cli.js";
 import { CONNECT_CLIENT_FEATURES, SHELL_QUIET, countLinesCommand, expectLine, seenShape, terminalText, call, until, checkText, connectWorkspace, createProject, createWorkspace, fileTarget, frameCode, openBridge, waitState, writeFile } from "./steps.js";
 import { FIXTURE_TWO } from "./stage-provision.js";
+import { submoduleCommitsCommand, submoduleStatusNotes } from "./stage-submodules.js";
 import { loadState, newState, saveState, stateTarget } from "./state.js";
 import { localStack } from "./local-stack.js";
 import { agentCredentialsFromEnv, ALPHA_TARGET, NETWORK_RETRY_MS, networkRetries, checkGithubToken, databaseErrorCode, databaseRefusal, liveApi, liveBridge, liveRelease, targetIdentity, liveDatabase, localDatabase, OUTSIDE_PROBE_LIMIT, SET_APP_SYSTEM, tokenLines, tokenRefusal, type DatabaseClient } from "./live.js";
@@ -896,10 +897,26 @@ describe("rehearsal on the Personal route", () => {
   it("rehearses submodules: the copy fetched both, the forked workspace holds both at their commits, the token sign-in named", async () => {
     const { ctx, state, options } = setup({ owner: "personal" });
     expect(await runStages(ctx, ["setup", "submodules"], { ...options, ...all })).toBe(true);
-    expect(state.stages.submodules?.counts).toEqual({ copyFetched: 2, copyPublic: 2, workspaceFetched: 2, workspaceInitialized: 2 });
-    // There is no private submodule fixture: reported, not failed.
-    expect(state.stages.submodules?.notes).toEqual(["private_submodule:not_rehearsed_no_fixture"]);
+    expect(state.stages.submodules?.counts).toEqual({ copyFetched: 2, copyPublic: 2, workspaceFetched: 2, workspaceAtGitlink: 2 });
+    // The status prefix is a note: the product does not register submodules in .git/config. No private fixture: reported.
+    expect(state.stages.submodules?.notes).toEqual(["submodule_status:uninitialized_2", "private_submodule:not_rehearsed_no_fixture"]);
     expect((await cleanup(ctx, { log: () => undefined })).inventory).toEqual(EMPTY);
+  });
+
+  it("fails submodules when a submodule is at another commit, has no checkout, or shows a change", async () => {
+    for (const [move, code] of [[(alpha: FakeAlpha) => { alpha.submoduleHeads["vendor/private"] = "d".repeat(40); }, "other_commit_2"],
+      [(alpha: FakeAlpha) => { alpha.submoduleHeads["vendor/hello"] = "none"; }, "no_checkout_1"],
+      [(alpha: FakeAlpha) => { alpha.submoduleChanges["vendor/hello"] = 1; }, "changed_1"]] as const) {
+      const { alpha, ctx, options } = setup({ owner: "personal" });
+      move(alpha);
+      expect(await runStages(ctx, ["setup", "submodules"], { ...options, ...all })).toBe(false);
+      expect(ctx.state.stages.submodules).toMatchObject({ step: "submodule_commits", code });
+    }
+    expect(submoduleCommitsCommand(["vendor/hello"])).toContain(`[ -e "$p/.git" ] && git -C "$p" rev-parse HEAD`);
+    expect(() => submoduleCommitsCommand(["a'b"])).toThrow();
+    expect(submoduleStatusNotes(0, " " + "a".repeat(40) + " x\n-" + "b".repeat(40) + " y")).toEqual(["submodule_status:initialized_1", "submodule_status:uninitialized_1"]);
+    expect(submoduleStatusNotes(1, "")).toEqual(["submodule_status:exit_1"]);
+    expect(submoduleStatusNotes(0, "")).toEqual(["submodule_status:unread:lines_0:bytes_0"]);
   });
 
   it("refuses submodules until its fixtures exist, and off the Personal route", async () => {

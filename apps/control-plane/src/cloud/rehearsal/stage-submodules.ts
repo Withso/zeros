@@ -7,6 +7,35 @@ import { z } from "zod";
 import { RehearsalFailure, type StageContext } from "./contract.js";
 import { openBridge, check, createProject, createWorkspace, deleteProject, deleteWorkspace, parse, seenShape, shell, waitCopyReady, workspaceRoot } from "./steps.js";
 
+const SUBMODULE_PATH = /^[A-Za-z0-9._][A-Za-z0-9._/-]{0,199}$/;
+/** For each path: `zr-sub <path> <gitlink|none> <head|none> <changes>`. The head is read only from the folder's own Git
+ * entry (`<path>/.git`), so a folder without one never reads the superproject's HEAD. */
+export function submoduleCommitsCommand(paths: readonly string[]): string {
+  if (!paths.every(path => SUBMODULE_PATH.test(path) && !path.includes(".."))) throw new RehearsalFailure("submodule_commits", "path");
+  return `for p in ${paths.map(path => `'${path}'`).join(" ")}; do ` +
+    `l=$(git ls-files -s -- "$p" | awk '$1 == "160000" { print $2 }'); ` +
+    `h=$( [ -e "$p/.git" ] && git -C "$p" rev-parse HEAD 2>/dev/null ); ` +
+    `c=$(git status --porcelain -- "$p" | wc -l | tr -d ' '); ` +
+    `printf 'zr-sub %s %s %s %s\\n' "$p" "\${l:-none}" "\${h:-none}" "\${c:-0}"; done`;
+}
+export function readSubmoduleCommits(output: string): Map<string, { gitlink: string; head: string; changes: number }> {
+  const rows = new Map<string, { gitlink: string; head: string; changes: number }>();
+  for (const match of output.matchAll(/^zr-sub (\S+) ([0-9a-f]{40}|none) ([0-9a-f]{40}|none) (\d+)$/gm))
+    rows.set(match[1]!, { gitlink: match[2]!, head: match[3]!, changes: Number(match[4]) });
+  return rows;
+}
+/** `submodule_status:<initialized|unregistered|other_commit|conflicted>_<n>`, one per kind seen, or why none was read. */
+export function submoduleStatusNotes(exitCode: number, output: string): string[] {
+  if (exitCode !== 0) return [`submodule_status:exit_${exitCode}`];
+  const kinds: Record<string, string> = { " ": "initialized", "-": "uninitialized", "+": "other_commit", U: "conflicted" };
+  const counted = new Map<string, number>();
+  for (const line of output.split("\n")) {
+    const kind = /^([ +\-U])[0-9a-f]{40} /.exec(line)?.[1];
+    if (kind) counted.set(kinds[kind]!, (counted.get(kinds[kind]!) ?? 0) + 1);
+  }
+  return counted.size ? [...counted].map(([kind, n]) => `submodule_status:${kind}_${n}`) : [`submodule_status:unread:${seenShape(output)}`];
+}
+
 export async function stageSubmodules(ctx: StageContext): Promise<Record<string, number>> {
   check(ctx.state.owner === "personal", "owner", "personal_route_only");
   const { submodules: three, submoduleFixture } = ctx.repositories;
@@ -14,7 +43,7 @@ export async function stageSubmodules(ctx: StageContext): Promise<Record<string,
   for (const repository of [three, submoduleFixture])
     if (!await ctx.ports.github.repositoryExists(repository)) throw new RehearsalFailure("fixtures", "missing");
   const { prefix } = ctx.state;
-  const counts: Record<string, number> = { copyFetched: 0, copyPublic: 0, workspaceFetched: 0, workspaceInitialized: 0 };
+  const counts: Record<string, number> = { copyFetched: 0, copyPublic: 0, workspaceFetched: 0, workspaceAtGitlink: 0 };
 
   ctx.step("project");
   const project = await createProject(ctx, { name: `${prefix}sub`, repositories: [{ repository: three, fetchSubmodules: true }] });
@@ -44,12 +73,26 @@ export async function stageSubmodules(ctx: StageContext): Promise<Record<string,
   try {
     // A one-repository workspace's root is its checkout.
     const checkout = await workspaceRoot(bridge, workspace.id);
-    // `git submodule status`: a leading space is initialized at the recorded commit; "-" uninitialized, "+" another commit.
-    const status = await shell(ctx, bridge, { workspaceId: workspace.id, cwd: checkout }, `${prefix}pty-sub`, "git --no-pager submodule status", "submodule_status");
-    check(status.exitCode === 0, "submodule_status", `exit_${status.exitCode}`);
-    const lines = status.output.split(/\r?\n/).filter(line => /^[ +\-U][0-9a-f]{40} /.test(line));
-    counts.workspaceInitialized = lines.filter(line => line.startsWith(" ")).length;
-    check(lines.length === 2 && counts.workspaceInitialized === 2, "submodule_status", `initialized_${counts.workspaceInitialized}_of_${lines.length}:${seenShape(status.output)}`);
+    const scope = { workspaceId: workspace.id, cwd: checkout };
+    // Each planned submodule at its gitlink: its own Git directory's HEAD equals the commit the superproject's index records
+    // (mode 160000), and the superproject shows no change for that path. One line per path, the command's own marker.
+    const paths = rows.map(row => String(row.path));
+    check(paths.length === 2 && paths.every(path => SUBMODULE_PATH.test(path)), "submodule_commits", `paths_${paths.length}`);
+    const commits = await shell(ctx, bridge, scope, `${prefix}pty-sub`, submoduleCommitsCommand(paths), "submodule_commits");
+    const seen = readSubmoduleCommits(commits.output);
+    for (const [index, path] of paths.entries()) {
+      const row = seen.get(path), at = `${index + 1}`;
+      check(row, "submodule_commits", `unread_${at}:${seenShape(commits.output)}`);
+      check(/^[0-9a-f]{40}$/.test(row.gitlink), "submodule_commits", `no_gitlink_${at}`);
+      check(row.head !== "none", "submodule_commits", `no_checkout_${at}`);
+      check(row.head === row.gitlink, "submodule_commits", `other_commit_${at}`);
+      check(row.changes === 0, "submodule_commits", `changed_${at}`);
+      counts.workspaceAtGitlink!++;
+    }
+    // `git submodule status` reads the registration in .git/config, which this product's layout does not write: its
+    // prefix is a note only (" " initialized, "-" not registered, "+" another commit, "U" conflicted), never a failure.
+    const status = await shell(ctx, bridge, scope, `${prefix}pty-substatus`, "git --no-pager submodule status", "submodule_status");
+    for (const note of submoduleStatusNotes(status.exitCode, status.output)) ctx.note(note);
   } finally { bridge.close(); }
   // Not rehearsed, and not a failure: there is no private submodule fixture (the owner made every new fixture public).
   ctx.note("private_submodule:not_rehearsed_no_fixture");
