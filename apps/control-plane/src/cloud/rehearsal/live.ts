@@ -337,6 +337,9 @@ export type LiveDatabase = Database & {
   asTableOwner<T>(table: string, work: (pool: pg.Pool, connectionString: string) => Promise<T>): Promise<T>;
 };
 
+/** Waits before each retry of a role PlanetScale's API refused with 429 or 5xx. */
+export const ROLE_RETRY_MS = [2_000, 5_000, 15_000] as const;
+
 export function liveDatabase(input: { organization: string; database: string; tokenId: string; token: string; roleName: (kind: "read" | "write") => string;
   planetScale?: ReturnType<typeof planetScaleClient>; client?: (connectionString: string) => DatabaseClient; sleep?: (ms: number) => Promise<void>;
   pool?: (connectionString: string) => pg.Pool }): LiveDatabase {
@@ -353,7 +356,14 @@ export function liveDatabase(input: { organization: string; database: string; to
   /** A role on the branch, and its deletion (retried until a GET answers 404). */
   const role = async (kind: "read" | "write"): Promise<{ role: Role; remove: () => Promise<void> }> => {
     const path = await branch();
-    const created = await planetScale("POST", `${path}/roles`, { name: input.roleName(kind), inherited_roles: [kind === "read" ? "pg_read_all_data" : "postgres"], ttl: 3600 });
+    // PlanetScale's API answering 429 or 5xx is retried, bounded, each time under a new name. A role a lost reply might
+    // still have made needs nothing: it has no password anyone holds, and its TTL (3600 s) removes it.
+    let created = await planetScale("POST", `${path}/roles`, { name: input.roleName(kind), inherited_roles: [kind === "read" ? "pg_read_all_data" : "postgres"], ttl: 3600 });
+    for (const wait of ROLE_RETRY_MS) {
+      if (created.status !== 429 && created.status < 500) break;
+      await sleep(wait);
+      created = await planetScale("POST", `${path}/roles`, { name: input.roleName(kind), inherited_roles: [kind === "read" ? "pg_read_all_data" : "postgres"], ttl: 3600 });
+    }
     const parsedRole = z.object({ id: z.string(), name: z.string(), username: z.string(), password: z.string(), access_host_url: z.string() }).passthrough().safeParse(created.body);
     const acknowledged = z.object({ id: z.string() }).passthrough().safeParse(created.body);
     const remove = async () => {

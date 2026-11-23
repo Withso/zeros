@@ -310,6 +310,31 @@ describe("rehearsal database roles", () => {
     expect(live.size).toBe(0);
   });
 
+  it("retries a role PlanetScale's API refuses with 429 or 5xx, bounded, under a new name each time; never another status", async () => {
+    let refusals = 2, names: string[] = [];
+    const statuses = (status: number) => async (method: "GET" | "POST" | "DELETE", path: string, body?: unknown) => {
+      if (path === "/databases/alpha") return { status: 200, body: { default_branch: "main" } };
+      if (method === "POST") {
+        names.push((body as { name: string }).name);
+        if (refusals-- > 0) return { status, body: { code: "unavailable" } };
+        return { status: 201, body: { id: "role-1", name: "n", username: "u", password: "p", access_host_url: "h.example" } };
+      }
+      return { status: method === "DELETE" ? 204 : 404, body: null };
+    };
+    const client = (): DatabaseClient => ({ connect: async () => undefined, end: async () => undefined, query: async () => ({ rows: [{ one: 1 }], rowCount: 1 }) });
+    let n = 0;
+    const make = (status: number) => liveDatabase({ organization: "o", database: "alpha", tokenId: "t", token: "t", roleName: kind => `r-${kind}-${++n}`,
+      planetScale: statuses(status), client, sleep: async () => undefined });
+    expect(await make(503).read("SELECT 1 AS one")).toEqual([{ one: 1 }]);
+    expect(names).toEqual(["r-read-1", "r-read-2", "r-read-3"]);
+    refusals = 10; names = [];
+    await expect(make(503).read("SELECT 1 AS one")).rejects.toMatchObject({ step: "database_read_role", code: "http_503" });
+    expect(names).toHaveLength(4);
+    refusals = 1; names = [];
+    await expect(make(403).read("SELECT 1 AS one")).rejects.toMatchObject({ code: "http_403" });
+    expect(names).toHaveLength(1);
+  });
+
   it("mints a postgres role only for a write transaction, grants zeros_app to its session user, and deletes it before returning", async () => {
     const { database, statements, live, inherited } = provider();
     expect(await database.transaction(async query => { expect(live.size).toBe(1); return (await query("SELECT 2")).rowCount; })).toBe(1);

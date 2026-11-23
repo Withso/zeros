@@ -25,7 +25,7 @@ import { loadState, newState, saveState } from "./state.js";
 export const USAGE = "alpha:rehearse <provision|setup|projects|personal|retention|submodules|waiting|all> [--plan] [--cleanup] [--run <id>] " +
   "[--owner personal|organization (default personal)] [--account owner|1..10 (default 2)] [--other 1..10 (default the next configured)] " +
   "[--waiting-account 1..10 (default 3)] " +
-  "[--pro-actor <first 8 hex of the platform owner>] [--switches projects,personal,retention] [--repository owner/name] " +
+  "[--pro-actor <first 8 hex of the platform owner>] [--switches projects,personal,retention] --repository owner/name (R1, required unless ZEROS_REHEARSAL_REPOSITORY is set) " +
   "[--repository-two owner/name (default Withso/zeros-dev-fixture-2)] [--submodule-repository owner/name] [--submodule-fixture-repository owner/name] [--keep-base] [--max-active <n>] [--organization <slug|id>]";
 /** `all` runs these in order on each route; D is refused until written. */
 export const ALL: Record<OwnerKind, readonly StageName[]> = {
