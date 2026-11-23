@@ -12,8 +12,12 @@ type Workspace = {
   // Retention, in days since the stop.
   /** The Cloud Computer build it was created or last rebuilt from. */
   computerBuildId?: string | null;
+  /** Created while the base was being prepared (#1260): the build it waits for, and when it was created. */
+  waitingFor?: string; createdAtMs?: number; errorCode?: string;
   stoppedDays: number | null; archivedAtDays?: number; probe?: "clean" | "dirty"; backup: boolean; wakes: number; scrub: string | null; machineGone: boolean; lostWork?: boolean;
 };
+type Build = { id: string; state: string; snapshot: string | null; builderSandboxId: string | null; automatic?: boolean; shared?: boolean;
+  createdAt?: number; readyAt?: number };
 type Project = { id: string; name: string; organizationId: string; repositories: string[]; machine: string; submodules: boolean };
 type Turn = { chatId: string; turnId: string; startedAt: number; files: string[] };
 
@@ -31,7 +35,15 @@ export class FakeAlpha {
   /** Whether the fixtures' .gitignore names .env. */
   ignoresEnv = true;
   /** The Personal organization's Cloud Computer: its active base build, and the builds; Boat's named snapshots. */
-  computer: { active: string | null; builds: { id: string; state: string; snapshot: string | null; builderSandboxId: string | null }[] } = { active: null, builds: [] };
+  computer: { active: string | null; builds: Build[] } = { active: null, builds: [] };
+  /** The server prepares the organization's base itself (#1260): a project or a create queues an automatic one, ready after
+   * baseBuildMs. False: a server before #1260, whose overview reports no base. */
+  automaticBase = true;
+  baseBuildMs = 5 * 60_000;
+  /** #1260's F1, as it was: a create that waited past the 10-minute boot deadline fails right after its machine boots. */
+  bootDeadlineFromCreate = false;
+  /** CLOUD_V2_SHARED_BASE_SNAPSHOT set and the organization has no install script: its base is live at once, no machine. */
+  sharedBase = false;
   readonly snapshots = new Set<string>();
   /** Behave as main did before the clean-restore fix: a rebuilt workspace keeps its earlier pin. */
   staleRestorePin = false;
@@ -77,7 +89,9 @@ export class FakeAlpha {
   private reply(status: number, body: unknown = {}): ApiReply { return { status, body }; }
   private document(row: Workspace) {
     const archived = row.archivedAt !== null;
-    return { id: row.id, number: [...this.workspaces.keys()].indexOf(row.id) + 1, name: row.name, organizationId: row.organizationId, state: row.state, branch: row.branch, boatSandboxId: row.boatSandboxId,
+    return { id: row.id, number: [...this.workspaces.keys()].indexOf(row.id) + 1, name: row.name, organizationId: row.organizationId, state: row.state, branch: row.branch,
+      boatSandboxId: row.boatSandboxId || null, ...(row.errorCode ? { errorCode: row.errorCode } : {}),
+      ...(row.waitingFor && row.state === "creating" ? { preparing: "computer" } : {}),
       archivedAt: row.archivedAt, activeAt: row.activeAt, updatedAt: row.updatedAt, keep: row.keep, ...(row.projectId ? { projectId: row.projectId } : {}),
       ...(row.repositories ? { repositories: row.repositories } : {}), ...(archived && row.archiveReason ? { archiveReason: row.archiveReason } : {}),
       ...(archived ? { machineExpectedGoneAt: { at: new Date(this.now).toISOString(), estimate: true } } : {}),
@@ -86,8 +100,43 @@ export class FakeAlpha {
       ...(row.lostWork ? { lostWork: { restored: "none", stoppedAt: new Date(this.now).toISOString() } } : {}) };
   }
 
+  /** The organization's base, made sure of as computer.ts ensureBase does: the live one, the one building, or a new
+   * automatic one (its builder machine counted). Null with the base switch off. */
+  private ensureBase(): Build | null {
+    if (!this.automaticBase) return null;
+    const live = this.computer.builds.find(build => build.id === this.computer.active && build.state === "succeeded");
+    if (live) return live;
+    const building = this.computer.builds.find(build => build.state === "building");
+    if (building) return building;
+    if (this.sharedBase) {
+      const shared: Build = { id: randomUUID(), state: "succeeded", snapshot: `zeros-shared@${randomUUID()}`, builderSandboxId: null, automatic: true, shared: true, createdAt: this.now };
+      this.computer.builds.unshift(shared); this.computer.active = shared.id; this.snapshots.add("zeros-shared");
+      return shared;
+    }
+    const build: Build = { id: randomUUID(), state: "building", snapshot: null, builderSandboxId: this.machine("base builder"), automatic: true,
+      createdAt: this.now, readyAt: this.now + this.baseBuildMs };
+    this.computer.builds.unshift(build);
+    return build;
+  }
+  private baseView(): { state: string } {
+    if (this.computer.builds.some(build => build.id === this.computer.active && build.state === "succeeded")) return { state: "ready" };
+    return { state: this.computer.builds.some(build => build.state === "building") ? "preparing" : "none" };
+  }
+
   /** The retention lifecycle, run on every database read and clock sleep. */
   tick(): void {
+    for (const build of this.computer.builds) {
+      if (build.state !== "building" || build.readyAt === undefined || build.readyAt > this.now) continue;
+      build.state = "succeeded"; build.snapshot = `zeros-alpha-${this.computer.builds.length}`; this.snapshots.add(build.snapshot);
+      if (build.builderSandboxId) this.machines.get(build.builderSandboxId)!.state = "deleted";
+      this.computer.active = build.id;
+      for (const row of this.workspaces.values()) {
+        if (row.waitingFor !== build.id || row.state !== "creating") continue;
+        delete row.waitingFor;
+        if (this.bootDeadlineFromCreate && this.now - (row.createdAtMs ?? this.now) > 10 * 60_000) { row.state = "failed"; row.errorCode = "worker_boot_timeout"; continue; }
+        row.state = "running"; row.boatSandboxId = this.machine(`${row.name} from base`);
+      }
+    }
     if (this.proEndedAt !== null && this.now - this.proEndedAt >= 20 * 60_000)
       for (const row of this.workspaces.values()) if (row.state === "running") { row.state = "stopped"; row.stoppedDays = 0; this.machines.get(row.boatSandboxId)!.state = "stopped"; }
     for (const row of this.workspaces.values()) {
@@ -160,6 +209,8 @@ export class FakeAlpha {
         const project: Project = { id: randomUUID(), name: String(body.name), organizationId: this.organizationId,
           repositories: (body.repositories as { repository: string }[]).map(row => row.repository), machine: "",
           submodules: (body.repositories as { fetchSubmodules?: boolean }[]).some(row => row.fetchSubmodules === true) };
+        // A project's copy needs a base: made sure of first (composition.ts changed → ensureBase).
+        this.ensureBase();
         project.machine = this.machine(`copy ${project.name}`);
         this.machines.get(project.machine)!.state = "stopped";
         this.projects.set(project.id, project);
@@ -190,11 +241,12 @@ export class FakeAlpha {
         // build's snapshot is cleaned up, as the product's cleanup does once nobody is creating from it.
         this.machines.get(builderSandboxId)!.state = "deleted"; this.snapshots.add(snapshot);
         for (const old of this.computer.builds) if (old.snapshot) { this.snapshots.delete(old.snapshot); old.snapshot = null; }
-        this.computer.builds.unshift({ id, state: "succeeded", snapshot, builderSandboxId }); this.computer.active = id;
+        this.computer.builds.unshift({ id, state: "succeeded", snapshot, builderSandboxId, createdAt: this.now }); this.computer.active = id;
         return this.reply(202, { build: { id, state: "queued" } });
       }
       return this.reply(200, { activeBuildId: this.computer.active, snapshotName: null, recipeRevision: 0,
-        builds: this.computer.builds.map(build => ({ id: build.id, state: build.state, builderSandboxId: build.builderSandboxId })) });
+        builds: this.computer.builds.map(build => ({ id: build.id, state: build.state, builderSandboxId: build.builderSandboxId })),
+        ...(this.automaticBase ? { base: this.baseView() } : {}) });
     }
     if (parts[2] === "organizations" && parts[4] === "github") return this.reply(200, { organization: [{ accountLogin: "Withso", state: "active" }], personal: [] });
     if (parts[2] === "workspaces" && parts[3] === "by-number") return this.reply(404, { error: { code: "not_found" } });
@@ -203,6 +255,7 @@ export class FakeAlpha {
     if (url.pathname === "/v1/cloud-v2/workspaces" && method === "POST") {
       const project = this.projects.get(String(body.projectId));
       if (!project) return this.reply(404);
+      const base = this.ensureBase();
       const id = randomUUID(), branch = String(body.branch);
       const repositories = project.repositories.length > 1
         ? project.repositories.map(repository => ({ repository, checkoutPath: `/home/user/p/${repository.split("/")[1]}`, branch, baseBranch: "main" })) : undefined;
@@ -216,6 +269,11 @@ export class FakeAlpha {
         for (const [file, content] of seeded?.files ?? []) { row.files.set(`${folder}/${file}`, content); row.seeded.set(`${folder}/${file}`, content); }
       }
       row.computerBuildId = this.computer.active;
+      if (base?.state === "building") {
+        // It waits for the base being prepared: no machine yet.
+        this.machines.get(row.boatSandboxId)!.state = "deleted";
+        Object.assign(row, { state: "creating", boatSandboxId: "", waitingFor: base.id, computerBuildId: base.id, createdAtMs: this.now });
+      }
       this.workspaces.set(id, row); this.forks.add(id);
       return this.reply(201, { workspace: this.document(row) });
     }
@@ -226,7 +284,7 @@ export class FakeAlpha {
       if (row.state !== "deleted" && !this.pro() && this.proGrant !== null) return this.reply(403, { error: { code: "pro_required" } });
       if (action === "connect") return this.reply(200, { url: "wss://alpha.test/x", protocols: ["zeros.cloud.v2", "ticket.x"] });
       if (!action && method === "GET") return row.state === "deleted" ? this.reply(404) : this.reply(200, { workspace: this.document(row) });
-      if (!action && method === "DELETE") { row.state = "deleted"; this.machines.get(row.boatSandboxId)!.state = "deleted"; return this.reply(202, { workspace: this.document(row) }); }
+      if (!action && method === "DELETE") { row.state = "deleted"; const machine = this.machines.get(row.boatSandboxId); if (machine) machine.state = "deleted"; return this.reply(202, { workspace: this.document(row) }); }
       if (action === "stop") {
         row.state = "stopped"; row.stoppedDays = 0;
         // Dirty: an unpushed commit, or an ignored .env file that is not exactly what the environment seeded.
@@ -351,7 +409,7 @@ export class FakeAlpha {
       // The stage commits in its second repository (R2).
       const repository = row.repositories?.[1]?.repository ?? "";
       row.commits.set(repository, [...row.commits.get(repository) ?? [], committed]);
-      const untracked = /> '([^']+untracked\.txt)'/.exec(data)?.[1]!;
+      const untracked = /> '([^']+untracked\.txt)'/.exec(data)?.[1] ?? "";
       row.files.set(`${row.repositories!.find(entry => entry.repository === repository)!.checkoutPath}/${untracked}`, `${untracked.replace("untracked.txt", "untracked")}\n`);
     }
     const ignored = /printf '%s\\n' '([^']+person-bytes)' (>>?) '([^']+)'/.exec(data);
@@ -414,6 +472,27 @@ export class FakeAlpha {
     if (text.includes("FROM cloud_v2_workspace_submodules")) {
       const project = this.projects.get(String(this.workspaces.get(String(values[0]))?.projectId));
       return rows(project?.submodules ? [{ path: "vendor/hello", status: "fetch", public: true }, { path: "vendor/private", status: "fetch", public: true }] : []);
+    }
+    // The run's bases (#1260): by organization, automatic, created after the run started; or recorded ids.
+    const runBase = (build: Build, idsAt: number, startAt: number) =>
+      ((values[idsAt] ?? []) as string[]).includes(build.id) || (build.automatic === true && (build.createdAt ?? 0) >= Date.parse(String(values[startAt])));
+    if (text.startsWith("SELECT id::text AS id, base_shared FROM cloud_v2_computer_builds")) {
+      return rows(this.computer.builds.filter(build => build.automatic && (build.createdAt ?? 0) >= Date.parse(String(values[1]))).reverse()
+        .map(build => ({ id: build.id, base_shared: build.shared === true })));
+    }
+    if (text.includes("FOR UPDATE OF c, b")) {
+      const live = this.computer.builds.find(build => build.id === this.computer.active);
+      return rows(live && runBase(live, 1, 2) ? [{ id: live.id, snapshot_id: live.snapshot, base_shared: live.shared === true }] : []);
+    }
+    if (text.includes("/* run bases */")) return rows(this.computer.builds.filter(build => runBase(build, 1, 2))
+      .map(build => ({ active: this.computer.active === build.id, snapshot_id: build.snapshot, base_shared: build.shared === true })));
+    if (text.includes("waiting_for_base_at IS NOT NULL AS waiting")) {
+      const row = this.workspaces.get(String(values[0]));
+      return rows(row ? [{ waiting: row.waitingFor !== undefined, build: row.computerBuildId ?? null }] : []);
+    }
+    if (text.startsWith("SELECT computer_build_id::text AS build FROM cloud_v2_workspaces WHERE id = $1::uuid")) {
+      const row = this.workspaces.get(String(values[0]));
+      return rows(row ? [{ build: row.computerBuildId ?? null }] : []);
     }
     if (text.includes("snapshot_deleted_at IS NOT NULL AS gone")) {
       const build = this.computer.builds.find(row => row.id === values[0]);

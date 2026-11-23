@@ -4,17 +4,33 @@
 // approved (plan.ts lists it).
 import { z } from "zod";
 import { RehearsalFailure, type ProGrant, type StageContext } from "./contract.js";
-import { call, check, githubSignIn, parse, until } from "./steps.js";
+import { call, check, githubSignIn, parse, readBase, until } from "./steps.js";
 
 const DAY_MS = 86_400_000;
 
 export async function stageSetup(ctx: StageContext): Promise<Record<string, number>> {
   if (ctx.state.owner !== "personal") throw new RehearsalFailure("setup", "organization_route_awaiting_approval");
+  const counts: Record<string, number> = { proChanges: 0, githubSignIn: 0 };
+  await prepareOwner(ctx, counts);
+
+  // The organization's base (#1260): nobody presses Build. Zeros prepares it at the first project (or a create), so
+  // setup only reads what there is; the first create waits for it (steps.ts baseReady), and stage waiting rehearses a
+  // create made while one is still being prepared.
+  ctx.step("cloud_computer");
+  const base = await readBase(ctx, "cloud_computer");
+  check(base.state !== "absent", "cloud_computer", "base_view_absent");
+  check(base.state !== "unavailable", "cloud_computer", "base_unavailable");
+  ctx.note(`cloud_computer:base_${base.state}`);
+  counts.baseReadyAtSetup = base.state === "ready" ? 1 : 0;
+  return counts;
+}
+
+/** The Personal organization as a full cloud owner: Pro for its account, and its own GitHub sign-in by token. Each change
+ * is recorded before it is made. Stage waiting runs it for its own account and organization. */
+export async function prepareOwner(ctx: StageContext, counts: Record<string, number>): Promise<void> {
   const { pro, githubSignIn: signIn } = ctx.ports;
   check(pro, "setup_pro", "not_configured");
   check(signIn, "setup_github_sign_in", "not_configured");
-  const counts: Record<string, number> = { proChanges: 0, githubSignIn: 0 };
-
   ctx.step("pro");
   await grantPro(ctx, counts);
   ctx.step("personal_cloud");
@@ -34,41 +50,10 @@ export async function stageSetup(ctx: StageContext): Promise<Record<string, numb
   const after = await githubSignIn(ctx, organizationId, "github_sign_in_after");
   check(after.methods.pat.configured && after.selectedMethod === "pat", "github_sign_in_after", "not_connected");
   counts.githubSignIn = 1;
-
-  // A project's copy builds only on the organization's own active base (ready copies on, no shared base): a Personal
-  // organization that never built one gets it here, explicitly, as one builder machine.
-  ctx.step("cloud_computer");
-  counts.computerBuilt = await ensureComputer(ctx);
-  return counts;
 }
 
 const Computer = z.object({ activeBuildId: z.string().nullable(), recipeRevision: z.number().int().nonnegative(),
   builds: z.array(z.object({ id: z.string(), state: z.string(), builderSandboxId: z.string().nullable().optional() }).passthrough()) }).passthrough();
-/** The Personal organization's active Cloud Computer, built once when it has none. Returns 1 when this run built it. */
-export async function ensureComputer(ctx: StageContext): Promise<number> {
-  const path = `/v1/cloud-v2/organizations/${ctx.state.organizationId}/computer`;
-  const read = async (step: string) => parse(Computer, (await call(ctx.ports.api, "GET", path, step)).body, step);
-  const current = await read("computer_read");
-  const active = current.activeBuildId && current.builds.find(build => build.id === current.activeBuildId);
-  if (active && active.state === "succeeded") { ctx.note("cloud_computer:existing"); return 0; }
-  if (!ctx.state.created.computerBuild) {
-    ctx.start("computer_build");
-    const requested = parse(z.object({ build: z.object({ id: z.string().uuid() }).passthrough() }),
-      (await call(ctx.ports.api, "POST", `${path}/builds`, "computer_build", { revision: current.recipeRevision })).body, "computer_build");
-    ctx.state.created.computerBuild = requested.build.id;
-    await ctx.save();
-  }
-  const id = ctx.state.created.computerBuild;
-  await until(ctx, "computer_built", ctx.timing.computerMs, ctx.timing.pollMs, async () => {
-    const overview = await read("computer_built");
-    const build = overview.builds.find(row => row.id === id);
-    if (build?.builderSandboxId && !ctx.state.created.machines.includes(build.builderSandboxId)) ctx.state.created.machines.push(build.builderSandboxId);
-    check(build && !["failed", "cancelled"].includes(build.state), "computer_built", build ? `build_${build.state}` : "build_missing");
-    return overview.activeBuildId === id && build.state === "succeeded";
-  });
-  ctx.note("cloud_computer:built_by_this_run");
-  return 1;
-}
 
 /** Pro on for a day, unless it already runs at least half a day longer; the grant before the run's first change is kept. */
 export async function grantPro(ctx: StageContext, counts?: Record<string, number>): Promise<void> {

@@ -12,7 +12,7 @@ export class RehearsalFailure extends Error {
   }
 }
 
-export const STAGES = ["provision", "setup", "projects", "personal", "retention", "submodules"] as const;
+export const STAGES = ["provision", "setup", "projects", "personal", "retention", "submodules", "waiting"] as const;
 export type StageName = (typeof STAGES)[number];
 /** Where the organization stages run: the selected test user's Personal organization (Cloud for Pro), or the probe
  * organization (kept for later; needs the organization route's setup). */
@@ -21,13 +21,13 @@ export type OwnerKind = "personal" | "organization";
  * declares them. On the Personal route every stage but provision also needs CLOUD_V2_PERSONAL_CLOUD_ENABLED. */
 export function stageSwitches(stage: StageName, owner: OwnerKind): Switch[] {
   const own: Record<StageName, Switch[]> = { provision: [], setup: [], projects: ["projects"], personal: ["projects"], retention: ["projects", "retention"],
-    submodules: ["projects"] };
+    submodules: ["projects"], waiting: ["projects"] };
   const needed = own[stage];
   return stage === "provision" ? needed : owner === "personal" || stage === "personal" ? [...needed, "personal"] : needed;
 }
 /** Whether a stage signs in. provision uses only the GitHub App, so it runs whatever happens to an account's sign-in. */
 export const STAGE_NEEDS_ACCOUNT: Record<StageName, boolean> = {
-  provision: false, setup: true, projects: true, personal: true, retention: true, submodules: true,
+  provision: false, setup: true, projects: true, personal: true, retention: true, submodules: true, waiting: true,
 };
 export type Switch = "projects" | "personal" | "retention";
 
@@ -104,6 +104,9 @@ export type Ports = {
   pro?: ProPort;
   /** The selected account's own GitHub sign-in by token, for the owner organization. The token stays inside the port. */
   githubSignIn?: { connect(organizationId: string, expectedGeneration: string): Promise<void> };
+  /** Stage waiting's account (test user 3 by default) and its own fresh Personal organization: the ports that differ
+   * for it (its API, Pro and GitHub sign-in; a test may give it a whole fake). */
+  waiting?: { organizationId: string; ports: Partial<Omit<Ports, "waiting">> };
   bridge(workspaceId: string): Promise<Bridge>;
   boat: Boat;
   storage: Storage;
@@ -127,6 +130,9 @@ export type Created = {
   computerBuild?: string;
   /** Later Cloud Computer builds this run requested (stage C's rebuild); each replaces the live one. */
   computerRebuilds?: string[];
+  /** Automatic base builds this run caused (#1260): found by organization, `automatic`, and created after the run
+   * started; nobody pressed Build for them. Cleanup removes the live one unless --keep-base. */
+  bases?: string[];
 };
 export type StageResult = { ok: boolean; step?: string; code?: string; skipped?: string; counts?: Record<string, number>;
   /** Closed codes for what a stage chose (environment_case:seeded, environment_skipped:environment_exists). */
@@ -138,6 +144,8 @@ export type RehearsalState = {
   /** Organization ids a clock shift may touch. */
   organizations: string[];
   shifts: number; machineStarts: number;
+  /** Stage waiting's own organization and what the run created there; cleaned up as the main one is. */
+  waiting?: { organizationId: string; created: Created };
 };
 
 export type StageContext = {

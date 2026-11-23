@@ -53,6 +53,8 @@ export const WorkspaceDocument = z.object({
   machineExpectedGoneAt: z.object({ at: z.string(), estimate: z.boolean() }).optional(),
   lostWork: z.object({ restored: z.string(), stoppedAt: z.string() }).optional(),
   restores: z.unknown().optional(),
+  /** Created while its organization's base was being prepared, and waiting for it (#1260). */
+  preparing: z.literal("computer").optional(),
 }).passthrough();
 export type WorkspaceDocument = z.infer<typeof WorkspaceDocument>;
 const Reply = z.object({ workspace: WorkspaceDocument });
@@ -80,9 +82,19 @@ export async function waitState(ctx: StageContext, id: string, state: string, st
   });
 }
 
-/** Creates one workspace named with the run's prefix. The id is saved before anything else can fail. */
+/** Creates one workspace named with the run's prefix, once its organization's base is ready (a create that waits on a
+ * base being prepared is stage waiting's own step). The id is saved before anything else can fail. */
 export async function createWorkspace(ctx: StageContext, input: { name: string; projectId?: string; repository?: string; branch?: string },
   step = "workspace_create"): Promise<WorkspaceDocument> {
+  check(prefixed(ctx.state.prefix, input.name), step, "unprefixed");
+  await baseReady(ctx, `${step}_base`);
+  const document = await postWorkspace(ctx, input, step);
+  return waitState(ctx, document.id, "running", `${step}_running`);
+}
+
+/** The create request alone: it may answer while the organization's base is still being prepared. */
+export async function postWorkspace(ctx: StageContext, input: { name: string; projectId?: string; repository?: string; branch?: string },
+  step: string): Promise<WorkspaceDocument> {
   check(prefixed(ctx.state.prefix, input.name), step, "unprefixed");
   ctx.start("workspace");
   const reply = await call(ctx.ports.api, "POST", base, step, { organizationId: ctx.state.organizationId, ...input },
@@ -91,7 +103,49 @@ export async function createWorkspace(ctx: StageContext, input: { name: string; 
   ctx.state.created.workspaces.push(document.id);
   remember(ctx, document.boatSandboxId);
   await ctx.save();
-  return waitState(ctx, document.id, "running", `${step}_running`);
+  return document;
+}
+
+// ── The organization's base (ready copies, #1260) ───────
+
+/** The base as the Cloud Computer overview reports it (computer.ts baseState): absent from a server before #1260. */
+export type BaseState = "ready" | "preparing" | "failed" | "unavailable" | "none" | "absent";
+const BaseOverview = z.object({ activeBuildId: z.string().nullable(),
+  base: z.object({ state: z.enum(["ready", "preparing", "failed", "unavailable", "none"]), errorCode: z.string().optional() }).passthrough().optional() }).passthrough();
+export async function readBase(ctx: StageContext, step: string): Promise<{ state: BaseState; errorCode?: string; activeBuildId: string | null }> {
+  const overview = parse(BaseOverview, (await call(ctx.ports.api, "GET", `/v1/cloud-v2/organizations/${ctx.state.organizationId}/computer`, step)).body, step);
+  return { state: overview.base?.state ?? "absent", ...(overview.base?.errorCode ? { errorCode: overview.base.errorCode } : {}), activeBuildId: overview.activeBuildId };
+}
+
+/** The automatic base builds this run caused in its organization: automatic, and created after the run started. Each is
+ * recorded once (and counted as one machine start: its builder). */
+export async function recordRunBases(ctx: StageContext): Promise<string[]> {
+  const rows = await ctx.ports.database.read(`SELECT id::text AS id, base_shared FROM cloud_v2_computer_builds WHERE org_id = $1::uuid AND automatic
+    AND created_at >= $2::timestamptz ORDER BY version`, [ctx.state.organizationId, ctx.state.startedAt]);
+  const recorded = (ctx.state.created.bases ??= []);
+  for (const row of rows) {
+    const id = String(row.id);
+    if (recorded.includes(id)) continue;
+    // The shared base is a reference to Zeros's snapshot: no builder machine.
+    if (row.base_shared !== true) ctx.start("computer_build");
+    recorded.push(id);
+    await ctx.save();
+  }
+  return recorded;
+}
+
+/** Waits until the organization's base is ready. Nobody presses Build: a project (or a create) made it, or the server's
+ * sweep. A failed base or no cloud stops the step with its closed code. */
+export async function baseReady(ctx: StageContext, step: string): Promise<void> {
+  await until(ctx, step, ctx.timing.computerMs, ctx.timing.pollMs, async () => {
+    const base = await readBase(ctx, step);
+    check(base.state !== "absent", step, "base_view_absent");
+    check(base.state !== "unavailable", step, "base_unavailable");
+    check(base.state !== "failed", step, `base_failed:${base.errorCode ?? "none"}`);
+    if (base.state !== "ready") await recordRunBases(ctx);
+    return base.state === "ready";
+  });
+  await recordRunBases(ctx);
 }
 
 export async function lifecycle(ctx: StageContext, id: string, action: "start" | "stop" | "archive", step: string): Promise<void> {

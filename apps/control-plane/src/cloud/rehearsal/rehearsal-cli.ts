@@ -22,19 +22,22 @@ import { cleanup, cleanupNeedsAccount, DEFAULT_RUN_CAP, inventoryLines, NO_ACCOU
 import { FIXTURE_TWO } from "./stage-provision.js";
 import { loadState, newState, saveState } from "./state.js";
 
-export const USAGE = "alpha:rehearse <provision|setup|projects|personal|retention|submodules|all> [--plan] [--cleanup] [--run <id>] " +
+export const USAGE = "alpha:rehearse <provision|setup|projects|personal|retention|submodules|waiting|all> [--plan] [--cleanup] [--run <id>] " +
   "[--owner personal|organization (default personal)] [--account owner|1..10 (default 2)] [--other 1..10 (default the next configured)] " +
+  "[--waiting-account 1..10 (default 3)] " +
   "[--pro-actor <first 8 hex of the platform owner>] [--switches projects,personal,retention] [--repository owner/name] " +
   "[--repository-two owner/name (default Withso/zeros-dev-fixture-2)] [--submodule-repository owner/name] [--submodule-fixture-repository owner/name] [--keep-base] [--max-active <n>] [--organization <slug|id>]";
 /** `all` runs these in order on each route; D is refused until written. */
 export const ALL: Record<OwnerKind, readonly StageName[]> = {
-  personal: ["provision", "setup", "projects", "personal", "retention", "submodules"], organization: ["provision", "setup", "projects", "retention"],
+  personal: ["provision", "setup", "projects", "personal", "retention", "submodules", "waiting"], organization: ["provision", "setup", "projects", "retention"],
 };
 export const TIMING = { pollMs: 5_000, stateMs: 15 * 60_000, copyMs: 30 * 60_000, turnMs: 10 * 60_000, scanMs: 5 * 60_000, archiveScanMs: 65 * 60_000,
   idleStopMs: 35 * 60_000, computerMs: 45 * 60_000 };
 
 export type Arguments = {
   stages: StageName[]; plan: boolean; cleanup: boolean; run?: string; owner: OwnerKind; account: "owner" | number; other?: number; proActor?: string;
+  /** Stage waiting's account: its own fresh Personal organization. */
+  waitingAccount: number;
   switches: Set<Switch>;
   repository?: string; repositoryTwo?: string; submoduleRepository?: string; submoduleFixtureRepository?: string; keepBase: boolean; maxActive: number; organization?: string;
 };
@@ -45,6 +48,7 @@ export function parseArguments(argv: string[]): Arguments {
     plan: { type: "boolean" }, cleanup: { type: "boolean" }, run: { type: "string" }, account: { type: "string" }, switches: { type: "string" },
     repository: { type: "string" }, "repository-two": { type: "string" }, "keep-base": { type: "boolean" }, "max-active": { type: "string" },
     organization: { type: "string" }, owner: { type: "string" }, "submodule-repository": { type: "string" }, "submodule-fixture-repository": { type: "string" }, other: { type: "string" }, "pro-actor": { type: "string" }, help: { type: "boolean" },
+    "waiting-account": { type: "string" },
   } });
   const owner = (values.owner ?? "personal") as OwnerKind;
   if (!["personal", "organization"].includes(owner)) throw new RehearsalFailure("usage", "owner");
@@ -59,6 +63,8 @@ export function parseArguments(argv: string[]): Arguments {
   const other = values.other === undefined ? undefined : Number(values.other);
   if (other !== undefined && !(Number.isInteger(other) && other >= 1 && other <= 10 && other !== account)) throw new RehearsalFailure("usage", "other");
   if (values["pro-actor"] !== undefined && !/^[0-9a-f]{8}$/.test(values["pro-actor"])) throw new RehearsalFailure("usage", "pro_actor");
+  const waitingAccount = Number(values["waiting-account"] ?? (account === 3 ? 4 : 3));
+  if (!(Number.isInteger(waitingAccount) && waitingAccount >= 1 && waitingAccount <= 10 && waitingAccount !== account)) throw new RehearsalFailure("usage", "waiting_account");
   const switches = new Set<Switch>();
   for (const name of (values.switches ?? "").split(",").filter(Boolean)) {
     if (!["projects", "personal", "retention"].includes(name)) throw new RehearsalFailure("usage", "switch");
@@ -66,7 +72,7 @@ export function parseArguments(argv: string[]): Arguments {
   }
   const maxActive = values["max-active"] === undefined ? 10 : Number(values["max-active"]);
   if (!(Number.isInteger(maxActive) && maxActive >= 0 && maxActive <= 50)) throw new RehearsalFailure("usage", "max_active");
-  return { stages, plan: !!values.plan, cleanup: !!values.cleanup, ...(values.run ? { run: values.run } : {}), owner, account,
+  return { stages, plan: !!values.plan, cleanup: !!values.cleanup, ...(values.run ? { run: values.run } : {}), owner, account, waitingAccount,
     ...(other !== undefined ? { other } : {}), ...(values["pro-actor"] ? { proActor: values["pro-actor"] } : {}), switches,
     ...(values.repository ? { repository: assertRepository(values.repository) } : {}),
     ...(values["repository-two"] ? { repositoryTwo: assertRepository(values["repository-two"]) } : {}),
@@ -153,20 +159,28 @@ async function main(argv: string[]): Promise<number> {
         const actor = await proActor(reads, args.proActor);
         log(`pro actor (--pro-actor): ${actor.state}; github token (ZEROS_REHEARSAL_GITHUB_TOKEN): ${token ? "configured" : "absent"}`);
         const summaries = new Map<string, AccountSummary | { failed: string }>();
-      const facts: PreconditionFacts = { release: await liveReleaseIdentity(), runtime: null, projectsRead: null, computer: null };
+      const facts: PreconditionFacts = { release: await liveReleaseIdentity(), runtime: null, projectsRead: null, computer: null, sharedBaseInUse: null };
+      let waitingAccount = "account_not_configured";
       if (facts.release) facts.runtime = await liveRuntimeQualification({ bucket: need("ZEROS_R2_ALPHA_BUCKET"), endpoint: need("ZEROS_R2_ALPHA_ENDPOINT"),
         accessKeyId: need("ZEROS_R2_ALPHA_ACCESS_KEY_ID"), secretAccessKey: need("ZEROS_R2_ALPHA_SECRET_ACCESS_KEY") }, facts.release.workerSha256).catch(() => null);
         for (const result of await signInAll(accounts, signInDeps(probe))) {
-          if (!result.ok) { log(`account ${result.label}: failed ${result.step} ${result.code}`); summaries.set(result.label, { failed: `${result.step}:${result.code}` }); continue; }
+          if (!result.ok) {
+            log(`account ${result.label}: failed ${result.step} ${result.code}`); summaries.set(result.label, { failed: `${result.step}:${result.code}` });
+            if (result.label === String(args.waitingAccount)) waitingAccount = `account_unavailable:${result.step}:${result.code}`;
+            continue;
+          }
           try {
             const summary = await readAccount(result.api, result.label, probe.id, "Withso");
             if (result.label === String(args.account) && summary.personal) {
               const base = `/v1/cloud-v2/organizations/${summary.personal.id}`;
               const projects = await result.api.json("GET", `${base}/cloud-projects`);
               facts.projectsRead = projects.status === 200 ? "200" : errorCode(projects);
-              const computer = await result.api.json("GET", `${base}/computer`);
-              const active = z.object({ activeBuildId: z.string().nullable() }).passthrough().safeParse(computer.body);
-              facts.computer = computer.status === 200 && active.success ? (active.data.activeBuildId ? "active" : "none") : errorCode(computer);
+              facts.computer = await baseOf(result.api, summary.personal.id);
+            }
+            // Stage waiting's account: its Personal organization must have no base and nothing building.
+            if (result.label === String(args.waitingAccount)) {
+              const state = summary.personal ? await baseOf(result.api, summary.personal.id) : null;
+              waitingAccount = !summary.personal ? "no_personal_organization" : state === "none" ? "fresh" : `base_${state}`;
             }
             summaries.set(result.label, summary);
             for (const line of accountLines(summary)) log(line);
@@ -189,7 +203,9 @@ async function main(argv: string[]): Promise<number> {
         }
         const selected = summaries.get(String(args.account)) ?? { failed: "account:not_configured" };
         const otherLabel = String(args.other ?? accounts.find(row => row.label !== "owner" && row.label !== String(args.account))?.label ?? "none");
-        log(`selected account ${args.account}; second account ${otherLabel}; repositories R1 ${one}, R2 ${two}`);
+        log(`selected account ${args.account}; second account ${otherLabel}; waiting account ${args.waitingAccount} (${waitingAccount}); repositories R1 ${one}, R2 ${two}`);
+        facts.sharedBaseInUse = await reads.read(`SELECT count(*)::int AS n FROM cloud_v2_computers c
+          JOIN cloud_v2_computer_builds b ON b.id = c.active_build_id AND b.org_id = c.org_id WHERE b.base_shared`).then(rows => Number(rows[0]?.n ?? 0), () => null);
         if (args.account === "owner") log("note: the owner's own account; the run asserts its entitlement, sessions and settings are unchanged");
         // Stage D's fixtures, read through the run's fixture identity (a repository read; nothing is written).
         const named = args.submoduleRepository && args.submoduleFixtureRepository ? [args.submoduleRepository, args.submoduleFixtureRepository] : null;
@@ -199,7 +215,7 @@ async function main(argv: string[]): Promise<number> {
           submoduleFixtures = (await Promise.all(named.map(repository => github.repositoryExists(repository).catch(() => false)))).every(Boolean) ? "present" : "missing";
         }
         log(`submodule fixtures: ${submoduleFixtures}`);
-        const readiness = { token: !!token, ...(tokenState && tokenState !== "absent" ? { tokenRefusal: tokenState } : {}), proActor: actor.state, submoduleFixtures };
+        const readiness = { token: !!token, ...(tokenState && tokenState !== "absent" ? { tokenRefusal: tokenState } : {}), proActor: actor.state, submoduleFixtures, waitingAccount };
         for (const stage of [...new Set<StageName>(["setup", ...args.stages])]) {
           const refused = refusal(stage, selected, args.switches, args.owner, readiness);
           log(`stage ${stage}: ${refused ? `refused ${refused}` : "would run"}`);
@@ -250,6 +266,18 @@ async function main(argv: string[]): Promise<number> {
         const result = account ? await signInAccount(account, signInDeps(probe)) : undefined;
         if (result?.ok) { sessions.push(result); other = result; } else log(`second account ${label || "none"}: unavailable${result && !result.ok ? ` ${result.step}:${result.code}` : ""}`);
       }
+      // Stage waiting's account, signed in for that stage or for a cleanup of what it made.
+      let waiting: SignedIn | undefined;
+      if (owner === "personal" && (args.cleanup ? !!run.waiting : args.stages.includes("waiting"))) {
+        const account = accounts.find(row => row.label === String(args.waitingAccount));
+        const result = account ? await signInAccount(account, signInDeps(probe)) : undefined;
+        if (result?.ok && personalOf(result)) { sessions.push(result); waiting = result; }
+        else {
+          if (result?.ok) sessions.push(result);
+          log(`waiting account ${args.waitingAccount}: unavailable${result && !result.ok ? ` ${result.step}:${result.code}` : result ? " personal_organization:none" : " not_configured"}`);
+        }
+        if (waiting && run.waiting && run.waiting.organizationId !== personalOf(waiting)!.id) throw new RehearsalFailure("state", "waiting_organization");
+      }
       const api = held?.api ?? NO_ACCOUNT;
       const db = database(run.runId.replace(/-/g, ""));
       const ports: Ports = {
@@ -262,6 +290,9 @@ async function main(argv: string[]): Promise<number> {
         ...(other ? { other: other.api } : {}),
         ...(held && owner === "personal" && actor.id ? { pro: livePro(db, { subjectUserId: held.userId, expectedEmail: held.email, actorUserId: actor.id }) } : {}),
         ...(held && token ? { githubSignIn: liveGithubSignIn(held.api, token) } : {}),
+        ...(waiting ? { waiting: { organizationId: personalOf(waiting)!.id, ports: { api: waiting.api, bridge: liveBridge(waiting.api),
+          ...(actor.id ? { pro: livePro(db, { subjectUserId: waiting.userId, expectedEmail: waiting.email, actorUserId: actor.id }) } : {}),
+          ...(token ? { githubSignIn: liveGithubSignIn(waiting.api, token) } : {}) } } } : {}),
       };
       const ctx = stageContext(ports, run, () => saveState(run), { one, two, ...(args.submoduleRepository ? { submodules: args.submoduleRepository } : {}),
         ...(args.submoduleFixtureRepository ? { submoduleFixture: args.submoduleFixtureRepository } : {}) }, TIMING, DEFAULT_RUN_CAP);
@@ -270,7 +301,7 @@ async function main(argv: string[]): Promise<number> {
       let passed: boolean;
       if (args.cleanup) {
         const { inventory, failures } = await cleanup(ctx, { accountless: !held, keepBase: args.keepBase, log });
-        if (args.keepBase && run.created.computerBuild) log("cloud computer base: kept (--keep-base): its build row, live pointer and Boat named snapshot stay");
+        if (args.keepBase) log("cloud computer bases the run caused: kept (--keep-base): their build rows, live pointers and Boat named snapshots stay");
         const { lines, clean } = inventoryLines(inventory);
         for (const line of lines) log(line);
         if (failures) log(`cleanup failures ${failures}`);
@@ -292,6 +323,14 @@ async function main(argv: string[]): Promise<number> {
     log(`failed ${error instanceof RehearsalFailure ? `${error.step} ${error.code}` : "unexpected"}`);
     return 1;
   }
+}
+
+/** An organization's base as its Cloud Computer overview reports it (#1260), "absent" before that, or the read's closed code. */
+async function baseOf(api: Api, organizationId: string): Promise<string> {
+  const reply = await api.json("GET", `/v1/cloud-v2/organizations/${organizationId}/computer`);
+  if (reply.status !== 200) return errorCode(reply);
+  const parsed = z.object({ base: z.object({ state: z.enum(["ready", "preparing", "failed", "unavailable", "none"]) }).passthrough().optional() }).passthrough().safeParse(reply.body);
+  return parsed.success ? parsed.data.base?.state ?? "absent" : "schema";
 }
 
 /** The test user's WorkOS subject, read by email with the Alpha WorkOS key. */

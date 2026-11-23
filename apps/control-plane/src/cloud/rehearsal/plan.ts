@@ -72,7 +72,10 @@ export type PersonalReadiness = { token: boolean; proActor: "resolved" | "none" 
   /** Why the token check refused it (kind_classic, reaches_outside_fixtures, fixture_contents_read_only, ...). */
   tokenRefusal?: string;
   /** Stage D's two fixture repositories (R3 and the Withso fixture that is one of its submodules), as the run's GitHub identity sees them. */
-  submoduleFixtures?: "present" | "missing" | "not_named" };
+  submoduleFixtures?: "present" | "missing" | "not_named";
+  /** Stage waiting's account (--waiting-account, test user 3 by default): "fresh" when its Personal organization has no
+   * base and nothing building, else why not (base_ready, account_unavailable:<code>, no_personal_organization). */
+  waitingAccount?: string };
 
 /** Why a stage cannot run, or null. `account` is the selected account's summary, or the reason its sign-in or read
  * failed. provision needs no account. On the Personal route the account needs its Personal organization, and setup the
@@ -85,15 +88,19 @@ export function refusal(stage: StageName, account: AccountSummary | { failed: st
   if (!STAGE_RUNNERS[stage]) return "not_written";
   if ((stage === "personal" || stage === "submodules") && owner !== "personal") return "personal_route_only";
   if (stage === "submodules" && readiness.submoduleFixtures !== "present") return `fixtures_${readiness.submoduleFixtures ?? "not_named"}`;
+  if (stage === "waiting" && owner !== "personal") return "personal_route_only";
+  if (stage === "waiting" && readiness.waitingAccount !== "fresh") return `waiting_account_${readiness.waitingAccount ?? "not_configured"}`;
   const missing = stageSwitches(stage, owner).find(needed => !switches.has(needed));
   if (missing) return `undeclared_${missing}`;
   if (!STAGE_NEEDS_ACCOUNT[stage]) return null;
   if ("failed" in account) return `account_unavailable:${account.failed}`;
   if (owner === "personal") {
     if (!account.personal) return "no_personal_organization";
-    if (stage === "setup" && !readiness.token) return "no_github_token";
-    if (stage === "setup" && readiness.tokenRefusal) return `github_token_${readiness.tokenRefusal}`;
-    if (stage === "setup" && readiness.proActor !== "resolved") return `pro_actor_${readiness.proActor}`;
+    // Stage waiting prepares its own account as setup does.
+    const owns = stage === "setup" || stage === "waiting";
+    if (owns && !readiness.token) return "no_github_token";
+    if (owns && readiness.tokenRefusal) return `github_token_${readiness.tokenRefusal}`;
+    if (owns && readiness.proActor !== "resolved") return `pro_actor_${readiness.proActor}`;
     return null;
   }
   if (!account.organizations.some(org => org.probe)) return "not_a_member";
@@ -145,8 +152,10 @@ export function writeLines(stage: StageName, prefix: string, repositories: { one
         " recording the grant before it; cleanup puts that grant back (or ends Pro when there was none)",
       "setup would connect the test user's own GitHub sign-in in its Personal organization by token (action pat, ZEROS_REHEARSAL_GITHUB_TOKEN, fixture repositories only);" +
         " never over a sign-in it did not make; cleanup disconnects it",
-      "setup would build the Personal organization's Cloud Computer base when it has none (1 builder machine from Boat's stock image, minutes reported);" +
-        " it leaves a build row, the organization's live pointer and a Boat named snapshot; cleanup removes the pointer and the snapshot unless --keep-base",
+      "setup presses no Build: it reads the Personal organization's base (ready, preparing, failed, unavailable or none). Zeros prepares it at the first" +
+        " project (1 builder machine from Boat's stock image, or none with a shared base), and every stage's first create waits until it is ready",
+      "cleanup removes the base the run caused (the organization's, automatic, newer than the run's start): its live pointer and its own Boat named" +
+        " snapshot (never the shared one), unless --keep-base",
     ] : [
       "setup (proposal, not run until approved) would let test user <n> run projects and retention in the probe organization:",
       "  1. invitation: POST /v1/organizations/<probe>/invitations role admin for user <n>, as an admin of the probe organization (today only the owner's account);" +
@@ -179,6 +188,14 @@ export function writeLines(stage: StageName, prefix: string, repositories: { one
       `submodules would create workspace ${prefix}sub-w (1 machine start), forked from the copy, fetching both public submodules itself, and read git submodule status:` +
         " both initialized at their gitlink commits",
       "submodules needs R3 (--submodule-repository) and the Withso fixture that is one of its submodules (--submodule-fixture-repository), both existing",
+    ],
+    waiting: [
+      "waiting runs in a second, fresh Personal organization: --waiting-account (test user 3 by default), whose organization has no base and nothing building",
+      "waiting would give that account Individual Pro and connect its own GitHub sign-in by token, as setup does; cleanup puts both back",
+      `waiting would create project ${prefix}wait (Only you, ${repositories.one}): Zeros queues the organization's automatic base (1 builder machine)`,
+      `waiting would at once create workspace ${prefix}wait-w (1 machine start): it must answer creating, document field preparing: computer, bound to that base`,
+      "waiting would wait for the base to be ready, then for the workspace to be running from it (the wait in seconds, and whether it passed the" +
+        " 10-minute boot deadline, are reported), then delete the workspace and the project; cleanup removes that base unless --keep-base",
     ],
 
   };
@@ -225,8 +242,12 @@ export type PreconditionFacts = {
   runtime: { found: boolean; actingUser: boolean; syncContext: boolean } | null;
   /** The selected account's Personal organization's projects read: 200, or its closed 404 code. */
   projectsRead: string | null;
-  /** Its Cloud Computer: has an active base, none, or the read's closed code (404 while cloud is off for it). */
-  computer: "active" | "none" | string | null;
+  /** Its Cloud Computer's base as the overview reports it (#1260: ready, preparing, failed, unavailable, none), "absent"
+   * from a server before #1260, or the read's closed code (404 while cloud is off for it). */
+  computer: string | null;
+  /** Organizations whose live build is the shared base: evidence that CLOUD_V2_SHARED_BASE_SNAPSHOT is configured (the
+   * variable is Railway's and not read). Null when unread. */
+  sharedBaseInUse: number | null;
 };
 
 /** The preconditions block: what each switch needs and what is unset on Alpha, checked live where it can be. */
@@ -242,15 +263,18 @@ export function preconditionLines(facts: PreconditionFacts): string[] {
     `  projects routes: ${facts.projectsRead === null ? "unread" : facts.projectsRead === "200" ? "mounted (CLOUD_V2_READY_COPIES_ENABLED on)"
       : facts.projectsRead.endsWith(":route_or_resource") ? "not mounted (CLOUD_V2_READY_COPIES_ENABLED off)"
         : facts.projectsRead.endsWith(":organization") ? "mounted, but the Personal organization has no cloud (CLOUD_V2_PERSONAL_CLOUD_ENABLED off, or no Pro yet)" : facts.projectsRead}`,
-    `  Personal organization's Cloud Computer: ${facts.computer === null ? "unread" : facts.computer === "active" ? "has an active base"
-      : facts.computer === "none" ? "none: setup builds one" : `not readable yet (${facts.computer}): it has no cloud before setup's Pro and the personal switch`}`,
-    "  base: with ready copies on, a project's copy builds only on the organization's own active base_only Cloud Computer build; with none,",
-    "    the copy never queues and the project's status stays none (a workspace create answers 409 cloud_computer_build_required)",
-    "  base: setup requests one build (POST .../computer/builds, the organization's recipe revision): with CLOUD_V2_SHARED_BASE_SNAPSHOT unset, one builder",
-    "    machine from Boat's stock image installs the runtime and saves a named snapshot; the minutes are reported; cleanup removes the base unless --keep-base",
+    `  Personal organization's base: ${facts.computer === null ? "unread" : facts.computer === "absent" ? "not reported: the server predates the safe switch-on (#1260); setup refuses"
+      : ["ready", "preparing", "failed", "unavailable", "none"].includes(facts.computer) ? facts.computer
+        : `not readable yet (${facts.computer}): it has no cloud before setup's Pro and the personal switch`}`,
+    `  shared base: ${facts.sharedBaseInUse === null ? "unread" : facts.sharedBaseInUse > 0 ? `in use by ${facts.sharedBaseInUse} organization(s), so configured`
+      : "in use by no organization (CLOUD_V2_SHARED_BASE_SNAPSHOT likely unset; the variable itself is Railway's and not read)"}`,
+    "  base (#1260): nobody presses Build. A project (or a create) makes Zeros prepare the organization's automatic base: with no install script and the",
+    "    shared base at Boat, at once with no machine; otherwise one builder machine from Boat's stock image (4 an hour and 30 a day across Alpha, and a",
+    "    base a create waits on goes first). A create made meanwhile waits for it (document field preparing: computer); 409 cloud_computer_preparing, or",
+    "    cloud_computer_preparation_failed during a failed base's backoff (15 minutes, doubling, at most 6 hours); a waiting create stopped: cloud_create_stopped;",
+    "    archived or its creator's cloud gone meanwhile: cloud_create_archived, cloud_creator_access_lost",
     "  unset on Alpha, and what that means here:",
-    "    CLOUD_V2_SHARED_BASE_SNAPSHOT: each organization builds its own base (one builder machine); set, a build with no install script uses that Boat",
-    "      named snapshot with no machine; base() reads only the organization's own build either way, so a build is always needed first",
+    "    CLOUD_V2_SHARED_BASE_SNAPSHOT: each organization's base takes one builder machine; the rehearsal checks nothing that depends on the shared snapshot",
     "    CLOUD_V2_CHECKPOINT_RETRY_ENABLED: nothing for retention; retention runs the checkpoint retry scan itself (lifecycle.ts: checkpointRetry || retention)",
     "    CLOUD_V2_ASYNC_CREATE_ENABLED: unset means on (creates return before their GitHub checks)",
     "    CLOUD_V2_RETENTION_BACKUP_FORKS_PER_HOUR: default 20; CLOUD_V2_RETENTION_MAINTENANCE_PER_HOUR and _PER_DAY: defaults 20 and 120",

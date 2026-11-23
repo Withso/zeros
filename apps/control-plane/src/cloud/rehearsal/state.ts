@@ -9,22 +9,25 @@ import { runPrefix } from "./guard.js";
 
 const Uuid = z.string().uuid();
 const Grant = z.object({ enabled: z.boolean(), validFrom: z.string().datetime({ offset: true }), validUntil: z.string().datetime({ offset: true }).nullable() }).strict();
+const Created = z.object({
+  projects: z.array(Uuid), workspaces: z.array(Uuid), machines: z.array(z.string().max(128)),
+  branches: z.array(z.object({ repository: z.string().max(201), name: z.string().max(255) })),
+  pulls: z.array(z.object({ repository: z.string().max(201), number: z.number().int().positive() })),
+  environments: z.array(z.object({ repository: z.string().max(201), repositoryId: z.string().regex(/^[1-9][0-9]{0,15}$/) })),
+  pro: z.object({ before: Grant.nullable(), operations: z.array(Uuid).max(16) }).optional(),
+  githubSignIns: z.array(Uuid).max(4),
+  computerBuild: Uuid.optional(),
+  computerRebuilds: z.array(Uuid).max(8).optional(),
+  bases: z.array(Uuid).max(8).optional(),
+});
 const Schema = z.object({
   version: z.literal(1), runId: Uuid, prefix: z.string().regex(/^zr-[0-9a-f]{8}-$/), startedAt: z.string(),
   owner: z.enum(["personal", "organization"]), organizationId: Uuid, organizations: z.array(Uuid).max(4),
-  created: z.object({
-    projects: z.array(Uuid), workspaces: z.array(Uuid), machines: z.array(z.string().max(128)),
-    branches: z.array(z.object({ repository: z.string().max(201), name: z.string().max(255) })),
-    pulls: z.array(z.object({ repository: z.string().max(201), number: z.number().int().positive() })),
-    environments: z.array(z.object({ repository: z.string().max(201), repositoryId: z.string().regex(/^[1-9][0-9]{0,15}$/) })),
-    pro: z.object({ before: Grant.nullable(), operations: z.array(Uuid).max(16) }).optional(),
-    githubSignIns: z.array(Uuid).max(4),
-    computerBuild: Uuid.optional(),
-    computerRebuilds: z.array(Uuid).max(8).optional(),
-  }),
+  created: Created,
   stages: z.record(z.string(), z.object({ ok: z.boolean(), step: z.string().optional(), code: z.string().optional(), skipped: z.string().optional(),
     counts: z.record(z.string(), z.number()).optional(), notes: z.array(z.string().regex(/^[a-z0-9_:.-]{1,80}$/)).max(16).optional() })),
   shifts: z.number().int().nonnegative(), machineStarts: z.number().int().nonnegative(),
+  waiting: z.object({ organizationId: Uuid, created: Created }).strict().optional(),
 }).strict();
 
 export const stateDirectory = (base = homedir()) => join(base, ".zeros-rehearsal");

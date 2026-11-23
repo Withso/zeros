@@ -7,6 +7,7 @@ import { stageProvision } from "./stage-provision.js";
 import { stagePersonal } from "./stage-personal.js";
 import { stageRetention } from "./stage-retention.js";
 import { stageSubmodules } from "./stage-submodules.js";
+import { stageWaiting, waitingContext } from "./stage-waiting.js";
 import { changePro, sameGrant, stageSetup } from "./stage-setup.js";
 import { clearEnvironment, disconnectGithubSignIn, githubSignIn, deleteProject, deleteWorkspace, getWorkspace, listProjects, listWorkspaces, readEnvironment } from "./steps.js";
 
@@ -14,7 +15,7 @@ export type Stage = (ctx: StageContext) => Promise<Record<string, number>>;
 /** Every stage. setup refuses itself on the organization route; personal and submodules run on the Personal route only,
  * and submodules refuses itself until its fixtures exist. */
 export const STAGE_RUNNERS: Partial<Record<StageName, Stage>> = { provision: stageProvision, setup: stageSetup, projects: stageProjects,
-  personal: stagePersonal, retention: stageRetention, submodules: stageSubmodules };
+  personal: stagePersonal, retention: stageRetention, submodules: stageSubmodules, waiting: stageWaiting };
 
 export type RunOptions = {
   switches: ReadonlySet<Switch>;
@@ -98,11 +99,27 @@ export type Inventory = Record<"workspaces" | "projects" | "branches" | "pulls" 
 /** Whether cleanup needs a signed-in account: anything recorded that only the API removes, or a create attempted (a
  * machine start is counted before its request, so a lost response is found by listing the prefix). A provision-only
  * run does not. */
-export const cleanupNeedsAccount = (state: RehearsalState) =>
-  state.created.workspaces.length + state.created.projects.length + state.created.environments.length + state.created.githubSignIns.length +
-    (state.created.pro?.operations.length ?? 0) + state.machineStarts > 0;
+export const cleanupNeedsAccount = (state: RehearsalState) => [state.created, state.waiting?.created].some(created => created &&
+  created.workspaces.length + created.projects.length + created.environments.length + created.githubSignIns.length + (created.pro?.operations.length ?? 0) > 0)
+  || state.machineStarts > 0;
 
 export async function cleanup(ctx: StageContext, options: { accountless?: boolean; keepBase?: boolean; log(line: string): void }): Promise<{ inventory: Inventory; failures: number }> {
+  const main = await cleanupOrganization(ctx, options);
+  if (!ctx.state.waiting) return main;
+  // Stage waiting's organization, as its own account: the same steps, and one inventory summed over both.
+  if (!ctx.ports.waiting) {
+    options.log(safeLine("cleanup waiting: waiting_account_required"));
+    return { inventory: main.inventory, failures: main.failures + 1 };
+  }
+  const waiting = await cleanupOrganization(waitingContext(ctx), { ...options, log: line => options.log(line.replace(/^cleanup /, "cleanup waiting ")) });
+  // Branches, pull requests and the database's prefixed rows are read run-wide by each pass: counted once.
+  const once = new Set(["branches", "pulls", "databaseRows"]);
+  const inventory = Object.fromEntries(Object.entries(main.inventory).map(([kind, count]) =>
+    [kind, once.has(kind) ? count : count + waiting.inventory[kind as keyof Inventory]])) as Inventory;
+  return { inventory, failures: main.failures + waiting.failures };
+}
+
+async function cleanupOrganization(ctx: StageContext, options: { accountless?: boolean; keepBase?: boolean; log(line: string): void }): Promise<{ inventory: Inventory; failures: number }> {
   const { ports, state } = ctx;
   if (options.accountless && cleanupNeedsAccount(state)) throw new RehearsalFailure("cleanup", "account_required");
   let failures = 0;
@@ -151,11 +168,11 @@ export async function cleanup(ctx: StageContext, options: { accountless?: boolea
   workspaces = state.created.workspaces; projects = state.created.projects;
   for (const target of state.created.environments) await attempt("environment", () => clearEnvironment(ctx, target, "cleanup_environment"));
   for (const organizationId of state.created.githubSignIns) await attempt("github_sign_in", () => disconnectGithubSignIn(ctx, organizationId, "cleanup_github_sign_in"));
-  // The Cloud Computer base this run built, unless --keep-base: as the product's own baseMissing does, the organization's
+  // The Cloud Computer base this run caused, unless --keep-base: as the product's own baseMissing does, the organization's
   // live pointer goes, then that build's Boat named snapshot, then the build records it gone. The build row stays (history).
-  // A rebuild this run made later replaced it: the live one is then the run's newest build.
-  if (state.created.computerBuild && !options.keepBase)
-    await attempt("cloud_computer", () => removeBase(ctx, state.created.computerRebuilds?.at(-1) ?? state.created.computerBuild!));
+  // The run's bases: the automatic one Zeros prepared for it (by organization, `automatic`, newer than the run's start),
+  // a build an older run requested, and stage C's rebuild, which replaced it. Only the live one is removed.
+  if (!options.keepBase) await attempt("cloud_computer", () => removeRunBase(ctx));
   // The Pro grant last: everything above may need the account's cloud.
   if (state.created.pro?.operations.length) await attempt("pro", async () => {
     if (!ports.pro) throw new RehearsalFailure("cleanup_pro", "pro_actor_required");
@@ -201,12 +218,13 @@ export async function readInventory(ctx: StageContext, accountless = false, keep
       (SELECT count(*) FROM cloud_projects WHERE left(name, length($1)) = $1)::int AS projects`, [state.prefix]);
   const databaseRows = Number(rows[0]?.workspaces ?? 0) + Number(rows[0]?.projects ?? 0);
   let computerBase = 0;
-  if (state.created.computerBuild && !keepBase) {
-    const live = state.created.computerRebuilds?.at(-1) ?? state.created.computerBuild;
-    const row = (await ports.database.read(`SELECT coalesce(c.active_build_id = b.id, false) AS active, b.snapshot_id FROM cloud_v2_computer_builds b
-      LEFT JOIN cloud_v2_computers c ON c.org_id = b.org_id WHERE b.id = $1::uuid AND b.org_id = $2::uuid`, [live, state.organizationId]))[0];
-    if (row && (row.active === true || (row.snapshot_id && await ports.boat.snapshotExists(String(row.snapshot_id))))) computerBase = 1;
-  }
+  // Every base the run caused that is still live, or whose own Boat snapshot is still there (a replaced one the product's
+  // cleanup has not removed yet counts until it has). The shared base is Zeros's and never counted.
+  if (!keepBase) for (const row of await ports.database.read(`SELECT coalesce(c.active_build_id = b.id, false) AS active, b.snapshot_id, b.base_shared
+      FROM cloud_v2_computer_builds b LEFT JOIN cloud_v2_computers c ON c.org_id = b.org_id
+      WHERE b.org_id = $1::uuid AND (b.id = ANY($2::uuid[]) OR (b.automatic AND b.created_at >= $3::timestamptz)) /* run bases */`,
+      [state.organizationId, runBaseIds(state), state.startedAt]))
+    if (row.active === true || (row.base_shared !== true && row.snapshot_id && await ports.boat.snapshotExists(String(row.snapshot_id)))) computerBase++;
   return { workspaces, projects, branches, pulls, machines, objects, environments, githubSignIns, pro, computerBase, databaseRows };
 }
 
@@ -224,18 +242,26 @@ function fixtureRepositories(ctx: StageContext): string[] {
     .filter((value): value is string => !!value).map(assertRepository))];
 }
 
-/** Removes the base build this run made: only that build, only in the run's own organization, only while it is the one live. */
-async function removeBase(ctx: StageContext, buildId: string): Promise<void> {
+/** The base builds this run recorded: an older run's requested build, stage C's rebuilds, the automatic ones it caused. */
+const runBaseIds = (state: RehearsalState): string[] =>
+  [state.created.computerBuild, ...state.created.computerRebuilds ?? [], ...state.created.bases ?? []].filter((id): id is string => !!id);
+
+/** Removes the run's live base: only a build the run caused, only in the run's own organization, only while it is the one
+ * live. The shared base (a reference to Zeros's snapshot) loses only the organization's pointer. */
+async function removeRunBase(ctx: StageContext): Promise<void> {
   const { ports, state } = ctx;
-  const snapshot = await ports.database.transaction(async query => {
-    const row = (await query(`SELECT b.snapshot_id, c.active_build_id::text AS active FROM cloud_v2_computer_builds b
-      LEFT JOIN cloud_v2_computers c ON c.org_id = b.org_id WHERE b.id = $1::uuid AND b.org_id = $2::uuid FOR UPDATE OF b`, [buildId, state.organizationId])).rows[0];
-    if (!row) throw new RehearsalFailure("cloud_computer", "not_this_run");
-    if (row.active === buildId) await query(`UPDATE cloud_v2_computers SET active_build_id = NULL, snapshot_name = NULL, updated_at = clock_timestamp()
-      WHERE org_id = $1::uuid AND active_build_id = $2::uuid`, [state.organizationId, buildId]);
-    return row.snapshot_id === null ? null : String(row.snapshot_id);
+  const live = await ports.database.transaction(async query => {
+    const row = (await query(`SELECT b.id::text AS id, b.snapshot_id, b.base_shared FROM cloud_v2_computers c
+      JOIN cloud_v2_computer_builds b ON b.id = c.active_build_id AND b.org_id = c.org_id
+      WHERE c.org_id = $1::uuid AND (b.id = ANY($2::uuid[]) OR (b.automatic AND b.created_at >= $3::timestamptz)) FOR UPDATE OF c, b`,
+      [state.organizationId, runBaseIds(state), state.startedAt])).rows[0];
+    if (!row) return null;
+    await query(`UPDATE cloud_v2_computers SET active_build_id = NULL, snapshot_name = NULL, updated_at = clock_timestamp()
+      WHERE org_id = $1::uuid AND active_build_id = $2::uuid`, [state.organizationId, row.id]);
+    return { buildId: String(row.id), snapshot: row.snapshot_id === null || row.base_shared === true ? null : String(row.snapshot_id) };
   });
-  if (snapshot === null) return;
+  if (!live?.snapshot) return;
+  const { buildId, snapshot } = live;
   if (!/^[a-z0-9][a-z0-9-]{0,62}$/.test(snapshot)) throw new RehearsalFailure("cloud_computer", "snapshot_name");
   if (await ports.boat.snapshotExists(snapshot)) await ports.boat.deleteSnapshot(snapshot);
   await ports.database.transaction(query => query(`UPDATE cloud_v2_computer_builds SET snapshot_id = NULL, snapshot_deleted_at = clock_timestamp()

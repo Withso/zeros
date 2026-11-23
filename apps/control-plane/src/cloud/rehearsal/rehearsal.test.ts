@@ -18,11 +18,12 @@ import { checkGithubToken, databaseErrorCode, liveDatabase, OUTSIDE_PROBE_LIMIT,
 import { platformOwners } from "./plan.js";
 
 const R1 = "Withso/zeros-dev-fixture";
-const TIMING = { pollMs: 30_000, stateMs: 120_000, copyMs: 120_000, turnMs: 120_000, scanMs: 300_000, archiveScanMs: 3_900_000, idleStopMs: 2_100_000 };
+const TIMING = { pollMs: 30_000, stateMs: 120_000, copyMs: 120_000, turnMs: 120_000, scanMs: 300_000, archiveScanMs: 3_900_000, idleStopMs: 2_100_000,
+  computerMs: 3_600_000 };
 
 // Every fixture is public; vendor/private's repository is a public Withso fixture despite its name.
 const R3 = "Withso/zeros-dev-fixture-submodules", SUBMODULE_FIXTURE = "Withso/zeros-dev-fixture-private-sub";
-function setup(options: { provisioned?: boolean; owner?: "personal" | "organization"; submodules?: boolean } = {}) {
+function setup(options: { provisioned?: boolean; owner?: "personal" | "organization"; submodules?: boolean; waiting?: FakeAlpha } = {}) {
   const alpha = new FakeAlpha([R1, ...options.provisioned === false ? [] : [FIXTURE_TWO], ...options.submodules === false ? [] : [R3, SUBMODULE_FIXTURE]]);
   const state = newState(randomUUID(), alpha.organizationId, new Date(alpha.now), options.owner ?? "organization");
   // On the Personal route the test user starts with no GitHub sign-in; setup connects one and builds the base. The probe
@@ -32,7 +33,8 @@ function setup(options: { provisioned?: boolean; owner?: "personal" | "organizat
     snapshot: "zeros-probe-base", builderSandboxId: null }] }; alpha.snapshots.add("zeros-probe-base"); }
   const lines: string[] = [];
   const saved: RehearsalState[] = [];
-  const ctx = stageContext(alpha.ports(), state, async () => { saved.push(structuredClone(state)); },
+  const ports = alpha.ports(options.waiting ? { waiting: { organizationId: options.waiting.organizationId, ports: options.waiting.ports() } } : {});
+  const ctx = stageContext(ports, state, async () => { saved.push(structuredClone(state)); },
     { one: R1, two: FIXTURE_TWO, submodules: R3, submoduleFixture: SUBMODULE_FIXTURE }, TIMING, 30);
   const options_ = { switches: new Set(["projects", "personal", "retention"] as const), maxActive: 10, runCap: 30, log: (line: string) => lines.push(line) };
   return { alpha, state, ctx, lines, saved, options: options_ };
@@ -56,10 +58,12 @@ describe("rehearsal guards", () => {
 
   it("parses the command line and refuses what it does not know", () => {
     expect(parseArguments(["all", "--plan", "--switches", "projects,personal,retention"]))
-      .toMatchObject({ stages: ["provision", "setup", "projects", "personal", "retention", "submodules"], plan: true, owner: "personal", account: 2 });
+      .toMatchObject({ stages: ["provision", "setup", "projects", "personal", "retention", "submodules", "waiting"], plan: true, owner: "personal", account: 2, waitingAccount: 3 });
     expect(parseArguments(["all", "--owner", "organization", "--account", "owner"])).toMatchObject({ stages: ["provision", "setup", "projects", "retention"], account: "owner" });
     expect(parseArguments(["personal", "--account", "4", "--other", "5", "--pro-actor", "3e515301"])).toMatchObject({ account: 4, other: 5, proActor: "3e515301" });
-    expect(parseArguments(["retention", "--account", "3", "--run", randomUUID()])).toMatchObject({ stages: ["retention"], account: 3 });
+    expect(parseArguments(["retention", "--account", "3", "--run", randomUUID()])).toMatchObject({ stages: ["retention"], account: 3, waitingAccount: 4 });
+    expect(parseArguments(["waiting", "--waiting-account", "5"])).toMatchObject({ stages: ["waiting"], waitingAccount: 5 });
+    expect(() => parseArguments(["waiting", "--account", "5", "--waiting-account", "5"])).toThrow(RehearsalFailure);
     for (const bad of [["nope"], ["all", "--plan", "--cleanup", "--run", "x"], ["all", "--cleanup"], ["all", "--account", "11"], ["all", "--switches", "billing"],
       ["all", "--repository", "Withso/zeros"], ["all", "--owner", "team"], ["all", "--account", "4", "--other", "4"], ["all", "--pro-actor", "3E5153"]])
       expect(() => parseArguments(bad), bad.join(" ")).toThrow(RehearsalFailure);
@@ -358,8 +362,11 @@ describe("rehearsal on the Personal route", () => {
     expect(await runStages(ctx, ["provision", "setup", "projects", "personal", "retention"], { ...options, ...all })).toBe(true);
     expect(lines.filter(line => line.startsWith("stage "))).toEqual(["stage provision: ok", "stage setup: ok", "stage projects: ok", "stage personal: ok", "stage retention: ok"]);
     expect(ctx.projectLevel).toBe("personal");
-    expect(state.stages.setup?.counts).toEqual({ proChanges: 1, githubSignIn: 1, computerBuilt: 1 });
-    expect(state.stages.setup?.notes).toEqual(["cloud_computer:built_by_this_run"]);
+    // Setup presses no Build: the organization has no base yet, and the first project makes Zeros prepare one.
+    expect(state.stages.setup?.counts).toEqual({ proChanges: 1, githubSignIn: 1, baseReadyAtSetup: 0 });
+    expect(state.stages.setup?.notes).toEqual(["cloud_computer:base_none"]);
+    expect(alpha.writes.some(write => write.includes("/computer/builds") && !write.startsWith("POST /v1/cloud-v2/organizations/:id/computer/builds"))).toBe(false);
+    expect(state.created.bases).toHaveLength(1);
     // Pro ended: the machine stopped after the 20-minute idle stop; four reads and the list were hidden from the second user.
     expect(state.stages.personal?.counts).toMatchObject({ workspaces: 1, hiddenReads: 5, minutesToStop: 20 });
     expect(state.stages.personal?.notes).toEqual(["worker_token:not_observable"]);
@@ -374,7 +381,7 @@ describe("rehearsal on the Personal route", () => {
     expect(alpha.patConnected).toBe(false);
     expect(alpha.computer.active).toBeNull();
     expect(alpha.snapshots.size).toBe(0);
-    // Setup's base and retention's rebuild; both build rows stay, as history.
+    // The automatic base the first project caused, and retention's rebuild; both build rows stay, as history.
     expect(alpha.computer.builds).toHaveLength(2);
     for (const line of lines) expect(safeLine(line)).toBe(line);
   });
@@ -400,20 +407,113 @@ describe("rehearsal on the Personal route", () => {
 
   it("keeps the base with --keep-base, and never builds or removes a base the organization already had", async () => {
     const kept = setup({ owner: "personal" });
-    expect(await runStages(kept.ctx, ["setup"], { ...kept.options, ...all })).toBe(true);
+    expect(await runStages(kept.ctx, ["setup", "personal"], { ...kept.options, ...all })).toBe(true);
+    expect(kept.ctx.state.created.bases).toHaveLength(1);
     expect((await cleanup(kept.ctx, { keepBase: true, log: () => undefined })).inventory).toEqual(EMPTY);
     expect(kept.alpha.computer.active).not.toBeNull();
     expect(kept.alpha.snapshots.size).toBe(1);
     const existing = setup({ owner: "personal" });
     existing.alpha.computer = { active: "11111111-1111-1111-1111-111111111111", builds: [{ id: "11111111-1111-1111-1111-111111111111", state: "succeeded", snapshot: "theirs", builderSandboxId: null }] };
     existing.alpha.snapshots.add("theirs");
-    expect(await runStages(existing.ctx, ["setup"], { ...existing.options, ...all })).toBe(true);
-    expect(existing.ctx.state.stages.setup?.counts?.computerBuilt).toBe(0);
-    expect(existing.ctx.state.stages.setup?.notes).toEqual(["cloud_computer:existing"]);
+    expect(await runStages(existing.ctx, ["setup", "personal"], { ...existing.options, ...all })).toBe(true);
+    expect(existing.ctx.state.stages.setup?.counts?.baseReadyAtSetup).toBe(1);
+    expect(existing.ctx.state.stages.setup?.notes).toEqual(["cloud_computer:base_ready"]);
     expect(existing.ctx.state.created.computerBuild).toBeUndefined();
+    expect(existing.ctx.state.created.bases ?? []).toEqual([]);
     expect((await cleanup(existing.ctx, { log: () => undefined })).inventory).toEqual(EMPTY);
     expect(existing.alpha.computer.active).toBe("11111111-1111-1111-1111-111111111111");
     expect(existing.alpha.snapshots.has("theirs")).toBe(true);
+  });
+
+  describe("stage waiting: a create made while the base is still being prepared", () => {
+    const third = () => { const three = new FakeAlpha([R1]); three.githubIdentity = false; return three; };
+    const waitingAll = { switches: new Set(["projects", "personal", "retention"] as const) };
+
+    it("waits for the automatic base, boots from it, and cleanup restores the third account and its organization", async () => {
+      const three = third();
+      const { ctx, state, lines, options } = setup({ owner: "personal", waiting: three });
+      expect(await runStages(ctx, ["setup", "waiting"], { ...options, ...waitingAll })).toBe(true);
+      expect(state.stages.waiting?.counts).toEqual({ proChanges: 1, githubSignIn: 1, createdWhilePreparing: 1, baseWaitSeconds: 300,
+        waitedPastBootDeadline: 0, bootedFromBase: 1 });
+      expect(state.waiting?.organizationId).toBe(three.organizationId);
+      expect(state.waiting?.created.bases).toHaveLength(1);
+      // Nobody pressed Build in either organization.
+      expect([...three.writes].some(write => write.includes("/computer/builds"))).toBe(false);
+      const { inventory, failures } = await cleanup(ctx, { log: line => lines.push(line) });
+      expect({ inventory, failures }).toEqual({ inventory: EMPTY, failures: 0 });
+      expect(three.pro()).toBe(false);
+      expect(three.patConnected).toBe(false);
+      expect(three.computer.active).toBeNull();
+      expect(three.snapshots.size).toBe(0);
+      for (const line of lines) expect(safeLine(line)).toBe(line);
+    });
+
+    it("names #1260's F1: a wait past the boot deadline that fails the workspace after its machine boots", async () => {
+      const broken = third();
+      broken.baseBuildMs = 15 * 60_000; broken.bootDeadlineFromCreate = true;
+      const run = setup({ owner: "personal", waiting: broken });
+      expect(await runStages(run.ctx, ["setup", "waiting"], { ...run.options, ...waitingAll })).toBe(false);
+      expect(run.state.stages.waiting).toMatchObject({ step: "waiting_running", code: "state_failed:worker_boot_timeout" });
+      expect((await cleanup(run.ctx, { log: () => undefined })).inventory).toEqual(EMPTY);
+      // Fixed: the same wait passes, and the run says it passed the deadline.
+      const fixed = third();
+      fixed.baseBuildMs = 15 * 60_000;
+      const good = setup({ owner: "personal", waiting: fixed });
+      expect(await runStages(good.ctx, ["setup", "waiting"], { ...good.options, ...waitingAll })).toBe(true);
+      expect(good.state.stages.waiting?.counts).toMatchObject({ baseWaitSeconds: 900, waitedPastBootDeadline: 1, bootedFromBase: 1 });
+    });
+
+    it("refuses an organization that is not fresh, and says a shared base leaves nothing to wait for", async () => {
+      const used = third();
+      used.computer = { active: "33333333-3333-3333-3333-333333333333", builds: [{ id: "33333333-3333-3333-3333-333333333333", state: "succeeded", snapshot: "theirs", builderSandboxId: null }] };
+      used.snapshots.add("theirs");
+      const refused = setup({ owner: "personal", waiting: used });
+      expect(await runStages(refused.ctx, ["setup", "waiting"], { ...refused.options, ...waitingAll })).toBe(false);
+      expect(refused.state.stages.waiting).toMatchObject({ step: "waiting_fresh", code: "base_ready" });
+      expect((await cleanup(refused.ctx, { log: () => undefined })).inventory).toEqual(EMPTY);
+      expect(used.computer.active).toBe("33333333-3333-3333-3333-333333333333");
+      const shared = third();
+      shared.sharedBase = true;
+      const instant = setup({ owner: "personal", waiting: shared });
+      expect(await runStages(instant.ctx, ["setup", "waiting"], { ...instant.options, ...waitingAll })).toBe(false);
+      expect(instant.state.stages.waiting).toMatchObject({ step: "waiting_base_queued", code: "base_ready" });
+      expect((await cleanup(instant.ctx, { log: () => undefined })).inventory).toEqual(EMPTY);
+      // The shared base loses only the organization's pointer: Zeros's snapshot is never deleted.
+      expect(shared.computer.active).toBeNull();
+      expect(shared.snapshots.has("zeros-shared")).toBe(true);
+    });
+
+    it("refuses setup on a server before the safe switch-on, which reports no base", async () => {
+      const { alpha, ctx, state, options } = setup({ owner: "personal" });
+      alpha.automaticBase = false;
+      expect(await runStages(ctx, ["setup"], { ...options, ...waitingAll })).toBe(false);
+      expect(state.stages.setup).toMatchObject({ step: "cloud_computer", code: "base_view_absent" });
+    });
+
+    it("cleanup after a failure at any step of waiting leaves an empty inventory", async () => {
+      const probe = third();
+      const clean = setup({ owner: "personal", waiting: probe });
+      expect(await runStages(clean.ctx, ["setup"], { ...clean.options, ...waitingAll })).toBe(true);
+      const offset = probe.calls;
+      expect(await runStages(clean.ctx, ["waiting"], { ...clean.options, ...waitingAll })).toBe(true);
+      const total = probe.calls - offset;
+      expect(total).toBeGreaterThan(5);
+      let failed = 0;
+      for (let at = 1; at <= total; at++) for (const after of [false, true]) {
+        const three = third();
+        const { ctx, lines, options } = setup({ owner: "personal", waiting: three });
+        expect(await runStages(ctx, ["setup"], { ...options, ...waitingAll })).toBe(true);
+        three.fault = { at: three.calls + at, after };
+        const passed = await runStages(ctx, ["waiting"], { ...options, ...waitingAll });
+        three.fault = undefined;
+        if (passed) continue;
+        failed++;
+        const failure = lines.filter(line => line.startsWith("stage ")).at(-1);
+        const { inventory } = await cleanup(ctx, { log: () => undefined });
+        expect(inventory, `call ${at}${after ? " after" : ""}: ${failure}`).toEqual(EMPTY);
+      }
+      expect(failed).toBeGreaterThan(total);
+    }, 120_000);
   });
 
   it("fails retention when a clean open after the Cloud Computer rebuild is not rebuilt from the live build", async () => {
@@ -636,10 +736,11 @@ describe("rehearsal --plan", () => {
   it("prints the preconditions block safely, for each state it can observe", () => {
     const states: PreconditionFacts[] = [
       { release: { sourceSha: "a".repeat(40), workerSha256: "b".repeat(64) }, runtime: { found: true, actingUser: true, syncContext: true },
-        projectsRead: "http_404_not_found:route_or_resource", computer: "http_404_not_found" },
-      { release: null, runtime: null, projectsRead: null, computer: null },
+        projectsRead: "http_404_not_found:route_or_resource", computer: "http_404_not_found", sharedBaseInUse: 0 },
+      { release: null, runtime: null, projectsRead: null, computer: null, sharedBaseInUse: null },
       { release: { sourceSha: "a".repeat(40), workerSha256: "b".repeat(64) }, runtime: { found: false, actingUser: false, syncContext: false },
-        projectsRead: "200", computer: "none" },
+        projectsRead: "200", computer: "none", sharedBaseInUse: 3 },
+      { release: null, runtime: null, projectsRead: "200", computer: "absent", sharedBaseInUse: null },
     ];
     // The lines come back through safeLine already: a line it refused would read "line withheld (unsafe)".
     for (const facts of states) for (const line of preconditionLines(facts)) expect(line).not.toBe("line withheld (unsafe)");
@@ -680,7 +781,12 @@ describe("rehearsal --plan", () => {
     for (const line of PERSONAL_ROUTE_GAPS) expect(safeLine(line)).toBe(line);
     alpha.githubIdentity = false;
     expect((await readAccount(alpha.api(), "9", state.organizationId, "Withso")).githubIdentity).toBe(false);
-    for (const stage of ["provision", "setup", "projects", "personal", "retention", "submodules"] as StageName[])
+    expect(refusal("waiting", summary, all, "personal", { token: true, proActor: "resolved" })).toBe("waiting_account_not_configured");
+    expect(refusal("waiting", summary, all, "personal", { token: true, proActor: "resolved", waitingAccount: "base_ready" })).toBe("waiting_account_base_ready");
+    expect(refusal("waiting", summary, all, "personal", { token: true, proActor: "none", waitingAccount: "fresh" })).toBe("pro_actor_none");
+    expect(refusal("waiting", summary, all, "personal", { token: true, proActor: "resolved", waitingAccount: "fresh" })).toBeNull();
+    expect(refusal("waiting", summary, all, "organization")).toBe("personal_route_only");
+    for (const stage of ["provision", "setup", "projects", "personal", "retention", "submodules", "waiting"] as StageName[])
       for (const owner of ["personal", "organization"] as const)
         for (const line of writeLines(stage, "zr-<run>-", { one: R1, two: FIXTURE_TWO }, owner)) { expect(line).not.toBe("line withheld (unsafe)"); }
   });
