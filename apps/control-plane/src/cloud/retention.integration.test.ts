@@ -1860,6 +1860,33 @@ d("cloud v2 retention", () => {
         expect(boat.machine(vm)!.files.get(ENV)).toBe("TOKEN=the person's own edit");
       });
 
+      it("keeps the person's environment file when the archived wake finds the checkout changed, through the backup that change makes due, a machine loss and a restore", async () => {
+        boat.write(vm, ENV, "TOKEN=the person's own edit");
+        seeded.set(ENV, "TOKEN=from the server");
+        boat.write(vm, `${path("app")}/UNPUSHED`, "work");
+        await stop();
+        await earlier(CLOUD_V2_BACKUP_DELAY_MS + 60_000);
+        await lifecycle().tick();
+        await archive();
+        await sleepFor(10.6);
+        // A file under the checkout is newer than the stop's marker: the backup no longer describes the machine.
+        written.add(vm);
+        await lifecycle().tick();
+        expect(await wakeRows()).toMatchObject([{ outcome: "stopped", changed_since_stop: true }]);
+        // The file the person wrote is still on the machine, so the backup the change makes due holds it.
+        expect(boat.machine(vm)!.files.get(ENV)).toBe("TOKEN=the person's own edit");
+        await lifecycle().tick();
+        const backedUp = (await columns("checkpoint_object")).checkpoint_object as string;
+        expect(archives.get(backedUp)?.get(ENV)).toBe("TOKEN=the person's own edit");
+        // The machine is lost; opening restores from that backup with the person's bytes.
+        boat.machine(vm)!.state = "deleted";
+        await store.requestLifecycle(id, user, "start");
+        await lifecycle().tick();
+        const restored = (await columns("boat_sandbox_id")).boat_sandbox_id as string;
+        expect(restored).not.toBe(vm);
+        expect(boat.machine(restored)!.files.get(ENV)).toBe("TOKEN=the person's own edit");
+      });
+
       it("does the same for a second repository: its hand-edited environment file is scrubbed, then comes back on open", async () => {
         const API_ENV = `${path("api")}/.env`;
         boat.write(vm, API_ENV, "API_TOKEN=the person's own edit");

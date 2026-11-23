@@ -994,7 +994,11 @@ export class CloudV2Lifecycle {
       const changed = await compute.exec(vm, changedSinceStopCommand(CLOUD_V2_HOME, checkouts), CHANGED_SINCE_STOP_SECONDS).catch(() => null);
       await held();
       changedSinceStop = !changed || changed.timedOut || parseChangedSinceStop(changed.stdout);
-      const mode = row.maintenanceWake.scrub;
+      // A backup-mode scrub removes environment files because the stop's backup holds them. When the machine changed
+      // since that stop, the backup no longer describes it, and this wake's own record of the change makes a new final
+      // backup due: removing them first would leave that backup, and the open that restores from it, without the
+      // person's bytes. So it scrubs as `keep`: logins go, environment files stay for the backup to take.
+      const mode = row.maintenanceWake.scrub === "backup" && changedSinceStop ? "keep" : row.maintenanceWake.scrub;
       if (mode) {
         const scrubbed = await compute.exec(vm, archiveScrubCommand({ home: CLOUD_V2_HOME, checkoutPaths: checkouts, mode }), ARCHIVE_SCRUB_SECONDS)
           .catch(() => null);
