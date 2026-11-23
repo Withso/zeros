@@ -133,7 +133,7 @@ export class CloudV2SharedBases {
         interruptions = interruptions + 1,
         failures = CASE WHEN interruptions + 1 > ${SHARED_BASE_INTERRUPTION_RETRIES} THEN failures + 1 ELSE failures END,
         next_attempt_at = CASE WHEN interruptions + 1 > ${SHARED_BASE_INTERRUPTION_RETRIES}
-          THEN clock_timestamp() + least(interval '15 minutes' * power(2, least(failures, 16)), interval '6 hours') ELSE clock_timestamp() END
+          THEN clock_timestamp() + least(interval '15 minutes' * power(2, least(failures, 16)), interval '6 hours') ELSE NULL END
       WHERE starts_with(name, $1) AND state = 'building' AND coalesce(heartbeat_at, created_at) < clock_timestamp() - interval '${INTERRUPTED_AFTER}'`, [prefix]);
   }
 

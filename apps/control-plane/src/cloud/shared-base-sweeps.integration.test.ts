@@ -95,7 +95,7 @@ d("cloud v2 shared base sweeps", () => {
         await interrupt();
       }
       const rows = (await pool.query<{ rebuild: number; interruptions: number; failures: number; due: boolean }>(
-        "SELECT rebuild, interruptions, failures, next_attempt_at <= clock_timestamp() AS due FROM cloud_v2_shared_bases ORDER BY rebuild")).rows;
+        "SELECT rebuild, interruptions, failures, coalesce(next_attempt_at <= clock_timestamp(), true) AS due FROM cloud_v2_shared_bases ORDER BY rebuild")).rows;
       expect(rows).toEqual([
         { rebuild: 0, interruptions: 1, failures: 0, due: true }, { rebuild: 1, interruptions: 2, failures: 0, due: true },
         { rebuild: 2, interruptions: 3, failures: 0, due: true }, { rebuild: 3, interruptions: 4, failures: 1, due: false }]);
