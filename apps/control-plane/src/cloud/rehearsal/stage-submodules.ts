@@ -5,7 +5,7 @@
 // private submodule fixture): read-only submodule tokens and the "creator cannot read it" path are reported as not rehearsed.
 import { z } from "zod";
 import { RehearsalFailure, type StageContext } from "./contract.js";
-import { check, createProject, createWorkspace, deleteProject, deleteWorkspace, parse, shell, waitCopyReady, workspaceRoot } from "./steps.js";
+import { openBridge, check, createProject, createWorkspace, deleteProject, deleteWorkspace, parse, shell, waitCopyReady, workspaceRoot } from "./steps.js";
 
 export async function stageSubmodules(ctx: StageContext): Promise<Record<string, number>> {
   check(ctx.state.owner === "personal", "owner", "personal_route_only");
@@ -40,7 +40,7 @@ export async function stageSubmodules(ctx: StageContext): Promise<Record<string,
   counts.workspaceFetched = rows.filter(row => row.status === "fetch" && row.public === true).length;
   check(counts.workspaceFetched === 2, "workspace_submodules", `fetched_public_${counts.workspaceFetched}`);
   check(!rows.some(row => row.status === "skipped"), "workspace_submodules", "skipped");
-  const bridge = await ctx.ports.bridge(workspace.id);
+  const bridge = await openBridge(ctx, workspace.id);
   try {
     // A one-repository workspace's root is its checkout.
     const checkout = await workspaceRoot(bridge, workspace.id);

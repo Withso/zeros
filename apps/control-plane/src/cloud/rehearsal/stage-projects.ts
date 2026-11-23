@@ -3,7 +3,7 @@
 // request in the second repository and a rewind across both, and every copy machine gone after the projects.
 import { z } from "zod";
 import { type Bridge, type StageContext } from "./contract.js";
-import { answered, check, clearEnvironment, copyMachines, ENVIRONMENT_PATH, seedEnvironments, createProject, createWorkspace, deleteProject, deleteWorkspace, getWorkspace, lifecycle,
+import { openBridge, answered, check, clearEnvironment, copyMachines, ENVIRONMENT_PATH, seedEnvironments, createProject, createWorkspace, deleteProject, deleteWorkspace, getWorkspace, lifecycle,
   openAndClosePull, parse, readFile, turn, until, waitCopyReady, waitState, workspaceRoot, writeFile, type WorkspaceDocument } from "./steps.js";
 
 export async function stageProjects(ctx: StageContext): Promise<Record<string, number>> {
@@ -24,7 +24,7 @@ export async function stageProjects(ctx: StageContext): Promise<Record<string, n
   counts.workspaces!++;
   ctx.state.created.branches.push({ repository: one, name: `${prefix}one` }); await ctx.save();
   await forkedFromCopy(ctx, workspace);
-  let bridge = await ctx.ports.bridge(workspace.id);
+  let bridge = await openBridge(ctx, workspace.id);
   let path: string, content: string;
   try {
     const root = await workspaceRoot(bridge, workspace.id), scope = { workspaceId: workspace.id, cwd: root };
@@ -54,7 +54,7 @@ export async function stageProjects(ctx: StageContext): Promise<Record<string, n
   await waitState(ctx, workspace.id, "stopped", "stopped");
   await lifecycle(ctx, workspace.id, "start", "wake");
   workspace = await waitState(ctx, workspace.id, "running", "woken");
-  bridge = await ctx.ports.bridge(workspace.id);
+  bridge = await openBridge(ctx, workspace.id);
   try {
     const root = await workspaceRoot(bridge, workspace.id);
     check(await readFile(bridge, { workspaceId: workspace.id, cwd: root }, path, "wake_file") === content, "wake_file", "content");
@@ -91,7 +91,7 @@ export async function stageProjects(ctx: StageContext): Promise<Record<string, n
   const first = checkouts.find(row => row.repository.toLowerCase() === one.toLowerCase());
   const second = checkouts.find(row => row.repository.toLowerCase() === two.toLowerCase());
   check(first && second, "workspace_two_repositories", "identity");
-  bridge = await ctx.ports.bridge(pair.id);
+  bridge = await openBridge(ctx, pair.id);
   try {
     const root = await workspaceRoot(bridge, pair.id), scope = { workspaceId: pair.id, cwd: root };
     ctx.step("both_folders");

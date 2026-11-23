@@ -7,7 +7,7 @@ import { z } from "zod";
 import { RehearsalFailure, type StageContext } from "./contract.js";
 import { shiftClock } from "./clock.js";
 import { rebuildComputer } from "./stage-setup.js";
-import { call, check, clearEnvironment, ENVIRONMENT_PATH, seedEnvironments, createProject, createWorkspace, deleteProject, deleteWorkspace, getWorkspace, lifecycle, parse, readFile, shell, until,
+import { openBridge, call, check, clearEnvironment, ENVIRONMENT_PATH, seedEnvironments, createProject, createWorkspace, deleteProject, deleteWorkspace, getWorkspace, lifecycle, parse, readFile, shell, until,
   waitCopyReady, waitState, workspaceRoot, WorkspaceDocument } from "./steps.js";
 
 const HOUR_DAYS = 1 / 24;
@@ -39,7 +39,7 @@ export async function stageRetention(ctx: StageContext): Promise<Record<string, 
   ctx.step("unpushed_work");
   const ignored = seed.seeded ? ENVIRONMENT_PATH : `${prefix}hand.env`;
   const ignoredBytes = seed.seeded ? `${seedBytes}${handBytes}\n` : `${handBytes}\n`;
-  let bridge = await ctx.ports.bridge(w.id);
+  let bridge = await openBridge(ctx, w.id);
   try {
     const root = await workspaceRoot(bridge, w.id), scope = { workspaceId: w.id, cwd: root };
     const r2 = await shell(ctx, bridge, { ...scope, cwd: second.checkoutPath }, `${prefix}pty-r2`,
@@ -145,7 +145,7 @@ export async function stageRetention(ctx: StageContext): Promise<Record<string, 
   await lifecycle(ctx, w.id, "start", "restore_open");
   const restored = await waitState(ctx, w.id, "running", "restored");
   check(!restored.archivedAt && !restored.lostWork, "restored", restored.lostWork ? "lost_work" : "still_archived");
-  bridge = await ctx.ports.bridge(w.id);
+  bridge = await openBridge(ctx, w.id);
   try {
     const root = await workspaceRoot(bridge, w.id), scope = { workspaceId: w.id, cwd: root };
     const log = await shell(ctx, bridge, { ...scope, cwd: second.checkoutPath }, `${prefix}pty-log`, "git log --format=%s -n 20", "restored_commit");

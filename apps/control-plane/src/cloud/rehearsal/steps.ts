@@ -60,6 +60,19 @@ export type WorkspaceDocument = z.infer<typeof WorkspaceDocument>;
 const Reply = z.object({ workspace: WorkspaceDocument });
 const base = "/v1/cloud-v2/workspaces";
 
+/** A machine id as a failure line may carry it: Boat's sandbox id, or "none". */
+const machineOf = (row: { boatSandboxId?: string | null | undefined }) => row.boatSandboxId && /^[A-Za-z0-9_-]{1,40}$/.test(row.boatSandboxId) ? row.boatSandboxId : "none";
+
+/** Opens a workspace's bridge. When the connect is refused, the failure names the workspace's state, its error code and
+ * its machine (connect http_409:failed:cloud_source_checkout_failed:bx_…), read at once from the API. */
+export async function openBridge(ctx: StageContext, workspaceId: string, step = "connect"): Promise<Bridge> {
+  try { return await ctx.ports.bridge(workspaceId); } catch (error) {
+    if (!(error instanceof RehearsalFailure)) throw error;
+    const row = await getWorkspace(ctx, workspaceId, `${step}_read`).catch(() => null);
+    throw new RehearsalFailure(error.step, row ? `${error.code}:${row.state}:${row.errorCode ?? "none"}:${machineOf(row)}`.slice(0, 80) : error.code);
+  }
+}
+
 /** Records a machine the run caused, so cleanup and the inventory can find it whatever happens to the workspace. */
 export function remember(ctx: StageContext, machineId: string | null | undefined): void {
   if (machineId && !ctx.state.created.machines.includes(machineId)) ctx.state.created.machines.push(machineId);
@@ -76,7 +89,8 @@ export async function waitState(ctx: StageContext, id: string, state: string, st
   return until(ctx, step, timeoutMs, ctx.timing.pollMs, async () => {
     const row = await getWorkspace(ctx, id, step);
     check(row, step, "missing");
-    check(row.state !== "failed", step, `state_failed:${row.errorCode ?? "none"}`);
+    // A failed workspace names its error code and its machine, so the failure line says what to read next.
+    check(row.state !== "failed", step, `state_failed:${row.errorCode ?? "none"}:${machineOf(row)}`);
     check(row.state !== "deleting" && row.state !== "deleted", step, "state_deleting");
     return row.state === state ? row : false;
   });

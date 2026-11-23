@@ -13,6 +13,7 @@ import { assertRepository, safeLine } from "./guard.js";
 import { accountLines, PERSONAL_ROUTE_GAPS, preconditionLines, readAccount, refusal, writeLines, type PreconditionFacts } from "./plan.js";
 import { cleanup, cleanupNeedsAccount, inventoryLines, NO_ACCOUNT, readInventory, runStages, stageContext } from "./runner.js";
 import { parseArguments, sharedBaseFacts } from "./rehearsal-cli.js";
+import { createProject, createWorkspace, openBridge, waitState } from "./steps.js";
 import { FIXTURE_TWO } from "./stage-provision.js";
 import { loadState, newState, saveState } from "./state.js";
 import { checkGithubToken, databaseErrorCode, liveDatabase, OUTSIDE_PROBE_LIMIT, SET_APP_SYSTEM, tokenLines, tokenRefusal, type DatabaseClient } from "./live.js";
@@ -508,7 +509,7 @@ describe("rehearsal on the Personal route", () => {
       broken.baseBuildMs = 15 * 60_000; broken.bootDeadlineFromCreate = true;
       const run = setup({ owner: "personal", waiting: broken });
       expect(await runStages(run.ctx, ["setup", "waiting"], { ...run.options, ...waitingAll })).toBe(false);
-      expect(run.state.stages.waiting).toMatchObject({ step: "waiting_running", code: "state_failed:worker_boot_timeout" });
+      expect(run.state.stages.waiting).toMatchObject({ step: "waiting_running", code: "state_failed:worker_boot_timeout:none" });
       expect((await cleanup(run.ctx, { log: () => undefined })).inventory).toEqual(EMPTY);
       // Fixed: the same wait passes, and the run says it passed the deadline.
       const fixed = third();
@@ -625,6 +626,18 @@ describe("rehearsal on the Personal route", () => {
     expect(alpha.pro()).toBe(false);
     // Pro on for the cleanup, then back to none.
     expect(alpha.proChanges.slice(-2).map(grant => grant.enabled)).toEqual([true, false]);
+  });
+
+  it("names a failed workspace's error code and machine when its connect is refused or its wait sees it fail", async () => {
+    const { alpha, ctx, options } = setup({ owner: "personal" });
+    expect(await runStages(ctx, ["setup"], { ...options, switches: new Set(["projects", "personal", "retention"] as const) })).toBe(true);
+    const project = await createProject(ctx, { name: `${ctx.state.prefix}fail`, repositories: [R1] });
+    const workspace = await createWorkspace(ctx, { name: `${ctx.state.prefix}fail-w`, projectId: project.id, branch: `${ctx.state.prefix}fail` });
+    const row = alpha.workspaces.get(workspace.id)!;
+    Object.assign(row, { state: "failed", errorCode: "cloud_source_checkout_failed" });
+    await expect(openBridge(ctx, workspace.id)).rejects.toMatchObject({ step: "connect", code: `http_409:failed:cloud_source_checkout_failed:${row.boatSandboxId}` });
+    await expect(waitState(ctx, workspace.id, "running", "probe_running")).rejects
+      .toMatchObject({ code: `state_failed:cloud_source_checkout_failed:${row.boatSandboxId}` });
   });
 
   it("never replaces a sign-in or a grant it did not make, and refuses B before setup", async () => {
