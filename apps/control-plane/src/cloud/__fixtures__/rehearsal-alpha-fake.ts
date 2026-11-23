@@ -44,6 +44,9 @@ export class FakeAlpha {
   bootDeadlineFromCreate = false;
   /** CLOUD_V2_SHARED_BASE_SNAPSHOT set and the organization has no install script: its base is live at once, no machine. */
   sharedBase = false;
+  /** The organization's install script (#1260: with one, its base is its own build, never the shared one). */
+  installScript: string | null = null;
+  private recipeRevision = 0;
   readonly snapshots = new Set<string>();
   /** Behave as main did before the clean-restore fix: a rebuilt workspace keeps its earlier pin. */
   staleRestorePin = false;
@@ -108,7 +111,7 @@ export class FakeAlpha {
     if (live) return live;
     const building = this.computer.builds.find(build => build.state === "building");
     if (building) return building;
-    if (this.sharedBase) {
+    if (this.sharedBase && this.installScript === null) {
       const shared: Build = { id: randomUUID(), state: "succeeded", snapshot: `zeros-shared@${randomUUID()}`, builderSandboxId: null, automatic: true, shared: true, createdAt: this.now };
       this.computer.builds.unshift(shared); this.computer.active = shared.id; this.snapshots.add("zeros-shared");
       return shared;
@@ -233,6 +236,13 @@ export class FakeAlpha {
       }
       return this.reply(200, { environment: { repositoryId: parts[5], revision: environment.revision, versionId: null, updatedAt: null, variables: [],
         files: [...environment.files.keys()].map(path => ({ path, bytes: 1 })) } });
+    }
+    if (parts[2] === "organizations" && parts[4] === "computer" && parts[5] === "install-script") {
+      if (method === "PUT") {
+        if (body.revision !== this.recipeRevision) return this.reply(409, { error: { code: "computer_recipe_changed" } });
+        this.installScript = (body.installScript as string | null) ?? null; this.recipeRevision++;
+      }
+      return this.reply(200, { installScript: this.installScript, recipeRevision: this.recipeRevision });
     }
     if (parts[2] === "organizations" && parts[4] === "computer") {
       if (method === "POST" && parts[5] === "builds") {

@@ -10,7 +10,7 @@ import { pathToFileURL } from "node:url";
 import { parseArgs, parseEnv } from "node:util";
 import { z } from "zod";
 import { gate0SignIn } from "../gate0-cli.js";
-import { RehearsalFailure, STAGE_NEEDS_ACCOUNT, STAGES, type Api, type OwnerKind, type Ports, type StageName, type Switch } from "./contract.js";
+import { RehearsalFailure, STAGE_NEEDS_ACCOUNT, STAGES, type Api, type Database, type OwnerKind, type Ports, type StageName, type Switch } from "./contract.js";
 import { diagnose, signInAccount, signInAll, type Account, type SignedIn, type SignInDeps } from "./accounts.js";
 import { assertRepository, safeLine } from "./guard.js";
 import { checkGithubToken, tokenLines, liveApi, liveBoat, liveBridge, liveClock, liveDatabase, liveGithub, liveGithubSignIn, liveGithubToken, livePro, liveRelease, liveStorage,
@@ -206,6 +206,8 @@ async function main(argv: string[]): Promise<number> {
         log(`selected account ${args.account}; second account ${otherLabel}; waiting account ${args.waitingAccount} (${waitingAccount}); repositories R1 ${one}, R2 ${two}`);
         facts.sharedBaseInUse = await reads.read(`SELECT count(*)::int AS n FROM cloud_v2_computers c
           JOIN cloud_v2_computer_builds b ON b.id = c.active_build_id AND b.org_id = c.org_id WHERE b.base_shared`).then(rows => Number(rows[0]?.n ?? 0), () => null);
+        facts.sharedBase = await sharedBaseFacts(reads, facts.release?.workerSha256 ?? null,
+          name => liveBoat({ apiKey: profile.boat.apiKey, ...(profile.boat.billingOrg ? { billingOrg: profile.boat.billingOrg } : {}) }).snapshotExists(name)).catch(() => null);
         if (args.account === "owner") log("note: the owner's own account; the run asserts its entitlement, sessions and settings are unchanged");
         // Stage D's fixtures, read through the run's fixture identity (a repository read; nothing is written).
         const named = args.submoduleRepository && args.submoduleFixtureRepository ? [args.submoduleRepository, args.submoduleFixtureRepository] : null;
@@ -323,6 +325,20 @@ async function main(argv: string[]): Promise<number> {
     log(`failed ${error instanceof RehearsalFailure ? `${error.step} ${error.code}` : "unexpected"}`);
     return 1;
   }
+}
+
+/** The shared base for the pinned runtime, read-only: its row (0269), whether Boat has it, and organizations per shared base. */
+export async function sharedBaseFacts(reads: Pick<Database, "read">, runtimeSha256: string | null, atBoat: (name: string) => Promise<boolean>):
+  Promise<NonNullable<PreconditionFacts["sharedBase"]>> {
+  const table = (await reads.read("SELECT to_regclass('public.cloud_v2_shared_bases') IS NOT NULL AS present"))[0]?.present === true;
+  if (!table) return { table: false };
+  const row = runtimeSha256 ? (await reads.read(`SELECT name, state FROM cloud_v2_shared_bases WHERE runtime_sha256 = $1 AND deleted_at IS NULL
+    ORDER BY created_at DESC LIMIT 1`, [runtimeSha256]))[0] : undefined;
+  const pinned = row ? { name: String(row.name), state: String(row.state) } : null;
+  const perName = (await reads.read(`SELECT split_part(snapshot_name, '@', 1) AS name, count(*)::int AS organizations FROM cloud_v2_computers
+    WHERE position('@' in snapshot_name) > 0 GROUP BY 1 ORDER BY 2 DESC, 1 LIMIT 5`)).map(entry => ({ name: String(entry.name), organizations: Number(entry.organizations) }));
+  const own = Number((await reads.read(`SELECT count(*)::int AS n FROM cloud_v2_computers WHERE snapshot_name IS NOT NULL AND position('@' in snapshot_name) = 0`))[0]?.n ?? 0);
+  return { table: true, pinned, atBoat: pinned ? await atBoat(pinned.name).catch(() => null) : null, perName, ownBases: own };
 }
 
 /** An organization's base as its Cloud Computer overview reports it (#1260), "absent" before that, or the read's closed code. */

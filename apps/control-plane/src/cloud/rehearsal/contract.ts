@@ -133,6 +133,8 @@ export type Created = {
   /** Automatic base builds this run caused (#1260): found by organization, `automatic`, and created after the run
    * started; nobody pressed Build for them. Cleanup removes the live one unless --keep-base. */
   bases?: string[];
+  /** Stage waiting set its organization's install script (it had none): cleanup removes it. */
+  installScript?: boolean;
 };
 export type StageResult = { ok: boolean; step?: string; code?: string; skipped?: string; counts?: Record<string, number>;
   /** Closed codes for what a stage chose (environment_case:seeded, environment_skipped:environment_exists). */

@@ -192,6 +192,8 @@ export function writeLines(stage: StageName, prefix: string, repositories: { one
     waiting: [
       "waiting runs in a second, fresh Personal organization: --waiting-account (test user 3 by default), whose organization has no base and nothing building",
       "waiting would give that account Individual Pro and connect its own GitHub sign-in by token, as setup does; cleanup puts both back",
+      "waiting would set that organization's install script to one line (echo zeros-rehearsal-waiting) when it has none, so it builds its own base" +
+        " instead of riding the shared one; cleanup removes it",
       `waiting would create project ${prefix}wait (Only you, ${repositories.one}): Zeros queues the organization's automatic base (1 builder machine)`,
       `waiting would at once create workspace ${prefix}wait-w (1 machine start): it must answer creating, document field preparing: computer, bound to that base`,
       "waiting would wait for the base to be ready, then for the workspace to be running from it (the wait in seconds, and whether it passed the" +
@@ -248,13 +250,25 @@ export type PreconditionFacts = {
   /** Organizations whose live build is the shared base: evidence that CLOUD_V2_SHARED_BASE_SNAPSHOT is configured (the
    * variable is Railway's and not read). Null when unread. */
   sharedBaseInUse: number | null;
+  /** The shared base for the pinned runtime (cloud_v2_shared_bases, 0269): absent before that migration; its state, whether
+   * Boat has it, and which organizations ride which shared base. Null when unread. */
+  sharedBase?: { table: false } | { table: true; pinned: { name: string; state: string } | null; atBoat: boolean | null;
+    perName: { name: string; organizations: number }[]; ownBases: number } | null;
 };
 
 /** The preconditions block: what each switch needs and what is unset on Alpha, checked live where it can be. */
 export function preconditionLines(facts: PreconditionFacts): string[] {
   const yes = (value: boolean) => value ? "yes" : "no";
+  const shared = facts.sharedBase;
   const lines = [
     "preconditions:",
+    // First: the switch must not go on before the shared base for the pinned runtime is ready, or every organization
+    // without an install script would start its own build in the first minute.
+    `  shared base for the pinned runtime: ${shared === undefined || shared === null ? "unread" : !shared.table ? "not built (no cloud_v2_shared_bases table: the server predates the shared base)"
+      : !shared.pinned ? "none for this runtime yet: do not turn ready copies on" : `${shared.pinned.name} ${shared.pinned.state}${shared.pinned.state === "ready" ? "" : ": do not turn ready copies on"},` +
+        ` at Boat ${shared.atBoat === null ? "unread" : shared.atBoat ? "yes" : "no"}`}`,
+    ...(shared && shared.table ? [`  organizations per shared base: ${shared.perName.length ? shared.perName.map(row => `${row.name} ${row.organizations}`).join(", ") : "none"};` +
+      ` organizations on their own base: ${shared.ownBases}`] : []),
     `  release: ${facts.release ? `alpha source ${facts.release.sourceSha.slice(0, 12)}, active runtime ${facts.release.workerSha256.slice(0, 12)}` : "unreadable"}`,
     facts.runtime === null ? "  runtime qualification: unreadable (R2 read failed)"
       : !facts.runtime.found ? "  runtime qualification: no capability record for the active runtime in ZEROS_R2_ALPHA_BUCKET (it may not be Alpha's runtime store; checkpoints live there too)"

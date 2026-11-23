@@ -108,6 +108,18 @@ export async function postWorkspace(ctx: StageContext, input: { name: string; pr
 
 // ── The organization's base (ready copies, #1260) ───────
 
+/** Stage waiting's one-line install script: with it the organization builds its own base (one builder machine) instead of
+ * riding the shared one, so a create can be made while that base is still being prepared. */
+export const WAITING_INSTALL_SCRIPT = "echo zeros-rehearsal-waiting";
+const InstallScript = z.object({ installScript: z.string().nullable(), recipeRevision: z.number().int().nonnegative() }).passthrough();
+const installScriptPath = (ctx: StageContext) => `/v1/cloud-v2/organizations/${ctx.state.organizationId}/computer/install-script`;
+export async function readInstallScript(ctx: StageContext, step: string): Promise<z.infer<typeof InstallScript>> {
+  return parse(InstallScript, (await call(ctx.ports.api, "GET", installScriptPath(ctx), step)).body, step);
+}
+export async function writeInstallScript(ctx: StageContext, installScript: string | null, revision: number, step: string): Promise<void> {
+  await call(ctx.ports.api, "PUT", installScriptPath(ctx), step, { installScript, revision });
+}
+
 /** The base as the Cloud Computer overview reports it (computer.ts baseState): absent from a server before #1260. */
 export type BaseState = "ready" | "preparing" | "failed" | "unavailable" | "none" | "absent";
 const BaseOverview = z.object({ activeBuildId: z.string().nullable(),

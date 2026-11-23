@@ -11,7 +11,7 @@ import { RehearsalFailure, type RehearsalState, type StageName } from "./contrac
 import { assertRepository, safeLine } from "./guard.js";
 import { accountLines, PERSONAL_ROUTE_GAPS, preconditionLines, readAccount, refusal, writeLines, type PreconditionFacts } from "./plan.js";
 import { cleanup, cleanupNeedsAccount, inventoryLines, NO_ACCOUNT, readInventory, runStages, stageContext } from "./runner.js";
-import { parseArguments } from "./rehearsal-cli.js";
+import { parseArguments, sharedBaseFacts } from "./rehearsal-cli.js";
 import { FIXTURE_TWO } from "./stage-provision.js";
 import { loadState, newState, saveState } from "./state.js";
 import { checkGithubToken, databaseErrorCode, liveDatabase, OUTSIDE_PROBE_LIMIT, tokenLines, tokenRefusal, type DatabaseClient } from "./live.js";
@@ -39,7 +39,8 @@ function setup(options: { provisioned?: boolean; owner?: "personal" | "organizat
   const options_ = { switches: new Set(["projects", "personal", "retention"] as const), maxActive: 10, runCap: 30, log: (line: string) => lines.push(line) };
   return { alpha, state, ctx, lines, saved, options: options_ };
 }
-const EMPTY = { workspaces: 0, projects: 0, branches: 0, pulls: 0, machines: 0, objects: 0, environments: 0, githubSignIns: 0, pro: 0, computerBase: 0, databaseRows: 0 };
+const EMPTY = { workspaces: 0, projects: 0, branches: 0, pulls: 0, machines: 0, objects: 0, environments: 0, githubSignIns: 0, pro: 0, computerBase: 0, installScripts: 0,
+  databaseRows: 0 };
 
 describe("rehearsal guards", () => {
   it("refuses every repository but the fixtures, by name", () => {
@@ -463,7 +464,7 @@ describe("rehearsal on the Personal route", () => {
       expect(good.state.stages.waiting?.counts).toMatchObject({ baseWaitSeconds: 900, waitedPastBootDeadline: 1, bootedFromBase: 1 });
     });
 
-    it("refuses an organization that is not fresh, and says a shared base leaves nothing to wait for", async () => {
+    it("refuses an organization that is not fresh; with the shared base configured, its install script gives it its own base to wait for", async () => {
       const used = third();
       used.computer = { active: "33333333-3333-3333-3333-333333333333", builds: [{ id: "33333333-3333-3333-3333-333333333333", state: "succeeded", snapshot: "theirs", builderSandboxId: null }] };
       used.snapshots.add("theirs");
@@ -472,15 +473,22 @@ describe("rehearsal on the Personal route", () => {
       expect(refused.state.stages.waiting).toMatchObject({ step: "waiting_fresh", code: "base_ready" });
       expect((await cleanup(refused.ctx, { log: () => undefined })).inventory).toEqual(EMPTY);
       expect(used.computer.active).toBe("33333333-3333-3333-3333-333333333333");
+      // The Production configuration: the shared base is set. The main organization rides it (ready at once, no machine);
+      // stage waiting's organization gets a one-line install script first, so it builds its own base and the create waits.
       const shared = third();
       shared.sharedBase = true;
-      const instant = setup({ owner: "personal", waiting: shared });
-      expect(await runStages(instant.ctx, ["setup", "waiting"], { ...instant.options, ...waitingAll })).toBe(false);
-      expect(instant.state.stages.waiting).toMatchObject({ step: "waiting_base_queued", code: "base_ready" });
-      expect((await cleanup(instant.ctx, { log: () => undefined })).inventory).toEqual(EMPTY);
+      const production = setup({ owner: "personal", waiting: shared });
+      production.alpha.sharedBase = true;
+      expect(await runStages(production.ctx, ["setup", "personal", "waiting"], { ...production.options, ...waitingAll })).toBe(true);
+      expect(production.alpha.computer.builds.filter(build => build.shared)).toHaveLength(1);
+      expect(shared.computer.builds.filter(build => build.shared)).toHaveLength(0);
+      expect(production.state.stages.waiting?.counts).toMatchObject({ createdWhilePreparing: 1, bootedFromBase: 1 });
+      expect(shared.installScript).not.toBeNull();
+      expect((await cleanup(production.ctx, { log: () => undefined })).inventory).toEqual(EMPTY);
+      expect(shared.installScript).toBeNull();
       // The shared base loses only the organization's pointer: Zeros's snapshot is never deleted.
-      expect(shared.computer.active).toBeNull();
-      expect(shared.snapshots.has("zeros-shared")).toBe(true);
+      expect(production.alpha.computer.active).toBeNull();
+      expect(production.alpha.snapshots.has("zeros-shared")).toBe(true);
     });
 
     it("refuses setup on a server before the safe switch-on, which reports no base", async () => {
@@ -733,7 +741,7 @@ describe("rehearsal GitHub token check", () => {
 });
 
 describe("rehearsal --plan", () => {
-  it("prints the preconditions block safely, for each state it can observe", () => {
+  it("prints the preconditions block safely, for each state it can observe", async () => {
     const states: PreconditionFacts[] = [
       { release: { sourceSha: "a".repeat(40), workerSha256: "b".repeat(64) }, runtime: { found: true, actingUser: true, syncContext: true },
         projectsRead: "http_404_not_found:route_or_resource", computer: "http_404_not_found", sharedBaseInUse: 0 },
@@ -744,6 +752,22 @@ describe("rehearsal --plan", () => {
     ];
     // The lines come back through safeLine already: a line it refused would read "line withheld (unsafe)".
     for (const facts of states) for (const line of preconditionLines(facts)) expect(line).not.toBe("line withheld (unsafe)");
+    // The shared base for the pinned runtime comes first, with what it means for the switch.
+    const shared = (sharedBase: PreconditionFacts["sharedBase"]) => preconditionLines({ ...states[1]!, sharedBase });
+    expect(shared({ table: false })[1]).toBe("  shared base for the pinned runtime: not built (no cloud_v2_shared_bases table: the server predates the shared base)");
+    expect(shared({ table: true, pinned: null, atBoat: null, perName: [], ownBases: 0 })[1]).toContain("do not turn ready copies on");
+    expect(shared({ table: true, pinned: { name: "zeros-alpha-base-1a2b3c4d5e6f", state: "building" }, atBoat: false, perName: [], ownBases: 2 })[1])
+      .toBe("  shared base for the pinned runtime: zeros-alpha-base-1a2b3c4d5e6f building: do not turn ready copies on, at Boat no");
+    const ready = shared({ table: true, pinned: { name: "zeros-alpha-base-1a2b3c4d5e6f", state: "ready" }, atBoat: true,
+      perName: [{ name: "zeros-alpha-base-1a2b3c4d5e6f", organizations: 4 }], ownBases: 2 });
+    expect(ready.slice(1, 3)).toEqual(["  shared base for the pinned runtime: zeros-alpha-base-1a2b3c4d5e6f ready, at Boat yes",
+      "  organizations per shared base: zeros-alpha-base-1a2b3c4d5e6f 4; organizations on their own base: 2"]);
+    const reads = { read: async (text: string) => text.includes("to_regclass") ? [{ present: true }] : text.includes("FROM cloud_v2_shared_bases")
+      ? [{ name: "zeros-alpha-base-1a2b3c4d5e6f", state: "ready" }] : text.includes("GROUP BY") ? [{ name: "zeros-alpha-base-1a2b3c4d5e6f", organizations: 4 }] : [{ n: 2 }] };
+    expect(await sharedBaseFacts(reads, "b".repeat(64), async name => name === "zeros-alpha-base-1a2b3c4d5e6f"))
+      .toEqual({ table: true, pinned: { name: "zeros-alpha-base-1a2b3c4d5e6f", state: "ready" }, atBoat: true,
+        perName: [{ name: "zeros-alpha-base-1a2b3c4d5e6f", organizations: 4 }], ownBases: 2 });
+    expect(await sharedBaseFacts({ read: async () => [{ present: false }] }, null, async () => true)).toEqual({ table: false });
     const lines = preconditionLines(states[0]!);
     expect(lines).toContain("  projects routes: not mounted (CLOUD_V2_READY_COPIES_ENABLED off)");
     expect(lines.join(" ")).toContain("CLOUD_V2_READY_COPIES_ENABLED=true, CLOUD_V2_PERSONAL_CLOUD_ENABLED=true, CLOUD_V2_RETENTION_ENABLED=true");

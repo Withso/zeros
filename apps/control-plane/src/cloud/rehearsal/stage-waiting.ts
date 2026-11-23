@@ -8,7 +8,8 @@
 // base went live (#1260 F1: a wait past ten minutes used to fail it with worker_boot_timeout right after its VM booted).
 import { RehearsalFailure, type Created, type StageContext } from "./contract.js";
 import { prepareOwner } from "./stage-setup.js";
-import { baseReady, check, createProject, deleteProject, deleteWorkspace, postWorkspace, readBase, recordRunBases, waitState } from "./steps.js";
+import { WAITING_INSTALL_SCRIPT, baseReady, check, createProject, deleteProject, deleteWorkspace, postWorkspace, readBase, readInstallScript, recordRunBases, waitState,
+  writeInstallScript } from "./steps.js";
 
 /** The boot deadline a waiting create must not be measured against from its creation (lifecycle.ts BOOT_DEADLINE_MS). */
 const BOOT_DEADLINE_MS = 10 * 60_000;
@@ -41,6 +42,15 @@ export async function stageWaiting(ctx: StageContext): Promise<Record<string, nu
   const before = await readBase(sub, "waiting_fresh");
   check(before.state !== "absent", "waiting_fresh", "base_view_absent");
   if (!sub.state.created.bases?.length) check(before.state === "none", "waiting_fresh", `base_${before.state}`);
+
+  // An install script, so this organization builds its own base rather than riding the shared one (which is live at once
+  // and leaves nothing to wait for). Set before the project; cleanup removes it. A script someone else set is left alone.
+  ctx.step("waiting_install_script");
+  const script = await readInstallScript(sub, "waiting_install_script");
+  if (script.installScript === null) {
+    sub.state.created.installScript = true; await ctx.save();
+    await writeInstallScript(sub, WAITING_INSTALL_SCRIPT, script.recipeRevision, "waiting_install_script");
+  } else if (!sub.state.created.installScript) ctx.note("waiting:install_script_existing");
 
   ctx.step("waiting_project");
   const { prefix } = ctx.state;

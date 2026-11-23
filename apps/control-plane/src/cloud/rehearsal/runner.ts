@@ -9,7 +9,8 @@ import { stageRetention } from "./stage-retention.js";
 import { stageSubmodules } from "./stage-submodules.js";
 import { stageWaiting, waitingContext } from "./stage-waiting.js";
 import { changePro, sameGrant, stageSetup } from "./stage-setup.js";
-import { clearEnvironment, disconnectGithubSignIn, githubSignIn, deleteProject, deleteWorkspace, getWorkspace, listProjects, listWorkspaces, readEnvironment } from "./steps.js";
+import { WAITING_INSTALL_SCRIPT, clearEnvironment, disconnectGithubSignIn, githubSignIn, deleteProject, deleteWorkspace, getWorkspace, listProjects, listWorkspaces, readEnvironment,
+  readInstallScript, writeInstallScript } from "./steps.js";
 
 export type Stage = (ctx: StageContext) => Promise<Record<string, number>>;
 /** Every stage. setup refuses itself on the organization route; personal and submodules run on the Personal route only,
@@ -93,7 +94,7 @@ async function preconditions(ctx: StageContext, options: RunOptions, account: bo
 // ── Cleanup and inventory ───────────────────────────────
 
 export type Inventory = Record<"workspaces" | "projects" | "branches" | "pulls" | "machines" | "objects" | "environments" | "githubSignIns" | "pro" | "computerBase" |
-  "databaseRows", number>;
+  "installScripts" | "databaseRows", number>;
 
 /** Removes everything this run created or named with its prefix, best effort per item, then reads the inventory. */
 /** Whether cleanup needs a signed-in account: anything recorded that only the API removes, or a create attempted (a
@@ -168,6 +169,12 @@ async function cleanupOrganization(ctx: StageContext, options: { accountless?: b
   workspaces = state.created.workspaces; projects = state.created.projects;
   for (const target of state.created.environments) await attempt("environment", () => clearEnvironment(ctx, target, "cleanup_environment"));
   for (const organizationId of state.created.githubSignIns) await attempt("github_sign_in", () => disconnectGithubSignIn(ctx, organizationId, "cleanup_github_sign_in"));
+  // The install script stage waiting set, only while it is still the one it set.
+  if (state.created.installScript) await attempt("install_script", async () => {
+    const current = await readInstallScript(ctx, "cleanup_install_script");
+    if (current.installScript === WAITING_INSTALL_SCRIPT) await writeInstallScript(ctx, null, current.recipeRevision, "cleanup_install_script");
+    delete state.created.installScript; await ctx.save();
+  });
   // The Cloud Computer base this run caused, unless --keep-base: as the product's own baseMissing does, the organization's
   // live pointer goes, then that build's Boat named snapshot, then the build records it gone. The build row stays (history).
   // The run's bases: the automatic one Zeros prepared for it (by organization, `automatic`, newer than the run's start),
@@ -225,7 +232,9 @@ export async function readInventory(ctx: StageContext, accountless = false, keep
       WHERE b.org_id = $1::uuid AND (b.id = ANY($2::uuid[]) OR (b.automatic AND b.created_at >= $3::timestamptz)) /* run bases */`,
       [state.organizationId, runBaseIds(state), state.startedAt]))
     if (row.active === true || (row.base_shared !== true && row.snapshot_id && await ports.boat.snapshotExists(String(row.snapshot_id)))) computerBase++;
-  return { workspaces, projects, branches, pulls, machines, objects, environments, githubSignIns, pro, computerBase, databaseRows };
+  // Stage waiting's install script counts until cleanup has put the organization back to none.
+  const installScripts = state.created.installScript ? 1 : 0;
+  return { workspaces, projects, branches, pulls, machines, objects, environments, githubSignIns, pro, computerBase, installScripts, databaseRows };
 }
 
 export function inventoryLines(inventory: Inventory): { lines: string[]; clean: boolean } {
