@@ -1291,6 +1291,26 @@ describe("a workspace of several repositories", () => {
     expect(readFileSync(join(newApi, "README.md"), "utf8")).toBe("api\n");
   });
 
+  it("fails the capture when a step in a later repository fails, even one with no check of its own", () => {
+    const p = project(), key = randomBytes(32), out = join(p.root, "checkpoint.zck"), web = p.folder(p.oldHome, "web");
+    p.write(join(web, "page.html"), "<p>committed</p>\n"); p.git(web, "add", "page.html"); p.git(web, "commit", "-q", "-m", "page");
+    // A commit object the bundle needs is gone: only `git bundle create` notices, and nothing checks it but errexit.
+    const commit = p.git(web, "rev-parse", "HEAD");
+    rmSync(join(web, ".git", "objects", commit.slice(0, 2), commit.slice(2)));
+    expect(save(p, key, out).parsed).toMatchObject({ ok: false, code: "checkpoint_failed" });
+  });
+
+  it("fails the restore when a step in a later repository fails, even one with no check of its own", () => {
+    const p = project(), key = randomBytes(32), out = join(p.root, "checkpoint.zck");
+    p.write(join(p.folder(p.oldHome, "web"), "README.md"), "web edited\n");
+    expect(save(p, key, out).parsed).toMatchObject({ ok: true });
+    mkdirSync(join(p.newHome, "zeros-app"), { recursive: true });
+    for (const name of ["api", "web"] as const) p.git(p.root, "clone", "-q", p.origins[name], p.folder(p.newHome, name));
+    // Another Git holds the second checkout's index: its read-tree fails, and nothing checks it but errexit.
+    p.write(join(p.folder(p.newHome, "web"), ".git", "index.lock"), "");
+    expect(load(p, key, out, sha(out)).parsed).toEqual({ ok: false, code: "checkpoint_restore_failed" });
+  });
+
   it("is reused only while every repository is unchanged", () => {
     const p = project(), key = randomBytes(32), out = join(p.root, "checkpoint.zck");
     const first = save(p, key, out);
@@ -1505,8 +1525,9 @@ describe("retention backups and the stop probe", () => {
     expect(digest(checkpointCommand({ ...PIN, checkoutPath: "/home/user/project/app", repositories: [
       { checkoutPath: "/home/user/project/api", baseBranch: "trunk" }, { checkoutPath: "/home/user/project/docs", baseBranch: "main" }] })))
       // Later repositories capture their own seeded environment files (environment.tar, left out of ignored.tar);
-      // the first repository's part of the command is unchanged, as the one-repository digest above shows.
-      .toBe("1e25ac142a6aa3c7dbec5b6f950118d512b46de158c7453dd2c97cdbfbb72a37");
+      // the first repository's part of the command is unchanged, as the one-repository digest above shows. Each later
+      // part runs with errexit on (C4B: bash ignored it inside the `||`-tested subshell), so several repositories' one changed.
+      .toBe("ffa7b2291287f49dba65e64f736ced711566dbb70cb9c1133329550879c59547");
     expect(digest(checkpointCommand({ ...PIN, reuse: { fingerprint: "f".repeat(64), base: "a".repeat(40) } })))
       .toBe("b6e28ffb57f9b435ae69b616cecb9e09827b66a39ccca776f78b57fd87d5a524");
     expect(checkpointCommand({ ...PIN, backup: false })).toBe(checkpointCommand(PIN));
