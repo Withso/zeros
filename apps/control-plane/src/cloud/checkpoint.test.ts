@@ -2072,6 +2072,61 @@ process.exit(result.status ?? 1);
       });
     });
 
+    describe("a deinitialised submodule: its folder empty, its Git directory still the person's", () => {
+      /** `git submodule deinit -f lib`, as far as the disk goes: the folder emptied, its Git directory kept. */
+      const deinit = (p: ReturnType<typeof project>, lib: string) => { for (const name of readdirSync(lib)) rmSync(join(lib, name), { recursive: true, force: true }); };
+      const probed = (p: ReturnType<typeof project>) => parseBackupProbe(spawnSync("bash", ["-c", `eval "$1"`, "probe",
+        backupProbeCommand([p.folder(p.oldHome)], p.oldHome, p.submodules(p.oldHome).slice(0, 1))], { env: p.env, encoding: "utf8" }).stdout);
+
+      it("probes dirty, and its branch, detached HEAD and stash come back into its Git directory, the folder still empty", () => {
+        const p = project(), lib = join(p.folder(p.oldHome), "lib"), key = randomBytes(32), out = join(p.root, "checkpoint.zck");
+        p.git(lib, "switch", "-q", "-c", "mine"); p.write(join(lib, "m.txt"), "mine\n"); p.git(lib, "add", "m.txt"); p.git(lib, "commit", "-q", "-m", "mine");
+        p.git(lib, "-c", "advice.detachedHead=false", "checkout", "-q", "--detach", p.lib.commit);
+        p.write(join(lib, "lib.txt"), "stashed\n"); p.git(lib, "stash", "-q", "-m", "kept for later");
+        const was = { mine: p.git(lib, "rev-parse", "mine"), stash: p.git(lib, "rev-parse", "refs/stash") };
+        deinit(p, lib);
+        expect(probed(p)).toBe("dirty");
+        expect(save(p, key, out, p.submodules(p.oldHome).slice(0, 1)).parsed).toMatchObject({ ok: true });
+        mkdirSync(join(p.newHome, "app"), { recursive: true }); p.git(p.root, "clone", "-q", p.app.origin, p.folder(p.newHome));
+        const net = github(p, TOKEN);
+        expect(load(p, key, out, net.env, planned(p, p.newHome).slice(0, 1))).toMatchObject({ parsed: { ok: true }, unrestored: [] });
+        const gitDir = join(p.folder(p.newHome), ".git", p.gitDirs.lib), gd = (...args: string[]) => p.git(p.root, `--git-dir=${gitDir}`, ...args);
+        expect(gd("rev-parse", "mine")).toBe(was.mine);
+        expect(gd("rev-parse", "refs/stash")).toBe(was.stash);
+        expect(gd("log", "-g", "--format=%gs", "refs/stash")).toBe("On (no branch): kept for later");
+        expect(gd("rev-parse", "HEAD")).toBe(p.lib.commit);
+        expect(readdirSync(join(p.folder(p.newHome), "lib"))).toEqual([]);
+        expect(net.calls().map(call => call.repository)).toEqual(["lib"]);
+      });
+
+      it("on an active restore, puts its Git directory back from what was fetched before the download, the folder emptied", () => {
+        const p = project(), lib = join(p.folder(p.oldHome), "lib"), key = randomBytes(32), out = join(p.root, "checkpoint.zck");
+        p.git(lib, "switch", "-q", "-c", "mine"); p.write(join(lib, "m.txt"), "mine\n"); p.git(lib, "add", "m.txt"); p.git(lib, "commit", "-q", "-m", "mine");
+        const mine = p.git(lib, "rev-parse", "mine");
+        p.git(lib, "-c", "advice.detachedHead=false", "checkout", "-q", "--detach", p.lib.commit);
+        deinit(p, lib);
+        expect(save(p, key, out, p.submodules(p.oldHome).slice(0, 1)).parsed).toMatchObject({ ok: true });
+        // A fork of the project's build, where lib is fetched and checked out.
+        mkdirSync(join(p.newHome, "app"), { recursive: true }); p.git(p.root, "clone", "-q", p.app.origin, p.folder(p.newHome));
+        p.fetch(p.folder(p.newHome), "lib", p.lib.origin, p.gitDirs.lib, p.lib.commit);
+        const net = github(p, TOKEN);
+        const restored = load(p, key, out, net.env, planned(p, p.newHome).slice(0, 1), { active: true, githubToken: TOKEN, repositoryUrl: "https://github.com/acme/app.git" });
+        expect(restored, restored.stdout).toMatchObject({ parsed: { ok: true }, unrestored: [] });
+        const gitDir = join(p.folder(p.newHome), ".git", p.gitDirs.lib);
+        expect(p.git(p.root, `--git-dir=${gitDir}`, "rev-parse", "mine")).toBe(mine);
+        expect(readdirSync(join(p.folder(p.newHome), "lib"))).toEqual([]);
+      });
+
+      it("stays clean, with no part, when its Git directory holds only GitHub's work at the gitlink", () => {
+        const p = project(), lib = join(p.folder(p.oldHome), "lib"), key = randomBytes(32), out = join(p.root, "checkpoint.zck");
+        deinit(p, lib);
+        expect(probed(p)).toBe("clean");
+        expect(save(p, key, out, p.submodules(p.oldHome).slice(0, 1)).parsed).toMatchObject({ ok: true });
+        const b64 = (value: string) => Buffer.from(value).toString("base64");
+        expect(parts(p, key, out).stdout).toContain(`manifest:submodule 1 0 ${b64("lib")} ${p.lib.commit} empty|`);
+      });
+    });
+
     it("refuses pushes with exactly the worker's sentence", () => {
       const worker = readFileSync(join(__dirname, "../../../cloud-worker/src/workspace/submodules.ts"), "utf8");
       expect(worker).toContain(`export const SUBMODULE_PUSH_REFUSED = ${JSON.stringify(SUBMODULE_PUSH_REFUSED)};`);

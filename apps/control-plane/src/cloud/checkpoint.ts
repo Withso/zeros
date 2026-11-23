@@ -575,6 +575,42 @@ function otherRepositoriesCapture(repositories: readonly CheckpointRepository[],
 const CLONE_COPIES = String.raw`{ if (index($2, "refs/heads/") == 1) local[substr($2, 12)] = $1; else if (index($2, "refs/remotes/origin/") == 1) origin[substr($2, 21)] = $1 }
 END { for (name in local) if ((name in origin) && local[name] == origin[name] && "refs/heads/" name != head) print "refs/heads/" name }`;
 
+/** A deinitialised submodule (`git submodule deinit`): its folder empty or absent, its planned Git directory still
+ * holding the person's branches, HEAD and stashes. When any of them is the person's (a stash, or a branch or HEAD its
+ * gitlink does not reach, less the clone's copies of GitHub's branches), that Git directory alone is captured, as a
+ * `gitdir` part: refs, HEAD and stashes, bundled against the gitlink. Otherwise it stays absent or empty. */
+function gitdirCapture(k: number): string[] {
+  return [
+    "  if { [ \"$state\" = absent ] || [ \"$state\" = empty ]; } && [ -d \"$planned_git\" ] && [ ! -L \"$planned_git\" ] && [ \"$(cd \"$planned_git\" && pwd -P)\" = \"$planned_git\" ]; then",
+    "    step=gitdir",
+    "    gd() { git --git-dir=\"$planned_git\" \"$@\"; }",
+    "    base_commit=$(gd rev-parse -q --verify \"$gitlink^{commit}\" || true)",
+    "    headref=$(gd symbolic-ref -q HEAD || true); head=$(gd rev-parse -q --verify 'HEAD^{commit}' || true)",
+    "    gd for-each-ref --format='%(objectname) %(refname)' refs/heads refs/remotes/origin > \"$work/refs\"",
+    `    awk -v head="$headref" ${quote(CLONE_COPIES)} "$work/refs" > "$work/copies"`,
+    "    own=(); while read -r _ ref; do case \"$ref\" in refs/heads/*) grep -qxF \"$ref\" \"$work/copies\" || own+=(\"$ref\") ;; esac; done < \"$work/refs\"",
+    "    gd log -g --format='%H %gs' refs/stash > \"$work/stashes\" 2>/dev/null || : > \"$work/stashes\"",
+    "    ahead=$(gd rev-list -n 1 ${head:+\"$head\"} ${own[@]+\"${own[@]}\"} --not ${base_commit:+\"$base_commit\"})",
+    "    if [ -s \"$work/stashes\" ] || [ -n \"$ahead\" ]; then",
+    `      state=gitdir; c="$outer_work/c/submodules/${k}"; mkdir -p "$c"; m="$c/manifest"`,
+    "      { printf 'zeros-checkpoint 1\\ngitdir\\n'",
+    "        for ref in ${own[@]+\"${own[@]}\"}; do printf 'branch %s %s\\n' \"$(gd rev-parse \"$ref\")\" \"$ref\"; done",
+    "        if [ -n \"$headref\" ]; then printf 'head ref %s\\n' \"$headref\"; elif [ -n \"$head\" ]; then printf 'head detached %s\\n' \"$head\"; fi",
+    "        while read -r sha message; do printf 'stash %s %s\\n' \"$sha\" \"$(printf %s \"$message\" | base64 -w0)\"; done < \"$work/stashes\"",
+    "      } > \"$m\"",
+    // Stash entries and a detached HEAD are reachable from no branch: named for the bundle, then removed.
+    "      gitdir_refs=1; n=0",
+    "      if [ -n \"$head\" ]; then gd update-ref refs/zeros-checkpoint/head \"$head\"; fi",
+    "      while read -r _ sha _; do gd update-ref \"refs/zeros-checkpoint/stash-$n\" \"$sha\"; n=$((n + 1)); done < <(grep '^stash ' \"$m\" || true)",
+    "      negative=(); if [ -n \"$base_commit\" ]; then negative=(--not \"$base_commit\"); fi",
+    "      step=bundle; gd bundle create \"$c/repo.bundle\" ${own[@]+\"${own[@]}\"} --glob=refs/zeros-checkpoint ${negative[@]+\"${negative[@]}\"}",
+    "      gd for-each-ref --format='%(refname)' refs/zeros-checkpoint/ | while read -r ref; do gd update-ref -d \"$ref\"; done; gitdir_refs=''",
+    `      { printf 'submodule ${k}\\n'; cat "$m"; printf 'base %s\\n' "\${base_commit:--}"; } > "$outer_work/submodule-${k}"`,
+    "    fi",
+    "  fi",
+  ];
+}
+
 function submodulesCapture(submodules: readonly CheckpointSubmodule[]): string[] {
   return submodules.flatMap((entry, index) => {
     const k = index + 1, folder = checkedPath(entry.checkoutPath), repository = checkedPath(entry.repositoryPath);
@@ -584,14 +620,15 @@ function submodulesCapture(submodules: readonly CheckpointSubmodule[]): string[]
     return [
       `step=submodule-${k}`,
       "set +e; (", "  set -e",
-      `  repo=${quote(folder)} planned_git=${quote(`${repository}/.git/${entry.gitDir}`)} gitlink=${quote(entry.baseCommit)} base='' cleanup_refs='' reported='' state=captured`,
-      "  trap 'code=$?; if [ -n \"$cleanup_refs\" ]; then git -C \"$repo\" for-each-ref --format=\"%(refname)\" refs/zeros-checkpoint/ 2>/dev/null | while read -r ref; do git -C \"$repo\" update-ref -d \"$ref\" || true; done; fi; if [ \"$code\" -ne 0 ] && [ -z \"$reported\" ]; then printf \"zeros-checkpoint-error checkpoint_failed %s\\n\" \"$step\" >&3; fi' EXIT",
+      `  repo=${quote(folder)} planned_git=${quote(`${repository}/.git/${entry.gitDir}`)} gitlink=${quote(entry.baseCommit)} base='' cleanup_refs='' gitdir_refs='' reported='' state=captured`,
+      "  trap 'code=$?; if [ -n \"$cleanup_refs\" ]; then git -C \"$repo\" for-each-ref --format=\"%(refname)\" refs/zeros-checkpoint/ 2>/dev/null | while read -r ref; do git -C \"$repo\" update-ref -d \"$ref\" || true; done; fi; if [ -n \"$gitdir_refs\" ]; then git --git-dir=\"$planned_git\" for-each-ref --format=\"%(refname)\" refs/zeros-checkpoint/ 2>/dev/null | while read -r ref; do git --git-dir=\"$planned_git\" update-ref -d \"$ref\" || true; done; fi; if [ \"$code\" -ne 0 ] && [ -z \"$reported\" ]; then printf \"zeros-checkpoint-error checkpoint_failed %s\\n\" \"$step\" >&3; fi' EXIT",
       `  outer_work=$work; work="$outer_work/s${k}"; mkdir "$work"; cp "$outer_work/digest.mjs" "$outer_work/environment.mjs" "$work/"`,
       "  if [ -L \"$repo\" ] || [ ! -d \"$repo\" ]; then state=absent",
       "  elif [ -z \"$(ls -A \"$repo\")\" ]; then state=empty",
       "  elif ! { [ \"$(cd \"$repo\" && pwd -P)\" = \"$repo\" ] && top=$(git -C \"$repo\" rev-parse --show-toplevel) && [ \"$(cd \"$top\" && pwd -P)\" = \"$repo\" ] \\",
       "    && gd=$(git -C \"$repo\" rev-parse --absolute-git-dir) && [ -d \"$planned_git\" ] && [ ! -L \"$planned_git\" ] \\",
       "    && [ \"$(cd \"$gd\" && pwd -P)\" = \"$(cd \"$planned_git\" && pwd -P)\" ]; }; then state=foreign; fi",
+      ...gitdirCapture(k),
       `  printf '%s\\n' "$state" > "$outer_work/submodule-${k}-state"`,
       "  if [ \"$state\" = captured ]; then",
       `    c="$outer_work/c/submodules/${k}"; mkdir -p "$c"; m="$c/manifest"; printf 'zeros-checkpoint 1\\n' > "$m"`,
@@ -816,9 +853,25 @@ function submodulesProbe(submodules: readonly CheckpointSubmodule[]): string[] {
     return `  probe_submodule ${quote(folder)} ${quote(`${repository}/.git/${entry.gitDir}`)} ${entry.baseCommit} || { printf 'zeros-backup-probe unknown\\n' >&3; exit 0; }`;
   });
   return [
+    "probe_gitdir() {",
+    "  local head own ref gitlink ahead",
+    "  [ \"$(cd \"$1\" && pwd -P)\" = \"$1\" ] || return 1",
+    "  if g --git-dir=\"$1\" rev-parse -q --verify refs/stash >/dev/null; then state=dirty; return 0; fi",
+    "  gitlink=$(g --git-dir=\"$1\" rev-parse -q --verify \"$2^{commit}\" || true)",
+    "  head=$(g --git-dir=\"$1\" rev-parse -q --verify 'HEAD^{commit}' || true)",
+    "  g --git-dir=\"$1\" for-each-ref --format='%(objectname) %(refname)' refs/heads refs/remotes/origin > \"$work/refs\" || return 1",
+    `  awk -v head="$(g --git-dir="$1" symbolic-ref -q HEAD || true)" ${quote(CLONE_COPIES)} "$work/refs" > "$work/copies" || return 1`,
+    "  own=(); while read -r _ ref; do grep -qxF \"$ref\" \"$work/copies\" || own+=(\"$ref\"); done < <(grep ' refs/heads/' \"$work/refs\" || true)",
+    "  ahead=$(g --git-dir=\"$1\" rev-list -n 1 ${head:+\"$head\"} ${own[@]+\"${own[@]}\"} --not ${gitlink:+\"$gitlink\"}) || return 1",
+    "  if [ -n \"$ahead\" ]; then state=dirty; fi",
+    "}",
     "probe_submodule() {",
     "  [ \"$state\" = clean ] || return 0",
-    "  if [ -L \"$1\" ] || [ ! -d \"$1\" ] || [ -z \"$(ls -A \"$1\")\" ]; then return 0; fi",
+    // Absent or empty: nothing in its folder, but a deinitialised one's Git directory may still hold the person's work.
+    "  if [ -L \"$1\" ] || [ ! -d \"$1\" ] || [ -z \"$(ls -A \"$1\")\" ]; then",
+    "    [ -d \"$2\" ] && [ ! -L \"$2\" ] || return 0",
+    "    probe_gitdir \"$2\" \"$3\"; return",
+    "  fi",
     "  cd -- \"$1\" && [ \"$(pwd -P)\" = \"$1\" ] && [ \"$(cd \"$(g rev-parse --show-toplevel)\" && pwd -P)\" = \"$1\" ] || return 1",
     "  [ -d \"$2\" ] && [ ! -L \"$2\" ] && [ \"$(cd \"$(g rev-parse --absolute-git-dir)\" && pwd -P)\" = \"$(cd \"$2\" && pwd -P)\" ] || return 1",
     "  local changes head ahead gitlink path size total=0 own ref",
@@ -1233,9 +1286,73 @@ function submodulesRestore(input: RestoreInput, submodules: readonly CheckedSubm
         ")",
         `code=$?; set -e; [ "$code" -eq 0 ] || printf '${SUBMODULE_UNRESTORED} ${j}\\n' >&3`,
         `rm -f "$work/submodule-${j}/token" "$work/submodule-${j}/askpass"; fi`,
+        ...gitdirRestore(input, entry, j, credential),
         ...(input.active ? [`release_submodule ${quote(entry.folder)} ${quote(entry.gitDir)}`] : []),
       ];
     })];
+}
+
+/** A deinitialised submodule's `gitdir` part: its Git directory is put back where the worker plans it (fetched from
+ * GitHub, or, on an active restore, from what was fetched before the download), with the person's branches, HEAD and
+ * stashes; its folder is left as `deinit` left it. Into a Git directory already there only the refs go, and HEAD only
+ * while its folder is empty. A failure is one SUBMODULE_UNRESTORED line, as for any other part. */
+function gitdirRestore(input: RestoreInput, entry: CheckedSubmodule, j: number, credential: readonly string[]): string[] {
+  const fetchSha = input.active ? "fail checkpoint_prerequisites_missing"
+    : `remote_git --git-dir="$planned_git" fetch -q --no-recurse-submodules ${quote(entry.url)} "$sha" || true`;
+  return [
+    `k=$(awk -v p=${entry.position} -v b=${quote(b64(entry.path))} '$1 == "submodule" && $3 == p && $4 == b && $6 == "gitdir" { print $2; exit }' "$m")`,
+    `if [[ "$k" =~ ^[1-9][0-9]?$ ]] && [ -f "$c/submodules/$k/manifest" ]; then set +e; (`,
+    "  set -e; exec 3>/dev/null",
+    `  repo=${quote(entry.folder)} planned_git=${quote(entry.gitDir)} c="$c/submodules/$k" reported='' made='' outer_work=$work`,
+    "  trap 'code=$?; if [ \"$code\" -ne 0 ] && [ -n \"$made\" ]; then rm -rf -- \"$planned_git\"; fi' EXIT",
+    "  m=\"$c/manifest\"; [ \"$(head -n 1 \"$m\")\" = 'zeros-checkpoint 1' ] && grep -qx gitdir \"$m\" || fail checkpoint_corrupt",
+    `  work="$work/submodule-${j}"; mkdir -p -m 700 "$work"`,
+    ...credential,
+    "  gd() { git --git-dir=\"$planned_git\" \"$@\"; }",
+    "  if [ ! -e \"$planned_git\" ] && [ ! -L \"$planned_git\" ]; then",
+    "    mkdir -p -- \"${planned_git%/*}\"; [ \"$(cd \"${planned_git%/*}\" && pwd -P)\" = \"${planned_git%/*}\" ] || fail checkpoint_restore_failed",
+    ...(input.active ? [
+      `    [ -d "$outer_work/submodule-fetched-${j}" ] || fail checkpoint_prerequisites_missing`,
+      // The folder holds the snapshot's checkout, not the person's: it goes, as their deinit left it.
+      "    if [ -d \"$repo\" ] && [ ! -L \"$repo\" ]; then",
+      "      [ \"$(cd \"$repo\" && pwd -P)\" = \"$repo\" ] && { [ ! -e \"$repo/.git\" ] || { [ -f \"$repo/.git\" ] && [ ! -L \"$repo/.git\" ]; }; } || fail checkpoint_restore_failed",
+      "      find \"$repo\" -mindepth 1 -delete",
+      "    fi",
+      `    made=1; mv -- "$outer_work/submodule-fetched-${j}" "$planned_git"`,
+      `    gd remote add origin ${quote(entry.url)}`,
+    ] : [
+      "    made=1; git init -q --bare --template= \"$planned_git\"",
+      `    gd remote add origin ${quote(entry.url)}`,
+      `    step=clone; remote_git --git-dir="$planned_git" fetch -q --no-recurse-submodules ${quote(entry.url)} '+refs/heads/*:refs/remotes/origin/*' || fail checkpoint_repository_missing`,
+    ]),
+    "    gd config core.bare false",
+    "  else [ -d \"$planned_git\" ] && [ ! -L \"$planned_git\" ] && [ \"$(cd \"$planned_git\" && pwd -P)\" = \"$planned_git\" ] || fail checkpoint_restore_failed; fi",
+    "  step=objects",
+    "  if [ -f \"$c/repo.bundle\" ]; then",
+    "    while read -r sha; do hex \"$sha\"; gd cat-file -e \"$sha^{commit}\" || " + fetchSha + "; gd cat-file -e \"$sha^{commit}\" || fail checkpoint_prerequisites_missing",
+    "    done < <(sed '/^$/q' \"$c/repo.bundle\" | grep -a '^-' | cut -c2- | cut -d' ' -f1)",
+    "    gd bundle unbundle \"$c/repo.bundle\" || fail checkpoint_corrupt",
+    "  fi",
+    "  step=refs",
+    "  while read -r _ sha name; do hex \"$sha\"; branch \"$name\"; gd update-ref \"$name\" \"$sha\"; done < <(grep '^branch ' \"$m\" || true)",
+    "  if [ ! -d \"$repo\" ] || [ -L \"$repo\" ] || [ -z \"$(ls -A \"$repo\")\" ]; then",
+    "    line=$(grep '^head ' \"$m\" || true)",
+    "    case \"$line\" in",
+    "      'head ref '*) ref=${line#head ref }; branch \"$ref\"; gd symbolic-ref HEAD \"$ref\" ;;",
+    "      'head detached '*) sha=${line#head detached }; hex \"$sha\"; gd update-ref --no-deref HEAD \"$sha\" ;;",
+    "    esac",
+    "  fi",
+    "  step=stash; gd update-ref -d refs/stash || true",
+    "  while read -r _ sha message; do hex \"$sha\"; gd update-ref --create-reflog -m \"$(printf %s \"$message\" | base64 -d)\" refs/stash \"$sha\"; done < <(grep '^stash ' \"$m\" | tac || true)",
+    "  step=hook; mkdir -p \"$planned_git/hooks\"",
+    `  printf %s ${quote(b64(`#!/bin/sh
+echo ${quote(SUBMODULE_PUSH_REFUSED)} >&2
+exit 1
+`))} | base64 -d > "$planned_git/hooks/pre-push"; chmod 755 "$planned_git/hooks/pre-push"`,
+    ")",
+    `code=$?; set -e; [ "$code" -eq 0 ] || printf '${SUBMODULE_UNRESTORED} ${j}\\n' >&3`,
+    `rm -f "$work/submodule-${j}/token" "$work/submodule-${j}/askpass"; fi`,
+  ];
 }
 
 /** The 1-based places in the restore's plan of the submodules it could not put back. */
