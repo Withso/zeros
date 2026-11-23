@@ -250,7 +250,7 @@ export type PreconditionFacts = {
   /** Organizations whose live build is the shared base: evidence that CLOUD_V2_SHARED_BASE_SNAPSHOT is configured (the
    * variable is Railway's and not read). Null when unread. */
   sharedBaseInUse: number | null;
-  /** The shared base for the pinned runtime (cloud_v2_shared_bases, 0269): absent before that migration; its state, whether
+  /** The shared base for the pinned runtime (cloud_v2_shared_bases, 0268): absent before that migration; its state, whether
    * Boat has it, and which organizations ride which shared base. Null when unread. */
   sharedBase?: { table: false } | { table: true; pinned: { name: string; state: string } | null; atBoat: boolean | null;
     perName: { name: string; organizations: number }[]; ownBases: number } | null;

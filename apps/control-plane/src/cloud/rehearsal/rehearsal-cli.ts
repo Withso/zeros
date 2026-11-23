@@ -327,7 +327,7 @@ async function main(argv: string[]): Promise<number> {
   }
 }
 
-/** The shared base for the pinned runtime, read-only: its row (0269), whether Boat has it, and organizations per shared base. */
+/** The shared base for the pinned runtime, read-only: its row (0268), whether Boat has it, and organizations per shared base. */
 export async function sharedBaseFacts(reads: Pick<Database, "read">, runtimeSha256: string | null, atBoat: (name: string) => Promise<boolean>):
   Promise<NonNullable<PreconditionFacts["sharedBase"]>> {
   const table = (await reads.read("SELECT to_regclass('public.cloud_v2_shared_bases') IS NOT NULL AS present"))[0]?.present === true;
