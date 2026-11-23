@@ -144,6 +144,8 @@ export type CloudV2ComputerOptions = {
 export const CLOUD_V2_AUTOMATIC_BASE_BUDGET = { perHour: 4, perDay: 30 } as const;
 /** After an automatic base build fails: 15 minutes, doubling, at most 6 hours, until one succeeds. */
 export const AUTOMATIC_BASE_RETRY_FIRST_MS = 15 * 60_000;
+/** A base build cancelled because its organization's cloud ended: not a failure of the base (readBase, the sweep). */
+const CLOUD_ENDED = "computer_cloud_unavailable";
 export const AUTOMATIC_BASE_RETRY_MAX_MS = 6 * 60 * 60_000;
 export function automaticBaseRetryDelay(failures: number): number {
   return Math.min(AUTOMATIC_BASE_RETRY_MAX_MS, AUTOMATIC_BASE_RETRY_FIRST_MS * 2 ** Math.max(0, failures - 1));
@@ -445,11 +447,14 @@ export class CloudV2Computers {
       // A create that finds the first failure of a run asks for one try now, rather than waiting out its 15 minutes;
       // if that fails too the run is two long and it waits like everyone else. The sweep never asks early.
       const current = await this.readBase(tx, organizationId, true, now, options.create === true);
-      if (current.kind !== "none") return current.state;
-      if (!current.installScript && shared && sharedAvailable) {
+      // In a failure backoff too, an organization without an install script takes the ready shared base: that needs no
+      // machine, and the backoff paces machines.
+      const waiting = current.kind === "none" ? current : current.backoff;
+      if (waiting && !waiting.installScript && shared && sharedAvailable) {
         activated = true;
-        return { state: "ready", buildId: await this.insertSharedBase(tx, organizationId, shared, current.snapshotName) };
+        return { state: "ready", buildId: await this.insertSharedBase(tx, organizationId, shared, waiting.snapshotName) };
       }
+      if (current.kind !== "none") return current.state;
       return { state: "preparing", buildId: await this.insertAutomatic(tx, organizationId, { reason: "manual", baseSnapshot: current.snapshotName }) };
     });
     if (activated) await this.baseActivated?.(organizationId).catch(() => undefined);
@@ -479,7 +484,8 @@ export class CloudV2Computers {
   }
 
   private async readBase(tx: Tx, organizationId: string, lock: boolean, now: Date, retryFirstFailure = false): Promise<
-    { kind: "known"; state: CloudV2BaseState } | { kind: "none"; installScript: string | null; snapshotName: string | null }> {
+    { kind: "known"; state: CloudV2BaseState; backoff?: { installScript: string | null; snapshotName: string | null } }
+    | { kind: "none"; installScript: string | null; snapshotName: string | null }> {
     const org = (await tx.query<{ enabled: boolean }>(`SELECT cloud_organization_enabled(o) AS enabled FROM organizations o
       WHERE o.id=$1 AND o.deleted_at IS NULL AND o.lifecycle_status='active'${lock ? " FOR UPDATE" : ""}`, [organizationId])).rows[0];
     if (!org?.enabled) return { kind: "known", state: { state: "unavailable" } };
@@ -498,13 +504,20 @@ export class CloudV2Computers {
       `SELECT id, state, error_code, finished_at, clock_timestamp() AS at FROM cloud_v2_computer_builds WHERE org_id=$1 AND base_only
        ORDER BY version DESC LIMIT 20`, [organizationId])).rows;
     const failed = [];
-    for (const row of recent) { if (row.state !== "failed" && row.state !== "cancelled") break; failed.push(row); }
+    for (const row of recent) {
+      // Cancelled because the organization's cloud ended (computer_cloud_unavailable): not the base failing, so neither
+      // part of a run of failures nor its end. When cloud returns, the base is made at once.
+      if (row.state === "cancelled" && row.error_code === CLOUD_ENDED) continue;
+      if (row.state !== "failed" && row.state !== "cancelled") break;
+      failed.push(row);
+    }
     const last = failed[0];
     if (last && !(retryFirstFailure && failed.length === 1)) {
       const at = last.at ?? now;
       const nextAt = new Date((last.finished_at ?? at).getTime() + automaticBaseRetryDelay(failed.length));
       if (nextAt > at) return { kind: "known", state: { state: "failed", buildId: last.id, errorCode: last.error_code ?? "computer_build_failed",
-        failures: failed.length, nextAttemptAt: nextAt.toISOString() } };
+        failures: failed.length, nextAttemptAt: nextAt.toISOString() },
+        backoff: { installScript: computer?.install_script ?? null, snapshotName: computer?.snapshot_name ?? null } };
     }
     return { kind: "none", installScript: computer?.install_script ?? null, snapshotName: computer?.snapshot_name ?? null };
   }
@@ -550,25 +563,27 @@ export class CloudV2Computers {
          AND live.state = 'succeeded' AND NOT live.base_only`, [organizationId]);
   }
 
-  /** Organizations the sweep may give a base: cloud enabled by the one rule, not a Personal organization (it gets its
-   * base at first use), used (a project, a workspace not deleted, or a workspace active in the last 30 days), with no
-   * base and nothing building. Most recently used first. */
+  /** Organizations the sweep may give a base: cloud enabled by the one rule, used (a project, a workspace not deleted,
+   * or a workspace active in the last 30 days), with no base and nothing building; a Personal organization only once it
+   * has a project (a project's copy waits for the base; otherwise it gets its base at first use). Most recently used
+   * first. */
   async sweepCandidates(limit: number): Promise<{ organizationId: string; installScript: string | null }[]> {
     if (!this.options.readyCopies) return [];
     const { rows } = await withSystemTx(this.pool, tx => tx.query<{ id: string; install_script: string | null }>(
       `SELECT o.id, c.install_script FROM organizations o
        LEFT JOIN cloud_v2_computers c ON c.org_id = o.id
        LEFT JOIN cloud_v2_computer_builds live ON live.id = c.active_build_id AND live.org_id = o.id AND live.state = 'succeeded'
-       WHERE o.deleted_at IS NULL AND o.lifecycle_status = 'active' AND cloud_organization_enabled(o) AND NOT o.is_personal
+       WHERE o.deleted_at IS NULL AND o.lifecycle_status = 'active' AND cloud_organization_enabled(o)
+         AND (NOT o.is_personal OR EXISTS (SELECT 1 FROM cloud_projects pp WHERE pp.org_id = o.id))
          AND NOT (coalesce(live.base_only, false) AND c.snapshot_name IS NOT NULL)
          AND NOT EXISTS (SELECT 1 FROM cloud_v2_computer_builds q WHERE q.org_id = o.id AND q.state IN ('queued','building'))
          -- Not in its failure backoff, as readBase reckons it (automaticBaseRetryDelay): the latest base build failed and
          -- the delay for its run of failures has not passed. Otherwise those organizations would fill the page.
          AND NOT EXISTS (SELECT 1 FROM (SELECT f.state, f.finished_at FROM cloud_v2_computer_builds f WHERE f.org_id = o.id AND f.base_only
-             ORDER BY f.version DESC LIMIT 1) last
+             AND NOT (f.state = 'cancelled' AND f.error_code = '${CLOUD_ENDED}') ORDER BY f.version DESC LIMIT 1) last
            WHERE last.state IN ('failed','cancelled') AND coalesce(last.finished_at, clock_timestamp()) + make_interval(secs => least(${AUTOMATIC_BASE_RETRY_MAX_MS / 1000},
              ${AUTOMATIC_BASE_RETRY_FIRST_MS / 1000} * power(2, (SELECT count(*) - 1 FROM cloud_v2_computer_builds x WHERE x.org_id = o.id AND x.base_only
-               AND x.state IN ('failed','cancelled') AND x.version > coalesce((SELECT max(y.version) FROM cloud_v2_computer_builds y
+               AND x.state IN ('failed','cancelled') AND NOT (x.state = 'cancelled' AND x.error_code = '${CLOUD_ENDED}') AND x.version > coalesce((SELECT max(y.version) FROM cloud_v2_computer_builds y
                  WHERE y.org_id = o.id AND y.base_only AND y.state NOT IN ('failed','cancelled')), 0))))) > clock_timestamp())
          AND (EXISTS (SELECT 1 FROM cloud_projects p WHERE p.org_id = o.id)
            OR EXISTS (SELECT 1 FROM cloud_v2_workspaces w WHERE w.org_id = o.id
