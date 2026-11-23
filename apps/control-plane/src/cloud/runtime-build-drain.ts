@@ -59,7 +59,10 @@ async function status(tx: Tx, row: Row): Promise<BuildDrainStatus> {
     (SELECT count(*)::int FROM cloud_v2_computer_builds b WHERE b.state<>'building' AND
       (b.builder_create_pending OR (b.builder_sandbox_id IS NOT NULL AND b.builder_deleted_at IS NULL) OR b.operation_until IS NOT NULL
        OR (b.snapshot_id IS NOT NULL AND b.snapshot_deleted_at IS NULL
-         AND NOT EXISTS (SELECT 1 FROM cloud_v2_computers c WHERE c.active_build_id=b.id)
+         -- Not a leftover: the live build, or an organization's legacy build, kept on purpose with its snapshot (#1260,
+         -- computer.ts kept: 30 days, for ready copies being turned off again) until its cleanup is requested.
+         AND NOT EXISTS (SELECT 1 FROM cloud_v2_computers c WHERE c.active_build_id=b.id
+           OR (c.legacy_build_id=b.id AND b.cleanup_requested_at IS NULL))
          AND NOT EXISTS (SELECT 1 FROM cloud_v2_workspaces w WHERE w.computer_build_id=b.id AND w.org_id=b.org_id
            AND w.boat_sandbox_id IS NULL AND (w.state='creating' OR (w.restore_pending AND w.state<>'deleted')))))) AS unresolved,
     (SELECT count(*)::int FROM cloud_worker_runtime_handoffs h JOIN cloud_v2_workspaces w ON w.id=h.workspace_id
