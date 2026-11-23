@@ -1304,7 +1304,8 @@ export function parseCheckpointResult(stdout: string): CheckpointResult {
     }
     const unchanged = /^zeros-checkpoint-unchanged fingerprint=([0-9a-f]{64})$/.exec(line);
     if (unchanged) return { ok: true, unchanged: true, fingerprint: unchanged[1]! };
-    const failed = /^zeros-checkpoint-error ([a-z_]+)(?: ([a-z]+))?$/.exec(line);
+    // A later repository's or a submodule's part names its kind and place (repository-1, submodule-2): the kind counts.
+    const failed = /^zeros-checkpoint-error ([a-z_]+)(?: ([a-z]+)(?:-[1-9][0-9]?)?)?$/.exec(line);
     if (failed) return { ok: false, code: errorCode(failed[1]!, "checkpoint_failed"), step: failed[2] ?? "unknown" };
   }
   return { ok: false, code: "checkpoint_failed", step: "unknown" };

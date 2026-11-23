@@ -58,6 +58,7 @@ function setup(claimed: (CloudV2LifecycleWorkspace & { attempts: number })[], op
   runtimeForWorkspace?: CloudV2LifecycleDeps["runtimeForWorkspace"]; bootEnv?: CloudV2LifecycleDeps["bootEnv"]; builds?: CloudV2LifecycleDeps["builds"]; recovery?: CloudV2LifecycleDeps["recovery"];
   authorizeWorkspace?: CloudV2LifecycleDeps["authorizeWorkspace"]; resolvePendingSource?: CloudV2LifecycleDeps["resolvePendingSource"]; previousRuntimeSha256?: string; logs?: true;
   readyCopies?: CloudV2LifecycleDeps["readyCopies"]; repositories?: CloudV2LifecycleDeps["repositories"];
+  checkouts?: CloudV2LifecycleDeps["checkouts"]; submoduleToken?: CloudV2LifecycleDeps["submoduleToken"];
   claimExecutionRestore?: CloudV2LifecycleDeps["claimExecutionRestore"] } = {}) {
   const retries = [...options.retries ?? []];
   const compute: CloudV2Compute = {
@@ -157,6 +158,8 @@ function setup(claimed: (CloudV2LifecycleWorkspace & { attempts: number })[], op
     ...(options.resolvePendingSource ? { resolvePendingSource: options.resolvePendingSource } : {}),
     ...(options.readyCopies ? { readyCopies: options.readyCopies } : {}),
     ...(options.repositories ? { repositories: options.repositories } : {}),
+    ...(options.checkouts ? { checkouts: options.checkouts } : {}),
+    ...(options.submoduleToken ? { submoduleToken: options.submoduleToken } : {}),
     ...(options.claimExecutionRestore ? { claimExecutionRestore: options.claimExecutionRestore } : {}),
   });
   return { lifecycle, compute, store, stopWorker, logs };
@@ -370,6 +373,8 @@ describe("cloud v2 lifecycle", () => {
     ["the upload has another size", {}, 99, "checkpoint_upload_failed", true, "size"],
     ["the command prints nothing", { checkpoint: "" }, 1234, "checkpoint_failed", false, "no_result"],
     ["the VM names a step the script does not have", { checkpoint: "zeros-checkpoint-error checkpoint_failed secretname" }, 1234, "checkpoint_failed", true, "no_result"],
+    // C4: a submodule's own part, before the upload: the retry path, as for any other step.
+    ["a submodule's part fails", { checkpoint: "zeros-checkpoint-error checkpoint_failed submodule-2" }, 1234, "checkpoint_failed", true, "step_submodule"],
   ] as const)("still stops, keeps the previous checkpoint and records why when %s", async (_case, vm, size, code, settled, cause) => {
     const checkpoints = checkpointsFake(), logs: string[] = [];
     checkpoints.storage.size.mockResolvedValue(size);
@@ -556,6 +561,71 @@ describe("cloud v2 lifecycle", () => {
     expect(githubToken).toHaveBeenCalledWith(expect.anything(), "withso/web");
     expect(restore).toContain("https://github.com/withso/web.git");
     expect(restore).toContain(Buffer.from("synthetic-token-for-withso/web-0123").toString("base64"));
+  });
+
+  describe("a workspace's submodules (C4)", () => {
+    const lib = { position: 0, repository: "acme/lib", repositoryId: "1", checkoutFolder: "o/r/lib", repositoryFolder: "o/r",
+      baseCommit: "c".repeat(40), gitDir: `modules/${"d".repeat(64)}` };
+    const inner = { ...lib, repository: "acme/inner", repositoryId: "2", checkoutFolder: "o/r/lib/inner", gitDir: `${lib.gitDir}/modules/${"e".repeat(64)}`, public: true as const };
+    const checkouts = vi.fn(async () => ({ repositories: [], submodules: [lib, inner] }));
+    const TOKEN = ["synthetic", "submodule", "token", "0123456789"].join("-");
+
+    it("captures each and restores each, a private one with its own read-only token and a public one with none", async () => {
+      const stopping = setup([workspace("stopping", { boatSandboxId: "bx_abc1", checkpoint: SAVED })], { checkpoints: checkpointsFake(), checkouts });
+      vmCommands(stopping);
+      await stopping.lifecycle.tick();
+      const [, command] = vmCommand(stopping, "zeros-checkpoint-saved")!;
+      expect(command).toContain("step=submodule-2");
+      expect(command).toContain("/home/user/o/r/lib/inner");
+      const submoduleToken = vi.fn(async () => ({ token: TOKEN }));
+      const restoring = setup([workspace("starting", { checkpoint: SAVED })], { checkpoints: checkpointsFake(), checkouts, submoduleToken });
+      vmCommands(restoring);
+      await restoring.lifecycle.tick();
+      const [, restore] = vmCommand(restoring, "zeros-checkpoint-restored")!;
+      expect(submoduleToken).toHaveBeenCalledExactlyOnceWith(expect.anything(), "acme/lib");
+      expect(restore).toContain("https://github.com/acme/lib.git");
+      expect(restore).toContain("https://github.com/acme/inner.git");
+      expect(restore).toContain(Buffer.from(TOKEN).toString("base64"));
+      expect(restoring.store.finishRestore).toHaveBeenCalled();
+    });
+
+    it("restores without a credential, not at all, when a private one's token cannot be had", async () => {
+      const submoduleToken = vi.fn(async () => { throw Object.assign(new Error("no access"), { status: 403 }); });
+      const restoring = setup([workspace("starting", { checkpoint: SAVED })], { checkpoints: checkpointsFake(), checkouts, submoduleToken });
+      vmCommands(restoring);
+      await restoring.lifecycle.tick();
+      const [, restore] = vmCommand(restoring, "zeros-checkpoint-restored")!;
+      expect(restore).toContain("https://github.com/acme/lib.git");
+      expect(restoring.store.finishRestore).toHaveBeenCalled();
+    });
+
+    it("opens when one could not be restored, and says so once, by count", async () => {
+      const restoring = setup([workspace("starting", { checkpoint: SAVED })], { checkpoints: checkpointsFake(), checkouts, submoduleToken: async () => ({ token: TOKEN }), logs: true });
+      vmCommands(restoring, { restore: "zeros-submodule-unrestored 2\nzeros-submodule-unrestored 2\nzeros-checkpoint-restored" });
+      await restoring.lifecycle.tick();
+      expect(restoring.store.finishRestore).toHaveBeenCalled();
+      expect(restoring.store.transition).not.toHaveBeenCalled();
+      expect(restoring.logs.warn).toEqual([`[cloud-v2] restore left 1 submodule(s) unrestored workspace=${WS.slice(0, 8)}`]);
+    });
+
+    it("issues the same commands, and asks for no token, without any", async () => {
+      const none = vi.fn(async () => ({ repositories: [], submodules: [] }));
+      const commands = async (deps: { checkouts?: typeof none }) => {
+        const stopping = setup([workspace("stopping", { boatSandboxId: "bx_abc1", checkpoint: SAVED })], { checkpoints: checkpointsFake(), ...deps });
+        vmCommands(stopping);
+        await stopping.lifecycle.tick();
+        const submoduleToken = vi.fn(async () => ({ token: TOKEN }));
+        const restoring = setup([workspace("starting", { checkpoint: SAVED })], { checkpoints: checkpointsFake(), submoduleToken, ...deps });
+        vmCommands(restoring);
+        await restoring.lifecycle.tick();
+        expect(submoduleToken).not.toHaveBeenCalled();
+        // The archive's random object name and key differ per run: compare the command's shape.
+        const shape = (command: string) => command.replace(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/g, "ID")
+          .replace(/printf %s '\\''[A-Za-z0-9+/]{43}='\\'' > "\$work\/key"/g, "KEY");
+        return [stopping, restoring].map(f => vi.mocked(f.compute.exec).mock.calls.map(([, command]) => shape(command)));
+      };
+      expect(await commands({ checkouts: none })).toEqual(await commands({}));
+    });
   });
 
   it("restores every repository of a workspace of several in shared execution, each with its own token, and refuses one without", async () => {

@@ -18,7 +18,7 @@ import type { CloudV2CheckpointFork, CloudV2CheckpointReuse, CloudV2CheckpointRe
 import { CLOUD_V2_WORKER_PORT, type CloudV2WorkerTiming, type CloudV2WorkerBootTiming } from "./contract.js";
 import type { WorkspaceCheckouts, WorkspaceSubmoduleCheckout } from "./workspace-repositories.js";
 import { CLOUD_V2_BACKUP_PROBE_SECONDS, CLOUD_V2_CHECKPOINT_ERRORS, CLOUD_V2_CHECKPOINT_SECONDS, WORKER_OFF_COMMAND, WORKER_UNIT_CHECK, backupProbeCommand, checkpointCommand,
-  cloudV2CheckpointObject, parseBackupProbe, parseCheckpointResult, parseRestoreResult, restoreCommand, workerUnitOff, type BackupProbe,
+  cloudV2CheckpointObject, parseBackupProbe, parseCheckpointResult, parseRestoreResult, parseUnrestoredSubmodules, restoreCommand, workerUnitOff, type BackupProbe,
   type CheckpointSubmodule, type CloudV2CheckpointError, type CloudV2CheckpointStorage, environmentRestoreCommand, parseEnvironmentRestore } from "./checkpoint.js";
 import { ARCHIVE_SCRUB_SECONDS, CHANGED_SINCE_STOP_SECONDS, archiveScrubCommand, changedSinceStopCommand, parseArchiveScrub, parseChangedSinceStop,
   stopMarkerCommand, type ArchiveScrubResult } from "./archive-scrub.js";
@@ -254,7 +254,7 @@ function sandboxLost(error: unknown): boolean {
 }
 
 /** The checkpoint script's own step names; anything else the VM prints is not logged. */
-const CHECKPOINT_STEPS: ReadonlySet<string> = new Set(["attachments", "bundle", "decrypt", "download", "encrypt", "environment", "files", "fingerprint", "gitdir", "ignored", "marker", "node", "objects", "pack", "refs", "remotes", "repository", "sessions", "start", "stash", "turns", "upload", "upstream", "worktree"]);
+const CHECKPOINT_STEPS: ReadonlySet<string> = new Set(["attachments", "bundle", "decrypt", "download", "encrypt", "environment", "files", "fingerprint", "gitdir", "ignored", "marker", "node", "objects", "pack", "refs", "remotes", "repository", "sessions", "start", "stash", "submodule", "turns", "upload", "upstream", "worktree"]);
 const checkpointError = (code: CloudV2CheckpointError) => Object.assign(new Error("checkpoint failed"), { code });
 const checkpointCode = (error: unknown): CloudV2CheckpointError =>
   (CLOUD_V2_CHECKPOINT_ERRORS as readonly string[]).includes(errorCode(error)) ? errorCode(error) as CloudV2CheckpointError : "checkpoint_failed";
@@ -1213,12 +1213,13 @@ export class CloudV2Lifecycle {
       // instance once deletion began, issues no upload at all.
       if (!await store.checkpointUpload(workspace.id, owner, generation, object, uploadUntil, ...scoped)) return "fenced";
       const reuse = await this.reusable(workspace);
-      // Every repository of a workspace of several, each in its own part of the archive.
-      const others = (await this.checkouts(workspace)).repositories;
+      // Every repository of a workspace of several, each in its own part of the archive, and each submodule it fetched.
+      const { repositories: others, submodules } = await this.checkouts(workspace);
       const command = checkpointCommand({ checkoutPath: workspaceCheckoutPath(workspace), home: CLOUD_V2_HOME,
         baseBranch: workspace.baseBranch, key, uploadUrl: await checkpoints.storage.uploadUrl(workspace.id, object), ...(reuse ? { reuse } : {}),
         ...(this.retention && scope === "retry" ? { backup: true } : {}),
-        ...(others.length ? { repositories: others.map(entry => ({ checkoutPath: `${CLOUD_V2_HOME}/${entry.checkoutFolder}`, baseBranch: entry.baseBranch })) } : {}) });
+        ...(others.length ? { repositories: others.map(entry => ({ checkoutPath: `${CLOUD_V2_HOME}/${entry.checkoutFolder}`, baseBranch: entry.baseBranch })) } : {}),
+        ...(submodules.length ? { submodules: checkpointSubmodules(submodules) } : {}) });
       const { result, saved } = await this.measure(workspace, "checkpoint", async () => {
         const result = await this.deps.compute.exec(vm, command, CLOUD_V2_CHECKPOINT_SECONDS);
         return { result, saved: parseCheckpointResult(result.stdout) };
@@ -1531,8 +1532,8 @@ export class CloudV2Lifecycle {
     const active = workspace.executionIntent !== undefined;
     if (active && !await this.deps.claimExecutionRestore?.(workspace, sandboxId)) throw checkpointError("checkpoint_restore_failed");
     const github = await this.deps.githubToken?.(workspace) ?? null;
-    // Each repository after the first is restored with its own token and clone URL.
-    const others = (await this.checkouts(workspace)).repositories;
+    // Each repository after the first is restored with its own token and clone URL; each planned submodule with its own.
+    const { repositories: others, submodules: planned } = await this.checkouts(workspace);
     const repositories = await Promise.all(others.map(async entry => {
       const token = await this.deps.githubToken?.(workspace, entry.repository) ?? null;
       // Shared execution fetches every repository's objects with its own token, as for the first.
@@ -1540,12 +1541,18 @@ export class CloudV2Lifecycle {
       return { checkoutPath: `${CLOUD_V2_HOME}/${entry.checkoutFolder}`, repositoryUrl: `https://github.com/${entry.repository}.git`,
         ...(token ? { githubToken: token.token } : {}) };
     }));
+    // A private submodule's read-only token; one that cannot be had is restored without a credential, and fails on its
+    // own if it needs one. A public one never carries one.
+    const submodules = await Promise.all(planned.map(async entry => {
+      const token = entry.public ? null : await this.deps.submoduleToken?.(workspace, entry.repository).catch(() => null) ?? null;
+      return { ...checkpointSubmodules([entry])[0]!, repository: entry.repository, ...(entry.public ? { public: true } : {}), ...(token ? { githubToken: token.token } : {}) };
+    }));
     const key = checkpoints.open(checkpoint.key, workspace.id, checkpoint.object);
     try {
       const command = restoreCommand({ checkoutPath: workspaceCheckoutPath(workspace), home: CLOUD_V2_HOME, key,
         sha256: checkpoint.sha256, downloadUrl: await checkpoints.storage.downloadUrl(workspace.id, checkpoint.object),
         repositoryUrl: `https://github.com/${workspace.repository}.git`, ...(github ? { githubToken: github.token } : {}), ...(active ? { active: true } : {}),
-        ...(repositories.length ? { repositories } : {}) });
+        ...(repositories.length ? { repositories } : {}), ...(submodules.length ? { submodules } : {}) });
       await this.deps.store.defer(workspace.id, "starting", CHECKPOINT_LEASE_MS, { failure: true });
       await this.deps.assertExecution?.(workspace);
       const result = await this.deps.compute.exec(sandboxId, command, CLOUD_V2_CHECKPOINT_SECONDS);
@@ -1553,6 +1560,10 @@ export class CloudV2Lifecycle {
       const restored = parseRestoreResult(result.stdout);
       if (!restored.ok) throw checkpointError(restored.code);
       if (result.exitCode !== 0 || result.timedOut) throw checkpointError("checkpoint_restore_failed");
+      // Never blocks the open: the rest is restored and each such submodule is left for the worker to fetch at its gitlink.
+      // Nothing tells the person yet (the lostWork follow-up); a count only, never a path.
+      const unrestored = parseUnrestoredSubmodules(result.stdout).filter(place => place <= submodules.length).length;
+      if (unrestored) this.deps.logger?.warn(`[cloud-v2] restore left ${unrestored} submodule(s) unrestored workspace=${workspace.id.slice(0, 8)}`);
     } finally { key.fill(0); }
   }
 
