@@ -437,7 +437,9 @@ export function cloudV2StopProbe(row: { backup_probe?: BackupProbe | null; backu
  * or this stop left nothing off GitHub (rebuilt without loss); otherwise "pushed": it is rebuilt from GitHub and
  * work never pushed is gone (the lostWork note). An earlier stop's backup alone is "pushed": it lacks this stop's work. */
 /** The build a workspace restores from, for both restore paths (beginRestore, pinRestoreImage): the organization's active
- * Cloud Computer build, locked so activation and cleanup wait for the pin the caller writes in the same transaction. */
+ * Cloud Computer build, locked so activation and cleanup wait for the pin the caller writes in the same transaction.
+ * With ready copies on that may be a base that holds no repository (base_only, policy 2), built or the shared one: its
+ * image clones every repository, and nothing else is needed (retention.integration.test.ts covers both). */
 async function restoreBuild(tx: Tx, organizationId: string): Promise<{ id: string; snapshot_name: string; source_policy_version: number; recipe: unknown } | null> {
   return (await tx.query<{ id: string; snapshot_name: string; source_policy_version: number; recipe: unknown }>(
     `SELECT b.id, c.snapshot_name, b.source_policy_version, b.recipe FROM cloud_v2_computers c

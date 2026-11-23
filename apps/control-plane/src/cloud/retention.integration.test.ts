@@ -311,6 +311,30 @@ d("cloud v2 retention", () => {
       await rebuilt(newer);
     });
 
+    // Ready copies on: the live build may be a base that holds no repository, which Zeros prepared (no creator), or the
+    // shared Zeros base (its snapshot a reference, name@build). Both are what restoreBuild takes; no rule of its own.
+    it.each([
+      { kind: "a base Zeros prepared", shared: false },
+      { kind: "the shared Zeros base", shared: true },
+    ])("rebuilds a lost VM from the live build when it is $kind", async ({ shared }) => {
+      remoteBranches.add(path("app"));
+      await stop();
+      const base = randomUUID(), snapshot = shared ? `zeros-shared@${base}` : "zeros-base-3";
+      await pool.query(`INSERT INTO cloud_v2_computer_builds (id, org_id, version, recipe, state, created_by, source_policy_version, snapshot_id,
+          source_targets, base_only, base_shared, automatic) VALUES ($1,$2,3,'{"repositories":[]}','succeeded',NULL,2,$3,'[]',true,$4,true)`,
+        [base, org, snapshot, shared]);
+      await pool.query("UPDATE cloud_v2_computers SET active_build_id=$2, snapshot_name=$3 WHERE org_id=$1", [org, base, snapshot]);
+      await pool.query("UPDATE cloud_v2_computer_builds SET snapshot_deleted_at=clock_timestamp() WHERE org_id=$1 AND id<>$2", [org, base]);
+      boat.machine(vm)!.state = "deleted";
+      await store.transition(id, ["stopped"], "starting");
+      await clean().tick();
+      const restored = await row();
+      expect(restored.state).toBe("starting");
+      expect(boat.machine(restored.boat_sandbox_id)!.from).toBe(shared ? "zeros-shared" : "zeros-base-3");
+      expect((await columns("computer_build_id")).computer_build_id).toBe(base);
+      expect(cloned).toEqual([restored.boat_sandbox_id]);
+    });
+
     it("opens an archived workspace whose machine expired: restores reads pushed, and the open rebuilds from GitHub with the lost-work note", async () => {
       remoteBranches.add(path("app"));
       boat.write(vm, `${path("app")}/UNPUSHED`, "work");
