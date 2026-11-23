@@ -296,7 +296,9 @@ describe("a patch release's revocation fix (0255 there, 0270 here)", () => {
     });
     await runMigrations(pool, { env: {} });
     const recorded = calls.filter(({ text }) => /INSERT\s+INTO\s+schema_migrations/i.test(text)).map(({ values }) => values[0]);
-    expect(recorded).toEqual([...LADDER.filter(name => { const n = Number(name.slice(0, 4)); return n >= 255 && n <= 269; }), MAIN]);
+    // main's own 0255 onwards in order: 0270 from the patch's row, every later migration applied as usual.
+    expect(recorded).toEqual(LADDER.filter(name => Number(name.slice(0, 4)) >= 255));
+    expect(recorded.indexOf(MAIN)).toBe(recorded.indexOf("0269_cloud_v2_archive_guard.sql") + 1);
     // 0270 is recorded from the patch's row (the alias), and its body never runs here.
     const aliasRow = calls.find(({ text, values }) => /INSERT\s+INTO\s+schema_migrations/i.test(text) && values[0] === MAIN)!;
     expect(aliasRow.values[2]).toBe(PATCH);
