@@ -1,5 +1,5 @@
 import { expect } from "@playwright/test";
-import { designFrameElementBox, openLayersDrawer } from "./ui-smoke-design-helpers.mjs";
+import { designFrameElementBox, openLayersDrawer, pressDesignScrub } from "./ui-smoke-design-helpers.mjs";
 
 export async function runDesignLayoutGesturesSmoke({ page, check }) {
   const origin = new URL(page.url()).origin;
@@ -32,15 +32,12 @@ export async function runDesignLayoutGesturesSmoke({ page, check }) {
   await padding.fill("21.7");
   await padding.press("Enter");
   await expect(padding).toHaveValue("22");
-  const scrub = await layout
-    .getByRole("button", { name: "Scrub Left", exact: true })
-    .boundingBox();
+  const scrubLabel = layout.getByRole("button", { name: "Scrub Left", exact: true });
   await page.keyboard.down("Shift");
-  await page.mouse.move(scrub.x + scrub.width / 2, scrub.y + scrub.height / 2);
-  await page.mouse.down();
+  const start = await pressDesignScrub(page, scrubLabel);
   await page.mouse.move(
-    scrub.x + scrub.width / 2 + 4,
-    scrub.y + scrub.height / 2,
+    start.x + 4,
+    start.y,
     { steps: 4 },
   );
   await page.mouse.up();
