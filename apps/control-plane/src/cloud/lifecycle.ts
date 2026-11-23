@@ -1513,11 +1513,10 @@ export class CloudV2Lifecycle {
     return sandboxId;
   }
 
-  /** A fork of a ready copy, once its restore settled: every checkout of the workspace there, or a direct clone of the
-   * missing ones (a copy's archive may lack what its build wrote). */
+  /** A fork of a ready copy, read at once (a fork serves its archive's files from its first second): every checkout of the
+   * workspace there, or a direct clone of the missing ones (a copy's archive may lack what its build wrote). */
   private async forkCheckoutsOrClone(workspace: CloudV2LifecycleWorkspace, sandboxId: string): Promise<void> {
     const paths = [workspaceCheckoutPath(workspace), ...(await this.deps.repositories?.(workspace) ?? []).map(entry => `${CLOUD_V2_HOME}/${entry.checkoutFolder}`)];
-    await diskSettled(this.deps.compute, sandboxId, { sleep: ms => this.pause(ms) }).catch(() => "unknown");
     const read = await this.deps.compute.exec(sandboxId, `bash -c ${shellQuote(readyCopyCheckoutsCommand(paths).join("\n"))}`, 120).catch(() => null);
     if (read && read.exitCode === 0 && !read.timedOut && checkoutsMatch(read.stdout, paths.map(() => ({ commit: null })))) return;
     this.deps.logger?.warn(`[cloud-v2] ready copy fork lacks a checkout; cloning directly workspace=${workspace.id.slice(0, 8)}`);

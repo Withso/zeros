@@ -1262,8 +1262,8 @@ export class CloudV2ReadyCopyForks<W extends ReadyCopyWorkspace = ReadyCopyWorks
    * before the worker starts. A failure is not the workspace's, and one
    * repository's never stops another's: that checkout opens on the copy's
    * commit and the worker's own refresh retries the fetch in the background. */
-  /** After the fork, its restore settled (bounded): whether it holds every checkout its copy recorded, at the recorded
-   * commit. When not, that generation is never forked again and is rebuilt, and the caller clones directly. True for a
+  /** Right after the fork, with no wait (a fork serves its archive's files from its first second): whether it holds every
+   * checkout its copy recorded, at the recorded commit. One command, and no read of the machine. When not, that generation is never forked again and is rebuilt, and the caller clones directly. True for a
    * workspace that did not fork a copy. */
   async verify(workspace: W, sandboxId: string): Promise<boolean> {
     const fork = await this.deps.copies.forkOf(workspace.id);
@@ -1271,7 +1271,6 @@ export class CloudV2ReadyCopyForks<W extends ReadyCopyWorkspace = ReadyCopyWorks
     const copy = await this.deps.copies.get(fork.copyId);
     // A copy recorded before its folders were (or with none) cannot be read back: taken as before.
     if (!copy?.result?.length || copy.result.some(entry => !entry.checkoutFolder)) return true;
-    await diskSettled(this.deps.compute, sandboxId, { sleep: this.deps.sleep ?? (ms => new Promise(resolve => setTimeout(resolve, ms))) }).catch(() => "unknown");
     const read = await this.deps.compute.exec(sandboxId, asZeros(readyCopyCheckoutsCommand(copy.result.map(entry => homePath(entry.checkoutFolder!)))), 120)
       .catch(() => null);
     if (read && read.exitCode === 0 && !read.timedOut && checkoutsMatch(read.stdout, copy.result)) return true;

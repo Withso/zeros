@@ -175,6 +175,24 @@ d("cloud v2 ready copies", () => {
       expect(await copies.forkable(org, zeros, new Date(clock))).toBeNull();
     });
 
+    it("with the fork read-back on, reads a copy's checkouts through one throwaway fork of its archive, then deletes it", async () => {
+      await liveBase();
+      await copyBuilder({ verifyArchiveByFork: true }).tick();
+      const copy = await row(1);
+      expect(copy.state).toBe("ready");
+      const verify = [...boat.machines.values()].filter(machine => machine.source === copy.machineId);
+      expect(verify).toHaveLength(1);
+      expect(verify[0]!.state).toBe("deleted");
+      expect(boat.commands.filter(command => command.machineId === verify[0]!.id && command.command.includes("zeros-checkouts-read"))).toHaveLength(1);
+      // An archive that lacks the checkout fails the copy, though the machine held it at the stop.
+      boat.script = (machine, command) => { if (command.includes(" clone ")) boat.beginSnapshotAttempt(machine.id, 0); return undefined; };
+      const original = boat.fork.bind(boat);
+      boat.fork = async (source, input) => { const made = await original(source, input); boat.machine(made.sandboxId)!.files.delete(checkout); return made; };
+      await copyBuilder().buildNow(org, zeros, admin);
+      await copyBuilder({ verifyArchiveByFork: true }).tick();
+      expect(await row(2)).toMatchObject({ state: "failed", failureReason: "ready_copy_archive_incomplete" });
+    });
+
     it("never fails a workspace on a copy's word: a fork without its checkout clones directly, and that copy is rebuilt", async () => {
       await liveBase();
       await copyBuilder().tick();
@@ -1111,7 +1129,8 @@ d("cloud v2 ready copies", () => {
     await store.createWorkspace({ id, organizationId: org, creatorUserId: member, name: "zeros", repository: "withso/zeros",
       branch: "zeros/w", baseBranch: "main", computerBuildId: base.buildId, projectId: zeros, ...one("withso/zeros", "zeros/w") });
     const fetchBase = vi.fn(async () => true);
-    const readyCopies = { prepare: (w: Parameters<CloudV2ReadyCopyForks["prepare"]>[0]) => forks().prepare(w), fetchBase };
+    const readyCopies = { prepare: (w: Parameters<CloudV2ReadyCopyForks["prepare"]>[0]) => forks().prepare(w), fetchBase,
+      verify: (w: Parameters<CloudV2ReadyCopyForks["verify"]>[0], sandboxId: string) => forks().verify(w, sandboxId) };
     await new CloudV2Lifecycle({ store, compute: boat, readyCopies, runtime,
       publicKeys: [generateKeyPairSync("ed25519").publicKey.export({ type: "spki", format: "pem" }).toString()],
       sealPortToken: () => ({ encrypted: true }), stopWorker: async () => true, bootEnv: () => ({}),
@@ -1123,6 +1142,10 @@ d("cloud v2 ready copies", () => {
     expect(boat.calls.filter(call => call.op === "create")).toHaveLength(2);
     expect(fetchBase).toHaveBeenCalledOnce();
     expect((await row(1)).lastForkedAt?.getTime()).toBe(clock);
+    // Reading the fork's checkouts back costs a create one command and no wait: no read of the machine at all.
+    const forked = workspaceRow.boat_sandbox_id;
+    expect(boat.commands.filter(command => command.machineId === forked && command.command.includes("zeros-checkouts-read"))).toHaveLength(1);
+    expect(boat.calls.filter(call => call.op === "inspect" && call.args[0] === forked)).toEqual([]);
   });
 
   it("keeps a removed project's workspaces working, private ones private, with nothing left on project_id", async () => {

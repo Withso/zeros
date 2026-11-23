@@ -72,6 +72,11 @@ it("keeps ready copies off until a deployment enables them, and validates the sh
   expect(loadConfig({ ...base, CLOUD_V2_READY_COPIES_ENABLED: " TRUE ", CLOUD_V2_SHARED_BASE_SNAPSHOT: "zeros-base-1" }).cloudV2)
     .toMatchObject({ readyCopies: true, sharedBaseSnapshot: "zeros-base-1" });
   expect(() => loadConfig({ ...base, CLOUD_V2_READY_COPIES_ENABLED: "1" })).toThrow("CLOUD_V2_READY_COPIES_ENABLED");
+  // The throwaway-fork read-back of a copy's archive: off unless a channel turns it on.
+  expect(loadConfig(base).cloudV2).not.toHaveProperty("readyCopyVerifyFork");
+  expect(loadConfig({ ...base, CLOUD_V2_READY_COPY_VERIFY_FORK: "true" }).cloudV2).toMatchObject({ readyCopyVerifyFork: true });
+  expect(loadConfig({ ...base, CLOUD_V2_READY_COPY_VERIFY_FORK: "false" }).cloudV2).not.toHaveProperty("readyCopyVerifyFork");
+  expect(() => loadConfig({ ...base, CLOUD_V2_READY_COPY_VERIFY_FORK: "yes" })).toThrow("CLOUD_V2_READY_COPY_VERIFY_FORK");
   expect(() => loadConfig({ ...base, CLOUD_V2_SHARED_BASE_SNAPSHOT: "Not A Name" })).toThrow("CLOUD_V2_SHARED_BASE_SNAPSHOT");
 });
 

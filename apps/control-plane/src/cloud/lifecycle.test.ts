@@ -447,7 +447,8 @@ describe("cloud v2 lifecycle", () => {
   });
 
   it("keeps stopping, and asks Boat again, while Boat has not archived the VM after accepting the stop", async () => {
-    for (const states of [["idle"], Array(13).fill("archiving")]) {
+    // Past every read the stop makes: 10 quick reads right after it (boat-disk.ts), then ARCHIVE_CONFIRM_READS (12).
+    for (const states of [["idle"], Array(23).fill("archiving")]) {
       const f = setup([workspace("stopping", { boatSandboxId: "bx_abc1", checkpoint: SAVED })], { logs: true });
       // The read before the stop, then the answers after it.
       for (const state of ["running", ...states]) vi.mocked(f.compute.inspect).mockResolvedValueOnce({ name: "zeros-alpha-6f2b7c1e", state });

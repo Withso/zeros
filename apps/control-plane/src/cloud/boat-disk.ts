@@ -28,14 +28,21 @@ export async function diskSettled(compute: Pick<CloudV2Compute, "inspect">, sand
   return "timeout";
 }
 
-/** A stop's outcome. `holds`: Boat completed a snapshot attempt that began after the stop was asked for, and reported
- * no failed one during it (true); it reported a failed one, or none completed (false); or it does not report its disk
- * (null). `failed`: Boat reported a failed attempt while the machine was archiving. */
+/** A stop's outcome. `holds`: exactly one snapshot attempt began after the last read before the stop, it completed, and
+ * none was reported failed (true); otherwise false; null when the provider does not report its disk. `failed`: an attempt
+ * was in progress (or the machine not hydrated) when the wait before the stop gave up, or one was reported failed while
+ * the machine archived. */
 export type BoatStop = { stoppedAt: Date | null; holds: boolean | null; failed: boolean; attemptAt: Date | null; status: string | null };
 
+/** Reads right after a stop, a little apart: a failed attempt may be reported for well under a second. */
+const STOP_FAST_READS = 10, STOP_FAST_INTERVAL_MS = 300;
+
 /** Stops a machine so its archive holds what it was writing: waits (bounded) while it is not hydrated or a snapshot
- * attempt is in progress, stops it, then reads it until it is archived, watching for an attempt that failed. Throws code
- * provider_stop_incomplete when Boat never reports it archived, as an unconfirmed stop always has. */
+ * attempt is in progress, stops it, then reads it until it is archived: at once and every 300 ms for the first seconds,
+ * then at `archiveIntervalMs`. Attempt times are compared only with each other (the provider's clock, never ours): an
+ * attempt that began after the last read before the stop but before the stop itself shows up as a second new attempt,
+ * and is not trusted. Throws code provider_stop_incomplete when the machine is never reported archived, as an
+ * unconfirmed stop always has. */
 export async function stopKeepingWrites(compute: Pick<CloudV2Compute, "inspect" | "stop">, sandboxId: string, wait: BoatDiskWait & { archiveReads?: number;
   archiveIntervalMs?: number }): Promise<BoatStop> {
   // Before the stop: hydrated, with no attempt in progress, so the stop's own attempt is the one that saves the disk.
@@ -47,21 +54,25 @@ export async function stopKeepingWrites(compute: Pick<CloudV2Compute, "inspect" 
     if (before.snapshotStatus !== "in_progress" && before.hydrated !== false) break;
     if (read < reads) await wait.sleep(wait.intervalMs ?? SETTLE_INTERVAL_MS);
   }
+  const live = before?.state === "running" || before?.state === "idle";
   const since = before?.snapshotAttemptAt?.getTime() ?? null;
+  // Gave up waiting: the stop lands on an attempt in progress, or on a machine still being restored.
+  let failed = live && (before?.snapshotStatus === "in_progress" || before?.hydrated === false);
   await compute.stop(sandboxId);
-  let failed = before?.snapshotStatus === "in_progress";
-  const archiveReads = wait.archiveReads ?? ARCHIVE_READS;
+  const attempts = new Set<number>();
+  const archiveReads = (wait.archiveReads ?? ARCHIVE_READS) + STOP_FAST_READS;
   for (let read = 1; read <= archiveReads; read++) {
     const inspected = await compute.inspect(sandboxId);
     if (inspected.snapshotStatus === "failed") failed = true;
+    const attemptAt = inspected.snapshotAttemptAt?.getTime();
+    if (attemptAt !== undefined && (since === null || attemptAt > since)) attempts.add(attemptAt);
     if (inspected.state === "archived") {
-      const attemptAt = inspected.snapshotAttemptAt ?? null;
       const holds = !known(inspected) || !before || !known(before) ? null
-        : !failed && inspected.snapshotStatus === "completed" && attemptAt !== null && (since === null || attemptAt.getTime() > since);
-      return { stoppedAt: inspected.stoppedAt ?? null, holds, failed, attemptAt, status: inspected.snapshotStatus ?? null };
+        : !failed && attempts.size === 1 && inspected.snapshotStatus === "completed" && attemptAt !== undefined && attempts.has(attemptAt);
+      return { stoppedAt: inspected.stoppedAt ?? null, holds, failed, attemptAt: inspected.snapshotAttemptAt ?? null, status: inspected.snapshotStatus ?? null };
     }
     if (inspected.state !== "archiving") break;
-    if (read < archiveReads) await wait.sleep(wait.archiveIntervalMs ?? ARCHIVE_INTERVAL_MS);
+    if (read < archiveReads) await wait.sleep(read <= STOP_FAST_READS ? STOP_FAST_INTERVAL_MS : wait.archiveIntervalMs ?? ARCHIVE_INTERVAL_MS);
   }
   throw Object.assign(new Error("Boat has not stopped the VM"), { code: "provider_stop_incomplete" });
 }

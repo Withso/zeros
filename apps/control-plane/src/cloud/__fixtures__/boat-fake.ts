@@ -61,8 +61,8 @@ type Machine = {
   attempt: { at: number; status: "in_progress" | "completed" | "failed"; files: Map<string, string>; reads: number };
   /** What the stop archived when it was not the files as they stood (a stop that failed an attempt in progress). */
   archive: Map<string, string> | null;
-  /** Inspect reads during archiving that still report the failed attempt, before the stop's own. */
-  failedReads: number;
+  /** What inspect reads report while the machine archives, in order, before the stop's own attempt completes it. */
+  stopReads: { at: number; status: "in_progress" | "failed" }[];
 };
 export type FakeCommand = { machineId: string; command: string; input?: string };
 type Exec = (machine: Machine, command: string, input?: string) => CloudV2CommandResult | Promise<CloudV2CommandResult> | undefined;
@@ -88,6 +88,9 @@ export class FakeBoat implements CloudV2Compute {
   archivingReads = 0;
   /** Inspect reads before a fork, or a machine made from a snapshot, is hydrated. */
   hydrationReads = 0;
+  /** The next stop meets a snapshot attempt that began just before it (after the caller's last read): seen in progress
+   * for `inProgressReads` reads, then failed for `failedReads`, then the stop's own attempt. */
+  attemptAtStop: { inProgressReads: number; failedReads: number } | null = null;
   /** The next saveSnapshot fails with this code after Boat recorded the name, as a failed or timed-out save can. */
   failNextSave: "computer_snapshot_failed" | "computer_snapshot_timeout" | null = null;
   /** The next create is refused outright, before anything exists. */
@@ -123,12 +126,12 @@ export class FakeBoat implements CloudV2Compute {
     const entry = this.keys.get(key);
     return entry && this.clock() - entry.at < DAY ? entry.id : null;
   }
-  private make(key: string, init: Omit<Machine, "id" | "createdAt" | "stoppedAt" | "state" | "worker" | "leaseUntil" | "cold" | "hydrateReads" | "attempt" | "archive" | "failedReads">
+  private make(key: string, init: Omit<Machine, "id" | "createdAt" | "stoppedAt" | "state" | "worker" | "leaseUntil" | "cold" | "hydrateReads" | "attempt" | "archive" | "stopReads">
     & Partial<Pick<Machine, "worker" | "leaseUntil">>): string {
     const id = `bx_fake${String(this.next++).padStart(4, "0")}`;
     this.machines.set(id, { worker: { enabled: false, active: false }, leaseUntil: null, ...init, id, state: "running", createdAt: this.clock(), stoppedAt: null, cold: false,
       hydrateReads: init.from || init.source ? this.hydrationReads : 0, attempt: { at: this.clock(), status: "completed", files: new Map(init.files), reads: 0 },
-      archive: null, failedReads: 0 });
+      archive: null, stopReads: [] });
     this.keys.set(key, { id, at: this.clock() });
     return id;
   }
@@ -168,10 +171,10 @@ export class FakeBoat implements CloudV2Compute {
     if (machine.hydrateReads > 0) machine.hydrateReads--;
     const attempt = machine.attempt;
     if (attempt.status === "in_progress" && machine.state === "running" && attempt.reads-- <= 0) attempt.status = "completed";
-    // A stop that failed an attempt in progress: those reads still show it failed; then the stop's own attempt.
-    if (machine.state === "archiving" && machine.failedReads > 0) {
-      machine.failedReads--;
-      return { name: machine.name, state: machine.state, stoppedAt: null, ...this.disk(machine, { at: attempt.at, status: "failed" }) };
+    // A stop that met an attempt in progress: what the reads report of it first; then the stop's own attempt.
+    if (machine.state === "archiving" && machine.stopReads.length) {
+      const seen = machine.stopReads.shift()!;
+      return { name: machine.name, state: machine.state, stoppedAt: null, ...this.disk(machine, seen) };
     }
     if (machine.state === "archiving" && this.archivingReads-- <= 0) {
       machine.state = "archived"; machine.stoppedAt = this.clock();
@@ -210,9 +213,16 @@ export class FakeBoat implements CloudV2Compute {
     const machine = this.live(sandboxId);
     if (machine.state === "running") {
       machine.state = "archiving";
+      const gap = this.attemptAtStop;
+      this.attemptAtStop = null;
+      if (gap) machine.attempt = { at: Math.max(this.clock(), machine.attempt.at + 1), status: "in_progress", files: new Map(machine.files), reads: Number.POSITIVE_INFINITY };
       // Stopped during an attempt: it fails, and the archive holds only what that attempt began with.
-      if (machine.attempt.status === "in_progress") { machine.attempt.status = "failed"; machine.archive = new Map(machine.attempt.files); machine.failedReads = 1; }
-      else machine.archive = null;
+      if (machine.attempt.status === "in_progress") {
+        const at = machine.attempt.at;
+        machine.stopReads = gap ? [...Array<{ at: number; status: "in_progress" }>(gap.inProgressReads).fill({ at, status: "in_progress" }),
+          ...Array<{ at: number; status: "failed" }>(gap.failedReads).fill({ at, status: "failed" })] : [{ at, status: "failed" }];
+        machine.attempt.status = "failed"; machine.archive = new Map(machine.attempt.files);
+      } else { machine.archive = null; machine.stopReads = []; }
     }
     this.replied("stop", undefined);
   }
