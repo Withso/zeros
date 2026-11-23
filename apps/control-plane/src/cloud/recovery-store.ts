@@ -29,7 +29,7 @@ export type RecoveryAttempt = {
   worker_generation: string | null; sealed_at: Date | null; source_stopped_at: Date | null;
   checkpoint_object: string | null; checkpoint_key: unknown; checkpoint_sha256: string | null; checkpoint_bytes: string | null;
   checkpoint_upload_until: Date | null; checkpoint_saved_at: Date | null;
-  /** C4B: the capture left out a planned submodule folder holding a person's own clone (0271). */
+  /** C4B: the capture left out a planned submodule folder holding a person's own clone (0272). */
   checkpoint_partial?: boolean;
   replacement_create: RecoveryCreate | null; replacement_sandbox_id: string | null; replacement_token_hash: Buffer | null;
   replacement_token: unknown; replacement_runtime_sha256: string | null; replacement_boot_id: string | null;

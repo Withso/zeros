@@ -544,7 +544,7 @@ d("cloud v2 retention", () => {
     /** Before this change: the lifecycle knew no submodules, so its probe and backup never looked at one. */
     const before = { checkouts: async () => ({ repositories: others, submodules: [] }) };
     const sub = `${path("app")}/lib`;
-    const migration = () => pool.query(readFileSync(new URL("../../migrations/0271_cloud_v2_submodule_probe.sql", import.meta.url), "utf8")
+    const migration = () => pool.query(readFileSync(new URL("../../migrations/0272_cloud_v2_submodule_probe.sql", import.meta.url), "utf8")
       .replace("SET LOCAL lock_timeout = '5s';", ""));
     const fetched = () => pool.query(`INSERT INTO cloud_v2_workspace_submodules (workspace_id, position, path, status, repository, repository_id, commit, git_dir)
       VALUES ($1, 0, 'lib', 'fetch', 'acme/lib', '42', $2, $3)`, [id, lib.baseCommit, lib.gitDir]);
@@ -571,7 +571,7 @@ d("cloud v2 retention", () => {
       expect(boat.machine((await row()).boat_sandbox_id)!.files.get(`${sub}/UNPUSHED`)).toBe("stash");
     });
 
-    it("0271: a stop probed clean before this change is unknown for that stop, and its next maintenance backs it up within the budget", async () => {
+    it("0272: a stop probed clean before this change is unknown for that stop, and its next maintenance backs it up within the budget", async () => {
       boat.write(vm, `${sub}/UNPUSHED`, "stash");
       await stopWith(before);
       const stopped = await row();
@@ -594,7 +594,7 @@ d("cloud v2 retention", () => {
       expect(boat.machine((await row()).boat_sandbox_id)!.files.get(`${sub}/UNPUSHED`)).toBe("stash");
     });
 
-    it("0271: once that machine is gone, opening says so: no clean rebuild without the note", async () => {
+    it("0272: once that machine is gone, opening says so: no clean rebuild without the note", async () => {
       remoteBranches.add(path("app"));
       boat.write(vm, `${sub}/UNPUSHED`, "stash");
       await stopWith(before);
@@ -621,7 +621,7 @@ d("cloud v2 retention", () => {
       return saved;
     };
 
-    it("0271: a backup the old capture made is this stop's no more, so maintenance backs the stop up again and the stash survives", async () => {
+    it("0272: a backup the old capture made is this stop's no more, so maintenance backs the stop up again and the stash survives", async () => {
       const saved = await oldBackup();
       await fetched();
       await migration();
@@ -638,7 +638,7 @@ d("cloud v2 retention", () => {
       expect(boat.machine((await row()).boat_sandbox_id)!.files.get(`${sub}/UNPUSHED`)).toBe("stash");
     });
 
-    it("0271: archived, its machine gone, restores answers pushed, and the open says the latest stop's work is missing", async () => {
+    it("0272: archived, its machine gone, restores answers pushed, and the open says the latest stop's work is missing", async () => {
       await oldBackup();
       await fetched();
       await store.requestLifecycle(id, user, "archive");
@@ -707,7 +707,7 @@ d("cloud v2 retention", () => {
       expect((await store.get(id, user)).unrestoredSubmodules).toBeUndefined();
     });
 
-    it("0271: leaves a clean stop alone without a fetched submodule", async () => {
+    it("0272: leaves a clean stop alone without a fetched submodule", async () => {
       await stopWith(before);
       await pool.query(`INSERT INTO cloud_v2_workspace_submodules (workspace_id, position, path, status, reason) VALUES ($1, 0, 'vendor/x', 'skipped', 'no access')`, [id]);
       await migration();
