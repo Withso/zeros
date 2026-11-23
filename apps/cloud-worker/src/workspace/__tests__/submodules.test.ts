@@ -1,8 +1,8 @@
 // workspace-submodules-v1, run for real (git): a new checkout's planned submodules, fetched the way the project
 // build fetches them. github.com is a local origin for the test only, through the test's own global Git config.
 import { execFile } from "node:child_process";
-import { existsSync } from "node:fs";
-import { chmod, lstat, mkdir, mkdtemp, readdir, readFile, readlink, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { constants, existsSync } from "node:fs";
+import { chmod, mkdir, mkdtemp, open, readdir, readFile, readlink, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
@@ -114,12 +114,19 @@ describe("a new checkout's planned submodules", () => {
 /** Every name, mode and byte under a folder: equal before and after means nothing was touched. */
 async function snapshot(top: string): Promise<string[]> {
   const lines: string[] = [];
+  // Each entry's kind from the listing itself, and its mode and bytes from one opened handle: no separate check of a
+  // path before using it.
   const walk = async (dir: string): Promise<void> => {
-    for (const name of (await readdir(dir)).sort()) {
-      const path = join(dir, name), info = await lstat(path), rel = relative(top, path);
-      if (info.isDirectory()) { lines.push(`${rel}/ ${info.mode}`); await walk(path); }
-      else if (info.isSymbolicLink()) lines.push(`${rel} -> ${await readlink(path)}`);
-      else lines.push(`${rel} ${info.mode} ${createHash("sha256").update(await readFile(path)).digest("hex")}`);
+    for (const entry of (await readdir(dir, { withFileTypes: true })).sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0)) {
+      const path = join(dir, entry.name), rel = relative(top, path);
+      if (entry.isSymbolicLink()) { lines.push(`${rel} -> ${await readlink(path)}`); continue; }
+      const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+      try {
+        const { mode } = await handle.stat();
+        if (entry.isDirectory()) lines.push(`${rel}/ ${mode}`);
+        else lines.push(`${rel} ${mode} ${createHash("sha256").update(await handle.readFile()).digest("hex")}`);
+      } finally { await handle.close(); }
+      if (entry.isDirectory()) await walk(path);
     }
   };
   await walk(top);

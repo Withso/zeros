@@ -10,7 +10,7 @@ import {
   heldSubmodulesCommand, parseCheckpointResult, parseRestoreResult, parseSubmoduleRestore, parseUnrestoredSubmodules, restoreCommand, sealCheckpointKey, SUBMODULE_PUSH_REFUSED, type CheckpointReuse, type RestoreInput,
   type RestoreSubmodule,
 } from "./checkpoint.js";
-import { OFFLINE_GIT_ENV, pinnedPath } from "./__fixtures__/offline-git.js";
+import { OFFLINE_GIT_ENV, pinnedEnv, pinnedPath } from "./__fixtures__/offline-git.js";
 import { restoreBranchCommand } from "./lifecycle.js";
 import { fetchPlannedSubmodules } from "../../../cloud-worker/src/workspace/submodules.js";
 
@@ -54,7 +54,7 @@ function workspaces() {
 }
 
 function run(script: string[], env: NodeJS.ProcessEnv) {
-  const result = spawnSync("bash", ["-c", [...pinnedPath(env.PATH), ...script].join("\n")], { env, encoding: "utf8" });
+  const result = spawnSync("bash", ["-c", [...pinnedPath(), ...script].join("\n")], { env: pinnedEnv(env), encoding: "utf8" });
   return { status: result.status, stdout: result.stdout };
 }
 
@@ -2011,8 +2011,8 @@ process.exit(result.status ?? 1);
       const fresh = p.folder(p.newHome);
       p.git(p.root, "clone", "-q", p.app.origin, fresh);
       // The pushed restore (lifecycle restoreBranches): the workspace branch from GitHub, and nothing for any submodule.
-      const branch = spawnSync("bash", ["-c", [...pinnedPath(p.env.PATH), restoreBranchCommand(fresh, "zeros/w")].join("\n")],
-        { env: p.env, input: "Authorization: Basic fixture\n", encoding: "utf8" });
+      const branch = spawnSync("bash", ["-c", [...pinnedPath(), restoreBranchCommand(fresh, "zeros/w")].join("\n")],
+        { env: pinnedEnv(p.env), input: "Authorization: Basic fixture\n", encoding: "utf8" });
       expect(branch.status).toBe(0);
       expect(restoreBranchCommand(fresh, "zeros/w")).not.toContain("lib");
       // The worker's start: its branch, then each planned submodule still missing, at the gitlink its repository records.
@@ -2210,8 +2210,8 @@ process.exit(result.status ?? 1);
       const start = (p: ReturnType<typeof project>, net: ReturnType<typeof github>, submodules = planned(p, p.newHome)) => {
         // Its script run in this shell, after the PATH pin: a nested bash would get /bin first again on some machines.
         const command = heldSubmodulesCommand({ checkoutPath: p.folder(p.newHome), home: p.newHome, submodules });
-        const result = spawnSync("bash", ["-c", [...pinnedPath(net.env.PATH), `set -- ${command.slice("bash -c ".length)}`, 'eval "$1"'].join("\n")],
-          { env: net.env, encoding: "utf8" });
+        const result = spawnSync("bash", ["-c", [...pinnedPath(), `set -- ${command.slice("bash -c ".length)}`, 'eval "$1"'].join("\n")],
+          { env: pinnedEnv(net.env), encoding: "utf8" });
         expect(result.stdout).toContain("zeros-submodules-held");
         return parseSubmoduleRestore(result.stdout);
       };

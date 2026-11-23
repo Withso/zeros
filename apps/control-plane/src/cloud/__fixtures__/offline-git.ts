@@ -8,5 +8,8 @@ export const OFFLINE_GIT_ENV = {
 } as const;
 
 /** The first line of a test's shell script: some machines' shells, started from Node, put /bin first on PATH, which
- * would bypass a test's stub Git, sudo or rm for the real one. */
-export const pinnedPath = (path: string | undefined): string[] => path ? [`export PATH='${path.replaceAll("'", "'\\''")}'`] : [];
+ * would bypass a test's stub Git, sudo or rm for the real one. The value travels in the child's environment
+ * (`pinnedEnv`), never inside the command text. */
+export const pinnedPath = (): string[] => ['[ -z "${ZEROS_PINNED_PATH:-}" ] || export PATH="$ZEROS_PINNED_PATH"'];
+/** The environment that carries the PATH pinnedPath restores. */
+export const pinnedEnv = (env: NodeJS.ProcessEnv): NodeJS.ProcessEnv => env.PATH ? { ...env, ZEROS_PINNED_PATH: env.PATH } : env;
