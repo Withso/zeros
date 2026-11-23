@@ -57,6 +57,15 @@ export function publicDevProfile(workspace, profile) {
   };
 }
 
+/** The cloud v2 switches a Dev stack takes from the launching process when it sets them (unset: the control plane's own
+ * default, off). Values are passed as given; the control plane validates each. */
+export const CLOUD_V2_SWITCHES = Object.freeze(["CLOUD_V2_CHECKPOINT_RETRY_ENABLED", "CLOUD_V2_READY_COPIES_ENABLED", "CLOUD_V2_PERSONAL_CLOUD_ENABLED",
+  "CLOUD_V2_RETENTION_ENABLED", "CLOUD_V2_SHARED_BASE_SNAPSHOT", "CLOUD_V2_READY_COPY_VERIFY_FORK"]);
+/** The switches `env` sets, by name; none set is `{}`. */
+export function cloudV2Switches(env) {
+  return Object.fromEntries(CLOUD_V2_SWITCHES.filter(name => typeof env[name] === "string" && env[name].trim() !== "").map(name => [name, env[name].trim()]));
+}
+
 /** electron:cloud runs this branch's cloud v2 against its own tunnel origin. The
  * Boat key and runtime store stay in the backend; the VM fetches the pinned
  * runtime by presigned URL and trusts only this workspace's signing key. */
@@ -70,8 +79,9 @@ function cloudV2Environment(workspace, profile, apiOrigin, env) {
     CLOUD_V2_ENABLED: "true", CLOUD_V2_API_URL: apiOrigin, CLOUD_V2_REALTIME_URL: apiOrigin.replace(/^https:/, "wss:"),
     CLOUD_V2_PROMPT_OUTBOX_ENABLED: env.CLOUD_V2_PROMPT_OUTBOX_ENABLED ?? "true",
     ...(env.ZEROS_CLOUD_ACTING_USER_DEFAULT === undefined ? {} : { ZEROS_CLOUD_ACTING_USER_DEFAULT: env.ZEROS_CLOUD_ACTING_USER_DEFAULT }),
-    // Off unless asked for: qualifies forking a stopped VM on this Boat account.
-    ...(env.CLOUD_V2_CHECKPOINT_RETRY_ENABLED ? { CLOUD_V2_CHECKPOINT_RETRY_ENABLED: env.CLOUD_V2_CHECKPOINT_RETRY_ENABLED } : {}),
+    // Off unless asked for: checkpoint retry (qualifies forking a stopped VM on this Boat account), ready copies, Personal
+    // cloud, retention, the shared base and the copy's fork read-back, each as the launching process sets it.
+    ...cloudV2Switches(env),
     CLOUD_V2_RUNTIME_SHA256: runtime, CLOUD_V2_RUNTIME_STORE_ENDPOINT: s.endpoint, CLOUD_V2_RUNTIME_STORE_BUCKET: s.bucket,
     CLOUD_V2_RUNTIME_STORE_ACCESS_KEY_ID: s.accessKeyId, CLOUD_V2_RUNTIME_STORE_SECRET_ACCESS_KEY: s.secretAccessKey,
     BOAT_API_KEY: b.apiKey, ...(b.billingOrg ? { BOAT_BILLING_ORG: b.billingOrg } : {}),
