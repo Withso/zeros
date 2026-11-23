@@ -331,6 +331,17 @@ export function tokenLines(check: TokenCheck, fixtures: readonly string[]): stri
   ];
 }
 
+/** A database refusal by closed values only: `sqlstate_<SQLSTATE>`, then the constraint's name, or the message when it is
+ * a bare identifier as the entitlement triggers raise (`cloud_creator_ineligible`, `seat refresh scope changed`), spaces
+ * as underscores. Null when the error carries no SQLSTATE; a message that is anything else is never printed. */
+export function databaseRefusal(error: unknown): string | null {
+  const value = error as { code?: unknown; constraint?: unknown; message?: unknown } | null;
+  if (typeof value?.code !== "string" || !/^[0-9A-Z]{5}$/.test(value.code)) return null;
+  const detail = typeof value.constraint === "string" && /^[a-z0-9_]{1,63}$/.test(value.constraint) ? value.constraint
+    : typeof value.message === "string" && /^[a-z_ ]{1,64}$/.test(value.message) ? value.message.replace(/ /g, "_") : null;
+  return `sqlstate_${value.code}${detail ? `:${detail}` : ""}`;
+}
+
 /** A database failure's closed class: its SQLSTATE (five characters, never the message), or "connection" when it has none. */
 export function databaseErrorCode(error: unknown): string {
   const state = (error as { code?: unknown } | null)?.code;
@@ -522,7 +533,7 @@ export function livePro(database: LiveDatabase, input: { subjectUserId: string; 
             // The operator's messages are fixed text, never values; only the plan mismatch is retried.
             if (attempt === 0 && error instanceof Error && error.message.startsWith("Individual Pro plan changed")) continue;
             throw new RehearsalFailure("pro_change", error instanceof Error && /active platform owner/.test(error.message) ? "actor" :
-              error instanceof Error && /overwrite billing/.test(error.message) ? "foreign_grant" : "refused");
+              error instanceof Error && /overwrite billing/.test(error.message) ? "foreign_grant" : databaseRefusal(error) ?? "refused");
           }
         }
       });

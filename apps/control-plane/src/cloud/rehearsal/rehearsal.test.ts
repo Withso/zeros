@@ -16,7 +16,7 @@ import { parseArguments, sharedBaseFacts } from "./rehearsal-cli.js";
 import { CONNECT_CLIENT_FEATURES, checkText, connectWorkspace, createProject, createWorkspace, fileTarget, frameCode, openBridge, waitState, writeFile } from "./steps.js";
 import { FIXTURE_TWO } from "./stage-provision.js";
 import { loadState, newState, saveState } from "./state.js";
-import { checkGithubToken, databaseErrorCode, liveBridge, liveDatabase, OUTSIDE_PROBE_LIMIT, SET_APP_SYSTEM, tokenLines, tokenRefusal, type DatabaseClient } from "./live.js";
+import { checkGithubToken, databaseErrorCode, databaseRefusal, liveBridge, liveDatabase, OUTSIDE_PROBE_LIMIT, SET_APP_SYSTEM, tokenLines, tokenRefusal, type DatabaseClient } from "./live.js";
 import { platformOwners, probeDiagnostics, proActor, resolveProbe } from "./plan.js";
 
 const R1 = "Withso/zeros-dev-fixture";
@@ -490,6 +490,13 @@ describe("rehearsal database roles", () => {
   it("names a database failure by SQLSTATE only, and replaces a dropped read connection once", async () => {
     expect(databaseErrorCode({ code: "42501", message: "permission denied for table users" })).toBe("sqlstate_42501");
     expect(databaseErrorCode({ code: "57P01" })).toBe("connection");
+    expect(databaseRefusal({ code: "23514", message: "cloud_creator_ineligible" })).toBe("sqlstate_23514:cloud_creator_ineligible");
+    expect(databaseRefusal({ code: "P0001", message: "seat refresh scope changed" })).toBe("sqlstate_P0001:seat_refresh_scope_changed");
+    expect(databaseRefusal({ code: "23505", constraint: "account_entitlements_pkey", message: "duplicate key value violates unique constraint \"x\"" }))
+      .toBe("sqlstate_23505:account_entitlements_pkey");
+    expect(databaseRefusal({ code: "23514", message: "new row for relation \"account_entitlements\" violates check constraint" })).toBe("sqlstate_23514");
+    expect(databaseRefusal({ code: "P0001", message: "user a@b.c is not allowed" })).toBe("sqlstate_P0001");
+    expect(databaseRefusal(new Error("something else"))).toBeNull();
     expect(databaseErrorCode({ code: "08006" })).toBe("connection");
     expect(databaseErrorCode(new Error("read ECONNRESET"))).toBe("connection");
     let dropped = false;
