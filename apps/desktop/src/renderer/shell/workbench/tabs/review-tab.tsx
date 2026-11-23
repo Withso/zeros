@@ -582,6 +582,22 @@ export function ReviewView({
     !!githubReview.error ||
     !!githubReview.notice ||
     !!codeReview.error;
+  // Overview's comment sources fail into the same banner as the PR's other
+  // reads, with a Retry that reloads them; the header refresh doesn't.
+  const commentSourceError = useReviewGithubFailure(
+    sub === "overview" ? (githubReview.error ?? codeReview.error ?? null) : null,
+    { workspaceId, active },
+  );
+  useWorkbenchStatusSource(
+    {
+      error: commentSourceError,
+      pending: sub === "overview" && (!!githubReview.source?.loading || codeReview.loading),
+      retry: async () => {
+        await Promise.allSettled([githubReview.refresh(), codeReview.refresh()]);
+      },
+    },
+    "review-comments",
+  );
   const comments = useMemo(
     () =>
       sortReviewComments([
