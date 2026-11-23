@@ -1003,9 +1003,10 @@ export class CloudV2Lifecycle {
         (this.deps.logger?.error ?? this.deps.logger?.warn)?.call(this.deps.logger,
           `[cloud-v2] maintenance stop archive may lack the machine's last writes (${stopped.failed ? "failed_attempt" : "attempt_before_stop"}) workspace=${row.id.slice(0, 8)}`);
         // Its own record, never the person's stop's. The archived wake's scrub may not have reached the archive: partial,
-        // and the wake is not done, so it scrubs again (within the maintenance budget).
+        // and the wake is not done, so it scrubs again (within the maintenance budget). A backup-mode scrub stays
+        // "backup": the files it removed may be gone from the archive, and only that value has an open put them back.
         archiveSuspectStop = true;
-        if (scrub) scrub = "partial";
+        if (scrub && mode !== "backup") scrub = "partial";
       }
       outcome = "stopped";
       return true;

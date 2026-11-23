@@ -559,6 +559,29 @@ d("cloud v2 retention", () => {
       expect(await lostWork()).toMatchObject({ restored: "earlier" });
     });
 
+    it("never calls a backup of a suspect stop complete when its fork found the archive unchanged since an earlier backup", async () => {
+      boat.write(vm, `${path("api")}/UNPUSHED`, "api work");
+      await stop();
+      await earlier(CLOUD_V2_BACKUP_DELAY_MS + 60_000);
+      await lifecycle().tick();
+      const backedUp = await row();
+      expect(backedUp.checkpoint_stop_generation).toBe(backedUp.stop_generation);
+      // A later stop, suspect, after which a backup fork finds the archive identical to that backup: every write of the
+      // session in between may be what the archive lacks.
+      const next = String(BigInt(backedUp.stop_generation) + 1n);
+      await pool.query(`UPDATE cloud_v2_workspaces SET stop_generation=$2::bigint, stop_archive_failed_generation=$2::bigint,
+        stopped_at=clock_timestamp(), checkpoint_reuse=jsonb_build_object('object', checkpoint_object, 'fingerprint', 'same') WHERE id=$1`, [id, next]);
+      expect(await store.checkpointUnchanged(id, vm, next, backedUp.checkpoint_object, "retry")).toBe(true);
+      const confirmed = await row();
+      expect(confirmed.checkpoint_stop_generation).toBe(next);
+      await store.requestLifecycle(id, user, "archive");
+      await pool.query("UPDATE cloud_v2_workspaces SET machine_gone_at=clock_timestamp() WHERE id=$1", [id]);
+      expect((await store.get(id, user)).restores).toBe("pushed");
+      // A stop's own unchanged checkpoint, confirmed on the running machine before that stop, stays complete.
+      await pool.query(`UPDATE cloud_v2_workspaces SET stopped_at=clock_timestamp() + interval '1 minute' WHERE id=$1`, [id]);
+      expect((await store.get(id, user)).restores).toBe("all");
+    });
+
     it("stops again, keeping writes, a machine whose stop did not take, and records that stop when its archive is suspect", async () => {
       boat.write(vm, `${path("api")}/UNPUSHED`, "api work");
       await stop();
@@ -1524,6 +1547,34 @@ d("cloud v2 retention", () => {
         expect(restoredAt).toBeGreaterThanOrEqual(0);
         expect(tokenAt).toBeGreaterThan(restoredAt);
         expect(await columns("archive_scrub")).toEqual({ archive_scrub: "clean" });
+      });
+
+      for (const again of [false, true]) it(`keeps a backup-mode scrub whose wake's stop left the archive suspect, so an open puts the files back${again ? ", after a second wake scrubs nothing" : ""}`, async () => {
+        boat.write(vm, ENV, "TOKEN=the person's own edit");
+        seeded.set(ENV, "TOKEN=from the server");
+        boat.write(vm, `${path("app")}/UNPUSHED`, "work");
+        await stop();
+        await earlier(CLOUD_V2_BACKUP_DELAY_MS + 60_000);
+        await lifecycle().tick();
+        await archive();
+        await sleepFor(10.6);
+        boat.attemptAtStop = { inProgressReads: 1, failedReads: 0 };
+        await lifecycle().tick();
+        expect(await wakeRows()).toMatchObject([{ outcome: "stopped", scrub: "backup" }]);
+        const first = (await pool.query("SELECT archive_scrub, archive_wake_done_at, maintenance_archive_suspect_at FROM cloud_v2_workspaces WHERE id=$1", [id])).rows[0];
+        expect(first).toEqual({ archive_scrub: "backup", archive_wake_done_at: null, maintenance_archive_suspect_at: expect.any(Date) });
+        if (again) {
+          // Not done, so the next archived wake scrubs again: the files are gone, and nothing is left to remove.
+          boat.machine(vm)!.files.delete(ENV);
+          await sleepFor(11);
+          await pool.query("UPDATE cloud_v2_maintenance_wakes SET started_at=started_at - interval '2 hours' WHERE workspace_id=$1", [id]);
+          await lifecycle().tick();
+          expect(await wakeRows()).toHaveLength(2);
+          expect(await columns("archive_scrub")).toEqual({ archive_scrub: "backup" });
+        }
+        await store.requestLifecycle(id, user, "start");
+        await lifecycle().tick();
+        expect(boat.machine(vm)!.files.get(ENV)).toBe("TOKEN=the person's own edit");
       });
 
       it("does the same for a second repository: its hand-edited environment file is scrubbed, then comes back on open", async () => {
