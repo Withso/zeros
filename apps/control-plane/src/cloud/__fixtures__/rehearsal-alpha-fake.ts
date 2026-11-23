@@ -18,7 +18,7 @@ type Workspace = {
   waitingFor?: string; createdAtMs?: number; errorCode?: string;
   stoppedDays: number | null; archivedAtDays?: number; probe?: "clean" | "dirty"; backup: boolean;
   /** Stop generations, as the product counts them: a backup covers only the stop it was taken for. */
-  stopGeneration?: number; backupGeneration?: number; wakes: number; scrub: string | null; machineGone: boolean; lostWork?: boolean;
+  stopGeneration?: number; backupGeneration?: number; wakes: number; scrub: string | null; machineGone: boolean; lostWork?: boolean; changedSinceStop?: boolean;
 };
 type Build = { id: string; state: string; snapshot: string | null; builderSandboxId: string | null; automatic?: boolean; shared?: boolean;
   createdAt?: number; readyAt?: number };
@@ -74,6 +74,11 @@ export class FakeAlpha {
   ptyNoise = false;
   /** The commit a shell's `git rev-parse HEAD` reads (the repositories' default head unless a test moves it). */
   rebuiltHead = DEFAULT_HEAD;
+  /** The archived wake finds the checkout changed since the stop (#1276); a scrub it records instead of the product's rule. */
+  archivedWakeChanged = false;
+  archivedWakeScrub: string | null = null;
+  /** The archived wake removes the person's ignored files and no open puts them back (the loss own_disk_ignored catches). */
+  scrubLosesIgnored = false;
   /** A submodule's HEAD (or "none": no checkout) and the superproject's change count for it, when a test moves them. */
   submoduleHeads: Record<string, string> = {};
   submoduleChanges: Record<string, number> = {};
@@ -189,7 +194,13 @@ export class FakeAlpha {
         row.archivedAt = new Date(this.now).toISOString(); row.archiveReason = "inactive"; row.archivedAtDays = row.stoppedDays;
       }
       // The archived wake, ten days after the archive.
-      if (row.archivedAt !== null && row.scrub === null && row.stoppedDays >= (row.archivedAtDays ?? 0) + 10) { row.scrub = row.backup && row.seeded.size > 0 ? "backup" : "clean"; row.wakes++; }
+      if (row.archivedAt !== null && row.scrub === null && row.stoppedDays >= (row.archivedAtDays ?? 0) + 10) {
+        // A wake that finds the checkout changed since the stop keeps what a backup-mode scrub would remove (#1276).
+        row.changedSinceStop = this.archivedWakeChanged;
+        row.scrub = row.backup && row.seeded.size > 0 ? (this.archivedWakeChanged ? "partial" : "backup") : "clean"; row.wakes++;
+        if (this.archivedWakeScrub && row.backup && row.seeded.size > 0) row.scrub = this.archivedWakeScrub;
+        if (this.scrubLosesIgnored) for (const path of [...row.files.keys()]) if (/\.env$/.test(path)) row.files.delete(path);
+      }
       if (this.s4 && row.archivedAt !== null && row.backup && row.stoppedDays >= 61 && row.archiveReason === "manual") {
         row.backup = false; for (const key of [...this.objects]) if (key.includes(row.id)) this.objects.delete(key);
       }
@@ -684,7 +695,8 @@ export class FakeAlpha {
       return rows([{ forks: backup ? 1 : 0, backed_up: backup && row!.backupGeneration === (row!.stopGeneration ?? 0), fork_gone: true }]);
     }
     if (text.includes("kind = 'wake'")) return rows([{ wakes: ids.reduce((sum, id) => sum + (this.workspaces.get(id)?.wakes ? 1 : 0), 0) }]);
-    if (text.includes("archive_scrub FROM")) return rows(ids.map(id => ({ id, archive_scrub: this.workspaces.get(id)?.scrub ?? null })));
+    if (text.includes("archive_scrub")) return rows(ids.map(id => ({ id, archive_scrub: this.workspaces.get(id)?.scrub ?? null,
+      ...(text.includes("AS changed") ? { changed: this.workspaces.get(id)?.changedSinceStop === true } : {}) })));
     if (text.includes("information_schema.tables")) return rows([{ present: this.s4 ? 1 : 0 }]);
     // The fake keeps one timestamp; the real schema's full list is covered by clock.integration.test.ts.
     if (text.includes("information_schema.columns")) return rows([{ column_name: "stopped_at" }]);

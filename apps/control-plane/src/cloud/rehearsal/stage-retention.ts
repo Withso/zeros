@@ -153,11 +153,18 @@ export async function stageRetention(ctx: StageContext): Promise<Record<string, 
     const rows = await ctx.ports.database.read(`SELECT id::text AS id, archive_scrub FROM cloud_v2_workspaces WHERE id = ANY($1::uuid[])`, [both]);
     return rows.length === 2 && rows.every(row => row.archive_scrub !== null);
   });
-  const scrubs = await ctx.ports.database.read(`SELECT id::text AS id, archive_scrub FROM cloud_v2_workspaces WHERE id = ANY($1::uuid[])`, [both]);
-  // W's scrub removes the environment files seeded into its checkout, which its backup holds ("backup"); with none (an
-  // environment of variables only, or none) there is nothing to remove: "clean". K, whose probe was clean, re-seeds: "clean".
-  const wScrub = seededFiles > 0 ? "backup" : "clean";
-  check(scrubs.find(row => row.id === w.id)?.archive_scrub === wScrub, "archived_wake_w", `not_${wScrub}`);
+  // Whether the wake found the checkout changed since the stop (0263's record), read with the scrub.
+  const scrubs = await ctx.ports.database.read(`SELECT id::text AS id, archive_scrub, coalesce(changed_since_stop_generation = stop_generation, false) AS changed
+    FROM cloud_v2_workspaces WHERE id = ANY($1::uuid[])`, [both]);
+  // W's scrub removes the environment files seeded into its checkout, which its backup holds ("backup"). When the wake
+  // found the checkout changed since the stop, the backup no longer covers them: the scrub keeps them ("partial") and a
+  // new final backup becomes due. With no file seeded (an environment of variables only, or none) there is nothing to
+  // remove: "clean" (or "partial" after a change). K, whose probe was clean, re-seeds: "clean".
+  const wRow = scrubs.find(row => row.id === w.id), wChanged = wRow?.changed === true;
+  const wScrub = seededFiles > 0 ? (wChanged ? "partial" : "backup") : "clean";
+  const wAccepted = wRow?.archive_scrub === wScrub || (seededFiles === 0 && wChanged && wRow?.archive_scrub === "partial");
+  check(wAccepted, "archived_wake_w", `not_${wScrub}`);
+  ctx.note(`archived_wake_w:${String(wRow!.archive_scrub)}${wChanged ? "_changed" : ""}`);
   check(scrubs.find(row => row.id === k.id)?.archive_scrub === "clean", "archived_wake_k", "not_clean");
   counts.wakes! += 2;
   // Its stop starts the machine's own clock again: both documents now carry the date Boat is expected to remove it.
@@ -175,6 +182,9 @@ export async function stageRetention(ctx: StageContext): Promise<Record<string, 
     const root = await workspaceRoot(bridge, w.id), scope = { workspaceId: w.id, cwd: root };
     await expectLine(ctx, bridge, { ...scope, cwd: second.checkoutPath }, `${prefix}pty-own`, "git --no-pager log --format=%s -n 20", `${prefix}unpushed`, "own_disk_commit");
     await checkText(bridge, scope, `${second.checkoutPath}/${prefix}untracked.txt`, `${prefix}untracked\n`, "own_disk_untracked", "missing", w);
+    // The person's ignored file, with their own bytes: kept by a "partial" scrub, put back from the backup after a
+    // "backup" one; the same bytes restored_ignored checks after the restore.
+    await checkText(bridge, scope, `${first.checkoutPath}/${ignored}`, ignoredBytes, "own_disk_ignored", "bytes", w);
   } finally { bridge.close(); }
   counts.ownDiskKept = 1;
   await lifecycle(ctx, w.id, "stop", "own_disk_stop");

@@ -133,7 +133,7 @@ describe("rehearsal stages against a fake Alpha", () => {
     expect(state.stages.projects?.counts).toEqual({ workspaces: 2, pulls: 2, turns: 3, copiesGone: 2, environments: 2,
       copyLifetimeSeconds: 60, copySnapshotAttemptAfterCreateSeconds: 50, copySnapshotCompletedAfterCreateSeconds: 60, copyHydrated: 1 });
     expect(state.stages.projects?.notes).toEqual(["copy_snapshot:completed", "copy_archive:completed", "turn_agent:claude", "environment:seeded"]);
-    expect(state.stages.retention?.notes).toEqual(["environment_case:seeded_edited", "wake_w_snapshot:completed", "wake_k_snapshot:completed", "rebuilt_pin:live"]);
+    expect(state.stages.retention?.notes).toEqual(["environment_case:seeded_edited", "wake_w_snapshot:completed", "wake_k_snapshot:completed", "archived_wake_w:backup", "rebuilt_pin:live"]);
     // W opened on its own machine after the wakes' stops still holds the work written before the person's stop.
     expect(state.stages.retention?.counts).toMatchObject({ ownDiskKept: 1 });
     // Every environment this run seeded is empty again at the end of its stage.
@@ -679,7 +679,7 @@ describe("rehearsal environments and the worker-off record", () => {
     expect(await runStages(ctx, ["projects", "retention"], options)).toBe(true);
     expect(state.stages.projects?.notes).toEqual(["copy_snapshot:completed", "copy_archive:completed", "turn_agent:claude", "environment_skipped:environment_exists"]);
     expect(state.stages.projects?.counts?.environments).toBeUndefined();
-    expect(state.stages.retention?.notes).toEqual(["environment_case:hand_made_ignored", "environment_skipped:environment_exists", "wake_w_snapshot:completed", "wake_k_snapshot:completed", "rebuilt_pin:live"]);
+    expect(state.stages.retention?.notes).toEqual(["environment_case:hand_made_ignored", "environment_skipped:environment_exists", "wake_w_snapshot:completed", "wake_k_snapshot:completed", "archived_wake_w:backup", "rebuilt_pin:live"]);
     expect(alpha.environments.get(alpha.repositoryId(R1))).toEqual({ revision: 3, files: new Map([[".env", "theirs"]]) });
     expect(state.created.environments).toEqual([]);
     expect((await cleanup(ctx, { log: () => undefined })).inventory).toEqual(EMPTY);
@@ -1045,6 +1045,28 @@ describe("rehearsal on the Personal route", () => {
       }
       expect(failed).toBeGreaterThan(total);
     }, 120_000);
+  });
+
+  it("an archived wake that finds W changed since its stop keeps its files (partial), and the own-disk open still has them", async () => {
+    const { alpha, ctx, options } = setup({ owner: "personal" });
+    alpha.archivedWakeChanged = true;
+    expect(await runStages(ctx, ["setup", "retention"], { ...options, ...all })).toBe(true);
+    expect(ctx.state.stages.retention?.notes).toContain("archived_wake_w:partial_changed");
+    expect((await cleanup(ctx, { log: () => undefined })).inventory).toEqual(EMPTY);
+    // "partial" with no change found, or "backup" after a change: failed, named by what was expected.
+    for (const [changed, scrub, code] of [[false, "partial", "not_backup"], [true, "backup", "not_partial"]] as const) {
+      const again = setup({ owner: "personal" });
+      again.alpha.archivedWakeChanged = changed; again.alpha.archivedWakeScrub = scrub;
+      expect(await runStages(again.ctx, ["setup", "retention"], { ...again.options, ...all })).toBe(false);
+      expect(again.ctx.state.stages.retention).toMatchObject({ step: "archived_wake_w", code });
+    }
+  });
+
+  it("fails retention when the own-disk open lost the person's ignored file", async () => {
+    const { alpha, ctx, options } = setup({ owner: "personal" });
+    alpha.scrubLosesIgnored = true;
+    expect(await runStages(ctx, ["setup", "retention"], { ...options, ...all })).toBe(false);
+    expect(ctx.state.stages.retention).toMatchObject({ step: "own_disk_ignored", code: "reply:error:not_found" });
   });
 
   it("a clean open after the Cloud Computer rebuild that keeps its pin (a fork of the ready copy) is noted, not failed", async () => {
