@@ -129,7 +129,7 @@ export async function withRuntimeDatabase<P extends Pool, T>(config: RuntimeRele
   const ctx = context(config, env, journal, deps);
   if (journal.role.phase !== "planned" || journal.failure !== null) return reject("recovery");
   let stage: Stage = "identity", failure: Stage | null = null, dispatched = false, cleanupFailed = false, retained = false;
-  let pool: P | undefined, result: T | undefined;
+  let pool: P | undefined, result: T | undefined, operationFailure: PromotionError | undefined;
   let login: { id: string; name: string; username: string; password: string; access_host_url: string } | undefined;
   try {
     ctx.checkCancelled(); await ctx.verifyIdentity(); await ctx.save();
@@ -168,7 +168,12 @@ export async function withRuntimeDatabase<P extends Pool, T>(config: RuntimeRele
     if (deps.retain) { stage = "handoff"; ctx.checkCancelled(); await deps.retain(login, expiry.data); retained = true; }
     stage = "database"; ctx.checkCancelled(); pool = deps.createPool(roleConnectionString(login));
     stage = "operation"; result = await operation(pool);
-  } catch (error) { failure = error instanceof RuntimeDatabaseError ? error.code : stage; }
+  } catch (error) {
+    failure = error instanceof RuntimeDatabaseError ? error.code : stage;
+    // The release's own failure inside the operation (a PromotionError, written to be printed): kept, so the stage says
+    // what stopped it rather than "database operation failed". Anything else stays withheld.
+    if (failure === "operation" && error instanceof PromotionError && !(error instanceof RuntimeDatabaseError)) operationFailure = error;
+  }
   finally {
     if (pool) { try { await pool.end(); } catch { failure ??= "database"; } }
     if (login) login.password = "";
@@ -179,6 +184,7 @@ export async function withRuntimeDatabase<P extends Pool, T>(config: RuntimeRele
     try { await ctx.save(); } catch { failure ??= "journal"; journal.failure = failure; }
   }
   if (cleanupFailed) return reject("cleanup");
+  if (failure === "operation" && operationFailure) throw operationFailure;
   if (failure) return reject(failure);
   if (!journal.role.deleted) return reject("cleanup");
   return result as T;

@@ -17,6 +17,7 @@ import { RuntimeEventSchema, type RuntimeEvent } from "./runtime-journal";
 
 const sdk = createRequire(new URL("../../apps/control-plane/package.json", import.meta.url))("@aws-sdk/client-s3") as {
   GetObjectCommand: new (input: unknown) => unknown;
+  HeadObjectCommand: new (input: unknown) => unknown;
   PutObjectCommand: new (input: unknown) => unknown;
 };
 type ObjectBody = AsyncIterable<Uint8Array>;
@@ -90,16 +91,24 @@ export function runtimeReleaseStore(storage: CloudV2RuntimeStore, repository: st
       requireCheck(length === value.ContentLength && hash.digest("hex") === expected, "Runtime archive does not match its digest");
     } finally { await file.close(); }
   }
+  async function verifyArchive(key: string, manifest: RuntimeManifest) {
+    const directory = await mkdtemp(join(tmpdir(), "zeros-runtime-verify-"));
+    try { await download(key, join(directory, "archive.tar.gz"), manifest.sha256); }
+    finally { await rm(directory, { recursive: true, force: true }); }
+  }
   async function immutableArchive(key: string, path: string, manifest: RuntimeManifest) {
+    // An archive a rerun or an earlier attempt already stored is verified, never uploaded again: a streamed upload the store
+    // answers 412 cannot be retried, and the SDK prints that as an error line though nothing failed.
+    try { await client.send(new sdk.HeadObjectCommand({ Bucket: storage.bucket, Key: key })); await verifyArchive(key, manifest); return; }
+    catch (error) { if (!runtimeObjectMissing(error)) throw error; }
     const stream = createReadStream(path);
     try {
       await client.send(new sdk.PutObjectCommand({ Bucket: storage.bucket, Key: key, Body: stream, ContentLength: manifest.bytes,
         ContentType: "application/gzip", CacheControl: "public,max-age=31536000,immutable", IfNoneMatch: "*" }));
     } catch (error) {
+      // Stored meanwhile by another writer: verified the same way.
       if ((error as { $metadata?: { httpStatusCode?: number } })?.$metadata?.httpStatusCode !== 412) throw error;
-      const directory = await mkdtemp(join(tmpdir(), "zeros-runtime-verify-"));
-      try { await download(key, join(directory, "archive.tar.gz"), manifest.sha256); }
-      finally { await rm(directory, { recursive: true, force: true }); }
+      await verifyArchive(key, manifest);
     } finally { stream.destroy(); }
   }
   async function checkedArchive(path: string, capabilitiesRequired = true) {
