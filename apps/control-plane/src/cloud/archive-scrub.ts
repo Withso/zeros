@@ -126,15 +126,23 @@ export function parseArchiveScrub(stdout: string): ArchiveScrubResult {
 const STOP_MARKER = ".cache/zeros-stop-marker";
 export const CHANGED_SINCE_STOP_SECONDS = 25;
 
+/** The marker's time: the next whole second. A machine's file system may keep whole seconds only: a marker touched
+ * mid-second was then stored earlier than writes made just before it in that second (the worker's last ones as it went
+ * off), which then read as the person's. */
+const MARK = `touch -d "@$(( $(date +%s) + 1 ))" --`;
+
 export function stopMarkerCommand(home: string): string {
   if (!home.startsWith("/") || /[\n\0']/.test(home)) throw new Error("Invalid marker path");
-  return `bash -c ${quote(`mkdir -p -- '${home}/.cache' && touch -- '${home}/${STOP_MARKER}'`)}`;
+  return `bash -c ${quote(`mkdir -p -- '${home}/.cache' && ${MARK} '${home}/${STOP_MARKER}'`)}`;
 }
 
 /** At the end of a maintenance wake: is any file under a checkout newer than the stop's marker? Something
  * the person left running outside the worker's service may have written while the machine was awake.
  * Bounded; a timeout, an error or no marker (a stop from before this check) answers "changed", and a
- * missing marker is created now so the next wake can tell. */
+ * missing marker is created now so the next wake can tell. Git's own bookkeeping never counts: the .git entry's own
+ * time and, in it and in each submodule's Git directory under .git/modules, index, *.lock, FETCH_HEAD and ORIG_HEAD
+ * (a git status rewrites the index). Every other entry does, work-tree directories included (a deleted file moves only
+ * its directory's time); staging still writes a new object. */
 export function changedSinceStopCommand(home: string, checkoutPaths: readonly string[]): string {
   for (const value of [home, ...checkoutPaths])
     if (!value.startsWith("/") || /[\n\0]/.test(value) || value.split("/").some(part => part === "..")) throw new Error("Invalid change check path");
@@ -142,10 +150,13 @@ export function changedSinceStopCommand(home: string, checkoutPaths: readonly st
     "set -u", "exec 3>&1 >/dev/null 2>&1",
     `m=${quote(`${home}/${STOP_MARKER}`)}`,
     `answer() { printf 'zeros-changed %s\\n' "$1" >&3; exit 0; }`,
-    `[ -f "$m" ] || { mkdir -p -- ${quote(`${home}/.cache`)}; touch -- "$m"; answer yes; }`,
+    `[ -f "$m" ] || { mkdir -p -- ${quote(`${home}/.cache`)}; ${MARK} "$m"; answer yes; }`,
     `for repo in ${checkoutPaths.map(quote).join(" ")}; do`,
     "  [ -d \"$repo\" ] || continue",
-    "  found=$(timeout 20 find \"$repo\" -xdev -newer \"$m\" -print -quit) || answer yes",
+    // The checkout's path as a regular expression, then Git's bookkeeping under it, in submodules' Git directories too.
+    "  re=$(printf '%s' \"$repo\" | sed 's/[][\\.*^$+?(){}|]/\\\\&/g'); git=\"$re/\\.git(/modules/[^/]+)*\"",
+    "  found=$(timeout 20 find \"$repo\" -xdev -regextype posix-extended -newer \"$m\" ! -regex \"$git\" "
+      + "! -regex \"$git/(index|FETCH_HEAD|ORIG_HEAD|[^/]*\\.lock)\" -print -quit) || answer yes",
     "  [ -n \"$found\" ] && answer yes",
     "done",
     "answer no",
