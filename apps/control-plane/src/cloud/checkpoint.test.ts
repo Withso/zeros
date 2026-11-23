@@ -1755,6 +1755,22 @@ it("keeps every control-plane source file text: no NUL byte anywhere under src",
 });
 
 // Real Git on several machines' worth of checkouts: some of these take seconds.
+// C4B: without submodules, the capture, the probe and the restore are byte for byte main's at fb6bac9e (after the
+// errexit fix, #1262), so every existing fingerprint and checkpoint stays as it was.
+it("keeps the one-repository capture, probe and restore byte for byte as main's", () => {
+  const digest = (value: string) => createHash("sha256").update(value).digest("hex"), key = Buffer.alloc(32, 7);
+  expect({
+    archive: digest(checkpointArchiveSteps({ checkoutPath: "/home/user/acme/app", home: "/home/user", baseBranch: "main", key }).join("\n")),
+    probe: digest(backupProbeCommand(["/home/user/acme/app"], "/home/user")),
+    restore: digest(restoreCommand({ checkoutPath: "/home/user/acme/app", home: "/home/user", key, sha256: "a".repeat(64),
+      downloadUrl: "https://r2.example.test/get?sig=1", repositoryUrl: "https://github.com/acme/app.git", githubToken: "synthetic-token-0123456789" })),
+  }).toEqual({
+    archive: "053903c2aaf430b5845c9e74fe6da3a4d85995634a99facd3504a3be28678efe",
+    probe: "d13797b8ef26c61aa72a8b30c2bf83c8189448e7e3c8a97d2a5a5afef435f7ef",
+    restore: "0141e28d299a60bd65f1727044dd1701cac9d84368e31ccb393df2f020d3c008",
+  });
+});
+
 describe("a workspace's submodules (C4)", { timeout: 30_000 }, () => {
   const digest = (name: string) => createHash("sha256").update(name).digest("hex");
   /** A project's first repository with acme/lib at lib and lib's own acme/inner at lib/inner, each fetched the worker's way:
