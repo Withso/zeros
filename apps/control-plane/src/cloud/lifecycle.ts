@@ -33,6 +33,9 @@ const HELLO_POLL_MS = 30_000;
 /** Set by a refused worker hello while starting; the next step installs the pin. */
 export const CLOUD_V2_RUNTIME_REFUSED = "worker_runtime_mismatch";
 const BOOT_DEADLINE_MS = 10 * 60_000;
+/** A create waiting for its organization's base to be prepared checks this often, and gives up after this long. */
+const BASE_WAIT_POLL_MS = 5_000;
+const BASE_WAIT_DEADLINE_MS = 6 * 60 * 60_000;
 /** A restore also creates a VM and applies a checkpoint of up to 4 GiB. */
 const RESTORE_DEADLINE_MS = 25 * 60_000;
 /** Holds the step's claim while the VM runs a checkpoint command. */
@@ -165,7 +168,8 @@ export type CloudV2LifecycleDeps = {
     | "claimMaintenanceWake" | "beginMaintenanceStop" | "adoptMaintenance" | "maintenanceHeld" | "finishMaintenance"
     | "startRetentionClocks" | "archiveInactive" | "archiveDepartedPrivate" | "restoreReturningPrivate" | "archiveForSystem" | "clearArchiveScrub"
     | "claimBackupRemovals" | "pendingBackupRemovals" | "finishBackupRemoval" | "sweepDepartedProjects" | "deleteDepartedProjects" | "missedWakes"
-    | "accountCheckpointPrefixes" | "retireDisconnectedCopies" | "clearStaleMaintenance" | "maintenanceBacklog" | "keepLostMachine">;
+    | "accountCheckpointPrefixes" | "retireDisconnectedCopies" | "clearStaleMaintenance" | "maintenanceBacklog" | "keepLostMachine">
+    & Partial<Pick<CloudV2Store, "workspaceBuildWait" | "rebindToBase" | "baseWaitOver" | "deferredCreateChange">>;
   /** Optional for older compositions; the shipped store always provides it. */
   prompts?: CloudV2Store["prompts"];
   pruneEnvironments?: () => Promise<void>;
@@ -580,7 +584,30 @@ export class CloudV2Lifecycle {
       await this.measure(workspace, "source_authorize", () => this.deps.authorizeWorkspace!(workspace));
     switch (workspace.state) {
       case "creating": {
-        if (now - Date.parse(workspace.createdAt) > BOOT_DEADLINE_MS) {
+        // Ready copies: a base being prepared for this create. It waits ("Preparing the Cloud Computer…"), and its boot
+        // deadline counts from when that base went live.
+        // Before any machine is made for it: archived meanwhile (a member who left), or its creator lost cloud (left,
+        // or Pro ended in a Personal organization), and it gives up, plainly, with none made.
+        const changed = workspace.preparing ? await store.deferredCreateChange?.(workspace.id) : null;
+        if (changed) {
+          await store.transition(workspace.id, ["creating"], "failed", { errorCode: changed === "archived" ? "cloud_create_archived" : "cloud_creator_access_lost" });
+          return;
+        }
+        const base = workspace.preparing ? await store.workspaceBuildWait?.(workspace.id) : null;
+        if (base && (base.state === "queued" || base.state === "building")) {
+          if (now - Date.parse(workspace.createdAt) > BASE_WAIT_DEADLINE_MS) {
+            await store.transition(workspace.id, ["creating"], "failed", { errorCode: "cloud_computer_preparation_failed" });
+            return;
+          }
+          await store.defer(workspace.id, "creating", BASE_WAIT_POLL_MS);
+          return;
+        }
+        if (workspace.preparing) await store.baseWaitOver?.(workspace.id);
+        // From the create, or from the tick that saw its base live (this one, or the one kept in the row): never from
+        // the base's own finish, which a lifecycle that was down or behind may see long after.
+        const bootFrom = workspace.preparing ? now
+          : Math.max(Date.parse(workspace.createdAt), workspace.baseReadyAt ? Date.parse(workspace.baseReadyAt) : 0);
+        if (now - bootFrom > BOOT_DEADLINE_MS) {
           await store.transition(workspace.id, ["creating"], "failed", { errorCode: "worker_boot_timeout" });
           return;
         }
@@ -589,7 +616,14 @@ export class CloudV2Lifecycle {
         let sandboxId = workspace.boatSandboxId;
         let image = await store.workspaceImage(workspace.id);
         if (!image) {
-          await store.transition(workspace.id, ["creating"], "failed", { errorCode: "cloud_computer_build_required" });
+          // The base it waited for failed or was cancelled: the organization's live base if there is one now, else it fails.
+          if (base && base.state !== "succeeded") {
+            if (await store.rebindToBase?.(workspace.id, base.buildId)) { await store.defer(workspace.id, "creating", 0); return; }
+            await store.transition(workspace.id, ["creating"], "failed", { errorCode: "cloud_computer_preparation_failed" });
+            return;
+          }
+          // With ready copies on, nobody is told to build the Cloud Computer: Zeros prepares it.
+          await store.transition(workspace.id, ["creating"], "failed", { errorCode: this.deps.readyCopies ? "cloud_computer_preparation_failed" : "cloud_computer_build_required" });
           return;
         }
         // A fork of the repository's ready copy already holds the base, the

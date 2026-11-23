@@ -119,7 +119,9 @@ const copy = (row: Row): CloudV2ReadyCopy => ({
 
 /** The organization's live base-only Cloud Computer build: tools only, no
  * repository source, so only it may start a ready copy. */
-export type ReadyCopyBase = { buildId: string; snapshot: string; createdBy: string; shared: boolean };
+export type ReadyCopyBase = { buildId: string; snapshot: string;
+  /** Null for a base Zeros prepared (automatic). Never a copy's creator: that is its project's owner or creator. */
+  createdBy: string | null; shared: boolean };
 
 /** A project as its copy is built: its repositories in position order. Not
  * buildable while a personal project's member has left or the organization no
@@ -154,12 +156,15 @@ export class CloudV2ReadyCopies {
   }
 
   async base(organizationId: string): Promise<ReadyCopyBase | null> {
-    const row = (await this.tx(tx => tx.query<{ id: string; snapshot_name: string; created_by: string | null; base_shared: boolean }>(
-      `SELECT b.id, c.snapshot_name, b.created_by, b.base_shared FROM cloud_v2_computers c
+    const row = (await this.tx(tx => tx.query<{ id: string; snapshot_name: string; created_by: string | null; base_shared: boolean; automatic: boolean }>(
+      `SELECT b.id, c.snapshot_name, b.created_by, b.base_shared, b.automatic FROM cloud_v2_computers c
        JOIN cloud_v2_computer_builds b ON b.id=c.active_build_id AND b.org_id=c.org_id AND b.state='succeeded' AND b.base_only
        JOIN organizations o ON o.id=c.org_id AND ${ORGANIZATION_AVAILABLE}
        WHERE c.org_id=$1 AND c.snapshot_name IS NOT NULL`, [organizationId]))).rows[0];
-    if (!row?.created_by) return null;
+    // Any live base: it holds no source, and a copy is built as its project's owner or creator, never the base's. So a
+    // base whose creator's account is gone (created_by ON DELETE SET NULL) is as usable as one Zeros prepared, the same
+    // rule computer.ts readBase uses; otherwise its projects would wait forever while ensureBase calls it ready.
+    if (!row) return null;
     return { buildId: row.id, snapshot: row.snapshot_name, createdBy: row.created_by, shared: row.base_shared };
   }
 
@@ -182,11 +187,30 @@ export class CloudV2ReadyCopies {
 
   /** The organization's projects that should hold a copy now: every organization
    * project, and personal ones only once their member asked (a create or a save). */
-  async organizationProjects(organizationId: string): Promise<string[]> {
+  async organizationProjects(organizationId: string, limit = 500): Promise<string[]> {
     const { rows } = await this.tx(tx => tx.query<{ id: string }>(
       `SELECT p.id FROM cloud_projects p JOIN organizations o ON o.id=p.org_id AND ${ORGANIZATION_AVAILABLE}
-       WHERE p.org_id=$1 AND p.level='organization' ORDER BY p.created_at, p.id`, [organizationId]));
+       WHERE p.org_id=$1 AND (p.level='organization' OR p.copy_requested_at IS NOT NULL) ORDER BY p.created_at, p.id LIMIT $2`, [organizationId, limit]));
     return rows.map(row => row.id);
+  }
+
+  /** A project asked for its first copy while its organization had no base: it is queued once one is live. */
+  async requestWhenBaseReady(projectId: string): Promise<void> {
+    await this.tx(tx => tx.query("UPDATE cloud_projects SET copy_requested_at=coalesce(copy_requested_at, clock_timestamp()) WHERE id=$1", [projectId]));
+  }
+
+  async requestDelivered(projectId: string): Promise<void> {
+    await this.tx(tx => tx.query("UPDATE cloud_projects SET copy_requested_at=NULL WHERE id=$1 AND copy_requested_at IS NOT NULL", [projectId]));
+  }
+
+  /** Projects still waiting for a base that is now live, oldest first. */
+  async requestedWithBase(limit = 25): Promise<{ organizationId: string; projectId: string }[]> {
+    const { rows } = await this.tx(tx => tx.query<{ org_id: string; id: string }>(
+      `SELECT p.org_id, p.id FROM cloud_projects p JOIN organizations o ON o.id=p.org_id AND ${ORGANIZATION_AVAILABLE}
+       JOIN cloud_v2_computers c ON c.org_id=p.org_id
+       JOIN cloud_v2_computer_builds b ON b.id=c.active_build_id AND b.org_id=c.org_id AND b.state='succeeded' AND b.base_only
+       WHERE p.copy_requested_at IS NOT NULL ORDER BY p.copy_requested_at, p.id LIMIT $1`, [limit]));
+    return rows.map(row => ({ organizationId: row.org_id, projectId: row.id }));
   }
 
   /** Queues a generation, or joins the one already building for this project. */
@@ -758,6 +782,8 @@ export const readyCopyLayout = (project: { name: string; repositories: readonly 
   return repositoryFolderNames(project.repositories.map(entry => entry.repository)).map(name => `${folder}/${name}`);
 };
 const homePath = (checkoutFolder: string) => `/home/user/${checkoutFolder}`;
+/** A copy is built as its project's owner (a personal project) or creator, never as whoever built the base. */
+const copyCreator = (project: ReadyCopyProject): string | null => project.ownerUserId ?? project.createdBy;
 /** The project's ignored-file baseline at the end of its build: one per checkout, at the paths a fork's
  * workspace has (checkpoint.ts ignoredBaselineCommand). Every build records afresh: a machine forked from the
  * previous copy holds that copy's baseline, and on a build machine there is no person whose files it must keep
@@ -788,10 +814,15 @@ export class CloudV2ReadyCopyBuilder {
   async queueFirst(organizationId: string, projectId: string, trigger: ReadyCopyTrigger = "project_created"): Promise<CloudV2ReadyCopy | null> {
     const { copies } = this.deps;
     const base = await copies.base(organizationId), project = await copies.project(projectId);
-    if (!base || !project || project.organizationId !== organizationId || !project.buildable || !project.repositories.length) return null;
+    if (!project || project.organizationId !== organizationId || !project.buildable || !project.repositories.length) return null;
+    // No base yet: the project waits, and the base's activation queues it.
+    if (!base) { await copies.requestWhenBaseReady(projectId); return null; }
+    const creator = copyCreator(project);
+    if (!creator) return null;
     const inputs = await copies.inputs(organizationId, projectId);
-    if (!await copies.mayQueueFirst(projectId, this.now(), inputs)) return null;
-    return copies.request({ organizationId, projectId, createdBy: project.ownerUserId ?? project.createdBy ?? base.createdBy,
+    if (!await copies.mayQueueFirst(projectId, this.now(), inputs)) { await copies.requestDelivered(projectId); return null; }
+    await copies.requestDelivered(projectId);
+    return copies.request({ organizationId, projectId, createdBy: creator,
       computerBuildId: base.buildId, builtFromBase: `snapshot:${base.snapshot}`, inputs, trigger });
   }
 
@@ -803,13 +834,16 @@ export class CloudV2ReadyCopyBuilder {
     const trigger = change === "submodules_changed" ? "setup_changed" as const : change;
     const triggerDetail = change === "submodules_changed" ? "submodules_changed" as const : undefined;
     const { copies } = this.deps, base = await copies.base(organizationId), project = await copies.project(projectId);
-    if (!base || !project || project.organizationId !== organizationId || !project.buildable || !project.repositories.length) return;
+    if (!project || project.organizationId !== organizationId || !project.buildable || !project.repositories.length) return;
+    if (!base) { await copies.requestWhenBaseReady(projectId); return; }
+    const creator = copyCreator(project);
+    if (!creator) return;
     const inputs = await copies.inputs(organizationId, projectId);
     const latest = (await copies.history(organizationId, projectId)).find(row => row.state !== "retired");
     if (!latest) { await this.queueFirst(organizationId, projectId, trigger); return; }
     if (latest.inputs === inputs && latest.state !== "failed") return;
     const ready = trigger === "repositories_changed" ? null : await copies.forkable(organizationId, projectId, this.now());
-    await copies.request({ organizationId, projectId, createdBy: project.ownerUserId ?? project.createdBy ?? base.createdBy,
+    await copies.request({ organizationId, projectId, createdBy: creator,
       computerBuildId: base.buildId, builtFromBase: ready && ready.computerBuildId === base.buildId ? `copy:${ready.id}` : `snapshot:${base.snapshot}`,
       refresh: !!ready, inputs, trigger, ...(triggerDetail ? { triggerDetail } : {}) });
   }
@@ -833,8 +867,10 @@ export class CloudV2ReadyCopyBuilder {
   private async manual(organizationId: string, projectId: string, userId: string | null, now: Date): Promise<CloudV2ReadyCopy | null> {
     const { copies } = this.deps, base = await copies.base(organizationId), project = await copies.project(projectId);
     if (!base || !project || project.organizationId !== organizationId || !project.buildable || !project.repositories.length) return null;
+    const creator = copyCreator(project);
+    if (!creator) return null;
     const ready = await copies.forkable(organizationId, projectId, now);
-    return copies.request({ organizationId, projectId, createdBy: project.ownerUserId ?? project.createdBy ?? base.createdBy,
+    return copies.request({ organizationId, projectId, createdBy: creator,
       computerBuildId: base.buildId, builtFromBase: ready && ready.computerBuildId === base.buildId ? `copy:${ready.id}` : `snapshot:${base.snapshot}`,
       refresh: !!ready, inputs: await copies.inputs(organizationId, projectId), manualRetry: true, trigger: "manual", triggeredBy: userId });
   }
@@ -857,7 +893,8 @@ export class CloudV2ReadyCopyBuilder {
     for (const ready of await copies.refreshCandidates(now)) {
       if (this.closed) return;
       const base = await copies.base(ready.organizationId), project = await copies.project(ready.projectId);
-      if (!base || !project?.buildable) continue;
+      const creator = project ? copyCreator(project) : null;
+      if (!base || !project?.buildable || !creator) continue;
       // A refresh that keeps failing backs off and stops like a first copy; the
       // older generation keeps serving until it expires, and only those who edit the project hear of it.
       const inputs = await copies.inputs(ready.organizationId, ready.projectId);
@@ -867,13 +904,18 @@ export class CloudV2ReadyCopyBuilder {
       // A copy on the current base, with the same repositories, is refreshed by forking it; otherwise it is rebuilt from the base.
       const same = JSON.stringify(ready.result?.map(entry => entry.repositoryId) ?? []) === JSON.stringify(project.repositories.map(entry => entry.repositoryId));
       await copies.request({ organizationId: ready.organizationId, projectId: ready.projectId,
-        createdBy: project.ownerUserId ?? project.createdBy ?? base.createdBy, computerBuildId: base.buildId, refresh: true, inputs, trigger,
+        createdBy: creator, computerBuildId: base.buildId, refresh: true, inputs, trigger,
         builtFromBase: ready.stale || !ready.machineId || ready.computerBuildId !== base.buildId || !same ? `snapshot:${base.snapshot}` : `copy:${ready.id}` });
     }
     // First copies that failed: retried on the backoff, then left until something changes.
     for (const failed of await copies.unrecovered()) {
       if (this.closed) return;
       await this.queueFirst(failed.organizationId, failed.projectId, "retry");
+    }
+    // Projects that asked while their organization had no base, and were not queued at its activation.
+    for (const waiting of await copies.requestedWithBase()) {
+      if (this.closed) return;
+      await this.queueFirst(waiting.organizationId, waiting.projectId, "computer_build");
     }
   }
 
@@ -948,7 +990,7 @@ export class CloudV2ReadyCopyBuilder {
       // An organization project clones through the organization's GitHub connection; a personal one as its member.
       const token = project.level === "personal" ? await this.deps.cloneToken(job.organizationId, project.ownerUserId!, target)
         : this.deps.sharedCloneToken ? await this.deps.sharedCloneToken(job.organizationId, target)
-        : await this.deps.cloneToken(job.organizationId, base.createdBy, target);
+        : await this.deps.cloneToken(job.organizationId, job.createdBy ?? copyCreator(project)!, target);
       tokens.push(token);
       const header = `Authorization: Basic ${Buffer.from(`x-access-token:${token}`).toString("base64")}\n`;
       const clone = await compute.execLong(machineId, asZeros(checkoutScript({ repository: entry.repository, ...(entry.defaultBranch ? { ref: entry.defaultBranch } : {}) },

@@ -8,6 +8,7 @@ import { HttpError } from "../authz.js";
 import { createCloudV2Routes, type CloudV2RouteDeps } from "./routes.js";
 import { createProjectRoutes, type ProjectRouteDeps } from "./project-routes.js";
 import type { CloudProject, CloudProjectView } from "./projects.js";
+import type { CloudV2BaseState } from "./computer.js";
 
 const org = "11111111-1111-4111-8111-111111111111";
 const alice = "22222222-2222-4222-8222-222222222222", bob = "33333333-3333-4333-8333-333333333333";
@@ -108,7 +109,8 @@ describe("a create from a project", () => {
     onError(hono);
     const deps = {
       store: { activeComputer: async () => ({ buildId: "55555555-5555-4555-8555-555555555555", baseOnly: true, repositories: [] }), createWorkspace },
-      computers: { requireMember: async () => {}, requireAdmin: async () => {}, overview: async () => ({ activeBuildId: "b" }) },
+      computers: { requireMember: async () => {}, requireAdmin: async () => {}, overview: async () => ({ activeBuildId: "b" }),
+        ensureBase: vi.fn(async (): Promise<CloudV2BaseState> => ({ state: "ready", buildId: "55555555-5555-4555-8555-555555555555" })) },
       projects: { forRepository: vi.fn(async () => found), get: vi.fn(async () => { if (!found) throw new HttpError(404, "not_found", "Project not found"); return found; }),
         oneRepositoryProjects: vi.fn(), syncRecipe: vi.fn() },
       projectAccess: vi.fn(async (_o: string, _u: string, repositories: { repository: string; repositoryId: string; baseBranch?: string | null }[]) =>
@@ -195,10 +197,51 @@ describe("a create from a project", () => {
     expect(f.deps.projectAccess).toHaveBeenCalledWith(org, alice, expect.arrayContaining([{ repository: "acme/web", repositoryId: "45", baseBranch: "next" }]));
   });
 
-  it("asks for a Cloud Computer build while the live one still holds repositories", async () => {
-    const f = create(alice, ZEROS, { store: { activeComputer: async () => ({ buildId: "b", repositories: [{ repository: "withso/zeros", defaultBranch: "main" }] }),
-      createWorkspace: vi.fn() } });
-    expect((await f.send({ organizationId: org, repository: "withso/zeros" })).body.error.code).toBe("cloud_computer_rebuild_required");
+  /** The organization's base, as ensureBase finds it, and a live pre-switch build that installs withso/zeros. */
+  const preSwitch = (base: CloudV2BaseState) => {
+    const createWorkspace = vi.fn(async (input: Record<string, unknown>) => ({ ...input, state: "creating", createdAt: "2026-11-21T00:00:00.000Z" }));
+    return { createWorkspace, extra: {
+      store: { activeComputer: async () => ({ buildId: "b", repositories: [{ repository: "withso/zeros", defaultBranch: "main" }] }), createWorkspace },
+      computers: { requireMember: async () => {}, requireAdmin: async () => {}, overview: async () => ({ activeBuildId: "b" }), ensureBase: vi.fn(async () => base) },
+      authorizeBuildRepository: vi.fn(async (_o: string, _u: string, _b: string, repository: string) => ({ repository, repositoryId: "42" })),
+      remoteHead: vi.fn(async () => "d".repeat(40)) } };
+  };
+
+  it.each<CloudV2BaseState>([{ state: "preparing", buildId: "66666666-6666-4666-8666-666666666666" },
+    { state: "failed", buildId: "66666666-6666-4666-8666-666666666666", errorCode: "computer_install_script_failed", failures: 1, nextAttemptAt: "2026-11-21T01:00:00.000Z" }])(
+    "until a base is live (%o), creates a repository the pre-switch build installs exactly as before, never asking for a build", async base => {
+      const { createWorkspace, extra } = preSwitch(base);
+      const f = create(alice, ZEROS, extra);
+      const sent = await f.send({ organizationId: org, repository: "withso/zeros" });
+      expect(sent.status).toBe(201);
+      expect(f.deps.projectAccess).not.toHaveBeenCalled();
+      expect(createWorkspace).toHaveBeenCalledWith(expect.objectContaining({ repository: "withso/zeros", computerBuildId: "b", sourceRepositoryId: "42" }));
+      expect(createWorkspace.mock.calls[0]![0]).not.toHaveProperty("projectId");
+    });
+
+  it("creates from the project, bound to the base being prepared, when no pre-switch build installs the repository", async () => {
+    const queued = "77777777-7777-4777-8777-777777777777";
+    const f = create(alice, APP, { computers: { requireMember: async () => {}, requireAdmin: async () => {}, overview: async () => ({ activeBuildId: null }),
+      ensureBase: vi.fn(async () => ({ state: "preparing", buildId: queued })) }, store: { activeComputer: async () => null, createWorkspace: vi.fn(
+      async (input: Record<string, unknown>) => ({ ...input, state: "creating", createdAt: "2026-11-21T00:00:00.000Z" })) } });
+    expect((await f.send({ organizationId: org, projectId: P2 })).status).toBe(201);
+    expect((f.deps.store as unknown as { createWorkspace: ReturnType<typeof vi.fn> }).createWorkspace)
+      .toHaveBeenCalledWith(expect.objectContaining({ projectId: P2, computerBuildId: queued }));
+  });
+
+  it("never asks anyone to press Build: a failed base and a base behind another build say what Zeros does", async () => {
+    const cases: [CloudV2BaseState, string][] = [
+      [{ state: "failed", buildId: "66666666-6666-4666-8666-666666666666", errorCode: "computer_install_script_failed", failures: 2,
+        nextAttemptAt: "2026-11-21T01:00:00.000Z" }, "cloud_computer_preparation_failed"],
+      [{ state: "preparing", buildId: null }, "cloud_computer_preparing"]];
+    for (const [base, code] of cases) {
+      const f = create(alice, APP, { computers: { requireMember: async () => {}, requireAdmin: async () => {}, overview: async () => ({ activeBuildId: null }),
+        ensureBase: vi.fn(async () => base) }, store: { activeComputer: async () => null, createWorkspace: vi.fn() } });
+      const sent = await f.send({ organizationId: org, projectId: P2 });
+      expect(sent.status).toBe(409);
+      expect(sent.body.error.code).toBe(code);
+      expect(sent.body.error.message).not.toMatch(/build the cloud computer|rebuild|settings/i);
+    }
   });
 });
 
@@ -258,6 +301,22 @@ describe("GitHub connections and projects", () => {
       method, ...(body === undefined ? {} : { headers: { "content-type": "application/json" }, body: JSON.stringify(body) }) });
     return { deps, send };
   }
+
+  it("says what a project without a copy waits for: the Cloud Computer being prepared, or why it failed, never a silent none", async () => {
+    const f = routes(alice);
+    const readyCopies = f.deps.readyCopies as typeof f.deps.readyCopies & { base?: ReturnType<typeof vi.fn> };
+    readyCopies.copies.history.mockResolvedValue([]);
+    readyCopies.base = vi.fn(async () => ({ state: "preparing", buildId: null }));
+    expect((await (await f.send("/cloud-projects")).json()).base).toEqual({ state: "preparing" });
+    expect((await (await f.send(`/cloud-projects/${P1}/ready-copy`)).json()).base).toEqual({ state: "preparing" });
+    readyCopies.base = vi.fn(async () => ({ state: "failed", buildId: "b", errorCode: "computer_install_script_failed", failures: 2,
+      nextAttemptAt: "2026-11-22T13:00:00.000Z" }));
+    expect((await (await f.send(`/cloud-projects/${P1}/ready-copy`)).json()).base)
+      .toEqual({ state: "failed", reason: "computer_install_script_failed", nextAttemptAt: "2026-11-22T13:00:00.000Z" });
+    // A live base says nothing more; a project that has copies shows them instead.
+    readyCopies.base = vi.fn(async () => ({ state: "ready", buildId: "b" }));
+    expect((await (await f.send(`/cloud-projects/${P1}/ready-copy`)).json())).not.toHaveProperty("base");
+  });
 
   it("splits connections into the organization's and the caller's own, and shows which projects use each repository, with no add step", async () => {
     const f = routes(alice);

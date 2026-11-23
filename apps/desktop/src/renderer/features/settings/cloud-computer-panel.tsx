@@ -66,7 +66,7 @@ function CloudComputerScope({ userId, organizationId, organizationName, canManag
   const configured = draft.local ?? data?.recipe?.repositories ?? live;
   const changes = computerChanges(configured, live);
   const status = computerStatus({ builds, activeBuildId: data?.activeBuildId ?? null, changes,
-    configuredCount: configured.length, now: Date.now(), loaded: data !== undefined });
+    configuredCount: configured.length, now: Date.now(), loaded: data !== undefined, readyCopies: data?.readyCopies === true, base: data?.base });
 
   const run = async (work: () => Promise<unknown>) => {
     setBusy(true); setError(null);
@@ -138,7 +138,8 @@ function CloudComputerScope({ userId, organizationId, organizationName, canManag
               <Button variant="ghost" onClick={() => void discard()} disabled={locked}>Discard</Button>
             )}
             <Button variant={status.kind === "unbuilt" ? "primary" : "secondary"} onClick={() => void build()}
-              disabled={locked || configured.length === 0 || data === undefined}>
+              // With projects the Cloud Computer holds no repository: a build needs none.
+              disabled={locked || (!data?.readyCopies && configured.length === 0) || data === undefined}>
               {running ? "Building…" : "Build computer"}
             </Button>
           </div>
