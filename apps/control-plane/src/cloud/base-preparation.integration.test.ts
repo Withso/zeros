@@ -733,6 +733,28 @@ d("ready copies: a safe switch-on", () => {
     });
   });
 
+  describe("with the setting turned on while a pre-switch refresh was interrupted", () => {
+    it("never retries that refresh, which would queue a full build beside the base; off, it is retried as before", async () => {
+      const pre = await preSwitchBuild();
+      const other = "c".repeat(64);
+      // Queued with the setting off for a new runtime, then interrupted (a deploy stopped its server).
+      const off = computersWith({ readyCopies: false });
+      const refresh = await off.enqueueAutomatic(org, pre.id, "runtime", other);
+      expect(refresh).toMatchObject({ reason: "runtime", state: "queued", createdBy: admin });
+      await pool.query("UPDATE cloud_v2_computer_builds SET state='failed', error_code='computer_build_interrupted', finished_at=clock_timestamp()-interval '2 minutes' WHERE id=$1", [refresh!.id]);
+      // Off, it is retried as it always was (the queued retry is then taken back for the rest of this test).
+      expect(await off.retryInterrupted(other)).toBe(1);
+      await pool.query("DELETE FROM cloud_v2_computer_builds WHERE retry_of=$1", [refresh!.id]);
+      // On: never retried, and the sweep queues the organization's base instead.
+      const on = computersWith();
+      expect(await on.retryInterrupted(other)).toBe(0);
+      expect((await pool.query("SELECT count(*)::int AS n FROM cloud_v2_computer_builds WHERE retry_of=$1", [refresh!.id])).rows[0].n).toBe(0);
+      await builder(on).tick();
+      expect((await pool.query("SELECT base_only, automatic FROM cloud_v2_computer_builds WHERE org_id=$1 AND id NOT IN ($2,$3)", [org, pre.id, refresh!.id])).rows)
+        .toEqual([{ base_only: true, automatic: true }]);
+    });
+  });
+
   describe("with the setting off", () => {
     it("never refreshes a base, which would queue a build with no repository; on, an automatic base is refreshed as another", async () => {
       boat.snapshots.set(SHARED, new Map());

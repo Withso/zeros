@@ -732,13 +732,16 @@ export class CloudV2Computers {
           JOIN users u ON u.id=m.user_id AND u.auth_status='active' AND u.deleted_at IS NULL
           WHERE m.org_id=b.org_id AND m.user_id=b.created_by AND m.role IN ('owner','admin')))
         AND b.state='failed' AND b.error_code='computer_build_interrupted' AND b.reason IN ('runtime','refresh') AND b.retry_attempt<3
+        -- As refreshCandidates: with ready copies on only a base is retried (a build that installs repositories would be a
+        -- full build beside the organization's base); off, only such builds are.
+        AND b.base_only = $2
         AND b.runtime_sha256=$1 AND b.cleanup_requested_at IS NULL AND b.source_policy_version IN (2,3) AND b.source_targets IS NOT NULL
         AND NOT b.builder_create_pending AND (b.builder_sandbox_id IS NULL OR b.builder_deleted_at IS NOT NULL)
         AND (b.snapshot_id IS NULL OR b.snapshot_deleted_at IS NOT NULL) AND b.operation_until IS NULL
         AND b.finished_at<=clock_timestamp()-CASE WHEN b.retry_attempt=1 THEN interval '1 minute' ELSE interval '5 minutes' END
         AND NOT EXISTS(SELECT 1 FROM cloud_v2_computer_builds newer WHERE newer.org_id=b.org_id AND newer.version>b.version)
         AND NOT EXISTS(SELECT 1 FROM cloud_v2_computer_builds child WHERE child.retry_of=b.id)
-      ORDER BY b.finished_at,b.id LIMIT 25`, [runtimeSha256]));
+      ORDER BY b.finished_at,b.id LIMIT 25`, [runtimeSha256, !!this.options.readyCopies]));
     let queued = 0;
     for (const candidate of candidates.rows) {
       try {
@@ -748,14 +751,14 @@ export class CloudV2Computers {
             `SELECT b.*,c.recipe_revision::text FROM cloud_v2_computer_builds b JOIN cloud_v2_computers c
               ON c.org_id=b.org_id AND c.active_build_id=b.automatic_base_build_id AND c.recipe_revision=b.automatic_recipe_revision
             WHERE b.id=$1 AND b.state='failed' AND b.error_code='computer_build_interrupted' AND b.reason IN ('runtime','refresh')
-              AND b.retry_attempt<3 AND b.runtime_sha256=$2 AND b.cleanup_requested_at IS NULL
+              AND b.retry_attempt<3 AND b.runtime_sha256=$2 AND b.cleanup_requested_at IS NULL AND b.base_only = $3
               AND b.finished_at<=clock_timestamp()-CASE WHEN b.retry_attempt=1 THEN interval '1 minute' ELSE interval '5 minutes' END
               AND b.source_policy_version IN (2,3) AND b.source_targets IS NOT NULL AND (b.created_by IS NOT NULL OR b.automatic)
               AND NOT b.builder_create_pending AND (b.builder_sandbox_id IS NULL OR b.builder_deleted_at IS NOT NULL)
               AND (b.snapshot_id IS NULL OR b.snapshot_deleted_at IS NOT NULL) AND b.operation_until IS NULL
               AND NOT EXISTS(SELECT 1 FROM cloud_v2_computer_builds newer WHERE newer.org_id=b.org_id AND newer.version>b.version)
               AND NOT EXISTS(SELECT 1 FROM cloud_v2_computer_builds child WHERE child.retry_of=b.id)
-            FOR UPDATE OF b,c`, [candidate.id, runtimeSha256])).rows[0];
+            FOR UPDATE OF b,c`, [candidate.id, runtimeSha256, !!this.options.readyCopies])).rows[0];
           if (!row?.runtime_sha256) return false;
           if (row.automatic) {
             if (!this.options.readyCopies) return false;
