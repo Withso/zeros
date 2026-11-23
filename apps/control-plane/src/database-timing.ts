@@ -11,6 +11,7 @@ export const ADVISORY_LOCK_PURPOSES = [
   "capability-key", "actor-session-capacity", "cloud-v2-computer-build", "cloud-v2-workspace-create",
   "mcp-configuration", "mcp-authorization-start", "mcp-repository-admission", "cloud-github-connection", "cloud-environment-write", "cloud-api-session",
   "cloud-team-presence-cap", "cloud-v2-ready-copy-claim", "cloud-v2-maintenance-claim",
+  "cloud-v2-shared-base-claim",
 ] as const;
 export type AdvisoryLockPurpose = typeof ADVISORY_LOCK_PURPOSES[number];
 const purposes = new Set<string>(ADVISORY_LOCK_PURPOSES);

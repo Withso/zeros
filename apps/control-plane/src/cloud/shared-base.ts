@@ -113,7 +113,7 @@ export class CloudV2SharedBases {
   async claim(scope: SharedBaseScope, runtimeSha256: string, now = new Date()): Promise<SharedBaseClaim> {
     const prefix = sharedBasePrefix(scope);
     return withSystemTx(this.pool, async tx => {
-      await tx.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [`cloud-v2-shared-base:${prefix}`]);
+      await tx.query("/* lock_purpose='cloud-v2-shared-base-claim' */ SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [`cloud-v2-shared-base:${prefix}`]);
       await this.failInterrupted(tx, prefix);
       const decided = await this.decide(tx, scope, runtimeSha256, now);
       if (decided.kind !== "claimed") return decided;
