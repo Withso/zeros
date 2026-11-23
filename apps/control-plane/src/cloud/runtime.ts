@@ -100,6 +100,7 @@ export function installRuntimeCommand(runtime: { sha256: string; url: string; pu
       + (sha === runtime.sha256 ? "" : ` \\\n  && [ ! -f ${RUNTIMES}/${runtime.sha256}/.complete ]`)
       + `; then ${sha === runtime.sha256 ? "" : "echo runtime-kept; "}exit 0; fi`),
     ...prepare,
+    // Every step below is its own command, never part of an `&&` list: under set -e, bash goes on past a failure there.
     "sudo -n rm -f /opt/zeros/worker-runtime.env",
     ...(keys ? [
       `printf %s ${quote(b64(JSON.stringify(keys)))} | base64 -d | sudo -n tee /opt/zeros/worker-auth.json.next >/dev/null`,
@@ -134,6 +135,7 @@ function runtimePreparation(runtime: { sha256: string; url: string }): string[] 
   const url = new URL(runtime.url);
   if (url.protocol !== "https:" || url.username || url.password) throw new Error("Invalid runtime URL");
   const dir = `${RUNTIMES}/${runtime.sha256}`;
+  // Each step its own command, never part of an `&&` list: under set -e, bash goes on past a failure there.
   return [
     "set -eu",
     `sudo -n mkdir -p ${RUNTIMES}`,
@@ -172,6 +174,7 @@ export function activateRuntimeCommand(input: { sha256: string; previousSha256: 
     // The marker precedes restart. An uncertain provider reply may inspect it,
     // but must not restart the same boot again and consume its one-use identity.
     `if [ -f ${marker} ]; then echo activation-recorded; exit 0; fi`,
+    // Each step below its own command, never part of an `&&` list: under set -e, bash goes on past a failure there.
     `printf %s ${quote(Buffer.from(environment).toString("base64"))} | base64 -d | sudo -n tee /opt/zeros/worker-runtime.env.next >/dev/null`,
     "sudo -n chown root:root /opt/zeros/worker-runtime.env.next; sudo -n chmod 0644 /opt/zeros/worker-runtime.env.next",
     `test "$(sha256sum /home/user/.config/zeros/worker-token | cut -d ' ' -f 1)" = ${input.tokenSha256}`,
