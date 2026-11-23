@@ -26,6 +26,8 @@ const ALLOWED: Record<string, { count: number; reason: string }> = {
   "cloud/team-sharing/authority.ts": { count: 1, reason: "the team-sharing signature input; team sharing is never Personal" },
   "auth.ts": { count: 1, reason: "Personal organization create, which writes false as the CHECK requires" },
   "manage-account-pro.ts": { count: 6, reason: "account_entitlements' own column, not organizations" },
+  "cloud/rehearsal/live.ts": { count: 4, reason: "the rehearsal (operator tooling): account_entitlements' own column in its Pro read, and the local stack's staff organization it creates (never Personal), which writes false" },
+  "cloud/rehearsal/plan.ts": { count: 1, reason: "the rehearsal's read-only diagnostic, printed when a projects read answers 404; it decides nothing" },
 };
 const ALLOWED_MIGRATIONS: Record<string, { count: number; reason: string }> = {
   "0262_cloud_organization_enabled.sql": { count: 3, reason: "the function itself and its header" },

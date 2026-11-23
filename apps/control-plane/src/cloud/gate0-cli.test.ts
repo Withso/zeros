@@ -70,8 +70,34 @@ describe("gate0 Dev identity and sign-in", () => {
     await expect(gate0SignIn(input, fetchImpl)).rejects.toThrow("sign_in_identity");
     expect(String(fetchImpl.mock.calls[1]![0])).toContain("sessions/revoke");
     const failed = vi.fn<typeof fetch>().mockResolvedValueOnce(Response.json({ error: input.password }, { status: 401 }));
-    await expect(gate0SignIn(input, failed)).rejects.toThrow(/^Cloud v2 gate0 failed: sign_in$/);
+    // The status is reported; a body that echoes the password is not, even as an error name.
+    await expect(gate0SignIn(input, failed)).rejects.toThrow(/^Cloud v2 gate0 failed: sign_in \(http_401\)$/);
     expect(failed).toHaveBeenCalledTimes(1);
+  });
+
+  it("names the failed step with WorkOS's known error code, and a throttled grant as http_429", async () => {
+    const reply = (body: unknown, status: number) => vi.fn<typeof fetch>().mockResolvedValueOnce(Response.json(body, { status }));
+    await expect(gate0SignIn(input, reply({ code: "invalid_credentials", message: input.password }, 400)))
+      .rejects.toMatchObject({ stage: "sign_in", cause: "http_400_invalid_credentials" });
+    await expect(gate0SignIn(input, reply({ error: "rate_limit_exceeded" }, 429))).rejects.toMatchObject({ stage: "sign_in", cause: "http_429_rate_limit_exceeded" });
+    await expect(gate0SignIn(input, reply({ code: "sso_required" }, 403))).rejects.toMatchObject({ stage: "sign_in", cause: "http_403_sso_required" });
+    await expect(gate0SignIn(input, vi.fn<typeof fetch>().mockRejectedValueOnce(new Error(input.password)))).rejects.toMatchObject({ stage: "sign_in", cause: "network" });
+    await expect(gate0SignIn(input, reply(grant(600, "user_wrong"), 200).mockResolvedValueOnce(new Response(null, { status: 204 }))))
+      .rejects.toMatchObject({ stage: "sign_in_identity", cause: "user" });
+  });
+
+  it("lets the caller choose among the offered organizations when none is configured", async () => {
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValueOnce(selection())
+      .mockResolvedValueOnce(Response.json({ ...grant(), organization_id: "org_fixture" })).mockResolvedValueOnce(new Response(null, { status: 204 }));
+    const offered: string[][] = [];
+    const session = await gate0SignIn({ ...input, selectOrganization: ids => { offered.push([...ids]); return "org_fixture"; } }, fetchImpl);
+    await session.close();
+    expect(offered).toEqual([["org_other", "org_fixture"]]);
+    expect(JSON.parse(String(fetchImpl.mock.calls[1]![1]!.body))).toMatchObject({ organization_id: "org_fixture" });
+    await expect(gate0SignIn({ ...input, selectOrganization: () => undefined }, vi.fn<typeof fetch>().mockResolvedValueOnce(selection())))
+      .rejects.toMatchObject({ stage: "sign_in_organization", cause: "selection_required" });
+    await expect(gate0SignIn({ ...input, selectOrganization: () => "org_elsewhere" }, vi.fn<typeof fetch>().mockResolvedValueOnce(selection())))
+      .rejects.toMatchObject({ stage: "sign_in_organization", cause: "not_offered" });
   });
 
   const pending = "synthetic-pending-authentication-token";

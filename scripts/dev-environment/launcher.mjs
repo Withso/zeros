@@ -8,7 +8,7 @@ import { createInterface } from "node:readline/promises";
 import { once } from "node:events";
 import { setTimeout as delay } from "node:timers/promises";
 import { ensureWorkspace, acquireWorkspaceLock, systemEnvironment, privateDirectory, writePrivateFile, saveWorkspace, readPrivateJson } from "./state.mjs";
-import { loadProfile, profileIssues, publicDevProfile, backendEnvironment, webEnvironment } from "./profile.mjs";
+import { loadProfile, profileIssues, publicDevProfile, backendEnvironment, webEnvironment, cloudV2Switches } from "./profile.mjs";
 import { ensureTunnel, configureTunnel, deleteTunnel } from "./cloudflare.mjs";
 import { ensureWorkosWebhook, enableWorkosWebhook, pauseWorkosWebhook, deleteWorkosWebhook } from "./workos.mjs";
 import { startPostgres, pickServicePorts, migratePostgres, databaseCommand } from "./postgres.mjs";
@@ -150,7 +150,9 @@ async function start(workspace, profile) {
     const tunnel = await ensureTunnel(workspace, profile.cloudflare); signal.throwIfAborted();
     await configureTunnel(workspace, profile.cloudflare, ports); signal.throwIfAborted();
     await ensureWorkosWebhook(workspace, profile); signal.throwIfAborted();
-    const apiEnv = { ...env, ...backendEnvironment(workspace, profile, ports, runId, { ZEROS_CLOUD_V2_RUNTIME_SHA256: runtime,
+    // The switches this start runs with: recorded, so --doctor can say what the running stack has.
+    workspace.state.cloudSwitches = cloudV2Switches(process.env); saveWorkspace(workspace);
+    const apiEnv = { ...env, ...backendEnvironment(workspace, profile, ports, runId, { ZEROS_CLOUD_V2_RUNTIME_SHA256: runtime, ...cloudV2Switches(process.env),
       ...(process.env.ZEROS_CLOUD_ACTING_USER_DEFAULT === undefined ? {} : { ZEROS_CLOUD_ACTING_USER_DEFAULT: process.env.ZEROS_CLOUD_ACTING_USER_DEFAULT }) }),
       ...(process.env.ZEROS_CLOUD_V2_RUNTIME_PREVIOUS_SHA256 ? { CLOUD_V2_RUNTIME_PREVIOUS_SHA256: process.env.ZEROS_CLOUD_V2_RUNTIME_PREVIOUS_SHA256 } : {}) };
     const apiCwd = path.join(root, "apps/control-plane"), logs = privateDirectory(workspace.directory, "logs");
@@ -244,7 +246,9 @@ async function main() {
     console.log(JSON.stringify({ owner: workspace.state.owner, status: workspace.state.status,
       tunnelProvisioned: Boolean(workspace.state.tunnel.id), identity: profile.workos?.environment ?? "dev",
       cloudV2: { boat: Boolean(profile.boat?.apiKey), runtimeStore: Boolean(profile.storage?.bucket),
-        runtime: (process.env.ZEROS_CLOUD_V2_RUNTIME_SHA256 || workspace.state.cloudRuntime?.sha256)?.slice(0, 12) ?? null },
+        runtime: (process.env.ZEROS_CLOUD_V2_RUNTIME_SHA256 || workspace.state.cloudRuntime?.sha256)?.slice(0, 12) ?? null,
+        // The switches the running stack was started with, and the ones a start from this shell would pass.
+        switches: { running: workspace.state.launcher ? workspace.state.cloudSwitches ?? {} : null, next: cloudV2Switches(process.env) } },
       issues: profileIssues(profile) }, null, 2));
     return;
   }

@@ -57,7 +57,7 @@ async function until<T>(stage: string, timeoutMs: number, pollMs: number, probe:
   }
 }
 
-class BridgeProbe {
+export class BridgeProbe {
   readonly frames: Frame[] = [];
   private failed = false;
   /** Why the bridge stopped being usable: the first of a close (with its code), a socket error or an unusable frame. */

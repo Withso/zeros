@@ -16,9 +16,17 @@ WorkOS. Never use Production credentials or data.
 
 ## Database access
 
-- **RLS-safe reads** with a read-only role:
-  `WITH cfg AS MATERIALIZED (SELECT set_config('app.system','on',true) AS v)
-  SELECT x.* FROM cfg CROSS JOIN LATERAL (SELECT … WHERE cfg.v = 'on') x`.
+- **RLS-safe reads** with a read-only role: inside one `BEGIN READ ONLY`
+  transaction, run `SELECT set_config('app.system','on',true)` as its own
+  statement, then the read, then `COMMIT`.
+  - Never set it inside the read itself. A CTE that sets it does not make the
+    planner read after it unless the read depends on it, so the read can run
+    with the policy still closed and silently return no rows, depending on the
+    plan.
+  - A tool that can send only one statement must make the read depend on the
+    CTE: `WITH cfg AS MATERIALIZED (SELECT set_config('app.system','on',true) AS v)
+    SELECT x.* FROM cfg CROSS JOIN LATERAL (SELECT … WHERE cfg.v = 'on') x`,
+    with the condition inside the lateral. Treat zero rows as unproven.
 - **Owner-level operator writes** use a temporary PlanetScale role:
   - it inherits `postgres`, with a TTL of 3600;
   - grant `zeros_app` to the connection's `session_user`, not the API

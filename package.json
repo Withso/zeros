@@ -60,6 +60,7 @@
     "electron:run": "node scripts/electron-cloud.mjs --run-only",
     "electron:alpha": "node scripts/dev-environment/launcher.mjs alpha",
     "alpha:probe": "pnpm --dir apps/control-plane cloud-v2:gate0 --alpha",
+    "alpha:rehearse": "pnpm --dir apps/control-plane cloud-v2:rehearse",
     "dev:setup": "bash scripts/setup-zeros-dev.sh",
     "storage:inventory": "node scripts/storage-inventory.mjs",
     "electron:rebuild": "node scripts/electron-rebuild-sqlite.cjs",

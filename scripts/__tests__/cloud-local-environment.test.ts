@@ -4,7 +4,7 @@ import path from "node:path";
 import { createPrivateKey } from "node:crypto";
 import { afterEach, describe, expect, it } from "vitest";
 import { ensureWorkspace } from "../dev-environment/state.mjs";
-import { backendEnvironment, publicDevProfile, webEnvironment } from "../dev-environment/profile.mjs";
+import { backendEnvironment, CLOUD_V2_SWITCHES, cloudV2Switches, publicDevProfile, webEnvironment } from "../dev-environment/profile.mjs";
 
 const RUNTIME = "d".repeat(64);
 const roots: string[] = [];
@@ -43,6 +43,20 @@ describe("electron:cloud control plane", () => {
     expect(backendEnvironment(w, p, ports, run, runtime)).not.toHaveProperty("CLOUD_V2_CHECKPOINT_RETRY_ENABLED");
     expect(backendEnvironment(w, p, ports, run, { ...runtime, CLOUD_V2_CHECKPOINT_RETRY_ENABLED: "true" }).CLOUD_V2_CHECKPOINT_RETRY_ENABLED).toBe("true");
     expect(webEnvironment(w, p, ports.api)).not.toHaveProperty("CLOUD_V2_CHECKPOINT_RETRY_ENABLED");
+  });
+
+  it("passes each cloud v2 switch the launching process sets, and none it does not", () => {
+    const { workspace: w, profile: p } = fixture();
+    const runtime = { ZEROS_CLOUD_V2_RUNTIME_SHA256: RUNTIME };
+    const off = backendEnvironment(w, p, ports, run, runtime);
+    for (const name of CLOUD_V2_SWITCHES) expect(off).not.toHaveProperty(name);
+    const on = { CLOUD_V2_READY_COPIES_ENABLED: "true", CLOUD_V2_PERSONAL_CLOUD_ENABLED: "true", CLOUD_V2_RETENTION_ENABLED: "true",
+      CLOUD_V2_SHARED_BASE_SNAPSHOT: "auto", CLOUD_V2_READY_COPY_VERIFY_FORK: "false", CLOUD_V2_CHECKPOINT_RETRY_ENABLED: "true" };
+    expect(backendEnvironment(w, p, ports, run, { ...runtime, ...on })).toMatchObject(on);
+    // A blank value is unset, and nothing else is taken from the launching process.
+    const { CLOUD_V2_RETENTION_ENABLED: _blank, ...rest } = on;
+    expect(cloudV2Switches({ ...on, CLOUD_V2_RETENTION_ENABLED: " ", UNRELATED: "x" })).toEqual(rest);
+    for (const name of CLOUD_V2_SWITCHES) expect(webEnvironment(w, p, ports.api)).not.toHaveProperty(name);
   });
 
   it("runs cloud v2 on this workspace's tunnel origin with its own stable keys", () => {
