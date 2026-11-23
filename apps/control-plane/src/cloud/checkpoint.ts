@@ -13,7 +13,7 @@ import { openCredentialBytes, sealCredentialBytes, type CloudAgentCredentialKeys
 import type { CloudV2RuntimeStore } from "./runtime.js";
 import { runtimeObjectMissing } from "./runtime-source.js";
 import { ENVIRONMENT_CHECKPOINT_SCRIPT } from "./checkpoint-environment.js";
-import { activeRestoreFetchSteps } from "./checkpoint-active-restore.js";
+import { activeRestoreFetchSteps, CLOUD_V2_RESTORE_AUTH_PREFIX } from "./checkpoint-active-restore.js";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const OBJECT = /^cloud-v2\/checkpoints\/([0-9a-f-]{36})\/([0-9a-f-]{36})\.zck$/;
@@ -875,12 +875,23 @@ export function checkpointCommand(input: ArchiveInput & { uploadUrl: string }): 
 
 export type RestoreInput = CheckpointPaths & { key: Buffer; sha256: string; githubToken?: string; repositoryUrl?: string; active?: boolean; recovery?: boolean;
   /** A workspace of several repositories: every one after the first, each with its own token and clone URL. */
-  repositories?: readonly { checkoutPath: string; githubToken?: string; repositoryUrl?: string }[] };
+  repositories?: readonly { checkoutPath: string; githubToken?: string; repositoryUrl?: string }[];
+  /** C4: the submodules the workspace plans now, parents first. Absent or empty, the restore is exactly as before. */
+  submodules?: readonly RestoreSubmodule[] };
+/** A planned submodule as a restore fetches it: a public one with no credential at all, a private one with its own
+ * read-only token. */
+export type RestoreSubmodule = CheckpointSubmodule & { repository: string; public?: boolean; githubToken?: string };
+/** The worker's pre-push hook sentence (cloud-worker workspace/submodules.ts SUBMODULE_PUSH_REFUSED). */
+export const SUBMODULE_PUSH_REFUSED = "Pushing from a submodule isn't available in cloud workspaces yet. Push it from your own computer.";
+/** One line per planned submodule (its 1-based place in the plan) whose captured state could not be put back. */
+export const SUBMODULE_UNRESTORED = "zeros-submodule-unrestored";
+const SUBMODULE_GIT = "git -c protocol.allow=never -c protocol.https.allow=always -c core.hooksPath=/dev/null -c credential.helper=";
 
 /** Verifies and applies the checkpoint that `fetch` places at
  * `$work/checkpoint.zck`, before the worker starts. */
 export function checkpointRestoreSteps(input: RestoreInput, fetch: readonly string[]): string[] {
   if (!/^[0-9a-f]{64}$/.test(input.sha256)) throw new Error("Invalid checkpoint digest");
+  const submodules = (input.submodules ?? []).map(restoreSubmodule);
   const token = input.githubToken;
   if (token !== undefined && !/^[\x21-\x7e]{16,4096}$/.test(token)) throw new Error("Invalid GitHub token");
   const remote = input.active ? input.repositoryUrl ?? "" : input.repositoryUrl === undefined ? "" : https(input.repositoryUrl);
@@ -895,6 +906,7 @@ export function checkpointRestoreSteps(input: RestoreInput, fetch: readonly stri
       ...activeRestoreFetchSteps(entry.githubToken, entry.repositoryUrl ?? ""),
       "repo=$first_repo",
     ]) : []),
+    ...(input.active ? activeSubmodulesFetch(submodules) : []),
     "step=download",
     ...fetch,
     `printf '%s  %s\\n' ${input.sha256} "$work/checkpoint.zck" | sha256sum -c --status || fail checkpoint_corrupt`,
@@ -927,6 +939,7 @@ export function checkpointRestoreSteps(input: RestoreInput, fetch: readonly stri
     "if [ -f \"$c/home.tar\" ]; then tar -xf \"$c/home.tar\" -C \"$home\" --no-same-owner; fi",
     ...repositoryRestore(input, remote),
     ...otherRepositoriesRestore(input),
+    ...submodulesRestore(input, submodules),
     "step=marker",
     "mkdir -p \"$home/$state\"",
     `printf %s ${quote(input.recovery ? "recovery" : "")} > "$home/$state/restored-from-checkpoint"`,
@@ -1076,6 +1089,140 @@ function otherRepositoriesRestore(input: RestoreInput): string[] {
       `rm -f "$work/repository-${i}/token-${i}" "$work/repository-${i}/askpass-${i}"`,
     ];
   });
+}
+
+type CheckedSubmodule = { folder: string; gitDir: string; path: string; position: number; commit: string; url: string; token?: string };
+function restoreSubmodule(entry: RestoreSubmodule): CheckedSubmodule {
+  const folder = checkedPath(entry.checkoutPath), repository = checkedPath(entry.repositoryPath);
+  if (!folder.startsWith(`${repository}/`) || !SUBMODULE_GIT_DIR.test(entry.gitDir) || !COMMIT.test(entry.baseCommit)
+    || !Number.isInteger(entry.position) || entry.position < 0 || entry.position > 9
+    || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,99}\/[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/.test(entry.repository)) throw new Error("Invalid checkpoint submodule");
+  // A public one carries no credential at all.
+  if (entry.githubToken !== undefined && (entry.public || !/^[\x21-\x7e]{16,4096}$/.test(entry.githubToken))) throw new Error("Invalid GitHub token");
+  return { folder, gitDir: `${repository}/.git/${entry.gitDir}`, path: folder.slice(repository.length + 1), position: entry.position,
+    commit: entry.baseCommit, url: `https://github.com/${entry.repository}.git`, ...(entry.githubToken ? { token: entry.githubToken } : {}) };
+}
+
+/** An active restore replaces each repository's Git directory with what it fetched, so every submodule's Git
+ * directory goes with it: each planned submodule's objects are fetched here, before the download, with its own
+ * token (a public one with none), into "$work/submodule-fetched-<j>". One that cannot be fetched is left out: its
+ * restore then fails on its own, and the workspace still opens. */
+function activeSubmodulesFetch(submodules: readonly CheckedSubmodule[]): string[] {
+  if (!submodules.length) return [];
+  return [
+    "step=fetch; https_allowed=always",
+    ...submodules.flatMap((entry, index) => {
+      const j = index + 1, fetched = `"$work/submodule-fetched-${j}"`;
+      const credential = entry.token ? [
+        `auth_dir=$(mktemp -d ${quote(`${CLOUD_V2_RESTORE_AUTH_PREFIX}XXXXXXXXXX`)}); chmod 700 "$auth_dir"`,
+        `printf %s ${quote(b64(entry.token))} | base64 -d > "$auth_dir/token"; chmod 600 "$auth_dir/token"`,
+        "printf '#!/bin/sh\\ncase \"$1\" in Username*) printf \"x-access-token\\\\n\" ;; Password*) cat \"$ZEROS_RESTORE_TOKEN_FILE\" ;; *) exit 1 ;; esac\\n' > \"$work/askpass\"; chmod 700 \"$work/askpass\"",
+      ] : [];
+      const run = entry.token ? `GIT_ALLOW_PROTOCOL=https GIT_ASKPASS="$work/askpass" ZEROS_RESTORE_TOKEN_FILE="$auth_dir/token" git` : "GIT_ALLOW_PROTOCOL=https git -c core.askPass=";
+      return [
+        ...credential,
+        `git init -q --bare --template= ${fetched}`,
+        `if ! ${run} -C ${fetched} fetch -q --no-recurse-submodules --no-write-fetch-head ${quote(entry.url)} '+refs/heads/*:refs/remotes/origin/*' '+refs/tags/*:refs/tags/*'; then rm -rf -- ${fetched}`,
+        // Its gitlink too, which no branch may reach.
+        `elif ! git -C ${fetched} cat-file -e '${entry.commit}^{commit}'; then ${run} -C ${fetched} fetch -q --no-recurse-submodules --no-write-fetch-head ${quote(entry.url)} ${entry.commit} || true; fi`,
+        ...(entry.token ? [
+          "rm -f -- \"$auth_dir/token\" \"$work/askpass\"; rmdir -- \"$auth_dir\"",
+          "[ ! -e \"$auth_dir\" ] && [ ! -L \"$auth_dir\" ] && [ ! -e \"$work/askpass\" ] || fail checkpoint_restore_failed",
+          "auth_dir=''",
+        ] : []),
+      ];
+    }),
+    "https_allowed=never",
+  ];
+}
+
+/** C4: after every repository, each planned submodule whose state the archive holds (matched by repository and path,
+ * parents first) is put back into its folder, the worker's way: cloned with its Git directory at the planned place when
+ * the folder is empty and that directory absent (the parent's restore leaves an empty folder for a gitlink), restored
+ * exactly as a repository is, its work tree included, then given the worker's push-refusing hook. Each runs in its own
+ * subshell with its own credential: a failure never fails the restore. It prints one SUBMODULE_UNRESTORED line and
+ * leaves the submodule as the worker can fetch it at its gitlink (an empty folder with no Git directory) when this
+ * restore made it. A submodule the archive does not hold, or whose folder the restored repository no longer has, is
+ * left to the worker, which fetches a missing one at the gitlink its repository records. */
+function submodulesRestore(input: RestoreInput, submodules: readonly CheckedSubmodule[]): string[] {
+  const hook = `#!/bin/sh\necho ${quote(SUBMODULE_PUSH_REFUSED)} >&2\nexit 1\n`;
+  if (!submodules.length) return [];
+  return [
+    // Active: a folder still linked to the Git directory its repository's replaced one took away is emptied, so the
+    // worker fetches it as missing. Only exactly that link: a folder with its own .git directory is never touched.
+    ...(input.active ? ["release_submodule() {",
+      "  [ -d \"$1\" ] && [ ! -L \"$1\" ] && [ \"$(cd \"$1\" && pwd -P)\" = \"$1\" ] && [ -f \"$1/.git\" ] && [ ! -L \"$1/.git\" ] || return 0",
+      "  [ \"$(cat \"$1/.git\")\" = \"gitdir: $2\" ] && [ ! -e \"$2\" ] && [ ! -L \"$2\" ] || return 0",
+      "  find \"$1\" -mindepth 1 -delete",
+      "}"] : []),
+    ...submodules.flatMap((entry, index) => {
+      const j = index + 1;
+      const credential = input.active ? [] : entry.token ? [
+        `  printf %s ${quote(b64(entry.token))} | base64 -d > "$work/token"`,
+        "  printf '#!/bin/sh\\ncase \"$1\" in Username*) echo x-access-token ;; *) cat \"%s\" ;; esac\\n' \"$work/token\" > \"$work/askpass\"; chmod 700 \"$work/askpass\"",
+        `  remote_git() { GIT_ASKPASS="$work/askpass" ${SUBMODULE_GIT} "$@"; }`,
+      ] : [
+        // No token (a public one, or none could be had): no askpass, no helper, no prompt, so Git can never ask.
+        "  unset GIT_ASKPASS SSH_ASKPASS",
+        `  remote_git() { ${SUBMODULE_GIT} -c core.askPass= "$@"; }`,
+      ];
+      const place = input.active ? [
+        // The repository's new Git directory has no modules: the fetched objects become this submodule's, and the
+        // folder's old content (the snapshot's, not the person's: the archive holds theirs) goes.
+        `  [ -d "$outer_work/submodule-fetched-${j}" ] || fail checkpoint_prerequisites_missing`,
+        "  [ ! -e \"$planned_git\" ] && [ ! -L \"$planned_git\" ] || fail checkpoint_restore_failed",
+        // Never a folder with a .git of its own: only one holding the worker's link, or none.
+        "  [ ! -e \"$repo/.git\" ] || { [ -f \"$repo/.git\" ] && [ ! -L \"$repo/.git\" ]; } || fail checkpoint_restore_failed",
+        "  made=1; find \"$repo\" -mindepth 1 -delete",
+        "  mkdir -p -- \"${planned_git%/*}\"; [ \"$(cd \"${planned_git%/*}\" && pwd -P)\" = \"${planned_git%/*}\" ] || fail checkpoint_restore_failed",
+        `  mv -- "$outer_work/submodule-fetched-${j}" "$planned_git"; git --git-dir="$planned_git" config core.bare false`,
+        "  printf 'gitdir: %s\\n' \"$planned_git\" > \"$repo/.git\"",
+        `  git -C "$repo" remote add origin ${quote(entry.url)}`,
+      ] : [
+        "  if [ -z \"$(ls -A \"$repo\")\" ]; then",
+        "    if [ ! -e \"$planned_git\" ] && [ ! -L \"$planned_git\" ]; then",
+        "      mkdir -p -- \"${planned_git%/*}\"; [ \"$(cd \"${planned_git%/*}\" && pwd -P)\" = \"${planned_git%/*}\" ] || fail checkpoint_restore_failed",
+        `      step=clone; made=1; remote_git clone -q --no-checkout --no-recurse-submodules --template= --separate-git-dir="$planned_git" -- ${quote(entry.url)} "$repo" || fail checkpoint_repository_missing`,
+        // Its Git directory is there but its folder lost the link to it: the link again, then the state into it.
+        "    elif [ -d \"$planned_git\" ] && [ ! -L \"$planned_git\" ]; then printf 'gitdir: %s\\n' \"$planned_git\" > \"$repo/.git\"",
+        "    else fail checkpoint_restore_failed; fi",
+        "  fi",
+      ];
+      return [
+        `step=submodule-${j}`,
+        `k=$(awk -v p=${entry.position} -v b=${quote(b64(entry.path))} '$1 == "submodule" && $3 == p && $4 == b && $6 == "captured" { print $2; exit }' "$m")`,
+        `if [[ "$k" =~ ^[1-9][0-9]?$ ]] && [ -f "$c/submodules/$k/manifest" ]; then set +e; (`,
+        // Its own failure is reported once, below, by its place in the plan: nothing it prints reaches the result.
+        "  set -e; exec 3>/dev/null",
+        `  repo=${quote(entry.folder)} planned_git=${quote(entry.gitDir)} c="$c/submodules/$k" reported='' made='' outer_work=$work`,
+        // A submodule this restore made and could not finish is left as the worker fetches a missing one.
+        "  trap 'code=$?; if [ \"$code\" -ne 0 ] && [ -n \"$made\" ]; then rm -rf -- \"$planned_git\"; find \"$repo\" -mindepth 1 -delete || true; fi' EXIT",
+        "  m=\"$c/manifest\"; [ \"$(head -n 1 \"$m\")\" = 'zeros-checkpoint 1' ] || fail checkpoint_corrupt",
+        `  work="$work/submodule-${j}"; mkdir -m 700 "$work"`,
+        ...credential,
+        "  fetched=''",
+        // The restored repository has no folder there any more: nothing to put back.
+        "  if [ -L \"$repo\" ] || [ ! -d \"$repo\" ]; then exit 0; fi",
+        "  [ \"$(cd \"$repo\" && pwd -P)\" = \"$repo\" ] || fail checkpoint_restore_failed",
+        ...place,
+        // Only where the worker put it: its own top, its Git directory the planned one.
+        "  top=$(git -C \"$repo\" rev-parse --show-toplevel) && [ \"$(cd \"$top\" && pwd -P)\" = \"$repo\" ] || fail checkpoint_restore_failed",
+        "  gd=$(git -C \"$repo\" rev-parse --absolute-git-dir) && [ \"$(cd \"$gd\" && pwd -P)\" = \"$(cd \"$planned_git\" && pwd -P)\" ] || fail checkpoint_restore_failed",
+        ...repositoryRestore(input, "").map(line => `  ${line}`),
+        "  step=hook; mkdir -p \"$planned_git/hooks\"",
+        `  printf %s ${quote(b64(hook))} | base64 -d > "$planned_git/hooks/pre-push"; chmod 755 "$planned_git/hooks/pre-push"`,
+        ")",
+        `code=$?; set -e; [ "$code" -eq 0 ] || printf '${SUBMODULE_UNRESTORED} ${j}\\n' >&3`,
+        `rm -f "$work/submodule-${j}/token" "$work/submodule-${j}/askpass"; fi`,
+        ...(input.active ? [`release_submodule ${quote(entry.folder)} ${quote(entry.gitDir)}`] : []),
+      ];
+    })];
+}
+
+/** The 1-based places in the restore's plan of the submodules it could not put back. */
+export function parseUnrestoredSubmodules(stdout: string): number[] {
+  const places = stdout.split(/\r?\n/).map(line => new RegExp(`^${SUBMODULE_UNRESTORED} ([1-9][0-9]?)$`).exec(line)?.[1]).filter(Boolean).map(Number);
+  return [...new Set(places)];
 }
 
 /** Downloads, verifies and applies a checkpoint before the worker starts. */
