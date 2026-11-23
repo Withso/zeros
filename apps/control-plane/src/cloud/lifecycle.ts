@@ -168,7 +168,7 @@ export type CloudV2LifecycleDeps = {
     | "beginRestore" | "replaceSandbox" | "finishRestore" | "checkpointUnchanged" | "claimCheckpointRetry" | "beginCheckpointFork"
     | "checkpointForkCreated" | "checkpointForkGone" | "checkpointRetryNext"
     // Retention (`retention`); absent from older compositions, which never enable it.
-    | "recordStopProbe" | "restoreForkRefused" | "replaceLostSandbox" | "workspaceBranches" | "recordLostWork"
+    | "recordStopProbe" | "restoreForkRefused" | "replaceLostSandbox" | "workspaceBranches" | "recordLostWork" | "recordStopArchiveSuspect"
     | "claimMaintenanceWake" | "beginMaintenanceStop" | "adoptMaintenance" | "maintenanceHeld" | "finishMaintenance"
     | "startRetentionClocks" | "archiveInactive" | "archiveDepartedPrivate" | "restoreReturningPrivate" | "archiveForSystem" | "clearArchiveScrub"
     | "claimBackupRemovals" | "pendingBackupRemovals" | "finishBackupRemoval" | "sweepDepartedProjects" | "deleteDepartedProjects" | "missedWakes"
@@ -1318,8 +1318,19 @@ export class CloudV2Lifecycle {
       // A stop Boat accepted but then failed left the VM running; Boat's own
       // guard still refuses one that would lose writes.
       // Fenced to this stop: a wake meanwhile owns the VM.
-      if (inspected.state !== "archiving" && await store.stopCurrent(row.id, row.stopGeneration, "stopped"))
-        await this.deps.compute.stop(source).catch(error => this.deps.logger?.warn(`[cloud-v2] checkpoint retry stop failed (${errorCode(error)})`));
+      // As a person's stop: never while a snapshot attempt is in progress, and a suspect archive is recorded for this stop.
+      if (inspected.state !== "archiving" && await store.stopCurrent(row.id, row.stopGeneration, "stopped")) {
+        const stopped = await stopKeepingWrites(this.deps.compute, source, { sleep: ms => this.pause(ms), reads: STOP_SETTLE_READS,
+          archiveReads: ARCHIVE_CONFIRM_READS, archiveIntervalMs: ARCHIVE_CONFIRM_MS })
+          .catch(error => { this.deps.logger?.warn(`[cloud-v2] checkpoint retry stop failed (${errorCode(error)})`); return null; });
+        if (stopped && archiveSuspect(stopped)) {
+          (this.deps.logger?.error ?? this.deps.logger?.warn)?.call(this.deps.logger,
+            `[cloud-v2] stop archive may lack the machine's last writes (${stopped.failed ? "failed_attempt" : "attempt_before_stop"}) workspace=${row.id.slice(0, 8)}`);
+          await store.recordStopArchiveSuspect(row.id, row.stopGeneration);
+        }
+        // Archived now: the next pass forks it.
+        if (stopped) { await store.checkpointRetryNext(row.id, retry.generation, { at: new Date(now) }); return true; }
+      }
       const next = now + (inspected.state === "archiving" ? ARCHIVING_RECHECK_MS : RETRY_BACKOFF_MS[Math.min(retry.attempts, RETRY_BACKOFF_MS.length - 1)]!);
       if (next >= until) await this.retriesExhausted(row, retry, "checkpoint_failed");
       else await store.checkpointRetryNext(row.id, retry.generation, { at: new Date(next) });

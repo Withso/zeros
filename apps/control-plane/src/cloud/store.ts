@@ -2218,6 +2218,13 @@ export class CloudV2Store {
     return Boolean(result.rowCount);
   }
 
+  /** A stop made again for the same stop generation (a checkpoint retry's) left its archive suspect: recorded for that
+   * stop generation only. */
+  async recordStopArchiveSuspect(id: string, stopGeneration: string): Promise<void> {
+    await withSystemTx(this.pool, tx => tx.query(
+      "UPDATE cloud_v2_workspaces SET stop_archive_failed_generation = stop_generation WHERE id = $1 AND stop_generation = $2::bigint", [id, stopGeneration]));
+  }
+
   /** Retention: a restore brought back an earlier backup or checkpoint, not the latest stop's work. */
   async recordLostWork(id: string, restored: "earlier"): Promise<void> {
     await withSystemTx(this.pool, tx => tx.query(

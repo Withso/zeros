@@ -559,6 +559,19 @@ d("cloud v2 retention", () => {
       expect(await lostWork()).toMatchObject({ restored: "earlier" });
     });
 
+    it("stops again, keeping writes, a machine whose stop did not take, and records that stop when its archive is suspect", async () => {
+      boat.write(vm, `${path("api")}/UNPUSHED`, "api work");
+      await stop();
+      // The stop was accepted, then did not take: the machine runs again.
+      boat.machine(vm)!.state = "running"; boat.machine(vm)!.stoppedAt = null;
+      boat.attemptAtStop = { inProgressReads: 1, failedReads: 0 };
+      await earlier(CLOUD_V2_BACKUP_DELAY_MS + 60_000);
+      await lifecycle().tick();
+      expect(boat.machine(vm)!.state).toBe("archived");
+      const stopped = (await pool.query("SELECT stop_generation, stop_archive_failed_generation FROM cloud_v2_workspaces WHERE id=$1", [id])).rows[0];
+      expect(stopped.stop_archive_failed_generation).toBe(stopped.stop_generation);
+    });
+
     it("records a stop during which Boat reported a failed attempt, and never calls that stop clean", async () => {
       boat.beginSnapshotAttempt(vm, Number.POSITIVE_INFINITY);
       await stop();

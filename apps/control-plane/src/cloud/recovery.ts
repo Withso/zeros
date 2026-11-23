@@ -175,6 +175,8 @@ export class CloudRecovery {
     const { store, compute, checkpoints } = this.deps;
     let a = initial;
     if (a.replacement_create?.restoreClaimedAt) throw fail("checkpoint_restore_unconfirmed");
+    // Its checkpoint was captured from the running machine above and the restore uses only that, never this stop's
+    // archive: a stop that left the archive suspect loses nothing here, so a plain stop is enough.
     await compute.stop(a.source_sandbox_id); await this.current(a);
     if (!a.replacement_create) {
       const issued = newCloudV2Token("worker"), runtime = { ...this.deps.runtime, sha256: a.source_runtime_sha256 };
