@@ -7,6 +7,7 @@ import { FakeBoat } from "./__fixtures__/boat-fake.js";
 import { CloudV2ComputerBuilder, CloudV2Computers } from "./computer.js";
 import type { CloudV2ComputerSourceResolver } from "./computer-provenance.js";
 import { buildSharedBase, CloudV2SharedBases, installBase, sharedBaseState } from "./shared-base.js";
+import { runSharedBaseCli } from "./shared-base-cli.js";
 
 const d = process.env.TEST_DATABASE_URL ? describe : describe.skip;
 const sha256 = "1a2b3c4d5e6f".padEnd(64, "0"), other = "9f8e7d6c5b4a".padEnd(64, "0");
@@ -167,5 +168,30 @@ d("cloud v2 shared base builds", () => {
     // A Local database names its own.
     expect(await bases.plan({ channel: "development", localOwner: "a".repeat(24) }, sha256))
       .toMatchObject({ kind: "claimed", row: { name: `zeros-local-${"a".repeat(24)}-base-1a2b3c4d5e6f` } });
+  });
+
+  it("runs as a command that prints names and closed codes only", async () => {
+    const printed: string[] = [];
+    const cli = (args: string[], override: { kind: "off" } | { kind: "name"; name: string } | null = null) =>
+      runSharedBaseCli(args, { bases, compute: boat, scope: { channel: "alpha" }, runtime, override, print: line => { printed.push(line); } });
+    expect(await cli([])).toBe(2);
+    expect(await cli(["--plan", "--execute"])).toBe(2);
+    expect(await cli(["--plan"])).toBe(0);
+    expect(boat.calls.map(call => call.op)).toEqual(["snapshotExists"]);
+    expect(printed).toContain("shared base: configured none (source database)");
+    expect(printed).toContain(`name: ${NAME}`);
+    expect(printed).toContain("present at Boat: no");
+    printed.length = 0;
+    expect(await cli(["--execute"])).toBe(0);
+    expect(printed).toEqual(["shared base: configured none (source database)", "runtime: 1a2b3c4d5e6f", "code: shared_base_ready", `name: ${NAME}`]);
+    printed.length = 0;
+    expect(await cli(["--plan"], { kind: "off" })).toBe(0);
+    expect(printed.slice(0, 1)).toEqual(["shared base: configured none (source override off)"]);
+    printed.length = 0;
+    await cli(["--plan"]);
+    expect(printed).toEqual(["shared base: configured " + NAME + " (source database)", "runtime: 1a2b3c4d5e6f", "code: shared_base_exists",
+      `name: ${NAME}`, "present at Boat: yes"]);
+    // Nothing but names, codes and the runtime's short hash.
+    expect(printed.join("\n")).not.toMatch(/https?:|sig=|token|bx_/);
   });
 });
