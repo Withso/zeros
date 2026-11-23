@@ -602,10 +602,11 @@ export class CloudV2Lifecycle {
           await store.defer(workspace.id, "creating", BASE_WAIT_POLL_MS);
           return;
         }
-        if (workspace.preparing) await store.baseWaitOver?.(workspace.id, base?.finishedAt ?? null);
-        // From the create, or from when the base it waited for went live (kept in the row for every later tick).
-        const bootFrom = Math.max(Date.parse(workspace.createdAt), base?.finishedAt?.getTime() ?? 0,
-          workspace.baseReadyAt ? Date.parse(workspace.baseReadyAt) : 0);
+        if (workspace.preparing) await store.baseWaitOver?.(workspace.id);
+        // From the create, or from the tick that saw its base live (this one, or the one kept in the row): never from
+        // the base's own finish, which a lifecycle that was down or behind may see long after.
+        const bootFrom = workspace.preparing ? now
+          : Math.max(Date.parse(workspace.createdAt), workspace.baseReadyAt ? Date.parse(workspace.baseReadyAt) : 0);
         if (now - bootFrom > BOOT_DEADLINE_MS) {
           await store.transition(workspace.id, ["creating"], "failed", { errorCode: "worker_boot_timeout" });
           return;

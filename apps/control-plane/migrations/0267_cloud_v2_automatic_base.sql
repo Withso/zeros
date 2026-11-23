@@ -24,5 +24,5 @@ CREATE INDEX cloud_projects_copy_requested ON cloud_projects (org_id) WHERE copy
 -- A workspace created while its organization's base was being prepared: it waits for that base, and its document says
 -- so ("Preparing the Cloud Computer…"). Cleared when the base is live.
 ALTER TABLE cloud_v2_workspaces ADD COLUMN waiting_for_base_at timestamptz,
-  -- When that base went live: the boot deadline counts from it on every later tick, not from the create.
+  -- When the lifecycle saw that base live: the boot deadline counts from it on every later tick, not from the create.
   ADD COLUMN base_ready_at timestamptz;
