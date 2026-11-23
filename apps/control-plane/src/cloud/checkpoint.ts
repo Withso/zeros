@@ -736,7 +736,8 @@ export const CLOUD_V2_BACKUP_PROBE_SECONDS = 15;
  * baseline, every other such file is dirty. Read-only: no optional index writes, no fsmonitor. Any doubt,
  * error or the time bound reports unknown; it never fails. Each checkout is judged by its own seed journal, the
  * one its backup captures from (the first's is the workspace's; later ones' are under repositories/<i>/). */
-export function backupProbeCommand(checkoutPaths: readonly string[], home = "/home/user"): string {
+export function backupProbeCommand(checkoutPaths: readonly string[], home = "/home/user",
+  submodules: readonly CheckpointSubmodule[] = []): string {
   if (!checkoutPaths.length) throw new Error("Invalid backup probe");
   if (!home.startsWith("/") || /[\n\0]/.test(home) || home.split("/").some(part => part === "..")) throw new Error("Invalid backup probe");
   const script = [
@@ -778,9 +779,43 @@ export function backupProbeCommand(checkoutPaths: readonly string[], home = "/ho
     "  [ \"$state\" = clean ] || break",
     "  index=$((index + 1))",
     "done",
+    ...submodulesProbe(submodules),
     "printf 'zeros-backup-probe %s\\n' \"$state\" >&3",
   ];
   return `bash -c ${quote(script.join("\n"))}`;
+}
+
+/** C4: the submodule checkouts after the repositories, by the same rule with two differences: a commit its gitlink
+ * reaches is not ahead, and every ignored file a backup would hold counts (a submodule has no seed journal or
+ * baseline). An absent or empty folder holds nothing (clean); one whose Git directory is not the one the worker
+ * made is unknown, which backs up. Nothing at all without submodules, so the probe stays byte-identical. */
+function submodulesProbe(submodules: readonly CheckpointSubmodule[]): string[] {
+  if (!submodules.length) return [];
+  const calls = submodules.map(entry => {
+    const folder = checkedPath(entry.checkoutPath), repository = checkedPath(entry.repositoryPath);
+    if (!folder.startsWith(`${repository}/`) || !SUBMODULE_GIT_DIR.test(entry.gitDir) || !COMMIT.test(entry.baseCommit)) throw new Error("Invalid backup probe");
+    return `  probe_submodule ${quote(folder)} ${quote(`${repository}/.git/${entry.gitDir}`)} ${entry.baseCommit} || { printf 'zeros-backup-probe unknown\\n' >&3; exit 0; }`;
+  });
+  return [
+    "probe_submodule() {",
+    "  [ \"$state\" = clean ] || return 0",
+    "  if [ -L \"$1\" ] || [ ! -d \"$1\" ] || [ -z \"$(ls -A \"$1\")\" ]; then return 0; fi",
+    "  cd -- \"$1\" && [ \"$(pwd -P)\" = \"$1\" ] && [ \"$(cd \"$(g rev-parse --show-toplevel)\" && pwd -P)\" = \"$1\" ] || return 1",
+    "  [ -d \"$2\" ] && [ ! -L \"$2\" ] && [ \"$(cd \"$(g rev-parse --absolute-git-dir)\" && pwd -P)\" = \"$(cd \"$2\" && pwd -P)\" ] || return 1",
+    "  local changes head ahead gitlink path size total=0",
+    "  changes=$(g status --porcelain=v1 -z --untracked-files=normal --ignore-submodules=none) || return 1",
+    "  if [ -n \"$changes\" ]; then state=dirty; return 0; fi",
+    "  if g rev-parse -q --verify refs/stash >/dev/null; then state=dirty; return 0; fi",
+    "  head=$(g rev-parse -q --verify 'HEAD^{commit}' || true)",
+    "  gitlink=$(g rev-parse -q --verify \"$3^{commit}\" || true)",
+    "  ahead=$(g rev-list -n 1 --branches ${head:+\"$head\"} --not --remotes ${gitlink:+\"$gitlink\"}) || return 1",
+    "  if [ -n \"$ahead\" ]; then state=dirty; return 0; fi",
+    "  : > \"$work/list\"",
+    ...ignoredFiles(`printf '%s\\0' "$path" >> "$work/list"`),
+    "  if [ -s \"$work/list\" ]; then state=dirty; fi",
+    "}",
+    ...calls,
+  ];
 }
 
 /** Records each checkout's ignored-file baseline (what the backup would capture of its ignored files, with

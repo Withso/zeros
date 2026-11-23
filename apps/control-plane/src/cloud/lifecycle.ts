@@ -16,10 +16,10 @@ import type { CloudV2ReadyCopyForks } from "./ready-copies.js";
 import type { CloudV2CheckpointFork, CloudV2CheckpointReuse, CloudV2CheckpointRetry, CloudV2CheckpointScope, CloudV2Store, CloudV2Workspace,
   CloudV2LifecycleWorkspace, CloudV2RestoreCreate } from "./store.js";
 import { CLOUD_V2_WORKER_PORT, type CloudV2WorkerTiming, type CloudV2WorkerBootTiming } from "./contract.js";
-import type { WorkspaceCheckouts } from "./workspace-repositories.js";
+import type { WorkspaceCheckouts, WorkspaceSubmoduleCheckout } from "./workspace-repositories.js";
 import { CLOUD_V2_BACKUP_PROBE_SECONDS, CLOUD_V2_CHECKPOINT_ERRORS, CLOUD_V2_CHECKPOINT_SECONDS, WORKER_OFF_COMMAND, WORKER_UNIT_CHECK, backupProbeCommand, checkpointCommand,
   cloudV2CheckpointObject, parseBackupProbe, parseCheckpointResult, parseRestoreResult, restoreCommand, workerUnitOff, type BackupProbe,
-  type CloudV2CheckpointError, type CloudV2CheckpointStorage, environmentRestoreCommand, parseEnvironmentRestore } from "./checkpoint.js";
+  type CheckpointSubmodule, type CloudV2CheckpointError, type CloudV2CheckpointStorage, environmentRestoreCommand, parseEnvironmentRestore } from "./checkpoint.js";
 import { ARCHIVE_SCRUB_SECONDS, CHANGED_SINCE_STOP_SECONDS, archiveScrubCommand, changedSinceStopCommand, parseArchiveScrub, parseChangedSinceStop,
   stopMarkerCommand, type ArchiveScrubResult } from "./archive-scrub.js";
 
@@ -116,6 +116,12 @@ const ARCHIVING_RECHECK_MS = 60_000;
 const ARCHIVE_CONFIRM_READS = 12, ARCHIVE_CONFIRM_MS = 5_000;
 /** Boat's stock image home; repositories live at <home>/<owner>/<name>. */
 export const CLOUD_V2_HOME = "/home/user";
+
+/** A workspace's planned submodule checkouts as the checkpoint scripts take them: absolute paths on the VM. */
+function checkpointSubmodules(submodules: readonly WorkspaceSubmoduleCheckout[]): CheckpointSubmodule[] {
+  return submodules.map(entry => ({ position: entry.position, checkoutPath: `${CLOUD_V2_HOME}/${entry.checkoutFolder}`,
+    repositoryPath: `${CLOUD_V2_HOME}/${entry.repositoryFolder}`, gitDir: entry.gitDir, baseCommit: entry.baseCommit }));
+}
 /** Boat's stock image runs commands as its one user, `user`. The worker and
  * agents run as that user too, so its credential lives in its config dir. */
 export const CLOUD_V2_WORKER_TOKEN_PATH = "/home/user/.config/zeros/worker-token";
@@ -1118,9 +1124,10 @@ export class CloudV2Lifecycle {
       `[cloud-v2] stop could not verify the worker off; recorded for the next wake workspace=${workspace.id.slice(0, 8)}`);
     let probe: BackupProbe = "unknown";
     try {
-      const others = (await this.checkouts(workspace)).repositories;
+      const { repositories: others, submodules } = await this.checkouts(workspace);
       const result = await this.deps.compute.exec(sandboxId,
-        backupProbeCommand([workspaceCheckoutPath(workspace), ...others.map(entry => `${CLOUD_V2_HOME}/${entry.checkoutFolder}`)], CLOUD_V2_HOME), CLOUD_V2_BACKUP_PROBE_SECONDS);
+        backupProbeCommand([workspaceCheckoutPath(workspace), ...others.map(entry => `${CLOUD_V2_HOME}/${entry.checkoutFolder}`)], CLOUD_V2_HOME,
+          checkpointSubmodules(submodules)), CLOUD_V2_BACKUP_PROBE_SECONDS);
       if (result.exitCode === 0 && !result.timedOut) probe = parseBackupProbe(result.stdout);
     } catch (error) {
       this.deps.logger?.warn(`[cloud-v2] stop probe failed (${errorCode(error)}) workspace=${workspace.id.slice(0, 8)}`);

@@ -1812,4 +1812,59 @@ describe("a workspace's submodules (C4)", () => {
     const b64 = (value: string) => Buffer.from(value).toString("base64");
     expect(parts(p, key, out).stdout).toContain(`manifest:submodule 1 0 ${b64("lib")} ${p.lib.commit} foreign|`);
   });
+
+  describe("the stop probe", () => {
+    const probe = (p: ReturnType<typeof project>, submodules = p.submodules(p.oldHome)) => {
+      const result = spawnSync("bash", ["-c", `eval "$1"`, "probe", backupProbeCommand([p.folder(p.oldHome)], p.oldHome, submodules)], { env: p.env, encoding: "utf8" });
+      expect(result.status).toBe(0);
+      return parseBackupProbe(result.stdout);
+    };
+
+    it("is clean for submodules as the worker fetched them, even when no branch reaches the gitlink", () => {
+      const p = project(), lib = join(p.folder(p.oldHome), "lib");
+      expect(probe(p)).toBe("clean");
+      // The gitlink is a commit no remote-tracking branch holds: still nothing to back up.
+      for (const ref of p.git(lib, "for-each-ref", "--format=%(refname)", "refs/remotes/").split("\n").filter(Boolean)) p.git(lib, "update-ref", "-d", ref);
+      expect(probe(p)).toBe("clean");
+      // Without its gitlink, the same submodule would be dirty: the gitlink is what makes it clean.
+      expect(probe(p, p.submodules(p.oldHome).map(entry => ({ ...entry, baseCommit: p.app.commit })))).toBe("dirty");
+    });
+
+    it("is dirty for a submodule's stash, a branch commit, an ignored file or an edit, each on its own", () => {
+      const stash = project(), lib = (p: ReturnType<typeof project>) => join(p.folder(p.oldHome), "lib");
+      stash.write(join(lib(stash), "lib.txt"), "stashed\n"); stash.git(lib(stash), "stash", "-q");
+      expect(stash.git(stash.folder(stash.oldHome), "status", "--porcelain", "--ignore-submodules=none")).toBe("");
+      expect(probe(stash)).toBe("dirty");
+      // The gap this closes: the repository alone probes clean.
+      expect(probe(stash, [])).toBe("clean");
+      const branch = project();
+      branch.git(lib(branch), "switch", "-q", "-c", "mine"); branch.write(join(lib(branch), "b.txt"), "b\n");
+      branch.git(lib(branch), "add", "b.txt"); branch.git(lib(branch), "commit", "-q", "-m", "mine");
+      branch.git(lib(branch), "-c", "advice.detachedHead=false", "checkout", "-q", "--detach", branch.lib.commit);
+      expect(branch.git(branch.folder(branch.oldHome), "status", "--porcelain", "--ignore-submodules=none")).toBe("");
+      expect(probe(branch)).toBe("dirty");
+      expect(probe(branch, [])).toBe("clean");
+      const ignored = project();
+      ignored.write(join(lib(ignored), "debug.log"), "log\n");
+      expect(ignored.git(ignored.folder(ignored.oldHome), "status", "--porcelain", "--ignore-submodules=none")).toBe("");
+      expect(probe(ignored)).toBe("dirty");
+      expect(probe(ignored, [])).toBe("clean");
+      const edit = project();
+      edit.write(join(lib(edit), "inner", "inner.txt"), "edited\n");
+      expect(probe(edit, edit.submodules(edit.oldHome).slice(1))).toBe("dirty");
+    });
+
+    it("is clean for an absent or empty folder, unknown for one that is not the worker's, and unchanged with none", () => {
+      const p = project(), lib = join(p.folder(p.oldHome), "lib");
+      const gone = { position: 0, checkoutPath: join(p.folder(p.oldHome), "vendor", "gone"), repositoryPath: p.folder(p.oldHome),
+        gitDir: `modules/${digest("gone")}`, baseCommit: p.lib.commit };
+      const empty = { ...gone, checkoutPath: join(p.folder(p.oldHome), "vendor", "empty"), gitDir: `modules/${digest("empty")}` };
+      mkdirSync(empty.checkoutPath, { recursive: true });
+      expect(probe(p, [gone, empty])).toBe("clean");
+      rmSync(lib, { recursive: true, force: true }); p.git(p.root, "clone", "-q", p.lib.origin, lib);
+      expect(probe(p, [p.submodules(p.oldHome)[0]!])).toBe("unknown");
+      expect(backupProbeCommand([p.folder(p.oldHome)], p.oldHome, [])).toBe(backupProbeCommand([p.folder(p.oldHome)], p.oldHome));
+      expect(() => backupProbeCommand([p.folder(p.oldHome)], p.oldHome, [{ ...gone, gitDir: "../elsewhere" }])).toThrow();
+    });
+  });
 });
