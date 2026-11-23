@@ -1709,3 +1709,107 @@ it("keeps every control-plane source file text: no NUL byte anywhere under src",
   walk(join(__dirname, ".."));
   expect(offenders).toEqual([]);
 });
+
+describe("a workspace's submodules (C4)", () => {
+  const digest = (name: string) => createHash("sha256").update(name).digest("hex");
+  /** A project's first repository with acme/lib at lib and lib's own acme/inner at lib/inner, each fetched the worker's way:
+   * a gitdir file in its folder, its Git directory under the superproject's .git/modules. */
+  function project() {
+    const f = fixture();
+    const make = (name: string, files: Record<string, string>) => {
+      const origin = join(f.root, `${name}.git`), seed = join(f.root, `seed-${name}`);
+      f.git(f.root, "init", "-q", "--bare", "-b", "main", origin);
+      f.git(f.root, "clone", "-q", origin, seed);
+      for (const [file, content] of Object.entries(files)) f.write(join(seed, file), content);
+      f.git(seed, "add", "-A"); f.git(seed, "commit", "-q", "-m", "base"); f.git(seed, "push", "-q", "origin", "main");
+      return { origin, seed, commit: f.git(seed, "rev-parse", "HEAD") };
+    };
+    const inner = make("inner", { "inner.txt": "inner\n" });
+    const lib = make("lib", { "lib.txt": "lib\n", ".gitignore": "*.log\n" });
+    f.git(lib.seed, "update-index", "--add", "--cacheinfo", `160000,${inner.commit},inner`);
+    f.git(lib.seed, "commit", "-q", "-m", "inner"); f.git(lib.seed, "push", "-q", "origin", "main");
+    lib.commit = f.git(lib.seed, "rev-parse", "HEAD");
+    const app = make("app", { "README.md": "app\n" });
+    f.git(app.seed, "update-index", "--add", "--cacheinfo", `160000,${lib.commit},lib`);
+    f.git(app.seed, "commit", "-q", "-m", "lib"); f.git(app.seed, "push", "-q", "origin", "main");
+    const oldHome = join(f.root, "old-home"), newHome = join(f.root, "new-home"), folder = (home: string) => join(home, "app", "app");
+    mkdirSync(join(oldHome, "app"), { recursive: true });
+    f.git(f.root, "clone", "-q", app.origin, folder(oldHome));
+    const gitDirs = { lib: `modules/${digest("lib")}`, inner: `modules/${digest("lib")}/modules/${digest("inner")}` };
+    const fetch = (repo: string, path: string, origin: string, gitDir: string, commit: string) => {
+      mkdirSync(join(repo, path), { recursive: true }); mkdirSync(dirname(join(repo, ".git", gitDir)), { recursive: true });
+      f.git(repo, "clone", "-q", "--no-checkout", "--no-recurse-submodules", "--template=", `--separate-git-dir=${join(repo, ".git", gitDir)}`, origin, join(repo, path));
+      f.git(join(repo, path), "-c", "advice.detachedHead=false", "checkout", "-q", "--detach", commit);
+    };
+    fetch(folder(oldHome), "lib", lib.origin, gitDirs.lib, lib.commit);
+    fetch(folder(oldHome), "lib/inner", inner.origin, gitDirs.inner, inner.commit);
+    const submodules = (home: string) => [
+      { position: 0, checkoutPath: join(folder(home), "lib"), repositoryPath: folder(home), gitDir: gitDirs.lib, baseCommit: lib.commit },
+      { position: 0, checkoutPath: join(folder(home), "lib", "inner"), repositoryPath: folder(home), gitDir: gitDirs.inner, baseCommit: inner.commit }];
+    return { ...f, lib, inner, app, oldHome, newHome, folder, gitDirs, submodules, fetch };
+  }
+  const save = (p: ReturnType<typeof project>, key: Buffer, out: string, submodules = p.submodules(p.oldHome)) => {
+    const result = run([...checkpointArchiveSteps({ checkoutPath: p.folder(p.oldHome), home: p.oldHome, baseBranch: "main", key, submodules }),
+      `cp "$work/checkpoint.zck" '${out}'`, CHECKPOINT_SAVED_REPORT], p.env);
+    return { ...result, parsed: parseCheckpointResult(result.stdout) };
+  };
+  /** The archive's parts, as a restore onto a fresh clone of the first repository unpacks them. */
+  const parts = (p: ReturnType<typeof project>, key: Buffer, out: string) => {
+    mkdirSync(join(p.newHome, "app"), { recursive: true });
+    if (!existsSync(p.folder(p.newHome))) p.git(p.root, "clone", "-q", p.app.origin, p.folder(p.newHome));
+    const result = run([...checkpointRestoreSteps({ checkoutPath: p.folder(p.newHome), home: p.newHome, key, sha256: sha(out), repositoryUrl: undefined },
+      [`cp '${out}' "$work/checkpoint.zck"`]), "report zeros-checkpoint-restored",
+      `{ printf 'manifest:'; grep '^submodule ' "$work/c/manifest" | tr '\\n' '|'; printf '\\nfiles:'; (cd "$work/c" && find submodules -type f 2>/dev/null | sort | tr '\\n' ' '); printf '\\n';`,
+      `  for k in 1 2; do if [ -f "$work/c/submodules/$k/repo.bundle" ]; then printf 'heads-%s:' "$k"; git bundle list-heads "$work/c/submodules/$k/repo.bundle" | cut -d' ' -f2 | sort | tr '\\n' ' '; printf '\\n'; fi; done; } >&3`], p.env);
+    return { ...result, parsed: parseRestoreResult(result.stdout) };
+  };
+
+  it("captures each submodule where the worker put it, its edits, index, stash, branch and detached commits, a nested one too", () => {
+    const p = project(), key = randomBytes(32), out = join(p.root, "checkpoint.zck"), lib = join(p.folder(p.oldHome), "lib");
+    // Work in lib: a commit on a branch of its own, a stash, a new commit at a detached HEAD, an edit, a staged file and an untracked one.
+    p.git(lib, "switch", "-q", "-c", "mine"); p.write(join(lib, "branch.txt"), "branch\n"); p.git(lib, "add", "branch.txt"); p.git(lib, "commit", "-q", "-m", "on mine");
+    p.git(lib, "-c", "advice.detachedHead=false", "checkout", "-q", "--detach", p.lib.commit);
+    p.write(join(lib, "lib.txt"), "stashed\n"); p.git(lib, "stash", "-q");
+    p.write(join(lib, "detached.txt"), "detached\n"); p.git(lib, "add", "detached.txt"); p.git(lib, "commit", "-q", "-m", "detached");
+    p.write(join(lib, "lib.txt"), "edited\n"); p.write(join(lib, "staged.txt"), "staged\n"); p.git(lib, "add", "staged.txt"); p.write(join(lib, "new.txt"), "new\n");
+    p.write(join(lib, "inner", "inner.txt"), "inner edited\n");
+    const saved = save(p, key, out);
+    expect(saved.parsed).toMatchObject({ ok: true });
+    // Nothing temporary stays in any checkout.
+    for (const repo of [p.folder(p.oldHome), lib, join(lib, "inner")]) expect(p.git(repo, "for-each-ref", "refs/zeros-checkpoint/")).toBe("");
+    const shown = parts(p, key, out);
+    expect(shown.parsed).toEqual({ ok: true });
+    const b64 = (value: string) => Buffer.from(value).toString("base64");
+    expect(shown.stdout).toContain(`manifest:submodule 1 0 ${b64("lib")} ${p.lib.commit} captured|submodule 2 0 ${b64("lib/inner")} ${p.inner.commit} captured|`);
+    expect(shown.stdout).toMatch(/files:submodules\/1\/manifest submodules\/1\/repo\.bundle submodules\/2\/manifest submodules\/2\/repo\.bundle/);
+    const heads = shown.stdout.split("\n").find(line => line.startsWith("heads-1:"))!;
+    for (const ref of ["refs/heads/mine", "refs/zeros-checkpoint/head", "refs/zeros-checkpoint/index", "refs/zeros-checkpoint/worktree", "refs/zeros-checkpoint/stash-0"])
+      expect(heads).toContain(ref);
+  });
+
+  it("skips an absent or empty folder with a line and still saves the repository; with none, the archive is exactly as before", () => {
+    const p = project(), key = randomBytes(32), out = join(p.root, "checkpoint.zck");
+    const gone = { position: 0, checkoutPath: join(p.folder(p.oldHome), "vendor", "gone"), repositoryPath: p.folder(p.oldHome),
+      gitDir: `modules/${digest("gone")}`, baseCommit: p.lib.commit };
+    const empty = { ...gone, checkoutPath: join(p.folder(p.oldHome), "vendor", "empty"), gitDir: `modules/${digest("empty")}` };
+    mkdirSync(empty.checkoutPath, { recursive: true });
+    p.write(join(p.folder(p.oldHome), "README.md"), "app edited\n");
+    expect(save(p, key, out, [gone, empty]).parsed).toMatchObject({ ok: true });
+    const shown = parts(p, key, out);
+    const b64 = (value: string) => Buffer.from(value).toString("base64");
+    expect(shown.stdout).toContain(`manifest:submodule 1 0 ${b64("vendor/gone")} ${p.lib.commit} absent|submodule 2 0 ${b64("vendor/empty")} ${p.lib.commit} empty|`);
+    expect(readFileSync(join(p.folder(p.newHome), "README.md"), "utf8")).toBe("app edited\n");
+    // No submodules: the same steps, so the same fingerprint, as before this change.
+    const input = { checkoutPath: p.folder(p.oldHome), home: p.oldHome, baseBranch: "main", key };
+    expect(checkpointArchiveSteps({ ...input, submodules: [] })).toEqual(checkpointArchiveSteps(input));
+  });
+
+  it("captures nothing from a folder that is not the worker's: its own clone, or a Git directory elsewhere", () => {
+    const p = project(), key = randomBytes(32), out = join(p.root, "checkpoint.zck"), lib = join(p.folder(p.oldHome), "lib");
+    // The person replaced lib with a clone of their own.
+    rmSync(lib, { recursive: true, force: true }); p.git(p.root, "clone", "-q", p.lib.origin, lib);
+    expect(save(p, key, out, [p.submodules(p.oldHome)[0]!]).parsed).toMatchObject({ ok: true });
+    const b64 = (value: string) => Buffer.from(value).toString("base64");
+    expect(parts(p, key, out).stdout).toContain(`manifest:submodule 1 0 ${b64("lib")} ${p.lib.commit} foreign|`);
+  });
+});

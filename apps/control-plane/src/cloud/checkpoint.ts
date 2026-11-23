@@ -187,6 +187,10 @@ export type CheckpointPaths = {
 };
 /** A repository after the first of a workspace of several, captured in its own part of the archive. */
 export type CheckpointRepository = { checkoutPath: string; baseBranch: string };
+/** C4: one submodule checkout the worker fetched: its folder, the checkout of the repository it belongs to (its Git
+ * directory is that checkout's `.git/<gitDir>`), and the gitlink its create recorded. */
+export type CheckpointSubmodule = { position: number; checkoutPath: string; repositoryPath: string; gitDir: string; baseCommit: string };
+const SUBMODULE_GIT_DIR = /^modules\/[0-9a-f]{64}(?:\/modules\/[0-9a-f]{64}){0,2}$/;
 
 function paths(input: CheckpointPaths) {
   for (const value of [input.checkoutPath, input.home])
@@ -295,7 +299,9 @@ type ArchiveInput = CheckpointPaths & { baseBranch: string; key: Buffer; maxByte
    * applies only the parts an archive holds, so it reads either kind unchanged. */
   backup?: boolean;
   /** A workspace of several repositories: every one after the first. Absent, the archive is exactly a one-repository checkpoint's. */
-  repositories?: readonly CheckpointRepository[] };
+  repositories?: readonly CheckpointRepository[];
+  /** C4: the submodules it fetched, parents first. Absent or empty, the archive is exactly as before. */
+  submodules?: readonly CheckpointSubmodule[] };
 const FINGERPRINT = /^[0-9a-f]{64}$/, COMMIT = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/;
 
 /** Builds `$work/checkpoint.zck` and sets `bytes`, `sha`, `fingerprint` and
@@ -329,6 +335,7 @@ function archiveSteps(input: ArchiveInput, revision: string): string[] {
     ...repositoryCapture(`${CLOUD_V2_WORKER_STATE}/environment-seed/manifest.json`, !input.backup),
     // Before the fingerprint, which then covers every repository.
     ...otherRepositoriesCapture(input.repositories ?? [], !input.backup),
+    ...submodulesCapture(input.submodules ?? []),
     "step=sessions",
     "cd \"$home\"; set --",
     `for p in ${(input.backup ? BACKUP_SESSION_PATHS : SESSION_PATHS).map(quote).join(" ")}; do if [ -e "$p" ] && [ ! -L "$p" ]; then set -- "$@" "$p"; fi; done`,
@@ -551,6 +558,56 @@ function otherRepositoriesCapture(repositories: readonly CheckpointRepository[],
       ") || { reported=1; exit 3; }",
       `if grep -qx undigested "$work/repository-${i}"; then digests=''; fi`,
       `cat "$work/repository-${i}" >> "$work/parts"`,
+    ];
+  });
+}
+
+/** C4: each submodule checkout, parents first, in its own subshell, into submodules/<k>/ of the same archive, as a
+ * later repository is: its index, work tree, branches, tags, stashes, detached HEAD and ignored files. Its bundle
+ * leaves out what its gitlink and its remotes already hold, which its restore fetches again. Only a checkout where the
+ * worker put it is captured: its folder is its own top level and its Git directory resolves to the planned one under
+ * its repository's .git. Otherwise the line says absent, empty or foreign and the backup goes on. A main-manifest
+ * line `submodule <k> <position> <base64 path> <gitlink> <state>` maps it back by path; what it holds joins the
+ * fingerprint, so a checkpoint is reused only when every submodule is unchanged. A failure inside a captured one
+ * fails the capture (checkpoint_failed step=submodule-<k>). */
+function submodulesCapture(submodules: readonly CheckpointSubmodule[]): string[] {
+  return submodules.flatMap((entry, index) => {
+    const k = index + 1, folder = checkedPath(entry.checkoutPath), repository = checkedPath(entry.repositoryPath);
+    if (!folder.startsWith(`${repository}/`) || !SUBMODULE_GIT_DIR.test(entry.gitDir) || !COMMIT.test(entry.baseCommit)
+      || !Number.isInteger(entry.position) || entry.position < 0 || entry.position > 9) throw new Error("Invalid checkpoint submodule");
+    const path = folder.slice(repository.length + 1);
+    return [
+      `step=submodule-${k}`,
+      "(",
+      `  repo=${quote(folder)} planned_git=${quote(`${repository}/.git/${entry.gitDir}`)} gitlink=${quote(entry.baseCommit)} base='' cleanup_refs='' reported='' state=captured`,
+      "  trap 'code=$?; if [ -n \"$cleanup_refs\" ]; then git -C \"$repo\" for-each-ref --format=\"%(refname)\" refs/zeros-checkpoint/ 2>/dev/null | while read -r ref; do git -C \"$repo\" update-ref -d \"$ref\" || true; done; fi; if [ \"$code\" -ne 0 ] && [ -z \"$reported\" ]; then printf \"zeros-checkpoint-error checkpoint_failed %s\\n\" \"$step\" >&3; fi' EXIT",
+      `  outer_work=$work; work="$outer_work/s${k}"; mkdir "$work"; cp "$outer_work/digest.mjs" "$outer_work/environment.mjs" "$work/"`,
+      "  if [ -L \"$repo\" ] || [ ! -d \"$repo\" ]; then state=absent",
+      "  elif [ -z \"$(ls -A \"$repo\")\" ]; then state=empty",
+      "  elif ! { [ \"$(cd \"$repo\" && pwd -P)\" = \"$repo\" ] && top=$(git -C \"$repo\" rev-parse --show-toplevel) && [ \"$(cd \"$top\" && pwd -P)\" = \"$repo\" ] \\",
+      "    && gd=$(git -C \"$repo\" rev-parse --absolute-git-dir) && [ -d \"$planned_git\" ] && [ ! -L \"$planned_git\" ] \\",
+      "    && [ \"$(cd \"$gd\" && pwd -P)\" = \"$(cd \"$planned_git\" && pwd -P)\" ]; }; then state=foreign; fi",
+      `  printf '%s\\n' "$state" > "$outer_work/submodule-${k}-state"`,
+      "  if [ \"$state\" = captured ]; then",
+      `    c="$outer_work/c/submodules/${k}"; mkdir -p "$c"; m="$c/manifest"; printf 'zeros-checkpoint 1\\n' > "$m"`,
+      "    have_repo='' tree='' staged_tree='' base_commit='' digests=1; : > \"$work/parts\"",
+      ...repositoryCapture(false, false).map(line => `    ${line}`),
+      // Its base: the gitlink its create recorded, when it has it, and whatever its remote-tracking branches hold.
+      "    base_commit=$(git -C \"$repo\" rev-parse -q --verify \"$gitlink^{commit}\" || true)",
+      "    step=bundle",
+      "    if [ -n \"$have_repo\" ]; then",
+      "      cd \"$repo\"",
+      "      negative=(--not --remotes); if [ -n \"$base_commit\" ]; then negative+=(\"$base_commit\"); fi",
+      "      git bundle create \"$c/repo.bundle\" --branches --tags --glob=refs/zeros-checkpoint \"${negative[@]}\"",
+      "      step=ignored",
+      "      if [ -s \"$work/ignored\" ]; then tar --null --verbatim-files-from --no-recursion -T \"$work/ignored\" -cf \"$c/ignored.tar\"; fi",
+      "    fi",
+      `    { printf 'submodule ${k}\\n'; grep -v -E '^(index|worktree) ' "$m" || true; printf 'index-tree %s\\nworktree-tree %s\\nbase %s\\n' "\${staged_tree:--}" "\${tree:--}" "\${base_commit:--}";`,
+      `      cat "$work/parts"; [ -n "$digests" ] || printf 'undigested\\n'; } > "$outer_work/submodule-${k}"`,
+      "  fi",
+      ") || { reported=1; exit 3; }",
+      `printf 'submodule ${k} ${entry.position} ${b64(path)} ${entry.baseCommit} %s\\n' "$(cat "$work/submodule-${k}-state")" >> "$m"`,
+      `if [ -f "$work/submodule-${k}" ]; then if grep -qx undigested "$work/submodule-${k}"; then digests=''; fi; cat "$work/submodule-${k}" >> "$work/parts"; fi`,
     ];
   });
 }
