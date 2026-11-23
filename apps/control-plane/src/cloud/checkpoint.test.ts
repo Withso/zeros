@@ -2132,6 +2132,37 @@ process.exit(result.status ?? 1);
       expect(worker).toContain(`export const SUBMODULE_PUSH_REFUSED = ${JSON.stringify(SUBMODULE_PUSH_REFUSED)};`);
     });
 
+    it("holds a part it could not put back, so the next stop still saves it, and puts it back at a later open once it can", () => {
+      const { p, key, out, was } = worked(), net = github(p, TOKEN);
+      const machine = (name: string) => { const home = join(p.root, name); mkdirSync(join(home, "app"), { recursive: true }); p.git(p.root, "clone", "-q", p.app.origin, join(home, "app", "app")); return home; };
+      const restoreOn = (home: string, from: string, submodules: RestoreSubmodule[]) => {
+        const result = run([...checkpointRestoreSteps({ checkoutPath: p.folder(home), home, key, sha256: sha(from), repositoryUrl: undefined, submodules },
+          [`cp '${from}' "$work/checkpoint.zck"`]), "report zeros-checkpoint-restored"], net.env);
+        return { parsed: parseRestoreResult(result.stdout), unrestored: parseUnrestoredSubmodules(result.stdout) };
+      };
+      const held = (home: string) => readdirSync(join(home, ".local/share/zeros/cloud-worker/submodule-holdover"));
+      // First open: lib's repository cannot be fetched. The rest opens; lib and its child are held, not lost.
+      const first = machine("first");
+      expect(restoreOn(first, out, planned(p, first, { lib: { repository: "acme/gone" } }))).toEqual({ parsed: { ok: true }, unrestored: [1, 2] });
+      expect(held(first)).toHaveLength(2);
+      expect(readdirSync(join(p.folder(first), "lib"))).toEqual([]);
+      // Its stop: the probe says a backup is needed, and the backup carries what is held.
+      const probe = spawnSync("bash", ["-c", `eval "$1"`, "probe", backupProbeCommand([p.folder(first)], first, p.submodules(first))], { env: p.env, encoding: "utf8" });
+      expect(parseBackupProbe(probe.stdout)).toBe("dirty");
+      const second = join(p.root, "second.zck");
+      expect(parseCheckpointResult(run([...checkpointArchiveSteps({ checkoutPath: p.folder(first), home: first, baseBranch: "main", key, submodules: p.submodules(first) }),
+        `cp "$work/checkpoint.zck" '${second}'`, CHECKPOINT_SAVED_REPORT], p.env).stdout)).toMatchObject({ ok: true });
+      // A later open, with the cause gone: both come back as they were saved, and nothing is held any more.
+      const later = machine("later");
+      expect(restoreOn(later, second, planned(p, later))).toEqual({ parsed: { ok: true }, unrestored: [] });
+      const lib = join(p.folder(later), "lib");
+      expect(p.git(lib, "rev-parse", "HEAD")).toBe(was.head);
+      expect(p.git(lib, "rev-parse", "refs/stash")).toBe(was.stash);
+      expect(readFileSync(join(lib, "lib.txt"), "utf8")).toBe("edited\n");
+      expect(readFileSync(join(lib, "inner", "inner.txt"), "utf8")).toBe("inner edited\n");
+      expect(held(later)).toEqual([]);
+    });
+
     it("leaves a submodule the archive does not hold, or no longer planned there, as it is, and is exactly as before with none", () => {
       const p = project(), key = randomBytes(32), out = join(p.root, "checkpoint.zck");
       // Saved before C4B: no submodule parts at all.

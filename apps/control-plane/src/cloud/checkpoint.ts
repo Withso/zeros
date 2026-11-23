@@ -890,6 +890,8 @@ function submodulesProbe(submodules: readonly CheckpointSubmodule[]): string[] {
     ...ignoredFiles(`printf '%s\\0' "$path" >> "$work/list"`),
     "  if [ -s \"$work/list\" ]; then state=dirty; fi",
     "}",
+    // A part a restore could not put back is held in the worker's state: the next backup must carry it.
+    `if [ -n "$(ls -A "$home/${SUBMODULE_HOLDOVER_DIR}" 2>/dev/null)" ]; then state=dirty; fi`,
     ...calls,
   ];
 }
@@ -1208,17 +1210,32 @@ function activeSubmodulesFetch(submodules: readonly CheckedSubmodule[]): string[
   ];
 }
 
+/** Where a submodule part that a restore could not put back is held, in the worker's state: every later backup carries
+ * it (home.tar), every later restore unpacks it before the repositories and tries it again. */
+export const SUBMODULE_HOLDOVER_DIR = `${CLOUD_V2_WORKER_STATE}/submodule-holdover`;
+const holdoverName = (entry: { position: number; path: string }) => createHash("sha256").update(`${entry.position}\0${entry.path}`).digest("hex");
+
 /** C4: after every repository, each planned submodule whose state the archive holds (matched by repository and path,
  * parents first) is put back into its folder, the worker's way: cloned with its Git directory at the planned place when
  * the folder is empty and that directory absent (the parent's restore leaves an empty folder for a gitlink), restored
- * exactly as a repository is, its work tree included, then given the worker's push-refusing hook. Each runs in its own
- * subshell with its own credential: a failure never fails the restore. It prints one SUBMODULE_UNRESTORED line and
- * leaves the submodule as the worker can fetch it at its gitlink (an empty folder with no Git directory) when this
- * restore made it. A submodule the archive does not hold, or whose folder the restored repository no longer has, is
- * left to the worker, which fetches a missing one at the gitlink its repository records. */
+ * exactly as a repository is, its work tree included, then given the worker's push-refusing hook; a deinitialised one's
+ * Git directory alone (put_gitdir). Each runs in its own subshell with its own credential: a failure never fails the
+ * restore. It prints one SUBMODULE_UNRESTORED line, leaves what it made as the worker fetches a missing one (an empty
+ * folder with no Git directory), and keeps the part in SUBMODULE_HOLDOVER_DIR, so nothing is lost at the next stop: a
+ * later restore tries it again while the submodule is untouched (held_applies), and drops it once it is back. A
+ * submodule the archive does not hold, or whose folder the restored repository no longer has, is left to the worker,
+ * which fetches a missing one at the gitlink its repository records. */
 function submodulesRestore(input: RestoreInput, submodules: readonly CheckedSubmodule[]): string[] {
-  const hook = `#!/bin/sh\necho ${quote(SUBMODULE_PUSH_REFUSED)} >&2\nexit 1\n`;
   if (!submodules.length) return [];
+  const hook = `#!/bin/sh\necho ${quote(SUBMODULE_PUSH_REFUSED)} >&2\nexit 1\n`;
+  const fetched = '"$outer_work/submodule-fetched-$j"';
+  const fetchSha = input.active ? "fail checkpoint_prerequisites_missing"
+    : 'remote_git --git-dir="$planned_git" fetch -q --no-recurse-submodules "$url" "$sha" || true';
+  const writeHook = [
+    "  step=hook; mkdir -p \"$planned_git/hooks\"",
+    `  printf %s ${quote(b64(hook))} | base64 -d > "$planned_git/hooks/pre-push"; chmod 755 "$planned_git/hooks/pre-push"`,
+  ];
+  const parentOfGit = "  mkdir -p -- \"${planned_git%/*}\"; [ \"$(cd \"${planned_git%/*}\" && pwd -P)\" = \"${planned_git%/*}\" ] || fail checkpoint_restore_failed";
   return [
     // Active: a folder still linked to the Git directory its repository's replaced one took away is emptied, so the
     // worker fetches it as missing. Only exactly that link: a folder with its own .git directory is never touched.
@@ -1227,109 +1244,84 @@ function submodulesRestore(input: RestoreInput, submodules: readonly CheckedSubm
       "  [ \"$(cat \"$1/.git\")\" = \"gitdir: $2\" ] && [ ! -e \"$2\" ] && [ ! -L \"$2\" ] || return 0",
       "  find \"$1\" -mindepth 1 -delete",
       "}"] : []),
-    ...submodules.flatMap((entry, index) => {
-      const j = index + 1;
-      const credential = input.active ? [] : entry.token ? [
-        `  printf %s ${quote(b64(entry.token))} | base64 -d > "$work/token"`,
-        "  printf '#!/bin/sh\\ncase \"$1\" in Username*) echo x-access-token ;; *) cat \"%s\" ;; esac\\n' \"$work/token\" > \"$work/askpass\"; chmod 700 \"$work/askpass\"",
-        `  remote_git() { GIT_ASKPASS="$work/askpass" ${SUBMODULE_GIT} "$@"; }`,
-      ] : [
-        // No token (a public one, or none could be had): no askpass, no helper, no prompt, so Git can never ask.
-        "  unset GIT_ASKPASS SSH_ASKPASS",
-        `  remote_git() { ${SUBMODULE_GIT} -c core.askPass= "$@"; }`,
-      ];
-      const place = input.active ? [
-        // The repository's new Git directory has no modules: the fetched objects become this submodule's, and the
-        // folder's old content (the snapshot's, not the person's: the archive holds theirs) goes.
-        `  [ -d "$outer_work/submodule-fetched-${j}" ] || fail checkpoint_prerequisites_missing`,
-        "  [ ! -e \"$planned_git\" ] && [ ! -L \"$planned_git\" ] || fail checkpoint_restore_failed",
-        // Never a folder with a .git of its own: only one holding the worker's link, or none.
-        "  [ ! -e \"$repo/.git\" ] || { [ -f \"$repo/.git\" ] && [ ! -L \"$repo/.git\" ]; } || fail checkpoint_restore_failed",
-        "  made=1; find \"$repo\" -mindepth 1 -delete",
-        "  mkdir -p -- \"${planned_git%/*}\"; [ \"$(cd \"${planned_git%/*}\" && pwd -P)\" = \"${planned_git%/*}\" ] || fail checkpoint_restore_failed",
-        `  mv -- "$outer_work/submodule-fetched-${j}" "$planned_git"; git --git-dir="$planned_git" config core.bare false`,
-        "  printf 'gitdir: %s\\n' \"$planned_git\" > \"$repo/.git\"",
-        `  git -C "$repo" remote add origin ${quote(entry.url)}`,
-      ] : [
-        "  if [ -z \"$(ls -A \"$repo\")\" ]; then",
-        "    if [ ! -e \"$planned_git\" ] && [ ! -L \"$planned_git\" ]; then",
-        "      mkdir -p -- \"${planned_git%/*}\"; [ \"$(cd \"${planned_git%/*}\" && pwd -P)\" = \"${planned_git%/*}\" ] || fail checkpoint_restore_failed",
-        `      step=clone; made=1; remote_git clone -q --no-checkout --no-recurse-submodules --template= --separate-git-dir="$planned_git" -- ${quote(entry.url)} "$repo" || fail checkpoint_repository_missing`,
-        // Its Git directory is there but its folder lost the link to it: the link again, then the state into it.
-        "    elif [ -d \"$planned_git\" ] && [ ! -L \"$planned_git\" ]; then printf 'gitdir: %s\\n' \"$planned_git\" > \"$repo/.git\"",
-        "    else fail checkpoint_restore_failed; fi",
-        "  fi",
-      ];
-      return [
-        `step=submodule-${j}`,
-        `k=$(awk -v p=${entry.position} -v b=${quote(b64(entry.path))} '$1 == "submodule" && $3 == p && $4 == b && $6 == "captured" { print $2; exit }' "$m")`,
-        `if [[ "$k" =~ ^[1-9][0-9]?$ ]] && [ -f "$c/submodules/$k/manifest" ]; then set +e; (`,
-        // Its own failure is reported once, below, by its place in the plan: nothing it prints reaches the result.
-        "  set -e; exec 3>/dev/null",
-        `  repo=${quote(entry.folder)} planned_git=${quote(entry.gitDir)} c="$c/submodules/$k" reported='' made='' outer_work=$work`,
-        // A submodule this restore made and could not finish is left as the worker fetches a missing one.
-        "  trap 'code=$?; if [ \"$code\" -ne 0 ] && [ -n \"$made\" ]; then rm -rf -- \"$planned_git\"; find \"$repo\" -mindepth 1 -delete || true; fi' EXIT",
-        "  m=\"$c/manifest\"; [ \"$(head -n 1 \"$m\")\" = 'zeros-checkpoint 1' ] || fail checkpoint_corrupt",
-        `  work="$work/submodule-${j}"; mkdir -m 700 "$work"`,
-        ...credential,
-        "  fetched=''",
-        // The restored repository has no folder there any more: nothing to put back.
-        "  if [ -L \"$repo\" ] || [ ! -d \"$repo\" ]; then exit 0; fi",
-        "  [ \"$(cd \"$repo\" && pwd -P)\" = \"$repo\" ] || fail checkpoint_restore_failed",
-        ...place,
-        // Only where the worker put it: its own top, its Git directory the planned one.
-        "  top=$(git -C \"$repo\" rev-parse --show-toplevel) && [ \"$(cd \"$top\" && pwd -P)\" = \"$repo\" ] || fail checkpoint_restore_failed",
-        "  gd=$(git -C \"$repo\" rev-parse --absolute-git-dir) && [ \"$(cd \"$gd\" && pwd -P)\" = \"$(cd \"$planned_git\" && pwd -P)\" ] || fail checkpoint_restore_failed",
-        ...repositoryRestore(input, "").map(line => `  ${line}`),
-        "  step=hook; mkdir -p \"$planned_git/hooks\"",
-        `  printf %s ${quote(b64(hook))} | base64 -d > "$planned_git/hooks/pre-push"; chmod 755 "$planned_git/hooks/pre-push"`,
-        ")",
-        `code=$?; set -e; [ "$code" -eq 0 ] || printf '${SUBMODULE_UNRESTORED} ${j}\\n' >&3`,
-        `rm -f "$work/submodule-${j}/token" "$work/submodule-${j}/askpass"; fi`,
-        ...gitdirRestore(input, entry, j, credential),
-        ...(input.active ? [`release_submodule ${quote(entry.folder)} ${quote(entry.gitDir)}`] : []),
-      ];
-    })];
-}
-
-/** A deinitialised submodule's `gitdir` part: its Git directory is put back where the worker plans it (fetched from
- * GitHub, or, on an active restore, from what was fetched before the download), with the person's branches, HEAD and
- * stashes; its folder is left as `deinit` left it. Into a Git directory already there only the refs go, and HEAD only
- * while its folder is empty. A failure is one SUBMODULE_UNRESTORED line, as for any other part. */
-function gitdirRestore(input: RestoreInput, entry: CheckedSubmodule, j: number, credential: readonly string[]): string[] {
-  const fetchSha = input.active ? "fail checkpoint_prerequisites_missing"
-    : `remote_git --git-dir="$planned_git" fetch -q --no-recurse-submodules ${quote(entry.url)} "$sha" || true`;
-  return [
-    `k=$(awk -v p=${entry.position} -v b=${quote(b64(entry.path))} '$1 == "submodule" && $3 == p && $4 == b && $6 == "gitdir" { print $2; exit }' "$m")`,
-    `if [[ "$k" =~ ^[1-9][0-9]?$ ]] && [ -f "$c/submodules/$k/manifest" ]; then set +e; (`,
-    "  set -e; exec 3>/dev/null",
-    `  repo=${quote(entry.folder)} planned_git=${quote(entry.gitDir)} c="$c/submodules/$k" reported='' made='' outer_work=$work`,
-    "  trap 'code=$?; if [ \"$code\" -ne 0 ] && [ -n \"$made\" ]; then rm -rf -- \"$planned_git\"; fi' EXIT",
-    "  m=\"$c/manifest\"; [ \"$(head -n 1 \"$m\")\" = 'zeros-checkpoint 1' ] && grep -qx gitdir \"$m\" || fail checkpoint_corrupt",
-    `  work="$work/submodule-${j}"; mkdir -p -m 700 "$work"`,
-    ...credential,
+    // A held part goes back only over a submodule with nothing of the person's: its folder empty with no Git
+    // directory, or at its gitlink with no change, stash, or branch or HEAD the gitlink does not reach.
+    "held_applies() {",
+    "  local gitlink head own ref",
+    "  [ -d \"$1\" ] && [ ! -L \"$1\" ] && [ \"$(cd \"$1\" && pwd -P)\" = \"$1\" ] || return 1",
+    "  if [ -z \"$(ls -A \"$1\")\" ]; then [ ! -e \"$2\" ] && [ ! -L \"$2\" ]; return; fi",
+    "  [ -d \"$2\" ] && [ ! -L \"$2\" ] && [ \"$(cd \"$(git -C \"$1\" rev-parse --absolute-git-dir)\" && pwd -P)\" = \"$(cd \"$2\" && pwd -P)\" ] || return 1",
+    "  [ -z \"$(git -C \"$1\" status --porcelain=v1 --untracked-files=normal --ignore-submodules=none)\" ] || return 1",
+    "  ! git -C \"$1\" rev-parse -q --verify refs/stash >/dev/null || return 1",
+    "  gitlink=$(git -C \"$1\" rev-parse -q --verify \"$3^{commit}\" || true); head=$(git -C \"$1\" rev-parse -q --verify 'HEAD^{commit}' || true)",
+    "  git -C \"$1\" for-each-ref --format='%(objectname) %(refname)' refs/heads refs/remotes/origin > \"$work/held-refs\" || return 1",
+    `  awk -v head="$(git -C "$1" symbolic-ref -q HEAD || true)" ${quote(CLONE_COPIES)} "$work/held-refs" > "$work/held-copies" || return 1`,
+    "  own=(); while read -r _ ref; do grep -qxF \"$ref\" \"$work/held-copies\" || own+=(\"$ref\"); done < <(grep ' refs/heads/' \"$work/held-refs\" || true)",
+    "  [ -z \"$(git -C \"$1\" rev-list -n 1 ${head:+\"$head\"} ${own[@]+\"${own[@]}\"} --not ${gitlink:+\"$gitlink\"})\" ]",
+    "}",
+    // One part, in its subshell: $repo, $planned_git, $url and $j name the submodule, $1 the part's directory.
+    "put_submodule() {",
+    "  c=$1; m=\"$c/manifest\"; [ \"$(head -n 1 \"$m\")\" = 'zeros-checkpoint 1' ] || fail checkpoint_corrupt",
+    "  if grep -qx gitdir \"$m\"; then put_gitdir; else put_captured; fi",
+    "}",
+    "put_captured() {",
+    // Its folder was there at the capture, so none now means its parent could not be put back: held with it.
+    "  if [ -L \"$repo\" ] || [ ! -d \"$repo\" ]; then fail checkpoint_restore_failed; fi",
+    "  [ \"$(cd \"$repo\" && pwd -P)\" = \"$repo\" ] || fail checkpoint_restore_failed",
+    ...(input.active ? [
+      // The repository's new Git directory has no modules: the fetched objects become this submodule's, and the
+      // folder's old content (the snapshot's, not the person's: the archive holds theirs) goes.
+      `  [ -d ${fetched} ] || fail checkpoint_prerequisites_missing`,
+      "  [ ! -e \"$planned_git\" ] && [ ! -L \"$planned_git\" ] || fail checkpoint_restore_failed",
+      // Never a folder with a .git of its own: only one holding the worker's link, or none.
+      "  [ ! -e \"$repo/.git\" ] || { [ -f \"$repo/.git\" ] && [ ! -L \"$repo/.git\" ]; } || fail checkpoint_restore_failed",
+      "  made=1 made_folder=1; find \"$repo\" -mindepth 1 -delete",
+      parentOfGit,
+      `  mv -- ${fetched} "$planned_git"; git --git-dir="$planned_git" config core.bare false`,
+      "  printf 'gitdir: %s\\n' \"$planned_git\" > \"$repo/.git\"",
+      "  git -C \"$repo\" remote add origin \"$url\"",
+    ] : [
+      "  if [ -z \"$(ls -A \"$repo\")\" ]; then",
+      "    if [ ! -e \"$planned_git\" ] && [ ! -L \"$planned_git\" ]; then",
+      `  ${parentOfGit}`,
+      "      step=clone; made=1 made_folder=1; remote_git clone -q --no-checkout --no-recurse-submodules --template= --separate-git-dir=\"$planned_git\" -- \"$url\" \"$repo\" || fail checkpoint_repository_missing",
+      // Its Git directory is there but its folder lost the link to it: the link again, then the state into it.
+      "    elif [ -d \"$planned_git\" ] && [ ! -L \"$planned_git\" ]; then printf 'gitdir: %s\\n' \"$planned_git\" > \"$repo/.git\"",
+      "    else fail checkpoint_restore_failed; fi",
+      "  fi",
+    ]),
+    // Only where the worker put it: its own top, its Git directory the planned one.
+    "  top=$(git -C \"$repo\" rev-parse --show-toplevel) && [ \"$(cd \"$top\" && pwd -P)\" = \"$repo\" ] || fail checkpoint_restore_failed",
+    "  gd=$(git -C \"$repo\" rev-parse --absolute-git-dir) && [ \"$(cd \"$gd\" && pwd -P)\" = \"$(cd \"$planned_git\" && pwd -P)\" ] || fail checkpoint_restore_failed",
+    ...repositoryRestore(input, ""),
+    ...writeHook,
+    "}",
+    // A deinitialised one: its Git directory goes back where the worker plans it, with the person's branches, HEAD and
+    // stashes; its folder is left as deinit left it. Into a Git directory already there only the refs go, and HEAD only
+    // while its folder is empty.
+    "put_gitdir() {",
     "  gd() { git --git-dir=\"$planned_git\" \"$@\"; }",
     "  if [ ! -e \"$planned_git\" ] && [ ! -L \"$planned_git\" ]; then",
-    "    mkdir -p -- \"${planned_git%/*}\"; [ \"$(cd \"${planned_git%/*}\" && pwd -P)\" = \"${planned_git%/*}\" ] || fail checkpoint_restore_failed",
+    `  ${parentOfGit}`,
     ...(input.active ? [
-      `    [ -d "$outer_work/submodule-fetched-${j}" ] || fail checkpoint_prerequisites_missing`,
+      `    [ -d ${fetched} ] || fail checkpoint_prerequisites_missing`,
       // The folder holds the snapshot's checkout, not the person's: it goes, as their deinit left it.
       "    if [ -d \"$repo\" ] && [ ! -L \"$repo\" ]; then",
       "      [ \"$(cd \"$repo\" && pwd -P)\" = \"$repo\" ] && { [ ! -e \"$repo/.git\" ] || { [ -f \"$repo/.git\" ] && [ ! -L \"$repo/.git\" ]; }; } || fail checkpoint_restore_failed",
       "      find \"$repo\" -mindepth 1 -delete",
       "    fi",
-      `    made=1; mv -- "$outer_work/submodule-fetched-${j}" "$planned_git"`,
-      `    gd remote add origin ${quote(entry.url)}`,
+      `    made=1; mv -- ${fetched} "$planned_git"`,
+      "    gd remote add origin \"$url\"",
     ] : [
       "    made=1; git init -q --bare --template= \"$planned_git\"",
-      `    gd remote add origin ${quote(entry.url)}`,
-      `    step=clone; remote_git --git-dir="$planned_git" fetch -q --no-recurse-submodules ${quote(entry.url)} '+refs/heads/*:refs/remotes/origin/*' || fail checkpoint_repository_missing`,
+      "    gd remote add origin \"$url\"",
+      "    step=clone; remote_git --git-dir=\"$planned_git\" fetch -q --no-recurse-submodules \"$url\" '+refs/heads/*:refs/remotes/origin/*' || fail checkpoint_repository_missing",
     ]),
     "    gd config core.bare false",
     "  else [ -d \"$planned_git\" ] && [ ! -L \"$planned_git\" ] && [ \"$(cd \"$planned_git\" && pwd -P)\" = \"$planned_git\" ] || fail checkpoint_restore_failed; fi",
     "  step=objects",
     "  if [ -f \"$c/repo.bundle\" ]; then",
-    "    while read -r sha; do hex \"$sha\"; gd cat-file -e \"$sha^{commit}\" || " + fetchSha + "; gd cat-file -e \"$sha^{commit}\" || fail checkpoint_prerequisites_missing",
+    `    while read -r sha; do hex "$sha"; gd cat-file -e "$sha^{commit}" || ${fetchSha}; gd cat-file -e "$sha^{commit}" || fail checkpoint_prerequisites_missing`,
     "    done < <(sed '/^$/q' \"$c/repo.bundle\" | grep -a '^-' | cut -c2- | cut -d' ' -f1)",
     "    gd bundle unbundle \"$c/repo.bundle\" || fail checkpoint_corrupt",
     "  fi",
@@ -1344,15 +1336,49 @@ function gitdirRestore(input: RestoreInput, entry: CheckedSubmodule, j: number, 
     "  fi",
     "  step=stash; gd update-ref -d refs/stash || true",
     "  while read -r _ sha message; do hex \"$sha\"; gd update-ref --create-reflog -m \"$(printf %s \"$message\" | base64 -d)\" refs/stash \"$sha\"; done < <(grep '^stash ' \"$m\" | tac || true)",
-    "  step=hook; mkdir -p \"$planned_git/hooks\"",
-    `  printf %s ${quote(b64(`#!/bin/sh
-echo ${quote(SUBMODULE_PUSH_REFUSED)} >&2
-exit 1
-`))} | base64 -d > "$planned_git/hooks/pre-push"; chmod 755 "$planned_git/hooks/pre-push"`,
-    ")",
-    `code=$?; set -e; [ "$code" -eq 0 ] || printf '${SUBMODULE_UNRESTORED} ${j}\\n' >&3`,
-    `rm -f "$work/submodule-${j}/token" "$work/submodule-${j}/askpass"; fi`,
-  ];
+    ...writeHook,
+    "}",
+    ...submodules.flatMap((entry, index) => {
+      const j = index + 1;
+      const credential = input.active ? [] : entry.token ? [
+        `  printf %s ${quote(b64(entry.token))} | base64 -d > "$work/token"`,
+        "  printf '#!/bin/sh\\ncase \"$1\" in Username*) echo x-access-token ;; *) cat \"%s\" ;; esac\\n' \"$work/token\" > \"$work/askpass\"; chmod 700 \"$work/askpass\"",
+        `  remote_git() { GIT_ASKPASS="$work/askpass" ${SUBMODULE_GIT} "$@"; }`,
+      ] : [
+        // No token (a public one, or none could be had): no askpass, no helper, no prompt, so Git can never ask.
+        "  unset GIT_ASKPASS SSH_ASKPASS",
+        `  remote_git() { ${SUBMODULE_GIT} -c core.askPass= "$@"; }`,
+      ];
+      // Its own failure is reported once, by its place in the plan: nothing it prints reaches the result. What this
+      // restore made and could not finish is left as the worker fetches a missing one.
+      const attempt = (part: string) => [
+        "set +e; (",
+        "  set -e; exec 3>/dev/null",
+        "  reported='' made='' made_folder='' fetched='' outer_work=$work",
+        "  trap 'code=$?; if [ \"$code\" -ne 0 ] && [ -n \"$made\" ]; then rm -rf -- \"$planned_git\"; if [ -n \"$made_folder\" ]; then find \"$repo\" -mindepth 1 -delete || true; fi; fi' EXIT",
+        `  work="$work/submodule-${j}"; mkdir -p -m 700 "$work"`,
+        ...credential,
+        `  put_submodule ${part}`,
+        ")",
+        "code=$?; set -e",
+      ];
+      return [
+        `step=submodule-${j}`,
+        `repo=${quote(entry.folder)} planned_git=${quote(entry.gitDir)} url=${quote(entry.url)} j=${j} held="$home/${SUBMODULE_HOLDOVER_DIR}/${holdoverName(entry)}" failed=''`,
+        `k=$(awk -v p=${entry.position} -v b=${quote(b64(entry.path))} '$1 == "submodule" && $3 == p && $4 == b && ($6 == "captured" || $6 == "gitdir") { print $2; exit }' "$m")`,
+        "if [[ \"$k\" =~ ^[1-9][0-9]?$ ]] && [ -f \"$c/submodules/$k/manifest\" ]; then",
+        ...attempt("\"$c/submodules/$k\"").map(line => `  ${line}`),
+        // Not put back: held, so the next stop's backup still carries it and a later restore tries again.
+        `  if [ "$code" -ne 0 ]; then failed=1; printf '${SUBMODULE_UNRESTORED} %s\\n' "$j" >&3; rm -rf -- "$held"; mkdir -p -- "\${held%/*}"; cp -a -- "$c/submodules/$k" "$held"; fi`,
+        "fi",
+        `if [ -z "$failed" ] && [ -f "$held/manifest" ] && held_applies "$repo" "$planned_git" ${entry.commit}; then`,
+        ...attempt("\"$held\"").map(line => `  ${line}`),
+        `  if [ "$code" -eq 0 ]; then rm -rf -- "$held"; else printf '${SUBMODULE_UNRESTORED} %s\\n' "$j" >&3; fi`,
+        "fi",
+        `rm -f "$work/submodule-${j}/token" "$work/submodule-${j}/askpass"`,
+        ...(input.active ? [`release_submodule ${quote(entry.folder)} ${quote(entry.gitDir)}`] : []),
+      ];
+    })];
 }
 
 /** The 1-based places in the restore's plan of the submodules it could not put back. */
