@@ -540,6 +540,25 @@ d("cloud v2 retention", () => {
       expect(errors.filter(line => line.includes("(attempt_before_stop)"))).toHaveLength(1);
     });
 
+    it("never calls a backup forked from a suspect stop's archive complete: restores answers pushed, and the open notes lost work", async () => {
+      boat.write(vm, `${path("api")}/UNPUSHED`, "api work");
+      boat.attemptAtStop = { inProgressReads: 1, failedReads: 0 };
+      await stop();
+      await earlier(CLOUD_V2_BACKUP_DELAY_MS + 60_000);
+      await lifecycle().tick();
+      const saved = await row();
+      // A backup of this very stop, taken from its archive after the stop.
+      expect(saved.checkpoint_stop_generation).toBe(saved.stop_generation);
+      await store.requestLifecycle(id, user, "archive");
+      await pool.query("UPDATE cloud_v2_workspaces SET machine_gone_at=clock_timestamp() WHERE id=$1", [id]);
+      expect((await store.get(id, user)).restores).toBe("pushed");
+      await pool.query("UPDATE cloud_v2_workspaces SET archived_at=NULL WHERE id=$1", [id]);
+      boat.machine(vm)!.state = "deleted";
+      await store.transition(id, ["stopped"], "starting");
+      await lifecycle().tick();
+      expect(await lostWork()).toMatchObject({ restored: "earlier" });
+    });
+
     it("records a stop during which Boat reported a failed attempt, and never calls that stop clean", async () => {
       boat.beginSnapshotAttempt(vm, Number.POSITIVE_INFINITY);
       await stop();

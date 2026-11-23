@@ -164,6 +164,8 @@ export type CloudV2CheckpointRetry = { generation: string; attempts: number; sto
 
 /** Internal lifecycle metadata is never included in public workspace documents. */
 export type CloudV2LifecycleWorkspace = CloudV2Workspace & {
+  /** cloudV2CheckpointLossy: this stop's backup may lack its last writes; a restore from it records lost work. */
+  checkpointLossy?: true;
   /** Ready copies: when the base its create waited for went live; its boot deadline counts from then. */
   baseReadyAt?: string;
   recoveryAttemptId?: string;
@@ -244,6 +246,7 @@ export type CloudV2WorkspaceRow = {
   backup_probe?: BackupProbe | null; backup_probe_generation?: string | null; stop_generation?: string; checkpoint_stop_generation?: string | null;
   changed_since_stop_generation?: string | null; machine_gone_at?: Date | null; waiting_for_base_at?: Date | null;
   stop_archive_failed_generation?: string | null;
+  checkpoint_saved_at?: Date | null;
 };
 type Row = CloudV2WorkspaceRow;
 
@@ -252,7 +255,7 @@ const WORKSPACE_COLUMNS_SQL = sql`id, org_id, creator_user_id, name, number, tit
   agent_cost_usd, agent_cost_turns, agent_cost_estimated_turns, private_owner_user_id, project_id, checkout_path, folder,
   lost_work_restored, lost_work_since, keep_set_at, archive_reason, stopped_at, machine_stopped_at, machine_data_expired_at,
   archive_wake_done_at, checkpoint_object, retention_started_at, backup_probe, backup_probe_generation, stop_generation,
-  checkpoint_stop_generation, changed_since_stop_generation, machine_gone_at, waiting_for_base_at, stop_archive_failed_generation`;
+  checkpoint_stop_generation, changed_since_stop_generation, machine_gone_at, waiting_for_base_at, stop_archive_failed_generation, checkpoint_saved_at`;
 const COLUMNS = WORKSPACE_COLUMNS_SQL.text;
 export const CLOUD_V2_WORKSPACE_COLUMNS = COLUMNS.split(",").map(value => value.trim());
 
@@ -275,7 +278,7 @@ type LifecycleRow = Row & {
 const LIFECYCLE_COLUMNS = `${COLUMNS}, lease_renewed_at, base_commit, restore_pending, restore_attempt, restore_create, checkpoint_uploads,
   execution_mode, execution_transition_id, execution_restore_claimed_at, execution_initiator_user_id, execution_intent_id, execution_intent_authority, access_epoch,
   stop_generation, checkpoint_stop_generation,
-  checkpoint_object, checkpoint_key, checkpoint_sha256, checkpoint_bytes, checkpoint_saved_at, checkpoint_reuse, checkpoint_retry_fork,
+  checkpoint_object, checkpoint_key, checkpoint_sha256, checkpoint_bytes, checkpoint_reuse, checkpoint_retry_fork,
   backup_probe, backup_probe_generation, worker_off_unverified_at, worker_off_verified_generation,
   maintenance_attempt, maintenance_phase, maintenance_started_at, archive_scrub, archive_scrubbed_generation, base_ready_at`;
 type RetryRow = LifecycleRow & { retry_stopped_at: Date; checkpoint_retry_generation: string; checkpoint_retry_attempts: number; checkpoint_retry_exhausted_at: Date | null };
@@ -319,6 +322,7 @@ export function cloudV2LifecycleWorkspaceFromRow(row: LifecycleRow): CloudV2Life
       accessEpoch: row.access_epoch, authority: row.execution_intent_authority } } : {}),
     checkpoint, restorePending: row.restore_pending, restoreAttempt: row.restore_attempt, restoreCreate: restoreCreate(row.restore_create),
     ...(row.base_ready_at ? { baseReadyAt: row.base_ready_at.toISOString() } : {}),
+    ...(cloudV2CheckpointLossy(row) ? { checkpointLossy: true as const } : {}),
     stopGeneration: row.stop_generation, checkpointUploadUntil: uploadHorizon(row.checkpoint_uploads),
     checkpointRetryFork: checkpointFork(row.checkpoint_retry_fork),
     ...(cloudV2StopProbe(row) ? { stopProbe: cloudV2StopProbe(row)! } : {}),
@@ -460,8 +464,18 @@ const restoreImage = (build: { snapshot_name: string; source_policy_version: num
   cloudV2WorkspaceImage({ policy: build.source_policy_version, snapshot: build.snapshot_name, recipe: build.recipe,
     scope: workspace.source_repositories ?? [], repository: workspace.repository });
 
+/** This stop's checkpoint was taken from its archive after the stop (a backup fork), and that stop's archive is suspect
+ * (stop_archive_failed_generation): it may lack the stop's last writes. A checkpoint taken on the running machine before
+ * its stop (the stop checkpoint) is not affected. */
+export function cloudV2CheckpointLossy(row: { stop_generation?: string; stop_archive_failed_generation?: string | null; checkpoint_stop_generation?: string | null;
+  checkpoint_saved_at?: Date | null; stopped_at?: Date | null }): boolean {
+  return !!row.stop_archive_failed_generation && row.stop_archive_failed_generation === row.stop_generation
+    && row.checkpoint_stop_generation === row.stop_generation && row.checkpoint_saved_at instanceof Date
+    && (!(row.stopped_at instanceof Date) || row.checkpoint_saved_at > row.stopped_at);
+}
+
 export function cloudV2Restores(row: Row, now = Date.now()): "all" | "pushed" {
-  if (row.checkpoint_object && row.checkpoint_stop_generation === row.stop_generation) return "all";
+  if (row.checkpoint_object && row.checkpoint_stop_generation === row.stop_generation && !cloudV2CheckpointLossy(row)) return "all";
   if (cloudV2StopProbe(row) === "clean") return "all";
   const lastStop = [row.machine_stopped_at, row.stopped_at].filter((at): at is Date => at instanceof Date)
     .reduce<Date | null>((latest, at) => !latest || at > latest ? at : latest, null);

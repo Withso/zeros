@@ -789,7 +789,8 @@ export class CloudV2Lifecycle {
           // A ready copy fork already holds every checkout, set up, with Git LFS.
           if (!recorded?.fork && (image.prune.length || !image.from)) await this.measure(workspace, "image_prepare", () => this.prepareImage(sandboxId, image));
           // Retention: in the hour before a stop's backup, a lost VM restores the last earlier one.
-          const earlier = this.retention && workspace.checkpoint?.stopGeneration !== workspace.stopGeneration;
+          // Or a backup of this stop forked from an archive its stop left suspect: it may lack the stop's last writes.
+          const earlier = this.retention && (workspace.checkpoint?.stopGeneration !== workspace.stopGeneration || workspace.checkpointLossy === true);
           await this.measure(workspace, "checkpoint_restore", () => this.applyCheckpoint(workspace, sandboxId!), () => earlier ? { checkpoint: "earlier" } : {});
           if (earlier) {
             this.deps.logger?.warn(`[cloud-v2] restored an earlier backup or checkpoint: the latest stop had none yet workspace=${workspace.id.slice(0, 8)}`);
