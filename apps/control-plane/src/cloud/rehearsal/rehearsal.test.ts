@@ -13,11 +13,11 @@ import { assertRepository, safeLine } from "./guard.js";
 import { accountLines, turnLine, PERSONAL_ROUTE_GAPS, preconditionLines, readAccount, refusal, writeLines, type PreconditionFacts } from "./plan.js";
 import { cleanup, cleanupNeedsAccount, inventoryLines, NO_ACCOUNT, readInventory, runStages, stageContext, timingLines } from "./runner.js";
 import { parseArguments, sharedBaseFacts, targetPorts } from "./rehearsal-cli.js";
-import { CONNECT_CLIENT_FEATURES, checkText, connectWorkspace, createProject, createWorkspace, fileTarget, frameCode, openBridge, waitState, writeFile } from "./steps.js";
+import { CONNECT_CLIENT_FEATURES, call, until, checkText, connectWorkspace, createProject, createWorkspace, fileTarget, frameCode, openBridge, waitState, writeFile } from "./steps.js";
 import { FIXTURE_TWO } from "./stage-provision.js";
 import { loadState, newState, saveState, stateTarget } from "./state.js";
 import { localStack } from "./local-stack.js";
-import { agentCredentialsFromEnv, ALPHA_TARGET, checkGithubToken, databaseErrorCode, databaseRefusal, liveApi, liveBridge, liveRelease, targetIdentity, liveDatabase, OUTSIDE_PROBE_LIMIT, SET_APP_SYSTEM, tokenLines, tokenRefusal, type DatabaseClient } from "./live.js";
+import { agentCredentialsFromEnv, ALPHA_TARGET, NETWORK_RETRY_MS, networkRetries, checkGithubToken, databaseErrorCode, databaseRefusal, liveApi, liveBridge, liveRelease, targetIdentity, liveDatabase, OUTSIDE_PROBE_LIMIT, SET_APP_SYSTEM, tokenLines, tokenRefusal, type DatabaseClient } from "./live.js";
 import { platformOwners, probeDiagnostics, proActor, resolveProbe } from "./plan.js";
 
 const R1 = "Withso/zeros-dev-fixture";
@@ -277,7 +277,8 @@ describe("rehearsal stages against a fake Alpha", () => {
       storage: () => ({ endpoint: "https://store.example.test", bucket: "dev", accessKeyId: "id", secretAccessKey: "secret" }),
     };
     const stack = localStack(launcher);
-    expect(stack.target).toEqual({ kind: "local", origin: "https://api.o.dev.example.test", channel: "development" });
+    // Requests go to this stack's own recorded API port on loopback; the public origin is kept for what depends on it.
+    expect(stack.target).toEqual({ kind: "local", origin: "https://api.o.dev.example.test", channel: "development", loopback: "http://127.0.0.1:4100" });
     expect([...stack.switches].sort()).toEqual(["personal", "projects"]);
     // Every Alpha input is behind `need`, which throws here: none is read.
     const ports = targetPorts(stack, name => { throw new Error(`reached ${name}`); }, { client: url => {
@@ -290,11 +291,11 @@ describe("rehearsal stages against a fake Alpha", () => {
     const database = ports.database("run");
     expect(await database.read("SELECT 1 AS one")).toEqual([{ one: 1 }]);
     await database.close();
-    // The release identity and the API go to the stack's origin only, and accept its own channel.
+    // The release identity and the API go to the stack's own loopback port only, and accept its own channel.
     const fetched: string[] = [];
     const fetchImpl = (async (url: string) => {
       fetched.push(String(url));
-      if (!String(url).startsWith(stack.target.origin)) throw new Error("left the stack");
+      if (!String(url).startsWith("http://127.0.0.1:4100/")) throw new Error("left the stack");
       // A Dev stack's real answer: never ready (no deployed source sha), so 503, but current migrations and a pinned worker.
       return new Response(JSON.stringify(devIdentity), { status: 503 });
     }) as typeof fetch;
@@ -309,7 +310,8 @@ describe("rehearsal stages against a fake Alpha", () => {
     // Alpha's check is unchanged: the same answer is not Alpha's.
     expect(() => targetIdentity(ALPHA_TARGET, { ...devIdentity, channel: "alpha" })).toThrow();
     await liveApi(async () => "token", fetchImpl, stack.target).json("GET", "/v1/me");
-    expect(fetched.every(url => url.startsWith("https://api.o.dev.example.test/"))).toBe(true);
+    expect(fetched.length).toBeGreaterThan(0);
+    expect(fetched.every(url => url.startsWith("http://127.0.0.1:4100/"))).toBe(true);
     // Alpha's identity is refused on the local target, and the local one on Alpha's.
     expect(() => targetIdentity(stack.target, { channel: "alpha", ready: true, maintenance: false, sourceSha: "a".repeat(40),
       cloud: { enabled: true, ready: true, state: "healthy" }, worker: { sha256: "b".repeat(64) } })).toThrow();
@@ -317,6 +319,112 @@ describe("rehearsal stages against a fake Alpha", () => {
     expect(() => localStack({ ...launcher, workspace: () => null })).toThrow(expect.objectContaining({ code: "not_set_up" }));
     expect(() => localStack({ ...launcher, workspace: () => ({ state: { owner: "o", status: "active" } }) })).toThrow(expect.objectContaining({ code: "not_running" }));
     expect(() => localStack({ ...launcher, storage: () => ({}) })).toThrow(expect.objectContaining({ code: "profile_storage" }));
+  });
+
+  describe("transient network failures", () => {
+    // A fetch that fails once in transport (as undici does: TypeError "fetch failed" with the code on its cause), then answers.
+    const failingOnce = (code: string) => {
+      const seen: { url: string; method: string }[] = [];
+      const fetchImpl = (async (url: string, init?: RequestInit) => {
+        seen.push({ url: String(url), method: init?.method ?? "GET" });
+        if (seen.length === 1) throw Object.assign(new TypeError("fetch failed"), { cause: Object.assign(new Error(code), { code }) });
+        return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      }) as typeof fetch;
+      return { seen, fetchImpl };
+    };
+    const waits: number[] = [];
+    const sleep = async (ms: number) => { waits.push(ms); };
+    beforeEach(() => { waits.length = 0; networkRetries.take(); });
+
+    it("retries a read after a reset, counts it once, and waits 1 s", async () => {
+      for (const code of ["ECONNRESET", "UND_ERR_CONNECT_TIMEOUT", "UND_ERR_SOCKET", "UND_ERR_HEADERS_TIMEOUT", "ETIMEDOUT", "EAI_AGAIN"]) {
+        const { seen, fetchImpl } = failingOnce(code);
+        expect(await liveApi(async () => "token", fetchImpl, ALPHA_TARGET, sleep).json("GET", "/v1/me")).toEqual({ status: 200, body: { ok: true } });
+        expect(seen.length).toBe(2);
+      }
+      expect(waits).toEqual(Array(6).fill(1_000));
+      expect(networkRetries.take()).toBe(6);
+      expect(networkRetries.take()).toBe(0);
+    });
+
+    it("gives up after four tries, 1, 3 and 9 s apart, named by the transport code", async () => {
+      const fetchImpl = (async () => { throw Object.assign(new TypeError("fetch failed"), { cause: { code: "ECONNRESET" } }); }) as unknown as typeof fetch;
+      const api = liveApi(async () => "token", fetchImpl, ALPHA_TARGET, sleep);
+      await expect(call(api, "GET", "/v1/me", "me")).rejects.toMatchObject({ step: "me", code: "network:ECONNRESET" });
+      expect(waits).toEqual([...NETWORK_RETRY_MS]);
+      expect(networkRetries.take()).toBe(3);
+    });
+
+    it("never repeats a write a reset interrupted mid-request: it fails as before, named", async () => {
+      const { seen, fetchImpl } = failingOnce("ECONNRESET");
+      const api = liveApi(async () => "token", fetchImpl, ALPHA_TARGET, sleep);
+      await expect(call(api, "POST", "/v1/cloud-v2/workspaces", "create", {})).rejects.toMatchObject({ step: "create", code: "network:ECONNRESET" });
+      expect(seen.length).toBe(1);
+      expect(networkRetries.take()).toBe(0);
+    });
+
+    it("repeats a write that never left (a connect-phase failure)", async () => {
+      for (const code of ["ECONNREFUSED", "UND_ERR_CONNECT_TIMEOUT", "EAI_AGAIN"]) {
+        const { seen, fetchImpl } = failingOnce(code);
+        expect((await liveApi(async () => "token", fetchImpl, ALPHA_TARGET, sleep).json("POST", "/v1/cloud-v2/workspaces", {})).status).toBe(200);
+        expect(seen.map(item => item.method)).toEqual(["POST", "POST"]);
+      }
+      expect(networkRetries.take()).toBe(3);
+    });
+
+    it("repeats a write idempotent by its own key, as the connect-ticket request is", async () => {
+      const { seen, fetchImpl } = failingOnce("ECONNRESET");
+      const api = liveApi(async () => "token", fetchImpl, ALPHA_TARGET, sleep);
+      expect((await call(api, "POST", "/v1/cloud-v2/workspaces/w/connect", "connect", {}, { headers: { "Idempotency-Key": "k" } })).status).toBe(200);
+      expect(seen.length).toBe(2);
+      expect(networkRetries.take()).toBe(1);
+    });
+
+    it("a poll takes a read that failed in transport as not yet", async () => {
+      let reads = 0;
+      const clock = { now: () => 0, sleep: async () => undefined };
+      const value = await until({ ports: { clock } } as never, "wait", 60_000, 1_000, async () => {
+        reads++;
+        if (reads === 1) throw new RehearsalFailure("read", "network:ECONNRESET");
+        return "ready";
+      });
+      expect(value).toBe("ready"); expect(reads).toBe(2);
+      // Anything else still fails the poll at once.
+      await expect(until({ ports: { clock } } as never, "wait", 60_000, 1_000, async () => { throw new RehearsalFailure("read", "http_500"); }))
+        .rejects.toMatchObject({ code: "http_500" });
+    });
+
+    it("repeats the bridge open after it fails, with a fresh ticket, and opens loopback of the stack's own port with --local", async () => {
+      const { seen, fetchImpl } = failingOnce("ECONNRESET");
+      const tickets: number[] = [];
+      const api: Parameters<typeof liveBridge>[0] = { json: async (method, path, body, headers) => {
+        if (path.includes("/connect")) { tickets.push(tickets.length);
+          return { status: 200, body: { url: "wss://api.o.dev.example.test/v1/cloud-v2/bridge/w", protocols: ["zeros.cloud.v2", `ticket.${tickets.length}`] } }; }
+        return liveApi(async () => "token", fetchImpl, ALPHA_TARGET, sleep).json(method, path, body, headers);
+      } };
+      const opened: string[] = [];
+      const socket = { readyState: 1, on: () => socket };
+      const openProbe = async (ticket: { url: string }) => {
+        opened.push(ticket.url);
+        if (opened.length === 1) throw new Gate0Failure("bridge_open", "connect_failed");
+        return { socket, op: async () => ({}), request: async () => ({}), send: () => undefined, frames: [], close: () => undefined } as never;
+      };
+      await liveBridge(api, 1_000, 10, openProbe, { loopback: "http://127.0.0.1:4100", sleep })("w");
+      expect(tickets.length).toBe(2);
+      expect(opened).toEqual(["ws://127.0.0.1:4100/v1/cloud-v2/bridge/w", "ws://127.0.0.1:4100/v1/cloud-v2/bridge/w"]);
+      expect(waits).toEqual([1_000]);
+      expect(networkRetries.take()).toBe(1);
+      expect(seen.length).toBe(0);
+    });
+
+    it("prints each stage's network retries at its end", async () => {
+      const { ctx, lines, options } = setup();
+      // Retries from before the stage are taken and dropped; the stage's own are printed once, at its end.
+      let calls = 0;
+      ctx.ports.networkRetries = () => calls++ === 0 ? 5 : 2;
+      expect(await runStages(ctx, ["provision"], options)).toBe(true);
+      expect(lines.filter(line => line.includes("network retries"))).toEqual(["  provision network retries 2"]);
+    });
   });
 
   it("refuses a state file from the other target, and records the target on a new one", async () => {

@@ -82,7 +82,7 @@ export async function runStages(ctx: ReturnType<typeof stageContext>, stages: re
     else if (STAGE_NEEDS_ACCOUNT[name] && options.accountUnavailable) result = { ok: false, step: "account_unavailable", code: options.accountUnavailable };
     else {
       // Every step prints its elapsed time as it finishes; the stage ends with its slowest steps and its total.
-      ctx.takeTimings();
+      ctx.takeTimings(); ctx.ports.networkRetries?.();
       ctx.onStep = (step, ms) => { if (step !== "start" || ms >= 1_000) options.log(safeLine(`  ${name} step ${step} ${seconds(ms)}`)); };
       try {
         await preconditions(ctx, options, STAGE_NEEDS_ACCOUNT[name]);
@@ -99,6 +99,7 @@ export async function runStages(ctx: ReturnType<typeof stageContext>, stages: re
       const timings = ctx.takeTimings();
       delete ctx.onStep;
       for (const line of timingLines(name, timings)) options.log(safeLine(line));
+      if (ctx.ports.networkRetries) options.log(safeLine(`  ${name} network retries ${ctx.ports.networkRetries()}`));
     }
     ctx.state.stages[name] = result;
     await ctx.save();

@@ -44,7 +44,9 @@ export function localStack(launcher: Launcher): LocalStack {
   let origin: string;
   try { origin = launcher.origin(workspace); } catch { throw new RehearsalFailure("local_stack", "profile_origin"); }
   if (!/^https:\/\/[a-z0-9.-]+$/.test(origin)) throw new RehearsalFailure("local_stack", "origin");
-  return { target: { kind: "local", origin, channel: "development" },
+  // Its own recorded API port, on loopback only.
+  const loopback = `http://127.0.0.1:${ports!.api as number}`;
+  return { target: { kind: "local", origin, channel: "development", loopback },
     readUrl: launcher.databaseUrl(workspace, ports!.database as number, "runtime"), ownerUrl: launcher.databaseUrl(workspace, ports!.database as number, "migration"),
     switches, started, storage: storage as LocalStack["storage"] };
 }

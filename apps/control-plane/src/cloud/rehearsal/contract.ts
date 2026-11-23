@@ -118,6 +118,8 @@ export type Ports = {
    * for it (its API, Pro and GitHub sign-in; a test may give it a whole fake). */
   waiting?: { organizationId: string; ports: Partial<Omit<Ports, "waiting">> };
   bridge(workspaceId: string): Promise<Bridge>;
+  /** Network retries since the last call (and reset): the runner prints them at each stage's end. */
+  networkRetries?(): number;
   boat: Boat;
   storage: Storage;
   github: Github;

@@ -38,7 +38,11 @@ export async function until<T>(ctx: Pick<StageContext, "ports">, step: string, t
   probe: () => Promise<T | false | undefined | null>): Promise<T> {
   const deadline = ctx.ports.clock.now() + timeoutMs;
   for (;;) {
-    const result = await probe();
+    // A read that still failed in transport after its own retries is "not yet": the poll goes on until its deadline.
+    const result = await probe().catch((error: unknown) => {
+      if (error instanceof RehearsalFailure && /^network/.test(error.code)) return false as const;
+      throw error;
+    });
     if (result) return result;
     if (ctx.ports.clock.now() >= deadline) throw new RehearsalFailure(step, "timeout");
     await ctx.ports.clock.sleep(pollMs);

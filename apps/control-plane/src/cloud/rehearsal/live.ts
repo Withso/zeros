@@ -26,7 +26,38 @@ export const liveClock: Clock = { now: () => Date.now(), sleep: ms => new Promis
 
 /** Where a run goes: Alpha, or the Dev stack this checkout runs (`pnpm electron:cloud`, `--local`). Every request the
  * rehearsal's API, release and Pro ports make goes to `origin` with `channel`'s identity; nothing else is reached. */
-export type RehearsalTarget = { kind: "alpha" | "local"; origin: string; channel: "alpha" | "development" };
+export type RehearsalTarget = { kind: "alpha" | "local"; origin: string; channel: "alpha" | "development";
+  /** --local: this stack's own recorded API port on loopback (http://127.0.0.1:<port>). API, identity and bridge requests go
+   * there, so the tunnel is only on the path a VM needs; the public origin stays the stack's identity. */
+  loopback?: string };
+
+/** Transport failures a read may repeat, and the ones where the request never left (a write may repeat those too). */
+const TRANSIENT = new Set(["ECONNRESET", "UND_ERR_CONNECT_TIMEOUT", "UND_ERR_SOCKET", "UND_ERR_HEADERS_TIMEOUT", "ETIMEDOUT", "EAI_AGAIN", "ECONNREFUSED"]);
+const NEVER_SENT = new Set(["ECONNREFUSED", "UND_ERR_CONNECT_TIMEOUT", "EAI_AGAIN"]);
+/** Waits before the second, third and fourth try. */
+export const NETWORK_RETRY_MS = [1_000, 3_000, 9_000] as const;
+/** The transport code of a raw fetch failure (the error's or its cause's), or null when it is not one. */
+export function networkCode(error: unknown): string | null {
+  const value = error as { code?: unknown; cause?: { code?: unknown } } | null;
+  const code = [value?.code, value?.cause?.code].find(item => typeof item === "string" && TRANSIENT.has(item));
+  return typeof code === "string" ? code : null;
+}
+/** Retries counted since the last take (the runner prints them at each stage's end). */
+export const networkRetries = { count: 0, take(): number { const taken = this.count; this.count = 0; return taken; } };
+/** One request, repeated after a transient transport failure up to four tries in all, 1, 3 and 9 s apart, when repeating is
+ * safe: a read always; a write only when it never left (a connect-phase failure) or carries its own Idempotency-Key. */
+export async function withNetworkRetry<T>(work: () => Promise<T>, safe: (code: string) => boolean, sleep: (ms: number) => Promise<void> = liveClock.sleep): Promise<T> {
+  for (let attempt = 0; ; attempt++) {
+    try { return await work(); } catch (error) {
+      const code = networkCode(error), wait = NETWORK_RETRY_MS[attempt];
+      if (!code || wait === undefined || !safe(code)) throw error;
+      networkRetries.count++;
+      await sleep(wait);
+    }
+  }
+}
+const repeatable = (method: string, headers: Record<string, string>) => (code: string) =>
+  method === "GET" || method === "HEAD" || NEVER_SENT.has(code) || Object.keys(headers).some(name => name.toLowerCase() === "idempotency-key");
 export const ALPHA_TARGET: RehearsalTarget = Object.freeze({ kind: "alpha", origin: ALPHA_PROBE_ORIGIN, channel: "alpha" });
 
 /** A release identity of the target's own channel: ready, not in maintenance, its cloud healthy. Alpha's check is gate0's. */
@@ -50,7 +81,8 @@ export async function liveRelease(fetchImpl: typeof fetch = fetch, target: Rehea
 /** The target's release identity (its channel, ready, not in maintenance), or null. */
 export async function liveReleaseIdentity(fetchImpl: typeof fetch = fetch, target: RehearsalTarget = ALPHA_TARGET): Promise<{ sourceSha: string; workerSha256: string } | null> {
   try {
-    const response = await fetchImpl(`${target.origin}/v1/release-identity`, { redirect: "error", signal: AbortSignal.timeout(15_000) });
+    const response = await withNetworkRetry(() => fetchImpl(`${target.loopback ?? target.origin}/v1/release-identity`, { redirect: "error", signal: AbortSignal.timeout(15_000) }),
+      () => true);
     // A Dev stack answers its identity with 503 (never "ready"; targetIdentity checks what it can show).
     if (!response.ok && !(target.kind === "local" && response.status === 503)) { await response.body?.cancel(); return null; }
     return targetIdentity(target, await response.json());
@@ -65,14 +97,19 @@ export async function liveRuntimeQualification(store: { bucket: string; endpoint
   return { found: !!record, actingUser: !!record?.features.includes("acting-user-v1"), syncContext: !!record?.features.includes("sync-context-v1") };
 }
 
-export function liveApi(accessToken: () => Promise<string>, fetchImpl: typeof fetch = fetch, target: RehearsalTarget = ALPHA_TARGET): Api {
+export function liveApi(accessToken: () => Promise<string>, fetchImpl: typeof fetch = fetch, target: RehearsalTarget = ALPHA_TARGET,
+  sleep: (ms: number) => Promise<void> = liveClock.sleep): Api {
   return {
     async json(method, path, body, headers = {}) {
       if (!path.startsWith("/v1/")) throw new RehearsalFailure("api", "path");
-      const response = await fetchImpl(`${target.origin}${path}`, { method, redirect: "error", signal: AbortSignal.timeout(TIMEOUT_MS),
-        headers: { authorization: `Bearer ${await accessToken()}`, "content-type": "application/json", ...headers },
-        ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
-      const raw = await response.text();
+      const send = async () => {
+        const response = await fetchImpl(`${target.loopback ?? target.origin}${path}`, { method, redirect: "error", signal: AbortSignal.timeout(TIMEOUT_MS),
+          headers: { authorization: `Bearer ${await accessToken()}`, "content-type": "application/json", ...headers },
+          ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
+        // The body is part of the read: a reset while it streams is the same transport failure.
+        return { response, raw: await response.text() };
+      };
+      const { response, raw } = await withNetworkRetry(send, repeatable(method, headers), sleep);
       let parsed: unknown = null;
       try { parsed = raw ? JSON.parse(raw) : null; } catch { parsed = null; }
       return { status: response.status, body: parsed };
@@ -94,16 +131,31 @@ const MAX_REOPENS = 3;
  * per bridge; a request a close interrupted is never resent. A close is named by its code, how long the socket had been
  * open, and how many relay pings it had answered (bridge_closed_1006:open_25s:pings_0). */
 export function liveBridge(api: Api, timeoutMs = 600_000, pollMs = 1_000,
-  openProbe: (ticket: { url: string; protocols: string[] }) => Promise<OpenedProbe> = ticket => BridgeProbe.open(ticket, timeoutMs, pollMs)): (workspaceId: string) => Promise<Bridge> {
+  openProbe: (ticket: { url: string; protocols: string[] }) => Promise<OpenedProbe> = ticket => BridgeProbe.open(ticket, timeoutMs, pollMs),
+  options: { loopback?: string; sleep?: (ms: number) => Promise<void> } = {}): (workspaceId: string) => Promise<Bridge> {
   return async workspaceId => {
+    // The ticket request and the socket open are both safe to repeat: a new ticket, a new socket, nothing done yet.
     const connect = async () => {
+      for (let attempt = 0; ; attempt++) {
+        try { return await connectOnce(); } catch (error) {
+          const wait = NETWORK_RETRY_MS[attempt];
+          const transient = error instanceof RehearsalFailure && (error.step === "bridge_open" || /^network/.test(error.code));
+          if (!transient || wait === undefined) throw error;
+          networkRetries.count++;
+          await (options.sleep ?? liveClock.sleep)(wait);
+        }
+      }
+    };
+    const connectOnce = async () => {
       const reply = await connectWorkspace(api, workspaceId, "connect");
       const ticket = z.object({ url: z.string().url(), protocols: z.array(z.string()).length(2) }).safeParse(reply.body);
       if (!ticket.success) throw new RehearsalFailure("connect", "schema");
       const target = new URL(ticket.data.url);
       if (target.protocol !== "wss:" || target.username || target.password || target.search || target.hash ||
         ticket.data.protocols[0] !== "zeros.cloud.v2" || !ticket.data.protocols[1]?.startsWith("ticket.")) throw new RehearsalFailure("connect", "ticket");
-      const probe = await wrap("bridge_open", () => openProbe(ticket.data));
+      // --local: the same path on this stack's own loopback port (the relay serves it on the API's port), never another.
+      const url = options.loopback ? `${options.loopback.replace(/^http/, "ws")}${target.pathname}` : ticket.data.url;
+      const probe = await wrap("bridge_open", () => openProbe({ url, protocols: ticket.data.protocols }));
       const life = { openedAt: Date.now(), closedAt: null as number | null, code: null as number | null, pings: 0 };
       probe.socket.on("ping", () => { life.pings++; });
       probe.socket.on("close", code => { life.code = code; life.closedAt = Date.now(); });
