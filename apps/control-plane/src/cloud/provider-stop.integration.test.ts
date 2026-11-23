@@ -56,6 +56,19 @@ database("Boat archived a running VM on its own", () => {
     expect(await stops()).toEqual([{ trigger: "wake_check", mode: "on", provider_state: "archived", rewake: false, outcome: "stopped" }]);
   });
 
+  const marker = async () => (await pool.query(`SELECT stop_generation::text,stop_archive_failed_generation::text AS failed FROM cloud_v2_workspaces WHERE id=$1`,
+    [f.workspace.id])).rows[0];
+  it("records a stop whose last snapshot attempt the provider reports failed, so it is never read as clean", async () => {
+    expect(await check({ ...archived(), snapshotStatus: "failed" } as never).check(await binding(), "wake_check")).toBe("stopped");
+    const after = await marker();
+    expect(after.failed).toBe(after.stop_generation);
+  });
+
+  it("records nothing of a stop whose last snapshot attempt completed, or that the provider says nothing of", async () => {
+    expect(await check({ ...archived(), snapshotStatus: "completed" } as never).check(await binding(), "wake_check")).toBe("stopped");
+    expect((await marker()).failed).toBeNull();
+  });
+
   it("treats a sandbox that is gone like an archived one, and does nothing while Boat says it runs or cannot answer", async () => {
     for (const inspected of [{ state: "running" }, new CloudProviderError("provider_unavailable", "Boat unavailable", true), { state: "archiving" }]) {
       expect(["running", "unknown"]).toContain(await check(inspected).check(await binding(), "dial"));

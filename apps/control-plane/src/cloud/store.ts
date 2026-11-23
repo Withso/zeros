@@ -406,7 +406,9 @@ export function cloudV2BackupRemovalAt(archivedAt: Date | null | undefined, rete
 const DAY_MS = 24 * 60 * 60_000;
 /** Retention S3: an archived workspace's final backup is still to be taken. Settled once this stop has a
  * backup (a wake that found the checkout changed takes that cover away), or a clean probe nothing has
- * changed since, or this stop's retries are exhausted, or 12 days after the archive. Over alias w. */
+ * changed since, or this stop's retries are exhausted, or 12 days after the archive. Over alias w.
+ * It reads the raw probe, not a suspect archive's marker (stop_archive_failed_generation): a backup forks that same
+ * archive, so it could not add what the archive lacks, and a clean probe already found nothing off GitHub. */
 const FINAL_BACKUP_PENDING = `(w.archived_at IS NOT NULL AND w.archived_at > clock_timestamp() - interval '12 days'
   AND w.checkpoint_stop_generation IS DISTINCT FROM w.stop_generation
   AND NOT (w.backup_probe = 'clean' AND w.backup_probe_generation = w.stop_generation
@@ -1017,7 +1019,9 @@ export class CloudV2Store {
    * messages from people who still have access ask for one wake. Boat's answer is evidence only when it says the VM
    * stopped after our last resume and our own row shows no activity since; anything else is recorded, not acted on.
    * One row per boot and outcome; `observe` records only. */
-  async providerStopped(binding: CloudV2ProviderStopBinding, evidence: { trigger: "dial" | "suspect" | "wake_check"; state: string; stoppedAt: Date | null },
+  async providerStopped(binding: CloudV2ProviderStopBinding, evidence: { trigger: "dial" | "suspect" | "wake_check"; state: string; stoppedAt: Date | null;
+    /** The provider did not report the stop's snapshot attempt completed: marked like a suspect stop of ours (stop_archive_failed_generation). */
+    archiveSuspect?: boolean },
     mode: "observe" | "on"): Promise<CloudV2ProviderStopOutcome> {
     return withSystemTx(this.pool, async tx => {
       const row = (await tx.query<{ state: string; boat_sandbox_id: string | null; worker_boot_id: string | null; token_hash: string | null;
@@ -1054,9 +1058,10 @@ export class CloudV2Store {
       if (recent.stops >= PROVIDER_STOP_BRAKE_PER_10_MINUTES) return record("braked", row.stop_generation);
       const generation = (await tx.query<{ stop_generation: string }>(`UPDATE cloud_v2_workspaces SET state='stopped',
           stop_generation=stop_generation+1,stopped_at=clock_timestamp(),restart_stop_generation=NULL,
+          stop_archive_failed_generation=CASE WHEN $2 THEN stop_generation+1 ELSE stop_archive_failed_generation END,
           error_code=CASE WHEN error_code='live_connection_unavailable' THEN NULL ELSE error_code END,
           worker_token_hash=NULL,worker_boot_id=NULL,attempts=0,next_attempt_at=NULL,updated_at=clock_timestamp()
-        WHERE id=$1 RETURNING stop_generation::text`, [binding.workspaceId])).rows[0]!.stop_generation;
+        WHERE id=$1 RETURNING stop_generation::text`, [binding.workspaceId, evidence.archiveSuspect === true])).rows[0]!.stop_generation;
       await tx.query(`DELETE FROM cloud_v2_tokens WHERE workspace_id=$1`, [binding.workspaceId]);
       // Boat confirmed the shutdown, which is what releases these barriers on an ordinary stop too.
       await tx.query(`UPDATE cloud_v2_execution_contexts SET state='retired',retired_at=clock_timestamp(),
@@ -1861,6 +1866,7 @@ export class CloudV2Store {
           maintenance_started_at=clock_timestamp() WHERE w.id=$1 RETURNING ${LIFECYCLE_COLUMNS.replace(/\b(\w+)\b/g, "w.$1")},
           CASE WHEN w.archived_at IS NULL OR (w.archive_wake_done_at IS NOT NULL AND w.archive_wake_done_at >= w.archived_at) OR ${FINAL_BACKUP_PENDING} THEN NULL
             WHEN w.checkpoint_stop_generation IS NOT DISTINCT FROM w.stop_generation THEN 'backup'
+            -- Raw probe: after a suspect archive too, reseeding from GitHub (which a clean probe says holds it all) beats keeping its files.
             WHEN w.backup_probe = 'clean' AND w.backup_probe_generation = w.stop_generation
               AND w.changed_since_stop_generation IS DISTINCT FROM w.stop_generation THEN 'reseed' ELSE 'keep' END AS scrub_mode`, [due.id, input.attempt]);
       await tx.query(`INSERT INTO cloud_v2_maintenance_wakes (workspace_id, attempt, kind, deadline_at)
@@ -2206,7 +2212,9 @@ export class CloudV2Store {
 
   /** Retention: a lost VM's replacement for a workspace whose latest stop left nothing off GitHub, or
    * that has no backup at all (then it records that the latest stop's work did not come back). It
-   * needs no checkpoint and no pending restore: it is recorded only once it holds the workspace. */
+   * needs no checkpoint and no pending restore: it is recorded only once it holds the workspace. It reads the raw probe:
+   * the lost machine took its archive with it, suspect or not, and lost work means work off GitHub, which a clean probe
+   * found none of. */
   async replaceLostSandbox(id: string, lostSandboxId: string | null, sandboxId: string, renewedAt: Date): Promise<boolean> {
     const result = await withSystemTx(this.pool, tx => tx.query(
       `UPDATE cloud_v2_workspaces SET boat_sandbox_id=$3, lease_renewed_at=$4,
