@@ -650,6 +650,8 @@ export class CloudV2SharedBaseSweeper {
 
   async tick(): Promise<void> {
     const deps = this.deps, now = deps.now?.() ?? Date.now();
+    // Off (CLOUD_V2_SHARED_BASE_SNAPSHOT=off): none of the shared base's hooks run, its inventory included.
+    if (deps.override?.kind === "off") return;
     const due = (key: keyof typeof this.last, every: number) => {
       if (now - this.last[key] < every) return false;
       this.last[key] = now;
