@@ -11,6 +11,8 @@ import {
   type RestoreSubmodule,
 } from "./checkpoint.js";
 import { OFFLINE_GIT_ENV, pinnedPath } from "./__fixtures__/offline-git.js";
+import { restoreBranchCommand } from "./lifecycle.js";
+import { fetchPlannedSubmodules } from "../../../cloud-worker/src/workspace/submodules.js";
 
 const roots: string[] = [];
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
@@ -1958,6 +1960,36 @@ process.exit(result.status ?? 1);
       // Missing, as the worker fetches it: an empty folder and no Git directory.
       expect(readdirSync(inner)).toEqual([]);
       expect(existsSync(join(p.folder(p.newHome), ".git", p.gitDirs.inner))).toBe(false);
+    });
+
+    it("a pushed restore runs nothing for them: the branch from GitHub, then the worker's fetch puts each at the gitlink that branch records", async () => {
+      const p = project(), app = p.folder(p.oldHome), lib = join(app, "lib");
+      // The person moved lib to a newer commit they pushed, and pushed the workspace branch recording it.
+      p.write(join(p.lib.seed, "lib.txt"), "newer\n"); p.git(p.lib.seed, "add", "lib.txt"); p.git(p.lib.seed, "commit", "-q", "-m", "newer");
+      p.git(p.lib.seed, "push", "-q", "origin", "main");
+      const newer = p.git(p.lib.seed, "rev-parse", "HEAD");
+      p.git(lib, "fetch", "-q", "origin"); p.git(lib, "-c", "advice.detachedHead=false", "checkout", "-q", "--detach", newer);
+      p.git(app, "switch", "-q", "-c", "zeros/w"); p.git(app, "add", "lib"); p.git(app, "commit", "-q", "-m", "lib newer"); p.git(app, "push", "-q", "origin", "zeros/w");
+      // The machine is lost with nothing unpushed. A new one: the base's clone on main, an empty folder for each gitlink.
+      mkdirSync(join(p.newHome, "app"), { recursive: true });
+      const fresh = p.folder(p.newHome);
+      p.git(p.root, "clone", "-q", p.app.origin, fresh);
+      // The pushed restore (lifecycle restoreBranches): the workspace branch from GitHub, and nothing for any submodule.
+      const branch = spawnSync("bash", ["-c", [...pinnedPath(p.env.PATH), restoreBranchCommand(fresh, "zeros/w")].join("\n")],
+        { env: p.env, input: "Authorization: Basic fixture\n", encoding: "utf8" });
+      expect(branch.status).toBe(0);
+      expect(restoreBranchCommand(fresh, "zeros/w")).not.toContain("lib");
+      // The worker's start: its branch, then each planned submodule still missing, at the gitlink its repository records.
+      p.git(fresh, "switch", "-q", "zeros/w");
+      expect(readdirSync(join(fresh, "lib"))).toEqual([]);
+      p.write(p.env.GIT_CONFIG_GLOBAL, `[url "${p.lib.origin}"]\n\tinsteadOf = https://github.com/acme/lib.git\n[url "${p.inner.origin}"]\n\tinsteadOf = https://github.com/acme/inner.git\n[protocol "file"]\n\tallow = always\n`);
+      const plan = (["lib", "lib/inner"] as const).map((path, index) => ({ position: 0, path, repository: index ? "acme/inner" : "acme/lib",
+        commit: index ? p.inner.commit : p.lib.commit, gitDir: index ? p.gitDirs.inner : p.gitDirs.lib }));
+      expect(await fetchPlannedSubmodules(fresh, plan, p.env, { onlyMissing: true })).toEqual([{ path: "lib", fetched: true }, { path: "lib/inner", fetched: true }]);
+      expect(p.git(join(fresh, "lib"), "rev-parse", "HEAD")).toBe(newer);
+      expect(readFileSync(join(fresh, "lib", "lib.txt"), "utf8")).toBe("newer\n");
+      expect(p.git(join(fresh, "lib", "inner"), "rev-parse", "HEAD")).toBe(p.inner.commit);
+      expect(p.git(fresh, "status", "--porcelain")).toBe("");
     });
 
     it("refuses pushes with exactly the worker's sentence", () => {
