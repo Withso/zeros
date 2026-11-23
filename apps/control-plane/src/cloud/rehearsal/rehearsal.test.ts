@@ -132,7 +132,7 @@ describe("rehearsal stages against a fake Alpha", () => {
     expect(state.stages.projects?.counts).toEqual({ workspaces: 2, pulls: 2, turns: 3, copiesGone: 2, environments: 2,
       copyLifetimeSeconds: 60, copySnapshotAttemptAfterCreateSeconds: 50, copySnapshotCompletedAfterCreateSeconds: 60, copyHydrated: 1 });
     expect(state.stages.projects?.notes).toEqual(["copy_snapshot:completed", "copy_archive:completed", "turn_agent:claude", "environment:seeded"]);
-    expect(state.stages.retention?.notes).toEqual(["environment_case:seeded_edited", "wake_w_snapshot:completed", "wake_k_snapshot:completed"]);
+    expect(state.stages.retention?.notes).toEqual(["environment_case:seeded_edited", "wake_w_snapshot:completed", "wake_k_snapshot:completed", "rebuilt_pin:live"]);
     // W opened on its own machine after the wakes' stops still holds the work written before the person's stop.
     expect(state.stages.retention?.counts).toMatchObject({ ownDiskKept: 1 });
     // Every environment this run seeded is empty again at the end of its stage.
@@ -563,7 +563,12 @@ describe("rehearsal stages against a fake Alpha", () => {
     expect(fileTarget(scope, path, pair)).toEqual({ workspaceId: pair.id, repository: FIXTURE_TWO, path: "x.txt" });
     await writeFile(bridge, scope, path, "x\n", "write", pair);
     await checkText(bridge, scope, path, "x\n", "read", "content", pair);
-    await expect(checkText(bridge, scope, `${second.checkoutPath}/absent.txt`, "x", "read_absent", "content", pair)).rejects.toMatchObject({ code: "reply:error" });
+    await expect(checkText(bridge, scope, `${second.checkoutPath}/absent.txt`, "x", "read_absent", "content", pair)).rejects.toMatchObject({ code: "reply:error:not_found" });
+    // There, but the worker could not read it: named apart from a missing one; a list that cannot be read is unknown.
+    const listing = (files: unknown) => ({ op: async (name: string) => name === "file.read" ? { kind: "error", path: "x", bytes: 0, error: "The file could not be read within this workspace." }
+      : files, close: () => undefined }) as never;
+    await expect(checkText(listing({ files: ["x.txt"] }), scope, `${second.checkoutPath}/x.txt`, "x", "read", "content", pair)).rejects.toMatchObject({ code: "reply:error:unreadable" });
+    await expect(checkText(listing({ nope: true }), scope, `${second.checkoutPath}/x.txt`, "x", "read", "content", pair)).rejects.toMatchObject({ code: "reply:error:unknown" });
     bridge.close();
   });
 
@@ -673,7 +678,7 @@ describe("rehearsal environments and the worker-off record", () => {
     expect(await runStages(ctx, ["projects", "retention"], options)).toBe(true);
     expect(state.stages.projects?.notes).toEqual(["copy_snapshot:completed", "copy_archive:completed", "turn_agent:claude", "environment_skipped:environment_exists"]);
     expect(state.stages.projects?.counts?.environments).toBeUndefined();
-    expect(state.stages.retention?.notes).toEqual(["environment_case:hand_made_ignored", "environment_skipped:environment_exists", "wake_w_snapshot:completed", "wake_k_snapshot:completed"]);
+    expect(state.stages.retention?.notes).toEqual(["environment_case:hand_made_ignored", "environment_skipped:environment_exists", "wake_w_snapshot:completed", "wake_k_snapshot:completed", "rebuilt_pin:live"]);
     expect(alpha.environments.get(alpha.repositoryId(R1))).toEqual({ revision: 3, files: new Map([[".env", "theirs"]]) });
     expect(state.created.environments).toEqual([]);
     expect((await cleanup(ctx, { log: () => undefined })).inventory).toEqual(EMPTY);
@@ -1025,11 +1030,19 @@ describe("rehearsal on the Personal route", () => {
     }, 120_000);
   });
 
-  it("fails retention when a clean open after the Cloud Computer rebuild is not rebuilt from the live build", async () => {
+  it("a clean open after the Cloud Computer rebuild that keeps its pin (a fork of the ready copy) is noted, not failed", async () => {
     const { alpha, ctx, options } = setup({ owner: "personal" });
     alpha.staleRestorePin = true;
+    expect(await runStages(ctx, ["setup", "retention"], { ...options, ...all })).toBe(true);
+    expect(ctx.state.stages.retention?.notes).toContain("rebuilt_pin:unchanged");
+    expect((await cleanup(ctx, { log: () => undefined })).inventory).toEqual(EMPTY);
+  });
+
+  it("fails retention when the rebuilt workspace's checkout is not at the repository's head", async () => {
+    const { alpha, ctx, options } = setup({ owner: "personal" });
+    alpha.rebuiltHead = "d".repeat(40);
     expect(await runStages(ctx, ["setup", "retention"], { ...options, ...all })).toBe(false);
-    expect(ctx.state.stages.retention).toMatchObject({ step: "rebuilt_pin", code: "not_live_build" });
+    expect(ctx.state.stages.retention).toMatchObject({ step: "rebuilt_head_1", code: "other_commit" });
     expect((await cleanup(ctx, { log: () => undefined })).inventory).toEqual(EMPTY);
   });
 

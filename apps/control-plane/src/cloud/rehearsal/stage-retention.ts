@@ -9,7 +9,7 @@ import { shiftClock } from "./clock.js";
 import { rebuildComputer } from "./stage-setup.js";
 import { readEnvironment, reportMachineSnapshot } from "./steps.js";
 import { openBridge, call, check, checkText, clearEnvironment, ENVIRONMENT_PATH, seedEnvironments, createProject, createWorkspace, deleteProject, deleteWorkspace, getWorkspace, lifecycle, parse, shell, until,
-  waitCopyReady, waitState, workspaceRoot, WorkspaceDocument, expectLine } from "./steps.js";
+  waitCopyReady, waitState, workspaceRoot, WorkspaceDocument, expectLine, seenShape } from "./steps.js";
 
 const HOUR_DAYS = 1 / 24;
 
@@ -213,12 +213,29 @@ export async function stageRetention(ctx: StageContext): Promise<Record<string, 
 
   // C8: K, clean, with its machine deleted: opened, rebuilt from GitHub, nothing reported lost.
   ctx.step("rebuild");
+  const pinOf = async () => (await ctx.ports.database.read("SELECT id::text AS id, computer_build_id::text AS build FROM cloud_v2_workspaces WHERE id = ANY($1::uuid[])",
+    [both])).find(row => row.id === k.id)?.build ?? null;
+  const pinBefore = await pinOf();
   await lifecycle(ctx, k.id, "start", "rebuild_open");
   const rebuilt = await waitState(ctx, k.id, "running", "rebuilt");
   check(!rebuilt.archivedAt && !rebuilt.lostWork, "rebuilt", rebuilt.lostWork ? "lost_work" : "still_archived");
-  // K had nothing off GitHub: its open rebuilt from the live Cloud Computer and is pinned to it.
-  const pins = await ctx.ports.database.read("SELECT id::text AS id, computer_build_id::text AS build FROM cloud_v2_workspaces WHERE id = ANY($1::uuid[])", [both]);
-  check(pins.find(row => row.id === k.id)?.build === computer.current, "rebuilt_pin", "not_live_build");
+  // Which image the open used is the product's choice: a fork of the project's ready copy keeps the pin as it was (every
+  // later image read uses the organization's active build); a create (no copy, or the fork refused) pins the live build.
+  // The stage cannot tell which ran, so the pin is a note; what it asserts is the checkout: at each repository's head.
+  const pinAfter = await pinOf();
+  ctx.note(`rebuilt_pin:${pinAfter === computer.current ? "live" : pinAfter === pinBefore ? "unchanged" : "other"}`);
+  bridge = await openBridge(ctx, k.id);
+  try {
+    const root = await workspaceRoot(bridge, k.id), scope = { workspaceId: k.id, cwd: root };
+    for (const [index, repository] of [one, two].entries()) {
+      const expected = await ctx.ports.github.defaultHead?.(repository) ?? null;
+      if (!expected) { ctx.note(`rebuilt_head_${index + 1}:not_read`); continue; }
+      const head = await shell(ctx, bridge, { ...scope, cwd: checkout(rebuilt, repository).checkoutPath }, `${prefix}pty-k${index + 1}`,
+        `printf 'zr-head %s\\n' "$(git rev-parse HEAD)"`, `rebuilt_head_${index + 1}`);
+      const seen = /^zr-head ([0-9a-f]{40})$/m.exec(head.output)?.[1];
+      check(seen === expected, `rebuilt_head_${index + 1}`, seen ? "other_commit" : `unread:${seenShape(head.output)}`);
+    }
+  } finally { bridge.close(); }
   counts.rebuilt!++;
 
   // C9: S4 (#1246) deployed: an archived backup is removed at 60 days, and `restores` says what opening would bring back.

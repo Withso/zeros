@@ -74,6 +74,8 @@ export interface Github {
   /** Whether the default branch's root .gitignore names `path` with a plain rule (`.env`, `.env*`, `*.env`, `/.env`). A
    * seeded environment file must be ignored, or the worker refuses it (cloud_environment_path_ignored_required). */
   ignores(repository: string, path: string): Promise<boolean>;
+  /** The default branch's head commit (40 hex), or null when it cannot be read. */
+  defaultHead?(repository: string): Promise<string | null>;
 }
 export type MachineSnapshot = { createdAt: string | null; stoppedAt: string | null; hydrated: boolean | null;
   lastSnapshotStatus: string | null; lastSnapshotAttemptAt: string | null; snapshotCompletedAt: string | null };

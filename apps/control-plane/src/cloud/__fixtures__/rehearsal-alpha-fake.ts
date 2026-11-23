@@ -27,6 +27,7 @@ type Project = { id: string; name: string; organizationId: string; repositories:
   copyFailed?: string | null };
 type Turn = { chatId: string; turnId: string; startedAt: number; files: string[] };
 
+const DEFAULT_HEAD = "c".repeat(40);
 export class FakeAlpha {
   readonly organizationId = randomUUID();
   readonly workspaces = new Map<string, Workspace>();
@@ -70,6 +71,8 @@ export class FakeAlpha {
   copyRetries = 0;
   /** Terminal escape sequences around every shell command's output. */
   ptyNoise = false;
+  /** The commit a shell's `git rev-parse HEAD` reads (the repositories' default head unless a test moves it). */
+  rebuiltHead = DEFAULT_HEAD;
   /** What the provider said of the copy's archive when it was promoted (cloud_v2_ready_copies.archive_snapshot). */
   copyArchive: string | null = "completed";
   /** The organization's install script (#1260: with one, its base is its own build, never the shared one). */
@@ -472,6 +475,10 @@ export class FakeAlpha {
             if (!target) return { kind: "error", path: String(params.path), bytes: 0, error: "The file could not be written within this workspace." };
             row.files.set(target, String(params.content)); return { kind: "success", path: params.path, bytes: String(params.content).length };
           }
+          case "file.tree": {
+            const base = fileAt({ ...params, path: "x" })?.slice(0, -2) ?? "";
+            return { files: [...row.files.keys()].filter(path => path.startsWith(`${base}/`) && path.includes(String(params.query ?? ""))).map(path => path.slice(base.length + 1)) };
+          }
           case "file.read": {
             const target = fileAt(params);
             return target && row.files.has(target) ? { kind: "text", path: params.path, content: row.files.get(target) }
@@ -547,6 +554,7 @@ export class FakeAlpha {
       const file = `${row.repositories![0]!.checkoutPath}/${ignored[3]}`;
       row.files.set(file, `${ignored[2] === ">>" ? row.files.get(file) ?? "" : ""}${ignored[1]}\n`);
     }
+    if (data.includes(`printf 'zr-head %s\\n' "$(git rev-parse HEAD)"`)) output = `zr-head ${this.rebuiltHead}`;
     const counted = /git --no-pager log --format=%s -n 20 \| grep -cxF '([^']+)'/.exec(data)?.[1];
     if (counted) output = `zr-count ${[...row.commits.values()].flat().filter(subject => subject === counted).length}`;
     if (data.includes("git --no-pager submodule status")) output = [` ${"7fd1a60b01f91b314f59955a4e4d4e80d8edf11d"} vendor/hello (heads/master)`, ` ${"b".repeat(40)} vendor/private (heads/main)`].join("\r\n");
@@ -577,6 +585,7 @@ export class FakeAlpha {
       },
       github: {
         repositoryExists: name => this.counted(() => this.repositories.has(name.toLowerCase())),
+        defaultHead: name => this.counted(() => this.repositories.has(name.toLowerCase()) ? DEFAULT_HEAD : null),
         branches: (name, prefix) => this.counted(() => [...this.repositories.get(name.toLowerCase())?.branches ?? []].filter(branch => branch.startsWith(prefix))),
         deleteBranch: (name, branch) => this.counted(() => { this.repositories.get(name.toLowerCase())?.branches.delete(branch); }),
         openPulls: (name, prefix) => this.counted(() => [...this.repositories.get(name.toLowerCase())?.pulls ?? []]

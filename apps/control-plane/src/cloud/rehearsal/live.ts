@@ -296,6 +296,15 @@ function githubPort(request: GithubRequest, owner: string, tokenFor: (repository
       try { return (await request("GET", `/repos/${checked(repository)}`, await tokenFor(checked(repository), "read"))).status === 200; }
       catch (error) { if (error instanceof RehearsalFailure && error.step === "github_token") return false; throw error; }
     },
+    async defaultHead(repository) {
+      const token = await tokenFor(checked(repository), "read");
+      const repo = await request("GET", `/repos/${checked(repository)}`, token);
+      const branch = z.object({ default_branch: z.string().min(1) }).passthrough().safeParse(repo.body);
+      if (repo.status !== 200 || !branch.success) return null;
+      const head = await request("GET", `/repos/${checked(repository)}/commits/${branch.data.default_branch.split("/").map(encodeURIComponent).join("/")}`, token);
+      const sha = z.object({ sha: z.string().regex(/^[0-9a-f]{40}$/) }).passthrough().safeParse(head.body);
+      return head.status === 200 && sha.success ? sha.data.sha : null;
+    },
     async branches(repository, prefix) {
       const reply = await request("GET", `/repos/${checked(repository)}/git/matching-refs/heads/${encodeURIComponent(prefix)}`, await write(repository));
       ok(reply.status, "github_branches", [200]);

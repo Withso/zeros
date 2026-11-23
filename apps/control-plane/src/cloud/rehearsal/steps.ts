@@ -346,11 +346,24 @@ export async function readFile(bridge: Bridge, scope: Record<string, unknown>, p
   if (file?.kind === "error") return null;
   throw new RehearsalFailure(step, replyCode(reply));
 }
-/** A file that must hold `expected`: an unreadable one fails as reply:error, other text as `code`. */
+/** Why the worker answered a read with `error` (one fixed message for every cause), as a closed word: the checkout's file
+ * list (file.tree, ignored and untracked files included) read for that path, so a missing file reads apart from one that is
+ * there and could not be read. `unknown` when the list cannot be read. */
+export async function readErrorReason(bridge: Bridge, scope: Record<string, unknown>, path: string, workspace?: FileWorkspace): Promise<"not_found" | "unreadable" | "unknown"> {
+  const { path: target, ...rest } = fileTarget(scope, path, workspace);
+  const full = String(target), name = full.split("/").at(-1) ?? "";
+  try {
+    const listed = z.object({ files: z.array(z.string()) }).safeParse(await bridge.op("file.tree", { ...rest, includeIgnored: true, query: name, limit: 20_000 }));
+    if (!listed.success) return "unknown";
+    return listed.data.files.some(entry => entry === full || full.endsWith(`/${entry}`)) ? "unreadable" : "not_found";
+  } catch { return "unknown"; }
+}
+/** A file that must hold `expected`: one the worker answers with an error fails as `reply:error:<not_found|unreadable|unknown>`,
+ * other text as `code`. */
 export async function checkText(bridge: Bridge, scope: Record<string, unknown>, path: string, expected: string, step: string, code: string,
   workspace?: FileWorkspace): Promise<void> {
   const text = await readFile(bridge, scope, path, step, workspace);
-  check(text !== null, step, "reply:error");
+  if (text === null) throw new RehearsalFailure(step, `reply:error:${await readErrorReason(bridge, scope, path, workspace)}`);
   check(text === expected, step, code);
 }
 /** The agents a turn may use, in order of preference. Each runs only on a credential its person connected for the
