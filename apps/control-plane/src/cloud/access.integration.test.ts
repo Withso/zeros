@@ -13,6 +13,9 @@ import { ingestWorkOSManagementEvent } from "../workos-sync-events.js";
 import { grantTestPro } from "../test-pro.js";
 import { CLOUD_V2_BRIDGE_PROTOCOL, CloudV2Relay } from "./relay.js";
 import { CloudV2Store, type CloudV2Workspace } from "./store.js";
+import { CloudWorkspaceApiTokens } from "./api/workspace-tokens.js";
+import { createDeletionLifecycleRoutes } from "../deletion-lifecycle.js";
+import { manageAccountPro } from "../manage-account-pro.js";
 
 const d = process.env.TEST_DATABASE_URL ? describe : describe.skip;
 d("cloud access through membership routes and security publication", () => {
@@ -238,5 +241,66 @@ d("cloud access through membership routes and security publication", () => {
     expect(await store.byWorkerToken(live.token)).toBeNull();
     expect(await store.verifyProxyToken(live.proxy)).toBeNull();
 
+  });
+  // Every running workspace whose worker takes the workspace API holds the worker's API token. Each revoking caller must
+  // still commit with one there: the workspace goes to stopping, its API token is gone and every other token expired.
+  describe("with the worker's API token on the running workspace", () => {
+    const keys = { currentKeyVersion: 1, keys: { 1: Buffer.alloc(32, 27).toString("base64url") } };
+    const now = () => new Date().toISOString();
+    const linkWorkOS = async () => {
+      await pool.query(`INSERT INTO workos_organization_links (organization_id, workos_organization_id, external_id, state)
+        VALUES ($1::uuid, $2, ($1::uuid)::text, 'active')`, [org, `org_${org}`]);
+      await pool.query(`UPDATE organization_members SET workos_membership_id = 'membership_test' WHERE org_id = $1 AND user_id = $2`, [org, creator.id]);
+    };
+    const as = (user: AuthedUser, routes: Hono) => {
+      const app = new Hono();
+      app.use("*", async (c, next) => { c.set("user", user); await next(); });
+      app.route("/", routes);
+      return app;
+    };
+    const callers: Record<string, () => Promise<void>> = {
+      "a member removed through the route": async () => {
+        const app = as(owner, createRoutes(pool, undefined, { inviteLinkBase: "https://example.test/invite" }) as never);
+        expect((await app.request(`/v1/organizations/${org}/members/${creator.id}`, { method: "DELETE" })).status).toBe(200);
+      },
+      "a WorkOS membership deleted": async () => {
+        await linkWorkOS();
+        expect(await ingestWorkOSManagementEvent(pool, { id: `event_${randomUUID()}`, createdAt: now(), event: "organization_membership.deleted",
+          data: { id: "membership_test", organizationId: `org_${org}`, userId: creator.identity.subject, status: "inactive",
+            directoryManaged: false, role: { slug: "member" }, updatedAt: now() } }, "webhook")).toEqual({ status: "applied" });
+      },
+      "the account's deletion scheduled through the route": async () => {
+        const signedIn = { ...creator, authentication: { ...creator.authentication, authTime: Math.floor(Date.now() / 1000) } };
+        const response = await as(signedIn, createDeletionLifecycleRoutes(pool) as never).request("/v1/account/deletion", { method: "POST",
+          headers: { "content-type": "application/json" }, body: JSON.stringify({ confirmation: "DELETE MY ACCOUNT" }) });
+        expect(response.status).toBe(202);
+      },
+      "a WorkOS user deleted": async () => {
+        expect(await ingestWorkOSManagementEvent(pool, { id: `event_${randomUUID()}`, createdAt: now(), event: "user.deleted",
+          data: { id: creator.identity.subject, email: creator.email, emailVerified: true, name: null, profilePictureUrl: null, updatedAt: now() } },
+          "webhook")).toEqual({ status: "applied" });
+      },
+      "Pro ended through the operator": async () => {
+        await pool.query("UPDATE users SET staff_role='platform_owner' WHERE id=$1", [owner.id]);
+        const input = { operationId: randomUUID(), channel: "development", subjectUserId: creator.id, expectedEmail: creator.email.toLowerCase(),
+          actorUserId: owner.id, enabled: false, validFrom: new Date(Date.now() - 60_000).toISOString(), validUntil: null,
+          reason: "Local fixture: Pro ends while a workspace runs" };
+        const options = { databaseUrl: process.env.TEST_DATABASE_URL!, channel: "development" };
+        const plan = await manageAccountPro(pool, input, options);
+        expect((await manageAccountPro(pool, input, { ...options, execute: true, approval: plan.planSha256 })).state).toBe("changed");
+      },
+    };
+    it.each(Object.keys(callers))("commits %s, stops the workspace and ends its tokens", async caller => {
+      await store.issueToken({ workspaceId: workspace.id, kind: "connect", userId: creator.id, ttlMs: 60_000, authority: creator });
+      expect(await new CloudWorkspaceApiTokens(pool, keys as never).token(workspace.id)).toEqual(expect.any(String));
+      await callers[caller]!();
+      // An account's deletion schedules its workspace's deletion in the same write; every other caller stops it.
+      const deleted = caller === "a WorkOS user deleted" || caller === "the account's deletion scheduled through the route";
+      expect((await pool.query("SELECT state FROM cloud_v2_workspaces WHERE id=$1", [workspace.id])).rows[0].state).toBe(deleted ? "deleting" : "stopping");
+      const tokens = (await pool.query(`SELECT kind, expires_at <= clock_timestamp() AS expired FROM cloud_v2_tokens WHERE workspace_id=$1 ORDER BY kind`,
+        [workspace.id])).rows;
+      expect(tokens.filter(token => token.kind === "api" || !token.expired)).toEqual([]);
+      if (!deleted) expect(tokens).toEqual([{ kind: "connect", expired: true }]);
+    });
   });
 });
