@@ -2,6 +2,8 @@
 // the stages use, with a retention lifecycle that advances when a test shifts a workspace's clock. Every port call is
 // counted so a test can fail the n-th one, before or after its effect.
 import { randomUUID } from "node:crypto";
+import { WORKSPACE_REPOSITORIES_FEATURE } from "../contract.js";
+import { connectWorkspace } from "../rehearsal/steps.js";
 import { RehearsalFailure, type Api, type ApiReply, type Bridge, type Ports, type ProGrant, type ProPort, type Query } from "../rehearsal/contract.js";
 
 type Workspace = {
@@ -197,10 +199,10 @@ export class FakeAlpha {
   }
 
   api(): Api {
-    return { json: (method, path, body) => this.counted(() => this.route(method, path, body as Record<string, unknown> | undefined)) };
+    return { json: (method, path, body, headers) => this.counted(() => this.route(method, path, body as Record<string, unknown> | undefined, headers)) };
   }
 
-  private route(method: string, path: string, body: Record<string, unknown> = {}): ApiReply {
+  private route(method: string, path: string, body: Record<string, unknown> = {}, headers: Record<string, string> = {}): ApiReply {
     if (method !== "GET") this.writes.push(`${method} ${path.replace(/[0-9a-f-]{36}/g, ":id")}`);
     const url = new URL(path, "https://alpha.test"), parts = url.pathname.split("/").filter(Boolean);
     // A Personal organization whose Pro ended has no cloud: its GitHub connection, projects and workspace list answer 404
@@ -245,6 +247,8 @@ export class FakeAlpha {
       return this.reply(200, { project: this.project(project) });
     }
     if (parts[2] === "organizations" && parts[4] === "environment") {
+      // Its routes resolve the repository through the caller's GitHub sign-in in the organization.
+      if (!this.githubIdentity && !this.patConnected) return this.reply(409, { error: { code: "github_connection_required" } });
       const environment = this.environments.get(parts[5]!) ?? { revision: 0, files: new Map<string, string>() };
       if (method === "PATCH") {
         if (body.expectedRevision !== environment.revision) return this.reply(409, { error: { code: "cloud_environment_conflict" } });
@@ -311,7 +315,14 @@ export class FakeAlpha {
       if (!row || row.state === "deleted" && method !== "GET") return this.reply(404, { error: { code: "not_found" } });
       const action = parts[4];
       if (row.state !== "deleted" && !this.pro() && this.proGrant !== null) return this.reply(403, { error: { code: "pro_required" } });
-      if (action === "connect") return this.reply(200, { url: "wss://alpha.test/x", protocols: ["zeros.cloud.v2", "ticket.x"] });
+      if (action === "connect") {
+        // routes.ts: a workspace of several repositories (it has a folder) connects only for a client declaring them.
+        const features = (headers["X-Zeros-Client-Features"] ?? "").split(",").map(value => value.trim());
+        if ((row.repositories?.length ?? 0) > 1 && !features.includes(WORKSPACE_REPOSITORIES_FEATURE)) return this.reply(409, { error: { code: "client_update_required" } });
+        if (row.state === "failed" || row.state === "deleting") return this.reply(409, { error: { code: "workspace_unavailable" } });
+        if (row.state !== "running") return this.reply(409, { error: { code: "cloud_workspace_not_running" } });
+        return this.reply(200, { url: "wss://alpha.test/x", protocols: ["zeros.cloud.v2", "ticket.x"] });
+      }
       if (!action && method === "GET") return row.state === "deleted" ? this.reply(404) : this.reply(200, { workspace: this.document(row) });
       if (!action && method === "DELETE") { row.state = "deleted"; const machine = this.machines.get(row.boatSandboxId); if (machine) machine.state = "deleted"; return this.reply(202, { workspace: this.document(row) }); }
       if (action === "stop") {
@@ -367,7 +378,9 @@ export class FakeAlpha {
     return this.reply(400);
   }
 
-  bridge(workspaceId: string): Promise<Bridge> {
+  /** As the live bridge: a connect through the API (connectWorkspace), then the socket. */
+  async bridge(workspaceId: string): Promise<Bridge> {
+    await connectWorkspace(this.api(), workspaceId, "connect");
     return this.counted(() => {
       const row = this.workspaces.get(workspaceId);
       if (!row || row.state !== "running") throw new RehearsalFailure("connect", "http_409");

@@ -13,10 +13,10 @@ import { assertRepository, safeLine } from "./guard.js";
 import { accountLines, turnLine, PERSONAL_ROUTE_GAPS, preconditionLines, readAccount, refusal, writeLines, type PreconditionFacts } from "./plan.js";
 import { cleanup, cleanupNeedsAccount, inventoryLines, NO_ACCOUNT, readInventory, runStages, stageContext } from "./runner.js";
 import { parseArguments, sharedBaseFacts } from "./rehearsal-cli.js";
-import { createProject, createWorkspace, frameCode, openBridge, waitState } from "./steps.js";
+import { CONNECT_CLIENT_FEATURES, connectWorkspace, createProject, createWorkspace, frameCode, openBridge, waitState } from "./steps.js";
 import { FIXTURE_TWO } from "./stage-provision.js";
 import { loadState, newState, saveState } from "./state.js";
-import { checkGithubToken, databaseErrorCode, liveDatabase, OUTSIDE_PROBE_LIMIT, SET_APP_SYSTEM, tokenLines, tokenRefusal, type DatabaseClient } from "./live.js";
+import { checkGithubToken, databaseErrorCode, liveBridge, liveDatabase, OUTSIDE_PROBE_LIMIT, SET_APP_SYSTEM, tokenLines, tokenRefusal, type DatabaseClient } from "./live.js";
 import { platformOwners, probeDiagnostics, proActor, resolveProbe } from "./plan.js";
 
 const R1 = "Withso/zeros-dev-fixture";
@@ -192,6 +192,36 @@ describe("rehearsal stages against a fake Alpha", () => {
     expect(await runStages(ctx, ["projects"], options)).toBe(true);
     expect(state.stages.projects?.notes).toEqual(expect.arrayContaining(["copy_snapshot:failed", "fork_fallback:no_fork_record"]));
     expect(state.stages.projects?.counts).toMatchObject({ forkFallback: 1 });
+  });
+
+  it("connects a workspace of several repositories only with the desktop's client features, and names a refusal by its code", async () => {
+    const { alpha, ctx } = setup();
+    const project = await createProject(ctx, { name: `${ctx.state.prefix}pair`, repositories: [R1, FIXTURE_TWO] });
+    const pair = await createWorkspace(ctx, { name: `${ctx.state.prefix}pair-w`, projectId: project.id, branch: `${ctx.state.prefix}pair` });
+    expect((await alpha.api().json("POST", `/v1/cloud-v2/workspaces/${pair.id}/connect`, {})).body).toEqual({ error: { code: "client_update_required" } });
+    expect((await connectWorkspace(alpha.api(), pair.id, "connect")).status).toBe(200);
+    (await openBridge(ctx, pair.id)).close();
+    // The live bridge sends exactly what the desktop sends, and a refusal says why.
+    const seen: { path: string; body: unknown; headers: Record<string, string> }[] = [];
+    const refusing = { json: async (_method: string, path: string, body?: unknown, headers: Record<string, string> = {}) => {
+      seen.push({ path, body, headers });
+      return { status: 409, body: { error: { code: "client_update_required", message: "Update Zeros" } } };
+    } };
+    await expect(liveBridge(refusing)(pair.id)).rejects.toMatchObject({ step: "connect", code: "http_409_client_update_required" });
+    expect(seen).toEqual([{ path: `/v1/cloud-v2/workspaces/${pair.id}/connect?wakePolicy=explicit`, body: { wake: true },
+      headers: { "X-Zeros-Client-Features": "workspace-repositories-v1", "Idempotency-Key": expect.stringMatching(/^[0-9a-f-]{36}$/) } }]);
+  });
+
+  it("declares on connect exactly the client features today's desktop declares, by the protocol's constants", async () => {
+    const root = new URL("../../../../../", import.meta.url).pathname;
+    const desktop = await readFile(join(root, "apps/desktop/src/renderer/platform/cloud-v2.ts"), "utf8");
+    const protocol = await readFile(join(root, "packages/protocol/src/cloud-v2-relay.ts"), "utf8");
+    const connect = desktop.slice(desktop.indexOf("export async function connectCloudV2Workspace"));
+    const names = /clientFeatures: \[([^\]]*)\]/.exec(connect)?.[1]?.split(",").map(name => name.trim()).filter(Boolean) ?? [];
+    const alias = (name: string) => new RegExp(`export const ${name} = ([A-Z_]+);`).exec(desktop)?.[1] ?? name;
+    const value = (name: string) => new RegExp(`export const ${alias(name)} = "([^"]+)";`).exec(protocol)?.[1];
+    expect(names.length).toBeGreaterThan(0);
+    expect(names.map(value)).toEqual([...CONNECT_CLIENT_FEATURES]);
   });
 
   it("names a session reply that is not a session by its type and code, closed values only", async () => {
@@ -482,7 +512,7 @@ describe("rehearsal on the Personal route", () => {
     expect(alpha.writes.some(write => write.includes("/computer/builds") && !write.startsWith("POST /v1/cloud-v2/organizations/:id/computer/builds"))).toBe(false);
     expect(state.created.bases).toHaveLength(1);
     // Pro ended: the machine stopped after the 20-minute idle stop; four reads and the list were hidden from the second user.
-    expect(state.stages.personal?.counts).toMatchObject({ workspaces: 1, hiddenReads: 5, minutesToStop: 20 });
+    expect(state.stages.personal?.counts).toMatchObject({ workspaces: 1, hiddenReads: 9, minutesToStop: 20 });
     expect(state.stages.personal?.notes).toEqual(["worker_token:not_observable"]);
     expect(alpha.proChanges.map(grant => grant.enabled)).toEqual([true, false, true]);
     expect(alpha.writes.filter(write => write.startsWith("other"))).toEqual([]);
@@ -686,6 +716,43 @@ describe("rehearsal on the Personal route", () => {
     expect(alpha.proChanges.slice(-2).map(grant => grant.enabled)).toEqual([true, false]);
   });
 
+  it("recovers a cleanup that stopped after its sign-in was gone: the run's own sign-in back, environments cleared, then off, Pro ended", async () => {
+    const { alpha, ctx, options, state } = setup({ owner: "personal" });
+    expect(await runStages(ctx, ["setup", "projects"], { ...options, switches: new Set(["projects", "personal", "retention"] as const) })).toBe(true);
+    expect(state.created.environments).toHaveLength(2);
+    // As the failed cleanup left it: no workspace or project, Pro ended, the token sign-in disconnected, both seeded
+    // environments still stored, and their routes answering 409 github_connection_required.
+    for (const target of state.created.environments) alpha.environments.set(target.repositoryId, { revision: 3, files: new Map([[".env", "SEEDED=1\n"]]) });
+    await alpha.proPort().change({ enabled: false, validFrom: new Date(alpha.now - 60_000).toISOString(), validUntil: null }, "Alpha rehearsal: end Pro (failed cleanup)");
+    state.created.pro!.operations.push(randomUUID());
+    alpha.patConnected = false;
+    await alpha.proPort().change({ enabled: true, validFrom: new Date(alpha.now - 60_000).toISOString(), validUntil: null }, "Alpha rehearsal: test probe");
+    const target = state.created.environments[0]!;
+    expect((await alpha.api().json("GET", `/v1/cloud-v2/organizations/${state.organizationId}/environment/${target.repositoryId}?repository=${target.repository}`)).body)
+      .toEqual({ error: { code: "github_connection_required" } });
+    await alpha.proPort().change({ enabled: false, validFrom: new Date(alpha.now - 60_000).toISOString(), validUntil: null }, "Alpha rehearsal: test probe");
+    const lines: string[] = [];
+    const { inventory, failures } = await cleanup(ctx, { log: line => lines.push(line) });
+    expect({ inventory, failures, lines }).toEqual({ inventory: EMPTY, failures: 0, lines: [] });
+    expect([...alpha.environments.values()].map(environment => environment.files.size)).toEqual([0, 0]);
+    expect(state.created.environments).toEqual([]);
+    expect(alpha.patConnected).toBe(false);
+    expect(alpha.pro()).toBe(false);
+  });
+
+  it("never signs in for cleanup where the run made no sign-in: the environments stay counted, never read as clean", async () => {
+    const { alpha, ctx, options, state } = setup({ owner: "personal" });
+    expect(await runStages(ctx, ["setup", "projects"], { ...options, switches: new Set(["projects", "personal", "retention"] as const) })).toBe(true);
+    for (const target of state.created.environments) alpha.environments.set(target.repositoryId, { revision: 3, files: new Map([[".env", "SEEDED=1\n"]]) });
+    state.created.githubSignIns = [];
+    alpha.patConnected = false;
+    const lines: string[] = [];
+    const { inventory } = await cleanup(ctx, { log: line => lines.push(line) });
+    expect(inventory.environments).toBe(2);
+    expect(alpha.patConnected).toBe(false);
+    expect(lines.filter(line => line.startsWith("cleanup environment:"))).toEqual(Array(2).fill("cleanup environment: http_409_github_connection_required"));
+  });
+
   it("names a failed workspace's error code and machine when its connect is refused or its wait sees it fail", async () => {
     const { alpha, ctx, options } = setup({ owner: "personal" });
     expect(await runStages(ctx, ["setup"], { ...options, switches: new Set(["projects", "personal", "retention"] as const) })).toBe(true);
@@ -693,7 +760,7 @@ describe("rehearsal on the Personal route", () => {
     const workspace = await createWorkspace(ctx, { name: `${ctx.state.prefix}fail-w`, projectId: project.id, branch: `${ctx.state.prefix}fail` });
     const row = alpha.workspaces.get(workspace.id)!;
     Object.assign(row, { state: "failed", errorCode: "cloud_source_checkout_failed" });
-    await expect(openBridge(ctx, workspace.id)).rejects.toMatchObject({ step: "connect", code: `http_409:failed:cloud_source_checkout_failed:${row.boatSandboxId}` });
+    await expect(openBridge(ctx, workspace.id)).rejects.toMatchObject({ step: "connect", code: `http_409_workspace_unavailable:failed:cloud_source_checkout_failed:${row.boatSandboxId}` });
     await expect(waitState(ctx, workspace.id, "running", "probe_running")).rejects
       .toMatchObject({ code: `state_failed:cloud_source_checkout_failed:${row.boatSandboxId}` });
   });

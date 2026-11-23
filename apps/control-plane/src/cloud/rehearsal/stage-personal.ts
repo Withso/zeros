@@ -3,8 +3,12 @@
 // refused (403 pro_required), its connect too, and the machine stops (the minutes measured); Pro again, it opens.
 import { z } from "zod";
 import { type StageContext } from "./contract.js";
+import { TEAM_OWNERSHIP_HEADER, TEAM_SHARING_HEADER } from "../team-sharing/contract.js";
+
+/** The desktop's TEAM_SHARING_HEADERS, by the server's own header names. */
+const TEAM_SHARING_READ_HEADERS = { [TEAM_SHARING_HEADER]: "1", [TEAM_OWNERSHIP_HEADER]: "1" };
 import { changePro, personalSeat } from "./stage-setup.js";
-import { call, check, errorCode, createProject, createWorkspace, deleteProject, deleteWorkspace, lifecycle, until, waitCopyReady, waitState } from "./steps.js";
+import { call, check, connectWorkspace, errorCode, createProject, createWorkspace, deleteProject, deleteWorkspace, lifecycle, until, waitCopyReady, waitState } from "./steps.js";
 
 const DAY_MS = 86_400_000;
 
@@ -35,9 +39,14 @@ export async function stagePersonal(ctx: StageContext): Promise<Record<string, n
     [`/v1/cloud-v2/organizations/${organizationId}/cloud-projects/${project.id}`, "other_project"],
     ...(slug && typeof number === "number" ? [[`/v1/cloud-v2/workspaces/by-number/${slug}/${number}`, "other_by_number"] as [string, string]] : []),
   ];
-  for (const [path, step] of hidden) { await call(other, "GET", path, step, undefined, { ok: [404] }); counts.hiddenReads!++; }
-  const listed = await call(other, "GET", `/v1/cloud-v2/workspaces?organizationId=${organizationId}`, "other_list", undefined, { ok: [200, 403, 404] });
-  check(listed.status !== 200 || !JSON.stringify(listed.body).includes(workspace.id), "other_list", "visible");
+  // Each read twice: plain, and as today's desktop reads a workspace and the list, with its team-sharing headers
+  // (apps/desktop/src/renderer/platform/control-plane-headers.ts TEAM_SHARING_HEADERS), which route a shared
+  // workspace through the team path: both must hide it.
+  for (const headers of [{}, TEAM_SHARING_READ_HEADERS]) {
+    for (const [path, step] of hidden) { await call(other, "GET", path, step, undefined, { ok: [404], headers }); counts.hiddenReads!++; }
+    const listed = await call(other, "GET", `/v1/cloud-v2/workspaces?organizationId=${organizationId}`, "other_list", undefined, { ok: [200, 403, 404], headers });
+    check(listed.status !== 200 || !JSON.stringify(listed.body).includes(workspace.id), "other_list", "visible");
+  }
   counts.hiddenReads!++;
 
   // B3: Pro ended. The owner's workspace answers 403 pro_required and refuses a connect; the machine stops.
@@ -49,7 +58,7 @@ export async function stagePersonal(ctx: StageContext): Promise<Record<string, n
     (await call(ctx.ports.api, "GET", `/v1/cloud-v2/workspaces/${workspace.id}`, "pro_required", undefined, { ok: [200, 403] })).status === 403);
   const refused = await call(ctx.ports.api, "GET", `/v1/cloud-v2/workspaces/${workspace.id}`, "pro_required_code", undefined, { ok: [403] });
   check(errorCode(refused) === "http_403_pro_required", "pro_required_code", "other_code");
-  const connect = await call(ctx.ports.api, "POST", `/v1/cloud-v2/workspaces/${workspace.id}/connect`, "connect_refused", undefined, { ok: [403] });
+  const connect = await connectWorkspace(ctx.ports.api, workspace.id, "connect_refused", [403]);
   check(errorCode(connect) === "http_403_pro_required", "connect_refused", "other_code");
   ctx.note("worker_token:not_observable");
   ctx.step("idle_stop");

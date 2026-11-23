@@ -17,6 +17,7 @@ import { RehearsalFailure, type Api, type Boat, type Bridge, type Clock, type Da
   type Storage } from "./contract.js";
 import { manageAccountPro } from "../../manage-account-pro.js";
 import { assertRepository, prefixed } from "./guard.js";
+import { connectWorkspace } from "./steps.js";
 
 const TIMEOUT_MS = 30_000;
 
@@ -66,8 +67,7 @@ export function liveApi(accessToken: () => Promise<string>, fetchImpl: typeof fe
 /** gate0's bridge client, opened with a connect ticket validated as gate0 validates it. */
 export function liveBridge(api: Api, timeoutMs = 600_000, pollMs = 1_000): (workspaceId: string) => Promise<Bridge> {
   return async workspaceId => {
-    const reply = await api.json("POST", `/v1/cloud-v2/workspaces/${workspaceId}/connect`);
-    if (reply.status !== 200) throw new RehearsalFailure("connect", `http_${reply.status}`);
+    const reply = await connectWorkspace(api, workspaceId, "connect");
     const ticket = z.object({ url: z.string().url(), protocols: z.array(z.string()).length(2) }).safeParse(reply.body);
     if (!ticket.success) throw new RehearsalFailure("connect", "schema");
     const target = new URL(ticket.data.url);

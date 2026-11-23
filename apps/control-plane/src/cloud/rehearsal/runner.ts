@@ -9,7 +9,7 @@ import { stageRetention } from "./stage-retention.js";
 import { stageSubmodules } from "./stage-submodules.js";
 import { stageWaiting, waitingContext } from "./stage-waiting.js";
 import { changePro, sameGrant, stageSetup } from "./stage-setup.js";
-import { WAITING_INSTALL_SCRIPT, clearEnvironment, disconnectGithubSignIn, githubSignIn, deleteProject, deleteWorkspace, getWorkspace, listProjects, listWorkspaces, readEnvironment,
+import { WAITING_INSTALL_SCRIPT, check, clearEnvironment, disconnectGithubSignIn, githubSignIn, deleteProject, deleteWorkspace, getWorkspace, listProjects, listWorkspaces, readEnvironment,
   readInstallScript, writeInstallScript } from "./steps.js";
 
 export type Stage = (ctx: StageContext) => Promise<Record<string, number>>;
@@ -167,7 +167,16 @@ async function cleanupOrganization(ctx: StageContext, options: { accountless?: b
     if (row && row.state !== "deleted") await ports.boat.delete(machine);
   });
   workspaces = state.created.workspaces; projects = state.created.projects;
-  for (const target of state.created.environments) await attempt("environment", () => clearEnvironment(ctx, target, "cleanup_environment"));
+  // Environments, while the cloud and a GitHub sign-in are on: their routes need both (409 github_connection_required
+  // without a sign-in). Each is cleared and read back, and leaves the record only once it reads empty. A cleanup that
+  // stopped after its sign-in was gone puts the run's own token sign-in back for this, never over another one.
+  if (state.created.environments.length && !options.accountless) await attempt("environment_sign_in", () => signInForCleanup(ctx));
+  for (const target of [...state.created.environments]) await attempt("environment", async () => {
+    await clearEnvironment(ctx, target, "cleanup_environment");
+    check((await readEnvironment(ctx, target.repository, target.repositoryId, "cleanup_environment_read")).empty, "cleanup_environment_read", "not_empty");
+    state.created.environments = state.created.environments.filter(row => row.repositoryId !== target.repositoryId); await ctx.save();
+  });
+  // Then the run's sign-in goes: after everything that needs it.
   for (const organizationId of state.created.githubSignIns) await attempt("github_sign_in", () => disconnectGithubSignIn(ctx, organizationId, "cleanup_github_sign_in"));
   // The install script stage waiting set, only while it is still the one it set.
   if (state.created.installScript) await attempt("install_script", async () => {
@@ -201,6 +210,17 @@ async function cleanupOrganization(ctx: StageContext, options: { accountless?: b
   } finally { await ports.database.close().catch(() => { failures++; }); }
 }
 
+/** The run's own token sign-in, back for cleanup when it is gone: only in an organization where this run made one, and only
+ * while no sign-in of any kind is there (a person's own, or a GitHub App one, is used as it is, never replaced). */
+async function signInForCleanup(ctx: StageContext): Promise<void> {
+  const organizationId = ctx.state.organizationId;
+  if (!ctx.state.created.githubSignIns.includes(organizationId)) return;
+  const status = await githubSignIn(ctx, organizationId, "cleanup_sign_in_read");
+  if (status.methods.pat.configured || status.methods["github-app"].configured) return;
+  if (!ctx.ports.githubSignIn) throw new RehearsalFailure("cleanup_github_sign_in", "token_required");
+  await ctx.ports.githubSignIn.connect(organizationId, status.generation);
+}
+
 /** 1 while the Pro grant differs from the one before the run (either may be "none"), or cannot be read; 0 otherwise. */
 async function proRemaining(ctx: StageContext): Promise<number> {
   const { ports, state } = ctx;
@@ -225,7 +245,9 @@ export async function readInventory(ctx: StageContext, accountless = false, keep
     if (row && row.state !== "deleted") machines++;
   }
   for (const id of state.created.workspaces) objects += (await ports.storage.keys(id)).length;
-  for (const target of state.created.environments) if (!(await readEnvironment(ctx, target.repository, target.repositoryId, "inventory_environment")).empty) environments++;
+  // Only what cleanup could not verify empty is still recorded; one that cannot be read counts as remaining.
+  for (const target of state.created.environments)
+    if (!(await readEnvironment(ctx, target.repository, target.repositoryId, "inventory_environment").catch(() => ({ empty: false }))).empty) environments++;
   for (const organizationId of state.created.githubSignIns) if ((await githubSignIn(ctx, organizationId, "inventory_github_sign_in")).methods.pat.configured) githubSignIns++;
   // Pro counts as remaining while the grant differs from the one before the run; cleanup reads it after putting it back.
   if (include.pro !== false) pro = await proRemaining(ctx);

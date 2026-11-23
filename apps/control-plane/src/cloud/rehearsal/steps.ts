@@ -4,6 +4,7 @@ import { z } from "zod";
 import { RehearsalFailure, type Api, type ApiReply, type Bridge, type StageContext } from "./contract.js";
 import { prefixed } from "./guard.js";
 import { GATE0_DEFAULT_MODELS } from "../gate0.js";
+import { WORKSPACE_REPOSITORIES_FEATURE } from "../contract.js";
 
 export function parse<T>(schema: z.ZodType<T>, value: unknown, step: string): T {
   const result = schema.safeParse(value);
@@ -83,6 +84,20 @@ export async function reportMachineSnapshot(ctx: StageContext, machineId: string
 
 /** A machine id as a failure line may carry it: Boat's sandbox id, or "none". */
 const machineOf = (row: { boatSandboxId?: string | null | undefined }) => row.boatSandboxId && /^[A-Za-z0-9_-]{1,40}$/.test(row.boatSandboxId) ? row.boatSandboxId : "none";
+
+/** The client features today's desktop declares on connect (apps/desktop/src/renderer/platform/cloud-v2.ts,
+ * connectCloudV2Workspace: `clientFeatures: [WORKSPACE_REPOSITORIES_CLIENT_FEATURE]`), from the constant the connect route
+ * itself checks. Without it a workspace of several repositories is refused (409 client_update_required). The desktop's
+ * rollover feature is not declared: it goes with X-Zeros-Client-Instance and the CLOUD_CONNECTION_RENEW frames, which
+ * the rehearsal's bridge does not speak, and the route reads it only for an activated workspace. */
+export const CONNECT_CLIENT_FEATURES: readonly string[] = [WORKSPACE_REPOSITORIES_FEATURE];
+
+/** A connect as today's desktop sends it: the explicit wake policy in the query, `{ wake: true }`, an Idempotency-Key and
+ * X-Zeros-Client-Features. A refusal fails as the API's own code (`http_409_client_update_required`). */
+export async function connectWorkspace(api: Api, workspaceId: string, step: string, ok: readonly number[] = [200]): Promise<ApiReply> {
+  return call(api, "POST", `/v1/cloud-v2/workspaces/${workspaceId}/connect?wakePolicy=explicit`, step, { wake: true },
+    { ok, headers: { "X-Zeros-Client-Features": CONNECT_CLIENT_FEATURES.join(","), "Idempotency-Key": randomUUID() } });
+}
 
 /** Opens a workspace's bridge. When the connect is refused, the failure names the workspace's state, its error code and
  * its machine (connect http_409:failed:cloud_source_checkout_failed:bx_…), read at once from the API. */
