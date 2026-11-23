@@ -68,6 +68,8 @@ export class FakeAlpha {
   /** Failure reasons the next copies fail with, one per copy build (a create, then each retry); empty: ready. */
   copyFailures: string[] = [];
   copyRetries = 0;
+  /** Terminal escape sequences around every shell command's output. */
+  ptyNoise = false;
   /** What the provider said of the copy's archive when it was promoted (cloud_v2_ready_copies.archive_snapshot). */
   copyArchive: string | null = "completed";
   /** The organization's install script (#1260: with one, its base is its own build, never the shared one). */
@@ -545,8 +547,11 @@ export class FakeAlpha {
       const file = `${row.repositories![0]!.checkoutPath}/${ignored[3]}`;
       row.files.set(file, `${ignored[2] === ">>" ? row.files.get(file) ?? "" : ""}${ignored[1]}\n`);
     }
-    if (data.includes("git log")) output = [...row.commits.values()].flat().reverse().join("\r\n");
-    if (data.includes("git submodule status")) output = [` ${"7fd1a60b01f91b314f59955a4e4d4e80d8edf11d"} vendor/hello (heads/master)`, ` ${"b".repeat(40)} vendor/private (heads/main)`].join("\r\n");
+    const counted = /git --no-pager log --format=%s -n 20 \| grep -cxF '([^']+)'/.exec(data)?.[1];
+    if (counted) output = `zr-count ${[...row.commits.values()].flat().filter(subject => subject === counted).length}`;
+    if (data.includes("git --no-pager submodule status")) output = [` ${"7fd1a60b01f91b314f59955a4e4d4e80d8edf11d"} vendor/hello (heads/master)`, ` ${"b".repeat(40)} vendor/private (heads/main)`].join("\r\n");
+    // A terminal's own escape sequences around the output (a prompt's colour, a title), as a real one sends.
+    if (this.ptyNoise) output = `\x1b]0;user@machine\x07\x1b[?2004l${output.replace(/\n/g, "\x1b[K\n")}\x1b[0m`;
     return `${begin}\r\n${output}\r\n${end} 0\r\n`;
   }
 

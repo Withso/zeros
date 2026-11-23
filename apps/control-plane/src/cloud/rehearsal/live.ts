@@ -466,7 +466,13 @@ export function databaseErrorCode(error: unknown): string {
 export const SET_APP_SYSTEM = "SELECT set_config('app.system','on',true)";
 
 export type DatabaseClient = { connect(): Promise<unknown>; query(text: string, values?: unknown[]): Promise<{ rows: Record<string, unknown>[]; rowCount: number | null }>;
-  end(): Promise<void> };
+  end(): Promise<void>; on?(event: "error", listener: (error: unknown) => void): unknown };
+/** A connection the server ends under us (57P01 at a restart, a dropped socket) emits "error" while idle: with no listener
+ * that would crash the process. It is taken here and the connection is marked ended; the next query on it fails named
+ * (`database connection`), and a reader is opened afresh for the next read. */
+function onEnded(held: { on?(event: "error", listener: (error: unknown) => void): unknown }, ended: () => void): void {
+  held.on?.("error", () => ended());
+}
 type Role = { id: string; name: string; username: string; password: string; access_host_url: string };
 
 /** Least privilege (alpha-operator.md). Reads: one temporary role inheriting only pg_read_all_data (TTL 3600), minted on
@@ -527,6 +533,8 @@ export function liveDatabase(input: { organization: string; database: string; to
   const mint = async (kind: "read" | "write"): Promise<{ held: DatabaseClient; remove: () => Promise<void> }> => {
     const { role: minted, remove } = await role(kind);
     const held = client(roleConnectionString(minted));
+    // Its role is still removed at close; a query on the ended connection fails named.
+    onEnded(held, () => undefined);
     try {
       await held.connect();
       if (kind === "write") {
@@ -585,6 +593,7 @@ export function liveDatabase(input: { organization: string; database: string; to
       const { role: minted, remove } = await role("write");
       const connectionString = roleConnectionString(minted);
       const pool = (input.pool ?? (url => new pg.Pool({ connectionString: url, max: 1, connectionTimeoutMillis: 15_000 })))(connectionString);
+      onEnded(pool, () => undefined);
       try {
         const probe = await pool.connect();
         let owner: string;
@@ -637,14 +646,20 @@ export function localDatabase(input: { readUrl: string; ownerUrl: string; client
     catch (error) { throw new RehearsalFailure("database", databaseErrorCode(error)); }
   };
   let reader: Promise<DatabaseClient> | undefined;
+  const ended = new WeakSet<DatabaseClient>();
   const open = async (url: string) => {
     const held = client(url);
+    onEnded(held, () => { ended.add(held); void held.end().catch(() => undefined); });
     try { await held.connect(); } catch (error) { throw new RehearsalFailure("database", databaseErrorCode(error)); }
     return held;
   };
   return {
     async read(text, values) {
-      const held = await (reader ??= open(input.readUrl).catch(error => { reader = undefined; throw error; })), query = run(held);
+      const reading = () => reader ??= open(input.readUrl).catch(error => { reader = undefined; throw error; });
+      let held = await reading();
+      // The server ended the reader (a restart): this read opens a new one.
+      if (ended.has(held)) { reader = undefined; held = await reading(); }
+      const query = run(held);
       await query("BEGIN READ ONLY");
       try {
         await query(SET_APP_SYSTEM);
@@ -668,6 +683,7 @@ export function localDatabase(input: { readUrl: string; ownerUrl: string; client
     async asTableOwner(table, work) {
       if (!/^public\.[a-z_]{1,63}$/.test(table)) throw new RehearsalFailure("database_owner", "table");
       const pool = (input.pool ?? (url => new pg.Pool({ connectionString: url, max: 1, connectionTimeoutMillis: 15_000 })))(input.ownerUrl);
+      onEnded(pool, () => undefined);
       try {
         const owner = (await pool.query<{ owner: boolean }>("SELECT pg_get_userbyid(relowner) = current_user AS owner FROM pg_class WHERE oid = $1::regclass", [table])).rows[0];
         if (owner?.owner !== true) throw new RehearsalFailure("database_owner", "not_owner");

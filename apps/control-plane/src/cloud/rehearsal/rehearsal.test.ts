@@ -1,3 +1,4 @@
+import { EventEmitter } from "node:events";
 import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -13,11 +14,11 @@ import { assertRepository, safeLine } from "./guard.js";
 import { accountLines, turnLine, PERSONAL_ROUTE_GAPS, preconditionLines, readAccount, refusal, writeLines, type PreconditionFacts } from "./plan.js";
 import { cleanup, cleanupNeedsAccount, inventoryLines, NO_ACCOUNT, readInventory, runStages, stageContext, timingLines } from "./runner.js";
 import { localProActorLabel, parseArguments, sharedBaseFacts, targetPorts } from "./rehearsal-cli.js";
-import { CONNECT_CLIENT_FEATURES, call, until, checkText, connectWorkspace, createProject, createWorkspace, fileTarget, frameCode, openBridge, waitState, writeFile } from "./steps.js";
+import { CONNECT_CLIENT_FEATURES, SHELL_QUIET, countLinesCommand, expectLine, seenShape, terminalText, call, until, checkText, connectWorkspace, createProject, createWorkspace, fileTarget, frameCode, openBridge, waitState, writeFile } from "./steps.js";
 import { FIXTURE_TWO } from "./stage-provision.js";
 import { loadState, newState, saveState, stateTarget } from "./state.js";
 import { localStack } from "./local-stack.js";
-import { agentCredentialsFromEnv, ALPHA_TARGET, NETWORK_RETRY_MS, networkRetries, checkGithubToken, databaseErrorCode, databaseRefusal, liveApi, liveBridge, liveRelease, targetIdentity, liveDatabase, OUTSIDE_PROBE_LIMIT, SET_APP_SYSTEM, tokenLines, tokenRefusal, type DatabaseClient } from "./live.js";
+import { agentCredentialsFromEnv, ALPHA_TARGET, NETWORK_RETRY_MS, networkRetries, checkGithubToken, databaseErrorCode, databaseRefusal, liveApi, liveBridge, liveRelease, targetIdentity, liveDatabase, localDatabase, OUTSIDE_PROBE_LIMIT, SET_APP_SYSTEM, tokenLines, tokenRefusal, type DatabaseClient } from "./live.js";
 import { platformOwners, probeDiagnostics, proActor, resolveProbe } from "./plan.js";
 
 const R1 = "Withso/zeros-dev-fixture";
@@ -465,6 +466,70 @@ describe("rehearsal stages against a fake Alpha", () => {
       expect(alpha.copyRetries).toBe(0);
       expect(ctx.state.stages.projects).toMatchObject({ ok: false, step: "copy_ready", code: "copy_failed:ready_copy_setup_failed" });
     });
+  });
+
+  describe("shell output", () => {
+    it("retention passes when the terminal wraps every output in its own escape sequences", async () => {
+      const { alpha, ctx, options } = setup();
+      alpha.ptyNoise = true;
+      expect(await runStages(ctx, ["provision", "projects", "retention"], options)).toBe(true);
+    });
+
+    // A bridge whose terminal answers each command with `answer(command)` between the shell's own markers.
+    const terminal = (answer: (command: string) => string) => {
+      const frames: { type: string; sessionId?: string; data?: string }[] = [], written: string[] = [];
+      const bridge = {
+        request: async () => ({ type: "PTY_CREATED", sessionId: "s" }),
+        send: (type: string, fields: Record<string, unknown>) => {
+          if (type !== "PTY_WRITE") return;
+          const data = String(fields.data); written.push(data);
+          const begin = /'(zr-begin-[0-9a-f]+)'/.exec(data)![1], end = /'(zr-end-[0-9a-f]+)'/.exec(data)![1];
+          frames.push({ type: "PTY_DATA", sessionId: "s", data: `${data}\r\n${begin}\r\n${answer(data)}\r\n${end} 0\r\n` });
+        },
+        frames: () => frames, op: async () => ({}), close: () => undefined,
+      };
+      let now = 0;
+      const ctx = { ports: { clock: { now: () => now, sleep: async (ms: number) => { now += ms; } } }, timing: { stateMs: 1_000, pollMs: 10 } };
+      return { bridge: bridge as never, ctx: ctx as never, written };
+    };
+    const scope = { workspaceId: "w", cwd: "/home/user/r2" };
+
+    it("runs every command with no pager, editor or prompt and stdin closed, and matches on its own count marker", async () => {
+      const { bridge, ctx, written } = terminal(command => command.includes("grep -cxF 'zr-x-unpushed'") ? "\x1b[?1h\x1b=zr-count 1\x1b[K\r" : "");
+      await expectLine(ctx, bridge, scope, "s", "git --no-pager log --format=%s -n 20", "zr-x-unpushed", "own_disk_commit");
+      expect(written[0]).toContain(`( ${SHELL_QUIET} printf 'zr-count %s\\n' "$(git --no-pager log --format=%s -n 20 | grep -cxF 'zr-x-unpushed')" ) </dev/null;`);
+      expect(SHELL_QUIET).toMatch(/GIT_PAGER=cat PAGER=cat .*GIT_TERMINAL_PROMPT=0/);
+      expect(() => countLinesCommand("git log", "it's")).toThrow();
+    });
+
+    it("names what it saw when the line is missing: a count of 0, or no count at all (a pager's screen)", async () => {
+      const none = terminal(() => "zr-count 0");
+      await expect(expectLine(none.ctx, none.bridge, scope, "s", "git --no-pager log", "zr-x-unpushed", "own_disk_commit"))
+        .rejects.toMatchObject({ step: "own_disk_commit", code: "missing:count_0:lines_1:bytes_10" });
+      const paged = terminal(() => "\x1b[?1049h\x1b[H\x1b[2Jzr-x-unpushed\r\nother\r\n\x1b[7m(END)\x1b[27m");
+      await expect(expectLine(paged.ctx, paged.bridge, scope, "s", "git --no-pager log", "zr-x-unpushed", "own_disk_commit"))
+        .rejects.toMatchObject({ code: "missing:count_none:lines_3:bytes_25" });
+      expect(terminalText("\x1b]0;t\x07a\x1b[0m\r\nb\x1b(B")).toBe("a\nb");
+      expect(seenShape("")).toBe("lines_0:bytes_0");
+    });
+  });
+
+  it("a connection the server ends under the run (57P01 at a restart) never crashes it: the next read opens a new one", async () => {
+    const clients: (EventEmitter & DatabaseClient)[] = [];
+    const database = localDatabase({ readUrl: "postgresql://r@127.0.0.1:1/d", ownerUrl: "postgresql://o@127.0.0.1:1/d", client: () => {
+      const held = Object.assign(new EventEmitter(), { ended: false,
+        connect: async () => undefined, end: async () => { held.ended = true; },
+        query: async (text: string) => { if (held.ended) throw new Error("Client was closed and is not queryable"); return { rows: text.startsWith("SELECT 1") ? [{ one: 1 }] : [], rowCount: 0 }; } });
+      clients.push(held as never); return held as never;
+    } });
+    expect(await database.read("SELECT 1 AS one")).toEqual([{ one: 1 }]);
+    // An EventEmitter with no "error" listener throws (in a real run: an unhandled error, the process gone).
+    expect(() => clients[0]!.emit("error", Object.assign(new Error("terminating connection due to administrator command"), { code: "57P01" }))).not.toThrow();
+    expect(await database.read("SELECT 1 AS one")).toEqual([{ one: 1 }]);
+    expect(clients.length).toBe(2);
+    // A query on a connection that is gone fails the step, named.
+    expect(databaseErrorCode(Object.assign(new Error("x"), { code: "57P01" }))).toBe("connection");
+    await database.close();
   });
 
   it("refuses a state file from the other target, and records the target on a new one", async () => {

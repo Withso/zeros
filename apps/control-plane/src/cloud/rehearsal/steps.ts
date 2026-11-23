@@ -498,16 +498,46 @@ export async function openAndClosePull(ctx: StageContext, workspaceId: string, r
 
 /** Runs one command in a fresh PTY at `scope.cwd` and returns its output and exit code. The output stays in memory:
  * callers compare it with what they expect and never print it. */
+/** Every shell command runs with no pager, no editor and no prompt, and stdin closed: in a terminal `git log` would
+ * otherwise open the pager, and its screen (escape sequences, waiting for a key) is never the command's own output. */
+export const SHELL_QUIET = "export GIT_PAGER=cat PAGER=cat GIT_EDITOR=true GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=/bin/false SSH_ASKPASS=/bin/false;";
+/** A terminal's text as plain lines: escape sequences (CSI, OSC, charset and keypad modes) and carriage returns removed. */
+export function terminalText(raw: string): string {
+  // eslint-disable-next-line no-control-regex
+  return raw.replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b[()][0-9A-Za-z]|\x1b[=>78]/g, "").replace(/\r/g, "");
+}
+/** What an output held, in a closed form for a failure code: its non-empty lines and its bytes. */
+export function seenShape(output: string): string {
+  return `lines_${output.split("\n").filter(line => line.trim()).length}:bytes_${Buffer.byteLength(output)}`;
+}
+/** A command that prints how many of `listing`'s lines equal `expected` exactly, as `zr-count <n>`, and reads that count:
+ * a match on the command's own marker, never on raw terminal lines. */
+export function countLinesCommand(listing: string, expected: string): string {
+  if (expected.includes("'")) throw new RehearsalFailure("shell", "quote");
+  return `printf 'zr-count %s\\n' "$(${listing} | grep -cxF '${expected}')"`;
+}
+export function readCount(output: string): number | null {
+  const match = /^zr-count (\d+)$/m.exec(output);
+  return match ? Number(match[1]) : null;
+}
+/** `listing` holds the line `expected` exactly once or more; otherwise fails `step` with `missing:count_<n|none>:lines_<n>:bytes_<m>`. */
+export async function expectLine(ctx: StageContext, bridge: Bridge, scope: { workspaceId: string; cwd: string }, sessionId: string,
+  listing: string, expected: string, step: string): Promise<void> {
+  const { output } = await shell(ctx, bridge, scope, sessionId, countLinesCommand(listing, expected), step);
+  const count = readCount(output);
+  check(count !== null && count > 0, step, `missing:count_${count ?? "none"}:${seenShape(output)}`);
+}
 export async function shell(ctx: StageContext, bridge: Bridge, scope: { workspaceId: string; cwd: string }, sessionId: string, command: string,
   step: string): Promise<{ exitCode: number; output: string }> {
   const created = parse(z.object({ type: z.literal("PTY_CREATED"), sessionId: z.string() }).passthrough(),
     await bridge.request("PTY_CREATE", { ...scope, sessionId, cols: 200, rows: 50 }, `${step}_pty`), `${step}_pty`);
   const begin = `zr-begin-${randomUUID().slice(0, 8)}`, end = `zr-end-${randomUUID().slice(0, 8)}`;
-  bridge.send("PTY_WRITE", { sessionId: created.sessionId, data: `printf '%s\\n' '${begin}'; ( ${command} ); printf '\\n%s %s\\n' '${end}' "$?"\n` });
-  const text = () => bridge.frames().filter(frame => frame.type === "PTY_DATA" && frame.sessionId === created.sessionId)
-    .map(frame => typeof frame.data === "string" ? frame.data : "").join("");
+  bridge.send("PTY_WRITE", { sessionId: created.sessionId,
+    data: `printf '%s\\n' '${begin}'; ( ${SHELL_QUIET} ${command} ) </dev/null; printf '\\n%s %s\\n' '${end}' "$?"\n` });
+  const text = () => terminalText(bridge.frames().filter(frame => frame.type === "PTY_DATA" && frame.sessionId === created.sessionId)
+    .map(frame => typeof frame.data === "string" ? frame.data : "").join(""));
   // The echoed command line holds both markers in quotes; the real output has the end marker followed by a code.
-  const pattern = new RegExp(`${begin}\\r?\\n([\\s\\S]*?)\\r?\\n${end} (\\d+)`);
+  const pattern = new RegExp(`${begin}\\n([\\s\\S]*?)\\n${end} (\\d+)`);
   const match = await until(ctx, step, ctx.timing.stateMs, ctx.timing.pollMs, async () => pattern.exec(text()));
   bridge.send("PTY_KILL", { sessionId: created.sessionId });
   return { exitCode: Number(match[2]), output: match[1]! };

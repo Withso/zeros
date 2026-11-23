@@ -5,7 +5,7 @@
 // private submodule fixture): read-only submodule tokens and the "creator cannot read it" path are reported as not rehearsed.
 import { z } from "zod";
 import { RehearsalFailure, type StageContext } from "./contract.js";
-import { openBridge, check, createProject, createWorkspace, deleteProject, deleteWorkspace, parse, shell, waitCopyReady, workspaceRoot } from "./steps.js";
+import { openBridge, check, createProject, createWorkspace, deleteProject, deleteWorkspace, parse, seenShape, shell, waitCopyReady, workspaceRoot } from "./steps.js";
 
 export async function stageSubmodules(ctx: StageContext): Promise<Record<string, number>> {
   check(ctx.state.owner === "personal", "owner", "personal_route_only");
@@ -45,11 +45,11 @@ export async function stageSubmodules(ctx: StageContext): Promise<Record<string,
     // A one-repository workspace's root is its checkout.
     const checkout = await workspaceRoot(bridge, workspace.id);
     // `git submodule status`: a leading space is initialized at the recorded commit; "-" uninitialized, "+" another commit.
-    const status = await shell(ctx, bridge, { workspaceId: workspace.id, cwd: checkout }, `${prefix}pty-sub`, "git submodule status", "submodule_status");
+    const status = await shell(ctx, bridge, { workspaceId: workspace.id, cwd: checkout }, `${prefix}pty-sub`, "git --no-pager submodule status", "submodule_status");
     check(status.exitCode === 0, "submodule_status", `exit_${status.exitCode}`);
     const lines = status.output.split(/\r?\n/).filter(line => /^[ +\-U][0-9a-f]{40} /.test(line));
     counts.workspaceInitialized = lines.filter(line => line.startsWith(" ")).length;
-    check(lines.length === 2 && counts.workspaceInitialized === 2, "submodule_status", `initialized_${counts.workspaceInitialized}_of_${lines.length}`);
+    check(lines.length === 2 && counts.workspaceInitialized === 2, "submodule_status", `initialized_${counts.workspaceInitialized}_of_${lines.length}:${seenShape(status.output)}`);
   } finally { bridge.close(); }
   // Not rehearsed, and not a failure: there is no private submodule fixture (the owner made every new fixture public).
   ctx.note("private_submodule:not_rehearsed_no_fixture");

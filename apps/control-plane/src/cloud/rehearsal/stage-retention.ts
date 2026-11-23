@@ -9,7 +9,7 @@ import { shiftClock } from "./clock.js";
 import { rebuildComputer } from "./stage-setup.js";
 import { readEnvironment, reportMachineSnapshot } from "./steps.js";
 import { openBridge, call, check, checkText, clearEnvironment, ENVIRONMENT_PATH, seedEnvironments, createProject, createWorkspace, deleteProject, deleteWorkspace, getWorkspace, lifecycle, parse, shell, until,
-  waitCopyReady, waitState, workspaceRoot, WorkspaceDocument } from "./steps.js";
+  waitCopyReady, waitState, workspaceRoot, WorkspaceDocument, expectLine } from "./steps.js";
 
 const HOUR_DAYS = 1 / 24;
 
@@ -173,8 +173,7 @@ export async function stageRetention(ctx: StageContext): Promise<Record<string, 
   bridge = await openBridge(ctx, w.id);
   try {
     const root = await workspaceRoot(bridge, w.id), scope = { workspaceId: w.id, cwd: root };
-    const log = await shell(ctx, bridge, { ...scope, cwd: second.checkoutPath }, `${prefix}pty-own`, "git log --format=%s -n 20", "own_disk_commit");
-    check(log.output.split(/\r?\n/).some(line => line.trim() === `${prefix}unpushed`), "own_disk_commit", "missing");
+    await expectLine(ctx, bridge, { ...scope, cwd: second.checkoutPath }, `${prefix}pty-own`, "git --no-pager log --format=%s -n 20", `${prefix}unpushed`, "own_disk_commit");
     await checkText(bridge, scope, `${second.checkoutPath}/${prefix}untracked.txt`, `${prefix}untracked\n`, "own_disk_untracked", "missing", w);
   } finally { bridge.close(); }
   counts.ownDiskKept = 1;
@@ -206,8 +205,7 @@ export async function stageRetention(ctx: StageContext): Promise<Record<string, 
   bridge = await openBridge(ctx, w.id);
   try {
     const root = await workspaceRoot(bridge, w.id), scope = { workspaceId: w.id, cwd: root };
-    const log = await shell(ctx, bridge, { ...scope, cwd: second.checkoutPath }, `${prefix}pty-log`, "git log --format=%s -n 20", "restored_commit");
-    check(log.output.split(/\r?\n/).some(line => line.trim() === `${prefix}unpushed`), "restored_commit", "missing");
+    await expectLine(ctx, bridge, { ...scope, cwd: second.checkoutPath }, `${prefix}pty-log`, "git --no-pager log --format=%s -n 20", `${prefix}unpushed`, "restored_commit");
     await checkText(bridge, scope, `${second.checkoutPath}/${prefix}untracked.txt`, `${prefix}untracked\n`, "restored_untracked", "missing", w);
     await checkText(bridge, scope, `${first.checkoutPath}/${ignored}`, ignoredBytes, "restored_ignored", "bytes", w);
   } finally { bridge.close(); }
