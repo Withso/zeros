@@ -180,6 +180,25 @@ describe("cloud v2 Boat compute", () => {
     expect(boat.request).toHaveBeenCalledExactlyOnceWith("/named-snapshots", { method: "POST", body: { sandboxId: "bx_newbuild", name: "zeros-alpha-org-v1" } });
   });
 
+  it("lists named snapshots with Boat's allowance, as Alpha answers", async () => {
+    const boat = client();
+    boat.request.mockResolvedValueOnce({
+      snapshots: [{ name: "zeros-alpha-base-1a2b3c4d5e6f", status: "ready", sourceSandboxId: "bx_abc12345", snapshotId: "snap_1", type: "named",
+        createdAt: "2026-11-01T00:00:00.000Z", org: "team_x" }],
+      allowance: { included: 10, free: 10, used: 12, extra: 2, pricePerExtraMonthlyDollars: 1.68, pricePerExtraDailyDollars: 0.056 },
+    });
+    expect(await new BoatCloudV2Compute(boat).listNamedSnapshots()).toEqual({
+      snapshots: [{ name: "zeros-alpha-base-1a2b3c4d5e6f", status: "ready", createdAt: "2026-11-01T00:00:00.000Z" }],
+      allowance: { included: 10, used: 12, extra: 2, pricePerExtraMonthlyDollars: 1.68 },
+    });
+    expect(boat.request).toHaveBeenCalledExactlyOnceWith("/named-snapshots", { method: "GET" });
+    // An allowance Boat leaves out or changes shape reads as unknown; the list itself must parse.
+    boat.request.mockResolvedValueOnce({ snapshots: [], allowance: { included: "ten" } });
+    expect((await new BoatCloudV2Compute(boat).listNamedSnapshots()).allowance).toBeNull();
+    boat.request.mockResolvedValueOnce({ items: [] });
+    await expect(new BoatCloudV2Compute(boat).listNamedSnapshots()).rejects.toThrow();
+  });
+
   it("finds a sandbox by exact name, newest first, without reading past its creation window", async () => {
     const boat = client();
     const at = (minutes: number) => new Date(Date.UTC(2026, 9, 24, 12, minutes)).toISOString();

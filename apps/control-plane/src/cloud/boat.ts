@@ -45,11 +45,25 @@ export interface CloudV2Compute {
   /** Whether a named snapshot exists and can start a machine. Checked before
    * an organization is pointed at a snapshot it did not save itself. */
   snapshotExists?(name: string): Promise<boolean>;
+  /** Every named snapshot this Boat account holds, with its billed allowance. Read by the daily inventory only. */
+  listNamedSnapshots?(): Promise<BoatNamedSnapshotList>;
   hostPort(sandboxId: string, input: { port: number; localhost: true; title: string; key?: string; signal?: AbortSignal }): Promise<{ url: string; token: string }>;
   /** A sandbox with exactly this name created at or after `since`, newest first. */
   findSandbox(name: string, since: Date): Promise<string | null>;
 }
 
+export type BoatNamedSnapshotList = {
+  snapshots: { name: string; status: string; createdAt: string | null }[];
+  /** Named snapshots are billed beyond `included`; `extra` is how many are billed now. */
+  allowance: { included: number; used: number; extra: number; pricePerExtraMonthlyDollars: number | null } | null;
+};
+const count = z.number().int().nonnegative();
+// Read on Alpha: { snapshots: [{ name, status, sourceSandboxId, snapshotId, type, createdAt, org }], allowance: { included, free,
+// used, extra, pricePerExtraMonthlyDollars, pricePerExtraDailyDollars } }, with no expiry field and no paging.
+const NamedSnapshots = z.object({
+  snapshots: z.array(z.object({ name: z.string().max(256), status: z.string().max(64), createdAt: z.string().max(64).nullable().optional() }).passthrough()).max(10_000),
+  allowance: z.object({ included: count, used: count, extra: count, pricePerExtraMonthlyDollars: z.number().nonnegative().optional() }).passthrough().optional().catch(undefined),
+}).passthrough();
 const Created = z.object({ sandbox: z.object({ id: z.string().regex(SANDBOX_ID) }).passthrough() }).passthrough();
 const Forked = z.object({ sandbox: z.object({ id: z.string().regex(SANDBOX_ID) }).passthrough().optional(),
   sandboxId: z.string().regex(SANDBOX_ID).optional() }).passthrough();
@@ -237,9 +251,8 @@ export class BoatCloudV2Compute implements CloudV2Compute {
     throw Object.assign(new Error("snapshot save timed out"), { code: "computer_snapshot_timeout" });
   }
 
-  /** Assumed Boat call: GET /named-snapshots/<name>, "ready" when it can
-   * start a machine, 404 when it does not exist (unverified for a snapshot
-   * another Boat organization saved). */
+  /** GET /named-snapshots/<name>: "ready" when it can start a machine, 404 when it does not exist
+   * (read on Alpha for this account's own snapshots; unverified for one another Boat organization saved). */
   async snapshotExists(name: string): Promise<boolean> {
     if (!SNAPSHOT_NAME.test(name)) throw new Error("Invalid Boat snapshot name");
     try {
@@ -248,6 +261,15 @@ export class BoatCloudV2Compute implements CloudV2Compute {
       if (notFound(error)) return false;
       throw error;
     }
+  }
+
+  async listNamedSnapshots(): Promise<BoatNamedSnapshotList> {
+    const listed = NamedSnapshots.parse(await this.client.request("/named-snapshots", { method: "GET" }));
+    return {
+      snapshots: listed.snapshots.map(snapshot => ({ name: snapshot.name, status: snapshot.status, createdAt: snapshot.createdAt ?? null })),
+      allowance: listed.allowance ? { included: listed.allowance.included, used: listed.allowance.used, extra: listed.allowance.extra,
+        pricePerExtraMonthlyDollars: listed.allowance.pricePerExtraMonthlyDollars ?? null } : null,
+    };
   }
 
   async deleteSnapshot(name: string): Promise<void> {

@@ -75,6 +75,19 @@ it("keeps ready copies off until a deployment enables them, and validates the sh
   expect(() => loadConfig({ ...base, CLOUD_V2_SHARED_BASE_SNAPSHOT: "Not A Name" })).toThrow("CLOUD_V2_SHARED_BASE_SNAPSHOT");
 });
 
+it("reads CLOUD_V2_SHARED_BASE_SNAPSHOT as the shared base override: a name pins it, off turns it off", () => {
+  const key = generateKeyPairSync("ed25519").privateKey.export({ format: "der", type: "pkcs8" }).toString("base64");
+  const base = { ...env, CLOUD_V2_WORKER_SIGNING_KEY: key };
+  expect(loadConfig(base).cloudV2?.sharedBaseOverride).toBeNull();
+  expect(loadConfig({ ...base, CLOUD_V2_SHARED_BASE_SNAPSHOT: "zeros-alpha-base-1a2b3c4d5e6f" }).cloudV2)
+    .toMatchObject({ sharedBaseSnapshot: "zeros-alpha-base-1a2b3c4d5e6f", sharedBaseOverride: { kind: "name", name: "zeros-alpha-base-1a2b3c4d5e6f" } });
+  const off = loadConfig({ ...base, CLOUD_V2_SHARED_BASE_SNAPSHOT: " off " }).cloudV2;
+  expect(off?.sharedBaseOverride).toEqual({ kind: "off" });
+  // Older readers of sharedBaseSnapshot see no shared base, never a snapshot called "off".
+  expect(off).not.toHaveProperty("sharedBaseSnapshot");
+  expect(() => loadConfig({ ...base, CLOUD_V2_SHARED_BASE_SNAPSHOT: "OFF" })).toThrow("CLOUD_V2_SHARED_BASE_SNAPSHOT");
+});
+
 it("keeps retention off until a deployment enables it", () => {
   const key = generateKeyPairSync("ed25519").privateKey.export({ format: "der", type: "pkcs8" }).toString("base64");
   const base = { ...env, CLOUD_V2_WORKER_SIGNING_KEY: key };
