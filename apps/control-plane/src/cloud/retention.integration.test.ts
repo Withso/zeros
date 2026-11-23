@@ -818,8 +818,9 @@ d("cloud v2 retention", () => {
         boat.attemptAtStop = { inProgressReads: 1, failedReads: 0 };
         await lifecycle().tick();
         expect(await wakes()).toMatchObject([{ kind: "wake", outcome: "stopped" }]);
-        const recorded = (await pool.query("SELECT stop_generation, stop_archive_failed_generation FROM cloud_v2_workspaces WHERE id=$1", [id])).rows[0];
-        expect(recorded.stop_archive_failed_generation).toBe(recorded.stop_generation);
+        // Its own record: the person's stop, and its backup, are not called into question.
+        const recorded = (await pool.query("SELECT stop_archive_failed_generation, maintenance_archive_suspect_at FROM cloud_v2_workspaces WHERE id=$1", [id])).rows[0];
+        expect(recorded).toEqual({ stop_archive_failed_generation: null, maintenance_archive_suspect_at: expect.any(Date) });
       });
 
       it("records a failed attempt during its stop, so nothing calls that archive good", async () => {
@@ -827,9 +828,9 @@ d("cloud v2 retention", () => {
         attemptAtMarker(Number.POSITIVE_INFINITY);
         await lifecycle().tick();
         expect(await wakes()).toMatchObject([{ kind: "wake", outcome: "stopped" }]);
-        const recorded = (await pool.query("SELECT stop_generation, stop_archive_failed_generation FROM cloud_v2_workspaces WHERE id=$1", [id])).rows[0];
-        expect(recorded.stop_archive_failed_generation).toBe(recorded.stop_generation);
-        expect(errors.filter(line => line.startsWith("[cloud-v2] stop archive may lack the machine's last writes"))).toHaveLength(1);
+        const recorded = (await pool.query("SELECT stop_archive_failed_generation, maintenance_archive_suspect_at FROM cloud_v2_workspaces WHERE id=$1", [id])).rows[0];
+        expect(recorded).toEqual({ stop_archive_failed_generation: null, maintenance_archive_suspect_at: expect.any(Date) });
+        expect(errors.filter(line => line.startsWith("[cloud-v2] maintenance stop archive may lack the machine's last writes"))).toHaveLength(1);
       });
     });
 
@@ -1015,6 +1016,19 @@ d("cloud v2 retention", () => {
         await lifecycle().tick();
         expect(resumes()).toEqual([]);
       });
+    });
+
+    it("scrubs an archived workspace again when its wake's stop left the archive suspect: partial, and not done", async () => {
+      boat.write(vm, `${path("app")}/.env`, "SECRET=1");
+      await sleeping(5);
+      // Archived five days after its last stop, the archived wake now due (as the archived wake's own test sets it).
+      await pool.query(`UPDATE cloud_v2_workspaces SET stopped_at=stopped_at - interval '5 days 14 hours',
+        archived_at=clock_timestamp() - interval '5 days 14 hours' WHERE id=$1`, [id]);
+      boat.attemptAtStop = { inProgressReads: 1, failedReads: 0 };
+      await lifecycle().tick();
+      expect(resumes()).toHaveLength(1);
+      const after = (await pool.query("SELECT archive_scrub, archive_wake_done_at, maintenance_archive_suspect_at FROM cloud_v2_workspaces WHERE id=$1", [id])).rows[0];
+      expect(after).toEqual({ archive_scrub: "partial", archive_wake_done_at: null, maintenance_archive_suspect_at: expect.any(Date) });
     });
 
     it("wakes an archived workspace once more, on its machine's own 10 days, then never", async () => {

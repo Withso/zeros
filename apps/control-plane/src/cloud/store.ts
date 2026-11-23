@@ -1609,12 +1609,6 @@ export class CloudV2Store {
     });
   }
 
-  /** A failed snapshot attempt was reported during a stop of this workspace's machine that changed no stop generation
-   * (a maintenance wake's): the current stop's archive may lack its last writes. */
-  async recordStopArchiveFailed(id: string): Promise<void> {
-    await withSystemTx(this.pool, tx => tx.query("UPDATE cloud_v2_workspaces SET stop_archive_failed_generation = stop_generation WHERE id = $1", [id]));
-  }
-
   /** The VM found everything as `object` holds it: that checkpoint now also
    * covers this stop. Refused unless `object` is still the one compared. */
   async checkpointUnchanged(id: string, sandboxId: string, generation: string, object: string, scope: CloudV2CheckpointScope = "stop"): Promise<boolean> {
@@ -2145,11 +2139,15 @@ export class CloudV2Store {
     /** Retention S3: a file under a checkout is newer than the stop's marker (or the check could not tell). */
     changedSinceStop?: boolean;
     /** Retention S3: the archived wake's scrub result; its presence makes this the archived workspace's one wake. */
-    scrub?: ArchiveScrubResult }): Promise<void> {
+    scrub?: ArchiveScrubResult;
+    /** Its stop left the archive suspect (boat-disk.ts archiveSuspect): recorded on its own, and an archived wake is not
+     * done, so it scrubs again. */
+    archiveSuspect?: boolean }): Promise<void> {
     await withSystemTx(this.pool, async tx => {
       await tx.query(`UPDATE cloud_v2_workspaces SET maintenance_attempt=NULL, maintenance_phase=NULL, maintenance_started_at=NULL,
           machine_stopped_at=coalesce($3::timestamptz, machine_stopped_at),
-          archive_wake_done_at=CASE WHEN archived_at IS NOT NULL AND ($4 = 'gone' OR $4 = 'stopped' AND $7::text IS NOT NULL) THEN clock_timestamp() ELSE archive_wake_done_at END,
+          archive_wake_done_at=CASE WHEN archived_at IS NOT NULL AND ($4 = 'gone' OR $4 = 'stopped' AND $7::text IS NOT NULL AND NOT $9::boolean) THEN clock_timestamp() ELSE archive_wake_done_at END,
+          maintenance_archive_suspect_at=CASE WHEN $9::boolean THEN clock_timestamp() ELSE maintenance_archive_suspect_at END,
           archive_scrub=CASE WHEN $7::text IS NOT NULL THEN $7::text ELSE archive_scrub END,
           archive_scrubbed_at=CASE WHEN $7::text IS NOT NULL THEN clock_timestamp() ELSE archive_scrubbed_at END,
           archive_scrubbed_generation=CASE WHEN $7::text IS NOT NULL THEN stop_generation ELSE archive_scrubbed_generation END,
@@ -2163,7 +2161,7 @@ export class CloudV2Store {
           worker_off_unverified_at=CASE WHEN $5::boolean THEN NULL WHEN $5::boolean IS FALSE THEN coalesce(worker_off_unverified_at, clock_timestamp())
             ELSE worker_off_unverified_at END
         WHERE id=$1 AND maintenance_attempt=$2`, [id, attempt, result.machineStoppedAt ?? null, result.outcome, result.workerOff ?? null,
-          result.changedSinceStop === true, result.scrub ?? null, result.dataExpiredAt ?? null]);
+          result.changedSinceStop === true, result.scrub ?? null, result.dataExpiredAt ?? null, result.archiveSuspect === true]);
       await tx.query(`UPDATE cloud_v2_maintenance_wakes SET finished_at=clock_timestamp(), outcome=$2, worker_found_running=$3,
           changed_since_stop=coalesce($7, changed_since_stop), scrub=coalesce($8, scrub),
           snapshot_available=coalesce($4, snapshot_available), data_expired_at=coalesce($5, data_expired_at),

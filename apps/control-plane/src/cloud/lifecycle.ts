@@ -168,7 +168,7 @@ export type CloudV2LifecycleDeps = {
     | "beginRestore" | "replaceSandbox" | "finishRestore" | "checkpointUnchanged" | "claimCheckpointRetry" | "beginCheckpointFork"
     | "checkpointForkCreated" | "checkpointForkGone" | "checkpointRetryNext"
     // Retention (`retention`); absent from older compositions, which never enable it.
-    | "recordStopProbe" | "restoreForkRefused" | "replaceLostSandbox" | "workspaceBranches" | "recordLostWork" | "recordStopArchiveFailed"
+    | "recordStopProbe" | "restoreForkRefused" | "replaceLostSandbox" | "workspaceBranches" | "recordLostWork"
     | "claimMaintenanceWake" | "beginMaintenanceStop" | "adoptMaintenance" | "maintenanceHeld" | "finishMaintenance"
     | "startRetentionClocks" | "archiveInactive" | "archiveDepartedPrivate" | "restoreReturningPrivate" | "archiveForSystem" | "clearArchiveScrub"
     | "claimBackupRemovals" | "pendingBackupRemovals" | "finishBackupRemoval" | "sweepDepartedProjects" | "deleteDepartedProjects" | "missedWakes"
@@ -946,7 +946,7 @@ export class CloudV2Lifecycle {
     const vm = row.boatSandboxId!, start = this.deps.now?.() ?? Date.now();
     let outcome: "stopped" | "adopted" | "gone" | "failed" = "failed", workerFoundRunning = false, workerOff: boolean | undefined;
     let machineStoppedAt: Date | null = null, snapshotAvailable: boolean | undefined, dataExpiredAt: Date | null = null;
-    let changedSinceStop: boolean | undefined, scrub: ArchiveScrubResult | undefined;
+    let changedSinceStop: boolean | undefined, scrub: ArchiveScrubResult | undefined, archiveSuspectStop = false;
     // After every call to the machine: a person's start that took the wake over (or opened the
     // workspace) gets it at once, and nothing of the wake's runs after their worker starts.
     const held = async () => { if (!await store.maintenanceHeld(row.id, attempt)) throw new MaintenanceReleased(); };
@@ -997,8 +997,11 @@ export class CloudV2Lifecycle {
       machineStoppedAt = stopped.stoppedAt;
       if (archiveSuspect(stopped)) {
         (this.deps.logger?.error ?? this.deps.logger?.warn)?.call(this.deps.logger,
-          `[cloud-v2] stop archive may lack the machine's last writes (${stopped.failed ? "failed_attempt" : "attempt_before_stop"}) workspace=${row.id.slice(0, 8)}`);
-        await store.recordStopArchiveFailed(row.id);
+          `[cloud-v2] maintenance stop archive may lack the machine's last writes (${stopped.failed ? "failed_attempt" : "attempt_before_stop"}) workspace=${row.id.slice(0, 8)}`);
+        // Its own record, never the person's stop's. The archived wake's scrub may not have reached the archive: partial,
+        // and the wake is not done, so it scrubs again (within the maintenance budget).
+        archiveSuspectStop = true;
+        if (scrub) scrub = "partial";
       }
       outcome = "stopped";
       return true;
@@ -1012,7 +1015,7 @@ export class CloudV2Lifecycle {
     } finally {
       await store.finishMaintenance(row.id, attempt, { outcome, machineStoppedAt, workerFoundRunning, ...(workerOff !== undefined ? { workerOff } : {}),
         ...(snapshotAvailable !== undefined ? { snapshotAvailable } : {}), dataExpiredAt,
-        ...(changedSinceStop !== undefined ? { changedSinceStop } : {}), ...(scrub ? { scrub } : {}) })
+        ...(changedSinceStop !== undefined ? { changedSinceStop } : {}), ...(scrub ? { scrub } : {}), ...(archiveSuspectStop ? { archiveSuspect: true } : {}) })
         .catch(error => this.deps.logger?.warn(`[cloud-v2] maintenance wake not recorded (${errorCode(error)})`));
       emitCloudV2Timing(this.deps.timing, { workspaceId: row.id.slice(0, 8), state: row.state, phase: "maintenance_wake", outcome,
         durationMs: Math.max(0, Math.round((this.deps.now?.() ?? Date.now()) - start)) });
