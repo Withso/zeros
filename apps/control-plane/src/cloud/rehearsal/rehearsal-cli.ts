@@ -180,7 +180,11 @@ async function main(argv: string[]): Promise<number> {
             // Stage waiting's account: its Personal organization must have no base and nothing building.
             if (result.label === String(args.waitingAccount)) {
               const state = summary.personal ? await baseOf(result.api, summary.personal.id) : null;
-              waitingAccount = !summary.personal ? "no_personal_organization" : state === "none" ? "fresh" : `base_${state}`;
+              // Before its Pro (which stage waiting grants first) its Personal organization has no cloud, so its base reads 404
+              // organization: not a refusal; the stage checks it is fresh after the grant.
+              const beforePro = !!state && state.startsWith("http_404") && state.endsWith(":organization");
+              waitingAccount = !summary.personal ? "no_personal_organization" : state === "none" || beforePro ? "fresh" : `base_${state}`;
+              if (beforePro) log(`  waiting account ${args.waitingAccount}: no cloud before its Pro; stage waiting checks its base is fresh after granting it`);
             }
             summaries.set(result.label, summary);
             for (const line of accountLines(summary)) log(line);
