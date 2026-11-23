@@ -271,12 +271,25 @@ export type SharedBaseState =
   | { state: "off" };
 
 /** The shared base for activations: the override first (off, or a pinned name), then the rows. */
+/** Whether this deployment's builder makes the shared base itself: every hosted channel (Alpha, Production, hosted Dev)
+ * unless it is off; a Local control plane (a developer's own) only when asked with auto or a name, since every runtime
+ * sha a developer builds would otherwise leave a zeros-local-… snapshot on the shared Boat account. The one rule the
+ * sweeper (what it claims) and the resolver (whether a base is "building") both read, so they cannot disagree. */
+export function sharedBaseBuilds(scope: SharedBaseScope, override: CloudV2SharedBaseOverride | null | undefined): boolean {
+  if (override?.kind === "off") return false;
+  return scope.localOwner === undefined || override?.kind === "auto" || override?.kind === "name";
+}
+
 export async function sharedBaseState(bases: CloudV2SharedBases, input: SharedBaseScope & {
   runtimeSha256: string; override?: CloudV2SharedBaseOverride | null; now?: Date;
 }): Promise<SharedBaseState> {
   if (input.override?.kind === "off") return { state: "off" };
   if (input.override?.kind === "name") return { state: "ready", name: input.override.name, source: "override" };
-  return bases.state(input, input.runtimeSha256, input.now);
+  const state = await bases.state(input, input.runtimeSha256, input.now);
+  // Nobody builds one here (a Local control plane not asked to): only a ready row (the CLI's) is a shared base; anything
+  // else is off, never "building", or its organizations' bases would be held for a build that never comes.
+  if (!sharedBaseBuilds(input, input.override) && state.state !== "ready") return { state: "off" };
+  return state;
 }
 
 /** sharedBaseState, cached for at most a minute per process; one read at a time. */
@@ -412,7 +425,7 @@ export { foldSharedRepoints, isSharedRepoint } from "./computer.js";
 export const SHARED_BASE_INTERRUPTION_RETRIES = 3;
 /** How long a superseded base is kept before deletion may take it (references are checked as well): the resolver caches a
  * minute, and the worker installs the pinned runtime at boot, so no rollback needs an old image. */
-export const SHARED_BASE_SUPERSEDED_KEEP = "24 hours";
+export const SHARED_BASE_SUPERSEDED_KEEP = "6 hours";
 
 /** How often the builder's hooks run. */
 export const SHARED_BASE_CLAIM_MS = 60_000;
@@ -538,7 +551,7 @@ export async function repointOrganizations(pool: pg.Pool, compute: CloudV2Comput
 /**
  * Deletes old shared bases nothing needs: never the current one, a kept one (a pinned override), or the previous
  * runtime's (kept for a rollback; the newest base of another runtime when CLOUD_V2_RUNTIME_PREVIOUS_SHA256 is unset);
- * only 24 hours after it was superseded; and only with no reference left: no live pointer, no build row still holding
+ * only 6 hours after it was superseded; and only with no reference left: no live pointer, no build row still holding
  * it, no ready copy being built from it. A stale resolver cache (a minute at most) cannot activate a base superseded a
  * week ago, so no new reference appears between this check and the delete. The row is marked deleted only after Boat
  * reads it back gone.
@@ -703,7 +716,7 @@ export class CloudV2SharedBaseSweeper {
     // A Local control plane (a developer's own) builds no shared base unless asked (a name or auto): every runtime sha a
     // developer builds would otherwise leave a zeros-local-… snapshot on the shared Boat account. Its other hooks run only
     // once it has rows of its own (the CLI's --execute still builds one on purpose).
-    const local = deps.scope.localOwner !== undefined && deps.override?.kind !== "auto" && deps.override?.kind !== "name";
+    const local = !sharedBaseBuilds(deps.scope, deps.override);
     if (local && !await deps.bases.hasRows(deps.scope).catch(() => false)) return;
     const due = (key: keyof typeof this.last, every: number) => {
       if (now - this.last[key] < every) return false;

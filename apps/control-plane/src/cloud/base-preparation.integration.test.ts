@@ -9,6 +9,7 @@ import { configureCloudPersonal } from "../db-context.js";
 import { grantTestPro } from "../test-pro.js";
 import { FakeBoat } from "./__fixtures__/boat-fake.js";
 import { CloudV2ComputerBuilder, CloudV2Computers, type CloudV2BaseState, type CloudV2ComputerOptions } from "./computer.js";
+import { CloudV2SharedBaseResolver, CloudV2SharedBases, sharedBaseBuilds, type SharedBaseState } from "./shared-base.js";
 import type { CloudV2ComputerSourceResolver } from "./computer-provenance.js";
 import { CloudV2Lifecycle } from "./lifecycle.js";
 import { CloudV2ReadyCopies, CloudV2ReadyCopyBuilder } from "./ready-copies.js";
@@ -287,6 +288,36 @@ d("ready copies: a safe switch-on", () => {
       const live = (await pool.query<{ snapshot_name: string }>("SELECT snapshot_name FROM cloud_v2_computers WHERE org_id=$1", [org])).rows[0]!;
       expect(live.snapshot_name.startsWith(`${older}@`)).toBe(true);
       expect(creates()).toEqual([]);
+    });
+
+    it("on a Local control plane not asked to build one: no shared base is building, so the organization's own base is claimed at once", async () => {
+      const owner = "a".repeat(24), local = { channel: "development", localOwner: owner };
+      const withResolver = (override: { kind: "auto" } | null) => new CloudV2Computers(pool, pool, resolveRepository, resolveRepository, {
+        readyCopies: true, runtimeSha256: runtime.sha256,
+        sharedBase: new CloudV2SharedBaseResolver(new CloudV2SharedBases(pool), { ...local, runtimeSha256: runtime.sha256, override }),
+        sharedBaseAvailable: async (name?: string) => !!name && boat.snapshots.has(name) });
+      expect(sharedBaseBuilds(local, null)).toBe(false);
+      expect(sharedBaseBuilds(local, { kind: "auto" })).toBe(true);
+      expect(sharedBaseBuilds({ channel: "development" }, null)).toBe(true);
+      // No setting: off, never "building": ensureBase queues the organization's own base and the builder claims it now.
+      const computers = withResolver(null);
+      expect(await computers.sharedBaseNow()).toEqual({ name: null, building: false });
+      const created = await create(computers, member, { projectId: await project() });
+      const id = (created.response as unknown as { id: string }).id;
+      const row = (await workspaceRow(id)).computer_build_id;
+      await builder(computers).tick();
+      expect((await pool.query("SELECT state, base_shared FROM cloud_v2_computer_builds WHERE id=$1", [row])).rows[0]).toEqual({ state: "succeeded", base_shared: false });
+      // With a ready row the CLI made, that is its shared base.
+      org = await organization();
+      const name = `zeros-local-${owner}-base-${runtime.sha256.slice(0, 12)}`;
+      await pool.query(`INSERT INTO cloud_v2_shared_bases (name, channel, runtime_sha256, state, ready_at) VALUES ($1, 'development', $2, 'ready', clock_timestamp())`,
+        [name, runtime.sha256]);
+      boat.snapshots.set(name, new Map());
+      expect(await withResolver(null).ensureBase(org)).toMatchObject({ state: "ready" });
+      expect(((await pool.query<{ snapshot_name: string }>("SELECT snapshot_name FROM cloud_v2_computers WHERE org_id=$1", [org])).rows[0]!).snapshot_name.startsWith(`${name}@`)).toBe(true);
+      // Asked with auto (and no ready row for another scope): as Alpha, a base being built is waited for.
+      await pool.query("DELETE FROM cloud_v2_shared_bases");
+      expect(await withResolver({ kind: "auto" }).sharedBaseNow()).toEqual({ name: null, building: true });
     });
 
     it("never queues for an organization without an install script from the sweep while the shared base is building", async () => {

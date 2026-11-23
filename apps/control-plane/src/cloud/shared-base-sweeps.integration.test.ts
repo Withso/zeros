@@ -114,7 +114,9 @@ d("cloud v2 shared base sweeps", () => {
       expect(await sharedBaseState(bases, { channel: "alpha", runtimeSha256: B, override: { kind: "off" } })).toEqual({ state: "off" });
       // Another deployment's rows are never read.
       expect(await sharedBaseState(bases, { channel: "production", runtimeSha256: A })).toEqual({ state: "building" });
-      expect(await sharedBaseState(bases, { channel: "development", localOwner: "a".repeat(24), runtimeSha256: A })).toEqual({ state: "building" });
+      // A Local control plane builds none unless asked: off, never "building".
+      expect(await sharedBaseState(bases, { channel: "development", localOwner: "a".repeat(24), runtimeSha256: A })).toEqual({ state: "off" });
+      expect(await sharedBaseState(bases, { channel: "development", localOwner: "a".repeat(24), runtimeSha256: A, override: { kind: "auto" } })).toEqual({ state: "building" });
     });
   });
 
@@ -191,14 +193,14 @@ d("cloud v2 shared base sweeps", () => {
       expect(boat.calls.filter(call => call.op === "deleteSnapshot").map(call => call.args[0])).toEqual([a]);
     });
 
-    it("waits 24 hours from the supersession and never deletes the current or the previous runtime's base", async () => {
+    it("waits 6 hours from the supersession and never deletes the current or the previous runtime's base", async () => {
       const { a, org } = await oldBase();
       await pool.query("DELETE FROM cloud_v2_computers WHERE org_id = $1", [org]);
       await pool.query("UPDATE cloud_v2_computer_builds SET snapshot_id = NULL, snapshot_deleted_at = clock_timestamp() WHERE org_id = $1", [org]);
-      await supersededDaysAgo(a, 0.9);
+      await supersededDaysAgo(a, 0.2);
       expect((await sweep()).deleted).toEqual([]);
       for (const base of [name(B), name(C)]) await supersededDaysAgo(base, 30);
-      await supersededDaysAgo(a, 1.1);
+      await supersededDaysAgo(a, 0.3);
       expect((await sweep()).deleted).toEqual([a]);
       expect(boat.snapshots.has(name(B)) && boat.snapshots.has(name(C))).toBe(true);
       // With no previous runtime configured, the newest base of another runtime is kept instead.

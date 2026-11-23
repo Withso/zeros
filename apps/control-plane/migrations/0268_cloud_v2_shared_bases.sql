@@ -35,7 +35,7 @@ CREATE TABLE cloud_v2_shared_bases (
   created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
   ready_at timestamptz,
   finished_at timestamptz,
-  -- No longer current; deletion waits at least 24 hours from here and for every reference to end.
+  -- No longer current; deletion waits at least 6 hours from here and for every reference to end.
   superseded_at timestamptz,
   deleted_at timestamptz,
   CHECK (state <> 'ready' OR ready_at IS NOT NULL),
