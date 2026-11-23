@@ -1278,9 +1278,12 @@ export class CloudV2ReadyCopyForks<W extends ReadyCopyWorkspace = ReadyCopyWorks
   }
 
   /** The same read-back for a fork of a copy's machine that no create recorded (a restore onto a fork of a copy, a
-   * clean rebuild): by the copy that machine belongs to. True when it belongs to none. */
-  async verifyMachine(machineId: string, sandboxId: string): Promise<boolean> {
-    return this.readBack(await this.deps.copies.byMachine(machineId), sandboxId);
+   * clean rebuild): by the copy that machine belongs to. Null when it belongs to none, or that copy recorded no folders:
+   * there is no record to read back by, and the caller checks the checkouts are there at all. */
+  async verifyMachine(machineId: string, sandboxId: string): Promise<boolean | null> {
+    const copy = await this.deps.copies.byMachine(machineId);
+    if (!copy?.result?.length || copy.result.some(entry => !entry.checkoutFolder)) return null;
+    return this.readBack(copy, sandboxId);
   }
 
   private async readBack(copy: CloudV2ReadyCopy | null, sandboxId: string): Promise<boolean> {

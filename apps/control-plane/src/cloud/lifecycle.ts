@@ -1539,6 +1539,7 @@ export class CloudV2Lifecycle {
     const verified = await this.deps.readyCopies?.verifyMachine?.(source, sandboxId).catch(() => false);
     if (verified === true) return;
     if (verified === false) { await this.cloneDirectly(workspace, sandboxId); return; }
+    // No copy's record to read back by: every checkout must at least be there.
     const paths = [workspaceCheckoutPath(workspace), ...(await this.deps.repositories?.(workspace) ?? []).map(entry => `${CLOUD_V2_HOME}/${entry.checkoutFolder}`)];
     const read = await this.deps.compute.exec(sandboxId, `bash -c ${shellQuote(readyCopyCheckoutsCommand(paths).join("\n"))}`, 120).catch(() => null);
     if (read && read.exitCode === 0 && !read.timedOut && checkoutsMatch(read.stdout, paths.map(() => ({ commit: null })))) return;

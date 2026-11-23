@@ -231,8 +231,9 @@ d("cloud v2 ready copies", () => {
       boat.machine(moved.sandboxId)!.files.set(checkout, "d".repeat(40));
       expect(await forks().verifyMachine(copy.machineId!, moved.sandboxId)).toBe(false);
       expect(await row(1)).toMatchObject({ state: "ready", stale: true });
-      // A machine no copy owns is taken as it is.
-      expect(await forks().verifyMachine("bx_notacopy1", moved.sandboxId)).toBe(true);
+      // A machine no copy owns (a pruned generation's) has no record to read back by: null, and the caller reads that
+      // the checkouts are there at all.
+      expect(await forks().verifyMachine("bx_notacopy1", moved.sandboxId)).toBeNull();
     });
 
     it("never fails a workspace on a copy's word: a fork without its checkout clones directly, and that copy is rebuilt", async () => {
