@@ -152,6 +152,8 @@ export interface WorkspaceAvailability {
   rejection?: ConnectionRejection;
   stopError?: { code: string; message: string } | null;
   canWake?: boolean;
+  /** Cloud, ready copies: created while its organization's Cloud Computer is being prepared. */
+  preparingComputer?: boolean;
   /** Cloud only: chats come from stored history and messages go over HTTPS (the prompt outbox), so neither needs the
    * live connection. Absent for workers without the prompt outbox. */
   messagesWithoutLive?: boolean;
@@ -219,7 +221,9 @@ export function describeWorkspaceAvailability(
     case "setting_up":
       return {
         tone: "pending",
-        message: `This ${workspace} is still setting up.`,
+        message: input.cloud && input.preparingComputer
+          ? "Preparing the Cloud Computer… This workspace starts as soon as it is ready."
+          : `This ${workspace} is still setting up.`,
       };
     case "starting":
     case "waking":

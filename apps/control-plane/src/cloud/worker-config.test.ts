@@ -94,6 +94,11 @@ it("keeps retention off until a deployment enables it", () => {
   for (const [name, values] of [["CLOUD_V2_RETENTION_MAINTENANCE_PER_HOUR", ["0", "721", "2.5", "-1", "many"]],
     ["CLOUD_V2_RETENTION_MAINTENANCE_PER_DAY", ["0", "10000", "1e3", "many"]]] as const)
     for (const value of values) expect(() => loadConfig({ ...base, [name]: value })).toThrow(name);
+  // Ready copies' automatic bases: their own budget beside maintenance, the code's 4/hour and 30/day unless set.
+  expect(loadConfig(base).cloudV2).not.toHaveProperty("automaticBasePerHour");
+  expect(loadConfig({ ...base, CLOUD_V2_AUTOMATIC_BASE_PER_HOUR: "6", CLOUD_V2_AUTOMATIC_BASE_PER_DAY: "48" }).cloudV2)
+    .toMatchObject({ automaticBasePerHour: 6, automaticBasePerDay: 48 });
+  for (const value of ["0", "721", "many"]) expect(() => loadConfig({ ...base, CLOUD_V2_AUTOMATIC_BASE_PER_HOUR: value })).toThrow("CLOUD_V2_AUTOMATIC_BASE_PER_HOUR");
 });
 
 it("uses only a dedicated public canary key on Alpha and never accepts the worker signing key for that authority", () => {

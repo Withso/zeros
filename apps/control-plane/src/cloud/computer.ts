@@ -38,6 +38,9 @@ const INTERRUPTED_AFTER = "5 minutes";
 const BUILD_CONCURRENCY = 1;
 /** How often the builder looks for snapshots to refresh by themselves. */
 const REFRESH_SCAN_MS = 10 * 60_000;
+/** How often the base sweep runs, and how many organizations it looks at each time. */
+const BASE_SWEEP_MS = 60_000;
+const BASE_SWEEP_PAGE = 25;
 
 /** Up to 10 repositories while ready copies are off; with them the organization
  * level has no practical limit, so stored recipes read up to this many. */
@@ -88,6 +91,8 @@ export type CloudV2Build = {
   builderSandboxId: string | null; snapshotId: string | null; errorCode: string | null; createdBy: string | null;
   createdAt: string; startedAt: string | null; finishedAt: string | null;
   reason: CloudV2BuildReason; baseSnapshot: string | null; runtimeSha256: string | null;
+  /** Prepared by Zeros with no person behind it (ready copies): base-only, no source, no creator. */
+  automatic?: true;
 };
 export type CloudV2ComputerOverview = {
   activeBuildId: string | null; snapshotName: string | null; builds: CloudV2Build[];
@@ -98,9 +103,14 @@ export type CloudV2ComputerOverview = {
   installScript?: string | null;
   /** Ready copies are on: a build makes the base only, and repositories are not listed. */
   readyCopies?: true;
+  /** Ready copies: the base as ensureBase would find it ("none": made at first use or by the sweep). */
+  base?: CloudV2BaseState | { state: "none" };
 };
 export type CloudV2RefreshCandidate = {
-  organizationId: string; createdBy: string; recipe: CloudV2Recipe;
+  /** Null for an automatic base, which is refreshed as another automatic base. */
+  organizationId: string; createdBy: string | null; recipe: CloudV2Recipe;
+  /** The live build is a base (ready copies): with ready copies off it is never refreshed. */
+  baseOnly: boolean;
   /** The live build this candidate was read from; a newer one makes it stale. */
   activeBuildId: string;
   /** The live snapshot caches a runtime other than the one workspaces need. */
@@ -116,13 +126,35 @@ export type CloudV2ComputerOptions = {
   readyCopies?: boolean;
   /** CloudV2Config.sharedBaseSnapshot: the base of organizations without an install script. */
   sharedBaseSnapshot?: string;
+  /** Whether Boat has the shared base now (ensureBase reads it before taking any lock). */
+  sharedBaseAvailable?: () => Promise<boolean>;
+  /** The runtime a base made now records (the shared base made inline caches none of its own). */
+  runtimeSha256?: string;
+  /** Automatic base builds that need a machine, across the deployment (CLOUD_V2_AUTOMATIC_BASE_BUDGET). */
+  automaticBaseBudget?: { perHour: number; perDay: number };
 };
+
+/** Automatic base builds that make a machine: at most this many start per hour and per day, beside every other Boat
+ * use. A build a waiting create needs is never held back by it. The shared base makes no machine and is not counted. */
+export const CLOUD_V2_AUTOMATIC_BASE_BUDGET = { perHour: 4, perDay: 30 } as const;
+/** After an automatic base build fails: 15 minutes, doubling, at most 6 hours, until one succeeds. */
+export const AUTOMATIC_BASE_RETRY_FIRST_MS = 15 * 60_000;
+export const AUTOMATIC_BASE_RETRY_MAX_MS = 6 * 60 * 60_000;
+export function automaticBaseRetryDelay(failures: number): number {
+  return Math.min(AUTOMATIC_BASE_RETRY_MAX_MS, AUTOMATIC_BASE_RETRY_FIRST_MS * 2 ** Math.max(0, failures - 1));
+}
+/** A base being prepared, ready, failed after its backoff, or not this organization's to have (no cloud). */
+export type CloudV2BaseState =
+  | { state: "ready"; buildId: string }
+  | { state: "preparing"; buildId: string | null }
+  | { state: "failed"; buildId: string; errorCode: string; failures: number; nextAttemptAt: string }
+  | { state: "unavailable" };
 
 type Row = {
   id: string; org_id: string; version: number; recipe: CloudV2Recipe; state: CloudV2Build["state"];
   builder_sandbox_id: string | null; snapshot_id: string | null; error_code: string | null; created_by: string | null;
   created_at: Date; started_at: Date | null; finished_at: Date | null;
-  reason: CloudV2BuildReason; base_snapshot: string | null; runtime_sha256: string | null;
+  reason: CloudV2BuildReason; base_snapshot: string | null; runtime_sha256: string | null; automatic: boolean;
 };
 type ComputerConfiguration = {
   recipe: { repositories?: unknown } | null; recipe_source_targets: unknown;
@@ -135,17 +167,22 @@ type Resources = Row & {
   base_shared?: boolean;
   cleanup_requested_at: Date | null; builder_create_pending: boolean; builder_deleted_at: Date | null;
   snapshot_deleted_at: Date | null; operation_until: Date | null; active: boolean; pinned: boolean;
+  /** Kept for the setting being turned off again: the organization's legacy build. */
+  legacy: boolean;
 };
-const COLUMNS = "id, org_id, version, recipe, state, builder_sandbox_id, snapshot_id, error_code, created_by, created_at, started_at, finished_at, reason, base_snapshot, runtime_sha256";
+const COLUMNS = "id, org_id, version, recipe, state, builder_sandbox_id, snapshot_id, error_code, created_by, created_at, started_at, finished_at, reason, base_snapshot, runtime_sha256, automatic";
 const CURRENT_RETRY_INTENT = `(b.retry_of IS NULL OR (
   EXISTS(SELECT 1 FROM cloud_v2_computers c WHERE c.org_id=b.org_id
     AND c.active_build_id=b.automatic_base_build_id AND c.recipe_revision=b.automatic_recipe_revision)
   AND NOT EXISTS(SELECT 1 FROM cloud_v2_computer_builds newer WHERE newer.org_id=b.org_id AND newer.version>b.version)))`;
+/** A create is waiting on this automatic base: it is a create's machine, not the sweep's, and goes first. */
+const AUTOMATIC_WAITED_ON = `EXISTS (SELECT 1 FROM cloud_v2_workspaces w WHERE w.computer_build_id=b.id AND w.org_id=b.org_id AND w.state='creating')`;
 const build = (row: Row): CloudV2Build => ({
   id: row.id, organizationId: row.org_id, version: row.version, recipe: row.recipe, state: row.state,
   builderSandboxId: row.builder_sandbox_id, snapshotId: row.snapshot_id, errorCode: row.error_code, createdBy: row.created_by,
   createdAt: row.created_at.toISOString(), startedAt: row.started_at?.toISOString() ?? null, finishedAt: row.finished_at?.toISOString() ?? null,
   reason: row.reason, baseSnapshot: row.base_snapshot, runtimeSha256: row.runtime_sha256,
+  ...(row.automatic ? { automatic: true as const } : {}),
 });
 
 export const recipeChanged = () => new HttpError(409, "computer_recipe_changed", "The Cloud Computer changed. Review the latest version and try again.");
@@ -207,6 +244,11 @@ export class CloudV2Computers {
   }
 
   async overview(organizationId: string): Promise<CloudV2ComputerOverview> {
+    const overview = await this.readOverview(organizationId);
+    return this.options.readyCopies ? { ...overview, base: await this.baseState(organizationId) } : overview;
+  }
+
+  private async readOverview(organizationId: string): Promise<CloudV2ComputerOverview> {
     return withSystemTx(this.pool, async tx => {
       const computer = (await tx.query<{ active_build_id: string | null; snapshot_name: string | null; recipe: { repositories?: unknown } | null; recipe_revision: string; install_script: string | null }>(
         `SELECT active_build_id, snapshot_name, recipe, recipe_revision::text, install_script FROM cloud_v2_computers WHERE org_id = $1`, [organizationId])).rows[0];
@@ -367,6 +409,167 @@ export class CloudV2Computers {
     return withSystemTx(this.pool, tx => this.insertBuild(tx, organizationId, userId, parsed, sources, options, previous.key));
   }
 
+  /** Ready copies: hands its base to inline activations (a shared base made by ensureBase), as the builder's onActivated does. */
+  baseActivated?: (organizationId: string) => Promise<void>;
+
+  /**
+   * The organization's base, made sure of: ready, preparing, failed (still in its backoff), or unavailable (no cloud).
+   * With no base and nothing building, an organization without an install script gets the shared base at once, in
+   * this transaction and with no machine; any other gets an automatic build queued. One base per organization: the
+   * organization row is locked first, as every Cloud Computer path does. With ready copies off: unavailable.
+   */
+  async ensureBase(organizationId: string, now: Date = new Date(), options: { create?: boolean } = {}): Promise<CloudV2BaseState> {
+    if (!this.options.readyCopies) return { state: "unavailable" };
+    const shared = this.options.sharedBaseSnapshot;
+    // Boat is asked before any lock is taken.
+    const sharedAvailable = shared && this.options.sharedBaseAvailable ? await this.options.sharedBaseAvailable().catch(() => false) : false;
+    let activated = false;
+    const state = await withSystemTx(this.pool, async (tx): Promise<CloudV2BaseState> => {
+      // A create that finds the first failure of a run asks for one try now, rather than waiting out its 15 minutes;
+      // if that fails too the run is two long and it waits like everyone else. The sweep never asks early.
+      const current = await this.readBase(tx, organizationId, true, now, options.create === true);
+      if (current.kind !== "none") return current.state;
+      if (!current.installScript && shared && sharedAvailable) {
+        activated = true;
+        return { state: "ready", buildId: await this.insertSharedBase(tx, organizationId, shared, current.snapshotName) };
+      }
+      return { state: "preparing", buildId: await this.insertAutomatic(tx, organizationId, { reason: "manual", baseSnapshot: current.snapshotName }) };
+    });
+    if (activated) await this.baseActivated?.(organizationId).catch(() => undefined);
+    return state;
+  }
+
+  /** The organization's base as ensureBase would find it, changing nothing: "none" when nothing exists or is building. */
+  async baseState(organizationId: string, now: Date = new Date()): Promise<CloudV2BaseState | { state: "none" }> {
+    if (!this.options.readyCopies) return { state: "unavailable" };
+    return withSystemTx(this.pool, async tx => {
+      const current = await this.readBase(tx, organizationId, false, now);
+      return current.kind === "none" ? { state: "none" as const } : current.state;
+    });
+  }
+
+  private async readBase(tx: Tx, organizationId: string, lock: boolean, now: Date, retryFirstFailure = false): Promise<
+    { kind: "known"; state: CloudV2BaseState } | { kind: "none"; installScript: string | null; snapshotName: string | null }> {
+    const org = (await tx.query<{ enabled: boolean }>(`SELECT cloud_organization_enabled(o) AS enabled FROM organizations o
+      WHERE o.id=$1 AND o.deleted_at IS NULL AND o.lifecycle_status='active'${lock ? " FOR UPDATE" : ""}`, [organizationId])).rows[0];
+    if (!org?.enabled) return { kind: "known", state: { state: "unavailable" } };
+    const computer = (await tx.query<{ snapshot_name: string | null; install_script: string | null; active_build_id: string | null; active_base: boolean | null }>(
+      `SELECT c.snapshot_name, c.install_script, c.active_build_id, b.base_only AS active_base FROM cloud_v2_computers c
+       LEFT JOIN cloud_v2_computer_builds b ON b.id=c.active_build_id AND b.org_id=c.org_id AND b.state='succeeded'
+       WHERE c.org_id=$1${lock ? " FOR UPDATE OF c" : ""}`, [organizationId])).rows[0];
+    if (computer?.active_base && computer.snapshot_name && computer.active_build_id) return { kind: "known", state: { state: "ready", buildId: computer.active_build_id } };
+    const busy = (await tx.query<{ id: string; base_only: boolean }>(
+      `SELECT id, base_only FROM cloud_v2_computer_builds WHERE org_id=$1 AND state IN ('queued','building') ORDER BY version DESC LIMIT 1`,
+      [organizationId])).rows[0];
+    if (busy) return { kind: "known", state: { state: "preparing", buildId: busy.base_only ? busy.id : null } };
+    // Base builds that failed in a row since the last one that went live: the latest says why, and when to try again.
+    // The database's clock, as the sweep's own exclusion uses (sweepCandidates): one rule, one clock.
+    const recent = (await tx.query<{ id: string; state: string; error_code: string | null; finished_at: Date | null; at: Date }>(
+      `SELECT id, state, error_code, finished_at, clock_timestamp() AS at FROM cloud_v2_computer_builds WHERE org_id=$1 AND base_only
+       ORDER BY version DESC LIMIT 20`, [organizationId])).rows;
+    const failed = [];
+    for (const row of recent) { if (row.state !== "failed" && row.state !== "cancelled") break; failed.push(row); }
+    const last = failed[0];
+    if (last && !(retryFirstFailure && failed.length === 1)) {
+      const at = last.at ?? now;
+      const nextAt = new Date((last.finished_at ?? at).getTime() + automaticBaseRetryDelay(failed.length));
+      if (nextAt > at) return { kind: "known", state: { state: "failed", buildId: last.id, errorCode: last.error_code ?? "computer_build_failed",
+        failures: failed.length, nextAttemptAt: nextAt.toISOString() } };
+    }
+    return { kind: "none", installScript: computer?.install_script ?? null, snapshotName: computer?.snapshot_name ?? null };
+  }
+
+  /** An automatic base build, queued: no creator, no source, the organization's install script. */
+  private async insertAutomatic(tx: Tx, organizationId: string, options: { reason: CloudV2BuildReason; baseSnapshot: string | null;
+    runtimeSha256?: string; automaticBaseBuildId?: string; revision?: number; retryOf?: string; retryAttempt?: number }): Promise<string> {
+    const id = randomUUID();
+    await tx.query(
+      `INSERT INTO cloud_v2_computer_builds (id, org_id, version, recipe, state, created_by, reason, base_snapshot, runtime_sha256, source_targets,
+         source_policy_version, automatic_base_build_id, automatic_recipe_revision, retry_of, retry_attempt, base_only, install_script, automatic)
+       VALUES ($1, $2, coalesce((SELECT max(version) FROM cloud_v2_computer_builds WHERE org_id = $2), 0) + 1, '{"repositories":[]}', 'queued', NULL,
+         $3, $4, $5, '[]', 2, $6, $7, $8, $9, true, (SELECT install_script FROM cloud_v2_computers WHERE org_id = $2), true)`,
+      [id, organizationId, options.reason, options.baseSnapshot, options.runtimeSha256 ?? null, options.automaticBaseBuildId ?? null,
+        options.automaticBaseBuildId ? options.revision ?? 0 : null, options.retryOf ?? null, options.retryAttempt ?? 1]);
+    return id;
+  }
+
+  /** The shared base, live for this organization now: a build row with no machine, as the builder's activateShared writes. */
+  private async insertSharedBase(tx: Tx, organizationId: string, snapshotName: string, baseSnapshot: string | null): Promise<string> {
+    const id = randomUUID(), reference = cloudV2SharedSnapshotReference(snapshotName, id);
+    await tx.query(
+      `INSERT INTO cloud_v2_computer_builds (id, org_id, version, recipe, state, created_by, reason, base_snapshot, runtime_sha256, source_targets,
+         source_policy_version, base_only, base_shared, automatic, snapshot_id, started_at, finished_at)
+       VALUES ($1, $2, coalesce((SELECT max(version) FROM cloud_v2_computer_builds WHERE org_id = $2), 0) + 1, '{"repositories":[]}', 'succeeded', NULL,
+         'manual', $3, $4, '[]', 2, true, true, true, $5, clock_timestamp(), clock_timestamp())`,
+      [id, organizationId, baseSnapshot, this.options.runtimeSha256 ?? null, reference]);
+    await this.recordBaseLive(tx, organizationId);
+    await tx.query(
+      `INSERT INTO cloud_v2_computers (org_id, active_build_id, snapshot_name) VALUES ($1, $2, $3)
+       ON CONFLICT (org_id) DO UPDATE SET active_build_id = EXCLUDED.active_build_id, snapshot_name = EXCLUDED.snapshot_name,
+         updated_at = clock_timestamp()`, [organizationId, id, reference]);
+    return id;
+  }
+
+  /** A base is about to replace the live build. When that build installs repositories it becomes the legacy build,
+   * kept for the setting being turned off again, and the 30 days start now. Called before the live pointer moves. */
+  private async recordBaseLive(tx: Tx, organizationId: string): Promise<void> {
+    await tx.query(
+      `UPDATE cloud_v2_computers c SET legacy_build_id = c.active_build_id, base_live_at = clock_timestamp()
+       FROM cloud_v2_computer_builds live
+       WHERE c.org_id = $1 AND c.legacy_build_id IS NULL AND live.id = c.active_build_id AND live.org_id = c.org_id
+         AND live.state = 'succeeded' AND NOT live.base_only`, [organizationId]);
+  }
+
+  /** Organizations the sweep may give a base: cloud enabled by the one rule, not a Personal organization (it gets its
+   * base at first use), used (a project, a workspace not deleted, or a workspace active in the last 30 days), with no
+   * base and nothing building. Most recently used first. */
+  async sweepCandidates(limit: number): Promise<{ organizationId: string; installScript: string | null }[]> {
+    if (!this.options.readyCopies) return [];
+    const { rows } = await withSystemTx(this.pool, tx => tx.query<{ id: string; install_script: string | null }>(
+      `SELECT o.id, c.install_script FROM organizations o
+       LEFT JOIN cloud_v2_computers c ON c.org_id = o.id
+       LEFT JOIN cloud_v2_computer_builds live ON live.id = c.active_build_id AND live.org_id = o.id AND live.state = 'succeeded'
+       WHERE o.deleted_at IS NULL AND o.lifecycle_status = 'active' AND cloud_organization_enabled(o) AND NOT o.is_personal
+         AND NOT (coalesce(live.base_only, false) AND c.snapshot_name IS NOT NULL)
+         AND NOT EXISTS (SELECT 1 FROM cloud_v2_computer_builds q WHERE q.org_id = o.id AND q.state IN ('queued','building'))
+         -- Not in its failure backoff, as readBase reckons it (automaticBaseRetryDelay): the latest base build failed and
+         -- the delay for its run of failures has not passed. Otherwise those organizations would fill the page.
+         AND NOT EXISTS (SELECT 1 FROM (SELECT f.state, f.finished_at FROM cloud_v2_computer_builds f WHERE f.org_id = o.id AND f.base_only
+             ORDER BY f.version DESC LIMIT 1) last
+           WHERE last.state IN ('failed','cancelled') AND coalesce(last.finished_at, clock_timestamp()) + make_interval(secs => least(${AUTOMATIC_BASE_RETRY_MAX_MS / 1000},
+             ${AUTOMATIC_BASE_RETRY_FIRST_MS / 1000} * power(2, (SELECT count(*) - 1 FROM cloud_v2_computer_builds x WHERE x.org_id = o.id AND x.base_only
+               AND x.state IN ('failed','cancelled') AND x.version > coalesce((SELECT max(y.version) FROM cloud_v2_computer_builds y
+                 WHERE y.org_id = o.id AND y.base_only AND y.state NOT IN ('failed','cancelled')), 0))))) > clock_timestamp())
+         AND (EXISTS (SELECT 1 FROM cloud_projects p WHERE p.org_id = o.id)
+           OR EXISTS (SELECT 1 FROM cloud_v2_workspaces w WHERE w.org_id = o.id
+             AND (w.state <> 'deleted' OR coalesce(w.active_at, w.created_at) > clock_timestamp() - interval '30 days')))
+       ORDER BY (SELECT max(coalesce(w.active_at, w.created_at)) FROM cloud_v2_workspaces w WHERE w.org_id = o.id) DESC NULLS LAST, o.id
+       LIMIT $1`, [limit]));
+    return rows.map(row => ({ organizationId: row.id, installScript: row.install_script }));
+  }
+
+  /** Automatic base builds that may still start a machine under the budget, counting those already queued. */
+  async automaticBudgetRemaining(): Promise<number> {
+    const budget = this.options.automaticBaseBudget ?? CLOUD_V2_AUTOMATIC_BASE_BUDGET;
+    const used = (await withSystemTx(this.pool, tx => tx.query<{ hour: number; day: number }>(
+      `SELECT count(*) FILTER (WHERE state = 'queued' OR started_at > clock_timestamp() - interval '1 hour')::int AS hour,
+         count(*) FILTER (WHERE state = 'queued' OR started_at > clock_timestamp() - interval '1 day')::int AS day
+       FROM cloud_v2_computer_builds WHERE automatic AND NOT base_shared`))).rows[0]!;
+    return Math.max(0, Math.min(budget.perHour - used.hour, budget.perDay - used.day));
+  }
+
+  /** Legacy builds nothing needs any more: 30 days after the base went live, with no workspace left on them. */
+  async releaseLegacyBuilds(): Promise<number> {
+    if (!this.options.readyCopies) return 0;
+    const { rowCount } = await withSystemTx(this.pool, tx => tx.query(
+      `UPDATE cloud_v2_computers c SET legacy_build_id = NULL
+       WHERE c.legacy_build_id IS NOT NULL AND c.base_live_at < clock_timestamp() - interval '30 days'
+         AND EXISTS (SELECT 1 FROM cloud_v2_computer_builds b WHERE b.id = c.active_build_id AND b.org_id = c.org_id AND b.base_only)
+         AND NOT EXISTS (SELECT 1 FROM cloud_v2_workspaces w WHERE w.org_id = c.org_id AND w.computer_build_id = c.legacy_build_id
+           AND w.state <> 'deleted')`));
+    return rowCount ?? 0;
+  }
+
   private async insertBuild(tx: Tx, organizationId: string, userId: string, recipe: CloudV2Recipe, sources: readonly CloudSourceTarget[],
     options: { reason?: CloudV2BuildReason; configure?: boolean; runtimeSha256?: string; revision?: number }, expectedConfiguration?: string): Promise<CloudV2Build> {
     await this.lockOrganization(tx, organizationId, userId);
@@ -439,9 +642,11 @@ export class CloudV2Computers {
    * when the organization is busy, gone, or its live build changed. */
   async enqueueAutomatic(organizationId: string, expectedActiveBuildId: string, reason: "runtime" | "refresh", runtimeSha256?: string): Promise<CloudV2Build | null> {
     try {
-      const actor = (await withSystemTx(this.pool, tx => tx.query<{ created_by: string | null }>(
-        `SELECT b.created_by FROM cloud_v2_computers c JOIN cloud_v2_computer_builds b ON b.id=c.active_build_id AND b.org_id=c.org_id
+      const actor = (await withSystemTx(this.pool, tx => tx.query<{ created_by: string | null; automatic: boolean; base_only: boolean }>(
+        `SELECT b.created_by, b.automatic, b.base_only FROM cloud_v2_computers c JOIN cloud_v2_computer_builds b ON b.id=c.active_build_id AND b.org_id=c.org_id
          WHERE c.org_id=$1 AND c.active_build_id=$2 AND b.state='succeeded'`, [organizationId, expectedActiveBuildId]))).rows[0];
+      // An automatic base, or a base whose creator's account is gone, is refreshed as another automatic base: no actor, no source.
+      if (actor && (actor.automatic || (actor.base_only && !actor.created_by))) return this.options.readyCopies ? await this.enqueueAutomaticBase(organizationId, expectedActiveBuildId, reason, runtimeSha256) : null;
       if (!actor?.created_by) return null;
       await this.requireAdmin(organizationId, actor.created_by);
       const sources = await this.buildSourceTargets(organizationId, expectedActiveBuildId);
@@ -468,13 +673,33 @@ export class CloudV2Computers {
     }
   }
 
+  private async enqueueAutomaticBase(organizationId: string, expectedActiveBuildId: string, reason: "runtime" | "refresh",
+    runtimeSha256?: string): Promise<CloudV2Build | null> {
+    return withSystemTx(this.pool, async tx => {
+      await this.lockOrganization(tx, organizationId);
+      await this.requireCloud(tx, organizationId);
+      const busy = await tx.query(`SELECT 1 FROM cloud_v2_computer_builds WHERE org_id = $1 AND state IN ('queued','building')`, [organizationId]);
+      if (busy.rowCount) return null;
+      const live = (await tx.query<{ snapshot_name: string | null; recipe_revision: string }>(
+        `SELECT c.snapshot_name, c.recipe_revision::text FROM cloud_v2_computers c
+         JOIN cloud_v2_computer_builds b ON b.id = c.active_build_id AND b.org_id = c.org_id AND b.state = 'succeeded'
+           AND b.base_only AND (b.automatic OR b.created_by IS NULL)
+         WHERE c.org_id = $1 AND c.active_build_id = $2 AND c.snapshot_name IS NOT NULL FOR UPDATE OF c`, [organizationId, expectedActiveBuildId])).rows[0];
+      if (!live) return null;
+      const id = await this.insertAutomatic(tx, organizationId, { reason, baseSnapshot: live.snapshot_name, ...(runtimeSha256 ? { runtimeSha256 } : {}),
+        automaticBaseBuildId: expectedActiveBuildId, revision: Number(live.recipe_revision) });
+      return build((await tx.query<Row>(`SELECT ${COLUMNS} FROM cloud_v2_computer_builds WHERE id = $1`, [id])).rows[0]!);
+    });
+  }
+
   async retryInterrupted(runtimeSha256: string): Promise<number> {
     const candidates = await withSystemTx(this.pool, tx => tx.query<{ id: string; org_id: string }>(`SELECT b.id,b.org_id FROM cloud_v2_computer_builds b
       JOIN cloud_v2_computers c ON c.org_id=b.org_id AND c.active_build_id=b.automatic_base_build_id AND c.recipe_revision=b.automatic_recipe_revision
       JOIN organizations o ON o.id=b.org_id AND cloud_organization_enabled(o) AND o.deleted_at IS NULL AND o.lifecycle_status='active'
-      JOIN organization_members m ON m.org_id=b.org_id AND m.user_id=b.created_by AND m.role IN ('owner','admin')
-      JOIN users u ON u.id=m.user_id AND u.auth_status='active' AND u.deleted_at IS NULL
-      WHERE b.state='failed' AND b.error_code='computer_build_interrupted' AND b.reason IN ('runtime','refresh') AND b.retry_attempt<3
+      WHERE (b.automatic OR EXISTS (SELECT 1 FROM organization_members m
+          JOIN users u ON u.id=m.user_id AND u.auth_status='active' AND u.deleted_at IS NULL
+          WHERE m.org_id=b.org_id AND m.user_id=b.created_by AND m.role IN ('owner','admin')))
+        AND b.state='failed' AND b.error_code='computer_build_interrupted' AND b.reason IN ('runtime','refresh') AND b.retry_attempt<3
         AND b.runtime_sha256=$1 AND b.cleanup_requested_at IS NULL AND b.source_policy_version IN (2,3) AND b.source_targets IS NOT NULL
         AND NOT b.builder_create_pending AND (b.builder_sandbox_id IS NULL OR b.builder_deleted_at IS NOT NULL)
         AND (b.snapshot_id IS NULL OR b.snapshot_deleted_at IS NOT NULL) AND b.operation_until IS NULL
@@ -493,13 +718,21 @@ export class CloudV2Computers {
             WHERE b.id=$1 AND b.state='failed' AND b.error_code='computer_build_interrupted' AND b.reason IN ('runtime','refresh')
               AND b.retry_attempt<3 AND b.runtime_sha256=$2 AND b.cleanup_requested_at IS NULL
               AND b.finished_at<=clock_timestamp()-CASE WHEN b.retry_attempt=1 THEN interval '1 minute' ELSE interval '5 minutes' END
-              AND b.source_policy_version IN (2,3) AND b.source_targets IS NOT NULL AND b.created_by IS NOT NULL
+              AND b.source_policy_version IN (2,3) AND b.source_targets IS NOT NULL AND (b.created_by IS NOT NULL OR b.automatic)
               AND NOT b.builder_create_pending AND (b.builder_sandbox_id IS NULL OR b.builder_deleted_at IS NOT NULL)
               AND (b.snapshot_id IS NULL OR b.snapshot_deleted_at IS NOT NULL) AND b.operation_until IS NULL
               AND NOT EXISTS(SELECT 1 FROM cloud_v2_computer_builds newer WHERE newer.org_id=b.org_id AND newer.version>b.version)
               AND NOT EXISTS(SELECT 1 FROM cloud_v2_computer_builds child WHERE child.retry_of=b.id)
             FOR UPDATE OF b,c`, [candidate.id, runtimeSha256])).rows[0];
-          if (!row?.created_by || !row.runtime_sha256) return false;
+          if (!row?.runtime_sha256) return false;
+          if (row.automatic) {
+            if (!this.options.readyCopies) return false;
+            await this.requireCloud(tx, row.org_id);
+            await this.insertAutomatic(tx, row.org_id, { reason: row.reason, baseSnapshot: row.base_snapshot, runtimeSha256: row.runtime_sha256,
+              automaticBaseBuildId: row.automatic_base_build_id, revision: Number(row.recipe_revision), retryOf: row.id, retryAttempt: row.retry_attempt + 1 });
+            return true;
+          }
+          if (!row.created_by) return false;
           await this.requireAdminInTransaction(tx, row.org_id, row.created_by);
           const recipe = CloudV2RecipeSchema.safeParse(row.recipe);
           if (!recipe.success) return false;
@@ -531,8 +764,8 @@ export class CloudV2Computers {
    * one that is; a deferred computer waits until its next check. A build from
    * before builds recorded their runtime counts as having another runtime. */
   async refreshCandidates(runtimeSha256: string, limit = 25): Promise<CloudV2RefreshCandidate[]> {
-    const { rows } = await withSystemTx(this.pool, tx => tx.query<{ org_id: string; active_build_id: string; created_by: string; recipe: CloudV2Recipe; runtime_stale: boolean; refresh_due: boolean }>(
-      `SELECT * FROM (SELECT c.org_id, c.active_build_id, b.created_by, b.recipe, b.finished_at, c.refresh_next_at,
+    const { rows } = await withSystemTx(this.pool, tx => tx.query<{ org_id: string; active_build_id: string; created_by: string | null; recipe: CloudV2Recipe; base_only: boolean; runtime_stale: boolean; refresh_due: boolean }>(
+      `SELECT * FROM (SELECT c.org_id, c.active_build_id, b.created_by, b.recipe, b.base_only, b.finished_at, c.refresh_next_at,
          (NOT b.base_shared AND (b.runtime_sha256 IS DISTINCT FROM $1 OR (b.source_policy_version <> 3 AND NOT b.base_only))
            AND NOT EXISTS (SELECT 1 FROM cloud_v2_computer_builds f WHERE f.org_id = c.org_id AND f.reason = 'runtime'
              AND f.runtime_sha256 = $1 AND f.state IN ('failed','cancelled') AND f.created_at > clock_timestamp() - interval '6 hours'
@@ -550,7 +783,11 @@ export class CloudV2Computers {
        JOIN cloud_v2_computer_builds b ON b.id = c.active_build_id AND b.org_id = c.org_id AND b.state = 'succeeded'
        JOIN organizations o ON o.id = c.org_id AND o.deleted_at IS NULL AND o.lifecycle_status = 'active'
          AND cloud_organization_enabled(o)
-       WHERE c.snapshot_name IS NOT NULL AND b.created_by IS NOT NULL AND b.source_targets IS NOT NULL AND b.source_policy_version IN (2,3)
+       WHERE c.snapshot_name IS NOT NULL AND (b.created_by IS NOT NULL OR b.base_only) AND b.source_targets IS NOT NULL AND b.source_policy_version IN (2,3)
+         -- With ready copies on only a base is refreshed: a live build that installs repositories is replaced by the
+         -- organization's base (ensureBase), and refreshing it would queue a full build that holds the base back. Off,
+         -- only such builds are: refreshing a base would queue a build with no repository.
+         AND b.base_only = $3
          AND NOT EXISTS (SELECT 1 FROM cloud_v2_computer_builds q WHERE q.org_id = c.org_id AND q.state IN ('queued','building'))
          AND NOT EXISTS (SELECT 1 FROM cloud_v2_computer_builds f WHERE f.org_id=c.org_id AND f.version>b.version
            AND f.state IN ('failed','cancelled') AND (f.runtime_sha256=$1 OR f.runtime_sha256 IS NULL)
@@ -558,9 +795,9 @@ export class CloudV2Computers {
            AND (f.reason IN ('manual','reactivate') OR (f.error_code='computer_build_interrupted'
              AND NOT EXISTS(SELECT 1 FROM cloud_v2_computer_builds newer WHERE newer.org_id=f.org_id AND newer.version>f.version))))
        ) due WHERE runtime_stale OR refresh_due
-       ORDER BY runtime_stale DESC, coalesce(refresh_next_at, finished_at) NULLS FIRST, org_id LIMIT $2`, [runtimeSha256, limit]));
+       ORDER BY runtime_stale DESC, coalesce(refresh_next_at, finished_at) NULLS FIRST, org_id LIMIT $2`, [runtimeSha256, limit, this.options.readyCopies === true]));
     return rows.map(row => ({ organizationId: row.org_id, activeBuildId: row.active_build_id, createdBy: row.created_by, recipe: row.recipe,
-      runtimeStale: row.runtime_stale, refreshDue: row.refresh_due }));
+      baseOnly: row.base_only, runtimeStale: row.runtime_stale, refreshDue: row.refresh_due }));
   }
 
   /** The recipe of the build whose snapshot this build started from. */
@@ -654,6 +891,7 @@ export class CloudV2Computers {
   }
 
   async claim(runtimeSha256?: string): Promise<CloudV2Build | null> {
+    const budget = this.options.automaticBaseBudget ?? CLOUD_V2_AUTOMATIC_BASE_BUDGET;
     // Old claimers lock build rows before the drain; cancellation must precede it.
     await withSystemTx(this.pool, async tx => {
       await this.cancelUnauthorizedBuilds(tx);
@@ -667,8 +905,13 @@ export class CloudV2Computers {
        WHERE id = (SELECT b.id FROM cloud_v2_computer_builds b JOIN organizations o ON o.id=b.org_id
          WHERE b.state='queued' AND b.cleanup_requested_at IS NULL AND o.deleted_at IS NULL
            AND ${CURRENT_RETRY_INTENT}
-         ORDER BY b.created_at LIMIT 1 FOR UPDATE OF b SKIP LOCKED)
-       RETURNING ${COLUMNS}`, [runtimeSha256 ?? null]);
+           AND (NOT b.automatic OR ${AUTOMATIC_WAITED_ON} OR (
+             (SELECT count(*) FROM cloud_v2_computer_builds a WHERE a.automatic AND NOT a.base_shared
+               AND a.started_at > clock_timestamp() - interval '1 hour') < $2
+             AND (SELECT count(*) FROM cloud_v2_computer_builds a WHERE a.automatic AND NOT a.base_shared
+               AND a.started_at > clock_timestamp() - interval '1 day') < $3))
+         ORDER BY (b.automatic AND NOT ${AUTOMATIC_WAITED_ON}), b.created_at LIMIT 1 FOR UPDATE OF b SKIP LOCKED)
+       RETURNING ${COLUMNS}`, [runtimeSha256 ?? null, budget.perHour, budget.perDay]);
     });
     return rows[0] ? build(rows[0]) : null;
   }
@@ -731,17 +974,36 @@ export class CloudV2Computers {
     return { baseOnly: row?.base_only ?? false, installScript: row?.install_script ?? null };
   }
 
+  /** The build's organization, locked for its activation: as its creator, who must still be an admin, or for an
+   * automatic base, while the organization still has cloud. */
+  private async lockForActivation(tx: Tx, buildId: string): Promise<{ org_id: string; base_only: boolean }> {
+    const actor = (await tx.query<{ org_id: string; created_by: string | null; automatic: boolean; base_only: boolean }>(
+      "SELECT org_id, created_by, automatic, base_only FROM cloud_v2_computer_builds WHERE id=$1", [buildId])).rows[0];
+    if (actor?.automatic) {
+      await this.lockOrganization(tx, actor.org_id);
+      await this.requireCloud(tx, actor.org_id);
+      return actor;
+    }
+    if (!actor?.created_by) throw new HttpError(403, "forbidden", "Build creator is unavailable");
+    await this.lockOrganization(tx, actor.org_id, actor.created_by);
+    return actor;
+  }
+
+  private async requireCloud(tx: Tx, organizationId: string): Promise<void> {
+    const enabled = (await tx.query<{ enabled: boolean }>("SELECT cloud_organization_enabled(o) AS enabled FROM organizations o WHERE o.id=$1",
+      [organizationId])).rows[0]?.enabled;
+    if (!enabled) throw new HttpError(403, "forbidden", "Cloud is not enabled for this organization");
+  }
+
   /** Organizations without an install script share Zeros's base: no machine
    * is made, and no cleanup ever deletes that snapshot. */
   async activateShared(buildId: string, snapshotName: string, runtimeSha256: string): Promise<void> {
     // The shared name is every such organization's; each stores its own reference.
     const reference = cloudV2SharedSnapshotReference(snapshotName, buildId);
     await withSystemTx(this.pool, async tx => {
-      const actor = (await tx.query<{ org_id: string; created_by: string | null }>(
-        "SELECT org_id,created_by FROM cloud_v2_computer_builds WHERE id=$1", [buildId])).rows[0];
-      if (!actor?.created_by) throw new HttpError(403, "forbidden", "Build creator is unavailable");
-      await this.lockOrganization(tx, actor.org_id, actor.created_by);
+      const actor = await this.lockForActivation(tx, buildId);
       await this.cancelSupersededRetries(tx, buildId);
+      await this.recordBaseLive(tx, actor.org_id);
       const { rows } = await tx.query<{ org_id: string }>(
         `UPDATE cloud_v2_computer_builds SET state='succeeded', snapshot_id=$2, base_shared=true, runtime_sha256=$3,
            finished_at=clock_timestamp()
@@ -770,11 +1032,11 @@ export class CloudV2Computers {
   /** Makes the build live and returns the snapshot it replaced. */
   async activate(buildId: string, snapshotName: string): Promise<{ previousSnapshot: string | null }> {
     return withSystemTx(this.pool, async tx => {
-      const actor = (await tx.query<{ org_id: string; created_by: string | null }>(
-        "SELECT org_id,created_by FROM cloud_v2_computer_builds WHERE id=$1", [buildId])).rows[0];
-      if (!actor?.created_by) throw new HttpError(403, "forbidden", "Build creator is unavailable");
-      await this.lockOrganization(tx, actor.org_id, actor.created_by);
+      const actor = await this.lockForActivation(tx, buildId);
       await this.cancelSupersededRetries(tx, buildId);
+      // A base keeps the build it replaces as the legacy build; a build that installs repositories serves creates itself.
+      if (actor.base_only) await this.recordBaseLive(tx, actor.org_id);
+      else await tx.query("UPDATE cloud_v2_computers SET legacy_build_id = NULL WHERE org_id = $1 AND legacy_build_id IS NOT NULL", [actor.org_id]);
       const { rows } = await tx.query<{ org_id: string }>(
         `UPDATE cloud_v2_computer_builds SET state = 'succeeded', snapshot_id = $2, finished_at = clock_timestamp()
          WHERE id = $1 AND state = 'building' AND cleanup_requested_at IS NULL AND source_targets IS NOT NULL AND source_policy_version IN (2,3)
@@ -816,6 +1078,7 @@ export class CloudV2Computers {
     // snapshot. New pins need an active build.
     const { rows } = await withSystemTx(this.pool, tx => tx.query<Resources>(`SELECT b.*,
       EXISTS (SELECT 1 FROM cloud_v2_computers c WHERE c.active_build_id=b.id) AS active,
+      EXISTS (SELECT 1 FROM cloud_v2_computers c WHERE c.legacy_build_id=b.id) AS legacy,
       (EXISTS (SELECT 1 FROM cloud_v2_workspaces w WHERE w.computer_build_id=b.id AND w.org_id=b.org_id AND w.boat_sandbox_id IS NULL
         AND (w.state='creating' OR (w.restore_pending AND w.state<>'deleted')))
         OR EXISTS (SELECT 1 FROM cloud_v2_recovery_attempts a WHERE a.org_id=b.org_id
@@ -830,7 +1093,7 @@ export class CloudV2Computers {
     const { rows } = await withSystemTx(this.pool, tx => tx.query<{ id: string }>(`SELECT b.id FROM cloud_v2_computer_builds b WHERE
       b.builder_create_pending OR (b.builder_sandbox_id IS NOT NULL AND b.builder_deleted_at IS NULL)
       OR (b.cleanup_requested_at IS NOT NULL AND b.snapshot_deleted_at IS NULL)
-      OR (b.snapshot_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM cloud_v2_computers c WHERE c.active_build_id=b.id))
+      OR (b.snapshot_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM cloud_v2_computers c WHERE c.active_build_id=b.id OR c.legacy_build_id=b.id))
       ORDER BY b.created_at LIMIT 50`));
     return rows.map(row => row.id);
   }
@@ -847,15 +1110,18 @@ export class CloudV2Computers {
   }
 
   private async cancelUnauthorizedBuilds(tx: Tx, id?: string): Promise<void> {
+    // A person's build stops when they are no longer an admin; an automatic base, when its organization loses cloud.
     await tx.query(`UPDATE cloud_v2_computer_builds b SET state='cancelled',
-      error_code='computer_admin_access_lost',finished_at=clock_timestamp()
-      WHERE ($1::uuid IS NULL OR b.id=$1) AND b.state IN ('queued','building') AND NOT EXISTS (
+      error_code=CASE WHEN b.automatic THEN 'computer_cloud_unavailable' ELSE 'computer_admin_access_lost' END,finished_at=clock_timestamp()
+      WHERE ($1::uuid IS NULL OR b.id=$1) AND b.state IN ('queued','building') AND CASE WHEN b.automatic THEN NOT EXISTS (
+        SELECT 1 FROM organizations o WHERE o.id=b.org_id AND cloud_organization_enabled(o) AND o.deleted_at IS NULL AND o.lifecycle_status='active'
+      ) ELSE NOT EXISTS (
         SELECT 1 FROM organization_members m
         JOIN users u ON u.id=m.user_id AND u.auth_status='active' AND u.deleted_at IS NULL
         JOIN organizations o ON o.id=m.org_id AND cloud_organization_enabled(o)
           AND o.deleted_at IS NULL AND o.lifecycle_status='active'
         WHERE m.org_id=b.org_id AND m.user_id=b.created_by AND m.role IN ('owner','admin')
-      )`, [id ?? null]);
+      ) END`, [id ?? null]);
   }
 
   private async cancelSupersededRetries(tx: Tx, id?: string): Promise<void> {
@@ -982,6 +1248,7 @@ const GITHUB_ACCESS_FAILURES = new Set(["github_repository_unavailable", "github
 /** Runs queued builds on Boat, a few organizations at a time. */
 export class CloudV2ComputerBuilder {
   private lastRefreshScan: number;
+  private lastSweep = Number.NEGATIVE_INFINITY;
   private refreshing: Promise<void> | null = null;
   private closed = false;
 
@@ -1008,7 +1275,7 @@ export class CloudV2ComputerBuilder {
      * fail it. Defaults to one scan interval. */
     refreshDelayMs?: number;
     now?: () => number;
-    logger?: Pick<Console, "warn">;
+    logger?: Pick<Console, "warn"> & Partial<Pick<Console, "error">>;
     /** Ready copies: a base went live. Queues first copies and marks the rest stale. */
     onActivated?(build: { organizationId: string; reason: CloudV2BuildReason }): Promise<void>;
   }) {
@@ -1021,6 +1288,8 @@ export class CloudV2ComputerBuilder {
     await this.cleanup();
     if (this.closed) return;
     await computers.retryInterrupted(this.deps.runtime.sha256);
+    if (this.closed) return;
+    await this.sweepBases().catch(() => this.deps.logger?.warn("[cloud-v2] base sweep will retry"));
     if (this.closed) return;
     // GitHub reads can be slow; a scan runs beside admission, never before it.
     this.refreshing ??= this.scheduleRefreshes()
@@ -1041,6 +1310,28 @@ export class CloudV2ComputerBuilder {
 
   close(): void { this.closed = true; }
 
+  /** Ready copies: bases for organizations that have none, at most once a minute (BASE_SWEEP_MS). With no install script
+   * and the shared base at Boat, a base costs no machine and is made at once; any other is queued only while the
+   * automatic budget has room, so the queue never holds what cannot start soon. Legacy builds are released here too. */
+  private async sweepBases(): Promise<void> {
+    const { computers } = this.deps;
+    if (!computers.options.readyCopies) return;
+    const now = this.deps.now?.() ?? Date.now();
+    if (now - this.lastSweep < BASE_SWEEP_MS) return;
+    this.lastSweep = now;
+    await computers.releaseLegacyBuilds();
+    const shared = computers.options.sharedBaseSnapshot && computers.options.sharedBaseAvailable
+      ? await computers.options.sharedBaseAvailable().catch(() => false) : false;
+    let machines = await computers.automaticBudgetRemaining();
+    for (const candidate of await computers.sweepCandidates(BASE_SWEEP_PAGE)) {
+      if (this.closed) return;
+      const free = shared && !candidate.installScript;
+      if (!free && machines <= 0) continue;
+      const state = await computers.ensureBase(candidate.organizationId).catch(() => null);
+      if (!free && state?.state === "preparing" && state.buildId) machines--;
+    }
+  }
+
   private async runLocked(job: CloudV2Build): Promise<void> {
     const { computers } = this.deps;
     await computers.withBuildLock(job.id, async assertHeld => {
@@ -1052,6 +1343,9 @@ export class CloudV2ComputerBuilder {
         const code = (error as { code?: unknown } | null)?.code;
         await computers.append(job.id, `\n[zeros] build failed: ${typeof code === "string" ? code : "error"}\n`);
         await computers.fail(job.id, typeof code === "string" ? code : "computer_build_failed");
+        // One operator line per failure, so one per organization per backoff window: nobody pressed this build.
+        if (job.automatic) (this.deps.logger?.error ?? this.deps.logger?.warn)?.call(this.deps.logger,
+          `[cloud-v2] automatic base build failed org=${job.organizationId.slice(0, 8)} code=${typeof code === "string" ? code : "computer_build_failed"}`);
       } finally { clearInterval(beat); }
     }).catch(() => this.deps.logger?.warn("[cloud-v2] Computer build will retry"));
   }
@@ -1083,6 +1377,7 @@ export class CloudV2ComputerBuilder {
   private async repositoriesMoved(candidate: CloudV2RefreshCandidate): Promise<boolean | null> {
     const { remoteHead } = this.deps;
     if (!remoteHead) return true;
+    if (!candidate.createdBy) return null;
     let targets: CloudSourceTarget[];
     try {
       targets = await this.deps.computers.resolveSourceTargets(candidate.organizationId, candidate.createdBy,
@@ -1145,10 +1440,12 @@ export class CloudV2ComputerBuilder {
       assertHeld(); await compute.delete(sandboxId);
       assertHeld(); await computers.confirmDeleted(id, "builder");
     }
-    if (!resource.active && !resource.pinned && !resource.snapshot_deleted_at && resource.base_shared) {
+    // The legacy build is kept for the setting being turned off again, never past its organization's erasure.
+    const kept = resource.legacy && !resource.cleanup_requested_at;
+    if (!resource.active && !kept && !resource.pinned && !resource.snapshot_deleted_at && resource.base_shared) {
       // The shared Zeros base belongs to every organization on it: only the reference goes.
       assertHeld(); await computers.confirmDeleted(id, "snapshot");
-    } else if (!resource.active && !resource.pinned && !resource.snapshot_deleted_at) {
+    } else if (!resource.active && !kept && !resource.pinned && !resource.snapshot_deleted_at) {
       // Older builds may have cleared snapshot_id before a failed delete. Their
       // deterministic names still let org erasure verify every named snapshot.
       const name = resource.snapshot_id ?? (resource.cleanup_requested_at ? cloudV2SnapshotName(this.deps.channel, resource.org_id, resource.version, this.deps.localOwner) : null);
@@ -1162,9 +1459,16 @@ export class CloudV2ComputerBuilder {
   private async run(job: CloudV2Build, assertHeld: () => void): Promise<void> {
     const { compute, computers } = this.deps;
     // Old queued work cannot become a new trusted build during a rolling deploy.
-    if (!job.createdBy) throw Object.assign(new Error("no creator"), { code: "computer_build_creator_missing" });
-    await computers.resolveSourceTargets(job.organizationId, job.createdBy, await computers.buildSourceTargets(job.organizationId, job.id));
+    // An automatic base has no creator and no source: it clones nothing, so nothing is resolved and no token is minted.
+    if (job.automatic) {
+      if ((await computers.buildSourceTargets(job.organizationId, job.id)).length || !(await computers.buildBase(job.id)).baseOnly)
+        throw Object.assign(new Error("automatic build with source"), { code: "computer_build_creator_missing" });
+    } else {
+      if (!job.createdBy) throw Object.assign(new Error("no creator"), { code: "computer_build_creator_missing" });
+      await computers.resolveSourceTargets(job.organizationId, job.createdBy, await computers.buildSourceTargets(job.organizationId, job.id));
+    }
     const log = (text: string) => computers.append(job.id, text);
+    if (job.automatic) await log("[zeros] prepared automatically by Zeros: Boat's stock image and this organization's install script, no repository\n");
     await log(`[zeros] building Cloud Computer v${job.version}${REASON_LABEL[job.reason]}\n`);
     const base = await computers.buildBase(job.id), shared = computers.options.sharedBaseSnapshot;
     if (base.baseOnly && !base.installScript && shared) {
@@ -1253,7 +1557,7 @@ export class CloudV2ComputerBuilder {
       assertHeld();
       if (!await computers.running(job.id)) return;
     }
-    await computers.resolveSourceTargets(job.organizationId, job.createdBy!, await computers.buildSourceTargets(job.organizationId, job.id));
+    if (!job.automatic) await computers.resolveSourceTargets(job.organizationId, job.createdBy!, await computers.buildSourceTargets(job.organizationId, job.id));
     assertHeld();
     await computers.update(job.id, { recipe: { ...job.recipe, repositories: pinned } });
     assertHeld();

@@ -18,7 +18,7 @@ import { CloudV2BeginActiveReplySchema } from "../contract.js";
 import { teamSharingFixture } from "../team-sharing/test-fixture.js";
 import { executionIntentAuthority } from "./authority.js";
 
-export async function executionFixture(pool: pg.Pool, options: { lifecycle?: boolean; relay?: boolean; actingUserDefault?: boolean; runtimeCanaryKey?: string; teamOwnership?: boolean; personal?: boolean; authCache?: "off" | "shadow" | "on" } = {}) {
+export async function executionFixture(pool: pg.Pool, options: { lifecycle?: boolean; relay?: boolean; actingUserDefault?: boolean; runtimeCanaryKey?: string; teamOwnership?: boolean; personal?: boolean; authCache?: "off" | "shadow" | "on"; readyCopies?: boolean } = {}) {
   const seed = await teamSharingFixture(pool, { ownership: options.teamOwnership === true, personal: options.personal === true });
   const keys = { currentKeyVersion: 1, keys: { 1: Buffer.alloc(32, 27).toString("base64url") } };
   const signing = generateKeyPairSync("ed25519");
@@ -30,6 +30,7 @@ export async function executionFixture(pool: pg.Pool, options: { lifecycle?: boo
       ...(options.actingUserDefault === undefined ? {} : { actingUserDefault: options.actingUserDefault }),
       ...(options.teamOwnership === undefined ? {} : { teamOwnership: options.teamOwnership }),
       ...(options.personal ? { personalCloud: true } : {}),
+      ...(options.readyCopies ? { readyCopies: true } : {}),
       // TEST_EXECUTION_AUTH_CACHE=on reruns every execution suite with token verdicts served from memory.
       ...((options.authCache ?? process.env.TEST_EXECUTION_AUTH_CACHE) ? { executionAuthCache: (options.authCache ?? process.env.TEST_EXECUTION_AUTH_CACHE) as "off" | "shadow" | "on" } : {}),
       ...(options.runtimeCanaryKey ? { runtimeCanary: { keys: [{ id: "fixture", publicKey: options.runtimeCanaryKey }],
