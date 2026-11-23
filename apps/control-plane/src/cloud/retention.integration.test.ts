@@ -717,6 +717,49 @@ d("cloud v2 retention", () => {
     expect(prepareRepository).not.toHaveBeenCalled();
   });
 
+  describe("a fork of a ready copy is read back by that copy's record", () => {
+    const withCopies = (verifyMachine: (machine: string, sandboxId: string) => Promise<boolean | null>) =>
+      ({ readyCopies: { prepare: async () => null, fetchBase: async () => false, verifyMachine: vi.fn(verifyMachine) } });
+
+    it("reads back a restore onto a fork of a copy, which goes on either way (a copy found lacking is distrusted there)", async () => {
+      for (const answer of [true, false]) {
+        boat.write(vm, `${path("api")}/UNPUSHED`, "api work");
+        await stop();
+        await earlier(CLOUD_V2_BACKUP_DELAY_MS + 60_000);
+        await lifecycle().tick();
+        boat.machine(vm)!.state = "deleted";
+        await store.transition(id, ["stopped"], "starting");
+        const deps = withCopies(async () => answer);
+        await lifecycle(deps).tick();
+        const restored = await row();
+        expect(restored.restore_pending).toBe(false);
+        expect(boat.machine(restored.boat_sandbox_id)!.source).toBe(readyCopy);
+        expect(deps.readyCopies.verifyMachine.mock.calls).toEqual([[readyCopy, restored.boat_sandbox_id]]);
+        expect(boat.machine(restored.boat_sandbox_id)!.files.get(`${path("api")}/UNPUSHED`)).toBe("api work");
+        await pool.query("UPDATE cloud_v2_workspaces SET state='running' WHERE id=$1", [id]);
+        vm = restored.boat_sandbox_id;
+      }
+    });
+
+    for (const [answer, clones, all] of [[true, false, false], [false, true, true], [null, true, false]] as const)
+      it(`rebuilds clean from a fork its copy's read-back answers ${answer} for: ${clones ? "a direct clone" : "nothing cloned"}`, async () => {
+        // The archive lacks one checkout (two of three) or holds them all: the read-back's answer decides, and only a
+        // machine no copy records falls back to reading that the checkouts are there.
+        readyCopy = boat.stopped("zeros-ready-copy", all ? Object.fromEntries(REPOS.map(repo => [`${path(repo.folder)}/.git/HEAD`, "c".repeat(40)]))
+          : { [`${path("api")}/.git/HEAD`]: "c".repeat(40), [`${path("docs")}/.git/HEAD`]: "c".repeat(40) });
+        const prepareRepository = vi.fn(async () => {});
+        await stop();
+        boat.machine(vm)!.state = "deleted";
+        await store.transition(id, ["stopped"], "starting");
+        const deps = withCopies(async () => answer);
+        await lifecycle({ prepareRepository, ...deps }).tick();
+        const restored = await row();
+        expect(boat.machine(restored.boat_sandbox_id)!.source).toBe(readyCopy);
+        expect(deps.readyCopies.verifyMachine.mock.calls).toEqual([[readyCopy, restored.boat_sandbox_id]]);
+        expect(prepareRepository).toHaveBeenCalledTimes(clones ? 1 : 0);
+      });
+  });
+
   it("falls back to the Cloud Computer when the ready copy can no longer be forked", async () => {
     await stop();
     boat.machine(vm)!.state = "deleted";
