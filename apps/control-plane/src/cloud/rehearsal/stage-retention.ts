@@ -7,6 +7,7 @@ import { z } from "zod";
 import { RehearsalFailure, type StageContext } from "./contract.js";
 import { shiftClock } from "./clock.js";
 import { rebuildComputer } from "./stage-setup.js";
+import { reportMachineSnapshot } from "./steps.js";
 import { openBridge, call, check, clearEnvironment, ENVIRONMENT_PATH, seedEnvironments, createProject, createWorkspace, deleteProject, deleteWorkspace, getWorkspace, lifecycle, parse, readFile, shell, until,
   waitCopyReady, waitState, workspaceRoot, WorkspaceDocument } from "./steps.js";
 
@@ -94,6 +95,12 @@ export async function stageRetention(ctx: StageContext): Promise<Record<string, 
     return Number(rows[0]?.wakes) >= 2;
   });
   counts.wakes! += 2;
+  // Boat's record of each machine's archive after the wake's own stop (a seconds-old machine stopped while Boat still
+  // hydrates it can lose what it holds, 2026-11-23).
+  for (const [label, id] of [["wake_w", w.id], ["wake_k", k.id]] as const) {
+    const machine = (await getWorkspace(ctx, id, `${label}_machine`))?.boatSandboxId;
+    if (machine) await reportMachineSnapshot(ctx, machine, label, counts);
+  }
   const after = await documents(ctx, both, "wake_after");
   for (const [index, row] of after.entries())
     check(row.activeAt === shifted[index]!.activeAt && row.updatedAt === shifted[index]!.updatedAt, "invisible_wake", "document_changed");
@@ -128,6 +135,23 @@ export async function stageRetention(ctx: StageContext): Promise<Record<string, 
   check(scrubs.find(row => row.id === w.id)?.archive_scrub === "backup", "archived_wake_w", "not_backup");
   check(scrubs.find(row => row.id === k.id)?.archive_scrub === "clean", "archived_wake_k", "not_clean");
   counts.wakes! += 2;
+
+  // C6b: W opened on its own machine, after the maintenance wakes' stops (the 10-day wake, the archived wake's scrub):
+  // the unpushed commit and the untracked file written just before the person's stop are still on its disk. Then stopped
+  // again; its backup is untouched, and C7 restores from it.
+  ctx.step("own_disk_open");
+  await lifecycle(ctx, w.id, "start", "own_disk_open");
+  await waitState(ctx, w.id, "running", "own_disk_running");
+  bridge = await openBridge(ctx, w.id);
+  try {
+    const root = await workspaceRoot(bridge, w.id), scope = { workspaceId: w.id, cwd: root };
+    const log = await shell(ctx, bridge, { ...scope, cwd: second.checkoutPath }, `${prefix}pty-own`, "git log --format=%s -n 20", "own_disk_commit");
+    check(log.output.split(/\r?\n/).some(line => line.trim() === `${prefix}unpushed`), "own_disk_commit", "missing");
+    check(await readFile(bridge, scope, `${second.checkoutPath}/${prefix}untracked.txt`, "own_disk_untracked") === `${prefix}untracked\n`, "own_disk_untracked", "missing");
+  } finally { bridge.close(); }
+  counts.ownDiskKept = 1;
+  await lifecycle(ctx, w.id, "stop", "own_disk_stop");
+  await waitState(ctx, w.id, "stopped", "own_disk_stopped");
 
   // C7: W's machine deleted (the run's one deliberate machine deletion), then opened: restored from its backup.
   // The Cloud Computer is rebuilt (as a runtime change or the daily refresh does): the workspaces' own builds are replaced

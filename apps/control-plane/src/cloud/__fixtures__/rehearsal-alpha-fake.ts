@@ -44,6 +44,10 @@ export class FakeAlpha {
   bootDeadlineFromCreate = false;
   /** CLOUD_V2_SHARED_BASE_SNAPSHOT set and the organization has no install script: its base is live at once, no machine. */
   sharedBase = false;
+  /** What Boat reports as a machine's last snapshot attempt (the rehearsal prints it). */
+  snapshotStatus = "completed";
+  /** A create that fell back to a direct clone: no fork record. */
+  forkFallback = false;
   /** The organization's install script (#1260: with one, its base is its own build, never the shared one). */
   installScript: string | null = null;
   private recipeRevision = 0;
@@ -289,7 +293,7 @@ export class FakeAlpha {
         this.machines.get(row.boatSandboxId)!.state = "deleted";
         Object.assign(row, { state: "creating", boatSandboxId: "", waitingFor: base.id, computerBuildId: base.id, createdAtMs: this.now });
       }
-      this.workspaces.set(id, row); this.forks.add(id);
+      this.workspaces.set(id, row); if (!this.forkFallback) this.forks.add(id);
       return this.reply(201, { workspace: this.document(row) });
     }
     if (parts[2] === "workspaces" && parts[3]) {
@@ -442,6 +446,13 @@ export class FakeAlpha {
       release: () => this.counted(() => true), api: this.api(), bridge: id => this.bridge(id),
       boat: {
         inspect: id => this.counted(() => { const row = this.machines.get(id); return row && row.state !== "deleted" ? { ...row } : null; }),
+        snapshot: id => this.counted(() => {
+          const row = this.machines.get(id);
+          if (!row || row.state === "deleted") return null;
+          const created = new Date(this.now - 120_000).toISOString();
+          return { createdAt: created, stoppedAt: row.state === "stopped" ? new Date(this.now - 60_000).toISOString() : null, hydrated: true,
+            lastSnapshotStatus: this.snapshotStatus, lastSnapshotAttemptAt: new Date(this.now - 70_000).toISOString(), snapshotCompletedAt: new Date(this.now - 60_000).toISOString() };
+        }),
         delete: id => this.counted(() => { const row = this.machines.get(id); if (row) row.state = "deleted"; }),
         snapshotExists: name => this.counted(() => this.snapshots.has(name)),
         deleteSnapshot: name => this.counted(() => { this.snapshots.delete(name); }),

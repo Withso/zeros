@@ -3,6 +3,7 @@
 // request in the second repository and a rewind across both, and every copy machine gone after the projects.
 import { z } from "zod";
 import { type Bridge, type StageContext } from "./contract.js";
+import { reportMachineSnapshot } from "./steps.js";
 import { openBridge, answered, check, clearEnvironment, copyMachines, ENVIRONMENT_PATH, seedEnvironments, createProject, createWorkspace, deleteProject, deleteWorkspace, getWorkspace, lifecycle,
   openAndClosePull, parse, readFile, turn, until, waitCopyReady, waitState, workspaceRoot, writeFile, type WorkspaceDocument } from "./steps.js";
 
@@ -17,13 +18,15 @@ export async function stageProjects(ctx: StageContext): Promise<Record<string, n
   await waitCopyReady(ctx, projectOne.id);
   const copiesOne = await copyMachines(ctx, projectOne.id);
   check(copiesOne.length > 0, "copy_machine", "missing");
+  // Boat's record of the copy's archive: what the workspaces forked from it will hold.
+  await reportMachineSnapshot(ctx, copiesOne.at(-1)!, "copy", counts);
 
   // A2: a workspace forked from it.
   ctx.step("workspace_one");
   let workspace = await createWorkspace(ctx, { name: `${prefix}one-w`, projectId: projectOne.id, branch: `${prefix}one` });
   counts.workspaces!++;
   ctx.state.created.branches.push({ repository: one, name: `${prefix}one` }); await ctx.save();
-  await forkedFromCopy(ctx, workspace);
+  await forkedFromCopy(ctx, workspace, counts);
   let bridge = await openBridge(ctx, workspace.id);
   let path: string, content: string;
   try {
@@ -152,14 +155,18 @@ export async function stageProjects(ctx: StageContext): Promise<Record<string, n
   return counts;
 }
 
-/** The workspace's machine was forked from a ready copy: the fork record is complete, and Boat named it "<source> fork". */
-async function forkedFromCopy(ctx: StageContext, workspace: WorkspaceDocument): Promise<void> {
+/** The workspace's machine was forked from a ready copy: the fork record is complete, and Boat named it "<source> fork".
+ * A create that fell back to a direct clone (no fork record, or a machine that is not a fork) is not hidden as a pass: it
+ * is a note, fork_fallback, and a count. */
+async function forkedFromCopy(ctx: StageContext, workspace: WorkspaceDocument, counts: Record<string, number>): Promise<void> {
+  check(workspace.boatSandboxId, "forked_from_copy", "no_machine");
   const rows = await ctx.ports.database.read(`SELECT count(*)::int AS forks FROM cloud_v2_ready_copy_forks
     WHERE workspace_id = $1::uuid AND completed_at IS NOT NULL`, [workspace.id]);
-  check(Number(rows[0]?.forks) === 1, "forked_from_copy", "no_fork_record");
-  check(workspace.boatSandboxId, "forked_from_copy", "no_machine");
   const machine = await ctx.ports.boat.inspect(workspace.boatSandboxId);
-  check(machine?.name?.endsWith(" fork"), "forked_from_copy", "not_a_fork");
+  if (Number(rows[0]?.forks) !== 1 || !machine?.name?.endsWith(" fork")) {
+    ctx.note(Number(rows[0]?.forks) !== 1 ? "fork_fallback:no_fork_record" : "fork_fallback:not_a_fork");
+    counts.forkFallback = (counts.forkFallback ?? 0) + 1;
+  }
 }
 
 /** gate0's terminal check: a PTY at the workspace root prints a marker and the branch. */

@@ -90,9 +90,28 @@ async function wrap<T>(step: string, work: () => Promise<T>): Promise<T> {
   }
 }
 
+const RawSnapshot = z.object({ sandbox: z.object({
+  createdAt: z.string().max(64).nullable().optional().catch(null), stoppedAt: z.string().max(64).nullable().optional().catch(null),
+  hydrated: z.boolean().nullable().optional().catch(null), lastSnapshotStatus: z.string().max(32).nullable().optional().catch(null),
+  lastSnapshotAttemptAt: z.string().max(64).nullable().optional().catch(null), snapshotCompletedAt: z.string().max(64).nullable().optional().catch(null),
+}).passthrough() }).passthrough();
+
 export function liveBoat(input: { apiKey: string; billingOrg?: string }): Boat {
-  const compute = new BoatCloudV2Compute(new BoatApiClient({ apiKey: input.apiKey, timeoutMs: 20_000, ...(input.billingOrg ? { billingOrg: input.billingOrg } : {}) }));
+  const client = new BoatApiClient({ apiKey: input.apiKey, timeoutMs: 20_000, ...(input.billingOrg ? { billingOrg: input.billingOrg } : {}) });
+  const compute = new BoatCloudV2Compute(client);
   return {
+    async snapshot(machineId) {
+      if (!/^[A-Za-z0-9_-]{1,64}$/.test(machineId)) throw new RehearsalFailure("boat_snapshot_read", "machine_id");
+      try {
+        const { sandbox } = RawSnapshot.parse(await client.request(`/sandboxes/${machineId}`, { method: "GET" }));
+        return { createdAt: sandbox.createdAt ?? null, stoppedAt: sandbox.stoppedAt ?? null, hydrated: sandbox.hydrated ?? null,
+          lastSnapshotStatus: sandbox.lastSnapshotStatus ?? null, lastSnapshotAttemptAt: sandbox.lastSnapshotAttemptAt ?? null,
+          snapshotCompletedAt: sandbox.snapshotCompletedAt ?? null };
+      } catch (error) {
+        if ((error as { code?: unknown }).code === "provider_not_found") return null;
+        throw new RehearsalFailure("boat_snapshot_read", String((error as { code?: unknown }).code ?? "failed"));
+      }
+    },
     async inspect(machineId) {
       try { const row = await compute.inspect(machineId); return { name: row.name, state: row.state }; } catch (error) {
         if ((error as { code?: unknown }).code === "provider_not_found") return null;

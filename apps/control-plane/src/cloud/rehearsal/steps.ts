@@ -60,6 +60,25 @@ export type WorkspaceDocument = z.infer<typeof WorkspaceDocument>;
 const Reply = z.object({ workspace: WorkspaceDocument });
 const base = "/v1/cloud-v2/workspaces";
 
+/** Boat's record of a machine's archive, printed for the run: its snapshot status as a note
+ * (`<label>_snapshot:completed`, `…:failed`, `…:unknown`), and as counts its lifetime (create to stop), when its last
+ * snapshot attempt began and completed (seconds after create), and whether Boat had it hydrated. Never a failure: what
+ * it shows is evidence for the person reading the run (a copy stopped 11 s after create lost its files, 2026-11-23). */
+export async function reportMachineSnapshot(ctx: StageContext, machineId: string, label: string, counts: Record<string, number>): Promise<void> {
+  const read = ctx.ports.boat.snapshot ? await ctx.ports.boat.snapshot(machineId).catch(() => null) : null;
+  const status = (read?.lastSnapshotStatus ?? "unknown").toLowerCase().replace(/[^a-z0-9_]/g, "_").slice(0, 24);
+  ctx.note(`${label}_snapshot:${status}`);
+  if (!read) return;
+  const at = (value: string | null) => value ? Date.parse(value) : NaN, created = at(read.createdAt);
+  const seconds = (value: string | null) => Math.round((at(value) - created) / 1000);
+  if (Number.isFinite(created)) {
+    if (Number.isFinite(at(read.stoppedAt))) counts[`${label}LifetimeSeconds`] = seconds(read.stoppedAt);
+    if (Number.isFinite(at(read.lastSnapshotAttemptAt))) counts[`${label}SnapshotAttemptAfterCreateSeconds`] = seconds(read.lastSnapshotAttemptAt);
+    if (Number.isFinite(at(read.snapshotCompletedAt))) counts[`${label}SnapshotCompletedAfterCreateSeconds`] = seconds(read.snapshotCompletedAt);
+  }
+  if (read.hydrated !== null) counts[`${label}Hydrated`] = read.hydrated ? 1 : 0;
+}
+
 /** A machine id as a failure line may carry it: Boat's sandbox id, or "none". */
 const machineOf = (row: { boatSandboxId?: string | null | undefined }) => row.boatSandboxId && /^[A-Za-z0-9_-]{1,40}$/.test(row.boatSandboxId) ? row.boatSandboxId : "none";
 

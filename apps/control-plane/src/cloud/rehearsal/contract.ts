@@ -48,6 +48,9 @@ export interface Bridge {
 export interface Boat {
   /** Null when Boat no longer has the machine (404). */
   inspect(machineId: string): Promise<{ name: string | null; state: string } | null>;
+  /** Boat's own record of a machine's archive, read raw (2026-11-23: a copy stopped while hydrated false with an attempt
+   * in progress lost its files). Null when Boat no longer has the machine; any field Boat leaves out is null. */
+  snapshot?(machineId: string): Promise<MachineSnapshot | null>;
   delete(machineId: string): Promise<void>;
   /** A Cloud Computer's named snapshot: only the one this run's own base build made is ever deleted. */
   snapshotExists(name: string): Promise<boolean>;
@@ -71,6 +74,8 @@ export interface Github {
    * seeded environment file must be ignored, or the worker refuses it (cloud_environment_path_ignored_required). */
   ignores(repository: string, path: string): Promise<boolean>;
 }
+export type MachineSnapshot = { createdAt: string | null; stoppedAt: string | null; hydrated: boolean | null;
+  lastSnapshotStatus: string | null; lastSnapshotAttemptAt: string | null; snapshotCompletedAt: string | null };
 export type Query = (text: string, values?: unknown[]) => Promise<{ rows: Record<string, unknown>[]; rowCount: number }>;
 /** The Alpha database, least privilege first (alpha-operator.md): reads through one temporary read-only role
  * (pg_read_all_data, TTL 3600), minted on first read and deleted by `close()`, which the runner calls at the end of every

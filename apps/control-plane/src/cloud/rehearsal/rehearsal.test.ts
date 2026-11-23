@@ -126,16 +126,21 @@ describe("rehearsal stages against a fake Alpha", () => {
     expect(await runStages(ctx, ["provision", "projects", "retention"], options)).toBe(true);
     expect(lines.filter(line => line.startsWith("stage "))).toEqual(["stage provision: ok", "stage projects: ok", "stage retention: ok"]);
     expect(state.stages.provision?.counts).toEqual({ present: 4 });
-    expect(state.stages.projects?.counts).toEqual({ workspaces: 2, pulls: 2, turns: 3, copiesGone: 2, environments: 2 });
-    expect(state.stages.projects?.notes).toEqual(["environment:seeded"]);
-    expect(state.stages.retention?.notes).toEqual(["environment_case:seeded_edited"]);
+    // Boat's record of the copy's archive is printed: its status as a note, its lifetime and attempt times as counts.
+    expect(state.stages.projects?.counts).toEqual({ workspaces: 2, pulls: 2, turns: 3, copiesGone: 2, environments: 2,
+      copyLifetimeSeconds: 60, copySnapshotAttemptAfterCreateSeconds: 50, copySnapshotCompletedAfterCreateSeconds: 60, copyHydrated: 1 });
+    expect(state.stages.projects?.notes).toEqual(["copy_snapshot:completed", "environment:seeded"]);
+    expect(state.stages.retention?.notes).toEqual(["environment_case:seeded_edited", "wake_w_snapshot:completed", "wake_k_snapshot:completed"]);
+    // W opened on its own machine after the wakes' stops still holds the work written before the person's stop.
+    expect(state.stages.retention?.counts).toMatchObject({ ownDiskKept: 1 });
     // Every environment this run seeded is empty again at the end of its stage.
     expect([...alpha.environments.values()].every(environment => environment.files.size === 0)).toBe(true);
     expect(state.stages.retention?.counts).toMatchObject({ restored: 1, rebuilt: 1, removal: 1 });
     // Four shifts of both workspaces, then the removal's one of W alone.
     expect(alpha.shifts.map(shift => shift.ids.length)).toEqual([2, 2, 2, 2, 1]);
-    // Two copies, five workspace starts and opens in A, two copies' worth in C, plus C's Cloud Computer rebuild.
-    expect(state.machineStarts).toBe(12);
+    // Two copies, five workspace starts and opens in A, two copies' worth in C, C's Cloud Computer rebuild, and W's open on
+    // its own machine after the wakes.
+    expect(state.machineStarts).toBe(13);
     expect(state.stages.retention?.counts?.computerRebuilt).toBe(1);
     const { inventory } = await cleanup(ctx, { log: line => lines.push(line) });
     expect(inventory).toEqual(EMPTY);
@@ -181,12 +186,20 @@ describe("rehearsal stages against a fake Alpha", () => {
     expect(lines.filter(line => line.startsWith("stage "))).toEqual(["stage projects: failed release_identity not_ready"]);
   });
 
+  it("prints a copy archive Boat reports failed, and notes a create that fell back to a direct clone instead of passing it quietly", async () => {
+    const { alpha, state, ctx, options } = setup();
+    alpha.snapshotStatus = "failed"; alpha.forkFallback = true;
+    expect(await runStages(ctx, ["projects"], options)).toBe(true);
+    expect(state.stages.projects?.notes).toEqual(expect.arrayContaining(["copy_snapshot:failed", "fork_fallback:no_fork_record"]));
+    expect(state.stages.projects?.counts).toMatchObject({ forkFallback: 1 });
+  });
+
   it("stops creating machines at the run's cap", async () => {
     const { alpha, state } = setup();
     const ctx = stageContext(alpha.ports(), state, async () => undefined, { one: R1, two: FIXTURE_TWO }, TIMING, 3);
     const lines: string[] = [];
     expect(await runStages(ctx, ["projects"], { switches: new Set(["projects"] as const), maxActive: 10, runCap: 3, log: line => lines.push(line) })).toBe(false);
-    expect(lines.at(-1)).toMatch(/^stage projects: failed machine_cap run_cap$/);
+    expect(lines.filter(line => line.startsWith("stage ")).at(-1)).toMatch(/^stage projects: failed machine_cap run_cap$/);
     expect(state.machineStarts).toBe(3);
     expect((await cleanup(ctx, { log: () => undefined })).inventory).toEqual(EMPTY);
   });
@@ -232,9 +245,9 @@ describe("rehearsal environments and the worker-off record", () => {
     const { alpha, state, ctx, options } = setup();
     alpha.environments.set(alpha.repositoryId(R1), { revision: 3, files: new Map([[".env", "theirs"]]) });
     expect(await runStages(ctx, ["projects", "retention"], options)).toBe(true);
-    expect(state.stages.projects?.notes).toEqual(["environment_skipped:environment_exists"]);
+    expect(state.stages.projects?.notes).toEqual(["copy_snapshot:completed", "environment_skipped:environment_exists"]);
     expect(state.stages.projects?.counts?.environments).toBeUndefined();
-    expect(state.stages.retention?.notes).toEqual(["environment_case:hand_made_ignored", "environment_skipped:environment_exists"]);
+    expect(state.stages.retention?.notes).toEqual(["environment_case:hand_made_ignored", "environment_skipped:environment_exists", "wake_w_snapshot:completed", "wake_k_snapshot:completed"]);
     expect(alpha.environments.get(alpha.repositoryId(R1))).toEqual({ revision: 3, files: new Map([[".env", "theirs"]]) });
     expect(state.created.environments).toEqual([]);
     expect((await cleanup(ctx, { log: () => undefined })).inventory).toEqual(EMPTY);
@@ -244,7 +257,7 @@ describe("rehearsal environments and the worker-off record", () => {
     const { alpha, state, ctx, options } = setup();
     alpha.ignoresEnv = false;
     expect(await runStages(ctx, ["projects"], options)).toBe(true);
-    expect(state.stages.projects?.notes).toEqual(["environment_skipped:path_not_ignored"]);
+    expect(state.stages.projects?.notes).toEqual(["copy_snapshot:completed", "environment_skipped:path_not_ignored"]);
     expect(alpha.writes.filter(write => write.startsWith("PATCH"))).toEqual([]);
   });
 
