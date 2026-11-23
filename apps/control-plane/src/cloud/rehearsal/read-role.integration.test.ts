@@ -1,7 +1,7 @@
 // The rehearsal's reads through its own liveDatabase as a read role that is neither a superuser nor a table's owner
 // (pg_read_all_data, RLS on), on the migrated schema: app.system is set by its own statement before the read, so a row
 // that exists is seen. The single-statement wrapper it replaces (a CTE that sets app.system, the read beside it) let the
-// planner read first with the policy closed: 0 rows for a row that exists (Alpha, run 485395f0, copy_machine missing).
+// planner read first with the policy closed: 0 rows for a row that exists.
 import { randomUUID } from "node:crypto";
 import pg from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
@@ -25,7 +25,7 @@ d("rehearsal reads as the read role (integration)", () => {
   afterAll(() => pool.end());
   beforeEach(() => resetMigratedTestDatabase(pool));
 
-  /** liveDatabase over a PlanetScale fake, its connection the read role (SET ROLE: RLS applies, as on Alpha). */
+  /** liveDatabase over a PlanetScale fake, its connection the read role (SET ROLE: RLS applies, as in a deployment). */
   const reader = () => liveDatabase({ organization: "o", database: "alpha", tokenId: "t", token: "t", roleName: kind => `r-${kind}-${randomUUID()}`,
     planetScale: async (method, path) => path === "/databases/alpha" ? { status: 200, body: { default_branch: "main" } }
       : method === "POST" ? { status: 201, body: { id: "role", name: "n", username: "u", password: "p", access_host_url: "h.example" } }
@@ -44,12 +44,12 @@ d("rehearsal reads as the read role (integration)", () => {
     await pool.query(`INSERT INTO cloud_v2_computer_builds (id, org_id, version, recipe, state, created_by, reason, source_targets, source_policy_version,
         base_only, base_shared, automatic, snapshot_id, started_at, finished_at)
       VALUES ($1, $2, 1, '{"repositories":[]}', 'succeeded', NULL, 'manual', '[]', 2, true, true, true, $3, clock_timestamp(), clock_timestamp())`,
-      [build, org, `zeros-alpha-base-a218125eb26c@${build}`]);
-    await pool.query("INSERT INTO cloud_v2_computers (org_id, active_build_id, snapshot_name) VALUES ($1, $2, $3)", [org, build, `zeros-alpha-base-a218125eb26c@${build}`]);
-    await pool.query("INSERT INTO cloud_projects (id, org_id, name, level, owner_user_id, created_by) VALUES ($1, $2, 'zr-485395f0-one', 'personal', $3, $3)",
+      [build, org, `zeros-alpha-base-0f1e2d3c4b5a@${build}`]);
+    await pool.query("INSERT INTO cloud_v2_computers (org_id, active_build_id, snapshot_name) VALUES ($1, $2, $3)", [org, build, `zeros-alpha-base-0f1e2d3c4b5a@${build}`]);
+    await pool.query("INSERT INTO cloud_projects (id, org_id, name, level, owner_user_id, created_by) VALUES ($1, $2, 'zr-0123abcd-one', 'personal', $3, $3)",
       [project, org, user]);
     await pool.query(`INSERT INTO cloud_v2_ready_copies (id, org_id, project_id, generation, state, idempotency_key, created_by, computer_build_id, built_from_base, machine_id)
-      VALUES (gen_random_uuid(), $1, $2, 1, 'ready', gen_random_uuid()::text, $3, $4, $5, 'bx_copy0001')`, [org, project, user, build, `snapshot:zeros-alpha-base-a218125eb26c@${build}`]);
+      VALUES (gen_random_uuid(), $1, $2, 1, 'ready', gen_random_uuid()::text, $3, $4, $5, 'bx_copy0001')`, [org, project, user, build, `snapshot:zeros-alpha-base-0f1e2d3c4b5a@${build}`]);
     return { user, org, project, build };
   }
 
@@ -57,7 +57,7 @@ d("rehearsal reads as the read role (integration)", () => {
     const { org, project, build } = await seed();
     const database = reader();
     try {
-      // The statements that read nothing on Alpha (copyMachines, the computer by organization), and the run's base record.
+      // Reads by primary key and by an indexed uuid column (copyMachines, the computer by organization), and the run's base record.
       const state = newState(randomUUID(), org, new Date(Date.now() - 3_600_000), "personal");
       const ctx = { ports: { database }, state, start: () => {}, save: async () => {} } as unknown as StageContext;
       expect(await copyMachines(ctx, project)).toEqual(["bx_copy0001"]);
@@ -65,7 +65,7 @@ d("rehearsal reads as the read role (integration)", () => {
       expect(await database.read("SELECT id::text AS id FROM cloud_v2_computer_builds WHERE id = $1::uuid", [build])).toEqual([{ id: build }]);
       expect(await recordRunBases(ctx)).toEqual([build]);
       expect((await sharedBaseFacts(database, null, async () => true))).toMatchObject({ table: true,
-        perName: [{ name: "zeros-alpha-base-a218125eb26c", organizations: 1 }], ownBases: 0 });
+        perName: [{ name: "zeros-alpha-base-0f1e2d3c4b5a", organizations: 1 }], ownBases: 0 });
       // As the read role without app.system, nothing: the policy is what the set_config statement opens.
       const client = new pg.Client({ connectionString: process.env.TEST_DATABASE_URL });
       await client.connect();
@@ -73,7 +73,7 @@ d("rehearsal reads as the read role (integration)", () => {
         await client.query("SET ROLE zr_rehearsal_reader");
         await client.query("BEGIN READ ONLY");
         expect((await client.query("SELECT machine_id FROM cloud_v2_ready_copies WHERE project_id = $1::uuid", [project])).rows).toEqual([]);
-        // The old wrapper, on the plan an index scan takes (Alpha's tables are large enough to use one): the policy is still
+        // The old wrapper, on the plan an index scan takes (a large table uses one): the policy is still
         // closed when the row is read.
         await client.query("SET LOCAL enable_seqscan = off");
         const old = (await client.query(OLD_WRAPPER("SELECT machine_id FROM cloud_v2_ready_copies WHERE project_id = $1::uuid AND machine_id IS NOT NULL"), [project])).rows;

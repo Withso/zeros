@@ -63,7 +63,8 @@ const base = "/v1/cloud-v2/workspaces";
 /** Boat's record of a machine's archive, printed for the run: its snapshot status as a note
  * (`<label>_snapshot:completed`, `…:failed`, `…:unknown`), and as counts its lifetime (create to stop), when its last
  * snapshot attempt began and completed (seconds after create), and whether Boat had it hydrated. Never a failure: what
- * it shows is evidence for the person reading the run (a copy stopped 11 s after create lost its files, 2026-11-23). */
+ * it shows is evidence for the person reading the run: the provider can report a failed snapshot attempt when a machine
+ * is stopped seconds after its create, and this record makes a lost write visible. */
 export async function reportMachineSnapshot(ctx: StageContext, machineId: string, label: string, counts: Record<string, number>): Promise<void> {
   const read = ctx.ports.boat.snapshot ? await ctx.ports.boat.snapshot(machineId).catch(() => null) : null;
   const status = (read?.lastSnapshotStatus ?? "unknown").toLowerCase().replace(/[^a-z0-9_]/g, "_").slice(0, 24);

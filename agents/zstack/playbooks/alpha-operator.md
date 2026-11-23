@@ -22,8 +22,7 @@ WorkOS. Never use Production credentials or data.
   - Never set it inside the read itself. A CTE that sets it does not make the
     planner read after it unless the read depends on it, so the read can run
     with the policy still closed and silently return no rows, depending on the
-    plan. That happened to the rehearsal on Alpha (run 485395f0,
-    `copy_machine missing`).
+    plan.
   - A tool that can send only one statement must make the read depend on the
     CTE: `WITH cfg AS MATERIALIZED (SELECT set_config('app.system','on',true) AS v)
     SELECT x.* FROM cfg CROSS JOIN LATERAL (SELECT … WHERE cfg.v = 'on') x`,

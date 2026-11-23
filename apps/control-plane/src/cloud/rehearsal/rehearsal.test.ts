@@ -623,7 +623,7 @@ describe("rehearsal on the Personal route", () => {
     expect(alpha.pro()).toBe(false);
   });
 
-  it("cleans up again after a cleanup that ended Pro before its inventory (run 485395f0): Pro on, sign-in off, inventory clean, Pro ended", async () => {
+  it("cleans up again after a cleanup that ended Pro before its inventory: Pro on, sign-in off, inventory clean, Pro ended", async () => {
     const { alpha, ctx, options, state } = setup({ owner: "personal" });
     expect(await runStages(ctx, ["setup", "projects"], { ...options, switches: new Set(["projects", "personal", "retention"] as const) })).toBe(true);
     // As the failed cleanup left it: Pro put back to none (so the organization has no cloud), the sign-in still stored.

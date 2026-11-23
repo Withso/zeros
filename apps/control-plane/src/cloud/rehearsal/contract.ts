@@ -48,8 +48,9 @@ export interface Bridge {
 export interface Boat {
   /** Null when Boat no longer has the machine (404). */
   inspect(machineId: string): Promise<{ name: string | null; state: string } | null>;
-  /** Boat's own record of a machine's archive, read raw (2026-11-23: a copy stopped while hydrated false with an attempt
-   * in progress lost its files). Null when Boat no longer has the machine; any field Boat leaves out is null. */
+  /** Boat's own record of a machine's archive, read raw. The provider can report a failed snapshot attempt when a machine
+   * is stopped seconds after its create; the rehearsal prints this record so a lost write is visible. Null when Boat no
+   * longer has the machine; any field Boat leaves out is null. */
   snapshot?(machineId: string): Promise<MachineSnapshot | null>;
   delete(machineId: string): Promise<void>;
   /** A Cloud Computer's named snapshot: only the one this run's own base build made is ever deleted. */

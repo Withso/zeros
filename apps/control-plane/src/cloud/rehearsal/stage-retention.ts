@@ -95,8 +95,8 @@ export async function stageRetention(ctx: StageContext): Promise<Record<string, 
     return Number(rows[0]?.wakes) >= 2;
   });
   counts.wakes! += 2;
-  // Boat's record of each machine's archive after the wake's own stop (a seconds-old machine stopped while Boat still
-  // hydrates it can lose what it holds, 2026-11-23).
+  // Boat's record of each machine's archive after the wake's own stop, so a failed snapshot attempt at that stop is
+  // visible in the run.
   for (const [label, id] of [["wake_w", w.id], ["wake_k", k.id]] as const) {
     const machine = (await getWorkspace(ctx, id, `${label}_machine`))?.boatSandboxId;
     if (machine) await reportMachineSnapshot(ctx, machine, label, counts);
