@@ -4,6 +4,7 @@
 // answered by meaning: a marker file named UNPUSHED stands for work that is
 // not on GitHub, and an archive is the set of such files it captured.
 import { generateKeyPairSync, randomUUID } from "node:crypto";
+import { readFileSync } from "node:fs";
 import pg from "pg";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { CloudProviderError } from "./provider-error.js";
@@ -36,6 +37,10 @@ d("cloud v2 retention", () => {
   /** Branches GitHub has, by checkout path. */
   let remoteBranches: Set<string>;
   let backupFails: boolean;
+  /** C4B: the next backup left out a planned submodule folder holding a person's own clone. */
+  let partialBackup: boolean;
+  /** C4B: a restore cannot put the first planned submodule back (its repository is unreachable) while this is set. */
+  let submoduleUnreachable: boolean;
   /** Retention S3: machines whose stop marker exists; machines something wrote to since; the change check timing out;
    * the environment restore failing; the bytes the server seeded, by path. */
   /** Retention S4: prefixes listed in the bucket with no object of their own here (orphans, non-ids). */
@@ -55,7 +60,7 @@ d("cloud v2 retention", () => {
   beforeEach(async () => {
     setCloudV2RetentionDocuments(true);
     await resetMigratedTestDatabase(pool);
-    archives = new Map(); uploads = []; errors = []; warnings = []; timings = []; remoteBranches = new Set(); backupFails = false;
+    archives = new Map(); uploads = []; errors = []; warnings = []; timings = []; remoteBranches = new Set(); backupFails = false; partialBackup = false; submoduleUnreachable = false;
     markers = new Set(); written = new Set(); extraPrefixes = new Set(); objectTimes = new Map(); changeTimesOut = false; environmentRestoreFails = false; seeded = new Map();
     checkouts = REPOS.map(repo => path(repo.folder)); keepRefs = false;
     boat = new FakeBoat();
@@ -69,12 +74,21 @@ d("cloud v2 retention", () => {
         const object = OBJECT.exec(command)![0];
         archives.set(object, new Map([...machine.files].filter(([file]) => (file.endsWith("/UNPUSHED") || file.endsWith("/.env")
           || (keepRefs && file.includes("/.git/refs/heads/"))) && checkouts.some(checkout => command.includes(checkout) && file.startsWith(`${checkout}/`)))));
-        return { exitCode: 0, stdout: `zeros-checkpoint-saved bytes=100 sha256=${"e".repeat(64)}\n`, timedOut: false };
+        return { exitCode: 0, stdout: `${partialBackup ? "zeros-checkpoint-partial\n" : ""}zeros-checkpoint-saved bytes=100 sha256=${"e".repeat(64)}\n`, timedOut: false };
       }
       if (command.includes("zeros-checkpoint-restored")) {
         const object = OBJECT.exec(command)![0];
         for (const [file, content] of archives.get(object) ?? []) machine.files.set(file, content);
-        return { exitCode: 0, stdout: "zeros-checkpoint-restored\n", timedOut: false };
+        // A submodule part it could not put back stays held on the machine (UNPUSHED.held), not in its folder.
+        const held = [...machine.files.keys()].filter(file => submoduleUnreachable && file.includes("/lib/") && file.endsWith("/UNPUSHED"));
+        for (const file of held) { machine.files.set(`${file}.held`, machine.files.get(file)!); machine.files.delete(file); }
+        return { exitCode: 0, stdout: `${held.length ? "zeros-submodule-unrestored 1 checkpoint_repository_missing\n" : ""}zeros-checkpoint-restored\n`, timedOut: false };
+      }
+      if (command.includes("zeros-submodules-held")) {
+        const held = [...machine.files.keys()].filter(file => file.endsWith("/UNPUSHED.held"));
+        if (submoduleUnreachable) return { exitCode: 0, stdout: "zeros-submodule-unrestored 1 checkpoint_repository_missing\nzeros-submodules-held\n", timedOut: false };
+        for (const file of held) { machine.files.set(file.slice(0, -".held".length), machine.files.get(file)!); machine.files.delete(file); }
+        return { exitCode: 0, stdout: `${held.length ? "zeros-submodule-held-restored 1\n" : ""}zeros-submodules-held\n`, timedOut: false };
       }
       // Retention S3's commands on the machine.
       if (command.includes("zeros-stop-marker") && !command.includes("zeros-changed")) { markers.add(machine.id); written.delete(machine.id); return { exitCode: 0, stdout: "", timedOut: false }; }
@@ -523,6 +537,224 @@ d("cloud v2 retention", () => {
     expect(uploads).toHaveLength(1);
     expect(boat.commands.some(command => command.command.includes("zeros-backup-probe"))).toBe(false);
     expect((await row()).checkpoint_object).toMatch(OBJECT);
+  });
+
+  describe("a workspace's submodules (C4B)", () => {
+    /** acme/lib fetched at app/lib, as the worker does: its folder is one more checkout the machine's commands look at. */
+    const lib = { position: 0, repository: "acme/lib", repositoryId: "42", checkoutFolder: "proj/app/lib", repositoryFolder: "proj/app",
+      baseCommit: "c".repeat(40), gitDir: `modules/${"d".repeat(64)}` };
+    const others = REPOS.slice(1).map(repo => ({ repository: repo.repository, checkoutFolder: `proj/${repo.folder}`, baseBranch: "main" }));
+    const withSubmodules = { checkouts: async () => ({ repositories: others, submodules: [lib] }), submoduleToken: async () => ({ token: "synthetic-submodule-token" }) };
+    /** Before this change: the lifecycle knew no submodules, so its probe and backup never looked at one. */
+    const before = { checkouts: async () => ({ repositories: others, submodules: [] }) };
+    const sub = `${path("app")}/lib`;
+    const migration = () => pool.query(readFileSync(new URL("../../migrations/0272_cloud_v2_submodule_probe.sql", import.meta.url), "utf8")
+      .replace("SET LOCAL lock_timeout = '5s';", ""));
+    const fetched = () => pool.query(`INSERT INTO cloud_v2_workspace_submodules (workspace_id, position, path, status, repository, repository_id, commit, git_dir)
+      VALUES ($1, 0, 'lib', 'fetch', 'acme/lib', '42', $2, $3)`, [id, lib.baseCommit, lib.gitDir]);
+    beforeEach(() => { checkouts.push(sub); });
+    const stopWith = async (deps: Partial<CloudV2LifecycleDeps>) => {
+      await store.transition(id, ["running"], "stopping");
+      await lifecycle(deps).tick();
+      expect((await row()).state).toBe("stopped");
+    };
+
+    it("backs up a submodule's stash on a fork and brings it back when the machine is lost", async () => {
+      boat.write(vm, `${sub}/UNPUSHED`, "stash");
+      await stopWith(withSubmodules);
+      expect((await row()).backup_probe).toBe("dirty");
+      await earlier(CLOUD_V2_BACKUP_DELAY_MS + 60_000);
+      await lifecycle(withSubmodules).tick();
+      const forkId = [...boat.machines.values()].find(machine => machine.source === vm)!.id;
+      const backup = boat.commands.filter(command => command.machineId === forkId).map(command => command.command).find(command => command.includes("zeros-checkpoint-saved"))!;
+      expect(backup).toContain("step=submodule-1");
+      expect([...archives.get((await row()).checkpoint_object)!.keys()]).toContain(`${sub}/UNPUSHED`);
+      boat.machine(vm)!.state = "deleted";
+      await store.transition(id, ["stopped"], "starting");
+      await lifecycle(withSubmodules).tick();
+      expect(boat.machine((await row()).boat_sandbox_id)!.files.get(`${sub}/UNPUSHED`)).toBe("stash");
+    });
+
+    it("0272: a stop probed clean before this change is unknown for that stop, and its next maintenance backs it up within the budget", async () => {
+      boat.write(vm, `${sub}/UNPUSHED`, "stash");
+      await stopWith(before);
+      const stopped = await row();
+      expect(stopped.backup_probe).toBe("clean");
+      await fetched();
+      await migration();
+      expect(await row()).toMatchObject({ backup_probe: "unknown", backup_probe_generation: stopped.backup_probe_generation });
+      await earlier(CLOUD_V2_BACKUP_DELAY_MS + 60_000);
+      // Its backup is a fork the shared budget counts: with none left this hour, nothing is forked.
+      await pool.query("INSERT INTO cloud_v2_maintenance_wakes (workspace_id, attempt, kind) VALUES ($1, $2, 'backup_fork')", [id, randomUUID()]);
+      await lifecycle({ ...withSubmodules, maintenancePerHour: 1 }).tick();
+      expect(forks()).toEqual([]);
+      await pool.query("DELETE FROM cloud_v2_maintenance_wakes WHERE workspace_id=$1", [id]);
+      await lifecycle(withSubmodules).tick();
+      expect(forks()).toHaveLength(1);
+      expect([...archives.get((await row()).checkpoint_object)!.keys()]).toContain(`${sub}/UNPUSHED`);
+      boat.machine(vm)!.state = "deleted";
+      await store.transition(id, ["stopped"], "starting");
+      await lifecycle(withSubmodules).tick();
+      expect(boat.machine((await row()).boat_sandbox_id)!.files.get(`${sub}/UNPUSHED`)).toBe("stash");
+    });
+
+    it("0272: once that machine is gone, opening says so: no clean rebuild without the note", async () => {
+      remoteBranches.add(path("app"));
+      boat.write(vm, `${sub}/UNPUSHED`, "stash");
+      await stopWith(before);
+      const stoppedAt = (await row()).stopped_at;
+      await fetched();
+      await migration();
+      boat.machine(vm)!.state = "deleted";
+      await store.transition(id, ["stopped"], "starting");
+      await lifecycle(withSubmodules).tick();
+      expect((await row()).state).toBe("starting");
+      expect(await lostWork()).toEqual({ restored: "none", stoppedAt: stoppedAt.toISOString() });
+    });
+
+    /** Before this change: a submodule edit made the repository dirty, so a backup was taken, holding none of it. */
+    const oldBackup = async () => {
+      boat.write(vm, `${path("app")}/UNPUSHED`, "moved gitlink");
+      boat.write(vm, `${sub}/UNPUSHED`, "stash");
+      await stopWith(before);
+      await earlier(CLOUD_V2_BACKUP_DELAY_MS + 60_000);
+      await lifecycle(before).tick();
+      const saved = await row();
+      expect(saved.checkpoint_stop_generation).toBe(saved.stop_generation);
+      archives.get(saved.checkpoint_object)!.delete(`${sub}/UNPUSHED`);
+      return saved;
+    };
+
+    it("0272: a backup the old capture made is this stop's no more, so maintenance backs the stop up again and the stash survives", async () => {
+      const saved = await oldBackup();
+      await fetched();
+      await migration();
+      expect(await row()).toMatchObject({ checkpoint_object: saved.checkpoint_object, checkpoint_stop_generation: null });
+      await pool.query("UPDATE cloud_v2_workspaces SET checkpoint_retry_at=NULL WHERE id=$1", [id]);
+      await lifecycle(withSubmodules).tick();
+      const again = await row();
+      expect(again.checkpoint_object).not.toBe(saved.checkpoint_object);
+      expect(again.checkpoint_stop_generation).toBe(again.stop_generation);
+      expect([...archives.get(again.checkpoint_object)!.keys()]).toContain(`${sub}/UNPUSHED`);
+      boat.machine(vm)!.state = "deleted";
+      await store.transition(id, ["stopped"], "starting");
+      await lifecycle(withSubmodules).tick();
+      expect(boat.machine((await row()).boat_sandbox_id)!.files.get(`${sub}/UNPUSHED`)).toBe("stash");
+    });
+
+    it("0272: archived, its machine gone, restores answers pushed, and the open says the latest stop's work is missing", async () => {
+      await oldBackup();
+      await fetched();
+      await store.requestLifecycle(id, user, "archive");
+      // Boat has said the machine is gone: what opening brings back is the backup's alone.
+      await pool.query("UPDATE cloud_v2_workspaces SET machine_gone_at=clock_timestamp() WHERE id=$1", [id]);
+      expect((await store.get(id, user)).restores).toBe("all");
+      await migration();
+      expect((await store.get(id, user)).restores).toBe("pushed");
+      // Opened once its machine is gone: the old backup comes back as an earlier checkpoint, with the note.
+      await pool.query("UPDATE cloud_v2_workspaces SET archived_at=NULL WHERE id=$1", [id]);
+      boat.machine(vm)!.state = "deleted";
+      await store.transition(id, ["stopped"], "starting");
+      await lifecycle(withSubmodules).tick();
+      expect(await lostWork()).toMatchObject({ restored: "earlier" });
+    });
+
+    it("a backup that left out a person's own clone in a submodule folder never answers all", async () => {
+      boat.write(vm, `${sub}/UNPUSHED`, "their own clone's work");
+      partialBackup = true;
+      await stopWith(withSubmodules);
+      await earlier(CLOUD_V2_BACKUP_DELAY_MS + 60_000);
+      await lifecycle(withSubmodules).tick();
+      const saved = await pool.query("SELECT checkpoint_partial, checkpoint_stop_generation = stop_generation AS this_stop FROM cloud_v2_workspaces WHERE id=$1", [id]);
+      expect(saved.rows[0]).toEqual({ checkpoint_partial: true, this_stop: true });
+      await store.requestLifecycle(id, user, "archive");
+      await pool.query("UPDATE cloud_v2_workspaces SET machine_gone_at=clock_timestamp() WHERE id=$1", [id]);
+      expect((await store.get(id, user)).restores).toBe("pushed");
+      // The next backup that holds everything answers all again.
+      await pool.query("UPDATE cloud_v2_workspaces SET checkpoint_partial=false WHERE id=$1", [id]);
+      expect((await store.get(id, user)).restores).toBe("all");
+    });
+
+    it("a partial backup of a suspect stop: never all while either holds, 0271 and a later unchanged confirmation keep it so, and its restore notes lost work", async () => {
+      boat.write(vm, `${sub}/UNPUSHED`, "their own clone's work");
+      partialBackup = true;
+      boat.attemptAtStop = { inProgressReads: 1, failedReads: 0 };
+      await stopWith(withSubmodules);
+      await earlier(CLOUD_V2_BACKUP_DELAY_MS + 60_000);
+      await lifecycle(withSubmodules).tick();
+      const saved = (await pool.query(`SELECT checkpoint_object, checkpoint_partial, stop_generation::text,
+        checkpoint_stop_generation = stop_generation AS this_stop, stop_archive_failed_generation = stop_generation AS suspect FROM cloud_v2_workspaces WHERE id=$1`, [id])).rows[0];
+      expect(saved).toMatchObject({ checkpoint_partial: true, this_stop: true, suspect: true });
+      await store.requestLifecycle(id, user, "archive");
+      await pool.query("UPDATE cloud_v2_workspaces SET machine_gone_at=clock_timestamp() WHERE id=$1", [id]);
+      const restores = async () => (await store.get(id, user)).restores;
+      expect(await restores()).toBe("pushed");
+      // 0271 un-counts this stop's backup; a backup fork then finds the archive unchanged: confirmed after the suspect
+      // stop, so still not all.
+      await fetched(); await migration();
+      expect((await row()).checkpoint_stop_generation).toBeNull();
+      expect(await restores()).toBe("pushed");
+      await pool.query("UPDATE cloud_v2_workspaces SET checkpoint_reuse=jsonb_build_object('object', checkpoint_object, 'fingerprint', 'same') WHERE id=$1", [id]);
+      expect(await store.checkpointUnchanged(id, vm, saved.stop_generation, saved.checkpoint_object, "retry")).toBe(true);
+      expect(await restores()).toBe("pushed");
+      // Each alone keeps it from all: not suspect, still partial; not partial, still suspect; neither, all.
+      await pool.query("UPDATE cloud_v2_workspaces SET stop_archive_failed_generation=NULL WHERE id=$1", [id]);
+      expect(await restores()).toBe("pushed");
+      await pool.query("UPDATE cloud_v2_workspaces SET stop_archive_failed_generation=stop_generation, checkpoint_partial=false WHERE id=$1", [id]);
+      expect(await restores()).toBe("pushed");
+      await pool.query("UPDATE cloud_v2_workspaces SET stop_archive_failed_generation=NULL WHERE id=$1", [id]);
+      expect(await restores()).toBe("all");
+      // Partial and suspect again: an open after the machine is gone restores it and says the stop's work may be missing.
+      await pool.query(`UPDATE cloud_v2_workspaces SET checkpoint_partial=true, stop_archive_failed_generation=stop_generation, archived_at=NULL,
+        machine_gone_at=NULL WHERE id=$1`, [id]);
+      boat.machine(vm)!.state = "deleted";
+      await store.transition(id, ["stopped"], "starting");
+      await lifecycle(withSubmodules).tick();
+      expect(await lostWork()).toMatchObject({ restored: "earlier" });
+    });
+
+    it("records a submodule a restore could not put back, shows it, and puts it back at a later plain start once it can", async () => {
+      boat.write(vm, `${sub}/UNPUSHED`, "stash");
+      await stopWith(withSubmodules);
+      await earlier(CLOUD_V2_BACKUP_DELAY_MS + 60_000);
+      await lifecycle(withSubmodules).tick();
+      // The machine is lost; the restore cannot reach lib's repository.
+      boat.machine(vm)!.state = "deleted";
+      submoduleUnreachable = true;
+      await store.transition(id, ["stopped"], "starting");
+      await lifecycle(withSubmodules).tick();
+      const machine = (await row()).boat_sandbox_id;
+      expect(boat.machine(machine)!.files.has(`${sub}/UNPUSHED`)).toBe(false);
+      const recorded = (await pool.query("SELECT submodules_unrestored FROM cloud_v2_workspaces WHERE id=$1", [id])).rows[0].submodules_unrestored;
+      expect(recorded).toEqual([{ position: 0, path: "lib", folder: sub, reason: "repository_unavailable", since: expect.any(String) }]);
+      expect((await store.get(id, user)).unrestoredSubmodules).toEqual([{ path: sub, reason: "repository_unavailable", since: recorded[0].since }]);
+      // It runs, is stopped, and is started again on the same machine, the cause still there: still recorded, since unchanged.
+      await pool.query("UPDATE cloud_v2_workspaces SET state='running', restore_pending=false WHERE id=$1", [id]);
+      await stopWith(withSubmodules);
+      await store.transition(id, ["stopped"], "starting");
+      await lifecycle(withSubmodules).tick();
+      expect((await store.get(id, user)).unrestoredSubmodules).toEqual([{ path: sub, reason: "repository_unavailable", since: recorded[0].since }]);
+      // Again, the cause gone: back on that machine before its worker starts, and the record and the field gone.
+      submoduleUnreachable = false;
+      await pool.query("UPDATE cloud_v2_workspaces SET state='running' WHERE id=$1", [id]);
+      await stopWith(withSubmodules);
+      await store.transition(id, ["stopped"], "starting");
+      await lifecycle(withSubmodules).tick();
+      expect((await row()).boat_sandbox_id).toBe(machine);
+      expect(boat.machine(machine)!.files.get(`${sub}/UNPUSHED`)).toBe("stash");
+      const own = boat.commands.filter(command => command.machineId === machine).map(command => command.command);
+      expect(own.findLastIndex(command => command.includes("zeros-submodules-held")))
+        .toBeLessThan(own.findLastIndex(command => command.includes("/.config/zeros/worker-token")));
+      expect((await pool.query("SELECT submodules_unrestored FROM cloud_v2_workspaces WHERE id=$1", [id])).rows[0].submodules_unrestored).toBeNull();
+      expect((await store.get(id, user)).unrestoredSubmodules).toBeUndefined();
+    });
+
+    it("0272: leaves a clean stop alone without a fetched submodule", async () => {
+      await stopWith(before);
+      await pool.query(`INSERT INTO cloud_v2_workspace_submodules (workspace_id, position, path, status, reason) VALUES ($1, 0, 'vendor/x', 'skipped', 'no access')`, [id]);
+      await migration();
+      expect((await row()).backup_probe).toBe("clean");
+    });
   });
 
   describe("a stop keeps what the machine wrote", () => {

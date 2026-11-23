@@ -23,6 +23,17 @@ describe("a v2 reply becomes the popup's document", () => {
     expect(parse(lostWork).lostWork).toEqual(lostWork);
     expect(parse({ restored: "earlier" })).not.toHaveProperty("lostWork");
   });
+  it("carries the submodules a restore could not put back, drops a malformed list, and an older desktop ignores it", () => {
+    const unrestored = [{ path: "/home/user/proj/app/lib", reason: "repository_unavailable", since: "2026-11-23T08:00:00.000Z" }];
+    const parse = (value: unknown) => CloudWorkspaceDocumentSchema.parse(cloudV2Document(CloudV2WorkspaceSchema.parse({ ...reply, unrestoredSubmodules: value })));
+    expect(parse(unrestored).unrestoredSubmodules).toEqual(unrestored);
+    for (const malformed of [[], [{ ...unrestored[0], path: "/etc/passwd" }], [{ ...unrestored[0], since: "yesterday" }], "lib"])
+      expect(parse(malformed)).not.toHaveProperty("unrestoredSubmodules");
+    expect(CloudWorkspaceDocumentSchema.parse(cloudV2Document(CloudV2WorkspaceSchema.parse(reply)))).not.toHaveProperty("unrestoredSubmodules");
+    // A desktop from before the field: the same document still parses, the field dropped.
+    const older = CloudWorkspaceDocumentSchema.omit({ unrestoredSubmodules: true });
+    expect(older.parse(cloudV2Document(CloudV2WorkspaceSchema.parse({ ...reply, unrestoredSubmodules: unrestored })))).not.toHaveProperty("unrestoredSubmodules");
+  });
   it("drops a malformed field alone, and keeps absent fields absent", () => {
     const document = CloudWorkspaceDocumentSchema.parse(cloudV2Document(CloudV2WorkspaceSchema.parse({ ...reply, setup: { state: "paused" }, agentCost: -1 })));
     expect(document).not.toHaveProperty("setup");

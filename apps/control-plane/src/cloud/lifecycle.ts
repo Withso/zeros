@@ -18,9 +18,11 @@ import type { CloudV2ReadyCopyForks } from "./ready-copies.js";
 import type { CloudV2CheckpointFork, CloudV2CheckpointReuse, CloudV2CheckpointRetry, CloudV2CheckpointScope, CloudV2Store, CloudV2Workspace,
   CloudV2LifecycleWorkspace, CloudV2RestoreCreate } from "./store.js";
 import { CLOUD_V2_WORKER_PORT, type CloudV2WorkerTiming, type CloudV2WorkerBootTiming } from "./contract.js";
+import type { WorkspaceCheckouts, WorkspaceSubmoduleCheckout } from "./workspace-repositories.js";
+import { checkpointSubmodules, restoreSubmodules, submoduleOutcome, unrestoredPlace } from "./submodule-checkpoints.js";
 import { CLOUD_V2_BACKUP_PROBE_SECONDS, CLOUD_V2_CHECKPOINT_ERRORS, CLOUD_V2_CHECKPOINT_SECONDS, WORKER_OFF_COMMAND, WORKER_UNIT_CHECK, backupProbeCommand, checkpointCommand,
-  cloudV2CheckpointObject, parseBackupProbe, parseCheckpointResult, parseRestoreResult, restoreCommand, workerUnitOff, type BackupProbe,
-  type CloudV2CheckpointError, type CloudV2CheckpointStorage, environmentRestoreCommand, parseEnvironmentRestore } from "./checkpoint.js";
+  cloudV2CheckpointObject, heldSubmodulesCommand, parseBackupProbe, parseCheckpointResult, parseRestoreResult, restoreCommand, workerUnitOff, type BackupProbe,
+  CHECKPOINT_PARTIAL, type CloudV2CheckpointError, type RestoreSubmodule, type CloudV2CheckpointStorage, environmentRestoreCommand, parseEnvironmentRestore } from "./checkpoint.js";
 import { ARCHIVE_SCRUB_SECONDS, CHANGED_SINCE_STOP_SECONDS, archiveScrubCommand, changedSinceStopCommand, parseArchiveScrub, parseChangedSinceStop,
   stopMarkerCommand, type ArchiveScrubResult } from "./archive-scrub.js";
 
@@ -119,6 +121,9 @@ const ARCHIVE_CONFIRM_READS = 12, ARCHIVE_CONFIRM_MS = 5_000;
 const STOP_SETTLE_READS = 15;
 /** Boat's stock image home; repositories live at <home>/<owner>/<name>. */
 export const CLOUD_V2_HOME = "/home/user";
+
+/** A held apply touches only the recorded submodules, each at most a clone and a restore. */
+const HELD_SUBMODULES_SECONDS = 300;
 /** Boat's stock image runs commands as its one user, `user`. The worker and
  * agents run as that user too, so its credential lives in its config dir. */
 export const CLOUD_V2_WORKER_TOKEN_PATH = "/home/user/.config/zeros/worker-token";
@@ -168,7 +173,8 @@ export type CloudV2LifecycleDeps = {
     | "beginRestore" | "replaceSandbox" | "finishRestore" | "checkpointUnchanged" | "claimCheckpointRetry" | "beginCheckpointFork"
     | "checkpointForkCreated" | "checkpointForkGone" | "checkpointRetryNext"
     // Retention (`retention`); absent from older compositions, which never enable it.
-    | "recordStopProbe" | "restoreForkRefused" | "replaceLostSandbox" | "workspaceBranches" | "recordLostWork" | "recordStopArchiveSuspect"
+    | "recordStopProbe" | "restoreForkRefused" | "replaceLostSandbox" | "workspaceBranches" | "recordLostWork" | "recordUnrestoredSubmodules"
+    | "recordStopArchiveSuspect"
     | "claimMaintenanceWake" | "beginMaintenanceStop" | "adoptMaintenance" | "maintenanceHeld" | "finishMaintenance"
     | "startRetentionClocks" | "archiveInactive" | "archiveDepartedPrivate" | "restoreReturningPrivate" | "archiveForSystem" | "clearArchiveScrub"
     | "claimBackupRemovals" | "pendingBackupRemovals" | "finishBackupRemoval" | "sweepDepartedProjects" | "deleteDepartedProjects" | "missedWakes"
@@ -211,6 +217,11 @@ export type CloudV2LifecycleDeps = {
   prepareRepository?(workspace: CloudV2LifecycleWorkspace, sandboxId: string): Promise<void>;
   /** A workspace of several repositories: every one after the first, for its checkpoint and restore. */
   repositories?(workspace: CloudV2LifecycleWorkspace): Promise<{ repository: string; checkoutFolder: string; baseBranch: string }[]>;
+  /** C4: the repositories after the first and the submodules it fetched, in one statement (workspace-repositories.ts
+   * workspaceCheckouts). Preferred to `repositories` when given. */
+  checkouts?(workspace: CloudV2LifecycleWorkspace): Promise<WorkspaceCheckouts>;
+  /** C4: a read-only token for one planned, non-public submodule (workspace-submodules.ts lifecycleSubmoduleToken). */
+  submoduleToken?(workspace: CloudV2LifecycleWorkspace, repository: string): Promise<{ token: string }>;
   /** Cloud Computer builds share this loop; one runs at a time. */
   builds?: { tick(): Promise<void>; cleanup?(): Promise<void>; close?(): void };
   /** Ready copies (CloudV2Config.readyCopies): creates fork a repository's
@@ -247,7 +258,7 @@ function sandboxLost(error: unknown): boolean {
 }
 
 /** The checkpoint script's own step names; anything else the VM prints is not logged. */
-const CHECKPOINT_STEPS: ReadonlySet<string> = new Set(["attachments", "bundle", "decrypt", "download", "encrypt", "environment", "files", "fingerprint", "gitdir", "ignored", "marker", "node", "objects", "pack", "refs", "remotes", "repository", "sessions", "start", "stash", "turns", "upload", "upstream", "worktree"]);
+const CHECKPOINT_STEPS: ReadonlySet<string> = new Set(["attachments", "bundle", "decrypt", "download", "encrypt", "environment", "files", "fingerprint", "gitdir", "ignored", "marker", "node", "objects", "pack", "refs", "remotes", "repository", "sessions", "start", "stash", "submodule", "turns", "upload", "upstream", "worktree"]);
 const checkpointError = (code: CloudV2CheckpointError) => Object.assign(new Error("checkpoint failed"), { code });
 const checkpointCode = (error: unknown): CloudV2CheckpointError =>
   (CLOUD_V2_CHECKPOINT_ERRORS as readonly string[]).includes(errorCode(error)) ? errorCode(error) as CloudV2CheckpointError : "checkpoint_failed";
@@ -801,7 +812,7 @@ export class CloudV2Lifecycle {
             await store.recordLostWork(workspace.id, "earlier");
           }
           if (!await store.finishRestore(workspace.id, sandboxId)) return;
-        }
+        } else if (workspace.submodulesUnrestored?.length) await this.applyHeldSubmodules(workspace, sandboxId);
         if (!await (routed ?? route())) return;
         const delivered = await this.measure(workspace, "token_delivery", () => this.deliverToken(workspace, sandboxId, bootEnv));
         if (installed.kept && delivered) this.stageRuntime(sandboxId, boot.runtime);
@@ -979,7 +990,7 @@ export class CloudV2Lifecycle {
         `[cloud-v2] maintenance wake could not verify the worker off; stopping at once workspace=${row.id.slice(0, 8)}`);
       // Retention S3: did anything write into a checkout while the machine was awake? Then this stop's backup
       // or clean probe no longer describes it. Then the archived wake's scrub, after the worker is off.
-      const checkouts = [workspaceCheckoutPath(row), ...(await this.deps.repositories?.(row) ?? []).map(entry => `${CLOUD_V2_HOME}/${entry.checkoutFolder}`)];
+      const checkouts = [workspaceCheckoutPath(row), ...((await this.checkouts(row)).repositories).map(entry => `${CLOUD_V2_HOME}/${entry.checkoutFolder}`)];
       const changed = await compute.exec(vm, changedSinceStopCommand(CLOUD_V2_HOME, checkouts), CHANGED_SINCE_STOP_SECONDS).catch(() => null);
       await held();
       changedSinceStop = !changed || changed.timedOut || parseChangedSinceStop(changed.stdout);
@@ -1145,9 +1156,10 @@ export class CloudV2Lifecycle {
       `[cloud-v2] stop could not verify the worker off; recorded for the next wake workspace=${workspace.id.slice(0, 8)}`);
     let probe: BackupProbe = "unknown";
     try {
-      const others = await this.deps.repositories?.(workspace) ?? [];
+      const { repositories: others, submodules } = await this.checkouts(workspace);
       const result = await this.deps.compute.exec(sandboxId,
-        backupProbeCommand([workspaceCheckoutPath(workspace), ...others.map(entry => `${CLOUD_V2_HOME}/${entry.checkoutFolder}`)], CLOUD_V2_HOME), CLOUD_V2_BACKUP_PROBE_SECONDS);
+        backupProbeCommand([workspaceCheckoutPath(workspace), ...others.map(entry => `${CLOUD_V2_HOME}/${entry.checkoutFolder}`)], CLOUD_V2_HOME,
+          checkpointSubmodules(submodules)), CLOUD_V2_BACKUP_PROBE_SECONDS);
       if (result.exitCode === 0 && !result.timedOut) probe = parseBackupProbe(result.stdout);
     } catch (error) {
       this.deps.logger?.warn(`[cloud-v2] stop probe failed (${errorCode(error)}) workspace=${workspace.id.slice(0, 8)}`);
@@ -1185,7 +1197,7 @@ export class CloudV2Lifecycle {
       let key: Buffer | undefined;
       try {
         key = checkpoints.open(checkpoint.key, workspace.id, checkpoint.object);
-        const others = await this.deps.repositories?.(workspace) ?? [];
+        const others = (await this.checkouts(workspace)).repositories;
         const command = environmentRestoreCommand({ checkoutPath: workspaceCheckoutPath(workspace), home: CLOUD_V2_HOME, key,
           sha256: checkpoint.sha256, downloadUrl: await checkpoints.storage.downloadUrl(workspace.id, checkpoint.object),
           repositories: others.map(entry => `${CLOUD_V2_HOME}/${entry.checkoutFolder}`) });
@@ -1233,12 +1245,13 @@ export class CloudV2Lifecycle {
       // instance once deletion began, issues no upload at all.
       if (!await store.checkpointUpload(workspace.id, owner, generation, object, uploadUntil, ...scoped)) return "fenced";
       const reuse = await this.reusable(workspace);
-      // Every repository of a workspace of several, each in its own part of the archive.
-      const others = await this.deps.repositories?.(workspace) ?? [];
+      // Every repository of a workspace of several, each in its own part of the archive, and each submodule it fetched.
+      const { repositories: others, submodules } = await this.checkouts(workspace);
       const command = checkpointCommand({ checkoutPath: workspaceCheckoutPath(workspace), home: CLOUD_V2_HOME,
         baseBranch: workspace.baseBranch, key, uploadUrl: await checkpoints.storage.uploadUrl(workspace.id, object), ...(reuse ? { reuse } : {}),
         ...(this.retention && scope === "retry" ? { backup: true } : {}),
-        ...(others.length ? { repositories: others.map(entry => ({ checkoutPath: `${CLOUD_V2_HOME}/${entry.checkoutFolder}`, baseBranch: entry.baseBranch })) } : {}) });
+        ...(others.length ? { repositories: others.map(entry => ({ checkoutPath: `${CLOUD_V2_HOME}/${entry.checkoutFolder}`, baseBranch: entry.baseBranch })) } : {}),
+        ...(submodules.length ? { submodules: checkpointSubmodules(submodules) } : {}) });
       const { result, saved } = await this.measure(workspace, "checkpoint", async () => {
         const result = await this.deps.compute.exec(vm, command, CLOUD_V2_CHECKPOINT_SECONDS);
         return { result, saved: parseCheckpointResult(result.stdout) };
@@ -1263,7 +1276,8 @@ export class CloudV2Lifecycle {
       if (await checkpoints.storage.size(workspace.id, object) !== saved.bytes) { cause = "size"; throw checkpointError("checkpoint_upload_failed"); }
       // Only this stop, or a retry of it, records it: a late save from an earlier stop is refused.
       const recorded = await store.saveCheckpoint(workspace.id, owner, generation,
-        { object, key: checkpoints.seal(key, workspace.id, object), sha256: saved.sha256, bytes: saved.bytes, ...(saved.reuse ? { reuse: saved.reuse } : {}) },
+        { object, key: checkpoints.seal(key, workspace.id, object), sha256: saved.sha256, bytes: saved.bytes, ...(saved.reuse ? { reuse: saved.reuse } : {}),
+          ...(result.stdout.split(/\r?\n/).includes(CHECKPOINT_PARTIAL) ? { partial: true } : {}) },
         ...scoped);
       // Only the checkpoint this one replaced is retired, never anything newer;
       // anything a crashed upload left goes with the workspace.
@@ -1557,9 +1571,15 @@ export class CloudV2Lifecycle {
    * created from GitHub's when GitHub has it. When it does not (never pushed),
    * nothing is done and the worker creates it from the base branch, as at
    * create. Any other GitHub failure fails the step, which is retried. */
+  /** The repositories after the first and the submodules it fetched: one dependency call, as `repositories` was. */
+  private async checkouts(workspace: CloudV2LifecycleWorkspace): Promise<WorkspaceCheckouts> {
+    if (this.deps.checkouts) return this.deps.checkouts(workspace);
+    return { repositories: await this.deps.repositories?.(workspace) ?? [], submodules: [] };
+  }
+
   private async restoreBranches(workspace: CloudV2LifecycleWorkspace, sandboxId: string): Promise<void> {
     await this.deps.authorizeWorkspace?.(workspace);
-    const others = new Map((await this.deps.repositories?.(workspace) ?? []).map(entry => [entry.repository.toLowerCase(), entry.checkoutFolder]));
+    const others = new Map(((await this.checkouts(workspace)).repositories).map(entry => [entry.repository.toLowerCase(), entry.checkoutFolder]));
     for (const entry of await this.deps.store.workspaceBranches(workspace.id)) {
       const dir = entry.position === 0 ? workspaceCheckoutPath(workspace) : others.get(entry.repository.toLowerCase());
       if (!dir) continue;
@@ -1581,8 +1601,8 @@ export class CloudV2Lifecycle {
     const active = workspace.executionIntent !== undefined;
     if (active && !await this.deps.claimExecutionRestore?.(workspace, sandboxId)) throw checkpointError("checkpoint_restore_failed");
     const github = await this.deps.githubToken?.(workspace) ?? null;
-    // Each repository after the first is restored with its own token and clone URL.
-    const others = await this.deps.repositories?.(workspace) ?? [];
+    // Each repository after the first is restored with its own token and clone URL; each planned submodule with its own.
+    const { repositories: others, submodules: planned } = await this.checkouts(workspace);
     const repositories = await Promise.all(others.map(async entry => {
       const token = await this.deps.githubToken?.(workspace, entry.repository) ?? null;
       // Shared execution fetches every repository's objects with its own token, as for the first.
@@ -1590,12 +1610,13 @@ export class CloudV2Lifecycle {
       return { checkoutPath: `${CLOUD_V2_HOME}/${entry.checkoutFolder}`, repositoryUrl: `https://github.com/${entry.repository}.git`,
         ...(token ? { githubToken: token.token } : {}) };
     }));
+    const submodules = await this.restoreSubmodules(workspace, planned);
     const key = checkpoints.open(checkpoint.key, workspace.id, checkpoint.object);
     try {
       const command = restoreCommand({ checkoutPath: workspaceCheckoutPath(workspace), home: CLOUD_V2_HOME, key,
         sha256: checkpoint.sha256, downloadUrl: await checkpoints.storage.downloadUrl(workspace.id, checkpoint.object),
         repositoryUrl: `https://github.com/${workspace.repository}.git`, ...(github ? { githubToken: github.token } : {}), ...(active ? { active: true } : {}),
-        ...(repositories.length ? { repositories } : {}) });
+        ...(repositories.length ? { repositories } : {}), ...(submodules.length ? { submodules } : {}) });
       await this.deps.store.defer(workspace.id, "starting", CHECKPOINT_LEASE_MS, { failure: true });
       await this.deps.assertExecution?.(workspace);
       const result = await this.deps.compute.exec(sandboxId, command, CLOUD_V2_CHECKPOINT_SECONDS);
@@ -1603,7 +1624,44 @@ export class CloudV2Lifecycle {
       const restored = parseRestoreResult(result.stdout);
       if (!restored.ok) throw checkpointError(restored.code);
       if (result.exitCode !== 0 || result.timedOut) throw checkpointError("checkpoint_restore_failed");
+      // Never blocks the open: the rest is restored, and each such submodule's part is held on the machine, recorded
+      // on the row (the document shows it) and tried again at every later open until it is back.
+      await this.recordSubmoduleOutcome(workspace, planned, result.stdout, "restore");
     } finally { key.fill(0); }
+  }
+
+  /** C4B: what a restore or a held apply printed about submodules, recorded by their places in `planned`. A log line
+   * with the count only, never a path; no query when nothing changed. */
+  private async recordSubmoduleOutcome(workspace: CloudV2LifecycleWorkspace, planned: readonly WorkspaceSubmoduleCheckout[], stdout: string,
+    kind: "restore" | "start"): Promise<void> {
+    const { failed, restored } = submoduleOutcome(planned, stdout);
+    if (failed.length) this.deps.logger?.warn(`[cloud-v2] ${kind} left ${failed.length} submodule(s) unrestored workspace=${workspace.id.slice(0, 8)}`);
+    if (failed.length || restored.length) await this.deps.store.recordUnrestoredSubmodules(workspace.id, { failed, restored });
+  }
+
+  /** C4B: a start on the machine a restore left with held submodule parts (a plain wake): puts each back that it can,
+   * with its own credential, before the worker starts. Bounded, and never blocks the start. Only for a workspace whose
+   * row records some, so any other start costs no command and no query. */
+  private async applyHeldSubmodules(workspace: CloudV2LifecycleWorkspace, sandboxId: string): Promise<void> {
+    try {
+      const recorded = workspace.submodulesUnrestored ?? [];
+      const planned = (await this.checkouts(workspace)).submodules
+        .filter(entry => recorded.some(held => held.position === entry.position && held.path === unrestoredPlace(entry).path));
+      if (!planned.length) return;
+      const submodules = await this.restoreSubmodules(workspace, planned);
+      const result = await this.deps.compute.exec(sandboxId,
+        heldSubmodulesCommand({ checkoutPath: workspaceCheckoutPath(workspace), home: CLOUD_V2_HOME, submodules }), HELD_SUBMODULES_SECONDS);
+      if (result.exitCode !== 0 || result.timedOut || !result.stdout.split(/\r?\n/).includes("zeros-submodules-held")) throw new Error("held submodules failed");
+      await this.recordSubmoduleOutcome(workspace, planned, result.stdout, "start");
+    } catch (error) {
+      this.deps.logger?.warn(`[cloud-v2] held submodules not tried (${errorCode(error)}) workspace=${workspace.id.slice(0, 8)}`);
+    }
+  }
+
+  /** Each planned submodule as a restore takes it: a private one with its own read-only token (none when it cannot be
+   * had: it then fails on its own if it needs one), a public one with none. */
+  private restoreSubmodules(workspace: CloudV2LifecycleWorkspace, planned: readonly WorkspaceSubmoduleCheckout[]): Promise<RestoreSubmodule[]> {
+    return restoreSubmodules(planned, async repository => this.deps.submoduleToken?.(workspace, repository));
   }
 
   private async lookupBaseCommit(workspace: CloudV2LifecycleWorkspace): Promise<string | null> {

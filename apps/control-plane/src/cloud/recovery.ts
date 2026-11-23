@@ -2,7 +2,7 @@ import { randomBytes, randomUUID } from "node:crypto";
 import { workspaceCheckoutPath } from "./workspace-layout.js";
 import type { CloudV2Compute } from "./boat.js";
 import { BoatBootPendingError, BoatCreateRejectedError } from "./boat-client.js";
-import { CLOUD_V2_CHECKPOINT_SECONDS, cloudV2CheckpointObject, parseCheckpointResult, parseRestoreResult,
+import { CHECKPOINT_PARTIAL, CLOUD_V2_CHECKPOINT_SECONDS, cloudV2CheckpointObject, parseCheckpointResult, parseRestoreResult,
   restoreCommand } from "./checkpoint.js";
 import { CLOUD_V2_HOME, deliverWorkerTokenCommand, type CloudV2LifecycleDeps } from "./lifecycle.js";
 import { CLOUD_V2_WORKER_PORT } from "./contract.js";
@@ -10,7 +10,9 @@ import { GIT_LFS_INSTALL_COMMAND } from "./computer.js";
 import { pruneCloudRepositories } from "./source-authority.js";
 import { installRuntimeCommand, type CloudV2Runtime } from "./runtime.js";
 import { newCloudV2Token } from "./tokens.js";
-import type { CloudV2LifecycleWorkspace } from "./store.js";
+import type { CloudV2LifecycleWorkspace, CloudV2Store } from "./store.js";
+import { checkpointSubmodules, restoreSubmodules, submoduleOutcome } from "./submodule-checkpoints.js";
+import type { WorkspaceCheckouts } from "./workspace-repositories.js";
 import { CloudRecoveryStore, RECOVERY_WAIT_MS, RECOVERY_RETENTION_MS, type RecoveryAttempt } from "./recovery-store.js";
 import { recoveryCheckpointCommand, recoveryShutdownCommand, recoveryShutdownResult } from "./recovery-command.js";
 
@@ -36,6 +38,12 @@ export type CloudRecoveryDeps = {
   githubToken(workspace: CloudV2LifecycleWorkspace, repository?: { repository: string; repositoryId: string }): Promise<{ token: string }>;
   /** A workspace of several repositories: every one after the first, in order. */
   repositories?(workspace: CloudV2LifecycleWorkspace): Promise<{ repository: string; repositoryId: string; checkoutFolder: string; baseBranch: string }[]>;
+  /** C4B: the same repositories and the submodules the worker fetched, as the lifecycle's capture and restore take them. */
+  checkouts?(workspace: CloudV2LifecycleWorkspace): Promise<WorkspaceCheckouts>;
+  /** C4B: a read-only token for one planned, non-public submodule, minted for the recovery's actor. */
+  submoduleToken?(workspace: CloudV2LifecycleWorkspace, repository: string): Promise<{ token: string }>;
+  /** C4B: what the restore could not put back of a submodule (held on the machine), or put back (CloudV2Store). */
+  recordUnrestoredSubmodules?: CloudV2Store["recordUnrestoredSubmodules"];
   bootEnv(workspace: CloudV2LifecycleWorkspace, runtime: CloudV2Runtime): Promise<Record<string, string>>;
   sandboxName(workspace: CloudV2LifecycleWorkspace, attempt: string): string;
   sealToken(token: string, workspaceId: string): unknown;
@@ -143,6 +151,12 @@ export class CloudRecovery {
     } finally { await store.defer(id, a.lease_id, delay); }
   }
 
+  /** The repositories after the first and the fetched submodules, as the lifecycle reads them (one dependency call). */
+  private async checkouts(w: CloudV2LifecycleWorkspace): Promise<WorkspaceCheckouts> {
+    if (this.deps.checkouts) return this.deps.checkouts(w);
+    return { repositories: await this.deps.repositories?.(w) ?? [], submodules: [] };
+  }
+
   private async capture(a: RecoveryAttempt, w: CloudV2LifecycleWorkspace) {
     const { store, compute, checkpoints } = this.deps;
     const binding = { id: a.id, bootId: a.source_boot_id, deadline: a.deadline_at.getTime() };
@@ -156,18 +170,22 @@ export class CloudRecovery {
     try {
       if (!await store.upload(a.id, a.lease_id!, { object, key: checkpoints.seal(key, w.id, object), until: new Date(this.now() + UPLOAD_HORIZON_MS) }))
         throw fail("recovery_binding_changed");
-      // Every repository of a workspace of several, each in its own part of the archive.
-      const others = await this.deps.repositories?.(w) ?? [];
+      // Every repository of a workspace of several, each in its own part of the archive, and each fetched submodule,
+      // exactly as a stop's capture takes them.
+      const { repositories: others, submodules } = await this.checkouts(w);
       const command = recoveryCheckpointCommand({ ...binding, checkoutPath: workspaceCheckoutPath(w), home: CLOUD_V2_HOME,
         baseBranch: w.baseBranch, key, uploadUrl: await checkpoints.storage.uploadUrl(w.id, object),
-        ...(others.length ? { repositories: others.map(entry => ({ checkoutPath: `${CLOUD_V2_HOME}/${entry.checkoutFolder}`, baseBranch: entry.baseBranch })) } : {}) });
+        ...(others.length ? { repositories: others.map(entry => ({ checkoutPath: `${CLOUD_V2_HOME}/${entry.checkoutFolder}`, baseBranch: entry.baseBranch })) } : {}),
+        ...(submodules.length ? { submodules: checkpointSubmodules(submodules) } : {}) });
       await this.current(a);
       const result = await compute.exec(a.source_sandbox_id, command, CLOUD_V2_CHECKPOINT_SECONDS);
       const saved = parseCheckpointResult(result.stdout);
       await this.current(a);
       if (!saved.ok || saved.unchanged || result.exitCode !== 0 || result.timedOut) throw fail("recovery_capture_unconfirmed");
       if (await checkpoints.storage.size(w.id, object) !== saved.bytes) throw fail("checkpoint_upload_failed");
-      if (!await store.captured(a.id, a.lease_id!, { object, sha256: saved.sha256, bytes: saved.bytes })) throw fail("recovery_binding_changed");
+      const partial = result.stdout.split(/\r?\n/).includes(CHECKPOINT_PARTIAL);
+      if (!await store.captured(a.id, a.lease_id!, { object, sha256: saved.sha256, bytes: saved.bytes, ...(partial ? { partial } : {}) }))
+        throw fail("recovery_binding_changed");
     } finally { key.fill(0); }
   }
 
@@ -210,7 +228,10 @@ export class CloudRecovery {
     if (!request.from) { await compute.exec(sandbox, GIT_LFS_INSTALL_COMMAND, 300).catch(() => {}); await this.current(a); }
     if (!await store.claimRestore(a.id, a.lease_id!)) throw fail("checkpoint_restore_unconfirmed");
     const github = await this.deps.githubToken(w), object = a.checkpoint_object!;
-    // Each repository after the first fetches with its own token, before any checkpoint content exists.
+    // Each repository after the first fetches with its own token, before any checkpoint content exists; each planned
+    // submodule with its own, so the active restore puts its part back into the repository's new Git directory.
+    const planned = (await this.checkouts(w)).submodules;
+    const submodules = await restoreSubmodules(planned, async repository => this.deps.submoduleToken?.(w, repository));
     const repositories = await Promise.all((await this.deps.repositories?.(w) ?? []).map(async entry => ({
       checkoutPath: `${CLOUD_V2_HOME}/${entry.checkoutFolder}`, repositoryUrl: `https://github.com/${entry.repository}.git`,
       githubToken: (await this.deps.githubToken(w, { repository: entry.repository, repositoryId: entry.repositoryId })).token })));
@@ -219,12 +240,18 @@ export class CloudRecovery {
       const command = restoreCommand({ checkoutPath: workspaceCheckoutPath(w), home: CLOUD_V2_HOME, key,
         sha256: a.checkpoint_sha256!, downloadUrl: await checkpoints.storage.downloadUrl(w.id, object),
         repositoryUrl: `https://github.com/${w.repository}.git`, githubToken: github.token, active: true, recovery: true,
-        ...(repositories.length ? { repositories } : {}) });
+        ...(repositories.length ? { repositories } : {}), ...(submodules.length ? { submodules } : {}) });
       await this.current(a);
       const result = await compute.exec(sandbox, command, CLOUD_V2_CHECKPOINT_SECONDS);
       await this.current(a);
       const restored = parseRestoreResult(result.stdout);
       if (!restored.ok || result.exitCode !== 0 || result.timedOut) throw fail("checkpoint_restore_unconfirmed");
+      // As a stop's restore: a submodule it could not put back is held on the machine and recorded, and every later
+      // open tries it again. Never fails the recovery, whose restore is done.
+      const { failed, restored: back } = submoduleOutcome(planned, result.stdout);
+      if (failed.length) this.deps.logger?.warn(`[cloud-v2] recovery left ${failed.length} submodule(s) unrestored workspace=${w.id.slice(0, 8)}`);
+      if (failed.length || back.length) await this.deps.recordUnrestoredSubmodules?.(w.id, { failed, restored: back })
+        .catch(error => this.deps.logger?.warn(`[cloud-v2] recovery's unrestored submodules not recorded (${reason(error)}) workspace=${w.id.slice(0, 8)}`));
       if (!await store.restored(a.id, a.lease_id!)) throw fail("recovery_binding_changed");
     } finally { key.fill(0); }
   }

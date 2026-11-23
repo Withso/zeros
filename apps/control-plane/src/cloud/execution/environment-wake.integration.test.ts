@@ -10,6 +10,7 @@ import { checkpointArchiveSteps, parseCheckpointResult, sealCheckpointKey } from
 import { pinCloudEnvironment } from "../environment-store.js";
 import { CloudProviderError } from "../provider-error.js";
 import { executionFixture, type ExecutionFixture } from "./test-fixture.js";
+import { OFFLINE_GIT_ENV } from "../__fixtures__/offline-git.js";
 
 const database = process.env.TEST_DATABASE_URL ? describe : describe.skip;
 database("active environment isolation across real start and prompt wake routes", () => {
@@ -34,7 +35,7 @@ database("active environment isolation across real start and prompt wake routes"
     await f.login(); await f.activate(f.viewer);
     const oldHome = join(directory, "old"), home = join(directory, "current"), origin = join(directory, "origin.git");
     const oldRepo = join(oldHome, f.workspace.repository), repo = join(home, f.workspace.repository);
-    const env = { PATH: `${dirname(process.execPath)}:/usr/bin:/bin`, HOME: oldHome, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null",
+    const env = { PATH: `${dirname(process.execPath)}:/usr/bin:/bin`, HOME: oldHome, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null", ...OFFLINE_GIT_ENV,
       GIT_AUTHOR_NAME: "Fixture", GIT_AUTHOR_EMAIL: "fixture@example.test", GIT_COMMITTER_NAME: "Fixture", GIT_COMMITTER_EMAIL: "fixture@example.test" };
     const git = (cwd: string, ...args: string[]) => execFileSync("/usr/bin/git", args, { cwd, env, stdio: "pipe" });
     mkdirSync(oldRepo, { recursive: true });

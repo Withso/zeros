@@ -1006,15 +1006,19 @@ export class CloudWorker {
     await report(entry.repository, { versionId, sequence: 1, state: "ready" }, signal).catch(() => {});
   }
 
-  /** A new checkout's planned submodules, before its setup runs. A resumed disk's are the person's own and never
-   * moved. One that can't be fetched is skipped; a closed line, never a path. */
+  /** A new checkout's planned submodules, before its setup runs. A checkout whose branch was already there (a
+   * restore, which leaves each gitlink's folder empty, or an earlier start on this disk) gets only those still
+   * missing; any that exists is the person's own and never moved. One that can't be fetched is skipped; a closed
+   * line, never a path. */
   private async withSubmodules<T extends CheckoutResult | void>(position: number, planned: WorkerConfig["workspace"]["submodules"], checkoutPath: string,
     checkout: T): Promise<T> {
     const entries = planned?.filter(entry => entry.position === position) ?? [];
-    if (!entries.length || !checkout || !checkout.createdBranch) return checkout;
-    const outcomes = await fetchPlannedSubmodules(checkoutPath, entries, this.gitEnvironment);
-    const skipped = outcomes.filter(outcome => !outcome.fetched).length;
-    if (skipped) this.options.log?.(`[submodules] repository ${position}: ${outcomes.length - skipped} fetched, ${skipped} skipped`);
+    if (!entries.length || !checkout) return checkout;
+    const outcomes = await fetchPlannedSubmodules(checkoutPath, entries, this.gitEnvironment, checkout.createdBranch ? undefined : { onlyMissing: true });
+    const fetched = outcomes.filter(outcome => outcome.fetched).length, skipped = outcomes.filter(outcome => !outcome.fetched && !outcome.kept).length;
+    // atPlan: after a restore, the gitlink its superproject records could not be fetched, so it is at the planned commit.
+    const atPlan = outcomes.filter(outcome => outcome.atPlan).length;
+    if (skipped || atPlan) this.options.log?.(`[submodules] repository ${position}: ${fetched} fetched, ${skipped} skipped${atPlan ? `, ${atPlan} at the planned commit` : ""}`);
     return checkout;
   }
 

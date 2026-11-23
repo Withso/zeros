@@ -923,4 +923,25 @@ describe("lost work", () => {
     // A value from a newer server that this release does not know reads as none.
     expect(CloudWorkspaceDocumentSchema.parse({ ...doc(3), lostWork: { restored: "partial", stoppedAt } }).lostWork).toBeUndefined();
   });
+
+  it("names the submodules a restore could not bring back yet, with or without lost work", async () => {
+    const { renderToStaticMarkup } = await import("react-dom/server");
+    const React = await import("react");
+    const { LostWorkNotice, unrestoredSubmodulesMessage } = await import("../../shell/conversation/lost-work-notice");
+    const key = `cloud://${target.organizationId}/${target.workspaceId}`, since = "2026-11-20T15:04:00.000Z";
+    const rendered = () => renderToStaticMarkup(React.createElement(LostWorkNotice, { folder: key }));
+    const lib = { path: "/home/user/proj/app/lib", reason: "repository_unavailable", since };
+    // Only the submodules: the notice names them and has no Dismiss (it goes once they are back).
+    acceptCloudWorkspaceDocument({ ...doc(4), unrestoredSubmodules: [lib] });
+    expect(rendered()).toContain("1 submodule could not be brought back yet (proj/app/lib). Zeros tries again each time this workspace opens.");
+    expect(rendered()).not.toContain(">Dismiss<");
+    // With lost work: one row, both said, and Dismiss (for the lost work).
+    acceptCloudWorkspaceDocument({ ...doc(5), lostWork: { restored: "earlier", stoppedAt: since }, unrestoredSubmodules: [lib] });
+    expect(rendered()).toContain("This workspace was restored from an earlier backup.");
+    expect(rendered()).toContain("1 submodule could not be brought back yet (proj/app/lib).");
+    expect(rendered()).toContain(">Dismiss<");
+    // Many: the first three by name.
+    const many = ["a", "b", "c", "d", "e"].map(name => ({ ...lib, path: `/home/user/proj/app/${name}` }));
+    expect(unrestoredSubmodulesMessage(many)).toBe("5 submodules could not be brought back yet (proj/app/a, proj/app/b, proj/app/c and 2 more). Zeros tries again each time this workspace opens.");
+  });
 });
