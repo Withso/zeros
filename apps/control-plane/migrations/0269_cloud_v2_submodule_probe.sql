@@ -22,3 +22,9 @@ WHERE w.state = 'stopped' AND w.checkpoint_object IS NOT NULL AND w.checkpoint_s
 -- C4B: a backup that left out a planned submodule folder holding a person's own clone, which it cannot hold; `restores`
 -- never answers "all" from it. Every backup before this change counts as complete, as before.
 ALTER TABLE cloud_v2_workspaces ADD COLUMN IF NOT EXISTS checkpoint_partial boolean NOT NULL DEFAULT false;
+
+-- C4B: the submodules a restore could not put back, each held on its machine (and in every later backup) until a later
+-- open can: [{position, path, folder, reason, since}], written by the restore, emptied as each comes back; NULL when none.
+-- While it is set every open, a plain start included, tries the held parts again before the worker starts.
+ALTER TABLE cloud_v2_workspaces ADD COLUMN IF NOT EXISTS submodules_unrestored jsonb
+  CHECK (submodules_unrestored IS NULL OR (jsonb_typeof(submodules_unrestored) = 'array' AND jsonb_array_length(submodules_unrestored) BETWEEN 1 AND 320));

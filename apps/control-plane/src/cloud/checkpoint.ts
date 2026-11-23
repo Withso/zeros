@@ -962,8 +962,11 @@ export type RestoreInput = CheckpointPaths & { key: Buffer; sha256: string; gith
 export type RestoreSubmodule = CheckpointSubmodule & { repository: string; public?: boolean; githubToken?: string };
 /** The worker's pre-push hook sentence (cloud-worker workspace/submodules.ts SUBMODULE_PUSH_REFUSED). */
 export const SUBMODULE_PUSH_REFUSED = "Pushing from a submodule isn't available in cloud workspaces yet. Push it from your own computer.";
-/** One line per planned submodule (its 1-based place in the plan) whose captured state could not be put back. */
+/** One line per planned submodule (its 1-based place in the plan) whose captured state could not be put back, with
+ * the closed reason its restore gave. */
 export const SUBMODULE_UNRESTORED = "zeros-submodule-unrestored";
+/** One line per planned submodule whose held part was put back (and is no longer held). */
+export const SUBMODULE_HELD_RESTORED = "zeros-submodule-held-restored";
 const SUBMODULE_GIT = "git -c protocol.allow=never -c protocol.https.allow=always -c core.hooksPath=/dev/null -c credential.helper=";
 
 /** Verifies and applies the checkpoint that `fetch` places at
@@ -996,24 +999,7 @@ export function checkpointRestoreSteps(input: RestoreInput, fetch: readonly stri
     "tar -xzf \"$work/plain\" -C \"$c\" --no-same-owner || fail checkpoint_corrupt",
     "rm -f \"$work/plain\"; m=\"$c/manifest\"",
     "[ \"$(head -n 1 \"$m\")\" = 'zeros-checkpoint 1' ] || fail checkpoint_corrupt",
-    "hex() { [[ \"$1\" =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ ]] || fail checkpoint_corrupt; }",
-    ...OWN_GIT_DIRS,
-    "branch() { [[ \"$1\" == refs/heads/* ]] && git check-ref-format \"$1\" || fail checkpoint_corrupt; }",
-    // Network only when the Cloud Computer lacks a commit the checkpoint needs.
-    ...(input.active ? [] : token ? [
-      `printf %s ${quote(b64(token))} | base64 -d > "$work/token"`,
-      "printf '#!/bin/sh\\ncase \"$1\" in Username*) echo x-access-token ;; *) cat \"%s\" ;; esac\\n' \"$work/token\" > \"$work/askpass\"; chmod 700 \"$work/askpass\"",
-      "remote_git() { GIT_ASKPASS=\"$work/askpass\" git -c credential.helper= \"$@\"; }",
-    ] : ["remote_git() { git -c credential.helper= \"$@\"; }"]),
-    "fetched=''",
-    "need() {",
-    "  hex \"$1\"; local object=\"$1^{${2:-commit}}\"; if git cat-file -e \"$object\"; then return 0; fi",
-    ...(input.active ? [] : [
-      "  if [ -z \"$fetched\" ]; then fetched=1; remote_git fetch -q --tags origin || true; fi",
-      "  git cat-file -e \"$object\" || remote_git fetch -q origin \"$1\" || true",
-    ]),
-    "  git cat-file -e \"$object\" || fail checkpoint_prerequisites_missing",
-    "}",
+    ...restoreHelpers(!!input.active, token),
     "step=sessions",
     "if [ -f \"$c/home.tar\" ]; then tar -xf \"$c/home.tar\" -C \"$home\" --no-same-owner; fi",
     ...repositoryRestore(input, remote),
@@ -1022,6 +1008,31 @@ export function checkpointRestoreSteps(input: RestoreInput, fetch: readonly stri
     "step=marker",
     "mkdir -p \"$home/$state\"",
     `printf %s ${quote(input.recovery ? "recovery" : "")} > "$home/$state/restored-from-checkpoint"`,
+  ];
+}
+
+/** What every restore of a checkout uses: ref and commit checks, the checkout's own Git directories, and `need`, which
+ * fetches a missing commit (network only off an active restore, and only when the Cloud Computer lacks one). */
+function restoreHelpers(active: boolean, token: string | undefined): string[] {
+  return [
+    "hex() { [[ \"$1\" =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ ]] || fail checkpoint_corrupt; }",
+    ...OWN_GIT_DIRS,
+    "branch() { [[ \"$1\" == refs/heads/* ]] && git check-ref-format \"$1\" || fail checkpoint_corrupt; }",
+    // Network only when the Cloud Computer lacks a commit the checkpoint needs.
+    ...(active ? [] : token ? [
+      `printf %s ${quote(b64(token))} | base64 -d > "$work/token"`,
+      "printf '#!/bin/sh\\ncase \"$1\" in Username*) echo x-access-token ;; *) cat \"%s\" ;; esac\\n' \"$work/token\" > \"$work/askpass\"; chmod 700 \"$work/askpass\"",
+      "remote_git() { GIT_ASKPASS=\"$work/askpass\" git -c credential.helper= \"$@\"; }",
+    ] : ["remote_git() { git -c credential.helper= \"$@\"; }"]),
+    "fetched=''",
+    "need() {",
+    "  hex \"$1\"; local object=\"$1^{${2:-commit}}\"; if git cat-file -e \"$object\"; then return 0; fi",
+    ...(active ? [] : [
+      "  if [ -z \"$fetched\" ]; then fetched=1; remote_git fetch -q --tags origin || true; fi",
+      "  git cat-file -e \"$object\" || remote_git fetch -q origin \"$1\" || true",
+    ]),
+    "  git cat-file -e \"$object\" || fail checkpoint_prerequisites_missing",
+    "}",
   ];
 }
 
@@ -1230,7 +1241,7 @@ const holdoverName = (entry: { position: number; path: string }) => createHash("
  * later restore tries it again while the submodule is untouched (held_applies), and drops it once it is back. A
  * submodule the archive does not hold, or whose folder the restored repository no longer has, is left to the worker,
  * which fetches a missing one at the gitlink its repository records. */
-function submodulesRestore(input: RestoreInput, submodules: readonly CheckedSubmodule[]): string[] {
+function submodulesRestore(input: RestoreInput, submodules: readonly CheckedSubmodule[], heldOnly = false): string[] {
   if (!submodules.length) return [];
   const hook = `#!/bin/sh\necho ${quote(SUBMODULE_PUSH_REFUSED)} >&2\nexit 1\n`;
   const fetched = '"$outer_work/submodule-fetched-$j"';
@@ -1252,13 +1263,18 @@ function submodulesRestore(input: RestoreInput, submodules: readonly CheckedSubm
     // A held part goes back only over a submodule with nothing of the person's: its folder empty with no Git
     // directory, or at its gitlink with no change, stash, or branch or HEAD the gitlink does not reach.
     "held_applies() {",
-    "  local gitlink head own ref",
+    "  local gitlink head own ref top recorded",
     "  [ -d \"$1\" ] && [ ! -L \"$1\" ] && [ \"$(cd \"$1\" && pwd -P)\" = \"$1\" ] || return 1",
     "  if [ -z \"$(ls -A \"$1\")\" ]; then [ ! -e \"$2\" ] && [ ! -L \"$2\" ]; return; fi",
     "  [ -d \"$2\" ] && [ ! -L \"$2\" ] && [ \"$(cd \"$(git -C \"$1\" rev-parse --absolute-git-dir)\" && pwd -P)\" = \"$(cd \"$2\" && pwd -P)\" ] || return 1",
     "  [ -z \"$(git -C \"$1\" status --porcelain=v1 --untracked-files=normal --ignore-submodules=none)\" ] || return 1",
     "  ! git -C \"$1\" rev-parse -q --verify refs/stash >/dev/null || return 1",
-    "  gitlink=$(git -C \"$1\" rev-parse -q --verify \"$3^{commit}\" || true); head=$(git -C \"$1\" rev-parse -q --verify 'HEAD^{commit}' || true)",
+    // Its gitlink: the one its restored repository records (the person may have moved it, and the worker fetches that
+    // one), else the plan's.
+    "  top=$(git -C \"${1%/*}\" rev-parse --show-toplevel 2>/dev/null) && recorded=$(git -C \"$top\" ls-files -s -- \"${1#\"$top\"/}\" | awk '$1 == \"160000\" { print $2; exit }') || recorded=''",
+    "  gitlink=$({ [ -z \"$recorded\" ] || git -C \"$1\" rev-parse -q --verify \"$recorded^{commit}\"; } || true)",
+    "  [ -n \"$gitlink\" ] || gitlink=$(git -C \"$1\" rev-parse -q --verify \"$3^{commit}\" || true)",
+    "  head=$(git -C \"$1\" rev-parse -q --verify 'HEAD^{commit}' || true)",
     "  git -C \"$1\" for-each-ref --format='%(objectname) %(refname)' refs/heads refs/remotes/origin > \"$work/held-refs\" || return 1",
     `  awk -v head="$(git -C "$1" symbolic-ref -q HEAD || true)" ${quote(CLONE_COPIES)} "$work/held-refs" > "$work/held-copies" || return 1`,
     "  own=(); while read -r _ ref; do grep -qxF \"$ref\" \"$work/held-copies\" || own+=(\"$ref\"); done < <(grep ' refs/heads/' \"$work/held-refs\" || true)",
@@ -1358,7 +1374,8 @@ function submodulesRestore(input: RestoreInput, submodules: readonly CheckedSubm
       // restore made and could not finish is left as the worker fetches a missing one.
       const attempt = (part: string) => [
         "set +e; (",
-        "  set -e; exec 3>/dev/null",
+        // Its one error line goes to its own file, for the reason below; nothing it prints reaches the result.
+        `  set -e; exec 3>"$work/submodule-${j}.result"`,
         "  reported='' made='' made_folder='' fetched='' outer_work=$work",
         "  trap 'code=$?; if [ \"$code\" -ne 0 ] && [ -n \"$made\" ]; then rm -rf -- \"$planned_git\"; if [ -n \"$made_folder\" ]; then find \"$repo\" -mindepth 1 -delete || true; fi; fi' EXIT",
         `  work="$work/submodule-${j}"; mkdir -p -m 700 "$work"`,
@@ -1366,19 +1383,23 @@ function submodulesRestore(input: RestoreInput, submodules: readonly CheckedSubm
         `  put_submodule ${part}`,
         ")",
         "code=$?; set -e",
+        `reason=$(awk 'NR == 1 && $1 == "zeros-checkpoint-error" { print $2 }' "$work/submodule-${j}.result" 2>/dev/null || true)`,
+        "[[ \"$reason\" =~ ^[a-z_]{1,64}$ ]] || reason=checkpoint_restore_failed",
       ];
       return [
         `step=submodule-${j}`,
         `repo=${quote(entry.folder)} planned_git=${quote(entry.gitDir)} url=${quote(entry.url)} j=${j} held="$home/${SUBMODULE_HOLDOVER_DIR}/${holdoverName(entry)}" failed=''`,
-        `k=$(awk -v p=${entry.position} -v b=${quote(b64(entry.path))} '$1 == "submodule" && $3 == p && $4 == b && ($6 == "captured" || $6 == "gitdir") { print $2; exit }' "$m")`,
-        "if [[ \"$k\" =~ ^[1-9][0-9]?$ ]] && [ -f \"$c/submodules/$k/manifest\" ]; then",
-        ...attempt("\"$c/submodules/$k\"").map(line => `  ${line}`),
-        // Not put back: held, so the next stop's backup still carries it and a later restore tries again.
-        `  if [ "$code" -ne 0 ]; then failed=1; printf '${SUBMODULE_UNRESTORED} %s\\n' "$j" >&3; rm -rf -- "$held"; mkdir -p -- "\${held%/*}"; cp -a -- "$c/submodules/$k" "$held"; fi`,
-        "fi",
+        ...(heldOnly ? [] : [`k=$(awk -v p=${entry.position} -v b=${quote(b64(entry.path))} '$1 == "submodule" && $3 == p && $4 == b && ($6 == "captured" || $6 == "gitdir") { print $2; exit }' "$m")`]),
+        ...(heldOnly ? [] : [
+          "if [[ \"$k\" =~ ^[1-9][0-9]?$ ]] && [ -f \"$c/submodules/$k/manifest\" ]; then",
+          ...attempt("\"$c/submodules/$k\"").map(line => `  ${line}`),
+          // Not put back: held, so the next stop's backup still carries it and a later open tries again.
+          `  if [ "$code" -ne 0 ]; then failed=1; printf '${SUBMODULE_UNRESTORED} %s %s\\n' "$j" "$reason" >&3; rm -rf -- "$held"; mkdir -p -- "\${held%/*}"; cp -a -- "$c/submodules/$k" "$held"; fi`,
+          "fi",
+        ]),
         `if [ -z "$failed" ] && [ -f "$held/manifest" ] && held_applies "$repo" "$planned_git" ${entry.commit}; then`,
         ...attempt("\"$held\"").map(line => `  ${line}`),
-        `  if [ "$code" -eq 0 ]; then rm -rf -- "$held"; else printf '${SUBMODULE_UNRESTORED} %s\\n' "$j" >&3; fi`,
+        `  if [ "$code" -eq 0 ]; then rm -rf -- "$held"; printf '${SUBMODULE_HELD_RESTORED} %s\\n' "$j" >&3; else printf '${SUBMODULE_UNRESTORED} %s %s\\n' "$j" "$reason" >&3; fi`,
         "fi",
         `rm -f "$work/submodule-${j}/token" "$work/submodule-${j}/askpass"`,
         ...(input.active ? [`release_submodule ${quote(entry.folder)} ${quote(entry.gitDir)}`] : []),
@@ -1388,8 +1409,36 @@ function submodulesRestore(input: RestoreInput, submodules: readonly CheckedSubm
 
 /** The 1-based places in the restore's plan of the submodules it could not put back. */
 export function parseUnrestoredSubmodules(stdout: string): number[] {
-  const places = stdout.split(/\r?\n/).map(line => new RegExp(`^${SUBMODULE_UNRESTORED} ([1-9][0-9]?)$`).exec(line)?.[1]).filter(Boolean).map(Number);
-  return [...new Set(places)];
+  return parseSubmoduleRestore(stdout).unrestored.map(entry => entry.place);
+}
+
+/** Which planned submodules (1-based places) a restore or a held apply could not put back, and why, and which held
+ * parts it put back. Reasons are closed values only. */
+export function parseSubmoduleRestore(stdout: string): { unrestored: { place: number; reason: string }[]; held: number[] } {
+  const unrestored = new Map<number, string>(), held = new Set<number>();
+  for (const line of stdout.split(/\r?\n/)) {
+    const failed = new RegExp(`^${SUBMODULE_UNRESTORED} ([1-9][0-9]?)(?: ([a-z_]{1,64}))?$`).exec(line);
+    if (failed && !unrestored.has(Number(failed[1]))) unrestored.set(Number(failed[1]), failed[2] ?? "checkpoint_restore_failed");
+    const back = new RegExp(`^${SUBMODULE_HELD_RESTORED} ([1-9][0-9]?)$`).exec(line);
+    if (back) held.add(Number(back[1]));
+  }
+  return { unrestored: [...unrestored].map(([place, reason]) => ({ place, reason })), held: [...held] };
+}
+
+/** On a machine kept since a restore that could not put a submodule back (a plain wake): puts back each held part
+ * it can (held_applies), before the worker starts, with each submodule's own credential, and nothing else. `submodules`
+ * are the ones recorded as unrestored, as planned now. One result line, zeros-submodules-held, after the lines of
+ * parseSubmoduleRestore. */
+export function heldSubmodulesCommand(input: CheckpointPaths & { submodules: readonly RestoreSubmodule[] }): string {
+  const submodules = input.submodules.map(restoreSubmodule);
+  if (!submodules.length) throw new Error("Invalid held submodules");
+  const restore: RestoreInput = { checkoutPath: input.checkoutPath, home: input.home, key: Buffer.alloc(32), sha256: "0".repeat(64) };
+  return `bash -c ${quote([
+    ...prologue("restore", paths(input)),
+    ...restoreHelpers(false, undefined),
+    ...submodulesRestore(restore, submodules, true),
+    "report zeros-submodules-held",
+  ].join("\n"))}`;
 }
 
 /** Downloads, verifies and applies a checkpoint before the worker starts. */

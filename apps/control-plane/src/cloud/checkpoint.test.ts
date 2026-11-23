@@ -7,7 +7,7 @@ import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   backupProbeCommand, CHECKPOINT_SAVED_REPORT, checkpointArchiveSteps, checkpointCommand, checkpointRestoreSteps, cloudV2CheckpointObject, environmentRestoreSteps, ignoredBaselineCommand, openCheckpointKey, parseBackupProbe, parseEnvironmentRestore, WORKER_SERVICE_OFF,
-  parseCheckpointResult, parseRestoreResult, parseUnrestoredSubmodules, restoreCommand, sealCheckpointKey, SUBMODULE_PUSH_REFUSED, type CheckpointReuse, type RestoreInput,
+  heldSubmodulesCommand, parseCheckpointResult, parseRestoreResult, parseSubmoduleRestore, parseUnrestoredSubmodules, restoreCommand, sealCheckpointKey, SUBMODULE_PUSH_REFUSED, type CheckpointReuse, type RestoreInput,
   type RestoreSubmodule,
 } from "./checkpoint.js";
 import { OFFLINE_GIT_ENV, pinnedPath } from "./__fixtures__/offline-git.js";
@@ -1990,7 +1990,7 @@ process.exit(result.status ?? 1);
       // inner's repository is gone from GitHub.
       const restored = load(p, key, out, net.env, planned(p, p.newHome, { inner: { repository: "acme/gone" } }));
       expect(restored).toMatchObject({ parsed: { ok: true }, unrestored: [2] });
-      expect(restored.stdout.split("\n").filter(line => line.startsWith("zeros-submodule-unrestored"))).toEqual(["zeros-submodule-unrestored 2"]);
+      expect(restored.stdout.split("\n").filter(line => line.startsWith("zeros-submodule-unrestored"))).toEqual(["zeros-submodule-unrestored 2 checkpoint_repository_missing"]);
       expect(readFileSync(join(p.folder(p.newHome), "lib", "lib.txt"), "utf8")).toBe("edited\n");
       // Missing, as the worker fetches it: an empty folder and no Git directory.
       expect(readdirSync(inner)).toEqual([]);
@@ -2196,6 +2196,58 @@ process.exit(result.status ?? 1);
       expect(readFileSync(join(lib, "lib.txt"), "utf8")).toBe("edited\n");
       expect(readFileSync(join(lib, "inner", "inner.txt"), "utf8")).toBe("inner edited\n");
       expect(held(later)).toEqual([]);
+    });
+
+    describe("on the same machine, a later start puts a held part back once it can", () => {
+      const held = (home: string) => readdirSync(join(home, ".local/share/zeros/cloud-worker/submodule-holdover"));
+      /** The first open of `worked()`'s new machine, where lib's repository cannot be fetched. */
+      const firstOpen = (p: ReturnType<typeof project>, key: Buffer, out: string, net: ReturnType<typeof github>) => {
+        const result = run([...checkpointRestoreSteps({ checkoutPath: p.folder(p.newHome), home: p.newHome, key, sha256: sha(out), repositoryUrl: undefined,
+          submodules: planned(p, p.newHome, { lib: { repository: "acme/gone" } }) }, [`cp '${out}' "$work/checkpoint.zck"`]), "report zeros-checkpoint-restored"], net.env);
+        return parseSubmoduleRestore(result.stdout);
+      };
+      const start = (p: ReturnType<typeof project>, net: ReturnType<typeof github>, submodules = planned(p, p.newHome)) => {
+        // Its script run in this shell, after the PATH pin: a nested bash would get /bin first again on some machines.
+        const command = heldSubmodulesCommand({ checkoutPath: p.folder(p.newHome), home: p.newHome, submodules });
+        const result = spawnSync("bash", ["-c", [...pinnedPath(net.env.PATH), `set -- ${command.slice("bash -c ".length)}`, 'eval "$1"'].join("\n")],
+          { env: net.env, encoding: "utf8" });
+        expect(result.stdout).toContain("zeros-submodules-held");
+        return parseSubmoduleRestore(result.stdout);
+      };
+
+      it("restores lib and its child, held after a failed restore, once lib's repository can be fetched", () => {
+        const { p, key, out, was } = worked(), net = github(p, TOKEN);
+        expect(firstOpen(p, key, out, net)).toEqual({ unrestored: [{ place: 1, reason: "checkpoint_repository_missing" }, { place: 2, reason: "checkpoint_restore_failed" }], held: [] });
+        expect(held(p.newHome)).toHaveLength(2);
+        // Started again on the same machine: still unreachable, so both stay held and are named again.
+        expect(start(p, net, planned(p, p.newHome, { lib: { repository: "acme/gone" } })).held).toEqual([]);
+        expect(held(p.newHome)).toHaveLength(2);
+        // With the cause gone: both back, nothing held.
+        expect(start(p, net)).toEqual({ unrestored: [], held: [1, 2] });
+        expectRestored(p, was);
+        expect(held(p.newHome)).toEqual([]);
+      });
+
+      it("applies over the gitlink the restored repository records, when the person had moved and committed it", () => {
+        const p = project(), app = p.folder(p.oldHome), lib = join(app, "lib"), key = randomBytes(32), out = join(p.root, "checkpoint.zck");
+        p.write(join(p.lib.seed, "newer.txt"), "newer\n"); p.git(p.lib.seed, "add", "newer.txt"); p.git(p.lib.seed, "commit", "-q", "-m", "newer");
+        p.git(p.lib.seed, "push", "-q", "origin", "main");
+        const newer = p.git(p.lib.seed, "rev-parse", "HEAD");
+        p.git(lib, "fetch", "-q", "origin"); p.git(lib, "-c", "advice.detachedHead=false", "checkout", "-q", "--detach", newer);
+        p.git(app, "add", "lib"); p.git(app, "commit", "-q", "-m", "lib moved");
+        p.write(join(lib, "newer.txt"), "stashed\n"); p.git(lib, "stash", "-q");
+        const stash = p.git(lib, "rev-parse", "refs/stash");
+        expect(save(p, key, out, p.submodules(p.oldHome).slice(0, 1)).parsed).toMatchObject({ ok: true });
+        const net = github(p, TOKEN);
+        mkdirSync(join(p.newHome, "app"), { recursive: true }); p.git(p.root, "clone", "-q", p.app.origin, p.folder(p.newHome));
+        const first = run([...checkpointRestoreSteps({ checkoutPath: p.folder(p.newHome), home: p.newHome, key, sha256: sha(out), repositoryUrl: undefined,
+          submodules: planned(p, p.newHome, { lib: { repository: "acme/gone" } }).slice(0, 1) }, [`cp '${out}' "$work/checkpoint.zck"`]), "report zeros-checkpoint-restored"], net.env);
+        expect(parseSubmoduleRestore(first.stdout).unrestored).toHaveLength(1);
+        // The worker then checks lib out at the gitlink the restored repository records: the person's own, not the plan's.
+        p.fetch(p.folder(p.newHome), "lib", p.lib.origin, p.gitDirs.lib, newer);
+        expect(start(p, net, planned(p, p.newHome).slice(0, 1))).toEqual({ unrestored: [], held: [1] });
+        expect(p.git(join(p.folder(p.newHome), "lib"), "rev-parse", "refs/stash")).toBe(stash);
+      });
     });
 
     it("leaves a submodule the archive does not hold, or no longer planned there, as it is, and is exactly as before with none", () => {

@@ -37,6 +37,14 @@ const CloudHomeFolderSchema = z.string().regex(/^\/home\/user\/[A-Za-z0-9_.-]+$/
 /** `none`: rebuilt from GitHub; `earlier`: restored from an earlier backup. `stoppedAt`: since when work could be lost. */
 export const CloudLostWorkSchema = z.object({ restored: z.enum(["none", "earlier"]), stoppedAt: z.string().datetime() });
 export type CloudLostWork = z.infer<typeof CloudLostWorkSchema>;
+/** Submodules a restore could not put back, kept on the machine until a later start can: each one's folder, why (a
+ * closed reason such as repository_unavailable) and since when. */
+export const CloudUnrestoredSubmodulesSchema = z.array(z.object({
+  path: z.string().max(4096).regex(/^\/home\/user\/[^\0\n]+$/).refine(safeSegments),
+  reason: z.string().regex(/^[a-z_]{1,64}$/),
+  since: z.string().datetime(),
+})).min(1).max(320);
+export type CloudUnrestoredSubmodules = z.infer<typeof CloudUnrestoredSubmodulesSchema>;
 
 export const CloudWorkspaceDocumentSchema = z.object({
   id: z.string().uuid(),
@@ -106,6 +114,8 @@ export const CloudWorkspaceDocumentSchema = z.object({
   agentCost: lenient(z.object(CloudV2AgentCostSchema.shape)),
   /** Retention: a restore came back without some work; its own member sees it until they dismiss it. */
   lostWork: lenient(CloudLostWorkSchema),
+  /** C4B: submodules a restore could not put back yet; absent when there are none, and from a server before it. */
+  unrestoredSubmodules: lenient(CloudUnrestoredSubmodulesSchema),
   /** Ready copies: created while its organization's Cloud Computer was being prepared, and waiting for it. */
   preparing: lenient(z.literal("computer")),
   /** Retention (CLOUD_V2_RETENTION_ENABLED): present only from a server that runs it; absent means no Keep and no dates. */

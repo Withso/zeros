@@ -132,6 +132,9 @@ export type CloudV2Workspace = {
   /** Retention: a lost VM came back without the work of the stop at `stoppedAt`: nothing of it
    * (rebuilt from GitHub) or an earlier backup instead. Until dismissed or the next backup. */
   lostWork?: { restored: "none" | "earlier"; stoppedAt: string };
+  /** C4B: submodules a restore could not put back, held on the machine until a later open can: each one's folder, why
+   * (a closed reason) and since when. Absent when there are none. */
+  unrestoredSubmodules?: { path: string; reason: CloudV2UnrestoredReason; since: string }[];
   /** Ready copies: created while its organization's base was being prepared, and waiting for it. */
   preparing?: "computer";
   /** Retention S3: exempt from automatic archive; never true while archived. The serializer always sends it from
@@ -165,7 +168,25 @@ export type CloudV2CheckpointScope = "stop" | "retry";
 export type CloudV2CheckpointRetry = { generation: string; attempts: number; stoppedAt: string; exhaustedAt: string | null };
 
 /** Internal lifecycle metadata is never included in public workspace documents. */
+/** Why a restore could not put a submodule back. */
+export type CloudV2UnrestoredReason = "repository_unavailable" | "commits_unavailable" | "archive_corrupt" | "restore_failed";
+/** One submodule a restore could not put back, as recorded: its place in the plan, its folder, why and since when. */
+export type CloudV2UnrestoredSubmodule = { position: number; path: string; folder: string; reason: CloudV2UnrestoredReason; since: string };
+const UNRESTORED_REASONS: readonly CloudV2UnrestoredReason[] = ["repository_unavailable", "commits_unavailable", "archive_corrupt", "restore_failed"];
+/** The record as stored, validated: anything malformed is dropped, never thrown. */
+function unrestoredSubmodules(value: unknown): CloudV2UnrestoredSubmodule[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap(entry => {
+    const e = entry as Partial<Record<keyof CloudV2UnrestoredSubmodule, unknown>> | null;
+    return e && Number.isInteger(e.position) && typeof e.path === "string" && typeof e.folder === "string" && e.folder.startsWith("/home/user/")
+      && UNRESTORED_REASONS.includes(e.reason as CloudV2UnrestoredReason) && typeof e.since === "string" && Number.isFinite(Date.parse(e.since))
+      ? [{ position: e.position as number, path: e.path, folder: e.folder, reason: e.reason as CloudV2UnrestoredReason, since: new Date(e.since).toISOString() }] : [];
+  });
+}
+
 export type CloudV2LifecycleWorkspace = CloudV2Workspace & {
+  /** C4B: the recorded unrestored submodules, with their places: a later start puts their held parts back. */
+  submodulesUnrestored?: CloudV2UnrestoredSubmodule[];
   /** C4: the submodules it fetched (its 'fetch' rows); absent when none, so its checkouts need no query for them. */
   submoduleFetches?: number;
   /** Ready copies: when the base its create waited for went live; its boot deadline counts from then. */
@@ -248,6 +269,7 @@ export type CloudV2WorkspaceRow = {
   backup_probe?: BackupProbe | null; backup_probe_generation?: string | null; stop_generation?: string; checkpoint_stop_generation?: string | null;
   changed_since_stop_generation?: string | null; machine_gone_at?: Date | null; waiting_for_base_at?: Date | null;
   checkpoint_partial?: boolean | null;
+  submodules_unrestored?: unknown;
 };
 type Row = CloudV2WorkspaceRow;
 
@@ -256,7 +278,7 @@ const WORKSPACE_COLUMNS_SQL = sql`id, org_id, creator_user_id, name, number, tit
   agent_cost_usd, agent_cost_turns, agent_cost_estimated_turns, private_owner_user_id, project_id, checkout_path, folder,
   lost_work_restored, lost_work_since, keep_set_at, archive_reason, stopped_at, machine_stopped_at, machine_data_expired_at,
   archive_wake_done_at, checkpoint_object, retention_started_at, backup_probe, backup_probe_generation, stop_generation,
-  checkpoint_stop_generation, changed_since_stop_generation, machine_gone_at, waiting_for_base_at, checkpoint_partial`;
+  checkpoint_stop_generation, changed_since_stop_generation, machine_gone_at, waiting_for_base_at, checkpoint_partial, submodules_unrestored`;
 const COLUMNS = WORKSPACE_COLUMNS_SQL.text;
 export const CLOUD_V2_WORKSPACE_COLUMNS = COLUMNS.split(",").map(value => value.trim());
 
@@ -330,6 +352,7 @@ export function cloudV2LifecycleWorkspaceFromRow(row: LifecycleRow): CloudV2Life
       accessEpoch: row.access_epoch, authority: row.execution_intent_authority } } : {}),
     checkpoint, restorePending: row.restore_pending, restoreAttempt: row.restore_attempt, restoreCreate: restoreCreate(row.restore_create),
     ...(row.submodule_fetches ? { submoduleFetches: row.submodule_fetches } : {}),
+    ...(unrestoredSubmodules(row.submodules_unrestored).length ? { submodulesUnrestored: unrestoredSubmodules(row.submodules_unrestored) } : {}),
     ...(row.base_ready_at ? { baseReadyAt: row.base_ready_at.toISOString() } : {}),
     stopGeneration: row.stop_generation, checkpointUploadUntil: uploadHorizon(row.checkpoint_uploads),
     checkpointRetryFork: checkpointFork(row.checkpoint_retry_fork),
@@ -385,6 +408,8 @@ function workspace(row: Row): CloudV2Workspace {
     ...(row.folder ? { folder: row.folder } : {}),
     ...(row.lost_work_restored && row.lost_work_since ? { lostWork: { restored: row.lost_work_restored, stoppedAt: row.lost_work_since.toISOString() } } : {}),
     ...(row.waiting_for_base_at && row.state === "creating" ? { preparing: "computer" as const } : {}),
+    ...(unrestoredSubmodules(row.submodules_unrestored).length ? { unrestoredSubmodules: unrestoredSubmodules(row.submodules_unrestored)
+      .map(entry => ({ path: entry.folder, reason: entry.reason, since: entry.since })) } : {}),
     // Retention's fields only where retention runs: with the switch off a document is exactly what it was.
     ...(retentionDocuments ? { keep: Boolean(row.keep_set_at) && !row.archived_at, ...archiveFields(row) } : {}),
   };
@@ -1599,6 +1624,26 @@ export class CloudV2Store {
            lost_work_restored=NULL, lost_work_since=NULL, lost_work_machine=NULL WHERE id=$1`,
         [id, checkpoint.object, JSON.stringify(checkpoint.key), checkpoint.sha256, checkpoint.bytes, reuse ? JSON.stringify(reuse) : null, !!checkpoint.partial]);
       return { replaced: rows[0].checkpoint_object };
+    });
+  }
+
+  /** C4B: records the submodules a restore or a held apply could not put back (each kept with the first time it was
+   * recorded) and drops the ones whose held part went back. One row, under its lock; nothing when there is nothing to do. */
+  async recordUnrestoredSubmodules(id: string, change: { failed: readonly Omit<CloudV2UnrestoredSubmodule, "since">[];
+    restored: readonly { position: number; path: string }[] }): Promise<void> {
+    if (!change.failed.length && !change.restored.length) return;
+    await withSystemTx(this.pool, async tx => {
+      const { rows } = await tx.query<{ submodules_unrestored: unknown; now: Date }>(
+        "SELECT submodules_unrestored, clock_timestamp() AS now FROM cloud_v2_workspaces WHERE id=$1 FOR UPDATE", [id]);
+      if (!rows[0]) return;
+      const same = (a: { position: number; path: string }, b: { position: number; path: string }) => a.position === b.position && a.path === b.path;
+      let entries = unrestoredSubmodules(rows[0].submodules_unrestored).filter(entry => !change.restored.some(done => same(done, entry)));
+      for (const failed of change.failed) {
+        const known = entries.find(entry => same(entry, failed));
+        entries = known ? entries.map(entry => entry === known ? { ...known, reason: failed.reason, folder: failed.folder } : entry)
+          : [...entries, { ...failed, since: rows[0].now.toISOString() }];
+      }
+      await tx.query("UPDATE cloud_v2_workspaces SET submodules_unrestored=$2 WHERE id=$1", [id, entries.length ? JSON.stringify(entries.slice(0, 320)) : null]);
     });
   }
 

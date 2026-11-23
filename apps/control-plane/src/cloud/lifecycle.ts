@@ -14,12 +14,12 @@ import { pruneCloudRepositories } from "./source-authority.js";
 import type { PendingSourceOutcome } from "./pending-create.js";
 import type { CloudV2ReadyCopyForks } from "./ready-copies.js";
 import type { CloudV2CheckpointFork, CloudV2CheckpointReuse, CloudV2CheckpointRetry, CloudV2CheckpointScope, CloudV2Store, CloudV2Workspace,
-  CloudV2LifecycleWorkspace, CloudV2RestoreCreate } from "./store.js";
+  CloudV2LifecycleWorkspace, CloudV2RestoreCreate, CloudV2UnrestoredReason } from "./store.js";
 import { CLOUD_V2_WORKER_PORT, type CloudV2WorkerTiming, type CloudV2WorkerBootTiming } from "./contract.js";
 import type { WorkspaceCheckouts, WorkspaceSubmoduleCheckout } from "./workspace-repositories.js";
 import { CLOUD_V2_BACKUP_PROBE_SECONDS, CLOUD_V2_CHECKPOINT_ERRORS, CLOUD_V2_CHECKPOINT_SECONDS, WORKER_OFF_COMMAND, WORKER_UNIT_CHECK, backupProbeCommand, checkpointCommand,
-  cloudV2CheckpointObject, parseBackupProbe, parseCheckpointResult, parseRestoreResult, parseUnrestoredSubmodules, restoreCommand, workerUnitOff, type BackupProbe,
-  CHECKPOINT_PARTIAL, type CheckpointSubmodule, type CloudV2CheckpointError, type CloudV2CheckpointStorage, environmentRestoreCommand, parseEnvironmentRestore } from "./checkpoint.js";
+  cloudV2CheckpointObject, heldSubmodulesCommand, parseBackupProbe, parseCheckpointResult, parseRestoreResult, parseSubmoduleRestore, restoreCommand, workerUnitOff, type BackupProbe,
+  CHECKPOINT_PARTIAL, type CheckpointSubmodule, type CloudV2CheckpointError, type RestoreSubmodule, type CloudV2CheckpointStorage, environmentRestoreCommand, parseEnvironmentRestore } from "./checkpoint.js";
 import { ARCHIVE_SCRUB_SECONDS, CHANGED_SINCE_STOP_SECONDS, archiveScrubCommand, changedSinceStopCommand, parseArchiveScrub, parseChangedSinceStop,
   stopMarkerCommand, type ArchiveScrubResult } from "./archive-scrub.js";
 
@@ -117,6 +117,18 @@ const ARCHIVE_CONFIRM_READS = 12, ARCHIVE_CONFIRM_MS = 5_000;
 /** Boat's stock image home; repositories live at <home>/<owner>/<name>. */
 export const CLOUD_V2_HOME = "/home/user";
 
+/** A held apply touches only the recorded submodules, each at most a clone and a restore. */
+const HELD_SUBMODULES_SECONDS = 300;
+/** Where a planned submodule is, as its unrestored record names it. */
+function unrestoredPlace(entry: WorkspaceSubmoduleCheckout): { position: number; path: string; folder: string } {
+  return { position: entry.position, path: entry.checkoutFolder.slice(entry.repositoryFolder.length + 1), folder: `${CLOUD_V2_HOME}/${entry.checkoutFolder}` };
+}
+/** The restore's closed failure codes, as the record and the document name them. */
+function unrestoredReason(code: string): CloudV2UnrestoredReason {
+  return code === "checkpoint_repository_missing" ? "repository_unavailable" : code === "checkpoint_prerequisites_missing" ? "commits_unavailable"
+    : code === "checkpoint_corrupt" ? "archive_corrupt" : "restore_failed";
+}
+
 /** A workspace's planned submodule checkouts as the checkpoint scripts take them: absolute paths on the VM. */
 function checkpointSubmodules(submodules: readonly WorkspaceSubmoduleCheckout[]): CheckpointSubmodule[] {
   return submodules.map(entry => ({ position: entry.position, checkoutPath: `${CLOUD_V2_HOME}/${entry.checkoutFolder}`,
@@ -171,7 +183,7 @@ export type CloudV2LifecycleDeps = {
     | "beginRestore" | "replaceSandbox" | "finishRestore" | "checkpointUnchanged" | "claimCheckpointRetry" | "beginCheckpointFork"
     | "checkpointForkCreated" | "checkpointForkGone" | "checkpointRetryNext"
     // Retention (`retention`); absent from older compositions, which never enable it.
-    | "recordStopProbe" | "restoreForkRefused" | "replaceLostSandbox" | "workspaceBranches" | "recordLostWork"
+    | "recordStopProbe" | "restoreForkRefused" | "replaceLostSandbox" | "workspaceBranches" | "recordLostWork" | "recordUnrestoredSubmodules"
     | "claimMaintenanceWake" | "beginMaintenanceStop" | "adoptMaintenance" | "maintenanceHeld" | "finishMaintenance"
     | "startRetentionClocks" | "archiveInactive" | "archiveDepartedPrivate" | "restoreReturningPrivate" | "archiveForSystem" | "clearArchiveScrub"
     | "claimBackupRemovals" | "pendingBackupRemovals" | "finishBackupRemoval" | "sweepDepartedProjects" | "deleteDepartedProjects" | "missedWakes"
@@ -801,7 +813,7 @@ export class CloudV2Lifecycle {
             await store.recordLostWork(workspace.id, "earlier");
           }
           if (!await store.finishRestore(workspace.id, sandboxId)) return;
-        }
+        } else if (workspace.submodulesUnrestored?.length) await this.applyHeldSubmodules(workspace, sandboxId);
         if (!await (routed ?? route())) return;
         const delivered = await this.measure(workspace, "token_delivery", () => this.deliverToken(workspace, sandboxId, bootEnv));
         if (installed.kept && delivered) this.stageRuntime(sandboxId, boot.runtime);
@@ -1542,12 +1554,7 @@ export class CloudV2Lifecycle {
       return { checkoutPath: `${CLOUD_V2_HOME}/${entry.checkoutFolder}`, repositoryUrl: `https://github.com/${entry.repository}.git`,
         ...(token ? { githubToken: token.token } : {}) };
     }));
-    // A private submodule's read-only token; one that cannot be had is restored without a credential, and fails on its
-    // own if it needs one. A public one never carries one.
-    const submodules = await Promise.all(planned.map(async entry => {
-      const token = entry.public ? null : await this.deps.submoduleToken?.(workspace, entry.repository).catch(() => null) ?? null;
-      return { ...checkpointSubmodules([entry])[0]!, repository: entry.repository, ...(entry.public ? { public: true } : {}), ...(token ? { githubToken: token.token } : {}) };
-    }));
+    const submodules = await this.restoreSubmodules(workspace, planned);
     const key = checkpoints.open(checkpoint.key, workspace.id, checkpoint.object);
     try {
       const command = restoreCommand({ checkoutPath: workspaceCheckoutPath(workspace), home: CLOUD_V2_HOME, key,
@@ -1561,11 +1568,53 @@ export class CloudV2Lifecycle {
       const restored = parseRestoreResult(result.stdout);
       if (!restored.ok) throw checkpointError(restored.code);
       if (result.exitCode !== 0 || result.timedOut) throw checkpointError("checkpoint_restore_failed");
-      // Never blocks the open: the rest is restored and each such submodule is left for the worker to fetch at its gitlink.
-      // Nothing tells the person yet (the lostWork follow-up); a count only, never a path.
-      const unrestored = parseUnrestoredSubmodules(result.stdout).filter(place => place <= submodules.length).length;
-      if (unrestored) this.deps.logger?.warn(`[cloud-v2] restore left ${unrestored} submodule(s) unrestored workspace=${workspace.id.slice(0, 8)}`);
+      // Never blocks the open: the rest is restored, and each such submodule's part is held on the machine, recorded
+      // on the row (the document shows it) and tried again at every later open until it is back.
+      await this.recordSubmoduleOutcome(workspace, planned, result.stdout, "restore");
     } finally { key.fill(0); }
+  }
+
+  /** C4B: what a restore or a held apply printed about submodules, recorded by their places in `planned`. A log line
+   * with the count only, never a path; no query when nothing changed. */
+  private async recordSubmoduleOutcome(workspace: CloudV2LifecycleWorkspace, planned: readonly WorkspaceSubmoduleCheckout[], stdout: string,
+    kind: "restore" | "start"): Promise<void> {
+    const outcome = parseSubmoduleRestore(stdout);
+    const place = (index: number) => planned[index - 1];
+    const failed = outcome.unrestored.flatMap(({ place: index, reason }) => {
+      const entry = place(index);
+      return entry ? [{ ...unrestoredPlace(entry), reason: unrestoredReason(reason) }] : [];
+    });
+    const restored = outcome.held.flatMap(index => place(index) ? [unrestoredPlace(place(index)!)] : []);
+    if (failed.length) this.deps.logger?.warn(`[cloud-v2] ${kind} left ${failed.length} submodule(s) unrestored workspace=${workspace.id.slice(0, 8)}`);
+    if (failed.length || restored.length) await this.deps.store.recordUnrestoredSubmodules(workspace.id, { failed, restored });
+  }
+
+  /** C4B: a start on the machine a restore left with held submodule parts (a plain wake): puts each back that it can,
+   * with its own credential, before the worker starts. Bounded, and never blocks the start. Only for a workspace whose
+   * row records some, so any other start costs no command and no query. */
+  private async applyHeldSubmodules(workspace: CloudV2LifecycleWorkspace, sandboxId: string): Promise<void> {
+    try {
+      const recorded = workspace.submodulesUnrestored ?? [];
+      const planned = (await this.checkouts(workspace)).submodules
+        .filter(entry => recorded.some(held => held.position === entry.position && held.path === unrestoredPlace(entry).path));
+      if (!planned.length) return;
+      const submodules = await this.restoreSubmodules(workspace, planned);
+      const result = await this.deps.compute.exec(sandboxId,
+        heldSubmodulesCommand({ checkoutPath: workspaceCheckoutPath(workspace), home: CLOUD_V2_HOME, submodules }), HELD_SUBMODULES_SECONDS);
+      if (result.exitCode !== 0 || result.timedOut || !result.stdout.split(/\r?\n/).includes("zeros-submodules-held")) throw new Error("held submodules failed");
+      await this.recordSubmoduleOutcome(workspace, planned, result.stdout, "start");
+    } catch (error) {
+      this.deps.logger?.warn(`[cloud-v2] held submodules not tried (${errorCode(error)}) workspace=${workspace.id.slice(0, 8)}`);
+    }
+  }
+
+  /** Each planned submodule as a restore takes it: a private one with its own read-only token (none when it cannot be
+   * had: it then fails on its own if it needs one), a public one with none. */
+  private async restoreSubmodules(workspace: CloudV2LifecycleWorkspace, planned: readonly WorkspaceSubmoduleCheckout[]): Promise<RestoreSubmodule[]> {
+    return Promise.all(planned.map(async entry => {
+      const token = entry.public ? null : await this.deps.submoduleToken?.(workspace, entry.repository).catch(() => null) ?? null;
+      return { ...checkpointSubmodules([entry])[0]!, repository: entry.repository, ...(entry.public ? { public: true } : {}), ...(token ? { githubToken: token.token } : {}) };
+    }));
   }
 
   private async lookupBaseCommit(workspace: CloudV2LifecycleWorkspace): Promise<string | null> {

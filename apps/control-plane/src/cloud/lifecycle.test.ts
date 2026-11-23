@@ -132,6 +132,7 @@ function setup(claimed: (CloudV2LifecycleWorkspace & { attempts: number })[], op
     missedWakes: vi.fn(async () => ({ ids: [], total: 0 })),
     accountCheckpointPrefixes: vi.fn(async () => ({ prunable: [], missing: [], empty: false })),
     retireDisconnectedCopies: vi.fn(async () => 0),
+    recordUnrestoredSubmodules: vi.fn(async () => {}),
   } as CloudV2LifecycleDeps["store"];
   const stopWorker = vi.fn(async () => true);
   const logs: { warn: string[]; error: string[] } = { warn: [], error: [] };
@@ -606,6 +607,44 @@ describe("cloud v2 lifecycle", () => {
       expect(restoring.store.finishRestore).toHaveBeenCalled();
       expect(restoring.store.transition).not.toHaveBeenCalled();
       expect(restoring.logs.warn).toEqual([`[cloud-v2] restore left 1 submodule(s) unrestored workspace=${WS.slice(0, 8)}`]);
+      // Recorded on the row by its place: the child, with its closed reason.
+      expect(restoring.store.recordUnrestoredSubmodules).toHaveBeenCalledExactlyOnceWith(WS, {
+        failed: [{ position: 0, path: "lib/inner", folder: "/home/user/o/r/lib/inner", reason: "restore_failed" }], restored: [] });
+    });
+
+    it("puts a held part back at a plain start, before the worker starts, and clears its record", async () => {
+      const recorded = [{ position: 0, path: "lib", folder: "/home/user/o/r/lib", reason: "repository_unavailable" as const, since: new Date(NOW).toISOString() }];
+      const submoduleToken = vi.fn(async () => ({ token: TOKEN }));
+      const starting = setup([workspace("starting", { boatSandboxId: "bx_abc1", submodulesUnrestored: recorded })], { checkouts, submoduleToken });
+      vi.mocked(starting.compute.exec).mockImplementation(async (_id, command) => ({ exitCode: 0, timedOut: false,
+        stdout: command.includes("zeros-submodules-held") ? "zeros-submodule-held-restored 1\nzeros-submodules-held\n" : "" }));
+      await starting.lifecycle.tick();
+      const commands = vi.mocked(starting.compute.exec).mock.calls.map(([, command]) => command);
+      const held = commands.findIndex(command => command.includes("zeros-submodules-held"));
+      expect(held).toBeGreaterThanOrEqual(0);
+      // Only the recorded one, with its own token; then the worker's credential.
+      expect(commands[held]).toContain("https://github.com/acme/lib.git");
+      expect(commands[held]).not.toContain("acme/inner");
+      expect(commands[held]).toContain(Buffer.from(TOKEN).toString("base64"));
+      expect(held).toBeLessThan(commands.findIndex(command => command.includes(CLOUD_V2_WORKER_TOKEN_PATH)));
+      expect(starting.store.recordUnrestoredSubmodules).toHaveBeenCalledExactlyOnceWith(WS, { failed: [], restored: [{ position: 0, path: "lib", folder: "/home/user/o/r/lib" }] });
+    });
+
+    it("starts as before, with no command and no query for them, without a record; and a failed apply never blocks the start", async () => {
+      const unread = vi.fn(async () => ({ repositories: [], submodules: [lib, inner] }));
+      const plain = setup([workspace("starting", { boatSandboxId: "bx_abc1" })], { checkouts: unread });
+      vmCommands(plain);
+      await plain.lifecycle.tick();
+      expect(unread).not.toHaveBeenCalled();
+      expect(vi.mocked(plain.compute.exec).mock.calls.some(([, command]) => command.includes("zeros-submodules-held"))).toBe(false);
+      expect(plain.store.recordUnrestoredSubmodules).not.toHaveBeenCalled();
+      const recorded = [{ position: 0, path: "lib", folder: "/home/user/o/r/lib", reason: "repository_unavailable" as const, since: new Date(NOW).toISOString() }];
+      const failing = setup([workspace("starting", { boatSandboxId: "bx_abc1", submodulesUnrestored: recorded })], { checkouts, logs: true });
+      vi.mocked(failing.compute.exec).mockImplementation(async (_id, command) => ({ exitCode: command.includes("zeros-submodules-held") ? 1 : 0, timedOut: false, stdout: "" }));
+      await failing.lifecycle.tick();
+      expect(vi.mocked(failing.compute.exec).mock.calls.some(([, command]) => command.includes(CLOUD_V2_WORKER_TOKEN_PATH))).toBe(true);
+      expect(failing.store.recordUnrestoredSubmodules).not.toHaveBeenCalled();
+      expect(failing.logs.warn.some(line => line.includes("held submodules not tried"))).toBe(true);
     });
 
     it("issues the same commands, and asks for no token, without any", async () => {
