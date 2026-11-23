@@ -164,6 +164,8 @@ export type CloudV2CheckpointRetry = { generation: string; attempts: number; sto
 
 /** Internal lifecycle metadata is never included in public workspace documents. */
 export type CloudV2LifecycleWorkspace = CloudV2Workspace & {
+  /** cloudV2CheckpointLossy: this stop's backup may lack its last writes; a restore from it records lost work. */
+  checkpointLossy?: true;
   /** Ready copies: when the base its create waited for went live; its boot deadline counts from then. */
   baseReadyAt?: string;
   recoveryAttemptId?: string;
@@ -244,6 +246,7 @@ export type CloudV2WorkspaceRow = {
   backup_probe?: BackupProbe | null; backup_probe_generation?: string | null; stop_generation?: string; checkpoint_stop_generation?: string | null;
   changed_since_stop_generation?: string | null; machine_gone_at?: Date | null; waiting_for_base_at?: Date | null;
   stop_archive_failed_generation?: string | null;
+  checkpoint_saved_at?: Date | null; checkpoint_confirmed_at?: Date | null;
 };
 type Row = CloudV2WorkspaceRow;
 
@@ -252,7 +255,8 @@ const WORKSPACE_COLUMNS_SQL = sql`id, org_id, creator_user_id, name, number, tit
   agent_cost_usd, agent_cost_turns, agent_cost_estimated_turns, private_owner_user_id, project_id, checkout_path, folder,
   lost_work_restored, lost_work_since, keep_set_at, archive_reason, stopped_at, machine_stopped_at, machine_data_expired_at,
   archive_wake_done_at, checkpoint_object, retention_started_at, backup_probe, backup_probe_generation, stop_generation,
-  checkpoint_stop_generation, changed_since_stop_generation, machine_gone_at, waiting_for_base_at, stop_archive_failed_generation`;
+  checkpoint_stop_generation, changed_since_stop_generation, machine_gone_at, waiting_for_base_at, stop_archive_failed_generation, checkpoint_saved_at,
+  checkpoint_confirmed_at`;
 const COLUMNS = WORKSPACE_COLUMNS_SQL.text;
 export const CLOUD_V2_WORKSPACE_COLUMNS = COLUMNS.split(",").map(value => value.trim());
 
@@ -275,7 +279,7 @@ type LifecycleRow = Row & {
 const LIFECYCLE_COLUMNS = `${COLUMNS}, lease_renewed_at, base_commit, restore_pending, restore_attempt, restore_create, checkpoint_uploads,
   execution_mode, execution_transition_id, execution_restore_claimed_at, execution_initiator_user_id, execution_intent_id, execution_intent_authority, access_epoch,
   stop_generation, checkpoint_stop_generation,
-  checkpoint_object, checkpoint_key, checkpoint_sha256, checkpoint_bytes, checkpoint_saved_at, checkpoint_reuse, checkpoint_retry_fork,
+  checkpoint_object, checkpoint_key, checkpoint_sha256, checkpoint_bytes, checkpoint_reuse, checkpoint_retry_fork,
   backup_probe, backup_probe_generation, worker_off_unverified_at, worker_off_verified_generation,
   maintenance_attempt, maintenance_phase, maintenance_started_at, archive_scrub, archive_scrubbed_generation, base_ready_at`;
 type RetryRow = LifecycleRow & { retry_stopped_at: Date; checkpoint_retry_generation: string; checkpoint_retry_attempts: number; checkpoint_retry_exhausted_at: Date | null };
@@ -319,6 +323,7 @@ export function cloudV2LifecycleWorkspaceFromRow(row: LifecycleRow): CloudV2Life
       accessEpoch: row.access_epoch, authority: row.execution_intent_authority } } : {}),
     checkpoint, restorePending: row.restore_pending, restoreAttempt: row.restore_attempt, restoreCreate: restoreCreate(row.restore_create),
     ...(row.base_ready_at ? { baseReadyAt: row.base_ready_at.toISOString() } : {}),
+    ...(cloudV2CheckpointLossy(row) ? { checkpointLossy: true as const } : {}),
     stopGeneration: row.stop_generation, checkpointUploadUntil: uploadHorizon(row.checkpoint_uploads),
     checkpointRetryFork: checkpointFork(row.checkpoint_retry_fork),
     ...(cloudV2StopProbe(row) ? { stopProbe: cloudV2StopProbe(row)! } : {}),
@@ -402,7 +407,9 @@ export function cloudV2BackupRemovalAt(archivedAt: Date | null | undefined, rete
 const DAY_MS = 24 * 60 * 60_000;
 /** Retention S3: an archived workspace's final backup is still to be taken. Settled once this stop has a
  * backup (a wake that found the checkout changed takes that cover away), or a clean probe nothing has
- * changed since, or this stop's retries are exhausted, or 12 days after the archive. Over alias w. */
+ * changed since, or this stop's retries are exhausted, or 12 days after the archive. Over alias w.
+ * It reads the raw probe, not a suspect archive's marker (stop_archive_failed_generation): a backup forks that same
+ * archive, so it could not add what the archive lacks, and a clean probe already found nothing off GitHub. */
 const FINAL_BACKUP_PENDING = `(w.archived_at IS NOT NULL AND w.archived_at > clock_timestamp() - interval '12 days'
   AND w.checkpoint_stop_generation IS DISTINCT FROM w.stop_generation
   AND NOT (w.backup_probe = 'clean' AND w.backup_probe_generation = w.stop_generation
@@ -460,8 +467,21 @@ const restoreImage = (build: { snapshot_name: string; source_policy_version: num
   cloudV2WorkspaceImage({ policy: build.source_policy_version, snapshot: build.snapshot_name, recipe: build.recipe,
     scope: workspace.source_repositories ?? [], repository: workspace.repository });
 
+/** This stop's checkpoint was taken from its archive after the stop (a backup fork), or a backup fork found that archive
+ * unchanged since the checkpoint (checkpoint_confirmed_at), and that stop's archive is suspect
+ * (stop_archive_failed_generation): it may lack the stop's last writes. A checkpoint taken or confirmed on the running
+ * machine before its stop (the stop checkpoint) is not affected. */
+export function cloudV2CheckpointLossy(row: { stop_generation?: string; stop_archive_failed_generation?: string | null; checkpoint_stop_generation?: string | null;
+  checkpoint_saved_at?: Date | null; checkpoint_confirmed_at?: Date | null; stopped_at?: Date | null }): boolean {
+  const covered = [row.checkpoint_saved_at, row.checkpoint_confirmed_at].filter((at): at is Date => at instanceof Date)
+    .reduce<Date | null>((latest, at) => !latest || at > latest ? at : latest, null);
+  return !!row.stop_archive_failed_generation && row.stop_archive_failed_generation === row.stop_generation
+    && row.checkpoint_stop_generation === row.stop_generation && covered !== null
+    && (!(row.stopped_at instanceof Date) || covered > row.stopped_at);
+}
+
 export function cloudV2Restores(row: Row, now = Date.now()): "all" | "pushed" {
-  if (row.checkpoint_object && row.checkpoint_stop_generation === row.stop_generation) return "all";
+  if (row.checkpoint_object && row.checkpoint_stop_generation === row.stop_generation && !cloudV2CheckpointLossy(row)) return "all";
   if (cloudV2StopProbe(row) === "clean") return "all";
   const lastStop = [row.machine_stopped_at, row.stopped_at].filter((at): at is Date => at instanceof Date)
     .reduce<Date | null>((latest, at) => !latest || at > latest ? at : latest, null);
@@ -1003,7 +1023,9 @@ export class CloudV2Store {
    * messages from people who still have access ask for one wake. Boat's answer is evidence only when it says the VM
    * stopped after our last resume and our own row shows no activity since; anything else is recorded, not acted on.
    * One row per boot and outcome; `observe` records only. */
-  async providerStopped(binding: CloudV2ProviderStopBinding, evidence: { trigger: "dial" | "suspect" | "wake_check"; state: string; stoppedAt: Date | null },
+  async providerStopped(binding: CloudV2ProviderStopBinding, evidence: { trigger: "dial" | "suspect" | "wake_check"; state: string; stoppedAt: Date | null;
+    /** The provider did not report the stop's snapshot attempt completed: marked like a suspect stop of ours (stop_archive_failed_generation). */
+    archiveSuspect?: boolean },
     mode: "observe" | "on"): Promise<CloudV2ProviderStopOutcome> {
     return withSystemTx(this.pool, async tx => {
       const row = (await tx.query<{ state: string; boat_sandbox_id: string | null; worker_boot_id: string | null; token_hash: string | null;
@@ -1040,9 +1062,10 @@ export class CloudV2Store {
       if (recent.stops >= PROVIDER_STOP_BRAKE_PER_10_MINUTES) return record("braked", row.stop_generation);
       const generation = (await tx.query<{ stop_generation: string }>(`UPDATE cloud_v2_workspaces SET state='stopped',
           stop_generation=stop_generation+1,stopped_at=clock_timestamp(),restart_stop_generation=NULL,
+          stop_archive_failed_generation=CASE WHEN $2 THEN stop_generation+1 ELSE stop_archive_failed_generation END,
           error_code=CASE WHEN error_code='live_connection_unavailable' THEN NULL ELSE error_code END,
           worker_token_hash=NULL,worker_boot_id=NULL,attempts=0,next_attempt_at=NULL,updated_at=clock_timestamp()
-        WHERE id=$1 RETURNING stop_generation::text`, [binding.workspaceId])).rows[0]!.stop_generation;
+        WHERE id=$1 RETURNING stop_generation::text`, [binding.workspaceId, evidence.archiveSuspect === true])).rows[0]!.stop_generation;
       await tx.query(`DELETE FROM cloud_v2_tokens WHERE workspace_id=$1`, [binding.workspaceId]);
       // Boat confirmed the shutdown, which is what releases these barriers on an ordinary stop too.
       await tx.query(`UPDATE cloud_v2_execution_contexts SET state='retired',retired_at=clock_timestamp(),
@@ -1588,24 +1611,18 @@ export class CloudV2Store {
       const reuse = checkpoint.reuse ? { object: checkpoint.object, fingerprint: checkpoint.reuse.fingerprint, base: checkpoint.reuse.base } : null;
       await tx.query(
         `UPDATE cloud_v2_workspaces SET checkpoint_object=$2, checkpoint_key=$3, checkpoint_sha256=$4, checkpoint_bytes=$5, checkpoint_reuse=$6,
-           checkpoint_saved_at=clock_timestamp(), checkpoint_stop_generation=stop_generation, checkpoint_error=NULL,
+           checkpoint_saved_at=clock_timestamp(), checkpoint_confirmed_at=NULL, checkpoint_stop_generation=stop_generation, checkpoint_error=NULL,
            lost_work_restored=NULL, lost_work_since=NULL, lost_work_machine=NULL WHERE id=$1`,
         [id, checkpoint.object, JSON.stringify(checkpoint.key), checkpoint.sha256, checkpoint.bytes, reuse ? JSON.stringify(reuse) : null]);
       return { replaced: rows[0].checkpoint_object };
     });
   }
 
-  /** A failed snapshot attempt was reported during a stop of this workspace's machine that changed no stop generation
-   * (a maintenance wake's): the current stop's archive may lack its last writes. */
-  async recordStopArchiveFailed(id: string): Promise<void> {
-    await withSystemTx(this.pool, tx => tx.query("UPDATE cloud_v2_workspaces SET stop_archive_failed_generation = stop_generation WHERE id = $1", [id]));
-  }
-
   /** The VM found everything as `object` holds it: that checkpoint now also
    * covers this stop. Refused unless `object` is still the one compared. */
   async checkpointUnchanged(id: string, sandboxId: string, generation: string, object: string, scope: CloudV2CheckpointScope = "stop"): Promise<boolean> {
     const result = await withSystemTx(this.pool, tx => tx.query(
-      `UPDATE cloud_v2_workspaces SET checkpoint_stop_generation=stop_generation, checkpoint_error=NULL
+      `UPDATE cloud_v2_workspaces SET checkpoint_stop_generation=stop_generation, checkpoint_confirmed_at=clock_timestamp(), checkpoint_error=NULL
        WHERE id=$1 AND ${checkpointFence(scope)} AND checkpoint_object=$4 AND checkpoint_reuse->>'object'=$4`,
       [id, sandboxId, generation, object]));
     return Boolean(result.rowCount);
@@ -1729,8 +1746,15 @@ export class CloudV2Store {
 
   /** Boat confirmed that fork is gone, or it was never created. */
   async checkpointForkGone(id: string, attempt: string): Promise<void> {
-    await withSystemTx(this.pool, tx => tx.query(
-      `UPDATE cloud_v2_workspaces SET checkpoint_retry_fork=NULL WHERE id=$1 AND checkpoint_retry_fork->>'attempt'=$2`, [id, attempt]));
+    await withSystemTx(this.pool, async tx => {
+      await tx.query(`UPDATE cloud_v2_workspaces SET checkpoint_retry_fork=NULL WHERE id=$1 AND checkpoint_retry_fork->>'attempt'=$2`, [id, attempt]);
+      // Retention's record of that fork's machine time (beginCheckpointFork counted it) ends with it: "stopped" when the
+      // workspace now has this stop's backup, "failed" otherwise. Only once, and only for this fork's own row.
+      await tx.query(`UPDATE cloud_v2_maintenance_wakes m SET finished_at=clock_timestamp(),
+          outcome=CASE WHEN w.checkpoint_stop_generation IS NOT DISTINCT FROM w.stop_generation THEN 'stopped' ELSE 'failed' END
+        FROM cloud_v2_workspaces w WHERE w.id=m.workspace_id AND m.workspace_id=$1 AND m.attempt::text=$2 AND m.kind='backup_fork'
+          AND m.finished_at IS NULL`, [id, attempt]);
+    });
   }
 
   /** Schedules this stop's next retry, ends its retries, or records that they
@@ -1853,6 +1877,7 @@ export class CloudV2Store {
           maintenance_started_at=clock_timestamp() WHERE w.id=$1 RETURNING ${LIFECYCLE_COLUMNS.replace(/\b(\w+)\b/g, "w.$1")},
           CASE WHEN w.archived_at IS NULL OR (w.archive_wake_done_at IS NOT NULL AND w.archive_wake_done_at >= w.archived_at) OR ${FINAL_BACKUP_PENDING} THEN NULL
             WHEN w.checkpoint_stop_generation IS NOT DISTINCT FROM w.stop_generation THEN 'backup'
+            -- Raw probe: after a suspect archive too, reseeding from GitHub (which a clean probe says holds it all) beats keeping its files.
             WHEN w.backup_probe = 'clean' AND w.backup_probe_generation = w.stop_generation
               AND w.changed_since_stop_generation IS DISTINCT FROM w.stop_generation THEN 'reseed' ELSE 'keep' END AS scrub_mode`, [due.id, input.attempt]);
       await tx.query(`INSERT INTO cloud_v2_maintenance_wakes (workspace_id, attempt, kind, deadline_at)
@@ -1993,7 +2018,7 @@ export class CloudV2Store {
          ORDER BY ${CLOUD_V2_BACKUP_REMOVAL_AT_SQL} LIMIT $1 FOR UPDATE SKIP LOCKED
        ), cleared AS (
          UPDATE cloud_v2_workspaces w SET checkpoint_object=NULL, checkpoint_key=NULL, checkpoint_sha256=NULL, checkpoint_bytes=NULL,
-             checkpoint_saved_at=NULL, checkpoint_reuse=NULL, checkpoint_stop_generation=NULL
+             checkpoint_saved_at=NULL, checkpoint_confirmed_at=NULL, checkpoint_reuse=NULL, checkpoint_stop_generation=NULL
            FROM due WHERE w.id=due.id AND w.archived_at IS NOT NULL AND w.state IN ('stopped','failed') AND w.checkpoint_object=due.object
            AND NOT w.restore_pending
            RETURNING w.id, due.object
@@ -2131,12 +2156,18 @@ export class CloudV2Store {
     /** Retention S3: a file under a checkout is newer than the stop's marker (or the check could not tell). */
     changedSinceStop?: boolean;
     /** Retention S3: the archived wake's scrub result; its presence makes this the archived workspace's one wake. */
-    scrub?: ArchiveScrubResult }): Promise<void> {
+    scrub?: ArchiveScrubResult;
+    /** Its stop left the archive suspect (boat-disk.ts archiveSuspect): recorded on its own, and an archived wake is not
+     * done, so it scrubs again. */
+    archiveSuspect?: boolean }): Promise<void> {
     await withSystemTx(this.pool, async tx => {
       await tx.query(`UPDATE cloud_v2_workspaces SET maintenance_attempt=NULL, maintenance_phase=NULL, maintenance_started_at=NULL,
           machine_stopped_at=coalesce($3::timestamptz, machine_stopped_at),
-          archive_wake_done_at=CASE WHEN archived_at IS NOT NULL AND ($4 = 'gone' OR $4 = 'stopped' AND $7::text IS NOT NULL) THEN clock_timestamp() ELSE archive_wake_done_at END,
-          archive_scrub=CASE WHEN $7::text IS NOT NULL THEN $7::text ELSE archive_scrub END,
+          archive_wake_done_at=CASE WHEN archived_at IS NOT NULL AND ($4 = 'gone' OR $4 = 'stopped' AND $7::text IS NOT NULL AND NOT $9::boolean) THEN clock_timestamp() ELSE archive_wake_done_at END,
+          maintenance_archive_suspect_at=CASE WHEN $9::boolean THEN clock_timestamp() ELSE maintenance_archive_suspect_at END,
+          -- A later wake's scrub of the same stop never replaces 'backup': an open still owes those files back (clearArchiveScrub).
+          archive_scrub=CASE WHEN $7::text IS NOT NULL AND archive_scrub='backup' AND archive_scrubbed_generation=stop_generation THEN 'backup'
+            WHEN $7::text IS NOT NULL THEN $7::text ELSE archive_scrub END,
           archive_scrubbed_at=CASE WHEN $7::text IS NOT NULL THEN clock_timestamp() ELSE archive_scrubbed_at END,
           archive_scrubbed_generation=CASE WHEN $7::text IS NOT NULL THEN stop_generation ELSE archive_scrubbed_generation END,
           -- The machine now holds what this stop's backup may not: that backup is an earlier one from here on.
@@ -2149,7 +2180,7 @@ export class CloudV2Store {
           worker_off_unverified_at=CASE WHEN $5::boolean THEN NULL WHEN $5::boolean IS FALSE THEN coalesce(worker_off_unverified_at, clock_timestamp())
             ELSE worker_off_unverified_at END
         WHERE id=$1 AND maintenance_attempt=$2`, [id, attempt, result.machineStoppedAt ?? null, result.outcome, result.workerOff ?? null,
-          result.changedSinceStop === true, result.scrub ?? null, result.dataExpiredAt ?? null]);
+          result.changedSinceStop === true, result.scrub ?? null, result.dataExpiredAt ?? null, result.archiveSuspect === true]);
       await tx.query(`UPDATE cloud_v2_maintenance_wakes SET finished_at=clock_timestamp(), outcome=$2, worker_found_running=$3,
           changed_since_stop=coalesce($7, changed_since_stop), scrub=coalesce($8, scrub),
           snapshot_available=coalesce($4, snapshot_available), data_expired_at=coalesce($5, data_expired_at),
@@ -2194,7 +2225,9 @@ export class CloudV2Store {
 
   /** Retention: a lost VM's replacement for a workspace whose latest stop left nothing off GitHub, or
    * that has no backup at all (then it records that the latest stop's work did not come back). It
-   * needs no checkpoint and no pending restore: it is recorded only once it holds the workspace. */
+   * needs no checkpoint and no pending restore: it is recorded only once it holds the workspace. It reads the raw probe:
+   * the lost machine took its archive with it, suspect or not, and lost work means work off GitHub, which a clean probe
+   * found none of. */
   async replaceLostSandbox(id: string, lostSandboxId: string | null, sandboxId: string, renewedAt: Date): Promise<boolean> {
     const result = await withSystemTx(this.pool, tx => tx.query(
       `UPDATE cloud_v2_workspaces SET boat_sandbox_id=$3, lease_renewed_at=$4,
@@ -2204,6 +2237,13 @@ export class CloudV2Store {
        WHERE id=$1 AND state='starting' AND boat_sandbox_id IS NOT DISTINCT FROM $2::text AND NOT restore_pending
          AND ((backup_probe='clean' AND backup_probe_generation=stop_generation) OR checkpoint_object IS NULL)`, [id, lostSandboxId, sandboxId, renewedAt]));
     return Boolean(result.rowCount);
+  }
+
+  /** A stop made again for the same stop generation (a checkpoint retry's) left its archive suspect: recorded for that
+   * stop generation only. */
+  async recordStopArchiveSuspect(id: string, stopGeneration: string): Promise<void> {
+    await withSystemTx(this.pool, tx => tx.query(
+      "UPDATE cloud_v2_workspaces SET stop_archive_failed_generation = stop_generation WHERE id = $1 AND stop_generation = $2::bigint", [id, stopGeneration]));
   }
 
   /** Retention: a restore brought back an earlier backup or checkpoint, not the latest stop's work. */

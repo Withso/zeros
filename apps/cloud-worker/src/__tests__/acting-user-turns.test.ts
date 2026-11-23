@@ -451,11 +451,20 @@ it("checks out and runs setup as the workspace's starter from the bootstrap leas
   await until(() => f.relay.calls.find(call => call.op === `execution-leases/${BOOT}/retired`)?.body.reason).toBe("setup_done");
 });
 
-it("clones a missing repository after the first as the starter, from the same bootstrap lease as the first checkout", async () => {
+it("clones each missing repository, the first and those after it, as the starter, from the same bootstrap lease", async () => {
   const BOOT = "77777777-7777-4777-8777-777777777777";
   const cloned: Array<[string, unknown]> = [];
   await setup({ bootstrap: BOOT, several: true, clone: repository => { cloned.push([repository, operationEnvironment.getStore()]); } });
-  expect(cloned).toEqual([["withso/web", expect.objectContaining({ git: expect.objectContaining({ GIT_AUTHOR_NAME: "Sam" }), zeros: { ZEROS_EXECUTION_CONTEXT: BOOT } })]]);
+  expect(cloned.map(([repository]) => repository)).toEqual([config.workspace.repository, "withso/web"]);
+  expect(cloned.slice(1)).toEqual([["withso/web", expect.objectContaining({ git: expect.objectContaining({ GIT_AUTHOR_NAME: "Sam" }), zeros: { ZEROS_EXECUTION_CONTEXT: BOOT } })]]);
+});
+
+it("clones a missing first checkout as the starter before preparing its branch, as a ready copy's fork lacking it needs", async () => {
+  const BOOT = "77777777-7777-4777-8777-777777777777";
+  const order: Array<[string, unknown]> = [];
+  await setup({ bootstrap: BOOT, freshCheckout: true, checkout: () => { order.push(["prepare", undefined]); },
+    clone: repository => { order.push([repository, operationEnvironment.getStore()]); } });
+  expect(order).toEqual([[config.workspace.repository, expect.objectContaining({ zeros: { ZEROS_EXECUTION_CONTEXT: BOOT } })], ["prepare", undefined]]);
 });
 
 it("never seeds a later repository's files in a shared workspace, whatever its configuration carries", async () => {

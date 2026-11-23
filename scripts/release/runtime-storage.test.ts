@@ -123,6 +123,17 @@ describe("runtime release archive retention and copying", () => {
     expect(await s.store.publish(f.archive, sourceSha, sourceSha256)).toEqual(manifest);
     expect(s.calls.every(call => !call.name.startsWith("Delete"))).toBe(true);
   });
+  it("verifies an archive already stored instead of streaming it again, so a rerun sends no upload the store refuses", async () => {
+    const f = await fixture(), s = storage();
+    const manifest = await s.store.publish(f.archive, sourceSha, sourceSha256);
+    const archives = () => s.calls.filter(call => call.name === "PutObjectCommand" && String(call.input.Key).endsWith(".tar.gz")).length;
+    expect(archives()).toBe(2);
+    expect(await s.store.publish(f.archive, sourceSha, sourceSha256)).toEqual(manifest);
+    expect(archives()).toBe(2);
+    // A stored archive with other bytes is refused, as before.
+    s.objects.set(`cloud-v2/runtime/releases/archives/${manifest.sha256}.tar.gz`, Buffer.from("other bytes"));
+    await expect(s.store.publish(f.archive, sourceSha, sourceSha256)).rejects.toThrow();
+  });
   it("copies exact Alpha bytes to the destination without rebuilding and repairs a pruned ordinary archive", async () => {
     const f = await fixture(), a = storage(), b = storage(), manifest = await a.store.publish(f.archive, sourceSha, sourceSha256);
     expect(await b.store.copy(manifest.sha256, a.store)).toEqual(manifest);
