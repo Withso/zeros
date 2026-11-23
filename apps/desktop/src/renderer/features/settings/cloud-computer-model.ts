@@ -46,9 +46,11 @@ export function relativeAge(iso: string | null | undefined, now: number): string
 const FAILURE: Record<string, string> = {
   computer_clone_failed: "A repository could not be cloned.",
   computer_setup_failed: "A setup script failed.",
+  computer_install_script_failed: "The install script failed. Its output is in the build's log.",
   computer_build_interrupted: "The build was interrupted.",
   computer_base_missing: "The previous computer was missing, so the next build starts fresh.",
   computer_build_creator_missing: "The person who built it no longer has access.",
+  computer_cloud_unavailable: "Cloud workspaces were turned off for this organization, so it stopped.",
   computer_remove_failed: "A removed repository could not be deleted.",
   computer_shared_base_missing: "Zeros's shared base is not available right now, so nothing changed. Build again later, or add an install script to build your own base.",
   worker_runtime_install_failed: "The workspace runtime could not be installed.",
@@ -67,19 +69,36 @@ export function computerStatus(input: {
   builds: readonly CloudV2Build[]; activeBuildId: string | null; changes: readonly ComputerChange[]; configuredCount: number; now: number;
   /** False until the first read answers; nothing is claimed before then. */
   loaded?: boolean;
+  /** Ready copies: the Cloud Computer holds tools only, and Zeros prepares it (base: as the server finds it). */
+  readyCopies?: boolean;
+  base?: { state: string; errorCode?: string | undefined } | undefined;
 }): ComputerStatus {
   if (input.loaded === false) return { kind: "loading", title: "Loading Cloud Computer…", detail: null };
   const latest = input.builds[0];
   if (latest && (latest.state === "queued" || latest.state === "building"))
-    return { kind: "building", title: "Building computer…", detail: `Build #${latest.version}${reasonSuffix(latest)}` };
+    return latest.automatic
+      ? { kind: "building", title: "Preparing the Cloud Computer…", detail: "Prepared automatically by Zeros. Workspaces can be created meanwhile." }
+      : { kind: "building", title: "Building computer…", detail: `Build #${latest.version}${reasonSuffix(latest)}` };
+  if (input.readyCopies && input.base?.state === "failed")
+    return { kind: "failed", title: "The Cloud Computer could not be prepared", detail: `${buildFailure(input.base.errorCode ?? null)} Zeros tries again automatically.` };
   if (input.changes.length) return { kind: "unbuilt", title: "Unbuilt changes", detail: describeChanges(input.changes) };
   const active = input.builds.find(build => build.id === input.activeBuildId);
   if (latest && latest.state === "failed" && latest.id !== input.activeBuildId)
     return { kind: "failed", title: `Last build failed ${relativeAge(latest.finishedAt ?? latest.createdAt, input.now) ?? ""}`.trim(), detail: buildFailure(latest.errorCode) };
+  if (active && input.readyCopies && sharedBase(active))
+    return { kind: "built", title: "Uses the standard Zeros tools", detail: "Add an install script to customise it." };
+  // A build nobody pressed is said so, with its date, so an admin can see it.
+  if (active?.automatic) return { kind: "built", title: `Rebuilt automatically on ${calendarDay(active.finishedAt ?? active.createdAt)}`,
+    detail: "Zeros prepared it with this organization's install script." };
   if (active) return { kind: "built", title: `Last build ${relativeAge(active.finishedAt ?? active.createdAt, input.now) ?? ""}`.trim(), detail: null };
+  if (input.readyCopies) return { kind: "empty", title: "No build yet", detail: "Zeros prepares it with your first project or workspace." };
   return { kind: "empty", title: "No build yet",
     detail: input.configuredCount ? "Build the computer to start cloud workspaces from it." : "Add a repository below, then build the computer." };
 }
+
+/** The shared Zeros base: no machine of the organization's own, its snapshot a reference (name@build). */
+const sharedBase = (build: CloudV2Build) => !!build.snapshotId?.includes("@");
+const calendarDay = (at: string) => new Date(at).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
 
 function reasonSuffix(build: CloudV2Build): string {
   if (build.reason === "runtime") return " · runtime update";
@@ -89,6 +108,8 @@ function reasonSuffix(build: CloudV2Build): string {
 }
 
 export function historyNote(build: CloudV2Build): string | null {
+  if (build.automatic && sharedBase(build)) return "Standard Zeros tools";
+  if (build.automatic) return build.reason === "runtime" ? "Automatic · runtime update" : "Automatic";
   if (build.reason === "runtime") return "Runtime update";
   if (build.reason === "refresh") return "Daily refresh";
   if (build.recipe.rebuiltFrom) return `From #${build.recipe.rebuiltFrom}`;

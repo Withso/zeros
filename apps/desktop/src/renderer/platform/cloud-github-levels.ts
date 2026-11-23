@@ -28,6 +28,9 @@ export const CloudProjectSchema = z.object({
 }).passthrough();
 export type CloudProject = z.infer<typeof CloudProjectSchema>;
 const ProjectsSchema = z.object({ projects: z.array(CloudProjectSchema).max(5000), personalAllowed: z.boolean(), canCreateOrganization: z.boolean(),
+  /** What a project without a copy waits for: the organization's Cloud Computer. Absent from older servers. */
+  base: z.object({ state: z.enum(["ready", "preparing", "failed", "unavailable"]), reason: z.string().max(64).optional(),
+    nextAttemptAt: z.string().optional() }).optional().catch(undefined),
   limits: z.object({ personal: z.number().int(), repositories: z.number().int() }).passthrough() }).passthrough();
 export type CloudProjects = z.infer<typeof ProjectsSchema>;
 /** The one-repository project a repository's cloud settings belong to: the organization's first, then the caller's own. */
@@ -107,6 +110,9 @@ const ReadyCopySchema = z.object({
     failure: z.object({ reason: z.string(), repository: z.string().max(201).nullable().catch(null), step: z.string().max(32).nullable().catch(null),
       detail: z.string().nullable() }).nullable(), output: z.boolean() }).passthrough()).max(50).optional(),
   canBuild: z.boolean().optional(),
+  /** A project with no copy yet whose organization's Cloud Computer is not ready: what it waits for. Absent otherwise. */
+  base: z.object({ state: z.enum(["preparing", "failed", "unavailable"]), reason: z.string().max(64).optional(),
+    nextAttemptAt: z.string().optional() }).optional().catch(undefined),
 }).passthrough();
 export type CloudReadyCopy = z.infer<typeof ReadyCopySchema>;
 const projectPath = (organizationId: string, projectId: string) => `${base(organizationId)}/cloud-projects/${uuid.parse(projectId)}`;

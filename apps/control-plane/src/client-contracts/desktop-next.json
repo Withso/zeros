@@ -1683,6 +1683,10 @@
                     "runtime",
                     "refresh"
                   ]
+                },
+                "automatic": {
+                  "type": "boolean",
+                  "const": true
                 }
               },
               "required": [
@@ -1753,6 +1757,32 @@
                 "type": "null"
               }
             ]
+          },
+          "base": {
+            "type": "object",
+            "properties": {
+              "state": {
+                "type": "string",
+                "enum": [
+                  "ready",
+                  "preparing",
+                  "failed",
+                  "unavailable",
+                  "none"
+                ]
+              },
+              "errorCode": {
+                "type": "string",
+                "maxLength": 64
+              },
+              "nextAttemptAt": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "state"
+            ],
+            "additionalProperties": {}
           },
           "readyCopyFailures": {
             "maxItems": 200,

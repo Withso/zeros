@@ -78,6 +78,10 @@ const STATUS: Record<CloudV2Workspace["state"], string> = {
 
 const ERRORS: Record<string, string> = {
   cloud_computer_build_required: "Build the Cloud Computer first.",
+  cloud_computer_preparation_failed: "The Cloud Computer could not be prepared, so this workspace was not created. Zeros tries again; create the workspace again later.",
+  cloud_create_stopped: "Stopped while the Cloud Computer was being prepared, so this workspace was never created. Create a new one when you need it.",
+  cloud_create_archived: "Archived while the Cloud Computer was being prepared, so this workspace was never created.",
+  cloud_creator_access_lost: "Its creator no longer has cloud access, so this workspace was never created.",
   cloud_computer_changed: "The Cloud Computer was just rebuilt. Create the workspace again.",
   cloud_source_access_denied: "Your GitHub connection can no longer read this repository. Check repository access in Settings → GitHub, then create a new workspace.",
   repository_branch_not_found: "The base branch no longer exists on GitHub. Choose another branch and create a new workspace.",
@@ -145,6 +149,7 @@ export function cloudV2Document(workspace: CloudV2Workspace): CloudWorkspaceDocu
     ...topLevel("setup", CloudV2SetupStatusSchema, (workspace as Record<string, unknown>).setup),
     ...topLevel("agentCost", CloudV2AgentCostSchema, (workspace as Record<string, unknown>).agentCost),
     ...topLevel("lostWork", CloudLostWorkSchema, (workspace as Record<string, unknown>).lostWork),
+    ...topLevel("preparing", z.literal("computer"), (workspace as Record<string, unknown>).preparing),
     ...retentionOf(workspace as Record<string, unknown>),
     generation: {
       number: 1,
@@ -374,6 +379,8 @@ export const CloudV2BuildSchema = z.object({
   createdAt: z.string(), startedAt: z.string().nullable(), finishedAt: z.string().nullable(),
   /** Absent from older control planes; they only run manual builds. */
   reason: z.enum(["manual", "reactivate", "runtime", "refresh"]).optional(),
+  /** Ready copies: prepared by Zeros, with nobody pressing Build. */
+  automatic: z.literal(true).optional().catch(undefined),
 }).passthrough();
 export type CloudV2Build = z.infer<typeof CloudV2BuildSchema>;
 const RecipeSchema = z.object({ repositories: z.array(CloudV2RepositoryDraftSchema) });
@@ -385,6 +392,9 @@ export const CloudV2ComputerReplySchema = z.object({
   /** Ready copies are on: builds make the base, and repositories are not listed. */
   readyCopies: z.literal(true).optional(),
   installScript: z.string().max(16_000).nullable().optional(),
+  /** Ready copies: the base as the server finds it ("none": Zeros prepares it at first use). Absent from older servers. */
+  base: z.object({ state: z.enum(["ready", "preparing", "failed", "unavailable", "none"]), errorCode: z.string().max(64).optional(),
+    nextAttemptAt: z.string().optional() }).passthrough().optional().catch(undefined),
   /** Ready copies: each organization project's latest failed copy, the repository and step; detail is a path at most. */
   readyCopyFailures: z.array(z.object({ projectId: uuid, project: z.string().max(100), repository: z.string().max(201).nullable(),
     step: z.string().max(32).nullable(), generation: z.number().int(), reason: z.string().max(64),
