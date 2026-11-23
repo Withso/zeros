@@ -68,6 +68,20 @@ export async function runFilePillNavigationSmoke({ page, check }) {
     await fixture.screenshot({
       path: ".context/file-pill-fix/cloud-files.png",
     });
+    // A comment pill opens Changes at its line. The patch renders straight
+    // from the list's seed, and the diff still takes the line request.
+    for (const owner of ["personal", "organization", "cloud"]) {
+      await fixture.goto(`${url}?owner=${owner}`);
+      await fixture.evaluate(() => window.__filePillFixture.revealComment("src/changed.ts", 1));
+      await expect(opened).toHaveAttribute("data-open-type", "changes");
+      await expect(opened).toHaveText("src/changed.ts");
+      await expect
+        .poll(() => fixture.evaluate(() => window.__filePillFixture.pendingReveal()))
+        .toBeNull();
+      // The diff scrolled to the line, not only consumed the request.
+      await expect(fixture.locator('[data-review-revealed="src/changed.ts:1"]')).toHaveCount(1);
+      check(`${owner}: a comment pill opens Changes and its diff scrolls to the line`, true);
+    }
     for (const owner of ["personal", "cloud"]) {
       await fixture.goto(`${url}?owner=${owner}&nested&hold`);
       await pill("edit", ".context/task/notes.ts").click();

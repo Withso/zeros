@@ -202,6 +202,8 @@ export interface ComposerEditorApi {
     /** Turns the chip's tooltip into the same hover preview its source pill
      *  has. Frozen at staging time — the chip is a file, not a live view. */
     preview?: ComposerAttachmentPreview;
+    /** Kept on the pill's node; see AttachmentNode's `reference`. */
+    reference?: unknown;
     /** The validation verdict, or null when unmounted. Returned because an invalid
      *  attachment is excluded at send, and a caller that ignores it ships a chip for
      *  a file the agent never receives. */
@@ -978,6 +980,7 @@ export function useComposerEditor(
       text: string;
       label?: string;
       preview?: ComposerAttachmentPreview;
+      reference?: unknown;
     }, options?: { focus?: boolean; atEnd?: boolean }): AttachmentValidation | null => {
       const ed = editorRef.current;
       // isDestroyed too: the ref is never nulled, and a read landing after unmount
@@ -1003,6 +1006,7 @@ export function useComposerEditor(
             kind: "text",
             sourceKey: input.sourceKey,
             label: input.label ?? "",
+            ...(input.reference !== undefined ? { reference: input.reference } : {}),
           },
         },
         { type: "text", text: " " },

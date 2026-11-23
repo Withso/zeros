@@ -97,6 +97,43 @@ describe.each(["/personal/a", "/organization/a", "cloud://organization/a"])("rea
     expect(api.serialize()!.attachments).toEqual([]);
   });
 
+  it("stages a pull request comment as one pill that keeps its reference in the draft", async () => {
+    await render(cwd);
+    const reference = {
+      kind: "pr-comment", key: "github:T1", prNumber: 42, title: "Unbounded wait", body: "Unbounded wait",
+      author: { name: "devin-ai-integration", avatarUrl: null, bot: true }, createdAt: 1, url: null,
+      path: "scripts/smoke.mjs", side: "new", startLine: 14, line: 18,
+    };
+    const input = { sourceKey: "pr-comment:a", name: "pr42-smoke.mjs-L18.md", text: "# comment", reference };
+    act(() => { api.insertTextAttachment(input, { focus: false }); });
+    act(() => { api.insertTextAttachment(input, { focus: false }); });
+    const draft = api.serialize()!;
+    expect(draft.attachments.map((attachment) => attachment.name)).toEqual(["pr42-smoke.mjs-L18.md"]);
+    expect(JSON.stringify(draft.json)).toContain('"reference":{"kind":"pr-comment"');
+    // The comment itself rides in the file; the prompt text stays clean.
+    expect(draft.displayText.trim()).toBe("draft");
+    await act(async () => {});
+    const pill = host.querySelector("[data-review-comment-pill]");
+    expect(pill?.textContent).toContain("smoke.mjs");
+    expect(pill?.textContent).toContain("Unbounded wait");
+  });
+
+  it("adds a comment pill after the draft without replacing selected text", async () => {
+    await render(cwd);
+    act(() => api.editor!.commands.selectAll());
+    act(() => { api.insertTextAttachment({ sourceKey: "pr-comment:b", name: "pr1-comment.md", text: "x", reference: { kind: "pr-comment" } }, { focus: false, atEnd: true }); });
+    const draft = api.serialize()!;
+    expect(draft.displayText.trim()).toBe("draft");
+    expect(draft.segments.at(-2)).toMatchObject({ type: "attachment", name: "pr1-comment.md" });
+  });
+
+  it("keeps the caret where the person is typing when a pill arrives in the background", async () => {
+    await render(cwd);
+    act(() => api.editor!.commands.setTextSelection(3));
+    act(() => { api.insertTextAttachment({ sourceKey: "pr-comment:c", name: "pr1-c.md", text: "x", reference: { kind: "pr-comment" } }, { focus: false, atEnd: true }); });
+    expect(api.editor!.state.selection.from).toBe(3);
+  });
+
   it("appends text literally, never as HTML", async () => {
     await render(cwd);
     act(() => api.appendText("\n\nsrc/<p>a.ts:L2", { focus: false }));

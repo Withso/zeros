@@ -99,3 +99,87 @@ describe("public review target fence", () => {
     expect(captured.anchor.path).toBe("a.ts");
   });
 });
+
+describe("posting from a local comparison (the Changes tab)", () => {
+  const localPatch =
+    "diff --git a/b.ts b/b.ts\n--- a/b.ts\n+++ b/b.ts\n@@ -1 +1 @@\n-old\n+new\n";
+  const local: Extract<ReviewCodeSnapshot, { kind: "diff" }> = {
+    kind: "diff",
+    path: "b.ts",
+    revision: "working-tree",
+    fileDiff: getSingularPatch(localPatch),
+  };
+  const selection: ReviewSelectionTarget = {
+    itemId: "b.ts",
+    anchor: anchorFromSelection(local, { start: 1, end: 1, side: "additions" })!,
+    mode: "composer",
+    postToPr: true,
+    mappedTarget: "pr-7",
+  };
+
+  it("posts through the adapter's mapped path when the diff is not the published PR diff", async () => {
+    const postMappedComment = vi.fn(
+      async (_anchor: CodeReviewAnchor, _body: string, _line: (line: number) => string | null, _current: () => boolean) => {},
+    );
+    const external = { threads: [], postMappedComment, mappedTarget: "pr-7" };
+    expect(canPostReviewSelection(selection, local, external)).toBe(true);
+    await postCapturedReview(selection, local, external, "Ship it");
+    expect(postMappedComment).toHaveBeenCalledWith(selection.anchor, "Ship it", expect.any(Function), expect.any(Function));
+    const [, , localLine, stillCurrent] = postMappedComment.mock.calls[0]! as unknown as [
+      unknown, unknown, (line: number) => string | null, () => boolean,
+    ];
+    expect(localLine(1)).toBe("new");
+    expect(localLine(5)).toBeNull();
+    expect(stillCurrent()).toBe(true);
+  });
+
+  it("rechecks the live comparison, not the one that admitted the post", async () => {
+    const postMappedComment = vi.fn(async () => {});
+    const external = { threads: [], postMappedComment, mappedTarget: "pr-7" };
+    let current: ReviewCodeSnapshot | undefined = local;
+    await postCapturedReview(selection, local, external, "Ship it", () => ({ snapshot: current, external }));
+    const [, , , stillCurrent] = postMappedComment.mock.calls[0]! as unknown as [unknown, unknown, unknown, () => boolean];
+    current = { ...local, fileDiff: getSingularPatch("diff --git a/b.ts b/b.ts\n--- a/b.ts\n+++ b/b.ts\n@@ -1 +1 @@\n-old\n+changed\n") };
+    expect(stillCurrent()).toBe(false);
+    current = undefined;
+    expect(stillCurrent()).toBe(false);
+  });
+
+  it("keeps a mapped draft on the pull request it was opened for", () => {
+    const postMappedComment = vi.fn(async () => {});
+    expect(
+      canPostReviewSelection(selection, local, { threads: [], postMappedComment, mappedTarget: "pr-8" }),
+    ).toBe(false);
+    expect(
+      canPostReviewSelection({ ...selection, mappedTarget: undefined }, local, { threads: [], postMappedComment, mappedTarget: "pr-7" }),
+    ).toBe(false);
+    // The comparison no longer shows the captured text at those lines.
+    expect(
+      canPostReviewSelection(
+        { ...selection, anchor: { ...selection.anchor, context: "older" } },
+        local,
+        { threads: [], postMappedComment, mappedTarget: "pr-7" },
+      ),
+    ).toBe(false);
+  });
+
+  it("never posts a whole-file anchor or an anchor without captured text", () => {
+    const postMappedComment = vi.fn(async () => {});
+    const external = { threads: [], postMappedComment, mappedTarget: "pr-7" };
+    expect(
+      canPostReviewSelection(
+        { ...selection, anchor: { ...selection.anchor, context: undefined } },
+        local,
+        external,
+      ),
+    ).toBe(false);
+    expect(
+      canPostReviewSelection(
+        { ...selection, anchor: { ...selection.anchor, side: "file" } },
+        local,
+        external,
+      ),
+    ).toBe(false);
+    expect(canPostReviewSelection(selection, local, { threads: [] })).toBe(false);
+  });
+});

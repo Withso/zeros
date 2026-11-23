@@ -16,6 +16,7 @@ import {
 } from "./review-annotations";
 import type { CodeReviewController } from "./use-code-review";
 import { reviewRangeLabel, reviewThreadKey } from "./review-thread-model";
+import { saveReviewCommentDestination } from "./review-comment-destination";
 
 export function ReviewAnnotationView({
   payload,
@@ -36,6 +37,7 @@ export function ReviewAnnotationView({
   const workspaceCommentsAvailable = review.workspaceCommentsAvailable !== false;
   if (!commentsAvailable) return null;
   const selection = payload.selection;
+  const postAs = review.external?.postAs;
   return (
     <div
       data-review-annotation
@@ -106,15 +108,26 @@ export function ReviewAnnotationView({
                   // Where the comment goes; the primary submit follows it.
                   <Tabs
                     value={selection.postToPr ? "pr" : "workspace"}
-                    onValueChange={(value) =>
-                      onSelect({ ...selection, postToPr: value === "pr" })
-                    }
+                    onValueChange={(value) => {
+                      saveReviewCommentDestination(
+                        value === "pr" ? "pr" : "workspace",
+                      );
+                      onSelect({ ...selection, postToPr: value === "pr" });
+                    }}
                   >
                     <TabsList aria-label="Comment destination">
                       {workspaceCommentsAvailable && (
                         <TabsTrigger value="workspace">Workspace</TabsTrigger>
                       )}
-                      <TabsTrigger value="pr" disabled={!postComment}>
+                      <TabsTrigger
+                        value="pr"
+                        disabled={!postComment}
+                        title={
+                          postAs
+                            ? `Posts to the pull request as ${postAs.name}`
+                            : "Posts to the pull request as your GitHub account"
+                        }
+                      >
                         Pull request
                       </TabsTrigger>
                     </TabsList>

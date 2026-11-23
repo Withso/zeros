@@ -4465,16 +4465,32 @@ function AgentChatBody({
   const pendingAppend = pendingComposerAppend;
   useEffect(() => {
     if (readOnly || !pendingAppend) return;
-    if (!chatId) return;
+    // On a cold mount the editor arrives a render later; consuming before it
+    // exists would drop the append. The effect runs again once it does.
+    if (!chatId || !composerEditor) return;
     // Append only targets this chat. (chatId null = EmptyComposer
     // case, handled separately in EmptyComposer.tsx.)
     if (pendingAppend.chatId !== chatId) return;
     const focus = !pendingAppend.preserveFocus;
-    appendComposerText(`\n\n${pendingAppend.text}`, { focus });
+    if (pendingAppend.text) appendComposerText(`\n\n${pendingAppend.text}`, { focus });
+    const attachments = pendingAppend.attachments ?? [];
+    const refused = attachments.filter((attachment, index) => {
+      const staged = stageTextAttachment(attachment, {
+        focus: focus && index === attachments.length - 1,
+        atEnd: true,
+      });
+      return staged !== null && !staged.ok;
+    });
+    if (refused.length)
+      toast.warning(
+        refused.length === 1
+          ? `Added "${refused[0]!.name}", but it won't be sent with this model.`
+          : `Added ${refused.length} comments that won't be sent with this model.`,
+      );
     dispatch({ type: "CONSUME_COMPOSER_APPEND", id: pendingAppend.id });
     if (interactive && focus) queueMicrotask(() => focusComposer());
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pendingAppend, chatId, interactive, readOnly]);
+  }, [pendingAppend, chatId, interactive, readOnly, composerEditor]);
 
   const handleAttachFiles = useCallback(
     () => fileInputRef.current?.click(),

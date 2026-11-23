@@ -196,6 +196,28 @@ export function openFilePill(
   );
 }
 
+/** Open Changes at a repository-relative path (a pull request comment's),
+ *  whatever folder the chat sits in. Returns the Changes owner, or null when
+ *  Changes keeps a draft for another file and nothing was opened. */
+export function openChangesAtRepositoryPath(
+  cwd: string | null | undefined,
+  repoPath: string,
+): string | null {
+  if (!cwd || !repoPath) return null;
+  const scope = workbenchScopeForFolder(cwd);
+  const state = useWorkspaceStore.getState();
+  const current = state.workbenchByScope[scope] ?? defaultScopeFor(scope);
+  const { workspaceId } = changesQuery(cwd, "");
+  const changes = current.tabs.find((tab) => tab.type === "changes");
+  if (changes && isWorkbenchEditorDirty(changes.id) && changes.filePath !== repoPath)
+    return null;
+  setChangesScope(workspaceId, { kind: "all" });
+  state.dispatch(
+    buildFilePillOpenAction(current.tabs, repoPath, scope, "changes", current.activeId),
+  );
+  return workspaceId;
+}
+
 export function warmFilePill(
   cwd: string | null | undefined,
   rawPath: string,

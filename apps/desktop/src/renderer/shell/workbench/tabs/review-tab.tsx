@@ -5,7 +5,7 @@
 // The header reads in rows (review-overview.tsx), then Overview / Description
 // / Activity / Checks / Commits. Overview holds Git status (the branch on this
 // machine, from the shared PR status island), PR status (the pull request on
-// the host, with the one Merge) and Findings, beside the rail. All provider
+// the host, with the one Merge) and Comments, beside the rail. All provider
 // data flows through ONE live snapshot store (review-data.ts — stale-while-
 // revalidate, event-bus + adaptive polling) behind the ReviewProvider seam
 // (review-provider.ts). The published diff, where Post to PR works, stays one
@@ -45,11 +45,20 @@ import {
   useReviewLiveData,
 } from "./review-data";
 import { useReviewGithubFailure } from "../../pr/review-github-failure";
-import { derivePrStatusView, reviewCommentViewer, reviewFindings, summarizeChecks } from "./review-model";
+import { activityCount, composerChatFor, derivePrStatusView, reviewCommentViewer, summarizeChecks } from "./review-model";
+import {
+  reviewCommentDocument,
+  reviewCommentFileName,
+  reviewCommentSourceKey,
+  sortReviewComments,
+  threadCommentItems,
+  timelineCommentItems,
+  type ReviewCommentItem,
+} from "@/renderer/features/code-review/review-comment-reference";
+import { CommentsSection } from "./review-comments";
 import { reviewRepositoryLabel } from "./review-repository-label";
 import { ErrorCallout } from "./review-shared-components";
 import {
-  FindingsSection,
   PrStatusCard,
   ReviewHeader,
   ReviewKnownHeader,
@@ -256,6 +265,35 @@ export function ReviewView({
     },
     [dispatch, prNumber, activeChatId],
   );
+  // Each comment becomes a composer pill backed by a small Markdown file, so
+  // the agent reads the whole comment while the prompt stays short.
+  const addCommentsToChat = useCallback(
+    (items: readonly ReviewCommentItem[]) => {
+      if (!items.length) return;
+      const chatId = composerChatFor(chats, activeChatId);
+      if (!chatId) {
+        toast.info("Open a chat to add comments to it.");
+        return;
+      }
+      appendCounter += 1;
+      dispatch({
+        type: "ENQUEUE_COMPOSER_APPEND",
+        append: {
+          id: `pr-review-${prNumber}-${appendCounter}`,
+          text: "",
+          chatId,
+          source: "manual",
+          attachments: items.map((item) => ({
+            sourceKey: reviewCommentSourceKey(workspaceId, item.reference),
+            name: reviewCommentFileName(item.reference),
+            text: reviewCommentDocument(item),
+            reference: item.reference,
+          })),
+        },
+      });
+    },
+    [dispatch, prNumber, activeChatId, chats, workspaceId],
+  );
 
   // ── published PR diff (Changes) — parent-owned so the sub-nav count and the
   //    section always agree; re-pulled on Git and remote comparison changes.
@@ -289,7 +327,7 @@ export function ReviewView({
   const renamedPaths = useMemo(() => new Map(files.flatMap(file => file.oldPath ? [[file.oldPath, file.path] as const] : [])), [files]);
   const githubReview = useGithubReview({
     workspaceId: provider.family === "github" ? workspaceId : undefined,
-    prNumber, cwd, active: active && (sub === "changes" || sub === "overview"),
+    prNumber, cwd, active: active && (sub === "changes" || sub === "overview" || sub === "activity"),
     confirmedHeadSha: filesHeadSha, confirmedBaseSha: filesBaseSha, renamedPaths,
   });
   const reviewHeadSha = githubReview.snapshot?.headSha;
@@ -493,7 +531,12 @@ export function ReviewView({
     [postComment, commentViewer],
   );
   const checksSummary = summarizeChecks(snap.checks);
-  const conversationCount = snap.timeline?.length ?? null;
+  const inlineSnapshot = githubReview.snapshot;
+  const threadsComplete =
+    !!inlineSnapshot &&
+    !inlineSnapshot.threadsTruncated &&
+    inlineSnapshot.threads.every((thread) => !thread.commentsTruncated);
+  const conversationCount = activityCount(snap.timeline, inlineSnapshot?.threads, threadsComplete);
   // The pull request's own totals; an older engine falls back to the diff.
   const changeCounts = useMemo<ReviewChangeCounts | null>(() => {
     const live = snap.pr;
@@ -517,8 +560,8 @@ export function ReviewView({
         : null,
     [snap.pr, branch, snap.checks, snap.timeline],
   );
-  // Findings: the agent's workspace comments joined with the host's review
-  // apps and code scanning (the GitHub review source).
+  // Comments: the PR conversation, GitHub line comments, workspace comments
+  // and code-scanning findings (the GitHub review source joins the last).
   const codeReview = useCodeReview({
     cwd,
     workspaceId,
@@ -526,9 +569,26 @@ export function ReviewView({
     refreshKey,
     external: githubReview.source,
   });
-  const findings = useMemo(
-    () => reviewFindings(codeReview.threads, prNumber),
-    [codeReview.threads, prNumber],
+  // Unknown is not empty: Comments says it is reading, or that a read failed.
+  const commentsLoading =
+    (snap.timeline === null && !snap.resourceErrors.timeline) ||
+    (!!githubReview.source?.loading && !githubReview.snapshot) ||
+    (codeReview.loading && codeReview.threads.length === 0);
+  // Any source it couldn't fully read (a failed read, a refused GitHub
+  // connection, annotations that didn't load, a truncated review). The
+  // workbench banner owns the failure and its Retry; Comments only says so.
+  const commentsIncomplete =
+    !!snap.resourceErrors.timeline ||
+    !!githubReview.error ||
+    !!githubReview.notice ||
+    !!codeReview.error;
+  const comments = useMemo(
+    () =>
+      sortReviewComments([
+        ...timelineCommentItems(snap.timeline ?? [], prNumber),
+        ...threadCommentItems(codeReview.threads, prNumber),
+      ]),
+    [snap.timeline, codeReview.threads, prNumber],
   );
 
   const runMerge = useCallback(
@@ -655,7 +715,17 @@ export function ReviewView({
                 onAddToChat={addToChat}
               />
             }
-            findings={<FindingsSection findings={findings} onAddToChat={addToChat} />}
+            comments={
+              <CommentsSection
+                loading={commentsLoading}
+                incomplete={commentsIncomplete}
+                items={comments}
+                owner={workspaceId}
+                prNumber={prNumber}
+                cwd={cwd}
+                onAddToChat={addCommentsToChat}
+              />
+            }
             rail={
               <ReviewRail
                 pr={pr}
@@ -739,7 +809,10 @@ export function ReviewView({
             ])}
             hostLabel={provider.hostLabel}
             viewer={commentViewer}
-            onAddToChat={addToChat}
+            onAddCommentsToChat={addCommentsToChat}
+            threads={githubReview.snapshot?.threads ?? null}
+            threadsComplete={threadsComplete}
+            cwd={cwd}
             onPostComment={postAsViewer}
             onRetry={() => void refresh()}
             checks={snap.checks}

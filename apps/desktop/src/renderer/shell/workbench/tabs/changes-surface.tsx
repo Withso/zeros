@@ -116,7 +116,7 @@ export const ChangesWorkbenchSurface = React.memo(
     const gitRefresh = useGitRefreshKey(cwd, changesTarget, active);
     const githubReview = useGithubReview({
       workspaceId: resolveReviewProvider(parseRemote(project?.originUrl)?.host ?? "github.com") ? changesTarget : undefined,
-      prNumber: workspace?.prNumber, cwd, active,
+      prNumber: workspace?.prNumber, cwd, active, localComparison: true,
     });
     // The Local main folder might not be a git repo yet — offer Initialize /
     // Publish instead of a raw git error.
