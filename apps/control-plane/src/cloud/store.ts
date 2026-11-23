@@ -2308,11 +2308,11 @@ export class CloudV2Store {
     return !row ? null : row.archived ? "archived" : row.live ? null : "access";
   }
 
-  /** Its base is live (or gone): it no longer says it is waiting, and keeps when the base went live, which its boot
-   * deadline counts from on every later tick. */
-  async baseWaitOver(workspaceId: string, readyAt: Date | null): Promise<void> {
-    await withSystemTx(this.pool, tx => tx.query(`UPDATE cloud_v2_workspaces SET waiting_for_base_at=NULL,
-      base_ready_at=coalesce($2::timestamptz, clock_timestamp()) WHERE id=$1 AND waiting_for_base_at IS NOT NULL`, [workspaceId, readyAt]));
+  /** Its base is live (or gone): it no longer says it is waiting, and keeps when this tick saw that, which its boot
+   * deadline counts from on every later tick (never the base's finish: a lifecycle that was down sees it late). */
+  async baseWaitOver(workspaceId: string): Promise<void> {
+    await withSystemTx(this.pool, tx => tx.query(`UPDATE cloud_v2_workspaces SET waiting_for_base_at=NULL, base_ready_at=clock_timestamp()
+      WHERE id=$1 AND waiting_for_base_at IS NOT NULL`, [workspaceId]));
   }
 
   /** A creating workspace whose base failed moves to the organization's live base, in one statement, so the build it

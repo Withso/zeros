@@ -244,6 +244,29 @@ d("ready copies: a safe switch-on", () => {
       expect((await pool.query("SELECT state, error_code FROM cloud_v2_workspaces WHERE id=$1", [id])).rows[0]).toEqual({ state: "creating", error_code: null });
     });
 
+    it("counts its boot deadline from the tick that saw the base live, however long after the base finished that tick came", async () => {
+      const { computers, id } = await waiting();
+      await builder(computers).tick();
+      // A long wait, and then the lifecycle was down or backlogged: created 30 minutes ago, and its base finished 11 minutes
+      // before any tick looked at this workspace.
+      await pool.query("UPDATE cloud_v2_workspaces SET created_at=clock_timestamp()-interval '30 minutes' WHERE id=$1", [id]);
+      await pool.query("UPDATE cloud_v2_computer_builds SET finished_at=clock_timestamp()-interval '11 minutes' WHERE org_id=$1", [org]);
+      clock = Date.now();
+      await due(id);
+      await lifecycle().tick();
+      expect(workspaceMachines()).toHaveLength(1);
+      expect((await pool.query("SELECT state, error_code FROM cloud_v2_workspaces WHERE id=$1", [id])).rows[0]).toEqual({ state: "creating", error_code: null });
+      // No hello: still within its 10 minutes of that tick at 9, timed out at 11.
+      clock += 9 * 60_000;
+      await due(id);
+      await lifecycle().tick();
+      expect((await pool.query("SELECT state FROM cloud_v2_workspaces WHERE id=$1", [id])).rows[0].state).toBe("creating");
+      clock += 2 * 60_000;
+      await due(id);
+      await lifecycle().tick();
+      expect((await pool.query("SELECT state, error_code FROM cloud_v2_workspaces WHERE id=$1", [id])).rows[0]).toEqual({ state: "failed", error_code: "worker_boot_timeout" });
+    });
+
     it("moves to a newer live base when the one it waited for fails, in one statement, and fails plainly when there is none", async () => {
       const first = await waiting();
       await pool.query("UPDATE cloud_v2_computer_builds SET state='failed', error_code='computer_install_script_failed', finished_at=clock_timestamp() WHERE id=$1", [first.buildId]);
