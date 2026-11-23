@@ -766,8 +766,13 @@ export class CloudWorker {
       const bootstrapEnvironment = bootstrap && { git: this.contextGit(bootstrap.contextId, bootstrap.gitIdentity), zeros: { ZEROS_EXECUTION_CONTEXT: bootstrap.contextId } };
       const asStarter = <T>(work: () => T): T => bootstrapEnvironment ? operationEnvironment.run(bootstrapEnvironment, work) : work();
       const checking = measureStartup("worker_checkout", () => this.options.runtimeResume ? Promise.resolve(undefined)
-        : asStarter(async () => this.withSubmodules(0, config.workspace.submodules, config.workspace.checkoutPath,
-          await (this.options.prepareCheckout ?? prepareCheckout)(config.workspace, this.gitEnvironment, timing))), timing)
+        : asStarter(async () => {
+          // An active create's control plane leaves the clone to the starter: a ready copy's fork may lack the first
+          // checkout too, and it is cloned here like any later one (nothing when it is there).
+          if (bootstrapEnvironment) await (this.options.cloneCheckout ?? cloneMissingCheckout)(config.workspace, config.workspace.repository, this.gitEnvironment);
+          return this.withSubmodules(0, config.workspace.submodules, config.workspace.checkoutPath,
+            await (this.options.prepareCheckout ?? prepareCheckout)(config.workspace, this.gitEnvironment, timing));
+        }), timing)
         .catch(async error => {
           await this.options.transport.reportCheckoutFailure?.().catch(() => {});
           throw tagged(error, "checkout_failed");
