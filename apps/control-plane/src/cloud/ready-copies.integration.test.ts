@@ -7,7 +7,7 @@ import { grantTestPro } from "../test-pro.js";
 import { FakeBoat } from "./__fixtures__/boat-fake.js";
 import { CloudV2ComputerBuilder, CloudV2Computers, type CloudV2ComputerOptions } from "./computer.js";
 import type { CloudV2ComputerSourceResolver } from "./computer-provenance.js";
-import { CloudV2Lifecycle } from "./lifecycle.js";
+import { CLOUD_V2_WORKER_TOKEN_PATH, CloudV2Lifecycle } from "./lifecycle.js";
 import { CloudV2ReadyCopies, CloudV2ReadyCopyBuilder, CloudV2ReadyCopyForks, readyCopyBaselineCommand, readyCopyLayout, READY_COPY_HISTORY_LIMIT, READY_COPY_REFRESH_STARTS, READY_COPY_RETRY_LIMIT,
   type ReadyCopyWorkspace } from "./ready-copies.js";
 import { CloudV2ReadyCopySecrets } from "./ready-copy-secrets.js";
@@ -141,8 +141,65 @@ d("cloud v2 ready copies", () => {
     const clone = own.find(command => command.includes(" clone "))!;
     expect(clone).not.toMatch(/--depth|--filter|--single-branch/);
     expect(own.some(command => command.includes("pnpm install"))).toBe(true);
-    expect(own.at(-1)).toContain("rm -rf /tmp/zeros-command-input-*");
+    // The scrub, then the checkouts read back before the stop: the last command.
+    expect(own.at(-2)).toContain("rm -rf /tmp/zeros-command-input-*");
+    expect(own.at(-1)).toContain("zeros-checkouts-read");
     expect(await new CloudV2Store(pool).installedRepositories(org)).toEqual([]);
+  });
+
+  describe("a copy's archive holds its checkout", () => {
+    /** A snapshot attempt of the copy machine begins just before its clone writes, completing after `reads` reads. */
+    const attemptBeforeClone = (reads: number) => {
+      boat.script = (machine, command) => { if (command.includes(" clone ")) boat.beginSnapshotAttempt(machine.id, reads); return undefined; };
+    };
+    const checkout = "/home/user/zeros/zeros/.git/HEAD";
+
+    it("waits out a snapshot attempt before the stop, so every fork of the copy holds its checkout", async () => {
+      await liveBase();
+      attemptBeforeClone(2);
+      await copyBuilder().tick();
+      const copy = await row(1);
+      expect(copy.state).toBe("ready");
+      const fork = await boat.fork(copy.machineId!, { key: "probe", ttlSeconds: 60 });
+      expect(boat.machine(fork.sandboxId)!.files.get(checkout)).toBe("c".repeat(40));
+      // What the provider said of the archive is kept on the row.
+      expect((await pool.query("SELECT archive_snapshot FROM cloud_v2_ready_copies WHERE id=$1", [copy.id])).rows[0].archive_snapshot)
+        .toEqual({ attemptAt: expect.any(String), status: "completed" });
+    });
+
+    it("never makes a copy ready when its archive may lack its checkout", async () => {
+      await liveBase();
+      attemptBeforeClone(Number.POSITIVE_INFINITY);
+      await copyBuilder().tick();
+      expect(await row(1)).toMatchObject({ state: "failed", failureReason: "ready_copy_archive_incomplete" });
+      expect(await copies.forkable(org, zeros, new Date(clock))).toBeNull();
+    });
+
+    it("never fails a workspace on a copy's word: a fork without its checkout clones directly, and that copy is rebuilt", async () => {
+      await liveBase();
+      await copyBuilder().tick();
+      const copy = await row(1);
+      // The copy's archive lacks its checkout after all.
+      boat.machine(copy.machineId!)!.files.delete(checkout);
+      const store = new CloudV2Store(pool), id = randomUUID();
+      const base = (await copies.base(org))!;
+      await store.createWorkspace({ id, organizationId: org, creatorUserId: member, name: "zeros", repository: "withso/zeros",
+        branch: "zeros/w", baseBranch: "main", computerBuildId: base.buildId, projectId: zeros, ...one("withso/zeros", "zeros/w") });
+      const prepareRepository = vi.fn(async (_workspace: unknown, sandboxId: string) => { boat.machine(sandboxId)!.files.set(checkout, "d".repeat(40)); });
+      const readyCopies = forks();
+      await new CloudV2Lifecycle({ store, compute: boat, readyCopies, runtime, prepareRepository,
+        publicKeys: [generateKeyPairSync("ed25519").publicKey.export({ type: "spki", format: "pem" }).toString()],
+        sealPortToken: () => ({ encrypted: true }), stopWorker: async () => true, bootEnv: () => ({}),
+        sandboxName: () => `zeros-fixture-${id}`, sleep: async () => {}, now: () => clock, logger,
+      }).tick();
+      const workspaceRow = (await pool.query("SELECT state, error_code, boat_sandbox_id FROM cloud_v2_workspaces WHERE id=$1", [id])).rows[0];
+      expect(workspaceRow).toMatchObject({ state: "creating", error_code: null });
+      expect(boat.machine(workspaceRow.boat_sandbox_id)!.source).toBe(copy.machineId);
+      expect(prepareRepository).toHaveBeenCalledOnce();
+      expect(boat.commands.some(command => command.machineId === workspaceRow.boat_sandbox_id && command.command.includes(CLOUD_V2_WORKER_TOKEN_PATH))).toBe(true);
+      expect(await row(1)).toMatchObject({ state: "ready", stale: true });
+      expect(warnings.filter(line => line.includes("ready copy fork lacks a checkout"))).toHaveLength(1);
+    });
   });
 
   it("joins concurrent requests for one project into one build", async () => {

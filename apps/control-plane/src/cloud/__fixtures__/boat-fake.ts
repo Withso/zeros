@@ -38,6 +38,10 @@ export const BOAT_FAKE_ASSUMPTIONS = [
   { verified: true, assumption: "GET /named-snapshots lists every named snapshot of the account with an allowance { included, free, used, extra, pricePerExtraMonthlyDollars, pricePerExtraDailyDollars }; snapshots beyond included are billed" },
   { verified: false, assumption: "a named snapshot does not expire while it is not deleted" },
   { verified: false, assumption: "a machine's disk holds a project's 10 full clones with their dependencies (about 20-30 GB)" },
+  { verified: "2026-11-23", assumption: "inspect reports hydrated, lastSnapshotAttemptAt and lastSnapshotStatus (in_progress | completed | failed)" },
+  { verified: "2026-11-23", assumption: "a machine made from a snapshot, or a fork, accepts commands before it reports hydrated" },
+  { verified: "2026-11-23", assumption: "a stop while a snapshot attempt is in progress can end with that attempt failed, and a fork of the machine then lacked the files written just before" },
+  { verified: "2026-11-23", assumption: "a fork copies its source's archive" },
 ] as const;
 
 type Machine = {
@@ -50,6 +54,15 @@ type Machine = {
   worker: { enabled: boolean; active: boolean };
   /** A fork's lease end; past it Boat archives the fork, and the next resume is cold. */
   leaseUntil: number | null; cold: boolean;
+  /** Inspect reads before Boat reports this machine hydrated (its restore settled); 0 means hydrated. */
+  hydrateReads: number;
+  /** The latest snapshot attempt: when it began, its status, the files as of its start, and the reads before an
+   * in-progress one completes. */
+  attempt: { at: number; status: "in_progress" | "completed" | "failed"; files: Map<string, string>; reads: number };
+  /** What the stop archived when it was not the files as they stood (a stop that failed an attempt in progress). */
+  archive: Map<string, string> | null;
+  /** Inspect reads during archiving that still report the failed attempt, before the stop's own. */
+  failedReads: number;
 };
 export type FakeCommand = { machineId: string; command: string; input?: string };
 type Exec = (machine: Machine, command: string, input?: string) => CloudV2CommandResult | Promise<CloudV2CommandResult> | undefined;
@@ -73,6 +86,8 @@ export class FakeBoat implements CloudV2Compute {
   failCommand: ((machine: Machine, command: string) => boolean) | null = null;
   /** Whether stop goes through "archiving" before "archived". */
   archivingReads = 0;
+  /** Inspect reads before a fork, or a machine made from a snapshot, is hydrated. */
+  hydrationReads = 0;
   /** The next saveSnapshot fails with this code after Boat recorded the name, as a failed or timed-out save can. */
   failNextSave: "computer_snapshot_failed" | "computer_snapshot_timeout" | null = null;
   /** The next create is refused outright, before anything exists. */
@@ -108,10 +123,12 @@ export class FakeBoat implements CloudV2Compute {
     const entry = this.keys.get(key);
     return entry && this.clock() - entry.at < DAY ? entry.id : null;
   }
-  private make(key: string, init: Omit<Machine, "id" | "createdAt" | "stoppedAt" | "state" | "worker" | "leaseUntil" | "cold">
+  private make(key: string, init: Omit<Machine, "id" | "createdAt" | "stoppedAt" | "state" | "worker" | "leaseUntil" | "cold" | "hydrateReads" | "attempt" | "archive" | "failedReads">
     & Partial<Pick<Machine, "worker" | "leaseUntil">>): string {
     const id = `bx_fake${String(this.next++).padStart(4, "0")}`;
-    this.machines.set(id, { worker: { enabled: false, active: false }, leaseUntil: null, ...init, id, state: "running", createdAt: this.clock(), stoppedAt: null, cold: false });
+    this.machines.set(id, { worker: { enabled: false, active: false }, leaseUntil: null, ...init, id, state: "running", createdAt: this.clock(), stoppedAt: null, cold: false,
+      hydrateReads: init.from || init.source ? this.hydrationReads : 0, attempt: { at: this.clock(), status: "completed", files: new Map(init.files), reads: 0 },
+      archive: null, failedReads: 0 });
     this.keys.set(key, { id, at: this.clock() });
     return id;
   }
@@ -135,7 +152,7 @@ export class FakeBoat implements CloudV2Compute {
     if (known) return this.replied("fork", { sandboxId: known });
     const source = this.live(sourceId);
     if (source.state !== "archived") throw new BoatForkRefusedError();
-    const id = this.make(input.key, { name: `${source.name} fork`, env: { ...source.env }, files: new Map(source.files), from: null, source: sourceId,
+    const id = this.make(input.key, { name: `${source.name} fork`, env: { ...source.env }, files: new Map(source.archive ?? source.files), from: null, source: sourceId,
       worker: { enabled: source.worker.enabled, active: source.worker.enabled }, leaseUntil: this.clock() + input.ttlSeconds * 1000 });
     return this.replied("fork", { sandboxId: id });
   }
@@ -148,15 +165,40 @@ export class FakeBoat implements CloudV2Compute {
       return { name: known.name, state: "archived", stoppedAt: known.stoppedAt === null ? null : new Date(known.stoppedAt), snapshotAvailable: false,
         dataExpiredAt: new Date(known.stoppedAt === null ? this.clock() : Math.min(this.clock(), known.stoppedAt + 14 * DAY)) };
     const machine = this.live(sandboxId);
-    if (machine.state === "archiving" && this.archivingReads-- <= 0) { machine.state = "archived"; machine.stoppedAt = this.clock(); }
+    if (machine.hydrateReads > 0) machine.hydrateReads--;
+    const attempt = machine.attempt;
+    if (attempt.status === "in_progress" && machine.state === "running" && attempt.reads-- <= 0) attempt.status = "completed";
+    // A stop that failed an attempt in progress: those reads still show it failed; then the stop's own attempt.
+    if (machine.state === "archiving" && machine.failedReads > 0) {
+      machine.failedReads--;
+      return { name: machine.name, state: machine.state, stoppedAt: null, ...this.disk(machine, { at: attempt.at, status: "failed" }) };
+    }
+    if (machine.state === "archiving" && this.archivingReads-- <= 0) {
+      machine.state = "archived"; machine.stoppedAt = this.clock();
+      machine.attempt = { at: Math.max(this.clock(), machine.attempt.at + 1), status: "completed", files: new Map(machine.archive ?? machine.files), reads: 0 };
+    }
     return { name: machine.name, state: machine.state, stoppedAt: machine.stoppedAt === null ? null : new Date(machine.stoppedAt),
-      ...(machine.state === "archived" ? { snapshotAvailable: true, dataExpiredAt: null } : {}) };
+      ...(machine.state === "archived" ? { snapshotAvailable: true, dataExpiredAt: null } : {}), ...this.disk(machine, machine.attempt) };
+  }
+
+  private disk(machine: Machine, attempt: { at: number; status: string }) {
+    return { hydrated: machine.hydrateReads === 0, snapshotAttemptAt: new Date(attempt.at), snapshotStatus: attempt.status };
+  }
+
+  /** A snapshot attempt of a running machine begins: it holds the files as they are now, and completes after `reads`
+   * inspect reads unless a stop comes first, which fails it. */
+  beginSnapshotAttempt(sandboxId: string, reads = Number.POSITIVE_INFINITY): void {
+    const machine = this.live(sandboxId);
+    machine.attempt = { at: Math.max(this.clock(), machine.attempt.at + 1), status: "in_progress", files: new Map(machine.files), reads };
   }
 
   async resume(sandboxId: string, ttlSeconds?: number) {
     this.record("resume", sandboxId, ...(ttlSeconds === undefined ? [] : [ttlSeconds]));
     const machine = this.live(sandboxId);
     if (machine.cold) { machine.worker.active = machine.worker.enabled; machine.cold = false; }
+    // A resume starts from what the stop archived, and from a stopped machine its restore runs again for a while.
+    if (machine.archive) { machine.files = new Map(machine.archive); machine.archive = null; }
+    if (machine.state !== "running") machine.hydrateReads = this.hydrationReads;
     // Boat's lease is the resume's ttl; boat.ts sends 24 hours when none is given.
     machine.state = "running"; machine.leaseUntil = this.clock() + (ttlSeconds ?? 24 * 60 * 60) * 1000;
   }
@@ -166,7 +208,12 @@ export class FakeBoat implements CloudV2Compute {
   async stop(sandboxId: string) {
     this.record("stop", sandboxId);
     const machine = this.live(sandboxId);
-    if (machine.state === "running") machine.state = "archiving";
+    if (machine.state === "running") {
+      machine.state = "archiving";
+      // Stopped during an attempt: it fails, and the archive holds only what that attempt began with.
+      if (machine.attempt.status === "in_progress") { machine.attempt.status = "failed"; machine.archive = new Map(machine.attempt.files); machine.failedReads = 1; }
+      else machine.archive = null;
+    }
     this.replied("stop", undefined);
   }
 
@@ -247,8 +294,17 @@ export class FakeBoat implements CloudV2Compute {
       }
       return { exitCode: 0, stdout: "zeros-baseline recorded\n", timedOut: false };
     }
-    if (command.includes("rev-parse HEAD"))
+    // Which checkouts a machine holds (ready-copies.ts readyCopyCheckoutsCommand): each one's HEAD, or missing.
+    if (command.includes("zeros-checkouts-read")) {
+      const dirs = [...command.replace(/'\\''/g, "'").matchAll(/zeros-checkout-at '([^']+)'/g)].map(match => match[1]!);
+      return { exitCode: 0, stdout: `${dirs.map((dir, index) => `zeros-checkout ${index} ${machine.files.get(`${dir}/.git/HEAD`) ?? "missing"}`).join("\n")}\nzeros-checkouts-read\n`, timedOut: false };
+    }
+    if (command.includes("rev-parse HEAD")) {
+      // A clone (computer.ts checkoutScript) leaves its checkout on the disk.
+      const target = /clone (?:--branch '[^']*' )?'https:\/\/github\.com\/[^']+\.git' '([^']+)'/.exec(command.replace(/'\\''/g, "'"))?.[1];
+      if (target) machine.files.set(`${target}/.git/HEAD`, "c".repeat(40));
       return { exitCode: 0, stdout: `Cloning\nzeros-build-branch=main\n${"c".repeat(40)}\n`, timedOut: false };
+    }
     return { exitCode: 0, stdout: "", timedOut: false };
   }
 
