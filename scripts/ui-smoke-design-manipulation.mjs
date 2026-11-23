@@ -305,8 +305,10 @@ const center = box => ({ x: box.x + box.width / 2, y: box.y + box.height / 2 });
 async function scrub(name, label, property) {
   if (!wants(name)) return;
   await load();
-  const box = await page.getByRole("button", { name: `Scrub ${label}`, exact: true }).boundingBox();
-  const start = center(box);
+  // hover() first: the label visible, stable and the element at its centre, so the drag starts on it.
+  const target = page.getByRole("button", { name: `Scrub ${label}`, exact: true });
+  await target.hover();
+  const start = center(await target.boundingBox());
   await measure(name, { frame: "home.html", node: "home-hero", property }, () => drag(start, { x: start.x + 28, y: start.y }));
 }
 
@@ -336,7 +338,9 @@ try {
   if (wants("padding-scrub")) {
     await load();
     await page.getByRole("button", { name: "Independent padding", exact: true }).click();
-    const start = center(await page.getByRole("button", { name: "Scrub Left", exact: true }).boundingBox());
+    const target = page.getByRole("button", { name: "Scrub Left", exact: true });
+    await target.hover();
+    const start = center(await target.boundingBox());
     await measure("padding-scrub", { frame: "home.html", node: "home-hero", property: "paddingLeft" }, () => drag(start, { x: start.x + 28, y: start.y }));
   }
   await scrub("radius-scrub", "Radius", "borderRadius");
