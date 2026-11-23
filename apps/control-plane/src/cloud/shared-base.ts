@@ -8,7 +8,7 @@ import type pg from "pg";
 import { withSystemTx, type Tx } from "../db.js";
 import type { CloudV2SharedBaseOverride } from "../config.js";
 import type { CloudV2Compute } from "./boat.js";
-import { installBase, type CloudV2Build } from "./computer.js";
+import { installBase } from "./computer.js";
 import { cloudV2BoatSnapshotName, cloudV2ResourcePrefix, cloudV2SandboxName, cloudV2SharedBaseName, cloudV2SharedSnapshotReference, cloudV2SnapshotName } from "./resource-names.js";
 import { buildClaimAllowed } from "./runtime-build-drain.js";
 
@@ -371,30 +371,8 @@ async function removeSnapshot(deps: Pick<SharedBaseBuildDeps, "bases" | "compute
   return true;
 }
 
-/** Overview history: an automatic re-point to a newer shared base, one per runtime release for every organization on it. */
-export function isSharedRepoint(build: Pick<CloudV2Build, "reason" | "state" | "snapshotId" | "createdBy"> & { automatic?: true }): boolean {
-  return build.reason === "runtime" && build.state === "succeeded" && build.createdBy === null && build.automatic === true
-    && typeof build.snapshotId === "string" && build.snapshotId.includes("@");
-}
-
-/**
- * Folds each run of consecutive shared re-points (newest first, as the overview lists builds) into its newest row,
- * which counts the ones it stands for. A build in `keep` (the live one) is never folded away.
- */
-export function foldSharedRepoints<T extends Pick<CloudV2Build, "id" | "reason" | "state" | "snapshotId" | "createdBy"> & { automatic?: true }>(
-  builds: readonly T[], keep: ReadonlySet<string> = new Set()): (T & { repoints?: number })[] {
-  const folded: (T & { repoints?: number })[] = [];
-  for (const build of builds) {
-    const head = folded[folded.length - 1];
-    if (head && isSharedRepoint(build) && isSharedRepoint(head) && !keep.has(build.id)) {
-      folded[folded.length - 1] = { ...head, repoints: (head.repoints ?? 1) + 1 };
-      continue;
-    }
-    folded.push(build);
-  }
-  return folded;
-}
-
+// Folding consecutive shared re-points in the Computer history lives with the overview that uses it (computer.ts).
+export { foldSharedRepoints, isSharedRepoint } from "./computer.js";
 
 /** How often the builder's hooks run. */
 export const SHARED_BASE_CLAIM_MS = 60_000;

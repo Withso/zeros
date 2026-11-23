@@ -16,6 +16,7 @@ import { CloudSourceTargetSchema, type CloudSourceTarget } from "./source-author
 import { computerSourceReviewRequired, readComputerSourceTargets, type CloudV2ComputerSourceResolver } from "./computer-provenance.js";
 import { RepositorySetupPathSchema } from "./repository-setup-contract.js";
 import { buildClaimAllowed } from "./runtime-build-drain.js";
+import type { SharedBaseState } from "./shared-base.js";
 export { cloudV2SnapshotName } from "./resource-names.js";
 
 const MAX_LOG_BYTES = 1024 * 1024;
@@ -124,10 +125,14 @@ export const CloudV2InstallScriptSchema = z.string().max(CLOUD_V2_INSTALL_SCRIPT
 export type CloudV2ComputerOptions = {
   /** CloudV2Config.readyCopies: builds make the base only. */
   readyCopies?: boolean;
-  /** CloudV2Config.sharedBaseSnapshot: the base of organizations without an install script. */
+  /** CloudV2Config.sharedBaseSnapshot: the base of organizations without an install script (a pinned name; the
+   * resolver below supersedes it). */
   sharedBaseSnapshot?: string;
-  /** Whether Boat has the shared base now (ensureBase reads it before taking any lock). */
-  sharedBaseAvailable?: () => Promise<boolean>;
+  /** The shared base the builder makes for the pinned runtime (shared-base.ts CloudV2SharedBaseResolver): ready with its
+   * name, building, failed or off. With it, sharedBaseSnapshot is not read. */
+  sharedBase?: { state(): Promise<SharedBaseState> };
+  /** Whether Boat has that shared base now (ensureBase reads it before taking any lock). */
+  sharedBaseAvailable?: (name?: string) => Promise<boolean>;
   /** The runtime a base made now records (the shared base made inline caches none of its own). */
   runtimeSha256?: string;
   /** Automatic base builds that need a machine, across the deployment (CLOUD_V2_AUTOMATIC_BASE_BUDGET). */
@@ -253,7 +258,9 @@ export class CloudV2Computers {
   }
 
   async overview(organizationId: string): Promise<CloudV2ComputerOverview> {
-    const overview = await this.readOverview(organizationId);
+    const read = await this.readOverview(organizationId);
+    // A release re-points organizations on the shared base: consecutive re-points read as one history row.
+    const overview = { ...read, builds: foldSharedRepoints(read.builds, new Set(read.activeBuildId ? [read.activeBuildId] : [])) };
     return this.options.readyCopies ? { ...overview, base: await this.baseState(organizationId) } : overview;
   }
 
@@ -429,9 +436,10 @@ export class CloudV2Computers {
    */
   async ensureBase(organizationId: string, now: Date = new Date(), options: { create?: boolean } = {}): Promise<CloudV2BaseState> {
     if (!this.options.readyCopies) return { state: "unavailable" };
-    const shared = this.options.sharedBaseSnapshot;
-    // Boat is asked before any lock is taken.
-    const sharedAvailable = shared && this.options.sharedBaseAvailable ? await this.options.sharedBaseAvailable().catch(() => false) : false;
+    // The shared base and Boat are asked before any lock is taken. One still being built is waited for: the base queued
+    // below for an organization without an install script is held by claim() until it is ready (or 30 minutes pass).
+    const { name: shared } = await this.sharedBaseNow();
+    const sharedAvailable = shared !== null;
     let activated = false;
     const state = await withSystemTx(this.pool, async (tx): Promise<CloudV2BaseState> => {
       // A create that finds the first failure of a run asks for one try now, rather than waiting out its 15 minutes;
@@ -446,6 +454,19 @@ export class CloudV2Computers {
     });
     if (activated) await this.baseActivated?.(organizationId).catch(() => undefined);
     return state;
+  }
+
+  /** The shared base to activate now (ready, and present at Boat), and whether one is being built for the pinned runtime
+   * (its organizations' bases are then held: claim(..., { holdShared })). */
+  async sharedBaseNow(): Promise<{ name: string | null; building: boolean }> {
+    const available = async (name: string) => this.options.sharedBaseAvailable ? await this.options.sharedBaseAvailable(name).catch(() => false) : false;
+    if (this.options.sharedBase) {
+      const state = await this.options.sharedBase.state().catch(() => null);
+      if (state?.state === "ready") return { name: await available(state.name) ? state.name : null, building: false };
+      return { name: null, building: state?.state === "building" };
+    }
+    const pinned = this.options.sharedBaseSnapshot;
+    return { name: pinned && await available(pinned) ? pinned : null, building: false };
   }
 
   /** The organization's base as ensureBase would find it, changing nothing: "none" when nothing exists or is building. */
@@ -901,7 +922,11 @@ export class CloudV2Computers {
     return rows[0].log;
   }
 
-  async claim(runtimeSha256?: string): Promise<CloudV2Build | null> {
+  /** `holdShared`: the shared base for the pinned runtime is being built, so an automatic base with no install script
+   * (which will be that shared base, at no machine) waits for it, for at most 30 minutes from its queueing; after that,
+   * or once the shared build has failed, it is claimed and builds the organization's own. A create bound to it waits
+   * through the ordinary waiting path meanwhile (waiting_for_base_at), and is never re-bound. */
+  async claim(runtimeSha256?: string, options: { holdShared?: boolean } = {}): Promise<CloudV2Build | null> {
     const budget = this.options.automaticBaseBudget ?? CLOUD_V2_AUTOMATIC_BASE_BUDGET;
     // Old claimers lock build rows before the drain; cancellation must precede it.
     await withSystemTx(this.pool, async tx => {
@@ -916,13 +941,14 @@ export class CloudV2Computers {
        WHERE id = (SELECT b.id FROM cloud_v2_computer_builds b JOIN organizations o ON o.id=b.org_id
          WHERE b.state='queued' AND b.cleanup_requested_at IS NULL AND o.deleted_at IS NULL
            AND ${CURRENT_RETRY_INTENT}
+           AND NOT ($4 AND b.automatic AND b.base_only AND b.install_script IS NULL AND b.created_at > clock_timestamp() - interval '30 minutes')
            AND (NOT b.automatic OR ${AUTOMATIC_WAITED_ON} OR (
              (SELECT count(*) FROM cloud_v2_computer_builds a WHERE a.automatic AND NOT a.base_shared
                AND a.started_at > clock_timestamp() - interval '1 hour') < $2
              AND (SELECT count(*) FROM cloud_v2_computer_builds a WHERE a.automatic AND NOT a.base_shared
                AND a.started_at > clock_timestamp() - interval '1 day') < $3))
          ORDER BY (b.automatic AND NOT ${AUTOMATIC_WAITED_ON}), b.created_at LIMIT 1 FOR UPDATE OF b SKIP LOCKED)
-       RETURNING ${COLUMNS}`, [runtimeSha256 ?? null, budget.perHour, budget.perDay]);
+       RETURNING ${COLUMNS}`, [runtimeSha256 ?? null, budget.perHour, budget.perDay, options.holdShared === true]);
     });
     return rows[0] ? build(rows[0]) : null;
   }
@@ -1221,6 +1247,30 @@ export async function installBase(compute: CloudV2Compute, sandboxId: string,
   return true;
 }
 
+/** Overview history: an automatic re-point to a newer shared base, one per runtime release for every organization on it. */
+export function isSharedRepoint(build: Pick<CloudV2Build, "reason" | "state" | "snapshotId" | "createdBy"> & { automatic?: true }): boolean {
+  return build.reason === "runtime" && build.state === "succeeded" && build.createdBy === null && build.automatic === true
+    && typeof build.snapshotId === "string" && build.snapshotId.includes("@");
+}
+
+/**
+ * Folds each run of consecutive shared re-points (newest first, as the overview lists builds) into its newest row,
+ * which counts the ones it stands for. A build in `keep` (the live one) is never folded away.
+ */
+export function foldSharedRepoints<T extends Pick<CloudV2Build, "id" | "reason" | "state" | "snapshotId" | "createdBy"> & { automatic?: true }>(
+  builds: readonly T[], keep: ReadonlySet<string> = new Set()): (T & { repoints?: number })[] {
+  const folded: (T & { repoints?: number })[] = [];
+  for (const build of builds) {
+    const head = folded[folded.length - 1];
+    if (head && isSharedRepoint(build) && isSharedRepoint(head) && !keep.has(build.id)) {
+      folded[folded.length - 1] = { ...head, repoints: (head.repoints ?? 1) + 1 };
+      continue;
+    }
+    folded.push(build);
+  }
+  return folded;
+}
+
 /** Reuse checkouts so ignored dependencies survive; credentials stay in a
  * per-command header, never a saved remote URL. */
 export function checkoutScript(entry: RecipeEntry, dir: string, canonicalRepository = entry.repository): string[] {
@@ -1320,6 +1370,8 @@ export class CloudV2ComputerBuilder {
     logger?: Pick<Console, "warn"> & Partial<Pick<Console, "error">>;
     /** Ready copies: a base went live. Queues first copies and marks the rest stale. */
     onActivated?(build: { organizationId: string; reason: CloudV2BuildReason }): Promise<void>;
+    /** The shared base's hooks (shared-base.ts CloudV2SharedBaseSweeper), each at its own cadence, beside admission. */
+    sharedBases?: { tick(): Promise<void> };
   }) {
     this.lastRefreshScan = (deps.now?.() ?? Date.now()) - REFRESH_SCAN_MS + (deps.refreshDelayMs ?? REFRESH_SCAN_MS);
   }
@@ -1333,6 +1385,8 @@ export class CloudV2ComputerBuilder {
     if (this.closed) return;
     await this.sweepBases().catch(() => this.deps.logger?.warn("[cloud-v2] base sweep will retry"));
     if (this.closed) return;
+    await this.deps.sharedBases?.tick().catch(() => this.deps.logger?.warn("[cloud-v2] shared base sweep will retry"));
+    if (this.closed) return;
     // GitHub reads can be slow; a scan runs beside admission, never before it.
     this.refreshing ??= this.scheduleRefreshes()
       .catch(() => this.deps.logger?.warn("[cloud-v2] Computer refresh scan will retry"))
@@ -1340,7 +1394,7 @@ export class CloudV2ComputerBuilder {
     const jobs: CloudV2Build[] = [];
     for (let index = 0; index < BUILD_CONCURRENCY; index++) {
       if (this.closed) break;
-      const job = await computers.claim(this.deps.runtime.sha256);
+      const job = await computers.claim(this.deps.runtime.sha256, { holdShared: (await computers.sharedBaseNow().catch(() => ({ building: false }))).building });
       if (!job) break;
       if (this.closed) { await computers.returnUnstarted(job.id); break; }
       jobs.push(job);
@@ -1362,11 +1416,14 @@ export class CloudV2ComputerBuilder {
     if (now - this.lastSweep < BASE_SWEEP_MS) return;
     this.lastSweep = now;
     await computers.releaseLegacyBuilds();
-    const shared = computers.options.sharedBaseSnapshot && computers.options.sharedBaseAvailable
-      ? await computers.options.sharedBaseAvailable().catch(() => false) : false;
+    const now_ = await computers.sharedBaseNow().catch(() => ({ name: null, building: false }));
+    const shared = now_.name !== null;
     let machines = await computers.automaticBudgetRemaining();
     for (const candidate of await computers.sweepCandidates(BASE_SWEEP_PAGE)) {
       if (this.closed) return;
+      // While the shared base is being built, an organization without an install script waits for it: nothing is queued
+      // for it by the sweep (a create still queues one, held by claim, so the create can wait).
+      if (now_.building && !candidate.installScript) continue;
       const free = shared && !candidate.installScript;
       if (!free && machines <= 0) continue;
       const state = await computers.ensureBase(candidate.organizationId).catch(() => null);
@@ -1512,7 +1569,13 @@ export class CloudV2ComputerBuilder {
     const log = (text: string) => computers.append(job.id, text);
     if (job.automatic) await log("[zeros] prepared automatically by Zeros: Boat's stock image and this organization's install script, no repository\n");
     await log(`[zeros] building Cloud Computer v${job.version}${REASON_LABEL[job.reason]}\n`);
-    const base = await computers.buildBase(job.id), shared = computers.options.sharedBaseSnapshot;
+    const base = await computers.buildBase(job.id);
+    // The shared base the builder made for the pinned runtime (present at Boat), else a pinned name. With the builder's
+    // shared base configured but not ready (failed, off, missing, or held past its 30 minutes), this organization's own
+    // base is built instead, on this same row: a create waiting on it is never re-bound.
+    const resolved = base.baseOnly && !base.installScript && computers.options.sharedBase ? await computers.sharedBaseNow().catch(() => ({ name: null })) : null;
+    const shared = resolved ? resolved.name : computers.options.sharedBaseSnapshot;
+    if (resolved && !resolved.name) await log("[zeros] Zeros's shared base is not ready, so this organization's own base is built\n");
     if (base.baseOnly && !base.installScript && shared) {
       // Nothing of the organization's own to install: no machine at all.
       assertHeld();
