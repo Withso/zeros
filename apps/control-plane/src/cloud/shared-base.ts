@@ -55,6 +55,7 @@ export type SharedBaseRow = {
   build_id: string; builder_sandbox_id: string | null; builder_create_pending: boolean; builder_deleted_at: Date | null;
   save_requested_at: Date | null; error_code: string | null; failures: number; next_attempt_at: Date | null;
   missing_at: Date | null; created_at: Date; ready_at: Date | null; superseded_at: Date | null; deleted_at: Date | null;
+  interruptions: number; missing_seen_at: Date | null;
 };
 export type SharedBaseClaim =
   | { kind: "claimed"; row: SharedBaseRow }
@@ -87,9 +88,9 @@ export class CloudV2SharedBases {
       // The drain row is locked here, so a release that takes the drain waits for this claim or sees its build.
       if (!await buildClaimAllowed(tx)) return { kind: "drain_held" };
       const row = (await tx.query<SharedBaseRow>(
-        `INSERT INTO cloud_v2_shared_bases (name, channel, runtime_sha256, rebuild, state, failures, heartbeat_at)
-         VALUES ($1, $2, $3, $4, 'building', $5, clock_timestamp()) RETURNING *`,
-        [decided.row.name, scope.channel, runtimeSha256, decided.row.rebuild, decided.row.failures])).rows[0]!;
+        `INSERT INTO cloud_v2_shared_bases (name, channel, runtime_sha256, rebuild, state, failures, interruptions, heartbeat_at)
+         VALUES ($1, $2, $3, $4, 'building', $5, $6, clock_timestamp()) RETURNING *`,
+        [decided.row.name, scope.channel, runtimeSha256, decided.row.rebuild, decided.row.failures, decided.row.interruptions])).rows[0]!;
       return { kind: "claimed", row };
     });
   }
@@ -111,7 +112,11 @@ export class CloudV2SharedBases {
     if (rebuild > 999) return { kind: "exhausted" };
     // A base Boat lost starts its backoff again; consecutive failures of builds carry on.
     const failures = last?.state === "failed" && !last.missing_at ? last.failures : 0;
-    return { kind: "claimed", row: { name: cloudV2SharedBaseName(scope.channel, runtimeSha256, rebuild, scope.localOwner), rebuild, failures } as SharedBaseRow };
+    // Interruptions in a row carry on, so a fourth counts as a failure (failInterrupted); anything else starts them again.
+    const interruptions = last?.state === "failed" && last.error_code === "shared_base_interrupted" && last.interruptions <= SHARED_BASE_INTERRUPTION_RETRIES
+      ? last.interruptions : 0;
+    return { kind: "claimed", row: { name: cloudV2SharedBaseName(scope.channel, runtimeSha256, rebuild, scope.localOwner), rebuild, failures,
+      interruptions } as SharedBaseRow };
   }
 
   /** Fails builds whose process stopped beating, so cleanup can remove what they left. */
@@ -119,9 +124,16 @@ export class CloudV2SharedBases {
     await withSystemTx(this.pool, tx => this.failInterrupted(tx, sharedBasePrefix(scope)));
   }
 
+  /** A build whose process stopped beating (a deploy, a crash) was interrupted, not failed: the release drain does not
+   * wait for shared builds (runtime-build-drain.ts counts Cloud Computer builds only), and on Alpha almost every merge
+   * deploys. Up to three interruptions in a row retry at the next claim without counting toward the backoff; a fourth
+   * counts as a failure, with the normal backoff. The previous base keeps serving meanwhile. */
   private async failInterrupted(tx: Tx, prefix: string): Promise<void> {
     await tx.query(`UPDATE cloud_v2_shared_bases SET state = 'failed', error_code = 'shared_base_interrupted', finished_at = clock_timestamp(),
-        failures = failures + 1, next_attempt_at = clock_timestamp() + least(interval '15 minutes' * power(2, least(failures, 16)), interval '6 hours')
+        interruptions = interruptions + 1,
+        failures = CASE WHEN interruptions + 1 > ${SHARED_BASE_INTERRUPTION_RETRIES} THEN failures + 1 ELSE failures END,
+        next_attempt_at = CASE WHEN interruptions + 1 > ${SHARED_BASE_INTERRUPTION_RETRIES}
+          THEN clock_timestamp() + least(interval '15 minutes' * power(2, least(failures, 16)), interval '6 hours') ELSE clock_timestamp() END
       WHERE starts_with(name, $1) AND state = 'building' AND coalesce(heartbeat_at, created_at) < clock_timestamp() - interval '${INTERRUPTED_AFTER}'`, [prefix]);
   }
 
@@ -184,6 +196,23 @@ export class CloudV2SharedBases {
     });
   }
 
+  /** The missing-base sweep's reading of Boat for a name: absent (a 404) is recorded as a first sighting and only a second
+   * scan in a row acts (true); present clears a sighting; unknown changes nothing. Names with no row (a pinned override)
+   * keep their sightings in `memory`. */
+  async sighting(name: string, reading: "present" | "absent" | "unknown", memory: Map<string, number>): Promise<boolean> {
+    if (reading === "unknown") return false;
+    const present = reading === "present";
+    const row = (await withSystemTx(this.pool, tx => tx.query<{ seen_before: boolean }>(
+      `WITH before AS (SELECT name, missing_seen_at FROM cloud_v2_shared_bases WHERE name = $1 FOR UPDATE)
+       UPDATE cloud_v2_shared_bases s SET missing_seen_at = CASE WHEN $2 THEN NULL ELSE coalesce(s.missing_seen_at, clock_timestamp()) END
+       FROM before WHERE s.name = before.name RETURNING (NOT $2 AND before.missing_seen_at IS NOT NULL) AS seen_before`, [name, present]))).rows[0];
+    if (row) return row.seen_before === true;
+    if (present) { memory.delete(name); return false; }
+    const seen = memory.has(name);
+    if (!seen) memory.set(name, Date.now());
+    return seen;
+  }
+
   /** Boat no longer has a ready base: it is failed at once (no backoff), so the next claim rebuilds it under a new name. */
   async missing(name: string): Promise<boolean> {
     const { rowCount } = await withSystemTx(this.pool, tx => tx.query(
@@ -203,6 +232,11 @@ export class CloudV2SharedBases {
 
   async row(name: string): Promise<SharedBaseRow | null> {
     return (await withSystemTx(this.pool, tx => tx.query<SharedBaseRow>("SELECT * FROM cloud_v2_shared_bases WHERE name = $1", [name]))).rows[0] ?? null;
+  }
+
+  async hasRows(scope: SharedBaseScope): Promise<boolean> {
+    return (await withSystemTx(this.pool, tx => tx.query("SELECT 1 FROM cloud_v2_shared_bases WHERE starts_with(name, $1) AND channel = $2 LIMIT 1",
+      [sharedBasePrefix(scope), scope.channel]))).rowCount! > 0;
   }
 
   async rows(scope: SharedBaseScope): Promise<SharedBaseRow[]> {
@@ -374,6 +408,12 @@ async function removeSnapshot(deps: Pick<SharedBaseBuildDeps, "bases" | "compute
 // Folding consecutive shared re-points in the Computer history lives with the overview that uses it (computer.ts).
 export { foldSharedRepoints, isSharedRepoint } from "./computer.js";
 
+/** Interruptions in a row that retry at once (failInterrupted). */
+export const SHARED_BASE_INTERRUPTION_RETRIES = 3;
+/** How long a superseded base is kept before deletion may take it (references are checked as well): the resolver caches a
+ * minute, and the worker installs the pinned runtime at boot, so no rollback needs an old image. */
+export const SHARED_BASE_SUPERSEDED_KEEP = "24 hours";
+
 /** How often the builder's hooks run. */
 export const SHARED_BASE_CLAIM_MS = 60_000;
 export const SHARED_BASE_REPOINT_MS = 60_000;
@@ -405,7 +445,12 @@ export async function cleanupSharedBaseBuilders(deps: Pick<SharedBaseBuildDeps, 
   }
 }
 
+/** Sightings of names with no row, when the caller keeps none of its own (one process's memory). */
+const memorySightings = new Map<string, number>();
+
 export type SharedBaseSweepDeps = SharedBaseBuildDeps & {
+  /** The missing-base sweep's first sightings of names with no row (a pinned override). */
+  sightings?: Map<string, number>;
   pool: pg.Pool;
   scope: SharedBaseScope;
   runtime: SharedBaseRuntime;
@@ -493,7 +538,7 @@ export async function repointOrganizations(pool: pg.Pool, compute: CloudV2Comput
 /**
  * Deletes old shared bases nothing needs: never the current one, a kept one (a pinned override), or the previous
  * runtime's (kept for a rollback; the newest base of another runtime when CLOUD_V2_RUNTIME_PREVIOUS_SHA256 is unset);
- * only 7 days after it was superseded; and only with no reference left: no live pointer, no build row still holding
+ * only 24 hours after it was superseded; and only with no reference left: no live pointer, no build row still holding
  * it, no ready copy being built from it. A stale resolver cache (a minute at most) cannot activate a base superseded a
  * week ago, so no new reference appears between this check and the delete. The row is marked deleted only after Boat
  * reads it back gone.
@@ -506,7 +551,7 @@ export async function deleteSupersededSharedBases(deps: SharedBaseSweepDeps & { 
   const names = (await withSystemTx(pool, tx => tx.query<{ name: string }>(
     `SELECT s.name FROM cloud_v2_shared_bases s
      WHERE starts_with(s.name, $1) AND s.channel = $2 AND s.state = 'ready' AND s.deleted_at IS NULL
-       AND s.superseded_at < clock_timestamp() - interval '7 days'
+       AND s.superseded_at < clock_timestamp() - interval '${SHARED_BASE_SUPERSEDED_KEEP}'
        AND s.name <> ALL($3::text[]) AND s.runtime_sha256 <> $4 AND s.runtime_sha256 <> coalesce($5, '')
        AND ($5::text IS NOT NULL OR s.name <> coalesce((SELECT p.name FROM cloud_v2_shared_bases p
          WHERE starts_with(p.name, $1) AND p.channel = $2 AND p.state = 'ready' AND p.runtime_sha256 <> $4
@@ -547,8 +592,11 @@ export async function checkMissingSharedBases(deps: SharedBaseSweepDeps & { onRe
   const names = [...new Set([...(current.state === "ready" ? [current.name] : []), ...referenced])];
   const missing: string[] = [];
   for (const name of names) {
-    const present = await exists(compute, name).catch(() => null);
-    if (present !== false) continue;
+    // Proven before it acts: an explicit 404 (never a status other than ready, never an error) on two scans in a row.
+    const reading = compute.snapshotState ? await compute.snapshotState(name).catch(() => "unknown" as const) : "unknown";
+    const second = await bases.sighting(name, reading, deps.sightings ?? memorySightings);
+    if (reading === "absent" && !second) { deps.logger?.warn(`[cloud-v2] shared base not found once name=${name}; checking again at the next scan`); continue; }
+    if (!second) continue;
     missing.push(name);
     deps.logger?.warn(`[cloud-v2] shared base missing name=${name}`);
     await bases.missing(name);
@@ -652,13 +700,18 @@ export class CloudV2SharedBaseSweeper {
     const deps = this.deps, now = deps.now?.() ?? Date.now();
     // Off (CLOUD_V2_SHARED_BASE_SNAPSHOT=off): none of the shared base's hooks run, its inventory included.
     if (deps.override?.kind === "off") return;
+    // A Local control plane (a developer's own) builds no shared base unless asked (a name or auto): every runtime sha a
+    // developer builds would otherwise leave a zeros-local-… snapshot on the shared Boat account. Its other hooks run only
+    // once it has rows of its own (the CLI's --execute still builds one on purpose).
+    const local = deps.scope.localOwner !== undefined && deps.override?.kind !== "auto" && deps.override?.kind !== "name";
+    if (local && !await deps.bases.hasRows(deps.scope).catch(() => false)) return;
     const due = (key: keyof typeof this.last, every: number) => {
       if (now - this.last[key] < every) return false;
       this.last[key] = now;
       return true;
     };
     const warn = (what: string) => () => deps.logger?.warn(`[cloud-v2] shared base ${what} will retry`);
-    if (!this.building && due("claim", SHARED_BASE_CLAIM_MS))
+    if (!local && !this.building && due("claim", SHARED_BASE_CLAIM_MS))
       this.building = claimSharedBaseBuild(deps).catch(warn("build")).finally(() => { this.building = null; });
     if (due("repoint", SHARED_BASE_REPOINT_MS)) {
       const current = await sharedBaseState(deps.bases, { ...deps.scope, runtimeSha256: deps.runtime.sha256, override: deps.override ?? null }).catch(() => null);

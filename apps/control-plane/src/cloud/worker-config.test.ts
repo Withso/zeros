@@ -75,7 +75,7 @@ it("keeps ready copies off until a deployment enables them, and validates the sh
   expect(() => loadConfig({ ...base, CLOUD_V2_SHARED_BASE_SNAPSHOT: "Not A Name" })).toThrow("CLOUD_V2_SHARED_BASE_SNAPSHOT");
 });
 
-it("reads CLOUD_V2_SHARED_BASE_SNAPSHOT as the shared base override: a name pins it, off turns it off", () => {
+it("reads CLOUD_V2_SHARED_BASE_SNAPSHOT as the shared base override: a name pins it, off turns it off, auto asks for the builder's", () => {
   const key = generateKeyPairSync("ed25519").privateKey.export({ format: "der", type: "pkcs8" }).toString("base64");
   const base = { ...env, CLOUD_V2_WORKER_SIGNING_KEY: key };
   expect(loadConfig(base).cloudV2?.sharedBaseOverride).toBeNull();
@@ -86,6 +86,10 @@ it("reads CLOUD_V2_SHARED_BASE_SNAPSHOT as the shared base override: a name pins
   // Older readers of sharedBaseSnapshot see no shared base, never a snapshot called "off".
   expect(off).not.toHaveProperty("sharedBaseSnapshot");
   expect(() => loadConfig({ ...base, CLOUD_V2_SHARED_BASE_SNAPSHOT: "OFF" })).toThrow("CLOUD_V2_SHARED_BASE_SNAPSHOT");
+  // auto: the builder's own shared base (what a Local control plane needs to build one); never a snapshot called "auto".
+  const auto = loadConfig({ ...base, CLOUD_V2_SHARED_BASE_SNAPSHOT: "auto" }).cloudV2;
+  expect(auto?.sharedBaseOverride).toEqual({ kind: "auto" });
+  expect(auto).not.toHaveProperty("sharedBaseSnapshot");
 });
 
 it("keeps retention off until a deployment enables it", () => {

@@ -77,11 +77,29 @@ d("cloud v2 shared base sweeps", () => {
       await bases.saveRequested(claim.row.name);
       await boat.saveSnapshot(sandboxId, claim.row.name);
       await pool.query("UPDATE cloud_v2_shared_bases SET heartbeat_at = clock_timestamp() - interval '10 minutes'");
-      expect(await claimSharedBaseBuild(deps(A))).toMatchObject({ code: "shared_base_backoff" });
+      // An interruption (a deploy) is not a failure: what it left is removed, and the next claim builds again at once.
+      expect(await claimSharedBaseBuild(deps(A))).toMatchObject({ code: "shared_base_ready", name: name(A, 1) });
       expect(boat.machine(sandboxId)?.state).toBe("deleted");
       expect(boat.snapshots.has(claim.row.name)).toBe(false);
-      expect(await bases.row(claim.row.name)).toMatchObject({ state: "failed", error_code: "shared_base_interrupted",
+      expect(await bases.row(claim.row.name)).toMatchObject({ state: "failed", error_code: "shared_base_interrupted", failures: 0, interruptions: 1,
         builder_deleted_at: expect.any(Date), deleted_at: expect.any(Date) });
+    });
+
+    it("retries up to three interruptions in a row at once, and backs off at the fourth", async () => {
+      const interrupt = async () => {
+        await pool.query("UPDATE cloud_v2_shared_bases SET heartbeat_at = clock_timestamp() - interval '10 minutes' WHERE state = 'building'");
+        await bases.interrupted({ channel: "alpha" });
+      };
+      for (let attempt = 0; attempt < 4; attempt++) {
+        expect(await bases.claim({ channel: "alpha" }, A)).toMatchObject({ kind: "claimed" });
+        await interrupt();
+      }
+      const rows = (await pool.query<{ rebuild: number; interruptions: number; failures: number; due: boolean }>(
+        "SELECT rebuild, interruptions, failures, next_attempt_at <= clock_timestamp() AS due FROM cloud_v2_shared_bases ORDER BY rebuild")).rows;
+      expect(rows).toEqual([
+        { rebuild: 0, interruptions: 1, failures: 0, due: true }, { rebuild: 1, interruptions: 2, failures: 0, due: true },
+        { rebuild: 2, interruptions: 3, failures: 0, due: true }, { rebuild: 3, interruptions: 4, failures: 1, due: false }]);
+      expect(await bases.claim({ channel: "alpha" }, A)).toMatchObject({ kind: "backoff" });
     });
   });
 
@@ -173,14 +191,14 @@ d("cloud v2 shared base sweeps", () => {
       expect(boat.calls.filter(call => call.op === "deleteSnapshot").map(call => call.args[0])).toEqual([a]);
     });
 
-    it("waits 7 days from the supersession and never deletes the current or the previous runtime's base", async () => {
+    it("waits 24 hours from the supersession and never deletes the current or the previous runtime's base", async () => {
       const { a, org } = await oldBase();
       await pool.query("DELETE FROM cloud_v2_computers WHERE org_id = $1", [org]);
       await pool.query("UPDATE cloud_v2_computer_builds SET snapshot_id = NULL, snapshot_deleted_at = clock_timestamp() WHERE org_id = $1", [org]);
-      await supersededDaysAgo(a, 6);
+      await supersededDaysAgo(a, 0.9);
       expect((await sweep()).deleted).toEqual([]);
       for (const base of [name(B), name(C)]) await supersededDaysAgo(base, 30);
-      await supersededDaysAgo(a, 8);
+      await supersededDaysAgo(a, 1.1);
       expect((await sweep()).deleted).toEqual([a]);
       expect(boat.snapshots.has(name(B)) && boat.snapshots.has(name(C))).toBe(true);
       // With no previous runtime configured, the newest base of another runtime is kept instead.
@@ -206,6 +224,9 @@ d("cloud v2 shared base sweeps", () => {
       const a = await built(A), b = await built(B);
       const onA = await onShared(a), onB = await onShared(b);
       boat.snapshots.delete(b);
+      // One 404 is only a sighting; the second scan in a row acts.
+      expect(await checkMissingSharedBases(deps(B))).toMatchObject({ missing: [], repointed: [], cleared: [] });
+      expect(lines).toContain(`[cloud-v2] shared base not found once name=${b}; checking again at the next scan`);
       const result = await checkMissingSharedBases(deps(B));
       expect(result).toMatchObject({ missing: [b], repointed: [onB.org], cleared: [] });
       expect(lines).toContain(`[cloud-v2] shared base missing name=${b}`);
@@ -220,11 +241,42 @@ d("cloud v2 shared base sweeps", () => {
       const a = await built(A);
       const { org } = await onShared(a);
       boat.snapshots.delete(a);
+      await checkMissingSharedBases(deps(A));
       expect(await checkMissingSharedBases(deps(A))).toMatchObject({ missing: [a], repointed: [], cleared: [org] });
       expect(await live(org)).toEqual({ active_build_id: null, snapshot_name: null });
       // A name Boat cannot answer for now is not called missing.
-      vi.spyOn(boat, "snapshotExists").mockRejectedValue(new Error("unavailable"));
+      vi.spyOn(boat, "snapshotState").mockRejectedValue(new Error("unavailable"));
       expect((await checkMissingSharedBases(deps(A))).missing).toEqual([]);
+    });
+
+    it("acts only on an explicit 404 on two scans in a row: a status other than ready, one 404, or a 404 then present do nothing", async () => {
+      const a = await built(A);
+      const { org } = await onShared(a);
+      const unchanged = async () => {
+        expect(await bases.row(a)).toMatchObject({ state: "ready", missing_at: null });
+        expect((await live(org)).snapshot_name.startsWith(`${a}@`)).toBe(true);
+      };
+      // Listed but not ready: unknown, never counted.
+      boat.notReady.add(a);
+      for (let scan = 0; scan < 3; scan++) expect((await checkMissingSharedBases(deps(A))).missing).toEqual([]);
+      expect((await bases.row(a))!.missing_seen_at).toBeNull();
+      await unchanged();
+      boat.notReady.delete(a);
+      // One 404: a sighting and nothing else.
+      const kept = new Map(boat.snapshots.get(a) ?? []);
+      boat.snapshots.delete(a);
+      expect((await checkMissingSharedBases(deps(A))).missing).toEqual([]);
+      expect((await bases.row(a))!.missing_seen_at).toEqual(expect.any(Date));
+      await unchanged();
+      // Present again: the sighting is cleared, so the next 404 starts over.
+      boat.snapshots.set(a, kept);
+      expect((await checkMissingSharedBases(deps(A))).missing).toEqual([]);
+      expect((await bases.row(a))!.missing_seen_at).toBeNull();
+      boat.snapshots.delete(a);
+      expect((await checkMissingSharedBases(deps(A))).missing).toEqual([]);
+      await unchanged();
+      // Two in a row: as before.
+      expect((await checkMissingSharedBases(deps(A))).missing).toEqual([a]);
     });
   });
 
@@ -266,6 +318,28 @@ d("cloud v2 shared base sweeps", () => {
         .toMatchObject({ listed: 1, unaccounted: [`zeros-local-${owner}-base-aaaaaaaaaaaa`], allowance: { extra: 0 } });
       expect(lines.slice(lines0).some(line => line.includes("allowance"))).toBe(false);
     });
+  });
+
+  it("on a Local control plane builds no shared base unless asked, and runs its other hooks only once it has rows", async () => {
+    const local = { channel: "development", localOwner: "a".repeat(24) };
+    const quiet = new CloudV2SharedBaseSweeper({ ...deps(A), scope: local });
+    await quiet.tick(); await quiet.settled();
+    expect(boat.calls).toEqual([]);
+    expect(await bases.rows(local)).toEqual([]);
+    // Asked (auto, or a pinned name): it builds its own, under its own name.
+    const asked = new CloudV2SharedBaseSweeper({ ...deps(A), scope: local, override: { kind: "auto" } });
+    await asked.tick(); await asked.settled();
+    expect((await bases.rows(local)).map(row => [row.name, row.state])).toEqual([[`zeros-local-${"a".repeat(24)}-base-${A.slice(0, 12)}`, "ready"]]);
+    // With rows of its own, the quiet one now checks them (Boat is read), but still never claims a build.
+    const before = boat.calls.filter(call => call.op === "create").length;
+    const later = new CloudV2SharedBaseSweeper({ ...deps(B), scope: local });
+    await later.tick(); await later.settled();
+    expect(boat.calls.filter(call => call.op === "create").length).toBe(before);
+    expect(boat.calls.some(call => call.op === "snapshotState")).toBe(true);
+    // Hosted Dev (the development channel with a generation: no local owner) builds as Alpha does.
+    const hosted = new CloudV2SharedBaseSweeper({ ...deps(C), scope: { channel: "development" } });
+    await hosted.tick(); await hosted.settled();
+    expect((await bases.rows({ channel: "development" })).some(row => row.name === `zeros-development-base-${C.slice(0, 12)}` && row.state === "ready")).toBe(true);
   });
 
   it("runs every hook at its cadence from one tick", async () => {

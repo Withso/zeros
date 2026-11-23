@@ -232,7 +232,9 @@ export type Config = {
   cloudV2?: CloudV2Config | null;
 };
 
-export type CloudV2SharedBaseOverride = { kind: "off" } | { kind: "name"; name: string };
+/** CLOUD_V2_SHARED_BASE_SNAPSHOT: off, a pinned name, or auto (the builder's own base; the default on hosted channels,
+ * and what a Local control plane needs to build one at all). */
+export type CloudV2SharedBaseOverride = { kind: "off" } | { kind: "auto" } | { kind: "name"; name: string };
 
 export type CloudV2Config = {
   /** Applies only to new organization cloud workspaces on this channel. */
@@ -344,11 +346,11 @@ function loadCloudV2Config(env: NodeJS.ProcessEnv, channel: string): CloudV2Conf
   if (backupForks && (!/^\d{1,3}$/.test(backupForks) || Number(backupForks) < 1 || Number(backupForks) > 200))
     throw new Error("Invalid environment: CLOUD_V2_RETENTION_BACKUP_FORKS_PER_HOUR must be an integer from 1 to 200");
   const sharedBaseSetting = env.CLOUD_V2_SHARED_BASE_SNAPSHOT?.trim() || undefined;
-  if (sharedBaseSetting && sharedBaseSetting !== "off" && !/^[a-z0-9][a-z0-9-]{0,61}[a-z0-9]$/.test(sharedBaseSetting))
-    throw new Error("Invalid environment: CLOUD_V2_SHARED_BASE_SNAPSHOT must be a Boat snapshot name or off");
-  const sharedBaseSnapshot = sharedBaseSetting === "off" ? undefined : sharedBaseSetting;
+  if (sharedBaseSetting && sharedBaseSetting !== "off" && sharedBaseSetting !== "auto" && !/^[a-z0-9][a-z0-9-]{0,61}[a-z0-9]$/.test(sharedBaseSetting))
+    throw new Error("Invalid environment: CLOUD_V2_SHARED_BASE_SNAPSHOT must be a Boat snapshot name, off or auto");
+  const sharedBaseSnapshot = sharedBaseSetting === "off" || sharedBaseSetting === "auto" ? undefined : sharedBaseSetting;
   const sharedBaseOverride: CloudV2SharedBaseOverride | null = sharedBaseSetting === "off" ? { kind: "off" }
-    : sharedBaseSetting ? { kind: "name", name: sharedBaseSetting } : null;
+    : sharedBaseSetting === "auto" ? { kind: "auto" } : sharedBaseSetting ? { kind: "name", name: sharedBaseSetting } : null;
   const executionAuthCache = env.CLOUD_V2_EXECUTION_AUTH_CACHE?.trim().toLowerCase() || "off";
   if (!["off", "shadow", "on"].includes(executionAuthCache)) throw new Error("Invalid environment: CLOUD_V2_EXECUTION_AUTH_CACHE must be off, shadow or on");
   const providerStopRecovery = env.CLOUD_V2_PROVIDER_STOP_RECOVERY?.trim().toLowerCase() || "off";

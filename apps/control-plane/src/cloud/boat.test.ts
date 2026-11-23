@@ -180,6 +180,20 @@ describe("cloud v2 Boat compute", () => {
     expect(boat.request).toHaveBeenCalledExactlyOnceWith("/named-snapshots", { method: "POST", body: { sandboxId: "bx_newbuild", name: "zeros-alpha-org-v1" } });
   });
 
+  it("reads a named snapshot three ways: ready is present, only a 404 is absent, any other status is unknown", async () => {
+    const boat = client(), compute = new BoatCloudV2Compute(boat);
+    const answer = (status: string) => ({ snapshot: { name: "zeros-alpha-base-1a2b3c4d5e6f", status, sourceSandboxId: "bx_abc12345", snapshotId: "snap_1",
+      type: "named", sizeBytes: 900_000_000, createdAt: "2026-11-01T00:00:00.000Z" } });
+    boat.request.mockResolvedValueOnce(answer("ready"));
+    expect(await compute.snapshotState("zeros-alpha-base-1a2b3c4d5e6f")).toBe("present");
+    boat.request.mockResolvedValueOnce(answer("pending"));
+    expect(await compute.snapshotState("zeros-alpha-base-1a2b3c4d5e6f")).toBe("unknown");
+    boat.request.mockRejectedValueOnce(Object.assign(new Error("Not found"), { httpStatus: 404, code: "provider_not_found" }));
+    expect(await compute.snapshotState("zeros-alpha-base-1a2b3c4d5e6f")).toBe("absent");
+    boat.request.mockRejectedValueOnce(Object.assign(new Error("Unavailable"), { httpStatus: 503 }));
+    await expect(compute.snapshotState("zeros-alpha-base-1a2b3c4d5e6f")).rejects.toThrow();
+  });
+
   it("lists named snapshots with Boat's allowance, as Alpha answers", async () => {
     const boat = client();
     boat.request.mockResolvedValueOnce({

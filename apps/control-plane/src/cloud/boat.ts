@@ -45,6 +45,8 @@ export interface CloudV2Compute {
   /** Whether a named snapshot exists and can start a machine. Checked before
    * an organization is pointed at a snapshot it did not save itself. */
   snapshotExists?(name: string): Promise<boolean>;
+  /** Three ways: present (ready), absent (an explicit 404) or unknown (any other status). Only absent proves it gone. */
+  snapshotState?(name: string): Promise<"present" | "absent" | "unknown">;
   /** Every named snapshot this Boat account holds, with its billed allowance. Read by the daily inventory only. */
   listNamedSnapshots?(): Promise<BoatNamedSnapshotList>;
   hostPort(sandboxId: string, input: { port: number; localhost: true; title: string; key?: string; signal?: AbortSignal }): Promise<{ url: string; token: string }>;
@@ -259,6 +261,16 @@ export class BoatCloudV2Compute implements CloudV2Compute {
       return NamedSnapshot.parse(await this.client.request(`/named-snapshots/${name}`, { method: "GET" })).snapshot.status === "ready";
     } catch (error) {
       if (notFound(error)) return false;
+      throw error;
+    }
+  }
+
+  async snapshotState(name: string): Promise<"present" | "absent" | "unknown"> {
+    if (!SNAPSHOT_NAME.test(name)) throw new Error("Invalid Boat snapshot name");
+    try {
+      return NamedSnapshot.parse(await this.client.request(`/named-snapshots/${name}`, { method: "GET" })).snapshot.status === "ready" ? "present" : "unknown";
+    } catch (error) {
+      if (notFound(error)) return "absent";
       throw error;
     }
   }

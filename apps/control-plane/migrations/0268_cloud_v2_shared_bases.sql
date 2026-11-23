@@ -26,12 +26,16 @@ CREATE TABLE cloud_v2_shared_bases (
   -- Consecutive failures for this runtime, this one included, and when the next attempt may start.
   failures integer NOT NULL DEFAULT 0 CHECK (failures BETWEEN 0 AND 1000),
   next_attempt_at timestamptz,
+  -- Interruptions in a row (a deploy stopped its builder): up to three retry at once, without counting as failures.
+  interruptions integer NOT NULL DEFAULT 0 CHECK (interruptions BETWEEN 0 AND 1000),
+  -- The missing-base sweep's first reading of Boat answering 404 for it; a second scan in a row acts, a present one clears it.
+  missing_seen_at timestamptz,
   -- The missing-base sweep found Boat no longer has it.
   missing_at timestamptz,
   created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
   ready_at timestamptz,
   finished_at timestamptz,
-  -- No longer current; deletion waits at least 7 days from here and for every reference to end.
+  -- No longer current; deletion waits at least 24 hours from here and for every reference to end.
   superseded_at timestamptz,
   deleted_at timestamptz,
   CHECK (state <> 'ready' OR ready_at IS NOT NULL),

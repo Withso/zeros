@@ -279,6 +279,16 @@ d("ready copies: a safe switch-on", () => {
       }
     });
 
+    it("goes live at once on the newest ready shared base when it is an older runtime's, which the re-point moves on later", async () => {
+      const older = "zeros-alpha-base-0123456789ab";
+      boat.snapshots.set(older, new Map());
+      const { computers } = resolved({ state: "ready", name: older, source: "database", runtimeSha256: "0".repeat(64) });
+      expect(await computers.ensureBase(org)).toMatchObject({ state: "ready" });
+      const live = (await pool.query<{ snapshot_name: string }>("SELECT snapshot_name FROM cloud_v2_computers WHERE org_id=$1", [org])).rows[0]!;
+      expect(live.snapshot_name.startsWith(`${older}@`)).toBe(true);
+      expect(creates()).toEqual([]);
+    });
+
     it("never queues for an organization without an install script from the sweep while the shared base is building", async () => {
       const { holder, computers } = resolved({ state: "building" });
       await project();

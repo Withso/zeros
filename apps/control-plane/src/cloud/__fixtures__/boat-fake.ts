@@ -270,7 +270,13 @@ export class FakeBoat implements CloudV2Compute {
 
   async deleteSnapshot(name: string) { this.record("deleteSnapshot", name); this.snapshots.delete(name); }
 
-  async snapshotExists(name: string) { this.record("snapshotExists", name); return this.snapshots.has(name); }
+  async snapshotExists(name: string) { this.record("snapshotExists", name); return this.snapshots.has(name) && !this.notReady.has(name); }
+  /** Names Boat lists but not as ready (a status other than ready): snapshotState answers unknown for them. */
+  readonly notReady = new Set<string>();
+  async snapshotState(name: string): Promise<"present" | "absent" | "unknown"> {
+    this.record("snapshotState", name);
+    return !this.snapshots.has(name) ? "absent" : this.notReady.has(name) ? "unknown" : "present";
+  }
 
   async hostPort(sandboxId: string, input: { port: number }) {
     this.record("hostPort", sandboxId, input);

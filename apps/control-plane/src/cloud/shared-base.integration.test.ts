@@ -163,8 +163,9 @@ d("cloud v2 shared base builds", () => {
     expect(claim).toMatchObject({ kind: "claimed" });
     expect(await execute()).toMatchObject({ code: "shared_base_building", name: NAME });
     await pool.query("UPDATE cloud_v2_shared_bases SET heartbeat_at = clock_timestamp() - interval '6 minutes' WHERE name = $1", [NAME]);
-    expect(await execute()).toMatchObject({ code: "shared_base_backoff", name: NAME });
-    expect(await bases.row(NAME)).toMatchObject({ state: "failed", error_code: "shared_base_interrupted", failures: 1 });
+    // Interrupted, not failed: the next build starts at once, without counting toward the backoff.
+    expect(await execute()).toMatchObject({ code: "shared_base_ready", name: `${NAME}-r1` });
+    expect(await bases.row(NAME)).toMatchObject({ state: "failed", error_code: "shared_base_interrupted", failures: 0, interruptions: 1 });
     // A Local database names its own.
     expect(await bases.plan({ channel: "development", localOwner: "a".repeat(24) }, sha256))
       .toMatchObject({ kind: "claimed", row: { name: `zeros-local-${"a".repeat(24)}-base-1a2b3c4d5e6f` } });
