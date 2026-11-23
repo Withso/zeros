@@ -136,8 +136,8 @@ describe("rehearsal stages against a fake Alpha", () => {
     // Every environment this run seeded is empty again at the end of its stage.
     expect([...alpha.environments.values()].every(environment => environment.files.size === 0)).toBe(true);
     expect(state.stages.retention?.counts).toMatchObject({ restored: 1, rebuilt: 1, removal: 1 });
-    // Four shifts of both workspaces, then the removal's one of W alone.
-    expect(alpha.shifts.map(shift => shift.ids.length)).toEqual([2, 2, 2, 2, 1]);
+    // Four shifts of both workspaces, then W alone: the hour to its reopened stop's backup, and the removal.
+    expect(alpha.shifts.map(shift => shift.ids.length)).toEqual([2, 2, 2, 2, 1, 1]);
     // Two copies, five workspace starts and opens in A, two copies' worth in C, C's Cloud Computer rebuild, and W's open on
     // its own machine after the wakes.
     expect(state.machineStarts).toBe(13);

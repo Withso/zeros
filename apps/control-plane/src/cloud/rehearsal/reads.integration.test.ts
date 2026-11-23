@@ -67,8 +67,9 @@ d("every rehearsal read, as the read role (integration)", () => {
       [s.workspace, s.org, copy]);
     await q("INSERT INTO cloud_v2_workspace_submodules (workspace_id, position, path, status, repository, repository_id, commit, git_dir, public) VALUES ($1, 0, 'vendor/hello', 'fetch', 'octocat/hello-world', '1296269', $2, $3, true)",
       [s.workspace, "7fd1a60b01f91b314f59955a4e4d4e80d8edf11d", `modules/${"a".repeat(64)}`]);
-    for (const kind of ["backup_fork", "wake"])
-      await q("INSERT INTO cloud_v2_maintenance_wakes (workspace_id, attempt, kind, outcome) VALUES ($1, gen_random_uuid(), $2, 'stopped')", [s.workspace, kind]);
+    // As the product writes them: a backup fork's row is only inserted (never finished); a wake's is finished 'stopped'.
+    await q("INSERT INTO cloud_v2_maintenance_wakes (workspace_id, attempt, kind) VALUES ($1, gen_random_uuid(), 'backup_fork')", [s.workspace]);
+    await q("INSERT INTO cloud_v2_maintenance_wakes (workspace_id, attempt, kind, outcome, finished_at) VALUES ($1, gen_random_uuid(), 'wake', 'stopped', clock_timestamp())", [s.workspace]);
     return s;
   }
 
@@ -89,7 +90,6 @@ d("every rehearsal read, as the read role (integration)", () => {
   it("reads a backup fork's result from the workspace row: its maintenance-wakes row is never finished", async () => {
     const s = await seed();
     // As the product leaves it (store.ts beginCheckpointFork inserts the row; nothing finishes it), with this stop's backup saved.
-    await pool.query("UPDATE cloud_v2_maintenance_wakes SET outcome = NULL, finished_at = NULL WHERE workspace_id = $1 AND kind = 'backup_fork'", [s.workspace]);
     await pool.query(`UPDATE cloud_v2_workspaces SET checkpoint_object = 'cloud-v2/checkpoints/' || id::text || '/' || gen_random_uuid()::text || '.zck',
       checkpoint_key = '{"v":1}'::jsonb, checkpoint_sha256 = repeat('a', 64), checkpoint_bytes = 4737,
       checkpoint_stop_generation = stop_generation, checkpoint_saved_at = clock_timestamp() WHERE id = $1`, [s.workspace]);

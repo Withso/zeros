@@ -16,7 +16,9 @@ type Workspace = {
   computerBuildId?: string | null;
   /** Created while the base was being prepared (#1260): the build it waits for, and when it was created. */
   waitingFor?: string; createdAtMs?: number; errorCode?: string;
-  stoppedDays: number | null; archivedAtDays?: number; probe?: "clean" | "dirty"; backup: boolean; wakes: number; scrub: string | null; machineGone: boolean; lostWork?: boolean;
+  stoppedDays: number | null; archivedAtDays?: number; probe?: "clean" | "dirty"; backup: boolean;
+  /** Stop generations, as the product counts them: a backup covers only the stop it was taken for. */
+  stopGeneration?: number; backupGeneration?: number; wakes: number; scrub: string | null; machineGone: boolean; lostWork?: boolean;
 };
 type Build = { id: string; state: string; snapshot: string | null; builderSandboxId: string | null; automatic?: boolean; shared?: boolean;
   createdAt?: number; readyAt?: number };
@@ -116,7 +118,9 @@ export class FakeAlpha {
       ...(row.waitingFor && row.state === "creating" ? { preparing: "computer" } : {}),
       archivedAt: row.archivedAt, activeAt: row.activeAt, updatedAt: row.updatedAt, keep: row.keep, ...(row.projectId ? { projectId: row.projectId } : {}),
       ...(row.repositories ? { repositories: row.repositories } : {}), ...(archived && row.archiveReason ? { archiveReason: row.archiveReason } : {}),
-      ...(archived ? { machineExpectedGoneAt: { at: new Date(this.now).toISOString(), estimate: true } } : {}),
+      // As store.ts archiveFields: an estimate (the last stop + 24 days, or + 14 once the archived wake ran) already past is
+      // left out; the archived wake (scrub set) stopped the machine just now.
+      ...(archived && (row.scrub !== null || (row.stoppedDays ?? 0) < 24) ? { machineExpectedGoneAt: { at: new Date(this.now).toISOString(), estimate: true } } : {}),
       ...(archived && row.backup ? { backupRemovalAt: new Date(this.now).toISOString() } : {}),
       ...(this.s4 && archived ? { restores: { code: row.backup ? "backup" : "github" } } : {}),
       ...(row.lostWork ? { lostWork: { restored: "none", stoppedAt: new Date(this.now).toISOString() } } : {}) };
@@ -163,13 +167,15 @@ export class FakeAlpha {
       for (const row of this.workspaces.values()) if (row.state === "running") { row.state = "stopped"; row.stoppedDays = 0; this.machines.get(row.boatSandboxId)!.state = "stopped"; }
     for (const row of this.workspaces.values()) {
       if (row.state !== "stopped" || row.stoppedDays === null) continue;
-      if (row.probe === "dirty" && !row.backup && row.stoppedDays >= 1 / 24) { row.backup = true; this.objects.add(`cloud-v2/checkpoints/${row.id}/a.zck`); }
+      if (row.probe === "dirty" && row.backupGeneration !== (row.stopGeneration ?? 0) && row.stoppedDays >= 1 / 24) {
+        row.backup = true; row.backupGeneration = row.stopGeneration ?? 0; this.objects.add(`cloud-v2/checkpoints/${row.id}/a.zck`);
+      }
       if (row.archivedAt === null && row.stoppedDays >= 10 && row.wakes === 0) row.wakes = 1;
       if (row.archivedAt === null && !row.keep && row.stoppedDays >= 30) {
         row.archivedAt = new Date(this.now).toISOString(); row.archiveReason = "inactive"; row.archivedAtDays = row.stoppedDays;
       }
       // The archived wake, ten days after the archive.
-      if (row.archivedAt !== null && row.scrub === null && row.stoppedDays >= (row.archivedAtDays ?? 0) + 10) { row.scrub = row.backup ? "backup" : "clean"; row.wakes++; }
+      if (row.archivedAt !== null && row.scrub === null && row.stoppedDays >= (row.archivedAtDays ?? 0) + 10) { row.scrub = row.backup && row.seeded.size > 0 ? "backup" : "clean"; row.wakes++; }
       if (this.s4 && row.archivedAt !== null && row.backup && row.stoppedDays >= 61 && row.archiveReason === "manual") {
         row.backup = false; for (const key of [...this.objects]) if (key.includes(row.id)) this.objects.delete(key);
       }
@@ -370,7 +376,7 @@ export class FakeAlpha {
       if (!action && method === "GET") return row.state === "deleted" ? this.reply(404) : this.reply(200, { workspace: this.document(row) });
       if (!action && method === "DELETE") { row.state = "deleted"; const machine = this.machines.get(row.boatSandboxId); if (machine) machine.state = "deleted"; return this.reply(202, { workspace: this.document(row) }); }
       if (action === "stop") {
-        row.state = "stopped"; row.stoppedDays = 0;
+        row.state = "stopped"; row.stoppedDays = 0; row.stopGeneration = (row.stopGeneration ?? 0) + 1;
         // Dirty: an unpushed commit, or an ignored .env file that is not exactly what the environment seeded.
         row.probe = [...row.commits.values()].some(list => list.length) || [...row.files].some(([file, content]) => file.endsWith(".env") && row.seeded.get(file) !== content)
           ? "dirty" : "clean";
@@ -384,6 +390,8 @@ export class FakeAlpha {
           // The bug the rehearsal looks for: a clean rebuild that keeps the workspace's replaced build.
           if (!this.staleRestorePin) row.computerBuildId = this.computer.active;
           if (!row.backup) { row.files = new Map(); row.commits = new Map(); }
+          // A dirty stop whose backup is an earlier stop's: restored from that one, and the open notes lost work.
+          if (row.probe === "dirty" && row.backupGeneration !== (row.stopGeneration ?? 0)) row.lostWork = true;
         }
         row.state = "running"; row.archivedAt = null; row.stoppedDays = null; row.scrub = null;
         this.machines.get(row.boatSandboxId)!.state = "running";
@@ -640,8 +648,8 @@ export class FakeAlpha {
     if (text.includes("worker_off_unverified_at IS NULL AS worker_off")) return rows(ids.map(id => ({ id, backup_probe: this.workspaces.get(id)?.probe ?? null,
       current_probe: true, worker_off: this.workerOff })));
     if (text.includes("AS fork_gone")) {
-      const backup = this.workspaces.get(String(values[0]))?.backup === true;
-      return rows([{ forks: backup ? 1 : 0, backed_up: backup, fork_gone: true }]);
+      const row = this.workspaces.get(String(values[0])), backup = row?.backup === true;
+      return rows([{ forks: backup ? 1 : 0, backed_up: backup && row!.backupGeneration === (row!.stopGeneration ?? 0), fork_gone: true }]);
     }
     if (text.includes("kind = 'wake'")) return rows([{ wakes: ids.reduce((sum, id) => sum + (this.workspaces.get(id)?.wakes ? 1 : 0), 0) }]);
     if (text.includes("archive_scrub FROM")) return rows(ids.map(id => ({ id, archive_scrub: this.workspaces.get(id)?.scrub ?? null })));

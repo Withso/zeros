@@ -503,9 +503,9 @@ const environmentPath = (ctx: StageContext, repository: string, repositoryId: st
   `/v1/cloud-v2/organizations/${ctx.state.organizationId}/environment/${repositoryId}?repository=${encodeURIComponent(repository)}`;
 
 export async function readEnvironment(ctx: StageContext, repository: string, repositoryId: string, step: string):
-  Promise<{ revision: number; empty: boolean }> {
+  Promise<{ revision: number; empty: boolean; files: number }> {
   const environment = parse(Environment, (await call(ctx.ports.api, "GET", environmentPath(ctx, repository, repositoryId), step)).body, step).environment;
-  return { revision: environment.revision, empty: environment.variables.length === 0 && environment.files.length === 0 };
+  return { revision: environment.revision, empty: environment.variables.length === 0 && environment.files.length === 0, files: environment.files.length };
 }
 
 /** Seeds one file into the account's environment for each repository, but only when nothing would be overwritten: every

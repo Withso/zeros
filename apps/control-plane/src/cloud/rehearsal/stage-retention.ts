@@ -7,7 +7,7 @@ import { z } from "zod";
 import { RehearsalFailure, type StageContext } from "./contract.js";
 import { shiftClock } from "./clock.js";
 import { rebuildComputer } from "./stage-setup.js";
-import { reportMachineSnapshot } from "./steps.js";
+import { readEnvironment, reportMachineSnapshot } from "./steps.js";
 import { openBridge, call, check, checkText, clearEnvironment, ENVIRONMENT_PATH, seedEnvironments, createProject, createWorkspace, deleteProject, deleteWorkspace, getWorkspace, lifecycle, parse, shell, until,
   waitCopyReady, waitState, workspaceRoot, WorkspaceDocument } from "./steps.js";
 
@@ -37,6 +37,9 @@ export async function stageRetention(ctx: StageContext): Promise<Record<string, 
   const seed = await seedEnvironments(ctx, [{ repository: r1.repository, repositoryId: r1.repositoryId }], () => seedBytes);
   ctx.note(seed.seeded ? "environment_case:seeded_edited" : "environment_case:hand_made_ignored");
   if (!seed.seeded) ctx.note(`environment_skipped:${seed.reason}`);
+  // The worker seeds R1's checkout with every file R1's environment holds, whoever wrote it; the archived wake's scrub
+  // removes exactly those (archive-scrub.ts, by the seed journal). So W's scrub reads "backup" when there was one.
+  const seededFiles = (await readEnvironment(ctx, r1.repository, r1.repositoryId, "environment_files")).files;
   ctx.step("workspaces");
   const w = await createWorkspace(ctx, { name: `${prefix}ret-w`, projectId: project.id, branch: `${prefix}ret-w` });
   const k = await createWorkspace(ctx, { name: `${prefix}ret-k`, projectId: project.id, branch: `${prefix}ret-k` });
@@ -91,11 +94,12 @@ export async function stageRetention(ctx: StageContext): Promise<Record<string, 
     return !row ? "no_row" : Number(row.forks) < 1 ? "no_fork" : row.backed_up !== true ? "not_backed_up" : row.fork_gone !== true ? "fork_present"
       : keys < 1 ? "no_object" : null;
   };
-  await until(ctx, "backup", ctx.timing.scanMs, ctx.timing.pollMs, async () => await backupState() === null)
+  const backedUp = (step: string) => until(ctx, step, ctx.timing.scanMs, ctx.timing.pollMs, async () => await backupState() === null)
     .catch(async (error: unknown) => {
       const missing = await backupState().catch(() => null);
-      throw missing && error instanceof RehearsalFailure && error.code === "timeout" ? new RehearsalFailure("backup", `timeout:${missing}`) : error;
+      throw missing && error instanceof RehearsalFailure && error.code === "timeout" ? new RehearsalFailure(step, `timeout:${missing}`) : error;
     });
+  await backedUp("backup");
   check((await ctx.ports.storage.keys(k.id)).length === 0, "backup_k", "uploaded");
 
   // C3: at ten days a maintenance wake runs and is invisible: stopped throughout, its activity and update times unchanged.
@@ -137,8 +141,10 @@ export async function stageRetention(ctx: StageContext): Promise<Record<string, 
     return rows.every(row => row.archivedAt && row.archiveReason === "inactive");
   });
   const archived = await documents(ctx, both, "archive_fields");
-  check(archived[0]!.backupRemovalAt && archived[0]!.machineExpectedGoneAt, "archive_fields", "w_dates");
-  check(archived[1]!.machineExpectedGoneAt && !archived[1]!.backupRemovalAt, "archive_fields", "k_dates");
+  // The backup's removal date only where there is a backup. The machine's date is checked after the archived wake: the
+  // product leaves out an estimate already past (store.ts archiveFields), and the clock shift has made this one past.
+  check(archived[0]!.backupRemovalAt, "archive_fields", "w_removal");
+  check(!archived[1]!.backupRemovalAt, "archive_fields", "k_removal");
 
   // C6: the archived wake scrubs the machine; W's scrub is covered by its backup.
   ctx.step("archived_wake");
@@ -148,9 +154,15 @@ export async function stageRetention(ctx: StageContext): Promise<Record<string, 
     return rows.length === 2 && rows.every(row => row.archive_scrub !== null);
   });
   const scrubs = await ctx.ports.database.read(`SELECT id::text AS id, archive_scrub FROM cloud_v2_workspaces WHERE id = ANY($1::uuid[])`, [both]);
-  check(scrubs.find(row => row.id === w.id)?.archive_scrub === "backup", "archived_wake_w", "not_backup");
+  // W's scrub removes the environment files seeded into its checkout, which its backup holds ("backup"); with none (an
+  // environment of variables only, or none) there is nothing to remove: "clean". K, whose probe was clean, re-seeds: "clean".
+  const wScrub = seededFiles > 0 ? "backup" : "clean";
+  check(scrubs.find(row => row.id === w.id)?.archive_scrub === wScrub, "archived_wake_w", `not_${wScrub}`);
   check(scrubs.find(row => row.id === k.id)?.archive_scrub === "clean", "archived_wake_k", "not_clean");
   counts.wakes! += 2;
+  // Its stop starts the machine's own clock again: both documents now carry the date Boat is expected to remove it.
+  const woken = await documents(ctx, both, "archive_machine_dates");
+  check(woken.every(row => row.machineExpectedGoneAt), "archive_machine_dates", "absent");
 
   // C6b: W opened on its own machine, after the maintenance wakes' stops (the 10-day wake, the archived wake's scrub):
   // the unpushed commit and the untracked file written just before the person's stop are still on its disk. Then stopped
@@ -168,6 +180,12 @@ export async function stageRetention(ctx: StageContext): Promise<Record<string, 
   counts.ownDiskKept = 1;
   await lifecycle(ctx, w.id, "stop", "own_disk_stop");
   await waitState(ctx, w.id, "stopped", "own_disk_stopped");
+  // That stop is a new stop generation, still dirty (the unpushed commit): its own backup comes an hour later, by fork
+  // (the same content, so the earlier checkpoint is confirmed for it). Without it, C7's restore would rightly bring back
+  // the earlier backup and note lost work.
+  ctx.step("own_disk_backup");
+  await shift([w.id], HOUR_DAYS + 1 / 1440);
+  await backedUp("own_disk_backup");
 
   // C7: W's machine deleted (the run's one deliberate machine deletion), then opened: restored from its backup.
   // The Cloud Computer is rebuilt (as a runtime change or the daily refresh does): the workspaces' own builds are replaced
