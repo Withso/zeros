@@ -8,49 +8,16 @@ import type pg from "pg";
 import { withSystemTx, type Tx } from "../db.js";
 import type { CloudV2SharedBaseOverride } from "../config.js";
 import type { CloudV2Compute } from "./boat.js";
-import { asZeros, GIT_LFS_INSTALL_COMMAND, type CloudV2Build } from "./computer.js";
-import { installRuntimeCommand } from "./runtime.js";
+import { installBase, type CloudV2Build } from "./computer.js";
 import { cloudV2BoatSnapshotName, cloudV2ResourcePrefix, cloudV2SandboxName, cloudV2SharedBaseName, cloudV2SharedSnapshotReference, cloudV2SnapshotName } from "./resource-names.js";
 import { buildClaimAllowed } from "./runtime-build-drain.js";
 
 /** The worker runtime a base installs. */
 export type SharedBaseRuntime = { sha256: string; url(sha256?: string): Promise<string> };
 
-export type InstallBaseHooks = {
-  log(text: string): Promise<void>;
-  assertHeld(): void;
-  /** Computer builds record the runtime they installed (CloudV2Computers.setRuntime). */
-  runtimeInstalled?(sha256: string): Promise<void>;
-  /** Asked before the install script runs: false means the build was cancelled meanwhile. */
-  running?(): Promise<boolean>;
-};
-
-/**
- * The one definition of what a base installs on Boat's stock image: the worker runtime (bounded at 300 s, a failure
- * fails the build), Git LFS (300 s, a failure is tolerated: the worker then tells LFS repositories how to fetch their
- * files) and, for an organization's own base, its install script. Returns false when the build stopped before the script.
- */
-export async function installBase(compute: CloudV2Compute, sandboxId: string,
-  input: { runtime: { sha256: string; url: string }; publicKeys?: readonly string[]; installScript?: string | null },
-  hooks: InstallBaseHooks): Promise<boolean> {
-  const { sha256, url } = input.runtime;
-  const installed = await compute.exec(sandboxId, installRuntimeCommand({ sha256, url, ...(input.publicKeys ? { publicKeys: input.publicKeys } : {}) }), 300);
-  if (installed.exitCode !== 0 || installed.timedOut) throw Object.assign(new Error("runtime install failed"), { code: "worker_runtime_install_failed" });
-  await hooks.runtimeInstalled?.(sha256);
-  await hooks.log(`[zeros] runtime ${sha256.slice(0, 12)} installed\n`);
-  const lfs = await compute.exec(sandboxId, GIT_LFS_INSTALL_COMMAND, 300);
-  await hooks.log(lfs.exitCode === 0 && !lfs.timedOut ? "[zeros] git-lfs installed\n"
-    : "[zeros] git-lfs could not be installed; Git LFS files stay placeholders until a later build adds it\n");
-  if (input.installScript) {
-    hooks.assertHeld();
-    if (hooks.running && !await hooks.running()) return false;
-    await hooks.log("[zeros] running the install script\n");
-    const script = await compute.execLong(sandboxId, `${asZeros(["cd /home/user", input.installScript])} 2>&1`, 3600);
-    await hooks.log(script.stdout.slice(-64 * 1024) + `\n[zeros] install script: exit ${script.exitCode}\n`);
-    if (script.exitCode !== 0 || script.timedOut) throw Object.assign(new Error("install script failed"), { code: "computer_install_script_failed" });
-  }
-  return true;
-}
+// The one definition of what a base installs lives beside the Computer builder that also runs it (computer.ts), so an
+// organization's own base and the shared base cannot drift; it is re-exported here.
+export { installBase, type InstallBaseHooks } from "./computer.js";
 
 /** Every outcome a shared base build reports; operators see these and names, nothing else. */
 export const SHARED_BASE_CODES = [

@@ -1179,6 +1179,42 @@ export function asZeros(lines: readonly string[]): string {
   return `bash -lc ${shellQuote(lines.join("\n"))}`;
 }
 
+export type InstallBaseHooks = {
+  log(text: string): Promise<void>;
+  assertHeld(): void;
+  /** Computer builds record the runtime they installed (CloudV2Computers.setRuntime). */
+  runtimeInstalled?(sha256: string): Promise<void>;
+  /** Asked before the install script runs: false means the build was cancelled meanwhile. */
+  running?(): Promise<boolean>;
+};
+
+/**
+ * The one definition of what a base installs on Boat's stock image: the worker runtime (bounded at 300 s, a failure
+ * fails the build), Git LFS (300 s, a failure is tolerated: the worker then tells LFS repositories how to fetch their
+ * files) and, for an organization's own base, its install script. Returns false when the build stopped before the script.
+ */
+export async function installBase(compute: CloudV2Compute, sandboxId: string,
+  input: { runtime: { sha256: string; url: string }; publicKeys?: readonly string[]; installScript?: string | null },
+  hooks: InstallBaseHooks): Promise<boolean> {
+  const { sha256, url } = input.runtime;
+  const installed = await compute.exec(sandboxId, installRuntimeCommand({ sha256, url, ...(input.publicKeys ? { publicKeys: input.publicKeys } : {}) }), 300);
+  if (installed.exitCode !== 0 || installed.timedOut) throw Object.assign(new Error("runtime install failed"), { code: "worker_runtime_install_failed" });
+  await hooks.runtimeInstalled?.(sha256);
+  await hooks.log(`[zeros] runtime ${sha256.slice(0, 12)} installed\n`);
+  const lfs = await compute.exec(sandboxId, GIT_LFS_INSTALL_COMMAND, 300);
+  await hooks.log(lfs.exitCode === 0 && !lfs.timedOut ? "[zeros] git-lfs installed\n"
+    : "[zeros] git-lfs could not be installed; Git LFS files stay placeholders until a later build adds it\n");
+  if (input.installScript) {
+    hooks.assertHeld();
+    if (hooks.running && !await hooks.running()) return false;
+    await hooks.log("[zeros] running the install script\n");
+    const script = await compute.execLong(sandboxId, `${asZeros(["cd /home/user", input.installScript])} 2>&1`, 3600);
+    await hooks.log(script.stdout.slice(-64 * 1024) + `\n[zeros] install script: exit ${script.exitCode}\n`);
+    if (script.exitCode !== 0 || script.timedOut) throw Object.assign(new Error("install script failed"), { code: "computer_install_script_failed" });
+  }
+  return true;
+}
+
 /** Reuse checkouts so ignored dependencies survive; credentials stay in a
  * per-command header, never a saved remote URL. */
 export function checkoutScript(entry: RecipeEntry, dir: string, canonicalRepository = entry.repository): string[] {
@@ -1512,25 +1548,11 @@ export class CloudV2ComputerBuilder {
     // A refresh installs the runtime it was queued for, even when a process
     // still on another pin picks it up during a deploy.
     const sha256 = job.runtimeSha256 ?? this.deps.runtime.sha256;
-    const installed = await compute.exec(sandboxId, installRuntimeCommand({ sha256, url: await this.deps.runtime.url(sha256),
-      ...(this.deps.publicKeys ? { publicKeys: this.deps.publicKeys } : {}) }), 300);
-    if (installed.exitCode !== 0 || installed.timedOut) throw Object.assign(new Error("runtime install failed"), { code: "worker_runtime_install_failed" });
-    await computers.setRuntime(job.id, sha256);
-    await log(`[zeros] runtime ${sha256.slice(0, 12)} installed\n`);
-    // Boat's stock image has no git-lfs. A build that can't add it still goes
-    // live; the worker then tells LFS repositories how to fetch their files.
-    const lfs = await compute.exec(sandboxId, GIT_LFS_INSTALL_COMMAND, 300);
-    await log(lfs.exitCode === 0 && !lfs.timedOut ? "[zeros] git-lfs installed\n"
-      : "[zeros] git-lfs could not be installed; Git LFS files stay placeholders until a later build adds it\n");
+    // The one definition (installBase): runtime, Git LFS, then the organization's install script; the shared base runs the same.
     const base = await computers.buildBase(job.id);
-    if (base.installScript) {
-      assertHeld();
-      if (!await computers.running(job.id)) return;
-      await log("[zeros] running the install script\n");
-      const script = await compute.execLong(sandboxId, `${asZeros(["cd /home/user", base.installScript])} 2>&1`, 3600);
-      await log(script.stdout.slice(-64 * 1024) + `\n[zeros] install script: exit ${script.exitCode}\n`);
-      if (script.exitCode !== 0 || script.timedOut) throw Object.assign(new Error("install script failed"), { code: "computer_install_script_failed" });
-    }
+    if (!await installBase(compute, sandboxId, { runtime: { sha256, url: await this.deps.runtime.url(sha256) },
+      ...(this.deps.publicKeys ? { publicKeys: this.deps.publicKeys } : {}), installScript: base.installScript },
+      { log, assertHeld, runtimeInstalled: installed => computers.setRuntime(job.id, installed), running: () => computers.running(job.id) })) return;
     const policy = await computers.sourcePolicy(job.id);
     const name = cloudV2SnapshotName(this.deps.channel, job.organizationId, job.version, this.deps.localOwner);
     const capture = async (): Promise<boolean> => {
