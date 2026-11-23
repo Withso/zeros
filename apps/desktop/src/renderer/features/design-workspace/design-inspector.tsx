@@ -204,6 +204,7 @@ import { designFieldMixed, designValuesMixed } from "./design-style-mixed";
 import { dispatchDesignWorkspaceShortcut } from "./design-workspace-shortcuts";
 import {
   clearDesignLivePreview,
+  designLivePreviewValue,
   publishDesignLivePreviewStyles,
   useDesignFrameGeometryLiveValue,
   useDesignLivePreviewValue,
@@ -212,6 +213,7 @@ import {
 } from "./state/design-live-preview";
 import { useShallow } from "zustand/react/shallow";
 import { useDesignRuntimeStore } from "./state/design-runtime-store";
+import { DesignGesturePreview } from "./state/design-gesture-preview";
 import {
   beginDesignHistorySelection,
   captureDesignRuntimeScreenshot,
@@ -377,6 +379,17 @@ function inspectorFieldDraftWithUnit(text: string, unit: string): string {
   return text;
 }
 
+/** A commit that ends a gesture the user saw previewed, such as a released
+ *  scrub, as opposed to an edit computed from the current details. */
+interface DesignGestureCommit {
+  gesture?: boolean;
+}
+
+interface DesignStylePreviewRequest {
+  styles: Record<string, string | null>;
+  perNode?: (nodeId: string) => Record<string, string | null>;
+}
+
 /** Which node a selection styles. A selected frame styles its root, named by
  *  the root's details whatever their generation: after an edit the frame's
  *  generation advances before its details are read again, and dropping the
@@ -459,6 +472,7 @@ export function InspectorEditField({
   const unitMenuOpenRef = useRef(false);
   const commitIntentRef = useRef(0);
   const scrubCancelRef = useRef<(() => void) | null>(null);
+  const mixedScrubRef = useRef(false);
   const scrubRef = useRef<{
     pointerId: number;
     originX: number;
@@ -586,7 +600,9 @@ export function InspectorEditField({
   );
 
   useEffect(() => {
-    if (disabled && (!revalidating || !scrubRef.current)) scrubCancelRef.current?.();
+    // A scrub outlives a revalidation (its readback returns to the same
+    // layers); only a field disabled outright ends it.
+    if (disabled && (!revalidating || (!scrubRef.current && !mixedScrubRef.current))) scrubCancelRef.current?.();
   }, [disabled, revalidating]);
 
   useLayoutEffect(() => {
@@ -806,7 +822,9 @@ export function InspectorEditField({
               let moved = false;
               let sent = 0;
               let fine = false;
+              mixedScrubRef.current = true;
               const end = () => {
+                mixedScrubRef.current = false;
                 scrubCancelRef.current = null;
               };
               scrubCancelRef.current = beginDesignPointerGesture({
@@ -826,8 +844,13 @@ export function InspectorEditField({
                 },
                 onFinish: () => {
                   end();
-                  if (sent !== 0) showMixedMessage(mixedSteps.commit(sent, fine));
-                  else mixedSteps.cancel();
+                  if (sent === 0) {
+                    mixedSteps.cancel();
+                    return;
+                  }
+                  // Admitted now even while the layers read back, so an Undo
+                  // pressed after the release reverts this scrub.
+                  showMixedMessage(mixedSteps.commit(sent, fine));
                 },
                 onCancel: () => {
                   end();
@@ -1249,7 +1272,7 @@ const InspectorStyleField = React.memo(function InspectorStyleField({
    * from its own value. */
   selection?: readonly DesignRuntimeNodeDetails[];
   originLabel?: DesignStyleOriginLabel;
-  onLayoutAction?: (action: DesignLayoutAction) => Promise<void>;
+  onLayoutAction?: (action: DesignLayoutAction, options?: DesignGestureCommit) => Promise<void>;
   onPreviewLayoutAction?: (action: DesignLayoutAction) => Promise<void>;
   disabled?: boolean;
   revalidating?: boolean;
@@ -1263,6 +1286,8 @@ const InspectorStyleField = React.memo(function InspectorStyleField({
   onCommitStyles: (
     styles: Record<string, string | null>,
     perNode?: (nodeId: string) => Record<string, string | null>,
+    intent?: "reset" | "token" | "detach",
+    options?: DesignGestureCommit,
   ) => Promise<void>;
   motionModeActive: boolean;
   motionTrackActive: boolean;
@@ -1386,11 +1411,11 @@ const InspectorStyleField = React.memo(function InspectorStyleField({
         previewLayout: (action) => void Promise.resolve(onPreviewLayoutAction?.(action)).catch(() => {}),
         cancel: () => void Promise.resolve(onCancelPreview()).catch(() => {}),
         commit: (styles, perNode) =>
-          void onCommitStyles(styles, perNode).catch((error) =>
+          void onCommitStyles(styles, perNode, undefined, { gesture: true }).catch((error) =>
             toast.error(`Couldn't update ${label.toLowerCase()}`, { description: errorMessage(error) }),
           ),
         commitLayout: (action) =>
-          void Promise.resolve(onLayoutAction?.(action)).catch((error) =>
+          void Promise.resolve(onLayoutAction?.(action, { gesture: true })).catch((error) =>
             toast.error(`Couldn't update ${label.toLowerCase()}`, { description: errorMessage(error) }),
           ),
       })
@@ -2163,6 +2188,7 @@ export const DesignInspector = React.memo(function DesignInspector({
   });
   const styleEditContextRef = useRef({
     active: active && Boolean(elementDetails),
+    editable: !editsDisabled && Boolean(presentedElementDetails),
     pageId: activePageId ?? null,
     directoryKey: styleDirectoryKey,
     workspaceId,
@@ -2176,6 +2202,7 @@ export const DesignInspector = React.memo(function DesignInspector({
   });
   styleEditContextRef.current = {
     active: active && Boolean(elementDetails),
+    editable: !editsDisabled && Boolean(presentedElementDetails),
     pageId: activePageId ?? null,
     directoryKey: styleDirectoryKey,
     workspaceId,
@@ -2195,6 +2222,7 @@ export const DesignInspector = React.memo(function DesignInspector({
       key: styleOwnerKey,
       contextRef: { current: styleEditContextRef.current },
       previewIntentRef: { current: 0 },
+      gesturePreview: new DesignGesturePreview<DesignStylePreviewRequest>(),
     }),
     [styleOwnerKey],
   );
@@ -2330,6 +2358,7 @@ export const DesignInspector = React.memo(function DesignInspector({
   const currentStyleOwnerRef = useRef(styleOwner);
   currentStyleOwnerRef.current = styleOwner;
   const stylePreviewIntentRef = styleOwner.previewIntentRef;
+  const replayStylePreviewRef = useRef<() => void>(() => {});
   const stylesForNode = useCallback(
     (
       nodeId: string,
@@ -2360,7 +2389,23 @@ export const DesignInspector = React.memo(function DesignInspector({
       perNode?: (nodeId: string) => Record<string, string | null>,
     ) => {
       const context = styleOwner.contextRef.current;
-      if (currentStyleOwnerRef.current !== styleOwner || !context.active) return;
+      if (currentStyleOwnerRef.current !== styleOwner) return;
+      const request: DesignStylePreviewRequest = { styles, perNode };
+      const generation = context.active ? context.elementDetails?.sourceVersion ?? null : null;
+      styleOwner.gesturePreview.ask(request, generation);
+      if (!context.active) {
+        // Waiting for the layers to read back: the live preview holds it so
+        // it shows once they do.
+        if (context.workspaceId && context.frame)
+          for (const nodeId of context.styleNodeIds)
+            publishDesignLivePreviewStyles(
+              context.workspaceId,
+              context.frame.file,
+              nodeId,
+              stylesForNode(nodeId, perNode ? perNode(nodeId) : styles, context),
+            );
+        return;
+      }
       if (
         !context.workspaceId ||
         !context.folder ||
@@ -2370,6 +2415,7 @@ export const DesignInspector = React.memo(function DesignInspector({
         throw new Error("Select one or more design layers first.");
       }
       const intent = ++stylePreviewIntentRef.current;
+      const runtimeAtAsk = designFrameRuntime(context.workspaceId, context.frame.file);
       const ownStyles = (nodeId: string) => (perNode ? perNode(nodeId) : styles);
       for (const nodeId of context.styleNodeIds)
         publishDesignLivePreviewStyles(
@@ -2392,7 +2438,9 @@ export const DesignInspector = React.memo(function DesignInspector({
             context.selectedNodeId,
           )?.querySelector("[data-design-inline-spacing-root]"),
         );
-      const previewGeometries = await Promise.all(
+      let previewGeometries: Awaited<ReturnType<typeof previewDesignNodeGeometry>>[];
+      try {
+        previewGeometries = await Promise.all(
         context.styleNodeIds.map((nodeId) =>
           previewDesignNodeGeometry({
             workspaceId: context.workspaceId!,
@@ -2402,12 +2450,24 @@ export const DesignInspector = React.memo(function DesignInspector({
             children: wantsChildren && nodeId === context.selectedNodeId,
           }),
         ),
-      );
+        );
+      } catch (error) {
+        styleOwner.gesturePreview.failed(request);
+        // A runtime that replaced the refusing one while this was in flight
+        // has already announced itself; offer the preview to it now.
+        if (designFrameRuntime(context.workspaceId, context.frame.file) !== runtimeAtAsk)
+          replayStylePreviewRef.current();
+        throw error;
+      }
       if (
         stylePreviewIntentRef.current !== intent ||
         currentStyleOwnerRef.current !== styleOwner ||
         !styleOwner.contextRef.current.active
-      ) return;
+      ) {
+        styleOwner.gesturePreview.failed(request);
+        return;
+      }
+      if (generation) styleOwner.gesturePreview.shown(request, generation);
       for (const geometry of previewGeometries) {
         const spacingRoot = paintDesignInspectorPreviewDetails(
           context.workspaceId,
@@ -2427,7 +2487,49 @@ export const DesignInspector = React.memo(function DesignInspector({
     [styleOwner, stylePreviewIntentRef, stylesForNode],
   );
 
+  // A new generation (an undo finishing, another edit) replaces the document
+  // under a gesture's preview; show the same preview on it, and again on a
+  // replacement runtime if that attempt did not reach the document.
+  const styleGeneration = elementDetails?.sourceVersion ?? null;
+  const styleFrameFile = frame?.file;
+  useEffect(() => {
+    if (!active || !workspaceId || !styleFrameFile) return;
+    const replay = () => {
+      if (currentStyleOwnerRef.current !== styleOwner) return;
+      const generation = styleOwner.contextRef.current.active
+        ? styleOwner.contextRef.current.elementDetails?.sourceVersion ?? null
+        : null;
+      const request = styleOwner.gesturePreview.replay(generation);
+      if (!request) return;
+      // Only a preview still showing returns: a save that landed, a restore
+      // or an undo past it has already taken it out of the live preview.
+      const context = styleOwner.contextRef.current;
+      const showing = context.styleNodeIds.some((nodeId) =>
+        Object.keys(request.perNode ? request.perNode(nodeId) : request.styles).some((property) =>
+          designLivePreviewValue(workspaceId, styleFrameFile, nodeId, property) !== undefined));
+      if (!showing) {
+        styleOwner.gesturePreview.clear();
+        return;
+      }
+      void previewSelectedStyles(request.styles, request.perNode).catch(() => {});
+    };
+    replayStylePreviewRef.current = replay;
+    replay();
+    // A runtime that goes away retires the frame's entry and the next one
+    // replaces it, so any change to the entry is worth a cheap check.
+    const entryOf = (state: ReturnType<typeof useDesignRuntimeStore.getState>) =>
+      state.byWorkspace[workspaceId]?.frames[styleFrameFile];
+    let last = entryOf(useDesignRuntimeStore.getState());
+    return useDesignRuntimeStore.subscribe((state) => {
+      const next = entryOf(state);
+      if (next === last) return;
+      last = next;
+      replay();
+    });
+  }, [active, previewSelectedStyles, styleFrameFile, styleGeneration, styleOwner, workspaceId]);
+
   const restoreSelectedStylePreview = useCallback(async () => {
+    styleOwner.gesturePreview.clear();
     const context = styleOwner.contextRef.current;
     if (!context.workspaceId || !context.folder || !context.frame) return;
     const snapshot = designWorkspaceSnapshotCache.peekSnapshot(context.workspaceId).data;
@@ -2507,12 +2609,17 @@ export const DesignInspector = React.memo(function DesignInspector({
        * a token resolves to on that layer. */
       perNode?: (nodeId: string) => Record<string, string | null>,
       intent?: "reset" | "token" | "detach",
+      options?: DesignGestureCommit,
     ): Promise<void> => {
       const context = styleEditContextRef.current;
       // Retire stale callbacks during render, before passive unmount cleanup.
       // An eyedropper or a pending animation frame cannot follow a new layer.
-      if (currentStyleOwnerRef.current !== styleOwner || !context.active)
+      // A released gesture whose layers still read back at a new generation
+      // takes its save: the values it showed are captured here and the lane
+      // prepares the rest at its turn. Other edits wait for current details.
+      if (currentStyleOwnerRef.current !== styleOwner || !(context.active || (options?.gesture && context.editable)))
         return Promise.resolve();
+      styleOwner.gesturePreview.clear();
       // A held state is view only, answered or not: no value reaches the source.
       if (context.workspaceId && context.frame && designHeldStateHolds(context.workspaceId, context.frame.file, context.styleNodeIds))
         return Promise.resolve();
@@ -2807,8 +2914,12 @@ export const DesignInspector = React.memo(function DesignInspector({
   );
 
   const commitLayoutAction = useCallback(
-    (action: DesignLayoutAction): Promise<void> => {
-      if (currentStyleOwnerRef.current !== styleOwner || !styleEditContextRef.current.active)
+    (action: DesignLayoutAction, options?: DesignGestureCommit): Promise<void> => {
+      // As the style commit: a released gesture whose layers still read back
+      // takes its save, prepared from confirmed measurements at its turn.
+      const admissible = styleEditContextRef.current.active ||
+        (options?.gesture === true && styleEditContextRef.current.editable);
+      if (currentStyleOwnerRef.current !== styleOwner || !admissible)
         return Promise.resolve();
       const currentContext = styleEditContextRef.current;
       const { workspaceId, frame, stateContext } = currentContext;
