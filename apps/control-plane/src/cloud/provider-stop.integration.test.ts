@@ -69,6 +69,27 @@ database("Boat archived a running VM on its own", () => {
     expect((await marker()).failed).toBeNull();
   });
 
+  it("records an attempt in progress only when both reads report it; another status is logged, not recorded", async () => {
+    const stoppedAt = new Date();
+    const reading = (statuses: string[]) => {
+      const warn = vi.fn();
+      return { warn, check: new ProviderStopCheck({ mode: "on", store: f.cp.store, schedule: () => {}, wait: async () => {}, logger: { warn },
+        compute: { inspect: vi.fn(async () => ({ state: "archived", stoppedAt, snapshotStatus: statuses.shift() ?? null })) } }) };
+    };
+    for (const statuses of [["in_progress", "completed"], ["something_new", "something_new"]]) {
+      const { warn, check: once } = reading([...statuses]);
+      expect(await once.check(await binding(), "wake_check")).toBe("stopped");
+      expect((await marker()).failed).toBeNull();
+      expect(warn.mock.calls.at(-1)?.[1]).toMatchObject({ snapshotStatus: statuses, archiveSuspect: false });
+      await pool.query(`UPDATE cloud_v2_workspaces SET state='running',worker_boot_id=gen_random_uuid(),
+        worker_token_hash=sha256(gen_random_uuid()::text::bytea) WHERE id=$1`, [f.workspace.id]);
+    }
+    const { check: both } = reading(["in_progress", "in_progress"]);
+    expect(await both.check(await binding(), "wake_check")).toBe("stopped");
+    const after = await marker();
+    expect(after.failed).toBe(after.stop_generation);
+  });
+
   it("treats a sandbox that is gone like an archived one, and does nothing while Boat says it runs or cannot answer", async () => {
     for (const inspected of [{ state: "running" }, new CloudProviderError("provider_unavailable", "Boat unavailable", true), { state: "archiving" }]) {
       expect(["running", "unknown"]).toContain(await check(inspected).check(await binding(), "dial"));

@@ -73,13 +73,16 @@ export class ProviderStopCheck {
       await this.wait(PROVIDER_STOP_CONFIRM_MS);
       const confirmed = await read();
       if (!confirmed || confirmed.state !== inspected.state || confirmed.stoppedAt?.getTime() !== inspected.stoppedAt?.getTime()) return "unknown";
-      // Nothing waited for this stop's snapshot attempt: one the provider reports as anything but completed may have
-      // missed the machine's last writes, so the stop is never read as clean (store.cloudV2StopProbe).
-      const archiveSuspect = [inspected, confirmed].some(read => read.snapshotStatus !== null && read.snapshotStatus !== "completed");
+      // Nothing waited for this stop's snapshot attempt. A failed one, or one still in progress at both reads, may have
+      // missed the machine's last writes, so the stop is never read as clean (store.cloudV2StopProbe). A false mark costs
+      // a backup and a needless lost-work note, so any other status is logged, not marked.
+      const statuses = [inspected.snapshotStatus, confirmed.snapshotStatus];
+      const archiveSuspect = statuses.includes("failed") || statuses.every(status => status === "in_progress");
       const result = await this.deps.store.providerStopped(binding, { trigger, state: inspected.state, stoppedAt: inspected.stoppedAt, archiveSuspect },
         this.deps.mode);
       if (result !== "stale") this.deps.logger?.warn("[cloud-v2] provider stop", { workspaceId: binding.workspaceId.slice(0, 8),
-        sandboxId: binding.sandboxId, trigger, state: inspected.state, stoppedAt: inspected.stoppedAt?.toISOString() ?? null, archiveSuspect, result });
+        sandboxId: binding.sandboxId, trigger, state: inspected.state, stoppedAt: inspected.stoppedAt?.toISOString() ?? null,
+        snapshotStatus: statuses, archiveSuspect, result });
       return result;
     } finally { this.running.delete(key); }
   }
