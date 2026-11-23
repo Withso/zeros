@@ -609,6 +609,24 @@ describe("rehearsal on the Personal route", () => {
     expect(alpha.pro()).toBe(false);
   });
 
+  it("cleans up again after a cleanup that ended Pro before its inventory (run 485395f0): Pro on, sign-in off, inventory clean, Pro ended", async () => {
+    const { alpha, ctx, options, state } = setup({ owner: "personal" });
+    expect(await runStages(ctx, ["setup", "projects"], { ...options, switches: new Set(["projects", "personal", "retention"] as const) })).toBe(true);
+    // As the failed cleanup left it: Pro put back to none (so the organization has no cloud), the sign-in still stored.
+    await alpha.proPort().change({ enabled: false, validFrom: new Date(alpha.now - 60_000).toISOString(), validUntil: null }, "Alpha rehearsal: end Pro (failed cleanup)");
+    state.created.pro!.operations.push(randomUUID());
+    expect(alpha.pro()).toBe(false);
+    expect(alpha.patConnected).toBe(true);
+    expect((await alpha.api().json("GET", `/v1/cloud-v2/github/connection?organizationId=${alpha.organizationId}`)).status).toBe(404);
+    const lines: string[] = [];
+    const { inventory, failures } = await cleanup(ctx, { log: line => lines.push(line) });
+    expect({ inventory, failures, lines }).toEqual({ inventory: EMPTY, failures: 0, lines: [] });
+    expect(alpha.patConnected).toBe(false);
+    expect(alpha.pro()).toBe(false);
+    // Pro on for the cleanup, then back to none.
+    expect(alpha.proChanges.slice(-2).map(grant => grant.enabled)).toEqual([true, false]);
+  });
+
   it("never replaces a sign-in or a grant it did not make, and refuses B before setup", async () => {
     const existing = setup({ owner: "personal" });
     existing.alpha.patConnected = true;

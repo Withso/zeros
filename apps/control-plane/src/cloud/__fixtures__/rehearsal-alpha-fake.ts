@@ -191,6 +191,11 @@ export class FakeAlpha {
   private route(method: string, path: string, body: Record<string, unknown> = {}): ApiReply {
     if (method !== "GET") this.writes.push(`${method} ${path.replace(/[0-9a-f-]{36}/g, ":id")}`);
     const url = new URL(path, "https://alpha.test"), parts = url.pathname.split("/").filter(Boolean);
+    // A Personal organization whose Pro ended has no cloud: its GitHub connection, projects and workspace list answer 404
+    // (organization), as Alpha's do; a workspace's own routes answer 403 pro_required (below).
+    if (this.proGrant !== null && this.proGrant !== "foreign" && !this.pro() && (url.pathname === "/v1/cloud-v2/github/connection" || parts[4] === "cloud-projects"
+      || parts[4] === "computer" || (url.pathname === "/v1/cloud-v2/workspaces" && method === "GET")))
+      return this.reply(404, { error: { code: "not_found", message: "Organization not found" } });
     if (url.pathname === "/v1/cloud-v2/github/connection" && method === "POST") {
       if (body.expected !== "a".repeat(64)) return this.reply(409, { error: { code: "github_connection_changed" } });
       if (body.action === "pat") this.patConnected = true;

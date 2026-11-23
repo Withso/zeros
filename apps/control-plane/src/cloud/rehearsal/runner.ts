@@ -180,23 +180,39 @@ async function cleanupOrganization(ctx: StageContext, options: { accountless?: b
   // The run's bases: the automatic one Zeros prepared for it (by organization, `automatic`, newer than the run's start),
   // a build an older run requested, and stage C's rebuild, which replaced it. Only the live one is removed.
   if (!options.keepBase) await attempt("cloud_computer", () => removeRunBase(ctx));
-  // The Pro grant last: everything above may need the account's cloud.
-  if (state.created.pro?.operations.length) await attempt("pro", async () => {
-    if (!ports.pro) throw new RehearsalFailure("cleanup_pro", "pro_actor_required");
-    const current = await ports.pro.read();
-    if (current === "foreign") throw new RehearsalFailure("cleanup_pro", "foreign_grant");
-    const before = state.created.pro!.before;
-    if (sameGrant(current, before)) return;
-    await changePro(ctx, before ?? { enabled: false, validFrom: new Date(ports.clock.now() - 60_000).toISOString(), validUntil: null }, "restore");
-  });
   for (const id of workspaces) await attempt("objects", async () => { for (const key of await ports.storage.keys(id)) await ports.storage.delete(key); });
-  const inventory = await readInventory(ctx, options.accountless === true, options.keepBase === true).finally(() => ports.database.close().catch(() => { failures++; }));
-  return { inventory, failures };
+  // The inventory is read while the account still has its cloud: on the Personal route the organization's cloud ends with
+  // Pro, and then its GitHub connection, workspace and project routes answer 404, which never counts as clean. Then
+  // the Pro grant goes back, last, and its kind is read again from the database alone.
+  try {
+    // Pro goes back even when the inventory cannot be read; its failure is then the cleanup's.
+    const read = await readInventory(ctx, options.accountless === true, options.keepBase === true, { pro: false })
+      .then(inventory => ({ inventory }), (error: unknown) => ({ error }));
+    if (state.created.pro?.operations.length) await attempt("pro", async () => {
+      if (!ports.pro) throw new RehearsalFailure("cleanup_pro", "pro_actor_required");
+      const current = await ports.pro.read();
+      if (current === "foreign") throw new RehearsalFailure("cleanup_pro", "foreign_grant");
+      const before = state.created.pro!.before;
+      if (sameGrant(current, before)) return;
+      await changePro(ctx, before ?? { enabled: false, validFrom: new Date(ports.clock.now() - 60_000).toISOString(), validUntil: null }, "restore");
+    });
+    if ("error" in read) throw read.error;
+    return { inventory: { ...read.inventory, pro: await proRemaining(ctx) }, failures };
+  } finally { await ports.database.close().catch(() => { failures++; }); }
+}
+
+/** 1 while the Pro grant differs from the one before the run (either may be "none"), or cannot be read; 0 otherwise. */
+async function proRemaining(ctx: StageContext): Promise<number> {
+  const { ports, state } = ctx;
+  if (!state.created.pro?.operations.length) return 0;
+  // Without the Pro port (no --pro-actor) the grant cannot be read: it counts as remaining.
+  const current = ports.pro ? await ports.pro.read() : "foreign";
+  return current === "foreign" || !sameGrant(current, state.created.pro.before) ? 1 : 0;
 }
 
 /** Accountless (a provision-only run): the API's kinds are read from the database only, where prefixed rows still count. The
  * fixture repositories are never created or deleted by the rehearsal, so they are not part of the inventory. */
-export async function readInventory(ctx: StageContext, accountless = false, keepBase = false): Promise<Inventory> {
+export async function readInventory(ctx: StageContext, accountless = false, keepBase = false, include: { pro?: boolean } = {}): Promise<Inventory> {
   const { ports, state } = ctx;
   const repositories = fixtureRepositories(ctx);
   let branches = 0, pulls = 0, machines = 0, objects = 0, workspaces = 0, environments = 0, githubSignIns = 0, pro = 0;
@@ -211,12 +227,8 @@ export async function readInventory(ctx: StageContext, accountless = false, keep
   for (const id of state.created.workspaces) objects += (await ports.storage.keys(id)).length;
   for (const target of state.created.environments) if (!(await readEnvironment(ctx, target.repository, target.repositoryId, "inventory_environment")).empty) environments++;
   for (const organizationId of state.created.githubSignIns) if ((await githubSignIn(ctx, organizationId, "inventory_github_sign_in")).methods.pat.configured) githubSignIns++;
-  // Pro counts as remaining while the grant differs from the one before the run (either may be "none").
-  if (state.created.pro?.operations.length) {
-    // Without the Pro port (no --pro-actor) the grant cannot be read: it counts as remaining.
-    const current = ports.pro ? await ports.pro.read() : "foreign";
-    if (current === "foreign" || !sameGrant(current, state.created.pro.before)) pro = 1;
-  }
+  // Pro counts as remaining while the grant differs from the one before the run; cleanup reads it after putting it back.
+  if (include.pro !== false) pro = await proRemaining(ctx);
   if (!accountless) for (const row of await listWorkspaces(ports.api, state.organizationId, "inventory_workspaces"))
     if (prefixed(state.prefix, row.name) && row.state !== "deleted") workspaces++;
   const projects = accountless ? 0 : (await listProjects(ports.api, state.organizationId, "inventory_projects")).filter(row => prefixed(state.prefix, row.name)).length;
