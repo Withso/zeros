@@ -26,6 +26,7 @@ import { createCloudV2AgentLogins, createCloudV2CodexRefresh } from "./agent-log
 import { BoatCloudV2Compute } from "./boat.js";
 import type { CloudV2ControlFrame } from "./contract.js";
 import { CLOUD_V2_AUTOMATIC_BASE_BUDGET, CloudV2ComputerBuilder, CloudV2Computers } from "./computer.js";
+import { CloudV2SharedBaseResolver, CloudV2SharedBases, CloudV2SharedBaseSweeper } from "./shared-base.js";
 import { CloudV2ReadyCopies, CloudV2ReadyCopyBuilder, CloudV2ReadyCopyForks } from "./ready-copies.js";
 import { CloudV2ReadyCopySecrets } from "./ready-copy-secrets.js";
 import { CloudRepositoryLevels } from "./repository-levels.js";
@@ -175,18 +176,23 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
     return workspaceRepositoryToken(pool, github.token, workspace, repository, purpose, () => authorizeSource(workspace), failedTokenSha256);
   };
   const proxyBase = `${v2.apiUrl}${CLOUD_V2_PROXY_PREFIX}`;
-  // Whether Boat has the shared base, asked at most once a minute (a base made from it costs no machine).
-  const sharedBase = v2.sharedBaseSnapshot;
-  let sharedBaseSeen: { at: number; present: boolean } | null = null;
-  const sharedBaseAvailable = async () => {
-    if (!sharedBase || !compute.snapshotExists) return false;
-    if (sharedBaseSeen && Date.now() - sharedBaseSeen.at < 60_000) return sharedBaseSeen.present;
-    const present = await compute.snapshotExists(sharedBase).catch(() => false);
-    sharedBaseSeen = { at: Date.now(), present };
+  // Zeros's shared base for the pinned runtime (shared-base.ts): the builder makes it whatever the ready-copies switch
+  // says; CLOUD_V2_SHARED_BASE_SNAPSHOT may pin a name or turn it off. Read through one resolver (cached a minute).
+  const sharedBaseScope = { channel: config.deploymentChannel, ...(localOwner ? { localOwner } : {}) };
+  const sharedBases = new CloudV2SharedBases(pool);
+  const sharedBase = new CloudV2SharedBaseResolver(sharedBases, { ...sharedBaseScope, runtimeSha256: runtime.sha256, override: v2.sharedBaseOverride ?? null });
+  // Whether Boat has a shared base, asked at most once a minute per name (a base made from it costs no machine).
+  const sharedBaseSeen = new Map<string, { at: number; present: boolean }>();
+  const sharedBaseAvailable = async (name?: string) => {
+    if (!name || !compute.snapshotExists) return false;
+    const seen = sharedBaseSeen.get(name);
+    if (seen && Date.now() - seen.at < 60_000) return seen.present;
+    const present = await compute.snapshotExists(name).catch(() => false);
+    sharedBaseSeen.set(name, { at: Date.now(), present });
     return present;
   };
   const computers = new CloudV2Computers(pool, lockPool, github.resolveRepository, github.resolveRecentRepository,
-    { readyCopies: v2.readyCopies === true, ...(sharedBase ? { sharedBaseSnapshot: sharedBase } : {}),
+    { readyCopies: v2.readyCopies === true, sharedBase,
       ...(v2.readyCopies === true ? { sharedBaseAvailable, runtimeSha256: runtime.sha256 } : {}),
       ...(v2.automaticBasePerHour || v2.automaticBasePerDay ? { automaticBaseBudget: { perHour: v2.automaticBasePerHour ?? CLOUD_V2_AUTOMATIC_BASE_BUDGET.perHour,
         perDay: v2.automaticBasePerDay ?? CLOUD_V2_AUTOMATIC_BASE_BUDGET.perDay } } : {}) });
@@ -739,6 +745,10 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
       if (readyCopyBuilder) await readyCopyBuilder.baseActivated(organizationId, reason);
       else await readyCopies.markStale(organizationId);
     } } : {}),
+    // The shared base: built for each pinned runtime, organizations re-pointed onto it, missing ones repaired, old ones
+    // deleted once nothing refers to them, and Boat's named snapshots inventoried daily (shared-base.ts).
+    sharedBases: new CloudV2SharedBaseSweeper({ bases: sharedBases, compute, pool, scope: sharedBaseScope, runtime, publicKeys: signer.publicKeys,
+      ...(v2.runtime.previousSha256 ? { previousRuntimeSha256: v2.runtime.previousSha256 } : {}), override: v2.sharedBaseOverride ?? null, logger: console }),
     logger: console,
   }) : null;
   const copyCloneToken = async (organizationId: string, userId: string, target: CloudSourceTarget) =>
