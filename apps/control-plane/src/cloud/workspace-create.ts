@@ -148,7 +148,7 @@ export function createCloudWorkspaceOperations(deps: CloudV2RouteDeps) {
       if (unknown) throw new HttpError(422, "invalid_request", `${unknown.repository} is not one of this project's repositories.`);
       // The base, made sure of now: nobody presses Build for it (computer.ts ensureBase). A live base needs no lock.
       const base: CloudV2BaseState = computer?.baseOnly ? { state: "ready", buildId: computer.buildId }
-        : await deps.computers.ensureBase(input.organizationId);
+        : await deps.computers.ensureBase(input.organizationId, new Date(), { create: true });
       // Until a base is live, a repository the organization's pre-switch build installs is created exactly as before
       // the switch; once one is live, never again, so every organization converges.
       const named = input.repository ?? (project.repositories.length === 1 ? first.repository : undefined);

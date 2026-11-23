@@ -164,6 +164,8 @@ export type CloudV2CheckpointRetry = { generation: string; attempts: number; sto
 
 /** Internal lifecycle metadata is never included in public workspace documents. */
 export type CloudV2LifecycleWorkspace = CloudV2Workspace & {
+  /** Ready copies: when the base its create waited for went live; its boot deadline counts from then. */
+  baseReadyAt?: string;
   recoveryAttemptId?: string;
   executionTransitionId?: string;
   executionRestoreClaimed?: true;
@@ -254,6 +256,7 @@ const COLUMNS = WORKSPACE_COLUMNS_SQL.text;
 export const CLOUD_V2_WORKSPACE_COLUMNS = COLUMNS.split(",").map(value => value.trim());
 
 type LifecycleRow = Row & {
+  base_ready_at?: Date | null;
   execution_transition_id: string | null;
   execution_restore_claimed_at: Date | null;
   execution_mode: string; execution_initiator_user_id: string | null; execution_intent_id: string | null;
@@ -273,7 +276,7 @@ const LIFECYCLE_COLUMNS = `${COLUMNS}, lease_renewed_at, base_commit, restore_pe
   stop_generation, checkpoint_stop_generation,
   checkpoint_object, checkpoint_key, checkpoint_sha256, checkpoint_bytes, checkpoint_saved_at, checkpoint_reuse, checkpoint_retry_fork,
   backup_probe, backup_probe_generation, worker_off_unverified_at, worker_off_verified_generation,
-  maintenance_attempt, maintenance_phase, maintenance_started_at, archive_scrub, archive_scrubbed_generation`;
+  maintenance_attempt, maintenance_phase, maintenance_started_at, archive_scrub, archive_scrubbed_generation, base_ready_at`;
 type RetryRow = LifecycleRow & { retry_stopped_at: Date; checkpoint_retry_generation: string; checkpoint_retry_attempts: number; checkpoint_retry_exhausted_at: Date | null };
 
 function uploadHorizon(uploads: Record<string, string>): string | null {
@@ -314,6 +317,7 @@ export function cloudV2LifecycleWorkspaceFromRow(row: LifecycleRow): CloudV2Life
     ...(row.execution_mode === "active" ? { executionIntent: { id: row.execution_intent_id, userId: row.execution_initiator_user_id,
       accessEpoch: row.access_epoch, authority: row.execution_intent_authority } } : {}),
     checkpoint, restorePending: row.restore_pending, restoreAttempt: row.restore_attempt, restoreCreate: restoreCreate(row.restore_create),
+    ...(row.base_ready_at ? { baseReadyAt: row.base_ready_at.toISOString() } : {}),
     stopGeneration: row.stop_generation, checkpointUploadUntil: uploadHorizon(row.checkpoint_uploads),
     checkpointRetryFork: checkpointFork(row.checkpoint_retry_fork),
     ...(cloudV2StopProbe(row) ? { stopProbe: cloudV2StopProbe(row)! } : {}),
@@ -630,8 +634,9 @@ export class CloudV2Store {
           (SELECT jsonb_agg(jsonb_build_object('repository', r.repository, 'repositoryId', r.repository_id) ORDER BY r.position)
              FROM cloud_project_repositories r WHERE r.project_id=p.id) AS repositories
         FROM cloud_projects p JOIN organizations o ON o.id=p.org_id
-        -- The live base, or the base being prepared that this workspace waits for (the lifecycle defers until it is live).
-        JOIN cloud_v2_computer_builds b ON b.id=$4 AND b.org_id=p.org_id AND b.base_only AND (b.state IN ('queued','building')
+        -- The live base, or the base being prepared that this workspace waits for (the lifecycle defers until it is live,
+        -- or, if it failed since the create's check, re-binds or fails plainly: cloud_computer_preparation_failed).
+        JOIN cloud_v2_computer_builds b ON b.id=$4 AND b.org_id=p.org_id AND b.base_only AND (b.state IN ('queued','building','failed','cancelled')
           OR (b.state='succeeded' AND EXISTS (SELECT 1 FROM cloud_v2_computers c WHERE c.org_id=p.org_id AND c.active_build_id=b.id)))
         WHERE p.id=$1 AND p.org_id=$2 AND (p.level='organization' OR (p.owner_user_id=$3 AND o.cloud_personal_projects_allowed))
         FOR SHARE OF p`, [input.projectId, input.organizationId, input.creatorUserId, input.computerBuildId])).rows[0];
@@ -655,7 +660,7 @@ export class CloudV2Store {
       `INSERT INTO cloud_v2_workspaces (id, org_id, creator_user_id, name, repository, branch, base_branch, state, computer_build_id, source_repositories, source_pending, api_access, created_by_session_id, execution_initiator_user_id, execution_intent_id, execution_mode, private_owner_user_id, project_id, checkout_path, folder, base_commit, waiting_for_base_at)
        VALUES ($1, $2, $3, $4, $5, $6, $7, 'creating', $8, $9::text[], $10,
          coalesce((SELECT workspace_api_access FROM cloud_api_access_settings WHERE org_id=$2 AND user_id=$3),true), $11, $3, gen_random_uuid(), $12, $13, $14,
-         $15, $16, $17, CASE WHEN $14::uuid IS NOT NULL AND EXISTS (SELECT 1 FROM cloud_v2_computer_builds b WHERE b.id=$8 AND b.state IN ('queued','building'))
+         $15, $16, $17, CASE WHEN $14::uuid IS NOT NULL AND EXISTS (SELECT 1 FROM cloud_v2_computer_builds b WHERE b.id=$8 AND b.state IN ('queued','building','failed','cancelled'))
            THEN clock_timestamp() END) RETURNING ${COLUMNS}`,
       [input.id, input.organizationId, input.creatorUserId, input.name, input.repository, input.branch,
         input.baseBranch, input.computerBuildId,
@@ -2303,9 +2308,11 @@ export class CloudV2Store {
     return !row ? null : row.archived ? "archived" : row.live ? null : "access";
   }
 
-  /** Its base is live (or gone): it no longer says it is waiting for it. */
-  async baseWaitOver(workspaceId: string): Promise<void> {
-    await withSystemTx(this.pool, tx => tx.query("UPDATE cloud_v2_workspaces SET waiting_for_base_at=NULL WHERE id=$1 AND waiting_for_base_at IS NOT NULL", [workspaceId]));
+  /** Its base is live (or gone): it no longer says it is waiting, and keeps when the base went live, which its boot
+   * deadline counts from on every later tick. */
+  async baseWaitOver(workspaceId: string, readyAt: Date | null): Promise<void> {
+    await withSystemTx(this.pool, tx => tx.query(`UPDATE cloud_v2_workspaces SET waiting_for_base_at=NULL,
+      base_ready_at=coalesce($2::timestamptz, clock_timestamp()) WHERE id=$1 AND waiting_for_base_at IS NOT NULL`, [workspaceId, readyAt]));
   }
 
   /** A creating workspace whose base failed moves to the organization's live base, in one statement, so the build it

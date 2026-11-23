@@ -602,8 +602,11 @@ export class CloudV2Lifecycle {
           await store.defer(workspace.id, "creating", BASE_WAIT_POLL_MS);
           return;
         }
-        if (workspace.preparing) await store.baseWaitOver?.(workspace.id);
-        if (now - Math.max(Date.parse(workspace.createdAt), base?.finishedAt?.getTime() ?? 0) > BOOT_DEADLINE_MS) {
+        if (workspace.preparing) await store.baseWaitOver?.(workspace.id, base?.finishedAt ?? null);
+        // From the create, or from when the base it waited for went live (kept in the row for every later tick).
+        const bootFrom = Math.max(Date.parse(workspace.createdAt), base?.finishedAt?.getTime() ?? 0,
+          workspace.baseReadyAt ? Date.parse(workspace.baseReadyAt) : 0);
+        if (now - bootFrom > BOOT_DEADLINE_MS) {
           await store.transition(workspace.id, ["creating"], "failed", { errorCode: "worker_boot_timeout" });
           return;
         }
@@ -618,7 +621,8 @@ export class CloudV2Lifecycle {
             await store.transition(workspace.id, ["creating"], "failed", { errorCode: "cloud_computer_preparation_failed" });
             return;
           }
-          await store.transition(workspace.id, ["creating"], "failed", { errorCode: "cloud_computer_build_required" });
+          // With ready copies on, nobody is told to build the Cloud Computer: Zeros prepares it.
+          await store.transition(workspace.id, ["creating"], "failed", { errorCode: this.deps.readyCopies ? "cloud_computer_preparation_failed" : "cloud_computer_build_required" });
           return;
         }
         // A fork of the repository's ready copy already holds the base, the

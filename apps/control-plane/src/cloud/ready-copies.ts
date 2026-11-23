@@ -161,8 +161,10 @@ export class CloudV2ReadyCopies {
        JOIN cloud_v2_computer_builds b ON b.id=c.active_build_id AND b.org_id=c.org_id AND b.state='succeeded' AND b.base_only
        JOIN organizations o ON o.id=c.org_id AND ${ORGANIZATION_AVAILABLE}
        WHERE c.org_id=$1 AND c.snapshot_name IS NOT NULL`, [organizationId]))).rows[0];
-    // A person's build whose creator is gone is not trusted as a base; an automatic one never had a creator.
-    if (!row || (!row.created_by && !row.automatic)) return null;
+    // Any live base: it holds no source, and a copy is built as its project's owner or creator, never the base's. So a
+    // base whose creator's account is gone (created_by ON DELETE SET NULL) is as usable as one Zeros prepared, the same
+    // rule computer.ts readBase uses; otherwise its projects would wait forever while ensureBase calls it ready.
+    if (!row) return null;
     return { buildId: row.id, snapshot: row.snapshot_name, createdBy: row.created_by, shared: row.base_shared };
   }
 

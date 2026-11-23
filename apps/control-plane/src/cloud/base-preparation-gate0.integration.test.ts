@@ -41,6 +41,11 @@ d("the runtime canary through a ready-copies switch-on", () => {
     await off.enqueue(f.organizationId, f.creator.id, { repositories: [{ repository: "example/project" }] }, { configure: true });
     await build(off);
     await migrateProjects(pool);
+    // Once its base is live the canary's old-style create is answered from this project (repository_not_in_project
+    // without it): one organization project holding exactly the canary repository, made at boot from the live build.
+    expect((await pool.query(`SELECT count(*)::int AS n FROM cloud_projects p JOIN cloud_project_repositories r ON r.project_id = p.id
+      WHERE p.org_id = $1 AND p.level = 'organization' AND r.repository = 'example/project'
+        AND (SELECT count(*) FROM cloud_project_repositories c WHERE c.project_id = p.id) = 1`, [f.organizationId])).rows[0].n).toBe(1);
   }
   const STATES = {
     "a pre-switch build, the setting just on": async () => {},
