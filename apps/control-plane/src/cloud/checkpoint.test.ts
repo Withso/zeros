@@ -1755,8 +1755,9 @@ it("keeps every control-plane source file text: no NUL byte anywhere under src",
 });
 
 // Real Git on several machines' worth of checkouts: some of these take seconds.
-// C4B: without submodules, the capture, the probe and the restore are byte for byte main's at fb6bac9e (after the
-// errexit fix, #1262), so every existing fingerprint and checkpoint stays as it was.
+// C4B: without submodules, the capture, the probe and the restore are byte for byte main's (first pinned at fb6bac9e,
+// after the errexit fix #1262; recomputed unchanged on main at cf8dc9c4), so every existing fingerprint and checkpoint
+// stays as it was.
 it("keeps the one-repository capture, probe and restore byte for byte as main's", () => {
   const digest = (value: string) => createHash("sha256").update(value).digest("hex"), key = Buffer.alloc(32, 7);
   expect({

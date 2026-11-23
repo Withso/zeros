@@ -265,6 +265,51 @@ describe("historical migration filename compatibility", () => {
   });
 });
 
+describe("a patch release's revocation fix (0255 there, 0270 here)", () => {
+  // A patch on the 0.1.30 line carries the revocation fix as 0255_cloud_v2_security_revoke_tokens.sql (its next number);
+  // main carries the same function as 0270. A database that took the patch must boot on main, apply main's own 0255 to
+  // 0269 after it, and record 0270 as applied without running it again.
+  const PATCH = "0255_cloud_v2_security_revoke_tokens.sql", MAIN = "0270_cloud_v2_security_revoke_tokens.sql";
+  const patchedLedger = () => {
+    const released = LADDER.filter(name => Number(name.slice(0, 4)) <= 254);
+    const { pool, calls } = poolWithAppliedMigrations(released);
+    // The patched ledger row: its file is not here, only its alias.
+    const client = (pool as unknown as { connect(): Promise<{ query: ReturnType<typeof vi.fn> }> });
+    return { pool, calls, client, released };
+  };
+
+  it("maps main's 0270 to the patch's 0255", () => {
+    expect(renamedMigrationAliasesFor(MAIN)).toEqual([PATCH]);
+  });
+
+  it("boots on a ledger holding the patch, applies main's 0255 to 0269 in order, and records 0270 without running it", async () => {
+    const { pool, calls, client } = patchedLedger();
+    const connected = await client.connect();
+    const answer = connected.query.getMockImplementation()!;
+    connected.query.mockImplementation(async (query: string | { text: string }, values?: unknown[]) => {
+      const text = typeof query === "string" ? query : query.text;
+      const result = await answer(query, values);
+      if (/SELECT\s+name,\s*checksum\s+FROM\s+schema_migrations/i.test(text))
+        return { rows: [...result.rows, { name: PATCH, checksum: "sha256:" + "0".repeat(64) }], rowCount: result.rowCount + 1 };
+      if (/AS phase_supported/.test(text)) return { rows: [{ phase_supported: true }], rowCount: 1 };
+      return result;
+    });
+    await runMigrations(pool, { env: {} });
+    const recorded = calls.filter(({ text }) => /INSERT\s+INTO\s+schema_migrations/i.test(text)).map(({ values }) => values[0]);
+    // main's own 0255 onwards in order: 0270 from the patch's row, every later migration applied as usual.
+    expect(recorded).toEqual(LADDER.filter(name => Number(name.slice(0, 4)) >= 255));
+    expect(recorded.indexOf(MAIN)).toBe(recorded.indexOf("0269_cloud_v2_archive_guard.sql") + 1);
+    // 0270 is recorded from the patch's row (the alias), and its body never runs here.
+    const aliasRow = calls.find(({ text, values }) => /INSERT\s+INTO\s+schema_migrations/i.test(text) && values[0] === MAIN)!;
+    expect(aliasRow.values[2]).toBe(PATCH);
+    const body = readFileSync(path.join(MIGRATIONS_DIR, MAIN), "utf8");
+    expect(calls.some(({ text }) => text.includes(body.slice(body.indexOf("CREATE OR REPLACE FUNCTION"))))).toBe(false);
+    // Nothing applied after the patch replaces the fixed function or the token trigger it works around.
+    const applied = calls.filter(({ text }) => !/schema_migrations/i.test(text)).map(({ text }) => text).join("\n");
+    expect(applied).not.toMatch(/revoke_cloud_v2_security_access|fence_cloud_api_tokens|cloud_api_token_lifetime/);
+  });
+});
+
 describe("migration checksums", () => {
   it("uses a stable, algorithm-qualified digest of exact file content", () => {
     expect(migrationChecksum("SELECT 1;\n")).toBe(

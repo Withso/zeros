@@ -22,7 +22,7 @@ export const PROVIDER_STOP_CONFIRM_MS = 5_000;
 
 type Deps = {
   mode: ProviderStopMode;
-  compute: { inspect(sandboxId: string): Promise<{ state: string; stoppedAt?: Date | null }> };
+  compute: { inspect(sandboxId: string): Promise<{ state: string; stoppedAt?: Date | null; snapshotStatus?: string | null }> };
   store: Pick<CloudV2Store, "providerStopped" | "providerStopSuspects">;
   logger?: Pick<Console, "warn">;
   now?: () => number;
@@ -48,9 +48,13 @@ export class ProviderStopCheck {
     this.prune(now);
     this.running.add(key);
     try {
-      const read = async (): Promise<{ state: string; stoppedAt: Date | null } | null> => {
-        try { const value = await this.deps.compute.inspect(binding.sandboxId); return { state: value.state, stoppedAt: value.stoppedAt ?? null }; }
-        catch (error) { return error instanceof CloudProviderError && error.code === "provider_not_found" ? { state: "missing", stoppedAt: null } : null; }
+      const read = async (): Promise<{ state: string; stoppedAt: Date | null; snapshotStatus: string | null } | null> => {
+        try {
+          const value = await this.deps.compute.inspect(binding.sandboxId);
+          return { state: value.state, stoppedAt: value.stoppedAt ?? null, snapshotStatus: value.snapshotStatus ?? null };
+        } catch (error) {
+          return error instanceof CloudProviderError && error.code === "provider_not_found" ? { state: "missing", stoppedAt: null, snapshotStatus: null } : null;
+        }
       };
       const inspected = await read();
       if (!inspected) return "unknown";
@@ -69,9 +73,16 @@ export class ProviderStopCheck {
       await this.wait(PROVIDER_STOP_CONFIRM_MS);
       const confirmed = await read();
       if (!confirmed || confirmed.state !== inspected.state || confirmed.stoppedAt?.getTime() !== inspected.stoppedAt?.getTime()) return "unknown";
-      const result = await this.deps.store.providerStopped(binding, { trigger, state: inspected.state, stoppedAt: inspected.stoppedAt }, this.deps.mode);
+      // Nothing waited for this stop's snapshot attempt. A failed one, or one still in progress at both reads, may have
+      // missed the machine's last writes, so the stop is never read as clean (store.cloudV2StopProbe). A false mark costs
+      // a backup and a needless lost-work note, so any other status is logged, not marked.
+      const statuses = [inspected.snapshotStatus, confirmed.snapshotStatus];
+      const archiveSuspect = statuses.includes("failed") || statuses.every(status => status === "in_progress");
+      const result = await this.deps.store.providerStopped(binding, { trigger, state: inspected.state, stoppedAt: inspected.stoppedAt, archiveSuspect },
+        this.deps.mode);
       if (result !== "stale") this.deps.logger?.warn("[cloud-v2] provider stop", { workspaceId: binding.workspaceId.slice(0, 8),
-        sandboxId: binding.sandboxId, trigger, state: inspected.state, stoppedAt: inspected.stoppedAt?.toISOString() ?? null, result });
+        sandboxId: binding.sandboxId, trigger, state: inspected.state, stoppedAt: inspected.stoppedAt?.toISOString() ?? null,
+        snapshotStatus: statuses, archiveSuspect, result });
       return result;
     } finally { this.running.delete(key); }
   }

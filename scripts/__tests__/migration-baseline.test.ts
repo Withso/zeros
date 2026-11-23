@@ -124,16 +124,25 @@ describe("migration guard baseline", () => {
     ).toBe(before);
   });
 
-  it.each([
-    { EVENT_NAME: "push", GITHUB_REF: "refs/heads/release/1.2.3" },
-    { EVENT_NAME: "merge_group", GITHUB_REF: "refs/heads/main" },
-  ])(
-    "keeps fetching the current main for $EVENT_NAME on $GITHUB_REF",
-    (context) => {
-      const { checkout, before, later } = repository();
-      expect(
-        runStep("ci.yml", checkout, { ...context, PUSH_BEFORE: before }),
-      ).toBe(later);
-    },
-  );
+  // A release line carries its own ladder: a patch takes that line's next number, which main may already use.
+  it("compares a release-branch push with the commit it was pushed onto, not today's main", () => {
+    const { checkout, before } = repository();
+    expect(
+      runStep("ci.yml", checkout, { EVENT_NAME: "push", GITHUB_REF: "refs/heads/release/1.2.3", PUSH_BEFORE: before }),
+    ).toBe(before);
+  });
+
+  it("compares a new release branch (no push base) with its parent", () => {
+    const { checkout, tested } = repository();
+    expect(
+      runStep("preflight.yml", checkout, { EVENT_NAME: "push", GITHUB_REF: "refs/heads/release/1.2.3", PUSH_BEFORE: "0".repeat(40) }),
+    ).toBe(git(checkout, "rev-parse", `${tested}^`));
+  });
+
+  it("keeps fetching the current main for a merge group", () => {
+    const { checkout, before, later } = repository();
+    expect(
+      runStep("ci.yml", checkout, { EVENT_NAME: "merge_group", GITHUB_REF: "refs/heads/main", PUSH_BEFORE: before }),
+    ).toBe(later);
+  });
 });

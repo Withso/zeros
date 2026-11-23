@@ -1786,9 +1786,10 @@ describe("cloud v2 checkpoint retries", () => {
     vi.mocked(odd.compute.inspect).mockResolvedValueOnce({ name: "zeros-alpha-6f2b7c1e", state: "running" });
     await odd.lifecycle.tick();
     expect(odd.compute.fork).not.toHaveBeenCalled();
-    expect(odd.store.checkpointRetryNext).toHaveBeenCalledWith(WS, "2", { at: new Date(NOW + 60 * 60_000) });
-    // A stop Boat accepted but never finished leaves the VM running: ask Boat to stop it again.
+    // A stop Boat accepted but never finished leaves the VM running: stop it again, keeping its writes (boat-disk.ts),
+    // and once it is archived the next pass forks it, with no backoff.
     expect(odd.compute.stop).toHaveBeenCalledExactlyOnceWith("bx_abc1");
+    expect(odd.store.checkpointRetryNext).toHaveBeenCalledWith(WS, "2", { at: new Date(NOW) });
     const { CloudProviderError } = await import("./provider-error.js");
     const refused = setup([], { checkpoints: checkpointsFake(), checkpointRetry: true, retries: [retryRow()] });
     vi.mocked(refused.compute.inspect).mockResolvedValueOnce({ name: "zeros-alpha-6f2b7c1e", state: "idle" });

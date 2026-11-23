@@ -304,7 +304,7 @@ export class CloudRecoveryStore {
       await tx.query(`UPDATE cloud_v2_workspaces SET boat_sandbox_id=$3,worker_token_hash=$4,worker_boot_id=NULL,worker_recovery_boot_id=NULL,
         worker_route_url=$5,worker_port_token=$6,worker_runtime_sha256=$7,worker_runtime_boot_id=NULL,setup_status=NULL,
         computer_build_id=$8,restore_create=$9,restore_attempt=$2,restore_pending=false,execution_restore_claimed_at=NULL,
-        checkpoint_object=$10,checkpoint_key=$11,checkpoint_sha256=$12,checkpoint_bytes=$13,checkpoint_saved_at=$14,
+        checkpoint_object=$10,checkpoint_key=$11,checkpoint_sha256=$12,checkpoint_bytes=$13,checkpoint_saved_at=$14,checkpoint_confirmed_at=NULL,
         checkpoint_partial=$16,checkpoint_stop_generation=stop_generation,checkpoint_reuse=NULL,lease_renewed_at=clock_timestamp(),state='starting',updated_at=clock_timestamp(),next_attempt_at=$15
         WHERE id=$1 AND recovery_attempt_id=$2`, [a.workspace_id, id, a.replacement_sandbox_id, a.replacement_token_hash,
         route.url, JSON.stringify(route.token), a.replacement_runtime_sha256, a.replacement_create!.computerBuildId, JSON.stringify(a.replacement_create),

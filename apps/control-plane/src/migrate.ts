@@ -166,6 +166,11 @@ const RENAMED_MIGRATION_ALIASES: Readonly<Record<string, readonly string[]>> = {
   "0052_cloud_workspace_canonical_path_order.sql": [
     "0050_cloud_workspace_canonical_path_order.sql",
   ],
+  // A patch on the 0.1.30 line may carry the revocation fix under its next number. A database that took it records
+  // main's 0270 from that row; none of main's 0255 to 0269 redefines the function it replaces.
+  "0270_cloud_v2_security_revoke_tokens.sql": [
+    "0255_cloud_v2_security_revoke_tokens.sql",
+  ],
 };
 
 const NO_MIGRATION_ALIASES: readonly string[] = Object.freeze([]);

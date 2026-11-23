@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { prepareRuntimeDatabase, withRuntimeDatabase, cleanupRuntimeDatabase, withRetainedRuntimeDatabase } from "./runtime-database";
 import type { RuntimeHandoff } from "./runtime-handoff";
+import { PromotionError } from "./contracts";
 
 function fixture() {
   const config = { channel: "alpha" as const, action: "publish" as const, repository: "example/project", workflowSha: "1".repeat(40), branch: "main",
@@ -80,6 +81,13 @@ describe("runtime release's existing migration authority", () => {
     expect(f.deps.verifyDatabaseRoute).toHaveBeenCalledExactlyOnceWith(expect.stringContaining("fixture.pg.psdb.cloud:5432/postgres"));
     expect(JSON.stringify(f.saves)).not.toContain("synthetic-private-key"); expect(JSON.stringify(f.saves)).not.toContain("synthetic-role-password");
     expect(JSON.stringify(f.calls)).not.toContain("synthetic-private-key");
+  });
+
+  it("reports the release's own failure inside the operation by its message, after the same cleanup", async () => {
+    const f = fixture();
+    await expect(withRuntimeDatabase(f.config, f.env, f.journal, f.deps, async () => { throw new PromotionError("Build drain is ended, expired, or lacks time for a release mutation"); }))
+      .rejects.toThrow("Build drain is ended, expired, or lacks time for a release mutation");
+    expect(f.journal.failure).toBe("operation"); expect(f.journal.role.deleted).toBe(true); expect(f.pool.end).toHaveBeenCalledOnce();
   });
 
   it("keeps the first operation failure and still joins the pool and retires its role", async () => {

@@ -183,6 +183,9 @@ d("cloud v2 retention", () => {
   const row = async () => (await pool.query(`SELECT state, boat_sandbox_id, stopped_at, retention_started_at, backup_probe, backup_probe_generation, stop_generation,
     checkpoint_object, checkpoint_stop_generation, checkpoint_retry_fork, checkpoint_retry_exhausted_at, restore_pending, backup_forked_at
     FROM cloud_v2_workspaces WHERE id=$1`, [id])).rows[0];
+  /** The workspace's backup-fork maintenance records, oldest first: how each fork's machine time ended. */
+  const forkRecords = async () => (await pool.query(`SELECT outcome, finished_at IS NOT NULL AS finished FROM cloud_v2_maintenance_wakes
+    WHERE workspace_id = $1 AND kind = 'backup_fork' ORDER BY started_at`, [id])).rows;
   /** The recorded stop and retention start, `ms` earlier. */
   const earlier = (ms: number) => pool.query(`UPDATE cloud_v2_workspaces SET stopped_at=stopped_at - make_interval(secs => $2::double precision / 1000),
     retention_started_at=retention_started_at - make_interval(secs => $2::double precision / 1000),
@@ -259,6 +262,7 @@ d("cloud v2 retention", () => {
     expect(fork.state).toBe("deleted");
     expect((await row()).checkpoint_retry_exhausted_at).toBeInstanceOf(Date);
     expect(errors.some(line => line.includes("backup fork refused: its worker unit is on"))).toBe(true);
+    expect(await forkRecords()).toEqual([{ outcome: "failed", finished: true }]);
   });
 
   const lostWork = async () => (await store.get(id, user)).lostWork;
@@ -671,6 +675,44 @@ d("cloud v2 retention", () => {
       expect((await store.get(id, user)).restores).toBe("all");
     });
 
+    it("a partial backup of a suspect stop: never all while either holds, 0271 and a later unchanged confirmation keep it so, and its restore notes lost work", async () => {
+      boat.write(vm, `${sub}/UNPUSHED`, "their own clone's work");
+      partialBackup = true;
+      boat.attemptAtStop = { inProgressReads: 1, failedReads: 0 };
+      await stopWith(withSubmodules);
+      await earlier(CLOUD_V2_BACKUP_DELAY_MS + 60_000);
+      await lifecycle(withSubmodules).tick();
+      const saved = (await pool.query(`SELECT checkpoint_object, checkpoint_partial, stop_generation::text,
+        checkpoint_stop_generation = stop_generation AS this_stop, stop_archive_failed_generation = stop_generation AS suspect FROM cloud_v2_workspaces WHERE id=$1`, [id])).rows[0];
+      expect(saved).toMatchObject({ checkpoint_partial: true, this_stop: true, suspect: true });
+      await store.requestLifecycle(id, user, "archive");
+      await pool.query("UPDATE cloud_v2_workspaces SET machine_gone_at=clock_timestamp() WHERE id=$1", [id]);
+      const restores = async () => (await store.get(id, user)).restores;
+      expect(await restores()).toBe("pushed");
+      // 0271 un-counts this stop's backup; a backup fork then finds the archive unchanged: confirmed after the suspect
+      // stop, so still not all.
+      await fetched(); await migration();
+      expect((await row()).checkpoint_stop_generation).toBeNull();
+      expect(await restores()).toBe("pushed");
+      await pool.query("UPDATE cloud_v2_workspaces SET checkpoint_reuse=jsonb_build_object('object', checkpoint_object, 'fingerprint', 'same') WHERE id=$1", [id]);
+      expect(await store.checkpointUnchanged(id, vm, saved.stop_generation, saved.checkpoint_object, "retry")).toBe(true);
+      expect(await restores()).toBe("pushed");
+      // Each alone keeps it from all: not suspect, still partial; not partial, still suspect; neither, all.
+      await pool.query("UPDATE cloud_v2_workspaces SET stop_archive_failed_generation=NULL WHERE id=$1", [id]);
+      expect(await restores()).toBe("pushed");
+      await pool.query("UPDATE cloud_v2_workspaces SET stop_archive_failed_generation=stop_generation, checkpoint_partial=false WHERE id=$1", [id]);
+      expect(await restores()).toBe("pushed");
+      await pool.query("UPDATE cloud_v2_workspaces SET stop_archive_failed_generation=NULL WHERE id=$1", [id]);
+      expect(await restores()).toBe("all");
+      // Partial and suspect again: an open after the machine is gone restores it and says the stop's work may be missing.
+      await pool.query(`UPDATE cloud_v2_workspaces SET checkpoint_partial=true, stop_archive_failed_generation=stop_generation, archived_at=NULL,
+        machine_gone_at=NULL WHERE id=$1`, [id]);
+      boat.machine(vm)!.state = "deleted";
+      await store.transition(id, ["stopped"], "starting");
+      await lifecycle(withSubmodules).tick();
+      expect(await lostWork()).toMatchObject({ restored: "earlier" });
+    });
+
     it("records a submodule a restore could not put back, shows it, and puts it back at a later plain start once it can", async () => {
       boat.write(vm, `${sub}/UNPUSHED`, "stash");
       await stopWith(withSubmodules);
@@ -734,6 +776,61 @@ d("cloud v2 retention", () => {
       expect(errors.filter(line => line.includes("(attempt_before_stop)"))).toHaveLength(1);
     });
 
+    it("never calls a backup forked from a suspect stop's archive complete: restores answers pushed, and the open notes lost work", async () => {
+      boat.write(vm, `${path("api")}/UNPUSHED`, "api work");
+      boat.attemptAtStop = { inProgressReads: 1, failedReads: 0 };
+      await stop();
+      await earlier(CLOUD_V2_BACKUP_DELAY_MS + 60_000);
+      await lifecycle().tick();
+      const saved = await row();
+      // A backup of this very stop, taken from its archive after the stop.
+      expect(saved.checkpoint_stop_generation).toBe(saved.stop_generation);
+      await store.requestLifecycle(id, user, "archive");
+      await pool.query("UPDATE cloud_v2_workspaces SET machine_gone_at=clock_timestamp() WHERE id=$1", [id]);
+      expect((await store.get(id, user)).restores).toBe("pushed");
+      await pool.query("UPDATE cloud_v2_workspaces SET archived_at=NULL WHERE id=$1", [id]);
+      boat.machine(vm)!.state = "deleted";
+      await store.transition(id, ["stopped"], "starting");
+      await lifecycle().tick();
+      expect(await lostWork()).toMatchObject({ restored: "earlier" });
+    });
+
+    it("never calls a backup of a suspect stop complete when its fork found the archive unchanged since an earlier backup", async () => {
+      boat.write(vm, `${path("api")}/UNPUSHED`, "api work");
+      await stop();
+      await earlier(CLOUD_V2_BACKUP_DELAY_MS + 60_000);
+      await lifecycle().tick();
+      const backedUp = await row();
+      expect(backedUp.checkpoint_stop_generation).toBe(backedUp.stop_generation);
+      // A later stop, suspect, after which a backup fork finds the archive identical to that backup: every write of the
+      // session in between may be what the archive lacks.
+      const next = String(BigInt(backedUp.stop_generation) + 1n);
+      await pool.query(`UPDATE cloud_v2_workspaces SET stop_generation=$2::bigint, stop_archive_failed_generation=$2::bigint,
+        stopped_at=clock_timestamp(), checkpoint_reuse=jsonb_build_object('object', checkpoint_object, 'fingerprint', 'same') WHERE id=$1`, [id, next]);
+      expect(await store.checkpointUnchanged(id, vm, next, backedUp.checkpoint_object, "retry")).toBe(true);
+      const confirmed = await row();
+      expect(confirmed.checkpoint_stop_generation).toBe(next);
+      await store.requestLifecycle(id, user, "archive");
+      await pool.query("UPDATE cloud_v2_workspaces SET machine_gone_at=clock_timestamp() WHERE id=$1", [id]);
+      expect((await store.get(id, user)).restores).toBe("pushed");
+      // A stop's own unchanged checkpoint, confirmed on the running machine before that stop, stays complete.
+      await pool.query(`UPDATE cloud_v2_workspaces SET stopped_at=clock_timestamp() + interval '1 minute' WHERE id=$1`, [id]);
+      expect((await store.get(id, user)).restores).toBe("all");
+    });
+
+    it("stops again, keeping writes, a machine whose stop did not take, and records that stop when its archive is suspect", async () => {
+      boat.write(vm, `${path("api")}/UNPUSHED`, "api work");
+      await stop();
+      // The stop was accepted, then did not take: the machine runs again.
+      boat.machine(vm)!.state = "running"; boat.machine(vm)!.stoppedAt = null;
+      boat.attemptAtStop = { inProgressReads: 1, failedReads: 0 };
+      await earlier(CLOUD_V2_BACKUP_DELAY_MS + 60_000);
+      await lifecycle().tick();
+      expect(boat.machine(vm)!.state).toBe("archived");
+      const stopped = (await pool.query("SELECT stop_generation, stop_archive_failed_generation FROM cloud_v2_workspaces WHERE id=$1", [id])).rows[0];
+      expect(stopped.stop_archive_failed_generation).toBe(stopped.stop_generation);
+    });
+
     it("records a stop during which Boat reported a failed attempt, and never calls that stop clean", async () => {
       boat.beginSnapshotAttempt(vm, Number.POSITIVE_INFINITY);
       await stop();
@@ -783,6 +880,8 @@ d("cloud v2 retention", () => {
     expect(saved).toMatchObject({ checkpoint_stop_generation: saved.stop_generation, checkpoint_retry_fork: null });
     expect(saved.backup_forked_at).toBeInstanceOf(Date);
     expect([...archives.get(saved.checkpoint_object)!.keys()]).toEqual([`${path("api")}/UNPUSHED`]);
+    // Its maintenance record ends with the fork: it backed up this stop.
+    expect(await forkRecords()).toEqual([{ outcome: "stopped", finished: true }]);
 
     // Boat loses the VM; opening it restores onto a fork of the project's ready copy.
     boat.machine(vm)!.state = "deleted";
@@ -856,6 +955,49 @@ d("cloud v2 retention", () => {
     expect(prepareRepository).not.toHaveBeenCalled();
   });
 
+  describe("a fork of a ready copy is read back by that copy's record", () => {
+    const withCopies = (verifyMachine: (machine: string, sandboxId: string) => Promise<boolean | null>) =>
+      ({ readyCopies: { prepare: async () => null, fetchBase: async () => false, verifyMachine: vi.fn(verifyMachine) } });
+
+    it("reads back a restore onto a fork of a copy, which goes on either way (a copy found lacking is distrusted there)", async () => {
+      for (const answer of [true, false]) {
+        boat.write(vm, `${path("api")}/UNPUSHED`, "api work");
+        await stop();
+        await earlier(CLOUD_V2_BACKUP_DELAY_MS + 60_000);
+        await lifecycle().tick();
+        boat.machine(vm)!.state = "deleted";
+        await store.transition(id, ["stopped"], "starting");
+        const deps = withCopies(async () => answer);
+        await lifecycle(deps).tick();
+        const restored = await row();
+        expect(restored.restore_pending).toBe(false);
+        expect(boat.machine(restored.boat_sandbox_id)!.source).toBe(readyCopy);
+        expect(deps.readyCopies.verifyMachine.mock.calls).toEqual([[readyCopy, restored.boat_sandbox_id]]);
+        expect(boat.machine(restored.boat_sandbox_id)!.files.get(`${path("api")}/UNPUSHED`)).toBe("api work");
+        await pool.query("UPDATE cloud_v2_workspaces SET state='running' WHERE id=$1", [id]);
+        vm = restored.boat_sandbox_id;
+      }
+    });
+
+    for (const [answer, clones, all] of [[true, false, false], [false, true, true], [null, true, false]] as const)
+      it(`rebuilds clean from a fork its copy's read-back answers ${answer} for: ${clones ? "a direct clone" : "nothing cloned"}`, async () => {
+        // The archive lacks one checkout (two of three) or holds them all: the read-back's answer decides, and only a
+        // machine no copy records falls back to reading that the checkouts are there.
+        readyCopy = boat.stopped("zeros-ready-copy", all ? Object.fromEntries(REPOS.map(repo => [`${path(repo.folder)}/.git/HEAD`, "c".repeat(40)]))
+          : { [`${path("api")}/.git/HEAD`]: "c".repeat(40), [`${path("docs")}/.git/HEAD`]: "c".repeat(40) });
+        const prepareRepository = vi.fn(async () => {});
+        await stop();
+        boat.machine(vm)!.state = "deleted";
+        await store.transition(id, ["stopped"], "starting");
+        const deps = withCopies(async () => answer);
+        await lifecycle({ prepareRepository, ...deps }).tick();
+        const restored = await row();
+        expect(boat.machine(restored.boat_sandbox_id)!.source).toBe(readyCopy);
+        expect(deps.readyCopies.verifyMachine.mock.calls).toEqual([[readyCopy, restored.boat_sandbox_id]]);
+        expect(prepareRepository).toHaveBeenCalledTimes(clones ? 1 : 0);
+      });
+  });
+
   it("falls back to the Cloud Computer when the ready copy can no longer be forked", async () => {
     await stop();
     boat.machine(vm)!.state = "deleted";
@@ -879,10 +1021,12 @@ d("cloud v2 retention", () => {
     boat.loseNextReply("delete");
     await lifecycle().tick();
     const forkId = [...boat.machines.values()].find(machine => machine.source === vm)!.id;
-    // Boat deleted it but the reply was lost: the record stays until a later scan confirms.
+    // Boat deleted it but the reply was lost: the record stays until a later scan confirms, and so does its machine time.
     expect((await row()).checkpoint_retry_fork).toMatchObject({ sandboxId: forkId });
+    expect(await forkRecords()).toEqual([{ outcome: null, finished: false }]);
     await lifecycle().tick();
     expect((await row()).checkpoint_retry_fork).toBeNull();
+    expect(await forkRecords()).toEqual([{ outcome: "stopped", finished: true }]);
     expect(boat.machine(forkId)!.state).toBe("deleted");
 
     // A fork request whose reply never came, past Boat's key window: nothing can find it.
@@ -993,8 +1137,9 @@ d("cloud v2 retention", () => {
         boat.attemptAtStop = { inProgressReads: 1, failedReads: 0 };
         await lifecycle().tick();
         expect(await wakes()).toMatchObject([{ kind: "wake", outcome: "stopped" }]);
-        const recorded = (await pool.query("SELECT stop_generation, stop_archive_failed_generation FROM cloud_v2_workspaces WHERE id=$1", [id])).rows[0];
-        expect(recorded.stop_archive_failed_generation).toBe(recorded.stop_generation);
+        // Its own record: the person's stop, and its backup, are not called into question.
+        const recorded = (await pool.query("SELECT stop_archive_failed_generation, maintenance_archive_suspect_at FROM cloud_v2_workspaces WHERE id=$1", [id])).rows[0];
+        expect(recorded).toEqual({ stop_archive_failed_generation: null, maintenance_archive_suspect_at: expect.any(Date) });
       });
 
       it("records a failed attempt during its stop, so nothing calls that archive good", async () => {
@@ -1002,9 +1147,9 @@ d("cloud v2 retention", () => {
         attemptAtMarker(Number.POSITIVE_INFINITY);
         await lifecycle().tick();
         expect(await wakes()).toMatchObject([{ kind: "wake", outcome: "stopped" }]);
-        const recorded = (await pool.query("SELECT stop_generation, stop_archive_failed_generation FROM cloud_v2_workspaces WHERE id=$1", [id])).rows[0];
-        expect(recorded.stop_archive_failed_generation).toBe(recorded.stop_generation);
-        expect(errors.filter(line => line.startsWith("[cloud-v2] stop archive may lack the machine's last writes"))).toHaveLength(1);
+        const recorded = (await pool.query("SELECT stop_archive_failed_generation, maintenance_archive_suspect_at FROM cloud_v2_workspaces WHERE id=$1", [id])).rows[0];
+        expect(recorded).toEqual({ stop_archive_failed_generation: null, maintenance_archive_suspect_at: expect.any(Date) });
+        expect(errors.filter(line => line.startsWith("[cloud-v2] maintenance stop archive may lack the machine's last writes"))).toHaveLength(1);
       });
     });
 
@@ -1190,6 +1335,19 @@ d("cloud v2 retention", () => {
         await lifecycle().tick();
         expect(resumes()).toEqual([]);
       });
+    });
+
+    it("scrubs an archived workspace again when its wake's stop left the archive suspect: partial, and not done", async () => {
+      boat.write(vm, `${path("app")}/.env`, "SECRET=1");
+      await sleeping(5);
+      // Archived five days after its last stop, the archived wake now due (as the archived wake's own test sets it).
+      await pool.query(`UPDATE cloud_v2_workspaces SET stopped_at=stopped_at - interval '5 days 14 hours',
+        archived_at=clock_timestamp() - interval '5 days 14 hours' WHERE id=$1`, [id]);
+      boat.attemptAtStop = { inProgressReads: 1, failedReads: 0 };
+      await lifecycle().tick();
+      expect(resumes()).toHaveLength(1);
+      const after = (await pool.query("SELECT archive_scrub, archive_wake_done_at, maintenance_archive_suspect_at FROM cloud_v2_workspaces WHERE id=$1", [id])).rows[0];
+      expect(after).toEqual({ archive_scrub: "partial", archive_wake_done_at: null, maintenance_archive_suspect_at: expect.any(Date) });
     });
 
     it("wakes an archived workspace once more, on its machine's own 10 days, then never", async () => {
@@ -1672,6 +1830,34 @@ d("cloud v2 retention", () => {
         expect(restoredAt).toBeGreaterThanOrEqual(0);
         expect(tokenAt).toBeGreaterThan(restoredAt);
         expect(await columns("archive_scrub")).toEqual({ archive_scrub: "clean" });
+      });
+
+      for (const again of [false, true]) it(`keeps a backup-mode scrub whose wake's stop left the archive suspect, so an open puts the files back${again ? ", after a second wake scrubs nothing" : ""}`, async () => {
+        boat.write(vm, ENV, "TOKEN=the person's own edit");
+        seeded.set(ENV, "TOKEN=from the server");
+        boat.write(vm, `${path("app")}/UNPUSHED`, "work");
+        await stop();
+        await earlier(CLOUD_V2_BACKUP_DELAY_MS + 60_000);
+        await lifecycle().tick();
+        await archive();
+        await sleepFor(10.6);
+        boat.attemptAtStop = { inProgressReads: 1, failedReads: 0 };
+        await lifecycle().tick();
+        expect(await wakeRows()).toMatchObject([{ outcome: "stopped", scrub: "backup" }]);
+        const first = (await pool.query("SELECT archive_scrub, archive_wake_done_at, maintenance_archive_suspect_at FROM cloud_v2_workspaces WHERE id=$1", [id])).rows[0];
+        expect(first).toEqual({ archive_scrub: "backup", archive_wake_done_at: null, maintenance_archive_suspect_at: expect.any(Date) });
+        if (again) {
+          // Not done, so the next archived wake scrubs again: the files are gone, and nothing is left to remove.
+          boat.machine(vm)!.files.delete(ENV);
+          await sleepFor(11);
+          await pool.query("UPDATE cloud_v2_maintenance_wakes SET started_at=started_at - interval '2 hours' WHERE workspace_id=$1", [id]);
+          await lifecycle().tick();
+          expect(await wakeRows()).toHaveLength(2);
+          expect(await columns("archive_scrub")).toEqual({ archive_scrub: "backup" });
+        }
+        await store.requestLifecycle(id, user, "start");
+        await lifecycle().tick();
+        expect(boat.machine(vm)!.files.get(ENV)).toBe("TOKEN=the person's own edit");
       });
 
       it("does the same for a second repository: its hand-edited environment file is scrubbed, then comes back on open", async () => {
