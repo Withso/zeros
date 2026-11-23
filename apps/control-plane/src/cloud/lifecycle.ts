@@ -156,7 +156,7 @@ export function emitCloudV2Timing(observer: ((record: CloudV2TimingRecord) => vo
 export type CloudV2LifecycleDeps = {
   /** Database-only scan, once a minute, for running workspaces whose messages do not move (cloud/provider-stop.ts). */
   providerStop?: { scan(): Promise<void> };
-  store: Pick<CloudV2Store, "claimPending" | "nextLifecycleDue" | "defer" | "transition" | "rotateWorkerToken" | "workspaceImage" | "revoke" | "idleSince" | "setWorkerRoute" | "leasesDue" | "markLeaseRenewed" | "recordInitialSandbox"
+  store: Pick<CloudV2Store, "claimPending" | "nextLifecycleDue" | "defer" | "transition" | "rotateWorkerToken" | "workspaceImage" | "pinRestoreImage" | "revoke" | "idleSince" | "setWorkerRoute" | "leasesDue" | "markLeaseRenewed" | "recordInitialSandbox"
     | "setBaseCommit" | "saveCheckpoint" | "checkpointFailed" | "checkpointUpload" | "checkpointUploadDone" | "checkpointUploadHorizon" | "stopCurrent"
     | "beginRestore" | "replaceSandbox" | "finishRestore" | "checkpointUnchanged" | "claimCheckpointRetry" | "beginCheckpointFork"
     | "checkpointForkCreated" | "checkpointForkGone" | "checkpointRetryNext"
@@ -1426,7 +1426,9 @@ export class CloudV2Lifecycle {
       }
     }
     if (!sandboxId) {
-      const image = await store.workspaceImage(workspace.id);
+      // The organization's live Cloud Computer, as a backup restore uses (store.pinRestoreImage): never the
+      // workspace's earlier build, whose snapshot is gone once a newer one is live.
+      const image = await store.pinRestoreImage(workspace.id);
       if (!image) { await store.transition(workspace.id, ["starting"], "failed", { errorCode: "cloud_computer_build_required" }); return null; }
       ({ sandboxId } = await compute.create({ key: `${key}:create`, name: `${this.deps.sandboxName(workspace)}-c${workspace.stopGeneration}`, env: bootEnv,
         ...(image.from ? { from: image.from } : {}) }));

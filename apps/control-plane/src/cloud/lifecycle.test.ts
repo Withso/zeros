@@ -84,6 +84,9 @@ function setup(claimed: (CloudV2LifecycleWorkspace & { attempts: number })[], op
     rotateWorkerToken: vi.fn(async () => token),
     workspaceImage: vi.fn(async () => options.snapshot === null ? null
       : { from: options.stock ? null : options.snapshot === undefined ? "cv2-alpha-org-1" : options.snapshot, prune: options.prune ?? [], checkout: options.checkout === true }),
+    // The clean rebuild's image: the organization's active build (store.pinRestoreImage), the same answer here.
+    pinRestoreImage: vi.fn(async () => options.snapshot === null ? null
+      : { from: options.stock ? null : options.snapshot === undefined ? "cv2-alpha-org-1" : options.snapshot, prune: options.prune ?? [], checkout: options.checkout === true }),
     revoke: vi.fn(async () => {}),
     idleSince: vi.fn(async () => options.idle ?? []),
     nextLifecycleDue: vi.fn(async (): Promise<number | null> => null),
