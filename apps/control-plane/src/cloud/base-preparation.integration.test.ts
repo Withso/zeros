@@ -755,6 +755,23 @@ d("ready copies: a safe switch-on", () => {
     });
   });
 
+  describe("with the setting turned on while a pre-switch refresh was still queued", () => {
+    it("cancels that refresh instead of building it, and builds the organization's base", async () => {
+      const pre = await preSwitchBuild();
+      const other = "c".repeat(64);
+      // Queued by a server that still had the setting off (a deploy's outgoing instance).
+      const refresh = await computersWith({ readyCopies: false }).enqueueAutomatic(org, pre.id, "runtime", other);
+      expect(refresh).toMatchObject({ reason: "runtime", state: "queued" });
+      await builder(computersWith()).tick();
+      expect((await pool.query("SELECT state, error_code, started_at FROM cloud_v2_computer_builds WHERE id=$1", [refresh!.id])).rows[0])
+        .toEqual({ state: "cancelled", error_code: "computer_refresh_superseded", started_at: null });
+      // That tick's base sweep ran while the refresh was still queued; the next one queues the base.
+      await builder(computersWith()).tick();
+      expect((await pool.query("SELECT base_only, automatic FROM cloud_v2_computer_builds WHERE org_id=$1 AND id NOT IN ($2,$3)", [org, pre.id, refresh!.id])).rows)
+        .toEqual([{ base_only: true, automatic: true }]);
+    });
+  });
+
   describe("with the setting off", () => {
     it("never refreshes a base, which would queue a build with no repository; on, an automatic base is refreshed as another", async () => {
       boat.snapshots.set(SHARED, new Map());

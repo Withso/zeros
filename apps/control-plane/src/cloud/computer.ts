@@ -935,6 +935,10 @@ export class CloudV2Computers {
     await withSystemTx(this.pool, async tx => {
       await this.cancelUnauthorizedBuilds(tx);
       await this.cancelSupersededRetries(tx);
+      // With ready copies on, a refresh of a build that installs repositories, queued by a server that still had them off
+      // (a deploy's outgoing instance), is never built: the organization's base replaces that build (ensureBase).
+      if (this.options.readyCopies) await tx.query(`UPDATE cloud_v2_computer_builds SET state='cancelled', error_code='computer_refresh_superseded',
+        finished_at=clock_timestamp() WHERE state='queued' AND NOT base_only AND reason IN ('runtime','refresh')`);
     });
     const { rows } = await withSystemTx(this.pool, async tx => {
       if (!await buildClaimAllowed(tx)) return { rows: [] };
