@@ -2,7 +2,7 @@
 // image, and nothing private (no source, no credentials, no token). Organizations without an install script start
 // from it, so they need no machine of their own. The builder makes it for the channel's pinned runtime whatever
 // CLOUD_V2_READY_COPIES_ENABLED says; CLOUD_V2_SHARED_BASE_SNAPSHOT may pin a name or turn it off.
-// Every name is recorded in cloud_v2_shared_bases (0269) before its save, and deleted only when nothing refers to it.
+// Every name is recorded in cloud_v2_shared_bases (0268) before its save, and deleted only when nothing refers to it.
 import { randomUUID } from "node:crypto";
 import type pg from "pg";
 import { withSystemTx, type Tx } from "../db.js";
