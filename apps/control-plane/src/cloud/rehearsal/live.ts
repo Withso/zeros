@@ -64,25 +64,68 @@ export function liveApi(accessToken: () => Promise<string>, fetchImpl: typeof fe
   };
 }
 
-/** gate0's bridge client, opened with a connect ticket validated as gate0 validates it. */
-export function liveBridge(api: Api, timeoutMs = 600_000, pollMs = 1_000): (workspaceId: string) => Promise<Bridge> {
+/** The socket a bridge rides on, as liveBridge needs it (BridgeProbe in production; a fake in tests). */
+export type BridgeSocket = { readyState: number; on(event: "close", listener: (code: number) => void): unknown; on(event: "ping", listener: () => void): unknown };
+export type OpenedProbe = Pick<BridgeProbe, "op" | "request" | "send" | "frames" | "close"> & { socket: BridgeSocket };
+const SOCKET_OPEN = 1;
+/** Closes after which the desktop reconnects at once (runtime-client.ts onclose: a ready socket that did not end normally,
+ * was not refused and was not a relay's retry-later); any other close is a failure, named. */
+const REOPENED_CLOSES = new Set([1001, 1006, 1011, 1012]);
+const MAX_REOPENS = 3;
+
+/** gate0's bridge client, opened with a connect ticket validated as gate0 validates it. As the desktop's: after an
+ * abnormal close of a ready socket the next request reconnects (a fresh connect ticket, a new socket), at most three times
+ * per bridge; a request a close interrupted is never resent. A close is named by its code, how long the socket had been
+ * open, and how many relay pings it had answered (bridge_closed_1006:open_25s:pings_0). */
+export function liveBridge(api: Api, timeoutMs = 600_000, pollMs = 1_000,
+  openProbe: (ticket: { url: string; protocols: string[] }) => Promise<OpenedProbe> = ticket => BridgeProbe.open(ticket, timeoutMs, pollMs)): (workspaceId: string) => Promise<Bridge> {
   return async workspaceId => {
-    const reply = await connectWorkspace(api, workspaceId, "connect");
-    const ticket = z.object({ url: z.string().url(), protocols: z.array(z.string()).length(2) }).safeParse(reply.body);
-    if (!ticket.success) throw new RehearsalFailure("connect", "schema");
-    const target = new URL(ticket.data.url);
-    if (target.protocol !== "wss:" || target.username || target.password || target.search || target.hash ||
-      ticket.data.protocols[0] !== "zeros.cloud.v2" || !ticket.data.protocols[1]?.startsWith("ticket.")) throw new RehearsalFailure("connect", "ticket");
-    const probe = await wrap("bridge_open", () => BridgeProbe.open(ticket.data, timeoutMs, pollMs));
+    const connect = async () => {
+      const reply = await connectWorkspace(api, workspaceId, "connect");
+      const ticket = z.object({ url: z.string().url(), protocols: z.array(z.string()).length(2) }).safeParse(reply.body);
+      if (!ticket.success) throw new RehearsalFailure("connect", "schema");
+      const target = new URL(ticket.data.url);
+      if (target.protocol !== "wss:" || target.username || target.password || target.search || target.hash ||
+        ticket.data.protocols[0] !== "zeros.cloud.v2" || !ticket.data.protocols[1]?.startsWith("ticket.")) throw new RehearsalFailure("connect", "ticket");
+      const probe = await wrap("bridge_open", () => openProbe(ticket.data));
+      const life = { openedAt: Date.now(), closedAt: null as number | null, code: null as number | null, pings: 0 };
+      probe.socket.on("ping", () => { life.pings++; });
+      probe.socket.on("close", code => { life.code = code; life.closedAt = Date.now(); });
+      return { probe, life };
+    };
+    let current = await connect(), reopens = 0;
+    const closed = () => current.life.code === null ? null
+      : `bridge_closed_${current.life.code}:open_${Math.round(((current.life.closedAt ?? Date.now()) - current.life.openedAt) / 1000)}s:pings_${current.life.pings}`;
+    const usable = async (step: string) => {
+      if (current.probe.socket.readyState === SOCKET_OPEN) return current.probe;
+      if (current.life.code !== null && REOPENED_CLOSES.has(current.life.code) && reopens < MAX_REOPENS) {
+        reopens++; current.probe.close(); current = await connect(); return current.probe;
+      }
+      throw new RehearsalFailure(clean(step), closed() ?? "bridge_disconnected");
+    };
+    const named = async <T>(step: string, work: (probe: OpenedProbe) => Promise<T>): Promise<T> => {
+      const probe = await usable(step);
+      try { return await work(probe); }
+      catch (error) {
+        // Closed while the request was out: named by the close, and not resent (it may have run).
+        const why = probe === current.probe ? closed() : null;
+        if (why) throw new RehearsalFailure(clean(step), why);
+        throw error;
+      }
+    };
     return {
-      op: (op, params) => wrap(op, () => probe.op(op, params)),
-      request: (type, fields, step) => wrap(step, () => probe.request(type, fields, step)),
-      send: (type, fields) => { try { return probe.send(type, fields); } catch { throw new RehearsalFailure("bridge_send", "disconnected"); } },
-      frames: () => probe.frames,
-      close: () => probe.close(),
+      op: (op, params) => named(op, probe => wrap(op, () => probe.op(op, params))),
+      request: (type, fields, step) => named(step, probe => wrap(step, () => probe.request(type, fields, step))),
+      send: (type, fields) => {
+        if (current.probe.socket.readyState !== SOCKET_OPEN) throw new RehearsalFailure("bridge_send", closed() ?? "disconnected");
+        try { return current.probe.send(type, fields); } catch { throw new RehearsalFailure("bridge_send", closed() ?? "disconnected"); }
+      },
+      frames: () => current.probe.frames,
+      close: () => current.probe.close(),
     };
   };
 }
+const clean = (step: string) => step.slice(0, 64).replace(/[^a-z0-9_.:-]/gi, "_").toLowerCase();
 async function wrap<T>(step: string, work: () => Promise<T>): Promise<T> {
   try { return await work(); } catch (error) {
     throw error instanceof Gate0Failure ? new RehearsalFailure(step.slice(0, 64).replace(/[^a-z0-9_.:-]/gi, "_").toLowerCase(), error.cause ?? "bridge")

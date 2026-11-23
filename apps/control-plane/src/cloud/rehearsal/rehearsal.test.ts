@@ -212,6 +212,45 @@ describe("rehearsal stages against a fake Alpha", () => {
       headers: { "X-Zeros-Client-Features": "workspace-repositories-v1", "Idempotency-Key": expect.stringMatching(/^[0-9a-f-]{36}$/) } }]);
   });
 
+  it("reopens the bridge after an abnormal close as the desktop does, never resends an interrupted request, and names a close", async () => {
+    const connects: string[] = [];
+    const api = { json: async (_method: string, path: string) => { connects.push(path);
+      return { status: 200, body: { url: "wss://relay.example.test/v2/cloud/workspaces/w/bridge", protocols: ["zeros.cloud.v2", `ticket.${connects.length}`] } }; } };
+    type Listener = (...args: never[]) => void;
+    const sockets: { readyState: number; listeners: Map<string, Listener[]>; emit(event: string, ...args: unknown[]): void }[] = [];
+    let hangNext = false;
+    const openProbe = async () => {
+      const socket = { readyState: 1, listeners: new Map<string, Listener[]>(),
+        on(event: string, listener: Listener) { this.listeners.set(event, [...this.listeners.get(event) ?? [], listener]); return this; },
+        emit(event: string, ...args: unknown[]) { for (const listener of this.listeners.get(event) ?? []) (listener as (...values: unknown[]) => void)(...args); } };
+      sockets.push(socket);
+      const close = (code: number) => { socket.readyState = 3; socket.emit("close", code); };
+      return { socket, frames: [], close: () => undefined, send: () => "id",
+        request: async () => ({ type: "AGENT_SESSION_CREATED" }),
+        op: async (op: string) => {
+          if (hangNext) { hangNext = false; close(1006); throw new Gate0Failure(op, "bridge_closed_1006"); }
+          return { ok: socket === sockets.at(-1) };
+        },
+        closeWith: close } as never;
+    };
+    const bridge = await liveBridge(api as never, 1_000, 10, openProbe)("00000000-0000-4000-8000-000000000001");
+    expect(await bridge.op("chats.upsert", {})).toEqual({ ok: true });
+    // The relay drops the socket (1006): the next request reconnects with a fresh ticket and goes out on the new socket.
+    sockets[0]!.readyState = 3; sockets[0]!.emit("ping"); sockets[0]!.emit("close", 1006);
+    expect(await bridge.op("chats.upsert", {})).toEqual({ ok: true });
+    expect(connects).toHaveLength(2);
+    // A close while a request is out: that request fails, named, and is not resent.
+    hangNext = true;
+    await expect(bridge.op("turns.list", {})).rejects.toMatchObject({ step: "turns.list", code: expect.stringMatching(/^bridge_closed_1006:open_\d+s:pings_0$/) });
+    expect(connects).toHaveLength(2);
+    // A refusal (4001 access_revoked) is never reopened.
+    expect(await bridge.op("chats.upsert", {})).toEqual({ ok: true });
+    sockets.at(-1)!.readyState = 3; sockets.at(-1)!.emit("close", 4001);
+    await expect(bridge.op("chats.upsert", {})).rejects.toMatchObject({ code: expect.stringMatching(/^bridge_closed_4001:open_\d+s:pings_0$/) });
+    expect(connects).toHaveLength(3);
+    expect(connects.every(path => path.endsWith("/connect?wakePolicy=explicit"))).toBe(true);
+  });
+
   it("declares on connect exactly the client features today's desktop declares, by the protocol's constants", async () => {
     const root = new URL("../../../../../", import.meta.url).pathname;
     const desktop = await readFile(join(root, "apps/desktop/src/renderer/platform/cloud-v2.ts"), "utf8");
