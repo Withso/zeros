@@ -75,6 +75,30 @@ describe("cloud v2 runtime install", () => {
     } finally { rmSync(root, { recursive: true, force: true }); }
   });
 
+  it("fails, and never reports the runtime changed, when the worker's link could not be switched", () => {
+    const root = mkdtempSync(join(tmpdir(), "zeros-runtime-link-")), bin = join(root, "bin");
+    try {
+      for (const dir of [bin, join(root, "opt/zeros"), join(root, "etc/systemd/system"), join(root, "etc/profile.d"), join(root, "payload")]) mkdirSync(dir, { recursive: true });
+      writeFileSync(join(root, "payload/worker.mjs"), "export {};\n");
+      execFileSync("tar", ["-czf", join(root, "runtime.tar.gz"), "-C", join(root, "payload"), "."]);
+      const digest = createHash("sha256").update(readFileSync(join(root, "runtime.tar.gz"))).digest("hex");
+      // Only the link fails: under `set -e`, bash goes on past a failure partway through a `&&` list.
+      writeFileSync(join(bin, "sudo"), `#!/bin/bash\n[ "$1" = -n ] && shift\n[ "$1" = ln ] && exit 1\nexec "$@"\n`, { mode: 0o755 });
+      writeFileSync(join(bin, "systemctl"), "#!/bin/bash\nexit 0\n", { mode: 0o755 });
+      writeFileSync(join(bin, "chown"), "#!/bin/bash\nexit 0\n", { mode: 0o755 });
+      writeFileSync(join(bin, "curl"), `#!/bin/bash\nwhile [ $# -gt 0 ]; do [ "$1" = -o ] && out=$2; shift; done\ncp ${join(root, "runtime.tar.gz")} "$out"\n`, { mode: 0o755 });
+      const script = execFileSync("bash", ["-c", `set -- ${installRuntimeCommand({ sha256: digest, url }).slice("bash -c ".length)}; printf %s "$1"`], { encoding: "utf8" })
+        .replaceAll("/opt/zeros", join(root, "opt/zeros")).replaceAll("/etc/systemd/system", join(root, "etc/systemd/system"))
+        .replaceAll("/etc/profile.d", join(root, "etc/profile.d")).replaceAll("/home/user/.cache", join(root, "cache"));
+      // The system shell's startup may put /bin first, where a real sudo is: the failing one must stay the one used.
+      const run = () => execFileSync("bash", ["-c", `export PATH='${bin}:${process.env.PATH}'\n${script}`], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+      let output = "";
+      expect(() => { output = run(); }).toThrow();
+      expect(output).not.toContain("runtime-changed");
+      expect(existsSync(join(root, "opt/zeros/worker"))).toBe(false);
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+
   it("keeps the previous runtime on disk with no privileged command until the pin is staged beside it, then switches without a download or restart", () => {
     const root = mkdtempSync(join(tmpdir(), "zeros-runtime-keep-")), bin = join(root, "bin"), log = join(root, "commands.log");
     try {

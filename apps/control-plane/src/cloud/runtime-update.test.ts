@@ -90,6 +90,35 @@ it("refuses a delayed activation when Stop withdrew its permit during the final 
   expect(readFileSync(f.log, "utf8")).toBe("");
 });
 
+/** A step that fails partway through a `&&` list: under `set -e` bash goes on unless the list is its own command. */
+const failing = (f: ReturnType<typeof fixture>, command: string, last: string) => {
+  writeFileSync(join(f.bin, "sudo"), `#!/bin/sh\n[ "$1" != "-n" ] || shift\nif [ "$1" = "${command}" ]; then eval "target=\\\${$#}"; case "$target" in *${last}) exit 1 ;; esac; fi\n[ "$1" != "chown" ] || exit 0\nexec "$@"\n`, { mode: 0o755 });
+  // The system shell's startup may put /bin first, where a real sudo is: the failing one must stay the one used.
+  return (script: string) => f.run(`export PATH='${join(f.root, "bin")}:${process.env.PATH}'; ${script}`);
+};
+
+it("refuses a staged runtime whose permissions could not be set, and never marks it complete", () => {
+  const f = fixture();
+  writeFileSync(join(f.bin, "sudo"), '#!/bin/sh\n[ "$1" != "-n" ] || shift\n[ "$1" != "chown" ] || [ "$2" != "-R" ] || exit 1\n[ "$1" != "chown" ] || exit 0\nexec "$@"\n', { mode: 0o755 });
+  const run = (script: string) => f.run(`export PATH='${join(f.root, "bin")}:${process.env.PATH}'; ${script}`);
+  expect(() => run(prepareRuntimeCommand({ sha256: f.sha256, url: "https://fixture.example.test/runtime.tar.gz" }))).toThrow();
+  expect(existsSync(join(f.runtimes, f.sha256, ".complete"))).toBe(false);
+  expect(readlinkSync(f.current)).toBe(join(f.runtimes, f.old));
+});
+
+it("does not record an activation, or restart the worker, when the active link could not be switched", () => {
+  const f = fixture(), id = randomUUID(); f.permit(id);
+  f.run(prepareRuntimeCommand({ sha256: f.sha256, url: "https://fixture.example.test/runtime.tar.gz" }));
+  // Only the switch of the active link: the line that links the previous runtime still works.
+  const run = failing(f, "ln", "/worker.next");
+  const bootId = randomUUID();
+  expect(() => run(activateRuntimeCommand({ sha256: f.sha256, previousSha256: f.old, id, bootId, instanceId: randomUUID(),
+    tokenSha256: f.tokenSha256, expectedBootIds: [f.bootId] }))).toThrow();
+  expect(readlinkSync(f.current)).toBe(join(f.runtimes, f.old));
+  expect(existsSync(join(f.root, `opt/zeros/runtime-activation-${id}-${bootId}`))).toBe(false);
+  expect(readFileSync(f.log, "utf8")).toBe("");
+});
+
 it("refuses a corrupt archive without changing the active runtime", () => {
   const f = fixture(); writeFileSync(f.archive, "corrupt fixture");
   expect(() => f.run(prepareRuntimeCommand({ sha256: f.sha256, url: "https://fixture.example.test/runtime.tar.gz" }))).toThrow();
