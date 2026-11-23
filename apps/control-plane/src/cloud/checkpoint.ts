@@ -570,6 +570,11 @@ function otherRepositoriesCapture(repositories: readonly CheckpointRepository[],
  * line `submodule <k> <position> <base64 path> <gitlink> <state>` maps it back by path; what it holds joins the
  * fingerprint, so a checkpoint is reused only when every submodule is unchanged. A failure inside a captured one
  * fails the capture (checkpoint_failed step=submodule-<k>). */
+/** From `<sha> <refname>` lines of refs/heads and refs/remotes/origin: each local branch exactly at its own origin ref
+ * (the same sha), but not the one HEAD is on (-v head). Those are the clone's copies of GitHub's branches. */
+const CLONE_COPIES = String.raw`{ if (index($2, "refs/heads/") == 1) local[substr($2, 12)] = $1; else if (index($2, "refs/remotes/origin/") == 1) origin[substr($2, 21)] = $1 }
+END { for (name in local) if ((name in origin) && local[name] == origin[name] && "refs/heads/" name != head) print "refs/heads/" name }`;
+
 function submodulesCapture(submodules: readonly CheckpointSubmodule[]): string[] {
   return submodules.flatMap((entry, index) => {
     const k = index + 1, folder = checkedPath(entry.checkoutPath), repository = checkedPath(entry.repositoryPath);
@@ -592,13 +597,23 @@ function submodulesCapture(submodules: readonly CheckpointSubmodule[]): string[]
       `    c="$outer_work/c/submodules/${k}"; mkdir -p "$c"; m="$c/manifest"; printf 'zeros-checkpoint 1\\n' > "$m"`,
       "    have_repo='' tree='' staged_tree='' base_commit='' digests=1; : > \"$work/parts\"",
       ...repositoryCapture(false, false).map(line => `    ${line}`),
-      // Its base: the gitlink its create recorded, when it has it, and whatever its remote-tracking branches hold.
+      // The clone's copies of GitHub's branches are not the person's work: a local branch exactly at its own origin
+      // ref (the same sha, read together), unless HEAD is on it. Nor are its tags, which the clone fetched. Neither is
+      // recorded or bundled; a restore's clone has GitHub's.
+      "    step=branches",
+      "    git -C \"$repo\" for-each-ref --format='%(objectname) %(refname)' refs/heads refs/remotes/origin > \"$work/refs\"",
+      `    awk -v head="$(git -C "$repo" symbolic-ref -q HEAD || true)" ${quote(CLONE_COPIES)} "$work/refs" > "$work/copies"`,
+      "    awk 'FILENAME == ARGV[1] { copy[$1] = 1; next } !($1 == \"tag\" || ($1 == \"branch\" && ($3 in copy)) || ($1 == \"upstream\" && ($2 in copy)))' \"$work/copies\" \"$m\" > \"$m.kept\"",
+      "    mv \"$m.kept\" \"$m\"",
+      // Its base: the gitlink its create recorded, when it has it, and nothing else. A remote-tracking branch may be gone
+      // from GitHub by the restore (squash-merged and deleted), but the gitlink is what its repository pins.
       "    base_commit=$(git -C \"$repo\" rev-parse -q --verify \"$gitlink^{commit}\" || true)",
       "    step=bundle",
       "    if [ -n \"$have_repo\" ]; then",
       "      cd \"$repo\"",
-      "      negative=(--not --remotes); if [ -n \"$base_commit\" ]; then negative+=(\"$base_commit\"); fi",
-      "      git bundle create \"$c/repo.bundle\" --branches --tags --glob=refs/zeros-checkpoint \"${negative[@]}\"",
+      "      own=(); while read -r _ _ ref; do own+=(\"$ref\"); done < <(grep '^branch ' \"$m\" || true)",
+      "      negative=(); if [ -n \"$base_commit\" ]; then negative=(--not \"$base_commit\"); fi",
+      "      git bundle create \"$c/repo.bundle\" ${own[@]+\"${own[@]}\"} --glob=refs/zeros-checkpoint ${negative[@]+\"${negative[@]}\"}",
       "      step=ignored",
       "      if [ -s \"$work/ignored\" ]; then tar --null --verbatim-files-from --no-recursion -T \"$work/ignored\" -cf \"$c/ignored.tar\"; fi",
       "    fi",
@@ -806,13 +821,17 @@ function submodulesProbe(submodules: readonly CheckpointSubmodule[]): string[] {
     "  if [ -L \"$1\" ] || [ ! -d \"$1\" ] || [ -z \"$(ls -A \"$1\")\" ]; then return 0; fi",
     "  cd -- \"$1\" && [ \"$(pwd -P)\" = \"$1\" ] && [ \"$(cd \"$(g rev-parse --show-toplevel)\" && pwd -P)\" = \"$1\" ] || return 1",
     "  [ -d \"$2\" ] && [ ! -L \"$2\" ] && [ \"$(cd \"$(g rev-parse --absolute-git-dir)\" && pwd -P)\" = \"$(cd \"$2\" && pwd -P)\" ] || return 1",
-    "  local changes head ahead gitlink path size total=0",
+    "  local changes head ahead gitlink path size total=0 own ref",
     "  changes=$(g status --porcelain=v1 -z --untracked-files=normal --ignore-submodules=none) || return 1",
     "  if [ -n \"$changes\" ]; then state=dirty; return 0; fi",
     "  if g rev-parse -q --verify refs/stash >/dev/null; then state=dirty; return 0; fi",
     "  head=$(g rev-parse -q --verify 'HEAD^{commit}' || true)",
     "  gitlink=$(g rev-parse -q --verify \"$3^{commit}\" || true)",
-    "  ahead=$(g rev-list -n 1 --branches ${head:+\"$head\"} --not --remotes ${gitlink:+\"$gitlink\"}) || return 1",
+    // Ahead of the gitlink alone: HEAD, and every local branch but the clone's copies of GitHub's (as the capture).
+    "  g for-each-ref --format='%(objectname) %(refname)' refs/heads refs/remotes/origin > \"$work/refs\" || return 1",
+    `  awk -v head="$(g symbolic-ref -q HEAD || true)" ${quote(CLONE_COPIES)} "$work/refs" > "$work/copies" || return 1`,
+    "  own=(); while read -r _ ref; do grep -qxF \"$ref\" \"$work/copies\" || own+=(\"$ref\"); done < <(grep ' refs/heads/' \"$work/refs\" || true)",
+    "  ahead=$(g rev-list -n 1 ${head:+\"$head\"} ${own[@]+\"${own[@]}\"} --not ${gitlink:+\"$gitlink\"}) || return 1",
     "  if [ -n \"$ahead\" ]; then state=dirty; return 0; fi",
     "  : > \"$work/list\"",
     ...ignoredFiles(`printf '%s\\0' "$path" >> "$work/list"`),

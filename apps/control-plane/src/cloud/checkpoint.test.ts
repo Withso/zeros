@@ -1992,6 +1992,86 @@ process.exit(result.status ?? 1);
       expect(p.git(fresh, "status", "--porcelain")).toBe("");
     });
 
+    describe("what counts as the person's: the gitlink alone, less the clone's copies of GitHub's branches", () => {
+      /** GitHub's lib moves on after the create; the old machine's lib fetched it, its local main at GitHub's tip. */
+      const moved = () => {
+        const p = project(), lib = join(p.folder(p.oldHome), "lib");
+        p.write(join(p.lib.seed, "upstream.txt"), "upstream\n"); p.git(p.lib.seed, "add", "upstream.txt"); p.git(p.lib.seed, "commit", "-q", "-m", "upstream");
+        p.git(p.lib.seed, "push", "-q", "origin", "main");
+        p.git(lib, "fetch", "-q", "origin"); p.git(lib, "branch", "-f", "main", "origin/main");
+        return { p, lib, upstream: p.git(p.lib.seed, "rev-parse", "HEAD") };
+      };
+      const probed = (p: ReturnType<typeof project>) => {
+        const result = spawnSync("bash", ["-c", `eval "$1"`, "probe", backupProbeCommand([p.folder(p.oldHome)], p.oldHome, p.submodules(p.oldHome))], { env: p.env, encoding: "utf8" });
+        return parseBackupProbe(result.stdout);
+      };
+
+      it("is clean, and bundles none of GitHub's commits, with a local default branch ahead of the gitlink", () => {
+        const { p, upstream } = moved(), key = randomBytes(32), out = join(p.root, "checkpoint.zck");
+        expect(probed(p)).toBe("clean");
+        expect(save(p, key, out).parsed).toMatchObject({ ok: true });
+        const shown = parts(p, key, out);
+        const heads = shown.stdout.split("\n").find(line => line.startsWith("heads-1:"))!;
+        expect(heads).not.toContain("refs/heads/main");
+        // The bundle's own objects: GitHub's newer commit is not among them.
+        const scratch = join(p.root, "scratch.git"); p.git(p.root, "init", "-q", "--bare", scratch);
+        const bundle = join(p.root, "lib.bundle"), pack = join(p.root, "lib.pack");
+        run([...checkpointRestoreSteps({ checkoutPath: p.folder(p.newHome), home: p.newHome, key, sha256: sha(out), repositoryUrl: undefined },
+          [`cp '${out}' "$work/checkpoint.zck"`]), `cp "$work/c/submodules/1/repo.bundle" '${bundle}'`, "report zeros-checkpoint-restored"], p.env);
+        const bytes = readFileSync(bundle);
+        writeFileSync(pack, bytes.subarray(bytes.indexOf("\n\n") + 2));
+        p.git(scratch, "index-pack", "-o", join(p.root, "lib.idx"), pack);
+        const objects = execFileSync("git", ["show-index"], { input: readFileSync(join(p.root, "lib.idx")), encoding: "utf8" });
+        expect(objects).not.toContain(upstream);
+        expect(objects.trim().split("\n").length).toBeLessThan(12);
+      });
+
+      it("keeps a commit on that branch even after GitHub's branch moved back", () => {
+        const { p, lib } = moved(), key = randomBytes(32), out = join(p.root, "checkpoint.zck");
+        p.git(lib, "switch", "-q", "main"); p.write(join(lib, "mine.txt"), "mine\n"); p.git(lib, "add", "mine.txt"); p.git(lib, "commit", "-q", "-m", "mine");
+        const mine = p.git(lib, "rev-parse", "HEAD");
+        expect(probed(p)).toBe("dirty");
+        expect(save(p, key, out).parsed).toMatchObject({ ok: true });
+        // GitHub's main is force-pushed back to the gitlink: the commit it held is gone from GitHub.
+        p.git(p.lib.seed, "push", "-q", "-f", "origin", `${p.lib.commit}:refs/heads/main`);
+        mkdirSync(join(p.newHome, "app"), { recursive: true }); p.git(p.root, "clone", "-q", p.app.origin, p.folder(p.newHome));
+        const net = github(p, TOKEN);
+        expect(load(p, key, out, net.env, planned(p, p.newHome).slice(0, 1))).toMatchObject({ parsed: { ok: true }, unrestored: [] });
+        expect(p.git(join(p.folder(p.newHome), "lib"), "rev-parse", "main")).toBe(mine);
+        expect(readFileSync(join(p.folder(p.newHome), "lib", "mine.txt"), "utf8")).toBe("mine\n");
+      });
+
+      it("restores commits on a feature branch whose upstream was squash-merged and deleted", () => {
+        const p = project(), lib = join(p.folder(p.oldHome), "lib"), key = randomBytes(32), out = join(p.root, "checkpoint.zck");
+        p.git(lib, "switch", "-q", "-c", "feature");
+        p.write(join(lib, "a.txt"), "pushed\n"); p.git(lib, "add", "a.txt"); p.git(lib, "commit", "-q", "-m", "pushed"); p.git(lib, "push", "-q", "origin", "feature");
+        p.write(join(lib, "b.txt"), "unpushed\n"); p.git(lib, "add", "b.txt"); p.git(lib, "commit", "-q", "-m", "unpushed");
+        const tip = p.git(lib, "rev-parse", "HEAD");
+        p.git(lib, "-c", "advice.detachedHead=false", "checkout", "-q", "--detach", p.lib.commit);
+        expect(probed(p)).toBe("dirty");
+        expect(save(p, key, out).parsed).toMatchObject({ ok: true });
+        // Squash-merged on GitHub and the branch deleted: its pushed commit is gone from GitHub too.
+        p.git(p.lib.seed, "push", "-q", "origin", ":refs/heads/feature");
+        mkdirSync(join(p.newHome, "app"), { recursive: true }); p.git(p.root, "clone", "-q", p.app.origin, p.folder(p.newHome));
+        const net = github(p, TOKEN);
+        expect(load(p, key, out, net.env, planned(p, p.newHome).slice(0, 1))).toMatchObject({ parsed: { ok: true }, unrestored: [] });
+        const restored = join(p.folder(p.newHome), "lib");
+        expect(p.git(restored, "rev-parse", "feature")).toBe(tip);
+        expect(p.git(restored, "log", "--format=%s", "-2", "feature")).toBe("unpushed\npushed");
+      });
+
+      it("counts a stash or a branch GitHub never had as the person's, as before", () => {
+        const { p, lib } = moved();
+        p.write(join(lib, "lib.txt"), "stashed\n"); p.git(lib, "stash", "-q");
+        expect(probed(p)).toBe("dirty");
+        const other = moved();
+        other.p.git(other.lib, "switch", "-q", "-c", "local-only", other.p.lib.commit);
+        other.p.git(other.lib, "commit", "-q", "--allow-empty", "-m", "x");
+        other.p.git(other.lib, "-c", "advice.detachedHead=false", "checkout", "-q", "--detach", other.p.lib.commit);
+        expect(probed(other.p)).toBe("dirty");
+      });
+    });
+
     it("refuses pushes with exactly the worker's sentence", () => {
       const worker = readFileSync(join(__dirname, "../../../cloud-worker/src/workspace/submodules.ts"), "utf8");
       expect(worker).toContain(`export const SUBMODULE_PUSH_REFUSED = ${JSON.stringify(SUBMODULE_PUSH_REFUSED)};`);
