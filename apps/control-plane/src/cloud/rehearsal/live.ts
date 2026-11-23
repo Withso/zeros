@@ -13,7 +13,7 @@ import { readRuntimeCapabilities } from "../runtime-capabilities.js";
 import { BoatCloudV2Compute } from "../boat.js";
 import { ALPHA_PROBE_ORIGIN, alphaProbeIdentity } from "../gate0-alpha.js";
 import { BridgeProbe, Gate0Failure } from "../gate0.js";
-import { RehearsalFailure, type Api, type Boat, type Bridge, type Clock, type Database, type Github, type Ports, type ProGrant, type ProPort, type Query,
+import { RehearsalFailure, type AgentCredentialPort, type Api, type Boat, type Bridge, type Clock, type Database, type Github, type Ports, type ProGrant, type ProPort, type Query,
   type Storage } from "./contract.js";
 import { manageAccountPro } from "../../manage-account-pro.js";
 import { assertRepository, prefixed } from "./guard.js";
@@ -543,6 +543,26 @@ export function livePro(database: LiveDatabase, input: { subjectUserId: string; 
       return operationId;
     },
   };
+}
+
+/** The rehearsal's agent credential, from .env.agent by name, in this order (the first set is used):
+ * ZEROS_REHEARSAL_CLAUDE_SETUP_TOKEN (a `claude setup-token`), ZEROS_REHEARSAL_CLAUDE_API_KEY, ZEROS_REHEARSAL_OPENAI_API_KEY
+ * (Codex by API key) and ZEROS_REHEARSAL_CURSOR_API_KEY: the forms Settings accepts by paste. A ChatGPT sign-in for Codex
+ * is a native cache import, not a pasted value, so it is not taken. A malformed value fails by its variable's name only. */
+export const AGENT_CREDENTIAL_SOURCES = [
+  { name: "ZEROS_REHEARSAL_CLAUDE_SETUP_TOKEN", provider: "claude", kind: "claude-setup-token", field: "accessToken" },
+  { name: "ZEROS_REHEARSAL_CLAUDE_API_KEY", provider: "claude", kind: "claude-api-key", field: "apiKey" },
+  { name: "ZEROS_REHEARSAL_OPENAI_API_KEY", provider: "codex", kind: "codex-api-key", field: "apiKey" },
+  { name: "ZEROS_REHEARSAL_CURSOR_API_KEY", provider: "cursor", kind: "cursor-api-key", field: "apiKey" },
+] as const;
+export function agentCredentialFromEnv(env: NodeJS.ProcessEnv): AgentCredentialPort | null {
+  for (const source of AGENT_CREDENTIAL_SOURCES) {
+    const value = env[source.name]?.trim();
+    if (!value) continue;
+    if (!/^[\x21-\x7e]{16,4096}$/.test(value)) throw new RehearsalFailure("agent_credential", `invalid:${source.name}`);
+    return { provider: source.provider, kind: source.kind, source: source.name, material: () => ({ kind: source.kind, [source.field]: value }) };
+  }
+  return null;
 }
 
 /** The account's own GitHub sign-in by token. The token is used only in this request's body. */

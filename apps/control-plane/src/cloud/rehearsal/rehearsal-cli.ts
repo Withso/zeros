@@ -13,7 +13,7 @@ import { gate0SignIn } from "../gate0-cli.js";
 import { RehearsalFailure, STAGE_NEEDS_ACCOUNT, STAGES, type Api, type Database, type OwnerKind, type Ports, type StageName, type Switch } from "./contract.js";
 import { diagnose, signInAccount, signInAll, type Account, type SignedIn, type SignInDeps } from "./accounts.js";
 import { assertRepository, safeLine } from "./guard.js";
-import { checkGithubToken, tokenLines, liveApi, liveBoat, liveBridge, liveClock, liveDatabase, liveGithub, liveGithubSignIn, liveGithubToken, livePro, liveRelease, liveStorage,
+import { AGENT_CREDENTIAL_SOURCES, agentCredentialFromEnv, checkGithubToken, tokenLines, liveApi, liveBoat, liveBridge, liveClock, liveDatabase, liveGithub, liveGithubSignIn, liveGithubToken, livePro, liveRelease, liveStorage,
   tokenRefusal, liveReleaseIdentity, liveRuntimeQualification } from "./live.js";
 import { errorCode } from "./steps.js";
 import { accountLines, turnLine, PERSONAL_ROUTE_GAPS, preconditionLines, type PreconditionFacts, platformOwners, probeDiagnostics, proActor, readAccount, refusal, resolveProbe, writeLines,
@@ -114,6 +114,8 @@ async function main(argv: string[]): Promise<number> {
   const one = args.repository ?? (env.ZEROS_REHEARSAL_REPOSITORY ? assertRepository(env.ZEROS_REHEARSAL_REPOSITORY) : undefined);
   const two = args.repositoryTwo ?? (env.ZEROS_REHEARSAL_REPOSITORY_2 ? assertRepository(env.ZEROS_REHEARSAL_REPOSITORY_2) : FIXTURE_TWO);
   const githubToken = env.ZEROS_REHEARSAL_GITHUB_TOKEN?.trim();
+  // The rehearsal's agent credential for the turns (none: the turns are skipped and counted).
+  const agentCredential = agentCredentialFromEnv(env);
   // The fixtures' reads and clean-up (exists, branches, pull requests, branch deletion): the token when set, so the
   // Personal route does not depend on the App's selected repositories; the App otherwise.
   const fixtureGithub = () => githubToken ? liveGithubToken(githubToken, "Withso")
@@ -208,7 +210,9 @@ async function main(argv: string[]): Promise<number> {
         const selected = summaries.get(String(args.account)) ?? { failed: "account:not_configured" };
         const otherLabel = String(args.other ?? accounts.find(row => row.label !== "owner" && row.label !== String(args.account))?.label ?? "none");
         log(`selected account ${args.account}; second account ${otherLabel}; waiting account ${args.waitingAccount} (${waitingAccount}); repositories R1 ${one}, R2 ${two}`);
-        if (args.stages.includes("projects")) log(turnLine(selected, args.owner, String(args.account)));
+        log(agentCredential ? `agent credential: ${agentCredential.source} (${agentCredential.kind}); setup connects it for account ${args.account} in its Personal organization, cleanup removes it`
+          : `agent credential: none (set one of ${AGENT_CREDENTIAL_SOURCES.map(source => source.name).join(", ")} in .env.agent)`);
+        if (args.stages.includes("projects")) log(turnLine(selected, args.owner, String(args.account), args.owner === "personal" ? agentCredential?.provider : undefined));
         facts.sharedBaseInUse = await reads.read(`SELECT count(*)::int AS n FROM cloud_v2_computers c
           JOIN cloud_v2_computer_builds b ON b.id = c.active_build_id AND b.org_id = c.org_id WHERE b.base_shared`).then(rows => Number(rows[0]?.n ?? 0), () => null);
         facts.sharedBase = await sharedBaseFacts(reads, facts.release?.workerSha256 ?? null,
@@ -297,6 +301,7 @@ async function main(argv: string[]): Promise<number> {
         ...(other ? { other: other.api } : {}),
         ...(held && owner === "personal" && actor.id ? { pro: livePro(db, { subjectUserId: held.userId, expectedEmail: held.email, actorUserId: actor.id }) } : {}),
         ...(held && token ? { githubSignIn: liveGithubSignIn(held.api, token) } : {}),
+        ...(held && agentCredential ? { agentCredential } : {}),
         ...(waiting ? { waiting: { organizationId: personalOf(waiting)!.id, ports: { api: waiting.api, bridge: liveBridge(waiting.api),
           ...(actor.id ? { pro: livePro(db, { subjectUserId: waiting.userId, expectedEmail: waiting.email, actorUserId: actor.id }) } : {}),
           ...(token ? { githubSignIn: liveGithubSignIn(waiting.api, token) } : {}) } } } : {}),

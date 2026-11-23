@@ -4,7 +4,7 @@
 // approved (plan.ts lists it).
 import { z } from "zod";
 import { RehearsalFailure, type ProGrant, type StageContext } from "./contract.js";
-import { call, check, githubSignIn, parse, readBase, until } from "./steps.js";
+import { call, check, connectAgentLogin, githubSignIn, parse, readBase, until } from "./steps.js";
 
 const DAY_MS = 86_400_000;
 
@@ -12,6 +12,15 @@ export async function stageSetup(ctx: StageContext): Promise<Record<string, numb
   if (ctx.state.owner !== "personal") throw new RehearsalFailure("setup", "organization_route_awaiting_approval");
   const counts: Record<string, number> = { proChanges: 0, githubSignIn: 0 };
   await prepareOwner(ctx, counts);
+
+  // The rehearsal's agent credential, when .env.agent has one: connected for this account here, as Settings does, so the
+  // turns run on it. A connection already there that this run did not make is left alone (and used).
+  if (ctx.ports.agentCredential) {
+    ctx.step("agent_login");
+    const outcome = await connectAgentLogin(ctx);
+    ctx.note(`agent_login:${outcome}:${ctx.ports.agentCredential.provider}`);
+    counts.agentLogin = outcome === "connected" ? 1 : 0;
+  }
 
   // The organization's base (#1260): nobody presses Build. Zeros prepares it at the first project (or a create), so
   // setup only reads what there is; the first create waits for it (steps.ts baseReady), and stage waiting rehearses a

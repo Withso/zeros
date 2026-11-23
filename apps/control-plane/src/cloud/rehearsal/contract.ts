@@ -110,6 +110,9 @@ export type Ports = {
   pro?: ProPort;
   /** The selected account's own GitHub sign-in by token, for the owner organization. The token stays inside the port. */
   githubSignIn?: { connect(organizationId: string, expectedGeneration: string): Promise<void> };
+  /** An agent credential for the rehearsal's turns (.env.agent), which setup connects for the selected account in the run's
+   * Personal organization as Settings does. Its value stays inside `material`, used only in that request's body. */
+  agentCredential?: AgentCredentialPort;
   /** Stage waiting's account (test user 3 by default) and its own fresh Personal organization: the ports that differ
    * for it (its API, Pro and GitHub sign-in; a test may give it a whole fake). */
   waiting?: { organizationId: string; ports: Partial<Omit<Ports, "waiting">> };
@@ -119,6 +122,16 @@ export type Ports = {
   github: Github;
   database: Database;
   clock: Clock;
+};
+
+export type AgentCredentialPort = {
+  provider: "claude" | "codex" | "cursor";
+  /** The credential's kind, a closed value (claude-setup-token, claude-api-key, codex-api-key, cursor-api-key). */
+  kind: "claude-setup-token" | "claude-api-key" | "codex-api-key" | "cursor-api-key";
+  /** Where it came from, by name only (ZEROS_REHEARSAL_CLAUDE_SETUP_TOKEN). */
+  source: string;
+  /** The material as the credential route takes it; never logged, stored or returned anywhere else. */
+  material(): Record<string, string>;
 };
 
 /** Everything a run created, by kind, so cleanup and the inventory never depend on names a provider chose. */
@@ -141,6 +154,9 @@ export type Created = {
   bases?: string[];
   /** Stage waiting set its organization's install script (it had none): cleanup removes it. */
   installScript?: boolean;
+  /** Agent credentials this run made and connected (recorded before the write); cleanup removes each from the
+   * organization, revokes it, and reads both back. */
+  agentLogins?: { organizationId: string; provider: "claude" | "codex" | "cursor"; credentialId: string }[];
 };
 export type StageResult = { ok: boolean; step?: string; code?: string; skipped?: string; counts?: Record<string, number>;
   /** Closed codes for what a stage chose (environment_case:seeded, environment_skipped:environment_exists). */

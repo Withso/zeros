@@ -9,7 +9,7 @@ import { stageRetention } from "./stage-retention.js";
 import { stageSubmodules } from "./stage-submodules.js";
 import { stageWaiting, waitingContext } from "./stage-waiting.js";
 import { changePro, sameGrant, stageSetup } from "./stage-setup.js";
-import { WAITING_INSTALL_SCRIPT, check, clearEnvironment, disconnectGithubSignIn, githubSignIn, deleteProject, deleteWorkspace, getWorkspace, listProjects, listWorkspaces, readEnvironment,
+import { WAITING_INSTALL_SCRIPT, agentCredentialLive, check, clearEnvironment, removeAgentLogin, disconnectGithubSignIn, githubSignIn, deleteProject, deleteWorkspace, getWorkspace, listProjects, listWorkspaces, readEnvironment,
   readInstallScript, writeInstallScript } from "./steps.js";
 
 export type Stage = (ctx: StageContext) => Promise<Record<string, number>>;
@@ -94,14 +94,15 @@ async function preconditions(ctx: StageContext, options: RunOptions, account: bo
 // ── Cleanup and inventory ───────────────────────────────
 
 export type Inventory = Record<"workspaces" | "projects" | "branches" | "pulls" | "machines" | "objects" | "environments" | "githubSignIns" | "pro" | "computerBase" |
-  "installScripts" | "databaseRows", number>;
+  "installScripts" | "agentLogins" | "databaseRows", number>;
 
 /** Removes everything this run created or named with its prefix, best effort per item, then reads the inventory. */
 /** Whether cleanup needs a signed-in account: anything recorded that only the API removes, or a create attempted (a
  * machine start is counted before its request, so a lost response is found by listing the prefix). A provision-only
  * run does not. */
 export const cleanupNeedsAccount = (state: RehearsalState) => [state.created, state.waiting?.created].some(created => created &&
-  created.workspaces.length + created.projects.length + created.environments.length + created.githubSignIns.length + (created.pro?.operations.length ?? 0) > 0)
+  created.workspaces.length + created.projects.length + created.environments.length + created.githubSignIns.length + (created.pro?.operations.length ?? 0)
+    + (created.agentLogins?.length ?? 0) > 0)
   || state.machineStarts > 0;
 
 export async function cleanup(ctx: StageContext, options: { accountless?: boolean; keepBase?: boolean; log(line: string): void }): Promise<{ inventory: Inventory; failures: number }> {
@@ -176,6 +177,9 @@ async function cleanupOrganization(ctx: StageContext, options: { accountless?: b
     check((await readEnvironment(ctx, target.repository, target.repositoryId, "cleanup_environment_read")).empty, "cleanup_environment_read", "not_empty");
     state.created.environments = state.created.environments.filter(row => row.repositoryId !== target.repositoryId); await ctx.save();
   });
+  // Agent credentials this run connected: out of the organization, revoked, both read back, while the cloud is on.
+  if (!options.accountless) for (const login of [...state.created.agentLogins ?? []])
+    await attempt("agent_login", () => removeAgentLogin(ctx, login, "cleanup_agent_login"));
   // Then the run's sign-in goes: after everything that needs it.
   for (const organizationId of state.created.githubSignIns) await attempt("github_sign_in", () => disconnectGithubSignIn(ctx, organizationId, "cleanup_github_sign_in"));
   // The install script stage waiting set, only while it is still the one it set.
@@ -268,7 +272,11 @@ export async function readInventory(ctx: StageContext, accountless = false, keep
     if (row.active === true || (row.base_shared !== true && row.snapshot_id && await ports.boat.snapshotExists(String(row.snapshot_id)))) computerBase++;
   // Stage waiting's install script counts until cleanup has put the organization back to none.
   const installScripts = state.created.installScript ? 1 : 0;
-  return { workspaces, projects, branches, pulls, machines, objects, environments, githubSignIns, pro, computerBase, installScripts, databaseRows };
+  // Only what cleanup could not verify removed is still recorded; one that cannot be read counts as remaining.
+  let agentLogins = 0;
+  for (const login of state.created.agentLogins ?? [])
+    if (accountless || await agentCredentialLive(ports.api, login.credentialId, "inventory_agent_login").catch(() => true)) agentLogins++;
+  return { workspaces, projects, branches, pulls, machines, objects, environments, githubSignIns, pro, computerBase, installScripts, agentLogins, databaseRows };
 }
 
 export function inventoryLines(inventory: Inventory): { lines: string[]; clean: boolean } {

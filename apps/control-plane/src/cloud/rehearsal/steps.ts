@@ -344,6 +344,59 @@ export async function connectedAgents(api: Api, organizationId: string, step: st
   return TURN_AGENTS.filter(agent => rows.some(row => row.provider === agent && row.connected));
 }
 
+const AgentConnections = z.object({ connections: z.array(z.object({ provider: z.string(), revision: z.number().int().nonnegative(),
+  credentialId: z.string().nullable(), connected: z.boolean() }).passthrough()) }).passthrough();
+/** The account's agent connections in an organization, as Settings reads them. */
+export async function agentConnectionRows(api: Api, organizationId: string, step: string) {
+  return parse(AgentConnections, (await call(api, "GET", `/v1/organizations/${organizationId}/agent-connections`, step)).body, step).connections;
+}
+
+/** Connects the rehearsal's agent credential (ports.agentCredential) for the account in the run's organization, as Settings
+ * does (apps/desktop/src/renderer/features/settings/cloud-provider-connection.ts): the credential, then the organization's
+ * selection of it for its provider with the model the turns use. Recorded before the first write. A provider already
+ * selected by a credential this run did not make is left alone (the turns use it); one this run made is kept. */
+export async function connectAgentLogin(ctx: StageContext): Promise<"connected" | "kept" | "existing" | "absent"> {
+  const credential = ctx.ports.agentCredential;
+  if (!credential) return "absent";
+  const organizationId = ctx.state.organizationId, logins = ctx.state.created.agentLogins ??= [];
+  const row = (await agentConnectionRows(ctx.ports.api, organizationId, "agent_login_read")).find(entry => entry.provider === credential.provider);
+  const ours = logins.find(entry => entry.organizationId === organizationId && entry.provider === credential.provider);
+  if (row?.credentialId && row.credentialId === ours?.credentialId && row.connected) return "kept";
+  if (row?.credentialId && row.credentialId !== ours?.credentialId) return "existing";
+  const credentialId = randomUUID(), operationId = randomUUID();
+  logins.push({ organizationId, provider: credential.provider, credentialId }); await ctx.save();
+  const saved = parse(z.object({ credential: z.object({ revision: z.number().int().positive() }).passthrough() }),
+    (await call(ctx.ports.api, "PUT", `/v1/cloud-agent-credentials/${credentialId}`, "agent_login_credential",
+      { operationId, expectedRevision: 0, displayName: `Zeros rehearsal ${ctx.state.prefix.slice(0, -1)}`, material: credential.material(), organizationId },
+      { headers: { "Idempotency-Key": operationId } })).body, "agent_login_credential").credential;
+  await call(ctx.ports.api, "PUT", `/v1/organizations/${organizationId}/agent-connections/${credential.provider}`, "agent_login_select",
+    { expectedRevision: row?.revision ?? 0, credentialId, credentialRevision: saved.revision, models: [GATE0_DEFAULT_MODELS[credential.provider]] },
+    { headers: { "Idempotency-Key": randomUUID() } });
+  const after = (await agentConnectionRows(ctx.ports.api, organizationId, "agent_login_after")).find(entry => entry.provider === credential.provider);
+  check(after?.credentialId === credentialId, "agent_login_after", "not_selected");
+  check(after.connected, "agent_login_after", "not_ready");
+  return "connected";
+}
+
+/** Removes one agent credential this run made: out of the organization (Settings' remove), then revoked, then both read
+ * back. Leaves the record only once the organization no longer selects it and the credential reads revoked or absent. */
+export async function removeAgentLogin(ctx: StageContext, login: { organizationId: string; provider: string; credentialId: string }, step: string): Promise<void> {
+  await call(ctx.ports.api, "DELETE", `/v1/organizations/${login.organizationId}/agent-connections/accounts/${login.credentialId}`, step, {},
+    { ok: [200, 404], headers: { "Idempotency-Key": randomUUID() } });
+  await call(ctx.ports.api, "DELETE", `/v1/cloud-agent-credentials/${login.credentialId}`, step, undefined, { ok: [200, 404] });
+  check(!(await agentConnectionRows(ctx.ports.api, login.organizationId, `${step}_read`)).some(row => row.credentialId === login.credentialId),
+    `${step}_read`, "still_selected");
+  check(!await agentCredentialLive(ctx.ports.api, login.credentialId, `${step}_read`), `${step}_read`, "not_revoked");
+  ctx.state.created.agentLogins = (ctx.state.created.agentLogins ?? []).filter(entry => entry.credentialId !== login.credentialId);
+  await ctx.save();
+}
+/** Whether the account still holds this credential unrevoked (Settings' list; metadata only). */
+export async function agentCredentialLive(api: Api, credentialId: string, step: string): Promise<boolean> {
+  const list = parse(z.object({ credentials: z.array(z.object({ id: z.string(), revoked: z.boolean() }).passthrough()) }).passthrough(),
+    (await call(api, "GET", "/v1/cloud-agent-credentials", step)).body, step).credentials;
+  return list.some(entry => entry.id.toLowerCase() === credentialId.toLowerCase() && !entry.revoked);
+}
+
 /** The agent this stage's turns use, noted (`turn_agent:<agent>`), or null with `turn_skipped:no_agent_credential`: the
  * caller then skips each turn and counts it in `turnsSkipped`, never as a pass. */
 export async function turnAgent(ctx: StageContext): Promise<TurnAgent | null> {

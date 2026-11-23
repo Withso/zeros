@@ -48,8 +48,13 @@ export class FakeAlpha {
   sharedBase = false;
   /** What Boat reports as a machine's last snapshot attempt (the rehearsal prints it). */
   snapshotStatus = "completed";
-  /** The account's connected agents (GET /v1/organizations/<id>/agent-connections). */
+  /** Providers connected by a credential this run did not make (a person's own), as GET agent-connections reads them. */
   agentConnections: string[] = ["claude"];
+  /** The account's agent credentials and the organization's selections, as the credential routes keep them. */
+  readonly agentCredentials = new Map<string, { kind: string; revoked: boolean; revision: number; organizationId: string | null }>();
+  readonly agentSelections = new Map<string, { credentialId: string | null; revision: number }>();
+  /** A credential value the fake received, kept only to prove it never reaches a printed line. */
+  readonly agentMaterialValues: string[] = [];
   /** What AGENT_NEW_SESSION answers instead of a session (e.g. an error frame for an agent with no credential). */
   sessionReply: ({ type: string } & Record<string, unknown>) | null = null;
   /** A create that fell back to a direct clone: no fork record. */
@@ -222,7 +227,46 @@ export class FakeAlpha {
         methods: { "github-app": { configured: false }, pat: { configured: pat } }, appAvailable: true, installUrl: null });
     }
     if (parts[1] === "organizations" && parts[3] === "agent-connections" && method === "GET")
-      return this.reply(200, { credentials: [], connections: ["claude", "codex", "cursor"].map(provider => ({ provider, connected: this.agentConnections.includes(provider) })) });
+      return this.reply(200, { credentials: [], connections: ["claude", "codex", "cursor"].map((provider, index) => {
+        const selected = this.agentSelections.get(provider), foreign = this.agentConnections.includes(provider) && !selected;
+        const credentialId = selected ? selected.credentialId : foreign ? `00000000-0000-4000-8000-00000000000${index + 1}` : null;
+        const connected = foreign || (!!credentialId && this.agentCredentials.get(credentialId)?.revoked === false);
+        return { provider, revision: selected?.revision ?? (foreign ? 1 : 0), credentialId, connected };
+      }) });
+    // Settings' agent routes (agent-credential-routes.ts): a credential, its organization selection, its removal and revoke.
+    if (parts[1] === "organizations" && parts[3] === "agent-connections" && parts[4] === "accounts" && method === "DELETE") {
+      for (const [provider, selected] of this.agentSelections)
+        if (selected.credentialId === parts[5]) this.agentSelections.set(provider, { credentialId: null, revision: selected.revision + 1 });
+      return this.reply(200, { removed: true });
+    }
+    if (parts[1] === "organizations" && parts[3] === "agent-connections" && parts[4] && method === "PUT") {
+      const provider = parts[4], current = this.agentSelections.get(provider)?.revision ?? (this.agentConnections.includes(provider) ? 1 : 0);
+      if (body.expectedRevision !== current) return this.reply(409, { error: { code: "agent_connection_conflict" } });
+      const credential = this.agentCredentials.get(String(body.credentialId));
+      if (!credential || credential.revoked || !credential.kind.startsWith(`${provider}-`)) return this.reply(404, { error: { code: "agent_credential_unavailable" } });
+      if (body.credentialRevision !== credential.revision || !Array.isArray(body.models) || !body.models.length) return this.reply(409, { error: { code: "agent_credential_conflict" } });
+      this.agentSelections.set(provider, { credentialId: String(body.credentialId), revision: current + 1 });
+      return this.reply(200, { revision: current + 1, replayed: false });
+    }
+    if (parts[1] === "cloud-agent-credentials") {
+      if (!parts[2] && method === "GET") return this.reply(200, { credentials: [...this.agentCredentials].filter(([, row]) => !row.revoked)
+        .map(([id, row]) => ({ id, kind: row.kind, displayName: "x", revision: row.revision, revoked: false, connectionMethod: "api" })) });
+      const id = parts[2]!;
+      if (method === "PUT") {
+        if (this.proGrant !== null && !this.pro()) return this.reply(403, { error: { code: "pro_required" } });
+        const material = body.material as Record<string, unknown> | undefined;
+        const value = material?.accessToken ?? material?.apiKey;
+        if (typeof material?.kind !== "string" || typeof value !== "string" || body.expectedRevision !== 0) return this.reply(422, { error: { code: "invalid_agent_credential_request" } });
+        this.agentMaterialValues.push(value);
+        this.agentCredentials.set(id, { kind: material.kind, revoked: false, revision: 1, organizationId: typeof body.organizationId === "string" ? body.organizationId : null });
+        return this.reply(200, { credential: { id, kind: material.kind, displayName: String(body.displayName), revision: 1, revoked: false, connectionMethod: "api" } });
+      }
+      if (method === "DELETE") {
+        const row = this.agentCredentials.get(id);
+        if (!row) return this.reply(404, { error: { code: "agent_credential_unavailable" } });
+        row.revoked = true; return this.reply(200, { revoked: true });
+      }
+    }
     if (url.pathname === "/v1/me") return this.reply(200, { user: { id: this.userId }, capabilities: { pro: this.pro() },
       organizations: [{ id: this.organizationId, slug: "user-2", name: "Zeros User-2", role: "owner", isPersonal: true, seat: this.pro() ? "pro" : "free" }] });
     if (parts[2] === "organizations" && parts[4] === "cloud-projects") {

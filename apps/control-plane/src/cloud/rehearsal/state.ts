@@ -20,6 +20,7 @@ const Created = z.object({
   computerRebuilds: z.array(Uuid).max(8).optional(),
   bases: z.array(Uuid).max(8).optional(),
   installScript: z.boolean().optional(),
+  agentLogins: z.array(z.object({ organizationId: Uuid, provider: z.enum(["claude", "codex", "cursor"]), credentialId: Uuid }).strict()).max(8).optional(),
 });
 const Schema = z.object({
   version: z.literal(1), runId: Uuid, prefix: z.string().regex(/^zr-[0-9a-f]{8}-$/), startedAt: z.string(),

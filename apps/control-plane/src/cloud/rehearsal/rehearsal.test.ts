@@ -16,7 +16,7 @@ import { parseArguments, sharedBaseFacts } from "./rehearsal-cli.js";
 import { CONNECT_CLIENT_FEATURES, checkText, connectWorkspace, createProject, createWorkspace, fileTarget, frameCode, openBridge, waitState, writeFile } from "./steps.js";
 import { FIXTURE_TWO } from "./stage-provision.js";
 import { loadState, newState, saveState } from "./state.js";
-import { checkGithubToken, databaseErrorCode, databaseRefusal, liveBridge, liveDatabase, OUTSIDE_PROBE_LIMIT, SET_APP_SYSTEM, tokenLines, tokenRefusal, type DatabaseClient } from "./live.js";
+import { agentCredentialFromEnv, checkGithubToken, databaseErrorCode, databaseRefusal, liveBridge, liveDatabase, OUTSIDE_PROBE_LIMIT, SET_APP_SYSTEM, tokenLines, tokenRefusal, type DatabaseClient } from "./live.js";
 import { platformOwners, probeDiagnostics, proActor, resolveProbe } from "./plan.js";
 
 const R1 = "Withso/zeros-dev-fixture";
@@ -41,7 +41,7 @@ function setup(options: { provisioned?: boolean; owner?: "personal" | "organizat
   const options_ = { switches: new Set(["projects", "personal", "retention"] as const), maxActive: 10, runCap: 30, log: (line: string) => lines.push(line) };
   return { alpha, state, ctx, lines, saved, options: options_ };
 }
-const EMPTY = { workspaces: 0, projects: 0, branches: 0, pulls: 0, machines: 0, objects: 0, environments: 0, githubSignIns: 0, pro: 0, computerBase: 0, installScripts: 0,
+const EMPTY = { workspaces: 0, projects: 0, branches: 0, pulls: 0, machines: 0, objects: 0, environments: 0, githubSignIns: 0, pro: 0, computerBase: 0, installScripts: 0, agentLogins: 0,
   databaseRows: 0 };
 
 describe("rehearsal guards", () => {
@@ -781,6 +781,94 @@ describe("rehearsal on the Personal route", () => {
     expect(inventory.environments).toBe(2);
     expect(alpha.patConnected).toBe(false);
     expect(lines.filter(line => line.startsWith("cleanup environment:"))).toEqual(Array(2).fill("cleanup environment: http_409_github_connection_required"));
+  });
+
+  describe("the rehearsal's agent credential", () => {
+    const SECRET = "rehearsal-synthetic-credential-0123456789";
+    const credential = () => ({ provider: "claude" as const, kind: "claude-setup-token" as const, source: "ZEROS_REHEARSAL_CLAUDE_SETUP_TOKEN",
+      material: () => ({ kind: "claude-setup-token", accessToken: SECRET }) });
+    const switches = new Set(["projects", "personal", "retention"] as const);
+
+    it("connects it as Settings does, runs the turns on it, and cleanup removes and revokes it, reading both back", async () => {
+      const { alpha, ctx, options, state } = setup({ owner: "personal" });
+      alpha.agentConnections = [];
+      ctx.ports.agentCredential = credential();
+      expect(await runStages(ctx, ["setup", "projects"], { ...options, switches })).toBe(true);
+      expect(state.stages.setup?.notes).toContain("agent_login:connected:claude");
+      expect(state.stages.projects?.notes).toContain("turn_agent:claude");
+      expect(state.stages.projects?.counts).toMatchObject({ turns: 3 });
+      expect(state.stages.projects?.counts?.turnsSkipped).toBeUndefined();
+      const [login] = state.created.agentLogins!;
+      expect(alpha.agentSelections.get("claude")?.credentialId).toBe(login!.credentialId);
+      const lines: string[] = [];
+      const { inventory, failures } = await cleanup(ctx, { log: line => lines.push(line) });
+      expect({ inventory, failures, lines }).toEqual({ inventory: EMPTY, failures: 0, lines: [] });
+      expect(alpha.agentSelections.get("claude")?.credentialId).toBeNull();
+      expect(alpha.agentCredentials.get(login!.credentialId)?.revoked).toBe(true);
+      expect(state.created.agentLogins).toEqual([]);
+      // The value reached the credential route's body and nothing else.
+      expect(alpha.agentMaterialValues).toEqual([SECRET]);
+      expect(JSON.stringify(state)).not.toContain(SECRET);
+    });
+
+    it("finishes a cleanup that stopped after taking it out of the organization, and a second cleanup finds nothing", async () => {
+      const { alpha, ctx, options, state } = setup({ owner: "personal" });
+      alpha.agentConnections = [];
+      ctx.ports.agentCredential = credential();
+      expect(await runStages(ctx, ["setup"], { ...options, switches })).toBe(true);
+      const [login] = state.created.agentLogins!;
+      // As a cleanup that stopped between the two writes left it: no longer selected, not yet revoked.
+      await alpha.api().json("DELETE", `/v1/organizations/${state.organizationId}/agent-connections/accounts/${login!.credentialId}`, {});
+      expect((await readInventory(ctx, false, false, { pro: false })).agentLogins).toBe(1);
+      for (let pass = 0; pass < 2; pass++) {
+        const lines: string[] = [];
+        const { inventory, failures } = await cleanup(ctx, { log: line => lines.push(line) });
+        expect({ inventory, failures, lines }).toEqual({ inventory: EMPTY, failures: 0, lines: [] });
+      }
+      expect(alpha.agentCredentials.get(login!.credentialId)?.revoked).toBe(true);
+    });
+
+    it("leaves a connection already there alone, uses it for the turns, and keeps its own on a second setup", async () => {
+      const existing = setup({ owner: "personal" });
+      existing.ctx.ports.agentCredential = credential();
+      expect(await runStages(existing.ctx, ["setup", "projects"], { ...existing.options, switches })).toBe(true);
+      expect(existing.state.stages.setup?.notes).toContain("agent_login:existing:claude");
+      expect(existing.state.stages.projects?.notes).toContain("turn_agent:claude");
+      expect(existing.alpha.agentCredentials.size).toBe(0);
+      expect(existing.state.created.agentLogins ?? []).toEqual([]);
+      expect((await cleanup(existing.ctx, { log: () => undefined })).inventory).toEqual(EMPTY);
+      expect(existing.alpha.agentSelections.size).toBe(0);
+
+      const again = setup({ owner: "personal" });
+      again.alpha.agentConnections = [];
+      again.ctx.ports.agentCredential = credential();
+      expect(await runStages(again.ctx, ["setup"], { ...again.options, switches })).toBe(true);
+      again.state.stages = {};
+      expect(await runStages(again.ctx, ["setup"], { ...again.options, switches })).toBe(true);
+      expect(again.state.stages.setup?.notes).toContain("agent_login:kept:claude");
+      expect(again.alpha.agentCredentials.size).toBe(1);
+    });
+
+    it("reads the credential from .env.agent by name in a fixed order, and a bad value fails by its name only", () => {
+      expect(agentCredentialFromEnv({})).toBeNull();
+      const picked = agentCredentialFromEnv({ ZEROS_REHEARSAL_CURSOR_API_KEY: `key_${"c".repeat(20)}`, ZEROS_REHEARSAL_CLAUDE_SETUP_TOKEN: SECRET })!;
+      expect({ provider: picked.provider, kind: picked.kind, source: picked.source }).toEqual({ provider: "claude", kind: "claude-setup-token", source: "ZEROS_REHEARSAL_CLAUDE_SETUP_TOKEN" });
+      expect(picked.material()).toEqual({ kind: "claude-setup-token", accessToken: SECRET });
+      expect(agentCredentialFromEnv({ ZEROS_REHEARSAL_OPENAI_API_KEY: `openai-${"o".repeat(20)}` })?.kind).toBe("codex-api-key");
+      let failure: unknown;
+      try { agentCredentialFromEnv({ ZEROS_REHEARSAL_CLAUDE_API_KEY: "short value" }); } catch (error) { failure = error; }
+      expect(failure).toMatchObject({ step: "agent_credential", code: "invalid:ZEROS_REHEARSAL_CLAUDE_API_KEY" });
+      expect(JSON.stringify(failure)).not.toContain("short value");
+    });
+
+    it("says in --plan that the rehearsal's credential runs the turns when none is connected", () => {
+      const summary = { label: "2", organizations: [], admin: false, connections: { organization: 0, personal: 0, logins: [] }, activeMachines: 0,
+        fixtureConnection: false, githubIdentity: false, pro: true, personal: { id: "p", seat: "pro" }, agents: { personal: [], probe: null } };
+      expect(turnLine(summary, "personal", "2", "claude"))
+        .toBe("turns: agent claude (the rehearsal's credential, connected by setup for account 2 in its Personal organization and removed by cleanup)");
+      expect(turnLine({ ...summary, agents: { personal: ["codex"], probe: null } }, "personal", "2", "claude"))
+        .toBe("turns: agent codex (account 2's first connected agent in its Personal organization)");
+    });
   });
 
   it("names a failed workspace's error code and machine when its connect is refused or its wait sees it fail", async () => {
