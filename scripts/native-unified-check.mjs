@@ -28,6 +28,7 @@ import { startEgressGuard } from "./native-unified/egress.mjs";
 import { foreignSockets, identify, killRun, runProcesses, runSockets } from "./native-unified/processes.mjs";
 import { PERSON_MUST_LOOK, isLocalUrl, scrub, table } from "./native-unified/report.mjs";
 import { CHECKS } from "./native-unified/checks.mjs";
+import { electronInstall, worktreeRemoval } from "./native-unified/setup.mjs";
 
 const exec = promisify(execFile);
 const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -61,17 +62,28 @@ async function freePort() {
 /** What --build would download and write, and where, without doing any of it. */
 async function buildDryRun() {
   const bun = path.join(root, "bun", "node_modules", ".bin", "bun");
-  const electron = path.join(repo, "node_modules", "electron", "dist");
+  const electron = electronInstall(path.join(repo, "node_modules", "electron"));
   say("--build would:");
   say(existsSync(bun) ? `- reuse bun already in ${path.join(root, "bun")}` : `- download bun@${BUN_VERSION} from the npm registry (registry.npmjs.org: the 'bun' package and its platform binary, about 35 MB) into ${path.join(root, "bun")}`);
-  say(existsSync(electron) ? `- use the Electron already installed by pnpm install (${path.relative(repo, electron)}); download nothing for it` : "- find no Electron: run pnpm install first (it downloads Electron); --build itself downloads none");
+  say(electron.installed ? `- use Electron ${electron.version} already installed (node_modules/electron/dist); download nothing for it`
+    : electron.version ? `- download Electron ${electron.version} from Electron's releases (github.com/electron/electron), about 100 MB, into node_modules/electron/dist with Electron's own install script (${electron.reason}: pnpm install skipped its postinstall)`
+    : `- stop: ${electron.reason}`);
   say(`- create ${path.join(root, "stage")} (links to this worktree's apps, packages, resources, styles and node_modules) and compile main and preload into it with tsup`);
   say(`- write ${path.join(root, "build.json")} (revision and the fixture control plane's loopback port)`);
-  say("- change nothing outside that folder; no network access other than the bun download above");
+  say(`- change nothing outside that folder${electron.installed ? "" : " and node_modules/electron"}; no network access other than the download${electron.installed ? "" : "s"} above`);
 }
 
 async function build() {
   const started = Date.now();
+  // pnpm install --prefer-offline can skip Electron's postinstall (seen on a fresh Mac), leaving no binary.
+  const electron = electronInstall(path.join(repo, "node_modules", "electron"));
+  if (!electron.version) throw new Error(`No Electron package (${electron.reason}).`);
+  if (!electron.installed) {
+    say(`downloading Electron ${electron.version} from Electron's releases (about 100 MB): ${electron.reason}`);
+    await run(process.execPath, [path.join(repo, "node_modules", "electron", "install.js")], { cwd: path.join(repo, "node_modules", "electron") });
+    const after = electronInstall(path.join(repo, "node_modules", "electron"));
+    if (!after.installed) throw new Error(`Electron's install script finished but Electron is still missing (${after.reason}).`);
+  }
   await fs.mkdir(root, { recursive: true });
   const bun = path.join(root, "bun", "node_modules", ".bin", "bun");
   if (!existsSync(bun)) {
@@ -293,10 +305,10 @@ async function cleanup() {
   const top = (await run("git", ["rev-parse", "--show-toplevel"]).catch(() => "")).trim();
   const tmp = await fs.realpath(os.tmpdir());
   const realTop = top ? await fs.realpath(top).catch(() => top) : "";
-  if (gitDir && common && path.resolve(repo, gitDir) !== path.resolve(repo, common) && realTop.startsWith(`${tmp}${path.sep}`)) {
-    const main = path.dirname(path.resolve(repo, common));
-    await run("git", ["-C", main, "worktree", "remove", "--force", realTop]);
-    await run("git", ["-C", main, "worktree", "prune"]);
+  const removal = worktreeRemoval({ repo, gitDir, common, realTop, tmp });
+  if (removal) {
+    // From the main checkout: the first command deletes this worktree, the script's own folder.
+    for (const command of removal.commands) await run("git", command.args, { cwd: command.cwd });
     say("removed this worktree (git worktree remove, then prune)");
   } else say("left the checkout alone: it is not a linked worktree under the temp directory");
 }

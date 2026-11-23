@@ -1,11 +1,12 @@
-import { spawn, type ChildProcess } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
+import { execFileSync, spawn, type ChildProcess } from "node:child_process";
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { descendants, foreignSockets, identify, isLauncherCommand, killRun, namesRunFolder, parseProcessTable, selectRunProcesses, signalTargets } from "../native-unified/processes.mjs";
 import { isLocalUrl, isLoopbackAddress, PERSON_MUST_LOOK, scrub, table } from "../native-unified/report.mjs";
+import { electronInstall, worktreeRemoval } from "../native-unified/setup.mjs";
 
 describe("native check: loopback only (N12)", () => {
   it("accepts every loopback spelling and nothing else", () => {
@@ -145,6 +146,80 @@ describe.skipIf(process.platform === "win32")("native check: teardown against re
     await killRun([{ pid: foreign.pid!, started: now!.started === T ? LATER : T }], root, { graceMs: 500 });
     await settle();
     expect(alive(foreign.pid!)).toBe(true);
+  });
+
+  it("cleans its temp folder", () => {
+    rmSync(base, { recursive: true, force: true });
+  });
+});
+
+describe("native check: --cleanup removes its worktree from the main checkout", () => {
+  const tmp = "/private/var/folders/x/T";
+  const linked = { repo: `${tmp}/zeros-native/wt`, gitDir: "/Users/p/zeros/.git/worktrees/wt", common: "/Users/p/zeros/.git", realTop: `${tmp}/zeros-native/wt`, tmp };
+
+  it("runs both commands from the main checkout, never from the worktree it deletes", () => {
+    const removal = worktreeRemoval(linked);
+    expect(removal?.main).toBe("/Users/p/zeros");
+    expect(removal?.commands.map(command => command.args)).toEqual([
+      ["-C", "/Users/p/zeros", "worktree", "remove", "--force", linked.realTop],
+      ["-C", "/Users/p/zeros", "worktree", "prune"],
+    ]);
+    for (const command of removal!.commands) expect(command.cwd).toBe("/Users/p/zeros");
+  });
+
+  it("leaves a person's checkout, a worktree outside the temp directory and an unreadable Git alone", () => {
+    expect(worktreeRemoval({ ...linked, gitDir: ".git", common: ".git", repo: "/Users/p/zeros", realTop: "/Users/p/zeros" })).toBeNull();
+    expect(worktreeRemoval({ ...linked, realTop: "/Users/p/zeros-wt" })).toBeNull();
+    expect(worktreeRemoval({ ...linked, realTop: `${tmp}-other/wt` })).toBeNull();
+    for (const missing of ["gitDir", "common", "realTop"]) expect(worktreeRemoval({ ...linked, [missing]: "" }), missing).toBeNull();
+  });
+
+  it("finishes after the worktree it ran from is gone (the prune that failed with spawn git ENOENT)", () => {
+    const base = realpathSync(mkdtempSync(path.join(os.tmpdir(), "native-cleanup-")));
+    try {
+      const main = path.join(base, "main"), worktree = path.join(base, "wt");
+      const git = (cwd: string, ...args: string[]) => execFileSync("git", args, { cwd, stdio: "pipe" });
+      mkdirSync(main);
+      git(main, "init", "-q", "-b", "main");
+      writeFileSync(path.join(main, "file"), "x");
+      git(main, "add", "file");
+      git(main, "-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit", "-q", "-m", "x");
+      git(main, "worktree", "add", "-q", worktree);
+      const removal = worktreeRemoval({ repo: worktree, gitDir: git(worktree, "rev-parse", "--git-dir").toString().trim(),
+        common: git(worktree, "rev-parse", "--git-common-dir").toString().trim(), realTop: worktree, tmp: base });
+      expect(removal?.main).toBe(main);
+      for (const command of removal!.commands) git(command.cwd, ...command.args);
+      expect(existsSync(worktree)).toBe(false);
+      expect(git(main, "worktree", "list", "--porcelain").toString()).not.toContain(worktree);
+      // The old prune, from the deleted worktree, is what failed on the Mac.
+      expect(() => git(worktree, "-C", main, "worktree", "prune")).toThrow(/ENOENT/);
+    } finally { rmSync(base, { recursive: true, force: true }); }
+  });
+});
+
+describe("native check: --build finds a missing Electron binary", () => {
+  const base = mkdtempSync(path.join(os.tmpdir(), "native-electron-"));
+  const pkg = (name: string, files: Record<string, string>) => {
+    const dir = path.join(base, name);
+    for (const [file, content] of Object.entries(files)) { mkdirSync(path.dirname(path.join(dir, file)), { recursive: true }); writeFileSync(path.join(dir, file), content); }
+    return dir;
+  };
+  const manifest = JSON.stringify({ name: "electron", version: "43.8.3" });
+
+  it("reports the package's version and installs when pnpm skipped the postinstall (no dist)", () => {
+    expect(electronInstall(pkg("skipped", { "package.json": manifest }))).toEqual({ installed: false, version: "43.8.3", reason: "no dist" });
+  });
+
+  it("installs when dist holds another version or path.txt names a missing executable", () => {
+    expect(electronInstall(pkg("old", { "package.json": manifest, "dist/version": "v42.0.0", "path.txt": "electron", "dist/electron": "" })))
+      .toMatchObject({ installed: false, reason: "dist holds 42.0.0" });
+    expect(electronInstall(pkg("partial", { "package.json": manifest, "dist/version": "43.8.3", "path.txt": "Electron.app/Contents/MacOS/Electron" })).installed).toBe(false);
+  });
+
+  it("uses an installed Electron, and stops with no package at all", () => {
+    expect(electronInstall(pkg("ok", { "package.json": manifest, "dist/version": "v43.8.3", "path.txt": "electron", "dist/electron": "" })))
+      .toEqual({ installed: true, version: "43.8.3", reason: null });
+    expect(electronInstall(path.join(base, "absent"))).toMatchObject({ installed: false, version: null });
   });
 
   it("cleans its temp folder", () => {
