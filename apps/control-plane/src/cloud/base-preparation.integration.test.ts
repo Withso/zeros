@@ -618,6 +618,9 @@ d("ready copies: a safe switch-on", () => {
       expect((await legacy()).legacy_build_id).toBeNull();
       await builder(on).tick();
       expect(await snapshotOf(pre.id)).toBeNull();
+      // Turned off after that: the organization has only its base, which installs no repository. An old-style create is
+      // refused until someone builds the Cloud Computer with its repositories again: why the legacy build is kept 30 days.
+      await expect(offCreate()).rejects.toMatchObject({ code: "repository_not_installed" });
     });
 
     it("after its 30 days, a stopped workspace on it no longer keeps it; it then opens from the live base, with or without a backup", async () => {
