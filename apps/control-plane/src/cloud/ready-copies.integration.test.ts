@@ -220,6 +220,21 @@ d("cloud v2 ready copies", () => {
       expect((await pool.query("SELECT state, error_code FROM cloud_v2_workspaces WHERE id=$1", [id])).rows[0]).toEqual({ state: "creating", error_code: null });
     });
 
+    it("reads back any fork of a copy's machine (a restore, a clean rebuild) by that copy, and distrusts a copy that lacks one", async () => {
+      await liveBase();
+      await copyBuilder().tick();
+      const copy = await row(1);
+      const good = await boat.fork(copy.machineId!, { key: "restore-a", ttlSeconds: 60 });
+      expect(await forks().verifyMachine(copy.machineId!, good.sandboxId)).toBe(true);
+      expect(await row(1)).toMatchObject({ stale: false });
+      const moved = await boat.fork(copy.machineId!, { key: "restore-b", ttlSeconds: 60 });
+      boat.machine(moved.sandboxId)!.files.set(checkout, "d".repeat(40));
+      expect(await forks().verifyMachine(copy.machineId!, moved.sandboxId)).toBe(false);
+      expect(await row(1)).toMatchObject({ state: "ready", stale: true });
+      // A machine no copy owns is taken as it is.
+      expect(await forks().verifyMachine("bx_notacopy1", moved.sandboxId)).toBe(true);
+    });
+
     it("never fails a workspace on a copy's word: a fork without its checkout clones directly, and that copy is rebuilt", async () => {
       await liveBase();
       await copyBuilder().tick();

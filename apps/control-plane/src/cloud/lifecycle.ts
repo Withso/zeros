@@ -215,7 +215,8 @@ export type CloudV2LifecycleDeps = {
   builds?: { tick(): Promise<void>; cleanup?(): Promise<void>; close?(): void };
   /** Ready copies (CloudV2Config.readyCopies): creates fork a repository's
    * stopped, set-up machine; their builds run beside Cloud Computer builds. */
-  readyCopies?: Pick<CloudV2ReadyCopyForks<CloudV2LifecycleWorkspace>, "prepare" | "fetchBase"> & Partial<Pick<CloudV2ReadyCopyForks<CloudV2LifecycleWorkspace>, "verify">>;
+  readyCopies?: Pick<CloudV2ReadyCopyForks<CloudV2LifecycleWorkspace>, "prepare" | "fetchBase">
+    & Partial<Pick<CloudV2ReadyCopyForks<CloudV2LifecycleWorkspace>, "verify" | "verifyMachine">>;
   readyCopyBuilds?: { tick(): Promise<void>; close?(): void };
   runtimeUpdates?: { tick(): Promise<void>; close(): void };
   recovery?: { start(): () => Promise<void> };
@@ -788,6 +789,9 @@ export class CloudV2Lifecycle {
           const image = { from: recorded?.from ?? null, prune: recorded?.prune ?? [] };
           // A ready copy fork already holds every checkout, set up, with Git LFS.
           if (!recorded?.fork && (image.prune.length || !image.from)) await this.measure(workspace, "image_prepare", () => this.prepareImage(sandboxId, image));
+          // A fork of a copy: read back, and a copy that lacks a checkout is distrusted. The restore itself clones a
+          // missing checkout (restoreCommand), or creates it from the objects it fetched (an active restore).
+          if (recorded?.fork) await this.deps.readyCopies?.verifyMachine?.(recorded.fork, sandboxId).catch(() => true);
           // Retention: in the hour before a stop's backup, a lost VM restores the last earlier one.
           // Or a backup of this stop forked from an archive its stop left suspect: it may lack the stop's last writes.
           const earlier = this.retention && (workspace.checkpoint?.stopGeneration !== workspace.stopGeneration || workspace.checkpointLossy === true);
@@ -1501,7 +1505,7 @@ export class CloudV2Lifecycle {
         if (!neverCreated(error)) throw error;
         this.deps.logger?.warn(`[cloud-v2] ready copy fork refused for a restore; creating from the Cloud Computer (${errorCode(error)})`);
       }
-      if (sandboxId) await this.forkCheckoutsOrClone(workspace, sandboxId);
+      if (sandboxId) await this.forkCheckoutsOrClone(workspace, sandboxId, source);
     }
     if (!sandboxId) {
       // The organization's live Cloud Computer, as a backup restore uses (store.pinRestoreImage): never the
@@ -1530,11 +1534,19 @@ export class CloudV2Lifecycle {
 
   /** A fork of a ready copy, read at once (a fork serves its archive's files from its first second): every checkout of the
    * workspace there, or a direct clone of the missing ones (a copy's archive may lack what its build wrote). */
-  private async forkCheckoutsOrClone(workspace: CloudV2LifecycleWorkspace, sandboxId: string): Promise<void> {
+  private async forkCheckoutsOrClone(workspace: CloudV2LifecycleWorkspace, sandboxId: string, source: string): Promise<void> {
+    // The copy's own record when there is one: every checkout at its recorded commit, and a copy that lacks one distrusted.
+    const verified = await this.deps.readyCopies?.verifyMachine?.(source, sandboxId).catch(() => false);
+    if (verified === true) return;
+    if (verified === false) { await this.cloneDirectly(workspace, sandboxId); return; }
     const paths = [workspaceCheckoutPath(workspace), ...(await this.deps.repositories?.(workspace) ?? []).map(entry => `${CLOUD_V2_HOME}/${entry.checkoutFolder}`)];
     const read = await this.deps.compute.exec(sandboxId, `bash -c ${shellQuote(readyCopyCheckoutsCommand(paths).join("\n"))}`, 120).catch(() => null);
     if (read && read.exitCode === 0 && !read.timedOut && checkoutsMatch(read.stdout, paths.map(() => ({ commit: null })))) return;
     this.deps.logger?.warn(`[cloud-v2] ready copy fork lacks a checkout; cloning directly workspace=${workspace.id.slice(0, 8)}`);
+    await this.cloneDirectly(workspace, sandboxId);
+  }
+
+  private async cloneDirectly(workspace: CloudV2LifecycleWorkspace, sandboxId: string): Promise<void> {
     if (!this.deps.prepareRepository) throw Object.assign(new Error("no clone path"), { code: "cloud_source_checkout_failed" });
     await this.deps.prepareRepository(workspace, sandboxId);
   }

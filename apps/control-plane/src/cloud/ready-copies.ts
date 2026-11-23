@@ -237,6 +237,12 @@ export class CloudV2ReadyCopies {
     });
   }
 
+  /** The copy whose stopped machine this is (its newest generation, should several ever share one). */
+  async byMachine(machineId: string): Promise<CloudV2ReadyCopy | null> {
+    const row = (await this.tx(tx => tx.query<Row>("SELECT * FROM cloud_v2_ready_copies WHERE machine_id=$1 ORDER BY generation DESC LIMIT 1", [machineId]))).rows[0];
+    return row ? copy(row) : null;
+  }
+
   async get(id: string): Promise<CloudV2ReadyCopy | null> {
     const row = (await this.tx(tx => tx.query<Row>("SELECT * FROM cloud_v2_ready_copies WHERE id=$1", [id]))).rows[0];
     return row ? copy(row) : null;
@@ -1268,7 +1274,16 @@ export class CloudV2ReadyCopyForks<W extends ReadyCopyWorkspace = ReadyCopyWorks
   async verify(workspace: W, sandboxId: string): Promise<boolean> {
     const fork = await this.deps.copies.forkOf(workspace.id);
     if (!fork) return true;
-    const copy = await this.deps.copies.get(fork.copyId);
+    return this.readBack(await this.deps.copies.get(fork.copyId), sandboxId);
+  }
+
+  /** The same read-back for a fork of a copy's machine that no create recorded (a restore onto a fork of a copy, a
+   * clean rebuild): by the copy that machine belongs to. True when it belongs to none. */
+  async verifyMachine(machineId: string, sandboxId: string): Promise<boolean> {
+    return this.readBack(await this.deps.copies.byMachine(machineId), sandboxId);
+  }
+
+  private async readBack(copy: CloudV2ReadyCopy | null, sandboxId: string): Promise<boolean> {
     // A copy recorded before its folders were (or with none) cannot be read back: taken as before.
     if (!copy?.result?.length || copy.result.some(entry => !entry.checkoutFolder)) return true;
     // A failed read distrusts a good copy too: the cost is a rebuild and one direct clone, never anyone's data.
