@@ -1,12 +1,12 @@
 // The rehearsal's reads of the shared base and the run's bases against the migrated schema (0267, 0268): the --plan
-// precondition reads the real table, in the live read role's RLS-safe form, and the run's base record finds only
+// precondition reads the real table, as the live read role reads (app.system set first), and the run's base record finds only
 // automatic bases made after the run started.
 import { randomUUID } from "node:crypto";
 import pg from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { resetMigratedTestDatabase } from "../../test-database.js";
 import type { Database, StageContext } from "./contract.js";
-import { rlsSafe } from "./live.js";
+import { SET_APP_SYSTEM } from "./live.js";
 import { sharedBaseFacts } from "./rehearsal-cli.js";
 import { newState } from "./state.js";
 import { recordRunBases } from "./steps.js";
@@ -19,8 +19,14 @@ d("rehearsal shared base reads (integration)", () => {
   beforeAll(() => { pool = new pg.Pool({ connectionString: process.env.TEST_DATABASE_URL, max: 2 }); });
   afterAll(() => pool.end());
   beforeEach(() => resetMigratedTestDatabase(pool));
-  // As the live read role runs them: app.system set in a materialized CTE.
-  const reads = { read: async (text: string, values?: unknown[]) => (await pool.query(rlsSafe(text), values as unknown[])).rows };
+  // As the live read role runs them: app.system set by its own statement, then the read, in one READ ONLY transaction.
+  const reads = { read: async (text: string, values?: unknown[]) => {
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN READ ONLY"); await client.query(SET_APP_SYSTEM);
+      const rows = (await client.query(text, values as unknown[])).rows; await client.query("COMMIT"); return rows;
+    } finally { client.release(); }
+  } };
   const base = (name: string, runtime: string, state: string) => pool.query(
     `INSERT INTO cloud_v2_shared_bases (name, channel, runtime_sha256, state, ready_at) VALUES ($1, 'alpha', $2, $3, CASE WHEN $3 = 'ready' THEN clock_timestamp() END)`,
     [name, runtime, state]);

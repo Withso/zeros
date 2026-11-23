@@ -319,9 +319,10 @@ export function databaseErrorCode(error: unknown): string {
   return state.startsWith("08") || state === "57P01" ? "connection" : `sqlstate_${state}`;
 }
 
-/** The playbook's RLS-safe read: app.system is set by a materialized CTE before the statement's rows are read. */
-export const rlsSafe = (text: string) => `WITH cfg AS MATERIALIZED (SELECT set_config('app.system','on',true) AS v)
-          SELECT x.* FROM cfg CROSS JOIN LATERAL (${text}) x WHERE cfg.v = 'on'`;
+/** Sets app.system for the rest of the transaction, as its own statement before any read (the RLS policies' app_is_system()).
+ * Never inside the read itself: a CTE that sets it does not order the read after it unless the read depends on it, so a
+ * single-statement wrapper can read with the policy closed and see no rows, silently and depending on the plan. */
+export const SET_APP_SYSTEM = "SELECT set_config('app.system','on',true)";
 
 export type DatabaseClient = { connect(): Promise<unknown>; query(text: string, values?: unknown[]): Promise<{ rows: Record<string, unknown>[]; rowCount: number | null }>;
   end(): Promise<void> };
@@ -411,7 +412,8 @@ export function liveDatabase(input: { organization: string; database: string; to
         try {
           await run("BEGIN READ ONLY");
           try {
-            const rows = (await run(rlsSafe(text), values)).rows;
+            await run(SET_APP_SYSTEM);
+            const rows = (await run(text, values)).rows;
             await run("COMMIT");
             return rows;
           } catch (error) { await current.held.query("ROLLBACK").catch(() => undefined); throw error; }

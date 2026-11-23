@@ -7,7 +7,7 @@ import { resetMigratedTestDatabase } from "../../test-database.js";
 import { shiftClock } from "./clock.js";
 import { RehearsalFailure, type Database, type Query } from "./contract.js";
 import { newState } from "./state.js";
-import { rlsSafe } from "./live.js";
+import { SET_APP_SYSTEM } from "./live.js";
 
 const d = process.env.TEST_DATABASE_URL ? describe : describe.skip;
 
@@ -99,7 +99,8 @@ d("rehearsal shiftClock (integration)", () => {
       await client.query("SET LOCAL ROLE zr_rehearsal_reader");
       const text = "SELECT count(*)::int AS projects FROM cloud_projects WHERE left(name, length($1)) = $1";
       expect((await client.query(text, [state.prefix])).rows[0].projects).toBe(0);
-      expect((await client.query(rlsSafe(text), [state.prefix])).rows[0].projects).toBe(1);
+      await client.query(SET_APP_SYSTEM);
+      expect((await client.query(text, [state.prefix])).rows[0].projects).toBe(1);
       await client.query("ROLLBACK");
     } finally { client.release(); }
   });

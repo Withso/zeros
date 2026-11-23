@@ -14,7 +14,7 @@ import { cleanup, cleanupNeedsAccount, inventoryLines, NO_ACCOUNT, readInventory
 import { parseArguments, sharedBaseFacts } from "./rehearsal-cli.js";
 import { FIXTURE_TWO } from "./stage-provision.js";
 import { loadState, newState, saveState } from "./state.js";
-import { checkGithubToken, databaseErrorCode, liveDatabase, OUTSIDE_PROBE_LIMIT, tokenLines, tokenRefusal, type DatabaseClient } from "./live.js";
+import { checkGithubToken, databaseErrorCode, liveDatabase, OUTSIDE_PROBE_LIMIT, SET_APP_SYSTEM, tokenLines, tokenRefusal, type DatabaseClient } from "./live.js";
 import { platformOwners } from "./plan.js";
 
 const R1 = "Withso/zeros-dev-fixture";
@@ -295,15 +295,17 @@ describe("rehearsal database roles", () => {
     return { database, requests, statements, live, inherited };
   }
 
-  it("reads through a pg_read_all_data role in the RLS-safe form, never postgres, and deletes it at close", async () => {
+  it("reads through a pg_read_all_data role, app.system set by its own statement first, never postgres, and deletes it at close", async () => {
     const { database, statements, live, inherited } = provider();
     expect(await platformOwners(database)).toEqual(["abcdef12"]);
     await database.read("SELECT 1 AS one");
     expect(inherited()).toEqual([["pg_read_all_data"]]);
     expect(statements).toContain("BEGIN READ ONLY");
-    const reads = statements.filter(text => text.includes("CROSS JOIN LATERAL"));
-    expect(reads).toHaveLength(2);
-    for (const text of reads) expect(text).toMatch(/^WITH cfg AS MATERIALIZED \(SELECT set_config\('app\.system','on',true\) AS v\)/);
+    // Each read: BEGIN READ ONLY, then set_config as its own statement, then the text itself, unwrapped.
+    expect(statements.filter(text => text.includes("CROSS JOIN LATERAL") || text.includes("MATERIALIZED"))).toEqual([]);
+    const read = statements.indexOf("SELECT 1 AS one");
+    expect(statements.slice(read - 2, read + 1)).toEqual(["BEGIN READ ONLY", SET_APP_SYSTEM, "SELECT 1 AS one"]);
+    expect(statements.filter(text => text === SET_APP_SYSTEM)).toHaveLength(2);
     expect(statements.some(text => text.startsWith("GRANT"))).toBe(false);
     expect(live.size).toBe(1);
     await database.close();
@@ -354,7 +356,7 @@ describe("rehearsal database roles", () => {
     let dropped = false;
     const { database: flaky, live, inherited } = provider(() => ({ connect: async () => undefined, end: async () => undefined,
       query: async text => {
-        if (text.includes("LATERAL") && !dropped) { dropped = true; throw Object.assign(new Error("terminated"), { code: "57P01" }); }
+        if (text === "SELECT 1 AS one" && !dropped) { dropped = true; throw Object.assign(new Error("terminated"), { code: "57P01" }); }
         return { rows: [{ one: 1 }], rowCount: 1 };
       } }));
     expect(await flaky.read("SELECT 1 AS one")).toEqual([{ one: 1 }]);
@@ -365,7 +367,7 @@ describe("rehearsal database roles", () => {
     expect(live.size).toBe(0);
     // A refused query is not retried: its SQLSTATE is the code.
     const { database: refused, inherited: once } = provider(() => ({ connect: async () => undefined, end: async () => undefined,
-      query: async text => { if (text.includes("LATERAL")) throw Object.assign(new Error("permission denied"), { code: "42501" }); return { rows: [], rowCount: 0 }; } }));
+      query: async text => { if (text === "SELECT 1") throw Object.assign(new Error("permission denied"), { code: "42501" }); return { rows: [], rowCount: 0 }; } }));
     await expect(refused.read("SELECT 1")).rejects.toMatchObject({ step: "database", code: "sqlstate_42501" });
     expect(once()).toHaveLength(1);
   });
