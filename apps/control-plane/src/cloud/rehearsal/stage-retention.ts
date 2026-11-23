@@ -13,6 +13,13 @@ import { openBridge, call, check, checkText, clearEnvironment, ENVIRONMENT_PATH,
 
 const HOUR_DAYS = 1 / 24;
 
+/** W's backup, as the product records it: a backup fork counted (its maintenance-wakes row), this stop's checkpoint saved,
+ * and the fork's record cleared. */
+export const BACKUP_STATE = `SELECT (SELECT count(*)::int FROM cloud_v2_maintenance_wakes m WHERE m.workspace_id = w.id AND m.kind = 'backup_fork') AS forks,
+    w.checkpoint_object IS NOT NULL AND w.checkpoint_stop_generation IS NOT DISTINCT FROM w.stop_generation AS backed_up,
+    w.checkpoint_retry_fork IS NULL AS fork_gone
+  FROM cloud_v2_workspaces w WHERE w.id = $1::uuid`;
+
 export async function stageRetention(ctx: StageContext): Promise<Record<string, number>> {
   const { prefix } = ctx.state, one = ctx.repositories.one, two = ctx.repositories.two;
   check(two, "repository_two", "missing");
@@ -75,11 +82,20 @@ export async function stageRetention(ctx: StageContext): Promise<Record<string, 
   // C2: an hour later, W's backup fork runs and uploads one object; K, clean, has none.
   ctx.step("backup");
   await shift(both, HOUR_DAYS + 1 / 1440);
-  await until(ctx, "backup", ctx.timing.scanMs, ctx.timing.pollMs, async () => {
-    const rows = await ctx.ports.database.read(`SELECT count(*)::int AS forks FROM cloud_v2_maintenance_wakes
-      WHERE workspace_id = $1::uuid AND kind = 'backup_fork' AND outcome = 'stopped'`, [w.id]);
-    return Number(rows[0]?.forks) >= 1 && (await ctx.ports.storage.keys(w.id)).length >= 1;
-  });
+  // A backup fork's own record is the workspace row (store.ts beginCheckpointFork, saveCheckpoint): this stop's checkpoint
+  // saved and the fork record cleared once the fork is gone. Its maintenance-wakes row only counts the machine start in
+  // the shared budget; nothing ever finishes it, so its outcome is never read. Then the object itself, in storage.
+  const backupState = async () => {
+    const row = (await ctx.ports.database.read(BACKUP_STATE, [w.id]))[0];
+    const keys = (await ctx.ports.storage.keys(w.id)).length;
+    return !row ? "no_row" : Number(row.forks) < 1 ? "no_fork" : row.backed_up !== true ? "not_backed_up" : row.fork_gone !== true ? "fork_present"
+      : keys < 1 ? "no_object" : null;
+  };
+  await until(ctx, "backup", ctx.timing.scanMs, ctx.timing.pollMs, async () => await backupState() === null)
+    .catch(async (error: unknown) => {
+      const missing = await backupState().catch(() => null);
+      throw missing && error instanceof RehearsalFailure && error.code === "timeout" ? new RehearsalFailure("backup", `timeout:${missing}`) : error;
+    });
   check((await ctx.ports.storage.keys(k.id)).length === 0, "backup_k", "uploaded");
 
   // C3: at ten days a maintenance wake runs and is invisible: stopped throughout, its activity and update times unchanged.

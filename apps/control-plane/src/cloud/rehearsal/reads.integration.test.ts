@@ -7,6 +7,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { resetMigratedTestDatabase } from "../../test-database.js";
 import { REHEARSAL_READS, type ReadSeed } from "../__fixtures__/rehearsal-reads.js";
 import { liveDatabase, type DatabaseClient } from "./live.js";
+import { BACKUP_STATE } from "./stage-retention.js";
 
 const d = process.env.TEST_DATABASE_URL ? describe : describe.skip;
 
@@ -83,5 +84,21 @@ d("every rehearsal read, as the read role (integration)", () => {
     } finally { await database.close(); }
     expect(blind).toEqual([]);
     expect(REHEARSAL_READS.length).toBeGreaterThanOrEqual(28);
+  });
+
+  it("reads a backup fork's result from the workspace row: its maintenance-wakes row is never finished", async () => {
+    const s = await seed();
+    // As the product leaves it (store.ts beginCheckpointFork inserts the row; nothing finishes it), with this stop's backup saved.
+    await pool.query("UPDATE cloud_v2_maintenance_wakes SET outcome = NULL, finished_at = NULL WHERE workspace_id = $1 AND kind = 'backup_fork'", [s.workspace]);
+    await pool.query(`UPDATE cloud_v2_workspaces SET checkpoint_object = 'cloud-v2/checkpoints/' || id::text || '/' || gen_random_uuid()::text || '.zck',
+      checkpoint_key = '{"v":1}'::jsonb, checkpoint_sha256 = repeat('a', 64), checkpoint_bytes = 4737,
+      checkpoint_stop_generation = stop_generation, checkpoint_saved_at = clock_timestamp() WHERE id = $1`, [s.workspace]);
+    const database = reader();
+    try {
+      expect(await database.read(BACKUP_STATE, [s.workspace])).toEqual([{ forks: 1, backed_up: true, fork_gone: true }]);
+      // The statement the stage waited on before: it never sees this backup.
+      expect(await database.read(`SELECT count(*)::int AS forks FROM cloud_v2_maintenance_wakes
+        WHERE workspace_id = $1::uuid AND kind = 'backup_fork' AND outcome = 'stopped'`, [s.workspace])).toEqual([{ forks: 0 }]);
+    } finally { await database.close(); }
   });
 });

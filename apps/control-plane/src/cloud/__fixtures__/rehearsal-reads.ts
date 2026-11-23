@@ -2,6 +2,7 @@
 // seeded dataset in rehearsal/reads.integration.test.ts. A unit test (rehearsal.test.ts) checks that every statement the
 // stages, cleanup and --plan send is listed here, so a new read cannot skip the read-role test.
 import { COPY_OF_FORK } from "../rehearsal/stage-projects.js";
+import { BACKUP_STATE } from "../rehearsal/stage-retention.js";
 
 export type ReadSeed = {
   user: string; owner: string; org: string; project: string; workspace: string; other: string; build: string; startedAt: string; prefix: string;
@@ -33,8 +34,7 @@ export const REHEARSAL_READS: CatalogRead[] = [
   // stage-retention.ts
   { name: "retention probes", text: `SELECT id::text AS id, backup_probe, backup_probe_generation = stop_generation AS current_probe,
       worker_off_unverified_at IS NULL AS worker_off FROM cloud_v2_workspaces WHERE id = ANY($1::uuid[])`, values: s => [[s.workspace]] },
-  { name: "retention backup forks", text: `SELECT count(*)::int AS forks FROM cloud_v2_maintenance_wakes
-      WHERE workspace_id = $1::uuid AND kind = 'backup_fork' AND outcome = 'stopped'`, values: s => [s.workspace], sees: positive("forks") },
+  { name: "retention backup state", text: BACKUP_STATE, values: s => [s.workspace], sees: positive("forks") },
   { name: "retention wakes", text: `SELECT count(*)::int AS wakes FROM cloud_v2_maintenance_wakes
       WHERE workspace_id = ANY($1::uuid[]) AND kind = 'wake' AND outcome = 'stopped'`, values: s => [[s.workspace]], sees: positive("wakes") },
   { name: "retention scrubs", text: "SELECT id::text AS id, archive_scrub FROM cloud_v2_workspaces WHERE id = ANY($1::uuid[])", values: s => [[s.workspace]] },

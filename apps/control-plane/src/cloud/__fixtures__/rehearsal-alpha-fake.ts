@@ -639,7 +639,10 @@ export class FakeAlpha {
     if (text.includes("FROM cloud_v2_ready_copy_forks")) return rows([{ forks: this.forks.has(String(values[0])) ? 1 : 0 }]);
     if (text.includes("worker_off_unverified_at IS NULL AS worker_off")) return rows(ids.map(id => ({ id, backup_probe: this.workspaces.get(id)?.probe ?? null,
       current_probe: true, worker_off: this.workerOff })));
-    if (text.includes("kind = 'backup_fork'")) return rows([{ forks: this.workspaces.get(String(values[0]))?.backup ? 1 : 0 }]);
+    if (text.includes("AS fork_gone")) {
+      const backup = this.workspaces.get(String(values[0]))?.backup === true;
+      return rows([{ forks: backup ? 1 : 0, backed_up: backup, fork_gone: true }]);
+    }
     if (text.includes("kind = 'wake'")) return rows([{ wakes: ids.reduce((sum, id) => sum + (this.workspaces.get(id)?.wakes ? 1 : 0), 0) }]);
     if (text.includes("archive_scrub FROM")) return rows(ids.map(id => ({ id, archive_scrub: this.workspaces.get(id)?.scrub ?? null })));
     if (text.includes("information_schema.tables")) return rows([{ present: this.s4 ? 1 : 0 }]);
