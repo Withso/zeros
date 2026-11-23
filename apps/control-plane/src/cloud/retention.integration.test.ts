@@ -169,6 +169,9 @@ d("cloud v2 retention", () => {
   const row = async () => (await pool.query(`SELECT state, boat_sandbox_id, stopped_at, retention_started_at, backup_probe, backup_probe_generation, stop_generation,
     checkpoint_object, checkpoint_stop_generation, checkpoint_retry_fork, checkpoint_retry_exhausted_at, restore_pending, backup_forked_at
     FROM cloud_v2_workspaces WHERE id=$1`, [id])).rows[0];
+  /** The workspace's backup-fork maintenance records, oldest first: how each fork's machine time ended. */
+  const forkRecords = async () => (await pool.query(`SELECT outcome, finished_at IS NOT NULL AS finished FROM cloud_v2_maintenance_wakes
+    WHERE workspace_id = $1 AND kind = 'backup_fork' ORDER BY started_at`, [id])).rows;
   /** The recorded stop and retention start, `ms` earlier. */
   const earlier = (ms: number) => pool.query(`UPDATE cloud_v2_workspaces SET stopped_at=stopped_at - make_interval(secs => $2::double precision / 1000),
     retention_started_at=retention_started_at - make_interval(secs => $2::double precision / 1000),
@@ -245,6 +248,7 @@ d("cloud v2 retention", () => {
     expect(fork.state).toBe("deleted");
     expect((await row()).checkpoint_retry_exhausted_at).toBeInstanceOf(Date);
     expect(errors.some(line => line.includes("backup fork refused: its worker unit is on"))).toBe(true);
+    expect(await forkRecords()).toEqual([{ outcome: "failed", finished: true }]);
   });
 
   const lostWork = async () => (await store.get(id, user)).lostWork;
@@ -644,6 +648,8 @@ d("cloud v2 retention", () => {
     expect(saved).toMatchObject({ checkpoint_stop_generation: saved.stop_generation, checkpoint_retry_fork: null });
     expect(saved.backup_forked_at).toBeInstanceOf(Date);
     expect([...archives.get(saved.checkpoint_object)!.keys()]).toEqual([`${path("api")}/UNPUSHED`]);
+    // Its maintenance record ends with the fork: it backed up this stop.
+    expect(await forkRecords()).toEqual([{ outcome: "stopped", finished: true }]);
 
     // Boat loses the VM; opening it restores onto a fork of the project's ready copy.
     boat.machine(vm)!.state = "deleted";
@@ -783,10 +789,12 @@ d("cloud v2 retention", () => {
     boat.loseNextReply("delete");
     await lifecycle().tick();
     const forkId = [...boat.machines.values()].find(machine => machine.source === vm)!.id;
-    // Boat deleted it but the reply was lost: the record stays until a later scan confirms.
+    // Boat deleted it but the reply was lost: the record stays until a later scan confirms, and so does its machine time.
     expect((await row()).checkpoint_retry_fork).toMatchObject({ sandboxId: forkId });
+    expect(await forkRecords()).toEqual([{ outcome: null, finished: false }]);
     await lifecycle().tick();
     expect((await row()).checkpoint_retry_fork).toBeNull();
+    expect(await forkRecords()).toEqual([{ outcome: "stopped", finished: true }]);
     expect(boat.machine(forkId)!.state).toBe("deleted");
 
     // A fork request whose reply never came, past Boat's key window: nothing can find it.
