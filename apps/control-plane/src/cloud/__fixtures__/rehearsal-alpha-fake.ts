@@ -46,6 +46,10 @@ export class FakeAlpha {
   sharedBase = false;
   /** What Boat reports as a machine's last snapshot attempt (the rehearsal prints it). */
   snapshotStatus = "completed";
+  /** The account's connected agents (GET /v1/organizations/<id>/agent-connections). */
+  agentConnections: string[] = ["claude"];
+  /** What AGENT_NEW_SESSION answers instead of a session (e.g. an error frame for an agent with no credential). */
+  sessionReply: ({ type: string } & Record<string, unknown>) | null = null;
   /** A create that fell back to a direct clone: no fork record. */
   forkFallback = false;
   /** A create whose fork lacked a checkout: cloned directly, and the copy it forked marked stale (#1263's distrust). */
@@ -215,6 +219,8 @@ export class FakeAlpha {
       return this.reply(200, { generation: "a".repeat(64), selectedMethod: pat ? "pat" : null,
         methods: { "github-app": { configured: false }, pat: { configured: pat } }, appAvailable: true, installUrl: null });
     }
+    if (parts[1] === "organizations" && parts[3] === "agent-connections" && method === "GET")
+      return this.reply(200, { credentials: [], connections: ["claude", "codex", "cursor"].map(provider => ({ provider, connected: this.agentConnections.includes(provider) })) });
     if (url.pathname === "/v1/me") return this.reply(200, { user: { id: this.userId }, capabilities: { pro: this.pro() },
       organizations: [{ id: this.organizationId, slug: "user-2", name: "Zeros User-2", role: "owner", isPersonal: true, seat: this.pro() ? "pro" : "free" }] });
     if (parts[2] === "organizations" && parts[4] === "cloud-projects") {
@@ -400,6 +406,7 @@ export class FakeAlpha {
       return {
         op: (name, params) => this.counted(() => op(name, params)),
         request: (type, fields) => this.counted(() => {
+          if (type === "AGENT_NEW_SESSION" && this.sessionReply) return this.sessionReply;
           if (type === "AGENT_NEW_SESSION") { const sessionId = randomUUID(); sessions.set(sessionId, String(fields.chatId)); return { type: "AGENT_SESSION_CREATED", session: { sessionId } }; }
           if (type === "PTY_CREATE") return { type: "PTY_CREATED", sessionId: String(fields.sessionId), cwd: String(fields.cwd) };
           if (type === "AGENT_PROMPT") {

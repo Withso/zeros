@@ -3,7 +3,7 @@
 // request in the second repository and a rewind across both, and every copy machine gone after the projects.
 import { z } from "zod";
 import { type Bridge, type StageContext } from "./contract.js";
-import { reportMachineSnapshot } from "./steps.js";
+import { reportMachineSnapshot, skipTurns, turnAgent, type TurnAgent } from "./steps.js";
 import { openBridge, answered, check, clearEnvironment, copyMachines, ENVIRONMENT_PATH, seedEnvironments, createProject, createWorkspace, deleteProject, deleteWorkspace, getWorkspace, lifecycle,
   openAndClosePull, parse, readFile, turn, until, waitCopyReady, waitState, workspaceRoot, writeFile, type WorkspaceDocument } from "./steps.js";
 
@@ -11,6 +11,8 @@ export async function stageProjects(ctx: StageContext): Promise<Record<string, n
   const { prefix } = ctx.state, one = ctx.repositories.one, two = ctx.repositories.two;
   check(two, "repository_two", "missing");
   const counts: Record<string, number> = { workspaces: 0, pulls: 0, turns: 0, copiesGone: 0 };
+  // The agent every turn of this stage uses (its account's first connected one), or none: each turn skipped and counted.
+  let agent: TurnAgent | null = null;
 
   // A1: the copy.
   ctx.step("project_one");
@@ -32,9 +34,12 @@ export async function stageProjects(ctx: StageContext): Promise<Record<string, n
   try {
     const root = await workspaceRoot(bridge, workspace.id), scope = { workspaceId: workspace.id, cwd: root };
     ctx.step("turn");
-    await turn(ctx, bridge, workspace, root, `${prefix}chat-ok`, "Reply with exactly: ok. Do not use tools or read files.", "turn");
-    check(await answered(bridge, `${prefix}chat-ok`, "ok", "turn_answer"), "turn_answer", "no_answer");
-    counts.turns!++;
+    agent = await turnAgent(ctx);
+    if (agent) {
+      await turn(ctx, bridge, workspace, root, `${prefix}chat-ok`, "Reply with exactly: ok. Do not use tools or read files.", "turn", agent);
+      check(await answered(bridge, `${prefix}chat-ok`, "ok", "turn_answer"), "turn_answer", "no_answer");
+      counts.turns!++;
+    } else skipTurns(counts, 1);
     ctx.step("terminal");
     await terminalRoundTrip(ctx, bridge, scope, `${prefix}pty`, workspace.branch);
     ctx.step("files");
@@ -121,20 +126,23 @@ export async function stageProjects(ctx: StageContext): Promise<Record<string, n
     // A rewind across both: each turn writes a file in a different repository; resetting from the second
     // turn removes its file in R2 and keeps the first's in R1.
     ctx.step("rewind");
-    const chatId = `${prefix}chat-rewind`;
-    const firstFile = `${first.checkoutPath}/${prefix}rewind-1.txt`, secondFile = `${second.checkoutPath}/${prefix}rewind-2.txt`;
-    await turn(ctx, bridge, pair, root, chatId, `Create the file ${firstFile} containing the single line one. Then reply with exactly: ok.`, "rewind_turn_1");
-    await turn(ctx, bridge, pair, root, chatId, `Create the file ${secondFile} containing the single line two. Then reply with exactly: ok.`, "rewind_turn_2");
-    counts.turns! += 2;
-    check(await readFile(bridge, scope, firstFile, "rewind_file_1") !== null, "rewind_file_1", "not_written");
-    check(await readFile(bridge, scope, secondFile, "rewind_file_2") !== null, "rewind_file_2", "not_written");
-    const turns = parse(z.object({ turns: z.array(z.object({ chatId: z.string(), turnId: z.string(), startedAt: z.number() }).passthrough()) }),
-      await bridge.op("turns.list", { ...scope, limit: 100 }), "rewind_turns").turns
-      .filter(row => row.chatId === chatId).sort((left, right) => left.startedAt - right.startedAt);
-    check(turns.length === 2, "rewind_turns", `count_${turns.length}`);
-    await bridge.op("turns.reset", { ...scope, chatId, turnId: turns[1]!.turnId, mode: "filesAndTranscript" });
-    check(await readFile(bridge, scope, secondFile, "rewind_after_2") === null, "rewind_after_2", "kept");
-    check(await readFile(bridge, scope, firstFile, "rewind_after_1") !== null, "rewind_after_1", "removed");
+    if (!agent) skipTurns(counts, 2);
+    else {
+      const chatId = `${prefix}chat-rewind`;
+      const firstFile = `${first.checkoutPath}/${prefix}rewind-1.txt`, secondFile = `${second.checkoutPath}/${prefix}rewind-2.txt`;
+      await turn(ctx, bridge, pair, root, chatId, `Create the file ${firstFile} containing the single line one. Then reply with exactly: ok.`, "rewind_turn_1", agent);
+      await turn(ctx, bridge, pair, root, chatId, `Create the file ${secondFile} containing the single line two. Then reply with exactly: ok.`, "rewind_turn_2", agent);
+      counts.turns! += 2;
+      check(await readFile(bridge, scope, firstFile, "rewind_file_1") !== null, "rewind_file_1", "not_written");
+      check(await readFile(bridge, scope, secondFile, "rewind_file_2") !== null, "rewind_file_2", "not_written");
+      const turns = parse(z.object({ turns: z.array(z.object({ chatId: z.string(), turnId: z.string(), startedAt: z.number() }).passthrough()) }),
+        await bridge.op("turns.list", { ...scope, limit: 100 }), "rewind_turns").turns
+        .filter(row => row.chatId === chatId).sort((left, right) => left.startedAt - right.startedAt);
+      check(turns.length === 2, "rewind_turns", `count_${turns.length}`);
+      await bridge.op("turns.reset", { ...scope, chatId, turnId: turns[1]!.turnId, mode: "filesAndTranscript" });
+      check(await readFile(bridge, scope, secondFile, "rewind_after_2") === null, "rewind_after_2", "kept");
+      check(await readFile(bridge, scope, firstFile, "rewind_after_1") !== null, "rewind_after_1", "removed");
+    }
   } finally { bridge.close(); }
   await ctx.ports.github.deleteBranch(two, `${prefix}two`);
   await ctx.ports.github.deleteBranch(one, `${prefix}two`).catch(() => undefined);

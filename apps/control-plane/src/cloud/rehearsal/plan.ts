@@ -7,7 +7,7 @@ import { RehearsalFailure, STAGE_NEEDS_ACCOUNT, stageSwitches, type Api, type Da
 import { safeLine } from "./guard.js";
 import { FIXTURE_TWO } from "./stage-provision.js";
 import { STAGE_RUNNERS } from "./runner.js";
-import { call, parse } from "./steps.js";
+import { call, connectedAgents, parse, type TurnAgent } from "./steps.js";
 
 export type AccountSummary = {
   label: string;
@@ -21,7 +21,12 @@ export type AccountSummary = {
   githubIdentity: boolean;
   /** The account's Pro, and its Personal organization: the Personal route's owner. */
   pro: boolean; personal: { id: string; seat: string | null } | null;
+  /** The account's connected agents (turn preference order) in its Personal organization and in the probe organization;
+   * null when not a member or the read failed. A turn needs one: none runs without its person's credential. */
+  agents: { personal: TurnAgent[] | null; probe: TurnAgent[] | null };
 };
+
+const agentsIn = (api: Api, organizationId: string) => connectedAgents(api, organizationId, "account_agents").catch(() => null);
 
 /** Each read names its step, so a failure says which (account_projects http_403, account_github_identity schema:...). */
 export async function readAccount(api: Api, label: string, probeOrganization: string, fixtureOwner: string): Promise<AccountSummary> {
@@ -34,6 +39,7 @@ export async function readAccount(api: Api, label: string, probeOrganization: st
     label, organizations: me.organizations.map(org => ({ name: org.name, role: org.role ?? "none", personal: org.isPersonal === true, probe: org.id === probeOrganization })),
     admin: false, connections: { organization: 0, personal: 0, logins: [] }, activeMachines: 0, fixtureConnection: false, githubIdentity: false,
     pro: me.capabilities?.pro === true, personal: own ? { id: own.id, seat: own.seat ?? null } : null,
+    agents: { personal: own ? await agentsIn(api, own.id) : null, probe: probe ? await agentsIn(api, probe.id) : null },
   };
   if (!probe) return summary;
   summary.admin = parse(z.object({ canCreateOrganization: z.boolean() }).passthrough(),
@@ -63,7 +69,21 @@ export function accountLines(summary: AccountSummary): string[] {
       (summary.connections.logins.length ? ` (${summary.connections.logins.join(", ")})` : ""),
     `  fixture connection active: ${summary.fixtureConnection ? "yes" : "no"}; own github sign-in: ${summary.githubIdentity ? "yes" : "no"}; active machines ${summary.activeMachines}`,
     `  pro: ${summary.pro ? "yes" : "no"}; personal organization: ${summary.personal ? `yes, cloud seat ${summary.personal.seat ?? "none"}` : "no"}`,
+    `  connected agents: personal ${agentList(summary.agents.personal)}; probe ${agentList(summary.agents.probe)}`,
   ].map(safeLine);
+}
+const agentList = (agents: TurnAgent[] | null) => agents === null ? "unread" : agents.length ? agents.join(", ") : "none";
+
+/** What stage projects' three turns will do for the selected account on the route: which agent runs them, or that each is
+ * skipped and counted (turn_skipped:no_agent_credential), and what would cover them. Printed before any machine starts. */
+export function turnLine(summary: AccountSummary | { failed: string }, owner: "personal" | "organization", label: string): string {
+  if ("failed" in summary) return `turns: unknown (account ${label} unread: ${summary.failed})`;
+  const agents = owner === "personal" ? summary.agents.personal : summary.agents.probe;
+  const where = owner === "personal" ? "its Personal organization" : "the probe organization";
+  if (agents === null) return `turns: unknown (account ${label}'s agent connections in ${where} unread)`;
+  if (agents.length) return `turns: agent ${agents[0]} (account ${label}'s first connected agent in ${where})`;
+  return `turns: none connected for account ${label} in ${where}: stage projects skips its 3 turns (turn_skipped:no_agent_credential, counted, not passed);`
+    + " to cover them, connect a Claude, Codex or Cursor credential for that account there";
 }
 
 /** What the Personal route needs besides an account: the token for the account's own GitHub sign-in, and the one

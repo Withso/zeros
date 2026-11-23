@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { RehearsalFailure, type Api, type ApiReply, type Bridge, type StageContext } from "./contract.js";
 import { prefixed } from "./guard.js";
+import { GATE0_DEFAULT_MODELS } from "../gate0.js";
 
 export function parse<T>(schema: z.ZodType<T>, value: unknown, step: string): T {
   const result = schema.safeParse(value);
@@ -282,13 +283,44 @@ export async function readFile(bridge: Bridge, scope: Record<string, unknown>, p
     return null;
   }
 }
+/** The agents a turn may use, in order of preference. Each runs only on a credential its person connected for the
+ * organization (Claude and Cursor receive it; Codex goes through the control plane's proxy with it): none runs without one. */
+export const TURN_AGENTS = ["claude", "codex", "cursor"] as const;
+export type TurnAgent = typeof TURN_AGENTS[number];
+
+/** The signed-in account's connected agents in an organization, in preference order: the read the Alpha probe and the
+ * runtime canary make before their own turns (GET /v1/organizations/<id>/agent-connections). */
+export async function connectedAgents(api: Api, organizationId: string, step: string): Promise<TurnAgent[]> {
+  const rows = parse(z.object({ connections: z.array(z.object({ provider: z.string(), connected: z.boolean() }).passthrough()) }).passthrough(),
+    (await call(api, "GET", `/v1/organizations/${organizationId}/agent-connections`, step)).body, step).connections;
+  return TURN_AGENTS.filter(agent => rows.some(row => row.provider === agent && row.connected));
+}
+
+/** The agent this stage's turns use, noted (`turn_agent:<agent>`), or null with `turn_skipped:no_agent_credential`: the
+ * caller then skips each turn and counts it in `turnsSkipped`, never as a pass. */
+export async function turnAgent(ctx: StageContext): Promise<TurnAgent | null> {
+  const agent = (await connectedAgents(ctx.ports.api, ctx.state.organizationId, "turn_agent"))[0] ?? null;
+  ctx.note(agent ? `turn_agent:${agent}` : "turn_skipped:no_agent_credential");
+  return agent;
+}
+export function skipTurns(counts: Record<string, number>, turns: number): void { counts.turnsSkipped = (counts.turnsSkipped ?? 0) + turns; }
+
+/** A reply frame that is not the one expected, named by closed values only: its type and, when it carries one, its code. */
+export function frameCode(frame: { type: string } & Record<string, unknown>): string {
+  const closed = (value: unknown) => typeof value === "string" && /^[A-Za-z0-9_.-]{1,48}$/.test(value) ? value : "other";
+  const error = frame.error as { code?: unknown } | undefined;
+  const code = typeof frame.code === "string" ? frame.code : typeof error?.code === "string" ? error.code : undefined;
+  return `frame:${closed(frame.type)}${code === undefined ? "" : `:${closed(code)}`}`.slice(0, 80);
+}
+
 /** One agent turn that must complete, over the HTTPS outbox when the workspace advertises it, else the bridge. */
-export async function turn(ctx: StageContext, bridge: Bridge, workspace: WorkspaceDocument, root: string, chatId: string, text: string, step: string):
-  Promise<void> {
-  const agentId = "claude", model = "claude-haiku-5-5", scope = { workspaceId: workspace.id, cwd: root };
+export async function turn(ctx: StageContext, bridge: Bridge, workspace: WorkspaceDocument, root: string, chatId: string, text: string, step: string,
+  agentId: TurnAgent): Promise<void> {
+  const model = GATE0_DEFAULT_MODELS[agentId], scope = { workspaceId: workspace.id, cwd: root };
   await bridge.op("chats.upsert", { chat: { id: chatId, folder: root, agentId, model, effort: "low", title: chatId, createdAt: ctx.ports.clock.now() } });
-  const opened = parse(z.object({ type: z.literal("AGENT_SESSION_CREATED"), session: z.object({ sessionId: z.string() }) }),
-    await bridge.request("AGENT_NEW_SESSION", { ...scope, agentId, chatId }, `${step}_session`), `${step}_session`);
+  const reply = parse(Frame, await bridge.request("AGENT_NEW_SESSION", { ...scope, agentId, chatId }, `${step}_session`), `${step}_session`);
+  if (reply.type !== "AGENT_SESSION_CREATED") throw new RehearsalFailure(`${step}_session`, frameCode(reply));
+  const opened = parse(z.object({ type: z.literal("AGENT_SESSION_CREATED"), session: z.object({ sessionId: z.string() }) }), reply, `${step}_session`);
   const prompt = [{ type: "text", text }];
   if (workspace.capabilities?.promptOutbox === 1) {
     const sent = parse(z.object({ receipt: z.object({ userMessageId: z.string() }).passthrough() }), (await call(ctx.ports.api, "POST",
@@ -302,7 +334,7 @@ export async function turn(ctx: StageContext, bridge: Bridge, workspace: Workspa
     check(state === "completed", step, `turn_${state}`);
   } else {
     const done = parse(Frame, await bridge.request("AGENT_PROMPT", { agentId, sessionId: opened.session.sessionId, userMessageId: randomUUID(), prompt }, step), step);
-    check(done.type === "AGENT_PROMPT_COMPLETE", step, `reply_${done.type}`.slice(0, 60));
+    if (done.type !== "AGENT_PROMPT_COMPLETE") throw new RehearsalFailure(step, frameCode(done));
   }
 }
 /** Whether a chat's transcript holds an agent reply equal to `marker` (models add a full stop about half the time). */

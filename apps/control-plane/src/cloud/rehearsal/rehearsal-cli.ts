@@ -16,7 +16,7 @@ import { assertRepository, safeLine } from "./guard.js";
 import { checkGithubToken, tokenLines, liveApi, liveBoat, liveBridge, liveClock, liveDatabase, liveGithub, liveGithubSignIn, liveGithubToken, livePro, liveRelease, liveStorage,
   tokenRefusal, liveReleaseIdentity, liveRuntimeQualification } from "./live.js";
 import { errorCode } from "./steps.js";
-import { accountLines, PERSONAL_ROUTE_GAPS, preconditionLines, type PreconditionFacts, platformOwners, probeDiagnostics, proActor, readAccount, refusal, resolveProbe, writeLines,
+import { accountLines, turnLine, PERSONAL_ROUTE_GAPS, preconditionLines, type PreconditionFacts, platformOwners, probeDiagnostics, proActor, readAccount, refusal, resolveProbe, writeLines,
   type AccountSummary } from "./plan.js";
 import { cleanup, cleanupNeedsAccount, DEFAULT_RUN_CAP, inventoryLines, NO_ACCOUNT, runStages, stageContext } from "./runner.js";
 import { FIXTURE_TWO } from "./stage-provision.js";
@@ -208,6 +208,7 @@ async function main(argv: string[]): Promise<number> {
         const selected = summaries.get(String(args.account)) ?? { failed: "account:not_configured" };
         const otherLabel = String(args.other ?? accounts.find(row => row.label !== "owner" && row.label !== String(args.account))?.label ?? "none");
         log(`selected account ${args.account}; second account ${otherLabel}; waiting account ${args.waitingAccount} (${waitingAccount}); repositories R1 ${one}, R2 ${two}`);
+        if (args.stages.includes("projects")) log(turnLine(selected, args.owner, String(args.account)));
         facts.sharedBaseInUse = await reads.read(`SELECT count(*)::int AS n FROM cloud_v2_computers c
           JOIN cloud_v2_computer_builds b ON b.id = c.active_build_id AND b.org_id = c.org_id WHERE b.base_shared`).then(rows => Number(rows[0]?.n ?? 0), () => null);
         facts.sharedBase = await sharedBaseFacts(reads, facts.release?.workerSha256 ?? null,

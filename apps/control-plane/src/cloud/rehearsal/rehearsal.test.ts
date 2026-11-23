@@ -10,10 +10,10 @@ import { REHEARSAL_READS } from "../__fixtures__/rehearsal-reads.js";
 import { shiftClock } from "./clock.js";
 import { RehearsalFailure, type Database, type RehearsalState, type StageName } from "./contract.js";
 import { assertRepository, safeLine } from "./guard.js";
-import { accountLines, PERSONAL_ROUTE_GAPS, preconditionLines, readAccount, refusal, writeLines, type PreconditionFacts } from "./plan.js";
+import { accountLines, turnLine, PERSONAL_ROUTE_GAPS, preconditionLines, readAccount, refusal, writeLines, type PreconditionFacts } from "./plan.js";
 import { cleanup, cleanupNeedsAccount, inventoryLines, NO_ACCOUNT, readInventory, runStages, stageContext } from "./runner.js";
 import { parseArguments, sharedBaseFacts } from "./rehearsal-cli.js";
-import { createProject, createWorkspace, openBridge, waitState } from "./steps.js";
+import { createProject, createWorkspace, frameCode, openBridge, waitState } from "./steps.js";
 import { FIXTURE_TWO } from "./stage-provision.js";
 import { loadState, newState, saveState } from "./state.js";
 import { checkGithubToken, databaseErrorCode, liveDatabase, OUTSIDE_PROBE_LIMIT, SET_APP_SYSTEM, tokenLines, tokenRefusal, type DatabaseClient } from "./live.js";
@@ -129,7 +129,7 @@ describe("rehearsal stages against a fake Alpha", () => {
     // Boat's record of the copy's archive is printed: its status as a note, its lifetime and attempt times as counts.
     expect(state.stages.projects?.counts).toEqual({ workspaces: 2, pulls: 2, turns: 3, copiesGone: 2, environments: 2,
       copyLifetimeSeconds: 60, copySnapshotAttemptAfterCreateSeconds: 50, copySnapshotCompletedAfterCreateSeconds: 60, copyHydrated: 1 });
-    expect(state.stages.projects?.notes).toEqual(["copy_snapshot:completed", "copy_archive:completed", "environment:seeded"]);
+    expect(state.stages.projects?.notes).toEqual(["copy_snapshot:completed", "copy_archive:completed", "turn_agent:claude", "environment:seeded"]);
     expect(state.stages.retention?.notes).toEqual(["environment_case:seeded_edited", "wake_w_snapshot:completed", "wake_k_snapshot:completed"]);
     // W opened on its own machine after the wakes' stops still holds the work written before the person's stop.
     expect(state.stages.retention?.counts).toMatchObject({ ownDiskKept: 1 });
@@ -194,6 +194,42 @@ describe("rehearsal stages against a fake Alpha", () => {
     expect(state.stages.projects?.counts).toMatchObject({ forkFallback: 1 });
   });
 
+  it("names a session reply that is not a session by its type and code, closed values only", async () => {
+    const { alpha, ctx, lines, options } = setup();
+    alpha.sessionReply = { type: "ERROR", code: "agent_credential_missing", message: "secret-ish text" };
+    expect(await runStages(ctx, ["projects"], options)).toBe(false);
+    expect(lines.filter(line => line.startsWith("stage "))).toEqual(["stage projects: failed turn_session frame:ERROR:agent_credential_missing"]);
+    expect(frameCode({ type: "AGENT_ERROR", error: { code: "auth failed: token=abc" } })).toBe("frame:AGENT_ERROR:other");
+    expect(frameCode({ type: "AGENT_PROMPT_COMPLETE" })).toBe("frame:AGENT_PROMPT_COMPLETE");
+  });
+
+  it("skips and counts every turn when the account has no connected agent, never passing one", async () => {
+    const { alpha, state, ctx, options } = setup();
+    alpha.agentConnections = [];
+    expect(await runStages(ctx, ["projects"], options)).toBe(true);
+    expect(state.stages.projects?.notes).toContain("turn_skipped:no_agent_credential");
+    expect(state.stages.projects?.counts).toMatchObject({ turns: 0, turnsSkipped: 3 });
+    expect(alpha.turns).toEqual([]);
+  });
+
+  it("runs its turns on the account's first connected agent, in the order claude, codex, cursor", async () => {
+    const { alpha, state, ctx, options } = setup();
+    alpha.agentConnections = ["cursor", "codex"];
+    expect(await runStages(ctx, ["projects"], options)).toBe(true);
+    expect(state.stages.projects?.notes).toContain("turn_agent:codex");
+    expect(state.stages.projects?.counts).toMatchObject({ turns: 3 });
+  });
+
+  it("says in --plan which agent runs the turns, or that they are skipped and what would cover them", () => {
+    const base = { label: "2", organizations: [], admin: false, connections: { organization: 0, personal: 0, logins: [] }, activeMachines: 0,
+      fixtureConnection: false, githubIdentity: false, pro: true, personal: { id: "p", seat: "pro" } };
+    expect(turnLine({ ...base, agents: { personal: ["claude"], probe: null } }, "personal", "2"))
+      .toBe("turns: agent claude (account 2's first connected agent in its Personal organization)");
+    expect(turnLine({ ...base, agents: { personal: [], probe: null } }, "personal", "2")).toMatch(/^turns: none connected .*turn_skipped:no_agent_credential.*connect a Claude, Codex or Cursor credential/);
+    expect(turnLine({ ...base, agents: { personal: [], probe: null } }, "organization", "2")).toBe("turns: unknown (account 2's agent connections in the probe organization unread)");
+    expect(turnLine({ failed: "sign_in:http_401" }, "personal", "2")).toBe("turns: unknown (account 2 unread: sign_in:http_401)");
+  });
+
   it("notes a create whose fork lacked a checkout (the copy distrusted and cloned directly), and the copy's archive record", async () => {
     const { alpha, state, ctx, options } = setup();
     alpha.copyDistrusted = true; alpha.copyArchive = "completed";
@@ -254,7 +290,7 @@ describe("rehearsal environments and the worker-off record", () => {
     const { alpha, state, ctx, options } = setup();
     alpha.environments.set(alpha.repositoryId(R1), { revision: 3, files: new Map([[".env", "theirs"]]) });
     expect(await runStages(ctx, ["projects", "retention"], options)).toBe(true);
-    expect(state.stages.projects?.notes).toEqual(["copy_snapshot:completed", "copy_archive:completed", "environment_skipped:environment_exists"]);
+    expect(state.stages.projects?.notes).toEqual(["copy_snapshot:completed", "copy_archive:completed", "turn_agent:claude", "environment_skipped:environment_exists"]);
     expect(state.stages.projects?.counts?.environments).toBeUndefined();
     expect(state.stages.retention?.notes).toEqual(["environment_case:hand_made_ignored", "environment_skipped:environment_exists", "wake_w_snapshot:completed", "wake_k_snapshot:completed"]);
     expect(alpha.environments.get(alpha.repositoryId(R1))).toEqual({ revision: 3, files: new Map([[".env", "theirs"]]) });
@@ -266,7 +302,7 @@ describe("rehearsal environments and the worker-off record", () => {
     const { alpha, state, ctx, options } = setup();
     alpha.ignoresEnv = false;
     expect(await runStages(ctx, ["projects"], options)).toBe(true);
-    expect(state.stages.projects?.notes).toEqual(["copy_snapshot:completed", "copy_archive:completed", "environment_skipped:path_not_ignored"]);
+    expect(state.stages.projects?.notes).toEqual(["copy_snapshot:completed", "copy_archive:completed", "turn_agent:claude", "environment_skipped:path_not_ignored"]);
     expect(alpha.writes.filter(write => write.startsWith("PATCH"))).toEqual([]);
   });
 
