@@ -455,7 +455,7 @@ export class FakeAlpha {
         ignores: () => this.counted(() => this.ignoresEnv),
       },
       database: {
-        read: (text, values) => this.counted(() => { this.tick(); return this.sql(text, values ?? []).rows; }),
+        read: (text, values) => this.counted(() => { this.tick(); this.readTexts.add(text); return this.sql(text, values ?? []).rows; }),
         transaction: work => this.counted(() => { this.transactions++; return work((text, values) => Promise.resolve(this.sql(text, values ?? []))); }),
         close: () => Promise.resolve(),
       },
@@ -468,6 +468,9 @@ export class FakeAlpha {
       ...overrides,
     };
   }
+
+  /** Every statement read through the read role (rehearsal-reads.ts lists them all, for the read-role test). */
+  readonly readTexts = new Set<string>();
 
   /** The statements the rehearsal sends, recognized by shape. */
   sql(text: string, values: unknown[]): Awaited<ReturnType<Query>> {

@@ -6,8 +6,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Gate0Failure } from "../gate0.js";
 import { signInAccount, signInAll, type SignInDeps } from "./accounts.js";
 import { FakeAlpha } from "../__fixtures__/rehearsal-alpha-fake.js";
+import { REHEARSAL_READS } from "../__fixtures__/rehearsal-reads.js";
 import { shiftClock } from "./clock.js";
-import { RehearsalFailure, type RehearsalState, type StageName } from "./contract.js";
+import { RehearsalFailure, type Database, type RehearsalState, type StageName } from "./contract.js";
 import { assertRepository, safeLine } from "./guard.js";
 import { accountLines, PERSONAL_ROUTE_GAPS, preconditionLines, readAccount, refusal, writeLines, type PreconditionFacts } from "./plan.js";
 import { cleanup, cleanupNeedsAccount, inventoryLines, NO_ACCOUNT, readInventory, runStages, stageContext } from "./runner.js";
@@ -15,7 +16,7 @@ import { parseArguments, sharedBaseFacts } from "./rehearsal-cli.js";
 import { FIXTURE_TWO } from "./stage-provision.js";
 import { loadState, newState, saveState } from "./state.js";
 import { checkGithubToken, databaseErrorCode, liveDatabase, OUTSIDE_PROBE_LIMIT, SET_APP_SYSTEM, tokenLines, tokenRefusal, type DatabaseClient } from "./live.js";
-import { platformOwners } from "./plan.js";
+import { platformOwners, probeDiagnostics, proActor, resolveProbe } from "./plan.js";
 
 const R1 = "Withso/zeros-dev-fixture";
 const TIMING = { pollMs: 30_000, stateMs: 120_000, copyMs: 120_000, turnMs: 120_000, scanMs: 300_000, archiveScanMs: 3_900_000, idleStopMs: 2_100_000,
@@ -268,6 +269,32 @@ describe("rehearsal environments and the worker-off record", () => {
     expect(await runStages(ctx, ["retention"], options)).toBe(false);
     expect(lines).toContain("stage retention: failed stop_worker_off unverified");
     expect(ctx.state.stages.retention).toMatchObject({ ok: false, step: "stop_worker_off", code: "unverified" });
+  });
+});
+
+describe("rehearsal reads: every statement is in the read-role test's catalog", () => {
+  it("lists each statement the stages, cleanup and --plan's readers send", async () => {
+    const normal = (text: string) => text.replace(/\s+/g, " ").trim();
+    const catalog = new Set(REHEARSAL_READS.map(entry => normal(entry.text)));
+    const seen = new Set<string>();
+    // Every stage on the Personal route, then cleanup, against the fake.
+    const three = new FakeAlpha([R1]); three.githubIdentity = false;
+    const { alpha, ctx, options } = setup({ owner: "personal", waiting: three });
+    expect(await runStages(ctx, ["provision", "setup", "projects", "personal", "retention", "submodules", "waiting"],
+      { ...options, switches: new Set(["projects", "personal", "retention"] as const) })).toBe(true);
+    await cleanup(ctx, { log: () => undefined });
+    for (const text of [...alpha.readTexts, ...three.readTexts]) seen.add(normal(text));
+    // --plan's readers, through a database that records what it is asked.
+    const recording: Database = { read: async text => { seen.add(normal(text)); return [{ id: "abcdef12-0000-0000-0000-000000000000", present: true, n: 0 }]; },
+      transaction: async () => { throw new Error("no writes"); }, close: async () => {} };
+    await platformOwners(recording);
+    await resolveProbe(recording, "probe").catch(() => undefined);
+    await proActor(recording, "abcdef12");
+    await probeDiagnostics(recording, randomUUID(), randomUUID());
+    await sharedBaseFacts(recording, "b".repeat(64), async () => true);
+    const missing = [...seen].filter(text => !catalog.has(text));
+    expect(missing).toEqual([]);
+    expect(seen.size).toBeGreaterThan(15);
   });
 });
 
