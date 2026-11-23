@@ -158,13 +158,25 @@ export async function stageProjects(ctx: StageContext): Promise<Record<string, n
 /** The workspace's machine was forked from a ready copy: the fork record is complete, and Boat named it "<source> fork".
  * A create that fell back to a direct clone (no fork record, or a machine that is not a fork) is not hidden as a pass: it
  * is a note, fork_fallback, and a count. */
+/** The copy a workspace forked, as the server left it: `distrusted` when the create found a checkout missing from the fork,
+ * cloned directly and marked that copy stale (stale while the organization's base is still the one the copy was built
+ * from, so a new base's markStale is not mistaken for it), and what the provider said of the copy's archive. */
+export const COPY_OF_FORK = `SELECT c.stale AND c.computer_build_id IS NOT DISTINCT FROM co.active_build_id AS distrusted,
+    c.archive_snapshot->>'status' AS archive
+  FROM cloud_v2_ready_copy_forks f JOIN cloud_v2_ready_copies c ON c.id = f.copy_id LEFT JOIN cloud_v2_computers co ON co.org_id = c.org_id
+  WHERE f.workspace_id = $1::uuid AND f.completed_at IS NOT NULL`;
+
 async function forkedFromCopy(ctx: StageContext, workspace: WorkspaceDocument, counts: Record<string, number>): Promise<void> {
   check(workspace.boatSandboxId, "forked_from_copy", "no_machine");
   const rows = await ctx.ports.database.read(`SELECT count(*)::int AS forks FROM cloud_v2_ready_copy_forks
     WHERE workspace_id = $1::uuid AND completed_at IS NOT NULL`, [workspace.id]);
+  const copy = Number(rows[0]?.forks) === 1 ? (await ctx.ports.database.read(COPY_OF_FORK, [workspace.id]))[0] : undefined;
+  if (copy) ctx.note(`copy_archive:${typeof copy.archive === "string" ? copy.archive : "unrecorded"}`);
   const machine = await ctx.ports.boat.inspect(workspace.boatSandboxId);
-  if (Number(rows[0]?.forks) !== 1 || !machine?.name?.endsWith(" fork")) {
-    ctx.note(Number(rows[0]?.forks) !== 1 ? "fork_fallback:no_fork_record" : "fork_fallback:not_a_fork");
+  const fallback = Number(rows[0]?.forks) !== 1 ? "no_fork_record" : copy?.distrusted === true ? "copy_distrusted"
+    : !machine?.name?.endsWith(" fork") ? "not_a_fork" : null;
+  if (fallback) {
+    ctx.note(`fork_fallback:${fallback}`);
     counts.forkFallback = (counts.forkFallback ?? 0) + 1;
   }
 }

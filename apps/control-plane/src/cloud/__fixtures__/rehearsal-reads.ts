@@ -1,6 +1,8 @@
 // Every statement the rehearsal reads through its read role, exactly as its modules send them, with values from the
 // seeded dataset in rehearsal/reads.integration.test.ts. A unit test (rehearsal.test.ts) checks that every statement the
 // stages, cleanup and --plan send is listed here, so a new read cannot skip the read-role test.
+import { COPY_OF_FORK } from "../rehearsal/stage-projects.js";
+
 export type ReadSeed = {
   user: string; owner: string; org: string; project: string; workspace: string; other: string; build: string; startedAt: string; prefix: string;
   runtime: string; probeSlug: string;
@@ -21,6 +23,7 @@ export const REHEARSAL_READS: CatalogRead[] = [
   // stage-projects.ts and stage-submodules.ts
   { name: "projects fork record", text: `SELECT count(*)::int AS forks FROM cloud_v2_ready_copy_forks
     WHERE workspace_id = $1::uuid AND completed_at IS NOT NULL`, values: s => [s.workspace], sees: positive("forks") },
+  { name: "projects copy of the fork", text: COPY_OF_FORK, values: s => [s.workspace] },
   { name: "submodules copy result", text: `SELECT result FROM cloud_v2_ready_copies WHERE project_id = $1::uuid AND state = 'ready'
     ORDER BY generation DESC LIMIT 1`, values: s => [s.project] },
   { name: "submodules fork record", text: "SELECT count(*)::int AS forks FROM cloud_v2_ready_copy_forks WHERE workspace_id = $1::uuid AND completed_at IS NOT NULL",

@@ -48,6 +48,10 @@ export class FakeAlpha {
   snapshotStatus = "completed";
   /** A create that fell back to a direct clone: no fork record. */
   forkFallback = false;
+  /** A create whose fork lacked a checkout: cloned directly, and the copy it forked marked stale (#1263's distrust). */
+  copyDistrusted = false;
+  /** What the provider said of the copy's archive when it was promoted (cloud_v2_ready_copies.archive_snapshot). */
+  copyArchive: string | null = "completed";
   /** The organization's install script (#1260: with one, its base is its own build, never the shared one). */
   installScript: string | null = null;
   private recipeRevision = 0;
@@ -545,6 +549,7 @@ export class FakeAlpha {
     }
     if (text.startsWith("SELECT state FROM cloud_v2_workspaces")) return rows([{ state: this.workspaces.get(String(values[0]))?.state ?? null }]);
     if (text.includes("FROM cloud_v2_ready_copies")) return rows([...this.projects.values()].filter(project => project.id === values[0]).map(project => ({ machine_id: project.machine })));
+    if (text.includes("AS distrusted")) return rows(this.forks.has(String(values[0])) ? [{ distrusted: this.copyDistrusted, archive: this.copyArchive }] : []);
     if (text.includes("FROM cloud_v2_ready_copy_forks")) return rows([{ forks: this.forks.has(String(values[0])) ? 1 : 0 }]);
     if (text.includes("worker_off_unverified_at IS NULL AS worker_off")) return rows(ids.map(id => ({ id, backup_probe: this.workspaces.get(id)?.probe ?? null,
       current_probe: true, worker_off: this.workerOff })));

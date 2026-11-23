@@ -129,7 +129,7 @@ describe("rehearsal stages against a fake Alpha", () => {
     // Boat's record of the copy's archive is printed: its status as a note, its lifetime and attempt times as counts.
     expect(state.stages.projects?.counts).toEqual({ workspaces: 2, pulls: 2, turns: 3, copiesGone: 2, environments: 2,
       copyLifetimeSeconds: 60, copySnapshotAttemptAfterCreateSeconds: 50, copySnapshotCompletedAfterCreateSeconds: 60, copyHydrated: 1 });
-    expect(state.stages.projects?.notes).toEqual(["copy_snapshot:completed", "environment:seeded"]);
+    expect(state.stages.projects?.notes).toEqual(["copy_snapshot:completed", "copy_archive:completed", "environment:seeded"]);
     expect(state.stages.retention?.notes).toEqual(["environment_case:seeded_edited", "wake_w_snapshot:completed", "wake_k_snapshot:completed"]);
     // W opened on its own machine after the wakes' stops still holds the work written before the person's stop.
     expect(state.stages.retention?.counts).toMatchObject({ ownDiskKept: 1 });
@@ -194,6 +194,15 @@ describe("rehearsal stages against a fake Alpha", () => {
     expect(state.stages.projects?.counts).toMatchObject({ forkFallback: 1 });
   });
 
+  it("notes a create whose fork lacked a checkout (the copy distrusted and cloned directly), and the copy's archive record", async () => {
+    const { alpha, state, ctx, options } = setup();
+    alpha.copyDistrusted = true; alpha.copyArchive = "completed";
+    expect(await runStages(ctx, ["projects"], options)).toBe(true);
+    expect(state.stages.projects?.notes).toEqual(expect.arrayContaining(["copy_archive:completed", "fork_fallback:copy_distrusted"]));
+    expect(state.stages.projects?.notes).not.toContain("fork_fallback:not_a_fork");
+    expect(state.stages.projects?.counts).toMatchObject({ forkFallback: 1 });
+  });
+
   it("stops creating machines at the run's cap", async () => {
     const { alpha, state } = setup();
     const ctx = stageContext(alpha.ports(), state, async () => undefined, { one: R1, two: FIXTURE_TWO }, TIMING, 3);
@@ -245,7 +254,7 @@ describe("rehearsal environments and the worker-off record", () => {
     const { alpha, state, ctx, options } = setup();
     alpha.environments.set(alpha.repositoryId(R1), { revision: 3, files: new Map([[".env", "theirs"]]) });
     expect(await runStages(ctx, ["projects", "retention"], options)).toBe(true);
-    expect(state.stages.projects?.notes).toEqual(["copy_snapshot:completed", "environment_skipped:environment_exists"]);
+    expect(state.stages.projects?.notes).toEqual(["copy_snapshot:completed", "copy_archive:completed", "environment_skipped:environment_exists"]);
     expect(state.stages.projects?.counts?.environments).toBeUndefined();
     expect(state.stages.retention?.notes).toEqual(["environment_case:hand_made_ignored", "environment_skipped:environment_exists", "wake_w_snapshot:completed", "wake_k_snapshot:completed"]);
     expect(alpha.environments.get(alpha.repositoryId(R1))).toEqual({ revision: 3, files: new Map([[".env", "theirs"]]) });
@@ -257,7 +266,7 @@ describe("rehearsal environments and the worker-off record", () => {
     const { alpha, state, ctx, options } = setup();
     alpha.ignoresEnv = false;
     expect(await runStages(ctx, ["projects"], options)).toBe(true);
-    expect(state.stages.projects?.notes).toEqual(["copy_snapshot:completed", "environment_skipped:path_not_ignored"]);
+    expect(state.stages.projects?.notes).toEqual(["copy_snapshot:completed", "copy_archive:completed", "environment_skipped:path_not_ignored"]);
     expect(alpha.writes.filter(write => write.startsWith("PATCH"))).toEqual([]);
   });
 
