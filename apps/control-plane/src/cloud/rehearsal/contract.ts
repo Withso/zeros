@@ -110,9 +110,10 @@ export type Ports = {
   pro?: ProPort;
   /** The selected account's own GitHub sign-in by token, for the owner organization. The token stays inside the port. */
   githubSignIn?: { connect(organizationId: string, expectedGeneration: string): Promise<void> };
-  /** An agent credential for the rehearsal's turns (.env.agent), which setup connects for the selected account in the run's
-   * Personal organization as Settings does. Its value stays inside `material`, used only in that request's body. */
-  agentCredential?: AgentCredentialPort;
+  /** The agent credentials for the rehearsal's turns (.env.agent), at most one per agent, which setup connects for the
+   * selected account in the run's Personal organization as Settings does. Each value stays inside its `material`, used
+   * only in that request's body. */
+  agentCredentials?: AgentCredentialPort[];
   /** Stage waiting's account (test user 3 by default) and its own fresh Personal organization: the ports that differ
    * for it (its API, Pro and GitHub sign-in; a test may give it a whole fake). */
   waiting?: { organizationId: string; ports: Partial<Omit<Ports, "waiting">> };

@@ -3,7 +3,7 @@
 // request in the second repository and a rewind across both, and every copy machine gone after the projects.
 import { z } from "zod";
 import { type Bridge, type StageContext } from "./contract.js";
-import { reportMachineSnapshot, skipTurns, turnAgent, type TurnAgent } from "./steps.js";
+import { reportMachineSnapshot, skipTurns, turnAgents, type TurnAgent } from "./steps.js";
 import { openBridge, answered, check, checkText, clearEnvironment, copyMachines, ENVIRONMENT_PATH, seedEnvironments, createProject, createWorkspace, deleteProject, deleteWorkspace, getWorkspace, lifecycle,
   openAndClosePull, parse, readFile, turn, until, waitCopyReady, waitState, workspaceRoot, writeFile, type WorkspaceDocument } from "./steps.js";
 
@@ -11,8 +11,8 @@ export async function stageProjects(ctx: StageContext): Promise<Record<string, n
   const { prefix } = ctx.state, one = ctx.repositories.one, two = ctx.repositories.two;
   check(two, "repository_two", "missing");
   const counts: Record<string, number> = { workspaces: 0, pulls: 0, turns: 0, copiesGone: 0 };
-  // The agent every turn of this stage uses (its account's first connected one), or none: each turn skipped and counted.
-  let agent: TurnAgent | null = null;
+  // The agents this stage's turns use (every connected one, the first for the rewind), or none: each turn skipped and counted.
+  let agents: TurnAgent[] = [];
 
   // A1: the copy.
   ctx.step("project_one");
@@ -34,12 +34,14 @@ export async function stageProjects(ctx: StageContext): Promise<Record<string, n
   try {
     const root = await workspaceRoot(bridge, workspace.id), scope = { workspaceId: workspace.id, cwd: root };
     ctx.step("turn");
-    agent = await turnAgent(ctx);
-    if (agent) {
-      await turn(ctx, bridge, workspace, root, `${prefix}chat-ok`, "Reply with exactly: ok. Do not use tools or read files.", "turn", agent);
-      check(await answered(bridge, `${prefix}chat-ok`, "ok", "turn_answer"), "turn_answer", "no_answer");
+    // Once per connected agent (each its own chat; a failure names the agent), the rewind below on the first.
+    agents = await turnAgents(ctx);
+    for (const agent of agents) {
+      await turn(ctx, bridge, workspace, root, `${prefix}chat-ok-${agent}`, "Reply with exactly: ok. Do not use tools or read files.", `turn_${agent}`, agent);
+      check(await answered(bridge, `${prefix}chat-ok-${agent}`, "ok", `turn_answer_${agent}`), `turn_answer_${agent}`, "no_answer");
       counts.turns!++;
-    } else skipTurns(counts, 1);
+    }
+    if (!agents.length) skipTurns(counts, 1);
     ctx.step("terminal");
     await terminalRoundTrip(ctx, bridge, scope, `${prefix}pty`, workspace.branch);
     ctx.step("files");
@@ -127,6 +129,7 @@ export async function stageProjects(ctx: StageContext): Promise<Record<string, n
     // A rewind across both: each turn writes a file in a different repository; resetting from the second
     // turn removes its file in R2 and keeps the first's in R1.
     ctx.step("rewind");
+    const agent = agents[0];
     if (!agent) skipTurns(counts, 2);
     else {
       const chatId = `${prefix}chat-rewind`;

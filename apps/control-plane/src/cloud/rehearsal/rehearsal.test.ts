@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Gate0Failure } from "../gate0.js";
-import { signInAccount, signInAll, type SignInDeps } from "./accounts.js";
+import { signInAccount, signInAll, transportCode, type SignInDeps } from "./accounts.js";
 import { FakeAlpha } from "../__fixtures__/rehearsal-alpha-fake.js";
 import { REHEARSAL_READS } from "../__fixtures__/rehearsal-reads.js";
 import { shiftClock } from "./clock.js";
@@ -16,7 +16,7 @@ import { parseArguments, sharedBaseFacts } from "./rehearsal-cli.js";
 import { CONNECT_CLIENT_FEATURES, checkText, connectWorkspace, createProject, createWorkspace, fileTarget, frameCode, openBridge, waitState, writeFile } from "./steps.js";
 import { FIXTURE_TWO } from "./stage-provision.js";
 import { loadState, newState, saveState } from "./state.js";
-import { agentCredentialFromEnv, checkGithubToken, databaseErrorCode, databaseRefusal, liveBridge, liveDatabase, OUTSIDE_PROBE_LIMIT, SET_APP_SYSTEM, tokenLines, tokenRefusal, type DatabaseClient } from "./live.js";
+import { agentCredentialsFromEnv, checkGithubToken, databaseErrorCode, databaseRefusal, liveBridge, liveDatabase, OUTSIDE_PROBE_LIMIT, SET_APP_SYSTEM, tokenLines, tokenRefusal, type DatabaseClient } from "./live.js";
 import { platformOwners, probeDiagnostics, proActor, resolveProbe } from "./plan.js";
 
 const R1 = "Withso/zeros-dev-fixture";
@@ -251,7 +251,7 @@ describe("rehearsal stages against a fake Alpha", () => {
     const { alpha, ctx, lines, options } = setup();
     alpha.sessionReply = { type: "ERROR", code: "agent_credential_missing", message: "secret-ish text" };
     expect(await runStages(ctx, ["projects"], options)).toBe(false);
-    expect(lines.filter(line => line.startsWith("stage "))).toEqual(["stage projects: failed turn_session frame:ERROR:agent_credential_missing"]);
+    expect(lines.filter(line => line.startsWith("stage "))).toEqual(["stage projects: failed turn_claude_session frame:ERROR:agent_credential_missing"]);
     expect(frameCode({ type: "AGENT_ERROR", error: { code: "auth failed: token=abc" } })).toBe("frame:AGENT_ERROR:other");
     expect(frameCode({ type: "AGENT_PROMPT_COMPLETE" })).toBe("frame:AGENT_PROMPT_COMPLETE");
   });
@@ -265,19 +265,20 @@ describe("rehearsal stages against a fake Alpha", () => {
     expect(alpha.turns).toEqual([]);
   });
 
-  it("runs its turns on the account's first connected agent, in the order claude, codex, cursor", async () => {
+  it("runs the first turn once per connected agent, in the order claude, codex, cursor, and the rewind on the first", async () => {
     const { alpha, state, ctx, options } = setup();
     alpha.agentConnections = ["cursor", "codex"];
     expect(await runStages(ctx, ["projects"], options)).toBe(true);
-    expect(state.stages.projects?.notes).toContain("turn_agent:codex");
-    expect(state.stages.projects?.counts).toMatchObject({ turns: 3 });
+    expect(state.stages.projects?.notes).toEqual(expect.arrayContaining(["turn_agent:codex", "turn_agent:cursor"]));
+    expect(state.stages.projects?.counts).toMatchObject({ turns: 4 });
+    expect(alpha.turns.map(turn => turn.chatId).slice(0, 2)).toEqual([`${state.prefix}chat-ok-codex`, `${state.prefix}chat-ok-cursor`]);
   });
 
   it("says in --plan which agent runs the turns, or that they are skipped and what would cover them", () => {
     const base = { label: "2", organizations: [], admin: false, connections: { organization: 0, personal: 0, logins: [] }, activeMachines: 0,
       fixtureConnection: false, githubIdentity: false, pro: true, personal: { id: "p", seat: "pro" } };
     expect(turnLine({ ...base, agents: { personal: ["claude"], probe: null } }, "personal", "2"))
-      .toBe("turns: agent claude (account 2's first connected agent in its Personal organization)");
+      .toBe("turns: claude (connected) for account 2 in its Personal organization; the first turn runs once per agent, the rewind on claude");
     expect(turnLine({ ...base, agents: { personal: [], probe: null } }, "personal", "2")).toMatch(/^turns: none connected .*turn_skipped:no_agent_credential.*connect a Claude, Codex or Cursor credential/);
     expect(turnLine({ ...base, agents: { personal: [], probe: null } }, "organization", "2")).toBe("turns: unknown (account 2's agent connections in the probe organization unread)");
     expect(turnLine({ failed: "sign_in:http_401" }, "personal", "2")).toBe("turns: unknown (account 2 unread: sign_in:http_401)");
@@ -792,7 +793,7 @@ describe("rehearsal on the Personal route", () => {
     it("connects it as Settings does, runs the turns on it, and cleanup removes and revokes it, reading both back", async () => {
       const { alpha, ctx, options, state } = setup({ owner: "personal" });
       alpha.agentConnections = [];
-      ctx.ports.agentCredential = credential();
+      ctx.ports.agentCredentials = [credential()];
       expect(await runStages(ctx, ["setup", "projects"], { ...options, switches })).toBe(true);
       expect(state.stages.setup?.notes).toContain("agent_login:connected:claude");
       expect(state.stages.projects?.notes).toContain("turn_agent:claude");
@@ -814,7 +815,7 @@ describe("rehearsal on the Personal route", () => {
     it("finishes a cleanup that stopped after taking it out of the organization, and a second cleanup finds nothing", async () => {
       const { alpha, ctx, options, state } = setup({ owner: "personal" });
       alpha.agentConnections = [];
-      ctx.ports.agentCredential = credential();
+      ctx.ports.agentCredentials = [credential()];
       expect(await runStages(ctx, ["setup"], { ...options, switches })).toBe(true);
       const [login] = state.created.agentLogins!;
       // As a cleanup that stopped between the two writes left it: no longer selected, not yet revoked.
@@ -830,7 +831,7 @@ describe("rehearsal on the Personal route", () => {
 
     it("leaves a connection already there alone, uses it for the turns, and keeps its own on a second setup", async () => {
       const existing = setup({ owner: "personal" });
-      existing.ctx.ports.agentCredential = credential();
+      existing.ctx.ports.agentCredentials = [credential()];
       expect(await runStages(existing.ctx, ["setup", "projects"], { ...existing.options, switches })).toBe(true);
       expect(existing.state.stages.setup?.notes).toContain("agent_login:existing:claude");
       expect(existing.state.stages.projects?.notes).toContain("turn_agent:claude");
@@ -841,7 +842,7 @@ describe("rehearsal on the Personal route", () => {
 
       const again = setup({ owner: "personal" });
       again.alpha.agentConnections = [];
-      again.ctx.ports.agentCredential = credential();
+      again.ctx.ports.agentCredentials = [credential()];
       expect(await runStages(again.ctx, ["setup"], { ...again.options, switches })).toBe(true);
       again.state.stages = {};
       expect(await runStages(again.ctx, ["setup"], { ...again.options, switches })).toBe(true);
@@ -849,25 +850,57 @@ describe("rehearsal on the Personal route", () => {
       expect(again.alpha.agentCredentials.size).toBe(1);
     });
 
-    it("reads the credential from .env.agent by name in a fixed order, and a bad value fails by its name only", () => {
-      expect(agentCredentialFromEnv({})).toBeNull();
-      const picked = agentCredentialFromEnv({ ZEROS_REHEARSAL_CURSOR_API_KEY: `key_${"c".repeat(20)}`, ZEROS_REHEARSAL_CLAUDE_SETUP_TOKEN: SECRET })!;
-      expect({ provider: picked.provider, kind: picked.kind, source: picked.source }).toEqual({ provider: "claude", kind: "claude-setup-token", source: "ZEROS_REHEARSAL_CLAUDE_SETUP_TOKEN" });
-      expect(picked.material()).toEqual({ kind: "claude-setup-token", accessToken: SECRET });
-      expect(agentCredentialFromEnv({ ZEROS_REHEARSAL_OPENAI_API_KEY: `openai-${"o".repeat(20)}` })?.kind).toBe("codex-api-key");
+    it("reads every credential .env.agent sets, one per agent in a fixed order, and a bad value fails by its name only", () => {
+      expect(agentCredentialsFromEnv({})).toEqual([]);
+      const picked = agentCredentialsFromEnv({ ZEROS_REHEARSAL_CURSOR_API_KEY: `key_${"c".repeat(20)}`, ZEROS_REHEARSAL_CLAUDE_API_KEY: `claude-${"k".repeat(20)}`,
+        ZEROS_REHEARSAL_CLAUDE_SETUP_TOKEN: SECRET, ZEROS_REHEARSAL_OPENAI_API_KEY: `openai-${"o".repeat(20)}` });
+      expect(picked.map(entry => [entry.provider, entry.kind, entry.source])).toEqual([["claude", "claude-setup-token", "ZEROS_REHEARSAL_CLAUDE_SETUP_TOKEN"],
+        ["codex", "codex-api-key", "ZEROS_REHEARSAL_OPENAI_API_KEY"], ["cursor", "cursor-api-key", "ZEROS_REHEARSAL_CURSOR_API_KEY"]]);
+      expect(picked[0]!.material()).toEqual({ kind: "claude-setup-token", accessToken: SECRET });
       let failure: unknown;
-      try { agentCredentialFromEnv({ ZEROS_REHEARSAL_CLAUDE_API_KEY: "short value" }); } catch (error) { failure = error; }
+      try { agentCredentialsFromEnv({ ZEROS_REHEARSAL_CLAUDE_API_KEY: "short value" }); } catch (error) { failure = error; }
       expect(failure).toMatchObject({ step: "agent_credential", code: "invalid:ZEROS_REHEARSAL_CLAUDE_API_KEY" });
       expect(JSON.stringify(failure)).not.toContain("short value");
     });
 
-    it("says in --plan that the rehearsal's credential runs the turns when none is connected", () => {
+    it("connects every credential set, runs the first turn on each, names a failing one by its agent, and cleanup removes all", async () => {
+      const { alpha, ctx, options, state } = setup({ owner: "personal" });
+      alpha.agentConnections = [];
+      ctx.ports.agentCredentials = [credential(),
+        { provider: "codex", kind: "codex-api-key", source: "ZEROS_REHEARSAL_OPENAI_API_KEY", material: () => ({ kind: "codex-api-key", apiKey: `${SECRET}-codex` }) },
+        { provider: "cursor", kind: "cursor-api-key", source: "ZEROS_REHEARSAL_CURSOR_API_KEY", material: () => ({ kind: "cursor-api-key", apiKey: `${SECRET}-cursor` }) }];
+      expect(await runStages(ctx, ["setup", "projects"], { ...options, switches })).toBe(true);
+      expect(state.stages.setup?.notes).toEqual(expect.arrayContaining(["agent_login:connected:claude", "agent_login:connected:codex", "agent_login:connected:cursor"]));
+      expect(state.stages.setup?.counts).toMatchObject({ agentLogins: 3 });
+      expect(state.stages.projects?.notes).toEqual(expect.arrayContaining(["turn_agent:claude", "turn_agent:codex", "turn_agent:cursor"]));
+      expect(state.stages.projects?.counts).toMatchObject({ turns: 5 });
+      expect(state.created.agentLogins!.map(login => login.provider)).toEqual(["claude", "codex", "cursor"]);
+      const lines: string[] = [];
+      expect((await cleanup(ctx, { log: line => lines.push(line) }))).toEqual({ inventory: EMPTY, failures: 0 });
+      expect(lines).toEqual([]);
+      expect([...alpha.agentCredentials.values()].every(row => row.revoked)).toBe(true);
+      expect(JSON.stringify(state)).not.toContain(SECRET);
+      // A failing agent is named by its own step.
+      const again = setup({ owner: "personal" });
+      again.alpha.agentConnections = ["claude", "codex"];
+      again.alpha.sessionReply = null;
+      const original = again.alpha.bridge.bind(again.alpha);
+      again.ctx.ports.bridge = async id => {
+        const bridge = await original(id);
+        return { ...bridge, request: (type, fields, step) => type === "AGENT_NEW_SESSION" && fields.agentId === "codex"
+          ? Promise.resolve({ type: "ERROR", code: "agent_unavailable" }) : bridge.request(type, fields, step) };
+      };
+      expect(await runStages(again.ctx, ["setup", "projects"], { ...again.options, switches })).toBe(false);
+      expect(again.state.stages.projects).toMatchObject({ step: "turn_codex_session", code: "frame:ERROR:agent_unavailable" });
+    });
+
+    it("lists in --plan every agent the first turn runs on: connected ones and the rehearsal's credentials", () => {
       const summary = { label: "2", organizations: [], admin: false, connections: { organization: 0, personal: 0, logins: [] }, activeMachines: 0,
         fixtureConnection: false, githubIdentity: false, pro: true, personal: { id: "p", seat: "pro" }, agents: { personal: [], probe: null } };
-      expect(turnLine(summary, "personal", "2", "claude"))
-        .toBe("turns: agent claude (the rehearsal's credential, connected by setup for account 2 in its Personal organization and removed by cleanup)");
-      expect(turnLine({ ...summary, agents: { personal: ["codex"], probe: null } }, "personal", "2", "claude"))
-        .toBe("turns: agent codex (account 2's first connected agent in its Personal organization)");
+      expect(turnLine(summary, "personal", "2", ["claude", "cursor"])).toBe("turns: claude (the rehearsal's credential, connected by setup and removed by cleanup), "
+        + "cursor (the rehearsal's credential, connected by setup and removed by cleanup) for account 2 in its Personal organization; the first turn runs once per agent, the rewind on claude");
+      expect(turnLine({ ...summary, agents: { personal: ["codex"], probe: null } }, "personal", "2", ["claude"])).toBe("turns: claude (the rehearsal's credential, "
+        + "connected by setup and removed by cleanup), codex (connected) for account 2 in its Personal organization; the first turn runs once per agent, the rewind on claude");
     });
   });
 
@@ -936,6 +969,30 @@ describe("rehearsal sign-in", () => {
     return { waits, subject: async () => "user_3", signIn: async () => session(), api: () => me([{ id: randomUUID(), slug: null }]),
       sleep: async ms => { waits.push(ms); }, ...overrides };
   };
+
+  it("names a transport failure by closed values, and retries a read that failed in transport as it retries a throttle", async () => {
+    const reset = () => Object.assign(new TypeError("fetch failed"), { cause: Object.assign(new Error("socket hang up"), { code: "ECONNRESET" }) });
+    expect(transportCode(reset())).toBe("network:ECONNRESET");
+    expect(transportCode(Object.assign(new Error("x"), { code: "ETIMEDOUT" }))).toBe("network:ETIMEDOUT");
+    expect(transportCode(new DOMException("t", "TimeoutError"))).toBe("timeout");
+    expect(transportCode(new DOMException("a", "AbortError"))).toBe("aborted");
+    expect(transportCode(new SyntaxError("Unexpected token < in JSON"))).toBe("json_parse");
+    expect(transportCode(Object.assign(new TypeError("fetch failed"), { cause: new Error("other") }))).toBe("network");
+    expect(transportCode(new Error("pw leaked"))).toBeNull();
+    expect(transportCode(Object.assign(new Error("x"), { code: "not a code" }))).toBeNull();
+    // A read that resets once is retried after 5 s; one that keeps failing is named, never "unexpected".
+    let calls = 0;
+    const flaky = deps({ api: () => ({ json: async () => { if (calls++ === 0) throw reset(); return { status: 200, body: { user: { id: randomUUID() }, organizations: [] } }; } }) });
+    expect(await signInAccount(account, flaky)).toMatchObject({ ok: true });
+    expect(flaky.waits).toEqual([5_000]);
+    const down = deps({ api: () => ({ json: async () => { throw reset(); } }) });
+    expect(await signInAccount(account, down)).toEqual({ ok: false, label: "3", step: "me_read", code: "network:ECONNRESET" });
+    expect(down.waits).toEqual([5_000, 15_000, 45_000]);
+    // A sign-in is not a read: a transport failure there is named, not retried.
+    const signIn = deps({ signIn: async () => { throw reset(); } });
+    expect(await signInAccount(account, signIn)).toEqual({ ok: false, label: "3", step: "sign_in", code: "network:ECONNRESET" });
+    expect(signIn.waits).toEqual([]);
+  });
 
   it("names the failed step and its closed code, and closes a session it opened", async () => {
     expect(await signInAccount(account, deps({ subject: async () => { throw new RehearsalFailure("subject_lookup", "not_found"); } })))

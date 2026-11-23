@@ -13,13 +13,13 @@ export async function stageSetup(ctx: StageContext): Promise<Record<string, numb
   const counts: Record<string, number> = { proChanges: 0, githubSignIn: 0 };
   await prepareOwner(ctx, counts);
 
-  // The rehearsal's agent credential, when .env.agent has one: connected for this account here, as Settings does, so the
-  // turns run on it. A connection already there that this run did not make is left alone (and used).
-  if (ctx.ports.agentCredential) {
-    ctx.step("agent_login");
-    const outcome = await connectAgentLogin(ctx);
-    ctx.note(`agent_login:${outcome}:${ctx.ports.agentCredential.provider}`);
-    counts.agentLogin = outcome === "connected" ? 1 : 0;
+  // The rehearsal's agent credentials, every one .env.agent has: each connected for this account here, as Settings does,
+  // so the turns run on each. A connection already there that this run did not make is left alone (and used).
+  for (const credential of ctx.ports.agentCredentials ?? []) {
+    ctx.step(`agent_login_${credential.provider}`);
+    const outcome = await connectAgentLogin(ctx, credential);
+    ctx.note(`agent_login:${outcome}:${credential.provider}`);
+    counts.agentLogins = (counts.agentLogins ?? 0) + (outcome === "connected" ? 1 : 0);
   }
 
   // The organization's base (#1260): nobody presses Build. Zeros prepares it at the first project (or a create), so

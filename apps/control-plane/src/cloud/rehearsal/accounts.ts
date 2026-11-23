@@ -23,6 +23,22 @@ export type SignInDeps = {
   probeWorkosOrganization?: string;
 };
 
+/** A transport failure's class, by closed values only, or null when it is none: `timeout` and `aborted` (an AbortSignal),
+ * `network:<CODE>` from the error or its cause (ECONNRESET, ETIMEDOUT, ENOTFOUND, UND_ERR_SOCKET, ...), `network` for a
+ * fetch failure with no code, and `json_parse` for a body that was not JSON. Never a message. */
+export function transportCode(error: unknown): string | null {
+  const value = error as { name?: unknown; code?: unknown; cause?: unknown } | null;
+  if (!value || typeof value !== "object") return null;
+  if (value.name === "TimeoutError") return "timeout";
+  if (value.name === "AbortError") return "aborted";
+  if (value.name === "SyntaxError") return "json_parse";
+  const code = [value.code, (value.cause as { code?: unknown } | null)?.code].find(item => typeof item === "string" && /^[A-Z][A-Z0-9_]{1,39}$/.test(item));
+  if (typeof code === "string") return `network:${code}`;
+  const cause = value.cause as { name?: unknown } | null;
+  if (cause?.name === "TimeoutError" || cause?.name === "ConnectTimeoutError") return "timeout";
+  return value.name === "TypeError" && cause ? "network" : null;
+}
+
 /** Seconds between two accounts' sign-ins, and the waits before each retry of a throttled step. */
 export const SIGN_IN_SPACING_MS = 3_000;
 export const THROTTLE_BACKOFF_MS = [5_000, 15_000, 45_000] as const;
@@ -31,22 +47,27 @@ const MeSchema = z.object({ user: z.object({ id: z.string().uuid() }).passthroug
   organizations: z.array(z.object({ id: z.string().uuid(), slug: z.string().nullable().optional(), isPersonal: z.boolean().optional(),
     role: z.string().nullable().optional() }).passthrough()) }).passthrough();
 
-/** A failure as `{step, code}`: the rehearsal's and gate0's own closed classes; anything else is "unexpected". */
+/** A failure as `{step, code}`: the rehearsal's and gate0's own closed classes, then a transport failure's class
+ * (transportCode); anything else is "unexpected". */
 export function diagnose(error: unknown, step: string): { step: string; code: string } {
   if (error instanceof RehearsalFailure) return { step: error.step, code: error.code };
   if (error instanceof Gate0Failure) return { step: error.stage, code: error.cause ?? "failed" };
-  return { step, code: "unexpected" };
+  return { step, code: transportCode(error) ?? "unexpected" };
 }
 const throttled = (error: unknown) => {
   const code = error instanceof RehearsalFailure ? error.code : error instanceof Gate0Failure ? error.cause ?? "" : "";
   return code.startsWith("http_429");
 };
+/** A transport failure: one the rehearsal classified as such, or a raw one transportCode names. */
+const transport = (error: unknown) => error instanceof RehearsalFailure ? /^(network|timeout|aborted)/.test(error.code)
+  : !(error instanceof Gate0Failure) && transportCode(error) !== null && transportCode(error) !== "json_parse";
 
-async function retrying<T>(deps: SignInDeps, work: () => Promise<T>): Promise<T> {
+/** Retries a throttled step (429), and a read that failed in transport (a reset, a timeout), after 5, 15 and 45 s. */
+async function retrying<T>(deps: SignInDeps, work: () => Promise<T>, read = false): Promise<T> {
   for (let attempt = 0; ; attempt++) {
     try { return await work(); } catch (error) {
       const wait = THROTTLE_BACKOFF_MS[attempt];
-      if (!throttled(error) || wait === undefined) throw error;
+      if (!(throttled(error) || read && transport(error)) || wait === undefined) throw error;
       await deps.sleep(wait);
     }
   }
@@ -56,7 +77,7 @@ export async function signInAccount(account: Account, deps: SignInDeps): Promise
   let step = "subject_lookup";
   let session: Session | undefined;
   try {
-    const subject = account.subject ?? await retrying(deps, () => deps.subject(account.email));
+    const subject = account.subject ?? await retrying(deps, () => deps.subject(account.email), true);
     step = "sign_in";
     const choice: { selected: SignedIn["selected"] } = { selected: "none" };
     session = await retrying(deps, () => deps.signIn({ email: account.email, password: account.password, subject,
@@ -74,7 +95,7 @@ export async function signInAccount(account: Account, deps: SignInDeps): Promise
       const parsed = MeSchema.safeParse(reply.body);
       if (!parsed.success) throw new RehearsalFailure("me_read", `schema:${parsed.error.issues[0]?.path.map(String).join(".") ?? ""}`.slice(0, 80));
       return parsed.data;
-    });
+    }, true);
     return { ok: true, label: account.label, email: account.email, subject, userId: me.user.id, session, api, selected: choice.selected,
       organizations: me.organizations.map(org => ({ id: org.id, slug: org.slug ?? null, personal: org.isPersonal === true, role: org.role ?? null })) };
   } catch (error) {

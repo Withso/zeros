@@ -1,8 +1,9 @@
 // The rehearsal's API steps, shared by every stage: one call or poll each, failing with a closed code and never a body.
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
-import { RehearsalFailure, type Api, type ApiReply, type Bridge, type StageContext } from "./contract.js";
+import { RehearsalFailure, type AgentCredentialPort, type Api, type ApiReply, type Bridge, type StageContext } from "./contract.js";
 import { prefixed } from "./guard.js";
+import { transportCode } from "./accounts.js";
 import { GATE0_DEFAULT_MODELS } from "../gate0.js";
 import { WORKSPACE_REPOSITORIES_FEATURE } from "../contract.js";
 
@@ -17,7 +18,8 @@ export function check(value: unknown, step: string, code = "failed"): asserts va
 export async function call(api: Api, method: Parameters<Api["json"]>[0], path: string, step: string, body?: unknown,
   options: { ok?: readonly number[]; headers?: Record<string, string> } = {}): Promise<ApiReply> {
   let reply: ApiReply;
-  try { reply = await api.json(method, path, body, options.headers); } catch { throw new RehearsalFailure(step, "network"); }
+  try { reply = await api.json(method, path, body, options.headers); }
+  catch (error) { throw error instanceof RehearsalFailure ? error : new RehearsalFailure(step, transportCode(error) ?? "network"); }
   if (!(options.ok ?? [200, 201, 202]).includes(reply.status)) throw new RehearsalFailure(step, errorCode(reply));
   return reply;
 }
@@ -351,13 +353,11 @@ export async function agentConnectionRows(api: Api, organizationId: string, step
   return parse(AgentConnections, (await call(api, "GET", `/v1/organizations/${organizationId}/agent-connections`, step)).body, step).connections;
 }
 
-/** Connects the rehearsal's agent credential (ports.agentCredential) for the account in the run's organization, as Settings
+/** Connects one of the rehearsal's agent credentials (ports.agentCredentials) for the account in the run's organization, as Settings
  * does (apps/desktop/src/renderer/features/settings/cloud-provider-connection.ts): the credential, then the organization's
  * selection of it for its provider with the model the turns use. Recorded before the first write. A provider already
  * selected by a credential this run did not make is left alone (the turns use it); one this run made is kept. */
-export async function connectAgentLogin(ctx: StageContext): Promise<"connected" | "kept" | "existing" | "absent"> {
-  const credential = ctx.ports.agentCredential;
-  if (!credential) return "absent";
+export async function connectAgentLogin(ctx: StageContext, credential: AgentCredentialPort): Promise<"connected" | "kept" | "existing"> {
   const organizationId = ctx.state.organizationId, logins = ctx.state.created.agentLogins ??= [];
   const row = (await agentConnectionRows(ctx.ports.api, organizationId, "agent_login_read")).find(entry => entry.provider === credential.provider);
   const ours = logins.find(entry => entry.organizationId === organizationId && entry.provider === credential.provider);
@@ -397,12 +397,13 @@ export async function agentCredentialLive(api: Api, credentialId: string, step: 
   return list.some(entry => entry.id.toLowerCase() === credentialId.toLowerCase() && !entry.revoked);
 }
 
-/** The agent this stage's turns use, noted (`turn_agent:<agent>`), or null with `turn_skipped:no_agent_credential`: the
- * caller then skips each turn and counts it in `turnsSkipped`, never as a pass. */
-export async function turnAgent(ctx: StageContext): Promise<TurnAgent | null> {
-  const agent = (await connectedAgents(ctx.ports.api, ctx.state.organizationId, "turn_agent"))[0] ?? null;
-  ctx.note(agent ? `turn_agent:${agent}` : "turn_skipped:no_agent_credential");
-  return agent;
+/** The agents this stage's turns use: every connected one, in preference order, each noted (`turn_agent:<agent>`); none
+ * notes `turn_skipped:no_agent_credential`, and the caller skips each turn and counts it in `turnsSkipped`, never as a pass. */
+export async function turnAgents(ctx: StageContext): Promise<TurnAgent[]> {
+  const agents = await connectedAgents(ctx.ports.api, ctx.state.organizationId, "turn_agent");
+  for (const agent of agents) ctx.note(`turn_agent:${agent}`);
+  if (!agents.length) ctx.note("turn_skipped:no_agent_credential");
+  return agents;
 }
 export function skipTurns(counts: Record<string, number>, turns: number): void { counts.turnsSkipped = (counts.turnsSkipped ?? 0) + turns; }
 

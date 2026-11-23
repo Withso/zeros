@@ -7,7 +7,7 @@ import { RehearsalFailure, STAGE_NEEDS_ACCOUNT, stageSwitches, type Api, type Da
 import { safeLine } from "./guard.js";
 import { FIXTURE_TWO } from "./stage-provision.js";
 import { STAGE_RUNNERS } from "./runner.js";
-import { call, connectedAgents, parse, type TurnAgent } from "./steps.js";
+import { call, connectedAgents, parse, TURN_AGENTS, type TurnAgent } from "./steps.js";
 
 export type AccountSummary = {
   label: string;
@@ -76,13 +76,15 @@ const agentList = (agents: TurnAgent[] | null) => agents === null ? "unread" : a
 
 /** What stage projects' three turns will do for the selected account on the route: which agent runs them, or that each is
  * skipped and counted (turn_skipped:no_agent_credential), and what would cover them. Printed before any machine starts. */
-export function turnLine(summary: AccountSummary | { failed: string }, owner: "personal" | "organization", label: string, configured?: TurnAgent): string {
+export function turnLine(summary: AccountSummary | { failed: string }, owner: "personal" | "organization", label: string, configured: readonly TurnAgent[] = []): string {
   if ("failed" in summary) return `turns: unknown (account ${label} unread: ${summary.failed})`;
   const agents = owner === "personal" ? summary.agents.personal : summary.agents.probe;
   const where = owner === "personal" ? "its Personal organization" : "the probe organization";
   if (agents === null) return `turns: unknown (account ${label}'s agent connections in ${where} unread)`;
-  if (agents.length) return `turns: agent ${agents[0]} (account ${label}'s first connected agent in ${where})`;
-  if (configured) return `turns: agent ${configured} (the rehearsal's credential, connected by setup for account ${label} in ${where} and removed by cleanup)`;
+  // Every agent the first turn runs on: those connected now, and those setup connects from the rehearsal's credentials.
+  const all = TURN_AGENTS.filter(agent => agents.includes(agent) || configured.includes(agent));
+  if (all.length) return `turns: ${all.map(agent => `${agent} (${agents.includes(agent) ? "connected" : "the rehearsal's credential, connected by setup and removed by cleanup"})`).join(", ")}`
+    + ` for account ${label} in ${where}; the first turn runs once per agent, the rewind on ${all[0]}`;
   return `turns: none connected for account ${label} in ${where}: stage projects skips its 3 turns (turn_skipped:no_agent_credential, counted, not passed);`
     + " to cover them, connect a Claude, Codex or Cursor credential for that account there";
 }
