@@ -104,6 +104,9 @@ export const AttachmentNode = Node.create({
       // What the pill shows instead of the file name: a chat selection's or
       // reply's own text. The name stays the file's, on disk and once sent.
       label: { default: "", rendered: false },
+      // What a synthesized pill stands for (a pull request comment), so it
+      // can open its source. Saved with drafts; never written to the DOM.
+      reference: { default: null, rendered: false },
     };
   },
 

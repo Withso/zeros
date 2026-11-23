@@ -4,16 +4,14 @@
 //
 // The pull request reads top down: its header in rows, then Overview's Git
 // status (the branch on this machine), PR status (the pull request on the
-// host, with the one Merge) and Findings (agents, review apps and code
-// scanning), with the rail beside them. Below the rail's container width it
+// host, with the one Merge) and Comments (people, review apps, agents and
+// code scanning), with the rail beside them. Below the rail's container width it
 // folds into Details after PR status.
 
 import React, { useMemo, useState } from "react";
 import {
   ArrowLeft,
   ArrowRight,
-  Bot,
-  ChevronDown,
   CircleCheck,
   CircleDot,
   CircleX,
@@ -26,7 +24,6 @@ import {
   GitPullRequestDraft,
   MessageSquare,
   MoreHorizontal,
-  ScanSearch,
 } from "lucide-react";
 
 import type { PR, PrLabel, PrPerson, PrTimelineItem } from "../../../platform/git";
@@ -49,7 +46,6 @@ import {
 import { SplitButton } from "@/renderer/shared/ui/primitives/split-button";
 import { toast } from "@/renderer/shared/ui/primitives/elements";
 import { cn } from "@/renderer/shared/ui/cn";
-import { AgentIcon } from "@/renderer/features/agent/agent-icon";
 import { STATUS_CARD } from "../../pr/git-status-card";
 import type { ReviewMergeMethod, ReviewProvider } from "../../pr/review-provider";
 import { AGENT_WORKING_REASON } from "../../pr/use-agent-working";
@@ -64,7 +60,6 @@ import {
   reviewActionBlockReason,
   type ChecksSummary,
   type PrStatusView,
-  type ReviewFinding,
 } from "./review-model";
 
 // ── merge method memory ─────────────────────────────────────
@@ -565,107 +560,6 @@ function ReadyAction({
   );
 }
 
-// ── Findings ────────────────────────────────────────────────
-
-/** A finding's one line with its `code` spans set as code. */
-function FindingTitle({ text }: { text: string }) {
-  const parts = text.split("`");
-  return (
-    <>
-      {parts.map((part, index) =>
-        index % 2 === 1 && index < parts.length - 1 ? (
-          <code key={index} className="bg-bg2 text-fg1 text-3xxs rounded-sm px-1 py-px font-mono leading-4">
-            {part}
-          </code>
-        ) : (
-          <React.Fragment key={index}>{part}</React.Fragment>
-        ),
-      )}
-    </>
-  );
-}
-
-function FindingMark({ finding }: { finding: ReviewFinding }) {
-  if (finding.author.kind === "agent") {
-    return (
-      <span aria-hidden className="bg-bg2 inline-flex size-5 shrink-0 items-center justify-center rounded-sm">
-        <AgentIcon agentId={finding.author.provider ?? null} iconUrl={null} size={12} />
-      </span>
-    );
-  }
-  const Icon = finding.author.kind === "check" ? ScanSearch : Bot;
-  return (
-    <span aria-hidden className="bg-bg2 text-fg2 inline-flex size-5 shrink-0 items-center justify-center rounded-sm [&_svg]:size-3">
-      <Icon />
-    </span>
-  );
-}
-
-/** Comments from agents, review apps and code scanning: what it says, then who
- * and where. Each has Add to chat; resolved ones fold under Show resolved. */
-export function FindingsSection({
-  findings,
-  onAddToChat,
-}: {
-  findings: readonly ReviewFinding[];
-  onAddToChat: (text: string) => void;
-}) {
-  const [showResolved, setShowResolved] = useState(false);
-  const open = findings.filter((finding) => !finding.resolved);
-  const resolved = findings.filter((finding) => finding.resolved);
-  if (findings.length === 0) return null;
-  return (
-    <ReviewSection
-      title="Findings"
-      count={open.length}
-      action={
-        open.length > 1 ? (
-          <Button variant="secondary" size="compact" onClick={() => onAddToChat(open.map((f) => f.chatText).join(""))}>
-            Add all to chat
-          </Button>
-        ) : null
-      }
-    >
-      <div data-review-findings="" className={REVIEW_CARD}>
-        {[...open, ...(showResolved ? resolved : [])].map((finding) => (
-          <div key={finding.key} data-review-finding={finding.author.kind} className={cn(ROW, "min-h-13")}>
-            <FindingMark finding={finding} />
-            <div className="flex min-w-0 flex-1 flex-col gap-0.5">
-              <span className={cn("truncate text-xs", finding.resolved ? "text-fg3" : "text-fg1")}>
-                <FindingTitle text={finding.title} />
-              </span>
-              <span className="text-fg3 text-3xxs truncate leading-4">
-                {finding.author.name} · <span className="font-mono text-2xxs">{finding.location}</span>
-              </span>
-            </div>
-            {finding.resolved ? (
-              <span className="text-fg3 text-3xxs shrink-0 leading-4">Resolved</span>
-            ) : (
-              <Button variant="ghost" size="compact" className="text-fg2" onClick={() => onAddToChat(finding.chatText)}>
-                Add to chat
-              </Button>
-            )}
-          </div>
-        ))}
-        {resolved.length > 0 ? (
-          <div className={cn(ROW, "min-h-9 py-1.5")}>
-            <Button
-              variant="ghost"
-              size="compact"
-              className="text-fg3 -ml-1.5"
-              aria-expanded={showResolved}
-              onClick={() => setShowResolved((value) => !value)}
-            >
-              <ChevronDown aria-hidden className={cn("transition-transform", showResolved && "rotate-180")} />
-              {showResolved ? "Hide resolved" : `Show ${resolved.length} resolved`}
-            </Button>
-          </div>
-        ) : null}
-      </div>
-    </ReviewSection>
-  );
-}
-
 // ── rail ────────────────────────────────────────────────────
 
 const REVIEW_STATE_ICON: Record<string, { icon: typeof CircleCheck; className: string; label: string }> = {
@@ -817,17 +711,17 @@ export function ReviewRail({
   );
 }
 
-/** Git status, PR status and Findings beside the rail; below the rail's
- * container width the rail follows PR status as Details. */
+/** Git status, PR status and Comments beside the rail; below the rail's
+ * container width the rail follows Comments as Details. */
 export function ReviewOverviewLayout({
   gitStatus,
   prStatus,
-  findings,
+  comments,
   rail,
 }: {
   gitStatus: React.ReactNode;
   prStatus: React.ReactNode;
-  findings: React.ReactNode;
+  comments: React.ReactNode;
   rail: React.ReactNode;
 }) {
   return (
@@ -839,12 +733,12 @@ export function ReviewOverviewLayout({
         <div className="flex min-w-0 flex-col gap-6">
           {gitStatus ? <ReviewSection title="Git status">{gitStatus}</ReviewSection> : null}
           <ReviewSection title="PR status">{prStatus}</ReviewSection>
+          {comments}
           <div className="@3xl/review:hidden">
             <ReviewSection title="Details">
               <div className={cn(REVIEW_CARD, "p-3.5")}>{rail}</div>
             </ReviewSection>
           </div>
-          {findings}
         </div>
         <div className="hidden @3xl/review:block">{rail}</div>
       </div>

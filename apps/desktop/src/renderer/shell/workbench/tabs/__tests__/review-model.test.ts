@@ -5,7 +5,9 @@ import {
   bucketChecks,
   checkOutcome,
   commitAuthorsLabel,
+  activityCount,
   composeTimeline,
+  composerChatFor,
   derivePrStatusView,
   filterTimelineEvents,
   formatDuration,
@@ -17,7 +19,6 @@ import {
   recencyLabel,
   relTime,
   reviewActionBlockReason,
-  reviewFindings,
   summarizeChecks,
   reviewCommentViewer,
 } from "../review-model";
@@ -398,38 +399,6 @@ describe("derivePrStatusView", () => {
   });
 });
 
-describe("reviewFindings", () => {
-  const thread = (id: string, source: "workspace" | "github" | "check", kind: "agent" | "integration" | "human", body: string, resolved = false) => ({
-    id,
-    source,
-    anchor: { path: "src/auth/login.ts", side: "new" as const, startLine: 18, endLine: id === "range" ? 21 : 18, revision: "r" },
-    comments: [{ id: `${id}-c`, author: { id: kind, name: kind === "agent" ? "Claude" : kind === "integration" ? "coderabbitai" : "Priya", kind, ...(kind === "agent" ? { provider: "claude" } : {}) }, body, createdAt: 1 }],
-    resolved,
-    version: 1,
-  });
-  it("keeps agents, review apps and code scanning; people stay in Activity", () => {
-    const findings = reviewFindings(
-      [
-        thread("done", "github", "integration", "Old note", true),
-        thread("person", "github", "human", "Looks good"),
-        thread("agent", "workspace", "agent", "**Protocol-relative URLs** pass `safeRedirect`"),
-        thread("range", "check", "integration", "Server-side URL redirect from user input"),
-        thread("local-person", "workspace", "human", "Note to self"),
-      ],
-      42,
-    );
-    expect(findings.map((f) => [f.author.kind, f.title, f.location, f.resolved])).toEqual([
-      ["agent", "Protocol-relative URLs pass `safeRedirect`", "login.ts:18", false],
-      ["check", "Server-side URL redirect from user input", "login.ts:18–21", false],
-      ["bot", "Old note", "login.ts:18", true],
-    ]);
-    expect(findings[0].author.provider).toBe("claude");
-    expect(findings[0].chatText).toBe(
-      "PR #42 — Claude on `src/auth/login.ts:18`:\n> **Protocol-relative URLs** pass `safeRedirect`\n\n",
-    );
-  });
-});
-
 describe("mergeMethodDetail", () => {
   it("says what each GitHub method does to the commits", () => {
     expect(mergeMethodDetail("squash", 3, "main")).toBe("The 3 commits land on main as one");
@@ -492,5 +461,64 @@ describe("the account a conversation comment posts as", () => {
   it("shows no account when neither read has named one", () => {
     expect(reviewCommentViewer({ login: null, avatarUrl: null }, null)).toBeNull();
     expect(reviewCommentViewer({ login: null, avatarUrl: null }, undefined)).toBeNull();
+  });
+});
+
+describe("line comments in Activity", () => {
+  const threadOf = (id: string, login: string, kind: "human" | "bot", at: number) => ({
+    id,
+    path: "src/a.ts",
+    side: "RIGHT" as const,
+    startLine: null,
+    line: 4,
+    originalStartLine: null,
+    originalLine: 4,
+    isResolved: false,
+    isOutdated: false,
+    canResolve: true,
+    canUnresolve: false,
+    commentsTruncated: false,
+    comments: [
+      { id: `${id}-c`, databaseId: 1, author: { login, avatarUrl: null, kind }, body: "Look here", url: null, createdAt: at, updatedAt: at, commitSha: null },
+    ],
+  });
+  const emptyReview = {
+    kind: "review" as const, id: 9, author: "priya", authorAvatarUrl: null, state: "COMMENTED", body: "", url: null, createdAt: 10,
+  };
+  const approval = { ...emptyReview, id: 10, state: "APPROVED", createdAt: 30 };
+
+  it("adds each thread at its first comment and drops the empty review GitHub records for it", () => {
+    const events = composeTimeline({
+      pr: null,
+      commits: [],
+      items: [emptyReview, approval],
+      threads: [threadOf("T1", "priya", "human", 10), threadOf("T2", "devin-ai-integration", "bot", 20)],
+      threadsComplete: true,
+    });
+    expect(events.map((e) => e.kind)).toEqual(["thread", "thread", "review"]);
+    expect(filterTimelineEvents(events, "bots").map((e) => e.at)).toEqual([20]);
+    expect(filterTimelineEvents(events, "people").map((e) => e.at)).toEqual([10, 30]);
+  });
+
+  it("keeps the empty review unless a complete read shows that author's line comments", () => {
+    const kinds = (threads: ReturnType<typeof threadOf>[] | null, threadsComplete: boolean) =>
+      composeTimeline({ pr: null, commits: [], items: [emptyReview], threads, threadsComplete }).map((e) => e.kind);
+    expect(kinds(null, true)).toEqual(["review"]);
+    expect(kinds([threadOf("T1", "priya", "human", 10)], false)).toEqual(["thread", "review"]);
+    expect(kinds([threadOf("T1", "sam", "human", 10)], true)).toEqual(["thread", "review"]);
+    expect(kinds([threadOf("T1", "Priya", "human", 10)], true)).toEqual(["thread"]);
+    expect(activityCount([emptyReview], [threadOf("T1", "priya", "human", 10)], true)).toBe(1);
+    expect(activityCount([emptyReview], [threadOf("T1", "priya", "human", 10)], false)).toBe(2);
+  });
+});
+
+describe("composerChatFor", () => {
+  it("targets the active chat, never a terminal or a missing chat", () => {
+    const chats = [{ id: "c1", kind: "chat" as const }, { id: "t1", kind: "terminal" as const }, { id: "legacy" }];
+    expect(composerChatFor(chats, "c1")).toBe("c1");
+    expect(composerChatFor(chats, "legacy")).toBe("legacy");
+    expect(composerChatFor(chats, "t1")).toBeNull();
+    expect(composerChatFor(chats, "gone")).toBeNull();
+    expect(composerChatFor(chats, null)).toBeNull();
   });
 });

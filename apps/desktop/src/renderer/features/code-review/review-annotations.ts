@@ -19,6 +19,8 @@ export interface ReviewSelectionTarget {
   mode: "selection" | "composer";
   postToPr?: boolean;
   confirmedRevision?: string;
+  /** The adapter's `mappedTarget` when the selection was made. */
+  mappedTarget?: string;
 }
 export interface ReviewAnnotationThread {
   thread: CodeReviewThreadItem;

@@ -26,6 +26,8 @@ import type { RendererContext } from "../features/agent/renderers/types";
 import type { AgentToolMessage } from "../features/agent/use-agent-session";
 import { TooltipProvider } from "../shared/ui/primitives/tooltip";
 import { Button } from "../shared/ui/primitives";
+import { revealReviewComment } from "../features/code-review/review-comment-open";
+import { currentReviewCommentReveal } from "../features/code-review/review-comment-reveal";
 
 const cloud =
   "cloud://11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222";
@@ -175,6 +177,14 @@ Object.assign(window, {
       for (const resolve of pending.splice(0)) resolve();
     },
     failures: () => gitFailures,
+    // A comment pill: open Changes at a line; the diff consumes the request.
+    revealComment: (path: string, line: number) =>
+      revealReviewComment(cwd, {
+        kind: "pr-comment", key: `github:${path}:${line}`, prNumber: 1, title: "Comment", body: "Comment",
+        author: { name: "reviewer", avatarUrl: null, bot: false }, createdAt: 1, url: null,
+        path, side: "new", startLine: line, line,
+      }),
+    pendingReveal: () => currentReviewCommentReveal(),
     settled: () => settledReads,
     open: (path: string) => {
       const state = useWorkspaceStore.getState();

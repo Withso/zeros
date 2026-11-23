@@ -338,14 +338,14 @@ export async function runReviewComparisonSmoke({
     }
 
     // Overview (plans.md §1): the header in rows, five sub-tabs, Git status,
-    // PR status holding the one Merge with only its blockers, Findings and
+    // PR status holding the one Merge with only its blockers, Comments and
     // the rail — which folds into Details in a narrow pane.
     await page.goto(`${harnessBase}/harness-review-comparison.html?rich&sub=overview`, {
       waitUntil: "networkidle",
     });
     const prStatus = page.locator("[data-review-pr-status]");
     await expect(prStatus).toBeVisible();
-    await expect(page.getByRole("tab")).toHaveText(["Overview", "Description", "Activity4", "Checks7", "Commits3"]);
+    await expect(page.getByRole("tab")).toHaveText(["Overview", "Description", "Activity6", "Checks7", "Commits3"]);
     const overview = await page.evaluate(() => {
       const tab = document.querySelector('[role="tab"][data-state="active"]');
       const title = document.querySelector("[data-review-header] h2");
@@ -354,7 +354,7 @@ export async function runReviewComparisonSmoke({
         tab: tab ? { text: tab.textContent, height: tab.getBoundingClientRect().height } : null,
         title: title ? { text: title.textContent, size: getComputedStyle(title).fontSize, line: getComputedStyle(title).lineHeight } : null,
         blockers: [...document.querySelectorAll("[data-review-blocker]")].map((row) => row.textContent),
-        findings: document.querySelectorAll("[data-review-finding]").length,
+        comments: document.querySelectorAll("[data-review-comment]").length,
         visibleRails: rails.length,
         railBesideStatus:
           rails.length === 1 &&
@@ -366,7 +366,9 @@ export async function runReviewComparisonSmoke({
       tab: { text: "Overview", height: 28 },
       title: { text: "Fix login redirect loop", size: "18px", line: "28px" },
       blockers: ["test (ubuntu-latest) failedAdd to chat", "priya-shah requested changesAdd to chat"],
-      findings: 2,
+      // Two agent notes, two conversation comments and one open line comment;
+      // the resolved line comment folds under its toggle.
+      comments: 6,
       visibleRails: 1,
       railBesideStatus: true,
       headerMerge: false,
@@ -387,9 +389,28 @@ export async function runReviewComparisonSmoke({
       .toBe(true);
     await page.setViewportSize({ width: 1180, height: 900 });
     check(
-      "Review Overview reads in header rows with five sub-tabs, one Merge in PR status, Findings and a rail that folds into Details",
+      "Review Overview reads in header rows with five sub-tabs, one Merge in PR status, Comments and a rail that folds into Details",
       true,
     );
+
+    // Comments: one line each; hover shows Hide and Add to chat, Hide folds
+    // the row away, and a conversation comment opens in a preview.
+    const comments = page.locator("[data-review-comments]");
+    const devin = comments.locator("[data-review-comment='github']").filter({ hasText: "devin-ai-integration" });
+    await expect(devin).toContainText("example.ts:2");
+    await devin.hover();
+    await expect(devin.getByRole("button", { name: "Add to chat" })).toBeVisible();
+    await devin.getByRole("button", { name: "Hide", exact: true }).click();
+    await expect(devin).toHaveCount(0);
+    await comments.getByRole("button", { name: "Show 1 hidden" }).click();
+    await comments.locator("[data-review-comment='github']").filter({ hasText: "devin-ai-integration" }).getByRole("button", { name: "Unhide" }).click();
+    await expect(comments.getByRole("button", { name: /hidden/ })).toHaveCount(0);
+    await comments.locator("[data-review-comment='review']").filter({ hasText: "coderabbitai" }).getByRole("button").first().click();
+    const preview = page.locator("[data-review-comment-preview]");
+    await expect(preview).toContainText("The session helpers now compare MACs in constant time.");
+    await page.keyboard.press("Escape");
+    await expect(preview).toHaveCount(0);
+    check("Review Overview lists every comment with Hide, Add to chat and a preview", true);
 
     // A review App sits among the reviewers by name, with a Bot badge.
     const rail = page.locator("[data-review-rail]").filter({ visible: true });
@@ -434,7 +455,7 @@ export async function runReviewComparisonSmoke({
 
     await page.getByRole("tab", { name: /^Activity/ }).click();
     await expect.poll(() => alignedWithTitle("Activity")).toBe(true);
-    await expect(page.getByRole("tablist", { name: "Show activity from" }).getByRole("tab")).toHaveText(["All", "People", "Bots1"]);
+    await expect(page.getByRole("tablist", { name: "Show activity from" }).getByRole("tab")).toHaveText(["All", "People", "Bots2"]);
     const bot = page.locator("[data-review-bot-event]");
     await expect(bot).toHaveCount(1);
     await expect(bot).toContainText("coderabbitai");
@@ -451,6 +472,20 @@ export async function runReviewComparisonSmoke({
     await expect(page.getByText("Please add a test for the SSO path.")).toHaveCount(0);
     await page.getByRole("tab", { name: "All" }).click();
     check("Activity filters All, People and Bots, and folds an App's review to one line until Show", true);
+
+    // Line comments join Activity with their file and line; an App's folds.
+    const threads = page.locator("[data-review-thread-event]");
+    await expect(threads).toHaveCount(2);
+    await expect(threads.nth(0)).toContainText("priya-shah");
+    await expect(threads.nth(0)).toContainText("commented on");
+    await expect(threads.nth(0)).toContainText("src/example.ts:2");
+    await expect(threads.nth(0)).toContainText("Resolved");
+    await expect(threads.nth(0)).toContainText("Why drop the base value?");
+    await expect(threads.nth(1)).not.toContainText("Unbounded smoke wait");
+    await threads.nth(1).getByRole("button", { name: "Show" }).click();
+    await expect(threads.nth(1)).toContainText("Unbounded smoke wait");
+    await expect(threads.nth(1)).toContainText("Good catch, adding a timeout.");
+    check("Activity lists line comments with their file, line, replies and resolution", true);
 
     await page.getByRole("tab", { name: /^Checks/ }).click();
     const summary = page.locator("[data-review-checks-summary]");

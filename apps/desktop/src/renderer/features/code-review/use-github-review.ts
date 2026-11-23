@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useSyncExternalStore } from "react";
 import type { CodeReviewAnchor } from "@zeros/protocol/code-review";
 import type { PrInlineReview } from "@zeros/protocol/github-review";
 import {
+  getPrReviewDiff,
   postPrLineComment,
   replyPrReviewThread,
   setPrReviewThreadResolved,
@@ -29,12 +30,17 @@ import {
 } from "./github-review-model";
 import {
   EMPTY_REVIEW_THREADS,
+  type CodeReviewExternalSource,
   type CodeReviewThreadItem,
 } from "./review-thread-model";
+import { mapAnchorToPrDiff, parsePrDiff } from "./pr-diff-mapping";
 import {
   beginReviewCacheRequest,
   type ReviewCacheRequest,
 } from "./review-cache-forget";
+
+type GithubReviewSource = CodeReviewExternalSource &
+  Required<Pick<CodeReviewExternalSource, "reply" | "setResolved">>;
 
 const IDLE: AsyncCacheSnapshot<PrInlineReview> = Object.freeze({
   data: undefined, loading: false, refreshing: false, error: null,
@@ -55,6 +61,7 @@ export function useGithubReview({
   confirmedHeadSha,
   confirmedBaseSha,
   renamedPaths,
+  localComparison = false,
 }: {
   workspaceId: string | null | undefined;
   prNumber: number | null | undefined;
@@ -64,6 +71,9 @@ export function useGithubReview({
   confirmedHeadSha?: string;
   confirmedBaseSha?: string;
   renamedPaths?: ReadonlyMap<string, string>;
+  /** The caller shows a local comparison (the Changes tab). New comments are
+   *  matched against the published PR diff when they are posted. */
+  localComparison?: boolean;
 }) {
   const scope = useCloudGithubPrScope(workspaceId ?? cwd);
   const available = githubReviewAvailable({ cwd, workspaceId });
@@ -210,11 +220,53 @@ export function useGithubReview({
     },
     [key, cwd, confirmed, confirmedBaseSha, renamedPaths, refreshAfterWrite],
   );
+  const postMappedComment = useCallback(
+    async (
+      anchor: CodeReviewAnchor,
+      body: string,
+      localLine: (line: number) => string | null,
+      stillCurrent: () => boolean,
+    ) => {
+      if (!key) throw new Error("Open the pull request before posting to it.");
+      const request = beginGithubReviewMutation(cwd);
+      try {
+        const target = githubReviewTargetFromKey(key);
+        // Read the diff now: the comment must land on the PR's current head.
+        const published = await getPrReviewDiff(target);
+        const mapped = mapAnchorToPrDiff(parsePrDiff(published.patch), anchor, localLine);
+        if (!mapped.ok) throw new Error(mapped.reason);
+        if (!stillCurrent())
+          throw new Error(
+            "The comparison changed while posting. Your draft is kept; select the lines again.",
+          );
+        await postPrLineComment({
+          ...target,
+          body,
+          path: mapped.path,
+          side: mapped.side,
+          line: mapped.line,
+          startLine: mapped.startLine,
+          commitSha: published.headSha,
+          baseSha: published.baseSha,
+        });
+        await refreshAfterWrite(request);
+      } finally {
+        request.finish();
+      }
+    },
+    [key, cwd, refreshAfterWrite],
+  );
+  const viewer = snapshot.data?.viewer;
+  const postAs = useMemo(
+    () =>
+      viewer ? { name: viewer.login, avatarUrl: viewer.avatarUrl } : null,
+    [viewer],
+  );
   // A refused connection is guidance, not a failed read of the hosting tab.
   const connectionNotice = githubReviewConnectionNotice(snapshot.error);
   const error = connectionNotice ? undefined : snapshot.error?.message;
   const notice = connectionNotice ?? githubReviewNotice(snapshot.data);
-  const source = useMemo(
+  const source = useMemo<GithubReviewSource | undefined>(
     () =>
       key
         ? {
@@ -223,7 +275,10 @@ export function useGithubReview({
             setResolved,
             ...(confirmedRevision
               ? { confirmedRevision, postComment, createLabel: "Post to PR" }
-              : {}),
+              : localComparison && !connectionNotice
+                ? { postMappedComment, mappedTarget: key, createLabel: "Post to PR" }
+                : {}),
+            postAs,
             ...(error ? { error } : {}),
             ...(notice ? { notice } : {}),
             loading: snapshot.loading,
@@ -236,6 +291,10 @@ export function useGithubReview({
       setResolved,
       confirmedRevision,
       postComment,
+      localComparison,
+      connectionNotice,
+      postMappedComment,
+      postAs,
       error,
       notice,
       snapshot.loading,
