@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { otherRepositories, workerRepositories, workspaceTokenSource, type WorkerRepositoryConfig } from "./workspace-repositories.js";
+import { otherRepositories, lifecycleCheckouts, workerRepositories, workspaceTokenSource, type WorkerRepositoryConfig } from "./workspace-repositories.js";
 import { repositorySetupReports } from "./workspace-repository-setup.js";
 import { resolveWorkspaceMcpServers } from "./workspace-repository-mcp.js";
 import type { CloudWorkspaceEnvironment } from "./environment-contract.js";
@@ -33,7 +33,7 @@ import { CloudProjects, migrateProjects } from "./projects.js";
 import { organizationCloneToken, organizationSubmoduleRepository } from "./organization-github.js";
 import { readSubmoduleLevel } from "./submodules.js";
 import { CloudGithubHttp, withGithubReadScope } from "./github-http.js";
-import { readOnlyToken, resolveWorkspaceSubmodules, withoutReadOnlyToken, workerSubmodules, workspaceRepositoryToken, workspaceSubmoduleSource, type WorkspaceSubmoduleRepositoryInput } from "./workspace-submodules.js";
+import { readOnlyToken, resolveWorkspaceSubmodules, lifecycleSubmoduleToken, withoutReadOnlyToken, workerSubmodules, workspaceRepositoryToken, workspaceSubmoduleSource, type WorkspaceSubmoduleRepositoryInput } from "./workspace-submodules.js";
 import { createCloudGithubServices } from "./github-composition.js";
 import { CLOUD_V2_READY_CHANNEL, CLOUD_V2_BOOT_CHANNEL, WorkerReadySignals, notifyCloudV2WorkerBoot } from "./worker-ready.js";
 import { hydrateCloudRepository, type CloudSourceProof, type CloudSourceTarget } from "./source-authority.js";
@@ -854,6 +854,14 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
     githubToken: async (workspace, repository) => repository ? otherRepositoryToken(workspace, repository)
       : (await lifecycleSource(workspace,"computer"))?.credential ?? github.workspaceToken(workspace),
     repositories: workspace => withSystemTx(pool, tx => otherRepositories(tx, workspace)),
+    // C4: the same repositories and the submodules it fetched, in one statement (no query without either).
+    checkouts: lifecycleCheckouts(pool),
+    submoduleToken: lifecycleSubmoduleToken(pool, async (workspace: CloudV2LifecycleWorkspace, target) => {
+      const actor = await lifecycleExecution(execution, workspace);
+      if (actor) return github.token({ organizationId: workspace.organizationId, userId: actor.userId }, target, "read", "sync", actor.check);
+      requireWorkspaceCreator(workspace);
+      return github.token({ organizationId: workspace.organizationId, userId: workspace.creatorUserId }, target, "read", "sync", () => authorizeSource(workspace));
+    }),
     logger: console,
   }) : null;
   // Lifecycle rows notify on change. Reconnecting sweeps once, covering any

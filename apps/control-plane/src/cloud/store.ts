@@ -164,6 +164,8 @@ export type CloudV2CheckpointRetry = { generation: string; attempts: number; sto
 
 /** Internal lifecycle metadata is never included in public workspace documents. */
 export type CloudV2LifecycleWorkspace = CloudV2Workspace & {
+  /** C4: the submodules it fetched (its 'fetch' rows); absent when none, so its checkouts need no query for them. */
+  submoduleFetches?: number;
   /** Ready copies: when the base its create waited for went live; its boot deadline counts from then. */
   baseReadyAt?: string;
   recoveryAttemptId?: string;
@@ -256,6 +258,8 @@ const COLUMNS = WORKSPACE_COLUMNS_SQL.text;
 export const CLOUD_V2_WORKSPACE_COLUMNS = COLUMNS.split(",").map(value => value.trim());
 
 type LifecycleRow = Row & {
+  /** C4: its 'fetch' submodule rows, counted in the statement that loads it (lifecycleSubmodules). */
+  submodule_fetches?: number;
   base_ready_at?: Date | null;
   execution_transition_id: string | null;
   execution_restore_claimed_at: Date | null;
@@ -271,6 +275,11 @@ type LifecycleRow = Row & {
   maintenance_attempt?: string | null; maintenance_phase?: "waking" | "adopting" | "stopping" | null; maintenance_started_at?: Date | null;
   archive_scrub?: "backup" | "clean" | "partial" | null; archive_scrubbed_generation?: string | null;
 };
+/** C4: how many submodules a workspace fetched, read inside the statement that loads it for the lifecycle, so its stop,
+ * backup and restore read their checkouts only when there are some: a workspace without any costs no query for them.
+ * `table` names the workspace row in that statement. */
+const lifecycleSubmodules = (table: string) =>
+  `(SELECT count(*)::int FROM cloud_v2_workspace_submodules s WHERE s.workspace_id=${table}.id AND s.status='fetch') AS submodule_fetches`;
 const LIFECYCLE_COLUMNS = `${COLUMNS}, lease_renewed_at, base_commit, restore_pending, restore_attempt, restore_create, checkpoint_uploads,
   execution_mode, execution_transition_id, execution_restore_claimed_at, execution_initiator_user_id, execution_intent_id, execution_intent_authority, access_epoch,
   stop_generation, checkpoint_stop_generation,
@@ -317,6 +326,7 @@ export function cloudV2LifecycleWorkspaceFromRow(row: LifecycleRow): CloudV2Life
     ...(row.execution_mode === "active" ? { executionIntent: { id: row.execution_intent_id, userId: row.execution_initiator_user_id,
       accessEpoch: row.access_epoch, authority: row.execution_intent_authority } } : {}),
     checkpoint, restorePending: row.restore_pending, restoreAttempt: row.restore_attempt, restoreCreate: restoreCreate(row.restore_create),
+    ...(row.submodule_fetches ? { submoduleFetches: row.submodule_fetches } : {}),
     ...(row.base_ready_at ? { baseReadyAt: row.base_ready_at.toISOString() } : {}),
     stopGeneration: row.stop_generation, checkpointUploadUntil: uploadHorizon(row.checkpoint_uploads),
     checkpointRetryFork: checkpointFork(row.checkpoint_retry_fork),
@@ -1515,7 +1525,7 @@ export class CloudV2Store {
        UPDATE cloud_v2_workspaces w SET attempts = w.attempts + 1,
          next_attempt_at = clock_timestamp() + make_interval(secs => $2::double precision / 1000)
        FROM claimed WHERE w.id = claimed.id
-       RETURNING ${LIFECYCLE_COLUMNS.replace(/\b(\w+)\b/g, "w.$1")}, w.attempts`,
+       RETURNING ${LIFECYCLE_COLUMNS.replace(/\b(\w+)\b/g, "w.$1")}, w.attempts, ${lifecycleSubmodules("w")}`,
       [limit, leaseMs, excludeIds, states],
     ));
     return rows.map(row => ({ ...lifecycleWorkspace(row), attempts: row.attempts }));
@@ -1540,7 +1550,7 @@ export class CloudV2Store {
          updated_at=CASE WHEN state='deleted' THEN clock_timestamp() ELSE updated_at END
        WHERE id=$1 AND stop_generation=$2::bigint AND NOT restore_pending AND restore_attempt IS NULL
          AND (boat_sandbox_id IS NULL OR boat_sandbox_id=$3)
-       RETURNING ${LIFECYCLE_COLUMNS}, attempts`, [id, generation, sandboxId, renewedAt]));
+       RETURNING ${LIFECYCLE_COLUMNS}, attempts, ${lifecycleSubmodules("cloud_v2_workspaces")}`, [id, generation, sandboxId, renewedAt]));
     return rows[0] ? { ...lifecycleWorkspace(rows[0]), attempts: rows[0].attempts } : null;
   }
 
@@ -1679,7 +1689,7 @@ export class CloudV2Store {
        RETURNING ${LIFECYCLE_COLUMNS.replace(/\b(\w+)\b/g, "w.$1")},
          CASE WHEN $5::boolean AND ${FINAL_BACKUP_PENDING} THEN greatest(coalesce(w.stopped_at, w.updated_at), w.archived_at)
            ELSE coalesce(w.stopped_at, w.updated_at) END AS retry_stopped_at,
-         w.checkpoint_retry_generation, w.checkpoint_retry_attempts, w.checkpoint_retry_exhausted_at`,
+         w.checkpoint_retry_generation, w.checkpoint_retry_attempts, w.checkpoint_retry_exhausted_at, ${lifecycleSubmodules("w")}`,
       [input.leaseMs, input.firstDelayMs, input.windowMs, input.excludeIds ?? [], input.retention !== undefined, input.retention?.forksPerHour ?? 0,
         input.retention?.maintenance?.perHour ?? null, input.retention?.maintenance?.perDay ?? null]));
     const row = rows[0];
@@ -1841,7 +1851,8 @@ export class CloudV2Store {
           CASE WHEN w.archived_at IS NULL OR (w.archive_wake_done_at IS NOT NULL AND w.archive_wake_done_at >= w.archived_at) OR ${FINAL_BACKUP_PENDING} THEN NULL
             WHEN w.checkpoint_stop_generation IS NOT DISTINCT FROM w.stop_generation THEN 'backup'
             WHEN w.backup_probe = 'clean' AND w.backup_probe_generation = w.stop_generation
-              AND w.changed_since_stop_generation IS DISTINCT FROM w.stop_generation THEN 'reseed' ELSE 'keep' END AS scrub_mode`, [due.id, input.attempt]);
+              AND w.changed_since_stop_generation IS DISTINCT FROM w.stop_generation THEN 'reseed' ELSE 'keep' END AS scrub_mode,
+          ${lifecycleSubmodules("w")}`, [due.id, input.attempt]);
       await tx.query(`INSERT INTO cloud_v2_maintenance_wakes (workspace_id, attempt, kind, deadline_at)
         SELECT id, $2, 'wake', greatest(machine_stopped_at, stopped_at) + interval '14 days' FROM cloud_v2_workspaces WHERE id=$1`, [due.id, input.attempt]);
       const row = rows[0]!;
@@ -2215,7 +2226,8 @@ export class CloudV2Store {
 
   /** One workspace's lifecycle row, as the lifecycle reads it. */
   async lifecycleWorkspace(id: string): Promise<CloudV2LifecycleWorkspace | null> {
-    const { rows } = await withSystemTx(this.pool, tx => tx.query<LifecycleRow>(`SELECT ${LIFECYCLE_COLUMNS} FROM cloud_v2_workspaces WHERE id=$1`, [id]));
+    const { rows } = await withSystemTx(this.pool, tx => tx.query<LifecycleRow>(`SELECT ${LIFECYCLE_COLUMNS}, ${lifecycleSubmodules("cloud_v2_workspaces")}
+      FROM cloud_v2_workspaces WHERE id=$1`, [id]));
     return rows[0] ? lifecycleWorkspace(rows[0]) : null;
   }
 

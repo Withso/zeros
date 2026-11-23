@@ -1,5 +1,6 @@
 // A project workspace's repositories as its worker is configured with them.
-import type { Tx } from "../db.js";
+import type pg from "pg";
+import { withSystemTx, type Tx } from "../db.js";
 import type { CloudV2Workspace } from "./store.js";
 import { CLOUD_V2_HOME_PATH, workspaceCheckoutPath } from "./workspace-layout.js";
 
@@ -77,4 +78,69 @@ export async function workspaceTokenSource(tx: Tx, workspaceId: string, reposito
         OR EXISTS (SELECT 1 FROM cloud_v2_workspace_repositories r WHERE r.workspace_id=w.id AND lower(r.repository)=lower($2::text)))`,
     [workspaceId, repository]);
   return rows[0] ?? null;
+}
+
+/** C4: one submodule checkout a workspace fetched ('fetch' rows of cloud_v2_workspace_submodules), for its backup. */
+export type WorkspaceSubmoduleCheckout = {
+  /** The repository it belongs to: 0 is the first. */
+  position: number;
+  repository: string;
+  repositoryId: string;
+  /** Under /home/user: its repository's checkout folder, then its path in that repository. */
+  checkoutFolder: string;
+  /** Under /home/user: the checkout of the repository it belongs to (its Git directory is under that checkout's .git). */
+  repositoryFolder: string;
+  /** The gitlink the create recorded. */
+  baseCommit: string;
+  /** Its Git directory, relative to that repository's top .git ("modules/<digest>", nested at most three deep). */
+  gitDir: string;
+  /** Fetched with no credential; never a token target. */
+  public?: true;
+};
+export type WorkspaceCheckouts = {
+  /** Every repository after the first, as otherRepositories reads them (repositoryId is not read by the lifecycle). */
+  repositories: { repository: string; repositoryId?: string; checkoutFolder: string; baseBranch: string }[];
+  /** The submodules it fetched, parents before children, at most 32 per repository (as the worker fetches them). */
+  submodules: WorkspaceSubmoduleCheckout[];
+};
+
+/**
+ * A workspace's checkouts after the first, and the submodules it fetched, in one statement. No query without a
+ * project, nor for a workspace with one repository and no submodule (its lifecycle loader counted them).
+ */
+type CheckoutsWorkspace = Pick<CloudV2Workspace, "id" | "projectId" | "checkoutFolder" | "folder"> & { submoduleFetches?: number };
+const hasCheckouts = (workspace: CheckoutsWorkspace) =>
+  !!workspace.projectId && !!workspace.checkoutFolder && (!!workspace.folder || !!workspace.submoduleFetches);
+
+export async function workspaceCheckouts(tx: Tx, workspace: CheckoutsWorkspace): Promise<WorkspaceCheckouts> {
+  if (!hasCheckouts(workspace)) return { repositories: [], submodules: [] };
+  const { rows } = await tx.query<{ repositories: { repository: string; repositoryId: string; folder: string; baseBranch: string }[];
+    submodules: { position: number; path: string; repository: string; repositoryId: string; commit: string; gitDir: string; public: boolean; folder: string | null }[] }>(
+    `SELECT coalesce((SELECT jsonb_agg(jsonb_build_object('repository', r.repository, 'repositoryId', s.repository_id::text, 'folder', r.folder,
+          'baseBranch', r.base_branch) ORDER BY r.position)
+        FROM cloud_v2_workspace_repositories r JOIN cloud_v2_github_sources s ON s.workspace_id=r.workspace_id AND s.source_repository=lower(r.repository)
+        WHERE r.workspace_id=$1 AND r.position > 0 AND r.folder IS NOT NULL), '[]'::jsonb) AS repositories,
+      coalesce((SELECT jsonb_agg(jsonb_build_object('position', m.position, 'path', m.path, 'repository', m.repository, 'repositoryId', m.repository_id,
+          'commit', m.commit, 'gitDir', m.git_dir, 'public', m.public, 'folder', r.folder) ORDER BY m.position, char_length(m.git_dir), m.path)
+        FROM cloud_v2_workspace_submodules m JOIN cloud_v2_workspace_repositories r ON r.workspace_id=m.workspace_id AND r.position=m.position
+        WHERE m.workspace_id=$1 AND m.status='fetch'), '[]'::jsonb) AS submodules`, [workspace.id]);
+  const row = rows[0]!;
+  const repositories = workspace.folder ? row.repositories.map(entry => ({ repository: entry.repository, repositoryId: entry.repositoryId,
+    checkoutFolder: `${workspace.folder}/${entry.folder}`, baseBranch: entry.baseBranch })) : [];
+  const taken = new Map<number, number>();
+  const submodules = row.submodules.flatMap(entry => {
+    const count = taken.get(entry.position) ?? 0;
+    const repositoryFolder = entry.position === 0 ? workspace.checkoutFolder : workspace.folder && entry.folder ? `${workspace.folder}/${entry.folder}` : null;
+    if (count >= 32 || !repositoryFolder) return [];
+    taken.set(entry.position, count + 1);
+    return [{ position: entry.position, repository: entry.repository, repositoryId: entry.repositoryId, checkoutFolder: `${repositoryFolder}/${entry.path}`,
+      repositoryFolder, baseCommit: entry.commit, gitDir: entry.gitDir, ...(entry.public ? { public: true as const } : {}) }];
+  });
+  return { repositories, submodules };
+}
+
+/** The lifecycle's `checkouts`: no transaction at all for a workspace with nothing after its first checkout. */
+export function lifecycleCheckouts(pool: pg.Pool) {
+  return async (workspace: CheckoutsWorkspace): Promise<WorkspaceCheckouts> =>
+    hasCheckouts(workspace) ? withSystemTx(pool, tx => workspaceCheckouts(tx, workspace)) : { repositories: [], submodules: [] };
 }

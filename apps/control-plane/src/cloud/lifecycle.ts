@@ -16,6 +16,7 @@ import type { CloudV2ReadyCopyForks } from "./ready-copies.js";
 import type { CloudV2CheckpointFork, CloudV2CheckpointReuse, CloudV2CheckpointRetry, CloudV2CheckpointScope, CloudV2Store, CloudV2Workspace,
   CloudV2LifecycleWorkspace, CloudV2RestoreCreate } from "./store.js";
 import { CLOUD_V2_WORKER_PORT, type CloudV2WorkerTiming, type CloudV2WorkerBootTiming } from "./contract.js";
+import type { WorkspaceCheckouts } from "./workspace-repositories.js";
 import { CLOUD_V2_BACKUP_PROBE_SECONDS, CLOUD_V2_CHECKPOINT_ERRORS, CLOUD_V2_CHECKPOINT_SECONDS, WORKER_OFF_COMMAND, WORKER_UNIT_CHECK, backupProbeCommand, checkpointCommand,
   cloudV2CheckpointObject, parseBackupProbe, parseCheckpointResult, parseRestoreResult, restoreCommand, workerUnitOff, type BackupProbe,
   type CloudV2CheckpointError, type CloudV2CheckpointStorage, environmentRestoreCommand, parseEnvironmentRestore } from "./checkpoint.js";
@@ -207,6 +208,11 @@ export type CloudV2LifecycleDeps = {
   prepareRepository?(workspace: CloudV2LifecycleWorkspace, sandboxId: string): Promise<void>;
   /** A workspace of several repositories: every one after the first, for its checkpoint and restore. */
   repositories?(workspace: CloudV2LifecycleWorkspace): Promise<{ repository: string; checkoutFolder: string; baseBranch: string }[]>;
+  /** C4: the repositories after the first and the submodules it fetched, in one statement (workspace-repositories.ts
+   * workspaceCheckouts). Preferred to `repositories` when given. */
+  checkouts?(workspace: CloudV2LifecycleWorkspace): Promise<WorkspaceCheckouts>;
+  /** C4: a read-only token for one planned, non-public submodule (workspace-submodules.ts lifecycleSubmoduleToken). */
+  submoduleToken?(workspace: CloudV2LifecycleWorkspace, repository: string): Promise<{ token: string }>;
   /** Cloud Computer builds share this loop; one runs at a time. */
   builds?: { tick(): Promise<void>; cleanup?(): Promise<void>; close?(): void };
   /** Ready copies (CloudV2Config.readyCopies): creates fork a repository's
@@ -957,7 +963,7 @@ export class CloudV2Lifecycle {
         `[cloud-v2] maintenance wake could not verify the worker off; stopping at once workspace=${row.id.slice(0, 8)}`);
       // Retention S3: did anything write into a checkout while the machine was awake? Then this stop's backup
       // or clean probe no longer describes it. Then the archived wake's scrub, after the worker is off.
-      const checkouts = [workspaceCheckoutPath(row), ...(await this.deps.repositories?.(row) ?? []).map(entry => `${CLOUD_V2_HOME}/${entry.checkoutFolder}`)];
+      const checkouts = [workspaceCheckoutPath(row), ...((await this.checkouts(row)).repositories).map(entry => `${CLOUD_V2_HOME}/${entry.checkoutFolder}`)];
       const changed = await compute.exec(vm, changedSinceStopCommand(CLOUD_V2_HOME, checkouts), CHANGED_SINCE_STOP_SECONDS).catch(() => null);
       await held();
       changedSinceStop = !changed || changed.timedOut || parseChangedSinceStop(changed.stdout);
@@ -1112,7 +1118,7 @@ export class CloudV2Lifecycle {
       `[cloud-v2] stop could not verify the worker off; recorded for the next wake workspace=${workspace.id.slice(0, 8)}`);
     let probe: BackupProbe = "unknown";
     try {
-      const others = await this.deps.repositories?.(workspace) ?? [];
+      const others = (await this.checkouts(workspace)).repositories;
       const result = await this.deps.compute.exec(sandboxId,
         backupProbeCommand([workspaceCheckoutPath(workspace), ...others.map(entry => `${CLOUD_V2_HOME}/${entry.checkoutFolder}`)], CLOUD_V2_HOME), CLOUD_V2_BACKUP_PROBE_SECONDS);
       if (result.exitCode === 0 && !result.timedOut) probe = parseBackupProbe(result.stdout);
@@ -1152,7 +1158,7 @@ export class CloudV2Lifecycle {
       let key: Buffer | undefined;
       try {
         key = checkpoints.open(checkpoint.key, workspace.id, checkpoint.object);
-        const others = await this.deps.repositories?.(workspace) ?? [];
+        const others = (await this.checkouts(workspace)).repositories;
         const command = environmentRestoreCommand({ checkoutPath: workspaceCheckoutPath(workspace), home: CLOUD_V2_HOME, key,
           sha256: checkpoint.sha256, downloadUrl: await checkpoints.storage.downloadUrl(workspace.id, checkpoint.object),
           repositories: others.map(entry => `${CLOUD_V2_HOME}/${entry.checkoutFolder}`) });
@@ -1201,7 +1207,7 @@ export class CloudV2Lifecycle {
       if (!await store.checkpointUpload(workspace.id, owner, generation, object, uploadUntil, ...scoped)) return "fenced";
       const reuse = await this.reusable(workspace);
       // Every repository of a workspace of several, each in its own part of the archive.
-      const others = await this.deps.repositories?.(workspace) ?? [];
+      const others = (await this.checkouts(workspace)).repositories;
       const command = checkpointCommand({ checkoutPath: workspaceCheckoutPath(workspace), home: CLOUD_V2_HOME,
         baseBranch: workspace.baseBranch, key, uploadUrl: await checkpoints.storage.uploadUrl(workspace.id, object), ...(reuse ? { reuse } : {}),
         ...(this.retention && scope === "retry" ? { backup: true } : {}),
@@ -1488,9 +1494,15 @@ export class CloudV2Lifecycle {
    * created from GitHub's when GitHub has it. When it does not (never pushed),
    * nothing is done and the worker creates it from the base branch, as at
    * create. Any other GitHub failure fails the step, which is retried. */
+  /** The repositories after the first and the submodules it fetched: one dependency call, as `repositories` was. */
+  private async checkouts(workspace: CloudV2LifecycleWorkspace): Promise<WorkspaceCheckouts> {
+    if (this.deps.checkouts) return this.deps.checkouts(workspace);
+    return { repositories: await this.deps.repositories?.(workspace) ?? [], submodules: [] };
+  }
+
   private async restoreBranches(workspace: CloudV2LifecycleWorkspace, sandboxId: string): Promise<void> {
     await this.deps.authorizeWorkspace?.(workspace);
-    const others = new Map((await this.deps.repositories?.(workspace) ?? []).map(entry => [entry.repository.toLowerCase(), entry.checkoutFolder]));
+    const others = new Map(((await this.checkouts(workspace)).repositories).map(entry => [entry.repository.toLowerCase(), entry.checkoutFolder]));
     for (const entry of await this.deps.store.workspaceBranches(workspace.id)) {
       const dir = entry.position === 0 ? workspaceCheckoutPath(workspace) : others.get(entry.repository.toLowerCase());
       if (!dir) continue;
@@ -1513,7 +1525,7 @@ export class CloudV2Lifecycle {
     if (active && !await this.deps.claimExecutionRestore?.(workspace, sandboxId)) throw checkpointError("checkpoint_restore_failed");
     const github = await this.deps.githubToken?.(workspace) ?? null;
     // Each repository after the first is restored with its own token and clone URL.
-    const others = await this.deps.repositories?.(workspace) ?? [];
+    const others = (await this.checkouts(workspace)).repositories;
     const repositories = await Promise.all(others.map(async entry => {
       const token = await this.deps.githubToken?.(workspace, entry.repository) ?? null;
       // Shared execution fetches every repository's objects with its own token, as for the first.

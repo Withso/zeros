@@ -18,8 +18,8 @@ import { CloudRepositoryLevels } from "./repository-levels.js";
 import { CloudProjects } from "./projects.js";
 import { scheduleCloudDeletion } from "./deletion.js";
 import { withSystemTx } from "../db.js";
-import { otherRepositories, workerRepositories, workspaceTokenSource } from "./workspace-repositories.js";
-import { insertWorkspaceSubmodules, resolveWorkspaceSubmodules, workerSubmodules, workspaceSubmoduleSource } from "./workspace-submodules.js";
+import { lifecycleCheckouts, otherRepositories, workerRepositories, workspaceTokenSource } from "./workspace-repositories.js";
+import { insertWorkspaceSubmodules, lifecycleSubmoduleToken, resolveWorkspaceSubmodules, workerSubmodules, workspaceSubmoduleSource } from "./workspace-submodules.js";
 import { submoduleGitDirName } from "./submodules.js";
 import { CloudGithubPrStore } from "./github-pr-store.js";
 import { hashCloudV2Token } from "./tokens.js";
@@ -899,6 +899,92 @@ d("cloud v2 ready copies", () => {
       expect(copy.state).toBe("ready");
       expect(copy.result![0]!.submodules).toEqual([{ path: ".gitmodules", fetched: false, reason: "GitHub could not be read" }]);
       expect(warnings).toContainEqual(expect.stringMatching(/could not read withso\/zeros's submodules/));
+    });
+
+    describe("the checkouts a backup covers (lifecycle checkouts and submoduleToken)", () => {
+      const store = () => new CloudV2Store(pool);
+      /** A workspace of the project withso/zeros + withso/web (or only withso/zeros), as a create lays it out. */
+      async function made(submodules: Parameters<CloudV2Store["createWorkspace"]>[0]["submodules"] = [], several = true) {
+        await liveBase();
+        const base = (await copies.base(org))!, id = randomUUID(), branch = `zeros/b-${id.slice(0, 8)}`;
+        const repositories = several ? [{ repository: "withso/zeros" }, { repository: "withso/web" }] : [{ repository: "withso/zeros" }];
+        const app = await project(repositories, { name: `App ${id.slice(0, 8)}` });
+        await store().createWorkspace({ id, organizationId: org, creatorUserId: member, name: "App", repository: "withso/zeros", branch,
+          baseBranch: "main", computerBuildId: base.buildId, projectId: app, ...(several ? { folder: "app" } : {}), checkoutFolder: several ? "app/zeros" : "zeros/zeros",
+          repositories: repositories.map(entry => ({ repository: entry.repository, repositoryId: repositoryId(entry.repository),
+            folder: entry.repository.split("/")[1]!, branch, baseBranch: "main" })),
+          ...(submodules?.length ? { submodules } : {}) });
+        return id;
+      }
+      async function queries<T>(work: () => Promise<T>): Promise<{ result: T; count: number }> {
+        const original = pg.Client.prototype.query;
+        let count = 0;
+        pg.Client.prototype.query = function (this: pg.Client, ...args: unknown[]) { count++; return (original as (...a: unknown[]) => unknown).apply(this, args); } as never;
+        try { return { result: await work(), count }; } finally { pg.Client.prototype.query = original; }
+      }
+      const inner = `modules/${submoduleGitDirName("lib")}/modules/${submoduleGitDirName("inner")}`;
+      const vendor = { position: 1, path: "vendor", status: "fetch" as const, repository: "oss/vendor", repositoryId: "900", commit: VENDOR,
+        gitDir: `modules/${submoduleGitDirName("vendor")}`, public: true as const };
+
+      it("reads every repository after the first and each fetched submodule in one statement, parents first, as the worker fetches them", async () => {
+        const id = await made([
+          { position: 0, path: "lib/inner", status: "fetch", repository: "acme/inner", repositoryId: "503", commit: "d".repeat(40), gitDir: inner },
+          readable(LIB), vendor,
+          { position: 0, path: "secret", status: "skipped", repository: "acme/secret", reason: "no access" },
+          { position: 1, path: "readonly", status: "readable", repositoryId: "504" }]);
+        const lifecycle = (await store().lifecycleWorkspace(id))!;
+        expect(lifecycle.submoduleFetches).toBe(3);
+        expect((await store().claimPending(10, 60_000)).find(row => row.id === id)?.submoduleFetches).toBe(3);
+        const { result, count } = await queries(() => lifecycleCheckouts(pool)(lifecycle));
+        // The repositories exactly as otherRepositories reads them.
+        expect(result.repositories).toEqual(await withSystemTx(pool, tx => otherRepositories(tx, lifecycle)));
+        expect(result.submodules).toEqual([
+          { position: 0, repository: "acme/lib", repositoryId: "501", checkoutFolder: "app/zeros/lib", repositoryFolder: "app/zeros", baseCommit: LIB,
+            gitDir: `modules/${submoduleGitDirName("lib")}` },
+          { position: 0, repository: "acme/inner", repositoryId: "503", checkoutFolder: "app/zeros/lib/inner", repositoryFolder: "app/zeros",
+            baseCommit: "d".repeat(40), gitDir: inner },
+          { position: 1, repository: "oss/vendor", repositoryId: "900", checkoutFolder: "app/web/vendor", repositoryFolder: "app/web", baseCommit: VENDOR,
+            gitDir: `modules/${submoduleGitDirName("vendor")}`, public: true }]);
+        // One transaction: its statement and the system context around it.
+        expect(count).toBeLessThanOrEqual(4);
+        const plan = await withSystemTx(pool, async tx => workerSubmodules(await workerRepositories(tx, await store().get(id, member), { forked: false })));
+        expect(plan.submodules!.map(entry => [entry.position, entry.path])).toEqual(result.submodules.map(entry =>
+          [entry.position, entry.checkoutFolder.slice(entry.repositoryFolder.length + 1)]));
+      });
+
+      it("keeps at most the 32 per repository the worker fetches", async () => {
+        const id = await made(Array.from({ length: 33 }, (_, index) => ({ position: 0, path: `m${String(index).padStart(2, "0")}`, status: "fetch" as const,
+          repository: `acme/m${index}`, repositoryId: String(600 + index), commit: LIB, gitDir: `modules/${submoduleGitDirName(`m${index}`)}` })));
+        const listed = (await lifecycleCheckouts(pool)((await store().lifecycleWorkspace(id))!)).submodules;
+        const plan = await withSystemTx(pool, async tx => workerSubmodules(await workerRepositories(tx, await store().get(id, member), { forked: false })));
+        expect(listed.map(entry => entry.checkoutFolder)).toEqual(plan.submodules!.map(entry => `app/zeros/${entry.path}`));
+        expect(listed).toHaveLength(32);
+      });
+
+      it("costs a workspace with one repository and no submodule, or none from before projects, no query at all", async () => {
+        const one = (await store().lifecycleWorkspace(await made([], false)))!;
+        expect(one).not.toHaveProperty("submoduleFetches");
+        expect(await queries(() => lifecycleCheckouts(pool)(one))).toEqual({ result: { repositories: [], submodules: [] }, count: 0 });
+        const legacy = { ...one, projectId: undefined, checkoutFolder: undefined, folder: undefined };
+        expect(await queries(() => lifecycleCheckouts(pool)(legacy))).toEqual({ result: { repositories: [], submodules: [] }, count: 0 });
+        // One repository with a submodule: read, with its folder under that one checkout.
+        const sub = (await store().lifecycleWorkspace(await made([readable(LIB)], false)))!;
+        expect((await lifecycleCheckouts(pool)(sub)).submodules.map(entry => [entry.checkoutFolder, entry.repositoryFolder])).toEqual([["zeros/zeros/lib", "zeros/zeros"]]);
+      });
+
+      it("mints a submodule token only for a planned, non-public submodule, never for any other repository", async () => {
+        const id = await made([readable(LIB), vendor, { position: 1, path: "readonly", status: "readable", repositoryId: "504", repository: "acme/readonly" },
+          { position: 0, path: "secret", status: "skipped", repository: "acme/secret", reason: "no access" }]);
+        const minted: unknown[] = [];
+        const token = lifecycleSubmoduleToken(pool, async (_workspace: { id: string }, target) => { minted.push(target); return { token: "synthetic-sub", expiresAt: Date.now() + 3_600_000 }; });
+        expect(await token({ id }, "Acme/Lib")).toMatchObject({ token: "synthetic-sub" });
+        expect(minted).toEqual([{ repository: "acme/lib", repositoryId: "501" }]);
+        for (const other of ["oss/vendor", "acme/readonly", "acme/secret", "withso/web", "withso/zeros", "acme/unknown"])
+          await expect(token({ id }, other)).rejects.toMatchObject({ code: "github_repository_access_required" });
+        expect(minted).toHaveLength(1);
+        // Another workspace's submodule is never this one's.
+        await expect(token({ id: randomUUID() }, "acme/lib")).rejects.toMatchObject({ code: "github_repository_access_required" });
+      });
     });
   });
 
