@@ -532,6 +532,14 @@ d("cloud v2 retention", () => {
       expect(boat.machine(fork.sandboxId)!.files.get(`${path("app")}/LATE`)).toBe("written while Boat was saving");
     });
 
+    it("records a stop met by an attempt that began just before it, though none is reported failed", async () => {
+      boat.attemptAtStop = { inProgressReads: 1, failedReads: 0 };
+      await stop();
+      const stopped = (await pool.query("SELECT stop_generation, stop_archive_failed_generation FROM cloud_v2_workspaces WHERE id=$1", [id])).rows[0];
+      expect(stopped.stop_archive_failed_generation).toBe(stopped.stop_generation);
+      expect(errors.filter(line => line.includes("(attempt_before_stop)"))).toHaveLength(1);
+    });
+
     it("records a stop during which Boat reported a failed attempt, and never calls that stop clean", async () => {
       boat.beginSnapshotAttempt(vm, Number.POSITIVE_INFINITY);
       await stop();
@@ -784,6 +792,15 @@ d("cloud v2 retention", () => {
         const fork = await boat.fork(vm, { key: "probe", ttlSeconds: 60 });
         expect(boat.machine(fork.sandboxId)!.files.get("/home/user/.local/share/zeros/WAKE-MARK")).toBe("written by the wake");
         expect((await pool.query("SELECT stop_archive_failed_generation FROM cloud_v2_workspaces WHERE id=$1", [id])).rows[0].stop_archive_failed_generation).toBeNull();
+      });
+
+      it("records an attempt that began just before its stop, though none is reported failed", async () => {
+        await sleeping(10.6);
+        boat.attemptAtStop = { inProgressReads: 1, failedReads: 0 };
+        await lifecycle().tick();
+        expect(await wakes()).toMatchObject([{ kind: "wake", outcome: "stopped" }]);
+        const recorded = (await pool.query("SELECT stop_generation, stop_archive_failed_generation FROM cloud_v2_workspaces WHERE id=$1", [id])).rows[0];
+        expect(recorded.stop_archive_failed_generation).toBe(recorded.stop_generation);
       });
 
       it("records a failed attempt during its stop, so nothing calls that archive good", async () => {

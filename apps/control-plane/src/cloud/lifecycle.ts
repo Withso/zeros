@@ -6,7 +6,7 @@
 import { workspaceCheckoutPath } from "./workspace-layout.js";
 import { randomBytes, randomUUID } from "node:crypto";
 import { CLOUD_V2_LEASE_SECONDS, type CloudV2Compute, type CloudV2CommandResult } from "./boat.js";
-import { diskSettled, stopKeepingWrites } from "./boat-disk.js";
+import { archiveSuspect, diskSettled, stopKeepingWrites } from "./boat-disk.js";
 import { checkoutsMatch, readyCopyCheckoutsCommand } from "./ready-copies.js";
 import { BoatBootPendingError, BoatCreateRejectedError, BoatForkRefusedError, BoatSnapshotExpiredError } from "./boat-client.js";
 import { CloudProviderError } from "./provider-error.js";
@@ -820,10 +820,10 @@ export class CloudV2Lifecycle {
             const stopped = await stopKeepingWrites(compute, sandboxId, { sleep: ms => this.pause(ms), reads: STOP_SETTLE_READS,
               archiveReads: ARCHIVE_CONFIRM_READS, archiveIntervalMs: ARCHIVE_CONFIRM_MS });
             stoppedAt = stopped.stoppedAt;
-            if (stopped.failed) {
+            if (archiveSuspect(stopped)) {
               archiveFailed = true;
               (this.deps.logger?.error ?? this.deps.logger?.warn)?.call(this.deps.logger,
-                `[cloud-v2] stop archive may lack the machine's last writes: the provider reported a failed snapshot attempt workspace=${workspace.id.slice(0, 8)}`);
+                `[cloud-v2] stop archive may lack the machine's last writes (${stopped.failed ? "failed_attempt" : "attempt_before_stop"}) workspace=${workspace.id.slice(0, 8)}`);
             }
           }
           catch (error) {
@@ -994,9 +994,9 @@ export class CloudV2Lifecycle {
       const stopped = await stopKeepingWrites(compute, vm, { sleep: ms => this.pause(ms), reads: STOP_SETTLE_READS,
         archiveReads: ARCHIVE_CONFIRM_READS, archiveIntervalMs: ARCHIVE_CONFIRM_MS });
       machineStoppedAt = stopped.stoppedAt;
-      if (stopped.failed) {
+      if (archiveSuspect(stopped)) {
         (this.deps.logger?.error ?? this.deps.logger?.warn)?.call(this.deps.logger,
-          `[cloud-v2] stop archive may lack the machine's last writes: the provider reported a failed snapshot attempt workspace=${row.id.slice(0, 8)}`);
+          `[cloud-v2] stop archive may lack the machine's last writes (${stopped.failed ? "failed_attempt" : "attempt_before_stop"}) workspace=${row.id.slice(0, 8)}`);
         await store.recordStopArchiveFailed(row.id);
       }
       outcome = "stopped";

@@ -32,7 +32,13 @@ export async function diskSettled(compute: Pick<CloudV2Compute, "inspect">, sand
  * none was reported failed (true); otherwise false; null when the provider does not report its disk. `failed`: an attempt
  * was in progress (or the machine not hydrated) when the wait before the stop gave up, or one was reported failed while
  * the machine archived. */
-export type BoatStop = { stoppedAt: Date | null; holds: boolean | null; failed: boolean; attemptAt: Date | null; status: string | null };
+export type BoatStop = { stoppedAt: Date | null; holds: boolean | null; failed: boolean; attemptAt: Date | null; status: string | null;
+  /** How many new snapshot attempts were seen after the stop: more than one means one began before the stop itself. */
+  newAttempts: number };
+
+/** Whether a stop's archive may lack the machine's last writes: an attempt reported failed, or one that began before the
+ * stop itself (more than one new attempt seen). A quiet stop, or one the provider says nothing of, is not. */
+export const archiveSuspect = (stopped: BoatStop) => stopped.failed || stopped.newAttempts > 1;
 
 /** Reads right after a stop, a little apart: a failed attempt may be reported for well under a second. */
 const STOP_FAST_READS = 10, STOP_FAST_INTERVAL_MS = 300;
@@ -69,7 +75,8 @@ export async function stopKeepingWrites(compute: Pick<CloudV2Compute, "inspect" 
     if (inspected.state === "archived") {
       const holds = !known(inspected) || !before || !known(before) ? null
         : !failed && attempts.size === 1 && inspected.snapshotStatus === "completed" && attemptAt !== undefined && attempts.has(attemptAt);
-      return { stoppedAt: inspected.stoppedAt ?? null, holds, failed, attemptAt: inspected.snapshotAttemptAt ?? null, status: inspected.snapshotStatus ?? null };
+      return { stoppedAt: inspected.stoppedAt ?? null, holds, failed, attemptAt: inspected.snapshotAttemptAt ?? null, status: inspected.snapshotStatus ?? null,
+        newAttempts: attempts.size };
     }
     if (inspected.state !== "archiving") break;
     if (read < archiveReads) await wait.sleep(read <= STOP_FAST_READS ? STOP_FAST_INTERVAL_MS : wait.archiveIntervalMs ?? ARCHIVE_INTERVAL_MS);

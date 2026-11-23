@@ -1271,6 +1271,7 @@ export class CloudV2ReadyCopyForks<W extends ReadyCopyWorkspace = ReadyCopyWorks
     const copy = await this.deps.copies.get(fork.copyId);
     // A copy recorded before its folders were (or with none) cannot be read back: taken as before.
     if (!copy?.result?.length || copy.result.some(entry => !entry.checkoutFolder)) return true;
+    // A failed read distrusts a good copy too: the cost is a rebuild and one direct clone, never anyone's data.
     const read = await this.deps.compute.exec(sandboxId, asZeros(readyCopyCheckoutsCommand(copy.result.map(entry => homePath(entry.checkoutFolder!)))), 120)
       .catch(() => null);
     if (read && read.exitCode === 0 && !read.timedOut && checkoutsMatch(read.stdout, copy.result)) return true;

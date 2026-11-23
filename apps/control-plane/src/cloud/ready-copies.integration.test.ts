@@ -167,6 +167,14 @@ d("cloud v2 ready copies", () => {
         .toEqual({ attemptAt: expect.any(String), status: "completed" });
     });
 
+    it("never makes a copy ready whose checkout reads another commit than the one it recorded", async () => {
+      await liveBase();
+      // Something moved the checkout after its clone recorded its commit (the scrub runs just before the read-back).
+      boat.script = (machine, command) => { if (command.includes("rm -rf /tmp/zeros-command-input-*")) machine.files.set(checkout, "d".repeat(40)); return undefined; };
+      await copyBuilder().tick();
+      expect(await row(1)).toMatchObject({ state: "failed", failureReason: "ready_copy_checkout_missing" });
+    });
+
     it("never makes a copy ready when its archive may lack its checkout", async () => {
       await liveBase();
       attemptBeforeClone(Number.POSITIVE_INFINITY);
@@ -191,6 +199,25 @@ d("cloud v2 ready copies", () => {
       await copyBuilder().buildNow(org, zeros, admin);
       await copyBuilder({ verifyArchiveByFork: true }).tick();
       expect(await row(2)).toMatchObject({ state: "failed", failureReason: "ready_copy_archive_incomplete" });
+    });
+
+    it("treats a fork whose checkout is at another commit than the copy recorded as untrusted: rebuilt, and its create goes on", async () => {
+      await liveBase();
+      await copyBuilder().tick();
+      const copy = await row(1);
+      boat.machine(copy.machineId!)!.files.set(checkout, "d".repeat(40));
+      const store = new CloudV2Store(pool), id = randomUUID(), base = (await copies.base(org))!;
+      await store.createWorkspace({ id, organizationId: org, creatorUserId: member, name: "zeros", repository: "withso/zeros",
+        branch: "zeros/w", baseBranch: "main", computerBuildId: base.buildId, projectId: zeros, ...one("withso/zeros", "zeros/w") });
+      const prepareRepository = vi.fn(async () => {});
+      await new CloudV2Lifecycle({ store, compute: boat, readyCopies: forks(), runtime, prepareRepository,
+        publicKeys: [generateKeyPairSync("ed25519").publicKey.export({ type: "spki", format: "pem" }).toString()],
+        sealPortToken: () => ({ encrypted: true }), stopWorker: async () => true, bootEnv: () => ({}),
+        sandboxName: () => `zeros-fixture-${id}`, sleep: async () => {}, now: () => clock, logger,
+      }).tick();
+      expect(prepareRepository).toHaveBeenCalledOnce();
+      expect(await row(1)).toMatchObject({ state: "ready", stale: true });
+      expect((await pool.query("SELECT state, error_code FROM cloud_v2_workspaces WHERE id=$1", [id])).rows[0]).toEqual({ state: "creating", error_code: null });
     });
 
     it("never fails a workspace on a copy's word: a fork without its checkout clones directly, and that copy is rebuilt", async () => {
