@@ -47,12 +47,22 @@ async function deleteAndConfirm(provider, path, id, belongs = () => true) {
 /** The launcher has stopped the backend and holds its data-directory lock.
  * Fences and confirmations live in the local DB, so interruption is retried
  * without losing resource IDs. Nothing is created, resumed or re-hosted. */
-export async function drainLocalCloudResources({ runtime, withSystemTx, request, provider, snapshotName, sandboxName }) {
+export async function drainLocalCloudResources({ runtime, withSystemTx, request, provider, snapshotName, sandboxName, sharedBasePrefix }) {
   if (request.backendStopped !== true) throw new Error("Stop the local backend before deleting its cloud resources");
+  // Alpha's and other instances' bases share this Boat account: only this instance's exact prefix is ever deleted.
+  if (typeof sharedBasePrefix !== "string" || sharedBasePrefix !== `zeros-local-${request.owner}-base-` || !/^[a-f0-9]{24}$/.test(request.owner))
+    throw new Error("Invalid local shared base prefix");
   await assertLocalDatabaseOwner(runtime, request);
   const tx = fn => withSystemTx(runtime, fn);
   const pending = new Set();
-  const { workspaces, builds } = await tx(async client => {
+  // Read only when the table exists, so a database from before shared bases still drains.
+  const sharedBases = async client => (await client.query("SELECT to_regclass('cloud_v2_shared_bases') IS NOT NULL AS present")).rows[0]?.present
+    ? (await client.query(`SELECT name,state,build_id,builder_sandbox_id,builder_create_pending,builder_deleted_at,deleted_at,heartbeat_at,created_at
+        FROM cloud_v2_shared_bases WHERE starts_with(name,$1) AND (deleted_at IS NULL OR builder_create_pending
+          OR (builder_sandbox_id IS NOT NULL AND builder_deleted_at IS NULL)) ORDER BY name`, [sharedBasePrefix])).rows
+        .filter(row => typeof row.name === "string" && row.name.startsWith(sharedBasePrefix))
+    : null;
+  const { workspaces, builds, bases } = await tx(async client => {
     await client.query(`UPDATE cloud_v2_computer_builds SET
       cleanup_requested_at=coalesce(cleanup_requested_at,clock_timestamp()),
       state=CASE WHEN state IN ('queued','building') THEN 'cancelled' ELSE state END`);
@@ -71,7 +81,9 @@ export async function drainLocalCloudResources({ runtime, withSystemTx, request,
       // database from before the column existed still drains.
       workspaces: (await client.query(`SELECT id,state,boat_sandbox_id,next_attempt_at,to_jsonb(w)->'checkpoint_retry_fork' AS retry_fork
         FROM cloud_v2_workspaces w ORDER BY id`)).rows,
-      builds: (await client.query("SELECT id,org_id,version,builder_sandbox_id,builder_create_pending,snapshot_id,operation_until FROM cloud_v2_computer_builds ORDER BY id")).rows,
+      builds: (await client.query(`SELECT id,org_id,version,builder_sandbox_id,builder_create_pending,snapshot_id,operation_until,
+        coalesce((to_jsonb(cloud_v2_computer_builds)->>'base_shared')::boolean,false) AS base_shared FROM cloud_v2_computer_builds ORDER BY id`)).rows,
+      bases: await sharedBases(client),
     };
   });
   let inventory;
@@ -119,15 +131,34 @@ export async function drainLocalCloudResources({ runtime, withSystemTx, request,
       if (!result.confirmed) { pending.add(key); continue; }
       await tx(client => client.query(`UPDATE cloud_v2_computer_builds SET builder_sandbox_id=coalesce($2,builder_sandbox_id),
         builder_deleted_at=coalesce(builder_deleted_at,clock_timestamp()),builder_create_pending=false WHERE id=$1`, [row.id, result.id]));
-      const name = snapshotName(row.org_id, row.version);
-      if ((row.snapshot_id && row.snapshot_id !== name) ||
-          !await deleteAndConfirm(provider, `/named-snapshots/${name}`, name)) { pending.add(key); continue; }
+      // A build on Zeros's shared base holds only a reference ("<base>@<build>"); the base itself is drained below.
+      const name = row.base_shared ? row.snapshot_id : snapshotName(row.org_id, row.version);
+      if (!row.base_shared && ((row.snapshot_id && row.snapshot_id !== name) ||
+          !await deleteAndConfirm(provider, `/named-snapshots/${name}`, name))) { pending.add(key); continue; }
       await tx(async client => {
         await client.query(`UPDATE cloud_v2_computer_builds SET snapshot_id=NULL,snapshot_deleted_at=coalesce(snapshot_deleted_at,clock_timestamp()),
           operation_until=NULL WHERE id=$1`, [row.id]);
         await client.query(`UPDATE cloud_v2_computers SET active_build_id=NULL,snapshot_name=NULL,updated_at=clock_timestamp()
           WHERE org_id=$1 AND (active_build_id=$2 OR active_build_id IS NULL) AND (snapshot_name=$3 OR snapshot_name IS NULL)`, [row.org_id, row.id, name]);
       });
+    } catch { pending.add(key); }
+  }
+
+  for (const row of bases ?? []) {
+    const key = `base:${row.name}`;
+    try {
+      // The builder's own horizon (shared-base.ts): a build that beat within it may still save its snapshot.
+      const beat = row.heartbeat_at ?? row.created_at;
+      if (row.state === "building" && (!beat || beat.getTime() > Date.now() - 5 * 60_000)) { pending.add(key); continue; }
+      if (!row.builder_deleted_at && (row.builder_sandbox_id || row.builder_create_pending)) {
+        const result = await sandbox(row.builder_sandbox_id, sandboxName("build", row.build_id));
+        if (!result.confirmed) { pending.add(key); continue; }
+        await tx(client => client.query(`UPDATE cloud_v2_shared_bases SET builder_sandbox_id=coalesce($2,builder_sandbox_id),
+          builder_deleted_at=coalesce(builder_deleted_at,clock_timestamp()),builder_create_pending=false WHERE name=$1`, [row.name, result.id]));
+      }
+      if (row.deleted_at) continue;
+      if (!await deleteAndConfirm(provider, `/named-snapshots/${row.name}`, row.name)) { pending.add(key); continue; }
+      await tx(client => client.query(`UPDATE cloud_v2_shared_bases SET state='deleted',deleted_at=coalesce(deleted_at,clock_timestamp()) WHERE name=$1`, [row.name]));
     } catch { pending.add(key); }
   }
 
@@ -140,5 +171,6 @@ export async function drainLocalCloudResources({ runtime, withSystemTx, request,
     UNION SELECT CASE WHEN active_build_id IS NULL THEN 'computer:'||org_id::text ELSE 'build:'||active_build_id::text END
       FROM cloud_v2_computers WHERE active_build_id IS NOT NULL OR snapshot_name IS NOT NULL`)).rows);
   for (const row of unfinished) pending.add(row.key);
+  if (bases) for (const row of await tx(sharedBases)) pending.add(`base:${row.name}`);
   return { complete: pending.size === 0, pending: pending.size };
 }

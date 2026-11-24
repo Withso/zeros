@@ -197,7 +197,8 @@ database("electron:cloud seed and confirmed resource drain", () => {
       if (!rows.has(path)) throw Object.assign(new Error("gone"), { code: "provider_not_found", httpStatus: 404 });
       return rows.get(path);
     }) };
-    const drain = (overrides = {}) => drainLocalCloudResources({ runtime, withSystemTx, request: { owner, instanceId, backendStopped: true, ...overrides }, provider, sandboxName, snapshotName });
+    const drain = (overrides = {}) => drainLocalCloudResources({ runtime, withSystemTx, request: { owner, instanceId, backendStopped: true, ...overrides }, provider, sandboxName, snapshotName,
+      sharedBasePrefix: `zeros-local-${owner}-base-` });
     return { workspaceId, buildId, snapshot, rows, provider, fail, sticky, drain };
   }
 
@@ -208,6 +209,37 @@ database("electron:cloud seed and confirmed resource drain", () => {
     expect((await pool.query("SELECT state FROM cloud_v2_workspaces WHERE id=$1", [f.workspaceId])).rows[0].state).toBe("deleted");
     const build = (await pool.query("SELECT builder_deleted_at,snapshot_deleted_at,cleanup_requested_at,snapshot_id FROM cloud_v2_computer_builds WHERE id=$1", [f.buildId])).rows[0];
     expect(build).toMatchObject({ builder_deleted_at: expect.any(Date), snapshot_deleted_at: expect.any(Date), cleanup_requested_at: expect.any(Date), snapshot_id: null });
+    expect((await pool.query("SELECT active_build_id,snapshot_name FROM cloud_v2_computers")).rows).toEqual([{ active_build_id: null, snapshot_name: null }]);
+    await expect(f.drain()).resolves.toEqual({ complete: true, pending: 0 });
+  });
+
+  it("deletes this instance's shared bases and their builders, clears the references to them, and leaves other names alone", async () => {
+    const f = await resources(), own = `zeros-local-${owner}-base-0123456789ab`, retry = `${own}-r1`, builder = randomUUID();
+    const others = [`zeros-local-${"b".repeat(24)}-base-0123456789ab`, "zeros-alpha-base-0123456789ab"];
+    await pool.query(`INSERT INTO cloud_v2_shared_bases(name,channel,runtime_sha256,state,ready_at,builder_sandbox_id,builder_deleted_at)
+      VALUES($1,'development',$2,'ready',now(),'bx_55555555',now())`, [own, "0".repeat(64)]);
+    await pool.query(`INSERT INTO cloud_v2_shared_bases(name,channel,runtime_sha256,rebuild,state,build_id,builder_sandbox_id,save_requested_at,heartbeat_at)
+      VALUES($1,'development',$2,1,'failed',$3,'bx_66666666',now(),now()-interval '1 hour')`, [retry, "0".repeat(64), builder]);
+    for (const name of others) await pool.query(`INSERT INTO cloud_v2_shared_bases(name,channel,runtime_sha256,state,ready_at)
+      VALUES($1,$2,$3,'ready',now())`, [name, name.includes("alpha") ? "alpha" : "development", "0".repeat(64)]);
+    // The organization is on the shared base: its build holds only a reference to it.
+    await pool.query("UPDATE cloud_v2_computer_builds SET base_shared=true,snapshot_id=$2 WHERE id=$1", [f.buildId, `${own}@${f.buildId}`]);
+    await pool.query("UPDATE cloud_v2_computers SET snapshot_name=$1", [`${own}@${f.buildId}`]);
+    f.rows.delete(`/named-snapshots/${f.snapshot}`);
+    for (const name of [own, retry, ...others]) f.rows.set(`/named-snapshots/${name}`, { snapshot: { name, status: "ready" } });
+    f.rows.set("/sandboxes/bx_66666666", { sandbox: { id: "bx_66666666", name: sandboxName("build", builder) } });
+    await expect(f.drain()).resolves.toEqual({ complete: true, pending: 0 });
+    expect([...f.rows.keys()].sort()).toEqual(["/sandboxes/bx_44444444", ...others.map(name => `/named-snapshots/${name}`)].sort());
+    expect(f.provider.request.mock.calls.some(([path]) => others.some(name => path.includes(name)))).toBe(false);
+    expect((await pool.query("SELECT name,state,deleted_at IS NOT NULL AS gone,builder_deleted_at IS NOT NULL AS builder_gone FROM cloud_v2_shared_bases ORDER BY name")).rows)
+      .toEqual([
+        { name: others[1], state: "ready", gone: false, builder_gone: false },
+        { name: own, state: "deleted", gone: true, builder_gone: true },
+        { name: retry, state: "deleted", gone: true, builder_gone: true },
+        { name: others[0], state: "ready", gone: false, builder_gone: false },
+      ]);
+    expect((await pool.query("SELECT snapshot_id,snapshot_deleted_at IS NOT NULL AS gone FROM cloud_v2_computer_builds WHERE id=$1", [f.buildId])).rows[0])
+      .toEqual({ snapshot_id: null, gone: true });
     expect((await pool.query("SELECT active_build_id,snapshot_name FROM cloud_v2_computers")).rows).toEqual([{ active_build_id: null, snapshot_name: null }]);
     await expect(f.drain()).resolves.toEqual({ complete: true, pending: 0 });
   });
