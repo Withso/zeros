@@ -35,7 +35,8 @@ import {
 } from "../../features/agent/agents-cache";
 import { useWorkspaceAgents, hasConfirmedWorkspaceAgents } from "../../features/agent/workspace-agent-registry";
 import { isCloudWorkspace } from "../../platform/bridge/cloud-workspace-key";
-import { hasUntitledChatName } from "../../features/agent/pristine-chat";
+import { canSwitchPristineChat, hasUntitledChatName } from "../../features/agent/pristine-chat";
+import type { SessionsActions } from "../../features/agent/sessions-context";
 import { useEnabledAgents } from "../../features/agent/enabled-agents";
 import { isRemovedAgent } from "../../features/agent/agent-runnable";
 import { AgentRemovedPanel } from "../agent-removed-panel";
@@ -52,6 +53,11 @@ import {
   type PristineSpawnBind,
 } from "./pristine-agent-switch";
 import { deferBootSessionAdmission } from "./lazy-boot-resume";
+import {
+  classifyHiddenChatSession,
+  pristineSessionRetirer,
+  type PristineSessionSnapshot,
+} from "./pristine-session-retire";
 import {
   rememberProvisionalBinding,
   resolveAutoBindChatSettings,
@@ -607,6 +613,19 @@ function ChatBody({
     isFocusedChat,
   ]);
 
+  // pristine-session-retire.ts decides when a hidden, untouched chat closes
+  // its session; showing it again re-admits through the effect above.
+  useEffect(() => {
+    if (readOnly || !surfaceActive) return;
+    pristineSessionRetirer.shown(chatId);
+    return () =>
+      pristineSessionRetirer.hidden(chatId, {
+        classify: () =>
+          classifyHiddenChatSession(pristineSessionSnapshot(chatId, sessions)),
+        retire: () => retirePristineSession(chatId, sessions),
+      });
+  }, [chatId, readOnly, sessions, surfaceActive]);
+
   // Persist only the provider binding. The Zeros execution id stays in the
   // live session store and is intentionally absent from durable chat state.
   useEffect(() => {
@@ -737,4 +756,47 @@ function ChatBody({
       />
     </>
   );
+}
+
+function pristineSessionSnapshot(
+  chatId: string,
+  sessions: SessionsActions,
+): PristineSessionSnapshot {
+  const slot = useSessionsStore.getState().sessions[chatId];
+  const workspace = useWorkspaceStore.getState();
+  const chat = workspace.chats.find((row) => row.id === chatId);
+  const draft =
+    getLiveChatDraft(chatId) ?? workspace.chatComposerDrafts[chatId] ?? null;
+  const activity = sessions.getCloseActivity(chatId);
+  return {
+    status: slot?.status ?? null,
+    hasTranscript: slot?.hasTranscript ?? false,
+    transcriptLoading: slot?.transcriptState === "loading",
+    messageCount: slot?.messages.length ?? 0,
+    chatTitle: chat && hasUntitledChatName(chat) ? "Untitled" : chat?.title,
+    composerHasText:
+      liveChatDraftHasText(draft) || (draft?.attachments.length ?? 0) > 0,
+    pendingAutoSend: workspace.pendingAutoSend[chatId] !== undefined,
+    running: activity.running || slot?.activeTurnStartedAt != null,
+    queuedCount: activity.queuedCount,
+    pendingInteraction:
+      Boolean(slot?.pendingPermission) ||
+      (slot?.pendingPermissions.length ?? 0) > 0 ||
+      (slot?.pendingQuestions.length ?? 0) > 0,
+    cloudActivity:
+      isCloudWorkspace(chat?.folder) && !canSwitchPristineChat(chat, slot),
+  };
+}
+
+function retirePristineSession(chatId: string, sessions: SessionsActions): void {
+  const folder =
+    useWorkspaceStore.getState().chats.find((row) => row.id === chatId)?.folder ??
+    useSessionsStore.getState().sessions[chatId]?.cwd;
+  // The same closes a pristine agent switch uses. Cloud's agent-switch close
+  // retires an unused view without a user Stop's confirmation round trip, and
+  // itself refuses a chat that is no longer pristine.
+  const closing = isCloudWorkspace(folder)
+    ? sessions.closeSession(chatId, { reason: "agent-switch" })
+    : sessions.closeSession(chatId);
+  if (closing) void closing.catch(() => {});
 }
