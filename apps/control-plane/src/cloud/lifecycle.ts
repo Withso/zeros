@@ -977,8 +977,9 @@ export class CloudV2Lifecycle {
         return true;
       }
       await held();
-      // Anything the user left running outside the worker's service also runs for this minute.
-      const unit = await compute.exec(vm, WORKER_UNIT_CHECK, 30).catch(() => null);
+      // Anything the user left running outside the worker's service also runs for this minute. A resume returns before
+      // the machine takes commands: the first one waits, as the start path's do, or every check after it reads as changed.
+      const unit = await this.execWhenReady(vm, WORKER_UNIT_CHECK, 30).catch(() => null);
       await held();
       const running = !!unit && /\bactive=active\b/.test(unit.stdout);
       if (running) (this.deps.logger?.error ?? this.deps.logger?.warn)?.call(this.deps.logger,
@@ -1153,17 +1154,19 @@ export class CloudV2Lifecycle {
    * Resolves false: the stop has no checkpoint of its own. */
   private async probeStop(workspace: CloudV2LifecycleWorkspace, sandboxId: string): Promise<false> {
     const workerOff = await this.switchWorkerOff(sandboxId);
-    // Retention S3: what a later maintenance wake compares the checkouts against. A failed touch leaves an
-    // older marker, so that wake can only answer "changed", which is safe.
-    await this.deps.compute.exec(sandboxId, stopMarkerCommand(CLOUD_V2_HOME), 15).catch(() => {});
+    const checkouts = await this.checkouts(workspace).then(value => ({ value }), (error: unknown) => ({ error }));
+    const paths = "value" in checkouts
+      ? [workspaceCheckoutPath(workspace), ...checkouts.value.repositories.map(entry => `${CLOUD_V2_HOME}/${entry.checkoutFolder}`)] : null;
+    // Retention S3: what a later maintenance wake compares the checkouts against. A failed write leaves an older marker,
+    // and unknown checkouts one without a digest, so that wake can only answer "changed", which is safe.
+    await this.deps.compute.exec(sandboxId, stopMarkerCommand(CLOUD_V2_HOME, paths), 15).catch(() => {});
     if (!workerOff) (this.deps.logger?.error ?? this.deps.logger?.warn)?.call(this.deps.logger,
       `[cloud-v2] stop could not verify the worker off; recorded for the next wake workspace=${workspace.id.slice(0, 8)}`);
     let probe: BackupProbe = "unknown";
     try {
-      const { repositories: others, submodules } = await this.checkouts(workspace);
+      if ("error" in checkouts || !paths) throw "error" in checkouts ? checkouts.error : new Error("no checkouts");
       const result = await this.deps.compute.exec(sandboxId,
-        backupProbeCommand([workspaceCheckoutPath(workspace), ...others.map(entry => `${CLOUD_V2_HOME}/${entry.checkoutFolder}`)], CLOUD_V2_HOME,
-          checkpointSubmodules(submodules)), CLOUD_V2_BACKUP_PROBE_SECONDS);
+        backupProbeCommand(paths, CLOUD_V2_HOME, checkpointSubmodules(checkouts.value.submodules)), CLOUD_V2_BACKUP_PROBE_SECONDS);
       if (result.exitCode === 0 && !result.timedOut) probe = parseBackupProbe(result.stdout);
     } catch (error) {
       this.deps.logger?.warn(`[cloud-v2] stop probe failed (${errorCode(error)}) workspace=${workspace.id.slice(0, 8)}`);

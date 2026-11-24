@@ -32,7 +32,8 @@ async function databaseCommand(action: "inventory" | "drain", fail = false) {
           if (sql.includes('FROM public.zeros_cloud_local_identity')) return { rows: [{ owner: ${JSON.stringify(owner)}, instance_id: ${JSON.stringify(request.instanceId)} }] };
           if (sql.includes('FROM pg_roles')) return { rows: [{ rolsuper: false, rolbypassrls: false, rolcreatedb: false, rolcreaterole: false, migrator: false }] };
           if (sql.includes('has_schema_privilege')) return { rows: [{ ddl: false }] };
-          if (${JSON.stringify(action)} === 'drain' && /cloud_v2_(workspaces|computer_builds|computers|tokens)/.test(sql)) return { rows: [] };
+          if (${JSON.stringify(action)} === 'drain' && sql.includes('to_regclass')) return { rows: [{ present: true }] };
+          if (${JSON.stringify(action)} === 'drain' && /cloud_v2_(workspaces|computer_builds|computers|tokens|shared_bases)/.test(sql)) return { rows: [] };
           if (sql.includes('FROM cloud_v2_workspaces')) return { rows: [{ count: 1 }] };
           throw new Error('unexpected fixture query');
         }
@@ -64,7 +65,8 @@ async function databaseCommand(action: "inventory" | "drain", fail = false) {
       [pathToFileURL(path.join(root, "apps/control-plane/dist/cloud/boat-client.js")).href]:
         `export class BoatApiClient { async request() { throw new Error('An empty drain must not contact Boat'); } }`,
       [pathToFileURL(path.join(root, "apps/control-plane/dist/cloud/resource-names.js")).href]:
-        `export const cloudV2SnapshotName = () => 'unused'; export const cloudV2SandboxName = () => 'unused';`,
+        `export const cloudV2SnapshotName = () => 'unused'; export const cloudV2SandboxName = () => 'unused';
+         export const cloudV2ResourcePrefix = (channel, owner) => 'zeros-local-' + owner + '-';`,
     };
     const loader = path.join(scratch, "adapters.mjs");
     await writeFile(loader, `import { registerHooks } from 'node:module';
@@ -112,8 +114,9 @@ describe("local cloud database CLI pool ownership", () => {
     const result = await databaseCommand("drain");
     expect(result.code, result.stderr).toBe(0);
     expect(JSON.parse(result.stdout)).toEqual({ complete: true, pending: 0 });
+    // The fence and reads, the final unfinished check, and the shared bases still to finish.
     expect(result.events).toEqual([
-      "inventory-start", "inventory-complete", "inventory-start", "inventory-complete",
+      "inventory-start", "inventory-complete", "inventory-start", "inventory-complete", "inventory-start", "inventory-complete",
       "migration-end", "runtime-end",
     ]);
   });

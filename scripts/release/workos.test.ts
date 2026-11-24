@@ -118,4 +118,53 @@ describe("post-Pages WorkOS handshake verification", () => {
       await expect(verifyWorkOS(config, workosEnv, async (url, init) => String(url) === workosEnv.AUTH_JWKS_URL
         ? Response.json({ keys: [key] }) : f.fetcher(url, init))).rejects.toThrow(/signing keys/);
     });
+
+  describe("a request that received no response", () => {
+    const pauses: number[] = [];
+    const pause = async (ms: number) => { pauses.push(ms); };
+    const failing = (fail: (url: URL, call: number) => "throw" | Response | null) => {
+      const f = fixture(), calls = new Map<string, number>();
+      const fetcher: typeof fetch = async (input, init) => {
+        const url = new URL(String(input)), key = url.href, call = (calls.get(key) ?? 0) + 1;
+        calls.set(key, call);
+        const failure = fail(url, call);
+        if (failure === "throw") throw new TypeError("fetch failed");
+        // As fetch does: with redirect "error" a redirect answer throws.
+        if (failure && failure.status >= 300 && failure.status < 400 && init?.redirect === "error") throw new TypeError("unexpected redirect");
+        return failure ?? f.fetcher(input, init);
+      };
+      return { fetcher, calls };
+    };
+
+    it("is asked again a few seconds later, and the answer is judged as usual", async () => {
+      pauses.length = 0;
+      const f = failing((url, call) => call === 1 ? "throw" : null);
+      await expect(verifyWorkOS(config, workosEnv, f.fetcher, pause)).resolves.toMatchObject({ kind: "workos-handshake-v1", desktopVerified: true });
+      // Each of the seven requests retries on its own: two facades and their handshakes, the desktop entry and its handshake, the keys.
+      expect([...f.calls.values()]).toEqual([2, 2, 2, 2, 2, 2, 2]);
+      expect(pauses).toHaveLength(7);
+      expect(pauses.every(ms => ms >= 1_000 && ms <= 10_000)).toBe(true);
+    });
+
+    it("says network once its retries are spent, without the address", async () => {
+      pauses.length = 0;
+      const f = failing(url => url.pathname === "/sso/jwks/client_desktop" ? "throw" : null);
+      const failure = verifyWorkOS(config, workosEnv, f.fetcher, pause);
+      await expect(failure).rejects.toThrow(/network/);
+      await expect(failure).rejects.not.toThrow(/auth-api|example\.com|jwks/);
+      expect(f.calls.get(workosEnv.AUTH_JWKS_URL)).toBe(4);
+      expect(pauses).toHaveLength(3);
+    });
+
+    it.each([
+      { path: "/user_management/authorize", answer: () => new Response("private-state-token", { status: 503 }), message: /WorkOS rejected/ },
+      { path: "/sso/jwks/client_desktop", answer: () => new Response(null, { status: 302, headers: { location: "https://elsewhere.example.com/" } }), message: /signing keys/ },
+    ])("is never retried once any response arrives, whatever its status ($path)", async ({ path, answer, message }) => {
+      pauses.length = 0;
+      const f = failing((url, call) => url.pathname === path && call === 1 ? answer() : null);
+      await expect(verifyWorkOS(config, workosEnv, f.fetcher, pause)).rejects.toThrow(message);
+      expect([...f.calls].filter(([href]) => href.includes(path)).map(([, n]) => n)).toEqual([1]);
+      expect(pauses).toEqual([]);
+    });
+  });
 });

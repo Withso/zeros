@@ -74,10 +74,11 @@ async function execute(request) {
       const { drainLocalCloudResources } = await import("./local-cleanup.mjs");
       const { BoatApiClient } = await module("cloud/boat-client.js");
       const client = new BoatApiClient({ apiKey: request.boat?.apiKey, billingOrg: request.boat?.billingOrg, timeoutMs: 30_000 });
-      const { cloudV2SnapshotName, cloudV2SandboxName } = await module("cloud/resource-names.js");
+      const { cloudV2SnapshotName, cloudV2SandboxName, cloudV2ResourcePrefix } = await module("cloud/resource-names.js");
       return await drainLocalCloudResources({ runtime, withSystemTx, request, provider: client,
         snapshotName: (org, version) => cloudV2SnapshotName("development", org, version, request.owner),
-        sandboxName: (kind, id) => cloudV2SandboxName("development", kind, id, request.owner) });
+        sandboxName: (kind, id) => cloudV2SandboxName("development", kind, id, request.owner),
+        sharedBasePrefix: `${cloudV2ResourcePrefix("development", request.owner)}base-` });
     }
     if (request.action === "inventory") {
       // This scope owns both pools. Settle the transaction before finally

@@ -2,7 +2,7 @@
 // assumption is listed in BOAT_FAKE_ASSUMPTIONS and nothing here talks to Boat.
 import { createHash } from "node:crypto";
 import type { BoatNamedSnapshotList, CloudV2CommandResult, CloudV2Compute } from "../boat.js";
-import { BoatForkRefusedError, BoatSnapshotExpiredError } from "../boat-client.js";
+import { BoatBootPendingError, BoatForkRefusedError, BoatSnapshotExpiredError } from "../boat-client.js";
 import { CloudProviderError } from "../provider-error.js";
 import { READY_COPY_SECRET_PATHS } from "../ready-copies.js";
 
@@ -84,6 +84,9 @@ export class FakeBoat implements CloudV2Compute {
   script: Exec | null = null;
   /** A command the test makes fail at Boat before the machine runs any of it. */
   failCommand: ((machine: Machine, command: string) => boolean) | null = null;
+  /** After a resume, this many commands are refused as Boat refuses them while the machine is still starting. */
+  startingCommands = 0;
+  private starting = new Map<string, number>();
   /** Whether stop goes through "archiving" before "archived". */
   archivingReads = 0;
   /** Inspect reads before a fork, or a machine made from a snapshot, is hydrated. */
@@ -202,6 +205,7 @@ export class FakeBoat implements CloudV2Compute {
     // A resume starts from what the stop archived, and from a stopped machine its restore runs again for a while.
     if (machine.archive) { machine.files = new Map(machine.archive); machine.archive = null; }
     if (machine.state !== "running") machine.hydrateReads = this.hydrationReads;
+    if (this.startingCommands) this.starting.set(sandboxId, this.startingCommands);
     // Boat's lease is the resume's ttl; boat.ts sends 24 hours when none is given.
     machine.state = "running"; machine.leaseUntil = this.clock() + (ttlSeconds ?? 24 * 60 * 60) * 1000;
   }
@@ -253,6 +257,8 @@ export class FakeBoat implements CloudV2Compute {
   private async run(sandboxId: string, command: string, input?: string): Promise<CloudV2CommandResult> {
     const machine = this.live(sandboxId);
     if (machine.state !== "running") throw new CloudProviderError("provider_request_failed", "Boat API request did not succeed", true, { httpStatus: 409 });
+    const starting = this.starting.get(sandboxId) ?? 0;
+    if (starting) { this.starting.set(sandboxId, starting - 1); throw new BoatBootPendingError(); }
     this.commands.push({ machineId: sandboxId, command, ...(input === undefined ? {} : { input }) });
     if (this.failCommand?.(machine, command)) throw lost();
     if (command.includes("systemctl stop zeros-worker.service")) machine.worker.active = false;
