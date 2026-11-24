@@ -200,6 +200,7 @@ export async function checkPromptFold({ page, check, harnessBase }) {
     await scrollFold(page, needle, 10_000);
     await expect.poll(() => promptGeometry(page, needle)).toMatchObject({ above: true, below: false });
     rows = await rowInk(page, geometry.clip, geometry.fill);
+    if (lineInk(rows, 1) >= lineInk(rows, 8) * 0.75) console.log("prompt-fold rows", theme, JSON.stringify(await promptGeometry(page, needle)), JSON.stringify(rows.slice(0, 70)));
     expect(lineInk(rows, 15), `${theme}: last line is solid at the end`).toBeGreaterThan(lineInk(rows, 8) * 0.9);
     expect(lineInk(rows, 1), `${theme}: top line dissolves once scrolled`).toBeLessThan(lineInk(rows, 8) * 0.75);
 
