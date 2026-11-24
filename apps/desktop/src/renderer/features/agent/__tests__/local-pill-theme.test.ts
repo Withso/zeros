@@ -16,10 +16,10 @@ describe("Local pill theme contract", () => {
     expect(contrastRatio(fill, resolveRgb(themes.light, "blue-fg"))).toBeGreaterThanOrEqual(4.5);
   });
 
-  it("preserves the exact dark workspace colors", () => {
+  it("keeps the dark workspace pill on the blue container colors", () => {
     expect(resolveRgb(themes.dark, "blue-pill-bg")).toEqual(resolveRgb(themes.dark, "blue-bg"));
     expect(resolveRgb(themes.dark, "blue-pill-hover")).toEqual([14, 48, 77].map((c) => c / 255));
-    expect(resolveRgb(themes.dark, "blue-fg")).toEqual([145, 197, 253].map((c) => c / 255));
+    expect(resolveRgb(themes.dark, "blue-fg")).toEqual([163, 203, 255].map((c) => c / 255));
   });
 
   it("removes the unused per-agent pill tints", () => {

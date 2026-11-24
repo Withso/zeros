@@ -23,7 +23,7 @@ describe("selected menu rows step metadata up a tier", () => {
 });
 
 describe("RadioGroup states", () => {
-  it("shares Checkbox's box and keeps the focus border over the checked fill", () => {
+  it("shares Checkbox's box and accent fill, and keeps the focus line outside the checked fill", () => {
     const markup = renderToStaticMarkup(
       createElement(
         RadioGroup,
@@ -34,11 +34,13 @@ describe("RadioGroup states", () => {
     expect(markup).toContain("size-4");
     expect(markup).toContain("border-border4");
     expect(markup).toContain("group-hover:border-fg3");
-    expect(markup).toContain("group-data-[state=checked]:bg-inverted-bg");
-    expect(markup).toContain("bg-inverted-fg");
-    // The standard halo, and a compound rule so the checked border cannot win.
-    expect(markup).toContain("group-focus-visible:ring-[3px]");
-    expect(markup).toContain("group-data-[state=checked]:group-focus-visible:border-highlighted-bright");
+    expect(markup).toContain("group-data-[state=checked]:bg-accent");
+    expect(markup).toContain("bg-accent-fg");
+    // One accent line a pixel off the circle, so it shows around the accent fill.
+    expect(markup).toContain("group-focus-visible:outline-1");
+    expect(markup).toContain("group-focus-visible:outline-offset-1");
+    expect(markup).toContain("group-focus-visible:outline-accent");
+    expect(markup).not.toContain("group-focus-visible:ring-[3px]");
     expect(markup).not.toContain("outline-offset-2");
     expect(markup).toContain("text-xs leading-4.5");
   });

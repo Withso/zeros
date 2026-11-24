@@ -4,7 +4,7 @@
 //
 // The island's in-memory caches (last settled batch, stability mask) die with
 // the renderer — an app relaunch or a dev reload wiped them, so the next
-// mount rendered "Loading..." and the tab glyph dropped to the brown "open"
+// mount rendered "Loading..." and the tab glyph dropped to the "open"
 // fallback even though nothing about the PR changed. The 2026-07-21 contract
 // says a status may only repaint when GitHub settles on a DIFFERENT status,
 // so the last rendered state must survive the renderer.

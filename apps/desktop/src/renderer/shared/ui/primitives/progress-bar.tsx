@@ -2,7 +2,7 @@ import React from "react";
 import { cn } from "../cn";
 
 const FILL = {
-  default: "bg-fg1",
+  default: "bg-accent",
   warning: "bg-yellow-primary",
   over: "bg-red-primary",
 } as const;

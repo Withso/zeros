@@ -99,7 +99,7 @@ function PillRemoveButton({
       disabled={disabled}
       onClick={onRemove}
       aria-label={`Remove ${label}`}
-      className="composer-pill-remove text-fg2 hover:bg-bg1-hover hover:text-fg1 focus-visible:ring-highlighted-bright grid size-4 shrink-0 place-items-center rounded-sm border-0 bg-transparent p-0 focus-visible:ring-1 focus-visible:outline-none"
+      className="composer-pill-remove text-fg2 hover:bg-bg1-hover hover:text-fg1 focus-visible:ring-accent grid size-4 shrink-0 place-items-center rounded-sm border-0 bg-transparent p-0 focus-visible:ring-1 focus-visible:outline-none"
     >
       <span
         data-composer-pill-icon=""

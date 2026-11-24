@@ -28,7 +28,7 @@ async function rowInk(page, clip, fill) {
   }, { data: png.toString("base64"), fill });
 }
 
-/** A sent message's line: the chat's 15px reading size on 22px lines. */
+/** A sent message's line: the chat's 14px reading size on 22px lines. */
 const LINE = 22;
 
 /** The brightest row of text line `n` (1-based) in a fold box whose first
@@ -93,6 +93,13 @@ async function promptGeometry(page, needle) {
       toggleAligned: toggleTextLeft === null ? null : Math.abs(toggleTextLeft - textLeft) <= 1.5,
       fill: [r, g, bl],
       clip: { x: Math.round(v.left), y: Math.round(v.top), width: Math.round(v.width), height: Math.round(v.height) },
+      // Unfolded, the fade never covers the scrollbar slot, so ink is read left of it.
+      ink: {
+        x: Math.round(v.left),
+        y: Math.round(v.top),
+        width: Math.round(v.width - parseFloat(getComputedStyle(viewport).getPropertyValue("--scrollbar-size"))),
+        height: Math.round(v.height),
+      },
     };
   }, needle);
 }
@@ -127,13 +134,13 @@ export async function checkPromptFold({ page, check, harnessBase }) {
 
     await post(index, `hi ${tag}`);
     await at(`hi ${tag}`).toMatchObject({
-      atRight: true, width: "text", surface: true, type: "15px/22px", footprint: LINE, fold: null, toggle: null,
+      atRight: true, width: "text", surface: true, type: "14px/22px", footprint: LINE, fold: null, toggle: null,
     });
     // A line longer than the cap wraps at 7/8 of the lane.
     await post(index, `${tag} wide ${"word ".repeat(80)}`);
     await at(`${tag} wide`).toMatchObject({ atRight: true, width: "cap", surface: true });
     // The composer writes in the same reading size the message is sent in.
-    await expect(page.locator(".composer-pm:visible").first()).toHaveCSS("font-size", "15px");
+    await expect(page.locator(".composer-pm:visible").first()).toHaveCSS("font-size", "14px");
     await expect(page.locator(".composer-pm:visible").first()).toHaveCSS("line-height", "22px");
 
     await post(index, lines(6, `${tag} six`));
@@ -191,7 +198,7 @@ export async function checkPromptFold({ page, check, harnessBase }) {
     await toggleIn(page, needle).click();
     await expect.poll(() => promptGeometry(page, needle)).toMatchObject({ fold: "expanded", below: true, above: false });
     geometry = await promptGeometry(page, needle);
-    rows = await rowInk(page, geometry.clip, geometry.fill);
+    rows = await rowInk(page, geometry.ink, geometry.fill);
     const middle = lineInk(rows, 8);
     expect(lineInk(rows, 1), `${theme}: unfolded top line is solid`).toBeGreaterThan(middle * 0.9);
     expect(lineInk(rows, 15), `${theme}: unfolded bottom line dissolves`).toBeLessThan(middle * 0.7);
@@ -199,7 +206,7 @@ export async function checkPromptFold({ page, check, harnessBase }) {
     // Scrolled to the end: the top line dissolves, the last line is solid.
     await scrollFold(page, needle, 10_000);
     await expect.poll(() => promptGeometry(page, needle)).toMatchObject({ above: true, below: false });
-    rows = await rowInk(page, geometry.clip, geometry.fill);
+    rows = await rowInk(page, geometry.ink, geometry.fill);
     expect(lineInk(rows, 15), `${theme}: last line is solid at the end`).toBeGreaterThan(lineInk(rows, 8) * 0.9);
     expect(lineInk(rows, 1), `${theme}: top line dissolves once scrolled`).toBeLessThan(lineInk(rows, 8) * 0.75);
 

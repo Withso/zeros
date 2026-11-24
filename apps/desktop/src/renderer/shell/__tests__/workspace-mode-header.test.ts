@@ -357,10 +357,11 @@ describe("Code seats its column controls above the chat strips", () => {
     // own, so an unfocused pane's dimmed strip and body tell them apart (its
     // edge did from 2026-11-07). The former bg0/30 veil, a wash
     // laid OVER the content, pushed every tier below WCAG AA. The owner chose
-    // 80%, the look of Cursor's unfocused panes, accepting that the two
-    // quietest tiers dip below their floors there: fg3 in Light and muted-fg
-    // in Dark (styles/policy/contrast-contract.json holds the rest-state
-    // floors). fg1 and fg2 stay at AA in both themes; any further dip fails.
+    // 80%, the look of Cursor's unfocused panes, accepting that the quietest
+    // tiers dip below their floors there: fg3 in both themes (Dark since the
+    // 2026-11-24 text tiers) and muted-fg in Dark
+    // (styles/policy/contrast-contract.json holds the rest-state floors).
+    // fg1 and fg2 stay at AA in both themes; any further dip fails.
     expect(paneLayoutSource).not.toContain("[--pane-bg:");
     expect(paneLayoutSource).not.toMatch(/bg-bg0\/\d+ pointer-events-none absolute inset-0/);
     const dim = /split && !isFocused && "\*:opacity-(\d+)"/.exec(paneLayoutSource);
@@ -376,7 +377,7 @@ describe("Code seats its column controls above the chat strips", () => {
         if (contrastRatio(dimmed, pane) < floor) belowFloor.push(`${name} ${tier}`);
       }
     }
-    expect(belowFloor).toEqual(["dark muted-fg", "light fg3"]);
+    expect(belowFloor).toEqual(["dark fg3", "dark muted-fg", "light fg3"]);
 
     // The two column-level controls still sit above pane-level layers: they act
     // on the whole workspace/column and only borrow a corner of one pane's strip.

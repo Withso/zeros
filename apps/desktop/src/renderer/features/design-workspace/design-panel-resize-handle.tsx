@@ -263,7 +263,7 @@ export function DesignPanelResizeHandle({
               edge === "top" ? "-top-1" : "-bottom-1",
             )
           : "absolute inset-y-0 z-2 w-1.5 cursor-ew-resize",
-        "focus-visible:outline-highlighted-bright focus-visible:outline-1 focus-visible:-outline-offset-1",
+        "focus-visible:outline-accent focus-visible:outline-1 focus-visible:-outline-offset-1",
         edge === "right" && "right-0",
         edge === "left" && "left-0",
         className,

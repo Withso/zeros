@@ -728,8 +728,15 @@ export async function runConversationSummarySmoke({
       await create.focus();
       await page.keyboard.press("Tab");
       await expect(more).toBeFocused();
-      // The keyboard ring is the shared highlighted edge plus its halo.
-      expect(await more.evaluate(node => getComputedStyle(node).boxShadow)).not.toBe("none");
+      // Keyboard focus is the shared 1px accent edge.
+      await expect.poll(() => more.evaluate(node => {
+        const probe = document.createElement("span");
+        probe.style.color = "var(--accent)";
+        node.parentElement.append(probe);
+        const accent = getComputedStyle(probe).color;
+        probe.remove();
+        return getComputedStyle(node).borderTopColor === accent;
+      })).toBe(true);
       await page.keyboard.press("Enter");
       await expect(page.getByRole("menuitem", { name: "Create draft PR", exact: true })).toBeVisible();
       await expect(page.getByRole("menuitem", { name: "Create PR directly", exact: true })).toBeVisible();

@@ -52,7 +52,8 @@ export async function runCloudWorkspaceDetailsSmoke({ page, harnessBase, check }
       }
       expect(reached, "Tab reaches Restart").toBe(true);
       expect(await restart.evaluate(node => node.matches(":focus-visible"))).toBe(true);
-      expect(await color(restart, "boxShadow")).not.toBe("none");
+      const accent = await token("--accent");
+      await expect.poll(() => color(restart, "borderTopColor")).toBe(accent);
       await shoot(page.locator("main"), `details-running-focused-${theme}`);
       await page.keyboard.press("Enter");
       expect(await page.evaluate(() => window.__detailsFixture.calls())).toEqual(["restart"]);

@@ -5,15 +5,9 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 
 import { loaderFrame } from "../../shared/ui/loading/loader-frame";
-import {
-  ORBIT_HEAD,
-  ORBIT_LAP_MS,
-  ORBIT_LAYERS,
-  ORBIT_TAIL,
-  orbitDashArray,
-} from "../../shared/ui/loading/orbit-motion";
 import { PUZZLE_CELLS, PUZZLE_CORNERS, PUZZLE_HOLES } from "../../shared/ui/loading/puzzle-motion";
-import { ZerosSpinner } from "../../shared/ui/loading/zeros-spinner";
+import { LOGO_WEAVE_BEAT_MS, LOGO_WEAVE_LOOP_MS, ZerosSpinner } from "../../shared/ui/loading/zeros-spinner";
+import { STARTUP_LOGO_WEAVE_ROWS } from "../../shared/ui/startup-loader";
 
 const render = (props: Parameters<typeof ZerosSpinner>[0]) =>
   renderToStaticMarkup(createElement(ZerosSpinner, props));
@@ -35,51 +29,46 @@ describe("loader geometry", () => {
   });
 });
 
-describe("ZerosSpinner — Orbit", () => {
-  it("draws the ring as a continuous track plus a layered comet, not blocks", () => {
+const keyframes = (css: string, name: string) =>
+  new RegExp(`@keyframes ${name}\\s*\\{([\\s\\S]*?\\})\\s*\\}`).exec(css)?.[1]?.replace(/\s+/g, " ").trim();
+
+describe("ZerosSpinner — logo", () => {
+  it("draws the Island Z as the startup loader's four rows, clipped to the square", () => {
     const markup = render({ size: 16 });
     expect(markup).toContain('role="status"');
     expect(markup).toContain('aria-label="Loading"');
-    expect(markup).toContain('data-zeros-loader="orbit"');
-    expect(markup).not.toContain("<rect");
-    // Track + one path per comet layer, all on the same ring.
-    expect(markup.match(/<path/g)).toHaveLength(ORBIT_LAYERS.length + 1);
-    expect(markup.match(/d="M0.5 0.5H3.5V3.5H0.5Z"/g)).toHaveLength(ORBIT_LAYERS.length + 1);
-    expect(markup.match(new RegExp(`animation:zeros-orbit-lap ${ORBIT_LAP_MS}ms linear infinite`, "g"))).toHaveLength(
-      ORBIT_LAYERS.length,
-    );
+    expect(markup).toContain('data-zeros-loader="logo"');
+    expect(markup.match(/<path/g)).toHaveLength(STARTUP_LOGO_WEAVE_ROWS.length);
+    for (const row of STARTUP_LOGO_WEAVE_ROWS) expect(markup).toContain(`d="${row.d}"`);
+    expect(markup).toMatch(/<svg[^>]*style="[^"]*overflow:hidden/);
   });
 
-  it("gives every layer the same phase, so the snake moves as one piece", () => {
+  it("weaves neighbouring rows in opposite directions on the startup beat", () => {
     const markup = render({ size: 16 });
-    const delays = new Set([...markup.matchAll(/animation-delay:(-?[\d.]+)ms/g)].map((m) => m[1]));
-    expect(delays.size).toBe(1);
+    const rows = [...markup.matchAll(/animation:zeros-logo-weave-([rl]) (\d+)ms infinite;animation-delay:(\d+)ms/g)];
+    expect(rows.map((row) => row[1])).toEqual(["r", "l", "r", "l"]);
+    expect(rows.map((row) => Number(row[2]))).toEqual(Array(4).fill(LOGO_WEAVE_LOOP_MS));
+    expect(rows.map((row) => Number(row[3]))).toEqual([0, 1, 2, 3].map((beat) => beat * LOGO_WEAVE_BEAT_MS));
+    expect([LOGO_WEAVE_LOOP_MS, LOGO_WEAVE_BEAT_MS]).toEqual([1800, 72]);
   });
 
-  it("ramps the tail smoothly from a solid head", () => {
-    const head = ORBIT_LAYERS[ORBIT_LAYERS.length - 1];
-    expect(head).toEqual({ length: ORBIT_HEAD, alpha: 1 });
-    // Compound opacity at each tail slice, head → tail end, strictly falls.
-    const slices = ORBIT_LAYERS.slice(0, -1).map((layer) => layer.length).sort((a, b) => a - b);
-    let last = 1;
-    for (const at of slices) {
-      const through = ORBIT_LAYERS.filter((layer) => layer.length >= at).reduce((t, l) => t * (1 - l.alpha), 1);
-      const alpha = 1 - through;
-      expect(alpha).toBeLessThan(last);
-      last = alpha;
+  it("runs the startup loader's own steps, pause on the Z included", () => {
+    const boot = readFileSync(resolve(process.cwd(), "index.html"), "utf8");
+    const css = readFileSync(resolve(process.cwd(), "styles/global/animations.css"), "utf8");
+    for (const side of ["r", "l"]) {
+      const steps = keyframes(css, `zeros-logo-weave-${side}`);
+      expect(steps).toBeDefined();
+      expect(steps).toBe(keyframes(boot, `zeros-boot-weave-${side}`));
+      // Back on the Z from 54% to the end of the loop.
+      expect(steps).toMatch(/54%, 100% \{ transform: translateX\(-?4px\); \}/);
     }
-    expect(Math.max(...ORBIT_LAYERS.map((l) => l.length))).toBeCloseTo(ORBIT_HEAD + ORBIT_TAIL);
-    // Every dash ends at the head: the pattern is exactly one ring long.
-    for (const { length } of ORBIT_LAYERS) {
-      const parts = orbitDashArray(length).split(" ").map(Number);
-      expect(parts.reduce((a, b) => a + b, 0)).toBeCloseTo(12);
-      expect(parts[2]).toBeCloseTo(length);
-    }
+    expect(boot).toMatch(/\.zeros-boot-row-r \{\s*animation: zeros-boot-weave-r 1\.8s infinite;/);
+    expect(boot).toMatch(/\.zeros-boot-beat-1 \{\s*animation-delay: 72ms;/);
   });
 
   it("paints each tone from its semantic tokens", () => {
     expect(render({ size: 16 })).toContain("color:var(--loader-active, var(--fg2))");
-    expect(render({ size: 16 })).toContain("stroke:var(--loader-rest, var(--muted-fg))");
+    expect(render({ size: 16 })).toContain('fill="currentColor"');
     expect(render({ size: 16, tone: "inverted" })).toContain(
       "color:var(--loader-active-inverted, var(--primary-button-fg))",
     );
@@ -108,7 +97,7 @@ describe("ZerosSpinner — agent puzzle", () => {
 
 describe("ZerosSpinner — sizing and guards", () => {
   it("pins its own svg size against blanket [&_svg]:size-* rules", () => {
-    for (const variant of ["orbit", "agent", "glass"] as const) {
+    for (const variant of ["logo", "agent", "glass"] as const) {
       const markup = render({ size: 14, variant });
       expect(markup).toMatch(/<span[^>]*style="width:14px;height:14px/);
       expect(markup).toMatch(/<svg[^>]*style="position:absolute;left:2px;top:2px;width:10px;height:10px/);
@@ -131,7 +120,8 @@ describe("ZerosSpinner — sizing and guards", () => {
       expect(source, square).not.toContain("requestAnimationFrame");
     }
     const css = readFileSync(resolve(process.cwd(), "styles/global/animations.css"), "utf8");
-    expect(css).toMatch(/@keyframes zeros-orbit-lap\s*\{\s*from\s*\{\s*stroke-dashoffset:\s*12;/);
+    expect(css).toContain("@keyframes zeros-logo-weave-r");
+    expect(css).not.toContain("zeros-orbit-lap");
     expect(css).toMatch(/prefers-reduced-motion: reduce[\s\S]*\[data-zeros-loader\] path/);
   });
 });

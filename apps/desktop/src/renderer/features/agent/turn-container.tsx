@@ -210,7 +210,7 @@ export const TurnPromptHeader = memo(function TurnPromptHeader({
    *  onEdit. */
   editAgentContext?: EditAgentContext;
   /** Set when Zeros sent this message on the user's behalf (PR island, Create
-   *  PR): the brown "sent by Zeros" bubble. Callers also omit onEdit, because the
+   *  PR): the blue "sent by Zeros" bubble. Callers also omit onEdit, because the
    *  wire text is a generated brief the label cannot round-trip. */
   autoAction?: string;
   /** Provenance belongs above the bubble, including steers and saved history. */
@@ -298,14 +298,14 @@ export const TurnPromptHeader = memo(function TurnPromptHeader({
         // Its pills sit a step lighter than the bubble (semantic-tokens.css).
         "[--pill-bg:var(--prompt-pill-bg)]",
         PROMPT_SURFACE_RADIUS,
-        autoAction ? "bg-brown-bg text-brown-fg font-medium" : "bg-bg2",
+        autoAction ? "bg-blue-bg text-blue-fg font-medium" : "bg-bg2",
       )}
     >
       <PromptFold surfaceActive={surfaceActive}>
         {AutoIcon ? (
           <div className="flex items-start gap-1.5">
             <AutoIcon
-              className="text-brown-fg mt-0.5 size-4 shrink-0"
+              className="text-blue-fg mt-0.5 size-4 shrink-0"
               strokeWidth={2}
             />
             <div className="min-w-0">{children}</div>

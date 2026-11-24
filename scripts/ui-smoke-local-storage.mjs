@@ -80,7 +80,14 @@ export async function runLocalStorageSmoke({ page, harnessBase, check }) {
   await panel.getByRole("button", { name: "Refresh" }).focus();
   await page.keyboard.press("Tab");
   await expect(reveal).toBeFocused();
-  expect(await reveal.evaluate((node) => node.matches(":focus-visible") && getComputedStyle(node).boxShadow !== "none")).toBe(true);
+  await expect.poll(() => reveal.evaluate((node) => {
+    const probe = document.createElement("span");
+    probe.style.color = "var(--accent)";
+    node.parentElement.append(probe);
+    const accent = getComputedStyle(probe).color;
+    probe.remove();
+    return node.matches(":focus-visible") && getComputedStyle(node).borderTopColor === accent;
+  })).toBe(true);
   await page.keyboard.press("Enter");
   expect(await page.evaluate(() => window.__localStorageFixture.callsOf("local_storage_reveal"))).toEqual([{ category: "workspaces" }]);
   check("Reveal is labelled, keyboard reachable with visible focus, and sends only the row id", true);

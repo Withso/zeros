@@ -73,12 +73,12 @@ function RadioGroupItem({
       >
         <span
           className={cn(
-            // Keyboard focus is the standard halo on the box; the checked
-            // fill keeps the highlighted-bright border visible inside it.
-            "border-border4 group-hover:border-fg3 group-data-[state=checked]:border-inverted-bg group-data-[state=checked]:bg-inverted-bg group-data-[state=checked]:group-hover:border-primary-button-hover group-data-[state=checked]:group-hover:bg-primary-button-hover group-focus-visible:border-highlighted-bright group-data-[state=checked]:group-focus-visible:border-highlighted-bright group-focus-visible:ring-highlighted-bright/50 flex size-4 shrink-0 items-center justify-center rounded-full border transition-[background-color,border-color,box-shadow] duration-120 ease-out group-focus-visible:ring-[3px]",
+            // Keyboard focus is a 1px accent line one pixel off the circle,
+            // so it still shows around the accent fill.
+            "border-border4 group-hover:border-fg3 group-data-[state=checked]:border-accent group-data-[state=checked]:bg-accent group-focus-visible:outline-accent flex size-4 shrink-0 items-center justify-center rounded-full border transition-[background-color,border-color] duration-120 ease-out group-focus-visible:outline-1 group-focus-visible:outline-offset-1",
           )}
         >
-          <RadioGroupPrimitive.Indicator className="bg-inverted-fg size-1.5 rounded-full" />
+          <RadioGroupPrimitive.Indicator className="bg-accent-fg size-1.5 rounded-full" />
         </span>
         <span className="flex min-w-0 flex-col gap-0.5">
           <span className="text-fg1 text-xs leading-4.5">{label}</span>

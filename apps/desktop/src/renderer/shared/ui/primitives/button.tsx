@@ -20,7 +20,7 @@ const buttonVariants = cva(
   // `aria-disabled` is the disabled state that keeps hover, so a Tooltip can
   // say why the action is unavailable; the caller keeps the click a no-op.
   // A loading button's spinner takes the leading icon's place.
-  "inline-flex w-fit select-none items-center justify-center gap-1 whitespace-nowrap rounded-md border border-transparent px-1.5 py-1 text-xs leading-4.5 font-medium transition-colors focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-highlighted-bright/50 focus-visible:border-highlighted-bright disabled:pointer-events-none disabled:opacity-50 aria-disabled:cursor-not-allowed aria-disabled:opacity-50 aria-busy:cursor-progress [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_:where(svg:not([class*='size-']))]:size-3.5 [&>[data-zeros-loader]+svg]:hidden",
+  "inline-flex w-fit select-none items-center justify-center gap-1 whitespace-nowrap rounded-md border border-transparent px-1.5 py-1 text-xs leading-4.5 font-medium transition-colors focus-visible:border-accent focus-visible:outline-1 focus-visible:-outline-offset-1 focus-visible:outline-accent disabled:pointer-events-none disabled:opacity-50 aria-disabled:cursor-not-allowed aria-disabled:opacity-50 aria-busy:cursor-progress [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_:where(svg:not([class*='size-']))]:size-3.5 [&>[data-zeros-loader]+svg]:hidden",
   {
     variants: {
       // Canonical set: Primary (the single main action), Secondary (the

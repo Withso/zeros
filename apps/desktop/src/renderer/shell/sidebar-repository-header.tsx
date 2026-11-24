@@ -70,11 +70,11 @@ const REPOSITORY_HEADER_CLS =
 const REPOSITORY_HOVER_ACTIONS_CLS =
   "pointer-events-none absolute inset-y-0 right-full flex items-center gap-0.5 bg-gradient-to-l from-(--repo-fill) from-75% to-transparent pr-0.5 pl-4 opacity-0 transition-none";
 const REPOSITORY_TOGGLE_CLS =
-  "group/toggle flex h-full min-w-0 flex-1 items-center gap-2 rounded-md pl-2 text-left text-xs font-medium text-inherit outline-none focus-visible:ring-2 focus-visible:ring-highlighted-bright/50";
+  "group/toggle flex h-full min-w-0 flex-1 items-center gap-2 rounded-md pl-2 text-left text-xs font-medium text-inherit outline-none focus-visible:ring-1 focus-visible:ring-accent";
 // Row actions: 24px squares inside the 32px row with the shared icon-button
 // hover (bg2-highlight), ending 12px in like every trailing control.
 export const SIDEBAR_ROW_ACTION_CLS =
-  "inline-flex size-6 shrink-0 items-center justify-center rounded-md text-fg2 outline-none transition-[background-color,color] duration-120 ease-out hover:bg-bg2-highlight hover:text-fg1 focus-visible:ring-2 focus-visible:ring-highlighted-bright/50 data-[state=open]:bg-bg2-highlight data-[state=open]:text-fg1 [&_svg]:size-3.5";
+  "inline-flex size-6 shrink-0 items-center justify-center rounded-md text-fg2 outline-none transition-[background-color,color] duration-120 ease-out hover:bg-bg2-highlight hover:text-fg1 focus-visible:ring-1 focus-visible:ring-accent data-[state=open]:bg-bg2-highlight data-[state=open]:text-fg1 [&_svg]:size-3.5";
 // A pointer-placed context menu can leave a trailing click on the row it
 // covered. Swallow a toggle that lands in that brief aftermath (the same guard
 // WorkspaceContextMenu applies to workspace rows).

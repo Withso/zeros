@@ -580,7 +580,7 @@ export function DesignColorPanel({
         aria-valuenow={Math.round(hsva.s)}
         aria-valuetext={`Saturation ${Math.round(hsva.s)}%, brightness ${Math.round(hsva.v)}%`}
         aria-disabled={disabled || undefined}
-        className="focus-visible:ring-highlighted-bright/60 relative h-40 w-full cursor-crosshair touch-none overflow-hidden rounded-md focus-visible:ring-2 focus-visible:outline-none"
+        className="focus-visible:ring-accent relative h-40 w-full cursor-crosshair touch-none overflow-hidden rounded-md focus-visible:ring-1 focus-visible:outline-none"
         style={{
           backgroundColor: `hsl(${hsva.h} 100% 50%)`, // check:ui ignore-line -- dynamic HSV hue is user-authored color data, not app chrome.
         }}
@@ -633,7 +633,7 @@ export function DesignColorPanel({
             aria-valuemax={360}
             aria-valuenow={Math.round(hsva.h)}
             className={
-              "focus-visible:ring-highlighted-bright/60 relative h-3 cursor-pointer touch-none rounded-full bg-[linear-gradient(to_right,hsl(0_100%_50%),hsl(60_100%_50%),hsl(120_100%_50%),hsl(180_100%_50%),hsl(240_100%_50%),hsl(300_100%_50%),hsl(360_100%_50%))] focus-visible:ring-2 focus-visible:outline-none" // check:ui ignore-line -- a hue spectrum is functional color-picker data, not app chrome.
+              "focus-visible:ring-accent relative h-3 cursor-pointer touch-none rounded-full bg-[linear-gradient(to_right,hsl(0_100%_50%),hsl(60_100%_50%),hsl(120_100%_50%),hsl(180_100%_50%),hsl(240_100%_50%),hsl(300_100%_50%),hsl(360_100%_50%))] focus-visible:ring-1 focus-visible:outline-none" // check:ui ignore-line -- a hue spectrum is functional color-picker data, not app chrome.
             }
             {...trackHandlers((element, event) =>
               updateTrack(element, event.clientX, "h"),
@@ -670,7 +670,7 @@ export function DesignColorPanel({
               aria-valuemin={0}
               aria-valuemax={100}
               aria-valuenow={Math.round(hsva.a * 100)}
-              className="focus-visible:ring-highlighted-bright/60 absolute inset-0 cursor-pointer touch-none rounded-full focus-visible:ring-2 focus-visible:outline-none"
+              className="focus-visible:ring-accent absolute inset-0 cursor-pointer touch-none rounded-full focus-visible:ring-1 focus-visible:outline-none"
               style={{
                 backgroundImage: `linear-gradient(to right, transparent, ${opaque})`,
               }}
@@ -969,7 +969,7 @@ export function DesignColorPicker({
           type="button"
           disabled={disabled}
           className={cn(
-            "focus-visible:ring-highlighted-bright/50 flex size-7 shrink-0 items-center justify-center rounded-sm focus-visible:ring-[3px] focus-visible:outline-none disabled:opacity-50",
+            "focus-visible:ring-accent flex size-7 shrink-0 items-center justify-center rounded-sm focus-visible:ring-1 focus-visible:outline-none disabled:opacity-50",
             className,
           )}
           aria-label={`Edit ${label.toLocaleLowerCase()}`}

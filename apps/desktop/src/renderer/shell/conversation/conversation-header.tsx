@@ -85,7 +85,7 @@ const WORKSPACE_NAME_CLS =
   "text-sm font-medium text-fg1 min-w-0 overflow-hidden text-ellipsis whitespace-nowrap";
 
 const WORKSPACE_NAME_INPUT_CLS =
-  "h-6 px-1.5 text-sm font-medium text-fg1 bg-transparent border border-border1 rounded-sm outline-none focus-visible:border-highlighted-bright focus-visible:ring-2 focus-visible:ring-highlighted-bright/30 min-w-0 max-w-[260px]";
+  "h-6 px-1.5 text-sm font-medium text-fg1 bg-transparent border border-border1 rounded-sm outline-none focus-visible:border-accent min-w-0 max-w-[260px]";
 
 /** "Open in" split button — the logo half (opens the default app directly)
  *  and the chevron half (opens the menu) are two separate targets. */

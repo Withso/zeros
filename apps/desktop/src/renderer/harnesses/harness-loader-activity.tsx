@@ -39,7 +39,7 @@ function Fixture() {
   window.loaderActivityFixture.retain = next => flushSync(() => setActive(next));
   return <ActivityScope.Provider value={local ? active : undefined}>
     <main id="activity-owner" className="flex items-center gap-6 p-6 text-fg1" style={{ position: "absolute", top: 0 }}>
-      <ZerosSpinner variant="orbit" />
+      <ZerosSpinner variant="logo" />
       <ZerosSpinner variant="agent" />
       <ZerosSpinner variant="glass" motion="circuit" />
       <RunStream />

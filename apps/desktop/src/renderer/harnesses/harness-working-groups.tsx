@@ -38,7 +38,7 @@ const say = (id: string, text: string, at: number, phase?: "commentary" | "final
 const think = (id: string, text: string, at: number, end = at): AgentMessage =>
   ({ kind: "text", id, role: "thought", text, createdAt: at, updatedAt: end });
 
-const M1 = "The partition already separates answers from work. Next I’ll add the in-between message boundary.";
+const M1 = "The partition already separates answers from work. Next I’ll add the in-between message boundary, then rerun the adjacent suites.";
 const M2 = "Typecheck passes. Running the adjacent suites before I report back.";
 const ANSWER = "In-between messages now sit between working groups while the agent streams, and a setting decides whether they stay there once the turn is done.";
 

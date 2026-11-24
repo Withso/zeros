@@ -350,7 +350,7 @@ describe("Local CLI tool presentation", () => {
     expect(pills[0]).not.toContain("bg-red-bg");
     expect(pills[0]).not.toContain("text-red-");
     const preview = html.match(/<span data-tool-preview=""[^>]*>/)![0];
-    expect(preview).toContain("bg-red-bg text-red-primary");
+    expect(preview).toContain("bg-red-bg text-red-fg");
     expect(preview).not.toContain("font-mono");
   });
 

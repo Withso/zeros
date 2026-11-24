@@ -6,7 +6,7 @@
 //
 // twMerge is extended with the app's custom type-scale steps
 // (zeros-tokens.css: text-xxs 10px, text-2xxs 11px, text-3xxs
-// 12px, text-reading 15px). Without this, tailwind-merge can't classify them as
+// 12px, text-reading 14px). Without this, tailwind-merge can't classify them as
 // font sizes, files them in the text-COLOR group, and silently
 // drops them whenever the same cn() call also sets a text color
 // (e.g. `text-2xxs text-fg2` → `text-fg2`).

@@ -23,7 +23,7 @@ const Tile = React.forwardRef<
       "transition-colors duration-120 ease-out",
       // bg2-highlight + border3 reads on bg2, where bg2-hover was 1.06:1.
       "hover:border-border3 hover:bg-bg2-highlight",
-      "focus-visible:border-highlighted-bright focus-visible:ring-highlighted-bright/50 focus-visible:ring-[3px] focus-visible:outline-none",
+      "focus-visible:border-accent focus-visible:outline-none",
       className,
     )}
     {...props}

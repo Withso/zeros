@@ -101,9 +101,9 @@ describe("persistent turn failure card", () => {
       createElement(TurnFailureCard, { failure: failure!, onRetry: vi.fn() }),
     );
     expect(html).toContain(notice.message);
-    expect(html).toContain("bg-brown-bg");
+    expect(html).toContain("bg-blue-bg");
     expect(html).toContain("text-fg1");
-    expect(html).toContain("text-brown-fg");
+    expect(html).toContain("text-blue-fg");
     expect(html).toContain("Retry");
     expect(html).not.toContain("Retry in new chat");
   });

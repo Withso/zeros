@@ -230,9 +230,9 @@
       "$type": "color",
       "$value": {
         "colorSpace": "hsl",
-        "components": [30.0, 5.195, 30.196]
+        "components": [26.67, 5.45, 32.35]
       },
-      "$description": "default text + icon; 8.4:1 on white",
+      "$description": "default text + icon; 7.7:1 on white",
       "$extensions": {
         "org.zeros": {
           "cssName": "--fg2",
@@ -247,7 +247,7 @@
       "$type": "color",
       "$value": {
         "colorSpace": "hsl",
-        "components": [30.0, 4.396, 35.686]
+        "components": [30.0, 5.05, 38.82]
       },
       "$description": "middle tier (one step below fg2)",
       "$extensions": {
@@ -264,7 +264,7 @@
       "$type": "color",
       "$value": {
         "colorSpace": "hsl",
-        "components": [40.0, 2.83, 41.569]
+        "components": [30.0, 4.17, 47.06]
       },
       "$description": "supplemental metadata; 3:1 floor, fg3 on hover/selection",
       "$extensions": {
@@ -672,7 +672,7 @@
       "$type": "color",
       "$value": {
         "colorSpace": "hsl",
-        "components": [37.0, 90.0, 28.5]
+        "components": [45.25, 100.0, 23.92]
       },
       "$description": "warning · modified · in-progress (text)",
       "$extensions": {
@@ -690,7 +690,7 @@
       "$type": "color",
       "$value": {
         "colorSpace": "hsl",
-        "components": [48.0, 97.0, 89.0]
+        "components": [50.67, 95.74, 90.78]
       },
       "$description": "warning container surface",
       "$extensions": {
@@ -707,7 +707,7 @@
       "$type": "color",
       "$value": {
         "colorSpace": "hsl",
-        "components": [37.0, 100.0, 30.5]
+        "components": [31.76, 80.95, 28.82]
       },
       "$description": "text/icon on --yellow-bg",
       "$extensions": {
@@ -724,7 +724,7 @@
       "$type": "color",
       "$value": {
         "colorSpace": "hsl",
-        "components": [37.0, 90.0, 36.0]
+        "components": [45.19, 100.0, 30.98]
       },
       "$description": "icons, dots, tinted borders",
       "$extensions": {
@@ -755,7 +755,7 @@
       "$type": "color",
       "$value": {
         "colorSpace": "hsl",
-        "components": [221.0, 83.0, 48.5]
+        "components": [218.97, 76.32, 44.71]
       },
       "$description": "info · links · accents",
       "$extensions": {
@@ -772,7 +772,7 @@
       "$type": "color",
       "$value": {
         "colorSpace": "hsl",
-        "components": [214.0, 100.0, 97.0]
+        "components": [217.14, 100.0, 95.88]
       },
       "$description": "info container surface",
       "$extensions": {
@@ -789,7 +789,7 @@
       "$type": "color",
       "$value": {
         "colorSpace": "hsl",
-        "components": [224.0, 77.0, 48.0]
+        "components": [218.73, 75.24, 41.18]
       },
       "$description": "text/icon on --blue-bg",
       "$extensions": {
@@ -1058,54 +1058,20 @@
         }
       }
     },
-    "brown-primary": {
+    "accent": {
       "$type": "color",
       "$value": {
         "colorSpace": "hsl",
-        "components": [5.0, 35.0, 43.0]
+        "components": [219.57, 82.46, 55.29]
       },
-      "$description": "file paths · warm accents",
+      "$description": "the one accent fill: keyboard focus, checked controls, switch on, slider and progress",
       "$extensions": {
         "org.zeros": {
-          "cssName": "--brown-primary",
+          "cssName": "--accent",
           "section": "light-red-primary",
-          "utility": "--color-brown-primary",
+          "utility": "--color-accent",
           "utilitySection": "utilities-red-primary",
           "utilityOrder": 50
-        }
-      }
-    },
-    "brown-bg": {
-      "$type": "color",
-      "$value": {
-        "colorSpace": "hsl",
-        "components": [5.0, 74.0, 91.0]
-      },
-      "$description": "brown container surface",
-      "$extensions": {
-        "org.zeros": {
-          "cssName": "--brown-bg",
-          "section": "light-red-primary",
-          "utility": "--color-brown-bg",
-          "utilitySection": "utilities-red-primary",
-          "utilityOrder": 51
-        }
-      }
-    },
-    "brown-fg": {
-      "$type": "color",
-      "$value": {
-        "colorSpace": "hsl",
-        "components": [0.0, 20.0, 40.0]
-      },
-      "$description": "text/icon on --brown-bg",
-      "$extensions": {
-        "org.zeros": {
-          "cssName": "--brown-fg",
-          "section": "light-red-primary",
-          "utility": "--color-brown-fg",
-          "utilitySection": "utilities-red-primary",
-          "utilityOrder": 52
         }
       }
     },

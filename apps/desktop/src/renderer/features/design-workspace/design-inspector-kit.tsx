@@ -364,7 +364,7 @@ export function InspectorCheckboxRow({
       <span
         aria-hidden="true"
         className={cn(
-          "peer-focus-visible:ring-highlighted-bright/50 grid size-3.5 shrink-0 place-items-center rounded-sm border peer-focus-visible:ring-[3px]",
+          "peer-focus-visible:ring-accent grid size-3.5 shrink-0 place-items-center rounded-sm border peer-focus-visible:ring-1",
           checked || mixed
             ? "bg-inverted-bg border-inverted-bg text-inverted-fg"
             : "border-border4",

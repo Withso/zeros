@@ -9,7 +9,7 @@ import { DropdownMenu, DropdownMenuTrigger } from "./dropdown-menu";
 // outer focus ring. The halves overlap by their 1px border; the hovered, open
 // or focused half rises above its neighbour so its whole border shows.
 const HALF =
-  "relative inline-flex items-center justify-center border border-transparent whitespace-nowrap text-xs leading-4.5 font-medium outline-none transition-colors duration-120 ease-out focus-visible:z-2 focus-visible:border-highlighted-bright focus-visible:ring-[3px] focus-visible:ring-highlighted-bright/50 disabled:cursor-not-allowed disabled:opacity-50 aria-busy:cursor-progress [&_svg]:pointer-events-none [&_svg]:shrink-0";
+  "relative inline-flex items-center justify-center border border-transparent whitespace-nowrap text-xs leading-4.5 font-medium outline-none transition-colors duration-120 ease-out focus-visible:z-2 focus-visible:border-accent disabled:cursor-not-allowed disabled:opacity-50 aria-busy:cursor-progress [&_svg]:pointer-events-none [&_svg]:shrink-0";
 
 const SIZE = {
   default: {
@@ -35,7 +35,7 @@ const VARIANT = {
     action:
       "border-r-0 border-primary-button-bg bg-primary-button-bg text-primary-button-fg enabled:hover:border-primary-button-hover enabled:hover:bg-primary-button-hover focus-visible:-mr-px focus-visible:border-r",
     chevron:
-      "border-primary-button-bg border-l-primary-button-fg/15 bg-primary-button-bg text-primary-button-fg enabled:hover:border-primary-button-hover enabled:hover:border-l-primary-button-fg/15 enabled:hover:bg-primary-button-hover data-[state=open]:border-primary-button-hover data-[state=open]:border-l-primary-button-fg/15 data-[state=open]:bg-primary-button-hover focus-visible:border-l-highlighted-bright",
+      "border-primary-button-bg border-l-primary-button-fg/15 bg-primary-button-bg text-primary-button-fg enabled:hover:border-primary-button-hover enabled:hover:border-l-primary-button-fg/15 enabled:hover:bg-primary-button-hover data-[state=open]:border-primary-button-hover data-[state=open]:border-l-primary-button-fg/15 data-[state=open]:bg-primary-button-hover focus-visible:border-l-accent",
   },
   // Merge when it can run: the PR status green, with the primary variant's
   // divider. A merge that can't run is the secondary outline.
@@ -43,7 +43,7 @@ const VARIANT = {
     action:
       "border-r-0 border-green-primary bg-green-primary text-[var(--pr-status-merge-fg)] enabled:hover:opacity-90 focus-visible:-mr-px focus-visible:border-r",
     chevron:
-      "border-green-primary border-l-[color-mix(in_srgb,var(--pr-status-merge-fg)_20%,transparent)] bg-green-primary text-[var(--pr-status-merge-fg)] enabled:hover:opacity-90 data-[state=open]:opacity-90 focus-visible:border-l-highlighted-bright",
+      "border-green-primary border-l-[color-mix(in_srgb,var(--pr-status-merge-fg)_20%,transparent)] bg-green-primary text-[var(--pr-status-merge-fg)] enabled:hover:opacity-90 data-[state=open]:opacity-90 focus-visible:border-l-accent",
   },
 } as const;
 

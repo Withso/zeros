@@ -7,7 +7,7 @@ import { cn } from "@/renderer/shared/ui/cn";
 // ring: hover adds a soft halo, keyboard focus the standard ring outside the
 // bg1 one. Disabled dims the whole slider, track included.
 const THUMB =
-  "block size-3.5 rounded-full bg-fg1 shadow-[0_0_0_2px_var(--bg1)] transition-shadow duration-120 ease-out outline-none hover:shadow-[0_0_0_2px_var(--bg1),0_0_0_6px_color-mix(in_srgb,var(--fg1)_14%,transparent)] focus-visible:shadow-[0_0_0_2px_var(--bg1),0_0_0_3px_var(--highlighted-bright),0_0_0_6px_color-mix(in_srgb,var(--highlighted-bright)_50%,transparent)]";
+  "block size-3.5 rounded-full bg-fg1 shadow-[0_0_0_2px_var(--bg1)] transition-shadow duration-120 ease-out outline-none hover:shadow-[0_0_0_2px_var(--bg1),0_0_0_6px_color-mix(in_srgb,var(--fg1)_14%,transparent)] focus-visible:shadow-[0_0_0_2px_var(--bg1),0_0_0_3px_var(--accent)]";
 
 const Slider = React.forwardRef<
   React.ComponentRef<typeof SliderPrimitive.Root>,
@@ -27,7 +27,7 @@ const Slider = React.forwardRef<
     {...props}
   >
     <SliderPrimitive.Track className="bg-border3 relative h-1 w-full grow overflow-hidden rounded-full">
-      <SliderPrimitive.Range className="bg-fg1 absolute h-full rounded-full" />
+      <SliderPrimitive.Range className="bg-accent absolute h-full rounded-full" />
     </SliderPrimitive.Track>
     {(props.value ?? props.defaultValue ?? [0]).map((_, index) => (
       <SliderPrimitive.Thumb key={index} className={THUMB} aria-label={label} aria-valuetext={valueText} />

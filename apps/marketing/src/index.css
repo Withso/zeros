@@ -127,9 +127,9 @@
   /* @generated tokens:marketing-dark-bg4:end */
 
   /* @generated tokens:marketing-dark-fg1:start */
-  --fg1: hsl(0 0% 94%); /* #F0F0F0 */
-  --fg2: hsl(0 0% 72%); /* #B8B8B8 */
-  --fg3: hsl(0 0% 63%); /* #A1A1A1 */
+  --fg1: hsl(0 0% 92.16%); /* #EBEBEB */
+  --fg2: hsl(0 0% 62.35%); /* #9F9F9F */
+  --fg3: hsl(0 0% 57.65%); /* #939393 */
   --muted-fg: hsl(0 0% 42%); /* #6B6B6B */
   /* @generated tokens:marketing-dark-fg1:end */
 
@@ -178,7 +178,7 @@
   /* @generated tokens:marketing-dark-green-fg:end */
 
   /* @generated tokens:marketing-dark-yellow-primary:start */
-  --yellow-primary: hsl(37 75% 60%); /* #E6AB4C */
+  --yellow-primary: hsl(47.95 95.82% 53.14%); /* #FACC15 */
   /* @generated tokens:marketing-dark-yellow-primary:end */
   --yellow-bg: hsl(38 68% 17%);
   --yellow-fg: hsl(44 100% 50%);
@@ -228,9 +228,9 @@
 
     /* @generated tokens:marketing-light-fg1:start */
     --fg1: hsl(30 10% 15.686%); /* #2C2824 */
-    --fg2: hsl(30 5.195% 30.196%); /* #514D49 */
-    --fg3: hsl(30 4.396% 35.686%); /* #5F5B57 */
-    --muted-fg: hsl(40 2.83% 41.569%); /* #6D6B67 */
+    --fg2: hsl(26.67 5.45% 32.35%); /* #57524E */
+    --fg3: hsl(30 5.05% 38.82%); /* #68635E */
+    --muted-fg: hsl(30 4.17% 47.06%); /* #7D7873 */
     /* @generated tokens:marketing-light-fg1:end */
 
     /* @generated tokens:marketing-light-sidebar-bg:start */
@@ -275,7 +275,7 @@
     /* @generated tokens:marketing-light-green-fg:end */
 
     /* @generated tokens:marketing-light-yellow-primary:start */
-    --yellow-primary: hsl(37 90% 28.5%); /* #8A5807 */
+    --yellow-primary: hsl(45.25 100% 23.92%); /* #7A5C00 */
     /* @generated tokens:marketing-light-yellow-primary:end */
     --yellow-bg: hsl(48 97% 89%);
     --yellow-fg: hsl(37 100% 51%);

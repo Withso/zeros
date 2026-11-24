@@ -48,7 +48,7 @@ describe("SplitButton", () => {
   it("waits on the menu while the action is busy", () => {
     const [action, menu] = halves(render({ loading: true }));
     expect(action).toContain('aria-busy="true"');
-    expect(action).toContain('data-zeros-loader="orbit"');
+    expect(action).toContain('data-zeros-loader="logo"');
     expect(menu).toContain("disabled");
   });
 });
@@ -65,8 +65,8 @@ describe("splitButtonClasses", () => {
         expect(set).toContain("border");
         expect(set).toContain("leading-4.5");
         expect(set).toContain("font-medium");
-        expect(set).toContain("focus-visible:ring-[3px]");
-        expect(set).toContain("focus-visible:border-highlighted-bright");
+        expect(set).not.toContain("focus-visible:ring-[3px]");
+        expect(set).toContain("focus-visible:border-accent");
         expect([...set].some((cls) => cls.includes("ring-inset"))).toBe(false);
       }
       expect(classSet(action)).toContain("py-1");

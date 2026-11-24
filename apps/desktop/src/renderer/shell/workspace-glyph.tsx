@@ -22,7 +22,8 @@ export type WorkspacePrTone = "open" | "ready" | "merged" | "closed" | "conflict
  *  via ghPrSync/getPr) and outrank a possibly-stale live island kind from a
  *  workspace whose island isn't mounted (merged on github.com while this
  *  workspace sat in the background); otherwise the island derives it, and an
- *  open PR it hasn't derived yet is plain "open". */
+ *  open PR it hasn't derived yet is plain "open". Failing checks wear the
+ *  conflicts warning so they never read as ready. */
 export function workspacePrTone(
   workspace: Pick<Workspace, "prNumber" | "prState">,
   islandKind: string | null,
@@ -38,6 +39,7 @@ export function workspacePrTone(
     case "closed":
       return "closed";
     case "merge-conflicts":
+    case "unable-to-merge":
       return "conflicts";
     case "ready-to-merge":
       return "ready";
@@ -58,11 +60,11 @@ export function workspaceGlyphSeed(
 
 /** PR identities, the same tokens the former PR icons wore. */
 const PR_TONE_CLS: Record<WorkspacePrTone, string> = {
-  open: "text-brown-fg",
+  open: "text-green-primary",
   ready: "text-green-primary",
   merged: "text-violet-fg",
   closed: "text-red-fg",
-  conflicts: "text-red-fg",
+  conflicts: "text-yellow-primary",
 };
 
 export interface WorkspaceGlyphProps {

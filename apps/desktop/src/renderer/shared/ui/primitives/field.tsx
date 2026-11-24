@@ -9,14 +9,14 @@ import { cn } from "@/renderer/shared/ui/cn";
 export const FIELD_BOX =
   "rounded-md border border-border3 bg-transparent text-xs leading-4.5 text-fg1 transition-[color,background-color,border-color,box-shadow] duration-120 ease-out hover:border-border4 disabled:cursor-not-allowed disabled:opacity-50";
 
-// The ring is for keyboard focus only: the focus tracker marks focus that Tab
+// The accent border is for keyboard focus only: the focus tracker marks focus that Tab
 // or arrow navigation brought. A click or typing changes nothing; the caret
 // is the cue.
 export const FIELD_FOCUS =
-  "focus-visible:outline-none focus-visible:data-[zeros-keyboard-focus]:border-highlighted-bright focus-visible:data-[zeros-keyboard-focus]:ring-[3px] focus-visible:data-[zeros-keyboard-focus]:ring-highlighted-bright/50";
+  "focus-visible:outline-none focus-visible:data-[zeros-keyboard-focus]:border-accent";
 
 export const FIELD_INVALID =
-  "aria-[invalid=true]:border-red-primary aria-[invalid=true]:hover:border-red-primary focus-visible:data-[zeros-keyboard-focus]:aria-[invalid=true]:border-red-primary focus-visible:data-[zeros-keyboard-focus]:aria-[invalid=true]:ring-red-primary/30";
+  "aria-[invalid=true]:border-red-primary aria-[invalid=true]:hover:border-red-primary focus-visible:data-[zeros-keyboard-focus]:aria-[invalid=true]:border-red-primary focus-visible:data-[zeros-keyboard-focus]:aria-[invalid=true]:ring-1 focus-visible:data-[zeros-keyboard-focus]:aria-[invalid=true]:ring-red-primary";
 
 export interface FieldProps {
   label: React.ReactNode;

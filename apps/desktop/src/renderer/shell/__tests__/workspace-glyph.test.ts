@@ -85,11 +85,11 @@ describe("workspace glyph", () => {
     expect(render({ seed, working: true })).toMatch(/class="[^"]*\btext-fg2\b/);
     expect(render({ seed, working: true })).toContain('data-active="true"');
     const tones = {
-      open: "text-brown-fg",
+      open: "text-green-primary",
       ready: "text-green-primary",
       merged: "text-violet-fg",
       closed: "text-red-fg",
-      conflicts: "text-red-fg",
+      conflicts: "text-yellow-primary",
     } as const;
     for (const [pr, cls] of Object.entries(tones)) {
       for (const working of [false, true]) {
@@ -108,6 +108,7 @@ describe("workspace glyph", () => {
     expect(pr("open", "checks-running")).toBe("open");
     expect(pr("open", "ready-to-merge")).toBe("ready");
     expect(pr("open", "merge-conflicts")).toBe("conflicts");
+    expect(pr("open", "unable-to-merge")).toBe("conflicts");
     expect(pr("open", "merged")).toBe("merged");
     // Terminal persisted states outrank a stale live island kind.
     expect(pr("merged", "ready-to-merge")).toBe("merged");

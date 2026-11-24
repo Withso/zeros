@@ -223,7 +223,7 @@ export function FileMediaPreview({
         aria-keyshortcuts="+ - 0 ArrowLeft ArrowRight ArrowUp ArrowDown"
         tabIndex={visible && ready ? 0 : -1}
         className={cn(
-          "focus-visible:outline-highlighted-bright relative flex min-h-0 flex-1 touch-none items-center justify-center overflow-hidden p-4 -outline-offset-2 focus-visible:outline-2 data-[dragging=true]:cursor-grabbing",
+          "focus-visible:outline-accent relative flex min-h-0 flex-1 touch-none items-center justify-center overflow-hidden p-4 -outline-offset-2 focus-visible:outline-1 data-[dragging=true]:cursor-grabbing",
           ready ? "cursor-grab" : "cursor-default",
         )}
       >

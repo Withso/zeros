@@ -104,8 +104,7 @@
         "green-primary",
         "yellow-primary",
         "blue-primary",
-        "violet-primary",
-        "brown-primary"
+        "violet-primary"
       ],
       "on": [
         "@rest",
@@ -160,13 +159,37 @@
       ]
     },
     {
-      "role": "text",
+      "role": "graphic",
       "fg": [
-        "brown-fg"
+        "accent-fg"
       ],
       "on": [
-        "brown-bg"
-      ]
+        "accent"
+      ],
+      "why": "The check, radio dot and switch knob drawn on the accent fill."
+    },
+    {
+      "role": "text",
+      "fg": [
+        "fg1",
+        "blue-fg",
+        "blue-primary"
+      ],
+      "on": [
+        "blue-bg"
+      ],
+      "why": "Chat notices and Zeros' own messages: body text, actions and links on the blue wash."
+    },
+    {
+      "role": "focus",
+      "fg": [
+        "accent"
+      ],
+      "on": [
+        "@rest",
+        "@hover"
+      ],
+      "why": "The 1px accent border that marks keyboard focus and checked controls on every surface."
     },
     {
       "role": "text",
@@ -347,7 +370,6 @@
         "yellow-bg",
         "blue-bg",
         "violet-bg",
-        "brown-bg",
         "bg1-highlight",
         "bg1-hover"
       ],

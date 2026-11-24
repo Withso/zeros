@@ -107,9 +107,10 @@ const FORMER_WARM_DARK = {
  *  palette:
  *    bg2      — a point higher so the composer and raised cards lift further
  *               off the canvas.
- *    fg1/fg2  — raised for stronger text contrast on the neutral canvas.
- *    fg3      — the middle tier at L63 (the former palette sat at L44 before
- *               the tier consolidation).
+ *    fg1/fg2/fg3 — #EBEBEB, #9F9F9F and #939393: the dimmest tiers that
+ *               still clear 4.5:1 on a selected row.
+ *    bg2-highlight, selected-bg — one #2B2B2B selected fill, dark enough for
+ *               fg3 to stay readable on it.
  *    muted-fg — L42, the owner-chosen supplemental tier: a 3:1 floor at rest,
  *               below AA by design; hovered/selected rows step up to fg3.
  *               styles/policy/contrast-contract.json owns the thresholds.
@@ -123,10 +124,12 @@ const NEUTRAL_DARK_LIGHTNESS_OVERRIDES: Record<string, number> = {
   border3: 26.667,
   border4: 34.118,
   "highlighted-bright": 79.216,
-  fg1: 94,
-  fg2: 72,
-  fg3: 63,
+  fg1: 92.16,
+  fg2: 62.35,
+  fg3: 57.65,
   "muted-fg": 42,
+  "bg2-highlight": 16.86,
+  "selected-bg": 16.86,
 };
 
 /** Structural primitives neutral Dark defines as an ALIAS rather than a literal
@@ -189,7 +192,6 @@ describe("dark structural palettes", () => {
       "yellow",
       "blue",
       "violet",
-      "brown",
     ]) {
       expect(
         tokenTriple(neutral, `${family}-primary`)[1],
@@ -240,9 +242,9 @@ describe("foreground tier ladder", () => {
    *  Lightness RISES as the tiers get quieter because Light inverts the axis. */
   const LIGHT_FOREGROUND_TIERS: Record<string, [number, number, number]> = {
     fg1: [30, 10, 15.686],
-    fg2: [30, 5.195, 30.196],
-    fg3: [30, 4.396, 35.686],
-    "muted-fg": [40, 2.83, 41.569],
+    fg2: [26.67, 5.45, 32.35],
+    fg3: [30, 5.05, 38.82],
+    "muted-fg": [30.0, 4.17, 47.06],
   };
 
   it("pins the light foreground tiers against unreviewed drift", () => {

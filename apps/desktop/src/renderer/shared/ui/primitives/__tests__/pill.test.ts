@@ -14,7 +14,8 @@ describe("Pill", () => {
     const markup = renderToStaticMarkup(createElement(Pill, { "aria-label": "App resources" }, "1.24 GB"));
     expect(markup).toContain("<button");
     expect(markup).toContain('type="button"');
-    expect(markup).toContain("focus-visible:ring-[3px]");
+    expect(markup).toContain("focus-visible:border-accent");
+    expect(markup).not.toContain("focus-visible:ring-[3px]");
     expect(markup).toContain("1.24 GB");
   });
 
@@ -34,7 +35,7 @@ describe("Pill", () => {
     // On is the selected fill; the resting edge stays as it is.
     expect([...neutral].some((cls) => /^aria-pressed:(?:hover:)?(?:border|ring|shadow|outline)/.test(cls))).toBe(false);
     expect(classes(renderToStaticMarkup(createElement(Pill, { tone: "failed" }, "x")))).toContain("bg-red-bg");
-    expect(classes(renderToStaticMarkup(createElement(Pill, { tone: "mode" }, "x")))).toContain("bg-brown-bg");
+    expect(classes(renderToStaticMarkup(createElement(Pill, { tone: "mode" }, "x")))).toContain("bg-blue-bg");
     expect(classes(renderToStaticMarkup(createElement(Pill, { tone: "gone" }, "x")))).toContain("border-dashed");
   });
 

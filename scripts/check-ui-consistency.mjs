@@ -71,7 +71,7 @@ const SKIP_DIRS = new Set([
 ]);
 
 const ALLOWED_FONT_SIZES_PX = new Set([
-  8, 9, 10, 11, 12, 13, 14, 15, 16, 18, 20,
+  8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 20,
 ]);
 const ALLOWED_RADII_PX = new Set([0, 4, 6, 8, 12]);
 // Spacing scale for hand-written CSS — the same px steps the Tailwind spacing
@@ -86,7 +86,7 @@ const ALLOWED_SPACE_PX = new Set([
 const TAILWIND_COLOR_RE =
   /\b(bg|text|border|ring|divide|from|to|via|shadow|fill|stroke|outline|accent|caret|placeholder|decoration)-(orange|purple|pink|gray|grey|zinc|slate|neutral|stone|emerald|teal|cyan|sky|indigo|fuchsia|rose|amber|lime)-\d{2,3}\b/;
 
-// The 6 Zeros families (red/green/yellow/blue/violet/brown) are a TWO-TIER system:
+// The 5 Zeros families (red/green/yellow/blue/violet) are a TWO-TIER system:
 //   • ANCHORS — `-primary` / `-secondary` / `-bg` / `-fg` — ARE the semantic
 //     layer; components use them directly (text-red-primary, bg-green-bg, …).
 //   • RAW RAMPS — the numeric steps `-50 … -950` — are the private palette
@@ -94,7 +94,7 @@ const TAILWIND_COLOR_RE =
 // This RE matches ONLY the numeric ramp classes — anchors are non-numeric, so
 // `\d{2,3}` can't match `-primary` / `-secondary` / `-bg` / `-fg`.
 const ZEROS_RAMP_CLASS_RE =
-  /\b(bg|text|border|ring|divide|from|to|via|shadow|fill|stroke|outline|accent|caret|placeholder|decoration)-(red|green|yellow|blue|violet|brown)-\d{2,3}\b/;
+  /\b(bg|text|border|ring|divide|from|to|via|shadow|fill|stroke|outline|accent|caret|placeholder|decoration)-(red|green|yellow|blue|violet)-\d{2,3}\b/;
 
 // Match hex colors like #fff, #ffffff, #ffff80 — but avoid URL fragments
 const HEX_RE = /#[0-9a-fA-F]{3,8}\b/g;
@@ -109,7 +109,7 @@ const PRIMITIVE_TOKEN_RE =
 // are private to zeros-tokens.css; anchors (var(--red-primary), var(--red-bg))
 // are fine and NOT matched here.
 const ZEROS_RAMP_VAR_RE =
-  /var\(--(red|green|yellow|blue|violet|brown)-\d{2,3}\b/;
+  /var\(--(red|green|yellow|blue|violet)-\d{2,3}\b/;
 
 // Inline style with static visual property. We only flag when we can
 // see a literal value (string or number). var(--…) and dynamic identifiers
@@ -219,12 +219,13 @@ const WHITE_BLACK_CLASS_RE =
 
 // DEAD shadcn alias classes — zeros-tokens.css defines no shadcn tokens, so
 // these generate NO color; a paired `ring-1`/`ring-2` then paints solid
-// full-opacity currentColor (the ring-foreground/ring-border/ring-accent
-// family of bugs). The lookarounds keep real tokens (border-border1,
+// full-opacity currentColor (the ring-foreground/ring-border family of
+// bugs). `accent` is a real Zeros token and is not in the list. The
+// lookarounds keep real tokens (border-border1,
 // text-primary-button-fg, text-muted-fg) from matching — `muted` is in the
 // alternation, so only the trailing `(?![\w-])` keeps `muted-fg` out.
 const DEAD_SHADCN_CLASS_RE =
-  /(?<![\w-])(bg|text|border|ring|divide|outline|fill|stroke|from|to|via)-(background|foreground|card|popover|muted|accent|destructive|input|ring|border|primary|secondary)(?![\w-])/;
+  /(?<![\w-])(bg|text|border|ring|divide|outline|fill|stroke|from|to|via)-(background|foreground|card|popover|muted|destructive|input|ring|border|primary|secondary)(?![\w-])/;
 
 // bg3 as a FILL outside popover surfaces — foundation §5.4: in light, bg3 =
 // bg1 = pure white, so a bg3 chip/state fill on a lower surface vanishes.

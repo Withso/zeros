@@ -13,14 +13,14 @@
    excluded because the TipTap composer's
    ProseMirror editor is a contenteditable <div> (a text-input surface
    like <textarea>); the composer card's focus-within border is its
-   focus chrome. Without this it picked up the 2px white outline. */
+   focus chrome. Without this it picked up the fallback outline. */
 
 [data-Zeros-root]
   *:focus-visible:where(:not([data-zeros-focus-visible="false"])):not(input):not(textarea):not(select):not(button):not(a):not(
     [contenteditable]
   ):not([contenteditable] *) {
-  outline: 2px solid var(--highlighted-bright);
-  outline-offset: 2px;
+  outline: 1px solid var(--accent);
+  outline-offset: 1px;
 }
 
 /* Every scrollbar in the app is one thumb (2026-11-09): --scrollbar-thumb

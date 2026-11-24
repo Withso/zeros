@@ -856,7 +856,7 @@ export const TurnFooter = memo(function TurnFooter({
             aria-expanded={changesExpanded}
             aria-controls={changesId}
             onClick={() => setExpandedChangesKey(changesExpanded ? null : changesKey)}
-            className="hover:bg-bg1-hover focus-visible:ring-highlighted-bright h-5 shrink-0 rounded-sm px-1 py-0 font-normal tabular-nums focus-visible:ring-2"
+            className="hover:bg-bg1-hover focus-visible:ring-accent h-5 shrink-0 rounded-sm px-1 py-0 font-normal tabular-nums focus-visible:ring-1"
           >
             <span className="text-green-primary">+{additions}</span>
             <span className="text-red-primary">−{deletions}</span>

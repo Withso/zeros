@@ -170,7 +170,7 @@
       "$type": "color",
       "$value": {
         "colorSpace": "hsl",
-        "components": [0.0, 0.0, 18.0]
+        "components": [0.0, 0.0, 16.86]
       },
       "$description": "dropdown trigger hover/open",
       "$extensions": {
@@ -187,7 +187,7 @@
       "$type": "color",
       "$value": {
         "colorSpace": "hsl",
-        "components": [0.0, 0.0, 20.5]
+        "components": [0.0, 0.0, 16.86]
       },
       "$description": "selected, pressed and active fill, one step above hover; never an edge",
       "$extensions": {
@@ -273,7 +273,7 @@
       "$type": "color",
       "$value": {
         "colorSpace": "hsl",
-        "components": [0.0, 0.0, 94.0]
+        "components": [0.0, 0.0, 92.16]
       },
       "$description": "selected/highlighted text + icons",
       "$extensions": {
@@ -290,7 +290,7 @@
       "$type": "color",
       "$value": {
         "colorSpace": "hsl",
-        "components": [0.0, 0.0, 72.0]
+        "components": [0.0, 0.0, 62.35]
       },
       "$description": "default text + icon across app",
       "$extensions": {
@@ -307,7 +307,7 @@
       "$type": "color",
       "$value": {
         "colorSpace": "hsl",
-        "components": [0.0, 0.0, 63.0]
+        "components": [0.0, 0.0, 57.65]
       },
       "$description": "middle tier (one step below fg2)",
       "$extensions": {
@@ -517,10 +517,10 @@
     "dialog-title-size": {
       "$type": "dimension",
       "$value": {
-        "value": 0.9375,
+        "value": 0.875,
         "unit": "rem"
       },
-      "$description": "15px shared popup heading",
+      "$description": "14px shared popup heading",
       "$extensions": {
         "org.zeros": {
           "cssName": "--dialog-title-size",
@@ -549,10 +549,10 @@
     "reading-text-size": {
       "$type": "dimension",
       "$value": {
-        "value": 0.9375,
+        "value": 0.875,
         "unit": "rem"
       },
-      "$description": "15px chat reading text",
+      "$description": "14px chat reading text",
       "$extensions": {
         "org.zeros": {
           "cssName": "--reading-text-size",
@@ -831,7 +831,7 @@
       "$type": "color",
       "$value": {
         "colorSpace": "hsl",
-        "components": [37.0, 75.0, 60.0]
+        "components": [47.95, 95.82, 53.14]
       },
       "$description": "warning · modified · in-progress",
       "$extensions": {
@@ -849,7 +849,7 @@
       "$type": "color",
       "$value": {
         "colorSpace": "hsl",
-        "components": [38.0, 68.0, 17.0]
+        "components": [47.23, 68.12, 13.53]
       },
       "$description": "warning container surface",
       "$extensions": {
@@ -866,7 +866,7 @@
       "$type": "color",
       "$value": {
         "colorSpace": "hsl",
-        "components": [44.0, 100.0, 50.0]
+        "components": [48.0, 96.64, 76.67]
       },
       "$description": "text/icon on --yellow-bg",
       "$extensions": {
@@ -895,7 +895,10 @@
     },
     "yellow-wash": {
       "$type": "color",
-      "$value": "{tokens.yellow-primary}",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [47.74, 86.11, 42.35]
+      },
       "$description": "code-editor search-match washes",
       "$extensions": {
         "org.zeros": {
@@ -908,7 +911,7 @@
       "$type": "color",
       "$value": {
         "colorSpace": "hsl",
-        "components": [205.0, 80.0, 73.0]
+        "components": [212.62, 100.0, 70.78]
       },
       "$description": "info · links · accents",
       "$extensions": {
@@ -925,7 +928,7 @@
       "$type": "color",
       "$value": {
         "colorSpace": "hsl",
-        "components": [207.6, 75.758, 12.941]
+        "components": [217.14, 52.5, 15.69]
       },
       "$description": "info container surface",
       "$extensions": {
@@ -942,7 +945,7 @@
       "$type": "color",
       "$value": {
         "colorSpace": "hsl",
-        "components": [211.0, 96.0, 78.0]
+        "components": [213.91, 100.0, 81.96]
       },
       "$description": "text/icon on --blue-bg",
       "$extensions": {
@@ -1259,52 +1262,35 @@
         }
       }
     },
-    "brown-primary": {
+    "accent": {
       "$type": "color",
       "$value": {
         "colorSpace": "hsl",
-        "components": [9.0, 46.0, 72.0]
+        "components": [217.86, 100.0, 63.33]
       },
-      "$description": "file paths · warm accents",
+      "$description": "the one accent fill: keyboard focus, checked controls, switch on, slider and progress",
       "$extensions": {
         "org.zeros": {
-          "cssName": "--brown-primary",
+          "cssName": "--accent",
           "section": "base-yellow-wash",
-          "utility": "--color-brown-primary",
+          "utility": "--color-accent",
           "utilitySection": "utilities-red-primary",
           "utilityOrder": 50
         }
       }
     },
-    "brown-bg": {
+    "accent-fg": {
       "$type": "color",
       "$value": {
         "colorSpace": "hsl",
-        "components": [10.0, 15.0, 15.0]
+        "components": [0.0, 0.0, 100.0]
       },
-      "$description": "brown container surface",
+      "$description": "marks drawn on the accent fill",
       "$extensions": {
         "org.zeros": {
-          "cssName": "--brown-bg",
+          "cssName": "--accent-fg",
           "section": "base-yellow-wash",
-          "utility": "--color-brown-bg",
-          "utilitySection": "utilities-red-primary",
-          "utilityOrder": 51
-        }
-      }
-    },
-    "brown-fg": {
-      "$type": "color",
-      "$value": {
-        "colorSpace": "hsl",
-        "components": [10.0, 80.0, 72.0]
-      },
-      "$description": "text/icon on --brown-bg",
-      "$extensions": {
-        "org.zeros": {
-          "cssName": "--brown-fg",
-          "section": "base-yellow-wash",
-          "utility": "--color-brown-fg",
+          "utility": "--color-accent-fg",
           "utilitySection": "utilities-red-primary",
           "utilityOrder": 52
         }
@@ -2311,194 +2297,6 @@
           "utility": "--color-violet-950",
           "utilitySection": "utilities-red-50",
           "utilityOrder": 109
-        }
-      }
-    },
-    "brown-50": {
-      "$type": "color",
-      "$value": {
-        "colorSpace": "hsl",
-        "components": [8.0, 75.0, 97.0]
-      },
-      "$description": "private brown 50 palette step; theme independent",
-      "$extensions": {
-        "org.zeros": {
-          "cssName": "--brown-50",
-          "section": "base-red-50",
-          "utility": "--color-brown-50",
-          "utilitySection": "utilities-red-50",
-          "utilityOrder": 110
-        }
-      }
-    },
-    "brown-100": {
-      "$type": "color",
-      "$value": {
-        "colorSpace": "hsl",
-        "components": [7.0, 74.0, 93.0]
-      },
-      "$description": "private brown 100 palette step; theme independent",
-      "$extensions": {
-        "org.zeros": {
-          "cssName": "--brown-100",
-          "section": "base-red-50",
-          "utility": "--color-brown-100",
-          "utilitySection": "utilities-red-50",
-          "utilityOrder": 111
-        }
-      }
-    },
-    "brown-200": {
-      "$type": "color",
-      "$value": {
-        "colorSpace": "hsl",
-        "components": [7.0, 70.0, 88.0]
-      },
-      "$description": "private brown 200 palette step; theme independent",
-      "$extensions": {
-        "org.zeros": {
-          "cssName": "--brown-200",
-          "section": "base-red-50",
-          "utility": "--color-brown-200",
-          "utilitySection": "utilities-red-50",
-          "utilityOrder": 112
-        }
-      }
-    },
-    "brown-300": {
-      "$type": "color",
-      "$value": {
-        "colorSpace": "hsl",
-        "components": [7.0, 62.0, 83.0]
-      },
-      "$description": "private brown 300 palette step; theme independent",
-      "$extensions": {
-        "org.zeros": {
-          "cssName": "--brown-300",
-          "section": "base-red-50",
-          "utility": "--color-brown-300",
-          "utilitySection": "utilities-red-50",
-          "utilityOrder": 113
-        }
-      }
-    },
-    "brown-400": {
-      "$type": "color",
-      "$value": {
-        "colorSpace": "hsl",
-        "components": [8.0, 53.0, 77.0]
-      },
-      "$description": "private brown 400 palette step; theme independent",
-      "$extensions": {
-        "org.zeros": {
-          "cssName": "--brown-400",
-          "section": "base-red-50",
-          "utility": "--color-brown-400",
-          "utilitySection": "utilities-red-50",
-          "utilityOrder": 114
-        }
-      }
-    },
-    "brown-500": {
-      "$type": "color",
-      "$value": {
-        "colorSpace": "hsl",
-        "components": [9.0, 46.0, 72.0]
-      },
-      "$description": "private brown 500 palette step; theme independent",
-      "$extensions": {
-        "org.zeros": {
-          "cssName": "--brown-500",
-          "section": "base-red-50",
-          "utility": "--color-brown-500",
-          "utilitySection": "utilities-red-50",
-          "utilityOrder": 115
-        }
-      }
-    },
-    "brown-600": {
-      "$type": "color",
-      "$value": {
-        "colorSpace": "hsl",
-        "components": [7.0, 38.0, 58.0]
-      },
-      "$description": "private brown 600 palette step; theme independent",
-      "$extensions": {
-        "org.zeros": {
-          "cssName": "--brown-600",
-          "section": "base-red-50",
-          "utility": "--color-brown-600",
-          "utilitySection": "utilities-red-50",
-          "utilityOrder": 116
-        }
-      }
-    },
-    "brown-700": {
-      "$type": "color",
-      "$value": {
-        "colorSpace": "hsl",
-        "components": [6.0, 30.0, 45.0]
-      },
-      "$description": "private brown 700 palette step; theme independent",
-      "$extensions": {
-        "org.zeros": {
-          "cssName": "--brown-700",
-          "section": "base-red-50",
-          "utility": "--color-brown-700",
-          "utilitySection": "utilities-red-50",
-          "utilityOrder": 117
-        }
-      }
-    },
-    "brown-800": {
-      "$type": "color",
-      "$value": {
-        "colorSpace": "hsl",
-        "components": [7.0, 23.0, 35.0]
-      },
-      "$description": "muted brown · PR-status chip border (raised from the ramp for a visible outline)",
-      "$extensions": {
-        "org.zeros": {
-          "cssName": "--brown-800",
-          "section": "base-red-50",
-          "utility": "--color-brown-800",
-          "utilitySection": "utilities-red-50",
-          "utilityOrder": 118,
-          "cssFormat": "multiline"
-        }
-      }
-    },
-    "brown-900": {
-      "$type": "color",
-      "$value": {
-        "colorSpace": "hsl",
-        "components": [10.0, 15.0, 15.0]
-      },
-      "$description": "private brown 900 palette step; theme independent",
-      "$extensions": {
-        "org.zeros": {
-          "cssName": "--brown-900",
-          "section": "base-red-50",
-          "utility": "--color-brown-900",
-          "utilitySection": "utilities-red-50",
-          "utilityOrder": 119
-        }
-      }
-    },
-    "brown-950": {
-      "$type": "color",
-      "$value": {
-        "colorSpace": "hsl",
-        "components": [10.0, 15.0, 10.0]
-      },
-      "$description": "private brown 950 palette step; theme independent",
-      "$extensions": {
-        "org.zeros": {
-          "cssName": "--brown-950",
-          "section": "base-red-50",
-          "utility": "--color-brown-950",
-          "utilitySection": "utilities-red-50",
-          "utilityOrder": 120
         }
       }
     }

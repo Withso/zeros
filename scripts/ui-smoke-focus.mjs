@@ -71,9 +71,9 @@ export async function runKeyboardFocusSmoke({ page, check }) {
       await page.keyboard.press("ArrowRight");
       const nextRadio = surface.getByRole("radio", { name: "Choice B", exact: true });
       await expect(nextRadio).toBeFocused();
-      // The radio's keyboard focus is the standard halo on its box (a ring),
-      // which the pointer-focused box never shows.
-      expect((await focusChrome(nextRadio.locator("span").first())).shadow).not.toBe(pointerDot.shadow);
+      // The radio's keyboard focus is a 1px accent outline on its box, which
+      // the pointer-focused box never shows.
+      expect((await focusChrome(nextRadio.locator("span").first())).outline).not.toBe(pointerDot.outline);
 
       const tabA = surface.getByRole("tab", { name: "Tab A" });
       await tabA.click();
@@ -84,7 +84,7 @@ export async function runKeyboardFocusSmoke({ page, check }) {
       const tabB = surface.getByRole("tab", { name: "Tab B" });
       await expect(tabB).toBeFocused();
       await expect(tabB).toHaveAttribute("aria-selected", "true");
-      expect((await focusChrome(tabB)).shadow).not.toBe(pointerTab.shadow);
+      expect((await focusChrome(tabB)).border).not.toBe(pointerTab.border);
       check(`${theme}, ${owner}: peer/group/inverse variants and widget arrow navigation work`, true);
 
       const field = surface.getByRole("textbox", { name: "Editable field" });
@@ -93,11 +93,10 @@ export async function runKeyboardFocusSmoke({ page, check }) {
       await page.keyboard.type("typing stays here");
       await expect(field).toBeFocused();
       await expect(field).toHaveValue("typing stays here");
-      // A click or typing shows only the caret; Tab brings the
-      // highlighted-bright edge.
+      // A click or typing shows only the caret; Tab brings the accent edge.
       const highlighted = await field.evaluate((element) => {
         const probe = document.createElement("span");
-        probe.style.color = "var(--highlighted-bright)";
+        probe.style.color = "var(--accent)";
         element.parentElement.append(probe);
         const color = getComputedStyle(probe).color;
         probe.remove();
@@ -175,10 +174,10 @@ export async function runEmbeddedFocusSmoke({ page, check }) {
   await page.keyboard.press("Tab");
   const destination = page.getByRole("button", { name: "After embedded document" });
   await expect(destination).toBeFocused();
-  expect((await focusChrome(destination)).shadow).not.toBe("none");
+  const keyboardBorder = (await focusChrome(destination)).border;
   await page.frameLocator('iframe[title="Embedded focus document"]').getByRole("button", { name: "Frame end" }).click();
   await destination.click();
-  expect((await focusChrome(destination)).shadow).toBe("none");
+  expect((await focusChrome(destination)).border).not.toBe(keyboardBorder);
   check("Tab returning from an embedded document retains a visible app focus indicator", true);
 }
 

@@ -404,7 +404,7 @@ export function SimulatorAnnotator({
           data-simulator-annotator=""
           data-annotation-marks={marks.length}
           className={cn(
-            "focus-visible:ring-highlighted-bright absolute inset-0 touch-none outline-none select-none focus-visible:ring-2 focus-visible:ring-inset",
+            "focus-visible:ring-accent absolute inset-0 touch-none outline-none select-none focus-visible:ring-1 focus-visible:ring-inset",
             overBadge ? "cursor-pointer" : tool === "text" ? "cursor-text" : "cursor-crosshair",
           )}
           onPointerDown={onPointerDown}

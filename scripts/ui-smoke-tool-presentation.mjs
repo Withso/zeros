@@ -68,7 +68,7 @@ export async function runToolPresentationSmoke({ page, check }) {
   });
   await expect(bash.locator("[data-tool-preview]")).toBeVisible();
   // The description is a 20px chip of 13px text, the height and size of the
-  // file tags beside it; the tool's name reads at the chat's 15px.
+  // file tags beside it; the tool's name reads at the chat's 14px.
   const previewHeight = await bash
     .locator("[data-tool-preview]")
     .evaluate((element) => element.getBoundingClientRect().height);
@@ -78,7 +78,7 @@ export async function runToolPresentationSmoke({ page, check }) {
     `height ${previewHeight}`,
   );
   await expect(bash.locator("[data-tool-preview]")).toHaveCSS("font-size", "13px");
-  await expect(bash.getByText("Bash", { exact: true })).toHaveCSS("font-size", "15px");
+  await expect(bash.getByText("Bash", { exact: true })).toHaveCSS("font-size", "14px");
   await bash.focus();
   await page.keyboard.press("Enter");
   await expect(bash).toHaveAttribute("aria-expanded", "true");

@@ -251,7 +251,7 @@ function GithubNavIcon({ size }: { size?: number }) {
 
 // Override every state modifier; twMerge does not replace across modifiers.
 const INTERNAL_NAV_CLS =
-  "text-brown-primary hover:text-brown-primary data-[state=active]:text-brown-primary data-[state=active]:hover:text-brown-primary [&>svg]:text-brown-primary data-[state=active]:[&>svg]:text-brown-primary";
+  "text-blue-primary hover:text-blue-primary data-[state=active]:text-blue-primary data-[state=active]:hover:text-blue-primary [&>svg]:text-blue-primary data-[state=active]:[&>svg]:text-blue-primary";
 
 const SECTIONS: SectionDef[] = [
   {

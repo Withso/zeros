@@ -27,8 +27,8 @@ describe("ListRow", () => {
     for (const cls of [
       "hover:bg-bg1-hover",
       "min-h-7",
-      "focus-visible:ring-[3px]",
-      "focus-visible:inset-ring-highlighted-bright",
+      "focus-visible:inset-ring",
+      "focus-visible:inset-ring-accent",
     ]) {
       expect(set, cls).toContain(cls);
     }
@@ -134,7 +134,7 @@ describe("ListRowGroup", () => {
     for (const cls of ["-ml-2", "px-2", "py-1", "min-h-7", "rounded-md", "hover:bg-bg1-hover", "w-fit", "max-w-full"]) {
       expect(group, cls).toContain(cls);
     }
-    expect(group).toContain("has-[[data-list-row-disclosure]:focus-visible]:inset-ring-highlighted-bright");
+    expect(group).toContain("has-[[data-list-row-disclosure]:focus-visible]:inset-ring-accent");
   });
 
   it("leaves its disclosure only the icon and name, with no fill or ring of its own", () => {

@@ -10,7 +10,7 @@ import { Switch } from "./switch";
 // only; other panels keep their fields.
 const ROW =
   "relative flex h-8 w-full min-w-0 shrink-0 items-center justify-between gap-3 overflow-hidden rounded-md bg-bg2 py-0 pr-1.5 pl-2.5 text-left text-xs leading-4.5 text-fg1";
-const FOCUS = "outline-none focus-visible:ring-[3px] focus-visible:ring-highlighted-bright/50";
+const FOCUS = "outline-none focus-visible:ring-1 focus-visible:ring-accent";
 const LABEL = "relative shrink-0 truncate whitespace-nowrap text-fg2";
 const VALUE = "relative inline-flex min-w-0 items-center gap-1.5 whitespace-nowrap pr-1 text-fg1 tabular-nums";
 const UNIT = "-ml-0.5 text-3xxs text-fg3";

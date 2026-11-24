@@ -453,7 +453,7 @@ export function FilesToCopySection({
                   {summaryLead(copyCount)}
                 </span>{" "}
                 will be copied from{" "}
-                <span className="text-brown-primary text-2xxs font-mono">
+                <span className="text-blue-primary text-2xxs font-mono">
                   {preview.rootPath}
                 </span>
               </>
@@ -638,7 +638,7 @@ export const TreeRowView = memo(function TreeRowView({
             type="button"
             onClick={expand}
             aria-expanded={expanded}
-            className="focus-visible:ring-highlighted-bright flex min-w-0 flex-1 items-center gap-2 rounded-sm text-left focus-visible:ring-1 focus-visible:outline-none"
+            className="focus-visible:ring-accent flex min-w-0 flex-1 items-center gap-2 rounded-sm text-left focus-visible:ring-1 focus-visible:outline-none"
           >
             <ChevronRight
               className={cn(

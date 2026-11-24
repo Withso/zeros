@@ -28,7 +28,7 @@ describe("Tabs chrome variant", () => {
     );
 
     expect(markup).toContain("bg-transparent");
-    expect(markup).toContain("data-[state=active]:bg-bg2");
+    expect(markup).toContain("data-[state=active]:bg-selected-bg");
     expect(markup).not.toContain("rounded-lg bg-bg2 p-1");
     expect(markup).not.toContain('variant="chrome"');
   });
