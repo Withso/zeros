@@ -26,12 +26,12 @@ import { fileRegistry } from "./isolation-org.js";
 
 export const USAGE = "alpha:rehearse <provision|setup|projects|personal|retention|submodules|waiting|all> [--local (this checkout's Dev stack; the Personal route needs no --organization)] [--plan] [--cleanup] [--run <id>] " +
   "[--owner personal|organization (default personal)] [--account owner|1..10 (default 2)] [--other 1..10 (default the next configured)] " +
-  "[--waiting-account 1..10 (default 3)] [--pro-actor-account 1..10 (--local: default the first configured account the run does not use)] [--isolation-member-leaves] [--isolation-org-remove] " +
+  "[--waiting-account 1..10 (default 3)] [--pro-actor-account 1..10 (--local: default the first configured account the run does not use)] [--isolation-member-leaves] [--isolation-org-remove] [--edges 1,..,10] " +
   "[--pro-actor <first 8 hex of the platform owner>] [--switches projects,personal,retention] --repository owner/name (R1, required unless ZEROS_REHEARSAL_REPOSITORY is set) " +
   "[--repository-two owner/name (default Withso/zeros-dev-fixture-2)] [--submodule-repository owner/name] [--submodule-fixture-repository owner/name] [--keep-base] [--max-active <n>] [--organization <slug|id>]";
 /** `all` runs these in order on each route; D is refused until written. */
 export const ALL: Record<OwnerKind, readonly StageName[]> = {
-  personal: ["provision", "setup", "projects", "personal", "isolation", "retention", "submodules", "waiting"], organization: ["provision", "setup", "projects", "retention"],
+  personal: ["provision", "setup", "projects", "personal", "isolation", "retention", "submodules", "waiting", "edges"], organization: ["provision", "setup", "projects", "retention"],
 };
 export const TIMING = { pollMs: 5_000, stateMs: 15 * 60_000, copyMs: 30 * 60_000, turnMs: 10 * 60_000, scanMs: 5 * 60_000, archiveScanMs: 65 * 60_000,
   idleStopMs: 35 * 60_000, computerMs: 45 * 60_000 };
@@ -46,11 +46,19 @@ export type Arguments = {
   isolationMemberLeaves: boolean;
   /** Stage isolation: only delete the kept organization, through the product's own delete. */
   isolationOrgRemove: boolean;
+  /** Stage edges: the cases to run (1..10), all by default. */
+  edges?: number[];
   /** Stage waiting's account: its own fresh Personal organization. */
   waitingAccount: number;
   switches: Set<Switch>;
   repository?: string; repositoryTwo?: string; submoduleRepository?: string; submoduleFixtureRepository?: string; keepBase: boolean; maxActive: number; organization?: string;
 };
+/** --edges 1,4,10: the cases, each 1..10, at least one. */
+function edgeCases(value: string): number[] {
+  const cases = value.split(",").map(item => Number(item.trim()));
+  if (!cases.length || cases.some(n => !Number.isInteger(n) || n < 1 || n > 10)) throw new RehearsalFailure("usage", "edges");
+  return [...new Set(cases)];
+}
 export function parseArguments(argv: string[]): Arguments {
   // Private files: .env.agent at the repository root and the zeros-dev profile, both mode 0600; the profile is reached by
   // ZEROS_DEV_PROFILE_PATH (its loader refuses group- or world-readable files and does not follow a symlink).
@@ -59,7 +67,7 @@ export function parseArguments(argv: string[]): Arguments {
     repository: { type: "string" }, "repository-two": { type: "string" }, "keep-base": { type: "boolean" }, "max-active": { type: "string" },
     organization: { type: "string" }, owner: { type: "string" }, "submodule-repository": { type: "string" }, "submodule-fixture-repository": { type: "string" }, other: { type: "string" }, "pro-actor": { type: "string" }, help: { type: "boolean" },
     "waiting-account": { type: "string" }, "pro-actor-account": { type: "string" },
-    "isolation-member-leaves": { type: "boolean" }, "isolation-org-remove": { type: "boolean" },
+    "isolation-member-leaves": { type: "boolean" }, "isolation-org-remove": { type: "boolean" }, edges: { type: "string" },
   } });
   const owner = (values.owner ?? "personal") as OwnerKind;
   if (!["personal", "organization"].includes(owner)) throw new RehearsalFailure("usage", "owner");
@@ -89,6 +97,7 @@ export function parseArguments(argv: string[]): Arguments {
     ...(other !== undefined ? { other } : {}), ...(values["pro-actor"] ? { proActor: values["pro-actor"] } : {}),
     ...(proActorAccount !== undefined ? { proActorAccount } : {}), switches,
     isolationMemberLeaves: !!values["isolation-member-leaves"], isolationOrgRemove: !!values["isolation-org-remove"],
+    ...(values.edges ? { edges: edgeCases(values.edges) } : {}),
     ...(values.repository ? { repository: assertRepository(values.repository) } : {}),
     ...(values["repository-two"] ? { repositoryTwo: assertRepository(values["repository-two"]) } : {}),
     ...(values["submodule-repository"] ? { submoduleRepository: assertRepository(values["submodule-repository"]) } : {}),
@@ -402,7 +411,7 @@ async function main(argv: string[]): Promise<number> {
       }
       const ports: Ports = {
         release: () => liveRelease(fetch, target), api, bridge: liveBridge(api, undefined, undefined, undefined, target.loopback ? { loopback: target.loopback } : {}),
-        networkRetries: () => networkRetries.take(), bridgeWaits: () => bridgeWaits.take(), bridgeReopens: () => bridgeReopens.take(), boat: liveBoat({ apiKey: profile.boat.apiKey,
+        networkRetries: () => networkRetries.take(), edges: { cases: args.edges ?? null, retention: args.switches.has("retention") }, bridgeWaits: () => bridgeWaits.take(), bridgeReopens: () => bridgeReopens.take(), boat: liveBoat({ apiKey: profile.boat.apiKey,
           ...(profile.boat.billingOrg ? { billingOrg: profile.boat.billingOrg } : {}) }),
         storage: liveStorage(storageConfig(), () => run.created.workspaces),
         github: fixtureGithub(),

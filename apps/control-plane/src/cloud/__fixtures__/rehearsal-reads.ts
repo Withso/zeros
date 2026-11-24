@@ -37,6 +37,13 @@ export const REHEARSAL_READS: CatalogRead[] = [
   { name: "retention backup state", text: BACKUP_STATE, values: s => [s.workspace], sees: positive("forks") },
   { name: "retention wakes", text: `SELECT count(*)::int AS wakes FROM cloud_v2_maintenance_wakes
       WHERE workspace_id = ANY($1::uuid[]) AND kind = 'wake' AND outcome = 'stopped'`, values: s => [[s.workspace]], sees: positive("wakes") },
+  { name: "edges workspace row", text: "SELECT state, boat_sandbox_id FROM cloud_v2_workspaces WHERE id = $1::uuid", values: s => [s.workspace] },
+  { name: "edges forks", text: `SELECT f.sandbox_id, w.boat_sandbox_id FROM cloud_v2_ready_copy_forks f JOIN cloud_v2_workspaces w ON w.id = f.workspace_id
+      WHERE f.workspace_id = ANY($1::uuid[])`, values: s => [[s.workspace]] },
+  { name: "edges wake due", text: "SELECT count(*)::int AS n FROM cloud_v2_maintenance_wakes WHERE workspace_id = $1::uuid AND kind = 'wake'", values: s => [s.workspace] },
+  { name: "edges wake outcome", text: "SELECT outcome FROM cloud_v2_maintenance_wakes WHERE workspace_id = $1::uuid AND kind = 'wake' ORDER BY started_at DESC LIMIT 1",
+    values: s => [s.workspace] },
+  { name: "edges workspaces by name", text: "SELECT count(*)::int AS n FROM cloud_v2_workspaces WHERE name = $1 AND state <> 'deleted'", values: s => [`${s.prefix}e10-w`] },
   { name: "isolation copies", text: "SELECT count(*)::int AS n FROM cloud_v2_ready_copies WHERE project_id = $1::uuid", values: s => [s.project] },
   { name: "isolation member left", text: "SELECT archived_at IS NOT NULL AS archived, archive_reason FROM cloud_v2_workspaces WHERE id = $1::uuid", values: s => [s.workspace] },
   { name: "isolation workspaces", text: "SELECT count(*)::int AS n FROM cloud_v2_workspaces WHERE org_id = ANY($1::uuid[])", values: s => [[s.org]] },

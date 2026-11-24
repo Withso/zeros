@@ -71,6 +71,10 @@ export class FakeAlpha {
   /** Failure reasons the next copies fail with, one per copy build (a create, then each retry); empty: ready. */
   copyFailures: string[] = [];
   copyRetries = 0;
+  /** Stage edges: workspaces by create idempotency key; knobs that break a product promise for a test. */
+  readonly createKeys = new Map<string, string>();
+  idempotencyBroken = false;
+  archiveKeepsKeep = false;
   /** A copy's setup output shows a build secret's value (the leak stage isolation must see). */
   outputShowsSecrets = false;
   readonly connectionId = randomUUID();
@@ -389,7 +393,16 @@ export class FakeAlpha {
       if (parts[6] === "ready-copy") return this.reply(200, { status: project.copyFailed
         ? { state: "failed", failure: { reason: project.copyFailed, repository: null, step: "stop", detail: null, failures: 1, nextRetryAt: null } } : { state: "ready" },
         history: [{ generation: project.generation ?? 1, state: project.copyFailed ? "failed" : "ready", output: true }] });
-      if (method === "DELETE") { this.machines.get(project.machine)!.state = "deleted"; this.projects.delete(project.id); return this.reply(200, { ok: true }); }
+      if (method === "DELETE") {
+        this.machines.get(project.machine)!.state = "deleted"; this.projects.delete(project.id);
+        // Its workspaces stay, with no project.
+        for (const row of this.workspaces.values()) if (row.projectId === project.id) delete row.projectId;
+        return this.reply(200, { ok: true });
+      }
+      if (method === "PATCH") {
+        if (typeof body.name === "string") project.name = body.name;
+        if (Array.isArray(body.repositories)) project.repositories = (body.repositories as { repository: string }[]).map(row => row.repository);
+      }
       return this.reply(200, { project: this.project(project) });
     }
     if (parts[2] === "organizations" && parts[4] === "environment") {
@@ -432,6 +445,10 @@ export class FakeAlpha {
     if (url.pathname === "/v1/cloud-v2/workspaces" && method === "GET")
       return this.reply(200, { workspaces: [...this.workspaces.values()].filter(row => row.state !== "deleted").map(row => this.document(row)) });
     if (url.pathname === "/v1/cloud-v2/workspaces" && method === "POST") {
+      // The same idempotency key answers the same workspace, the same way.
+      const key = headers["idempotency-key"] ?? headers["Idempotency-Key"];
+      const replayed = key ? this.createKeys.get(key) : undefined;
+      if (replayed) return this.reply(this.idempotencyBroken ? 202 : 201, { workspace: this.document(this.workspaces.get(replayed)!) });
       const project = this.projects.get(String(body.projectId));
       if (!project) return this.reply(404);
       const base = this.ensureBase();
@@ -454,6 +471,7 @@ export class FakeAlpha {
         Object.assign(row, { state: "creating", boatSandboxId: "", waitingFor: base.id, computerBuildId: base.id, createdAtMs: this.now });
       }
       this.workspaces.set(id, row); if (!this.forkFallback) this.forks.add(id);
+      if (key) this.createKeys.set(key, id);
       return this.reply(201, { workspace: this.document(row) });
     }
     if (parts[2] === "workspaces" && parts[3]) {
@@ -479,7 +497,12 @@ export class FakeAlpha {
         this.machines.get(row.boatSandboxId)!.state = "stopped";
         return this.reply(202, { workspace: this.document(row) });
       }
-      if (action === "archive") { row.state = "stopped"; row.archivedAt = new Date(this.now).toISOString(); row.archiveReason = "manual"; row.archivedAtDays = row.stoppedDays ?? 0; return this.reply(202, { workspace: this.document(row) }); }
+      if (action === "archive") {
+        row.state = "stopped"; row.archivedAt = new Date(this.now).toISOString(); row.archiveReason = "manual"; row.archivedAtDays = row.stoppedDays ?? 0;
+        // Keep is cleared by the archive (unless a test breaks that).
+        if (!this.archiveKeepsKeep) row.keep = false;
+        return this.reply(202, { workspace: this.document(row) });
+      }
       if (action === "start") {
         if (this.machines.get(row.boatSandboxId)?.state === "deleted") {
           row.boatSandboxId = this.machine(`${row.name} restored`);
@@ -634,7 +657,7 @@ export class FakeAlpha {
       const file = `${row.repositories![0]!.checkoutPath}/${ignored[3]}`;
       row.files.set(file, `${ignored[2] === ">>" ? row.files.get(file) ?? "" : ""}${ignored[1]}\n`);
     }
-    if (data.includes(`printf 'zr-head %s\\n' "$(git rev-parse HEAD)"`)) output = `zr-head ${this.rebuiltHead}`;
+    if (data.includes("printf 'zr-head %s")) output = `zr-head ${this.rebuiltHead}`;
     const counted = /git --no-pager log --format=%s -n 20 \| grep -cxF '([^']+)'/.exec(data)?.[1];
     if (counted) output = `zr-count ${[...row.commits.values()].flat().filter(subject => subject === counted).length}`;
     // As the product lays submodules out: fetched at their gitlinks, not registered in .git/config (status prints "-").
@@ -773,6 +796,15 @@ export class FakeAlpha {
       return { rows: [], rowCount: build ? 1 : 0 };
     }
     if (text.startsWith("SELECT state FROM cloud_v2_workspaces")) return rows([{ state: this.workspaces.get(String(values[0]))?.state ?? null }]);
+    // Stage edges.
+    if (text.startsWith("SELECT state, boat_sandbox_id FROM cloud_v2_workspaces")) {
+      const row = this.workspaces.get(String(values[0]));
+      return rows(row ? [{ state: row.state, boat_sandbox_id: row.boatSandboxId || null }] : []);
+    }
+    if (text.startsWith("SELECT count(*)::int AS n FROM cloud_v2_maintenance_wakes")) return rows([{ n: this.workspaces.get(String(values[0]))?.wakes ?? 0 }]);
+    if (text.startsWith("SELECT outcome FROM cloud_v2_maintenance_wakes")) return rows(this.workspaces.get(String(values[0]))?.wakes ? [{ outcome: "adopted" }] : []);
+    if (text.startsWith("SELECT count(*)::int AS n FROM cloud_v2_workspaces WHERE name = $1"))
+      return rows([{ n: [...this.workspaces.values()].filter(row => row.name === values[0] && row.state !== "deleted").length }]);
     if (text.includes("FROM cloud_v2_ready_copies")) return rows([...this.projects.values()].filter(project => project.id === values[0]).map(project => ({ machine_id: project.machine })));
     if (text.includes("AS distrusted")) return rows(this.forks.has(String(values[0])) ? [{ distrusted: this.copyDistrusted, archive: this.copyArchive }] : []);
     if (text.includes("FROM cloud_v2_ready_copy_forks")) return rows([{ forks: this.forks.has(String(values[0])) ? 1 : 0 }]);

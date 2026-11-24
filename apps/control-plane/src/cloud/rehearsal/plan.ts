@@ -169,6 +169,11 @@ export function writeLines(stage: StageName, prefix: string, repositories: { one
         " and wait up to 35 minutes for the machine to stop (the minutes are reported)",
       "personal would put Pro back (1 operator change), open the workspace (1 machine start), then delete the workspace and the project",
     ],
+    edges: [
+      `edges would make project ${prefix}edges (Only you, ${repositories.one}) and, case by case, its own projects and workspaces (up to about 20 machine starts in all),` +
+        " each removed when its case ends: two creates while a copy builds, a create whose project is deleted, a delete while creating, a stop during a turn," +
+        " an open during a background wake (a clock shift), archive then open, Pro ended during a create (Personal route), a repository removed, a rename, a repeated idempotency key",
+    ],
     isolation: [
       `isolation would create project ${prefix}iso (Only you, ${repositories.one}, a setup that prints its build secret) and its copy, set one build secret` +
         ` (the copy built again: 2 machines), make workspace ${prefix}iso-w (1 machine start, then stopped) and seed one environment file when it is empty`,
