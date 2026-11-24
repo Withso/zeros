@@ -103,7 +103,7 @@ export function createCloudTeamRoutes(sharing: CloudTeamSharing, document: (valu
   }));
   const creator = share(async (c,next) => {
     const id = uuid(c.req.param("id")!), user = c.get("user");
-    if (executionActive ? await executionActive(c,id) : await sharing.workspaces.prompts.execution?.active(id)) return next();
+    if (executionActive ? await executionActive(c,id) : await sharing.workspaces.prompts.execution?.active(id,undefined,user.id)) return next();
     if (await sharing.authority.isCreator(id,user.id)) return next();
     const proof = await sharing.authority.admit(id,user);
     if (proof.view.role !== "creator") throw teamReadOnly();
@@ -113,7 +113,7 @@ export function createCloudTeamRoutes(sharing: CloudTeamSharing, document: (valu
   for (const action of ["stop","archive"] as const) app.post(`${path}/${action}`,share(async (c,next) => {
     await body(c,empty,true);
     const id = uuid(c.req.param("id")!), user = c.get("user");
-    if (action === "stop" && (executionActive ? await executionActive(c,id) : await sharing.workspaces.prompts.execution?.active(id))) return next();
+    if (action === "stop" && (executionActive ? await executionActive(c,id) : await sharing.workspaces.prompts.execution?.active(id,undefined,user.id))) return next();
     const result = await sharing.manage(id,user,action);
     return c.json({ workspace: document(await sharing.get(id,user,owns(c))),teamSharing: 1,...marker(c) },result.moved ? 202 : 200);
   }));

@@ -163,7 +163,7 @@ export function createCloudV2Routes(deps: CloudV2RouteDeps): Hono {
   const activeWorkspace = (c: Context, id: string) => {
     let pending = activeWorkspaces.get(c);
     if (!pending) {
-      pending = deps.execution?.active(id) ?? Promise.resolve(false);
+      pending = deps.execution?.active(id, undefined, c.get("user").id) ?? Promise.resolve(false);
       activeWorkspaces.set(c, pending);
     }
     return pending;

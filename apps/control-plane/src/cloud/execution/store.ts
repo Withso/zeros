@@ -79,10 +79,14 @@ export class CloudExecutionContexts {
   authorizations?: ExecutionAuthorizationCache<CachedTokenContext>;
   constructor(readonly pool: pg.Pool, readonly deps: ExecutionDeps) {}
 
-  async active(id: string, transaction?: Tx): Promise<boolean> {
+  /** viewer: a personal project's workspace is its member's alone, so for anyone else it is never active and their
+   * requests take the path an unknown id takes, answering as one. */
+  async active(id: string, transaction?: Tx, viewer?: string): Promise<boolean> {
     const result = transaction
-      ? await transaction.query("SELECT 1 FROM cloud_v2_workspaces WHERE id=$1 AND execution_mode='active'", [id])
-      : await withSystemStatement(this.pool, sql`SELECT 1 FROM cloud_v2_workspaces WHERE id=${SqlFragment.uuid(id.toLowerCase())} AND execution_mode='active'`);
+      ? await transaction.query(`SELECT 1 FROM cloud_v2_workspaces WHERE id=$1 AND execution_mode='active'
+          AND ($2::uuid IS NULL OR private_owner_user_id IS NULL OR private_owner_user_id=$2)`, [id, viewer ?? null])
+      : await withSystemStatement(this.pool, sql`SELECT 1 FROM cloud_v2_workspaces WHERE id=${SqlFragment.uuid(id.toLowerCase())} AND execution_mode='active'${viewer
+        ? sql` AND (private_owner_user_id IS NULL OR private_owner_user_id=${SqlFragment.uuid(viewer.toLowerCase())})` : sql``}`);
     return result.rowCount === 1;
   }
 
@@ -99,7 +103,7 @@ export class CloudExecutionContexts {
 
   async connectionWorkspace(id: string, user: AuthedUser) {
     return withSystemTx(this.pool, async tx => {
-      if (!await this.active(id, tx)) return undefined;
+      if (!await this.active(id, tx, user.id)) return undefined;
       return this.workspace(id, user.id, user, tx);
     });
   }
