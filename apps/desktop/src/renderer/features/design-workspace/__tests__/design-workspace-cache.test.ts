@@ -2811,7 +2811,7 @@ describe("design workspace cache", () => {
     const hero = {
       sourceVersion: nextSourceVersion, oid: "hero", tag: "main", name: "Hero", text: null,
       selector: '[data-oid="hero"]', visible: true, breadcrumb: ["main · Hero"],
-      rect: { x: 0, y: 0, width: 240, height: 80 }, styles: { color: "rgb(255, 0, 0)" },
+      rect: { x: 0, y: 0, width: 240, height: 80 }, styles: { color: "red" },
     };
     const runtimeSnapshot = {
       sourceVersion: nextSourceVersion, revision: 2, tree: [], warnings: [],
@@ -2823,7 +2823,7 @@ describe("design workspace cache", () => {
       frame: { ...runtimeSnapshot.frame, sourceVersion: previousFrame.sourceVersion },
     }, previousFrame.sourceVersion);
     // The heading inside the hero takes its colour from it.
-    const heading = { ...hero, oid: "heading", sourceVersion: previousFrame.sourceVersion, styles: { color: "rgb(0, 0, 0)" } };
+    const heading = { ...hero, oid: "heading", sourceVersion: previousFrame.sourceVersion, styles: { color: "black" } };
     useDesignRuntimeStore.getState().publishNodeDetails(workspaceId, "/design/a", previousFrame.file, heading, previousFrame.sourceVersion);
     runtimeMocks.designFrameRuntime.mockReturnValue({
       sourceVersion: previousFrame.sourceVersion,
@@ -2846,7 +2846,7 @@ describe("design workspace cache", () => {
 
     const frame = designRuntimeFrameState(workspaceId, previousFrame.file);
     expect(frame?.sourceVersion).toBe(nextSourceVersion);
-    expect(frame?.detailsByNode.hero?.styles.color).toBe("rgb(255, 0, 0)");
+    expect(frame?.detailsByNode.hero?.styles.color).toBe("red");
     // Its cached black is the old generation's answer, not the new one's.
     expect(frame?.detailsByNode.heading).toBeUndefined();
   });
