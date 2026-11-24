@@ -8,7 +8,7 @@ import type { WorkspacePrTone } from "../workspace-glyph";
 
 // The PR status island's #N chip as one 24px pill: a quiet outline in the
 // PR's colour, the same --pr-status-chip-border-* ramp shades the island uses.
-// Open and ready are green, conflicts yellow, as the island's chip is.
+// Open and ready are green; conflicts and failed checks yellow.
 const PR_PILL_TONE: Record<WorkspacePrTone, string> = {
   open: "border-(--pr-status-chip-border-success) text-green-primary hover:text-green-fg",
   conflicts: "border-(--pr-status-chip-border-warning) text-yellow-primary hover:text-yellow-fg",

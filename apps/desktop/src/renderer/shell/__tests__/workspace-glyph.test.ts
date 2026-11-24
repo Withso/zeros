@@ -108,6 +108,7 @@ describe("workspace glyph", () => {
     expect(pr("open", "checks-running")).toBe("open");
     expect(pr("open", "ready-to-merge")).toBe("ready");
     expect(pr("open", "merge-conflicts")).toBe("conflicts");
+    expect(pr("open", "unable-to-merge")).toBe("conflicts");
     expect(pr("open", "merged")).toBe("merged");
     // Terminal persisted states outrank a stale live island kind.
     expect(pr("merged", "ready-to-merge")).toBe("merged");
