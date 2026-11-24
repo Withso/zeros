@@ -263,6 +263,25 @@ d("cloud v2 ready copies", () => {
     });
   });
 
+  it("asks for a forked workspace's route only once its machine accepts commands", async () => {
+    await liveBase();
+    await copyBuilder().tick();
+    const copy = await row(1);
+    const store = new CloudV2Store(pool), id = randomUUID();
+    const base = (await copies.base(org))!;
+    await store.createWorkspace({ id, organizationId: org, creatorUserId: member, name: "zeros", repository: "withso/zeros",
+      branch: "zeros/w", baseBranch: "main", computerBuildId: base.buildId, projectId: zeros, ...one("withso/zeros", "zeros/w") });
+    await new CloudV2Lifecycle({ store, compute: boat, readyCopies: forks(), runtime,
+      publicKeys: [generateKeyPairSync("ed25519").publicKey.export({ type: "spki", format: "pem" }).toString()],
+      sealPortToken: () => ({ encrypted: true }), stopWorker: async () => true, bootEnv: () => ({}),
+      sandboxName: () => `zeros-fixture-${id}`, sleep: async () => {}, now: () => clock, logger,
+    }).tick();
+    const sandboxId = (await pool.query("SELECT boat_sandbox_id FROM cloud_v2_workspaces WHERE id=$1", [id])).rows[0].boat_sandbox_id;
+    expect(boat.machine(sandboxId)!.source).toBe(copy.machineId);
+    expect(boat.calls.filter(call => call.op === "hostPort" && call.args[0] === sandboxId)).toHaveLength(1);
+    expect(boat.earlyRoutes).toEqual([]);
+  });
+
   it("joins concurrent requests for one project into one build", async () => {
     await liveBase();
     const base = (await copies.base(org))!;

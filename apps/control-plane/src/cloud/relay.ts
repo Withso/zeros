@@ -37,6 +37,9 @@ const INVALID_FRAME = Symbol("invalid_frame");
 type ConfigFrame = Extract<CloudV2ControlFrame, { t: "config" }>;
 type ActivityReply = Omit<Extract<CloudV2ControlFrame, { t: "activity-reply" }>, "t" | "id">;
 
+/** Gateway refusals in one connect before its route is asked for again. */
+const REROUTE_AFTER_GATEWAY_FAILURES = 3;
+
 export type CloudV2RelayDeps = {
   execution?: CloudExecutionContexts;
   store: Pick<CloudV2Store, "consumeConnectTicket" | "get" | "accessEpoch" | "appAccessSnapshot" | "loginRevision">;
@@ -60,6 +63,9 @@ export type CloudV2RelayDeps = {
   workerRoute(workspaceId: string): Promise<WorkerRoute | null>;
   waitReady?(workspace: CloudV2Workspace, signal: AbortSignal, timeoutMs: number): Promise<void>;
   liveRecovery?: Pick<CloudLiveRecovery, "failed" | "connected" | "exhausted">;
+  /** Asks for a running workspace's route again and keeps what comes back; resolves whether the route is now current.
+   * A route that answers the gateway's errors can need only that (one asked for while its machine was starting). */
+  reroute?(route: WorkerRoute): Promise<boolean>;
   /** A refused dial of a running route may mean Boat archived the VM (cloud/provider-stop.ts). */
   providerStop?: (route: WorkerRoute) => void;
   workerActivity?(binding: CloudV2WorkerBinding, idle: boolean): Promise<ActivityReply | null>;
@@ -389,7 +395,7 @@ export class CloudV2Relay {
     const deadline = Date.now() + 60_000;
     const boundedRoute = Boolean(this.deps.waitReady) && room.stops.size === 0;
     let snapshot: WorkerRoute | undefined;
-    let routeReads = 0, gatewayFailures = 0, gatewayStarted: number | undefined;
+    let routeReads = 0, gatewayFailures = 0, gatewayStarted: number | undefined, reroutes = 0, reread = false;
     const waiting = this.deps.now?.() ?? Date.now();
     if (boundedRoute) {
       if (room.wakeAllowed) this.wake(room);
@@ -402,6 +408,7 @@ export class CloudV2Relay {
     let lastFailure: { route: WorkerRoute; error: WorkerConnectionFailure } | undefined;
     for (let attempt = 0, attempts = 0; this.wanted(room) && Date.now() < deadline; attempt++, attempts++) {
       if (await this.current(room) !== "allowed") return;
+      if (reread) { snapshot = undefined; reread = false; }
       let ws: WebSocket | undefined;
       try {
         if (!snapshot) routeReads++;
@@ -439,6 +446,13 @@ export class CloudV2Relay {
                 durationMs: Math.max(0, Math.round((this.deps.now?.() ?? Date.now()) - dialStarted)), attempt: attempts + 1 });
               if (room.clients.size && route.workspace.state === "running") this.deps.liveRecovery?.failed(route, error);
               if (error.reason === "refused" && route.workspace.state === "running") this.deps.providerStop?.(route);
+              // Once per connect window, after a few gateway refusals (about a second), well inside live recovery's
+              // first window: the route is asked for again, and the next attempt reads and dials what came back.
+              if (error.reason === "gateway" && !reroutes && gatewayFailures >= REROUTE_AFTER_GATEWAY_FAILURES && this.deps.reroute
+                  && route.workspace.state === "running") {
+                reroutes++;
+                reread = await this.deps.reroute(route).catch(() => false);
+              }
             }
             throw error;
           }
@@ -471,7 +485,7 @@ export class CloudV2Relay {
             const at = this.deps.now?.() ?? Date.now();
             emitCloudV2Timing(this.deps.timing, { workspaceId: room.workspace.id.slice(0, 8), phase: "relay_ready",
               durationMs: Math.max(0, Math.round(at - started)), dialMs: Math.max(0, Math.round(dialed - dialStarted)), configMs: Math.max(0, Math.round(at - dialed)),
-              ...(boundedRoute ? { readyWaitMs: Math.round(readyWaitMs), routeReads, gatewayFailures,
+              ...(boundedRoute ? { readyWaitMs: Math.round(readyWaitMs), routeReads, gatewayFailures, ...(reroutes ? { reroutes } : {}),
                 gatewayWaitMs: gatewayStarted === undefined ? 0 : Math.max(0, Math.round(dialed - gatewayStarted)) } : {}),
               attempts: attempts + 1 });
             const forwarding: Promise<void>[] = [];

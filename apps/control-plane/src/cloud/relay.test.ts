@@ -8,6 +8,7 @@ import { PostgresSecurityEventBroker } from "../security-events.js";
 import { assertWorkOSProviderLockHeld, withHeldWorkOSProviderLock, WorkOSProviderLockLostError } from "../workos-provider-lock-context.js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CLOUD_V2_BRIDGE_PROTOCOL, CloudV2Relay, type CloudV2RelayDeps } from "./relay.js";
+import { CloudLiveRecovery } from "./live-recovery.js";
 import type { CloudV2Workspace } from "./store.js";
 import { newCloudV2Token } from "./tokens.js";
 import { HttpError } from "../authz.js";
@@ -137,6 +138,44 @@ describe("cloud v2 relay", () => {
     expect(attempts).toBe(4);
     expect(deps.workerRoute).toHaveBeenCalledTimes(2);
     expect(deps.store.consumeConnectTicket).toHaveBeenCalledOnce();
+  });
+
+  it("asks for a route that answers gateway errors once more, connects through it, and live recovery never escalates", async () => {
+    Object.assign(deps, { waitReady: vi.fn(async () => {}), timing: vi.fn() });
+    // A bound route, so live recovery takes it up: it escalates after two windows of gateway refusals.
+    const bound = { workspace: workspace("running"), accessEpoch, url: workerUrl, token: "synthetic-port-token", bootId: workspaceId, workerTokenHash: "a".repeat(64) };
+    vi.mocked(deps.workerRoute).mockImplementation(async () => bound);
+    let healed = false, refusals = 0;
+    workerServer.options.verifyClient = (_info, done) => { if (healed) done(true); else { refusals++; done(false, 502); } };
+    deps.reroute = vi.fn(async () => { healed = true; return true; });
+    let now = 1_800_000_000_000;
+    const rebuild = vi.fn(async () => true), condition = vi.fn(async () => true);
+    const recovery = new CloudLiveRecovery({ route: async () => bound, condition, rebuild, mint: () => "synthetic-grant", ready: vi.fn(),
+      // Its clock runs ten times faster than real time: a 60 s window lasts 6 s here, its 2 s retries 200 ms.
+      witness: async () => ({ seen: () => true, dispose() {} }), now: () => now,
+      wait: async (ms: number) => { await new Promise(resolve => setTimeout(resolve, ms / 10)); now += ms; } });
+    deps.liveRecovery = recovery;
+    try {
+      await worker();
+      expect(deps.reroute).toHaveBeenCalledExactlyOnceWith(bound);
+      expect(refusals).toBeGreaterThanOrEqual(3);
+      // The route read once, again after the re-ask, and once more as the dial is confirmed.
+      await vi.waitFor(() => expect(deps.timing).toHaveBeenCalledWith(expect.objectContaining({ phase: "relay_ready", reroutes: 1, routeReads: 3, gatewayFailures: 3 })));
+      await recovery.close();
+      expect(rebuild).not.toHaveBeenCalled();
+      expect(condition).not.toHaveBeenCalledWith(expect.anything(), true);
+    } finally { await recovery.close(); }
+  });
+
+  it("asks for the route again at most once in a connect window", async () => {
+    Object.assign(deps, { waitReady: vi.fn(async () => {}) });
+    workerServer.options.verifyClient = (_info, done) => done(false, 502);
+    deps.reroute = vi.fn(async () => true);
+    const client = await app();
+    await expect.poll(() => vi.mocked(deps.reroute!).mock.calls.length).toBe(1);
+    await new Promise(resolve => setTimeout(resolve, 300));
+    expect(deps.reroute).toHaveBeenCalledOnce();
+    client.terminate();
   });
 
   it("does not configure a carrier whose boot changed during the gateway wait", async () => {

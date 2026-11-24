@@ -84,6 +84,10 @@ export class FakeBoat implements CloudV2Compute {
   script: Exec | null = null;
   /** A command the test makes fail at Boat before the machine runs any of it. */
   failCommand: ((machine: Machine, command: string) => boolean) | null = null;
+  /** Routes asked for before their machine accepted a command since its create, fork or resume: such a route answers
+   * the gateway's 502 until it is asked for again (measured on real machines). */
+  earlyRoutes: string[] = [];
+  private commanded = new Set<string>();
   /** After a resume, this many commands are refused as Boat refuses them while the machine is still starting. */
   startingCommands = 0;
   private starting = new Map<string, number>();
@@ -205,6 +209,7 @@ export class FakeBoat implements CloudV2Compute {
     // A resume starts from what the stop archived, and from a stopped machine its restore runs again for a while.
     if (machine.archive) { machine.files = new Map(machine.archive); machine.archive = null; }
     if (machine.state !== "running") machine.hydrateReads = this.hydrationReads;
+    this.commanded.delete(sandboxId);
     if (this.startingCommands) this.starting.set(sandboxId, this.startingCommands);
     // Boat's lease is the resume's ttl; boat.ts sends 24 hours when none is given.
     machine.state = "running"; machine.leaseUntil = this.clock() + (ttlSeconds ?? 24 * 60 * 60) * 1000;
@@ -259,6 +264,7 @@ export class FakeBoat implements CloudV2Compute {
     if (machine.state !== "running") throw new CloudProviderError("provider_request_failed", "Boat API request did not succeed", true, { httpStatus: 409 });
     const starting = this.starting.get(sandboxId) ?? 0;
     if (starting) { this.starting.set(sandboxId, starting - 1); throw new BoatBootPendingError(); }
+    this.commanded.add(sandboxId);
     this.commands.push({ machineId: sandboxId, command, ...(input === undefined ? {} : { input }) });
     if (this.failCommand?.(machine, command)) throw lost();
     if (command.includes("systemctl stop zeros-worker.service")) machine.worker.active = false;
@@ -353,6 +359,7 @@ export class FakeBoat implements CloudV2Compute {
   async hostPort(sandboxId: string, input: { port: number }) {
     this.record("hostPort", sandboxId, input);
     this.live(sandboxId);
+    if (!this.commanded.has(sandboxId)) this.earlyRoutes.push(sandboxId);
     return { url: `https://${sandboxId}-${input.port}.on.boat.dev`, token: "fixture-route-token-000000" };
   }
 

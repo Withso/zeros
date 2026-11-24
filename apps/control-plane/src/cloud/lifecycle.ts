@@ -144,7 +144,7 @@ export type CloudV2TimingRecord = {
   /** relay_ready: the worker socket dial, and the time from it to readiness.
    * worker_hello: configMs is the control plane's configuration inside hello. */
   dialMs?: number; configMs?: number;
-  readyWaitMs?: number; routeReads?: number; gatewayFailures?: number; gatewayWaitMs?: number;
+  readyWaitMs?: number; routeReads?: number; gatewayFailures?: number; gatewayWaitMs?: number; reroutes?: number;
   /** relay_ready: route reads until the worker was ready, including the successful one. */
   attempts?: number;
   /** maintenance_backlog: sleeping workspaces due a wake, past due by 2 days, found expired by Boat,
@@ -668,12 +668,12 @@ export class CloudV2Lifecycle {
             return;
           }
         }
-        // Nothing listens on the route until the worker starts, and only token
-        // delivery below starts it, after the image is prepared. Creating the
-        // route while the VM boots overlaps the two.
+        await this.measure(workspace, "runtime_install", () => this.ensureRuntime(sandboxId, boot.runtime), installed => ({ runtimeChanged: installed.changed }));
+        // Nothing listens on the route until token delivery below starts the worker. The route is asked for once the
+        // machine has accepted a command (the install above): one asked for while a new machine is still starting can
+        // answer gateway errors until it is asked for again. It still overlaps preparing the repository.
         const routed = this.measure(workspace, "protected_route", () => this.host(workspace, sandboxId));
         routed.catch(() => {});
-        await this.measure(workspace, "runtime_install", () => this.ensureRuntime(sandboxId, boot.runtime), installed => ({ runtimeChanged: installed.changed }));
         // Boat exec waited ~6 s for a 6 s child with trailing "&"; braces + echo returned in ~120 ms.
         // Still unawaited so a slow or failed launch cannot hold up worker startup.
         const warmup = image.checkout ? checkoutWarmupCommand(workspaceCheckoutPath(workspace)) : null;
@@ -780,17 +780,17 @@ export class CloudV2Lifecycle {
             restoring = true;
           }
         }
-        // As on create, the route is inert until token delivery starts the worker.
-        // A rare restore keeps it after the checkpoint is applied.
-        const route = () => this.measure(workspace, "protected_route", () => this.host(workspace, sandboxId!));
-        const routed = restoring ? undefined : route();
-        routed?.catch(() => {});
         // A runtime shipped while the VM slept is installed now, unless the VM
         // already holds the release it replaced: that starts at once and the
         // pin is staged after the worker starts, for the next wake.
         const keep = restoring ? undefined : this.keepableRuntime(workspace, boot.runtime);
         const installed = await this.measure(workspace, "runtime_install", () => this.ensureRuntime(sandboxId, boot.runtime, keep),
           result => ({ runtimeChanged: result.changed, ...(result.kept ? { runtimeKept: true } : {}) }));
+        // As on create, the route is inert until token delivery starts the worker, and is asked for once the machine has
+        // accepted a command (the install above). A rare restore asks for it after the checkpoint is applied.
+        const route = () => this.measure(workspace, "protected_route", () => this.host(workspace, sandboxId!));
+        const routed = restoring ? undefined : route();
+        routed?.catch(() => {});
         const bootEnv = installed.kept && keep
           ? await this.deps.bootEnv(workspace, { sha256: keep, url: async (target = keep) => boot.runtime.url(target) }) : boot.env;
         if (restoring) {
