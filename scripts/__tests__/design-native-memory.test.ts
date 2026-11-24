@@ -194,6 +194,40 @@ describe("native application memory sampling", () => {
     expect(rows).toEqual(processes());
     expect(nativeApplicationProcessIdentities(app)).toContainEqual({ pid: 104, role: "native-child", startedAt: "short-lived helper" });
   });
+
+  // The app's Resources footprint read runs setuid-root /usr/bin/top for about
+  // half a second; macOS denies its footprint to an unprivileged reader.
+  it("awaits a privileged helper's exit instead of retrying a footprint the OS withholds", async () => {
+    const app = { evaluate: vi.fn(async () => processes()) };
+    const privileged = (process.getuid?.() ?? 0) + 1;
+    let waitedMs = 0;
+    const readFootprints = vi.fn(async () => new Map([[101, 200 * MiB], [102, 300 * MiB]]));
+    const rows = await sampleNativeApplicationMemory({ app, readFootprints,
+      readProcessTree: async () => waitedMs < 600
+        ? [{ pid: 104, ppid: 101, startedAt: "top", state: "R", uid: privileged }] : [],
+      readProcess: async (pid: number) => ({ pid, rssBytes: 5 * MiB, cpuSeconds: 0.4 }),
+      isProcessAlive: async () => waitedMs < 600,
+      pause: async (ms: number) => { waitedMs += ms; },
+    });
+    expect(rows).toEqual(processes());
+    expect(readFootprints).toHaveBeenCalledTimes(1);
+  });
+
+  it("bounds the wait and retains unavailable evidence for a privileged helper that stays alive", async () => {
+    const app = { evaluate: vi.fn(async () => processes()) };
+    const privileged = (process.getuid?.() ?? 0) + 1;
+    let waitedMs = 0;
+    const rows = await sampleNativeApplicationMemory({ app,
+      readProcessTree: async () => [{ pid: 104, ppid: 101, startedAt: "login", state: "S", uid: privileged }],
+      readProcess: async (pid: number) => ({ pid, rssBytes: 9 * MiB, cpuSeconds: 0 }),
+      readFootprints: async () => new Map([[101, 200 * MiB], [102, 300 * MiB]]),
+      isProcessAlive: async () => true,
+      pause: async (ms: number) => { waitedMs += ms; },
+    });
+    expect(rows.find((row: { pid: number }) => row.pid === 104)).toMatchObject({ physicalFootprintBytes: null });
+    expect(waitedMs).toBeGreaterThanOrEqual(2000);
+    expect(waitedMs).toBeLessThanOrEqual(3000);
+  });
 });
 
 describe("native memory guard lifecycle", () => {
