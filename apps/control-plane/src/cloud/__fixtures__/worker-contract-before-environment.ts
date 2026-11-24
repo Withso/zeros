@@ -117,6 +117,7 @@ export const CloudV2ControlFrameSchema = z.discriminatedUnion("t", [
     agentInteractions: z.literal(1).optional(),
     codeReview: z.object({
       userId: z.uuid(),
+      // eslint-disable-next-line no-control-regex
       userName: z.string().min(1).max(256).refine(value => !!value.trim() && !/[\u0000-\u001f\u007f]/.test(value)).optional(),
     }).strict().optional(),
     historyReplacement: z.literal(1).optional(),

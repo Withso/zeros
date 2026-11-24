@@ -1,4 +1,4 @@
-import { readPrivateJson, privateDirectory } from "./state.mjs";
+import { readPrivateJson } from "./state.mjs";
 import { developmentProfilePath, profileExists } from "./profile-path.mjs";
 import { workspaceHostnames } from "./cloudflare.mjs";
 import { databaseUrl } from "./postgres.mjs";
