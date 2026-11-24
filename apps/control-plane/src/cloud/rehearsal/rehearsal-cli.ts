@@ -22,10 +22,11 @@ import { cleanup, cleanupNeedsAccount, DEFAULT_RUN_CAP, inventoryLines, NO_ACCOU
 import { FIXTURE_TWO } from "./stage-provision.js";
 import { loadState, newState, saveState, stateTarget } from "./state.js";
 import { launcherModules, localStack, type LocalStack } from "./local-stack.js";
+import { fileRegistry } from "./isolation-org.js";
 
 export const USAGE = "alpha:rehearse <provision|setup|projects|personal|retention|submodules|waiting|all> [--local (this checkout's Dev stack; the Personal route needs no --organization)] [--plan] [--cleanup] [--run <id>] " +
   "[--owner personal|organization (default personal)] [--account owner|1..10 (default 2)] [--other 1..10 (default the next configured)] " +
-  "[--waiting-account 1..10 (default 3)] [--pro-actor-account 1..10 (--local: default the first configured account the run does not use)] " +
+  "[--waiting-account 1..10 (default 3)] [--pro-actor-account 1..10 (--local: default the first configured account the run does not use)] [--isolation-member-leaves] [--isolation-org-remove] " +
   "[--pro-actor <first 8 hex of the platform owner>] [--switches projects,personal,retention] --repository owner/name (R1, required unless ZEROS_REHEARSAL_REPOSITORY is set) " +
   "[--repository-two owner/name (default Withso/zeros-dev-fixture-2)] [--submodule-repository owner/name] [--submodule-fixture-repository owner/name] [--keep-base] [--max-active <n>] [--organization <slug|id>]";
 /** `all` runs these in order on each route; D is refused until written. */
@@ -41,6 +42,10 @@ export type Arguments = {
   local: boolean; owner: OwnerKind; account: "owner" | number; other?: number; proActor?: string;
   /** --local: the numbered account made the stack's platform owner for the run, to act for Pro (never one under test). */
   proActorAccount?: number;
+  /** Stage isolation: A removes B from the kept organization and B joins again (one invitation email each time). */
+  isolationMemberLeaves: boolean;
+  /** Stage isolation: only delete the kept organization, through the product's own delete. */
+  isolationOrgRemove: boolean;
   /** Stage waiting's account: its own fresh Personal organization. */
   waitingAccount: number;
   switches: Set<Switch>;
@@ -54,6 +59,7 @@ export function parseArguments(argv: string[]): Arguments {
     repository: { type: "string" }, "repository-two": { type: "string" }, "keep-base": { type: "boolean" }, "max-active": { type: "string" },
     organization: { type: "string" }, owner: { type: "string" }, "submodule-repository": { type: "string" }, "submodule-fixture-repository": { type: "string" }, other: { type: "string" }, "pro-actor": { type: "string" }, help: { type: "boolean" },
     "waiting-account": { type: "string" }, "pro-actor-account": { type: "string" },
+    "isolation-member-leaves": { type: "boolean" }, "isolation-org-remove": { type: "boolean" },
   } });
   const owner = (values.owner ?? "personal") as OwnerKind;
   if (!["personal", "organization"].includes(owner)) throw new RehearsalFailure("usage", "owner");
@@ -82,6 +88,7 @@ export function parseArguments(argv: string[]): Arguments {
   return { stages, plan: !!values.plan, cleanup: !!values.cleanup, local: !!values.local, ...(values.run ? { run: values.run } : {}), owner, account, waitingAccount,
     ...(other !== undefined ? { other } : {}), ...(values["pro-actor"] ? { proActor: values["pro-actor"] } : {}),
     ...(proActorAccount !== undefined ? { proActorAccount } : {}), switches,
+    isolationMemberLeaves: !!values["isolation-member-leaves"], isolationOrgRemove: !!values["isolation-org-remove"],
     ...(values.repository ? { repository: assertRepository(values.repository) } : {}),
     ...(values["repository-two"] ? { repositoryTwo: assertRepository(values["repository-two"]) } : {}),
     ...(values["submodule-repository"] ? { submoduleRepository: assertRepository(values["submodule-repository"]) } : {}),
@@ -348,7 +355,7 @@ async function main(argv: string[]): Promise<number> {
           } finally { await staffDb.close().catch(() => undefined); }
         }
       }
-      if (held && (args.stages.includes("personal") || args.stages.includes("isolation")) && !args.cleanup) {
+      if (held && ((args.stages.includes("personal") || args.stages.includes("isolation")) && !args.cleanup || args.cleanup && !!run.created.isolationOrg)) {
         const label = otherLabelOf(labels, args);
         const account = accounts.find(row => row.label === label);
         const result = account ? await signInAccount(account, signInDeps(probe)) : undefined;
@@ -402,6 +409,8 @@ async function main(argv: string[]): Promise<number> {
         database: db, clock: liveClock,
         ...(other ? { other: other.api } : {}),
         ...(isolation ? isolation : {}),
+        ...(other ? { isolationOrganization: { ...fileRegistry(target.kind), memberLeaves: args.isolationMemberLeaves, removeOrganization: args.isolationOrgRemove,
+          ...(token ? { connectOther: (organizationId: string, expected: string) => liveGithubSignIn(other!.api, token).connect(organizationId, expected) } : {}) } } : {}),
         ...(held && owner === "personal" && actor.id ? { pro: livePro(db, { subjectUserId: held.userId, expectedEmail: held.email, actorUserId: actor.id }, target.channel) } : {}),
         ...(held && token ? { githubSignIn: liveGithubSignIn(held.api, token) } : {}),
         ...(held && agentCredentials.length ? { agentCredentials } : {}),

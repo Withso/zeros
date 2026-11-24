@@ -6,6 +6,7 @@ import { stageProjects } from "./stage-projects.js";
 import { stageProvision } from "./stage-provision.js";
 import { stagePersonal } from "./stage-personal.js";
 import { stageIsolation } from "./stage-isolation.js";
+import { ISOLATION_ORGANIZATION, removeOrganizationThings } from "./isolation-org.js";
 import { stageRetention } from "./stage-retention.js";
 import { stageSubmodules } from "./stage-submodules.js";
 import { stageWaiting, waitingContext } from "./stage-waiting.js";
@@ -140,7 +141,7 @@ async function preconditions(ctx: StageContext, options: RunOptions, account: bo
 // ── Cleanup and inventory ───────────────────────────────
 
 export type Inventory = Record<"workspaces" | "projects" | "branches" | "pulls" | "machines" | "objects" | "environments" | "githubSignIns" | "pro" | "computerBase" |
-  "installScripts" | "agentLogins" | "databaseRows", number>;
+  "installScripts" | "agentLogins" | "databaseRows" | "isolationOrgThings", number>;
 
 /** Removes everything this run created or named with its prefix, best effort per item, then reads the inventory. */
 /** Whether cleanup needs a signed-in account: anything recorded that only the API removes, or a create attempted (a
@@ -148,11 +149,17 @@ export type Inventory = Record<"workspaces" | "projects" | "branches" | "pulls" 
  * run does not. */
 export const cleanupNeedsAccount = (state: RehearsalState) => [state.created, state.waiting?.created].some(created => created &&
   created.workspaces.length + created.projects.length + created.environments.length + created.githubSignIns.length + (created.pro?.operations.length ?? 0)
-    + (created.agentLogins?.length ?? 0) > 0)
+    + (created.agentLogins?.length ?? 0) + (created.isolationOrg ? 1 : 0) > 0)
   || state.machineStarts > 0;
 
 export async function cleanup(ctx: StageContext, options: { accountless?: boolean; keepBase?: boolean; log(line: string): void }): Promise<{ inventory: Inventory; failures: number }> {
-  const main = await cleanupOrganization(ctx, options);
+  // The second account's things in the kept isolation organization, removed as it first; the organization stays on purpose.
+  const isolation = ctx.state.created.isolationOrg ? await removeOrganizationThings(ctx, { log: line => options.log(safeLine(line)) })
+    .catch((error: unknown) => { options.log(safeLine(`cleanup isolation_org: ${error instanceof RehearsalFailure ? error.code : "failed"}`)); return 1; }) : 0;
+  if (ctx.ports.isolationOrganization && await ctx.ports.isolationOrganization.read().catch(() => null))
+    options.log(safeLine(`kept on purpose: the isolation organization ${ISOLATION_ORGANIZATION.slug} (only --isolation-org-remove deletes it)`));
+  const first = await cleanupOrganization(ctx, options);
+  const main = { inventory: first.inventory, failures: first.failures + isolation };
   if (!ctx.state.waiting) return main;
   // Stage waiting's organization, as its own account: the same steps, and one inventory summed over both.
   if (!ctx.ports.waiting) {
@@ -322,7 +329,9 @@ export async function readInventory(ctx: StageContext, accountless = false, keep
   let agentLogins = 0;
   for (const login of state.created.agentLogins ?? [])
     if (accountless || await agentCredentialLive(ports.api, login.credentialId, "inventory_agent_login").catch(() => true)) agentLogins++;
-  return { workspaces, projects, branches, pulls, machines, objects, environments, githubSignIns, pro, computerBase, installScripts, agentLogins, databaseRows };
+  // The second account's things in the kept isolation organization, until cleanup has removed them (the organization stays).
+  const isolationOrgThings = state.created.isolationOrg ? 1 : 0;
+  return { workspaces, projects, branches, pulls, machines, objects, environments, githubSignIns, pro, computerBase, installScripts, agentLogins, databaseRows, isolationOrgThings };
 }
 
 export function inventoryLines(inventory: Inventory): { lines: string[]; clean: boolean } {

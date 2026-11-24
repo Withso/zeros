@@ -16,6 +16,7 @@ import { cleanup, cleanupNeedsAccount, inventoryLines, NO_ACCOUNT, readInventory
 import { localProActorLabel, parseArguments, sharedBaseFacts, targetPorts } from "./rehearsal-cli.js";
 import { CONNECT_CLIENT_FEATURES, SHELL_QUIET, countLinesCommand, expectLine, seenShape, terminalText, call, until, checkText, connectWorkspace, createProject, createWorkspace, fileTarget, frameCode, openBridge, waitState, writeFile } from "./steps.js";
 import { FIXTURE_TWO } from "./stage-provision.js";
+import { ISOLATION_ORGANIZATION } from "./isolation-org.js";
 import { submoduleCommitsCommand, submoduleStatusNotes } from "./stage-submodules.js";
 import { loadState, newState, saveState, stateTarget } from "./state.js";
 import { localStack } from "./local-stack.js";
@@ -45,7 +46,7 @@ function setup(options: { provisioned?: boolean; owner?: "personal" | "organizat
   return { alpha, state, ctx, lines, saved, options: options_ };
 }
 const EMPTY = { workspaces: 0, projects: 0, branches: 0, pulls: 0, machines: 0, objects: 0, environments: 0, githubSignIns: 0, pro: 0, computerBase: 0, installScripts: 0, agentLogins: 0,
-  databaseRows: 0 };
+  databaseRows: 0, isolationOrgThings: 0 };
 
 describe("rehearsal guards", () => {
   it("refuses every repository but the fixtures, by name", () => {
@@ -679,7 +680,7 @@ describe("rehearsal stages against a fake Alpha", () => {
       expect(counts.sameAsAbsent).toBeGreaterThan(40);
       expect(counts.unauthenticated).toBe(counts.revoked);
       expect(counts.unauthenticated).toBeGreaterThan(40);
-      expect(ctx.state.stages.isolation!.notes).toEqual(expect.arrayContaining(["organization_route:not_available", "audit_log:no_read_route"]));
+      expect(ctx.state.stages.isolation!.notes).toEqual(expect.arrayContaining(["organization_route:organization_project_needs_connection", "audit_log:no_read_route"]));
       // Every write B tried was refused, and A's things read back as they were; the stage cleaned up.
       expect(alpha.writes.filter(line => line.startsWith("other "))).not.toHaveLength(0);
       expect((await cleanup(ctx, { log: () => undefined })).inventory).toEqual(EMPTY);
@@ -712,6 +713,89 @@ describe("rehearsal stages against a fake Alpha", () => {
       expect(ok).toBe(false);
       expect(ctx.state.stages.isolation!.notes).toEqual(expect.arrayContaining(["isolation:workspace_read_unauthenticated:answered_404",
         "isolation:workspace_read_revoked:answered_404"]));
+    });
+  });
+
+  describe("stage isolation's organization route, on the kept test organization", () => {
+    const all = { switches: new Set(["projects", "personal", "retention"] as const) };
+    type Run = { alpha: FakeAlpha; ctx: ReturnType<typeof setup>["ctx"]; options: ReturnType<typeof setup>["options"] };
+    // A run; with `previous`, the next stage isolation against the same fake (the same kept organization and its record).
+    const run = async (previous?: Run, change: (fake: FakeAlpha) => void = () => undefined) => {
+      const made: Run = previous ?? setup({ owner: "personal" });
+      change(made.alpha);
+      const ok = await runStages(made.ctx, previous ? ["isolation"] : ["setup", "isolation"], { ...made.options, ...all });
+      return { ...made, ok };
+    };
+
+    it("makes it the first time through the product's own routes: create, invite, accept after invite_preparing", async () => {
+      const { alpha, ctx, ok } = await run();
+      expect(ctx.state.stages.isolation).toMatchObject({ ok: true });
+      expect(ok).toBe(true);
+      expect(alpha.orgs.organizations.size).toBe(1);
+      const kept = [...alpha.orgs.organizations.values()][0]!;
+      expect(kept).toMatchObject({ slug: ISOLATION_ORGANIZATION.slug, personalAllowed: true });
+      expect(Object.fromEntries(kept.members)).toEqual({ [alpha.userId]: "owner", [alpha.otherUserId]: "member" });
+      expect(alpha.isolationRecord).toMatchObject({ organizationId: kept.id, ownerUserId: alpha.userId, memberUserId: alpha.otherUserId, joined: true });
+      expect(alpha.orgs.invitationsSent).toBe(1);
+      const result = ctx.state.stages.isolation!;
+      expect(result.notes).toEqual(expect.arrayContaining(["isolation_org:created", "organization_route:organization_project_needs_connection"]));
+      expect(result.counts).toMatchObject({ organizationRoute: 1, violations: 0 });
+      expect(result.counts!.absentFromLists).toBeGreaterThan(3);
+      // B's things there are gone, the organization stays; the inventory is clean.
+      expect(alpha.orgs.projects.size).toBe(0);
+      expect([...alpha.orgs.workspaces.values()].every(row => row.state === "deleted")).toBe(true);
+      expect(alpha.orgs.signIns.size).toBe(0);
+      expect((await cleanup(ctx, { log: () => undefined })).inventory).toEqual(EMPTY);
+      expect(kept.deletionScheduled).toBe(false);
+    });
+
+    it("reuses it on the next run: no second organization, no invitation", async () => {
+      const first = await run();
+      expect(first.ok).toBe(true);
+      const again = await run(first);
+      expect(again.ok).toBe(true);
+      expect(again.alpha.orgs.organizations.size).toBe(1);
+      expect(again.alpha.orgs.invitationsSent).toBe(1);
+      expect(again.ctx.state.stages.isolation!.notes).not.toContain("isolation_org:created");
+    });
+
+    it("refuses one that is not as recorded, or one of that name it did not record, and changes nothing", async () => {
+      const first = await run();
+      const kept = [...first.alpha.orgs.organizations.values()][0]!;
+      kept.members.delete(first.alpha.otherUserId);
+      const missing = await run(first);
+      expect(missing.ok).toBe(false);
+      expect(missing.ctx.state.stages.isolation).toMatchObject({ step: "isolation_org", code: "member_missing" });
+      kept.members.set(first.alpha.otherUserId, "member"); kept.deletionScheduled = true;
+      const scheduled = await run(first);
+      expect(scheduled.ctx.state.stages.isolation).toMatchObject({ step: "isolation_org", code: "deletion_scheduled" });
+      // An organization of that name the run has no record of: never touched.
+      const stranger = await run(undefined, fake => { fake.orgs.handle(fake.userId, "POST", "/v1/organizations", { name: "zr-isolation", slug: "zr-isolation" }); });
+      expect(stranger.ctx.state.stages.isolation).toMatchObject({ step: "isolation_org", code: "unrecorded" });
+      expect(stranger.alpha.orgs.invitationsSent).toBe(0);
+    });
+
+    it("fails, naming the route, when one answers the owner about the member's personal workspace", async () => {
+      const { ctx, ok } = await run(undefined, fake => { fake.orgs.leaks.set("GET /v1/cloud-v2/workspaces/:id", 200); });
+      expect(ok).toBe(false);
+      expect(ctx.state.stages.isolation!.notes).toContain("isolation:org_workspace_read:answered_200");
+    });
+
+    it("with --isolation-member-leaves: archived as member_left at once, still hidden from the owner, and the member's again after rejoining", async () => {
+      const { alpha, ctx, ok } = await run(undefined, fake => { fake.isolationMemberLeaves = true; });
+      expect(ok).toBe(true);
+      expect(ctx.state.stages.isolation!.counts).toMatchObject({ memberLeftArchived: 1, memberRejoined: 1 });
+      expect(alpha.orgs.invitationsSent).toBe(2);
+      expect(Object.fromEntries([...alpha.orgs.organizations.values()][0]!.members)).toMatchObject({ [alpha.otherUserId]: "member" });
+    });
+
+    it("with --isolation-org-remove: only the product's delete, then the record is gone", async () => {
+      const first = await run();
+      const removed = await run(first, fake => { fake.isolationOrgRemove = true; });
+      expect(removed.ok).toBe(true);
+      expect([...removed.alpha.orgs.organizations.values()][0]!.deletionScheduled).toBe(true);
+      expect(removed.alpha.isolationRecord).toBeNull();
+      expect(removed.ctx.state.stages.isolation!.counts).toEqual({ organizationRemoved: 1 });
     });
   });
 

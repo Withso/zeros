@@ -23,6 +23,8 @@ const Created = z.object({
   staffGrant: z.object({ userId: Uuid, email: z.string().email(), organizationId: Uuid,
     previousRole: z.enum(["platform_owner", "developer", "support_admin"]).nullable(), madeOrganization: z.boolean().optional() }).strict().optional(),
   agentLogins: z.array(z.object({ organizationId: Uuid, provider: z.enum(["claude", "codex", "cursor"]), credentialId: Uuid }).strict()).max(8).optional(),
+  isolationOrg: z.object({ organizationId: Uuid, projects: z.array(Uuid).max(8), workspaces: z.array(Uuid).max(8),
+    environments: z.array(z.object({ repository: z.string(), repositoryId: z.string() }).strict()).max(4), signIn: z.boolean() }).strict().optional(),
 });
 const Schema = z.object({
   version: z.literal(1), runId: Uuid, prefix: z.string().regex(/^zr-[0-9a-f]{8}-$/), startedAt: z.string(), target: z.enum(["alpha", "local"]).optional(),

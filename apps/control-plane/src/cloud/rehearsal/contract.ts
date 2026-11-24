@@ -111,6 +111,10 @@ export type Ports = {
   /** Stage isolation: the API with no session, and with the second account's revoked session (each must answer 401). */
   anonymous?: Api;
   revoked?: Api;
+  /** Stage isolation's organization route: the kept organization's record, the second account's token sign-in there, and
+   * the run's choices (--isolation-member-leaves, --isolation-org-remove). */
+  isolationOrganization?: { read(): Promise<IsolationOrganizationRecord | null>; save(record: IsolationOrganizationRecord): Promise<void>; remove(): Promise<void>;
+    connectOther?(organizationId: string, expectedGeneration: string): Promise<void>; memberLeaves: boolean; removeOrganization: boolean };
   /** The selected account's Individual Pro, through manage-account-pro.ts (plan, then execute, then read back). */
   pro?: ProPort;
   /** The selected account's own GitHub sign-in by token, for the owner organization. The token stays inside the port. */
@@ -174,7 +178,12 @@ export type Created = {
   staffGrant?: { userId: string; email: string; organizationId: string; previousRole: "platform_owner" | "developer" | "support_admin" | null;
     /** The prefixed organization made for it (a platform owner owns a non-personal one); kept, as the role's audit refers to it. */
     madeOrganization?: boolean };
+  /** Stage isolation's organization route: what the second account made in the kept organization (removed as it, by the
+   * stage and by cleanup; the organization itself is kept on purpose). */
+  isolationOrg?: { organizationId: string; projects: string[]; workspaces: string[]; environments: { repository: string; repositoryId: string }[]; signIn: boolean };
 };
+/** The kept isolation organization, by id: made by the rehearsal, owned by the selected account, with the second as a member. */
+export type IsolationOrganizationRecord = { organizationId: string; slug: string; ownerUserId: string; memberUserId: string; joined: boolean };
 export type StageResult = { ok: boolean; step?: string; code?: string; skipped?: string; counts?: Record<string, number>;
   /** Closed codes for what a stage chose (environment_case:seeded, environment_skipped:environment_exists). */
   notes?: string[] };
