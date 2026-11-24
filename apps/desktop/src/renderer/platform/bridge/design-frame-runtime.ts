@@ -52,6 +52,8 @@ import { withNativeDesignCaptureAdmission } from "./design-native-capture-admiss
 
 const DEFAULT_REQUEST_TIMEOUT_MS = 5_000;
 const SCREENSHOT_REQUEST_TIMEOUT_MS = 12_000;
+/** Requests that leave the document as it was; any other one ends sharing. */
+const SHAREABLE_READS: ReadonlySet<DesignRuntimeMethod> = new Set(["getSnapshot", "getNodeDetails", "getElementAtLoc", "getElementsInRect", "getMatchedStyles"]);
 
 interface RuntimeHostWindow {
   setTimeout(handler: () => void, timeout: number): number;
@@ -439,6 +441,9 @@ class DesignRuntimeConnectionImpl implements DesignFrameRuntimeConnection {
   private methods: ReadonlySet<DesignRuntimeMethod> | null = null;
   private captureCompletion = false;
   private captureLifetime = new AbortController();
+  /** In-flight details reads, shared by callers asking for the same layer
+   * until any other request or document event could change the answer. */
+  private readonly sharedDetailReads = new Map<string, { result: Promise<unknown>; controller: AbortController; waiting: number }>();
 
   constructor(
     source: MessageEventSource,
@@ -482,6 +487,7 @@ class DesignRuntimeConnectionImpl implements DesignFrameRuntimeConnection {
   receive(message: DesignRuntimeFrameMessage): void {
     if (message.type === "event") {
       if (this.destroyed) return;
+      this.sharedDetailReads.clear();
       if (message.event === "ready") {
         if (
           message.payload.sourceVersion !== this.expectedSourceVersion ||
@@ -563,7 +569,39 @@ class DesignRuntimeConnectionImpl implements DesignFrameRuntimeConnection {
       : this.sendRequest(method, args, signal);
   }
 
+  private sharedDetailsRequest(args: Record<string, unknown>, signal?: AbortSignal): Promise<unknown> {
+    if (signal?.aborted) return Promise.reject(runtimeError("request cancelled", "CANCELLED", false));
+    const key = `${this.expectedSourceVersion}\u0000${JSON.stringify(args)}`;
+    let shared = this.sharedDetailReads.get(key);
+    if (!shared) {
+      const controller = new AbortController();
+      const entry = { result: this.request("getNodeDetails", args, controller.signal), controller, waiting: 0 };
+      const forget = () => { if (this.sharedDetailReads.get(key) === entry) this.sharedDetailReads.delete(key); };
+      entry.result.then(forget, forget);
+      this.sharedDetailReads.set(key, entry);
+      shared = entry;
+    }
+    const entry = shared;
+    entry.waiting++;
+    if (!signal) return entry.result;
+    return new Promise((resolve, reject) => {
+      const leave = () => {
+        if (--entry.waiting === 0) {
+          if (this.sharedDetailReads.get(key) === entry) this.sharedDetailReads.delete(key);
+          entry.controller.abort();
+        }
+        reject(runtimeError("request cancelled", "CANCELLED", false));
+      };
+      signal.addEventListener("abort", leave, { once: true });
+      entry.result.then(
+        (value) => { signal.removeEventListener("abort", leave); resolve(value); },
+        (error: unknown) => { signal.removeEventListener("abort", leave); reject(error); },
+      );
+    });
+  }
+
   private changeGeneration<T>(apply: () => Promise<T>): Promise<T> {
+    this.sharedDetailReads.clear();
     const result = this.generationTransition
       ? this.generationTransition.then(apply)
       : apply();
@@ -590,6 +628,7 @@ class DesignRuntimeConnectionImpl implements DesignFrameRuntimeConnection {
         runtimeError("request cancelled", "CANCELLED", false),
       );
     }
+    if (!SHAREABLE_READS.has(method)) this.sharedDetailReads.clear();
     const requestId = `design-runtime-${++requestSequence}`;
     const message: DesignRuntimeHostRequest = {
       protocol: DESIGN_RUNTIME_PROTOCOL,
@@ -726,7 +765,7 @@ class DesignRuntimeConnectionImpl implements DesignFrameRuntimeConnection {
     signal?: AbortSignal,
     options?: { relocation?: boolean },
   ): Promise<DesignRuntimeNodeDetails> {
-    const result = await this.request("getNodeDetails", { nodeId, ...options }, signal);
+    const result = await this.sharedDetailsRequest({ nodeId, ...options }, signal);
     if (
       !isNodeDetails(result) ||
       result.sourceVersion !== this.expectedSourceVersion

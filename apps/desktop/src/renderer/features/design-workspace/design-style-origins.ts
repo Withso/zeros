@@ -18,6 +18,7 @@ import {
 import { designColorValueText, parseDesignColor } from "./design-color-values";
 import {
   authoredDeclarationAffects,
+  designStylePropertyInherits,
   isDesignRuntimeStylePropertyAuthored,
 } from "./design-style-values";
 
@@ -101,34 +102,6 @@ export interface DesignStyleOriginsContext {
   themes?: readonly string[];
 }
 
-// Properties a layer takes from its parent when it does not set them.
-const INHERITED_PROPERTIES = new Set([
-  "color",
-  "cursor",
-  "direction",
-  "font",
-  "font-family",
-  "font-feature-settings",
-  "font-size",
-  "font-stretch",
-  "font-style",
-  "font-variant",
-  "font-weight",
-  "letter-spacing",
-  "line-height",
-  "list-style",
-  "list-style-position",
-  "list-style-type",
-  "tab-size",
-  "text-align",
-  "text-indent",
-  "text-shadow",
-  "text-transform",
-  "visibility",
-  "white-space",
-  "word-break",
-  "word-spacing",
-]);
 
 const PROPERTY_LABELS: Record<string, string> = {
   "background-color": "Fill",
@@ -488,7 +461,7 @@ export function designStyleOrigins(
     }
     // Without the authored list the runtime said nothing either way.
     if (
-      INHERITED_PROPERTIES.has(property) &&
+      designStylePropertyInherits(property) &&
       details.authoredStyleProperties !== undefined &&
       !isDesignRuntimeStylePropertyAuthored(details.authoredStyleProperties, property)
     ) {
