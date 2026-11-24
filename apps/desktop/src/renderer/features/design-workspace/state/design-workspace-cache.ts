@@ -70,7 +70,7 @@ import type { DesignPageSummary } from "@zeros/protocol/design-pages";
 import type { DesignFramesChange } from "@zeros/protocol/messages";
 import { classifyRpcError } from "../../../platform/bridge/failure";
 import { designFrameRuntime } from "../../../platform/bridge/design-frame-runtime";
-import { designStylePropertyAffectsLayout } from "../design-style-values";
+import { designStylePropertyAffectsLayout, designStylePropertyInherits } from "../design-style-values";
 import { DesignHistoryPreview, type DesignHistoryPrediction } from "./design-history-preview";
 import {
   clearDesignHistoryPresentation,
@@ -2825,6 +2825,10 @@ async function adoptDesignStyleGeneration(
       updates.some((update) =>
         Object.keys(update.styles).some(designStylePropertyAffectsLayout),
       );
+    // Descendants that do not set an inherited property take the new value.
+    const inheritedChanged = updates.some((update) =>
+      Object.keys(update.styles).some(designStylePropertyInherits),
+    );
     const selectedNodeIds = new Set(
       useDesignWorkspaceUiStore.getState().byWorkspace[workspaceId]
         ?.selectedNodeIds ?? [],
@@ -2839,7 +2843,7 @@ async function adoptDesignStyleGeneration(
           !updatedNodeIds.has(nodeId) &&
           ((patch && !patch.structure) ||
             affectedParents.has(nodeId) ||
-            (layoutChanged && selectedNodeIds.has(nodeId)) ||
+            ((layoutChanged || inheritedChanged) && selectedNodeIds.has(nodeId)) ||
             cachedFrame?.detailsByNode[nodeId]?.childrenLayout?.nodeIds.some(
               (childId) => updatedNodeIds.has(childId),
             )),
@@ -2861,7 +2865,7 @@ async function adoptDesignStyleGeneration(
       adopted.snapshot,
       [...adopted.details, ...refreshedDetails],
       adopted.treeUnchanged,
-      { dropUnrefreshed: layoutChanged || historyPresented },
+      { dropUnrefreshed: layoutChanged || inheritedChanged || historyPresented },
     );
     const folder = runtimeStore.byWorkspace[workspaceId]?.folder;
     if (promoted && folder) {

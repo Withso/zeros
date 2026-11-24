@@ -1203,4 +1203,56 @@ describe("design frame runtime client", () => {
     connection.destroy();
     framePort.close();
   });
+
+  it("shares one read of a layer's details between concurrent callers until something changes the document", async () => {
+    // Selecting a layer asked the runtime for the same details three times at
+    // once (selection, inspector and the Layers warm window).
+    const source = { postMessage: vi.fn() };
+    const connection = connectDesignFrameRuntime("workspace-a", "shared.html", SOURCE_VERSION,
+      { contentWindow: source } as unknown as HTMLIFrameElement, {}, { setTimeout: vi.fn(() => 9), clearTimeout: vi.fn() });
+    const framePort = source.postMessage.mock.calls[0]?.[1]?.transfer?.[0] as MessagePort;
+    const messages: Array<Record<string, unknown>> = [];
+    framePort.onmessage = (event) => { messages.push(event.data as Record<string, unknown>); };
+    framePort.start();
+    const reads = () => messages.filter((message) => message.method === "getNodeDetails");
+    const reply = (message: Record<string, unknown> | undefined, result: unknown) => framePort.postMessage({
+      protocol: DESIGN_RUNTIME_PROTOCOL, version: DESIGN_RUNTIME_VERSION, type: "response", requestId: message?.requestId, ok: true, result });
+    const details = snapshot(1).frame;
+    try {
+      const leaving = new AbortController();
+      const first = connection.getNodeDetails("frame");
+      const second = connection.getNodeDetails("frame", leaving.signal);
+      const third = connection.getNodeDetails("frame");
+      const relocation = connection.getNodeDetails("frame", undefined, { relocation: true });
+      await vi.waitFor(() => expect(reads()).toHaveLength(2));
+      leaving.abort();
+      await expect(second).rejects.toMatchObject({ code: "CANCELLED" });
+      // The others still wait on the shared read, so it is not cancelled.
+      expect(messages.some((message) => message.type === "cancel")).toBe(false);
+
+      // A read asked for after a change must see the change.
+      void connection.setNodeVisibility("frame", false).catch(() => {});
+      const afterChange = connection.getNodeDetails("frame");
+      await vi.waitFor(() => expect(reads()).toHaveLength(3));
+
+      reply(reads()[0], details);
+      await expect(first).resolves.toEqual(details);
+      await expect(third).resolves.toEqual(details);
+      reply(reads()[1], details);
+      await expect(relocation).resolves.toEqual(details);
+      reply(reads()[2], { ...details, visible: false });
+      await expect(afterChange).resolves.toMatchObject({ visible: false });
+
+      // Settled reads are not reused, and a read every caller left is cancelled.
+      const lone = new AbortController();
+      const abandoned = connection.getNodeDetails("frame", lone.signal);
+      await vi.waitFor(() => expect(reads()).toHaveLength(4));
+      lone.abort();
+      await expect(abandoned).rejects.toMatchObject({ code: "CANCELLED" });
+      await vi.waitFor(() => expect(messages.at(-1)).toMatchObject({ type: "cancel", requestId: reads()[3]?.requestId }));
+    } finally {
+      connection.destroy();
+      framePort.close();
+    }
+  });
 });

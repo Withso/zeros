@@ -796,6 +796,39 @@ export function designStyleFieldRefusal(property: string, value: string): "negat
   return CSS.supports(normalized, declared) ? null : "invalid";
 }
 
+const INHERITED_PROPERTIES = new Set([
+  "color",
+  "cursor",
+  "direction",
+  "font",
+  "font-family",
+  "font-feature-settings",
+  "font-size",
+  "font-stretch",
+  "font-style",
+  "font-variant",
+  "font-weight",
+  "letter-spacing",
+  "line-height",
+  "list-style",
+  "list-style-position",
+  "list-style-type",
+  "tab-size",
+  "text-align",
+  "text-indent",
+  "text-shadow",
+  "text-transform",
+  "visibility",
+  "white-space",
+  "word-break",
+  "word-spacing",
+]);
+
+/** A layer takes this property from its parent when it does not set it. */
+export function designStylePropertyInherits(property: string): boolean {
+  return INHERITED_PROPERTIES.has(cssStyleProperty(property));
+}
+
 /** Whether a preview needs browser layout readback to keep the selected box,
  * spacing controls, and child gap bands aligned with the painted element. */
 export function designStylePropertyAffectsLayout(property: string): boolean {

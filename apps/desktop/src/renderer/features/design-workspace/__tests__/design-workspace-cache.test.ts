@@ -2801,6 +2801,55 @@ describe("design workspace cache", () => {
     expect(stable.protocolCapability).toBe("d".repeat(64));
   });
 
+  it("does not relabel a child current after its parent's inherited colour changes", async () => {
+    const workspaceId = "ws_design_inherited";
+    const previous = snapshot();
+    const previousFrame = previous.frames[0]!;
+    const nextSourceVersion = "e".repeat(24);
+    const next = snapshot();
+    next.frames[0] = { ...next.frames[0]!, sourceVersion: nextSourceVersion, modifiedAt: 20 };
+    const hero = {
+      sourceVersion: nextSourceVersion, oid: "hero", tag: "main", name: "Hero", text: null,
+      selector: '[data-oid="hero"]', visible: true, breadcrumb: ["main · Hero"],
+      rect: { x: 0, y: 0, width: 240, height: 80 }, styles: { color: "red" },
+    };
+    const runtimeSnapshot = {
+      sourceVersion: nextSourceVersion, revision: 2, tree: [], warnings: [],
+      frame: { ...hero, oid: "" }, viewport: { width: 240, height: 80, scrollX: 0, scrollY: 0 },
+    };
+    designWorkspaceSnapshotCache.setData(workspaceId, previous);
+    useDesignRuntimeStore.getState().publishSnapshot(workspaceId, "/design/a", previousFrame.file, {
+      ...runtimeSnapshot, sourceVersion: previousFrame.sourceVersion, revision: 1,
+      frame: { ...runtimeSnapshot.frame, sourceVersion: previousFrame.sourceVersion },
+    }, previousFrame.sourceVersion);
+    // The heading inside the hero takes its colour from it.
+    const heading = { ...hero, oid: "heading", sourceVersion: previousFrame.sourceVersion, styles: { color: "black" } };
+    useDesignRuntimeStore.getState().publishNodeDetails(workspaceId, "/design/a", previousFrame.file, heading, previousFrame.sourceVersion);
+    runtimeMocks.designFrameRuntime.mockReturnValue({
+      sourceVersion: previousFrame.sourceVersion,
+      commitStyles: runtimeMocks.commitStyles,
+      getNodeDetails: vi.fn().mockRejectedValue(new Error("not read")),
+    });
+    runtimeMocks.commitStyles.mockResolvedValue({ sourceVersion: nextSourceVersion, treeUnchanged: true, snapshot: runtimeSnapshot, details: [hero] });
+    platformMocks.updateStyles.mockResolvedValue({
+      mutation: {
+        changed: true,
+        frame: { ...next.frames[0]!, source: '<main data-oid="hero" style="color:red"></main>', srcDoc: '<main data-oid="hero" style="color:red"></main>', tree: [] },
+        lint: next.lint,
+      },
+      snapshot: next,
+    });
+
+    await updateDesignNodeStylesCached(workspaceId, {
+      frame: previousFrame.file, nodeId: "hero", sourceVersion: previousFrame.sourceVersion, styles: { color: "red" },
+    });
+
+    const frame = designRuntimeFrameState(workspaceId, previousFrame.file);
+    expect(frame?.sourceVersion).toBe(nextSourceVersion);
+    expect(frame?.detailsByNode.hero?.styles.color).toBe("red");
+    // Its cached black is the old generation's answer, not the new one's.
+    expect(frame?.detailsByNode.heading).toBeUndefined();
+  });
   it("adopts a confirmed style generation and refreshed container pins before publishing its workspace snapshot", async () => {
     const workspaceId = "ws_design";
     const previous = snapshot();

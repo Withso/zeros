@@ -518,6 +518,13 @@ try {
   await styleEdit("style-padding", "Horizontal", "84");
   await styleEdit("style-radius", "Radius", "24");
   await styleEdit("style-rotation", "Rotation", "15");
+  if (wants("style-undo")) {
+    await settleFrame("home.html");
+    const before = await page.evaluate(() => window.__zerosDesignContinuityProbe.read().frameVersion);
+    await page.locator("[data-design-canvas-viewport]").focus();
+    await measure("style-undo", { owner: workspaceId, frame: "home.html", input: "keydown", previousVersion: before, styles: true },
+      () => page.keyboard.press("ControlOrMeta+z"));
+  }
 
   if (wants("style-fill")) {
     await settleFrame("home.html");
