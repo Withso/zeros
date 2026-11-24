@@ -8,6 +8,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   darwinVersionForMacOS,
+  packagedApp,
   parseArguments,
   stampFeed,
   stampMinimumSystemVersion,
@@ -86,6 +87,17 @@ describe("update feed minimum macOS", () => {
       feed: "/r/latest-mac.yml",
       app: "/r/mac-arm64/Zeros.app",
     });
+  });
+
+  it("finds the one packaged app the release workflows leave under release/", () => {
+    const root = mkdtempSync(join(tmpdir(), "zeros-feed-release-"));
+    roots.push(root);
+    expect(() => packagedApp(root)).toThrow(/found 0/);
+    const app = join(root, "mac-arm64", "Zeros Alpha.app");
+    mkdirSync(join(app, "Contents", "Frameworks", "Helper.app"), { recursive: true });
+    expect(packagedApp(root)).toBe(app);
+    mkdirSync(join(root, "mac", "Zeros.app"), { recursive: true });
+    expect(() => packagedApp(root)).toThrow(/found 2/);
   });
 
   it.runIf(process.platform === "darwin")("reads the floor from the packaged app's Info.plist", () => {

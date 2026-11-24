@@ -40,7 +40,7 @@ export function stampMinimumSystemVersion(feed, darwinVersion) {
   return stamped;
 }
 
-function packagedApp(root) {
+export function packagedApp(root) {
   const found = [];
   const visit = (dir, depth) => {
     if (depth > 3 || !existsSync(dir)) return;
