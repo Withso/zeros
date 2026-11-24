@@ -215,6 +215,13 @@ d("cloud v2 retention", () => {
     expect(boat.machine(vm)!.worker).toEqual({ enabled: false, active: false });
   });
 
+  it("asks for a started workspace's route only once its machine accepts commands", async () => {
+    await stop();
+    await wake();
+    expect(boat.calls.filter(call => call.op === "hostPort" && call.args[0] === vm)).toHaveLength(1);
+    expect(boat.earlyRoutes).toEqual([]);
+  });
+
   const workerOffRow = async () => (await pool.query("SELECT worker_off_unverified_at FROM cloud_v2_workspaces WHERE id=$1", [id])).rows[0].worker_off_unverified_at;
   const isOffStep = (command: string) => command.includes("systemctl disable zeros-worker.service") && !command.includes("zeros-backup-probe");
 

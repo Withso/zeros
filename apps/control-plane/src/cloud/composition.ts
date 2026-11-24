@@ -57,6 +57,7 @@ import type { CloudV2RouteDeps } from "./routes.js";
 import { CloudV2Store, cloudV2WorkspaceFromRow, setCloudV2RetentionDocuments, type CloudV2LifecycleWorkspace, type CloudV2WorkerSession, type CloudV2Workspace } from "./store.js";
 import { CloudV2WorkerSigner } from "./worker-auth.js";
 import { openPortToken, sealPortToken } from "./worker-port-token.js";
+import { workerReroute } from "./worker-reroute.js";
 import type { CloudV2WorkerRouteDeps } from "./worker-routes.js";
 import { cloudV2SandboxName } from "./resource-names.js";
 import { CloudV2PromptSignals } from "./prompt-signals.js";
@@ -523,6 +524,7 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
     store, timing, authorizeSource, continueSource, ...(securityEvents ? { securityEvents } : {}),
     runtimeAdmission: runtimeHandoffs,
     ...(liveRecovery ? { liveRecovery } : {}),
+    reroute: workerReroute({ compute, store, sealPortToken: (token, id) => sealPortToken(token, id, keys) }),
     config: workerConfig,
     workerRoute,
     waitReady: (workspace, signal, ms) => readySignals.wait(workspace.id, Date.parse(workspace.updatedAt), workspace.state !== "running", signal, ms),

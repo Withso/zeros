@@ -1193,6 +1193,14 @@ export class CloudV2Store {
       accessEpoch: row.access_epoch, url: row.worker_route_url, portToken: row.worker_port_token, bootId: row.worker_boot_id, workerTokenHash: row.worker_token_hash } : null;
   }
 
+  /** A running workspace's route asked for again came back different: kept only while it still runs on that machine. */
+  async replaceWorkerRoute(id: string, sandboxId: string, url: string, portToken: unknown): Promise<boolean> {
+    const result = await withSystemTx(this.pool, tx => tx.query(
+      `UPDATE cloud_v2_workspaces SET worker_route_url=$3, worker_port_token=$4
+       WHERE id=$1 AND boat_sandbox_id=$2 AND state='running'`, [id, sandboxId, url, JSON.stringify(portToken)]));
+    return Boolean(result.rowCount);
+  }
+
   async setWorkerRoute(id: string, sandboxId: string, url: string, portToken: unknown): Promise<boolean> {
     const result = await withSystemTx(this.pool, tx => tx.query(
       `UPDATE cloud_v2_workspaces SET worker_route_url=$3, worker_port_token=$4

@@ -659,6 +659,17 @@ d("cloud v2 store", () => {
     expect((await store.listChats(w.id)).chats).toEqual([{ id: "retained" }]);
   });
 
+  it("replaces a route asked for again only while the workspace runs on that machine", async () => {
+    const w = await create(), token = await store.rotateWorkerToken(w.id);
+    await store.defer(w.id, "creating", 0, { boatSandboxId: "bx_test" });
+    await store.setWorkerRoute(w.id, "bx_test", "https://fixture-41783.on.boat.dev", { encrypted: 1 });
+    expect(await store.replaceWorkerRoute(w.id, "bx_test", "https://other-41783.on.boat.dev", { encrypted: 2 })).toBe(false);
+    await store.acceptWorkerHello(token, randomUUID());
+    expect(await store.replaceWorkerRoute(w.id, "bx_other", "https://other-41783.on.boat.dev", { encrypted: 2 })).toBe(false);
+    expect(await store.replaceWorkerRoute(w.id, "bx_test", "https://other-41783.on.boat.dev", { encrypted: 2 })).toBe(true);
+    expect(await store.workerRoute(w.id)).toMatchObject({ url: "https://other-41783.on.boat.dev", portToken: { encrypted: 2 } });
+  });
+
   it("stores private routing separately and fences ordered history by boot after a lost response", async () => {
     const w = await create(), token = await store.rotateWorkerToken(w.id), bootId = randomUUID();
     await store.defer(w.id, "creating", 0, { boatSandboxId: "bx_test" });

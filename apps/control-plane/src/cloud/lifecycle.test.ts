@@ -1242,7 +1242,8 @@ describe("cloud v2 lifecycle", () => {
     release(true); await step;
     expect(f.compute.stop).toHaveBeenCalledWith("bx_test");
   });
-  it.each(["creating", "starting"] as const)("creates the worker route while the %s VM is still busy with its runtime check", async state => {
+  it.each(["creating", "starting"] as const)("asks for the worker route only once the %s VM has answered its runtime check", async state => {
+    // A route asked for while a new machine is still starting can answer gateway errors until it is asked for again.
     const f = setup([workspace(state, { boatSandboxId: state === "starting" ? "bx_test" : null })]);
     let release!: () => void;
     vi.mocked(f.compute.exec).mockImplementationOnce(() => new Promise(resolve => {
@@ -1250,15 +1251,14 @@ describe("cloud v2 lifecycle", () => {
     }));
     const step = f.lifecycle.tick();
     await vi.waitFor(() => expect(release).toBeTypeOf("function"));
-    await vi.waitFor(() => expect(f.compute.hostPort).toHaveBeenCalledOnce());
-    expect(f.store.rotateWorkerToken).not.toHaveBeenCalled();
+    await new Promise(resolve => setTimeout(resolve, 20));
+    expect(f.compute.hostPort).not.toHaveBeenCalled();
     release(); await step;
+    expect(f.compute.hostPort).toHaveBeenCalledOnce();
     expect(f.store.rotateWorkerToken).toHaveBeenCalledOnce();
   });
 
   it.each(["creating", "starting"] as const)("retries a %s route that Boat refuses while the VM is still booting", async state => {
-    // The route now starts beside the VM's first command, before Boat has
-    // reported the VM ready to it (co-master review of #931).
     const f = setup([workspace(state, { boatSandboxId: state === "starting" ? "bx_test" : null })], { sleep: async () => {} });
     vi.mocked(f.compute.hostPort).mockRejectedValueOnce(new BoatBootPendingError({ httpStatus: 409 }));
     await f.lifecycle.tick();
