@@ -18,6 +18,7 @@ import { CONNECT_CLIENT_FEATURES, SHELL_QUIET, countLinesCommand, expectLine, se
 import { FIXTURE_TWO } from "./stage-provision.js";
 import { ISOLATION_ORGANIZATION } from "./isolation-org.js";
 import { tryProbes } from "./isolation-probes.js";
+import { STOPPED_TURN_ENDS } from "./stage-edges.js";
 import { submoduleCommitsCommand, submoduleStatusNotes } from "./stage-submodules.js";
 import { loadState, newState, saveState, stateTarget } from "./state.js";
 import { localStack } from "./local-stack.js";
@@ -67,7 +68,7 @@ describe("rehearsal guards", () => {
 
   it("parses the command line and refuses what it does not know", () => {
     expect(parseArguments(["all", "--plan", "--switches", "projects,personal,retention"]))
-      .toMatchObject({ stages: ["provision", "setup", "projects", "personal", "isolation", "retention", "submodules", "waiting"], plan: true, owner: "personal", account: 2, waitingAccount: 3 });
+      .toMatchObject({ stages: ["provision", "setup", "projects", "personal", "isolation", "retention", "submodules", "waiting", "edges"], plan: true, owner: "personal", account: 2, waitingAccount: 3 });
     expect(parseArguments(["all", "--owner", "organization", "--account", "owner"])).toMatchObject({ stages: ["provision", "setup", "projects", "retention"], account: "owner" });
     expect(parseArguments(["personal", "--account", "4", "--other", "5", "--pro-actor", "3e515301"])).toMatchObject({ account: 4, other: 5, proActor: "3e515301" });
     expect(parseArguments(["retention", "--account", "3", "--run", randomUUID()])).toMatchObject({ stages: ["retention"], account: 3, waitingAccount: 4 });
@@ -896,6 +897,53 @@ describe("rehearsal stages against a fake Alpha", () => {
       expect(lines.filter(line => line.includes("request_timeout"))).toEqual([]);
       expect(result.inventory).toEqual(EMPTY);
       void alpha;
+    });
+  });
+
+  describe("stage edges", () => {
+    const all = { switches: new Set(["projects", "personal", "retention"] as const) };
+    const run = async (change: (alpha: FakeAlpha) => void = () => undefined, cases: number[] | null = null) => {
+      const made = setup({ owner: "personal" });
+      made.ctx.ports.edges = { cases, retention: true };
+      change(made.alpha);
+      const ok = await runStages(made.ctx, ["setup", "edges"], { ...made.options, ...all });
+      return { ...made, ok };
+    };
+
+    it("runs every case, each named and counted, and says why one cannot run here; then nothing is left", async () => {
+      const { ctx, ok } = await run();
+      expect(ctx.state.stages.edges).toMatchObject({ ok: true });
+      expect(ok).toBe(true);
+      const result = ctx.state.stages.edges!;
+      expect(result.counts).toMatchObject({ edgesPassed: 9, edgesFailed: 0, edgesSkipped: 1 });
+      expect(result.notes).toEqual(expect.arrayContaining(["edge_1:ok:copies_0", "edge_3:ok:machine_gone", "edge_4:skipped:no_prompt_outbox",
+        "edge_5:ok:start_first", "edge_6:ok:settled_running", "edge_7:ok:without_pro_stopped", "edge_9:ok:folder_follows_name"]));
+      expect((await cleanup(ctx, { log: () => undefined })).inventory).toEqual(EMPTY);
+    });
+
+    it("fails the stage on a case whose product answer is wrong, names it, and still runs the others", async () => {
+      const { ctx, ok } = await run(alpha => { alpha.archiveKeepsKeep = true; alpha.idempotencyBroken = true; });
+      expect(ok).toBe(false);
+      expect(ctx.state.stages.edges).toMatchObject({ step: "edge_6_e6_keep_cleared", code: "keep_still_on" });
+      expect(ctx.state.stages.edges!.notes).toEqual(expect.arrayContaining(["edge_6:failed:e6_keep_cleared:keep_still_on",
+        "edge_10:failed:e10_same_reply:status_201_202", "edge_8:ok"]));
+      expect(ctx.state.stages.edges!.counts).toMatchObject({ edgesPassed: 7, edgesFailed: 2, edgesSkipped: 1 });
+      expect((await cleanup(ctx, { log: () => undefined })).inventory).toEqual(EMPTY);
+    });
+
+    it("runs only the cases named with --edges, and says why a case needs a switch", async () => {
+      const { ctx, ok } = await run(alpha => { void alpha; }, [5, 10]);
+      expect(ok).toBe(true);
+      expect(ctx.state.stages.edges!.notes).toEqual(expect.arrayContaining(["edge_5:ok:start_first", "edge_10:ok"]));
+      expect(ctx.state.stages.edges!.counts).toMatchObject({ edgesPassed: 2 });
+      expect(parseArguments(["edges", "--edges", "3,10,3"]).edges).toEqual([3, 10]);
+      // A turn its workspace's stop ended, by design: completed, cancelled or interrupted; failed is not one of them.
+      expect([...STOPPED_TURN_ENDS].sort()).toEqual(["cancelled", "completed", "interrupted"]);
+      expect(() => parseArguments(["edges", "--edges", "11"])).toThrow();
+      const off = setup({ owner: "personal" });
+      off.ctx.ports.edges = { cases: [6], retention: false };
+      expect(await runStages(off.ctx, ["setup", "edges"], { ...off.options, ...all })).toBe(true);
+      expect(off.ctx.state.stages.edges!.notes).toContain("edge_6:skipped:retention_off");
     });
   });
 

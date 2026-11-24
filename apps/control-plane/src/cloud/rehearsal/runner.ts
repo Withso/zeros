@@ -6,6 +6,7 @@ import { stageProjects } from "./stage-projects.js";
 import { stageProvision } from "./stage-provision.js";
 import { stagePersonal } from "./stage-personal.js";
 import { stageIsolation } from "./stage-isolation.js";
+import { stageEdges } from "./stage-edges.js";
 import { ISOLATION_ORGANIZATION, removeOrganizationThings } from "./isolation-org.js";
 import { stageRetention } from "./stage-retention.js";
 import { stageSubmodules } from "./stage-submodules.js";
@@ -18,7 +19,7 @@ export type Stage = (ctx: StageContext) => Promise<Record<string, number>>;
 /** Every stage. setup refuses itself on the organization route; personal and submodules run on the Personal route only,
  * and submodules refuses itself until its fixtures exist. */
 export const STAGE_RUNNERS: Partial<Record<StageName, Stage>> = { provision: stageProvision, setup: stageSetup, projects: stageProjects,
-  personal: stagePersonal, isolation: stageIsolation, retention: stageRetention, submodules: stageSubmodules, waiting: stageWaiting };
+  personal: stagePersonal, isolation: stageIsolation, edges: stageEdges, retention: stageRetention, submodules: stageSubmodules, waiting: stageWaiting };
 
 export type RunOptions = {
   switches: ReadonlySet<Switch>;
