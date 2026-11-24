@@ -19,7 +19,7 @@ import { FIXTURE_TWO } from "./stage-provision.js";
 import { submoduleCommitsCommand, submoduleStatusNotes } from "./stage-submodules.js";
 import { loadState, newState, saveState, stateTarget } from "./state.js";
 import { localStack } from "./local-stack.js";
-import { agentCredentialsFromEnv, ALPHA_TARGET, BRIDGE_UNAVAILABLE_MS, BRIDGE_UNAVAILABLE_POLL_MS, bridgeWaits, NETWORK_RETRY_MS, networkRetries, checkGithubToken, databaseErrorCode, databaseRefusal, liveApi, liveBridge, liveRelease, targetIdentity, liveDatabase, localDatabase, OUTSIDE_PROBE_LIMIT, SET_APP_SYSTEM, tokenLines, tokenRefusal, type DatabaseClient } from "./live.js";
+import { agentCredentialsFromEnv, ALPHA_TARGET, BRIDGE_READ_OPS, bridgeReopens, BRIDGE_UNAVAILABLE_MS, BRIDGE_UNAVAILABLE_POLL_MS, bridgeWaits, NETWORK_RETRY_MS, networkRetries, checkGithubToken, databaseErrorCode, databaseRefusal, liveApi, liveBridge, liveRelease, targetIdentity, liveDatabase, localDatabase, OUTSIDE_PROBE_LIMIT, SET_APP_SYSTEM, tokenLines, tokenRefusal, type DatabaseClient } from "./live.js";
 import { platformOwners, probeDiagnostics, proActor, resolveProbe } from "./plan.js";
 
 const R1 = "Withso/zeros-dev-fixture";
@@ -242,9 +242,9 @@ describe("rehearsal stages against a fake Alpha", () => {
     sockets[0]!.readyState = 3; sockets[0]!.emit("ping"); sockets[0]!.emit("close", 1006);
     expect(await bridge.op("chats.upsert", {})).toEqual({ ok: true });
     expect(connects).toHaveLength(2);
-    // A close while a request is out: that request fails, named, and is not resent.
+    // A close while a write is out: that write fails, named, and is not resent.
     hangNext = true;
-    await expect(bridge.op("turns.list", {})).rejects.toMatchObject({ step: "turns.list", code: expect.stringMatching(/^bridge_closed_1006:open_\d+s:pings_0$/) });
+    await expect(bridge.op("chats.upsert", {})).rejects.toMatchObject({ step: "chats.upsert", code: expect.stringMatching(/^bridge_closed_1006:open_\d+s:pings_0$/) });
     expect(connects).toHaveLength(2);
     // A refusal (4001 access_revoked) is never reopened.
     expect(await bridge.op("chats.upsert", {})).toEqual({ ok: true });
@@ -252,6 +252,74 @@ describe("rehearsal stages against a fake Alpha", () => {
     await expect(bridge.op("chats.upsert", {})).rejects.toMatchObject({ code: expect.stringMatching(/^bridge_closed_4001:open_\d+s:pings_0$/) });
     expect(connects).toHaveLength(3);
     expect(connects.every(path => path.endsWith("/connect?wakePolicy=explicit"))).toBe(true);
+  });
+
+  describe("a read out when the bridge closes abnormally", () => {
+    // A bridge whose socket closes with `code` while each of the next `closes` operations is out.
+    const harness = (closes: number, code = 1006) => {
+      const connects: string[] = [], sent: { op: string; socket: number }[] = [];
+      const api = { json: async (_method: string, path: string) => { connects.push(path);
+        return { status: 200, body: { url: "wss://relay.example.test/v2/cloud/workspaces/w/bridge", protocols: ["zeros.cloud.v2", `ticket.${connects.length}`] } }; } };
+      let sockets = 0, remaining = closes;
+      const openProbe = async () => {
+        const index = sockets++, listeners: ((closed: number) => void)[] = [];
+        const socket = { readyState: 1, on(event: string, listener: (closed: number) => void) { if (event === "close") listeners.push(listener); return socket; } };
+        return { socket, frames: [], close: () => undefined, send: () => "id", request: async () => ({}),
+          op: async (op: string) => {
+            sent.push({ op, socket: index });
+            if (remaining > 0) { remaining--; socket.readyState = 3; for (const listener of listeners) listener(code); throw new Gate0Failure(op, `bridge_closed_${code}`); }
+            return { workspaces: [] };
+          } } as never;
+      };
+      return { bridge: liveBridge(api as never, 1_000, 10, openProbe)("00000000-0000-4000-8000-000000000001"), connects, sent };
+    };
+    beforeEach(() => { bridgeReopens.take(); });
+
+    it("is answered on a reopened bridge after a 1006", async () => {
+      const h = harness(1);
+      expect(await (await h.bridge).op("workspace.list", { withChanges: false })).toEqual({ workspaces: [] });
+      expect(h.sent).toEqual([{ op: "workspace.list", socket: 0 }, { op: "workspace.list", socket: 1 }]);
+      expect(h.connects).toHaveLength(2);
+      expect(bridgeReopens.take()).toEqual([1006]);
+    });
+
+    it("a write out at a 1006 fails as today, named by the close, and is never resent", async () => {
+      const h = harness(1);
+      await expect((await h.bridge).op("file.write", { path: "x", content: "x" })).rejects.toMatchObject({ step: "file.write", code: expect.stringMatching(/^bridge_closed_1006:/) });
+      expect(h.sent).toEqual([{ op: "file.write", socket: 0 }]);
+      expect(h.connects).toHaveLength(1);
+      expect(bridgeReopens.take()).toEqual([]);
+    });
+
+    it("a fourth close fails, named: the resends share the bridge's three reopens", async () => {
+      const h = harness(Number.POSITIVE_INFINITY);
+      await expect((await h.bridge).op("workspace.list", {})).rejects.toMatchObject({ step: "workspace.list", code: expect.stringMatching(/^bridge_closed_1006:/) });
+      expect(h.sent.map(row => row.socket)).toEqual([0, 1, 2, 3]);
+      expect(h.connects).toHaveLength(4);
+      expect(bridgeReopens.take()).toEqual([1006, 1006, 1006]);
+    });
+
+    it("a read out at a close that is not reopened (4001) fails at once", async () => {
+      const h = harness(1, 4001);
+      await expect((await h.bridge).op("workspace.list", {})).rejects.toMatchObject({ code: expect.stringMatching(/^bridge_closed_4001:/) });
+      expect(h.connects).toHaveLength(1);
+    });
+
+    it("the reads are an explicit list of operations that change nothing", () => {
+      for (const op of ["workspace.list", "file.read", "file.tree", "git.status", "git.log", "git.branches", "turns.list", "messages.window"])
+        expect(BRIDGE_READ_OPS.has(op), op).toBe(true);
+      for (const op of ["file.write", "git.commit", "git.push", "git.fetch", "git.checkoutBranch", "chats.upsert", "turns.reset", "messages.truncateFrom"])
+        expect(BRIDGE_READ_OPS.has(op), op).toBe(false);
+    });
+
+    it("counts the stage's reopens and notes each by its code", async () => {
+      const { ctx, lines, options } = setup();
+      let calls = 0;
+      ctx.ports.bridgeReopens = () => calls++ === 0 ? [1011] : [1006, 1012];
+      expect(await runStages(ctx, ["provision"], options)).toBe(true);
+      expect(ctx.state.stages.provision).toMatchObject({ counts: { bridgeReopens: 2 }, notes: ["bridge_reopen:1006", "bridge_reopen:1012"] });
+      expect(lines).toContain("  provision bridgeReopens 2");
+    });
   });
 
   it("prints each step's elapsed time as it finishes, and ends each stage with its total and slowest steps", async () => {

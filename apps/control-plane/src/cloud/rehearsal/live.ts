@@ -128,6 +128,18 @@ const REOPENED_CLOSES = new Set([1001, 1006, 1011, 1012]);
 export const BRIDGE_UNAVAILABLE_MS = 600_000;
 export const BRIDGE_UNAVAILABLE_POLL_MS = 3_000;
 /** Each connect's wait in seconds since the last take (the runner prints the longest and the total at each stage's end). */
+/** The worker operations that only read (workspace, files, Git status, logs, branches, chats and turns): safe to send
+ * again after a close. Every other operation, and every request that is not an op, is never resent. */
+export const BRIDGE_READ_OPS: ReadonlySet<string> = new Set([
+  "workspace.list", "workspace.get", "workspace.resources",
+  "file.read", "file.readRange", "file.tree", "file.ignored", "fs.listDir",
+  "git.status", "git.log", "git.show", "git.diff", "git.branches", "git.listAllBranches", "git.changeCounts", "git.changeLineCounts",
+  "git.hasChanges", "git.stashList", "git.tagList",
+  "chats.list", "chats.summariesForFolder", "messages.window", "messages.windowOlder", "messages.search",
+  "turns.list", "turns.get", "turns.diff", "turns.commits",
+]);
+/** The close code of each bridge reopen since the last take (the runner counts them and notes each at the stage's end). */
+export const bridgeReopens = { codes: [] as number[], take(): number[] { const taken = this.codes; this.codes = []; return taken; } };
 export const bridgeWaits = { seconds: [] as number[], take(): number[] { const taken = this.seconds; this.seconds = []; return taken; } };
 const MAX_REOPENS = 3;
 
@@ -201,22 +213,27 @@ export function liveBridge(api: Api, timeoutMs = 600_000, pollMs = 1_000,
     const usable = async (step: string) => {
       if (current.probe.socket.readyState === SOCKET_OPEN) return current.probe;
       if (current.life.code !== null && REOPENED_CLOSES.has(current.life.code) && reopens < MAX_REOPENS) {
-        reopens++; current.probe.close(); current = await connect(); return current.probe;
+        reopens++; bridgeReopens.codes.push(current.life.code); current.probe.close(); current = await connect(); return current.probe;
       }
       throw new RehearsalFailure(clean(step), closed() ?? "bridge_disconnected");
     };
-    const named = async <T>(step: string, work: (probe: OpenedProbe) => Promise<T>): Promise<T> => {
-      const probe = await usable(step);
-      try { return await work(probe); }
-      catch (error) {
-        // Closed while the request was out: named by the close, and not resent (it may have run).
-        const why = probe === current.probe ? closed() : null;
-        if (why) throw new RehearsalFailure(clean(step), why);
-        throw error;
+    const named = async <T>(step: string, work: (probe: OpenedProbe) => Promise<T>, resend = false): Promise<T> => {
+      for (;;) {
+        const probe = await usable(step);
+        try { return await work(probe); }
+        catch (error) {
+          const why = probe === current.probe ? closed() : null;
+          // A read changes nothing: out when the socket closed with a reopened code, it is sent again on the reopened
+          // bridge, within the same three reopens (usable names the close once they are spent).
+          if (why && resend && REOPENED_CLOSES.has(current.life.code!)) continue;
+          // Anything else closed while it was out: named by the close, and not resent (it may have run).
+          if (why) throw new RehearsalFailure(clean(step), why);
+          throw error;
+        }
       }
     };
     return {
-      op: (op, params) => named(op, probe => wrap(op, () => probe.op(op, params))),
+      op: (op, params) => named(op, probe => wrap(op, () => probe.op(op, params)), BRIDGE_READ_OPS.has(op)),
       request: (type, fields, step) => named(step, probe => wrap(step, () => probe.request(type, fields, step))),
       send: (type, fields) => {
         if (current.probe.socket.readyState !== SOCKET_OPEN) throw new RehearsalFailure("bridge_send", closed() ?? "disconnected");

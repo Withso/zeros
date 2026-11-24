@@ -87,7 +87,7 @@ export async function runStages(ctx: ReturnType<typeof stageContext>, stages: re
     else if (STAGE_NEEDS_ACCOUNT[name] && options.accountUnavailable) result = { ok: false, step: "account_unavailable", code: options.accountUnavailable };
     else {
       // Every step prints its elapsed time as it finishes; the stage ends with its slowest steps and its total.
-      ctx.takeTimings(); ctx.takeCounts(); ctx.ports.networkRetries?.(); ctx.ports.bridgeWaits?.();
+      ctx.takeTimings(); ctx.takeCounts(); ctx.ports.networkRetries?.(); ctx.ports.bridgeWaits?.(); ctx.ports.bridgeReopens?.();
       ctx.onStep = (step, ms) => { if (step !== "start" || ms >= 1_000) options.log(safeLine(`  ${name} step ${step} ${seconds(ms)}`)); };
       try {
         await preconditions(ctx, options, STAGE_NEEDS_ACCOUNT[name]);
@@ -104,6 +104,12 @@ export async function runStages(ctx: ReturnType<typeof stageContext>, stages: re
       for (const seconds of waits) if (seconds > BRIDGE_WAIT_NOTED_S) ctx.note(`bridge_wait:${seconds}`);
       if (waits.length) result = { ...result, counts: { ...result.counts,
         bridgeWaitLongestSeconds: Math.max(...waits), bridgeWaitTotalSeconds: waits.reduce((sum, seconds) => sum + seconds, 0) } };
+      // Each reopen after an abnormal close, by its code.
+      if (ctx.ports.bridgeReopens) {
+        const reopened = ctx.ports.bridgeReopens();
+        for (const code of reopened) ctx.note(`bridge_reopen:${code}`);
+        result = { ...result, counts: { ...result.counts, bridgeReopens: reopened.length } };
+      }
       const notes = ctx.takeNotes();
       if (notes.length) result = { ...result, notes };
       const counted = ctx.takeCounts();
