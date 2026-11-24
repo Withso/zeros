@@ -49,7 +49,10 @@ export const networkRetries = { count: 0, take(): number { const taken = this.co
 export async function withNetworkRetry<T>(work: () => Promise<T>, safe: (code: string) => boolean, sleep: (ms: number) => Promise<void> = liveClock.sleep): Promise<T> {
   for (let attempt = 0; ; attempt++) {
     try { return await work(); } catch (error) {
-      const code = networkCode(error), wait = NETWORK_RETRY_MS[attempt];
+      // A request that took too long is repeated where repeating is safe (a read, or a write with its own key); a write
+      // without one may have run, and is not.
+      const timedOut = (error as { name?: unknown } | null)?.name === "TimeoutError";
+      const code = networkCode(error) ?? (timedOut ? "REQUEST_TIMEOUT" : null), wait = NETWORK_RETRY_MS[attempt];
       if (!code || wait === undefined || !safe(code)) throw error;
       networkRetries.count++;
       await sleep(wait);
@@ -57,7 +60,7 @@ export async function withNetworkRetry<T>(work: () => Promise<T>, safe: (code: s
   }
 }
 const repeatable = (method: string, headers: Record<string, string>) => (code: string) =>
-  method === "GET" || method === "HEAD" || NEVER_SENT.has(code) || Object.keys(headers).some(name => name.toLowerCase() === "idempotency-key");
+  method === "GET" || method === "HEAD" || (code !== "REQUEST_TIMEOUT" && NEVER_SENT.has(code)) || Object.keys(headers).some(name => name.toLowerCase() === "idempotency-key");
 export const ALPHA_TARGET: RehearsalTarget = Object.freeze({ kind: "alpha", origin: ALPHA_PROBE_ORIGIN, channel: "alpha" });
 
 /** A release identity of the target's own channel: ready, not in maintenance, its cloud healthy. Alpha's check is gate0's. */

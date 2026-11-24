@@ -14,7 +14,10 @@ export type Method = "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
 /** One request B must be refused. `absent` is the same request about something that does not exist (item 10). */
 export type Probe = { route: string; method: Method; path: string; body?: unknown; headers?: Record<string, string>; absent?: string; absentBody?: unknown;
   /** A list or the caller's own environment: in an organization the caller belongs to it answers, and must hold none of the target's things. */
-  list?: true };
+  list?: true;
+  /** A list that answers anyone with their own (the plain workspace list): 200 is right even outside the organization, the
+   * same as for an organization that does not exist, and it must hold none of the target's things. */
+  answersAnyone?: true };
 /** What the probes are about: the target's things, and who tries them. `member`: the caller belongs to the target's organization. */
 export type ProbeTarget = { org: string; projectId: string; workspaceId: string; number: unknown; slug: string | null;
   repository: { repository: string; repositoryId: string }; ownerUserId: string; callerUserId: string; callerOrg: string | null; connections: string[];
@@ -88,7 +91,8 @@ export function isolationProbes(t: ProbeTarget): Probe[] {
     { route: "workspace_lost_work_dismiss", method: "POST", path: `${W}/lost-work/dismiss`, body: {} },
     { route: "workspace_prompts", method: "GET", path: `${W}/prompts` },
     { route: "workspace_followers", method: "GET", path: `${W}/followers` },
-    { route: "workspace_list", method: "GET", path: `/v1/cloud-v2/workspaces?organizationId=${org}`, absent: `/v1/cloud-v2/workspaces?organizationId=${absentOrg}`, list: true },
+    { route: "workspace_list", method: "GET", path: `/v1/cloud-v2/workspaces?organizationId=${org}`, absent: `/v1/cloud-v2/workspaces?organizationId=${absentOrg}`, list: true,
+      answersAnyone: true },
     // 5. Create, naming the target's things.
     { route: "create_in_target_organization", method: "POST", path: "/v1/cloud-v2/workspaces", body: { organizationId: org, projectId: t.projectId, branch: name },
       absent: "/v1/cloud-v2/workspaces", absentBody: { organizationId: t.member ? org : absentOrg, projectId: absentId, branch: name } },
@@ -135,9 +139,15 @@ export async function tryProbes(prober: Prober, who: Api, probes: readonly Probe
     const route = `${label}${probe.route}`;
     const reply = await send(who, probe, route);
     scan(route, reply);
-    if (member && probe.list && reply.status === 200) {
-      if (things.some(id => JSON.stringify(reply.body ?? null).includes(id))) violate(route, "listed");
-      else counts.absentFromLists = (counts.absentFromLists ?? 0) + 1;
+    if ((member || probe.answersAnyone) && probe.list && reply.status === 200) {
+      if (things.some(id => JSON.stringify(reply.body ?? null).includes(id))) { violate(route, "listed"); continue; }
+      counts.absentFromLists = (counts.absentFromLists ?? 0) + 1;
+      // Outside the organization it answers as for one that does not exist: nothing tells the caller it is there.
+      if (!member && probe.absent) {
+        const absent = await send(who, { ...probe, path: probe.absent }, `${route}_absent`);
+        if (absent.status === reply.status && errorCode(absent) === errorCode(reply)) counts.sameAsAbsent!++;
+        else violate(route, `differs_${reply.status}_${absent.status}`);
+      }
       continue;
     }
     if (!REFUSED.has(reply.status)) { violate(route, `answered_${reply.status}`); continue; }

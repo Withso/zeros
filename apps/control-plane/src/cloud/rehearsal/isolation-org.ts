@@ -11,7 +11,8 @@ import { z } from "zod";
 import { RehearsalFailure, type Api, type ApiReply, type IsolationOrganizationRecord, type StageContext } from "./contract.js";
 import { stateDirectory } from "./state.js";
 import { connectionIds, identity, isolationProbes, REFUSED, TEAM, tryProbes, type Identity, type Prober } from "./isolation-probes.js";
-import { ENVIRONMENT_PATH, errorCode } from "./steps.js";
+import { ENVIRONMENT_PATH, errorCode, TRANSIENT_CODE } from "./steps.js";
+import { sameGrant } from "./stage-setup.js";
 
 /** The kept organization's fixed, recognisable name and ID. */
 export const ISOLATION_ORGANIZATION = Object.freeze({ name: "zr-isolation", slug: "zr-isolation" });
@@ -156,6 +157,29 @@ export async function organizationRoute(ctx: StageContext, prober: Prober, a: Id
     if (state === "failed") throw new RehearsalFailure("org_b_copy", "copy_failed");
     return state === "ready";
   }, ctx.timing.copyMs);
+  // A member's free seat cannot make a cloud workspace there (the product's rule): refused, pro_required, asserted once
+  // while B has no Pro; then B is given Pro for the stage, recorded first, and put back at the end.
+  ctx.step("org_b_pro");
+  const proPort = port.pro;
+  if (!proPort) throw new RehearsalFailure("org_b_pro", "pro_actor_required");
+  const current = await proPort.read();
+  if (current === "foreign") throw new RehearsalFailure("org_b_pro", "foreign_grant");
+  const at = ctx.ports.clock.now();
+  if (!(current?.enabled && (current.validUntil === null || Date.parse(current.validUntil) > at + 3_600_000))) {
+    const refused = await send(other, { method: "POST", path: "/v1/cloud-v2/workspaces", body: { organizationId: X, projectId: created.id, branch: `${prefix}iso-org-free` } },
+      "org_b_workspace_without_pro");
+    if (errorCode(refused) === "http_403_pro_required") counts.refusedWithoutPro = 1;
+    else {
+      violate("org_b_workspace_without_pro", `answered_${refused.status}`);
+      const made = WorkspaceReply.safeParse(refused.body);
+      if (made.success) { record.workspaces.push(made.data.workspace.id); await ctx.save(); }
+    }
+    record.pro ??= { before: current, operations: [] }; await ctx.save();
+    record.pro.operations.push(await proPort.change({ enabled: true, validFrom: new Date(at - 60_000).toISOString(), validUntil: new Date(at + 2 * 3_600_000).toISOString() },
+      `Alpha rehearsal ${prefix}: Individual Pro on for the isolation organization route`));
+    await ctx.save();
+    await waitAs(ctx, other, "/v1/me", "org_b_pro_on", body => (body as { capabilities?: { pro?: unknown } } | null)?.capabilities?.pro === true, ctx.timing.stateMs);
+  } else ctx.note("org_b_pro:already");
   ctx.step("org_b_workspace");
   ctx.start("workspace");
   const workspace = WorkspaceReply.parse(must(await send(other, { method: "POST", path: "/v1/cloud-v2/workspaces", body: { organizationId: X, projectId: created.id,
@@ -261,8 +285,14 @@ export async function removeOrganizationThings(ctx: StageContext, options: { log
   if (!record) return 0;
   if (!other) throw new RehearsalFailure("cleanup_isolation_org", "other_account_required");
   let failures = 0;
+  // As cleanup's own steps: one that failed in transport or on a slow request is tried again, twice, 5 s apart.
   const attempt = async (what: string, work: () => Promise<void>) => {
-    try { await work(); } catch (error) { failures++; options.log(`cleanup isolation_org ${what}: ${error instanceof RehearsalFailure ? error.code : "failed"}`); }
+    for (let tries = 0; ; tries++) {
+      try { await work(); return; } catch (error) {
+        if (error instanceof RehearsalFailure && TRANSIENT_CODE.test(error.code) && tries < 2) { await ctx.ports.clock.sleep(5_000); continue; }
+        failures++; options.log(`cleanup isolation_org ${what}: ${error instanceof RehearsalFailure ? error.code : "failed"}`); return;
+      }
+    }
   };
   for (const id of [...record.workspaces]) await attempt("workspace", async () => {
     const deleted = await other.json("DELETE", `/v1/cloud-v2/workspaces/${id}`, {}, { "Idempotency-Key": randomUUID() });
@@ -289,7 +319,18 @@ export async function removeOrganizationThings(ctx: StageContext, options: { log
     if (done.status !== 200) throw new RehearsalFailure("cleanup_isolation_org_sign_in", errorCode(done));
     record.signIn = false; await ctx.save();
   });
-  if (!record.workspaces.length && !record.projects.length && !record.environments.length && !record.signIn) { delete ctx.state.created.isolationOrg; await ctx.save(); }
+  // B's Pro back to the grant before the run, last (B's own deletions above may need it).
+  if (record.pro) await attempt("pro", async () => {
+    const pro = ctx.ports.isolationOrganization?.pro;
+    if (!pro) throw new RehearsalFailure("cleanup_isolation_org_pro", "pro_actor_required");
+    const current = await pro.read();
+    if (current === "foreign") throw new RehearsalFailure("cleanup_isolation_org_pro", "foreign_grant");
+    const before = record.pro!.before;
+    if (!sameGrant(current, before)) record.pro!.operations.push(await pro.change(before ?? { enabled: false,
+      validFrom: new Date(ctx.ports.clock.now() - 60_000).toISOString(), validUntil: null }, `Alpha rehearsal ${ctx.state.prefix}: Individual Pro restored after the isolation organization route`));
+    delete record.pro; await ctx.save();
+  });
+  if (!record.workspaces.length && !record.projects.length && !record.environments.length && !record.signIn && !record.pro) { delete ctx.state.created.isolationOrg; await ctx.save(); }
   return failures;
 }
 

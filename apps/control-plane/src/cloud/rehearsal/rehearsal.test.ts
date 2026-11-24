@@ -696,6 +696,16 @@ describe("rehearsal stages against a fake Alpha", () => {
       expect(ctx.state.stages.isolation!.counts!.violations).toBe(2);
     });
 
+    it("takes the plain workspace list as a list: 200 with none of A's things, the same as for an organization that does not exist", async () => {
+      const { ctx, ok } = await run();
+      expect(ok).toBe(true);
+      expect(ctx.state.stages.isolation!.counts!.absentFromLists).toBeGreaterThan(0);
+      // Answered otherwise for A's organization than for one that does not exist: that tells B it is there.
+      const differs = await run(alpha => { alpha.otherLeaks.set("GET /v1/cloud-v2/workspaces?organizationId=:id", 403); });
+      expect(differs.ok).toBe(false);
+      expect(differs.ctx.state.stages.isolation!.notes).toContain("isolation:workspace_list:differs_403_200");
+    });
+
     it("fails when a refusal differs from the answer for an id that does not exist", async () => {
       const { ctx, ok } = await run(alpha => { alpha.otherLeaks.set("GET /v1/cloud-v2/workspaces/:id", 403); });
       expect(ok).toBe(false);
@@ -789,6 +799,25 @@ describe("rehearsal stages against a fake Alpha", () => {
       expect(Object.fromEntries([...alpha.orgs.organizations.values()][0]!.members)).toMatchObject({ [alpha.otherUserId]: "member" });
     });
 
+    it("asserts the member without Pro is refused a workspace there (pro_required), then gives it Pro for the stage and puts it back", async () => {
+      const { alpha, ctx, ok } = await run();
+      expect(ok).toBe(true);
+      expect(ctx.state.stages.isolation!.counts).toMatchObject({ refusedWithoutPro: 1 });
+      // Granted, then put back to none (the grant before the run).
+      expect(alpha.otherProChanges.map(grant => grant.enabled)).toEqual([true, false]);
+      expect(alpha.otherPro()).toBe(false);
+      expect(ctx.state.created.isolationOrg).toBeUndefined();
+    });
+
+    it("names a member's workspace made without Pro, and removes it", async () => {
+      const { alpha, ctx, ok } = await run(undefined, fake => { fake.otherProGrant = null;
+        // The product's rule broken: a free seat may make a workspace.
+        (fake.orgs as unknown as { pro: (user: string) => boolean }).pro = () => true; });
+      expect(ok).toBe(false);
+      expect(ctx.state.stages.isolation!.notes).toContain("isolation:org_b_workspace_without_pro:answered_201");
+      expect([...alpha.orgs.workspaces.values()].every(row => row.state === "deleted")).toBe(true);
+    });
+
     it("with --isolation-org-remove: only the product's delete, then the record is gone", async () => {
       const first = await run();
       const removed = await run(first, fake => { fake.isolationOrgRemove = true; });
@@ -796,6 +825,58 @@ describe("rehearsal stages against a fake Alpha", () => {
       expect([...removed.alpha.orgs.organizations.values()][0]!.deletionScheduled).toBe(true);
       expect(removed.alpha.isolationRecord).toBeNull();
       expect(removed.ctx.state.stages.isolation!.counts).toEqual({ organizationRemoved: 1 });
+    });
+  });
+
+  describe("a request that times out", () => {
+    const timeoutOnce = () => {
+      let calls = 0;
+      const fetchImpl = (async () => {
+        calls++;
+        if (calls === 1) throw new DOMException("The operation was aborted due to timeout", "TimeoutError");
+        return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      }) as unknown as typeof fetch;
+      return { fetchImpl, calls: () => calls };
+    };
+    const sleep = async () => undefined;
+
+    it("is repeated when it is a read, and fails as request_timeout when it is a write without its own key", async () => {
+      const read = timeoutOnce();
+      expect((await liveApi(async () => "t", read.fetchImpl, ALPHA_TARGET, sleep).json("GET", "/v1/me")).status).toBe(200);
+      expect(read.calls()).toBe(2);
+      const write = timeoutOnce();
+      await expect(call(liveApi(async () => "t", write.fetchImpl, ALPHA_TARGET, sleep), "POST", "/v1/cloud-v2/workspaces", "create", {}))
+        .rejects.toMatchObject({ step: "create", code: "request_timeout" });
+      expect(write.calls()).toBe(1);
+    });
+
+    it("inside a poll is not yet; only the poll's own deadline is timeout", async () => {
+      let reads = 0, now = 0;
+      const clock = { now: () => now, sleep: async (ms: number) => { now += ms; } };
+      expect(await until({ ports: { clock } } as never, "copy_ready", 60_000, 1_000, async () => {
+        reads++;
+        if (reads === 1) throw new RehearsalFailure("copy_ready", "request_timeout");
+        return "ready";
+      })).toBe("ready");
+      await expect(until({ ports: { clock } } as never, "copy_ready", 3_000, 1_000, async () => false)).rejects.toMatchObject({ code: "timeout" });
+    });
+
+    it("in cleanup is tried again rather than counted", async () => {
+      const { alpha, ctx, options } = setup();
+      expect(await runStages(ctx, ["provision", "projects"], options)).toBe(true);
+      const api = ctx.ports.api;
+      let failed = false;
+      ctx.ports.api = { json: async (method, path, body, headers) => {
+        if (!failed && method === "GET" && path.startsWith("/v1/cloud-v2/workspaces?")) { failed = true; throw new RehearsalFailure("cleanup_list", "request_timeout"); }
+        return api.json(method, path, body, headers);
+      } };
+      const lines: string[] = [];
+      const result = await cleanup(ctx, { log: line => lines.push(line) });
+      expect(failed).toBe(true);
+      expect(result.failures).toBe(0);
+      expect(lines.filter(line => line.includes("request_timeout"))).toEqual([]);
+      expect(result.inventory).toEqual(EMPTY);
+      void alpha;
     });
   });
 
@@ -1619,7 +1700,8 @@ describe("rehearsal sign-in", () => {
     const reset = () => Object.assign(new TypeError("fetch failed"), { cause: Object.assign(new Error("socket hang up"), { code: "ECONNRESET" }) });
     expect(transportCode(reset())).toBe("network:ECONNRESET");
     expect(transportCode(Object.assign(new Error("x"), { code: "ETIMEDOUT" }))).toBe("network:ETIMEDOUT");
-    expect(transportCode(new DOMException("t", "TimeoutError"))).toBe("timeout");
+    // One request that took too long, named apart from a wait that ran out (`timeout`, until's deadline).
+    expect(transportCode(new DOMException("t", "TimeoutError"))).toBe("request_timeout");
     expect(transportCode(new DOMException("a", "AbortError"))).toBe("aborted");
     expect(transportCode(new SyntaxError("Unexpected token < in JSON"))).toBe("json_parse");
     expect(transportCode(Object.assign(new TypeError("fetch failed"), { cause: new Error("other") }))).toBe("network");

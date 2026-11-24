@@ -114,7 +114,9 @@ export type Ports = {
   /** Stage isolation's organization route: the kept organization's record, the second account's token sign-in there, and
    * the run's choices (--isolation-member-leaves, --isolation-org-remove). */
   isolationOrganization?: { read(): Promise<IsolationOrganizationRecord | null>; save(record: IsolationOrganizationRecord): Promise<void>; remove(): Promise<void>;
-    connectOther?(organizationId: string, expectedGeneration: string): Promise<void>; memberLeaves: boolean; removeOrganization: boolean };
+    connectOther?(organizationId: string, expectedGeneration: string): Promise<void>; memberLeaves: boolean; removeOrganization: boolean;
+    /** The second account's Pro, through the same operator as the selected account's. */
+    pro?: ProPort };
   /** The selected account's Individual Pro, through manage-account-pro.ts (plan, then execute, then read back). */
   pro?: ProPort;
   /** The selected account's own GitHub sign-in by token, for the owner organization. The token stays inside the port. */
@@ -180,7 +182,9 @@ export type Created = {
     madeOrganization?: boolean };
   /** Stage isolation's organization route: what the second account made in the kept organization (removed as it, by the
    * stage and by cleanup; the organization itself is kept on purpose). */
-  isolationOrg?: { organizationId: string; projects: string[]; workspaces: string[]; environments: { repository: string; repositoryId: string }[]; signIn: boolean };
+  isolationOrg?: { organizationId: string; projects: string[]; workspaces: string[]; environments: { repository: string; repositoryId: string }[]; signIn: boolean;
+    /** The second account's Pro, given for the stage (a free seat cannot make a cloud workspace there) and put back after. */
+    pro?: { before: ProGrant | null; operations: string[] } };
 };
 /** The kept isolation organization, by id: made by the rehearsal, owned by the selected account, with the second as a member. */
 export type IsolationOrganizationRecord = { organizationId: string; slug: string; ownerUserId: string; memberUserId: string; joined: boolean };

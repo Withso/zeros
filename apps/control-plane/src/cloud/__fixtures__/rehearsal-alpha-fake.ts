@@ -233,7 +233,15 @@ export class FakeAlpha {
   readonly otherUserId = randomUUID();
   readonly otherOrganizationId = randomUUID();
   /** The kept isolation organization's world, both accounts' view of it. */
-  readonly orgs = new FakeOrganizations(new Map([[this.userId, "user-2@zeros.build"], [this.otherUserId, "user-3@zeros.build"]]));
+  readonly orgs = new FakeOrganizations(new Map([[this.userId, "user-2@zeros.build"], [this.otherUserId, "user-3@zeros.build"]]),
+    user => user === this.userId ? this.pro() : this.otherPro());
+  /** The second account's Pro grant, changed only through its operator port. */
+  otherProGrant: ProGrant | null = null;
+  readonly otherProChanges: ProGrant[] = [];
+  otherPro(): boolean {
+    const grant = this.otherProGrant;
+    return grant !== null && grant.enabled && (grant.validUntil === null || Date.parse(grant.validUntil) > this.now);
+  }
   /** The kept organization's record (the CLI keeps it in a private file), and the run's choices. */
   isolationRecord: IsolationOrganizationRecord | null = null;
   isolationMemberLeaves = false;
@@ -243,7 +251,7 @@ export class FakeAlpha {
   /** The same for a request with no session or a revoked one (each must answer 401). */
   readonly sessionlessLeaks = new Map<string, number>();
   otherApi(): Api {
-    return { json: (method, path, body) => this.counted(() => {
+    return { json: (method, path, body, headers) => this.counted(() => {
       const world = this.orgs.handle(this.otherUserId, method, path, body as Record<string, unknown> | undefined);
       if (world) { if (method !== "GET") this.writes.push(`other ${method} ${path.replace(/[0-9a-f-]{36}/g, ":id")}`); return world; }
       const shape = `${method} ${path.replace(/[0-9a-f-]{36}/g, ":id")}`;
@@ -252,14 +260,17 @@ export class FakeAlpha {
       const ours = [this.organizationId, ...this.projects.keys(), ...this.workspaces.keys()].some(id => path.includes(id));
       const leaked = ours ? this.otherLeaks.get(shape) : undefined;
       if (leaked) return this.reply(leaked, {});
-      if (path === "/v1/me") return this.reply(200, { user: { id: this.otherUserId, email: "user-3@zeros.build" }, capabilities: { pro: false },
+      if (path === "/v1/me") return this.reply(200, { user: { id: this.otherUserId, email: "user-3@zeros.build" }, capabilities: { pro: this.otherPro() },
         organizations: [{ id: this.otherOrganizationId, slug: "user-3", name: "Zeros User-3", role: "owner", isPersonal: true, seat: "free" }, ...this.orgs.memberships(this.otherUserId)] });
       // Its own organization: its own (empty) lists, never anything of the first account's.
       if (path.startsWith(`/v1/cloud-v2/organizations/${this.otherOrganizationId}/github/connections`) && method === "GET" && !path.includes("/repositories"))
         return this.reply(200, { organization: [], personal: [] });
       if (path.startsWith(`/v1/cloud-v2/organizations/${this.otherOrganizationId}/environment/`) && method === "GET")
         return this.reply(200, { environment: { revision: 0, variables: [], files: [] } });
-      if (path.startsWith("/v1/cloud-v2/workspaces?")) return this.reply(403, { error: { code: "forbidden" } });
+      // As Alpha answers them: the plain list is the caller's own (empty) one, whatever the organization; the team list
+      // of an organization the caller is not in is refused.
+      if (path.startsWith("/v1/cloud-v2/workspaces?")) return headers?.["X-Zeros-Team-Sharing"] === "1"
+        ? this.reply(403, { error: { code: "forbidden" } }) : this.reply(200, { workspaces: [] });
       return this.reply(404, { error: { code: "not_found" } });
     }) };
   }
@@ -678,6 +689,13 @@ export class FakeAlpha {
         connectOther: async organizationId => { this.orgs.handle(this.otherUserId, "POST", "/v1/cloud-v2/github/connection", { organizationId, action: "pat" }); },
         // Read when the stage runs, so a test may set them after the ports are made.
         get memberLeaves() { return memberLeaves(); }, get removeOrganization() { return removeOrganization(); },
+        pro: {
+          read: () => this.counted(() => this.otherProGrant ? { ...this.otherProGrant } : null),
+          change: (grant, reason) => this.counted(() => {
+            if (reason.length < 16) throw new RehearsalFailure("pro_change", "reason");
+            this.otherProGrant = { ...grant }; this.otherProChanges.push({ ...grant }); return randomUUID();
+          }),
+        },
       },
       githubSignIn: { connect: (organizationId, expected) => this.counted(async () => {
         const reply = this.route("POST", "/v1/cloud-v2/github/connection", { organizationId, expected, action: "pat", token: "synthetic" });

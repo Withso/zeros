@@ -410,6 +410,7 @@ async function main(argv: string[]): Promise<number> {
         ...(other ? { other: other.api } : {}),
         ...(isolation ? isolation : {}),
         ...(other ? { isolationOrganization: { ...fileRegistry(target.kind), memberLeaves: args.isolationMemberLeaves, removeOrganization: args.isolationOrgRemove,
+          ...(actor.id ? { pro: livePro(db, { subjectUserId: other.userId, expectedEmail: other.email, actorUserId: actor.id }, target.channel) } : {}),
           ...(token ? { connectOther: (organizationId: string, expected: string) => liveGithubSignIn(other!.api, token).connect(organizationId, expected) } : {}) } } : {}),
         ...(held && owner === "personal" && actor.id ? { pro: livePro(db, { subjectUserId: held.userId, expectedEmail: held.email, actorUserId: actor.id }, target.channel) } : {}),
         ...(held && token ? { githubSignIn: liveGithubSignIn(held.api, token) } : {}),

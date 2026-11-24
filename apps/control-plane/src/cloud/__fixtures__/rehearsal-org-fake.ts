@@ -22,7 +22,7 @@ export class FakeOrganizations {
   preparingAccepts = 1;
   invitationsSent = 0;
   private numbers = 0;
-  constructor(private readonly emails: ReadonlyMap<string, string>) {}
+  constructor(private readonly emails: ReadonlyMap<string, string>, private readonly pro: (user: string) => boolean = () => true) {}
 
   /** The organizations a user belongs to, as /v1/me lists them. */
   memberships(user: string): Record<string, unknown>[] {
@@ -95,6 +95,8 @@ export class FakeOrganizations {
         .map(row => this.workspace(row)) });
       const project = this.projects.get(String(body.projectId));
       if (!project || project.owner !== user || project.org !== queryOrg.id) return missing();
+      // A member's free seat cannot make a cloud workspace: Pro is needed.
+      if (!this.pro(user)) return reply(403, { error: { code: "pro_required" } });
       const row: Workspace = { id: randomUUID(), org: queryOrg.id, owner: user, project: project.id, number: ++this.numbers, state: "running", archivedAt: null, archiveReason: null };
       this.workspaces.set(row.id, row);
       return reply(201, { workspace: this.workspace(row) });

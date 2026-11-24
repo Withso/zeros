@@ -11,7 +11,7 @@ import { stageRetention } from "./stage-retention.js";
 import { stageSubmodules } from "./stage-submodules.js";
 import { stageWaiting, waitingContext } from "./stage-waiting.js";
 import { changePro, sameGrant, stageSetup } from "./stage-setup.js";
-import { WAITING_INSTALL_SCRIPT, agentCredentialLive, check, clearEnvironment, removeAgentLogin, disconnectGithubSignIn, githubSignIn, deleteProject, deleteWorkspace, getWorkspace, listProjects, listWorkspaces, readEnvironment,
+import { TRANSIENT_CODE, WAITING_INSTALL_SCRIPT, agentCredentialLive, check, clearEnvironment, removeAgentLogin, disconnectGithubSignIn, githubSignIn, deleteProject, deleteWorkspace, getWorkspace, listProjects, listWorkspaces, readEnvironment,
   readInstallScript, writeInstallScript } from "./steps.js";
 
 export type Stage = (ctx: StageContext) => Promise<Record<string, number>>;
@@ -178,10 +178,16 @@ async function cleanupOrganization(ctx: StageContext, options: { accountless?: b
   const { ports, state } = ctx;
   if (options.accountless && cleanupNeedsAccount(state)) throw new RehearsalFailure("cleanup", "account_required");
   let failures = 0;
+  // A step that failed in transport or on one slow request (a restart, a dropped connection) is tried again, twice, 5 s
+  // apart, before it counts as a failure.
   const attempt = async (what: string, work: () => Promise<unknown>) => {
-    try { await work(); } catch (error) {
-      failures++;
-      options.log(safeLine(`cleanup ${what}: ${error instanceof RehearsalFailure ? error.code : "failed"}`));
+    for (let tries = 0; ; tries++) {
+      try { await work(); return; } catch (error) {
+        if (error instanceof RehearsalFailure && TRANSIENT_CODE.test(error.code) && tries < 2) { await ports.clock.sleep(5_000); continue; }
+        failures++;
+        options.log(safeLine(`cleanup ${what}: ${error instanceof RehearsalFailure ? error.code : "failed"}`));
+        return;
+      }
     }
   };
   // A run that changed Pro may have left it off (a failure inside stage B): while off, the API refuses the account's own

@@ -130,7 +130,7 @@ export async function stageIsolation(ctx: StageContext): Promise<Record<string, 
     ownerUserId: a.userId, callerUserId: b.userId, callerOrg: b.personal?.id ?? null, connections, prefix, generation: built?.generation ?? 1,
     environmentRevision: was.environment.revision, member: false });
   ctx.step("b_tries");
-  await tryProbes(prober, other, probes, [project.id, workspace.id, org, ...connections], false);
+  await tryProbes(prober, other, probes, [project.id, workspace.id, org, ...connections], false, "", [project.id, workspace.id, ...connections]);
   // B's own connections list never holds A's connections.
   if (b.personal && connections.length) {
     const own = await send(other, { method: "GET", path: `/v1/cloud-v2/organizations/${b.personal.id}/github/connections` }, "b_connections");
