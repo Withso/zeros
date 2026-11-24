@@ -12,7 +12,7 @@ export class RehearsalFailure extends Error {
   }
 }
 
-export const STAGES = ["provision", "setup", "projects", "personal", "retention", "submodules", "waiting"] as const;
+export const STAGES = ["provision", "setup", "projects", "personal", "isolation", "retention", "submodules", "waiting"] as const;
 export type StageName = (typeof STAGES)[number];
 /** Where the organization stages run: the selected test user's Personal organization (Cloud for Pro), or the probe
  * organization (kept for later; needs the organization route's setup). */
@@ -20,14 +20,14 @@ export type OwnerKind = "personal" | "organization";
 /** The control-plane switches a stage needs on its route. The control plane does not report switches: the operator
  * declares them. On the Personal route every stage but provision also needs CLOUD_V2_PERSONAL_CLOUD_ENABLED. */
 export function stageSwitches(stage: StageName, owner: OwnerKind): Switch[] {
-  const own: Record<StageName, Switch[]> = { provision: [], setup: [], projects: ["projects"], personal: ["projects"], retention: ["projects", "retention"],
+  const own: Record<StageName, Switch[]> = { provision: [], setup: [], projects: ["projects"], personal: ["projects"], isolation: ["projects"], retention: ["projects", "retention"],
     submodules: ["projects"], waiting: ["projects"] };
   const needed = own[stage];
   return stage === "provision" ? needed : owner === "personal" || stage === "personal" ? [...needed, "personal"] : needed;
 }
 /** Whether a stage signs in. provision uses only the GitHub App, so it runs whatever happens to an account's sign-in. */
 export const STAGE_NEEDS_ACCOUNT: Record<StageName, boolean> = {
-  provision: false, setup: true, projects: true, personal: true, retention: true, submodules: true, waiting: true,
+  provision: false, setup: true, projects: true, personal: true, isolation: true, retention: true, submodules: true, waiting: true,
 };
 export type Switch = "projects" | "personal" | "retention";
 
@@ -108,6 +108,9 @@ export type Ports = {
   api: Api;
   /** A second test account, for checks that must see nothing. */
   other?: Api;
+  /** Stage isolation: the API with no session, and with the second account's revoked session (each must answer 401). */
+  anonymous?: Api;
+  revoked?: Api;
   /** The selected account's Individual Pro, through manage-account-pro.ts (plan, then execute, then read back). */
   pro?: ProPort;
   /** The selected account's own GitHub sign-in by token, for the owner organization. The token stays inside the port. */

@@ -64,7 +64,7 @@ describe("rehearsal guards", () => {
 
   it("parses the command line and refuses what it does not know", () => {
     expect(parseArguments(["all", "--plan", "--switches", "projects,personal,retention"]))
-      .toMatchObject({ stages: ["provision", "setup", "projects", "personal", "retention", "submodules", "waiting"], plan: true, owner: "personal", account: 2, waitingAccount: 3 });
+      .toMatchObject({ stages: ["provision", "setup", "projects", "personal", "isolation", "retention", "submodules", "waiting"], plan: true, owner: "personal", account: 2, waitingAccount: 3 });
     expect(parseArguments(["all", "--owner", "organization", "--account", "owner"])).toMatchObject({ stages: ["provision", "setup", "projects", "retention"], account: "owner" });
     expect(parseArguments(["personal", "--account", "4", "--other", "5", "--pro-actor", "3e515301"])).toMatchObject({ account: 4, other: 5, proActor: "3e515301" });
     expect(parseArguments(["retention", "--account", "3", "--run", randomUUID()])).toMatchObject({ stages: ["retention"], account: 3, waitingAccount: 4 });
@@ -659,6 +659,60 @@ describe("rehearsal stages against a fake Alpha", () => {
     // A query on a connection that is gone fails the step, named.
     expect(databaseErrorCode(Object.assign(new Error("x"), { code: "57P01" }))).toBe("connection");
     await database.close();
+  });
+
+  describe("stage isolation", () => {
+    const run = async (change: (alpha: FakeAlpha) => void = () => undefined) => {
+      const { alpha, ctx, lines, options } = setup({ owner: "personal" });
+      change(alpha);
+      const ok = await runStages(ctx, ["setup", "isolation"], { ...options, switches: new Set(["projects", "personal", "retention"] as const) });
+      return { alpha, ctx, lines, ok };
+    };
+
+    it("passes when the second account is refused everywhere, as for ids that do not exist, and 401 without a session", async () => {
+      const { alpha, ctx, ok } = await run();
+      expect(ctx.state.stages.isolation).toMatchObject({ ok: true });
+      expect(ok).toBe(true);
+      const counts = ctx.state.stages.isolation!.counts!;
+      expect(counts.violations).toBe(0);
+      expect(counts.refused).toBeGreaterThan(40);
+      expect(counts.sameAsAbsent).toBeGreaterThan(40);
+      expect(counts.unauthenticated).toBe(counts.revoked);
+      expect(counts.unauthenticated).toBeGreaterThan(40);
+      expect(ctx.state.stages.isolation!.notes).toEqual(expect.arrayContaining(["organization_route:not_available", "audit_log:no_read_route"]));
+      // Every write B tried was refused, and A's things read back as they were; the stage cleaned up.
+      expect(alpha.writes.filter(line => line.startsWith("other "))).not.toHaveLength(0);
+      expect((await cleanup(ctx, { log: () => undefined })).inventory).toEqual(EMPTY);
+    });
+
+    it("fails, naming the route and the status, when one route wrongly answers the second account", async () => {
+      const { ctx, ok } = await run(alpha => { alpha.otherLeaks.set("PATCH /v1/cloud-v2/organizations/:id/cloud-projects/:id", 200); });
+      expect(ok).toBe(false);
+      expect(ctx.state.stages.isolation).toMatchObject({ ok: false, step: "project_update_name", code: "answered_200" });
+      // Every route that answered is named, not only the first: both PATCH routes of the project.
+      expect(ctx.state.stages.isolation!.notes).toEqual(expect.arrayContaining(["isolation:project_update_name:answered_200",
+        "isolation:project_update_repositories:answered_200"]));
+      expect(ctx.state.stages.isolation!.counts!.violations).toBe(2);
+    });
+
+    it("fails when a refusal differs from the answer for an id that does not exist", async () => {
+      const { ctx, ok } = await run(alpha => { alpha.otherLeaks.set("GET /v1/cloud-v2/workspaces/:id", 403); });
+      expect(ok).toBe(false);
+      expect(ctx.state.stages.isolation!.notes).toContain("isolation:workspace_read:differs_403_404");
+    });
+
+    it("fails when a read the first account makes returns the build secret's value", async () => {
+      const { ctx, ok } = await run(alpha => { alpha.outputShowsSecrets = true; });
+      expect(ok).toBe(false);
+      expect(ctx.state.stages.isolation).toMatchObject({ step: "a_copy_output", code: "secret_returned" });
+    });
+
+    it("fails when a route answers without a session", async () => {
+      const { ctx, ok } = await run(alpha => { alpha.sessionlessLeaks.set("GET /v1/cloud-v2/workspaces/:id", 404); });
+      expect(ok).toBe(false);
+      expect(ctx.state.stages.isolation!.notes).toEqual(expect.arrayContaining(["isolation:workspace_read_unauthenticated:answered_404",
+        "isolation:workspace_read_revoked:answered_404"]));
+    });
   });
 
   it("refuses a state file from the other target, and records the target on a new one", async () => {

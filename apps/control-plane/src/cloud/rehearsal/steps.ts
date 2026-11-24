@@ -244,7 +244,7 @@ export const ProjectDocument = z.object({
 const projects = (organizationId: string) => `/v1/cloud-v2/organizations/${organizationId}/cloud-projects`;
 
 export async function createProject(ctx: StageContext, input: { name: string; level?: "organization" | "personal";
-  repositories: (string | { repository: string; fetchSubmodules: boolean })[] },
+  repositories: (string | { repository: string; fetchSubmodules?: boolean; setup?: string })[] },
   step = "project_create"): Promise<z.infer<typeof ProjectDocument>> {
   check(prefixed(ctx.state.prefix, input.name), step, "unprefixed");
   ctx.start("copy");

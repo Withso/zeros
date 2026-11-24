@@ -30,7 +30,7 @@ export const USAGE = "alpha:rehearse <provision|setup|projects|personal|retentio
   "[--repository-two owner/name (default Withso/zeros-dev-fixture-2)] [--submodule-repository owner/name] [--submodule-fixture-repository owner/name] [--keep-base] [--max-active <n>] [--organization <slug|id>]";
 /** `all` runs these in order on each route; D is refused until written. */
 export const ALL: Record<OwnerKind, readonly StageName[]> = {
-  personal: ["provision", "setup", "projects", "personal", "retention", "submodules", "waiting"], organization: ["provision", "setup", "projects", "retention"],
+  personal: ["provision", "setup", "projects", "personal", "isolation", "retention", "submodules", "waiting"], organization: ["provision", "setup", "projects", "retention"],
 };
 export const TIMING = { pollMs: 5_000, stateMs: 15 * 60_000, copyMs: 30 * 60_000, turnMs: 10 * 60_000, scanMs: 5 * 60_000, archiveScanMs: 65 * 60_000,
   idleStopMs: 35 * 60_000, computerMs: 45 * 60_000 };
@@ -348,11 +348,24 @@ async function main(argv: string[]): Promise<number> {
           } finally { await staffDb.close().catch(() => undefined); }
         }
       }
-      if (held && args.stages.includes("personal") && !args.cleanup) {
+      if (held && (args.stages.includes("personal") || args.stages.includes("isolation")) && !args.cleanup) {
         const label = otherLabelOf(labels, args);
         const account = accounts.find(row => row.label === label);
         const result = account ? await signInAccount(account, signInDeps(probe)) : undefined;
         if (result?.ok) { sessions.push(result); other = result; } else log(`second account ${label || "none"}: unavailable${result && !result.ok ? ` ${result.step}:${result.code}` : ""}`);
+      }
+      // Stage isolation: the API with no session, and with a session of the second account's that is revoked first (its
+      // access token kept, the session ended), so each route can be seen to answer 401 to both.
+      let isolation: { anonymous: Api; revoked?: Api } | undefined;
+      if (other && args.stages.includes("isolation") && !args.cleanup) {
+        isolation = { anonymous: liveApi(async () => "", fetch, target) };
+        const account = accounts.find(row => row.label === other!.label);
+        const again = account ? await signInAccount(account, signInDeps(probe)) : undefined;
+        if (again?.ok) {
+          const token = await again.session.accessToken();
+          await again.session.close();
+          isolation.revoked = liveApi(async () => token, fetch, target);
+        } else log(`second account ${other.label}: a second session for stage isolation is unavailable${again && !again.ok ? ` ${again.step}:${again.code}` : ""}`);
       }
       // Stage waiting's account, signed in for that stage or for a cleanup of what it made.
       let waiting: SignedIn | undefined;
@@ -388,6 +401,7 @@ async function main(argv: string[]): Promise<number> {
         github: fixtureGithub(),
         database: db, clock: liveClock,
         ...(other ? { other: other.api } : {}),
+        ...(isolation ? isolation : {}),
         ...(held && owner === "personal" && actor.id ? { pro: livePro(db, { subjectUserId: held.userId, expectedEmail: held.email, actorUserId: actor.id }, target.channel) } : {}),
         ...(held && token ? { githubSignIn: liveGithubSignIn(held.api, token) } : {}),
         ...(held && agentCredentials.length ? { agentCredentials } : {}),
