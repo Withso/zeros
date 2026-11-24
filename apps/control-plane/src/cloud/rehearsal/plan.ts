@@ -109,7 +109,7 @@ export function refusal(stage: StageName, account: AccountSummary | { failed: st
   readiness: PersonalReadiness = { token: true, proActor: "resolved" }): string | null {
   if (stage === "setup" && owner === "organization") return "awaiting_approval";
   if (!STAGE_RUNNERS[stage]) return "not_written";
-  if ((stage === "personal" || stage === "submodules") && owner !== "personal") return "personal_route_only";
+  if ((stage === "personal" || stage === "isolation" || stage === "submodules") && owner !== "personal") return "personal_route_only";
   if (stage === "submodules" && readiness.submoduleFixtures !== "present") return `fixtures_${readiness.submoduleFixtures ?? "not_named"}`;
   if (stage === "waiting" && owner !== "personal") return "personal_route_only";
   if (stage === "waiting" && readiness.waitingAccount !== "fresh") return `waiting_account_${readiness.waitingAccount ?? "not_configured"}`;
@@ -168,6 +168,13 @@ export function writeLines(stage: StageName, prefix: string, repositories: { one
       "personal would end the account's Pro through manage-account-pro.ts (1 operator change), check 403 pro_required on the workspace and its connect," +
         " and wait up to 35 minutes for the machine to stop (the minutes are reported)",
       "personal would put Pro back (1 operator change), open the workspace (1 machine start), then delete the workspace and the project",
+    ],
+    isolation: [
+      `isolation would create project ${prefix}iso (Only you, ${repositories.one}, a setup that prints its build secret) and its copy, set one build secret` +
+        ` (the copy built again: 2 machines), make workspace ${prefix}iso-w (1 machine start, then stopped) and seed one environment file when it is empty`,
+      "isolation would send, as the second test user, every project, ready copy, build secret, workspace, create, team-sharing, environment and" +
+        " GitHub connection route with the first user's ids, and the same with ids that do not exist; then each without a session and with a revoked one",
+      "isolation would read everything back as the first user, then clear the environment and delete the workspace and the project",
     ],
     // A proposal for the owner: what lets a test user run A and C without the owner's account in the stages themselves.
     setup: owner === "personal" ? [

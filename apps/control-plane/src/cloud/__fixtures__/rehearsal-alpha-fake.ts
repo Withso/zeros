@@ -24,7 +24,7 @@ type Build = { id: string; state: string; snapshot: string | null; builderSandbo
   createdAt?: number; readyAt?: number };
 type Project = { id: string; name: string; organizationId: string; repositories: string[]; machine: string; submodules: boolean;
   /** Its latest copy's failure reason, or null when it is ready. */
-  copyFailed?: string | null };
+  copyFailed?: string | null; secrets?: Record<string, string>; generation?: number };
 type Turn = { chatId: string; turnId: string; startedAt: number; files: string[] };
 
 const DEFAULT_HEAD = "c".repeat(40);
@@ -70,6 +70,9 @@ export class FakeAlpha {
   /** Failure reasons the next copies fail with, one per copy build (a create, then each retry); empty: ready. */
   copyFailures: string[] = [];
   copyRetries = 0;
+  /** A copy's setup output shows a build secret's value (the leak stage isolation must see). */
+  outputShowsSecrets = false;
+  readonly connectionId = randomUUID();
   /** Terminal escape sequences around every shell command's output. */
   ptyNoise = false;
   /** The commit a shell's `git rev-parse HEAD` reads (the repositories' default head unless a test moves it). */
@@ -226,11 +229,36 @@ export class FakeAlpha {
     };
   }
   /** A second test account: a stranger to this organization, who reaches none of it. */
+  readonly otherUserId = randomUUID();
+  readonly otherOrganizationId = randomUUID();
+  /** Routes (method and path with ids as :id) the second account is wrongly answered on, with the status: the bug a stage must see. */
+  readonly otherLeaks = new Map<string, number>();
+  /** The same for a request with no session or a revoked one (each must answer 401). */
+  readonly sessionlessLeaks = new Map<string, number>();
   otherApi(): Api {
     return { json: (method, path) => this.counted(() => {
-      if (method !== "GET") this.writes.push(`other ${method} ${path.replace(/[0-9a-f-]{36}/g, ":id")}`);
+      const shape = `${method} ${path.replace(/[0-9a-f-]{36}/g, ":id")}`;
+      if (method !== "GET") this.writes.push(`other ${shape}`);
+      // Only about the first account's own things: the same request about an id that does not exist is answered as usual.
+      const ours = [this.organizationId, ...this.projects.keys(), ...this.workspaces.keys()].some(id => path.includes(id));
+      const leaked = ours ? this.otherLeaks.get(shape) : undefined;
+      if (leaked) return this.reply(leaked, {});
+      if (path === "/v1/me") return this.reply(200, { user: { id: this.otherUserId }, capabilities: { pro: false },
+        organizations: [{ id: this.otherOrganizationId, slug: "user-3", name: "Zeros User-3", role: "owner", isPersonal: true, seat: "free" }] });
+      // Its own organization: its own (empty) lists, never anything of the first account's.
+      if (path.startsWith(`/v1/cloud-v2/organizations/${this.otherOrganizationId}/github/connections`) && method === "GET" && !path.includes("/repositories"))
+        return this.reply(200, { organization: [], personal: [] });
+      if (path.startsWith(`/v1/cloud-v2/organizations/${this.otherOrganizationId}/environment/`) && method === "GET")
+        return this.reply(200, { environment: { revision: 0, variables: [], files: [] } });
       if (path.startsWith("/v1/cloud-v2/workspaces?")) return this.reply(403, { error: { code: "forbidden" } });
       return this.reply(404, { error: { code: "not_found" } });
+    }) };
+  }
+  /** No session, or a revoked one: 401 everywhere. */
+  sessionlessApi(): Api {
+    return { json: (method, path) => this.counted(() => {
+      const leaked = this.sessionlessLeaks.get(`${method} ${path.replace(/[0-9a-f-]{36}/g, ":id")}`);
+      return leaked ? this.reply(leaked, {}) : this.reply(401, { error: { code: "unauthorized" } });
     }) };
   }
 
@@ -318,12 +346,26 @@ export class FakeAlpha {
       }
       const project = id ? this.projects.get(id) : undefined;
       if (!project) return this.reply(404, { error: { code: "not_found" } });
+      if (parts[6] === "build-secrets") {
+        if (method === "PUT") { project.secrets = { ...body.secrets as Record<string, string> }; project.generation = (project.generation ?? 1) + 1; }
+        if (method === "PATCH") {
+          project.secrets = { ...project.secrets, ...body.set as Record<string, string> };
+          for (const name of (body.remove ?? []) as string[]) delete project.secrets[name];
+        }
+        return this.reply(200, { names: Object.keys(project.secrets ?? {}).sort() });
+      }
+      if (parts[6] === "ready-copy" && parts[7] === "output") {
+        // The setup printed the secret; the product shows its output with the value withheld, unless a test says otherwise.
+        const value = Object.values(project.secrets ?? {})[0] ?? "";
+        return this.reply(200, { output: `setup\n${this.outputShowsSecrets ? value : "[redacted]"}\n` });
+      }
       if (parts[6] === "ready-copy" && parts[7] === "retry" && method === "POST") {
         this.copyRetries++; project.copyFailed = this.copyFailures.shift() ?? null;
         return this.reply(202, { ok: true });
       }
       if (parts[6] === "ready-copy") return this.reply(200, { status: project.copyFailed
-        ? { state: "failed", failure: { reason: project.copyFailed, repository: null, step: "stop", detail: null, failures: 1, nextRetryAt: null } } : { state: "ready" } });
+        ? { state: "failed", failure: { reason: project.copyFailed, repository: null, step: "stop", detail: null, failures: 1, nextRetryAt: null } } : { state: "ready" },
+        history: [{ generation: project.generation ?? 1, state: project.copyFailed ? "failed" : "ready", output: true }] });
       if (method === "DELETE") { this.machines.get(project.machine)!.state = "deleted"; this.projects.delete(project.id); return this.reply(200, { ok: true }); }
       return this.reply(200, { project: this.project(project) });
     }
@@ -362,7 +404,7 @@ export class FakeAlpha {
         builds: this.computer.builds.map(build => ({ id: build.id, state: build.state, builderSandboxId: build.builderSandboxId })),
         ...(this.automaticBase ? { base: this.baseView() } : {}) });
     }
-    if (parts[2] === "organizations" && parts[4] === "github") return this.reply(200, { organization: [{ accountLogin: "Withso", state: "active" }], personal: [] });
+    if (parts[2] === "organizations" && parts[4] === "github") return this.reply(200, { organization: [{ id: this.connectionId, accountLogin: "Withso", state: "active" }], personal: [] });
     if (parts[2] === "workspaces" && parts[3] === "by-number") return this.reply(404, { error: { code: "not_found" } });
     if (url.pathname === "/v1/cloud-v2/workspaces" && method === "GET")
       return this.reply(200, { workspaces: [...this.workspaces.values()].filter(row => row.state !== "deleted").map(row => this.document(row)) });
@@ -617,7 +659,7 @@ export class FakeAlpha {
         close: () => Promise.resolve(),
       },
       clock: { now: () => this.now, sleep: async ms => { this.now += ms; this.tick(); } },
-      pro: this.proPort(), other: this.otherApi(),
+      pro: this.proPort(), other: this.otherApi(), anonymous: this.sessionlessApi(), revoked: this.sessionlessApi(),
       githubSignIn: { connect: (organizationId, expected) => this.counted(async () => {
         const reply = this.route("POST", "/v1/cloud-v2/github/connection", { organizationId, expected, action: "pat", token: "synthetic" });
         if (reply.status !== 200) throw new RehearsalFailure("github_sign_in_connect", `http_${reply.status}`);
@@ -633,6 +675,11 @@ export class FakeAlpha {
   sql(text: string, values: unknown[]): Awaited<ReturnType<Query>> {
     const rows = (list: Record<string, unknown>[]) => ({ rows: list, rowCount: list.length });
     const ids = (values[0] ?? []) as string[];
+    // Stage isolation: what B's attempts could have made (copies of A's project, workspaces in either organization).
+    if (text.startsWith("SELECT count(*)::int AS n FROM cloud_v2_ready_copies WHERE project_id"))
+      return rows([{ n: this.projects.get(String(values[0]))?.generation ?? 0 }]);
+    if (text.startsWith("SELECT count(*)::int AS n FROM cloud_v2_workspaces WHERE org_id = ANY"))
+      return rows([{ n: ids.includes(this.organizationId) ? this.workspaces.size : 0 }]);
     // Stage D: the copy's record of its submodules, and a workspace's submodule rows (a token sign-in's create).
     if (text.startsWith("SELECT result FROM cloud_v2_ready_copies")) {
       const project = this.projects.get(String(values[0]));
