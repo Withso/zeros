@@ -93,6 +93,13 @@ async function promptGeometry(page, needle) {
       toggleAligned: toggleTextLeft === null ? null : Math.abs(toggleTextLeft - textLeft) <= 1.5,
       fill: [r, g, bl],
       clip: { x: Math.round(v.left), y: Math.round(v.top), width: Math.round(v.width), height: Math.round(v.height) },
+      // The fade never covers the scrollbar slot, so ink is read left of it.
+      ink: {
+        x: Math.round(v.left),
+        y: Math.round(v.top),
+        width: Math.round(v.width - parseFloat(getComputedStyle(viewport).getPropertyValue("--scrollbar-size"))),
+        height: Math.round(v.height),
+      },
     };
   }, needle);
 }
@@ -183,7 +190,7 @@ export async function checkPromptFold({ page, check, harnessBase }) {
 
     // Folded: line 1 is solid; line 5 dissolves into the bubble.
     let geometry = await promptGeometry(page, needle);
-    let rows = await rowInk(page, geometry.clip, geometry.fill);
+    let rows = await rowInk(page, geometry.ink, geometry.fill);
     expect(lineInk(rows, 1), `${theme}: folded line 1 ink`).toBeGreaterThan(80);
     expect(lineInk(rows, 5), `${theme}: folded line 5 dissolves`).toBeLessThan(lineInk(rows, 1) * 0.7);
 
@@ -191,7 +198,7 @@ export async function checkPromptFold({ page, check, harnessBase }) {
     await toggleIn(page, needle).click();
     await expect.poll(() => promptGeometry(page, needle)).toMatchObject({ fold: "expanded", below: true, above: false });
     geometry = await promptGeometry(page, needle);
-    rows = await rowInk(page, geometry.clip, geometry.fill);
+    rows = await rowInk(page, geometry.ink, geometry.fill);
     const middle = lineInk(rows, 8);
     expect(lineInk(rows, 1), `${theme}: unfolded top line is solid`).toBeGreaterThan(middle * 0.9);
     expect(lineInk(rows, 15), `${theme}: unfolded bottom line dissolves`).toBeLessThan(middle * 0.7);
@@ -199,8 +206,7 @@ export async function checkPromptFold({ page, check, harnessBase }) {
     // Scrolled to the end: the top line dissolves, the last line is solid.
     await scrollFold(page, needle, 10_000);
     await expect.poll(() => promptGeometry(page, needle)).toMatchObject({ above: true, below: false });
-    rows = await rowInk(page, geometry.clip, geometry.fill);
-    if (lineInk(rows, 1) >= lineInk(rows, 8) * 0.75) console.log("prompt-fold rows", theme, JSON.stringify(await promptGeometry(page, needle)), JSON.stringify(rows.slice(0, 70)));
+    rows = await rowInk(page, geometry.ink, geometry.fill);
     expect(lineInk(rows, 15), `${theme}: last line is solid at the end`).toBeGreaterThan(lineInk(rows, 8) * 0.9);
     expect(lineInk(rows, 1), `${theme}: top line dissolves once scrolled`).toBeLessThan(lineInk(rows, 8) * 0.75);
 
