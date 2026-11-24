@@ -9,6 +9,11 @@ import {
 import { DESIGN_CANVAS_CHIP_CLS } from "./design-canvas-chip";
 import { designSizeBadgeText } from "./design-layout-tools";
 import { designRuntimeFrameState } from "./state/design-runtime-store";
+import { designWorkspaceView } from "./state/design-workspace-ui";
+
+/** Device pixels in one capture; a whole large frame at 4× would otherwise
+ * decode hundreds of megabytes for a temporary picture. */
+const MAX_CAPTURE_PIXELS = 4096 * 4096;
 
 type DragNode = Pick<DesignRuntimeNodeDetails, "oid" | "rect"> &
   Partial<Pick<DesignRuntimeNodeDetails, "box" | "borderCoordinateSpace" | "styles">>;
@@ -25,6 +30,8 @@ export function createDesignDragPresentation(
      * frame. The frame's overlay sits beneath the picture there, so it would
      * otherwise be covered by the very pixels it describes. */
     selection?: boolean;
+    /** The live camera zoom, when the caller holds a newer one than the store. */
+    zoom?: number;
   } = {},
 ) {
   const world = article.closest<HTMLElement>("[data-design-canvas-world]");
@@ -32,11 +39,19 @@ export function createDesignDragPresentation(
   const cached = designRuntimeFrameState(workspaceId, frame.file);
   const nodeImage = cached?.screenshotsByNode[details.oid];
   const frameImage = cached?.screenshotsByNode[""];
+  const drawnScale = (options.zoom ?? designWorkspaceView(workspaceId).zoom ?? 1) * (window.devicePixelRatio || 1);
+  const wantedScale = Math.min(4, Math.max(1, drawnScale),
+    Math.sqrt(MAX_CAPTURE_PIXELS / Math.max(1, details.rect.width * details.rect.height)));
   const exactNode =
     nodeImage?.sourceVersion === frame.sourceVersion ? nodeImage : null;
-  const screenshot =
+  const cachedShot =
     exactNode ??
     (frameImage?.sourceVersion === frame.sourceVersion ? frameImage : null);
+  const sourceImage = article.querySelector<HTMLImageElement>(`img[data-design-source-ready][data-design-source-version="${CSS.escape(frame.sourceVersion)}"]`);
+  const vectorReady = Boolean(sourceImage?.complete && sourceImage.naturalWidth > 0);
+  // Background pictures are made for the zoom they were seen at (often a
+  // quarter scale). The ready vector source stays sharp at any zoom.
+  const screenshot = cachedShot && (cachedShot.scale >= wantedScale || !vectorReady) ? cachedShot : null;
   const element = document.createElement("div");
   element.className = "zd-design-drag-preview";
   element.dataset.designDragPreview = details.oid;
@@ -129,13 +144,14 @@ export function createDesignDragPresentation(
   };
   let hasPixels = screenshot !== null;
   let isolated = false;
-  if (screenshot) showPixels(screenshot.dataUrl, !exactNode);
-  else {
-    const sourceImage = article.querySelector<HTMLImageElement>(`img[data-design-source-ready][data-design-source-version="${CSS.escape(frame.sourceVersion)}"]`);
-    if (sourceImage?.complete && sourceImage.naturalWidth > 0) {
-      showPixels(sourceImage.currentSrc || sourceImage.src, true);
-      hasPixels = true;
-    }
+  let shownScale = 0;
+  if (screenshot) {
+    showPixels(screenshot.dataUrl, screenshot !== exactNode);
+    shownScale = screenshot.scale;
+  } else if (sourceImage && vectorReady) {
+    showPixels(sourceImage.currentSrc || sourceImage.src, true);
+    hasPixels = true;
+    shownScale = Infinity;
   }
   world.appendChild(element);
   let disposeWatch: (() => void) | null = null;
@@ -159,24 +175,33 @@ export function createDesignDragPresentation(
     get isolated() {
       return isolated;
     },
-    /** Pixels captured for this drag once the layer left its frame. A capture
-     * of the layer alone replaces any cached crop; it is sharper and carries
-     * nothing from behind the layer. */
+    /** Device pixels per CSS pixel the picture is drawn at: zoom × DPR, bounded. */
+    wantedScale,
+    /** Whether the shown pixels are at least as sharp as they are drawn. */
+    get sharp() {
+      return shownScale >= wantedScale;
+    },
+    /** Pixels captured for this drag. A capture of the layer alone replaces
+     * any cached crop, as it carries nothing from behind the layer; a crop
+     * replaces only a blurrier one. */
     adopt(captured: {
       sourceVersion: string;
       dataUrl: string;
       nodeId: string | null;
+      scale?: number;
       isolated?: boolean;
     }) {
+      const scale = captured.scale ?? 0;
       if (
         captured.sourceVersion !== frame.sourceVersion ||
         captured.nodeId !== details.oid ||
         isolated ||
-        (hasPixels && !captured.isolated)
+        (hasPixels && !captured.isolated && scale <= shownScale)
       )
         return;
       hasPixels = true;
       isolated = captured.isolated === true;
+      shownScale = scale;
       showPixels(captured.dataUrl, false);
     },
     paint(origin: { x: number; y: number }) {

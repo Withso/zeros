@@ -76,19 +76,20 @@ export function presentDesignFrameCopy(input: {
   article: HTMLElement;
   geometry: DesignFrameGeometryWire;
   current(): boolean;
+  zoom?: number;
 }) {
   const { workspaceId, frame, geometry } = input;
   const rootId = designRuntimeFrameState(workspaceId, frame.file)?.snapshot?.frame.oid ?? DESIGN_RUNTIME_DOCUMENT_BODY_ID;
   const presentation = createDesignDragPresentation(workspaceId, frame, {
     oid: rootId, rect: { x: 0, y: 0, width: frame.width, height: frame.height },
-  }, input.article);
+  }, input.article, { zoom: input.zoom });
   if (!presentation) return null;
   presentation.element.dataset.designFrameCopyPreview = "";
   presentation.paint({ x: geometry.x - frame.x, y: geometry.y - frame.y });
   const captures = new AbortController();
   const runtime = designFrameRuntime(workspaceId, frame.file);
-  if (!presentation.hasPixels && runtime?.sourceVersion === frame.sourceVersion)
-    void runtime.captureScreenshot(null, 1, captures.signal, "explicit").then((capture) => {
+  if (!presentation.sharp && runtime?.sourceVersion === frame.sourceVersion)
+    void runtime.captureScreenshot(null, presentation.wantedScale, captures.signal, "explicit").then((capture) => {
       if (input.current()) presentation.adopt({ ...capture, nodeId: rootId });
     }).catch(() => {});
   let retired = false;
@@ -136,6 +137,7 @@ export function startDesignFrameCopy(input: {
   frame: DesignCanvasFrameWire;
   point(pointer: { clientX: number; clientY: number }): { x: number; y: number };
   current(): boolean;
+  zoom?(): number;
   nest(file: string | null): void;
   finished(): void;
   saving(save: Promise<void>): void;
@@ -203,12 +205,12 @@ export function startDesignFrameCopy(input: {
       origin = { x: Math.round(pointer.x - grab.x), y: Math.round(pointer.y - grab.y) };
       presentation ??= createDesignDragPresentation(workspaceId, frame, {
         oid: rootId, rect: { x: 0, y: 0, width: frame.width, height: frame.height },
-      }, article);
+      }, article, { zoom: input.zoom?.() });
       presentation?.paint({ x: origin.x - frame.x, y: origin.y - frame.y });
       const runtime = designFrameRuntime(workspaceId, frame.file);
-      if (presentation && !presentation.hasPixels && !capturing && runtime?.sourceVersion === frame.sourceVersion) {
+      if (presentation && !presentation.sharp && !capturing && runtime?.sourceVersion === frame.sourceVersion) {
         capturing = true;
-        void runtime.captureScreenshot(null, 1, captures.signal, "explicit").then(capture => {
+        void runtime.captureScreenshot(null, presentation.wantedScale, captures.signal, "explicit").then(capture => {
           if (current()) presentation?.adopt({ ...capture, nodeId: rootId });
         }).catch(() => {});
       }

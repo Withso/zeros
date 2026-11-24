@@ -239,7 +239,7 @@ export function startDesignLayoutDrag(input: {
         { ...frame, sourceVersion: runtime.sourceVersion },
         details,
         article,
-        { selection: true },
+        { selection: true, zoom: input.zoom() },
       );
       presentation?.paint(origin());
       input.paint(movedDetails());
@@ -249,9 +249,8 @@ export function startDesignLayoutDrag(input: {
       // frame behind it and was rendered for a smaller zoom.
       if (presentation && !presentation.isolated && !capturing) {
         capturing = true;
-        const scale = Math.min(4, Math.max(1, input.zoom() * window.devicePixelRatio));
         void runtime
-          .captureScreenshot(details.oid, scale, undefined, "explicit", { isolate: true })
+          .captureScreenshot(details.oid, presentation.wantedScale, undefined, "explicit", { isolate: true })
           .then((captured) => {
             if (stopped || !isCurrent()) return;
             presentation?.adopt(captured);

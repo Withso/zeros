@@ -358,6 +358,18 @@ async function runDesignCopyChecks({ page, check }) {
   await page.waitForFunction(() => window.__zerosHarnessDesignSurface.measurement.requests.some(request => request.op === "design.frame.duplicate" && request.released === null));
   await expect(page.locator("[data-design-frame-copy-preview]")).toBeVisible();
   check("a keyboard frame copy paints before its save is answered", true);
+  // Background pictures are made at a fraction of the drawn resolution; the
+  // copy shows the vector source or a capture at least as sharp as drawn.
+  const copyPixels = await page.evaluate(() => {
+    const image = document.querySelector("[data-design-frame-copy-preview] [data-design-drag-pixels] img");
+    const source = document.querySelector("[data-design-frame] img[data-design-source-ready]");
+    if (!image) return null;
+    const { width } = image.getBoundingClientRect();
+    return { vector: Boolean(source && (source.currentSrc || source.src) === image.src), naturalWidth: image.naturalWidth,
+      drawnWidth: width * window.devicePixelRatio };
+  });
+  check("a keyboard frame copy shows pixels at least as sharp as it is drawn",
+    Boolean(copyPixels && (copyPixels.vector || copyPixels.naturalWidth >= copyPixels.drawnWidth * 0.98)), JSON.stringify(copyPixels));
   await page.evaluate(() => window.__zerosHarnessDesignSurface.measurement.release("design.frame.duplicate"));
   await settled(page);
   await expect(page.locator('[data-design-frame="copy-1.html"]')).toHaveCount(1);
