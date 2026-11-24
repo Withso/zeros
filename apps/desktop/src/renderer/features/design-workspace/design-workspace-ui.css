@@ -1048,8 +1048,8 @@
 }
 
 .zd-canvas-tool:focus-visible:where(:not([data-zeros-focus-visible="false"])) {
-  border-color: var(--accent);
-  outline: none;
+  outline: 1px solid var(--accent);
+  outline-offset: -1px;
 }
 
 .zd-canvas-tool:disabled {
