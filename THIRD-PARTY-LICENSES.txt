@@ -2232,7 +2232,7 @@ electron-updater@6.8.9
   Source: https://github.com/electron-userland/electron-builder
   License documents: 3f13dd7700ec
 
-electron@43.8.3
+electron@45.4.1
   License: MIT
   Surfaces: desktop runtime
   Author: Electron Community
@@ -12370,8 +12370,8 @@ THE SOFTWARE.
 ================================================================================
 DOCUMENT 5154e165bd6c
 SHA-256: 5154e165bd6c2cc0cfbcd8916498c7abab0497923bafcd5cb07673fe8480087d
-Applies to: electron@43.8.3
-Source labels: electron@43.8.3 — LICENSE
+Applies to: electron@45.4.1
+Source labels: electron@45.4.1 — LICENSE
 ================================================================================
 
 Copyright (c) Electron contributors

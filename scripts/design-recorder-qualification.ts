@@ -181,14 +181,16 @@ void app.whenReady().then(async () => {
           const width = Math.round(source.viewport.width * ratio), height = Math.round(source.viewport.height * ratio);
           const decoded = CK.MakeImageFromEncoded(png);
           const surface = CK.MakeSurface(width, height);
-          const pixels = (draw: (c: { clear(color: unknown): void; drawPicture(p: unknown): void; drawImage(i: unknown, x: number, y: number): void }) => void) => {
+          const pixels = (draw: (c: { clear(color: unknown): void; drawPicture(p: unknown): void; drawImage(i: unknown, x: number, y: number): void; saveLayer(): number; restore(): void }) => void) => {
             const c = surface.getCanvas(); c.clear(CK.WHITE); draw(c); surface.flush();
             const image = surface.makeImageSnapshot();
             const out = image.readPixels(0, 0, { width, height, colorType: CK.ColorType.RGBA_8888, alphaType: CK.AlphaType.Unpremul, colorSpace: CK.ColorSpace.SRGB }) as Uint8Array;
             image.delete(); return out;
           };
           const expected = pixels((c) => c.drawImage(decoded, 0, 0));
-          const actual = pixels((c) => c.drawPicture(picture));
+          // The recorder paints over a transparent page background, so the
+          // picture clears its bounds; its own layer keeps the white backdrop.
+          const actual = pixels((c) => { c.saveLayer(); c.drawPicture(picture); c.restore(); });
           const diff = compare(expected, actual, width, height);
           const row = { file: frame.file, bytes: bytes.length, recordedBytes: recorded.length, typefaces: layer.typefaces.length, share: diff.share, flatPixels: diff.flat, scale: item.scale };
           (report.frames as unknown[]).push(row);
