@@ -16,7 +16,7 @@ export const FIELD_FOCUS =
   "focus-visible:outline-none focus-visible:data-[zeros-keyboard-focus]:border-accent";
 
 export const FIELD_INVALID =
-  "aria-[invalid=true]:border-red-primary aria-[invalid=true]:hover:border-red-primary focus-visible:data-[zeros-keyboard-focus]:aria-[invalid=true]:border-red-primary";
+  "aria-[invalid=true]:border-red-primary aria-[invalid=true]:hover:border-red-primary focus-visible:data-[zeros-keyboard-focus]:aria-[invalid=true]:border-red-primary focus-visible:data-[zeros-keyboard-focus]:aria-[invalid=true]:ring-1 focus-visible:data-[zeros-keyboard-focus]:aria-[invalid=true]:ring-red-primary";
 
 export interface FieldProps {
   label: React.ReactNode;
