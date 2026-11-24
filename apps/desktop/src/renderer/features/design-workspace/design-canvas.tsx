@@ -2560,6 +2560,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
       const provisional = article && isPreparedDesignFrame(frame) ? presentDesignFrameCopy({
         workspaceId, frame, article, geometry,
         current: () => isCurrentDesignPageOwner(owner) && canvasLifetimeRef.current === canvasLifetime,
+        zoom: (wheelViewportRef.current ?? designWorkspaceView(workspaceId)).zoom,
       }) : null;
       if (provisional) {
         provisionalCopiesRef.current.add(provisional.retire);
@@ -3373,6 +3374,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
           point: pointer => designCanvasPointFromClient({ x: pointer.clientX, y: pointer.clientY }, bounds,
             wheelViewportRef.current ?? designWorkspaceView(workspaceId)),
           current: () => nudgeLifetimeRef.current === lifetime && canvasLifetimeRef.current === canvasLifetime,
+          zoom: () => (wheelViewportRef.current ?? designWorkspaceView(workspaceId)).zoom,
           nest: showNestTarget, finished: () => { gestureCancelRef.current = null; },
           saving: save => savedEditingSession?.retain(save),
           presenting: retire => {

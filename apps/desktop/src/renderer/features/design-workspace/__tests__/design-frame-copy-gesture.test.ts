@@ -9,7 +9,7 @@ const mocks = vi.hoisted(() => ({
   runtime: null as any, runtimeState: null as any, destination: null as any, copyVariant: null as string | null, statePreview: false,
   identity: "main" as "main" | "ordinary" | "instance" | "unknown",
   captureAvailable: true,
-  presentation: { hasPixels: true, paint: vi.fn(), remove: vi.fn(), handoff: vi.fn(async () => {}), adopt: vi.fn() },
+  presentation: { hasPixels: true, sharp: true, wantedScale: 2, paint: vi.fn(), remove: vi.fn(), handoff: vi.fn(async () => {}), adopt: vi.fn(), element: { dataset: {} } },
 }));
 vi.mock("../../../platform/bridge/design-frame-runtime", () => ({ designFrameRuntime: () => mocks.runtime, waitForDesignFrameRuntime: mocks.wait }));
 vi.mock("../design-pointer-gesture", () => ({ beginDesignPointerGesture: (input: Parameters<typeof beginDesignPointerGesture>[0]) => {
@@ -57,6 +57,7 @@ beforeEach(() => {
   mocks.statePreview = false;
   mocks.identity = "main";
   mocks.captureAvailable = true;
+  Object.assign(mocks.presentation, { hasPixels: true, sharp: true, wantedScale: 2 });
 });
 
 describe("canvas frame Option copy", () => {
@@ -133,6 +134,26 @@ describe("canvas frame Option copy", () => {
     }));
     expect(input.statePreviewed).not.toHaveBeenCalled();
     await input.saving.mock.calls[0]?.[0];
+  });
+
+  it("captures a blurry copy's pixels again at the resolution they are drawn", async () => {
+    const capture = { sourceVersion: frame.sourceVersion, dataUrl: "data:image/png;base64,sharp", scale: 2, nodeId: null };
+    const runtime = { sourceVersion: frame.sourceVersion, captureScreenshot: vi.fn(async () => capture) };
+    mocks.runtime = runtime;
+    Object.assign(mocks.presentation, { hasPixels: true, sharp: false, wantedScale: 2 });
+    start();
+    mocks.gesture!.onMove({ clientX: 65, clientY: 75 } as PointerEvent);
+    mocks.gesture!.onMove({ clientX: 70, clientY: 80 } as PointerEvent);
+    expect(runtime.captureScreenshot).toHaveBeenCalledExactlyOnceWith(null, 2, expect.anything(), "explicit");
+    await vi.waitFor(() => expect(mocks.presentation.adopt).toHaveBeenCalledWith({ ...capture, nodeId: "::zeros-document-body" }));
+  });
+
+  it("keeps an already sharp copy free of capture work", () => {
+    const runtime = { sourceVersion: frame.sourceVersion, captureScreenshot: vi.fn() };
+    mocks.runtime = runtime;
+    start();
+    mocks.gesture!.onMove({ clientX: 65, clientY: 75 } as PointerEvent);
+    expect(runtime.captureScreenshot).not.toHaveBeenCalled();
   });
 
   it("notifies when a state preview is copied as Default", () => {
