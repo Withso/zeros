@@ -8,34 +8,11 @@
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { RehearsalFailure, type Api, type ApiReply, type StageContext } from "./contract.js";
-import { TEAM_OWNERSHIP_HEADER, TEAM_SHARING_HEADER } from "../team-sharing/contract.js";
+import { connectionIds, identity, isolationProbes, ISOLATION_SECRET, TEAM, tryProbes, type Method, type Prober } from "./isolation-probes.js";
+import { organizationRoute, removeIsolationOrganization } from "./isolation-org.js";
+export { ISOLATION_SECRET } from "./isolation-probes.js";
 import { call, check, clearEnvironment, createProject, createWorkspace, deleteProject, deleteWorkspace, errorCode, lifecycle, readEnvironment,
-  seedEnvironments, ENVIRONMENT_PATH, until, waitCopyReady, waitState } from "./steps.js";
-
-const TEAM = { [TEAM_SHARING_HEADER]: "1", [TEAM_OWNERSHIP_HEADER]: "1" };
-const REFUSED = new Set([403, 404]);
-/** The build secret's name; its value is the run's own marker, looked for in every reply. */
-export const ISOLATION_SECRET = "ZR_ISOLATION_SECRET";
-type Method = "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
-/** One request B must be refused. `absent` is the same request about something that does not exist (item 10). */
-export type Probe = { route: string; method: Method; path: string; body?: unknown; headers?: Record<string, string>; absent?: string; absentBody?: unknown };
-type Identity = { userId: string; personal: { id: string; slug: string | null } | null;
-  organizations: { id: string; slug: string | null; personal: boolean; role: string | null }[] };
-
-const Me = z.object({ user: z.object({ id: z.string() }).passthrough(), organizations: z.array(z.object({ id: z.string(), slug: z.string().nullable().optional(),
-  role: z.string().nullable().optional(), isPersonal: z.boolean().optional() }).passthrough()) }).passthrough();
-async function identity(api: Api, step: string): Promise<Identity> {
-  const me = Me.parse((await call(api, "GET", "/v1/me", step)).body);
-  const organizations = me.organizations.map(org => ({ id: org.id, slug: org.slug ?? null, personal: org.isPersonal === true, role: org.role ?? null }));
-  const personal = organizations.find(org => org.personal && org.role === "owner") ?? null;
-  return { userId: me.user.id, personal: personal ? { id: personal.id, slug: personal.slug } : null, organizations };
-}
-/** The connection ids in a connections list (`{ organization: [...], personal: [...] }`, each row with its id). */
-const connectionIds = (value: unknown) => {
-  const rows = z.object({ organization: z.array(z.object({ id: z.string() }).passthrough()).optional(), personal: z.array(z.object({ id: z.string() }).passthrough()).optional() })
-    .passthrough().safeParse(value);
-  return rows.success ? [...rows.data.organization ?? [], ...rows.data.personal ?? []].map(row => row.id).sort() : [];
-};
+  seedEnvironments, until, waitCopyReady, waitState } from "./steps.js";
 
 export async function stageIsolation(ctx: StageContext): Promise<Record<string, number>> {
   check(ctx.state.owner === "personal", "owner", "personal_route_only");
@@ -67,6 +44,11 @@ export async function stageIsolation(ctx: StageContext): Promise<Record<string, 
   ctx.step("a_identity");
   const a = await identity(api, "a_me"), b = await identity(other, "b_me");
   check(a.userId !== b.userId, "b_me", "same_account");
+  // --isolation-org-remove: only the kept organization's removal, through the product's own delete.
+  if (ctx.ports.isolationOrganization?.removeOrganization) {
+    await removeIsolationOrganization(ctx, send, a);
+    return { organizationRemoved: 1 };
+  }
   const aSlug = a.organizations.find(row => row.id === org)?.slug ?? null;
   ctx.step("a_project");
   // Its setup prints the secret: whatever the build shows A must not hold the value.
@@ -140,99 +122,15 @@ export async function stageIsolation(ctx: StageContext): Promise<Record<string, 
   const was = await snapshot();
 
   // ── B tries ─────────────────────────────────────────
-  const absentId = randomUUID(), absentOrg = randomUUID();
-  const swap = (path: string, id: string) => path.split(id).join(absentId);
-  const pr = (op: string, params: Record<string, unknown> = {}) => ({ op, params });
-  const number = (workspace as { number?: unknown }).number;
-  const probes: Probe[] = [
-    // 1. Projects.
-    { route: "project_read", method: "GET", path: P },
-    { route: "project_list", method: "GET", path: `/v1/cloud-v2/organizations/${org}/cloud-projects`, absent: `/v1/cloud-v2/organizations/${absentOrg}/cloud-projects` },
-    { route: "project_update_name", method: "PATCH", path: P, body: { name: `${prefix}iso-b` } },
-    { route: "project_update_repositories", method: "PATCH", path: P, body: { repositories: [{ repository: repository.repository, setup: "true",
-      defaultBranch: "main", fetchSubmodules: true }] } },
-    { route: "project_delete", method: "DELETE", path: P },
-    { route: "project_share", method: "POST", path: `${P}/share` },
-    { route: "project_warm", method: "POST", path: `${P}/warm` },
-    // 2. Ready copy.
-    { route: "copy_status", method: "GET", path: `${P}/ready-copy` },
-    { route: "copy_output", method: "GET", path: `${P}/ready-copy/output?generation=${built?.generation ?? 1}` },
-    { route: "copy_build", method: "POST", path: `${P}/ready-copy/build`, body: {} },
-    { route: "copy_retry", method: "POST", path: `${P}/ready-copy/retry`, body: {} },
-    // 3. Build secrets (names only are ever listed; set, patch and remove).
-    { route: "secrets_list", method: "GET", path: `${P}/build-secrets` },
-    { route: "secrets_set", method: "PUT", path: `${P}/build-secrets`, body: { secrets: { ZR_B: "b" } } },
-    { route: "secrets_patch", method: "PATCH", path: `${P}/build-secrets`, body: { set: { ZR_B: "b" } } },
-    { route: "secrets_delete", method: "PATCH", path: `${P}/build-secrets`, body: { remove: [ISOLATION_SECRET] } },
-    // 4. Workspace.
-    { route: "workspace_read", method: "GET", path: W },
-    ...aSlug && typeof number === "number" ? [{ route: "workspace_by_number", method: "GET" as const, path: `/v1/cloud-v2/workspaces/by-number/${aSlug}/${number}`,
-      absent: `/v1/cloud-v2/workspaces/by-number/${aSlug}/999999` }] : [],
-    ...(["start", "stop", "archive", "restart"] as const).map(action => ({ route: `workspace_${action}`, method: "POST" as const, path: `${W}/${action}`, body: {} })),
-    { route: "workspace_delete", method: "DELETE", path: W },
-    { route: "keep_on", method: "PUT", path: `${W}/keep` },
-    { route: "keep_off", method: "DELETE", path: `${W}/keep` },
-    { route: "workspace_connect", method: "POST", path: `${W}/connect?wakePolicy=explicit`, body: { wake: true } },
-    { route: "workspace_rename", method: "POST", path: `${W}/rename`, body: { name: `${prefix}iso-b` } },
-    { route: "workspace_github_read", method: "POST", path: `${W}/github`, body: pr("gh.prList") },
-    { route: "workspace_github_auth", method: "POST", path: `${W}/github`, body: pr("gh.authStatus") },
-    { route: "workspace_github_create", method: "POST", path: `${W}/github`, body: { op: "gh.prCreate", params: { title: `${prefix}iso-b`, body: "" },
-      expected: { connectionGeneration: "1", repositoryId: repository.repositoryId, repository: repository.repository, branch: `${prefix}iso`, baseBranch: "main", contextRevision: "1" } } },
-    { route: "workspace_history", method: "POST", path: `${W}/history`, body: {} },
-    { route: "workspace_activity", method: "POST", path: `${W}/activity`, body: {} },
-    { route: "workspace_lost_work_dismiss", method: "POST", path: `${W}/lost-work/dismiss`, body: {} },
-    { route: "workspace_prompts", method: "GET", path: `${W}/prompts` },
-    { route: "workspace_followers", method: "GET", path: `${W}/followers` },
-    // 5. Create, naming A's things.
-    { route: "create_in_a_organization", method: "POST", path: "/v1/cloud-v2/workspaces", body: { organizationId: org, projectId: project.id, branch: `${prefix}iso-b` },
-      absent: "/v1/cloud-v2/workspaces", absentBody: { organizationId: absentOrg, projectId: absentId, branch: `${prefix}iso-b` } },
-    ...b.personal ? [
-      { route: "create_with_a_project", method: "POST" as const, path: "/v1/cloud-v2/workspaces", body: { organizationId: b.personal.id, projectId: project.id, branch: `${prefix}iso-b` },
-        absent: "/v1/cloud-v2/workspaces", absentBody: { organizationId: b.personal.id, projectId: absentId, branch: `${prefix}iso-b` } },
-    ] : [],
-    // 6. Team sharing and reassign, as B.
-    { route: "team_read", method: "GET", path: W, headers: TEAM },
-    { route: "team_list", method: "GET", path: `/v1/cloud-v2/workspaces?organizationId=${org}`, headers: TEAM, absent: `/v1/cloud-v2/workspaces?organizationId=${absentOrg}` },
-    { route: "team_reassign_candidates", method: "GET", path: `${W}/reassign-candidates`, headers: TEAM },
-    { route: "team_reassign", method: "POST", path: `${W}/reassign`, headers: TEAM,
-      body: { requestId: randomUUID(), toUserId: b.userId, expectedCreatorUserId: a.userId, expectedCreatorRevision: "1" } },
-    ...(["follow", "pin"] as const).map(verb => ({ route: `team_${verb}`, method: "POST" as const, path: `${W}/${verb}`, headers: TEAM, body: {} })),
-    { route: "team_stop", method: "POST", path: `${W}/stop`, headers: TEAM, body: {} },
-    { route: "team_rename", method: "POST", path: `${W}/rename`, headers: TEAM, body: { name: `${prefix}iso-b` } },
-    { route: "team_delete", method: "DELETE", path: W, headers: TEAM },
-    // 7. Environment.
-    { route: "environment_read", method: "GET", path: E(org), absent: E(absentOrg) },
-    { route: "environment_write", method: "PATCH", path: E(org), body: { expectedRevision: was.environment.revision, files: [{ path: ENVIRONMENT_PATH, content: "zr-b\n" }] },
-      absent: E(absentOrg) },
-    // 8. GitHub connections.
-    { route: "connections_list", method: "GET", path: `/v1/cloud-v2/organizations/${org}/github/connections`, absent: `/v1/cloud-v2/organizations/${absentOrg}/github/connections` },
-    ...connections.flatMap(connection => [
-      { route: "connection_repositories", method: "GET" as const, path: `/v1/cloud-v2/organizations/${org}/github/connections/${connection}/repositories` },
-      { route: "connection_delete", method: "DELETE" as const, path: `/v1/cloud-v2/organizations/${org}/github/connections/${connection}` },
-      ...b.personal ? [
-        { route: "connection_repositories_b", method: "GET" as const, path: `/v1/cloud-v2/organizations/${b.personal.id}/github/connections/${connection}/repositories` },
-        { route: "connection_in_b_project", method: "POST" as const, path: `/v1/cloud-v2/organizations/${b.personal.id}/cloud-projects`,
-          body: { name: `${prefix}iso-b`, level: "personal", repositories: [{ repository: repository.repository, connectionId: connection }] } },
-      ] : [],
-    ]),
-  ];
-
+  const prober: Prober = { send, violate, counts, note: (route, code) => ctx.note(`isolation:${route}:${code}`.slice(0, 80)), scan: (route, reply) => {
+    leaks(route, reply);
+    if (JSON.stringify(reply.body ?? null).includes(marker)) violate(route, "environment_returned");
+  } };
+  const probes = isolationProbes({ org, projectId: project.id, workspaceId: workspace.id, number: (workspace as { number?: unknown }).number, slug: aSlug, repository,
+    ownerUserId: a.userId, callerUserId: b.userId, callerOrg: b.personal?.id ?? null, connections, prefix, generation: built?.generation ?? 1,
+    environmentRevision: was.environment.revision, member: false });
   ctx.step("b_tries");
-  const ownIds = [project.id, workspace.id, org, ...connections];
-  for (const probe of probes) {
-    const reply = await send(other, probe, probe.route);
-    leaks(probe.route, reply);
-    if (JSON.stringify(reply.body ?? null).includes(marker)) violate(probe.route, "environment_returned");
-    if (!REFUSED.has(reply.status)) { violate(probe.route, `answered_${reply.status}`); continue; }
-    counts.refused!++;
-    // 10. The same answer as for something that does not exist: nothing tells B the thing is there.
-    const id = ownIds.find(own => probe.path.includes(own));
-    const absentPath = probe.absent ?? (id ? swap(probe.path, id) : undefined);
-    if (!absentPath) continue;
-    const absent = await send(other, { ...probe, path: absentPath, ...probe.absentBody !== undefined ? { body: probe.absentBody } : {} }, `${probe.route}_absent`);
-    if (errorCode(absent) === errorCode(reply)) counts.sameAsAbsent!++;
-    else violate(probe.route, `differs_${reply.status}_${absent.status}`);
-  }
+  await tryProbes(prober, other, probes, [project.id, workspace.id, org, ...connections], false, "", [project.id, workspace.id, ...connections]);
   // B's own connections list never holds A's connections.
   if (b.personal && connections.length) {
     const own = await send(other, { method: "GET", path: `/v1/cloud-v2/organizations/${b.personal.id}/github/connections` }, "b_connections");
@@ -263,31 +161,8 @@ export async function stageIsolation(ctx: StageContext): Promise<Record<string, 
     }
   }
 
-  // 9. The organization route: only where both accounts share an organization, one an admin and one a member.
-  const shared = a.organizations.filter(row => !row.personal).map(row => ({ id: row.id, a: row.role, b: b.organizations.find(other => other.id === row.id)?.role ?? null }))
-    .find(row => row.b && ((["owner", "admin"].includes(row.a ?? "") && row.b === "member") || (row.a === "member" && ["owner", "admin"].includes(row.b ?? ""))));
-  if (!shared) ctx.note("organization_route:not_available");
-  else {
-    ctx.step("organization_route");
-    ctx.note(`organization_route:${shared.a}_${shared.b}`);
-    const member = shared.a === "member" ? api : other;
-    // A member cannot edit an organization project, nor read its build secrets.
-    const list = await send(member, { method: "GET", path: `/v1/cloud-v2/organizations/${shared.id}/cloud-projects` }, "org_projects");
-    const orgProject = z.object({ projects: z.array(z.object({ id: z.string(), name: z.string(), level: z.string() }).passthrough()) }).passthrough()
-      .safeParse(list.body);
-    const target = orgProject.success ? orgProject.data.projects.find(row => row.level === "organization") : undefined;
-    if (!target) ctx.note("organization_route:no_organization_project");
-    else {
-      const base = `/v1/cloud-v2/organizations/${shared.id}/cloud-projects/${target.id}`;
-      for (const probe of [{ route: "org_member_edit", method: "PATCH" as const, path: base, body: { name: target.name } },
-        { route: "org_member_secrets", method: "GET" as const, path: `${base}/build-secrets` }]) {
-        const reply = await send(member, probe, probe.route);
-        if (REFUSED.has(reply.status)) counts.refused!++; else violate(probe.route, `answered_${reply.status}`);
-      }
-    }
-    // An admin and a member's personal project: needs the member's own personal project there, which this stage does not make.
-    ctx.note("organization_route:admin_personal_project_not_rehearsed");
-  }
+  // 9. The organization route, on the kept test organization (isolation-org.ts).
+  await organizationRoute(ctx, prober, a, b);
   // The audit log has no read route: nothing of A's can appear in one.
   ctx.note("audit_log:no_read_route");
 
@@ -308,3 +183,4 @@ export async function stageIsolation(ctx: StageContext): Promise<Record<string, 
   }
   return counts;
 }
+

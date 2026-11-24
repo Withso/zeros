@@ -23,13 +23,16 @@ const Created = z.object({
   staffGrant: z.object({ userId: Uuid, email: z.string().email(), organizationId: Uuid,
     previousRole: z.enum(["platform_owner", "developer", "support_admin"]).nullable(), madeOrganization: z.boolean().optional() }).strict().optional(),
   agentLogins: z.array(z.object({ organizationId: Uuid, provider: z.enum(["claude", "codex", "cursor"]), credentialId: Uuid }).strict()).max(8).optional(),
+  isolationOrg: z.object({ organizationId: Uuid, projects: z.array(Uuid).max(8), workspaces: z.array(Uuid).max(8),
+    environments: z.array(z.object({ repository: z.string(), repositoryId: z.string() }).strict()).max(4), signIn: z.boolean(),
+    pro: z.object({ before: Grant.nullable(), operations: z.array(Uuid).max(16) }).strict().optional() }).strict().optional(),
 });
 const Schema = z.object({
   version: z.literal(1), runId: Uuid, prefix: z.string().regex(/^zr-[0-9a-f]{8}-$/), startedAt: z.string(), target: z.enum(["alpha", "local"]).optional(),
   owner: z.enum(["personal", "organization"]), organizationId: Uuid, organizations: z.array(Uuid).max(4),
   created: Created,
   stages: z.record(z.string(), z.object({ ok: z.boolean(), step: z.string().optional(), code: z.string().optional(), skipped: z.string().optional(),
-    counts: z.record(z.string(), z.number()).optional(), notes: z.array(z.string().regex(/^[a-z0-9_:.-]{1,80}$/)).max(16).optional() })),
+    counts: z.record(z.string(), z.number()).optional(), notes: z.array(z.string().regex(/^[a-z0-9_:.-]{1,80}$/)).max(32).optional() })),
   shifts: z.number().int().nonnegative(), machineStarts: z.number().int().nonnegative(),
   waiting: z.object({ organizationId: Uuid, created: Created }).strict().optional(),
 }).strict();

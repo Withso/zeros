@@ -1,10 +1,11 @@
 // An in-memory Alpha for the rehearsal's unit tests: the API routes, bridge ops, Boat, R2, GitHub and database reads
 // the stages use, with a retention lifecycle that advances when a test shifts a workspace's clock. Every port call is
 // counted so a test can fail the n-th one, before or after its effect.
+import { FakeOrganizations } from "./rehearsal-org-fake.js";
 import { randomUUID } from "node:crypto";
 import { WORKSPACE_REPOSITORIES_FEATURE } from "../contract.js";
 import { connectWorkspace } from "../rehearsal/steps.js";
-import { RehearsalFailure, type Api, type ApiReply, type Bridge, type Ports, type ProGrant, type ProPort, type Query } from "../rehearsal/contract.js";
+import { RehearsalFailure, type Api, type ApiReply, type Bridge, type IsolationOrganizationRecord, type Ports, type ProGrant, type ProPort, type Query } from "../rehearsal/contract.js";
 
 type Workspace = {
   id: string; name: string; organizationId: string; state: string; branch: string; boatSandboxId: string; projectId?: string;
@@ -231,26 +232,45 @@ export class FakeAlpha {
   /** A second test account: a stranger to this organization, who reaches none of it. */
   readonly otherUserId = randomUUID();
   readonly otherOrganizationId = randomUUID();
+  /** The kept isolation organization's world, both accounts' view of it. */
+  readonly orgs = new FakeOrganizations(new Map([[this.userId, "user-2@zeros.build"], [this.otherUserId, "user-3@zeros.build"]]),
+    user => user === this.userId ? this.pro() : this.otherPro());
+  /** The second account's Pro grant, changed only through its operator port. */
+  otherProGrant: ProGrant | null = null;
+  readonly otherProChanges: ProGrant[] = [];
+  otherPro(): boolean {
+    const grant = this.otherProGrant;
+    return grant !== null && grant.enabled && (grant.validUntil === null || Date.parse(grant.validUntil) > this.now);
+  }
+  /** The kept organization's record (the CLI keeps it in a private file), and the run's choices. */
+  isolationRecord: IsolationOrganizationRecord | null = null;
+  isolationMemberLeaves = false;
+  isolationOrgRemove = false;
   /** Routes (method and path with ids as :id) the second account is wrongly answered on, with the status: the bug a stage must see. */
   readonly otherLeaks = new Map<string, number>();
   /** The same for a request with no session or a revoked one (each must answer 401). */
   readonly sessionlessLeaks = new Map<string, number>();
   otherApi(): Api {
-    return { json: (method, path) => this.counted(() => {
+    return { json: (method, path, body, headers) => this.counted(() => {
+      const world = this.orgs.handle(this.otherUserId, method, path, body as Record<string, unknown> | undefined);
+      if (world) { if (method !== "GET") this.writes.push(`other ${method} ${path.replace(/[0-9a-f-]{36}/g, ":id")}`); return world; }
       const shape = `${method} ${path.replace(/[0-9a-f-]{36}/g, ":id")}`;
       if (method !== "GET") this.writes.push(`other ${shape}`);
       // Only about the first account's own things: the same request about an id that does not exist is answered as usual.
       const ours = [this.organizationId, ...this.projects.keys(), ...this.workspaces.keys()].some(id => path.includes(id));
       const leaked = ours ? this.otherLeaks.get(shape) : undefined;
       if (leaked) return this.reply(leaked, {});
-      if (path === "/v1/me") return this.reply(200, { user: { id: this.otherUserId }, capabilities: { pro: false },
-        organizations: [{ id: this.otherOrganizationId, slug: "user-3", name: "Zeros User-3", role: "owner", isPersonal: true, seat: "free" }] });
+      if (path === "/v1/me") return this.reply(200, { user: { id: this.otherUserId, email: "user-3@zeros.build" }, capabilities: { pro: this.otherPro() },
+        organizations: [{ id: this.otherOrganizationId, slug: "user-3", name: "Zeros User-3", role: "owner", isPersonal: true, seat: "free" }, ...this.orgs.memberships(this.otherUserId)] });
       // Its own organization: its own (empty) lists, never anything of the first account's.
       if (path.startsWith(`/v1/cloud-v2/organizations/${this.otherOrganizationId}/github/connections`) && method === "GET" && !path.includes("/repositories"))
         return this.reply(200, { organization: [], personal: [] });
       if (path.startsWith(`/v1/cloud-v2/organizations/${this.otherOrganizationId}/environment/`) && method === "GET")
         return this.reply(200, { environment: { revision: 0, variables: [], files: [] } });
-      if (path.startsWith("/v1/cloud-v2/workspaces?")) return this.reply(403, { error: { code: "forbidden" } });
+      // As Alpha answers them: the plain list is the caller's own (empty) one, whatever the organization; the team list
+      // of an organization the caller is not in is refused.
+      if (path.startsWith("/v1/cloud-v2/workspaces?")) return headers?.["X-Zeros-Team-Sharing"] === "1"
+        ? this.reply(403, { error: { code: "forbidden" } }) : this.reply(200, { workspaces: [] });
       return this.reply(404, { error: { code: "not_found" } });
     }) };
   }
@@ -268,6 +288,8 @@ export class FakeAlpha {
 
   private route(method: string, path: string, body: Record<string, unknown> = {}, headers: Record<string, string> = {}): ApiReply {
     if (method !== "GET") this.writes.push(`${method} ${path.replace(/[0-9a-f-]{36}/g, ":id")}`);
+    const world = this.orgs.handle(this.userId, method, path, body);
+    if (world) return world;
     const url = new URL(path, "https://alpha.test"), parts = url.pathname.split("/").filter(Boolean);
     // A Personal organization whose Pro ended has no cloud: its GitHub connection, projects and workspace list answer 404
     // (organization), as Alpha's do; a workspace's own routes answer 403 pro_required (below).
@@ -326,8 +348,9 @@ export class FakeAlpha {
         row.revoked = true; return this.reply(200, { revoked: true });
       }
     }
-    if (url.pathname === "/v1/me") return this.reply(200, { user: { id: this.userId }, capabilities: { pro: this.pro() },
-      organizations: [{ id: this.organizationId, slug: "user-2", name: "Zeros User-2", role: "owner", isPersonal: true, seat: this.pro() ? "pro" : "free" }] });
+    if (url.pathname === "/v1/me") return this.reply(200, { user: { id: this.userId, email: "user-2@zeros.build" }, capabilities: { pro: this.pro() },
+      organizations: [{ id: this.organizationId, slug: "user-2", name: "Zeros User-2", role: "owner", isPersonal: true, seat: this.pro() ? "pro" : "free" },
+        ...this.orgs.memberships(this.userId)] });
     if (parts[2] === "organizations" && parts[4] === "cloud-projects") {
       const id = parts[5];
       if (!id && method === "GET") return this.reply(200, { canCreateOrganization: true, personalAllowed: false,
@@ -624,6 +647,7 @@ export class FakeAlpha {
   }
 
   ports(overrides: Partial<Ports> = {}): Ports {
+    const memberLeaves = () => this.isolationMemberLeaves, removeOrganization = () => this.isolationOrgRemove;
     return {
       release: () => this.counted(() => true), api: this.api(), bridge: id => this.bridge(id),
       boat: {
@@ -660,6 +684,19 @@ export class FakeAlpha {
       },
       clock: { now: () => this.now, sleep: async ms => { this.now += ms; this.tick(); } },
       pro: this.proPort(), other: this.otherApi(), anonymous: this.sessionlessApi(), revoked: this.sessionlessApi(),
+      isolationOrganization: {
+        read: async () => this.isolationRecord, save: async record => { this.isolationRecord = { ...record }; }, remove: async () => { this.isolationRecord = null; },
+        connectOther: async organizationId => { this.orgs.handle(this.otherUserId, "POST", "/v1/cloud-v2/github/connection", { organizationId, action: "pat" }); },
+        // Read when the stage runs, so a test may set them after the ports are made.
+        get memberLeaves() { return memberLeaves(); }, get removeOrganization() { return removeOrganization(); },
+        pro: {
+          read: () => this.counted(() => this.otherProGrant ? { ...this.otherProGrant } : null),
+          change: (grant, reason) => this.counted(() => {
+            if (reason.length < 16) throw new RehearsalFailure("pro_change", "reason");
+            this.otherProGrant = { ...grant }; this.otherProChanges.push({ ...grant }); return randomUUID();
+          }),
+        },
+      },
       githubSignIn: { connect: (organizationId, expected) => this.counted(async () => {
         const reply = this.route("POST", "/v1/cloud-v2/github/connection", { organizationId, expected, action: "pat", token: "synthetic" });
         if (reply.status !== 200) throw new RehearsalFailure("github_sign_in_connect", `http_${reply.status}`);
@@ -676,6 +713,10 @@ export class FakeAlpha {
     const rows = (list: Record<string, unknown>[]) => ({ rows: list, rowCount: list.length });
     const ids = (values[0] ?? []) as string[];
     // Stage isolation: what B's attempts could have made (copies of A's project, workspaces in either organization).
+    if (text.startsWith("SELECT archived_at IS NOT NULL AS archived, archive_reason FROM cloud_v2_workspaces WHERE id")) {
+      const row = this.orgs.archive(String(values[0]));
+      return rows(row ? [row] : []);
+    }
     if (text.startsWith("SELECT count(*)::int AS n FROM cloud_v2_ready_copies WHERE project_id"))
       return rows([{ n: this.projects.get(String(values[0]))?.generation ?? 0 }]);
     if (text.startsWith("SELECT count(*)::int AS n FROM cloud_v2_workspaces WHERE org_id = ANY"))

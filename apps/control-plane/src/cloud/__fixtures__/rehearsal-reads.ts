@@ -38,6 +38,7 @@ export const REHEARSAL_READS: CatalogRead[] = [
   { name: "retention wakes", text: `SELECT count(*)::int AS wakes FROM cloud_v2_maintenance_wakes
       WHERE workspace_id = ANY($1::uuid[]) AND kind = 'wake' AND outcome = 'stopped'`, values: s => [[s.workspace]], sees: positive("wakes") },
   { name: "isolation copies", text: "SELECT count(*)::int AS n FROM cloud_v2_ready_copies WHERE project_id = $1::uuid", values: s => [s.project] },
+  { name: "isolation member left", text: "SELECT archived_at IS NOT NULL AS archived, archive_reason FROM cloud_v2_workspaces WHERE id = $1::uuid", values: s => [s.workspace] },
   { name: "isolation workspaces", text: "SELECT count(*)::int AS n FROM cloud_v2_workspaces WHERE org_id = ANY($1::uuid[])", values: s => [[s.org]] },
   { name: "retention scrubs", text: "SELECT id::text AS id, archive_scrub FROM cloud_v2_workspaces WHERE id = ANY($1::uuid[])", values: s => [[s.workspace]] },
   { name: "retention scrubs and changes", text: `SELECT id::text AS id, archive_scrub, coalesce(changed_since_stop_generation = stop_generation, false) AS changed

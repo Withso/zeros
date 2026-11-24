@@ -175,6 +175,9 @@ export function writeLines(stage: StageName, prefix: string, repositories: { one
       "isolation would send, as the second test user, every project, ready copy, build secret, workspace, create, team-sharing, environment and" +
         " GitHub connection route with the first user's ids, and the same with ids that do not exist; then each without a session and with a revoked one",
       "isolation would read everything back as the first user, then clear the environment and delete the workspace and the project",
+      "isolation would use the kept organization zr-isolation (made the first time: create, invite the second user, accept; one invitation email)," +
+        " connect the second user's token sign-in there, make its personal project and workspace (2 machine starts), have the first user (owner)" +
+        " try every route against them, then delete them; the organization itself is kept (only --isolation-org-remove deletes it)",
     ],
     // A proposal for the owner: what lets a test user run A and C without the owner's account in the stages themselves.
     setup: owner === "personal" ? [

@@ -34,13 +34,15 @@ export function errorCode(reply: ApiReply): string {
 }
 const NOT_FOUND_MESSAGES: Record<string, string> = { "Not found": "route_or_resource", "Organization not found": "organization" };
 
+/** A request that failed in transport or took too long: "not yet" inside a poll, retried by cleanup. */
+export const TRANSIENT_CODE = /^(network|request_timeout)/;
 export async function until<T>(ctx: Pick<StageContext, "ports">, step: string, timeoutMs: number, pollMs: number,
   probe: () => Promise<T | false | undefined | null>): Promise<T> {
   const deadline = ctx.ports.clock.now() + timeoutMs;
   for (;;) {
     // A read that still failed in transport after its own retries is "not yet": the poll goes on until its deadline.
     const result = await probe().catch((error: unknown) => {
-      if (error instanceof RehearsalFailure && /^network/.test(error.code)) return false as const;
+      if (error instanceof RehearsalFailure && TRANSIENT_CODE.test(error.code)) return false as const;
       throw error;
     });
     if (result) return result;

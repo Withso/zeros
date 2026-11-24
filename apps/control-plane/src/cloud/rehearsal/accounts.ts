@@ -23,19 +23,20 @@ export type SignInDeps = {
   probeWorkosOrganization?: string;
 };
 
-/** A transport failure's class, by closed values only, or null when it is none: `timeout` and `aborted` (an AbortSignal),
+/** A transport failure's class, by closed values only, or null when it is none: `request_timeout` (one request that took
+ * too long; never a wait that ran out, which is `timeout`) and `aborted` (an AbortSignal),
  * `network:<CODE>` from the error or its cause (ECONNRESET, ETIMEDOUT, ENOTFOUND, UND_ERR_SOCKET, ...), `network` for a
  * fetch failure with no code, and `json_parse` for a body that was not JSON. Never a message. */
 export function transportCode(error: unknown): string | null {
   const value = error as { name?: unknown; code?: unknown; cause?: unknown } | null;
   if (!value || typeof value !== "object") return null;
-  if (value.name === "TimeoutError") return "timeout";
+  if (value.name === "TimeoutError") return "request_timeout";
   if (value.name === "AbortError") return "aborted";
   if (value.name === "SyntaxError") return "json_parse";
   const code = [value.code, (value.cause as { code?: unknown } | null)?.code].find(item => typeof item === "string" && /^[A-Z][A-Z0-9_]{1,39}$/.test(item));
   if (typeof code === "string") return `network:${code}`;
   const cause = value.cause as { name?: unknown } | null;
-  if (cause?.name === "TimeoutError" || cause?.name === "ConnectTimeoutError") return "timeout";
+  if (cause?.name === "TimeoutError" || cause?.name === "ConnectTimeoutError") return "request_timeout";
   return value.name === "TypeError" && cause ? "network" : null;
 }
 
@@ -59,7 +60,7 @@ const throttled = (error: unknown) => {
   return code.startsWith("http_429");
 };
 /** A transport failure: one the rehearsal classified as such, or a raw one transportCode names. */
-const transport = (error: unknown) => error instanceof RehearsalFailure ? /^(network|timeout|aborted)/.test(error.code)
+const transport = (error: unknown) => error instanceof RehearsalFailure ? /^(network|request_timeout|timeout|aborted)/.test(error.code)
   : !(error instanceof Gate0Failure) && transportCode(error) !== null && transportCode(error) !== "json_parse";
 
 /** Retries a throttled step (429), and a read that failed in transport (a reset, a timeout), after 5, 15 and 45 s. */

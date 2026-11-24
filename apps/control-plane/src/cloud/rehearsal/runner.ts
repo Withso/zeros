@@ -6,11 +6,12 @@ import { stageProjects } from "./stage-projects.js";
 import { stageProvision } from "./stage-provision.js";
 import { stagePersonal } from "./stage-personal.js";
 import { stageIsolation } from "./stage-isolation.js";
+import { ISOLATION_ORGANIZATION, removeOrganizationThings } from "./isolation-org.js";
 import { stageRetention } from "./stage-retention.js";
 import { stageSubmodules } from "./stage-submodules.js";
 import { stageWaiting, waitingContext } from "./stage-waiting.js";
 import { changePro, sameGrant, stageSetup } from "./stage-setup.js";
-import { WAITING_INSTALL_SCRIPT, agentCredentialLive, check, clearEnvironment, removeAgentLogin, disconnectGithubSignIn, githubSignIn, deleteProject, deleteWorkspace, getWorkspace, listProjects, listWorkspaces, readEnvironment,
+import { TRANSIENT_CODE, WAITING_INSTALL_SCRIPT, agentCredentialLive, check, clearEnvironment, removeAgentLogin, disconnectGithubSignIn, githubSignIn, deleteProject, deleteWorkspace, getWorkspace, listProjects, listWorkspaces, readEnvironment,
   readInstallScript, writeInstallScript } from "./steps.js";
 
 export type Stage = (ctx: StageContext) => Promise<Record<string, number>>;
@@ -54,7 +55,7 @@ export function stageContext(ports: Ports, state: RehearsalState, save: () => Pr
     ports, state, save, repositories, timing, projectLevel: state.owner === "personal" ? "personal" : "organization",
     step(name) { finish(); last = name; startedAt = ports.clock.now(); },
     takeTimings: () => { finish(); const taken = timings; timings = []; last = "start"; startedAt = ports.clock.now(); return taken; },
-    note(code) { if (/^[a-z0-9_:.-]{1,80}$/.test(code) && notes.length < 16) notes.push(code); },
+    note(code) { if (/^[a-z0-9_:.-]{1,80}$/.test(code) && notes.length < 32) notes.push(code); },
     takeNotes: () => { const taken = notes; notes = []; return taken; },
     count(name) { if (/^[a-zA-Z0-9_]{1,40}$/.test(name)) counts[name] = (counts[name] ?? 0) + 1; },
     takeCounts: () => { const taken = counts; counts = {}; return taken; },
@@ -140,7 +141,7 @@ async function preconditions(ctx: StageContext, options: RunOptions, account: bo
 // ── Cleanup and inventory ───────────────────────────────
 
 export type Inventory = Record<"workspaces" | "projects" | "branches" | "pulls" | "machines" | "objects" | "environments" | "githubSignIns" | "pro" | "computerBase" |
-  "installScripts" | "agentLogins" | "databaseRows", number>;
+  "installScripts" | "agentLogins" | "databaseRows" | "isolationOrgThings", number>;
 
 /** Removes everything this run created or named with its prefix, best effort per item, then reads the inventory. */
 /** Whether cleanup needs a signed-in account: anything recorded that only the API removes, or a create attempted (a
@@ -148,11 +149,17 @@ export type Inventory = Record<"workspaces" | "projects" | "branches" | "pulls" 
  * run does not. */
 export const cleanupNeedsAccount = (state: RehearsalState) => [state.created, state.waiting?.created].some(created => created &&
   created.workspaces.length + created.projects.length + created.environments.length + created.githubSignIns.length + (created.pro?.operations.length ?? 0)
-    + (created.agentLogins?.length ?? 0) > 0)
+    + (created.agentLogins?.length ?? 0) + (created.isolationOrg ? 1 : 0) > 0)
   || state.machineStarts > 0;
 
 export async function cleanup(ctx: StageContext, options: { accountless?: boolean; keepBase?: boolean; log(line: string): void }): Promise<{ inventory: Inventory; failures: number }> {
-  const main = await cleanupOrganization(ctx, options);
+  // The second account's things in the kept isolation organization, removed as it first; the organization stays on purpose.
+  const isolation = ctx.state.created.isolationOrg ? await removeOrganizationThings(ctx, { log: line => options.log(safeLine(line)) })
+    .catch((error: unknown) => { options.log(safeLine(`cleanup isolation_org: ${error instanceof RehearsalFailure ? error.code : "failed"}`)); return 1; }) : 0;
+  if (ctx.ports.isolationOrganization && await ctx.ports.isolationOrganization.read().catch(() => null))
+    options.log(safeLine(`kept on purpose: the isolation organization ${ISOLATION_ORGANIZATION.slug} (only --isolation-org-remove deletes it)`));
+  const first = await cleanupOrganization(ctx, options);
+  const main = { inventory: first.inventory, failures: first.failures + isolation };
   if (!ctx.state.waiting) return main;
   // Stage waiting's organization, as its own account: the same steps, and one inventory summed over both.
   if (!ctx.ports.waiting) {
@@ -171,10 +178,16 @@ async function cleanupOrganization(ctx: StageContext, options: { accountless?: b
   const { ports, state } = ctx;
   if (options.accountless && cleanupNeedsAccount(state)) throw new RehearsalFailure("cleanup", "account_required");
   let failures = 0;
+  // A step that failed in transport or on one slow request (a restart, a dropped connection) is tried again, twice, 5 s
+  // apart, before it counts as a failure.
   const attempt = async (what: string, work: () => Promise<unknown>) => {
-    try { await work(); } catch (error) {
-      failures++;
-      options.log(safeLine(`cleanup ${what}: ${error instanceof RehearsalFailure ? error.code : "failed"}`));
+    for (let tries = 0; ; tries++) {
+      try { await work(); return; } catch (error) {
+        if (error instanceof RehearsalFailure && TRANSIENT_CODE.test(error.code) && tries < 2) { await ports.clock.sleep(5_000); continue; }
+        failures++;
+        options.log(safeLine(`cleanup ${what}: ${error instanceof RehearsalFailure ? error.code : "failed"}`));
+        return;
+      }
     }
   };
   // A run that changed Pro may have left it off (a failure inside stage B): while off, the API refuses the account's own
@@ -322,7 +335,9 @@ export async function readInventory(ctx: StageContext, accountless = false, keep
   let agentLogins = 0;
   for (const login of state.created.agentLogins ?? [])
     if (accountless || await agentCredentialLive(ports.api, login.credentialId, "inventory_agent_login").catch(() => true)) agentLogins++;
-  return { workspaces, projects, branches, pulls, machines, objects, environments, githubSignIns, pro, computerBase, installScripts, agentLogins, databaseRows };
+  // The second account's things in the kept isolation organization, until cleanup has removed them (the organization stays).
+  const isolationOrgThings = state.created.isolationOrg ? 1 : 0;
+  return { workspaces, projects, branches, pulls, machines, objects, environments, githubSignIns, pro, computerBase, installScripts, agentLogins, databaseRows, isolationOrgThings };
 }
 
 export function inventoryLines(inventory: Inventory): { lines: string[]; clean: boolean } {
