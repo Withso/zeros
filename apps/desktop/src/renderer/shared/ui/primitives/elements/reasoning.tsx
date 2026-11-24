@@ -37,7 +37,7 @@ const ReasoningTrigger = React.forwardRef<
   <CollapsibleTrigger
     ref={ref}
     className={cn(
-      "text-fg2 hover:bg-bg2-hover/50 hover:text-fg1 focus-visible:ring-highlighted-bright flex w-full items-center gap-2 rounded-sm px-2 py-1 text-left text-xs font-medium transition-colors focus-visible:ring-1 focus-visible:outline-none",
+      "text-fg2 hover:bg-bg2-hover/50 hover:text-fg1 focus-visible:ring-accent flex w-full items-center gap-2 rounded-sm px-2 py-1 text-left text-xs font-medium transition-colors focus-visible:ring-1 focus-visible:outline-none",
       className,
     )}
     {...props}

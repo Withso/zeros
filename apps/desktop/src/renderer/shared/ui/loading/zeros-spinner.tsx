@@ -1,13 +1,14 @@
 // ──────────────────────────────────────────────────────────
-// ZerosSpinner — the "Orbit" loader, the agent "Puzzle" and the
+// ZerosSpinner — the logo loader, the agent "Puzzle" and the
 // transcript's glass square (square-tile loaders on one 4 × 4 grid)
 // ──────────────────────────────────────────────────────────
 //
-//   • orbit (default) — loading. A snake laps the ring of a 4 × 4 square over
-//     a faint track, one lap every 1200ms. Track and snake are continuous
-//     bands, and the snake's tail fades as one smooth ramp (orbit-motion.ts),
-//     so the loop never breaks into grey blocks. Pure CSS: every layer runs
-//     the shared `zeros-orbit-lap` keyframe (styles/global/animations.css).
+//   • logo (default) — loading. The Island Z running the startup loader's
+//     Weave (startup-loader.tsx): its four rows step sideways on a 72ms beat,
+//     neighbours in opposite directions, and land back on the Z. One loop is
+//     1800ms, moving for the first half and resting on the Z for the second.
+//     Pure CSS: the rows run the shared `zeros-logo-weave-*` keyframes
+//     (styles/global/animations.css), the startup loader's own steps.
 //
 //   • agent — the agent is working. A 4 × 4 sliding-tile square whose corner
 //     tiles never move, worked by three hands at once (puzzle-square.tsx,
@@ -41,44 +42,31 @@ import React from "react";
 import { cn } from "@/renderer/shared/ui/cn";
 
 import { LOADER_GRID, loaderFrame } from "./loader-frame";
-import {
-  ORBIT_LAP_MS,
-  ORBIT_LAYERS,
-  ORBIT_REST_HEAD,
-  ORBIT_RING_LENGTH,
-  ORBIT_RING_PATH,
-  orbitDashArray,
-} from "./orbit-motion";
+import { STARTUP_LOGO_WEAVE_ROWS } from "@/renderer/shared/ui/startup-loader";
 import { GlassTiles } from "./glass-square";
 import { pickGlassMotion, type GlassMotion } from "./glass-motion";
 import { PuzzleTiles } from "./puzzle-square";
 import { usePrefersReducedMotion } from "./use-prefers-reduced-motion";
 import { useElementActivity } from "./activity-scope";
 
-export type ZerosSpinnerVariant = "orbit" | "agent" | "glass";
+export type ZerosSpinnerVariant = "logo" | "agent" | "glass";
 
 export type ZerosSpinnerTone = "default" | "inverted" | "inherit";
 
-/** Colors per tone — semantic loader tokens (semantic-tokens.css) with
+/** Color per tone — semantic loader tokens (semantic-tokens.css) with
  *  primitive fallbacks, so the loader still paints on a bare preview page.
- *  `active` colours the snake and the puzzle's tiles; `rest` the Orbit track.
- *  `undefined` leaves `color` unset so the loader inherits currentColor. */
-const TONE_COLORS: Record<
-  ZerosSpinnerTone,
-  { active: string | undefined; rest: string; restOpacity: number }
-> = {
-  default: {
-    active: "var(--loader-active, var(--fg2))",
-    rest: "var(--loader-rest, var(--muted-fg))",
-    restOpacity: 0.4,
-  },
-  inverted: {
-    active: "var(--loader-active-inverted, var(--primary-button-fg))",
-    rest: "var(--loader-rest-inverted, var(--primary-button-fg))",
-    restOpacity: 0.22,
-  },
-  inherit: { active: undefined, rest: "currentColor", restOpacity: 0.3 },
+ *  It colours the logo's rows and the puzzle's tiles; `undefined` leaves
+ *  `color` unset so the loader inherits currentColor. */
+const TONE_COLORS: Record<ZerosSpinnerTone, string | undefined> = {
+  default: "var(--loader-active, var(--fg2))",
+  inverted: "var(--loader-active-inverted, var(--primary-button-fg))",
+  inherit: undefined,
 };
+
+/** One Weave loop and the beat between its rows: the startup loader's timing
+ *  (index.html). */
+export const LOGO_WEAVE_LOOP_MS = 1800;
+export const LOGO_WEAVE_BEAT_MS = 72;
 
 export interface ZerosSpinnerProps {
   /** Side length of the loader box in CSS pixels (square). Default 24. The
@@ -86,7 +74,7 @@ export interface ZerosSpinnerProps {
   size?: number;
   /** Accessible label. Defaults to "Loading". */
   label?: string;
-  /** "orbit" (default) — loading, reconnecting, busy buttons. "agent" — the
+  /** "logo" (default) — loading, reconnecting, busy buttons. "agent" — the
    *  agent is working (chat tabs, workspace rows). "glass" — the agent is
    *  working, in the transcript (the active turn's rail, running tool and
    *  subagent rows). */
@@ -106,16 +94,16 @@ export interface ZerosSpinnerProps {
 export function ZerosSpinner({
   size = 24,
   label = "Loading",
-  variant = "orbit",
+  variant = "logo",
   tone = "default",
   tones,
   motion,
   className,
 }: ZerosSpinnerProps) {
   const host = React.useRef<HTMLSpanElement>(null);
-  const active = useElementActivity(host, variant === "orbit");
+  const active = useElementActivity(host, variant === "logo");
   const reducedMotion = usePrefersReducedMotion();
-  const colors = TONE_COLORS[tone];
+  const color = TONE_COLORS[tone];
   const { cell, extent, offset } = loaderFrame(size);
   // A glass square keeps the motion it mounted with.
   const [pickedMotion] = React.useState(() => motion ?? pickGlassMotion());
@@ -132,7 +120,7 @@ export function ZerosSpinner({
       // next to its label. `shrink-0`: the art is absolutely positioned, so a
       // flex parent could otherwise squeeze the box to nothing.
       className={cn("relative inline-block shrink-0 align-middle", className)}
-      style={{ width: size, height: size, color: colors.active }}
+      style={{ width: size, height: size, color }}
     >
       <svg
         aria-hidden="true"
@@ -146,7 +134,8 @@ export function ZerosSpinner({
           top: offset,
           width: extent,
           height: extent,
-          overflow: "visible",
+          // The logo's rows slide in from outside the square.
+          overflow: variant === "logo" ? "hidden" : "visible",
         }}
       >
         {variant === "glass" ? (
@@ -156,50 +145,29 @@ export function ZerosSpinner({
           // A fresh random square per mount: no two live loaders match.
           <PuzzleTiles active reducedMotion={reducedMotion} tones={tones} />
         ) : (
-          <OrbitBands colors={colors} reducedMotion={reducedMotion} active={active} />
+          <LogoRows reducedMotion={reducedMotion} active={active} />
         )}
       </svg>
     </span>
   );
 }
 
-// ── Orbit ─────────────────────────────────────────────────
+// ── Logo ──────────────────────────────────────────────────
 
-function OrbitBands({
-  colors,
-  reducedMotion,
-  active,
-}: {
-  colors: (typeof TONE_COLORS)[ZerosSpinnerTone];
-  reducedMotion: boolean;
-  active: boolean;
-}) {
-  // One random entry point per mount, so loaders mounted on the same frame
-  // don't lap in lockstep. Every layer shares it: the snake stays one piece.
-  const [phaseMs] = React.useState(() => Math.random() * ORBIT_LAP_MS);
-  const band = {
-    d: ORBIT_RING_PATH,
-    fill: "none",
-    strokeWidth: 1,
-    strokeLinejoin: "miter" as const,
-    pathLength: ORBIT_RING_LENGTH,
-  };
+function LogoRows({ reducedMotion, active }: { reducedMotion: boolean; active: boolean }) {
   return (
     <>
-      <path {...band} style={{ stroke: colors.rest, opacity: colors.restOpacity }} />
-      {ORBIT_LAYERS.map(({ length, alpha }) => (
+      {STARTUP_LOGO_WEAVE_ROWS.map((row, beat) => (
         <path
-          key={length}
-          {...band}
-          stroke="currentColor"
-          strokeDasharray={orbitDashArray(length)}
+          key={row.d}
+          d={row.d}
+          fill="currentColor"
           style={
             reducedMotion
-              ? { opacity: alpha, strokeDashoffset: ORBIT_RING_LENGTH - ORBIT_REST_HEAD }
+              ? undefined
               : {
-                  opacity: alpha,
-                  animation: `zeros-orbit-lap ${ORBIT_LAP_MS}ms linear infinite`,
-                  animationDelay: `${-phaseMs}ms`,
+                  animation: `zeros-logo-weave-${beat % 2 === 0 ? "r" : "l"} ${LOGO_WEAVE_LOOP_MS}ms infinite`,
+                  animationDelay: `${beat * LOGO_WEAVE_BEAT_MS}ms`,
                   animationPlayState: active ? undefined : "paused",
                 }
           }

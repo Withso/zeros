@@ -337,7 +337,7 @@ export const CLASS_RULES = [
   },
 ];
 
-const FAMILIES = ["red", "green", "yellow", "blue", "violet", "brown"];
+const FAMILIES = ["red", "green", "yellow", "blue", "violet"];
 
 /** Rules over all tokens that land on one element (one class context). */
 export const GROUP_RULES = [

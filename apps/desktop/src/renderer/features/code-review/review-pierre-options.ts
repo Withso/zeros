@@ -12,7 +12,7 @@ export const REVIEW_GUTTER_CSS = `
     outline: none;
   }
   [data-utility-button]:hover { color: var(--bg1); background: var(--blue-primary); }
-  [data-utility-button]:focus-visible:where(:not([data-zeros-focus-visible="false"])) { outline: 1px solid var(--highlighted-bright); }
+  [data-utility-button]:focus-visible:where(:not([data-zeros-focus-visible="false"])) { outline: 1px solid var(--accent); }
 `;
 
 /** Pierre supplies the real click/drag button; annotate its accessible name. */

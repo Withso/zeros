@@ -9,7 +9,7 @@ import { cn } from "@/renderer/shared/ui/cn";
 // fill with the resting edge unchanged — and tints only where they mean
 // something.
 const pillVariants = cva(
-  "inline-flex max-w-60 shrink-0 items-center whitespace-nowrap border transition-colors duration-120 ease-out focus-visible:border-highlighted-bright focus-visible:ring-[3px] focus-visible:ring-highlighted-bright/50 focus-visible:outline-none disabled:pointer-events-none disabled:opacity-50 [&_svg]:shrink-0 [&>span]:truncate",
+  "inline-flex max-w-60 shrink-0 items-center whitespace-nowrap border transition-colors duration-120 ease-out focus-visible:border-accent focus-visible:outline-none disabled:pointer-events-none disabled:opacity-50 [&_svg]:shrink-0 [&>span]:truncate",
   {
     variants: {
       size: {
@@ -22,7 +22,7 @@ const pillVariants = cva(
         // A tool target that failed.
         failed: "border-transparent bg-red-bg text-red-fg [&_svg]:text-red-fg",
         // The Design mode tag.
-        mode: "border-transparent bg-brown-bg text-brown-fg [&_svg]:text-brown-fg",
+        mode: "border-transparent bg-blue-bg text-blue-fg [&_svg]:text-blue-fg",
         // Anything whose target is gone.
         gone: "border-dashed border-border3 bg-transparent text-fg3",
         // A missing attachment: a yellow outline and a grey icon.

@@ -113,7 +113,7 @@ describe("ZerosSpinner variant=glass", () => {
   });
 
   it("leaves the other loaders plain", () => {
-    for (const variant of ["agent", "orbit"] as const) {
+    for (const variant of ["agent", "logo"] as const) {
       expect(render({ size: 16, variant })).not.toMatch(/<mask|<filter|zeros-glass/);
     }
   });

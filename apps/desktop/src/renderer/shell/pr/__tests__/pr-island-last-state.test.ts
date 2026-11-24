@@ -1,6 +1,6 @@
 // The durable "last rendered status" contract (2026-07-21): an app relaunch
 // or dev reload must resume the island from the state it last showed —
-// "Loading..." and the brown glyph fallback are reserved for a PR with no
+// "Loading..." and the open glyph fallback are reserved for a PR with no
 // derivation history — and the persisted state must arm the anti-flap mask so
 // the first post-relaunch fetch that echoes "unknown" cannot repaint the row.
 import { describe, it, expect, beforeEach, afterEach } from "vitest";

@@ -28,7 +28,7 @@ async function rowInk(page, clip, fill) {
   }, { data: png.toString("base64"), fill });
 }
 
-/** A sent message's line: the chat's 15px reading size on 22px lines. */
+/** A sent message's line: the chat's 14px reading size on 22px lines. */
 const LINE = 22;
 
 /** The brightest row of text line `n` (1-based) in a fold box whose first
@@ -127,13 +127,13 @@ export async function checkPromptFold({ page, check, harnessBase }) {
 
     await post(index, `hi ${tag}`);
     await at(`hi ${tag}`).toMatchObject({
-      atRight: true, width: "text", surface: true, type: "15px/22px", footprint: LINE, fold: null, toggle: null,
+      atRight: true, width: "text", surface: true, type: "14px/22px", footprint: LINE, fold: null, toggle: null,
     });
     // A line longer than the cap wraps at 7/8 of the lane.
     await post(index, `${tag} wide ${"word ".repeat(80)}`);
     await at(`${tag} wide`).toMatchObject({ atRight: true, width: "cap", surface: true });
     // The composer writes in the same reading size the message is sent in.
-    await expect(page.locator(".composer-pm:visible").first()).toHaveCSS("font-size", "15px");
+    await expect(page.locator(".composer-pm:visible").first()).toHaveCSS("font-size", "14px");
     await expect(page.locator(".composer-pm:visible").first()).toHaveCSS("line-height", "22px");
 
     await post(index, lines(6, `${tag} six`));

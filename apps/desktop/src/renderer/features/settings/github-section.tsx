@@ -598,7 +598,7 @@ export function GitHubSection({
                 )}
               >
                 <input
-                  className="border-border4 hover:border-fg3 checked:border-inverted-bg checked:bg-inverted-fg focus-visible:border-highlighted-bright focus-visible:ring-highlighted-bright/50 mt-px size-4 appearance-none rounded-full border transition-[background-color,border-color,box-shadow] duration-120 ease-out checked:shadow-[inset_0_0_0_4px_var(--inverted-bg)] focus-visible:ring-[3px] focus-visible:outline-none"
+                  className="border-border4 hover:border-fg3 checked:border-inverted-bg checked:bg-inverted-fg focus-visible:border-accent mt-px size-4 appearance-none rounded-full border transition-[background-color,border-color,box-shadow] duration-120 ease-out checked:shadow-[inset_0_0_0_4px_var(--inverted-bg)] focus-visible:outline-none"
                   type="radio"
                   name="github-auth-method"
                   value={method}

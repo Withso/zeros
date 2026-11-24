@@ -84,7 +84,7 @@ const ToolHeader = React.forwardRef<
     // hover tint fits the header instead of painting the empty lane to the
     // right; hover should fit the content, not exceed it.
     className={cn(
-      "group/tool-header text-fg1 hover:bg-bg2-hover/40 focus-visible:ring-highlighted-bright flex h-8 w-fit max-w-full min-w-0 items-center gap-2 rounded-md px-2 text-left text-sm font-normal transition-colors focus-visible:ring-1 focus-visible:outline-none",
+      "group/tool-header text-fg1 hover:bg-bg2-hover/40 focus-visible:ring-accent flex h-8 w-fit max-w-full min-w-0 items-center gap-2 rounded-md px-2 text-left text-sm font-normal transition-colors focus-visible:ring-1 focus-visible:outline-none",
       className,
     )}
     {...props}

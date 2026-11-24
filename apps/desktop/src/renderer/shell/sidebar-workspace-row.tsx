@@ -104,7 +104,7 @@ import { pullRequestTarget } from "../state/workspace-repositories";
 // 16px icon column. `transition-none` keeps a switch from cross-fading the old
 // and new selection.
 const SIDEBAR_WORKSPACE_ROW_CLS =
-  "group/workspace relative flex h-8 w-full min-w-0 shrink-0 select-none items-center overflow-hidden rounded-md pr-2 text-left text-xs font-normal text-fg2 transition-none [--row-fill:var(--surface-hover)] hover:bg-(--surface-hover) focus-within:bg-(--surface-hover) data-[active=true]:bg-bg2-highlight data-[active=true]:text-fg1 data-[active=true]:[--row-fill:var(--bg2-highlight)] data-[active=true]:hover:bg-bg2-highlight data-[active=true]:focus-within:bg-bg2-highlight has-[>button:focus-visible]:inset-ring has-[>button:focus-visible]:inset-ring-highlighted-bright has-[>button:focus-visible]:ring-[3px] has-[>button:focus-visible]:ring-highlighted-bright/50";
+  "group/workspace relative flex h-8 w-full min-w-0 shrink-0 select-none items-center overflow-hidden rounded-md pr-2 text-left text-xs font-normal text-fg2 transition-none [--row-fill:var(--surface-hover)] hover:bg-(--surface-hover) focus-within:bg-(--surface-hover) data-[active=true]:bg-bg2-highlight data-[active=true]:text-fg1 data-[active=true]:[--row-fill:var(--bg2-highlight)] data-[active=true]:hover:bg-bg2-highlight data-[active=true]:focus-within:bg-bg2-highlight has-[>button:focus-visible]:inset-ring has-[>button:focus-visible]:inset-ring-accent";
 // Grouped rows sit under their repository header: the state glyph starts on
 // the header's 40px name column. Ungrouped rows (repository icon first) and
 // standalone folder rows align with the headers' own 16px icon column.

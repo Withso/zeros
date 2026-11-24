@@ -40,11 +40,11 @@ describe("IconButton states", () => {
     }
   });
 
-  it("shows the keyboard ring at every size, including inline", () => {
+  it("shows the accent keyboard border at every size, including inline", () => {
     for (const size of ["inline", "compact", "standard"] as const) {
       const set = classes(render({ size }));
-      expect(set, size).toContain("focus-visible:border-highlighted-bright");
-      expect(set, size).toContain("focus-visible:ring-[3px]");
+      expect(set, size).toContain("focus-visible:border-accent");
+      expect(set, size).not.toContain("focus-visible:ring-[3px]");
     }
   });
 

@@ -21,8 +21,8 @@ describe("PrPill", () => {
   });
 
   it.each([
-    ["open", "border-(--pr-status-chip-border-active)", "text-brown-primary"],
-    ["conflicts", "border-(--pr-status-chip-border-active)", "text-brown-primary"],
+    ["open", "border-(--pr-status-chip-border-success)", "text-green-primary"],
+    ["conflicts", "border-(--pr-status-chip-border-warning)", "text-yellow-primary"],
     ["ready", "border-(--pr-status-chip-border-success)", "text-green-primary"],
     ["merged", "border-(--pr-status-chip-border-merged)", "text-violet-fg"],
     ["closed", "border-(--pr-status-chip-border-closed)", "text-red-fg"],

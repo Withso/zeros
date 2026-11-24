@@ -42,7 +42,7 @@ export async function runNotifyUserSmoke({ page, harnessBase, check }) {
     await expect(page.getByRole("tab", { name: "Simulator, unread" })).toBeVisible();
     await expect(page.getByRole("tab", { name: "Fix login", exact: true })).toBeVisible();
     const dot = page.getByRole("tab", { name: "Simulator, unread" }).locator("[data-chat-unread] span");
-    expect(await color(dot, "backgroundColor")).toBe(await token("--brown-fg"));
+    expect(await color(dot, "backgroundColor")).toBe(await token("--accent"));
     expect(await page.evaluate(() => [globalThis.__notifyUser.transcript("simulator"), globalThis.__notifyUser.transcript("login")])).toEqual([0, 0]);
     await shoot(page.getByRole("tablist", { name: "Chats" }), `notify-user-unread-${theme}`);
     check(`An attention update marks only an off-screen chat unread, on its token, without a transcript row, in ${theme}`, true);

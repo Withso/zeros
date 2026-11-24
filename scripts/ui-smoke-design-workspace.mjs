@@ -2062,7 +2062,7 @@ export async function runDesignWorkspaceCanvasSmoke({ page, waitFor, check }) {
       .evaluate((line) => {
         const style = getComputedStyle(line);
         return (
-          style.backgroundColor === "rgb(12, 140, 233)" &&
+          style.backgroundColor === "rgb(68, 137, 255)" &&
           style.boxShadow.includes("rgb(255, 255, 255)") &&
           style.boxShadow.includes("inset")
         );
@@ -2776,7 +2776,7 @@ export async function runDesignWorkspaceCanvasSmoke({ page, waitFor, check }) {
           return focused ? getComputedStyle(focused).boxShadow : "";
         }),
       )
-      .toContain("0px 0px 0px 3px");
+      .toContain("0px 0px 0px 1px inset");
     await page.evaluate(() => document.activeElement?.blur());
     await page.mouse.move(1, 1);
     check("property fields hover in bg2-highlight, edit without a ring and ring on keyboard focus", true);
@@ -4442,7 +4442,7 @@ export async function runDesignWorkspaceCanvasSmoke({ page, waitFor, check }) {
       return (
         (await homeFrame.locator(".zd-design-selection-handle").count()) ===
           0 &&
-        boundary.includes("rgb(12, 140, 233)") &&
+        boundary.includes("rgb(68, 137, 255)") &&
         runtimePaint.color !== "rgba(0, 0, 0, 0)" &&
         runtimePaint.fill === "rgba(0, 0, 0, 0)"
       );

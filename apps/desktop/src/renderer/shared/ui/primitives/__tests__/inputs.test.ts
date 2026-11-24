@@ -19,10 +19,7 @@ function classes(markup: string, index = 0) {
   return new Set(all[index]!.replaceAll("&#x27;", "'").replaceAll("&amp;", "&").split(/\s+/));
 }
 
-const KEYBOARD_RING = [
-  "focus-visible:data-[zeros-keyboard-focus]:border-highlighted-bright",
-  "focus-visible:data-[zeros-keyboard-focus]:ring-[3px]",
-];
+const KEYBOARD_BORDER = "focus-visible:data-[zeros-keyboard-focus]:border-accent";
 
 describe("the field box", () => {
   it("draws Input at 13/18 with 8px sides, a border4 hover and no stock shadow", () => {
@@ -35,21 +32,22 @@ describe("the field box", () => {
     expect(set).not.toContain("text-sm");
   });
 
-  it("rings on keyboard focus only, never on every focus", () => {
+  it("draws the 1px accent border on keyboard focus only, with no halo", () => {
     for (const element of [
       createElement(Input, { "aria-label": "Name" }),
       createElement(Textarea, { "aria-label": "Notes" }),
     ]) {
       const set = classes(renderToStaticMarkup(element));
-      for (const cls of KEYBOARD_RING) expect(set, cls).toContain(cls);
-      expect(set).not.toContain("focus-visible:border-highlighted-bright");
+      expect(set).toContain(KEYBOARD_BORDER);
+      expect(set).not.toContain("focus-visible:border-accent");
+      expect([...set].some((cls) => /focus-visible:.*ring-\[3px\]/.test(cls))).toBe(false);
     }
   });
 
-  it("shows invalid as a red border, and a red ring when focused by keyboard", () => {
+  it("shows invalid as a red border that keyboard focus keeps", () => {
     const set = classes(renderToStaticMarkup(createElement(Input, { "aria-invalid": true })));
     expect(set).toContain("aria-[invalid=true]:border-red-primary");
-    expect(set).toContain("focus-visible:data-[zeros-keyboard-focus]:aria-[invalid=true]:ring-red-primary/30");
+    expect(set).toContain("focus-visible:data-[zeros-keyboard-focus]:aria-[invalid=true]:border-red-primary");
   });
 
   it("offers the compact 24px field, the inline rename look and a mono value", () => {
@@ -73,7 +71,7 @@ describe("the field box", () => {
   it("offers a bare Textarea that grows with its text inside its own surface", () => {
     const set = classes(renderToStaticMarkup(createElement(Textarea, { appearance: "bare", "aria-label": "Reply" })));
     for (const cls of ["field-sizing-content", "border-0", "bg-transparent", "resize-none", "overflow-y-auto", "text-reading",
-      "focus-visible:data-[zeros-keyboard-focus]:ring-[3px]"]) {
+      "focus-visible:data-[zeros-keyboard-focus]:ring-1", "focus-visible:data-[zeros-keyboard-focus]:ring-accent"]) {
       expect(set, cls).toContain(cls);
     }
     expect(set).not.toContain("border-border3");
@@ -125,7 +123,7 @@ describe("Select trigger", () => {
     const set = classes(trigger());
     expect(set).toContain("pl-2");
     expect(set).toContain("data-[placeholder]:text-fg3");
-    for (const cls of KEYBOARD_RING) expect(set, cls).toContain(cls);
+    expect(set).toContain(KEYBOARD_BORDER);
     expect(set).toContain("aria-[invalid=true]:border-red-primary");
   });
 
@@ -143,14 +141,15 @@ describe("Select trigger", () => {
 });
 
 describe("Checkbox", () => {
-  it("is the 16px box with a 12px, 2px-stroke check", () => {
+  it("is the 16px accent box with a 12px, 2.5px-stroke white check", () => {
     const markup = renderToStaticMarkup(
       createElement(Checkbox, { checked: true, onChange: () => {}, "aria-label": "Copy" }),
     );
     expect(markup).toContain("size-4");
-    expect(markup).toContain('stroke-width="2"');
+    expect(markup).toContain('stroke-width="2.5"');
     expect(markup).toMatch(/lucide-check[^"]*size-3/);
-    expect(markup).toContain("hover:bg-primary-button-hover");
+    expect(markup).toContain("bg-accent border-accent text-accent-fg");
+    expect(markup).not.toContain("bg-inverted-bg");
   });
 
   it("lifts an off box on hover and dims a disabled one to 50%", () => {
@@ -178,19 +177,21 @@ describe("Switch", () => {
     const markup = renderToStaticMarkup(createElement(Switch, { "aria-label": "Sync" }));
     const track = classes(markup, 0);
     expect(track).not.toContain("shadow-sm");
-    expect(track).toContain("data-[state=unchecked]:not-focus-visible:enabled:hover:border-fg3");
+    expect(track).toContain("data-[state=unchecked]:enabled:hover:border-fg3");
+    expect(track).toContain("data-[state=checked]:bg-[var(--switch-on-bg)]");
+    expect(track).toContain("focus-visible:outline-accent");
     expect(classes(markup, 1)).toContain("shadow-[var(--switch-thumb-shadow)]");
   });
 });
 
 describe("Slider", () => {
-  it("draws a border3 track, an fg1 range and a 14px thumb, and dims whole when disabled", () => {
+  it("draws a border3 track, an accent range and a 14px thumb, and dims whole when disabled", () => {
     const markup = renderToStaticMarkup(
       createElement(Slider, { defaultValue: [40], disabled: true, "aria-label": "Volume" }),
     );
     expect(classes(markup, 0)).toContain("data-[disabled]:opacity-50");
     expect(markup).toContain("bg-border3");
-    expect(markup).toContain("bg-fg1 absolute");
+    expect(markup).toContain("bg-accent absolute");
     expect(markup).not.toContain("primary-button-bg");
   });
 });

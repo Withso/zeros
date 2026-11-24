@@ -118,9 +118,9 @@ describe("unread dot", () => {
   const DECK = source("apps/desktop/src/renderer/shell/conversation/chat-deck.tsx");
   const SHELL = source("apps/desktop/src/renderer/app-shell.tsx");
 
-  it("is a small brown dot, decorative because its surface names the state", () => {
+  it("is a small accent dot, decorative because its surface names the state", () => {
     const dot = renderToStaticMarkup(createElement(ChatUnreadDot));
-    expect(dot).toMatch(/<span class="[^"]*\bbg-brown-fg\b[^"]*\brounded-full\b/);
+    expect(dot).toMatch(/<span class="[^"]*\bbg-accent\b[^"]*\brounded-full\b/);
     expect(dot).toContain('aria-hidden="true"');
     expect(dot).toContain("data-chat-unread");
   });

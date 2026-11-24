@@ -46,12 +46,12 @@ describe("sent message width", () => {
     }
   });
 
-  it("fills bg2 with no edge, while Zeros' own messages keep their brown fill", () => {
+  it("fills bg2 with no edge, while Zeros' own messages keep their blue fill", () => {
     const own = [...classesOf(render(), 'data-user-bubble=""')];
     expect(own).toContain("bg-bg2");
     expect(own.filter((cls) => /^border|^bg-sidebar-bg$/.test(cls))).toEqual([]);
     const auto = [...classesOf(render({ autoAction: "create-pr" }), 'data-user-bubble=""')];
-    expect(auto).toContain("bg-brown-bg");
+    expect(auto).toContain("bg-blue-bg");
     expect(auto.filter((cls) => cls.startsWith("border"))).toEqual([]);
   });
 

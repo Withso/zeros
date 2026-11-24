@@ -179,12 +179,12 @@ export const TextMessage: Renderer<AgentTextMessage> = memo(
             chat bubble. */}
           <MessageContent
             variant={role === "system" ? "default" : "flat"}
-            // Auto-sent bubbles (PR island / Create PR) read as --brown-fg on
-            // the brown bubble TurnPromptHeader paints (cn/twMerge lets this
+            // Auto-sent bubbles (PR island / Create PR) read as --blue-fg on
+            // the blue bubble TurnPromptHeader paints (cn/twMerge lets this
             // override the flat variant's text-fg1).
             className={
               message.role === "user" && message.autoAction
-                ? "text-brown-fg"
+                ? "text-blue-fg"
                 : undefined
             }
           >

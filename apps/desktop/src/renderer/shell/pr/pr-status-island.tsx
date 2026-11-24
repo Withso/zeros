@@ -113,14 +113,16 @@ interface PrStatusIslandProps {
   presentation?: "row" | "git-status";
 }
 
-// Tone → row surface + bottom hairline. Every open-PR state shares the brown
-// identity; green, violet, and red mark terminal states.
-// The surface + action treatments resolve per theme via the --pr-status-*
-// semantic tokens (styles/semantic-tokens.css). neutral/warning/danger are one
-// visual bucket — defined once so the shared treatment can't drift per key.
-const OPEN_CARD = "bg-[var(--pr-status-surface)] border-brown-primary/10";
-const OPEN_CHIP =
-  "border-[var(--pr-status-chip-border-active)] text-brown-primary hover:text-brown-fg";
+// Tone → row surface + bottom hairline. Every open-PR state shares the
+// neutral raised surface; green, violet, and red mark terminal states.
+// The surface + action treatments resolve via the --pr-status-* semantic
+// tokens (styles/semantic-tokens.css). neutral/warning/danger share one
+// surface — defined once so the shared treatment can't drift per key.
+const OPEN_CARD = "bg-[var(--pr-status-surface)] border-border2";
+const SUCCESS_CHIP =
+  "border-[var(--pr-status-chip-border-success)] text-green-primary hover:text-green-fg";
+const WARNING_CHIP =
+  "border-[var(--pr-status-chip-border-warning)] text-yellow-primary hover:text-yellow-fg";
 const CARD_TONE: Record<PrIslandTone, string> = {
   neutral: OPEN_CARD,
   warning: OPEN_CARD,
@@ -142,11 +144,10 @@ const LABEL_TONE: Record<PrIslandTone, string> = {
 const CHIP_BASE =
   "inline-flex shrink-0 items-center gap-0.5 rounded-sm border px-1.5 py-0.5 text-[13px] tabular-nums transition-colors duration-120 ease-out";
 const CHIP_TONE: Record<PrIslandTone, string> = {
-  neutral: OPEN_CHIP,
-  warning: OPEN_CHIP,
-  danger: OPEN_CHIP,
-  success:
-    "border-[var(--pr-status-chip-border-success)] text-green-primary hover:text-green-fg",
+  neutral: SUCCESS_CHIP,
+  warning: WARNING_CHIP,
+  danger: WARNING_CHIP,
+  success: SUCCESS_CHIP,
   merged:
     "border-[var(--pr-status-chip-border-merged)] text-violet-fg hover:text-violet-primary",
   closed:
@@ -199,7 +200,7 @@ function actionButtonClass(action: PrIslandAction, tone: PrIslandTone): string {
     // Merged-row Continue — filled violet, theme-adaptive label.
     return "bg-[var(--pr-status-continue-bg)] text-[var(--pr-status-continue-fg)] enabled:hover:opacity-90";
   }
-  // Secondary. On the brown open-PR rows this is the filled theme-adaptive
+  // Secondary. On the open-PR rows this is the filled theme-adaptive
   // action button; elsewhere it stays a quiet outline.
   if (tone === "neutral" || tone === "warning" || tone === "danger") {
     return "bg-[var(--pr-status-action-bg)] text-[var(--pr-status-action-fg)] enabled:hover:bg-[var(--pr-status-action-hover)]";
@@ -697,7 +698,7 @@ export function PrStatusIsland({
             return;
           }
           // Auto-sent treatment: the bubble shows the short label + the
-          // action's icon (brown "sent by Zeros" bubble, copy-only); the
+          // action's icon (blue "sent by Zeros" bubble, copy-only); the
           // agent receives the full brief.
           const bubble = promptActionBubble(action.kind);
           const sent = sendToChat({

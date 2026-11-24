@@ -49,19 +49,17 @@
   --chat-lane: 800px;
   --chat-column: calc(var(--chat-lane) + var(--spacing) * 14);
 
-  /* Chat notice text actions (Retry, Sign in) have no hover fill: the brown
+  /* Chat notice text actions (Retry, Sign in) have no hover fill: the blue
      label and icon pop instead — ten lightness points lighter on dark,
      ten deeper in Light (override below), so hover always adds contrast. */
-  --agent-notice-action-hover: hsl(from var(--brown-fg) h s calc(l + 10));
+  --agent-notice-action-hover: hsl(from var(--blue-fg) h s calc(l + 10));
 
-  /* PR status island — open-PR (brown) states.
-     Action button flips polarity per theme so its icon never vanishes:
-     the light primary button in Dark, a solid --brown-fg in Light. */
-  --pr-status-surface: var(
-    --brown-bg
-  ); /* brown container surface (the raw --brown-bg, per design) */
-  --pr-status-action-bg: var(--primary-button-bg); /* white primary button */
-  --pr-status-action-fg: var(--primary-button-fg); /* dark text + icon on it */
+  /* PR status island — open-PR states sit on the neutral raised surface; the
+     state is the chip's colour. The action is the primary button, which
+     already flips per theme. */
+  --pr-status-surface: var(--bg2);
+  --pr-status-action-bg: var(--primary-button-bg);
+  --pr-status-action-fg: var(--primary-button-fg);
   --pr-status-action-hover: var(--primary-button-hover);
   --pr-status-merge-fg: var(
     --inverted-fg
@@ -70,10 +68,12 @@
   /* #N chip outline — a muted per-tone ramp shade so the pill reads as a
      quiet outline, not a bright accent. Theme-static: the 50–950 ramps don't
      flip, so no [data-theme="light"] override is needed. */
-  --pr-status-chip-border-active: var(--brown-800); /* open-PR (brown) states */
   --pr-status-chip-border-success: var(
     --green-700
-  ); /* ready-to-merge (green) */
+  ); /* open and ready-to-merge (green) */
+  --pr-status-chip-border-warning: var(
+    --yellow-800
+  ); /* conflicts and failed checks (yellow) */
   --pr-status-chip-border-merged: var(--violet-750); /* merged (violet) */
   --pr-status-chip-border-closed: var(
     --red-750
@@ -85,39 +85,31 @@
     --inverted-fg
   ); /* dark label on the light-violet button in dark themes */
 
-  /* Loader (ZerosSpinner — the Orbit loader and the agent Puzzle,
+  /* Loader (ZerosSpinner — the logo loader and the agent Puzzle,
      apps/desktop/src/renderer/shared/ui/loading/zeros-spinner.tsx). The
-     app's DEFAULT loader colors: --loader-active paints the Orbit's snake
-     and the Puzzle's tiles, --loader-rest the Orbit's faint track. Both
-     aliases resolve to primitives that already flip per theme, so no
-     [data-theme="light"] override is needed.
-       --loader-active/-rest            → default surfaces (chrome, dialogs,
-                                          secondary/ghost buttons)
-       --loader-active/-rest-inverted   → inverted fills (primary buttons):
-                                          the tiles must paint in the
-                                          on-inverted foreground or they
-                                          vanish against the near-white
-                                          (dark themes) / near-black (Light) fill.
-                                          Rest shares the same color — the
-                                          track's own lower opacity keeps
-                                          the two apart.
+     app's DEFAULT loader colors: --loader-active paints the logo's rows and
+     the Puzzle's tiles. Both aliases resolve to primitives that already flip
+     per theme, so no [data-theme="light"] override is needed.
+       --loader-active            → default surfaces (chrome, dialogs,
+                                    secondary/ghost buttons)
+       --loader-active-inverted   → inverted fills (primary buttons): the
+                                    tiles must paint in the on-inverted
+                                    foreground or they vanish against the
+                                    near-white (dark themes) / near-black
+                                    (Light) fill.
      Buttons with bespoke fills (green Merge, red destructive, the PR
      island's theme-flipping actions) use the spinner's `tone="inherit"`
      (currentColor) instead — the button's own text color already carries
      the per-theme logic. */
   --loader-active: var(--fg2);
-  --loader-rest: var(--muted-fg);
   --loader-active-inverted: var(--primary-button-fg);
-  --loader-rest-inverted: var(--primary-button-fg);
 
   /* Switch (apps/desktop/src/renderer/shared/ui/primitives/switch.tsx) — the
-     ON track is the brown accent in every theme (--brown-fg already flips:
-     salmon on dark, mauve in Light). The knob is near-black on Dark's salmon
-     track (8.5:1; a near-white knob was 1.9:1) and pure white on Light's mauve
-     track. The knob keeps one color across ON/OFF so it never recolors
-     mid-slide; the OFF track stays border3/border4 in the component. */
-  --switch-on-bg: var(--brown-fg);
-  --switch-thumb: #0D0D0D; /* near-black knob on the salmon track */
+     ON track is the accent in every theme, with a white knob. The knob keeps
+     one color across ON/OFF so it never recolors mid-slide; the OFF track
+     stays border3/border4 in the component. */
+  --switch-on-bg: var(--accent);
+  --switch-thumb: var(--accent-fg);
   --switch-thumb-shadow: 0 1px 2px rgb(0 0 0 / 0.25); /* one soft lift for the 16px knob */
 
   /* Selected-state fill on GLASS surfaces (frosted overlays — first caller:
@@ -129,19 +121,20 @@
   --selected-glass: color-mix(in oklab, var(--bg5) 25%, transparent);
 
   /* Design workspace. These are interaction signals rather than general app
-     accents: selection/padding stay Figma-blue, while inter-item gaps use a
+     accents: selection/padding use the dark accent blue in both themes
+     (the canvas draws on user content), while inter-item gaps use a
      distinct pink so nested layout geometry remains readable at low zoom. */
-  --design-selection-stroke: #0C8CE9;
-  --design-hover-stroke: #0C8CE9;
+  --design-selection-stroke: #4489FF;
+  --design-hover-stroke: #4489FF;
   --design-selection-handle-fill: #FFFFFF;
-  /* Text sits on the darker label fill, never on a stroke: white on #0A6FC2
-     is 5.2:1 (3.5:1 on the stroke blue). */
-  --design-selection-label-bg: #0A6FC2;
+  /* Text sits on the darker label fill, never on a stroke: white on #2F6FEB
+     is 4.6:1 (3.4:1 on the stroke blue). */
+  --design-selection-label-bg: #2F6FEB;
   --design-selection-label-fg: #FFFFFF;
   /* Host-side text creation mirrors the generated white canvas document
      before an authored frame exists to provide computed typography. */
   --design-canvas-default-text: #111111;
-  --design-padding-stroke: #0C8CE9;
+  --design-padding-stroke: #4489FF;
   --design-gap-stroke: #F531B3;
   --design-spacing-line-border: #FFFFFF;
   --design-selection-soft: color-mix(
@@ -164,31 +157,17 @@
   --composer-border: var(--border2); /* #E4E0DC, the composer's existing Light edge */
   --prompt-pill-bg: var(--sidebar-bg); /* #FBFAF8, a step lighter than the #F5F3F0 bubble */
   --agent-notice-action-hover: hsl(
-    from var(--brown-fg) h s calc(l - 10)
-  ); /* deeper mauve on the pink notice */
-  --pr-status-surface: var(
-    --brown-bg
-  ); /* light-pink surface reads fine as-is */
-  --pr-status-action-bg: var(--brown-fg); /* solid mauve button */
-  --pr-status-action-fg: var(
-    --inverted-fg
-  ); /* white text + icon on the mauve button */
-  --pr-status-action-hover: var(--brown-800); /* darker mauve */
+    from var(--blue-fg) h s calc(l - 10)
+  ); /* deeper blue on the pale-blue notice */
   --pr-status-merge-fg: var(
     --inverted-fg
   ); /* white text/icon on the green Merge button */
   --pr-status-continue-fg: var(
     --inverted-fg
-  ); /* white label on the mauve Continue button */
+  ); /* white label on the violet Continue button */
   --pr-status-chip-border-closed: var(
     --red-300
   ); /* softer pink outline on the light salmon closed row */
-
-  /* Switch — --switch-on-bg needs no override (--brown-fg is mauve in Light);
-     the knob flips to the pure-white on-inverted foreground. */
-  --switch-thumb: var(
-    --inverted-fg
-  ); /* #FFFFFF white knob on the mauve track */
 
   /* Selected-state fill on glass — bg3 (= white in Light) at 30%. */
   --selected-glass: color-mix(in oklab, var(--bg3) 30%, transparent);

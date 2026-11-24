@@ -759,7 +759,7 @@ function NativeAgentBrowserTab({ tab, active, scope }: BrowserTabProps) {
               navigate();
             }}
           >
-            <div className="bg-bg2 focus-within:border-highlighted-bright flex h-7 items-center rounded-md border border-transparent px-2">
+            <div className="bg-bg2 focus-within:border-accent flex h-7 items-center rounded-md border border-transparent px-2">
               {activity?.faviconDataUrl ? (
                 <img
                   src={activity.faviconDataUrl}
@@ -2436,7 +2436,7 @@ function BrowserChrome({
         <div
           className={[
             "bg-bg2 flex h-7 w-full items-center rounded-md border border-transparent px-2 transition-colors",
-            electron ? "focus-within:border-highlighted-bright" : "opacity-60",
+            electron ? "focus-within:border-accent" : "opacity-60",
           ].join(" ")}
           onMouseDown={(e) => {
             // Clicking anywhere in the bar routes focus to the address.

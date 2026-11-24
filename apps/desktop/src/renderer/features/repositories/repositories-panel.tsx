@@ -253,7 +253,7 @@ function TomlSourceEditor({
       <div
         aria-hidden
         className={cn(
-          "border-border1 text-fg2/45 shrink-0 border-r px-2 py-2 text-right tabular-nums select-none",
+          "border-border1 text-muted-fg shrink-0 border-r px-2 py-2 text-right tabular-nums select-none",
           TEXT,
         )}
       >

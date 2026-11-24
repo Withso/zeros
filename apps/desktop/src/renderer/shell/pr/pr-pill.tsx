@@ -8,17 +8,17 @@ import type { WorkspacePrTone } from "../workspace-glyph";
 
 // The PR status island's #N chip as one 24px pill: a quiet outline in the
 // PR's colour, the same --pr-status-chip-border-* ramp shades the island uses.
-// Conflicts keep the open colour, as the island's chip does.
+// Open and ready are green, conflicts yellow, as the island's chip is.
 const PR_PILL_TONE: Record<WorkspacePrTone, string> = {
-  open: "border-(--pr-status-chip-border-active) text-brown-primary hover:text-brown-fg",
-  conflicts: "border-(--pr-status-chip-border-active) text-brown-primary hover:text-brown-fg",
+  open: "border-(--pr-status-chip-border-success) text-green-primary hover:text-green-fg",
+  conflicts: "border-(--pr-status-chip-border-warning) text-yellow-primary hover:text-yellow-fg",
   ready: "border-(--pr-status-chip-border-success) text-green-primary hover:text-green-fg",
   merged: "border-(--pr-status-chip-border-merged) text-violet-fg hover:text-violet-primary",
   closed: "border-(--pr-status-chip-border-closed) text-red-fg hover:text-red-primary",
 };
 
 export const PR_PILL_CLS =
-  "inline-flex h-6 shrink-0 items-center rounded-full border px-2 text-xs leading-4 font-medium tabular-nums transition-colors duration-120 ease-out focus-visible:ring-[3px] focus-visible:ring-highlighted-bright/50 focus-visible:outline-none";
+  "inline-flex h-6 shrink-0 items-center rounded-full border px-2 text-xs leading-4 font-medium tabular-nums transition-colors duration-120 ease-out focus-visible:ring-1 focus-visible:ring-accent focus-visible:outline-none";
 
 // --- COMPONENT ---
 

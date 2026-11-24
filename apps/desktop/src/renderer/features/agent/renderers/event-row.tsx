@@ -158,7 +158,7 @@ export const EventRow = memo(function EventRow({
       onPointerEnter={warmFile}
       onFocus={warmFile}
       onClick={() => { if (canOpen && path) openFilePill(ctx.attachmentCwd, path, destination); }}
-      className={cn(TOOL_DESCRIPTION_FIT, sTone === "fail" && "border-red-primary/25 bg-red-bg text-red-primary hover:bg-red-bg [&_*]:text-red-primary!")}
+      className={cn(TOOL_DESCRIPTION_FIT, sTone === "fail" && "border-red-primary/25 bg-red-bg text-red-fg hover:bg-red-bg [&_*]:text-red-fg!")}
     />
   ) : null;
   if (filePill && hoverPreview) {
@@ -177,7 +177,7 @@ export const EventRow = memo(function EventRow({
     <ToolPreview
       previewRef={previewAppear}
       mono={!!localCli && sTone !== "fail"}
-      className={sTone === "fail" ? "bg-red-bg text-red-primary" : undefined}
+      className={sTone === "fail" ? "bg-red-bg text-red-fg" : undefined}
     >{meta.target}</ToolPreview>
   ) : null;
   const toggle = () => {

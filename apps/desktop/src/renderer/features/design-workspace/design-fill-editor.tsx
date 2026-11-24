@@ -377,7 +377,7 @@ function DesignFillPopover({
           type="button"
           disabled={disabled}
           aria-label="Edit fill"
-          className="focus-visible:ring-highlighted-bright/50 flex size-5 shrink-0 items-center justify-center rounded-sm focus-visible:ring-[3px] focus-visible:outline-none disabled:opacity-50"
+          className="focus-visible:ring-accent flex size-5 shrink-0 items-center justify-center rounded-sm focus-visible:ring-1 focus-visible:outline-none disabled:opacity-50"
         >
           {trigger}
         </button>

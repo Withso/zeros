@@ -26,7 +26,7 @@ import { REVIEW_CARD, ReviewSection } from "./review-overview";
 const ROW_LIMIT = 50;
 const INCOMPLETE = "Some comments couldn't be loaded, so this list may be incomplete.";
 const ROW =
-  "group border-border1 relative flex min-h-10 min-w-0 items-center gap-2.5 py-1 pr-2 pl-3.5 hover:bg-sidebar-bg-hover has-[[data-list-row-disclosure]:focus-visible]:inset-ring has-[[data-list-row-disclosure]:focus-visible]:inset-ring-highlighted-bright [&+&]:border-t";
+  "group border-border1 relative flex min-h-10 min-w-0 items-center gap-2.5 py-1 pr-2 pl-3.5 hover:bg-sidebar-bg-hover has-[[data-list-row-disclosure]:focus-visible]:inset-ring has-[[data-list-row-disclosure]:focus-visible]:inset-ring-accent [&+&]:border-t";
 
 /** A title's `code` spans set as code. */
 function CommentTitle({ text }: { text: string }) {

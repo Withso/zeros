@@ -129,7 +129,7 @@ export interface SessionsActions {
     segments?: import("./use-agent-session").MessageContentSegment[],
     /** Set when Zeros auto-sends this prompt on the user's behalf (PR island
      *  buttons) — the action kind stamped on the user bubble so it renders
-     *  with the "sent by Zeros" treatment (icon + brown bubble, copy-only). */
+     *  with the "sent by Zeros" treatment (icon + blue bubble, copy-only). */
     autoAction?: string,
     /** The provider now owns a pending message/queue entry; not turn completion. */
     onAccepted?: () => void,

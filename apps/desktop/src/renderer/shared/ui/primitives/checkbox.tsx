@@ -43,10 +43,11 @@ export interface CheckboxProps {
   className?: string;
 }
 
-/** 16px box (the Radio's size): border4, fg3 on hover, inverted when on and a
- *  shade darker on hover, the standard ring on keyboard focus. */
+/** 16px box (the Radio's size): border4, fg3 on hover, the accent with a
+ *  white mark when on. Keyboard focus is a 1px accent line one pixel off the
+ *  box, so it still shows around the accent fill. */
 const BOX =
-  "peer-focus-visible:ring-highlighted-bright/50 peer-focus-visible:border-highlighted-bright grid size-4 shrink-0 place-items-center rounded-sm border transition-[background-color,border-color,box-shadow] duration-120 ease-out peer-focus-visible:ring-[3px]";
+  "peer-focus-visible:outline-accent grid size-4 shrink-0 place-items-center rounded-sm border transition-[background-color,border-color] duration-120 ease-out peer-focus-visible:outline-1 peer-focus-visible:outline-offset-1";
 
 export function Checkbox({
   checked,
@@ -81,14 +82,14 @@ export function Checkbox({
           BOX,
           off
             ? "border-border4 hover:border-fg3 group-hover/choice:border-fg3"
-            : "bg-inverted-bg border-inverted-bg text-inverted-fg hover:bg-primary-button-hover hover:border-primary-button-hover group-hover/choice:bg-primary-button-hover group-hover/choice:border-primary-button-hover",
+            : "bg-accent border-accent text-accent-fg",
           // A row dims as a whole, so its box does not dim twice.
           disabled && label === undefined && "opacity-50",
           label === undefined && className,
         )}
       >
-        {checked === true && <Check className="size-3" strokeWidth={2} />}
-        {checked === "indeterminate" && <Minus className="size-3" strokeWidth={2} />}
+        {checked === true && <Check className="size-3" strokeWidth={2.5} />}
+        {checked === "indeterminate" && <Minus className="size-3" strokeWidth={2.5} />}
       </span>
     </>
   );

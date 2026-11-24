@@ -69,11 +69,11 @@ describe("agent tones", () => {
       createElement(AgentActivityIndicator, { activity: "running", agentId: "codex" }),
     );
     expect(tiles(toned).every((tile) => tile.fill?.includes("light-dark("))).toBe(true);
-    // Waiting keeps the neutral Orbit.
+    // Waiting keeps the neutral logo loader.
     const waiting = renderToStaticMarkup(
       createElement(AgentActivityIndicator, { activity: "waiting", agentId: "codex" }),
     );
-    expect(waiting).toContain('data-zeros-loader="orbit"');
+    expect(waiting).toContain('data-zeros-loader="logo"');
     expect(waiting).not.toContain("light-dark(");
     expect(TABS).toMatch(/<AgentActivityIndicator\s+activity=\{activity\}\s+agentId=\{chat\.agentId\}/);
   });

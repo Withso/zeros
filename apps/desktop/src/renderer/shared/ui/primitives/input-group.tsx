@@ -22,7 +22,7 @@ function InputGroup({ className, ...props }: React.ComponentProps<"div">) {
         "has-[>[data-align=block-end]]:h-auto has-[>[data-align=block-end]]:flex-col has-[>[data-align=block-end]]:[&>input]:pt-3",
 
         // Keyboard focus only, as on Input: a click or typing shows the caret.
-        "has-[[data-slot=input-group-control]:focus-visible[data-zeros-keyboard-focus]]:border-highlighted-bright has-[[data-slot=input-group-control]:focus-visible[data-zeros-keyboard-focus]]:ring-[3px] has-[[data-slot=input-group-control]:focus-visible[data-zeros-keyboard-focus]]:ring-highlighted-bright/50",
+        "has-[[data-slot=input-group-control]:focus-visible[data-zeros-keyboard-focus]]:border-accent",
 
         // Error state.
         "has-[[data-slot][aria-invalid=true]]:border-red-primary",

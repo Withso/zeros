@@ -301,7 +301,7 @@ export function SimulatorLiveScreen({
       aria-label={`${device.name} screen`}
       tabIndex={0}
       data-simulator-live={painted ? "painted" : "waiting"}
-      className="focus-visible:ring-highlighted-bright relative size-full touch-none outline-none select-none focus-visible:ring-2 focus-visible:ring-inset"
+      className="focus-visible:ring-accent relative size-full touch-none outline-none select-none focus-visible:ring-1 focus-visible:ring-inset"
       onPointerDown={onPointerDown}
       onPointerMove={onPointerMove}
       onPointerUp={onPointerUp}

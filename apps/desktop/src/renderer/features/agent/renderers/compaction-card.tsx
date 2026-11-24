@@ -5,7 +5,7 @@
 // Context compaction renders like any other thing the agent does — a line
 // in the working stripe with exactly two states:
 //
-//   • running  — the Orbit shimmer (ZerosSpinner) + "Compacting.."
+//   • running  — the logo loader (ZerosSpinner) + "Compacting.."
 //   • settled  — lucide `CircleCheckBig` + "Context compacted" + a no-icon
 //                "Done" StatusChip (same recipe as the question record's
 //                ANSWERED chip: border1, mono 10px uppercase, over bg1)
@@ -31,10 +31,10 @@ import type { Renderer } from "./types";
 import { EventRow, type EventMeta } from "./event-row";
 import { renderDetail } from "./event-row-renderer";
 
-/** Leading indicator for the live compaction row — the Orbit shimmer at
+/** Leading indicator for the live compaction row — the logo loader at
  *  the row-icon size (12px), slotted through EventMeta's Icon. Compaction
  *  is infrastructure loading, not the agent producing output, so it takes
- *  the default orbit variant (not the agent wave). */
+ *  the default logo variant (not the agent wave). */
 function CompactingIcon({ className }: { className?: string }) {
   return <ZerosSpinner size={12} label="Compacting" className={className} />;
 }
@@ -108,13 +108,13 @@ export const CompactionRecordCard: Renderer<AgentToolMessage> = memo(
       <div className={cn(DETAIL_BODY_CLS, "gap-0.5")}>
         {info?.trigger ? (
           <div>
-            <span className="text-fg2/70">Trigger: </span>
+            <span className="text-fg3">Trigger: </span>
             {info.trigger}
           </div>
         ) : null}
         {info?.preTokens !== undefined ? (
           <div>
-            <span className="text-fg2/70">Context before: </span>
+            <span className="text-fg3">Context before: </span>
             {fmtTokens(info.preTokens)} tokens
           </div>
         ) : null}

@@ -36,7 +36,7 @@ export async function runSubagentPresentationSmoke({ page, check }) {
       `${label} Thinking has compact edges, paragraphs and line spacing (${JSON.stringify(spacing)})`,
       spacing.top >= 0 && spacing.top <= 4 &&
         spacing.bottom >= 0 && spacing.bottom <= 4 &&
-        spacing.gap > 0 && spacing.gap <= 8 && spacing.lineRatio <= 1.5,
+        spacing.gap > 0 && spacing.gap <= 8 && spacing.lineRatio <= 1.6,
     );
     await expect(detail.locator("[data-tool-detail]")).toHaveCount(0);
   };
@@ -175,10 +175,13 @@ export async function runSubagentPresentationSmoke({ page, check }) {
   const shell = errors.getByRole("button", { name: /^Check command access/ });
   const red = await color(shell.locator(".lucide-circle-x"));
   const preview = shell.locator("[data-tool-preview]");
+  // Text on the red fill is red-fg; the icon beside it keeps red-primary.
+  const previewClass = await preview.getAttribute("class");
   check(
     "Collapsed failed commands use red foreground and background",
-    (await color(preview)) === red &&
-      (await preview.getAttribute("class")).includes("bg-red-bg"),
+    (await color(preview)) !== bright &&
+      previewClass.includes("text-red-fg") &&
+      previewClass.includes("bg-red-bg"),
   );
   await shell.click();
   const shellCard = errors

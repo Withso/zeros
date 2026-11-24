@@ -4,7 +4,7 @@
 //
 // The PR-status island / Create-PR buttons send a full brief to the agent but
 // show the user a short label ("Create a PR", "Resolve", …). Those bubbles
-// carry `autoAction` (see AgentTextMessage.autoAction) and render in the brown
+// carry `autoAction` (see AgentTextMessage.autoAction) and render in the blue
 // "sent by Zeros" treatment with the SAME icon as the button that fired them —
 // the visual contract that this message wasn't typed by the user.
 //

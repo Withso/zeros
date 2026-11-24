@@ -47,8 +47,8 @@ describe("the composer's Ask pill", () => {
     expect(card).not.toContain("overflow-hidden");
   });
 
-  it("morphs the shape in 220ms out and 180ms back on one curve, and holds still for reduced motion", () => {
-    expect([COMPOSER_ASK_EXPAND_MS, COMPOSER_ASK_COLLAPSE_MS]).toEqual([220, 180]);
+  it("morphs the shape in 200ms each way on one curve, and holds still for reduced motion", () => {
+    expect([COMPOSER_ASK_EXPAND_MS, COMPOSER_ASK_COLLAPSE_MS]).toEqual([200, 200]);
     for (const collapsed of [true, false]) {
       const card = classes(composerAskCardClasses(collapsed));
       expect(card).toEqual(expect.arrayContaining([
@@ -56,7 +56,7 @@ describe("the composer's Ask pill", () => {
         "transition-[width,height,border-radius,border-color,background-color,box-shadow]",
         "ease-[cubic-bezier(0.2,0,0,1)]", "motion-reduce:transition-none", "data-[ask-instant]:transition-none",
       ]));
-      expect(card).toContain(collapsed ? "duration-180" : "duration-220");
+      expect(card).toContain("duration-200");
     }
     // While it expands the card keeps the pill's clip and bottom-centre anchor.
     expect(classes(composerAskCardClasses(false))).toEqual(expect.arrayContaining([
@@ -67,10 +67,10 @@ describe("the composer's Ask pill", () => {
   it("keeps the composer laid out at full width and fades it, so nothing reflows inside the morph", () => {
     const hidden = classes(composerAskContentClasses(true));
     expect(hidden).toEqual(expect.arrayContaining([
-      "min-w-(--composer-content-w)", "opacity-0", "translate-y-1", "pointer-events-none", "duration-70",
+      "min-w-(--composer-content-w)", "opacity-0", "translate-y-1", "pointer-events-none", "duration-120",
     ]));
     const shown = classes(composerAskContentClasses(false));
-    expect(shown).toEqual(expect.arrayContaining(["opacity-100", "translate-y-0", "delay-60", "duration-140"]));
+    expect(shown).toEqual(expect.arrayContaining(["opacity-100", "translate-y-0", "delay-60", "duration-150"]));
     expect(shown).toContain("group-data-[ask-morph]/composer:min-w-(--composer-content-w)");
     // Only the card eases to auto; its contents keep numeric interpolation.
     expect(shown).toContain("[interpolate-size:numeric-only]");

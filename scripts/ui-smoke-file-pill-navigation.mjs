@@ -164,8 +164,8 @@ export async function runFilePillNavigationSmoke({ page, check }) {
       await expect(
         source.getByRole("link", { name: "the site" }),
       ).toHaveAttribute("href", "https://example.com");
-      // The preview reads like the chat: 15px prose, fences as the chat's
-      // code cards, and a file link drawn as the chat's 15px sans reference.
+      // The preview reads like the chat: 14px prose, fences as the chat's
+      // code cards, and a file link drawn as the chat's 14px sans reference.
       const look = await source.evaluate((element) => {
         const chip = element.querySelector(".zeros-md-filepath");
         return {
@@ -177,10 +177,10 @@ export async function runFilePillNavigationSmoke({ page, check }) {
         };
       });
       expect(look).toEqual({
-        prose: "15px",
+        prose: "14px",
         codeCards: 1,
         plainPre: 0,
-        link: "15px",
+        link: "14px",
         mono: false,
       });
       await link("a missing page").click();

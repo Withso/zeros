@@ -8,7 +8,7 @@
 // green PR arrow, … — so the island PUBLISHES each derived kind here and the
 // rows subscribe. Entries persist after unmount (a row keeps its last-known
 // icon when you switch away) AND across relaunches (2026-07-21: hydrated from
-// localStorage, so a reload can't drop a green glyph to the brown "open"
+// localStorage, so a reload can't drop a green glyph to the "open"
 // fallback while nothing changed — the icon repaints only when the island
 // derives a different status). Workspaces that never derived here fall back
 // to their persisted prState (see sidebar-workspace-row.tsx); persisted TERMINAL prStates

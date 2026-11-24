@@ -132,7 +132,7 @@ describe("workspace name chip", () => {
     expect(topbar).not.toContain('variant="accent"');
     const pill = source("apps/desktop/src/renderer/shared/ui/primitives/pill.tsx");
     expect(pill).toContain("border-border2 bg-bg2 text-fg1");
-    expect(pill).not.toContain("blue");
+    expect(/neutral:\s*"[^"]*"/.exec(pill)?.[0]).not.toContain("blue");
   });
 });
 

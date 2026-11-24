@@ -254,7 +254,7 @@ function PathBreadcrumbs({ path, truncateFilename = false }: { path: string; tru
           {dir && (
             <>
               <span className="text-fg2 truncate">{dir}</span>
-              <span className="text-fg2/50 shrink-0">/</span>
+              <span className="text-muted-fg shrink-0">/</span>
             </>
           )}
           <span className={cn("text-fg1 font-medium", truncateFilename ? "min-w-0 truncate" : "shrink-0")}>{file}</span>

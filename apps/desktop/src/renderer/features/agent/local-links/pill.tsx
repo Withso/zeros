@@ -129,14 +129,14 @@ export const LocalLinkPill = memo(function LocalLinkPill({
           sender
             ? [
                 "group/sender min-w-0 shrink-0 items-center gap-0.5 rounded-sm border-0 bg-transparent p-0 font-normal hover:bg-transparent",
-                "focus-visible:ring-highlighted-bright focus-visible:ring-2 [&_svg]:size-4",
+                "focus-visible:ring-accent focus-visible:ring-1 [&_svg]:size-4",
                 SENDER[tone],
               ]
             : [
                 link.kind === "chat" ? PILL_SHELL : `${PILL_METRICS} border-0`,
                 // The workspace glyph sits closer to its name than a chat logo.
                 link.kind === "chat" ? COMPOSER_PILL_SPACING : "gap-1 px-1.5",
-                "focus-visible:ring-highlighted-bright min-w-0 shrink-0 py-0 font-normal focus-visible:ring-2 [&_svg]:size-[13px]",
+                "focus-visible:ring-accent min-w-0 shrink-0 py-0 font-normal focus-visible:ring-1 [&_svg]:size-[13px]",
                 TINTS[tone],
                 selected && SELECTED[tone],
               ],

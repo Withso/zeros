@@ -416,14 +416,6 @@
         "button": 1
       }
     },
-    "status-pairing": {
-      "apps/desktop/src/renderer/features/agent/renderers/event-row.tsx": {
-        "text-red-primary on bg-red-bg": 2
-      },
-      "apps/desktop/src/renderer/features/agent/renderers/tool-detail-surface.tsx": {
-        "text-red-primary on bg-red-bg": 1
-      }
-    },
     "stock-shadow": {
       "apps/desktop/src/renderer/features/browser/browser-variant-frame.tsx": {
         "shadow-md": 1
@@ -440,27 +432,6 @@
       }
     },
     "text-alpha": {
-      "apps/desktop/src/renderer/features/agent/renderers/compaction-card.tsx": {
-        "text-fg2/70": 2
-      },
-      "apps/desktop/src/renderer/features/agent/renderers/highlighted-code.tsx": {
-        "text-fg2/45": 1
-      },
-      "apps/desktop/src/renderer/features/agent/renderers/question-card.tsx": {
-        "text-fg2/70": 3
-      },
-      "apps/desktop/src/renderer/features/repositories/repositories-panel.tsx": {
-        "text-fg2/45": 1
-      },
-      "apps/desktop/src/renderer/features/settings/code-theme-preview.tsx": {
-        "text-fg2/45": 1
-      },
-      "apps/desktop/src/renderer/shared/ui/primitives/sidebar.tsx": {
-        "text-fg1/70": 1
-      },
-      "apps/desktop/src/renderer/shell/workbench/tabs/file-viewer.tsx": {
-        "text-fg2/50": 1
-      },
       "apps/desktop/src/renderer/shell/workspace-glyph.tsx": {
         "text-fg3/25": 1
       }

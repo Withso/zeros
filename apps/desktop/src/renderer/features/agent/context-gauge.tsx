@@ -156,7 +156,7 @@ function Ring({
           strokeLinecap="round"
           strokeDasharray={`${clamped * CIRCUMFERENCE} ${CIRCUMFERENCE}`}
           className={cn(
-            "transition-[stroke-dasharray] duration-300 ease-out",
+            "transition-[stroke-dasharray] duration-200 ease-out",
             critical ? "stroke-red-primary" : "stroke-fg2",
           )}
         />
@@ -232,7 +232,7 @@ export const ContextGauge = memo(function ContextGauge({
             </div>
             <div className="bg-bg4 mt-2.5 h-1.5 overflow-hidden rounded-full">
               <div
-                className="bg-fg1 h-full rounded-full transition-[width] duration-300 ease-out"
+                className="bg-fg1 h-full rounded-full transition-[width] duration-200 ease-out"
                 style={{ width: `${Math.min(100, fraction * 100)}%` }}
               />
             </div>

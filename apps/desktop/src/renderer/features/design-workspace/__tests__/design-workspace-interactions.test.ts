@@ -88,7 +88,7 @@ const appShellSource = readFileSync(
   resolve(process.cwd(), "apps/desktop/src/renderer/app-shell.tsx"),
   "utf8",
 );
-const DESIGN_BLUE = `#${"0C8CE9"}`;
+const DESIGN_BLUE = `#${"4489FF"}`;
 const DESIGN_GAP_PINK = `#${"F531B3"}`;
 const DESIGN_WHITE = `#${"FFFFFF"}`;
 

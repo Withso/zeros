@@ -85,7 +85,7 @@ export async function runAgentNoticesSmoke({ page, check }) {
         .evaluateAll((notices) =>
           notices.every((notice) => {
             const probe = document.createElement("span");
-            probe.style.backgroundColor = "var(--brown-bg)";
+            probe.style.backgroundColor = "var(--blue-bg)";
             probe.style.color = "var(--fg1)";
             notice.appendChild(probe);
             const expected = getComputedStyle(probe);
@@ -98,7 +98,7 @@ export async function runAgentNoticesSmoke({ page, check }) {
           }),
         );
       check(
-        `Blocking failures and sign-in notices use brown without overflow in ${theme} mode`,
+        `Blocking failures and sign-in notices use blue without overflow in ${theme} mode`,
         readable,
       );
       const quietStatus = await warning.evaluate((element) => {
@@ -119,7 +119,7 @@ export async function runAgentNoticesSmoke({ page, check }) {
         element.appendChild(probe);
         probe.style.color = "var(--agent-notice-action-hover)";
         const popped = getComputedStyle(probe).color;
-        probe.style.color = "var(--brown-fg)";
+        probe.style.color = "var(--blue-fg)";
         const rest = getComputedStyle(probe).color;
         probe.remove();
         const luma = (color) => {

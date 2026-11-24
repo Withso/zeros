@@ -201,7 +201,8 @@ describe("sidebar workspace rows", () => {
     expect(cls).toContain("data-[active=true]:hover:bg-bg2-highlight");
     expect(cls).not.toContain("data-[active=true]:bg-(--surface-hover)");
     expect(cls).toMatch(/data-\[active=true\]:text-fg1\b/);
-    expect(cls).toContain("has-[>button:focus-visible]:ring-[3px]");
+    expect(cls).toContain("has-[>button:focus-visible]:inset-ring-accent");
+    expect(cls).not.toContain("has-[>button:focus-visible]:ring-[3px]");
     expect(SIDEBAR).toMatch(/<Surface\s+as="nav"\s+kind="sidebar"/);
     expect(classConstant(HEADER, "REPOSITORY_HEADER_CLS")).toMatch(/\bh-8\b/);
     const surface = source(

@@ -24,7 +24,7 @@ export async function runToolWaitSmoke({ page, check }) {
   const detail = page.locator(`[id="${await pending.getAttribute("aria-controls")}"] [data-tool-detail]`);
   await expect(detail).toContainText("Checks are still running.");
   await expect(detail).toContainText("smoke");
-  await expect(detail).not.toHaveClass(/text-red-primary/);
+  await expect(detail).not.toHaveClass(/text-red-fg/);
   await expect(feed).not.toContainText("Sleep");
   await expect(feed).not.toContainText("durationMs");
   const narration = feed.getByText(/I will check again shortly\.$/);
@@ -53,7 +53,7 @@ export async function runToolWaitSmoke({ page, check }) {
   await expect(failure).toContainText("Error");
   await expect(failure).toHaveAttribute("aria-description", "Tool failed");
   await failure.click();
-  await expect(fixture.locator("#tool-wait-real-failure [data-tool-detail]")).toHaveClass(/text-red-primary/);
+  await expect(fixture.locator("#tool-wait-real-failure [data-tool-detail]")).toHaveClass(/text-red-fg/);
   await expect(fixture.locator("#tool-wait-real-failure")).toContainText("One test failed.");
 
   await fixture.getByRole("button", { name: "Finish checks", exact: true }).click();

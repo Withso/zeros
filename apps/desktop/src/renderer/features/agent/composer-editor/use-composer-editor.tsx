@@ -105,7 +105,7 @@ const EMPTY_SKILLS: Skill[] = [];
 
 // The 200px cap and its overflow must live on the same element, the
 // .composer-pm contenteditable, or a long paste grows past the composer card.
-// The chat's reading text, 15px on 22px lines: taller than a 20px inline pill,
+// The chat's reading text, 14px on 22px lines: taller than a 20px inline pill,
 // so a line holding one never grows.
 // overscroll-contain keeps the scroll from chaining into the transcript.
 const EDITOR_CLASS = `composer-pm w-full ${EDITOR_MIN_HEIGHT_CLASS} max-h-[200px] overflow-y-auto overscroll-contain p-0 text-reading text-fg1`;

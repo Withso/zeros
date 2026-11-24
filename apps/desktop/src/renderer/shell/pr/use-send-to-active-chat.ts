@@ -43,7 +43,7 @@ export interface SendToActiveChatArgs {
   bubbleAttachments?: AgentTextMessageAttachment[];
   segments?: MessageContentSegment[];
   /** Auto-sent action kind (PR island / Create PR buttons). Renders the
-   *  bubble with the "sent by Zeros" treatment — icon + brown bubble,
+   *  bubble with the "sent by Zeros" treatment — icon + blue bubble,
    *  copy-only. Typed as the canonical union so producers can't stamp a kind
    *  the icon registry doesn't know. See AgentTextMessage.autoAction. */
   autoAction?: AutoActionKind;

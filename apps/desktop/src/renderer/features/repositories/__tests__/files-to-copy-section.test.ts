@@ -25,6 +25,6 @@ describe("TreeRowView", () => {
       /<button[^>]*aria-expanded="false"[^>]*class="([^"]+)"/,
     );
     expect(disclosure?.[1]).toContain("focus-visible:ring-1");
-    expect(disclosure?.[1]).toContain("focus-visible:ring-highlighted-bright");
+    expect(disclosure?.[1]).toContain("focus-visible:ring-accent");
   });
 });

@@ -47,11 +47,11 @@ const TabsTrigger = React.forwardRef<
     ref={ref}
     className={cn(
       // One tab recipe for every strip and one segmented control: 13px, flat,
-      // 6px corners, the keyboard ring; active is medium fg1 on a fill, never
+      // 6px corners, the accent keyboard border; active is medium fg1 on a fill, never
       // an edge.
-      "focus-visible:ring-highlighted-bright/50 focus-visible:border-highlighted-bright data-[state=active]:text-fg1 inline-flex items-center justify-center gap-1.5 rounded-md border border-transparent px-2.5 text-xs leading-4.5 whitespace-nowrap focus-visible:ring-[3px] focus-visible:outline-none disabled:pointer-events-none disabled:opacity-50 data-[state=active]:font-medium [&_svg]:size-3.5 [&_svg]:shrink-0",
+      "focus-visible:border-accent data-[state=active]:text-fg1 inline-flex items-center justify-center gap-1.5 rounded-md border border-transparent px-2.5 text-xs leading-4.5 whitespace-nowrap focus-visible:outline-none disabled:pointer-events-none disabled:opacity-50 data-[state=active]:font-medium [&_svg]:size-3.5 [&_svg]:shrink-0",
       variant === "chrome"
-        ? "hover:bg-bg1-hover hover:text-fg1 data-[state=active]:bg-bg2 data-[state=active]:hover:bg-bg2 h-7 transition-none"
+        ? "hover:bg-bg1-hover hover:text-fg1 data-[state=active]:bg-selected-bg data-[state=active]:hover:bg-selected-bg h-7 transition-none"
         : "hover:text-fg1 data-[state=active]:bg-selected-bg h-6 transition-colors",
       className,
     )}
@@ -67,7 +67,7 @@ const TabsContent = React.forwardRef<
   <TabsPrimitive.Content
     ref={ref}
     className={cn(
-      "focus-visible:ring-highlighted-bright/50 mt-2 focus-visible:ring-[3px] focus-visible:outline-none",
+      "focus-visible:ring-accent mt-2 focus-visible:ring-1 focus-visible:outline-none",
       className,
     )}
     {...props}

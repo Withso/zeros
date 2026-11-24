@@ -12,7 +12,7 @@ export interface ListRowProps extends React.ButtonHTMLAttributes<HTMLButtonEleme
 }
 
 const LIST_ROW_FOCUS =
-  "hover:bg-bg1-hover focus-visible:inset-ring focus-visible:inset-ring-highlighted-bright focus-visible:ring-highlighted-bright/50 text-left transition-colors duration-120 ease-out focus-visible:ring-[3px] focus-visible:outline-none";
+  "hover:bg-bg1-hover focus-visible:inset-ring focus-visible:inset-ring-accent text-left transition-colors duration-120 ease-out focus-visible:outline-none";
 
 const LIST_ROW_SHAPES = {
   inline: "-ml-2 flex min-h-7 w-fit max-w-full items-center gap-2 rounded-md px-2 py-1",
@@ -57,7 +57,7 @@ const LIST_ROW_IN_GROUP =
   "m-0 min-h-0 min-w-0 rounded-none p-0 hover:bg-transparent focus-visible:inset-ring-0 focus-visible:ring-0";
 
 const GROUP_FOCUS =
-  "has-[[data-list-row-disclosure]:focus-visible]:inset-ring has-[[data-list-row-disclosure]:focus-visible]:inset-ring-highlighted-bright has-[[data-list-row-disclosure]:focus-visible]:ring-[3px] has-[[data-list-row-disclosure]:focus-visible]:ring-highlighted-bright/50";
+  "has-[[data-list-row-disclosure]:focus-visible]:inset-ring has-[[data-list-row-disclosure]:focus-visible]:inset-ring-accent";
 
 export interface ListRowGroupProps extends React.HTMLAttributes<HTMLDivElement> {
   /** The row opens and closes: it then hovers, rings while its disclosure

@@ -128,7 +128,7 @@ export const QuestionRecordCard: Renderer<AgentToolMessage> = memo(
               <div className="text-fg1">{a.prompt}</div>
               {a.value ? (
                 <div className="text-fg2">
-                  <span className="text-fg2/70">Answered: </span>
+                  <span className="text-fg3">Answered: </span>
                   {a.value}
                 </div>
               ) : null}
@@ -148,12 +148,12 @@ export const QuestionRecordCard: Renderer<AgentToolMessage> = memo(
                 <ul className="flex flex-col gap-0.5 pl-1">
                   {q.options.map((o, oi) => (
                     <li key={oi} className="text-fg2 text-xs">
-                      <span className="text-fg2/70 mr-1.5 font-mono">
+                      <span className="text-fg3 mr-1.5 font-mono">
                         {oi + 1}
                       </span>
                       {o.label}
                       {o.description ? (
-                        <span className="text-fg2/70"> — {o.description}</span>
+                        <span className="text-fg3"> — {o.description}</span>
                       ) : null}
                     </li>
                   ))}

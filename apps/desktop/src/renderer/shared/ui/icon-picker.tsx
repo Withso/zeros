@@ -81,7 +81,7 @@ export function IconPicker({
                     className={cn(
                       "text-fg2 inline-flex size-7 items-center justify-center rounded-sm transition-colors",
                       "hover:bg-bg2-hover hover:text-fg1",
-                      "focus-visible:ring-highlighted-bright focus-visible:ring-1 focus-visible:outline-none",
+                      "focus-visible:ring-accent focus-visible:ring-1 focus-visible:outline-none",
                       icon.name === selected && "bg-bg2-hover text-fg1",
                     )}
                   >

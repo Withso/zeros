@@ -284,7 +284,7 @@ function GithubCreatePrButton({
           placement: isCloudWorkspace(workspace.id) ? "cloud" : "local",
         });
         // Auto-sent treatment (2026-07-19): a tidy "Create a PR" bubble with
-        // the button's own icon on the brown "sent by Zeros" surface — no
+        // the button's own icon on the blue "sent by Zeros" surface — no
         // attachment pill; the agent still receives the full brief.
         const sent = sendToChat({
           text,

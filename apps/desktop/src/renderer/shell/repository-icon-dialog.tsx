@@ -247,7 +247,7 @@ export function RepositoryIconDialog({
                             choose({ kind: "lucide", value: icon.name })
                           }
                           className={cn(
-                            "text-fg2 hover:bg-bg1-hover hover:text-fg1 focus-visible:ring-highlighted-bright inline-flex size-9 items-center justify-center rounded-sm transition-colors focus-visible:ring-1 focus-visible:outline-none",
+                            "text-fg2 hover:bg-bg1-hover hover:text-fg1 focus-visible:ring-accent inline-flex size-9 items-center justify-center rounded-sm transition-colors focus-visible:ring-1 focus-visible:outline-none",
                             selected && "bg-bg1-hover text-fg1",
                           )}
                         >
@@ -269,7 +269,7 @@ export function RepositoryIconDialog({
                             choose({ kind: "emoji", value: emoji.value })
                           }
                           className={cn(
-                            "hover:bg-bg1-hover focus-visible:ring-highlighted-bright inline-flex size-9 items-center justify-center rounded-sm text-lg transition-colors focus-visible:ring-1 focus-visible:outline-none",
+                            "hover:bg-bg1-hover focus-visible:ring-accent inline-flex size-9 items-center justify-center rounded-sm text-lg transition-colors focus-visible:ring-1 focus-visible:outline-none",
                             selected && "bg-bg1-hover",
                           )}
                         >

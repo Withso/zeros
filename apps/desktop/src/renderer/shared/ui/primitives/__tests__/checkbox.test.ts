@@ -15,10 +15,11 @@ describe("Checkbox", () => {
     );
 
     expect(markup).toContain("peer");
-    expect(markup).toContain("peer-focus-visible:ring-[3px]");
-    expect(markup).toContain("peer-focus-visible:ring-highlighted-bright/50");
-    // Opaque focus core under the halo.
-    expect(markup).toContain("peer-focus-visible:border-highlighted-bright");
+    // One accent line a pixel off the box, so it shows around the accent fill.
+    expect(markup).toContain("peer-focus-visible:outline-1");
+    expect(markup).toContain("peer-focus-visible:outline-offset-1");
+    expect(markup).toContain("peer-focus-visible:outline-accent");
+    expect(markup).not.toContain("peer-focus-visible:ring-[3px]");
   });
 
   it("outlines the unchecked box with the subtle border4 recipe", () => {

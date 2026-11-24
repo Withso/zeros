@@ -13,7 +13,7 @@ async function expectDialogChrome(dialog, page, { footer = true } = {}) {
     "padding", "16px",
   );
   const title = dialog.locator('[data-slot="dialog-title"]');
-  await expect(title).toHaveCSS("font-size", "15px");
+  await expect(title).toHaveCSS("font-size", "14px");
   await expect(title).toHaveCSS("line-height", "20px");
   const close = dialog.getByRole("button", { name: "Close", exact: true });
   await expect(close).toHaveCSS("width", "24px");
@@ -84,7 +84,7 @@ export async function runDialogChromeSmoke({ page, check }) {
       await expect(dialog).toHaveCount(0);
     }
     check(
-      `${theme}: dialogs share 15px headings, top-right close, separated footers and 50% overlay`,
+      `${theme}: dialogs share 14px headings, top-right close, separated footers and 50% overlay`,
       true,
     );
 
