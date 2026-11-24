@@ -58,11 +58,13 @@ export async function sampleNativeMemoryPlateau({ throughCycle, sample, pause })
 
 async function nativeProcessTree() {
   // No argv: an unrelated process's command line may contain credentials.
-  const { stdout } = await exec("ps", ["-axo", "pid=,ppid=,stat=,lstart="], { timeout: 3000, maxBuffer: 1024 * 1024 });
+  // ps's uid column is the effective user, which libproc's permission check uses.
+  const { stdout } = await exec("ps", ["-axo", "pid=,ppid=,uid=,stat=,lstart="], { timeout: 3000, maxBuffer: 1024 * 1024 });
   return stdout.trim().split("\n").map(line => {
-    const match = /^\s*(\d+)\s+(\d+)\s+(\S+)\s+(.+?)\s*$/.exec(line);
+    const match = /^\s*(\d+)\s+(\d+)\s+(\d+)\s+(\S+)\s+(.+?)\s*$/.exec(line);
     if (!match) throw new Error("Native process ownership is unavailable.");
-    return { pid: Number(match[1]), ppid: Number(match[2]), state: match[3], startedAt: match[4].replace(/\s+/g, " ") };
+    return { pid: Number(match[1]), ppid: Number(match[2]), uid: Number(match[3]), state: match[4],
+      startedAt: match[5].replace(/\s+/g, " ") };
   });
 }
 
@@ -166,9 +168,17 @@ export async function sampleNativeApplicationMemory({ app, enginePid,
         if (same && current.state?.startsWith("Z")) return "retired";
         // The tree read can cross the helper's reaping; confirm the exit.
         if (!await isProcessAlive(row.pid)) return "retired";
-        return same && current.state ? "same" : "unknown";
+        if (!same || !current.state) return "unknown";
+        return Number.isSafeInteger(current.uid) && current.uid !== process.getuid?.() ? "privileged" : "same";
       };
       let state = await identityState();
+      // macOS withholds a setuid helper's footprint from this reader (EPERM),
+      // so a retry cannot succeed. The app's Resources read runs /usr/bin/top
+      // for about half a second: await its exit, bounded; one that stays fails.
+      for (let waitedMs = 0; state === "privileged" && waitedMs < 2500; waitedMs += 50) {
+        await pause(50);
+        state = await identityState();
+      }
       // libproc can race a newly spawned or exiting helper. Retry only twice,
       // and bind both sides of each OS read to its original start identity.
       // Persistent live failures stay null and fail the memory guard.
