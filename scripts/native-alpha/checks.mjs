@@ -29,13 +29,17 @@ async function shows(page, name, timeoutMs = 20_000) {
   return false;
 }
 
-/** The project page's cloud build status: the line after the section's heading and its description. */
+/** A project page's cloud build status: the first status line within three lines after the section's heading, which
+ * is "Cloud build" on a repository's project page and "Cloud" on a cloud project's own page. */
 export function buildLabel(pageText) {
   const lines = String(pageText).split("\n").map(line => line.trim()).filter(Boolean);
-  const at = lines.indexOf("Cloud build");
-  const label = at < 0 ? "" : lines[at + 2] ?? "";
-  return /^(Ready|Getting ready…|Updating…|Update failed|Not built yet|Preparing the Cloud Computer…|The Cloud Computer could not be prepared)$/.test(label)
-    ? label.replace(/…$/, "") : "?";
+  const status = /^(Ready|Getting ready…|Updating…|Update failed|Not built yet|Preparing the Cloud Computer…|The Cloud Computer could not be prepared)$/;
+  for (let at = 0; at < lines.length; at++) {
+    if (lines[at] !== "Cloud build" && lines[at] !== "Cloud") continue;
+    const label = lines.slice(at + 1, at + 4).find(line => status.test(line));
+    if (label) return label.replace(/…$/, "");
+  }
+  return "?";
 }
 
 /** Alpha's API with the app's own session, called inside the renderer so the token never leaves it. */

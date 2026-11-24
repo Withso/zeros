@@ -83,3 +83,57 @@ describe("a project's ready copy on its project page", () => {
     expect(readyCopyStatus({ state: "none", updatedAt: null, nextUpdateAt: null }, now)).toBeNull();
   });
 });
+
+describe("a project's build status while it is in progress", () => {
+  const reads = async () => vi.mocked((await import("../../../platform/cloud-github-levels")).getCloudReadyCopy).mock.calls.length;
+  const mount = async (reply: unknown, active = true) => {
+    fixture.reply = reply;
+    await act(async () => { root.render(createElement(ReadyCopySection, { organizationId: ORG, projectId: `99999999-9999-4999-8999-${String(project++).padStart(12, "0")}`, active })); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+  };
+  const after = async (ms: number) => { await act(async () => { await vi.advanceTimersByTimeAsync(ms); }); return container.textContent ?? ""; };
+  const building = { canBuild: true, status: { state: "getting_ready", updatedAt: null, nextUpdateAt: null },
+    history: [{ generation: 1, state: "building", startedAt: iso(-60_000), finishedAt: null, repositories: null, trigger: "project_created", startedBy: null, failure: null, output: false }] };
+  const ready = { canBuild: true, status: { state: "ready", updatedAt: iso(0), nextUpdateAt: iso(7 * day) },
+    history: [{ generation: 1, state: "ready", startedAt: iso(-60_000), finishedAt: iso(0), repositories: null, trigger: "project_created", startedBy: null, failure: null, output: false }] };
+  beforeEach(async () => {
+    vi.useFakeTimers();
+    vi.mocked((await import("../../../platform/cloud-github-levels")).getCloudReadyCopy).mockReset().mockImplementation(async () => fixture.reply as never);
+  });
+  afterEach(() => { vi.useRealTimers(); });
+
+  it("shows Ready on its own once the build finishes, while the page stays open, then stops reading", async () => {
+    await mount(building);
+    expect(container.textContent).toContain("Getting ready…");
+    fixture.reply = ready;
+    expect(await after(10_000)).toContain("Ready");
+    expect(container.textContent).not.toContain("Getting ready…");
+    const settled = await reads();
+    await after(120_000);
+    expect(await reads()).toBe(settled);
+  });
+
+  it("keeps the last status on screen while it reads again", async () => {
+    await mount(building);
+    let release!: () => void;
+    const { getCloudReadyCopy } = await import("../../../platform/cloud-github-levels");
+    vi.mocked(getCloudReadyCopy).mockImplementationOnce(() => new Promise(resolve => { release = () => resolve(ready as never); }));
+    expect(await after(10_000)).toContain("Getting ready…");
+    release();
+    expect(await after(0)).toContain("Ready");
+  });
+
+  it("reads again while the organization's Cloud Computer is being prepared", async () => {
+    await mount({ canBuild: true, status: { state: "none", updatedAt: null, nextUpdateAt: null }, history: [], base: { state: "preparing" } });
+    expect(container.textContent).toContain("Preparing the Cloud Computer…");
+    fixture.reply = building;
+    expect(await after(10_000)).toContain("Getting ready…");
+  });
+
+  it("never reads again while the page is not the active one", async () => {
+    await mount(building, false);
+    const before = await reads();
+    await after(60_000);
+    expect(await reads()).toBe(before);
+  });
+});

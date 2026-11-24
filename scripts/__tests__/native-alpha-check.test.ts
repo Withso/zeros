@@ -62,5 +62,7 @@ describe("the project page's build status", () => {
     expect(buildLabel(page("Update failed"))).toBe("Update failed");
     expect(buildLabel(page("Something else"))).toBe("?");
     expect(buildLabel("no section here")).toBe("?");
+    // A cloud project's own page heads the same section "Cloud".
+    expect(buildLabel("zr-x-native-one\nCloud\nGetting ready…\nNew workspaces clone directly.")).toBe("Getting ready");
   });
 });

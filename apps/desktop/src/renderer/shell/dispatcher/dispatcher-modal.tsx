@@ -115,6 +115,7 @@ import { CONTROL_PLANE_URL } from "../../features/team/control-plane";
 import { createComposerDraftKey, createComposerDraftOwner, createComposerDrafts } from "../../state/create-composer-drafts";
 import type { ComposerAttachment } from "../../features/agent/composer-attachments";
 import { CreateAttachmentPreviewPanel } from "./create-attachment-preview-panel";
+import { useCloudCreateAgents } from "./cloud-create-agents";
 
 interface DispatcherPageProps {
   /** Retained Home surfaces stay mounted. Gate effects and selection resets to
@@ -276,6 +277,8 @@ function ActiveDispatcherPage({
   const placement = cloud.computerMode ? "cloud" : "local";
   const placementReason = placement === "cloud" ? cloud.reason : null;
   const computerIdentity = cloud.computerOwner ? JSON.parse(cloud.computerOwner) as [string, string] : null;
+  // The Cloud side offers what the organization's cloud runs (its connected cloud logins), never this Mac's logins.
+  const cloudAgents = useCloudCreateAgents(computerIdentity?.[0] ?? null, computerIdentity?.[1] ?? null, active && placement === "cloud", agents);
   // The personal home has no Cloud Computer yet; its cloud side keeps a device draft so the prompt survives a flip.
   const personalHome = Boolean(unified && cloud.organization?.isPersonal && !cloud.cloudOrganization);
   const draftOwnerFor = (target: CreatePlacement) =>
@@ -909,7 +912,7 @@ function ActiveDispatcherPage({
               active={active}
               onOpenAttachment={openAttachment}
               onAttachmentsChange={attachmentsChanged}
-              agents={agents}
+              agents={placement === "cloud" ? cloudAgents : agents}
               cwd={cloud.computerMode ? null : selectedProject?.repoRoot ?? null}
               originUrl={cloud.computerRepository ? `https://github.com/${cloud.computerRepository.owner}/${cloud.computerRepository.name}.git` : selectedProject?.originUrl ?? null}
               onCreate={handleCreate}
