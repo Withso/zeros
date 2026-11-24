@@ -158,6 +158,13 @@ requireWorkflowToken(
   '"release/Zeros-arm64.dmg"',
   2,
 );
+// Without the packaged app's minimum macOS in the feed, a Mac below it installs
+// an update that cannot launch (scripts/stamp-update-feed-minimum-os.mjs).
+requireWorkflowToken(
+  stableReleaseWorkflow,
+  "stable release workflow",
+  "node scripts/stamp-update-feed-minimum-os.mjs --feed release/latest-mac.yml",
+);
 for (const { label, text, file, parent, publication } of channelReleaseWorkflows) {
   // `alpha` — the rolling release tag AND the artifact basename. They
   // must agree, or the feed references assets that were never uploaded.
@@ -183,6 +190,7 @@ for (const { label, text, file, parent, publication } of channelReleaseWorkflows
   // date!". Since the rolling prerelease is now BOTH the manual-install source
   // and the update origin, these four references are the whole chain.
   requireWorkflowToken(text, label, `release/${ch}-mac.yml`, 4);
+  requireWorkflowToken(parent, label, `node scripts/stamp-update-feed-minimum-os.mjs --feed release/${ch}-mac.yml`);
   // The rolling tag the updater's base URL points at
   // (/releases/download/<ch>/). If the workflow ever published under a
   // versioned tag instead, every installed client would 404 forever.

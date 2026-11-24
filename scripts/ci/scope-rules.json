@@ -407,6 +407,11 @@
       "lanes": ["design-containment", "desktop-engine", "packaging"]
     },
     {
+      "id": "update-feed-minimum-os",
+      "include": ["scripts/stamp-update-feed-minimum-os.mjs"],
+      "lanes": ["packaging", "repository-contracts"]
+    },
+    {
       "id": "composer-smoke-infrastructure",
       "include": [
         "scripts/ui-smoke-*",

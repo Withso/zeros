@@ -323,6 +323,12 @@ jobs:
           CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
         run: pnpm exec electron-builder --config electron-builder.yml --publish never
 
+      - name: Stamp the update feed's minimum macOS
+        # An installed app's electron-updater skips an update whose feed names a
+        # newer Darwin than the Mac runs. Without it, a Mac below the packaged
+        # app's LSMinimumSystemVersion installs an update that cannot launch.
+        run: node scripts/stamp-update-feed-minimum-os.mjs --feed release/latest-mac.yml
+
       - name: Assert differential update blockmap
         # electron-updater falls back to downloading the entire ~170 MB zip when
         # this sidecar is missing. Fail before notarization rather than silently

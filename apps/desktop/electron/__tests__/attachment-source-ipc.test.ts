@@ -1,10 +1,18 @@
 import { beforeEach, expect, it, vi } from "vitest";
+type ClipboardEntry = { types: string[]; getType(type: string): Promise<Blob> };
+const RAW_COMPOSER_FORMAT = 'electron application/osclipboard;format="application/x-zeros-composer+json"';
+const clipboardWith = (entries: Record<string, string>): ClipboardEntry[] => [{
+  types: Object.keys(entries),
+  getType: async (type) => {
+    if (!(type in entries)) throw new Error(`The type '${type}' was not found in the ClipboardItem`);
+    return new Blob([entries[type]]);
+  },
+}];
 const mocks = vi.hoisted(() => ({
   register: vi.fn(async () => "opaque-id"),
   prune: vi.fn(async () => {}),
   pruneTemporary: vi.fn(async () => {}),
-  readBuffer: vi.fn(() => Buffer.alloc(0)),
-  readHTML: vi.fn(() => ""),
+  read: vi.fn(async (): Promise<ClipboardEntry[]> => []),
   handle: vi.fn(),
   on: vi.fn(),
   removeListener: vi.fn(),
@@ -18,7 +26,7 @@ const mocks = vi.hoisted(() => ({
   },
 }));
 vi.mock("electron", () => ({
-  clipboard: { readBuffer: mocks.readBuffer, readHTML: mocks.readHTML },
+  clipboard: { read: mocks.read },
   ipcMain: {
     handle: mocks.handle,
     on: mocks.on,
@@ -42,8 +50,7 @@ import {
 
 beforeEach(() => {
   vi.clearAllMocks();
-  mocks.readBuffer.mockReturnValue(Buffer.alloc(0));
-  mocks.readHTML.mockReturnValue("");
+  mocks.read.mockResolvedValue([]);
 });
 
 it("authorizes cleanup and preserves the current clipboard's recovery sources through HTML fallback", async () => {
@@ -60,9 +67,10 @@ it("authorizes cleanup and preserves the current clipboard's recovery sources th
   const encoded = JSON.stringify({
     attachments: [{ sourceRecoveryId: clipboardId }],
   }).replace(/"/g, "&quot;");
-  mocks.readHTML.mockReturnValue(
-    `<div data-zeros-composer="${encoded}"></div>`,
-  );
+  mocks.read.mockResolvedValue(clipboardWith({
+    "text/plain": "copied",
+    "text/html": `<meta charset='utf-8'><div data-zeros-composer="${encoded}"></div>`,
+  }));
   await expect(handler({ sender: {}, senderFrame: {} }, [])).rejects.toThrow(
     /renderer/,
   );
@@ -78,13 +86,13 @@ it("skips cleanup when attachment clipboard metadata cannot be read", async () =
   const handler = mocks.handle.mock.calls.find(
     (call) => call[0] === "zeros:attachment-source-maintenance",
   )![1];
-  mocks.readBuffer.mockReturnValue(Buffer.from("invalid JSON"));
+  mocks.read.mockResolvedValue(clipboardWith({ [RAW_COMPOSER_FORMAT]: "invalid JSON", "text/html": "" }));
   await expect(
     handler(
       { sender: mocks.contents, senderFrame: mocks.contents.mainFrame },
       [],
     ),
-  ).rejects.toThrow();
+  ).rejects.toThrow(SyntaxError);
   expect(mocks.prune).not.toHaveBeenCalled();
 });
 

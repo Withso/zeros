@@ -14,12 +14,19 @@ import {
 import { pruneAttachmentTemporaryDirectories } from "../../src/engine/files/attachment-temporary-records";
 import { getMainWindow } from "./events";
 
-function clipboardSourceIds(): string[] {
-  let encoded = clipboard
-    .readBuffer(ATTACHMENT_CLIPBOARD_MIME)
-    .toString("utf8");
+// What clipboard.readBuffer(ATTACHMENT_CLIPBOARD_MIME) read before Electron 44:
+// the raw platform format of that name, not the renderer's web custom data.
+const RAW_ATTACHMENT_FORMAT = `electron application/osclipboard;format="${ATTACHMENT_CLIPBOARD_MIME}"`;
+
+async function clipboardSourceIds(): Promise<string[]> {
+  const items = await clipboard.read();
+  const entry = async (type: typeof RAW_ATTACHMENT_FORMAT | "text/html") => {
+    const item = items.find((candidate) => candidate.types.includes(type));
+    return item ? (await item.getType(type)).text() : "";
+  };
+  let encoded = await entry(RAW_ATTACHMENT_FORMAT);
   if (!encoded) {
-    const html = clipboard.readHTML();
+    const html = await entry("text/html");
     if (!html.includes("data-zeros-composer")) return [];
     if (html.length > 2_000_000)
       throw new Error("Attachment clipboard metadata is too large");
@@ -76,7 +83,7 @@ export function registerAttachmentSourceIpc(): void {
         !input.every(isAttachmentSourceId)
       )
         throw new Error("Invalid attachment recovery references");
-      const clipboardIds = clipboardSourceIds();
+      const clipboardIds = await clipboardSourceIds();
       await pruneAttachmentSources(new Set([...input, ...clipboardIds]));
       await pruneAttachmentTemporaryDirectories();
       return clipboardIds;

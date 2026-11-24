@@ -31,7 +31,7 @@ onlyBuiltDependencies:
 # requires a node-abi release that knows its ABI mapping. Raise this floor in the
 # same change as an Electron major-version update.
 overrides:
-  node-abi: "^4.33.0"
+  node-abi: "^4.39.0"
   # Transitive security floors. Compatibility exceptions are documented beside
   # their entries; keep each override until its parent lock entry naturally
   # resolves to an equal or newer release.

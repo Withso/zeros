@@ -37,6 +37,12 @@ async function digest(file) {
   for await (const chunk of createReadStream(file)) hash.update(chunk);
   return hash.digest("hex");
 }
+async function clipboardImageSize(app) {
+  return app.evaluate(async ({ clipboard, nativeImage }) => {
+    const item = (await clipboard.read()).find(entry => entry.types.includes("image/png"));
+    return item ? nativeImage.createFromBuffer(Buffer.from(await (await item.getType("image/png")).arrayBuffer())).getSize() : null;
+  });
+}
 // A valid, sparse ten-minute WebM: the original VP8 keyframe repeated once a
 // second, indexed by Cues, with legal EBML Void padding in each cluster. Unlike
 // appending junk to a two-second clip, Chromium can seek by time and file offset.
@@ -189,7 +195,7 @@ try {
     const copyFrame = page.getByRole("button", { name: "Copy current frame", exact: true });
     await copyFrame.click();
     await expect(copyFrame).toBeEnabled();
-    const copied = await app.evaluate(({ clipboard }) => clipboard.readImage().getSize());
+    const copied = await clipboardImageSize(app);
     assert.deepEqual(copied, { width: 160, height: 96 });
     await sample("copy");
     const beforeHide = await app.evaluate(() => globalThis.mediaReads.length);
@@ -229,7 +235,7 @@ try {
   const copyImage = page.getByRole("button", { name: "Copy image", exact: true });
   await copyImage.click();
   await expect(copyImage).toBeEnabled();
-  assert.deepEqual(await app.evaluate(({ clipboard }) => clipboard.readImage().getSize()), { width: 1, height: 1 });
+  assert.deepEqual(await clipboardImageSize(app), { width: 1, height: 1 });
   for (const owner of ["personal", "organization", "cloud", "personal"]) {
     await page.evaluate(owner => window.__zerosFileMediaHarness.hover(owner, "sample.png"), owner);
     await page.getByRole("button", { name: "Saved image", exact: true }).hover();

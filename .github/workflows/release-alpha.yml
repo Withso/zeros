@@ -294,6 +294,11 @@ jobs:
           CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
         run: node scripts/electron-builder-run.mjs --publish never
 
+      - name: Stamp the update feed's minimum macOS
+        # As in release.yml: keeps a Mac below the packaged app's
+        # LSMinimumSystemVersion from installing an update that cannot launch.
+        run: node scripts/stamp-update-feed-minimum-os.mjs --feed release/alpha-mac.yml
+
       - name: Assert differential update blockmap
         # Keep alpha representative of production update behavior. Missing this
         # file is correctness-safe, but makes every update download the full zip.

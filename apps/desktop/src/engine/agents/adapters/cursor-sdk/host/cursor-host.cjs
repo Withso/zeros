@@ -361,7 +361,7 @@ function installEnvironmentProxyTransports() {
     return secureSocket;
   };
 
-  // Electron 43 / Node 24 exposes this API. Calling it explicitly makes the
+  // Electron's Node 24 exposes this API. Calling it explicitly makes the
   // startup contract observable and also configures global fetch's dispatcher.
   if (typeof http.setGlobalProxyFromEnv === "function") {
     http.setGlobalProxyFromEnv();
