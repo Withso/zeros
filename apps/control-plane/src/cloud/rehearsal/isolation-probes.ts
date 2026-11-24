@@ -24,7 +24,9 @@ export type ProbeTarget = { org: string; projectId: string; workspaceId: string;
   prefix: string; generation: number; environmentRevision: number; member: boolean };
 /** The tools every probe run shares: a rate-limit-aware send, the violation record, the counts and the leak scan. */
 export type Prober = { send(who: Api, probe: { method: Method; path: string; body?: unknown; headers?: Record<string, string> }, step: string): Promise<ApiReply>;
-  violate(route: string, code: string): void; scan(route: string, reply: ApiReply): void; counts: Record<string, number> };
+  violate(route: string, code: string): void; scan(route: string, reply: ApiReply): void; counts: Record<string, number>;
+  /** A detail beside a violation (what an absent id answered), noted without counting as one. */
+  note(route: string, code: string): void };
 export type Identity = { userId: string; email: string | null; personal: { id: string; slug: string | null } | null;
   organizations: { id: string; slug: string | null; personal: boolean; role: string | null }[] };
 
@@ -86,10 +88,11 @@ export function isolationProbes(t: ProbeTarget): Probe[] {
     { route: "workspace_github_auth", method: "POST", path: `${W}/github`, body: pr("gh.authStatus") },
     { route: "workspace_github_create", method: "POST", path: `${W}/github`, body: { op: "gh.prCreate", params: { title: name, body: "" },
       expected: { connectionGeneration: "1", repositoryId: repository.repositoryId, repository: repository.repository, branch: `${prefix}iso`, baseBranch: "main", contextRevision: "1" } } },
-    { route: "workspace_history", method: "POST", path: `${W}/history`, body: {} },
+    // Bodies and queries the routes accept, so each answer is the access decision and never the request's own check.
+    { route: "workspace_history", method: "POST", path: `${W}/history`, body: { op: "chats.list", params: {} } },
     { route: "workspace_activity", method: "POST", path: `${W}/activity`, body: {} },
     { route: "workspace_lost_work_dismiss", method: "POST", path: `${W}/lost-work/dismiss`, body: {} },
-    { route: "workspace_prompts", method: "GET", path: `${W}/prompts` },
+    { route: "workspace_prompts", method: "GET", path: `${W}/prompts?chatId=${prefix}chat` },
     { route: "workspace_followers", method: "GET", path: `${W}/followers` },
     { route: "workspace_list", method: "GET", path: `/v1/cloud-v2/workspaces?organizationId=${org}`, absent: `/v1/cloud-v2/workspaces?organizationId=${absentOrg}`, list: true,
       answersAnyone: true },
@@ -112,7 +115,9 @@ export function isolationProbes(t: ProbeTarget): Probe[] {
     { route: "team_rename", method: "POST", path: `${W}/rename`, headers: TEAM, body: { name } },
     { route: "team_delete", method: "DELETE", path: W, headers: TEAM },
     // 7. Environment: the target's own values, never the caller's (in a shared organization the caller's own answers it).
-    { route: "environment_read", method: "GET", path: E(org), absent: E(absentOrg), ...t.member ? { list: true as const } : {} },
+    // In the caller's own organization the absent one is a repository id that does not exist there.
+    { route: "environment_read", method: "GET", path: E(org), ...t.member ? { list: true as const,
+      absent: `/v1/cloud-v2/organizations/${org}/environment/999999999?repository=${encodeURIComponent(repository.repository)}` } : { absent: E(absentOrg) } },
     ...t.member ? [] : [{ route: "environment_write", method: "PATCH" as const, path: E(org),
       body: { expectedRevision: t.environmentRevision, files: [{ path: ENVIRONMENT_PATH, content: "zr-b\n" }] }, absent: E(absentOrg) }],
     // 8. GitHub connections.
@@ -146,17 +151,32 @@ export async function tryProbes(prober: Prober, who: Api, probes: readonly Probe
       if (!member && probe.absent) {
         const absent = await send(who, { ...probe, path: probe.absent }, `${route}_absent`);
         if (absent.status === reply.status && errorCode(absent) === errorCode(reply)) counts.sameAsAbsent!++;
-        else violate(route, `differs_${reply.status}_${absent.status}`);
+        else violate(route, `differs_${answer(reply)}_${answer(absent)}`);
       }
       continue;
     }
-    if (!REFUSED.has(reply.status)) { violate(route, `answered_${reply.status}`); continue; }
+    if (!REFUSED.has(reply.status)) {
+      violate(route, `answered_${answer(reply)}`);
+      // What the same request answers about something that does not exist, so the rule that answered can be told.
+      const absentPath = probe.absent ?? (ownIds.find(own => probe.path.includes(own)) ? probe.path.split(ownIds.find(own => probe.path.includes(own))!).join(randomUUID()) : undefined);
+      if (absentPath) {
+        const absent = await send(who, { ...probe, path: absentPath, ...probe.absentBody !== undefined ? { body: probe.absentBody } : {} }, `${route}_absent`);
+        prober.note(route, `absent_${answer(absent)}`);
+      }
+      continue;
+    }
     counts.refused!++;
     const id = ownIds.find(own => probe.path.includes(own));
     const absentPath = probe.absent ?? (id ? probe.path.split(id).join(randomUUID()) : undefined);
     if (!absentPath) continue;
     const absent = await send(who, { ...probe, path: absentPath, ...probe.absentBody !== undefined ? { body: probe.absentBody } : {} }, `${route}_absent`);
     if (errorCode(absent) === errorCode(reply)) counts.sameAsAbsent!++;
-    else violate(route, `differs_${reply.status}_${absent.status}`);
+    else violate(route, `differs_${answer(reply)}_${answer(absent)}`);
   }
+}
+
+/** A reply as `<status>_<the API's own error code>`, closed words only (`none` when it gives none): which rule answered. */
+export function answer(reply: ApiReply): string {
+  const code = z.object({ error: z.object({ code: z.string().regex(/^[a-z0-9_]{1,48}$/) }).passthrough() }).passthrough().safeParse(reply.body);
+  return `${reply.status}_${code.success ? code.data.error.code : "none"}`;
 }

@@ -55,7 +55,7 @@ export function stageContext(ports: Ports, state: RehearsalState, save: () => Pr
     ports, state, save, repositories, timing, projectLevel: state.owner === "personal" ? "personal" : "organization",
     step(name) { finish(); last = name; startedAt = ports.clock.now(); },
     takeTimings: () => { finish(); const taken = timings; timings = []; last = "start"; startedAt = ports.clock.now(); return taken; },
-    note(code) { if (/^[a-z0-9_:.-]{1,80}$/.test(code) && notes.length < 16) notes.push(code); },
+    note(code) { if (/^[a-z0-9_:.-]{1,80}$/.test(code) && notes.length < 32) notes.push(code); },
     takeNotes: () => { const taken = notes; notes = []; return taken; },
     count(name) { if (/^[a-zA-Z0-9_]{1,40}$/.test(name)) counts[name] = (counts[name] ?? 0) + 1; },
     takeCounts: () => { const taken = counts; counts = {}; return taken; },

@@ -122,7 +122,7 @@ export async function stageIsolation(ctx: StageContext): Promise<Record<string, 
   const was = await snapshot();
 
   // ── B tries ─────────────────────────────────────────
-  const prober: Prober = { send, violate, counts, scan: (route, reply) => {
+  const prober: Prober = { send, violate, counts, note: (route, code) => ctx.note(`isolation:${route}:${code}`.slice(0, 80)), scan: (route, reply) => {
     leaks(route, reply);
     if (JSON.stringify(reply.body ?? null).includes(marker)) violate(route, "environment_returned");
   } };

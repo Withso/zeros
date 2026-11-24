@@ -689,10 +689,10 @@ describe("rehearsal stages against a fake Alpha", () => {
     it("fails, naming the route and the status, when one route wrongly answers the second account", async () => {
       const { ctx, ok } = await run(alpha => { alpha.otherLeaks.set("PATCH /v1/cloud-v2/organizations/:id/cloud-projects/:id", 200); });
       expect(ok).toBe(false);
-      expect(ctx.state.stages.isolation).toMatchObject({ ok: false, step: "project_update_name", code: "answered_200" });
+      expect(ctx.state.stages.isolation).toMatchObject({ ok: false, step: "project_update_name", code: "answered_200_none" });
       // Every route that answered is named, not only the first: both PATCH routes of the project.
-      expect(ctx.state.stages.isolation!.notes).toEqual(expect.arrayContaining(["isolation:project_update_name:answered_200",
-        "isolation:project_update_repositories:answered_200"]));
+      expect(ctx.state.stages.isolation!.notes).toEqual(expect.arrayContaining(["isolation:project_update_name:answered_200_none", "isolation:project_update_name:absent_200_none",
+        "isolation:project_update_repositories:answered_200_none"]));
       expect(ctx.state.stages.isolation!.counts!.violations).toBe(2);
     });
 
@@ -703,13 +703,13 @@ describe("rehearsal stages against a fake Alpha", () => {
       // Answered otherwise for A's organization than for one that does not exist: that tells B it is there.
       const differs = await run(alpha => { alpha.otherLeaks.set("GET /v1/cloud-v2/workspaces?organizationId=:id", 403); });
       expect(differs.ok).toBe(false);
-      expect(differs.ctx.state.stages.isolation!.notes).toContain("isolation:workspace_list:differs_403_200");
+      expect(differs.ctx.state.stages.isolation!.notes).toContain("isolation:workspace_list:differs_403_none_200_none");
     });
 
     it("fails when a refusal differs from the answer for an id that does not exist", async () => {
       const { ctx, ok } = await run(alpha => { alpha.otherLeaks.set("GET /v1/cloud-v2/workspaces/:id", 403); });
       expect(ok).toBe(false);
-      expect(ctx.state.stages.isolation!.notes).toContain("isolation:workspace_read:differs_403_404");
+      expect(ctx.state.stages.isolation!.notes).toContain("isolation:workspace_read:differs_403_none_404_not_found");
     });
 
     it("fails when a read the first account makes returns the build secret's value", async () => {
@@ -788,7 +788,7 @@ describe("rehearsal stages against a fake Alpha", () => {
     it("fails, naming the route, when one answers the owner about the member's personal workspace", async () => {
       const { ctx, ok } = await run(undefined, fake => { fake.orgs.leaks.set("GET /v1/cloud-v2/workspaces/:id", 200); });
       expect(ok).toBe(false);
-      expect(ctx.state.stages.isolation!.notes).toContain("isolation:org_workspace_read:answered_200");
+      expect(ctx.state.stages.isolation!.notes).toContain("isolation:org_workspace_read:answered_200_none");
     });
 
     it("with --isolation-member-leaves: archived as member_left at once, still hidden from the owner, and the member's again after rejoining", async () => {

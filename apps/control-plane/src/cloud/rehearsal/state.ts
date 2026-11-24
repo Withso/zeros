@@ -32,7 +32,7 @@ const Schema = z.object({
   owner: z.enum(["personal", "organization"]), organizationId: Uuid, organizations: z.array(Uuid).max(4),
   created: Created,
   stages: z.record(z.string(), z.object({ ok: z.boolean(), step: z.string().optional(), code: z.string().optional(), skipped: z.string().optional(),
-    counts: z.record(z.string(), z.number()).optional(), notes: z.array(z.string().regex(/^[a-z0-9_:.-]{1,80}$/)).max(16).optional() })),
+    counts: z.record(z.string(), z.number()).optional(), notes: z.array(z.string().regex(/^[a-z0-9_:.-]{1,80}$/)).max(32).optional() })),
   shifts: z.number().int().nonnegative(), machineStarts: z.number().int().nonnegative(),
   waiting: z.object({ organizationId: Uuid, created: Created }).strict().optional(),
 }).strict();
