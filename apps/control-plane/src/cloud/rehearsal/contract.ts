@@ -124,6 +124,8 @@ export type Ports = {
   networkRetries?(): number;
   /** Each bridge connect's wait in seconds since the last call (and reset): the runner prints the longest and the total. */
   bridgeWaits?(): number[];
+  /** The close code of each bridge reopen since the last call (and reset): counted and noted per stage. */
+  bridgeReopens?(): number[];
   boat: Boat;
   storage: Storage;
   github: Github;
