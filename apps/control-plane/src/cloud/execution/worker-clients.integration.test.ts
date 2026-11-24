@@ -295,7 +295,8 @@ database("real acting-user worker clients against HTTP routes and PostgreSQL", (
     await startWorker();
     await expect(contexts.clean(async () => ({ processes: 0, legacyMaterial: "refused" })))
       .rejects.toMatchObject({ status: 409, contextCode: "execution_not_retired" });
-    expect(calls.at(-1)).toMatchObject({ path: "/v2/cloud/worker/execution-leases/boot-clean", body: { processes: 0, legacyMaterial: "refused" },
+    // The boot-clean call by its path: a lease renewal may land after it.
+    expect(calls.findLast(call => call.path === "/v2/cloud/worker/execution-leases/boot-clean")).toMatchObject({ body: { processes: 0, legacyMaterial: "refused" },
       status: 409, reply: { error: { code: "execution_not_retired" } } });
     expect((await pool.query("SELECT state FROM cloud_v2_execution_contexts WHERE id=$1", [turn.result.contextId])).rows[0].state).not.toBe("retired");
     expect((await pool.query("SELECT clean_at FROM cloud_v2_execution_boots WHERE workspace_id=$1 AND boot_id=$2", [f.workspace.id, worker.bootId])).rows[0].clean_at).toBeNull();
