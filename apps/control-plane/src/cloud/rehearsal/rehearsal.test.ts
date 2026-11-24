@@ -17,6 +17,7 @@ import { localProActorLabel, parseArguments, sharedBaseFacts, targetPorts } from
 import { CONNECT_CLIENT_FEATURES, SHELL_QUIET, countLinesCommand, expectLine, seenShape, terminalText, call, until, checkText, connectWorkspace, createProject, createWorkspace, fileTarget, frameCode, openBridge, waitState, writeFile } from "./steps.js";
 import { FIXTURE_TWO } from "./stage-provision.js";
 import { ISOLATION_ORGANIZATION } from "./isolation-org.js";
+import { tryProbes } from "./isolation-probes.js";
 import { submoduleCommitsCommand, submoduleStatusNotes } from "./stage-submodules.js";
 import { loadState, newState, saveState, stateTarget } from "./state.js";
 import { localStack } from "./local-stack.js";
@@ -45,6 +46,7 @@ function setup(options: { provisioned?: boolean; owner?: "personal" | "organizat
   const options_ = { switches: new Set(["projects", "personal", "retention"] as const), maxActive: 10, runCap: 30, log: (line: string) => lines.push(line) };
   return { alpha, state, ctx, lines, saved, options: options_ };
 }
+type ApiReplyLike = { status: number; body: unknown };
 const EMPTY = { workspaces: 0, projects: 0, branches: 0, pulls: 0, machines: 0, objects: 0, environments: 0, githubSignIns: 0, pro: 0, computerBase: 0, installScripts: 0, agentLogins: 0,
   databaseRows: 0, isolationOrgThings: 0 };
 
@@ -704,6 +706,23 @@ describe("rehearsal stages against a fake Alpha", () => {
       const differs = await run(alpha => { alpha.otherLeaks.set("GET /v1/cloud-v2/workspaces?organizationId=:id", 403); });
       expect(differs.ok).toBe(false);
       expect(differs.ctx.state.stages.isolation!.notes).toContain("isolation:workspace_list:differs_403_none_200_none");
+    });
+
+    it("counts another refusal identical to the absent case as refused, noted; a 2xx is a violation whatever the absent case answers", async () => {
+      // Two probes, each sent with its absent case: one refused alike (409, the same code), one answered 200.
+      const noted: string[] = [], violations: string[] = [];
+      const counts: Record<string, number> = { refused: 0, sameAsAbsent: 0 };
+      const answers: Record<string, ApiReplyLike> = { "/a/mine": { status: 409, body: { error: { code: "github_connection_required" } } },
+        "/a/absent": { status: 409, body: { error: { code: "github_connection_required" } } },
+        "/b/mine": { status: 200, body: {} }, "/b/absent": { status: 200, body: {} } };
+      const who = { json: async (_method: string, path: string) => answers[path]! };
+      const prober = { send: (api: typeof who, probe: { path: string }) => api.json("GET", probe.path), counts,
+        violate: (route: string, code: string) => violations.push(`${route}:${code}`), note: (route: string, code: string) => noted.push(`${route}:${code}`), scan: () => undefined };
+      await tryProbes(prober as never, who as never, [{ route: "a", method: "GET", path: "/a/mine", absent: "/a/absent" }, { route: "b", method: "GET", path: "/b/mine", absent: "/b/absent" }],
+        [], false);
+      expect(noted).toEqual(["a:refused_as_absent_409_github_connection_required", "b:absent_200_none"]);
+      expect(violations).toEqual(["b:answered_200_none"]);
+      expect(counts).toEqual({ refused: 1, sameAsAbsent: 1 });
     });
 
     it("fails when a refusal differs from the answer for an id that does not exist", async () => {

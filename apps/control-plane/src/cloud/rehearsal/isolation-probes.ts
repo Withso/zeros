@@ -156,13 +156,19 @@ export async function tryProbes(prober: Prober, who: Api, probes: readonly Probe
       continue;
     }
     if (!REFUSED.has(reply.status)) {
-      violate(route, `answered_${answer(reply)}`);
       // What the same request answers about something that does not exist, so the rule that answered can be told.
-      const absentPath = probe.absent ?? (ownIds.find(own => probe.path.includes(own)) ? probe.path.split(ownIds.find(own => probe.path.includes(own))!).join(randomUUID()) : undefined);
-      if (absentPath) {
-        const absent = await send(who, { ...probe, path: absentPath, ...probe.absentBody !== undefined ? { body: probe.absentBody } : {} }, `${route}_absent`);
-        prober.note(route, `absent_${answer(absent)}`);
+      const own = ownIds.find(id => probe.path.includes(id));
+      const absentPath = probe.absent ?? (own ? probe.path.split(own).join(randomUUID()) : undefined);
+      const absent = absentPath
+        ? await send(who, { ...probe, path: absentPath, ...probe.absentBody !== undefined ? { body: probe.absentBody } : {} }, `${route}_absent`) : null;
+      // Another refusal (any 4xx) identical in status and code to the absent case tells the caller nothing: refused, noted.
+      if (absent && reply.status >= 400 && reply.status < 500 && answer(absent) === answer(reply) && errorCode(absent) === errorCode(reply)) {
+        counts.refused!++; counts.sameAsAbsent!++;
+        prober.note(route, `refused_as_absent_${answer(reply)}`);
+        continue;
       }
+      violate(route, `answered_${answer(reply)}`);
+      if (absent) prober.note(route, `absent_${answer(absent)}`);
       continue;
     }
     counts.refused!++;
