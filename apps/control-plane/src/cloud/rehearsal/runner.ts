@@ -34,6 +34,8 @@ export const NO_ACCOUNT: Api = { json: async () => { throw new RehearsalFailure(
 export const DEFAULT_RUN_CAP = 30;
 const ACTIVE = new Set(["creating", "starting", "running", "stopping"]);
 
+/** A connect that waited longer than this is noted (bridge_wait:<seconds>). */
+const BRIDGE_WAIT_NOTED_S = 30;
 export function stageContext(ports: Ports, state: RehearsalState, save: () => Promise<void>, repositories: StageContext["repositories"],
   timing: StageContext["timing"], runCap: number): StageContext & { lastStep(): string; takeNotes(): string[]; takeCounts(): Record<string, number>;
     /** Each finished step's elapsed time, in order (the current one closed now), and cleared for the next stage. */
@@ -85,7 +87,7 @@ export async function runStages(ctx: ReturnType<typeof stageContext>, stages: re
     else if (STAGE_NEEDS_ACCOUNT[name] && options.accountUnavailable) result = { ok: false, step: "account_unavailable", code: options.accountUnavailable };
     else {
       // Every step prints its elapsed time as it finishes; the stage ends with its slowest steps and its total.
-      ctx.takeTimings(); ctx.takeCounts(); ctx.ports.networkRetries?.();
+      ctx.takeTimings(); ctx.takeCounts(); ctx.ports.networkRetries?.(); ctx.ports.bridgeWaits?.();
       ctx.onStep = (step, ms) => { if (step !== "start" || ms >= 1_000) options.log(safeLine(`  ${name} step ${step} ${seconds(ms)}`)); };
       try {
         await preconditions(ctx, options, STAGE_NEEDS_ACCOUNT[name]);
@@ -97,6 +99,11 @@ export async function runStages(ctx: ReturnType<typeof stageContext>, stages: re
         // One temporary role per stage; nothing outlives it.
         await ctx.ports.database.close().catch(() => options.log("database role: close failed; run --cleanup"));
       }
+      // How long the stage's bridge connects waited for a live connection: measured, and named when one waited long.
+      const waits = ctx.ports.bridgeWaits?.() ?? [];
+      for (const seconds of waits) if (seconds > BRIDGE_WAIT_NOTED_S) ctx.note(`bridge_wait:${seconds}`);
+      if (waits.length) result = { ...result, counts: { ...result.counts,
+        bridgeWaitLongestSeconds: Math.max(...waits), bridgeWaitTotalSeconds: waits.reduce((sum, seconds) => sum + seconds, 0) } };
       const notes = ctx.takeNotes();
       if (notes.length) result = { ...result, notes };
       const counted = ctx.takeCounts();

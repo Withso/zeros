@@ -124,6 +124,11 @@ const SOCKET_OPEN = 1;
 /** Closes after which the desktop reconnects at once (runtime-client.ts onclose: a ready socket that did not end normally,
  * was not refused and was not a relay's retry-later); any other close is a failure, named. */
 const REOPENED_CLOSES = new Set([1001, 1006, 1011, 1012]);
+/** How long one connect waits out a live connection the server reports unavailable (1013 while running), and how often it asks. */
+export const BRIDGE_UNAVAILABLE_MS = 600_000;
+export const BRIDGE_UNAVAILABLE_POLL_MS = 3_000;
+/** Each connect's wait in seconds since the last take (the runner prints the longest and the total at each stage's end). */
+export const bridgeWaits = { seconds: [] as number[], take(): number[] { const taken = this.seconds; this.seconds = []; return taken; } };
 const MAX_REOPENS = 3;
 
 /** gate0's bridge client, opened with a connect ticket validated as gate0 validates it. As the desktop's: after an
@@ -132,19 +137,48 @@ const MAX_REOPENS = 3;
  * open, and how many relay pings it had answered (bridge_closed_1006:open_25s:pings_0). */
 export function liveBridge(api: Api, timeoutMs = 600_000, pollMs = 1_000,
   openProbe: (ticket: { url: string; protocols: string[] }) => Promise<OpenedProbe> = ticket => BridgeProbe.open(ticket, timeoutMs, pollMs),
-  options: { loopback?: string; sleep?: (ms: number) => Promise<void> } = {}): (workspaceId: string) => Promise<Bridge> {
+  options: { loopback?: string; sleep?: (ms: number) => Promise<void>; now?: () => number } = {}): (workspaceId: string) => Promise<Bridge> {
+  const sleep = options.sleep ?? liveClock.sleep, now = options.now ?? liveClock.now;
   return async workspaceId => {
     // The ticket request and the socket open are both safe to repeat: a new ticket, a new socket, nothing done yet.
+    // A machine whose live connection is not yet reachable is refused with 1013 while the workspace reads running: the
+    // server keeps dialing and asks the client to try later, and the desktop keeps retrying. That is waited out the same
+    // way, a few seconds apart, for up to BRIDGE_UNAVAILABLE_MS per connect, and measured (bridgeWaits), never hidden.
     const connect = async () => {
-      for (let attempt = 0; ; attempt++) {
-        try { return await connectOnce(); } catch (error) {
-          const wait = NETWORK_RETRY_MS[attempt];
+      const startedAt = now();
+      let waited = false;
+      for (let attempt = 0; ; ) {
+        try {
+          const opened = await connectOnce();
+          bridgeWaits.seconds.push(Math.round((now() - startedAt) / 1000));
+          return opened;
+        } catch (error) {
+          if (error instanceof RehearsalFailure && error.step === "bridge_open" && error.code === "bridge_closed_1013" && await liveUnavailable(workspaceId)) {
+            const seconds = Math.round((now() - startedAt) / 1000);
+            if (now() - startedAt >= BRIDGE_UNAVAILABLE_MS) {
+              bridgeWaits.seconds.push(seconds);
+              throw new RehearsalFailure("bridge_open", `bridge_closed_1013:waited_${seconds}s`);
+            }
+            waited = true;
+            await sleep(BRIDGE_UNAVAILABLE_POLL_MS);
+            continue;
+          }
+          const wait = NETWORK_RETRY_MS[attempt++];
           const transient = error instanceof RehearsalFailure && (error.step === "bridge_open" || /^network/.test(error.code));
-          if (!transient || wait === undefined) throw error;
+          if (!transient || wait === undefined) {
+            if (waited) bridgeWaits.seconds.push(Math.round((now() - startedAt) / 1000));
+            throw error;
+          }
           networkRetries.count++;
-          await (options.sleep ?? liveClock.sleep)(wait);
+          await sleep(wait);
         }
       }
+    };
+    // The workspace reads running with live_connection_unavailable: the one refusal that is waited out.
+    const liveUnavailable = async (id: string) => {
+      const reply = await api.json("GET", `/v1/cloud-v2/workspaces/${id}`).catch(() => null);
+      const row = z.object({ workspace: z.object({ state: z.string(), errorCode: z.string().nullable().optional() }).passthrough() }).safeParse(reply?.body);
+      return reply?.status === 200 && row.success && row.data.workspace.state === "running" && row.data.workspace.errorCode === "live_connection_unavailable";
     };
     const connectOnce = async () => {
       const reply = await connectWorkspace(api, workspaceId, "connect");
