@@ -1,8 +1,9 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Button } from "../../shared/ui";
 import { MessageRow } from "../../shared/ui/primitives/message-row";
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "../../shared/ui/primitives/sheet";
 import { KeyedAsyncCache } from "../../shared/lib/keyed-async-cache";
+import { useDocumentActive } from "../../state/use-document-active";
 import { useRecoveringRead } from "../../state/use-recovering-read";
 import { ControlPlaneError } from "../team/control-plane";
 import { buildCloudReadyCopy, getCloudReadyCopy, getCloudReadyCopyOutput, type CloudReadyCopy } from "../../platform/cloud-github-levels";
@@ -35,6 +36,15 @@ export function readyCopyStatus(status: CloudReadyCopy["status"], now: number): 
   }
 }
 
+/** How often an open project page reads its build again while one is in progress. */
+export const READY_COPY_PROGRESS_MS = 5_000;
+/** A build is under way: getting ready or updating, a generation still building, or the organization's Cloud Computer
+ * still being prepared for it. Ready and failed end it. */
+export function readyCopyInProgress(copy: Pick<CloudReadyCopy, "status" | "history" | "base">): boolean {
+  return copy.status.state === "getting_ready" || copy.status.state === "updating"
+    || !!copy.history?.some(build => build.state === "building") || copy.base?.state === "preparing";
+}
+
 const RESULT = { building: "building", ready: "succeeded", retired: "succeeded", failed: "failed" } as const;
 const duration = (start: string | null, end: string | null) => {
   if (!start || !end) return null;
@@ -49,6 +59,16 @@ export function ReadyCopySection({ organizationId, projectId, active }: { organi
   const [busy, setBusy] = useState(false), [error, setError] = useState<string | null>(null);
   const [output, setOutput] = useState<{ generation: number; text: string } | null>(null);
   const copy = read.data;
+  // While a build is under way, an open, visible page reads it again (keeping what it shows until the reply), so a
+  // person watching sees it become Ready; nothing reads on a hidden or retained page, and ready or failed ends it.
+  const visible = useDocumentActive(active);
+  const inProgress = !!copy && readyCopyInProgress(copy);
+  const refresh = read.refresh;
+  useEffect(() => {
+    if (!visible || !inProgress) return;
+    const timer = setInterval(refresh, READY_COPY_PROGRESS_MS);
+    return () => clearInterval(timer);
+  }, [visible, inProgress, refresh]);
   if (!copy) return null;
   const now = Date.now(), status = readyCopyStatus(copy.status, now), failure = copy.status.failure;
   const build = async () => {
