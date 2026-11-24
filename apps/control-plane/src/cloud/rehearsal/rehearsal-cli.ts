@@ -13,7 +13,7 @@ import { gate0SignIn } from "../gate0-cli.js";
 import { RehearsalFailure, STAGE_NEEDS_ACCOUNT, STAGES, type Api, type Database, type OwnerKind, type Ports, type StageName, type Switch } from "./contract.js";
 import { diagnose, signInAccount, signInAll, type Account, type SignedIn, type SignInDeps } from "./accounts.js";
 import { assertRepository, safeLine } from "./guard.js";
-import { ALPHA_TARGET, networkRetries, localDatabase, localStaffOrganization, localStaffRole, type DatabaseClient, type LiveDatabase, AGENT_CREDENTIAL_SOURCES, agentCredentialsFromEnv, checkGithubToken, tokenLines, liveApi, liveBoat, liveBridge, liveClock, liveDatabase, liveGithub, liveGithubSignIn, liveGithubToken, livePro, liveRelease, liveStorage,
+import { ALPHA_TARGET, bridgeWaits, networkRetries, localDatabase, localStaffOrganization, localStaffRole, type DatabaseClient, type LiveDatabase, AGENT_CREDENTIAL_SOURCES, agentCredentialsFromEnv, checkGithubToken, tokenLines, liveApi, liveBoat, liveBridge, liveClock, liveDatabase, liveGithub, liveGithubSignIn, liveGithubToken, livePro, liveRelease, liveStorage,
   tokenRefusal, liveReleaseIdentity, liveRuntimeQualification } from "./live.js";
 import { errorCode } from "./steps.js";
 import { accountLines, turnLine, PERSONAL_ROUTE_GAPS, preconditionLines, type PreconditionFacts, platformOwners, probeDiagnostics, proActor, readAccount, refusal, resolveProbe, writeLines,
@@ -382,7 +382,7 @@ async function main(argv: string[]): Promise<number> {
       }
       const ports: Ports = {
         release: () => liveRelease(fetch, target), api, bridge: liveBridge(api, undefined, undefined, undefined, target.loopback ? { loopback: target.loopback } : {}),
-        networkRetries: () => networkRetries.take(), boat: liveBoat({ apiKey: profile.boat.apiKey,
+        networkRetries: () => networkRetries.take(), bridgeWaits: () => bridgeWaits.take(), boat: liveBoat({ apiKey: profile.boat.apiKey,
           ...(profile.boat.billingOrg ? { billingOrg: profile.boat.billingOrg } : {}) }),
         storage: liveStorage(storageConfig(), () => run.created.workspaces),
         github: fixtureGithub(),

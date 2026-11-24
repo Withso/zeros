@@ -122,6 +122,8 @@ export type Ports = {
   bridge(workspaceId: string): Promise<Bridge>;
   /** Network retries since the last call (and reset): the runner prints them at each stage's end. */
   networkRetries?(): number;
+  /** Each bridge connect's wait in seconds since the last call (and reset): the runner prints the longest and the total. */
+  bridgeWaits?(): number[];
   boat: Boat;
   storage: Storage;
   github: Github;

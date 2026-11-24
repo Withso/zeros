@@ -19,7 +19,7 @@ import { FIXTURE_TWO } from "./stage-provision.js";
 import { submoduleCommitsCommand, submoduleStatusNotes } from "./stage-submodules.js";
 import { loadState, newState, saveState, stateTarget } from "./state.js";
 import { localStack } from "./local-stack.js";
-import { agentCredentialsFromEnv, ALPHA_TARGET, NETWORK_RETRY_MS, networkRetries, checkGithubToken, databaseErrorCode, databaseRefusal, liveApi, liveBridge, liveRelease, targetIdentity, liveDatabase, localDatabase, OUTSIDE_PROBE_LIMIT, SET_APP_SYSTEM, tokenLines, tokenRefusal, type DatabaseClient } from "./live.js";
+import { agentCredentialsFromEnv, ALPHA_TARGET, BRIDGE_UNAVAILABLE_MS, BRIDGE_UNAVAILABLE_POLL_MS, bridgeWaits, NETWORK_RETRY_MS, networkRetries, checkGithubToken, databaseErrorCode, databaseRefusal, liveApi, liveBridge, liveRelease, targetIdentity, liveDatabase, localDatabase, OUTSIDE_PROBE_LIMIT, SET_APP_SYSTEM, tokenLines, tokenRefusal, type DatabaseClient } from "./live.js";
 import { platformOwners, probeDiagnostics, proActor, resolveProbe } from "./plan.js";
 
 const R1 = "Withso/zeros-dev-fixture";
@@ -417,6 +417,66 @@ describe("rehearsal stages against a fake Alpha", () => {
       expect(waits).toEqual([1_000]);
       expect(networkRetries.take()).toBe(1);
       expect(seen.length).toBe(0);
+    });
+
+    describe("a live connection the server reports unavailable (1013 while running)", () => {
+      // A clock the waits advance, a workspace read, a ticket per connect, and an open that is refused `refusals` times.
+      const harness = (refusals: number, options: { close?: string; state?: string } = {}) => {
+        let clock = 0;
+        const slept: number[] = [], tickets: number[] = [];
+        const api: Parameters<typeof liveBridge>[0] = { json: async (_method, path) => {
+          if (path.includes("/connect")) { tickets.push(tickets.length);
+            return { status: 200, body: { url: "wss://api.example.test/v1/cloud-v2/bridge/w", protocols: ["zeros.cloud.v2", `ticket.${tickets.length}`] } }; }
+          return { status: 200, body: { workspace: { id: "w", state: options.state ?? "running", errorCode: "live_connection_unavailable" } } };
+        } };
+        const socket = { readyState: 1, on: () => socket };
+        let opens = 0;
+        const openProbe = async () => {
+          opens++;
+          if (opens <= refusals) throw new Gate0Failure("bridge_handshake", options.close ?? "bridge_closed_1013");
+          return { socket, op: async () => ({}), request: async () => ({}), send: () => undefined, frames: [], close: () => undefined } as never;
+        };
+        const bridge = liveBridge(api, 1_000, 10, openProbe, { now: () => clock, sleep: async ms => { slept.push(ms); clock += ms; } });
+        return { bridge, slept, tickets, opens: () => opens };
+      };
+      beforeEach(() => { bridgeWaits.take(); networkRetries.take(); });
+
+      it("is waited out, a few seconds apart with a fresh ticket each time, and the wait is recorded", async () => {
+        const h = harness(3);
+        await h.bridge("w");
+        expect(h.opens()).toBe(4); expect(h.tickets.length).toBe(4);
+        expect(h.slept).toEqual(Array(3).fill(BRIDGE_UNAVAILABLE_POLL_MS));
+        expect(bridgeWaits.take()).toEqual([9]);
+        // Not a network retry: those stay what they were.
+        expect(networkRetries.take()).toBe(0);
+      });
+
+      it("fails at the limit with the seconds it waited in the code", async () => {
+        const h = harness(Number.POSITIVE_INFINITY);
+        await expect(h.bridge("w")).rejects.toMatchObject({ step: "bridge_open", code: `bridge_closed_1013:waited_${BRIDGE_UNAVAILABLE_MS / 1000}s` });
+        expect(h.slept.reduce((sum, ms) => sum + ms, 0)).toBe(BRIDGE_UNAVAILABLE_MS);
+        expect(bridgeWaits.take()).toEqual([BRIDGE_UNAVAILABLE_MS / 1000]);
+      });
+
+      it("fails as before on any other close, or on 1013 while the workspace is not running", async () => {
+        const other = harness(Number.POSITIVE_INFINITY, { close: "bridge_closed_1008" });
+        await expect(other.bridge("w")).rejects.toMatchObject({ step: "bridge_open", code: "bridge_closed_1008" });
+        // The open's own three retries, 1, 3 and 9 s apart, as before; no waiting out.
+        expect(other.slept).toEqual([...NETWORK_RETRY_MS]);
+        const stopped = harness(Number.POSITIVE_INFINITY, { state: "stopped" });
+        await expect(stopped.bridge("w")).rejects.toMatchObject({ code: "bridge_closed_1013" });
+        expect(stopped.slept).toEqual([...NETWORK_RETRY_MS]);
+      });
+
+      it("prints the stage's longest and total wait as counts, and notes a connect that waited more than 30 s", async () => {
+        const { ctx, lines, options } = setup();
+        let calls = 0;
+        ctx.ports.bridgeWaits = () => calls++ === 0 ? [500] : [45, 2, 0];
+        expect(await runStages(ctx, ["provision"], options)).toBe(true);
+        expect(ctx.state.stages.provision).toMatchObject({ counts: { bridgeWaitLongestSeconds: 45, bridgeWaitTotalSeconds: 47 }, notes: ["bridge_wait:45"] });
+        expect(lines).toContain("  provision bridgeWaitLongestSeconds 45");
+        expect(lines).toContain("  provision note bridge_wait:45");
+      });
     });
 
     it("prints each stage's network retries at its end", async () => {
