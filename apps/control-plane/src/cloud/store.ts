@@ -870,7 +870,7 @@ export class CloudV2Store {
   async requestLifecycle(id: string, userId: string, action: "start" | "stop" | "archive" | "restart"):
     Promise<{ workspace: CloudV2Workspace; moved: boolean }> {
     const execution = this.prompts.execution;
-    if (execution && await execution.active(id)) {
+    if (execution && await execution.active(id, undefined, userId)) {
       const proof = action === "stop" ? undefined : await execution.deps.authority.admit(id, userId);
       return this.requestExecutionLifecycle(id, userId, action, proof);
     }

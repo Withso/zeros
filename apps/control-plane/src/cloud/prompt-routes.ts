@@ -23,7 +23,7 @@ export function createCloudV2PromptRoutes(outbox: CloudV2PromptOutbox, authorize
     c.header("Cache-Control", "no-store");
     // Stop remains possible after repository access is lost.
     const workspaceId = id(c.req.param("id")!);
-    if (!c.req.path.endsWith("/stop") && !await (executionActive ? executionActive(c, workspaceId) : outbox.execution?.active(workspaceId)))
+    if (!c.req.path.endsWith("/stop") && !await (executionActive ? executionActive(c, workspaceId) : outbox.execution?.active(workspaceId, undefined, c.get("user").id)))
       await authorizeSource?.(workspaceId, c.get("user").id);
     await next();
   });

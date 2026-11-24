@@ -85,7 +85,12 @@ export class CloudExecutionAuthority {
         AND (w.private_owner_user_id IS NULL OR w.private_owner_user_id=$2)
         AND u.auth_status='active' AND u.deleted_at IS NULL AND NOT ${memberOnHoldSql("m.org_id", "m.user_id")}`,
     [workspaceId, userId, fingerprint ?? null, contextId ?? null])).rows[0];
-    if (!row) throw memberAccessRevoked();
+    if (!row) {
+      // Another member's private workspace answers as an absent one, never as access its caller lost.
+      if ((await tx.query("SELECT 1 FROM cloud_v2_workspaces WHERE id=$1 AND private_owner_user_id<>$2", [workspaceId, userId])).rowCount)
+        throw new HttpError(404, "not_found", "Cloud workspace not found");
+      throw memberAccessRevoked();
+    }
     if (!row.context_current) throw actorChanged();
     if (row.execution_mode !== "active") throw executionWorkerRequired();
     const parsed = z.array(CloudSourceTargetSchema).min(1).max(100).safeParse(row.sources);
