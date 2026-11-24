@@ -44,7 +44,7 @@ Use the current shared primitives, token sources, and the checked-in frames in
    opacity (`text-fg2/60`). On a tinted `bg-<family>-bg`, text is
    `text-<family>-fg`.
 6. **Scales:** text `text-xxs` 10 · `text-2xxs` 11 · `text-3xxs` 12 · `text-xs`
-   13/18 · `text-sm` 14/20, and `text-reading` 15/22 for the chat's reading
+   13/18 · `text-sm` 14/20, and `text-reading` 14/22 for the chat's reading
    text only. Controls are 28 standard, 24 compact or 20 inline
    (IconButton), with 14, 12 and 12px glyphs; never mix heights in one row.
    Radius `rounded-sm` 4 (inline controls, pills, badges, kbd, checkboxes) ·
@@ -54,8 +54,8 @@ Use the current shared primitives, token sources, and the checked-in frames in
    controls). Global layers `z-panel` · `z-chrome` · `z-dropdown` · `z-modal` ·
    `z-toast`; only `z-0`…`z-2` locally.
 7. **States are the primitive's.** Hover, open, pressed (`aria-pressed`),
-   keyboard focus (`highlighted-bright` with the 3px halo; fields ring only on
-   keyboard focus), disabled (50%; `aria-disabled` keeps the reason tooltip)
+   keyboard focus (a 1px `accent` edge; fields show it only on keyboard
+   focus), disabled (50%; `aria-disabled` keeps the reason tooltip)
    and loading (`loading` on Button and SplitButton). One choice in a menu is
    a check at the row's end, several a left check column; destructive rows
    are red and last; shortcuts are Kbd chips.

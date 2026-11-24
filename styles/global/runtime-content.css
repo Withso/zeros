@@ -198,7 +198,7 @@
   letter-spacing: -0.01em;
 }
 [data-Zeros-root] .zeros-agent-md h2 {
-  font-size: 17px; /* check:ui ignore-line — rich-content heading scale 20/17/15/14 */
+  font-size: 17px;
 }
 [data-Zeros-root] .zeros-agent-md h3,
 [data-Zeros-root] .zeros-agent-md h4,
