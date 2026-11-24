@@ -122,43 +122,88 @@ export function parseArchiveScrub(stdout: string): ArchiveScrubResult {
 }
 
 /** Where a stop records, once the worker is off, the moment the machine's content was last a person's or an
- * agent's: outside every checkout, so writing it changes none. */
-const STOP_MARKER = ".cache/zeros-stop-marker";
+ * agent's, and a digest of what each checkout holds: outside every checkout, so writing it changes none, and outside
+ * what a backup captures. Never under a cache or temporary folder: the saved machine image does not include those. */
+export const STOP_MARKER = ".local/share/zeros/stop-marker";
 export const CHANGED_SINCE_STOP_SECONDS = 25;
+/** The stop's listing within its command's 15 s; the wake's newer-file search per checkout and its listing within 25 s. */
+const STOP_LISTING_SECONDS = 10, WAKE_NEWER_SECONDS = 8, WAKE_LISTING_SECONDS = 12;
 
 /** The marker's time: the next whole second. A machine's file system may keep whole seconds only: a marker touched
  * mid-second was then stored earlier than writes made just before it in that second (the worker's last ones as it went
  * off), which then read as the person's. */
 const MARK = `touch -d "@$(( $(date +%s) + 1 ))" --`;
+/** Git's bookkeeping, relative to a checkout: never part of the listing, nor a newer file. */
+const BOOKKEEPING = "(index|FETCH_HEAD|ORIG_HEAD|[^/]*\\.lock)";
 
-export function stopMarkerCommand(home: string): string {
-  if (!home.startsWith("/") || /[\n\0']/.test(home)) throw new Error("Invalid marker path");
-  return `bash -c ${quote(`mkdir -p -- '${home}/.cache' && ${MARK} '${home}/${STOP_MARKER}'`)}`;
-}
-
-/** At the end of a maintenance wake: is any file under a checkout newer than the stop's marker? Something
- * the person left running outside the worker's service may have written while the machine was awake.
- * Bounded; a timeout, an error or no marker (a stop from before this check) answers "changed", and a
- * missing marker is created now so the next wake can tell. Git's own bookkeeping never counts: the .git entry's own
- * time and, in it and in each submodule's Git directory under .git/modules, index, *.lock, FETCH_HEAD and ORIG_HEAD
- * (a git status rewrites the index). Every other entry does, work-tree directories included (a deleted file moves only
- * its directory's time); staging still writes a new object. */
-export function changedSinceStopCommand(home: string, checkoutPaths: readonly string[]): string {
+function checkedPaths(home: string, checkoutPaths: readonly string[]) {
   for (const value of [home, ...checkoutPaths])
     if (!value.startsWith("/") || /[\n\0]/.test(value) || value.split("/").some(part => part === "..")) throw new Error("Invalid change check path");
+}
+
+/** Defines `digest`: the sha256 of every entry that is not a directory under each checkout in order (relative paths,
+ * NUL-separated, sorted bytewise), Git's bookkeeping left out. Directories never count, neither their times nor their
+ * names: a machine brought back from the saved image gives them new times, and Git and a backup hold no empty one.
+ * Fails on any error or after `seconds`, so a partial listing is never a digest. */
+function digestFunction(checkoutPaths: readonly string[], seconds: number): string[] {
+  return [
+    "list() {",
+    `  for repo in ${checkoutPaths.map(quote).join(" ")}; do`,
+    "    printf 'checkout\\0%s\\0' \"$repo\"",
+    "    if [ -d \"$repo\" ]; then",
+    "      (cd -- \"$repo\" && find . -xdev -regextype posix-extended ! -type d "
+      + `! -regex ${quote(`\\./\\.git(/modules/[^/]+)*/${BOOKKEEPING}`)} -print0) | LC_ALL=C sort -z || return 1`,
+    "    else printf 'absent\\0'; fi",
+    "  done",
+    "}",
+    "export -f list",
+    `digest() { local d; d=$(timeout ${seconds} bash -c 'set -o pipefail; list | sha256sum') || return 1; printf '%s' "\${d%% *}"; }`,
+  ];
+}
+
+/** Writes the marker atomically with its time and, when given, the digest. */
+const WRITE_MARKER = [
+  `write_marker() { mkdir -p -- "$(dirname -- "$m")" && { if [ -n "$1" ]; then printf 'zeros-stop-v2 %s\\n' "$1"; fi; } > "$m.tmp" && ${MARK} "$m.tmp" && mv -f -- "$m.tmp" "$m"; }`,
+];
+
+/** The stop's marker. A listing that does not finish in time leaves it without a digest: the next wake answers changed. */
+export function stopMarkerCommand(home: string, checkoutPaths: readonly string[] | null): string {
+  checkedPaths(home, checkoutPaths ?? []);
+  return `bash -c ${quote([
+    "set -u", "exec >/dev/null 2>&1",
+    `m=${quote(`${home}/${STOP_MARKER}`)}`,
+    ...WRITE_MARKER,
+    ...(checkoutPaths?.length ? [...digestFunction(checkoutPaths, STOP_LISTING_SECONDS), "d=$(digest) || d=", "write_marker \"$d\""] : ["write_marker ''"]),
+  ].join("\n"))}`;
+}
+
+/** At the end of a maintenance wake: did anything change under a checkout since the stop? Something the person left
+ * running outside the worker's service may have written while the machine was awake. Changed means an entry that is not
+ * a directory and is newer than the marker, or a listing whose digest differs from the stop's (a deleted, renamed or new
+ * file). Git's own bookkeeping never counts: in the checkout's .git and each submodule's Git directory under .git/modules,
+ * index, *.lock, FETCH_HEAD and ORIG_HEAD (a git status rewrites the index). Never "unchanged" without a digest that
+ * matched: a timeout, an error, or a marker without a digest (a stop from before it, or whose listing did not finish)
+ * answers "changed", and that wake writes a full marker so the next one can tell. */
+export function changedSinceStopCommand(home: string, checkoutPaths: readonly string[]): string {
+  checkedPaths(home, checkoutPaths);
   return `bash -c ${quote([
     "set -u", "exec 3>&1 >/dev/null 2>&1",
     `m=${quote(`${home}/${STOP_MARKER}`)}`,
     `answer() { printf 'zeros-changed %s\\n' "$1" >&3; exit 0; }`,
-    `[ -f "$m" ] || { mkdir -p -- ${quote(`${home}/.cache`)}; ${MARK} "$m"; answer yes; }`,
+    ...WRITE_MARKER,
+    ...digestFunction(checkoutPaths, WAKE_LISTING_SECONDS),
+    "saved=$(sed -n 's/^zeros-stop-v2 \\([0-9a-f]\\{64\\}\\)$/\\1/p' \"$m\" 2>/dev/null) || saved=",
+    `[ -n "$saved" ] || { d=$(digest) && write_marker "$d"; answer yes; }`,
     `for repo in ${checkoutPaths.map(quote).join(" ")}; do`,
     "  [ -d \"$repo\" ] || continue",
     // The checkout's path as a regular expression, then Git's bookkeeping under it, in submodules' Git directories too.
     "  re=$(printf '%s' \"$repo\" | sed 's/[][\\.*^$+?(){}|]/\\\\&/g'); git=\"$re/\\.git(/modules/[^/]+)*\"",
-    "  found=$(timeout 20 find \"$repo\" -xdev -regextype posix-extended -newer \"$m\" ! -regex \"$git\" "
-      + "! -regex \"$git/(index|FETCH_HEAD|ORIG_HEAD|[^/]*\\.lock)\" -print -quit) || answer yes",
+    `  found=$(timeout ${WAKE_NEWER_SECONDS} find "$repo" -xdev -regextype posix-extended ! -type d -newer "$m" `
+      + `! -regex "$git/${BOOKKEEPING}" -print -quit) || answer yes`,
     "  [ -n \"$found\" ] && answer yes",
     "done",
+    "now=$(digest) || answer yes",
+    "[ \"$now\" = \"$saved\" ] || answer yes",
     "answer no",
   ].join("\n"))}`;
 }

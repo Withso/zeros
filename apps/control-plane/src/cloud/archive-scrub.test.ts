@@ -1,11 +1,11 @@
 // The maintenance wake's change check (archive-scrub.ts), with a real shell, find and Git: only the person's work
 // answers "changed", never the stop's own timing on a file system that keeps whole seconds, nor Git's bookkeeping.
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { changedSinceStopCommand, parseChangedSinceStop, stopMarkerCommand } from "./archive-scrub.js";
+import { STOP_MARKER, changedSinceStopCommand, parseChangedSinceStop, stopMarkerCommand } from "./archive-scrub.js";
 
 const dirs: string[] = [];
 afterEach(() => { for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true }); });
@@ -21,10 +21,10 @@ function workspace() {
   git("init", "-q", "-b", "main");
   writeFileSync(join(checkout, "README.md"), "hello\n"); writeFileSync(join(checkout, "keep.txt"), "keep\n");
   git("add", "-A"); git("commit", "-q", "-m", "base");
-  const marker = join(home, ".cache", "zeros-stop-marker");
-  const stop = () => { expect(run(stopMarkerCommand(home)).status).toBe(0); return statSync(marker).mtimeMs / 1000; };
+  const marker = join(home, ".local", "share", "zeros", "stop-marker"), oldMarker = join(home, ".cache", "zeros-stop-marker");
+  const stop = () => { expect(run(stopMarkerCommand(home, [checkout])).status).toBe(0); return statSync(marker).mtimeMs / 1000; };
   const changed = () => parseChangedSinceStop(run(changedSinceStopCommand(home, [checkout])).stdout);
-  return { home, checkout, git, marker, stop, changed };
+  return { home, checkout, git, marker, oldMarker, stop, changed };
 }
 
 describe("the stop's marker and the wake's change check", () => {
@@ -66,7 +66,12 @@ describe("the stop's marker and the wake's change check", () => {
   it.each([
     ["an edited file", (f: ReturnType<typeof workspace>, at: number) => { writeFileSync(join(f.checkout, "README.md"), "edited\n"); touchAt(join(f.checkout, "README.md"), at + 5); }],
     ["a new untracked file", (f: ReturnType<typeof workspace>, at: number) => { writeFileSync(join(f.checkout, "new.txt"), "new\n"); touchAt(join(f.checkout, "new.txt"), at + 5); }],
-    ["a deleted file", (f: ReturnType<typeof workspace>, at: number) => { rmSync(join(f.checkout, "keep.txt")); touchAt(f.checkout, at + 5); }],
+    // Directory times never count: only the listing shows a deleted or renamed file.
+    ["a deleted file", (f: ReturnType<typeof workspace>, at: number) => { rmSync(join(f.checkout, "keep.txt")); touchAt(f.checkout, at - 5); }],
+    ["a renamed file, its time kept", (f: ReturnType<typeof workspace>, at: number) => { renameSync(join(f.checkout, "keep.txt"), join(f.checkout, "kept.txt"));
+      touchAt(f.checkout, at - 5); }],
+    ["a new file with an old time", (f: ReturnType<typeof workspace>, at: number) => { writeFileSync(join(f.checkout, "old.txt"), "old\n");
+      touchAt(join(f.checkout, "old.txt"), at - 60); touchAt(f.checkout, at - 5); }],
     // Staging writes the index (bookkeeping) and a new blob under .git/objects, which counts. A known limit: staging
     // content whose blob already exists leaves no newer file, and answers unchanged.
     ["a change staged with git add", (f: ReturnType<typeof workspace>, at: number) => { writeFileSync(join(f.checkout, "README.md"), "staged\n");
@@ -74,9 +79,98 @@ describe("the stop's marker and the wake's change check", () => {
     // A real commit after the stop, past the marker's second: its new objects and refs are newer.
     ["a new commit", (f: ReturnType<typeof workspace>) => { execFileSync("sleep", ["1.1"]); writeFileSync(join(f.checkout, "c.txt"), "c\n");
       f.git("add", "c.txt"); f.git("commit", "-q", "-m", "c"); touchAt(join(f.checkout, "c.txt"), statSync(f.marker).mtimeMs / 1000 - 1); }],
+    ["a new commit with every work-tree time set back", (f: ReturnType<typeof workspace>, at: number) => { execFileSync("sleep", ["1.1"]);
+      writeFileSync(join(f.checkout, "c.txt"), "c\n"); f.git("add", "c.txt"); f.git("commit", "-q", "-m", "c");
+      for (const name of ["README.md", "keep.txt", "c.txt"]) touchAt(join(f.checkout, name), at - 5); }],
   ])("still answers changed for %s after the stop", (_label, change) => {
     const f = workspace(), at = f.stop();
     change(f, at);
     expect(f.changed()).toBe(true);
+  });
+
+  // The saved machine image does not include cache and temporary folders: a marker there is lost whenever a wake starts
+  // from the image, and every such wake answered "changed".
+  it("keeps the marker out of cache and temporary folders", () => {
+    expect(STOP_MARKER).toBe(".local/share/zeros/stop-marker");
+    for (const scratch of [/^\/home\/user\/\.cache(\/|$)/, /^\/tmp(\/|$)/, /^\/var\/tmp(\/|$)/]) expect(`/home/user/${STOP_MARKER}`).not.toMatch(scratch);
+    expect(stopMarkerCommand("/home/user")).not.toMatch(/\.cache|\/tmp/);
+    const f = workspace();
+    f.stop();
+    expect(existsSync(f.marker)).toBe(true);
+    expect(existsSync(join(f.home, ".cache"))).toBe(false);
+  });
+
+  it("answers unchanged for an untouched checkout and changed after a later write, with the marker in its kept folder", () => {
+    const f = workspace(), at = f.stop();
+    touchAt(join(f.checkout, "README.md"), at - 2);
+    expect(f.changed()).toBe(false);
+    writeFileSync(join(f.checkout, "later.txt"), "later\n"); touchAt(join(f.checkout, "later.txt"), at + 5);
+    expect(f.changed()).toBe(true);
+  });
+
+  /** Every directory's time set to now, as on a machine brought back from the saved image. */
+  const restoredImage = (f: ReturnType<typeof workspace>) => {
+    const now = Date.now() / 1000;
+    execFileSync("find", [f.checkout, "-type", "d", "-exec", "touch", "-d", `@${now.toFixed(3)}`, "{}", "+"]);
+  };
+
+  it("answers unchanged for an untouched checkout whose every directory time is newer, as a restored image leaves it", () => {
+    const f = workspace(), at = f.stop();
+    execFileSync("sleep", ["1.1"]);
+    restoredImage(f);
+    expect(statSync(f.checkout).mtimeMs / 1000).toBeGreaterThan(at);
+    expect(f.changed()).toBe(false);
+  });
+
+  it("writes the listing's digest into the marker, and directories never count, neither their times nor their names", () => {
+    const f = workspace();
+    f.stop();
+    expect(readFileSync(f.marker, "utf8")).toMatch(/^zeros-stop-v2 [0-9a-f]{64}\n$/);
+    mkdirSync(join(f.checkout, "empty", "nested"), { recursive: true });
+    expect(f.changed()).toBe(false);
+  });
+
+  it("answers changed once for a marker without a digest, at its new path or the old one, and that wake writes a full one", () => {
+    for (const place of ["new", "old"] as const) {
+      const f = workspace(), path = place === "new" ? f.marker : f.oldMarker, at = Math.floor(Date.now() / 1000) + 1;
+      mkdirSync(join(path, ".."), { recursive: true }); writeFileSync(path, ""); touchAt(path, at);
+      expect(f.changed()).toBe(true);
+      expect(readFileSync(f.marker, "utf8")).toMatch(/^zeros-stop-v2 [0-9a-f]{64}\n$/);
+      restoredImage(f);
+      expect(f.changed()).toBe(false);
+    }
+  });
+
+  it("answers changed with neither marker, and writes only the new one for the next wake", () => {
+    const f = workspace();
+    expect(f.changed()).toBe(true);
+    expect(existsSync(f.marker)).toBe(true);
+    expect(existsSync(f.oldMarker)).toBe(false);
+    expect(f.changed()).toBe(false);
+  });
+
+  it("writes the marker without a digest when the stop's listing runs out of time, so the next wake answers changed", () => {
+    const f = workspace(), stub = join(f.home, "stub"), log = join(f.home, "timeout.log");
+    mkdirSync(stub);
+    // timeout's own answer at its limit; the stub logs that it ran (a spawned bash may put other folders first on PATH).
+    writeFileSync(join(stub, "timeout"), `#!/bin/sh\necho ran >> '${log}'\nexit 124\n`, { mode: 0o755 });
+    const stopped = spawnSync("bash", ["-c", `export PATH='${stub}:${process.env.PATH}'; eval "$1"`, "check", stopMarkerCommand(f.home, [f.checkout])], { encoding: "utf8" });
+    expect(stopped.status).toBe(0);
+    expect(readFileSync(log, "utf8")).toBe("ran\n");
+    expect(readFileSync(f.marker, "utf8")).toBe("");
+    expect(f.changed()).toBe(true);
+    // That wake wrote a full marker.
+    expect(f.changed()).toBe(false);
+  });
+
+  it("never counts Git's bookkeeping that appears after the stop in the listing either", () => {
+    const f = workspace(), at = f.stop();
+    const module = join(f.checkout, ".git", "modules", "e".repeat(64));
+    mkdirSync(module, { recursive: true });
+    for (const name of ["FETCH_HEAD", "ORIG_HEAD", "config.lock"]) writeFileSync(join(f.checkout, ".git", name), "");
+    for (const name of ["index", "HEAD.lock", "FETCH_HEAD"]) writeFileSync(join(module, name), "");
+    for (const path of [...["FETCH_HEAD", "ORIG_HEAD", "config.lock", "index"].map(name => join(f.checkout, ".git", name)),
+      ...["index", "HEAD.lock", "FETCH_HEAD"].map(name => join(module, name))]) touchAt(path, at - 5);
+    expect(f.changed()).toBe(false);
   });
 });

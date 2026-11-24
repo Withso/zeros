@@ -91,7 +91,7 @@ d("cloud v2 retention", () => {
         return { exitCode: 0, stdout: `${held.length ? "zeros-submodule-held-restored 1\n" : ""}zeros-submodules-held\n`, timedOut: false };
       }
       // Retention S3's commands on the machine.
-      if (command.includes("zeros-stop-marker") && !command.includes("zeros-changed")) { markers.add(machine.id); written.delete(machine.id); return { exitCode: 0, stdout: "", timedOut: false }; }
+      if (command.includes(".local/share/zeros/stop-marker") && !command.includes("zeros-changed")) { markers.add(machine.id); written.delete(machine.id); return { exitCode: 0, stdout: "", timedOut: false }; }
       if (command.includes("zeros-changed")) {
         if (changeTimesOut) return { exitCode: 124, stdout: "", timedOut: true };
         const changed = !markers.has(machine.id) || written.has(machine.id);
@@ -1782,6 +1782,14 @@ d("cloud v2 retention", () => {
         await earlier(CLOUD_V2_BACKUP_DELAY_MS + 60_000);
         await lifecycle().tick();
         expect(forksOf()).toBe(1);
+      });
+
+      it("waits for a machine still starting after the wake's resume, instead of reading its refusals as a change", async () => {
+        await stop();
+        await sleepFor(10.6);
+        boat.startingCommands = 4;
+        await lifecycle().tick();
+        expect(await wakeRows()).toMatchObject([{ outcome: "stopped", changed_since_stop: false }]);
       });
 
       for (const [name, setup] of [
