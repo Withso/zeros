@@ -10,8 +10,11 @@ import { changePro } from "./stage-setup.js";
 import { baseReady, call, check, remember, createProject, deleteProject, deleteWorkspace, errorCode, getWorkspace, lifecycle, openBridge, parse, postWorkspace, seenShape, shell,
   turn, turnAgents, until, waitCopyReady, waitState, workspaceRoot, WorkspaceDocument } from "./steps.js";
 import { GATE0_DEFAULT_MODELS } from "../gate0.js";
+import { projectFolderName } from "../workspace-layout.js";
 
 const base = "/v1/cloud-v2/workspaces";
+/** The terminal states the product defines for a turn its workspace's stop ended (case 4). */
+export const STOPPED_TURN_ENDS: readonly string[] = ["completed", "cancelled", "interrupted"];
 /** The cases, by number, as the operator names them with --edges. */
 export const EDGE_CASES = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10] as const;
 type Made = { workspaces: string[]; projects: string[] };
@@ -201,14 +204,19 @@ const CASES: Record<number, Case> = {
     await waitState(ctx, created.id, "stopped", "e4_stopped");
     await lifecycle(ctx, created.id, "start", "e4_start");
     const again = await waitState(ctx, created.id, "running", "e4_restarted");
+    // What a person's stop does to a turn the agent holds, by design: the worker retires its routes on shutdown and the
+    // running turn ends with stopReason "cancelled" (cloud-worker/src/agents.ts retire() and :1094/:1111, reported by
+    // turnState at :1190); one the worker could not report is ended by the control plane as "cancelled" when a stop of the
+    // chat was asked, else "interrupted" (control-plane/src/cloud/store.ts:1117, prompt-outbox.ts:357). Never "failed".
     const ended = await until(ctx, "e4_turn_ended", ctx.timing.turnMs, ctx.timing.pollMs, async () => {
       const state = await promptState(ctx, created.id, chatId, receipt);
       return state && ["completed", "interrupted", "failed", "cancelled"].includes(state) ? state : false;
     });
-    check(["completed", "interrupted"].includes(ended), "e4_turn_ended", `turn_${ended}`);
+    // The follow-up always runs, and must answer: the chat works after the stop whatever the turn ended as.
     const next = await openBridge(ctx, created.id, "e4_reconnect");
     try { await turn(ctx, next, again, await workspaceRoot(next, created.id, "e4_root_again"), chatId, "Reply with the single word edges.", "e4_next_turn", agent); }
     finally { next.close(); }
+    check(STOPPED_TURN_ENDS.includes(ended), "e4_turn_ended", `turn_${ended}`);
     return `turn_${ended}`;
   },
   // 5. An open during a background wake: the person's start wins (running, the worker on, nothing reports it stopped after,
@@ -222,10 +230,23 @@ const CASES: Record<number, Case> = {
     await waitState(ctx, created.id, "stopped", "e5_stopped");
     const machine = (await row(ctx, created.id)).machine;
     await shiftClock(ctx.ports.database, ctx.state, [created.id], 10.5);
-    // The wake is due: started the moment its row appears.
-    await until(ctx, "e5_wake_due", ctx.timing.scanMs, Math.min(ctx.timing.pollMs, 2_000), async () =>
-      Number((await ctx.ports.database.read("SELECT count(*)::int AS n FROM cloud_v2_maintenance_wakes WHERE workspace_id = $1::uuid AND kind = 'wake'", [created.id]))[0]?.n ?? 0) > 0);
-    await lifecycle(ctx, created.id, "start", "e5_start");
+    // The wake is due. The person's start goes out the moment the shift returns, and again on each poll until a wake row
+    // appears or the scan has had its chance: landing inside the wake (it holds the machine for seconds) is the case; a
+    // start that lands first is a valid edge too, and the wake must then not run against it.
+    ctx.start("wake");
+    const wakes = async () => Number((await ctx.ports.database.read("SELECT count(*)::int AS n FROM cloud_v2_maintenance_wakes WHERE workspace_id = $1::uuid AND kind = 'wake'",
+      [created.id]))[0]?.n ?? 0);
+    const deadline = ctx.ports.clock.now() + ctx.timing.scanMs;
+    let landed = false;
+    for (;;) {
+      // Sent until it has landed (the workspace reads starting or running), then only watched.
+      if (!landed) {
+        await call(ctx.ports.api, "POST", `${base}/${created.id}/start`, "e5_start", undefined, { ok: [200, 201, 202, 409] });
+        landed = ["starting", "running"].includes((await getWorkspace(ctx, created.id, "e5_start_read"))?.state ?? "");
+      }
+      if (await wakes() > 0 || ctx.ports.clock.now() >= deadline) break;
+      await ctx.ports.clock.sleep(Math.min(ctx.timing.pollMs, 2_000));
+    }
     await waitState(ctx, created.id, "running", "e5_running_after");
     // Nothing reports it stopped afterwards: running through three more polls, on the same single machine, the worker on.
     for (let poll = 0; poll < 3; poll++) {
@@ -236,9 +257,12 @@ const CASES: Record<number, Case> = {
     const after = await row(ctx, created.id);
     check(!machine || after.machine === machine, "e5_one_machine", "replaced");
     await checkouts(ctx, running, "e5");
-    const outcome = (await ctx.ports.database.read("SELECT outcome FROM cloud_v2_maintenance_wakes WHERE workspace_id = $1::uuid AND kind = 'wake' ORDER BY started_at DESC LIMIT 1",
-      [created.id]))[0]?.outcome;
-    return `wake_${typeof outcome === "string" ? outcome : "open"}`;
+    const wake = (await ctx.ports.database.read("SELECT outcome FROM cloud_v2_maintenance_wakes WHERE workspace_id = $1::uuid AND kind = 'wake' ORDER BY started_at DESC LIMIT 1",
+      [created.id]))[0];
+    // adopted: the start landed while the wake held the machine; after_wake: the wake had already stopped it; start_first:
+    // no wake ran (the person's start came first); any other outcome is named.
+    const outcome = typeof wake?.outcome === "string" ? wake.outcome : null;
+    return !wake ? "start_first" : outcome === "adopted" ? "adopted" : outcome === "stopped" ? "after_wake" : `wake_${outcome ?? "open"}`;
   },
   // 6. Archive while running, then open at once: it settles running or stopped, never archived and running; Keep is cleared.
   6: async (ctx, made, shared) => {
@@ -325,18 +349,20 @@ const CASES: Record<number, Case> = {
     made.projects.push(project.id);
     await waitCopyReady(ctx, project.id, "e9_copy_ready");
     const first = await post(ctx, made, { name: `${ctx.state.prefix}e9-a`, projectId: project.id, branch: `${ctx.state.prefix}e9-a` }, "e9_create_a");
-    const before = await waitState(ctx, first.id, "running", "e9_running_a");
-    const paths = (document: WorkspaceDocument | null) => JSON.stringify((document?.repositories ?? []).map(entry => entry.checkoutPath));
+    await waitState(ctx, first.id, "running", "e9_running_a");
+    // A one-repository workspace's checkout is its root, `<project folder>/<repository>`, the project folder fixed from the
+    // project's name at create (workspace-create.ts, projectFolderName): read from the worker, as the desktop does.
+    const before = await rootOf(ctx, first.id, "e9_root_a");
+    check(before.split("/").includes(projectFolderName(`${ctx.state.prefix}e9`)), "e9_folder", "not_project_folder");
     await call(ctx.ports.api, "PATCH", `/v1/cloud-v2/organizations/${ctx.state.organizationId}/cloud-projects/${project.id}`, "e9_rename",
       { name: `${ctx.state.prefix}e9-renamed` });
     const after = await getWorkspace(ctx, first.id, "e9_after");
-    check(paths(after) === paths(before), "e9_paths", "changed");
+    check(await rootOf(ctx, first.id, "e9_root_after") === before, "e9_paths", "changed");
     await checkouts(ctx, after!, "e9_after");
     const second = await post(ctx, made, { name: `${ctx.state.prefix}e9-b`, projectId: project.id, branch: `${ctx.state.prefix}e9-b` }, "e9_create_b");
-    const fresh = await waitState(ctx, second.id, "running", "e9_running_b");
-    const namedBefore = paths(before).includes(`${ctx.state.prefix}e9`);
-    if (namedBefore) check(paths(fresh).includes("e9-renamed"), "e9_new_name", "old_name");
-    return namedBefore ? "folder_follows_name" : "folder_not_named_by_project";
+    await waitState(ctx, second.id, "running", "e9_running_b");
+    check((await rootOf(ctx, second.id, "e9_root_b")).split("/").includes(projectFolderName(`${ctx.state.prefix}e9-renamed`)), "e9_new_name", "old_name");
+    return "folder_follows_name";
   },
   // 10. The same idempotency key sent twice for a create: one workspace, the same reply both times.
   10: async (ctx, made, shared) => {
@@ -360,6 +386,11 @@ const CASES: Record<number, Case> = {
   },
 };
 
+/** A workspace's root as its worker reports it. */
+async function rootOf(ctx: StageContext, id: string, step: string): Promise<string> {
+  const bridge = await openBridge(ctx, id, `${step}_connect`);
+  try { return await workspaceRoot(bridge, id, step); } finally { bridge.close(); }
+}
 /** A prompt's state in the workspace's outbox, or null while it is not listed. */
 async function promptState(ctx: StageContext, workspaceId: string, chatId: string, userMessageId: string): Promise<string | null> {
   const items = parse(z.object({ items: z.array(z.object({ receipt: z.object({ userMessageId: z.string() }).passthrough(), state: z.string() }).passthrough()) }),

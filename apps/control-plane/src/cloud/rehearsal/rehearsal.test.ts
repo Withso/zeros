@@ -18,6 +18,7 @@ import { CONNECT_CLIENT_FEATURES, SHELL_QUIET, countLinesCommand, expectLine, se
 import { FIXTURE_TWO } from "./stage-provision.js";
 import { ISOLATION_ORGANIZATION } from "./isolation-org.js";
 import { tryProbes } from "./isolation-probes.js";
+import { STOPPED_TURN_ENDS } from "./stage-edges.js";
 import { submoduleCommitsCommand, submoduleStatusNotes } from "./stage-submodules.js";
 import { loadState, newState, saveState, stateTarget } from "./state.js";
 import { localStack } from "./local-stack.js";
@@ -916,7 +917,7 @@ describe("rehearsal stages against a fake Alpha", () => {
       const result = ctx.state.stages.edges!;
       expect(result.counts).toMatchObject({ edgesPassed: 9, edgesFailed: 0, edgesSkipped: 1 });
       expect(result.notes).toEqual(expect.arrayContaining(["edge_1:ok:copies_0", "edge_3:ok:machine_gone", "edge_4:skipped:no_prompt_outbox",
-        "edge_5:ok:wake_adopted", "edge_6:ok:settled_running", "edge_7:ok:without_pro_stopped", "edge_9:ok:folder_not_named_by_project"]));
+        "edge_5:ok:start_first", "edge_6:ok:settled_running", "edge_7:ok:without_pro_stopped", "edge_9:ok:folder_follows_name"]));
       expect((await cleanup(ctx, { log: () => undefined })).inventory).toEqual(EMPTY);
     });
 
@@ -933,9 +934,11 @@ describe("rehearsal stages against a fake Alpha", () => {
     it("runs only the cases named with --edges, and says why a case needs a switch", async () => {
       const { ctx, ok } = await run(alpha => { void alpha; }, [5, 10]);
       expect(ok).toBe(true);
-      expect(ctx.state.stages.edges!.notes).toEqual(expect.arrayContaining(["edge_5:ok:wake_adopted", "edge_10:ok"]));
+      expect(ctx.state.stages.edges!.notes).toEqual(expect.arrayContaining(["edge_5:ok:start_first", "edge_10:ok"]));
       expect(ctx.state.stages.edges!.counts).toMatchObject({ edgesPassed: 2 });
       expect(parseArguments(["edges", "--edges", "3,10,3"]).edges).toEqual([3, 10]);
+      // A turn its workspace's stop ended, by design: completed, cancelled or interrupted; failed is not one of them.
+      expect([...STOPPED_TURN_ENDS].sort()).toEqual(["cancelled", "completed", "interrupted"]);
       expect(() => parseArguments(["edges", "--edges", "11"])).toThrow();
       const off = setup({ owner: "personal" });
       off.ctx.ports.edges = { cases: [6], retention: false };

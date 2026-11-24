@@ -2,12 +2,13 @@
 // the stages use, with a retention lifecycle that advances when a test shifts a workspace's clock. Every port call is
 // counted so a test can fail the n-th one, before or after its effect.
 import { FakeOrganizations } from "./rehearsal-org-fake.js";
+import { projectFolderName } from "../workspace-layout.js";
 import { randomUUID } from "node:crypto";
 import { WORKSPACE_REPOSITORIES_FEATURE } from "../contract.js";
 import { connectWorkspace } from "../rehearsal/steps.js";
 import { RehearsalFailure, type Api, type ApiReply, type Bridge, type IsolationOrganizationRecord, type Ports, type ProGrant, type ProPort, type Query } from "../rehearsal/contract.js";
 
-type Workspace = {
+type Workspace = { root?: string;
   id: string; name: string; organizationId: string; state: string; branch: string; boatSandboxId: string; projectId?: string;
   archivedAt: string | null; activeAt: string; updatedAt: string; keep: boolean; archiveReason?: string;
   repositories?: { repository: string; checkoutPath: string; branch: string; baseBranch: string }[];
@@ -453,15 +454,17 @@ export class FakeAlpha {
       if (!project) return this.reply(404);
       const base = this.ensureBase();
       const id = randomUUID(), branch = String(body.branch);
+      // A one-repository workspace's root is its checkout, `<project folder>/<repository>`, fixed from the project's name now.
+      const root = project.repositories.length > 1 ? "/home/user/p" : `/home/user/${projectFolderName(project.name)}/${project.repositories[0]!.split("/")[1]}`;
       const repositories = project.repositories.length > 1
         ? project.repositories.map(repository => ({ repository, checkoutPath: `/home/user/p/${repository.split("/")[1]}`, branch, baseBranch: "main" })) : undefined;
       const row: Workspace = { id, name: String(body.name), organizationId: this.organizationId, state: "running", branch,
-        boatSandboxId: this.machine(`${this.machines.get(project.machine)!.name} fork`), projectId: project.id, archivedAt: null,
+        boatSandboxId: this.machine(`${this.machines.get(project.machine)!.name} fork`), projectId: project.id, archivedAt: null, root,
         activeAt: new Date(this.now).toISOString(), updatedAt: new Date(this.now).toISOString(), keep: false, ...(repositories ? { repositories } : {}),
         files: new Map(), seeded: new Map(), commits: new Map(), pushed: new Set(), stoppedDays: null, backup: false, wakes: 0, scrub: null, machineGone: false };
       for (const [index, repository] of project.repositories.entries()) {
         const seeded = this.environments.get(this.repositoryId(repository));
-        const folder = repositories?.[index]?.checkoutPath ?? "/home/user/p";
+        const folder = repositories?.[index]?.checkoutPath ?? root;
         for (const [file, content] of seeded?.files ?? []) { row.files.set(`${folder}/${file}`, content); row.seeded.set(`${folder}/${file}`, content); }
       }
       row.computerBuildId = this.computer.active;
@@ -564,7 +567,7 @@ export class FakeAlpha {
         const checkouts = row.repositories ?? [], named = typeof params.repository === "string"
           ? checkouts.find(entry => entry.repository.toLowerCase() === String(params.repository).toLowerCase()) : undefined;
         if (typeof params.repository === "string" && checkouts.length > 1 && !named) throw new RehearsalFailure("file", "reply_WORKSPACE_ERROR");
-        const base = named?.checkoutPath ?? checkouts[0]?.checkoutPath ?? "/home/user/p";
+        const base = named?.checkoutPath ?? checkouts[0]?.checkoutPath ?? row.root ?? "/home/user/p";
         if (named && named !== checkouts[0] && params.cwd !== undefined && params.cwd !== base) throw new RehearsalFailure("file", "reply_WORKSPACE_ERROR");
         const path = String(params.path);
         const target = path.startsWith("/") ? path : `${base}/${path}`;
@@ -572,7 +575,7 @@ export class FakeAlpha {
       };
       const op = (name: string, params: Record<string, unknown> = {}): unknown => {
         switch (name) {
-          case "workspace.list": return { workspaces: [{ id: row.id, path: "/home/user/p" }] };
+          case "workspace.list": return { workspaces: [{ id: row.id, path: row.root ?? "/home/user/p" }] };
           case "file.write": {
             const target = fileAt(params);
             if (!target) return { kind: "error", path: String(params.path), bytes: 0, error: "The file could not be written within this workspace." };
