@@ -45,10 +45,13 @@ export interface SidebarPullRequest {
  * taking the island's live state. */
 export function workspacePullRequests(workspace: Workspace, islandKind: string | null = null): SidebarPullRequest[] {
   const repositories = workspace.repositories?.length ? workspace.repositories : null;
+  const primary = repositories
+    ? Math.max(0, repositories.findIndex((repository) => repository.prNumber != null && repository.prNumber === workspace.prNumber))
+    : 0;
   const rows = repositories
     ? repositories.map((repository, index) => ({
         prNumber: repository.prNumber, prState: repository.prState, prUrl: repository.prUrl,
-        repository: repository.repository, island: index === 0 ? islandKind : null,
+        repository: repository.repository, island: index === primary ? islandKind : null,
       }))
     : [{ prNumber: workspace.prNumber, prState: workspace.prState, prUrl: workspace.prUrl, repository: null, island: islandKind }];
   return rows.flatMap((row) => {
@@ -104,6 +107,7 @@ export function filterSidebarWorkspaces(
   view: SidebarViewPreferences,
   signalOf: (workspace: Workspace) => SidebarWorkspaceSignal,
   ownerOf?: (workspace: Workspace) => SidebarOwnerFilter | null,
+  islandOf?: (workspace: Workspace) => string | null,
 ): readonly Workspace[] {
   if (!sidebarViewFilters(view)) return workspaces;
   return workspaces.filter((workspace) => {
@@ -112,7 +116,7 @@ export function filterSidebarWorkspaces(
     if (view.draftOnly && !signal.draft) return false;
     if (view.statuses.length && !view.statuses.includes(agentStatusOf(workspace, signal))) return false;
     if (view.prStates.length) {
-      const tones = workspacePullRequests(workspace).map((pull) => pull.tone);
+      const tones = workspacePullRequests(workspace, islandOf?.(workspace) ?? null).map((pull) => pull.tone);
       if (!(tones.length ? tones.some((tone) => view.prStates.includes(tone)) : view.prStates.includes("none"))) return false;
     }
     if (view.owners.length && ownerOf) {
@@ -155,14 +159,13 @@ export function sidebarWorkspaceComparator(args: {
 
 export interface SidebarGroupKey { key: string; label: string }
 
-const DAY = 86_400_000;
 export function recencyGroup(at: number, now = Date.now()): SidebarGroupKey {
   const start = new Date(now); start.setHours(0, 0, 0, 0);
-  const today = start.getTime();
-  if (at >= today) return { key: "today", label: "Today" };
-  if (at >= today - DAY) return { key: "yesterday", label: "Yesterday" };
-  if (at >= today - 6 * DAY) return { key: "week", label: "This week" };
-  if (at >= today - 29 * DAY) return { key: "month", label: "This month" };
+  const daysBack = (days: number) => new Date(start.getFullYear(), start.getMonth(), start.getDate() - days).getTime();
+  if (at >= daysBack(0)) return { key: "today", label: "Today" };
+  if (at >= daysBack(1)) return { key: "yesterday", label: "Yesterday" };
+  if (at >= daysBack(6)) return { key: "week", label: "This week" };
+  if (at >= daysBack(29)) return { key: "month", label: "This month" };
   return { key: "older", label: "Older" };
 }
 
@@ -179,7 +182,7 @@ export const PR_FILTER_LABELS = PR_LABELS;
 export function extraGroupOf(
   grouping: SidebarExtraGrouping | "agent-status",
   workspace: Workspace,
-  context: { signal: SidebarWorkspaceSignal; activeAt?: number; owner?: SidebarOwnerFilter | null; now?: number },
+  context: { signal: SidebarWorkspaceSignal; activeAt?: number; owner?: SidebarOwnerFilter | null; island?: string | null; now?: number },
 ): SidebarGroupKey & { order: number } {
   switch (grouping) {
     case "placement":
@@ -191,7 +194,7 @@ export function extraGroupOf(
       return { ...group, order: RECENCY_ORDER.indexOf(group.key) };
     }
     case "pr": {
-      const tones = workspacePullRequests(workspace).map((pull) => pull.tone);
+      const tones = workspacePullRequests(workspace, context.island ?? null).map((pull) => pull.tone);
       const tone = PR_ORDER.find((value) => value !== "none" && tones.includes(value)) ?? "none";
       return { key: tone, label: PR_LABELS[tone], order: PR_ORDER.indexOf(tone) };
     }

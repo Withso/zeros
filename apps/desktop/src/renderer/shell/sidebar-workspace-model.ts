@@ -297,9 +297,16 @@ function buildEntries(args: Parameters<typeof buildSidebarWorkspaceEntries>[0]):
         if (existing) existing.items.push(item);
         else groups.set(group.key, { ...group, items: [item] });
       }
-      return [...groups.values()]
+      const grouped: SidebarWorkspaceEntry[] = [...groups.values()]
         .sort((a, b) => a.order - b.order)
-        .map(group => ({ kind: "group" as const, key: `group:${group.key}`, label: group.label, items: group.items }));
+        .map(group => ({ kind: "group" as const, key: `group:${group.key}`, label: group.label, items: nest(group.items) }));
+      const represented = new Set(mixed.map((item) => item.project.id));
+      for (const project of projects) {
+        if (project.isGitRepository === false && !represented.has(project.id)) {
+          grouped.push({ kind: "folder", key: `project:${project.id}`, project });
+        }
+      }
+      return grouped;
     }
     const items = filter === "status" ? mixed : nest(mixed);
     const representedProjects = new Set(items.map((item) => item.project.id));

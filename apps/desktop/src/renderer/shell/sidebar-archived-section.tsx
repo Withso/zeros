@@ -83,7 +83,7 @@ export function SidebarArchivedSection({
               )}
               <Tooltip label="Unarchive">
                 <IconButton size="compact" label={`Unarchive ${label}`} onClick={restore} disabled={busy}
-                  className={cn(!busy && "hidden group-hover/archived:inline-flex group-focus-within/archived:inline-flex focus-visible:inline-flex")}>
+                  className={cn(!busy && "opacity-0 group-hover/archived:opacity-100 group-focus-within/archived:opacity-100 focus-visible:opacity-100")}>
                   {busy ? <ZerosSpinner size={12} /> : <RotateCcw strokeWidth={1.5} />}
                 </IconButton>
               </Tooltip>

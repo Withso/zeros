@@ -142,3 +142,25 @@ describe("applied view options", () => {
     expect(changedSidebarView(view({ compact: true, statuses: ["input"] }), ["statuses", "compact", "direction"])).toEqual(["statuses", "compact"]);
   });
 });
+
+describe("sidebar review regressions", () => {
+  it("gives the live island state to the repository that holds the workspace PR", () => {
+    const workspace = ws("multi", {
+      prNumber: 5,
+      prState: "open",
+      repositories: [
+        { repository: "a/one", prNumber: 1, prState: "open", prUrl: null },
+        { repository: "a/two", prNumber: 5, prState: "open", prUrl: null },
+      ],
+    } as unknown as Partial<Workspace>);
+    const live = workspacePullRequests(ws("solo", { prNumber: 5, prState: "open" } as Partial<Workspace>), "merge-conflicts")[0]?.tone;
+    expect(live).toBe("conflicts");
+    expect(workspacePullRequests(workspace, "merge-conflicts").map((pull) => pull.tone)).toEqual(["open", live]);
+  });
+
+  it("groups recency by calendar day, not 24-hour steps", () => {
+    const now = new Date(2026, 2, 9, 10).getTime();
+    expect(recencyGroup(new Date(2026, 2, 8, 0, 30).getTime(), now).key).toBe("yesterday");
+    expect(recencyGroup(new Date(2026, 2, 7, 23, 30).getTime(), now).key).toBe("week");
+  });
+});

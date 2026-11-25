@@ -39,6 +39,23 @@ export function sharingSectionLookup(documents: ReturnType<typeof getCloudWorksp
   };
 }
 
+/** Whose work a row is, ignoring Pinned: a pinned teammate row is still theirs. */
+export function sharingOwnerLookup(documents: ReturnType<typeof getCloudWorkspaceDocuments>, me: string | null) {
+  const byId = new Map(documents.map(doc => [doc.id, doc]));
+  return (workspace: Workspace): "mine" | "following" | null => {
+    const target = parseCloudWorkspaceKey(workspace.id) ?? parseCloudWorkspaceKey(workspace.path);
+    const doc = target ? byId.get(target.workspaceId) : undefined;
+    if (!doc?.sharing) return "mine";
+    if (doc.sharing.viewerRole === "creator" || (me !== null && doc.ownerUserId === me)) return "mine";
+    return doc.sharing.following || doc.sharing.pinned ? "following" : null;
+  };
+}
+
+export function useSharingOwners(me: string | null) {
+  const documents = useSyncExternalStore(subscribeCloudWorkspaces, getCloudWorkspaceDocuments, getCloudWorkspaceDocuments);
+  return useMemo(() => sharingOwnerLookup(documents, me), [documents, me]);
+}
+
 export function useSharingSections(me: string | null) {
   const documents = useSyncExternalStore(subscribeCloudWorkspaces, getCloudWorkspaceDocuments, getCloudWorkspaceDocuments);
   return useMemo(() => sharingSectionLookup(documents, me), [documents, me]);

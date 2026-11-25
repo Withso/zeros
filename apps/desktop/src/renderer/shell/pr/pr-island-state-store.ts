@@ -21,6 +21,8 @@ import { useSyncExternalStore } from "react";
 
 import { registerPrWorkspaceCacheForget } from "./pr-cache-forget";
 
+let version = 0;
+
 const STORAGE_KEY = "zeros.pr-island.kinds.v1";
 const kinds = new Map<string, string>();
 const listeners = new Set<() => void>();
@@ -80,6 +82,7 @@ registerPrWorkspaceCacheForget((workspaceId) => {
   }
   if (!changed) return;
   persist();
+  version += 1;
   for (const l of listeners) l();
 });
 
@@ -111,7 +114,13 @@ export function publishPrIslandKind(
     }
   }
   persist();
+  version += 1;
   for (const l of listeners) l();
+}
+
+/** Changes whenever any island kind changes, for lists that read many keys. */
+export function usePrIslandKindsVersion(): number {
+  return useSyncExternalStore(subscribe, () => version);
 }
 
 function subscribe(cb: () => void): () => void {

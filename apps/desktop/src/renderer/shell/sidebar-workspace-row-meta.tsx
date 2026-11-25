@@ -166,7 +166,11 @@ function useWidth<T extends HTMLElement>() {
   useLayoutEffect(() => {
     const node = ref.current;
     if (!node || typeof ResizeObserver === "undefined") return;
-    const observer = new ResizeObserver(([entry]) => setWidth(Math.round(entry?.contentRect.width ?? 0)));
+    // A hidden row reports 0; keep the last width so it does not re-render.
+    const observer = new ResizeObserver(([entry]) => {
+      const next = Math.round(entry?.contentRect.width ?? 0);
+      if (next > 0) setWidth(next);
+    });
     observer.observe(node);
     return () => observer.disconnect();
   }, []);

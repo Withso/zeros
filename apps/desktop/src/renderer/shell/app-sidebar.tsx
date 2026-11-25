@@ -59,7 +59,9 @@ import { filterRowsForOrganization, localWorkShowsEverywhere } from "../features
 import { OrganizationSwitcher } from "../features/team/organization-switcher";
 import { getActiveOrganizationIdSnapshot, getTeamStoreState, useActiveOrganization } from "../features/team/team-store";
 import { useMyUserId, useSharingOrganization } from "../platform/team-sharing-state";
-import { useSharingSections } from "../state/cloud-workspace-creators";
+import { useSharingOwners, useSharingSections } from "../state/cloud-workspace-creators";
+import { pullRequestTarget } from "../state/workspace-repositories";
+import { getPrIslandKind, usePrIslandKindsVersion } from "./pr/pr-island-state-store";
 import { CONTROL_PLANE_URL } from "../features/team/control-plane";
 import { useArchiveWorkspace } from "../state/archive-actions";
 import { draftChatIdsByWorkspace } from "../state/composer-draft-presence";
@@ -430,6 +432,7 @@ export function AppSidebar({ hidden = false }: { hidden?: boolean }) {
   const sharing = useSharingOrganization(sharingOrganizationId);
   const me = useMyUserId();
   const sectionOf = useSharingSections(me);
+  const sharingOwnerOf = useSharingOwners(me);
   const liveVisibleWorkspaces = useLiveVisible(accessibleWorkspaces);
   const realWorkspaces = useMemo(
     () => sharing ? liveVisibleWorkspaces.filter(workspace => sectionOf(workspace) !== null) : liveVisibleWorkspaces,
@@ -503,11 +506,15 @@ export function AppSidebar({ hidden = false }: { hidden?: boolean }) {
   const ownerOf = useCallback(
     (workspace: Workspace): SidebarOwnerFilter | null => {
       if (!sharing) return "mine";
-      const section = sectionOf(workspace);
-      return section === "following" ? "following" : section ? "mine" : null;
+      return sharingOwnerOf(workspace);
     },
-    [sectionOf, sharing],
+    [sharingOwnerOf, sharing],
   );
+  const prIslandVersion = usePrIslandKindsVersion();
+  const islandOf = useMemo(() => {
+    void prIslandVersion;
+    return (workspace: Workspace) => getPrIslandKind(pullRequestTarget(workspace), workspace.prNumber);
+  }, [prIslandVersion]);
   const viewArgs = useMemo(() => {
     const label = (workspace: Workspace) => workspaceLabel(workspace);
     const base = sidebarWorkspaceComparator({
@@ -523,7 +530,7 @@ export function AppSidebar({ hidden = false }: { hidden?: boolean }) {
         ? { order: 0, key: workspace.repoSlug ?? "" }
         : grouping === "status"
           ? { order: LIFECYCLE_STATUSES.findIndex((status) => status.value === statusMeta(workspace.status).value), key: "" }
-          : extraGroupOf(grouping, workspace, { signal: signalLookup(workspace.id), activeAt: activeAtByWorkspaceId.get(workspace.id), owner: ownerOf(workspace) });
+          : extraGroupOf(grouping, workspace, { signal: signalLookup(workspace.id), activeAt: activeAtByWorkspaceId.get(workspace.id), owner: ownerOf(workspace), island: islandOf(workspace) });
     const thenBy = view.thenBy;
     const compare = thenBy
       ? (a: Workspace, b: Workspace) => {
@@ -553,22 +560,23 @@ export function AppSidebar({ hidden = false }: { hidden?: boolean }) {
                     signal: signalLookup(item.workspace.id),
                     activeAt: activeAtByWorkspaceId.get(item.workspace.id),
                     owner: ownerOf(item.workspace),
+                    island: islandOf(item.workspace),
                   }),
           }
         : {}),
     };
-  }, [activeAtByWorkspaceId, ownerOf, preferences.sort, signalLookup, view.direction, view.grouping, view.hideEmptyGroups, view.needsYouFirst, view.thenBy]);
+  }, [activeAtByWorkspaceId, islandOf, ownerOf, preferences.sort, signalLookup, view.direction, view.grouping, view.hideEmptyGroups, view.needsYouFirst, view.thenBy]);
   const menuCounts = useMemo(() => {
     const statuses = Object.fromEntries(SIDEBAR_AGENT_STATUS_FILTERS.map(status => [status, 0])) as Record<SidebarAgentStatusFilter, number>;
     const prStates = Object.fromEntries(SIDEBAR_PR_FILTERS.map(state => [state, 0])) as Record<SidebarPrFilter, number>;
     for (const workspace of rowsShownForPlacements(realWorkspaces, hiddenPlacements)) {
       statuses[agentStatusOf(workspace, signalLookup(workspace.id))] += 1;
-      const tones = new Set(workspacePullRequests(workspace).map(pull => pull.tone));
+      const tones = new Set(workspacePullRequests(workspace, islandOf(workspace)).map(pull => pull.tone));
       if (tones.size === 0) prStates.none += 1;
       for (const tone of tones) prStates[tone] += 1;
     }
     return { statuses, prStates };
-  }, [hiddenPlacements, realWorkspaces, signalLookup]);
+  }, [hiddenPlacements, islandOf, realWorkspaces, signalLookup]);
   const buildSections = useCallback((expanded: ReadonlySet<string>) => {
     const args = {
       expandedWorkspaceIds: expanded,
@@ -577,7 +585,7 @@ export function AppSidebar({ hidden = false }: { hidden?: boolean }) {
       repositoryIds,
       activity: { activeAtByWorkspaceId },
       projects,
-      workspaces: filterSidebarWorkspaces(rowsShownForPlacements(realWorkspaces, hiddenPlacements), view, signalOfWorkspace, ownerOf),
+      workspaces: filterSidebarWorkspaces(rowsShownForPlacements(realWorkspaces, hiddenPlacements), view, signalOfWorkspace, sharing ? ownerOf : undefined, islandOf),
       pending: rowsShownForPlacements(dedupedPendingCreates, hiddenPlacements),
       ...(unifiedPlacements ? { projectGroupOf: projectGroupLookup(projects) } : {}),
       ...viewArgs,
@@ -585,7 +593,7 @@ export function AppSidebar({ hidden = false }: { hidden?: boolean }) {
     return sharing
       ? buildSidebarSharingSections({ ...args, sectionOf })
       : [{ id: null, label: "", entries: buildSidebarWorkspaceEntries(args) }];
-  }, [dedupedPendingCreates, listFilter, preferences.sort, repositoryIds, hiddenPlacements, activeAtByWorkspaceId, projects, realWorkspaces, sharing, sectionOf, unifiedPlacements, view, signalOfWorkspace, ownerOf, viewArgs]);
+  }, [dedupedPendingCreates, listFilter, preferences.sort, repositoryIds, hiddenPlacements, activeAtByWorkspaceId, projects, realWorkspaces, sharing, sectionOf, unifiedPlacements, view, signalOfWorkspace, ownerOf, islandOf, viewArgs]);
   const sections = useMemo(() => buildSections(expandedWorkspaceIds), [buildSections, expandedWorkspaceIds]);
   const entries = useMemo(() => sections.flatMap(section => section.entries), [sections]);
   const listedItems = useMemo(() => sidebarWorkspaceItems(entries), [entries]);
