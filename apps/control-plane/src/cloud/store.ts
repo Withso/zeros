@@ -1063,6 +1063,7 @@ export class CloudV2Store {
          worker_token_hash = CASE WHEN $3 IN ('starting','deleted') THEN NULL ELSE worker_token_hash END,
          worker_boot_id = CASE WHEN $3 IN ('starting','deleted') THEN NULL ELSE worker_boot_id END,
          active_at = CASE WHEN $3 = 'running' THEN clock_timestamp() ELSE active_at END,
+         running_at = CASE WHEN $3 = 'running' AND state <> 'running' THEN clock_timestamp() ELSE running_at END,
          archived_at = CASE WHEN $3 = 'starting' THEN NULL ELSE archived_at END,
          stop_generation = stop_generation + CASE WHEN $3 = 'stopping' AND state <> 'stopping' THEN 1 ELSE 0 END,
          checkpoint_object = CASE WHEN $3 = 'deleted' THEN NULL ELSE checkpoint_object END,
