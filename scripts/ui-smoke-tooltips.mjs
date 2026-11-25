@@ -132,8 +132,8 @@ export async function runTooltipSmoke({ page, harnessBase, check }) {
     await leave();
     const model = page.getByRole("button", { name: /^Model:/ });
     await model.hover();
-    // Every tooltip waits the one 1000ms delay (the model picker's 1500ms
-    // override is gone).
+    // In tooltip-policy mode the harness keeps the app's provider default, so
+    // the model picker waits the same 1000ms as every other app tooltip.
     await page.clock.runFor(900);
     await expect(tooltip).toHaveCount(0);
     await page.clock.runFor(200);
