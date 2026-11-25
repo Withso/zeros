@@ -20,7 +20,7 @@ import { buildNativeProduction, serveNativeProductionAssets } from "./design-nat
 import { withNativeRendererModules, waitForNativeRenderer, nativePageSession } from "./design-native-renderer.mjs";
 import { activateNativeWorkbenchTab, prepareNativeWorkspaceCatalog } from "./design-native-workbench.mjs";
 import { prepareNativeDesignView, selectNativeDesignFrame,
-  startNativeDesignCameraObservation, finishNativeDesignCameraObservation, readNativeDesignCoverage } from "./design-native-view.mjs";
+  startNativeDesignCameraObservation, finishNativeDesignCameraObservation, readNativeDesignCoverage, readNativeDesignDocuments } from "./design-native-view.mjs";
 import { dispatchMacDesignGesture } from "./design-native-input.mjs";
 import { sampleNativeApplicationMemory, sampleNativeMemoryPlateau, startNativeMemoryGuard, nativeApplicationProcessIdentities, observeNativeApplicationProcesses, waitForNativeProcessRetirement } from "./design-native-memory.mjs";
 import { measureNativeIdleCpu } from "./design-native-cpu.mjs";
@@ -54,6 +54,21 @@ async function authoredManifest(fixtures) {
   }
   for (const workspace of fixtures) await visit(workspace.path, workspace);
   return rows.sort((a, b) => `${a.fixture}/${a.file}`.localeCompare(`${b.fixture}/${b.file}`));
+}
+
+/** Frame documents by kind: how many a gesture mounted, and how many are
+ * present and visible after it, with up to eight example frames each. */
+export function summarizeDocuments({ present, mounted }) {
+  const group = rows => {
+    const kinds = {};
+    for (const row of rows) {
+      const kind = kinds[row.kind] ??= { count: 0, frames: [] };
+      kind.count++;
+      if (kind.frames.length < 8 && !kind.frames.includes(row.frame)) kind.frames.push(row.frame);
+    }
+    return kinds;
+  };
+  return { mounted: group(mounted), present: group(present), visible: group(present.filter(row => row.visible)) };
 }
 
 /** `--canvas recorded` measures the internal recorded GPU canvas: the
@@ -331,11 +346,19 @@ async function main() {
     await open(overview);
     report.runtime.viewport = await page.evaluate(() => ({ width: innerWidth, height: innerHeight, dpr: devicePixelRatio }));
     phase("presentation");
-    await app.evaluate(({ app, BrowserWindow }) => {
-      const window = BrowserWindow.getAllWindows()[0];
-      window.setIgnoreMouseEvents(false); window.show(); window.focus(); app.focus({ steal: true });
-    });
-    for (let repeat = 1; repeat <= 3; repeat++) for (const name of ["pan", "zoom"]) {
+    // Above other apps, so another app's window cannot occlude (hide) the
+    // page or take the gesture's input midway; the viewport size is unchanged.
+    const foreground = async () => {
+      await app.evaluate(({ app, BrowserWindow }) => {
+        const window = BrowserWindow.getAllWindows()[0];
+        window.setAlwaysOnTop(true, "floating"); window.setIgnoreMouseEvents(false);
+        window.show(); window.focus(); app.focus({ steal: true });
+      });
+      await page.waitForFunction(() => document.visibilityState === "visible", null, { timeout: 10_000 });
+    };
+    report.foregroundRetries = 0;
+    for (let repeat = 1; repeat <= 3; repeat++) for (const name of ["pan", "zoom"]) for (let attempt = 1; ; attempt++) {
+      await foreground();
       const startCamera = cameras.get(overview.id);
       await prepareNativeDesignView(page, overview.id, startCamera); await pause(1000);
       const box = await page.locator(viewportSelector).boundingBox(), events = [];
@@ -351,26 +374,43 @@ async function main() {
       // Individual CDP wheel commands synthesize an end for every command and
       // change Chromium's acknowledgement/scheduling path. Retain that older
       // evidence with its original driver; do not attribute this to rendering.
-      const inputWorkload = await dispatchMacDesignGesture({
-        pid: report.runtime.mainPid, name, startZoom: startCamera.zoom,
-        x: bounds.x + box.x + box.width / 2, y: bounds.y + box.y + box.height / 2,
-      }, { signal: controller.signal });
+      let inputWorkload;
+      try {
+        inputWorkload = await dispatchMacDesignGesture({
+          pid: report.runtime.mainPid, name, startZoom: startCamera.zoom,
+          x: bounds.x + box.x + box.width / 2, y: bounds.y + box.y + box.height / 2,
+        }, { signal: controller.signal });
+      } catch (error) {
+        await finishNativeDesignCameraObservation(page, prefix);
+        await cdp.send("Tracing.end"); await complete; cdp.off("Tracing.dataCollected", collect);
+        // The driver stops input the moment another app takes the foreground;
+        // the cut-short gesture is discarded and redone from the same camera.
+        if (attempt <= 2 && /lost foreground ownership|changed input windows/.test(String(error?.message))) {
+          report.foregroundRetries++; continue;
+        }
+        throw error;
+      }
       const cameraChanges = await finishNativeDesignCameraObservation(page, prefix);
+      const documents = summarizeDocuments(await readNativeDesignDocuments(page));
       // The recorded canvas's own draw, upload and raster timings for this gesture.
       const gpu = recorded ? await page.evaluate(() => globalThis.window.__zerosDesignGpu.snapshot()) : undefined;
       await pause(300); await cdp.send("Tracing.end"); await complete; cdp.off("Tracing.dataCollected", collect);
       await fs.writeFile(path.join(evidence, `${name}-${repeat}-trace.json`), JSON.stringify({ traceEvents: events }));
       const first = events.find(e => e.name === prefix + ":start"), last = events.find(e => e.name === prefix + ":end");
       assert(first && last && first.pid === last.pid, "The native trace must contain this app's workload markers.");
-      report.interactions.push({ name, repeat, cameraChanges, inputWorkload, ...(gpu ? { gpu } : {}),
+      report.interactions.push({ name, repeat, cameraChanges, inputWorkload, documents, ...(gpu ? { gpu } : {}),
         ...analyzeDesignPresentationTrace(events, { rendererPid: first.pid, startUs: first.ts, endUs: last.ts }),
         // Observe allocation categories after tracing/input stop; JS heap and
         // DOM counts are diagnostics, never substitutes for physical memory.
         rendererMemory: { heap: await cdp.send("Runtime.getHeapUsage"), dom: await cdp.send("Memory.getDOMCounters") },
       });
       save(); guard.assertHealthy();
+      break;
     }
-    await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].setIgnoreMouseEvents(true));
+    await app.evaluate(({ BrowserWindow }) => {
+      const window = BrowserWindow.getAllWindows()[0];
+      window.setAlwaysOnTop(false); window.setIgnoreMouseEvents(true);
+    });
     phase("editing-resize-capture");
     const small = fixtures.find(f => f.fixture === "2"); await open(small);
     const selected = await selectNativeDesignFrame(page, small.id);
