@@ -158,9 +158,17 @@ describe("sidebar review regressions", () => {
     expect(workspacePullRequests(workspace, "merge-conflicts").map((pull) => pull.tone)).toEqual(["open", live]);
   });
 
-  it("groups recency by calendar day, not 24-hour steps", () => {
-    const now = new Date(2026, 2, 9, 10).getTime();
-    expect(recencyGroup(new Date(2026, 2, 8, 0, 30).getTime(), now).key).toBe("yesterday");
-    expect(recencyGroup(new Date(2026, 2, 7, 23, 30).getTime(), now).key).toBe("week");
+  it("groups recency by calendar day across a clock change", () => {
+    const zone = process.env.TZ;
+    process.env.TZ = "America/New_York";
+    try {
+      // 2026-03-08 is a 23-hour day in New York.
+      const now = new Date(2026, 2, 9, 10).getTime();
+      expect(recencyGroup(new Date(2026, 2, 8, 0, 30).getTime(), now).key).toBe("yesterday");
+      expect(recencyGroup(new Date(2026, 2, 7, 23, 30).getTime(), now).key).toBe("week");
+    } finally {
+      if (zone === undefined) delete process.env.TZ;
+      else process.env.TZ = zone;
+    }
   });
 });
