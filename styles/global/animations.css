@@ -28,15 +28,6 @@
   }
 }
 
-@keyframes ocAgentLiveDurationPulse {
-  0%,
-  100% {
-    opacity: 0.65;
-  }
-  50% {
-    opacity: 1;
-  }
-}
 
 /* Effort battery pill — the label drops in gently from the top on each toggle
  * (its own keyed remount). The charge FILL is a hover affordance driven by a

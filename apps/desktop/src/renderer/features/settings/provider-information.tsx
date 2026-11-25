@@ -5,7 +5,6 @@ import type {
   BrowserSubscriptionProvider,
   ProviderSubscriptionStatus,
 } from "@zeros/protocol/provider-auth";
-import { cn } from "../../shared/ui/cn";
 import { ZerosSpinner } from "../../shared/ui/loading/zeros-spinner";
 import { ProgressBar } from "../../shared/ui/primitives/progress-bar";
 import { Tooltip } from "../../shared/ui/primitives/tooltip";

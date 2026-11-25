@@ -2,12 +2,6 @@
    2. KEYFRAME CONSUMER CLASSES (referenced from JSX hooks)
    ────────────────────────────────────────────────────────── */
 
-/* Live tool-call duration pulse.
- * Consumer: apps/desktop/src/renderer/shared/ui/loading/live-duration.tsx         */
-[data-Zeros-root] .zeros-agent-live-duration {
-  animation: ocAgentLiveDurationPulse 1.6s ease-in-out infinite;
-}
-
 /* Chat viewport scrollbar — intentionally has NONE of its own. The chat
  * scroll container (apps/desktop/src/renderer/features/agent/agent-chat.tsx, classes `zeros-agent-body
  * zeros-agent-scrollbar`) uses the global rules in scrollbars.css:

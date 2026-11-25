@@ -706,8 +706,7 @@ export const TurnFooter = memo(function TurnFooter({
 
   // While the turn is still streaming, render nothing: the working group's
   // ActivityShimmer already shows the live elapsed timer (grey, text-fg2) at the
-  // tail. A second timer here would duplicate it and use LiveDuration's default
-  // blue directly under the grey shimmer.
+  // tail. A second timer here would duplicate it.
   // The footer appears once the turn settles.
   if (live) return null;
   const durationStart = presentation?.startedAt ?? turn?.startedAt ?? startedAt;

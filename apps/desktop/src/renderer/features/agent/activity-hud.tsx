@@ -9,7 +9,7 @@
 
 import { memo } from "react";
 
-import { ActivityShimmer, LiveDuration } from "@/renderer/shared/ui/loading";
+import { ActivityShimmer } from "@/renderer/shared/ui/loading";
 import type { AgentMessage } from "./use-agent-session";
 
 /** The anchor for a streaming turn's live elapsed timer: the EARLIEST moment
@@ -19,9 +19,7 @@ import type { AgentMessage } from "./use-agent-session";
  *  this turn?" — so it must only ever go up. It used to re-anchor to the most
  *  recent in-flight tool, which made it read 0s at the start of every tool and
  *  jump back to the real elapsed the moment that tool finished: a visible
- *  reset-and-resume several times per turn, on every provider. (Per-tool
- *  elapsed is not lost — each in-flight tool row renders its own DurationChip,
- *  where a tool-scoped clock is the right answer.)
+ *  reset-and-resume several times per turn, on every provider.
  *
  *  The earliest confirmed candidate wins:
  *   - the turn's own start (the user message's timestamp) — authoritative when
@@ -61,4 +59,4 @@ export const ActivityHUD = memo(function ActivityHUD(_props: ActivityHUDProps) {
 });
 
 // Back-compat re-exports; canonical implementations live in apps/desktop/src/renderer/shared/ui/loading.
-export { ActivityShimmer, LiveDuration };
+export { ActivityShimmer };

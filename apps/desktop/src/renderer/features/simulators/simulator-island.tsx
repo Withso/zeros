@@ -14,7 +14,6 @@ import type {
   SimulatorInput,
 } from "@zeros/protocol/simulators";
 
-import { cn } from "../../shared/ui/cn";
 import { Button } from "../../shared/ui/primitives/button";
 import { toast } from "../../shared/ui/primitives/elements";
 import { IconButton } from "../../shared/ui/primitives/icon-button";

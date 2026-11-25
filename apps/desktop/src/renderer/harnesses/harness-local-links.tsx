@@ -27,6 +27,7 @@ import {
 } from "../features/agent/composer-editor/use-composer-editor";
 import { AttachmentPillView } from "../features/agent/composer-editor/pill-views";
 import { useWorkspaceStore, type ChatThread } from "../state/store";
+import { COMPOSER_SURFACE_CLS } from "@/renderer/features/agent/composer-shell";
 
 window.__ZEROS_NATIVE__ = {
   on: () => () => {},
@@ -256,7 +257,8 @@ function Composer() {
   return (
     <div
       data-testid="local-link-composer"
-      className="border-border2 bg-bg2 rounded-lg border p-3"
+      // The real composer surface, so its pills take the composer ground.
+      className={`${COMPOSER_SURFACE_CLS} rounded-lg border p-3`}
     >
       {editor.editorContent}
       {editor.suggestionPopup}

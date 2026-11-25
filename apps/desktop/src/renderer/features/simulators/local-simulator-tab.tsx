@@ -25,7 +25,6 @@ import { WorkbenchTabToolbar, useWorkbenchStatusSource } from "../../shell/workb
 import type { WorkbenchNotice } from "../../shell/workbench/tab-status-model";
 import { useWorkspaceDispatch, useWorkspaceStore } from "../../state/store";
 import { selectWorkbench } from "../../state/workspace-store";
-import { cn } from "../../shared/ui/cn";
 import { usePrefersReducedMotion } from "../../shared/ui/loading/use-prefers-reduced-motion";
 import { Button } from "../../shared/ui/primitives/button";
 import { DropdownMenu, DropdownMenuTrigger } from "../../shared/ui/primitives/dropdown-menu";

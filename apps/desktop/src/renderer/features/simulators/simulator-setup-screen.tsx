@@ -32,7 +32,7 @@ const MIN_FRAMED_SCREEN_WIDTH = 280;
 
 const EMPTY_DEVICES: readonly SimulatorDevice[] = [];
 
-function ToneIcon({ tone, active }: { tone: SimulatorSetupRow["tone"]; active: boolean }) {
+function ToneIcon({ tone }: { tone: SimulatorSetupRow["tone"] }) {
   const className = "mt-px size-4 shrink-0";
   switch (tone) {
     case "ready":
@@ -56,7 +56,7 @@ function SetupStatusRow({ row, active }: { row: SimulatorSetupRow; active: boole
   return (
     <div data-simulator-setup={row.tone} className="flex flex-col gap-2">
       <div className="flex min-h-8 items-center gap-2">
-        <ToneIcon tone={row.tone} active={active} />
+        <ToneIcon tone={row.tone} />
         <span
           aria-live={active ? "polite" : "off"}
           className="min-w-0 flex-1 truncate text-xs leading-4.5"

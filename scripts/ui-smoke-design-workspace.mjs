@@ -2804,7 +2804,7 @@ export async function runDesignWorkspaceCanvasSmoke({ page, waitFor, check }) {
     check("a field stays hovered while the pointer is on its trailing menu", true);
 
     // The Design-tab sheets (Layer tree, Inspector, Property field): owned
-    // rows on bg2 with quiet fg3 type icons, a 36px selection header, 12px
+    // rows on bg2 with quiet fg3 type icons, a 40px selection header, 12px
     // glyphs on 24px section actions, and a 20px-high in-field sizing word
     // at least as wide as it is tall.
     const sheetLook = await page.evaluate(() => {
