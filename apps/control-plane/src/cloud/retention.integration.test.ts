@@ -1992,6 +1992,24 @@ d("cloud v2 retention", () => {
           expect((await columns("state")).state).toBe("failed");
         });
 
+        it("touches no machine when shutdown begins while it confirms the workspace is still due", async () => {
+          await stop();
+          await failedOpen(true);
+          let shutdown: Promise<void> | undefined, close: (() => Promise<void>) | undefined;
+          const watched = new Proxy(store, { get(target, key) {
+            if (key === "healDue") return async (candidate: Parameters<typeof store.healDue>[0]) => { shutdown ??= close!(); return target.healDue(candidate); };
+            const value = Reflect.get(target, key);
+            return typeof value === "function" ? value.bind(target) : value;
+          } });
+          const running = lifecycle({ healFailed: true, store: watched });
+          close = running.start();
+          await vi.waitFor(() => expect(shutdown).toBeDefined(), { timeout: 15_000 });
+          await shutdown;
+          expect(boat.machine(vm)!.state).toBe("running");
+          expect(boat.machine(vm)!.worker).toEqual({ enabled: true, active: true });
+          expect((await columns("state")).state).toBe("failed");
+        });
+
         it("leaves the machine to a Start that arrives while it heals", async () => {
           await stop();
           await failedOpen(true);

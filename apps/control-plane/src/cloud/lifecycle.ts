@@ -1233,8 +1233,10 @@ export class CloudV2Lifecycle {
           if (this.stopped) return;
           // Re-read before touching the machine: a Start since the scan owns it now.
           if (!await store.healDue(candidate)) continue;
+          if (this.stopped) return;
           const workerOff = await this.switchWorkerOff(candidate.boatSandboxId!);
           if (!await store.healDue(candidate)) continue;
+          if (this.stopped) return;
           const stopped = await stopKeepingWrites(compute, candidate.boatSandboxId!, { sleep: ms => this.pause(ms), reads: STOP_SETTLE_READS,
             archiveReads: ARCHIVE_CONFIRM_READS, archiveIntervalMs: ARCHIVE_CONFIRM_MS });
           stop = { ...(stopped.stoppedAt ? { stoppedAt: stopped.stoppedAt } : {}), ...(archiveSuspect(stopped) ? { archiveFailed: true } : {}),
