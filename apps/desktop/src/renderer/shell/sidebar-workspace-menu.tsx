@@ -303,7 +303,7 @@ export function SidebarWorkspaceMenu({
               !open && !anyApplied && "opacity-0 group-hover/section:opacity-100 focus-visible:opacity-100",
             )}
             label="Filter workspaces"
-            aria-description={anyApplied ? "Filters applied" : undefined}
+            aria-description={anyApplied ? "View changed from defaults" : undefined}
             data-filtered={anyApplied || undefined}
           >
             <ListFilter strokeWidth={1.5} />

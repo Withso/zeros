@@ -16,7 +16,7 @@ export async function runSidebarWorkspaceFilters({ page, check, harnessBase }) {
   const indicator = trigger.locator("[data-filter-indicator]");
   const expectFilterIndicator = async (active) => {
     await expect(trigger).toHaveAccessibleDescription(
-      active ? "Filters applied" : "",
+      active ? "View changed from defaults" : "",
     );
     await expect(indicator).toHaveCount(active ? 1 : 0);
     if (active) await expect(indicator).toBeVisible();
@@ -251,7 +251,7 @@ export async function runSidebarWorkspaceFilters({ page, check, harnessBase }) {
   await placement("Cloud");
   await expect(row(seeded.keys[0])).toHaveCount(0);
   await expect(row("ws-atlanta")).toBeVisible();
-  await expect(trigger).toHaveAccessibleDescription("Filters applied");
+  await expect(trigger).toHaveAccessibleDescription("View changed from defaults");
   await page.evaluate((id) => window.appSidebarSelectOwner(id), seeded.otherOrganizationId);
   await expect(row(seeded.keys[2])).toBeVisible();
   await page.evaluate((id) => window.appSidebarSelectOwner(id), seeded.organizationId);
