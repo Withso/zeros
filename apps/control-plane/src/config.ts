@@ -250,6 +250,9 @@ export type CloudV2Config = {
   checkpointRetry?: boolean;
   /** CLOUD_V2_FAILED_HEAL_ENABLED, on unless "false": recoverable failed workspaces are moved to stopped without a start. */
   failedHeal?: boolean;
+  /** CLOUD_V2_WAKE_BREAKER_ENABLED, on unless "false": creates and wakes failing the same way across workspaces are
+   * held and retried instead of failed, with one alert. */
+  wakeBreaker?: boolean;
   /** Creates return before their GitHub checks, which the lifecycle runs
    * before any VM exists. CLOUD_V2_ASYNC_CREATE_ENABLED=false keeps every
    * create synchronous; unset means enabled. */
@@ -331,6 +334,8 @@ function loadCloudV2Config(env: NodeJS.ProcessEnv, channel: string): CloudV2Conf
   if (checkpointRetry && !["true", "false"].includes(checkpointRetry)) throw new Error("Invalid environment: CLOUD_V2_CHECKPOINT_RETRY_ENABLED must be true or false");
   const failedHeal = env.CLOUD_V2_FAILED_HEAL_ENABLED?.trim().toLowerCase();
   if (failedHeal && !["true", "false"].includes(failedHeal)) throw new Error("Invalid environment: CLOUD_V2_FAILED_HEAL_ENABLED must be true or false");
+  const wakeBreaker = env.CLOUD_V2_WAKE_BREAKER_ENABLED?.trim().toLowerCase();
+  if (wakeBreaker && !["true", "false"].includes(wakeBreaker)) throw new Error("Invalid environment: CLOUD_V2_WAKE_BREAKER_ENABLED must be true or false");
   const asyncCreate = env.CLOUD_V2_ASYNC_CREATE_ENABLED?.trim().toLowerCase();
   if (asyncCreate && !["true", "false"].includes(asyncCreate)) throw new Error("Invalid environment: CLOUD_V2_ASYNC_CREATE_ENABLED must be true or false");
   const readyCopies = env.CLOUD_V2_READY_COPIES_ENABLED?.trim().toLowerCase();
@@ -403,6 +408,7 @@ function loadCloudV2Config(env: NodeJS.ProcessEnv, channel: string): CloudV2Conf
     messageAuthority: messageAuthority !== "false",
     checkpointRetry: checkpointRetry === "true",
     failedHeal: failedHeal !== "false",
+    wakeBreaker: wakeBreaker !== "false",
     readyCopies: readyCopies === "true",
     ...(readyCopyVerifyFork === "true" ? { readyCopyVerifyFork: true } : {}),
     retention: retention === "true",

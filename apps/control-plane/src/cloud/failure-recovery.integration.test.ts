@@ -135,6 +135,14 @@ database("recovering a failed cloud workspace", () => {
     expect((await row()).state).toBe("stopped");
   });
 
+  it("tells a wake breaker whether any workspace entered running since it opened", async () => {
+    const opened = new Date(Date.now() - 30 * 60_000);
+    await pool.query("UPDATE cloud_v2_workspaces SET running_at = CASE WHEN running_at > $1 THEN $1 - interval '1 hour' ELSE running_at END", [opened]);
+    expect(await f.store.wakeSucceededSince(opened)).toBe(false);
+    await pool.query("UPDATE cloud_v2_workspaces SET running_at=now() WHERE id=$1", [f.workspaceId]);
+    expect(await f.store.wakeSucceededSince(opened)).toBe(true);
+  });
+
   it("is the Creator's alone", async () => {
     await fail();
     const before = await row();

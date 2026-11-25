@@ -1,4 +1,5 @@
 import { BoatBootPendingError } from "./boat-client.js";
+import { CloudProviderError } from "./provider-error.js";
 import { describe, expect, it, vi } from "vitest";
 import { GithubTemporaryError } from "../github-availability.js";
 import type { CloudV2Compute } from "./boat.js";
@@ -59,7 +60,7 @@ function setup(claimed: (CloudV2LifecycleWorkspace & { attempts: number })[], op
   authorizeWorkspace?: CloudV2LifecycleDeps["authorizeWorkspace"]; resolvePendingSource?: CloudV2LifecycleDeps["resolvePendingSource"]; previousRuntimeSha256?: string; logs?: true;
   readyCopies?: CloudV2LifecycleDeps["readyCopies"]; repositories?: CloudV2LifecycleDeps["repositories"];
   checkouts?: CloudV2LifecycleDeps["checkouts"]; submoduleToken?: CloudV2LifecycleDeps["submoduleToken"];
-  claimExecutionRestore?: CloudV2LifecycleDeps["claimExecutionRestore"] } = {}) {
+  claimExecutionRestore?: CloudV2LifecycleDeps["claimExecutionRestore"]; wakeBreaker?: true } = {}) {
   const retries = [...options.retries ?? []];
   const compute: CloudV2Compute = {
     create: vi.fn(async () => ({ sandboxId: "bx_new1" })),
@@ -133,6 +134,7 @@ function setup(claimed: (CloudV2LifecycleWorkspace & { attempts: number })[], op
     accountCheckpointPrefixes: vi.fn(async () => ({ prunable: [], missing: [], empty: false })),
     retireDisconnectedCopies: vi.fn(async () => 0),
     recordUnrestoredSubmodules: vi.fn(async () => {}),
+    wakeSucceededSince: vi.fn(async () => false),
   } as CloudV2LifecycleDeps["store"];
   const stopWorker = vi.fn(async () => true);
   const logs: { warn: string[]; error: string[] } = { warn: [], error: [] };
@@ -162,6 +164,7 @@ function setup(claimed: (CloudV2LifecycleWorkspace & { attempts: number })[], op
     ...(options.checkouts ? { checkouts: options.checkouts } : {}),
     ...(options.submoduleToken ? { submoduleToken: options.submoduleToken } : {}),
     ...(options.claimExecutionRestore ? { claimExecutionRestore: options.claimExecutionRestore } : {}),
+    ...(options.wakeBreaker ? { wakeBreaker: true } : {}),
   });
   return { lifecycle, compute, store, stopWorker, logs };
 }
@@ -1884,5 +1887,112 @@ describe("cloud v2 checkpoint retries", () => {
     expect(old.compute.findSandbox).not.toHaveBeenCalled();
     expect(vi.mocked(old.compute.delete).mock.calls).toEqual([["bx_abc1"]]);
     expect(old.store.checkpointForkGone).toHaveBeenCalledWith(WS, PENDING);
+  });
+});
+
+describe("a wake failure every workspace shares", () => {
+  const ids = ["a", "b", "c", "d", "e"].map(letter => `${letter.repeat(8)}-3b0a-4f7e-9d43-8a0b2b9c6d11`);
+  const waking = (id: string, extra: Partial<CloudV2LifecycleWorkspace & { attempts: number }> = {}) =>
+    workspace("starting", { id, boatSandboxId: `bx_${id.slice(0, 4)}`, ...extra });
+  const refused = () => new CloudProviderError("provider_request_failed", "Boat API request did not succeed", true, { httpStatus: 502 });
+  /** Every route Boat is asked for fails, as it did when its reply changed shape. */
+  const harness = (claimed: (CloudV2LifecycleWorkspace & { attempts: number })[], fail: () => Error = refused) => {
+    let now = NOW;
+    const f = setup(claimed, { logs: true, wakeBreaker: true, now: () => now });
+    vi.mocked(f.compute.hostPort).mockImplementation(async () => { throw fail(); });
+    return { ...f, claimed, at: (ms: number) => { now = NOW + ms; } };
+  };
+  const failed = (f: { store: CloudV2LifecycleDeps["store"] }, id: string) =>
+    vi.mocked(f.store.transition).mock.calls.filter(([workspace, , to]) => workspace === id && to === "failed");
+  const opened = (logs: { error: string[] }) => logs.error.filter(line => line.includes("wake breaker open"));
+
+  it("opens once three different workspaces fail the same step the same way, with one alert", async () => {
+    const f = harness(ids.slice(0, 3).map(id => waking(id)));
+    await f.lifecycle.tick();
+    expect(opened(f.logs)).toEqual([expect.stringContaining("provider_request_failed status=502")]);
+    expect(opened(f.logs)[0]).toContain("3 workspaces");
+    await f.lifecycle.tick();
+    expect(opened(f.logs)).toHaveLength(1);
+  });
+
+  it("holds a wake past its retries and its boot deadline while open, retrying without a create or fork", async () => {
+    const f = harness(ids.slice(0, 3).map(id => waking(id)));
+    await f.lifecycle.tick();
+    f.claimed.splice(0, 3, waking(ids[3]!, { attempts: 8 }));
+    await f.lifecycle.tick();
+    expect(failed(f, ids[3]!)).toEqual([]);
+    expect(f.store.defer).toHaveBeenLastCalledWith(ids[3], "starting", expect.any(Number), { failure: true });
+    f.claimed.splice(0, 1, waking(ids[3]!, { attempts: 9, updatedAt: new Date(NOW - 11 * 60_000).toISOString() }));
+    await f.lifecycle.tick();
+    expect(failed(f, ids[3]!)).toEqual([]);
+    expect(f.compute.resume).toHaveBeenCalledWith(`bx_${ids[3]!.slice(0, 4)}`);
+    expect(f.compute.create).not.toHaveBeenCalled();
+    expect(f.compute.fork).not.toHaveBeenCalled();
+  });
+
+  it("closes on a wake that succeeds, giving held wakes a fresh boot window and others the usual retries", async () => {
+    const f = harness(ids.slice(0, 3).map(id => waking(id)));
+    await f.lifecycle.tick();
+    f.claimed.splice(0, 3, waking(ids[3]!, { attempts: 8 }));
+    await f.lifecycle.tick();
+    const held = waking(ids[3]!, { attempts: 9, updatedAt: new Date(NOW - 11 * 60_000).toISOString() });
+    f.claimed.splice(0, 1, held);
+    await f.lifecycle.tick();
+    expect(failed(f, ids[3]!)).toEqual([]);
+    // Fixed for the held wake; still failing for a new one, whose own retries then decide as before.
+    vi.mocked(f.compute.hostPort).mockImplementation(async sandboxId => {
+      if (sandboxId === `bx_${ids[4]!.slice(0, 4)}`) throw refused();
+      return { url: "https://fixture-41783.on.boat.dev", token: "synthetic-port-token" };
+    });
+    vi.mocked(f.store.wakeSucceededSince!).mockResolvedValue(true);
+    f.at(60_000);
+    await f.lifecycle.tick();
+    expect(f.logs.warn.some(line => line.includes("wake breaker closed"))).toBe(true);
+    // Held: not failed at once for a deadline it missed while the breaker held it.
+    expect(failed(f, ids[3]!)).toEqual([]);
+    f.claimed.splice(0, 1, waking(ids[4]!, { attempts: 8 }));
+    await f.lifecycle.tick();
+    expect(failed(f, ids[4]!)).toEqual([[ids[4], ["starting"], "failed", { errorCode: "provider_request_failed" }]]);
+    f.claimed.splice(0, 1, held);
+    f.at(12 * 60_000);
+    await f.lifecycle.tick();
+    expect(failed(f, ids[3]!)).toEqual([[ids[3], ["starting"], "failed", { errorCode: "worker_boot_timeout" }]]);
+  });
+
+  it("never opens for a failure one workspace's own state explains", async () => {
+    const f = harness(ids.slice(0, 3).map(id => waking(id)), () => new CloudProviderError("provider_budget_exhausted", "Boat API request did not succeed", false, { httpStatus: 402 }));
+    await f.lifecycle.tick();
+    expect(opened(f.logs)).toEqual([]);
+    f.claimed.splice(0, 3, waking(ids[3]!, { attempts: 8 }));
+    await f.lifecycle.tick();
+    expect(failed(f, ids[3]!)).toHaveLength(1);
+  });
+
+  it("never opens for one workspace failing again and again", async () => {
+    const f = harness([waking(ids[0]!)]);
+    for (let i = 0; i < 4; i++) { f.at(i * 30_000); await f.lifecycle.tick(); }
+    expect(opened(f.logs)).toEqual([]);
+  });
+
+  it("still fails a wake held for two hours, and gives up the breaker then", async () => {
+    const f = harness(ids.slice(0, 3).map(id => waking(id)));
+    await f.lifecycle.tick();
+    f.claimed.splice(0, 3, waking(ids[3]!, { attempts: 9, updatedAt: new Date(NOW - 121 * 60_000).toISOString() }));
+    await f.lifecycle.tick();
+    expect(failed(f, ids[3]!)).toEqual([[ids[3], ["starting"], "failed", { errorCode: "worker_boot_timeout" }]]);
+    f.at(121 * 60_000);
+    f.claimed.splice(0, 1);
+    await f.lifecycle.tick();
+    expect(f.logs.error.some(line => line.includes("wake breaker gave up"))).toBe(true);
+  });
+
+  it("opens for wakes that miss their boot deadline everywhere, and holds the next one", async () => {
+    const late = new Date(NOW - 11 * 60_000).toISOString();
+    const f = harness(ids.slice(0, 3).map(id => waking(id, { updatedAt: late })));
+    await f.lifecycle.tick();
+    expect(opened(f.logs)).toEqual([expect.stringContaining("worker_boot_timeout")]);
+    f.claimed.splice(0, 3, waking(ids[3]!, { updatedAt: late }));
+    await f.lifecycle.tick();
+    expect(failed(f, ids[3]!)).toEqual([]);
   });
 });
