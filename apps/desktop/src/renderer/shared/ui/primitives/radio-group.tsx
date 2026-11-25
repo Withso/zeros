@@ -75,7 +75,7 @@ function RadioGroupItem({
           className={cn(
             // Keyboard focus is a 1px accent line one pixel off the circle,
             // so it still shows around the accent fill.
-            "border-border4 group-hover:border-fg3 group-data-[state=checked]:border-accent group-data-[state=checked]:bg-accent group-focus-visible:outline-accent flex size-4 shrink-0 items-center justify-center rounded-full border transition-[background-color,border-color] duration-120 ease-out group-focus-visible:outline-1 group-focus-visible:outline-offset-1",
+            "border-border4 group-hover:border-fg3 group-data-[state=checked]:border-accent group-data-[state=checked]:bg-accent group-focus-visible:outline-accent flex size-4 shrink-0 items-center justify-center rounded-full border transition-[background-color,border-color] duration-fast ease-out group-focus-visible:outline-1 group-focus-visible:outline-offset-1",
           )}
         >
           <RadioGroupPrimitive.Indicator className="bg-accent-fg size-1.5 rounded-full" />

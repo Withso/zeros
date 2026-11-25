@@ -104,7 +104,7 @@ export function ReviewChecksSection({
     <div
       key={`${c.name}-${i}`}
       data-review-check={c.name}
-      className="group hover:bg-bg1-hover flex h-9 min-w-0 items-center gap-2.5 rounded-md px-2.5 transition-colors duration-120 ease-out"
+      className="group hover:bg-bg1-hover flex h-9 min-w-0 items-center gap-2.5 rounded-md px-2.5 transition-colors duration-fast ease-out"
     >
       <CheckGlyph check={c} />
       <span className="text-fg1 min-w-0 truncate text-xs">{c.name}</span>

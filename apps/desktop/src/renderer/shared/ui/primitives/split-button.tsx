@@ -9,7 +9,7 @@ import { DropdownMenu, DropdownMenuTrigger } from "./dropdown-menu";
 // outer focus ring. The halves overlap by their 1px border; the hovered, open
 // or focused half rises above its neighbour so its whole border shows.
 const HALF =
-  "relative inline-flex items-center justify-center border border-transparent whitespace-nowrap text-xs leading-4.5 font-medium outline-none transition-colors duration-120 ease-out focus-visible:z-2 focus-visible:border-accent disabled:cursor-not-allowed disabled:opacity-50 aria-busy:cursor-progress [&_svg]:pointer-events-none [&_svg]:shrink-0";
+  "relative inline-flex items-center justify-center border border-transparent whitespace-nowrap text-xs leading-4.5 font-medium outline-none transition-colors duration-fast ease-out focus-visible:z-2 focus-visible:border-accent disabled:cursor-not-allowed disabled:opacity-50 aria-busy:cursor-progress [&_svg]:pointer-events-none [&_svg]:shrink-0";
 
 const SIZE = {
   default: {

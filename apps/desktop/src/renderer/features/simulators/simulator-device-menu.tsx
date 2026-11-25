@@ -20,7 +20,7 @@ function DeviceItem({ device }: { device: SimulatorDevice }) {
     >
       <span className="flex min-w-0 flex-col">
         <span className="truncate">{device.name}</span>
-        <span className="text-fg3 text-2xxs truncate">
+        <span className="text-fg3 text-3xxs truncate">
           {simulatorDeviceStatusLabel(device)}
         </span>
       </span>

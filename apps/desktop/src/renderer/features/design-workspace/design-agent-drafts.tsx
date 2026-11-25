@@ -372,7 +372,7 @@ const DesignAgentDraftGhost = React.memo(function DesignAgentDraftGhost({
           transform: `translateY(${designCanvasScreenPixels(-8)}) scale(${DESIGN_CANVAS_INVERSE_ZOOM})`,
         }}
       >
-        <span className="text-fg3 text-2xxs block truncate leading-4 font-medium">
+        <span className="text-fg3 text-3xxs block truncate leading-4 font-medium">
           {title}
         </span>
       </div>

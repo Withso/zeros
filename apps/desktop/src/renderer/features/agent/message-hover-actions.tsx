@@ -57,7 +57,7 @@ export function MessageHoverActions({
     <div
       data-message-hover-actions=""
       className={cn(
-        "pointer-events-none absolute right-0 bottom-full z-2 pb-1 opacity-0 transition-opacity duration-150 ease-out",
+        "pointer-events-none absolute right-0 bottom-full z-2 pb-1 opacity-0 transition-opacity duration-base ease-out",
         revealClassName,
       )}
     >

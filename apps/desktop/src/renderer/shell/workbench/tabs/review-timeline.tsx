@@ -553,7 +553,7 @@ function TimelineCard({
     <div
       className={cn(
         REVIEW_CARD,
-        "transition-opacity duration-120 ease-out",
+        "transition-opacity duration-fast ease-out",
         optimistic && "opacity-70",
       )}
     >
@@ -674,7 +674,7 @@ function ThreadTimelineCard({
         onClick={() => void revealReviewComment(cwd, item.reference)}
         label={`Open ${location} in Changes`}
       >
-        <span className="font-mono text-2xxs">{location}</span>
+        <span className="font-mono text-3xxs">{location}</span>
       </ReviewTextLink>
       {thread.isResolved ? <Badge variant="neutral">Resolved</Badge> : thread.isOutdated ? <Badge variant="neutral">Outdated</Badge> : null}
       <span className="text-fg3 shrink-0">{relTime(first.createdAt)}</span>

@@ -30,7 +30,7 @@ describe("checkDesignDocs", () => {
           "Run `pnpm check:ui --prune-debt` and `pnpm design:docs`.",
           "See `styles/zeros-tokens.css`, `shared/ui/primitives/`, and [the rules](../RULES.md).",
           "Classes: `bg-bg1 hover:bg-bg1-hover text-fg2` and `z-modal`.",
-          "These do not compile: `text-error`, `rounded-xl`.",
+          "These do not compile: `text-error`, `rounded-3xl`.",
           "```",
           "`--not-checked-inside-a-fence`",
           "```",

@@ -178,7 +178,7 @@ const DialogContent = React.forwardRef<
             DIALOG_WIDTH[size],
             MENU_SURFACE_RADIUS,
             // Smooth, subtle motion: 3% scale, decelerate in / accelerate out.
-            "origin-center duration-200 ease-out data-[state=closed]:duration-150 data-[state=closed]:ease-in",
+            "origin-center duration-base ease-out data-[state=closed]:ease-in",
             "data-[state=open]:animate-in data-[state=closed]:animate-out",
             "data-[state=open]:fade-in-0 data-[state=closed]:fade-out-0",
             "data-[state=open]:zoom-in-97 data-[state=closed]:zoom-out-97",
@@ -266,7 +266,7 @@ const DialogTitle = React.forwardRef<
       data-slot="dialog-title"
       className={cn(
         // Long unbroken names wrap instead of running under the close button.
-        "text-dialog-title min-w-0 flex-1 leading-5 font-medium break-words",
+        "text-dialog-title min-w-0 flex-1 leading-5 font-semibold break-words",
         className,
       )}
       {...props}

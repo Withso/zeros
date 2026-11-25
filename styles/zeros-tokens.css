@@ -214,34 +214,41 @@
   --font-weight-semibold: var(--weight-semibold);
   --font-weight-bold: var(--weight-bold);
 
-  /* ── RADII — fixed 3-step scale ──
-   * The whole app uses exactly three corner radii; pick by use case,
+  /* ── RADII — five steps (P7) ──
+   * The whole app uses exactly five corner radii; pick by use case,
    * never by taste:
-   *   --radius-sm 4px — the 20px inline icon button, inline pills, badges,
-   *                     kbd chips, checkboxes, the inline-rename field
-   *   --radius-md 6px — buttons, icon buttons, fields and the Select
-   *                     trigger, tabs and segmented controls, tooltips,
-   *                     toolbar tools, sidebar and settings rows
-   *   --radius-lg 8px — menu rows, code blocks, small cards and rows
-   * Floating surfaces (menus, Select lists, Command, popovers, hover
-   * cards, toasts, dialogs) use 1.5 × --radius-lg = 12px via
-   * shared/ui/menu-surface.ts, as do the grouped settings cards
-   * (features/settings/settings-ui.tsx, SETTINGS_GROUP_RADIUS) and the
-   * prompt surfaces — composer card, inline edit composer, sent user
-   * message — via features/agent/composer-shell.tsx (PROMPT_SURFACE_RADIUS),
-   * so a prompt keeps its shape from typed to sent. Toolbars use
-   * --radius-md + 4px = 10px (shared/ui/primitives/toolbar.tsx). All
-   * derived from the scale, not a fourth token.
-   * Plus rounded-full (circles/scrollbars/switch) and rounded-none
-   * (nested resets). xs/xl/2xl/3xl/4xl are reset to `initial` below
-   * ON PURPOSE so `rounded-xl` etc. no longer exist —
-   * a class that won't compile beats a fourth radius sneaking in.
-   * Nesting rule: inner radius = outer radius − inset (a 12px menu with a
-   * 4px inset → 8px rows; a 10px toolbar with a 4px inset → 6px tools). */
+   *   --radius-sm  4px — the 20px inline icon button, inline pills, badges,
+   *                      kbd chips, checkboxes, the inline-rename field
+   *   --radius-md  6px — buttons, icon buttons, fields and the Select
+   *                      trigger, tabs and segmented controls, tooltips,
+   *                      sidebar and settings rows
+   *   --radius-lg  8px — menu rows, toolbar tools, code blocks, small cards
+   *   --radius-xl 12px — floating surfaces (menus, Select lists, Command,
+   *                      popovers, hover cards, toasts, dialogs, toolbars),
+   *                      settings groups, tiles and the sent user message
+   *   --radius-2xl 18px — the composer family (Create, chat, inline edit)
+   * Plus rounded-full (circles, capsules, scrollbars, switch) and
+   * rounded-none (nested resets). xs/3xl/4xl are reset to `initial` ON
+   * PURPOSE, so a class that won't compile beats a sixth radius sneaking in.
+   * Nesting rule: inner radius = outer radius − inset (a 12px menu or
+   * toolbar with a 4px inset → 8px rows and tools). */
   --radius-*: initial;
   --radius-sm: 4px;
   --radius-md: 6px;
   --radius-lg: 8px;
+  --radius-xl: 12px;
+  --radius-2xl: 18px;
+
+  /* ── DURATIONS — three named steps (P8) ──
+   * fast 120 for colour, fill and border changes; base 150 for anchored
+   * overlays entering, slides and dialogs; slow 200 for larger panel and
+   * canvas moves. Utilities: duration-fast / -base / -slow (below), and
+   * var(--duration-*) in hand-written CSS. Loader beats are animation
+   * timing, not transitions, and keep their own constants. */
+  --duration-fast: 120ms;
+  --duration-base: 150ms;
+  --duration-slow: 200ms;
+  --default-transition-duration: 150ms;
 
   /* ── BACKGROUNDS — `bg-bg1`..`bg-bg5` + hovers ── */
   /* @generated tokens:utilities-bg1:start */
@@ -425,6 +432,20 @@
 }
 @utility z-toast {
   z-index: var(--z-toast);
+}
+
+/* ── NAMED DURATIONS → utilities (P8) ── */
+@utility duration-fast {
+  --tw-duration: var(--duration-fast);
+  transition-duration: var(--duration-fast);
+}
+@utility duration-base {
+  --tw-duration: var(--duration-base);
+  transition-duration: var(--duration-base);
+}
+@utility duration-slow {
+  --tw-duration: var(--duration-slow);
+  transition-duration: var(--duration-slow);
 }
 
 /* ──────────────────────────────────────────────────────────

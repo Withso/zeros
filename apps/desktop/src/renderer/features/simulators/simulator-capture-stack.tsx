@@ -108,7 +108,7 @@ function CaptureCard({
       onDragStart={onDragStart}
       className={cn(
         "group/capture ring-border2 bg-bg1 absolute right-0 bottom-0 origin-bottom-right cursor-grab overflow-hidden rounded-lg shadow-[var(--shadow-dropdown)] ring-1",
-        "duration-200 ease-out motion-safe:transition-transform",
+        "duration-slow ease-out motion-safe:transition-transform",
         layer,
       )}
       style={{
@@ -132,7 +132,7 @@ function CaptureCard({
       {capture.kind === "recording" && capture.durationMs !== undefined && (
         <span
           aria-hidden
-          className="border-border2 bg-bg2 text-fg1 text-2xxs pointer-events-none absolute bottom-1 left-1 flex items-center gap-1 rounded-sm border px-1 tabular-nums"
+          className="border-border2 bg-bg2 text-fg1 text-3xxs pointer-events-none absolute bottom-1 left-1 flex items-center gap-1 rounded-sm border px-1 tabular-nums"
         >
           <Video className="size-3" />
           {formatRecordingElapsed(capture.durationMs)}
@@ -142,7 +142,7 @@ function CaptureCard({
         <Toolbar
           aria-label={`${label} actions`}
           className={cn(
-            "pointer-events-none opacity-0 transition-opacity duration-150",
+            "pointer-events-none opacity-0 transition-opacity duration-base",
             "group-hover/capture:pointer-events-auto group-hover/capture:opacity-100",
             "group-focus-within/capture:pointer-events-auto group-focus-within/capture:opacity-100",
           )}

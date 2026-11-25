@@ -51,7 +51,7 @@ export function ReviewCommentPreviewDialog({
               {reference.author.avatarUrl ? (
                 <AvatarImage src={reference.author.avatarUrl} alt="" />
               ) : null}
-              <AvatarFallback className="text-xxs uppercase">
+              <AvatarFallback className="text-2xxs uppercase">
                 {reference.author.name.slice(0, 1) || "?"}
               </AvatarFallback>
             </Avatar>

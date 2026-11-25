@@ -143,7 +143,6 @@ export const InspectorIconButton = React.forwardRef<
     <Tooltip
       label={tooltip}
       shortcut={shortcut}
-      delayDuration={props["aria-haspopup"] ? 1500 : undefined}
       disabled={
         props["aria-expanded"] === true || props["aria-expanded"] === "true"
       }
@@ -560,7 +559,6 @@ export const DesignToolbarButton = React.forwardRef<
       label={tooltip ?? label}
       shortcut={shortcut}
       side={tooltipSide}
-      delayDuration={props["aria-haspopup"] ? 1500 : undefined}
       disabled={
         props["aria-expanded"] === true || props["aria-expanded"] === "true"
       }

@@ -76,7 +76,7 @@ export function WorkspaceBadge({ folder }: { folder: string }) {
   const { workspaces } = useLiveWorkspaces();
   const { workspaces: archived } = useArchivedWorkspaces();
   return (
-    <span className="text-fg3 border-border1 shrink-0 rounded-sm border px-1 text-xxs leading-4" data-session-workspace="">
+    <span className="text-fg3 border-border1 shrink-0 rounded-sm border px-1 text-3xxs leading-4" data-session-workspace="">
       {workspaceBadgeLabel(folder, workspaces, archived)}
     </span>
   );

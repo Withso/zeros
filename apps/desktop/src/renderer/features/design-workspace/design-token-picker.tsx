@@ -222,7 +222,7 @@ export function DesignTokenRows({
         ) : (
           shown.map((group) => (
             <div key={group.key} role="group" aria-label={group.label} className="flex min-w-0 flex-col">
-              <div className="text-fg3 truncate px-1.5 pt-1 pb-0.5 text-2xxs font-medium">
+              <div className="text-fg3 truncate px-1.5 pt-1 pb-0.5 text-3xxs font-medium">
                 {group.label}
               </div>
               {group.rows.map((row) => {

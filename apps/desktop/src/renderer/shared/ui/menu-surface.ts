@@ -15,7 +15,7 @@
 // from the radius scale instead of adding a fourth token; zeros-tokens.css
 // documents the nesting rule.
 
-export const MENU_SURFACE_RADIUS = "rounded-[calc(var(--radius-lg)*1.5)]";
+export const MENU_SURFACE_RADIUS = "rounded-xl";
 
 /** Inset between the surface edge and its rows, equal on every side. */
 export const MENU_SURFACE_INSET = "p-1";

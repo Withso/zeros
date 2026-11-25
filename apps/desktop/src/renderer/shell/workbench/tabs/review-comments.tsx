@@ -115,14 +115,14 @@ function CommentRow({
         </span>
       </ListRow>
       {location ? (
-        <span className="text-fg3 text-2xxs max-w-[30%] shrink-0 truncate font-mono">
+        <span className="text-fg3 text-3xxs max-w-[30%] shrink-0 truncate font-mono">
           {location}
         </span>
       ) : null}
       {/* Over the row's end, so showing them moves nothing under the pointer.
           Transparent rather than hidden: they stay in the tab order, and
           keyboard focus reveals them. */}
-      <div className="bg-bg1-raised-hover absolute inset-y-0 right-0 flex items-center gap-1 pr-2 pl-3 opacity-0 transition-opacity duration-120 ease-out group-focus-within:opacity-100 group-hover:opacity-100">
+      <div className="bg-bg1-raised-hover absolute inset-y-0 right-0 flex items-center gap-1 pr-2 pl-3 opacity-0 transition-opacity duration-fast ease-out group-focus-within:opacity-100 group-hover:opacity-100">
         <Button variant="ghost" size="compact" className="text-fg2" onClick={() => onHide(!hidden)}>
           {hidden ? "Unhide" : "Hide"}
         </Button>

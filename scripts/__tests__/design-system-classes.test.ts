@@ -194,7 +194,7 @@ describe("checkCompiledClasses", () => {
     const file = writeFixture(
       "apps/desktop/src/renderer/dead.tsx",
       `export const Dead = () => (
-        <div className="text-error bg-sidebar rounded-xl rounded border-bd1 bg-bg1 group/repo zeros-agent-surface defined-in-css hover:bg-bg2-hover" />
+        <div className="text-error bg-sidebar rounded-3xl rounded border-bd1 bg-bg1 group/repo zeros-agent-surface defined-in-css hover:bg-bg2-hover" />
       );`,
     );
     const violations = await checkCompiledClasses({
@@ -209,7 +209,7 @@ describe("checkCompiledClasses", () => {
       .map((v: { message: string }) => v.message.match(/^Class "([^"]+)"/)?.[1])
       .filter(Boolean);
     expect(dead.sort()).toEqual(
-      ["border-bd1", "bg-sidebar", "rounded", "rounded-xl", "text-error"].sort(),
+      ["border-bd1", "bg-sidebar", "rounded", "rounded-3xl", "text-error"].sort(),
     );
   });
 

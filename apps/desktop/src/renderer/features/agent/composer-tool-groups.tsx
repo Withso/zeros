@@ -206,7 +206,7 @@ function ToolRows({
           // 28px rows, 13/18, names on the group label's 24px column.
           className="flex min-h-7 items-center gap-2 py-1 pr-1.5 pl-6 text-xs leading-4.5"
         >
-          <Tooltip label={entry.name} delayDuration={1500}>
+          <Tooltip label={entry.name}>
             <div className="text-fg1 min-w-0 flex-1 truncate">{entry.name}</div>
           </Tooltip>
           <ToolStatus

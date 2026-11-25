@@ -2,7 +2,7 @@
 // check-compiled-classes.mjs
 // ------------------------------------------------------------
 // Every class the renderer writes must produce CSS. Tailwind never errors on
-// an unknown utility — `text-error`, `bg-sidebar`, or a removed `rounded-xl`
+// an unknown utility — `text-error`, `bg-sidebar`, or a removed `rounded-3xl`
 // simply render nothing — so a typo or a retired token silently drops the
 // intended styling. This check compiles each class candidate against the real
 // app entrypoint (styles/zeros-tokens.css) with the SAME Tailwind compiler the

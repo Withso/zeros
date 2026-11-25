@@ -186,7 +186,7 @@ export function CloudComputerSourcePicker({
             ? `Create from ${selected.kind === "pr" ? "pull request" : "GitHub branch"}: ${selected.label}`
             : "Create from source"
         }
-        delayDuration={1500}
+       
         disabled={open}
       >
         <PopoverTrigger asChild>

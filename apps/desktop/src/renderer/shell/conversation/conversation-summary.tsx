@@ -197,7 +197,7 @@ export function ConversationSummaryTrigger() {
           open={state.open}
           onOpenChange={state.setOpen}
         >
-          <Tooltip label="Summary" delayDuration={1500} disabled={state.open}>
+          <Tooltip label="Summary" disabled={state.open}>
             <PopoverTrigger asChild>
               {button}
             </PopoverTrigger>

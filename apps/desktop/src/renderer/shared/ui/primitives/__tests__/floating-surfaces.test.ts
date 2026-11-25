@@ -18,7 +18,7 @@ const source = (file: string) =>
 
 describe("the floating surface", () => {
   it("is 12px with a 4px inset, so 8px rows sit parallel inside it", () => {
-    expect(MENU_SURFACE_RADIUS).toBe("rounded-[calc(var(--radius-lg)*1.5)]");
+    expect(MENU_SURFACE_RADIUS).toBe("rounded-xl");
     expect(MENU_SURFACE_INSET).toBe("p-1");
     expect(MENU_SEPARATOR).toContain("-mx-1");
     expect(MENU_SEPARATOR).toContain("my-1");

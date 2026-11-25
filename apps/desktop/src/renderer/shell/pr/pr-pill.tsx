@@ -18,7 +18,7 @@ const PR_PILL_TONE: Record<WorkspacePrTone, string> = {
 };
 
 export const PR_PILL_CLS =
-  "inline-flex h-6 shrink-0 items-center rounded-full border px-2 text-xs leading-4 font-medium tabular-nums transition-colors duration-120 ease-out focus-visible:ring-1 focus-visible:ring-accent focus-visible:outline-none";
+  "inline-flex h-6 shrink-0 items-center rounded-full border px-2 text-xs leading-4 font-medium tabular-nums transition-colors duration-fast ease-out focus-visible:ring-1 focus-visible:ring-accent focus-visible:outline-none";
 
 // --- COMPONENT ---
 

@@ -220,7 +220,7 @@ export function ReviewChangesSection({
               onClick={() => toggle(f.path)}
               aria-expanded={open}
               className={cn(
-                "hover:bg-bg1-hover flex h-9 w-full items-center gap-2 px-2.5 text-left transition-colors duration-120 ease-out",
+                "hover:bg-bg1-hover flex h-9 w-full items-center gap-2 px-2.5 text-left transition-colors duration-fast ease-out",
                 open && "border-border1 border-b",
               )}
             >

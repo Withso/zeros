@@ -95,7 +95,7 @@ export function AuthorAvatar({
   return (
     <Avatar size="sm" className={cn("size-5", className)}>
       {avatarUrl ? <AvatarImage src={avatarUrl} alt={login} /> : null}
-      <AvatarFallback className="text-xxs uppercase">
+      <AvatarFallback className="text-2xxs uppercase">
         {login.slice(0, 1) || "?"}
       </AvatarFallback>
     </Avatar>
@@ -121,12 +121,12 @@ export function GroupHeader({
       type="button"
       aria-expanded={open}
       onClick={onToggle}
-      className="text-fg2 hover:text-fg1 flex h-8 w-full items-center gap-1.5 rounded-md px-2.5 text-left text-xs transition-colors duration-120 ease-out"
+      className="text-fg2 hover:text-fg1 flex h-8 w-full items-center gap-1.5 rounded-md px-2.5 text-left text-xs transition-colors duration-fast ease-out"
     >
       <ChevronDown
         aria-hidden
         className={cn(
-          "text-fg3 size-3.5 shrink-0 transition-transform duration-120 ease-out",
+          "text-fg3 size-3.5 shrink-0 transition-transform duration-fast ease-out",
           !open && "-rotate-90",
         )}
       />
@@ -161,7 +161,7 @@ export function ErrorCallout({
         <button
           type="button"
           onClick={onRetry}
-          className="shrink-0 rounded-sm px-1.5 py-0.5 font-medium underline-offset-2 transition-colors duration-120 ease-out hover:underline"
+          className="shrink-0 rounded-sm px-1.5 py-0.5 font-medium underline-offset-2 transition-colors duration-fast ease-out hover:underline"
         >
           Retry
         </button>
@@ -193,7 +193,7 @@ export function ViewedToggle({
       onMouseEnter={() => setHover(true)}
       onMouseLeave={() => setHover(false)}
       className={cn(
-        "flex size-4.5 shrink-0 items-center justify-center rounded-sm border transition-colors duration-120 ease-out",
+        "flex size-4.5 shrink-0 items-center justify-center rounded-sm border transition-colors duration-fast ease-out",
         viewed
           ? "bg-green-bg text-green-on-bg border-transparent"
           : "border-border3 text-fg2 hover:border-border4",

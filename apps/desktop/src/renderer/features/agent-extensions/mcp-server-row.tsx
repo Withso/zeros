@@ -187,7 +187,7 @@ export function McpToolCount({
       <ChevronDown
         aria-hidden
         className={cn(
-          "transition-transform duration-150 ease-out",
+          "transition-transform duration-base ease-out",
           open && "rotate-180",
         )}
       />

@@ -95,14 +95,14 @@ const SELECT_TRIGGER_WIDTH: Record<SelectTriggerWidth, string> = {
 // rest; hover and open paint selected-bg. Compact keeps the line box and
 // drops to 24px.
 const SELECT_TRIGGER_BASE = cn(
-  "group/select-trigger flex items-center justify-between gap-1 rounded-md border border-border3 bg-transparent py-1 pr-1.5 pl-2 text-xs leading-4.5 whitespace-nowrap transition-[color,background-color,border-color,box-shadow] duration-120 ease-out outline-none hover:border-border4 hover:bg-selected-bg data-[state=open]:border-border4 data-[state=open]:bg-selected-bg data-[size=compact]:py-0.5 disabled:cursor-not-allowed disabled:opacity-50 data-[placeholder]:text-fg3 *:data-[slot=select-value]:line-clamp-1 *:data-[slot=select-value]:flex *:data-[slot=select-value]:items-center *:data-[slot=select-value]:gap-2 [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-3.5 [&_svg:not([class*='text-'])]:text-fg2",
+  "group/select-trigger flex items-center justify-between gap-1 rounded-md border border-border3 bg-transparent py-1 pr-1.5 pl-2 text-xs leading-4.5 whitespace-nowrap transition-[color,background-color,border-color,box-shadow] duration-fast ease-out outline-none hover:border-border4 hover:bg-selected-bg data-[state=open]:border-border4 data-[state=open]:bg-selected-bg data-[size=compact]:py-0.5 disabled:cursor-not-allowed disabled:opacity-50 data-[placeholder]:text-fg3 *:data-[slot=select-value]:line-clamp-1 *:data-[slot=select-value]:flex *:data-[slot=select-value]:items-center *:data-[slot=select-value]:gap-2 [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-3.5 [&_svg:not([class*='text-'])]:text-fg2",
   FIELD_FOCUS,
   FIELD_INVALID,
 )
 
 /** The trigger's chevron: fg3 at rest, fg2 on hover and while open. */
 const SELECT_CHEVRON =
-  "text-fg3 group-hover/select-trigger:text-fg2 group-data-[state=open]/select-trigger:text-fg2 size-3.5 transition-colors duration-120 ease-out"
+  "text-fg3 group-hover/select-trigger:text-fg2 group-data-[state=open]/select-trigger:text-fg2 size-3.5 transition-colors duration-fast ease-out"
 
 /** The dropdown-trigger chrome as a class string, for the rare menu whose
  *  trigger should look like a Select (an action menu such as "Open in ▾")

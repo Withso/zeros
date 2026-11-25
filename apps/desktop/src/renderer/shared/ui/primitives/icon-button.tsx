@@ -33,7 +33,7 @@ export interface IconButtonProps extends Omit<
 // surfaces. The glyph size belongs to the component, so it wins over sizes a
 // caller puts on the icon.
 const BASE =
-  "inline-flex shrink-0 select-none items-center justify-center border border-transparent p-0 text-fg2 transition-colors duration-120 ease-out hover:bg-selected-bg hover:text-fg1 data-[state=open]:bg-selected-bg data-[state=open]:text-fg1 focus-visible:outline-none focus-visible:border-accent disabled:pointer-events-none disabled:opacity-50 aria-disabled:cursor-not-allowed aria-disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:shrink-0";
+  "inline-flex shrink-0 select-none items-center justify-center border border-transparent p-0 text-fg2 transition-colors duration-fast ease-out hover:bg-selected-bg hover:text-fg1 data-[state=open]:bg-selected-bg data-[state=open]:text-fg1 focus-visible:outline-none focus-visible:border-accent disabled:pointer-events-none disabled:opacity-50 aria-disabled:cursor-not-allowed aria-disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:shrink-0";
 
 const SIZE_CLASSES = {
   inline: "size-5 rounded-sm [&_svg]:size-3",

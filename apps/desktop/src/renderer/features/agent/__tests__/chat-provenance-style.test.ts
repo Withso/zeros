@@ -222,7 +222,7 @@ describe("Settings → Git prefix pane", () => {
     expect(
       source("apps/desktop/src/renderer/features/settings/settings-ui.tsx"),
     ).toContain(
-      '"bg-bg1-raised border-border1 divide-border1 rounded-[calc(var(--radius-lg)*1.5)] border px-3.5 [&>*]:py-3"',
+      '"bg-bg1-raised border-border1 divide-border1 rounded-xl border px-3.5 [&>*]:py-3"',
     );
   });
 

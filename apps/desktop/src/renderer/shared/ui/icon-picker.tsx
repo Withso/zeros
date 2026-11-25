@@ -49,7 +49,7 @@ export function IconPicker({
         if (!next) setQuery("");
       }}
     >
-      <Tooltip label={label} delayDuration={1500} disabled={open}>
+      <Tooltip label={label} disabled={open}>
         <PopoverTrigger asChild>
           <IconButton size="standard" label={label}>
             <DynamicIcon name={selected} className="size-4" />

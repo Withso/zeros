@@ -292,7 +292,7 @@ export function SidebarWorkspaceMenu({
 
   return (
     <DropdownMenu open={active && open} onOpenChange={setOpen}>
-      <Tooltip label="Filter workspaces" side="bottom" delayDuration={1500} disabled={open}>
+      <Tooltip label="Filter workspaces" side="bottom" disabled={open}>
         <DropdownMenuTrigger asChild>
           <IconButton
             type="button"

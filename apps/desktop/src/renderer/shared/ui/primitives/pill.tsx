@@ -9,7 +9,7 @@ import { cn } from "@/renderer/shared/ui/cn";
 // chat, bg2-hover in the composer, selected-bg in a sent message), and tints
 // only where they mean something.
 const pillVariants = cva(
-  "inline-flex max-w-60 shrink-0 items-center whitespace-nowrap border transition-colors duration-120 ease-out focus-visible:border-accent focus-visible:outline-none disabled:pointer-events-none disabled:opacity-50 [&_svg]:shrink-0 [&>span]:truncate",
+  "inline-flex max-w-60 shrink-0 items-center whitespace-nowrap border transition-colors duration-fast ease-out focus-visible:border-accent focus-visible:outline-none disabled:pointer-events-none disabled:opacity-50 [&_svg]:shrink-0 [&>span]:truncate",
   {
     variants: {
       size: {

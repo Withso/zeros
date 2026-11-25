@@ -1393,7 +1393,7 @@ function ChatPane({ paneId, ctx }: { paneId: string; ctx: PaneCtx }) {
       // fg3 in Dark dip below their floors there.
       className={cn(
         "relative flex min-h-0 min-w-0 flex-1 flex-col bg-(--pane-bg) outline-none",
-        split && "*:transition-opacity *:duration-120 *:ease-out motion-reduce:*:transition-none",
+        split && "*:transition-opacity *:duration-fast *:ease-out motion-reduce:*:transition-none",
         split && !isFocused && "*:opacity-80",
       )}
     >

@@ -12,7 +12,7 @@ function InputGroup({ className, ...props }: React.ComponentProps<"div">) {
       className={cn(
         // The Input field box around a control and its addons: 28px, 6px
         // corners, border3 lifting to border4 on hover.
-        "group/input-group relative flex w-full items-center rounded-md border border-border3 transition-[color,border-color,box-shadow] duration-120 ease-out outline-none hover:border-border4",
+        "group/input-group relative flex w-full items-center rounded-md border border-border3 transition-[color,border-color,box-shadow] duration-fast ease-out outline-none hover:border-border4",
         "h-7 min-w-0 has-[>textarea]:h-auto",
 
         // Variants based on alignment.

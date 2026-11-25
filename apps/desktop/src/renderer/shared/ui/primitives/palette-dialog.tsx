@@ -35,10 +35,10 @@ export function PaletteDialog({
           // Fixed geometry keeps category switches from moving the search field.
           "z-modal border-border2/60 fixed top-1/2 left-1/2 flex h-[min(72vh,432px)] w-[92vw] max-w-[660px] -translate-x-1/2 -translate-y-1/2 flex-col gap-0 overflow-hidden border p-0 shadow-[var(--shadow-dropdown)]",
           // 14px corners, including the shared dialog's responsive breakpoint.
-          "rounded-[calc(var(--radius-lg)+var(--radius-md))] sm:rounded-[calc(var(--radius-lg)+var(--radius-md))]",
+          "rounded-xl sm:rounded-xl",
           "bg-bg2/30 backdrop-blur-[28px] backdrop-saturate-[1.2]",
           // Translate and zoom stay separate so the panel remains centered.
-          "origin-center duration-200 ease-out data-[state=closed]:duration-150 data-[state=closed]:ease-in",
+          "origin-center duration-slow ease-out data-[state=closed]:duration-base data-[state=closed]:ease-in",
           "data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=open]:fade-in-0 data-[state=closed]:fade-out-0 data-[state=open]:zoom-in-97 data-[state=closed]:zoom-out-97",
           className,
         )}

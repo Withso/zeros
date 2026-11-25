@@ -418,7 +418,7 @@ export function BrowserDeviceToolbar({
       </Tooltip>
 
       <DropdownMenu>
-        <Tooltip label="Zoom" delayDuration={1500}>
+        <Tooltip label="Zoom">
           <DropdownMenuTrigger asChild>
             <Button
               variant="ghost"

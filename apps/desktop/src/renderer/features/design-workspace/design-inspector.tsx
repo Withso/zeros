@@ -3765,7 +3765,7 @@ export const DesignInspector = React.memo(function DesignInspector({
         data-design-inspector-header=""
         data-design-selection-type={selectionName}
         data-design-component-of={componentHeader ? componentHeader.slot !== null ? "slot" : componentHeader.part ? "part" : "instance" : undefined}
-        className="flex h-9 min-w-0 items-center gap-2 pr-1.5 pl-3"
+        className="flex h-10 min-w-0 items-center gap-2 pr-1.5 pl-3"
       >
         {selectionName === "Page" && workspaceId && pages?.length ? (
           <DesignPagePicker workspaceId={workspaceId} directoryId={previewDirectoryId} pages={pages}

@@ -42,8 +42,8 @@
   font-size: 13px;
   font-variant-numeric: tabular-nums;
   transition:
-    background-color 120ms ease-out,
-    box-shadow 120ms ease-out;
+    background-color var(--duration-fast) ease-out,
+    box-shadow var(--duration-fast) ease-out;
 }
 
 .zd-field:hover {
@@ -170,8 +170,8 @@
   font-size: 13px;
   white-space: nowrap;
   transition:
-    background-color 120ms ease-out,
-    color 120ms ease-out;
+    background-color var(--duration-fast) ease-out,
+    color var(--duration-fast) ease-out;
 }
 
 .zd-segment svg {
@@ -216,8 +216,8 @@
   background: transparent;
   color: var(--fg2);
   transition:
-    background-color 120ms ease-out,
-    color 120ms ease-out;
+    background-color var(--duration-fast) ease-out,
+    color var(--duration-fast) ease-out;
 }
 
 /* The shared IconButton sizes: compact 24 and inline 20 carry a 12px glyph,
@@ -282,7 +282,7 @@
 
 .zd-section-header {
   display: flex;
-  height: 36px;
+  height: 40px;
   min-width: 0;
   align-items: center;
   gap: 2px;
@@ -387,8 +387,8 @@
   flex: 1 1 auto;
   overflow: hidden;
   color: var(--fg1);
-  font-size: 13px;
-  font-weight: var(--weight-medium);
+  font-size: 14px;
+  font-weight: var(--weight-semibold);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -695,7 +695,7 @@
     var(--zd-field-fill) 55%,
     transparent
   );
-  transition: opacity 120ms ease-out;
+  transition: opacity var(--duration-fast) ease-out;
 }
 
 .zd-inspector-field:hover .zd-field-motion,
@@ -727,8 +727,8 @@
     transparent
   );
   transition:
-    opacity 120ms ease-out,
-    visibility 0s linear 120ms;
+    opacity var(--duration-fast) ease-out,
+    visibility 0s linear var(--duration-fast);
 }
 
 /* Only the button takes the pointer; the fade still lets a press reach the
@@ -837,7 +837,7 @@
   height: 36px;
   gap: 2px;
   padding: calc(var(--spacing) * 0.75);
-  border-radius: calc(var(--radius-md) + 4px);
+  border-radius: var(--radius-xl);
 }
 
 .zd-canvas-toolbar-divider {
@@ -866,7 +866,7 @@
   top: 8px;
   bottom: 8px;
   flex-direction: column;
-  transition: bottom 160ms ease-out;
+  transition: bottom var(--duration-slow) ease-out;
 }
 
 .zd-design-tools-rail::before,
@@ -898,8 +898,8 @@
   font-size: 13px;
   font-weight: var(--weight-medium);
   transition:
-    background-color 120ms ease-out,
-    color 120ms ease-out;
+    background-color var(--duration-fast) ease-out,
+    color var(--duration-fast) ease-out;
 }
 
 .zd-design-directory-trigger > svg {
@@ -940,9 +940,9 @@
   height: 36px;
   gap: 2px;
   padding: calc(var(--spacing) * 0.75);
-  border-radius: calc(var(--radius-md) + 4px);
+  border-radius: var(--radius-xl);
   transform: translateX(-50%);
-  transition: bottom 160ms ease-out;
+  transition: bottom var(--duration-slow) ease-out;
 }
 
 .zd-design-agent-activity[data-motion-open] {
@@ -1008,13 +1008,13 @@
   align-items: center;
   justify-content: center;
   border: 1px solid transparent;
-  border-radius: var(--radius-md);
+  border-radius: var(--radius-lg);
   background: transparent;
   color: var(--fg2);
   transition:
-    background-color 120ms ease-out,
-    border-color 120ms ease-out,
-    color 120ms ease-out;
+    background-color var(--duration-fast) ease-out,
+    border-color var(--duration-fast) ease-out,
+    color var(--duration-fast) ease-out;
 }
 
 .zd-canvas-tool svg {

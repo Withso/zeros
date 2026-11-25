@@ -97,13 +97,13 @@ function ServerRow({
         </span>
         <Stack gap={0.5} className="min-w-0 flex-1">
           <span className="text-fg1 truncate text-xs">{title}</span>
-          <span className="text-fg3 truncate text-2xxs" title={detailTitle}>
+          <span className="text-fg3 truncate text-3xxs" title={detailTitle}>
             {detail}
           </span>
         </Stack>
         <Inline gap={1.5} align="center" className="shrink-0">
           <span className={DOT_CLASSES[tone]} aria-hidden />
-          <span className="text-fg3 text-2xxs">{statusLabel}</span>
+          <span className="text-fg3 text-3xxs">{statusLabel}</span>
         </Inline>
       </Tile>
     </li>

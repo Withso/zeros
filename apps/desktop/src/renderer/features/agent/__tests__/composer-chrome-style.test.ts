@@ -136,13 +136,13 @@ describe("composer chrome", () => {
 
   it("gives Create, workspace and edit composers 18px corners without changing sent messages", () => {
     expect(code("../composer-shell.tsx")).toContain(
-      'export const COMPOSER_SURFACE_RADIUS = "rounded-[18px]"',
+      'export const COMPOSER_SURFACE_RADIUS = "rounded-2xl"',
     );
     expect(code("../agent-chat.tsx")).toContain("COMPOSER_SURFACE_RADIUS");
     expect(code("../../../shell/dispatcher/dispatcher-composer.tsx")).toContain("COMPOSER_SURFACE_RADIUS");
     expect(code("../composer-pills.tsx")).toContain('rx="17.5"');
     expect(code("../composer-shell.tsx")).toContain(
-      'export const PROMPT_SURFACE_RADIUS = "rounded-[calc(var(--radius-lg)*1.5)]"',
+      'export const PROMPT_SURFACE_RADIUS = "rounded-xl"',
     );
     expect(code("../turn-container.tsx")).toContain("PROMPT_SURFACE_RADIUS");
   });

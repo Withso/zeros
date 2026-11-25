@@ -47,7 +47,7 @@ export interface CheckboxProps {
  *  white mark when on. Keyboard focus is a 1px accent line one pixel off the
  *  box, so it still shows around the accent fill. */
 const BOX =
-  "peer-focus-visible:outline-accent grid size-4 shrink-0 place-items-center rounded-sm border transition-[background-color,border-color] duration-120 ease-out peer-focus-visible:outline-1 peer-focus-visible:outline-offset-1";
+  "peer-focus-visible:outline-accent grid size-4 shrink-0 place-items-center rounded-sm border transition-[background-color,border-color] duration-fast ease-out peer-focus-visible:outline-1 peer-focus-visible:outline-offset-1";
 
 export function Checkbox({
   checked,

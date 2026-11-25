@@ -513,7 +513,7 @@ function AnnotationColorMenu({
 }) {
   return (
     <DropdownMenu>
-      <Tooltip label="Color" delayDuration={1500}>
+      <Tooltip label="Color">
         <DropdownMenuTrigger asChild>
           <IconButton label={`Color: ${COLORS[color].label}`} disabled={disabled}>
             <span aria-hidden className={cn("size-3 rounded-full", COLORS[color].swatch)} />

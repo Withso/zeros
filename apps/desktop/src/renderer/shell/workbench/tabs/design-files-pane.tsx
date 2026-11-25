@@ -59,7 +59,7 @@ export const DESIGN_PANE_HEADER_HEIGHT = 32;
 /** The section's top rule, part of its box. */
 const DESIGN_PANE_BORDER = 1;
 /** The open/close slide. Short and decelerating: a reveal, not a bounce. Must
- *  match the section's `duration-200` class; the settle timer below is the
+ *  match the section's `duration-slow` class; the settle timer below is the
  *  fallback for when no transitionend arrives (reduced motion, a hidden tab). */
 export const DESIGN_PANE_SLIDE_MS = 200;
 /** Air between the header and the first row. The header already separates the
@@ -241,7 +241,7 @@ export function DesignFilesPane({
       // flex column with a definite height, so the percentage resolves;
       // `shrink-0` keeps the code tree above from squeezing it, and
       // `overflow-hidden` is what clips the tree during the slide.
-      className="border-border1 flex shrink-0 flex-col overflow-hidden border-t transition-[height] duration-200 ease-out motion-reduce:transition-none"
+      className="border-border1 flex shrink-0 flex-col overflow-hidden border-t transition-[height] duration-slow ease-out motion-reduce:transition-none"
       style={{
         height: collapsed
           ? DESIGN_PANE_HEADER_HEIGHT + DESIGN_PANE_BORDER
@@ -255,7 +255,7 @@ export function DesignFilesPane({
         aria-expanded={!collapsed}
         onClick={toggle}
         // `group` so the collapsed chevron can key off the header's hover.
-        className="group text-fg2 hover:bg-bg1-hover hover:text-fg1 flex w-full shrink-0 items-center gap-1 px-2.5 text-left text-xs font-medium transition-colors duration-120 ease-out"
+        className="group text-fg2 hover:bg-bg1-hover hover:text-fg1 flex w-full shrink-0 items-center gap-1 px-2.5 text-left text-xs font-medium transition-colors duration-fast ease-out"
         style={{ height: DESIGN_PANE_HEADER_HEIGHT }}
       >
         <span className="truncate">{DESIGN_FILES_LABEL}</span>
@@ -264,7 +264,7 @@ export function DesignFilesPane({
             a plain footer label and the affordance appears only on hover or
             keyboard focus — it is still in the DOM for the hit target. */}
         {collapsed ? (
-          <ChevronRight className="size-3.5 shrink-0 opacity-0 transition-opacity duration-120 ease-out group-hover:opacity-100 group-focus-visible:opacity-100" />
+          <ChevronRight className="size-3.5 shrink-0 opacity-0 transition-opacity duration-fast ease-out group-hover:opacity-100 group-focus-visible:opacity-100" />
         ) : (
           <ChevronDown className="size-3.5 shrink-0" />
         )}
@@ -276,7 +276,7 @@ export function DesignFilesPane({
         // the slide; hidden (not unmounted — see the header note) only once a
         // collapse has settled.
         className={cn(
-          "min-h-0 flex-1 transition-opacity duration-200 ease-out motion-reduce:transition-none",
+          "min-h-0 flex-1 transition-opacity duration-slow ease-out motion-reduce:transition-none",
           collapsed ? "opacity-0" : "opacity-100",
           collapsed && settled && "hidden",
         )}

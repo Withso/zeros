@@ -167,7 +167,7 @@ const TRADEMARKS: Record<SimulatorPlatform, string> = {
 };
 
 function TrademarkNote({ platform }: { platform: SimulatorPlatform }) {
-  return <p className="text-fg3 text-xxs m-0">{TRADEMARKS[platform]}</p>;
+  return <p className="text-fg3 text-3xxs m-0">{TRADEMARKS[platform]}</p>;
 }
 
 /** What a Simulator tab shows before a device is attached: what's installed,

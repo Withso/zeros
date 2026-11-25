@@ -453,7 +453,7 @@ export function FilesToCopySection({
                   {summaryLead(copyCount)}
                 </span>{" "}
                 will be copied from{" "}
-                <span className="text-accent-text text-2xxs font-mono">
+                <span className="text-accent-text text-3xxs font-mono">
                   {preview.rootPath}
                 </span>
               </>
@@ -496,7 +496,7 @@ export function FilesToCopySection({
       {/* Read-only patterns for the committed-file case. The list above is the
           answer either way; these are the lines that produced it. */}
       {readOnly && preview?.sourceText !== undefined && (
-        <pre className="bg-bg1-raised text-fg2 text-2xxs m-0 max-h-64 select-text overflow-auto rounded-md px-3 py-2 font-mono leading-relaxed">
+        <pre className="bg-bg1-raised text-fg2 text-3xxs m-0 max-h-64 select-text overflow-auto rounded-md px-3 py-2 font-mono leading-relaxed">
           {preview.sourceText}
         </pre>
       )}
@@ -605,7 +605,7 @@ export const TreeRowView = memo(function TreeRowView({
   const expand = useCallback(() => onExpand(path), [onExpand, path]);
   const indent = DEPTH_INDENT[Math.min(depth, DEPTH_INDENT.length - 1)];
   const text = cn(
-    "min-w-0 truncate font-mono text-2xxs",
+    "min-w-0 truncate font-mono text-3xxs",
     checked === false ? "text-fg3" : "text-fg1",
     locked && "opacity-55",
   );

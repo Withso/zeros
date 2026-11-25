@@ -150,7 +150,7 @@ export function TurnUsageCard({
             <dt className="text-fg2">
               Total cost{" "}
               {details.estimated && (
-                <span className="text-fg2 text-2xxs">· Estimated</span>
+                <span className="text-fg2 text-3xxs">· Estimated</span>
               )}
             </dt>
             <dd className="text-fg1 tabular-nums">{details.cost}</dd>

@@ -286,7 +286,7 @@ const FLOAT_RESIZE_HANDLES: readonly {
   { handle: "bottom-left", cursor: "nesw-resize", className: "-bottom-1 -left-1 size-3 cursor-nesw-resize" },
 ];
 
-const FLOAT_ISLAND_HIDDEN = "pointer-events-none opacity-0 transition-opacity duration-150";
+const FLOAT_ISLAND_HIDDEN = "pointer-events-none opacity-0 transition-opacity duration-base";
 // Focus inside the islands reveals them; focus inside the page does not.
 const FLOAT_ISLAND_REVEAL =
   "group-hover:pointer-events-auto group-hover:opacity-100 group-focus-within/float-islands:pointer-events-auto group-focus-within/float-islands:opacity-100";
@@ -411,7 +411,7 @@ function BrowserFloatBox({
                 reveal,
               )}
             >
-              <span className="text-2xxs min-w-0 truncate">{title}</span>
+              <span className="text-3xxs min-w-0 truncate">{title}</span>
             </div>
           </Tooltip>
         )}

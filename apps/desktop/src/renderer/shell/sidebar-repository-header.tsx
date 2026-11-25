@@ -74,7 +74,7 @@ const REPOSITORY_TOGGLE_CLS =
 // Row actions: 24px squares inside the 32px row with the shared icon-button
 // hover (selected-bg), ending 12px in like every trailing control.
 export const SIDEBAR_ROW_ACTION_CLS =
-  "inline-flex size-6 shrink-0 items-center justify-center rounded-md text-fg2 outline-none transition-[background-color,color] duration-120 ease-out hover:bg-selected-bg hover:text-fg1 focus-visible:ring-1 focus-visible:ring-accent data-[state=open]:bg-selected-bg data-[state=open]:text-fg1 [&_svg]:size-3.5";
+  "inline-flex size-6 shrink-0 items-center justify-center rounded-md text-fg2 outline-none transition-[background-color,color] duration-fast ease-out hover:bg-selected-bg hover:text-fg1 focus-visible:ring-1 focus-visible:ring-accent data-[state=open]:bg-selected-bg data-[state=open]:text-fg1 [&_svg]:size-3.5";
 // A pointer-placed context menu can leave a trailing click on the row it
 // covered. Swallow a toggle that lands in that brief aftermath (the same guard
 // WorkspaceContextMenu applies to workspace rows).

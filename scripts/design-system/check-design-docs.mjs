@@ -34,7 +34,7 @@ export const CHECKED_DOCS = [
 export const COUNTEREXAMPLES = new Set([
   "text-error",
   "bg-sidebar",
-  "rounded-xl",
+  "rounded-3xl",
   "bg-gray-500",
   "text-white",
 ]);

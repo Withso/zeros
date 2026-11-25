@@ -694,13 +694,13 @@ export const ResourceMonitor = memo(function ResourceMonitor() {
   return (
     <div className="flex h-full shrink-0 items-center">
       <Popover open={open} onOpenChange={setOpen}>
-        <Tooltip label={triggerLabel} side="bottom" delayDuration={1500} disabled={open}>
+        <Tooltip label={triggerLabel} side="bottom" disabled={open}>
           <PopoverTrigger asChild>
             <Button
               type="button"
               variant="ghost"
               size="sm"
-              className="h-6 shrink-0 gap-1 rounded-md border-border2 px-1.5 text-2xxs text-fg2 hover:bg-(--surface-hover) hover:text-fg1 data-[active=true]:bg-(--surface-hover) data-[active=true]:text-fg1 [&_svg]:size-3"
+              className="h-6 shrink-0 gap-1 rounded-md border-border2 px-1.5 text-3xxs text-fg2 hover:bg-(--surface-hover) hover:text-fg1 data-[active=true]:bg-(--surface-hover) data-[active=true]:text-fg1 [&_svg]:size-3"
               data-active={open}
               aria-label="App resources"
               aria-expanded={open}

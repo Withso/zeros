@@ -73,7 +73,7 @@ const SKIP_DIRS = new Set([
 const ALLOWED_FONT_SIZES_PX = new Set([
   8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 20,
 ]);
-const ALLOWED_RADII_PX = new Set([0, 4, 6, 8, 12]);
+const ALLOWED_RADII_PX = new Set([0, 4, 6, 8, 12, 18]);
 // Spacing scale for hand-written CSS — the same px steps the Tailwind spacing
 // utilities produce (0.5 → 2px … 12 → 48px), see agents/skills/zeros-ui.md.
 // 1px is also allowed for column seams and dividers.

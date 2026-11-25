@@ -15,9 +15,6 @@
       "apps/desktop/src/renderer/features/agent/composer-pills.tsx": {
         "z-[3]": 1
       },
-      "apps/desktop/src/renderer/features/agent/composer-shell.tsx": {
-        "rounded-[18px]": 1
-      },
       "apps/desktop/src/renderer/features/agent/question-card.tsx": {
         "rounded-[3px]": 1
       },

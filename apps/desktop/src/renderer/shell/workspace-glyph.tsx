@@ -87,7 +87,7 @@ export function WorkspaceGlyph({ seed, working = false, pr = null, size = 16, cl
       // Depth while it works: three close tones of the same colour.
       shaded
       className={cn(
-        "transition-colors duration-200",
+        "transition-colors duration-slow",
         pr ? PR_TONE_CLS[pr] : working ? "text-fg2" : "text-fg3",
         className,
       )}

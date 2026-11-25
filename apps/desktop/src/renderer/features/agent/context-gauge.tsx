@@ -55,7 +55,7 @@ export function formatTokens(n: number): string {
 function ServerRow({ server }: { server: ContextGaugeServer }) {
   return (
     <div className="text-fg2 flex items-center justify-between gap-2 px-1.5 py-1 text-xs leading-4.5">
-      <Tooltip label={server.name} delayDuration={1500}>
+      <Tooltip label={server.name}>
         <span className="min-w-0 truncate">{server.name}</span>
       </Tooltip>
       <span className="shrink-0 font-mono tabular-nums">
@@ -156,7 +156,7 @@ function Ring({
           strokeLinecap="round"
           strokeDasharray={`${clamped * CIRCUMFERENCE} ${CIRCUMFERENCE}`}
           className={cn(
-            "transition-[stroke-dasharray] duration-200 ease-out",
+            "transition-[stroke-dasharray] duration-slow ease-out",
             critical ? "stroke-red-text" : "stroke-fg2",
           )}
         />
@@ -204,7 +204,7 @@ export const ContextGauge = memo(function ContextGauge({
 
   return (
     <Popover>
-      <Tooltip label={tooltip} delayDuration={1500}>
+      <Tooltip label={tooltip}>
         <PopoverTrigger asChild>
           <button
             type="button"
@@ -232,7 +232,7 @@ export const ContextGauge = memo(function ContextGauge({
             </div>
             <div className="bg-bg4 mt-2.5 h-1.5 overflow-hidden rounded-full">
               <div
-                className="bg-fg1 h-full rounded-full transition-[width] duration-200 ease-out"
+                className="bg-fg1 h-full rounded-full transition-[width] duration-slow ease-out"
                 style={{ width: `${Math.min(100, fraction * 100)}%` }}
               />
             </div>

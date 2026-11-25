@@ -12,7 +12,7 @@ export interface ListRowProps extends React.ButtonHTMLAttributes<HTMLButtonEleme
 }
 
 const LIST_ROW_FOCUS =
-  "hover:bg-bg1-hover focus-visible:inset-ring focus-visible:inset-ring-accent text-left transition-colors duration-120 ease-out focus-visible:outline-none";
+  "hover:bg-bg1-hover focus-visible:inset-ring focus-visible:inset-ring-accent text-left transition-colors duration-fast ease-out focus-visible:outline-none";
 
 const LIST_ROW_SHAPES = {
   inline: "-ml-2 flex min-h-7 w-fit max-w-full items-center gap-2 rounded-md px-2 py-1",
@@ -77,7 +77,7 @@ const ListRowGroup = React.forwardRef<HTMLDivElement, ListRowGroupProps>(
       {...props}
       ref={ref}
       className={cn(
-        "-ml-2 flex min-h-7 w-fit max-w-full min-w-0 items-center gap-2 rounded-md px-2 py-1 transition-colors duration-120 ease-out",
+        "-ml-2 flex min-h-7 w-fit max-w-full min-w-0 items-center gap-2 rounded-md px-2 py-1 transition-colors duration-fast ease-out",
         interactive && "hover:bg-bg1-hover cursor-pointer",
         interactive && GROUP_FOCUS,
         className,

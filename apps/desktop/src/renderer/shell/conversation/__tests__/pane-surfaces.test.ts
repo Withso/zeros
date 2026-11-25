@@ -77,7 +77,7 @@ describe("split pane surfaces", () => {
     expect(pane).toContain('"relative flex min-h-0 min-w-0 flex-1 flex-col bg-(--pane-bg) outline-none"');
     expect(pane).not.toContain("[--pane-bg:");
     expect(pane).not.toContain("bg1-raised");
-    expect(pane).toContain('split && "*:transition-opacity *:duration-120 *:ease-out motion-reduce:*:transition-none"');
+    expect(pane).toContain('split && "*:transition-opacity *:duration-fast *:ease-out motion-reduce:*:transition-none"');
     expect(pane).toContain('split && !isFocused && "*:opacity-80"');
     expect(pane).not.toMatch(/(?<!\*:)opacity-80/);
   });

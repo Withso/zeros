@@ -528,7 +528,7 @@ export function PermRow({
       // for pointer and focus, and the Enter default highlighted at rest.
       // Label left, its shortcut as an 18px keycap right.
       className={cn(
-        "hover:bg-bg1-raised-hover focus-visible:bg-bg1-raised-hover disabled:pointer-events-none disabled:opacity-50 flex min-h-8 w-full items-center justify-between gap-3 rounded-lg px-2 py-1.5 text-left transition-colors duration-120 ease-out focus-visible:outline-none",
+        "hover:bg-bg1-raised-hover focus-visible:bg-bg1-raised-hover disabled:pointer-events-none disabled:opacity-50 flex min-h-8 w-full items-center justify-between gap-3 rounded-lg px-2 py-1.5 text-left transition-colors duration-fast ease-out focus-visible:outline-none",
         hint === "↵" && "bg-bg1-raised-hover",
         explicitFocus && "focus:bg-bg1-raised-hover",
       )}

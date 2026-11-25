@@ -31,7 +31,7 @@ export const MarkdownCodeBlock = memo(function MarkdownCodeBlock({
 
   return (
     <div className="zeros-md-codeblock group/md-code border-border2 bg-bg2 relative overflow-hidden rounded-lg border">
-      <div className="absolute top-2 right-2 z-10 opacity-0 transition-opacity duration-150 group-hover/md-code:opacity-100 focus-within:opacity-100">
+      <div className="absolute top-2 right-2 z-10 opacity-0 transition-opacity duration-base group-hover/md-code:opacity-100 focus-within:opacity-100">
         <CodeBlockCopyButton
           text={body}
           className="bg-bg2/70 hover:bg-bg2-hover backdrop-blur-sm"

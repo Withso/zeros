@@ -142,7 +142,7 @@ const LABEL_TONE: Record<PrIslandTone, string> = {
 // "View PR ↗" chip — a quiet per-tone outline (muted ramp shades via the
 // --pr-status-chip-border-* semantics), constant across every state.
 const CHIP_BASE =
-  "inline-flex shrink-0 items-center gap-0.5 rounded-sm border px-1.5 py-0.5 text-xs tabular-nums transition-colors duration-120 ease-out";
+  "inline-flex shrink-0 items-center gap-0.5 rounded-sm border px-1.5 py-0.5 text-xs tabular-nums transition-colors duration-fast ease-out";
 const CHIP_TONE: Record<PrIslandTone, string> = {
   neutral: SUCCESS_CHIP,
   warning: WARNING_CHIP,
@@ -177,7 +177,7 @@ const ACTION_ICON: Partial<
 // disabled (e.g. the agent-working gate); the `disabled` attribute alone
 // already blocks clicks. `disabled:opacity-50` doubles as the in-flight dim.
 const BTN_BASE =
-  "inline-flex h-7 shrink-0 items-center gap-1.5 rounded-sm px-2.5 text-xs font-medium transition-colors duration-120 ease-out disabled:opacity-50";
+  "inline-flex h-7 shrink-0 items-center gap-1.5 rounded-sm px-2.5 text-xs font-medium transition-colors duration-fast ease-out disabled:opacity-50";
 
 /** Per-variant, tone-aware button chrome. Open-PR secondary buttons use the
  *  filled theme-adaptive action treatment

@@ -23,7 +23,7 @@ describe("Toolbar chrome", () => {
     expect(set).toContain("bg-bg2");
     expect(set).toContain("gap-0.5");
     expect(set).toContain("p-[calc(var(--spacing)*0.75)]");
-    expect(set).toContain("rounded-[calc(var(--radius-md)+var(--spacing))]");
+    expect(set).toContain("rounded-xl");
   });
 
   it("lifts with the dropdown shadow when floating and none when docked", () => {

@@ -42,7 +42,7 @@ describe("AgentControlBar", () => {
     const classes = rootClasses(render());
     expect(classes).toContain("shadow-[var(--shadow-dropdown)]");
     expect(classes).not.toContain("shadow-[var(--shadow-xl)]");
-    expect(classes).toContain("rounded-[calc(var(--radius-md)+var(--spacing))]");
+    expect(classes).toContain("rounded-xl");
   });
 
   it("omits the detail and Esc hint when they do not apply", () => {
@@ -56,7 +56,7 @@ describe("AgentControlBar", () => {
     for (const variant of ["pill", "strip"] as const) {
       const shown = rootClasses(render({ variant, visible: true }));
       expect(shown).toContain("opacity-100");
-      expect(shown).toContain("duration-120");
+      expect(shown).toContain("duration-fast");
       expect(shown).toContain("motion-reduce:transition-none");
       expect(shown).not.toContain("pointer-events-none");
       const hidden = rootClasses(render({ variant, visible: false }));

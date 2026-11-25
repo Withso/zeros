@@ -135,7 +135,7 @@ export function AgentsTab({ active, scope }: { tab: WorkbenchTab; active: boolea
           if (rows.length === 0 && nativeRows.length === 0) return null;
           return (
             <section key={group.id} aria-label={group.label} className="pb-2" data-agents-group={group.id}>
-              <h3 className="text-fg3 px-3 pb-1 text-xxs font-medium">{group.label} · {rows.length + nativeRows.length}</h3>
+              <h3 className="text-fg3 px-3 pb-1 text-3xxs font-medium">{group.label} · {rows.length + nativeRows.length}</h3>
               {rows.map((chat) => (
                 <SessionListRow
                   key={chat.id}
@@ -152,7 +152,7 @@ export function AgentsTab({ active, scope }: { tab: WorkbenchTab; active: boolea
         })}
         {terminals.length > 0 && (
           <section aria-label="Terminal agents" className="pb-2" data-agents-group="terminals">
-            <h3 className="text-fg3 px-3 pb-1 text-xxs font-medium">Terminal agents · {terminals.length}</h3>
+            <h3 className="text-fg3 px-3 pb-1 text-3xxs font-medium">Terminal agents · {terminals.length}</h3>
             {terminals.map((chat) => (
               <SessionListRow key={chat.id} chat={chat} folder={folder} status="idle" active={chat.id === activeId} onSelect={select} />
             ))}

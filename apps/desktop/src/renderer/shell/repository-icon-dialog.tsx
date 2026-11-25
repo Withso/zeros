@@ -306,7 +306,7 @@ export function RepositoryIconDialog({
                       : automaticRepositoryIconLabel(automatic.source)}
                 </span>
                 {!plainFolder && automatic.source?.kind === "repository-file" && (
-                  <code className="text-fg3 text-2xxs mt-2 max-w-full truncate">
+                  <code className="text-fg3 text-3xxs mt-2 max-w-full truncate">
                     {automatic.source.path}
                   </code>
                 )}

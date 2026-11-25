@@ -715,7 +715,7 @@ function NativeAgentBrowserTab({ tab, active, scope }: BrowserTabProps) {
   return (
     <div className="bg-bg1 flex min-h-0 flex-1 flex-col overflow-hidden">
       <WorkbenchTabToolbar>
-        <PanelHeader size="window" className="h-9 px-1.5">
+        <PanelHeader size="window" className="px-1.5">
           <IconButton
             size="standard"
             disabled={
@@ -2402,7 +2402,7 @@ function BrowserChrome({
   );
 
   return (
-    <PanelHeader size="window" className="h-9 px-1.5">
+    <PanelHeader size="window" className="px-1.5">
       <IconButton
         size="standard"
         disabled={!state.canGoBack}
@@ -2553,7 +2553,7 @@ function BrowserChrome({
             Open separate preview window
           </DropdownMenuItem>
           {electron && windowUnavailable !== null && (
-            <DropdownMenuLabel className="text-fg3 text-2xxs pt-0 font-normal">
+            <DropdownMenuLabel className="text-fg3 text-3xxs pt-0 font-normal">
               {windowUnavailable}
             </DropdownMenuLabel>
           )}
@@ -2655,7 +2655,7 @@ function CanvasHeightIndicator({
   const visible = isResizing || !isDefault;
   return (
     <div
-      className="absolute top-full left-1/2 z-10 mt-3 flex -translate-x-1/2 items-center gap-2 transition-opacity duration-150"
+      className="absolute top-full left-1/2 z-10 mt-3 flex -translate-x-1/2 items-center gap-2 transition-opacity duration-base"
       style={{
         opacity: visible ? 1 : 0,
         pointerEvents: visible ? "auto" : "none",

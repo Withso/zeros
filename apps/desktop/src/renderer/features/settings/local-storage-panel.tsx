@@ -34,7 +34,7 @@ import {
 import { SettingsGroup, SettingsRow } from "./settings-ui";
 
 const HINT_CLS = "text-fg3 m-0 px-0.5 text-3xxs leading-4";
-const AT_LEAST_CLS = "text-fg3 block text-2xxs leading-3.5";
+const AT_LEAST_CLS = "text-fg3 block text-3xxs leading-3.5";
 
 // Neutral steps from the token ramp; the legend and rows carry the meaning.
 const SEGMENT_CLS: Record<SummaryGroup, string> = {
@@ -156,7 +156,7 @@ function Summary({ view, now, active }: { view: LocalStorageView; now: number; a
               <span
                 key={group.id}
                 data-group={group.id}
-                className={cn(SEGMENT_CLS[group.id], "block h-full min-w-0.75 transition-[flex-grow] duration-200 ease-out motion-reduce:transition-none")}
+                className={cn(SEGMENT_CLS[group.id], "block h-full min-w-0.75 transition-[flex-grow] duration-slow ease-out motion-reduce:transition-none")}
                 style={{ flexGrow: group.bytes, flexBasis: 0 }}
               />
             ) : null,
@@ -187,7 +187,7 @@ function StorageRow({
 }) {
   const Icon = spec.icon;
   const hint = spec.showsLocation ? (
-    <span className="text-fg3 block truncate font-mono text-2xxs">{category?.location ?? " "}</span>
+    <span className="text-fg3 block truncate font-mono text-3xxs">{category?.location ?? " "}</span>
   ) : (
     spec.description
   );

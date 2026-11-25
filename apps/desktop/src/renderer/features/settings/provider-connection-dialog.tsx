@@ -76,7 +76,7 @@ export function ProviderConnectionDialog({
             {methods.map((entry) => (
               <section
                 key={entry.id}
-                className="border-border1 min-w-0 overflow-hidden rounded-[calc(var(--radius-lg)*1.5)] border"
+                className="border-border1 min-w-0 overflow-hidden rounded-xl border"
               >
                 <Button
                   variant="ghost"

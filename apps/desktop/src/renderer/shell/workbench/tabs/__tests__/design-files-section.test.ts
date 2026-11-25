@@ -412,9 +412,9 @@ describe("Files tab wiring", () => {
     // clips the tree meanwhile and the body fades with it. Hiding before the
     // slide ends would make the tree vanish on the first frame of a collapse.
     expect(pane).toMatch(
-      /overflow-hidden border-t transition-\[height\] duration-200 ease-out motion-reduce:transition-none/,
+      /overflow-hidden border-t transition-\[height\] duration-slow ease-out motion-reduce:transition-none/,
     );
-    expect(pane).toMatch(/transition-opacity duration-200/);
+    expect(pane).toMatch(/transition-opacity duration-slow/);
     expect(pane).toMatch(/onTransitionEnd=\{onTransitionEnd\}/);
     expect(pane).toMatch(/event\.propertyName !== "height"/);
     // Fallback for when no transitionend arrives (reduced motion, hidden tab).

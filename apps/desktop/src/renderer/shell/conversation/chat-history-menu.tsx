@@ -47,7 +47,7 @@ export function ChatHistoryMenu({
         if (open) setNow(Date.now());
       }}
     >
-      <Tooltip label="Chat history" delayDuration={1500}>
+      <Tooltip label="Chat history">
         <DropdownMenuTrigger asChild>
           <IconButton
             size="standard"

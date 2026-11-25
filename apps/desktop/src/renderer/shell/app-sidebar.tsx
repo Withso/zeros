@@ -202,7 +202,7 @@ import { initialsOf } from "@/renderer/shared/lib/initials";
 // 8px padding, no border); selection lifts them to fg2. Rows never shift
 // width. `[&_svg]:` beats the primitive's own icon size through twMerge.
 const SIDEBAR_ENTRY_CLS =
-  "flex h-8 w-full min-w-0 items-center justify-start gap-2 rounded-md border-0 bg-transparent px-2 py-0 text-left text-xs leading-4.5 font-normal text-fg2 transition-colors duration-120 ease-out hover:bg-(--surface-hover) hover:text-fg1 data-[state=active]:bg-selected-bg data-[state=active]:text-fg1 data-[state=active]:hover:bg-selected-bg [&_svg]:size-3.5 [&>svg]:shrink-0 [&>svg]:text-fg3 data-[state=active]:[&>svg]:text-fg2";
+  "flex h-8 w-full min-w-0 items-center justify-start gap-2 rounded-md border-0 bg-transparent px-2 py-0 text-left text-xs leading-4.5 font-normal text-fg2 transition-colors duration-fast ease-out hover:bg-(--surface-hover) hover:text-fg1 data-[state=active]:bg-selected-bg data-[state=active]:text-fg1 data-[state=active]:hover:bg-selected-bg [&_svg]:size-3.5 [&>svg]:shrink-0 [&>svg]:text-fg3 data-[state=active]:[&>svg]:text-fg2";
 // The list's section label: 12/16 medium on fg3, like Settings' group labels.
 const SECTION_LABEL_CLS = "select-none truncate text-3xxs leading-4 font-medium text-fg3";
 // The sidebar never squeezes the workspace below its column floors

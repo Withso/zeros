@@ -7,7 +7,7 @@ import { cn } from "@/renderer/shared/ui/cn";
 // side padding and a border3 edge that lifts to border4 on hover, so a value
 // lines up between an Input and a Select above or below it.
 export const FIELD_BOX =
-  "rounded-md border border-border3 bg-transparent text-xs leading-4.5 text-fg1 transition-[color,background-color,border-color,box-shadow] duration-120 ease-out hover:border-border4 disabled:cursor-not-allowed disabled:opacity-50";
+  "rounded-md border border-border3 bg-transparent text-xs leading-4.5 text-fg1 transition-[color,background-color,border-color,box-shadow] duration-fast ease-out hover:border-border4 disabled:cursor-not-allowed disabled:opacity-50";
 
 // The accent border is for keyboard focus only: the focus tracker marks focus that Tab
 // or arrow navigation brought. A click or typing changes nothing; the caret

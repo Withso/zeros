@@ -45,7 +45,7 @@ export function DashboardRepositoryIcon({
   return (
     <span
       className={cn(
-        "bg-bg2-hover text-fg2 text-xxs inline-flex shrink-0 items-center justify-center overflow-hidden leading-none font-medium",
+        "bg-bg2-hover text-fg2 text-2xxs inline-flex shrink-0 items-center justify-center overflow-hidden leading-none font-medium",
         round ? "size-4.5 rounded-full" : "size-5",
         !round && (pill ? "rounded-md" : "rounded-sm"),
       )}

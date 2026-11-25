@@ -542,7 +542,7 @@ export const CheckpointRail = memo(function CheckpointRail({
               {/* Active state is color only; every tick has the same width. */}
               <span
                 className={cn(
-                  "h-0.5 w-3 rounded-full transition-colors duration-200 ease-out",
+                  "h-0.5 w-3 rounded-full transition-colors duration-slow ease-out",
                   i === activeIndex
                     ? "bg-fg1"
                     : "bg-fg3/45 group-hover/rail:bg-fg3/70",
@@ -583,7 +583,7 @@ export const CheckpointRail = memo(function CheckpointRail({
             <span
               aria-hidden="true"
               className={cn(
-                "h-0.5 w-3 flex-none rounded-full transition-colors duration-200 ease-out",
+                "h-0.5 w-3 flex-none rounded-full transition-colors duration-slow ease-out",
                 i === activeIndex ? "bg-fg1" : "bg-fg3/45",
               )}
             />

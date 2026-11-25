@@ -41,7 +41,7 @@ export function CanvasKnobHandles({
   const sideClass =
     "group absolute flex items-center justify-center bg-transparent pointer-events-auto";
   const barBase =
-    "rounded-full pointer-events-none transition-[background,transform] duration-150 ease-out";
+    "rounded-full pointer-events-none transition-[background,transform] duration-base ease-out";
 
   const verticalVisual = (axis: CanvasKnobAxis) => {
     const active = activeAxis === axis;

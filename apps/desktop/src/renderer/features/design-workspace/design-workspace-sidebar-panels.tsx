@@ -1383,7 +1383,7 @@ function OwnedDesignWorkspaceSidebarPanels({
       className="bg-bg1 flex min-h-0 flex-1 flex-col overflow-hidden text-xs"
       aria-labelledby={headingId}
     >
-      <div className="flex h-9 shrink-0 items-center gap-2 pr-2 pl-3">
+      <div className="flex h-10 shrink-0 items-center gap-2 pr-1.5 pl-3">
         <h2 id={headingId} className="text-fg1 flex min-w-0 flex-1 text-xs font-medium">
           {onExpandedChange ? (
             // The drawer at the foot of the Style panel opens from this

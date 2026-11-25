@@ -35,11 +35,11 @@ export function composerAskCardClasses(collapsed: boolean): string {
     "data-[ask-morph]:overflow-hidden data-[ask-morph]:items-center data-[ask-morph]:justify-end",
     collapsed
       ? cn(
-          "h-8 w-(--ask-pill-w) overflow-hidden items-center justify-end rounded-[calc(var(--radius-lg)*2)] duration-200",
+          "h-8 w-(--ask-pill-w) overflow-hidden items-center justify-end rounded-full duration-slow",
           "hover:bg-bg1-raised-hover hover:border-border3",
           "has-[[data-composer-ask-pill]:focus-visible]:border-accent",
         )
-      : "duration-200",
+      : "duration-slow",
   );
 }
 
@@ -54,8 +54,8 @@ export function composerAskContentClasses(collapsed: boolean): string {
     "motion-reduce:transition-none group-data-[ask-instant]/composer:transition-none",
     "group-data-[ask-morph]/composer:min-w-(--composer-content-w)",
     collapsed
-      ? "pointer-events-none min-w-(--composer-content-w) translate-y-1 opacity-0 duration-120"
-      : "translate-y-0 opacity-100 delay-60 duration-150",
+      ? "pointer-events-none min-w-(--composer-content-w) translate-y-1 opacity-0 duration-fast"
+      : "translate-y-0 opacity-100 delay-60 duration-base",
   );
 }
 
@@ -87,7 +87,7 @@ export function ComposerAskPill({
       onClick={onActivate}
       className={cn(
         ASK_PILL_CLS,
-        collapsed ? "opacity-100 delay-80 duration-120" : "pointer-events-none opacity-0 duration-120",
+        collapsed ? "opacity-100 delay-80 duration-fast" : "pointer-events-none opacity-0 duration-fast",
       )}
     >
       <span ref={labelRef}>Ask {agent}</span>

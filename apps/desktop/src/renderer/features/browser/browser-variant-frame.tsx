@@ -191,7 +191,7 @@ export function BrowserVariantFrame({
         style={{ width, height }}
       >
         <div
-          className="border-border1 bg-bg2 text-xxs flex h-[34px] shrink-0 cursor-grab items-center gap-1 border-b px-2 select-none active:cursor-grabbing"
+          className="border-border1 bg-bg2 text-3xxs flex h-[34px] shrink-0 cursor-grab items-center gap-1 border-b px-2 select-none active:cursor-grabbing"
           data-zeros-canvas-chrome
           onPointerDown={startHeaderDrag}
         >
@@ -202,7 +202,7 @@ export function BrowserVariantFrame({
               onBlur={handleRename}
               onKeyDown={(e) => e.key === "Enter" && handleRename()}
               onPointerDown={(e) => e.stopPropagation()}
-              className="text-xxs h-6 min-w-0 flex-1 px-1.5"
+              className="text-3xxs h-6 min-w-0 flex-1 px-1.5"
               autoFocus
             />
           ) : (

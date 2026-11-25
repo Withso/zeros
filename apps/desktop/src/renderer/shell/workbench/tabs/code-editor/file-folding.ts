@@ -69,7 +69,7 @@ const foldTheme = EditorView.theme({
   ".cm-foldGutter [data-fold]": {
     display: "inline-flex",
     color: "var(--fg3)",
-    transition: "opacity 120ms ease",
+    transition: "opacity var(--duration-fast) ease",
   },
   ".cm-foldGutter [data-fold]:hover": { color: "var(--fg1)" },
   ".cm-foldGutter [data-fold='open']": { opacity: "0" },

@@ -1115,7 +1115,7 @@ function useRepoBranchCatalog(
 // `min-w-0` + truncate so a long branch name shrinks instead of overflowing the
 // column.
 const GIT_PICKER_TRIGGER_CLS =
-  "inline-flex h-7 max-w-full min-w-0 items-center gap-1.5 rounded-md border border-border2 bg-transparent pl-2.5 pr-2 text-xs text-fg1 transition-colors duration-120 ease-out hover:border-border3 hover:bg-bg2-hover disabled:opacity-50";
+  "inline-flex h-7 max-w-full min-w-0 items-center gap-1.5 rounded-md border border-border2 bg-transparent pl-2.5 pr-2 text-xs text-fg1 transition-colors duration-fast ease-out hover:border-border3 hover:bg-bg2-hover disabled:opacity-50";
 
 /** The source glyph shown inside the branch trigger: where new workspaces
  *  come from — GitHub, another git host, or this machine's local branches. */

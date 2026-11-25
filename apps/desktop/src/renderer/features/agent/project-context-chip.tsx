@@ -108,7 +108,7 @@ export function ProjectContextChip({ agentId, cwd }: Props) {
       <PopoverTrigger asChild>
         <button
           type="button"
-          className="text-fg2 bg-bg2-hover/50 hover:text-fg1 hover:bg-bg2-hover aria-expanded:text-fg1 aria-expanded:bg-bg2-hover inline-flex shrink-0 cursor-pointer items-center gap-1 rounded-sm px-2 py-0.5 text-xs leading-none transition-colors duration-150 ease-out"
+          className="text-fg2 bg-bg2-hover/50 hover:text-fg1 hover:bg-bg2-hover aria-expanded:text-fg1 aria-expanded:bg-bg2-hover inline-flex shrink-0 cursor-pointer items-center gap-1 rounded-sm px-2 py-0.5 text-xs leading-none transition-colors duration-base ease-out"
         >
           <FileText className="h-3 w-3" />
           <span>{label}</span>

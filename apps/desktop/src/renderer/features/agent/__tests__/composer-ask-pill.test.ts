@@ -38,7 +38,7 @@ describe("the composer's Ask pill", () => {
     const pill = classes(composerAskCardClasses(true));
     expect(pill).toEqual(expect.arrayContaining([
       "h-8", "w-(--ask-pill-w)", "overflow-hidden", "items-center", "justify-end",
-      "rounded-[calc(var(--radius-lg)*2)]", "hover:bg-bg1-raised-hover", "hover:border-border3",
+      "rounded-full", "hover:bg-bg1-raised-hover", "hover:border-border3",
     ]));
     // No fill or edge of its own: the composer's bg1-raised and composer-border carry through.
     expect(pill.filter((name) => /^(bg-|border-)/.test(name))).toEqual([]);
@@ -56,7 +56,7 @@ describe("the composer's Ask pill", () => {
         "transition-[width,height,border-radius,border-color,background-color,box-shadow]",
         "ease-[cubic-bezier(0.2,0,0,1)]", "motion-reduce:transition-none", "data-[ask-instant]:transition-none",
       ]));
-      expect(card).toContain("duration-200");
+      expect(card).toContain("duration-slow");
     }
     // While it expands the card keeps the pill's clip and bottom-centre anchor.
     expect(classes(composerAskCardClasses(false))).toEqual(expect.arrayContaining([
@@ -67,10 +67,10 @@ describe("the composer's Ask pill", () => {
   it("keeps the composer laid out at full width and fades it, so nothing reflows inside the morph", () => {
     const hidden = classes(composerAskContentClasses(true));
     expect(hidden).toEqual(expect.arrayContaining([
-      "min-w-(--composer-content-w)", "opacity-0", "translate-y-1", "pointer-events-none", "duration-120",
+      "min-w-(--composer-content-w)", "opacity-0", "translate-y-1", "pointer-events-none", "duration-fast",
     ]));
     const shown = classes(composerAskContentClasses(false));
-    expect(shown).toEqual(expect.arrayContaining(["opacity-100", "translate-y-0", "delay-60", "duration-150"]));
+    expect(shown).toEqual(expect.arrayContaining(["opacity-100", "translate-y-0", "delay-60", "duration-base"]));
     expect(shown).toContain("group-data-[ask-morph]/composer:min-w-(--composer-content-w)");
     // Only the card eases to auto; its contents keep numeric interpolation.
     expect(shown).toContain("[interpolate-size:numeric-only]");

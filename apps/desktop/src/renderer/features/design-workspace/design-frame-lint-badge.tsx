@@ -86,7 +86,7 @@ export function DesignFrameLintList({ violations, onSelectLayer }: {
                 </>
               );
               const className = cn(
-                "text-2xxs flex w-full items-start gap-2 px-3 py-1 text-left leading-4",
+                "text-3xxs flex w-full items-start gap-2 px-3 py-1 text-left leading-4",
                 violation.severity === "error" ? "text-red-on-bg" : "text-fg2",
               );
               const oid = violation.oid;

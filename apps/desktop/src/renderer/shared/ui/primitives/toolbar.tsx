@@ -3,12 +3,13 @@ import * as React from "react";
 import { cn } from "@/renderer/shared/ui/cn";
 import { IconButtonSizeContext } from "./icon-button";
 
-// One size for every toolbar and island: 28px tools in a 36px bar. The 3px
-// inset plus the 1px border puts the 6px tool corners on the bar's 10px ones.
+// One size for every toolbar and island: 28px tools in a 36px bar. The bar
+// takes the 12px corners of every floating surface (P7), and the 3px inset
+// plus the 1px border puts 8px tool corners on them, as in a menu.
 export const TOOLBAR_INSET = "p-[calc(var(--spacing)*0.75)]";
-export const TOOLBAR_RADIUS = "rounded-[calc(var(--radius-md)+var(--spacing))]";
+export const TOOLBAR_RADIUS = "rounded-xl";
 export const TOOLBAR_SURFACE = cn(
-  "border-border2 bg-bg2 text-fg2 inline-flex shrink-0 items-center gap-0.5 border",
+  "border-border2 bg-bg2 text-fg2 inline-flex shrink-0 items-center gap-0.5 border *:rounded-lg",
   TOOLBAR_INSET,
   TOOLBAR_RADIUS,
 );

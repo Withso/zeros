@@ -562,7 +562,7 @@
   display: inline-block;
   margin-right: 6px;
   color: var(--fg2);
-  transition: transform 120ms ease-out;
+  transition: transform var(--duration-fast) ease-out;
 }
 [data-Zeros-root] .zeros-agent-md details[open] > summary::before {
   transform: rotate(90deg);

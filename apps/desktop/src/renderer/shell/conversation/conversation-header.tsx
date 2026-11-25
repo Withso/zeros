@@ -90,7 +90,7 @@ const WORKSPACE_NAME_INPUT_CLS =
 /** "Open in" split button — the logo half (opens the default app directly)
  *  and the chevron half (opens the menu) are two separate targets. */
 const OPEN_IN_CHEVRON_BTN_CLS =
-  "h-7 w-5 px-0 shrink-0 rounded-sm text-fg2 hover:text-fg1 hover:bg-bg2-hover/40 transition-[background-color,color] duration-120 ease-out";
+  "h-7 w-5 px-0 shrink-0 rounded-sm text-fg2 hover:text-fg1 hover:bg-bg2-hover/40 transition-[background-color,color] duration-fast ease-out";
 
 interface ResolvedContext {
   project: Project | null;
@@ -428,7 +428,7 @@ function OpenInDropdown({ path }: OpenInDropdownProps) {
         </IconButton>
       </Tooltip>
       <DropdownMenu>
-        <Tooltip label="Open in…" delayDuration={1500}>
+        <Tooltip label="Open in…">
           <DropdownMenuTrigger asChild>
             <IconButton
               size="standard"
@@ -465,7 +465,7 @@ export function OpenInBadgeMenu({
 
   return (
     <DropdownMenu>
-      <Tooltip label="Open in…" delayDuration={1500}>
+      <Tooltip label="Open in…">
         <DropdownMenuTrigger asChild>
           {/* A workspace link is the neutral inline pill, with no blue. */}
           <Pill aria-label={`Open ${label} in…`}>
@@ -628,7 +628,7 @@ export function ConversationHeader({
               className={cn(
                 WORKSPACE_NAME_CLS,
                 workspace &&
-                  "group/wsname hover:bg-bg2-hover/40 inline-flex cursor-text items-center gap-1 rounded-sm px-1.5 py-0.5 transition-[background-color] duration-120 ease-out",
+                  "group/wsname hover:bg-bg2-hover/40 inline-flex cursor-text items-center gap-1 rounded-sm px-1.5 py-0.5 transition-[background-color] duration-fast ease-out",
                 !workspace && "px-1.5 py-0.5",
               )}
               onClick={() => {
@@ -638,7 +638,7 @@ export function ConversationHeader({
             >
               <span className="truncate">{workspaceLabel}</span>
               {workspace && (
-                <Pencil className="text-fg2 size-3 shrink-0 opacity-0 transition-opacity duration-120 ease-out group-hover/wsname:opacity-100" />
+                <Pencil className="text-fg2 size-3 shrink-0 opacity-0 transition-opacity duration-fast ease-out group-hover/wsname:opacity-100" />
               )}
             </button>
           </Tooltip>

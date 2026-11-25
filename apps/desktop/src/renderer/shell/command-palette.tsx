@@ -328,7 +328,7 @@ export function CommandPalette({
         </CommandList>
         <div
           aria-hidden="true"
-          className="border-fg1/15 text-xxs text-fg2 flex h-8 shrink-0 items-center justify-end gap-3 border-t px-3"
+          className="border-fg1/15 text-3xxs text-fg2 flex h-8 shrink-0 items-center justify-end gap-3 border-t px-3"
         >
           <span className="flex items-center gap-1">
             <ArrowUp className="size-3" />

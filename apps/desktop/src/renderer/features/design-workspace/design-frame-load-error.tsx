@@ -51,7 +51,7 @@ export function DesignFrameProblemLabel({ title, message, width }: {
     >
       <span
         title={`${title}: ${message ?? LOAD_ERROR}`}
-        className="text-2xxs text-fg3 flex max-w-full min-w-0 items-center gap-1 overflow-hidden leading-4 font-medium whitespace-nowrap"
+        className="text-3xxs text-fg3 flex max-w-full min-w-0 items-center gap-1 overflow-hidden leading-4 font-medium whitespace-nowrap"
       >
         <DesignFrameProblemMark message={message} />
         <span className="block min-w-0 overflow-hidden text-ellipsis">{title}</span>

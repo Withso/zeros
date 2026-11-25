@@ -97,7 +97,7 @@ function ReassignDialog({ target }: { target: CloudWorkspaceTarget }) {
           {visible.map(row => (
             <CommandItem key={row.userId} value={row.userId} disabled={!row.eligible} onSelect={() => { setMessage(null); setPicked(row); }} className="gap-2">
               <span className="min-w-0 flex-1 truncate">{row.name}</span>
-              {row.hint && <span className="text-fg3 text-2xxs shrink-0">{row.hint}</span>}
+              {row.hint && <span className="text-fg3 text-3xxs shrink-0">{row.hint}</span>}
             </CommandItem>
           ))}
         </CommandGroup>

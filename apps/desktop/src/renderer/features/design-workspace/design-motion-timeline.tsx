@@ -1889,7 +1889,7 @@ export const DesignMotionTimeline = React.memo(function DesignMotionTimeline({
           disabled={disabled}
           onValueChange={applyPreset}
         >
-          <Tooltip label="Motion preset" delayDuration={1500}>
+          <Tooltip label="Motion preset">
             <SelectTrigger
               size="sm"
               className="zd-field zd-motion-preset"

@@ -589,7 +589,7 @@ export function GitHubSection({
               <div
                 key={method}
                 className={cn(
-                  "border-border2 relative grid grid-cols-[20px_minmax(0,1fr)_auto] items-start gap-2.5 rounded-[calc(var(--radius-lg)*1.5)] border p-3.5 transition-colors duration-120 ease-out",
+                  "border-border2 relative grid grid-cols-[20px_minmax(0,1fr)_auto] items-start gap-2.5 rounded-xl border p-3.5 transition-colors duration-fast ease-out",
                   selected
                     ? "bg-bg1-hover"
                     : "bg-bg1 hover:border-border3 hover:bg-bg1-hover",
@@ -598,7 +598,7 @@ export function GitHubSection({
                 )}
               >
                 <input
-                  className="border-border4 hover:border-fg3 checked:border-inverted-bg checked:bg-inverted-fg focus-visible:border-accent mt-px size-4 appearance-none rounded-full border transition-[background-color,border-color,box-shadow] duration-120 ease-out checked:shadow-[inset_0_0_0_4px_var(--inverted-bg)] focus-visible:outline-none"
+                  className="border-border4 hover:border-fg3 checked:border-inverted-bg checked:bg-inverted-fg focus-visible:border-accent mt-px size-4 appearance-none rounded-full border transition-[background-color,border-color,box-shadow] duration-fast ease-out checked:shadow-[inset_0_0_0_4px_var(--inverted-bg)] focus-visible:outline-none"
                   type="radio"
                   name="github-auth-method"
                   value={method}
