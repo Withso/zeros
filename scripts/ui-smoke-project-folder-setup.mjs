@@ -137,7 +137,7 @@ export async function runDialogChromeSmoke({ page, check }) {
         return pixels[4] + pixels[5] + pixels[6] < pixels[0] + pixels[1] + pixels[2];
       })).toBe(true);
     }
-    await expect(shortcuts).toHaveCSS("border-radius", "14px");
+    await expect(shortcuts).toHaveCSS("border-radius", "12px");
     await search.fill("feedback");
     await expect(shortcuts.getByText("Send feedback", { exact: true })).toBeVisible();
     await expect(shortcuts.locator('[data-slot="command-item"]')).toHaveCount(1);
