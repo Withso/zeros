@@ -365,7 +365,7 @@ export function TerminalWorkbenchLayout({
                                   else if (entry.runActionId)
                                     onRun(entry.runActionId);
                                 }}
-                                className="text-accent-on-bg hover:text-accent-on-bg h-6 px-2 py-0 text-xs"
+                                className="text-accent-text hover:text-accent-text h-6 px-2 py-0 text-xs"
                               >
                                 Run
                               </Button>

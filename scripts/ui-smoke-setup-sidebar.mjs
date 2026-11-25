@@ -48,7 +48,7 @@ export async function runSetupSidebarSmoke({ page, check }) {
   expect(
     await run.evaluate((element) => {
       const probe = document.createElement("span");
-      probe.style.color = "var(--accent-on-bg)";
+      probe.style.color = "var(--accent-text)";
       document.body.appendChild(probe);
       const matches =
         getComputedStyle(element).color === getComputedStyle(probe).color;

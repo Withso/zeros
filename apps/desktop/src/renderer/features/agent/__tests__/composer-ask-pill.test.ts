@@ -38,7 +38,7 @@ describe("the composer's Ask pill", () => {
     const pill = classes(composerAskCardClasses(true));
     expect(pill).toEqual(expect.arrayContaining([
       "h-8", "w-(--ask-pill-w)", "overflow-hidden", "items-center", "justify-end",
-      "rounded-full", "hover:bg-bg1-raised-hover", "hover:border-border3",
+      "rounded-[calc(var(--radius-lg)*2)]", "hover:bg-bg1-raised-hover", "hover:border-border3",
     ]));
     // No fill or edge of its own: the composer's bg1-raised and composer-border carry through.
     expect(pill.filter((name) => /^(bg-|border-)/.test(name))).toEqual([]);

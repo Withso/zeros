@@ -122,14 +122,15 @@ export async function runToolsSmoke({ page, check }) {
       await expect.poll(() => matchesToken(refreshAction, "--fg2")).toBe(true);
       await refreshAction.hover();
       await expect.poll(() => matchesToken(refreshAction, "--fg2")).toBe(true);
-      await expect.poll(() => matchesToken(textAction, "--accent-on-bg")).toBe(true);
+      await expect.poll(() => matchesToken(textAction, "--accent-text")).toBe(true);
       const normal = await textAppearance();
       expect(normal.padding).toEqual(["0px", "0px", "0px", "0px"]);
       expect(normal.background).toBe("rgba(0, 0, 0, 0)");
       await textAction.hover();
-      await expect
-        .poll(async () => (await textAppearance()).lightness)
-        .toBeGreaterThan(normal.lightness + 0.01);
+      // Hover moves toward more contrast: lighter in Dark, darker in Light.
+      const lightness = expect.poll(async () => (await textAppearance()).lightness);
+      if (theme === "dark") await lightness.toBeGreaterThan(normal.lightness + 0.01);
+      else await lightness.toBeLessThan(normal.lightness - 0.01);
       // Sample the endpoint, not an intermediate color in the CSS transition.
       await expect
         .poll(() => matchesToken(textAction, "--composer-tool-action-hover"))

@@ -74,7 +74,8 @@ export async function checkLayersDrawerDefault({ page, check }) {
       (await fold.getAttribute("aria-controls")) === null &&
       (await tree.count()) === 0 &&
       (await page.locator("[data-design-layer-id]").count()) === 0 &&
-      (await page.locator("[data-design-layers-slot]").boundingBox()).height <= 40,
+      // The 40px header and the slot's 1px top rule.
+      (await page.locator("[data-design-layers-slot]").boundingBox()).height <= 41,
   );
   await fold.click();
   await tree.waitFor({ state: "visible" });
@@ -2842,7 +2843,7 @@ export async function runDesignWorkspaceCanvasSmoke({ page, waitFor, check }) {
       "layer, inspector and field details follow their sheets",
       sheetLook.owned &&
         sheetLook.icon &&
-        sheetLook.header === 36 &&
+        sheetLook.header === 40 &&
         sheetLook.glyphs.length > 0 &&
         sheetLook.glyphs.every((width) => width === 12) &&
         sheetLook.trigger?.height === 20 &&
@@ -2872,7 +2873,9 @@ export async function runDesignWorkspaceCanvasSmoke({ page, waitFor, check }) {
   );
   const themeStartBox = await themeDialog.boundingBox();
   await expect(themeDialog.locator('[data-design-theme-titlebar]')).toHaveCSS("height", "40px");
-  await expect(themeDialog.locator('h2')).toHaveCSS("font-size", "13px");
+  // Window titles are 14 semibold like dialog and popover titles.
+  await expect(themeDialog.locator('h2')).toHaveCSS("font-size", "14px");
+  await expect(themeDialog.locator("h2")).toHaveCSS("font-weight", "500");
   await expect(themeDialog.locator('[data-design-theme-type-filter]')).toHaveCSS("width", "168px");
   await expect(themeDialog.locator('[data-design-theme-toolbar]')).toHaveCSS("height", "40px");
   await expect(themeDialog.locator('[data-slot="dialog-footer"]')).toHaveCount(0);

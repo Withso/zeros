@@ -145,13 +145,13 @@ export async function runComposerSuggestionsSmoke({ page, check, harnessBase }) 
       const popup = await menu.boundingBox();
       return !!card && !!popup && Math.abs(popup.x - card.x) < 1 && Math.abs(popup.width - card.width) < 1 && Math.abs(popup.y + popup.height + 8 - card.y) < 1;
     }).toBe(true);
-    // Docked above the composer, the picker is one more card on the
-    // composer's surface: bg1-raised, the composer-border edge and no lift.
+    // Docked above the composer, the picker takes bg3 like every menu, on the
+    // composer-border edge with no lift.
     for (const theme of ["dark", "light"]) {
       await page.evaluate(next => { document.documentElement.dataset.theme = next; }, theme);
       const surface = await menu.evaluate(node => {
         const probe = document.createElement("span");
-        probe.style.backgroundColor = "var(--bg1-raised)";
+        probe.style.backgroundColor = "var(--bg3)";
         probe.style.borderTopColor = "var(--composer-border)";
         document.body.append(probe);
         const expected = getComputedStyle(probe);

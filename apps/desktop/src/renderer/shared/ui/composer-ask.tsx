@@ -22,7 +22,10 @@ const ASK_PILL_PADDING_X = 16;
 /** One curve for the whole morph: quick to start, long to settle. */
 const ASK_EASE = "ease-[cubic-bezier(0.2,0,0,1)]";
 
-/** The composer card's half of the morph, placed after the card's surface
+/** The pill's 16px corners are a length, not rounded-full: border-radius eases
+ *  with the morph, and an infinite radius would jump instead of easing.
+ *
+ *  The composer card's half of the morph, placed after the card's surface
  *  radius. `data-ask-morph` holds the pill's clip and bottom-centre anchor while
  *  the card expands; `data-ask-instant` skips the motion for a retained chat
  *  that is revealed straight into its pane's state (useComposerAskMorph). */
@@ -35,7 +38,7 @@ export function composerAskCardClasses(collapsed: boolean): string {
     "data-[ask-morph]:overflow-hidden data-[ask-morph]:items-center data-[ask-morph]:justify-end",
     collapsed
       ? cn(
-          "h-8 w-(--ask-pill-w) overflow-hidden items-center justify-end rounded-full duration-slow",
+          "h-8 w-(--ask-pill-w) overflow-hidden items-center justify-end rounded-[calc(var(--radius-lg)*2)] duration-slow",
           "hover:bg-bg1-raised-hover hover:border-border3",
           "has-[[data-composer-ask-pill]:focus-visible]:border-accent",
         )

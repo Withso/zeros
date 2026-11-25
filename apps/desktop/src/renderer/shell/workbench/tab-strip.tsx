@@ -395,7 +395,7 @@ function TabPill({
           )
         ) : browserWorking ? (
           <MousePointer2
-            className="text-accent-on-bg size-3.5 shrink-0 fill-current drop-shadow-[0_0_5px_rgba(47,190,235,.45)]"
+            className="text-accent-text size-3.5 shrink-0 fill-current drop-shadow-[0_0_5px_rgba(47,190,235,.45)]"
             aria-hidden="true"
           />
         ) : favicon ? (

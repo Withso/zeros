@@ -307,7 +307,7 @@ export async function runWorkspaceShortcutsSmoke({ page, check, harnessBase, scr
       expect(await arrows.evaluateAll(nodes => nodes.every(node => {
         const icon = node.getBoundingClientRect();
         const chip = node.closest('[data-slot="kbd"]').getBoundingClientRect();
-        return icon.width === 12 && icon.height === 12 && Math.abs(icon.y + 6 - (chip.y + chip.height / 2)) <= 1;
+        return icon.width === 11 && icon.height === 11 && Math.abs(icon.y + 5.5 - (chip.y + chip.height / 2)) <= 1;
       }))).toBe(true);
       if (screenshotDir) await palette.screenshot({ path: join(screenshotDir, `shortcuts-${category.toLowerCase()}-${theme}.png`) });
     }
