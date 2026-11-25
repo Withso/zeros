@@ -42,7 +42,7 @@
    workspace toolbar, settings navigation, etc.) doesn't
    need a rename. Interactive descendants opt back out below. */
 [data-tauri-drag-region] {
-  -webkit-app-region: var(--zeros-window-drag-region, drag);
+  -webkit-app-region: drag;
 }
 
 /* Interactive descendants inside a drag region opt back out so native window
@@ -67,7 +67,10 @@
    tooltips must not disable the titlebar. Restore it with the closing paint.
    The rule styles body itself and drag regions inherit the variable. Its
    argument looks under closed and hidden surfaces, so any DOM change re-checks
-   it; styling body's descendants here restyled the whole document each time. */
+   it; styling body's descendants here restyled the whole document each time.
+   Regions read the inherited variable through a style query: Chromium 151+
+   (Electron 44+) computes `app-region: var(…)` as none, which removed every
+   native titlebar. */
 body:has(:is(
   [role="dialog"], [role="alertdialog"], [role="menu"], [role="listbox"]
 ):not(
@@ -75,6 +78,11 @@ body:has(:is(
   :is([data-state="closed"], [hidden], [inert], [aria-hidden="true"]) *
 )) {
   --zeros-window-drag-region: no-drag;
+}
+@container style(--zeros-window-drag-region: no-drag) {
+  [data-tauri-drag-region] {
+    -webkit-app-region: no-drag;
+  }
 }
 
 /* ──────────────────────────────────────────────────────────
