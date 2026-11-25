@@ -416,7 +416,7 @@ function OpenInDropdown({ path }: OpenInDropdownProps) {
 
   return (
     <div className="flex shrink-0 items-center">
-      <Tooltip label={`Open in ${defaultApp.name} (⌘O)`}>
+      <Tooltip label={`Open in ${defaultApp.name}`} shortcut="⌘O">
         <IconButton
           size="standard"
           className="shrink-0"
