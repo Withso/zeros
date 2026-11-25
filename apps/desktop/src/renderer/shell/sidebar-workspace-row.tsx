@@ -173,7 +173,7 @@ export function WorkspaceProjectIcon({ project }: { project: Project }) {
           asChild
           onContextMenu={(event) => event.stopPropagation()}
         >
-          <span className="pointer-events-auto inline-flex size-4 shrink-0 items-center justify-center">
+          <span data-sidebar-row-logo="" className="pointer-events-auto inline-flex size-4 shrink-0 items-center justify-center">
             <RepositoryIcon project={project} className={REPOSITORY_ICON_CHIP_CLS} />
           </span>
         </ContextMenuTrigger>

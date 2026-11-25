@@ -867,8 +867,8 @@
   /* @generated tokens:light-red-text:start */
   --red-text: hsl(358.66 61.468% 42.745%); /* #B02A2D — red status words, icons and destructive labels on any plain surface */
   --red-solid: hsl(
-    0 72% 50%
-  ); /* #DB2424 — destructive fill carrying red-solid-fg */
+    0 72% 45%
+  ); /* #C52020 — destructive fill carrying red-solid-fg; deep enough that its 90% hover keeps the label at AA */
   --red-bg: hsl(4.8 100% 95.098%); /* #FFE8E6 — error container surface */
   --red-on-bg: hsl(358.95 60.638% 36.863%); /* #972527 — text and icons inside a red-bg container */
   --green-text: hsl(140.69 63.504% 26.863%); /* #197037 — green status words and icons on any plain surface */

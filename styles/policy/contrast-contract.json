@@ -262,6 +262,156 @@
       ]
     },
     {
+      "role": "text",
+      "fg": [
+        "red-solid-fg/0.9@bg1"
+      ],
+      "on": [
+        "red-solid/0.9@bg1"
+      ],
+      "why": "Filled-button hover: the whole control at 90% opacity over the surface it sits on (page, raised group or dialog), label and fill together."
+    },
+    {
+      "role": "text",
+      "fg": [
+        "red-solid-fg/0.9@bg1-raised"
+      ],
+      "on": [
+        "red-solid/0.9@bg1-raised"
+      ],
+      "why": "Filled-button hover: the whole control at 90% opacity over the surface it sits on (page, raised group or dialog), label and fill together."
+    },
+    {
+      "role": "text",
+      "fg": [
+        "red-solid-fg/0.9@bg3"
+      ],
+      "on": [
+        "red-solid/0.9@bg3"
+      ],
+      "why": "Filled-button hover: the whole control at 90% opacity over the surface it sits on (page, raised group or dialog), label and fill together."
+    },
+    {
+      "role": "text",
+      "fg": [
+        "green-solid-fg/0.9@bg1"
+      ],
+      "on": [
+        "green-solid/0.9@bg1"
+      ],
+      "why": "Filled-button hover: the whole control at 90% opacity over the surface it sits on (page, raised group or dialog), label and fill together."
+    },
+    {
+      "role": "text",
+      "fg": [
+        "green-solid-fg/0.9@bg1-raised"
+      ],
+      "on": [
+        "green-solid/0.9@bg1-raised"
+      ],
+      "why": "Filled-button hover: the whole control at 90% opacity over the surface it sits on (page, raised group or dialog), label and fill together."
+    },
+    {
+      "role": "text",
+      "fg": [
+        "green-solid-fg/0.9@bg3"
+      ],
+      "on": [
+        "green-solid/0.9@bg3"
+      ],
+      "why": "Filled-button hover: the whole control at 90% opacity over the surface it sits on (page, raised group or dialog), label and fill together."
+    },
+    {
+      "role": "text",
+      "fg": [
+        "accent-solid-fg/0.9@bg1"
+      ],
+      "on": [
+        "accent-solid/0.9@bg1"
+      ],
+      "why": "Filled-button hover: the whole control at 90% opacity over the surface it sits on (page, raised group or dialog), label and fill together."
+    },
+    {
+      "role": "text",
+      "fg": [
+        "accent-solid-fg/0.9@bg1-raised"
+      ],
+      "on": [
+        "accent-solid/0.9@bg1-raised"
+      ],
+      "why": "Filled-button hover: the whole control at 90% opacity over the surface it sits on (page, raised group or dialog), label and fill together."
+    },
+    {
+      "role": "text",
+      "fg": [
+        "accent-solid-fg/0.9@bg3"
+      ],
+      "on": [
+        "accent-solid/0.9@bg3"
+      ],
+      "why": "Filled-button hover: the whole control at 90% opacity over the surface it sits on (page, raised group or dialog), label and fill together."
+    },
+    {
+      "role": "text",
+      "fg": [
+        "neutral-solid-fg/0.9@bg1"
+      ],
+      "on": [
+        "neutral-solid/0.9@bg1"
+      ],
+      "why": "Filled-button hover: the whole control at 90% opacity over the surface it sits on (page, raised group or dialog), label and fill together."
+    },
+    {
+      "role": "text",
+      "fg": [
+        "neutral-solid-fg/0.9@bg1-raised"
+      ],
+      "on": [
+        "neutral-solid/0.9@bg1-raised"
+      ],
+      "why": "Filled-button hover: the whole control at 90% opacity over the surface it sits on (page, raised group or dialog), label and fill together."
+    },
+    {
+      "role": "text",
+      "fg": [
+        "neutral-solid-fg/0.9@bg3"
+      ],
+      "on": [
+        "neutral-solid/0.9@bg3"
+      ],
+      "why": "Filled-button hover: the whole control at 90% opacity over the surface it sits on (page, raised group or dialog), label and fill together."
+    },
+    {
+      "role": "text",
+      "fg": [
+        "primary-button-fg/0.9@bg1"
+      ],
+      "on": [
+        "primary-button-bg/0.9@bg1"
+      ],
+      "why": "Filled-button hover: the whole control at 90% opacity over the surface it sits on (page, raised group or dialog), label and fill together."
+    },
+    {
+      "role": "text",
+      "fg": [
+        "primary-button-fg/0.9@bg1-raised"
+      ],
+      "on": [
+        "primary-button-bg/0.9@bg1-raised"
+      ],
+      "why": "Filled-button hover: the whole control at 90% opacity over the surface it sits on (page, raised group or dialog), label and fill together."
+    },
+    {
+      "role": "text",
+      "fg": [
+        "primary-button-fg/0.9@bg3"
+      ],
+      "on": [
+        "primary-button-bg/0.9@bg3"
+      ],
+      "why": "Filled-button hover: the whole control at 90% opacity over the surface it sits on (page, raised group or dialog), label and fill together."
+    },
+    {
       "role": "boundary",
       "fg": [
         "border3"

@@ -81,10 +81,19 @@ describe("contrast contract", () => {
     }
   });
 
+  it("checks every filled button's 90% opacity hover, label and fill together", () => {
+    for (const fill of ["red-solid", "green-solid", "accent-solid", "neutral-solid", "primary-button-bg"]) {
+      const hover: Array<{ fg: string[] }> = contract.pairs.filter((pair: { on: string | string[] }) => [pair.on].flat().some((on: string) => on.startsWith(`${fill}/0.9@`)));
+      expect(hover.length, fill).toBeGreaterThan(0);
+      for (const pair of hover) expect(pair.fg.every((fg: string) => /\/0\.9@/.test(fg)), fill).toBe(true);
+    }
+  });
+
   it("only names tokens that exist in both themes", () => {
     const names = new Set<string>();
     for (const pair of contract.pairs) {
-      for (const fg of pair.fg) names.add(fg);
+      // A composite `fill/alpha@base` names two tokens.
+      for (const fg of pair.fg) for (const name of fg.split(/\/[\d.]+@/)) names.add(name);
     }
     for (const exemption of contract.exempt) {
       for (const token of exemption.tokens) names.add(token);

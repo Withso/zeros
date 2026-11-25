@@ -93,9 +93,10 @@ export function resolveRgb(theme, name) {
 }
 
 /**
- * A surface reference: a token name, or `fg/alpha@base` for a translucent
- * fill composited over an opaque base (source-over in encoded sRGB, which is
- * what the browser paints).
+ * A surface or text reference: a token name, or `fg/alpha@base` for a
+ * translucent fill composited over an opaque base (source-over in encoded
+ * sRGB, which is what the browser paints). A whole control at opacity 0.9
+ * composites its label and its fill over the same base.
  */
 export function resolveSurface(theme, ref) {
   const composite = ref.match(/^([a-z0-9-]+)\/([\d.]+)@([a-z0-9-]+)$/);
@@ -155,7 +156,7 @@ export function evaluateContract(contract, themes) {
       const min = role.min;
       for (const fg of pair.fg) {
         for (const surface of expandSurfaces(contract, pair.on)) {
-          const ratio = contrastRatio(resolveRgb(theme, fg), resolveSurface(theme, surface));
+          const ratio = contrastRatio(resolveSurface(theme, fg), resolveSurface(theme, surface));
           results.push({ theme: themeName, role: pair.role, fg, surface, ratio, min, pass: ratio >= min });
         }
       }

@@ -489,9 +489,9 @@
       "$type": "color",
       "$value": {
         "colorSpace": "hsl",
-        "components": [0.0, 72.0, 50.0]
+        "components": [0.0, 72.0, 45.0]
       },
-      "$description": "destructive fill carrying red-solid-fg",
+      "$description": "destructive fill carrying red-solid-fg; deep enough that its 90% hover keeps the label at AA",
       "$extensions": {
         "org.zeros": {
           "cssName": "--red-solid",
