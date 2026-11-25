@@ -269,6 +269,17 @@
             "profile": {
               "type": "string"
             },
+            "providerId": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/BedrockProviderId"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Defaults to Amazon Bedrock Mantle when omitted."
+            },
             "region": {
               "type": "string"
             },
@@ -290,6 +301,17 @@
         },
         {
           "properties": {
+            "providerId": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/BedrockProviderId"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Defaults to Amazon Bedrock Mantle when omitted."
+            },
             "region": {
               "type": "string"
             },
@@ -2356,6 +2378,17 @@
             "apiKey": {
               "type": "string"
             },
+            "providerId": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/BedrockProviderId"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Defaults to Amazon Bedrock Mantle when omitted."
+            },
             "region": {
               "type": "string"
             },
@@ -2380,6 +2413,17 @@
           "properties": {
             "accessKeyId": {
               "type": "string"
+            },
+            "providerId": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/BedrockProviderId"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Defaults to Amazon Bedrock Mantle when omitted."
             },
             "region": {
               "type": "string"
@@ -7313,6 +7357,13 @@
             "null"
           ]
         },
+        "model": {
+          "description": "Override the model for this sample. Omit or pass `null` to inherit the source thread's model.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "prompt": {
           "type": "string"
         },
@@ -7876,6 +7927,13 @@
         },
         "daybreakEnabled": {
           "description": "Initial Daybreak choice for this persistent thread. Omitted or null leaves it unset. This does not select a turn's `cyberAccessProgram` or grant access. Not supported for ephemeral threads.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "daybreakProgramPropagationEnrolled": {
+          "description": "False opts this new root out of Daybreak propagation unless managed policy requires it. Omitted, null, or true uses the configured enrollment rule.",
           "type": [
             "boolean",
             "null"

@@ -263,6 +263,9 @@
             "contextWindowExceeded",
             "sessionBudgetExceeded",
             "usageLimitExceeded",
+            "apiKeySpendLimitExceeded",
+            "projectSpendLimitExceeded",
+            "organizationSpendLimitExceeded",
             "rateLimitExceeded",
             "flexUnavailable",
             "serverOverloaded",
@@ -1432,6 +1435,13 @@
         },
         "daybreakEnabled": {
           "description": "Saved Daybreak choice, independent of turn execution. Null if unset.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "daybreakProgramPropagationEnrolled": {
+          "description": "Whether the live thread joined the Daybreak propagation experiment at startup. Null when only stored metadata is available. Older servers can omit this field.",
           "type": [
             "boolean",
             "null"

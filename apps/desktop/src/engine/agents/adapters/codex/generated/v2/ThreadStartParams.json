@@ -353,6 +353,13 @@
         "null"
       ]
     },
+    "daybreakProgramPropagationEnrolled": {
+      "description": "False opts this new root out of Daybreak propagation unless managed policy requires it. Omitted, null, or true uses the configured enrollment rule.",
+      "type": [
+        "boolean",
+        "null"
+      ]
+    },
     "developerInstructions": {
       "type": [
         "string",

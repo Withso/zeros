@@ -41,6 +41,13 @@
         "null"
       ]
     },
+    "model": {
+      "description": "Override the model for this sample. Omit or pass `null` to inherit the source thread's model.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "prompt": {
       "type": "string"
     },

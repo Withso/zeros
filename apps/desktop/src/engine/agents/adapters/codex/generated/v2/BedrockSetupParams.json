@@ -1,10 +1,30 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "BedrockProviderId": {
+      "enum": [
+        "amazon-bedrock",
+        "amazon-bedrock-runtime"
+      ],
+      "type": "string"
+    }
+  },
   "oneOf": [
     {
       "properties": {
         "profile": {
           "type": "string"
+        },
+        "providerId": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/BedrockProviderId"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Defaults to Amazon Bedrock Mantle when omitted."
         },
         "region": {
           "type": "string"
@@ -27,6 +47,17 @@
     },
     {
       "properties": {
+        "providerId": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/BedrockProviderId"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Defaults to Amazon Bedrock Mantle when omitted."
+        },
         "region": {
           "type": "string"
         },
