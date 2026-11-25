@@ -248,6 +248,8 @@ export type CloudV2Config = {
   /** Retries a stop's failed checkpoint on a fork of the stopped VM. Enable
    * only once forking a stopped VM is qualified on the deployment's Boat account. */
   checkpointRetry?: boolean;
+  /** CLOUD_V2_FAILED_HEAL_ENABLED, on unless "false": recoverable failed workspaces are moved to stopped without a start. */
+  failedHeal?: boolean;
   /** Creates return before their GitHub checks, which the lifecycle runs
    * before any VM exists. CLOUD_V2_ASYNC_CREATE_ENABLED=false keeps every
    * create synchronous; unset means enabled. */
@@ -327,6 +329,8 @@ function loadCloudV2Config(env: NodeJS.ProcessEnv, channel: string): CloudV2Conf
   if (messageAuthority && !["true", "false"].includes(messageAuthority)) throw new Error("Invalid environment: CLOUD_V2_MESSAGE_AUTHORITY_ENABLED must be true or false");
   const checkpointRetry = env.CLOUD_V2_CHECKPOINT_RETRY_ENABLED?.trim().toLowerCase();
   if (checkpointRetry && !["true", "false"].includes(checkpointRetry)) throw new Error("Invalid environment: CLOUD_V2_CHECKPOINT_RETRY_ENABLED must be true or false");
+  const failedHeal = env.CLOUD_V2_FAILED_HEAL_ENABLED?.trim().toLowerCase();
+  if (failedHeal && !["true", "false"].includes(failedHeal)) throw new Error("Invalid environment: CLOUD_V2_FAILED_HEAL_ENABLED must be true or false");
   const asyncCreate = env.CLOUD_V2_ASYNC_CREATE_ENABLED?.trim().toLowerCase();
   if (asyncCreate && !["true", "false"].includes(asyncCreate)) throw new Error("Invalid environment: CLOUD_V2_ASYNC_CREATE_ENABLED must be true or false");
   const readyCopies = env.CLOUD_V2_READY_COPIES_ENABLED?.trim().toLowerCase();
@@ -398,6 +402,7 @@ function loadCloudV2Config(env: NodeJS.ProcessEnv, channel: string): CloudV2Conf
     promptOutbox: promptOutbox === "true",
     messageAuthority: messageAuthority !== "false",
     checkpointRetry: checkpointRetry === "true",
+    failedHeal: failedHeal !== "false",
     readyCopies: readyCopies === "true",
     ...(readyCopyVerifyFork === "true" ? { readyCopyVerifyFork: true } : {}),
     retention: retention === "true",

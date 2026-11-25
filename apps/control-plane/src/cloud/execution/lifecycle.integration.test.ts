@@ -53,6 +53,38 @@ database("shared execution lifecycle and metadata", () => {
     expect((await pool.query("SELECT state FROM cloud_v2_workspaces WHERE id=$1", [f.workspace.id])).rows[0].state).toBe("starting");
     expect(await open()).toBe(0);
   });
+  it("lets the auto-heal finish a Stop that failed with a shared turn open, in its own generation, ending stopped", async () => {
+    await f.login();
+    const turn = await f.dispatch(f.prompt(), f.viewer);
+    expect((await call("stop")).status).toBe(202);
+    const stopping = (await pool.query("SELECT stop_generation::text AS gen FROM cloud_v2_workspaces WHERE id=$1", [f.workspace.id])).rows[0].gen;
+    await pool.query(`UPDATE cloud_v2_workspaces SET state='failed', error_code='provider_request_failed', boat_sandbox_id=coalesce(boat_sandbox_id,'bx_fixture1'),
+      active_at=coalesce(active_at,now()), updated_at=now() - interval '11 minutes' WHERE id=$1`, [f.workspace.id]);
+    const [candidate] = await f.cp.store.healCandidates(new Date(Date.now() - 10 * 60_000), 4);
+    expect(candidate).toMatchObject({ id: f.workspace.id, stopGeneration: stopping, interruptedStop: true });
+    expect(await f.cp.store.healFailed(candidate!, "stopping")).toBe(true);
+    const row = (await pool.query("SELECT state, error_code, stop_generation::text AS gen, restart_stop_generation::text AS restart FROM cloud_v2_workspaces WHERE id=$1", [f.workspace.id])).rows[0];
+    expect(row).toEqual({ state: "stopping", error_code: null, gen: stopping, restart: null });
+    await f.cp.store.transition(f.workspace.id, ["stopping"], "stopped", { stopGeneration: stopping, revoke: true });
+    expect((await pool.query("SELECT state FROM cloud_v2_workspaces WHERE id=$1", [f.workspace.id])).rows[0].state).toBe("stopped");
+    expect((await pool.query("SELECT 1 FROM cloud_v2_execution_contexts WHERE id=$1 AND state<>'retired'", [turn.lease.contextId])).rowCount).toBe(0);
+  });
+  it("lets the auto-heal stop a failed active workspace in its own generation, retiring its contexts as a stop does", async () => {
+    await pool.query(`UPDATE cloud_v2_workspaces SET state='failed', error_code='worker_boot_timeout', boat_sandbox_id=coalesce(boat_sandbox_id,'bx_fixture1'),
+      active_at=now() - interval '2 hours', stopped_at=now() - interval '1 hour', updated_at=now() - interval '11 minutes' WHERE id=$1`, [f.workspace.id]);
+    const generation = (await pool.query("SELECT stop_generation::text AS gen FROM cloud_v2_workspaces WHERE id=$1", [f.workspace.id])).rows[0].gen;
+    const [candidate] = await f.cp.store.healCandidates(new Date(Date.now() - 10 * 60_000), 4);
+    expect(candidate).toMatchObject({ id: f.workspace.id, stopGeneration: generation, ran: false, interruptedStop: false });
+    expect(await f.cp.store.healFailed(candidate!, "stopped")).toBe(true);
+    const row = (await pool.query("SELECT state,error_code,stop_generation::text AS gen,worker_token_hash FROM cloud_v2_workspaces WHERE id=$1", [f.workspace.id])).rows[0];
+    expect(row).toEqual({ state: "stopped", error_code: null, gen: generation, worker_token_hash: null });
+    const live = await withSystemTx(pool, tx => tx.query("SELECT count(*)::int AS n FROM cloud_v2_execution_contexts WHERE workspace_id=$1 AND state<>'retired'", [f.workspace.id]));
+    expect(live.rows[0].n).toBe(0);
+    // Fenced on the row as read: the same candidate cannot act twice.
+    expect(await f.cp.store.healFailed(candidate!, "stopped")).toBe(false);
+    expect((await call("start")).status).toBe(202);
+    expect((await pool.query("SELECT state FROM cloud_v2_workspaces WHERE id=$1", [f.workspace.id])).rows[0].state).toBe("starting");
+  });
   it("lets a member Stop without an agent login or GitHub call and keeps workspace archive restricted", async () => {
     f.fetcher.mockClear();
     expect((await call("stop")).status).toBe(202);

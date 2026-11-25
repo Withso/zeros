@@ -854,6 +854,7 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
     prompts: store.prompts, stopIdle: (id, before) => store.stopIdle(id, before),
     pruneEnvironments: () => environments.prune(),
     checkpointRetry: v2.checkpointRetry === true,
+    healFailed: v2.failedHeal !== false,
     // Retention (CLOUD_V2_RETENTION_ENABLED): absent while off, so stops checkpoint and restores create as before.
     ...(v2.retention === true ? { retention: true, ...(v2.backupForksPerHour ? { backupForksPerHour: v2.backupForksPerHour } : {}),
       ...(v2.maintenancePerHour ? { maintenancePerHour: v2.maintenancePerHour } : {}), ...(v2.maintenancePerDay ? { maintenancePerDay: v2.maintenancePerDay } : {}),
