@@ -11,6 +11,7 @@ const MAX_INTENT_OWNERS = 8;
 
 const intentByWorkspace = new Map<string, string>();
 const pendingByWorkspace = new Map<string, { file: string; timer: ReturnType<typeof setTimeout> }>();
+const pointerByWorkspace = new Map<string, DesignPointerPoint>();
 const listeners = new Set<() => void>();
 
 function publish(workspaceId: string, file: string | null): void {
@@ -32,10 +33,26 @@ function cancelPending(workspaceId: string): void {
   pendingByWorkspace.delete(workspaceId);
 }
 
+export interface DesignPointerPoint { x: number; y: number }
+
+/** Where the pointer last moved over this workspace's canvas. */
+export function noteDesignPointerMoved(workspaceId: string, at: DesignPointerPoint): void {
+  pointerByWorkspace.delete(workspaceId);
+  pointerByWorkspace.set(workspaceId, { x: at.x, y: at.y });
+  while (pointerByWorkspace.size > MAX_INTENT_OWNERS) {
+    const oldest = pointerByWorkspace.keys().next().value as string | undefined;
+    if (oldest === undefined) break;
+    pointerByWorkspace.delete(oldest);
+  }
+}
+
 /** The pointer is over `file` (or over empty canvas, `null`). Empty canvas
- * keeps the last intent: crossing a gap between frames is not leaving. */
-export function noteDesignFrameIntent(workspaceId: string, file: string | null): void {
-  if (!file) {
+ * keeps the last intent: crossing a gap between frames is not leaving. A
+ * pointer `at` the point it last moved to did not move: the camera moved
+ * content under it, which is not intent. */
+export function noteDesignFrameIntent(workspaceId: string, file: string | null, at?: DesignPointerPoint): void {
+  const last = at && pointerByWorkspace.get(workspaceId);
+  if (!file || (at && last && last.x === at.x && last.y === at.y)) {
     cancelPending(workspaceId);
     return;
   }
@@ -52,6 +69,12 @@ export function noteDesignFrameIntent(workspaceId: string, file: string | null):
   pendingByWorkspace.set(workspaceId, { file, timer });
 }
 
+/** The camera moved: the title a pointer was resting on moved away from it.
+ * The current intent stays; only the dwell toward a new frame ends. */
+export function cancelDesignFrameIntentDwell(workspaceId: string): void {
+  cancelPending(workspaceId);
+}
+
 /** A frame that is about to be selected (just created): warm it at once. */
 export function primeDesignFrameIntent(workspaceId: string, file: string): void {
   cancelPending(workspaceId);
@@ -61,6 +84,7 @@ export function primeDesignFrameIntent(workspaceId: string, file: string): void 
 /** The pointer left the canvas, the surface deactivated or its owner changed. */
 export function clearDesignFrameIntent(workspaceId: string): void {
   cancelPending(workspaceId);
+  pointerByWorkspace.delete(workspaceId);
   publish(workspaceId, null);
 }
 
@@ -84,4 +108,5 @@ export function resetDesignFrameIntentForTests(): void {
   for (const pending of pendingByWorkspace.values()) clearTimeout(pending.timer);
   pendingByWorkspace.clear();
   intentByWorkspace.clear();
+  pointerByWorkspace.clear();
 }

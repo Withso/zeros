@@ -9,7 +9,7 @@ import { designWheelZoomFactor, zoomDesignViewportAtPoint } from "../../apps/des
 // the import() expressions that Playwright evaluates inside the browser.
 const { prepareNativeDesignView, readNativeDesignView, assertNativeDesignView, nativeDesignWheelDelta,
   startNativeDesignCameraObservation, finishNativeDesignCameraObservation, nativeDesignHiddenResourcesRetired,
-  readNativeDesignProvenance } = createRequire(import.meta.url)("../design-native-view.mjs");
+  readNativeDesignProvenance, readNativeDesignDocuments } = createRequire(import.meta.url)("../design-native-view.mjs");
 
 let browser: Browser;
 beforeAll(async () => { browser = await chromium.launch({ headless: true }); });
@@ -151,6 +151,25 @@ it("counts changed camera transforms, not repeated style writes or unrelated chr
       world.style.setProperty("--design-canvas-inverse-zoom", ".5");
     });
     expect(await finishNativeDesignCameraObservation(page, "moving")).toBe(1);
+  } finally { await page.close(); }
+});
+
+it("names the frame documents a gesture mounts and those present after it", async () => {
+  const page = await browser.newPage();
+  try {
+    await page.setContent('<main data-design-retained-workspace="workspace" aria-hidden="false"><div data-design-canvas-world><article data-design-frame="page/a.html"></article></div></main>');
+    await startNativeDesignCameraObservation(page, "probe");
+    await page.locator("article").evaluate(node => {
+      const host = document.createElement("div");
+      host.innerHTML = '<iframe data-design-source-surface data-design-source-ready></iframe>';
+      node.append(host);
+    });
+    await finishNativeDesignCameraObservation(page, "probe");
+    const documents = await readNativeDesignDocuments(page);
+    expect(documents.mounted).toEqual([{ frame: "page/a.html", kind: "source",
+      attributes: ["data-design-source-ready", "data-design-source-surface"] }]);
+    expect(documents.present).toHaveLength(1);
+    expect(documents.present[0]).toMatchObject({ frame: "page/a.html", kind: "source" });
   } finally { await page.close(); }
 });
 

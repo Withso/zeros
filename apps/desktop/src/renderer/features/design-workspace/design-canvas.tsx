@@ -243,7 +243,8 @@ import {
   releaseDesignLayoutToolsLive,
 } from "./state/design-layout-tools-live";
 import { useDesignRuntimeStore, waitForDesignRuntimeFrame } from "./state/design-runtime-store";
-import { clearDesignFrameIntent, noteDesignFrameIntent, primeDesignFrameIntent, useDesignFrameIntent } from "./state/design-frame-intent";
+import { cancelDesignFrameIntentDwell, clearDesignFrameIntent, noteDesignFrameIntent, noteDesignPointerMoved, primeDesignFrameIntent,
+  useDesignFrameIntent } from "./state/design-frame-intent";
 import { useDesignFrameResidency } from "./state/use-design-frame-residency";
 import { designFramePreparationProblem, designFrameViews, designFramesAtPresentedGeometry, designPresentedFrame, isPreparedDesignFrame, type DesignFrameView } from "./state/design-frame-view";
 import { DesignPassiveSelectionPublisher } from "./state/design-passive-selection";
@@ -1476,7 +1477,8 @@ export const DesignCanvas = React.memo(function DesignCanvas({
     if (!latest) return;
     paintDesignCanvasCamera(worldRef.current, latest, true);
     refreshFrameResidency("camera");
-  }, [refreshFrameResidency]);
+    if (workspaceId) cancelDesignFrameIntentDwell(workspaceId);
+  }, [refreshFrameResidency, workspaceId]);
   useLayoutEffect(() => {
     const pending = wheelViewportRef.current;
     paintDesignCanvasCamera(
@@ -6224,6 +6226,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
         wheelViewportRef.current = latest;
         paintDesignCanvasCamera(worldRef.current, latest, true);
         refreshFrameResidency("camera");
+        cancelDesignFrameIntentDwell(workspaceId);
         designBackgroundWork.touch();
       };
 
@@ -8151,6 +8154,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
         onPointerMove={(event) => {
           syncMeasureModifier(event.altKey);
           syncStructureModifier(designStructureModifierPressed(event));
+          if (workspaceId) noteDesignPointerMoved(workspaceId, { x: event.clientX, y: event.clientY });
         }}
         // Entering a frame's title (or leaving it for anything else) is the
         // intent signal; movement within one element never reaches React state.
@@ -8164,7 +8168,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
             : null;
           // A selected frame already has its editor.
           if (file && view.selectedTargets.some((selected) => selected.frame === file)) return;
-          noteDesignFrameIntent(workspaceId, file);
+          noteDesignFrameIntent(workspaceId, file, { x: event.clientX, y: event.clientY });
         }}
         onPointerLeave={() => {
           if (workspaceId) clearDesignFrameIntent(workspaceId);

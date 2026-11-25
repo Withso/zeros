@@ -4,6 +4,8 @@ import {
   DESIGN_FRAME_INTENT_DWELL_MS,
   designFrameIntent,
   noteDesignFrameIntent,
+  noteDesignPointerMoved,
+  cancelDesignFrameIntentDwell,
   resetDesignFrameIntentForTests,
   subscribeDesignFrameIntent,
 } from "../state/design-frame-intent";
@@ -58,4 +60,39 @@ it("scopes intent by workspace owner and bounds retained owners", () => {
   }
   expect(designFrameIntent("ws_personal")).toBeNull();
   expect(designFrameIntent("ws_19")).toBe("a.html");
+});
+
+it("takes no intent from a frame the camera moves under a resting pointer", () => {
+  // A zoom or pan slides frame titles under a pointer that never moved, and
+  // Chromium reports each as a pointerover. Booting that frame's editor gave
+  // every later camera frame a document to re-raster and wait for.
+  noteDesignPointerMoved("ws_a", { x: 400, y: 300 });
+  noteDesignFrameIntent("ws_a", "a.html", { x: 400, y: 300 });
+  vi.advanceTimersByTime(DESIGN_FRAME_INTENT_DWELL_MS * 2);
+  expect(designFrameIntent("ws_a")).toBeNull();
+  // The pointer itself moving onto a title is intent.
+  noteDesignFrameIntent("ws_a", "a.html", { x: 410, y: 300 });
+  noteDesignPointerMoved("ws_a", { x: 410, y: 300 });
+  vi.advanceTimersByTime(DESIGN_FRAME_INTENT_DWELL_MS);
+  expect(designFrameIntent("ws_a")).toBe("a.html");
+  // Content moving away mid-dwell cancels the pending frame, not the current one.
+  noteDesignFrameIntent("ws_a", "b.html", { x: 420, y: 300 });
+  noteDesignPointerMoved("ws_a", { x: 420, y: 300 });
+  noteDesignFrameIntent("ws_a", "c.html", { x: 420, y: 300 });
+  vi.advanceTimersByTime(DESIGN_FRAME_INTENT_DWELL_MS * 2);
+  expect(designFrameIntent("ws_a")).toBe("a.html");
+  // The camera moving during the dwell carries the title away from the pointer.
+  noteDesignFrameIntent("ws_a", "e.html", { x: 430, y: 300 });
+  cancelDesignFrameIntentDwell("ws_a");
+  vi.advanceTimersByTime(DESIGN_FRAME_INTENT_DWELL_MS * 2);
+  expect(designFrameIntent("ws_a")).toBe("a.html");
+  // Without a pointer position (focus, Layers rows) intent is taken as before.
+  noteDesignFrameIntent("ws_a", "d.html");
+  vi.advanceTimersByTime(DESIGN_FRAME_INTENT_DWELL_MS);
+  expect(designFrameIntent("ws_a")).toBe("d.html");
+  // Leaving forgets the position: the first title on re-entry is intent.
+  clearDesignFrameIntent("ws_a");
+  noteDesignFrameIntent("ws_a", "a.html", { x: 420, y: 300 });
+  vi.advanceTimersByTime(DESIGN_FRAME_INTENT_DWELL_MS);
+  expect(designFrameIntent("ws_a")).toBe("a.html");
 });

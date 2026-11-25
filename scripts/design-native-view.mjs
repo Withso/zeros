@@ -120,13 +120,26 @@ export async function startNativeDesignCameraObservation(page, prefix) {
   await page.evaluate(prefix => {
     const world = document.querySelector('[data-design-retained-workspace][aria-hidden="false"] [data-design-canvas-world]');
     if (!world || globalThis.__designBenchmark) throw new Error("Native camera observation is unavailable or already owned.");
-    const observation = { world, changes: 0, transform: world.style.transform };
+    const observation = { world, changes: 0, transform: world.style.transform, mounted: [] };
     observation.record = () => {
       const transform = world.style.transform;
       if (transform !== observation.transform) { observation.transform = transform; observation.changes++; }
     };
     observation.observer = new MutationObserver(observation.record);
     observation.observer.observe(world, { attributes: true, attributeFilter: ["style"] });
+    // Which frame documents a gesture starts: each is a browsing context the
+    // gesture must also lay out, paint and present.
+    globalThis.__designDescribeDocument = frame => ({
+      frame: frame.closest("[data-design-frame]")?.getAttribute("data-design-frame") ?? null,
+      kind: frame.hasAttribute("data-design-source-surface") ? "source" : frame.hasAttribute("data-design-document-buffer") ? "runtime" : "other",
+      attributes: frame.getAttributeNames().filter(name => name.startsWith("data-design-")).sort(),
+    });
+    observation.documents = new MutationObserver(records => {
+      for (const record of records) for (const node of record.addedNodes)
+        if (node instanceof Element) for (const frame of [node, ...node.querySelectorAll("iframe")])
+          if (frame.tagName === "IFRAME") observation.mounted.push(globalThis.__designDescribeDocument(frame));
+    });
+    observation.documents.observe(document.body, { childList: true, subtree: true });
     globalThis.__designBenchmark = observation;
     performance.mark(prefix + ":start");
   }, prefix);
@@ -136,12 +149,25 @@ export async function finishNativeDesignCameraObservation(page, prefix) {
   return page.evaluate(prefix => {
     const observation = globalThis.__designBenchmark;
     if (!observation) throw new Error("Native camera observation is missing.");
-    observation.record(); observation.observer.disconnect(); delete globalThis.__designBenchmark;
+    observation.record(); observation.observer.disconnect(); observation.documents.disconnect(); delete globalThis.__designBenchmark;
+    globalThis.__designBenchmarkMounted = observation.mounted;
     if (document.querySelector('[data-design-retained-workspace][aria-hidden="false"] [data-design-canvas-world]') !== observation.world)
       throw new Error("The observed native camera owner changed.");
     performance.mark(prefix + ":end");
     return observation.changes;
   }, prefix);
+}
+
+/** The frame documents present now, and those the last observed gesture
+ * mounted. */
+export async function readNativeDesignDocuments(page) {
+  return page.evaluate(() => {
+    const describe = globalThis.__designDescribeDocument;
+    if (!describe) throw new Error("Native camera observation never ran.");
+    const present = [...document.querySelectorAll("iframe")].map(frame => ({ ...describe(frame),
+      visible: frame.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true }) }));
+    return { present, mounted: globalThis.__designBenchmarkMounted ?? [] };
+  });
 }
 
 /** Inspect the active owner's confirmed pixels, independently of readiness
