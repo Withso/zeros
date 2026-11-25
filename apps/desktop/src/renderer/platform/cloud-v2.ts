@@ -109,6 +109,19 @@ const ERRORS: Record<string, string> = {
 /** A failed restore keeps its checkpoint; Start tries it again. */
 const RETRYABLE = new Set(["checkpoint_restore_failed", "checkpoint_download_failed", "checkpoint_prerequisites_missing", "checkpoint_repository_missing",
   "execution_first_boot_failed"]);
+/** The server marks a failed workspace `recoverable` when it can still run (control plane failure-retry.ts): Start then
+ * recovers it (stop its machine, start it again). Without the mark, as on an older server or after a create that never
+ * ran, the code's own copy stands. */
+const RECOVER_ERRORS: Record<string, string> = {
+  worker_boot_timeout: "The workspace computer did not start in time. Start it to try again.",
+};
+const RECOVER_ERROR = "This workspace couldn't start. Start it to try again.";
+const cloudV2Recoverable = (workspace: CloudV2Workspace) =>
+  workspace.state === "failed" && (workspace as Record<string, unknown>).recoverable === true;
+const startable = (workspace: CloudV2Workspace) => workspace.state === "stopped" ||
+  (workspace.state === "failed" && (RETRYABLE.has(workspace.errorCode ?? "") || cloudV2Recoverable(workspace)));
+const errorMessage = (workspace: CloudV2Workspace, code: string) => cloudV2Recoverable(workspace) && !RETRYABLE.has(code)
+  ? RECOVER_ERRORS[code] ?? RECOVER_ERROR : ERRORS[code] ?? "This cloud workspace is unavailable.";
 
 export function cloudV2Document(workspace: CloudV2Workspace): CloudWorkspaceDocument {
   const [owner, name] = workspace.repository.split("/") as [string, string];
@@ -135,8 +148,9 @@ export function cloudV2Document(workspace: CloudV2Workspace): CloudWorkspaceDocu
       ...(workspace.capabilities.githubPullRequests === 1 ? { githubPullRequests: 1 as const } : {}),
       ...(workspace.chatEdits === 1 ? { chatEdits: 1 as const } : {}),
       canWrite: !readOnly, canEdit: !readOnly || canManage, canManage,
-      canStart: !readOnly && (workspace.state === "stopped" || (workspace.state === "failed" && RETRYABLE.has(workspace.errorCode ?? ""))),
-      startUnavailableReason: workspace.state === "failed" && !RETRYABLE.has(workspace.errorCode ?? "") ? "This workspace failed. Create a new one." : null,
+      canStart: !readOnly && startable(workspace),
+      startUnavailableReason: workspace.state === "failed" && !startable(workspace) ? "This workspace failed. Create a new one." : null,
+      ...(!readOnly && cloudV2Recoverable(workspace) ? { recoverable: true as const } : {}),
     },
     repository: { forge: "github.com", owner, name, revision: workspace.baseBranch },
     ...(workspace.github ? { github: workspace.github } : {}),
@@ -161,7 +175,7 @@ export function cloudV2Document(workspace: CloudV2Workspace): CloudWorkspaceDocu
     },
     // The catalog orders observations by the server's workspace update time.
     version: Date.parse(workspace.updatedAt),
-    error: workspace.errorCode ? { code: workspace.errorCode, message: ERRORS[workspace.errorCode] ?? "This cloud workspace is unavailable." } : null,
+    error: workspace.errorCode ? { code: workspace.errorCode, message: errorMessage(workspace, workspace.errorCode) } : null,
     createdAt: iso(workspace.createdAt),
     updatedAt: iso(workspace.updatedAt),
     deletedAt: workspace.state === "deleted" ? iso(workspace.updatedAt) : null,
@@ -288,7 +302,7 @@ export async function setCloudV2WorkspaceKeep(target: CloudWorkspaceTarget, keep
   return workspace;
 }
 
-export async function changeCloudV2Workspace(target: CloudWorkspaceTarget, action: "start" | "stop" | "restart" | "archive" | "delete"): Promise<CloudV2Workspace> {
+export async function changeCloudV2Workspace(target: CloudWorkspaceTarget, action: "start" | "stop" | "restart" | "recover" | "archive" | "delete"): Promise<CloudV2Workspace> {
   const id = uuid.parse(target.workspaceId), erase = action === "delete" && prepareCloudPromptErasure(target);
   const { workspace } = action === "delete"
     ? await cloudAccountRequest(`/v1/cloud-v2/workspaces/${id}`, one, { body: {}, idempotencyKey: key(), method: "DELETE" }, sharingFor(id))

@@ -24,6 +24,20 @@ database("shared execution lifecycle and metadata", () => {
     row = (await pool.query("SELECT execution_initiator_user_id,state FROM cloud_v2_workspaces WHERE id=$1", [f.workspace.id])).rows[0];
     expect(row).toEqual({ execution_initiator_user_id: f.admin.id, state: "stopping" });
   });
+  it("recovers a failed shared workspace as a restart under the caller's execution authority", async () => {
+    // 2026-11-25: an active workspace whose wake timed out with its machine intact could only be deleted.
+    await pool.query(`UPDATE cloud_v2_workspaces SET state='failed', error_code='worker_boot_timeout', boat_sandbox_id=coalesce(boat_sandbox_id,'bx_fixture1'),
+      active_at=coalesce(active_at,now()) WHERE id=$1`, [f.workspace.id]);
+    const before = (await pool.query("SELECT stop_generation::text AS gen FROM cloud_v2_workspaces WHERE id=$1", [f.workspace.id])).rows[0].gen;
+    const response = await call("recover"); expect(response.status).toBe(202);
+    const next = String(BigInt(before) + 1n);
+    const row = (await pool.query(`SELECT state,error_code,stop_generation::text AS gen,restart_stop_generation::text AS restart,
+      execution_initiator_user_id,execution_intent_id FROM cloud_v2_workspaces WHERE id=$1`, [f.workspace.id])).rows[0];
+    expect(row).toMatchObject({ state: "stopping", error_code: "worker_boot_timeout", gen: next, restart: next, execution_initiator_user_id: f.viewer.id });
+    expect(row.execution_intent_id).toEqual(expect.any(String));
+    await pool.query("UPDATE cloud_v2_workspaces SET state='failed', error_code='sandbox_missing' WHERE id=$1", [f.workspace.id]);
+    expect((await call("recover")).status).toBe(409);
+  });
   it("lets a member Stop without an agent login or GitHub call and keeps workspace archive restricted", async () => {
     f.fetcher.mockClear();
     expect((await call("stop")).status).toBe(202);
