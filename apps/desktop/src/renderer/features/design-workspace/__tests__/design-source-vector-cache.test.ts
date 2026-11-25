@@ -22,7 +22,7 @@ describe("completed Design source cache", () => {
   it("inspects a displayed image's exact authority without acquiring or renewing a cache lease", () => {
     const { cache, budget, time } = setup();
     const request = cache.open(target), lease = request.publish(svg)!;
-    const image = { isConnected: false, removeAttribute: vi.fn() } as unknown as HTMLImageElement;
+    const image = { isConnected: false, setAttribute: vi.fn() } as unknown as HTMLImageElement;
     expect(cache.hasDisplayedImage(target, image)).toBe(false);
     lease.confirm(image);
     const before = { cache: cache.usage(), budget: budget.usage() };
@@ -44,7 +44,7 @@ describe("completed Design source cache", () => {
   it("does not qualify a displayed image after its authority is retired", () => {
     const { cache } = setup();
     const request = cache.open(target), lease = request.publish(svg)!;
-    const image = { isConnected: false, removeAttribute: vi.fn() } as unknown as HTMLImageElement;
+    const image = { isConnected: false, setAttribute: vi.fn() } as unknown as HTMLImageElement;
     lease.confirm(image);
     cache.forgetWorkspaces([target.workspaceId]);
     expect(cache.hasDisplayedImage(target, image)).toBe(false);
@@ -54,8 +54,8 @@ describe("completed Design source cache", () => {
   it("does not lend a disconnected GPU source to a second display or replace its cached identity", () => {
     const { cache } = setup();
     const request = cache.open(target), vector = request.publish(svg)!;
-    const original = { isConnected: false, removeAttribute: vi.fn() } as unknown as HTMLImageElement;
-    const duplicate = { isConnected: false, removeAttribute: vi.fn() } as unknown as HTMLImageElement;
+    const original = { isConnected: false, setAttribute: vi.fn() } as unknown as HTMLImageElement;
+    const duplicate = { isConnected: false, setAttribute: vi.fn() } as unknown as HTMLImageElement;
     vector.confirm(original);
     const create = vi.fn(() => duplicate);
     const first = acquireDesignSourceVectorImage(vector, create);
@@ -183,19 +183,19 @@ describe("completed Design source cache", () => {
   it("bounds loaded warm elements separately, yields them under pressure and keeps encoded source", async () => {
     const budget = new DesignSourceVectorBudget(svg.length * 8, { create: vi.fn(() => "blob:frame"), revoke: vi.fn() });
     const cache = new DesignSourceVectorCache(budget, { maxImages: 1, maxImageBytes: svg.length * 8 });
-    const elements = [0, 1].map(() => ({ isConnected: false, removeAttribute: vi.fn() }) as unknown as HTMLImageElement);
+    const elements = [0, 1].map(() => ({ isConnected: false, setAttribute: vi.fn() }) as unknown as HTMLImageElement);
     for (const [index, element] of elements.entries()) {
       const request = cache.open({ ...target, file: `${index}.html` }); const lease = request.publish(svg)!;
       lease.confirm(element); lease.release(); request.close();
     }
     await Promise.resolve();
-    expect(elements[0].removeAttribute).toHaveBeenCalledWith("src");
-    expect(elements[1].removeAttribute).not.toHaveBeenCalled();
+    expect(elements[0].setAttribute).toHaveBeenCalledWith("src", "");
+    expect(elements[1].setAttribute).not.toHaveBeenCalled();
     expect(cache.usage()).toMatchObject({ entries: 2, warmImages: 1, warmImageEstimatedBytes: svg.length * 8 });
     const displayed = cache.open({ ...target, file: "1.html" });
     cache.clearWarmImages(); expect(displayed.cached?.image).toBe(elements[1]);
     displayed.cached!.release(); displayed.close(); cache.clearWarmImages(); await Promise.resolve();
-    expect(elements[1].removeAttribute).toHaveBeenCalledWith("src");
+    expect(elements[1].setAttribute).toHaveBeenCalledWith("src", "");
     const restored = cache.open({ ...target, file: "1.html" });
     expect(restored.cached).not.toBeNull(); expect(restored.cached!.image).toBeNull(); restored.cached!.release(); restored.close();
     expect(budget.usage().entries).toBe(2);
@@ -204,7 +204,7 @@ describe("completed Design source cache", () => {
   it.each([3, 10])("charges newly displayed images against retained images before navigation can double a pool capped at %i entries", async maxImages => {
     const budget = new DesignSourceVectorBudget(svg.length * 8, { create: vi.fn(() => "blob:frame"), revoke: vi.fn() });
     const cache = new DesignSourceVectorCache(budget, { maxImages, maxImageBytes: svg.length * 8 * 3 });
-    const elements = Array.from({ length: 5 }, () => ({ isConnected: false, removeAttribute: vi.fn() }) as unknown as HTMLImageElement);
+    const elements = Array.from({ length: 5 }, () => ({ isConnected: false, setAttribute: vi.fn() }) as unknown as HTMLImageElement);
     const display = (index: number) => {
       const request = cache.open({ ...target, file: `${index}.html` });
       const lease = request.publish(svg)!;
@@ -214,9 +214,9 @@ describe("completed Design source cache", () => {
     for (let i = 0; i < 3; i++) display(i)();
     const closeA = display(3), closeB = display(4);
     await Promise.resolve();
-    expect(elements[0].removeAttribute).toHaveBeenCalledWith("src");
-    expect(elements[1].removeAttribute).toHaveBeenCalledWith("src");
-    for (const element of elements.slice(2)) expect(element.removeAttribute).not.toHaveBeenCalled();
+    expect(elements[0].setAttribute).toHaveBeenCalledWith("src", "");
+    expect(elements[1].setAttribute).toHaveBeenCalledWith("src", "");
+    for (const element of elements.slice(2)) expect(element.setAttribute).not.toHaveBeenCalled();
     // Eviction retires only the loaded DOM; the exact-generation source is
     // still cached, and neither displayed consumer loses its pixels.
     const revisit = cache.open({ ...target, file: "0.html" });
@@ -234,7 +234,7 @@ describe("completed Design source cache", () => {
       const request = cache.open({ ...target, workspaceId, folder: `/work/${workspaceId}`, file: `${i}.html` });
       const lease = request.cached ?? request.publish(svg)!;
       if (!lease.image) {
-        const image = { isConnected: false, removeAttribute: vi.fn() } as unknown as HTMLImageElement;
+        const image = { isConnected: false, setAttribute: vi.fn() } as unknown as HTMLImageElement;
         images.push(image); lease.confirm(image);
       }
       return () => { lease.release(); request.close(); };
@@ -243,14 +243,14 @@ describe("completed Design source cache", () => {
     show("organization-local").forEach(close => close());
     const returned = show("personal-local");
     expect(images).toHaveLength(512);
-    for (const image of images) expect(image.removeAttribute).not.toHaveBeenCalled();
+    for (const image of images) expect(image.setAttribute).not.toHaveBeenCalled();
     returned.forEach(close => close());
   });
 
   it("never removes an active image to meet the pool budget and retires it when its last display releases", async () => {
     const budget = new DesignSourceVectorBudget(svg.length * 4, { create: vi.fn(() => "blob:frame"), revoke: vi.fn() });
     const cache = new DesignSourceVectorCache(budget, { maxImages: 1 });
-    const images = [0, 1].map(() => ({ isConnected: false, removeAttribute: vi.fn() }) as unknown as HTMLImageElement);
+    const images = [0, 1].map(() => ({ isConnected: false, setAttribute: vi.fn() }) as unknown as HTMLImageElement);
     const displayed = images.map((image, i) => {
       const request = cache.open({ ...target, file: `${i}.html` });
       const lease = request.publish(svg)!;
@@ -258,12 +258,12 @@ describe("completed Design source cache", () => {
       return { lease, request };
     });
     await Promise.resolve();
-    for (const image of images) expect(image.removeAttribute).not.toHaveBeenCalled();
+    for (const image of images) expect(image.setAttribute).not.toHaveBeenCalled();
     expect(cache.usage()).toMatchObject({ images: 2, leases: 2, warmImages: 0 });
     displayed[0].lease.release(); displayed[0].request.close();
     await Promise.resolve();
-    expect(images[0].removeAttribute).toHaveBeenCalledWith("src");
-    expect(images[1].removeAttribute).not.toHaveBeenCalled();
+    expect(images[0].setAttribute).toHaveBeenCalledWith("src", "");
+    expect(images[1].setAttribute).not.toHaveBeenCalled();
     expect(cache.usage()).toMatchObject({ images: 1, leases: 1 });
     displayed[1].lease.release(); displayed[1].request.close();
   });
