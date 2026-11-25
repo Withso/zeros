@@ -1,4 +1,5 @@
 import { expect } from "@playwright/test";
+import { openSidebarSubmenu, selectSidebarGrouping } from "./ui-smoke/sidebar-menu.mjs";
 import { runSidebarWorkspaceFilters } from "./ui-smoke-sidebar-filters.mjs";
 import { appSidebarRegressionChecks } from "./ui-smoke-app-sidebar-regressions.mjs";
 import { runWorkspaceHoverCards } from "./ui-smoke-workspace-hover-card.mjs";
@@ -21,12 +22,7 @@ export async function runAppSidebarSmoke({ page, check, harnessBase }) {
   const header = (id) => page.locator(`[data-sidebar-repository="${id}"]`);
   const row = (id) => page.locator(`[data-workspace-id="${id}"]`);
   const moveAway = () => page.mouse.move(900, 700);
-  const selectFilter = async (name) => {
-    await page
-      .getByRole("button", { name: "Filter workspaces", exact: true })
-      .click();
-    await page.getByRole("menuitemradio", { name, exact: true }).click();
-  };
+  const selectFilter = (name) => selectSidebarGrouping(page, name);
 
   await page.goto(harness, { waitUntil: "networkidle" });
   await page.evaluate(() => {
@@ -267,14 +263,10 @@ export async function runAppSidebarSmoke({ page, check, harnessBase }) {
     true,
   );
 
-  await page
-    .getByRole("button", { name: "Filter workspaces", exact: true })
-    .click();
-  expect(await page.getByRole("menuitemradio").allTextContents()).toEqual([
-    "Repository",
-    "Status",
-    "None",
-  ]);
+  await openSidebarSubmenu(page, "Group");
+  expect(await page.getByRole("menuitemradio").allTextContents()).toEqual(
+    expect.arrayContaining(["Repository", "Status", "None"]),
+  );
   await page.getByRole("menuitemradio", { name: "None", exact: true }).click();
   await expect(headers).toHaveCount(0);
   expect(
@@ -363,14 +355,21 @@ export async function runAppSidebarSmoke({ page, check, harnessBase }) {
   await page.evaluate(() => sessionStorage.clear());
   await page.goto(harness, { waitUntil: "networkidle" });
   await expect(row("ws-new-york")).toBeVisible();
-  const heights = await page.evaluate(() =>
-    [
-      ...document.querySelectorAll(
-        "[data-sidebar-repository], [data-workspace-tab]",
-      ),
-    ].map((node) => node?.getBoundingClientRect().height),
+  const heights = (selector) =>
+    page.evaluate(
+      (query) =>
+        [...document.querySelectorAll(query)].map(
+          (node) => node.getBoundingClientRect().height,
+        ),
+      selector,
+    );
+  expect(new Set(await heights("[data-sidebar-repository]"))).toEqual(
+    new Set([32]),
   );
-  expect(new Set(heights)).toEqual(new Set([32]));
+  // Default workspace rows are two lines: name, then status, PRs and time.
+  expect(new Set(await heights("[data-workspace-tab]"))).toEqual(
+    new Set([48]),
+  );
   const gaps = await page.evaluate(() => {
     const rows = [
       ...document.querySelectorAll(
@@ -392,6 +391,13 @@ export async function runAppSidebarSmoke({ page, check, harnessBase }) {
     );
     return {
       gaps: rows.slice(1).map((rect, index) => rect.top - rows[index].bottom),
+      hugs:
+        document
+          .querySelector('[aria-label="Switch organization"]')
+          .getBoundingClientRect().width <
+        document.querySelector("[data-app-sidebar]").getBoundingClientRect()
+          .width -
+          16,
       padding: [
         switcher.paddingTop,
         switcher.paddingRight,
@@ -401,16 +407,17 @@ export async function runAppSidebarSmoke({ page, check, harnessBase }) {
     };
   });
   expect(destinations.gaps).toEqual([2, 2]);
-  // The switcher is a full-width row with the destinations' 8px sides.
+  // The switcher hugs its name and arrow, with the destinations' 8px sides.
   expect(destinations.padding).toEqual(["0px", "8px", "0px", "8px"]);
+  expect(destinations.hugs).toBe(true);
   check(
-    "Repository and workspace rows are 32px tall and 2px apart; the organization switcher is a full-width row",
+    "Repository rows are 32px, workspace rows 48px, 2px apart; the organization switcher hugs its name",
     true,
   );
 
   const section = page
     .locator("[data-app-sidebar]")
-    .getByText("Workspaces", { exact: true })
+    .getByText("My workspaces", { exact: true })
     .locator("..");
   const filterButton = page.getByRole("button", {
     name: "Filter workspaces",
@@ -427,7 +434,7 @@ export async function runAppSidebarSmoke({ page, check, harnessBase }) {
   expect(
     await filterButton.evaluate((node) => getComputedStyle(node).opacity),
   ).toBe("0");
-  check("Workspaces reveals only its ⋯ on hover, with no row highlight", true);
+  check("My workspaces reveals only its filter button on hover, with no row highlight", true);
 
   // Collapse: the panel-left toggle hides the sidebar, then floats over the
   // content's corner at the same position; Home's title row sits beside it on

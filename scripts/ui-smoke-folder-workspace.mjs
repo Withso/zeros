@@ -1,4 +1,5 @@
 import { expect } from "@playwright/test";
+import { selectSidebarGrouping } from "./ui-smoke/sidebar-menu.mjs";
 
 export async function runWorkspaceRecoveryNavigationSmoke({ page, check }) {
   const harness = `${new URL(page.url()).origin}/apps/desktop/src/renderer/harnesses/harness-folder-workspace.html`;
@@ -16,8 +17,7 @@ export async function runWorkspaceRecoveryNavigationSmoke({ page, check }) {
     };
   });
   const selectGroup = async (name) => {
-    await page.getByRole("button", { name: "Filter workspaces", exact: true }).click();
-    await page.getByRole("menuitemradio", { name, exact: true }).click();
+    await selectSidebarGrouping(page, name);
   };
 
   await page.evaluate(() => { localStorage.clear(); sessionStorage.clear(); });
@@ -106,10 +106,7 @@ export async function runFolderWorkspaceSmoke({ page, check }) {
   // a second time, in any grouping.
   await expect(page.locator("[data-sidebar-repository]")).toHaveCount(0);
   for (const group of ["None", "Status", "Repository"]) {
-    await page
-      .getByRole("button", { name: "Filter workspaces", exact: true })
-      .click();
-    await page.getByRole("menuitemradio", { name: group, exact: true }).click();
+    await selectSidebarGrouping(page, group);
     await expect(tab).toHaveCount(1);
     await expect(tab.locator("svg.lucide-folder")).toHaveCount(1);
     await expect(page.locator('[data-workspace-tab="true"]')).toHaveCount(1);

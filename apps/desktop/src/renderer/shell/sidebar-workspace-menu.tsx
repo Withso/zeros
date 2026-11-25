@@ -292,7 +292,7 @@ export function SidebarWorkspaceMenu({
 
   return (
     <DropdownMenu open={active && open} onOpenChange={setOpen}>
-      <Tooltip label="View options" side="bottom" delayDuration={1500} disabled={open}>
+      <Tooltip label="Filter workspaces" side="bottom" delayDuration={1500} disabled={open}>
         <DropdownMenuTrigger asChild>
           <IconButton
             type="button"
@@ -302,8 +302,8 @@ export function SidebarWorkspaceMenu({
               "relative",
               !open && !anyApplied && "opacity-0 group-hover/section:opacity-100 focus-visible:opacity-100",
             )}
-            label="View options"
-            aria-description={anyApplied ? "View options changed" : undefined}
+            label="Filter workspaces"
+            aria-description={anyApplied ? "Filters applied" : undefined}
             data-filtered={anyApplied || undefined}
           >
             <ListFilter strokeWidth={1.5} />
