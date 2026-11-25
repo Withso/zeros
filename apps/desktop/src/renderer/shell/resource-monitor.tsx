@@ -700,12 +700,12 @@ export const ResourceMonitor = memo(function ResourceMonitor() {
               type="button"
               variant="ghost"
               size="sm"
-              className="h-7 shrink-0 gap-1 rounded-md border-border2 px-2 text-fg2 hover:bg-sidebar-bg-hover hover:text-fg1 data-[active=true]:bg-sidebar-bg-hover data-[active=true]:text-fg1"
+              className="h-6 shrink-0 gap-1 rounded-md border-border2 px-1.5 text-2xxs text-fg2 hover:bg-(--surface-hover) hover:text-fg1 data-[active=true]:bg-(--surface-hover) data-[active=true]:text-fg1 [&_svg]:size-3"
               data-active={open}
               aria-label="App resources"
               aria-expanded={open}
             >
-              <Cpu className="size-3.5" strokeWidth={1.5} aria-hidden="true" />
+              <Cpu className="size-3" strokeWidth={1.5} aria-hidden="true" />
               <span className="tabular-nums">{summaryMemory}</span>
             </Button>
           </PopoverTrigger>

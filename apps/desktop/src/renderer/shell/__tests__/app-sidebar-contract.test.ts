@@ -138,10 +138,12 @@ describe("sidebar workspace list presentations", () => {
     expect(MODEL).toMatch(
       /SIDEBAR_WORKSPACE_LIST_FILTERS[^=]*=\s*\[\s*"grouped",\s*"status",\s*"ungrouped",?\s*\]/,
     );
-    expect(MENU).toContain("SIDEBAR_WORKSPACE_LIST_FILTERS.map(");
     expect(MENU).toContain('aria-label="Group"');
-    expect(MENU).toContain('aria-label="Search repositories"');
     expect(MENU).toContain('aria-label="Sort by"');
+    // Step 2: the view menu has no search; every option is a checklist or switch.
+    expect(MENU).not.toContain('type="search"');
+    for (const label of ["Then by", "Hide empty groups", "Needs you on top", "Unread only", "Has unsent draft", "Show archived", "Compact view", "Expand child workspaces"])
+      expect(MENU, label).toContain(label);
     expect(SIDEBAR).not.toContain("repositoryWorkspaceListFilter");
   });
 
@@ -193,13 +195,12 @@ describe("sidebar workspace rows", () => {
   it("fill the sidebar width with the shared hover and their own selected fill", () => {
     const cls = classConstant(ROW, "SIDEBAR_WORKSPACE_ROW_CLS");
     expect(cls).toMatch(/\bw-full\b/);
-    expect(cls).toMatch(/\bh-8\b/);
+    expect(classConstant(ROW, "SIDEBAR_WORKSPACE_COMPACT_ROW_CLS")).toMatch(/\bh-8\b/);
     expect(cls).toContain("hover:bg-(--surface-hover)");
     expect(cls).toContain("focus-within:bg-(--surface-hover)");
-    // Selected is not hover: bg2-highlight, kept while hovered or focused.
-    expect(cls).toContain("data-[active=true]:bg-bg2-highlight");
-    expect(cls).toContain("data-[active=true]:hover:bg-bg2-highlight");
-    expect(cls).not.toContain("data-[active=true]:bg-(--surface-hover)");
+    // Step 2: selected shares the sidebar's own hover fill.
+    expect(cls).toContain("data-[active=true]:bg-(--surface-hover)");
+    expect(cls).not.toContain("bg2-highlight");
     expect(cls).toMatch(/data-\[active=true\]:text-fg1\b/);
     expect(cls).toContain("has-[>button:focus-visible]:inset-ring-accent");
     expect(cls).not.toContain("has-[>button:focus-visible]:ring-[3px]");
@@ -209,7 +210,7 @@ describe("sidebar workspace rows", () => {
       "apps/desktop/src/renderer/shared/ui/layout/surface.tsx",
     );
     expect(surface).toMatch(
-      /sidebar:\s*"bg-sidebar-bg \[--surface-hover:var\(--sidebar-bg-hover\)\]/,
+      /sidebar:\s*"bg-nav-bg \[--surface-hover:var\(--nav-bg-hover\)\]/,
     );
   });
 
@@ -361,14 +362,8 @@ describe("sidebar collapse and geometry", () => {
     );
     expect(SIDEBAR).toContain('<div className="flex flex-col gap-0.5">');
     expect(SIDEBAR).toContain('className="flex flex-col gap-0.5 empty:hidden"');
-    const section = SIDEBAR.slice(
-      SIDEBAR.indexOf('className="group/section'),
-      SIDEBAR.indexOf(
-        "Workspaces\n",
-        SIDEBAR.indexOf('className="group/section'),
-      ),
-    );
-    expect(section).not.toContain("hover:bg-");
+    expect(SIDEBAR).toContain('{section.id === null ? "My workspaces" : section.label}');
+    expect(SIDEBAR).toContain("setSidebarSectionCollapsed(id, !collapsed)");
     const label = classConstant(SIDEBAR, "SECTION_LABEL_CLS").split(/\s+/);
     for (const cls of ["text-3xxs", "leading-4", "font-medium", "text-fg3"]) expect(label, cls).toContain(cls);
     // The scroller's 4px top inset keeps the first header's focus ring whole.
@@ -394,7 +389,7 @@ describe("sidebar typography and colour", () => {
     expect(header).not.toMatch(/\btext-fg1\b/);
     expect(header).not.toContain("has-[:focus-visible]:bg-");
     // An open repository page fills its header like a selected row.
-    expect(header.split(/\s+/)).toContain("data-[active=true]:bg-bg2-highlight");
+    expect(header.split(/\s+/)).toContain("data-[active=true]:bg-(--surface-hover)");
     expect(classConstant(ROW, "GLYPH_BOX_CLS")).toMatch(/\btext-fg2\b/);
   });
 
@@ -406,13 +401,13 @@ describe("sidebar typography and colour", () => {
       'export const LOCAL_ORGANIZATION_LABEL = "Local";',
     );
     expect(switcher).toContain("<LaptopMinimal strokeWidth={1.5} />");
-    // A full-width 32px row, the same height and inset as the nav rows.
-    expect(switcher).toMatch(/\bh-8 w-full min-w-0\b/);
+    // Step 2: 32px tall, only as wide as the name and its arrow.
+    expect(switcher).toMatch(/\bh-8 w-fit max-w-full min-w-0\b/);
     expect(switcher).toContain(
       '<span className="min-w-0 truncate text-left">{label}</span>',
     );
     expect(switcher).toContain(
-      '<ChevronDown className="ml-auto size-3!" strokeWidth={1.5} />',
+      '<ChevronDown className="size-3!" strokeWidth={1.5} />',
     );
     expect(switcher).not.toContain("ExternalLink");
     expect(

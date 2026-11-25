@@ -3,8 +3,93 @@ import type { WorkspaceStatus } from "../platform/git";
 import { getSetting, setSetting } from "../platform/settings";
 import { LIFECYCLE_STATUSES } from "../shared/lib/workspace-status";
 
-export type SidebarWorkspaceSort = "updated" | "created";
+export type SidebarWorkspaceSort = "updated" | "created" | "name";
 export type SidebarPlacement = "local" | "cloud";
+/** Groupings beyond the persisted Repository / Status / None presentation. */
+export type SidebarExtraGrouping = "placement" | "owner" | "recency" | "pr";
+export type SidebarThenBy = "repository" | "status" | SidebarExtraGrouping;
+export type SidebarAgentStatusFilter = "input" | "working" | "unread" | "failed" | "idle";
+export type SidebarPrFilter = "none" | "draft" | "open" | "conflicts" | "merged" | "closed";
+export type SidebarOwnerFilter = "mine" | "following";
+export type SidebarSection = "pinned" | "mine" | "following" | "archived";
+
+/** App-wide view options from the sidebar's menu. Every default reads as "not
+ * applied", so the menu can mark exactly what the user changed. */
+export interface SidebarViewPreferences {
+  direction: "desc" | "asc";
+  needsYouFirst: boolean;
+  grouping: SidebarExtraGrouping | null;
+  thenBy: SidebarThenBy | null;
+  hideEmptyGroups: boolean;
+  statuses: readonly SidebarAgentStatusFilter[];
+  prStates: readonly SidebarPrFilter[];
+  owners: readonly SidebarOwnerFilter[];
+  unreadOnly: boolean;
+  draftOnly: boolean;
+  showProjectName: boolean;
+  compact: boolean;
+  expandChildren: boolean;
+  showArchived: boolean;
+  collapsedSections: readonly SidebarSection[];
+  collapsedGroups: readonly string[];
+}
+
+export const SIDEBAR_AGENT_STATUS_FILTERS: readonly SidebarAgentStatusFilter[] = ["input", "working", "unread", "failed", "idle"];
+export const SIDEBAR_PR_FILTERS: readonly SidebarPrFilter[] = ["none", "draft", "open", "conflicts", "merged", "closed"];
+export const SIDEBAR_OWNER_FILTERS: readonly SidebarOwnerFilter[] = ["mine", "following"];
+const EXTRA_GROUPINGS: readonly SidebarExtraGrouping[] = ["placement", "owner", "recency", "pr"];
+const THEN_BY: readonly SidebarThenBy[] = ["repository", "status", ...EXTRA_GROUPINGS];
+const SECTIONS: readonly SidebarSection[] = ["pinned", "mine", "following", "archived"];
+const MAX_COLLAPSED_GROUPS = 128;
+
+export const SIDEBAR_VIEW_DEFAULTS: SidebarViewPreferences = Object.freeze({
+  direction: "desc",
+  needsYouFirst: false,
+  grouping: null,
+  thenBy: null,
+  hideEmptyGroups: false,
+  statuses: Object.freeze([]),
+  prStates: Object.freeze([]),
+  owners: Object.freeze([]),
+  unreadOnly: false,
+  draftOnly: false,
+  showProjectName: false,
+  compact: false,
+  expandChildren: false,
+  showArchived: false,
+  collapsedSections: Object.freeze([]),
+  collapsedGroups: Object.freeze([]),
+});
+
+function pick<T extends string>(value: unknown, allowed: readonly T[]): readonly T[] {
+  return Array.isArray(value) ? allowed.filter((option) => value.includes(option)) : [];
+}
+
+function sidebarView(raw: unknown): SidebarViewPreferences {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return SIDEBAR_VIEW_DEFAULTS;
+  const value = raw as Record<string, unknown>;
+  const flag = (key: keyof SidebarViewPreferences) => value[key] === true;
+  return {
+    direction: value.direction === "asc" ? "asc" : "desc",
+    needsYouFirst: flag("needsYouFirst"),
+    grouping: EXTRA_GROUPINGS.find((option) => option === value.grouping) ?? null,
+    thenBy: THEN_BY.find((option) => option === value.thenBy) ?? null,
+    hideEmptyGroups: flag("hideEmptyGroups"),
+    statuses: pick(value.statuses, SIDEBAR_AGENT_STATUS_FILTERS),
+    prStates: pick(value.prStates, SIDEBAR_PR_FILTERS),
+    owners: pick(value.owners, SIDEBAR_OWNER_FILTERS),
+    unreadOnly: flag("unreadOnly"),
+    draftOnly: flag("draftOnly"),
+    showProjectName: flag("showProjectName"),
+    compact: flag("compact"),
+    expandChildren: flag("expandChildren"),
+    showArchived: flag("showArchived"),
+    collapsedSections: pick(value.collapsedSections, SECTIONS),
+    collapsedGroups: Array.isArray(value.collapsedGroups)
+      ? [...new Set(value.collapsedGroups.filter(validId))].slice(-MAX_COLLAPSED_GROUPS)
+      : [],
+  };
+}
 
 interface SidebarListPreferences {
   sort: SidebarWorkspaceSort;
@@ -12,6 +97,7 @@ interface SidebarListPreferences {
   collapsedStatuses: readonly WorkspaceStatus[];
   /** unified-workspaces: a view preference per owner; at most one placement is hidden. */
   hiddenPlacementsByOwner: Readonly<Record<string, readonly SidebarPlacement[]>>;
+  view: SidebarViewPreferences;
 }
 
 const KEY = "sidebar-list-preferences-v1";
@@ -25,6 +111,7 @@ const DEFAULTS: SidebarListPreferences = {
   repositoryIdsByOwner: {},
   collapsedStatuses: [],
   hiddenPlacementsByOwner: {},
+  view: SIDEBAR_VIEW_DEFAULTS,
 };
 
 function hiddenPlacements(value: unknown): readonly SidebarPlacement[] {
@@ -65,7 +152,8 @@ export function getSidebarListPreferences(): SidebarListPreferences {
   const value = raw as Record<string, unknown>;
   const owners = value.repositoryIdsByOwner;
   snapshot = {
-    sort: value.sort === "created" ? "created" : "updated",
+    sort: value.sort === "created" || value.sort === "name" ? value.sort : "updated",
+    view: sidebarView(value.view),
     repositoryIdsByOwner: Object.fromEntries(
       owners && typeof owners === "object" && !Array.isArray(owners)
         ? Object.entries(owners)
@@ -106,7 +194,7 @@ function write(next: SidebarListPreferences): void {
 
 export function setSidebarWorkspaceSort(sort: SidebarWorkspaceSort): void {
   const current = getSidebarListPreferences();
-  if (current.sort !== sort && (sort === "created" || sort === "updated")) {
+  if (current.sort !== sort && (sort === "created" || sort === "updated" || sort === "name")) {
     write({ ...current, sort });
   }
 }
@@ -152,6 +240,34 @@ export function setSidebarHiddenPlacements(
   const entries = Object.entries(current.hiddenPlacementsByOwner).filter(([key]) => key !== owner);
   if (next.length) entries.push([owner, next]);
   write({ ...current, hiddenPlacementsByOwner: Object.fromEntries(entries.slice(-MAX_OWNERS)) });
+}
+
+/** Merge menu changes into the view; unchanged values write nothing. */
+export function setSidebarView(patch: Partial<SidebarViewPreferences>): void {
+  const current = getSidebarListPreferences();
+  const next = sidebarView({ ...current.view, ...patch });
+  if (JSON.stringify(next) === JSON.stringify(current.view)) return;
+  write({ ...current, view: next });
+}
+
+/** Reset keeps what the menu does not own: collapsed sections and groups. */
+export function resetSidebarView(keys?: readonly (keyof SidebarViewPreferences)[]): void {
+  const reset = keys ?? (Object.keys(SIDEBAR_VIEW_DEFAULTS) as (keyof SidebarViewPreferences)[])
+    .filter((key) => key !== "collapsedSections" && key !== "collapsedGroups");
+  setSidebarView(Object.fromEntries(reset.map((key) => [key, SIDEBAR_VIEW_DEFAULTS[key]])) as Partial<SidebarViewPreferences>);
+}
+
+export function setSidebarSectionCollapsed(section: SidebarSection, collapsed: boolean): void {
+  const { view } = getSidebarListPreferences();
+  const rest = view.collapsedSections.filter((value) => value !== section);
+  setSidebarView({ collapsedSections: collapsed ? [...rest, section] : rest });
+}
+
+export function setSidebarGroupCollapsed(key: string, collapsed: boolean): void {
+  if (!validId(key)) return;
+  const { view } = getSidebarListPreferences();
+  const rest = view.collapsedGroups.filter((value) => value !== key);
+  setSidebarView({ collapsedGroups: collapsed ? [...rest, key] : rest });
 }
 
 export function setSidebarStatusCollapsed(

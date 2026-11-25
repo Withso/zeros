@@ -93,22 +93,18 @@ describe("sidebar workspace row", () => {
     expect(leading).toMatch(/working \? \(\s*<AgentActivityIndicator activity=\{activity\} \/>/);
   });
 
-  it("shows a grouped row's mark in the inset gutter, left of the square", () => {
-    const gutter = row.indexOf("{grouped && statusMark && (");
-    expect(gutter).toBeGreaterThan(-1);
-    expect(gutter).toBeLessThan(row.indexOf("{archiving ? ("));
-    expect(row.slice(gutter, gutter + 400)).toMatch(
-      /<span className=\{SIDEBAR_WORKSPACE_GUTTER_CLS\} aria-hidden="true">[\s\S]*?<AgentAwaitingIcon/,
-    );
-    // The square starts on the header's 40px name column; the 32px gutter
-    // centres the mark on the header's 24px icon column.
+  it("gives a Compact row's status a dot after the leading slot, never for Working", () => {
+    const dot = row.indexOf("{statusDot && (");
+    expect(dot).toBeGreaterThan(row.indexOf("{archiving ? ("));
+    expect(dot).toBeLessThan(row.indexOf("{/* Only the name truncates"));
+    expect(row).toContain('const statusDot = compact && rowStatus && rowStatus.tone !== "muted" ? STATUS_DOT_CLS[rowStatus.tone] : null;');
     expect(ROW).toMatch(/const SIDEBAR_WORKSPACE_GROUPED_INSET_CLS = "pl-8";/);
-    expect(ROW).toMatch(/SIDEBAR_WORKSPACE_GUTTER_CLS =\s*"[^"]*\babsolute inset-y-0 left-0\b[^"]*\bw-8\b/);
+    expect(ROW).not.toContain("SIDEBAR_WORKSPACE_GUTTER_CLS");
   });
 
   it("gives a flat row's mark the pencil's slot, which it outranks", () => {
     expect(row).toMatch(/const statusMark = archiving \? null : \(awaitingKind \?\? /);
-    expect(row).toMatch(/const trailingMark = !grouped && statusMark \? statusMark : showDraft \? "draft" : null;/);
+    expect(row).toMatch(/const trailingMark = twoLine && statusMark === "unread" \? "unread" : showDraft \? "draft" : null;/);
     // An Ungrouped row's trailing agent state is the loader alone now.
     expect(row).toMatch(/const trailingAgentState = mixedRepositories && !archiving && working;/);
   });
@@ -137,9 +133,8 @@ describe("unread dot", () => {
   it("sits where a workspace row's plan or question mark goes, which outranks it", () => {
     expect(row).toContain("const unread = useAnyChatUnread(chatIds);");
     expect(row).toMatch(/const statusMark = archiving \? null : \(awaitingKind \?\? \(unread \? "unread" : null\)\);/);
-    const gutter = row.slice(row.indexOf("{grouped && statusMark && ("), row.indexOf("{archiving ? ("));
-    expect(gutter).toMatch(/statusMark === "unread" \? \(\s*<ChatUnreadDot \/>/);
-    expect(row).toMatch(/const trailingMark = !grouped && statusMark \? statusMark : showDraft \? "draft" : null;/);
+    expect(row).toMatch(/trailingMark === "unread" \? \(\s*<ChatUnreadDot \/>/);
+    expect(row).toMatch(/const trailingMark = twoLine && statusMark === "unread" \? "unread" : showDraft \? "draft" : null;/);
     expect(row).toMatch(/unread,\s*\}\)\}/);
   });
 

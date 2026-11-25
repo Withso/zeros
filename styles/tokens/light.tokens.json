@@ -277,6 +277,40 @@
         }
       }
     },
+    "nav-bg": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [40.0, 27.273, 97.843]
+      },
+      "$description": "workspace navigation sidebar background",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--nav-bg",
+          "section": "light-sidebar-bg",
+          "utility": "--color-nav-bg",
+          "utilitySection": "utilities-sidebar-bg",
+          "utilityOrder": 20
+        }
+      }
+    },
+    "nav-bg-hover": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [36.0, 12.195, 91.961]
+      },
+      "$description": "workspace navigation row hover and selected state",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--nav-bg-hover",
+          "section": "light-sidebar-bg",
+          "utility": "--color-nav-bg-hover",
+          "utilitySection": "utilities-sidebar-bg",
+          "utilityOrder": 21
+        }
+      }
+    },
     "sidebar-bg": {
       "$type": "color",
       "$value": {
@@ -324,7 +358,7 @@
           "section": "light-border1",
           "utility": "--color-border1",
           "utilitySection": "utilities-border1",
-          "utilityOrder": 20
+          "utilityOrder": 22
         }
       }
     },
@@ -341,7 +375,7 @@
           "section": "light-border1",
           "utility": "--color-border2",
           "utilitySection": "utilities-border1",
-          "utilityOrder": 21
+          "utilityOrder": 23
         }
       }
     },
@@ -358,7 +392,7 @@
           "section": "light-border3",
           "utility": "--color-border3",
           "utilitySection": "utilities-border1",
-          "utilityOrder": 22
+          "utilityOrder": 24
         }
       }
     },
@@ -375,7 +409,7 @@
           "section": "light-border3",
           "utility": "--color-border4",
           "utilitySection": "utilities-border1",
-          "utilityOrder": 23
+          "utilityOrder": 25
         }
       }
     },
@@ -457,7 +491,7 @@
           "section": "light-highlighted-bg",
           "utility": "--color-highlighted-bg",
           "utilitySection": "utilities-highlighted-bg",
-          "utilityOrder": 24,
+          "utilityOrder": 26,
           "cssFormat": "multiline"
         }
       }
@@ -475,7 +509,7 @@
           "section": "light-highlighted-bg",
           "utility": "--color-highlighted-bright",
           "utilitySection": "utilities-highlighted-bg",
-          "utilityOrder": 25,
+          "utilityOrder": 27,
           "cssFormat": "multiline"
         }
       }
@@ -493,7 +527,7 @@
           "section": "light-inverted-bg",
           "utility": "--color-inverted-bg",
           "utilitySection": "utilities-inverted-bg",
-          "utilityOrder": 26
+          "utilityOrder": 28
         }
       }
     },
@@ -510,7 +544,7 @@
           "section": "light-inverted-bg",
           "utility": "--color-inverted-fg",
           "utilitySection": "utilities-inverted-bg",
-          "utilityOrder": 27
+          "utilityOrder": 29
         }
       }
     },
@@ -527,7 +561,7 @@
           "section": "light-primary-button-hover",
           "utility": "--color-primary-button-hover",
           "utilitySection": "utilities-primary-button-bg",
-          "utilityOrder": 29
+          "utilityOrder": 31
         }
       }
     },
@@ -544,7 +578,7 @@
           "section": "light-red-primary",
           "utility": "--color-red-primary",
           "utilitySection": "utilities-red-primary",
-          "utilityOrder": 31
+          "utilityOrder": 33
         }
       }
     },
@@ -561,7 +595,7 @@
           "section": "light-red-primary",
           "utility": "--color-red-secondary",
           "utilitySection": "utilities-red-primary",
-          "utilityOrder": 32,
+          "utilityOrder": 34,
           "cssFormat": "multiline"
         }
       }
@@ -579,7 +613,7 @@
           "section": "light-red-primary",
           "utility": "--color-red-secondary-hover",
           "utilitySection": "utilities-red-primary",
-          "utilityOrder": 34
+          "utilityOrder": 36
         }
       }
     },
@@ -596,7 +630,7 @@
           "section": "light-red-primary",
           "utility": "--color-red-bg",
           "utilitySection": "utilities-red-primary",
-          "utilityOrder": 35
+          "utilityOrder": 37
         }
       }
     },
@@ -613,7 +647,7 @@
           "section": "light-red-primary",
           "utility": "--color-red-fg",
           "utilitySection": "utilities-red-primary",
-          "utilityOrder": 36
+          "utilityOrder": 38
         }
       }
     },
@@ -630,7 +664,7 @@
           "section": "light-red-primary",
           "utility": "--color-green-primary",
           "utilitySection": "utilities-red-primary",
-          "utilityOrder": 37
+          "utilityOrder": 39
         }
       }
     },
@@ -647,7 +681,7 @@
           "section": "light-red-primary",
           "utility": "--color-green-bg",
           "utilitySection": "utilities-red-primary",
-          "utilityOrder": 38
+          "utilityOrder": 40
         }
       }
     },
@@ -664,7 +698,7 @@
           "section": "light-red-primary",
           "utility": "--color-green-fg",
           "utilitySection": "utilities-red-primary",
-          "utilityOrder": 39
+          "utilityOrder": 41
         }
       }
     },
@@ -681,7 +715,7 @@
           "section": "light-red-primary",
           "utility": "--color-yellow-primary",
           "utilitySection": "utilities-red-primary",
-          "utilityOrder": 40,
+          "utilityOrder": 42,
           "cssFormat": "multiline"
         }
       }
@@ -699,7 +733,7 @@
           "section": "light-red-primary",
           "utility": "--color-yellow-bg",
           "utilitySection": "utilities-red-primary",
-          "utilityOrder": 41
+          "utilityOrder": 43
         }
       }
     },
@@ -716,7 +750,7 @@
           "section": "light-red-primary",
           "utility": "--color-yellow-fg",
           "utilitySection": "utilities-red-primary",
-          "utilityOrder": 42
+          "utilityOrder": 44
         }
       }
     },
@@ -733,7 +767,7 @@
           "section": "light-red-primary",
           "utility": "--color-yellow-icon",
           "utilitySection": "utilities-red-primary",
-          "utilityOrder": 43
+          "utilityOrder": 45
         }
       }
     },
@@ -764,7 +798,7 @@
           "section": "light-red-primary",
           "utility": "--color-blue-primary",
           "utilitySection": "utilities-red-primary",
-          "utilityOrder": 44
+          "utilityOrder": 46
         }
       }
     },
@@ -781,7 +815,7 @@
           "section": "light-red-primary",
           "utility": "--color-blue-bg",
           "utilitySection": "utilities-red-primary",
-          "utilityOrder": 45
+          "utilityOrder": 47
         }
       }
     },
@@ -798,7 +832,7 @@
           "section": "light-red-primary",
           "utility": "--color-blue-fg",
           "utilitySection": "utilities-red-primary",
-          "utilityOrder": 46
+          "utilityOrder": 48
         }
       }
     },
@@ -815,7 +849,7 @@
           "section": "light-red-primary",
           "utility": "--color-blue-pill-bg",
           "utilitySection": "utilities-local-links",
-          "utilityOrder": 126
+          "utilityOrder": 128
         }
       }
     },
@@ -832,7 +866,7 @@
           "section": "light-red-primary",
           "utility": "--color-blue-pill-hover",
           "utilitySection": "utilities-local-links",
-          "utilityOrder": 127
+          "utilityOrder": 129
         }
       }
     },
@@ -846,7 +880,7 @@
           "section": "light-red-primary",
           "utility": "--color-green-secondary",
           "utilitySection": "utilities-green-secondary",
-          "utilityOrder": 128
+          "utilityOrder": 130
         }
       }
     },
@@ -863,7 +897,7 @@
           "section": "light-red-primary",
           "utility": "--color-green-secondary-hover",
           "utilitySection": "utilities-green-secondary",
-          "utilityOrder": 129
+          "utilityOrder": 131
         }
       }
     },
@@ -877,7 +911,7 @@
           "section": "light-red-primary",
           "utility": "--color-blue-secondary",
           "utilitySection": "utilities-green-secondary",
-          "utilityOrder": 131
+          "utilityOrder": 133
         }
       }
     },
@@ -894,7 +928,7 @@
           "section": "light-red-primary",
           "utility": "--color-blue-secondary-hover",
           "utilitySection": "utilities-green-secondary",
-          "utilityOrder": 132
+          "utilityOrder": 134
         }
       }
     },
@@ -908,7 +942,7 @@
           "section": "light-red-primary",
           "utility": "--color-neutral-secondary",
           "utilitySection": "utilities-green-secondary",
-          "utilityOrder": 134
+          "utilityOrder": 136
         }
       }
     },
@@ -925,7 +959,7 @@
           "section": "light-red-primary",
           "utility": "--color-neutral-secondary-hover",
           "utilitySection": "utilities-green-secondary",
-          "utilityOrder": 135
+          "utilityOrder": 137
         }
       }
     },
@@ -1003,7 +1037,7 @@
           "section": "light-red-primary",
           "utility": "--color-conflict-neutral",
           "utilitySection": "utilities-green-secondary",
-          "utilityOrder": 137
+          "utilityOrder": 139
         }
       }
     },
@@ -1020,7 +1054,7 @@
           "section": "light-red-primary",
           "utility": "--color-violet-primary",
           "utilitySection": "utilities-red-primary",
-          "utilityOrder": 47
+          "utilityOrder": 49
         }
       }
     },
@@ -1037,7 +1071,7 @@
           "section": "light-red-primary",
           "utility": "--color-violet-bg",
           "utilitySection": "utilities-red-primary",
-          "utilityOrder": 48
+          "utilityOrder": 50
         }
       }
     },
@@ -1054,7 +1088,7 @@
           "section": "light-red-primary",
           "utility": "--color-violet-fg",
           "utilitySection": "utilities-red-primary",
-          "utilityOrder": 49
+          "utilityOrder": 51
         }
       }
     },
@@ -1071,7 +1105,7 @@
           "section": "light-red-primary",
           "utility": "--color-accent",
           "utilitySection": "utilities-red-primary",
-          "utilityOrder": 50
+          "utilityOrder": 52
         }
       }
     },

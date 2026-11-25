@@ -64,7 +64,7 @@ import { RepositoryIconDialog } from "./repository-icon-dialog";
 // like a selected workspace row, when its repository page is active. Focus
 // stays on the focused control itself.
 const REPOSITORY_HEADER_CLS =
-  "group/repo relative flex h-8 w-full min-w-0 shrink-0 select-none items-center gap-1 rounded-md pr-1 text-fg2 transition-none [--repo-fill:var(--sidebar-bg)] data-[active=true]:bg-bg2-highlight data-[active=true]:[--repo-fill:var(--bg2-highlight)]";
+  "group/repo relative flex h-8 w-full min-w-0 shrink-0 select-none items-center gap-1 rounded-md pr-1 text-fg2 transition-none [--repo-fill:var(--nav-bg)] data-[active=true]:bg-(--surface-hover) data-[active=true]:[--repo-fill:var(--nav-bg-hover)]";
 // Sits left of the always-visible Create button: 2px gap, then a 16px fade
 // that stays click-through to the name; only its buttons take the pointer.
 const REPOSITORY_HOVER_ACTIONS_CLS =

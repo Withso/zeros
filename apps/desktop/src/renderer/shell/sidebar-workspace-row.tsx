@@ -45,7 +45,21 @@ import {
 import { type Workspace } from "../platform/git";
 import { isCloudWorkspace } from "../platform/bridge/cloud-workspace-key";
 import { localWorkShowsEverywhere } from "../features/team/organization-capabilities";
-import { showsCloudMark, SidebarCloudMark } from "./sidebar-cloud-mark";
+import { useCloudWorkspaceStatus } from "./sidebar-cloud-mark";
+import { formatCompactAge } from "../features/agent/format-age";
+import {
+  prMarkGroups,
+  prMarkLayout,
+  workspacePullRequests,
+  workspaceUpdatedAt,
+} from "./sidebar-view-model";
+import {
+  SidebarPlacementIcon,
+  SidebarPrMarks,
+  SidebarWorkspaceRowMeta,
+  STATUS_DOT_CLS,
+  sidebarRowStatus,
+} from "./sidebar-workspace-row-meta";
 import { AgentActivityIndicator } from "../features/agent/agent-activity-indicator";
 import { AgentAwaitingIcon } from "../features/agent/agent-awaiting-indicator";
 import { useAnyChatUnread } from "../features/agent/chat-unread";
@@ -96,23 +110,25 @@ import { pullRequestTarget } from "../state/workspace-repositories";
 
 // --- CONSTANTS ---
 
-// Full-width 32px row. Hover is the sidebar's hover fill; the selected row has
-// its own, bg2-highlight with fg1, so it never reads as hover. Rows never
+// Full-width row. Hover and the selected row share the sidebar's own hover
+// fill (#222 in dark); selection also lifts the name to fg1. Rows never
 // shift. --row-fill carries the current fill so the Archive fade matches it.
 // Keyboard focus is the standard ring drawn as shadows (a 1px inset edge and
 // the 3px halo), so the row keeps no layout border and its glyph lands on the
 // 16px icon column. `transition-none` keeps a switch from cross-fading the old
 // and new selection.
 const SIDEBAR_WORKSPACE_ROW_CLS =
-  "group/workspace relative flex h-8 w-full min-w-0 shrink-0 select-none items-center overflow-hidden rounded-md pr-2 text-left text-xs font-normal text-fg2 transition-none [--row-fill:var(--surface-hover)] hover:bg-(--surface-hover) focus-within:bg-(--surface-hover) data-[active=true]:bg-bg2-highlight data-[active=true]:text-fg1 data-[active=true]:[--row-fill:var(--bg2-highlight)] data-[active=true]:hover:bg-bg2-highlight data-[active=true]:focus-within:bg-bg2-highlight has-[>button:focus-visible]:inset-ring has-[>button:focus-visible]:inset-ring-accent";
+  "group/workspace relative flex w-full min-w-0 shrink-0 select-none items-center overflow-hidden rounded-md pr-2 text-left text-xs font-normal text-fg2 transition-none [--row-fill:var(--surface-hover)] hover:bg-(--surface-hover) focus-within:bg-(--surface-hover) data-[active=true]:bg-(--surface-hover) data-[active=true]:text-fg1 has-[>button:focus-visible]:inset-ring has-[>button:focus-visible]:inset-ring-accent";
+// Compact rows keep the one 32px line; the default row is two lines (name,
+// then placement · status · PRs · time) and an optional third for the project.
+const SIDEBAR_WORKSPACE_COMPACT_ROW_CLS = "h-8";
+const SIDEBAR_WORKSPACE_TWO_LINE_ROW_CLS = "items-start py-1.5";
+// Archive covers line 1 only, so line 2 never changes on hover.
+const SIDEBAR_WORKSPACE_TWO_LINE_ACTION_CLS = "inset-y-auto top-0 h-[30px]";
 // Grouped rows sit under their repository header: the state glyph starts on
 // the header's 40px name column. Ungrouped rows (repository icon first) and
 // standalone folder rows align with the headers' own 16px icon column.
 const SIDEBAR_WORKSPACE_GROUPED_INSET_CLS = "pl-8";
-// The grouped inset doubles as the gutter for the awaiting mark, left of the
-// square it must not replace; it centres on the header's icon column (24px).
-const SIDEBAR_WORKSPACE_GUTTER_CLS =
-  "pointer-events-none absolute inset-y-0 left-0 flex w-8 items-center justify-center text-fg2";
 const SIDEBAR_WORKSPACE_FLAT_INSET_CLS = "pl-2";
 const SIDEBAR_WORKSPACE_OPEN_BUTTON_CLS =
   "absolute inset-0 size-full rounded-md border-0 bg-transparent p-0 text-inherit shadow-none transition-none hover:bg-transparent hover:text-inherit focus-visible:ring-0";
@@ -219,6 +235,10 @@ export interface SidebarWorkspaceRowProps {
   /** A legacy plain folder has no repository header, so its own row carries
    *  the folder's settings action in the slot Archive uses elsewhere. */
   onOpenSettings?: () => void;
+  /** One-line rows: a status dot after the leading slot, time at the end. */
+  compact?: boolean;
+  /** Adds the project name as a third line (never in Compact). */
+  showProjectName?: boolean;
 }
 
 // --- ROOT COMPONENTS ---
@@ -239,7 +259,10 @@ export function SidebarWorkspaceRow({
   onArchive,
   rowRef,
   onOpenSettings,
+  compact = false,
+  showProjectName = false,
 }: SidebarWorkspaceRowProps) {
+  const twoLine = !compact;
   const requestedMode = usePendingWorkspaceMode(workspace.id);
   const modeSwitching = requestedMode !== null;
   const designWorkspace = workspace.kind === "design";
@@ -273,9 +296,27 @@ export function SidebarWorkspaceRow({
   // unread finish. Grouped rows show it in a gutter left of the square; flat
   // rows put it in the pencil's slot, which it outranks.
   const statusMark = archiving ? null : (awaitingKind ?? (unread ? "unread" : null));
-  const trailingMark = !grouped && statusMark ? statusMark : showDraft ? "draft" : null;
-  // unified-workspaces lists Local and cloud rows together; only cloud rows carry a mark.
-  const cloudMark = showsCloudMark(localWorkShowsEverywhere() && isCloudWorkspace(workspace.path), trailingMark);
+  // Line 2 spells the status out and Compact gives it a dot after the leading
+  // slot, so the trailing slot keeps only the unsent-draft pencil (and, on
+  // two-line rows, the unread dot beside the name).
+  const trailingMark = twoLine && statusMark === "unread" ? "unread" : showDraft ? "draft" : null;
+  const cloudRow = isCloudWorkspace(workspace.path);
+  const cloudStatus = useCloudWorkspaceStatus(cloudRow ? workspace.path : null);
+  const rowStatus = sidebarRowStatus({
+    archiving,
+    setupFailed: workspace.setupState === "failed",
+    cloudStatus,
+    awaiting: archiving ? null : awaitingKind,
+    working,
+    unread,
+  });
+  const pulls = workspacePullRequests(workspace, islandKind);
+  const updatedAt = workspaceUpdatedAt(workspace, activeAt);
+  const statusDot = compact && rowStatus && rowStatus.tone !== "muted" ? STATUS_DOT_CLS[rowStatus.tone] : null;
+  const projectName = showProjectName && twoLine ? (workspace.project?.name ?? project?.name ?? null) : null;
+  // unified-workspaces lists Local and cloud rows together. Compact rows carry
+  // the placement beside the name; two-line rows on line 2.
+  const placementMark = compact && localWorkShowsEverywhere();
   // One hover/focus action per row: Archive for a managed worktree, folder
   // settings for a legacy plain folder, nothing for a primary checkout.
   const action =
@@ -301,7 +342,7 @@ export function SidebarWorkspaceRow({
       className={
         trailingMark
           ? SIDEBAR_WORKSPACE_DRAFT_ACTION_OVERLAY_CLS
-          : SIDEBAR_WORKSPACE_ACTION_OVERLAY_CLS
+          : cn(SIDEBAR_WORKSPACE_ACTION_OVERLAY_CLS, twoLine && SIDEBAR_WORKSPACE_TWO_LINE_ACTION_CLS)
       }
     >
       <Tooltip label={action.tooltip} side="right">
@@ -328,11 +369,13 @@ export function SidebarWorkspaceRow({
       ref={rowRef}
       className={cn(
         SIDEBAR_WORKSPACE_ROW_CLS,
+        compact ? SIDEBAR_WORKSPACE_COMPACT_ROW_CLS : SIDEBAR_WORKSPACE_TWO_LINE_ROW_CLS,
         grouped
           ? SIDEBAR_WORKSPACE_GROUPED_INSET_CLS
           : SIDEBAR_WORKSPACE_FLAT_INSET_CLS,
       )}
       data-active={active}
+      data-compact={compact}
       data-workspace-tab="true"
       data-workspace-id={workspace.id}
       data-streaming={working || undefined}
@@ -382,21 +425,8 @@ export function SidebarWorkspaceRow({
         })}
         disabled={archiving}
       />
-      {grouped && statusMark && (
-        <span className={SIDEBAR_WORKSPACE_GUTTER_CLS} aria-hidden="true">
-          {statusMark === "unread" ? (
-            <ChatUnreadDot />
-          ) : (
-            <AgentAwaitingIcon
-              kind={statusMark}
-              className="size-3.5"
-              strokeWidth={1.25}
-            />
-          )}
-        </span>
-      )}
       <span
-        className={cn(SIDEBAR_WORKSPACE_CONTENT_CLS, archiving && "opacity-50")}
+        className={cn(SIDEBAR_WORKSPACE_CONTENT_CLS, twoLine && "h-auto items-start", archiving && "opacity-50")}
       >
         {mixedRepositories && project && !archiving ? (
           <WorkspaceProjectIcon project={project} />
@@ -427,14 +457,26 @@ export function SidebarWorkspaceRow({
           </span>
           </ActivityScope.Provider>
         )}
+        {statusDot && (
+          <span className="inline-flex size-2 shrink-0 items-center justify-center" aria-hidden="true" data-sidebar-status-dot>
+            <span className={cn("size-1.5 rounded-full", statusDot)} />
+          </span>
+        )}
+        <span className={twoLine ? "flex min-w-0 flex-1 flex-col gap-0.5" : "contents"}>
+        <span className={twoLine ? "flex h-4.5 min-w-0 items-center gap-2" : "contents"}>
         {/* Only the name truncates; everything after it is shrink-0. */}
-        <span className="min-w-0 flex-1 truncate">{label}</span>
+        <span className="min-w-0 truncate">{label}</span>
+        {placementMark && (
+          <span className="text-fg3 inline-flex shrink-0">
+            <SidebarPlacementIcon cloud={cloudRow} cloudStatus={cloudStatus} />
+          </span>
+        )}
         {/* Counts, then the stream, then state, then the pencil (or a flat
             row's awaiting mark) — each independently optional so a running
             workspace still reports what it changed. Archiving hides the
             counts (that row is already a spinner) but a run genuinely still
             running keeps saying so. */}
-        <span className={SIDEBAR_WORKSPACE_TRAILING_CLS}>
+        <span className={cn(SIDEBAR_WORKSPACE_TRAILING_CLS, "ml-auto")}>
           {!archiving && (
             <WorkspaceChangeCounts {...changeLines} active={active} />
           )}
@@ -452,9 +494,7 @@ export function SidebarWorkspaceRow({
               )}
             </span>
           ) : null}
-          {cloudMark && (
-            <SidebarCloudMark folder={workspace.path} className={cn(TRAILING_SLOT_CLS, "text-fg2")} />
-          )}
+          
           {trailingMark && (
             <span className={cn(TRAILING_SLOT_CLS, "text-fg2")}>
               {trailingMark === "draft" ? (
@@ -471,6 +511,29 @@ export function SidebarWorkspaceRow({
               {rowAction}
             </span>
           )}
+          {compact && pulls.length > 0 && (
+            <span className="text-3xxs inline-flex shrink-0 items-center">
+              <SidebarPrMarks groups={prMarkGroups(pulls)} layout={prMarkLayout(prMarkGroups(pulls), 0, true)} />
+            </span>
+          )}
+          {compact && (
+            <span className="text-fg3 text-3xxs shrink-0 tabular-nums">{formatCompactAge(updatedAt)}</span>
+          )}
+        </span>
+        </span>
+        {twoLine && (
+          <SidebarWorkspaceRowMeta
+            workspace={workspace}
+            pulls={pulls}
+            status={rowStatus}
+            cloud={cloudRow}
+            cloudStatus={cloudStatus}
+            updatedAt={updatedAt}
+          />
+        )}
+        {projectName && (
+          <span className="text-fg3 truncate text-3xxs leading-4" data-sidebar-project-name>{projectName}</span>
+        )}
         </span>
       </span>
       {!trailingMark && rowAction}
@@ -543,9 +606,12 @@ export function PendingSidebarWorkspaceRow({
   mixedRepositories = false,
   grouped = false,
   active = false,
+  compact = false,
   rowRef,
 }: {
   label: string;
+  /** Matches the confirmed row's height so the swap never reflows. */
+  compact?: boolean;
   /** The reserved branch: seeds the same square the confirmed row draws. */
   branch?: string;
   kind?: "code" | "design";
@@ -567,16 +633,18 @@ export function PendingSidebarWorkspaceRow({
       ref={rowRef}
       className={cn(
         SIDEBAR_WORKSPACE_ROW_CLS,
+        compact ? SIDEBAR_WORKSPACE_COMPACT_ROW_CLS : SIDEBAR_WORKSPACE_TWO_LINE_ROW_CLS,
         grouped
           ? SIDEBAR_WORKSPACE_GROUPED_INSET_CLS
           : SIDEBAR_WORKSPACE_FLAT_INSET_CLS,
       )}
       data-workspace-tab="true"
+      data-compact={compact}
       data-active={active}
       role="status"
       aria-live="polite"
     >
-      <span className={SIDEBAR_WORKSPACE_CONTENT_CLS}>
+      <span className={cn(SIDEBAR_WORKSPACE_CONTENT_CLS, !compact && "h-auto items-start")}>
         {mixedRepositories && project ? (
           projectInteractive ? <WorkspaceProjectIcon project={project} /> : <RepositoryIcon project={project} className={REPOSITORY_ICON_CHIP_CLS} />
         ) : (
@@ -590,7 +658,10 @@ export function PendingSidebarWorkspaceRow({
             )}
           </span>
         )}
-        <span className="min-w-0 flex-1 truncate">{label}</span>
+        <span className={compact ? "contents" : "flex min-w-0 flex-1 flex-col gap-0.5"}>
+        <span className={compact ? "min-w-0 flex-1 truncate" : "h-4.5 min-w-0 truncate"}>{label}</span>
+        {!compact && <span className="text-fg3 h-4 text-3xxs leading-4">Creating…</span>}
+        </span>
         {trailingDesignMark && (
           <span className={SIDEBAR_WORKSPACE_TRAILING_CLS}>
             <span className={GLYPH_BOX_CLS} aria-hidden="true">

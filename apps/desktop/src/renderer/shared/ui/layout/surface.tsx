@@ -16,7 +16,7 @@ const SURFACE_CLASSES = {
   floating:
     "bg-bg3 [--surface-hover:var(--bg3-hover)] [--surface-border:var(--border2)]",
   sidebar:
-    "bg-sidebar-bg [--surface-hover:var(--sidebar-bg-hover)] [--surface-border:var(--border2)]",
+    "bg-nav-bg [--surface-hover:var(--nav-bg-hover)] [--surface-border:var(--border2)]",
 } as const;
 
 /** The floating fill and its bindings as a class string, for the floating
