@@ -11,12 +11,12 @@ database("recovering a failed cloud workspace", () => {
   beforeEach(async () => { f = await localCommandsFixture(pool); });
   afterEach(async () => { await f.signals.close(); });
 
-  const fail = (patch: { error_code?: string | null; boat_sandbox_id?: string | null; active_at?: "now" | null; checkpoint_object?: string | null } = {}) =>
-    pool.query(`UPDATE cloud_v2_workspaces SET state='failed', error_code=$2, boat_sandbox_id=$3, active_at=CASE WHEN $4::boolean THEN now() ELSE NULL END,
+  const fail = (patch: { error_code?: string | null; boat_sandbox_id?: string | null; running_at?: "now" | null; checkpoint_object?: string | null } = {}) =>
+    pool.query(`UPDATE cloud_v2_workspaces SET state='failed', error_code=$2, boat_sandbox_id=$3, active_at=now(), running_at=CASE WHEN $4::boolean THEN now() ELSE NULL END,
       checkpoint_object=$5, checkpoint_key=CASE WHEN $5::text IS NULL THEN NULL ELSE '{"sealed":"fixture"}'::jsonb END,
       checkpoint_sha256=CASE WHEN $5::text IS NULL THEN NULL ELSE repeat('a', 64) END, checkpoint_bytes=CASE WHEN $5::text IS NULL THEN NULL ELSE 100 END,
       checkpoint_saved_at=CASE WHEN $5::text IS NULL THEN NULL ELSE now() END, attempts=3, next_attempt_at=now() WHERE id=$1`, [f.workspaceId, patch.error_code === undefined ? "worker_boot_timeout" : patch.error_code,
-      patch.boat_sandbox_id === undefined ? "bx_fixture1" : patch.boat_sandbox_id, patch.active_at !== null, patch.checkpoint_object ?? null]);
+      patch.boat_sandbox_id === undefined ? "bx_fixture1" : patch.boat_sandbox_id, patch.running_at !== null, patch.checkpoint_object ?? null]);
   const row = async () => (await pool.query(`SELECT state, error_code, attempts, next_attempt_at, stop_generation::text AS gen,
     restart_stop_generation::text AS restart FROM cloud_v2_workspaces WHERE id=$1`, [f.workspaceId])).rows[0];
   const recover = (actor = f.owner.id) => f.call(`/v1/cloud-v2/workspaces/${f.workspaceId}/recover`, "POST", {}, { "x-test-actor": actor });
@@ -53,9 +53,21 @@ database("recovering a failed cloud workspace", () => {
     expect(after.rows[0]).toEqual({ state: "starting", restore_pending: true, gen: before.gen, saved: before.gen });
   });
 
+  it("keeps what was sent during a Stop that failed when that Stop is finished in its own generation", async () => {
+    await pool.query("UPDATE cloud_v2_workspaces SET state='stopping', boat_sandbox_id='bx_fixture1', running_at=now() WHERE id=$1", [f.workspaceId]);
+    const sent = f.prompt();
+    expect((await f.submit(sent)).status).toBeLessThan(300);
+    await pool.query("UPDATE cloud_v2_workspaces SET state='failed', error_code='provider_request_failed', updated_at=now() - interval '11 minutes' WHERE id=$1", [f.workspaceId]);
+    const [candidate] = await f.store.healCandidates(new Date(Date.now() - 10 * 60_000), 4);
+    expect(await f.store.healFailed({ ...candidate!, interruptedStop: true }, "stopping")).toBe(true);
+    const message = (await pool.query("SELECT state, wake_after_stop FROM cloud_v2_prompt_outbox WHERE workspace_id=$1 AND user_message_id=$2",
+      [f.workspaceId, sent.userMessageId])).rows[0];
+    expect(message).toEqual({ state: "queued", wake_after_stop: true });
+  });
+
   it("refuses what trying again cannot fix, a create that never ran, and anything not failed, changing nothing", async () => {
     for (const patch of [{ error_code: "sandbox_missing" }, { error_code: "github_access_required" }, { error_code: "checkpoint_restore_failed" },
-      { active_at: null }, { boat_sandbox_id: null }] as const) {
+      { running_at: null }, { boat_sandbox_id: null }] as const) {
       await fail(patch);
       const before = await row(), response = await recover();
       expect(response.status).toBe(409);

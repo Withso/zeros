@@ -40,7 +40,7 @@ import { RUNTIME_HANDOFF_SESSION } from "./runtime-handoff-store.js";
 import { notifyCloudV2WorkerBoot, notifyCloudV2WorkerReady } from "./worker-ready.js";
 import type { CloudV2SetupStatus } from "./setup-status-contract.js";
 import { insertWorkspaceSubmodules, type WorkspaceSubmoduleRow } from "./workspace-submodules.js";
-import { CLOUD_V2_RECOVERABLE_FAILURES, cloudV2RecoverableFailure } from "./failure-retry.js";
+import { cloudV2RecoverableFailure, cloudV2RecoverableFailureSql } from "./failure-retry.js";
 
 export type CloudV2WorkspaceState =
   | "creating" | "running" | "stopping" | "stopped" | "starting" | "deleting" | "deleted" | "failed";
@@ -278,6 +278,8 @@ export type CloudV2WorkspaceRow = {
   checkpoint_partial?: boolean | null;
   submodules_unrestored?: unknown;
   checkpoint_saved_at?: Date | null; checkpoint_confirmed_at?: Date | null;
+  /** When it last entered running (0273). */
+  running_at?: Date | null;
 };
 type Row = CloudV2WorkspaceRow;
 
@@ -287,7 +289,7 @@ const WORKSPACE_COLUMNS_SQL = sql`id, org_id, creator_user_id, name, number, tit
   lost_work_restored, lost_work_since, keep_set_at, archive_reason, stopped_at, machine_stopped_at, machine_data_expired_at,
   archive_wake_done_at, checkpoint_object, retention_started_at, backup_probe, backup_probe_generation, stop_generation,
   checkpoint_stop_generation, changed_since_stop_generation, machine_gone_at, waiting_for_base_at, stop_archive_failed_generation, checkpoint_partial,
-  submodules_unrestored, checkpoint_saved_at, checkpoint_confirmed_at`;
+  submodules_unrestored, checkpoint_saved_at, checkpoint_confirmed_at, running_at`;
 const COLUMNS = WORKSPACE_COLUMNS_SQL.text;
 export const CLOUD_V2_WORKSPACE_COLUMNS = COLUMNS.split(",").map(value => value.trim());
 
@@ -1104,12 +1106,12 @@ export class CloudV2Store {
   async healCandidates(before: Date, limit: number): Promise<CloudV2HealCandidate[]> {
     const { rows } = await withSystemTx(this.pool, tx => tx.query<LifecycleRow & { ran: boolean; fence: Date; interrupted_stop: boolean }>(
       `SELECT ${LIFECYCLE_COLUMNS}, date_trunc('milliseconds', updated_at) AS fence,
-         active_at IS NOT NULL AND (stopped_at IS NULL OR active_at > stopped_at) AS ran,
+         running_at IS NOT NULL AND (stopped_at IS NULL OR running_at > stopped_at) AS ran,
          EXISTS (SELECT 1 FROM cloud_v2_execution_contexts e WHERE e.workspace_id=w.id AND e.state<>'retired'
            AND e.stop_generation<w.stop_generation) AS interrupted_stop
-       FROM cloud_v2_workspaces w WHERE state='failed' AND updated_at < $1 AND error_code = ANY($3::text[])
+       FROM cloud_v2_workspaces w WHERE ${cloudV2RecoverableFailureSql("w")} AND updated_at < $1
          AND maintenance_attempt IS NULL AND recovery_attempt_id IS NULL AND execution_transition_id IS NULL
-       ORDER BY updated_at, id LIMIT $2`, [before, limit, [...CLOUD_V2_RECOVERABLE_FAILURES]]));
+       ORDER BY updated_at, id LIMIT $2`, [before, limit]));
     return rows.filter(row => cloudV2RecoverableFailure(row)).map(row => ({ id: row.id, stopGeneration: row.stop_generation,
       fence: row.fence.toISOString(), ran: row.ran, boatSandboxId: row.boat_sandbox_id, restorePending: row.restore_pending,
       interruptedStop: row.interrupted_stop }));

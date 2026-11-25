@@ -1195,9 +1195,9 @@ export class CloudV2Lifecycle {
   }
 
   /** Never creates, forks or resumes a machine: each is a Boat start. A Stop that failed with turns open is finished in
-   * its own generation. A run's machine that is still up gets the ordinary stop (a new generation, with its probe or
-   * checkpoint). A wake that never ran, or a machine Boat already archived, ends stopped in the same generation; an up
-   * machine has its worker switched off and is stopped first. */
+   * its own generation. A generation that ran gets the ordinary stop (a new generation, with its probe or checkpoint)
+   * whether its machine is up, archived or gone: its disk may hold work the generation's backup does not cover. A wake
+   * that never ran ends stopped in the same generation; an up machine has its worker switched off and is stopped first. */
   private async healFailedWorkspaces(now: number): Promise<void> {
     const { store, compute } = this.deps;
     if (!store.healCandidates || !store.healDue || !store.healFailed) return;
@@ -1209,6 +1209,10 @@ export class CloudV2Lifecycle {
           if (await store.healFailed(candidate, "stopping")) this.deps.logger?.warn(`[cloud-v2] failed workspace healed (stop finished) workspace=${candidate.id.slice(0, 8)}`);
           continue;
         }
+        if (candidate.ran && !candidate.restorePending) {
+          if (await store.healFailed(candidate, "stopping")) this.deps.logger?.warn(`[cloud-v2] failed workspace healed (stopping) workspace=${candidate.id.slice(0, 8)}`);
+          continue;
+        }
         let state: string | null = null, archivedAt: Date | null = null;
         if (candidate.boatSandboxId) {
           try { ({ state, stoppedAt: archivedAt = null } = await compute.inspect(candidate.boatSandboxId)); }
@@ -1217,10 +1221,6 @@ export class CloudV2Lifecycle {
         const up = state === "running" || state === "idle";
         // Starting, stopping or resuming on Boat's side: looked at again on a later scan.
         if (state !== null && !up && state !== "archived") continue;
-        if (up && candidate.ran && !candidate.restorePending) {
-          if (await store.healFailed(candidate, "stopping")) this.deps.logger?.warn(`[cloud-v2] failed workspace healed (stopping) workspace=${candidate.id.slice(0, 8)}`);
-          continue;
-        }
         // Retention's 14-day clock counts from Boat's own stop.
         let stop: { stoppedAt?: Date; archiveFailed?: boolean; workerOffUnverified?: boolean } = archivedAt ? { stoppedAt: archivedAt } : {};
         if (up) {

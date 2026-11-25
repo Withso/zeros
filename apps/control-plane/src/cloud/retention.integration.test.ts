@@ -1873,7 +1873,7 @@ d("cloud v2 retention", () => {
           await lifecycle().tick();
           expect(await columns("state, error_code")).toEqual({ state: "failed", error_code: "worker_boot_timeout" });
           if (up) { await boat.resume(vm); boat.machine(vm)!.worker = { enabled: true, active: true }; }
-          await pool.query("UPDATE cloud_v2_workspaces SET active_at=stopped_at - interval '1 hour' WHERE id=$1", [id]);
+          await pool.query("UPDATE cloud_v2_workspaces SET running_at=stopped_at - interval '1 hour' WHERE id=$1", [id]);
           await aged();
         };
 
@@ -1911,7 +1911,7 @@ d("cloud v2 retention", () => {
 
         it("gives a run that failed while up the ordinary stop, with its backup probe, in a new generation", async () => {
           boat.write(vm, `${path("api")}/UNPUSHED`, "api work");
-          await pool.query("UPDATE cloud_v2_workspaces SET state='failed', error_code='live_connection_unavailable', active_at=now() - interval '1 hour' WHERE id=$1", [id]);
+          await pool.query("UPDATE cloud_v2_workspaces SET state='failed', error_code='live_connection_unavailable', running_at=now() - interval '1 hour' WHERE id=$1", [id]);
           await aged();
           const generation = BigInt((await columns("stop_generation::text AS g")).g), from = boat.calls.length;
           await heal();
@@ -1922,6 +1922,19 @@ d("cloud v2 retention", () => {
             .toEqual({ state: "stopped", backup_probe: "dirty", probed: String(generation + 1n) });
           expect(boat.machine(vm)!.state).toBe("archived");
           expect(boat.machine(vm)!.worker).toEqual({ enabled: false, active: false });
+        });
+
+        it("gives a run whose machine Boat already archived the ordinary stop too, so the run's work is not taken as backed up", async () => {
+          boat.write(vm, `${path("api")}/UNPUSHED`, "api work");
+          await pool.query("UPDATE cloud_v2_workspaces SET state='failed', error_code='live_connection_unavailable', running_at=now() - interval '1 hour' WHERE id=$1", [id]);
+          await boat.stop(vm);
+          await aged();
+          const generation = BigInt((await columns("stop_generation::text AS g")).g), from = boat.calls.length;
+          await heal();
+          expect(await columns("state, error_code, stop_generation::text AS g")).toEqual({ state: "stopping", error_code: null, g: String(generation + 1n) });
+          await lifecycle().tick();
+          expect(starts(from)).toEqual([]);
+          expect(await columns("state, backup_probe_generation::text AS probed")).toEqual({ state: "stopped", probed: String(generation + 1n) });
         });
 
         it("waits out a recent failure and never touches one trying again cannot fix", async () => {
@@ -1974,8 +1987,8 @@ d("cloud v2 retention", () => {
         await lifecycle().tick();
         expect(await columns("state, error_code")).toEqual({ state: "failed", error_code: "worker_boot_timeout" });
         expect(boat.machine(vm)!.files.has(ENV)).toBe(false);
-        // Every workspace that reached running has active_at; this fixture's row was inserted running without one.
-        await pool.query("UPDATE cloud_v2_workspaces SET active_at=now() - interval '1 day' WHERE id=$1", [id]);
+        // Every workspace that reached running has running_at; this fixture's row was inserted running without one.
+        await pool.query("UPDATE cloud_v2_workspaces SET running_at=now() - interval '1 day' WHERE id=$1", [id]);
         const generation = (await columns("stop_generation::text AS g")).g;
         await store.recoverFailedWorkspace(id, user);
         await lifecycle().tick();

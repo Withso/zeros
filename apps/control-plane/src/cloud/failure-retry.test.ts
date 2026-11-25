@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { CLOUD_V2_RECOVERABLE_FAILURES, cloudV2RecoverableFailure } from "./failure-retry.js";
 
-const woke = { state: "failed", error_code: "worker_boot_timeout", active_at: new Date("2026-11-24T16:13:31Z"), boat_sandbox_id: "bx_abc12345",
+const woke = { state: "failed", error_code: "worker_boot_timeout", running_at: new Date("2026-11-24T16:13:31Z"), boat_sandbox_id: "bx_abc12345",
   checkpoint_object: null } as const;
 const backup = "checkpoints/w.tar";
 
@@ -23,8 +23,10 @@ describe("a failed cloud workspace that recovery may start again", () => {
   });
 
   it("is never a create that did not finish: its machine may lack the checkout and setup", () => {
-    expect(cloudV2RecoverableFailure({ ...woke, active_at: null })).toBe(false);
-    expect(cloudV2RecoverableFailure({ ...woke, active_at: null, checkpoint_object: backup })).toBe(false);
+    expect(cloudV2RecoverableFailure({ ...woke, running_at: null })).toBe(false);
+    expect(cloudV2RecoverableFailure({ ...woke, running_at: null, checkpoint_object: backup })).toBe(false);
+    // Activity is not a run: queueing a create's first message sets active_at before any worker starts.
+    expect(cloudV2RecoverableFailure({ ...woke, running_at: null, active_at: new Date() } as typeof woke)).toBe(false);
   });
 
   it("ignores loss evidence, which can describe a machine this workspace has since replaced", () => {

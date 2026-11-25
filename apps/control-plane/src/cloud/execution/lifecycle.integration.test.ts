@@ -26,7 +26,7 @@ database("shared execution lifecycle and metadata", () => {
   });
   it("recovers a failed shared workspace as a start under the caller's execution authority", async () => {
     await pool.query(`UPDATE cloud_v2_workspaces SET state='failed', error_code='worker_boot_timeout', boat_sandbox_id=coalesce(boat_sandbox_id,'bx_fixture1'),
-      active_at=coalesce(active_at,now()) WHERE id=$1`, [f.workspace.id]);
+      running_at=coalesce(running_at,now()) WHERE id=$1`, [f.workspace.id]);
     const before = (await pool.query("SELECT stop_generation::text AS gen FROM cloud_v2_workspaces WHERE id=$1", [f.workspace.id])).rows[0].gen;
     const response = await call("recover"); expect(response.status).toBe(202);
     const row = (await pool.query(`SELECT state,error_code,stop_generation::text AS gen,restart_stop_generation::text AS restart,
@@ -43,7 +43,7 @@ database("shared execution lifecycle and metadata", () => {
     const stopping = (await pool.query("SELECT stop_generation::text AS gen FROM cloud_v2_workspaces WHERE id=$1", [f.workspace.id])).rows[0].gen;
     // The stop's retries ran out before Boat confirmed it: its completion, which retires the turn, never came.
     await pool.query(`UPDATE cloud_v2_workspaces SET state='failed', error_code='provider_request_failed', boat_sandbox_id=coalesce(boat_sandbox_id,'bx_fixture1'),
-      active_at=coalesce(active_at,now()) WHERE id=$1`, [f.workspace.id]);
+      running_at=coalesce(running_at,now()) WHERE id=$1`, [f.workspace.id]);
     const open = () => pool.query("SELECT 1 FROM cloud_v2_execution_contexts WHERE id=$1 AND state<>'retired'", [turn.lease.contextId]).then(r => r.rowCount);
     expect(await open()).toBe(1);
     expect((await call("recover")).status).toBe(202);
@@ -59,7 +59,7 @@ database("shared execution lifecycle and metadata", () => {
     expect((await call("stop")).status).toBe(202);
     const stopping = (await pool.query("SELECT stop_generation::text AS gen FROM cloud_v2_workspaces WHERE id=$1", [f.workspace.id])).rows[0].gen;
     await pool.query(`UPDATE cloud_v2_workspaces SET state='failed', error_code='provider_request_failed', boat_sandbox_id=coalesce(boat_sandbox_id,'bx_fixture1'),
-      active_at=coalesce(active_at,now()), updated_at=now() - interval '11 minutes' WHERE id=$1`, [f.workspace.id]);
+      running_at=coalesce(running_at,now()), updated_at=now() - interval '11 minutes' WHERE id=$1`, [f.workspace.id]);
     const [candidate] = await f.cp.store.healCandidates(new Date(Date.now() - 10 * 60_000), 4);
     expect(candidate).toMatchObject({ id: f.workspace.id, stopGeneration: stopping, interruptedStop: true });
     expect(await f.cp.store.healFailed(candidate!, "stopping")).toBe(true);
@@ -71,7 +71,7 @@ database("shared execution lifecycle and metadata", () => {
   });
   it("lets the auto-heal stop a failed active workspace in its own generation, retiring its contexts as a stop does", async () => {
     await pool.query(`UPDATE cloud_v2_workspaces SET state='failed', error_code='worker_boot_timeout', boat_sandbox_id=coalesce(boat_sandbox_id,'bx_fixture1'),
-      active_at=now() - interval '2 hours', stopped_at=now() - interval '1 hour', updated_at=now() - interval '11 minutes' WHERE id=$1`, [f.workspace.id]);
+      running_at=now() - interval '2 hours', stopped_at=now() - interval '1 hour', updated_at=now() - interval '11 minutes' WHERE id=$1`, [f.workspace.id]);
     const generation = (await pool.query("SELECT stop_generation::text AS gen FROM cloud_v2_workspaces WHERE id=$1", [f.workspace.id])).rows[0].gen;
     const [candidate] = await f.cp.store.healCandidates(new Date(Date.now() - 10 * 60_000), 4);
     expect(candidate).toMatchObject({ id: f.workspace.id, stopGeneration: generation, ran: false, interruptedStop: false });
