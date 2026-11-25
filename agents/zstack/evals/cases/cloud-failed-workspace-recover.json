@@ -1,0 +1,9 @@
+{
+  "id": "cloud-failed-workspace-recover",
+  "kind": "replay",
+  "area": "control-plane",
+  "fixedBy": "pr:1301",
+  "symptom": "Cloud workspaces that failed with worker_boot_timeout while their VM and backup were intact showed Failed with no Start, only Delete, and needed an operator database write to run again.",
+  "rule": "A failure that trying again can get past, on a workspace that still holds its machine or a backup, offers Start; recovery starts it in the same stop generation so that generation's scrub, checkpoint and restore still apply.",
+  "check": "pnpm --dir apps/control-plane exec vitest run src/cloud/failure-retry.test.ts && pnpm exec vitest run --config vitest.config.ts apps/desktop/src/renderer/shell/conversation/__tests__/cloud-workspace-details-start.test.ts apps/desktop/src/renderer/platform/__tests__/cloud-v2-checkout-path.test.ts"
+}

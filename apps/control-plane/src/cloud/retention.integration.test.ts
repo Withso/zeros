@@ -1847,6 +1847,39 @@ d("cloud v2 retention", () => {
         expect(await columns("archive_scrub")).toEqual({ archive_scrub: "clean" });
       });
 
+      it("recovers an open that failed before the files came back, and still puts them back before the worker starts", async () => {
+        boat.write(vm, ENV, "TOKEN=the person's own edit");
+        seeded.set(ENV, "TOKEN=from the server");
+        boat.write(vm, "/home/user/.claude/.credentials.json", "{}");
+        boat.write(vm, `${path("app")}/UNPUSHED`, "work");
+        await stop();
+        await earlier(CLOUD_V2_BACKUP_DELAY_MS + 60_000);
+        await lifecycle().tick();
+        await archive();
+        await sleepFor(10.6);
+        await lifecycle().tick();
+        expect(boat.machine(vm)!.files.has(ENV)).toBe(false);
+        expect(await columns("archive_scrub")).toEqual({ archive_scrub: "backup" });
+        // The open passes its boot deadline before the VM resumes.
+        await store.requestLifecycle(id, user, "start");
+        await pool.query("UPDATE cloud_v2_workspaces SET updated_at=now() - interval '11 minutes' WHERE id=$1", [id]);
+        await lifecycle().tick();
+        expect(await columns("state, error_code")).toEqual({ state: "failed", error_code: "worker_boot_timeout" });
+        expect(boat.machine(vm)!.files.has(ENV)).toBe(false);
+        // Every workspace that reached running has active_at; this fixture's row was inserted running without one.
+        await pool.query("UPDATE cloud_v2_workspaces SET active_at=now() - interval '1 day' WHERE id=$1", [id]);
+        const generation = (await columns("stop_generation::text AS g")).g;
+        await store.recoverFailedWorkspace(id, user);
+        await lifecycle().tick();
+        expect(boat.machine(vm)!.files.get(ENV)).toBe("TOKEN=the person's own edit");
+        const commands = boat.commands.filter(command => command.machineId === vm).map(command => command.command);
+        const restoredAt = commands.findIndex(command => command.includes("zeros-environment-restored"));
+        const tokenAt = commands.findLastIndex(command => command.includes("worker-token") && !command.includes("zeros-archive-scrub"));
+        expect(restoredAt).toBeGreaterThanOrEqual(0);
+        expect(tokenAt).toBeGreaterThan(restoredAt);
+        expect(await columns("archive_scrub, lost_work_since, stop_generation::text AS g")).toEqual({ archive_scrub: "clean", lost_work_since: null, g: generation });
+      });
+
       for (const again of [false, true]) it(`keeps a backup-mode scrub whose wake's stop left the archive suspect, so an open puts the files back${again ? ", after a second wake scrubs nothing" : ""}`, async () => {
         boat.write(vm, ENV, "TOKEN=the person's own edit");
         seeded.set(ENV, "TOKEN=from the server");

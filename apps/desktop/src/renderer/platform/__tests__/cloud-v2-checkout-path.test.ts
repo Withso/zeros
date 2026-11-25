@@ -27,7 +27,6 @@ describe("cloud v2 checkout path", () => {
   });
 
   it("lets Start recover a workspace the server marks recoverable, and keeps Delete-only for a create that never ran", () => {
-    // 2026-11-25: Alpha wakes ended worker_boot_timeout with their VM and backup intact; the app offered only Delete.
     const failed = (errorCode: string, recoverable?: true) => ({
       id: "22222222-2222-4222-8222-222222222222", organizationId: "11111111-1111-4111-8111-111111111111",
       creatorUserId: "33333333-3333-4333-8333-333333333333", name: "w", repository: "Withso/zeros",

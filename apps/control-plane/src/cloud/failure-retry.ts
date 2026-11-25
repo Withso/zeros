@@ -11,7 +11,7 @@ export const CLOUD_V2_RECOVERABLE_FAILURES: ReadonlySet<string> = new Set([
 
 type FailureRow = {
   state: string; error_code: string | null; active_at: Date | null; boat_sandbox_id: string | null;
-  checkpoint_object?: string | null; machine_gone_at?: Date | null; machine_data_expired_at?: Date | null;
+  checkpoint_object?: string | null;
 };
 
 /** Failed for a recoverable reason after it had run (a create that never reached running may lack its checkout and
@@ -20,5 +20,7 @@ export function cloudV2RecoverableFailure(row: FailureRow): boolean {
   if (row.state !== "failed" || !row.error_code || !CLOUD_V2_RECOVERABLE_FAILURES.has(row.error_code) || !row.active_at) return false;
   const backup = !!row.checkpoint_object;
   if (row.error_code === "checkpoint_restore_failed") return backup;
-  return (!!row.boat_sandbox_id && !row.machine_gone_at && !row.machine_data_expired_at) || backup;
+  // Loss evidence is not checked: it can describe a VM this workspace has since replaced, and the start itself rebuilds
+  // a lost machine where it can or ends sandbox_missing, which is not recoverable.
+  return !!row.boat_sandbox_id || backup;
 }

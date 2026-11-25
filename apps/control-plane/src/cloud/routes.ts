@@ -382,14 +382,14 @@ export function createCloudV2Routes(deps: CloudV2RouteDeps): Hono {
     });
   }
 
-  /** A failed workspace that can still run (failure-retry.ts): its machine is stopped through the ordinary stop and
-   * started again, ending running. Anything else is refused (409 workspace_not_recoverable) and left as it was. */
+  /** A failed workspace that can still run (failure-retry.ts) starts as an ordinary start would. Anything else is
+   * refused (409 workspace_not_recoverable) and left as it was. */
   if (deps.store.recoverFailedWorkspace) app.post("/v1/cloud-v2/workspaces/:id/recover", async c => {
     const id = uuid.safeParse(c.req.param("id"));
     if (!id.success) throw new HttpError(404, "not_found", "Cloud workspace not found");
     const user = c.get("user"), active = await activeWorkspace(c, id.data);
     const ownership = c.req.header(TEAM_SHARING_HEADER) === "1" && c.req.header(TEAM_OWNERSHIP_HEADER) === "1";
-    const { workspace } = await deps.store.recoverFailedWorkspace!(id.data, user.id, { restart: true, ...(active ? { user, ownership } : {}) });
+    const { workspace } = await deps.store.recoverFailedWorkspace!(id.data, user.id, active ? { user, ownership } : {});
     if (active && ownership && deps.teamSharing) return c.json({
       workspace: workspaceDocument(await deps.teamSharing.lifecycleDocument(id.data, user), deps.promptOutbox === true, !!chatEdits),
       teamSharing: 1, teamOwnership: 1,

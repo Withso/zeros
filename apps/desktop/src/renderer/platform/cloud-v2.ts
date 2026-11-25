@@ -110,7 +110,7 @@ const ERRORS: Record<string, string> = {
 const RETRYABLE = new Set(["checkpoint_restore_failed", "checkpoint_download_failed", "checkpoint_prerequisites_missing", "checkpoint_repository_missing",
   "execution_first_boot_failed"]);
 /** The server marks a failed workspace `recoverable` when it can still run (control plane failure-retry.ts): Start then
- * recovers it (stop its machine, start it again). Without the mark, as on an older server or after a create that never
+ * recovers it (starts it as an ordinary start would). Without the mark, as on an older server or after a create that never
  * ran, the code's own copy stands. */
 const RECOVER_ERRORS: Record<string, string> = {
   worker_boot_timeout: "The workspace computer did not start in time. Start it to try again.",

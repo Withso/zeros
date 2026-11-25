@@ -17,7 +17,6 @@ const card = (workspace: ReturnType<typeof cloudV2Document>) => renderToStaticMa
   { workspace, statusLabel: "Failed", resources: null, changing: false, onChange: vi.fn() }));
 
 describe("a failed cloud workspace's details", () => {
-  // 2026-11-25: a wake that timed out with its VM and backup intact showed no Start, only Delete.
   it("offers Start for a workspace the server marks recoverable, and Start recovers it", () => {
     const recoverable = failed("worker_boot_timeout", { recoverable: true });
     expect(card(recoverable)).toContain("Start workspace");

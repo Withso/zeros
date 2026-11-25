@@ -3,8 +3,6 @@ import pg from "pg";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { localCommandsFixture, type LocalCommandsFixture } from "./local-commands/test-fixture.js";
 
-// 2026-11-25: Alpha wakes ended worker_boot_timeout with their VM and backup intact; the app offered only Delete, and
-// moving them on took an operator write. Recovery stops the machine through the ordinary stop, then starts it again.
 const database = process.env.TEST_DATABASE_URL ? describe : describe.skip;
 database("recovering a failed cloud workspace", () => {
   let pool: pg.Pool, f: LocalCommandsFixture;
@@ -30,37 +28,29 @@ database("recovering a failed cloud workspace", () => {
     expect((await (await f.call(`/v1/cloud-v2/workspaces/${f.workspaceId}`)).json()).workspace).not.toHaveProperty("recoverable");
   });
 
-  it("stops the machine through the ordinary stop, then starts it again in one request", async () => {
+  it("starts it as an ordinary start would, in the same stop generation", async () => {
     await fail();
     const before = await row();
     const response = await recover();
     expect(response.status).toBe(202);
     const body = await response.json();
-    const after = await row(), next = String(BigInt(before.gen) + 1n);
-    // The first failure stays until a boot reaches running (default-create.integration.test.ts).
-    expect(after).toEqual({ state: "stopping", error_code: "worker_boot_timeout", attempts: 0, next_attempt_at: null, gen: next, restart: next });
-    expect(body.workspace).toMatchObject({ state: "stopping" });
+    // The first failure stays until a boot reaches running (default-create.integration.test.ts). The generation is the
+    // one whose scrub, checkpoint and restore the start still has to honour.
+    expect(await row()).toEqual({ state: "starting", error_code: "worker_boot_timeout", attempts: 0, next_attempt_at: null, gen: before.gen, restart: null });
+    expect(body.workspace).toMatchObject({ state: "starting" });
     expect(body.workspace).not.toHaveProperty("recoverable");
-    // The lifecycle's stop completion then turns this restart's stop into a start.
-    await f.store.transition(f.workspaceId, ["stopping"], "stopped", { stopGeneration: next, revoke: true });
-    expect((await row()).state).toBe("starting");
   });
 
-  it("without restart ends stopped, for a sweep that leaves the start to the person", async () => {
-    await fail();
-    const { workspace, moved } = await f.store.recoverFailedWorkspace(f.workspaceId, f.owner.id, { restart: false });
-    expect(moved).toBe(true);
-    expect(workspace.state).toBe("stopping");
-    const after = await row();
-    expect(after.restart).toBeNull();
-    await f.store.transition(f.workspaceId, ["stopping"], "stopped", { stopGeneration: after.gen, revoke: true });
-    expect((await row()).state).toBe("stopped");
-  });
-
-  it("recovers a failed restore from its backup when the machine is gone", async () => {
+  it("recovers a failed restore from its backup when the machine is gone, without a stop that could allocate one", async () => {
     await fail({ error_code: "checkpoint_restore_failed", boat_sandbox_id: null, checkpoint_object: `cloud-v2/checkpoints/${f.workspaceId}/${randomUUID()}.zck` });
+    await pool.query(`UPDATE cloud_v2_workspaces SET restore_pending=true, restore_attempt=gen_random_uuid(),
+      restore_create=jsonb_build_object('from', null, 'name', 'zeros-restore', 'env', '{}'::jsonb, 'requestedAt', clock_timestamp()),
+      checkpoint_stop_generation=stop_generation WHERE id=$1`, [f.workspaceId]);
+    const before = await row();
     expect((await recover()).status).toBe(202);
-    expect((await row()).state).toBe("stopping");
+    const after = await pool.query("SELECT state, restore_pending, stop_generation::text AS gen, checkpoint_stop_generation::text AS saved FROM cloud_v2_workspaces WHERE id=$1", [f.workspaceId]);
+    // Still the checkpoint's own generation, so the restore is not taken for an earlier backup (lost work).
+    expect(after.rows[0]).toEqual({ state: "starting", restore_pending: true, gen: before.gen, saved: before.gen });
   });
 
   it("refuses what trying again cannot fix, a create that never ran, and anything not failed, changing nothing", async () => {

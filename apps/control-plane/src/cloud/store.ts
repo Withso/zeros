@@ -551,7 +551,7 @@ const LIVE_SESSION = `s.provider = 'workos' AND s.user_id = w.creator_user_id
 
 const notFound = () => new HttpError(404, "not_found", "Cloud workspace not found");
 
-/** `recover`: only a recoverable failed workspace (failure-retry.ts), moved to stopping (store.recoverFailedWorkspace). */
+/** `recover`: only a recoverable failed workspace (failure-retry.ts) may start (store.recoverFailedWorkspace). */
 type LifecycleOptions = { recover?: boolean };
 
 /** Creator-only paths remain closed to members even after shared execution
@@ -946,23 +946,21 @@ export class CloudV2Store {
     });
   }
 
-  /** Recovers a failed workspace that can still run (failure-retry.ts), for the route and later callers alike: its
-   * machine is stopped through the ordinary stop and, with restart, started again. Shared workspaces go through the
-   * caller's execution authority, as a restart or stop would. Refused with 409 workspace_not_recoverable otherwise. */
-  async recoverFailedWorkspace(id: string, userId: string, options: { restart: boolean; user?: AuthedUser; ownership?: boolean }):
+  /** Starts a failed workspace that can still run (failure-retry.ts) as an ordinary start would: straight to starting,
+   * in the same stop generation, so what that generation recorded (an archive scrub to undo, the checkpoint it saved,
+   * a pending restore) still applies. Shared workspaces go through the caller's execution authority. Refused with 409
+   * workspace_not_recoverable otherwise. */
+  async recoverFailedWorkspace(id: string, userId: string, options: { user?: AuthedUser; ownership?: boolean } = {}):
     Promise<{ workspace: CloudV2Workspace; moved: boolean }> {
-    const action = options.restart ? "restart" : "stop";
     const execution = this.prompts.execution;
     if (options.user && execution && await execution.active(id, undefined, userId))
-      return this.requestExecutionLifecycle(id, userId, action, undefined, options.user, false, options.ownership ?? true, { recover: true });
-    return this.requestLifecycle(id, userId, action, { recover: true });
+      return this.requestExecutionLifecycle(id, userId, "start", undefined, options.user, false, options.ownership ?? true, { recover: true });
+    return this.requestLifecycle(id, userId, "start", { recover: true });
   }
 
   private async lifecycleIntent(tx: Tx, id: string, current: Row, action: "start" | "stop" | "archive" | "restart", initiator?: string,
     executionAuthority?: ExecutionIntentAuthority, options: LifecycleOptions = {}) {
-      // Decided on the locked row before anything changes. A recoverable failure's machine may still be running, so
-      // recovery always stops it through the ordinary stop; with restart, that stop's completion starts it again
-      // (transition: stopping -> starting at restart_stop_generation). Its first error stays until a boot is running.
+      // Decided on the locked row before anything changes. Its first error stays until a boot is running.
       if (options.recover && !cloudV2RecoverableFailure(current))
         throw new HttpError(409, "workspace_not_recoverable", "This cloud workspace cannot be recovered. Delete it and create a new one.");
       if (action === "stop" || action === "archive") await cancelExecutionActivation(tx, id);
@@ -988,7 +986,7 @@ export class CloudV2Store {
       const starts = action === "start" || action === "restart" && (current.state === "stopped" || current.state === "failed");
       const reconfirm = action === "stop" && current.state === "stopped" && intent.execution_mode === "prepared" &&
         await needsExecutionStopConfirmation(tx, id);
-      const state = options.recover ? "stopping" : starts
+      const state = starts
         ? current.state === "stopped" || current.state === "failed" ? "starting" : current.state
         : current.state === "running" || current.state === "starting" || configuring || reconfirm ? "stopping" : current.state;
       const moved = state !== current.state;

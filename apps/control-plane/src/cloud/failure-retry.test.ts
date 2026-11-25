@@ -1,9 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { CLOUD_V2_RECOVERABLE_FAILURES, cloudV2RecoverableFailure } from "./failure-retry.js";
 
-// 2026-11-25: Alpha wakes ended worker_boot_timeout with their VM and backup intact, and the app offered only Delete.
 const woke = { state: "failed", error_code: "worker_boot_timeout", active_at: new Date("2026-11-24T16:13:31Z"), boat_sandbox_id: "bx_abc12345",
-  checkpoint_object: null, machine_gone_at: null, machine_data_expired_at: null } as const;
+  checkpoint_object: null } as const;
 const backup = "checkpoints/w.tar";
 
 describe("a failed cloud workspace that recovery may start again", () => {
@@ -28,11 +27,12 @@ describe("a failed cloud workspace that recovery may start again", () => {
     expect(cloudV2RecoverableFailure({ ...woke, active_at: null, checkpoint_object: backup })).toBe(false);
   });
 
+  it("ignores loss evidence, which can describe a machine this workspace has since replaced", () => {
+    expect(cloudV2RecoverableFailure({ ...woke, machine_gone_at: new Date(), machine_data_expired_at: new Date() } as typeof woke)).toBe(true);
+  });
+
   it("is never one with nothing left to start, or failed for a reason trying again cannot change", () => {
     expect(cloudV2RecoverableFailure({ ...woke, boat_sandbox_id: null })).toBe(false);
-    expect(cloudV2RecoverableFailure({ ...woke, machine_gone_at: new Date() })).toBe(false);
-    expect(cloudV2RecoverableFailure({ ...woke, machine_data_expired_at: new Date() })).toBe(false);
-    expect(cloudV2RecoverableFailure({ ...woke, machine_gone_at: new Date(), checkpoint_object: backup })).toBe(true);
     for (const code of ["sandbox_missing", "github_access_required", "cloud_source_checkout_failed", "cloud_computer_build_required",
       "provider_budget_exhausted", "provider_credential_rejected", "checkpoint_corrupt", "execution_first_boot_failed", null])
       expect(cloudV2RecoverableFailure({ ...woke, error_code: code })).toBe(false);
