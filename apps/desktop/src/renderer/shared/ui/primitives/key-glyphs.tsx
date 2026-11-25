@@ -54,6 +54,10 @@ export function KeyGlyphIcon({ glyph, className }: { glyph: KeyGlyph; className?
   const paths: readonly string[] = [KEY_GLYPH_PATHS[glyph]].flat();
   return (
     <svg
+      // Intrinsic 11px, so the glyph never falls back to the 300 × 150 SVG
+      // default where no stylesheet sizes it; `className` sizes it in the app.
+      width={11}
+      height={11}
       viewBox="0 0 256 256"
       fill="currentColor"
       aria-hidden="true"

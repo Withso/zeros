@@ -3,11 +3,14 @@ import * as SliderPrimitive from "@radix-ui/react-slider";
 
 import { cn } from "@/renderer/shared/ui/cn";
 
-// A 4px border3 track with an fg1 range, and a solid 14px fg1 thumb on a bg1
-// ring: hover adds a soft halo, keyboard focus the standard ring outside the
-// bg1 one. Disabled dims the whole slider, track included.
+// A 4px border3 track with an fg1 range, and a solid 14px fg1 thumb on a 2px
+// ring in the surface the slider sits on (--slider-ring, bg1 unless the host
+// sets it, as the bg2 media island does), so it never draws a darker collar.
+// No hover halo: like every other control, hover is quiet and keyboard focus
+// is the 1px accent ring outside the surface one. Disabled dims the whole
+// slider, track included.
 const THUMB =
-  "block size-3.5 rounded-full bg-fg1 shadow-[0_0_0_2px_var(--bg1)] transition-shadow duration-fast ease-out outline-none hover:shadow-[0_0_0_2px_var(--bg1),0_0_0_6px_color-mix(in_srgb,var(--fg1)_14%,transparent)] focus-visible:shadow-[0_0_0_2px_var(--bg1),0_0_0_3px_var(--accent)]";
+  "block size-3.5 rounded-full bg-fg1 shadow-[0_0_0_2px_var(--slider-ring,var(--bg1))] transition-shadow duration-fast ease-out outline-none focus-visible:shadow-[0_0_0_2px_var(--slider-ring,var(--bg1)),0_0_0_3px_var(--accent)]";
 
 const Slider = React.forwardRef<
   React.ComponentRef<typeof SliderPrimitive.Root>,

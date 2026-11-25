@@ -187,6 +187,14 @@ export function ProviderInformation({
                 </div>
                 <ProgressBar
                   value={usage?.usedPercent}
+                  // Yellow from 80% of a limit, red once it is reached.
+                  tone={
+                    (usage?.usedPercent ?? 0) >= 100
+                      ? "over"
+                      : (usage?.usedPercent ?? 0) >= 80
+                        ? "warning"
+                        : "default"
+                  }
                   aria-label={labels[id]}
                 />
                 {usage && (

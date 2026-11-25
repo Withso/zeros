@@ -46,7 +46,6 @@ describe("the floating surface", () => {
     "primitives/hover-card.tsx",
     "primitives/tooltip.tsx",
     "primitives/elements/toast.tsx",
-    "primitives/elements/update-toast.tsx",
   ])("%s joins the floating family", (file) => {
     const text = source(file);
     expect(text).toContain("FLOATING_SURFACE");
@@ -54,6 +53,12 @@ describe("the floating surface", () => {
     expect(text).toContain("shadow-[var(--shadow-dropdown)]");
     expect(text).not.toContain("backdrop-blur");
   });
+});
+
+it("draws the update toast as the one ToastCard shape", () => {
+  const update = source("primitives/elements/update-toast.tsx");
+  expect(update).toContain("<ToastCard");
+  expect(update).not.toContain("FLOATING_SURFACE");
 });
 
 describe("menu choices", () => {

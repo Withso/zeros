@@ -514,7 +514,8 @@ function SingleAttachmentPill(props: NodeViewProps) {
           side="top"
           align="start"
           collisionPadding={12}
-          className="w-[24rem] overflow-hidden p-0"
+          size="lg"
+          className="overflow-hidden p-0"
         >
           <AttachmentTextPreview
             key={attachmentTextPreviewKey(ctx.cwd, att)}

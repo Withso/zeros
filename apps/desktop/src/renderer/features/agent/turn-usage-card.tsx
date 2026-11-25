@@ -110,7 +110,8 @@ export function TurnUsageCard({
         role="tooltip"
         side="top"
         align="start"
-        className="w-max max-w-[calc(100vw-2rem)] min-w-64 p-3 text-xs"
+        size="fit"
+        className="min-w-60 p-3 text-xs"
       >
         <div className="text-fg1 font-medium">{details.name}</div>
         <div className="text-fg2 mt-1.5 mb-2.5 flex flex-wrap items-center gap-x-1.5 tabular-nums">

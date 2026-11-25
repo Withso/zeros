@@ -120,7 +120,8 @@ export const WorkflowActivity = memo(function WorkflowActivity({
         align="start"
         sideOffset={6}
         collisionPadding={8}
-        className="w-[min(520px,calc(100vw-24px))] overflow-hidden p-0"
+        size="lg"
+        className="overflow-hidden p-0"
       >
         <WorkflowProgressPanel workflow={workflow} onStop={onStop} />
       </HoverCardContent>

@@ -271,8 +271,7 @@
         "input": 4
       },
       "apps/desktop/src/renderer/features/design-workspace/design-inspector-kit.tsx": {
-        "button": 3,
-        "input": 1
+        "button": 3
       },
       "apps/desktop/src/renderer/features/design-workspace/design-inspector.tsx": {
         "button": 2

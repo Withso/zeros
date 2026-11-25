@@ -14,15 +14,11 @@
 // stays centralised — same rule as toast.tsx, never call sonner elsewhere.
 // ──────────────────────────────────────────────────────────
 
-import * as React from "react";
-import { X } from "lucide-react";
+import type * as React from "react";
 import { toast as sonnerToast } from "sonner";
 
-import { cn } from "@/renderer/shared/ui/cn";
-import { FLOATING_SURFACE } from "@/renderer/shared/ui/layout/surface";
-import { MENU_SURFACE_RADIUS } from "@/renderer/shared/ui/menu-surface";
 import { Button } from "@/renderer/shared/ui/primitives/button";
-import { IconButton } from "@/renderer/shared/ui/primitives/icon-button";
+import { ToastCard } from "./toast";
 import { createNativeSurfaceOverlayIntent } from "@/renderer/shared/ui/native-surface-overlay";
 
 const publishUpdateOverlay = createNativeSurfaceOverlayIntent();
@@ -55,20 +51,17 @@ function UpdateToastCard({
   onRestartWhenIdle,
   onDismiss,
 }: UpdateToastProps & { id: string | number }) {
+  // The one toast shape (ToastCard) with a row of actions; the caller's
+  // dismiss arms the re-show timer before the toast tears down.
   return (
-    <div
-      className={cn(
-        "border-border2 text-fg1 relative flex w-90 items-start gap-2.5 border p-3 shadow-[var(--shadow-dropdown)]",
-        FLOATING_SURFACE,
-        MENU_SURFACE_RADIUS,
-      )}
-    >
-      <div className="flex min-w-0 flex-1 flex-col gap-0.5">
-        <div className="text-fg1 text-xs leading-4.5 font-medium">{title}</div>
-        {description && (
-          <div className="text-fg2 text-3xxs leading-4 break-words">{description}</div>
-        )}
-        <div className="mt-2 flex flex-wrap items-center gap-2">
+    <ToastCard
+      id={id}
+      variant="default"
+      message={title}
+      description={description}
+      onDismiss={onDismiss}
+      actions={
+        <>
           <Button variant="secondary" onClick={onSeeChanges}>
             See changes
           </Button>
@@ -80,22 +73,9 @@ function UpdateToastCard({
           <Button variant="primary" onClick={onRestart}>
             Restart
           </Button>
-        </div>
-      </div>
-      {/* The caller's dismiss arms the re-show timer, then the sonner toast
-          tears down. */}
-      <IconButton
-        size="compact"
-        label="Dismiss"
-        className="-mt-1 -mr-1"
-        onClick={() => {
-          onDismiss();
-          sonnerToast.dismiss(id);
-        }}
-      >
-        <X aria-hidden="true" />
-      </IconButton>
-    </div>
+        </>
+      }
+    />
   );
 }
 

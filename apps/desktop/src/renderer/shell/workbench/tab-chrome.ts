@@ -9,8 +9,11 @@
 //     compositor-synced during a fling.
 //   - The ACTIVE pill is CSS-sticky and pins to the lane edge it reaches; its
 //     left-1/right-1 insets mirror the hook's EDGE_INSET_PX, and its opaque
-//     bg-bg2 fill is what lets it float above scrolling neighbors (z-20 sits
-//     above the strip's fades at z-10).
+//     selected-bg fill is what lets it float above scrolling neighbors (z-20
+//     sits above the strip's fades at z-10).
+//   - --tab-fill carries the pill's current fill (selected-bg active,
+//     bg1-hover hovered), so the close button's fade matches it, as on chat
+//     tabs.
 
 // The Zeros Design tab: 6px corners like every tab, a bg1-hover hover that is
 // not the active fill, and medium text only on the active tab.
@@ -18,10 +21,10 @@ export const WORKBENCH_TAB_PILL_BASE_CLS =
   "relative flex h-7 shrink-0 cursor-pointer items-center overflow-hidden rounded-md text-xs transition-none";
 
 export const WORKBENCH_TAB_PILL_ACTIVE_CLS =
-  "bg-bg2 text-fg1 font-medium sticky left-1 right-1 z-20";
+  "[--tab-fill:var(--selected-bg)] bg-(--tab-fill) text-fg1 font-medium sticky left-1 right-1 z-20";
 
 export const WORKBENCH_TAB_PILL_INACTIVE_CLS =
-  "text-fg2 data-[hovered=true]:bg-bg1-hover data-[hovered=true]:text-fg1";
+  "text-fg2 data-[hovered=true]:[--tab-fill:var(--bg1-hover)] data-[hovered=true]:bg-(--tab-fill) data-[hovered=true]:text-fg1";
 
 /** Files and terminals share the same title and adjacent icon geometry. The
  *  name sits on the bar as plain text, with no edge or fill, on a 28px row so

@@ -3,6 +3,11 @@ import * as SeparatorPrimitive from "@radix-ui/react-separator";
 
 import { cn } from "@/renderer/shared/ui/cn";
 
+/** The two rules, by surface: border1 on the canvas, border2 inside floating
+ * surfaces, menus and toolbars. Menu and toolbar separators read these so
+ * the three cannot drift. */
+export const SEPARATOR_RULE = { canvas: "bg-border1", floating: "bg-border2" } as const;
+
 /** One rule: border1 on the canvas, border2 inside floating surfaces and
  * toolbars (`surface="floating"`). */
 const Separator = React.forwardRef<
@@ -21,7 +26,7 @@ const Separator = React.forwardRef<
       orientation={orientation}
       className={cn(
         "shrink-0",
-        surface === "floating" ? "bg-border2" : "bg-border1",
+        SEPARATOR_RULE[surface],
         orientation === "horizontal" ? "h-[1px] w-full" : "h-full w-[1px]",
         className,
       )}

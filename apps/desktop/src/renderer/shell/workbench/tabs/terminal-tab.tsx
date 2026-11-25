@@ -1580,14 +1580,14 @@ function SubTab({
           off the strip-driven data-hovered, not :hover (sticky-strip rule),
           and focus-within keeps it visible for keyboard users. */}
       {onClose && (
-        <div className="from-bg2 pointer-events-none absolute inset-y-0 right-0 flex w-10 items-center justify-end bg-gradient-to-l from-50% to-transparent pr-1 pl-4 opacity-0 transition-none group-data-[hovered=true]/subtab:opacity-100 focus-within:opacity-100">
+        <div className="from-(--tab-fill) pointer-events-none absolute inset-y-0 right-0 flex w-10 items-center justify-end bg-gradient-to-l from-50% to-transparent pr-1 pl-4 opacity-0 transition-none group-data-[hovered=true]/subtab:opacity-100 focus-within:opacity-100">
           <IconButton
             label={`Close ${label}`}
             onClick={(e) => {
               e.stopPropagation();
               onClose();
             }}
-            className="pointer-events-auto shrink-0"
+            className="pointer-events-auto shrink-0 hover:bg-transparent"
           >
             <X className="size-3.5" />
           </IconButton>

@@ -46,10 +46,21 @@ const HoverCardTrigger = React.forwardRef<
 ));
 HoverCardTrigger.displayName = HoverCardPrimitive.Trigger.displayName;
 
+/** The Popover's widths (P7): sm 240, md 320 (the default), lg 400, and fit
+ *  for content that sizes itself. Callers never hand-set a width. */
+const HOVER_CARD_WIDTH = {
+  sm: "w-60",
+  md: "w-80",
+  lg: "w-100 max-w-[calc(100vw-24px)]",
+  fit: "w-max max-w-[calc(100vw-24px)]",
+} as const;
+
 const HoverCardContent = React.forwardRef<
   React.ElementRef<typeof HoverCardPrimitive.Content>,
-  React.ComponentPropsWithoutRef<typeof HoverCardPrimitive.Content>
->(({ className, align = "center", sideOffset = 4, ...props }, ref) => (
+  React.ComponentPropsWithoutRef<typeof HoverCardPrimitive.Content> & {
+    size?: keyof typeof HOVER_CARD_WIDTH;
+  }
+>(({ className, align = "center", sideOffset = 4, size = "md", ...props }, ref) => (
   <HoverCardPrimitive.Portal data-slot="hover-card-portal">
     <HoverCardPrimitive.Content
       ref={ref}
@@ -58,7 +69,8 @@ const HoverCardContent = React.forwardRef<
       sideOffset={sideOffset}
       className={cn(
         ANCHORED_OVERLAY_MOTION,
-        "border-border2 text-fg1 z-dropdown w-64 origin-(--radix-hover-card-content-transform-origin) border p-3 shadow-[var(--shadow-dropdown)] outline-hidden",
+        "border-border2 text-fg1 z-dropdown origin-(--radix-hover-card-content-transform-origin) border p-3 shadow-[var(--shadow-dropdown)] outline-hidden",
+        HOVER_CARD_WIDTH[size],
         FLOATING_SURFACE,
         MENU_SURFACE_RADIUS,
         className,

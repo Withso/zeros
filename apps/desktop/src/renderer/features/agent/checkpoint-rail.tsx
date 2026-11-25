@@ -561,7 +561,8 @@ export const CheckpointRail = memo(function CheckpointRail({
         sideOffset={-RAIL_WIDTH_PX}
         alignOffset={0}
         collisionPadding={12}
-        className="flex max-h-[min(28rem,70vh)] w-72 flex-col gap-0.5 overflow-y-auto p-1"
+        size="md"
+        className="flex max-h-[min(28rem,70vh)] flex-col gap-0.5 overflow-y-auto p-1"
       >
         {checkpoints.map((c, i) => (
           <button

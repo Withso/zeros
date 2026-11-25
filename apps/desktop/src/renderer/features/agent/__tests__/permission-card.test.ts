@@ -304,7 +304,7 @@ describe("canonical permission-card variants", () => {
     // Decline and Cancel are distinct rows but share one global rejection
     // shortcut. Only the row that Backspace/Delete actually selects may claim
     // the hint.
-    expect(html.match(/⌫/g)).toHaveLength(1);
+    expect(html.match(/data-key-glyph="⌫"/g)).toHaveLength(1);
   });
 
   it("shows the command as well as provider-authored permission context", () => {

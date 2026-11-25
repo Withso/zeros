@@ -65,7 +65,6 @@ describe("workspace glyph", () => {
 
     rememberRestingSquare(seed, rested);
     expect(tiles(render({ seed }))).toEqual(rested);
-    expect(tiles(render({ seed, working: true }))).toEqual(rested);
     // Only seeded squares resume; the chat loaders stay random per mount.
     expect(restingSquare(workspaceGlyphSeed("zeros", "zeros/lima"))).toBeUndefined();
   });
@@ -78,26 +77,13 @@ describe("workspace glyph", () => {
     expect(restingSquare(`bound/${PUZZLE_RESTING_LIMIT - 1}`)).toEqual(cellsOf);
   });
 
-  it("rests quiet in fg3, works in fg2, and wears its PR colour in both", () => {
+  // 2026-11-25 (FndGlyphs): the glyph is a still fg3 square; PR and agent
+  // state read from the sidebar's marks and the chat tabs.
+  it("rests in fg3 and carries no PR or agent state", () => {
     const seed = workspaceGlyphSeed("zeros", "zeros/palembang");
     expect(render({ seed })).toMatch(/class="[^"]*\btext-fg3\b/);
     expect(render({ seed })).not.toContain('data-active="true"');
-    expect(render({ seed, working: true })).toMatch(/class="[^"]*\btext-fg2\b/);
-    expect(render({ seed, working: true })).toContain('data-active="true"');
-    const tones = {
-      open: "text-green-text",
-      ready: "text-green-text",
-      merged: "text-violet-on-bg",
-      closed: "text-red-on-bg",
-      conflicts: "text-yellow-text",
-    } as const;
-    for (const [pr, cls] of Object.entries(tones)) {
-      for (const working of [false, true]) {
-        expect(render({ seed, working, pr: pr as keyof typeof tones })).toMatch(
-          new RegExp(`class="[^"]*\\b${cls}\\b`),
-        );
-      }
-    }
+    expect(render({ seed })).not.toMatch(/text-(green|violet|red|yellow)-/);
   });
 
   it("maps PR state the way the former PR icons did", () => {
@@ -154,9 +140,9 @@ describe("workspace glyph depth", () => {
       return { cell: Number(y) * 4 + Number(x), opacity: opacity ? Number(opacity[1]) : 1 };
     });
 
-  it("shades its moving tiles in three close tones while it works", () => {
-    for (const pr of [null, "open", "ready", "merged", "closed"] as const) {
-      const tiles = tileShades(render({ seed, working: true, pr }));
+  it("shades a working square's moving tiles in three close tones", () => {
+    {
+      const tiles = tileShades(renderToStaticMarkup(createElement(PuzzleSquare, { seed, active: true, shaded: true })));
       expect(tiles).toHaveLength(10);
       const channel = tiles.filter((t) => !PUZZLE_CORNERS.includes(t.cell));
       const tones = new Set(channel.map((t) => t.opacity));
@@ -170,9 +156,7 @@ describe("workspace glyph depth", () => {
   });
 
   it("rests in one flat colour", () => {
-    for (const pr of [null, "open"] as const) {
-      expect(new Set(tileShades(render({ seed, pr })).map((t) => t.opacity))).toEqual(new Set([1]));
-    }
+    expect(new Set(tileShades(render({ seed })).map((t) => t.opacity))).toEqual(new Set([1]));
   });
 
   it("belongs to the workspace glyph alone, not the agent loader", () => {

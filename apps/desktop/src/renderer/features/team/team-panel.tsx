@@ -442,11 +442,7 @@ function DangerZone({ team }: { team: TeamSummary }) {
           label="Delete team"
           hint="Permanently removes this team for every member"
         >
-          <Button
-            variant="ghost"
-            onClick={() => setConfirmOpen(true)}
-            className="text-red-text hover:bg-red-text/10 hover:text-red-text gap-1.5"
-          >
+          <Button variant="destructive-secondary" onClick={() => setConfirmOpen(true)}>
             Delete team
           </Button>
         </SettingsRow>

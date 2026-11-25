@@ -867,7 +867,9 @@ function TabRow({
     >
       <IconButton
         type="button"
-        className="pointer-events-auto shrink-0"
+        // On the selected fill a selected-bg hover would vanish: the ✕ marks
+        // hover by brightening alone.
+        className="pointer-events-auto shrink-0 hover:bg-transparent"
         onClick={(e) => onClose(chat, e)}
         label="Close chat"
       >

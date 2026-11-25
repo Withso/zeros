@@ -15,13 +15,14 @@
 // from the radius scale instead of adding a fourth token; zeros-tokens.css
 // documents the nesting rule.
 
+import { SEPARATOR_RULE } from "@/renderer/shared/ui/primitives/separator";
 export const MENU_SURFACE_RADIUS = "rounded-xl";
 
 /** Inset between the surface edge and its rows, equal on every side. */
 export const MENU_SURFACE_INSET = "p-1";
 
 /** Full-bleed hairline between row groups with the same 4px gap as the inset. */
-export const MENU_SEPARATOR = "bg-border2 -mx-1 my-1 h-px";
+export const MENU_SEPARATOR = `${SEPARATOR_RULE.floating} -mx-1 my-1 h-px`;
 
 /** Hover/selection fill on a row: the standard 8px radius-lg. */
 export const MENU_ITEM_RADIUS = "rounded-lg";

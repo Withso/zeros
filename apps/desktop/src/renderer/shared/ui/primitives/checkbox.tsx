@@ -72,6 +72,7 @@ export function Checkbox({
         type="checkbox"
         className="peer sr-only"
         aria-label={ariaLabel}
+        aria-checked={checked === "indeterminate" ? "mixed" : undefined}
         checked={checked === true}
         disabled={disabled}
         onChange={onChange}

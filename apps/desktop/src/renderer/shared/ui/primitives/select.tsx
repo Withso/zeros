@@ -8,6 +8,7 @@ import { cn } from "@/renderer/shared/ui/cn"
 import { ANCHORED_OVERLAY_MOTION } from "@/renderer/shared/ui/anchored-overlay-motion"
 import {
   MENU_ITEM_RADIUS,
+  MENU_LABEL,
   MENU_SEPARATOR,
   MENU_SURFACE_INSET,
   MENU_SURFACE_RADIUS,
@@ -95,7 +96,7 @@ const SELECT_TRIGGER_WIDTH: Record<SelectTriggerWidth, string> = {
 // rest; hover and open paint selected-bg. Compact keeps the line box and
 // drops to 24px.
 const SELECT_TRIGGER_BASE = cn(
-  "group/select-trigger flex items-center justify-between gap-1 rounded-md border border-border3 bg-transparent py-1 pr-1.5 pl-2 text-xs leading-4.5 whitespace-nowrap transition-[color,background-color,border-color,box-shadow] duration-fast ease-out outline-none hover:border-border4 hover:bg-selected-bg data-[state=open]:border-border4 data-[state=open]:bg-selected-bg data-[size=compact]:py-0.5 disabled:cursor-not-allowed disabled:opacity-50 data-[placeholder]:text-fg3 *:data-[slot=select-value]:line-clamp-1 *:data-[slot=select-value]:flex *:data-[slot=select-value]:items-center *:data-[slot=select-value]:gap-2 [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-3.5 [&_svg:not([class*='text-'])]:text-fg2",
+  "group/select-trigger flex items-center justify-between gap-1 rounded-md border border-border3 bg-transparent py-1 pr-1.5 pl-2 text-xs leading-4.5 whitespace-nowrap transition-[color,background-color,border-color,box-shadow] duration-fast ease-out outline-none hover:border-border4 hover:bg-[var(--surface-hover,var(--bg1-hover))] data-[state=open]:border-border4 data-[state=open]:bg-[var(--surface-hover,var(--bg1-hover))] data-[size=compact]:py-0.5 disabled:cursor-not-allowed disabled:opacity-50 data-[placeholder]:text-fg3 *:data-[slot=select-value]:line-clamp-1 *:data-[slot=select-value]:flex *:data-[slot=select-value]:items-center *:data-[slot=select-value]:gap-2 [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-3.5 [&_svg:not([class*='text-'])]:text-fg2",
   FIELD_FOCUS,
   FIELD_INVALID,
 )
@@ -240,7 +241,7 @@ function SelectLabel({
   return (
     <SelectPrimitive.Label
       data-slot="select-label"
-      className={cn("px-2 py-1.5 text-xs text-fg2", className)}
+      className={cn(MENU_LABEL, className)}
       {...props}
     />
   )

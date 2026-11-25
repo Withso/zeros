@@ -511,7 +511,7 @@ export const DesignMeasureOverlay = React.memo(function DesignMeasureOverlay({
           top: target.y,
           width: target.width,
           height: target.height,
-          "--design-stroke-color": "var(--red-text)",
+          "--design-stroke-color": "var(--design-measure)",
           ...designStrokeWidth(1),
         } as React.CSSProperties}
       />
@@ -523,7 +523,7 @@ export const DesignMeasureOverlay = React.memo(function DesignMeasureOverlay({
           style={{
             left: extension.x,
             top: extension.y,
-            ...designDashedLineStyle(extension.axis, extension.length, "var(--red-text)"),
+            ...designDashedLineStyle(extension.axis, extension.length, "var(--design-measure)"),
           }}
         />
       ))}
@@ -533,7 +533,7 @@ export const DesignMeasureOverlay = React.memo(function DesignMeasureOverlay({
           <span
             key={measurement.side}
             data-design-measure={measurement.side}
-            className="bg-red-text absolute"
+            className="bg-(--design-measure) absolute"
             style={{
               left: measurement.x,
               top: measurement.y,
@@ -546,7 +546,7 @@ export const DesignMeasureOverlay = React.memo(function DesignMeasureOverlay({
             }}
           >
             <span
-              className="bg-red-text text-2xxs absolute rounded-sm px-1 leading-4 font-medium whitespace-nowrap text-[var(--design-selection-label-fg)] tabular-nums"
+              className="bg-(--design-measure) text-2xxs absolute rounded-sm px-1 leading-4 font-medium whitespace-nowrap text-[var(--design-selection-label-fg)] tabular-nums"
               style={{
                 left: horizontal ? "50%" : 0,
                 top: horizontal ? 0 : "50%",

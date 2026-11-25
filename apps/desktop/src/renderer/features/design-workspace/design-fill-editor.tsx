@@ -490,7 +490,7 @@ function DesignFillPopover({
                       "absolute top-1/2 size-5 -translate-y-1/2 rounded-sm outline-none",
                       key === "start" ? "left-1" : "right-1",
                       stop === key
-                        ? "shadow-[0_0_0_2px_var(--bg3),0_0_0_3px_var(--highlighted-bright)]"
+                        ? "shadow-[0_0_0_2px_var(--bg3),0_0_0_3px_var(--accent)]"
                         : "shadow-[0_0_0_2px_var(--bg3)]",
                     )}
                     onClick={() => setStop(key)}

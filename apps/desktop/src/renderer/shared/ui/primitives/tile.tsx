@@ -21,8 +21,9 @@ const Tile = React.forwardRef<
     className={cn(
       "border-border1 bg-bg2 text-fg1 rounded-xl border p-4 text-left",
       "transition-colors duration-fast ease-out",
-      // selected-bg + border3 reads on bg2, where bg2-hover was 1.06:1.
-      "hover:border-border3 hover:bg-selected-bg",
+      // bg2's own hover (stepped up in 2026-11 to read on bg2) on border3;
+      // selected-bg stays for selection, so a hovered tile never looks picked.
+      "hover:border-border3 hover:bg-bg2-hover",
       "focus-visible:border-accent focus-visible:outline-none",
       className,
     )}

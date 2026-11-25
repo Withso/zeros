@@ -1432,16 +1432,19 @@
   background-color: var(--design-gap-stroke);
 }
 
+/* Value chips carry white text, so they sit on the darker label fills
+ * (padding on the selection label blue, gap on its deep pink); the strokes
+ * keep the brighter colours for ticks and bands. */
 .zd-design-inline-spacing-value {
   visibility: hidden;
   opacity: 0;
-  background-color: var(--design-padding-stroke);
+  background-color: var(--design-selection-label-bg);
   color: var(--design-selection-label-fg);
   text-align: center;
 }
 
 .zd-design-inline-gap-handle .zd-design-inline-spacing-value {
-  background-color: var(--design-gap-stroke);
+  background-color: var(--design-gap-label-bg);
 }
 
 /* Hovered or edited space: one solid shade of its stroke color, strong
@@ -1529,7 +1532,7 @@
 .zd-design-inline-spacing-floating {
   visibility: visible;
   opacity: 1;
-  background-color: var(--design-gap-stroke);
+  background-color: var(--design-gap-label-bg);
 }
 
 /* Typing replaces the readout in place. */
@@ -1550,7 +1553,7 @@
   border: 0;
   box-shadow: inset 0 0 0 calc(1px * var(--design-canvas-inverse-zoom))
     var(--design-spacing-line-border);
-  background-color: var(--design-padding-stroke);
+  background-color: var(--design-selection-label-bg);
   color: var(--design-selection-label-fg);
   caret-color: var(--design-selection-label-fg);
   text-align: center;

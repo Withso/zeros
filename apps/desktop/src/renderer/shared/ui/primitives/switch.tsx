@@ -16,7 +16,7 @@ const Switch = React.forwardRef<
       // is a 1px accent line one pixel off the track, so it still shows
       // around the accent fill. Both switch tokens live in
       // styles/semantic-tokens.css.
-      "peer focus-visible:outline-accent data-[state=unchecked]:bg-border3 data-[state=unchecked]:border-border4 data-[state=unchecked]:enabled:hover:border-fg3 inline-flex h-5 w-8 shrink-0 cursor-pointer items-center rounded-full border border-transparent transition-colors focus-visible:outline-1 focus-visible:outline-offset-1 disabled:cursor-not-allowed disabled:opacity-50 data-[state=checked]:bg-[var(--switch-on-bg)]",
+      "peer focus-visible:outline-accent data-[state=unchecked]:bg-border3 data-[state=unchecked]:border-border4 data-[state=unchecked]:enabled:hover:border-fg3 inline-flex h-5 w-8 shrink-0 cursor-pointer items-center rounded-full border border-transparent transition-colors duration-fast ease-out focus-visible:outline-1 focus-visible:outline-offset-1 disabled:cursor-not-allowed disabled:opacity-50 data-[state=checked]:bg-[var(--switch-on-bg)]",
       className,
     )}
     {...props}
@@ -27,7 +27,7 @@ const Switch = React.forwardRef<
         // --switch-thumb: white in both themes, one colour across ON/OFF. Its one
         // soft shadow is --switch-thumb-shadow: --shadow-dropdown's 24px blur
         // is wrong for a 16px thumb.
-        "pointer-events-none block h-4 w-4 rounded-full bg-[var(--switch-thumb)] shadow-[var(--switch-thumb-shadow)] ring-0 transition-transform data-[state=checked]:translate-x-[14px] data-[state=unchecked]:translate-x-0",
+        "pointer-events-none block h-4 w-4 rounded-full bg-[var(--switch-thumb)] shadow-[var(--switch-thumb-shadow)] ring-0 transition-transform duration-base ease-out data-[state=checked]:translate-x-[14px] data-[state=unchecked]:translate-x-0",
       )}
     />
   </SwitchPrimitive.Root>

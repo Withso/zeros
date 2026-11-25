@@ -2,6 +2,7 @@ import * as React from "react";
 
 import { cn } from "@/renderer/shared/ui/cn";
 import { IconButtonSizeContext } from "./icon-button";
+import { SEPARATOR_RULE } from "./separator";
 
 // One size for every toolbar and island: 28px tools in a 36px bar. The bar
 // takes the 12px corners of every floating surface (P7), and the 3px inset
@@ -9,7 +10,7 @@ import { IconButtonSizeContext } from "./icon-button";
 export const TOOLBAR_INSET = "p-[calc(var(--spacing)*0.75)]";
 export const TOOLBAR_RADIUS = "rounded-xl";
 export const TOOLBAR_SURFACE = cn(
-  "border-border2 bg-bg2 text-fg2 inline-flex shrink-0 items-center gap-0.5 border *:rounded-lg",
+  "border-border2 bg-bg2 text-fg2 inline-flex shrink-0 items-center gap-0.5 border *:rounded-lg [--slider-ring:var(--bg2)]",
   TOOLBAR_INSET,
   TOOLBAR_RADIUS,
 );
@@ -206,7 +207,8 @@ function ToolbarSeparator({ className, ...props }: React.HTMLAttributes<HTMLDivE
       role="separator"
       aria-hidden
       className={cn(
-        "bg-border2 shrink-0",
+        SEPARATOR_RULE.floating,
+        "shrink-0",
         "in-data-[orientation=horizontal]:mx-0.5 in-data-[orientation=horizontal]:h-4 in-data-[orientation=horizontal]:w-px in-data-[toolbar-size=inline]:h-3",
         "in-data-[orientation=vertical]:my-0.5 in-data-[orientation=vertical]:h-px in-data-[orientation=vertical]:w-4",
         className,

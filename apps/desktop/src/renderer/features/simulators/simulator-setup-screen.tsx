@@ -90,7 +90,7 @@ function SetupStatusRow({ row, active }: { row: SimulatorSetupRow; active: boole
       {typeof row.progress === "number" && (
         <div className="flex items-center gap-2">
           <ProgressBar value={row.progress} aria-label="Download progress" className="flex-1" />
-          <span className="text-fg3 text-2xxs tabular-nums">{row.progress}%</span>
+          <span className="text-fg3 text-3xxs tabular-nums">{row.progress}%</span>
         </div>
       )}
     </div>

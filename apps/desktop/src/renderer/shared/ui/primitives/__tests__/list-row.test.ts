@@ -83,7 +83,7 @@ describe("ListRow in a panel", () => {
   const classes = (props: Record<string, unknown>) =>
     new Set(renderToStaticMarkup(createElement(ListRow, props, "row")).match(/class="([^"]*)"/)![1]!.split(/\s+/));
 
-  it("is a full-width row flush with the panel at its two heights", () => {
+  it("is a full-width 28px row flush with the panel, in a group too (P7)", () => {
     const line = classes({ variant: "panel" });
     for (const cls of ["w-full", "min-w-0", "h-7", "rounded-none", "pl-3", "pr-2", "text-3xxs", "leading-4", "hover:bg-bg1-hover", "focus-visible:inset-ring"]) {
       expect(line, cls).toContain(cls);
@@ -91,8 +91,8 @@ describe("ListRow in a panel", () => {
     expect(line).not.toContain("-ml-2");
     expect(line).not.toContain("w-fit");
     const row = classes({ variant: "panel", size: "sm" });
-    for (const cls of ["h-6.5", "min-h-0", "rounded-sm", "px-1.5"]) expect(row, cls).toContain(cls);
-    expect(row).not.toContain("h-7");
+    for (const cls of ["h-7", "min-h-0", "rounded-sm", "px-1.5"]) expect(row, cls).toContain(cls);
+    expect(row).not.toContain("h-6.5");
     expect(row).not.toContain("rounded-none");
   });
 

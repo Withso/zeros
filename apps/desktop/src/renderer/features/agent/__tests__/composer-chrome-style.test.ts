@@ -46,7 +46,7 @@ describe("composer chrome", () => {
       /export const DOCK_CARD_CLS =\s*`border-\(--composer-border\) bg-bg1-raised /,
     );
     expect(code("../../../shared/ui/primitives/popover.tsx")).toMatch(
-      /composer:\s*"bg-bg1-raised border-\(--composer-border\) /,
+      /composer:\s*"bg-bg[3] border-\(--composer-border\) /,
     );
     expect(shell).not.toContain("border-border2");
     // Review drafts in Changes, Files and Review take the agent composer's

@@ -142,6 +142,11 @@
   --design-canvas-default-text: #111111;
   --design-padding-stroke: #4489FF;
   --design-gap-stroke: #F531B3;
+  /* White gap values sit on this darker pink (5.6:1), never on the stroke. */
+  --design-gap-label-bg: #C21A87;
+  /* Alt measurement lines and their white chips: one theme-static red that
+     carries white text (5.9:1) on any canvas, apart from the app's status red. */
+  --design-measure: #C11F1F;
   --design-spacing-line-border: #FFFFFF;
   --design-selection-soft: color-mix(
     in oklab,

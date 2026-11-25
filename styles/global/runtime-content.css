@@ -375,7 +375,7 @@
   display: none;
 }
 [data-Zeros-root] .zeros-agent-md .zeros-md-filepath:focus-visible:where(:not([data-zeros-focus-visible="false"])) {
-  outline: 1px solid var(--accent-text);
+  outline: 1px solid var(--accent);
   outline-offset: 2px;
 }
 /* References retain their own link affordance in live and settled narration. */
