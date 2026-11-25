@@ -1,4 +1,5 @@
 import { expect } from "@playwright/test";
+import { openSidebarSubmenu, selectSidebarGrouping, selectSidebarSort } from "./ui-smoke/sidebar-menu.mjs";
 
 export async function runSidebarWorkspaceFilters({ page, check, harnessBase }) {
   // Owner isolation below is the stable sidebar; the unified section follows.
@@ -15,7 +16,7 @@ export async function runSidebarWorkspaceFilters({ page, check, harnessBase }) {
   const indicator = trigger.locator("[data-filter-indicator]");
   const expectFilterIndicator = async (active) => {
     await expect(trigger).toHaveAccessibleDescription(
-      active ? "Repository filter active" : "",
+      active ? "View changed from defaults" : "",
     );
     await expect(indicator).toHaveCount(active ? 1 : 0);
     if (active) await expect(indicator).toBeVisible();
@@ -25,29 +26,13 @@ export async function runSidebarWorkspaceFilters({ page, check, harnessBase }) {
     page
       .locator("[data-workspace-tab]")
       .evaluateAll((nodes) => nodes.map((node) => node.dataset.workspaceId));
-  const selectGroup = async (name) => {
-    await trigger.click();
-    await page.getByRole("menuitemradio", { name, exact: true }).click();
-  };
-  const selectSort = async (name) => {
-    await trigger.click();
-    await page.getByRole("menuitem", { name: "Sort by", exact: true }).hover();
-    await page.getByRole("menuitemradio", { name, exact: true }).click();
-  };
+  const selectGroup = (name) => selectSidebarGrouping(page, name);
+  const selectSort = (name) => selectSidebarSort(page, name);
   const openRepositories = async () => {
-    await trigger.click();
-    const filter = page.getByRole("menuitem", { name: /^Filter/ });
-    await expect(filter).toHaveText("Filter");
-    await filter.hover();
-    await page.getByRole("menuitem", { name: "Repo", exact: true }).hover();
-    const search = page.getByRole("searchbox", { name: "Search repositories" });
-    await expect(search).toBeVisible();
-    await expect(search).toBeFocused();
-    await expect(search).toHaveCSS("border-top-width", "0px");
-    await expect(
-      page.getByRole("menuitem", { name: "All repositories", exact: true }),
-    ).toHaveCount(0);
-    return search;
+    await openSidebarSubmenu(page, "Filter");
+    const repository = page.getByRole("menuitem", { name: /^Repository/ });
+    await repository.hover();
+    await expect(repository).toHaveAttribute("data-state", "open");
   };
 
   await expectFilterIndicator(false);
@@ -65,7 +50,7 @@ export async function runSidebarWorkspaceFilters({ page, check, harnessBase }) {
   expect(await order()).toEqual(createdOrder);
   await page.evaluate(() => window.appSidebarUpdateChat("ws-seville"));
   expect(await order()).toEqual(createdOrder);
-  await selectSort("Updated");
+  await selectSort("Last updated");
   await expect.poll(async () => (await order())[0]).toBe("ws-seville");
   await page.evaluate(() =>
     window.appSidebarUpdateWorkspace("ws-new-york", { status: "done" }),
@@ -111,20 +96,13 @@ export async function runSidebarWorkspaceFilters({ page, check, harnessBase }) {
     true,
   );
 
-  await selectGroup("None");
-  const search = await openRepositories();
-  await search.fill("no matching repository");
-  await expect(
-    page.getByText("No repositories found", { exact: true }),
-  ).toBeVisible();
-  await search.fill("ze");
-  await search.press("ArrowDown");
+  await selectGroup("Repository");
+  await openRepositories();
   const zeros = page.getByRole("menuitemcheckbox", {
     name: "example/zeros",
     exact: true,
   });
-  await expect(zeros).toBeFocused();
-  await zeros.press("Enter");
+  await zeros.click();
   await expect(zeros).toHaveAttribute("aria-checked", "true");
   await expectFilterIndicator(true);
   const originalTheme = await page.evaluate(
@@ -150,7 +128,6 @@ export async function runSidebarWorkspaceFilters({ page, check, harnessBase }) {
     else delete document.documentElement.dataset.theme;
   }, originalTheme);
   await expect.poll(order).toEqual(["ws-boston", "ws-atlanta"]);
-  await search.fill("ocolors");
   const colors = page.getByRole("menuitemcheckbox", {
     name: "example/ocolors",
     exact: true,
@@ -167,7 +144,7 @@ export async function runSidebarWorkspaceFilters({ page, check, harnessBase }) {
   await expect(trigger).toHaveAttribute("data-filtered", "true");
   await expectFilterIndicator(true);
   check(
-    "Repo supports search, keyboard selection, multiple repositories and reload persistence",
+    "Repository filter supports multiple repositories and reload persistence",
     true,
   );
 
@@ -186,10 +163,14 @@ export async function runSidebarWorkspaceFilters({ page, check, harnessBase }) {
   await expect(page.getByRole("menu", { includeHidden: true })).toHaveCount(0);
   await trigger.focus();
   await trigger.press("Enter");
-  await expect(
-    page.getByRole("menuitemradio", { name: "None", exact: true }),
-  ).toBeFocused();
-  await page.keyboard.press("Home");
+  await expect(page.getByRole("menuitem", { name: /^Sort/ })).toBeFocused();
+  const group = page.getByRole("menuitem", { name: /^Group/ });
+  for (let step = 0; step < 6; step += 1) {
+    if (await group.evaluate((node) => node === document.activeElement)) break;
+    await page.keyboard.press("ArrowDown");
+  }
+  await expect(group).toBeFocused();
+  await page.keyboard.press("ArrowRight");
   await expect(
     page.getByRole("menuitemradio", { name: "Repository", exact: true }),
   ).toBeFocused();
@@ -204,7 +185,7 @@ export async function runSidebarWorkspaceFilters({ page, check, harnessBase }) {
     true,
   );
 
-  await selectGroup("None");
+  await selectGroup("Repository");
   await openRepositories();
   await page
     .getByRole("menuitemcheckbox", { name: "example/zeros", exact: true })
@@ -259,8 +240,10 @@ export async function runSidebarWorkspaceFilters({ page, check, harnessBase }) {
   await expect(row(seeded.keys[0]).locator('[data-cloud-mark="stopped"]')).toHaveCount(1);
   await expect(row("ws-atlanta").locator("[data-cloud-mark]")).toHaveCount(0);
   const placement = async (name) => {
-    await trigger.click();
-    await page.getByRole("menuitem", { name: /^Filter/ }).hover();
+    await openSidebarSubmenu(page, "Filter");
+    const placementItem = page.getByRole("menuitem", { name: /^Placement/ });
+    await placementItem.hover();
+    await expect(placementItem).toHaveAttribute("data-state", "open");
     await page.getByRole("menuitemcheckbox", { name, exact: true }).click();
     await page.keyboard.press("Escape");
     await expect(page.getByRole("menu", { includeHidden: true })).toHaveCount(0);
@@ -268,7 +251,7 @@ export async function runSidebarWorkspaceFilters({ page, check, harnessBase }) {
   await placement("Cloud");
   await expect(row(seeded.keys[0])).toHaveCount(0);
   await expect(row("ws-atlanta")).toBeVisible();
-  await expect(trigger).toHaveAccessibleDescription("Placement filter active");
+  await expect(trigger).toHaveAccessibleDescription("View changed from defaults");
   await page.evaluate((id) => window.appSidebarSelectOwner(id), seeded.otherOrganizationId);
   await expect(row(seeded.keys[2])).toBeVisible();
   await page.evaluate((id) => window.appSidebarSelectOwner(id), seeded.organizationId);

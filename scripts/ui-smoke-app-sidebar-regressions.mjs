@@ -1,4 +1,5 @@
 import { expect } from "@playwright/test";
+import { selectSidebarGrouping } from "./ui-smoke/sidebar-menu.mjs";
 
 async function resetHarness(page, harnessBase, query = "") {
   await page.goto(`${harnessBase}/harness-app-sidebar.html`, {
@@ -36,7 +37,7 @@ export async function checkSidebarNarrowHeader({ page, check, harnessBase }) {
     const box = await page
       .getByRole("button", { name, exact: true })
       .boundingBox();
-    expect(box.height).toBe(28);
+    expect(box.height).toBe(name === "App resources" ? 24 : 28);
     if (name !== "App resources") expect(box.width).toBe(28);
     expect(box.x).toBeGreaterThanOrEqual(previousEnd);
     previousEnd = box.x + box.width;
@@ -173,12 +174,7 @@ export async function checkSidebarUnopenedFolder({ page, check, harnessBase }) {
     () => window.appSidebarState().chats,
   );
   for (const presentation of ["Repository", "Status", "None"]) {
-    await page
-      .getByRole("button", { name: "Filter workspaces", exact: true })
-      .click();
-    await page
-      .getByRole("menuitemradio", { name: presentation, exact: true })
-      .click();
+    await selectSidebarGrouping(page, presentation);
     await expect(folder).toBeVisible();
     await folder.click();
     await expect
@@ -248,12 +244,7 @@ export async function checkSidebarRetiredLocalMain({
       folder: `/fixture/zeros${query.includes("subdirectory") ? "/packages/app" : ""}`,
     });
     for (const presentation of ["None", "Repository"]) {
-      await page
-        .getByRole("button", { name: "Filter workspaces", exact: true })
-        .click();
-      await page
-        .getByRole("menuitemradio", { name: presentation, exact: true })
-        .click();
+      await selectSidebarGrouping(page, presentation);
       await expect(page.locator('[data-workspace-id^="local:"]')).toHaveCount(
         0,
       );

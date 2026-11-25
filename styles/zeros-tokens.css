@@ -277,6 +277,8 @@
   /* @generated tokens:utilities-sidebar-bg:start */
   --color-sidebar-bg: var(--sidebar-bg); /* #181818 — repository sidebar background */
   --color-sidebar-bg-hover: var(--sidebar-bg-hover); /* #262626 — sidebar row hover and selected state */
+  --color-nav-bg: var(--nav-bg); /* #101010 — workspace navigation sidebar background */
+  --color-nav-bg-hover: var(--nav-bg-hover); /* #222222 — workspace navigation row hover and selected state */
   /* @generated tokens:utilities-sidebar-bg:end */
 
   /* ── BORDERS — `border-border1`..`border-border4` ── */
@@ -526,6 +528,8 @@
 
   /* ── REPOSITORY NAVIGATION (not the settings sidebar) ── */
   /* @generated tokens:base-sidebar-bg:start */
+  --nav-bg: hsl(0 0% 6.275%); /* #101010 — workspace navigation sidebar background */
+  --nav-bg-hover: hsl(0 0% 13.333%); /* #222222 — workspace navigation row hover and selected state */
   --sidebar-bg: hsl(0 0% 9.412%); /* #181818 — repository sidebar background */
   --sidebar-bg-hover: hsl(0 0% 15%); /* #262626 — sidebar row hover and selected state */
   /* @generated tokens:base-sidebar-bg:end */
@@ -817,6 +821,8 @@
 
   /* ── SIDEBAR ── */
   /* @generated tokens:light-sidebar-bg:start */
+  --nav-bg: hsl(40 27.273% 97.843%); /* #FBFAF8 — workspace navigation sidebar background */
+  --nav-bg-hover: hsl(36 12.195% 91.961%); /* #EDEBE8 — workspace navigation row hover and selected state */
   --sidebar-bg: hsl(40 27.273% 97.843%); /* #FBFAF8 — repository sidebar background */
   --sidebar-bg-hover: hsl(36 12.195% 91.961%); /* #EDEBE8 — sidebar row hover and selected state */
   /* @generated tokens:light-sidebar-bg:end */

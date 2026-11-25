@@ -78,11 +78,12 @@ describe("live Run stream placement", () => {
     // render half a number.
     expect(counts).toMatch(/className="[^"]*\bshrink-0\b/);
     expect(row).toMatch(
-      /<span className="[^"]*\bflex-1\b[^"]*\btruncate\b[^"]*">\{label\}<\/span>/,
+      /<span className="min-w-0 truncate">\{label\}<\/span>/,
     );
     expect(row).toMatch(
       /const SIDEBAR_WORKSPACE_TRAILING_CLS =\s*\n?\s*"[^"]*\bshrink-0\b/,
     );
+    expect(row).toContain('cn(SIDEBAR_WORKSPACE_TRAILING_CLS, "ml-auto")');
   });
 
   it("only publishes the cross-surface run signal once it is an answer", () => {

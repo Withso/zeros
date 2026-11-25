@@ -93,6 +93,14 @@ export type SidebarWorkspaceEntry =
       items: SidebarWorkspaceItem[];
     }
   | {
+      /** A View-menu grouping beyond Repository and Status (placement, owner,
+       * recency, pull request state). */
+      kind: "group";
+      key: string;
+      label: string;
+      items: SidebarWorkspaceItem[];
+    }
+  | {
       kind: "row";
       key: string;
       item: SidebarWorkspaceItem;
@@ -202,8 +210,22 @@ export function buildSidebarWorkspaceEntries(args: {
   pending: readonly PendingWorkspaceCreate[];
   /** unified-workspaces: one group per GitHub repository, holding its local and cloud workspaces. */
   projectGroupOf?: (projectId: string) => readonly Project[] | undefined;
+  /** Replaces the sort's order (name, direction, Needs you on top, Then by). */
+  compare?: (a: Workspace, b: Workspace) => number;
+  /** Groups the mixed list by a View-menu grouping instead of `filter`. */
+  extraGroup?: (item: SidebarWorkspaceItem) => { key: string; label: string; order: number };
+  /** Drops repository, status and group headers that have no rows. */
+  hideEmptyGroups?: boolean;
 }): SidebarWorkspaceEntry[] {
-  const { filter, sort = "updated", activity, projectGroupOf } = args;
+  const entries = buildEntries(args);
+  return args.hideEmptyGroups
+    ? entries.filter(entry => entry.kind === "row" || entry.kind === "folder" || entry.items.length > 0)
+    : entries;
+}
+
+function buildEntries(args: Parameters<typeof buildSidebarWorkspaceEntries>[0]): SidebarWorkspaceEntry[] {
+  const { sort = "updated", activity, projectGroupOf, extraGroup } = args;
+  const filter = extraGroup ? "ungrouped" : args.filter;
   const nest = (items: SidebarWorkspaceItem[]) => nestChildWorkspaces(items, args.expandedWorkspaceIds ?? NO_EXPANDED);
   // Selecting any side of a joined project selects the whole project.
   const selectedIds = new Set(projectGroupOf
@@ -213,13 +235,13 @@ export function buildSidebarWorkspaceEntries(args: {
     ? args.projects.filter(project => selectedIds.has(project.id))
     : args.projects;
   const visibleProjectIds = new Set(projects.map(project => project.id));
-  const orderWorkspaces = (rows: readonly Workspace[]) => [...rows].sort((a, b) => {
+  const orderWorkspaces = (rows: readonly Workspace[]) => [...rows].sort(args.compare ?? ((a, b) => {
     const timestamp = (workspace: Workspace) => sort === "created"
       ? finiteTimestamp(workspace.createdAt)
       : Math.max(finiteTimestamp(workspace.createdAt), finiteTimestamp(workspace.lastActiveAt),
         finiteTimestamp(activity?.activeAtByWorkspaceId?.get(workspace.id)));
     return timestamp(b) - timestamp(a);
-  });
+  }));
   const pendingByProject = new Map<string, PendingWorkspaceCreate[]>();
   const unregisteredCloudCreates: SidebarWorkspaceItem[] = [];
   for (const pending of args.pending) {
@@ -267,6 +289,25 @@ export function buildSidebarWorkspaceEntries(args: {
     const mixed = [...unregisteredCloudCreates, ...pending]
       .sort((a, b) => (b.kind === "pending" ? finiteTimestamp(b.pending.startedAt) : 0) - (a.kind === "pending" ? finiteTimestamp(a.pending.startedAt) : 0))
       .concat(workspaces);
+    if (extraGroup) {
+      const groups = new Map<string, { key: string; label: string; order: number; items: SidebarWorkspaceItem[] }>();
+      for (const item of mixed) {
+        const group = extraGroup(item);
+        const existing = groups.get(group.key);
+        if (existing) existing.items.push(item);
+        else groups.set(group.key, { ...group, items: [item] });
+      }
+      const grouped: SidebarWorkspaceEntry[] = [...groups.values()]
+        .sort((a, b) => a.order - b.order)
+        .map(group => ({ kind: "group" as const, key: `group:${group.key}`, label: group.label, items: nest(group.items) }));
+      const represented = new Set(mixed.map((item) => item.project.id));
+      for (const project of projects) {
+        if (project.isGitRepository === false && !represented.has(project.id)) {
+          grouped.push({ kind: "folder", key: `project:${project.id}`, project });
+        }
+      }
+      return grouped;
+    }
     const items = filter === "status" ? mixed : nest(mixed);
     const representedProjects = new Set(items.map((item) => item.project.id));
     const entries: SidebarWorkspaceEntry[] = filter === "status"
@@ -355,7 +396,7 @@ export function sidebarWorkspaceItems(
   entries: readonly SidebarWorkspaceEntry[],
 ): SidebarWorkspaceItem[] {
   return entries.flatMap((entry) => {
-    if (entry.kind === "repository" || entry.kind === "status") return entry.items;
+    if (entry.kind === "repository" || entry.kind === "status" || entry.kind === "group") return entry.items;
     return entry.kind === "row" ? [entry.item] : [];
   });
 }

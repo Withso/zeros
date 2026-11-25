@@ -18,7 +18,7 @@ function currentRecipe(file: string, name: string) {
 // Each contextual class is equivalent only under the sidebar Surface binding.
 function sidebarClasses(markup: string) {
   return classes(
-    markup.replaceAll("bg-(--surface-hover)", "bg-sidebar-bg-hover"),
+    markup.replaceAll("bg-(--surface-hover)", "bg-nav-bg-hover"),
   );
 }
 
@@ -26,7 +26,7 @@ describe("Surface markup equivalence", () => {
   it("preserves the sidebar nav's tag and painted classes, with context only", () => {
     // shell/app-sidebar.tsx original navigation recipe.
     const original =
-      "bg-sidebar-bg flex min-w-0 flex-1 flex-col overflow-hidden";
+      "bg-nav-bg flex min-w-0 flex-1 flex-col overflow-hidden";
     const markup = renderToStaticMarkup(
       createElement(
         Surface,
@@ -43,7 +43,7 @@ describe("Surface markup equivalence", () => {
     expect(classes(markup)).toEqual(
       new Set([
         ...original.split(/\s+/),
-        "[--surface-hover:var(--sidebar-bg-hover)]",
+        "[--surface-hover:var(--nav-bg-hover)]",
         "[--surface-border:var(--border2)]",
       ]),
     );
@@ -53,7 +53,7 @@ describe("Surface markup equivalence", () => {
 
   it("preserves the standalone draft harness's sidebar container", () => {
     // harnesses/harness-draft-indicators.tsx original sidebar-width container.
-    const original = "bg-sidebar-bg flex w-[220px] flex-col gap-px p-1";
+    const original = "bg-nav-bg flex w-[220px] flex-col gap-px p-1";
     const markup = renderToStaticMarkup(
       createElement(Surface, {
         kind: "sidebar",
@@ -65,7 +65,7 @@ describe("Surface markup equivalence", () => {
     expect(classes(markup)).toEqual(
       new Set([
         ...original.split(/\s+/),
-        "[--surface-hover:var(--sidebar-bg-hover)]",
+        "[--surface-hover:var(--nav-bg-hover)]",
         "[--surface-border:var(--border2)]",
       ]),
     );
@@ -80,7 +80,7 @@ describe("Surface markup equivalence", () => {
       constant: "SIDEBAR_ENTRY_CLS",
       tag: "button",
       original:
-        "flex h-8 w-full min-w-0 items-center justify-start gap-2 rounded-md border-0 bg-transparent px-2 py-0 text-left text-xs leading-4.5 font-normal text-fg2 transition-colors duration-120 ease-out hover:bg-sidebar-bg-hover hover:text-fg1 data-[state=active]:bg-bg2-highlight data-[state=active]:text-fg1 data-[state=active]:hover:bg-bg2-highlight [&_svg]:size-3.5 [&>svg]:shrink-0 [&>svg]:text-fg3 data-[state=active]:[&>svg]:text-fg2",
+        "flex h-8 w-full min-w-0 items-center justify-start gap-2 rounded-md border-0 bg-transparent px-2 py-0 text-left text-xs leading-4.5 font-normal text-fg2 transition-colors duration-120 ease-out hover:bg-nav-bg-hover hover:text-fg1 data-[state=active]:bg-bg2-highlight data-[state=active]:text-fg1 data-[state=active]:hover:bg-bg2-highlight [&_svg]:size-3.5 [&>svg]:shrink-0 [&>svg]:text-fg3 data-[state=active]:[&>svg]:text-fg2",
       icon: false,
     },
     // shell/app-sidebar.tsx Customize
@@ -90,7 +90,7 @@ describe("Surface markup equivalence", () => {
       constant: "SIDEBAR_ENTRY_CLS",
       tag: "button",
       original:
-        "flex h-8 w-full min-w-0 items-center justify-start gap-2 rounded-md border-0 bg-transparent px-2 py-0 text-left text-xs leading-4.5 font-normal text-fg2 transition-colors duration-120 ease-out hover:bg-sidebar-bg-hover hover:text-fg1 data-[state=active]:bg-bg2-highlight data-[state=active]:text-fg1 data-[state=active]:hover:bg-bg2-highlight [&_svg]:size-3.5 [&>svg]:shrink-0 [&>svg]:text-fg3 data-[state=active]:[&>svg]:text-fg2",
+        "flex h-8 w-full min-w-0 items-center justify-start gap-2 rounded-md border-0 bg-transparent px-2 py-0 text-left text-xs leading-4.5 font-normal text-fg2 transition-colors duration-120 ease-out hover:bg-nav-bg-hover hover:text-fg1 data-[state=active]:bg-bg2-highlight data-[state=active]:text-fg1 data-[state=active]:hover:bg-bg2-highlight [&_svg]:size-3.5 [&>svg]:shrink-0 [&>svg]:text-fg3 data-[state=active]:[&>svg]:text-fg2",
       icon: false,
     },
     // shell/app-sidebar.tsx Announcements
@@ -100,7 +100,7 @@ describe("Surface markup equivalence", () => {
       constant: "SIDEBAR_ENTRY_CLS",
       tag: "button",
       original:
-        "flex h-8 w-full min-w-0 items-center justify-start gap-2 rounded-md border-0 bg-transparent px-2 py-0 text-left text-xs leading-4.5 font-normal text-fg2 transition-colors duration-120 ease-out hover:bg-sidebar-bg-hover hover:text-fg1 data-[state=active]:bg-bg2-highlight data-[state=active]:text-fg1 data-[state=active]:hover:bg-bg2-highlight [&_svg]:size-3.5 [&>svg]:shrink-0 [&>svg]:text-fg3 data-[state=active]:[&>svg]:text-fg2",
+        "flex h-8 w-full min-w-0 items-center justify-start gap-2 rounded-md border-0 bg-transparent px-2 py-0 text-left text-xs leading-4.5 font-normal text-fg2 transition-colors duration-120 ease-out hover:bg-nav-bg-hover hover:text-fg1 data-[state=active]:bg-bg2-highlight data-[state=active]:text-fg1 data-[state=active]:hover:bg-bg2-highlight [&_svg]:size-3.5 [&>svg]:shrink-0 [&>svg]:text-fg3 data-[state=active]:[&>svg]:text-fg2",
       icon: false,
     },
     // shell/app-sidebar.tsx legacy folder
@@ -110,7 +110,7 @@ describe("Surface markup equivalence", () => {
       constant: "SIDEBAR_ENTRY_CLS",
       tag: "button",
       original:
-        "flex h-8 w-full min-w-0 items-center justify-start gap-2 rounded-md border-0 bg-transparent px-2 py-0 text-left text-xs leading-4.5 font-normal text-fg2 transition-colors duration-120 ease-out hover:bg-sidebar-bg-hover hover:text-fg1 data-[state=active]:bg-bg2-highlight data-[state=active]:text-fg1 data-[state=active]:hover:bg-bg2-highlight [&_svg]:size-3.5 [&>svg]:shrink-0 [&>svg]:text-fg3 data-[state=active]:[&>svg]:text-fg2",
+        "flex h-8 w-full min-w-0 items-center justify-start gap-2 rounded-md border-0 bg-transparent px-2 py-0 text-left text-xs leading-4.5 font-normal text-fg2 transition-colors duration-120 ease-out hover:bg-nav-bg-hover hover:text-fg1 data-[state=active]:bg-bg2-highlight data-[state=active]:text-fg1 data-[state=active]:hover:bg-bg2-highlight [&_svg]:size-3.5 [&>svg]:shrink-0 [&>svg]:text-fg3 data-[state=active]:[&>svg]:text-fg2",
       icon: false,
     },
     // shell/sidebar-workspace-row.tsx workspace — the Zeros Design row: its
@@ -123,7 +123,7 @@ describe("Surface markup equivalence", () => {
       constant: "SIDEBAR_WORKSPACE_ROW_CLS",
       tag: "div",
       original:
-        "group/workspace relative flex h-8 w-full min-w-0 shrink-0 select-none items-center overflow-hidden rounded-md pr-2 text-left text-xs font-normal text-fg2 transition-none [--row-fill:var(--surface-hover)] hover:bg-sidebar-bg-hover focus-within:bg-sidebar-bg-hover data-[active=true]:bg-bg2-highlight data-[active=true]:text-fg1 data-[active=true]:[--row-fill:var(--bg2-highlight)] data-[active=true]:hover:bg-bg2-highlight data-[active=true]:focus-within:bg-bg2-highlight has-[>button:focus-visible]:inset-ring has-[>button:focus-visible]:inset-ring-accent",
+        "group/workspace relative flex w-full min-w-0 shrink-0 select-none items-center overflow-hidden rounded-md pr-2 text-left text-xs font-normal text-fg2 transition-none [--row-fill:var(--surface-hover)] hover:bg-nav-bg-hover focus-within:bg-nav-bg-hover data-[active=true]:bg-nav-bg-hover data-[active=true]:text-fg1 has-[>button:focus-visible]:inset-ring has-[>button:focus-visible]:inset-ring-accent",
       icon: false,
     },
     // shell/sidebar-workspace-row.tsx pending workspace
@@ -133,7 +133,7 @@ describe("Surface markup equivalence", () => {
       constant: "SIDEBAR_WORKSPACE_ROW_CLS",
       tag: "div",
       original:
-        "group/workspace relative flex h-8 w-full min-w-0 shrink-0 select-none items-center overflow-hidden rounded-md pr-2 text-left text-xs font-normal text-fg2 transition-none [--row-fill:var(--surface-hover)] hover:bg-sidebar-bg-hover focus-within:bg-sidebar-bg-hover data-[active=true]:bg-bg2-highlight data-[active=true]:text-fg1 data-[active=true]:[--row-fill:var(--bg2-highlight)] data-[active=true]:hover:bg-bg2-highlight data-[active=true]:focus-within:bg-bg2-highlight has-[>button:focus-visible]:inset-ring has-[>button:focus-visible]:inset-ring-accent",
+        "group/workspace relative flex w-full min-w-0 shrink-0 select-none items-center overflow-hidden rounded-md pr-2 text-left text-xs font-normal text-fg2 transition-none [--row-fill:var(--surface-hover)] hover:bg-nav-bg-hover focus-within:bg-nav-bg-hover data-[active=true]:bg-nav-bg-hover data-[active=true]:text-fg1 has-[>button:focus-visible]:inset-ring has-[>button:focus-visible]:inset-ring-accent",
       icon: false,
     },
   ];
@@ -173,7 +173,7 @@ describe("Surface markup equivalence", () => {
       const surface = renderToStaticMarkup(
         createElement(Surface, { kind: "sidebar" }),
       );
-      expect(surface).toContain("[--surface-hover:var(--sidebar-bg-hover)]");
+      expect(surface).toContain("[--surface-hover:var(--nav-bg-hover)]");
     },
   );
 
@@ -181,7 +181,7 @@ describe("Surface markup equivalence", () => {
     ["canvas", "bg1", "bg1-hover", "border1"],
     ["raised", "bg2", "bg2-hover", "border2"],
     ["floating", "bg3", "bg3-hover", "border2"],
-    ["sidebar", "sidebar-bg", "sidebar-bg-hover", "border2"],
+    ["sidebar", "nav-bg", "nav-bg-hover", "border2"],
   ] as const)(
     "binds %s to its own existing theme tokens",
     (kind, fill, hover, border) => {

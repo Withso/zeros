@@ -79,7 +79,9 @@ function outline(entries: readonly SidebarWorkspaceEntry[]): string[] {
         ]
       : entry.kind === "folder"
         ? [entry.key]
-        : [sidebarItemSelectionKey(entry.item)],
+        : entry.kind === "group"
+          ? entry.items.map(sidebarItemSelectionKey)
+          : [sidebarItemSelectionKey(entry.item)],
   );
 }
 

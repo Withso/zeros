@@ -53,6 +53,11 @@ function write(next: string[]): void {
   for (const listener of listeners) listener();
 }
 
+/** Notified whenever the unread set changes. */
+export function subscribeChatUnread(listener: () => void): () => void {
+  return subscribe(listener);
+}
+
 function subscribe(listener: () => void): () => void {
   listeners.add(listener);
   return () => {

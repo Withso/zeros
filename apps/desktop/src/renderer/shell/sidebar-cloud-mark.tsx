@@ -35,6 +35,15 @@ const LABELS: Record<CloudMarkState, string> = {
   unknown: "Cloud workspace",
 };
 
+/** A cloud row's catalog status, or null for Local rows and before it loads. */
+export function useCloudWorkspaceStatus(folder: string | null): string | null {
+  const read = useCallback(() => {
+    const target = folder ? parseCloudWorkspaceKey(folder) : null;
+    return (target ? cloudWorkspaceDocument(target)?.status : null) ?? null;
+  }, [folder]);
+  return useSyncExternalStore(subscribeCloudWorkspaces, read, read);
+}
+
 /** One 16px trailing mark for a cloud workspace row; Local rows carry none. */
 export function SidebarCloudMark({ folder, className }: { folder: string; className: string }) {
   const read = useCallback(() => {

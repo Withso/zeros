@@ -124,3 +124,52 @@ describe("sidebar list preferences", () => {
     expect(sidebarRepositoryIds("local")).toEqual(["repo"]);
   });
 });
+
+describe("sidebar view preferences", () => {
+  it("defaults to the neutral view and restores changes on reload", async () => {
+    const prefs = await import("../sidebar-list-preferences");
+    expect(prefs.getSidebarListPreferences().view).toEqual(prefs.SIDEBAR_VIEW_DEFAULTS);
+    prefs.setSidebarView({ compact: true, statuses: ["input"], direction: "asc" });
+    resetSidebarListPreferencesForTests();
+    const { view } = prefs.getSidebarListPreferences();
+    expect([view.compact, view.statuses, view.direction]).toEqual([true, ["input"], "asc"]);
+  });
+
+  it("drops unknown or malformed values from storage", async () => {
+    const prefs = await import("../sidebar-list-preferences");
+    values.set(KEY, JSON.stringify({ sort: "updated", view: { compact: "yes", statuses: ["input", "bogus"], grouping: "nope", collapsedSections: ["pinned", 3] } }));
+    resetSidebarListPreferencesForTests();
+    const { view, sort } = prefs.getSidebarListPreferences();
+    expect(sort).toBe("updated");
+    expect(view.compact).toBe(false);
+    expect(view.statuses).toEqual(["input"]);
+    expect(view.grouping).toBeNull();
+    expect(view.collapsedSections).toEqual(["pinned"]);
+  });
+
+  it("reads a store written before the view existed", async () => {
+    const prefs = await import("../sidebar-list-preferences");
+    values.set(KEY, JSON.stringify({ sort: "created", repositoryIdsByOwner: {}, collapsedStatuses: [], hiddenPlacementsByOwner: {} }));
+    resetSidebarListPreferencesForTests();
+    expect(prefs.getSidebarListPreferences().sort).toBe("created");
+    expect(prefs.getSidebarListPreferences().view).toEqual(prefs.SIDEBAR_VIEW_DEFAULTS);
+  });
+
+  it("Reset clears menu options but keeps collapsed sections and groups", async () => {
+    const prefs = await import("../sidebar-list-preferences");
+    prefs.setSidebarView({ compact: true, unreadOnly: true, showProjectName: true });
+    prefs.setSidebarSectionCollapsed("pinned", true);
+    prefs.setSidebarGroupCollapsed("recency:today", true);
+    prefs.resetSidebarView(["unreadOnly"]);
+    expect(prefs.getSidebarListPreferences().view.compact).toBe(true);
+    expect(prefs.getSidebarListPreferences().view.unreadOnly).toBe(false);
+    prefs.resetSidebarView();
+    const { view } = prefs.getSidebarListPreferences();
+    expect(view.compact).toBe(false);
+    expect(view.showProjectName).toBe(false);
+    expect(view.collapsedSections).toEqual(["pinned"]);
+    expect(view.collapsedGroups).toEqual(["recency:today"]);
+    prefs.setSidebarSectionCollapsed("pinned", false);
+    expect(prefs.getSidebarListPreferences().view.collapsedSections).toEqual([]);
+  });
+});

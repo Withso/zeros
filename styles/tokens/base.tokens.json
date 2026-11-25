@@ -337,6 +337,40 @@
         }
       }
     },
+    "nav-bg": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [0.0, 0.0, 6.275]
+      },
+      "$description": "workspace navigation sidebar background",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--nav-bg",
+          "section": "base-sidebar-bg",
+          "utility": "--color-nav-bg",
+          "utilitySection": "utilities-sidebar-bg",
+          "utilityOrder": 20
+        }
+      }
+    },
+    "nav-bg-hover": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [0.0, 0.0, 13.333]
+      },
+      "$description": "workspace navigation row hover and selected state",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--nav-bg-hover",
+          "section": "base-sidebar-bg",
+          "utility": "--color-nav-bg-hover",
+          "utilitySection": "utilities-sidebar-bg",
+          "utilityOrder": 21
+        }
+      }
+    },
     "sidebar-bg": {
       "$type": "color",
       "$value": {
@@ -384,7 +418,7 @@
           "section": "base-border1",
           "utility": "--color-border1",
           "utilitySection": "utilities-border1",
-          "utilityOrder": 20
+          "utilityOrder": 22
         }
       }
     },
@@ -401,7 +435,7 @@
           "section": "base-border1",
           "utility": "--color-border2",
           "utilitySection": "utilities-border1",
-          "utilityOrder": 21
+          "utilityOrder": 23
         }
       }
     },
@@ -418,7 +452,7 @@
           "section": "base-border1",
           "utility": "--color-border3",
           "utilitySection": "utilities-border1",
-          "utilityOrder": 22
+          "utilityOrder": 24
         }
       }
     },
@@ -435,7 +469,7 @@
           "section": "base-border1",
           "utility": "--color-border4",
           "utilitySection": "utilities-border1",
-          "utilityOrder": 23
+          "utilityOrder": 25
         }
       }
     },
@@ -570,7 +604,7 @@
           "section": "base-highlighted-bg",
           "utility": "--color-highlighted-bg",
           "utilitySection": "utilities-highlighted-bg",
-          "utilityOrder": 24
+          "utilityOrder": 26
         }
       }
     },
@@ -587,7 +621,7 @@
           "section": "base-highlighted-bg",
           "utility": "--color-highlighted-bright",
           "utilitySection": "utilities-highlighted-bg",
-          "utilityOrder": 25,
+          "utilityOrder": 27,
           "cssFormat": "multiline"
         }
       }
@@ -605,7 +639,7 @@
           "section": "base-inverted-bg",
           "utility": "--color-inverted-bg",
           "utilitySection": "utilities-inverted-bg",
-          "utilityOrder": 26
+          "utilityOrder": 28
         }
       }
     },
@@ -622,7 +656,7 @@
           "section": "base-inverted-bg",
           "utility": "--color-inverted-fg",
           "utilitySection": "utilities-inverted-bg",
-          "utilityOrder": 27,
+          "utilityOrder": 29,
           "cssFormat": "multiline"
         }
       }
@@ -637,7 +671,7 @@
           "section": "base-primary-button-bg",
           "utility": "--color-primary-button-bg",
           "utilitySection": "utilities-primary-button-bg",
-          "utilityOrder": 28
+          "utilityOrder": 30
         }
       }
     },
@@ -654,7 +688,7 @@
           "section": "base-primary-button-bg",
           "utility": "--color-primary-button-hover",
           "utilitySection": "utilities-primary-button-bg",
-          "utilityOrder": 29
+          "utilityOrder": 31
         }
       }
     },
@@ -668,7 +702,7 @@
           "section": "base-primary-button-bg",
           "utility": "--color-primary-button-fg",
           "utilitySection": "utilities-primary-button-bg",
-          "utilityOrder": 30
+          "utilityOrder": 32
         }
       }
     },
@@ -685,7 +719,7 @@
           "section": "base-red-primary",
           "utility": "--color-red-primary",
           "utilitySection": "utilities-red-primary",
-          "utilityOrder": 31
+          "utilityOrder": 33
         }
       }
     },
@@ -702,7 +736,7 @@
           "section": "base-red-primary",
           "utility": "--color-red-secondary",
           "utilitySection": "utilities-red-primary",
-          "utilityOrder": 32,
+          "utilityOrder": 34,
           "cssFormat": "multiline"
         }
       }
@@ -720,7 +754,7 @@
           "section": "base-red-primary",
           "utility": "--color-red-secondary-fg",
           "utilitySection": "utilities-red-primary",
-          "utilityOrder": 33,
+          "utilityOrder": 35,
           "cssFormat": "multiline"
         }
       }
@@ -738,7 +772,7 @@
           "section": "base-red-secondary-hover",
           "utility": "--color-red-secondary-hover",
           "utilitySection": "utilities-red-primary",
-          "utilityOrder": 34
+          "utilityOrder": 36
         }
       }
     },
@@ -755,7 +789,7 @@
           "section": "base-red-secondary-hover",
           "utility": "--color-red-bg",
           "utilitySection": "utilities-red-primary",
-          "utilityOrder": 35
+          "utilityOrder": 37
         }
       }
     },
@@ -772,7 +806,7 @@
           "section": "base-red-secondary-hover",
           "utility": "--color-red-fg",
           "utilitySection": "utilities-red-primary",
-          "utilityOrder": 36
+          "utilityOrder": 38
         }
       }
     },
@@ -789,7 +823,7 @@
           "section": "base-red-secondary-hover",
           "utility": "--color-green-primary",
           "utilitySection": "utilities-red-primary",
-          "utilityOrder": 37
+          "utilityOrder": 39
         }
       }
     },
@@ -806,7 +840,7 @@
           "section": "base-red-secondary-hover",
           "utility": "--color-green-bg",
           "utilitySection": "utilities-red-primary",
-          "utilityOrder": 38
+          "utilityOrder": 40
         }
       }
     },
@@ -823,7 +857,7 @@
           "section": "base-red-secondary-hover",
           "utility": "--color-green-fg",
           "utilitySection": "utilities-red-primary",
-          "utilityOrder": 39
+          "utilityOrder": 41
         }
       }
     },
@@ -840,7 +874,7 @@
           "section": "base-red-secondary-hover",
           "utility": "--color-yellow-primary",
           "utilitySection": "utilities-red-primary",
-          "utilityOrder": 40,
+          "utilityOrder": 42,
           "cssFormat": "multiline"
         }
       }
@@ -858,7 +892,7 @@
           "section": "base-red-secondary-hover",
           "utility": "--color-yellow-bg",
           "utilitySection": "utilities-red-primary",
-          "utilityOrder": 41
+          "utilityOrder": 43
         }
       }
     },
@@ -875,7 +909,7 @@
           "section": "base-red-secondary-hover",
           "utility": "--color-yellow-fg",
           "utilitySection": "utilities-red-primary",
-          "utilityOrder": 42
+          "utilityOrder": 44
         }
       }
     },
@@ -889,7 +923,7 @@
           "section": "base-yellow-icon",
           "utility": "--color-yellow-icon",
           "utilitySection": "utilities-red-primary",
-          "utilityOrder": 43
+          "utilityOrder": 45
         }
       }
     },
@@ -920,7 +954,7 @@
           "section": "base-yellow-wash",
           "utility": "--color-blue-primary",
           "utilitySection": "utilities-red-primary",
-          "utilityOrder": 44
+          "utilityOrder": 46
         }
       }
     },
@@ -937,7 +971,7 @@
           "section": "base-yellow-wash",
           "utility": "--color-blue-bg",
           "utilitySection": "utilities-red-primary",
-          "utilityOrder": 45
+          "utilityOrder": 47
         }
       }
     },
@@ -954,7 +988,7 @@
           "section": "base-yellow-wash",
           "utility": "--color-blue-fg",
           "utilitySection": "utilities-red-primary",
-          "utilityOrder": 46
+          "utilityOrder": 48
         }
       }
     },
@@ -968,7 +1002,7 @@
           "section": "base-yellow-wash",
           "utility": "--color-blue-pill-bg",
           "utilitySection": "utilities-local-links",
-          "utilityOrder": 126
+          "utilityOrder": 128
         }
       }
     },
@@ -985,7 +1019,7 @@
           "section": "base-yellow-wash",
           "utility": "--color-blue-pill-hover",
           "utilitySection": "utilities-local-links",
-          "utilityOrder": 127
+          "utilityOrder": 129
         }
       }
     },
@@ -1002,7 +1036,7 @@
           "section": "base-yellow-wash",
           "utility": "--color-green-secondary",
           "utilitySection": "utilities-green-secondary",
-          "utilityOrder": 128
+          "utilityOrder": 130
         }
       }
     },
@@ -1019,7 +1053,7 @@
           "section": "base-yellow-wash",
           "utility": "--color-green-secondary-hover",
           "utilitySection": "utilities-green-secondary",
-          "utilityOrder": 129
+          "utilityOrder": 131
         }
       }
     },
@@ -1033,7 +1067,7 @@
           "section": "base-yellow-wash",
           "utility": "--color-green-secondary-fg",
           "utilitySection": "utilities-green-secondary",
-          "utilityOrder": 130
+          "utilityOrder": 132
         }
       }
     },
@@ -1050,7 +1084,7 @@
           "section": "base-yellow-wash",
           "utility": "--color-blue-secondary",
           "utilitySection": "utilities-green-secondary",
-          "utilityOrder": 131
+          "utilityOrder": 133
         }
       }
     },
@@ -1067,7 +1101,7 @@
           "section": "base-yellow-wash",
           "utility": "--color-blue-secondary-hover",
           "utilitySection": "utilities-green-secondary",
-          "utilityOrder": 132
+          "utilityOrder": 134
         }
       }
     },
@@ -1081,7 +1115,7 @@
           "section": "base-yellow-wash",
           "utility": "--color-blue-secondary-fg",
           "utilitySection": "utilities-green-secondary",
-          "utilityOrder": 133
+          "utilityOrder": 135
         }
       }
     },
@@ -1098,7 +1132,7 @@
           "section": "base-yellow-wash",
           "utility": "--color-neutral-secondary",
           "utilitySection": "utilities-green-secondary",
-          "utilityOrder": 134
+          "utilityOrder": 136
         }
       }
     },
@@ -1115,7 +1149,7 @@
           "section": "base-yellow-wash",
           "utility": "--color-neutral-secondary-hover",
           "utilitySection": "utilities-green-secondary",
-          "utilityOrder": 135
+          "utilityOrder": 137
         }
       }
     },
@@ -1129,7 +1163,7 @@
           "section": "base-yellow-wash",
           "utility": "--color-neutral-secondary-fg",
           "utilitySection": "utilities-green-secondary",
-          "utilityOrder": 136
+          "utilityOrder": 138
         }
       }
     },
@@ -1207,7 +1241,7 @@
           "section": "base-yellow-wash",
           "utility": "--color-conflict-neutral",
           "utilitySection": "utilities-green-secondary",
-          "utilityOrder": 137
+          "utilityOrder": 139
         }
       }
     },
@@ -1224,7 +1258,7 @@
           "section": "base-yellow-wash",
           "utility": "--color-violet-primary",
           "utilitySection": "utilities-red-primary",
-          "utilityOrder": 47
+          "utilityOrder": 49
         }
       }
     },
@@ -1241,7 +1275,7 @@
           "section": "base-yellow-wash",
           "utility": "--color-violet-bg",
           "utilitySection": "utilities-red-primary",
-          "utilityOrder": 48
+          "utilityOrder": 50
         }
       }
     },
@@ -1258,7 +1292,7 @@
           "section": "base-yellow-wash",
           "utility": "--color-violet-fg",
           "utilitySection": "utilities-red-primary",
-          "utilityOrder": 49
+          "utilityOrder": 51
         }
       }
     },
@@ -1275,7 +1309,7 @@
           "section": "base-yellow-wash",
           "utility": "--color-accent",
           "utilitySection": "utilities-red-primary",
-          "utilityOrder": 50
+          "utilityOrder": 52
         }
       }
     },
@@ -1292,7 +1326,7 @@
           "section": "base-yellow-wash",
           "utility": "--color-accent-fg",
           "utilitySection": "utilities-red-primary",
-          "utilityOrder": 52
+          "utilityOrder": 54
         }
       }
     },
@@ -1342,7 +1376,7 @@
           "section": "base-red-50",
           "utility": "--color-red-50",
           "utilitySection": "utilities-red-50",
-          "utilityOrder": 53
+          "utilityOrder": 55
         }
       }
     },
@@ -1359,7 +1393,7 @@
           "section": "base-red-50",
           "utility": "--color-red-100",
           "utilitySection": "utilities-red-50",
-          "utilityOrder": 54
+          "utilityOrder": 56
         }
       }
     },
@@ -1376,7 +1410,7 @@
           "section": "base-red-50",
           "utility": "--color-red-200",
           "utilitySection": "utilities-red-50",
-          "utilityOrder": 55
+          "utilityOrder": 57
         }
       }
     },
@@ -1393,7 +1427,7 @@
           "section": "base-red-50",
           "utility": "--color-red-300",
           "utilitySection": "utilities-red-50",
-          "utilityOrder": 56
+          "utilityOrder": 58
         }
       }
     },
@@ -1410,7 +1444,7 @@
           "section": "base-red-50",
           "utility": "--color-red-400",
           "utilitySection": "utilities-red-50",
-          "utilityOrder": 57
+          "utilityOrder": 59
         }
       }
     },
@@ -1427,7 +1461,7 @@
           "section": "base-red-50",
           "utility": "--color-red-500",
           "utilitySection": "utilities-red-50",
-          "utilityOrder": 58
+          "utilityOrder": 60
         }
       }
     },
@@ -1444,7 +1478,7 @@
           "section": "base-red-50",
           "utility": "--color-red-600",
           "utilitySection": "utilities-red-50",
-          "utilityOrder": 59
+          "utilityOrder": 61
         }
       }
     },
@@ -1461,7 +1495,7 @@
           "section": "base-red-50",
           "utility": "--color-red-700",
           "utilitySection": "utilities-red-50",
-          "utilityOrder": 60
+          "utilityOrder": 62
         }
       }
     },
@@ -1478,7 +1512,7 @@
           "section": "base-red-50",
           "utility": "--color-red-750",
           "utilitySection": "utilities-red-50",
-          "utilityOrder": 61,
+          "utilityOrder": 63,
           "cssFormat": "multiline"
         }
       }
@@ -1496,7 +1530,7 @@
           "section": "base-red-50",
           "utility": "--color-red-800",
           "utilitySection": "utilities-red-50",
-          "utilityOrder": 62
+          "utilityOrder": 64
         }
       }
     },
@@ -1513,7 +1547,7 @@
           "section": "base-red-50",
           "utility": "--color-red-900",
           "utilitySection": "utilities-red-50",
-          "utilityOrder": 63
+          "utilityOrder": 65
         }
       }
     },
@@ -1530,7 +1564,7 @@
           "section": "base-red-50",
           "utility": "--color-red-950",
           "utilitySection": "utilities-red-50",
-          "utilityOrder": 64
+          "utilityOrder": 66
         }
       }
     },
@@ -1547,7 +1581,7 @@
           "section": "base-red-50",
           "utility": "--color-green-50",
           "utilitySection": "utilities-red-50",
-          "utilityOrder": 65
+          "utilityOrder": 67
         }
       }
     },
@@ -1564,7 +1598,7 @@
           "section": "base-red-50",
           "utility": "--color-green-100",
           "utilitySection": "utilities-red-50",
-          "utilityOrder": 66
+          "utilityOrder": 68
         }
       }
     },
@@ -1581,7 +1615,7 @@
           "section": "base-red-50",
           "utility": "--color-green-200",
           "utilitySection": "utilities-red-50",
-          "utilityOrder": 67
+          "utilityOrder": 69
         }
       }
     },
@@ -1598,7 +1632,7 @@
           "section": "base-red-50",
           "utility": "--color-green-300",
           "utilitySection": "utilities-red-50",
-          "utilityOrder": 68
+          "utilityOrder": 70
         }
       }
     },
@@ -1615,7 +1649,7 @@
           "section": "base-red-50",
           "utility": "--color-green-400",
           "utilitySection": "utilities-red-50",
-          "utilityOrder": 69
+          "utilityOrder": 71
         }
       }
     },
@@ -1632,7 +1666,7 @@
           "section": "base-red-50",
           "utility": "--color-green-500",
           "utilitySection": "utilities-red-50",
-          "utilityOrder": 70
+          "utilityOrder": 72
         }
       }
     },
@@ -1649,7 +1683,7 @@
           "section": "base-red-50",
           "utility": "--color-green-600",
           "utilitySection": "utilities-red-50",
-          "utilityOrder": 71
+          "utilityOrder": 73
         }
       }
     },
@@ -1666,7 +1700,7 @@
           "section": "base-red-50",
           "utility": "--color-green-700",
           "utilitySection": "utilities-red-50",
-          "utilityOrder": 72
+          "utilityOrder": 74
         }
       }
     },
@@ -1683,7 +1717,7 @@
           "section": "base-red-50",
           "utility": "--color-green-800",
           "utilitySection": "utilities-red-50",
-          "utilityOrder": 73
+          "utilityOrder": 75
         }
       }
     },
@@ -1700,7 +1734,7 @@
           "section": "base-red-50",
           "utility": "--color-green-900",
           "utilitySection": "utilities-red-50",
-          "utilityOrder": 74
+          "utilityOrder": 76
         }
       }
     },
@@ -1717,7 +1751,7 @@
           "section": "base-red-50",
           "utility": "--color-green-950",
           "utilitySection": "utilities-red-50",
-          "utilityOrder": 75
+          "utilityOrder": 77
         }
       }
     },
@@ -1734,7 +1768,7 @@
           "section": "base-red-50",
           "utility": "--color-yellow-50",
           "utilitySection": "utilities-red-50",
-          "utilityOrder": 76
+          "utilityOrder": 78
         }
       }
     },
@@ -1751,7 +1785,7 @@
           "section": "base-red-50",
           "utility": "--color-yellow-100",
           "utilitySection": "utilities-red-50",
-          "utilityOrder": 77
+          "utilityOrder": 79
         }
       }
     },
@@ -1768,7 +1802,7 @@
           "section": "base-red-50",
           "utility": "--color-yellow-200",
           "utilitySection": "utilities-red-50",
-          "utilityOrder": 78
+          "utilityOrder": 80
         }
       }
     },
@@ -1785,7 +1819,7 @@
           "section": "base-red-50",
           "utility": "--color-yellow-300",
           "utilitySection": "utilities-red-50",
-          "utilityOrder": 79
+          "utilityOrder": 81
         }
       }
     },
@@ -1802,7 +1836,7 @@
           "section": "base-red-50",
           "utility": "--color-yellow-400",
           "utilitySection": "utilities-red-50",
-          "utilityOrder": 80
+          "utilityOrder": 82
         }
       }
     },
@@ -1819,7 +1853,7 @@
           "section": "base-red-50",
           "utility": "--color-yellow-500",
           "utilitySection": "utilities-red-50",
-          "utilityOrder": 81
+          "utilityOrder": 83
         }
       }
     },
@@ -1836,7 +1870,7 @@
           "section": "base-red-50",
           "utility": "--color-yellow-600",
           "utilitySection": "utilities-red-50",
-          "utilityOrder": 82
+          "utilityOrder": 84
         }
       }
     },
@@ -1853,7 +1887,7 @@
           "section": "base-red-50",
           "utility": "--color-yellow-700",
           "utilitySection": "utilities-red-50",
-          "utilityOrder": 83
+          "utilityOrder": 85
         }
       }
     },
@@ -1870,7 +1904,7 @@
           "section": "base-red-50",
           "utility": "--color-yellow-800",
           "utilitySection": "utilities-red-50",
-          "utilityOrder": 84
+          "utilityOrder": 86
         }
       }
     },
@@ -1887,7 +1921,7 @@
           "section": "base-red-50",
           "utility": "--color-yellow-900",
           "utilitySection": "utilities-red-50",
-          "utilityOrder": 85
+          "utilityOrder": 87
         }
       }
     },
@@ -1904,7 +1938,7 @@
           "section": "base-red-50",
           "utility": "--color-yellow-950",
           "utilitySection": "utilities-red-50",
-          "utilityOrder": 86
+          "utilityOrder": 88
         }
       }
     },
@@ -1921,7 +1955,7 @@
           "section": "base-red-50",
           "utility": "--color-blue-50",
           "utilitySection": "utilities-red-50",
-          "utilityOrder": 87
+          "utilityOrder": 89
         }
       }
     },
@@ -1938,7 +1972,7 @@
           "section": "base-red-50",
           "utility": "--color-blue-100",
           "utilitySection": "utilities-red-50",
-          "utilityOrder": 88
+          "utilityOrder": 90
         }
       }
     },
@@ -1955,7 +1989,7 @@
           "section": "base-red-50",
           "utility": "--color-blue-200",
           "utilitySection": "utilities-red-50",
-          "utilityOrder": 89
+          "utilityOrder": 91
         }
       }
     },
@@ -1972,7 +2006,7 @@
           "section": "base-red-50",
           "utility": "--color-blue-300",
           "utilitySection": "utilities-red-50",
-          "utilityOrder": 90
+          "utilityOrder": 92
         }
       }
     },
@@ -1989,7 +2023,7 @@
           "section": "base-red-50",
           "utility": "--color-blue-400",
           "utilitySection": "utilities-red-50",
-          "utilityOrder": 91
+          "utilityOrder": 93
         }
       }
     },
@@ -2006,7 +2040,7 @@
           "section": "base-red-50",
           "utility": "--color-blue-500",
           "utilitySection": "utilities-red-50",
-          "utilityOrder": 92
+          "utilityOrder": 94
         }
       }
     },
@@ -2023,7 +2057,7 @@
           "section": "base-red-50",
           "utility": "--color-blue-600",
           "utilitySection": "utilities-red-50",
-          "utilityOrder": 93
+          "utilityOrder": 95
         }
       }
     },
@@ -2040,7 +2074,7 @@
           "section": "base-red-50",
           "utility": "--color-blue-700",
           "utilitySection": "utilities-red-50",
-          "utilityOrder": 94
+          "utilityOrder": 96
         }
       }
     },
@@ -2057,7 +2091,7 @@
           "section": "base-red-50",
           "utility": "--color-blue-800",
           "utilitySection": "utilities-red-50",
-          "utilityOrder": 95
+          "utilityOrder": 97
         }
       }
     },
@@ -2074,7 +2108,7 @@
           "section": "base-red-50",
           "utility": "--color-blue-900",
           "utilitySection": "utilities-red-50",
-          "utilityOrder": 96
+          "utilityOrder": 98
         }
       }
     },
@@ -2091,7 +2125,7 @@
           "section": "base-red-50",
           "utility": "--color-blue-950",
           "utilitySection": "utilities-red-50",
-          "utilityOrder": 97
+          "utilityOrder": 99
         }
       }
     },
@@ -2108,7 +2142,7 @@
           "section": "base-red-50",
           "utility": "--color-violet-50",
           "utilitySection": "utilities-red-50",
-          "utilityOrder": 98
+          "utilityOrder": 100
         }
       }
     },
@@ -2125,7 +2159,7 @@
           "section": "base-red-50",
           "utility": "--color-violet-100",
           "utilitySection": "utilities-red-50",
-          "utilityOrder": 99
+          "utilityOrder": 101
         }
       }
     },
@@ -2142,7 +2176,7 @@
           "section": "base-red-50",
           "utility": "--color-violet-200",
           "utilitySection": "utilities-red-50",
-          "utilityOrder": 100
+          "utilityOrder": 102
         }
       }
     },
@@ -2159,7 +2193,7 @@
           "section": "base-red-50",
           "utility": "--color-violet-300",
           "utilitySection": "utilities-red-50",
-          "utilityOrder": 101
+          "utilityOrder": 103
         }
       }
     },
@@ -2176,7 +2210,7 @@
           "section": "base-red-50",
           "utility": "--color-violet-400",
           "utilitySection": "utilities-red-50",
-          "utilityOrder": 102
+          "utilityOrder": 104
         }
       }
     },
@@ -2193,7 +2227,7 @@
           "section": "base-red-50",
           "utility": "--color-violet-500",
           "utilitySection": "utilities-red-50",
-          "utilityOrder": 103
+          "utilityOrder": 105
         }
       }
     },
@@ -2210,7 +2244,7 @@
           "section": "base-red-50",
           "utility": "--color-violet-600",
           "utilitySection": "utilities-red-50",
-          "utilityOrder": 104
+          "utilityOrder": 106
         }
       }
     },
@@ -2227,7 +2261,7 @@
           "section": "base-red-50",
           "utility": "--color-violet-700",
           "utilitySection": "utilities-red-50",
-          "utilityOrder": 105
+          "utilityOrder": 107
         }
       }
     },
@@ -2244,7 +2278,7 @@
           "section": "base-red-50",
           "utility": "--color-violet-750",
           "utilitySection": "utilities-red-50",
-          "utilityOrder": 106,
+          "utilityOrder": 108,
           "cssFormat": "multiline"
         }
       }
@@ -2262,7 +2296,7 @@
           "section": "base-red-50",
           "utility": "--color-violet-800",
           "utilitySection": "utilities-red-50",
-          "utilityOrder": 107
+          "utilityOrder": 109
         }
       }
     },
@@ -2279,7 +2313,7 @@
           "section": "base-red-50",
           "utility": "--color-violet-900",
           "utilitySection": "utilities-red-50",
-          "utilityOrder": 108
+          "utilityOrder": 110
         }
       }
     },
@@ -2296,7 +2330,7 @@
           "section": "base-red-50",
           "utility": "--color-violet-950",
           "utilitySection": "utilities-red-50",
-          "utilityOrder": 109
+          "utilityOrder": 111
         }
       }
     }
