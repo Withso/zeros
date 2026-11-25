@@ -670,7 +670,7 @@
       "$extensions": {
         "org.zeros": {
           "cssName": "--red-bg",
-          "section": "base-red-solid-hover",
+          "section": "base-status-tints",
           "utility": "--color-red-bg",
           "utilitySection": "utilities-red-text",
           "utilityOrder": 31
@@ -687,7 +687,7 @@
       "$extensions": {
         "org.zeros": {
           "cssName": "--red-on-bg",
-          "section": "base-red-solid-hover",
+          "section": "base-status-tints",
           "utility": "--color-red-on-bg",
           "utilitySection": "utilities-red-text",
           "utilityOrder": 32
@@ -704,7 +704,7 @@
       "$extensions": {
         "org.zeros": {
           "cssName": "--green-text",
-          "section": "base-red-solid-hover",
+          "section": "base-status-tints",
           "utility": "--color-green-text",
           "utilitySection": "utilities-red-text",
           "utilityOrder": 33
@@ -721,7 +721,7 @@
       "$extensions": {
         "org.zeros": {
           "cssName": "--green-bg",
-          "section": "base-red-solid-hover",
+          "section": "base-status-tints",
           "utility": "--color-green-bg",
           "utilitySection": "utilities-red-text",
           "utilityOrder": 34
@@ -738,7 +738,7 @@
       "$extensions": {
         "org.zeros": {
           "cssName": "--green-on-bg",
-          "section": "base-red-solid-hover",
+          "section": "base-status-tints",
           "utility": "--color-green-on-bg",
           "utilitySection": "utilities-red-text",
           "utilityOrder": 35
@@ -755,7 +755,7 @@
       "$extensions": {
         "org.zeros": {
           "cssName": "--yellow-text",
-          "section": "base-red-solid-hover",
+          "section": "base-status-tints",
           "utility": "--color-yellow-text",
           "utilitySection": "utilities-red-text",
           "utilityOrder": 36,
@@ -773,7 +773,7 @@
       "$extensions": {
         "org.zeros": {
           "cssName": "--yellow-bg",
-          "section": "base-red-solid-hover",
+          "section": "base-status-tints",
           "utility": "--color-yellow-bg",
           "utilitySection": "utilities-red-text",
           "utilityOrder": 37
@@ -790,7 +790,7 @@
       "$extensions": {
         "org.zeros": {
           "cssName": "--yellow-on-bg",
-          "section": "base-red-solid-hover",
+          "section": "base-status-tints",
           "utility": "--color-yellow-on-bg",
           "utilitySection": "utilities-red-text",
           "utilityOrder": 38

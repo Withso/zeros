@@ -39,7 +39,7 @@ export const MarkdownCodeBlock = memo(function MarkdownCodeBlock({
         aria-label="Code block actions"
         className="absolute top-2 right-2 z-10 opacity-0 transition-opacity duration-base group-hover/md-code:opacity-100 focus-within:opacity-100"
       >
-        <CodeBlockCopyButton text={body} className="size-5 rounded-sm border-0" />
+        <CodeBlockCopyButton text={body} className="size-5 rounded-sm" />
       </Toolbar>
       <HighlightedCode
         code={body}

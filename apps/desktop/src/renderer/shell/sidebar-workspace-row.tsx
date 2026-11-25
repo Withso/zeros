@@ -152,6 +152,12 @@ const CHILD_DOT_CLS = "size-1 rounded-full bg-fg3";
 const PARENT_TOGGLE_CLS =
   "group/lead pointer-events-auto size-4 rounded-sm hover:bg-selected-bg";
 
+/** React bubbles a portalled menu's or dialog's events through the component
+ * tree; only an event whose DOM target sits inside the element is its own. */
+export function eventInsideOwnDom(event: { currentTarget: Element; target: EventTarget | null }): boolean {
+  return event.target instanceof Node && event.currentTarget.contains(event.target);
+}
+
 // --- CHILD COMPONENTS ---
 
 /** The project logo in a row's leading slot. Its own right-click target still
@@ -417,7 +423,8 @@ export function SidebarWorkspaceRow({
         preview.contentRef.current?.querySelector<HTMLElement>("button:not(:disabled), a[href]")?.focus();
       }}
       onContextMenu={preview.close}
-      onClick={() => {
+      onClick={(event) => {
+        if (!eventInsideOwnDom(event)) return;
         if (!surfaceActive || archiving) return;
         preview.close();
         onSelect(workspace);

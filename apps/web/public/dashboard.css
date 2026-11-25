@@ -157,7 +157,7 @@ button, a, summary { -webkit-tap-highlight-color: transparent; }
 .button.ghost { color: var(--fg2); }
 .button.ghost:hover:not(:disabled) { background: var(--selected-bg); color: var(--fg1); }
 .button.danger { background: var(--red-solid); color: var(--red-solid-fg); }
-.button.danger:hover:not(:disabled) { background: var(--red-solid-hover); }
+.button.danger:hover:not(:disabled) { opacity: 0.9; }
 .button.danger-secondary { border-color: var(--border3); color: var(--red-text); }
 .button.danger-secondary:hover:not(:disabled) { border-color: var(--border4); background: var(--selected-bg); }
 .button:disabled { opacity: 0.5; }

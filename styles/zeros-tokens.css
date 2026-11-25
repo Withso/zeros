@@ -624,10 +624,9 @@
     0 0% 100%
   ); /* #FFFFFF — label on red-solid */
   /* @generated tokens:base-red-text:end */
-  /* Hover/pressed fill of a SOLID destructive control. A solid step, not an
-   * alpha (`/90`) wash: alpha lightens the fill toward the surface and broke
-   * white-text contrast in Light. */
-  /* @generated tokens:base-red-solid-hover:start */
+  /* Status containers: a -bg tint carries its -on-bg text; the -text role
+   * reads on any plain surface. Filled controls hover at 90% opacity. */
+  /* @generated tokens:base-status-tints:start */
   --red-bg: hsl(1.82 40.741% 15.882%); /* #391918 — error container surface */
   --red-on-bg: hsl(4.86 97.368% 85.098%); /* #FEBAB4 — text and icons inside a red-bg container */
   --green-text: hsl(134.16 43.415% 59.804%); /* #6CC581 — green status words and icons on any plain surface */
@@ -638,7 +637,7 @@
   ); /* #DEB95C — yellow status words and icons on any plain surface (one yellow for text and graphics) */
   --yellow-bg: hsl(42.63 61.29% 12.157%); /* #32270C — warning container surface */
   --yellow-on-bg: hsl(42.77 75.806% 75.686%); /* #F0D592 — text and icons inside a yellow-bg container */
-  /* @generated tokens:base-red-solid-hover:end */
+  /* @generated tokens:base-status-tints:end */
   /* Icons, status dots and tinted borders. Dark yellow-text already reads
    * at 3:1+ as a graphic, so it IS the icon color; Light needs a separate,
    * brighter value than its ochre text color. */

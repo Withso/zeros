@@ -111,6 +111,7 @@ const PRIMITIVE_TOKEN_RE =
 const ZEROS_RAMP_VAR_RE =
   /var\(--(red|green|yellow|blue|violet)-\d{2,3}\b/;
 
+const FILLED_HOVER = "hover:opacity-90 (filled buttons share one hover)";
 // Token names retired by the 2026-11 design-system cleanup (P2–P5). They no
 // longer exist, so a var() reads as unset and a utility compiles to nothing;
 // catch them by name with the replacement in the message.
@@ -127,8 +128,8 @@ export const RETIRED_TOKENS = new Map([
   ...["red", "green", "blue", "neutral"].flatMap((family) => {
     const role = family === "blue" ? "accent" : family;
     return [
-      [`${family}-secondary`, `${role}-solid`], [`${family}-secondary-hover`, `${role}-solid-hover`],
-      [`${family}-secondary-fg`, `${role}-solid-fg`],
+      [`${family}-secondary`, `${role}-solid`], [`${family}-secondary-hover`, FILLED_HOVER],
+      [`${family}-secondary-fg`, `${role}-solid-fg`], [`${role}-solid-hover`, FILLED_HOVER],
     ];
   }),
 ]);

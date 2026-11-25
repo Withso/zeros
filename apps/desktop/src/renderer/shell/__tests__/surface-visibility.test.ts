@@ -20,7 +20,6 @@ describe("retained-surface visibility guards", () => {
 
   it("routes every retained tick, poll, animation, and tokenizer through the guard", () => {
     const sources = [
-      "apps/desktop/src/renderer/shared/ui/loading/live-duration.tsx",
       "apps/desktop/src/renderer/shared/ui/loading/loader-loop.ts",
       "apps/desktop/src/renderer/shell/worktree-missing-panel.tsx",
       "apps/desktop/src/renderer/shell/workbench/tabs/code-editor/shiki-highlight.ts",
@@ -30,5 +29,12 @@ describe("retained-surface visibility guards", () => {
       expect(text, source).toContain("isElementActuallyVisible(");
       expect(text, source).not.toMatch(/\.checkVisibility\(\s*\)/);
     }
+    // The working timer ticks only from the guarded shared loader loop.
+    const timer = readFileSync(
+      resolve(process.cwd(), "apps/desktop/src/renderer/shared/ui/loading/live-duration.tsx"),
+      "utf8",
+    );
+    expect(timer).toContain("startLoaderRun(");
+    expect(timer).not.toMatch(/setInterval\(/);
   });
 });
