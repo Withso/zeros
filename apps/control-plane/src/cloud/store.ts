@@ -1102,6 +1102,15 @@ export class CloudV2Store {
     return workspace(rows[0]);
   }
 
+  /** Whether any workspace entered running after `at` and is running now: a wake breaker's sign that creates and wakes
+   * work again. Polled while a breaker is open; only running rows are read, through cloud_v2_lease_due's partial index
+   * (a running workspace always holds its machine), never the whole table. */
+  async wakeSucceededSince(at: Date): Promise<boolean> {
+    return withSystemTx(this.pool, async tx => (await tx.query<{ ok: boolean }>(
+      `SELECT EXISTS (SELECT 1 FROM cloud_v2_workspaces WHERE state = 'running' AND boat_sandbox_id IS NOT NULL
+        AND running_at > $1) AS ok`, [at])).rows[0]!.ok);
+  }
+
   /** Recoverable failed workspaces (failure-retry.ts) failed before `before` that nothing else holds: no maintenance
    * mark, live recovery or execution transition. Oldest first. */
   async healCandidates(before: Date, limit: number): Promise<CloudV2HealCandidate[]> {

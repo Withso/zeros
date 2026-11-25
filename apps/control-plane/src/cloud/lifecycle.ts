@@ -10,6 +10,7 @@ import { archiveSuspect, diskSettled, stopKeepingWrites } from "./boat-disk.js";
 import { checkoutsMatch, readyCopyCheckoutsCommand } from "./ready-copies.js";
 import { BoatBootPendingError, BoatCreateRejectedError, BoatForkRefusedError, BoatSnapshotExpiredError } from "./boat-client.js";
 import { CloudProviderError } from "./provider-error.js";
+import { CLOUD_V2_BREAKER_WINDOW_MS, CloudV2WakeBreaker } from "./wake-breaker.js";
 import { installRuntimeCommand, prepareRuntimeCommand, type CloudV2Runtime } from "./runtime.js";
 import { GIT_LFS_INSTALL_COMMAND } from "./computer.js";
 import { pruneCloudRepositories } from "./source-authority.js";
@@ -58,6 +59,8 @@ const MAINTENANCE_SCAN_MS = 60_000;
 /** A failure this old is healed: past any wake or recovery still deciding about it. */
 export const CLOUD_V2_HEAL_AFTER_MS = 10 * 60_000;
 const HEAL_BATCH = 4;
+/** Set on an error by `measure`: when its phase failed. */
+const FAILED_AT = Symbol("failedAt");
 /** An idle control plane sweeps this often; lifecycle notifications and due
  * deferrals wake it sooner. */
 const IDLE_SWEEP_MS = 60_000;
@@ -182,7 +185,7 @@ export type CloudV2LifecycleDeps = {
     | "startRetentionClocks" | "archiveInactive" | "archiveDepartedPrivate" | "restoreReturningPrivate" | "archiveForSystem" | "clearArchiveScrub"
     | "claimBackupRemovals" | "pendingBackupRemovals" | "finishBackupRemoval" | "sweepDepartedProjects" | "deleteDepartedProjects" | "missedWakes"
     | "accountCheckpointPrefixes" | "retireDisconnectedCopies" | "clearStaleMaintenance" | "maintenanceBacklog" | "keepLostMachine">
-    & Partial<Pick<CloudV2Store, "workspaceBuildWait" | "rebindToBase" | "baseWaitOver" | "deferredCreateChange" | "healCandidates" | "healDue" | "healFailed">>;
+    & Partial<Pick<CloudV2Store, "workspaceBuildWait" | "rebindToBase" | "baseWaitOver" | "deferredCreateChange" | "healCandidates" | "healDue" | "healFailed" | "wakeSucceededSince">>;
   /** Optional for older compositions; the shipped store always provides it. */
   prompts?: CloudV2Store["prompts"];
   pruneEnvironments?: () => Promise<void>;
@@ -237,6 +240,9 @@ export type CloudV2LifecycleDeps = {
   executionActivations?: { tick(): Promise<void> };
   /** Retries a stop's failed checkpoint on a fork of the stopped VM. */
   checkpointRetry?: boolean;
+  /** Holds creates and wakes that fail the same way across workspaces (wake-breaker.ts) instead of failing each one,
+   * and alerts once. Needs the store's wakeSucceededSince to close on the first wake that succeeds. */
+  wakeBreaker?: boolean;
   /** Moves recoverable failed workspaces (failure-retry.ts) to stopped without starting any machine, so the
    * person's next Start is an ordinary one. Needs the store's heal methods. */
   healFailed?: boolean;
@@ -348,7 +354,9 @@ export class CloudV2Lifecycle {
   /** A restore begun in this step, until the same step applies its checkpoint. */
   private readonly recordedRestores = new Map<string, CloudV2RestoreCreate>();
 
-  constructor(private readonly deps: CloudV2LifecycleDeps, private readonly intervalMs = 2_000) {}
+  constructor(private readonly deps: CloudV2LifecycleDeps, private readonly intervalMs = 2_000) {
+    this.breaker = deps.wakeBreaker ? new CloudV2WakeBreaker() : null;
+  }
 
   start(): () => Promise<void> {
     this.started = true; this.stopped = false;
@@ -441,6 +449,8 @@ export class CloudV2Lifecycle {
   private lastProviderStopScan = -Infinity;
   private providerStopScan: Promise<void> | null = null;
   private healing: Promise<void> | null = null;
+  private readonly breaker: CloudV2WakeBreaker | null;
+  private nextBreakerCheck = -Infinity;
   private nextHealScan = -Infinity;
 
   async tick(): Promise<void> {
@@ -489,6 +499,7 @@ export class CloudV2Lifecycle {
         .catch(error => this.deps.logger?.warn(`[cloud-v2] lease scan failed (${errorCode(error)})`))
         .finally(() => { this.renewing = null; });
     }
+    await this.checkBreaker(now);
     const slots = CONCURRENCY - this.inFlight.size;
     if (slots <= 0) return;
     // Creates, wakes and deletions first; stops then take at most their own slots.
@@ -576,6 +587,13 @@ export class CloudV2Lifecycle {
       // Boat's status tells a refused request (4xx) from an outage (5xx); the closed code alone hid which.
       const status = error instanceof CloudProviderError && error.httpStatus ? ` status=${error.httpStatus}` : "";
       this.deps.logger?.warn(`[cloud-v2] ${workspace.state} step failed (${code}${status})`);
+      const booting = workspace.state === "creating" || workspace.state === "starting";
+      // When it failed, not when it was admitted: a provider call can take minutes, past the breaker's window.
+      const stamped = error && typeof error === "object" ? (error as Record<symbol, unknown>)[FAILED_AT] : undefined;
+      const failedAt = typeof stamped === "number" ? stamped : this.deps.now?.() ?? Date.now();
+      if (booting) this.recordBootFailure(workspace.id, code, `${code}${status}`, failedAt);
+      // Held at any attempt, not only the last: a wake deferred while open needs the fresh window after the close too.
+      const held = booting && this.held(workspace, [`${code}${status}`], failedAt);
       // A late step cannot finalize a newer stop or a newly recorded VM.
       const fence = workspace.state === "stopping" ? { stopGeneration: workspace.stopGeneration }
         : workspace.state === "deleting" ? { expectedSandboxId: workspace.boatSandboxId } : {};
@@ -586,7 +604,7 @@ export class CloudV2Lifecycle {
         await this.deps.store.transition(workspace.id, [workspace.state], "failed", { errorCode: "sandbox_missing", revoke: true, ...fence });
       } else if ((code === "cloud_source_checkout_failed" || code === "github_access_required") && (workspace.state === "creating" || workspace.state === "starting")) {
         await this.deps.store.transition(workspace.id, [workspace.state], "failed", { errorCode: code });
-      } else if (workspace.attempts >= MAX_ATTEMPTS) {
+      } else if (workspace.attempts >= MAX_ATTEMPTS && !held) {
         // A restore that gives up keeps its checkpoint; Start tries again.
         const restore = workspace.state === "starting" && workspace.restorePending && !(CLOUD_V2_CHECKPOINT_ERRORS as readonly string[]).includes(code);
         await this.deps.store.transition(workspace.id, [workspace.state], "failed", { errorCode: restore ? "checkpoint_restore_failed" : code, ...fence });
@@ -640,9 +658,7 @@ export class CloudV2Lifecycle {
         if (workspace.preparing) await store.baseWaitOver?.(workspace.id);
         // From the create, or from the tick that saw its base live (this one, or the one kept in the row): never from
         // the base's own finish, which a lifecycle that was down or behind may see long after.
-        const bootFrom = workspace.preparing ? now
-          : Math.max(Date.parse(workspace.createdAt), workspace.baseReadyAt ? Date.parse(workspace.baseReadyAt) : 0);
-        if (now - bootFrom > BOOT_DEADLINE_MS) {
+        if (this.bootExpired(workspace, this.bootStart(workspace, now), now)) {
           await store.transition(workspace.id, ["creating"], "failed", { errorCode: "worker_boot_timeout" });
           return;
         }
@@ -734,7 +750,7 @@ export class CloudV2Lifecycle {
         }
         let sandboxId = workspace.boatSandboxId, restoring = workspace.restorePending;
         const deadline = restoring || (!sandboxId && workspace.checkpoint) ? RESTORE_DEADLINE_MS : BOOT_DEADLINE_MS;
-        if (now - Date.parse(workspace.updatedAt) > deadline) {
+        if (deadline === RESTORE_DEADLINE_MS ? now - Date.parse(workspace.updatedAt) > deadline : this.bootExpired(workspace, Date.parse(workspace.updatedAt), now)) {
           await store.transition(workspace.id, ["starting"], "failed",
             { errorCode: deadline === RESTORE_DEADLINE_MS ? "checkpoint_restore_failed" : "worker_boot_timeout" });
           return;
@@ -1193,6 +1209,54 @@ export class CloudV2Lifecycle {
     await this.deps.store.recordStopProbe(workspace.id, workspace.stopGeneration, probe, workerOff)
       .catch(error => this.deps.logger?.warn(`[cloud-v2] stop probe not recorded (${errorCode(error)})`));
     return false;
+  }
+
+  /** Past its boot deadline. A wake an open breaker holds is not; nor is a held wake within a fresh window from the
+   * breaker's close. Otherwise it fails as before, counted toward the boot-deadline breaker. */
+  private bootExpired(workspace: CloudV2LifecycleWorkspace, from: number, now: number): boolean {
+    if (now - (this.breaker?.deadlineFrom(workspace.id, from) ?? from) <= BOOT_DEADLINE_MS) return false;
+    if (this.held(workspace, [this.breaker?.lastKey(workspace.id, from), "worker_boot_timeout"], now, from)) return false;
+    // The miss that opens the breaker is held as well.
+    this.recordBootFailure(workspace.id, "worker_boot_timeout", "worker_boot_timeout", now);
+    return !this.held(workspace, ["worker_boot_timeout"], now, from);
+  }
+
+  /** Where a boot's deadline, and so its hold, counts from: a wake's from its start; a create's from the create or the
+   * tick that saw its base live (base_ready_at), and not at all while that base is still preparing. */
+  private bootStart(workspace: CloudV2LifecycleWorkspace, now: number): number {
+    if (workspace.state !== "creating") return Date.parse(workspace.updatedAt);
+    return workspace.preparing ? now
+      : Math.max(Date.parse(workspace.createdAt), workspace.baseReadyAt ? Date.parse(workspace.baseReadyAt) : 0);
+  }
+
+  private recordBootFailure(workspaceId: string, code: string, key: string, now: number): void {
+    const opened = this.breaker?.record(workspaceId, code, key, now);
+    if (opened) (this.deps.logger?.error ?? this.deps.logger?.warn)?.call(this.deps.logger,
+      `[cloud-v2] wake breaker open: ${key} failed for ${opened.workspaces} workspaces in ${CLOUD_V2_BREAKER_WINDOW_MS / 60_000} minutes; `
+      + "creates and wakes failing that way are held and retried for up to 2 hours instead of failing");
+  }
+
+  /** Kept creating or starting (retried as before) instead of failed, while an open breaker covers the failure. */
+  private held(workspace: CloudV2LifecycleWorkspace, keys: readonly (string | undefined)[], now: number,
+    startedAt = this.bootStart(workspace, now)): boolean {
+    const hold = this.breaker?.holds(workspace.id, keys, startedAt, now);
+    if (hold?.first) this.deps.logger?.warn(`[cloud-v2] wake held by breaker (${hold.key}) workspace=${workspace.id.slice(0, 8)}`);
+    return !!hold;
+  }
+
+  /** While a breaker is open: closed by the first wake anywhere that reaches running after it opened, or given up
+   * after the hold, when held wakes fail as before. */
+  private async checkBreaker(now: number): Promise<void> {
+    const breaker = this.breaker;
+    if (!breaker?.isOpen) return;
+    const alert = (this.deps.logger?.error ?? this.deps.logger?.warn)?.bind(this.deps.logger);
+    for (const key of breaker.expire(now)) alert?.(`[cloud-v2] wake breaker gave up after 2 hours: ${key}; held creates and wakes fail as before`);
+    const since = breaker.openedAt;
+    if (since === null || now < this.nextBreakerCheck || !this.deps.store.wakeSucceededSince) return;
+    this.nextBreakerCheck = now + 30_000;
+    if (!await this.deps.store.wakeSucceededSince(new Date(since)).catch(() => false)) return;
+    const closed = breaker.close(now);
+    this.deps.logger?.warn(`[cloud-v2] wake breaker closed: a wake succeeded (${closed.keys.join(", ")}); ${closed.held} held workspace(s) continue`);
   }
 
   /** Never creates, forks or resumes a machine: each is a Boat start. A Stop that failed with turns open is finished in
@@ -1837,7 +1901,13 @@ export class CloudV2Lifecycle {
 
   private async measure<T>(workspace: CloudV2Workspace, phase: LifecyclePhase, run: () => Promise<T>, detail?: (value: T) => TimingDetail): Promise<T> {
     const start = this.deps.now?.() ?? Date.now();
-    const value = await run();
+    let value: T;
+    try { value = await run(); }
+    catch (error) {
+      // When it failed: a phase run alongside slower work (the route, beside repository preparation) is awaited late.
+      if (error && typeof error === "object" && !(FAILED_AT in error)) Object.defineProperty(error, FAILED_AT, { value: this.deps.now?.() ?? Date.now() });
+      throw error;
+    }
     emitCloudV2Timing(this.deps.timing, { workspaceId: workspace.id.slice(0, 8), state: workspace.state, phase,
       durationMs: Math.max(0, Math.round((this.deps.now?.() ?? Date.now()) - start)), ...detail?.(value) });
     return value;
