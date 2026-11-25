@@ -5,6 +5,7 @@ import {
   designSourceLoadSlots,
   designSourceVectorCache,
   designSourceVectorDataUrl,
+  releaseDesignImageSource,
   type DesignSourceVectorTarget,
 } from "./design-source-vector";
 
@@ -93,8 +94,8 @@ export async function rasterizeDesignVector(url: string, width: number, height: 
     context.drawImage(image, 0, 0, width, height);
   } finally {
     // A decoded SVG image keeps its own laid-out document until its source
-    // is removed; a page of pictures otherwise retains hundreds of them.
-    image.removeAttribute("src");
+    // is released; a page of pictures otherwise retains hundreds of them.
+    releaseDesignImageSource(image);
   }
   return canvas.convertToBlob({ type: "image/png" });
 }

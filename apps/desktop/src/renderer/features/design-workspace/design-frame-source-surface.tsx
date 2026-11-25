@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useSta
 import { DESIGN_SURFACE_LAYOUT, DESIGN_SURFACE_LAYOUT_REQUEST, DESIGN_SURFACE_PAINTED, DESIGN_SURFACE_READY, type DesignSurfaceCost } from "@zeros/protocol/design-surface";
 import { designProtocolFrameUrl } from "../../platform/bridge/design-protocol-url";
 import { designSourceSurfaceBudget } from "./design-source-surfaces";
-import { acquireDesignSourceVectorImage, designSourceLoadSlots, designSourceVectorCache, designSourceVectorKey, type DesignSourceLoadTicket, type DesignCachedSourceVector, type DesignSourceVectorRequest, type DesignSourceVectorTarget } from "./design-source-vector";
+import { acquireDesignSourceVectorImage, designSourceLoadSlots, releaseDesignImageSource, designSourceVectorCache, designSourceVectorKey, type DesignSourceLoadTicket, type DesignCachedSourceVector, type DesignSourceVectorRequest, type DesignSourceVectorTarget } from "./design-source-vector";
 import { retainDesignResource } from "./state/design-resource-counters";
 import { useDesignRevealPresented } from "./design-frame-retirement";
 import { useDesignDocumentReplacement } from "./state/use-design-document-replacement";
@@ -143,7 +143,7 @@ function SourceVectorImage({ vector, entry, incoming, visible, ready, covered, p
       tileRelease.current?.(); tileRelease.current = null;
       node.removeEventListener("load", loaded); node.removeEventListener("error", failed);
       node.remove(); image.current = null; claim.release();
-      if (vector.image !== node) node.removeAttribute("src");
+      if (vector.image !== node) releaseDesignImageSource(node);
     };
   }, [entry.sourceVersion, vector]);
   useLayoutEffect(() => {

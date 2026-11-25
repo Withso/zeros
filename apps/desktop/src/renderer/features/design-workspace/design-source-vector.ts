@@ -117,6 +117,16 @@ export interface DesignCachedSourceVector extends DesignSourceVector {
 
 const displayedImages = new WeakSet<HTMLImageElement>();
 
+/** Releases a picture's decoded source. An empty src, not a removed one:
+ * Chromium 148+ registers an img with no source candidate as a document
+ * viewport listener even while detached, and only insertion, removal or a
+ * new source unregisters it, so a removed src kept every dropped picture
+ * (and its decoded SVG document) alive. An empty src is a candidate, so it
+ * unregisters the listener and still drops the decoded image. */
+export function releaseDesignImageSource(image: HTMLImageElement): void {
+  image.setAttribute("src", "");
+}
+
 /** A tiled source is deliberately disconnected but still belongs to its
  * display. DOM connectivity alone cannot authorize another consumer to move
  * that same loaded element. Release this claim after retiring its GPU scene. */
@@ -273,7 +283,7 @@ export class DesignSourceVectorCache {
   private dropImage(entry: VectorEntry) {
     const image = entry.image; entry.image = null;
     // Parent layout cleanup can precede host-node removal in the same commit.
-    if (image) queueMicrotask(() => { if (!image.isConnected && !displayedImages.has(image)) image.removeAttribute("src"); });
+    if (image) queueMicrotask(() => { if (!image.isConnected && !displayedImages.has(image)) releaseDesignImageSource(image); });
   }
   private trimImages() {
     const loaded = [...this.entries].filter(entry => entry.image);
