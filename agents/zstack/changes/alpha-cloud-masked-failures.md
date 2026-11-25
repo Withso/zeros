@@ -19,3 +19,11 @@ Target: `playbooks/alpha-operator.md` (diagnosis).
   often truncate them. Match exactly one row by prefix and check its name
   before `DELETE`. `DELETE` needs `x-ascii-confirm-delete: <full id>` and
   `x-boat-org`.
+- **Code-less errors.** `errorCode()` labels any error without a code
+  `provider_request_failed`. Without `status=`, the error is ours, not Boat's
+  HTTP reply. Once, Boat's new `&_generation=` query failed every wake this
+  way; `boat.test.ts` holds that case. With owner approval, replay the exact
+  idempotent call and redact its token before blaming the provider.
+- **DB reads.** The PlanetScale MCP refuses production branches. Use a
+  `pg_read_all_data` role with `ttl: 3600` from the service token, then
+  delete it and confirm a 404.

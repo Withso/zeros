@@ -170,12 +170,14 @@ export class BoatCloudV2Compute implements CloudV2Compute {
     });
     try {
       const hosted = z.object({ url: z.string().max(16_384), access: z.literal("private"), isProtected: z.literal(true), localhost: z.literal(true) }).passthrough().parse(raw);
-      const url = new URL(hosted.url), token = url.searchParams.get("_token");
+      const url = new URL(hosted.url), tokens = url.searchParams.getAll("_token"), token = tokens[0];
+      // Exactly one token. Other parameters Boat adds (`_generation` since 2026-11-25) are dropped with the rest of the
+      // URL: only the origin is kept, and the cookie authenticates without them. Refusing them failed every wake.
       if (url.protocol !== "https:" || !url.hostname.endsWith(`-${input.port}.on.boat.dev`) || url.username || url.password || url.hash ||
-          url.port || url.pathname !== "/" || [...url.searchParams.keys()].join(",") !== "_token" || !token || !/^[A-Za-z0-9._~+/=-]{16,8192}$/.test(token)) throw new Error();
+          url.port || url.pathname !== "/" || tokens.length !== 1 || !token || !/^[A-Za-z0-9._~+/=-]{16,8192}$/.test(token)) throw new Error();
       // Never retain a token-bearing URL, even transiently in workspace rows.
       return { url: url.origin, token };
-    } catch { throw new Error("Invalid private worker route"); }
+    } catch { throw Object.assign(new Error("Invalid private worker route"), { code: "provider_route_invalid" }); }
   }
 
   async stop(sandboxId: string): Promise<void> {
