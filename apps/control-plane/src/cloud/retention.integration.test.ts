@@ -1992,12 +1992,16 @@ d("cloud v2 retention", () => {
           expect((await columns("state")).state).toBe("failed");
         });
 
-        it("touches no machine when shutdown begins while it confirms the workspace is still due", async () => {
+        for (const [read, worker] of [[1, { enabled: true, active: true }], [2, { enabled: false, active: false }]] as const)
+        it(`stops no machine when shutdown begins during eligibility read ${read}${read === 2 ? ", after its worker is off" : ""}`, async () => {
           await stop();
           await failedOpen(true);
-          let shutdown: Promise<void> | undefined, close: (() => Promise<void>) | undefined;
+          let shutdown: Promise<void> | undefined, close: (() => Promise<void>) | undefined, reads = 0;
           const watched = new Proxy(store, { get(target, key) {
-            if (key === "healDue") return async (candidate: Parameters<typeof store.healDue>[0]) => { shutdown ??= close!(); return target.healDue(candidate); };
+            if (key === "healDue") return async (candidate: Parameters<typeof store.healDue>[0]) => {
+              if (++reads === read) shutdown ??= close!();
+              return target.healDue(candidate);
+            };
             const value = Reflect.get(target, key);
             return typeof value === "function" ? value.bind(target) : value;
           } });
@@ -2006,7 +2010,7 @@ d("cloud v2 retention", () => {
           await vi.waitFor(() => expect(shutdown).toBeDefined(), { timeout: 15_000 });
           await shutdown;
           expect(boat.machine(vm)!.state).toBe("running");
-          expect(boat.machine(vm)!.worker).toEqual({ enabled: true, active: true });
+          expect(boat.machine(vm)!.worker).toEqual(worker);
           expect((await columns("state")).state).toBe("failed");
         });
 
