@@ -1934,7 +1934,14 @@ d("cloud v2 retention", () => {
           expect(await columns("state, error_code, stop_generation::text AS g")).toEqual({ state: "stopping", error_code: null, g: String(generation + 1n) });
           await lifecycle().tick();
           expect(starts(from)).toEqual([]);
-          expect(await columns("state, backup_probe_generation::text AS probed")).toEqual({ state: "stopped", probed: String(generation + 1n) });
+          expect(await columns("state, backup_probe, backup_probe_generation::text AS probed"))
+            .toEqual({ state: "stopped", backup_probe: "unknown", probed: String(generation + 1n) });
+          // Its probe could not look at an archived disk, so the run's work is backed up from it later, as after any stop.
+          await earlier(CLOUD_V2_BACKUP_DELAY_MS + 60_000);
+          await lifecycle().tick();
+          const saved = await columns("checkpoint_object, checkpoint_stop_generation::text AS saved");
+          expect(saved.saved).toBe(String(generation + 1n));
+          expect([...archives.get(saved.checkpoint_object)!.keys()]).toContain(`${path("api")}/UNPUSHED`);
         });
 
         it("waits out a recent failure and never touches one trying again cannot fix", async () => {

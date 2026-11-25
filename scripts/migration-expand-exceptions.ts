@@ -14,9 +14,10 @@ BEGIN
       SET state = 'cancelled', cancel_requested = true, payload = NULL, payload_bytes = 0,
           terminal_at = clock_timestamp(), updated_at = clock_timestamp()
       WHERE workspace_id = NEW.id AND state IN ('queued','inboxed','dispatching','accepted');
-  ELSIF NEW.state = 'stopping' AND NOT (OLD.state = 'failed' AND NEW.stop_generation = OLD.stop_generation) THEN
-    -- Existing explicit workspace Stop also fences sends accepted before it. A failed Stop finished again in its own
-    -- generation was fenced when it began; what was sent while it ran keeps its wake.
+  ELSIF NEW.state = 'stopping' AND OLD.state <> 'failed' THEN
+    -- Existing explicit workspace Stop also fences sends accepted before it. Only recovery and the auto-heal move a
+    -- failed workspace to stopping, never a person's Stop: what was sent before, during a Stop that failed included,
+    -- keeps its wake.
     -- A later send may request one wake after this stop finishes.
     UPDATE public.cloud_v2_prompt_chats c SET epoch = epoch + 1
       WHERE workspace_id = NEW.id AND EXISTS (SELECT 1 FROM public.cloud_v2_prompt_outbox p

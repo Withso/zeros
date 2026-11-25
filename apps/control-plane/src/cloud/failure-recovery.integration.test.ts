@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import pg from "pg";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
@@ -51,6 +52,46 @@ database("recovering a failed cloud workspace", () => {
     const after = await pool.query("SELECT state, restore_pending, stop_generation::text AS gen, checkpoint_stop_generation::text AS saved FROM cloud_v2_workspaces WHERE id=$1", [f.workspaceId]);
     // Still the checkpoint's own generation, so the restore is not taken for an earlier backup (lost work).
     expect(after.rows[0]).toEqual({ state: "starting", restore_pending: true, gen: before.gen, saved: before.gen });
+  });
+
+  it("keeps what was sent during a Stop that failed when the heal gives the run its ordinary stop", async () => {
+    await pool.query("UPDATE cloud_v2_workspaces SET state='stopping', boat_sandbox_id='bx_fixture1', running_at=now() WHERE id=$1", [f.workspaceId]);
+    const sent = f.prompt();
+    expect((await f.submit(sent)).status).toBeLessThan(300);
+    await pool.query("UPDATE cloud_v2_workspaces SET state='failed', error_code='provider_request_failed', updated_at=now() - interval '11 minutes' WHERE id=$1", [f.workspaceId]);
+    const [candidate] = await f.store.healCandidates(new Date(Date.now() - 10 * 60_000), 4);
+    expect(candidate).toMatchObject({ ran: true, interruptedStop: false });
+    expect(await f.store.healFailed(candidate!, "stopping")).toBe(true);
+    expect((await pool.query("SELECT state FROM cloud_v2_workspaces WHERE id=$1", [f.workspaceId])).rows[0].state).toBe("stopping");
+    const message = (await pool.query("SELECT state, wake_after_stop FROM cloud_v2_prompt_outbox WHERE workspace_id=$1 AND user_message_id=$2",
+      [f.workspaceId, sent.userMessageId])).rows[0];
+    expect(message).toEqual({ state: "queued", wake_after_stop: true });
+  });
+
+  it("backfills when a workspace ran under row security, from a completed stop or a finished setup, never from activity", async () => {
+    const migration = readFileSync(new URL("../../migrations/0273_cloud_v2_running_at.sql", import.meta.url), "utf8");
+    const backfill = migration.slice(migration.indexOf("SELECT set_config('app.system','on',true);"),
+      migration.indexOf("SELECT set_config('app.system','',true);") + "SELECT set_config('app.system','',true);".length);
+    expect(backfill.length).toBeGreaterThan(100);
+    const role = `heal_backfill_${randomUUID().replaceAll("-", "").slice(0, 12)}`;
+    await pool.query(`CREATE ROLE ${role} NOLOGIN NOBYPASSRLS; GRANT zeros_app TO ${role}`);
+    const seed = (patch: string) => pool.query(`UPDATE cloud_v2_workspaces SET running_at=NULL, ${patch} WHERE id=$1`, [f.workspaceId]);
+    const backfilled = async () => {
+      const client = await pool.connect();
+      try { await client.query(`BEGIN; SET LOCAL ROLE ${role}`); await client.query(backfill); await client.query("COMMIT"); }
+      finally { client.release(); }
+      return (await pool.query("SELECT running_at FROM cloud_v2_workspaces WHERE id=$1", [f.workspaceId])).rows[0].running_at !== null;
+    };
+    try {
+      await seed("state='failed', error_code='live_connection_unavailable', stopped_at=now(), active_at=now()");
+      expect(await backfilled()).toBe(true);
+      await seed("state='failed', error_code='worker_boot_timeout', stopped_at=NULL, active_at=now(), setup_status=NULL");
+      expect(await backfilled()).toBe(false);
+      await seed(`state='failed', setup_status='{"state":"succeeded","exitCode":0,"startedAt":1,"finishedAt":2}'::jsonb`);
+      expect(await backfilled()).toBe(true);
+    } finally {
+      await pool.query(`DROP OWNED BY ${role}; DROP ROLE ${role}`);
+    }
   });
 
   it("keeps what was sent during a Stop that failed when that Stop is finished in its own generation", async () => {
