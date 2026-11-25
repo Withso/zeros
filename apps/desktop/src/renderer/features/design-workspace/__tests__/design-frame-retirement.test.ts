@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { designLiveDocumentRetirement } from "../design-frame-retirement";
+import { designLiveDocumentRetirement, designSourceStaysPainted } from "../design-frame-retirement";
 
 const read = (file: string) => readFileSync(path.resolve("apps/desktop/src/renderer/features/design-workspace", file), "utf8");
 
@@ -58,3 +58,23 @@ describe("retiring a live frame document", () => {
   });
 });
 
+describe("a source that leaves its surface budget", () => {
+  const base = { confirmed: true, enabled: false, failed: false, pictureOwner: true, pictureCurrent: false };
+
+  it("stays painted until the frame's exact-generation picture has decoded", () => {
+    expect(designSourceStaysPainted(base)).toBe(true);
+    expect(designSourceStaysPainted({ ...base, pictureCurrent: true })).toBe(false);
+    expect(designSourceStaysPainted({ ...base, enabled: true, pictureCurrent: true })).toBe(true);
+    expect(designSourceStaysPainted({ ...base, confirmed: false })).toBe(false);
+  });
+
+  it("keeps a rejected generation's last pixels even without a picture owner, and nothing else", () => {
+    expect(designSourceStaysPainted({ ...base, pictureOwner: false })).toBe(false);
+    expect(designSourceStaysPainted({ ...base, pictureOwner: false, failed: true })).toBe(true);
+  });
+
+  it("is what the render surface paints", () => {
+    const surface = read("design-frame-render-surface.tsx");
+    expect(surface).toContain("const sourcePainted = designSourceStaysPainted({ confirmed: hasSourcePixels, enabled: sourceEnabled,");
+  });
+});

@@ -56,12 +56,17 @@ function restoreSource(row: Registration): void {
   if (row.anchor?.parentNode) row.anchor.replaceWith(image);
   delete (image as HTMLImageElement & { designSourceAnchor?: HTMLElement }).designSourceAnchor;
 }
+interface Rect { x: number; y: number; width: number; height: number }
 interface Row extends DesignTileFrame {
   element: HTMLElement;
   chrome: number;
   registration: Registration | undefined;
   visible: boolean;
+  /** An overlay of unknown extent: every later source keeps DOM stacking. */
   barrier: boolean;
+  /** An editing frame's own overlays, measured in world units. Only later
+   * sources this region reaches keep DOM stacking. */
+  region?: Rect;
 }
 interface LayoutRow extends Omit<Row, "chrome" | "visible"> { compact: boolean; protected: boolean }
 interface Plane { canvas: HTMLCanvasElement; bytes: number }
@@ -83,6 +88,30 @@ let outputBytes = 0, outputPeakBytes = 0, outputPlanes = 0, activeScenes = 0;
 
 export function designSourceSceneUsage() {
   return { outputBytes, outputPeakBytes, outputPlanes, activeScenes, outputLimit: DESIGN_TILE_OUTPUT_BYTES };
+}
+
+/** Screen pixels around a measured editing region for overlays sized in
+ * screen space (handles, size labels), whose world extent grows on zoom-out. */
+const EDITING_REGION_MARGIN = 48;
+const EDITING_FRAME = "[data-design-frame-stack-protected],[data-design-nest-target]";
+
+/** The world rectangle an editing frame and its overlays paint. Selection
+ * boxes, guides and labels may escape the artboard; measuring them once per
+ * layout lets frames they never reach keep their GPU pixels. */
+function editingRegion(element: HTMLElement, bounds: Rect): Rect | undefined {
+  const frame = element.getBoundingClientRect();
+  if (frame.width <= 0 || frame.height <= 0) return undefined;
+  const scaleX = bounds.width / frame.width, scaleY = bounds.height / frame.height;
+  let left = bounds.x, top = bounds.y, right = bounds.x + bounds.width, bottom = bounds.y + bounds.height;
+  for (const node of element.querySelectorAll("*")) {
+    const rect = node.getBoundingClientRect();
+    if (rect.width <= 0 && rect.height <= 0) continue;
+    left = Math.min(left, bounds.x + (rect.left - frame.left) * scaleX);
+    top = Math.min(top, bounds.y + (rect.top - frame.top) * scaleY);
+    right = Math.max(right, bounds.x + (rect.right - frame.left) * scaleX);
+    bottom = Math.max(bottom, bounds.y + (rect.bottom - frame.top) * scaleY);
+  }
+  return { x: left, y: top, width: right - left, height: bottom - top };
 }
 
 function intersects(a: Pick<Row, "x" | "y" | "width" | "height" | "chrome">,
@@ -195,21 +224,43 @@ class DesignSourceScene {
     });
   }
 
-  private refreshBackgrounds() {
+  /** Re-reads frame colors from their unmodified CSS. A theme change reads
+   * every frame; a class change (a selection outline) reads only the frames
+   * it restyled, lifting just their compositor override for the read, so no
+   * other source leaves the GPU plane. */
+  private refreshBackgrounds(frames?: ReadonlySet<Element>) {
     this.layoutRows = null;
-    this.restore();
-    for (const row of this.registrations) { Object.assign(row, designFrameColors(row.frame)); row.colorsPending = false; }
+    if (!frames) {
+      this.restore();
+      for (const row of this.registrations) { Object.assign(row, designFrameColors(row.frame)); row.colorsPending = false; }
+      return;
+    }
+    const rows = [...this.registrations].filter(row => frames.has(row.frame));
+    const tiled = [...frames].filter(frame => frame.hasAttribute("data-design-frame-tiled"));
+    for (const frame of tiled) frame.removeAttribute("data-design-frame-tiled");
+    for (const row of rows) { Object.assign(row, designFrameColors(row.frame)); row.colorsPending = false; }
+    for (const frame of tiled) frame.setAttribute("data-design-frame-tiled", "");
   }
 
   private readGeometryChanges(records: MutationRecord[]): boolean {
-    if (records.some(record => record.attributeName === "class" && record.target instanceof HTMLElement &&
-      record.target.hasAttribute("data-design-frame"))) this.refreshBackgrounds();
+    const restyled = new Set(records.filter(record => record.attributeName === "class" && record.target instanceof HTMLElement &&
+      record.target.hasAttribute("data-design-frame")).map(record => record.target as Element));
+    if (restyled.size) this.refreshBackgrounds(restyled);
     const changed = records.some(record => record.type === "childList" && record.target === this.world &&
       [...record.addedNodes, ...record.removedNodes].some(node => node instanceof HTMLElement && !node.hasAttribute("data-design-source-plane")) ||
       record.target instanceof HTMLElement && record.target.parentElement === this.world && record.type === "attributes" &&
       (record.attributeName !== "style" || designStyleWithoutCameraScale(record.oldValue) !== designStyleWithoutCameraScale(record.target.getAttribute("style"))));
-    if (changed) this.layoutRows = null;
-    return changed;
+    // An editing frame's overlays move inside it without a world-child
+    // change; its measured region must follow them. Camera scale writes on
+    // its chrome are not geometry.
+    const editing = changed || records.some(record => {
+      const target = record.target instanceof Element ? record.target : record.target.parentElement;
+      const frame = target?.closest(EDITING_FRAME);
+      return !!frame && frame !== target && frame.parentElement === this.world &&
+        (record.attributeName !== "style" || designStyleWithoutCameraScale(record.oldValue) !== designStyleWithoutCameraScale(target!.getAttribute("style")));
+    });
+    if (editing) this.layoutRows = null;
+    return editing;
   }
 
   private affectsView(frame: HTMLElement): boolean {
@@ -286,9 +337,10 @@ class DesignSourceScene {
         const registration = registered.get(element);
         // Protected frame overlays can extend beyond their root rectangle.
         // Keep their entire paint stack in the existing DOM path.
-        const editing = element.hasAttribute("data-design-frame-stack-protected") || element.hasAttribute("data-design-nest-target");
+        const editing = element.matches(EDITING_FRAME);
         const eligible = registration && !editing ? registration : undefined;
-        return [{ x, y, width, height, element, registration: eligible, protected: protectedFrame, barrier: editing,
+        const region = editing ? editingRegion(element, bounds) : undefined;
+        return [{ x, y, width, height, element, registration: eligible, protected: protectedFrame, barrier: editing && !region, region,
           compact: element.hasAttribute("data-design-frame-compact-controls"),
           source: registration?.source ?? { key: "", image: null! }, background: registration?.background ?? [0, 0, 0, 0] as const,
           outline: registration?.outline }];
@@ -345,11 +397,15 @@ class DesignSourceScene {
       for (const row of rows) {
         if (!row.visible) continue;
         // Editing overlays may escape their frame; do not approximate their
-        // paint with the artboard rectangle. Later sources retain native DOM
-        // stacking until that overlay retires. Hidden guides are excluded.
+        // paint with the artboard rectangle. Later sources that their measured
+        // region reaches retain native DOM stacking until that overlay
+        // retires; an unmeasured overlay holds every later source. Hidden
+        // guides are excluded.
         if (row.barrier) barrier = true;
         if (!row.registration || barrier || earlierDom.some(other => intersects({ ...row, chrome: 0 }, other, 2 / view.zoom))) {
-          earlierDom.push(row);
+          const margin = EDITING_REGION_MARGIN / view.zoom, region = row.region;
+          earlierDom.push(region ? { x: region.x - margin, y: region.y - margin, width: region.width + 2 * margin,
+            height: region.height + 2 * margin, chrome: row.chrome } : row);
           continue;
         }
         selected.push(row);

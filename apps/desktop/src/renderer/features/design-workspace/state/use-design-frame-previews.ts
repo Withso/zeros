@@ -29,14 +29,16 @@ import {
   DesignFramePreviews,
   createDesignFramePicturedReader,
   designPreviewFrameKey,
-  downscaleDesignPreview,
-  encodeDesignPreview,
   type DesignPreviewDemand,
   type DesignPreviewLevel,
   type DesignPreviewOwner,
   type DesignPreviewPicture,
   type DesignPreviewTarget,
 } from "./design-frame-previews";
+import { createDesignPreviewEncoder } from "./design-preview-encoding";
+
+const previewEncoder = createDesignPreviewEncoder(typeof Worker === "undefined" ? null
+  : () => new Worker(new URL("./design-preview-encode.worker.ts", import.meta.url), { type: "module" }));
 
 /** A cloud picture starts a capture browser on the VM the agents run on, so
  * cloud canvases render only frames near the screen, with a pause between
@@ -196,8 +198,8 @@ export const designFramePreviews = new DesignFramePreviews({
     }
     return (await designBackgroundWork.schedule(`design-preview:${capture?.key ?? ""}`, async () => true)) ? work() : null;
   },
-  encode: encodeDesignPreview,
-  downscale: downscaleDesignPreview,
+  encode: previewEncoder.encode,
+  downscale: previewEncoder.downscale,
   canProduce: (owner) => {
     if (!isCloudWorkspace(owner.workspaceId)) return true;
     const target = parseCloudWorkspaceKey(owner.workspaceId);
