@@ -963,6 +963,10 @@ export class CloudV2Store {
       // Decided on the locked row before anything changes. Its first error stays until a boot is running.
       if (options.recover && !cloudV2RecoverableFailure(current))
         throw new HttpError(409, "workspace_not_recoverable", "This cloud workspace cannot be recovered. Delete it and create a new one.");
+      // A Stop that failed before Boat confirmed it left its turns open: only that stop's completion retires them, and a
+      // new boot's cleanup reaches only its own generation. Finish that stop, in its generation, then start.
+      const interruptedStop = !!options.recover && (await tx.query(`SELECT 1 FROM cloud_v2_execution_contexts
+        WHERE workspace_id=$1 AND state<>'retired' AND stop_generation<$2::bigint LIMIT 1`, [id, current.stop_generation])).rowCount === 1;
       if (action === "stop" || action === "archive") await cancelExecutionActivation(tx, id);
       else await assertNoExecutionTransition(tx, id);
       // A create still waiting for its organization's base has no machine to stop: stop ends it, plainly, with none made.
@@ -986,12 +990,13 @@ export class CloudV2Store {
       const starts = action === "start" || action === "restart" && (current.state === "stopped" || current.state === "failed");
       const reconfirm = action === "stop" && current.state === "stopped" && intent.execution_mode === "prepared" &&
         await needsExecutionStopConfirmation(tx, id);
-      const state = starts
+      const state = interruptedStop ? "stopping" : starts
         ? current.state === "stopped" || current.state === "failed" ? "starting" : current.state
         : current.state === "running" || current.state === "starting" || configuring || reconfirm ? "stopping" : current.state;
       const moved = state !== current.state;
       const archived = action === "archive" || (action === "stop" && current.archived_at !== null);
-      const restart = state === "stopping" && action === "restart" ? (BigInt(intent.stop_generation) + (moved ? 1n : 0n)).toString()
+      const restart = interruptedStop ? intent.stop_generation
+        : state === "stopping" && action === "restart" ? (BigInt(intent.stop_generation) + (moved ? 1n : 0n)).toString()
         : state === "stopping" && action === "start" && priorRestart === intent.stop_generation ? priorRestart : null;
       if (!moved && archived === (current.archived_at !== null) && restart === priorRestart) return { workspace: workspace(current), moved };
       const { rows } = await tx.query<Row>(
@@ -1008,11 +1013,11 @@ export class CloudV2Store {
            next_attempt_at = CASE WHEN state <> $2 THEN NULL ELSE next_attempt_at END,
            worker_token_hash = CASE WHEN state <> $2 AND $2 = 'starting' THEN NULL ELSE worker_token_hash END,
            worker_boot_id = CASE WHEN state <> $2 AND $2 = 'starting' THEN NULL ELSE worker_boot_id END,
-           stop_generation = stop_generation + CASE WHEN state <> $2 AND $2 = 'stopping' THEN 1 ELSE 0 END,
+           stop_generation = stop_generation + CASE WHEN state <> $2 AND $2 = 'stopping' AND NOT $8::boolean THEN 1 ELSE 0 END,
            updated_at = clock_timestamp(),
            state = $2
          WHERE id = $1 RETURNING ${COLUMNS}`,
-        [id, state, archived, restart, initiator ?? null, action === "start" || action === "restart", executionAuthority ?? null],
+        [id, state, archived, restart, initiator ?? null, action === "start" || action === "restart", executionAuthority ?? null, interruptedStop],
       );
       return { workspace: workspace(rows[0]!), moved };
   }
