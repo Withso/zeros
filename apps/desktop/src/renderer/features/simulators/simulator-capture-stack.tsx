@@ -5,7 +5,7 @@ import {
   useState,
   type DragEvent,
 } from "react";
-import { Image, LoaderCircle, MessageSquarePlus, Video, X } from "lucide-react";
+import { Image, MessageSquarePlus, Video, X } from "lucide-react";
 import type { SimulatorCapture } from "@zeros/protocol/simulator-captures";
 
 import { useWorkspaceStore } from "../../state/store";
@@ -27,6 +27,7 @@ import {
 } from "./simulator-capture-model";
 import { captureThumbnails, useCaptureThumbnails } from "./simulator-capture-store";
 import type { Size } from "./simulator-geometry";
+import { RunStream } from "@/renderer/shared/ui/loading/run-stream";
 
 /** Space kept between the thumbnails and a toast or picture in picture under
  * them. */
@@ -155,7 +156,7 @@ function CaptureCard({
               onClick={add}
             >
               {adding ? (
-                <LoaderCircle aria-hidden className="motion-safe:animate-spin" />
+                <RunStream size={16} />
               ) : (
                 <MessageSquarePlus aria-hidden />
               )}

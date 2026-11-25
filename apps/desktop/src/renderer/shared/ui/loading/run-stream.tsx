@@ -1,6 +1,10 @@
 // ──────────────────────────────────────────────────────────
-// RunStream — the live Run indicator
+// RunStream — Stream-run, the app's loader
 // ──────────────────────────────────────────────────────────
+//
+// The live Run indicator, and since 2026-11-25 every in-app wait: ZerosSpinner's
+// default "stream" variant draws these same rows (only app startup keeps the
+// Island Z weave, startup-loader.tsx).
 //
 // An irregular 4 × 4 square of tiles, like the agent puzzle, making the one
 // motion the puzzle never makes: every 95ms the next row, top to bottom,
@@ -52,6 +56,42 @@ export function runStreamRowPath(row: readonly number[], y: number): string {
 
 const ROW_PATHS = RUN_STREAM_PATTERN.map(runStreamRowPath);
 
+/** The streaming rows, for an svg whose viewBox is the LOADER_GRID square and
+ *  that clips at its edge. `phaseMs` offsets the whole square in its cycle;
+ *  `active` false pauses it (a hidden retained surface). Shared with
+ *  ZerosSpinner's default "stream" variant, the app's loader everywhere but
+ *  startup. */
+export function RunStreamRows({
+  phaseMs,
+  reducedMotion,
+  active,
+}: {
+  phaseMs: number;
+  reducedMotion: boolean;
+  active: boolean;
+}) {
+  return (
+    <>
+      {ROW_PATHS.map((d, row) => (
+        <path
+          key={row}
+          d={d}
+          fill="currentColor"
+          style={
+            reducedMotion
+              ? undefined
+              : {
+                  animation: `zeros-run-stream ${RUN_STREAM_CYCLE_MS}ms linear infinite`,
+                  animationDelay: `${row * RUN_STREAM_BEAT_MS - phaseMs}ms`,
+                  animationPlayState: active ? undefined : "paused",
+                }
+          }
+        />
+      ))}
+    </>
+  );
+}
+
 export interface RunStreamProps {
   /** Square box size in CSS pixels. */
   size?: number;
@@ -98,21 +138,7 @@ export function RunStream({ size = 16, className, label }: RunStreamProps) {
           overflow: "hidden",
         }}
       >
-        {ROW_PATHS.map((d, row) => (
-          <path
-            key={row}
-            d={d}
-            style={
-              reducedMotion
-                ? undefined
-                : {
-                    animation: `zeros-run-stream ${RUN_STREAM_CYCLE_MS}ms linear infinite`,
-                    animationDelay: `${row * RUN_STREAM_BEAT_MS - phaseMs}ms`,
-                    animationPlayState: active ? undefined : "paused",
-                  }
-            }
-          />
-        ))}
+        <RunStreamRows phaseMs={phaseMs} reducedMotion={reducedMotion} active={active} />
       </svg>
     </span>
   );

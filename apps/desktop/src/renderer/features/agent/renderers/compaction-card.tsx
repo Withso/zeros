@@ -5,7 +5,7 @@
 // Context compaction renders like any other thing the agent does — a line
 // in the working stripe with exactly two states:
 //
-//   • running  — the logo loader (ZerosSpinner) + "Compacting.."
+//   • running  — Stream-run (ZerosSpinner) + "Compacting.."
 //   • settled  — lucide `CircleCheckBig` + "Context compacted" + a no-icon
 //                "Done" StatusChip (same recipe as the question record's
 //                ANSWERED chip: border1, mono 10px uppercase, over bg1)
@@ -31,7 +31,7 @@ import type { Renderer } from "./types";
 import { EventRow, type EventMeta } from "./event-row";
 import { renderDetail } from "./event-row-renderer";
 
-/** Leading indicator for the live compaction row — the logo loader at
+/** Leading indicator for the live compaction row — Stream-run at
  *  the row-icon size (12px), slotted through EventMeta's Icon. Compaction
  *  is infrastructure loading, not the agent producing output, so it takes
  *  the default logo variant (not the agent wave). */

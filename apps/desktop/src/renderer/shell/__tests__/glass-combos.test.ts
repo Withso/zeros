@@ -4,51 +4,23 @@ import { createElement, Fragment } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 
-import {
-  GLASS_COMBOS,
-  glassComboStops,
-  glassTint,
-  pickGlassCombo,
-} from "../../shared/ui/loading/glass-combos";
-import { GLASS_MOTIONS, GLASS_TILES } from "../../shared/ui/loading/glass-motion";
+import { GLASS_FADE, glassComboLayer } from "../../shared/ui/loading/glass-combos";
+import { GLASS_DEFAULT_MOTION, GLASS_MOTIONS, GLASS_TILES } from "../../shared/ui/loading/glass-motion";
 import { ZerosSpinner } from "../../shared/ui/loading/zeros-spinner";
 
 const source = (path: string) => readFileSync(resolve(process.cwd(), path), "utf8");
 
-/** Deterministic PRNG. */
-function mulberry32(seed: number) {
-  let a = seed >>> 0;
-  return () => {
-    a = (a + 0x6d2b79f5) | 0;
-    let t = Math.imul(a ^ (a >>> 15), 1 | a);
-    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-  };
-}
-
-describe("glass colour combos", () => {
-  it("mix four to six colours, each kept lighter than pastel", () => {
-    expect(GLASS_COMBOS.length).toBeGreaterThanOrEqual(12);
-    for (const combo of GLASS_COMBOS) {
-      expect(combo.colors.length).toBeGreaterThanOrEqual(4);
-      expect(combo.colors.length).toBeLessThanOrEqual(6);
-      // Every gradient renders the same stops, shorter combos holding their last.
-      const stops = glassComboStops(combo);
-      expect(stops).toHaveLength(6);
-      expect(stops.at(-1)?.color).toBe(glassTint(combo.colors.at(-1) as string));
-    }
-    // Mostly white on dark, mostly a dark grey on light.
-    expect(glassTint("#F27BC4")).toBe("color-mix(in oklab, #F27BC4 30%, light-dark(#3b3b3b, #ffffff))"); // check:ui ignore-line (combo colour under test)
+// 2026-11-25: the glass square paints one fg1 → fg3 fade in the app's own
+// greys; the fourteen colour combos are gone.
+describe("the glass fade", () => {
+  it("runs fg1 at the top of the square to fg3 at the bottom, with no literal colour", () => {
+    expect(GLASS_FADE).toEqual([[0, "var(--fg1)"], [1, "var(--fg3)"]]);
+    expect(source("apps/desktop/src/renderer/shared/ui/loading/glass-combos.ts")).not.toMatch(/#[0-9A-Fa-f]{6}\b/);
   });
 
-  it("never pick the combo already showing", () => {
-    const random = mulberry32(3);
-    let combo = pickGlassCombo(null, random);
-    for (let i = 0; i < 200; i++) {
-      const next = pickGlassCombo(combo, random);
-      expect(next).not.toBe(combo);
-      combo = next;
-    }
+  it("counts layer generations up for the motion model", () => {
+    expect(glassComboLayer(null)).toEqual({ combo: 1 });
+    expect(glassComboLayer(4)).toEqual({ combo: 5 });
   });
 });
 
@@ -56,11 +28,11 @@ describe("ZerosSpinner variant=glass", () => {
   const render = (props: Parameters<typeof ZerosSpinner>[0]) =>
     renderToStaticMarkup(createElement(ZerosSpinner, props));
 
-  it("runs one of the three motions, picked at random per mount", () => {
-    const picked = new Set(
-      Array.from({ length: 60 }, () => /data-glass-motion="(\w+)"/.exec(render({ size: 16, variant: "glass" }))?.[1]),
-    );
-    expect([...picked].sort()).toEqual([...GLASS_MOTIONS].sort());
+  it("runs the one pinned motion unless a caller names another", () => {
+    expect(GLASS_DEFAULT_MOTION).toBe("weave");
+    for (let i = 0; i < 20; i++) {
+      expect(render({ size: 16, variant: "glass" })).toContain('data-glass-motion="weave"');
+    }
     for (const motion of GLASS_MOTIONS) {
       expect(render({ size: 16, variant: "glass", motion })).toContain(`data-glass-motion="${motion}"`);
     }
@@ -83,23 +55,18 @@ describe("ZerosSpinner variant=glass", () => {
         expect(mask.match(/<rect x="-4"/g)).toHaveLength(GLASS_TILES);
         expect(mask.match(/<g style="transform:translate\(\dpx, \dpx\)">/g)).toHaveLength(GLASS_TILES);
       }
-      // Each layer paints its two crossing gradients, the light, the sheen,
-      // and the glint waiting outside the square.
-      const layers = [...markup.matchAll(/<g mask="url\(#([^)]+)\)">([\s\S]*?)<\/g>/g)];
+      // Each layer paints the one fade through its mask.
+      const layers = [...markup.matchAll(/<rect mask="url\(#([^)]+)\)"[^>]*style="fill:url\(#([^)]+)\)"/g)];
       expect(layers).toHaveLength(2);
-      for (const [, , body] of layers) {
-        expect(body.match(/<rect[^>]*fill:url\(#/g)).toHaveLength(5);
-        expect(body).toContain("transform:translateX(-4px)");
-      }
-      expect(markup).toMatch(/stop-color:color-mix\(in oklab, #[0-9A-F]{6} 30%, light-dark\(/);
+      expect(new Set(layers.map((layer) => layer[2])).size).toBe(1);
+      expect(markup).toContain("stop-color:var(--fg1)");
+      expect(markup).toContain("stop-color:var(--fg3)");
     }
   });
 
-  it("wears a faint glow in the square's own units, and never shares ids between loaders", () => {
+  it("wears no glow, and never shares ids between loaders", () => {
     const markup = render({ size: 16, variant: "glass" });
-    const glow = /class="zeros-glass" filter="url\(#([^)]+)\)"/.exec(markup)?.[1];
-    expect(glow).toBeTruthy();
-    expect(markup).toMatch(new RegExp(`<filter id="${glow}" filterUnits="userSpaceOnUse" primitiveUnits="userSpaceOnUse"`));
+    expect(markup).not.toContain("<filter");
     const twice = renderToStaticMarkup(
       createElement(
         Fragment,
@@ -113,7 +80,7 @@ describe("ZerosSpinner variant=glass", () => {
   });
 
   it("leaves the other loaders plain", () => {
-    for (const variant of ["agent", "logo"] as const) {
+    for (const variant of ["agent", "stream"] as const) {
       expect(render({ size: 16, variant })).not.toMatch(/<mask|<filter|zeros-glass/);
     }
   });

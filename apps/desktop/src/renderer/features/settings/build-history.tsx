@@ -1,13 +1,14 @@
 import type { ReactNode } from "react";
-import { CircleCheck, CircleMinus, CircleX, LoaderCircle } from "lucide-react";
+import { CircleCheck, CircleMinus, CircleX } from "lucide-react";
+import { RunStream } from "@/renderer/shared/ui/loading/run-stream";
 
 export type BuildHistoryState = "succeeded" | "failed" | "cancelled" | "queued" | "building";
 export const BUILD_ICON: Record<BuildHistoryState, { icon: ReactNode; label: string }> = {
   succeeded: { icon: <CircleCheck className="text-fg2 size-4 shrink-0" aria-hidden />, label: "Built" },
   failed: { icon: <CircleX className="text-red-text size-4 shrink-0" aria-hidden />, label: "Failed" },
   cancelled: { icon: <CircleMinus className="text-fg3 size-4 shrink-0" aria-hidden />, label: "Cancelled" },
-  queued: { icon: <LoaderCircle className="text-fg2 size-4 shrink-0 animate-spin motion-reduce:animate-none" aria-hidden />, label: "Queued" },
-  building: { icon: <LoaderCircle className="text-fg2 size-4 shrink-0 animate-spin motion-reduce:animate-none" aria-hidden />, label: "Building" },
+  queued: { icon: <RunStream size={16} className="text-(--loader-active)" />, label: "Queued" },
+  building: { icon: <RunStream size={16} className="text-(--loader-active)" />, label: "Building" },
 };
 
 /** One build in a history list: the Cloud Computer's and each repository's ready copy share it. */

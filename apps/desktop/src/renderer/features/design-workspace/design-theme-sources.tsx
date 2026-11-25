@@ -20,6 +20,7 @@ import type {
 } from "../../platform/git";
 import { Button, Tooltip } from "../../shared/ui/primitives";
 import { cn } from "../../shared/ui/cn";
+import { RunStream } from "@/renderer/shared/ui/loading/run-stream";
 
 const STATUS = {
   ready: { Icon: CircleCheck, label: "Ready", className: "text-green-text" },
@@ -168,10 +169,7 @@ export function DesignThemeSourceRail({
               disabled={updating}
               onClick={onUpdate}
             >
-              <RefreshCw
-                aria-hidden="true"
-                className={updating ? "animate-spin" : undefined}
-              />
+              {updating ? <RunStream size={16} /> : <RefreshCw aria-hidden="true" />}
             </IconButton>
           </Tooltip>
         ) : null}

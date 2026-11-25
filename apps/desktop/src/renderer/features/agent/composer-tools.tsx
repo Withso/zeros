@@ -9,7 +9,7 @@ import {
   useSyncExternalStore,
 } from "react";
 import { IconButton } from "@/renderer/shared/ui/primitives/icon-button";
-import { Blocks, LoaderCircle, RefreshCw } from "lucide-react";
+import { Blocks, RefreshCw } from "lucide-react";
 import { ComposerToolGroups } from "./composer-tool-groups";
 import { NativeBrowserAvailability } from "./native-browser-availability";
 import {
@@ -35,6 +35,7 @@ import {
   createSessionToolsResource,
   sessionToolsResource,
 } from "./session-tools-cache";
+import { RunStream } from "@/renderer/shared/ui/loading/run-stream";
 
 const offline = {
   ...createSessionToolsResource(() =>
@@ -294,7 +295,7 @@ function ToolsPopover({
             role="status"
             className="text-fg2 flex items-center gap-2 py-2 text-xs"
           >
-            <LoaderCircle className="size-3.5 animate-spin motion-reduce:animate-none" />
+            <RunStream size={14} className="text-(--loader-active)" />
             Loading tools…
           </p>
         ) : null}

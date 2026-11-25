@@ -231,7 +231,7 @@ function SettingUpRow({ grow }: { grow?: boolean }) {
       role="status"
       aria-live="polite"
     >
-      <ZerosSpinner size={20} label="Setting up workspace" />
+      <ZerosSpinner size={24} label="Setting up workspace" />
       <span className="text-fg1 text-sm font-medium">Setting up workspace</span>
     </div>
   );

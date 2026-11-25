@@ -4,7 +4,6 @@ import {
   ChevronDown,
   ChevronRight,
   CircleDashed,
-  LoaderCircle,
   X,
 } from "lucide-react";
 import {
@@ -19,6 +18,7 @@ import {
   CollapsibleContent,
   CollapsibleTrigger,
 } from "../../shared/ui/primitives/elements/collapsible";
+import { RunStream } from "@/renderer/shared/ui/loading/run-stream";
 
 const LABELS = { plugins: "Plugins", apps: "Apps", mcp: "MCPs" } as const;
 /** MCP servers declared in the agent's own settings files on this machine. */
@@ -293,7 +293,7 @@ function ToolStatus({
   if (entry.status === "connecting")
     return (
       <span role="status" aria-label="Connecting" className="shrink-0">
-        <LoaderCircle className="text-fg2 size-3.5 animate-spin motion-reduce:animate-none" />
+        <RunStream size={14} className="text-(--loader-active)" />
       </span>
     );
   if (canAuthenticate)

@@ -48,7 +48,7 @@ describe("SplitButton", () => {
   it("waits on the menu while the action is busy", () => {
     const [action, menu] = halves(render({ loading: true }));
     expect(action).toContain('aria-busy="true"');
-    expect(action).toContain('data-zeros-loader="logo"');
+    expect(action).toContain('data-zeros-loader="stream"');
     expect(menu).toContain("disabled");
   });
 });

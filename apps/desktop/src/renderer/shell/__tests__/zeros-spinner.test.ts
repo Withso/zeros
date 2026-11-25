@@ -6,8 +6,8 @@ import { describe, expect, it } from "vitest";
 
 import { loaderFrame } from "../../shared/ui/loading/loader-frame";
 import { PUZZLE_CELLS, PUZZLE_CORNERS, PUZZLE_HOLES } from "../../shared/ui/loading/puzzle-motion";
-import { LOGO_WEAVE_BEAT_MS, LOGO_WEAVE_LOOP_MS, ZerosSpinner } from "../../shared/ui/loading/zeros-spinner";
-import { STARTUP_LOGO_WEAVE_ROWS } from "../../shared/ui/startup-loader";
+import { RUN_STREAM_BEAT_MS, RUN_STREAM_CYCLE_MS, RUN_STREAM_PATTERN } from "../../shared/ui/loading/run-stream";
+import { ZerosSpinner } from "../../shared/ui/loading/zeros-spinner";
 
 const render = (props: Parameters<typeof ZerosSpinner>[0]) =>
   renderToStaticMarkup(createElement(ZerosSpinner, props));
@@ -29,41 +29,32 @@ describe("loader geometry", () => {
   });
 });
 
-const keyframes = (css: string, name: string) =>
-  new RegExp(`@keyframes ${name}\\s*\\{([\\s\\S]*?\\})\\s*\\}`).exec(css)?.[1]?.replace(/\s+/g, " ").trim();
-
-describe("ZerosSpinner — logo", () => {
-  it("draws the Island Z as the startup loader's four rows, clipped to the square", () => {
+// 2026-11-25 (P11): Stream-run is the app's loader everywhere but startup;
+// ZerosSpinner's default draws its rows (the Island Z weave stays in
+// index.html and StartupLogoLoader only).
+describe("ZerosSpinner — stream (default)", () => {
+  it("draws Stream-run's four streaming rows, clipped to the square", () => {
     const markup = render({ size: 16 });
     expect(markup).toContain('role="status"');
     expect(markup).toContain('aria-label="Loading"');
-    expect(markup).toContain('data-zeros-loader="logo"');
-    expect(markup.match(/<path/g)).toHaveLength(STARTUP_LOGO_WEAVE_ROWS.length);
-    for (const row of STARTUP_LOGO_WEAVE_ROWS) expect(markup).toContain(`d="${row.d}"`);
+    expect(markup).toContain('data-zeros-loader="stream"');
+    expect(markup.match(/<path/g)).toHaveLength(RUN_STREAM_PATTERN.length);
     expect(markup).toMatch(/<svg[^>]*style="[^"]*overflow:hidden/);
   });
 
-  it("weaves neighbouring rows in opposite directions on the startup beat", () => {
+  it("runs the shared stream keyframe one beat per row", () => {
     const markup = render({ size: 16 });
-    const rows = [...markup.matchAll(/animation:zeros-logo-weave-([rl]) (\d+)ms infinite;animation-delay:(\d+)ms/g)];
-    expect(rows.map((row) => row[1])).toEqual(["r", "l", "r", "l"]);
-    expect(rows.map((row) => Number(row[2]))).toEqual(Array(4).fill(LOGO_WEAVE_LOOP_MS));
-    expect(rows.map((row) => Number(row[3]))).toEqual([0, 1, 2, 3].map((beat) => beat * LOGO_WEAVE_BEAT_MS));
-    expect([LOGO_WEAVE_LOOP_MS, LOGO_WEAVE_BEAT_MS]).toEqual([1800, 72]);
+    const rows = [...markup.matchAll(/animation:zeros-run-stream (\d+)ms linear infinite;animation-delay:(-?[\d.]+)ms/g)];
+    expect(rows).toHaveLength(4);
+    expect(rows.map((row) => Number(row[1]))).toEqual(Array(4).fill(RUN_STREAM_CYCLE_MS));
+    const delays = rows.map((row) => Number(row[2]));
+    for (let i = 1; i < delays.length; i++) expect(delays[i] - delays[i - 1]).toBeCloseTo(RUN_STREAM_BEAT_MS);
   });
 
-  it("runs the startup loader's own steps, pause on the Z included", () => {
-    const boot = readFileSync(resolve(process.cwd(), "index.html"), "utf8");
+  it("keeps the Island Z weave out of the app's stylesheet", () => {
     const css = readFileSync(resolve(process.cwd(), "styles/global/animations.css"), "utf8");
-    for (const side of ["r", "l"]) {
-      const steps = keyframes(css, `zeros-logo-weave-${side}`);
-      expect(steps).toBeDefined();
-      expect(steps).toBe(keyframes(boot, `zeros-boot-weave-${side}`));
-      // Back on the Z from 54% to the end of the loop.
-      expect(steps).toMatch(/54%, 100% \{ transform: translateX\(-?4px\); \}/);
-    }
-    expect(boot).toMatch(/\.zeros-boot-row-r \{\s*animation: zeros-boot-weave-r 1\.8s infinite;/);
-    expect(boot).toMatch(/\.zeros-boot-beat-1 \{\s*animation-delay: 72ms;/);
+    expect(css).not.toContain("zeros-logo-weave");
+    expect(css).toContain("@keyframes zeros-run-stream");
   });
 
   it("paints each tone from its semantic tokens", () => {
@@ -97,7 +88,7 @@ describe("ZerosSpinner — agent puzzle", () => {
 
 describe("ZerosSpinner — sizing and guards", () => {
   it("pins its own svg size against blanket [&_svg]:size-* rules", () => {
-    for (const variant of ["logo", "agent", "glass"] as const) {
+    for (const variant of ["stream", "agent", "glass"] as const) {
       const markup = render({ size: 14, variant });
       expect(markup).toMatch(/<span[^>]*style="width:14px;height:14px/);
       expect(markup).toMatch(/<svg[^>]*style="position:absolute;left:2px;top:2px;width:10px;height:10px/);
@@ -120,7 +111,7 @@ describe("ZerosSpinner — sizing and guards", () => {
       expect(source, square).not.toContain("requestAnimationFrame");
     }
     const css = readFileSync(resolve(process.cwd(), "styles/global/animations.css"), "utf8");
-    expect(css).toContain("@keyframes zeros-logo-weave-r");
+    expect(css).toContain("@keyframes zeros-run-stream");
     expect(css).not.toContain("zeros-orbit-lap");
     expect(css).toMatch(/prefers-reduced-motion: reduce[\s\S]*\[data-zeros-loader\] path/);
   });

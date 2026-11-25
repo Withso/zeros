@@ -183,7 +183,7 @@ export function DesignWorkbenchSurface({
         className="text-fg2 flex min-h-0 flex-1 items-center justify-center gap-2 p-4 text-xs leading-4.5"
         data-design-tab-empty=""
       >
-        <ZerosSpinner size={16} />
+        <ZerosSpinner size={20} />
         <p className="m-0">Checking Design directory…</p>
       </div>
     );

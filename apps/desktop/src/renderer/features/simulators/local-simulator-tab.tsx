@@ -8,7 +8,7 @@ import {
   type KeyboardEvent,
   type ReactNode,
 } from "react";
-import { ChevronDown, LoaderCircle } from "lucide-react";
+import { ChevronDown } from "lucide-react";
 import { agentControlName } from "@zeros/protocol/browser-tools";
 import {
   deviceControlDetail,
@@ -81,6 +81,7 @@ import {
   simulatorTabView,
   simulatorsShownElsewhere,
 } from "./simulator-tab-model";
+import { RunStream } from "@/renderer/shared/ui/loading/run-stream";
 
 const EMPTY_DEVICES: readonly SimulatorDevice[] = [];
 
@@ -98,10 +99,7 @@ function ScreenMessage({
   return (
     <div className="flex size-full flex-col items-center justify-center gap-3 p-4 text-center">
       {busy && (
-        <LoaderCircle
-          aria-hidden
-          className={cn("text-fg3 size-5", active && "motion-safe:animate-spin")}
-        />
+        <RunStream size={20} className="text-(--loader-active)" />
       )}
       <p aria-live={active ? "polite" : "off"} className="text-fg2 m-0 text-xs">
         {message}

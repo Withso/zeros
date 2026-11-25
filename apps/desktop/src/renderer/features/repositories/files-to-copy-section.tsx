@@ -56,6 +56,7 @@ import {
   type CandidateTreeRow,
 } from "./files-to-copy-model";
 import type { EditableRepoLayer } from "./repositories-panel";
+import { RunStream } from "@/renderer/shared/ui/loading/run-stream";
 
 /** Pause after the last keystroke before an unsaved draft is previewed. Long
  *  enough that typing a pattern doesn't fork a `git ls-files` per character,
@@ -376,7 +377,7 @@ export function FilesToCopySection({
 
       {firstLoad ? (
         <div className="text-fg3 flex items-center gap-2 py-4 text-xs">
-          <RotateCw className="size-3.5 animate-spin" aria-hidden />
+          <RunStream size={14} className="text-(--loader-active)" />
           Scanning {project.name}…
         </div>
       ) : unavailable ? (
@@ -476,18 +477,9 @@ export function FilesToCopySection({
               disabled={!connected || read.refreshing}
               label="Rescan"
             >
-              <RotateCw
-                className={cn(
-                  "size-3",
-                  // In flight only. Spinning on "what's on screen is older than
-                  // the box" instead never stopped once the bridge dropped — no
-                  // key means no data forever, while the last result keeps
-                  // painting — so a DISABLED button spun for the rest of the
-                  // session, claiming a scan nobody could have started.
-                  (read.refreshing || read.loading) && "animate-spin",
-                )}
-                aria-hidden
-              />
+              {/* In flight only: a disabled button never claims a scan nobody
+                  could have started. */}
+              {read.refreshing || read.loading ? <RunStream size={14} /> : <RotateCw className="size-3" aria-hidden />}
             </IconButton>
           </Tooltip>
         </div>

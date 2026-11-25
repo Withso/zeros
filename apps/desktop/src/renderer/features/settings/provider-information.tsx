@@ -27,6 +27,7 @@ import {
   usageResetLabel,
 } from "./provider-usage";
 import { SUBSCRIPTION_NAMES } from "./subscription-connection-panel";
+import { RunStream } from "@/renderer/shared/ui/loading/run-stream";
 
 const vendors = { claude: "Anthropic", codex: "OpenAI", cursor: "Cursor" };
 const noSubscription = () => () => {};
@@ -158,13 +159,7 @@ export function ProviderInformation({
                     .catch(() => {});
               }}
             >
-              <RefreshCw
-                className={cn(
-                  "size-3.5",
-                  refreshing && "motion-safe:animate-spin",
-                )}
-                aria-hidden="true"
-              />
+              {refreshing ? <RunStream size={16} /> : <RefreshCw className="size-3.5" aria-hidden="true" />}
             </IconButton>
           </Tooltip>
         </div>

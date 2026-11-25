@@ -278,7 +278,7 @@ describe("pixel-identical debt burn-down", () => {
     const previous = renderRecipe(
       c.tag,
       c.original,
-      "style" in c ? c.style : undefined,
+      undefined,
     );
     const current =
       c.component === "ListRow"
@@ -289,7 +289,7 @@ describe("pixel-identical debt burn-down", () => {
               "content",
             ),
           )
-        : renderRecipe(c.tag, c.className, "style" in c ? c.style : undefined);
+        : renderRecipe(c.tag, c.className, undefined);
     const normalized = new Set(
       [...classes(previous)].map((token) =>
         c.alias && token === c.alias.before ? c.alias.after : token,

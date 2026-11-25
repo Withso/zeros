@@ -92,9 +92,9 @@
     --inverted-fg
   ); /* dark label on the light-violet button in dark themes */
 
-  /* Loader (ZerosSpinner — the logo loader and the agent Puzzle,
+  /* Loader (ZerosSpinner — Stream-run and the agent Puzzle,
      apps/desktop/src/renderer/shared/ui/loading/zeros-spinner.tsx). The
-     app's DEFAULT loader colors: --loader-active paints the logo's rows and
+     app's DEFAULT loader colors: --loader-active paints the stream's rows and
      the Puzzle's tiles. Both aliases resolve to primitives that already flip
      per theme, so no [data-theme="light"] override is needed.
        --loader-active            → default surfaces (chrome, dialogs,

@@ -88,6 +88,7 @@ import {
   trackGithubInstallOpened,
   trackGithubMethodSelected,
 } from "../../platform/observability/analytics/github-events";
+import { RunStream } from "@/renderer/shared/ui/loading/run-stream";
 
 const METHODS = ["gh-cli", "github-app", "pat"] as const;
 
@@ -644,10 +645,7 @@ export function GitHubSection({
                       disabled={refreshing}
                       onClick={() => void refreshSnapshot(method)}
                     >
-                      <RefreshCw
-                        className={cn("size-3.5", refreshing && "animate-spin")}
-                        aria-hidden="true"
-                      />
+                      {refreshing ? <RunStream size={16} /> : <RefreshCw className="size-3.5" aria-hidden="true" />}
                       {refreshing ? "Refreshing…" : "Refresh"}
                     </Button>
                   ) : null}
@@ -811,13 +809,7 @@ export function GitHubSection({
                               disabled={refreshing}
                               onClick={() => void refreshSnapshot("github-app")}
                             >
-                              <RefreshCw
-                                className={cn(
-                                  "size-3.5",
-                                  refreshing && "animate-spin",
-                                )}
-                                aria-hidden="true"
-                              />
+                              {refreshing ? <RunStream size={16} /> : <RefreshCw className="size-3.5" aria-hidden="true" />}
                               Refresh
                             </Button>
                           ) : (
@@ -965,13 +957,7 @@ export function GitHubSection({
                           disabled={refreshing}
                           onClick={() => void refreshSnapshot(method)}
                         >
-                          <RefreshCw
-                            className={cn(
-                              "size-3.5",
-                              refreshing && "animate-spin",
-                            )}
-                            aria-hidden="true"
-                          />
+                          {refreshing ? <RunStream size={16} /> : <RefreshCw className="size-3.5" aria-hidden="true" />}
                           {refreshing ? "Refreshing…" : "Refresh"}
                         </Button>
                       </div>

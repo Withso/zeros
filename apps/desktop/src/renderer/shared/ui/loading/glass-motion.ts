@@ -24,12 +24,11 @@
 // always starts before the last lands. A tile in flight stays reserved until
 // its glide ends, so no tile is asked to move twice at once.
 //
-// Colour: the glass has two layers, each a whole-square combo seen through
-// the tiles in it (so colour holds still while the tiles run through it).
-// Every few seconds the idle layer takes a new combo and goes live, and the
-// tiles bring it in: in the weave as each one wraps round an edge (it
-// re-enters in the new combo), in the cascade and circuit the moment each one
-// moves. The next combo waits until every tile shows the last one.
+// Layers: the glass has two, seen through the tiles in each. Every few seconds
+// the idle layer goes live and the tiles move into it: in the weave as each
+// one wraps round an edge, in the cascade and circuit the moment each one
+// moves. Both layers paint the same fg1 → fg3 fade (glass-combos.ts), so the
+// change is bookkeeping only.
 //
 // The model is pure: it reports which tiles move where; the component turns
 // that into transforms.
@@ -46,10 +45,11 @@ import { PUZZLE_CORNERS, PUZZLE_HOLES } from "./puzzle-motion";
 export type GlassMotion = "weave" | "cascade" | "circuit";
 export const GLASS_MOTIONS: readonly GlassMotion[] = ["weave", "cascade", "circuit"];
 
-/** A motion at random: every square picks its own when it mounts. */
-export function pickGlassMotion(random: () => number = Math.random): GlassMotion {
-  return GLASS_MOTIONS[Math.floor(random() * GLASS_MOTIONS.length)];
-}
+/** The one motion every glass square runs (2026-11-25): pinned, so the
+ *  active turn's rail and its running tool and subagent rows read alike.
+ *  The weave is Stream-run's ripple with neighbouring rows running opposite
+ *  ways. The other motions stay for callers that pin them. */
+export const GLASS_DEFAULT_MOTION: GlassMotion = "weave";
 
 /** A new step starts every beat… */
 export const GLASS_BEAT_MS = 100;
@@ -60,8 +60,6 @@ export const GLASS_MOVE_MS = 150;
 export const GLASS_FIRST_STEP_MS = 20;
 /** The glide: the same ease as Stream's. */
 export const GLASS_EASE = "cubic-bezier(0.55, 0, 0.25, 1)";
-/** How long the glint takes to cross the square as a new combo arrives. */
-export const GLASS_GLINT_MS = 700;
 
 /** Tiles in a square: the density of the agent puzzle. */
 export const GLASS_TILES = N * N - PUZZLE_HOLES;
@@ -106,7 +104,7 @@ export interface GlassStep {
    *  tile leaving them and the one following into them move different ways,
    *  so the corner is kept filled until the follower lands. */
   joints: number[];
-  /** A new combo went live (in `live`): repaint that layer and glint. */
+  /** The other layer went live (in `live`). */
   swapped: boolean;
 }
 
@@ -201,8 +199,8 @@ export class GlassFlow {
     this.tiles = cells.map((cell) => ({ x: cell % N, y: Math.floor(cell / N), layer: 0 }));
     this.busyUntil = cells.map(() => 0);
     this.flying = cells.map(() => 0);
-    const first = glassComboLayer(null, random);
-    this.layers = [first, glassComboLayer(first.combo, random)];
+    const first = glassComboLayer(null);
+    this.layers = [first, glassComboLayer(first.combo)];
     this.way = random() < 0.5 ? 1 : -1;
     const byPosition = new Map(this.tiles.map((tile, id) => [ALONG.get(cellOf(tile)) ?? -1, id]));
     this.trains =
@@ -227,7 +225,7 @@ export class GlassFlow {
     if (now >= this.swapAt && this.showsOnly(this.live, now)) {
       const showing = this.layers[this.live].combo;
       this.live = this.live === 0 ? 1 : 0;
-      this.layers[this.live] = glassComboLayer(showing, this.random);
+      this.layers[this.live] = glassComboLayer(showing);
       this.swapAt = now + GLASS_COMBO_MS;
       result.swapped = true;
     }

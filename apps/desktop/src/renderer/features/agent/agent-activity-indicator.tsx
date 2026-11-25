@@ -17,7 +17,7 @@ export function AgentActivityIndicator({
   return (
     <ZerosSpinner
       size={16}
-      variant={activity === "waiting" ? "logo" : "agent"}
+      variant={activity === "waiting" ? "stream" : "agent"}
       tones={activity === "running" ? (agentTones(agentId) ?? undefined) : undefined}
       label={
         activity === "waiting"

@@ -92,7 +92,7 @@ describe("Button states", () => {
     );
     expect(markup).toContain('disabled=""');
     expect(markup).toContain('aria-busy="true"');
-    expect(markup).toMatch(/<button[^>]*><span[^>]*data-zeros-loader="logo"/);
+    expect(markup).toMatch(/<button[^>]*><span[^>]*data-zeros-loader="stream"/);
     expect(markup).toContain("Save</button>");
   });
 });

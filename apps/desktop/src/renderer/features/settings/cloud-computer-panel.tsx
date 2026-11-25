@@ -1,7 +1,7 @@
 import { useGithubLevels } from "./cloud-github-levels";
 import { useCallback, useState } from "react";
 import { IconButton } from "@/renderer/shared/ui/primitives/icon-button";
-import { ChevronDown, ChevronUp, CircleX, LoaderCircle, TriangleAlert, X } from "lucide-react";
+import { ChevronDown, ChevronUp, CircleX, TriangleAlert, X } from "lucide-react";
 import { Button } from "../../shared/ui";
 import { Badge, CodeTextarea, Pill } from "../../shared/ui/primitives";
 import { MessageRow } from "../../shared/ui/primitives/message-row";
@@ -25,6 +25,7 @@ import {
 import { KeyedAsyncCache } from "../../shared/lib/keyed-async-cache";
 import { computerChanges, computerStatus, editableRepositories, historyNote, relativeAge, type ComputerStatus } from "./cloud-computer-model";
 import { useFocusRefresh } from "./use-focus-refresh";
+import { RunStream } from "@/renderer/shared/ui/loading/run-stream";
 export { prefetchCloudComputer } from "./cloud-computer-store";
 
 export function CloudComputerPanel({ surfaceActive = true, openCloudRepository, onNewProject }: {
@@ -239,7 +240,7 @@ function MemberComputer({ userId, organizationId, active }: { userId: string; or
 
 const STATUS_ICON: Record<ComputerStatus["kind"], React.ReactNode> = {
   loading: null,
-  building: <LoaderCircle className="text-fg2 size-4 shrink-0 animate-spin motion-reduce:animate-none" aria-hidden />,
+  building: <RunStream size={16} className="text-(--loader-active)" />,
   unbuilt: <TriangleAlert className="text-fg1 size-4 shrink-0" aria-hidden />,
   failed: <CircleX className="text-red-text size-4 shrink-0" aria-hidden />,
   built: null,

@@ -3,7 +3,6 @@ import {
   ArrowLeft,
   Camera,
   House,
-  LoaderCircle,
   Moon,
   PenLine,
   RotateCcw,
@@ -36,6 +35,7 @@ import { formatRecordingElapsed } from "./simulator-capture-model";
 import { useSimulatorRecordingStartedAt } from "./simulator-capture-store";
 import { rotatedOrientation } from "./simulator-geometry";
 import { simulatorErrorMessage } from "./simulator-notices";
+import { RunStream } from "@/renderer/shared/ui/loading/run-stream";
 
 /** The device's Light/Dark setting, read again whenever its tab shows it,
  * since agents and Simulator can change it too. */
@@ -198,7 +198,7 @@ export function SimulatorIsland({
           onClick={turn}
         >
           {turning ? (
-            <LoaderCircle aria-hidden className={cn(active && "motion-safe:animate-spin")} />
+            <RunStream size={16} />
           ) : (
             <RotateCcw aria-hidden />
           )}
@@ -237,7 +237,7 @@ export function SimulatorIsland({
             onClick={record.toggle}
           >
             {record.busy ? (
-              <LoaderCircle aria-hidden className={cn(active && "motion-safe:animate-spin")} />
+              <RunStream size={16} />
             ) : (
               <Video aria-hidden />
             )}
@@ -253,7 +253,7 @@ export function SimulatorIsland({
           onClick={() => void annotateFromTab(tabId, device)}
         >
           {freezing ? (
-            <LoaderCircle aria-hidden className={cn(active && "motion-safe:animate-spin")} />
+            <RunStream size={16} />
           ) : (
             <PenLine aria-hidden />
           )}

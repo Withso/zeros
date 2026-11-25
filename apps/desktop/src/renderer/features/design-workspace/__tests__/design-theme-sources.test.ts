@@ -65,7 +65,7 @@ describe("theme editor sources", () => {
     const busy = rail({ onUpdate: () => {}, updating: true });
     expect(updateButton(busy)).toContain('aria-label="Updating sources"');
     expect(updateButton(busy)).toContain('disabled=""');
-    expect(busy).toContain("animate-spin");
+    expect(busy).toContain("data-run-stream");
 
     expect(updateButton(rail({ sources: [], onUpdate: () => {} }))).toBeUndefined();
     expect(updateButton(rail({}))).toBeUndefined();

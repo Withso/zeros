@@ -38,7 +38,7 @@ describe("MCP sign-in rows", () => {
     expect(render("needs-auth")).toContain(">Authenticate<");
     expect(render("needs-auth", true, "linear")).toContain("Opening…");
     expect(render("connected", false)).toContain('aria-label="Connected"');
-    expect(render("connecting", false)).toContain("lucide-loader-circle");
+    expect(render("connecting", false)).toContain("data-run-stream");
     expect(render("error", false)).toContain('aria-label="Error"');
   });
   it("says why a server without a sign-in action failed", () => {

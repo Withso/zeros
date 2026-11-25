@@ -704,7 +704,7 @@ function SetupStarting() {
       justify="center"
       className="h-full min-h-0 px-6 text-center"
     >
-      <ZerosSpinner size={16} />
+      <ZerosSpinner size={20} />
       <div className="text-fg2 text-xs">Starting setup…</div>
     </Stack>
   );

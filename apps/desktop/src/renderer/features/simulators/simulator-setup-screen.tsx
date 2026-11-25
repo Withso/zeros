@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { CircleAlert, CircleCheck, LoaderCircle, RotateCw, TriangleAlert } from "lucide-react";
+import { CircleAlert, CircleCheck, RotateCw, TriangleAlert } from "lucide-react";
 import type {
   SimulatorDevice,
   SimulatorHubSnapshot,
@@ -25,6 +25,7 @@ import {
 import { useElementSize } from "./simulator-hooks";
 import { simulatorSetup } from "./simulator-hub-store";
 import { simulatorSetupRow, type SimulatorSetupRow } from "./simulator-setup-model";
+import { RunStream } from "@/renderer/shared/ui/loading/run-stream";
 
 /** Below this screen width the setup reads better without the phone. */
 const MIN_FRAMED_SCREEN_WIDTH = 280;
@@ -42,10 +43,7 @@ function ToneIcon({ tone, active }: { tone: SimulatorSetupRow["tone"]; active: b
       return <CircleAlert aria-hidden className={cn(className, "text-red-text")} />;
     case "pending":
       return (
-        <LoaderCircle
-          aria-hidden
-          className={cn(className, "text-fg3", active && "motion-safe:animate-spin")}
-        />
+        <RunStream size={16} className={cn(className, "text-(--loader-active)")} />
       );
   }
 }
@@ -84,7 +82,7 @@ function SetupStatusRow({ row, active }: { row: SimulatorSetupRow; active: boole
                 void checkSimulatorsAgain().finally(() => setChecking(false));
               }}
             >
-              <RotateCw className={cn(checking && "motion-safe:animate-spin")} />
+              {checking ? <RunStream size={16} /> : <RotateCw />}
             </IconButton>
           </Tooltip>
         )}
