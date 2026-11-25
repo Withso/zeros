@@ -1,5 +1,8 @@
-import { readFileSync } from "node:fs";
-import { chromium, type Browser, type Page } from "@playwright/test";
+import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createRequire } from "node:module";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { _electron, chromium, type Page } from "@playwright/test";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 const source = (path: string) => readFileSync(path, "utf8");
@@ -23,14 +26,64 @@ describe("native window header wiring", () => {
   });
 });
 
-describe("native window hit regions", () => {
-  let browser: Browser;
-  let page: Page;
-  beforeAll(async () => {
-    browser = await chromium.launch();
-    page = await browser.newPage();
+// Native hit-testing reads the computed app-region of the app's own Chromium.
+// Playwright's Chromium is a different, usually older, build: Electron 45
+// (Chromium 156) computed `-webkit-app-region: var(…)` as `none`, so the window
+// could not be moved, while Playwright's Chromium 147 still passed. Every case
+// therefore also runs in a real BrowserWindow of the installed Electron.
+async function openChromium() {
+  const browser = await chromium.launch();
+  return { page: await browser.newPage(), close: () => browser.close() };
+}
+
+async function openElectron() {
+  const root = mkdtempSync(join(tmpdir(), "zeros-window-chrome-"));
+  const main = join(root, "main.cjs");
+  writeFileSync(main, `
+    const { app, BrowserWindow } = require("electron");
+    app.setPath("userData", ${JSON.stringify(join(root, "user-data"))});
+    app.whenReady().then(() => {
+      new BrowserWindow({ show: false, titleBarStyle: "hiddenInset",
+        webPreferences: { sandbox: true, contextIsolation: true } }).loadURL("about:blank");
+    });
+  `);
+  const env = Object.fromEntries(Object.entries(process.env)
+    .filter((entry): entry is [string, string] => entry[0] !== "ELECTRON_RUN_AS_NODE" && entry[1] !== undefined));
+  const app = await _electron.launch({
+    executablePath: createRequire(import.meta.url)("electron") as unknown as string,
+    // Headless ozone needs no display server; the CI runner has none.
+    args: [...(process.platform === "linux" ? ["--no-sandbox", "--ozone-platform=headless"] : []), main],
+    env,
+    timeout: 30_000,
   });
-  afterAll(async () => { await browser?.close(); });
+  return {
+    page: await app.firstWindow(),
+    close: async () => { await app.close(); rmSync(root, { recursive: true, force: true }); },
+  };
+}
+
+describe("app-region declarations", () => {
+  it("never take var(), which Chromium 151+ computes as none", () => {
+    const files = ["styles", "apps/desktop/src"].flatMap(dir =>
+      readdirSync(dir, { recursive: true, encoding: "utf8" })
+        .filter(file => file.endsWith(".css")).map(file => join(dir, file)));
+    const declarations = files.flatMap(file => [...source(file).replace(/\/\*[\s\S]*?\*\//g, "")
+      .matchAll(/(?:-webkit-)?app-region\s*:\s*[^;}]*/g)].map(match => `${file}: ${match[0]}`));
+    expect(declarations.length).toBeGreaterThan(0);
+    for (const declaration of declarations) expect(declaration).not.toMatch(/var\(/);
+  });
+});
+
+describe.each([
+  ["Playwright Chromium", openChromium],
+  ["the app's Electron", openElectron],
+])("native window hit regions in %s", (_engine, open) => {
+  let page: Page;
+  let close: (() => Promise<void>) | undefined;
+  beforeAll(async () => {
+    ({ page, close } = await open());
+  }, 40_000);
+  afterAll(async () => { await close?.(); });
 
   async function fixture() {
     await page.setContent(`
