@@ -37,7 +37,6 @@ export async function checkSidebarNarrowHeader({ page, check, harnessBase }) {
     const box = await page
       .getByRole("button", { name, exact: true })
       .boundingBox();
-    // Resource usage is a 24px chip; the icon buttons are 28px squares.
     expect(box.height).toBe(name === "App resources" ? 24 : 28);
     if (name !== "App resources") expect(box.width).toBe(28);
     expect(box.x).toBeGreaterThanOrEqual(previousEnd);

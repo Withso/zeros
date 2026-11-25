@@ -1,6 +1,5 @@
 import { expect } from "@playwright/test";
 
-// The sidebar's Filter workspaces menu: Sort, Filter, Group and Show submenus.
 export const sidebarMenuTrigger = (page, options = {}) =>
   page.getByRole("button", { name: "Filter workspaces", exact: true, ...options });
 

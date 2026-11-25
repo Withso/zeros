@@ -366,7 +366,6 @@ export async function runAppSidebarSmoke({ page, check, harnessBase }) {
   expect(new Set(await heights("[data-sidebar-repository]"))).toEqual(
     new Set([32]),
   );
-  // Default workspace rows are two lines: name, then status, PRs and time.
   expect(new Set(await heights("[data-workspace-tab]"))).toEqual(
     new Set([48]),
   );
@@ -407,7 +406,6 @@ export async function runAppSidebarSmoke({ page, check, harnessBase }) {
     };
   });
   expect(destinations.gaps).toEqual([2, 2]);
-  // The switcher hugs its name and arrow, with the destinations' 8px sides.
   expect(destinations.padding).toEqual(["0px", "8px", "0px", "8px"]);
   expect(destinations.hugs).toBe(true);
   check(
