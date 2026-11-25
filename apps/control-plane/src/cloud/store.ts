@@ -40,6 +40,7 @@ import { RUNTIME_HANDOFF_SESSION } from "./runtime-handoff-store.js";
 import { notifyCloudV2WorkerBoot, notifyCloudV2WorkerReady } from "./worker-ready.js";
 import type { CloudV2SetupStatus } from "./setup-status-contract.js";
 import { insertWorkspaceSubmodules, type WorkspaceSubmoduleRow } from "./workspace-submodules.js";
+import { cloudV2RecoverableFailure } from "./failure-retry.js";
 
 export type CloudV2WorkspaceState =
   | "creating" | "running" | "stopping" | "stopped" | "starting" | "deleting" | "deleted" | "failed";
@@ -122,6 +123,9 @@ export type CloudV2Workspace = {
   /** Created before its GitHub checks: no source scope, sandbox or worker
    * yet. Only the lifecycle's resolvePendingSource may end it. */
   sourcePending?: true;
+  /** Failed for a recoverable reason after it had run, with its machine or a backup left: recovery may start it
+   * again (failure-retry.ts). Absent otherwise, so other documents are unchanged. */
+  recoverable?: true;
   /** A personal project's workspace: its member's alone, never shared or reassigned. */
   privateOwnerUserId?: string;
   /** The project it was created from; none for workspaces made before projects. */
@@ -409,6 +413,7 @@ function workspace(row: Row): CloudV2Workspace {
     ...(row.setup_status ? { setup: row.setup_status } : {}),
     ...(Number(row.agent_cost_turns) > 0 ? { agentCost: { totalUsd: Number(row.agent_cost_usd), estimated: Number(row.agent_cost_estimated_turns) > 0 } } : {}),
     ...(row.source_pending ? { sourcePending: true as const } : {}),
+    ...(cloudV2RecoverableFailure(row) ? { recoverable: true as const } : {}),
     ...(row.private_owner_user_id ? { privateOwnerUserId: row.private_owner_user_id } : {}),
     ...(row.project_id ? { projectId: row.project_id } : {}),
     ...(row.checkout_path ? { checkoutFolder: row.checkout_path } : {}),
@@ -545,6 +550,9 @@ const LIVE_SESSION = `s.provider = 'workos' AND s.user_id = w.creator_user_id
     AND i.provider = s.provider AND i.provider_sub = s.provider_sub AND i.status = 'active')`;
 
 const notFound = () => new HttpError(404, "not_found", "Cloud workspace not found");
+
+/** `recover`: only a recoverable failed workspace (failure-retry.ts) may start (store.recoverFailedWorkspace). */
+type LifecycleOptions = { recover?: boolean };
 
 /** Creator-only paths remain closed to members even after shared execution
  * activates; those callers use the separate per-person admission. */
@@ -867,24 +875,24 @@ export class CloudV2Store {
   /** Serialize the initiator's intent with lifecycle progress. Flag-only changes
    * advance the document version without rescheduling a pending stop. A wake
    * revokes the suspended boot before Boat can resume its old service. */
-  async requestLifecycle(id: string, userId: string, action: "start" | "stop" | "archive" | "restart"):
+  async requestLifecycle(id: string, userId: string, action: "start" | "stop" | "archive" | "restart", options: LifecycleOptions = {}):
     Promise<{ workspace: CloudV2Workspace; moved: boolean }> {
     const execution = this.prompts.execution;
     if (execution && await execution.active(id, undefined, userId)) {
       const proof = action === "stop" ? undefined : await execution.deps.authority.admit(id, userId);
-      return this.requestExecutionLifecycle(id, userId, action, proof);
+      return this.requestExecutionLifecycle(id, userId, action, proof, undefined, false, true, options);
     }
     return withSystemTx(this.pool, async tx => {
       const current = await ownedRow(tx, id, userId, true);
       await ownedRow(tx, id, userId);
-      const result = await this.lifecycleIntent(tx,id,current,action);
+      const result = await this.lifecycleIntent(tx,id,current,action,undefined,undefined,options);
       if (action === "stop" || action === "archive") await clearStoppedExecutionTransition(tx, id);
       return result;
     });
   }
 
   async requestExecutionLifecycle(id: string, userId: string, action: "start" | "stop" | "archive" | "restart", proof?: ExecutionAdmission,
-    user?: AuthedUser, unarchived = false, ownership = true): Promise<{ workspace: CloudV2Workspace; moved: boolean }> {
+    user?: AuthedUser, unarchived = false, ownership = true, options: LifecycleOptions = {}): Promise<{ workspace: CloudV2Workspace; moved: boolean }> {
     const authority = this.prompts.execution!.deps.authority;
     return withSystemTx(this.pool, async tx => {
       const row = (await tx.query<Row>(`SELECT ${COLUMNS} FROM cloud_v2_workspaces WHERE id=$1 FOR UPDATE`, [id])).rows[0];
@@ -898,7 +906,7 @@ export class CloudV2Store {
       if (!ownership && row.creator_user_id === null) throw teamOwnershipRequired();
       if (action === "archive" && before.role === "member" && row.creator_user_id !== userId) throw new HttpError(403, "workspace_management_denied", "Only the Creator or an administrator may archive this workspace");
       if (unarchived && row.archived_at) throw new HttpError(409, "cloud_workspace_not_running", "This cloud workspace is not ready for a connection");
-      const result = await this.lifecycleIntent(tx, id, row, action, userId, admission ? executionIntentAuthority(admission) : undefined);
+      const result = await this.lifecycleIntent(tx, id, row, action, userId, admission ? executionIntentAuthority(admission) : undefined, options);
       if (admission) await authority.assert(admission, tx, true);
       else if ((await authority.snapshot(tx, id, userId)).permissionSignature !== before.permissionSignature) throw new HttpError(409, "actor_changed", "Execution authority changed");
       if (user) await authority.session(tx, user, userId);
@@ -938,8 +946,27 @@ export class CloudV2Store {
     });
   }
 
+  /** Starts a failed workspace that can still run (failure-retry.ts) as an ordinary start would: straight to starting,
+   * in the same stop generation, so what that generation recorded (an archive scrub to undo, the checkpoint it saved,
+   * a pending restore) still applies. Shared workspaces go through the caller's execution authority. Refused with 409
+   * workspace_not_recoverable otherwise. */
+  async recoverFailedWorkspace(id: string, userId: string, options: { user?: AuthedUser; ownership?: boolean } = {}):
+    Promise<{ workspace: CloudV2Workspace; moved: boolean }> {
+    const execution = this.prompts.execution;
+    if (options.user && execution && await execution.active(id, undefined, userId))
+      return this.requestExecutionLifecycle(id, userId, "start", undefined, options.user, false, options.ownership ?? true, { recover: true });
+    return this.requestLifecycle(id, userId, "start", { recover: true });
+  }
+
   private async lifecycleIntent(tx: Tx, id: string, current: Row, action: "start" | "stop" | "archive" | "restart", initiator?: string,
-    executionAuthority?: ExecutionIntentAuthority) {
+    executionAuthority?: ExecutionIntentAuthority, options: LifecycleOptions = {}) {
+      // Decided on the locked row before anything changes. Its first error stays until a boot is running.
+      if (options.recover && !cloudV2RecoverableFailure(current))
+        throw new HttpError(409, "workspace_not_recoverable", "This cloud workspace cannot be recovered. Delete it and create a new one.");
+      // A Stop that failed before Boat confirmed it left its turns open: only that stop's completion retires them, and a
+      // new boot's cleanup reaches only its own generation. Finish that stop, in its generation, then start.
+      const interruptedStop = !!options.recover && (await tx.query(`SELECT 1 FROM cloud_v2_execution_contexts
+        WHERE workspace_id=$1 AND state<>'retired' AND stop_generation<$2::bigint LIMIT 1`, [id, current.stop_generation])).rowCount === 1;
       if (action === "stop" || action === "archive") await cancelExecutionActivation(tx, id);
       else await assertNoExecutionTransition(tx, id);
       // A create still waiting for its organization's base has no machine to stop: stop ends it, plainly, with none made.
@@ -963,12 +990,13 @@ export class CloudV2Store {
       const starts = action === "start" || action === "restart" && (current.state === "stopped" || current.state === "failed");
       const reconfirm = action === "stop" && current.state === "stopped" && intent.execution_mode === "prepared" &&
         await needsExecutionStopConfirmation(tx, id);
-      const state = starts
+      const state = interruptedStop ? "stopping" : starts
         ? current.state === "stopped" || current.state === "failed" ? "starting" : current.state
         : current.state === "running" || current.state === "starting" || configuring || reconfirm ? "stopping" : current.state;
       const moved = state !== current.state;
       const archived = action === "archive" || (action === "stop" && current.archived_at !== null);
-      const restart = state === "stopping" && action === "restart" ? (BigInt(intent.stop_generation) + (moved ? 1n : 0n)).toString()
+      const restart = interruptedStop ? intent.stop_generation
+        : state === "stopping" && action === "restart" ? (BigInt(intent.stop_generation) + (moved ? 1n : 0n)).toString()
         : state === "stopping" && action === "start" && priorRestart === intent.stop_generation ? priorRestart : null;
       if (!moved && archived === (current.archived_at !== null) && restart === priorRestart) return { workspace: workspace(current), moved };
       const { rows } = await tx.query<Row>(
@@ -985,11 +1013,11 @@ export class CloudV2Store {
            next_attempt_at = CASE WHEN state <> $2 THEN NULL ELSE next_attempt_at END,
            worker_token_hash = CASE WHEN state <> $2 AND $2 = 'starting' THEN NULL ELSE worker_token_hash END,
            worker_boot_id = CASE WHEN state <> $2 AND $2 = 'starting' THEN NULL ELSE worker_boot_id END,
-           stop_generation = stop_generation + CASE WHEN state <> $2 AND $2 = 'stopping' THEN 1 ELSE 0 END,
+           stop_generation = stop_generation + CASE WHEN state <> $2 AND $2 = 'stopping' AND NOT $8::boolean THEN 1 ELSE 0 END,
            updated_at = clock_timestamp(),
            state = $2
          WHERE id = $1 RETURNING ${COLUMNS}`,
-        [id, state, archived, restart, initiator ?? null, action === "start" || action === "restart", executionAuthority ?? null],
+        [id, state, archived, restart, initiator ?? null, action === "start" || action === "restart", executionAuthority ?? null, interruptedStop],
       );
       return { workspace: workspace(rows[0]!), moved };
   }

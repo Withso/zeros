@@ -24,6 +24,35 @@ database("shared execution lifecycle and metadata", () => {
     row = (await pool.query("SELECT execution_initiator_user_id,state FROM cloud_v2_workspaces WHERE id=$1", [f.workspace.id])).rows[0];
     expect(row).toEqual({ execution_initiator_user_id: f.admin.id, state: "stopping" });
   });
+  it("recovers a failed shared workspace as a start under the caller's execution authority", async () => {
+    await pool.query(`UPDATE cloud_v2_workspaces SET state='failed', error_code='worker_boot_timeout', boat_sandbox_id=coalesce(boat_sandbox_id,'bx_fixture1'),
+      active_at=coalesce(active_at,now()) WHERE id=$1`, [f.workspace.id]);
+    const before = (await pool.query("SELECT stop_generation::text AS gen FROM cloud_v2_workspaces WHERE id=$1", [f.workspace.id])).rows[0].gen;
+    const response = await call("recover"); expect(response.status).toBe(202);
+    const row = (await pool.query(`SELECT state,error_code,stop_generation::text AS gen,restart_stop_generation::text AS restart,
+      execution_initiator_user_id,execution_intent_id FROM cloud_v2_workspaces WHERE id=$1`, [f.workspace.id])).rows[0];
+    expect(row).toMatchObject({ state: "starting", error_code: "worker_boot_timeout", gen: before, restart: null, execution_initiator_user_id: f.viewer.id });
+    expect(row.execution_intent_id).toEqual(expect.any(String));
+    await pool.query("UPDATE cloud_v2_workspaces SET state='failed', error_code='sandbox_missing' WHERE id=$1", [f.workspace.id]);
+    expect((await call("recover")).status).toBe(409);
+  });
+  it("finishes a Stop that failed with a shared turn still open before it starts again, so the turn is retired", async () => {
+    await f.login();
+    const turn = await f.dispatch(f.prompt(), f.viewer);
+    expect((await call("stop")).status).toBe(202);
+    const stopping = (await pool.query("SELECT stop_generation::text AS gen FROM cloud_v2_workspaces WHERE id=$1", [f.workspace.id])).rows[0].gen;
+    // The stop's retries ran out before Boat confirmed it: its completion, which retires the turn, never came.
+    await pool.query(`UPDATE cloud_v2_workspaces SET state='failed', error_code='provider_request_failed', boat_sandbox_id=coalesce(boat_sandbox_id,'bx_fixture1'),
+      active_at=coalesce(active_at,now()) WHERE id=$1`, [f.workspace.id]);
+    const open = () => pool.query("SELECT 1 FROM cloud_v2_execution_contexts WHERE id=$1 AND state<>'retired'", [turn.lease.contextId]).then(r => r.rowCount);
+    expect(await open()).toBe(1);
+    expect((await call("recover")).status).toBe(202);
+    const row = (await pool.query("SELECT state, stop_generation::text AS gen, restart_stop_generation::text AS restart FROM cloud_v2_workspaces WHERE id=$1", [f.workspace.id])).rows[0];
+    expect(row).toEqual({ state: "stopping", gen: stopping, restart: stopping });
+    await f.cp.store.transition(f.workspace.id, ["stopping"], "stopped", { stopGeneration: stopping, revoke: true });
+    expect((await pool.query("SELECT state FROM cloud_v2_workspaces WHERE id=$1", [f.workspace.id])).rows[0].state).toBe("starting");
+    expect(await open()).toBe(0);
+  });
   it("lets a member Stop without an agent login or GitHub call and keeps workspace archive restricted", async () => {
     f.fetcher.mockClear();
     expect((await call("stop")).status).toBe(202);

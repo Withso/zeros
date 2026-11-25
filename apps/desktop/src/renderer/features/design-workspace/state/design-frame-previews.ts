@@ -1093,39 +1093,7 @@ export class DesignFramePreviews {
   }
 }
 
-/** A high-quality reduction of a picture to an exact smaller size, encoded
- * like a render. Never used to enlarge. */
-export async function downscaleDesignPreview(picture: Blob, width: number, height: number, level: DesignPreviewLevel): Promise<Blob> {
-  if (typeof OffscreenCanvas === "undefined" || typeof createImageBitmap !== "function")
-    throw new Error("Design preview downscaling is unavailable.");
-  const bitmap = await createImageBitmap(picture, { resizeWidth: width, resizeHeight: height, resizeQuality: "high" });
-  try {
-    const canvas = new OffscreenCanvas(width, height);
-    const context = canvas.getContext("2d");
-    if (!context) throw new Error("Design preview downscaling is unavailable.");
-    context.drawImage(bitmap, 0, 0);
-    return encodeDesignPreview(await canvas.convertToBlob({ type: "image/png" }), level);
-  } finally {
-    bitmap.close();
-  }
-}
-
-/** PNG → WebP where the platform encodes off the main thread; the smaller of
- * the two is kept, so flat interface pictures may stay PNG. */
-export async function encodeDesignPreview(png: Blob, level: DesignPreviewLevel): Promise<Blob> {
-  if (typeof OffscreenCanvas === "undefined" || typeof createImageBitmap !== "function") return png;
-  const bitmap = await createImageBitmap(png);
-  try {
-    const canvas = new OffscreenCanvas(bitmap.width, bitmap.height);
-    const context = canvas.getContext("2d");
-    if (!context) return png;
-    context.drawImage(bitmap, 0, 0);
-    const webp = await canvas.convertToBlob({ type: "image/webp", quality: level === "detail" ? 0.95 : 0.9 });
-    return webp.type === "image/webp" && webp.size < png.size ? webp : png;
-  } finally {
-    bitmap.close();
-  }
-}
+export { downscaleDesignPreview, encodeDesignPreview } from "./design-preview-encoding";
 
 const NO_PICTURED: ReadonlySet<string> = new Set();
 

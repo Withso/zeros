@@ -4,11 +4,13 @@ import { parseNativeAcceptanceArgs, summarizeDocuments } from "../design-native-
 
 describe("native acceptance arguments", () => {
   it("measures the DOM canvas unless the recorded canvas is asked for", () => {
-    expect(parseNativeAcceptanceArgs([])).toEqual({ command: "run", sourceDigest: null, canvas: "dom" });
-    expect(parseNativeAcceptanceArgs(["--canvas", "recorded"])).toEqual({ command: "run", sourceDigest: null, canvas: "recorded" });
+    const run = { command: "run", sourceDigest: null, scenario: "acceptance" };
+    expect(parseNativeAcceptanceArgs([])).toEqual({ ...run, canvas: "dom" });
+    expect(parseNativeAcceptanceArgs(["--canvas", "recorded"])).toEqual({ ...run, canvas: "recorded" });
     const digest = "a".repeat(64);
     expect(parseNativeAcceptanceArgs(["--canvas", "recorded", "--source-digest", digest]))
-      .toEqual({ command: "run", sourceDigest: digest, canvas: "recorded" });
+      .toEqual({ ...run, sourceDigest: digest, canvas: "recorded" });
+    expect(parseNativeAcceptanceArgs(["--scenario", "edits"])).toEqual({ ...run, canvas: "dom", scenario: "edits" });
   });
 
   it("keeps --help and --status standalone", () => {
@@ -29,7 +31,8 @@ describe("native acceptance arguments", () => {
 
   it("rejects unknown canvases, malformed digests and repeats", () => {
     for (const args of [["--canvas", "gpu"], ["--canvas"], ["--source-digest", "abc"], ["--frames", "1"],
-      ["--source-digest", "a".repeat(64), "--source-digest", "b".repeat(64)]])
+      ["--source-digest", "a".repeat(64), "--source-digest", "b".repeat(64)], ["--scenario", "pan"],
+      ["--scenario", "edits", "--scenario", "edits"]])
       expect(() => parseNativeAcceptanceArgs(args), args.join(" ")).toThrow(/--help/);
   });
 });

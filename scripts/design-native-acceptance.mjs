@@ -22,6 +22,7 @@ import { activateNativeWorkbenchTab, prepareNativeWorkspaceCatalog } from "./des
 import { prepareNativeDesignView, selectNativeDesignFrame,
   startNativeDesignCameraObservation, finishNativeDesignCameraObservation, readNativeDesignCoverage, readNativeDesignDocuments } from "./design-native-view.mjs";
 import { dispatchMacDesignGesture } from "./design-native-input.mjs";
+import { assessNativeDesignEdits, measureNativeDesignEdits } from "./design-native-edits.mjs";
 import { sampleNativeApplicationMemory, sampleNativeMemoryPlateau, startNativeMemoryGuard, nativeApplicationProcessIdentities, observeNativeApplicationProcesses, waitForNativeProcessRetirement } from "./design-native-memory.mjs";
 import { measureNativeIdleCpu } from "./design-native-cpu.mjs";
 import { assertNativeMemoryBudget } from "./design-native-baseline.mjs";
@@ -72,14 +73,17 @@ export function summarizeDocuments({ present, mounted }) {
 }
 
 /** `--canvas recorded` measures the internal recorded GPU canvas: the
- * unpackaged recorder process plus the staff `designGpuCanvas` flag. */
+ * unpackaged recorder process plus the staff `designGpuCanvas` flag.
+ * `--scenario edits` measures only edit operations on their own 256-frame
+ * page, leaving the acceptance workload and its evidence unchanged. */
 export function parseNativeAcceptanceArgs(args) {
   if (args.length === 1 && (args[0] === "--help" || args[0] === "--status")) return { command: args[0].slice(2) };
-  const options = { command: "run", sourceDigest: null, canvas: "dom" };
+  const options = { command: "run", sourceDigest: null, canvas: "dom", scenario: "acceptance" };
   for (let i = 0; i < args.length; i += 2) {
     const [name, value] = [args[i], args[i + 1]];
     if (name === "--source-digest" && options.sourceDigest === null && /^[a-f0-9]{64}$/.test(value ?? "")) options.sourceDigest = value;
     else if (name === "--canvas" && (value === "dom" || value === "recorded")) options.canvas = value;
+    else if (name === "--scenario" && options.scenario === "acceptance" && value === "edits") options.scenario = value;
     else throw new Error("Use --help for performance arguments.");
   }
   return options;
@@ -88,7 +92,7 @@ export function parseNativeAcceptanceArgs(args) {
 async function main() {
   const options = parseNativeAcceptanceArgs(process.argv.slice(2));
   if (options.command === "help") {
-    console.log("pnpm design:performance:native [--source-digest SHA256] [--canvas dom|recorded]\npnpm design:performance:native --status"); return;
+    console.log("pnpm design:performance:native [--source-digest SHA256] [--canvas dom|recorded] [--scenario edits]\npnpm design:performance:native --status"); return;
   }
   if (options.command === "status") {
     const previous = await latest();
@@ -115,12 +119,12 @@ async function main() {
   }
   const sources = collectNativeSourceManifest(repo);
   if (options.sourceDigest) assert.equal(sources.digest, options.sourceDigest, "Wait for verified source sync before launching.");
-  const recorded = options.canvas === "recorded";
+  const recorded = options.canvas === "recorded", edits = options.scenario === "edits";
   const runId = `${new Date().toISOString().replace(/[^0-9T]/g, "")}-${randomUUID().slice(0, 8)}`;
   const release = acquireNativeRunLock(root, runId), evidence = path.join(root, runId);
   await fs.mkdir(evidence, { mode: 0o700 });
   const report = { runId, pid: process.pid, platform: process.platform, startedAt: new Date().toISOString(),
-    stage: "preparing", build: { mode: "production", hmr: false, sourceDigest: sources.digest, canvas: options.canvas },
+    stage: "preparing", scenario: options.scenario, build: { mode: "production", hmr: false, sourceDigest: sources.digest, canvas: options.canvas },
     hardware: { arch: process.arch, os: os.release(), memoryBytes: os.totalmem(), cpu: os.cpus()[0]?.model },
     interactions: [], idle: [], idleObservations: [], openings: [], scenarios: [], checks: [], memory: { warm: [], cycles: [], settled: [], peakAppBytes: 0, peakGpuBytes: 0 },
     limitations: ["Optimized renderer and compiled engine in an unpackaged, isolated Local host; release signing/updater are outside this workload.",
@@ -208,12 +212,17 @@ async function main() {
       await fs.rename(path.join(profile, name), path.join(profile, `${name}.auth-probe`)).catch(error => { if (error.code !== "ENOENT") throw error; });
     }
     await fs.copyFile(path.join(owners.profile, "zeros.db"), path.join(profile, "zeros.db"));
-    fixtures = owners.workspaces.map(w => ({ ...w, fixture: w.fixtureOwner, count: 2 }));
-    for (const spec of [{ fixture: "2", count: 2 }, { fixture: "32", count: 32 }, { fixture: "128", count: 128 },
+    fixtures = edits ? [] : owners.workspaces.map(w => ({ ...w, fixture: w.fixtureOwner, count: 2 }));
+    // Pages below, at and above the source-surface limit (an edit at the
+    // limit switches level of detail), and one whose copies reach the
+    // 1,000-frame page limit.
+    for (const spec of edits ? [{ fixture: "edits-128", count: 128 }, { fixture: "edits-256", count: 256 }, { fixture: "edits-320", count: 320, paged: true },
+      { fixture: "edits-999", count: 999, paged: true }] : [{ fixture: "2", count: 2 }, { fixture: "32", count: 32 }, { fixture: "128", count: 128 },
       { fixture: "256", count: 256 }, { fixture: "complex-32", count: 32, complex: true }, { fixture: "mixed-2", count: 2, mixed: true },
       { fixture: "overview-256", count: 256 }]) {
       const folder = path.join(evidence, `fixture-${spec.fixture}`);
-      const output = await run("bun", ["scripts/design-performance-fixture.ts", "--frames", String(spec.count), "--layout", "grid", "--output", folder,
+      const output = await run("bun", ["scripts/design-performance-fixture.ts",
+        ...(spec.paged ? ["--pages", "1", "--frames-per-page"] : ["--frames"]), String(spec.count), "--layout", "grid", "--output", folder,
         ...(spec.complex ? ["--complex"] : []), ...(spec.mixed ? ["--mixed"] : [])]);
       const generated = JSON.parse(output.slice(output.indexOf("{")));
       fixtures.push({ ...spec, path: folder, repoRoot: folder, repoSlug: `perf-${spec.fixture}`, organizationId: null,
@@ -322,6 +331,33 @@ async function main() {
       }
       await ready(fixture); return performance.now() - begin;
     };
+    if (edits) {
+      phase("edit-operations");
+      report.edits = [];
+      for (const fixture of fixtures) {
+        await open(fixture);
+        let measured;
+        try { measured = await measureNativeDesignEdits({ page, workspaceId: fixture.id, pause }); } catch (error) {
+          // What the canvas showed when an edit never settled.
+          await rawPage.screenshot({ path: path.join(evidence, `edit-failure-${fixture.fixture}.png`) }).catch(() => {});
+          report.editFailure = await page.evaluate(async id => {
+            const { designWorkspaceSnapshotCache } = await import("/apps/desktop/src/renderer/features/design-workspace/state/design-workspace-cache.ts");
+            const { useDesignWorkspaceUiStore } = await import("/apps/desktop/src/renderer/features/design-workspace/state/design-workspace-ui.ts");
+            const read = designWorkspaceSnapshotCache.peekSnapshot(id), data = read.data, ui = useDesignWorkspaceUiStore.getState().byWorkspace[id];
+            return { loading: read.loading, error: read.error ? String(read.error) : null, frames: data?.frames?.length ?? null,
+              descriptions: data?.preparation?.descriptions.length ?? null, pages: data?.pages?.map(page => page.id) ?? null, directoryId: data?.directoryId ?? null,
+              ui: ui ? { activePageId: ui.activePageId, directoryId: ui.directoryId, ownerRevision: ui.ownerRevision ?? 0 } : null,
+              savedEditing: document.querySelector("[data-design-saved-editing]")?.getAttribute("data-design-saved-editing") ?? null,
+              owners: [...document.querySelectorAll("[data-design-retained-workspace]")].map(owner => ({ id: owner.getAttribute("data-design-retained-workspace"),
+                hidden: owner.getAttribute("aria-hidden"), frames: owner.querySelectorAll("[data-design-frame]").length })) };
+          }, fixture.id).catch(failure => String(failure));
+          throw error;
+        }
+        for (const edit of measured) report.edits.push({ page: fixture.fixture, ...edit });
+        save();
+      }
+      save("retiring-native-app"); return;
+    }
     phase("cold-and-warm-opening");
     for (const fixture of fixtures) {
       const coldReadyMs = await open(fixture);
@@ -558,7 +594,7 @@ async function main() {
       if (!report.runtimeRetired) report.cleanupError ??= "An owned native app, engine or helper did not retire.";
     } catch (error) { report.runtimeRetired = false; report.cleanupError ??= error.message; }
     clearTimeout(deadline); process.off("SIGINT", cancel); process.off("SIGTERM", cancel);
-    report.acceptance = assessDesignPerformance(report);
+    report.acceptance = edits ? assessNativeDesignEdits(report) : assessDesignPerformance(report);
     report.stage = report.error || report.cleanupError ? "failed" : report.acceptance.passed ? "passed" : "failed-budgets";
     report.finishedAt = report.closedAt = new Date().toISOString(); save(); release();
     console.log(JSON.stringify({ evidence, acceptance: report.acceptance }, null, 2));

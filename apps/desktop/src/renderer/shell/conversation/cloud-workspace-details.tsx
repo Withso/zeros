@@ -33,7 +33,7 @@ export function cloudStatusLabel(status: string, availability?: WorkspaceAvailab
 
 const formatBytes = (bytes: number) => `${(bytes / 2 ** 30).toFixed(bytes < 10 * 2 ** 30 ? 1 : 0).replace(/\.0$/, "")} GB`;
 const formatPercent = (value: number) => `${Math.round(value)}% used`;
-type LifecycleChange = "wake" | "stop" | "restart";
+type LifecycleChange = "wake" | "stop" | "restart" | "recover";
 const SETUP_LABELS = { running: "Running", succeeded: "Succeeded", failed: "Failed", interrupted: "Interrupted" } as const;
 function setupLabel(setup: NonNullable<CloudWorkspaceDocument["setup"]>): string {
   return setup.state === "failed" && setup.reason === "timed_out" ? "Failed · timed out" : SETUP_LABELS[setup.state];
@@ -114,7 +114,7 @@ export function CloudWorkspaceDetailsCard({ workspace, title, statusLabel, resou
         ))}
       </dl>
       {workspace.capabilities.canStart && ["stopped", "failed"].includes(workspace.status) && (
-        <Button size="sm" className="mt-3" disabled={changing} onClick={() => onChange("wake")}>
+        <Button size="sm" className="mt-3" disabled={changing} onClick={() => onChange(cloudStartOperation(workspace))}>
           {changing ? "Starting…" : "Start workspace"}
         </Button>
       )}
@@ -126,6 +126,10 @@ export function CloudWorkspaceDetailsCard({ workspace, title, statusLabel, resou
     </>
   );
 }
+
+/** A recoverable failure's machine may still be running: Start recovers it (stops it, starts it again) instead of waking. */
+export const cloudStartOperation = (workspace: CloudWorkspaceDocument): "wake" | "recover" =>
+  workspace.status === "failed" && workspace.capabilities.recoverable === true ? "recover" : "wake";
 
 /** The viewer runs this workspace's lifecycle as themself: its Creator, or a member of an activated (team writing) workspace that executes for them. */
 /** The control plane refuses a sync grant for several repositories (sync_unsupported); the person reads why where they would turn it on. */
@@ -193,7 +197,8 @@ export function CloudWorkspaceDetails({ folder, name, title, workspace }: {
   const macs = useWorkspaceMacs(target && allowed && !reader ? target.workspaceId : null, shown,
     workspace ? { repository: workspace.repository.name, workspace: workspaceNumberName(workspace) ?? workspace.name } : undefined);
   if (!target || !allowed) return <WorkspaceIdentityLabel name={name} title={title} placement="cloud" />;
-  const failures: Record<LifecycleChange, string> = { wake: "Couldn't start cloud workspace", stop: "Couldn't stop cloud workspace", restart: "Couldn't restart cloud workspace" };
+  const failures: Record<LifecycleChange, string> = { wake: "Couldn't start cloud workspace", stop: "Couldn't stop cloud workspace",
+    restart: "Couldn't restart cloud workspace", recover: "Couldn't start cloud workspace" };
   const change = (operation: LifecycleChange) => {
     setChanging(true);
     void manageCloudWorkspace(target, operation)
