@@ -368,6 +368,7 @@ export class CloudV2Lifecycle {
       await this.retrying;
       await this.maintaining;
       await this.archiving;
+      await this.healing;
       await this.building;
       await this.copying;
       await this.cleaning;
@@ -1219,6 +1220,8 @@ export class CloudV2Lifecycle {
           catch (error) { if (!sandboxLost(error)) throw error; }
         }
         const up = state === "running" || state === "idle";
+        // Boat may answer a deleted machine's record instead of a 404: gone, as either way.
+        if (state === "deleted") state = null;
         // Starting, stopping or resuming on Boat's side: looked at again on a later scan.
         if (state !== null && !up && state !== "archived") continue;
         // Retention's 14-day clock counts from Boat's own stop.

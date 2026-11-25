@@ -68,10 +68,19 @@ database("recovering a failed cloud workspace", () => {
     expect(message).toEqual({ state: "queued", wake_after_stop: true });
   });
 
-  it("backfills when a workspace ran under row security, from a completed stop or a finished setup, never from activity", async () => {
+  it("records when an accepted hello brings the workspace into running", async () => {
+    await pool.query("UPDATE cloud_v2_workspaces SET state='starting', running_at=NULL WHERE id=$1", [f.workspaceId]);
+    const token = await f.store.rotateWorkerToken(f.workspaceId);
+    await f.store.acceptWorkerHello(token, randomUUID());
+    const after = (await pool.query("SELECT state, running_at FROM cloud_v2_workspaces WHERE id=$1", [f.workspaceId])).rows[0];
+    expect(after.state).toBe("running");
+    expect(after.running_at).toEqual(expect.any(Date));
+  });
+
+  it("backfills when a workspace ran under row security, from a completed stop, a finished setup or an accepted hello, never from activity", async () => {
     const migration = readFileSync(new URL("../../migrations/0273_cloud_v2_running_at.sql", import.meta.url), "utf8");
-    const backfill = migration.slice(migration.indexOf("SELECT set_config('app.system','on',true);"),
-      migration.indexOf("SELECT set_config('app.system','',true);") + "SELECT set_config('app.system','',true);".length);
+    const backfill = migration.slice(migration.indexOf("SELECT set_config('app.system','on',true)"),
+      migration.indexOf("set_config('app.cloud_execution_protocol','',true);") + "set_config('app.cloud_execution_protocol','',true);".length);
     expect(backfill.length).toBeGreaterThan(100);
     const role = `heal_backfill_${randomUUID().replaceAll("-", "").slice(0, 12)}`;
     await pool.query(`CREATE ROLE ${role} NOLOGIN NOBYPASSRLS; GRANT zeros_app TO ${role}`);
@@ -88,6 +97,12 @@ database("recovering a failed cloud workspace", () => {
       await seed("state='failed', error_code='worker_boot_timeout', stopped_at=NULL, active_at=now(), setup_status=NULL");
       expect(await backfilled()).toBe(false);
       await seed(`state='failed', setup_status='{"state":"succeeded","exitCode":0,"startedAt":1,"finishedAt":2}'::jsonb`);
+      expect(await backfilled()).toBe(true);
+      // A worker that said hello ran on a prepared checkout: a run that failed before its first completed stop.
+      await seed(`state='failed', error_code='live_connection_unavailable', setup_status=NULL, worker_boot_id=gen_random_uuid()`);
+      expect(await backfilled()).toBe(true);
+      // A shared workspace is visible to the app role only with the execution protocol marker as well.
+      await seed(`state='failed', worker_boot_id=NULL, setup_status='{"state":"succeeded","exitCode":0,"startedAt":1,"finishedAt":2}'::jsonb, execution_mode='active'`);
       expect(await backfilled()).toBe(true);
     } finally {
       await pool.query(`DROP OWNED BY ${role}; DROP ROLE ${role}`);

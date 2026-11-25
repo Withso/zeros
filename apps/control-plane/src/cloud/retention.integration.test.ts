@@ -1909,6 +1909,21 @@ d("cloud v2 retention", () => {
           expect((await columns("stopped_at")).stopped_at.getTime()).toBe(boat.machine(vm)!.stoppedAt);
         });
 
+        it("treats a machine Boat reports deleted as gone, and stops the failed open in place", async () => {
+          await scrubbed();
+          await failedOpen(false);
+          // Boat can answer a deleted machine's record rather than a 404.
+          const compute = new Proxy(boat, { get(target, key) {
+            if (key === "inspect") return async () => ({ name: "zeros-alpha-ws", state: "deleted" });
+            const value = Reflect.get(target, key);
+            return typeof value === "function" ? value.bind(target) : value;
+          } });
+          const generation = (await columns("stop_generation::text AS g")).g, from = boat.calls.length;
+          await heal({ compute });
+          expect(starts(from)).toEqual([]);
+          expect(await columns("state, error_code, stop_generation::text AS g")).toEqual({ state: "stopped", error_code: null, g: generation });
+        });
+
         it("gives a run that failed while up the ordinary stop, with its backup probe, in a new generation", async () => {
           boat.write(vm, `${path("api")}/UNPUSHED`, "api work");
           await pool.query("UPDATE cloud_v2_workspaces SET state='failed', error_code='live_connection_unavailable', running_at=now() - interval '1 hour' WHERE id=$1", [id]);

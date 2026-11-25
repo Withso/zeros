@@ -6,15 +6,17 @@ SET LOCAL lock_timeout = '5s';
 -- that was once set up, and its auto-heal needs to know whether the current stop generation ran (its disk then holds
 -- work the generation's backup does not cover). Existing rows with evidence of a boot count as having run, the side
 -- that protects their work: a completed stop, a state past the create, a live recovery (which begins only on a running
--- workspace) or a finished setup (which runs on the checkout).
+-- workspace), a finished setup (which runs on the checkout) or a worker's accepted hello (token delivery, and so the
+-- hello, follows the checkout's preparation).
 ALTER TABLE cloud_v2_workspaces ADD COLUMN running_at timestamptz;
--- Row security hides every workspace without system context, from a migration owner without BYPASSRLS too.
-SELECT set_config('app.system','on',true);
+-- Row security hides every workspace without system context, from a migration owner without BYPASSRLS too; a shared
+-- workspace also needs the execution protocol marker.
+SELECT set_config('app.system','on',true), set_config('app.cloud_execution_protocol','1',true);
 UPDATE cloud_v2_workspaces w SET running_at = coalesce(w.active_at, w.updated_at)
 WHERE w.stopped_at IS NOT NULL OR w.state IN ('running', 'stopping', 'stopped')
   OR EXISTS (SELECT 1 FROM cloud_v2_recovery_attempts a WHERE a.workspace_id = w.id)
-  OR w.setup_status->>'state' = 'succeeded';
-SELECT set_config('app.system','',true);
+  OR w.setup_status->>'state' = 'succeeded' OR w.worker_boot_id IS NOT NULL;
+SELECT set_config('app.system','',true), set_config('app.cloud_execution_protocol','',true);
 
 -- zeros-expand-exception: prompt-fence-reentry Finishing a failed Stop in its own generation keeps the sends its first entry accepted
 CREATE OR REPLACE FUNCTION fence_cloud_v2_prompts() RETURNS trigger

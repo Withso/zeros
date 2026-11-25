@@ -1381,6 +1381,7 @@ export class CloudV2Store {
          -- A boot that reaches running supersedes an earlier boot's failure; a running boot keeps its own condition.
          error_code=CASE WHEN prior.environment_ready AND prior.prior_state<>'running' THEN NULL ELSE error_code END,
          active_at=CASE WHEN state='running' OR NOT prior.environment_ready THEN active_at ELSE clock_timestamp() END,
+         running_at=CASE WHEN state='running' OR NOT prior.environment_ready THEN running_at ELSE clock_timestamp() END,
          updated_at=CASE WHEN state='running' OR (state='starting' AND NOT prior.environment_ready) THEN updated_at ELSE clock_timestamp() END
        FROM prior WHERE w.id=prior.prior_id
        RETURNING ${COLUMNS.replace(/\b(\w+)\b/g, "w.$1")}, execution_mode, access_epoch::text, login_revision::text, prior.prior_state,
