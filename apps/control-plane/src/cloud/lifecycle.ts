@@ -586,9 +586,11 @@ export class CloudV2Lifecycle {
       const status = error instanceof CloudProviderError && error.httpStatus ? ` status=${error.httpStatus}` : "";
       this.deps.logger?.warn(`[cloud-v2] ${workspace.state} step failed (${code}${status})`);
       const booting = workspace.state === "creating" || workspace.state === "starting";
-      if (booting) this.recordBootFailure(workspace.id, code, `${code}${status}`, now);
+      // When it failed, not when it was admitted: a provider call can take minutes, past the breaker's window.
+      const failedAt = this.deps.now?.() ?? Date.now();
+      if (booting) this.recordBootFailure(workspace.id, code, `${code}${status}`, failedAt);
       // Held at any attempt, not only the last: a wake deferred while open needs the fresh window after the close too.
-      const held = booting && this.held(workspace, [`${code}${status}`], now);
+      const held = booting && this.held(workspace, [`${code}${status}`], failedAt);
       // A late step cannot finalize a newer stop or a newly recorded VM.
       const fence = workspace.state === "stopping" ? { stopGeneration: workspace.stopGeneration }
         : workspace.state === "deleting" ? { expectedSandboxId: workspace.boatSandboxId } : {};
@@ -1210,7 +1212,7 @@ export class CloudV2Lifecycle {
    * breaker's close. Otherwise it fails as before, counted toward the boot-deadline breaker. */
   private bootExpired(workspace: CloudV2LifecycleWorkspace, from: number, now: number): boolean {
     if (now - (this.breaker?.deadlineFrom(workspace.id, from) ?? from) <= BOOT_DEADLINE_MS) return false;
-    if (this.held(workspace, [this.breaker?.lastKey(workspace.id), "worker_boot_timeout"], now, from)) return false;
+    if (this.held(workspace, [this.breaker?.lastKey(workspace.id, from), "worker_boot_timeout"], now, from)) return false;
     // The miss that opens the breaker is held as well.
     this.recordBootFailure(workspace.id, "worker_boot_timeout", "worker_boot_timeout", now);
     return !this.held(workspace, ["worker_boot_timeout"], now, from);

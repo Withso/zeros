@@ -49,7 +49,11 @@ export class CloudV2WakeBreaker {
     return { key, first };
   }
 
-  lastKey(workspaceId: string): string | undefined { return this.last.get(workspaceId)?.key; }
+  /** This wake's own last failure: one from before `since`, the wake's start, belongs to an earlier wake. */
+  lastKey(workspaceId: string, since: number): string | undefined {
+    const last = this.last.get(workspaceId);
+    return last && last.at >= since ? last.key : undefined;
+  }
 
   /** A held wake's boot deadline counts from the close: it missed the earlier one while the breaker held it. */
   deadlineFrom(workspaceId: string, from: number): number {

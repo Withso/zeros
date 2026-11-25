@@ -1959,6 +1959,33 @@ describe("a wake failure every workspace shares", () => {
     expect(failed(f, ids[3]!)).toEqual([[ids[3], ["starting"], "failed", { errorCode: "worker_boot_timeout" }]]);
   });
 
+  it("counts a slow step's failure when it fails, not when it was admitted", async () => {
+    const f = harness([waking(ids[0]!)]);
+    // Each step takes until minute 12 to fail, whenever it was admitted.
+    vi.mocked(f.compute.hostPort).mockImplementation(async () => { f.at(12 * 60_000); throw refused(); });
+    for (const [index, minute] of [[0, 0], [1, 6], [2, 11]] as const) {
+      f.claimed.splice(0, f.claimed.length, waking(ids[index]!, { updatedAt: new Date(NOW + minute * 60_000).toISOString() }));
+      f.at(minute * 60_000);
+      await f.lifecycle.tick();
+    }
+    expect(opened(f.logs)).toHaveLength(1);
+  });
+
+  it("never holds a new wake for a failure of the wake before it", async () => {
+    const f = harness(ids.slice(0, 3).map(id => waking(id)));
+    await f.lifecycle.tick();
+    expect(opened(f.logs)).toHaveLength(1);
+    f.at(60_000);
+    f.claimed.splice(0, 3, waking(ids[3]!));
+    await f.lifecycle.tick();
+    expect(failed(f, ids[3]!)).toEqual([]);
+    // Started again after that failure, it never says hello: its boot deadline fails it as before.
+    f.at(13 * 60_000);
+    f.claimed.splice(0, 1, waking(ids[3]!, { updatedAt: new Date(NOW + 2 * 60_000).toISOString() }));
+    await f.lifecycle.tick();
+    expect(failed(f, ids[3]!)).toEqual([[ids[3], ["starting"], "failed", { errorCode: "worker_boot_timeout" }]]);
+  });
+
   it("never opens for a failure one workspace's own state explains", async () => {
     const f = harness(ids.slice(0, 3).map(id => waking(id)), () => new CloudProviderError("provider_budget_exhausted", "Boat API request did not succeed", false, { httpStatus: 402 }));
     await f.lifecycle.tick();
