@@ -153,7 +153,7 @@ describe("sidebar review regressions", () => {
         { repository: "a/two", prNumber: 5, prState: "open", prUrl: null },
       ],
     } as unknown as Partial<Workspace>);
-    const live = workspacePullRequests(ws("solo", { prNumber: 5, prState: "open" } as Partial<Workspace>), "merge-conflicts")[0]?.tone;
+    const live = workspacePullRequests(ws("solo", { prNumber: 5, prState: "open" } as unknown as Partial<Workspace>), "merge-conflicts")[0]?.tone;
     expect(live).toBe("conflicts");
     expect(workspacePullRequests(workspace, "merge-conflicts").map((pull) => pull.tone)).toEqual(["open", live]);
   });
