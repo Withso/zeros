@@ -69,3 +69,15 @@ export function useDesignRevealPresented(shown: boolean): boolean {
   }, [shown]);
   return shown && presented;
 }
+
+/** A confirmed source that leaves its surface budget (a page crossing the
+ * overview frame count, or a rejected generation) stays painted until the
+ * frame's exact-generation picture has decoded. Dropping it at once showed
+ * the placeholder card on every visible frame for the seconds an overview's
+ * pictures took to decode. Without a picture owner none is coming, so only a
+ * rejected generation keeps its last pixels then. */
+export function designSourceStaysPainted(input: {
+  confirmed: boolean; enabled: boolean; failed: boolean; pictureOwner: boolean; pictureCurrent: boolean;
+}): boolean {
+  return input.confirmed && (input.enabled || (input.failed || input.pictureOwner) && !input.pictureCurrent);
+}

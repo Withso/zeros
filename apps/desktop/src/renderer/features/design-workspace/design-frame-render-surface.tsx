@@ -6,7 +6,7 @@
 
 // --- IMPORTS ---
 
-import { useDesignLiveDocumentRetirement } from "./design-frame-retirement";
+import { designSourceStaysPainted, useDesignLiveDocumentRetirement } from "./design-frame-retirement";
 import { FileCode2 } from "lucide-react";
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 
@@ -209,10 +209,12 @@ export const DesignFrameRenderSurface = React.memo(function DesignFrameRenderSur
           level: previewLevel ?? "overview" }
       : null,
   );
-  // A rejected generation still requests its normal bounded preview. Keep only
-  // the last confirmed source painted until that exact-generation decode can
-  // replace it; no failed HTML or pending layout work survives the handoff.
-  const sourcePainted = hasSourcePixels && (sourceEnabled || (sourceFailed && !picture?.current));
+  // A rejected or over-budget source still requests its normal bounded
+  // preview. Keep only the last confirmed source painted until that
+  // exact-generation decode can replace it; no failed HTML or pending layout
+  // work survives the handoff.
+  const sourcePainted = designSourceStaysPainted({ confirmed: hasSourcePixels, enabled: sourceEnabled,
+    failed: sourceFailed, pictureOwner: !!previewOwner, pictureCurrent: !!picture?.current });
   const storedScreenshot = useDesignRuntimeStore(
     (state) =>
       state.byWorkspace[workspaceId]?.frames[frame.file]?.screenshotsByNode[""],

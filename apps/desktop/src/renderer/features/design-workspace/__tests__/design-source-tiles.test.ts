@@ -667,9 +667,39 @@ it("keeps neighboring cached sources on the GPU when an active frame has chrome 
     await page.evaluate(() => { const w = window as any; w.releases = w.rows.map((row: any, i: number) => w.tiles.attachDesignSourceTiles(row.image, `active-${i}`)); });
     expect(await page.locator('[data-design-frame="neighbor"] [data-design-source-tiled]').count()).toBe(1);
     expect(await changed(page, before, await page.screenshot())).toBeLessThan(12);
-    await page.evaluate(() => { (window as any).rows[0].article.dataset.designFrameStackProtected = ""; });
-    await page.waitForFunction(() => !document.querySelector('[data-design-source-tiled]'));
+    // Editing overlays stay inside this frame's measured region, so a
+    // disjoint later frame keeps its GPU pixels when the frame is selected.
+    await page.evaluate(async () => { (window as any).rows[0].article.dataset.designFrameStackProtected = ""; await Promise.resolve(); });
+    expect(await page.locator('[data-design-frame="neighbor"] [data-design-source-tiled]').count()).toBe(1);
     expect(await changed(page, before, await page.screenshot())).toBeLessThan(12);
+  } finally { await page.close(); }
+});
+
+it("keeps only the later frames a selected frame's escaping overlay reaches in the DOM", async () => {
+  const page = await open();
+  try {
+    await page.evaluate(async () => {
+      const w = window as any;
+      w.rows = [await w.add({ key: "selected", x: 20, y: 40, width: 120, height: 120, z: 0, color: "blue", protected: true }),
+        await w.add({ key: "covered", x: 200, y: 40, width: 100, height: 100, z: 1, color: w.tileColors.orangeAlpha, compact: true }),
+        await w.add({ key: "clear", x: 340, y: 220, width: 100, height: 100, z: 2, color: "red", compact: true })];
+      w.overlay = document.createElement("div");
+      w.overlay.style.cssText = "position:absolute;left:150px;top:20px;width:80px;height:40px;background:lime";
+      w.rows[0].article.append(w.overlay);
+      w.paint();
+    });
+    const before = await page.screenshot();
+    await page.evaluate(() => { const w = window as any; w.releases = w.rows.map((row: any, i: number) => w.tiles.attachDesignSourceTiles(row.image, `escape-${i}`)); });
+    const tiled = (key: string) => page.locator(`[data-design-frame="${key}"] [data-design-source-tiled]`).count();
+    expect([await tiled("selected"), await tiled("covered"), await tiled("clear")]).toEqual([0, 0, 1]);
+    expect(await changed(page, before, await page.screenshot())).toBeLessThan(16);
+    // Moving the overlay inside its frame is not a world-child change; the
+    // covered frame still returns to the plane once nothing paints over it.
+    await page.evaluate(async () => { (window as any).overlay.style.left = "20px"; await Promise.resolve(); });
+    expect([await tiled("covered"), await tiled("clear")]).toEqual([1, 1]);
+    const moved = await page.screenshot();
+    await page.evaluate(() => { const w = window as any; w.releases.forEach((release: () => void) => release()); });
+    expect(await changed(page, moved, await page.screenshot())).toBeLessThan(16);
   } finally { await page.close(); }
 });
 
@@ -1571,6 +1601,38 @@ it("reuses bounded CSS color resolution across warm returns and preserves transp
     await page.evaluate(() => { const w = window as any; for (const release of w.releases) release(); });
     expect(await changed(page, themed, await page.screenshot())).toBeLessThan(12);
     expect(await page.evaluate(() => (window as any).canvasAllocations)).toBeLessThanOrEqual(2);
+  } finally { await page.close(); }
+});
+
+it("re-reads only a restyled frame's colors and keeps every other source on the GPU", async () => {
+  const page = await open();
+  try {
+    await page.addStyleTag({ content: `.restyled { --fixture-background: ${designSourceTileColors.upperAlpha}; }` });
+    await page.evaluate(async () => {
+      const w = window as any;
+      w.rows = [await w.add({ key: "restyle/a", x: 20, y: 55, width: 120, height: 160, z: 0, color: "blue", background: w.tileColors.blueAlpha }),
+        await w.add({ key: "restyle/b", x: 220, y: 55, width: 120, height: 160, z: 1, color: "red", background: w.tileColors.orangeAlpha })];
+      w.paint(); w.releases = w.rows.map((row: any) => w.tiles.attachDesignSourceTiles(row.image, row.article.dataset.designFrame));
+      await Promise.resolve();
+    });
+    expect(await page.locator("[data-design-source-tiled]").count()).toBe(2);
+    await page.evaluate(async () => {
+      const w = window as any;
+      w.restored = 0;
+      w.restores = new MutationObserver(records => {
+        for (const record of records) for (const node of record.addedNodes) if (node === w.rows[1].image) w.restored++;
+      });
+      w.restores.observe(document.querySelector("#world")!, { subtree: true, childList: true });
+      // A selection outline is a class on the frame it selects.
+      w.rows[0].article.classList.add("restyled");
+      await new Promise(resolve => setTimeout(resolve, 0));
+      await new Promise(resolve => requestAnimationFrame(resolve));
+    });
+    expect(await page.evaluate(() => (window as any).restored)).toBe(0);
+    expect(await page.locator("[data-design-source-tiled]").count()).toBe(2);
+    const restyled = await page.screenshot();
+    await page.evaluate(() => { const w = window as any; for (const release of w.releases) release(); });
+    expect(await changed(page, restyled, await page.screenshot())).toBeLessThan(12);
   } finally { await page.close(); }
 });
 
