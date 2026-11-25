@@ -57,7 +57,8 @@ export async function runLocalStorageSmoke({ page, harnessBase, check }) {
   check("Hovering the entry warms the measurement and opening joins the one still in flight", true);
 
   for (const label of ["Workspaces", "Cloud sync", "Chats and history", "Provider accounts", "Window and editor state", "Other app data", "Cache", "Logs", "Updates"])
-    await expect(panel.locator("section").getByText(label, { exact: true })).toBeVisible();
+    // The titled category groups; the Storage total is its own untitled group.
+    await expect(panel.locator("section:has(h2)").getByText(label, { exact: true })).toBeVisible();
   await expect(panel.getByText("~/zeros/workspaces")).toBeVisible();
   await expect(panel.getByText("Managed by Zeros")).toBeVisible();
   await expect(panel.getByText("Files in cloud workspaces live on their Cloud Computer and are not counted here.")).toBeVisible();
