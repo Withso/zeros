@@ -96,6 +96,18 @@ describe("cloud v2 Boat compute", () => {
     expect(new Headers(fetcher.mock.calls[0]?.[1]?.headers).get("idempotency-key")).toBe(new Headers(fetcher.mock.calls[1]?.[1]?.headers).get("idempotency-key"));
   });
 
+  it("accepts the route Boat returns with a generation beside the token and keeps neither in the saved URL", async () => {
+    // Boat's reply since 2026-11-25: `?_token=…&_generation=1`. Refusing it failed every wake with worker_boot_timeout.
+    const boat = client();
+    boat.request.mockResolvedValue({ ok: true, type: "port.hosted", success: true, port: 41783,
+      url: "https://box-node-8ab11300717b6734-41783.on.boat.dev?_token=synthetic-port-token&_generation=1", isProtected: true, access: "private", localhost: true });
+    expect(await new BoatCloudV2Compute(boat).hostPort("bx_abc12345", { port: 41783, localhost: true, title: "Zeros worker" }))
+      .toEqual({ url: "https://box-node-8ab11300717b6734-41783.on.boat.dev", token: "synthetic-port-token" });
+    boat.request.mockResolvedValue({ url: "https://fixture-41783.on.boat.dev/?_generation=2&_future=a&_token=synthetic-port-token", isProtected: true, access: "private", localhost: true });
+    expect(await new BoatCloudV2Compute(boat).hostPort("bx_abc12345", { port: 41783, localhost: true, title: "Zeros worker" }))
+      .toEqual({ url: "https://fixture-41783.on.boat.dev", token: "synthetic-port-token" });
+  });
+
   it("replays a route repair under its durable key rather than the wake's cached host request", async () => {
     const fetcher = vi.fn(async () => Response.json({ type: "sandbox.host", url: "https://fixture-41783.on.boat.dev/?_token=synthetic-port-token", access: "private", isProtected: true, localhost: true }));
     const compute = new BoatCloudV2Compute(new BoatApiClient({ apiKey: "synthetic-unused-key", timeoutMs: 1000, fetch: fetcher }));
@@ -111,9 +123,14 @@ describe("cloud v2 Boat compute", () => {
       { url: "https://fixture-41783.on.boat.dev/?_token=synthetic-port-token", access: "public", isProtected: false, localhost: true },
       { url: "https://foreign.example.test/?_token=synthetic-port-token", access: "private", isProtected: true, localhost: true },
       { url: "https://fixture-41783.on.boat.dev/", access: "private", isProtected: true, localhost: true },
+      { url: "https://fixture-41783.on.boat.dev/?_token=synthetic-port-token&_token=other-port-token", access: "private", isProtected: true, localhost: true },
     ]) {
       const boat = client(); boat.request.mockResolvedValue(response);
-      await expect(new BoatCloudV2Compute(boat).hostPort("bx_abc12345", { port: 41783, localhost: true, title: "Zeros worker" })).rejects.toThrow("Invalid private worker route");
+      const refused = new BoatCloudV2Compute(boat).hostPort("bx_abc12345", { port: 41783, localhost: true, title: "Zeros worker" });
+      await expect(refused).rejects.toThrow("Invalid private worker route");
+      // A closed code of its own: unlabelled, the lifecycle logged it as provider_request_failed.
+      await expect(refused).rejects.toMatchObject({ code: "provider_route_invalid" });
+      await expect(refused).rejects.not.toThrow("synthetic-port-token");
     }
   });
 

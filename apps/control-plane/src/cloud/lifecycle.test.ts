@@ -1267,6 +1267,21 @@ describe("cloud v2 lifecycle", () => {
     expect(f.store.defer).not.toHaveBeenCalledWith(expect.any(String), state, expect.any(Number), expect.objectContaining({ failure: true }));
   });
 
+  it("logs the closed code of a refused route with Boat's HTTP status, never the token", async () => {
+    // 2026-11-25: every wake failed at the route, logged only as provider_request_failed; the reply was a 200 the parser refused.
+    const { CloudProviderError } = await import("./provider-error.js");
+    for (const [error, line] of [
+      [Object.assign(new Error("Invalid private worker route"), { code: "provider_route_invalid" }), "[cloud-v2] starting step failed (provider_route_invalid)"],
+      [new CloudProviderError("provider_request_failed", "Boat API request did not succeed", false, { httpStatus: 409 }), "[cloud-v2] starting step failed (provider_request_failed status=409)"],
+    ] as const) {
+      const f = setup([workspace("starting", { boatSandboxId: "bx_test" })], { logs: true });
+      vi.mocked(f.compute.hostPort).mockRejectedValueOnce(error);
+      await f.lifecycle.tick();
+      expect(f.logs.warn).toEqual([line]);
+      expect(f.store.defer).toHaveBeenCalledWith(WS, "starting", expect.any(Number), { failure: true });
+    }
+  });
+
   it("removes the other recipe checkouts a kept image starts with before the worker can be reached", async () => {
     // The worker is reachable only once token delivery starts it. Its route
     // may exist earlier: nothing listens on it until then.

@@ -556,7 +556,9 @@ export class CloudV2Lifecycle {
       else await this.step(workspace, now);
     } catch (error) {
       const code = errorCode(error);
-      this.deps.logger?.warn(`[cloud-v2] ${workspace.state} step failed (${code})`);
+      // Boat's status tells a refused request (4xx) from an outage (5xx); the closed code alone hid which.
+      const status = error instanceof CloudProviderError && error.httpStatus ? ` status=${error.httpStatus}` : "";
+      this.deps.logger?.warn(`[cloud-v2] ${workspace.state} step failed (${code}${status})`);
       // A late step cannot finalize a newer stop or a newly recorded VM.
       const fence = workspace.state === "stopping" ? { stopGeneration: workspace.stopGeneration }
         : workspace.state === "deleting" ? { expectedSandboxId: workspace.boatSandboxId } : {};
