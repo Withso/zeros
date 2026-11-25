@@ -194,7 +194,7 @@ export function CreateTeamDialog({
                 spellCheck={false}
                 rows={3}
               />
-              <p className={inviteProblem ? "text-red-primary text-xs" : "text-fg2 text-xs"}>
+              <p className={inviteProblem ? "text-red-text text-xs" : "text-fg2 text-xs"}>
                 {inviteProblem ?? "Comma or newline separated."}
               </p>
             </div>

@@ -35,11 +35,11 @@ function ToneIcon({ tone, active }: { tone: SimulatorSetupRow["tone"]; active: b
   const className = "mt-px size-4 shrink-0";
   switch (tone) {
     case "ready":
-      return <CircleCheck aria-hidden className={cn(className, "text-green-primary")} />;
+      return <CircleCheck aria-hidden className={cn(className, "text-green-text")} />;
     case "warning":
-      return <TriangleAlert aria-hidden className={cn(className, "text-yellow-primary")} />;
+      return <TriangleAlert aria-hidden className={cn(className, "text-yellow-text")} />;
     case "error":
-      return <CircleAlert aria-hidden className={cn(className, "text-red-primary")} />;
+      return <CircleAlert aria-hidden className={cn(className, "text-red-text")} />;
     case "pending":
       return (
         <LoaderCircle
@@ -92,7 +92,7 @@ function SetupStatusRow({ row, active }: { row: SimulatorSetupRow; active: boole
       {typeof row.progress === "number" && (
         <div className="flex items-center gap-2">
           <ProgressBar value={row.progress} aria-label="Download progress" className="flex-1" />
-          <span className="text-muted-fg text-2xxs tabular-nums">{row.progress}%</span>
+          <span className="text-fg3 text-2xxs tabular-nums">{row.progress}%</span>
         </div>
       )}
     </div>
@@ -167,7 +167,7 @@ const TRADEMARKS: Record<SimulatorPlatform, string> = {
 };
 
 function TrademarkNote({ platform }: { platform: SimulatorPlatform }) {
-  return <p className="text-muted-fg text-xxs m-0">{TRADEMARKS[platform]}</p>;
+  return <p className="text-fg3 text-xxs m-0">{TRADEMARKS[platform]}</p>;
 }
 
 /** What a Simulator tab shows before a device is attached: what's installed,

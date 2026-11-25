@@ -3,7 +3,7 @@
 // 2026-11-07 (Zeros Design v401, "Chat window · Ask to focus"): while the chat
 // column is split, an unfocused pane's composer card collapses into one pill,
 // "Ask <agent>" with no shortcut, centred where the composer sits. The card
-// itself is the pill, so its sidebar-bg fill and composer-border edge carry
+// itself is the pill, so its bg1-raised fill and composer-border edge carry
 // through: pressing it only changes the shape. It expands into the composer
 // over 200ms while its label fades out and the composer's contents, kept laid
 // out at full width, fade in; the composer the focus leaves folds back over
@@ -36,7 +36,7 @@ export function composerAskCardClasses(collapsed: boolean): string {
     collapsed
       ? cn(
           "h-8 w-(--ask-pill-w) overflow-hidden items-center justify-end rounded-[calc(var(--radius-lg)*2)] duration-200",
-          "hover:bg-sidebar-bg-hover hover:border-border3",
+          "hover:bg-bg1-raised-hover hover:border-border3",
           "has-[[data-composer-ask-pill]:focus-visible]:border-accent",
         )
       : "duration-200",

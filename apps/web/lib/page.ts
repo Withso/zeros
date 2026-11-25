@@ -34,14 +34,12 @@ const WORDMARK = `<svg class="brand-word" viewBox="26 -10 2563.2 730.9" fill="cu
 export const SHELL_TOKENS = {
   dark: {
     "--bg1": "hsl(0 0% 7.843%)",
-    "--bg1-bright": "hsl(0 0% 11%)",
+    "--bg1-raised": "hsl(0 0% 10.196%)",
     "--bg2": "hsl(0 0% 13%)",
-    "--bg2-highlight": "hsl(0 0% 16.86%)",
     "--selected-bg": "hsl(0 0% 16.86%)",
     "--fg1": "hsl(0 0% 92.16%)",
-    "--fg2": "hsl(0 0% 62.35%)",
-    "--fg3": "hsl(0 0% 57.65%)",
-    "--muted-fg": "hsl(0 0% 42%)",
+    "--fg2": "hsl(0 0% 62.745%)",
+    "--fg3": "hsl(0 0% 53.333%)",
     "--border1": "hsl(0 0% 14%)",
     "--border3": "hsl(0 0% 26.667%)",
     "--border4": "hsl(0 0% 34.118%)",
@@ -49,19 +47,17 @@ export const SHELL_TOKENS = {
     "--inverted-bg": "hsl(0 0% 92%)",
     "--inverted-fg": "hsl(0 0% 5%)",
     "--primary-button-hover": "hsl(0 0% 83%)",
-    "--red-fg": "hsl(2.05 100% 82.745%)",
-    "--green-fg": "hsl(142 75% 73%)",
+    "--red-on-bg": "hsl(4.86 97.368% 85.098%)",
+    "--green-on-bg": "hsl(131.19 53.153% 78.235%)",
   },
   light: {
     "--bg1": "hsl(0 0% 100%)",
-    "--bg1-bright": "hsl(36 20% 95.098%)",
+    "--bg1-raised": "hsl(40 23.077% 97.451%)",
     "--bg2": "hsl(36 20% 95.098%)",
-    "--bg2-highlight": "hsl(36 7.937% 87.647%)",
     "--selected-bg": "hsl(36 7.937% 87.647%)",
     "--fg1": "hsl(30 10% 15.686%)",
-    "--fg2": "hsl(26.67 5.45% 32.35%)",
-    "--fg3": "hsl(30 5.05% 38.82%)",
-    "--muted-fg": "hsl(30 4.17% 47.06%)",
+    "--fg2": "hsl(26.67 5.028% 35.098%)",
+    "--fg3": "hsl(30 5.505% 42.745%)",
     "--border1": "hsl(34.29 14.894% 90.784%)",
     "--border3": "hsl(33.33 8.108% 78.235%)",
     "--border4": "hsl(36 7.042% 72.157%)",
@@ -69,8 +65,8 @@ export const SHELL_TOKENS = {
     "--inverted-bg": "hsl(30 10% 15.686%)",
     "--inverted-fg": "hsl(0 0% 100%)",
     "--primary-button-hover": "hsl(30 7.937% 24.706%)",
-    "--red-fg": "hsl(358.21 63.81% 41.176%)",
-    "--green-fg": "hsl(142 70% 27.5%)",
+    "--red-on-bg": "hsl(358.95 60.638% 36.863%)",
+    "--green-on-bg": "hsl(141.75 71.429% 21.961%)",
   },
 } as const;
 
@@ -130,17 +126,17 @@ export const SHELL_CSS = `
       .btn svg { width: 14px; height: 14px; flex-shrink: 0; }
       a.btn:hover, button.btn:hover { background: var(--primary-button-hover); }
       a.btn.secondary, button.btn.secondary { border-color: var(--border3); background: transparent; color: var(--fg1); }
-      a.btn.secondary:hover, button.btn.secondary:hover { border-color: var(--border4); background: var(--bg2-highlight); }
+      a.btn.secondary:hover, button.btn.secondary:hover { border-color: var(--border4); background: var(--selected-bg); }
       a.btn.ghost, button.btn.ghost { background: transparent; color: var(--fg2); }
-      a.btn.ghost:hover, button.btn.ghost:hover { background: var(--bg2-highlight); color: var(--fg1); }
+      a.btn.ghost:hover, button.btn.ghost:hover { background: var(--selected-bg); color: var(--fg1); }
       button.btn.ghost[aria-pressed="true"] { background: var(--selected-bg); color: var(--fg1); }
       .btn:focus-visible { outline: none; border-color: var(--highlighted-bright); box-shadow: 0 0 0 3px color-mix(in srgb, var(--highlighted-bright) 50%, transparent); }
       button.btn:disabled { opacity: 0.5; cursor: not-allowed; }
       a { color: var(--fg1); text-decoration: none; }
       .msg { max-width: 560px; margin: 12px 0 0; color: var(--fg2); font-size: 12px; line-height: 16px; }
       .msg:empty { margin: 0; }
-      .msg.error, .error { color: var(--red-fg); }
-      .msg.ok { color: var(--green-fg); }
+      .msg.error, .error { color: var(--red-on-bg); }
+      .msg.ok { color: var(--green-on-bg); }
       .meta { margin: 20px 0 0; color: var(--fg3); font-size: 12px; line-height: 16px; }
       .meta a { color: var(--fg1); font-weight: 500; }
       /* The 16px loader that stands in for an action while a page checks: the
@@ -149,7 +145,7 @@ export const SHELL_CSS = `
       @property --orb-turn { syntax: "<angle>"; inherits: false; initial-value: 0deg; }
       .orb { position: relative; display: inline-block; width: 16px; height: 16px; flex-shrink: 0; color: var(--fg2); }
       .orb::before, .orb::after { content: ""; position: absolute; inset: 2px; box-sizing: border-box; }
-      .orb::before { border: 3px solid var(--muted-fg); opacity: 0.4; }
+      .orb::before { border: 3px solid var(--fg3); opacity: 0.4; }
       .orb::after {
         padding: 3px;
         background: conic-gradient(from calc(var(--orb-turn) - 80deg), transparent 0deg, currentColor 80deg 188deg, transparent 188deg 360deg);
@@ -159,7 +155,7 @@ export const SHELL_CSS = `
       }
       @keyframes orb-lap { to { --orb-turn: 360deg; } }
       @media (prefers-reduced-motion: reduce) { .orb::after { animation: none; } }
-      .box { width: 100%; max-width: 400px; margin-top: 20px; border: 1px solid var(--border1); border-radius: 12px; background: var(--bg1-bright); text-align: left; }
+      .box { width: 100%; max-width: 400px; margin-top: 20px; border: 1px solid var(--border1); border-radius: 12px; background: var(--bg1-raised); text-align: left; }
       .box-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 12px 14px; }
       .box-text { display: flex; min-width: 0; flex-direction: column; gap: 2px; }
       .box-name { color: var(--fg1); font-weight: 450; }
@@ -171,7 +167,7 @@ export const SHELL_CSS = `
         cursor: pointer; transition: color 120ms ease-out, background-color 120ms ease-out;
       }
       .icon-btn svg { width: 12px; height: 12px; }
-      .icon-btn:hover { background: var(--bg2-highlight); color: var(--fg1); }
+      .icon-btn:hover { background: var(--selected-bg); color: var(--fg1); }
       .icon-btn:focus-visible { outline: none; border-color: var(--highlighted-bright); box-shadow: 0 0 0 3px color-mix(in srgb, var(--highlighted-bright) 50%, transparent); }
       .code { flex-shrink: 0; color: var(--fg1); font: 12px/18px ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace; letter-spacing: 0.02em; white-space: nowrap; }
       [hidden], .hidden { display: none !important; }

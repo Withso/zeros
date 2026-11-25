@@ -402,7 +402,7 @@ function StructuredQuestionCard({ request, onRespond }: QuestionCardProps) {
                 className={cn(
                   "text-xxs flex shrink-0 items-center gap-1 pt-0.5 font-mono tracking-wide uppercase tabular-nums",
                   skipRemainingMs <= 60_000
-                    ? "text-yellow-primary"
+                    ? "text-yellow-text"
                     : "text-fg2",
                 )}
                 role="timer"
@@ -418,7 +418,7 @@ function StructuredQuestionCard({ request, onRespond }: QuestionCardProps) {
             onMouseDown={suppressFocusOnClick}
             onClick={dismiss}
             label="Dismiss (agent proceeds with its default)"
-            className="hover:bg-sidebar-bg-hover -my-1 -mr-1.5"
+            className="hover:bg-bg1-raised-hover -my-1 -mr-1.5"
           >
             <X />
           </IconButton>
@@ -438,7 +438,7 @@ function StructuredQuestionCard({ request, onRespond }: QuestionCardProps) {
                 // the card surface's own hover.
                 className={cn(
                   "group flex min-h-8 w-full items-start gap-3 rounded-md px-2 py-1.5 text-left transition-colors",
-                  selected ? "bg-sidebar-bg-hover" : "hover:bg-sidebar-bg-hover",
+                  selected ? "bg-bg1-raised-hover" : "hover:bg-bg1-raised-hover",
                 )}
               >
                 <span className="text-fg2 w-4 shrink-0 text-right font-mono text-xs leading-4.5">
@@ -477,7 +477,7 @@ function StructuredQuestionCard({ request, onRespond }: QuestionCardProps) {
             <div
               className={cn(
                 "flex min-h-8 flex-col rounded-md px-2 py-1.5 transition-colors",
-                qs.otherActive ? "bg-sidebar-bg-hover" : "hover:bg-sidebar-bg-hover",
+                qs.otherActive ? "bg-bg1-raised-hover" : "hover:bg-bg1-raised-hover",
               )}
             >
               <button
@@ -506,7 +506,7 @@ function StructuredQuestionCard({ request, onRespond }: QuestionCardProps) {
                   onChange={(e) => patch(q.id, { freeText: e.target.value })}
                   {...(q.secret ? { spellCheck: false } : {})}
                   // A bg1 well with a border1 edge; focusing changes nothing.
-                  className="text-fg1 placeholder:text-muted-fg border-border1 bg-bg1 mt-1.5 ml-7 resize-none rounded-md border px-2 py-1.5 text-xs leading-4.5 outline-none"
+                  className="text-fg1 placeholder:text-fg3 border-border1 bg-bg1 mt-1.5 ml-7 resize-none rounded-md border px-2 py-1.5 text-xs leading-4.5 outline-none"
                   placeholder={
                     q.secret ? "Value (hidden from logs)" : "Your answer…"
                   }
@@ -531,7 +531,7 @@ function StructuredQuestionCard({ request, onRespond }: QuestionCardProps) {
                 onClick={() => setIndex((i) => Math.max(0, i - 1))}
                 disabled={index === 0}
                 label="Previous question"
-                className="hover:bg-sidebar-bg-hover"
+                className="hover:bg-bg1-raised-hover"
               >
                 <ChevronLeft />
               </IconButton>
@@ -561,7 +561,7 @@ function StructuredQuestionCard({ request, onRespond }: QuestionCardProps) {
                 }
                 disabled={index === questions.length - 1}
                 label="Next question"
-                className="hover:bg-sidebar-bg-hover"
+                className="hover:bg-bg1-raised-hover"
               >
                 <ChevronRight />
               </IconButton>
@@ -739,7 +739,7 @@ function OneClickApprovalCard({
             <span
               className={cn(
                 "text-xxs shrink-0 pt-0.5 font-mono tracking-wide uppercase tabular-nums",
-                skipRemainingMs <= 60_000 ? "text-yellow-primary" : "text-fg2",
+                skipRemainingMs <= 60_000 ? "text-yellow-text" : "text-fg2",
               )}
               role="timer"
             >

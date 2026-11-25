@@ -60,11 +60,11 @@ export function workspaceGlyphSeed(
 
 /** PR identities, the same tokens the former PR icons wore. */
 const PR_TONE_CLS: Record<WorkspacePrTone, string> = {
-  open: "text-green-primary",
-  ready: "text-green-primary",
-  merged: "text-violet-fg",
-  closed: "text-red-fg",
-  conflicts: "text-yellow-primary",
+  open: "text-green-text",
+  ready: "text-green-text",
+  merged: "text-violet-on-bg",
+  closed: "text-red-on-bg",
+  conflicts: "text-yellow-text",
 };
 
 export interface WorkspaceGlyphProps {
@@ -88,7 +88,7 @@ export function WorkspaceGlyph({ seed, working = false, pr = null, size = 16, cl
       shaded
       className={cn(
         "transition-colors duration-200",
-        pr ? PR_TONE_CLS[pr] : working ? "text-fg2" : "text-muted-fg",
+        pr ? PR_TONE_CLS[pr] : working ? "text-fg2" : "text-fg3",
         className,
       )}
     />

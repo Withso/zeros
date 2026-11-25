@@ -45,7 +45,7 @@ function StatusMark({ status }: { status: SessionStatus }) {
   if (status === "input" || status === "plan") {
     return <AgentAwaitingIcon kind={status} className="size-3.5 shrink-0" strokeWidth={1.25} />;
   }
-  if (status === "running") return <RunStream size={12} className="text-blue-primary shrink-0" />;
+  if (status === "running") return <RunStream size={12} className="text-accent-text shrink-0" />;
   return null;
 }
 
@@ -78,7 +78,7 @@ function NativeSubagentRow({ agent, onSelect }: { agent: NativeSubagent; onSelec
     <ListRow variant="panel" onClick={() => onSelect(agent.ownerChatId)} data-native-subagent={agent.id}>
       <Bot className="text-fg2 size-3.5 shrink-0" strokeWidth={1.5} aria-label="Agent" />
       <span className="text-fg1 min-w-0 flex-1 truncate text-xs">{agent.title}</span>
-      {agent.running && <RunStream size={12} className="text-blue-primary shrink-0" />}
+      {agent.running && <RunStream size={12} className="text-accent-text shrink-0" />}
     </ListRow>
   );
 }

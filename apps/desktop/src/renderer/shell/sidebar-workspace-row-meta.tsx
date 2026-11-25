@@ -30,10 +30,10 @@ import {
 
 const PR_TONE_CLS: Record<PrMarkTone, string> = {
   draft: "text-fg3",
-  open: "text-green-primary",
-  conflicts: "text-yellow-primary",
-  merged: "text-violet-fg",
-  closed: "text-red-primary",
+  open: "text-green-text",
+  conflicts: "text-yellow-text",
+  merged: "text-violet-on-bg",
+  closed: "text-red-text",
 };
 const PR_TONE_LABEL: Record<PrMarkTone, string> = {
   draft: "Draft",
@@ -49,15 +49,15 @@ export interface SidebarRowStatus { label: string; tone: SidebarRowStatusTone }
 // Status text sits on the sidebar surface, so it is each family's -primary
 // (the -fg roles are for text on a tinted -bg container).
 const STATUS_TONE_CLS: Record<SidebarRowStatusTone, string> = {
-  attention: "text-yellow-primary",
-  done: "text-blue-primary",
-  failed: "text-red-primary",
-  muted: "text-muted-fg",
+  attention: "text-yellow-text",
+  done: "text-accent-text",
+  failed: "text-red-text",
+  muted: "text-fg3",
 };
 export const STATUS_DOT_CLS: Record<Exclude<SidebarRowStatusTone, "muted">, string> = {
-  attention: "bg-yellow-icon",
+  attention: "bg-yellow-text",
   done: "bg-accent",
-  failed: "bg-red-primary",
+  failed: "bg-red-text",
 };
 
 export type SidebarRowLead = "archiving" | "working" | "child" | "folder" | "design" | "logo";
@@ -152,7 +152,7 @@ export function SidebarPrMarks({ groups, layout }: { groups: readonly PrMarkGrou
   const total = all.length;
   if (layout === "single") {
     return (
-      <PrMark pulls={all} label={`${total} pull requests`} className="text-blue-primary">
+      <PrMark pulls={all} label={`${total} pull requests`} className="text-accent-text">
         <GitPullRequest strokeWidth={1.5} className="size-3" />
         <span>{total}</span>
       </PrMark>
@@ -206,7 +206,7 @@ export function SidebarPlacementIcon({ cloud, cloudStatus }: { cloud: boolean; c
   const state = cloudMarkState(cloudStatus);
   if (state === "starting") return <ZerosSpinner size={12} label="Cloud workspace, starting" />;
   if (cloudStatus && CLOUD_ERROR.has(cloudStatus)) {
-    return <CloudOff strokeWidth={1.5} className="text-red-primary size-3 shrink-0" aria-label="Cloud workspace, error" role="img" data-cloud-mark="error" />;
+    return <CloudOff strokeWidth={1.5} className="text-red-text size-3 shrink-0" aria-label="Cloud workspace, error" role="img" data-cloud-mark="error" />;
   }
   return state === "stopped"
     ? <CloudOff strokeWidth={1.5} className="size-3 shrink-0" aria-label="Cloud workspace, stopped" role="img" data-cloud-mark={state} />
@@ -239,7 +239,7 @@ export function SidebarWorkspaceRowMeta({
   const layout = width === 0 ? "separate" : prMarkLayout(groups, available);
   const fits = width === 0 || prMarkWidth(groups, layout) <= available || layout === "single";
   return (
-    <span ref={ref} className="text-muted-fg flex h-4 min-w-0 items-center gap-1.5 text-3xxs leading-4" data-sidebar-row-meta={workspace.id}>
+    <span ref={ref} className="text-fg3 flex h-4 min-w-0 items-center gap-1.5 text-3xxs leading-4" data-sidebar-row-meta={workspace.id}>
       <span className="inline-flex size-3 shrink-0 items-center justify-center">
         <SidebarPlacementIcon cloud={cloud} cloudStatus={cloudStatus} />
       </span>

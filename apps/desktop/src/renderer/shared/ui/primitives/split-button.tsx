@@ -25,9 +25,9 @@ const SIZE = {
 const VARIANT = {
   secondary: {
     action:
-      "border-border3 text-fg1 enabled:hover:z-1 enabled:hover:border-border4 enabled:hover:bg-bg2-highlight",
+      "border-border3 text-fg1 enabled:hover:z-1 enabled:hover:border-border4 enabled:hover:bg-selected-bg",
     chevron:
-      "-ml-px border-border3 text-muted-fg enabled:hover:z-1 enabled:hover:border-border4 enabled:hover:bg-bg2-highlight enabled:hover:text-fg2 data-[state=open]:z-1 data-[state=open]:border-border4 data-[state=open]:bg-bg2-highlight data-[state=open]:text-fg2",
+      "-ml-px border-border3 text-fg3 enabled:hover:z-1 enabled:hover:border-border4 enabled:hover:bg-selected-bg enabled:hover:text-fg2 data-[state=open]:z-1 data-[state=open]:border-border4 data-[state=open]:bg-selected-bg data-[state=open]:text-fg2",
   },
   // The divider is the label colour at 15% over the half's own fill, so it
   // follows the fill on hover and open.
@@ -41,9 +41,9 @@ const VARIANT = {
   // divider. A merge that can't run is the secondary outline.
   merge: {
     action:
-      "border-r-0 border-green-primary bg-green-primary text-[var(--pr-status-merge-fg)] enabled:hover:opacity-90 focus-visible:-mr-px focus-visible:border-r",
+      "border-r-0 border-green-text bg-green-text text-[var(--pr-status-merge-fg)] enabled:hover:opacity-90 focus-visible:-mr-px focus-visible:border-r",
     chevron:
-      "border-green-primary border-l-[color-mix(in_srgb,var(--pr-status-merge-fg)_20%,transparent)] bg-green-primary text-[var(--pr-status-merge-fg)] enabled:hover:opacity-90 data-[state=open]:opacity-90 focus-visible:border-l-accent",
+      "border-green-text border-l-[color-mix(in_srgb,var(--pr-status-merge-fg)_20%,transparent)] bg-green-text text-[var(--pr-status-merge-fg)] enabled:hover:opacity-90 data-[state=open]:opacity-90 focus-visible:border-l-accent",
   },
 } as const;
 

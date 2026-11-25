@@ -55,6 +55,7 @@ import { registerLiveEditDraft } from "./edit-live-drafts";
 import type { Turn } from "./turn-grouping";
 import { LocalLinkPill } from "./local-links/pill";
 import { PromptFold } from "./prompt-fold";
+import { PILL_GROUND } from "./composer-editor/pill-views";
 
 export {
   groupMessagesIntoTurns,
@@ -295,17 +296,17 @@ export const TurnPromptHeader = memo(function TurnPromptHeader({
       data-user-bubble=""
       className={cn(
         "w-fit max-w-7/8 min-w-0 cursor-text px-3 py-2 select-text",
-        // Its pills sit a step lighter than the bubble (semantic-tokens.css).
-        "[--pill-bg:var(--prompt-pill-bg)]",
+        // Its pills rest on selected-bg with no edge (PILL_GROUND.message).
+        PILL_GROUND.message,
         PROMPT_SURFACE_RADIUS,
-        autoAction ? "bg-blue-bg text-blue-fg font-medium" : "bg-bg2",
+        autoAction ? "bg-accent-bg text-accent-on-bg font-medium" : "bg-bg2",
       )}
     >
       <PromptFold surfaceActive={surfaceActive}>
         {AutoIcon ? (
           <div className="flex items-start gap-1.5">
             <AutoIcon
-              className="text-blue-fg mt-0.5 size-4 shrink-0"
+              className="text-accent-on-bg mt-0.5 size-4 shrink-0"
               strokeWidth={2}
             />
             <div className="min-w-0">{children}</div>

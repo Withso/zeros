@@ -92,7 +92,7 @@ export async function runComposerAttachmentsSmoke({ page, check }) {
     await expect(page.locator("html")).toHaveAttribute("data-theme", mode);
     const surface = await editCard.evaluate((card) => {
       const probe = document.createElement("span");
-      probe.style.backgroundColor = "var(--sidebar-bg)";
+      probe.style.backgroundColor = "var(--bg1-raised)";
       probe.style.borderTopColor = "var(--composer-border)";
       document.body.append(probe);
       const expected = getComputedStyle(probe);

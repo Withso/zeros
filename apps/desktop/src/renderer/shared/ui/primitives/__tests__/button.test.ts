@@ -40,8 +40,8 @@ describe("Button control sizes", () => {
 
   it("hovers destructive fills with a solid token, never an alpha wash", () => {
     const destructive = classesFor({ variant: "destructive" }).join(" ");
-    expect(destructive).toContain("hover:bg-red-secondary-hover");
-    expect(destructive).not.toMatch(/bg-red-secondary\/\d+/);
+    expect(destructive).toContain("hover:bg-red-solid-hover");
+    expect(destructive).not.toMatch(/bg-red-solid\/\d+/);
   });
 });
 
@@ -62,7 +62,7 @@ describe("Button states", () => {
   it("holds the hover look while a Ghost button's menu is open", () => {
     const ghost = classesFor({ variant: "ghost" });
     expect(ghost).toEqual(
-      expect.arrayContaining(["data-[state=open]:bg-bg2-highlight", "data-[state=open]:text-fg1"]),
+      expect.arrayContaining(["data-[state=open]:bg-selected-bg", "data-[state=open]:text-fg1"]),
     );
   });
 

@@ -21,8 +21,8 @@ const Tile = React.forwardRef<
     className={cn(
       "border-border1 bg-bg2 text-fg1 rounded-[calc(var(--radius-lg)*1.5)] border p-4 text-left",
       "transition-colors duration-120 ease-out",
-      // bg2-highlight + border3 reads on bg2, where bg2-hover was 1.06:1.
-      "hover:border-border3 hover:bg-bg2-highlight",
+      // selected-bg + border3 reads on bg2, where bg2-hover was 1.06:1.
+      "hover:border-border3 hover:bg-selected-bg",
       "focus-visible:border-accent focus-visible:outline-none",
       className,
     )}

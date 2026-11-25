@@ -44,7 +44,7 @@ svg.lucide:not([stroke-linejoin]) { stroke-linejoin: round; }
   height: var(--space-12);
 }
 .np-eyebrow {
-  color: var(--muted-fg);
+  color: var(--fg3);
   font-size: var(--text-2xxs);
   line-height: 16px;
   font-weight: var(--weight-medium);

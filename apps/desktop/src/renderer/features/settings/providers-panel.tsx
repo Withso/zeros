@@ -864,7 +864,7 @@ function ProviderCard({
                 method,
               )}
               {connected && (
-                <Check className="text-green-fg size-4" aria-hidden="true" />
+                <Check className="text-green-on-bg size-4" aria-hidden="true" />
               )}
             </Button>
           </div>

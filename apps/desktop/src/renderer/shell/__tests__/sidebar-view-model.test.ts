@@ -205,8 +205,8 @@ describe("sidebar placement icon", () => {
   it("draws a failed cloud workspace as a red cloud-off, apart from an asleep one", () => {
     const icon = (cloudStatus: string | null) => renderToStaticMarkup(createElement(SidebarPlacementIcon, { cloud: true, cloudStatus }));
     expect(icon("failed")).toContain('data-cloud-mark="error"');
-    expect(icon("failed")).toContain("text-red-primary");
+    expect(icon("failed")).toContain("text-red-text");
     expect(icon("stopped")).toContain('data-cloud-mark="stopped"');
-    expect(icon("stopped")).not.toContain("text-red-primary");
+    expect(icon("stopped")).not.toContain("text-red-text");
   });
 });

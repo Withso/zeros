@@ -38,18 +38,22 @@ describe("contrast contract", () => {
     expect(failures).toEqual([]);
   });
 
-  it("declares supplemental metadata separately from AA text", () => {
-    expect(contract.roles.supplemental.min).toBe(3);
+  it("keeps three AA text tiers and lifts fg3 on hover fills", () => {
+    expect(contract.ladders).toContainEqual(expect.objectContaining({ tiers: ["fg1", "fg2", "fg3"], on: "bg1" }));
     expect(contract.pairs).toContainEqual(expect.objectContaining({
-      role: "supplemental", fg: ["muted-fg"], on: "@rest",
+      role: "text", fg: ["fg1", "fg2", "fg3"], on: "@rest",
     }));
-    for (const pair of contract.pairs.filter((pair: { role: string }) => pair.role === "text")) {
-      expect(pair.fg).not.toContain("muted-fg");
+    expect(contract.pairs).toContainEqual(expect.objectContaining({
+      role: "text", fg: ["fg1", "fg2"], on: "@hover",
+    }));
+    // Supplemental (3:1) is reserved for labels over translucent washes, never resting metadata.
+    for (const pair of contract.pairs.filter((pair: { role: string }) => pair.role === "supplemental")) {
+      expect(pair.on).not.toBe("@rest");
     }
   });
 
   it("checks subtle outlines on control surfaces and their hover step on bg2", () => {
-    const surfaces = ["bg0", "bg1", "bg1-highlight", "bg1-bright", "bg2", "bg3", "sidebar-bg"];
+    const surfaces = ["bg1", "bg1-raised", "bg3", "nav-bg"];
     expect(contract.roles.boundary.min).toBe(1.45);
     expect(contract.roles["boundary-hover"].min).toBe(1.6);
     expect(contract.pairs).toContainEqual(expect.objectContaining({

@@ -47,7 +47,7 @@
 }
 
 .zd-field:hover {
-  --zd-field-fill: var(--bg2-highlight);
+  --zd-field-fill: var(--selected-bg);
 }
 
 /* A read-only field has nothing to edit, so the pointer changes nothing. A
@@ -68,7 +68,7 @@
 }
 
 .zd-field[data-state="open"] {
-  --zd-field-fill: var(--bg2-highlight);
+  --zd-field-fill: var(--selected-bg);
 }
 
 .zd-field:focus-visible[data-zeros-keyboard-focus],
@@ -80,7 +80,7 @@
 
 .zd-field[aria-invalid="true"],
 .zd-field:has([aria-invalid="true"]) {
-  box-shadow: inset 0 0 0 1px var(--red-primary);
+  box-shadow: inset 0 0 0 1px var(--red-text);
 }
 
 .zd-field:has(:disabled),
@@ -246,7 +246,7 @@
 .zd-icon-button:hover:not(:disabled),
 .zd-icon-button[data-state="open"],
 .zd-icon-button[aria-expanded="true"] {
-  background-color: var(--bg2-highlight);
+  background-color: var(--selected-bg);
   color: var(--fg1);
 }
 
@@ -489,7 +489,7 @@
 .zd-limit-field:hover,
 .zd-size-control:hover,
 .zd-size-control:has(.zd-size-trigger[data-state="open"]) {
-  --zd-field-fill: var(--bg2-highlight);
+  --zd-field-fill: var(--selected-bg);
 }
 
 .zd-limit-field:focus-within,
@@ -562,7 +562,7 @@
 }
 
 .zd-alignment-point:hover:not(:disabled) {
-  background-color: var(--bg2-highlight);
+  background-color: var(--selected-bg);
 }
 
 .zd-alignment-point:focus-visible:where(:not([data-zeros-focus-visible="false"])) {
@@ -1023,14 +1023,14 @@
 }
 
 .zd-canvas-tool:hover:not(:disabled) {
-  background-color: var(--bg2-highlight);
+  background-color: var(--selected-bg);
   color: var(--fg1);
 }
 
 /* An open menu holds the hover; a toggle takes IconButton's pressed look, the
  * selected fill with no edge. */
 .zd-canvas-tool[aria-expanded="true"] {
-  background-color: var(--bg2-highlight);
+  background-color: var(--selected-bg);
   color: var(--fg1);
 }
 
@@ -1162,11 +1162,11 @@
 .zd-design-selection-outline[data-design-component-selection],
 [data-design-component-selection],
 [data-design-frame-component][data-design-frame-root-selected] {
-  --design-selection-stroke: var(--violet-primary);
+  --design-selection-stroke: var(--violet-text);
   --design-selection-soft: var(--violet-bg);
   --design-selection-handle-fill: var(--violet-bg);
   --design-selection-label-bg: var(--violet-bg);
-  --design-selection-label-fg: var(--violet-fg);
+  --design-selection-label-fg: var(--violet-on-bg);
 }
 
 .zd-design-selection-outline {
@@ -1560,7 +1560,7 @@
 
 .zd-design-inline-spacing-input[aria-invalid="true"] {
   box-shadow: inset 0 0 0 calc(1px * var(--design-canvas-inverse-zoom))
-    var(--red-primary);
+    var(--red-text);
 }
 
 .zd-design-inline-spacing-input::selection {
@@ -1638,11 +1638,11 @@
 
 /* Layer selection stays neutral: the tree reads as chrome, and the canvas keeps
  * sole ownership of the design accent. Like every tree, the selected row fills
- * bg2-highlight with fg1, a step above hover; owned rows sit between. */
+ * selected-bg with fg1, a step above hover; owned rows sit between. */
 .zd-design-layer-selected,
 .zd-design-layer-selected:hover {
   border-width: 0;
-  background-color: var(--bg2-highlight);
+  background-color: var(--selected-bg);
   box-shadow: none;
   color: var(--fg1);
 }
@@ -1663,12 +1663,12 @@
 
 .zd-design-layer-row[data-design-layer-component-owner],
 .zd-design-layer-row[data-design-frame-component] {
-  color: var(--violet-primary);
+  color: var(--violet-text);
 }
 
 .zd-design-layer-row[data-design-layer-component-owner] > svg,
 .zd-design-layer-row[data-design-frame-component] > svg {
-  color: var(--violet-primary);
+  color: var(--violet-text);
 }
 
 .zd-design-layer-selected > svg {
@@ -2100,7 +2100,7 @@
   padding: 10px 12px;
   border-radius: var(--radius-md);
   background: var(--yellow-bg);
-  color: var(--yellow-fg);
+  color: var(--yellow-on-bg);
 }
 .zd-canvas-item .zd-canvas-note-text {
   display: block;

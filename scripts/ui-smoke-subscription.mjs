@@ -318,7 +318,7 @@ export async function runSubscriptionSmoke({ page, check }) {
     const disconnect = page.getByRole("menuitem", { name: "Disconnect", exact: true });
     const red = await disconnect.evaluate((el) => {
       const probe = document.createElement("span");
-      probe.style.color = "var(--red-primary)";
+      probe.style.color = "var(--red-text)";
       el.append(probe);
       const color = getComputedStyle(probe).color;
       probe.remove();

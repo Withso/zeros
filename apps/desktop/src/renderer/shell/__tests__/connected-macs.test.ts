@@ -67,10 +67,10 @@ describe("Connected Macs", () => {
     // On: the status line with its dot, then This Mac's folder and its menu.
     const folder = "/Users/alex/zeros/cloud-sync/zeros/w-19";
     for (const [status, words, dot] of [
-      [{ workspaceId: "w", state: "in_sync", problems: 0, folder }, "In sync", "bg-green-primary"],
+      [{ workspaceId: "w", state: "in_sync", problems: 0, folder }, "In sync", "bg-green-text"],
       [{ workspaceId: "w", state: "syncing", files: 12, problems: 0, folder }, "Syncing (12 files)", "bg-fg3"],
       [{ workspaceId: "w", state: "paused", problems: 0, folder }, "Paused (workspace asleep)", "bg-fg3"],
-      [{ workspaceId: "w", state: "error", reason: "too_many_bytes", problems: 0, folder }, "Error (more than 5 GB)", "bg-red-primary"],
+      [{ workspaceId: "w", state: "error", reason: "too_many_bytes", problems: 0, folder }, "Error (more than 5 GB)", "bg-red-text"],
     ] as const) {
       const markup = html(status);
       expect(switches(markup)[0]).toMatchObject({ checked: true });

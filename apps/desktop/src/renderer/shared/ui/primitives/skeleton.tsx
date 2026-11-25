@@ -4,12 +4,12 @@ import { cn } from "@/renderer/shared/ui/cn";
 
 const SURFACE = {
   page: "bg-bg2",
-  // Cards fill with bg1-bright, which is bg2 in Light: step up to stay visible.
-  card: "bg-bg2-highlight",
+  // Cards fill with bg1-raised, which is bg2 in Light: step up to stay visible.
+  card: "bg-selected-bg",
 } as const;
 
 /** A quiet placeholder bar for content that is still loading: 8px tall,
- * `bg2` (`bg2-highlight` on a card), 4px corners, no shimmer. Give it a
+ * `bg2` (`selected-bg` on a card), 4px corners, no shimmer. Give it a
  * width; screen readers skip it, so the surrounding region carries
  * `aria-busy` or a label. */
 export function SkeletonLine({

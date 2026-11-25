@@ -225,10 +225,10 @@ export function ReviewChecksSection({
 }
 
 const SUMMARY_PARTS = [
-  { key: "failed", label: "failed", outcome: "failed", bar: "bg-red-primary" },
-  { key: "running", label: "running", outcome: "pending", bar: "bg-yellow-primary" },
+  { key: "failed", label: "failed", outcome: "failed", bar: "bg-red-text" },
+  { key: "running", label: "running", outcome: "pending", bar: "bg-yellow-text" },
   { key: "expected", label: "expected", outcome: "expected", bar: "bg-border3" },
-  { key: "passed", label: "passed", outcome: "passed", bar: "bg-green-primary" },
+  { key: "passed", label: "passed", outcome: "passed", bar: "bg-green-text" },
 ] as const;
 
 /** Counts per state over a bar whose segments share its width by count. */

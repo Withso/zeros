@@ -152,7 +152,7 @@ describe("Toast", () => {
   it("is 360px with its close inside the top-right corner and info in blue", () => {
     expect(toast).toContain("w-90");
     expect(toast).not.toContain("w-[350px]");
-    expect(toast).toContain('info: "text-blue-primary"');
+    expect(toast).toContain('info: "text-accent-text"');
     expect(toast).not.toContain("-left-2 -top-2");
     expect(toast).toContain("<IconButton");
   });
@@ -177,7 +177,7 @@ describe("Popover", () => {
   // with a lift while every other card above the composer sat on its surface.
   it("floats on bg3 with the lift, or docks on the composer's own surface", () => {
     expect(popover).toMatch(/floating:\s*"[^"]*border-border2 shadow-\[var\(--shadow-dropdown\)\]/);
-    expect(popover).toMatch(/composer:\s*"bg-sidebar-bg border-\(--composer-border\) /);
+    expect(popover).toMatch(/composer:\s*"bg-bg1-raised border-\(--composer-border\) /);
     expect(popover).not.toMatch(/composer:\s*"[^"]*shadow/);
     expect(popover).toContain('surface = "floating"');
     const suggestions = source("../../features/agent/composer-editor/suggestion-popup.tsx");

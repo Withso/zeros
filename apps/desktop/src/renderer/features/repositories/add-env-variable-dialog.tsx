@@ -274,7 +274,7 @@ export function AddEnvVariableDialog({
                   className="font-mono text-sm"
                 />
                 {nameIssue && (
-                  <p className="text-xs text-red-primary">
+                  <p className="text-xs text-red-text">
                     {trimmedName}: {nameIssue}
                   </p>
                 )}
@@ -319,7 +319,7 @@ export function AddEnvVariableDialog({
                   Clear
                 </Button>
               </div>
-              <div className="max-h-56 divide-y divide-border1 overflow-y-auto rounded-md border border-border1 bg-bg1-highlight">
+              <div className="max-h-56 divide-y divide-border1 overflow-y-auto rounded-md border border-border1 bg-bg1-raised">
                 {bulk.map((p) => (
                   <div
                     key={p.key}
@@ -332,7 +332,7 @@ export function AddEnvVariableDialog({
                       {p.value}
                     </span>
                     {existingNames.includes(p.key) && (
-                      <span className="shrink-0 text-xs text-muted-fg">
+                      <span className="shrink-0 text-xs text-fg3">
                         replaces stored
                       </span>
                     )}

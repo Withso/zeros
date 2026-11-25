@@ -217,7 +217,7 @@ export function DesignLayerRowIcon({ kind, node }: {
   kind: ReturnType<typeof designLayerRowKind>;
   node: DesignRuntimeTreeNode;
 }) {
-  if (kind === "instance") return <Diamond className="text-violet-primary" data-design-layer-instance="" aria-hidden="true" />;
+  if (kind === "instance") return <Diamond className="text-violet-text" data-design-layer-instance="" aria-hidden="true" />;
   if (kind === "slot") return <SquareDashed data-design-layer-slot="" aria-hidden="true" />;
   if (node.absolute) return <Scan data-design-layer-absolute="" aria-hidden="true" />;
   return (
@@ -354,8 +354,8 @@ const DesignLayerFrameRow = React.memo(function DesignLayerFrameRow({
           <span className={DESIGN_LAYER_DISCLOSURE_SPACER} />
         )}
         {identity ? identityKind === "instance"
-          ? <Diamond className="text-violet-primary" data-design-frame-component-mark="instance" aria-hidden="true" />
-          : <ComponentGlyph className="text-violet-primary fill-current" data-design-frame-component-mark="main" aria-hidden="true" />
+          ? <Diamond className="text-violet-text" data-design-frame-component-mark="instance" aria-hidden="true" />
+          : <ComponentGlyph className="text-violet-text fill-current" data-design-frame-component-mark="main" aria-hidden="true" />
           : frame.kind === "text" ? <Type /> : <FrameLayoutIcon kind={layoutKind} />}
         <DesignLayerRowName rename={rename} name={identity ?? designFrameDisplayName(frame)} actions={actions} />
       </div>

@@ -78,18 +78,18 @@ describe("workspace glyph", () => {
     expect(restingSquare(`bound/${PUZZLE_RESTING_LIMIT - 1}`)).toEqual(cellsOf);
   });
 
-  it("rests quiet in muted-fg, works in fg2, and wears its PR colour in both", () => {
+  it("rests quiet in fg3, works in fg2, and wears its PR colour in both", () => {
     const seed = workspaceGlyphSeed("zeros", "zeros/palembang");
-    expect(render({ seed })).toMatch(/class="[^"]*\btext-muted-fg\b/);
+    expect(render({ seed })).toMatch(/class="[^"]*\btext-fg3\b/);
     expect(render({ seed })).not.toContain('data-active="true"');
     expect(render({ seed, working: true })).toMatch(/class="[^"]*\btext-fg2\b/);
     expect(render({ seed, working: true })).toContain('data-active="true"');
     const tones = {
-      open: "text-green-primary",
-      ready: "text-green-primary",
-      merged: "text-violet-fg",
-      closed: "text-red-fg",
-      conflicts: "text-yellow-primary",
+      open: "text-green-text",
+      ready: "text-green-text",
+      merged: "text-violet-on-bg",
+      closed: "text-red-on-bg",
+      conflicts: "text-yellow-text",
     } as const;
     for (const [pr, cls] of Object.entries(tones)) {
       for (const working of [false, true]) {

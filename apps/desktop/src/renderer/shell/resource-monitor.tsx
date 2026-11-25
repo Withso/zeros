@@ -119,8 +119,8 @@ interface ResourceProcessRowProps {
 // Complete class strings per tone so the UI checks can see every utility.
 const SYSTEM_TONE_CLASS: Record<SystemSummaryTone, string> = {
   default: "text-fg2",
-  warning: "text-yellow-primary font-medium",
-  critical: "text-red-primary font-medium",
+  warning: "text-yellow-text font-medium",
+  critical: "text-red-text font-medium",
 };
 
 // --- HELPERS ---
@@ -246,7 +246,7 @@ const ResourceProcessRow = memo(function ResourceProcessRow({
             ) : null}
             <span className="truncate">{node.name}</span>
             {node.count > 1 && (
-              <span className="text-muted-fg shrink-0">×{node.count}</span>
+              <span className="text-fg3 shrink-0">×{node.count}</span>
             )}
           </span>
         </Tooltip>
@@ -738,7 +738,7 @@ export const ResourceMonitor = memo(function ResourceMonitor() {
                       {formatResourceMemory(totals.memoryBytes)}
                     </strong>
                   </span>
-                  <span className="text-muted-fg text-xs">
+                  <span className="text-fg3 text-xs">
                     {totals.processCount} processes
                   </span>
                 </div>
@@ -750,7 +750,7 @@ export const ResourceMonitor = memo(function ResourceMonitor() {
                 </div>
               )}
               {systemParts.length > 0 && (
-                <p className="text-muted-fg mt-1 text-xs">
+                <p className="text-fg3 mt-1 text-xs">
                   Mac:{" "}
                   {systemParts.map((part, index) => (
                     <React.Fragment key={part.id}>
@@ -853,7 +853,7 @@ export const ResourceMonitor = memo(function ResourceMonitor() {
                 <strong className="text-fg1 font-medium tabular-nums">
                   {formatCpuPercent(totals.peakCpuPercent)}
                 </strong>
-                <span className="text-muted-fg">
+                <span className="text-fg3">
                   {" "}
                   · {formatPeakTime(totals.peakCpuAt)}
                 </span>
@@ -863,7 +863,7 @@ export const ResourceMonitor = memo(function ResourceMonitor() {
                 <strong className="text-fg1 font-medium tabular-nums">
                   {formatResourceMemory(totals.peakMemoryBytes)}
                 </strong>
-                <span className="text-muted-fg">
+                <span className="text-fg3">
                   {" "}
                   · {formatPeakTime(totals.peakMemoryAt)}
                 </span>
@@ -926,7 +926,7 @@ export const ResourceMonitor = memo(function ResourceMonitor() {
                     <div role="row">
                       <div
                         role="gridcell"
-                        className="text-muted-fg px-4 py-2 text-xs"
+                        className="text-fg3 px-4 py-2 text-xs"
                       >
                         More than {MAX_RENDERED_PROCESS_ROWS} rows — sort,
                         stack, or collapse branches to narrow the view.
@@ -938,7 +938,7 @@ export const ResourceMonitor = memo(function ResourceMonitor() {
                       <div role="row">
                         <div
                           role="gridcell"
-                          className="text-muted-fg px-4 pt-2 pb-1 text-xs"
+                          className="text-fg3 px-4 pt-2 pb-1 text-xs"
                         >
                           Other Zeros apps on this Mac
                         </div>
@@ -965,7 +965,7 @@ export const ResourceMonitor = memo(function ResourceMonitor() {
           )}
 
           <Separator />
-          <div className="text-muted-fg flex flex-wrap items-center justify-between gap-x-4 gap-y-1 px-4 py-2 text-xs">
+          <div className="text-fg3 flex flex-wrap items-center justify-between gap-x-4 gap-y-1 px-4 py-2 text-xs">
             {displaySnapshot ? (
               <span>
                 Sampled {formatSampleAge(displaySnapshot.sampledAt)} · scan{" "}

@@ -113,8 +113,8 @@ export function WorkspaceModeToggleView({
               // shared icon button is 28px on its own).
               "size-6 rounded-md p-0 transition-none",
               active
-                ? "bg-bg1-highlight text-blue-fg hover:bg-bg1-highlight hover:text-blue-fg"
-                : "text-fg3 hover:bg-bg1-highlight/80 hover:text-fg3",
+                ? "bg-bg1-raised text-accent-on-bg hover:bg-bg1-raised hover:text-accent-on-bg"
+                : "text-fg3 hover:bg-bg1-raised/80 hover:text-fg2",
             )}
           >
             <option.Icon

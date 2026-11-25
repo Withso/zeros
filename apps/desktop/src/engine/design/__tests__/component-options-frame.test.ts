@@ -16,7 +16,7 @@ const MAIN = `<!doctype html><html><head><title>Chat composer</title>
 <zd-option name="width" type="number" default="1120" min="640" max="1440" unit="px"></zd-option>
 <zd-option name="attachments" type="number" default="2" min="0" max="4"></zd-option>
 <zd-option name="gap" type="number" default="8" unit="px"></zd-option>
-<zd-option name="accent" type="color" default="var(--blue-primary)"></zd-option>
+<zd-option name="accent" type="color" default="var(--accent-text)"></zd-option>
 <zd-option name="label" type="text" default="Send"></zd-option>
 <zd-option name="motion" type="easing" default="ease-out 150ms"></zd-option>
 <zd-derive name="gutter" value="gap * 2" unit="px"></zd-derive>

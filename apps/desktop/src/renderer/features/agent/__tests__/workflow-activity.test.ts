@@ -162,7 +162,7 @@ describe("workflow hover panel", () => {
 
   it("turns every cell green once the workflow completes", () => {
     const html = renderPanel(workflow({ status: "completed" }));
-    expect((html.match(/bg-green-primary/g) ?? []).length).toBe(
+    expect((html.match(/bg-green-text/g) ?? []).length).toBe(
       2 * WORKFLOW_SEGMENT_COUNT,
     );
     expect(html).not.toContain("bg-fg2");

@@ -33,14 +33,14 @@ import {
 } from "./local-storage-store";
 import { SettingsGroup, SettingsRow } from "./settings-ui";
 
-const HINT_CLS = "text-muted-fg m-0 px-0.5 text-3xxs leading-4";
-const AT_LEAST_CLS = "text-muted-fg block text-2xxs leading-3.5";
+const HINT_CLS = "text-fg3 m-0 px-0.5 text-3xxs leading-4";
+const AT_LEAST_CLS = "text-fg3 block text-2xxs leading-3.5";
 
 // Neutral steps from the token ramp; the legend and rows carry the meaning.
 const SEGMENT_CLS: Record<SummaryGroup, string> = {
   work: "bg-fg1",
   providers: "bg-fg2",
-  app: "bg-muted-fg",
+  app: "bg-fg3",
   updates: "bg-border4",
   temporary: "bg-border3",
 };
@@ -97,7 +97,7 @@ export function LocalStoragePanel({ surfaceActive = false }: { surfaceActive?: b
       </div>
       <SettingsGroup title="App data">{rows(APP_DATA)}</SettingsGroup>
       <SettingsGroup title="Temporary">{rows(TEMPORARY)}</SettingsGroup>
-      <p className="text-muted-fg m-0 flex items-start gap-2 text-3xxs leading-4">
+      <p className="text-fg3 m-0 flex items-start gap-2 text-3xxs leading-4">
         <Info className="mt-px size-3.5 shrink-0" aria-hidden />
         <span>Files in cloud workspaces live on their Cloud Computer and are not counted here.</span>
       </p>
@@ -117,7 +117,7 @@ function Summary({ view, now, active }: { view: LocalStorageView; now: number; a
         <p className="m-0 flex min-w-0 items-baseline gap-1.5">
           {total.kind === "known" ? (
             <>
-              {!total.exact && <span className="text-muted-fg text-3xxs">At least</span>}
+              {!total.exact && <span className="text-fg3 text-3xxs">At least</span>}
               <span className="text-fg1 text-lg leading-6 font-medium tabular-nums">{formatBytes(total.bytes)}</span>
             </>
           ) : total.kind === "pending" ? (
@@ -125,12 +125,12 @@ function Summary({ view, now, active }: { view: LocalStorageView; now: number; a
               <SkeletonLine surface="card" className="w-16" />
             </span>
           ) : (
-            <span className="text-muted-fg text-xs leading-6">Not measured</span>
+            <span className="text-fg3 text-xs leading-6">Not measured</span>
           )}
           <span className="text-fg3 text-xs">on this Mac</span>
         </p>
         <div className="flex shrink-0 items-center gap-2">
-          <span role="status" className="text-muted-fg text-3xxs whitespace-nowrap">
+          <span role="status" className="text-fg3 text-3xxs whitespace-nowrap">
             {status}
           </span>
           <Button
@@ -187,7 +187,7 @@ function StorageRow({
 }) {
   const Icon = spec.icon;
   const hint = spec.showsLocation ? (
-    <span className="text-muted-fg block truncate font-mono text-2xxs">{category?.location ?? " "}</span>
+    <span className="text-fg3 block truncate font-mono text-2xxs">{category?.location ?? " "}</span>
   ) : (
     spec.description
   );
@@ -219,7 +219,7 @@ function Size({ category, failed }: { category: LocalStorageCategory | undefined
           <SkeletonLine surface="card" className="w-13" />
         </span>
       ) : (
-        <span className="text-muted-fg text-3xxs">Not measured</span>
+        <span className="text-fg3 text-3xxs">Not measured</span>
       )}
     </div>
   );
@@ -237,11 +237,11 @@ function RowAction({
   active: boolean;
 }) {
   if (spec.action === "managed")
-    return <span className="text-muted-fg flex h-7 items-center text-3xxs">Managed by Zeros</span>;
+    return <span className="text-fg3 flex h-7 items-center text-3xxs">Managed by Zeros</span>;
   if (spec.action === "clear") {
     if (view.freedBytes !== undefined && !view.clearing)
       return (
-        <span role="status" className="text-green-primary flex h-7 items-center gap-1.5 text-3xxs">
+        <span role="status" className="text-green-text flex h-7 items-center gap-1.5 text-3xxs">
           <Check className="size-3.5" aria-hidden />
           {view.freedBytes === null ? "Cache cleared" : `Freed ${formatBytes(view.freedBytes)}`}
         </span>

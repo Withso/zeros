@@ -2225,7 +2225,7 @@ export const DesignMotionTimeline = React.memo(function DesignMotionTimeline({
               <span className="text-fg1 min-w-0 flex-1 truncate text-xs">
                 {details.name}
               </span>
-              <span className="text-muted-fg text-3xxs tabular-nums">
+              <span className="text-fg3 text-3xxs tabular-nums">
                 {properties.length}
               </span>
             </div>

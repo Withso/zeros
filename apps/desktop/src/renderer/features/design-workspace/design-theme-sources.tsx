@@ -22,13 +22,13 @@ import { Button, Tooltip } from "../../shared/ui/primitives";
 import { cn } from "../../shared/ui/cn";
 
 const STATUS = {
-  ready: { Icon: CircleCheck, label: "Ready", className: "text-green-primary" },
+  ready: { Icon: CircleCheck, label: "Ready", className: "text-green-text" },
   warning: {
     Icon: TriangleAlert,
     label: "Warning",
-    className: "text-yellow-primary",
+    className: "text-yellow-text",
   },
-  error: { Icon: CircleX, label: "Error", className: "text-red-primary" },
+  error: { Icon: CircleX, label: "Error", className: "text-red-text" },
 } as const;
 
 /** A newer cloud engine may report a status this build does not know yet. */
@@ -206,7 +206,7 @@ export function DesignThemeSourceRail({
               <span className="zd-theme-source-name">
                 <GroupChevron
                   aria-hidden="true"
-                  className="text-muted-fg size-3.5 shrink-0"
+                  className="text-fg3 size-3.5 shrink-0"
                 />
                 <span className="truncate">Styles only</span>
                 {groupStatus ? (

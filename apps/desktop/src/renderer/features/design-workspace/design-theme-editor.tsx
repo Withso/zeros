@@ -1061,7 +1061,7 @@ export const DesignThemeEditor = React.memo(function DesignThemeEditor({
                 <div className="zd-field zd-theme-search">
                   <Search
                     aria-hidden="true"
-                    className="text-muted-fg size-3.5 shrink-0"
+                    className="text-fg3 size-3.5 shrink-0"
                   />
                   <Input
                     value={query}
@@ -1161,7 +1161,7 @@ export const DesignThemeEditor = React.memo(function DesignThemeEditor({
                       role="status"
                       className={cn(
                         "zd-theme-parse-status",
-                        parsedImport.error && "text-red-primary",
+                        parsedImport.error && "text-red-text",
                       )}
                     >
                       {parsedImport.error ??
@@ -1513,7 +1513,7 @@ export const DesignThemeEditor = React.memo(function DesignThemeEditor({
                                 <Layers
                                   aria-hidden="true"
                                   data-design-theme-overrides=""
-                                  className="text-muted-fg size-3.5 shrink-0"
+                                  className="text-fg3 size-3.5 shrink-0"
                                 />
                               ) : null}
                             </div>

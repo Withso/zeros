@@ -452,7 +452,7 @@ function DangerZone({ team }: { team: TeamSummary }) {
             variant="ghost"
             size="sm"
             onClick={() => setConfirmOpen(true)}
-            className="text-red-primary hover:bg-red-primary/10 hover:text-red-primary gap-1.5"
+            className="text-red-text hover:bg-red-text/10 hover:text-red-text gap-1.5"
           >
             Delete team
           </Button>
@@ -534,7 +534,7 @@ function DeleteTeamDialog({
             variant="secondary"
             disabled={!nameMatches || busy}
             onClick={() => void destroy()}
-            className="border-red-primary/40 text-red-primary hover:bg-red-primary/10 hover:text-red-primary gap-1.5"
+            className="border-red-text/40 text-red-text hover:bg-red-text/10 hover:text-red-text gap-1.5"
           >
             <Trash2 size={14} />
             {busy ? "Deleting…" : "Delete team"}

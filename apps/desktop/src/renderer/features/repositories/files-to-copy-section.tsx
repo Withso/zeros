@@ -356,7 +356,7 @@ export function FilesToCopySection({
       description="Ignored files to copy into each new workspace."
     >
       {readOnly && (
-        <div className="text-blue-fg bg-blue-bg flex items-center gap-2 rounded-md px-3 py-2 text-xs">
+        <div className="text-accent-on-bg bg-accent-bg flex items-center gap-2 rounded-md px-3 py-2 text-xs">
           <Info className="size-3.5 shrink-0" aria-hidden />
           <span className="min-w-0">
             <code className="font-mono">.worktreeinclude</code> in the repo decides
@@ -375,7 +375,7 @@ export function FilesToCopySection({
       )}
 
       {firstLoad ? (
-        <div className="text-muted-fg flex items-center gap-2 py-4 text-xs">
+        <div className="text-fg3 flex items-center gap-2 py-4 text-xs">
           <RotateCw className="size-3.5 animate-spin" aria-hidden />
           Scanning {project.name}…
         </div>
@@ -383,7 +383,7 @@ export function FilesToCopySection({
         // NOT "nothing needs copying". We never looked — saying the project is
         // already complete would be a claim we have no evidence for, and it is
         // the one message that makes a user stop investigating.
-        <div className="border-border2 bg-bg1-highlight flex flex-col items-center gap-2 rounded-lg border border-dashed px-4 py-6 text-center">
+        <div className="border-border2 bg-bg1-raised flex flex-col items-center gap-2 rounded-lg border border-dashed px-4 py-6 text-center">
           <div className="text-fg1 text-xs leading-4.5 font-medium">
             Couldn&rsquo;t check this project
           </div>
@@ -400,7 +400,7 @@ export function FilesToCopySection({
           </Button>
         </div>
       ) : confirmedEmpty ? (
-        <div className="border-border2 bg-bg1-highlight flex flex-col items-center gap-2 rounded-lg border border-dashed px-4 py-6 text-center">
+        <div className="border-border2 bg-bg1-raised flex flex-col items-center gap-2 rounded-lg border border-dashed px-4 py-6 text-center">
           <div className="text-fg1 text-xs leading-4.5 font-medium">
             Nothing needs copying
           </div>
@@ -410,7 +410,7 @@ export function FilesToCopySection({
         </div>
       ) : liveRows.length > 0 ? (
         <div className="border-border1 overflow-hidden rounded-lg border">
-          <div className="border-border1 bg-bg1-highlight border-b px-3 py-2">
+          <div className="border-border1 bg-bg1-raised border-b px-3 py-2">
             <span className="text-fg1 text-xs font-medium">
               Git ignored files
             </span>
@@ -453,7 +453,7 @@ export function FilesToCopySection({
                   {summaryLead(copyCount)}
                 </span>{" "}
                 will be copied from{" "}
-                <span className="text-blue-primary text-2xxs font-mono">
+                <span className="text-accent-text text-2xxs font-mono">
                   {preview.rootPath}
                 </span>
               </>
@@ -461,7 +461,7 @@ export function FilesToCopySection({
               // The one honest thing left to say when the scan came up short.
               // It replaces a count rather than sitting beside one, so an
               // incomplete scan can never be read as "nothing to copy".
-              <span className="text-muted-fg">
+              <span className="text-fg3">
                 Couldn&rsquo;t work out what would be copied
               </span>
             )}
@@ -496,7 +496,7 @@ export function FilesToCopySection({
       {/* Read-only patterns for the committed-file case. The list above is the
           answer either way; these are the lines that produced it. */}
       {readOnly && preview?.sourceText !== undefined && (
-        <pre className="bg-bg1-highlight text-fg2 text-2xxs m-0 max-h-64 select-text overflow-auto rounded-md px-3 py-2 font-mono leading-relaxed">
+        <pre className="bg-bg1-raised text-fg2 text-2xxs m-0 max-h-64 select-text overflow-auto rounded-md px-3 py-2 font-mono leading-relaxed">
           {preview.sourceText}
         </pre>
       )}
@@ -524,12 +524,12 @@ export function FilesToCopySection({
                     className={cn(
                       "text-xxs rounded-full px-1.5 py-px font-semibold tabular-nums",
                       p.matchCount === null
-                        ? "bg-bg2 text-muted-fg"
+                        ? "bg-bg2 text-fg3"
                         : p.matchCount === 0
-                          ? "bg-red-bg text-red-fg"
+                          ? "bg-red-bg text-red-on-bg"
                           : p.negate
-                            ? "bg-bg2 text-muted-fg"
-                            : "bg-green-bg text-green-fg",
+                            ? "bg-bg2 text-fg3"
+                            : "bg-green-bg text-green-on-bg",
                     )}
                   >
                     {p.matchCount === null
@@ -540,7 +540,7 @@ export function FilesToCopySection({
                   </span>
                   <span className="text-fg1 font-mono">{p.raw}</span>
                   {p.matchCount === 0 && !p.negate && (
-                    <span className="text-muted-fg">matches nothing</span>
+                    <span className="text-fg3">matches nothing</span>
                   )}
                 </div>
               ))}
@@ -606,7 +606,7 @@ export const TreeRowView = memo(function TreeRowView({
   const indent = DEPTH_INDENT[Math.min(depth, DEPTH_INDENT.length - 1)];
   const text = cn(
     "min-w-0 truncate font-mono text-2xxs",
-    checked === false ? "text-muted-fg" : "text-fg1",
+    checked === false ? "text-fg3" : "text-fg1",
     locked && "opacity-55",
   );
   const box = (
@@ -642,12 +642,12 @@ export const TreeRowView = memo(function TreeRowView({
           >
             <ChevronRight
               className={cn(
-                "text-muted-fg size-3 shrink-0 transition-transform",
+                "text-fg3 size-3 shrink-0 transition-transform",
                 expanded && "rotate-90",
               )}
               aria-hidden
             />
-            <Folder className="text-muted-fg size-3 shrink-0" aria-hidden />
+            <Folder className="text-fg3 size-3 shrink-0" aria-hidden />
             <span className={text}>{label}/</span>
           </button>
         </>
@@ -665,7 +665,7 @@ export const TreeRowView = memo(function TreeRowView({
               folder shuffled the column its own children line up in. */}
           <span aria-hidden className="w-3 shrink-0" />
           {folder ? (
-            <Folder className="text-muted-fg size-3 shrink-0" aria-hidden />
+            <Folder className="text-fg3 size-3 shrink-0" aria-hidden />
           ) : (
             <span aria-hidden className="w-3 shrink-0" />
           )}

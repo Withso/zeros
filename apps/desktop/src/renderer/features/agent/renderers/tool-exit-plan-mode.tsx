@@ -92,7 +92,7 @@ export const ExitPlanModeCard: Renderer<AgentToolMessage> = memo(
       ) : status === "rejected" || status === "dismissed" ? (
         <CircleX
           aria-label={status === "dismissed" ? "Dismissed" : "Rejected"}
-          className={status === "dismissed" ? "size-3 shrink-0 text-fg3" : "size-3 shrink-0 text-red-primary"}
+          className={status === "dismissed" ? "size-3 shrink-0 text-fg3" : "size-3 shrink-0 text-red-text"}
         />
       ) : undefined;
 

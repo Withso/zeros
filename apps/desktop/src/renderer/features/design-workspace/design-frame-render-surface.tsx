@@ -410,7 +410,7 @@ export const DesignFrameRenderSurface = React.memo(function DesignFrameRenderSur
     surface = null;
   } else if (!sourcePainted && !still && !sourceEnabled && !recorded) {
     surface = (
-      <div className="bg-bg2 text-muted-fg pointer-events-none flex size-full items-center justify-center gap-2 text-xs">
+      <div className="bg-bg2 text-fg3 pointer-events-none flex size-full items-center justify-center gap-2 text-xs">
         <FileCode2 />
         <span className="max-w-48 truncate">{frame.title}</span>
       </div>

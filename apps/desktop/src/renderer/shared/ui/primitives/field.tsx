@@ -16,7 +16,7 @@ export const FIELD_FOCUS =
   "focus-visible:outline-none focus-visible:data-[zeros-keyboard-focus]:border-accent";
 
 export const FIELD_INVALID =
-  "aria-[invalid=true]:border-red-primary aria-[invalid=true]:hover:border-red-primary focus-visible:data-[zeros-keyboard-focus]:aria-[invalid=true]:border-red-primary focus-visible:data-[zeros-keyboard-focus]:aria-[invalid=true]:ring-1 focus-visible:data-[zeros-keyboard-focus]:aria-[invalid=true]:ring-red-primary";
+  "aria-[invalid=true]:border-red-text aria-[invalid=true]:hover:border-red-text focus-visible:data-[zeros-keyboard-focus]:aria-[invalid=true]:border-red-text focus-visible:data-[zeros-keyboard-focus]:aria-[invalid=true]:ring-1 focus-visible:data-[zeros-keyboard-focus]:aria-[invalid=true]:ring-red-text";
 
 export interface FieldProps {
   label: React.ReactNode;
@@ -58,7 +58,7 @@ export function Field({ label, hint, error, optional = false, className, childre
       </label>
       {control}
       {error ? (
-        <p id={messageId} className="text-red-primary text-3xxs m-0 flex items-center gap-1 leading-4">
+        <p id={messageId} className="text-red-text text-3xxs m-0 flex items-center gap-1 leading-4">
           <CircleAlert aria-hidden className="size-3 shrink-0" />
           {error}
         </p>

@@ -92,9 +92,9 @@ export function saveMergeMethod(provider: ReviewProvider, method: ReviewMergeMet
 
 const STATE_CHIP: Record<PR["state"], { label: string; icon: typeof GitPullRequest; className: string }> = {
   draft: { label: "Draft", icon: GitPullRequestDraft, className: "bg-bg2 text-fg2" },
-  ready: { label: "Open", icon: GitPullRequest, className: "bg-green-bg text-green-fg" },
-  merged: { label: "Merged", icon: GitMerge, className: "bg-violet-bg text-violet-fg" },
-  closed: { label: "Closed", icon: GitPullRequestClosed, className: "bg-red-bg text-red-fg" },
+  ready: { label: "Open", icon: GitPullRequest, className: "bg-green-bg text-green-on-bg" },
+  merged: { label: "Merged", icon: GitMerge, className: "bg-violet-bg text-violet-on-bg" },
+  closed: { label: "Closed", icon: GitPullRequestClosed, className: "bg-red-bg text-red-on-bg" },
 };
 
 export interface ReviewChangeCounts {
@@ -114,8 +114,8 @@ export function copyWithToast(text: string, what: string) {
 function DiffStat({ additions, deletions }: { additions: number; deletions: number }) {
   return (
     <span className="inline-flex shrink-0 gap-1 tabular-nums">
-      <span className="text-green-primary">+{additions}</span>
-      <span className="text-red-primary">−{deletions}</span>
+      <span className="text-green-text">+{additions}</span>
+      <span className="text-red-text">−{deletions}</span>
     </span>
   );
 }
@@ -374,17 +374,17 @@ export function ReviewSection({
 // ── PR status ───────────────────────────────────────────────
 
 const VERDICT_ICON: Record<PrStatusView["tone"], { icon: typeof CircleCheck; className: string }> = {
-  success: { icon: CircleCheck, className: "text-green-primary" },
-  danger: { icon: CircleX, className: "text-red-primary" },
+  success: { icon: CircleCheck, className: "text-green-text" },
+  danger: { icon: CircleX, className: "text-red-text" },
   neutral: { icon: CircleDot, className: "text-fg3" },
-  merged: { icon: GitMerge, className: "text-violet-fg" },
-  closed: { icon: GitPullRequestClosed, className: "text-red-fg" },
+  merged: { icon: GitMerge, className: "text-violet-on-bg" },
+  closed: { icon: GitPullRequestClosed, className: "text-red-on-bg" },
 };
 
 const BLOCKER_ICON: Record<string, { icon: typeof CircleX; className: string }> = {
-  check: { icon: CircleX, className: "text-red-primary" },
-  review: { icon: FileDiff, className: "text-red-primary" },
-  conflicts: { icon: GitMerge, className: "text-yellow-icon" },
+  check: { icon: CircleX, className: "text-red-text" },
+  review: { icon: FileDiff, className: "text-red-text" },
+  conflicts: { icon: GitMerge, className: "text-yellow-text" },
   behind: { icon: ArrowLeft, className: "text-fg3" },
   requirements: { icon: CircleDot, className: "text-fg3" },
 };
@@ -563,8 +563,8 @@ function ReadyAction({
 // ── rail ────────────────────────────────────────────────────
 
 const REVIEW_STATE_ICON: Record<string, { icon: typeof CircleCheck; className: string; label: string }> = {
-  APPROVED: { icon: CircleCheck, className: "text-green-primary", label: "Approved" },
-  CHANGES_REQUESTED: { icon: FileDiff, className: "text-red-primary", label: "Requested changes" },
+  APPROVED: { icon: CircleCheck, className: "text-green-text", label: "Approved" },
+  CHANGES_REQUESTED: { icon: FileDiff, className: "text-red-text", label: "Requested changes" },
   COMMENTED: { icon: MessageSquare, className: "text-fg3", label: "Commented" },
   DISMISSED: { icon: CircleDot, className: "text-fg3", label: "Dismissed" },
 };
@@ -687,7 +687,7 @@ export function ReviewRail({
               rel="noreferrer"
               className="text-fg1 hover:text-fg1 inline-flex min-h-6 items-center gap-2 text-xs no-underline"
             >
-              <CircleDot aria-hidden className="text-green-primary size-3.5 shrink-0" />
+              <CircleDot aria-hidden className="text-green-text size-3.5 shrink-0" />
               <span className="text-fg3 tabular-nums">#{issue}</span>
             </a>
           ))}

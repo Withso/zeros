@@ -36,10 +36,10 @@ const AUTO_EXPAND_MAX_FILES = 25;
 const STATUS_CHIP: Partial<
   Record<ChangedFile["status"], { label: string; cls: string }>
 > = {
-  added: { label: "New", cls: "bg-green-bg text-green-fg" },
-  untracked: { label: "New", cls: "bg-green-bg text-green-fg" },
-  deleted: { label: "Deleted", cls: "bg-red-bg text-red-fg" },
-  renamed: { label: "Renamed", cls: "bg-violet-bg text-violet-fg" },
+  added: { label: "New", cls: "bg-green-bg text-green-on-bg" },
+  untracked: { label: "New", cls: "bg-green-bg text-green-on-bg" },
+  deleted: { label: "Deleted", cls: "bg-red-bg text-red-on-bg" },
+  renamed: { label: "Renamed", cls: "bg-violet-bg text-violet-on-bg" },
 };
 
 export function ReviewChangesSection({
@@ -175,7 +175,7 @@ export function ReviewChangesSection({
         </span>
         <DiffStat additions={totals.additions} deletions={totals.deletions} />
         {viewed.size > 0 && (
-          <span className="text-muted-fg text-xs tabular-nums">
+          <span className="text-fg3 text-xs tabular-nums">
             {viewed.size}/{files.length} viewed
           </span>
         )}

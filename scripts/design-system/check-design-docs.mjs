@@ -71,7 +71,7 @@ function declaredCustomProperties(root) {
   }
   // Contextual properties set through Tailwind arbitrary-property utilities
   // (`[--surface-hover:var(--bg1-hover)]` in shared/ui/layout/surface.tsx,
-  // `[--pane-bg:var(--bg0)]`) are declarations too.
+  // `[--pane-bg:var(--bg1)]`) are declarations too.
   for (const file of rendererSourceFiles(root)) {
     for (const match of readFileSync(file, "utf8").matchAll(/\[(--[a-z0-9-]+):/g)) names.add(match[1]);
   }

@@ -115,7 +115,7 @@ export const SubagentCard: Renderer<AgentToolMessage> = memo(
               // The 12px icon column every feed row shares; the child rail
               // sits on its centre (the 14px glass square overhangs it by 1px).
               "relative inline-flex size-3 shrink-0 items-center justify-center",
-              failed ? "text-red-primary" : "text-fg2",
+              failed ? "text-red-text" : "text-fg2",
             )}
           >
             <span className="inline-flex group-hover/subagent-row:invisible group-focus-visible/subagent-row:invisible group-has-[[data-list-row-disclosure]:focus-visible]/subagent-row:invisible">
@@ -141,17 +141,17 @@ export const SubagentCard: Renderer<AgentToolMessage> = memo(
             // No 22ch cap beside the description: it would hide the model
             // and effort even when the full label fits.
             capped={false}
-            className={failed ? "text-red-primary" : "text-fg1"}
+            className={failed ? "text-red-text" : "text-fg1"}
           >
             {label}
-            {effortText ? <span data-agent-effort="" className={cn("text-fg2 text-xs opacity-80", failed && "text-red-primary")}>{` ${effortText}`}</span> : null}
+            {effortText ? <span data-agent-effort="" className={cn("text-fg2 text-xs opacity-80", failed && "text-red-text")}>{` ${effortText}`}</span> : null}
           </ToolName>
           {!linkedHeader && <span
             data-tool-preview=""
             className={cn(
               "truncate text-xs",
               TOOL_DESCRIPTION_FIT,
-              failed ? "text-red-primary" : "text-fg2",
+              failed ? "text-red-text" : "text-fg2",
             )}
           >
             {headerText}
@@ -164,7 +164,7 @@ export const SubagentCard: Renderer<AgentToolMessage> = memo(
           <ListRowGroup className="group/subagent-row flex-wrap" onToggle={toggleOpen}>
             {header}
             {headerLinks.map((href) => <LocalLinkPill key={href} href={href} />)}
-            <span data-tool-preview="" className={cn("truncate text-xs", TOOL_DESCRIPTION_FIT, failed ? "text-red-primary" : "text-fg2")}>{headerText}</span>
+            <span data-tool-preview="" className={cn("truncate text-xs", TOOL_DESCRIPTION_FIT, failed ? "text-red-text" : "text-fg2")}>{headerText}</span>
           </ListRowGroup>
         ) : header}
         {open && (

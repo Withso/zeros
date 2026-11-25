@@ -78,7 +78,7 @@ export function NoCreatorBar({ folder, surfaceActive }: { folder: string; surfac
         {...(self.state === "ineligible" || (message && !confirming) ? {
           details: <>
             {self.state === "ineligible" && <p className="text-fg3 mt-1 text-xs">{self.reason}</p>}
-            {message && !confirming && <p role="alert" className="text-red-fg mt-1 text-xs">{message}</p>}
+            {message && !confirming && <p role="alert" className="text-red-on-bg mt-1 text-xs">{message}</p>}
           </>,
         } : {})}
         actions={<div className="flex shrink-0 items-center gap-2">
@@ -92,7 +92,7 @@ export function NoCreatorBar({ folder, surfaceActive }: { folder: string; surfac
             <DialogHeader><DialogTitle>{copy.title}</DialogTitle></DialogHeader>
             <DialogBody>
               <DialogDescription>{copy.body}</DialogDescription>
-              {message && <p className="text-red-primary text-xs" role="alert">{message}</p>}
+              {message && <p className="text-red-text text-xs" role="alert">{message}</p>}
             </DialogBody>
             <DialogFooter>
               <Button variant="secondary" size="sm" disabled={submitting} onClick={() => setConfirming(false)}>Back</Button>

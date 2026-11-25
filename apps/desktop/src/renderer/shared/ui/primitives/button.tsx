@@ -33,26 +33,26 @@ const buttonVariants = cva(
           "bg-primary-button-bg text-primary-button-fg hover:bg-primary-button-hover",
         // SECONDARY — the everyday button, wearing the dropdown trigger's
         // exact chrome: TRANSPARENT fill so it blends with whatever surface it
-        // sits on (bg1 / bg2 / bg3 alike) + border3 → hover/open bg2-highlight
+        // sits on (bg1 / bg2 / bg3 alike) + border3 → hover/open selected-bg
         // + border4, so a secondary button and a Select are indistinguishable
         // at rest and on hover. Pressed (aria-pressed) is the selected fill:
         // selection never draws or changes an edge.
         secondary:
-          "border-border3 bg-transparent text-fg1 hover:border-border4 hover:bg-bg2-highlight data-[state=open]:border-border4 data-[state=open]:bg-bg2-highlight aria-pressed:bg-selected-bg aria-pressed:hover:bg-selected-bg",
+          "border-border3 bg-transparent text-fg1 hover:border-border4 hover:bg-selected-bg data-[state=open]:border-border4 data-[state=open]:bg-selected-bg aria-pressed:bg-selected-bg aria-pressed:hover:bg-selected-bg",
         // GHOST — transparent, no outline; toolbar and subtle text actions (a
         // dialog's Cancel). Its open menu holds the hover; pressed is the
         // selected fill with no edge.
         ghost:
-          "hover:bg-bg2-highlight hover:text-fg1 data-[state=open]:bg-bg2-highlight data-[state=open]:text-fg1 aria-pressed:bg-selected-bg aria-pressed:text-fg1 aria-pressed:hover:bg-selected-bg",
-        // DESTRUCTIVE (primary) — solid red fill (--red-secondary); text is the
-        // static --red-secondary-fg (white in both themes — fg1 would flip dark in light).
+          "hover:bg-selected-bg hover:text-fg1 data-[state=open]:bg-selected-bg data-[state=open]:text-fg1 aria-pressed:bg-selected-bg aria-pressed:text-fg1 aria-pressed:hover:bg-selected-bg",
+        // DESTRUCTIVE (primary) — solid red fill (--red-solid); text is the
+        // static --red-solid-fg (white in both themes — fg1 would flip dark in light).
         destructive:
-          "bg-red-secondary text-red-secondary-fg hover:bg-red-secondary-hover",
+          "bg-red-solid text-red-solid-fg hover:bg-red-solid-hover",
         // DESTRUCTIVE (secondary) — same neutral surface as Secondary
-        // (transparent fill + border3 → hover bg2-highlight/border4);
-        // red-primary text carries the danger cue.
+        // (transparent fill + border3 → hover selected-bg/border4);
+        // red-text text carries the danger cue.
         "destructive-secondary":
-          "border-border3 bg-transparent text-red-primary hover:border-border4 hover:bg-bg2-highlight",
+          "border-border3 bg-transparent text-red-text hover:border-border4 hover:bg-selected-bg",
         // LINK — an action inside a line of text (a meta row's chat name,
         // View checks): fg2 text that brightens on hover, on the text's own
         // 16px line box, with no fill, edge or padding.

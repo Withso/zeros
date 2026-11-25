@@ -92,7 +92,7 @@ const FILTER_KEYS = ["statuses", "prStates", "owners", "unreadOnly", "draftOnly"
 const GROUP_KEYS = ["grouping", "thenBy", "hideEmptyGroups"] as const;
 const VIEW_KEYS = [...SORT_KEYS, ...FILTER_KEYS, ...GROUP_KEYS, "showProjectName", "compact", "expandChildren", "showArchived"] as const;
 
-const APPLIED_CLS = "text-blue-fg [&>svg]:text-blue-fg";
+const APPLIED_CLS = "text-accent-on-bg [&>svg]:text-accent-on-bg";
 const VALUE_CLS = "text-fg3 ml-3 shrink-0 text-3xxs tabular-nums";
 const ICON_CLS = "text-fg2 size-3.5 shrink-0";
 
@@ -111,7 +111,7 @@ function MenuHeader({ label, onReset }: { label: string; onReset?: (() => void) 
       <DropdownMenuLabel className="text-fg3 p-0 text-3xxs font-medium">{label}</DropdownMenuLabel>
       {onReset && (
         <DropdownMenuItem
-          className="text-blue-fg h-6 w-auto px-1.5 text-3xxs"
+          className="text-accent-on-bg h-6 w-auto px-1.5 text-3xxs"
           onSelect={(event) => {
             event.preventDefault();
             onReset();
@@ -127,9 +127,9 @@ function MenuHeader({ label, onReset }: { label: string; onReset?: (() => void) 
 function SubTrigger({ icon: IconCmp, label, value, applied }: { icon: Icon; label: string; value?: ReactNode; applied: boolean }) {
   return (
     <DropdownMenuSubTrigger className={cn(applied && APPLIED_CLS)} data-applied={applied || undefined}>
-      <IconCmp strokeWidth={1.5} className={cn(ICON_CLS, applied && "text-blue-fg")} />
+      <IconCmp strokeWidth={1.5} className={cn(ICON_CLS, applied && "text-accent-on-bg")} />
       <span className="min-w-0 flex-1 truncate">{label}</span>
-      {value != null && <span className={cn(VALUE_CLS, applied && "text-blue-fg")}>{value}</span>}
+      {value != null && <span className={cn(VALUE_CLS, applied && "text-accent-on-bg")}>{value}</span>}
     </DropdownMenuSubTrigger>
   );
 }
@@ -162,7 +162,7 @@ function SwitchRow({
         onChange(!checked);
       }}
     >
-      <IconCmp strokeWidth={1.5} className={cn(ICON_CLS, applied && "text-blue-fg")} />
+      <IconCmp strokeWidth={1.5} className={cn(ICON_CLS, applied && "text-accent-on-bg")} />
       <span className="min-w-0 flex-1 truncate">{label}</span>
       <Switch checked={checked} disabled={disabled} tabIndex={-1} aria-hidden="true" className="pointer-events-none ml-3 scale-90" />
     </DropdownMenuItem>
@@ -177,9 +177,9 @@ function CheckRow({ label, checked, count, onChange, icon: IconCmp }: { label: s
       onSelect={(event) => event.preventDefault()}
       onCheckedChange={onChange}
     >
-      {IconCmp && <IconCmp strokeWidth={1.5} className={cn(ICON_CLS, checked && "text-blue-fg")} />}
+      {IconCmp && <IconCmp strokeWidth={1.5} className={cn(ICON_CLS, checked && "text-accent-on-bg")} />}
       <span className="min-w-0 flex-1 truncate">{label}</span>
-      {count != null && <span className={cn(VALUE_CLS, checked && "text-blue-fg")}>{count}</span>}
+      {count != null && <span className={cn(VALUE_CLS, checked && "text-accent-on-bg")}>{count}</span>}
     </DropdownMenuCheckboxItem>
   );
 }
@@ -308,7 +308,7 @@ export function SidebarWorkspaceMenu({
           >
             <ListFilter strokeWidth={1.5} />
             {anyApplied && (
-              <span data-filter-indicator aria-hidden="true" className="bg-blue-primary absolute top-0.5 right-0.5 size-1.5 rounded-full" />
+              <span data-filter-indicator aria-hidden="true" className="bg-accent-text absolute top-0.5 right-0.5 size-1.5 rounded-full" />
             )}
           </IconButton>
         </DropdownMenuTrigger>
@@ -322,7 +322,7 @@ export function SidebarWorkspaceMenu({
             <DropdownMenuRadioGroup value={sort} onValueChange={(value) => onSortChange(value as SidebarWorkspaceSort)} aria-label="Sort by">
               {SORTS.map(({ value, label, icon: IconCmp }) => (
                 <DropdownMenuRadioItem key={value} value={value} className={cn(value !== "updated" && sort === value && APPLIED_CLS)}>
-                  <IconCmp strokeWidth={1.5} className={cn(ICON_CLS, value !== "updated" && sort === value && "text-blue-fg")} />
+                  <IconCmp strokeWidth={1.5} className={cn(ICON_CLS, value !== "updated" && sort === value && "text-accent-on-bg")} />
                   {label}
                 </DropdownMenuRadioItem>
               ))}
@@ -334,7 +334,7 @@ export function SidebarWorkspaceMenu({
                 {newest}
               </DropdownMenuRadioItem>
               <DropdownMenuRadioItem value="asc" className={cn(view.direction === "asc" && APPLIED_CLS)}>
-                <ArrowUp strokeWidth={1.5} className={cn(ICON_CLS, view.direction === "asc" && "text-blue-fg")} />
+                <ArrowUp strokeWidth={1.5} className={cn(ICON_CLS, view.direction === "asc" && "text-accent-on-bg")} />
                 {oldest}
               </DropdownMenuRadioItem>
             </DropdownMenuRadioGroup>
@@ -400,7 +400,7 @@ export function SidebarWorkspaceMenu({
                     <span className="min-w-0">
                       <span className="block truncate">{label}</span>
                       {repositories.some((other) => other.project.id !== project.id && other.label === label) && (
-                        <span className="text-muted-fg text-3xxs block truncate">{project.repoRoot}</span>
+                        <span className="text-fg3 text-3xxs block truncate">{project.repoRoot}</span>
                       )}
                     </span>
                   </DropdownMenuCheckboxItem>
@@ -447,7 +447,7 @@ export function SidebarWorkspaceMenu({
             <DropdownMenuRadioGroup value={groupValue} onValueChange={(value) => setGroup(value as GroupValue)} aria-label="Group">
               {groups.map(({ value, label, icon: IconCmp }) => (
                 <DropdownMenuRadioItem key={value} value={value} className={cn(value !== "grouped" && groupValue === value && APPLIED_CLS)}>
-                  <IconCmp strokeWidth={1.5} className={cn(ICON_CLS, value !== "grouped" && groupValue === value && "text-blue-fg")} />
+                  <IconCmp strokeWidth={1.5} className={cn(ICON_CLS, value !== "grouped" && groupValue === value && "text-accent-on-bg")} />
                   {label}
                 </DropdownMenuRadioItem>
               ))}
@@ -470,7 +470,7 @@ export function SidebarWorkspaceMenu({
                     if (!then || value === groupValue) return [];
                     return [(
                       <DropdownMenuRadioItem key={value} value={then} className={cn(view.thenBy === then && APPLIED_CLS)}>
-                        <IconCmp strokeWidth={1.5} className={cn(ICON_CLS, view.thenBy === then && "text-blue-fg")} />
+                        <IconCmp strokeWidth={1.5} className={cn(ICON_CLS, view.thenBy === then && "text-accent-on-bg")} />
                         {label}
                       </DropdownMenuRadioItem>
                     )];

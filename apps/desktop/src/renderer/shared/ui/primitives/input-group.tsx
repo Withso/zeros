@@ -25,7 +25,7 @@ function InputGroup({ className, ...props }: React.ComponentProps<"div">) {
         "has-[[data-slot=input-group-control]:focus-visible[data-zeros-keyboard-focus]]:border-accent",
 
         // Error state.
-        "has-[[data-slot][aria-invalid=true]]:border-red-primary",
+        "has-[[data-slot][aria-invalid=true]]:border-red-text",
 
         className
       )}
@@ -35,7 +35,7 @@ function InputGroup({ className, ...props }: React.ComponentProps<"div">) {
 }
 
 const inputGroupAddonVariants = cva(
-  "flex h-auto cursor-text items-center justify-center gap-2 py-1.5 text-xs leading-4.5 font-medium text-fg2 select-none group-data-[disabled=true]/input-group:opacity-50 [&>kbd]:rounded-sm [&>svg:not([class*='size-'])]:size-3.5 [&>svg:not([class*='text-'])]:text-muted-fg",
+  "flex h-auto cursor-text items-center justify-center gap-2 py-1.5 text-xs leading-4.5 font-medium text-fg2 select-none group-data-[disabled=true]/input-group:opacity-50 [&>kbd]:rounded-sm [&>svg:not([class*='size-'])]:size-3.5 [&>svg:not([class*='text-'])]:text-fg3",
   {
     variants: {
       align: {

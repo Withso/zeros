@@ -70,7 +70,7 @@ interface EventRowProps {
 // the only status signal.
 const TONE_ROW_TINT: Record<ReturnType<typeof statusTone>, string> = {
   ok: "",
-  fail: "text-red-primary",
+  fail: "text-red-text",
   run: "",
   pending: "",
 };
@@ -79,7 +79,7 @@ const TONE_ROW_TINT: Record<ReturnType<typeof statusTone>, string> = {
 // the tool NAME stays `fg1` / 14px. Only the failed tone overrides to red.
 const TONE_ICON_COLOR: Record<ReturnType<typeof statusTone>, string> = {
   ok: "text-fg3",
-  fail: "text-red-primary [&_*]:text-red-primary!",
+  fail: "text-red-text [&_*]:text-red-text!",
   run: "text-fg3",
   pending: "text-fg3",
 };
@@ -158,7 +158,7 @@ export const EventRow = memo(function EventRow({
       onPointerEnter={warmFile}
       onFocus={warmFile}
       onClick={() => { if (canOpen && path) openFilePill(ctx.attachmentCwd, path, destination); }}
-      className={cn(TOOL_DESCRIPTION_FIT, sTone === "fail" && "border-red-primary/25 bg-red-bg text-red-fg hover:bg-red-bg [&_*]:text-red-fg!")}
+      className={cn(TOOL_DESCRIPTION_FIT, sTone === "fail" && "border-red-text/25 bg-red-bg text-red-on-bg hover:bg-red-bg [&_*]:text-red-on-bg!")}
     />
   ) : null;
   if (filePill && hoverPreview) {
@@ -177,7 +177,7 @@ export const EventRow = memo(function EventRow({
     <ToolPreview
       previewRef={previewAppear}
       mono={!!localCli && sTone !== "fail"}
-      className={sTone === "fail" ? "bg-red-bg text-red-fg" : undefined}
+      className={sTone === "fail" ? "bg-red-bg text-red-on-bg" : undefined}
     >{meta.target}</ToolPreview>
   ) : null;
   const toggle = () => {
@@ -263,7 +263,7 @@ export const EventRow = memo(function EventRow({
       <ToolName
         label={sTone === "fail" ? "Error" : meta.label}
         capped={!!(filePill || preview || localTargets.length)}
-        className={sTone === "fail" ? "text-red-primary" : "text-fg1"}
+        className={sTone === "fail" ? "text-red-text" : "text-fg1"}
       />
 
       {!separateTargets && preview}

@@ -38,8 +38,8 @@ import { startElapsedDisplay } from "./elapsed-display";
 // Shared utility classes — kept as module constants so consumers
 // composing their own className don't have to redefine the base.
 const LIVE_DURATION_CLS =
-  "zeros-agent-live-duration text-xs tabular-nums text-blue-primary";
-const FINAL_DURATION_CLS = "text-xs tabular-nums text-muted-fg";
+  "zeros-agent-live-duration text-xs tabular-nums text-accent-text";
+const FINAL_DURATION_CLS = "text-xs tabular-nums text-fg3";
 
 interface LiveDurationProps {
   startedAt: number;

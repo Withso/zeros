@@ -237,11 +237,11 @@ export function paintAnnotationMarks(
 }
 
 const COLOR_TOKENS: Record<AnnotationColor, string> = {
-  red: "var(--red-primary)",
-  yellow: "var(--yellow-primary)",
-  green: "var(--green-primary)",
-  blue: "var(--blue-primary)",
-  violet: "var(--violet-primary)",
+  red: "var(--red-text)",
+  yellow: "var(--yellow-text)",
+  green: "var(--green-text)",
+  blue: "var(--accent-text)",
+  violet: "var(--violet-text)",
 };
 
 /** The theme's colors as a canvas takes them, read where `element` is. */

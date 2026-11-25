@@ -21,7 +21,7 @@ const inputVariants = cva(
       appearance: {
         outline: "",
         inline:
-          "rounded-sm border-transparent px-1.5 hover:border-transparent hover:bg-bg2-highlight focus-visible:data-[zeros-keyboard-focus]:bg-bg1",
+          "rounded-sm border-transparent px-1.5 hover:border-transparent hover:bg-selected-bg focus-visible:data-[zeros-keyboard-focus]:bg-bg1",
       },
       mono: { true: "font-mono text-3xxs", false: "" },
     },

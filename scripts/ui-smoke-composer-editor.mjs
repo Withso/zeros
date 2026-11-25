@@ -393,7 +393,7 @@ export async function runComposerEditorSmoke({ page, check }) {
         shadow: style.boxShadow,
         inner,
         selectedBg: token("--selected-bg", "backgroundColor"),
-        hoverBg: token("--bg2-highlight", "backgroundColor"),
+        hoverBg: token("--selected-bg", "backgroundColor"),
         hoverBorder: token("--border3", "color"),
       };
     });
@@ -406,7 +406,7 @@ export async function runComposerEditorSmoke({ page, check }) {
     .catch(() => {});
   const hoveredPill = await pillShell();
   check(
-    "a hovered pill fills bg2-highlight on border3 as one shape",
+    "a hovered pill fills selected-bg on border3 as one shape",
     hoveredPill.background === hoveredPill.hoverBg &&
       hoveredPill.border === hoveredPill.hoverBorder &&
       hoveredPill.inner.every((fill) => fill === "rgba(0, 0, 0, 0)"),

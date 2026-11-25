@@ -904,8 +904,8 @@ function ChangesDiffHeader({
         {file.path}
       </button>
       <span className="flex shrink-0 gap-1 tabular-nums">
-        <span className="text-green-primary">+{file.additions}</span>
-        <span className="text-red-primary">−{file.deletions}</span>
+        <span className="text-green-text">+{file.additions}</span>
+        <span className="text-red-text">−{file.deletions}</span>
       </span>
       {conflicts && !collapsed && (
         <ConflictNavigator
@@ -937,7 +937,7 @@ function ChangesDiffHeader({
         <Tooltip label={notice}>
           <CircleAlert
             aria-label={notice}
-            className="text-yellow-primary size-3.5 shrink-0"
+            className="text-yellow-text size-3.5 shrink-0"
           />
         </Tooltip>
       )}

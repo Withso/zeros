@@ -34,7 +34,7 @@ export function BrowserAppearanceMenu({
     <DropdownMenuSub>
       <DropdownMenuSubTrigger>
         <span className="flex-1">Appearance</span>
-        <span className="text-muted-fg">{currentLabel}</span>
+        <span className="text-fg3">{currentLabel}</span>
       </DropdownMenuSubTrigger>
       <DropdownMenuSubContent className="min-w-[140px]">
         <DropdownMenuRadioGroup

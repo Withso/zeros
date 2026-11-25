@@ -55,7 +55,7 @@ describe("EmptyState", () => {
     expect(line).toBeLessThan(detail);
     expect(detail).toBeLessThan(error);
     expect(error).toBeLessThan(action);
-    expect(markup).toMatch(/role="alert" data-slot="empty-state-error" class="text-red-primary[^"]*text-3xxs leading-4/);
+    expect(markup).toMatch(/role="alert" data-slot="empty-state-error" class="text-red-text[^"]*text-3xxs leading-4/);
     expect(markup).not.toContain("bg-red-bg");
   });
 });

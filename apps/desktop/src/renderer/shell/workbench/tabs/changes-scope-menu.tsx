@@ -204,12 +204,12 @@ function HistoryItems({
           >
             <span className="min-w-0 flex-1 truncate">{row.label}</span>
             {row.additions !== undefined && (
-              <span className="text-green-primary shrink-0 tabular-nums">
+              <span className="text-green-text shrink-0 tabular-nums">
                 +{row.additions}
               </span>
             )}
             {row.deletions !== undefined && row.deletions > 0 && (
-              <span className="text-red-primary shrink-0 tabular-nums">
+              <span className="text-red-text shrink-0 tabular-nums">
                 −{row.deletions}
               </span>
             )}
@@ -227,7 +227,7 @@ function HistoryItems({
         </DropdownMenuItem>
       )}
       {error ? !managed && (
-        <div role="alert" className="text-red-fg px-2 py-1.5 text-xs">
+        <div role="alert" className="text-red-on-bg px-2 py-1.5 text-xs">
           <p className="m-0">{error}</p>
           <Button
             variant="ghost"

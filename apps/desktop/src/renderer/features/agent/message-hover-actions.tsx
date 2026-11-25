@@ -64,7 +64,7 @@ export function MessageHoverActions({
       <Toolbar aria-label="Message actions">
         {time && (
           <Tooltip label={`${timeLabel} ${new Date(createdAt!).toLocaleString()}`}>
-            <ToolbarText className="text-muted-fg tabular-nums select-none">{time}</ToolbarText>
+            <ToolbarText className="text-fg3 tabular-nums select-none">{time}</ToolbarText>
           </Tooltip>
         )}
         <Tooltip label={copied ? "Copied" : "Copy message"}>

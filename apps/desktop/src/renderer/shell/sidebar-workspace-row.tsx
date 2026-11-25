@@ -146,11 +146,11 @@ const SIDEBAR_WORKSPACE_DRAFT_ACTION_OVERLAY_CLS =
 const GLYPH_BOX_CLS =
   "inline-flex size-4 shrink-0 items-center justify-center text-fg2";
 // A child in its parent's project: a 4px muted dot instead of the logo again.
-const CHILD_DOT_CLS = "size-1 rounded-full bg-muted-fg";
+const CHILD_DOT_CLS = "size-1 rounded-full bg-fg3";
 // A parent's lead is a 16px toggle: its mark at rest, the arrow on hover or
 // keyboard focus.
 const PARENT_TOGGLE_CLS =
-  "group/lead pointer-events-auto size-4 rounded-sm hover:bg-bg2-highlight";
+  "group/lead pointer-events-auto size-4 rounded-sm hover:bg-selected-bg";
 
 // --- CHILD COMPONENTS ---
 
@@ -476,7 +476,7 @@ export function SidebarWorkspaceRow({
         {/* Only the name truncates; everything after it is shrink-0. */}
         <span className="text-fg1 min-w-0 truncate">{label}</span>
         {placementMark && (
-          <span className="text-muted-fg inline-flex shrink-0">
+          <span className="text-fg3 inline-flex shrink-0">
             <SidebarPlacementIcon cloud={cloudRow} cloudStatus={cloudStatus} />
           </span>
         )}
@@ -486,7 +486,7 @@ export function SidebarWorkspaceRow({
         <span className={cn(SIDEBAR_WORKSPACE_TRAILING_CLS, "ml-auto")}>
           {runActionRunning && (
             <span className={TRAILING_SLOT_CLS}>
-              <RunStream size={12} className="text-blue-primary" />
+              <RunStream size={12} className="text-accent-text" />
             </span>
           )}
           {trailingMark && (
@@ -511,7 +511,7 @@ export function SidebarWorkspaceRow({
             </span>
           )}
           {compact && !working && (
-            <span className="text-muted-fg text-3xxs shrink-0 tabular-nums">{formatCompactAge(updatedAt)}</span>
+            <span className="text-fg3 text-3xxs shrink-0 tabular-nums">{formatCompactAge(updatedAt)}</span>
           )}
         </span>
         </span>
@@ -526,7 +526,7 @@ export function SidebarWorkspaceRow({
           />
         )}
         {projectName && (
-          <span className="text-muted-fg truncate text-3xxs leading-4" data-sidebar-project-name>{projectName}</span>
+          <span className="text-fg3 truncate text-3xxs leading-4" data-sidebar-project-name>{projectName}</span>
         )}
         </span>
       </span>
@@ -645,9 +645,9 @@ export function PendingSidebarWorkspaceRow({
         <span className={compact ? "contents" : "flex min-w-0 flex-1 flex-col gap-0.5"}>
           <span className={cn("text-fg1", compact ? "min-w-0 flex-1 truncate" : "h-4.5 min-w-0 truncate")}>{label}</span>
           {compact ? (
-            <span className="text-muted-fg text-3xxs ml-auto shrink-0">Creating…</span>
+            <span className="text-fg3 text-3xxs ml-auto shrink-0">Creating…</span>
           ) : (
-            <span className="text-muted-fg flex h-4 items-center gap-1.5 text-3xxs leading-4">
+            <span className="text-fg3 flex h-4 items-center gap-1.5 text-3xxs leading-4">
               <span className="inline-flex size-3 shrink-0 items-center justify-center">
                 <SidebarPlacementIcon cloud={cloud} cloudStatus={null} />
               </span>

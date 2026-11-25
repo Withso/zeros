@@ -224,7 +224,7 @@ export function SimulatorIsland({
             disabled={record.busy !== null}
             onClick={record.toggle}
           >
-            <span aria-hidden className="bg-red-primary size-2 rounded-full" />
+            <span aria-hidden className="bg-red-text size-2 rounded-full" />
             <span className="tabular-nums">{formatRecordingElapsed(record.elapsed)}</span>
           </Button>
         </Tooltip>

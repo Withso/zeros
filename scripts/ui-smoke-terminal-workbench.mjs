@@ -130,7 +130,7 @@ export async function runTerminalWorkbenchSmoke({ page, check }) {
   await expect(rowActions("Test")).toHaveCSS("opacity", "1");
   await expect(runTest).toHaveCSS("pointer-events", "auto");
   await expect(runTest).toHaveText("Run");
-  await expectTokenColor(runTest, "--blue-fg");
+  await expectTokenColor(runTest, "--accent-on-bg");
   await page.mouse.move(0, 0);
   await expect(rowActions("Test")).toHaveCSS("opacity", "0");
   check(

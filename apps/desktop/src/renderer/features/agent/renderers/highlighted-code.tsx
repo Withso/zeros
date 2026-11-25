@@ -199,7 +199,7 @@ export const CodeWithGutter = memo(function CodeWithGutter({
       <div
         aria-hidden
         className={cn(
-          "sticky left-0 z-10 shrink-0 select-none border-r border-border1 bg-bg2 px-2 py-2 text-right tabular-nums text-muted-fg",
+          "sticky left-0 z-10 shrink-0 select-none border-r border-border1 bg-bg2 px-2 py-2 text-right tabular-nums text-fg3",
           CODE_LEADING,
         )}
       >

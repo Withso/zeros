@@ -34,7 +34,7 @@ describe("IconButton states", () => {
   it("uses one hover on every surface and every size", () => {
     for (const size of ["inline", "compact", "standard"] as const) {
       const set = classes(render({ size }));
-      expect(set, size).toContain("hover:bg-bg2-highlight");
+      expect(set, size).toContain("hover:bg-selected-bg");
       expect(set, size).toContain("hover:text-fg1");
       expect([...set].some((cls) => cls.startsWith("hover:bg-bg2-hover")), size).toBe(false);
     }
@@ -64,7 +64,7 @@ describe("IconButton states", () => {
   });
 
   it("holds the hover look while its menu is open", () => {
-    expect(classes(render({}))).toContain("data-[state=open]:bg-bg2-highlight");
+    expect(classes(render({}))).toContain("data-[state=open]:bg-selected-bg");
   });
 
   it("dims aria-disabled without dropping hover", () => {

@@ -395,7 +395,7 @@ function TabPill({
           )
         ) : browserWorking ? (
           <MousePointer2
-            className="text-blue-fg size-3.5 shrink-0 fill-current drop-shadow-[0_0_5px_rgba(47,190,235,.45)]"
+            className="text-accent-on-bg size-3.5 shrink-0 fill-current drop-shadow-[0_0_5px_rgba(47,190,235,.45)]"
             aria-hidden="true"
           />
         ) : favicon ? (
@@ -429,11 +429,11 @@ function TabPill({
           aria-hidden
           className={cn(
             "size-1.5 shrink-0 rounded-full",
-            terminalIndicator.dot === "running" && "bg-yellow-icon",
-            terminalIndicator.dot === "passed" && "bg-green-primary",
+            terminalIndicator.dot === "running" && "bg-yellow-text",
+            terminalIndicator.dot === "passed" && "bg-green-text",
             (terminalIndicator.dot === "failed" ||
               terminalIndicator.dot === "stopped") &&
-              "bg-red-primary",
+              "bg-red-text",
           )}
         />
       )}

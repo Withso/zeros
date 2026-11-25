@@ -179,12 +179,12 @@ export const TextMessage: Renderer<AgentTextMessage> = memo(
             chat bubble. */}
           <MessageContent
             variant={role === "system" ? "default" : "flat"}
-            // Auto-sent bubbles (PR island / Create PR) read as --blue-fg on
+            // Auto-sent bubbles (PR island / Create PR) read as --accent-on-bg on
             // the blue bubble TurnPromptHeader paints (cn/twMerge lets this
             // override the flat variant's text-fg1).
             className={
               message.role === "user" && message.autoAction
-                ? "text-blue-fg"
+                ? "text-accent-on-bg"
                 : undefined
             }
           >
@@ -398,7 +398,7 @@ function MessageSegmentView({
       }); }}>
       <FileTypeIcon name={seg.files[0].name} kind="file" size={13} />
       <span className="max-w-[16rem] truncate">{seg.name}</span>
-      <span className="text-muted-fg text-2xxs">+{seg.files.length - 1}</span>
+      <span className="text-fg3 text-2xxs">+{seg.files.length - 1}</span>
     </Button></Tooltip>;
   }
   if (seg.type === "mention") {

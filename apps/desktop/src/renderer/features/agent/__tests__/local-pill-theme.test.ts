@@ -8,18 +8,16 @@ import {
 const themes = readThemes();
 
 describe("Local pill theme contract", () => {
-  it("makes the light workspace fill distinct on the real composer and bubble surfaces", () => {
-    const fill = resolveRgb(themes.light, themes.light.has("blue-pill-bg") ? "blue-pill-bg" : "blue-bg");
-    // The fill is supplemental: readable text and the workspace glyph identify it.
-    expect(contrastRatio(fill, resolveRgb(themes.light, "bg2"))).toBeGreaterThanOrEqual(1.25);
-    expect(contrastRatio(fill, resolveRgb(themes.light, "highlighted-bg"))).toBeGreaterThanOrEqual(1.2);
-    expect(contrastRatio(fill, resolveRgb(themes.light, "blue-fg"))).toBeGreaterThanOrEqual(4.5);
-  });
-
-  it("keeps the dark workspace pill on the blue container colors", () => {
-    expect(resolveRgb(themes.dark, "blue-pill-bg")).toEqual(resolveRgb(themes.dark, "blue-bg"));
-    expect(resolveRgb(themes.dark, "blue-pill-hover")).toEqual([14, 48, 77].map((c) => c / 255));
-    expect(resolveRgb(themes.dark, "blue-fg")).toEqual([163, 203, 255].map((c) => c / 255));
+  // P13: the workspace link rests on accent-bg on the composer (bg1-raised)
+  // and in the agent chat (bg1), and on accent-bg-hover inside a sent message,
+  // where accent-bg sits too close to the bg2 bubble.
+  it("keeps the workspace link a visible blue on each ground with readable text", () => {
+    for (const theme of [themes.dark, themes.light]) {
+      for (const [ground, fill] of [["bg1", "accent-bg"], ["bg1-raised", "accent-bg"], ["bg2", "accent-bg-hover"]]) {
+        expect(contrastRatio(resolveRgb(theme, fill), resolveRgb(theme, ground)), `${fill} on ${ground}`).toBeGreaterThanOrEqual(1.1);
+        expect(contrastRatio(resolveRgb(theme, "accent-on-bg"), resolveRgb(theme, fill))).toBeGreaterThanOrEqual(4.5);
+      }
+    }
   });
 
   it("removes the unused per-agent pill tints", () => {

@@ -545,7 +545,7 @@ export const CheckpointRail = memo(function CheckpointRail({
                   "h-0.5 w-3 rounded-full transition-colors duration-200 ease-out",
                   i === activeIndex
                     ? "bg-fg1"
-                    : "bg-muted-fg/45 group-hover/rail:bg-muted-fg/70",
+                    : "bg-fg3/45 group-hover/rail:bg-fg3/70",
                 )}
               />
             </button>
@@ -584,7 +584,7 @@ export const CheckpointRail = memo(function CheckpointRail({
               aria-hidden="true"
               className={cn(
                 "h-0.5 w-3 flex-none rounded-full transition-colors duration-200 ease-out",
-                i === activeIndex ? "bg-fg1" : "bg-muted-fg/45",
+                i === activeIndex ? "bg-fg1" : "bg-fg3/45",
               )}
             />
             <span className="min-w-0 flex-1 truncate text-xs leading-snug">

@@ -87,9 +87,9 @@ export function PlaceLabel({ place }: { place: "mac" | "cloud" }) {
   );
 }
 
-// Use bg1-bright: bg3 matches the page background in light mode.
+// Use bg1-raised: bg3 matches the page background in light mode.
 export const SETTINGS_CARD_LIST_CLS =
-  "bg-bg1-bright border-border1 divide-border1 rounded-[calc(var(--radius-lg)*1.5)] border px-3.5 [&>*]:py-3";
+  "bg-bg1-raised border-border1 divide-border1 rounded-[calc(var(--radius-lg)*1.5)] border px-3.5 [&>*]:py-3";
 
 // Derive this radius from --radius-lg: our token reset removes rounded-xl.
 export const SETTINGS_GROUP_RADIUS = "rounded-[calc(var(--radius-lg)*1.5)]";
@@ -268,7 +268,7 @@ export function SettingsEmptyCard({
   return (
     <div
       className={cn(
-        "bg-bg1-bright border-border1 flex flex-col items-center justify-center gap-3 border px-3.5 py-6",
+        "bg-bg1-raised border-border1 flex flex-col items-center justify-center gap-3 border px-3.5 py-6",
         SETTINGS_GROUP_RADIUS,
       )}
     >

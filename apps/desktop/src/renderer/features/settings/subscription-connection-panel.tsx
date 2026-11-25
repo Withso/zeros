@@ -206,7 +206,7 @@ export function SubscriptionConnectionPanel({
                       </DropdownMenuTrigger>
                       <DropdownMenuContent align="end">
                         <DropdownMenuItem
-                          className="text-red-primary focus:text-red-primary"
+                          className="text-red-text focus:text-red-text"
                           disabled={disabled}
                           onSelect={() => void changeAccount(account.id, true)}
                         >

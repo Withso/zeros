@@ -362,7 +362,7 @@ function PendingInviteRow({
           disabled={busy}
           onClick={() => void revoke()}
           aria-label={`Revoke invitation to ${invitation.email}`}
-          className="text-fg2 hover:text-red-primary size-7 px-0"
+          className="text-fg2 hover:text-red-text size-7 px-0"
         >
           <X size={14} />
         </Button>
@@ -472,7 +472,7 @@ function MemberRow({
               disabled={busy}
               onClick={() => void remove()}
               aria-label={isSelf ? "Leave team" : `Remove ${name}`}
-              className="text-fg2 hover:text-red-primary size-7 px-0"
+              className="text-fg2 hover:text-red-text size-7 px-0"
             >
               <Trash2 size={14} />
             </Button>
@@ -548,7 +548,7 @@ function JoinTeamSection() {
           That doesn't look like an invite link or code.
         </p>
       )}
-      {error && <p className="text-red-primary text-xs">{error}</p>}
+      {error && <p className="text-red-text text-xs">{error}</p>}
     </SettingsSection>
   );
 }

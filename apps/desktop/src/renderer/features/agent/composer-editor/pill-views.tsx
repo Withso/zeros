@@ -22,14 +22,27 @@ import { Tooltip } from "@/renderer/shared/ui/primitives";
 // label then absorbs the squeeze while attachment remove buttons remain usable.
 export const PILL_METRICS =
   "inline-flex h-5 max-w-[calc(100%-3px)] mx-[1.5px] items-center rounded-sm align-middle text-xs leading-4 select-none";
-/** The fill comes from the surface holding the pill: bg2, unless it sets
- * --pill-bg (a sent message's bubble does, styles/semantic-tokens.css). */
-export const PILL_SHELL = `${PILL_METRICS} gap-1 border border-border2 bg-[var(--pill-bg,var(--bg2))] text-fg1`;
+/** Fill and edge come from the ground holding the pill (--pill-*, styles/
+ * semantic-tokens.css): bg2 on border2 in the agent chat, re-declared by
+ * PILL_GROUND for the composer and the sent-message bubble. */
+export const PILL_SHELL = `${PILL_METRICS} gap-1 border border-(--pill-border) bg-(--pill-bg) text-fg1`;
+/** Grounds that re-tune the pills inside them (P13). The composer family
+ * (bg1-raised) rests its pills on bg2-hover and hovers to selected-bg; the
+ * sent-message bubble (bg2) rests them on selected-bg with no edge, hovers by
+ * adding border3, and lifts the workspace link to accent-bg-hover because
+ * accent-bg is too close to bg2. */
+export const PILL_GROUND = {
+  composer:
+    "[--pill-bg:var(--bg2-hover)] [--pill-hover-bg:var(--selected-bg)]",
+  message:
+    "[--pill-bg:var(--selected-bg)] [--pill-border:transparent] [--pill-hover-bg:var(--selected-bg)] [--pill-link-bg:var(--accent-bg-hover)]",
+} as const;
 export const COMPOSER_PILL_SPACING = "gap-1 px-1.5";
 /** An interactive pill's hover, on the whole pill (its inner buttons paint no
- * fill of their own): bg2-highlight on border3, also while its menu is open. */
+ * fill of their own): the ground's hover fill on border3, also while its menu
+ * is open. */
 export const PILL_HOVER =
-  "hover:border-border3 hover:bg-bg2-highlight has-[[data-state=open]]:border-border3 has-[[data-state=open]]:bg-bg2-highlight";
+  "hover:border-(--pill-hover-border) hover:bg-(--pill-hover-bg) has-[[data-state=open]]:border-(--pill-hover-border) has-[[data-state=open]]:bg-(--pill-hover-bg)";
 /** The caret's node selection: a fill that holds under the pointer. */
 export const PILL_SELECTED = "bg-selected-bg hover:bg-selected-bg has-[[data-state=open]]:bg-selected-bg";
 

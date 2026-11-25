@@ -5009,7 +5009,7 @@ function AgentChatBody({
               data-composer-ask={askCollapsed ? "pill" : "composer"}
               className={cn(
                 "relative flex w-full min-w-0 flex-col border px-3.5 py-3",
-                // sidebar-bg + composer-border, shared with Create, user
+                // bg1-raised + composer-border, shared with Create, user
                 // messages and the cards docked above; focusing or typing
                 // changes nothing.
                 COMPOSER_SURFACE_CLS,
@@ -5069,7 +5069,7 @@ function AgentChatBody({
                   queue entry. */}
                   {/* A 32px row whose text sits on the editor's 14px column. */}
                   {editingQueuedId && (
-                    <div className="bg-sidebar-bg-hover text-fg1 -mx-2 mb-1 flex min-h-8 items-center justify-between gap-2 rounded-lg pr-1 pl-2 text-xs leading-4.5">
+                    <div className="bg-bg1-raised-hover text-fg1 -mx-2 mb-1 flex min-h-8 items-center justify-between gap-2 rounded-lg pr-1 pl-2 text-xs leading-4.5">
                       <span>Editing queued message</span>
                       <Button
                         type="button"

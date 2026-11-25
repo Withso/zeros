@@ -55,7 +55,7 @@ export async function runTurnChangesSmoke({ page, check }) {
         const colors = await card.evaluate(element => {
           const style = getComputedStyle(element);
           const probe = document.createElement("div");
-          probe.style.backgroundColor = "var(--bg1-highlight)"; probe.style.border = "1px solid var(--border2)";
+          probe.style.backgroundColor = "var(--bg1-raised)"; probe.style.border = "1px solid var(--border2)";
           element.append(probe);
           const expected = getComputedStyle(probe);
           const result = [style.backgroundColor, expected.backgroundColor, style.borderTopColor, expected.borderTopColor];
@@ -118,7 +118,7 @@ export async function runTurnChangesSmoke({ page, check }) {
         await expect.poll(() => toggle.evaluate(element => {
           const probe = document.createElement("span");
           probe.style.backgroundColor = "var(--bg1-hover)";
-          probe.style.color = "var(--red-primary)";
+          probe.style.color = "var(--red-text)";
           element.append(probe);
           const actual = getComputedStyle(element), expected = getComputedStyle(probe);
           const matches = actual.backgroundColor === expected.backgroundColor &&

@@ -14,7 +14,7 @@ a.nav-row { cursor: pointer; }
 /* A result line sits 12px under its actions, not a full section gap. */
 .form-msg { margin: -20px 0 0; color: var(--fg2); font-size: 12px; line-height: 16px; overflow-wrap: anywhere; }
 .form-msg:empty { display: none; }
-.form-msg.error { color: var(--red-fg); }
+.form-msg.error { color: var(--red-on-bg); }
 
 .input.mono, .kv code, .phrase {
   font-family: "Geist Mono Variable", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
@@ -23,7 +23,7 @@ a.nav-row { cursor: pointer; }
 .row-ctl .input.mono { width: 200px; }
 .kv code { color: var(--fg1); letter-spacing: 0.02em; }
 /* The exact force-purge phrase, as a red chip. */
-.phrase { padding: 1px 6px; border-radius: 4px; background: var(--red-bg); color: var(--red-fg); line-height: 16px; }
+.phrase { padding: 1px 6px; border-radius: 4px; background: var(--red-bg); color: var(--red-on-bg); line-height: 16px; }
 
 /* The request's details: label and value pairs under its heading row. */
 .kv { display: grid; grid-template-columns: 160px minmax(0, 1fr); gap: 8px 16px; margin: 0; padding: 12px 14px; }
@@ -53,7 +53,7 @@ a.nav-row { cursor: pointer; }
 }
 .seg-item:hover { color: var(--fg1); }
 .seg-item > input { position: absolute; width: 1px; height: 1px; margin: 0; opacity: 0; pointer-events: none; }
-.seg-item:has(> input:checked) { background: var(--selected-bg, var(--bg2-highlight)); color: var(--fg1); font-weight: 450; }
+.seg-item:has(> input:checked) { background: var(--selected-bg, var(--selected-bg)); color: var(--fg1); font-weight: 450; }
 
 .check:focus-visible, .seg-item:has(> input:focus-visible) {
   outline: none; border-color: var(--highlighted-bright);

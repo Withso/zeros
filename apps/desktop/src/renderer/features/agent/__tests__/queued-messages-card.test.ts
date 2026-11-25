@@ -46,7 +46,7 @@ describe("cloud readiness in the existing queued card", () => {
     expect(html).toMatch(/aria-label="Edit"(?![^>]*disabled)/);
     expect(html).toMatch(/aria-label="Remove"(?![^>]*disabled)/);
     expect(html).toMatch(/<button(?![^>]* disabled=)[^>]*>Retry<\/button>/);
-    expect(html).not.toContain('role="alert"'); expect(html).not.toContain("text-red-fg");
+    expect(html).not.toContain('role="alert"'); expect(html).not.toContain("text-red-on-bg");
     expect(html).not.toContain("AGENT STOPPED");
   });
   it("never creates an error card when no queued message was accepted", () => {

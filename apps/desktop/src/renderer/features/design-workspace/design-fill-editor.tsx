@@ -531,7 +531,7 @@ function DesignFillPopover({
                 }}
               >
                 {!imageUrl ? (
-                  <ImageIcon className="text-muted-fg size-5" />
+                  <ImageIcon className="text-fg3 size-5" />
                 ) : null}
               </div>
               <div className="zd-field">
@@ -590,7 +590,7 @@ function DesignFillPopover({
                           "absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 rounded-full",
                           imagePosition === nextPosition
                             ? "bg-fg1 size-1.5"
-                            : "bg-muted-fg size-1",
+                            : "bg-fg3 size-1",
                         )}
                       />
                     </button>

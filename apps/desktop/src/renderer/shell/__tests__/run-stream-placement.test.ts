@@ -23,7 +23,7 @@ describe("live Run stream placement", () => {
     expect(terminalTab).toContain("<RunStream");
   });
 
-  it("marks every running workspace blue-primary, selected or not", () => {
+  it("marks every running workspace accent-text, selected or not", () => {
     const row = source(
       "apps/desktop/src/renderer/shell/sidebar-workspace-row.tsx",
     );
@@ -35,7 +35,7 @@ describe("live Run stream placement", () => {
     expect(row).toContain("useAnyRunActionRunning(workspace.path)");
     // A live run is the loudest thing a row can say, so it stays the accent
     // colour in every row — dimming the unselected ones hid running work.
-    expect(row).toContain('<RunStream size={12} className="text-blue-primary"');
+    expect(row).toContain('<RunStream size={12} className="text-accent-text"');
     expect(row).not.toMatch(/<RunStream[\s\S]{0,120}?active \?/);
     expect(row).not.toContain(
       "anyRunActionRunning && activeWorkspaceId === workspace.id",

@@ -230,9 +230,9 @@ function RepoWorkspaceRow({
       </span>
       {archiveLine ? (
         // A cloud workspace's retention line, where its branch would be: the row keeps its height.
-        <ArchiveLineUnits line={archiveLine} className="text-muted-fg h-4.5 flex-1 basis-0 text-xs" />
+        <ArchiveLineUnits line={archiveLine} className="text-fg3 h-4.5 flex-1 basis-0 text-xs" />
       ) : row.branch !== row.title && (
-        <span className="text-muted-fg hidden min-w-0 truncate font-mono text-xs sm:block">
+        <span className="text-fg3 hidden min-w-0 truncate font-mono text-xs sm:block">
           {row.branch}
         </span>
       )}
@@ -399,7 +399,7 @@ export function RepoWorkspacesList({ project }: { project: Project }) {
         )
       )}
       {showArchived && archives.error && (
-        <p className="text-red-fg px-3 py-2 text-xs" role="alert">
+        <p className="text-red-on-bg px-3 py-2 text-xs" role="alert">
           Couldn’t load archived workspaces.
         </p>
       )}

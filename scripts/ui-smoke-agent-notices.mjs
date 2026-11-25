@@ -85,7 +85,7 @@ export async function runAgentNoticesSmoke({ page, check }) {
         .evaluateAll((notices) =>
           notices.every((notice) => {
             const probe = document.createElement("span");
-            probe.style.backgroundColor = "var(--blue-bg)";
+            probe.style.backgroundColor = "var(--accent-bg)";
             probe.style.color = "var(--fg1)";
             notice.appendChild(probe);
             const expected = getComputedStyle(probe);
@@ -119,7 +119,7 @@ export async function runAgentNoticesSmoke({ page, check }) {
         element.appendChild(probe);
         probe.style.color = "var(--agent-notice-action-hover)";
         const popped = getComputedStyle(probe).color;
-        probe.style.color = "var(--blue-fg)";
+        probe.style.color = "var(--accent-on-bg)";
         const rest = getComputedStyle(probe).color;
         probe.remove();
         const luma = (color) => {

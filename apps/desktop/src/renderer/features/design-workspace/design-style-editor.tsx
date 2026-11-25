@@ -833,7 +833,7 @@ export function DesignStyleEditor({
             <span className="text-fg1 min-w-0 flex-1 truncate">
               {animationName}
             </span>
-            <span className="text-muted-fg text-3xxs shrink-0 tabular-nums">
+            <span className="text-fg3 text-3xxs shrink-0 tabular-nums">
               {styleValue(details, "animation-duration", "0s")}
             </span>
           </button>

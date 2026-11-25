@@ -455,7 +455,7 @@ function Harness() {
                     ref={composerRef}
                     aria-label="Message"
                     placeholder="Send follow up"
-                    className="bg-bg1-highlight border-border1 w-full rounded-lg border p-3"
+                    className="bg-bg1-raised border-border1 w-full rounded-lg border p-3"
                   />
                 </div>
               </div>

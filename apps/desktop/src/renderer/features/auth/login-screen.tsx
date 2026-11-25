@@ -182,12 +182,12 @@ export function LoginScreen() {
             {/* A start failure (couldn't open the browser) or a FAILED browser
                 handoff (oauthError, async after the round-trip) shows here. */}
             {(error || oauthError) && (
-              <p role="alert" className="text-red-primary text-sm">
+              <p role="alert" className="text-red-text text-sm">
                 {error ?? oauthError}
               </p>
             )}
             {expiryLabel && (
-              <p className="text-muted-fg text-xs">{expiryLabel}</p>
+              <p className="text-fg3 text-xs">{expiryLabel}</p>
             )}
             {/* While the browser is open: a Cancel affordance. */}
             {waiting && (
@@ -202,7 +202,7 @@ export function LoginScreen() {
           </div>
           {signedIn.length > 0 && !waiting && (
             <div className="flex w-full flex-col items-start gap-2">
-              <p className="text-muted-fg text-xs">Signed in on this Mac</p>
+              <p className="text-fg3 text-xs">Signed in on this Mac</p>
               {signedIn.map((account) => (
                 <Button
                   key={account.accountId}

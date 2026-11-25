@@ -457,7 +457,7 @@ function Harness() {
   const showInBetween = useShowInBetweenMessages();
   return (
     <TooltipProvider delayDuration={100}>
-      <main data-Zeros-root="" className="bg-bg0 text-fg1 flex min-h-screen flex-wrap content-start gap-4 p-6">
+      <main data-Zeros-root="" className="bg-bg1 text-fg1 flex min-h-screen flex-wrap content-start gap-4 p-6">
         <div className="flex w-full items-center gap-3">
           <Button size="sm" variant="secondary" onClick={() => setShowInBetweenMessages(!showInBetween)}>
             {showInBetween ? "Turn the setting off" : "Turn the setting on"}

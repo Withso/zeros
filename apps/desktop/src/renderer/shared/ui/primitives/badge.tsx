@@ -14,11 +14,11 @@ const badgeVariants = cva(
       variant: {
         neutral: "bg-bg2 text-fg2",
         outline: "border-border3 text-fg2",
-        success: "bg-green-bg text-green-fg",
-        failure: "bg-red-bg text-red-fg",
-        warning: "bg-yellow-bg text-yellow-fg",
-        info: "bg-blue-bg text-blue-fg",
-        merged: "bg-violet-bg text-violet-fg",
+        success: "bg-green-bg text-green-on-bg",
+        failure: "bg-red-bg text-red-on-bg",
+        warning: "bg-yellow-bg text-yellow-on-bg",
+        info: "bg-accent-bg text-accent-on-bg",
+        merged: "bg-violet-bg text-violet-on-bg",
       },
     },
     defaultVariants: {

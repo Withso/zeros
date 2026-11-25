@@ -28,7 +28,7 @@ export function ToolDetailSurface({
         "border-border1 bg-bg1 text-fg1 focus-visible:ring-accent max-h-[320px] min-w-0 select-text overflow-auto overscroll-contain rounded-lg border text-xs focus-visible:ring-1 focus-visible:outline-none",
         failed &&
           // Override Shiki's inline colors, but retain link-pill identity colors.
-          "border-red-primary/25 bg-red-bg text-red-fg [&_*:not([data-local-link-pill],[data-local-link-pill]_*)]:text-red-fg!",
+          "border-red-text/25 bg-red-bg text-red-on-bg [&_*:not([data-local-link-pill],[data-local-link-pill]_*)]:text-red-on-bg!",
       )}
     >
       {children}

@@ -308,7 +308,7 @@ const COMPONENT_OPTIONS_SOURCE = `<!doctype html>
       <zd-option name="mode" type="choice" label="Mode" choices="ask plan" default="ask"></zd-option>
       <zd-option name="density" type="choice" label="Density" choices="compact cozy comfortable spacious" default="comfortable"></zd-option>
       <zd-option name="toolbar" type="boolean" label="Toolbar" default="true"></zd-option>
-      <zd-option name="accent" type="color" label="Accent" default="var(--blue-primary)"></zd-option>
+      <zd-option name="accent" type="color" label="Accent" default="var(--accent-text)"></zd-option>
       <zd-option name="ink" type="color" label="Ink" default="darkslategray"></zd-option>
       <zd-option name="send-radius" type="number" label="Corner radius" group="Send button" default="8" min="0" max="14" unit="px"></zd-option>
       <zd-option name="send-label" type="text" label="Label" group="Send button" default="Send"></zd-option>
@@ -318,7 +318,7 @@ const COMPONENT_OPTIONS_SOURCE = `<!doctype html>
       <zd-variant name="wide-plan" width="1400" mode="plan"></zd-variant>
     </template>
     <style>
-      :root { --blue-primary: royalblue; }
+      :root { --accent-text: royalblue; }
       body { margin: 0; font-family: system-ui, sans-serif; background: white; }
       .composer { box-sizing: border-box; width: var(--zd-width); --chip-round: var(--zd-gap); display: flex; flex-direction: column; gap: var(--zd-gap); padding: 16px;
         color: var(--zd-ink); transition: box-shadow var(--zd-motion-duration) var(--zd-motion-easing); }

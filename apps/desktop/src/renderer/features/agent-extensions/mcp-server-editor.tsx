@@ -107,8 +107,8 @@ function ConnectionDetails({ result }: { result?: McpProbeResult }) {
     <CollapsibleTrigger asChild><Button variant="ghost" size="compact" className="text-fg2 group px-0">Connection details<ChevronRight className="group-data-[state=open]:rotate-90" aria-hidden="true" /></Button></CollapsibleTrigger>
     <CollapsibleContent className="pt-2"><div className="flex flex-col gap-2">
       {result.stages.map((row, index) => <div key={`${row.stage}-${index}`} className="text-fg2 flex items-center justify-between gap-4 text-xs">
-        <span className="flex items-center gap-2">{row.status === "passed" ? <Check className="text-green-primary size-3.5" aria-hidden="true" />
-          : row.status === "failed" ? <X className="text-red-primary size-3.5" aria-hidden="true" /> : <span className="bg-border3 size-1.5 rounded-full" aria-hidden="true" />}{names[row.stage]}</span>
+        <span className="flex items-center gap-2">{row.status === "passed" ? <Check className="text-green-text size-3.5" aria-hidden="true" />
+          : row.status === "failed" ? <X className="text-red-text size-3.5" aria-hidden="true" /> : <span className="bg-border3 size-1.5 rounded-full" aria-hidden="true" />}{names[row.stage]}</span>
         <span>{row.status === "passed" ? "Done" : row.status === "failed" ? "Failed" : "Needs authentication"}</span>
       </div>)}
     </div></CollapsibleContent>

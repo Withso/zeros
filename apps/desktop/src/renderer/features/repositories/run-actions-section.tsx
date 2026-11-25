@@ -431,7 +431,7 @@ function ActionCard({
               label={`Delete ${draft.name || "action"}`}
               onClick={onDelete}
               disabled={busy}
-              className="text-fg2 hover:text-red-primary"
+              className="text-fg2 hover:text-red-text"
             >
               <Trash2 strokeWidth={1} />
             </IconButton>

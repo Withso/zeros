@@ -54,7 +54,7 @@ function OwnerFeedback({ review }: { review: CodeReviewController }) {
     >
       {message && !managed && (
         <div role="alert" className="flex items-center gap-2">
-          <span className="text-red-primary break-words">{message}</span>
+          <span className="text-red-text break-words">{message}</span>
           {review.error && (
             <Button variant="ghost" onClick={review.refresh}>
               Retry comments
@@ -96,7 +96,7 @@ function OwnerFeedback({ review }: { review: CodeReviewController }) {
         </div>
       )}
       {moreError && !managed && (
-        <p role="alert" className="text-red-primary">
+        <p role="alert" className="text-red-text">
           {moreError}
         </p>
       )}

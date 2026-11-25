@@ -225,7 +225,7 @@ function GroupHeader({ events, ctx, tail, browserClosed, open, onToggle }: {
             chatId={ctx.chatId}
             active={ctx.attachmentImagesActive !== false}
           />
-          {failed && <CircleX className="text-red-primary size-3 shrink-0" aria-hidden="true" />}
+          {failed && <CircleX className="text-red-text size-3 shrink-0" aria-hidden="true" />}
         </span>
       </ListRow>
     </Tooltip>

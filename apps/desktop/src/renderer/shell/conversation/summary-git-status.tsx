@@ -39,7 +39,7 @@ import {
 } from "./summary-git-status-model";
 
 const ACTION_CLASS =
-  "text-fg3 hover:text-fg1 enabled:hover:bg-bg2-highlight focus-visible:bg-bg2-highlight shrink-0 font-normal";
+  "text-fg3 hover:text-fg1 enabled:hover:bg-selected-bg focus-visible:bg-selected-bg shrink-0 font-normal";
 const ROW_CLASS =
   "flex min-w-0 items-center gap-2 rounded-md px-1.5 py-0.5 hover:bg-bg2-hover focus-within:bg-bg2-hover";
 const LABEL_CLASS = "text-fg1 min-w-0 flex-1 truncate text-xs";

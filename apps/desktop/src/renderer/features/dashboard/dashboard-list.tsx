@@ -309,14 +309,14 @@ export const DashboardListRow = forwardRef<
           <Tooltip label={status}>
             {/* The tag names its state once for assistive tech. */}
             <span
-              className={cn(TAG_CLS, "pr-2 pl-1.5", missing && "text-red-fg")}
+              className={cn(TAG_CLS, "pr-2 pl-1.5", missing && "text-red-on-bg")}
               role="img"
               aria-label={status}
             >
               {archived ? (
-                <Archive className="text-muted-fg size-3.5 shrink-0" />
+                <Archive className="text-fg3 size-3.5 shrink-0" />
               ) : missing ? (
-                <FolderX className="text-red-primary size-3.5 shrink-0" />
+                <FolderX className="text-red-text size-3.5 shrink-0" />
               ) : folder ? (
                 <Folder className="text-fg2 size-3.5 shrink-0" />
               ) : (

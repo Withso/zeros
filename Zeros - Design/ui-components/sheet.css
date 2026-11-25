@@ -23,7 +23,7 @@ body {
   gap: var(--space-1-5);
 }
 .doc-eyebrow {
-  color: var(--muted-fg);
+  color: var(--fg3);
   font-size: var(--text-2xxs);
   font-weight: var(--weight-medium);
 }
@@ -41,7 +41,7 @@ body {
   display: flex;
   flex-wrap: wrap;
   gap: var(--space-1) var(--space-4);
-  color: var(--muted-fg);
+  color: var(--fg3);
   font-family: var(--font-mono);
   font-size: var(--text-2xxs);
 }
@@ -77,7 +77,7 @@ body {
   align-items: center;
 }
 .doc-col {
-  color: var(--muted-fg);
+  color: var(--fg3);
   font-size: var(--text-2xxs);
   font-weight: var(--weight-medium);
 }
@@ -97,7 +97,7 @@ body {
   font-size: var(--text-2xxs);
 }
 .doc-used {
-  color: var(--muted-fg);
+  color: var(--fg3);
   font-size: var(--text-2xxs);
 }
 .doc-cell {
@@ -109,7 +109,7 @@ body {
   min-height: var(--space-12);
 }
 .doc-cell-empty {
-  color: var(--muted-fg);
+  color: var(--fg3);
 }
 
 /* ── Free-form specimen rows ──────────────────────────────── */
@@ -146,10 +146,10 @@ body {
   background: var(--bg2);
 }
 .doc-stage[data-surface="sidebar"] {
-  background: var(--sidebar-bg);
+  background: var(--bg1-raised);
 }
 .doc-stage[data-surface="highlight"] {
-  background: var(--bg1-highlight);
+  background: var(--bg1-raised);
 }
 .doc-stage[data-surface="scrim"] {
   background: var(--scrim);
@@ -172,7 +172,7 @@ body {
   border-bottom: 1px solid var(--border1);
 }
 .doc-th {
-  color: var(--muted-fg);
+  color: var(--fg3);
   font-size: var(--text-2xxs);
   font-weight: var(--weight-medium);
 }
@@ -203,7 +203,7 @@ body {
   font-size: var(--text-2xxs);
 }
 .doc-spec-key {
-  color: var(--muted-fg);
+  color: var(--fg3);
 }
 .doc-notes {
   display: flex;
@@ -225,7 +225,7 @@ body {
   width: var(--space-1-5);
   height: var(--space-1-5);
   border-radius: 50%;
-  background: var(--yellow-icon);
+  background: var(--yellow-text);
   transform: translateY(calc(var(--space-0-5) * -1));
 }
 
@@ -259,7 +259,7 @@ body {
   color: var(--fg2);
 }
 .doc-index-count {
-  color: var(--muted-fg);
+  color: var(--fg3);
   font-family: var(--font-mono);
   font-size: var(--text-2xxs);
 }

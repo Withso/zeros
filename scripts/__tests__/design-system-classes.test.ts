@@ -166,13 +166,13 @@ describe("extractClassCandidates — review reproductions", () => {
     expect(
       tokensOf(
         "apps/desktop/src/renderer/path.tsx",
-        `const STATUS = { added: { label: "New", cls: "bg-green-bg text-green-fg" } };
+        `const STATUS = { added: { label: "New", cls: "bg-green-bg text-green-on-bg" } };
         export function S({ status }) {
           const chip = STATUS[status];
           return <i className={chip.cls} />;
         }`,
       ).sort(),
-    ).toEqual(["bg-green-bg", "text-green-fg"]);
+    ).toEqual(["bg-green-bg", "text-green-on-bg"]);
   });
 });
 

@@ -285,10 +285,10 @@ export const CLASS_RULES = [
   {
     id: "text-alpha",
     message: (key) =>
-      `"${key}" invents a text tier with opacity, which skips the contrast contract. Use fg1 / fg2 / fg3 / muted-fg.`,
+      `"${key}" invents a text tier with opacity, which skips the contrast contract. Use fg1 / fg2 / fg3 / fg3.`,
     test(base) {
       // Any opacity syntax: /60, /[.6], /20.5, /(--alpha).
-      return /^text-(?:fg[123]|muted-fg)\/.+$/.test(base) ? base : null;
+      return /^text-(?:fg[123]|fg3)\/.+$/.test(base) ? base : null;
     },
   },
   {
@@ -337,19 +337,19 @@ export const CLASS_RULES = [
   },
 ];
 
-const FAMILIES = ["red", "green", "yellow", "blue", "violet"];
+const FAMILIES = ["red", "green", "yellow", "accent", "violet"];
 
 /** Rules over all tokens that land on one element (one class context). */
 export const GROUP_RULES = [
   {
     id: "status-pairing",
     message: (key) =>
-      `${key}: text on a --<family>-bg container uses text-<family>-fg, not the vivid -primary (styles/policy/contrast-contract.json).`,
+      `${key}: text on a --<family>-bg container uses text-<family>-on-bg, not the -text role (styles/policy/contrast-contract.json).`,
     test(bases) {
       const findings = [];
       for (const family of FAMILIES) {
-        if (bases.has(`bg-${family}-bg`) && bases.has(`text-${family}-primary`)) {
-          findings.push(`text-${family}-primary on bg-${family}-bg`);
+        if (bases.has(`bg-${family}-bg`) && bases.has(`text-${family}-text`)) {
+          findings.push(`text-${family}-text on bg-${family}-bg`);
         }
       }
       return findings;

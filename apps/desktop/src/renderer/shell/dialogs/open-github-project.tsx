@@ -263,7 +263,7 @@ function ScopedOpenGithubProjectDialog({
               className="text-xs"
             />
             {url.trim() && !urlIsValid && (
-              <p className="text-red-primary text-xs">
+              <p className="text-red-text text-xs">
                 That doesn't look like a git URL — use https://… or
                 git@host:owner/repo.git
               </p>

@@ -19,7 +19,7 @@ describe("composer tray", () => {
     expect(html.indexOf("data-card")).toBeLessThan(html.indexOf("Connect GitHub"));
     expect(html).toContain("data-composer-tray");
     expect(html).toContain('role="status"');
-    expect(html).toContain("bg-sidebar-bg");
+    expect(html).toContain("bg-bg1-raised");
     // The tray paints outside the composer's box, so a centered page does not shift.
     expect(html).toMatch(/class="[^"]*absolute[^"]*top-full[^"]*"[^>]*role="status"/);
     expect(html).toMatch(/aria-hidden="true" class="[^"]*absolute -inset-x-1 -top-1 -bottom-10/);

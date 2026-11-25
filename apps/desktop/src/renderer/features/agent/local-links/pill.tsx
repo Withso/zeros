@@ -15,17 +15,19 @@ import {
 import { useLocalLinks } from "./context";
 
 const TINTS = {
-  chat: "hover:border-border3 hover:bg-bg2-highlight hover:text-fg1",
+  chat: "hover:border-(--pill-hover-border) hover:bg-(--pill-hover-bg) hover:text-fg1",
   workspace:
-    "bg-blue-pill-bg text-blue-fg hover:bg-blue-pill-hover hover:text-blue-fg",
-  muted: "bg-bg2-hover text-fg3 hover:bg-bg2-highlight hover:text-fg3",
+    "bg-(--pill-link-bg) text-accent-on-bg hover:bg-accent-bg-hover hover:text-accent-on-bg",
+  // A target that is gone: no fill on any ground, a dashed edge and fg3,
+  // which passes on every bare ground (the Pill primitive's gone tone).
+  muted: "border border-dashed border-border3 bg-transparent text-fg3 hover:text-fg2",
 } as const;
 
 /** The caret's selection in the composer: a fill, never a ring. The workspace
  * pill keeps its blue, one step up. */
 const SELECTED = {
   chat: "bg-selected-bg hover:bg-selected-bg",
-  workspace: "bg-blue-pill-hover",
+  workspace: "bg-accent-bg-hover",
   muted: "bg-selected-bg hover:bg-selected-bg",
 } as const;
 

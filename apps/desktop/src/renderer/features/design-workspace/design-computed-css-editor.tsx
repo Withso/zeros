@@ -80,7 +80,7 @@ const MAX_CSS_DECLARATIONS = 128;
 const MAX_CSS_PATCH_PROPERTIES = 64;
 
 const cssHighlightStyle = HighlightStyle.define([
-  { tag: tags.propertyName, color: "var(--red-primary)" },
+  { tag: tags.propertyName, color: "var(--red-text)" },
   {
     tag: [tags.number, tags.string, tags.color, tags.atom, tags.bool],
     color: "var(--fg1)",
@@ -133,14 +133,14 @@ function designCssEditorTheme(dark: boolean): Extension {
           backgroundColor: "color-mix(in srgb, var(--fg1) 18%, transparent)",
         },
       ".cm-placeholder": {
-        color: "var(--muted-fg)",
+        color: "var(--fg3)",
         fontStyle: "normal",
       },
       // Secondary detail after a declaration: computed value and source.
       ".cm-line[data-design-css-hint]::after": {
         content: "attr(data-design-css-hint)",
         paddingLeft: "12px",
-        color: "var(--muted-fg)",
+        color: "var(--fg3)",
         fontFamily: "var(--font-sans)",
         fontSize: "11px",
         pointerEvents: "none",
@@ -671,7 +671,7 @@ export function DesignComputedCssEditor({
       {error ? (
         <div
           role="alert"
-          className="border-border1 text-red-primary text-3xxs shrink-0 border-t px-3 py-2 leading-4"
+          className="border-border1 text-red-text text-3xxs shrink-0 border-t px-3 py-2 leading-4"
         >
           {error}
         </div>

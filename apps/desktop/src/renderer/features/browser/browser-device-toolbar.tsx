@@ -357,7 +357,7 @@ export function BrowserDeviceToolbar({
           <Button
             variant="ghost"
             size="compact"
-            className="text-fg1 data-[state=open]:bg-bg2-highlight shrink-0"
+            className="text-fg1 data-[state=open]:bg-selected-bg shrink-0"
             aria-label={`Dimensions: ${browserDevicePresetLabel(presetId)}`}
           >
             {browserDevicePresetLabel(presetId)}
@@ -381,7 +381,7 @@ export function BrowserDeviceToolbar({
                 value={preset.id}
               >
                 <span className="min-w-0 flex-1 truncate">{preset.label}</span>
-                <span className="text-muted-fg pl-4 tabular-nums">
+                <span className="text-fg3 pl-4 tabular-nums">
                   {preset.width}×{preset.height}
                 </span>
               </DropdownMenuRadioItem>
@@ -423,7 +423,7 @@ export function BrowserDeviceToolbar({
             <Button
               variant="ghost"
               size="compact"
-              className="text-fg2 data-[state=open]:bg-bg2-highlight data-[state=open]:text-fg1 shrink-0 tabular-nums"
+              className="text-fg2 data-[state=open]:bg-selected-bg data-[state=open]:text-fg1 shrink-0 tabular-nums"
               aria-label={`Zoom: ${Math.round(effectiveZoom * 100)}%`}
             >
               {Math.round(effectiveZoom * 100)}%

@@ -32,9 +32,9 @@ export const MENU_ITEM_BOX = "min-h-7 gap-2 px-2 py-1 text-xs leading-4.5";
 /** Group label: 12px medium fg3 in every menu. */
 export const MENU_LABEL = "text-fg3 px-2 pt-1.5 pb-1 text-3xxs leading-4 font-medium";
 
-/** A destructive row: red-primary text and icon, placed last. */
+/** A destructive row: red-text text and icon, placed last. */
 export const MENU_ITEM_DESTRUCTIVE =
-  "text-red-primary focus:text-red-primary [&_svg]:text-red-primary";
+  "text-red-text focus:text-red-text [&_svg]:text-red-text";
 
 export const MENU_ITEM_ICON =
   "[&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-3.5 [&_svg:not([class*='text-'])]:text-fg2";

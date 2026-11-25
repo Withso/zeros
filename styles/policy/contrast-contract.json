@@ -2,22 +2,19 @@
   "description": "Declared foreground/background pairings for the Zeros token palette, with WCAG 2.2 contrast ratios and reviewed supplemental/boundary floors in BOTH themes. Asserted by apps/desktop/src/renderer/shared/theme/__tests__/contrast-contract.test.ts. A pairing that is not listed here is not a sanctioned combination.",
   "surfaces": {
     "rest": [
-      "bg0",
       "bg1",
-      "bg1-highlight",
-      "bg1-bright",
+      "bg1-raised",
       "bg2",
       "bg3",
-      "sidebar-bg",
-      "highlighted-bg"
+      "nav-bg"
     ],
     "hover": [
       "bg1-hover",
+      "bg1-raised-hover",
       "bg2-hover",
-      "bg2-highlight",
       "bg3-hover",
-      "sidebar-bg-hover",
-      "selected-bg"
+      "selected-bg",
+      "nav-bg-hover"
     ]
   },
   "roles": {
@@ -35,39 +32,39 @@
     },
     "supplemental": {
       "min": 3,
-      "why": "Quietest metadata tier: owner-chosen 3:1 floor, below AA by design. Hovered/selected rows step it up to fg3."
+      "why": "Reviewed below-AA floor for labels drawn over translucent washes (merge-conflict marker bands). Resting metadata is fg3, which meets AA."
     },
     "boundary": {
       "min": 1.45,
-      "why": "Control outlines must stay perceptible on every surface controls sit on: a perceptibility floor, not a WCAG claim. highlighted-bg is excluded because controls do not sit on the user-message bubble. Resting outlines are subtle by reviewed design, below WCAG 1.4.11’s 3:1; focus is the strong cue."
+      "why": "Control outlines must stay perceptible on every surface controls sit on: a perceptibility floor, not a WCAG claim. bg2 is checked for the border4 hover step only. Resting outlines are subtle by reviewed design, below WCAG 1.4.11’s 3:1; focus is the strong cue."
     },
     "boundary-hover": {
       "min": 1.6,
-      "why": "Hover/open outlines must read stronger on every control surface: a perceptibility floor, not a WCAG claim. highlighted-bg is excluded because controls do not sit on the user-message bubble."
+      "why": "Hover/open outlines must read stronger on every control surface: a perceptibility floor, not a WCAG claim. bg2 is excluded because controls do not sit on the user-message bubble."
     }
   },
   "pairs": [
     {
       "role": "text",
       "fg": [
-        "blue-fg"
+        "accent-on-bg"
       ],
       "on": [
-        "blue-pill-bg",
-        "blue-pill-hover"
+        "accent-bg",
+        "accent-bg-hover"
       ],
       "why": "Workspace link pill labels at rest and hover; Light uses a stronger fill on the bg2 composer."
     },
     {
       "role": "focus",
       "fg": [
-        "highlighted-bright"
+        "accent"
       ],
       "on": [
-        "blue-pill-bg",
-        "blue-pill-hover"
+        "accent-bg",
+        "accent-bg-hover"
       ],
-      "why": "Opaque keyboard focus ring on Local link pills."
+      "why": "Opaque 1px accent focus edge on Local link pills."
     },
     {
       "role": "text",
@@ -77,34 +74,25 @@
         "fg3"
       ],
       "on": "@rest",
-      "why": "Emphasis, default and secondary text meet AA at rest."
-    },
-    {
-      "role": "supplemental",
-      "fg": [
-        "muted-fg"
-      ],
-      "on": "@rest",
-      "why": "Supplemental metadata at rest; hovered/selected rows use fg3."
+      "why": "Three text tiers meet AA at rest on every resting surface."
     },
     {
       "role": "text",
       "fg": [
         "fg1",
-        "fg2",
-        "fg3"
+        "fg2"
       ],
       "on": "@hover",
-      "why": "Hovered/selected rows step text up one tier; muted-fg is never the resting tier on a hover fill."
+      "why": "Hovered or selected rows lift fg3 to fg2; fg3 is never the resting tier on a hover fill."
     },
     {
       "role": "text",
       "fg": [
-        "red-primary",
-        "green-primary",
-        "yellow-primary",
-        "blue-primary",
-        "violet-primary"
+        "red-text",
+        "green-text",
+        "yellow-text",
+        "accent-text",
+        "violet-text"
       ],
       "on": [
         "@rest",
@@ -115,17 +103,17 @@
     {
       "role": "text",
       "fg": [
-        "red-fg"
+        "red-on-bg"
       ],
       "on": [
         "red-bg"
       ],
-      "why": "Text on a tinted container uses the family -fg."
+      "why": "Text on a tinted container uses the family -on-bg."
     },
     {
       "role": "text",
       "fg": [
-        "green-fg"
+        "green-on-bg"
       ],
       "on": [
         "green-bg"
@@ -134,7 +122,7 @@
     {
       "role": "text",
       "fg": [
-        "yellow-fg"
+        "yellow-on-bg"
       ],
       "on": [
         "yellow-bg"
@@ -143,16 +131,16 @@
     {
       "role": "text",
       "fg": [
-        "blue-fg"
+        "accent-on-bg"
       ],
       "on": [
-        "blue-bg"
+        "accent-bg"
       ]
     },
     {
       "role": "text",
       "fg": [
-        "violet-fg"
+        "violet-on-bg"
       ],
       "on": [
         "violet-bg"
@@ -172,11 +160,11 @@
       "role": "text",
       "fg": [
         "fg1",
-        "blue-fg",
-        "blue-primary"
+        "accent-on-bg",
+        "accent-text"
       ],
       "on": [
-        "blue-bg"
+        "accent-bg"
       ],
       "why": "Chat notices and Zeros' own messages: body text, actions and links on the blue wash."
     },
@@ -199,65 +187,65 @@
       "on": [
         "yellow-wash/0.35@bg1",
         "yellow-wash/0.54@bg1",
-        "yellow-wash/0.35@sidebar-bg",
-        "yellow-wash/0.54@sidebar-bg"
+        "yellow-wash/0.35@bg1-raised",
+        "yellow-wash/0.54@bg1-raised"
       ],
       "why": "Text over code-editor search-match washes (35% match, 55% selected match). Editor text uses the syntax theme foreground, which sits at the fg1 end of the ladder; syntax token colors are a separate system."
     },
     {
       "role": "text",
       "fg": [
-        "red-secondary-fg"
+        "red-solid-fg"
       ],
       "on": [
-        "red-secondary",
-        "red-secondary-hover"
+        "red-solid",
+        "red-solid-hover"
       ],
       "why": "Solid destructive fills at rest and on hover."
     },
     {
       "role": "text",
       "fg": [
-        "green-secondary-fg"
+        "green-solid-fg"
       ],
       "on": [
-        "green-secondary",
-        "green-secondary-hover"
+        "green-solid",
+        "green-solid-hover"
       ],
       "why": "Solid Accept current change fills on a merge conflict, at rest and on hover."
     },
     {
       "role": "text",
       "fg": [
-        "blue-secondary-fg"
+        "accent-solid-fg"
       ],
       "on": [
-        "blue-secondary",
-        "blue-secondary-hover"
+        "accent-solid",
+        "accent-solid-hover"
       ],
       "why": "Solid Accept incoming change fills on a merge conflict, at rest and on hover."
     },
     {
       "role": "text",
       "fg": [
-        "neutral-secondary-fg"
+        "neutral-solid-fg"
       ],
       "on": [
-        "neutral-secondary",
-        "neutral-secondary-hover"
+        "neutral-solid",
+        "neutral-solid-hover"
       ],
       "why": "Solid Accept both fills on a merge conflict, at rest and on hover."
     },
     {
       "role": "supplemental",
       "fg": [
-        "fg3"
+        "fg2"
       ],
       "on": [
-        "green-primary/0.26@bg1",
-        "blue-primary/0.34@bg1"
+        "green-text/0.26@bg1",
+        "accent-text/0.34@bg1"
       ],
-      "why": "The (Current change) and (Incoming change) labels on a conflict's marker bands, at the dark bands' alphas (0.26 and 0.34). Light's incoming band is 0.26, so 0.34 is the stricter check there."
+      "why": "The (Current change) and (Incoming change) labels (fg2) on a conflict's marker bands, at the dark bands' alphas (0.26 and 0.34). Light's incoming band is 0.26, so 0.34 is the stricter check there."
     },
     {
       "role": "text",
@@ -279,29 +267,15 @@
       ]
     },
     {
-      "role": "graphic",
-      "fg": [
-        "yellow-icon"
-      ],
-      "on": [
-        "@rest",
-        "@hover"
-      ],
-      "why": "Yellow icons and status dots; yellow-primary is the darker text role."
-    },
-    {
       "role": "boundary",
       "fg": [
         "border3"
       ],
       "on": [
-        "bg0",
         "bg1",
-        "bg1-highlight",
-        "bg1-bright",
-        "bg2",
+        "bg1-raised",
         "bg3",
-        "sidebar-bg"
+        "nav-bg"
       ],
       "why": "Subtle resting control outlines on the surfaces controls sit on."
     },
@@ -311,26 +285,12 @@
         "border4"
       ],
       "on": [
-        "bg0",
         "bg1",
-        "bg1-highlight",
-        "bg1-bright",
-        "bg2",
+        "bg1-raised",
         "bg3",
-        "sidebar-bg"
+        "nav-bg"
       ],
       "why": "Hover/open outline on the same control surfaces."
-    },
-    {
-      "role": "focus",
-      "fg": [
-        "highlighted-bright"
-      ],
-      "on": [
-        "@rest",
-        "@hover"
-      ],
-      "why": "The opaque focus core; halos (/50) are decoration on top of it."
     }
   ],
   "ladders": [
@@ -338,12 +298,11 @@
       "tiers": [
         "fg1",
         "fg2",
-        "fg3",
-        "muted-fg"
+        "fg3"
       ],
       "on": "bg1",
       "minStep": 1.15,
-      "why": "Each foreground tier is at least 15% less contrast than the one above it, in both themes."
+      "why": "Each foreground tier is at least 15% less contrast than the one above it, in both themes (three tiers)."
     },
     {
       "tiers": [
@@ -368,9 +327,8 @@
         "red-bg",
         "green-bg",
         "yellow-bg",
-        "blue-bg",
+        "accent-bg",
         "violet-bg",
-        "bg1-highlight",
         "bg1-hover"
       ],
       "why": "Tinted/grouping washes; meaning is carried by their text and icons."

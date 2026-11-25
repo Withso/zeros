@@ -62,7 +62,7 @@ describe("MCP sign-in rows", () => {
     expect(html).toContain('aria-label="Not verified: Cursor does not report whether this server connected."');
     expect(html).toContain("lucide-circle-dashed");
     expect(html).not.toContain("lucide-x");
-    expect(html).not.toContain("text-red-primary");
+    expect(html).not.toContain("text-red-text");
   });
   it("does not apply an MCP attempt to a plugin or app with the same id", () => {
     const html = renderToStaticMarkup(createElement(ComposerToolGroups, {

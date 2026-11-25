@@ -12,7 +12,7 @@
 //   • Fixed 360px card — every toast is the same width regardless of
 //     text length — bg3, border2, 12px corners and the dropdown shadow
 //   • Close × is a 24px IconButton inside the top-right corner
-//   • A status toast leads with its tone's 16px icon; info is blue-primary
+//   • A status toast leads with its tone's 16px icon; info is accent-text
 //   • An optional action renders as a PRIMARY button (no icon) BELOW the text
 //   • Title 13/18 medium, description 12/16 fg2; both wrap if long
 //   • Default auto-dismiss after 4s; user can hover-pause
@@ -87,10 +87,10 @@ const VARIANT_ICON: Record<Exclude<ToastVariant, "default">, React.ComponentType
 };
 
 const VARIANT_ICON_TONE: Record<Exclude<ToastVariant, "default">, string> = {
-  success: "text-green-primary",
-  error: "text-red-primary",
-  warning: "text-yellow-primary",
-  info: "text-blue-primary",
+  success: "text-green-text",
+  error: "text-red-text",
+  warning: "text-yellow-text",
+  info: "text-accent-text",
 };
 
 function ToastCard({

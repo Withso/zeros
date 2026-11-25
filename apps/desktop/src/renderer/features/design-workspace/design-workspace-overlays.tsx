@@ -511,7 +511,7 @@ export const DesignMeasureOverlay = React.memo(function DesignMeasureOverlay({
           top: target.y,
           width: target.width,
           height: target.height,
-          "--design-stroke-color": "var(--red-primary)",
+          "--design-stroke-color": "var(--red-text)",
           ...designStrokeWidth(1),
         } as React.CSSProperties}
       />
@@ -523,7 +523,7 @@ export const DesignMeasureOverlay = React.memo(function DesignMeasureOverlay({
           style={{
             left: extension.x,
             top: extension.y,
-            ...designDashedLineStyle(extension.axis, extension.length, "var(--red-primary)"),
+            ...designDashedLineStyle(extension.axis, extension.length, "var(--red-text)"),
           }}
         />
       ))}
@@ -533,7 +533,7 @@ export const DesignMeasureOverlay = React.memo(function DesignMeasureOverlay({
           <span
             key={measurement.side}
             data-design-measure={measurement.side}
-            className="bg-red-primary absolute"
+            className="bg-red-text absolute"
             style={{
               left: measurement.x,
               top: measurement.y,
@@ -546,7 +546,7 @@ export const DesignMeasureOverlay = React.memo(function DesignMeasureOverlay({
             }}
           >
             <span
-              className="bg-red-primary text-2xxs absolute rounded-sm px-1 leading-4 font-medium whitespace-nowrap text-[var(--design-selection-label-fg)] tabular-nums"
+              className="bg-red-text text-2xxs absolute rounded-sm px-1 leading-4 font-medium whitespace-nowrap text-[var(--design-selection-label-fg)] tabular-nums"
               style={{
                 left: horizontal ? "50%" : 0,
                 top: horizontal ? 0 : "50%",
@@ -1166,7 +1166,7 @@ export function DesignSelectionMeasurements({
               {componentKind === "main" ? (
                 <ComponentGlyph
                   data-design-component-mark="main"
-                  className="text-violet-primary fill-current size-[11px] shrink-0"
+                  className="text-violet-text fill-current size-[11px] shrink-0"
                   aria-hidden="true"
                 />
               ) : (

@@ -68,7 +68,7 @@ describe("chat notices", () => {
           expect(html).toContain(message);
           expect(html).toContain('role="status"');
           expect(html).not.toContain("data-agent-notice");
-          expect(html).not.toContain("bg-blue-bg");
+          expect(html).not.toContain("bg-accent-bg");
           expect(html).not.toContain("Retry");
         }
       },
@@ -113,14 +113,14 @@ describe("chat notices", () => {
     expect(html).toContain("lucide-settings");
     expect(html).not.toContain("Retry");
     expect(html).not.toContain("data-agent-notice");
-    expect(html).not.toContain("bg-blue-bg");
+    expect(html).not.toContain("bg-accent-bg");
     expect(renderToStaticMarkup(createElement(EventRowRenderer, { message: notice(), ctx }))).not.toContain("Open Settings");
   });
   it("share the sent message's sans text, 12px corners and 8px/12px padding", () => {
     for (const html of renderedNotices()) {
       const surface = surfaceOf(html);
       expect(surface).toEqual(
-        expect.arrayContaining(["bg-blue-bg", "text-fg1", "px-3", "py-2", PROMPT_SURFACE_RADIUS]),
+        expect.arrayContaining(["bg-accent-bg", "text-fg1", "px-3", "py-2", PROMPT_SURFACE_RADIUS]),
       );
       expect(surface.filter((name) => /^p-|^rounded-(sm|md|lg)$/.test(name))).toEqual([]);
       expect(html).not.toContain("font-mono");
@@ -148,10 +148,10 @@ describe("chat notices", () => {
     expect(actions).toHaveLength(3);
     for (const action of actions) {
       expect(action).toEqual(
-        expect.arrayContaining(["text-blue-fg", "hover:bg-transparent", "hover:text-(--agent-notice-action-hover)"]),
+        expect.arrayContaining(["text-accent-on-bg", "hover:bg-transparent", "hover:text-(--agent-notice-action-hover)"]),
       );
-      expect(action).not.toContain("hover:bg-bg2-highlight");
-      expect(action).not.toContain("hover:bg-blue-fg/10");
+      expect(action).not.toContain("hover:bg-selected-bg");
+      expect(action).not.toContain("hover:bg-accent-on-bg/10");
       expect(action).not.toContain("mt-2");
       // 6px side padding for the hover wash, offset so the label stays
       // aligned with the message text.

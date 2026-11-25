@@ -185,7 +185,7 @@ function HealthDetail({ summary }: { summary: GithubCredentialSummary }) {
   return (
     <div className="text-fg2 flex min-h-8 items-center gap-2 text-xs leading-4.5">
       <TriangleAlert
-        className="text-yellow-primary size-4 shrink-0"
+        className="text-yellow-text size-4 shrink-0"
         aria-hidden="true"
       />
       <span>{copy}</span>
@@ -594,7 +594,7 @@ export function GitHubSection({
                     ? "bg-bg1-hover"
                     : "bg-bg1 hover:border-border3 hover:bg-bg1-hover",
                   githubHealthNeedsAttention(summary) &&
-                    "border-yellow-icon/30",
+                    "border-yellow-text/30",
                 )}
               >
                 <input
@@ -702,7 +702,7 @@ export function GitHubSection({
                         </DropdownMenuItem>
                         <DropdownMenuSeparator />
                         <DropdownMenuItem
-                          className="text-red-fg focus:text-red-fg"
+                          className="text-red-on-bg focus:text-red-on-bg"
                           onSelect={() => {
                             if (method === "github-app") {
                               setDisconnectAppOpen(true);
@@ -846,7 +846,7 @@ export function GitHubSection({
                         {appError ? (
                           <p
                             role="alert"
-                            className="text-yellow-fg m-0 flex items-start gap-1.5 text-xs"
+                            className="text-yellow-on-bg m-0 flex items-start gap-1.5 text-xs"
                           >
                             <TriangleAlert
                               className="mt-0.5 size-3.5 shrink-0"
@@ -953,7 +953,7 @@ export function GitHubSection({
                       <div className="text-fg2 flex flex-wrap items-center justify-between gap-2 text-xs">
                         <span className="flex items-center gap-2">
                           <CheckCircle2
-                            className="text-green-fg size-3.5"
+                            className="text-green-on-bg size-3.5"
                             aria-hidden="true"
                           />
                           {githubMethodStatusCopy(summary)}
@@ -1011,9 +1011,9 @@ export function GitHubSection({
         </p>
 
         {connection.error && !connection.data ? (
-          <div className="bg-bg1-highlight text-fg2 flex items-start gap-2.5 rounded-md px-3 py-2.5 text-xs">
+          <div className="bg-bg1-raised text-fg2 flex items-start gap-2.5 rounded-md px-3 py-2.5 text-xs">
             <TriangleAlert
-              className="text-yellow-fg mt-0.5 size-3.5 shrink-0"
+              className="text-yellow-on-bg mt-0.5 size-3.5 shrink-0"
               aria-hidden="true"
             />
             Couldn’t load GitHub authentication settings.

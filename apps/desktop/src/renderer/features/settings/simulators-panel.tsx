@@ -288,7 +288,7 @@ function SetupRow({
         <>
           {row.message}
           {typeof row.progress === "number" ? ` ${row.progress}%` : null}
-          {row.detail ? <span className="text-muted-fg block">{row.detail}</span> : null}
+          {row.detail ? <span className="text-fg3 block">{row.detail}</span> : null}
         </>
       }
     >

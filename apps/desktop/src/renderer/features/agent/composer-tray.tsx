@@ -8,7 +8,7 @@ export const COMPOSER_TRAY_RADIUS = "rounded-[calc(var(--radius-lg)*2.75)]";
 
 /**
  * A composer that cannot act yet, or has something to say, sits on a slightly
- * larger sidebar-bg tray with one status line beneath it and at most one
+ * larger bg1-raised tray with one status line beneath it and at most one
  * action. The tray paints outside the composer's box: its fill bleeds 4px
  * around the card and its line hangs below it, so on a centered page nothing
  * above or at the card moves as the message comes and goes, and the tray only
@@ -30,7 +30,7 @@ export function ComposerTray({
       {message && (
         <div
           aria-hidden="true"
-          className={cn("bg-sidebar-bg pointer-events-none absolute -inset-x-1 -top-1 -bottom-10", COMPOSER_TRAY_RADIUS)}
+          className={cn("bg-bg1-raised pointer-events-none absolute -inset-x-1 -top-1 -bottom-10", COMPOSER_TRAY_RADIUS)}
         />
       )}
       {children}

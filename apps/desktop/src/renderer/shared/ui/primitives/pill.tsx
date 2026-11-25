@@ -5,9 +5,9 @@ import { cn } from "@/renderer/shared/ui/cn";
 
 // Two sizes: inline (20px, 13/16, 4px corners) for text and rows, control
 // (24px, 13/18, 6px corners) around the composer. One neutral look for every
-// reference — bg2 + border2, hover border3 + bg2-highlight, on the selected
-// fill with the resting edge unchanged — and tints only where they mean
-// something.
+// reference, tuned by the ground it sits on (--pill-*: bg2 on border2 in the
+// chat, bg2-hover in the composer, selected-bg in a sent message), and tints
+// only where they mean something.
 const pillVariants = cva(
   "inline-flex max-w-60 shrink-0 items-center whitespace-nowrap border transition-colors duration-120 ease-out focus-visible:border-accent focus-visible:outline-none disabled:pointer-events-none disabled:opacity-50 [&_svg]:shrink-0 [&>span]:truncate",
   {
@@ -17,21 +17,22 @@ const pillVariants = cva(
         control: "h-6 gap-1 rounded-md px-2 text-xs leading-4.5 [&_svg]:size-3.5",
       },
       tone: {
+        // Fill and edge come from the ground (--pill-*, styles/semantic-tokens.css).
         neutral:
-          "border-border2 bg-bg2 text-fg1 hover:border-border3 hover:bg-bg2-highlight aria-pressed:bg-selected-bg aria-pressed:hover:bg-selected-bg data-[state=open]:border-border4 data-[state=open]:bg-bg2-highlight [&_svg:not([class*='text-'])]:text-fg2",
+          "border-(--pill-border) bg-(--pill-bg) text-fg1 hover:border-(--pill-hover-border) hover:bg-(--pill-hover-bg) aria-pressed:bg-selected-bg aria-pressed:hover:bg-selected-bg data-[state=open]:border-border4 data-[state=open]:bg-selected-bg [&_svg:not([class*='text-'])]:text-fg2",
         // A tool target that failed.
-        failed: "border-transparent bg-red-bg text-red-fg [&_svg]:text-red-fg",
+        failed: "border-transparent bg-red-bg text-red-on-bg [&_svg]:text-red-on-bg",
         // The Design mode tag.
-        mode: "border-transparent bg-blue-bg text-blue-fg [&_svg]:text-blue-fg",
+        mode: "border-transparent bg-accent-bg text-accent-on-bg [&_svg]:text-accent-on-bg",
         // Anything whose target is gone.
         gone: "border-dashed border-border3 bg-transparent text-fg3",
         // A missing attachment: a yellow outline and a grey icon.
         invalid:
-          "border-yellow-icon/45 bg-bg2 text-fg2 [&_svg]:opacity-60 [&_svg]:grayscale",
+          "border-yellow-text/45 bg-bg2 text-fg2 [&_svg]:opacity-60 [&_svg]:grayscale",
         // A design token applied to a Style field: its name on a quiet fill.
-        token: "border-transparent bg-bg2-highlight font-medium text-fg1 hover:bg-bg2-highlight",
+        token: "border-transparent bg-selected-bg font-medium text-fg1 hover:bg-selected-bg",
         // A design token the frame no longer declares.
-        missing: "border-transparent bg-yellow-bg font-medium text-yellow-fg",
+        missing: "border-transparent bg-yellow-bg font-medium text-yellow-on-bg",
       },
     },
     defaultVariants: { size: "inline", tone: "neutral" },

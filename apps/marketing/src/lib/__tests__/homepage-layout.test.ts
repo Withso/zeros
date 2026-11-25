@@ -140,9 +140,9 @@ describe("marketing homepage layout", () => {
     expect(css).not.toMatch(/inline-grid/);
     expect(css).toMatch(/white-space: nowrap/);
     expect(css).toMatch(/opacity: 0\.55/);
-    expect(css).not.toMatch(/--violet-fg/);
-    expect(css).not.toMatch(/--blue-fg/);
-    expect(css).not.toMatch(/--green-fg/);
+    expect(css).not.toMatch(/--violet-on-bg/);
+    expect(css).not.toMatch(/--accent-on-bg/);
+    expect(css).not.toMatch(/--green-on-bg/);
     expect(scramble).toMatch(/CODE_SCRAMBLE/);
     expect(scramble).toMatch(/DESIGN_SCRAMBLE/);
     expect(scramble).toMatch(/MATRIX_SCRAMBLE/);
@@ -226,7 +226,7 @@ describe("marketing homepage layout", () => {
     expect(hero).toMatch(/hero-product/);
     expect(hero).toMatch(/ProductPreview/);
     expect(hero).not.toMatch(/0\.5 \* productPx/);
-    expect(css).toMatch(/--bg0: hsl\(0 0% 5%\)/);
+    expect(css).toMatch(/--bg1: hsl\(0 0% 7%\)/);
     expect(css).toMatch(/prefers-color-scheme: light/);
     expect(css).toMatch(/hero-copy/);
     expect(css).toMatch(/--hero-peek: 0\.52/);

@@ -115,7 +115,7 @@ describe("chat reading type", () => {
     const text: [string, string][] = [
       ["features/agent/renderers/event-row-renderer.tsx", '"text-fg2 flex select-text flex-col gap-2 pr-3 pl-5 text-reading"'],
       ["features/agent/renderers/tool-exit-plan-mode.tsx", '"zeros-agent-md zeros-agent-md--document text-fg1 px-3 py-2.5 text-reading"'],
-      ["features/agent/agent-notice.tsx", '"bg-blue-bg text-fg1 min-w-0 px-3 py-2 text-reading"'],
+      ["features/agent/agent-notice.tsx", '"bg-accent-bg text-fg1 min-w-0 px-3 py-2 text-reading"'],
     ];
     for (const [file, pin] of [...rows, ...text]) expect(source(`${R}/${file}`), file).toContain(pin);
   });
@@ -131,10 +131,10 @@ describe("chat reading type", () => {
 
   it("counts the extra files in an attachment group at 11px, in the composer and sent messages", () => {
     expect(source(`${R}/features/agent/composer-editor/pills.tsx`)).toContain(
-      '<span className="text-muted-fg shrink-0 text-2xxs">+{ids.length - 1}</span>',
+      '<span className="text-fg3 shrink-0 text-2xxs">+{ids.length - 1}</span>',
     );
     expect(source(`${R}/features/agent/renderers/text-message.tsx`)).toContain(
-      '<span className="text-muted-fg text-2xxs">+{seg.files.length - 1}</span>',
+      '<span className="text-fg3 text-2xxs">+{seg.files.length - 1}</span>',
     );
   });
 

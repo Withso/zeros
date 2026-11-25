@@ -109,7 +109,7 @@ export function JoinTeamDialog({
                 That doesn't look like an invite link or code.
               </p>
             )}
-            {error && <p className="text-red-primary text-xs">{error}</p>}
+            {error && <p className="text-red-text text-xs">{error}</p>}
           </div>
         </DialogBody>
         <DialogFooter>

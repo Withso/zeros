@@ -251,7 +251,7 @@ function GithubNavIcon({ size }: { size?: number }) {
 
 // Override every state modifier; twMerge does not replace across modifiers.
 const INTERNAL_NAV_CLS =
-  "text-blue-primary hover:text-blue-primary data-[state=active]:text-blue-primary data-[state=active]:hover:text-blue-primary [&>svg]:text-blue-primary data-[state=active]:[&>svg]:text-blue-primary";
+  "text-accent-text hover:text-accent-text data-[state=active]:text-accent-text data-[state=active]:hover:text-accent-text [&>svg]:text-accent-text data-[state=active]:[&>svg]:text-accent-text";
 
 const SECTIONS: SectionDef[] = [
   {
@@ -481,7 +481,7 @@ function loadInitialSection(owner: string, unified: boolean): string {
 }
 
 const SIDEBAR_ENTRY_CLS =
-  "flex h-8 w-full min-w-0 items-center justify-start gap-2 rounded-md border-0 bg-transparent px-2 py-0 text-left text-xs leading-4.5 font-normal text-fg2 transition-colors duration-120 ease-out hover:bg-sidebar-bg-hover hover:text-fg1 data-[state=active]:bg-bg2-highlight data-[state=active]:text-fg1 data-[state=active]:hover:bg-bg2-highlight [&_svg]:size-3.5 [&>svg]:shrink-0 [&>svg]:text-fg3 data-[state=active]:[&>svg]:text-fg2";
+  "flex h-8 w-full min-w-0 items-center justify-start gap-2 rounded-md border-0 bg-transparent px-2 py-0 text-left text-xs leading-4.5 font-normal text-fg2 transition-colors duration-120 ease-out hover:bg-bg1-raised-hover hover:text-fg1 data-[state=active]:bg-selected-bg data-[state=active]:text-fg1 data-[state=active]:hover:bg-selected-bg [&_svg]:size-3.5 [&>svg]:shrink-0 [&>svg]:text-fg3 data-[state=active]:[&>svg]:text-fg2";
 
 const SETTINGS_GROUP_HEADER_CLS =
   "select-none px-2 pt-4 pb-1 text-3xxs leading-4 font-medium text-fg3";
@@ -750,7 +750,7 @@ function ScopedSettingsPage({ owner }: { owner: string }) {
   return (
     <div
       ref={pageSurfaceRef}
-      className="bg-sidebar-bg flex h-full min-h-0 w-full min-w-0 flex-1 flex-col overflow-hidden"
+      className="bg-bg1-raised flex h-full min-h-0 w-full min-w-0 flex-1 flex-col overflow-hidden"
     >
       <div className="relative flex min-h-0 min-w-0 flex-1 overflow-hidden">
         <div className="flex min-h-0 shrink-0 basis-[256px] flex-col">
@@ -762,7 +762,7 @@ function ScopedSettingsPage({ owner }: { owner: string }) {
             <Button
               variant="ghost"
               size="compact"
-              className="text-fg2 hover:bg-sidebar-bg-hover hover:text-fg1"
+              className="text-fg2 hover:bg-bg1-raised-hover hover:text-fg1"
               onClick={handleBack}
             >
               <ArrowLeft strokeWidth={1.5} />
@@ -1157,7 +1157,7 @@ function SignInMethodRow({
   return (
     <SettingsRow label={label} hint={desc}>
       {connected ? (
-        <span className="text-green-primary flex shrink-0 items-center gap-1.5 text-xs leading-4.5 font-medium">
+        <span className="text-green-text flex shrink-0 items-center gap-1.5 text-xs leading-4.5 font-medium">
           <CircleCheck className="size-3.5" aria-hidden />
           Connected
         </span>

@@ -177,8 +177,8 @@ const EditFileRow = memo(function EditFileRow({
       trailingNode={
         settled && !isWrite && hasChanges ? (
           <span className="shrink-0 text-xs tabular-nums">
-            <span className="text-green-primary">+{counts.added}</span>
-            <span className="text-red-primary ml-1">−{counts.removed}</span>
+            <span className="text-green-text">+{counts.added}</span>
+            <span className="text-red-text ml-1">−{counts.removed}</span>
           </span>
         ) : undefined
       }

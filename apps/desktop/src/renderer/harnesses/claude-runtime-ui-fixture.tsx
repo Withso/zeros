@@ -102,7 +102,7 @@ export function ClaudeRuntimeUiFixture({ ctx, connected }: { ctx: RendererContex
         <div className="grid gap-4 md:grid-cols-2">
           {runStates.map(state => (
             <div id={state.id} key={state.id} className="flex min-w-0 flex-col gap-2" data-task-row-id="stable-background-task">
-              <span className="text-muted-fg text-xs">{state.label}</span>
+              <span className="text-fg3 text-xs">{state.label}</span>
               <BackgroundTaskRecord message={background(state.ordinal, state.status)} ctx={ctx} />
               <TurnEventList events={[]} activityEvents={[background(state.ordinal, state.status)]} isActive isStreaming={false}
                 activityStartedAt={startedAt} ctx={{ ...ctx, activeTurnStartedAt: startedAt }}

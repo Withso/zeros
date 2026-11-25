@@ -64,8 +64,8 @@ const CodeBlockCopyButton = React.forwardRef<
       type="button"
       onClick={onCopy}
       className={cn(
-        // The icon-button recipe: 28px, 6px corners, the bg2-highlight hover.
-        "text-fg2 hover:bg-bg2-highlight hover:text-fg1 focus-visible:border-accent inline-flex size-7 items-center justify-center rounded-md border border-transparent transition-colors focus-visible:outline-none",
+        // The icon-button recipe: 28px, 6px corners, the selected-bg hover.
+        "text-fg2 hover:bg-selected-bg hover:text-fg1 focus-visible:border-accent inline-flex size-7 items-center justify-center rounded-md border border-transparent transition-colors focus-visible:outline-none",
         className,
       )}
       aria-label={copied ? "Copied" : "Copy code"}

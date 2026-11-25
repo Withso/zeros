@@ -6,12 +6,12 @@ export const REVIEW_GUTTER_CSS = `
     width: 16px;
     height: 16px;
     color: var(--bg1);
-    background: var(--blue-primary);
+    background: var(--accent-text);
     border: 0;
     border-radius: 4px;
     outline: none;
   }
-  [data-utility-button]:hover { color: var(--bg1); background: var(--blue-primary); }
+  [data-utility-button]:hover { color: var(--bg1); background: var(--accent-text); }
   [data-utility-button]:focus-visible:where(:not([data-zeros-focus-visible="false"])) { outline: 1px solid var(--accent); }
 `;
 

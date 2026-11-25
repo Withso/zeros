@@ -80,7 +80,7 @@ const foldTheme = EditorView.theme({
     padding: "0 4px",
     border: "none",
     borderRadius: "var(--radius-sm)",
-    backgroundColor: "var(--bg2-highlight)",
+    backgroundColor: "var(--selected-bg)",
     color: "var(--fg2)",
     cursor: "pointer",
   },

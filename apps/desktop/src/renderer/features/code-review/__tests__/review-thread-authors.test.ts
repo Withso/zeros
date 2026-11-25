@@ -195,7 +195,7 @@ describe("comment authors", () => {
       "Check annotation on New lines 4–6",
     );
     const slot = section.querySelector("article")!.firstElementChild!;
-    expect(slot.className).toContain("text-red-primary");
+    expect(slot.className).toContain("text-red-text");
     expect(slot.querySelector("svg")).not.toBeNull();
     expect(section.querySelector("[data-slot=avatar]")).toBeNull();
     expect(section.textContent).toContain("failure");

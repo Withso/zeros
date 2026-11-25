@@ -269,12 +269,12 @@ export function PublishToGithubDialog({
                   </p>
                 )}
                 {nameState.kind === "taken" && (
-                  <p className="text-red-primary text-xs">
+                  <p className="text-red-text text-xs">
                     That repository already exists.
                   </p>
                 )}
                 {nameState.kind === "error" && (
-                  <p className="text-red-primary text-xs">{nameState.message}</p>
+                  <p className="text-red-text text-xs">{nameState.message}</p>
                 )}
               </div>
 

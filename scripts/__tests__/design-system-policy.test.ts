@@ -77,38 +77,38 @@ describe("class rules", () => {
       "apps/desktop/src/renderer/features/b.tsx",
       `export const B = ({ failed }) => (
         <>
-          <span className={cn("bg-red-bg", failed && "text-red-primary")} />
-          <span className="bg-red-bg text-red-fg" />
-          <span className="text-red-primary" />
+          <span className={cn("bg-red-bg", failed && "text-red-text")} />
+          <span className="bg-red-bg text-red-on-bg" />
+          <span className="text-red-text" />
         </>
       );`,
     );
-    expect(keys(findings)).toEqual(["status-pairing:text-red-primary on bg-red-bg"]);
+    expect(keys(findings)).toEqual(["status-pairing:text-red-text on bg-red-bg"]);
   });
 
   it("keeps cva variants apart and re-expands shared constants at each use", () => {
     const variants = findingsFor(
       "apps/desktop/src/renderer/features/cva.tsx",
       `export const tone = cva("rounded-md", {
-        variants: { kind: { danger: "bg-red-bg text-red-fg", plain: "text-red-primary" } },
+        variants: { kind: { danger: "bg-red-bg text-red-on-bg", plain: "text-red-text" } },
       });`,
     );
     expect(variants).toEqual([]);
     const shared = findingsFor(
       "apps/desktop/src/renderer/features/shared.tsx",
       `const BACKGROUND_CLASS = "bg-red-bg";
-      export const X = () => <i className={cn(BACKGROUND_CLASS, "text-red-primary")} />;`,
+      export const X = () => <i className={cn(BACKGROUND_CLASS, "text-red-text")} />;`,
     );
-    expect(keys(shared)).toEqual(["status-pairing:text-red-primary on bg-red-bg"]);
+    expect(keys(shared)).toEqual(["status-pairing:text-red-text on bg-red-bg"]);
   });
 
   it("treats every opacity syntax on a text tier as a fake tier", () => {
     const findings = findingsFor(
       "apps/desktop/src/renderer/features/alpha.tsx",
-      'export const A = () => <i className="text-fg2/[.2] text-fg3/20.5 text-muted-fg/(--a)" />;',
+      'export const A = () => <i className="text-fg2/[.2] text-fg3/20.5 text-fg3/(--a)" />;',
     );
     expect(keys(findings)).toEqual(
-      ["text-alpha:text-fg2/[.2]", "text-alpha:text-fg3/20.5", "text-alpha:text-muted-fg/(--a)"].sort(),
+      ["text-alpha:text-fg2/[.2]", "text-alpha:text-fg3/20.5", "text-alpha:text-fg3/(--a)"].sort(),
     );
   });
 

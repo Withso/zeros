@@ -189,7 +189,7 @@ export function OrganizationSwitcher({
         </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="start" className="w-64">
-        <DropdownMenuLabel className="text-muted-fg truncate font-normal">
+        <DropdownMenuLabel className="text-fg3 truncate font-normal">
           {email ?? "Organizations"}
         </DropdownMenuLabel>
         {organizations.map((organization) => (
@@ -223,7 +223,7 @@ export function OrganizationSwitcher({
               >
                 <Plus />
                 <span>Create organization</span>
-                <ArrowUpRight className="text-muted-fg ml-auto" />
+                <ArrowUpRight className="text-fg3 ml-auto" />
               </DropdownMenuItem>
             )}
             <DropdownMenuItem
@@ -240,13 +240,13 @@ export function OrganizationSwitcher({
               <span>
                 {active?.isPersonal ? "Manage account" : "Manage organization"}
               </span>
-              <ArrowUpRight className="text-muted-fg ml-auto" />
+              <ArrowUpRight className="text-fg3 ml-auto" />
             </DropdownMenuItem>
             {multipleAccounts && (
               <>
                 <DropdownMenuSeparator />
                 {otherAccounts.length > 0 && (
-                  <DropdownMenuLabel className="text-muted-fg font-normal">
+                  <DropdownMenuLabel className="text-fg3 font-normal">
                     Switch account
                   </DropdownMenuLabel>
                 )}

@@ -122,7 +122,7 @@ export async function runToolsSmoke({ page, check }) {
       await expect.poll(() => matchesToken(refreshAction, "--fg2")).toBe(true);
       await refreshAction.hover();
       await expect.poll(() => matchesToken(refreshAction, "--fg2")).toBe(true);
-      await expect.poll(() => matchesToken(textAction, "--blue-fg")).toBe(true);
+      await expect.poll(() => matchesToken(textAction, "--accent-on-bg")).toBe(true);
       const normal = await textAppearance();
       expect(normal.padding).toEqual(["0px", "0px", "0px", "0px"]);
       expect(normal.background).toBe("rgba(0, 0, 0, 0)");

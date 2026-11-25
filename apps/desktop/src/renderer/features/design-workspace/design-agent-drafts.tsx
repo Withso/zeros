@@ -372,7 +372,7 @@ const DesignAgentDraftGhost = React.memo(function DesignAgentDraftGhost({
           transform: `translateY(${designCanvasScreenPixels(-8)}) scale(${DESIGN_CANVAS_INVERSE_ZOOM})`,
         }}
       >
-        <span className="text-muted-fg text-2xxs block truncate leading-4 font-medium">
+        <span className="text-fg3 text-2xxs block truncate leading-4 font-medium">
           {title}
         </span>
       </div>
@@ -706,7 +706,7 @@ export const DesignAgentActivityChip = React.memo(function DesignAgentActivityCh
                   onSelect={() => target && onReveal(target)}
                 >
                   <span className="min-w-0 flex-1 truncate">{designAgentDraftLabel(entry, context)}</span>
-                  <span className="text-muted-fg text-3xxs">{entryStatus}</span>
+                  <span className="text-fg3 text-3xxs">{entryStatus}</span>
                 </DropdownMenuItem>
               );
             })}

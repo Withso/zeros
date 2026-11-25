@@ -22,9 +22,9 @@ describe("MessageRow", () => {
   });
 
   it.each([
-    ["error", "text-red-primary"],
-    ["warning", "text-yellow-primary"],
-    ["success", "text-green-primary"],
+    ["error", "text-red-text"],
+    ["warning", "text-yellow-text"],
+    ["success", "text-green-text"],
     ["neutral", "text-fg3"],
   ] as const)("lets the 16px icon alone carry the %s tone", (tone, color) => {
     const markup = renderToStaticMarkup(createElement(MessageRow, { tone, children: "Line" }));
@@ -61,9 +61,9 @@ describe("SkeletonLine", () => {
     expect([...set].some((cls) => cls.startsWith("animate-"))).toBe(false);
   });
 
-  it("steps up to bg2-highlight on a card, whose bg1-bright fill is bg2 in Light", () => {
+  it("steps up to selected-bg on a card, whose bg1-raised fill is bg2 in Light", () => {
     const set = rootClasses(renderToStaticMarkup(createElement(SkeletonLine, { surface: "card" })));
-    expect(set).toContain("bg-bg2-highlight");
+    expect(set).toContain("bg-selected-bg");
     expect(set).not.toContain("bg-bg2");
     for (const cls of ["h-2", "rounded-sm"]) expect(set, cls).toContain(cls);
   });

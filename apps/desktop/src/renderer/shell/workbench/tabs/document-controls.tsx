@@ -66,7 +66,7 @@ export function DocumentControls({
             aria-label="Page number"
             inputMode="numeric"
             value={pageInput}
-            className="hover:bg-bg2-highlight h-7 w-8 border-transparent px-0 text-center tabular-nums"
+            className="hover:bg-selected-bg h-7 w-8 border-transparent px-0 text-center tabular-nums"
             onChange={(event) => setPageInput(event.target.value)}
             onBlur={commitPage}
             onKeyDown={(event) => {

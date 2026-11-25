@@ -211,7 +211,7 @@ const WorkflowPhaseRow = memo(function WorkflowPhaseRow({
             className={cn(
               "h-2 min-w-0 flex-1 rounded-sm",
               complete
-                ? "bg-green-primary"
+                ? "bg-green-text"
                 : index < filled
                   ? "bg-fg2"
                   : "bg-bg4",
@@ -219,7 +219,7 @@ const WorkflowPhaseRow = memo(function WorkflowPhaseRow({
           />
         ))}
       </div>
-      <span className="text-muted-fg min-w-12 text-right text-xs tabular-nums">
+      <span className="text-fg3 min-w-12 text-right text-xs tabular-nums">
         {workflowPhaseCountLabel(phase)}
       </span>
     </div>

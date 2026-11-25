@@ -191,10 +191,10 @@ function SimulatorPicker({
       <DropdownMenuTrigger asChild>
         <Button
           variant="ghost"
-          className="data-[state=open]:bg-bg2-highlight min-w-0 justify-start"
+          className="data-[state=open]:bg-selected-bg min-w-0 justify-start"
         >
           <span className="text-fg1 min-w-0 truncate">{device.name}</span>
-          <span className="text-muted-fg shrink-0 font-normal">
+          <span className="text-fg3 shrink-0 font-normal">
             {simulatorDeviceStatusLabel(device)}
           </span>
           <ChevronDown aria-hidden className="text-fg3" />

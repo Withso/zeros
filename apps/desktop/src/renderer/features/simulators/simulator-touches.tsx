@@ -7,10 +7,10 @@ import { mirroredFinger, type Size } from "./simulator-geometry";
 import { screenSpot, touchDots } from "./simulator-touch-motion";
 
 const FINGER =
-  "bg-muted-fg/50 border-fg1/25 pointer-events-none absolute size-6 -translate-x-1/2 -translate-y-1/2 rounded-full border";
+  "bg-fg3/50 border-fg1/25 pointer-events-none absolute size-6 -translate-x-1/2 -translate-y-1/2 rounded-full border";
 /** Invisible until its animation shows it, so a delayed dot waits unseen. */
 const AGENT_DOT =
-  "bg-muted-fg/50 border-fg1/25 pointer-events-none absolute size-6 -translate-x-1/2 -translate-y-1/2 rounded-full border opacity-0";
+  "bg-fg3/50 border-fg1/25 pointer-events-none absolute size-6 -translate-x-1/2 -translate-y-1/2 rounded-full border opacity-0";
 
 /** A burst of actions draws at most this many dots at once. */
 const MAX_AGENT_DOTS = 12;

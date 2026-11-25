@@ -241,7 +241,7 @@ const ContextMenuSubTrigger = React.forwardRef<
   <ContextMenuPrimitive.SubTrigger
     ref={ref}
     className={cn(
-      "focus:bg-bg3-hover focus:text-fg1 focus:[&_.text-muted-fg]:text-fg3 data-[state=open]:bg-bg3-hover data-[state=open]:[&_.text-muted-fg]:text-fg3 flex cursor-default items-center outline-none select-none",
+      "focus:bg-bg3-hover focus:text-fg1 focus:[&_.text-fg3]:text-fg3 data-[state=open]:bg-bg3-hover data-[state=open]:[&_.text-fg3]:text-fg3 flex cursor-default items-center outline-none select-none",
       MENU_ITEM_BOX,
       MENU_ITEM_RADIUS,
       MENU_ITEM_ICON,
@@ -353,7 +353,7 @@ const ContextMenuItem = React.forwardRef<
   React.ComponentRef<typeof ContextMenuPrimitive.Item>,
   React.ComponentPropsWithoutRef<typeof ContextMenuPrimitive.Item> & {
     inset?: boolean;
-    /** destructive: red-primary text and icon; place it last, after a
+    /** destructive: red-text text and icon; place it last, after a
      *  separator. */
     variant?: "default" | "destructive";
   }
@@ -362,7 +362,7 @@ const ContextMenuItem = React.forwardRef<
     ref={ref}
     data-variant={variant}
     className={cn(
-      "focus:bg-bg3-hover focus:text-fg1 focus:[&_.text-muted-fg]:text-fg3 relative flex cursor-default items-center transition-colors outline-none select-none data-[disabled]:pointer-events-none data-[disabled]:opacity-50",
+      "focus:bg-bg3-hover focus:text-fg1 focus:[&_.text-fg3]:text-fg3 relative flex cursor-default items-center transition-colors outline-none select-none data-[disabled]:pointer-events-none data-[disabled]:opacity-50",
       MENU_ITEM_BOX,
       MENU_ITEM_RADIUS,
       MENU_ITEM_ICON,

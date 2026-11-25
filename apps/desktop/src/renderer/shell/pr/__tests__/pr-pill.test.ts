@@ -21,11 +21,11 @@ describe("PrPill", () => {
   });
 
   it.each([
-    ["open", "border-(--pr-status-chip-border-success)", "text-green-primary"],
-    ["conflicts", "border-(--pr-status-chip-border-warning)", "text-yellow-primary"],
-    ["ready", "border-(--pr-status-chip-border-success)", "text-green-primary"],
-    ["merged", "border-(--pr-status-chip-border-merged)", "text-violet-fg"],
-    ["closed", "border-(--pr-status-chip-border-closed)", "text-red-fg"],
+    ["open", "border-(--pr-status-chip-border-success)", "text-green-text"],
+    ["conflicts", "border-(--pr-status-chip-border-warning)", "text-yellow-text"],
+    ["ready", "border-(--pr-status-chip-border-success)", "text-green-text"],
+    ["merged", "border-(--pr-status-chip-border-merged)", "text-violet-on-bg"],
+    ["closed", "border-(--pr-status-chip-border-closed)", "text-red-on-bg"],
   ] as const)("wears the PR status island's %s colours", (tone, border, text) => {
     const markup = pill(tone);
     expect(markup).toContain(border);

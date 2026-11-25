@@ -25,7 +25,7 @@ const ORBIT = [
   "@property --orb-turn { syntax: \"<angle>\"; inherits: false; initial-value: 0deg; }",
   ".orb { position: relative; display: inline-block; width: 16px; height: 16px; flex-shrink: 0; color: var(--fg2); }",
   ".orb::before, .orb::after { content: \"\"; position: absolute; inset: 2px; box-sizing: border-box; }",
-  ".orb::before { border: 3px solid var(--muted-fg); opacity: 0.4; }",
+  ".orb::before { border: 3px solid var(--fg3); opacity: 0.4; }",
   ".orb::after { padding: 3px; background: conic-gradient(from calc(var(--orb-turn) - 80deg), transparent 0deg, currentColor 80deg 188deg, transparent 188deg 360deg);" +
     " -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0); -webkit-mask-composite: xor;" +
     " mask: linear-gradient(#000 0 0) content-box exclude, linear-gradient(#000 0 0); animation: orb-lap 1200ms linear infinite; }",
@@ -62,7 +62,7 @@ describe("shared hosted-page shell", () => {
   });
 
   // The app's Orbit (shared/ui/loading/zeros-spinner.tsx): a square ring whose
-  // snake laps it every 1200ms over a muted-fg track at 40%, resting under
+  // snake laps it every 1200ms over a fg3 track at 40%, resting under
   // reduced motion. The dashboard and the shell draw the same one.
   it("draws the same square Orbit on the dashboard", async () => {
     const dashboard = (await readFile(new URL("../public/dashboard.css", import.meta.url), "utf8")).replace(/\s+/g, " ");

@@ -100,7 +100,7 @@ export function ConnectedMacs({ macs, now, busyDeviceId, onConnect, onDisconnect
 
 const SYNC_LABEL = "Sync to a local directory";
 // The dot: green in sync, red on an error, neutral while syncing or paused.
-const DOT: Record<WorkspaceSyncStatus["state"], string> = { in_sync: "bg-green-primary", error: "bg-red-primary", syncing: "bg-fg3", paused: "bg-fg3" };
+const DOT: Record<WorkspaceSyncStatus["state"], string> = { in_sync: "bg-green-text", error: "bg-red-text", syncing: "bg-fg3", paused: "bg-fg3" };
 /** A folder under the person's home reads from ~. */
 const displayFolder = (folder: string) => folder.replace(/^\/Users\/[^/]+(?=\/|$)/, "~");
 const displayBytes = (bytes: number) => {
@@ -127,7 +127,7 @@ function StatusLine({ state, words }: { state: WorkspaceSyncStatus["state"]; wor
   return (
     <span className="flex min-w-0 items-center gap-1.5">
       <span data-sync-dot={state} className={cn("size-1.5 shrink-0 rounded-full", DOT[state])} aria-hidden="true" />
-      <span role="status" className={cn(state === "error" ? "text-red-primary" : "text-fg2", "min-w-0 truncate text-xs leading-4.5")}>{words}</span>
+      <span role="status" className={cn(state === "error" ? "text-red-text" : "text-fg2", "min-w-0 truncate text-xs leading-4.5")}>{words}</span>
     </span>
   );
 }

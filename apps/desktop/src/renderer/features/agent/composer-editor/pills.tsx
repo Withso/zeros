@@ -244,7 +244,7 @@ function ReviewCommentPill(props: NodeViewProps & { reference: ReviewCommentRefe
             PILL_SHELL,
             "composer-pill", COMPOSER_PILL_SPACING,
             PILL_HOVER, props.selected && PILL_SELECTED,
-            invalid && "border-yellow-icon/40 hover:border-yellow-icon/40 text-fg2 opacity-85",
+            invalid && "border-yellow-text/40 hover:border-yellow-text/40 text-fg2 opacity-85",
           )}
         >
           <PillRemoveButton label={label} disabled={!ctx.editable} onRemove={() => removePill(props)}>
@@ -315,10 +315,10 @@ function AttachmentGroupPill(props: NodeViewProps) {
     if (ctx.onOpenAttachment) return; // Create's menu below opens each selected source.
     openComposerAttachmentGroup(ctx.cwd, id, name, available);
   };
-  const label = <><span className="max-w-[16rem] truncate">{name}</span><span className="text-muted-fg shrink-0 text-2xxs">+{ids.length - 1}</span></>;
+  const label = <><span className="max-w-[16rem] truncate">{name}</span><span className="text-fg3 shrink-0 text-2xxs">+{ids.length - 1}</span></>;
   return <Tooltip label={`${name} · ${ids.length} files${invalid ? ` · ${issues[0]}${issues.length > 1 ? ` (+${issues.length - 1} more)` : ""}` : saving ? " · Saving attachments" : ""}`}>
     <NodeViewWrapper as="span" contentEditable={false} data-attachment-pill="" data-attachment-group="" aria-busy={saving || undefined}
-      className={cn(PILL_SHELL, "composer-pill", COMPOSER_PILL_SPACING, PILL_HOVER, props.selected && PILL_SELECTED, invalid && "border-yellow-icon/40 hover:border-yellow-icon/40")}>
+      className={cn(PILL_SHELL, "composer-pill", COMPOSER_PILL_SPACING, PILL_HOVER, props.selected && PILL_SELECTED, invalid && "border-yellow-text/40 hover:border-yellow-text/40")}>
       <PillRemoveButton label={name} disabled={!ctx.editable} onRemove={() => removePill(props)}><Files size={13} /></PillRemoveButton>
       {ctx.onOpenAttachment ? <DropdownMenu>
         <DropdownMenuTrigger asChild><Button variant="ghost" aria-label={`Open ${name}, ${ids.length} files`} disabled={!ctx.attachmentImagesActive}
@@ -432,7 +432,7 @@ function SingleAttachmentPill(props: NodeViewProps) {
         "composer-pill", COMPOSER_PILL_SPACING,
         PILL_HOVER, props.selected && PILL_SELECTED,
         invalid &&
-          "border-yellow-icon/40 hover:border-yellow-icon/40 text-fg2 opacity-85 [&_[data-composer-pill-icon]]:grayscale",
+          "border-yellow-text/40 hover:border-yellow-text/40 text-fg2 opacity-85 [&_[data-composer-pill-icon]]:grayscale",
       )}
       contentEditable={false}
     >

@@ -48,7 +48,7 @@
 /* Brightness hierarchy (2026-06-19, refined): inside the working feed, ONLY the
    in-between NARRATION — the agent/system prose the model emits while working —
    is muted to `--fg3`, and uniformly: bold, headings, links, inline code and
-   table cells otherwise carry their own `--fg1`/`--blue-primary`, so without this they
+   table cells otherwise carry their own `--fg1`/`--accent-text`, so without this they
    read as brighter "highlights" inside an otherwise-muted message (user: "even
    bold or any formatting → muted"). Narration is a <TextMessage>, so it carries a
    `[data-role]`; reaching its `.zeros-agent-md *` at specificity (0,4,0) beats
@@ -268,7 +268,7 @@
   text-decoration-color: var(--fg2);
   opacity: 0.6;
 }
-/* External links — blue-primary text, no underline at rest; hover reveals a custom 1px
+/* External links — accent-text text, no underline at rest; hover reveals a custom 1px
    underline with a gap below the text (matches the file-path chips). Every
    link ends with a small ↗ redirect glyph (lucide arrow-up-right as an
    alpha mask, painted with the link color via background-color so it re-themes
@@ -281,7 +281,7 @@
   overflow: hidden;
   text-overflow: ellipsis;
   vertical-align: bottom;
-  color: var(--blue-primary);
+  color: var(--accent-text);
   font-family: var(--font-sans);
   font-size: var(--agent-md-text);
   word-break: normal;
@@ -355,7 +355,7 @@
   border-radius: 4px;
   background: transparent;
   border: none;
-  color: var(--blue-primary);
+  color: var(--accent-text);
   font-family: var(--font-sans);
   font-size: var(--agent-md-text);
   cursor: pointer;
@@ -365,27 +365,27 @@
 [data-Zeros-root] .zeros-agent-md .zeros-md-filepath:hover {
   text-decoration: underline;
   text-decoration-thickness: 1px;
-  text-decoration-color: var(--blue-primary);
+  text-decoration-color: var(--accent-text);
   text-underline-offset: 3px;
 }
 [data-Zeros-root] .zeros-agent-md a[data-local-preview] {
-  color: var(--blue-fg);
+  color: var(--accent-on-bg);
 }
 [data-Zeros-root] .zeros-agent-md a[data-local-preview]::after {
   display: none;
 }
 [data-Zeros-root] .zeros-agent-md .zeros-md-filepath:focus-visible:where(:not([data-zeros-focus-visible="false"])) {
-  outline: 1px solid var(--blue-primary);
+  outline: 1px solid var(--accent-text);
   outline-offset: 2px;
 }
 /* References retain their own link affordance in live and settled narration. */
 [data-Zeros-root] .zeros-working-feed [data-role] .zeros-agent-md :is(a, .zeros-md-filepath),
 [data-Zeros-root] .zeros-working-feed [data-role] .zeros-agent-md :is(a, .zeros-md-filepath) * {
-  color: var(--blue-primary);
+  color: var(--accent-text);
 }
 [data-Zeros-root] .zeros-working-feed [data-role] .zeros-agent-md a[data-local-preview],
 [data-Zeros-root] .zeros-working-feed [data-role] .zeros-agent-md a[data-local-preview] * {
-  color: var(--blue-fg);
+  color: var(--accent-on-bg);
 }
 [data-Zeros-root] .zeros-agent-md a code {
   font: inherit;
@@ -543,7 +543,7 @@
   margin: 14px 0;
   padding: 10px 14px;
   background: var(
-    --bg1-highlight
+    --bg1-raised
   ); /* lifted content on the bg1 canvas — NOT bg3 (floating-only) */
   border: 1px solid var(--border1);
   border-radius: 8px;
@@ -584,12 +584,12 @@
 
 /* Highlight (`<mark>`) — a neutral reference tag, NOT a colored highlighter.
    Same border1 frame as the inline-code chip (`.zeros-agent-md code` above) but
-   on the slightly-lighter `--bg1-highlight` (vs the chip's `--bg1`) so a stray
+   on the slightly-lighter `--bg1-raised` (vs the chip's `--bg1`) so a stray
    <mark> reads as a tag distinct from real inline code, and it stays in the
    prose (sans) font. Deliberately NOT an accent/blue fill — a colored block
    mid-prose read too loud (2026-07-08). */
 [data-Zeros-root] .zeros-agent-md mark {
-  background: var(--bg1-highlight);
+  background: var(--bg1-raised);
   border: 1px solid var(--border1);
   color: var(--fg1);
   padding: 1px 5px; /* check:ui ignore-line — matches the inline-code chip */
@@ -611,7 +611,7 @@
   min-height: 18px;
   padding: 0 5px; /* check:ui ignore-line — compact keyboard-chip geometry */
   background: var(
-    --bg1-highlight
+    --bg1-raised
   ); /* lifted content on the bg1 canvas — NOT bg3 (floating-only) */
   border: 1px solid var(--border1);
   border-radius: 4px;

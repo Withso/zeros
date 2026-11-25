@@ -571,7 +571,7 @@ function OptionsNotice({ tone, className, children, ...props }: React.HTMLAttrib
     <div
       {...props}
       className={cn("flex flex-col items-start gap-2 rounded-md p-2.5 text-3xxs leading-4.5",
-        tone === "error" ? "bg-red-bg text-red-fg" : "bg-yellow-bg text-yellow-fg", className)}
+        tone === "error" ? "bg-red-bg text-red-on-bg" : "bg-yellow-bg text-yellow-on-bg", className)}
     >
       {children}
     </div>

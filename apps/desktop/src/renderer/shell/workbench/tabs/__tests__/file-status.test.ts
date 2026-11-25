@@ -62,11 +62,11 @@ describe("Files Git status presentation", () => {
   it("uses a distinct accessible letter and semantic color for every status", () => {
     expect(FILE_STATUS_PRESENTATION.modified).toMatchObject({
       letter: "M",
-      className: "text-yellow-primary",
+      className: "text-yellow-text",
     });
     expect(FILE_STATUS_PRESENTATION.deleted).toMatchObject({
       letter: "D",
-      className: "text-red-primary",
+      className: "text-red-text",
     });
     expect(
       new Set(

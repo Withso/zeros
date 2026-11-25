@@ -13,7 +13,7 @@ export function CodeThemePreview() {
     <div className="flex font-mono text-xs leading-[1.6]">
       <div
         aria-hidden
-        className="text-muted-fg shrink-0 pr-4 pl-2 text-right tabular-nums select-none"
+        className="text-fg3 shrink-0 pr-4 pl-2 text-right tabular-nums select-none"
       >
         {Array.from({ length: LINES }, (_, i) => (
           <div key={i}>{i + 1}</div>

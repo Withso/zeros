@@ -276,7 +276,7 @@ function ToolsPopover({
             Connect to the workspace to view tools.
           </p>
         ) : preparationError ? (
-          <p role="alert" className="text-red-primary text-xs">
+          <p role="alert" className="text-red-text text-xs">
             {preparationError}
           </p>
         ) : preparing ? (
@@ -307,7 +307,7 @@ function ToolsPopover({
           />
         )}
         {(read.error || authError) && (
-          <p role="alert" className="text-red-primary mt-2 text-xs">
+          <p role="alert" className="text-red-text mt-2 text-xs">
             {authError ??
               (read.data
                 ? "Could not refresh. Showing the last confirmed tool status."

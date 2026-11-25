@@ -109,7 +109,7 @@ export function SlashCommandPicker({
             className={cn(PICKER_TAB_CLS, !active && "text-fg2 hover:text-fg1")}
           >
             <span>{t.label}</span>
-            <span className="text-muted-fg">{counts[t.id]}</span>
+            <span className="text-fg3">{counts[t.id]}</span>
           </Button>
         );
       })}

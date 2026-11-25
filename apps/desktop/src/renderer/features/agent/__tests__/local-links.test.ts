@@ -206,13 +206,14 @@ describe("Local link identity and presentation", () => {
       expect(html).toContain(`${agent} review`);
       expect(html).toContain(`data-local-link-agent="${agent}"`);
       expect(html).toContain("<svg");
-      // The neutral inline pill: bg2 + border2, 20px, 4px gap, 6px padding.
-      expect(html).toContain("bg-bg2");
-      expect(html).toContain("border-border2");
+      // The neutral inline pill on its ground's fill and edge (--pill-*), 20px,
+      // 4px gap, 6px padding.
+      expect(html).toContain("bg-(--pill-bg)");
+      expect(html).toContain("border-(--pill-border)");
       expect(html).toContain("text-fg1");
-      // It hovers like every reference pill: bg2-highlight on border3.
-      expect(html).toContain("hover:bg-bg2-highlight");
-      expect(html).toContain("hover:border-border3");
+      // It hovers like every reference pill: the ground's hover on border3.
+      expect(html).toContain("hover:bg-(--pill-hover-bg)");
+      expect(html).toContain("hover:border-(--pill-hover-border)");
       expect(html).not.toContain("bg-agent-");
       expect(html).not.toContain("border-0");
       expect(html).toContain("h-5");
@@ -237,7 +238,7 @@ describe("Local link identity and presentation", () => {
     for (const cls of ["border-0", "bg-transparent", "hover:bg-transparent", "p-0", "gap-0.5", "items-center", "text-fg1", "hover:text-fg1", "[&_svg]:size-4"]) {
       expect(button, cls).toContain(cls);
     }
-    for (const cls of ["bg-bg2", "border-border2", "h-5", "hover:bg-bg2-highlight", "hover:border-border3", "text-fg3"]) {
+    for (const cls of ["bg-(--pill-bg)", "border-(--pill-border)", "h-5", "hover:bg-(--pill-hover-bg)", "hover:border-(--pill-hover-border)", "text-fg3"]) {
       expect(button, cls).not.toContain(cls);
     }
     // Hovered, only the name takes a fill; its text stays fg1.
@@ -253,7 +254,7 @@ describe("Local link identity and presentation", () => {
     );
     expect(missing).toContain("text-fg3");
     expect(missing).toContain("border-0");
-    expect(missing).not.toContain("bg-bg2-hover");
+    expect(missing).not.toContain("border-dashed");
   });
 
   it("renders workspace labels and the existing workspace glyph", () => {
@@ -265,7 +266,7 @@ describe("Local link identity and presentation", () => {
     );
     expect(folder).toContain("Project");
     expect(folder).toContain("lucide-folder");
-    expect(folder).toContain("bg-blue-pill-bg");
+    expect(folder).toContain("bg-(--pill-link-bg)");
     expect(folder).toContain("border-0");
     // A tighter icon-to-name gap than the attachment-shaped chat pill.
     for (const html of [folder, render(h(LocalLinkPill, { href: "zeros-dev://workspace/ws_child" }))]) {
@@ -280,7 +281,9 @@ describe("Local link identity and presentation", () => {
     (id) => {
       const html = render(h(LocalLinkPill, { href: `zeros-dev://chat/${id}` }));
       expect(html).toContain('data-local-link-available="false"');
-      expect(html).toContain("bg-bg2-hover");
+      // Gone: no fill on any ground, a dashed border3 edge and fg3.
+      expect(html).toContain("border-dashed");
+      expect(html).toContain("bg-transparent");
       expect(html).toContain("Open chat: Chat");
       expect(html).not.toContain("disabled=");
     },

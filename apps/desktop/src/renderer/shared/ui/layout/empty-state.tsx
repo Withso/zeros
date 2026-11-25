@@ -15,7 +15,7 @@ export function EmptyStateError({
       role="alert"
       data-slot="empty-state-error"
       className={cn(
-        "text-red-primary m-0 flex max-w-sm items-start gap-1.5 text-left text-3xxs leading-4",
+        "text-red-text m-0 flex max-w-sm items-start gap-1.5 text-left text-3xxs leading-4",
         className,
       )}
       {...props}

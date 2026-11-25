@@ -24,23 +24,23 @@ Use the current shared primitives, token sources, and the checked-in frames in
    with a test; never hand-build a `<button>`, `<input>`, `<select>` or
    `<textarea>` in feature code, and never restyle a primitive from a caller.
 3. **Tokens only.** Color comes from token utilities (`bg-bg1`, `text-fg2`,
-   `border-border1`, `text-red-primary`, …). No hex/rgb/hsl, no Tailwind palette
+   `border-border1`, `text-red-text`, …). No hex/rgb/hsl, no Tailwind palette
    colors (they do not compile), no arbitrary values such as `text-[14px]`,
    `z-[1000]` or `rounded-[18px]`; a derived value is written from a token
    (`rounded-[calc(var(--radius-lg)*1.5)]`). Token values live in
    `styles/tokens/*.tokens.json`; the CSS token blocks are generated.
 4. **Surfaces decide hovers.** On `bg-bg1` hover with `hover:bg-bg1-hover`, on
    `bg-bg2` with `hover:bg-bg2-hover`, in the sidebar with
-   `hover:bg-sidebar-bg-hover`; inside a `Surface`, `hover:bg-(--surface-hover)`.
+   `hover:bg-bg1-raised-hover`; inside a `Surface`, `hover:bg-(--surface-hover)`.
    Floating surfaces (menus, popovers, tooltips, hover cards, toasts) are
    `bg-bg3` + `border-border2`, 12px corners, the dropdown shadow, a 4px inset
    and 28px rows with 8px corners; only they use `bg-bg3`. Navigation
-   selection (sidebar, trees, layers) is `bg-bg2-highlight` with `text-fg1`, a
+   selection (sidebar, trees, layers) is `bg-selected-bg` with `text-fg1`, a
    step above hover. A pressed toggle, the active tab or segment, and a chosen
    chip or option fill with `bg-selected-bg`; no selected, pressed, active or
    current state adds a border, ring, outline or shadow.
 5. **Text tiers:** `text-fg1` emphasis/selected, `text-fg2` default, `text-fg3`
-   secondary and placeholders, `text-muted-fg` metadata. Never fake a tier with
+   secondary and placeholders, `text-fg3` metadata. Never fake a tier with
    opacity (`text-fg2/60`). On a tinted `bg-<family>-bg`, text is
    `text-<family>-fg`.
 6. **Scales:** text `text-xxs` 10 · `text-2xxs` 11 · `text-3xxs` 12 · `text-xs`

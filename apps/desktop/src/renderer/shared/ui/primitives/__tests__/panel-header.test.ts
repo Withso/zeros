@@ -24,8 +24,8 @@ describe("PanelHeader markup equivalence", () => {
       site: "design-inspector error section",
       tag: "section",
       original:
-        "text-red-primary border-border1 flex h-9 items-center gap-2 border-b pr-1 pl-3",
-      props: { size: "panel", as: "section", className: "text-red-primary" },
+        "text-red-text border-border1 flex h-9 items-center gap-2 border-b pr-1 pl-3",
+      props: { size: "panel", as: "section", className: "text-red-text" },
     },
     {
       site: "pr-status-row window row",

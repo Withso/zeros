@@ -310,7 +310,7 @@ export function DesignPagePicker({
               Rename page…
             </DropdownMenuItem>
             <DropdownMenuItem
-              className="text-red-fg focus:text-red-fg h-7"
+              className="text-red-on-bg focus:text-red-on-bg h-7"
               disabled={pending || pages.length === 1}
               onSelect={requestDelete}
             >

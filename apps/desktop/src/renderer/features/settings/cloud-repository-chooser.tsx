@@ -163,8 +163,8 @@ export function CloudRepositoryChooser({ userId, organizationId, active, disable
                 </div>
                 <div className="flex min-h-0 flex-1 flex-col gap-1 overflow-y-auto px-3 py-2" aria-label="GitHub repositories">
                   {listing.loading && !listing.data && <p className="text-fg2 m-0 text-xs" role="status">Loading repositories…</p>}
-                  {listing.error && <p className="text-red-primary m-0 text-xs" role="alert">{listing.error.message}</p>}
-                  {error && <p className="text-red-primary m-0 text-xs" role="alert">{error}</p>}
+                  {listing.error && <p className="text-red-text m-0 text-xs" role="alert">{listing.error.message}</p>}
+                  {error && <p className="text-red-text m-0 text-xs" role="alert">{error}</p>}
                   {rows.map((row) => (
                     <Checkbox key={row.id} checked={isChosen(row)} onChange={() => onToggle(row)}
                       label={query ? fullName(row) : row.name} hint={row.canPush ? undefined : "Read only"} />

@@ -120,24 +120,24 @@ interface PrStatusIslandProps {
 // surface — defined once so the shared treatment can't drift per key.
 const OPEN_CARD = "bg-[var(--pr-status-surface)] border-border2";
 const SUCCESS_CHIP =
-  "border-[var(--pr-status-chip-border-success)] text-green-primary hover:text-green-fg";
+  "border-[var(--pr-status-chip-border-success)] text-green-text hover:text-green-on-bg";
 const WARNING_CHIP =
-  "border-[var(--pr-status-chip-border-warning)] text-yellow-primary hover:text-yellow-fg";
+  "border-[var(--pr-status-chip-border-warning)] text-yellow-text hover:text-yellow-on-bg";
 const CARD_TONE: Record<PrIslandTone, string> = {
   neutral: OPEN_CARD,
   warning: OPEN_CARD,
   danger: OPEN_CARD,
-  success: "bg-green-bg border-green-primary/10",
-  merged: "bg-violet-bg border-violet-primary/10",
-  closed: "bg-red-bg border-red-primary/10",
+  success: "bg-green-bg border-green-text/10",
+  merged: "bg-violet-bg border-violet-text/10",
+  closed: "bg-red-bg border-red-text/10",
 };
 const LABEL_TONE: Record<PrIslandTone, string> = {
   neutral: "text-fg1",
   warning: "text-fg1",
   danger: "text-fg1",
-  success: "text-green-primary",
-  merged: "text-violet-fg",
-  closed: "text-red-fg",
+  success: "text-green-text",
+  merged: "text-violet-on-bg",
+  closed: "text-red-on-bg",
 };
 // "View PR ↗" chip — a quiet per-tone outline (muted ramp shades via the
 // --pr-status-chip-border-* semantics), constant across every state.
@@ -149,9 +149,9 @@ const CHIP_TONE: Record<PrIslandTone, string> = {
   danger: WARNING_CHIP,
   success: SUCCESS_CHIP,
   merged:
-    "border-[var(--pr-status-chip-border-merged)] text-violet-fg hover:text-violet-primary",
+    "border-[var(--pr-status-chip-border-merged)] text-violet-on-bg hover:text-violet-text",
   closed:
-    "border-[var(--pr-status-chip-border-closed)] text-red-fg hover:text-red-primary",
+    "border-[var(--pr-status-chip-border-closed)] text-red-on-bg hover:text-red-text",
 };
 
 const ACTION_ICON: Partial<
@@ -186,7 +186,7 @@ const BTN_BASE =
 function actionButtonClass(action: PrIslandAction, tone: PrIslandTone): string {
   if (action.variant === "primary") {
     if (action.kind === "merge") {
-      return "bg-green-primary text-[var(--pr-status-merge-fg)] enabled:hover:opacity-90";
+      return "bg-green-text text-[var(--pr-status-merge-fg)] enabled:hover:opacity-90";
     }
     // Archive. On the Light closed row the dark inverted fill reads harsh on
     // the salmon surface — flip to a white bordered button.
@@ -893,7 +893,7 @@ export function PrStatusIsland({
           )}
         >
           {island.kind === "closed" && (
-            <GitPullRequestClosed className="text-red-fg size-3.5 shrink-0" />
+            <GitPullRequestClosed className="text-red-on-bg size-3.5 shrink-0" />
           )}
           <span className="min-w-0 truncate">{island.label}</span>
         </span>

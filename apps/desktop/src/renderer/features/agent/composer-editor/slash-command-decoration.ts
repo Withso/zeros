@@ -19,7 +19,7 @@ export function slashCommandDecorations(doc: Node, commands: readonly AvailableC
       const from = position + match.index! + match[1].length;
       decorations.push(Decoration.inline(from, from + match[2].length + 1, {
         "data-slash-command": match[2],
-        class: "text-yellow-primary",
+        class: "text-yellow-text",
       }));
     }
   });

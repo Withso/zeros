@@ -197,12 +197,12 @@ import { initialsOf } from "@/renderer/shared/lib/initials";
 
 // One shared destination-row shape, mirroring the Settings rail's entry
 // (settings-page.tsx SIDEBAR_ENTRY_CLS) so both navigations read as the same
-// control: 32px, fg2 at rest on the surface hover, fg1 on bg2-highlight when
+// control: 32px, fg2 at rest on the surface hover, fg1 on selected-bg when
 // selected. Icons are 14px on fg3 at the 16px icon column (8px list inset +
 // 8px padding, no border); selection lifts them to fg2. Rows never shift
 // width. `[&_svg]:` beats the primitive's own icon size through twMerge.
 const SIDEBAR_ENTRY_CLS =
-  "flex h-8 w-full min-w-0 items-center justify-start gap-2 rounded-md border-0 bg-transparent px-2 py-0 text-left text-xs leading-4.5 font-normal text-fg2 transition-colors duration-120 ease-out hover:bg-(--surface-hover) hover:text-fg1 data-[state=active]:bg-bg2-highlight data-[state=active]:text-fg1 data-[state=active]:hover:bg-bg2-highlight [&_svg]:size-3.5 [&>svg]:shrink-0 [&>svg]:text-fg3 data-[state=active]:[&>svg]:text-fg2";
+  "flex h-8 w-full min-w-0 items-center justify-start gap-2 rounded-md border-0 bg-transparent px-2 py-0 text-left text-xs leading-4.5 font-normal text-fg2 transition-colors duration-120 ease-out hover:bg-(--surface-hover) hover:text-fg1 data-[state=active]:bg-selected-bg data-[state=active]:text-fg1 data-[state=active]:hover:bg-selected-bg [&_svg]:size-3.5 [&>svg]:shrink-0 [&>svg]:text-fg3 data-[state=active]:[&>svg]:text-fg2";
 // The list's section label: 12/16 medium on fg3, like Settings' group labels.
 const SECTION_LABEL_CLS = "select-none truncate text-3xxs leading-4 font-medium text-fg3";
 // The sidebar never squeezes the workspace below its column floors
@@ -873,7 +873,7 @@ export function AppSidebar({ hidden = false }: { hidden?: boolean }) {
               </span>
             )}
             <span className="min-w-0 truncate">{label}</span>
-            <span className="text-muted-fg ml-auto text-3xxs tabular-nums">{entry.items.length}</span>
+            <span className="text-fg3 ml-auto text-3xxs tabular-nums">{entry.items.length}</span>
             {collapsed ? <ChevronRight strokeWidth={1.5} aria-hidden="true" /> : <ChevronDown strokeWidth={1.5} aria-hidden="true" />}
           </Button>
           <div id={groupId} role="group" aria-label={`${label} workspaces`}
@@ -1147,7 +1147,7 @@ export function AppSidebar({ hidden = false }: { hidden?: boolean }) {
                       aria-expanded={!collapsed} aria-controls={sectionId}
                       onClick={() => setSidebarSectionCollapsed(id, !collapsed)}>
                       <span className={cn(SECTION_LABEL_CLS, "min-w-0")}>{section.id === null ? "My workspaces" : section.label}</span>
-                      <span className="text-muted-fg text-3xxs tabular-nums">{items.length}</span>
+                      <span className="text-fg3 text-3xxs tabular-nums">{items.length}</span>
                       <span className="ml-auto inline-flex shrink-0" aria-hidden="true">
                         {collapsed ? <ChevronRight strokeWidth={1.5} /> : <ChevronDown strokeWidth={1.5} />}
                       </span>

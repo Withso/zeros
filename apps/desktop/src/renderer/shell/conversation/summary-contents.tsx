@@ -234,7 +234,7 @@ export function SummaryContents({
                 Add run action
               </Button>
             ) : (
-              <p className="text-muted-fg px-1.5 py-1 text-xs">
+              <p className="text-fg3 px-1.5 py-1 text-xs">
                 {actionsError
                   ? "Run actions unavailable."
                   : "Loading run actions…"}
@@ -277,12 +277,12 @@ export function SummaryContents({
                   aria-hidden="true"
                 >
                   {changeLines.additions > 0 && (
-                    <span className="text-green-primary">
+                    <span className="text-green-text">
                       +{changeLines.additions}
                     </span>
                   )}
                   {changeLines.deletions > 0 && (
-                    <span className="text-red-primary">
+                    <span className="text-red-text">
                       −{changeLines.deletions}
                     </span>
                   )}

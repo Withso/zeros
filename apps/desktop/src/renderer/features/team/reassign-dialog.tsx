@@ -76,7 +76,7 @@ function ReassignDialog({ target }: { target: CloudWorkspaceTarget }) {
           <DialogHeader><DialogTitle>{copy.title}</DialogTitle></DialogHeader>
           <DialogBody>
             <DialogDescription>{copy.body}{copy.follow ? <><br />{copy.follow}</> : null}</DialogDescription>
-            {message && <p className="text-red-primary text-xs" role="alert">{message}</p>}
+            {message && <p className="text-red-text text-xs" role="alert">{message}</p>}
           </DialogBody>
           <DialogFooter>
             <Button variant="secondary" size="sm" disabled={submitting} onClick={() => setPicked(null)}>Back</Button>
@@ -91,13 +91,13 @@ function ReassignDialog({ target }: { target: CloudWorkspaceTarget }) {
       title="Reassign Creator" description="The Creator's agent logins run every turn in this workspace.">
       <CommandInput placeholder="Search people…" value={query} onValueChange={setQuery} />
       <CommandList>
-        {message && <p className="text-red-primary px-3 py-2 text-xs" role="alert">{message}</p>}
+        {message && <p className="text-red-text px-3 py-2 text-xs" role="alert">{message}</p>}
         <CommandEmpty>{rows ? "No one matches." : "Loading…"}</CommandEmpty>
         <CommandGroup>
           {visible.map(row => (
             <CommandItem key={row.userId} value={row.userId} disabled={!row.eligible} onSelect={() => { setMessage(null); setPicked(row); }} className="gap-2">
               <span className="min-w-0 flex-1 truncate">{row.name}</span>
-              {row.hint && <span className="text-muted-fg text-2xxs shrink-0">{row.hint}</span>}
+              {row.hint && <span className="text-fg3 text-2xxs shrink-0">{row.hint}</span>}
             </CommandItem>
           ))}
         </CommandGroup>

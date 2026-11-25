@@ -59,19 +59,19 @@ describe("workspace tab change counts", () => {
     // A strip of twenty workspaces stays monochrome chrome; the one the user
     // is actually in gets the green/red every other diff stat in the app uses.
     const inactive = render(12, 4);
-    expect(inactive).not.toContain("text-green-primary");
-    expect(inactive).not.toContain("text-red-primary");
+    expect(inactive).not.toContain("text-green-text");
+    expect(inactive).not.toContain("text-red-text");
 
     const activeMarkup = render(12, 4, true);
-    expect(activeMarkup).toContain('class="text-green-primary">+12');
-    expect(activeMarkup).toContain('class="text-red-primary">\u2212');
+    expect(activeMarkup).toContain('class="text-green-text">+12');
+    expect(activeMarkup).toContain('class="text-red-text">\u2212');
     // The wrapper keeps carrying fg2 either way — colour is per half.
     expect(activeMarkup).toContain("text-fg2");
   });
 
   it("colours only the half that actually changed", () => {
-    expect(render(12, 0, true)).not.toContain("text-red-primary");
-    expect(render(0, 4, true)).not.toContain("text-green-primary");
+    expect(render(12, 0, true)).not.toContain("text-red-text");
+    expect(render(0, 4, true)).not.toContain("text-green-text");
   });
 
   it("stays decorative — the numbers are exposed via the tab's own name", () => {

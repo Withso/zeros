@@ -86,8 +86,8 @@ describe("EditCard — failed edits stay collapsed", () => {
 
   it("suppresses the applied-change ± badge on the failed row", () => {
     // The same edit succeeds → +2 −1 shows; failed → no green/red counts.
-    expect(render(editTool({}))).toContain("text-green-primary");
-    expect(render(failed)).not.toContain("text-green-primary");
+    expect(render(editTool({}))).toContain("text-green-text");
+    expect(render(failed)).not.toContain("text-green-text");
   });
 
   it("keeps a successful edit collapsed by default too (row parity)", () => {

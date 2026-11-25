@@ -313,11 +313,11 @@ export function TerminalWorkbenchLayout({
                               aria-hidden
                               className={cn(
                                 "size-1.5 shrink-0 rounded-full",
-                                entry.dot === "running" && "bg-yellow-icon",
-                                entry.dot === "passed" && "bg-green-primary",
+                                entry.dot === "running" && "bg-yellow-text",
+                                entry.dot === "passed" && "bg-green-text",
                                 (entry.dot === "failed" ||
                                   entry.dot === "stopped") &&
-                                  "bg-red-primary",
+                                  "bg-red-text",
                               )}
                             />
                           )}
@@ -367,7 +367,7 @@ export function TerminalWorkbenchLayout({
                                   else if (entry.runActionId)
                                     onRun(entry.runActionId);
                                 }}
-                                className="text-blue-fg hover:text-blue-fg h-6 px-2 py-0 text-xs"
+                                className="text-accent-on-bg hover:text-accent-on-bg h-6 px-2 py-0 text-xs"
                               >
                                 Run
                               </Button>

@@ -579,7 +579,7 @@ function DesignCanvasItemEditor({ draft, onCommit, onCancel, onKeyboardSettle, i
   );
   const error = problem ? (
     <div id={problemId} role="alert"
-      className="border-border2 bg-bg1 text-red-primary absolute left-0 top-full z-2 mt-1 w-72 rounded-md border p-2 text-xs leading-4 shadow-[var(--shadow-dropdown)]">
+      className="border-border2 bg-bg1 text-red-text absolute left-0 top-full z-2 mt-1 w-72 rounded-md border p-2 text-xs leading-4 shadow-[var(--shadow-dropdown)]">
       {problem}
     </div>
   ) : null;

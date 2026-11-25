@@ -49,7 +49,7 @@ export function SidebarArchivedSection({
           aria-expanded={!collapsed} aria-controls="sidebar-section-archived"
           onClick={() => onToggle(!collapsed)}>
           <span className={cn(labelClassName, "min-w-0")}>Archived</span>
-          {resolved && <span className="text-muted-fg text-3xxs tabular-nums">{rows.length}</span>}
+          {resolved && <span className="text-fg3 text-3xxs tabular-nums">{rows.length}</span>}
           <span className="ml-auto inline-flex shrink-0" aria-hidden="true">
             {collapsed ? <ChevronRight strokeWidth={1.5} /> : <ChevronDown strokeWidth={1.5} />}
           </span>
@@ -77,7 +77,7 @@ export function SidebarArchivedSection({
               className={cn("group/archived text-fg3 flex min-w-0 items-center gap-2 rounded-md pr-1 pl-2 text-xs hover:bg-(--surface-hover)", compact ? "h-8" : "h-9")}>
               <span className="min-w-0 flex-1 truncate">{label}</span>
               {workspace.archivedAt != null && (
-                <span className="text-muted-fg text-3xxs shrink-0 tabular-nums group-hover/archived:hidden group-focus-within/archived:hidden">
+                <span className="text-fg3 text-3xxs shrink-0 tabular-nums group-hover/archived:hidden group-focus-within/archived:hidden">
                   {formatCompactAge(workspace.archivedAt, now)}
                 </span>
               )}

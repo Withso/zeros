@@ -2278,13 +2278,13 @@ const VIEWPORT_WRAPPER_CLASSES = {
   canvas: "absolute flex items-start",
   // Fit frames do not overflow, so no bar takes width from the centering.
   device:
-    "bg-bg0 absolute inset-0 overflow-auto [&::-webkit-scrollbar-corner]:bg-transparent",
+    "bg-bg1 absolute inset-0 overflow-auto [&::-webkit-scrollbar-corner]:bg-transparent",
   // A fixed zoom always reserves the vertical bar, so a frame that starts or
   // stops overflowing mid-drag cannot shift the centering. Not
   // `scrollbar-gutter`: Chromium drops the gutter width from the horizontal
   // scroll range, which clips the frame's right padding.
   deviceFixedZoom:
-    "bg-bg0 absolute inset-0 overflow-x-auto overflow-y-scroll [&::-webkit-scrollbar-corner]:bg-transparent",
+    "bg-bg1 absolute inset-0 overflow-x-auto overflow-y-scroll [&::-webkit-scrollbar-corner]:bg-transparent",
   float: "absolute inset-0",
 } as const;
 
@@ -2553,7 +2553,7 @@ function BrowserChrome({
             Open separate preview window
           </DropdownMenuItem>
           {electron && windowUnavailable !== null && (
-            <DropdownMenuLabel className="text-muted-fg text-2xxs pt-0 font-normal">
+            <DropdownMenuLabel className="text-fg3 text-2xxs pt-0 font-normal">
               {windowUnavailable}
             </DropdownMenuLabel>
           )}

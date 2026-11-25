@@ -60,7 +60,7 @@ export interface PopoverContentProps extends React.ComponentPropsWithoutRef<
   padding?: "default" | "none" | "inset";
   /** floating (the default) is the bg3 menu surface with the dropdown lift;
    *  composer is for a picker docked on the composer, which takes the
-   *  composer's own surface like every card above it: sidebar-bg, the
+   *  composer's own surface like every card above it: bg1-raised, the
    *  composer-border edge and no lift. While it opens above its anchor it is
    *  the top of the composer stack, so it carries the stack's fade. */
   surface?: "floating" | "composer";
@@ -72,7 +72,7 @@ const POPOVER_SURFACE = {
   // The card only bounds the height; its content scrolls in an inner box, so
   // the card never clips the fade it carries above its top edge.
   composer:
-    "bg-sidebar-bg border-(--composer-border) group/composer-dock relative flex flex-col",
+    "bg-bg1-raised border-(--composer-border) group/composer-dock relative flex flex-col",
 } as const;
 
 const POPOVER_WIDTH = {

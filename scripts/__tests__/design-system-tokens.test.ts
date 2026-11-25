@@ -379,11 +379,11 @@ describe("marketing token generation", () => {
     expect(marketing).not.toContain(base.tokens.bg.$description);
   });
 
-  it("keeps all 52 generated marketing declarations within CSS print width with hex-only comments", () => {
+  it("keeps all 44 generated marketing declarations within CSS print width with hex-only comments", () => {
     const css = renderMarketingTokenCss(ROOT);
     const lines = [...css.matchAll(/\/\* @generated tokens:marketing-[a-z0-9-]+:start \*\/([\s\S]*?)\/\* @generated tokens:marketing-[a-z0-9-]+:end \*\//g)]
       .flatMap((match) => match[1].split("\n").filter((line) => line.trim()));
-    expect(lines).toHaveLength(52);
+    expect(lines).toHaveLength(44);
     for (const line of lines) {
       expect(line.length, "Generated marketing declarations must fit Prettier's 80-column CSS width").toBeLessThanOrEqual(80);
       expect(line).toMatch(/; \/\* #[0-9A-F]{6}(?:[0-9A-F]{2})? \*\/$/);

@@ -5,7 +5,7 @@
 // `:root` block and the `[data-theme="light"]` override (light inherits every
 // token it does not redeclare). Resolves `var(--x)` aliases and HSL/RGB
 // literals (with or without alpha) to sRGB channels and computes WCAG 2.x
-// contrast, including alpha composites such as `red-secondary/0.9@bg1` (the
+// contrast, including alpha composites such as `red-solid/0.9@bg1` (the
 // /90 hover fill over bg1).
 //
 // Shared by the contrast-contract test and the generated token reference

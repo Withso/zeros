@@ -39,31 +39,27 @@
     "org.zeros": {
       "marketing": {
         "groups": {
-          "bg0": ["tokens.bg0", "tokens.bg1"],
+          "bg1": ["tokens.bg1"],
           "bg1-hover": [
             "tokens.bg1-hover",
-            "tokens.bg1-highlight",
             "tokens.bg2",
             "tokens.bg2-hover",
             "tokens.bg3"
           ],
           "bg4": ["tokens.bg4", "tokens.bg5"],
-          "fg1": ["tokens.fg1", "tokens.fg2", "tokens.fg3", "tokens.muted-fg"],
-          "sidebar-bg": ["tokens.sidebar-bg", "tokens.sidebar-bg-hover"],
+          "fg1": ["tokens.fg1", "tokens.fg2", "tokens.fg3"],
+          "bg1-raised": ["tokens.bg1-raised", "tokens.bg1-raised-hover"],
           "border1": [
             "tokens.border1",
             "tokens.border2",
             "tokens.border3",
             "tokens.border4"
           ],
-          "highlighted-bg": [
-            "tokens.highlighted-bg",
-            "tokens.highlighted-bright"
-          ],
+          "highlighted-bright": ["tokens.highlighted-bright"],
           "inverted-bg": ["tokens.inverted-bg", "tokens.inverted-fg"],
           "primary-button-hover": ["tokens.primary-button-hover"],
-          "green-fg": ["tokens.green-fg"],
-          "yellow-primary": ["tokens.yellow-primary"]
+          "green-on-bg": ["tokens.green-on-bg"],
+          "yellow-text": ["tokens.yellow-text"]
         }
       }
     }

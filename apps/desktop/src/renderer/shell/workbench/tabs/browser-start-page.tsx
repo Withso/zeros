@@ -64,9 +64,9 @@ export function BrowserStartPage({ scope, active, onOpen }: BrowserStartPageProp
 type RowTone = "online" | "offline" | "unknown" | "warning";
 
 const DOT_CLASSES: Record<RowTone, string> = {
-  online: "bg-green-primary size-1.5 shrink-0 rounded-full",
-  offline: "bg-red-primary size-1.5 shrink-0 rounded-full",
-  warning: "bg-yellow-icon size-1.5 shrink-0 rounded-full",
+  online: "bg-green-text size-1.5 shrink-0 rounded-full",
+  offline: "bg-red-text size-1.5 shrink-0 rounded-full",
+  warning: "bg-yellow-text size-1.5 shrink-0 rounded-full",
   unknown: "bg-fg3 size-1.5 shrink-0 rounded-full",
 };
 
@@ -103,7 +103,7 @@ function ServerRow({
         </Stack>
         <Inline gap={1.5} align="center" className="shrink-0">
           <span className={DOT_CLASSES[tone]} aria-hidden />
-          <span className="text-muted-fg text-2xxs">{statusLabel}</span>
+          <span className="text-fg3 text-2xxs">{statusLabel}</span>
         </Inline>
       </Tile>
     </li>
@@ -176,7 +176,7 @@ function LocalServersSection({ scope, active, onOpen }: BrowserStartPageProps) {
                   Clear history
                 </DropdownMenuItem>
                 <DropdownMenuSeparator />
-                <DropdownMenuLabel className="text-muted-fg font-normal">Show</DropdownMenuLabel>
+                <DropdownMenuLabel className="text-fg3 font-normal">Show</DropdownMenuLabel>
                 <DropdownMenuRadioGroup value={filter satisfies LocalDevServerFilter} onValueChange={onFilter}>
                   <DropdownMenuRadioItem value="all">All</DropdownMenuRadioItem>
                   <DropdownMenuRadioItem value="online">Online</DropdownMenuRadioItem>

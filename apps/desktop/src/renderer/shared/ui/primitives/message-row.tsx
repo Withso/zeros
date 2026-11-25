@@ -14,9 +14,9 @@ const ICON: Record<Exclude<MessageTone, "pending">, LucideIcon> = {
 };
 
 const ICON_TONE: Record<Exclude<MessageTone, "pending">, string> = {
-  error: "text-red-primary",
-  warning: "text-yellow-primary",
-  success: "text-green-primary",
+  error: "text-red-text",
+  warning: "text-yellow-text",
+  success: "text-green-text",
   neutral: "text-fg3",
 };
 

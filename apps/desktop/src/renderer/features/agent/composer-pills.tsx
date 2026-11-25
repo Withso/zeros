@@ -51,17 +51,17 @@ import type { BridgeRegistryAgent } from "../../platform/bridge/messages";
 // The one canonical composer-toolbar pill chrome. Density variants pass an
 // override through cn(TOOLBAR_PILL, …) so tailwind-merge resolves the px delta.
 // Every toolbar control is 28px with 6px corners and the shared icon-button
-// hover (bg2-highlight). Labels are text-xs, under the editor's 14px reading
+// hover (selected-bg). Labels are text-xs, under the editor's 14px reading
 // size, so chrome reads quieter than the text being written.
 export const TOOLBAR_PILL =
-  "inline-flex h-7 items-center gap-1 rounded-md border-0 bg-transparent px-2 py-0 text-xs font-medium text-fg2 cursor-pointer transition-[background-color,color] duration-150 ease-out hover:bg-bg2-highlight hover:text-fg1";
+  "inline-flex h-7 items-center gap-1 rounded-md border-0 bg-transparent px-2 py-0 text-xs font-medium text-fg2 cursor-pointer transition-[background-color,color] duration-150 ease-out hover:bg-selected-bg hover:text-fg1";
 
 // The model pill is just logo + label, with no caret.
 
 // The engaged pill chrome, used only by the Fast pill when on: --bg3-hover fill
-// and --yellow-fg text, hugging its content.
+// and --yellow-on-bg text, hugging its content.
 export const TOOLBAR_PILL_ACTIVE =
-  "inline-flex h-7 items-center gap-1.5 rounded-md border-0 bg-bg2-highlight px-2 py-0 text-xs font-medium text-yellow-fg cursor-pointer transition-[background-color,color] duration-150 ease-out";
+  "inline-flex h-7 items-center gap-1.5 rounded-md border-0 bg-selected-bg px-2 py-0 text-xs font-medium text-yellow-on-bg cursor-pointer transition-[background-color,color] duration-150 ease-out";
 
 // True while a permission or question card has taken the composer's slot and
 // the composer card is display:none (not unmounted, so the draft survives).
@@ -250,7 +250,7 @@ export function EffortPill({
           onChange(next);
         }}
         aria-label={`Reasoning effort: ${label}`}
-        className="text-fg2 hover:bg-bg2-highlight hover:text-fg1 inline-flex h-7 cursor-pointer items-center overflow-hidden rounded-md border-0 px-2 py-0 text-xs font-medium transition-[background-color,color] duration-150 ease-out"
+        className="text-fg2 hover:bg-selected-bg hover:text-fg1 inline-flex h-7 cursor-pointer items-center overflow-hidden rounded-md border-0 px-2 py-0 text-xs font-medium transition-[background-color,color] duration-150 ease-out"
       >
         {/* Label — drops in gently from the top, but ONLY on a user toggle. The
             key is bumped solely by the click path (labelAnimKey), so a remount
@@ -500,7 +500,7 @@ export function PermissionToggle({
             onSelectMode(next.modeId);
           }}
           aria-label={`Permission mode: ${current.label}`}
-          className="text-fg2 hover:bg-bg2-highlight hover:text-fg1 inline-flex h-7 cursor-pointer items-center overflow-hidden rounded-md border-0 px-2 py-0 text-xs font-medium transition-[background-color,color] duration-150 ease-out"
+          className="text-fg2 hover:bg-selected-bg hover:text-fg1 inline-flex h-7 cursor-pointer items-center overflow-hidden rounded-md border-0 px-2 py-0 text-xs font-medium transition-[background-color,color] duration-150 ease-out"
         >
           {/* Icon — drops in gently from the top, but ONLY on a user toggle
               (keyed remount; key 0 = no animation class, same as EffortPill). */}
@@ -523,7 +523,7 @@ export function PermissionToggle({
           ref={feedbackRef}
           data-permission-mode-feedback
           data-placement={feedbackPlacement}
-          className={`text-fg2 bg-sidebar-bg pointer-events-none absolute z-[2] inline-flex items-center overflow-hidden py-1 pr-1.5 text-xs font-medium whitespace-nowrap ${
+          className={`text-fg2 bg-bg1-raised pointer-events-none absolute z-[2] inline-flex items-center overflow-hidden py-1 pr-1.5 text-xs font-medium whitespace-nowrap ${
             feedbackPlacement === "right"
               ? "top-1/2 left-full ml-1 -translate-y-1/2"
               : "bottom-full left-1/2 mb-1 -translate-x-1/2"

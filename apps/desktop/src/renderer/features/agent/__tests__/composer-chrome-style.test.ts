@@ -40,23 +40,23 @@ describe("composer chrome", () => {
     // pickers keep one edge, so none of them can drift back to border2.
     const shell = code("../composer-shell.tsx");
     expect(shell).toContain(
-      'export const COMPOSER_SURFACE_CLS = "border-(--composer-border) bg-sidebar-bg"',
+      'export const COMPOSER_SURFACE_CLS = `border-(--composer-border) bg-bg1-raised ${PILL_GROUND.composer}`',
     );
     expect(shell).toMatch(
-      /export const DOCK_CARD_CLS =\s*"border-\(--composer-border\) bg-sidebar-bg /,
+      /export const DOCK_CARD_CLS =\s*`border-\(--composer-border\) bg-bg1-raised /,
     );
     expect(code("../../../shared/ui/primitives/popover.tsx")).toMatch(
-      /composer:\s*"bg-sidebar-bg border-\(--composer-border\) /,
+      /composer:\s*"bg-bg1-raised border-\(--composer-border\) /,
     );
     expect(shell).not.toContain("border-border2");
     // Review drafts in Changes, Files and Review take the agent composer's
     // surface from its owner rather than a copy.
     const review = code("../../code-review/review-composer.tsx");
     expect(review).toMatch(/className=\{cn\(\s*COMPOSER_SURFACE_CLS,/);
-    expect(review).not.toContain("border-border2 bg-sidebar-bg");
+    expect(review).not.toContain("border-border2 bg-bg1-raised");
   });
 
-  it("keeps one sidebar-bg + composer-border edge whether or not it is focused", () => {
+  it("keeps one bg1-raised + composer-border edge whether or not it is focused", () => {
     // Clicking in and typing change nothing: the border never moves on focus
     // and the card carries no stock shadow.
     const agentChat = code("../agent-chat.tsx");
@@ -148,11 +148,11 @@ describe("composer chrome", () => {
   });
 
   it("keeps the composer's own surface off the sent user message", () => {
-    // One sidebar-bg + composer-border surface for the composer, Create and
+    // One bg1-raised + composer-border surface for the composer, Create and
     // the edit composer. Since 2026-11-09 a sent message is a bg2 bubble with
     // no edge (prompt-fold.test.ts), told apart from the prompt being written.
     expect(code("../composer-shell.tsx")).toContain(
-      'export const COMPOSER_SURFACE_CLS = "border-(--composer-border) bg-sidebar-bg"',
+      'export const COMPOSER_SURFACE_CLS = `border-(--composer-border) bg-bg1-raised ${PILL_GROUND.composer}`',
     );
     expect(code("../turn-container.tsx")).not.toContain(": COMPOSER_SURFACE_CLS,");
     expect(code("../agent-chat.tsx")).toContain("COMPOSER_SURFACE_CLS,");

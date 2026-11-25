@@ -249,7 +249,7 @@ function ToolStatus({
         size="sm"
         variant="ghost"
         disabled
-        className="text-blue-fg h-auto shrink-0 bg-transparent p-0 hover:bg-transparent hover:text-(--composer-tool-action-hover)"
+        className="text-accent-text h-auto shrink-0 bg-transparent p-0 hover:bg-transparent hover:text-(--composer-tool-action-hover)"
         aria-label={`Authenticate ${entry.name}`}
       >
         Opening…
@@ -271,7 +271,7 @@ function ToolStatus({
           onClick={() => onAuthenticate(entry.id)}
         >
           <span role="img" aria-label="Sign-in failed">
-            <X className="text-red-primary size-3.5" />
+            <X className="text-red-text size-3.5" />
           </span>
         </Button>
       </Tooltip>
@@ -285,7 +285,7 @@ function ToolStatus({
     return (
       <Tooltip label={label}>
         <span role="img" aria-label={label} className="shrink-0">
-          <Check className="text-green-primary size-3.5" />
+          <Check className="text-green-text size-3.5" />
         </span>
       </Tooltip>
     );
@@ -302,7 +302,7 @@ function ToolStatus({
         type="button"
         size="sm"
         variant="ghost"
-        className="text-blue-fg h-auto shrink-0 bg-transparent p-0 hover:bg-transparent hover:text-(--composer-tool-action-hover)"
+        className="text-accent-text h-auto shrink-0 bg-transparent p-0 hover:bg-transparent hover:text-(--composer-tool-action-hover)"
         disabled={authBusy !== null}
         aria-label={`Authenticate ${entry.name}`}
         onClick={() => onAuthenticate(entry.id)}
@@ -321,7 +321,7 @@ function ToolStatus({
   return (
     <Tooltip label={entry.detail ?? label}>
       <span role="img" aria-label={entry.detail ? `${label}: ${entry.detail}` : label} className="shrink-0">
-        <X className="text-red-primary size-3.5" />
+        <X className="text-red-text size-3.5" />
       </span>
     </Tooltip>
   );

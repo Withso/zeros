@@ -11,10 +11,10 @@ const Card = React.forwardRef<HTMLDivElement, CardProps>(
     <div
       ref={ref}
       className={cn(
-        // One card surface, shared with Settings groups: bg1-bright, border1,
+        // One card surface, shared with Settings groups: bg1-raised, border1,
         // 12px corners, 16 padding and 12 between parts.
         "border-border1 text-fg2 flex flex-col gap-3 rounded-[calc(var(--radius-lg)*1.5)] border p-4",
-        surface === "base" ? "bg-bg1" : "bg-bg1-bright",
+        surface === "base" ? "bg-bg1" : "bg-bg1-raised",
         className,
       )}
       {...props}

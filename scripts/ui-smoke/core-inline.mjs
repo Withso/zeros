@@ -1711,7 +1711,7 @@ export async function runDiffFilesSmoke({
       const bg1Probe = document.createElement("div");
       const changesProbe = document.createElement("div");
       bg1Probe.style.backgroundColor = "var(--bg1)";
-      changesProbe.style.backgroundColor = "var(--sidebar-bg)";
+      changesProbe.style.backgroundColor = "var(--bg1-raised)";
       document.body.append(bg1Probe, changesProbe);
       const matches =
         getComputedStyle(header).backgroundColor ===

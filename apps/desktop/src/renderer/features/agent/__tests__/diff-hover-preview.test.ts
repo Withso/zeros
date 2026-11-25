@@ -53,7 +53,7 @@ describe("DiffHoverPreview layout contract", () => {
 
     expect(html).toContain("bg-bg1");
     expect(html).toContain("min(350px");
-    expect(html).toContain("bg-sidebar-bg");
+    expect(html).toContain("bg-bg1-raised");
     expect(html).toContain("overflow-x-hidden");
     expect(html).toContain("overflow-y-auto");
   });

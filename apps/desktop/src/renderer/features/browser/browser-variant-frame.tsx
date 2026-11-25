@@ -231,7 +231,7 @@ export function BrowserVariantFrame({
               aria-label="Copy HTML and CSS"
             >
               {copied ? (
-                <Check className="text-green-primary size-3" />
+                <Check className="text-green-text size-3" />
               ) : (
                 <Copy className="size-3" />
               )}

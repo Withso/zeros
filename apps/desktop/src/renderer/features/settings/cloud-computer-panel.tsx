@@ -241,7 +241,7 @@ const STATUS_ICON: Record<ComputerStatus["kind"], React.ReactNode> = {
   loading: null,
   building: <LoaderCircle className="text-fg2 size-4 shrink-0 animate-spin motion-reduce:animate-none" aria-hidden />,
   unbuilt: <TriangleAlert className="text-fg1 size-4 shrink-0" aria-hidden />,
-  failed: <CircleX className="text-red-primary size-4 shrink-0" aria-hidden />,
+  failed: <CircleX className="text-red-text size-4 shrink-0" aria-hidden />,
   built: null,
   empty: null,
 };
