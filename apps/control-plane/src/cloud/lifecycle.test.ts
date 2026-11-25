@@ -1960,15 +1960,31 @@ describe("a wake failure every workspace shares", () => {
   });
 
   it("counts a slow step's failure when it fails, not when it was admitted", async () => {
-    const f = harness([waking(ids[0]!)]);
-    // Each step takes until minute 12 to fail, whenever it was admitted.
-    vi.mocked(f.compute.hostPort).mockImplementation(async () => { f.at(12 * 60_000); throw refused(); });
-    for (const [index, minute] of [[0, 0], [1, 6], [2, 11]] as const) {
+    // Admitted at minutes 0, 11 and 11.5; they fail at 11, 11.5 and 12, all within one window. The clock only moves on.
+    const f = harness([]);
+    const failAt = [11, 11.5, 12];
+    vi.mocked(f.compute.hostPort).mockImplementation(async () => { f.at(failAt.shift()! * 60_000); throw refused(); });
+    for (const [index, minute] of [[0, 0], [1, 11], [2, 11.5]] as const) {
       f.claimed.splice(0, f.claimed.length, waking(ids[index]!, { updatedAt: new Date(NOW + minute * 60_000).toISOString() }));
       f.at(minute * 60_000);
       await f.lifecycle.tick();
     }
     expect(opened(f.logs)).toHaveLength(1);
+  });
+
+  it("counts a route refused early in a slow create at its refusal, not when the create reaches it", async () => {
+    let now = NOW;
+    // The route is refused at once; preparing the repository then takes twelve minutes.
+    const prepareRepository = vi.fn(async () => { await new Promise(resolve => setTimeout(resolve, 5)); now = NOW + 12 * 60_000; });
+    const claimed: (CloudV2LifecycleWorkspace & { attempts: number })[] = [workspace("creating", { id: ids[0]! })];
+    const f = setup(claimed, { logs: true, wakeBreaker: true, now: () => now, prepareRepository });
+    vi.mocked(f.compute.hostPort).mockImplementation(async () => { throw refused(); });
+    await f.lifecycle.tick();
+    expect(prepareRepository).toHaveBeenCalledOnce();
+    // Two fresh refusals at minute 12: with the first at minute 0, three never fall within one window.
+    claimed.splice(0, 1, waking(ids[1]!, { updatedAt: new Date(now).toISOString() }), waking(ids[2]!, { updatedAt: new Date(now).toISOString() }));
+    await f.lifecycle.tick();
+    expect(f.logs.error.filter(line => line.includes("wake breaker open"))).toEqual([]);
   });
 
   it("never holds a new wake for a failure of the wake before it", async () => {

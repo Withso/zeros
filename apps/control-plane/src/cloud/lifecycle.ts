@@ -59,6 +59,8 @@ const MAINTENANCE_SCAN_MS = 60_000;
 /** A failure this old is healed: past any wake or recovery still deciding about it. */
 export const CLOUD_V2_HEAL_AFTER_MS = 10 * 60_000;
 const HEAL_BATCH = 4;
+/** Set on an error by `measure`: when its phase failed. */
+const FAILED_AT = Symbol("failedAt");
 /** An idle control plane sweeps this often; lifecycle notifications and due
  * deferrals wake it sooner. */
 const IDLE_SWEEP_MS = 60_000;
@@ -587,7 +589,8 @@ export class CloudV2Lifecycle {
       this.deps.logger?.warn(`[cloud-v2] ${workspace.state} step failed (${code}${status})`);
       const booting = workspace.state === "creating" || workspace.state === "starting";
       // When it failed, not when it was admitted: a provider call can take minutes, past the breaker's window.
-      const failedAt = this.deps.now?.() ?? Date.now();
+      const stamped = error && typeof error === "object" ? (error as Record<symbol, unknown>)[FAILED_AT] : undefined;
+      const failedAt = typeof stamped === "number" ? stamped : this.deps.now?.() ?? Date.now();
       if (booting) this.recordBootFailure(workspace.id, code, `${code}${status}`, failedAt);
       // Held at any attempt, not only the last: a wake deferred while open needs the fresh window after the close too.
       const held = booting && this.held(workspace, [`${code}${status}`], failedAt);
@@ -1898,7 +1901,13 @@ export class CloudV2Lifecycle {
 
   private async measure<T>(workspace: CloudV2Workspace, phase: LifecyclePhase, run: () => Promise<T>, detail?: (value: T) => TimingDetail): Promise<T> {
     const start = this.deps.now?.() ?? Date.now();
-    const value = await run();
+    let value: T;
+    try { value = await run(); }
+    catch (error) {
+      // When it failed: a phase run alongside slower work (the route, beside repository preparation) is awaited late.
+      if (error && typeof error === "object" && !(FAILED_AT in error)) Object.defineProperty(error, FAILED_AT, { value: this.deps.now?.() ?? Date.now() });
+      throw error;
+    }
     emitCloudV2Timing(this.deps.timing, { workspaceId: workspace.id.slice(0, 8), state: workspace.state, phase,
       durationMs: Math.max(0, Math.round((this.deps.now?.() ?? Date.now()) - start)), ...detail?.(value) });
     return value;
