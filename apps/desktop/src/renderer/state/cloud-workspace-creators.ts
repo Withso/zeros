@@ -47,7 +47,7 @@ export function sharingOwnerLookup(documents: ReturnType<typeof getCloudWorkspac
     const doc = target ? byId.get(target.workspaceId) : undefined;
     if (!doc?.sharing) return "mine";
     if (doc.sharing.viewerRole === "creator" || (me !== null && doc.ownerUserId === me)) return "mine";
-    return doc.sharing.following || doc.sharing.pinned ? "following" : null;
+    return doc.sharing.following ? "following" : null;
   };
 }
 
