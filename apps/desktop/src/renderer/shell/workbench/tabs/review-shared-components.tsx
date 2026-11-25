@@ -267,7 +267,7 @@ export function ReviewTextLink({
   arrow?: boolean;
 }) {
   return (
-    <Button variant="link" onClick={onClick} aria-label={label}>
+    <Button variant="ghost" size="compact" className="text-fg2 min-w-0 font-normal" onClick={onClick} aria-label={label}>
       <span className="truncate">{children}</span>
       {arrow && <ArrowUpRight aria-hidden className="size-3" />}
     </Button>

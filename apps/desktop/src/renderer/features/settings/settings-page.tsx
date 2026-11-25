@@ -1289,7 +1289,6 @@ function AccountPanel() {
                 <div className="flex items-center gap-2">
                   <Button
                     variant="secondary"
-                    size="sm"
                     loading={accountAction === `switch:${account.accountId}`}
                     disabled={accountAction !== null}
                     onClick={() => runAccountAction(`switch:${account.accountId}`, () => switchAccount(account.accountId))}
@@ -1298,7 +1297,6 @@ function AccountPanel() {
                   </Button>
                   <Button
                     variant="secondary"
-                    size="sm"
                     loading={accountAction === `sign-out:${account.accountId}`}
                     disabled={accountAction !== null}
                     onClick={() => runAccountAction(`sign-out:${account.accountId}`, () => signOutAccount(account.accountId))}
@@ -1315,7 +1313,6 @@ function AccountPanel() {
             >
               <Button
                 variant="secondary"
-                size="sm"
                 loading={accountAction === "add"}
                 disabled={accountAction !== null}
                 onClick={handleAddAccount}
@@ -1333,7 +1330,6 @@ function AccountPanel() {
             >
               <Button
                 variant="secondary"
-                size="sm"
                 loading={signingOut}
                 disabled={signingOutAll}
                 onClick={handleSignOut}
@@ -1348,7 +1344,6 @@ function AccountPanel() {
             >
               <Button
                 variant="destructive-secondary"
-                size="sm"
                 loading={signingOutAll}
                 disabled={signingOut}
                 onClick={handleSignOutEverywhere}
@@ -1675,7 +1670,7 @@ function ModelsPanel({ surfaceActive = false }: { surfaceActive?: boolean }) {
             <SettingsList className={MODELS_SECTION_CLS}>
               {memoryRead.error && (
                 <SettingsRow label="Couldn't read memory settings">
-                  <Button variant="ghost" size="sm" onClick={memoryRead.refresh}>
+                  <Button variant="ghost" onClick={memoryRead.refresh}>
                     Retry
                   </Button>
                 </SettingsRow>
@@ -1723,7 +1718,6 @@ function ModelsPanel({ surfaceActive = false }: { surfaceActive?: boolean }) {
               >
                 <Button
                   variant="ghost"
-                  size="sm"
                   disabled={
                     bridgeStatus !== "connected" ||
                     !codexMemory?.canReset ||

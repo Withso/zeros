@@ -207,7 +207,6 @@ export function CommandPalette({
               key={tab.id}
               searchRef={searchRef}
               variant="ghost"
-              size="sm"
               aria-pressed={category === tab.id}
               onClick={() => changeCategory(tab.id)}
               className={cn(
@@ -234,7 +233,6 @@ export function CommandPalette({
                 key={filter}
                 searchRef={searchRef}
                 variant="ghost"
-                size="sm"
                 aria-pressed={workspaceFilter === filter}
                 className={cn(
                   "h-6 px-2 text-xs",
@@ -270,7 +268,7 @@ export function CommandPalette({
             >
               <span>{notice}</span>
               {onRetry && (
-                <Button variant="ghost" size="sm" onClick={onRetry}>
+                <Button variant="ghost" onClick={onRetry}>
                   Retry
                 </Button>
               )}

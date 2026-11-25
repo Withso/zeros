@@ -61,7 +61,7 @@ export const TOOLBAR_PILL =
 // The engaged pill chrome, used only by the Fast pill when on: --bg3-hover fill
 // and --yellow-on-bg text, hugging its content.
 export const TOOLBAR_PILL_ACTIVE =
-  "inline-flex h-7 items-center gap-1.5 rounded-md border-0 bg-selected-bg px-2 py-0 text-xs font-medium text-yellow-on-bg cursor-pointer transition-[background-color,color] duration-base ease-out";
+  "inline-flex h-7 items-center gap-1.5 rounded-md border-0 bg-selected-bg px-2 py-0 text-xs font-medium text-yellow-text cursor-pointer transition-[background-color,color] duration-base ease-out";
 
 // True while a permission or question card has taken the composer's slot and
 // the composer card is display:none (not unmounted, so the draft survives).

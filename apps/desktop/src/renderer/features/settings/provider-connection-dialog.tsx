@@ -101,7 +101,7 @@ export function ProviderConnectionDialog({
                   <span className="flex-1">{entry.label}</span>
                   {method === entry.id && connected && (
                     <Check
-                      className="text-green-on-bg size-4"
+                      className="text-green-text size-4"
                       aria-label="Connected"
                     />
                   )}

@@ -399,7 +399,7 @@ export function RepoWorkspacesList({ project }: { project: Project }) {
         )
       )}
       {showArchived && archives.error && (
-        <p className="text-red-on-bg px-3 py-2 text-xs" role="alert">
+        <p className="text-red-text px-3 py-2 text-xs" role="alert">
           Couldn’t load archived workspaces.
         </p>
       )}

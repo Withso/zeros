@@ -195,8 +195,8 @@ describe("sidebar row leading slot", () => {
 });
 
 describe("sidebar row status colours", () => {
-  it("use the status families' -primary text and the accent dot for Done", () => {
-    expect(STATUS_DOT_CLS.done).toBe("bg-accent");
+  it("use the status families' -text roles, and violet for Done in word and dot", () => {
+    expect(STATUS_DOT_CLS.done).toBe("bg-violet-text");
     expect(sidebarRowStatus({ archiving: false, setupFailed: false, cloudStatus: null, awaiting: null, working: false, unread: true })).toEqual({ label: "Done", tone: "done" });
   });
 });

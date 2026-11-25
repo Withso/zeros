@@ -66,7 +66,6 @@
   --pr-status-surface: var(--bg2);
   --pr-status-action-bg: var(--primary-button-bg);
   --pr-status-action-fg: var(--primary-button-fg);
-  --pr-status-action-hover: var(--primary-button-hover);
   --pr-status-merge-fg: var(
     --inverted-fg
   ); /* dark text/icon on the bright-green Merge button */

@@ -51,7 +51,7 @@ export function ComposerSuggestionPopup({
       <PopoverContent
         data-composer-suggestions={state.trigger}
         aria-label={state.trigger === "@" ? "Mention files" : state.trigger === "#" ? "Pull requests" : "Commands and skills"}
-        side={placement === "caret" ? "bottom" : "top"} align="start" size="wide" padding="none"
+        side={placement === "caret" ? "bottom" : "top"} align="start" size="lg" padding="none"
         // Docked on the composer, the picker is one more card above it: the
         // composer's surface, 8px up. At the caret it floats over the page.
         sideOffset={placement === "composer" ? 8 : 6}
@@ -64,7 +64,7 @@ export function ComposerSuggestionPopup({
           if (event.target instanceof Node && state.anchor?.element.contains(event.target)) event.preventDefault();
         }}
       >
-      <Surface kind={placement === "composer" ? "sidebar" : "floating"}>
+      <Surface kind="floating">
       {state.trigger === "#" ? (
       <PrPicker items={state.items as PrPickerItem[]} status={state.status}
         highlightIndex={state.selectedIndex} onHover={onHover}

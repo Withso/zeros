@@ -327,7 +327,6 @@ export function RepositoryIconDialog({
                     <Button
                       type="button"
                       variant="secondary"
-                      size="sm"
                       onClick={() => {
                         setRepositoryIconChoice(project.repoRoot, null);
                         onOpenChange(false);
@@ -372,7 +371,6 @@ export function RepositoryIconDialog({
               <Button
                 type="button"
                 variant="secondary"
-                size="default"
                 disabled={uploading}
                 onClick={() => fileInputRef.current?.click()}
               >

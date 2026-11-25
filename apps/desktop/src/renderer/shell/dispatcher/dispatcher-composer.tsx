@@ -626,7 +626,6 @@ export function DispatcherComposer({
             </PromptInputTools>
             <Button
               variant="primary"
-              size="sm"
               type="submit"
               data-create-submit=""
               className="h-7 gap-1.5"

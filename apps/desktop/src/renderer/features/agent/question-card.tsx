@@ -574,7 +574,6 @@ function StructuredQuestionCard({ request, onRespond }: QuestionCardProps) {
               <>
                 <Button
                   type="button"
-                  size="sm"
                   variant="ghost"
                   onMouseDown={suppressFocusOnClick}
                   onClick={dismiss}
@@ -583,7 +582,6 @@ function StructuredQuestionCard({ request, onRespond }: QuestionCardProps) {
                 </Button>
                 <Button
                   type="button"
-                  size="sm"
                   variant="secondary"
                   onMouseDown={suppressFocusOnClick}
                   onClick={decline}
@@ -752,7 +750,6 @@ function OneClickApprovalCard({
             <Button
               key={option.id}
               type="button"
-              size="sm"
               variant="secondary"
               disabled={responded}
               onMouseDown={suppressFocusOnClick}
@@ -768,7 +765,6 @@ function OneClickApprovalCard({
           ))}
           <Button
             type="button"
-            size="sm"
             variant="secondary"
             disabled={responded}
             onMouseDown={suppressFocusOnClick}
@@ -779,7 +775,6 @@ function OneClickApprovalCard({
           {allowOnce ? (
             <Button
               type="button"
-              size="sm"
               variant="primary"
               disabled={responded}
               onMouseDown={suppressFocusOnClick}

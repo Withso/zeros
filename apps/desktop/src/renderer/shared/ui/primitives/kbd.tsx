@@ -1,21 +1,18 @@
 import * as React from "react";
-import { ArrowBigUp, ArrowDown, ArrowDownRight, ArrowLeft, ArrowRight, ArrowUp, ArrowUpLeft, ChevronUp, Command, CornerDownLeft, Option } from "lucide-react";
 
 import { cn } from "@/renderer/shared/ui/cn";
+import { isKeyGlyph, KEY_GLYPH_SPLIT, KeyGlyphIcon } from "./key-glyphs";
 
 /**
  * Kbd — the one keyboard-shortcut chip, in menus, tooltips and the command
  * palette alike: 18px tall, border2 on bg2 so it reads on a bg3 menu (border1
  * was faint there), fg2 text at 11px. Right-align it in a flex row with
  * `className="ml-auto"`. A combination is one chip per key: use KbdKeys.
+ * Modifier, return, delete and arrow symbols draw as 11px Phosphor Bold
+ * glyphs (key-glyphs.tsx), one family at the letters' weight; every other
+ * key stays text.
  */
-const SYMBOL_KEYS = {
-  "←": ArrowLeft, "→": ArrowRight, "↑": ArrowUp, "↓": ArrowDown,
-  "↖": ArrowUpLeft, "↘": ArrowDownRight,
-  "⌘": Command, "⌥": Option, "⇧": ArrowBigUp, "⌃": ChevronUp, "↵": CornerDownLeft,
-};
-
-const SYMBOL_SPLIT = /([⌘⌥⇧⌃↵←→↑↓↖↘])/;
+const SYMBOL_SPLIT = KEY_GLYPH_SPLIT;
 
 function Kbd({ className, children, ...props }: React.ComponentProps<"span">) {
   return (
@@ -27,14 +24,23 @@ function Kbd({ className, children, ...props }: React.ComponentProps<"span">) {
       )}
       {...props}
     >
-      {typeof children === "string" ? children.split(SYMBOL_SPLIT).map((part, index) => {
-        const Icon = Object.hasOwn(SYMBOL_KEYS, part) ? SYMBOL_KEYS[part as keyof typeof SYMBOL_KEYS] : null;
-        return Icon ? <React.Fragment key={index}>
-          <span className="sr-only">{part}</span>
-          <Icon className="size-3 shrink-0" aria-hidden="true" />
-        </React.Fragment> : part;
-      }) : children}
+      {typeof children === "string" ? <KeyParts text={children} glyphClassName="size-2.75 shrink-0" /> : children}
     </span>
+  );
+}
+
+/** A key's text with its symbols drawn as glyphs; screen readers still read
+ *  the symbol itself. */
+function KeyParts({ text, glyphClassName }: { text: string; glyphClassName: string }) {
+  return text.split(SYMBOL_SPLIT).map((part, index) =>
+    isKeyGlyph(part) ? (
+      <React.Fragment key={index}>
+        <span className="sr-only">{part}</span>
+        <KeyGlyphIcon glyph={part} className={glyphClassName} />
+      </React.Fragment>
+    ) : (
+      part
+    ),
   );
 }
 
@@ -61,19 +67,20 @@ function KbdKeys({
 
 /** A shortcut inside a filled button (Approve ⌘⇧↵, Close anyway ⌘↵): one 16px
  *  chip tinted from the button's own text colour, so it reads on primary and
- *  destructive fills alike. It is hidden from assistive tech; put the shortcut
- *  on the button with `aria-keyshortcuts`. */
+ *  destructive fills alike. Its symbols are the same Phosphor glyphs as Kbd's.
+ *  It is hidden from assistive tech; put the shortcut on the button with
+ *  `aria-keyshortcuts`. */
 function ButtonShortcut({ keys, className }: { keys: string; className?: string }) {
   return (
     <kbd
       aria-hidden="true"
       data-slot="button-shortcut"
       className={cn(
-        "ml-1 inline-flex h-4 shrink-0 items-center rounded-sm bg-current/15 px-1 font-mono text-2xxs leading-4",
+        "ml-1 inline-flex h-4 shrink-0 items-center gap-0.5 rounded-sm bg-current/15 px-1 font-mono text-2xxs leading-4",
         className,
       )}
     >
-      {keys}
+      <KeyParts text={keys} glyphClassName="size-2.75 shrink-0" />
     </kbd>
   );
 }

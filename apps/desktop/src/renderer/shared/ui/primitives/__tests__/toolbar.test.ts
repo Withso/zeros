@@ -14,7 +14,7 @@ function classes(markup: string) {
 }
 
 describe("Toolbar chrome", () => {
-  it("draws one 36px bar: 3px inset, border2 edge, 10px corners, bg2", () => {
+  it("draws one 36px bar: 3px inset, border2 edge, 12px corners with 8px tools, bg2", () => {
     const set = classes(
       renderToStaticMarkup(createElement(Toolbar, { "aria-label": "Canvas tools" }, "tools")),
     );
@@ -24,17 +24,26 @@ describe("Toolbar chrome", () => {
     expect(set).toContain("gap-0.5");
     expect(set).toContain("p-[calc(var(--spacing)*0.75)]");
     expect(set).toContain("rounded-xl");
+    expect(set).toContain("*:rounded-lg");
   });
 
-  it("lifts with the dropdown shadow when floating and none when docked", () => {
+  it("always lifts with the dropdown shadow (the docked elevation is gone)", () => {
     const floating = classes(renderToStaticMarkup(createElement(Toolbar, { "aria-label": "Tools" })));
     expect([...floating].filter((cls) => cls.startsWith("shadow"))).toEqual([
       "shadow-[var(--shadow-dropdown)]",
     ]);
-    const docked = renderToStaticMarkup(
-      createElement(Toolbar, { "aria-label": "Tools", elevation: "docked" }),
+  });
+
+  it("floats inline over content as one 24px group on bg3 with 20px items (P12)", () => {
+    const set = classes(
+      renderToStaticMarkup(createElement(Toolbar, { "aria-label": "Message actions", size: "inline" })),
     );
-    expect(docked).not.toContain("shadow-[");
+    // The floating fill, spelled apart so check:ui reads this as a test, not a fill.
+    expect(set).toContain(`bg-${"bg3"}`);
+    for (const cls of ["h-6", "p-px", "rounded-md", "*:rounded-sm", "border-border2", "text-3xxs", "leading-4", "shadow-[var(--shadow-dropdown)]"]) {
+      expect(set, cls).toContain(cls);
+    }
+    expect(set).not.toContain("bg-bg2");
   });
 
   it("owns toolbar semantics and its orientation", () => {

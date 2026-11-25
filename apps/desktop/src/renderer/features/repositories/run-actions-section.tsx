@@ -313,7 +313,6 @@ export function RunActionsSection({
         drafts.length > 0 ? (
           <Button
             variant="primary"
-            size="sm"
             onClick={add}
             disabled={repo.loading || mutatingId !== null}
           >
@@ -329,7 +328,6 @@ export function RunActionsSection({
           action={
             <Button
               variant="primary"
-              size="sm"
               onClick={add}
               disabled={mutatingId !== null}
             >
@@ -437,7 +435,6 @@ function ActionCard({
             </IconButton>
             <Button
               variant="secondary"
-              size="sm"
               onClick={onSave}
               disabled={busy || !dirty || invalid}
             >

@@ -315,7 +315,7 @@ export function AddEnvVariableDialog({
                   <Label>Secrets</Label>
                   <span className="text-xs text-fg2">{bulk.length}</span>
                 </div>
-                <Button variant="ghost" size="sm" onClick={clearBulk}>
+                <Button variant="ghost" onClick={clearBulk}>
                   Clear
                 </Button>
               </div>

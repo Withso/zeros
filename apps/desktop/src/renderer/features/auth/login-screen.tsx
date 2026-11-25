@@ -152,7 +152,7 @@ export function LoginScreen() {
           <div className="flex flex-col items-start gap-3">
             <Button
               variant="primary"
-              className="bg-primary-button-bg text-primary-button-fg hover:bg-primary-button-hover gap-2 text-sm disabled:opacity-100"
+              className="bg-primary-button-bg text-primary-button-fg hover:opacity-90 gap-2 text-sm disabled:opacity-100"
               onClick={onSignIn}
               loading={pending}
             >

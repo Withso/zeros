@@ -97,7 +97,6 @@ export function DesignFrameLoadError({
         <div data-design-frame-problem-message="" className="text-fg3 h-full flex-col items-center justify-center gap-2 text-xs">
           <span>{LOAD_ERROR}</span>
           <Button
-            size="sm"
             variant="secondary"
             data-design-frame-retry=""
             onClick={(event) => {

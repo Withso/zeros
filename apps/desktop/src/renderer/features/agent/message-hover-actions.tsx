@@ -61,7 +61,7 @@ export function MessageHoverActions({
         revealClassName,
       )}
     >
-      <Toolbar aria-label="Message actions">
+      <Toolbar size="inline" aria-label="Message actions">
         {time && (
           <Tooltip label={`${timeLabel} ${new Date(createdAt!).toLocaleString()}`}>
             <ToolbarText className="text-fg3 tabular-nums select-none">{time}</ToolbarText>

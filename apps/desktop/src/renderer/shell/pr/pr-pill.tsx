@@ -13,8 +13,8 @@ const PR_PILL_TONE: Record<WorkspacePrTone, string> = {
   open: "border-(--pr-status-chip-border-success) text-green-text hover:text-green-on-bg",
   conflicts: "border-(--pr-status-chip-border-warning) text-yellow-text hover:text-yellow-on-bg",
   ready: "border-(--pr-status-chip-border-success) text-green-text hover:text-green-on-bg",
-  merged: "border-(--pr-status-chip-border-merged) text-violet-on-bg hover:text-violet-text",
-  closed: "border-(--pr-status-chip-border-closed) text-red-on-bg hover:text-red-text",
+  merged: "border-(--pr-status-chip-border-merged) text-violet-text hover:text-violet-on-bg",
+  closed: "border-(--pr-status-chip-border-closed) text-red-text hover:text-red-on-bg",
 };
 
 export const PR_PILL_CLS =

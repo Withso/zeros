@@ -137,10 +137,6 @@
       "apps/desktop/src/renderer/shared/ui/primitives/elements/conversation.tsx": {
         "z-10": 1
       },
-      "apps/desktop/src/renderer/shared/ui/primitives/sidebar.tsx": {
-        "z-10": 1,
-        "z-20": 1
-      },
       "apps/desktop/src/renderer/shell/app-sidebar.tsx": {
         "z-20": 1
       },
@@ -382,11 +378,6 @@
       },
       "apps/desktop/src/renderer/shell/worktree-missing-panel.tsx": {
         "button": 1
-      }
-    },
-    "transition-all": {
-      "apps/desktop/src/renderer/shared/ui/primitives/sidebar.tsx": {
-        "transition-all": 1
       }
     }
   }

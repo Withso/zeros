@@ -136,7 +136,7 @@ const LABEL_TONE: Record<PrIslandTone, string> = {
   warning: "text-fg1",
   danger: "text-fg1",
   success: "text-green-text",
-  merged: "text-violet-on-bg",
+  merged: "text-violet-text",
   closed: "text-red-on-bg",
 };
 // "View PR ↗" chip — a quiet per-tone outline (muted ramp shades via the
@@ -191,7 +191,7 @@ function actionButtonClass(action: PrIslandAction, tone: PrIslandTone): string {
     // Archive. On the Light closed row the dark inverted fill reads harsh on
     // the salmon surface — flip to a white bordered button.
     return cn(
-      "bg-primary-button-bg text-primary-button-fg enabled:hover:bg-primary-button-hover",
+      "bg-primary-button-bg text-primary-button-fg enabled:hover:opacity-90",
       tone === "closed" &&
         "[[data-theme=light]_&]:border [[data-theme=light]_&]:border-border3 [[data-theme=light]_&]:bg-bg1 [[data-theme=light]_&]:text-fg1 [[data-theme=light]_&]:enabled:hover:bg-bg1-hover",
     );
@@ -203,7 +203,7 @@ function actionButtonClass(action: PrIslandAction, tone: PrIslandTone): string {
   // Secondary. On the open-PR rows this is the filled theme-adaptive
   // action button; elsewhere it stays a quiet outline.
   if (tone === "neutral" || tone === "warning" || tone === "danger") {
-    return "bg-[var(--pr-status-action-bg)] text-[var(--pr-status-action-fg)] enabled:hover:bg-[var(--pr-status-action-hover)]";
+    return "bg-[var(--pr-status-action-bg)] text-[var(--pr-status-action-fg)] enabled:hover:opacity-90";
   }
   return "border border-border3 bg-transparent text-fg1 enabled:hover:bg-bg2";
 }

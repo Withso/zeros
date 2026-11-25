@@ -202,10 +202,10 @@ export function DiscardDialog({
           </DialogDescription>
         </DialogBody>
         <DialogFooter>
-          <Button autoFocus variant="ghost" size="sm" onClick={onCancel}>
+          <Button autoFocus variant="ghost" onClick={onCancel}>
             Cancel
           </Button>
-          <Button variant="destructive" size="sm" onClick={onConfirm} aria-keyshortcuts="Meta+Enter Control+Enter">
+          <Button variant="destructive" onClick={onConfirm} aria-keyshortcuts="Meta+Enter Control+Enter">
             {isNew ? "Delete file" : "Discard"}
             <ButtonShortcut keys="⌘↵" />
           </Button>

@@ -397,7 +397,6 @@ function LocalComputerUseSettings({
               ) : null}
               <Button
                 variant="secondary"
-                size="sm"
                 disabled={blockedAppsDisabled || addingApp}
                 onClick={() => void addBlockedApp()}
               >
@@ -542,7 +541,6 @@ function BlockedAppRow({
     >
       <Button
         variant="ghost"
-        size="sm"
         className="text-fg2"
         disabled={disabled}
         onClick={() => onRemove(bundleId)}

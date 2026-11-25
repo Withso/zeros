@@ -3731,7 +3731,6 @@ export const DesignInspector = React.memo(function DesignInspector({
         <Button
           type="button"
           variant="ghost"
-          size="sm"
           className="text-fg2 h-7 min-w-12 px-2 text-xs tabular-nums"
           disabled={!active || !workspaceId}
           aria-label={`Canvas zoom ${zoomPercentage}%`}

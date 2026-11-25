@@ -145,8 +145,8 @@ describe("workspace mode toggle", () => {
         .match(/<button[^>]*data-workspace-mode="design"[^>]*>/)?.[0]
         ?.match(/class="([^"]*)"/)?.[1]
         ?.split(" ") ?? [];
-    expect(codeButtonClasses).toContain("text-accent-on-bg");
-    expect(codeButtonClasses).toContain("hover:text-accent-on-bg");
+    expect(codeButtonClasses).toContain("text-accent-text");
+    expect(codeButtonClasses).toContain("hover:text-accent-text");
     expect(codeButtonClasses).toContain("bg-bg1-raised");
     expect(codeButtonClasses).toContain("hover:bg-bg1-raised");
     expect(codeButtonClasses).not.toContain("hover:bg-bg1-raised/80");

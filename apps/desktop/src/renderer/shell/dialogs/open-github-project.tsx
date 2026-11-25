@@ -286,7 +286,6 @@ function ScopedOpenGithubProjectDialog({
               />
               <Button
                 variant="secondary"
-                size="lg"
                 onClick={handleBrowse}
                 className="shrink-0"
               >
@@ -308,7 +307,6 @@ function ScopedOpenGithubProjectDialog({
         <DialogFooter>
           <Button
             variant="ghost"
-            size="sm"
             onClick={() => onOpenChange(false)}
             disabled={busy}
           >
@@ -316,7 +314,6 @@ function ScopedOpenGithubProjectDialog({
           </Button>
           <Button
             variant="primary"
-            size="sm"
             onClick={handleClone}
             disabled={!canSubmit}
           >

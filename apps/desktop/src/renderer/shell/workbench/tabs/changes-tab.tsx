@@ -448,7 +448,6 @@ export function NotAGitRepo({
       <div className="flex items-center gap-2">
         <Button
           variant="secondary"
-          size="sm"
           disabled={busy}
           onClick={() => void initialize()}
         >
@@ -456,7 +455,6 @@ export function NotAGitRepo({
         </Button>
         <Button
           variant="secondary"
-          size="sm"
           disabled={busy}
           onClick={() => publishToGithub(repoRoot, defaultName)}
         >

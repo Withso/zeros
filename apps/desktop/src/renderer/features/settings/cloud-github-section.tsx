@@ -267,7 +267,7 @@ export function CloudGithubSection({
                   className="text-fg2 flex items-start gap-2 text-xs"
                   role="status"
                 >
-                  <TriangleAlert className="text-yellow-on-bg size-3.5 shrink-0" />
+                  <TriangleAlert className="text-yellow-text size-3.5 shrink-0" />
                   {cloudGithubHealthCopy[summary.health]}
                 </p>
               )}

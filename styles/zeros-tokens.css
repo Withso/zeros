@@ -313,7 +313,6 @@
   --color-red-text: var(--red-text); /* #E97873 — red status words, icons and destructive labels on any plain surface */
   --color-red-solid: var(--red-solid); /* #B32228 — destructive fill carrying red-solid-fg */
   --color-red-solid-fg: var(--red-solid-fg); /* #FFFFFF — label on red-solid */
-  --color-red-solid-hover: var(--red-solid-hover); /* #A72025 — hover on red-solid */
   --color-red-bg: var(--red-bg); /* #391918 — error container surface */
   --color-red-on-bg: var(--red-on-bg); /* #FEBAB4 — text and icons inside a red-bg container */
   --color-green-text: var(--green-text); /* #6CC581 — green status words and icons on any plain surface */
@@ -401,13 +400,10 @@
      destructive fill above). */
   /* @generated tokens:utilities-green-solid:start */
   --color-green-solid: var(--green-solid); /* #2A653F — green fill carrying green-solid-fg (accept current) */
-  --color-green-solid-hover: var(--green-solid-hover); /* #2F794A — hover on green-solid */
   --color-green-solid-fg: var(--green-solid-fg); /* #FFFFFF — label on green-solid */
   --color-accent-solid: var(--accent-solid); /* #405A6C — blue fill carrying accent-solid-fg (accept incoming) */
-  --color-accent-solid-hover: var(--accent-solid-hover); /* #4C6C82 — hover on accent-solid */
   --color-accent-solid-fg: var(--accent-solid-fg); /* #FFFFFF — label on accent-solid */
   --color-neutral-solid: var(--neutral-solid); /* #444444 — neutral fill carrying neutral-solid-fg (accept both) */
-  --color-neutral-solid-hover: var(--neutral-solid-hover); /* #565656 — hover on neutral-solid */
   --color-neutral-solid-fg: var(--neutral-solid-fg); /* #FFFFFF — label on neutral-solid */
   --color-conflict-neutral: var(--conflict-neutral); /* #F0F0F00D — merge conflict separator, ancestor and accept rows */
   /* @generated tokens:utilities-green-solid:end */
@@ -632,7 +628,6 @@
    * alpha (`/90`) wash: alpha lightens the fill toward the surface and broke
    * white-text contrast in Light. */
   /* @generated tokens:base-red-solid-hover:start */
-  --red-solid-hover: hsl(357.78 67.839% 39.02%); /* #A72025 — hover on red-solid */
   --red-bg: hsl(1.82 40.741% 15.882%); /* #391918 — error container surface */
   --red-on-bg: hsl(4.86 97.368% 85.098%); /* #FEBAB4 — text and icons inside a red-bg container */
   --green-text: hsl(134.16 43.415% 59.804%); /* #6CC581 — green status words and icons on any plain surface */
@@ -657,13 +652,10 @@
   --accent-on-bg: hsl(212.86 100% 83.529%); /* #ABD1FF — text and icons inside an accent-bg container */
   --accent-bg-hover: hsl(214.44 49.091% 21.569%); /* #1C3352 — hover on accent-bg pills */
   --green-solid: hsl(141.36 41.259% 28.039%); /* #2A653F — green fill carrying green-solid-fg (accept current) */
-  --green-solid-hover: hsl(141.89 44.048% 32.941%); /* #2F794A — hover on green-solid */
   --green-solid-fg: var(--red-solid-fg); /* #FFFFFF — label on green-solid */
   --accent-solid: hsl(204.55 25.581% 33.725%); /* #405A6C — blue fill carrying accent-solid-fg (accept incoming) */
-  --accent-solid-hover: hsl(204.44 26.214% 40.392%); /* #4C6C82 — hover on accent-solid */
   --accent-solid-fg: var(--red-solid-fg); /* #FFFFFF — label on accent-solid */
   --neutral-solid: hsl(0 0% 26.667%); /* #444444 — neutral fill carrying neutral-solid-fg (accept both) */
-  --neutral-solid-hover: hsl(0 0% 33.725%); /* #565656 — hover on neutral-solid */
   --neutral-solid-fg: var(--red-solid-fg); /* #FFFFFF — label on neutral-solid */
   --conflict-current: hsl(142 69% 58% / 0.12); /* #4ADE801F — merge conflict current rows; translucent so selection shows through */
   --conflict-current-band: hsl(142 69% 58% / 0.26); /* #4ADE8042 — merge conflict HEAD band (the <<<<<<< row) */
@@ -878,7 +870,6 @@
   --red-solid: hsl(
     0 72% 50%
   ); /* #DB2424 — destructive fill carrying red-solid-fg */
-  --red-solid-hover: hsl(0 72% 45%); /* #C52020 — hover on red-solid */
   --red-bg: hsl(4.8 100% 95.098%); /* #FFE8E6 — error container surface */
   --red-on-bg: hsl(358.95 60.638% 36.863%); /* #972527 — text and icons inside a red-bg container */
   --green-text: hsl(140.69 63.504% 26.863%); /* #197037 — green status words and icons on any plain surface */
@@ -895,11 +886,8 @@
   --accent-on-bg: hsl(214.69 79.459% 36.275%); /* #1351A6 — text and icons inside an accent-bg container */
   --accent-bg-hover: hsl(216.82 100% 91.373%); /* #D3E4FF — hover on accent-bg pills */
   --green-solid: var(--green-text); /* #197037 — green fill carrying green-solid-fg (accept current) */
-  --green-solid-hover: hsl(142 75% 23.529%); /* #0F6930 — hover on green-solid */
   --accent-solid: var(--accent-text); /* #1D60BC — blue fill carrying accent-solid-fg (accept incoming) */
-  --accent-solid-hover: hsl(220.95 83.26% 44.51%); /* #134FD0 — hover on accent-solid */
   --neutral-solid: var(--fg2); /* #5E5955 — neutral fill carrying neutral-solid-fg (accept both) */
-  --neutral-solid-hover: hsl(30 5.634% 27.843%); /* #4B4743 — hover on neutral-solid */
   --conflict-current: hsl(142 75% 25.5% / 0.12); /* #1072341F — merge conflict current rows; translucent so selection shows through */
   --conflict-current-band: hsl(142 75% 25.5% / 0.26); /* #10723442 — merge conflict HEAD band (the <<<<<<< row) */
   --conflict-incoming: hsl(214.72 73.272% 42.549% / 0.12); /* #1D60BC1F — merge conflict incoming rows */

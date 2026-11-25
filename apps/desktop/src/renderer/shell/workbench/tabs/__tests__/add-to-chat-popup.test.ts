@@ -134,7 +134,7 @@ async function dragDiff(page: Page, from: string, to: string, toX = 120) {
   await page.mouse.up();
 }
 
-const popup = (page: Page) => page.getByRole("button", { name: "Add to Chat" });
+const popup = (page: Page) => page.getByRole("button", { name: "Add to chat" });
 const appends = (page: Page) => page.evaluate(() => window.appends.map((append) => append.text));
 
 describe("Add to Chat", () => {

@@ -157,9 +157,9 @@ function Script({ id }: { id: string }) {
   return (
     <>
       <div className="flex gap-2">
-        <Button size="sm" variant="secondary" onClick={() => setStep((value) => Math.min(SCRIPT.length - 1, value + 1))}>Next call</Button>
-        <Button size="sm" variant="secondary" onClick={() => setMessage(true)}>Send message</Button>
-        <Button size="sm" variant="secondary" onClick={() => setFinished(true)}>Finish turn</Button>
+        <Button variant="secondary" onClick={() => setStep((value) => Math.min(SCRIPT.length - 1, value + 1))}>Next call</Button>
+        <Button variant="secondary" onClick={() => setMessage(true)}>Send message</Button>
+        <Button variant="secondary" onClick={() => setFinished(true)}>Finish turn</Button>
       </div>
       <Turn id={id} events={events} live={!finished} />
     </>
@@ -205,11 +205,11 @@ function InputStream() {
   return (
     <>
       <div className="flex flex-wrap gap-2" data-input-controls="">
-        <Button size="sm" variant="secondary" onClick={() => start("edit", 700)}>Stream an edit&apos;s input</Button>
-        <Button size="sm" variant="secondary" onClick={() => start("bash", null)}>Start a call whose input never completes</Button>
-        <Button size="sm" variant="secondary" onClick={() => start("edit", 5_000)}>Stream an Edit slowly</Button>
-        <Button size="sm" variant="secondary" onClick={() => start("bash", 5_000)}>Stream a Bash command slowly</Button>
-        <Button size="sm" variant="secondary" onClick={() => start("agent", 5_000)}>Stream an Agent prompt slowly</Button>
+        <Button variant="secondary" onClick={() => start("edit", 700)}>Stream an edit&apos;s input</Button>
+        <Button variant="secondary" onClick={() => start("bash", null)}>Start a call whose input never completes</Button>
+        <Button variant="secondary" onClick={() => start("edit", 5_000)}>Stream an Edit slowly</Button>
+        <Button variant="secondary" onClick={() => start("bash", 5_000)}>Stream a Bash command slowly</Button>
+        <Button variant="secondary" onClick={() => start("agent", 5_000)}>Stream an Agent prompt slowly</Button>
       </div>
       <Turn id="input" events={events} live />
     </>
@@ -230,7 +230,7 @@ function Burst() {
   return (
     <>
       <div className="flex gap-2">
-        <Button size="sm" variant="secondary" onClick={() => {
+        <Button variant="secondary" onClick={() => {
           setCount(1);
           timers.current = [120, 240].map((delay, index) => window.setTimeout(() => setCount(index + 2), delay));
         }}>Three quick calls</Button>
@@ -372,9 +372,9 @@ function Chain({ id, wrap, onChange, onReset, extra }: {
   return (
     <>
       <div className="flex flex-wrap gap-2" data-chain-controls="">
-        <Button size="sm" variant="secondary" onClick={play}>Play chain</Button>
+        <Button variant="secondary" onClick={play}>Play chain</Button>
         {Object.entries(TRANSITIONS).map(([name, [before, after]]) => (
-          <Button key={name} size="sm" variant="secondary" onClick={() => {
+          <Button key={name} variant="secondary" onClick={() => {
             clear();
             const full = before === "answer" ? CHAIN_ANSWER : before === "message" ? CHAIN_MESSAGE : "";
             setState({ step: before, text: full });
@@ -434,7 +434,7 @@ function ScrolledChain({ id, pinned }: { id: string; pinned: boolean }) {
   }, [el, glide]);
   return (
     <Chain id={id} onChange={changed} onReset={position} extra={pinned ? (
-      <Button size="sm" variant="secondary" onClick={() => setGlide((value) => !value)}>
+      <Button variant="secondary" onClick={() => setGlide((value) => !value)}>
         {glide ? "Content glide: on" : "Content glide: off"}
       </Button>
     ) : null} wrap={(turn) => (
@@ -459,7 +459,7 @@ function Harness() {
     <TooltipProvider delayDuration={100}>
       <main data-Zeros-root="" className="bg-bg1 text-fg1 flex min-h-screen flex-wrap content-start gap-4 p-6">
         <div className="flex w-full items-center gap-3">
-          <Button size="sm" variant="secondary" onClick={() => setShowInBetweenMessages(!showInBetween)}>
+          <Button variant="secondary" onClick={() => setShowInBetweenMessages(!showInBetween)}>
             {showInBetween ? "Turn the setting off" : "Turn the setting on"}
           </Button>
         </div>

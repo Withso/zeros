@@ -432,7 +432,7 @@ export function OptionEntryRow({ label, inputLabel, placeholder, onSubmit, onCan
           }}
         />
       </div>
-      {problem ? <p role="alert" className="text-red-on-bg px-0.5 text-3xxs leading-4">{problem}</p> : null}
+      {problem ? <p role="alert" className="text-red-text px-0.5 text-3xxs leading-4">{problem}</p> : null}
     </div>
   );
 }

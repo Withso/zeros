@@ -145,7 +145,6 @@ export function WorkspaceHistoryBar({
       actions={banner.action && (
         <Button
           variant="secondary"
-          size="sm"
           disabled={busy}
           onClick={() => void act()}
         >

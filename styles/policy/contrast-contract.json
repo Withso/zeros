@@ -198,10 +198,9 @@
         "red-solid-fg"
       ],
       "on": [
-        "red-solid",
-        "red-solid-hover"
+        "red-solid"
       ],
-      "why": "Solid destructive fills at rest and on hover."
+      "why": "Solid destructive fills; hover is 90% opacity of the same fill."
     },
     {
       "role": "text",
@@ -209,8 +208,7 @@
         "green-solid-fg"
       ],
       "on": [
-        "green-solid",
-        "green-solid-hover"
+        "green-solid"
       ],
       "why": "Solid Accept current change fills on a merge conflict, at rest and on hover."
     },
@@ -220,8 +218,7 @@
         "accent-solid-fg"
       ],
       "on": [
-        "accent-solid",
-        "accent-solid-hover"
+        "accent-solid"
       ],
       "why": "Solid Accept incoming change fills on a merge conflict, at rest and on hover."
     },
@@ -231,8 +228,7 @@
         "neutral-solid-fg"
       ],
       "on": [
-        "neutral-solid",
-        "neutral-solid-hover"
+        "neutral-solid"
       ],
       "why": "Solid Accept both fills on a merge conflict, at rest and on hover."
     },
@@ -262,8 +258,7 @@
         "primary-button-fg"
       ],
       "on": [
-        "primary-button-bg",
-        "primary-button-hover"
+        "primary-button-bg"
       ]
     },
     {

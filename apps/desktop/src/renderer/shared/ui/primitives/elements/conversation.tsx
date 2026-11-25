@@ -58,7 +58,7 @@ const ConversationScrollButton = React.forwardRef<
       ref={ref}
       data-slot="conversation-scroll-button"
       variant="secondary"
-      size="icon-lg"
+      size="icon"
       className={cn(
         "absolute right-4 bottom-4 z-10 rounded-sm shadow-[var(--shadow-dropdown)]",
         className,

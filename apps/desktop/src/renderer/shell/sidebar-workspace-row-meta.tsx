@@ -32,7 +32,7 @@ const PR_TONE_CLS: Record<PrMarkTone, string> = {
   draft: "text-fg3",
   open: "text-green-text",
   conflicts: "text-yellow-text",
-  merged: "text-violet-on-bg",
+  merged: "text-violet-text",
   closed: "text-red-text",
 };
 const PR_TONE_LABEL: Record<PrMarkTone, string> = {
@@ -46,17 +46,19 @@ const PR_TONE_LABEL: Record<PrMarkTone, string> = {
 export type SidebarRowStatusTone = "attention" | "done" | "failed" | "muted";
 export interface SidebarRowStatus { label: string; tone: SidebarRowStatusTone }
 
-// Status text sits on the sidebar surface, so it is each family's -primary
-// (the -fg roles are for text on a tinted -bg container).
+// Status text sits on the sidebar surface, so it is each family's -text role
+// (the -on-bg roles are for text on a tinted -bg container). Done is violet,
+// the lifecycle's Done everywhere (StatusIcon, the workspace menu).
 const STATUS_TONE_CLS: Record<SidebarRowStatusTone, string> = {
   attention: "text-yellow-text",
-  done: "text-accent-text",
+  done: "text-violet-text",
   failed: "text-red-text",
   muted: "text-fg3",
 };
+/** Compact rows' dots take the same colours as the words they stand for. */
 export const STATUS_DOT_CLS: Record<Exclude<SidebarRowStatusTone, "muted">, string> = {
   attention: "bg-yellow-text",
-  done: "bg-accent",
+  done: "bg-violet-text",
   failed: "bg-red-text",
 };
 

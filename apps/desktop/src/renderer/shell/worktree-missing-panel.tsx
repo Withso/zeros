@@ -149,7 +149,6 @@ export function WorktreeMissingPanel({
         </div>
         <Button
           variant="secondary"
-          size="sm"
           onClick={handleRecover}
           disabled={recovering}
         >

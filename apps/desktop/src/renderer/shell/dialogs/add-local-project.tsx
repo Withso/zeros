@@ -200,7 +200,6 @@ export function AddLocalProjectDialog({
         <DialogFooter>
           <Button
             variant="ghost"
-            size="sm"
             onClick={() => onOpenChange(false)}
             disabled={busy}
           >
@@ -208,7 +207,6 @@ export function AddLocalProjectDialog({
           </Button>
           <Button
             variant="primary"
-            size="sm"
             onClick={handleAdd}
             disabled={busy}
           >

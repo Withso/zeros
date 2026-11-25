@@ -132,10 +132,10 @@ export function conflictAnnotations<Payload>(
 
 const ACCEPT_TONE: Record<ConflictChoice, string> = {
   current:
-    "bg-green-solid text-green-solid-fg hover:bg-green-solid-hover",
+    "bg-green-solid text-green-solid-fg hover:opacity-90",
   incoming:
-    "bg-accent-solid text-accent-solid-fg hover:bg-accent-solid-hover",
-  both: "bg-neutral-solid text-neutral-solid-fg hover:bg-neutral-solid-hover",
+    "bg-accent-solid text-accent-solid-fg hover:opacity-90",
+  both: "bg-neutral-solid text-neutral-solid-fg hover:opacity-90",
 };
 
 export function ConflictAnnotationView({

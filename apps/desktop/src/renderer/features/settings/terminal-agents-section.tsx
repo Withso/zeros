@@ -377,7 +377,6 @@ function TerminalAgentCard({
         {showRemove && (
           <Button
             variant="ghost"
-            size="sm"
             onClick={onRemove}
             className="text-fg2"
             aria-label="Remove agent"
@@ -385,7 +384,7 @@ function TerminalAgentCard({
             <Trash2 className="size-4" aria-hidden="true" />
           </Button>
         )}
-        <Button size="sm" onClick={handleSave} disabled={!canSave}>
+        <Button onClick={handleSave} disabled={!canSave}>
           {isNew ? "Add agent" : "Save changes"}
         </Button>
       </SettingsActions>

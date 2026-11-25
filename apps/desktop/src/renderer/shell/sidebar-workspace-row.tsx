@@ -427,7 +427,6 @@ export function SidebarWorkspaceRow({
         ref={preview.triggerRef}
         type="button"
         variant="ghost"
-        size="default"
         className={SIDEBAR_WORKSPACE_OPEN_BUTTON_CLS}
         aria-current={active ? "page" : undefined}
         aria-haspopup="dialog"

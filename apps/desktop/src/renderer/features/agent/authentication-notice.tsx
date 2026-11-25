@@ -36,7 +36,6 @@ export function AuthenticationNotice({
     >
       <Button
         variant="ghost"
-        size="sm"
         onClick={cloud ? () => onSignIn(cloud.provider) : () => onSignIn()}
         className={cn(AGENT_NOTICE_ACTION, "mt-1")}
       >

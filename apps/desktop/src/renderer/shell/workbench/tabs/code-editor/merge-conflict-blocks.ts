@@ -290,17 +290,17 @@ const conflictTheme = EditorView.baseTheme({
     backgroundColor: "var(--green-solid)",
     color: "var(--green-solid-fg)",
   },
-  ".cm-conflict-accept-current:hover": { backgroundColor: "var(--green-solid-hover)" },
+  ".cm-conflict-accept-current:hover": { opacity: "0.9" },
   ".cm-conflict-accept-incoming": {
     backgroundColor: "var(--accent-solid)",
     color: "var(--accent-solid-fg)",
   },
-  ".cm-conflict-accept-incoming:hover": { backgroundColor: "var(--accent-solid-hover)" },
+  ".cm-conflict-accept-incoming:hover": { opacity: "0.9" },
   ".cm-conflict-accept-both": {
     backgroundColor: "var(--neutral-solid)",
     color: "var(--neutral-solid-fg)",
   },
-  ".cm-conflict-accept-both:hover": { backgroundColor: "var(--neutral-solid-hover)" },
+  ".cm-conflict-accept-both:hover": { opacity: "0.9" },
 });
 
 /** Mark conflicts in place. `onStatus` hears the block count, the block at

@@ -2090,7 +2090,6 @@ export const DesignMotionTimeline = React.memo(function DesignMotionTimeline({
             <Button
               type="button"
               variant={dirty ? "primary" : "ghost"}
-              size="sm"
               className="zd-motion-save"
               aria-label={saving ? "Saving…" : "Save"}
               disabled={

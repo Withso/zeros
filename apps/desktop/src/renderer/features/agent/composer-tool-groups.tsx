@@ -101,7 +101,6 @@ export const ComposerToolGroups = memo(function ComposerToolGroups({
               <Button
                 type="button"
                 variant="ghost"
-                size="sm"
                 // A 12px chevron and a 6px gap put the label 24px in, the
                 // column its tool rows' names start on.
                 className="w-full justify-start gap-1.5"
@@ -145,7 +144,6 @@ export const ComposerToolGroups = memo(function ComposerToolGroups({
                     <Button
                       type="button"
                       variant="ghost"
-                      size="sm"
                       className="w-full justify-start gap-1.5"
                       aria-label={`Local, ${local.length}`}
                     >
@@ -246,7 +244,6 @@ function ToolStatus({
     return (
       <Button
         type="button"
-        size="sm"
         variant="ghost"
         disabled
         className="text-accent-text h-auto shrink-0 bg-transparent p-0 hover:bg-transparent hover:text-(--composer-tool-action-hover)"
@@ -263,7 +260,6 @@ function ToolStatus({
       <Tooltip label="Sign-in failed. Authenticate again to retry.">
         <Button
           type="button"
-          size="sm"
           variant="ghost"
           disabled={authBusy !== null}
           className="h-auto shrink-0 bg-transparent p-0 hover:bg-transparent"
@@ -300,7 +296,6 @@ function ToolStatus({
     return (
       <Button
         type="button"
-        size="sm"
         variant="ghost"
         className="text-accent-text h-auto shrink-0 bg-transparent p-0 hover:bg-transparent hover:text-(--composer-tool-action-hover)"
         disabled={authBusy !== null}

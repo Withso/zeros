@@ -33,9 +33,9 @@ const VARIANT = {
   // follows the fill on hover and open.
   primary: {
     action:
-      "border-r-0 border-primary-button-bg bg-primary-button-bg text-primary-button-fg enabled:hover:border-primary-button-hover enabled:hover:bg-primary-button-hover focus-visible:-mr-px focus-visible:border-r",
+      "border-r-0 border-primary-button-bg bg-primary-button-bg text-primary-button-fg enabled:hover:opacity-90 focus-visible:-mr-px focus-visible:border-r",
     chevron:
-      "border-primary-button-bg border-l-primary-button-fg/15 bg-primary-button-bg text-primary-button-fg enabled:hover:border-primary-button-hover enabled:hover:border-l-primary-button-fg/15 enabled:hover:bg-primary-button-hover data-[state=open]:border-primary-button-hover data-[state=open]:border-l-primary-button-fg/15 data-[state=open]:bg-primary-button-hover focus-visible:border-l-accent",
+      "border-primary-button-bg border-l-primary-button-fg/15 bg-primary-button-bg text-primary-button-fg enabled:hover:opacity-90 data-[state=open]:opacity-90 focus-visible:border-l-accent",
   },
   // Merge when it can run: the PR status green, with the primary variant's
   // divider. A merge that can't run is the secondary outline.

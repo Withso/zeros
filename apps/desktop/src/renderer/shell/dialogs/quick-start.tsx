@@ -188,7 +188,6 @@ export function QuickStartDialog({
               />
               <Button
                 variant="secondary"
-                size="lg"
                 onClick={handleBrowse}
                 className="shrink-0"
               >
@@ -214,7 +213,6 @@ export function QuickStartDialog({
         <DialogFooter>
           <Button
             variant="ghost"
-            size="sm"
             onClick={() => onOpenChange(false)}
             disabled={busy}
           >
@@ -222,7 +220,6 @@ export function QuickStartDialog({
           </Button>
           <Button
             variant="primary"
-            size="sm"
             onClick={handleCreate}
             disabled={!canSubmit}
           >

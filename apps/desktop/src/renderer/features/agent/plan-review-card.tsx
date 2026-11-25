@@ -95,7 +95,6 @@ export function PlanReviewCard({
       <Button
         type="button"
         variant="ghost"
-        size="sm"
         onClick={copy}
         disabled={!planText}
         className="shrink-0"
@@ -106,7 +105,6 @@ export function PlanReviewCard({
       <Button
         type="button"
         variant="ghost"
-        size="sm"
         onClick={onReject}
         className="shrink-0"
       >
@@ -115,7 +113,6 @@ export function PlanReviewCard({
       <Button
         type="button"
         variant="primary"
-        size="sm"
         onClick={onApprove}
         aria-keyshortcuts="Meta+Shift+Enter Control+Shift+Enter"
         className="shrink-0"

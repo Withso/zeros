@@ -253,7 +253,6 @@ export function TerminalWorkbenchLayout({
                     <div className="group/terminal relative mb-0.5">
                       <Button
                         variant="ghost"
-                        size="sm"
                         role="tab"
                         aria-label={entry.title}
                         aria-selected={entry.id === tab?.terminalId}
@@ -357,7 +356,6 @@ export function TerminalWorkbenchLayout({
                             >
                               <Button
                                 variant="ghost"
-                                size="sm"
                                 aria-label={`Run ${entry.title}`}
                                 disabled={
                                   entry.kind === "setup" && setupRunDisabled

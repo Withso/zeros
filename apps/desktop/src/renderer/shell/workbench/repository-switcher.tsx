@@ -19,7 +19,7 @@ export function RepositorySwitcher({ workspace, active }: { workspace: Workspace
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
-        <Button variant="ghost" size="sm" className="min-w-0 gap-1.5" aria-label={`Repository: ${current.repository}`}>
+        <Button variant="ghost" className="min-w-0 gap-1.5" aria-label={`Repository: ${current.repository}`}>
           <GithubIcon />
           <span className="max-w-40 truncate">{current.folder}</span>
           <ChevronDown />

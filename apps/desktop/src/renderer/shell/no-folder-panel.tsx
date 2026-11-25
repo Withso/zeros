@@ -73,7 +73,6 @@ function NativeNoFolderPanel({ chatId }: { chatId: string }) {
         </div>
         <Button
           variant="secondary"
-          size="sm"
           onClick={handlePick}
           disabled={busy}
         >

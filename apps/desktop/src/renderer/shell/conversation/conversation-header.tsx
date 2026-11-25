@@ -496,7 +496,7 @@ export function OpenInPathButton({ path }: OpenInDropdownProps) {
       </Button>
     </Tooltip>
     <DropdownMenu><DropdownMenuTrigger asChild>
-      <Button variant="secondary" size="icon-sm" className="-ml-px rounded-l-none" aria-label="Sync directory options"><ChevronDown /></Button>
+      <Button variant="secondary" size="icon" className="-ml-px rounded-l-none" aria-label="Sync directory options"><ChevronDown /></Button>
     </DropdownMenuTrigger><DropdownMenuContent align="start"><OpenInMenuRows menu={menu} shortcuts={false} /></DropdownMenuContent></DropdownMenu>
   </div>;
 }

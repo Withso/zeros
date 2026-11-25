@@ -147,7 +147,7 @@ export const WorkflowProgressPanel = memo(function WorkflowProgressPanel({
             enable it when the provider adds a scoped pause method. */}
         <Tooltip label="Pause unavailable">
           <span className="inline-flex">
-            <Button type="button" size="sm" variant="ghost" disabled>
+            <Button type="button" variant="ghost" disabled>
               Pause
             </Button>
           </span>

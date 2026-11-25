@@ -17,14 +17,6 @@ export {
 export { LIST_ROW_IN_GROUP, ListRow, ListRowGroup, type ListRowGroupProps, type ListRowProps } from "./list-row";
 export { Pill, type PillProps } from "./pill";
 export { TruncateStart } from "./truncate-start";
-export {
-  Card,
-  CardHeader,
-  CardFooter,
-  CardTitle,
-  CardDescription,
-  CardContent,
-} from "./card";
 export { Input, inputVariants, type InputProps } from "./input";
 export { Textarea } from "./textarea";
 export { CodeTextarea, type CodeTextareaProps } from "./code-textarea";
@@ -35,7 +27,6 @@ export { RadioGroup, RadioGroupItem } from "./radio-group";
 export { Separator } from "./separator";
 export { ButtonShortcut, Kbd } from "./kbd";
 export { Tile } from "./tile";
-export { Alert, AlertTitle, AlertDescription } from "./alert";
 export {
   Dialog,
   DialogPortal,
@@ -158,31 +149,6 @@ export {
   CommandShortcut,
   CommandSeparator,
 } from "./command";
-export {
-  Sidebar,
-  SidebarContent,
-  SidebarFooter,
-  SidebarGroup,
-  SidebarGroupAction,
-  SidebarGroupContent,
-  SidebarGroupLabel,
-  SidebarHeader,
-  SidebarInput,
-  SidebarInset,
-  SidebarMenu,
-  SidebarMenuAction,
-  SidebarMenuBadge,
-  SidebarMenuButton,
-  SidebarMenuItem,
-  SidebarMenuSub,
-  SidebarMenuSubButton,
-  SidebarMenuSubItem,
-  SidebarProvider,
-  SidebarRail,
-  SidebarSeparator,
-  SidebarTrigger,
-  useSidebar,
-} from "./sidebar";
 
 // Chat-surface visual primitives.
 export * from "./elements";

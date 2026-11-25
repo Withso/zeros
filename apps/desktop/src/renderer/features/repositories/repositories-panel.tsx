@@ -895,7 +895,6 @@ export function EnvironmentSection({
         names.length > 0 ? (
           <Button
             variant="primary"
-            size="sm"
             onClick={() => setAddOpen(true)}
             disabled={addDisabled}
           >
@@ -938,7 +937,6 @@ export function EnvironmentSection({
             action={
               <Button
                 variant="primary"
-                size="sm"
                 onClick={() => setAddOpen(true)}
                 disabled={addDisabled}
               >
@@ -1353,19 +1351,19 @@ function GitSection({
           )}
         </div>
         {baseMissing && (
-          <p className="text-yellow-on-bg text-xs">
+          <p className="text-yellow-text text-xs">
             “{effectiveBase}” wasn’t found on {catalog?.listedRemote} — new
             workspaces will fall back to a local branch until it exists there.
           </p>
         )}
         {remoteGone && (
-          <p className="text-yellow-on-bg text-xs">
+          <p className="text-yellow-text text-xs">
             Remote “{effectiveRemote}” isn’t configured in this repository —
             showing local branches instead.
           </p>
         )}
         {remoteEmpty && (
-          <p className="text-yellow-on-bg text-xs">
+          <p className="text-yellow-text text-xs">
             No branches from “{effectiveRemote}” yet (not fetched, or offline) —
             showing local branches. New workspaces fall back the same way.
           </p>
@@ -1808,7 +1806,6 @@ function PathsSection({ project }: { project: Project }) {
               />
               <Button
                 variant="secondary"
-                size="lg"
                 onClick={() => void handleBrowse()}
               >
                 <FolderOpen className="size-3.5" aria-hidden="true" />
@@ -1816,7 +1813,6 @@ function PathsSection({ project }: { project: Project }) {
               </Button>
               <Button
                 variant="secondary"
-                size="lg"
                 onClick={() => void handleSave()}
                 disabled={local.loading || draft.trim() === repoPath}
               >
@@ -2105,7 +2101,6 @@ export function RemoveRepositoryDialog({
         <DialogFooter>
           <Button
             variant="secondary"
-            size="sm"
             onClick={() => onOpenChange(false)}
             disabled={busy}
           >
@@ -2113,7 +2108,6 @@ export function RemoveRepositoryDialog({
           </Button>
           <Button
             variant="destructive"
-            size="sm"
             onClick={() => void handleRemove()}
             disabled={busy}
           >

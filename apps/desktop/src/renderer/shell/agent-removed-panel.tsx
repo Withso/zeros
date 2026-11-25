@@ -57,7 +57,7 @@ export function AgentRemovedPanel({
             Switch this chat to an available agent to continue.
           </p>
         </div>
-        <Button variant="secondary" size="sm" onClick={onSwitchAgent}>
+        <Button variant="secondary" onClick={onSwitchAgent}>
           <ArrowLeftRight size={14} aria-hidden="true" />
           Switch agent
         </Button>

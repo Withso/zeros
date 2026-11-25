@@ -289,6 +289,8 @@ const BG3_SURFACE_FILES = new Set([
   "apps/desktop/src/renderer/features/agent/turn-footer.tsx",
   // Frame findings list rows sit on the badge's PopoverContent panel.
   "apps/desktop/src/renderer/features/design-workspace/design-frame-lint-badge.tsx",
+  // Toolbar size="inline": the 24px group that floats over content (P12).
+  "apps/desktop/src/renderer/shared/ui/primitives/toolbar.tsx",
 ]);
 
 // bg3 as a RAW CSS background fill. BG3_FILL_RE above is Tailwind-class-based

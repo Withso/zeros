@@ -660,23 +660,6 @@
         }
       }
     },
-    "red-solid-hover": {
-      "$type": "color",
-      "$value": {
-        "colorSpace": "hsl",
-        "components": [357.78, 67.839, 39.02]
-      },
-      "$description": "hover on red-solid",
-      "$extensions": {
-        "org.zeros": {
-          "cssName": "--red-solid-hover",
-          "section": "base-red-solid-hover",
-          "utility": "--color-red-solid-hover",
-          "utilitySection": "utilities-red-text",
-          "utilityOrder": 30
-        }
-      }
-    },
     "red-bg": {
       "$type": "color",
       "$value": {
@@ -913,23 +896,6 @@
         }
       }
     },
-    "green-solid-hover": {
-      "$type": "color",
-      "$value": {
-        "colorSpace": "hsl",
-        "components": [141.89, 44.048, 32.941]
-      },
-      "$description": "hover on green-solid",
-      "$extensions": {
-        "org.zeros": {
-          "cssName": "--green-solid-hover",
-          "section": "base-yellow-wash",
-          "utility": "--color-green-solid-hover",
-          "utilitySection": "utilities-green-solid",
-          "utilityOrder": 106
-        }
-      }
-    },
     "green-solid-fg": {
       "$type": "color",
       "$value": "{tokens.red-solid-fg}",
@@ -961,23 +927,6 @@
         }
       }
     },
-    "accent-solid-hover": {
-      "$type": "color",
-      "$value": {
-        "colorSpace": "hsl",
-        "components": [204.44, 26.214, 40.392]
-      },
-      "$description": "hover on accent-solid",
-      "$extensions": {
-        "org.zeros": {
-          "cssName": "--accent-solid-hover",
-          "section": "base-yellow-wash",
-          "utility": "--color-accent-solid-hover",
-          "utilitySection": "utilities-green-solid",
-          "utilityOrder": 109
-        }
-      }
-    },
     "accent-solid-fg": {
       "$type": "color",
       "$value": "{tokens.red-solid-fg}",
@@ -1006,23 +955,6 @@
           "utility": "--color-neutral-solid",
           "utilitySection": "utilities-green-solid",
           "utilityOrder": 111
-        }
-      }
-    },
-    "neutral-solid-hover": {
-      "$type": "color",
-      "$value": {
-        "colorSpace": "hsl",
-        "components": [0.0, 0.0, 33.725]
-      },
-      "$description": "hover on neutral-solid",
-      "$extensions": {
-        "org.zeros": {
-          "cssName": "--neutral-solid-hover",
-          "section": "base-yellow-wash",
-          "utility": "--color-neutral-solid-hover",
-          "utilitySection": "utilities-green-solid",
-          "utilityOrder": 112
         }
       }
     },

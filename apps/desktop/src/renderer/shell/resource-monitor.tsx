@@ -159,7 +159,6 @@ const ResourceSortButton = memo(function ResourceSortButton({
     <Button
       type="button"
       variant="ghost"
-      size="sm"
       className={
         align === "start" ? "w-full justify-start" : "w-full justify-end"
       }
@@ -699,7 +698,6 @@ export const ResourceMonitor = memo(function ResourceMonitor() {
             <Button
               type="button"
               variant="ghost"
-              size="sm"
               className="h-6 shrink-0 gap-1 rounded-md border-border2 px-1.5 text-3xxs text-fg2 hover:bg-(--surface-hover) hover:text-fg1 data-[active=true]:bg-(--surface-hover) data-[active=true]:text-fg1 [&_svg]:size-3"
               data-active={open}
               aria-label="App resources"
@@ -716,7 +714,7 @@ export const ResourceMonitor = memo(function ResourceMonitor() {
           aria-label="App resources"
           align="start"
           sideOffset={5}
-          size="wide"
+          size="lg"
           padding="none"
         >
           <div className="flex items-start justify-between gap-4 p-4 pb-3">

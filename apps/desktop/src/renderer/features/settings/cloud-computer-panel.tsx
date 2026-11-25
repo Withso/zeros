@@ -168,7 +168,7 @@ function CloudComputerScope({ userId, organizationId, organizationName, canManag
         <SettingsGroup title="Project builds" description="A project whose build failed keeps its last build; new workspaces clone directly until one succeeds.">
           {data.readyCopyFailures!.map(failure => (
             <SettingsRow key={failure.projectId} label={failure.project} hint={readyCopyFailureLine(failure, Date.now())}>
-              <Button variant="ghost" size="sm" disabled={busy}
+              <Button variant="ghost" disabled={busy}
                 onClick={() => void run(() => retryCloudReadyCopy(organizationId, failure.projectId))}>Retry now</Button>
             </SettingsRow>
           ))}
@@ -287,7 +287,7 @@ function CloudComputerProjects({ userId, organizationId, organizationName, activ
       <SettingsRow label={count === undefined ? "Projects" : `${count} ${count === 1 ? "project" : "projects"} in ${organizationName}`}
         hint="The Cloud Computer holds tools only. Repositories, setup scripts and build secrets belong to projects.">
         {onNewProject && projects && (projects.canCreateOrganization || projects.personalAllowed) && (
-          <Button variant="ghost" size="sm" onClick={onNewProject}>New project</Button>
+          <Button variant="ghost" onClick={onNewProject}>New project</Button>
         )}
       </SettingsRow>
     </SettingsGroup>

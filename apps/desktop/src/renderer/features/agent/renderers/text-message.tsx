@@ -528,7 +528,7 @@ function AgentMessageHover({ message, ctx, wrap, enabled, children }: {
   return (
     // A settled message reserves the popup's band above its text, so the popup
     // never covers the row or prompt above. Live rows keep the loader's slot.
-    <div data-agent-message="" className={cn("group/agentmsg", enabled && "pt-6")}>
+    <div data-agent-message="" className={cn("group/agentmsg", enabled && "pt-7")}>
       <div className="relative">
       {children}
       {enabled && <MessageHoverActions

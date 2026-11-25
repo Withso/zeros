@@ -673,7 +673,7 @@ function SetupActionButton({
   icon: "rerun" | "stop";
 }) {
   return (
-    <Button variant="secondary" size="sm" disabled={busy} onClick={onClick}>
+    <Button variant="secondary" disabled={busy} onClick={onClick}>
       {busy ? (
         <ZerosSpinner size={16} />
       ) : icon === "stop" ? (
@@ -738,7 +738,6 @@ function SetupRunEmpty({ busy, onRun }: { busy: boolean; onRun: () => void }) {
       action={
         <Button
           variant="secondary"
-          size="sm"
           disabled={busy}
           onClick={() => onRun()}
         >
@@ -773,7 +772,6 @@ function SetupLastRunEmpty({
       action={
         <Button
           variant="secondary"
-          size="sm"
           disabled={busy}
           onClick={() => onRun()}
         >
@@ -793,7 +791,7 @@ function SetupAddEmpty({ onAdd }: { onAdd: () => void }) {
     <SetupEmptyLayout
       icon={FileCode}
       action={
-        <Button variant="secondary" size="sm" onClick={() => onAdd()}>
+        <Button variant="secondary" onClick={() => onAdd()}>
           Add setup script
         </Button>
       }

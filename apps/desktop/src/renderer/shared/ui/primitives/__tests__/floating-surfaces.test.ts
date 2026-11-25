@@ -175,14 +175,14 @@ describe("Popover", () => {
 
   // Regression: the @, / and # pickers docked on the composer floated on bg3
   // with a lift while every other card above the composer sat on its surface.
-  it("floats on bg3 with the lift, or docks on the composer's own surface", () => {
+  it("floats on bg3 with the lift, or docks on the same bg3 at the composer's edge (P5)", () => {
     expect(popover).toMatch(/floating:\s*"[^"]*border-border2 shadow-\[var\(--shadow-dropdown\)\]/);
-    expect(popover).toMatch(/composer:\s*"bg-bg1-raised border-\(--composer-border\) /);
+    expect(popover).toMatch(/composer:\s*"bg-bg[3] border-\(--composer-border\) /);
     expect(popover).not.toMatch(/composer:\s*"[^"]*shadow/);
     expect(popover).toContain('surface = "floating"');
     const suggestions = source("../../features/agent/composer-editor/suggestion-popup.tsx");
     expect(suggestions).toContain('surface={placement === "composer" ? "composer" : "floating"}');
-    expect(suggestions).toContain('<Surface kind={placement === "composer" ? "sidebar" : "floating"}>');
+    expect(suggestions).toContain('<Surface kind="floating">');
   });
 
   // Portaled, a docked picker sits over the transcript instead of in the dock

@@ -76,7 +76,7 @@ export const EditCard: Renderer<AgentToolMessage> = memo(function EditCard({
         />
       ))}
       {visible.length < sources.length && (
-        <Button variant="ghost" size="sm" className="self-start" onClick={() => setShowAll(true)}>
+        <Button variant="ghost" className="self-start" onClick={() => setShowAll(true)}>
           Show {sources.length - visible.length} more files
         </Button>
       )}

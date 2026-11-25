@@ -231,7 +231,6 @@ function HistoryItems({
           <p className="m-0">{error}</p>
           <Button
             variant="ghost"
-            size="sm"
             className="text-xs"
             onClick={onRetry}
             aria-label={
@@ -358,7 +357,6 @@ export function ChangesScopeMenu({
       <DropdownMenuTrigger asChild>
         <Button
           variant="ghost"
-          size="sm"
           className="text-fg2 hover:text-fg1 data-[state=open]:text-fg1 min-w-0 gap-1.5 bg-transparent px-1.5 text-xs font-normal hover:bg-transparent [&_svg]:size-3.5"
           aria-label={`Changes scope: ${scopeLabel(selected, turns)}`}
         >

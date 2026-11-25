@@ -79,8 +79,8 @@ function ReassignDialog({ target }: { target: CloudWorkspaceTarget }) {
             {message && <p className="text-red-text text-xs" role="alert">{message}</p>}
           </DialogBody>
           <DialogFooter>
-            <Button variant="secondary" size="sm" disabled={submitting} onClick={() => setPicked(null)}>Back</Button>
-            <Button size="sm" loading={submitting} onClick={() => void confirm(picked)}>Make Creator</Button>
+            <Button variant="secondary" disabled={submitting} onClick={() => setPicked(null)}>Back</Button>
+            <Button loading={submitting} onClick={() => void confirm(picked)}>Make Creator</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

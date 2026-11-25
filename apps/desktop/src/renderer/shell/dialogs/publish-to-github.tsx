@@ -217,7 +217,7 @@ export function PublishToGithubDialog({
           {ownersError ? (
             <div className="flex items-center gap-2 text-sm text-fg2">
               <p>Couldn't load GitHub accounts.</p>
-              <Button variant="secondary" size="sm" onClick={ownersRead.refresh}>Retry</Button>
+              <Button variant="secondary" onClick={ownersRead.refresh}>Retry</Button>
             </div>
           ) : (
             <>
@@ -298,7 +298,6 @@ export function PublishToGithubDialog({
         <DialogFooter>
           <Button
             variant="ghost"
-            size="sm"
             onClick={() => onOpenChange(false)}
             disabled={busy}
           >
@@ -306,7 +305,6 @@ export function PublishToGithubDialog({
           </Button>
           <Button
             variant="primary"
-            size="sm"
             onClick={handlePublish}
             disabled={!canSubmit}
           >

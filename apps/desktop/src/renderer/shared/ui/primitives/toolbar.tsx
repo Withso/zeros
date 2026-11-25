@@ -13,6 +13,14 @@ export const TOOLBAR_SURFACE = cn(
   TOOLBAR_INSET,
   TOOLBAR_RADIUS,
 );
+/** The inline floating group (P12): every tool group that floats over
+ *  content (message actions, the selected-text popover in chat and in the
+ *  Files code view). 24px tall: a 1px border and 1px inset around 20px items
+ *  with 4px corners on the group's 6px ones; 12/16 text, 14px icons (12px
+ *  where a caller sizes a small glyph); bg3 with border2 and the dropdown
+ *  shadow, like every floating surface; items hover bg3-hover. */
+export const TOOLBAR_INLINE_SURFACE =
+  "border-border2 bg-bg3 text-fg2 inline-flex h-6 shrink-0 items-center gap-0.5 rounded-md border p-px text-3xxs leading-4 shadow-[var(--shadow-dropdown)] *:rounded-sm [&_svg:not([class*='size-'])]:size-3.5 [&_button]:hover:bg-bg3-hover [&_button]:hover:text-fg1";
 
 const ITEM_SELECTOR = [
   "button",
@@ -70,9 +78,9 @@ function isTextEntry(target: HTMLElement) {
 }
 
 export interface ToolbarProps extends React.HTMLAttributes<HTMLDivElement> {
-  /** floating lifts the bar off the content with the dropdown shadow; docked
-   * sits in a row with no shadow. */
-  elevation?: "floating" | "docked";
+  /** bar — the 36px bar and island with 28px tools (default). inline — the
+   * 24px group that floats over content, with 20px items. */
+  size?: "bar" | "inline";
   orientation?: "horizontal" | "vertical";
 }
 
@@ -83,7 +91,7 @@ const Toolbar = React.forwardRef<HTMLDivElement, ToolbarProps>(
     {
       className,
       role = "toolbar",
-      elevation = "floating",
+      size = "bar",
       orientation: orientationProp,
       onKeyDown,
       onFocus,
@@ -168,17 +176,16 @@ const Toolbar = React.forwardRef<HTMLDivElement, ToolbarProps>(
     };
 
     return (
-      <IconButtonSizeContext.Provider value="standard">
+      <IconButtonSizeContext.Provider value={size === "inline" ? "inline" : "standard"}>
         <div
           ref={setRef}
           role={role}
           aria-orientation={roving ? orientation : props["aria-orientation"]}
           data-orientation={orientation}
-          data-elevation={elevation}
+          data-toolbar-size={size}
           className={cn(
-            TOOLBAR_SURFACE,
+            size === "inline" ? TOOLBAR_INLINE_SURFACE : [TOOLBAR_SURFACE, "shadow-[var(--shadow-dropdown)]"],
             orientation === "vertical" && "flex-col",
-            elevation === "floating" && "shadow-[var(--shadow-dropdown)]",
             className,
           )}
           onFocus={handleFocus}
@@ -191,7 +198,8 @@ const Toolbar = React.forwardRef<HTMLDivElement, ToolbarProps>(
 );
 Toolbar.displayName = "Toolbar";
 
-/** A 1 × 16 border2 rule between tool groups (16 × 1 in a vertical bar). */
+/** A 1 × 16 border2 rule between tool groups (16 × 1 in a vertical bar,
+ * 1 × 12 in an inline group). */
 function ToolbarSeparator({ className, ...props }: React.HTMLAttributes<HTMLDivElement>) {
   return (
     <div
@@ -199,7 +207,7 @@ function ToolbarSeparator({ className, ...props }: React.HTMLAttributes<HTMLDivE
       aria-hidden
       className={cn(
         "bg-border2 shrink-0",
-        "in-data-[orientation=horizontal]:mx-0.5 in-data-[orientation=horizontal]:h-4 in-data-[orientation=horizontal]:w-px",
+        "in-data-[orientation=horizontal]:mx-0.5 in-data-[orientation=horizontal]:h-4 in-data-[orientation=horizontal]:w-px in-data-[toolbar-size=inline]:h-3",
         "in-data-[orientation=vertical]:my-0.5 in-data-[orientation=vertical]:h-px in-data-[orientation=vertical]:w-4",
         className,
       )}
@@ -214,7 +222,7 @@ function ToolbarText({ className, ...props }: React.HTMLAttributes<HTMLSpanEleme
   return (
     <span
       className={cn(
-        "text-fg2 inline-flex min-w-0 items-center gap-1.5 px-1.5 text-xs leading-4.5 whitespace-nowrap",
+        "text-fg2 inline-flex min-w-0 items-center gap-1.5 px-1.5 text-xs leading-4.5 whitespace-nowrap in-data-[toolbar-size=inline]:text-3xxs in-data-[toolbar-size=inline]:leading-4",
         "[&_strong]:text-fg1 [&_strong]:shrink-0 [&_strong]:font-medium",
         "[&_svg]:text-fg3 [&_svg]:size-3.5 [&_svg]:shrink-0",
         className,

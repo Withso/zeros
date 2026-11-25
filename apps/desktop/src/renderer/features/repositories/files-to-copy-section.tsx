@@ -395,7 +395,7 @@ export function FilesToCopySection({
                 : "Not connected to the Zeros engine yet.")}{" "}
             Your saved list still applies.
           </div>
-          <Button variant="secondary" size="sm" onClick={read.refresh}>
+          <Button variant="secondary" onClick={read.refresh}>
             <RotateCw className="size-3" aria-hidden />
             Try again
           </Button>

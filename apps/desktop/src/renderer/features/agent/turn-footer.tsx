@@ -915,7 +915,6 @@ export const TurnFooter = memo(function TurnFooter({
             <DialogFooter>
               <Button
                 variant="secondary"
-                size="sm"
                 autoFocus
                 onClick={() => setConfirmOpen(false)}
               >
@@ -923,7 +922,6 @@ export const TurnFooter = memo(function TurnFooter({
               </Button>
               <Button
                 variant="destructive"
-                size="sm"
                 onClick={runReset}
                 disabled={resetting}
               >

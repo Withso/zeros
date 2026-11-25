@@ -297,7 +297,6 @@ function SetupRow({
           {row.checkAgain ? (
             <Button
               variant="ghost"
-              size="sm"
               className="text-fg2"
               disabled={checking}
               aria-busy={checking || undefined}
@@ -309,7 +308,6 @@ function SetupRow({
           {action ? (
             <Button
               variant="secondary"
-              size="sm"
               onClick={() => void runSimulatorSetupAction(action)}
             >
               {action.label}

@@ -18,7 +18,6 @@ import type { LocalStorageCategory, LocalStorageCategoryId } from "../../../../s
 import { useNativeRuntime } from "../../platform/runtime";
 import { cn } from "../../shared/ui/cn";
 import { Button } from "../../shared/ui/primitives/button";
-import { Card } from "../../shared/ui/primitives/card";
 import { toast } from "../../shared/ui/primitives/elements";
 import { SkeletonLine } from "../../shared/ui/primitives/skeleton";
 import { Tooltip } from "../../shared/ui/primitives/tooltip";
@@ -112,7 +111,8 @@ function Summary({ view, now, active }: { view: LocalStorageView; now: number; a
   const busy = measuring || view.clearing || !active;
   const status = view.error && !measuring ? "Could not measure" : updatedLabel(view.report, now);
   return (
-    <Card role="group" aria-label="Total storage">
+    <SettingsGroup>
+      <div role="group" aria-label="Total storage" className="text-fg2 flex flex-col gap-3">
       <div className="flex items-center justify-between gap-4">
         <p className="m-0 flex min-w-0 items-baseline gap-1.5">
           {total.kind === "known" ? (
@@ -170,7 +170,8 @@ function Summary({ view, now, active }: { view: LocalStorageView; now: number; a
           </li>
         ))}
       </ul>
-    </Card>
+      </div>
+    </SettingsGroup>
   );
 }
 

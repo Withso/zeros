@@ -1270,7 +1270,7 @@ function RunActionOverlay({
             title={action.name}
             action={
               <Tooltip label={action.command}>
-                <Button variant="secondary" size="sm" onClick={onStart}>
+                <Button variant="secondary" onClick={onStart}>
                   {outcome && <RotateCw />}
                   {outcome
                     ? `Run ${action.name} again`
@@ -1302,7 +1302,7 @@ function RunActionOverlay({
       {outcome && (outcome === "stopped" || badgeVisible) && (
         <RunStatusBadge outcome={outcome} />
       )}
-      <Button variant="secondary" size="sm" onClick={onStart}>
+      <Button variant="secondary" onClick={onStart}>
         <RotateCw />
         Rerun
       </Button>
@@ -1322,7 +1322,7 @@ function RunAddEmpty() {
       icon={Play}
       title="Run"
       action={
-        <Button variant="secondary" size="sm" onClick={() => openRunActions()}>
+        <Button variant="secondary" onClick={() => openRunActions()}>
           Add run script
         </Button>
       }

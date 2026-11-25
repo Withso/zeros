@@ -4839,7 +4839,7 @@ function AgentChatBody({
                 message={session.cloudStop.state === "failed" ? "Stop was refused. Try Stop again." : "Stop could not be confirmed. Reconnect to check this turn."}
               >
                 <div className="mt-1">
-                  <Button type="button" variant="ghost" size="sm" className={AGENT_NOTICE_ACTION}
+                  <Button type="button" variant="ghost" className={AGENT_NOTICE_ACTION}
                     disabled={!interactive} onClick={() => { void session.cancel(); }}>
                     Retry Stop
                   </Button>

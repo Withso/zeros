@@ -181,7 +181,6 @@ export function SubscriptionConnectionPanel({
                     {account.state !== "connected" && (
                       <Button
                         variant="secondary"
-                        size="sm"
                         disabled={!native || disabled}
                         aria-label={`Sign in to ${label}`}
                         onClick={() => void act("connect", account.id)}
@@ -238,7 +237,6 @@ export function SubscriptionConnectionPanel({
           !showCode && (
             <Button
               variant="ghost"
-              size="sm"
               className="self-start"
               onClick={() => setShowCode(true)}
             >
@@ -265,7 +263,6 @@ export function SubscriptionConnectionPanel({
                   onChange={(event) => setCode(event.target.value)}
                 />
                 <Button
-                  size="sm"
                   type="submit"
                   disabled={submitting || !code.trim()}
                 >
@@ -278,7 +275,6 @@ export function SubscriptionConnectionPanel({
       <Actions className={dialogFooter ? undefined : "flex items-center gap-2"}>
         <Button
           variant="secondary"
-          size="sm"
           disabled={
             !native || !surfaceActive || read.loading || changingAccount
           }

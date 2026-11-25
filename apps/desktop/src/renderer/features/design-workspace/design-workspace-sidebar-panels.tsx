@@ -321,7 +321,6 @@ const DesignLayerFrameRow = React.memo(function DesignLayerFrameRow({
       asChild
       role="treeitem"
       variant="ghost"
-      size="sm"
       data-design-frame-row={frame.file}
       data-design-frame-component={identity ? "" : undefined}
       data-design-panel-row={row.key}
@@ -399,7 +398,6 @@ const DesignLayerNodeRow = React.memo(function DesignLayerNodeRow({
         data-design-panel-row={row.key}
         role="treeitem"
         variant="ghost"
-        size="sm"
         className={cn(
           "zd-design-layer-row relative z-[1] h-7 min-w-0 flex-1 justify-start gap-1 px-2 pr-7 text-xs font-normal [&>svg]:size-3.5",
           blockRadius,
@@ -1572,7 +1570,6 @@ function OwnedDesignWorkspaceSidebarPanels({
               <Button
                 type="button"
                 variant="secondary"
-                size="sm"
                 onClick={snapshot.refresh}
               >
                 Retry

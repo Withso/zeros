@@ -78,12 +78,12 @@ export function NoCreatorBar({ folder, surfaceActive }: { folder: string; surfac
         {...(self.state === "ineligible" || (message && !confirming) ? {
           details: <>
             {self.state === "ineligible" && <p className="text-fg3 mt-1 text-xs">{self.reason}</p>}
-            {message && !confirming && <p role="alert" className="text-red-on-bg mt-1 text-xs">{message}</p>}
+            {message && !confirming && <p role="alert" className="text-red-text mt-1 text-xs">{message}</p>}
           </>,
         } : {})}
         actions={<div className="flex shrink-0 items-center gap-2">
-          {self.state === "eligible" && <Button variant="secondary" size="sm" onClick={() => { setMessage(null); setConfirming(true); }}>Make me the Creator</Button>}
-          <Button variant="secondary" size="sm" onClick={() => openReassignDialog(target)}>Reassign…</Button>
+          {self.state === "eligible" && <Button variant="secondary" onClick={() => { setMessage(null); setConfirming(true); }}>Make me the Creator</Button>}
+          <Button variant="secondary" onClick={() => openReassignDialog(target)}>Reassign…</Button>
         </div>}
       />
       {confirming && (
@@ -95,8 +95,8 @@ export function NoCreatorBar({ folder, surfaceActive }: { folder: string; surfac
               {message && <p className="text-red-text text-xs" role="alert">{message}</p>}
             </DialogBody>
             <DialogFooter>
-              <Button variant="secondary" size="sm" disabled={submitting} onClick={() => setConfirming(false)}>Back</Button>
-              <Button size="sm" loading={submitting} onClick={() => void confirm()}>Make me the Creator</Button>
+              <Button variant="secondary" disabled={submitting} onClick={() => setConfirming(false)}>Back</Button>
+              <Button loading={submitting} onClick={() => void confirm()}>Make me the Creator</Button>
             </DialogFooter>
           </DialogContent>
         </Dialog>
