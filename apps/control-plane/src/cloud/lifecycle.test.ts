@@ -1975,10 +1975,18 @@ describe("a wake failure every workspace shares", () => {
   it("counts a route refused early in a slow create at its refusal, not when the create reaches it", async () => {
     let now = NOW;
     // The route is refused at once; preparing the repository then takes twelve minutes.
-    const prepareRepository = vi.fn(async () => { await new Promise(resolve => setTimeout(resolve, 5)); now = NOW + 12 * 60_000; });
+    let routeRefused!: () => void;
+    const refusedOnce = new Promise<void>(resolve => { routeRefused = resolve; });
+    // Preparing takes its minutes only after the route has been refused and that rejection has settled (a macrotask
+    // runs after every pending promise reaction).
+    const prepareRepository = vi.fn(async () => {
+      await refusedOnce;
+      await new Promise(resolve => setImmediate(resolve));
+      now = NOW + 12 * 60_000;
+    });
     const claimed: (CloudV2LifecycleWorkspace & { attempts: number })[] = [workspace("creating", { id: ids[0]! })];
     const f = setup(claimed, { logs: true, wakeBreaker: true, now: () => now, prepareRepository });
-    vi.mocked(f.compute.hostPort).mockImplementation(async () => { throw refused(); });
+    vi.mocked(f.compute.hostPort).mockImplementation(async () => { routeRefused(); throw refused(); });
     await f.lifecycle.tick();
     expect(prepareRepository).toHaveBeenCalledOnce();
     // Two fresh refusals at minute 12: with the first at minute 0, three never fall within one window.
