@@ -77,7 +77,7 @@ database("recovering a failed cloud workspace", () => {
     expect(after.running_at).toEqual(expect.any(Date));
   });
 
-  it("backfills when a workspace ran under row security, from a completed stop, a finished setup or an accepted hello, never from activity", async () => {
+  it("backfills when a workspace ran under row security, from a completed stop or a finished setup, never from activity or a hello alone", async () => {
     const migration = readFileSync(new URL("../../migrations/0273_cloud_v2_running_at.sql", import.meta.url), "utf8");
     const backfill = migration.slice(migration.indexOf("SELECT set_config('app.system','on',true)"),
       migration.indexOf("set_config('app.cloud_execution_protocol','',true);") + "set_config('app.cloud_execution_protocol','',true);".length);
@@ -98,9 +98,9 @@ database("recovering a failed cloud workspace", () => {
       expect(await backfilled()).toBe(false);
       await seed(`state='failed', setup_status='{"state":"succeeded","exitCode":0,"startedAt":1,"finishedAt":2}'::jsonb`);
       expect(await backfilled()).toBe(true);
-      // A worker that said hello ran on a prepared checkout: a run that failed before its first completed stop.
-      await seed(`state='failed', error_code='live_connection_unavailable', setup_status=NULL, worker_boot_id=gen_random_uuid()`);
-      expect(await backfilled()).toBe(true);
+      // A hello binds its boot before configuration finishes: not proof the workspace reached running.
+      await seed(`state='failed', error_code='worker_boot_timeout', setup_status=NULL, worker_boot_id=gen_random_uuid()`);
+      expect(await backfilled()).toBe(false);
       // A shared workspace is visible to the app role only with the execution protocol marker as well.
       await seed(`state='failed', worker_boot_id=NULL, setup_status='{"state":"succeeded","exitCode":0,"startedAt":1,"finishedAt":2}'::jsonb, execution_mode='active'`);
       expect(await backfilled()).toBe(true);

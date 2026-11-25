@@ -1203,6 +1203,9 @@ export class CloudV2Lifecycle {
     const { store, compute } = this.deps;
     if (!store.healCandidates || !store.healDue || !store.healFailed) return;
     for (const candidate of await store.healCandidates(new Date(now - CLOUD_V2_HEAL_AFTER_MS), HEAL_BATCH)) {
+      // A shutdown's drain is short and archive confirmation is not: stopping a machine its workspace no longer
+      // records would be left to the next scan, so none starts once shutdown has begun.
+      if (this.stopped) return;
       try {
         // Its own stop, finished by the ordinary stopping step, retires the run's open turns. A pending restore with no
         // machine has nothing that step could stop without allocating one; the direct stop below retires them too.
@@ -1227,6 +1230,7 @@ export class CloudV2Lifecycle {
         // Retention's 14-day clock counts from Boat's own stop.
         let stop: { stoppedAt?: Date; archiveFailed?: boolean; workerOffUnverified?: boolean } = archivedAt ? { stoppedAt: archivedAt } : {};
         if (up) {
+          if (this.stopped) return;
           // Re-read before touching the machine: a Start since the scan owns it now.
           if (!await store.healDue(candidate)) continue;
           const workerOff = await this.switchWorkerOff(candidate.boatSandboxId!);
