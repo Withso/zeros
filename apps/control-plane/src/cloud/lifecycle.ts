@@ -587,6 +587,8 @@ export class CloudV2Lifecycle {
       this.deps.logger?.warn(`[cloud-v2] ${workspace.state} step failed (${code}${status})`);
       const booting = workspace.state === "creating" || workspace.state === "starting";
       if (booting) this.recordBootFailure(workspace.id, code, `${code}${status}`, now);
+      // Held at any attempt, not only the last: a wake deferred while open needs the fresh window after the close too.
+      const held = booting && this.held(workspace, [`${code}${status}`], now);
       // A late step cannot finalize a newer stop or a newly recorded VM.
       const fence = workspace.state === "stopping" ? { stopGeneration: workspace.stopGeneration }
         : workspace.state === "deleting" ? { expectedSandboxId: workspace.boatSandboxId } : {};
@@ -597,7 +599,7 @@ export class CloudV2Lifecycle {
         await this.deps.store.transition(workspace.id, [workspace.state], "failed", { errorCode: "sandbox_missing", revoke: true, ...fence });
       } else if ((code === "cloud_source_checkout_failed" || code === "github_access_required") && (workspace.state === "creating" || workspace.state === "starting")) {
         await this.deps.store.transition(workspace.id, [workspace.state], "failed", { errorCode: code });
-      } else if (workspace.attempts >= MAX_ATTEMPTS && !(booting && this.held(workspace, [`${code}${status}`], now))) {
+      } else if (workspace.attempts >= MAX_ATTEMPTS && !held) {
         // A restore that gives up keeps its checkpoint; Start tries again.
         const restore = workspace.state === "starting" && workspace.restorePending && !(CLOUD_V2_CHECKPOINT_ERRORS as readonly string[]).includes(code);
         await this.deps.store.transition(workspace.id, [workspace.state], "failed", { errorCode: restore ? "checkpoint_restore_failed" : code, ...fence });
@@ -651,9 +653,7 @@ export class CloudV2Lifecycle {
         if (workspace.preparing) await store.baseWaitOver?.(workspace.id);
         // From the create, or from the tick that saw its base live (this one, or the one kept in the row): never from
         // the base's own finish, which a lifecycle that was down or behind may see long after.
-        const bootFrom = workspace.preparing ? now
-          : Math.max(Date.parse(workspace.createdAt), workspace.baseReadyAt ? Date.parse(workspace.baseReadyAt) : 0);
-        if (this.bootExpired(workspace, bootFrom, now)) {
+        if (this.bootExpired(workspace, this.bootStart(workspace, now), now)) {
           await store.transition(workspace.id, ["creating"], "failed", { errorCode: "worker_boot_timeout" });
           return;
         }
@@ -1211,8 +1211,17 @@ export class CloudV2Lifecycle {
   private bootExpired(workspace: CloudV2LifecycleWorkspace, from: number, now: number): boolean {
     if (now - (this.breaker?.deadlineFrom(workspace.id, from) ?? from) <= BOOT_DEADLINE_MS) return false;
     if (this.held(workspace, [this.breaker?.lastKey(workspace.id), "worker_boot_timeout"], now, from)) return false;
+    // The miss that opens the breaker is held as well.
     this.recordBootFailure(workspace.id, "worker_boot_timeout", "worker_boot_timeout", now);
-    return true;
+    return !this.held(workspace, ["worker_boot_timeout"], now, from);
+  }
+
+  /** Where a boot's deadline, and so its hold, counts from: a wake's from its start; a create's from the create or the
+   * tick that saw its base live (base_ready_at), and not at all while that base is still preparing. */
+  private bootStart(workspace: CloudV2LifecycleWorkspace, now: number): number {
+    if (workspace.state !== "creating") return Date.parse(workspace.updatedAt);
+    return workspace.preparing ? now
+      : Math.max(Date.parse(workspace.createdAt), workspace.baseReadyAt ? Date.parse(workspace.baseReadyAt) : 0);
   }
 
   private recordBootFailure(workspaceId: string, code: string, key: string, now: number): void {
@@ -1224,7 +1233,7 @@ export class CloudV2Lifecycle {
 
   /** Kept creating or starting (retried as before) instead of failed, while an open breaker covers the failure. */
   private held(workspace: CloudV2LifecycleWorkspace, keys: readonly (string | undefined)[], now: number,
-    startedAt = Date.parse(workspace.state === "creating" ? workspace.createdAt : workspace.updatedAt)): boolean {
+    startedAt = this.bootStart(workspace, now)): boolean {
     const hold = this.breaker?.holds(workspace.id, keys, startedAt, now);
     if (hold?.first) this.deps.logger?.warn(`[cloud-v2] wake held by breaker (${hold.key}) workspace=${workspace.id.slice(0, 8)}`);
     return !!hold;

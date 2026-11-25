@@ -1986,13 +1986,57 @@ describe("a wake failure every workspace shares", () => {
     expect(f.logs.error.some(line => line.includes("wake breaker gave up"))).toBe(true);
   });
 
-  it("opens for wakes that miss their boot deadline everywhere, and holds the next one", async () => {
+  it("opens for wakes that miss their boot deadline everywhere, holding the one that opened it and the next", async () => {
     const late = new Date(NOW - 11 * 60_000).toISOString();
     const f = harness(ids.slice(0, 3).map(id => waking(id, { updatedAt: late })));
     await f.lifecycle.tick();
     expect(opened(f.logs)).toEqual([expect.stringContaining("worker_boot_timeout")]);
+    expect(failed(f, ids[0]!)).toHaveLength(1);
+    expect(failed(f, ids[1]!)).toHaveLength(1);
+    expect(failed(f, ids[2]!)).toEqual([]);
     f.claimed.splice(0, 3, waking(ids[3]!, { updatedAt: late }));
     await f.lifecycle.tick();
     expect(failed(f, ids[3]!)).toEqual([]);
+  });
+
+  it("gives a wake it deferred below its retries the fresh boot window after it closes", async () => {
+    const f = harness(ids.slice(0, 3).map(id => waking(id)));
+    await f.lifecycle.tick();
+    f.claimed.splice(0, 3, waking(ids[3]!, { attempts: 2 }));
+    await f.lifecycle.tick();
+    expect(f.store.defer).toHaveBeenLastCalledWith(ids[3], "starting", expect.any(Number), { failure: true });
+    vi.mocked(f.compute.hostPort).mockResolvedValue({ url: "https://fixture-41783.on.boat.dev", token: "synthetic-port-token" });
+    vi.mocked(f.store.wakeSucceededSince!).mockResolvedValue(true);
+    vi.mocked(f.compute.resume).mockClear();
+    f.at(60_000);
+    // Past its first deadline, which it missed while the breaker deferred it.
+    f.claimed.splice(0, 1, waking(ids[3]!, { attempts: 3, updatedAt: new Date(NOW - 11 * 60_000).toISOString() }));
+    await f.lifecycle.tick();
+    expect(failed(f, ids[3]!)).toEqual([]);
+    expect(f.compute.resume).toHaveBeenCalledWith(`bx_${ids[3]!.slice(0, 4)}`);
+  });
+
+  it("holds a create for two hours from its base's readiness, as its boot deadline counts", async () => {
+    const f = harness(ids.slice(0, 3).map(id => waking(id)));
+    await f.lifecycle.tick();
+    f.claimed.splice(0, 3, workspace("creating", { id: ids[3]!, boatSandboxId: "bx_held", attempts: 8,
+      createdAt: new Date(NOW - 3 * 60 * 60_000).toISOString(), baseReadyAt: new Date(NOW - 60_000).toISOString() }));
+    await f.lifecycle.tick();
+    expect(failed(f, ids[3]!)).toEqual([]);
+  });
+
+  it("retries a held create under its one key, so a refused create never becomes a second machine", async () => {
+    const f = harness(ids.slice(0, 3).map(id => workspace("creating", { id, boatSandboxId: null })));
+    vi.mocked(f.compute.create).mockImplementation(async () => { throw refused(); });
+    await f.lifecycle.tick();
+    expect(opened(f.logs)).toEqual([expect.stringContaining("provider_request_failed status=502")]);
+    vi.mocked(f.compute.create).mockClear();
+    for (const attempts of [8, 9]) {
+      f.claimed.splice(0, f.claimed.length, workspace("creating", { id: ids[3]!, boatSandboxId: null, attempts }));
+      await f.lifecycle.tick();
+    }
+    expect(failed(f, ids[3]!)).toEqual([]);
+    expect(vi.mocked(f.compute.create).mock.calls.map(([input]) => input.key)).toEqual([ids[3], ids[3]]);
+    expect(f.compute.fork).not.toHaveBeenCalled();
   });
 });
