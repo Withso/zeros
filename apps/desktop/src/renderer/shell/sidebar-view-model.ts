@@ -146,7 +146,8 @@ export function sidebarWorkspaceComparator(args: {
       const delta = Number(needsYou(b)) - Number(needsYou(a));
       if (delta) return delta;
     }
-    if (sort === "name") return -sign * label(a).localeCompare(label(b), undefined, { sensitivity: "base", numeric: true });
+    // Name reads A→Z by default; the direction flips it.
+    if (sort === "name") return sign * label(a).localeCompare(label(b), undefined, { sensitivity: "base", numeric: true });
     const at = (workspace: Workspace) => sort === "created" ? finite(workspace.createdAt) : workspaceUpdatedAt(workspace, activeAt(workspace));
     return sign * (at(b) - at(a));
   };

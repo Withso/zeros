@@ -3,6 +3,7 @@
 // when it was last updated. The status word never truncates at rest; PR marks
 // step from one mark per state, to one combined group, to one blue icon as the
 // row narrows, and Archive never covers this line, so hover moves nothing.
+import { Button } from "../shared/ui/primitives/button";
 import { useLayoutEffect, useRef, useState } from "react";
 import { Cloud, CloudOff, GitPullRequest, Laptop } from "lucide-react";
 import type { Workspace } from "../platform/git";
@@ -89,23 +90,23 @@ function openPull(pull: SidebarPullRequest) {
 function PrMark({ pulls, label, className, children }: { pulls: readonly SidebarPullRequest[]; label: string; className?: string; children: React.ReactNode }) {
   const stop = (event: React.SyntheticEvent) => event.stopPropagation();
   const cls = cn(
-    "pointer-events-auto inline-flex h-4 shrink-0 items-center gap-0.5 rounded-sm px-0.5 tabular-nums outline-none hover:bg-(--surface-border) focus-visible:inset-ring focus-visible:inset-ring-accent",
+    "pointer-events-auto h-4 shrink-0 gap-0.5 rounded-sm px-0.5 py-0 text-3xxs font-normal tabular-nums",
     className,
   );
   if (pulls.length === 1 && pulls[0]!.url) {
     return (
-      <button type="button" className={cls} aria-label={label} data-pr-mark
+      <Button type="button" variant="ghost" size="compact" className={cls} aria-label={label} data-pr-mark
         onClick={(event) => { stop(event); openPull(pulls[0]!); }} onKeyDown={stop} onPointerDown={stop}>
         {children}
-      </button>
+      </Button>
     );
   }
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
-        <button type="button" className={cls} aria-label={label} data-pr-mark onClick={stop} onKeyDown={stop} onPointerDown={stop}>
+        <Button type="button" variant="ghost" size="compact" className={cls} aria-label={label} data-pr-mark onClick={stop} onKeyDown={stop} onPointerDown={stop}>
           {children}
-        </button>
+        </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="start" className="w-56" onClick={stop}>
         <DropdownMenuLabel className="text-fg3 text-3xxs font-medium">Pull requests</DropdownMenuLabel>
@@ -136,7 +137,7 @@ export function SidebarPrMarks({ groups, layout }: { groups: readonly PrMarkGrou
   if (layout === "combined") {
     return (
       <PrMark pulls={all} label={`${total} pull requests`} className="gap-1">
-        <span className="inline-flex items-center gap-0.75">
+        <span className="inline-flex items-center gap-1">
           {groups.map((group) => (
             <GitPullRequest key={group.tone} strokeWidth={1.5} className={cn("size-3", PR_TONE_CLS[group.tone])} />
           ))}
