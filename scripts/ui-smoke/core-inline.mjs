@@ -2099,8 +2099,8 @@ export async function runDiffFilesSmoke({
     `${initialSearchSidebar?.background} vs ${initialSearchSidebar?.treeBackground}`,
   );
   check(
-    "Search sidebar starts with only its 36px search row",
-    initialSearchSidebar?.rowHeight === 36 &&
+    "Search sidebar starts with only its 40px search row",
+    initialSearchSidebar?.rowHeight === 40 &&
       initialSearchSidebar.rowBorderBottom === "1px" &&
       initialSearchSidebar.inputBorder === "0px" &&
       (await searchSidebar.locator("[data-item-path]").count()) === 0,

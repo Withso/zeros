@@ -65,9 +65,13 @@ export async function runDashboardSmoke({ page: originPage, check }) {
     });
     await expect(row("ws-atlanta").getByLabel("80 additions, 20 deletions", { exact: true })).toBeVisible();
     await page.evaluate(() => window.appSidebarReleaseChangeLines());
-    // The sidebar only receives +80 when the held count request completes.
-    // This observation proves the old response arrived, without a timing sleep.
-    await expect(page.locator('[data-workspace-id="ws-atlanta"]')).toContainText("+80");
+    // The sidebar only receives +80 when the held count request completes; the
+    // row carries its totals in its accessible name (the hover card shows
+    // them). This observation proves the old response arrived, without a
+    // timing sleep.
+    await expect(
+      page.locator('[data-workspace-id="ws-atlanta"]').getByRole("button", { name: /^Open workspace atlanta.*80 lines added/ }),
+    ).toHaveCount(1);
     await expect(row("ws-atlanta").getByLabel("80 additions, 20 deletions", { exact: true })).toBeVisible();
     await page.evaluate(() => window.appSidebarSetChangeLines("ws-atlanta", { additions: 12, deletions: 3 }));
     await expect(row("ws-atlanta").getByLabel("12 additions, 3 deletions", { exact: true })).toBeVisible();
