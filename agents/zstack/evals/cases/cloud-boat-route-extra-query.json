@@ -1,0 +1,9 @@
+{
+  "id": "cloud-boat-route-extra-query",
+  "kind": "replay",
+  "area": "control-plane",
+  "fixedBy": "pr:1299",
+  "symptom": "Every Alpha cloud wake ended failed with worker_boot_timeout after Boat began returning the worker route as ?_token=…&_generation=1; the parser accepted only _token and its code-less error was logged as provider_request_failed.",
+  "rule": "A provider reply parser requires the fields it uses and ignores additions it does not keep; its refusal carries a closed code of its own.",
+  "check": "pnpm --dir apps/control-plane exec vitest run src/cloud/boat.test.ts src/cloud/lifecycle.test.ts"
+}

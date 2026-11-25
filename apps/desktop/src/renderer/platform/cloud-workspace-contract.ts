@@ -74,6 +74,8 @@ export const CloudWorkspaceDocumentSchema = z.object({
     canManage: z.boolean(),
     canStart: z.boolean(),
     startUnavailableReason: z.string().nullable(),
+    /** A failed workspace that can still run: Start recovers it (stops its machine, starts it again). */
+    recoverable: z.literal(true).optional(),
   }),
   repository: z.object({
     forge: z.string(),

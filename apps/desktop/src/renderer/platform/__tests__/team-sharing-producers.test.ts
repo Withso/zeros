@@ -34,7 +34,7 @@ describe("the Team sharing opt-in follows the viewer's role in the document held
   const exercise = async (signal?: AbortSignal) => {
     await readCloudV2History(target, "chats.list", {});
     await connectCloudV2Workspace(target, { wake: true, ...(signal ? { signal } : {}) });
-    for (const action of ["start", "stop", "restart", "archive", "delete"] as const) await changeCloudV2Workspace(target, action).catch(() => {});
+    for (const action of ["start", "stop", "restart", "recover", "archive", "delete"] as const) await changeCloudV2Workspace(target, action).catch(() => {});
     await editCloudV2Chat(target, "chat", { title: "T" });
     await pingCloudV2WorkspaceActivity(target);
     const prompts = cloudPromptApi(target, "chat");
@@ -51,7 +51,7 @@ describe("the Team sharing opt-in follows the viewer's role in the document held
     for (const held of ["creator", undefined]) {
       calls = []; role = held;
       await exercise();
-      expect(paths()).toEqual(["/history", "/connect", "/start", "/stop", "/restart", "/archive", "", "/chats/chat/edit", "/activity", "/prompts", "/prompts", "/prompts/stop"]);
+      expect(paths()).toEqual(["/history", "/connect", "/start", "/stop", "/restart", "/recover", "/archive", "", "/chats/chat/edit", "/activity", "/prompts", "/prompts", "/prompts/stop"]);
       expect(headers()).toEqual(calls.map(() => null));
     }
   });
@@ -62,7 +62,7 @@ describe("the Team sharing opt-in follows the viewer's role in the document held
       const signal = new AbortController().signal;
       await exercise(signal);
       expect(headers()).toEqual(calls.map(() => "1"));
-      expect(calls[9]!.headers.get("x-zeros-device-id")).toBe("7f1f6c1e-3b0a-4f7e-9d43-8a0b2b9c6d11");
+      expect(calls[10]!.headers.get("x-zeros-device-id")).toBe("7f1f6c1e-3b0a-4f7e-9d43-8a0b2b9c6d11");
       expect(calls[1]!.signal).not.toBeNull();
     }
   });

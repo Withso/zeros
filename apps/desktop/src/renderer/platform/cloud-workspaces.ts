@@ -217,7 +217,7 @@ export async function getCloudWorkspaceDocumentByNumber(
 
 export async function changeCloudWorkspaceLifecycle(
   target: CloudWorkspaceTarget,
-  operation: "wake" | "stop" | "restart" | "archive" | "delete",
+  operation: "wake" | "stop" | "restart" | "recover" | "archive" | "delete",
   _idempotencyKey: string,
   _reason?: "interaction",
 ): Promise<CloudWorkspaceDocument> {

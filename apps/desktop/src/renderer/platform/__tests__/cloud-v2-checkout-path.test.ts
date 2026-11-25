@@ -26,6 +26,32 @@ describe("cloud v2 checkout path", () => {
     expect(cloudV2Document(workspace).capabilities).toMatchObject({ canStart: false, startUnavailableReason: "This workspace failed. Create a new one." });
   });
 
+  it("lets Start recover a workspace the server marks recoverable, and keeps Delete-only for a create that never ran", () => {
+    const failed = (errorCode: string, recoverable?: true) => ({
+      id: "22222222-2222-4222-8222-222222222222", organizationId: "11111111-1111-4111-8111-111111111111",
+      creatorUserId: "33333333-3333-4333-8333-333333333333", name: "w", repository: "Withso/zeros",
+      branch: "zeros/w", baseBranch: "main", state: "failed", errorCode, archivedAt: null,
+      createdAt: "2026-10-22T00:00:00Z", updatedAt: "2026-10-22T00:00:00Z", version: 2,
+      capabilities: { design: false, browser: false, simulators: false, terminal: true, files: true, git: true, agents: ["codex"] },
+      ...(recoverable ? { recoverable } : {}),
+    } satisfies CloudV2Workspace);
+    const woke = cloudV2Document(failed("worker_boot_timeout", true));
+    expect(woke.capabilities).toMatchObject({ canStart: true, startUnavailableReason: null, recoverable: true });
+    expect(woke.error).toEqual({ code: "worker_boot_timeout", message: "The workspace computer did not start in time. Start it to try again." });
+    const route = cloudV2Document(failed("provider_route_invalid", true));
+    expect(route.capabilities).toMatchObject({ canStart: true });
+    expect(route.error?.message).toBe("This workspace couldn't start. Start it to try again.");
+    // Without the server's mark (a create that timed out, or an older server), Delete stays the way forward.
+    const created = cloudV2Document(failed("worker_boot_timeout"));
+    expect(created.capabilities).toMatchObject({ canStart: false, startUnavailableReason: "This workspace failed. Create a new one." });
+    expect(created.capabilities).not.toHaveProperty("recoverable");
+    expect(created.error?.message).toBe("The workspace computer did not start in time. Delete it and create a new one.");
+    // A malformed mark is ignored, never read as consent to start.
+    expect(cloudV2Document({ ...failed("worker_boot_timeout"), recoverable: "yes" } as CloudV2Workspace).capabilities.canStart).toBe(false);
+    // A restore failure the desktop already retries keeps its own copy and its wake, unless the server marks it.
+    expect(cloudV2Document(failed("checkpoint_restore_failed")).capabilities).not.toHaveProperty("recoverable");
+  });
+
   it("lets Start retry a failed checkpoint restore, but not a damaged checkpoint", () => {
     const failed = (errorCode: string) => ({
       id: "22222222-2222-4222-8222-222222222222", organizationId: "11111111-1111-4111-8111-111111111111",
