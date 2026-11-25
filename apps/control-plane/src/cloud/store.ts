@@ -40,7 +40,7 @@ import { RUNTIME_HANDOFF_SESSION } from "./runtime-handoff-store.js";
 import { notifyCloudV2WorkerBoot, notifyCloudV2WorkerReady } from "./worker-ready.js";
 import type { CloudV2SetupStatus } from "./setup-status-contract.js";
 import { insertWorkspaceSubmodules, type WorkspaceSubmoduleRow } from "./workspace-submodules.js";
-import { cloudV2RecoverableFailure } from "./failure-retry.js";
+import { cloudV2RecoverableFailure, cloudV2RecoverableFailureSql } from "./failure-retry.js";
 
 export type CloudV2WorkspaceState =
   | "creating" | "running" | "stopping" | "stopped" | "starting" | "deleting" | "deleted" | "failed";
@@ -278,6 +278,8 @@ export type CloudV2WorkspaceRow = {
   checkpoint_partial?: boolean | null;
   submodules_unrestored?: unknown;
   checkpoint_saved_at?: Date | null; checkpoint_confirmed_at?: Date | null;
+  /** When it last entered running (0273). */
+  running_at?: Date | null;
 };
 type Row = CloudV2WorkspaceRow;
 
@@ -287,7 +289,7 @@ const WORKSPACE_COLUMNS_SQL = sql`id, org_id, creator_user_id, name, number, tit
   lost_work_restored, lost_work_since, keep_set_at, archive_reason, stopped_at, machine_stopped_at, machine_data_expired_at,
   archive_wake_done_at, checkpoint_object, retention_started_at, backup_probe, backup_probe_generation, stop_generation,
   checkpoint_stop_generation, changed_since_stop_generation, machine_gone_at, waiting_for_base_at, stop_archive_failed_generation, checkpoint_partial,
-  submodules_unrestored, checkpoint_saved_at, checkpoint_confirmed_at`;
+  submodules_unrestored, checkpoint_saved_at, checkpoint_confirmed_at, running_at`;
 const COLUMNS = WORKSPACE_COLUMNS_SQL.text;
 export const CLOUD_V2_WORKSPACE_COLUMNS = COLUMNS.split(",").map(value => value.trim());
 
@@ -550,6 +552,20 @@ const LIVE_SESSION = `s.provider = 'workos' AND s.user_id = w.creator_user_id
     AND i.provider = s.provider AND i.provider_sub = s.provider_sub AND i.status = 'active')`;
 
 const notFound = () => new HttpError(404, "not_found", "Cloud workspace not found");
+
+export type CloudV2TransitionPatch = { boatSandboxId?: string | null; expectedSandboxId?: string | null; errorCode?: string | null; stopGeneration?: string;
+  revoke?: boolean; unarchived?: boolean;
+  /** Retention: Boat's own stoppedAt, read once the machine is archived. */
+  stoppedAt?: Date;
+  /** A failed snapshot attempt was reported during this stop: its archive may lack the machine's last writes. */
+  archiveFailed?: boolean };
+
+/** A failed workspace the auto-heal may stop, as read: `fence` is its updated_at, `ran` whether it reached running after
+ * its last stop. */
+export type CloudV2HealCandidate = { id: string; stopGeneration: string; fence: string; ran: boolean; boatSandboxId: string | null; restorePending: boolean;
+  /** A Stop that failed before Boat confirmed it, with turns of the run before it still open: only that stop's completion
+   * retires them (lifecycleIntent's recovery does the same). */
+  interruptedStop: boolean };
 
 /** `recover`: only a recoverable failed workspace (failure-retry.ts) may start (store.recoverFailedWorkspace). */
 type LifecycleOptions = { recover?: boolean };
@@ -1028,12 +1044,12 @@ export class CloudV2Store {
    * late step can never revoke a worker that a newer wake started.
    * `expectedSandboxId: null` fences an observed empty allocation slot. */
   async transition(id: string, from: readonly CloudV2WorkspaceState[], to: CloudV2WorkspaceState,
-    patch: { boatSandboxId?: string | null; expectedSandboxId?: string | null; errorCode?: string | null; stopGeneration?: string; revoke?: boolean; unarchived?: boolean;
-      /** Retention: Boat's own stoppedAt, read once the machine is archived. */
-      stoppedAt?: Date;
-      /** A failed snapshot attempt was reported during this stop: its archive may lack the machine's last writes. */
-      archiveFailed?: boolean } = {}): Promise<CloudV2Workspace | null> {
-    return withSystemTx(this.pool, async tx => {
+    patch: CloudV2TransitionPatch = {}): Promise<CloudV2Workspace | null> {
+    return withSystemTx(this.pool, tx => this.transitionIn(tx, id, from, to, patch));
+  }
+
+  private async transitionIn(tx: Tx, id: string, from: readonly CloudV2WorkspaceState[], to: CloudV2WorkspaceState,
+    patch: CloudV2TransitionPatch): Promise<CloudV2Workspace | null> {
     if (to === "starting") {
       await tx.query("SELECT id FROM cloud_v2_workspaces WHERE id=$1 FOR UPDATE", [id]);
       await assertNoExecutionTransition(tx, id);
@@ -1047,6 +1063,7 @@ export class CloudV2Store {
          worker_token_hash = CASE WHEN $3 IN ('starting','deleted') THEN NULL ELSE worker_token_hash END,
          worker_boot_id = CASE WHEN $3 IN ('starting','deleted') THEN NULL ELSE worker_boot_id END,
          active_at = CASE WHEN $3 = 'running' THEN clock_timestamp() ELSE active_at END,
+         running_at = CASE WHEN $3 = 'running' AND state <> 'running' THEN clock_timestamp() ELSE running_at END,
          archived_at = CASE WHEN $3 = 'starting' THEN NULL ELSE archived_at END,
          stop_generation = stop_generation + CASE WHEN $3 = 'stopping' AND state <> 'stopping' THEN 1 ELSE 0 END,
          checkpoint_object = CASE WHEN $3 = 'deleted' THEN NULL ELSE checkpoint_object END,
@@ -1083,6 +1100,56 @@ export class CloudV2Store {
       if (to === "stopped" && patch.stopGeneration) await confirmExecutionStop(tx, id, patch.stopGeneration);
     }
     return workspace(rows[0]);
+  }
+
+  /** Recoverable failed workspaces (failure-retry.ts) failed before `before` that nothing else holds: no maintenance
+   * mark, live recovery or execution transition. Oldest first. */
+  async healCandidates(before: Date, limit: number): Promise<CloudV2HealCandidate[]> {
+    const { rows } = await withSystemTx(this.pool, tx => tx.query<LifecycleRow & { ran: boolean; fence: Date; interrupted_stop: boolean }>(
+      `SELECT ${LIFECYCLE_COLUMNS}, date_trunc('milliseconds', updated_at) AS fence,
+         running_at IS NOT NULL AND (stopped_at IS NULL OR running_at > stopped_at) AS ran,
+         EXISTS (SELECT 1 FROM cloud_v2_execution_contexts e WHERE e.workspace_id=w.id AND e.state<>'retired'
+           AND e.stop_generation<w.stop_generation) AS interrupted_stop
+       FROM cloud_v2_workspaces w WHERE ${cloudV2RecoverableFailureSql("w")} AND updated_at < $1
+         AND maintenance_attempt IS NULL AND recovery_attempt_id IS NULL AND execution_transition_id IS NULL
+       ORDER BY updated_at, id LIMIT $2`, [before, limit]));
+    return rows.filter(row => cloudV2RecoverableFailure(row)).map(row => ({ id: row.id, stopGeneration: row.stop_generation,
+      fence: row.fence.toISOString(), ran: row.ran, boatSandboxId: row.boat_sandbox_id, restorePending: row.restore_pending,
+      interruptedStop: row.interrupted_stop }));
+  }
+
+  /** Whether the candidate is still exactly as it was read: failed, recoverable, unclaimed, at the same generation and
+   * untouched since (any start, stop or new failure moves updated_at). */
+  async healDue(candidate: CloudV2HealCandidate): Promise<boolean> {
+    return withSystemTx(this.pool, async tx => !!await this.healRow(tx, candidate, false));
+  }
+
+  private async healRow(tx: Tx, candidate: CloudV2HealCandidate, lock: boolean): Promise<LifecycleRow | null> {
+    const row = (await tx.query<LifecycleRow>(`SELECT ${LIFECYCLE_COLUMNS} FROM cloud_v2_workspaces w WHERE id=$1 AND state='failed' AND stop_generation=$2::bigint
+      AND date_trunc('milliseconds', updated_at)=$3::timestamptz AND maintenance_attempt IS NULL AND recovery_attempt_id IS NULL
+      AND execution_transition_id IS NULL${lock ? " FOR UPDATE" : ""}`, [candidate.id, candidate.stopGeneration, candidate.fence])).rows[0];
+    return row && cloudV2RecoverableFailure(row) ? row : null;
+  }
+
+  /** Auto-heal's one write, fenced on the candidate as read. `stopping` is the ordinary stop of a run (a new
+   * generation), or for an interrupted stop that stop again in its own generation; `stopped` keeps the generation, for a
+   * wake that never ran or a machine already archived, so what that generation recorded (scrub, checkpoint, backup
+   * probe) still applies. The first error is cleared either way. */
+  async healFailed(candidate: CloudV2HealCandidate, to: "stopping" | "stopped",
+    stop: { stoppedAt?: Date; archiveFailed?: boolean; workerOffUnverified?: boolean } = {}): Promise<boolean> {
+    return withSystemTx(this.pool, async tx => {
+      if (!await this.healRow(tx, candidate, true)) return false;
+      const moved = to === "stopping" && candidate.interruptedStop
+        ? (await tx.query(`UPDATE cloud_v2_workspaces SET state='stopping', error_code=NULL, restart_stop_generation=NULL, attempts=0,
+            next_attempt_at=NULL, updated_at=clock_timestamp() WHERE id=$1 AND state='failed' AND stop_generation=$2::bigint`,
+            [candidate.id, candidate.stopGeneration])).rowCount === 1
+        : to === "stopping"
+        ? await this.transitionIn(tx, candidate.id, ["failed"], "stopping", { errorCode: null, stopGeneration: candidate.stopGeneration })
+        : await this.transitionIn(tx, candidate.id, ["failed"], "stopped", { errorCode: null, stopGeneration: candidate.stopGeneration, revoke: true,
+          ...(stop.stoppedAt ? { stoppedAt: stop.stoppedAt } : {}), ...(stop.archiveFailed ? { archiveFailed: true } : {}) });
+      if (moved && stop.workerOffUnverified)
+        await tx.query("UPDATE cloud_v2_workspaces SET worker_off_unverified_at=coalesce(worker_off_unverified_at, clock_timestamp()) WHERE id=$1", [candidate.id]);
+      return !!moved;
     });
   }
 
@@ -1314,6 +1381,7 @@ export class CloudV2Store {
          -- A boot that reaches running supersedes an earlier boot's failure; a running boot keeps its own condition.
          error_code=CASE WHEN prior.environment_ready AND prior.prior_state<>'running' THEN NULL ELSE error_code END,
          active_at=CASE WHEN state='running' OR NOT prior.environment_ready THEN active_at ELSE clock_timestamp() END,
+         running_at=CASE WHEN state='running' OR NOT prior.environment_ready THEN running_at ELSE clock_timestamp() END,
          updated_at=CASE WHEN state='running' OR (state='starting' AND NOT prior.environment_ready) THEN updated_at ELSE clock_timestamp() END
        FROM prior WHERE w.id=prior.prior_id
        RETURNING ${COLUMNS.replace(/\b(\w+)\b/g, "w.$1")}, execution_mode, access_epoch::text, login_revision::text, prior.prior_state,

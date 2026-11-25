@@ -55,6 +55,9 @@ const MAX_ATTEMPTS = 8;
 const LEASE_RENEW_MS = 12 * 60 * 60_000;
 const STAGE_ATTEMPTS = 3, STAGE_RETRY_MS = 20_000;
 const MAINTENANCE_SCAN_MS = 60_000;
+/** A failure this old is healed: past any wake or recovery still deciding about it. */
+export const CLOUD_V2_HEAL_AFTER_MS = 10 * 60_000;
+const HEAL_BATCH = 4;
 /** An idle control plane sweeps this often; lifecycle notifications and due
  * deferrals wake it sooner. */
 const IDLE_SWEEP_MS = 60_000;
@@ -179,7 +182,7 @@ export type CloudV2LifecycleDeps = {
     | "startRetentionClocks" | "archiveInactive" | "archiveDepartedPrivate" | "restoreReturningPrivate" | "archiveForSystem" | "clearArchiveScrub"
     | "claimBackupRemovals" | "pendingBackupRemovals" | "finishBackupRemoval" | "sweepDepartedProjects" | "deleteDepartedProjects" | "missedWakes"
     | "accountCheckpointPrefixes" | "retireDisconnectedCopies" | "clearStaleMaintenance" | "maintenanceBacklog" | "keepLostMachine">
-    & Partial<Pick<CloudV2Store, "workspaceBuildWait" | "rebindToBase" | "baseWaitOver" | "deferredCreateChange">>;
+    & Partial<Pick<CloudV2Store, "workspaceBuildWait" | "rebindToBase" | "baseWaitOver" | "deferredCreateChange" | "healCandidates" | "healDue" | "healFailed">>;
   /** Optional for older compositions; the shipped store always provides it. */
   prompts?: CloudV2Store["prompts"];
   pruneEnvironments?: () => Promise<void>;
@@ -234,6 +237,9 @@ export type CloudV2LifecycleDeps = {
   executionActivations?: { tick(): Promise<void> };
   /** Retries a stop's failed checkpoint on a fork of the stopped VM. */
   checkpointRetry?: boolean;
+  /** Moves recoverable failed workspaces (failure-retry.ts) to stopped without starting any machine, so the
+   * person's next Start is an ordinary one. Needs the store's heal methods. */
+  healFailed?: boolean;
   /** CLOUD_V2_RETENTION_ENABLED, with checkpoints configured: a stop probes instead of
    * uploading, and a smaller backup is taken later on a fork. Off, nothing here changes. */
   retention?: boolean;
@@ -362,6 +368,7 @@ export class CloudV2Lifecycle {
       await this.retrying;
       await this.maintaining;
       await this.archiving;
+      await this.healing;
       await this.building;
       await this.copying;
       await this.cleaning;
@@ -407,13 +414,13 @@ export class CloudV2Lifecycle {
   /** Work in progress keeps the fast cadence; otherwise the next due deferral,
    * bounded by the idle sweep, decides. */
   private async nextSweep(running: ReadonlySet<Promise<void> | null>): Promise<number> {
-    const background = [this.building, this.copying, this.cleaning, this.retrying, this.renewing, this.maintaining, this.archiving].filter(task => task !== null && !running.has(task));
+    const background = [this.building, this.copying, this.cleaning, this.retrying, this.renewing, this.maintaining, this.archiving, this.healing].filter(task => task !== null && !running.has(task));
     if (background.length) {
       let timer: NodeJS.Timeout | undefined;
       await Promise.race([Promise.allSettled(background), new Promise(resolve => { timer = setTimeout(resolve, BACKGROUND_SETTLE_MS); })]);
       clearTimeout(timer);
     }
-    if (this.inFlight.size || this.building || this.copying || this.cleaning || this.retrying || this.renewing || this.maintaining || this.archiving) return this.intervalMs;
+    if (this.inFlight.size || this.building || this.copying || this.cleaning || this.retrying || this.renewing || this.maintaining || this.archiving || this.healing) return this.intervalMs;
     const due = await this.deps.store.nextLifecycleDue();
     return due === null ? IDLE_SWEEP_MS : Math.min(IDLE_SWEEP_MS, Math.max(this.intervalMs, due));
   }
@@ -433,6 +440,8 @@ export class CloudV2Lifecycle {
   private nextRetryScan = -Infinity;
   private lastProviderStopScan = -Infinity;
   private providerStopScan: Promise<void> | null = null;
+  private healing: Promise<void> | null = null;
+  private nextHealScan = -Infinity;
 
   async tick(): Promise<void> {
     await this.poll();
@@ -440,6 +449,7 @@ export class CloudV2Lifecycle {
     await this.retrying;
     await this.maintaining;
     await this.archiving;
+    await this.healing;
   }
 
   private poll(): Promise<void> {
@@ -509,6 +519,13 @@ export class CloudV2Lifecycle {
         .then(() => this.reportBacklog(now))
         .catch(error => this.deps.logger?.warn(`[cloud-v2] maintenance wake step failed (${errorCode(error)})`))
         .finally(() => { this.maintaining = null; });
+    }
+    // Outside the slots, one workspace at a time: a heal waits for Boat to archive a machine, and nobody waits for it.
+    if (this.deps.healFailed && !this.healing && now >= this.nextHealScan) {
+      this.nextHealScan = now + MAINTENANCE_SCAN_MS;
+      this.healing = this.healFailedWorkspaces(now)
+        .catch(error => this.deps.logger?.warn(`[cloud-v2] failed workspace heal scan failed (${errorCode(error)})`))
+        .finally(() => { this.healing = null; });
     }
     // Retention S3, hourly and outside the slots: a departed member's private workspaces (whatever the
     // switch), then the 30-day clocks and the automatic archive. Nothing here touches a machine; a running
@@ -1176,6 +1193,60 @@ export class CloudV2Lifecycle {
     await this.deps.store.recordStopProbe(workspace.id, workspace.stopGeneration, probe, workerOff)
       .catch(error => this.deps.logger?.warn(`[cloud-v2] stop probe not recorded (${errorCode(error)})`));
     return false;
+  }
+
+  /** Never creates, forks or resumes a machine: each is a Boat start. A Stop that failed with turns open is finished in
+   * its own generation. A generation that ran gets the ordinary stop (a new generation, with its probe or checkpoint)
+   * whether its machine is up, archived or gone: its disk may hold work the generation's backup does not cover. A wake
+   * that never ran ends stopped in the same generation; an up machine has its worker switched off and is stopped first. */
+  private async healFailedWorkspaces(now: number): Promise<void> {
+    const { store, compute } = this.deps;
+    if (!store.healCandidates || !store.healDue || !store.healFailed) return;
+    for (const candidate of await store.healCandidates(new Date(now - CLOUD_V2_HEAL_AFTER_MS), HEAL_BATCH)) {
+      // A shutdown's drain is short and archive confirmation is not: stopping a machine its workspace no longer
+      // records would be left to the next scan, so none starts once shutdown has begun.
+      if (this.stopped) return;
+      try {
+        // Its own stop, finished by the ordinary stopping step, retires the run's open turns. A pending restore with no
+        // machine has nothing that step could stop without allocating one; the direct stop below retires them too.
+        if (candidate.interruptedStop && (candidate.boatSandboxId || !candidate.restorePending)) {
+          if (await store.healFailed(candidate, "stopping")) this.deps.logger?.warn(`[cloud-v2] failed workspace healed (stop finished) workspace=${candidate.id.slice(0, 8)}`);
+          continue;
+        }
+        if (candidate.ran && !candidate.restorePending) {
+          if (await store.healFailed(candidate, "stopping")) this.deps.logger?.warn(`[cloud-v2] failed workspace healed (stopping) workspace=${candidate.id.slice(0, 8)}`);
+          continue;
+        }
+        let state: string | null = null, archivedAt: Date | null = null;
+        if (candidate.boatSandboxId) {
+          try { ({ state, stoppedAt: archivedAt = null } = await compute.inspect(candidate.boatSandboxId)); }
+          catch (error) { if (!sandboxLost(error)) throw error; }
+        }
+        const up = state === "running" || state === "idle";
+        // Boat may answer a deleted machine's record instead of a 404: gone, as either way.
+        if (state === "deleted") state = null;
+        // Starting, stopping or resuming on Boat's side: looked at again on a later scan.
+        if (state !== null && !up && state !== "archived") continue;
+        // Retention's 14-day clock counts from Boat's own stop.
+        let stop: { stoppedAt?: Date; archiveFailed?: boolean; workerOffUnverified?: boolean } = archivedAt ? { stoppedAt: archivedAt } : {};
+        if (up) {
+          if (this.stopped) return;
+          // Re-read before touching the machine: a Start since the scan owns it now.
+          if (!await store.healDue(candidate)) continue;
+          if (this.stopped) return;
+          const workerOff = await this.switchWorkerOff(candidate.boatSandboxId!);
+          if (!await store.healDue(candidate)) continue;
+          if (this.stopped) return;
+          const stopped = await stopKeepingWrites(compute, candidate.boatSandboxId!, { sleep: ms => this.pause(ms), reads: STOP_SETTLE_READS,
+            archiveReads: ARCHIVE_CONFIRM_READS, archiveIntervalMs: ARCHIVE_CONFIRM_MS });
+          stop = { ...(stopped.stoppedAt ? { stoppedAt: stopped.stoppedAt } : {}), ...(archiveSuspect(stopped) ? { archiveFailed: true } : {}),
+            ...(workerOff ? {} : { workerOffUnverified: true }) };
+        }
+        if (await store.healFailed(candidate, "stopped", stop)) this.deps.logger?.warn(`[cloud-v2] failed workspace healed (stopped) workspace=${candidate.id.slice(0, 8)}`);
+      } catch (error) {
+        this.deps.logger?.warn(`[cloud-v2] failed workspace heal failed (${errorCode(error)}) workspace=${candidate.id.slice(0, 8)}`);
+      }
+    }
   }
 
   /** Stops and disables the worker service, then checks both took (boat-fake.ts, "worker unit stays

@@ -15,6 +15,7 @@ export async function legacyEnvironmentHello(pool: pg.Pool, token: string, bootI
          worker_history_digest=CASE WHEN worker_boot_id=$2 THEN worker_history_digest ELSE NULL END,
          worker_boot_id=$2, state='running', attempts=0, next_attempt_at=NULL,
          active_at=CASE WHEN state='running' THEN active_at ELSE clock_timestamp() END,
+         running_at=CASE WHEN state='running' THEN running_at ELSE clock_timestamp() END,
          updated_at=CASE WHEN state='running' THEN updated_at ELSE clock_timestamp() END
        FROM prior WHERE w.id=prior.prior_id
        RETURNING ${COLUMNS.replace(/\b(\w+)\b/g, "w.$1")}, access_epoch::text, login_revision::text, prior.prior_state,

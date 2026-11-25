@@ -1847,6 +1847,189 @@ d("cloud v2 retention", () => {
         expect(await columns("archive_scrub")).toEqual({ archive_scrub: "clean" });
       });
 
+      describe("auto-heal of a failed workspace", () => {
+        const heal = (extra: Partial<CloudV2LifecycleDeps> = {}) => lifecycle({ healFailed: true, ...extra }).tick();
+        /** Creates, forks and resumes since `from`: each is a Boat start, and a heal makes none. */
+        const starts = (from: number) => boat.calls.slice(from).filter(call => ["create", "fork", "resume"].includes(call.op));
+        const aged = (minutes = 11) => pool.query("UPDATE cloud_v2_workspaces SET updated_at=now() - make_interval(mins => $2) WHERE id=$1", [id, minutes]);
+        const scrubbed = async () => {
+          boat.write(vm, ENV, "TOKEN=the person's own edit");
+          seeded.set(ENV, "TOKEN=from the server");
+          boat.write(vm, "/home/user/.claude/.credentials.json", "{}");
+          boat.write(vm, `${path("app")}/UNPUSHED`, "work");
+          await stop();
+          await earlier(CLOUD_V2_BACKUP_DELAY_MS + 60_000);
+          await lifecycle().tick();
+          await archive();
+          await sleepFor(10.6);
+          await lifecycle().tick();
+          expect(await columns("archive_scrub")).toEqual({ archive_scrub: "backup" });
+        };
+        /** An open of the stopped workspace that passes its boot deadline; with `up`, Boat had resumed its machine and a
+         * worker was started. It ran before its last stop, as every workspace that reached running has. */
+        const failedOpen = async (up: boolean) => {
+          await store.requestLifecycle(id, user, "start");
+          await aged();
+          await lifecycle().tick();
+          expect(await columns("state, error_code")).toEqual({ state: "failed", error_code: "worker_boot_timeout" });
+          if (up) { await boat.resume(vm); boat.machine(vm)!.worker = { enabled: true, active: true }; }
+          await pool.query("UPDATE cloud_v2_workspaces SET running_at=stopped_at - interval '1 hour' WHERE id=$1", [id]);
+          await aged();
+        };
+
+        it("stops a machine a failed open left up, in the same generation, so a later Start still puts scrubbed files back", async () => {
+          await scrubbed();
+          await failedOpen(true);
+          const generation = (await columns("stop_generation::text AS g")).g, from = boat.calls.length;
+          await heal();
+          expect(starts(from)).toEqual([]);
+          expect(boat.machine(vm)!.state).toBe("archived");
+          expect(boat.machine(vm)!.worker).toEqual({ enabled: false, active: false });
+          expect(await columns("state, error_code, archive_scrub, stop_generation::text AS g, worker_off_unverified_at"))
+            .toEqual({ state: "stopped", error_code: null, archive_scrub: "backup", g: generation, worker_off_unverified_at: null });
+          await store.requestLifecycle(id, user, "start");
+          await lifecycle().tick();
+          expect(boat.machine(vm)!.files.get(ENV)).toBe("TOKEN=the person's own edit");
+          const commands = boat.commands.filter(command => command.machineId === vm).map(command => command.command);
+          const restoredAt = commands.findLastIndex(command => command.includes("zeros-environment-restored"));
+          const tokenAt = commands.findLastIndex(command => command.includes("worker-token") && !command.includes("zeros-archive-scrub"));
+          expect(restoredAt).toBeGreaterThanOrEqual(0);
+          expect(tokenAt).toBeGreaterThan(restoredAt);
+          expect(await columns("archive_scrub, lost_work_since")).toEqual({ archive_scrub: "clean", lost_work_since: null });
+        });
+
+        it("leaves a machine Boat already archived untouched and only records the stop", async () => {
+          await scrubbed();
+          await failedOpen(false);
+          const generation = (await columns("stop_generation::text AS g")).g, from = boat.calls.length;
+          await heal();
+          expect(boat.calls.slice(from).map(call => call.op)).toEqual(["inspect"]);
+          expect(await columns("state, error_code, archive_scrub, stop_generation::text AS g"))
+            .toEqual({ state: "stopped", error_code: null, archive_scrub: "backup", g: generation });
+          expect((await columns("stopped_at")).stopped_at.getTime()).toBe(boat.machine(vm)!.stoppedAt);
+        });
+
+        it("treats a machine Boat reports deleted as gone, and stops the failed open in place", async () => {
+          await scrubbed();
+          await failedOpen(false);
+          // Boat can answer a deleted machine's record rather than a 404.
+          const compute = new Proxy(boat, { get(target, key) {
+            if (key === "inspect") return async () => ({ name: "zeros-alpha-ws", state: "deleted" });
+            const value = Reflect.get(target, key);
+            return typeof value === "function" ? value.bind(target) : value;
+          } });
+          const generation = (await columns("stop_generation::text AS g")).g, from = boat.calls.length;
+          await heal({ compute });
+          expect(starts(from)).toEqual([]);
+          expect(await columns("state, error_code, stop_generation::text AS g")).toEqual({ state: "stopped", error_code: null, g: generation });
+        });
+
+        it("gives a run that failed while up the ordinary stop, with its backup probe, in a new generation", async () => {
+          boat.write(vm, `${path("api")}/UNPUSHED`, "api work");
+          await pool.query("UPDATE cloud_v2_workspaces SET state='failed', error_code='live_connection_unavailable', running_at=now() - interval '1 hour' WHERE id=$1", [id]);
+          await aged();
+          const generation = BigInt((await columns("stop_generation::text AS g")).g), from = boat.calls.length;
+          await heal();
+          expect(await columns("state, error_code, stop_generation::text AS g")).toEqual({ state: "stopping", error_code: null, g: String(generation + 1n) });
+          await lifecycle().tick();
+          expect(starts(from)).toEqual([]);
+          expect(await columns("state, backup_probe, backup_probe_generation::text AS probed"))
+            .toEqual({ state: "stopped", backup_probe: "dirty", probed: String(generation + 1n) });
+          expect(boat.machine(vm)!.state).toBe("archived");
+          expect(boat.machine(vm)!.worker).toEqual({ enabled: false, active: false });
+        });
+
+        it("gives a run whose machine Boat already archived the ordinary stop too, so the run's work is not taken as backed up", async () => {
+          boat.write(vm, `${path("api")}/UNPUSHED`, "api work");
+          await pool.query("UPDATE cloud_v2_workspaces SET state='failed', error_code='live_connection_unavailable', running_at=now() - interval '1 hour' WHERE id=$1", [id]);
+          await boat.stop(vm);
+          await aged();
+          const generation = BigInt((await columns("stop_generation::text AS g")).g), from = boat.calls.length;
+          await heal();
+          expect(await columns("state, error_code, stop_generation::text AS g")).toEqual({ state: "stopping", error_code: null, g: String(generation + 1n) });
+          await lifecycle().tick();
+          expect(starts(from)).toEqual([]);
+          expect(await columns("state, backup_probe, backup_probe_generation::text AS probed"))
+            .toEqual({ state: "stopped", backup_probe: "unknown", probed: String(generation + 1n) });
+          // Its probe could not look at an archived disk, so the run's work is backed up from it later, as after any stop.
+          await earlier(CLOUD_V2_BACKUP_DELAY_MS + 60_000);
+          await lifecycle().tick();
+          const saved = await columns("checkpoint_object, checkpoint_stop_generation::text AS saved");
+          expect(saved.saved).toBe(String(generation + 1n));
+          expect([...archives.get(saved.checkpoint_object)!.keys()]).toContain(`${path("api")}/UNPUSHED`);
+        });
+
+        it("waits out a recent failure and never touches one trying again cannot fix", async () => {
+          await stop();
+          await failedOpen(true);
+          await aged(5);
+          const from = boat.calls.length;
+          await heal();
+          expect(await columns("state, error_code")).toEqual({ state: "failed", error_code: "worker_boot_timeout" });
+          await pool.query("UPDATE cloud_v2_workspaces SET error_code='sandbox_missing' WHERE id=$1", [id]);
+          await aged();
+          await heal();
+          expect(await columns("state, error_code")).toEqual({ state: "failed", error_code: "sandbox_missing" });
+          expect(boat.calls.slice(from)).toEqual([]);
+          expect(boat.machine(vm)!.state).toBe("running");
+        });
+
+        it("touches no machine once shutdown has begun, leaving the workspace for the next scan", async () => {
+          await stop();
+          await failedOpen(true);
+          let shutdown: Promise<void> | undefined, close: (() => Promise<void>) | undefined;
+          const compute = new Proxy(boat, { get(target, key) {
+            if (key === "inspect") return async (sandboxId: string) => { shutdown ??= close!(); return target.inspect(sandboxId); };
+            const value = Reflect.get(target, key);
+            return typeof value === "function" ? value.bind(target) : value;
+          } });
+          const running = lifecycle({ healFailed: true, compute });
+          close = running.start();
+          await vi.waitFor(() => expect(shutdown).toBeDefined(), { timeout: 15_000 });
+          await shutdown;
+          expect(boat.machine(vm)!.state).toBe("running");
+          expect(boat.machine(vm)!.worker).toEqual({ enabled: true, active: true });
+          expect((await columns("state")).state).toBe("failed");
+        });
+
+        for (const [read, worker] of [[1, { enabled: true, active: true }], [2, { enabled: false, active: false }]] as const)
+        it(`stops no machine when shutdown begins during eligibility read ${read}${read === 2 ? ", after its worker is off" : ""}`, async () => {
+          await stop();
+          await failedOpen(true);
+          let shutdown: Promise<void> | undefined, close: (() => Promise<void>) | undefined, reads = 0;
+          const watched = new Proxy(store, { get(target, key) {
+            if (key === "healDue") return async (candidate: Parameters<typeof store.healDue>[0]) => {
+              if (++reads === read) shutdown ??= close!();
+              return target.healDue(candidate);
+            };
+            const value = Reflect.get(target, key);
+            return typeof value === "function" ? value.bind(target) : value;
+          } });
+          const running = lifecycle({ healFailed: true, store: watched });
+          close = running.start();
+          await vi.waitFor(() => expect(shutdown).toBeDefined(), { timeout: 15_000 });
+          await shutdown;
+          expect(boat.machine(vm)!.state).toBe("running");
+          expect(boat.machine(vm)!.worker).toEqual(worker);
+          expect((await columns("state")).state).toBe("failed");
+        });
+
+        it("leaves the machine to a Start that arrives while it heals", async () => {
+          await stop();
+          await failedOpen(true);
+          const from = boat.calls.length;
+          const compute = new Proxy(boat, { get(target, key) {
+            if (key === "inspect") return async (sandboxId: string) => { await store.recoverFailedWorkspace(id, user); return target.inspect(sandboxId); };
+            const value = Reflect.get(target, key);
+            return typeof value === "function" ? value.bind(target) : value;
+          } });
+          await heal({ compute });
+          expect(boat.calls.slice(from).map(call => call.op)).toEqual(["inspect"]);
+          expect((await columns("state")).state).toBe("starting");
+          expect(boat.machine(vm)!.state).toBe("running");
+        });
+      });
+
       it("recovers an open that failed before the files came back, and still puts them back before the worker starts", async () => {
         boat.write(vm, ENV, "TOKEN=the person's own edit");
         seeded.set(ENV, "TOKEN=from the server");
@@ -1866,8 +2049,8 @@ d("cloud v2 retention", () => {
         await lifecycle().tick();
         expect(await columns("state, error_code")).toEqual({ state: "failed", error_code: "worker_boot_timeout" });
         expect(boat.machine(vm)!.files.has(ENV)).toBe(false);
-        // Every workspace that reached running has active_at; this fixture's row was inserted running without one.
-        await pool.query("UPDATE cloud_v2_workspaces SET active_at=now() - interval '1 day' WHERE id=$1", [id]);
+        // Every workspace that reached running has running_at; this fixture's row was inserted running without one.
+        await pool.query("UPDATE cloud_v2_workspaces SET running_at=now() - interval '1 day' WHERE id=$1", [id]);
         const generation = (await columns("stop_generation::text AS g")).g;
         await store.recoverFailedWorkspace(id, user);
         await lifecycle().tick();

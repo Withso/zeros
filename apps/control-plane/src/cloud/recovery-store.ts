@@ -191,7 +191,7 @@ export class CloudRecoveryStore {
       if (!["waiting", "sealing", "sealed"].includes(a.phase) || a.source_stopped_at || a.checkpoint_object)
         throw new HttpError(409, "recovery_capture_pending", "Recovery shutdown must be reconciled before cancellation.");
       await tx.query("UPDATE cloud_v2_recovery_attempts SET phase='cancelled',completed_at=clock_timestamp(),updated_at=clock_timestamp() WHERE id=$1", [id]);
-      await tx.query("UPDATE cloud_v2_workspaces SET recovery_attempt_id=NULL,state='running',error_code=NULL,next_attempt_at=NULL WHERE id=$1 AND recovery_attempt_id=$2", [a.workspace_id, id]);
+      await tx.query("UPDATE cloud_v2_workspaces SET recovery_attempt_id=NULL,running_at=CASE WHEN state='running' THEN running_at ELSE clock_timestamp() END,state='running',error_code=NULL,next_attempt_at=NULL WHERE id=$1 AND recovery_attempt_id=$2", [a.workspace_id, id]);
     });
   }
   async fail(id: string, code: string, lease?: string): Promise<void> {
@@ -353,7 +353,7 @@ export class CloudRecoveryStore {
     await this.mutate(id, lease, ["verifying"], async (tx, a) => {
       if (!a.worker_ready_at || !a.setup_succeeded_at || !a.disk_verified_at || a.first_error_code) return;
       await tx.query("UPDATE cloud_v2_recovery_attempts SET phase='succeeded',completed_at=clock_timestamp(),updated_at=clock_timestamp() WHERE id=$1", [id]);
-      await tx.query("UPDATE cloud_v2_workspaces SET recovery_attempt_id=NULL,state='running',error_code=NULL,next_attempt_at=NULL WHERE id=$1 AND recovery_attempt_id=$2", [a.workspace_id, id]);
+      await tx.query("UPDATE cloud_v2_workspaces SET recovery_attempt_id=NULL,running_at=CASE WHEN state='running' THEN running_at ELSE clock_timestamp() END,state='running',error_code=NULL,next_attempt_at=NULL WHERE id=$1 AND recovery_attempt_id=$2", [a.workspace_id, id]);
       await tx.query("SELECT pg_notify('zeros_cloud_v2_prompts',$1)", [a.workspace_id]);
       await notifyCloudV2WorkerReady(tx, a.workspace_id);
       success = true;

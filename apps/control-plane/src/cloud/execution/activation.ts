@@ -138,7 +138,7 @@ export async function completeExecutionActivation(tx: Tx, workspace: ExecutionWo
     await tx.query("UPDATE cloud_v2_workspaces SET execution_transition_id=NULL WHERE id=$1", [workspace.id]);
   }
   // As at hello: a boot that reaches running supersedes an earlier boot's failure.
-  const ready = await tx.query(`UPDATE cloud_v2_workspaces w SET state='running',attempts=0,next_attempt_at=NULL,active_at=clock_timestamp(),updated_at=clock_timestamp(),error_code=NULL
+  const ready = await tx.query(`UPDATE cloud_v2_workspaces w SET state='running',attempts=0,next_attempt_at=NULL,active_at=clock_timestamp(),running_at=clock_timestamp(),updated_at=clock_timestamp(),error_code=NULL
     WHERE id=$1 AND state IN ('creating','starting') AND worker_boot_id=$2 AND worker_token_hash=$3 AND access_epoch=$4 AND stop_generation=$5
       AND archived_at IS NULL AND NOT (${CLOUD_RECOVERY_TURN_HOLD}) RETURNING id`, [workspace.id,workspace.worker_boot_id,workspace.worker_token_hash,workspace.access_epoch,workspace.stop_generation]);
   if (ready.rowCount) await notifyCloudV2WorkerReady(tx, workspace.id);

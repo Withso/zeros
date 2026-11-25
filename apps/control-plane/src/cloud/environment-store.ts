@@ -337,6 +337,7 @@ export class CloudEnvironments {
         await tx.query(`UPDATE cloud_v2_workspaces SET state='running',attempts=0,next_attempt_at=NULL,
           error_code=CASE WHEN state='running' THEN error_code ELSE NULL END,
           active_at=CASE WHEN state='running' THEN active_at ELSE clock_timestamp() END,
+          running_at=CASE WHEN state='running' THEN running_at ELSE clock_timestamp() END,
           updated_at=CASE WHEN state='running' THEN updated_at ELSE clock_timestamp() END WHERE id=$1`, [row.id]);
         if (row.state !== "running") await notifyCloudV2WorkerReady(tx, row.id);
       } else {
