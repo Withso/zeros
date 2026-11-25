@@ -244,14 +244,14 @@ export async function runAppSidebarSmoke({ page, check, harnessBase }) {
   const logo = page
     .locator('[data-workspace-tab="true"]:not([data-active="true"]) [data-sidebar-row-logo]')
     .first();
-  const logoRow = logo.locator('xpath=ancestor::*[@data-workspace-tab="true"][1]');
-  const logoWorkspace = await logoRow.getAttribute("data-workspace-id");
+  const before = await state();
   await logo.click({ button: "right" });
   await page.getByRole("menuitem", { name: "Repository Settings", exact: true }).click();
+  // Wait for the menu's click to settle; a bubbled row click would open that
+  // row's workspace and move the folder after the repository page appears.
+  await expect(page.getByRole("menu")).toHaveCount(0);
   await expect.poll(async () => (await state()).page).toBe("repo");
-  await page.waitForTimeout(100);
-  expect((await state()).page).toBe("repo");
-  await expect(row(logoWorkspace)).not.toHaveAttribute("data-active", "true");
+  expect((await state()).folder).toBe(before.folder);
   await row("ws-atlanta")
     .getByRole("button", { name: /^Open workspace atlanta/ })
     .click();

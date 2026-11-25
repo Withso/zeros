@@ -83,8 +83,11 @@ describe("contrast contract", () => {
 
   it("checks every filled button's 90% opacity hover, label and fill together", () => {
     for (const fill of ["red-solid", "green-solid", "accent-solid", "neutral-solid", "primary-button-bg"]) {
-      const hover: Array<{ fg: string[] }> = contract.pairs.filter((pair: { on: string | string[] }) => [pair.on].flat().some((on: string) => on.startsWith(`${fill}/0.9@`)));
-      expect(hover.length, fill).toBeGreaterThan(0);
+      const hover: Array<{ fg: string[]; on: string | string[] }> = contract.pairs.filter((pair: { on: string | string[] }) => [pair.on].flat().some((on: string) => on.startsWith(`${fill}/0.9@`)));
+      // The page, a raised group and a dialog: each surface a filled button sits on.
+      for (const ground of ["bg1", "bg1-raised", "bg3"]) {
+        expect(hover.some((pair) => [pair.on].flat().includes(`${fill}/0.9@${ground}`)), `${fill} over ${ground}`).toBe(true);
+      }
       for (const pair of hover) expect(pair.fg.every((fg: string) => /\/0\.9@/.test(fg)), fill).toBe(true);
     }
   });
