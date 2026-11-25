@@ -23,4 +23,9 @@ describe("sharing owner lookup", () => {
     ], null);
     expect(ids.map((id) => ownerOf(row(id)))).toEqual(["following", null, "following"]);
   });
+
+  it("counts Local rows as Mine", () => {
+    const local = { id: "local-1", path: "/Users/me/repo" } as unknown as Workspace;
+    expect(sharingOwnerLookup([], null)(local)).toBe("mine");
+  });
 });
