@@ -437,7 +437,6 @@ export async function runUsageSmoke({ page, check }) {
     const beforeReturn = (await counts()).usageReads;
     await page.getByRole("button", { name: "Settings", exact: true }).click();
     await expect(refresh).toHaveAttribute("aria-busy", "true");
-    // A busy refresh shows the in-app loader, Stream-run, in place of its icon.
     await expect(refresh.locator("[data-run-stream]")).toHaveCount(1);
     expect((await counts()).usageReads).toBe(beforeReturn + 1);
     await expect(loading).toHaveCount(0);
