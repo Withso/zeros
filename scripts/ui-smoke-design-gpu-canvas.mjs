@@ -45,6 +45,10 @@ export async function runDesignGpuCanvasSmoke({ page, harnessBase }) {
   // embedded in each of the 24 pictures.
   expect(opened.worker.typefaces.registered).toBe(1);
   expect(opened.worker.pictures.count).toBe(24);
+  const first = await page.evaluate(() => window.designGpuHarness.frames[0]);
+  expect(await page.evaluate((file) => window.__zerosDesignGpu.frame(file), first.file))
+    .toEqual({ sourceVersion: first.sourceVersion, current: true });
+  expect(await page.evaluate(() => window.__zerosDesignGpu.frame("page-1/missing.html"))).toBeNull();
 
   // Each frame's own fill, read where the camera puts it (zoom 0.5, pan 20).
   const frames = await page.evaluate(() => window.designGpuHarness.frames.map((frame, index) =>

@@ -147,15 +147,25 @@ export async function finishNativeDesignCameraObservation(page, prefix) {
 /** Inspect the active owner's confirmed pixels, independently of readiness
  * flags on retained but hidden documents. */
 export async function readNativeDesignCoverage(page) {
-  return page.evaluate(() => {
+  return page.evaluate(async () => {
     const owner = document.querySelector('[data-design-retained-workspace][aria-hidden="false"]');
     const frames = [...(owner?.querySelectorAll('[data-design-frame]') ?? [])];
-    return { id: owner?.dataset.designRetainedWorkspace, frames: frames.length,
+    const visibility = { checkOpacity: true, checkVisibilityCSS: true };
+    // The recorded canvas paints a tiled frame on its own plane. It counts
+    // only once that plane drew every visible frame from its current
+    // recording at the camera's density: a stretched, stale or missing
+    // picture is not coverage.
+    const gpuWorld = owner?.querySelector('[data-design-canvas-world]'), gpuPlane = gpuWorld?.previousElementSibling;
+    const gpu = gpuPlane?.matches("canvas[data-design-gpu-plane]") && gpuPlane.width > 0 && gpuPlane.height > 0 &&
+      gpuPlane.checkVisibility(visibility) ? await globalThis.window.__zerosDesignGpu?.snapshot() : null;
+    const gpuDrawn = !!gpu && gpu.visible.missing === 0 && gpu.visible.stale === 0 && gpu.visible.finer === 0 &&
+      gpu.visible.stretched === 0;
+    return { id: owner?.dataset.designRetainedWorkspace, frames: frames.length, ...(gpu ? { gpu: gpu.visible } : {}),
       covered: frames.filter(frame => {
-        const visibility = { checkOpacity: true, checkVisibilityCSS: true };
         if ([...frame.querySelectorAll('img[data-design-source-ready], [data-design-frame-pixels-ready] img, iframe[data-design-document-ready], iframe[data-design-source-ready]')]
           .some(surface => surface.checkVisibility(visibility) &&
             (surface.tagName === "IFRAME" || (surface.complete && surface.naturalWidth > 0)))) return true;
+        if (gpuDrawn && frame.parentElement === gpuWorld && frame.hasAttribute("data-design-frame-tiled")) return true;
         // A tiled image deliberately has no DOM paint. Admission marks it
         // only after its pixels transfer to this world's visible output; a
         // missing plane or another retained owner's plane is not coverage.

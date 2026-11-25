@@ -27,7 +27,8 @@ Numbers refer to `agents/zstack/principles.md`; 9 and 16 apply throughout.
    physical GPU memory, energy, FPS or native input latency.
 5. On a Mac, first recover `pnpm design:performance:native --status`; a lost
    result does not authorize another launch. Then run
-   `pnpm design:performance:native`, optionally with `--source-digest <sha256>`.
+   `pnpm design:performance:native`, optionally with `--source-digest <sha256>`;
+   `--canvas recorded` measures the internal recorded GPU canvas instead.
    The workload owns fresh fixtures, an isolated profile and output under
    `.context/design-performance-native/`, and compiles the engine and an
    optimized renderer. It uses ordinary Dev sign-in and confirmed organization
