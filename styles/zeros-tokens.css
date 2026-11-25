@@ -81,7 +81,9 @@
      --highlighted-bg              user-message bg in chat (text on it: fg1/fg2)
                                    dark aliases this to --bg2; light keeps
                                    its own value
-     --highlighted-bright          input focus border, brighter accent borders
+     --highlighted-bright          structural neutral (diff modified marks,
+                                   terminal selection, tree accent); keyboard
+                                   focus is --accent
 
    INVERTED (polarity-flipping surface — always the OPPOSITE of bg1):
      --inverted-bg           near-white in dark theme, near-black in light
@@ -292,7 +294,7 @@
   /* ── HIGHLIGHTED (theme-adaptive interaction emphasis) ── */
   /* @generated tokens:utilities-highlighted-bg:start */
   --color-highlighted-bg: var(--highlighted-bg); /* #212121 — user msg bg (text: fg1/fg2) */
-  --color-highlighted-bright: var(--highlighted-bright); /* #CACACA — input focus border, brighter accents */
+  --color-highlighted-bright: var(--highlighted-bright); /* #CACACA — structural neutral: diff modified marks, terminal selection, tree accent (focus is the accent) */
   /* @generated tokens:utilities-highlighted-bg:end */
 
   /* ── INVERTED (polarity-flipping pair — buttons, checkbox ON) ── */
@@ -579,7 +581,7 @@
   --highlighted-bg: var(--bg2); /* #212121 — user msg bg (text: fg1/fg2) */
   --highlighted-bright: hsl(
     0 0% 79.216%
-  ); /* #CACACA — input focus border, brighter accents */
+  ); /* #CACACA — structural neutral: diff modified marks, terminal selection, tree accent (focus is the accent) */
   /* @generated tokens:base-highlighted-bg:end */
 
   /* ── INVERTED (polarity-flipping pair) ──
@@ -859,7 +861,7 @@
   ); /* #EEEBE8 — user msg bg (text on it: fg1/fg2) */
   --highlighted-bright: hsl(
     32.73 7.801% 27.647%
-  ); /* #4C4741 — input focus border, brighter accents */
+  ); /* #4C4741 — structural neutral: diff modified marks, terminal selection, tree accent (focus is the accent) */
   /* @generated tokens:light-highlighted-bg:end */
 
   /* ── INVERTED (near-black in light) ── */
@@ -936,7 +938,8 @@
    `currentColor`. Without this base-layer override, every `border`
    utility paints with the element's text color. shadcn's official
    Tailwind v4 setup guide uses this pattern; we point at our
-   default border (border1) and our emphasis token for focus outlines. */
+   default border (border1) and the accent, the one keyboard-focus
+   colour, for outlines. */
 
 @layer base {
   *,
@@ -945,6 +948,6 @@
   ::backdrop,
   ::file-selector-button {
     border-color: var(--border1, currentColor);
-    outline-color: var(--highlighted-bright);
+    outline-color: var(--accent);
   }
 }

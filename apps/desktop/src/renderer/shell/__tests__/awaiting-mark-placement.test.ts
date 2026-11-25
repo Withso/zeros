@@ -80,22 +80,22 @@ describe("chat tab", () => {
 });
 
 describe("sidebar workspace row", () => {
-  const leading = row.slice(row.indexOf("{archiving ? ("), row.indexOf("{/* Only the name truncates"));
+  const leading = row.slice(row.indexOf("const leadMark ="), row.indexOf("const parentToggle"));
 
   it("rests the square while every asking chat waits on the user", () => {
     expect(row).toContain("const activity = useAnyChatWorkingActivity(chatIds);");
     expect(row).not.toContain("useAnyChatAgentActivity(");
   });
 
-  it("never swaps the square or the loader for the mark", () => {
+  it("never swaps the logo or the loader for the mark", () => {
     expect(leading).not.toMatch(/awaiting|ClipboardList|MessageCircleQuestionMark/i);
-    expect(leading.match(/<WorkspaceGlyph/g)).toHaveLength(1);
-    expect(leading).toMatch(/working \? \(\s*<AgentActivityIndicator activity=\{activity\} \/>/);
+    expect(leading.match(/<WorkspaceProjectIcon/g)).toHaveLength(1);
+    expect(leading).toMatch(/lead === "working" \? <AgentActivityIndicator activity=\{activity\} \/>/);
   });
 
   it("gives a Compact row's status a dot after the leading slot, never for Working", () => {
-    const dot = row.indexOf("{statusDot && (");
-    expect(dot).toBeGreaterThan(row.indexOf("{archiving ? ("));
+    const dot = row.indexOf("{statusDot && !leadStatusDot && (");
+    expect(dot).toBeGreaterThan(row.indexOf("data-sidebar-lead={lead}"));
     expect(dot).toBeLessThan(row.indexOf("{/* Only the name truncates"));
     expect(row).toContain('const statusDot = compact && rowStatus && rowStatus.tone !== "muted" ? STATUS_DOT_CLS[rowStatus.tone] : null;');
     expect(ROW).toMatch(/const SIDEBAR_WORKSPACE_GROUPED_INSET_CLS = "pl-8";/);
@@ -105,8 +105,8 @@ describe("sidebar workspace row", () => {
   it("gives a flat row's mark the pencil's slot, which it outranks", () => {
     expect(row).toMatch(/const statusMark = archiving \? null : \(awaitingKind \?\? /);
     expect(row).toMatch(/const trailingMark = twoLine && statusMark === "unread" \? "unread" : showDraft \? "draft" : null;/);
-    // An Ungrouped row's trailing agent state is the loader alone now.
-    expect(row).toMatch(/const trailingAgentState = mixedRepositories && !archiving && working;/);
+    // Step 2: the loader lives in the leading slot on every row.
+    expect(row).not.toContain("trailingAgentState");
   });
 });
 

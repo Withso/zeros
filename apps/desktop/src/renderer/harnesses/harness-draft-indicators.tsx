@@ -280,7 +280,6 @@ function Harness() {
               chatIds={draftIds.get(owner.id)!}
               draftChatIds={draftIds.get(owner.id)!}
               project={mixed ? project : null}
-              mixedRepositories={mixed}
               grouped={!mixed}
               onSelect={selectWorkspace}
               onPrefetch={() => {}}

@@ -187,7 +187,7 @@ export function BrowserVariantFrame({
       data-zeros-browser-variant={variant.id}
     >
       <div
-        className="bg-bg1 ring-fg1/5 relative flex flex-col overflow-visible shadow-md ring-1"
+        className="bg-bg1 ring-fg1/5 relative flex flex-col overflow-visible shadow-[var(--shadow-dropdown)] ring-1"
         style={{ width, height }}
       >
         <div

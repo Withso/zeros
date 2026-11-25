@@ -260,10 +260,10 @@ export function TerminalWorkbenchLayout({
                         onClick={() => onSelect(entry.id)}
                         className={cn(
                           "h-7 w-full justify-start gap-2 px-2 text-xs [&_svg]:size-3.5",
-                          entry.id === tab?.terminalId && "bg-bg2 text-fg1",
+                          entry.id === tab?.terminalId && "bg-selected-bg text-fg1",
                           entry.docked && "text-fg3 hover:text-fg3",
                           entry.closable && "pr-7",
-                          (entry.docked || entry.dot) && "pr-9",
+                          (entry.docked || entry.dot) && "pr-10",
                           (entry.kind === "setup" || entry.runActionId) &&
                             "pr-12",
                           entry.runActionId && entry.running && "pr-16",

@@ -2611,7 +2611,7 @@ function CanvasPresetRail({ width, onApplyWidth }: CanvasPresetRailProps) {
       className="pointer-events-none absolute top-1/2 z-20 ml-6 flex -translate-y-1/2 flex-col items-end gap-1"
       style={{ left: "100%" }}
     >
-      <div className="border-border1 bg-bg2 text-fg2 pointer-events-auto rounded-sm border px-2.5 py-0.5 text-xs font-medium tabular-nums shadow-sm">
+      <div className="border-border1 bg-bg2 text-fg2 pointer-events-auto rounded-sm border px-2.5 py-0.5 text-xs font-medium tabular-nums shadow-[var(--shadow-dropdown)]">
         {width}px
       </div>
       {BROWSER_VIEWPORT_PRESETS.map((p) => {
@@ -2666,13 +2666,13 @@ function CanvasHeightIndicator({
           <button
             type="button"
             onClick={onReset}
-            className="bg-fg1 text-primary-button-fg hover:bg-fg1/90 rounded-sm px-2.5 py-1 text-xs font-medium shadow-sm"
+            className="bg-fg1 text-primary-button-fg hover:bg-fg1/90 rounded-sm px-2.5 py-1 text-xs font-medium shadow-[var(--shadow-dropdown)]"
           >
             Reset ({BROWSER_DEFAULT_HEIGHT}px)
           </button>
         </Tooltip>
       )}
-      <div className="border-border1 bg-bg2 text-fg2 rounded-sm border px-2.5 py-0.5 text-xs font-medium tabular-nums shadow-sm">
+      <div className="border-border1 bg-bg2 text-fg2 rounded-sm border px-2.5 py-0.5 text-xs font-medium tabular-nums shadow-[var(--shadow-dropdown)]">
         {height}px
       </div>
     </div>
@@ -2785,7 +2785,7 @@ function ElementChip({
       onPointerDown={(e) => e.stopPropagation()}
       onClick={(e) => e.stopPropagation()}
     >
-      <div className="border-border1 bg-bg3 flex flex-col gap-1.5 rounded-lg border p-2 shadow-lg">
+      <div className="border-border1 bg-bg3 flex flex-col gap-1.5 rounded-lg border p-2 shadow-[var(--shadow-dropdown)]">
         <div className="flex flex-wrap items-center gap-1">
           {elements.map((el, i) => (
             <Tooltip key={`${el.selector}-${i}`} label={`${el.selector}`}>

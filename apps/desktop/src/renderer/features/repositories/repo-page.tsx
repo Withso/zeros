@@ -385,7 +385,7 @@ export function RepoWorkspacesList({ project }: { project: Project }) {
       ) : (
         groups.length === 0 &&
         pending.length === 0 && (
-          <div className="flex flex-col items-center gap-1 py-16 text-center">
+          <div className="flex flex-col items-center gap-1 py-12 text-center">
             <span className="text-fg1 text-sm font-medium">
               {history.length > 0
                 ? "No available workspaces"
@@ -576,7 +576,7 @@ export function RepoPage({ project }: { project: Project }) {
           active view. The left gutter is responsive, growing with the window
           width but capped at 100px so the content hugs the left on wide screens. */}
       <div ref={pageScrollRef} className="min-h-0 flex-1 overflow-y-auto">
-        <div className="flex w-full max-w-5xl flex-col pt-10 pr-6 pb-16 pl-[clamp(1.5rem,5vw,6.25rem)]">
+        <div className="flex w-full max-w-5xl flex-col pt-10 pr-6 pb-12 pl-[clamp(1.5rem,5vw,6.25rem)]">
           <div className="flex flex-col items-start gap-5">
             <div className="flex min-w-0 items-center gap-2.5">
               <span

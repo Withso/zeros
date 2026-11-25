@@ -88,7 +88,7 @@ export function WorkspaceGlyph({ seed, working = false, pr = null, size = 16, cl
       shaded
       className={cn(
         "transition-colors duration-200",
-        pr ? PR_TONE_CLS[pr] : working ? "text-fg2" : "text-fg3/25",
+        pr ? PR_TONE_CLS[pr] : working ? "text-fg2" : "text-muted-fg",
         className,
       )}
     />

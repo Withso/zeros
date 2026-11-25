@@ -45,7 +45,7 @@ export function SidebarArchivedSection({
     <>
       <div className="group/section flex h-8 shrink-0 items-center gap-1 pt-1" data-sidebar-section="archived">
         <Button type="button" variant="ghost"
-          className="hover:bg-(--surface-hover) h-7 min-w-0 flex-1 justify-start gap-1.5 rounded-md border-0 px-2 font-normal [&_svg]:size-3 [&_svg]:text-fg3"
+          className="hover:bg-transparent h-7 min-w-0 flex-1 justify-start gap-1.5 rounded-md border-0 px-2 font-normal [&_svg]:size-3 [&_svg]:text-fg3"
           aria-expanded={!collapsed} aria-controls="sidebar-section-archived"
           onClick={() => onToggle(!collapsed)}>
           <span className={cn(labelClassName, "min-w-0")}>Archived</span>

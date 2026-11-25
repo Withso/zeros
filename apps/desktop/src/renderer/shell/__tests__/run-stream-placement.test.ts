@@ -43,42 +43,27 @@ describe("live Run stream placement", () => {
     expect(row).not.toContain("useRunStatuses");
   });
 
-  it("shows the counts AND the stream, counts first, at the row's end", () => {
+  // Step 2: the ± counts left the row for the hover card; the stream stays.
+  it("keeps the stream on the row and hands the counts to the hover card", () => {
     const row = source(
       "apps/desktop/src/renderer/shell/sidebar-workspace-row.tsx",
     );
-
-    // A running workspace should still report what it changed. DOM order is
-    // the visual order — counts sit to the LEFT of the stream, and both sit
-    // after the name. Plain folder rows have no Git comparison.
     expect(row).toMatch(
       /useWorkspaceChangeLines\(\s*localFolder \? null : workspace,/,
     );
-    expect(row).toMatch(
-      /\{label\}<\/span>[\s\S]*?<WorkspaceChangeCounts \{\.\.\.changeLines\} active=\{active\} \/>[\s\S]*?<RunStream/,
-    );
-    // Each is independently optional — neither may sit in the other's branch,
-    // or one of them goes back to suppressing the other.
-    expect(row).toMatch(/\{!archiving && \([\s\S]*?<WorkspaceChangeCounts/);
+    expect(row).not.toContain("<WorkspaceChangeCounts");
+    expect(row).toContain("changeLines={changeLines}");
     expect(row).toMatch(/\{runActionRunning && \([\s\S]*?<RunStream/);
     expect(row).not.toMatch(/runActionRunning \?[\s\S]{0,200}?<RunStream/);
   });
 
-  it("keeps the stream and the counts out of the truncation path", () => {
+  it("keeps the stream out of the truncation path", () => {
     const row = source(
       "apps/desktop/src/renderer/shell/sidebar-workspace-row.tsx",
     );
-    const counts = source(
-      "apps/desktop/src/renderer/shell/workspace-change-counts.tsx",
-    );
-
-    // Only the name may truncate. RunStream is shrink-0 inside its own
-    // component, the ± pair declares it on its wrapper span, and the trailing
-    // cluster is shrink-0. If either could shrink, a busy workspace would
-    // render half a number.
-    expect(counts).toMatch(/className="[^"]*\bshrink-0\b/);
+    // Only the name may truncate; the trailing cluster is shrink-0.
     expect(row).toMatch(
-      /<span className="min-w-0 truncate">\{label\}<\/span>/,
+      /<span className="text-fg1 min-w-0 truncate">\{label\}<\/span>/,
     );
     expect(row).toMatch(
       /const SIDEBAR_WORKSPACE_TRAILING_CLS =\s*\n?\s*"[^"]*\bshrink-0\b/,

@@ -400,7 +400,7 @@ export function RepoDetail({
       // Secrets and workspace commands share one Environment view, but the three
       // modules stay independent so each keeps its own save behavior.
       return (
-        <div className="flex flex-col gap-9">
+        <div className="flex flex-col gap-8">
           <EnvironmentSection project={project} layer={layer} root={root} />
           {project.isGitRepository !== false && (
             <ScriptsSection project={project} layer="repo-local" root={root} />
@@ -1253,7 +1253,7 @@ function GitSection({
     catalog.branchSource === "local";
 
   return (
-    <div className="flex flex-col gap-9">
+    <div className="flex flex-col gap-8">
       <SettingsSection
         title={
           <span className="flex items-center gap-2">

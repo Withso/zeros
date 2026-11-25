@@ -614,7 +614,7 @@
         "colorSpace": "hsl",
         "components": [0.0, 0.0, 79.216]
       },
-      "$description": "input focus border, brighter accents",
+      "$description": "structural neutral: diff modified marks, terminal selection, tree accent (focus is the accent)",
       "$extensions": {
         "org.zeros": {
           "cssName": "--highlighted-bright",

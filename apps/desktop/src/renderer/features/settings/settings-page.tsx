@@ -1776,7 +1776,7 @@ function ModelsPanel({ surfaceActive = false }: { surfaceActive?: boolean }) {
 // Branch naming is personal; remote and base branch belong to the repository.
 function GitDefaultsPanel() {
   return (
-    <div className="flex flex-col gap-9">
+    <div className="flex flex-col gap-8">
       <GitDefaultsSection />
     </div>
   );

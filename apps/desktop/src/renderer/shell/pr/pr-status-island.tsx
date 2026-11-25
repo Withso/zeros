@@ -142,7 +142,7 @@ const LABEL_TONE: Record<PrIslandTone, string> = {
 // "View PR ↗" chip — a quiet per-tone outline (muted ramp shades via the
 // --pr-status-chip-border-* semantics), constant across every state.
 const CHIP_BASE =
-  "inline-flex shrink-0 items-center gap-0.5 rounded-sm border px-1.5 py-0.5 text-[13px] tabular-nums transition-colors duration-120 ease-out";
+  "inline-flex shrink-0 items-center gap-0.5 rounded-sm border px-1.5 py-0.5 text-xs tabular-nums transition-colors duration-120 ease-out";
 const CHIP_TONE: Record<PrIslandTone, string> = {
   neutral: SUCCESS_CHIP,
   warning: WARNING_CHIP,

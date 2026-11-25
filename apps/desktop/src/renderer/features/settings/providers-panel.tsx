@@ -822,7 +822,7 @@ function ProviderCard({
           }
         >
           <div className="bg-bg2/60 relative rounded-md px-4 py-3">
-            <span className="text-fg1 block pr-9 text-xs break-all">
+            <span className="text-fg1 block pr-10 text-xs break-all">
               {agent.installHint.command}
             </span>
             <Tooltip label="Copy command">

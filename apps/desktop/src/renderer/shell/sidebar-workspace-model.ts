@@ -64,6 +64,9 @@ export type SidebarWorkspaceItem =
       childCount?: number;
       /** Whether this row's child workspaces are shown. */
       expanded?: boolean;
+      /** A child whose parent belongs to the same project: its leading slot
+       *  shows a dot instead of repeating the project's logo. */
+      sameProjectAsParent?: boolean;
     }
   | {
       kind: "pending";
@@ -183,16 +186,18 @@ export function nestChildWorkspaces(
   if (childrenOf.size === 0) return [...items];
   const out: SidebarWorkspaceItem[] = [];
   const seen = new Set<string>();
-  const visit = (item: SidebarWorkspaceItem, depth: number) => {
+  const visit = (item: SidebarWorkspaceItem, depth: number, parentProjectId: string | null) => {
     if (seen.has(item.key)) return;
     seen.add(item.key);
     if (item.kind !== "workspace") { out.push(item); return; }
     const children = childrenOf.get(item.workspace.id) ?? [];
     const open = children.length > 0 && expanded.has(item.workspace.id);
-    out.push(children.length || depth ? { ...item, depth, childCount: children.length, expanded: open } : item);
-    if (open) for (const child of children) visit(child, depth + 1);
+    out.push(children.length || depth
+      ? { ...item, depth, childCount: children.length, expanded: open, ...(depth ? { sameProjectAsParent: item.project.id === parentProjectId } : {}) }
+      : item);
+    if (open) for (const child of children) visit(child, depth + 1, item.project.id);
   };
-  for (const item of top) visit(item, 0);
+  for (const item of top) visit(item, 0, null);
   return out;
 }
 

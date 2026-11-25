@@ -28,7 +28,7 @@
 // (loader-frame.ts). The inner <svg> pins its size inline: Buttons and rows
 // carry blanket `[&_svg]:size-*` rules, which outrank presentation attributes.
 //
-// Tones: default → --loader-active / --loader-rest; inverted → the on-inverted
+// Tones: default → --loader-active; inverted → the on-inverted
 // foreground for primary-button fills; inherit → currentColor, for bespoke
 // fills (green Merge, destructive, the yellow review glyph).
 //

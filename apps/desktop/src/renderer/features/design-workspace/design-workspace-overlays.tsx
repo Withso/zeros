@@ -1267,7 +1267,7 @@ export const DesignMotionCanvasOverlay = React.memo(
       <>
         <div
           data-design-motion-inline-toolbar=""
-          className="zd-design-motion-inline-toolbar pointer-events-none absolute top-0 right-0 z-30 flex items-center gap-1 rounded-sm border px-1.5 py-0.5 shadow-sm"
+          className="zd-design-motion-inline-toolbar pointer-events-none absolute top-0 right-0 z-30 flex items-center gap-1 rounded-sm border px-1.5 py-0.5 shadow-[var(--shadow-dropdown)]"
           style={{
             marginTop: designCanvasScreenPixels(4),
             marginRight: designCanvasScreenPixels(4),

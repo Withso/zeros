@@ -890,7 +890,7 @@ export function GitHubSection({
                               autoComplete="off"
                               placeholder="github_pat_…"
                               aria-label="Personal access token"
-                              className="pr-9 font-mono text-xs"
+                              className="pr-10 font-mono text-xs"
                               onChange={(event) => setPat(event.target.value)}
                               onKeyDown={(event) => {
                                 if (event.key === "Enter") void connectPat();

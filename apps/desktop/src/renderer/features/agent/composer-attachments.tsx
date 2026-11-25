@@ -157,7 +157,7 @@ export const ComposerAttachmentChips = memo(function ComposerAttachmentChips({
           <Tooltip key={a.id} label={tooltip}>
             <div
               className={[
-                "bg-bg2-hover hover:border-highlighted-bright inline-flex max-w-[220px] items-center gap-1.5 rounded-sm py-[3px] pr-1 pl-2 text-xs transition-[background-color,border-color] duration-150 ease-out",
+                "bg-bg2-hover hover:border-border4 inline-flex max-w-[220px] items-center gap-1.5 rounded-sm py-[3px] pr-1 pl-2 text-xs transition-[background-color,border-color] duration-150 ease-out",
                 invalid
                   ? "border-yellow-icon/40 text-fg2 border opacity-85 [&_img]:grayscale [&>button_span:first-child]:grayscale"
                   : "border-border1 text-fg2 border",

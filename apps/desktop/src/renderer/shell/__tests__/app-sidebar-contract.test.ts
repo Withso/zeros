@@ -156,24 +156,22 @@ describe("sidebar workspace list presentations", () => {
     );
   });
 
-  it("uses repository icons and a trailing agent state in the mixed list", () => {
+  it("leads every row with the project logo and the loader while working", () => {
     const row = between(
       ROW,
       "export function SidebarWorkspaceRow(",
       "/** Placeholder row",
     );
     expect(row).toContain("<WorkspaceProjectIcon project={project} />");
-    expect(row).toContain("trailingAgentState");
+    expect(row).not.toContain("trailingAgentState");
     // Any chat's activity, where a turn parked on the user rests.
     expect(row).toContain("useAnyChatWorkingActivity");
-    expect(SIDEBAR).toContain("mixedRepositories={!groupedList}");
+    expect(SIDEBAR).not.toContain("mixedRepositories");
   });
 
-  // Ungrouped rows spend the leading glyph on repository identity, and design
-  // workspaces carry the same colour-word branch names code ones do — so the
-  // PenTool relocates to the trailing cluster in BOTH row variants, so the
-  // pending → confirmed swap neither drops nor re-adds it.
-  it("relocates the design marker instead of dropping it in the mixed list", () => {
+  // Design workspaces keep their pen in the leading slot in both row variants,
+  // so the pending → confirmed swap neither drops nor re-adds it.
+  it("keeps the design marker in the leading slot of both row variants", () => {
     const confirmed = between(
       ROW,
       "export function SidebarWorkspaceRow(",
@@ -182,12 +180,17 @@ describe("sidebar workspace list presentations", () => {
     const pending = ROW.slice(
       ROW.indexOf("export function PendingSidebarWorkspaceRow("),
     );
-    for (const variant of [confirmed, pending]) {
-      expect(variant).toContain("trailingDesignMark");
-      expect(variant).toMatch(
-        /trailingDesignMark[\s\S]{0,200}?<PenTool className="size-3\.5"/,
-      );
-    }
+    expect(confirmed).toMatch(/lead === "design" \? <PenTool className="size-3\.5"/);
+    expect(pending).toMatch(/kind === "design" \? \(\s*<PenTool className="size-3\.5"/);
+  });
+
+  // A parent's leading slot is the toggle for its child workspaces; there is
+  // no separate "N child workspaces" row.
+  it("toggles child workspaces from the parent's leading slot", () => {
+    expect(ROW).toContain("data-child-workspaces-toggle={workspace.id}");
+    expect(ROW).toMatch(/aria-expanded=\{childrenExpanded\}/);
+    expect(SIDEBAR).toContain("onToggleChildren={item.childCount ? () => toggleChildWorkspaces(item.workspace.id) : undefined}");
+    expect(SIDEBAR).not.toContain("child workspaces`}</span>");
   });
 });
 
