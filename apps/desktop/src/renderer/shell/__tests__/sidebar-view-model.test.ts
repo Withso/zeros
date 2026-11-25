@@ -52,7 +52,7 @@ describe("sidebar view filters", () => {
 });
 
 describe("sidebar sort", () => {
-  const label = (w: Workspace) => w.name;
+  const label = (w: Workspace) => w.id;
   const base = { label, activeAt: () => undefined, needsYou: (w: Workspace) => w.id === "old" };
   const list = [ws("mid", { lastActiveAt: 20 } as Partial<Workspace>), ws("old", { lastActiveAt: 10 } as Partial<Workspace>), ws("new", { lastActiveAt: 30 } as Partial<Workspace>)];
   const order = (args: Partial<Parameters<typeof sidebarWorkspaceComparator>[0]>) =>
