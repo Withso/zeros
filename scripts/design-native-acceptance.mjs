@@ -346,13 +346,12 @@ async function main() {
     await open(overview);
     report.runtime.viewport = await page.evaluate(() => ({ width: innerWidth, height: innerHeight, dpr: devicePixelRatio }));
     phase("presentation");
-    // Above other apps, so another app's window cannot occlude (hide) the
-    // page or take the gesture's input midway; the viewport size is unchanged.
+    // Not always-on-top: a floating window leaves the normal window level the
+    // native driver checks, so it would read the app below as the foreground.
     const foreground = async () => {
       await app.evaluate(({ app, BrowserWindow }) => {
         const window = BrowserWindow.getAllWindows()[0];
-        window.setAlwaysOnTop(true, "floating"); window.setIgnoreMouseEvents(false);
-        window.show(); window.focus(); app.focus({ steal: true });
+        window.setIgnoreMouseEvents(false); window.show(); window.focus(); app.focus({ steal: true });
       });
       await page.waitForFunction(() => document.visibilityState === "visible", null, { timeout: 10_000 });
     };
@@ -407,10 +406,7 @@ async function main() {
       save(); guard.assertHealthy();
       break;
     }
-    await app.evaluate(({ BrowserWindow }) => {
-      const window = BrowserWindow.getAllWindows()[0];
-      window.setAlwaysOnTop(false); window.setIgnoreMouseEvents(true);
-    });
+    await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].setIgnoreMouseEvents(true));
     phase("editing-resize-capture");
     const small = fixtures.find(f => f.fixture === "2"); await open(small);
     const selected = await selectNativeDesignFrame(page, small.id);
