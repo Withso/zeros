@@ -288,7 +288,9 @@ class DesignSourceScene {
       if (released) return;
       released = true;
       this.registrations.delete(registration);
-      this.composition = null;
+      // Only a composition that drew this source retains its image; any other
+      // output stays exact, so retiring offscreen generations repaints nothing.
+      if (this.composition?.rows.some(row => row.registration === registration)) this.composition = null;
       this.layoutRows = null;
       if (this.painted.delete(registration)) {
         restoreSource(registration);

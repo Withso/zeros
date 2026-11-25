@@ -399,6 +399,29 @@ it("keeps offscreen completed sources in the tiled path until their display owne
   } finally { await page.close(); }
 });
 
+it("retires an offscreen source generation without redrawing the visible output", async () => {
+  const page = await open();
+  try {
+    await page.evaluate(async () => {
+      const w = window as any;
+      w.rows = [await w.add({ key: "shown", x: 20, y: 55, width: 120, height: 160, z: 0, color: "blue", compact: true }),
+        await w.add({ key: "away", x: 4000, y: 55, width: 120, height: 160, z: 1, color: "red", compact: true })];
+      w.paint(); w.releases = w.rows.map((row: any, i: number) => w.tiles.attachDesignSourceTiles(row.image, `generation-${i}`));
+      w.paint();
+    });
+    const before = await page.screenshot();
+    const draws = await page.evaluate(() => (window as any).tiles.designSourceTiles.usage().draws);
+    // A source replacement retires every old generation, most of them
+    // offscreen; each one redrawing the whole output made a 256-frame
+    // replacement wait on a full-viewport present per frame.
+    await page.evaluate(() => { const w = window as any; w.releases[1](); w.paint(); });
+    expect(await page.evaluate(() => (window as any).tiles.designSourceTiles.usage().draws)).toBe(draws);
+    expect(await changed(page, before, await page.screenshot())).toBe(0);
+    await page.evaluate(() => { const w = window as any; w.releases[0](); });
+    expect(await page.locator("[data-design-source-tiled]").count()).toBe(0);
+    expect(await changed(page, before, await page.screenshot())).toBe(0);
+  } finally { await page.close(); }
+});
 it("disconnects a composed SVG without adopting or reloading it, then restores the exact source for editing", async () => {
   const page = await open();
   try {
