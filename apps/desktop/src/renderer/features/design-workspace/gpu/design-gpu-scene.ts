@@ -11,7 +11,8 @@ import { DESIGN_GPU_PAGE_PIXELS, designGpuChooseDensity, designGpuDensity, desig
 import type { DesignGpuRasterPicture, DesignGpuRasterUnit } from "./design-gpu-protocol";
 import type { DesignGpuStats, DesignGpuVisible } from "./design-gpu-stats";
 import type { DesignGpuWorkerClient } from "./design-gpu-worker-client";
-import type { DesignAdoptedRecording, DesignRecordingDemand, DesignRecordings, DesignRecordingsOwner } from "./design-recordings";
+import type { DesignAdoptedRecording, DesignPresentedRecording, DesignRecordingDemand, DesignRecordings,
+  DesignRecordingsOwner } from "./design-recordings";
 import { designRecordingsOwnerKey } from "./design-recordings";
 
 /** A burst's worker time at rest, and while the camera moves. */
@@ -205,6 +206,11 @@ export class DesignGpuScene {
 
   usage() {
     return this.pages.usage();
+  }
+
+  /** The recording this canvas shows for a frame, if it has one. */
+  presented(file: string): DesignPresentedRecording | null {
+    return this.input.owner ? this.deps.recordings.recording(this.input.owner, file) : null;
   }
 
   loseContext(): void {

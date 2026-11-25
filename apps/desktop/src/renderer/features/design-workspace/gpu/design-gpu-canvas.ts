@@ -81,6 +81,8 @@ interface DesignGpuInstrumentation {
   snapshot(): Promise<DesignGpuSnapshot>;
   reset(): void;
   loseContext(target: "compositor" | "rasterizer"): void;
+  /** The version the active canvas draws a frame from; `current` once it is the frame's own. */
+  frame(file: string): { sourceVersion: string; current: boolean } | null;
 }
 type InstrumentedWindow = Window & { __zerosDesignGpu?: DesignGpuInstrumentation };
 
@@ -109,6 +111,10 @@ function installInstrumentation(runtime: DesignGpuRuntime): void {
       const entry = current();
       if (which === "compositor") entry?.[0].loseContext();
       else entry?.[1].client?.loseContext();
+    },
+    frame(file) {
+      const recording = current()?.[0].presented(file);
+      return recording ? { sourceVersion: recording.sourceVersion, current: recording.current } : null;
     },
   };
 }

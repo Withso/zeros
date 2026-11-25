@@ -140,6 +140,8 @@ export class DesignRecordings {
   demand(owner: DesignRecordingsOwner, frames: readonly DesignRecordingDemand[]): void {
     const state = this.state(owner);
     const order: string[] = [];
+    // A new version can make a held recording current, or stale, with no reply.
+    const presented: string[] = [];
     for (const frame of frames) {
       let entry = state.frames.get(frame.file);
       if (!entry) {
@@ -152,6 +154,7 @@ export class DesignRecordings {
         entry.retries = 0;
         // The old version's retry wait doesn't hold back the new version.
         if (entry.failed?.retryable) entry.retryAt = 0;
+        if (entry.confirmed) presented.push(frame.file);
       }
       order.push(frame.file);
     }
@@ -160,6 +163,7 @@ export class DesignRecordings {
     for (const request of [...state.inFlight])
       if (request.files.every((file) => !demanded.has(file))) request.controller.abort(new Error("Design recordings no longer shown."));
     this.prune(state, demanded);
+    this.publish(state, presented);
     this.pump(state);
   }
 

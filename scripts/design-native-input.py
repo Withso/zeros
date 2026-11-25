@@ -86,8 +86,9 @@ def main(config):
                 window = array_at(windows, i)
                 if integer(window, 'kCGWindowLayer') != 0:
                     continue
-                if integer(window, 'kCGWindowOwnerPID') != pid:
-                    raise RuntimeError('The isolated app lost foreground ownership; native input stopped.')
+                owner = integer(window, 'kCGWindowOwnerPID')
+                if owner != pid:
+                    raise RuntimeError(f'The isolated app lost foreground ownership to pid {owner}; native input stopped.')
                 window_id = integer(window, 'kCGWindowNumber')
                 if not window_id:
                     raise RuntimeError('The isolated foreground window has no input identity.')

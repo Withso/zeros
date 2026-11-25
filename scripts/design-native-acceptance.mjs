@@ -56,12 +56,26 @@ async function authoredManifest(fixtures) {
   return rows.sort((a, b) => `${a.fixture}/${a.file}`.localeCompare(`${b.fixture}/${b.file}`));
 }
 
-async function main() {
-  const args = process.argv.slice(2);
-  if (args.length === 1 && args[0] === "--help") {
-    console.log("pnpm design:performance:native [--source-digest SHA256]\npnpm design:performance:native --status"); return;
+/** `--canvas recorded` measures the internal recorded GPU canvas: the
+ * unpackaged recorder process plus the staff `designGpuCanvas` flag. */
+export function parseNativeAcceptanceArgs(args) {
+  if (args.length === 1 && (args[0] === "--help" || args[0] === "--status")) return { command: args[0].slice(2) };
+  const options = { command: "run", sourceDigest: null, canvas: "dom" };
+  for (let i = 0; i < args.length; i += 2) {
+    const [name, value] = [args[i], args[i + 1]];
+    if (name === "--source-digest" && options.sourceDigest === null && /^[a-f0-9]{64}$/.test(value ?? "")) options.sourceDigest = value;
+    else if (name === "--canvas" && (value === "dom" || value === "recorded")) options.canvas = value;
+    else throw new Error("Use --help for performance arguments.");
   }
-  if (args.length === 1 && args[0] === "--status") {
+  return options;
+}
+
+async function main() {
+  const options = parseNativeAcceptanceArgs(process.argv.slice(2));
+  if (options.command === "help") {
+    console.log("pnpm design:performance:native [--source-digest SHA256] [--canvas dom|recorded]\npnpm design:performance:native --status"); return;
+  }
+  if (options.command === "status") {
     const previous = await latest();
     const retirement = previous?.retirement?.processes?.length
       ? await waitForNativeProcessRetirement(previous.retirement.processes, { timeoutMs: 0 }) : null;
@@ -71,7 +85,6 @@ async function main() {
       retirement: retirement ? { retired: retirement.retired, remaining: retirement.remaining, unknown: retirement.unknown } : undefined,
       evidence: path.join(root, previous.runId) } : { stage: "not-started" }, null, 2)); return;
   }
-  assert(args.length === 0 || (args.length === 2 && args[0] === "--source-digest" && /^[a-f0-9]{64}$/.test(args[1])), "Use --help for performance arguments.");
   assert.equal(process.platform, "darwin", "Native performance acceptance requires macOS.");
   const previous = await latest();
   if (previous) {
@@ -86,12 +99,13 @@ async function main() {
     }
   }
   const sources = collectNativeSourceManifest(repo);
-  if (args.length) assert.equal(sources.digest, args[1], "Wait for verified source sync before launching.");
+  if (options.sourceDigest) assert.equal(sources.digest, options.sourceDigest, "Wait for verified source sync before launching.");
+  const recorded = options.canvas === "recorded";
   const runId = `${new Date().toISOString().replace(/[^0-9T]/g, "")}-${randomUUID().slice(0, 8)}`;
   const release = acquireNativeRunLock(root, runId), evidence = path.join(root, runId);
   await fs.mkdir(evidence, { mode: 0o700 });
   const report = { runId, pid: process.pid, platform: process.platform, startedAt: new Date().toISOString(),
-    stage: "preparing", build: { mode: "production", hmr: false, sourceDigest: sources.digest },
+    stage: "preparing", build: { mode: "production", hmr: false, sourceDigest: sources.digest, canvas: options.canvas },
     hardware: { arch: process.arch, os: os.release(), memoryBytes: os.totalmem(), cpu: os.cpus()[0]?.model },
     interactions: [], idle: [], idleObservations: [], openings: [], scenarios: [], checks: [], memory: { warm: [], cycles: [], settled: [], peakAppBytes: 0, peakGpuBytes: 0 },
     limitations: ["Optimized renderer and compiled engine in an unpackaged, isolated Local host; release signing/updater are outside this workload.",
@@ -124,6 +138,14 @@ async function main() {
     const auth = await ensureDevAuthEnvironment({ processEnv: {} });
     assert.equal(auth.issue, null, "A validated public Alpha Dev configuration is required.");
     Object.assign(env, auth.env, { NODE_ENV: "production", ZEROS_NO_MAIN_HMR: "1", ZEROS_NO_ENGINE_HMR: "1" });
+    if (recorded) env.ZEROS_DESIGN_RECORDER = "1";
+    // The internal canvas flag is a personal preference the engine hydrates
+    // from user settings; an isolated settings layer pins it for this run
+    // without editing the operator's own settings.
+    const settings = path.join(evidence, "user-settings");
+    await fs.mkdir(settings, { mode: 0o700 });
+    await fs.writeFile(path.join(settings, "settings.toml"), `[preferences]\ninternal = { designGpuCanvas = ${recorded} }\n`, { mode: 0o600 });
+    env.ZEROS_USER_SETTINGS_DIR = settings;
     const profile = path.join(os.homedir(), "Library/Application Support", `com.zeros.dev.${identity.slug}`);
     await fs.mkdir(profile, { mode: 0o700 });
     writeNativeJson(path.join(profile, "design-qualification-owner.json"), { runId });
@@ -249,8 +271,23 @@ async function main() {
     const ready = async fixture => {
       const until = Date.now() + 60000;
       for (;;) { guard.assertHealthy(); const c = await coverage(); if (c.id === fixture.id && c.covered === fixture.count) return;
-        assert(Date.now() < until, `Incomplete ${fixture.fixture} coverage: ${JSON.stringify(c)}`); await pause(50); }
+        if (Date.now() >= until) assert.fail(`Incomplete ${fixture.fixture} coverage: ${JSON.stringify({ ...c, recordings: recorded ? await recordingsDiagnostic(fixture.id) : undefined })}`);
+        await pause(50); }
     };
+    // Bench-only private reads: the store keeps no public per-frame view.
+    const recordingsDiagnostic = id => page.evaluate(async id => {
+      const { designGpuRuntime } = await import("/apps/desktop/src/renderer/features/design-workspace/gpu/design-gpu-canvas.ts");
+      const { designWorkspaceSnapshotCache } = await import("/apps/desktop/src/renderer/features/design-workspace/state/design-workspace-cache.ts");
+      const snapshot = designWorkspaceSnapshotCache.peekSnapshot(id).data;
+      const shown = new Map((snapshot?.preparation?.descriptions ?? snapshot?.frames ?? []).map(frame => [frame.file, frame.sourceVersion ?? null]));
+      return [...designGpuRuntime().recordings.owners.values()].filter(state => state.owner.workspaceId === id).map(state => ({
+        owner: state.owner, pipeline: state.pipeline, order: state.order.length, inFlight: state.inFlight.size,
+        frames: [...state.frames].filter(([, entry]) => !entry.confirmed || entry.confirmed.sourceVersion !== entry.wanted ||
+          state.pipeline !== null && entry.confirmed.pipeline !== state.pipeline).slice(0, 24).map(([file, entry]) => ({ file,
+          wanted: entry.wanted ?? null, shown: shown.get(file) ?? null, confirmed: entry.confirmed?.sourceVersion ?? null,
+          pipeline: entry.confirmed?.pipeline ?? null, superseded: entry.superseded, storedMissing: entry.storedMissing ?? null,
+          failed: entry.failed?.error ?? null, pending: !!entry.pending, stale: entry.stale, demanded: state.order.includes(file) })) }));
+    }, id).catch(error => String(error));
     const open = async fixture => {
       const begin = performance.now();
       await selectNativeOwner(page, fixture);
@@ -271,7 +308,24 @@ async function main() {
       await ready(fixture); return performance.now() - begin;
     };
     phase("cold-and-warm-opening");
-    for (const fixture of fixtures) report.openings.push({ fixture: fixture.fixture, coldReadyMs: await open(fixture) });
+    for (const fixture of fixtures) {
+      const coldReadyMs = await open(fixture);
+      // A synced or stale flag must not silently measure the other canvas.
+      const planes = await page.locator('[data-design-retained-workspace][aria-hidden="false"] canvas[data-design-gpu-plane]').count();
+      if (recorded && planes !== 1) {
+        const why = await page.evaluate(async id => {
+          const features = await import("/apps/desktop/src/renderer/features/settings/internal-features.ts");
+          const { getActiveBridge } = await import("/apps/desktop/src/renderer/platform/bridge/active-bridge.ts");
+          const { designGpuRuntime } = await import("/apps/desktop/src/renderer/features/design-workspace/gpu/design-gpu-canvas.ts");
+          const { DESIGN_RECORDINGS_CAPABILITY } = await import("/apps/desktop/src/renderer/features/design-workspace/gpu/design-recordings-wire.ts");
+          return { staff: features.isInternalUser(), flag: features.isInternalFeatureEnabled("designGpuCanvas"),
+            unavailable: designGpuRuntime().unavailable, recorder: getActiveBridge()?.supportsEngineCapability?.(DESIGN_RECORDINGS_CAPABILITY, id) ?? null };
+        }, fixture.id);
+        throw new Error(`The recorded canvas did not mount: ${JSON.stringify(why)}.`);
+      }
+      assert.equal(planes, recorded ? 1 : 0, "The recorded canvas is on; run with --canvas recorded to measure it.");
+      report.openings.push({ fixture: fixture.fixture, coldReadyMs });
+    }
     for (const fixture of fixtures) report.openings.find(row => row.fixture === fixture.fixture).warmReadyMs = await open(fixture);
     const overview = fixtures.find(f => f.fixture === "overview-256"), organization = fixtures.find(f => f.fixture === "organization-local");
     await open(overview);
@@ -291,6 +345,7 @@ async function main() {
       assert.equal(await page.evaluate(() => document.visibilityState), "visible", "The benchmark window must remain visible.");
       const bounds = await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].getContentBounds());
       await cdp.send("Tracing.start", { categories: "benchmark,input,blink.user_timing,disabled-by-default-devtools.timeline.frame", transferMode: "ReportEvents" });
+      if (recorded) await page.evaluate(() => globalThis.window.__zerosDesignGpu.reset());
       await startNativeDesignCameraObservation(page, prefix);
       // One real native gesture keeps began/changed/ended phases continuous.
       // Individual CDP wheel commands synthesize an end for every command and
@@ -301,11 +356,13 @@ async function main() {
         x: bounds.x + box.x + box.width / 2, y: bounds.y + box.y + box.height / 2,
       }, { signal: controller.signal });
       const cameraChanges = await finishNativeDesignCameraObservation(page, prefix);
+      // The recorded canvas's own draw, upload and raster timings for this gesture.
+      const gpu = recorded ? await page.evaluate(() => globalThis.window.__zerosDesignGpu.snapshot()) : undefined;
       await pause(300); await cdp.send("Tracing.end"); await complete; cdp.off("Tracing.dataCollected", collect);
       await fs.writeFile(path.join(evidence, `${name}-${repeat}-trace.json`), JSON.stringify({ traceEvents: events }));
       const first = events.find(e => e.name === prefix + ":start"), last = events.find(e => e.name === prefix + ":end");
       assert(first && last && first.pid === last.pid, "The native trace must contain this app's workload markers.");
-      report.interactions.push({ name, repeat, cameraChanges, inputWorkload,
+      report.interactions.push({ name, repeat, cameraChanges, inputWorkload, ...(gpu ? { gpu } : {}),
         ...analyzeDesignPresentationTrace(events, { rendererPid: first.pid, startUs: first.ts, endUs: last.ts }),
         // Observe allocation categories after tracing/input stop; JS heap and
         // DOM counts are diagnostics, never substitutes for physical memory.
@@ -332,12 +389,14 @@ async function main() {
       const sourceFile = path.join(fixture.path, fixture.designDirectory, file), original = await fs.readFile(sourceFile);
       const restored = () => fs.writeFile(sourceFile, original); restores.push(restored);
       const image = page.locator(`[data-design-retained-workspace="${fixture.id}"] [data-design-frame=${JSON.stringify(file)}] [data-design-source-vector][data-design-source-ready][data-design-source-buffer="displayed"]`).first();
-      const originalVersion = await image.getAttribute("data-design-source-version"), begin = performance.now();
+      const currentVersion = recorded
+        ? async () => page.evaluate(file => { const shown = globalThis.window.__zerosDesignGpu?.frame(file); return shown?.current ? shown.sourceVersion : null; }, file)
+        : async () => image.evaluate(surface => { const img = surface.designSourceImage ?? surface; return img instanceof HTMLImageElement && img.complete && img.naturalWidth > 0 ? img.dataset.designSourceVersion : null; });
+      const originalVersion = recorded ? await currentVersion() : await image.getAttribute("data-design-source-version"), begin = performance.now();
       assert(originalVersion, "Source edit needs a confirmed generation.");
       const changed = original.toString().replace("</head>", `<style>/* qualification ${revision} */ body { outline: 3px solid #276ef1; outline-offset: -3px }</style></head>`);
       assert.notEqual(changed, original.toString(), "Source edit must change the authored fixture.");
       await fs.writeFile(sourceFile, changed);
-      const currentVersion = async () => image.evaluate(surface => { const img = surface.designSourceImage ?? surface; return img instanceof HTMLImageElement && img.complete && img.naturalWidth > 0 ? img.dataset.designSourceVersion : null; });
       const until = Date.now() + 30000;
       for (;;) { const version = await currentVersion(); if (version && version !== originalVersion) break;
         assert(Date.now() < until, "Changed source was not displayed."); await pause(50); }

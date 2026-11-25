@@ -21,6 +21,9 @@ const designModuleExports = Object.fromEntries(Object.entries({
   "features/design-workspace/state/design-workspace-cache.ts": ["designWorkspaceSnapshotCache"],
   "features/design-workspace/design-source-vector.ts": ["designSourceVectorCache"],
   "features/design-workspace/state/design-renderer-resources.ts": ["designRendererResources"],
+  "features/settings/internal-features.ts": ["isInternalUser", "isInternalFeatureEnabled"],
+  "features/design-workspace/gpu/design-gpu-canvas.ts": ["designGpuRuntime"],
+  "features/design-workspace/gpu/design-recordings-wire.ts": ["DESIGN_RECORDINGS_CAPABILITY"],
 }).map(([file, names]) => [`/apps/desktop/src/renderer/${file}`, names]));
 export const nativeDesignModules = Object.keys(designModuleExports);
 

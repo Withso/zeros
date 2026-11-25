@@ -253,6 +253,22 @@ describe("Design recordings", () => {
     expect(calls).toHaveLength(2);
   });
 
+  it("tells the canvas when a new demand changes what a frame's recording is: current, or no longer failed", async () => {
+    const { calls, recordings, changes } = harness();
+    recordings.demand(owner, [{ file: "a.html" }, { file: "b.html" }]);
+    calls[0]!.resolve({ ...readReply(calls[0]!.frames, ["b.html"], [], { versions: { "a.html": version(7) } }),
+      failed: [{ file: "b.html", sourceVersion: version(5), error: "This frame paints on 2 composited layers." }] });
+    await recordings.settled();
+    expect(recordings.recording(owner, "a.html")).toMatchObject({ current: false });
+    expect([...recordings.failedFiles(owner)]).toEqual(["b.html"]);
+    changes.length = 0;
+    // Preparation names a's stored version and a new version of b.
+    recordings.demand(owner, [{ file: "a.html", sourceVersion: version(7) }, { file: "b.html", sourceVersion: version(6) }]);
+    expect(recordings.recording(owner, "a.html")).toMatchObject({ current: true });
+    expect([...recordings.failedFiles(owner)]).toEqual([]);
+    expect(changes).toEqual([[designRecordingsOwnerKey(owner), "a.html"]]);
+  });
+
   it("keeps a frame's light and dark recordings apart: a scheme switch is an owner change", async () => {
     const { calls, recordings } = harness();
     const dark: DesignRecordingsOwner = { ...owner, colorScheme: "dark" };
