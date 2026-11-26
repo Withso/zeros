@@ -541,7 +541,8 @@ export function GitHubSection({
       setBusyMethod(method);
       try {
         // Even an empty App row may have a shared exchange in flight against this generation.
-        if (owner && method !== "gh-cli")
+        if (owner && (method === "github-app" ||
+          (method === "pat" && shared.read.data?.methods.pat.configured !== false)))
           await shared.change({ action: "disconnect", method });
         const result = await ghMethodDisconnect(method, accountId);
         ghAuthStatusCache.setData(authKey, result.snapshot);

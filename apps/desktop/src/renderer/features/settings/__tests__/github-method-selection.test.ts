@@ -1,10 +1,11 @@
 // @vitest-environment jsdom
 import { act, createElement } from "react";
 import { createRoot } from "react-dom/client";
-import { expect, it, vi } from "vitest";
+import { beforeEach, expect, it, vi } from "vitest";
 import { GitHubSection } from "../github-section";
 
 const adapters = vi.hoisted(() => ({
+  cloudPatConfigured: true,
   cloud: vi.fn(async () => {}),
   mac: vi.fn(async () => { throw new Error("Mac PAT revoked"); }),
   remove: vi.fn(async () => ({})),
@@ -24,9 +25,36 @@ vi.mock("../../../state/use-recovering-read", () => ({
 vi.mock("../inline-login-terminal", () => ({ InlineLoginTerminal: () => "CLI sign-in terminal" }));
 vi.mock("../use-shared-github", () => ({
   useSharedGithub: () => ({ change: adapters.cloud, read: { data: {
-    selectedMethod: null, methods: { pat: { configured: true, login: "octocat" }, "github-app": { configured: false } },
+    selectedMethod: null, methods: { pat: { configured: adapters.cloudPatConfigured, login: "octocat" }, "github-app": { configured: false } },
   } } }),
 }));
+
+beforeEach(() => {
+  vi.clearAllMocks();
+  adapters.cloudPatConfigured = true;
+});
+
+it("removes a Mac-only PAT when Cloud is offline", async () => {
+  adapters.cloudPatConfigured = false;
+  adapters.cloud.mockRejectedValueOnce(new Error("Cloud is offline"));
+  const container = document.body.appendChild(document.createElement("div"));
+  const root = createRoot(container);
+  try {
+    await act(async () => root.render(createElement(GitHubSection, {
+      owner: { userId: "a", organizationId: "o", name: "Team" },
+    })));
+    const trigger = container.querySelector<HTMLElement>('[aria-label="More actions for Personal Access Token"]')!;
+    await act(async () => trigger.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true })));
+    const remove = [...document.querySelectorAll<HTMLElement>('[role="menuitem"]')].find(item => item.textContent === "Remove token")!;
+    await act(async () => remove.click());
+    expect(adapters.remove).toHaveBeenCalledWith("pat", "a");
+    expect(adapters.cloud).not.toHaveBeenCalled();
+  } finally {
+    act(() => root.unmount());
+    container.remove();
+    adapters.cloud.mockReset();
+  }
+});
 
 it("invalidates a pending Cloud App exchange even when only the Mac has a saved App", async () => {
   const container = document.createElement("div");
