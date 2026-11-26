@@ -29,17 +29,17 @@ async function open() {
   return page;
 }
 
-async function paint(page: Page, zoom: number, panX = 0, width?: number) {
-  return page.evaluate(({ zoom, panX, width }) => {
+async function paint(page: Page, zoom: number, panX = 0, width?: number, gesture = true) {
+  return page.evaluate(({ zoom, panX, width, gesture }) => {
     const world = document.querySelector<HTMLDivElement>("#world")!;
-    (window as any).camera.paintDesignCanvasCamera(world, { zoom, panX, panY: 0 }, true,
+    (window as any).camera.paintDesignCanvasCamera(world, { zoom, panX, panY: 0 }, gesture,
       width === undefined ? undefined : { width, height: 300 });
     return [...world.querySelectorAll<HTMLElement>("[data-design-frame]")].map(frame => ({
       file: frame.dataset.designFrame,
       inverse: Number(getComputedStyle(frame).getPropertyValue("--design-canvas-inverse-zoom")),
       chromeHeight: frame.querySelector("[data-design-frame-chrome]")!.getBoundingClientRect().height,
     }));
-  }, { zoom, panX, width });
+  }, { zoom, panX, width, gesture });
 }
 
 it("stops propagating camera changes into offscreen frame trees and restores their scale before the return paint", async () => {
@@ -295,19 +295,48 @@ it("holds frame chrome scale through small steps of a live camera gesture and se
   } finally { await page.close(); }
 });
 
-it("keeps frame names and Play at their exact screen size through every gesture step while frame bodies hold their scale", async () => {
-  // Chrome holding a stale scale grew and shrank the name and its gap by up
-  // to 15% per step, then snapped back at rest: a flicker on every zoom.
+it("hides automatic frame names and Play through a camera gesture without restyling them, and restores their exact size at rest", async () => {
+  // An exact scale per step re-laid out every visible name, enough work to
+  // miss the display deadline; a held scale grew and shrank names, then snapped.
   const page = await open();
   try {
-    await paint(page, 2, 0, 500);
+    await page.locator('[data-design-frame="near"]').evaluate(frame => frame.setAttribute("data-design-frame-controls", "automatic"));
+    await page.evaluate(() => (window as any).camera.paintDesignCanvasCamera(document.querySelector("#world"), { zoom: 2, panX: 0, panY: 0 }, false, { width: 500, height: 300 }));
+    const chrome = page.locator('[data-design-frame="near"] > [data-design-frame-chrome]');
+    const state = () => chrome.evaluate(root => ({ opacity: getComputedStyle(root).opacity,
+      pointer: getComputedStyle(root.querySelector("button")!).pointerEvents, style: root.getAttribute("style") }));
+    const rest = await state();
+    expect(rest).toMatchObject({ opacity: "1", pointer: "auto" });
     for (const zoom of [2.1, 2.2, 1.9, 1.75, 2.05]) {
-      const [near] = await paint(page, zoom);
-      expect(near.chromeHeight).toBeCloseTo(28, 3);
-      // The frame body keeps the held scale: restyling its subtree per step is
-      // the cost the hold avoids.
-      expect(near.inverse).toBeCloseTo(.5);
+      await paint(page, zoom);
+      expect(await state()).toEqual({ opacity: "0", pointer: "none", style: rest.style });
     }
+    await page.evaluate(() => (window as any).camera.paintDesignCanvasCamera(document.querySelector("#world"), { zoom: 2.05, panX: 0, panY: 0 }, false));
+    expect(await state()).toMatchObject({ opacity: "1", pointer: "auto" });
+    expect(await chrome.evaluate(root => root.getBoundingClientRect().height)).toBeCloseTo(28, 3);
+    expect(await chrome.evaluate(root => Number(root.style.getPropertyValue("--design-canvas-inverse-zoom")))).toBeCloseTo(1 / 2.05);
+  } finally { await page.close(); }
+});
+
+it("keeps expanded and focused frame names at their exact screen size through every gesture step while frame bodies hold their scale", async () => {
+  const page = await open();
+  try {
+    await page.locator('[data-design-frame="near"]').evaluate(frame => frame.setAttribute("data-design-frame-controls", "expanded"));
+    await page.locator('[data-design-frame="far"]').evaluate(frame => {
+      frame.setAttribute("data-design-frame-controls", "automatic"); (frame as HTMLElement).style.left = "200px";
+    });
+    await paint(page, 2, 0, 500);
+    await page.locator('[data-design-frame="far"] button').focus();
+    for (const zoom of [2.1, 2.2, 1.9, 1.75, 2.05]) {
+      const [near, far] = await paint(page, zoom);
+      for (const frame of [near, far]) {
+        expect(frame.chromeHeight).toBeCloseTo(28, 3);
+        // The frame body keeps the held scale: restyling its subtree per step is
+        // the cost the hold avoids.
+        expect(frame.inverse).toBeCloseTo(.5);
+      }
+    }
+    expect(await page.locator("[data-design-frame-gesture-hidden]").count()).toBe(0);
   } finally { await page.close(); }
 });
 
@@ -415,7 +444,7 @@ it("keeps a small frame's name on an uncrowded page, hides only its Play control
       control: getComputedStyle(element.querySelector("[data-design-frame-play-chrome]")!).clip,
     }));
     // 60 px on screen: the name stays, the 16 px Play control waits for intent.
-    await paint(page, .5, 0, 500);
+    await paint(page, .5, 0, 500, false);
     expect(await state()).toEqual({ compact: false, play: true, label: "auto", control: "rect(0px, 0px, 0px, 0px)" });
     // The name row can lie over the frame above: only the name takes the pointer.
     expect(await frame.evaluate(element => {
@@ -426,17 +455,17 @@ it("keeps a small frame's name on an uncrowded page, hides only its Play control
     expect((await state()).control).toBe("auto");
     await page.mouse.move(600, 400);
     // 18 px: too small for a name.
-    await paint(page, .15);
+    await paint(page, .15, 0, undefined, false);
     expect(await state()).toMatchObject({ compact: true, play: false });
     // Wide enough for both; Play still waits for intent.
-    await paint(page, 2);
+    await paint(page, 2, 0, undefined, false);
     expect(await state()).toEqual({ compact: false, play: false, label: "auto", control: "rect(0px, 0px, 0px, 0px)" });
     // A crowded page keeps the cheap overview path at the old threshold.
     await page.locator("#world").evaluate(world => {
       for (let index = 0; index < 70; index++) world.insertAdjacentHTML("beforeend",
         `<article data-design-frame="extra-${index}" data-design-frame-controls="automatic" style="position:absolute;left:${3000 + index * 200}px;top:40px;width:120px;height:80px"><div data-design-frame-chrome style="height:28px"><button style="height:28px">Extra</button></div></article>`);
     });
-    await paint(page, .5);
+    await paint(page, .5, 0, undefined, false);
     expect(await state()).toMatchObject({ compact: true, play: false });
   } finally { await page.close(); }
 });

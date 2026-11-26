@@ -67,9 +67,11 @@ const writtenScales = new WeakMap<HTMLElement, { zoom: number; style: string | n
  * step restyled each frame subtree per display frame; rest writes it exactly. */
 const CHROME_SCALE_GESTURE_HOLD = 0.15;
 
-/** A frame's name and Play roots. They take the exact camera scale at every
- * gesture step: restyling these two small subtrees is cheap, while a held
- * scale grew and shrank the name and its gap by up to 15%, then snapped. */
+/** A frame's name and Play roots. At rest they take the exact camera scale.
+ * A held scale grew and shrank the name and its gap by up to 15%, then
+ * snapped; an exact scale per step restyled and re-laid out every visible
+ * name, enough main-thread work to miss the display deadline. So a camera
+ * gesture hides automatic chrome and leaves its scale untouched until rest. */
 const chromeRoots = new WeakMap<HTMLElement, { count: number; roots: HTMLElement[]; zoom?: number | null }>();
 
 /** Null leaves a root to inherit its frame's scale, as hidden chrome must. */
@@ -189,9 +191,11 @@ export function paintDesignFrameVisibility(element: HTMLElement, context?: Chrom
     !element.hasAttribute("data-design-nest-target");
   // A protected frame is one or a few frames whose selection geometry and
   // size label must not drift either; its subtree is cheap to restyle.
-  paintChromeScale(element, outside || compact ? 1 : viewport.zoom,
-    !chromeProtected && (context ? context.gesture : world.hasAttribute("data-design-camera-gesture")));
-  paintFrameChromeRoots(element, outside || compactControls ? null : viewport.zoom);
+  const gesture = !chromeProtected && !!(context ? context.gesture : world.hasAttribute("data-design-camera-gesture"));
+  paintChromeScale(element, outside || compact ? 1 : viewport.zoom, gesture);
+  const gestureHidden = gesture && controls === "automatic" && focusedFrame !== element;
+  element.toggleAttribute("data-design-frame-gesture-hidden", gestureHidden);
+  if (!gestureHidden) paintFrameChromeRoots(element, outside || compactControls ? null : viewport.zoom);
   if (!paintingWorlds.has(world)) repaintDesignCanvasPixels(world);
 }
 

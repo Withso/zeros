@@ -923,6 +923,19 @@ it("bounds outstanding speculative GPU uploads and cancels blocked work when the
     expect(blocked.polls).toBeGreaterThan(0);
     expect(blocked.fences).toBe(1);
     expect(blocked.usage.waiting).toBeGreaterThan(0);
+    // A held upload is checked once per display frame: a 1 ms retry queued
+    // hundreds of tasks per gesture between the camera's own frames.
+    const paced = await page.evaluate(async () => {
+      const w = window as any, polls = w.polls;
+      let frames = 0, running = true;
+      const tick = () => { if (running) { frames++; requestAnimationFrame(tick); } };
+      requestAnimationFrame(tick);
+      await new Promise(resolve => setTimeout(resolve, 200));
+      running = false;
+      return { polls: w.polls - polls, frames };
+    });
+    expect(paced.polls).toBeGreaterThan(0);
+    expect(paced.polls).toBeLessThanOrEqual(paced.frames + 1);
     await page.evaluate(() => { (window as any).gpuReady = true; });
     await page.waitForFunction(() => (window as any).renderer.usage().waiting === 0);
     const displayed = await page.evaluate(() => {

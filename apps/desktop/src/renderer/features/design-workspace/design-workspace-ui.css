@@ -1130,6 +1130,17 @@
   pointer-events: none;
 }
 
+/* A moving camera hides automatic names and Play without a layout; the
+ * camera painter restores their exact scale at rest. Opacity, unlike
+ * visibility, keeps them focusable: focus reveals them in the same paint. */
+[data-design-frame-gesture-hidden] > [data-design-frame-chrome] {
+  opacity: 0;
+}
+[data-design-frame-gesture-hidden] > [data-design-frame-chrome],
+[data-design-frame-gesture-hidden] > [data-design-frame-chrome] * {
+  pointer-events: none !important;
+}
+
 /* Play appears only for a frame with a selection, under the pointer, playing,
  * or holding keyboard focus; a click's leftover focus keeps it hidden. The
  * hidden control drops its layer, and the name takes the room. */
