@@ -684,6 +684,43 @@ dbDescribe("GitHub App OAuth handoff", () => {
     expect((await store.status(scope)).selectedMethod).toBe("pat");
   });
 
+  it("rejects a pending shared App exchange after disconnecting an empty Cloud slot", async () => {
+    const user = await ensureUser(pool, {
+      provider: "workos", providerSubject: randomUUID(),
+      email: `pending-${randomUUID()}@example.test`, displayName: "Owner",
+    });
+    const organizationId = randomUUID();
+    const scope = { organizationId, userId: user.id };
+    await pool.query("INSERT INTO organizations(id,slug,name,created_by,is_personal,cloud_workspaces_allowed) VALUES($1,$2,'Org',$3,false,true)",
+      [organizationId, `pending-${organizationId}`, user.id]);
+    await pool.query("INSERT INTO organization_members(org_id,user_id,role) VALUES($1,$2,'owner')", [organizationId, user.id]);
+    const store = new CloudGithubConnectionStore(pool, { currentKeyVersion: 1, keys: { 1: Buffer.alloc(32, 5).toString("base64url") } });
+    const provider = githubFetch([]);
+    const remote = vi.fn(provider);
+    const app = testApp(pool, user, { fetch: remote, cloudGithub: new CloudGithubConnections(store, githubConfig, remote) });
+    const nonce = randomUUID().repeat(2);
+    const started = await startFlow(app, nonce, false);
+    expect((await callback(app, started.state)).status).toBe(302);
+    const before = await store.status(scope);
+    expect(before.methods["github-app"].configured).toBe(false);
+    // Disconnect during the exchange's GitHub identity read, before the database save.
+    remote.mockImplementationOnce(async (url, init) => {
+      expect(String(url)).toMatch(/\/user$/);
+      await store.disconnect(scope, before.generation, "github-app");
+      return provider(url, init);
+    });
+    const result = await app.request("/v1/github/oauth/exchange", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ nonce, shared: { organizationId, expected: before.generation } }),
+    });
+    expect(result.status).toBe(409);
+    expect(await result.json()).toMatchObject({ error: { code: "github_authorization_changed" } });
+    const after = await store.status(scope);
+    expect(after.generation).not.toBe(before.generation);
+    expect(after.methods["github-app"].configured).toBe(false);
+    expect(after.selectedMethod).toBeNull();
+  });
+
   it("lets two Zeros accounts authorize the same installed GitHub account with independent access", async () => {
     const org = randomUUID(), calls: FetchCall[] = [], provider = githubFetch(calls);
     const liveRefresh = new Set<string>();
