@@ -1,4 +1,4 @@
-/* global document, innerWidth, innerHeight */
+/* global document, getComputedStyle, innerWidth, innerHeight */
 export async function designFrameElementBox(iframe, element) {
   // Playwright's cross-frame boundingBox applies iframe CSS zoom twice. Map
   // the authored viewport into the actual outer rectangle, including the
@@ -165,12 +165,16 @@ export async function designLayoutMenuState(page, name) {
   return !row ? "absent" : row[1] ? "disabled" : "enabled";
 }
 
-/** A frame's Play shows only while the frame has a selection or the pointer.
- * Reach it from inside the frame, as a pointer does. */
+/** A frame's Play shows only while the frame has a selection or plays.
+ * Select inside the frame below Play first, as a pointer does; its name may
+ * lie outside the view. */
 export async function clickFramePlay(play) {
-  const frame = play.locator("xpath=ancestor::article[@data-design-frame][1]");
-  const box = await frame.boundingBox();
-  await play.page().mouse.move(box.x + box.width - 12, box.y + 12);
+  const shown = () => play.evaluate(button => getComputedStyle(button.parentElement).clip === "auto");
+  if (!(await shown())) {
+    const box = await play.locator("xpath=ancestor::article[@data-design-frame][1]").boundingBox();
+    await play.page().mouse.click(box.x + box.width - 12, box.y + 12);
+    await play.page().waitForFunction(button => getComputedStyle(button.parentElement).clip === "auto", await play.elementHandle());
+  }
   await play.click();
 }
 

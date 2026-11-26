@@ -245,10 +245,11 @@ export async function runDesignOverviewChromeSmoke({ page: parent, check }) {
       return frames.filter(frame => frame.dataset.designFrame !== active).every(frame =>
         getComputedStyle(frame.querySelector("[data-design-frame-play]").parentElement).clip === "rect(0px, 0px, 0px, 0px)");
     })).toBe(true);
+    // The pointer alone does not reveal Play.
     await frame.hover({ position: { x: 30, y: 20 } });
-    await expect.poll(chrome).toEqual({ clip: "auto", pointerEvents: "auto" });
+    await page.waitForTimeout(100);
+    expect(await chrome()).toEqual({ clip: "rect(0px, 0px, 0px, 0px)", pointerEvents: "none" });
     await page.mouse.move(2, 2);
-    await expect.poll(chrome).toEqual({ clip: "rect(0px, 0px, 0px, 0px)", pointerEvents: "none" });
     // Keyboard navigation reveals Play; a click's leftover focus does not.
     await page.keyboard.press("Tab");
     await play.focus();
@@ -257,7 +258,7 @@ export async function runDesignOverviewChromeSmoke({ page: parent, check }) {
     await expect(play).toHaveAttribute("aria-pressed", "true");
     await page.keyboard.press("Escape");
     await expect(play).toHaveAttribute("aria-pressed", "false");
-    check("overview chrome leaves frames visible and remains available by hover and keyboard", true);
+    check("overview chrome leaves frames visible, keeps Play hidden under the pointer and available by keyboard", true);
   } finally { await page.close(); }
 }
 
