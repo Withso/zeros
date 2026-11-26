@@ -125,6 +125,22 @@ const STAGED_RELEASE_BINARIES = [
   },
 ];
 
+// Third-party source copied into the repository rather than installed: a
+// fixed upstream release whose reviewed terms sit under third_party/.
+const COPIED_SOURCE_ASSETS = [
+  {
+    // The keyboard-shortcut glyphs (Bold weight) inlined in
+    // apps/desktop/src/renderer/shared/ui/primitives/key-glyphs.tsx.
+    name: "@phosphor-icons/core",
+    version: "2.1.1",
+    license: "MIT",
+    repository: "https://github.com/phosphor-icons/core",
+    termsDirectory: "third_party/phosphor-icons",
+    surface: "desktop renderer (copied source)",
+    pinFile: "apps/desktop/src/renderer/shared/ui/primitives/key-glyphs.tsx",
+  },
+];
+
 /** Version suffix npm's Codex platform aliases carry (`0.146.0-darwin-arm64`).
  *  Their package NAME stays `@openai/codex`, so the platform variant can only
  *  be told apart from the JS wrapper by this suffix. */
@@ -505,6 +521,27 @@ function stagedReleaseRecords() {
   });
 }
 
+function copiedSourceRecords() {
+  return COPIED_SOURCE_ASSETS.map((target) => {
+    // The copy names the release it came from; a re-copy must update both.
+    if (!readFileSync(join(ROOT, target.pinFile), "utf8").includes(`${target.name} ${target.version}`)) {
+      throw new Error(`${target.name}: ${target.pinFile} no longer names version ${target.version}`);
+    }
+    return {
+    name: target.name,
+    version: target.version,
+    license: target.license,
+    author: "",
+    homepage: target.repository,
+    repository: target.repository,
+    repositoryKey: target.repository.toLowerCase(),
+    packagePath: join(ROOT, target.termsDirectory),
+    surfaces: new Set([target.surface]),
+    documentIds: [],
+    };
+  });
+}
+
 // License documents a package keeps below its root for code it adapted from
 // another project and ships. Missing ones fail closed.
 const NESTED_LICENSE_DOCUMENTS = new Map([
@@ -721,6 +758,7 @@ for (const record of [
   ...webRecords,
   electronRuntimeRecord(),
   ...stagedReleaseRecords(),
+  ...copiedSourceRecords(),
   ...runtimeSystemAssetRecords(),
 ]) {
   const key = `${record.name}@${record.version}`;
@@ -865,7 +903,8 @@ const lines = [
   "packaged Cursor runtime, the packaged ripgrep binary, the Parcel watcher, the macOS-only",
   "fsevents watcher, and the macOS-only Cua computer-use driver runtime",
   "are all included, as is the AXe iOS Simulator tool, a pinned release",
-  "binary that is not an npm package.",
+  "binary that is not an npm package. Source copied into the repository,",
+  "such as the Phosphor keyboard glyphs, is listed with its upstream terms.",
   "Electron's distribution also carries its Chromium notices",
   "file. See THIRD-PARTY-NOTICES.md for the vendor release requirements.",
   "",

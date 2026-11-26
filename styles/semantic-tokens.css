@@ -27,20 +27,26 @@
 
 /* ── Dark theme ── */
 :root {
-  /* Composer Tools text actions: preserve blue's hue/saturation while lifting
-     lightness by ten percentage points from the active theme's foreground. */
-  --composer-tool-action-hover: hsl(from var(--blue-fg) h s calc(l + 10));
+  /* Composer Tools text actions: the accent-text word gains ten lightness
+     points on hover in Dark and loses ten in Light (override below), so hover
+     always adds contrast. */
+  --composer-tool-action-hover: hsl(from var(--accent-text) h s calc(l + 10));
 
   /* The composer family's edge (composer, Create, the edit composer, dock
      cards and docked pickers): a step past border2 in Dark, between two
      primitives; Light keeps border2 (override below). */
   --composer-border: #323232;
 
-  /* A pill inside a sent message: one step lighter than the bg2 bubble, so it
-     still reads as a chip. bg2-hover in Dark; Light's next step lighter is too
-     faint to see, so it takes sidebar-bg, an equal step by eye (override
-     below). The bubble hands it to its pills as --pill-bg. */
-  --prompt-pill-bg: var(--bg2-hover);
+  /* Pills by ground (P13). One pill set, tuned to the surface it sits on.
+     These defaults are the agent chat and tool rows on bg1: bg2 on border2,
+     hovering to bg2-hover on border3 (the edge stays because a hovered row,
+     bg1-hover, swallows the fill). The composer family and the sent-message
+     bubble re-declare them through PILL_GROUND (composer-editor/pill-views.tsx). */
+  --pill-bg: var(--bg2);
+  --pill-border: var(--border2);
+  --pill-hover-bg: var(--bg2-hover);
+  --pill-hover-border: var(--border3);
+  --pill-link-bg: var(--accent-bg);
 
   /* The chat's text column, Settings → Appearance → Chat width: 800px is
      Normal, with Narrow and Wide below. --chat-column adds the lane's px-7
@@ -52,7 +58,7 @@
   /* Chat notice text actions (Retry, Sign in) have no hover fill: the blue
      label and icon pop instead — ten lightness points lighter on dark,
      ten deeper in Light (override below), so hover always adds contrast. */
-  --agent-notice-action-hover: hsl(from var(--blue-fg) h s calc(l + 10));
+  --agent-notice-action-hover: hsl(from var(--accent-on-bg) h s calc(l + 10));
 
   /* PR status island — open-PR states sit on the neutral raised surface; the
      state is the chip's colour. The action is the primary button, which
@@ -60,7 +66,6 @@
   --pr-status-surface: var(--bg2);
   --pr-status-action-bg: var(--primary-button-bg);
   --pr-status-action-fg: var(--primary-button-fg);
-  --pr-status-action-hover: var(--primary-button-hover);
   --pr-status-merge-fg: var(
     --inverted-fg
   ); /* dark text/icon on the bright-green Merge button */
@@ -79,15 +84,16 @@
     --red-750
   ); /* closed (red) — muted brick outline in dark themes */
 
-  /* Merged-row "Continue" button — filled violet, label flips per theme. */
-  --pr-status-continue-bg: var(--violet-fg);
+  /* Merged-row "Continue" button — filled with the violet text colour, so the
+     label flips per theme: dark on Dark's light violet, white on Light's deep one. */
+  --pr-status-continue-bg: var(--violet-text);
   --pr-status-continue-fg: var(
     --inverted-fg
   ); /* dark label on the light-violet button in dark themes */
 
-  /* Loader (ZerosSpinner — the logo loader and the agent Puzzle,
+  /* Loader (ZerosSpinner — Stream-run and the agent Puzzle,
      apps/desktop/src/renderer/shared/ui/loading/zeros-spinner.tsx). The
-     app's DEFAULT loader colors: --loader-active paints the logo's rows and
+     app's DEFAULT loader colors: --loader-active paints the stream's rows and
      the Puzzle's tiles. Both aliases resolve to primitives that already flip
      per theme, so no [data-theme="light"] override is needed.
        --loader-active            → default surfaces (chrome, dialogs,
@@ -136,6 +142,11 @@
   --design-canvas-default-text: #111111;
   --design-padding-stroke: #4489FF;
   --design-gap-stroke: #F531B3;
+  /* White gap values sit on this darker pink (5.6:1), never on the stroke. */
+  --design-gap-label-bg: #C21A87;
+  /* Alt measurement lines and their white chips: one theme-static red that
+     carries white text (5.9:1) on any canvas, apart from the app's status red. */
+  --design-measure: #C11F1F;
   --design-spacing-line-border: #FFFFFF;
   --design-selection-soft: color-mix(
     in oklab,
@@ -155,9 +166,9 @@
 /* ── Light theme ── */
 [data-theme="light"] {
   --composer-border: var(--border2); /* #E4E0DC, the composer's existing Light edge */
-  --prompt-pill-bg: var(--sidebar-bg); /* #FBFAF8, a step lighter than the #F5F3F0 bubble */
+  --composer-tool-action-hover: hsl(from var(--accent-text) h s calc(l - 10));
   --agent-notice-action-hover: hsl(
-    from var(--blue-fg) h s calc(l - 10)
+    from var(--accent-on-bg) h s calc(l - 10)
   ); /* deeper blue on the pale-blue notice */
   --pr-status-merge-fg: var(
     --inverted-fg

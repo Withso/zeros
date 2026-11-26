@@ -42,7 +42,7 @@ export function ClaudeProviderSettings({ onChange }: { onChange: () => void }) {
           <>
             <span className="block">How long Claude stays ready between turns</span>
             {idleTimeoutMinutes > DEFAULT_CLAUDE_IDLE_TIMEOUT_MINUTES && (
-              <span className="text-yellow-fg block">Longer sessions use more memory.</span>
+              <span className="text-yellow-text block">Longer sessions use more memory.</span>
             )}
           </>
         }

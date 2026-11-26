@@ -4,6 +4,6 @@
   "area": "renderer-agents",
   "fixedBy": "pr:839",
   "symptom": "The @, / and # pickers docked on the composer floated on bg3 with a shadow, 1px narrower than the composer and 7px above it, so the cards above the composer did not share its surface.",
-  "rule": "Everything docked above the composer is on the composer's surface: PopoverContent surface=\"composer\" (sidebar-bg, border2, no shadow) at the composer's width and 8px above it; the composer-suggestions smoke checks gap, width and surface in both themes.",
+  "rule": "Everything docked above the composer is on the composer's surface: PopoverContent surface=\"composer\" (bg1-raised, border2, no shadow) at the composer's width and 8px above it; the composer-suggestions smoke checks gap, width and surface in both themes.",
   "check": "pnpm test:ui-smoke --shard=2/3"
 }

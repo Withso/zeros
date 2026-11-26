@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Button, ButtonShortcut } from "@/renderer/shared/ui/primitives";
+import { MessageSquarePlus } from "lucide-react";
 import { Popover, PopoverAnchor, PopoverContent } from "@/renderer/shared/ui/primitives/popover";
+import { Toolbar } from "@/renderer/shared/ui/primitives/toolbar";
 import { toast } from "@/renderer/shared/ui/primitives/elements";
 import { useWorkspaceDispatch, useWorkspaceStore } from "@/renderer/state/store";
 import { formatLineReference, readCodeSelection, type CodeSelection } from "./code-selection";
@@ -14,7 +16,7 @@ const sameLines = (a: CodeSelection | null, b: CodeSelection | null) =>
 const isAddToChatKey = (event: KeyboardEvent) =>
   (event.metaKey || event.ctrlKey) && !event.shiftKey && !event.altKey && event.key.toLowerCase() === "l";
 
-/** "Add to Chat ⌘L" above a code selection in `root`: the source editor or a
+/** "Add to chat ⌘L" above a code selection in `root`: the source editor or a
  *  rendered diff. Adds a `path:L20-22` reference to the active chat's
  *  composer. */
 export function AddToChatPopup({
@@ -137,7 +139,8 @@ export function AddToChatPopup({
         side="top"
         align="start"
         size="fit"
-        padding="inset"
+        // The action is an inline floating group that draws its own surface.
+        surface="bare"
         hideWhenDetached
         updatePositionStrategy="always"
         data-add-to-chat=""
@@ -146,16 +149,19 @@ export function AddToChatPopup({
         onCloseAutoFocus={(event) => event.preventDefault()}
         onFocusOutside={(event) => event.preventDefault()}
       >
-        <Button
-          variant="ghost"
-          size="compact"
-          aria-keyshortcuts="Meta+L Control+L"
-          onPointerDown={(event) => event.preventDefault()}
-          onClick={add}
-        >
-          Add to Chat
-          <ButtonShortcut keys="⌘L" />
-        </Button>
+        <Toolbar size="inline" aria-label="Selection actions">
+          <Button
+            variant="ghost"
+            size="inline"
+            aria-keyshortcuts="Meta+L Control+L"
+            onPointerDown={(event) => event.preventDefault()}
+            onClick={add}
+          >
+            <MessageSquarePlus />
+            Add to chat
+            <ButtonShortcut keys="⌘L" />
+          </Button>
+        </Toolbar>
       </PopoverContent>
     </Popover>
   );

@@ -239,6 +239,25 @@ export async function runAppSidebarSmoke({ page, check, harnessBase }) {
     true,
   );
 
+  // The logo's menu and its dialog render in portals; their clicks bubble
+  // through React to the row and must not open that row's workspace.
+  const logo = page
+    .locator('[data-workspace-tab="true"]:not([data-active="true"]) [data-sidebar-row-logo]')
+    .first();
+  const before = await state();
+  await logo.click({ button: "right" });
+  await page.getByRole("menuitem", { name: "Repository Settings", exact: true }).click();
+  // Wait for the menu's click to settle; a bubbled row click would open that
+  // row's workspace and move the folder after the repository page appears.
+  await expect(page.getByRole("menu")).toHaveCount(0);
+  await expect.poll(async () => (await state()).page).toBe("repo");
+  expect((await state()).folder).toBe(before.folder);
+  await row("ws-atlanta")
+    .getByRole("button", { name: /^Open workspace atlanta/ })
+    .click();
+  await expect.poll(async () => (await state()).page).toBe("workspace");
+  check("Repository Settings from a row's logo opens the repository page, not the workspace", true);
+
   const zerosToggle = zeros.getByRole("button", { name: "Zeros", exact: true });
   await zerosToggle.click();
   await expect(zerosToggle).toHaveAttribute("aria-expanded", "false");

@@ -112,7 +112,7 @@ export const BrowserActivityCard = memo(function BrowserActivityCard({
             }
             active={ctx.attachmentImagesActive !== false}
             className={
-              failed ? "text-red-primary size-3" : "text-fg2 size-3"
+              failed ? "text-red-text size-3" : "text-fg2 size-3"
             }
           />
         </span>

@@ -104,7 +104,7 @@ export function ReviewChecksSection({
     <div
       key={`${c.name}-${i}`}
       data-review-check={c.name}
-      className="group hover:bg-bg1-hover flex h-9 min-w-0 items-center gap-2.5 rounded-md px-2.5 transition-colors duration-120 ease-out"
+      className="group hover:bg-bg1-hover flex h-9 min-w-0 items-center gap-2.5 rounded-md px-2.5 transition-colors duration-fast ease-out"
     >
       <CheckGlyph check={c} />
       <span className="text-fg1 min-w-0 truncate text-xs">{c.name}</span>
@@ -225,10 +225,10 @@ export function ReviewChecksSection({
 }
 
 const SUMMARY_PARTS = [
-  { key: "failed", label: "failed", outcome: "failed", bar: "bg-red-primary" },
-  { key: "running", label: "running", outcome: "pending", bar: "bg-yellow-primary" },
+  { key: "failed", label: "failed", outcome: "failed", bar: "bg-red-text" },
+  { key: "running", label: "running", outcome: "pending", bar: "bg-yellow-text" },
   { key: "expected", label: "expected", outcome: "expected", bar: "bg-border3" },
-  { key: "passed", label: "passed", outcome: "passed", bar: "bg-green-primary" },
+  { key: "passed", label: "passed", outcome: "passed", bar: "bg-green-text" },
 ] as const;
 
 /** Counts per state over a bar whose segments share its width by count. */

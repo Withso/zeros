@@ -18,7 +18,7 @@ const source = (file: string) =>
 
 describe("the floating surface", () => {
   it("is 12px with a 4px inset, so 8px rows sit parallel inside it", () => {
-    expect(MENU_SURFACE_RADIUS).toBe("rounded-[calc(var(--radius-lg)*1.5)]");
+    expect(MENU_SURFACE_RADIUS).toBe("rounded-xl");
     expect(MENU_SURFACE_INSET).toBe("p-1");
     expect(MENU_SEPARATOR).toContain("-mx-1");
     expect(MENU_SEPARATOR).toContain("my-1");
@@ -46,7 +46,6 @@ describe("the floating surface", () => {
     "primitives/hover-card.tsx",
     "primitives/tooltip.tsx",
     "primitives/elements/toast.tsx",
-    "primitives/elements/update-toast.tsx",
   ])("%s joins the floating family", (file) => {
     const text = source(file);
     expect(text).toContain("FLOATING_SURFACE");
@@ -54,6 +53,12 @@ describe("the floating surface", () => {
     expect(text).toContain("shadow-[var(--shadow-dropdown)]");
     expect(text).not.toContain("backdrop-blur");
   });
+});
+
+it("draws the update toast as the one ToastCard shape", () => {
+  const update = source("primitives/elements/update-toast.tsx");
+  expect(update).toContain("<ToastCard");
+  expect(update).not.toContain("FLOATING_SURFACE");
 });
 
 describe("menu choices", () => {
@@ -152,7 +157,7 @@ describe("Toast", () => {
   it("is 360px with its close inside the top-right corner and info in blue", () => {
     expect(toast).toContain("w-90");
     expect(toast).not.toContain("w-[350px]");
-    expect(toast).toContain('info: "text-blue-primary"');
+    expect(toast).toContain('info: "text-accent-text"');
     expect(toast).not.toContain("-left-2 -top-2");
     expect(toast).toContain("<IconButton");
   });
@@ -175,14 +180,14 @@ describe("Popover", () => {
 
   // Regression: the @, / and # pickers docked on the composer floated on bg3
   // with a lift while every other card above the composer sat on its surface.
-  it("floats on bg3 with the lift, or docks on the composer's own surface", () => {
+  it("floats on bg3 with the lift, or docks on the same bg3 at the composer's edge (P5)", () => {
     expect(popover).toMatch(/floating:\s*"[^"]*border-border2 shadow-\[var\(--shadow-dropdown\)\]/);
-    expect(popover).toMatch(/composer:\s*"bg-sidebar-bg border-\(--composer-border\) /);
+    expect(popover).toMatch(/composer:\s*"bg-bg[3] border-\(--composer-border\) /);
     expect(popover).not.toMatch(/composer:\s*"[^"]*shadow/);
     expect(popover).toContain('surface = "floating"');
     const suggestions = source("../../features/agent/composer-editor/suggestion-popup.tsx");
     expect(suggestions).toContain('surface={placement === "composer" ? "composer" : "floating"}');
-    expect(suggestions).toContain('<Surface kind={placement === "composer" ? "sidebar" : "floating"}>');
+    expect(suggestions).toContain('<Surface kind="floating">');
   });
 
   // Portaled, a docked picker sits over the transcript instead of in the dock

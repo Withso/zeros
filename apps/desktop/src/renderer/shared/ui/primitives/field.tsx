@@ -7,7 +7,7 @@ import { cn } from "@/renderer/shared/ui/cn";
 // side padding and a border3 edge that lifts to border4 on hover, so a value
 // lines up between an Input and a Select above or below it.
 export const FIELD_BOX =
-  "rounded-md border border-border3 bg-transparent text-xs leading-4.5 text-fg1 transition-[color,background-color,border-color,box-shadow] duration-120 ease-out hover:border-border4 disabled:cursor-not-allowed disabled:opacity-50";
+  "rounded-md border border-border3 bg-transparent text-xs leading-4.5 text-fg1 transition-[color,background-color,border-color,box-shadow] duration-fast ease-out hover:border-border4 disabled:cursor-not-allowed disabled:opacity-50";
 
 // The accent border is for keyboard focus only: the focus tracker marks focus that Tab
 // or arrow navigation brought. A click or typing changes nothing; the caret
@@ -16,7 +16,7 @@ export const FIELD_FOCUS =
   "focus-visible:outline-none focus-visible:data-[zeros-keyboard-focus]:border-accent";
 
 export const FIELD_INVALID =
-  "aria-[invalid=true]:border-red-primary aria-[invalid=true]:hover:border-red-primary focus-visible:data-[zeros-keyboard-focus]:aria-[invalid=true]:border-red-primary focus-visible:data-[zeros-keyboard-focus]:aria-[invalid=true]:ring-1 focus-visible:data-[zeros-keyboard-focus]:aria-[invalid=true]:ring-red-primary";
+  "aria-[invalid=true]:border-red-text aria-[invalid=true]:hover:border-red-text focus-visible:data-[zeros-keyboard-focus]:aria-[invalid=true]:border-red-text focus-visible:data-[zeros-keyboard-focus]:aria-[invalid=true]:ring-1 focus-visible:data-[zeros-keyboard-focus]:aria-[invalid=true]:ring-red-text";
 
 export interface FieldProps {
   label: React.ReactNode;
@@ -58,7 +58,7 @@ export function Field({ label, hint, error, optional = false, className, childre
       </label>
       {control}
       {error ? (
-        <p id={messageId} className="text-red-primary text-3xxs m-0 flex items-center gap-1 leading-4">
+        <p id={messageId} className="text-red-text text-3xxs m-0 flex items-center gap-1 leading-4">
           <CircleAlert aria-hidden className="size-3 shrink-0" />
           {error}
         </p>

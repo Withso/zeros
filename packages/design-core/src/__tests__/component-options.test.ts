@@ -28,7 +28,7 @@ const COMPOSER = [
   option({ name: "mode", type: "choice", label: "Mode", choices: "ask plan", default: "ask" }),
   option({ name: "density", type: "choice", label: "Density", choices: "compact comfortable wide-open", default: "comfortable" }),
   option({ name: "toolbar", type: "boolean", label: "Toolbar", default: "true" }),
-  option({ name: "accent", type: "color", label: "Accent", default: "var(--blue-primary)" }),
+  option({ name: "accent", type: "color", label: "Accent", default: "var(--accent-text)" }),
   option({ name: "send-radius", type: "number", label: "Corner radius", group: "Send button", default: "8", min: "0", max: "16", unit: "px" }),
   option({ name: "send-label", type: "text", label: "Label", group: "Send button", default: "Send" }),
   option({ name: "motion", type: "easing", label: "Easing", default: "spring(0.2) 150ms" }),
@@ -161,7 +161,7 @@ describe("option values in CSS", () => {
   it("set every option that reaches CSS, defaults included", () => {
     const { values } = componentOptionValues(declaration, new Map());
     const css = componentOptionCss(declaration, values);
-    expect(css).toMatch(/^--zd-width: 1120px; --zd-attachments: 2; --zd-accent: var\(--blue-primary\); --zd-send-radius: 8px; --zd-motion-easing: linear\([^)]*\); --zd-motion-duration: 150ms; --zd-gutter: 16px;$/);
+    expect(css).toMatch(/^--zd-width: 1120px; --zd-attachments: 2; --zd-accent: var\(--accent-text\); --zd-send-radius: 8px; --zd-motion-easing: linear\([^)]*\); --zd-motion-duration: 150ms; --zd-gutter: 16px;$/);
   });
 
   it("turn a spring into a bounded linear() curve that ends at 1", () => {
@@ -209,7 +209,7 @@ describe("option values in CSS", () => {
   });
 
   it("accept the colours people write", () => {
-    for (const color of ["#fff", "#ffffff80", "red", "transparent", "currentColor", "var(--blue-primary)", "rgb(1 2 3)", "rgba(1, 2, 3, 0.5)",
+    for (const color of ["#fff", "#ffffff80", "red", "transparent", "currentColor", "var(--accent-text)", "rgb(1 2 3)", "rgba(1, 2, 3, 0.5)",
       "hsl(210deg 50% 40% / 80%)", "oklch(0.7 0.1 200)", "lab(50% 40 59.5)", "hwb(12 50% 0%)"]) {
       expect(problems([option({ name: "c", type: "color", default: color })]), color).toEqual([]);
     }

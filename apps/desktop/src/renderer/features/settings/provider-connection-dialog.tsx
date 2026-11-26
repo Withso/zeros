@@ -76,7 +76,7 @@ export function ProviderConnectionDialog({
             {methods.map((entry) => (
               <section
                 key={entry.id}
-                className="border-border1 min-w-0 overflow-hidden rounded-[calc(var(--radius-lg)*1.5)] border"
+                className="border-border1 min-w-0 overflow-hidden rounded-xl border"
               >
                 <Button
                   variant="ghost"
@@ -101,7 +101,7 @@ export function ProviderConnectionDialog({
                   <span className="flex-1">{entry.label}</span>
                   {method === entry.id && connected && (
                     <Check
-                      className="text-green-fg size-4"
+                      className="text-green-text size-4"
                       aria-label="Connected"
                     />
                   )}

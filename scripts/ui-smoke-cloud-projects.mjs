@@ -88,9 +88,11 @@ export async function runCloudProjectsSmoke({ page, check, harnessBase }) {
 
   const row = page.locator("[data-folder-workspace-surface]").getByText("Dark mode", { exact: true }).first();
   await expect(row).toBeVisible();
-  await expect(page.locator("[data-folder-workspace-surface]")).toContainText("+60");
   const rowBox = await row.boundingBox();
   await page.mouse.move(rowBox.x + 10, rowBox.y + rowBox.height / 2);
+  // The ± totals live in the hover card, not on the row.
+  const card = page.getByRole("dialog", { name: /^Workspace details for Dark mode/ });
+  await expect(card).toContainText("+60");
   await expect(page.getByText("#9", { exact: true }).first()).toBeVisible();
-  check("The sidebar row totals every repository's lines and its hover card carries the one pull request mark", true);
+  check("The hover card totals every repository's lines and carries the one pull request mark", true);
 }

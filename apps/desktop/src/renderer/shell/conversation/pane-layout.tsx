@@ -1390,10 +1390,10 @@ function ChatPane({ paneId, ctx }: { paneId: string; ctx: PaneCtx }) {
       // an edge: split panes run edge to edge, and the divider's line
       // separates them. An unfocused pane's strip and body dim to 80%, the
       // owner's choice: fg1 and fg2 stay at WCAG AA, while fg3 in Light and
-      // muted-fg in Dark dip below their floors there.
+      // fg3 in Dark dip below their floors there.
       className={cn(
         "relative flex min-h-0 min-w-0 flex-1 flex-col bg-(--pane-bg) outline-none",
-        split && "*:transition-opacity *:duration-120 *:ease-out motion-reduce:*:transition-none",
+        split && "*:transition-opacity *:duration-fast *:ease-out motion-reduce:*:transition-none",
         split && !isFocused && "*:opacity-80",
       )}
     >
@@ -1576,7 +1576,7 @@ function PaneDropOverlay({
       {zone && (
         <div
           className={cn(
-            "bg-highlighted-bg/40 pointer-events-none absolute rounded-sm",
+            "bg-bg2/40 pointer-events-none absolute rounded-sm",
             zone === "center" && "inset-1",
             zone === "right" && "inset-y-1 right-1 left-1/2",
             zone === "down" && "inset-x-1 top-1/2 bottom-1",

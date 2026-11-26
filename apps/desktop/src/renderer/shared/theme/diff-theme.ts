@@ -19,7 +19,7 @@
 //
 // Syntax-token colors come from the user's unified code theme (resolveDiffTheme
 // — any Shiki bundled theme name, which @pierre/diffs resolves). The diff SURFACE
-// (--diffs-bg) is a Zeros structural surface (--sidebar-bg in workbench, --bg1
+// (--diffs-bg) is a Zeros structural surface (--bg1-raised in workbench, --bg1
 // in EditCards),
 // and the CHROME (add/remove row wash, changed-word emphasis, edge bars, line
 // numbers) is the Zeros palette — both bridged via @pierre's `--diffs-*` slots in
@@ -59,18 +59,18 @@ export function resolveDiffTheme(codeThemeId?: string): {
  *  against zeros-tokens.css):
  *
  *  1. SURFACE — `--diffs-bg` is set to a Zeros structural surface
- *     (--sidebar-bg in workbench, --bg1 in chat EditCards), NOT @pierre's cool
+ *     (--bg1-raised in workbench, --bg1 in chat EditCards), NOT @pierre's cool
  *     #000. @pierre derives context rows, gutter, and separator from it, so the
  *     whole diff matches the app. Syntax token colors still come from the picked
  *     Shiki theme.
  *  2. PALETTE — three base overrides; @pierre DERIVES the add/remove row wash,
  *     the changed-word emphasis, the edge bars, and the line numbers from them:
- *       addition → --green-primary · deletion → --red-primary
+ *       addition → --green-text · deletion → --red-text
  *       modified/selection → --highlighted-bright (structural neutral; replaces
  *       the package's navy #69b1ff). @pierre leaves the -override slots unset, so
  *       ours win. Fine-tune washes via --diffs-bg-*(-emphasis)-override.
  *  Preview: styles/Artifacts/diff-theme-preview.html. */
-function diffShadowCss(surface: "bg1" | "bg2" | "sidebar-bg"): string {
+function diffShadowCss(surface: "bg1" | "bg2" | "bg1-raised"): string {
   return `
   :host, pre, code {
     font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
@@ -225,8 +225,8 @@ export function zerosDiffOptions(opts?: {
   diffStyle?: "unified" | "split";
   disableFileHeader?: boolean;
   codeThemeId?: string;
-  /** Diff surface bg. Workbench diffs use "sidebar-bg" (default); EditCards "bg1". */
-  surface?: "bg1" | "bg2" | "sidebar-bg";
+  /** Diff surface bg. Workbench diffs use "bg1-raised" (default); EditCards "bg1". */
+  surface?: "bg1" | "bg2" | "bg1-raised";
 }): {
   theme: ThemesType;
   themeType: "dark" | "light";
@@ -249,7 +249,7 @@ export function zerosDiffOptions(opts?: {
 function zerosSharedDiffPresentation(opts?: {
   diffStyle?: "unified" | "split";
   codeThemeId?: string;
-  surface?: "bg1" | "bg2" | "sidebar-bg";
+  surface?: "bg1" | "bg2" | "bg1-raised";
 }): {
   theme: ThemesType;
   themeType: "dark" | "light";
@@ -263,7 +263,7 @@ function zerosSharedDiffPresentation(opts?: {
   return {
     theme,
     themeType,
-    unsafeCSS: diffShadowCss(opts?.surface ?? "sidebar-bg"),
+    unsafeCSS: diffShadowCss(opts?.surface ?? "bg1-raised"),
     diffStyle: opts?.diffStyle ?? "unified",
     hunkSeparators: "line-info",
     onPostRender: finishDiffRender,
@@ -286,8 +286,8 @@ export function zerosCodeViewOptions<
   diffStyle?: "unified" | "split";
   disableFileHeader?: boolean;
   codeThemeId?: string;
-  /** Diff surface bg. Workbench file-tab diffs use "sidebar-bg" (default). */
-  surface?: "bg1" | "bg2" | "sidebar-bg";
+  /** Diff surface bg. Workbench file-tab diffs use "bg1-raised" (default). */
+  surface?: "bg1" | "bg2" | "bg1-raised";
 }): CodeViewOptions<LAnnotation, Caret> {
   const presentation = zerosSharedDiffPresentation(opts);
   return {

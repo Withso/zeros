@@ -16,9 +16,9 @@
 // extend /apps/desktop/src/renderer/shared/ui/ first."
 //
 // The same 16px box as Checkbox: border4 at rest, fg3 on hover, and selected
-// fills with inverted-bg around an inverted-fg dot, the same "on" look as a
-// checked box. A settings choice is a state, not a call to action, so it never
-// takes the brand accent.
+// fills with the accent around a white (accent-fg) dot, the same "on" look as
+// a checked box. A choice that needs a frame sits in a Settings group like
+// every other row; there is no card variant.
 // ──────────────────────────────────────────────────────────
 
 import * as React from "react";
@@ -47,14 +47,12 @@ function RadioGroupItem({
   value,
   label,
   description,
-  variant = "default",
   className,
   children,
   ...props
 }: Omit<React.ComponentProps<typeof RadioGroupPrimitive.Item>, "children"> & {
   label: React.ReactNode;
   description?: React.ReactNode;
-  variant?: "default" | "card";
   children?: React.ReactNode;
 }) {
   return (
@@ -65,8 +63,6 @@ function RadioGroupItem({
         className={cn(
           "group flex cursor-pointer items-center gap-2 text-left focus-visible:outline-none",
           "disabled:cursor-not-allowed disabled:opacity-50",
-          variant === "card" &&
-            "border-border1 bg-bg1-highlight hover:bg-bg1-hover data-[state=checked]:bg-bg1-hover flex-row-reverse justify-between gap-4 rounded-lg border px-3.5 py-3",
           className,
         )}
         {...props}
@@ -75,7 +71,7 @@ function RadioGroupItem({
           className={cn(
             // Keyboard focus is a 1px accent line one pixel off the circle,
             // so it still shows around the accent fill.
-            "border-border4 group-hover:border-fg3 group-data-[state=checked]:border-accent group-data-[state=checked]:bg-accent group-focus-visible:outline-accent flex size-4 shrink-0 items-center justify-center rounded-full border transition-[background-color,border-color] duration-120 ease-out group-focus-visible:outline-1 group-focus-visible:outline-offset-1",
+            "border-border4 group-hover:border-fg3 group-data-[state=checked]:border-accent group-data-[state=checked]:bg-accent group-focus-visible:outline-accent flex size-4 shrink-0 items-center justify-center rounded-full border transition-[background-color,border-color] duration-fast ease-out group-focus-visible:outline-1 group-focus-visible:outline-offset-1",
           )}
         >
           <RadioGroupPrimitive.Indicator className="bg-accent-fg size-1.5 rounded-full" />

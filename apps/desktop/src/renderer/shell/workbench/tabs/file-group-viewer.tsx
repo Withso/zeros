@@ -82,7 +82,7 @@ export function FileGroupViewer({
                 onFocus={() => warmFilePill(cwd, file.path)}
                 className={cn(
                   "w-full shrink-0 justify-start gap-2 px-2 font-normal",
-                  position === index ? "bg-bg2-highlight text-fg1" : "text-fg2",
+                  position === index ? "bg-selected-bg text-fg1" : "text-fg2",
                 )}
               >
                 <FileTypeIcon name={file.name} kind="file" size={14} />

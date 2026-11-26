@@ -88,6 +88,7 @@ import {
   trackGithubInstallOpened,
   trackGithubMethodSelected,
 } from "../../platform/observability/analytics/github-events";
+import { RunStream } from "@/renderer/shared/ui/loading/run-stream";
 
 const METHODS = ["gh-cli", "github-app", "pat"] as const;
 
@@ -185,7 +186,7 @@ function HealthDetail({ summary }: { summary: GithubCredentialSummary }) {
   return (
     <div className="text-fg2 flex min-h-8 items-center gap-2 text-xs leading-4.5">
       <TriangleAlert
-        className="text-yellow-primary size-4 shrink-0"
+        className="text-yellow-text size-4 shrink-0"
         aria-hidden="true"
       />
       <span>{copy}</span>
@@ -589,16 +590,16 @@ export function GitHubSection({
               <div
                 key={method}
                 className={cn(
-                  "border-border2 relative grid grid-cols-[20px_minmax(0,1fr)_auto] items-start gap-2.5 rounded-[calc(var(--radius-lg)*1.5)] border p-3.5 transition-colors duration-120 ease-out",
+                  "border-border2 relative grid grid-cols-[20px_minmax(0,1fr)_auto] items-start gap-2.5 rounded-xl border p-3.5 transition-colors duration-fast ease-out",
                   selected
                     ? "bg-bg1-hover"
                     : "bg-bg1 hover:border-border3 hover:bg-bg1-hover",
                   githubHealthNeedsAttention(summary) &&
-                    "border-yellow-icon/30",
+                    "border-yellow-text/30",
                 )}
               >
                 <input
-                  className="border-border4 hover:border-fg3 checked:border-inverted-bg checked:bg-inverted-fg focus-visible:border-accent mt-px size-4 appearance-none rounded-full border transition-[background-color,border-color,box-shadow] duration-120 ease-out checked:shadow-[inset_0_0_0_4px_var(--inverted-bg)] focus-visible:outline-none"
+                  className="border-border4 hover:border-fg3 checked:border-inverted-bg checked:bg-inverted-fg focus-visible:border-accent mt-px size-4 appearance-none rounded-full border transition-[background-color,border-color,box-shadow] duration-fast ease-out checked:shadow-[inset_0_0_0_4px_var(--inverted-bg)] focus-visible:outline-none"
                   type="radio"
                   name="github-auth-method"
                   value={method}
@@ -640,14 +641,10 @@ export function GitHubSection({
                     <Button
                       type="button"
                       variant="ghost"
-                      size="sm"
                       disabled={refreshing}
                       onClick={() => void refreshSnapshot(method)}
                     >
-                      <RefreshCw
-                        className={cn("size-3.5", refreshing && "animate-spin")}
-                        aria-hidden="true"
-                      />
+                      {refreshing ? <RunStream size={16} /> : <RefreshCw className="size-3.5" aria-hidden="true" />}
                       {refreshing ? "Refreshing…" : "Refresh"}
                     </Button>
                   ) : null}
@@ -702,7 +699,7 @@ export function GitHubSection({
                         </DropdownMenuItem>
                         <DropdownMenuSeparator />
                         <DropdownMenuItem
-                          className="text-red-fg focus:text-red-fg"
+                          className="text-red-text focus:text-red-text"
                           onSelect={() => {
                             if (method === "github-app") {
                               setDisconnectAppOpen(true);
@@ -724,7 +721,6 @@ export function GitHubSection({
                     <Button
                       type="button"
                       variant="ghost"
-                      size="sm"
                       onClick={() =>
                         openUrl(
                           "https://github.com/settings/personal-access-tokens/new",
@@ -759,7 +755,6 @@ export function GitHubSection({
                           <div className="flex flex-wrap items-center gap-2">
                             <Button
                               type="button"
-                              size="sm"
                               onClick={beginCliLogin}
                             >
                               <Play className="size-3.5" aria-hidden="true" />
@@ -768,7 +763,6 @@ export function GitHubSection({
                             <Button
                               type="button"
                               variant="ghost"
-                              size="sm"
                               onClick={() => openUrl("https://cli.github.com/")}
                             >
                               Install GitHub CLI
@@ -780,7 +774,6 @@ export function GitHubSection({
                             <Button
                               type="button"
                               variant="ghost"
-                              size="sm"
                               onClick={() => {
                                 setSetupMethod(null);
                                 setAutoSetupDismissed(true);
@@ -807,23 +800,15 @@ export function GitHubSection({
                           {appWaiting ? (
                             <Button
                               type="button"
-                              size="sm"
                               disabled={refreshing}
                               onClick={() => void refreshSnapshot("github-app")}
                             >
-                              <RefreshCw
-                                className={cn(
-                                  "size-3.5",
-                                  refreshing && "animate-spin",
-                                )}
-                                aria-hidden="true"
-                              />
+                              {refreshing ? <RunStream size={16} /> : <RefreshCw className="size-3.5" aria-hidden="true" />}
                               Refresh
                             </Button>
                           ) : (
                             <Button
                               type="button"
-                              size="sm"
                               loading={busyMethod === "github-app"}
                               onClick={() => void connectApp()}
                             >
@@ -837,7 +822,6 @@ export function GitHubSection({
                           <Button
                             type="button"
                             variant="ghost"
-                            size="sm"
                             onClick={cancelApp}
                           >
                             Cancel
@@ -846,7 +830,7 @@ export function GitHubSection({
                         {appError ? (
                           <p
                             role="alert"
-                            className="text-yellow-fg m-0 flex items-start gap-1.5 text-xs"
+                            className="text-yellow-text m-0 flex items-start gap-1.5 text-xs"
                           >
                             <TriangleAlert
                               className="mt-0.5 size-3.5 shrink-0"
@@ -865,7 +849,6 @@ export function GitHubSection({
                           <Button
                             type="button"
                             variant="ghost"
-                            size="sm"
                             onClick={() =>
                               openUrl(
                                 "https://github.com/settings/personal-access-tokens/new",
@@ -890,7 +873,7 @@ export function GitHubSection({
                               autoComplete="off"
                               placeholder="github_pat_…"
                               aria-label="Personal access token"
-                              className="pr-9 font-mono text-xs"
+                              className="pr-10 font-mono text-xs"
                               onChange={(event) => setPat(event.target.value)}
                               onKeyDown={(event) => {
                                 if (event.key === "Enter") void connectPat();
@@ -931,7 +914,6 @@ export function GitHubSection({
                           <Button
                             type="button"
                             variant="ghost"
-                            size="sm"
                             onClick={() => {
                               setPat("");
                               // Keep the next pasted token masked.
@@ -953,7 +935,7 @@ export function GitHubSection({
                       <div className="text-fg2 flex flex-wrap items-center justify-between gap-2 text-xs">
                         <span className="flex items-center gap-2">
                           <CheckCircle2
-                            className="text-green-fg size-3.5"
+                            className="text-green-text size-3.5"
                             aria-hidden="true"
                           />
                           {githubMethodStatusCopy(summary)}
@@ -961,17 +943,10 @@ export function GitHubSection({
                         <Button
                           type="button"
                           variant="ghost"
-                          size="sm"
                           disabled={refreshing}
                           onClick={() => void refreshSnapshot(method)}
                         >
-                          <RefreshCw
-                            className={cn(
-                              "size-3.5",
-                              refreshing && "animate-spin",
-                            )}
-                            aria-hidden="true"
-                          />
+                          {refreshing ? <RunStream size={16} /> : <RefreshCw className="size-3.5" aria-hidden="true" />}
                           {refreshing ? "Refreshing…" : "Refresh"}
                         </Button>
                       </div>
@@ -983,7 +958,6 @@ export function GitHubSection({
                           <div>
                             <Button
                               type="button"
-                              size="sm"
                               loading={busyMethod === "github-app"}
                               onClick={() =>
                                 void connectApp({ forceInstall: true })
@@ -1011,16 +985,15 @@ export function GitHubSection({
         </p>
 
         {connection.error && !connection.data ? (
-          <div className="bg-bg1-highlight text-fg2 flex items-start gap-2.5 rounded-md px-3 py-2.5 text-xs">
+          <div className="bg-bg1-raised text-fg2 flex items-start gap-2.5 rounded-md px-3 py-2.5 text-xs">
             <TriangleAlert
-              className="text-yellow-fg mt-0.5 size-3.5 shrink-0"
+              className="text-yellow-text mt-0.5 size-3.5 shrink-0"
               aria-hidden="true"
             />
             Couldn’t load GitHub authentication settings.
             <Button
               type="button"
               variant="ghost"
-              size="sm"
               className="ml-auto shrink-0"
               disabled={connection.loading}
               onClick={() => connection.refresh()}

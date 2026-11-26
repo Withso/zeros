@@ -253,17 +253,16 @@ export function TerminalWorkbenchLayout({
                     <div className="group/terminal relative mb-0.5">
                       <Button
                         variant="ghost"
-                        size="sm"
                         role="tab"
                         aria-label={entry.title}
                         aria-selected={entry.id === tab?.terminalId}
                         onClick={() => onSelect(entry.id)}
                         className={cn(
                           "h-7 w-full justify-start gap-2 px-2 text-xs [&_svg]:size-3.5",
-                          entry.id === tab?.terminalId && "bg-bg2 text-fg1",
+                          entry.id === tab?.terminalId && "bg-selected-bg text-fg1",
                           entry.docked && "text-fg3 hover:text-fg3",
                           entry.closable && "pr-7",
-                          (entry.docked || entry.dot) && "pr-9",
+                          (entry.docked || entry.dot) && "pr-10",
                           (entry.kind === "setup" || entry.runActionId) &&
                             "pr-12",
                           entry.runActionId && entry.running && "pr-16",
@@ -313,11 +312,11 @@ export function TerminalWorkbenchLayout({
                               aria-hidden
                               className={cn(
                                 "size-1.5 shrink-0 rounded-full",
-                                entry.dot === "running" && "bg-yellow-icon",
-                                entry.dot === "passed" && "bg-green-primary",
+                                entry.dot === "running" && "bg-yellow-text",
+                                entry.dot === "passed" && "bg-green-text",
                                 (entry.dot === "failed" ||
                                   entry.dot === "stopped") &&
-                                  "bg-red-primary",
+                                  "bg-red-text",
                               )}
                             />
                           )}
@@ -357,7 +356,6 @@ export function TerminalWorkbenchLayout({
                             >
                               <Button
                                 variant="ghost"
-                                size="sm"
                                 aria-label={`Run ${entry.title}`}
                                 disabled={
                                   entry.kind === "setup" && setupRunDisabled
@@ -367,7 +365,7 @@ export function TerminalWorkbenchLayout({
                                   else if (entry.runActionId)
                                     onRun(entry.runActionId);
                                 }}
-                                className="text-blue-fg hover:text-blue-fg h-6 px-2 py-0 text-xs"
+                                className="text-accent-text hover:text-accent-text h-6 px-2 py-0 text-xs"
                               >
                                 Run
                               </Button>

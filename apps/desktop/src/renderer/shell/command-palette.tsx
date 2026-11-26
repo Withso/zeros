@@ -207,7 +207,6 @@ export function CommandPalette({
               key={tab.id}
               searchRef={searchRef}
               variant="ghost"
-              size="sm"
               aria-pressed={category === tab.id}
               onClick={() => changeCategory(tab.id)}
               className={cn(
@@ -234,7 +233,6 @@ export function CommandPalette({
                 key={filter}
                 searchRef={searchRef}
                 variant="ghost"
-                size="sm"
                 aria-pressed={workspaceFilter === filter}
                 className={cn(
                   "h-6 px-2 text-xs",
@@ -270,7 +268,7 @@ export function CommandPalette({
             >
               <span>{notice}</span>
               {onRetry && (
-                <Button variant="ghost" size="sm" onClick={onRetry}>
+                <Button variant="ghost" onClick={onRetry}>
                   Retry
                 </Button>
               )}
@@ -328,7 +326,7 @@ export function CommandPalette({
         </CommandList>
         <div
           aria-hidden="true"
-          className="border-fg1/15 text-xxs text-fg2 flex h-8 shrink-0 items-center justify-end gap-3 border-t px-3"
+          className="border-fg1/15 text-3xxs text-fg2 flex h-8 shrink-0 items-center justify-end gap-3 border-t px-3"
         >
           <span className="flex items-center gap-1">
             <ArrowUp className="size-3" />

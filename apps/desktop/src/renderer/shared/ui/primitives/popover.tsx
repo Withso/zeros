@@ -51,19 +51,19 @@ const PopoverAnchor = PopoverPrimitive.Anchor;
 export interface PopoverContentProps extends React.ComponentPropsWithoutRef<
   typeof PopoverPrimitive.Content
 > {
-  /** Width owned by the primitive: sm 240, md 320 (the default), lg 400.
-   *  wide fills up to 34rem for full-width feature pickers; fit wraps a
-   *  single action. */
-  size?: "sm" | "md" | "lg" | "default" | "wide" | "fit";
+  /** Width owned by the primitive: sm 240, md 320 (the default), lg 400;
+   *  fit wraps a single action. Pickers that were wider take lg (P7). */
+  size?: "sm" | "md" | "lg" | "default" | "fit";
   /** Edge-to-edge feature surfaces use their own section primitives; inset
    *  is the menu's 4px, for rows and actions. */
   padding?: "default" | "none" | "inset";
   /** floating (the default) is the bg3 menu surface with the dropdown lift;
-   *  composer is for a picker docked on the composer, which takes the
-   *  composer's own surface like every card above it: sidebar-bg, the
-   *  composer-border edge and no lift. While it opens above its anchor it is
-   *  the top of the composer stack, so it carries the stack's fade. */
-  surface?: "floating" | "composer";
+   *  composer is for a picker docked on the composer: the same bg3 as every
+   *  menu and dropdown (P5), on the composer-border edge with no lift. While
+   *  it opens above its anchor it is the top of the composer stack, so it
+   *  carries the stack's fade. bare only positions its content, which draws
+   *  its own surface (an inline floating Toolbar). */
+  surface?: "floating" | "composer" | "bare";
 }
 
 const POPOVER_SURFACE = {
@@ -72,7 +72,8 @@ const POPOVER_SURFACE = {
   // The card only bounds the height; its content scrolls in an inner box, so
   // the card never clips the fade it carries above its top edge.
   composer:
-    "bg-sidebar-bg border-(--composer-border) group/composer-dock relative flex flex-col",
+    "bg-bg3 border-(--composer-border) group/composer-dock relative flex flex-col",
+  bare: "border-0 bg-transparent shadow-none",
 } as const;
 
 const POPOVER_WIDTH = {
@@ -80,7 +81,6 @@ const POPOVER_WIDTH = {
   md: "w-80",
   default: "w-80",
   lg: "w-100",
-  wide: "w-[min(34rem,calc(100vw-1rem))]",
   fit: "w-fit",
 } as const;
 
@@ -134,9 +134,9 @@ const PopoverContent = React.forwardRef<
             ANCHORED_OVERLAY_MOTION,
             "text-fg1 z-dropdown max-w-(--radix-popover-content-available-width) max-h-(--radix-popover-content-available-height) border outline-none",
             POPOVER_SURFACE[surface],
-            MENU_SURFACE_RADIUS,
+            surface !== "bare" && MENU_SURFACE_RADIUS,
             POPOVER_WIDTH[size],
-            POPOVER_PADDING[padding],
+            surface === "bare" ? "p-0" : POPOVER_PADDING[padding],
             className,
           )}
           {...props}

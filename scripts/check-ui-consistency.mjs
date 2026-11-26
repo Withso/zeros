@@ -73,7 +73,7 @@ const SKIP_DIRS = new Set([
 const ALLOWED_FONT_SIZES_PX = new Set([
   8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 20,
 ]);
-const ALLOWED_RADII_PX = new Set([0, 4, 6, 8, 12]);
+const ALLOWED_RADII_PX = new Set([0, 4, 6, 8, 12, 18]);
 // Spacing scale for hand-written CSS — the same px steps the Tailwind spacing
 // utilities produce (0.5 → 2px … 12 → 48px), see agents/skills/zeros-ui.md.
 // 1px is also allowed for column seams and dividers.
@@ -86,13 +86,13 @@ const ALLOWED_SPACE_PX = new Set([
 const TAILWIND_COLOR_RE =
   /\b(bg|text|border|ring|divide|from|to|via|shadow|fill|stroke|outline|accent|caret|placeholder|decoration)-(orange|purple|pink|gray|grey|zinc|slate|neutral|stone|emerald|teal|cyan|sky|indigo|fuchsia|rose|amber|lime)-\d{2,3}\b/;
 
-// The 5 Zeros families (red/green/yellow/blue/violet) are a TWO-TIER system:
-//   • ANCHORS — `-primary` / `-secondary` / `-bg` / `-fg` — ARE the semantic
-//     layer; components use them directly (text-red-primary, bg-green-bg, …).
+// The Zeros families (red/green/yellow/violet and the accent blue) are a
+// TWO-TIER system:
+//   • ROLES — `-text` / `-bg` / `-on-bg` / `-solid` — ARE the semantic layer;
+//     components use them directly (text-red-text, bg-green-bg, …).
 //   • RAW RAMPS — the numeric steps `-50 … -950` — are the private palette
-//     backing the anchors; components must NEVER touch a numeric step.
-// This RE matches ONLY the numeric ramp classes — anchors are non-numeric, so
-// `\d{2,3}` can't match `-primary` / `-secondary` / `-bg` / `-fg`.
+//     backing the roles; components must NEVER touch a numeric step.
+// This RE matches ONLY the numeric ramp classes — roles are non-numeric.
 const ZEROS_RAMP_CLASS_RE =
   /\b(bg|text|border|ring|divide|from|to|via|shadow|fill|stroke|outline|accent|caret|placeholder|decoration)-(red|green|yellow|blue|violet)-\d{2,3}\b/;
 
@@ -106,10 +106,36 @@ const PRIMITIVE_TOKEN_RE =
 
 // Zeros-family RAW RAMP referenced via var() — e.g. `var(--red-400)`,
 // `var(--blue-500)`. Same two-tier rule as ZEROS_RAMP_CLASS_RE: numeric steps
-// are private to zeros-tokens.css; anchors (var(--red-primary), var(--red-bg))
+// are private to zeros-tokens.css; anchors (var(--red-text), var(--red-bg))
 // are fine and NOT matched here.
 const ZEROS_RAMP_VAR_RE =
   /var\(--(red|green|yellow|blue|violet)-\d{2,3}\b/;
+
+const FILLED_HOVER = "hover:opacity-90 (filled buttons share one hover)";
+// Token names retired by the 2026-11 design-system cleanup (P2–P5). They no
+// longer exist, so a var() reads as unset and a utility compiles to nothing;
+// catch them by name with the replacement in the message.
+export const RETIRED_TOKENS = new Map([
+  ["bg0", "bg1"], ["bg1-highlight", "bg1-raised"], ["bg1-bright", "bg1-raised"],
+  ["sidebar-bg", "bg1-raised"], ["sidebar-bg-hover", "bg1-raised-hover"],
+  ["highlighted-bg", "bg2"], ["bg2-highlight", "selected-bg"], ["muted-fg", "fg3"],
+  ["prompt-pill-bg", "the ground's --pill-bg"], ["yellow-icon", "yellow-text"],
+  ["blue-primary", "accent-text"], ["blue-bg", "accent-bg"], ["blue-fg", "accent-on-bg"],
+  ["blue-pill-bg", "accent-bg"], ["blue-pill-hover", "accent-bg-hover"],
+  ...["red", "green", "yellow", "violet"].flatMap((family) => [
+    [`${family}-primary`, `${family}-text`], [`${family}-fg`, `${family}-on-bg`],
+  ]),
+  ...["red", "green", "blue", "neutral"].flatMap((family) => {
+    const role = family === "blue" ? "accent" : family;
+    return [
+      [`${family}-secondary`, `${role}-solid`], [`${family}-secondary-hover`, FILLED_HOVER],
+      [`${family}-secondary-fg`, `${role}-solid-fg`], [`${role}-solid-hover`, FILLED_HOVER],
+    ];
+  }),
+]);
+const RETIRED_TOKEN_RE = new RegExp(
+  `(?:--|(?:^|[\\s"'\`:(\\[])(?:[a-z-]+:)*(?:bg|text|border|ring|fill|stroke|outline|from|to|via|decoration|divide|caret|placeholder|shadow)-)(${[...RETIRED_TOKENS.keys()].sort((a, b) => b.length - a.length).join("|")})(?![a-z0-9-])`,
+);
 
 // Inline style with static visual property. We only flag when we can
 // see a literal value (string or number). var(--…) and dynamic identifiers
@@ -222,8 +248,8 @@ const WHITE_BLACK_CLASS_RE =
 // full-opacity currentColor (the ring-foreground/ring-border family of
 // bugs). `accent` is a real Zeros token and is not in the list. The
 // lookarounds keep real tokens (border-border1,
-// text-primary-button-fg, text-muted-fg) from matching — `muted` is in the
-// alternation, so only the trailing `(?![\w-])` keeps `muted-fg` out.
+// text-primary-button-fg, text-fg3) from matching — `muted` is in the
+// alternation, so only the trailing `(?![\w-])` keeps `fg3` out.
 const DEAD_SHADCN_CLASS_RE =
   /(?<![\w-])(bg|text|border|ring|divide|outline|fill|stroke|from|to|via)-(background|foreground|card|popover|muted|destructive|input|ring|border|primary|secondary)(?![\w-])/;
 
@@ -241,7 +267,7 @@ const BG3_FILL_RE = /(?<![\w-])bg-bg3(?:-hover)?(?![\w/-])/;
 // Files whose components ARE popover surfaces (popover/dropdown/menu content
 // panels + their internal chips/hovers) — the one place bg3 fills belong.
 // Add a file here ONLY if it owns a floating bg3 panel; chips on bg1/bg2
-// surfaces take bg-bg2-hover, sidebar takes sidebar-bg-hover.
+// surfaces take bg-bg2-hover, sidebar takes bg1-raised-hover.
 const BG3_SURFACE_FILES = new Set([
   // The shared Surface wrapper's `floating` kind is the sanctioned owner of
   // the floating fill (shared/ui/layout/surface.tsx).
@@ -264,14 +290,16 @@ const BG3_SURFACE_FILES = new Set([
   "apps/desktop/src/renderer/features/agent/turn-footer.tsx",
   // Frame findings list rows sit on the badge's PopoverContent panel.
   "apps/desktop/src/renderer/features/design-workspace/design-frame-lint-badge.tsx",
+  // Toolbar size="inline": the 24px group that floats over content (P12).
+  "apps/desktop/src/renderer/shared/ui/primitives/toolbar.tsx",
 ]);
 
 // bg3 as a RAW CSS background fill. BG3_FILL_RE above is Tailwind-class-based
 // and skips .css, so `background: var(--bg3)` in globals.css (markdown
 // <details>/<kbd> callouts and the react-flow canvas are not covered by the
 // Tailwind-class check. bg3 is floating-only: in
-// light bg3 == bg1 (white), in dark bg3 == sidebar-bg (barely above bg1), so a
-// fill vanishes in both. Lifted content on bg1 → --bg1-highlight; a base
+// light bg3 == bg1 (white), in dark bg3 == bg1-raised (barely above bg1), so a
+// fill vanishes in both. Lifted content on bg1 → --bg1-raised; a base
 // surface → --bg2. Matches the property, so `--color-bg3: var(--bg3)` (the
 // @theme alias in the allowlisted tokens file) is NOT caught.
 const BG3_CSS_FILL_RE = /background(?:-color)?\s*:\s*var\(--bg3(?:-hover)?\)/;
@@ -404,7 +432,7 @@ function scanFile(absPath) {
       push(
         rel,
         ln,
-        "Primitive token referenced outside zeros-tokens.css — use a semantic token (e.g. --bg1, --fg2, --red-primary; see agents/skills/zeros-ui.md).",
+        "Primitive token referenced outside zeros-tokens.css — use a semantic token (e.g. --bg1, --fg2, --red-text; see agents/skills/zeros-ui.md).",
       );
     }
 
@@ -415,8 +443,16 @@ function scanFile(absPath) {
         push(
           rel,
           ln,
-          `Raw palette ramp "${m[0]})" — numeric steps (--red-50…950) are private to zeros-tokens.css. Use a family anchor: var(--<family>-primary|secondary|bg|fg).`,
+          `Raw palette ramp "${m[0]})" — numeric steps (--red-50…950) are private to zeros-tokens.css. Use a family role: var(--<family>-text|bg|on-bg|solid).`,
         );
+      }
+    }
+
+    // --- Retired token name (2026-11 cleanup) ---
+    {
+      const m = line.match(RETIRED_TOKEN_RE);
+      if (m) {
+        push(rel, ln, `Retired token "${m[1]}" — use ${RETIRED_TOKENS.get(m[1])} (see agents/skills/zeros-ui.md).`);
       }
     }
 
@@ -436,7 +472,7 @@ function scanFile(absPath) {
         push(
           rel,
           ln,
-          `Raw palette ramp "${m[0]}" — numeric steps (red-50…950) are private. Use a family anchor: text-<family>-primary | bg-<family>-bg | text-<family>-fg (see agents/skills/zeros-ui.md).`,
+          `Raw palette ramp "${m[0]}" — numeric steps (red-50…950) are private. Use a family role: text-<family>-text | bg-<family>-bg | text-<family>-on-bg (see agents/skills/zeros-ui.md).`,
         );
       }
     }
@@ -505,7 +541,7 @@ function scanFile(absPath) {
           push(
             rel,
             ln,
-            `"${m[0]}" fill outside a popover surface — in light bg3 = bg1 (white), the fill vanishes. Chips → bg-bg2-hover; sidebar → sidebar-bg-hover; real popover panels → add the file to BG3_SURFACE_FILES.`,
+            `"${m[0]}" fill outside a popover surface — in light bg3 = bg1 (white), the fill vanishes. Chips → bg-bg2-hover; sidebar → bg1-raised-hover; real popover panels → add the file to BG3_SURFACE_FILES.`,
           );
         }
       }
@@ -517,7 +553,7 @@ function scanFile(absPath) {
           push(
             rel,
             ln,
-            `"${m[0]}" — bg3 is floating-only (light bg3=bg1, dark bg3=sidebar-bg; a fill vanishes in both). Lifted content on bg1 → var(--bg1-highlight); a base surface → var(--bg2).`,
+            `"${m[0]}" — bg3 is floating-only (light bg3=bg1, dark bg3=bg1-raised; a fill vanishes in both). Lifted content on bg1 → var(--bg1-raised); a base surface → var(--bg2).`,
           );
         }
       }

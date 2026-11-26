@@ -112,7 +112,7 @@ export function WorkbenchTabBanner({
           aria-hidden
           className={cn(
             "size-4 shrink-0",
-            status?.tone === "error" ? "text-red-primary" : "text-fg3",
+            status?.tone === "error" ? "text-red-text" : "text-fg3",
           )}
         />
       )}

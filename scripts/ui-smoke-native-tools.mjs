@@ -35,10 +35,10 @@ export async function runNativeToolsSmoke({ page, check }) {
   await expect(
     transcript.getByText("Accessibility access was denied by the user."),
   ).toBeVisible();
-  await expect(row("Click Calculator")).toHaveClass(/text-red-primary/);
+  await expect(row("Click Calculator")).toHaveClass(/text-red-text/);
   await expect(
     row("Click Calculator").getByText("Error", { exact: true }),
-  ).toHaveClass(/text-red-primary/);
+  ).toHaveClass(/text-red-text/);
   await expect(row("Click Calculator").locator(".lucide-circle-x")).toHaveCount(1);
   await expect(row("Click Calculator").locator("img")).toHaveCount(0);
   check(

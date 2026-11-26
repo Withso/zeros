@@ -313,7 +313,6 @@ export function RunActionsSection({
         drafts.length > 0 ? (
           <Button
             variant="primary"
-            size="sm"
             onClick={add}
             disabled={repo.loading || mutatingId !== null}
           >
@@ -329,7 +328,6 @@ export function RunActionsSection({
           action={
             <Button
               variant="primary"
-              size="sm"
               onClick={add}
               disabled={mutatingId !== null}
             >
@@ -431,13 +429,12 @@ function ActionCard({
               label={`Delete ${draft.name || "action"}`}
               onClick={onDelete}
               disabled={busy}
-              className="text-fg2 hover:text-red-primary"
+              className="text-fg2 hover:text-red-text"
             >
               <Trash2 strokeWidth={1} />
             </IconButton>
             <Button
               variant="secondary"
-              size="sm"
               onClick={onSave}
               disabled={busy || !dirty || invalid}
             >

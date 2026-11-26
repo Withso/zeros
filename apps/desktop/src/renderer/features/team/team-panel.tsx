@@ -112,7 +112,7 @@ export function TeamLogo({
         "bg-bg2-hover text-fg1 flex shrink-0 items-center justify-center rounded-lg font-medium",
         // Initial sizes off the type scale (RULES 1.3): 15px in the
         // 40px row avatar, 13px in the 28px switcher, 10px at list size.
-        size >= 36 ? "text-[15px]" : size >= 24 ? "text-xs" : "text-xxs",
+        size >= 36 ? "text-sm" : size >= 24 ? "text-xs" : "text-2xxs",
         className,
       )}
       style={{ width: size, height: size }}
@@ -138,7 +138,7 @@ export function TeamPanel({ surfaceActive = true }: { surfaceActive?: boolean })
     return (
       <div className="flex flex-col items-start gap-3">
         <p className="text-fg2 text-sm">{error}</p>
-        <Button variant="secondary" size="sm" onClick={() => void reload()}>
+        <Button variant="secondary" onClick={() => void reload()}>
           Retry
         </Button>
       </div>
@@ -158,7 +158,6 @@ export function TeamPanel({ surfaceActive = true }: { surfaceActive?: boolean })
         />
         <Button
           variant="secondary"
-          size="sm"
           onClick={requestCreateTeamDialog}
         >
           <Plus size={14} />
@@ -291,7 +290,6 @@ function LogoRow({ team }: { team: TeamSummary }) {
             />
             <Button
               variant="secondary"
-              size="sm"
               disabled={busy}
               onClick={() => fileRef.current?.click()}
             >
@@ -300,7 +298,6 @@ function LogoRow({ team }: { team: TeamSummary }) {
             {team.logo && (
               <Button
                 variant="ghost"
-                size="sm"
                 disabled={busy}
                 onClick={() => void apply(null)}
                 className="text-fg2 hover:text-fg1"
@@ -369,12 +366,11 @@ function NameRow({ team }: { team: TeamSummary }) {
             }}
             className="w-[220px]"
           />
-          <Button variant="secondary" size="sm" disabled={busy} onClick={() => void save()}>
+          <Button variant="secondary" disabled={busy} onClick={() => void save()}>
             {busy ? "Saving…" : "Save"}
           </Button>
           <Button
             variant="ghost"
-            size="sm"
             disabled={busy}
             onClick={() => {
               setEditing(false);
@@ -391,7 +387,6 @@ function NameRow({ team }: { team: TeamSummary }) {
             <Tooltip label="Rename team">
               <Button
                 variant="ghost"
-                size="sm"
                 onClick={() => setEditing(true)}
                 aria-label="Rename team"
                 className="text-fg2 hover:text-fg1 size-7 px-0"
@@ -425,7 +420,6 @@ function TeamIdControl({ teamId }: { teamId: string }) {
       <Tooltip label="Copy ID">
         <Button
           variant="ghost"
-          size="sm"
           onClick={() => void copy()}
           aria-label="Copy team ID"
           className="text-fg2 hover:text-fg1 size-7 px-0"
@@ -448,12 +442,7 @@ function DangerZone({ team }: { team: TeamSummary }) {
           label="Delete team"
           hint="Permanently removes this team for every member"
         >
-          <Button
-            variant="ghost"
-            size="sm"
-            onClick={() => setConfirmOpen(true)}
-            className="text-red-primary hover:bg-red-primary/10 hover:text-red-primary gap-1.5"
-          >
+          <Button variant="destructive-secondary" onClick={() => setConfirmOpen(true)}>
             Delete team
           </Button>
         </SettingsRow>
@@ -534,7 +523,7 @@ function DeleteTeamDialog({
             variant="secondary"
             disabled={!nameMatches || busy}
             onClick={() => void destroy()}
-            className="border-red-primary/40 text-red-primary hover:bg-red-primary/10 hover:text-red-primary gap-1.5"
+            className="border-red-text/40 text-red-text hover:bg-red-text/10 hover:text-red-text gap-1.5"
           >
             <Trash2 size={14} />
             {busy ? "Deleting…" : "Delete team"}

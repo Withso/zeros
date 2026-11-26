@@ -1,7 +1,7 @@
 import { useGithubLevels } from "./cloud-github-levels";
 import { useCallback, useState } from "react";
 import { IconButton } from "@/renderer/shared/ui/primitives/icon-button";
-import { ChevronDown, ChevronUp, CircleX, LoaderCircle, TriangleAlert, X } from "lucide-react";
+import { ChevronDown, ChevronUp, CircleX, TriangleAlert, X } from "lucide-react";
 import { Button } from "../../shared/ui";
 import { Badge, CodeTextarea, Pill } from "../../shared/ui/primitives";
 import { MessageRow } from "../../shared/ui/primitives/message-row";
@@ -25,6 +25,7 @@ import {
 import { KeyedAsyncCache } from "../../shared/lib/keyed-async-cache";
 import { computerChanges, computerStatus, editableRepositories, historyNote, relativeAge, type ComputerStatus } from "./cloud-computer-model";
 import { useFocusRefresh } from "./use-focus-refresh";
+import { RunStream } from "@/renderer/shared/ui/loading/run-stream";
 export { prefetchCloudComputer } from "./cloud-computer-store";
 
 export function CloudComputerPanel({ surfaceActive = true, openCloudRepository, onNewProject }: {
@@ -167,7 +168,7 @@ function CloudComputerScope({ userId, organizationId, organizationName, canManag
         <SettingsGroup title="Project builds" description="A project whose build failed keeps its last build; new workspaces clone directly until one succeeds.">
           {data.readyCopyFailures!.map(failure => (
             <SettingsRow key={failure.projectId} label={failure.project} hint={readyCopyFailureLine(failure, Date.now())}>
-              <Button variant="ghost" size="sm" disabled={busy}
+              <Button variant="ghost" disabled={busy}
                 onClick={() => void run(() => retryCloudReadyCopy(organizationId, failure.projectId))}>Retry now</Button>
             </SettingsRow>
           ))}
@@ -239,9 +240,9 @@ function MemberComputer({ userId, organizationId, active }: { userId: string; or
 
 const STATUS_ICON: Record<ComputerStatus["kind"], React.ReactNode> = {
   loading: null,
-  building: <LoaderCircle className="text-fg2 size-4 shrink-0 animate-spin motion-reduce:animate-none" aria-hidden />,
+  building: <RunStream size={16} className="text-(--loader-active)" />,
   unbuilt: <TriangleAlert className="text-fg1 size-4 shrink-0" aria-hidden />,
-  failed: <CircleX className="text-red-primary size-4 shrink-0" aria-hidden />,
+  failed: <CircleX className="text-red-text size-4 shrink-0" aria-hidden />,
   built: null,
   empty: null,
 };
@@ -286,7 +287,7 @@ function CloudComputerProjects({ userId, organizationId, organizationName, activ
       <SettingsRow label={count === undefined ? "Projects" : `${count} ${count === 1 ? "project" : "projects"} in ${organizationName}`}
         hint="The Cloud Computer holds tools only. Repositories, setup scripts and build secrets belong to projects.">
         {onNewProject && projects && (projects.canCreateOrganization || projects.personalAllowed) && (
-          <Button variant="ghost" size="sm" onClick={onNewProject}>New project</Button>
+          <Button variant="ghost" onClick={onNewProject}>New project</Button>
         )}
       </SettingsRow>
     </SettingsGroup>

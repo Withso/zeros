@@ -11,7 +11,7 @@
 // Public API:
 //   COMPOSER_FILE_ACCEPT    — canonical accept= string for the file picker
 //   COMPOSER_SURFACE_RADIUS — 18px corners for the Create, workspace and edit composers
-//   COMPOSER_SURFACE_CLS    — the sidebar-bg + composer-border surface they share
+//   COMPOSER_SURFACE_CLS    — the bg1-raised + composer-border surface they share
 //   COMPOSER_DRAG_CLS       — a composer card while files are dragged over it
 //   ComposerDropVeil        — the veil over that card
 //   COMPOSER_SEND_CLS       — Send, Stop and Resend
@@ -22,18 +22,19 @@
 import { Upload } from "lucide-react";
 
 import { cn } from "@/renderer/shared/ui/cn";
+import { PILL_GROUND } from "./composer-editor/pill-views";
 
 export const COMPOSER_FILE_ACCEPT =
   ""; // All formats are selectable; the shared policy explains excluded files.
 
 /** Create, workspace and inline edit composers use the 18px corner geometry;
  *  sent messages keep the 12px prompt shape. */
-export const COMPOSER_SURFACE_RADIUS = "rounded-[18px]";
+export const COMPOSER_SURFACE_RADIUS = "rounded-2xl";
 
-/** The composer surface shared by Create and Agent chat: sidebar-bg with the
+/** The composer surface shared by Create and Agent chat: bg1-raised with the
  *  composer-border edge (styles/semantic-tokens.css) and no shadow. Clicking
  *  in and typing change nothing; only a drag or a mode outline restyles it. */
-export const COMPOSER_SURFACE_CLS = "border-(--composer-border) bg-sidebar-bg";
+export const COMPOSER_SURFACE_CLS = `border-(--composer-border) bg-bg1-raised ${PILL_GROUND.composer}`;
 
 /** A file dragged over a composer card: the same edge, dashed, with a soft
  *  ring; `!` keeps it identical whether or not the composer is focused. */
@@ -74,7 +75,7 @@ export const TRANSCRIPT_STATUS_ROW_CLS =
  *  pickers docked on the composer take the same surface through
  *  `PopoverContent surface="composer"`. */
 export const DOCK_CARD_CLS =
-  "border-(--composer-border) bg-sidebar-bg rounded-[calc(var(--radius-lg)*1.5)] border";
+  `border-(--composer-border) bg-bg1-raised rounded-xl border ${PILL_GROUND.composer}`;
 
 /** 12px corners for sent user messages and the chat error/warning/sign-in
  *  notices (agent-notice.tsx) that share their shape.
@@ -84,4 +85,4 @@ export const DOCK_CARD_CLS =
  *  SETTINGS_GROUP_RADIUS — not a fourth token. NOT `rounded-xl`:
  *  zeros-tokens.css resets `--radius-xl` to `initial` on purpose, so that
  *  class compiles to nothing. */
-export const PROMPT_SURFACE_RADIUS = "rounded-[calc(var(--radius-lg)*1.5)]";
+export const PROMPT_SURFACE_RADIUS = "rounded-xl";

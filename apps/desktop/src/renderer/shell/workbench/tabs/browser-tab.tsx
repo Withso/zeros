@@ -715,7 +715,7 @@ function NativeAgentBrowserTab({ tab, active, scope }: BrowserTabProps) {
   return (
     <div className="bg-bg1 flex min-h-0 flex-1 flex-col overflow-hidden">
       <WorkbenchTabToolbar>
-        <PanelHeader size="window" className="h-9 px-1.5">
+        <PanelHeader size="window" className="px-1.5">
           <IconButton
             size="standard"
             disabled={
@@ -2278,13 +2278,13 @@ const VIEWPORT_WRAPPER_CLASSES = {
   canvas: "absolute flex items-start",
   // Fit frames do not overflow, so no bar takes width from the centering.
   device:
-    "bg-bg0 absolute inset-0 overflow-auto [&::-webkit-scrollbar-corner]:bg-transparent",
+    "bg-bg1 absolute inset-0 overflow-auto [&::-webkit-scrollbar-corner]:bg-transparent",
   // A fixed zoom always reserves the vertical bar, so a frame that starts or
   // stops overflowing mid-drag cannot shift the centering. Not
   // `scrollbar-gutter`: Chromium drops the gutter width from the horizontal
   // scroll range, which clips the frame's right padding.
   deviceFixedZoom:
-    "bg-bg0 absolute inset-0 overflow-x-auto overflow-y-scroll [&::-webkit-scrollbar-corner]:bg-transparent",
+    "bg-bg1 absolute inset-0 overflow-x-auto overflow-y-scroll [&::-webkit-scrollbar-corner]:bg-transparent",
   float: "absolute inset-0",
 } as const;
 
@@ -2402,7 +2402,7 @@ function BrowserChrome({
   );
 
   return (
-    <PanelHeader size="window" className="h-9 px-1.5">
+    <PanelHeader size="window" className="px-1.5">
       <IconButton
         size="standard"
         disabled={!state.canGoBack}
@@ -2553,7 +2553,7 @@ function BrowserChrome({
             Open separate preview window
           </DropdownMenuItem>
           {electron && windowUnavailable !== null && (
-            <DropdownMenuLabel className="text-muted-fg text-2xxs pt-0 font-normal">
+            <DropdownMenuLabel className="text-fg3 text-3xxs pt-0 font-normal">
               {windowUnavailable}
             </DropdownMenuLabel>
           )}
@@ -2611,7 +2611,7 @@ function CanvasPresetRail({ width, onApplyWidth }: CanvasPresetRailProps) {
       className="pointer-events-none absolute top-1/2 z-20 ml-6 flex -translate-y-1/2 flex-col items-end gap-1"
       style={{ left: "100%" }}
     >
-      <div className="border-border1 bg-bg2 text-fg2 pointer-events-auto rounded-sm border px-2.5 py-0.5 text-xs font-medium tabular-nums shadow-sm">
+      <div className="border-border1 bg-bg2 text-fg2 pointer-events-auto rounded-sm border px-2.5 py-0.5 text-xs font-medium tabular-nums shadow-[var(--shadow-dropdown)]">
         {width}px
       </div>
       {BROWSER_VIEWPORT_PRESETS.map((p) => {
@@ -2655,7 +2655,7 @@ function CanvasHeightIndicator({
   const visible = isResizing || !isDefault;
   return (
     <div
-      className="absolute top-full left-1/2 z-10 mt-3 flex -translate-x-1/2 items-center gap-2 transition-opacity duration-150"
+      className="absolute top-full left-1/2 z-10 mt-3 flex -translate-x-1/2 items-center gap-2 transition-opacity duration-base"
       style={{
         opacity: visible ? 1 : 0,
         pointerEvents: visible ? "auto" : "none",
@@ -2666,13 +2666,13 @@ function CanvasHeightIndicator({
           <button
             type="button"
             onClick={onReset}
-            className="bg-fg1 text-primary-button-fg hover:bg-fg1/90 rounded-sm px-2.5 py-1 text-xs font-medium shadow-sm"
+            className="bg-fg1 text-primary-button-fg hover:bg-fg1/90 rounded-sm px-2.5 py-1 text-xs font-medium shadow-[var(--shadow-dropdown)]"
           >
             Reset ({BROWSER_DEFAULT_HEIGHT}px)
           </button>
         </Tooltip>
       )}
-      <div className="border-border1 bg-bg2 text-fg2 rounded-sm border px-2.5 py-0.5 text-xs font-medium tabular-nums shadow-sm">
+      <div className="border-border1 bg-bg2 text-fg2 rounded-sm border px-2.5 py-0.5 text-xs font-medium tabular-nums shadow-[var(--shadow-dropdown)]">
         {height}px
       </div>
     </div>
@@ -2785,7 +2785,7 @@ function ElementChip({
       onPointerDown={(e) => e.stopPropagation()}
       onClick={(e) => e.stopPropagation()}
     >
-      <div className="border-border1 bg-bg3 flex flex-col gap-1.5 rounded-lg border p-2 shadow-lg">
+      <div className="border-border1 bg-bg3 flex flex-col gap-1.5 rounded-lg border p-2 shadow-[var(--shadow-dropdown)]">
         <div className="flex flex-wrap items-center gap-1">
           {elements.map((el, i) => (
             <Tooltip key={`${el.selector}-${i}`} label={`${el.selector}`}>

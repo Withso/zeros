@@ -73,7 +73,7 @@ describe("agent tones", () => {
     const waiting = renderToStaticMarkup(
       createElement(AgentActivityIndicator, { activity: "waiting", agentId: "codex" }),
     );
-    expect(waiting).toContain('data-zeros-loader="logo"');
+    expect(waiting).toContain('data-zeros-loader="stream"');
     expect(waiting).not.toContain("light-dark(");
     expect(TABS).toMatch(/<AgentActivityIndicator\s+activity=\{activity\}\s+agentId=\{chat\.agentId\}/);
   });

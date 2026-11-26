@@ -28,15 +28,6 @@
   }
 }
 
-@keyframes ocAgentLiveDurationPulse {
-  0%,
-  100% {
-    opacity: 0.65;
-  }
-  50% {
-    opacity: 1;
-  }
-}
 
 /* Effort battery pill — the label drops in gently from the top on each toggle
  * (its own keyed remount). The charge FILL is a hover affordance driven by a
@@ -53,34 +44,6 @@
     opacity: 1;
     transform: translateY(0);
   }
-}
-
-/* ZerosSpinner "logo" (apps/desktop/src/renderer/shared/ui/loading/zeros-spinner.tsx)
- * — the startup loader's Weave (index.html, zeros-boot-weave-*; a test keeps
- * the two equal). Each row steps four cells, which is one repeat of its
- * pattern, then rests on the Z for the second half of the loop. */
-@keyframes zeros-logo-weave-r {
-  0% { transform: translateX(0); animation-timing-function: cubic-bezier(0.55, 0, 0.25, 1); }
-  6% { transform: translateX(1px); }
-  16% { transform: translateX(1px); animation-timing-function: cubic-bezier(0.55, 0, 0.25, 1); }
-  22% { transform: translateX(2px); }
-  32% { transform: translateX(2px); animation-timing-function: cubic-bezier(0.55, 0, 0.25, 1); }
-  38% { transform: translateX(3px); }
-  48% { transform: translateX(3px); animation-timing-function: cubic-bezier(0.55, 0, 0.25, 1); }
-  54%,
-  100% { transform: translateX(4px); }
-}
-
-@keyframes zeros-logo-weave-l {
-  0% { transform: translateX(0); animation-timing-function: cubic-bezier(0.55, 0, 0.25, 1); }
-  6% { transform: translateX(-1px); }
-  16% { transform: translateX(-1px); animation-timing-function: cubic-bezier(0.55, 0, 0.25, 1); }
-  22% { transform: translateX(-2px); }
-  32% { transform: translateX(-2px); animation-timing-function: cubic-bezier(0.55, 0, 0.25, 1); }
-  38% { transform: translateX(-3px); }
-  48% { transform: translateX(-3px); animation-timing-function: cubic-bezier(0.55, 0, 0.25, 1); }
-  54%,
-  100% { transform: translateX(-4px); }
 }
 
 /* RunStream (apps/desktop/src/renderer/shared/ui/loading/run-stream.tsx) — one
@@ -137,7 +100,7 @@
     90deg,
     var(--fg3) 0%,
     var(--fg3) 38%,
-    var(--blue-fg) 50%,
+    var(--accent-on-bg) 50%,
     var(--fg3) 62%,
     var(--fg3) 100%
   );

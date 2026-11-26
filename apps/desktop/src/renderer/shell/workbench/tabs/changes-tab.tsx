@@ -441,14 +441,13 @@ export function NotAGitRepo({
       className="h-full min-h-0 px-6 text-center"
     >
       <GitBranch
-        className="text-muted-fg size-10"
+        className="text-fg3 size-10"
         strokeWidth={1}
         aria-hidden
       />
       <div className="flex items-center gap-2">
         <Button
           variant="secondary"
-          size="sm"
           disabled={busy}
           onClick={() => void initialize()}
         >
@@ -456,7 +455,6 @@ export function NotAGitRepo({
         </Button>
         <Button
           variant="secondary"
-          size="sm"
           disabled={busy}
           onClick={() => publishToGithub(repoRoot, defaultName)}
         >
@@ -1278,7 +1276,7 @@ export function ChangesList({
       aria-busy={loading || undefined}
     >
       {error && showError && (
-        <div className="bg-red-bg text-red-fg m-3 rounded-md px-3 py-2 text-xs">
+        <div className="bg-red-bg text-red-on-bg m-3 rounded-md px-3 py-2 text-xs">
           {error}
         </div>
       )}
@@ -1529,7 +1527,7 @@ const FileRow = React.memo(function FileRow({
       className={cn(
         "group/change-row flex min-h-7 cursor-pointer items-center gap-2 py-1 pr-3 text-xs leading-4.5 transition-colors",
         // Selection is a step above the surface's hover.
-        isSelected ? "bg-bg2-highlight" : "hover:bg-bg1-hover",
+        isSelected ? "bg-selected-bg" : "hover:bg-bg1-hover",
       )}
       style={{ paddingLeft: 4 + depth * 14 }} // check:ui ignore-line (18px left at depth 1 (flat Changes list); 12px right via pr-3)
     >
@@ -1577,10 +1575,10 @@ const FileRow = React.memo(function FileRow({
           {!committed && <StatusGlyph status={file.status} />}
           <span className="text-2xxs tabular-nums">
             {file.additions > 0 && (
-              <span className="text-green-primary">+{file.additions}</span>
+              <span className="text-green-text">+{file.additions}</span>
             )}
             {file.deletions > 0 && (
-              <span className="text-red-primary ml-1">−{file.deletions}</span>
+              <span className="text-red-text ml-1">−{file.deletions}</span>
             )}
           </span>
           {/* Square COLOUR is per-file when the scope sets it (All changes mixes
@@ -1652,10 +1650,10 @@ const KIND_STYLE: Record<
   ChangeKind,
   { committedColor: string; label: string }
 > = {
-  created: { committedColor: "text-green-primary", label: "Created" },
-  modified: { committedColor: "text-yellow-primary", label: "Modified" },
-  deleted: { committedColor: "text-red-primary", label: "Deleted" },
-  conflicted: { committedColor: "text-red-primary", label: "Conflicted" },
+  created: { committedColor: "text-green-text", label: "Created" },
+  modified: { committedColor: "text-yellow-text", label: "Modified" },
+  deleted: { committedColor: "text-red-text", label: "Deleted" },
+  conflicted: { committedColor: "text-red-text", label: "Conflicted" },
 };
 
 /** A 12px square badge (square-plus/-dot/-minus are not in lucide-react 1.17,
@@ -1673,7 +1671,7 @@ function StatusSquare({
   const { committedColor, label } = KIND_STYLE[kind];
   const color =
     kind === "conflicted"
-      ? "text-red-primary"
+      ? "text-red-text"
       : committed
         ? committedColor
         : "text-fg2";

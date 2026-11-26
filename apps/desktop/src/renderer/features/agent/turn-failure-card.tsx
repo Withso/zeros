@@ -92,15 +92,15 @@ export function TurnFailureCard({
     >
       {(retryAction || newChatAction || reconnectAction || modelAction || (!readOnly && display.reassign)) && (
         <div className="mt-1 flex flex-wrap items-center gap-3">
-          {!readOnly && display.reassign && reassignable.target && <Button type="button" variant="ghost" size="sm" disabled={busy}
+          {!readOnly && display.reassign && reassignable.target && <Button type="button" variant="ghost" disabled={busy}
             onClick={() => openReassignDialog(reassignable.target!)} className={AGENT_NOTICE_ACTION}>
             Reassign… <ArrowRight className="size-3.5" aria-hidden="true" />
           </Button>}
-          {modelAction && <Button type="button" variant="ghost" size="sm" disabled={busy}
+          {modelAction && <Button type="button" variant="ghost" disabled={busy}
             onClick={modelAction} className={AGENT_NOTICE_ACTION}>
             Choose another model <ArrowRight className="size-3.5" aria-hidden="true" />
           </Button>}
-          {reconnectAction && <Button type="button" variant="ghost" size="sm" disabled={busy}
+          {reconnectAction && <Button type="button" variant="ghost" disabled={busy}
             onClick={() => reconnectAction(failure.cloud?.source === "provider" ? failure.cloud.provider : undefined)} className={AGENT_NOTICE_ACTION}>
             {display.reconnectLabel}
             <ArrowRight className="size-3.5" aria-hidden="true" />
@@ -109,7 +109,6 @@ export function TurnFailureCard({
             <Button
               type="button"
               variant="ghost"
-              size="sm"
               disabled={busy}
               onClick={() => void retry(retryAction)}
               className={AGENT_NOTICE_ACTION}
@@ -121,7 +120,6 @@ export function TurnFailureCard({
             <Button
               type="button"
               variant="ghost"
-              size="sm"
               disabled={busy}
               onPointerEnter={onRetryNewChatIntent}
               onFocus={onRetryNewChatIntent}

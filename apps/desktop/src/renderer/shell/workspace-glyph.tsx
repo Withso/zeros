@@ -58,39 +58,23 @@ export function workspaceGlyphSeed(
   return `${repoSlug ?? ""}/${branch}`;
 }
 
-/** PR identities, the same tokens the former PR icons wore. */
-const PR_TONE_CLS: Record<WorkspacePrTone, string> = {
-  open: "text-green-primary",
-  ready: "text-green-primary",
-  merged: "text-violet-fg",
-  closed: "text-red-fg",
-  conflicts: "text-yellow-primary",
-};
-
 export interface WorkspaceGlyphProps {
   size?: number;
   className?: string;
   /** workspaceGlyphSeed(repoSlug, branch). */
   seed: string;
-  /** The workspace's agent is working: the square animates. */
-  working?: boolean;
-  /** PR state, or null for none. */
-  pr?: WorkspacePrTone | null;
 }
 
-export function WorkspaceGlyph({ seed, working = false, pr = null, size = 16, className }: WorkspaceGlyphProps) {
+/** A workspace's own still square in fg3. It carries no PR or agent state:
+ *  those read from the sidebar's marks and the chat tabs. */
+export function WorkspaceGlyph({ seed, size = 16, className }: WorkspaceGlyphProps) {
   return (
     <PuzzleSquare
       size={size}
       seed={seed}
-      active={working}
-      // Depth while it works: three close tones of the same colour.
+      active={false}
       shaded
-      className={cn(
-        "transition-colors duration-200",
-        pr ? PR_TONE_CLS[pr] : working ? "text-fg2" : "text-fg3/25",
-        className,
-      )}
+      className={cn("text-fg3", className)}
     />
   );
 }

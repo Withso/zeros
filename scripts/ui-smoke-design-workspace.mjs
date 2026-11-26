@@ -74,7 +74,8 @@ export async function checkLayersDrawerDefault({ page, check }) {
       (await fold.getAttribute("aria-controls")) === null &&
       (await tree.count()) === 0 &&
       (await page.locator("[data-design-layer-id]").count()) === 0 &&
-      (await page.locator("[data-design-layers-slot]").boundingBox()).height <= 40,
+      // The 40px header and the slot's 1px top rule.
+      (await page.locator("[data-design-layers-slot]").boundingBox()).height <= 41,
   );
   await fold.click();
   await tree.waitFor({ state: "visible" });
@@ -2748,14 +2749,14 @@ export async function runDesignWorkspaceCanvasSmoke({ page, waitFor, check }) {
   );
 
   // Property fields (UI components · Property field): hover fills
-  // bg2-highlight, a click edits with only the caret, and keyboard focus rings.
+  // selected-bg, a click edits with only the caret, and keyboard focus rings.
   {
     // X and Y are locked while auto layout places the layer.
     const field = page.locator("[data-design-inspector] .zd-inspector-field:has(input:not(:disabled))").first();
     const fieldLook = () =>
       field.evaluate((element) => {
         const probe = document.createElement("div");
-        probe.style.background = "var(--bg2-highlight)";
+        probe.style.background = "var(--selected-bg)";
         element.parentElement.append(probe);
         const highlight = getComputedStyle(probe).backgroundColor;
         probe.remove();
@@ -2779,7 +2780,7 @@ export async function runDesignWorkspaceCanvasSmoke({ page, waitFor, check }) {
       .toContain("0px 0px 0px 1px inset");
     await page.evaluate(() => document.activeElement?.blur());
     await page.mouse.move(1, 1);
-    check("property fields hover in bg2-highlight, edit without a ring and ring on keyboard focus", true);
+    check("property fields hover in selected-bg, edit without a ring and ring on keyboard focus", true);
 
     // The W/H resizing menu sits over its field, outside it: the pointer on
     // the menu keeps the field hovered, so the fill does not flicker back.
@@ -2791,7 +2792,7 @@ export async function runDesignWorkspaceCanvasSmoke({ page, waitFor, check }) {
       .poll(() =>
         sized.evaluate((control) => {
           const probe = document.createElement("div");
-          probe.style.background = "var(--bg2-highlight)";
+          probe.style.background = "var(--selected-bg)";
           control.append(probe);
           const highlight = getComputedStyle(probe).backgroundColor;
           probe.remove();
@@ -2804,7 +2805,7 @@ export async function runDesignWorkspaceCanvasSmoke({ page, waitFor, check }) {
     check("a field stays hovered while the pointer is on its trailing menu", true);
 
     // The Design-tab sheets (Layer tree, Inspector, Property field): owned
-    // rows on bg2 with quiet fg3 type icons, a 36px selection header, 12px
+    // rows on bg2 with quiet fg3 type icons, a 40px selection header, 12px
     // glyphs on 24px section actions, and a 20px-high in-field sizing word
     // at least as wide as it is tall.
     const sheetLook = await page.evaluate(() => {
@@ -2842,7 +2843,7 @@ export async function runDesignWorkspaceCanvasSmoke({ page, waitFor, check }) {
       "layer, inspector and field details follow their sheets",
       sheetLook.owned &&
         sheetLook.icon &&
-        sheetLook.header === 36 &&
+        sheetLook.header === 40 &&
         sheetLook.glyphs.length > 0 &&
         sheetLook.glyphs.every((width) => width === 12) &&
         sheetLook.trigger?.height === 20 &&
@@ -2872,17 +2873,19 @@ export async function runDesignWorkspaceCanvasSmoke({ page, waitFor, check }) {
   );
   const themeStartBox = await themeDialog.boundingBox();
   await expect(themeDialog.locator('[data-design-theme-titlebar]')).toHaveCSS("height", "40px");
-  await expect(themeDialog.locator('h2')).toHaveCSS("font-size", "13px");
+  // Window titles are 14 semibold like dialog and popover titles.
+  await expect(themeDialog.locator('h2')).toHaveCSS("font-size", "14px");
+  await expect(themeDialog.locator("h2")).toHaveCSS("font-weight", "500");
   await expect(themeDialog.locator('[data-design-theme-type-filter]')).toHaveCSS("width", "168px");
   await expect(themeDialog.locator('[data-design-theme-toolbar]')).toHaveCSS("height", "40px");
   await expect(themeDialog.locator('[data-slot="dialog-footer"]')).toHaveCount(0);
   await expect(themeDialog.getByRole("button", { name: "Done", exact: true })).toHaveCount(0);
   await expect(themeDialog.locator('[data-design-theme-row]').first()).toHaveCSS("height", "36px");
-  // The chosen source and type fill bg2-highlight, as a selected layer does.
+  // The chosen source and type fill selected-bg, as a selected layer does.
   expect(
     await themeDialog.evaluate((root) => {
       const probe = document.createElement("div");
-      probe.style.background = "var(--bg2-highlight)";
+      probe.style.background = "var(--selected-bg)";
       root.append(probe);
       const highlight = getComputedStyle(probe).backgroundColor;
       probe.remove();

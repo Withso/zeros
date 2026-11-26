@@ -45,7 +45,7 @@ function StatusMark({ status }: { status: SessionStatus }) {
   if (status === "input" || status === "plan") {
     return <AgentAwaitingIcon kind={status} className="size-3.5 shrink-0" strokeWidth={1.25} />;
   }
-  if (status === "running") return <RunStream size={12} className="text-blue-primary shrink-0" />;
+  if (status === "running") return <RunStream size={12} className="text-accent-text shrink-0" />;
   return null;
 }
 
@@ -78,7 +78,7 @@ function NativeSubagentRow({ agent, onSelect }: { agent: NativeSubagent; onSelec
     <ListRow variant="panel" onClick={() => onSelect(agent.ownerChatId)} data-native-subagent={agent.id}>
       <Bot className="text-fg2 size-3.5 shrink-0" strokeWidth={1.5} aria-label="Agent" />
       <span className="text-fg1 min-w-0 flex-1 truncate text-xs">{agent.title}</span>
-      {agent.running && <RunStream size={12} className="text-blue-primary shrink-0" />}
+      {agent.running && <RunStream size={12} className="text-accent-text shrink-0" />}
     </ListRow>
   );
 }
@@ -135,7 +135,7 @@ export function AgentsTab({ active, scope }: { tab: WorkbenchTab; active: boolea
           if (rows.length === 0 && nativeRows.length === 0) return null;
           return (
             <section key={group.id} aria-label={group.label} className="pb-2" data-agents-group={group.id}>
-              <h3 className="text-fg3 px-3 pb-1 text-xxs font-medium">{group.label} · {rows.length + nativeRows.length}</h3>
+              <h3 className="text-fg3 px-3 pb-1 text-3xxs font-medium">{group.label} · {rows.length + nativeRows.length}</h3>
               {rows.map((chat) => (
                 <SessionListRow
                   key={chat.id}
@@ -152,7 +152,7 @@ export function AgentsTab({ active, scope }: { tab: WorkbenchTab; active: boolea
         })}
         {terminals.length > 0 && (
           <section aria-label="Terminal agents" className="pb-2" data-agents-group="terminals">
-            <h3 className="text-fg3 px-3 pb-1 text-xxs font-medium">Terminal agents · {terminals.length}</h3>
+            <h3 className="text-fg3 px-3 pb-1 text-3xxs font-medium">Terminal agents · {terminals.length}</h3>
             {terminals.map((chat) => (
               <SessionListRow key={chat.id} chat={chat} folder={folder} status="idle" active={chat.id === activeId} onSelect={select} />
             ))}

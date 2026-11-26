@@ -118,7 +118,7 @@ describe("an instance whose component is gone", () => {
     expect(panels).not.toContain("peekSnapshot(workspaceId).data?.frames");
     // An instance row carries the component mark and a slot row its own; a
     // part or slot row is hidden like any layer, never renamed.
-    expect(panels).toContain('kind === "instance") return <Diamond className="text-violet-primary" data-design-layer-instance=""');
+    expect(panels).toContain('kind === "instance") return <Diamond className="text-violet-text" data-design-layer-instance=""');
     expect(panels).toContain('kind === "slot") return <SquareDashed data-design-layer-slot=""');
     expect(panels).not.toContain('{kind === "part" ? null : <IconButton');
     expect(panels).toContain('["part", "slot"].includes(designLayerRowKind(row.frame, row.layer.node.oid))) return;');
@@ -273,7 +273,7 @@ describe("a component whose options do not apply", () => {
     expect(mark).toContain('data-design-frame-problem="options-not-applied"');
     expect(mark).toContain(`title="${message}"`);
     expect(mark).toContain(`aria-label="${message}"`);
-    expect(mark).toContain("text-red-primary");
+    expect(mark).toContain("text-red-text");
   });
 
   it("is drawn on the frame's label before anything is selected", () => {

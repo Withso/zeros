@@ -72,8 +72,10 @@ implementation in it. Prefer direct, explicit imports inside an app.
 
 ## 3. UI and styling
 
-Zeros uses dense professional desktop chrome, a restrained accent, four text
-tiers, a 4px spacing rhythm (half steps inside controls), and tonal borders.
+Zeros uses dense professional desktop chrome, a restrained accent, three text
+tiers, status colours at one lightness with four roles each (-text, -bg,
+-on-bg, -solid), a 4px spacing rhythm (half steps inside controls), and tonal
+borders.
 Existing visual behavior is a contract: structural work must not alter it
 without explicit design approval. Use the zeros-ui skill and verify against
 the current primitives, token sources, and contrast policy.
@@ -93,9 +95,11 @@ the current primitives, token sources, and contrast policy.
   code.
 - Every foreground/background pairing is declared in
   `styles/policy/contrast-contract.json` and must meet its role's floor in both
-  themes: WCAG AA for text, 3:1 for focus/graphics, and owner-reviewed floors
-  for supplemental metadata and subtle control outlines. A token change that
-  fails the contract does not ship.
+  themes: WCAG AA for text (all three tiers at rest), 3:1 for focus/graphics,
+  and owner-reviewed floors for labels over translucent washes and subtle
+  control outlines. A token change that fails the contract does not ship.
+- A retired token name stays retired: `check:ui` rejects it with its
+  replacement, so a rename never half-lands.
 - Add a primitive or semantic alias only with its first real caller, then run
   `pnpm design:docs`.
 - Do not add feature styling to a global stylesheet. Keep component-owned rules
@@ -118,9 +122,12 @@ the current primitives, token sources, and contrast policy.
 - Global overlays use the named layers (`z-panel`, `z-chrome`, `z-dropdown`,
   `z-modal`, `z-toast`) and shared primitives. Never solve a stacking problem
   with an arbitrary high `z-index`.
-- Controls are 28px (standard) or 24px (compact); same-row controls match
-  heights. Preserve accessible names, an opaque focus indicator, keyboard
-  behavior, reduced-motion behavior, and inertness of hidden content.
+- Controls are 28px (standard), 24px (compact) or 20px inside a 24px inline
+  floating group; same-row controls match heights. Panel headers are 40px.
+  Transitions use the named durations (fast 120, base 150, slow 200). Every
+  in-app wait shows Stream-run; only app startup shows the Island Z weave.
+  Preserve accessible names, an opaque focus indicator, keyboard behavior,
+  reduced-motion behavior, and inertness of hidden content.
 
 ### Enforcement
 

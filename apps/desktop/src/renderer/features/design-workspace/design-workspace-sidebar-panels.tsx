@@ -217,7 +217,7 @@ export function DesignLayerRowIcon({ kind, node }: {
   kind: ReturnType<typeof designLayerRowKind>;
   node: DesignRuntimeTreeNode;
 }) {
-  if (kind === "instance") return <Diamond className="text-violet-primary" data-design-layer-instance="" aria-hidden="true" />;
+  if (kind === "instance") return <Diamond className="text-violet-text" data-design-layer-instance="" aria-hidden="true" />;
   if (kind === "slot") return <SquareDashed data-design-layer-slot="" aria-hidden="true" />;
   if (node.absolute) return <Scan data-design-layer-absolute="" aria-hidden="true" />;
   return (
@@ -321,7 +321,6 @@ const DesignLayerFrameRow = React.memo(function DesignLayerFrameRow({
       asChild
       role="treeitem"
       variant="ghost"
-      size="sm"
       data-design-frame-row={frame.file}
       data-design-frame-component={identity ? "" : undefined}
       data-design-panel-row={row.key}
@@ -354,8 +353,8 @@ const DesignLayerFrameRow = React.memo(function DesignLayerFrameRow({
           <span className={DESIGN_LAYER_DISCLOSURE_SPACER} />
         )}
         {identity ? identityKind === "instance"
-          ? <Diamond className="text-violet-primary" data-design-frame-component-mark="instance" aria-hidden="true" />
-          : <ComponentGlyph className="text-violet-primary fill-current" data-design-frame-component-mark="main" aria-hidden="true" />
+          ? <Diamond className="text-violet-text" data-design-frame-component-mark="instance" aria-hidden="true" />
+          : <ComponentGlyph className="text-violet-text fill-current" data-design-frame-component-mark="main" aria-hidden="true" />
           : frame.kind === "text" ? <Type /> : <FrameLayoutIcon kind={layoutKind} />}
         <DesignLayerRowName rename={rename} name={identity ?? designFrameDisplayName(frame)} actions={actions} />
       </div>
@@ -399,7 +398,6 @@ const DesignLayerNodeRow = React.memo(function DesignLayerNodeRow({
         data-design-panel-row={row.key}
         role="treeitem"
         variant="ghost"
-        size="sm"
         className={cn(
           "zd-design-layer-row relative z-[1] h-7 min-w-0 flex-1 justify-start gap-1 px-2 pr-7 text-xs font-normal [&>svg]:size-3.5",
           blockRadius,
@@ -1383,7 +1381,7 @@ function OwnedDesignWorkspaceSidebarPanels({
       className="bg-bg1 flex min-h-0 flex-1 flex-col overflow-hidden text-xs"
       aria-labelledby={headingId}
     >
-      <div className="flex h-9 shrink-0 items-center gap-2 pr-2 pl-3">
+      <div className="flex h-10 shrink-0 items-center gap-2 pr-1.5 pl-3">
         <h2 id={headingId} className="text-fg1 flex min-w-0 flex-1 text-xs font-medium">
           {onExpandedChange ? (
             // The drawer at the foot of the Style panel opens from this
@@ -1572,7 +1570,6 @@ function OwnedDesignWorkspaceSidebarPanels({
               <Button
                 type="button"
                 variant="secondary"
-                size="sm"
                 onClick={snapshot.refresh}
               >
                 Retry

@@ -37,9 +37,9 @@ import { checkOutcome, type CheckOutcome } from "./review-model";
 export function PrStateBadge({ state }: { state: PR["state"] }) {
   const map: Record<PR["state"], { label: string; cls: string }> = {
     draft: { label: "Draft", cls: "bg-bg2-hover text-fg2" },
-    ready: { label: "Open", cls: "bg-green-bg text-green-fg" },
-    merged: { label: "Merged", cls: "bg-violet-bg text-violet-fg" },
-    closed: { label: "Closed", cls: "bg-red-bg text-red-fg" },
+    ready: { label: "Open", cls: "bg-green-bg text-green-on-bg" },
+    merged: { label: "Merged", cls: "bg-violet-bg text-violet-on-bg" },
+    closed: { label: "Closed", cls: "bg-red-bg text-red-on-bg" },
   };
   const m = map[state];
   return (
@@ -60,22 +60,22 @@ export function PrStateBadge({ state }: { state: PR["state"] }) {
  *  "passed" group with skips reads honestly. */
 export function CheckGlyph({ check }: { check: PrCheck }) {
   if (check.conclusion === "skipped")
-    return <CircleSlash className="text-muted-fg size-3.5 shrink-0" />;
+    return <CircleSlash className="text-fg3 size-3.5 shrink-0" />;
   const outcome = checkOutcome(check);
   return <OutcomeGlyph outcome={outcome} />;
 }
 
 export function OutcomeGlyph({ outcome }: { outcome: CheckOutcome }) {
   if (outcome === "passed")
-    return <CircleCheck className="text-green-primary size-3.5 shrink-0" />;
+    return <CircleCheck className="text-green-text size-3.5 shrink-0" />;
   if (outcome === "failed")
-    return <CircleX className="text-red-primary size-3.5 shrink-0" />;
+    return <CircleX className="text-red-text size-3.5 shrink-0" />;
   return (
     <ZerosSpinner
       size={14}
       tone="inherit"
       label="Running"
-      className="text-yellow-primary shrink-0"
+      className="text-yellow-text shrink-0"
     />
   );
 }
@@ -95,7 +95,7 @@ export function AuthorAvatar({
   return (
     <Avatar size="sm" className={cn("size-5", className)}>
       {avatarUrl ? <AvatarImage src={avatarUrl} alt={login} /> : null}
-      <AvatarFallback className="text-xxs uppercase">
+      <AvatarFallback className="text-2xxs uppercase">
         {login.slice(0, 1) || "?"}
       </AvatarFallback>
     </Avatar>
@@ -121,12 +121,12 @@ export function GroupHeader({
       type="button"
       aria-expanded={open}
       onClick={onToggle}
-      className="text-fg2 hover:text-fg1 flex h-8 w-full items-center gap-1.5 rounded-md px-2.5 text-left text-xs transition-colors duration-120 ease-out"
+      className="text-fg2 hover:text-fg1 flex h-8 w-full items-center gap-1.5 rounded-md px-2.5 text-left text-xs transition-colors duration-fast ease-out"
     >
       <ChevronDown
         aria-hidden
         className={cn(
-          "text-fg3 size-3.5 shrink-0 transition-transform duration-120 ease-out",
+          "text-fg3 size-3.5 shrink-0 transition-transform duration-fast ease-out",
           !open && "-rotate-90",
         )}
       />
@@ -140,7 +140,7 @@ export function GroupHeader({
 
 export function Centered({ children }: { children: React.ReactNode }) {
   return (
-    <div className="text-muted-fg px-3 py-6 text-center text-xs">
+    <div className="text-fg3 px-3 py-6 text-center text-xs">
       {children}
     </div>
   );
@@ -155,13 +155,13 @@ export function ErrorCallout({
   onRetry?: () => void;
 }) {
   return (
-    <div className="bg-red-bg text-red-fg flex items-start gap-2 rounded-md px-3 py-2 text-xs">
+    <div className="bg-red-bg text-red-on-bg flex items-start gap-2 rounded-md px-3 py-2 text-xs">
       <span className="min-w-0 flex-1 break-words">{text}</span>
       {onRetry && (
         <button
           type="button"
           onClick={onRetry}
-          className="shrink-0 rounded-sm px-1.5 py-0.5 font-medium underline-offset-2 transition-colors duration-120 ease-out hover:underline"
+          className="shrink-0 rounded-sm px-1.5 py-0.5 font-medium underline-offset-2 transition-colors duration-fast ease-out hover:underline"
         >
           Retry
         </button>
@@ -193,9 +193,9 @@ export function ViewedToggle({
       onMouseEnter={() => setHover(true)}
       onMouseLeave={() => setHover(false)}
       className={cn(
-        "flex size-4.5 shrink-0 items-center justify-center rounded-sm border transition-colors duration-120 ease-out",
+        "flex size-4.5 shrink-0 items-center justify-center rounded-sm border transition-colors duration-fast ease-out",
         viewed
-          ? "bg-green-bg text-green-fg border-transparent"
+          ? "bg-green-bg text-green-on-bg border-transparent"
           : "border-border3 text-fg2 hover:border-border4",
       )}
     >
@@ -233,10 +233,10 @@ export function DiffStat({
   return (
     <span className={cn("shrink-0 text-xs tabular-nums", className)}>
       {additions > 0 && (
-        <span className="text-green-primary">+{additions}</span>
+        <span className="text-green-text">+{additions}</span>
       )}
       {additions > 0 && deletions > 0 && <span> </span>}
-      {deletions > 0 && <span className="text-red-primary">−{deletions}</span>}
+      {deletions > 0 && <span className="text-red-text">−{deletions}</span>}
     </span>
   );
 }
@@ -267,7 +267,7 @@ export function ReviewTextLink({
   arrow?: boolean;
 }) {
   return (
-    <Button variant="link" onClick={onClick} aria-label={label}>
+    <Button variant="ghost" size="compact" className="text-fg2 min-w-0 font-normal" onClick={onClick} aria-label={label}>
       <span className="truncate">{children}</span>
       {arrow && <ArrowUpRight aria-hidden className="size-3" />}
     </Button>

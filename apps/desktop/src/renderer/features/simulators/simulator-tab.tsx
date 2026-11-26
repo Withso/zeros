@@ -55,7 +55,7 @@ function SimulatorUnavailable({ notice }: { notice: WorkbenchNotice }) {
   );
   return (
     <div className="flex min-h-0 flex-1 items-center justify-center">
-      <Smartphone aria-hidden strokeWidth={1} className="text-muted-fg size-10" />
+      <Smartphone aria-hidden strokeWidth={1} className="text-fg3 size-10" />
     </div>
   );
 }

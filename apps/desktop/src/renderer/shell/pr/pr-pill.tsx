@@ -10,15 +10,15 @@ import type { WorkspacePrTone } from "../workspace-glyph";
 // PR's colour, the same --pr-status-chip-border-* ramp shades the island uses.
 // Open and ready are green; conflicts and failed checks yellow.
 const PR_PILL_TONE: Record<WorkspacePrTone, string> = {
-  open: "border-(--pr-status-chip-border-success) text-green-primary hover:text-green-fg",
-  conflicts: "border-(--pr-status-chip-border-warning) text-yellow-primary hover:text-yellow-fg",
-  ready: "border-(--pr-status-chip-border-success) text-green-primary hover:text-green-fg",
-  merged: "border-(--pr-status-chip-border-merged) text-violet-fg hover:text-violet-primary",
-  closed: "border-(--pr-status-chip-border-closed) text-red-fg hover:text-red-primary",
+  open: "border-(--pr-status-chip-border-success) text-green-text hover:text-green-on-bg",
+  conflicts: "border-(--pr-status-chip-border-warning) text-yellow-text hover:text-yellow-on-bg",
+  ready: "border-(--pr-status-chip-border-success) text-green-text hover:text-green-on-bg",
+  merged: "border-(--pr-status-chip-border-merged) text-violet-text hover:text-violet-on-bg",
+  closed: "border-(--pr-status-chip-border-closed) text-red-text hover:text-red-on-bg",
 };
 
 export const PR_PILL_CLS =
-  "inline-flex h-6 shrink-0 items-center rounded-full border px-2 text-xs leading-4 font-medium tabular-nums transition-colors duration-120 ease-out focus-visible:ring-1 focus-visible:ring-accent focus-visible:outline-none";
+  "inline-flex h-6 shrink-0 items-center rounded-full border px-2 text-xs leading-4 font-medium tabular-nums transition-colors duration-fast ease-out focus-visible:ring-1 focus-visible:ring-accent focus-visible:outline-none";
 
 // --- COMPONENT ---
 

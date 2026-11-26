@@ -13,13 +13,13 @@ export interface PanelHeaderProps extends React.HTMLAttributes<HTMLElement> {
 
 const HEADER_CLASSES = {
   window: "bg-bg1 flex h-10 shrink-0 items-center gap-1 pr-1.5 pl-3",
-  panel: "flex h-9 items-center gap-2 pr-1 pl-3",
+  panel: "flex h-10 shrink-0 items-center gap-2 pr-1.5 pl-3",
 } as const;
 const HEADER_DIVIDER_CLS = "border-border1 border-b";
 
-/** Window chrome (40px) and panel headings (36px) share their own geometry:
- * text starts 12px in, and a trailing 28px icon button ends as far from the
- * edge as from the top (6px in a window, 4px in a panel). Icon buttons inside
+/** Window chrome and panel headings are both 40px (P7), so every column's
+ * header lines up: text starts 12px in, and a trailing 28px icon button ends
+ * as far from the edge as from the top (6px). Icon buttons inside
  * default to 28px; group them in PanelHeaderActions.
  * Legacy geometry overrides in className (window h-9 or gap-2) are
  * `@deprecated`: preserves a pre-existing recipe; unify during the UI iteration. */

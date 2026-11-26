@@ -78,7 +78,7 @@ async function main() {
     return <main className="bg-bg1 flex min-h-screen gap-6 p-6">
       <nav aria-label="Workspace navigation" className="bg-bg1 w-60 shrink-0">
         <SidebarTeamSection organizationId={organizationId} me={me} active homeActive onHome={() => homeOpens.push(Date.now())}
-          entryClassName="flex h-8 w-full min-w-0 items-center justify-start gap-2 rounded-md px-2 text-left text-xs text-fg2 hover:bg-(--surface-hover) data-[state=active]:bg-bg2-highlight data-[state=active]:text-fg1"
+          entryClassName="flex h-8 w-full min-w-0 items-center justify-start gap-2 rounded-md px-2 text-left text-xs text-fg2 hover:bg-(--surface-hover) data-[state=active]:bg-selected-bg data-[state=active]:text-fg1"
           labelClassName="select-none truncate text-3xxs leading-4 font-medium text-fg3" />
       </nav>
       <div className="flex min-w-0 flex-1 flex-col gap-6">

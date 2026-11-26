@@ -14,7 +14,9 @@ import {
   workspaceUpdatedAt,
   type SidebarWorkspaceSignal,
 } from "../sidebar-view-model";
-import { sidebarRowStatus } from "../sidebar-workspace-row-meta";
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
+import { SidebarPlacementIcon, sidebarRowLead, sidebarRowStatus, STATUS_DOT_CLS } from "../sidebar-workspace-row-meta";
 
 const ws = (id: string, extra: Partial<Workspace> = {}): Workspace =>
   ({ id, name: id, path: `/repo/${id}`, createdAt: 0, lastActiveAt: 0, ...extra }) as unknown as Workspace;
@@ -170,5 +172,41 @@ describe("sidebar review regressions", () => {
       if (zone === undefined) delete process.env.TZ;
       else process.env.TZ = zone;
     }
+  });
+});
+
+// Step 2 (v14 B01/B04): the leading slot is the project logo, the agent loader
+// while working, the logo loader while archiving and a dot for a same-project
+// child. The seeded PR-coloured square is gone.
+describe("sidebar row leading slot", () => {
+  const base = { archiving: false, working: false, sameProjectChild: false, folder: false, design: false };
+  it("shows the project logo at rest", () => {
+    expect(sidebarRowLead(base)).toBe("logo");
+  });
+  it("puts archiving, then working, ahead of everything else", () => {
+    expect(sidebarRowLead({ ...base, archiving: true, working: true, sameProjectChild: true })).toBe("archiving");
+    expect(sidebarRowLead({ ...base, working: true, sameProjectChild: true, folder: true })).toBe("working");
+  });
+  it("gives a same-project child a dot and keeps folder and design marks", () => {
+    expect(sidebarRowLead({ ...base, sameProjectChild: true })).toBe("child");
+    expect(sidebarRowLead({ ...base, folder: true })).toBe("folder");
+    expect(sidebarRowLead({ ...base, design: true })).toBe("design");
+  });
+});
+
+describe("sidebar row status colours", () => {
+  it("use the status families' -text roles, and violet for Done in word and dot", () => {
+    expect(STATUS_DOT_CLS.done).toBe("bg-violet-text");
+    expect(sidebarRowStatus({ archiving: false, setupFailed: false, cloudStatus: null, awaiting: null, working: false, unread: true })).toEqual({ label: "Done", tone: "done" });
+  });
+});
+
+describe("sidebar placement icon", () => {
+  it("draws a failed cloud workspace as a red cloud-off, apart from an asleep one", () => {
+    const icon = (cloudStatus: string | null) => renderToStaticMarkup(createElement(SidebarPlacementIcon, { cloud: true, cloudStatus }));
+    expect(icon("failed")).toContain('data-cloud-mark="error"');
+    expect(icon("failed")).toContain("text-red-text");
+    expect(icon("stopped")).toContain('data-cloud-mark="stopped"');
+    expect(icon("stopped")).not.toContain("text-red-text");
   });
 });

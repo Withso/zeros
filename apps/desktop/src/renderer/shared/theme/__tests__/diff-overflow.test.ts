@@ -43,11 +43,11 @@ describe("file and diff overflow policy", () => {
   it("keeps hover/Review PatchDiff chrome aligned with the Changes file viewer", () => {
     const patch = zerosDiffOptions({
       disableFileHeader: true,
-      surface: "sidebar-bg",
+      surface: "bg1-raised",
     });
     const file = zerosCodeViewOptions({
       disableFileHeader: true,
-      surface: "sidebar-bg",
+      surface: "bg1-raised",
     });
 
     expect(patch).toMatchObject({

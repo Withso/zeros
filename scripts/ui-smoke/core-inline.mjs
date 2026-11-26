@@ -1711,7 +1711,7 @@ export async function runDiffFilesSmoke({
       const bg1Probe = document.createElement("div");
       const changesProbe = document.createElement("div");
       bg1Probe.style.backgroundColor = "var(--bg1)";
-      changesProbe.style.backgroundColor = "var(--sidebar-bg)";
+      changesProbe.style.backgroundColor = "var(--bg1-raised)";
       document.body.append(bg1Probe, changesProbe);
       const matches =
         getComputedStyle(header).backgroundColor ===
@@ -2099,8 +2099,8 @@ export async function runDiffFilesSmoke({
     `${initialSearchSidebar?.background} vs ${initialSearchSidebar?.treeBackground}`,
   );
   check(
-    "Search sidebar starts with only its 36px search row",
-    initialSearchSidebar?.rowHeight === 36 &&
+    "Search sidebar starts with only its 40px search row",
+    initialSearchSidebar?.rowHeight === 40 &&
       initialSearchSidebar.rowBorderBottom === "1px" &&
       initialSearchSidebar.inputBorder === "0px" &&
       (await searchSidebar.locator("[data-item-path]").count()) === 0,

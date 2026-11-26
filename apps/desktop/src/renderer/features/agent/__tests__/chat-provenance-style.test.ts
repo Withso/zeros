@@ -131,7 +131,7 @@ describe("workspace name chip", () => {
     expect(chip).toContain("<Pill aria-label={`Open ${label} in…`}>");
     expect(topbar).not.toContain('variant="accent"');
     const pill = source("apps/desktop/src/renderer/shared/ui/primitives/pill.tsx");
-    expect(pill).toContain("border-border2 bg-bg2 text-fg1");
+    expect(pill).toContain("border-(--pill-border) bg-(--pill-bg) text-fg1");
     expect(/neutral:\s*"[^"]*"/.exec(pill)?.[0]).not.toContain("blue");
   });
 });
@@ -208,21 +208,21 @@ describe("Settings → Git prefix pane", () => {
   });
 
   it("gives that chip a fill that is not the card under it", () => {
-    // --bg2, NOT the --bg1-highlight originally named: the settings card is
-    // itself --bg1-highlight, so that pairing is the same colour as its own
+    // --bg2, NOT the --bg1-raised originally named: the settings card is
+    // itself --bg1-raised, so that pairing is the same colour as its own
     // background in BOTH themes and the chip disappears. This is the assertion
     // that catches a well-meaning "match the requested token" revert.
     const badge = source(
       "apps/desktop/src/renderer/shared/ui/primitives/badge.tsx",
     );
     expect(badge).toMatch(/neutral:\s*"[^"]*bg-bg2[^"]*text-fg2[^"]*"/);
-    expect(badge).not.toMatch(/neutral:\s*"[^"]*bg-bg1-highlight/);
+    expect(badge).not.toMatch(/neutral:\s*"[^"]*bg-bg1-raised/);
     // Same card fill, restated here so the collision is checked against the
     // real value rather than a remembered one.
     expect(
       source("apps/desktop/src/renderer/features/settings/settings-ui.tsx"),
     ).toContain(
-      '"bg-bg1-bright border-border1 divide-border1 rounded-[calc(var(--radius-lg)*1.5)] border px-3.5 [&>*]:py-3"',
+      '"bg-bg1-raised border-border1 divide-border1 rounded-xl border px-3.5 [&>*]:py-3"',
     );
   });
 

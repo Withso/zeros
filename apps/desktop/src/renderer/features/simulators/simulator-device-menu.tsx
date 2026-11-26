@@ -20,7 +20,7 @@ function DeviceItem({ device }: { device: SimulatorDevice }) {
     >
       <span className="flex min-w-0 flex-col">
         <span className="truncate">{device.name}</span>
-        <span className="text-muted-fg text-2xxs truncate">
+        <span className="text-fg3 text-3xxs truncate">
           {simulatorDeviceStatusLabel(device)}
         </span>
       </span>
@@ -63,8 +63,8 @@ export function SimulatorDeviceMenuContent({
         }}
       >
         {booted.length > 0 && (
-          <DropdownMenuLabel className="text-muted-fg flex items-center gap-1.5 font-normal">
-            <span aria-hidden className="bg-blue-primary size-1.5 rounded-full" />
+          <DropdownMenuLabel className="text-fg3 flex items-center gap-1.5 font-normal">
+            <span aria-hidden className="bg-accent-text size-1.5 rounded-full" />
             Booted
           </DropdownMenuLabel>
         )}
@@ -73,7 +73,7 @@ export function SimulatorDeviceMenuContent({
         ))}
         {booted.length > 0 && available.length > 0 && <DropdownMenuSeparator />}
         {available.length > 0 && (
-          <DropdownMenuLabel className="text-muted-fg font-normal">
+          <DropdownMenuLabel className="text-fg3 font-normal">
             Available (will boot)
           </DropdownMenuLabel>
         )}

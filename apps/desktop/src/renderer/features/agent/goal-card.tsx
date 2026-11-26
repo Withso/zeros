@@ -121,7 +121,7 @@ export function GoalCard({
                 {currentGoal.objective}
               </span>
               {currentGoal.tokenBudget != null ? (
-                <span className="text-muted-fg shrink-0 text-xs leading-4.5 tabular-nums">
+                <span className="text-fg3 shrink-0 text-xs leading-4.5 tabular-nums">
                   {currentGoal.tokensUsed.toLocaleString()} /{" "}
                   {currentGoal.tokenBudget.toLocaleString()} tokens
                 </span>

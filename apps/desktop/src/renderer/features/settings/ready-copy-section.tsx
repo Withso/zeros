@@ -88,7 +88,7 @@ export function ReadyCopySection({ organizationId, projectId, active }: { organi
       {error && <MessageRow tone="error" role="alert" flush>{error}</MessageRow>}
       <SettingsRow label={status?.label ?? "Not built yet"} hint={[status?.hint, failure && readyCopyFailureLine(failure, now)].filter(Boolean).join(" ") || null}>
         {copy.canBuild && (
-          <Button variant="secondary" size="sm" disabled={busy || copy.status.state === "updating" || copy.status.state === "getting_ready"}
+          <Button variant="secondary" disabled={busy || copy.status.state === "updating" || copy.status.state === "getting_ready"}
             onClick={() => void build()}>{failure ? "Retry now" : "Build now"}</Button>
         )}
       </SettingsRow>

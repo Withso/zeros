@@ -11,10 +11,8 @@ const HOME_PAGE = join(ROOT, "apps/marketing/src/pages/HomePage.tsx");
 
 /** Tokens the homepage actually consumes — must stay cloned from the app. */
 const DARK_TOKENS = [
-  "--bg0",
   "--bg1",
   "--bg1-hover",
-  "--bg1-highlight",
   "--bg2",
   "--bg2-hover",
   "--bg3",
@@ -23,20 +21,18 @@ const DARK_TOKENS = [
   "--fg1",
   "--fg2",
   "--fg3",
-  "--muted-fg",
-  "--sidebar-bg",
-  "--sidebar-bg-hover",
+  "--bg1-raised",
+  "--bg1-raised-hover",
   "--border1",
   "--border2",
   "--border3",
   "--border4",
-  "--highlighted-bg",
   "--highlighted-bright",
   "--inverted-bg",
   "--inverted-fg",
   "--primary-button-hover",
-  "--green-fg",
-  "--yellow-primary",
+  "--green-on-bg",
+  "--yellow-text",
 ] as const;
 
 const LIGHT_TOKENS = DARK_TOKENS;
@@ -82,7 +78,7 @@ describe("marketing appearance tokens", () => {
   const app = readFileSync(APP_TOKENS, "utf8");
   const marketing = readFileSync(MARKETING_TOKENS, "utf8");
 
-  it("generates exactly the 26 shared tokens in each appearance scope", () => {
+  it("generates exactly the 22 shared tokens in each appearance scope", () => {
     const dark = cssBlockAfter(marketing, ":root {");
     const light = cssBlockAfter(
       cssBlockAfter(marketing, "@media (prefers-color-scheme: light) {"),

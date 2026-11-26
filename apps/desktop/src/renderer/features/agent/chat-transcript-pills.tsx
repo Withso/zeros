@@ -247,9 +247,9 @@ function TranscriptPill({
       {attached ? (
         // No size class: LOGO_CLASS governs every glyph in this pill, and a
         // `size-*` here would be dead markup — the descendant rule outranks it.
-        <Check className="text-green-primary" aria-hidden="true" />
+        <Check className="text-green-text" aria-hidden="true" />
       ) : (
-        <span className="text-muted-fg text-2xxs tabular-nums">
+        <span className="text-fg3 text-2xxs tabular-nums">
           {summary.userMessageCount}
         </span>
       )}
@@ -294,7 +294,8 @@ function TranscriptPill({
         side="top"
         align="start"
         collisionPadding={12}
-        className="w-[24rem] overflow-hidden p-0"
+        size="lg"
+        className="overflow-hidden p-0"
       >
         <TranscriptPreviewCard
           chatId={summary.chatId}
@@ -396,11 +397,11 @@ export function TranscriptPickerBody({
                     VIEW of one state rather than a second state. */}
                 {attached ? (
                   <Check
-                    className="text-green-primary size-3 shrink-0"
+                    className="text-green-text size-3 shrink-0"
                     aria-hidden="true"
                   />
                 ) : (
-                  <span className="text-muted-fg text-2xxs shrink-0 tabular-nums">
+                  <span className="text-fg3 text-2xxs shrink-0 tabular-nums">
                     {s.userMessageCount}
                   </span>
                 )}

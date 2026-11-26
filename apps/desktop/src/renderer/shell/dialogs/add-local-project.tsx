@@ -192,15 +192,14 @@ export function AddLocalProjectDialog({
               <span className="text-fg1 truncate text-sm">{branchLabel}</span>
             </div>
             {ownerRepo && (
-              <div className="text-fg2 pl-5.5 text-xs">{ownerRepo}</div>
+              <div className="text-fg2 pl-6 text-xs">{ownerRepo}</div>
             )}
-            <div className="text-fg2 truncate pl-5.5 text-xs">{inspect.path}</div>
+            <div className="text-fg2 truncate pl-6 text-xs">{inspect.path}</div>
           </div>
         </DialogBody>
         <DialogFooter>
           <Button
             variant="ghost"
-            size="sm"
             onClick={() => onOpenChange(false)}
             disabled={busy}
           >
@@ -208,7 +207,6 @@ export function AddLocalProjectDialog({
           </Button>
           <Button
             variant="primary"
-            size="sm"
             onClick={handleAdd}
             disabled={busy}
           >

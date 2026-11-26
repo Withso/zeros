@@ -102,7 +102,7 @@ function CommitRow({
   return (
     <div
       data-review-commit={c.abbreviatedSha}
-      className="group hover:bg-bg1-hover flex min-h-13 min-w-0 items-center gap-2.5 rounded-md px-2.5 py-2 transition-colors duration-120 ease-out"
+      className="group hover:bg-bg1-hover flex min-h-13 min-w-0 items-center gap-2.5 rounded-md px-2.5 py-2 transition-colors duration-fast ease-out"
     >
       <span className="flex shrink-0 -space-x-1.5">
         <AuthorAvatar
@@ -141,7 +141,7 @@ function CommitRow({
           )}
         </span>
       </div>
-      <span className="flex shrink-0 items-center opacity-0 transition-opacity duration-120 ease-out group-focus-within:opacity-100 group-hover:opacity-100">
+      <span className="flex shrink-0 items-center opacity-0 transition-opacity duration-fast ease-out group-focus-within:opacity-100 group-hover:opacity-100">
         <Tooltip label="Copy SHA">
           <IconButton
             size="compact"

@@ -86,7 +86,7 @@ const CLOUD_PR_REFRESH_MESSAGE: PrBlockMessage = {
 };
 
 // The shared dropdown chrome in its SPLIT form (primitives/select.tsx): same
-// 6px corners, 13px text, 14px glyphs, border3 shell and bg2-highlight hover
+// 6px corners, 13px text, 14px glyphs, border3 shell and selected-bg hover
 // as the Target-branch dropdown across the row — only the action segment and
 // the ▾ menu segment hover independently. `enabled:` hovers keep a disabled
 // control inert under the cursor while its tooltip explains why.

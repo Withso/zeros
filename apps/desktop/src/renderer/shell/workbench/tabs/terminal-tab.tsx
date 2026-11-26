@@ -1258,7 +1258,7 @@ function RunActionOverlay({
             justify="center"
             className="h-full min-h-0 px-6 text-center"
           >
-            <ZerosSpinner size={16} />
+            <ZerosSpinner size={20} />
             <div className="text-fg2 text-xs">Starting {action.name}…</div>
           </Stack>
         ) : (
@@ -1270,7 +1270,7 @@ function RunActionOverlay({
             title={action.name}
             action={
               <Tooltip label={action.command}>
-                <Button variant="secondary" size="sm" onClick={onStart}>
+                <Button variant="secondary" onClick={onStart}>
                   {outcome && <RotateCw />}
                   {outcome
                     ? `Run ${action.name} again`
@@ -1302,7 +1302,7 @@ function RunActionOverlay({
       {outcome && (outcome === "stopped" || badgeVisible) && (
         <RunStatusBadge outcome={outcome} />
       )}
-      <Button variant="secondary" size="sm" onClick={onStart}>
+      <Button variant="secondary" onClick={onStart}>
         <RotateCw />
         Rerun
       </Button>
@@ -1322,7 +1322,7 @@ function RunAddEmpty() {
       icon={Play}
       title="Run"
       action={
-        <Button variant="secondary" size="sm" onClick={() => openRunActions()}>
+        <Button variant="secondary" onClick={() => openRunActions()}>
           Add run script
         </Button>
       }
@@ -1569,9 +1569,9 @@ function SubTab({
           className={cn(
             "size-1.5 shrink-0 rounded-full",
             dot === "running" &&
-              "bg-yellow-icon ring-yellow-icon/20 ring-[3px]",
-            dot === "passed" && "bg-green-primary",
-            (dot === "failed" || dot === "stopped") && "bg-red-primary",
+              "bg-yellow-text ring-yellow-text/20 ring-[3px]",
+            dot === "passed" && "bg-green-text",
+            (dot === "failed" || dot === "stopped") && "bg-red-text",
           )}
         />
       )}
@@ -1580,14 +1580,14 @@ function SubTab({
           off the strip-driven data-hovered, not :hover (sticky-strip rule),
           and focus-within keeps it visible for keyboard users. */}
       {onClose && (
-        <div className="from-bg2 pointer-events-none absolute inset-y-0 right-0 flex w-10 items-center justify-end bg-gradient-to-l from-50% to-transparent pr-1 pl-4 opacity-0 transition-none group-data-[hovered=true]/subtab:opacity-100 focus-within:opacity-100">
+        <div className="from-(--tab-fill) pointer-events-none absolute inset-y-0 right-0 flex w-10 items-center justify-end bg-gradient-to-l from-50% to-transparent pr-1 pl-4 opacity-0 transition-none group-data-[hovered=true]/subtab:opacity-100 focus-within:opacity-100">
           <IconButton
             label={`Close ${label}`}
             onClick={(e) => {
               e.stopPropagation();
               onClose();
             }}
-            className="pointer-events-auto shrink-0"
+            className="pointer-events-auto shrink-0 hover:bg-transparent"
           >
             <X className="size-3.5" />
           </IconButton>

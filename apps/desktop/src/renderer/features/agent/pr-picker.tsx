@@ -128,7 +128,7 @@ export function PrPicker({
                 onPick(pr);
               }}
               data-selected={active || undefined}
-              className={cn(PICKER_ROW_CLS, active && "[&_[data-icon]]:text-green-primary")}
+              className={cn(PICKER_ROW_CLS, active && "[&_[data-icon]]:text-green-text")}
             >
               <GitPullRequest
                 data-icon

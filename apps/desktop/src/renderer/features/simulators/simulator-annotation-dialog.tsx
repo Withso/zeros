@@ -71,14 +71,12 @@ export function SimulatorAnnotationLeaveDialog() {
           <Button
             ref={cancel}
             variant="ghost"
-            size="sm"
             onClick={() => simulatorAnnotations.cancelLeave()}
           >
             Cancel
           </Button>
           <Button
             variant="destructive"
-            size="sm"
             onClick={() => simulatorAnnotations.confirmLeave()}
             aria-keyshortcuts="Meta+Enter Control+Enter"
           >

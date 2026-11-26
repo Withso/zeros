@@ -103,7 +103,8 @@ export function ImageHoverCard({
         side="top"
         align="start"
         collisionPadding={12}
-        className="w-[450px] max-w-[calc(100vw-24px)] overflow-hidden p-1"
+        size="lg"
+        className="overflow-hidden p-1"
       >
         <ImagePreviewContent
           key={JSON.stringify([source.cwd, path, source.name])}

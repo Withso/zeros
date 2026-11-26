@@ -133,7 +133,7 @@ export function CloudProjectPage({ project, organization, userKey, connections, 
       <SettingsPageSection title="Sharing">
         <SettingsGroup>
           <SettingsRow label={sharing.label} hint={sharing.hint}>
-            {sharing.share && <Button variant="secondary" size="sm" disabled={busy} onClick={() => void share()}>Share with {organization.name}</Button>}
+            {sharing.share && <Button variant="secondary" disabled={busy} onClick={() => void share()}>Share with {organization.name}</Button>}
           </SettingsRow>
         </SettingsGroup>
       </SettingsPageSection>
@@ -145,9 +145,9 @@ export function CloudProjectPage({ project, organization, userKey, connections, 
             return (
               <SettingsRow key={entry.repository} label={entry.repository} hint={folder?.repoRoot ?? "Not on this Mac"}>
                 {folder ? (
-                  <Button variant="ghost" size="sm" onClick={() => onOpenFolder(folder)}>Folder settings</Button>
+                  <Button variant="ghost" onClick={() => onOpenFolder(folder)}>Folder settings</Button>
                 ) : onCloneToMac && (
-                  <Button variant="secondary" size="sm" onClick={() => onCloneToMac(entry.repository)}>Clone to this Mac</Button>
+                  <Button variant="secondary" onClick={() => onCloneToMac(entry.repository)}>Clone to this Mac</Button>
                 )}
               </SettingsRow>
             );
@@ -231,7 +231,7 @@ function RepositorySheet({ project, entry, userKey, busy, active, onClose, onSav
               <CodeTextarea aria-label={`${entry.repository} setup script`} value={value} offscreen={!active}
                 onChange={next => setSetup({ repository: entry.repository, value: next })} />
               <div className="flex justify-end">
-                <Button variant="secondary" size="sm" disabled={busy || value === (entry.setup ?? "")}
+                <Button variant="secondary" disabled={busy || value === (entry.setup ?? "")}
                   onClick={() => void onSave({ setup: value.trim() ? value : null })}>Save</Button>
               </div>
             </SettingsGroup>
@@ -244,7 +244,7 @@ function RepositorySheet({ project, entry, userKey, busy, active, onClose, onSav
             <SettingsGroup title="Remove">
               <SettingsRow label="Remove from this project"
                 hint={project.repositories.length > 1 ? "The repository stays on GitHub and in your other projects." : "A project keeps at least one repository."}>
-                <Button variant="ghost" size="sm" disabled={busy || project.repositories.length < 2} onClick={() => void onRemove()}>
+                <Button variant="ghost" disabled={busy || project.repositories.length < 2} onClick={() => void onRemove()}>
                   <Trash2 aria-hidden />Remove
                 </Button>
               </SettingsRow>

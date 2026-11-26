@@ -88,11 +88,11 @@ export function GithubConnectionsSection({ userId, organizationId, level, canMan
             hint={hint ?? (level === "organization" && !canManage ? "Managed by admins" : "Connected")}>
             <div className="flex items-center gap-2">
               {connection.state !== "active" && (
-                <Button variant="ghost" size="sm" onClick={() => void shellOpenUrl(installationSettingsUrl(connection.accountLogin))}>Open GitHub</Button>
+                <Button variant="ghost" onClick={() => void shellOpenUrl(installationSettingsUrl(connection.accountLogin))}>Open GitHub</Button>
               )}
-              <Button variant="secondary" size="sm" onClick={() => setOpen(connection)} disabled={!connection.installationId}>Repositories</Button>
+              <Button variant="secondary" onClick={() => setOpen(connection)} disabled={!connection.installationId}>Repositories</Button>
               {canManage && (
-                <Button variant="ghost" size="sm" disabled={busy}
+                <Button variant="ghost" disabled={busy}
                   onClick={() => void run(() => disconnectCloudGithubConnection(organizationId, connection.id))}>Remove</Button>
               )}
             </div>
@@ -145,7 +145,7 @@ export function ConnectionRepositories({ organizationId, connection, onClose, pe
         {connection && (
           <SettingsGroup title="On GitHub">
             <SettingsRow label="Add or remove repositories" hint="Choose which repositories Zeros can see.">
-              <Button variant="secondary" size="sm" onClick={() => void shellOpenUrl(installationSettingsUrl(connection.accountLogin))}>Manage</Button>
+              <Button variant="secondary" onClick={() => void shellOpenUrl(installationSettingsUrl(connection.accountLogin))}>Manage</Button>
             </SettingsRow>
           </SettingsGroup>
         )}

@@ -73,70 +73,34 @@ function contrastRatio(
   return (lighter + 0.05) / (darker + 0.05);
 }
 
-/** The former warm dark palette (shipped for a while as the opt-in "Orka
- *  black" theme, retired 2026-09-14). Kept ONLY as the historical record
- *  neutral Dark's lightness values were derived from — it no longer exists
- *  in the stylesheet. */
-const FORMER_WARM_DARK = {
-  bg0: [5, 10, 5],
-  bg1: [5, 5, 7],
-  "bg1-hover": [8, 5, 12],
-  "bg1-highlight": [25, 5, 9],
-  bg2: [25, 4, 12],
-  "bg2-hover": [25, 3, 15],
-  bg4: [5, 1, 24],
-  bg5: [8, 0, 37],
-  fg1: [0, 2, 92],
-  fg2: [20, 4, 66],
-  fg3: [15, 1, 44],
-  "muted-fg": [15, 4, 44],
-  "sidebar-bg": [25, 5, 9],
-  "sidebar-bg-hover": [25, 2, 15],
-  border1: [8, 3, 14],
-  border2: [25, 1, 18],
-  border3: [15, 0, 24],
-  border4: [15, 0, 30],
-  "highlighted-bg": [5, 8, 12],
-  "highlighted-bright": [25, 5, 65],
-  "inverted-bg": [0, 2, 92],
-  "inverted-fg": [5, 7, 5],
-  "primary-button-hover": [25, 2, 83],
-} satisfies Record<string, [number, number, number]>;
-
-/** Structural lightnesses neutral Dark does NOT inherit from the former warm
- *  palette:
- *    bg2      — a point higher so the composer and raised cards lift further
- *               off the canvas.
- *    fg1/fg2/fg3 — #EBEBEB, #9F9F9F and #939393: the dimmest tiers that
- *               still clear 4.5:1 on a selected row.
- *    bg2-highlight, selected-bg — one #2B2B2B selected fill, dark enough for
- *               fg3 to stay readable on it.
- *    muted-fg — L42, the owner-chosen supplemental tier: a 3:1 floor at rest,
- *               below AA by design; hovered/selected rows step up to fg3.
- *               styles/policy/contrast-contract.json owns the thresholds.
- *    bg1, sidebar-bg, border3, border4, highlighted-bright — the Zeros Design
- *               palette: #141414 and #181818 surfaces, #444444 / #575757
- *               control outlines and a #CACACA focus colour. */
-const NEUTRAL_DARK_LIGHTNESS_OVERRIDES: Record<string, number> = {
-  bg1: 7.843,
-  bg2: 13,
-  "sidebar-bg": 9.412,
-  border3: 26.667,
-  border4: 34.118,
-  "highlighted-bright": 79.216,
-  fg1: 92.16,
-  fg2: 62.35,
-  fg3: 57.65,
-  "muted-fg": 42,
-  "bg2-highlight": 16.86,
-  "selected-bg": 16.86,
-};
-
-/** Structural primitives neutral Dark defines as an ALIAS rather than a literal
- *  HSL triple, mapped to the primitive each one resolves to. Light keeps its
- *  own literal value for these. */
-const NEUTRAL_DARK_ALIASES: Record<string, string> = {
-  "highlighted-bg": "bg2",
+/** Neutral Dark's structural values, pinned (hue, saturation, lightness), so a
+ *  "quick contrast tweak" is a reviewed edit. 2026-11-25 (P4/P5): fg2 #A0A0A0
+ *  and fg3 #888888 are three visible tiers with fg1; bg1-raised #1A1A1A is the
+ *  one raised step between bg1 and bg2; bg2-hover #2A2A2A clears a visible step
+ *  on bg2 and stays below the #2B2B2B selected fill. */
+const NEUTRAL_DARK: Record<string, [number, number, number]> = {
+  bg1: [0, 0, 7.843],
+  "bg1-hover": [0, 0, 12],
+  "bg1-raised": [0, 0, 10.196],
+  "bg1-raised-hover": [0, 0, 14.118],
+  bg2: [0, 0, 13],
+  "bg2-hover": [0, 0, 16.471],
+  "selected-bg": [0, 0, 16.86],
+  bg3: [0, 0, 10.98],
+  bg4: [0, 0, 24],
+  bg5: [0, 0, 37],
+  "nav-bg": [0, 0, 6.275],
+  "nav-bg-hover": [0, 0, 13.333],
+  fg1: [0, 0, 92.16],
+  fg2: [0, 0, 62.745],
+  fg3: [0, 0, 53.333],
+  border1: [0, 0, 14],
+  border2: [0, 0, 18],
+  border3: [0, 0, 26.667],
+  border4: [0, 0, 34.118],
+  "highlighted-bright": [0, 0, 79.216],
+  "inverted-bg": [0, 0, 92],
+  "primary-button-hover": [0, 0, 83],
 };
 
 describe("dark structural palettes", () => {
@@ -147,15 +111,9 @@ describe("dark structural palettes", () => {
     expect(css).not.toMatch(/orka/i);
   });
 
-  it("keeps structural values neutral with the deliberate surface adjustments", () => {
-    for (const [token, preserved] of Object.entries(FORMER_WARM_DARK)) {
-      if (token in NEUTRAL_DARK_ALIASES) continue;
-      const neutralValue = tokenTriple(neutral, token);
-      expect(neutralValue, token).toEqual([
-        0,
-        0,
-        NEUTRAL_DARK_LIGHTNESS_OVERRIDES[token] ?? preserved[2],
-      ]);
+  it("keeps structural values neutral and pinned", () => {
+    for (const [token, expected] of Object.entries(NEUTRAL_DARK)) {
+      expect(tokenTriple(neutral, token), token).toEqual(expected);
     }
   });
 
@@ -163,40 +121,23 @@ describe("dark structural palettes", () => {
     expect(neutral).toMatch(/--pane-bg:\s*var\(--bg1\)/);
   });
 
-  it("lifts floating surfaces one step above the sidebar", () => {
-    // Menus and popovers have their own fill (#1C1C1C, hover #2A2A2A) so they
-    // read as floating over the sidebar they often open from.
-    const sidebar = tokenTriple(neutral, "sidebar-bg")[2];
+  it("lifts floating surfaces above the raised surface they open from", () => {
+    // Menus and popovers have their own fill (#1C1C1C, hover #2A2A2A); their
+    // lift is border2 plus the dropdown shadow, never a lighter fill alone.
+    const raised = tokenTriple(neutral, "bg1-raised")[2];
     const floating = tokenTriple(neutral, "bg3")[2];
-    expect(floating).toBeGreaterThan(sidebar);
+    expect(floating).toBeGreaterThan(raised);
     expect(tokenTriple(neutral, "bg3-hover")[2]).toBeGreaterThan(floating);
   });
 
-  it("aliases the user-message surface to bg2 in neutral Dark only", () => {
-    const light = extractBlock('[data-theme="light"]');
-    for (const [token, target] of Object.entries(NEUTRAL_DARK_ALIASES)) {
-      expect(neutral, token).toMatch(
-        new RegExp(`--${token}:\\s*var\\(--${target}\\)`),
-      );
-      // Light must still declare its OWN literal value — tokenTriple throws if
-      // the declaration is missing or itself an alias, so the neutral-Dark
-      // alias can never leak into it.
-      expect(tokenTriple(light, token)[2], `light ${token}`).toBeGreaterThan(0);
-    }
+  it("keeps hover below selection on bg2", () => {
+    expect(tokenTriple(neutral, "bg2-hover")[2]).toBeGreaterThan(tokenTriple(neutral, "bg2")[2]);
+    expect(tokenTriple(neutral, "bg2-hover")[2]).toBeLessThan(tokenTriple(neutral, "selected-bg")[2]);
   });
 
-  it("keeps meaning-bearing status families shared and chromatic", () => {
-    for (const family of [
-      "red",
-      "green",
-      "yellow",
-      "blue",
-      "violet",
-    ]) {
-      expect(
-        tokenTriple(neutral, `${family}-primary`)[1],
-        family,
-      ).toBeGreaterThan(0);
+  it("keeps meaning-bearing status families chromatic", () => {
+    for (const family of ["red", "green", "yellow", "accent", "violet"]) {
+      expect(tokenTriple(neutral, `${family}-text`)[1], family).toBeGreaterThan(0);
     }
   });
 
@@ -220,7 +161,7 @@ describe("dark structural palettes", () => {
   });
 });
 
-/** The four foreground tiers must read as a ladder in BOTH palettes. This is
+/** The three foreground tiers must read as a ladder in BOTH palettes. This is
  *  the guard against the lightness-polarity trap: dark themes gain contrast as
  *  L rises, Light LOSES it, so a tier value copied numerically from Dark into
  *  Light silently inverts the order. Asserting on contrast (not lightness)
@@ -230,21 +171,20 @@ describe("foreground tier ladder", () => {
     "neutral dark": extractBlock(":root"),
     light: extractBlock('[data-theme="light"]'),
   };
-  // Both blocks declare all four tiers, so each is self-contained.
-  const tiers = ["fg1", "fg2", "fg3", "muted-fg"] as const;
+  // Both blocks declare all three tiers, so each is self-contained.
+  const tiers = ["fg1", "fg2", "fg3"] as const;
 
   /** Light's foreground tiers, pinned. Dark is already pinned (via
    *  FORMER_WARM_DARK + NEUTRAL_DARK_LIGHTNESS_OVERRIDES), so a "quick
    *  contrast tweak" to either palette is a reviewed edit.
    *
-   *  fg1–fg3 clear AA; muted-fg keeps a reviewed supplemental 3:1 floor. Light
-   *  shares one warm tint (OKLCH hue 70) across its neutrals. Thresholds live in the contrast contract.
+   *  fg1–fg3 clear AA (2026-11-25: fg2 #5E5955, fg3 #736D67). Light shares one
+   *  warm tint across its neutrals. Thresholds live in the contrast contract.
    *  Lightness RISES as the tiers get quieter because Light inverts the axis. */
   const LIGHT_FOREGROUND_TIERS: Record<string, [number, number, number]> = {
     fg1: [30, 10, 15.686],
-    fg2: [26.67, 5.45, 32.35],
-    fg3: [30, 5.05, 38.82],
-    "muted-fg": [30.0, 4.17, 47.06],
+    fg2: [26.67, 5.028, 35.098],
+    fg3: [30, 5.505, 42.745],
   };
 
   it("pins the light foreground tiers against unreviewed drift", () => {
@@ -255,7 +195,7 @@ describe("foreground tier ladder", () => {
     }
   });
 
-  it("descends strictly fg1 > fg2 > fg3 > muted-fg against each canvas", () => {
+  it("descends strictly fg1 > fg2 > fg3 against each canvas", () => {
     for (const [name, block] of Object.entries(palettes)) {
       const canvas = tokenTriple(block, "bg1");
       const ratios = tiers.map((tier) =>
@@ -300,7 +240,7 @@ describe("control outline palette", () => {
 
 /** Diff rows are their own color identity. The renderer derives row fills from
  *  --diff-addition / --diff-deletion / --diff-neutral, so retuning status TEXT
- *  (green-primary, red-primary, fg2) for contrast must not re-tint diff rows:
+ *  (green-text, red-text, fg2) for contrast must not re-tint diff rows:
  *  darker light-mode text anchors once dropped GitHub Light code on an added
  *  row from 4.66:1 to 3.31:1. */
 describe("diff renderer inputs", () => {
@@ -311,9 +251,11 @@ describe("diff renderer inputs", () => {
     "utf8",
   );
 
-  it("follows the status anchors in Dark", () => {
-    expect(dark).toMatch(/--diff-addition:\s*var\(--green-primary\)/);
-    expect(dark).toMatch(/--diff-deletion:\s*var\(--red-primary\)/);
+  it("pins Dark's diff palette apart from the calmer status text", () => {
+    // 2026-11-25: diff green and red keep their earlier values (#4ADE80,
+    // #F87272) while green-text and red-text calm down.
+    expect(tokenTriple(dark, "diff-addition")).toEqual([142, 69, 58]);
+    expect(tokenTriple(dark, "diff-deletion")).toEqual([0, 91, 71]);
     expect(dark).toMatch(/--diff-neutral:\s*var\(--fg2\)/);
   });
 
@@ -327,6 +269,6 @@ describe("diff renderer inputs", () => {
     expect(diffThemeSource).toContain("var(--diff-addition)");
     expect(diffThemeSource).toContain("var(--diff-deletion)");
     expect(diffThemeSource).toContain("var(--diff-neutral)");
-    expect(diffThemeSource).not.toMatch(/var\(--(?:green|red)-primary\)|var\(--fg2\)/);
+    expect(diffThemeSource).not.toMatch(/var\(--(?:green|red)-text\)|var\(--fg2\)/);
   });
 });

@@ -197,12 +197,12 @@ import { initialsOf } from "@/renderer/shared/lib/initials";
 
 // One shared destination-row shape, mirroring the Settings rail's entry
 // (settings-page.tsx SIDEBAR_ENTRY_CLS) so both navigations read as the same
-// control: 32px, fg2 at rest on the surface hover, fg1 on bg2-highlight when
+// control: 32px, fg2 at rest on the surface hover, fg1 on selected-bg when
 // selected. Icons are 14px on fg3 at the 16px icon column (8px list inset +
 // 8px padding, no border); selection lifts them to fg2. Rows never shift
 // width. `[&_svg]:` beats the primitive's own icon size through twMerge.
 const SIDEBAR_ENTRY_CLS =
-  "flex h-8 w-full min-w-0 items-center justify-start gap-2 rounded-md border-0 bg-transparent px-2 py-0 text-left text-xs leading-4.5 font-normal text-fg2 transition-colors duration-120 ease-out hover:bg-(--surface-hover) hover:text-fg1 data-[state=active]:bg-bg2-highlight data-[state=active]:text-fg1 data-[state=active]:hover:bg-bg2-highlight [&_svg]:size-3.5 [&>svg]:shrink-0 [&>svg]:text-fg3 data-[state=active]:[&>svg]:text-fg2";
+  "flex h-8 w-full min-w-0 items-center justify-start gap-2 rounded-md border-0 bg-transparent px-2 py-0 text-left text-xs leading-4.5 font-normal text-fg2 transition-colors duration-fast ease-out hover:bg-(--surface-hover) hover:text-fg1 data-[state=active]:bg-selected-bg data-[state=active]:text-fg1 data-[state=active]:hover:bg-selected-bg [&_svg]:size-3.5 [&>svg]:shrink-0 [&>svg]:text-fg3 data-[state=active]:[&>svg]:text-fg2";
 // The list's section label: 12/16 medium on fg3, like Settings' group labels.
 const SECTION_LABEL_CLS = "select-none truncate text-3xxs leading-4 font-medium text-fg3";
 // The sidebar never squeezes the workspace below its column floors
@@ -281,35 +281,18 @@ function useNativeRuntimeNotice(): void {
 
 const NO_HIDDEN_PLACEMENTS: readonly ("local" | "cloud")[] = [];
 
-const CHILD_INDENT_CLS = ["", "ml-3", "ml-6", "ml-8", "ml-10"] as const;
+// A child workspace indents 16px per level under its parent; the parent's
+// own leading slot toggles its children (sidebar-workspace-row.tsx).
+const CHILD_INDENT_CLS = ["", "ml-4", "ml-8", "ml-12"] as const;
 
-/** A child workspace indents under its parent; a parent gets a collapsed
- * "N child workspaces" disclosure below it. */
 function nestedWorkspaceRow(
   item: Extract<SidebarWorkspaceItem, { kind: "workspace" }>,
   row: React.ReactElement,
-  onToggle: (id: string) => void,
 ): React.ReactElement {
   const depth = item.depth ?? 0;
-  const count = item.childCount ?? 0;
-  if (!depth && !count) return row;
+  if (!depth) return row;
   return (
-    <React.Fragment key={item.key}>
-      {depth ? <div className={cn("min-w-0", CHILD_INDENT_CLS[Math.min(depth, CHILD_INDENT_CLS.length - 1)])}>{row}</div> : row}
-      {count > 0 && (
-        <Button
-          variant="ghost"
-          size="compact"
-          className={cn("text-fg3 hover:text-fg2 min-w-0 justify-start gap-1 font-normal", CHILD_INDENT_CLS[Math.min(depth + 1, CHILD_INDENT_CLS.length - 1)])}
-          aria-expanded={item.expanded ? "true" : "false"}
-          onClick={() => onToggle(item.workspace.id)}
-          data-child-workspaces-toggle={item.workspace.id}
-        >
-          <ChevronRight className={cn("size-3.5 shrink-0 transition-transform", item.expanded && "rotate-90")} strokeWidth={1.5} aria-hidden="true" />
-          <span className="truncate">{count === 1 ? "1 child workspace" : `${count} child workspaces`}</span>
-        </Button>
-      )}
-    </React.Fragment>
+    <div key={item.key} className={cn("min-w-0", CHILD_INDENT_CLS[Math.min(depth, CHILD_INDENT_CLS.length - 1)])}>{row}</div>
   );
 }
 
@@ -890,7 +873,7 @@ export function AppSidebar({ hidden = false }: { hidden?: boolean }) {
               </span>
             )}
             <span className="min-w-0 truncate">{label}</span>
-            <span className="text-muted-fg ml-auto text-3xxs tabular-nums">{entry.items.length}</span>
+            <span className="text-fg3 ml-auto text-3xxs tabular-nums">{entry.items.length}</span>
             {collapsed ? <ChevronRight strokeWidth={1.5} aria-hidden="true" /> : <ChevronDown strokeWidth={1.5} aria-hidden="true" />}
           </Button>
           <div id={groupId} role="group" aria-label={`${label} workspaces`}
@@ -971,7 +954,6 @@ export function AppSidebar({ hidden = false }: { hidden?: boolean }) {
         key={item.key}
         workspace={item.workspace}
         project={item.project}
-        mixedRepositories={!groupedList}
         grouped={grouped}
         active={active}
         surfaceActive={!hidden}
@@ -985,6 +967,11 @@ export function AppSidebar({ hidden = false }: { hidden?: boolean }) {
         }
         compact={preferences.view.compact}
         showProjectName={preferences.view.showProjectName && !preferences.view.compact}
+        depth={item.depth}
+        sameProjectAsParent={item.sameProjectAsParent}
+        childCount={item.childCount}
+        childrenExpanded={item.expanded}
+        onToggleChildren={item.childCount ? () => toggleChildWorkspaces(item.workspace.id) : undefined}
         onSelect={handleSelectWorkspace}
         onPrefetch={handlePrefetchWorkspace}
         onArchive={handleArchiveWorkspace}
@@ -996,14 +983,13 @@ export function AppSidebar({ hidden = false }: { hidden?: boolean }) {
             : undefined
         }
       />
-    ), toggleChildWorkspaces) : (
+    )) : (
       <PendingSidebarWorkspaceRow
         key={item.key}
-        branch={item.pending.branch ?? undefined}
         kind={item.pending.kind}
         project={item.project}
         projectInteractive={item.pending.placement !== "cloud"}
-        mixedRepositories={!groupedList}
+        cloud={item.pending.placement === "cloud"}
         grouped={grouped}
         label={
           item.pending.label ?? (item.pending.branch
@@ -1157,11 +1143,11 @@ export function AppSidebar({ hidden = false }: { hidden?: boolean }) {
                 <React.Fragment key={id}>
                   <div className="group/section flex h-8 shrink-0 items-center gap-1 pt-1 first:pt-0" data-sidebar-section={id}>
                     <Button type="button" variant="ghost"
-                      className="hover:bg-(--surface-hover) h-7 min-w-0 flex-1 justify-start gap-1.5 rounded-md border-0 px-2 font-normal [&_svg]:size-3 [&_svg]:text-fg3"
+                      className="hover:bg-transparent h-7 min-w-0 flex-1 justify-start gap-1.5 rounded-md border-0 px-2 font-normal [&_svg]:size-3 [&_svg]:text-fg3"
                       aria-expanded={!collapsed} aria-controls={sectionId}
                       onClick={() => setSidebarSectionCollapsed(id, !collapsed)}>
                       <span className={cn(SECTION_LABEL_CLS, "min-w-0")}>{section.id === null ? "My workspaces" : section.label}</span>
-                      <span className="text-muted-fg text-3xxs tabular-nums">{items.length}</span>
+                      <span className="text-fg3 text-3xxs tabular-nums">{items.length}</span>
                       <span className="ml-auto inline-flex shrink-0" aria-hidden="true">
                         {collapsed ? <ChevronRight strokeWidth={1.5} /> : <ChevronDown strokeWidth={1.5} />}
                       </span>

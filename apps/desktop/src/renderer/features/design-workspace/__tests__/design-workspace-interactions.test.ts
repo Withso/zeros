@@ -724,7 +724,7 @@ describe("design workspace interaction wiring", () => {
     expect(layerRules).toContain("var(--bg2-hover)");
     expect(layerRules).not.toContain("--design-selection");
     // The selected row is the trees' one selection fill.
-    expect(layerRules).toMatch(/\.zd-design-layer-selected:hover \{[^}]*background-color: var\(--bg2-highlight\)/);
+    expect(layerRules).toMatch(/\.zd-design-layer-selected:hover \{[^}]*background-color: var\(--selected-bg\)/);
     // Selection moves in one commit. A colour transition left the outgoing
     // frame's block fading in place while the incoming one faded in above it.
     expect(layerRules).toContain("transition: none");
@@ -856,7 +856,7 @@ describe("design workspace interaction wiring", () => {
     // shared recipes rather than by overriding every child control.
     expect(uiSource).toContain(".zd-field {");
     expect(uiSource).toMatch(/\.zd-field \{[^}]*height: 28px;/);
-    expect(uiSource).toMatch(/\.zd-section-header \{[^}]*height: 36px;/);
+    expect(uiSource).toMatch(/\.zd-section-header \{[^}]*height: 40px;/);
     expect(uiSource).not.toContain(".zd-design-field-actions");
     expect(source).toContain("aria-label={`Unit for ${label}`}");
     expect(styleEditorSource).toMatch(

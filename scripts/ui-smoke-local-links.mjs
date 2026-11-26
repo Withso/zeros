@@ -408,9 +408,8 @@ export async function runLocalLinksSmoke({ page, harnessBase, check }) {
     await expect(target).toHaveAttribute("data-local-link-available", "true");
     await expect(target).toHaveAttribute("data-local-link-agent", "cursor");
   }
-  // 2026-11-09: inside a sent message a pill sits a step lighter than the bg2
-  // bubble (--prompt-pill-bg: bg2-hover in Dark, sidebar-bg in Light), while
-  // the composer's pills keep bg2.
+  // 2026-11-25 (P13): inside a sent message a pill rests on selected-bg, a
+  // visible step off the bg2 bubble, while the composer's pills rest on bg2-hover.
   const pillFills = () => page.evaluate(() => {
     const resolve = (element, value) => {
       const probe = document.createElement("span");
@@ -433,9 +432,9 @@ export async function runLocalLinksSmoke({ page, harnessBase, check }) {
     const bubble = getComputedStyle(sent.closest("[data-user-bubble]")).backgroundColor;
     return {
       theme: document.documentElement.dataset.theme,
-      sent: fill === resolve(sent, "var(--prompt-pill-bg)"),
-      lighter: luminance(fill) > luminance(bubble),
-      composer: getComputedStyle(composed).backgroundColor === resolve(composed, "var(--bg2)"),
+      sent: fill === resolve(sent, "var(--selected-bg)"),
+      distinct: luminance(fill) !== luminance(bubble),
+      composer: getComputedStyle(composed).backgroundColor === resolve(composed, "var(--bg2-hover)"),
     };
   });
   const themeToggle = page.getByRole("button", { name: "Toggle theme", exact: true });
@@ -447,12 +446,12 @@ export async function runLocalLinksSmoke({ page, harnessBase, check }) {
     // available, so poll until it settles.
     await expect
       .poll(pillFills, { message: `pass ${pass}: pill fills` })
-      .toMatchObject({ sent: true, lighter: true, composer: true });
+      .toMatchObject({ sent: true, distinct: true, composer: true });
     themes.push((await pillFills()).theme);
   }
   await themeToggle.click();
   expect(new Set(themes)).toEqual(new Set(["dark", "light"]));
-  check("Pills inside a sent message sit a step lighter than its bg2 bubble in Dark and Light; the composer's keep bg2", true);
+  check("Pills rest on selected-bg inside a sent message and on bg2-hover in the composer, in Dark and Light", true);
   await liveChat.getByRole("button", { name: "Rename pristine chat", exact: true }).click();
   for (const target of [livePill, composerPill])
     await expect(target).toHaveAttribute("aria-label", "Open chat: Live review");

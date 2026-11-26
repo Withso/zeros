@@ -8,6 +8,7 @@ import { cn } from "@/renderer/shared/ui/cn"
 import { ANCHORED_OVERLAY_MOTION } from "@/renderer/shared/ui/anchored-overlay-motion"
 import {
   MENU_ITEM_RADIUS,
+  MENU_LABEL,
   MENU_SEPARATOR,
   MENU_SURFACE_INSET,
   MENU_SURFACE_RADIUS,
@@ -92,17 +93,17 @@ const SELECT_TRIGGER_WIDTH: Record<SelectTriggerWidth, string> = {
 // The Input field box as a trigger: 8px left padding so a value lines up
 // with Input text above or below it, 6px right, 4px vertical, a 4px gap to
 // the 14px chevron → 28px tall, the same box as every Button. No fill at
-// rest; hover and open paint bg2-highlight. Compact keeps the line box and
+// rest; hover and open paint selected-bg. Compact keeps the line box and
 // drops to 24px.
 const SELECT_TRIGGER_BASE = cn(
-  "group/select-trigger flex items-center justify-between gap-1 rounded-md border border-border3 bg-transparent py-1 pr-1.5 pl-2 text-xs leading-4.5 whitespace-nowrap transition-[color,background-color,border-color,box-shadow] duration-120 ease-out outline-none hover:border-border4 hover:bg-bg2-highlight data-[state=open]:border-border4 data-[state=open]:bg-bg2-highlight data-[size=compact]:py-0.5 disabled:cursor-not-allowed disabled:opacity-50 data-[placeholder]:text-fg3 *:data-[slot=select-value]:line-clamp-1 *:data-[slot=select-value]:flex *:data-[slot=select-value]:items-center *:data-[slot=select-value]:gap-2 [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-3.5 [&_svg:not([class*='text-'])]:text-fg2",
+  "group/select-trigger flex items-center justify-between gap-1 rounded-md border border-border3 bg-transparent py-1 pr-1.5 pl-2 text-xs leading-4.5 whitespace-nowrap transition-[color,background-color,border-color,box-shadow] duration-fast ease-out outline-none hover:border-border4 hover:bg-[var(--surface-hover,var(--bg1-hover))] data-[state=open]:border-border4 data-[state=open]:bg-[var(--surface-hover,var(--bg1-hover))] data-[size=compact]:py-0.5 disabled:cursor-not-allowed disabled:opacity-50 data-[placeholder]:text-fg3 *:data-[slot=select-value]:line-clamp-1 *:data-[slot=select-value]:flex *:data-[slot=select-value]:items-center *:data-[slot=select-value]:gap-2 [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-3.5 [&_svg:not([class*='text-'])]:text-fg2",
   FIELD_FOCUS,
   FIELD_INVALID,
 )
 
-/** The trigger's chevron: muted-fg at rest, fg2 on hover and while open. */
+/** The trigger's chevron: fg3 at rest, fg2 on hover and while open. */
 const SELECT_CHEVRON =
-  "text-muted-fg group-hover/select-trigger:text-fg2 group-data-[state=open]/select-trigger:text-fg2 size-3.5 transition-colors duration-120 ease-out"
+  "text-fg3 group-hover/select-trigger:text-fg2 group-data-[state=open]/select-trigger:text-fg2 size-3.5 transition-colors duration-fast ease-out"
 
 /** The dropdown-trigger chrome as a class string, for the rare menu whose
  *  trigger should look like a Select (an action menu such as "Open in ▾")
@@ -240,7 +241,7 @@ function SelectLabel({
   return (
     <SelectPrimitive.Label
       data-slot="select-label"
-      className={cn("px-2 py-1.5 text-xs text-fg2", className)}
+      className={cn(MENU_LABEL, className)}
       {...props}
     />
   )
@@ -256,7 +257,7 @@ function SelectItem({
       data-slot="select-item"
       className={cn(
         MENU_ITEM_RADIUS,
-        "relative flex min-h-7 w-full cursor-default items-center gap-2 py-1 pr-8 pl-2 text-xs outline-hidden select-none focus:bg-bg3-hover focus:text-fg1 focus:[&_.text-muted-fg]:text-fg3 data-[disabled]:pointer-events-none data-[disabled]:opacity-50 [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-3.5 [&_svg:not([class*='text-'])]:text-fg2 *:[span]:last:flex *:[span]:last:items-center *:[span]:last:gap-2",
+        "relative flex min-h-7 w-full cursor-default items-center gap-2 py-1 pr-8 pl-2 text-xs outline-hidden select-none focus:bg-bg3-hover focus:text-fg1 focus:[&_.text-fg3]:text-fg3 data-[disabled]:pointer-events-none data-[disabled]:opacity-50 [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-3.5 [&_svg:not([class*='text-'])]:text-fg2 *:[span]:last:flex *:[span]:last:items-center *:[span]:last:gap-2",
         className
       )}
       {...props}

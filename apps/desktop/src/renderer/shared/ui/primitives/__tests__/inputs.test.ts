@@ -46,15 +46,15 @@ describe("the field box", () => {
 
   it("shows invalid as a red border that keyboard focus keeps", () => {
     const set = classes(renderToStaticMarkup(createElement(Input, { "aria-invalid": true })));
-    expect(set).toContain("aria-[invalid=true]:border-red-primary");
-    expect(set).toContain("focus-visible:data-[zeros-keyboard-focus]:aria-[invalid=true]:border-red-primary");
+    expect(set).toContain("aria-[invalid=true]:border-red-text");
+    expect(set).toContain("focus-visible:data-[zeros-keyboard-focus]:aria-[invalid=true]:border-red-text");
   });
 
   it("offers the compact 24px field, the inline rename look and a mono value", () => {
     expect(classes(renderToStaticMarkup(createElement(Input, { size: "compact" })))).toContain("h-6");
     const inline = classes(renderToStaticMarkup(createElement(Input, { appearance: "inline" })));
     expect(inline).toContain("border-transparent");
-    expect(inline).toContain("hover:bg-bg2-highlight");
+    expect(inline).toContain("hover:bg-selected-bg");
     expect(inline).toContain("rounded-sm");
     const mono = classes(renderToStaticMarkup(createElement(Input, { mono: true })));
     expect(mono).toContain("font-mono");
@@ -104,7 +104,7 @@ describe("Field", () => {
     expect(markup).toContain('aria-invalid="true"');
     expect(markup).toContain("Name is required");
     expect(markup).not.toContain("Shown to your team");
-    expect(markup).toContain("text-red-primary");
+    expect(markup).toContain("text-red-text");
     expect(markup).toContain(">Optional</span>");
   });
 });
@@ -124,12 +124,12 @@ describe("Select trigger", () => {
     expect(set).toContain("pl-2");
     expect(set).toContain("data-[placeholder]:text-fg3");
     expect(set).toContain(KEYBOARD_BORDER);
-    expect(set).toContain("aria-[invalid=true]:border-red-primary");
+    expect(set).toContain("aria-[invalid=true]:border-red-text");
   });
 
-  it("draws the chevron muted-fg, fg2 on hover and open, not a faded fg2", () => {
+  it("draws the chevron fg3, fg2 on hover and open, not a faded fg2", () => {
     const markup = trigger();
-    expect(markup).toContain("text-muted-fg");
+    expect(markup).toContain("text-fg3");
     expect(markup).toContain("group-data-[state=open]/select-trigger:text-fg2");
     expect(markup).not.toMatch(/lucide-chevron-down[^"]*opacity-50/);
   });

@@ -293,7 +293,7 @@ function EventGlyph({
 }) {
   switch (event.kind) {
     case "opened":
-      return <GitPullRequestArrow className="text-green-primary size-3.5" />;
+      return <GitPullRequestArrow className="text-green-text size-3.5" />;
     case "commit":
       // A chat's commit wears its agent's mark, as the chat's own rows do.
       return chat?.agentId ? (
@@ -304,9 +304,9 @@ function EventGlyph({
     case "check":
       return <OutcomeGlyph outcome="failed" />;
     case "merged":
-      return <GitMerge className="text-violet-primary size-3.5" />;
+      return <GitMerge className="text-violet-text size-3.5" />;
     case "closed":
-      return <GitPullRequestClosed className="text-red-primary size-3.5" />;
+      return <GitPullRequestClosed className="text-red-text size-3.5" />;
     case "review":
     case "comment":
       return (
@@ -381,7 +381,7 @@ function EventBody({
               {event.commit.message.split("\n")[0]}
             </span>
           )}
-          <span className="text-muted-fg shrink-0">{relTime(event.at)}</span>
+          <span className="text-fg3 shrink-0">{relTime(event.at)}</span>
         </div>
       );
     }
@@ -393,10 +393,10 @@ function EventBody({
           <span className="bg-bg2 text-fg2 text-3xxs shrink-0 rounded-sm px-1.5 font-mono leading-5">
             {event.sha.slice(0, 7)}
           </span>
-          <span className="text-muted-fg shrink-0">{relTime(event.at)}</span>
+          <span className="text-fg3 shrink-0">{relTime(event.at)}</span>
           {onViewChecks && (
             <>
-              <span className="text-muted-fg shrink-0">·</span>
+              <span className="text-fg3 shrink-0">·</span>
               <ReviewTextLink onClick={onViewChecks} arrow={false}>
                 View checks
               </ReviewTextLink>
@@ -461,15 +461,15 @@ function EventLine({
         className={cn(
           "min-w-0 truncate",
           tone === "merged"
-            ? "text-violet-primary font-medium"
+            ? "text-violet-text font-medium"
             : tone === "closed"
-              ? "text-red-primary font-medium"
+              ? "text-red-text font-medium"
               : "text-fg2",
         )}
       >
         {verb}
       </span>
-      <span className="text-muted-fg shrink-0">{relTime(at)}</span>
+      <span className="text-fg3 shrink-0">{relTime(at)}</span>
     </div>
   );
 }
@@ -477,10 +477,10 @@ function EventLine({
 // ── review / comment cards ───────────────────────────────────
 
 const VERDICT: Record<string, { label: string; cls: string }> = {
-  APPROVED: { label: "Approved", cls: "bg-green-bg text-green-fg" },
+  APPROVED: { label: "Approved", cls: "bg-green-bg text-green-on-bg" },
   CHANGES_REQUESTED: {
     label: "Changes requested",
-    cls: "bg-red-bg text-red-fg",
+    cls: "bg-red-bg text-red-on-bg",
   },
   DISMISSED: { label: "Dismissed", cls: "bg-bg2-hover text-fg2" },
 };
@@ -553,7 +553,7 @@ function TimelineCard({
     <div
       className={cn(
         REVIEW_CARD,
-        "transition-opacity duration-120 ease-out",
+        "transition-opacity duration-fast ease-out",
         optimistic && "opacity-70",
       )}
     >
@@ -572,7 +572,7 @@ function TimelineCard({
             {verdict.label}
           </span>
         )}
-        <span className="text-muted-fg shrink-0">
+        <span className="text-fg3 shrink-0">
           {optimistic ? "Posting…" : relTime(item.createdAt)}
         </span>
         <div className="flex-1" />
@@ -608,7 +608,7 @@ function TimelineCard({
           />
         </div>
       ) : (
-        <p className="text-muted-fg m-0 px-3 pt-1 pb-2.5 text-xs italic">
+        <p className="text-fg3 m-0 px-3 pt-1 pb-2.5 text-xs italic">
           {item.kind === "review"
             ? "Review submitted without a comment."
             : "(empty comment)"}
@@ -674,10 +674,10 @@ function ThreadTimelineCard({
         onClick={() => void revealReviewComment(cwd, item.reference)}
         label={`Open ${location} in Changes`}
       >
-        <span className="font-mono text-2xxs">{location}</span>
+        <span className="font-mono text-3xxs">{location}</span>
       </ReviewTextLink>
       {thread.isResolved ? <Badge variant="neutral">Resolved</Badge> : thread.isOutdated ? <Badge variant="neutral">Outdated</Badge> : null}
-      <span className="text-muted-fg shrink-0">{relTime(first.createdAt)}</span>
+      <span className="text-fg3 shrink-0">{relTime(first.createdAt)}</span>
       <div className="flex-1" />
       {open ? (
         <Button variant="ghost" size="compact" className="text-fg2" onClick={() => onAddCommentsToChat([item])}>
@@ -730,7 +730,7 @@ function ThreadReply({
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-1.5 text-xs">
           <span className="text-fg1 font-medium">{appDisplayName(login)}</span>
-          <span className="text-muted-fg">{relTime(at)}</span>
+          <span className="text-fg3">{relTime(at)}</span>
         </div>
         <div className="zeros-agent-md zeros-agent-md--panel [&_.zeros-md-prose>:first-child]:mt-0 [&_.zeros-md-prose>:last-child]:mb-0">
           <div className="zeros-md-prose text-sm" dangerouslySetInnerHTML={{ __html: html }} />

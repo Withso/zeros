@@ -99,7 +99,6 @@ export function SlashCommandPicker({
             data-selected={active || undefined}
             // The chosen tab is Ghost's pressed state: the selected fill.
             aria-pressed={active}
-            size="sm"
             // mousedown beats the textarea blur (same as the rows below).
             onMouseDown={(e) => {
               e.preventDefault();
@@ -109,7 +108,7 @@ export function SlashCommandPicker({
             className={cn(PICKER_TAB_CLS, !active && "text-fg2 hover:text-fg1")}
           >
             <span>{t.label}</span>
-            <span className="text-muted-fg">{counts[t.id]}</span>
+            <span className="text-fg3">{counts[t.id]}</span>
           </Button>
         );
       })}

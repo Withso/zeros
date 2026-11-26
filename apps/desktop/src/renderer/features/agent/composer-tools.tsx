@@ -9,7 +9,7 @@ import {
   useSyncExternalStore,
 } from "react";
 import { IconButton } from "@/renderer/shared/ui/primitives/icon-button";
-import { Blocks, LoaderCircle, RefreshCw } from "lucide-react";
+import { Blocks, RefreshCw } from "lucide-react";
 import { ComposerToolGroups } from "./composer-tool-groups";
 import { NativeBrowserAvailability } from "./native-browser-availability";
 import {
@@ -35,6 +35,7 @@ import {
   createSessionToolsResource,
   sessionToolsResource,
 } from "./session-tools-cache";
+import { RunStream } from "@/renderer/shared/ui/loading/run-stream";
 
 const offline = {
   ...createSessionToolsResource(() =>
@@ -202,7 +203,7 @@ function ToolsPopover({
         if (nextOpen && enabled) onPrepare?.();
       }}
     >
-      <Tooltip label="Tools" delayDuration={1500} disabled={visible}>
+      <Tooltip label="Tools" disabled={visible}>
         <PopoverTrigger asChild>
           <IconButton
             type="button"
@@ -276,7 +277,7 @@ function ToolsPopover({
             Connect to the workspace to view tools.
           </p>
         ) : preparationError ? (
-          <p role="alert" className="text-red-primary text-xs">
+          <p role="alert" className="text-red-text text-xs">
             {preparationError}
           </p>
         ) : preparing ? (
@@ -294,7 +295,7 @@ function ToolsPopover({
             role="status"
             className="text-fg2 flex items-center gap-2 py-2 text-xs"
           >
-            <LoaderCircle className="size-3.5 animate-spin motion-reduce:animate-none" />
+            <RunStream size={14} className="text-(--loader-active)" />
             Loading tools…
           </p>
         ) : null}
@@ -307,7 +308,7 @@ function ToolsPopover({
           />
         )}
         {(read.error || authError) && (
-          <p role="alert" className="text-red-primary mt-2 text-xs">
+          <p role="alert" className="text-red-text mt-2 text-xs">
             {authError ??
               (read.data
                 ? "Could not refresh. Showing the last confirmed tool status."

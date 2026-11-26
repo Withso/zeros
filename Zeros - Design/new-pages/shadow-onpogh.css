@@ -12,7 +12,7 @@
       var(--trees-theme-sidebar-header-fg, light-dark(#84848a, #84848a))
     ); --trees-bg: var(
       --trees-bg-override,
-      var(--trees-theme-sidebar-bg, light-dark(#f8f8f8, #141415))
+      var(--trees-theme-bg1-raised, light-dark(#f8f8f8, #141415))
     ); --trees-bg-muted: var(
       --trees-bg-muted-override,
       var(

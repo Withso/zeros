@@ -5,7 +5,6 @@ import type {
   BrowserSubscriptionProvider,
   ProviderSubscriptionStatus,
 } from "@zeros/protocol/provider-auth";
-import { cn } from "../../shared/ui/cn";
 import { ZerosSpinner } from "../../shared/ui/loading/zeros-spinner";
 import { ProgressBar } from "../../shared/ui/primitives/progress-bar";
 import { Tooltip } from "../../shared/ui/primitives/tooltip";
@@ -27,6 +26,7 @@ import {
   usageResetLabel,
 } from "./provider-usage";
 import { SUBSCRIPTION_NAMES } from "./subscription-connection-panel";
+import { RunStream } from "@/renderer/shared/ui/loading/run-stream";
 
 const vendors = { claude: "Anthropic", codex: "OpenAI", cursor: "Cursor" };
 const noSubscription = () => () => {};
@@ -158,13 +158,7 @@ export function ProviderInformation({
                     .catch(() => {});
               }}
             >
-              <RefreshCw
-                className={cn(
-                  "size-3.5",
-                  refreshing && "motion-safe:animate-spin",
-                )}
-                aria-hidden="true"
-              />
+              {refreshing ? <RunStream size={16} /> : <RefreshCw className="size-3.5" aria-hidden="true" />}
             </IconButton>
           </Tooltip>
         </div>
@@ -192,6 +186,14 @@ export function ProviderInformation({
                 </div>
                 <ProgressBar
                   value={usage?.usedPercent}
+                  // Yellow from 80% of a limit, red once it is reached.
+                  tone={
+                    (usage?.usedPercent ?? 0) >= 100
+                      ? "over"
+                      : (usage?.usedPercent ?? 0) >= 80
+                        ? "warning"
+                        : "default"
+                  }
                   aria-label={labels[id]}
                 />
                 {usage && (

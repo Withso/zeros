@@ -120,7 +120,8 @@ export const WorkflowActivity = memo(function WorkflowActivity({
         align="start"
         sideOffset={6}
         collisionPadding={8}
-        className="w-[min(520px,calc(100vw-24px))] overflow-hidden p-0"
+        size="lg"
+        className="overflow-hidden p-0"
       >
         <WorkflowProgressPanel workflow={workflow} onStop={onStop} />
       </HoverCardContent>
@@ -147,7 +148,7 @@ export const WorkflowProgressPanel = memo(function WorkflowProgressPanel({
             enable it when the provider adds a scoped pause method. */}
         <Tooltip label="Pause unavailable">
           <span className="inline-flex">
-            <Button type="button" size="sm" variant="ghost" disabled>
+            <Button type="button" variant="ghost" disabled>
               Pause
             </Button>
           </span>
@@ -211,7 +212,7 @@ const WorkflowPhaseRow = memo(function WorkflowPhaseRow({
             className={cn(
               "h-2 min-w-0 flex-1 rounded-sm",
               complete
-                ? "bg-green-primary"
+                ? "bg-green-text"
                 : index < filled
                   ? "bg-fg2"
                   : "bg-bg4",
@@ -219,7 +220,7 @@ const WorkflowPhaseRow = memo(function WorkflowPhaseRow({
           />
         ))}
       </div>
-      <span className="text-muted-fg min-w-12 text-right text-xs tabular-nums">
+      <span className="text-fg3 min-w-12 text-right text-xs tabular-nums">
         {workflowPhaseCountLabel(phase)}
       </span>
     </div>

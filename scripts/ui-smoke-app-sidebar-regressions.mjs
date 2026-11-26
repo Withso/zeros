@@ -310,9 +310,12 @@ export async function checkSidebarHiddenReads({ page, check, harnessBase }) {
   await resetHarness(page, harnessBase);
   await page.getByRole("button", { name: "Customize", exact: true }).click();
   const sidebar = page.locator("[data-app-sidebar]");
-  const counts = page.locator(
-    '[data-workspace-id="ws-atlanta"] [data-workspace-change-counts]',
-  );
+  // Step 2 moved the ± counts off the row (the hover card shows them); the
+  // row's open button still names them, so its label carries the retained
+  // confirmed counts.
+  const counts = page.locator('[data-workspace-id="ws-atlanta"] > button').first();
+  const countsShow = (additions) =>
+    expect(counts).toHaveAttribute("aria-label", new RegExp(`\\b${additions} lines added\\b`));
   const requestCount = (id) =>
     page.evaluate(
       (workspaceId) =>
@@ -336,7 +339,7 @@ export async function checkSidebarHiddenReads({ page, check, harnessBase }) {
     page.getByRole("button", { name: "Hide sidebar", exact: true }).click();
   const show = () =>
     page.getByRole("button", { name: "Show sidebar", exact: true }).click();
-  await expect(counts).toContainText("+12");
+  await countsShow(12);
   for (const [mode, value] of [
     ["collapsed", 21],
     ["settings", 22],
@@ -352,7 +355,7 @@ export async function checkSidebarHiddenReads({ page, check, harnessBase }) {
     expect(await requestCount("ws-atlanta")).toBe(before);
     if (mode === "collapsed") await show();
     else await page.evaluate(() => window.appSidebarNavigate("customize"));
-    await expect(counts).toContainText(`+${value}`);
+    await countsShow(value);
   }
 
   const otherBefore = await requestCount("ws-boston");
@@ -361,14 +364,14 @@ export async function checkSidebarHiddenReads({ page, check, harnessBase }) {
   await update(30);
   await expect.poll(() => requestCount("ws-atlanta")).toBe(beforeRace + 1);
   expect(await requestCount("ws-boston")).toBe(otherBefore);
-  await expect(counts).toContainText("+22");
+  await countsShow(22);
   await hide();
   await update(40);
   await page.evaluate(() => window.appSidebarReleaseChangeLines());
   await page.waitForTimeout(150);
-  await expect(counts).toContainText("+22");
+  await countsShow(22);
   await show();
-  await expect(counts).toContainText("+40");
+  await countsShow(40);
   check(
     "Hidden rows suspend Git reads, retain confirmed counts, and reject stale results",
     true,
@@ -392,8 +395,9 @@ export async function checkSidebarReselection({ page, check, harnessBase }) {
       deletions: 3,
     }),
   );
-  await expect(row.locator("[data-workspace-change-counts]")).toContainText(
-    "+20",
+  await expect(row.locator("> button").first()).toHaveAttribute(
+    "aria-label",
+    /\b20 lines added\b/,
   );
   expect(await list.evaluate((node) => node.scrollTop)).toBe(0);
   await page.getByRole("button", { name: "Home", exact: true }).click();

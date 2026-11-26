@@ -26,7 +26,7 @@ import { REVIEW_CARD, ReviewSection } from "./review-overview";
 const ROW_LIMIT = 50;
 const INCOMPLETE = "Some comments couldn't be loaded, so this list may be incomplete.";
 const ROW =
-  "group border-border1 relative flex min-h-10 min-w-0 items-center gap-2.5 py-1 pr-2 pl-3.5 hover:bg-sidebar-bg-hover has-[[data-list-row-disclosure]:focus-visible]:inset-ring has-[[data-list-row-disclosure]:focus-visible]:inset-ring-accent [&+&]:border-t";
+  "group border-border1 relative flex min-h-10 min-w-0 items-center gap-2.5 py-1 pr-2 pl-3.5 hover:bg-bg1-raised-hover has-[[data-list-row-disclosure]:focus-visible]:inset-ring has-[[data-list-row-disclosure]:focus-visible]:inset-ring-accent [&+&]:border-t";
 
 /** A title's `code` spans set as code. */
 function CommentTitle({ text }: { text: string }) {
@@ -96,7 +96,7 @@ function CommentRow({
       <Status
         aria-label={ref.resolved ? "Resolved" : ref.resolved === false ? "Unresolved" : undefined}
         aria-hidden={ref.resolved === undefined || undefined}
-        className={cn("size-3.5 shrink-0", ref.resolved ? "text-green-primary" : "text-fg3")}
+        className={cn("size-3.5 shrink-0", ref.resolved ? "text-green-text" : "text-fg3")}
       />
       <CommentMark item={item} />
       <ListRow
@@ -115,14 +115,14 @@ function CommentRow({
         </span>
       </ListRow>
       {location ? (
-        <span className="text-fg3 text-2xxs max-w-[30%] shrink-0 truncate font-mono">
+        <span className="text-fg3 text-3xxs max-w-[30%] shrink-0 truncate font-mono">
           {location}
         </span>
       ) : null}
       {/* Over the row's end, so showing them moves nothing under the pointer.
           Transparent rather than hidden: they stay in the tab order, and
           keyboard focus reveals them. */}
-      <div className="bg-sidebar-bg-hover absolute inset-y-0 right-0 flex items-center gap-1 pr-2 pl-3 opacity-0 transition-opacity duration-120 ease-out group-focus-within:opacity-100 group-hover:opacity-100">
+      <div className="bg-bg1-raised-hover absolute inset-y-0 right-0 flex items-center gap-1 pr-2 pl-3 opacity-0 transition-opacity duration-fast ease-out group-focus-within:opacity-100 group-hover:opacity-100">
         <Button variant="ghost" size="compact" className="text-fg2" onClick={() => onHide(!hidden)}>
           {hidden ? "Unhide" : "Hide"}
         </Button>

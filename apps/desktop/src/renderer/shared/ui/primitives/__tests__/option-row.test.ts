@@ -207,7 +207,7 @@ describe("a row whose value differs from what it inherits", () => {
     render(createElement("div", null, rows));
     const dots = host.querySelectorAll("[data-option-changed]");
     expect(dots).toHaveLength(6);
-    for (const cls of ["bg-blue-primary", "size-1", "rounded-full", "absolute"]) expect(dots[0]!.classList, cls).toContain(cls);
+    for (const cls of ["bg-accent-text", "size-1", "rounded-full", "absolute"]) expect(dots[0]!.classList, cls).toContain(cls);
     expect(host.querySelector('[aria-label="Plain"] [data-option-changed]')).toBeNull();
   });
 });

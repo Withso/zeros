@@ -119,7 +119,7 @@ Declare options in `<head>`, one element per line, each closed with its end tag.
   <zd-option name="attachments" type="number" label="Attachments" default="2" min="0" max="4" step="1"></zd-option>
   <zd-option name="mode" type="choice" label="Mode" choices="ask plan" default="ask"></zd-option>
   <zd-option name="toolbar" type="boolean" label="Toolbar" default="true"></zd-option>
-  <zd-option name="accent" type="color" label="Accent" default="var(--blue-primary)"></zd-option>
+  <zd-option name="accent" type="color" label="Accent" default="var(--accent-text)"></zd-option>
   <zd-option name="send-radius" type="number" label="Corner radius" group="Send button" default="8" min="0" max="16" unit="px"></zd-option>
   <zd-option name="send-label" type="text" label="Label" group="Send button" default="Send"></zd-option>
   <zd-option name="motion" type="easing" label="Easing" default="spring(0.2) 150ms"></zd-option>

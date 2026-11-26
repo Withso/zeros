@@ -43,7 +43,7 @@ export function WakeupFixture({ ctx }: { ctx: RendererContext }) {
         <TurnEventList events={slot.messages} isActive isStreaming={activity === "running"}
           activityStartedAt={startedAt} backgroundTasks={activity === "waiting" ? slot.backgroundTasks : undefined}
           ctx={{ ...ctx, chatId: CHAT, isStreaming: activity === "running" }}
-          footer={activity !== "running" ? <div data-wakeup-footer className="text-muted-fg py-1 text-xs">
+          footer={activity !== "running" ? <div data-wakeup-footer className="text-fg3 py-1 text-xs">
             Output footer · {formatElapsed(turnFooterDuration({ startedAt, endedAt: startedAt + 60_000 }, slot.messages, startedAt))}
           </div> : null} />
       </div>

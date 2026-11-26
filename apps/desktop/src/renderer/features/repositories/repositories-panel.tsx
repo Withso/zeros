@@ -253,7 +253,7 @@ function TomlSourceEditor({
       <div
         aria-hidden
         className={cn(
-          "border-border1 text-muted-fg shrink-0 border-r px-2 py-2 text-right tabular-nums select-none",
+          "border-border1 text-fg3 shrink-0 border-r px-2 py-2 text-right tabular-nums select-none",
           TEXT,
         )}
       >
@@ -280,7 +280,7 @@ function TomlSourceEditor({
           autoCapitalize="off"
           placeholder={placeholder}
           className={cn(
-            "caret-fg1 placeholder:text-muted-fg absolute inset-0 resize-none overflow-hidden border-0 bg-transparent px-3 py-2 break-words whitespace-pre-wrap text-transparent outline-none",
+            "caret-fg1 placeholder:text-fg3 absolute inset-0 resize-none overflow-hidden border-0 bg-transparent px-3 py-2 break-words whitespace-pre-wrap text-transparent outline-none",
             TEXT,
           )}
         />
@@ -350,7 +350,7 @@ export function RawTomlEditor({
         </Button>
       </div>
       {error && (
-        <div className="bg-red-bg text-red-fg rounded-md px-3 py-2 font-mono text-xs">
+        <div className="bg-red-bg text-red-on-bg rounded-md px-3 py-2 font-mono text-xs">
           {error}
         </div>
       )}
@@ -400,7 +400,7 @@ export function RepoDetail({
       // Secrets and workspace commands share one Environment view, but the three
       // modules stay independent so each keeps its own save behavior.
       return (
-        <div className="flex flex-col gap-9">
+        <div className="flex flex-col gap-8">
           <EnvironmentSection project={project} layer={layer} root={root} />
           {project.isGitRepository !== false && (
             <ScriptsSection project={project} layer="repo-local" root={root} />
@@ -515,11 +515,11 @@ interface RepoSharedDoc {
   prompts?: { general?: string };
 }
 
-/** The card every variable list renders in: lifted `bg1-highlight` fill, `border1`
+/** The card every variable list renders in: lifted `bg1-raised` fill, `border1`
  *  frame, hairline dividers, no lock icons. */
 function EnvVarList({ children }: { children: React.ReactNode }) {
   return (
-    <div className="divide-border1 border-border1 bg-bg1-highlight divide-y overflow-hidden rounded-lg border">
+    <div className="divide-border1 border-border1 bg-bg1-raised divide-y overflow-hidden rounded-lg border">
       {children}
     </div>
   );
@@ -611,7 +611,7 @@ function EnvVarRow({
             >
               {revealed ? (
                 value === "" ? (
-                  <span className="text-muted-fg italic">empty</span>
+                  <span className="text-fg3 italic">empty</span>
                 ) : (
                   value
                 )
@@ -622,7 +622,7 @@ function EnvVarRow({
           </Tooltip>
         </div>
       ) : (
-        <span className="text-muted-fg min-w-0 flex-1 truncate text-xs">
+        <span className="text-fg3 min-w-0 flex-1 truncate text-xs">
           {hint ?? "••••••••"}
         </span>
       )}
@@ -649,7 +649,7 @@ function EnvVarRow({
               onClick={onRemove}
               disabled={disabled}
               label={`Remove ${name}`}
-              className="text-fg2 hover:bg-red-primary/10 hover:text-red-primary"
+              className="text-fg2 hover:bg-red-text/10 hover:text-red-text"
             >
               <Trash2
                 className="size-3.5"
@@ -895,7 +895,6 @@ export function EnvironmentSection({
         names.length > 0 ? (
           <Button
             variant="primary"
-            size="sm"
             onClick={() => setAddOpen(true)}
             disabled={addDisabled}
           >
@@ -938,7 +937,6 @@ export function EnvironmentSection({
             action={
               <Button
                 variant="primary"
-                size="sm"
                 onClick={() => setAddOpen(true)}
                 disabled={addDisabled}
               >
@@ -1115,7 +1113,7 @@ function useRepoBranchCatalog(
 // `min-w-0` + truncate so a long branch name shrinks instead of overflowing the
 // column.
 const GIT_PICKER_TRIGGER_CLS =
-  "inline-flex h-7 max-w-full min-w-0 items-center gap-1.5 rounded-md border border-border2 bg-transparent pl-2.5 pr-2 text-xs text-fg1 transition-colors duration-120 ease-out hover:border-border3 hover:bg-bg2-hover disabled:opacity-50";
+  "inline-flex h-7 max-w-full min-w-0 items-center gap-1.5 rounded-md border border-border2 bg-transparent pl-2.5 pr-2 text-xs text-fg1 transition-colors duration-fast ease-out hover:border-border3 hover:bg-bg2-hover disabled:opacity-50";
 
 /** The source glyph shown inside the branch trigger: where new workspaces
  *  come from — GitHub, another git host, or this machine's local branches. */
@@ -1253,7 +1251,7 @@ function GitSection({
     catalog.branchSource === "local";
 
   return (
-    <div className="flex flex-col gap-9">
+    <div className="flex flex-col gap-8">
       <SettingsSection
         title={
           <span className="flex items-center gap-2">
@@ -1322,14 +1320,14 @@ function GitSection({
                       )}
                       <span className="truncate">{b.name}</span>
                       {b.missing ? (
-                        <span className="text-muted-fg ml-auto shrink-0 text-xs">
+                        <span className="text-fg3 ml-auto shrink-0 text-xs">
                           {catalog?.listedRemote
                             ? `not on ${catalog.listedRemote}`
                             : "not found"}
                         </span>
                       ) : (
                         b.name === catalog?.detectedDefault && (
-                          <span className="text-muted-fg ml-auto shrink-0 text-xs">
+                          <span className="text-fg3 ml-auto shrink-0 text-xs">
                             default
                           </span>
                         )
@@ -1353,19 +1351,19 @@ function GitSection({
           )}
         </div>
         {baseMissing && (
-          <p className="text-yellow-fg text-xs">
+          <p className="text-yellow-text text-xs">
             “{effectiveBase}” wasn’t found on {catalog?.listedRemote} — new
             workspaces will fall back to a local branch until it exists there.
           </p>
         )}
         {remoteGone && (
-          <p className="text-yellow-fg text-xs">
+          <p className="text-yellow-text text-xs">
             Remote “{effectiveRemote}” isn’t configured in this repository —
             showing local branches instead.
           </p>
         )}
         {remoteEmpty && (
-          <p className="text-yellow-fg text-xs">
+          <p className="text-yellow-text text-xs">
             No branches from “{effectiveRemote}” yet (not fetched, or offline) —
             showing local branches. New workspaces fall back the same way.
           </p>
@@ -1448,7 +1446,7 @@ function GitSection({
                         />
                       )}
                       <span className="shrink-0">{r.name}</span>
-                      <span className="text-muted-fg ml-auto min-w-0 truncate text-xs">
+                      <span className="text-fg3 ml-auto min-w-0 truncate text-xs">
                         {r.url}
                       </span>
                     </CommandItem>
@@ -1760,7 +1758,7 @@ function PathsSection({ project }: { project: Project }) {
               <span
                 className={cn(
                   "text-sm",
-                  project.originUrl ? "text-fg2" : "text-muted-fg italic",
+                  project.originUrl ? "text-fg2" : "text-fg3 italic",
                 )}
               >
                 {project.originUrl ?? "Not set"}
@@ -1808,7 +1806,6 @@ function PathsSection({ project }: { project: Project }) {
               />
               <Button
                 variant="secondary"
-                size="lg"
                 onClick={() => void handleBrowse()}
               >
                 <FolderOpen className="size-3.5" aria-hidden="true" />
@@ -1816,7 +1813,6 @@ function PathsSection({ project }: { project: Project }) {
               </Button>
               <Button
                 variant="secondary"
-                size="lg"
                 onClick={() => void handleSave()}
                 disabled={local.loading || draft.trim() === repoPath}
               >
@@ -2105,7 +2101,6 @@ export function RemoveRepositoryDialog({
         <DialogFooter>
           <Button
             variant="secondary"
-            size="sm"
             onClick={() => onOpenChange(false)}
             disabled={busy}
           >
@@ -2113,7 +2108,6 @@ export function RemoveRepositoryDialog({
           </Button>
           <Button
             variant="destructive"
-            size="sm"
             onClick={() => void handleRemove()}
             disabled={busy}
           >

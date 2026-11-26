@@ -2,7 +2,7 @@ import { expect } from "@playwright/test";
 
 /** 2026-11-10: the workspace header reads where the workspace lives first (a
  *  laptop for every Local workspace, a cloud for cloud), then its name, as one
- *  ghost control: no fill at rest, bg2-highlight on hover and while its details
+ *  ghost control: no fill at rest, selected-bg on hover and while its details
  *  are open, in both themes. Local opens its parent sessions (2026-11-21);
  *  or the cloud details, which close on Escape and when the workspace page is
  *  hidden, and stay closed when it returns. */
@@ -46,7 +46,7 @@ export async function runWorkspaceHeaderSmoke({ page, check, harnessBase }) {
       await away();
       await expect.poll(fill, { message: `${theme} rest` }).toBe("rgba(0, 0, 0, 0)");
       await identity.hover();
-      const highlight = await token("--bg2-highlight");
+      const highlight = await token("--selected-bg");
       await expect.poll(fill, { message: `${theme} hover` }).toBe(highlight);
     }
     await page.evaluate(() => document.documentElement.setAttribute("data-theme", "dark"));
@@ -71,7 +71,7 @@ export async function runWorkspaceHeaderSmoke({ page, check, harnessBase }) {
   await expect(sessions).toBeVisible();
   await expect(identity).toHaveAttribute("aria-expanded", "true");
   await away();
-  await expect.poll(fill).toBe(await token("--bg2-highlight"));
+  await expect.poll(fill).toBe(await token("--selected-bg"));
   await expect(sessions.locator("[data-session-row]").first()).toContainText(name);
   await expect(sessions.getByText("New parent session", { exact: true })).toBeVisible();
   const [popupBox, triggerBox] = await Promise.all([sessions.boundingBox(), identity.boundingBox()]);
@@ -112,7 +112,7 @@ export async function runWorkspaceHeaderSmoke({ page, check, harnessBase }) {
   await expect(cloudDetails.getByText("example/cloud-one", { exact: true })).toBeVisible();
   await expect(cloudDetails.getByRole("button", { name: "Start workspace", exact: true })).toBeVisible();
   await away();
-  await expect.poll(fill).toBe(await token("--bg2-highlight"));
+  await expect.poll(fill).toBe(await token("--selected-bg"));
   await page.keyboard.press("Escape");
   await expect(cloudDetails).toHaveCount(0);
   check("Workspace header: a cloud workspace reads cloud then name and opens the same cloud details", true);

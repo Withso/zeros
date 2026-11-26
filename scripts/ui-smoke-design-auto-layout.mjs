@@ -424,9 +424,9 @@ export async function runDesignNestedOffsetsSmoke({ page, check }) {
   await page.locator('[data-design-frame="home.html"] [data-design-frame-label]').click();
   const clip = layout.getByRole("checkbox", { name: "Clip content", exact: true });
   await expect(clip).toBeEnabled();
-  await expect(layout.locator('label[title^="The canvas always clips a frame"]')).toHaveCount(1);
+  await expect(layout.locator('[title^="The canvas always clips a frame"]')).toHaveCount(1);
   // A layer inside it has no such note.
   await select("home-hero");
-  await expect(layout.locator('label[title^="The canvas always clips a frame"]')).toHaveCount(0);
+  await expect(layout.locator('[title^="The canvas always clips a frame"]')).toHaveCount(0);
   check("a frame's Clip content explains that the canvas always clips a frame at its edges", true);
 }

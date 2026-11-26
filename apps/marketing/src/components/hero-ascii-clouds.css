@@ -26,23 +26,20 @@
  */
 @media (prefers-color-scheme: light) {
   .home-ascii-page {
-    --bg0: hsl(0 0% 5%);
     --bg1: hsl(0 0% 7%);
     --pane-bg: var(--bg1);
     --bg1-hover: hsl(0 0% 12%);
-    --bg1-highlight: hsl(0 0% 9%);
+    --bg1-raised: hsl(0 0% 9%);
     --bg2: hsl(0 0% 13%);
     --bg2-hover: hsl(0 0% 15%);
-    --bg3: var(--sidebar-bg);
-    --bg3-hover: var(--sidebar-bg-hover);
+    --bg3: var(--bg1-raised);
+    --bg3-hover: var(--bg1-raised-hover);
     --bg4: hsl(0 0% 24%);
     --bg5: hsl(0 0% 37%);
     --fg1: hsl(0 0% 94%);
     --fg2: hsl(0 0% 72%);
     --fg3: hsl(0 0% 60%);
-    --muted-fg: hsl(0 0% 44%);
-    --sidebar-bg: hsl(0 0% 9%);
-    --sidebar-bg-hover: hsl(0 0% 15%);
+    --bg1-raised-hover: hsl(0 0% 15%);
     --border1: hsl(0 0% 14%);
     --border2: hsl(0 0% 18%);
     --border3: hsl(0 0% 24%);
@@ -50,35 +47,34 @@
     --shadow-dropdown: 0 8px 24px rgba(0, 0, 0, 0.35);
     --shadow-product: 0 30px 80px -20px rgba(0, 0, 0, 0.7);
     --scrim: hsl(0 0% 0% / 0.8);
-    --highlighted-bg: var(--bg2);
     --highlighted-bright: hsl(0 0% 65%);
     --inverted-bg: hsl(0 0% 92%);
     --inverted-fg: hsl(0 0% 5%);
     --primary-button-bg: var(--inverted-bg);
     --primary-button-hover: hsl(0 0% 83%);
     --primary-button-fg: var(--inverted-fg);
-    --red-primary: hsl(0 91% 71%);
+    --red-text: hsl(0 91% 71%);
     --red-bg: hsl(3 26% 13.7%);
-    --red-fg: hsl(20 97% 72%);
-    --green-primary: hsl(142 69% 58%);
+    --red-on-bg: hsl(20 97% 72%);
+    --green-text: hsl(142 69% 58%);
     --green-bg: hsl(120 23% 17%);
-    --green-fg: hsl(142 75% 73%);
-    --yellow-primary: hsl(37 75% 60%);
+    --green-on-bg: hsl(142 75% 73%);
+    --yellow-text: hsl(37 75% 60%);
     --yellow-bg: hsl(38 68% 17%);
-    --yellow-fg: hsl(44 100% 50%);
-    --blue-primary: hsl(205 80% 73%);
-    --blue-bg: hsl(226 57% 18%);
-    --blue-fg: hsl(211 96% 78%);
-    --violet-primary: hsl(271 80% 73%);
+    --yellow-on-bg: hsl(44 100% 50%);
+    --accent-text: hsl(205 80% 73%);
+    --accent-bg: hsl(226 57% 18%);
+    --accent-on-bg: hsl(211 96% 78%);
+    --violet-text: hsl(271 80% 73%);
     --violet-bg: hsl(255 21% 18%);
-    --violet-fg: hsl(265 66% 77%);
+    --violet-on-bg: hsl(265 66% 77%);
     --brown-primary: hsl(9 46% 72%);
     --brown-bg: hsl(10 15% 15%);
     --brown-fg: hsl(10 80% 72%);
-    --success: var(--green-primary);
-    --warning: var(--yellow-primary);
-    --info: var(--blue-primary);
-    --destructive: var(--red-primary);
+    --success: var(--green-text);
+    --warning: var(--yellow-text);
+    --info: var(--accent-text);
+    --destructive: var(--red-text);
   }
 }
 

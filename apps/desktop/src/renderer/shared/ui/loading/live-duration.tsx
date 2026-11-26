@@ -1,93 +1,25 @@
 // ──────────────────────────────────────────────────────────
-// LiveDuration + DurationChip — shared duration UI
+// WorkingDuration — the agent's working timer
 // ──────────────────────────────────────────────────────────
 //
-// Every in-progress tool card needs a ticking
-// elapsed counter so a long-running shell/read/fetch/etc.
-// doesn't look frozen.
-//
-// Three exports:
-//   - LiveDuration({ startedAt }) — re-renders once per
-//     second; shows tabular-num formatted elapsed time.
-//   - DurationChip({ status, startedAt, durationMs }) —
-//     renders LiveDuration while in_progress, formatted
-//     final duration once the card completes (only if
-//     duration > 250ms — short ops don't warrant a chip).
-//   - WorkingDuration({ startedAt }) — the agent's working
-//     timer on the active turn's rail: counts in tenths of a
-//     second (57.5s · 1m 27.3s · 103m 57.5s), so it visibly
-//     runs, at 12px in plain --fg2 with no pulse.
-//
-// Chrome migrated from .zeros-agent-live-duration /
-// .zeros-agent-final-duration CSS classes to
-// Tailwind utilities + a tiny .zeros-agent-live-duration class
-// that ONLY carries the @keyframes pulse animation. The animation
-// stays in CSS because Tailwind v4 doesn't have a token for the
-// custom 1.6s ease-in-out infinite opacity pulse.
+// The active turn's rail counts in tenths of a second (57.5s · 1m 27.3s ·
+// 103m 57.5s), so it visibly runs, at 12px in plain --fg2 with no pulse.
+// The per-tool LiveDuration and DurationChip were removed on 2026-11-25:
+// nothing rendered them any more.
 // ──────────────────────────────────────────────────────────
 
 import { memo, useContext, useEffect, useRef, useState } from "react";
 
 import { cn } from "@/renderer/shared/ui/cn";
-import { isElementActuallyVisible } from "@/renderer/shared/lib/element-visibility";
 
 import { startLoaderRun } from "./loader-loop";
 import { ActivityScope } from "./activity-scope";
 import { startElapsedDisplay } from "./elapsed-display";
 
-// Shared utility classes — kept as module constants so consumers
-// composing their own className don't have to redefine the base.
-const LIVE_DURATION_CLS =
-  "zeros-agent-live-duration text-xs tabular-nums text-blue-primary";
-const FINAL_DURATION_CLS = "text-xs tabular-nums text-muted-fg";
-
-interface LiveDurationProps {
+interface WorkingDurationProps {
   startedAt: number;
   className?: string;
 }
-
-export const LiveDuration = memo(function LiveDuration({
-  startedAt,
-  className,
-}: LiveDurationProps) {
-  const scope = useContext(ActivityScope);
-  // 1 Hz tick. Sub-second precision in the display would just thrash
-  // React with no informational gain — what users want to know is
-  // "is this still running" and "is it taking a long time", both
-  // answered fine at 1s granularity.
-  const [tick, setTick] = useState<string | number>(() => scope === undefined ? 0 : formatElapsed(Date.now() - startedAt));
-  const elRef = useRef<HTMLSpanElement | null>(null);
-  const localStartedAt = scope === undefined ? undefined : startedAt;
-  useEffect(() => {
-    if (scope !== undefined) {
-      const host = elRef.current;
-      if (!scope || !host) return;
-      return startElapsedDisplay({ host, startedAt: localStartedAt!, precision: elapsed => elapsed >= 3_600_000 ? 60_000 : 1_000,
-        format: formatElapsed, changed: setTick,
-        activity: active => { host.style.animationPlayState = active ? "" : "paused"; } });
-    }
-    const id = window.setInterval(() => {
-      // Retained-but-hidden chat decks keep this component mounted
-      // (visibility:hidden), and N streaming tool cards across those decks
-      // would otherwise each re-render every second while invisible. The
-      // elapsed value is derived from startedAt at render time, so skipped
-      // ticks cost nothing: the first visible tick shows the correct total.
-      const el = elRef.current;
-      if (el && !isElementActuallyVisible(el)) return;
-      setTick((t) => typeof t === "number" ? t + 1 : 0);
-    }, 1000);
-    return () => window.clearInterval(id);
-  }, [scope, localStartedAt]);
-  // tick is read only to satisfy the linter — the increment alone is
-  // what schedules a re-render.
-  void tick;
-  const elapsedMs = Math.max(0, Date.now() - startedAt);
-  return (
-    <span ref={elRef} className={cn(LIVE_DURATION_CLS, className)} style={scope === false ? { animationPlayState: "paused" } : undefined}>
-      {formatElapsed(elapsedMs)}
-    </span>
-  );
-});
 
 /** The agent's working timer (ActivityShimmer, the active turn's rail). It
  *  re-renders only when the tenth changes, from the shared loader frame loop,
@@ -97,7 +29,7 @@ export const LiveDuration = memo(function LiveDuration({
 export const WorkingDuration = memo(function WorkingDuration({
   startedAt,
   className,
-}: LiveDurationProps) {
+}: WorkingDurationProps) {
   const scope = useContext(ActivityScope);
   const elRef = useRef<HTMLSpanElement | null>(null);
   const [text, setText] = useState(() => formatWorkingElapsed(Date.now() - startedAt));
@@ -119,37 +51,6 @@ export const WorkingDuration = memo(function WorkingDuration({
   );
 });
 
-interface DurationChipProps {
-  status: "pending" | "in_progress" | "completed" | "failed";
-  startedAt: number;
-  durationMs: number;
-  /** className applied in both states. Defaults to a sane shared one. */
-  className?: string;
-  /** Threshold below which a finished card hides its duration chip
-   *  entirely. Tunes how chatty the card chrome is on fast ops. */
-  hideBelowMs?: number;
-}
-
-export const DurationChip = memo(function DurationChip({
-  status,
-  startedAt,
-  durationMs,
-  className,
-  hideBelowMs = 250,
-}: DurationChipProps) {
-  if (status === "in_progress" || status === "pending") {
-    return <LiveDuration startedAt={startedAt} className={className} />;
-  }
-  if (durationMs <= hideBelowMs) return null;
-  return (
-    <span className={cn(FINAL_DURATION_CLS, className)}>
-      {formatElapsed(durationMs)}
-    </span>
-  );
-});
-
-/** The working timer's format, in tenths of a second: 7.4s · 57.5s ·
- *  1m 27.3s · 103m 57.5s. Minutes keep counting past the hour. */
 export function formatWorkingElapsed(ms: number): string {
   const tenths = Math.floor(Math.max(0, ms) / 100);
   const minutes = Math.floor(tenths / 600);

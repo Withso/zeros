@@ -94,11 +94,11 @@ const TOOLS: Record<AnnotationTool, { label: string; Icon: LucideIcon }> = {
 };
 
 const COLORS: Record<AnnotationColor, { label: string; swatch: string }> = {
-  red: { label: "Red", swatch: "bg-red-primary" },
-  yellow: { label: "Yellow", swatch: "bg-yellow-primary" },
-  green: { label: "Green", swatch: "bg-green-primary" },
-  blue: { label: "Blue", swatch: "bg-blue-primary" },
-  violet: { label: "Violet", swatch: "bg-violet-primary" },
+  red: { label: "Red", swatch: "bg-red-text" },
+  yellow: { label: "Yellow", swatch: "bg-yellow-text" },
+  green: { label: "Green", swatch: "bg-green-text" },
+  blue: { label: "Blue", swatch: "bg-accent-text" },
+  violet: { label: "Violet", swatch: "bg-violet-text" },
 };
 
 /** Esc leaves; ⌘Z undoes, ⇧⌘Z or Ctrl-Y redoes. A key a menu or field already
@@ -513,7 +513,7 @@ function AnnotationColorMenu({
 }) {
   return (
     <DropdownMenu>
-      <Tooltip label="Color" delayDuration={1500}>
+      <Tooltip label="Color">
         <DropdownMenuTrigger asChild>
           <IconButton label={`Color: ${COLORS[color].label}`} disabled={disabled}>
             <span aria-hidden className={cn("size-3 rounded-full", COLORS[color].swatch)} />

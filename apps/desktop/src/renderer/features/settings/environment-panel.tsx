@@ -88,7 +88,7 @@ export function CloudEnvironmentEditor({ organizationId, repository, signal }: {
   return <div className="flex flex-col gap-6">
     <p className="text-fg2 text-xs">Values are write-only. Agents, setup and terminals in your workspace can read them. They are never copied to the shared Cloud Computer.</p>
     {snapshot.loading && <p className="text-fg2 text-xs" role="status">Loading environment…</p>}
-    {(error || snapshot.error) && <p className="text-red-primary text-xs" role="alert">{error ?? cloudEnvironmentError(snapshot.error)}</p>}
+    {(error || snapshot.error) && <p className="text-red-text text-xs" role="alert">{error ?? cloudEnvironmentError(snapshot.error)}</p>}
     <SettingsGroup title="Application variables" description="Up to 128 variables, 16 KiB per value. Runtime and provider names are reserved.">
       {snapshot.data?.variables.map(variable => <SettingsRow key={variable.name} label={variable.name} hint={`${variable.bytes} bytes · Value saved`}>
         <div className="flex gap-2"><Button variant="ghost" disabled={disabled} onClick={() => replace(variable.name)} aria-label={`Replace ${variable.name}`}>Replace</Button>

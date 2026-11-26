@@ -275,7 +275,7 @@ export function CreateFromSource({
             ? `Create from ${sourceName}: ${selected.label}`
             : "Create from source"
         }
-        delayDuration={1500}
+       
         disabled={open}
       >
         <PopoverTrigger asChild>
@@ -536,7 +536,7 @@ export function ReadState({
   if (error)
     return (
       <div className="flex flex-col items-start gap-2 px-3 py-4 text-xs">
-        <span role="alert" className="text-red-primary">
+        <span role="alert" className="text-red-text">
           {error.message}
         </span>
         <Button type="button" variant="ghost" onClick={onRetry}>

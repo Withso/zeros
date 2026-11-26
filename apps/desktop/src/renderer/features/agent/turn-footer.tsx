@@ -347,8 +347,8 @@ export const TurnFileRow = memo(function TurnFileRow({
           not a lone "+5" — mirroring the edit rows' badge exactly. */}
       {previewable && (
         <span className="shrink-0 tabular-nums">
-          <span className="text-green-primary">+{file.additions}</span>
-          <span className="text-red-primary ml-1">−{file.deletions}</span>
+          <span className="text-green-text">+{file.additions}</span>
+          <span className="text-red-text ml-1">−{file.deletions}</span>
         </span>
       )}
     </Button>
@@ -389,7 +389,7 @@ export const TurnChangesCard = memo(function TurnChangesCard({
   if (!files.length) return null;
   const shown = expanded ? files : files.slice(0, COLLAPSED_FILE_COUNT);
   return (
-    <section id={id} data-turn-changes aria-label="Turn changes" className="border-border2 bg-bg1-highlight text-fg2 mt-2 min-w-0 rounded-lg border p-1.5 text-xs">
+    <section id={id} data-turn-changes aria-label="Turn changes" className="border-border2 bg-bg1-raised text-fg2 mt-2 min-w-0 rounded-lg border p-1.5 text-xs">
       <div className="flex min-w-0 items-center justify-between gap-2 pl-2">
         <span>{`${files.length} ${files.length === 1 ? "File" : "Files"} Changed`}</span>
         <Button type="button" variant="ghost" onClick={onReview} onPointerEnter={onReviewIntent} onFocus={onReviewIntent} className="text-fg2 hover:bg-bg1-hover font-normal">
@@ -706,8 +706,7 @@ export const TurnFooter = memo(function TurnFooter({
 
   // While the turn is still streaming, render nothing: the working group's
   // ActivityShimmer already shows the live elapsed timer (grey, text-fg2) at the
-  // tail. A second timer here would duplicate it and use LiveDuration's default
-  // blue directly under the grey shimmer.
+  // tail. A second timer here would duplicate it.
   // The footer appears once the turn settles.
   if (live) return null;
   const durationStart = presentation?.startedAt ?? turn?.startedAt ?? startedAt;
@@ -858,8 +857,8 @@ export const TurnFooter = memo(function TurnFooter({
             onClick={() => setExpandedChangesKey(changesExpanded ? null : changesKey)}
             className="hover:bg-bg1-hover focus-visible:ring-accent h-5 shrink-0 rounded-sm px-1 py-0 font-normal tabular-nums focus-visible:ring-1"
           >
-            <span className="text-green-primary">+{additions}</span>
-            <span className="text-red-primary">−{deletions}</span>
+            <span className="text-green-text">+{additions}</span>
+            <span className="text-red-text">−{deletions}</span>
           </Button>
         )}
       </div>
@@ -915,7 +914,6 @@ export const TurnFooter = memo(function TurnFooter({
             <DialogFooter>
               <Button
                 variant="secondary"
-                size="sm"
                 autoFocus
                 onClick={() => setConfirmOpen(false)}
               >
@@ -923,7 +921,6 @@ export const TurnFooter = memo(function TurnFooter({
               </Button>
               <Button
                 variant="destructive"
-                size="sm"
                 onClick={runReset}
                 disabled={resetting}
               >

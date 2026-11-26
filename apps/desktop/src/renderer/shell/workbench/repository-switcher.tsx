@@ -19,7 +19,7 @@ export function RepositorySwitcher({ workspace, active }: { workspace: Workspace
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
-        <Button variant="ghost" size="sm" className="min-w-0 gap-1.5" aria-label={`Repository: ${current.repository}`}>
+        <Button variant="ghost" className="min-w-0 gap-1.5" aria-label={`Repository: ${current.repository}`}>
           <GithubIcon />
           <span className="max-w-40 truncate">{current.folder}</span>
           <ChevronDown />
@@ -65,8 +65,8 @@ function RepositoryLines({ workspace, repository, active }: { workspace: Workspa
   if (!lines.additions && !lines.deletions) return null;
   return (
     <span className="flex shrink-0 gap-1 text-xs tabular-nums">
-      {lines.additions > 0 && <span className="text-green-primary">+{lines.additions}</span>}
-      {lines.deletions > 0 && <span className="text-red-primary">−{lines.deletions}</span>}
+      {lines.additions > 0 && <span className="text-green-text">+{lines.additions}</span>}
+      {lines.deletions > 0 && <span className="text-red-text">−{lines.deletions}</span>}
     </span>
   );
 }

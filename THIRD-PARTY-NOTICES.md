@@ -161,6 +161,12 @@ NOTICE also records code derived from Ratatui under MIT.
   copyright 2023 Vercel, Inc., under Apache-2.0. Modified files identify their
   provenance in their source headers. The full license is preserved at
   [`third_party/ai-elements/LICENSE`](third_party/ai-elements/LICENSE).
+- **Phosphor Icons:** The keyboard-shortcut glyphs in
+  `apps/desktop/src/renderer/shared/ui/primitives/key-glyphs.tsx` (⌘ ⌥ ⇧ ⌃ ↵ ⌫
+  and the arrows) are the unmodified Bold-weight paths of
+  `@phosphor-icons/core@2.1.1` (`assets/bold/*-bold.svg`), copyright 2023
+  Phosphor Icons, under MIT. The license is preserved at
+  [`third_party/phosphor-icons/LICENSE`](third_party/phosphor-icons/LICENSE).
 
 ### Agent integration marks
 

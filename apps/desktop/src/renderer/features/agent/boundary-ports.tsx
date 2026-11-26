@@ -80,7 +80,6 @@ export const BoundaryPortsPill = memo(function BoundaryPortsPill({
         <Button
           type="button"
           variant="ghost"
-          size="sm"
           className="text-fg2 hover:text-fg1 h-7 gap-1.5 px-2"
           aria-label={problem?.title ?? label}
           onPointerEnter={onIntent}

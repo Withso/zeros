@@ -263,7 +263,7 @@ export const DiffHoverPreview = memo(function DiffHoverPreview({
         disableFileHeader: true,
         // Use the same diff canvas and renderer contract as Changes/Review.
         // The optional filename header remains bg1 as requested.
-        surface: "sidebar-bg",
+        surface: "bg1-raised",
         codeThemeId: codeTheme,
       }),
     [codeTheme],
@@ -289,7 +289,7 @@ export const DiffHoverPreview = memo(function DiffHoverPreview({
       )}
       {/* @pierre owns visual-line measurement in overflow:"wrap" mode. This
           wrapper owns only the single remaining scroll axis. */}
-      <div className={embedded ? "bg-sidebar-bg min-w-0" : "bg-sidebar-bg min-h-0 min-w-0 flex-1 overflow-x-hidden overflow-y-auto"}>
+      <div className={embedded ? "bg-bg1-raised min-w-0" : "bg-bg1-raised min-h-0 min-w-0 flex-1 overflow-x-hidden overflow-y-auto"}>
         {hasPatch ? (
           <PatchDiff patch={patch} options={options} disableWorkerPool />
         ) : (

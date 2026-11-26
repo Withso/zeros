@@ -31,7 +31,7 @@ export interface AgentControlBarProps {
 }
 
 const FADE =
-  "transition-opacity duration-120 ease-out motion-reduce:transition-none";
+  "transition-opacity duration-fast ease-out motion-reduce:transition-none";
 
 /** Shows which agent is in control and lets the user take it back. Stop ends
  * only the agent's control, never the whole turn. */
@@ -70,7 +70,7 @@ export function AgentControlBar({
       >
         {leading}
         <span
-          className="text-fg1 text-2xxs min-w-0 flex-1 truncate text-left"
+          className="text-fg1 text-3xxs min-w-0 flex-1 truncate text-left"
           title={title}
         >
           {title}

@@ -12,7 +12,7 @@
 //   • Fixed 360px card — every toast is the same width regardless of
 //     text length — bg3, border2, 12px corners and the dropdown shadow
 //   • Close × is a 24px IconButton inside the top-right corner
-//   • A status toast leads with its tone's 16px icon; info is blue-primary
+//   • A status toast leads with its tone's 16px icon; info is accent-text
 //   • An optional action renders as a PRIMARY button (no icon) BELOW the text
 //   • Title 13/18 medium, description 12/16 fg2; both wrap if long
 //   • Default auto-dismiss after 4s; user can hover-pause
@@ -68,7 +68,7 @@ export interface ToastAction {
   onClick: () => void;
 }
 
-interface ToastCardProps {
+export interface ToastCardProps {
   id: string | number;
   message: React.ReactNode;
   variant: ToastVariant;
@@ -77,6 +77,11 @@ interface ToastCardProps {
   /** Optional primary action — renders as a button. Clicking it
    *  dismisses the toast AFTER firing the handler. */
   action?: ToastAction;
+  /** A row of actions below the text instead of one, for a persistent toast
+   *  that owns its own buttons (the update toast). */
+  actions?: React.ReactNode;
+  /** Runs before the × dismisses the toast. */
+  onDismiss?: () => void;
 }
 
 const VARIANT_ICON: Record<Exclude<ToastVariant, "default">, React.ComponentType<{ className?: string }>> = {
@@ -87,18 +92,22 @@ const VARIANT_ICON: Record<Exclude<ToastVariant, "default">, React.ComponentType
 };
 
 const VARIANT_ICON_TONE: Record<Exclude<ToastVariant, "default">, string> = {
-  success: "text-green-primary",
-  error: "text-red-primary",
-  warning: "text-yellow-primary",
-  info: "text-blue-primary",
+  success: "text-green-text",
+  error: "text-red-text",
+  warning: "text-yellow-text",
+  info: "text-accent-text",
 };
 
-function ToastCard({
+/** The one toast shape: icon, title, description, then one action or a row
+ *  of them, with a × in the corner. */
+export function ToastCard({
   id,
   message,
   variant,
   description,
   action,
+  actions,
+  onDismiss,
 }: ToastCardProps) {
   const Icon = variant !== "default" ? VARIANT_ICON[variant] : null;
   const iconTone = variant !== "default" ? VARIANT_ICON_TONE[variant] : "";
@@ -138,6 +147,7 @@ function ToastCard({
             {action.label}
           </Button>
         )}
+        {actions && <div className="mt-2 flex flex-wrap items-center gap-2">{actions}</div>}
       </div>
       {/* Only the front toast shows its × while the stack is collapsed:
           sonner marks the stacked-behind <li>s data-front="false" +
@@ -145,7 +155,10 @@ function ToastCard({
       <IconButton
         size="compact"
         label="Dismiss"
-        onClick={() => sonnerToast.dismiss(id)}
+        onClick={() => {
+          onDismiss?.();
+          sonnerToast.dismiss(id);
+        }}
         className="-mt-1 -mr-1 [[data-front=false][data-expanded=false]_&]:hidden"
       >
         <X aria-hidden="true" />

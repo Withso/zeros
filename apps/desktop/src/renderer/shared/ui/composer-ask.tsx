@@ -3,7 +3,7 @@
 // 2026-11-07 (Zeros Design v401, "Chat window · Ask to focus"): while the chat
 // column is split, an unfocused pane's composer card collapses into one pill,
 // "Ask <agent>" with no shortcut, centred where the composer sits. The card
-// itself is the pill, so its sidebar-bg fill and composer-border edge carry
+// itself is the pill, so its bg1-raised fill and composer-border edge carry
 // through: pressing it only changes the shape. It expands into the composer
 // over 200ms while its label fades out and the composer's contents, kept laid
 // out at full width, fade in; the composer the focus leaves folds back over
@@ -22,7 +22,10 @@ const ASK_PILL_PADDING_X = 16;
 /** One curve for the whole morph: quick to start, long to settle. */
 const ASK_EASE = "ease-[cubic-bezier(0.2,0,0,1)]";
 
-/** The composer card's half of the morph, placed after the card's surface
+/** The pill's 16px corners are a length, not rounded-full: border-radius eases
+ *  with the morph, and an infinite radius would jump instead of easing.
+ *
+ *  The composer card's half of the morph, placed after the card's surface
  *  radius. `data-ask-morph` holds the pill's clip and bottom-centre anchor while
  *  the card expands; `data-ask-instant` skips the motion for a retained chat
  *  that is revealed straight into its pane's state (useComposerAskMorph). */
@@ -35,11 +38,11 @@ export function composerAskCardClasses(collapsed: boolean): string {
     "data-[ask-morph]:overflow-hidden data-[ask-morph]:items-center data-[ask-morph]:justify-end",
     collapsed
       ? cn(
-          "h-8 w-(--ask-pill-w) overflow-hidden items-center justify-end rounded-[calc(var(--radius-lg)*2)] duration-200",
-          "hover:bg-sidebar-bg-hover hover:border-border3",
+          "h-8 w-(--ask-pill-w) overflow-hidden items-center justify-end rounded-[calc(var(--radius-lg)*2)] duration-slow",
+          "hover:bg-bg1-raised-hover hover:border-border3",
           "has-[[data-composer-ask-pill]:focus-visible]:border-accent",
         )
-      : "duration-200",
+      : "duration-slow",
   );
 }
 
@@ -54,8 +57,8 @@ export function composerAskContentClasses(collapsed: boolean): string {
     "motion-reduce:transition-none group-data-[ask-instant]/composer:transition-none",
     "group-data-[ask-morph]/composer:min-w-(--composer-content-w)",
     collapsed
-      ? "pointer-events-none min-w-(--composer-content-w) translate-y-1 opacity-0 duration-120"
-      : "translate-y-0 opacity-100 delay-60 duration-150",
+      ? "pointer-events-none min-w-(--composer-content-w) translate-y-1 opacity-0 duration-fast"
+      : "translate-y-0 opacity-100 delay-60 duration-base",
   );
 }
 
@@ -87,7 +90,7 @@ export function ComposerAskPill({
       onClick={onActivate}
       className={cn(
         ASK_PILL_CLS,
-        collapsed ? "opacity-100 delay-80 duration-120" : "pointer-events-none opacity-0 duration-120",
+        collapsed ? "opacity-100 delay-80 duration-fast" : "pointer-events-none opacity-0 duration-fast",
       )}
     >
       <span ref={labelRef}>Ask {agent}</span>

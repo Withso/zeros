@@ -71,7 +71,7 @@ export function MembersPanel({ surfaceActive = true }: { surfaceActive?: boolean
     return (
       <div className="flex flex-col items-start gap-3">
         <p className="text-fg2 text-sm">{error}</p>
-        <Button variant="secondary" size="sm" onClick={() => void reload()}>
+        <Button variant="secondary" onClick={() => void reload()}>
           Retry
         </Button>
       </div>
@@ -164,7 +164,7 @@ function MembersBody({
         {(memberRead.error || invitationRead.error) && (
           <div className="flex items-center gap-2 text-xs text-fg2" role="status">
             <span>{memberRead.error ? "Couldn't load members." : "Couldn't load invitations."}</span>
-            <Button variant="secondary" size="sm" onClick={() => void reload()}>Retry</Button>
+            <Button variant="secondary" onClick={() => void reload()}>Retry</Button>
           </div>
         )}
         {members === null ? (
@@ -299,7 +299,6 @@ function InviteComposer({
         />
         <Button
           variant="secondary"
-          size="sm"
           disabled={!canSend}
           onClick={() => void send()}
           className="shrink-0"
@@ -358,11 +357,10 @@ function PendingInviteRow({
       <Tooltip label="Revoke invitation">
         <Button
           variant="ghost"
-          size="sm"
           disabled={busy}
           onClick={() => void revoke()}
           aria-label={`Revoke invitation to ${invitation.email}`}
-          className="text-fg2 hover:text-red-primary size-7 px-0"
+          className="text-fg2 hover:text-red-text size-7 px-0"
         >
           <X size={14} />
         </Button>
@@ -468,11 +466,10 @@ function MemberRow({
           <Tooltip label={isSelf ? "Leave team" : `Remove ${name}`}>
             <Button
               variant="ghost"
-              size="sm"
               disabled={busy}
               onClick={() => void remove()}
               aria-label={isSelf ? "Leave team" : `Remove ${name}`}
-              className="text-fg2 hover:text-red-primary size-7 px-0"
+              className="text-fg2 hover:text-red-text size-7 px-0"
             >
               <Trash2 size={14} />
             </Button>
@@ -536,7 +533,6 @@ function JoinTeamSection() {
         />
         <Button
           variant="secondary"
-          size="sm"
           disabled={!token || busy}
           onClick={() => void join()}
         >
@@ -548,7 +544,7 @@ function JoinTeamSection() {
           That doesn't look like an invite link or code.
         </p>
       )}
-      {error && <p className="text-red-primary text-xs">{error}</p>}
+      {error && <p className="text-red-text text-xs">{error}</p>}
     </SettingsSection>
   );
 }

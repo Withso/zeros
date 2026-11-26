@@ -413,9 +413,9 @@
      inside the shadow root; headers, gutters and separators stay chrome. */
   [data-line] { -webkit-user-select: text; user-select: text; }
   :host {
-    background: var(--sidebar-bg);
+    background: var(--bg1-raised);
     --diffs-gap-block: 0px;
-    --diffs-bg: var(--sidebar-bg);
+    --diffs-bg: var(--bg1-raised);
     --diffs-addition-color-override: var(--diff-addition);
     --diffs-deletion-color-override: var(--diff-deletion);
     --diffs-modified-color-override: var(--highlighted-bright);

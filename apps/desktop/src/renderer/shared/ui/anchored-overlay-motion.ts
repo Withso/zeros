@@ -2,6 +2,9 @@
 // actions hide, a selected row is replaced, or a retained owner becomes inert.
 // Radix Presence otherwise keeps the popup and its positioner alive for an exit
 // animation, which can then measure a zero-sized anchor and paint at (0, 0).
+// The entry runs tw-animate's 150ms default, the base duration. Never add a
+// duration-* class here: it also sets transition-duration, and with no
+// transition-property every property (theme colours, position) would ease.
 // Close at once, including force-mounted content. Only entry animates; dialogs
 // and sheets have independent viewport geometry and keep their own motion.
 export const ANCHORED_OVERLAY_MOTION =

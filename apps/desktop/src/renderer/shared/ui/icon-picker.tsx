@@ -49,7 +49,7 @@ export function IconPicker({
         if (!next) setQuery("");
       }}
     >
-      <Tooltip label={label} delayDuration={1500} disabled={open}>
+      <Tooltip label={label} disabled={open}>
         <PopoverTrigger asChild>
           <IconButton size="standard" label={label}>
             <DynamicIcon name={selected} className="size-4" />
@@ -90,7 +90,7 @@ export function IconPicker({
                 </Tooltip>
               ))}
               {filtered.length === 0 && (
-                <div className="text-muted-fg col-span-6 py-3 text-center text-xs">
+                <div className="text-fg3 col-span-6 py-3 text-center text-xs">
                   No icons match
                 </div>
               )}

@@ -198,7 +198,7 @@ function ReviewedCodeView({
       diffStyle,
       codeThemeId: theme,
       disableFileHeader: true,
-      surface: snapshot.kind === "file" ? "bg1" : "sidebar-bg",
+      surface: snapshot.kind === "file" ? "bg1" : "bg1-raised",
     });
     return {
       ...shared,

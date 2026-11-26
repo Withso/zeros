@@ -92,7 +92,7 @@ const DropdownMenuSubTrigger = React.forwardRef<
   <DropdownMenuPrimitive.SubTrigger
     ref={ref}
     className={cn(
-      "focus:bg-bg3-hover focus:[&_.text-muted-fg]:text-fg3 data-[state=open]:bg-bg3-hover data-[state=open]:[&_.text-muted-fg]:text-fg3 flex cursor-default items-center outline-none select-none",
+      "focus:bg-bg3-hover focus:[&_.text-fg3]:text-fg3 data-[state=open]:bg-bg3-hover data-[state=open]:[&_.text-fg3]:text-fg3 flex cursor-default items-center outline-none select-none",
       MENU_ITEM_BOX,
       MENU_ITEM_RADIUS,
       MENU_ITEM_ICON,
@@ -248,13 +248,13 @@ const DropdownMenuContent = React.forwardRef<
 DropdownMenuContent.displayName = DropdownMenuPrimitive.Content.displayName;
 
 const ROW =
-  "focus:bg-bg3-hover focus:text-fg1 focus:[&_.text-muted-fg]:text-fg3 relative flex cursor-default items-center transition-colors outline-none select-none data-[disabled]:pointer-events-none data-[disabled]:opacity-50 aria-disabled:opacity-50";
+  "focus:bg-bg3-hover focus:text-fg1 focus:[&_.text-fg3]:text-fg3 relative flex cursor-default items-center transition-colors outline-none select-none data-[disabled]:pointer-events-none data-[disabled]:opacity-50 aria-disabled:opacity-50";
 
 const DropdownMenuItem = React.forwardRef<
   React.ComponentRef<typeof DropdownMenuPrimitive.Item>,
   React.ComponentPropsWithoutRef<typeof DropdownMenuPrimitive.Item> & {
     inset?: boolean;
-    /** destructive: red-primary text and icon; place it last. */
+    /** destructive: red-text text and icon; place it last. */
     variant?: "default" | "destructive";
   }
 >(({ className, inset, variant = "default", ...props }, ref) => (

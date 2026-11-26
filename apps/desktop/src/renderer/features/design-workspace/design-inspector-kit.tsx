@@ -9,6 +9,7 @@
 import React from "react";
 
 import { cn } from "../../shared/ui/cn";
+import { Checkbox } from "../../shared/ui/primitives/checkbox";
 import { getLastInputModality } from "../../shared/ui/overlay-focus";
 import type { InspectorGlyphName } from "./design-layout-values";
 import {
@@ -143,7 +144,6 @@ export const InspectorIconButton = React.forwardRef<
     <Tooltip
       label={tooltip}
       shortcut={shortcut}
-      delayDuration={props["aria-haspopup"] ? 1500 : undefined}
       disabled={
         props["aria-expanded"] === true || props["aria-expanded"] === "true"
       }
@@ -341,56 +341,21 @@ export function InspectorCheckboxRow({
   title?: string;
   onChange: () => void;
 }) {
+  // The shared Checkbox (P3, P9): 16px box, accent fill, white mark, the 1px
+  // accent focus; a mixed selection is its indeterminate dash.
   return (
-    <label
+    <span
       title={title}
-      className={cn(
-        "text-fg2 hover:text-fg1 flex h-7 w-fit cursor-pointer items-center gap-2 text-xs select-none",
-        disabled && (title ? "cursor-default opacity-50 hover:text-fg2" : "pointer-events-none opacity-50"),
-      )}
+      className={cn("flex h-7 w-fit items-center", disabled && title && "cursor-default")}
     >
-      <input
-        type="checkbox"
-        className="peer sr-only"
-        aria-label={label}
-        aria-checked={mixed ? "mixed" : undefined}
-        ref={(input) => {
-          if (input) input.indeterminate = mixed;
-        }}
-        checked={checked}
+      <Checkbox
+        checked={mixed ? "indeterminate" : checked}
         disabled={disabled}
         onChange={onChange}
+        aria-label={label}
+        label={label}
       />
-      <span
-        aria-hidden="true"
-        className={cn(
-          "peer-focus-visible:ring-accent grid size-3.5 shrink-0 place-items-center rounded-sm border peer-focus-visible:ring-1",
-          checked || mixed
-            ? "bg-inverted-bg border-inverted-bg text-inverted-fg"
-            : "border-border4",
-        )}
-      >
-        {mixed ? (
-          <span className="h-0.5 w-2 rounded-full bg-current" />
-        ) : checked ? (
-          <svg
-            viewBox="0 0 16 16"
-            className="size-2.5"
-            fill="none"
-            aria-hidden="true"
-          >
-            <path
-              d="M3.5 8.5 6.5 11.5 12.5 4.5"
-              stroke="currentColor"
-              strokeWidth="2.5"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-            />
-          </svg>
-        ) : null}
-      </span>
-      {label}
-    </label>
+    </span>
   );
 }
 
@@ -560,7 +525,6 @@ export const DesignToolbarButton = React.forwardRef<
       label={tooltip ?? label}
       shortcut={shortcut}
       side={tooltipSide}
-      delayDuration={props["aria-haspopup"] ? 1500 : undefined}
       disabled={
         props["aria-expanded"] === true || props["aria-expanded"] === "true"
       }

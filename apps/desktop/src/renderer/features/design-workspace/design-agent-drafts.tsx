@@ -14,7 +14,7 @@
 // canvas chrome names every file being written, including stylesheets and the
 // canvas document, reveals it on request and can follow the agent.
 
-import { Check, ChevronUp, LoaderCircle, LocateFixed, ScanSearch } from "lucide-react";
+import { Check, ChevronUp, LocateFixed, ScanSearch } from "lucide-react";
 import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { DesignPageSummary } from "@zeros/protocol/design-pages";
 
@@ -44,6 +44,7 @@ import {
   useDesignAgentFollowStore,
   type DesignAgentDraftEntry,
 } from "./state/design-agent-drafts";
+import { RunStream } from "@/renderer/shared/ui/loading/run-stream";
 
 /** Bounded wait for the saved generation before a settled draft retires. */
 const DESIGN_AGENT_DRAFT_HANDOFF_MS = 6_000;
@@ -163,7 +164,7 @@ function DesignAgentDraftBadge({ entry }: { entry: DesignAgentDraftEntry }) {
         {saved ? (
           <Check aria-hidden className="size-3" />
         ) : (
-          <LoaderCircle aria-hidden className="size-3 motion-safe:animate-spin" />
+          <RunStream size={12} />
         )}
         {phaseLabel(entry)}
       </span>
@@ -372,7 +373,7 @@ const DesignAgentDraftGhost = React.memo(function DesignAgentDraftGhost({
           transform: `translateY(${designCanvasScreenPixels(-8)}) scale(${DESIGN_CANVAS_INVERSE_ZOOM})`,
         }}
       >
-        <span className="text-muted-fg text-2xxs block truncate leading-4 font-medium">
+        <span className="text-fg3 text-3xxs block truncate leading-4 font-medium">
           {title}
         </span>
       </div>
@@ -676,7 +677,7 @@ export const DesignAgentActivityChip = React.memo(function DesignAgentActivityCh
         {saved ? (
           <Check aria-hidden="true" />
         ) : (
-          <LoaderCircle aria-hidden="true" className="motion-safe:animate-spin" />
+          <RunStream size={14} />
         )}
         <span className="min-w-0 truncate" data-design-agent-activity-label="">
           {status} {label}
@@ -706,7 +707,7 @@ export const DesignAgentActivityChip = React.memo(function DesignAgentActivityCh
                   onSelect={() => target && onReveal(target)}
                 >
                   <span className="min-w-0 flex-1 truncate">{designAgentDraftLabel(entry, context)}</span>
-                  <span className="text-muted-fg text-3xxs">{entryStatus}</span>
+                  <span className="text-fg3 text-3xxs">{entryStatus}</span>
                 </DropdownMenuItem>
               );
             })}

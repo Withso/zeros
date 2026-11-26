@@ -800,7 +800,6 @@ function ProviderCard({
               Install command
               <Button
                 variant="secondary"
-                size="sm"
                 onClick={() => void handleRunInstall()}
               >
                 <Play className="size-3.5" aria-hidden="true" />
@@ -822,7 +821,7 @@ function ProviderCard({
           }
         >
           <div className="bg-bg2/60 relative rounded-md px-4 py-3">
-            <span className="text-fg1 block pr-9 text-xs break-all">
+            <span className="text-fg1 block pr-10 text-xs break-all">
               {agent.installHint.command}
             </span>
             <Tooltip label="Copy command">
@@ -852,7 +851,6 @@ function ProviderCard({
             </div>
             <Button
               variant="secondary"
-              size="lg"
               onPointerEnter={warmConnection}
               onFocus={warmConnection}
               onClick={() => setConnectionOpen(true)}
@@ -864,7 +862,7 @@ function ProviderCard({
                 method,
               )}
               {connected && (
-                <Check className="text-green-fg size-4" aria-hidden="true" />
+                <Check className="text-green-text size-4" aria-hidden="true" />
               )}
             </Button>
           </div>
@@ -898,7 +896,6 @@ function ProviderCard({
                     <Button
                       asChild
                       variant="secondary"
-                      size="sm"
                       className="shrink-0"
                     >
                       <a
@@ -936,7 +933,6 @@ function ProviderCard({
                     className="flex-1"
                   />
                   <Button
-                    size="lg"
                     onClick={() => void handleSaveApiKey()}
                     disabled={savingApiKey || !apiKeyLoaded || !apiKey.trim()}
                   >
@@ -945,7 +941,6 @@ function ProviderCard({
                   {keyConfigured && (
                     <Button
                       variant="secondary"
-                      size="lg"
                       onClick={() => void handleRemoveApiKey()}
                       disabled={savingApiKey || !apiKeyLoaded}
                     >
@@ -984,7 +979,6 @@ function ProviderCard({
                   <div className="flex items-center gap-2">
                     <Button
                       variant="secondary"
-                      size="sm"
                       disabled={changingMethod}
                       onClick={() => setCliOpen(true)}
                     >
@@ -1038,7 +1032,6 @@ function ProviderCard({
                 />
                 <Button
                   variant="secondary"
-                  size="lg"
                   onClick={handleBinaryPathSave}
                   disabled={binaryPathDraft.trim() === (prefs.binaryPath ?? "")}
                 >
@@ -1075,7 +1068,6 @@ function ProviderCard({
                 />
                 <Button
                   variant="secondary"
-                  size="lg"
                   onClick={handleGatewaySave}
                   disabled={
                     gatewayDraft.trim() === (prefs.gatewayBaseUrl ?? "")

@@ -118,7 +118,7 @@ describe("app shell navigation", () => {
     expect(buttons).toContain('label="Go back"');
     expect(buttons).toContain('label="Go forward"');
     expect(classConstant(buttons, "HISTORY_BUTTON_CLS")).toMatch(
-      /^h-7 w-7 shrink-0 rounded-md text-fg2 hover:bg-sidebar-bg-hover hover:text-fg1 /,
+      /^h-7 w-7 shrink-0 rounded-md text-fg2 hover:bg-bg1-raised-hover hover:text-fg1 /,
     );
     // A disabled button drops pointer events, which would hand a quick second
     // click to the title band's double-click zoom.
@@ -156,24 +156,22 @@ describe("sidebar workspace list presentations", () => {
     );
   });
 
-  it("uses repository icons and a trailing agent state in the mixed list", () => {
+  it("leads every row with the project logo and the loader while working", () => {
     const row = between(
       ROW,
       "export function SidebarWorkspaceRow(",
       "/** Placeholder row",
     );
     expect(row).toContain("<WorkspaceProjectIcon project={project} />");
-    expect(row).toContain("trailingAgentState");
+    expect(row).not.toContain("trailingAgentState");
     // Any chat's activity, where a turn parked on the user rests.
     expect(row).toContain("useAnyChatWorkingActivity");
-    expect(SIDEBAR).toContain("mixedRepositories={!groupedList}");
+    expect(SIDEBAR).not.toContain("mixedRepositories");
   });
 
-  // Ungrouped rows spend the leading glyph on repository identity, and design
-  // workspaces carry the same colour-word branch names code ones do — so the
-  // PenTool relocates to the trailing cluster in BOTH row variants, so the
-  // pending → confirmed swap neither drops nor re-adds it.
-  it("relocates the design marker instead of dropping it in the mixed list", () => {
+  // Design workspaces keep their pen in the leading slot in both row variants,
+  // so the pending → confirmed swap neither drops nor re-adds it.
+  it("keeps the design marker in the leading slot of both row variants", () => {
     const confirmed = between(
       ROW,
       "export function SidebarWorkspaceRow(",
@@ -182,12 +180,17 @@ describe("sidebar workspace list presentations", () => {
     const pending = ROW.slice(
       ROW.indexOf("export function PendingSidebarWorkspaceRow("),
     );
-    for (const variant of [confirmed, pending]) {
-      expect(variant).toContain("trailingDesignMark");
-      expect(variant).toMatch(
-        /trailingDesignMark[\s\S]{0,200}?<PenTool className="size-3\.5"/,
-      );
-    }
+    expect(confirmed).toMatch(/lead === "design" \? <PenTool className="size-3\.5"/);
+    expect(pending).toMatch(/kind === "design" \? \(\s*<PenTool className="size-3\.5"/);
+  });
+
+  // A parent's leading slot is the toggle for its child workspaces; there is
+  // no separate "N child workspaces" row.
+  it("toggles child workspaces from the parent's leading slot", () => {
+    expect(ROW).toContain("data-child-workspaces-toggle={workspace.id}");
+    expect(ROW).toMatch(/aria-expanded=\{childrenExpanded\}/);
+    expect(SIDEBAR).toContain("onToggleChildren={item.childCount ? () => toggleChildWorkspaces(item.workspace.id) : undefined}");
+    expect(SIDEBAR).not.toContain("child workspaces`}</span>");
   });
 });
 
@@ -200,7 +203,7 @@ describe("sidebar workspace rows", () => {
     expect(cls).toContain("focus-within:bg-(--surface-hover)");
     // Step 2: selected shares the sidebar's own hover fill.
     expect(cls).toContain("data-[active=true]:bg-(--surface-hover)");
-    expect(cls).not.toContain("bg2-highlight");
+    expect(cls).not.toContain("selected-bg");
     expect(cls).toMatch(/data-\[active=true\]:text-fg1\b/);
     expect(cls).toContain("has-[>button:focus-visible]:inset-ring-accent");
     expect(cls).not.toContain("has-[>button:focus-visible]:ring-[3px]");
@@ -354,7 +357,7 @@ describe("sidebar collapse and geometry", () => {
   it("uses 32px rows and 2px gaps on one 16px icon column, with a quiet section header", () => {
     const entry = classConstant(SIDEBAR, "SIDEBAR_ENTRY_CLS");
     // 8px list inset + 8px padding and no border put every icon at 16px.
-    for (const cls of ["h-8", "px-2", "gap-2", "border-0", "data-[state=active]:bg-bg2-highlight", "[&>svg]:text-fg3"]) {
+    for (const cls of ["h-8", "px-2", "gap-2", "border-0", "data-[state=active]:bg-selected-bg", "[&>svg]:text-fg3"]) {
       expect(entry.split(/\s+/), cls).toContain(cls);
     }
     expect(classConstant(HEADER, "REPOSITORY_HEADER_CLS")).toMatch(
@@ -411,7 +414,7 @@ describe("sidebar typography and colour", () => {
     );
     expect(switcher).not.toContain("ExternalLink");
     expect(
-      switcher.match(/<ArrowUpRight className="text-muted-fg ml-auto" \/>/g),
+      switcher.match(/<ArrowUpRight className="text-fg3 ml-auto" \/>/g),
     ).toHaveLength(2);
   });
 });
@@ -463,7 +466,7 @@ describe("sidebar repository headers", () => {
     expect(HEADER).not.toMatch(/Hide repository/);
     expect(menu).toContain("requestCreateFromSource(project.id);");
     expect(menu).toContain('variant="destructive"');
-    expect(menu).not.toContain("text-red-primary");
+    expect(menu).not.toContain("text-red-text");
   });
 
   it("share the Paths section's removal flow instead of duplicating it", () => {

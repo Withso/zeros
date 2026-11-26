@@ -234,7 +234,7 @@ describe("collapsing the workbench cannot move the conversation pane", () => {
   });
 
   it("never transitions a flex property", () => {
-    // Mistake 2: `transition-[flex-grow] duration-150` turned the overshoot
+    // Mistake 2: `transition-[flex-grow] duration-base` turned the overshoot
     // above into a visible 150ms animation, and re-ran it on every launch
     // (see boot-layout-vars.test.ts). Animating a grow factor is not a width
     // animation anyway — grow 1→50 against a fixed 50 is wildly non-linear —

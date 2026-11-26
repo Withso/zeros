@@ -31,7 +31,7 @@ const COMPOSER = doc(
       '<zd-option name="attachments" type="number" default="2" min="0" max="4"></zd-option>',
       '<zd-option name="density" type="choice" choices="compact comfortable" default="comfortable"></zd-option>',
       '<zd-option name="toolbar" type="boolean" default="true"></zd-option>',
-      '<zd-option name="accent" type="color" default="var(--blue-primary)"></zd-option>',
+      '<zd-option name="accent" type="color" default="var(--accent-text)"></zd-option>',
       '<zd-option name="send-label" type="text" default="Send"></zd-option>',
       '<zd-variant name="compact" width="800" density="compact"></zd-variant>',
     ].join("\n")) +
@@ -52,7 +52,7 @@ describe("an instance of a component with options", () => {
       '<zd-chat-composer data-oid="ws" zd-variant="compact" attachments="1" toolbar="false" style="display: contents" data-zd-instance="1">' +
         '<div class="composer" data-zd-part="cc-root" data-oid="cc-root" data-density="compact" data-zd-root=""><span class="chip" data-zd-part="cc-chip" data-oid="cc-chip">File 1</span></div></zd-chat-composer>',
     );
-    expect(result.html).toContain('<style data-zeros-options>:where([data-zd-instance="1"]) { --zd-width: 800px; --zd-attachments: 1; --zd-accent: var(--blue-primary); }</style>');
+    expect(result.html).toContain('<style data-zeros-options>:where([data-zd-instance="1"]) { --zd-width: 800px; --zd-attachments: 1; --zd-accent: var(--accent-text); }</style>');
   });
 
   it("carries the component's linked stylesheets, and rebases its URLs from its own file", async () => {
@@ -161,7 +161,7 @@ describe("a frame registered as a component", () => {
       '<div class="composer" data-oid="cc-root" data-density="comfortable"><span class="chip" data-oid="cc-chip">File 1</span>' +
         '<span class="chip" data-zd-copy="cc-chip#1">File 2</span><button class="send" data-oid="cc-send">Send</button></div>',
     );
-    expect(result.html).toContain("<style data-zeros-options>:root { --zd-width: 1120px; --zd-attachments: 2; --zd-accent: var(--blue-primary); }</style>");
+    expect(result.html).toContain("<style data-zeros-options>:root { --zd-width: 1120px; --zd-attachments: 2; --zd-accent: var(--accent-text); }</style>");
     // The declaration stays in the file, inert.
     expect(result.html).toContain("<template data-zd-options>");
     expect(await expandDesignComponentsHtml("/work/options", COMPOSER, {}, "chat/composer.html", { registry })).toBe(result.html);

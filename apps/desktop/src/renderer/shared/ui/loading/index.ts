@@ -16,8 +16,6 @@ export {
   type ZerosSpinnerTone,
 } from "./zeros-spinner";
 export {
-  LiveDuration,
-  DurationChip,
   WorkingDuration,
   formatElapsed,
   formatWorkingElapsed,

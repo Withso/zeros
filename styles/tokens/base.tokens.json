@@ -35,23 +35,6 @@
         }
       }
     },
-    "bg0": {
-      "$type": "color",
-      "$value": {
-        "colorSpace": "hsl",
-        "components": [0.0, 0.0, 5.0]
-      },
-      "$description": "one step below bg1; the Browser tab's backdrop",
-      "$extensions": {
-        "org.zeros": {
-          "cssName": "--bg0",
-          "section": "base-bg0",
-          "utility": "--color-bg0",
-          "utilitySection": "utilities-bg0",
-          "utilityOrder": 0
-        }
-      }
-    },
     "bg1": {
       "$type": "color",
       "$value": {
@@ -62,10 +45,10 @@
       "$extensions": {
         "org.zeros": {
           "cssName": "--bg1",
-          "section": "base-bg0",
+          "section": "base-bg1",
           "utility": "--color-bg1",
-          "utilitySection": "utilities-bg0",
-          "utilityOrder": 1,
+          "utilitySection": "utilities-bg1",
+          "utilityOrder": 0,
           "cssFormat": "multiline"
         }
       }
@@ -93,42 +76,42 @@
           "cssName": "--bg1-hover",
           "section": "base-pane-bg",
           "utility": "--color-bg1-hover",
-          "utilitySection": "utilities-bg0",
+          "utilitySection": "utilities-bg1",
+          "utilityOrder": 1
+        }
+      }
+    },
+    "bg1-raised": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [0.0, 0.0, 10.196]
+      },
+      "$description": "one raised step between bg1 and bg2: composer, cards, settings groups, review threads, docked surfaces",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--bg1-raised",
+          "section": "base-pane-bg",
+          "utility": "--color-bg1-raised",
+          "utilitySection": "utilities-bg1",
           "utilityOrder": 2
         }
       }
     },
-    "bg1-highlight": {
+    "bg1-raised-hover": {
       "$type": "color",
       "$value": {
         "colorSpace": "hsl",
-        "components": [0.0, 0.0, 9.0]
+        "components": [0.0, 0.0, 14.118]
       },
-      "$description": "highlighted content above bg1",
+      "$description": "hover on bg1-raised rows and controls",
       "$extensions": {
         "org.zeros": {
-          "cssName": "--bg1-highlight",
+          "cssName": "--bg1-raised-hover",
           "section": "base-pane-bg",
-          "utility": "--color-bg1-highlight",
-          "utilitySection": "utilities-bg0",
+          "utility": "--color-bg1-raised-hover",
+          "utilitySection": "utilities-bg1",
           "utilityOrder": 3
-        }
-      }
-    },
-    "bg1-bright": {
-      "$type": "color",
-      "$value": {
-        "colorSpace": "hsl",
-        "components": [0.0, 0.0, 11.0]
-      },
-      "$description": "filled section card on bg1",
-      "$extensions": {
-        "org.zeros": {
-          "cssName": "--bg1-bright",
-          "section": "base-pane-bg",
-          "utility": "--color-bg1-bright",
-          "utilitySection": "utilities-bg0",
-          "utilityOrder": 4
         }
       }
     },
@@ -144,8 +127,8 @@
           "cssName": "--bg2",
           "section": "base-pane-bg",
           "utility": "--color-bg2",
-          "utilitySection": "utilities-bg0",
-          "utilityOrder": 5
+          "utilitySection": "utilities-bg1",
+          "utilityOrder": 4
         }
       }
     },
@@ -153,33 +136,16 @@
       "$type": "color",
       "$value": {
         "colorSpace": "hsl",
-        "components": [0.0, 0.0, 15.0]
+        "components": [0.0, 0.0, 16.471]
       },
-      "$description": "hover on bg2",
+      "$description": "hover on bg2; clears a visible step on bg2 and stays below selected-bg",
       "$extensions": {
         "org.zeros": {
           "cssName": "--bg2-hover",
           "section": "base-pane-bg",
           "utility": "--color-bg2-hover",
-          "utilitySection": "utilities-bg0",
-          "utilityOrder": 6
-        }
-      }
-    },
-    "bg2-highlight": {
-      "$type": "color",
-      "$value": {
-        "colorSpace": "hsl",
-        "components": [0.0, 0.0, 16.86]
-      },
-      "$description": "dropdown trigger hover/open",
-      "$extensions": {
-        "org.zeros": {
-          "cssName": "--bg2-highlight",
-          "section": "base-pane-bg",
-          "utility": "--color-bg2-highlight",
-          "utilitySection": "utilities-bg0",
-          "utilityOrder": 7
+          "utilitySection": "utilities-bg1",
+          "utilityOrder": 5
         }
       }
     },
@@ -195,8 +161,8 @@
           "cssName": "--selected-bg",
           "section": "base-pane-bg",
           "utility": "--color-selected-bg",
-          "utilitySection": "utilities-bg0",
-          "utilityOrder": 8
+          "utilitySection": "utilities-bg1",
+          "utilityOrder": 6
         }
       }
     },
@@ -212,8 +178,8 @@
           "cssName": "--bg3",
           "section": "base-bg3",
           "utility": "--color-bg3",
-          "utilitySection": "utilities-bg0",
-          "utilityOrder": 9
+          "utilitySection": "utilities-bg1",
+          "utilityOrder": 7
         }
       }
     },
@@ -229,8 +195,8 @@
           "cssName": "--bg3-hover",
           "section": "base-bg3",
           "utility": "--color-bg3-hover",
-          "utilitySection": "utilities-bg0",
-          "utilityOrder": 10,
+          "utilitySection": "utilities-bg1",
+          "utilityOrder": 8,
           "cssFormat": "multiline"
         }
       }
@@ -247,8 +213,8 @@
           "cssName": "--bg4",
           "section": "base-bg3",
           "utility": "--color-bg4",
-          "utilitySection": "utilities-bg0",
-          "utilityOrder": 11
+          "utilitySection": "utilities-bg1",
+          "utilityOrder": 9
         }
       }
     },
@@ -264,8 +230,8 @@
           "cssName": "--bg5",
           "section": "base-bg3",
           "utility": "--color-bg5",
-          "utilitySection": "utilities-bg0",
-          "utilityOrder": 12
+          "utilitySection": "utilities-bg1",
+          "utilityOrder": 10
         }
       }
     },
@@ -282,7 +248,7 @@
           "section": "base-fg1",
           "utility": "--color-fg1",
           "utilitySection": "utilities-fg1",
-          "utilityOrder": 14
+          "utilityOrder": 12
         }
       }
     },
@@ -290,16 +256,16 @@
       "$type": "color",
       "$value": {
         "colorSpace": "hsl",
-        "components": [0.0, 0.0, 62.35]
+        "components": [0.0, 0.0, 62.745]
       },
-      "$description": "default text + icon across app",
+      "$description": "default text and icons",
       "$extensions": {
         "org.zeros": {
           "cssName": "--fg2",
           "section": "base-fg1",
           "utility": "--color-fg2",
           "utilitySection": "utilities-fg1",
-          "utilityOrder": 15
+          "utilityOrder": 13
         }
       }
     },
@@ -307,33 +273,16 @@
       "$type": "color",
       "$value": {
         "colorSpace": "hsl",
-        "components": [0.0, 0.0, 57.65]
+        "components": [0.0, 0.0, 53.333]
       },
-      "$description": "middle tier (one step below fg2)",
+      "$description": "the third tier: metadata, placeholders, times, hints; hovered or selected rows lift it to fg2",
       "$extensions": {
         "org.zeros": {
           "cssName": "--fg3",
           "section": "base-fg3",
           "utility": "--color-fg3",
           "utilitySection": "utilities-fg1",
-          "utilityOrder": 16
-        }
-      }
-    },
-    "muted-fg": {
-      "$type": "color",
-      "$value": {
-        "colorSpace": "hsl",
-        "components": [0.0, 0.0, 42.0]
-      },
-      "$description": "supplemental metadata; 3:1 floor, fg3 on hover/selection",
-      "$extensions": {
-        "org.zeros": {
-          "cssName": "--muted-fg",
-          "section": "base-muted-fg",
-          "utility": "--color-muted-fg",
-          "utilitySection": "utilities-fg1",
-          "utilityOrder": 17
+          "utilityOrder": 14
         }
       }
     },
@@ -347,10 +296,10 @@
       "$extensions": {
         "org.zeros": {
           "cssName": "--nav-bg",
-          "section": "base-sidebar-bg",
+          "section": "base-nav-bg",
           "utility": "--color-nav-bg",
-          "utilitySection": "utilities-sidebar-bg",
-          "utilityOrder": 20
+          "utilitySection": "utilities-nav-bg",
+          "utilityOrder": 15
         }
       }
     },
@@ -364,44 +313,10 @@
       "$extensions": {
         "org.zeros": {
           "cssName": "--nav-bg-hover",
-          "section": "base-sidebar-bg",
+          "section": "base-nav-bg",
           "utility": "--color-nav-bg-hover",
-          "utilitySection": "utilities-sidebar-bg",
-          "utilityOrder": 21
-        }
-      }
-    },
-    "sidebar-bg": {
-      "$type": "color",
-      "$value": {
-        "colorSpace": "hsl",
-        "components": [0.0, 0.0, 9.412]
-      },
-      "$description": "repository sidebar background",
-      "$extensions": {
-        "org.zeros": {
-          "cssName": "--sidebar-bg",
-          "section": "base-sidebar-bg",
-          "utility": "--color-sidebar-bg",
-          "utilitySection": "utilities-sidebar-bg",
-          "utilityOrder": 18
-        }
-      }
-    },
-    "sidebar-bg-hover": {
-      "$type": "color",
-      "$value": {
-        "colorSpace": "hsl",
-        "components": [0.0, 0.0, 15.0]
-      },
-      "$description": "sidebar row hover and selected state",
-      "$extensions": {
-        "org.zeros": {
-          "cssName": "--sidebar-bg-hover",
-          "section": "base-sidebar-bg",
-          "utility": "--color-sidebar-bg-hover",
-          "utilitySection": "utilities-sidebar-bg",
-          "utilityOrder": 19
+          "utilitySection": "utilities-nav-bg",
+          "utilityOrder": 16
         }
       }
     },
@@ -418,7 +333,7 @@
           "section": "base-border1",
           "utility": "--color-border1",
           "utilitySection": "utilities-border1",
-          "utilityOrder": 22
+          "utilityOrder": 17
         }
       }
     },
@@ -435,7 +350,7 @@
           "section": "base-border1",
           "utility": "--color-border2",
           "utilitySection": "utilities-border1",
-          "utilityOrder": 23
+          "utilityOrder": 18
         }
       }
     },
@@ -452,7 +367,7 @@
           "section": "base-border1",
           "utility": "--color-border3",
           "utilitySection": "utilities-border1",
-          "utilityOrder": 24
+          "utilityOrder": 19
         }
       }
     },
@@ -469,7 +384,7 @@
           "section": "base-border1",
           "utility": "--color-border4",
           "utilitySection": "utilities-border1",
-          "utilityOrder": 25
+          "utilityOrder": 20
         }
       }
     },
@@ -576,7 +491,7 @@
           "section": "base-dialog-title-size",
           "utility": "--color-scrim",
           "utilitySection": "utilities-scrim",
-          "utilityOrder": 13
+          "utilityOrder": 11
         }
       }
     },
@@ -594,34 +509,20 @@
         }
       }
     },
-    "highlighted-bg": {
-      "$type": "color",
-      "$value": "{tokens.bg2}",
-      "$description": "user msg bg (text: fg1/fg2)",
-      "$extensions": {
-        "org.zeros": {
-          "cssName": "--highlighted-bg",
-          "section": "base-highlighted-bg",
-          "utility": "--color-highlighted-bg",
-          "utilitySection": "utilities-highlighted-bg",
-          "utilityOrder": 26
-        }
-      }
-    },
     "highlighted-bright": {
       "$type": "color",
       "$value": {
         "colorSpace": "hsl",
         "components": [0.0, 0.0, 79.216]
       },
-      "$description": "input focus border, brighter accents",
+      "$description": "structural neutral: diff modified marks, terminal selection, tree accent (focus is the accent)",
       "$extensions": {
         "org.zeros": {
           "cssName": "--highlighted-bright",
-          "section": "base-highlighted-bg",
+          "section": "base-highlighted-bright",
           "utility": "--color-highlighted-bright",
-          "utilitySection": "utilities-highlighted-bg",
-          "utilityOrder": 27,
+          "utilitySection": "utilities-highlighted-bright",
+          "utilityOrder": 21,
           "cssFormat": "multiline"
         }
       }
@@ -639,7 +540,7 @@
           "section": "base-inverted-bg",
           "utility": "--color-inverted-bg",
           "utilitySection": "utilities-inverted-bg",
-          "utilityOrder": 28
+          "utilityOrder": 22
         }
       }
     },
@@ -656,7 +557,7 @@
           "section": "base-inverted-bg",
           "utility": "--color-inverted-fg",
           "utilitySection": "utilities-inverted-bg",
-          "utilityOrder": 29,
+          "utilityOrder": 23,
           "cssFormat": "multiline"
         }
       }
@@ -671,7 +572,7 @@
           "section": "base-primary-button-bg",
           "utility": "--color-primary-button-bg",
           "utilitySection": "utilities-primary-button-bg",
-          "utilityOrder": 30
+          "utilityOrder": 24
         }
       }
     },
@@ -688,7 +589,7 @@
           "section": "base-primary-button-bg",
           "utility": "--color-primary-button-hover",
           "utilitySection": "utilities-primary-button-bg",
-          "utilityOrder": 31
+          "utilityOrder": 25
         }
       }
     },
@@ -702,77 +603,60 @@
           "section": "base-primary-button-bg",
           "utility": "--color-primary-button-fg",
           "utilitySection": "utilities-primary-button-bg",
-          "utilityOrder": 32
+          "utilityOrder": 26
         }
       }
     },
-    "red-primary": {
+    "red-text": {
       "$type": "color",
       "$value": {
         "colorSpace": "hsl",
-        "components": [0.0, 91.0, 71.0]
+        "components": [2.54, 72.84, 68.235]
       },
-      "$description": "−N counts, error accents",
+      "$description": "red status words, icons and destructive labels on any plain surface",
       "$extensions": {
         "org.zeros": {
-          "cssName": "--red-primary",
-          "section": "base-red-primary",
-          "utility": "--color-red-primary",
-          "utilitySection": "utilities-red-primary",
-          "utilityOrder": 33
+          "cssName": "--red-text",
+          "section": "base-red-text",
+          "utility": "--color-red-text",
+          "utilitySection": "utilities-red-text",
+          "utilityOrder": 27
         }
       }
     },
-    "red-secondary": {
+    "red-solid": {
       "$type": "color",
       "$value": {
         "colorSpace": "hsl",
         "components": [357.52, 68.075, 41.765]
       },
-      "$description": "solid delete fills + delete icons",
+      "$description": "destructive fill carrying red-solid-fg",
       "$extensions": {
         "org.zeros": {
-          "cssName": "--red-secondary",
-          "section": "base-red-primary",
-          "utility": "--color-red-secondary",
-          "utilitySection": "utilities-red-primary",
-          "utilityOrder": 34,
+          "cssName": "--red-solid",
+          "section": "base-red-text",
+          "utility": "--color-red-solid",
+          "utilitySection": "utilities-red-text",
+          "utilityOrder": 28,
           "cssFormat": "multiline"
         }
       }
     },
-    "red-secondary-fg": {
+    "red-solid-fg": {
       "$type": "color",
       "$value": {
         "colorSpace": "hsl",
         "components": [0.0, 0.0, 100.0]
       },
-      "$description": "text/icon on SOLID --red-secondary fills. THEME-STATIC (white in both themes — the red fill stays vivid in light, so fg1, which flips dark, can't sit on it).",
+      "$description": "label on red-solid",
       "$extensions": {
         "org.zeros": {
-          "cssName": "--red-secondary-fg",
-          "section": "base-red-primary",
-          "utility": "--color-red-secondary-fg",
-          "utilitySection": "utilities-red-primary",
-          "utilityOrder": 35,
+          "cssName": "--red-solid-fg",
+          "section": "base-red-text",
+          "utility": "--color-red-solid-fg",
+          "utilitySection": "utilities-red-text",
+          "utilityOrder": 29,
           "cssFormat": "multiline"
-        }
-      }
-    },
-    "red-secondary-hover": {
-      "$type": "color",
-      "$value": {
-        "colorSpace": "hsl",
-        "components": [357.78, 67.839, 39.02]
-      },
-      "$description": "destructive hover fill",
-      "$extensions": {
-        "org.zeros": {
-          "cssName": "--red-secondary-hover",
-          "section": "base-red-secondary-hover",
-          "utility": "--color-red-secondary-hover",
-          "utilitySection": "utilities-red-primary",
-          "utilityOrder": 36
         }
       }
     },
@@ -780,50 +664,50 @@
       "$type": "color",
       "$value": {
         "colorSpace": "hsl",
-        "components": [0.0, 36.842, 14.902]
+        "components": [1.82, 40.741, 15.882]
       },
       "$description": "error container surface",
       "$extensions": {
         "org.zeros": {
           "cssName": "--red-bg",
-          "section": "base-red-secondary-hover",
+          "section": "base-status-tints",
           "utility": "--color-red-bg",
-          "utilitySection": "utilities-red-primary",
-          "utilityOrder": 37
+          "utilitySection": "utilities-red-text",
+          "utilityOrder": 31
         }
       }
     },
-    "red-fg": {
+    "red-on-bg": {
       "$type": "color",
       "$value": {
         "colorSpace": "hsl",
-        "components": [2.05, 100.0, 82.745]
+        "components": [4.86, 97.368, 85.098]
       },
-      "$description": "text/icon on --red-bg",
+      "$description": "text and icons inside a red-bg container",
       "$extensions": {
         "org.zeros": {
-          "cssName": "--red-fg",
-          "section": "base-red-secondary-hover",
-          "utility": "--color-red-fg",
-          "utilitySection": "utilities-red-primary",
-          "utilityOrder": 38
+          "cssName": "--red-on-bg",
+          "section": "base-status-tints",
+          "utility": "--color-red-on-bg",
+          "utilitySection": "utilities-red-text",
+          "utilityOrder": 32
         }
       }
     },
-    "green-primary": {
+    "green-text": {
       "$type": "color",
       "$value": {
         "colorSpace": "hsl",
-        "components": [142.0, 69.0, 58.0]
+        "components": [134.16, 43.415, 59.804]
       },
-      "$description": "+N counts, success accents",
+      "$description": "green status words and icons on any plain surface",
       "$extensions": {
         "org.zeros": {
-          "cssName": "--green-primary",
-          "section": "base-red-secondary-hover",
-          "utility": "--color-green-primary",
-          "utilitySection": "utilities-red-primary",
-          "utilityOrder": 39
+          "cssName": "--green-text",
+          "section": "base-status-tints",
+          "utility": "--color-green-text",
+          "utilitySection": "utilities-red-text",
+          "utilityOrder": 33
         }
       }
     },
@@ -831,50 +715,50 @@
       "$type": "color",
       "$value": {
         "colorSpace": "hsl",
-        "components": [120.0, 23.0, 17.0]
+        "components": [132.5, 36.364, 12.941]
       },
       "$description": "success container surface",
       "$extensions": {
         "org.zeros": {
           "cssName": "--green-bg",
-          "section": "base-red-secondary-hover",
+          "section": "base-status-tints",
           "utility": "--color-green-bg",
-          "utilitySection": "utilities-red-primary",
-          "utilityOrder": 40
+          "utilitySection": "utilities-red-text",
+          "utilityOrder": 34
         }
       }
     },
-    "green-fg": {
+    "green-on-bg": {
       "$type": "color",
       "$value": {
         "colorSpace": "hsl",
-        "components": [142.0, 75.0, 73.0]
+        "components": [131.19, 53.153, 78.235]
       },
-      "$description": "text/icon on --green-bg",
+      "$description": "text and icons inside a green-bg container",
       "$extensions": {
         "org.zeros": {
-          "cssName": "--green-fg",
-          "section": "base-red-secondary-hover",
-          "utility": "--color-green-fg",
-          "utilitySection": "utilities-red-primary",
-          "utilityOrder": 41
+          "cssName": "--green-on-bg",
+          "section": "base-status-tints",
+          "utility": "--color-green-on-bg",
+          "utilitySection": "utilities-red-text",
+          "utilityOrder": 35
         }
       }
     },
-    "yellow-primary": {
+    "yellow-text": {
       "$type": "color",
       "$value": {
         "colorSpace": "hsl",
-        "components": [47.95, 95.82, 53.14]
+        "components": [42.92, 66.327, 61.569]
       },
-      "$description": "warning · modified · in-progress",
+      "$description": "yellow status words and icons on any plain surface (one yellow for text and graphics)",
       "$extensions": {
         "org.zeros": {
-          "cssName": "--yellow-primary",
-          "section": "base-red-secondary-hover",
-          "utility": "--color-yellow-primary",
-          "utilitySection": "utilities-red-primary",
-          "utilityOrder": 42,
+          "cssName": "--yellow-text",
+          "section": "base-status-tints",
+          "utility": "--color-yellow-text",
+          "utilitySection": "utilities-red-text",
+          "utilityOrder": 36,
           "cssFormat": "multiline"
         }
       }
@@ -883,47 +767,33 @@
       "$type": "color",
       "$value": {
         "colorSpace": "hsl",
-        "components": [47.23, 68.12, 13.53]
+        "components": [42.63, 61.29, 12.157]
       },
       "$description": "warning container surface",
       "$extensions": {
         "org.zeros": {
           "cssName": "--yellow-bg",
-          "section": "base-red-secondary-hover",
+          "section": "base-status-tints",
           "utility": "--color-yellow-bg",
-          "utilitySection": "utilities-red-primary",
-          "utilityOrder": 43
+          "utilitySection": "utilities-red-text",
+          "utilityOrder": 37
         }
       }
     },
-    "yellow-fg": {
+    "yellow-on-bg": {
       "$type": "color",
       "$value": {
         "colorSpace": "hsl",
-        "components": [48.0, 96.64, 76.67]
+        "components": [42.77, 75.806, 75.686]
       },
-      "$description": "text/icon on --yellow-bg",
+      "$description": "text and icons inside a yellow-bg container",
       "$extensions": {
         "org.zeros": {
-          "cssName": "--yellow-fg",
-          "section": "base-red-secondary-hover",
-          "utility": "--color-yellow-fg",
-          "utilitySection": "utilities-red-primary",
-          "utilityOrder": 44
-        }
-      }
-    },
-    "yellow-icon": {
-      "$type": "color",
-      "$value": "{tokens.yellow-primary}",
-      "$description": "icons, status dots and tinted borders",
-      "$extensions": {
-        "org.zeros": {
-          "cssName": "--yellow-icon",
-          "section": "base-yellow-icon",
-          "utility": "--color-yellow-icon",
-          "utilitySection": "utilities-red-primary",
-          "utilityOrder": 45
+          "cssName": "--yellow-on-bg",
+          "section": "base-status-tints",
+          "utility": "--color-yellow-on-bg",
+          "utilitySection": "utilities-red-text",
+          "utilityOrder": 38
         }
       }
     },
@@ -941,229 +811,164 @@
         }
       }
     },
-    "blue-primary": {
+    "accent-text": {
       "$type": "color",
       "$value": {
         "colorSpace": "hsl",
-        "components": [212.62, 100.0, 70.78]
+        "components": [213.54, 78.882, 68.431]
       },
-      "$description": "info · links · accents",
+      "$description": "the blue for words: links, file paths, info icons and running marks",
       "$extensions": {
         "org.zeros": {
-          "cssName": "--blue-primary",
+          "cssName": "--accent-text",
           "section": "base-yellow-wash",
-          "utility": "--color-blue-primary",
-          "utilitySection": "utilities-red-primary",
-          "utilityOrder": 46
+          "utility": "--color-accent-text",
+          "utilitySection": "utilities-red-text",
+          "utilityOrder": 39
         }
       }
     },
-    "blue-bg": {
+    "accent-bg": {
       "$type": "color",
       "$value": {
         "colorSpace": "hsl",
-        "components": [217.14, 52.5, 15.69]
+        "components": [213.66, 49.398, 16.275]
       },
-      "$description": "info container surface",
+      "$description": "tinted info container and link pills",
       "$extensions": {
         "org.zeros": {
-          "cssName": "--blue-bg",
+          "cssName": "--accent-bg",
           "section": "base-yellow-wash",
-          "utility": "--color-blue-bg",
-          "utilitySection": "utilities-red-primary",
-          "utilityOrder": 47
+          "utility": "--color-accent-bg",
+          "utilitySection": "utilities-red-text",
+          "utilityOrder": 40
         }
       }
     },
-    "blue-fg": {
+    "accent-on-bg": {
       "$type": "color",
       "$value": {
         "colorSpace": "hsl",
-        "components": [213.91, 100.0, 81.96]
+        "components": [212.86, 100.0, 83.529]
       },
-      "$description": "text/icon on --blue-bg",
+      "$description": "text and icons inside an accent-bg container",
       "$extensions": {
         "org.zeros": {
-          "cssName": "--blue-fg",
+          "cssName": "--accent-on-bg",
           "section": "base-yellow-wash",
-          "utility": "--color-blue-fg",
-          "utilitySection": "utilities-red-primary",
-          "utilityOrder": 48
+          "utility": "--color-accent-on-bg",
+          "utilitySection": "utilities-red-text",
+          "utilityOrder": 41
         }
       }
     },
-    "blue-pill-bg": {
+    "accent-bg-hover": {
       "$type": "color",
-      "$value": "{tokens.blue-bg}",
-      "$description": "Workspace link pill fill; Light separates it from the composer surface",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [214.44, 49.091, 21.569]
+      },
+      "$description": "hover on accent-bg pills",
       "$extensions": {
         "org.zeros": {
-          "cssName": "--blue-pill-bg",
+          "cssName": "--accent-bg-hover",
           "section": "base-yellow-wash",
-          "utility": "--color-blue-pill-bg",
+          "utility": "--color-accent-bg-hover",
           "utilitySection": "utilities-local-links",
-          "utilityOrder": 128
+          "utilityOrder": 104
         }
       }
     },
-    "blue-pill-hover": {
-      "$type": "color",
-      "$value": {
-        "colorSpace": "hsl",
-        "components": [207.62, 69.231, 17.843]
-      },
-      "$description": "Workspace link pill hover fill",
-      "$extensions": {
-        "org.zeros": {
-          "cssName": "--blue-pill-hover",
-          "section": "base-yellow-wash",
-          "utility": "--color-blue-pill-hover",
-          "utilitySection": "utilities-local-links",
-          "utilityOrder": 129
-        }
-      }
-    },
-    "green-secondary": {
+    "green-solid": {
       "$type": "color",
       "$value": {
         "colorSpace": "hsl",
         "components": [141.36, 41.259, 28.039]
       },
-      "$description": "solid Accept current change fills (merge conflicts)",
+      "$description": "green fill carrying green-solid-fg (accept current)",
       "$extensions": {
         "org.zeros": {
-          "cssName": "--green-secondary",
+          "cssName": "--green-solid",
           "section": "base-yellow-wash",
-          "utility": "--color-green-secondary",
-          "utilitySection": "utilities-green-secondary",
-          "utilityOrder": 130
+          "utility": "--color-green-solid",
+          "utilitySection": "utilities-green-solid",
+          "utilityOrder": 105
         }
       }
     },
-    "green-secondary-hover": {
+    "green-solid-fg": {
       "$type": "color",
-      "$value": {
-        "colorSpace": "hsl",
-        "components": [141.89, 44.048, 32.941]
-      },
-      "$description": "Accept current change hover fill",
+      "$value": "{tokens.red-solid-fg}",
+      "$description": "label on green-solid",
       "$extensions": {
         "org.zeros": {
-          "cssName": "--green-secondary-hover",
+          "cssName": "--green-solid-fg",
           "section": "base-yellow-wash",
-          "utility": "--color-green-secondary-hover",
-          "utilitySection": "utilities-green-secondary",
-          "utilityOrder": 131
+          "utility": "--color-green-solid-fg",
+          "utilitySection": "utilities-green-solid",
+          "utilityOrder": 107
         }
       }
     },
-    "green-secondary-fg": {
-      "$type": "color",
-      "$value": "{tokens.red-secondary-fg}",
-      "$description": "text on SOLID --green-secondary fills. THEME-STATIC white, as on the solid destructive fill.",
-      "$extensions": {
-        "org.zeros": {
-          "cssName": "--green-secondary-fg",
-          "section": "base-yellow-wash",
-          "utility": "--color-green-secondary-fg",
-          "utilitySection": "utilities-green-secondary",
-          "utilityOrder": 132
-        }
-      }
-    },
-    "blue-secondary": {
+    "accent-solid": {
       "$type": "color",
       "$value": {
         "colorSpace": "hsl",
         "components": [204.55, 25.581, 33.725]
       },
-      "$description": "solid Accept incoming change fills (merge conflicts)",
+      "$description": "blue fill carrying accent-solid-fg (accept incoming)",
       "$extensions": {
         "org.zeros": {
-          "cssName": "--blue-secondary",
+          "cssName": "--accent-solid",
           "section": "base-yellow-wash",
-          "utility": "--color-blue-secondary",
-          "utilitySection": "utilities-green-secondary",
-          "utilityOrder": 133
+          "utility": "--color-accent-solid",
+          "utilitySection": "utilities-green-solid",
+          "utilityOrder": 108
         }
       }
     },
-    "blue-secondary-hover": {
+    "accent-solid-fg": {
       "$type": "color",
-      "$value": {
-        "colorSpace": "hsl",
-        "components": [204.44, 26.214, 40.392]
-      },
-      "$description": "Accept incoming change hover fill",
+      "$value": "{tokens.red-solid-fg}",
+      "$description": "label on accent-solid",
       "$extensions": {
         "org.zeros": {
-          "cssName": "--blue-secondary-hover",
+          "cssName": "--accent-solid-fg",
           "section": "base-yellow-wash",
-          "utility": "--color-blue-secondary-hover",
-          "utilitySection": "utilities-green-secondary",
-          "utilityOrder": 134
+          "utility": "--color-accent-solid-fg",
+          "utilitySection": "utilities-green-solid",
+          "utilityOrder": 110
         }
       }
     },
-    "blue-secondary-fg": {
-      "$type": "color",
-      "$value": "{tokens.red-secondary-fg}",
-      "$description": "text on SOLID --blue-secondary fills. THEME-STATIC white.",
-      "$extensions": {
-        "org.zeros": {
-          "cssName": "--blue-secondary-fg",
-          "section": "base-yellow-wash",
-          "utility": "--color-blue-secondary-fg",
-          "utilitySection": "utilities-green-secondary",
-          "utilityOrder": 135
-        }
-      }
-    },
-    "neutral-secondary": {
+    "neutral-solid": {
       "$type": "color",
       "$value": {
         "colorSpace": "hsl",
         "components": [0.0, 0.0, 26.667]
       },
-      "$description": "solid neutral fills: Accept both (merge conflicts)",
+      "$description": "neutral fill carrying neutral-solid-fg (accept both)",
       "$extensions": {
         "org.zeros": {
-          "cssName": "--neutral-secondary",
+          "cssName": "--neutral-solid",
           "section": "base-yellow-wash",
-          "utility": "--color-neutral-secondary",
-          "utilitySection": "utilities-green-secondary",
-          "utilityOrder": 136
+          "utility": "--color-neutral-solid",
+          "utilitySection": "utilities-green-solid",
+          "utilityOrder": 111
         }
       }
     },
-    "neutral-secondary-hover": {
+    "neutral-solid-fg": {
       "$type": "color",
-      "$value": {
-        "colorSpace": "hsl",
-        "components": [0.0, 0.0, 33.725]
-      },
-      "$description": "neutral solid hover fill",
+      "$value": "{tokens.red-solid-fg}",
+      "$description": "label on neutral-solid",
       "$extensions": {
         "org.zeros": {
-          "cssName": "--neutral-secondary-hover",
+          "cssName": "--neutral-solid-fg",
           "section": "base-yellow-wash",
-          "utility": "--color-neutral-secondary-hover",
-          "utilitySection": "utilities-green-secondary",
-          "utilityOrder": 137
-        }
-      }
-    },
-    "neutral-secondary-fg": {
-      "$type": "color",
-      "$value": "{tokens.red-secondary-fg}",
-      "$description": "text on SOLID --neutral-secondary fills. THEME-STATIC white.",
-      "$extensions": {
-        "org.zeros": {
-          "cssName": "--neutral-secondary-fg",
-          "section": "base-yellow-wash",
-          "utility": "--color-neutral-secondary-fg",
-          "utilitySection": "utilities-green-secondary",
-          "utilityOrder": 138
+          "utility": "--color-neutral-solid-fg",
+          "utilitySection": "utilities-green-solid",
+          "utilityOrder": 113
         }
       }
     },
@@ -1201,7 +1006,7 @@
       "$type": "color",
       "$value": {
         "colorSpace": "hsl",
-        "components": [205.0, 80.0, 73.0],
+        "components": [213.54, 78.882, 68.431],
         "alpha": 0.18
       },
       "$description": "merge conflict incoming rows",
@@ -1216,7 +1021,7 @@
       "$type": "color",
       "$value": {
         "colorSpace": "hsl",
-        "components": [205.0, 80.0, 73.0],
+        "components": [213.54, 78.882, 68.431],
         "alpha": 0.34
       },
       "$description": "merge conflict branch band (the >>>>>>> row)",
@@ -1240,25 +1045,25 @@
           "cssName": "--conflict-neutral",
           "section": "base-yellow-wash",
           "utility": "--color-conflict-neutral",
-          "utilitySection": "utilities-green-secondary",
-          "utilityOrder": 139
+          "utilitySection": "utilities-green-solid",
+          "utilityOrder": 114
         }
       }
     },
-    "violet-primary": {
+    "violet-text": {
       "$type": "color",
       "$value": {
         "colorSpace": "hsl",
-        "components": [271.0, 80.0, 73.0]
+        "components": [261.22, 61.194, 73.725]
       },
-      "$description": "done · merged",
+      "$description": "violet status words and icons (merged, done) on any plain surface",
       "$extensions": {
         "org.zeros": {
-          "cssName": "--violet-primary",
+          "cssName": "--violet-text",
           "section": "base-yellow-wash",
-          "utility": "--color-violet-primary",
-          "utilitySection": "utilities-red-primary",
-          "utilityOrder": 49
+          "utility": "--color-violet-text",
+          "utilitySection": "utilities-red-text",
+          "utilityOrder": 42
         }
       }
     },
@@ -1266,7 +1071,7 @@
       "$type": "color",
       "$value": {
         "colorSpace": "hsl",
-        "components": [255.0, 21.0, 18.0]
+        "components": [262.5, 26.667, 17.647]
       },
       "$description": "done container surface",
       "$extensions": {
@@ -1274,25 +1079,25 @@
           "cssName": "--violet-bg",
           "section": "base-yellow-wash",
           "utility": "--color-violet-bg",
-          "utilitySection": "utilities-red-primary",
-          "utilityOrder": 50
+          "utilitySection": "utilities-red-text",
+          "utilityOrder": 43
         }
       }
     },
-    "violet-fg": {
+    "violet-on-bg": {
       "$type": "color",
       "$value": {
         "colorSpace": "hsl",
-        "components": [265.0, 66.0, 77.0]
+        "components": [260.4, 80.645, 87.843]
       },
-      "$description": "text/icon on --violet-bg",
+      "$description": "text and icons inside a violet-bg container",
       "$extensions": {
         "org.zeros": {
-          "cssName": "--violet-fg",
+          "cssName": "--violet-on-bg",
           "section": "base-yellow-wash",
-          "utility": "--color-violet-fg",
-          "utilitySection": "utilities-red-primary",
-          "utilityOrder": 51
+          "utility": "--color-violet-on-bg",
+          "utilitySection": "utilities-red-text",
+          "utilityOrder": 44
         }
       }
     },
@@ -1308,8 +1113,8 @@
           "cssName": "--accent",
           "section": "base-yellow-wash",
           "utility": "--color-accent",
-          "utilitySection": "utilities-red-primary",
-          "utilityOrder": 52
+          "utilitySection": "utilities-red-text",
+          "utilityOrder": 45
         }
       }
     },
@@ -1325,15 +1130,18 @@
           "cssName": "--accent-fg",
           "section": "base-yellow-wash",
           "utility": "--color-accent-fg",
-          "utilitySection": "utilities-red-primary",
-          "utilityOrder": 54
+          "utilitySection": "utilities-red-text",
+          "utilityOrder": 46
         }
       }
     },
     "diff-addition": {
       "$type": "color",
-      "$value": "{tokens.green-primary}",
-      "$description": "diff addition base",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [142.0, 69.0, 58.0]
+      },
+      "$description": "diff addition base; pinned so status text changes leave diffs alone",
       "$extensions": {
         "org.zeros": {
           "cssName": "--diff-addition",
@@ -1343,8 +1151,11 @@
     },
     "diff-deletion": {
       "$type": "color",
-      "$value": "{tokens.red-primary}",
-      "$description": "diff deletion base",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [0.0, 91.0, 71.0]
+      },
+      "$description": "diff deletion base; pinned so status text changes leave diffs alone",
       "$extensions": {
         "org.zeros": {
           "cssName": "--diff-deletion",
@@ -1376,7 +1187,7 @@
           "section": "base-red-50",
           "utility": "--color-red-50",
           "utilitySection": "utilities-red-50",
-          "utilityOrder": 55
+          "utilityOrder": 47
         }
       }
     },
@@ -1393,7 +1204,7 @@
           "section": "base-red-50",
           "utility": "--color-red-100",
           "utilitySection": "utilities-red-50",
-          "utilityOrder": 56
+          "utilityOrder": 48
         }
       }
     },
@@ -1410,7 +1221,7 @@
           "section": "base-red-50",
           "utility": "--color-red-200",
           "utilitySection": "utilities-red-50",
-          "utilityOrder": 57
+          "utilityOrder": 49
         }
       }
     },
@@ -1427,7 +1238,7 @@
           "section": "base-red-50",
           "utility": "--color-red-300",
           "utilitySection": "utilities-red-50",
-          "utilityOrder": 58
+          "utilityOrder": 50
         }
       }
     },
@@ -1444,7 +1255,7 @@
           "section": "base-red-50",
           "utility": "--color-red-400",
           "utilitySection": "utilities-red-50",
-          "utilityOrder": 59
+          "utilityOrder": 51
         }
       }
     },
@@ -1461,7 +1272,7 @@
           "section": "base-red-50",
           "utility": "--color-red-500",
           "utilitySection": "utilities-red-50",
-          "utilityOrder": 60
+          "utilityOrder": 52
         }
       }
     },
@@ -1478,7 +1289,7 @@
           "section": "base-red-50",
           "utility": "--color-red-600",
           "utilitySection": "utilities-red-50",
-          "utilityOrder": 61
+          "utilityOrder": 53
         }
       }
     },
@@ -1495,7 +1306,7 @@
           "section": "base-red-50",
           "utility": "--color-red-700",
           "utilitySection": "utilities-red-50",
-          "utilityOrder": 62
+          "utilityOrder": 54
         }
       }
     },
@@ -1512,7 +1323,7 @@
           "section": "base-red-50",
           "utility": "--color-red-750",
           "utilitySection": "utilities-red-50",
-          "utilityOrder": 63,
+          "utilityOrder": 55,
           "cssFormat": "multiline"
         }
       }
@@ -1530,7 +1341,7 @@
           "section": "base-red-50",
           "utility": "--color-red-800",
           "utilitySection": "utilities-red-50",
-          "utilityOrder": 64
+          "utilityOrder": 56
         }
       }
     },
@@ -1547,7 +1358,7 @@
           "section": "base-red-50",
           "utility": "--color-red-900",
           "utilitySection": "utilities-red-50",
-          "utilityOrder": 65
+          "utilityOrder": 57
         }
       }
     },
@@ -1564,7 +1375,7 @@
           "section": "base-red-50",
           "utility": "--color-red-950",
           "utilitySection": "utilities-red-50",
-          "utilityOrder": 66
+          "utilityOrder": 58
         }
       }
     },
@@ -1581,7 +1392,7 @@
           "section": "base-red-50",
           "utility": "--color-green-50",
           "utilitySection": "utilities-red-50",
-          "utilityOrder": 67
+          "utilityOrder": 59
         }
       }
     },
@@ -1598,7 +1409,7 @@
           "section": "base-red-50",
           "utility": "--color-green-100",
           "utilitySection": "utilities-red-50",
-          "utilityOrder": 68
+          "utilityOrder": 60
         }
       }
     },
@@ -1615,7 +1426,7 @@
           "section": "base-red-50",
           "utility": "--color-green-200",
           "utilitySection": "utilities-red-50",
-          "utilityOrder": 69
+          "utilityOrder": 61
         }
       }
     },
@@ -1632,7 +1443,7 @@
           "section": "base-red-50",
           "utility": "--color-green-300",
           "utilitySection": "utilities-red-50",
-          "utilityOrder": 70
+          "utilityOrder": 62
         }
       }
     },
@@ -1649,7 +1460,7 @@
           "section": "base-red-50",
           "utility": "--color-green-400",
           "utilitySection": "utilities-red-50",
-          "utilityOrder": 71
+          "utilityOrder": 63
         }
       }
     },
@@ -1666,7 +1477,7 @@
           "section": "base-red-50",
           "utility": "--color-green-500",
           "utilitySection": "utilities-red-50",
-          "utilityOrder": 72
+          "utilityOrder": 64
         }
       }
     },
@@ -1683,7 +1494,7 @@
           "section": "base-red-50",
           "utility": "--color-green-600",
           "utilitySection": "utilities-red-50",
-          "utilityOrder": 73
+          "utilityOrder": 65
         }
       }
     },
@@ -1700,7 +1511,7 @@
           "section": "base-red-50",
           "utility": "--color-green-700",
           "utilitySection": "utilities-red-50",
-          "utilityOrder": 74
+          "utilityOrder": 66
         }
       }
     },
@@ -1717,7 +1528,7 @@
           "section": "base-red-50",
           "utility": "--color-green-800",
           "utilitySection": "utilities-red-50",
-          "utilityOrder": 75
+          "utilityOrder": 67
         }
       }
     },
@@ -1734,7 +1545,7 @@
           "section": "base-red-50",
           "utility": "--color-green-900",
           "utilitySection": "utilities-red-50",
-          "utilityOrder": 76
+          "utilityOrder": 68
         }
       }
     },
@@ -1751,7 +1562,7 @@
           "section": "base-red-50",
           "utility": "--color-green-950",
           "utilitySection": "utilities-red-50",
-          "utilityOrder": 77
+          "utilityOrder": 69
         }
       }
     },
@@ -1768,7 +1579,7 @@
           "section": "base-red-50",
           "utility": "--color-yellow-50",
           "utilitySection": "utilities-red-50",
-          "utilityOrder": 78
+          "utilityOrder": 70
         }
       }
     },
@@ -1785,7 +1596,7 @@
           "section": "base-red-50",
           "utility": "--color-yellow-100",
           "utilitySection": "utilities-red-50",
-          "utilityOrder": 79
+          "utilityOrder": 71
         }
       }
     },
@@ -1802,7 +1613,7 @@
           "section": "base-red-50",
           "utility": "--color-yellow-200",
           "utilitySection": "utilities-red-50",
-          "utilityOrder": 80
+          "utilityOrder": 72
         }
       }
     },
@@ -1819,7 +1630,7 @@
           "section": "base-red-50",
           "utility": "--color-yellow-300",
           "utilitySection": "utilities-red-50",
-          "utilityOrder": 81
+          "utilityOrder": 73
         }
       }
     },
@@ -1836,7 +1647,7 @@
           "section": "base-red-50",
           "utility": "--color-yellow-400",
           "utilitySection": "utilities-red-50",
-          "utilityOrder": 82
+          "utilityOrder": 74
         }
       }
     },
@@ -1853,7 +1664,7 @@
           "section": "base-red-50",
           "utility": "--color-yellow-500",
           "utilitySection": "utilities-red-50",
-          "utilityOrder": 83
+          "utilityOrder": 75
         }
       }
     },
@@ -1870,7 +1681,7 @@
           "section": "base-red-50",
           "utility": "--color-yellow-600",
           "utilitySection": "utilities-red-50",
-          "utilityOrder": 84
+          "utilityOrder": 76
         }
       }
     },
@@ -1887,7 +1698,7 @@
           "section": "base-red-50",
           "utility": "--color-yellow-700",
           "utilitySection": "utilities-red-50",
-          "utilityOrder": 85
+          "utilityOrder": 77
         }
       }
     },
@@ -1904,7 +1715,7 @@
           "section": "base-red-50",
           "utility": "--color-yellow-800",
           "utilitySection": "utilities-red-50",
-          "utilityOrder": 86
+          "utilityOrder": 78
         }
       }
     },
@@ -1921,7 +1732,7 @@
           "section": "base-red-50",
           "utility": "--color-yellow-900",
           "utilitySection": "utilities-red-50",
-          "utilityOrder": 87
+          "utilityOrder": 79
         }
       }
     },
@@ -1938,7 +1749,7 @@
           "section": "base-red-50",
           "utility": "--color-yellow-950",
           "utilitySection": "utilities-red-50",
-          "utilityOrder": 88
+          "utilityOrder": 80
         }
       }
     },
@@ -1955,7 +1766,7 @@
           "section": "base-red-50",
           "utility": "--color-blue-50",
           "utilitySection": "utilities-red-50",
-          "utilityOrder": 89
+          "utilityOrder": 81
         }
       }
     },
@@ -1972,7 +1783,7 @@
           "section": "base-red-50",
           "utility": "--color-blue-100",
           "utilitySection": "utilities-red-50",
-          "utilityOrder": 90
+          "utilityOrder": 82
         }
       }
     },
@@ -1989,7 +1800,7 @@
           "section": "base-red-50",
           "utility": "--color-blue-200",
           "utilitySection": "utilities-red-50",
-          "utilityOrder": 91
+          "utilityOrder": 83
         }
       }
     },
@@ -2006,7 +1817,7 @@
           "section": "base-red-50",
           "utility": "--color-blue-300",
           "utilitySection": "utilities-red-50",
-          "utilityOrder": 92
+          "utilityOrder": 84
         }
       }
     },
@@ -2023,7 +1834,7 @@
           "section": "base-red-50",
           "utility": "--color-blue-400",
           "utilitySection": "utilities-red-50",
-          "utilityOrder": 93
+          "utilityOrder": 85
         }
       }
     },
@@ -2040,7 +1851,7 @@
           "section": "base-red-50",
           "utility": "--color-blue-500",
           "utilitySection": "utilities-red-50",
-          "utilityOrder": 94
+          "utilityOrder": 86
         }
       }
     },
@@ -2057,7 +1868,7 @@
           "section": "base-red-50",
           "utility": "--color-blue-600",
           "utilitySection": "utilities-red-50",
-          "utilityOrder": 95
+          "utilityOrder": 87
         }
       }
     },
@@ -2074,7 +1885,7 @@
           "section": "base-red-50",
           "utility": "--color-blue-700",
           "utilitySection": "utilities-red-50",
-          "utilityOrder": 96
+          "utilityOrder": 88
         }
       }
     },
@@ -2091,7 +1902,7 @@
           "section": "base-red-50",
           "utility": "--color-blue-800",
           "utilitySection": "utilities-red-50",
-          "utilityOrder": 97
+          "utilityOrder": 89
         }
       }
     },
@@ -2108,7 +1919,7 @@
           "section": "base-red-50",
           "utility": "--color-blue-900",
           "utilitySection": "utilities-red-50",
-          "utilityOrder": 98
+          "utilityOrder": 90
         }
       }
     },
@@ -2125,7 +1936,7 @@
           "section": "base-red-50",
           "utility": "--color-blue-950",
           "utilitySection": "utilities-red-50",
-          "utilityOrder": 99
+          "utilityOrder": 91
         }
       }
     },
@@ -2142,7 +1953,7 @@
           "section": "base-red-50",
           "utility": "--color-violet-50",
           "utilitySection": "utilities-red-50",
-          "utilityOrder": 100
+          "utilityOrder": 92
         }
       }
     },
@@ -2159,7 +1970,7 @@
           "section": "base-red-50",
           "utility": "--color-violet-100",
           "utilitySection": "utilities-red-50",
-          "utilityOrder": 101
+          "utilityOrder": 93
         }
       }
     },
@@ -2176,7 +1987,7 @@
           "section": "base-red-50",
           "utility": "--color-violet-200",
           "utilitySection": "utilities-red-50",
-          "utilityOrder": 102
+          "utilityOrder": 94
         }
       }
     },
@@ -2193,7 +2004,7 @@
           "section": "base-red-50",
           "utility": "--color-violet-300",
           "utilitySection": "utilities-red-50",
-          "utilityOrder": 103
+          "utilityOrder": 95
         }
       }
     },
@@ -2210,7 +2021,7 @@
           "section": "base-red-50",
           "utility": "--color-violet-400",
           "utilitySection": "utilities-red-50",
-          "utilityOrder": 104
+          "utilityOrder": 96
         }
       }
     },
@@ -2227,7 +2038,7 @@
           "section": "base-red-50",
           "utility": "--color-violet-500",
           "utilitySection": "utilities-red-50",
-          "utilityOrder": 105
+          "utilityOrder": 97
         }
       }
     },
@@ -2244,7 +2055,7 @@
           "section": "base-red-50",
           "utility": "--color-violet-600",
           "utilitySection": "utilities-red-50",
-          "utilityOrder": 106
+          "utilityOrder": 98
         }
       }
     },
@@ -2261,7 +2072,7 @@
           "section": "base-red-50",
           "utility": "--color-violet-700",
           "utilitySection": "utilities-red-50",
-          "utilityOrder": 107
+          "utilityOrder": 99
         }
       }
     },
@@ -2278,7 +2089,7 @@
           "section": "base-red-50",
           "utility": "--color-violet-750",
           "utilitySection": "utilities-red-50",
-          "utilityOrder": 108,
+          "utilityOrder": 100,
           "cssFormat": "multiline"
         }
       }
@@ -2296,7 +2107,7 @@
           "section": "base-red-50",
           "utility": "--color-violet-800",
           "utilitySection": "utilities-red-50",
-          "utilityOrder": 109
+          "utilityOrder": 101
         }
       }
     },
@@ -2313,7 +2124,7 @@
           "section": "base-red-50",
           "utility": "--color-violet-900",
           "utilitySection": "utilities-red-50",
-          "utilityOrder": 110
+          "utilityOrder": 102
         }
       }
     },
@@ -2330,7 +2141,7 @@
           "section": "base-red-50",
           "utility": "--color-violet-950",
           "utilitySection": "utilities-red-50",
-          "utilityOrder": 111
+          "utilityOrder": 103
         }
       }
     }

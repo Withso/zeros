@@ -6,7 +6,7 @@ import { createRoot } from "react-dom/client";
 import { flushSync } from "react-dom";
 import { ActivityScope } from "../shared/ui/loading/activity-scope";
 import { ActivityShimmer } from "../shared/ui/loading/activity-shimmer";
-import { LiveDuration } from "../shared/ui/loading/live-duration";
+import { WorkingDuration } from "../shared/ui/loading/live-duration";
 import { ZerosSpinner } from "../shared/ui/loading/zeros-spinner";
 import { RunStream } from "../shared/ui/loading/run-stream";
 
@@ -39,11 +39,11 @@ function Fixture() {
   window.loaderActivityFixture.retain = next => flushSync(() => setActive(next));
   return <ActivityScope.Provider value={local ? active : undefined}>
     <main id="activity-owner" className="flex items-center gap-6 p-6 text-fg1" style={{ position: "absolute", top: 0 }}>
-      <ZerosSpinner variant="logo" />
+      <ZerosSpinner variant="stream" />
       <ZerosSpinner variant="agent" />
       <ZerosSpinner variant="glass" motion="circuit" />
       <RunStream />
-      <LiveDuration startedAt={startedAt} />
+      <WorkingDuration startedAt={startedAt} />
       <ActivityShimmer startedAt={startedAt} gibberish />
     </main>
   </ActivityScope.Provider>;

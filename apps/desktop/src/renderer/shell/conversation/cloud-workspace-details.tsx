@@ -114,12 +114,12 @@ export function CloudWorkspaceDetailsCard({ workspace, title, statusLabel, resou
         ))}
       </dl>
       {workspace.capabilities.canStart && ["stopped", "failed"].includes(workspace.status) && (
-        <Button size="sm" className="mt-3" disabled={changing} onClick={() => onChange(cloudStartOperation(workspace))}>
+        <Button className="mt-3" disabled={changing} onClick={() => onChange(cloudStartOperation(workspace))}>
           {changing ? "Starting…" : "Start workspace"}
         </Button>
       )}
       {(workspace.capabilities.canManage || runsAsViewer(workspace)) && running && (
-        <Button size="sm" variant="secondary" className="mt-3" disabled={changing} onClick={() => onChange("stop")}>
+        <Button variant="secondary" className="mt-3" disabled={changing} onClick={() => onChange("stop")}>
           {changing ? "Stopping…" : "Stop workspace"}
         </Button>
       )}

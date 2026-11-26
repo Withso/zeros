@@ -48,7 +48,7 @@ describe("SplitButton", () => {
   it("waits on the menu while the action is busy", () => {
     const [action, menu] = halves(render({ loading: true }));
     expect(action).toContain('aria-busy="true"');
-    expect(action).toContain('data-zeros-loader="logo"');
+    expect(action).toContain('data-zeros-loader="stream"');
     expect(menu).toContain("disabled");
   });
 });
@@ -75,9 +75,9 @@ describe("splitButtonClasses", () => {
     },
   );
 
-  it("draws the secondary chevron in muted-fg, not a faded fg2", () => {
+  it("draws the secondary chevron in fg3, not a faded fg2", () => {
     const set = classSet(splitButtonClasses("secondary").chevron);
-    expect(set).toContain("text-muted-fg");
+    expect(set).toContain("text-fg3");
     expect(set).toContain("data-[state=open]:text-fg2");
     expect([...set].some((cls) => cls.includes("opacity-50") && !cls.startsWith("disabled:"))).toBe(false);
   });

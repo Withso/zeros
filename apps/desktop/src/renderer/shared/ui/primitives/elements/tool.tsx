@@ -56,12 +56,12 @@ function StatusIcon({ status }: { status: ToolStatus }) {
     return <ZerosSpinner size={12} variant="glass" label="Running" />;
   }
   if (status === "error" || status === "output-error") {
-    return <CircleX aria-label="Error" className="text-red-primary size-3" />;
+    return <CircleX aria-label="Error" className="text-red-text size-3" />;
   }
   return (
     <CircleCheck
       aria-label="Complete"
-      className="text-green-primary/80 size-3"
+      className="text-green-text/80 size-3"
     />
   );
 }

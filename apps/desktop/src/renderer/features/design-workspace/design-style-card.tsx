@@ -535,7 +535,7 @@ function DesignFieldMessage({
         onCloseAutoFocus={(event) => event.preventDefault()}
         onInteractOutside={(event) => event.preventDefault()}
       >
-        <p className={cn("px-2.5 py-1.5 text-3xxs leading-4", tone === "error" ? "text-red-primary" : "text-fg2")}>{text}</p>
+        <p className={cn("px-2.5 py-1.5 text-3xxs leading-4", tone === "error" ? "text-red-text" : "text-fg2")}>{text}</p>
       </PopoverContent>
     </Popover>
   );

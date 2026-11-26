@@ -38,18 +38,22 @@ describe("contrast contract", () => {
     expect(failures).toEqual([]);
   });
 
-  it("declares supplemental metadata separately from AA text", () => {
-    expect(contract.roles.supplemental.min).toBe(3);
+  it("keeps three AA text tiers and lifts fg3 on hover fills", () => {
+    expect(contract.ladders).toContainEqual(expect.objectContaining({ tiers: ["fg1", "fg2", "fg3"], on: "bg1" }));
     expect(contract.pairs).toContainEqual(expect.objectContaining({
-      role: "supplemental", fg: ["muted-fg"], on: "@rest",
+      role: "text", fg: ["fg1", "fg2", "fg3"], on: "@rest",
     }));
-    for (const pair of contract.pairs.filter((pair: { role: string }) => pair.role === "text")) {
-      expect(pair.fg).not.toContain("muted-fg");
+    expect(contract.pairs).toContainEqual(expect.objectContaining({
+      role: "text", fg: ["fg1", "fg2"], on: "@hover",
+    }));
+    // Supplemental (3:1) is reserved for labels over translucent washes, never resting metadata.
+    for (const pair of contract.pairs.filter((pair: { role: string }) => pair.role === "supplemental")) {
+      expect(pair.on).not.toBe("@rest");
     }
   });
 
   it("checks subtle outlines on control surfaces and their hover step on bg2", () => {
-    const surfaces = ["bg0", "bg1", "bg1-highlight", "bg1-bright", "bg2", "bg3", "sidebar-bg"];
+    const surfaces = ["bg1", "bg1-raised", "bg3", "nav-bg"];
     expect(contract.roles.boundary.min).toBe(1.45);
     expect(contract.roles["boundary-hover"].min).toBe(1.6);
     expect(contract.pairs).toContainEqual(expect.objectContaining({
@@ -77,10 +81,22 @@ describe("contrast contract", () => {
     }
   });
 
+  it("checks every filled button's 90% opacity hover, label and fill together", () => {
+    for (const fill of ["red-solid", "green-solid", "accent-solid", "neutral-solid", "primary-button-bg"]) {
+      const hover: Array<{ fg: string[]; on: string | string[] }> = contract.pairs.filter((pair: { on: string | string[] }) => [pair.on].flat().some((on: string) => on.startsWith(`${fill}/0.9@`)));
+      // The page, a raised group and a dialog: each surface a filled button sits on.
+      for (const ground of ["bg1", "bg1-raised", "bg3"]) {
+        expect(hover.some((pair) => [pair.on].flat().includes(`${fill}/0.9@${ground}`)), `${fill} over ${ground}`).toBe(true);
+      }
+      for (const pair of hover) expect(pair.fg.every((fg: string) => /\/0\.9@/.test(fg)), fill).toBe(true);
+    }
+  });
+
   it("only names tokens that exist in both themes", () => {
     const names = new Set<string>();
     for (const pair of contract.pairs) {
-      for (const fg of pair.fg) names.add(fg);
+      // A composite `fill/alpha@base` names two tokens.
+      for (const fg of pair.fg) for (const name of fg.split(/\/[\d.]+@/)) names.add(name);
     }
     for (const exemption of contract.exempt) {
       for (const token of exemption.tokens) names.add(token);

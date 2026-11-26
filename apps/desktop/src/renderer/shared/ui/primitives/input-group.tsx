@@ -12,7 +12,7 @@ function InputGroup({ className, ...props }: React.ComponentProps<"div">) {
       className={cn(
         // The Input field box around a control and its addons: 28px, 6px
         // corners, border3 lifting to border4 on hover.
-        "group/input-group relative flex w-full items-center rounded-md border border-border3 transition-[color,border-color,box-shadow] duration-120 ease-out outline-none hover:border-border4",
+        "group/input-group relative flex w-full items-center rounded-md border border-border3 transition-[color,border-color,box-shadow] duration-fast ease-out outline-none hover:border-border4",
         "h-7 min-w-0 has-[>textarea]:h-auto",
 
         // Variants based on alignment.
@@ -25,7 +25,7 @@ function InputGroup({ className, ...props }: React.ComponentProps<"div">) {
         "has-[[data-slot=input-group-control]:focus-visible[data-zeros-keyboard-focus]]:border-accent",
 
         // Error state.
-        "has-[[data-slot][aria-invalid=true]]:border-red-primary",
+        "has-[[data-slot][aria-invalid=true]]:border-red-text",
 
         className
       )}
@@ -35,7 +35,7 @@ function InputGroup({ className, ...props }: React.ComponentProps<"div">) {
 }
 
 const inputGroupAddonVariants = cva(
-  "flex h-auto cursor-text items-center justify-center gap-2 py-1.5 text-xs leading-4.5 font-medium text-fg2 select-none group-data-[disabled=true]/input-group:opacity-50 [&>kbd]:rounded-sm [&>svg:not([class*='size-'])]:size-3.5 [&>svg:not([class*='text-'])]:text-muted-fg",
+  "flex h-auto cursor-text items-center justify-center gap-2 py-1.5 text-xs leading-4.5 font-medium text-fg2 select-none group-data-[disabled=true]/input-group:opacity-50 [&>kbd]:rounded-sm [&>svg:not([class*='size-'])]:size-3.5 [&>svg:not([class*='text-'])]:text-fg3",
   {
     variants: {
       align: {

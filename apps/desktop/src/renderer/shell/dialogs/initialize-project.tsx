@@ -33,7 +33,6 @@ export function InitializeProjectDialog({
         <DialogFooter>
           <Button
             variant="primary"
-            size="sm"
             onClick={() => folder && onConfirm(folder)}
           >
             Initialize git and create

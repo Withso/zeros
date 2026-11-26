@@ -395,7 +395,7 @@ function TabPill({
           )
         ) : browserWorking ? (
           <MousePointer2
-            className="text-blue-fg size-3.5 shrink-0 fill-current drop-shadow-[0_0_5px_rgba(47,190,235,.45)]"
+            className="text-accent-text size-3.5 shrink-0 fill-current drop-shadow-[0_0_5px_rgba(47,190,235,.45)]"
             aria-hidden="true"
           />
         ) : favicon ? (
@@ -429,11 +429,11 @@ function TabPill({
           aria-hidden
           className={cn(
             "size-1.5 shrink-0 rounded-full",
-            terminalIndicator.dot === "running" && "bg-yellow-icon",
-            terminalIndicator.dot === "passed" && "bg-green-primary",
+            terminalIndicator.dot === "running" && "bg-yellow-text",
+            terminalIndicator.dot === "passed" && "bg-green-text",
             (terminalIndicator.dot === "failed" ||
               terminalIndicator.dot === "stopped") &&
-              "bg-red-primary",
+              "bg-red-text",
           )}
         />
       )}
@@ -443,7 +443,7 @@ function TabPill({
         <span className="text-fg2 text-3xxs leading-4 tabular-nums">{badge}</span>
       )}
       {browserWorking ? (
-        <div className="from-bg2 pointer-events-none absolute inset-y-0 right-0 flex w-9 items-center justify-end bg-gradient-to-l from-55% to-transparent pr-1.5 pl-3">
+        <div className="from-(--tab-fill) pointer-events-none absolute inset-y-0 right-0 flex w-9 items-center justify-end bg-gradient-to-l from-55% to-transparent pr-1.5 pl-3">
           <Tooltip label="Stop browser">
             <IconButton
               type="button"
@@ -459,14 +459,14 @@ function TabPill({
       ) : canClose ? (
         // Reveal-on-hover close overlay — the same treatment as the chat tabs
         // (conversation/chat-tabs TAB_HOVER_OVERLAY_CLS): the wrapper carries a
-        // gradient fade matching the pill's bg-bg2 hover/active fill so a long
+        // gradient fade in the pill's own fill (--tab-fill) so a long
         // title bleeds behind the ✕ instead of being clipped by a hard edge.
         // `pointer-events-none` on the wrapper keeps the gradient from
         // stealing hover from the underlying tab; the button opts back in.
         // Pure overlay (absolute) → no flex-width change on hover, no layout
         // shift. focus-within keeps it visible for keyboard users. Reveal keys
         // off the strip-driven data-hovered, not :hover (sticky-strip rule).
-        <div className="from-bg2 pointer-events-none absolute inset-y-0 right-0 flex w-10 items-center justify-end bg-gradient-to-l from-50% to-transparent pr-1 pl-4 opacity-0 transition-none group-data-[hovered=true]/tab:opacity-100 focus-within:opacity-100">
+        <div className="from-(--tab-fill) pointer-events-none absolute inset-y-0 right-0 flex w-10 items-center justify-end bg-gradient-to-l from-50% to-transparent pr-1 pl-4 opacity-0 transition-none group-data-[hovered=true]/tab:opacity-100 focus-within:opacity-100">
           <IconButton
             type="button"
             onClick={(e) => {
@@ -474,7 +474,7 @@ function TabPill({
               onClose(e, browserActivity?.browserSessionId);
             }}
             label={`Close ${tab.title}`}
-            className="pointer-events-auto shrink-0"
+            className="pointer-events-auto shrink-0 hover:bg-transparent"
           >
             <X className="size-3.5" />
           </IconButton>

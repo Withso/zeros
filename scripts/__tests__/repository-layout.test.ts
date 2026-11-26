@@ -488,6 +488,7 @@ describe("repository layout contracts", () => {
     expect(existsSync("third_party/ai-elements/LICENSE")).toBe(true);
     expect(existsSync("third_party/shadcn-ui/LICENSE")).toBe(true);
     expect(existsSync("third_party/lobe-icons/LICENSE")).toBe(true);
+    expect(existsSync("third_party/phosphor-icons/LICENSE")).toBe(true);
     expect(existsSync("third_party/README.md")).toBe(true);
     expect(existsSync("apps/marketing/public/agents/README.md")).toBe(true);
     expect(notices).toContain("Cursor's brand guidance");

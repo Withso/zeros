@@ -10,7 +10,7 @@ import {
   relativeLuminance,
   resolveRgb,
 } from "../../../../../../../scripts/design-system/token-palette.mjs";
-import { PILL_SHELL } from "../composer-editor/pill-views";
+import { PILL_GROUND, PILL_SHELL } from "../composer-editor/pill-views";
 import { TurnPromptHeader } from "../turn-container";
 
 function css(repoPath: string): string {
@@ -26,32 +26,36 @@ function themeBlock(stylesheet: string, selector: string): string {
   return stylesheet.slice(start, stylesheet.indexOf("\n}", start));
 }
 
-// 2026-11-09: a pill inside a sent message (a mention, file, attachment or chat
-// link) sits a step lighter than the bg2 bubble in both themes, so it reads as
-// a chip again; the composer's pills keep bg2.
-describe("pills inside a sent message", () => {
-  it("fill from the surface that holds them, bg2 unless it says otherwise", () => {
-    expect(PILL_SHELL.split(" ")).toContain("bg-[var(--pill-bg,var(--bg2))]");
+// 2026-11-25 (P13): pills are tuned to the ground that holds them. The agent
+// chat keeps bg2 on border2; the composer rests them on bg2-hover; a sent
+// message rests them on selected-bg with no edge. Each fill stays a visible
+// step off its ground in both themes.
+describe("pills by ground", () => {
+  it("fill and edge from the ground's --pill-* variables", () => {
+    expect(PILL_SHELL.split(" ")).toEqual(expect.arrayContaining(["bg-(--pill-bg)", "border-(--pill-border)"]));
     expect(PILL_SHELL.split(" ")).not.toContain("bg-bg2");
   });
 
-  it("take the sent message's own pill fill inside its bubble", () => {
+  it("take the sent message's pill ground inside its bubble", () => {
     const markup = renderToStaticMarkup(h(TurnPromptHeader, { originalText: "hi", children: "hi" }));
-    expect(markup).toMatch(/data-user-bubble=""[^>]*class="[^"]*\[--pill-bg:var\(--prompt-pill-bg\)\]/);
+    expect(markup).toMatch(/data-user-bubble=""[^>]*class="[^"]*\[--pill-bg:var\(--selected-bg\)\]/);
+    expect(PILL_GROUND.message).toContain("[--pill-border:transparent]");
+    expect(PILL_GROUND.composer).toContain("[--pill-bg:var(--bg2-hover)]");
   });
 
-  it("step one lighter than the bg2 bubble in each theme", () => {
+  it("keeps every pill fill a visible step off its ground in both themes", () => {
     const semantic = css("styles/semantic-tokens.css");
-    const dark = /--prompt-pill-bg:\s*var\(--([a-z0-9-]+)\);/.exec(themeBlock(semantic, ":root"))?.[1];
-    const light = /--prompt-pill-bg:\s*var\(--([a-z0-9-]+)\);/.exec(
-      themeBlock(semantic, '[data-theme="light"]'),
-    )?.[1];
-    expect([dark, light]).toEqual(["bg2-hover", "sidebar-bg"]);
+    expect(/--pill-bg:\s*var\(--bg2\);/.test(themeBlock(semantic, ":root"))).toBe(true);
     const themes = readThemes();
-    for (const [theme, step] of [[themes.dark, dark!], [themes.light, light!]] as const) {
-      expect(relativeLuminance(resolveRgb(theme, step))).toBeGreaterThan(
-        relativeLuminance(resolveRgb(theme, "bg2")),
-      );
+    const ratio = (a: number, b: number) => (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05);
+    for (const theme of [themes.dark, themes.light]) {
+      for (const [ground, fill] of [["bg1", "bg2"], ["bg1-raised", "bg2-hover"], ["bg2", "selected-bg"]]) {
+        const step = ratio(
+          relativeLuminance(resolveRgb(theme, ground)),
+          relativeLuminance(resolveRgb(theme, fill)),
+        );
+        expect(step, `${fill} on ${ground}`).toBeGreaterThan(1.09);
+      }
     }
   });
 });

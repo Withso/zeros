@@ -47,10 +47,10 @@ function image(owner: string) {
       ? "--green-bg"
       : owner === owners.organization
         ? "--purple-bg"
-        : "--blue-bg",
+        : "--accent-bg",
   );
   context.fillRect(0, 0, 1200, 800);
-  context.strokeStyle = color("--blue-primary");
+  context.strokeStyle = color("--accent-text");
   context.lineWidth = 2;
   for (let x = 0; x <= 1200; x += 80) {
     context.beginPath();
@@ -71,13 +71,13 @@ function image(owner: string) {
   context.fillText("Image preview", 245, 315);
   context.font = "28px sans-serif";
   context.fillText("Zoom, drag, copy and download", 245, 380);
-  context.fillStyle = color("--red-primary");
+  context.fillStyle = color("--red-text");
   context.fillRect(245, 440, 80, 80);
-  context.fillStyle = color("--green-primary");
+  context.fillStyle = color("--green-text");
   context.beginPath();
   context.arc(400, 480, 40, 0, Math.PI * 2);
   context.fill();
-  context.fillStyle = color("--blue-primary");
+  context.fillStyle = color("--accent-text");
   context.fillRect(475, 440, 150, 80);
   source = canvas.toDataURL("image/png");
   canvas.width = canvas.height = 0;

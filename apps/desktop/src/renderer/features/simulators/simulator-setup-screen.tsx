@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { CircleAlert, CircleCheck, LoaderCircle, RotateCw, TriangleAlert } from "lucide-react";
+import { CircleAlert, CircleCheck, RotateCw, TriangleAlert } from "lucide-react";
 import type {
   SimulatorDevice,
   SimulatorHubSnapshot,
@@ -25,27 +25,25 @@ import {
 import { useElementSize } from "./simulator-hooks";
 import { simulatorSetup } from "./simulator-hub-store";
 import { simulatorSetupRow, type SimulatorSetupRow } from "./simulator-setup-model";
+import { RunStream } from "@/renderer/shared/ui/loading/run-stream";
 
 /** Below this screen width the setup reads better without the phone. */
 const MIN_FRAMED_SCREEN_WIDTH = 280;
 
 const EMPTY_DEVICES: readonly SimulatorDevice[] = [];
 
-function ToneIcon({ tone, active }: { tone: SimulatorSetupRow["tone"]; active: boolean }) {
+function ToneIcon({ tone }: { tone: SimulatorSetupRow["tone"] }) {
   const className = "mt-px size-4 shrink-0";
   switch (tone) {
     case "ready":
-      return <CircleCheck aria-hidden className={cn(className, "text-green-primary")} />;
+      return <CircleCheck aria-hidden className={cn(className, "text-green-text")} />;
     case "warning":
-      return <TriangleAlert aria-hidden className={cn(className, "text-yellow-primary")} />;
+      return <TriangleAlert aria-hidden className={cn(className, "text-yellow-text")} />;
     case "error":
-      return <CircleAlert aria-hidden className={cn(className, "text-red-primary")} />;
+      return <CircleAlert aria-hidden className={cn(className, "text-red-text")} />;
     case "pending":
       return (
-        <LoaderCircle
-          aria-hidden
-          className={cn(className, "text-fg3", active && "motion-safe:animate-spin")}
-        />
+        <RunStream size={16} className={cn(className, "text-(--loader-active)")} />
       );
   }
 }
@@ -58,7 +56,7 @@ function SetupStatusRow({ row, active }: { row: SimulatorSetupRow; active: boole
   return (
     <div data-simulator-setup={row.tone} className="flex flex-col gap-2">
       <div className="flex min-h-8 items-center gap-2">
-        <ToneIcon tone={row.tone} active={active} />
+        <ToneIcon tone={row.tone} />
         <span
           aria-live={active ? "polite" : "off"}
           className="min-w-0 flex-1 truncate text-xs leading-4.5"
@@ -84,7 +82,7 @@ function SetupStatusRow({ row, active }: { row: SimulatorSetupRow; active: boole
                 void checkSimulatorsAgain().finally(() => setChecking(false));
               }}
             >
-              <RotateCw className={cn(checking && "motion-safe:animate-spin")} />
+              {checking ? <RunStream size={16} /> : <RotateCw />}
             </IconButton>
           </Tooltip>
         )}
@@ -92,7 +90,7 @@ function SetupStatusRow({ row, active }: { row: SimulatorSetupRow; active: boole
       {typeof row.progress === "number" && (
         <div className="flex items-center gap-2">
           <ProgressBar value={row.progress} aria-label="Download progress" className="flex-1" />
-          <span className="text-muted-fg text-2xxs tabular-nums">{row.progress}%</span>
+          <span className="text-fg3 text-3xxs tabular-nums">{row.progress}%</span>
         </div>
       )}
     </div>
@@ -167,7 +165,7 @@ const TRADEMARKS: Record<SimulatorPlatform, string> = {
 };
 
 function TrademarkNote({ platform }: { platform: SimulatorPlatform }) {
-  return <p className="text-muted-fg text-xxs m-0">{TRADEMARKS[platform]}</p>;
+  return <p className="text-fg3 text-3xxs m-0">{TRADEMARKS[platform]}</p>;
 }
 
 /** What a Simulator tab shows before a device is attached: what's installed,

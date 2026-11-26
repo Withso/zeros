@@ -8,7 +8,7 @@ export const PICKER_HEADER_CLS = "text-fg3 px-3 pt-2.5 pb-1 text-3xxs leading-4 
 /** Seven rows show before the list scrolls. */
 export const PICKER_LIST_CLS = "max-h-58 min-h-0 overflow-y-auto overscroll-contain p-1";
 export const PICKER_ROW_CLS =
-  "text-fg1 flex h-8 w-full cursor-pointer items-center gap-2 rounded-lg border-0 bg-transparent px-2 text-left font-normal transition-colors duration-120 ease-out hover:bg-(--surface-hover) data-[selected]:bg-(--surface-hover)";
+  "text-fg1 flex h-8 w-full cursor-pointer items-center gap-2 rounded-lg border-0 bg-transparent px-2 text-left font-normal transition-colors duration-fast ease-out hover:bg-(--surface-hover) data-[selected]:bg-(--surface-hover)";
 /** A row's name (13/18 medium), its hint (fg3) and its trailing kind (12/16). */
 export const PICKER_NAME_CLS = "text-fg1 max-w-[60%] shrink-0 truncate text-xs leading-4.5 font-medium";
 export const PICKER_HINT_CLS = "text-fg3 min-w-0 flex-1 truncate text-xs leading-4.5";

@@ -145,16 +145,16 @@ describe("workspace mode toggle", () => {
         .match(/<button[^>]*data-workspace-mode="design"[^>]*>/)?.[0]
         ?.match(/class="([^"]*)"/)?.[1]
         ?.split(" ") ?? [];
-    expect(codeButtonClasses).toContain("text-blue-fg");
-    expect(codeButtonClasses).toContain("hover:text-blue-fg");
-    expect(codeButtonClasses).toContain("bg-bg1-highlight");
-    expect(codeButtonClasses).toContain("hover:bg-bg1-highlight");
-    expect(codeButtonClasses).not.toContain("hover:bg-bg1-highlight/80");
-    expect(codeButtonClasses).not.toContain("bg-bg1-highlight/80");
+    expect(codeButtonClasses).toContain("text-accent-text");
+    expect(codeButtonClasses).toContain("hover:text-accent-text");
+    expect(codeButtonClasses).toContain("bg-bg1-raised");
+    expect(codeButtonClasses).toContain("hover:bg-bg1-raised");
+    expect(codeButtonClasses).not.toContain("hover:bg-bg1-raised/80");
+    expect(codeButtonClasses).not.toContain("bg-bg1-raised/80");
     expect(designButtonClasses).toContain("text-fg3");
-    expect(designButtonClasses).toContain("hover:text-fg3");
-    expect(designButtonClasses).toContain("hover:bg-bg1-highlight/80");
-    expect(designButtonClasses).not.toContain("bg-bg1-highlight");
+    expect(designButtonClasses).toContain("hover:text-fg2");
+    expect(designButtonClasses).toContain("hover:bg-bg1-raised/80");
+    expect(designButtonClasses).not.toContain("bg-bg1-raised");
   });
 
   it("keeps the selected mode fully visible while the switch settles", () => {
@@ -355,15 +355,16 @@ describe("Code seats its column controls above the chat strips", () => {
   it("sets an unfocused pane apart by the owner's 80% dim alone, which keeps the text people read at AA", () => {
     // 2026-11-09: split panes share bg1 and run flush with no edge of their
     // own, so an unfocused pane's dimmed strip and body tell them apart (its
-    // edge did from 2026-11-07). The former bg0/30 veil, a wash
+    // edge did from 2026-11-07). The former bg1/30 veil, a wash
     // laid OVER the content, pushed every tier below WCAG AA. The owner chose
     // 80%, the look of Cursor's unfocused panes, accepting that the quietest
-    // tiers dip below their floors there: fg3 in both themes (Dark since the
-    // 2026-11-24 text tiers) and muted-fg in Dark
-    // (styles/policy/contrast-contract.json holds the rest-state floors).
-    // fg1 and fg2 stay at AA in both themes; any further dip fails.
+    // tier, fg3, dips below AA there in both themes, and so does Light's fg2
+    // since the 2026-11-25 tiers (#5E5955, 4.3:1 dimmed) — only while the pane
+    // is unfocused (styles/policy/contrast-contract.json holds the rest-state
+    // floors). fg1 stays at AA in both themes and Dark's fg2 too; any further
+    // dip fails.
     expect(paneLayoutSource).not.toContain("[--pane-bg:");
-    expect(paneLayoutSource).not.toMatch(/bg-bg0\/\d+ pointer-events-none absolute inset-0/);
+    expect(paneLayoutSource).not.toMatch(/bg-bg1\/\d+ pointer-events-none absolute inset-0/);
     const dim = /split && !isFocused && "\*:opacity-(\d+)"/.exec(paneLayoutSource);
     expect(dim).not.toBeNull();
     const alpha = Number(dim?.[1]) / 100;
@@ -372,12 +373,12 @@ describe("Code seats its column controls above the chat strips", () => {
     const belowFloor: string[] = [];
     for (const [name, theme] of Object.entries(themes)) {
       const pane = resolveRgb(theme, "bg1");
-      for (const [tier, floor] of [["fg1", 4.5], ["fg2", 4.5], ["fg3", 4.5], ["muted-fg", 3]] as const) {
+      for (const [tier, floor] of [["fg1", 4.5], ["fg2", 4.5], ["fg3", 4.5]] as const) {
         const dimmed = resolveSurface(theme, `${tier}/${alpha}@bg1`);
         if (contrastRatio(dimmed, pane) < floor) belowFloor.push(`${name} ${tier}`);
       }
     }
-    expect(belowFloor).toEqual(["dark fg3", "dark muted-fg", "light fg3"]);
+    expect(belowFloor).toEqual(["dark fg3", "light fg2", "light fg3"]);
 
     // The two column-level controls still sit above pane-level layers: they act
     // on the whole workspace/column and only borrow a corner of one pane's strip.

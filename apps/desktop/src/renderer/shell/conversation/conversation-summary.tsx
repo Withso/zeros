@@ -197,7 +197,7 @@ export function ConversationSummaryTrigger() {
           open={state.open}
           onOpenChange={state.setOpen}
         >
-          <Tooltip label="Summary" delayDuration={1500} disabled={state.open}>
+          <Tooltip label="Summary" disabled={state.open}>
             <PopoverTrigger asChild>
               {button}
             </PopoverTrigger>
@@ -210,9 +210,9 @@ export function ConversationSummaryTrigger() {
             collisionBoundary={state.boundary}
             collisionPadding={{ top: 8, right: 16, bottom: 8, left: 8 }}
             padding="none"
-            // The docked island's surface: sidebar-bg on the primitive's own
+            // The docked island's surface: bg1-raised on the primitive's own
             // 1px edge in border1.
-            className="conversation-summary-popover bg-sidebar-bg border-border1 w-72 p-3 motion-reduce:animate-none"
+            className="conversation-summary-popover bg-bg1-raised border-border1 w-72 p-3 motion-reduce:animate-none"
             {...(!state.open ? { inert: "", "aria-hidden": true } : {})}
           >
             <SummaryCard state={state} />
@@ -232,7 +232,7 @@ export function ConversationSummaryIsland() {
       aria-label="Workspace summary"
       data-summary-island=""
       className={cn(
-        "conversation-summary-island bg-sidebar-bg border-border1 absolute top-3 right-4 z-2 max-h-[calc(100%-24px)] w-72 overflow-y-auto overscroll-contain border p-3",
+        "conversation-summary-island bg-bg1-raised border-border1 absolute top-3 right-4 z-2 max-h-[calc(100%-24px)] w-72 overflow-y-auto overscroll-contain border p-3",
         MENU_SURFACE_RADIUS,
       )}
     >

@@ -132,7 +132,7 @@ export function ReviewComposer({
         <p
           id={`${id}-error`}
           role="alert"
-          className="text-red-primary px-3 text-xs leading-4.5 break-words"
+          className="text-red-text px-3 text-xs leading-4.5 break-words"
         >
           {draft.error}
         </p>

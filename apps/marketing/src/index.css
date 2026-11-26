@@ -38,10 +38,9 @@
   --radius-lg: 8px;
 
   /* ── BACKGROUNDS ── */
-  --color-bg0: var(--bg0);
   --color-bg1: var(--bg1);
   --color-bg1-hover: var(--bg1-hover);
-  --color-bg1-highlight: var(--bg1-highlight);
+  --color-bg1-raised: var(--bg1-raised);
   --color-bg2: var(--bg2);
   --color-bg2-hover: var(--bg2-hover);
   --color-bg3: var(--bg3);
@@ -54,7 +53,6 @@
   --color-fg1: var(--fg1);
   --color-fg2: var(--fg2);
   --color-fg3: var(--fg3);
-  --color-muted-fg: var(--muted-fg);
 
   /* ── BORDERS ── */
   --color-border1: var(--border1);
@@ -63,11 +61,9 @@
   --color-border4: var(--border4);
 
   /* ── SIDEBAR / TOP BAR ── */
-  --color-sidebar-bg: var(--sidebar-bg);
-  --color-sidebar-bg-hover: var(--sidebar-bg-hover);
+  --color-bg1-raised-hover: var(--bg1-raised-hover);
 
   /* ── HIGHLIGHTED ── */
-  --color-highlighted-bg: var(--highlighted-bg);
   --color-highlighted-bright: var(--highlighted-bright);
 
   /* ── INVERTED / PRIMARY BUTTON ── */
@@ -82,21 +78,21 @@
   --color-warning: var(--warning);
   --color-info: var(--info);
   --color-destructive: var(--destructive);
-  --color-red-primary: var(--red-primary);
+  --color-red-text: var(--red-text);
   --color-red-bg: var(--red-bg);
-  --color-red-fg: var(--red-fg);
-  --color-green-primary: var(--green-primary);
-  --color-green-fg: var(--green-fg);
+  --color-red-on-bg: var(--red-on-bg);
+  --color-green-text: var(--green-text);
+  --color-green-on-bg: var(--green-on-bg);
   --color-green-bg: var(--green-bg);
-  --color-yellow-primary: var(--yellow-primary);
-  --color-yellow-fg: var(--yellow-fg);
+  --color-yellow-text: var(--yellow-text);
+  --color-yellow-on-bg: var(--yellow-on-bg);
   --color-yellow-bg: var(--yellow-bg);
-  --color-blue-primary: var(--blue-primary);
-  --color-blue-bg: var(--blue-bg);
-  --color-blue-fg: var(--blue-fg);
-  --color-violet-primary: var(--violet-primary);
+  --color-accent-text: var(--accent-text);
+  --color-accent-bg: var(--accent-bg);
+  --color-accent-on-bg: var(--accent-on-bg);
+  --color-violet-text: var(--violet-text);
   --color-violet-bg: var(--violet-bg);
-  --color-violet-fg: var(--violet-fg);
+  --color-violet-on-bg: var(--violet-on-bg);
   --color-brown-primary: var(--brown-primary);
   --color-brown-bg: var(--brown-bg);
   --color-brown-fg: var(--brown-fg);
@@ -108,19 +104,17 @@
 :root {
   color-scheme: dark;
 
-  /* @generated tokens:marketing-dark-bg0:start */
-  --bg0: hsl(0 0% 5%); /* #0D0D0D */
+  /* @generated tokens:marketing-dark-bg1:start */
   --bg1: hsl(0 0% 7.843%); /* #141414 */
-  /* @generated tokens:marketing-dark-bg0:end */
+  /* @generated tokens:marketing-dark-bg1:end */
   --pane-bg: var(--bg1);
   /* @generated tokens:marketing-dark-bg1-hover:start */
   --bg1-hover: hsl(0 0% 12%); /* #1F1F1F */
-  --bg1-highlight: hsl(0 0% 9%); /* #171717 */
   --bg2: hsl(0 0% 13%); /* #212121 */
-  --bg2-hover: hsl(0 0% 15%); /* #262626 */
+  --bg2-hover: hsl(0 0% 16.471%); /* #2A2A2A */
   --bg3: hsl(0 0% 10.98%); /* #1C1C1C */
   /* @generated tokens:marketing-dark-bg1-hover:end */
-  --bg3-hover: var(--sidebar-bg-hover);
+  --bg3-hover: var(--bg1-raised-hover);
   /* @generated tokens:marketing-dark-bg4:start */
   --bg4: hsl(0 0% 24%); /* #3D3D3D */
   --bg5: hsl(0 0% 37%); /* #5E5E5E */
@@ -128,15 +122,14 @@
 
   /* @generated tokens:marketing-dark-fg1:start */
   --fg1: hsl(0 0% 92.16%); /* #EBEBEB */
-  --fg2: hsl(0 0% 62.35%); /* #9F9F9F */
-  --fg3: hsl(0 0% 57.65%); /* #939393 */
-  --muted-fg: hsl(0 0% 42%); /* #6B6B6B */
+  --fg2: hsl(0 0% 62.745%); /* #A0A0A0 */
+  --fg3: hsl(0 0% 53.333%); /* #888888 */
   /* @generated tokens:marketing-dark-fg1:end */
 
-  /* @generated tokens:marketing-dark-sidebar-bg:start */
-  --sidebar-bg: hsl(0 0% 9.412%); /* #181818 */
-  --sidebar-bg-hover: hsl(0 0% 15%); /* #262626 */
-  /* @generated tokens:marketing-dark-sidebar-bg:end */
+  /* @generated tokens:marketing-dark-bg1-raised:start */
+  --bg1-raised: hsl(0 0% 10.196%); /* #1A1A1A */
+  --bg1-raised-hover: hsl(0 0% 14.118%); /* #242424 */
+  /* @generated tokens:marketing-dark-bg1-raised:end */
 
   /* @generated tokens:marketing-dark-border1:start */
   --border1: hsl(0 0% 14%); /* #242424 */
@@ -149,10 +142,9 @@
   --shadow-product: 0 30px 80px -20px rgba(0, 0, 0, 0.7);
   --scrim: hsl(0 0% 0% / 0.8);
 
-  /* @generated tokens:marketing-dark-highlighted-bg:start */
-  --highlighted-bg: var(--bg2); /* #212121 */
+  /* @generated tokens:marketing-dark-highlighted-bright:start */
   --highlighted-bright: hsl(0 0% 79.216%); /* #CACACA */
-  /* @generated tokens:marketing-dark-highlighted-bg:end */
+  /* @generated tokens:marketing-dark-highlighted-bright:end */
 
   /* @generated tokens:marketing-dark-inverted-bg:start */
   --inverted-bg: hsl(0 0% 92%); /* #EBEBEB */
@@ -165,40 +157,40 @@
   /* @generated tokens:marketing-dark-primary-button-hover:end */
   --primary-button-fg: var(--inverted-fg);
 
-  --red-primary: hsl(0 91% 71%);
-  --red-secondary: hsl(7 83% 39%);
-  --red-secondary-fg: hsl(0 0% 100%);
+  --red-text: hsl(0 91% 71%);
+  --red-solid: hsl(7 83% 39%);
+  --red-solid-fg: hsl(0 0% 100%);
   --red-bg: hsl(3 26% 13.7%);
-  --red-fg: hsl(20 97% 72%);
+  --red-on-bg: hsl(20 97% 72%);
 
-  --green-primary: hsl(142 69% 58%);
+  --green-text: hsl(142 69% 58%);
   --green-bg: hsl(120 23% 17%);
-  /* @generated tokens:marketing-dark-green-fg:start */
-  --green-fg: hsl(142 75% 73%); /* #87EEAC */
-  /* @generated tokens:marketing-dark-green-fg:end */
+  /* @generated tokens:marketing-dark-green-on-bg:start */
+  --green-on-bg: hsl(131.19 53.153% 78.235%); /* #AAE5B5 */
+  /* @generated tokens:marketing-dark-green-on-bg:end */
 
-  /* @generated tokens:marketing-dark-yellow-primary:start */
-  --yellow-primary: hsl(47.95 95.82% 53.14%); /* #FACC15 */
-  /* @generated tokens:marketing-dark-yellow-primary:end */
+  /* @generated tokens:marketing-dark-yellow-text:start */
+  --yellow-text: hsl(42.92 66.327% 61.569%); /* #DEB95C */
+  /* @generated tokens:marketing-dark-yellow-text:end */
   --yellow-bg: hsl(38 68% 17%);
-  --yellow-fg: hsl(44 100% 50%);
+  --yellow-on-bg: hsl(44 100% 50%);
 
-  --blue-primary: hsl(205 80% 73%);
-  --blue-bg: hsl(226 57% 18%);
-  --blue-fg: hsl(211 96% 78%);
+  --accent-text: hsl(205 80% 73%);
+  --accent-bg: hsl(226 57% 18%);
+  --accent-on-bg: hsl(211 96% 78%);
 
-  --violet-primary: hsl(271 80% 73%);
+  --violet-text: hsl(271 80% 73%);
   --violet-bg: hsl(255 21% 18%);
-  --violet-fg: hsl(265 66% 77%);
+  --violet-on-bg: hsl(265 66% 77%);
 
   --brown-primary: hsl(9 46% 72%);
   --brown-bg: hsl(10 15% 15%);
   --brown-fg: hsl(10 80% 72%);
 
-  --success: var(--green-primary);
-  --warning: var(--yellow-primary);
-  --info: var(--blue-primary);
-  --destructive: var(--red-primary);
+  --success: var(--green-text);
+  --warning: var(--yellow-text);
+  --info: var(--accent-text);
+  --destructive: var(--red-text);
 }
 
 /* ──────────────────────────────────────────────────────────
@@ -209,13 +201,11 @@
   :root {
     color-scheme: light;
 
-    /* @generated tokens:marketing-light-bg0:start */
-    --bg0: hsl(30 20% 98.039%); /* #FBFAF9 */
+    /* @generated tokens:marketing-light-bg1:start */
     --bg1: hsl(0 0% 100%); /* #FFFFFF */
-    /* @generated tokens:marketing-light-bg0:end */
+    /* @generated tokens:marketing-light-bg1:end */
     /* @generated tokens:marketing-light-bg1-hover:start */
     --bg1-hover: hsl(30 15.385% 94.902%); /* #F4F2F0 */
-    --bg1-highlight: hsl(40 17.647% 96.667%); /* #F8F7F5 */
     --bg2: hsl(36 20% 95.098%); /* #F5F3F0 */
     --bg2-hover: hsl(30 13.043% 90.98%); /* #EBE8E5 */
     --bg3: var(--bg1); /* #FFFFFF */
@@ -228,15 +218,14 @@
 
     /* @generated tokens:marketing-light-fg1:start */
     --fg1: hsl(30 10% 15.686%); /* #2C2824 */
-    --fg2: hsl(26.67 5.45% 32.35%); /* #57524E */
-    --fg3: hsl(30 5.05% 38.82%); /* #68635E */
-    --muted-fg: hsl(30 4.17% 47.06%); /* #7D7873 */
+    --fg2: hsl(26.67 5.028% 35.098%); /* #5E5955 */
+    --fg3: hsl(30 5.505% 42.745%); /* #736D67 */
     /* @generated tokens:marketing-light-fg1:end */
 
-    /* @generated tokens:marketing-light-sidebar-bg:start */
-    --sidebar-bg: hsl(40 27.273% 97.843%); /* #FBFAF8 */
-    --sidebar-bg-hover: hsl(36 12.195% 91.961%); /* #EDEBE8 */
-    /* @generated tokens:marketing-light-sidebar-bg:end */
+    /* @generated tokens:marketing-light-bg1-raised:start */
+    --bg1-raised: hsl(40 23.077% 97.451%); /* #FAF9F7 */
+    --bg1-raised-hover: hsl(36 13.514% 92.745%); /* #EFEDEA */
+    /* @generated tokens:marketing-light-bg1-raised:end */
 
     /* @generated tokens:marketing-light-border1:start */
     --border1: hsl(34.29 14.894% 90.784%); /* #EBE8E4 */
@@ -249,10 +238,9 @@
     --shadow-product: 0 24px 64px -20px rgba(0, 0, 0, 0.16);
     --scrim: hsl(0 0% 0% / 0.4);
 
-    /* @generated tokens:marketing-light-highlighted-bg:start */
-    --highlighted-bg: hsl(30 15% 92.157%); /* #EEEBE8 */
+    /* @generated tokens:marketing-light-highlighted-bright:start */
     --highlighted-bright: hsl(32.73 7.801% 27.647%); /* #4C4741 */
-    /* @generated tokens:marketing-light-highlighted-bg:end */
+    /* @generated tokens:marketing-light-highlighted-bright:end */
 
     /* @generated tokens:marketing-light-inverted-bg:start */
     --inverted-bg: hsl(30 10% 15.686%); /* #2C2824 */
@@ -263,30 +251,30 @@
     --primary-button-hover: hsl(30 7.937% 24.706%); /* #443F3A */
     /* @generated tokens:marketing-light-primary-button-hover:end */
 
-    --red-primary: hsl(0 72% 51%);
-    --red-secondary: hsl(0 72% 50%);
+    --red-text: hsl(0 72% 51%);
+    --red-solid: hsl(0 72% 45%);
     --red-bg: hsl(18 87% 91%);
-    --red-fg: hsl(18 89% 40%);
+    --red-on-bg: hsl(18 89% 40%);
 
-    --green-primary: hsl(142 75% 36%);
+    --green-text: hsl(142 75% 36%);
     --green-bg: hsl(134 38% 89%);
-    /* @generated tokens:marketing-light-green-fg:start */
-    --green-fg: hsl(142 70% 27.5%); /* #157739 */
-    /* @generated tokens:marketing-light-green-fg:end */
+    /* @generated tokens:marketing-light-green-on-bg:start */
+    --green-on-bg: hsl(141.75 71.429% 21.961%); /* #10602D */
+    /* @generated tokens:marketing-light-green-on-bg:end */
 
-    /* @generated tokens:marketing-light-yellow-primary:start */
-    --yellow-primary: hsl(45.25 100% 23.92%); /* #7A5C00 */
-    /* @generated tokens:marketing-light-yellow-primary:end */
+    /* @generated tokens:marketing-light-yellow-text:start */
+    --yellow-text: hsl(39.7 98.519% 26.471%); /* #865901 */
+    /* @generated tokens:marketing-light-yellow-text:end */
     --yellow-bg: hsl(48 97% 89%);
-    --yellow-fg: hsl(37 100% 51%);
+    --yellow-on-bg: hsl(37 100% 51%);
 
-    --blue-primary: hsl(221 83% 53%);
-    --blue-bg: hsl(214 100% 97%);
-    --blue-fg: hsl(224 77% 48%);
+    --accent-text: hsl(221 83% 53%);
+    --accent-bg: hsl(214 100% 97%);
+    --accent-on-bg: hsl(224 77% 48%);
 
-    --violet-primary: hsl(271 80% 51%);
+    --violet-text: hsl(271 80% 51%);
     --violet-bg: hsl(274 93% 94%);
-    --violet-fg: hsl(263 61% 46%);
+    --violet-on-bg: hsl(263 61% 46%);
 
     --brown-primary: hsl(5 35% 50%);
     --brown-bg: hsl(5 74% 91%);

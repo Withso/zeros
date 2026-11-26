@@ -3,8 +3,8 @@ import { cn } from "../cn";
 
 const FILL = {
   default: "bg-accent",
-  warning: "bg-yellow-primary",
-  over: "bg-red-primary",
+  warning: "bg-yellow-text",
+  over: "bg-red-text",
 } as const;
 
 /** Determinate usage/progress bar: a 4px border3 track (like the Slider) with

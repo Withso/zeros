@@ -10,6 +10,7 @@ import {
   Textarea,
 } from "@/renderer/shared/ui/primitives";
 import { Popover, PopoverAnchor, PopoverContent } from "@/renderer/shared/ui/primitives/popover";
+import { Toolbar } from "@/renderer/shared/ui/primitives/toolbar";
 import { toast } from "@/renderer/shared/ui/primitives/elements";
 import type { AttachmentValidation } from "./agent-attachments";
 import {
@@ -365,7 +366,9 @@ export function ChatSelectionPopup({ root, active, ownsKeyboard = active, onAddS
         avoidCollisions={false}
         collisionPadding={0}
         size={reply ? "lg" : "fit"}
-        padding={reply ? "default" : "inset"}
+        // The actions are an inline floating group that draws its own surface.
+        surface={reply ? "floating" : "bare"}
+        padding={reply ? "default" : "none"}
         hideWhenDetached
         updatePositionStrategy="always"
         data-chat-selection-popup={reply ? "reply" : "actions"}
@@ -427,10 +430,10 @@ export function ChatSelectionPopup({ root, active, ownsKeyboard = active, onAddS
             </div>
           </div>
         ) : (
-          <div className="flex items-center gap-0.5">
+          <Toolbar size="inline" aria-label="Selection actions">
             <Button
               variant="ghost"
-              size="compact"
+              size="inline"
               aria-keyshortcuts="Meta+L Control+L"
               onPointerDown={(event) => event.preventDefault()}
               onClick={addSelection}
@@ -441,14 +444,14 @@ export function ChatSelectionPopup({ root, active, ownsKeyboard = active, onAddS
             </Button>
             <Button
               variant="ghost"
-              size="compact"
+              size="inline"
               onPointerDown={(event) => event.preventDefault()}
               onClick={startReply}
             >
               <Reply />
               Reply
             </Button>
-          </div>
+          </Toolbar>
         )}
       </PopoverContent>
     </Popover>

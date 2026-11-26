@@ -376,7 +376,10 @@ export async function runComposerEditorSmoke({ page, check }) {
   const pillShell = () =>
     mention.evaluate((element) => {
       const token = (name, property) => {
+        // Read as the pill resolves it: its hover follows the ground it sits
+        // on. The probe stays outside the editor's own DOM.
         const probe = document.createElement("span");
+        probe.style.setProperty(name, getComputedStyle(element).getPropertyValue(name));
         probe.style[property] = `var(${name})`;
         document.body.append(probe);
         const value = getComputedStyle(probe)[property];
@@ -393,8 +396,8 @@ export async function runComposerEditorSmoke({ page, check }) {
         shadow: style.boxShadow,
         inner,
         selectedBg: token("--selected-bg", "backgroundColor"),
-        hoverBg: token("--bg2-highlight", "backgroundColor"),
-        hoverBorder: token("--border3", "color"),
+        hoverBg: token("--pill-hover-bg", "backgroundColor"),
+        hoverBorder: token("--pill-hover-border", "color"),
       };
     });
   const restingPill = await pillShell();
@@ -406,7 +409,7 @@ export async function runComposerEditorSmoke({ page, check }) {
     .catch(() => {});
   const hoveredPill = await pillShell();
   check(
-    "a hovered pill fills bg2-highlight on border3 as one shape",
+    "a hovered pill fills its ground's pill hover on border3 as one shape",
     hoveredPill.background === hoveredPill.hoverBg &&
       hoveredPill.border === hoveredPill.hoverBorder &&
       hoveredPill.inner.every((fill) => fill === "rgba(0, 0, 0, 0)"),

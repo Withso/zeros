@@ -8590,10 +8590,10 @@ export const DesignCanvas = React.memo(function DesignCanvas({
                             "text-2xxs block max-w-full min-w-0 overflow-hidden border-0 bg-transparent p-0 text-left leading-4 font-medium whitespace-nowrap outline-none",
                             (frameComponentPresentation || missingComponents.length > 0 || optionsProblem !== null || preparationProblem !== null) && "flex items-center gap-1",
                             frameComponentPresentation
-                              ? "text-violet-primary"
+                              ? "text-violet-text"
                               : frameSelectedOnly
                               ? "text-[var(--design-selection-stroke)]"
-                              : "text-muted-fg hover:text-fg2",
+                              : "text-fg3 hover:text-fg2",
                           )}
                           onPointerDown={(event) =>
                             startFrameGesture(event, frame, "move")
@@ -8606,9 +8606,9 @@ export const DesignCanvas = React.memo(function DesignCanvas({
                           }}
                         >
                           {frameComponentPresentation ? frameComponentPresentation.kind === "main" ? (
-                            <ComponentGlyph data-design-component-mark="main" className="text-violet-primary fill-current size-[11px] shrink-0" aria-hidden="true" />
+                            <ComponentGlyph data-design-component-mark="main" className="text-violet-text fill-current size-[11px] shrink-0" aria-hidden="true" />
                           ) : (
-                            <Diamond data-design-component-mark="instance" className="text-violet-primary size-[11px] shrink-0" aria-hidden="true" />
+                            <Diamond data-design-component-mark="instance" className="text-violet-text size-[11px] shrink-0" aria-hidden="true" />
                           ) : null}
                           {preparationProblem !== null ? <DesignFrameProblemMark message={preparationProblem} /> : null}
                           {missingComponents.length ? (
@@ -8694,7 +8694,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
                     recorded={gpuCanvas}
                   />
                 ) : (
-                  <div className="bg-bg2 text-muted-fg flex size-full items-center justify-center text-xs">
+                  <div className="bg-bg2 text-fg3 flex size-full items-center justify-center text-xs">
                     Preparing {frame.title}…
                   </div>
                 )}
@@ -9325,13 +9325,13 @@ export const DesignCanvas = React.memo(function DesignCanvas({
         />
 
         {!snapshot && showColdBusy ? (
-          <div className="text-muted-fg pointer-events-none absolute inset-0 flex items-center justify-center text-sm">
+          <div className="text-fg3 pointer-events-none absolute inset-0 flex items-center justify-center text-sm">
             Loading design…
           </div>
         ) : null}
 
         {!workspaceId && !snapshot ? (
-          <div className="text-muted-fg pointer-events-none absolute inset-0 flex items-center justify-center text-sm">
+          <div className="text-fg3 pointer-events-none absolute inset-0 flex items-center justify-center text-sm">
             Setting up design workspace…
           </div>
         ) : null}
@@ -9362,7 +9362,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
               }}
               loop
             >
-              <ContextMenuLabel className="text-muted-fg text-3xxs">
+              <ContextMenuLabel className="text-fg3 text-3xxs">
                 Select layer
               </ContextMenuLabel>
               {hitStackMenu.layers.map((layer, index) => {
@@ -9396,7 +9396,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
                       {layer.name}
                     </span>
                     {index > 0 ? (
-                      <span className="text-muted-fg text-3xxs tabular-nums">
+                      <span className="text-fg3 text-3xxs tabular-nums">
                         ↑{index}
                       </span>
                     ) : null}

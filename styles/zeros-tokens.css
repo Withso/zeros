@@ -25,50 +25,50 @@
 
    ─── TOKEN TAXONOMY ─────────────────────────────────────────
 
-   BACKGROUNDS (10 surfaces):
-     --bg0                  One step BELOW bg1; the Browser tab's backdrop.
-                            Never a chat window fill: every chat pane keeps
-                            bg1, and split panes tell focus apart by their
-                            edge and an unfocused pane's dim (ChatPane).
+   BACKGROUNDS (one hover per surface):
      --pane-bg              CONTEXTUAL alias — the surface color of the chat
                             window an element sits in, bg1 on every pane.
                             The window fill, tab-strip edge fades and the
                             transcript scroll mask all read it.
-     --bg1                  default canvas / app backdrop + ACTIVE chat window
+     --bg1                  default canvas / app backdrop + every chat window;
+                            also the Browser tab's backdrop
      --bg1-hover            hover state on bg1 (tool calls, tabs)
-     --bg1-highlight        highlighted content above bg1
-     --bg1-bright           filled section card on bg1 (settings groups) —
-                            brighter than bg1-highlight in dark; = --bg2 in light
-     --bg2                  composer surface (raised above bg1)
-     --bg2-hover            hover state on bg2 (icon buttons)
-     --bg2-highlight        hover/open fill on an unfilled-at-rest control
-                            sitting on bg1/bg2 (dropdown TRIGGER) — L18 in
-                            dark; = --bg5 in light
+     --bg1-raised           the one raised step between bg1 and bg2: composer,
+                            cards, settings groups, review threads, question
+                            and permission cards. Never floats.
+     --bg1-raised-hover     hover state on bg1-raised rows and controls
+     --bg2                  sent-message bubble, neutral fills, field fills
+     --bg2-hover            hover state on bg2; a visible step that stays below
+                            selected-bg
+     --selected-bg          selected, pressed, toggled or active, and nothing
+                            else (sidebar rows use nav-bg-hover)
      --bg3                  FLOATING popover / dropdown / menu surface ONLY —
                             always ON TOP of a background, never a fill or a
-                            selected/chip state. Dark = --sidebar-bg, light =
-                            --bg1; the lift is border2 + --shadow-dropdown.
+                            selected/chip state; the lift is border2 +
+                            --shadow-dropdown. Docked pickers paint it too.
      --bg3-hover            hover state on bg3 (menu items inside popovers)
      --bg4                  rare — reserved for specific use cases
      --bg5                  rare — reserved for specific use cases
 
-   FOREGROUNDS (4 tiers — TEXT + ICONS ONLY, never borders):
-     --fg1                  selected / highlighted text (titles, output, agent chat body)
+   FOREGROUNDS (3 tiers — TEXT + ICONS ONLY, never borders):
+     --fg1                  emphasis: titles, output, agent chat body
      --fg2                  default text + icon color across the app
-     --fg3                  MIDDLE tier — exactly ONE step quieter than --fg2.
-                            For content that must read as secondary to the text
-                            beside it while staying comfortably legible: input
-                            placeholders, .gitignore'd rows in the file tree.
-                            Reach for this (not --muted-fg) whenever the
-                            reference point is --fg2 rather than the canvas.
-     --muted-fg             QUIETEST tier — supplemental metadata (timestamps,
-                            counts, SHAs), empty-state icons. Owner-chosen 3:1
-                            floor at rest, below AA by design. Hovered/selected
-                            rows step up to fg3.
+     --fg3                  the third tier — metadata, placeholders, times,
+                            hints, empty-state icons. Passes 4.5:1 on bg1,
+                            bg1-raised, bg2 and nav-bg; a hovered or selected
+                            row lifts it to fg2.
 
-   REPOSITORY NAVIGATION (not the settings sidebar):
-     --sidebar-bg           workspace sidebar background
-     --sidebar-bg-hover     sidebar item hover + selected state
+   STATUS COLOURS (red, green, yellow, violet, plus the accent blue):
+     --{family}-text        words and icons on any plain surface
+     --{family}-bg          tinted container
+     --{family}-on-bg       text and icons inside that container
+     --{family}-solid       a fill that carries white (or -solid-fg) text
+     The blue is the accent: --accent (fills: focus, checked, progress),
+     --accent-text, --accent-bg, --accent-on-bg, --accent-bg-hover.
+
+   APP SIDEBAR (not the settings sidebar):
+     --nav-bg               workspace sidebar background
+     --nav-bg-hover         sidebar row hover + selected state
 
    BORDERS (4 tiers — borders only, never text):
      --border1              default for bg1 surfaces
@@ -78,10 +78,9 @@
      --border4              highlighted state of border3 consumers (dropdown hover)
 
    HIGHLIGHTED (neutral interaction emphasis):
-     --highlighted-bg              user-message bg in chat (text on it: fg1/fg2)
-                                   dark aliases this to --bg2; light keeps
-                                   its own value
-     --highlighted-bright          input focus border, brighter accent borders
+     --highlighted-bright          structural neutral (diff modified marks,
+                                   terminal selection, tree accent); keyboard
+                                   focus is --accent
 
    INVERTED (polarity-flipping surface — always the OPPOSITE of bg1):
      --inverted-bg           near-white in dark theme, near-black in light
@@ -215,71 +214,73 @@
   --font-weight-semibold: var(--weight-semibold);
   --font-weight-bold: var(--weight-bold);
 
-  /* ── RADII — fixed 3-step scale ──
-   * The whole app uses exactly three corner radii; pick by use case,
+  /* ── RADII — five steps (P7) ──
+   * The whole app uses exactly five corner radii; pick by use case,
    * never by taste:
-   *   --radius-sm 4px — the 20px inline icon button, inline pills, badges,
-   *                     kbd chips, checkboxes, the inline-rename field
-   *   --radius-md 6px — buttons, icon buttons, fields and the Select
-   *                     trigger, tabs and segmented controls, tooltips,
-   *                     toolbar tools, sidebar and settings rows
-   *   --radius-lg 8px — menu rows, code blocks, small cards and rows
-   * Floating surfaces (menus, Select lists, Command, popovers, hover
-   * cards, toasts, dialogs) use 1.5 × --radius-lg = 12px via
-   * shared/ui/menu-surface.ts, as do the grouped settings cards
-   * (features/settings/settings-ui.tsx, SETTINGS_GROUP_RADIUS) and the
-   * prompt surfaces — composer card, inline edit composer, sent user
-   * message — via features/agent/composer-shell.tsx (PROMPT_SURFACE_RADIUS),
-   * so a prompt keeps its shape from typed to sent. Toolbars use
-   * --radius-md + 4px = 10px (shared/ui/primitives/toolbar.tsx). All
-   * derived from the scale, not a fourth token.
-   * Plus rounded-full (circles/scrollbars/switch) and rounded-none
-   * (nested resets). xs/xl/2xl/3xl/4xl are reset to `initial` below
-   * ON PURPOSE so `rounded-xl` etc. no longer exist —
-   * a class that won't compile beats a fourth radius sneaking in.
-   * Nesting rule: inner radius = outer radius − inset (a 12px menu with a
-   * 4px inset → 8px rows; a 10px toolbar with a 4px inset → 6px tools). */
+   *   --radius-sm  4px — the 20px inline icon button, inline pills, badges,
+   *                      kbd chips, checkboxes, the inline-rename field
+   *   --radius-md  6px — buttons, icon buttons, fields and the Select
+   *                      trigger, tabs and segmented controls, tooltips,
+   *                      sidebar and settings rows
+   *   --radius-lg  8px — menu rows, toolbar tools, code blocks, small cards
+   *   --radius-xl 12px — floating surfaces (menus, Select lists, Command,
+   *                      popovers, hover cards, toasts, dialogs, toolbars),
+   *                      settings groups, tiles and the sent user message
+   *   --radius-2xl 18px — the composer family (Create, chat, inline edit)
+   * Plus rounded-full (circles, capsules, scrollbars, switch) and
+   * rounded-none (nested resets). xs/3xl/4xl are reset to `initial` ON
+   * PURPOSE, so a class that won't compile beats a sixth radius sneaking in.
+   * Nesting rule: inner radius = outer radius − inset (a 12px menu or
+   * toolbar with a 4px inset → 8px rows and tools). */
   --radius-*: initial;
   --radius-sm: 4px;
   --radius-md: 6px;
   --radius-lg: 8px;
+  --radius-xl: 12px;
+  --radius-2xl: 18px;
 
-  /* ── BACKGROUNDS — `bg-bg0`..`bg-bg5` + hovers ── */
-  /* @generated tokens:utilities-bg0:start */
-  --color-bg0: var(--bg0); /* #0D0D0D — one step below bg1; the Browser tab's backdrop */
+  /* ── DURATIONS — three named steps (P8) ──
+   * fast 120 for colour, fill and border changes; base 150 for anchored
+   * overlays entering, slides and dialogs; slow 200 for larger panel and
+   * canvas moves. Utilities: duration-fast / -base / -slow (below), and
+   * var(--duration-*) in hand-written CSS. Loader beats are animation
+   * timing, not transitions, and keep their own constants. */
+  --duration-fast: 120ms;
+  --duration-base: 150ms;
+  --duration-slow: 200ms;
+  --default-transition-duration: 150ms;
+
+  /* ── BACKGROUNDS — `bg-bg1`..`bg-bg5` + hovers ── */
+  /* @generated tokens:utilities-bg1:start */
   --color-bg1: var(--bg1); /* #141414 — default canvas / app backdrop + active chat window */
   --color-bg1-hover: var(--bg1-hover); /* #1F1F1F — hover on bg1 (tool calls, tabs) */
-  --color-bg1-highlight: var(--bg1-highlight); /* #171717 — highlighted content above bg1 */
-  --color-bg1-bright: var(--bg1-bright); /* #1C1C1C — filled section card on bg1 */
+  --color-bg1-raised: var(--bg1-raised); /* #1A1A1A — one raised step between bg1 and bg2: composer, cards, settings groups, review threads, docked surfaces */
+  --color-bg1-raised-hover: var(--bg1-raised-hover); /* #242424 — hover on bg1-raised rows and controls */
   --color-bg2: var(--bg2); /* #212121 — composer surface */
-  --color-bg2-hover: var(--bg2-hover); /* #262626 — hover on bg2 */
-  --color-bg2-highlight: var(--bg2-highlight); /* #2B2B2B — dropdown trigger hover/open */
+  --color-bg2-hover: var(--bg2-hover); /* #2A2A2A — hover on bg2; clears a visible step on bg2 and stays below selected-bg */
   --color-selected-bg: var(--selected-bg); /* #2B2B2B — selected, pressed and active fill, one step above hover; never an edge */
   --color-bg3: var(--bg3); /* #1C1C1C — floating popover surface */
   --color-bg3-hover: var(--bg3-hover); /* #2A2A2A — hover on bg3 (menu items) */
   --color-bg4: var(--bg4); /* #3D3D3D — rare */
   --color-bg5: var(--bg5); /* #5E5E5E — rare */
-  /* @generated tokens:utilities-bg0:end */
+  /* @generated tokens:utilities-bg1:end */
   /* Modal overlay veil — `bg-scrim` (dialog/sheet overlays; theme-scoped). */
   /* @generated tokens:utilities-scrim:start */
   --color-scrim: var(--scrim); /* #00000080 — modal overlay veil */
   /* @generated tokens:utilities-scrim:end */
 
-  /* ── FOREGROUNDS — `text-fg1` / `text-fg2` / `text-fg3` / `text-muted-fg` ── */
+  /* ── FOREGROUNDS — `text-fg1` / `text-fg2` / `text-fg3` / `text-fg3` ── */
   /* @generated tokens:utilities-fg1:start */
   --color-fg1: var(--fg1); /* #EBEBEB — selected/highlighted text + icons */
-  --color-fg2: var(--fg2); /* #9F9F9F — default text + icon across app */
-  --color-fg3: var(--fg3); /* #939393 — middle tier (one step below fg2) */
-  --color-muted-fg: var(--muted-fg); /* #6B6B6B — supplemental metadata; 3:1 floor, fg3 on hover/selection */
+  --color-fg2: var(--fg2); /* #A0A0A0 — default text and icons */
+  --color-fg3: var(--fg3); /* #888888 — the third tier: metadata, placeholders, times, hints; hovered or selected rows lift it to fg2 */
   /* @generated tokens:utilities-fg1:end */
 
   /* ── REPOSITORY NAVIGATION ── */
-  /* @generated tokens:utilities-sidebar-bg:start */
-  --color-sidebar-bg: var(--sidebar-bg); /* #181818 — repository sidebar background */
-  --color-sidebar-bg-hover: var(--sidebar-bg-hover); /* #262626 — sidebar row hover and selected state */
+  /* @generated tokens:utilities-nav-bg:start */
   --color-nav-bg: var(--nav-bg); /* #101010 — workspace navigation sidebar background */
   --color-nav-bg-hover: var(--nav-bg-hover); /* #222222 — workspace navigation row hover and selected state */
-  /* @generated tokens:utilities-sidebar-bg:end */
+  /* @generated tokens:utilities-nav-bg:end */
 
   /* ── BORDERS — `border-border1`..`border-border4` ── */
   /* @generated tokens:utilities-border1:start */
@@ -290,10 +291,9 @@
   /* @generated tokens:utilities-border1:end */
 
   /* ── HIGHLIGHTED (theme-adaptive interaction emphasis) ── */
-  /* @generated tokens:utilities-highlighted-bg:start */
-  --color-highlighted-bg: var(--highlighted-bg); /* #212121 — user msg bg (text: fg1/fg2) */
-  --color-highlighted-bright: var(--highlighted-bright); /* #CACACA — input focus border, brighter accents */
-  /* @generated tokens:utilities-highlighted-bg:end */
+  /* @generated tokens:utilities-highlighted-bright:start */
+  --color-highlighted-bright: var(--highlighted-bright); /* #CACACA — structural neutral: diff modified marks, terminal selection, tree accent (focus is the accent) */
+  /* @generated tokens:utilities-highlighted-bright:end */
 
   /* ── INVERTED (polarity-flipping pair — buttons, checkbox ON) ── */
   /* @generated tokens:utilities-inverted-bg:start */
@@ -309,29 +309,27 @@
   /* @generated tokens:utilities-primary-button-bg:end */
 
   /* ── COLOR PALETTES (families → bg-/text-/border- utilities) ── */
-  /* @generated tokens:utilities-red-primary:start */
-  --color-red-primary: var(--red-primary); /* #F87272 — −N counts, error accents */
-  --color-red-secondary: var(--red-secondary); /* #B32228 — solid delete fills + delete icons */
-  --color-red-secondary-fg: var(--red-secondary-fg); /* #FFFFFF — text/icon on SOLID --red-secondary fills. THEME-STATIC (white in both themes — the red fill stays vivid in light, so fg1, which flips dark, can't sit on it). */
-  --color-red-secondary-hover: var(--red-secondary-hover); /* #A72025 — destructive hover fill */
-  --color-red-bg: var(--red-bg); /* #341818 — error container surface */
-  --color-red-fg: var(--red-fg); /* #FFAAA7 — text/icon on --red-bg */
-  --color-green-primary: var(--green-primary); /* #4ADE80 — +N counts, success accents */
-  --color-green-bg: var(--green-bg); /* #213521 — success container surface */
-  --color-green-fg: var(--green-fg); /* #87EEAC — text/icon on --green-bg */
-  --color-yellow-primary: var(--yellow-primary); /* #FACC15 — warning · modified · in-progress */
-  --color-yellow-bg: var(--yellow-bg); /* #3A300B — warning container surface */
-  --color-yellow-fg: var(--yellow-fg); /* #FDE68A — text/icon on --yellow-bg */
-  --color-yellow-icon: var(--yellow-icon); /* #FACC15 — icons, status dots and tinted borders */
-  --color-blue-primary: var(--blue-primary); /* #6AAEFF — info · links · accents */
-  --color-blue-bg: var(--blue-bg); /* #13233D — info container surface */
-  --color-blue-fg: var(--blue-fg); /* #A3CBFF — text/icon on --blue-bg */
-  --color-violet-primary: var(--violet-primary); /* #BC83F1 — done · merged */
-  --color-violet-bg: var(--violet-bg); /* #292438 — done container surface */
-  --color-violet-fg: var(--violet-fg); /* #BE9EEB — text/icon on --violet-bg */
+  /* @generated tokens:utilities-red-text:start */
+  --color-red-text: var(--red-text); /* #E97873 — red status words, icons and destructive labels on any plain surface */
+  --color-red-solid: var(--red-solid); /* #B32228 — destructive fill carrying red-solid-fg */
+  --color-red-solid-fg: var(--red-solid-fg); /* #FFFFFF — label on red-solid */
+  --color-red-bg: var(--red-bg); /* #391918 — error container surface */
+  --color-red-on-bg: var(--red-on-bg); /* #FEBAB4 — text and icons inside a red-bg container */
+  --color-green-text: var(--green-text); /* #6CC581 — green status words and icons on any plain surface */
+  --color-green-bg: var(--green-bg); /* #152D1A — success container surface */
+  --color-green-on-bg: var(--green-on-bg); /* #AAE5B5 — text and icons inside a green-bg container */
+  --color-yellow-text: var(--yellow-text); /* #DEB95C — yellow status words and icons on any plain surface (one yellow for text and graphics) */
+  --color-yellow-bg: var(--yellow-bg); /* #32270C — warning container surface */
+  --color-yellow-on-bg: var(--yellow-on-bg); /* #F0D592 — text and icons inside a yellow-bg container */
+  --color-accent-text: var(--accent-text); /* #6FA7EE — the blue for words: links, file paths, info icons and running marks */
+  --color-accent-bg: var(--accent-bg); /* #15273E — tinted info container and link pills */
+  --color-accent-on-bg: var(--accent-on-bg); /* #ABD1FF — text and icons inside an accent-bg container */
+  --color-violet-text: var(--violet-text); /* #B093E5 — violet status words and icons (merged, done) on any plain surface */
+  --color-violet-bg: var(--violet-bg); /* #2A2139 — done container surface */
+  --color-violet-on-bg: var(--violet-on-bg); /* #D8C7F9 — text and icons inside a violet-bg container */
   --color-accent: var(--accent); /* #4489FF — the one accent fill: keyboard focus, checked controls, switch on, slider and progress */
   --color-accent-fg: var(--accent-fg); /* #FFFFFF — marks drawn on the accent fill */
-  /* @generated tokens:utilities-red-primary:end */
+  /* @generated tokens:utilities-red-text:end */
 
   /* ── COLOR RAMPS → Tailwind utilities (bg-red-500, text-green-300, …) ── */
   /* @generated tokens:utilities-red-50:start */
@@ -395,24 +393,20 @@
   /* @generated tokens:utilities-red-50:end */
 
   /* @generated tokens:utilities-local-links:start */
-  --color-blue-pill-bg: var(--blue-pill-bg); /* #13233D — Workspace link pill fill; Light separates it from the composer surface */
-  --color-blue-pill-hover: var(--blue-pill-hover); /* #0E304D — Workspace link pill hover fill */
+  --color-accent-bg-hover: var(--accent-bg-hover); /* #1C3352 — hover on accent-bg pills */
   /* @generated tokens:utilities-local-links:end */
 
   /* Solid accept fills for merge conflicts, in white type (with the solid
      destructive fill above). */
-  /* @generated tokens:utilities-green-secondary:start */
-  --color-green-secondary: var(--green-secondary); /* #2A653F — solid Accept current change fills (merge conflicts) */
-  --color-green-secondary-hover: var(--green-secondary-hover); /* #2F794A — Accept current change hover fill */
-  --color-green-secondary-fg: var(--green-secondary-fg); /* #FFFFFF — text on SOLID --green-secondary fills. THEME-STATIC white, as on the solid destructive fill. */
-  --color-blue-secondary: var(--blue-secondary); /* #405A6C — solid Accept incoming change fills (merge conflicts) */
-  --color-blue-secondary-hover: var(--blue-secondary-hover); /* #4C6C82 — Accept incoming change hover fill */
-  --color-blue-secondary-fg: var(--blue-secondary-fg); /* #FFFFFF — text on SOLID --blue-secondary fills. THEME-STATIC white. */
-  --color-neutral-secondary: var(--neutral-secondary); /* #444444 — solid neutral fills: Accept both (merge conflicts) */
-  --color-neutral-secondary-hover: var(--neutral-secondary-hover); /* #565656 — neutral solid hover fill */
-  --color-neutral-secondary-fg: var(--neutral-secondary-fg); /* #FFFFFF — text on SOLID --neutral-secondary fills. THEME-STATIC white. */
+  /* @generated tokens:utilities-green-solid:start */
+  --color-green-solid: var(--green-solid); /* #2A653F — green fill carrying green-solid-fg (accept current) */
+  --color-green-solid-fg: var(--green-solid-fg); /* #FFFFFF — label on green-solid */
+  --color-accent-solid: var(--accent-solid); /* #405A6C — blue fill carrying accent-solid-fg (accept incoming) */
+  --color-accent-solid-fg: var(--accent-solid-fg); /* #FFFFFF — label on accent-solid */
+  --color-neutral-solid: var(--neutral-solid); /* #444444 — neutral fill carrying neutral-solid-fg (accept both) */
+  --color-neutral-solid-fg: var(--neutral-solid-fg); /* #FFFFFF — label on neutral-solid */
   --color-conflict-neutral: var(--conflict-neutral); /* #F0F0F00D — merge conflict separator, ancestor and accept rows */
-  /* @generated tokens:utilities-green-secondary:end */
+  /* @generated tokens:utilities-green-solid:end */
 }
 
 /* ── STACKING LAYERS → utilities ──
@@ -436,6 +430,20 @@
   z-index: var(--z-toast);
 }
 
+/* ── NAMED DURATIONS → utilities (P8) ── */
+@utility duration-fast {
+  --tw-duration: var(--duration-fast);
+  transition-duration: var(--duration-fast);
+}
+@utility duration-base {
+  --tw-duration: var(--duration-base);
+  transition-duration: var(--duration-base);
+}
+@utility duration-slow {
+  --tw-duration: var(--duration-slow);
+  transition-duration: var(--duration-slow);
+}
+
 /* ──────────────────────────────────────────────────────────
    2. PRIMITIVE TOKENS — neutral dark (the default dark theme)
    ──────────────────────────────────────────────────────────
@@ -443,7 +451,7 @@
    saturation are both zero, and every one keeps the former dark
    palette's lightness EXCEPT bg2, which is deliberately one point
    lighter (L13) to lift the composer and raised cards off the canvas.
-   Neutral Dark also aliases --highlighted-bg to --bg2 so the
+   Neutral Dark also aliases --bg2 to --bg2 so the
    user-message bubble and the composer read as one surface family.
    Meaning-bearing status palettes remain chromatic; see COLOR PALETTES
    below. Light overrides the full palette. */
@@ -474,31 +482,29 @@
   /* @generated tokens:base-weight-medium:end */
 
   /* ── BACKGROUNDS ── */
-  /* @generated tokens:base-bg0:start */
-  --bg0: hsl(0 0% 5%); /* #0D0D0D — one step below bg1; the Browser tab's backdrop */
+  /* @generated tokens:base-bg1:start */
   --bg1: hsl(
     0 0% 7.843%
   ); /* #141414 — default canvas / app backdrop + active chat window */
-  /* @generated tokens:base-bg0:end */
+  /* @generated tokens:base-bg1:end */
   /* Contextual chat-window surface: bg1, so every pane (and any chat chrome
    * rendered outside a pane) looks exactly like the plain app canvas.
    * Consumers use bg-(--pane-bg) / from-(--pane-bg) to follow their pane. */
   /* @generated tokens:base-pane-bg:start */
   --pane-bg: var(--bg1); /* #141414 — contextual chat-pane surface; bg1 on every pane */
   --bg1-hover: hsl(0 0% 12%); /* #1F1F1F — hover on bg1 (tool calls, tabs) */
-  --bg1-highlight: hsl(0 0% 9%); /* #171717 — highlighted content above bg1 */
-  --bg1-bright: hsl(0 0% 11%); /* #1C1C1C — filled section card on bg1 */
+  --bg1-raised: hsl(0 0% 10.196%); /* #1A1A1A — one raised step between bg1 and bg2: composer, cards, settings groups, review threads, docked surfaces */
+  --bg1-raised-hover: hsl(0 0% 14.118%); /* #242424 — hover on bg1-raised rows and controls */
   --bg2: hsl(0 0% 13%); /* #212121 — composer surface */
-  --bg2-hover: hsl(0 0% 15%); /* #262626 — hover on bg2 */
-  --bg2-highlight: hsl(0 0% 16.86%); /* #2B2B2B — dropdown trigger hover/open */
+  --bg2-hover: hsl(0 0% 16.471%); /* #2A2A2A — hover on bg2; clears a visible step on bg2 and stays below selected-bg */
   --selected-bg: hsl(0 0% 16.86%); /* #2B2B2B — selected, pressed and active fill, one step above hover; never an edge */
   /* @generated tokens:base-pane-bg:end */
   /* bg3 is a FLOATING-SURFACE-ONLY token (popover / dropdown / menu / select /
    * command) — always on TOP of a background, NEVER a fill/chip/selected state.
-   * Aliased to --sidebar-bg so a floating panel sits one subtle step above the
+   * Aliased to --bg1-raised so a floating panel sits one subtle step above the
    * bg1 canvas (barely lifted, like the sidebar) and its lift comes from
    * border2 + --shadow-dropdown, mirroring the light theme where bg3 == bg1.
-   * (--sidebar-bg / --sidebar-bg-hover are defined a few lines below; CSS
+   * (--bg1-raised / --bg1-raised-hover are defined a few lines below; CSS
    * custom properties resolve var() lazily, so the forward reference is fine.) */
   /* @generated tokens:base-bg3:start */
   --bg3: hsl(0 0% 10.98%); /* #1C1C1C — floating popover surface */
@@ -512,27 +518,22 @@
   /* ── FOREGROUNDS (text + icons only — NEVER used for borders) ── */
   /* @generated tokens:base-fg1:start */
   --fg1: hsl(0 0% 92.16%); /* #EBEBEB — selected/highlighted text + icons */
-  --fg2: hsl(0 0% 62.35%); /* #9F9F9F — default text + icon across app */
+  --fg2: hsl(0 0% 62.745%); /* #A0A0A0 — default text and icons */
   /* @generated tokens:base-fg1:end */
   /* MIDDLE tier — one step below --fg2 (see TOKEN TAXONOMY).
    * Both themes keep it above the supplemental metadata tier; Light inverts
    * the lightness axis, so its own literal preserves the contrast order. */
   /* @generated tokens:base-fg3:start */
-  --fg3: hsl(0 0% 57.65%); /* #939393 — middle tier (one step below fg2) */
+  --fg3: hsl(0 0% 53.333%); /* #888888 — the third tier: metadata, placeholders, times, hints; hovered or selected rows lift it to fg2 */
   /* @generated tokens:base-fg3:end */
   /* SUPPLEMENTAL tier: owner-chosen 3:1 floor at rest, below AA by design.
    * Hovered/selected rows step up to fg3 (contrast-contract.json). */
-  /* @generated tokens:base-muted-fg:start */
-  --muted-fg: hsl(0 0% 42%); /* #6B6B6B — supplemental metadata; 3:1 floor, fg3 on hover/selection */
-  /* @generated tokens:base-muted-fg:end */
 
   /* ── REPOSITORY NAVIGATION (not the settings sidebar) ── */
-  /* @generated tokens:base-sidebar-bg:start */
+  /* @generated tokens:base-nav-bg:start */
   --nav-bg: hsl(0 0% 6.275%); /* #101010 — workspace navigation sidebar background */
   --nav-bg-hover: hsl(0 0% 13.333%); /* #222222 — workspace navigation row hover and selected state */
-  --sidebar-bg: hsl(0 0% 9.412%); /* #181818 — repository sidebar background */
-  --sidebar-bg-hover: hsl(0 0% 15%); /* #262626 — sidebar row hover and selected state */
-  /* @generated tokens:base-sidebar-bg:end */
+  /* @generated tokens:base-nav-bg:end */
 
   /* ── BORDERS ── */
   /* @generated tokens:base-border1:start */
@@ -575,12 +576,11 @@
    * gives the bubble its faint outline — keep any hover chip painted on this
    * surface at bg2-hover (15%) or above, or it disappears into the fill
    * (turn-container.tsx "More" pill). */
-  /* @generated tokens:base-highlighted-bg:start */
-  --highlighted-bg: var(--bg2); /* #212121 — user msg bg (text: fg1/fg2) */
+  /* @generated tokens:base-highlighted-bright:start */
   --highlighted-bright: hsl(
     0 0% 79.216%
-  ); /* #CACACA — input focus border, brighter accents */
-  /* @generated tokens:base-highlighted-bg:end */
+  ); /* #CACACA — structural neutral: diff modified marks, terminal selection, tree accent (focus is the accent) */
+  /* @generated tokens:base-highlighted-bright:end */
 
   /* ── INVERTED (polarity-flipping pair) ──
    * The one surface that is always the OPPOSITE of bg1: near-white
@@ -611,68 +611,59 @@
    * --<family>-fg (NOT the vivid primary) — keeps tinted containers from
    * reading "all red / green / …". The vivid primary is for standalone
    * accents (counts, icons, borders) on the app canvas.
-   * red also has --red-secondary (deep red 700) for SOLID delete button
+   * red also has --red-solid (deep red 700) for SOLID delete button
    * fills + delete icons. Full 50–950 ramps live in the palette preview
    * (styles/Artifacts/color-palette-preview.html); add a shade here only if a
    * specific step is actually needed. */
-  /* @generated tokens:base-red-primary:start */
-  --red-primary: hsl(0 91% 71%); /* #F87272 — −N counts, error accents */
-  --red-secondary: hsl(
+  /* @generated tokens:base-red-text:start */
+  --red-text: hsl(2.54 72.84% 68.235%); /* #E97873 — red status words, icons and destructive labels on any plain surface */
+  --red-solid: hsl(
     357.52 68.075% 41.765%
-  ); /* #B32228 — solid delete fills + delete icons */
-  --red-secondary-fg: hsl(
+  ); /* #B32228 — destructive fill carrying red-solid-fg */
+  --red-solid-fg: hsl(
     0 0% 100%
-  ); /* #FFFFFF — text/icon on SOLID --red-secondary fills. THEME-STATIC (white in both themes — the red fill stays vivid in light, so fg1, which flips dark, can't sit on it). */
-  /* @generated tokens:base-red-primary:end */
-  /* Hover/pressed fill of a SOLID destructive control. A solid step, not an
-   * alpha (`/90`) wash: alpha lightens the fill toward the surface and broke
-   * white-text contrast in Light. */
-  /* @generated tokens:base-red-secondary-hover:start */
-  --red-secondary-hover: hsl(357.78 67.839% 39.02%); /* #A72025 — destructive hover fill */
-  --red-bg: hsl(0 36.842% 14.902%); /* #341818 — error container surface */
-  --red-fg: hsl(2.05 100% 82.745%); /* #FFAAA7 — text/icon on --red-bg */
-  --green-primary: hsl(142 69% 58%); /* #4ADE80 — +N counts, success accents */
-  --green-bg: hsl(120 23% 17%); /* #213521 — success container surface */
-  --green-fg: hsl(142 75% 73%); /* #87EEAC — text/icon on --green-bg */
-  --yellow-primary: hsl(
-    47.95 95.82% 53.14%
-  ); /* #FACC15 — warning · modified · in-progress */
-  --yellow-bg: hsl(47.23 68.12% 13.53%); /* #3A300B — warning container surface */
-  --yellow-fg: hsl(48 96.64% 76.67%); /* #FDE68A — text/icon on --yellow-bg */
-  /* @generated tokens:base-red-secondary-hover:end */
-  /* Icons, status dots and tinted borders. Dark yellow-primary already reads
+  ); /* #FFFFFF — label on red-solid */
+  /* @generated tokens:base-red-text:end */
+  /* Status containers: a -bg tint carries its -on-bg text; the -text role
+   * reads on any plain surface. Filled controls hover at 90% opacity. */
+  /* @generated tokens:base-status-tints:start */
+  --red-bg: hsl(1.82 40.741% 15.882%); /* #391918 — error container surface */
+  --red-on-bg: hsl(4.86 97.368% 85.098%); /* #FEBAB4 — text and icons inside a red-bg container */
+  --green-text: hsl(134.16 43.415% 59.804%); /* #6CC581 — green status words and icons on any plain surface */
+  --green-bg: hsl(132.5 36.364% 12.941%); /* #152D1A — success container surface */
+  --green-on-bg: hsl(131.19 53.153% 78.235%); /* #AAE5B5 — text and icons inside a green-bg container */
+  --yellow-text: hsl(
+    42.92 66.327% 61.569%
+  ); /* #DEB95C — yellow status words and icons on any plain surface (one yellow for text and graphics) */
+  --yellow-bg: hsl(42.63 61.29% 12.157%); /* #32270C — warning container surface */
+  --yellow-on-bg: hsl(42.77 75.806% 75.686%); /* #F0D592 — text and icons inside a yellow-bg container */
+  /* @generated tokens:base-status-tints:end */
+  /* Icons, status dots and tinted borders. Dark yellow-text already reads
    * at 3:1+ as a graphic, so it IS the icon color; Light needs a separate,
    * brighter value than its ochre text color. */
-  /* @generated tokens:base-yellow-icon:start */
-  --yellow-icon: var(--yellow-primary); /* #FACC15 — icons, status dots and tinted borders */
-  /* @generated tokens:base-yellow-icon:end */
   /* Translucent highlight washes (code-editor search matches at 35% / 55%):
    * the vivid amber, so a wash reads as a highlighter in both themes. Text on
    * the wash stays the surrounding text color. */
   /* @generated tokens:base-yellow-wash:start */
   --yellow-wash: hsl(47.74 86.11% 42.35%); /* #C9A30F — code-editor search-match washes */
-  --blue-primary: hsl(212.62 100% 70.78%); /* #6AAEFF — info · links · accents */
-  --blue-bg: hsl(217.14 52.5% 15.69%); /* #13233D — info container surface */
-  --blue-fg: hsl(213.91 100% 81.96%); /* #A3CBFF — text/icon on --blue-bg */
-  --blue-pill-bg: var(--blue-bg); /* #13233D — Workspace link pill fill; Light separates it from the composer surface */
-  --blue-pill-hover: hsl(207.62 69.231% 17.843%); /* #0E304D — Workspace link pill hover fill */
-  --green-secondary: hsl(141.36 41.259% 28.039%); /* #2A653F — solid Accept current change fills (merge conflicts) */
-  --green-secondary-hover: hsl(141.89 44.048% 32.941%); /* #2F794A — Accept current change hover fill */
-  --green-secondary-fg: var(--red-secondary-fg); /* #FFFFFF — text on SOLID --green-secondary fills. THEME-STATIC white, as on the solid destructive fill. */
-  --blue-secondary: hsl(204.55 25.581% 33.725%); /* #405A6C — solid Accept incoming change fills (merge conflicts) */
-  --blue-secondary-hover: hsl(204.44 26.214% 40.392%); /* #4C6C82 — Accept incoming change hover fill */
-  --blue-secondary-fg: var(--red-secondary-fg); /* #FFFFFF — text on SOLID --blue-secondary fills. THEME-STATIC white. */
-  --neutral-secondary: hsl(0 0% 26.667%); /* #444444 — solid neutral fills: Accept both (merge conflicts) */
-  --neutral-secondary-hover: hsl(0 0% 33.725%); /* #565656 — neutral solid hover fill */
-  --neutral-secondary-fg: var(--red-secondary-fg); /* #FFFFFF — text on SOLID --neutral-secondary fills. THEME-STATIC white. */
+  --accent-text: hsl(213.54 78.882% 68.431%); /* #6FA7EE — the blue for words: links, file paths, info icons and running marks */
+  --accent-bg: hsl(213.66 49.398% 16.275%); /* #15273E — tinted info container and link pills */
+  --accent-on-bg: hsl(212.86 100% 83.529%); /* #ABD1FF — text and icons inside an accent-bg container */
+  --accent-bg-hover: hsl(214.44 49.091% 21.569%); /* #1C3352 — hover on accent-bg pills */
+  --green-solid: hsl(141.36 41.259% 28.039%); /* #2A653F — green fill carrying green-solid-fg (accept current) */
+  --green-solid-fg: var(--red-solid-fg); /* #FFFFFF — label on green-solid */
+  --accent-solid: hsl(204.55 25.581% 33.725%); /* #405A6C — blue fill carrying accent-solid-fg (accept incoming) */
+  --accent-solid-fg: var(--red-solid-fg); /* #FFFFFF — label on accent-solid */
+  --neutral-solid: hsl(0 0% 26.667%); /* #444444 — neutral fill carrying neutral-solid-fg (accept both) */
+  --neutral-solid-fg: var(--red-solid-fg); /* #FFFFFF — label on neutral-solid */
   --conflict-current: hsl(142 69% 58% / 0.12); /* #4ADE801F — merge conflict current rows; translucent so selection shows through */
   --conflict-current-band: hsl(142 69% 58% / 0.26); /* #4ADE8042 — merge conflict HEAD band (the <<<<<<< row) */
-  --conflict-incoming: hsl(205 80% 73% / 0.18); /* #83C3F12E — merge conflict incoming rows */
-  --conflict-incoming-band: hsl(205 80% 73% / 0.34); /* #83C3F157 — merge conflict branch band (the >>>>>>> row) */
+  --conflict-incoming: hsl(213.54 78.882% 68.431% / 0.18); /* #6FA7EE2E — merge conflict incoming rows */
+  --conflict-incoming-band: hsl(213.54 78.882% 68.431% / 0.34); /* #6FA7EE57 — merge conflict branch band (the >>>>>>> row) */
   --conflict-neutral: hsl(0 0% 94% / 0.05); /* #F0F0F00D — merge conflict separator, ancestor and accept rows */
-  --violet-primary: hsl(271 80% 73%); /* #BC83F1 — done · merged */
-  --violet-bg: hsl(255 21% 18%); /* #292438 — done container surface */
-  --violet-fg: hsl(265 66% 77%); /* #BE9EEB — text/icon on --violet-bg */
+  --violet-text: hsl(261.22 61.194% 73.725%); /* #B093E5 — violet status words and icons (merged, done) on any plain surface */
+  --violet-bg: hsl(262.5 26.667% 17.647%); /* #2A2139 — done container surface */
+  --violet-on-bg: hsl(260.4 80.645% 87.843%); /* #D8C7F9 — text and icons inside a violet-bg container */
   --accent: hsl(217.86 100% 63.33%); /* #4489FF — the one accent fill: keyboard focus, checked controls, switch on, slider and progress */
   --accent-fg: hsl(0 0% 100%); /* #FFFFFF — marks drawn on the accent fill */
   /* @generated tokens:base-yellow-wash:end */
@@ -683,9 +674,9 @@
    * tuning text contrast must never re-tint diff rows. Dark follows the status
    * anchors; Light pins the diff palette it has always used. */
   /* @generated tokens:base-diff-addition:start */
-  --diff-addition: var(--green-primary); /* #4ADE80 — diff addition base */
-  --diff-deletion: var(--red-primary); /* #F87272 — diff deletion base */
-  --diff-neutral: var(--fg2); /* #9F9F9F — neutral mixed into diff row fills */
+  --diff-addition: hsl(142 69% 58%); /* #4ADE80 — diff addition base; pinned so status text changes leave diffs alone */
+  --diff-deletion: hsl(0 91% 71%); /* #F87272 — diff deletion base; pinned so status text changes leave diffs alone */
+  --diff-neutral: var(--fg2); /* #A0A0A0 — neutral mixed into diff row fills */
   /* @generated tokens:base-diff-addition:end */
 
   /* ── COLOR RAMPS (50–950 — THEME-STATIC absolute scales) ──
@@ -784,19 +775,17 @@
   color-scheme: light;
 
   /* ── BACKGROUNDS ── */
-  /* @generated tokens:light-bg0:start */
-  --bg0: hsl(30 20% 98.039%); /* #FBFAF9 — one step below bg1; the Browser tab's backdrop */
+  /* @generated tokens:light-bg1:start */
   --bg1: hsl(
     0 0% 100%
   ); /* #FFFFFF — default canvas / app backdrop + active chat window */
   --bg1-hover: hsl(30 15.385% 94.902%); /* #F4F2F0 — hover on bg1 (tool calls, tabs) */
-  --bg1-highlight: hsl(40 17.647% 96.667%); /* #F8F7F5 — highlighted content above bg1 */
-  --bg1-bright: var(--bg2); /* #F5F3F0 — filled section card on bg1 */
+  --bg1-raised: hsl(40 23.077% 97.451%); /* #FAF9F7 — one raised step between bg1 and bg2: composer, cards, settings groups, review threads, docked surfaces */
+  --bg1-raised-hover: hsl(36 13.514% 92.745%); /* #EFEDEA — hover on bg1-raised rows and controls */
   --bg2: hsl(36 20% 95.098%); /* #F5F3F0 — composer surface */
-  --bg2-hover: hsl(30 13.043% 90.98%); /* #EBE8E5 — hover on bg2 */
-  --bg2-highlight: var(--bg5); /* #E2E0DD — dropdown trigger hover/open */
+  --bg2-hover: hsl(30 13.043% 90.98%); /* #EBE8E5 — hover on bg2; clears a visible step on bg2 and stays below selected-bg */
   --selected-bg: var(--bg5); /* #E2E0DD — selected, pressed and active fill; at hover level in Light so status text keeps AA; never an edge */
-  /* @generated tokens:light-bg0:end */
+  /* @generated tokens:light-bg1:end */
   /* Floating popover surface = the bg1 canvas itself; lift is border2 +
    * --shadow-dropdown (bg3 == bg1 in light — see the dark block's note). */
   /* @generated tokens:light-bg3:start */
@@ -814,18 +803,15 @@
    * uses the same neutral grey in both themes and a reviewed 3:1 floor.
    * Light INVERTS the lightness axis: higher L means LESS contrast on white. */
   /* @generated tokens:light-fg2:start */
-  --fg2: hsl(26.67 5.45% 32.35%); /* #57524E — default text + icon; 7.7:1 on white */
-  --fg3: hsl(30 5.05% 38.82%); /* #68635E — middle tier (one step below fg2) */
-  --muted-fg: hsl(30 4.17% 47.06%); /* #7D7873 — supplemental metadata; 3:1 floor, fg3 on hover/selection */
+  --fg2: hsl(26.67 5.028% 35.098%); /* #5E5955 — default text and icons */
+  --fg3: hsl(30 5.505% 42.745%); /* #736D67 — the third tier: metadata, placeholders, times, hints; hovered or selected rows lift it to fg2 */
   /* @generated tokens:light-fg2:end */
 
   /* ── SIDEBAR ── */
-  /* @generated tokens:light-sidebar-bg:start */
+  /* @generated tokens:light-nav-bg:start */
   --nav-bg: hsl(40 27.273% 97.843%); /* #FBFAF8 — workspace navigation sidebar background */
   --nav-bg-hover: hsl(36 12.195% 91.961%); /* #EDEBE8 — workspace navigation row hover and selected state */
-  --sidebar-bg: hsl(40 27.273% 97.843%); /* #FBFAF8 — repository sidebar background */
-  --sidebar-bg-hover: hsl(36 12.195% 91.961%); /* #EDEBE8 — sidebar row hover and selected state */
-  /* @generated tokens:light-sidebar-bg:end */
+  /* @generated tokens:light-nav-bg:end */
 
   /* ── BORDERS ── */
   /* @generated tokens:light-border1:start */
@@ -853,14 +839,11 @@
   /* @generated tokens:light-scrim:end */
 
   /* ── HIGHLIGHTED ── */
-  /* @generated tokens:light-highlighted-bg:start */
-  --highlighted-bg: hsl(
-    30 15% 92.157%
-  ); /* #EEEBE8 — user msg bg (text on it: fg1/fg2) */
+  /* @generated tokens:light-highlighted-bright:start */
   --highlighted-bright: hsl(
     32.73 7.801% 27.647%
-  ); /* #4C4741 — input focus border, brighter accents */
-  /* @generated tokens:light-highlighted-bg:end */
+  ); /* #4C4741 — structural neutral: diff modified marks, terminal selection, tree accent (focus is the accent) */
+  /* @generated tokens:light-highlighted-bright:end */
 
   /* ── INVERTED (near-black in light) ── */
   /* @generated tokens:light-inverted-bg:start */
@@ -877,54 +860,48 @@
 
   /* ── COLOR PALETTES (6 families — light anchors) ──
    * Each -primary is TEXT-safe: 4.5:1 on every rest AND hover surface (the
-   * worst is bg2-highlight, #E0E0E0). Only lightness moved from the previous values;
+   * worst is selected-bg, #E0E0E0). Only lightness moved from the previous values;
    * hue and saturation are the family's own. Yellow cannot be bright and
    * readable on white, so its text color is ochre and the vivid golden value
-   * lives on --yellow-icon (icons, dots, tinted borders: 3:1). */
-  /* @generated tokens:light-red-primary:start */
-  --red-primary: hsl(0 72% 44%); /* #C11F1F — −N counts, error accents */
-  --red-secondary: hsl(
-    0 72% 50%
-  ); /* #DB2424 — solid delete fills + delete icons */
-  --red-secondary-hover: hsl(0 72% 45%); /* #C52020 — destructive hover fill */
-  --red-bg: hsl(2.5 100% 95.294%); /* #FFE8E7 — error container surface */
-  --red-fg: hsl(358.21 63.81% 41.176%); /* #AC262A — text/icon on --red-bg */
-  --green-primary: hsl(142 75% 25.5%); /* #107234 — +N counts, success accents */
-  --green-bg: hsl(134 38% 89%); /* #D8EEDD — success container surface */
-  --green-fg: hsl(142 70% 27.5%); /* #157739 — text/icon on --green-bg */
-  --yellow-primary: hsl(
-    45.25 100% 23.92%
-  ); /* #7A5C00 — warning · modified · in-progress (text) */
-  --yellow-bg: hsl(50.67 95.74% 90.78%); /* #FEF7D1 — warning container surface */
-  --yellow-fg: hsl(31.76 80.95% 28.82%); /* #854D0E — text/icon on --yellow-bg */
-  --yellow-icon: hsl(45.19 100% 30.98%); /* #9E7700 — icons, dots, tinted borders */
+   * lives on --yellow-text (icons, dots, tinted borders: 3:1). */
+  /* @generated tokens:light-red-text:start */
+  --red-text: hsl(358.66 61.468% 42.745%); /* #B02A2D — red status words, icons and destructive labels on any plain surface */
+  --red-solid: hsl(
+    0 72% 45%
+  ); /* #C52020 — destructive fill carrying red-solid-fg; deep enough that its 90% hover keeps the label at AA */
+  --red-bg: hsl(4.8 100% 95.098%); /* #FFE8E6 — error container surface */
+  --red-on-bg: hsl(358.95 60.638% 36.863%); /* #972527 — text and icons inside a red-bg container */
+  --green-text: hsl(140.69 63.504% 26.863%); /* #197037 — green status words and icons on any plain surface */
+  --green-bg: hsl(129 50% 92.157%); /* #E1F5E4 — success container surface */
+  --green-on-bg: hsl(141.75 71.429% 21.961%); /* #10602D — text and icons inside a green-bg container */
+  --yellow-text: hsl(
+    39.7 98.519% 26.471%
+  ); /* #865901 — yellow status words and icons on any plain surface (one yellow for text and graphics) */
+  --yellow-bg: hsl(43.5 86.957% 90.98%); /* #FCF1D4 — warning container surface */
+  --yellow-on-bg: hsl(35.05 75.94% 26.078%); /* #754B10 — text and icons inside a yellow-bg container */
   --yellow-wash: hsl(37 90% 60%); /* #F5AE3D — search-match highlight washes */
-  --blue-primary: hsl(218.97 76.32% 44.71%); /* #1B58C9 — info · links · accents */
-  --blue-bg: hsl(217.14 100% 95.88%); /* #EAF2FF — info container surface */
-  --blue-fg: hsl(218.73 75.24% 41.18%); /* #1A52B8 — text/icon on --blue-bg */
-  --blue-pill-bg: hsl(214 100% 87%); /* #BDD9FF — Workspace link pill fill; Light separates it from the composer surface */
-  --blue-pill-hover: hsl(214 100% 86.5%); /* #BAD8FF — Workspace link pill hover fill */
-  --green-secondary: var(--green-primary); /* #107234 — solid Accept current change fills (merge conflicts) */
-  --green-secondary-hover: hsl(142 75% 23.529%); /* #0F6930 — Accept current change hover fill */
-  --blue-secondary: var(--blue-primary); /* #1B58C9 — solid Accept incoming change fills (merge conflicts) */
-  --blue-secondary-hover: hsl(220.95 83.26% 44.51%); /* #134FD0 — Accept incoming change hover fill */
-  --neutral-secondary: var(--fg2); /* #57524E — solid neutral fills: Accept both (merge conflicts) */
-  --neutral-secondary-hover: hsl(30 5.634% 27.843%); /* #4B4743 — neutral solid hover fill */
+  --accent-text: hsl(214.72 73.272% 42.549%); /* #1D60BC — the blue for words: links, file paths, info icons and running marks */
+  --accent-bg: hsl(215.56 100% 94.706%); /* #E4EFFF — tinted info container and link pills */
+  --accent-on-bg: hsl(214.69 79.459% 36.275%); /* #1351A6 — text and icons inside an accent-bg container */
+  --accent-bg-hover: hsl(216.82 100% 91.373%); /* #D3E4FF — hover on accent-bg pills */
+  --green-solid: var(--green-text); /* #197037 — green fill carrying green-solid-fg (accept current) */
+  --accent-solid: var(--accent-text); /* #1D60BC — blue fill carrying accent-solid-fg (accept incoming) */
+  --neutral-solid: var(--fg2); /* #5E5955 — neutral fill carrying neutral-solid-fg (accept both) */
   --conflict-current: hsl(142 75% 25.5% / 0.12); /* #1072341F — merge conflict current rows; translucent so selection shows through */
   --conflict-current-band: hsl(142 75% 25.5% / 0.26); /* #10723442 — merge conflict HEAD band (the <<<<<<< row) */
-  --conflict-incoming: hsl(221 83% 48.5% / 0.12); /* #1556E21F — merge conflict incoming rows */
-  --conflict-incoming-band: hsl(221 83% 48.5% / 0.26); /* #1556E242 — merge conflict branch band (the >>>>>>> row) */
+  --conflict-incoming: hsl(214.72 73.272% 42.549% / 0.12); /* #1D60BC1F — merge conflict incoming rows */
+  --conflict-incoming-band: hsl(214.72 73.272% 42.549% / 0.26); /* #1D60BC42 — merge conflict branch band (the >>>>>>> row) */
   --conflict-neutral: hsl(30 10% 15.686% / 0.05); /* #2C28240D — merge conflict separator, ancestor and accept rows */
-  --violet-primary: hsl(271 80% 51%); /* #851EE6 — done · merged */
-  --violet-bg: hsl(274 93% 94%); /* #F2E1FE — done container surface */
-  --violet-fg: hsl(263 61% 46%); /* #652EBD — text/icon on --violet-bg */
+  --violet-text: hsl(265.38 42.276% 48.235%); /* #7347AF — violet status words and icons (merged, done) on any plain surface */
+  --violet-bg: hsl(260 81.818% 95.686%); /* #F1EBFD — done container surface */
+  --violet-on-bg: hsl(265.89 44.601% 41.765%); /* #643B9A — text and icons inside a violet-bg container */
   --accent: hsl(219.57 82.46% 55.29%); /* #2F6FEB — the one accent fill: keyboard focus, checked controls, switch on, slider and progress */
-  /* @generated tokens:light-red-primary:end */
+  /* @generated tokens:light-red-text:end */
 
   /* Diff inputs pinned to Light's established diff palette (see :root). */
   /* @generated tokens:light-diff-addition:start */
-  --diff-addition: hsl(142 75% 36%); /* #17A149 — diff addition base */
-  --diff-deletion: hsl(0 72% 51%); /* #DC2828 — diff deletion base */
+  --diff-addition: hsl(142 75% 36%); /* #17A149 — diff addition base; pinned so status text changes leave diffs alone */
+  --diff-deletion: hsl(0 72% 51%); /* #DC2828 — diff deletion base; pinned so status text changes leave diffs alone */
   --diff-neutral: hsl(20 4% 37%); /* #625D5B — neutral mixed into diff row fills */
   /* @generated tokens:light-diff-addition:end */
 }
@@ -936,7 +913,8 @@
    `currentColor`. Without this base-layer override, every `border`
    utility paints with the element's text color. shadcn's official
    Tailwind v4 setup guide uses this pattern; we point at our
-   default border (border1) and our emphasis token for focus outlines. */
+   default border (border1) and the accent, the one keyboard-focus
+   colour, for outlines. */
 
 @layer base {
   *,
@@ -945,6 +923,6 @@
   ::backdrop,
   ::file-selector-button {
     border-color: var(--border1, currentColor);
-    outline-color: var(--highlighted-bright);
+    outline-color: var(--accent);
   }
 }

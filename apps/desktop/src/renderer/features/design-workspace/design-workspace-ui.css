@@ -42,12 +42,12 @@
   font-size: 13px;
   font-variant-numeric: tabular-nums;
   transition:
-    background-color 120ms ease-out,
-    box-shadow 120ms ease-out;
+    background-color var(--duration-fast) ease-out,
+    box-shadow var(--duration-fast) ease-out;
 }
 
 .zd-field:hover {
-  --zd-field-fill: var(--bg2-highlight);
+  --zd-field-fill: var(--selected-bg);
 }
 
 /* A read-only field has nothing to edit, so the pointer changes nothing. A
@@ -68,7 +68,7 @@
 }
 
 .zd-field[data-state="open"] {
-  --zd-field-fill: var(--bg2-highlight);
+  --zd-field-fill: var(--selected-bg);
 }
 
 .zd-field:focus-visible[data-zeros-keyboard-focus],
@@ -80,7 +80,7 @@
 
 .zd-field[aria-invalid="true"],
 .zd-field:has([aria-invalid="true"]) {
-  box-shadow: inset 0 0 0 1px var(--red-primary);
+  box-shadow: inset 0 0 0 1px var(--red-text);
 }
 
 .zd-field:has(:disabled),
@@ -170,8 +170,8 @@
   font-size: 13px;
   white-space: nowrap;
   transition:
-    background-color 120ms ease-out,
-    color 120ms ease-out;
+    background-color var(--duration-fast) ease-out,
+    color var(--duration-fast) ease-out;
 }
 
 .zd-segment svg {
@@ -216,8 +216,8 @@
   background: transparent;
   color: var(--fg2);
   transition:
-    background-color 120ms ease-out,
-    color 120ms ease-out;
+    background-color var(--duration-fast) ease-out,
+    color var(--duration-fast) ease-out;
 }
 
 /* The shared IconButton sizes: compact 24 and inline 20 carry a 12px glyph,
@@ -246,7 +246,7 @@
 .zd-icon-button:hover:not(:disabled),
 .zd-icon-button[data-state="open"],
 .zd-icon-button[aria-expanded="true"] {
-  background-color: var(--bg2-highlight);
+  background-color: var(--selected-bg);
   color: var(--fg1);
 }
 
@@ -282,7 +282,7 @@
 
 .zd-section-header {
   display: flex;
-  height: 36px;
+  height: 40px;
   min-width: 0;
   align-items: center;
   gap: 2px;
@@ -387,8 +387,8 @@
   flex: 1 1 auto;
   overflow: hidden;
   color: var(--fg1);
-  font-size: 13px;
-  font-weight: var(--weight-medium);
+  font-size: 14px;
+  font-weight: var(--weight-semibold);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -489,7 +489,7 @@
 .zd-limit-field:hover,
 .zd-size-control:hover,
 .zd-size-control:has(.zd-size-trigger[data-state="open"]) {
-  --zd-field-fill: var(--bg2-highlight);
+  --zd-field-fill: var(--selected-bg);
 }
 
 .zd-limit-field:focus-within,
@@ -562,7 +562,7 @@
 }
 
 .zd-alignment-point:hover:not(:disabled) {
-  background-color: var(--bg2-highlight);
+  background-color: var(--selected-bg);
 }
 
 .zd-alignment-point:focus-visible:where(:not([data-zeros-focus-visible="false"])) {
@@ -695,7 +695,7 @@
     var(--zd-field-fill) 55%,
     transparent
   );
-  transition: opacity 120ms ease-out;
+  transition: opacity var(--duration-fast) ease-out;
 }
 
 .zd-inspector-field:hover .zd-field-motion,
@@ -727,8 +727,8 @@
     transparent
   );
   transition:
-    opacity 120ms ease-out,
-    visibility 0s linear 120ms;
+    opacity var(--duration-fast) ease-out,
+    visibility 0s linear var(--duration-fast);
 }
 
 /* Only the button takes the pointer; the fade still lets a press reach the
@@ -837,7 +837,7 @@
   height: 36px;
   gap: 2px;
   padding: calc(var(--spacing) * 0.75);
-  border-radius: calc(var(--radius-md) + 4px);
+  border-radius: var(--radius-xl);
 }
 
 .zd-canvas-toolbar-divider {
@@ -866,7 +866,7 @@
   top: 8px;
   bottom: 8px;
   flex-direction: column;
-  transition: bottom 160ms ease-out;
+  transition: bottom var(--duration-slow) ease-out;
 }
 
 .zd-design-tools-rail::before,
@@ -898,8 +898,8 @@
   font-size: 13px;
   font-weight: var(--weight-medium);
   transition:
-    background-color 120ms ease-out,
-    color 120ms ease-out;
+    background-color var(--duration-fast) ease-out,
+    color var(--duration-fast) ease-out;
 }
 
 .zd-design-directory-trigger > svg {
@@ -940,9 +940,9 @@
   height: 36px;
   gap: 2px;
   padding: calc(var(--spacing) * 0.75);
-  border-radius: calc(var(--radius-md) + 4px);
+  border-radius: var(--radius-xl);
   transform: translateX(-50%);
-  transition: bottom 160ms ease-out;
+  transition: bottom var(--duration-slow) ease-out;
 }
 
 .zd-design-agent-activity[data-motion-open] {
@@ -1008,13 +1008,13 @@
   align-items: center;
   justify-content: center;
   border: 1px solid transparent;
-  border-radius: var(--radius-md);
+  border-radius: var(--radius-lg);
   background: transparent;
   color: var(--fg2);
   transition:
-    background-color 120ms ease-out,
-    border-color 120ms ease-out,
-    color 120ms ease-out;
+    background-color var(--duration-fast) ease-out,
+    border-color var(--duration-fast) ease-out,
+    color var(--duration-fast) ease-out;
 }
 
 .zd-canvas-tool svg {
@@ -1023,14 +1023,14 @@
 }
 
 .zd-canvas-tool:hover:not(:disabled) {
-  background-color: var(--bg2-highlight);
+  background-color: var(--selected-bg);
   color: var(--fg1);
 }
 
 /* An open menu holds the hover; a toggle takes IconButton's pressed look, the
  * selected fill with no edge. */
 .zd-canvas-tool[aria-expanded="true"] {
-  background-color: var(--bg2-highlight);
+  background-color: var(--selected-bg);
   color: var(--fg1);
 }
 
@@ -1162,11 +1162,11 @@
 .zd-design-selection-outline[data-design-component-selection],
 [data-design-component-selection],
 [data-design-frame-component][data-design-frame-root-selected] {
-  --design-selection-stroke: var(--violet-primary);
+  --design-selection-stroke: var(--violet-text);
   --design-selection-soft: var(--violet-bg);
   --design-selection-handle-fill: var(--violet-bg);
   --design-selection-label-bg: var(--violet-bg);
-  --design-selection-label-fg: var(--violet-fg);
+  --design-selection-label-fg: var(--violet-on-bg);
 }
 
 .zd-design-selection-outline {
@@ -1432,16 +1432,19 @@
   background-color: var(--design-gap-stroke);
 }
 
+/* Value chips carry white text, so they sit on the darker label fills
+ * (padding on the selection label blue, gap on its deep pink); the strokes
+ * keep the brighter colours for ticks and bands. */
 .zd-design-inline-spacing-value {
   visibility: hidden;
   opacity: 0;
-  background-color: var(--design-padding-stroke);
+  background-color: var(--design-selection-label-bg);
   color: var(--design-selection-label-fg);
   text-align: center;
 }
 
 .zd-design-inline-gap-handle .zd-design-inline-spacing-value {
-  background-color: var(--design-gap-stroke);
+  background-color: var(--design-gap-label-bg);
 }
 
 /* Hovered or edited space: one solid shade of its stroke color, strong
@@ -1529,7 +1532,7 @@
 .zd-design-inline-spacing-floating {
   visibility: visible;
   opacity: 1;
-  background-color: var(--design-gap-stroke);
+  background-color: var(--design-gap-label-bg);
 }
 
 /* Typing replaces the readout in place. */
@@ -1550,7 +1553,7 @@
   border: 0;
   box-shadow: inset 0 0 0 calc(1px * var(--design-canvas-inverse-zoom))
     var(--design-spacing-line-border);
-  background-color: var(--design-padding-stroke);
+  background-color: var(--design-selection-label-bg);
   color: var(--design-selection-label-fg);
   caret-color: var(--design-selection-label-fg);
   text-align: center;
@@ -1560,7 +1563,7 @@
 
 .zd-design-inline-spacing-input[aria-invalid="true"] {
   box-shadow: inset 0 0 0 calc(1px * var(--design-canvas-inverse-zoom))
-    var(--red-primary);
+    var(--red-text);
 }
 
 .zd-design-inline-spacing-input::selection {
@@ -1638,11 +1641,11 @@
 
 /* Layer selection stays neutral: the tree reads as chrome, and the canvas keeps
  * sole ownership of the design accent. Like every tree, the selected row fills
- * bg2-highlight with fg1, a step above hover; owned rows sit between. */
+ * selected-bg with fg1, a step above hover; owned rows sit between. */
 .zd-design-layer-selected,
 .zd-design-layer-selected:hover {
   border-width: 0;
-  background-color: var(--bg2-highlight);
+  background-color: var(--selected-bg);
   box-shadow: none;
   color: var(--fg1);
 }
@@ -1663,12 +1666,12 @@
 
 .zd-design-layer-row[data-design-layer-component-owner],
 .zd-design-layer-row[data-design-frame-component] {
-  color: var(--violet-primary);
+  color: var(--violet-text);
 }
 
 .zd-design-layer-row[data-design-layer-component-owner] > svg,
 .zd-design-layer-row[data-design-frame-component] > svg {
-  color: var(--violet-primary);
+  color: var(--violet-text);
 }
 
 .zd-design-layer-selected > svg {
@@ -2100,7 +2103,7 @@
   padding: 10px 12px;
   border-radius: var(--radius-md);
   background: var(--yellow-bg);
-  color: var(--yellow-fg);
+  color: var(--yellow-on-bg);
 }
 .zd-canvas-item .zd-canvas-note-text {
   display: block;

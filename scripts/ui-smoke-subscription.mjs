@@ -318,7 +318,7 @@ export async function runSubscriptionSmoke({ page, check }) {
     const disconnect = page.getByRole("menuitem", { name: "Disconnect", exact: true });
     const red = await disconnect.evaluate((el) => {
       const probe = document.createElement("span");
-      probe.style.color = "var(--red-primary)";
+      probe.style.color = "var(--red-text)";
       el.append(probe);
       const color = getComputedStyle(probe).color;
       probe.remove();
@@ -437,7 +437,7 @@ export async function runUsageSmoke({ page, check }) {
     const beforeReturn = (await counts()).usageReads;
     await page.getByRole("button", { name: "Settings", exact: true }).click();
     await expect(refresh).toHaveAttribute("aria-busy", "true");
-    await expect(refresh.locator("svg")).toHaveCSS("animation-name", "spin");
+    await expect(refresh.locator("[data-run-stream]")).toHaveCount(1);
     expect((await counts()).usageReads).toBe(beforeReturn + 1);
     await expect(loading).toHaveCount(0);
     await expect(info.getByRole("progressbar").first()).toHaveAttribute("aria-valuenow", "20");

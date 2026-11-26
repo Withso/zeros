@@ -4,7 +4,6 @@ import {
   ChevronDown,
   ChevronRight,
   CircleDashed,
-  LoaderCircle,
   X,
 } from "lucide-react";
 import {
@@ -19,6 +18,7 @@ import {
   CollapsibleContent,
   CollapsibleTrigger,
 } from "../../shared/ui/primitives/elements/collapsible";
+import { RunStream } from "@/renderer/shared/ui/loading/run-stream";
 
 const LABELS = { plugins: "Plugins", apps: "Apps", mcp: "MCPs" } as const;
 /** MCP servers declared in the agent's own settings files on this machine. */
@@ -101,7 +101,6 @@ export const ComposerToolGroups = memo(function ComposerToolGroups({
               <Button
                 type="button"
                 variant="ghost"
-                size="sm"
                 // A 12px chevron and a 6px gap put the label 24px in, the
                 // column its tool rows' names start on.
                 className="w-full justify-start gap-1.5"
@@ -145,7 +144,6 @@ export const ComposerToolGroups = memo(function ComposerToolGroups({
                     <Button
                       type="button"
                       variant="ghost"
-                      size="sm"
                       className="w-full justify-start gap-1.5"
                       aria-label={`Local, ${local.length}`}
                     >
@@ -206,7 +204,7 @@ function ToolRows({
           // 28px rows, 13/18, names on the group label's 24px column.
           className="flex min-h-7 items-center gap-2 py-1 pr-1.5 pl-6 text-xs leading-4.5"
         >
-          <Tooltip label={entry.name} delayDuration={1500}>
+          <Tooltip label={entry.name}>
             <div className="text-fg1 min-w-0 flex-1 truncate">{entry.name}</div>
           </Tooltip>
           <ToolStatus
@@ -246,10 +244,9 @@ function ToolStatus({
     return (
       <Button
         type="button"
-        size="sm"
         variant="ghost"
         disabled
-        className="text-blue-fg h-auto shrink-0 bg-transparent p-0 hover:bg-transparent hover:text-(--composer-tool-action-hover)"
+        className="text-accent-text h-auto shrink-0 bg-transparent p-0 hover:bg-transparent hover:text-(--composer-tool-action-hover)"
         aria-label={`Authenticate ${entry.name}`}
       >
         Opening…
@@ -263,7 +260,6 @@ function ToolStatus({
       <Tooltip label="Sign-in failed. Authenticate again to retry.">
         <Button
           type="button"
-          size="sm"
           variant="ghost"
           disabled={authBusy !== null}
           className="h-auto shrink-0 bg-transparent p-0 hover:bg-transparent"
@@ -271,7 +267,7 @@ function ToolStatus({
           onClick={() => onAuthenticate(entry.id)}
         >
           <span role="img" aria-label="Sign-in failed">
-            <X className="text-red-primary size-3.5" />
+            <X className="text-red-text size-3.5" />
           </span>
         </Button>
       </Tooltip>
@@ -285,7 +281,7 @@ function ToolStatus({
     return (
       <Tooltip label={label}>
         <span role="img" aria-label={label} className="shrink-0">
-          <Check className="text-green-primary size-3.5" />
+          <Check className="text-green-text size-3.5" />
         </span>
       </Tooltip>
     );
@@ -293,16 +289,15 @@ function ToolStatus({
   if (entry.status === "connecting")
     return (
       <span role="status" aria-label="Connecting" className="shrink-0">
-        <LoaderCircle className="text-fg2 size-3.5 animate-spin motion-reduce:animate-none" />
+        <RunStream size={14} className="text-(--loader-active)" />
       </span>
     );
   if (canAuthenticate)
     return (
       <Button
         type="button"
-        size="sm"
         variant="ghost"
-        className="text-blue-fg h-auto shrink-0 bg-transparent p-0 hover:bg-transparent hover:text-(--composer-tool-action-hover)"
+        className="text-accent-text h-auto shrink-0 bg-transparent p-0 hover:bg-transparent hover:text-(--composer-tool-action-hover)"
         disabled={authBusy !== null}
         aria-label={`Authenticate ${entry.name}`}
         onClick={() => onAuthenticate(entry.id)}
@@ -321,7 +316,7 @@ function ToolStatus({
   return (
     <Tooltip label={entry.detail ?? label}>
       <span role="img" aria-label={entry.detail ? `${label}: ${entry.detail}` : label} className="shrink-0">
-        <X className="text-red-primary size-3.5" />
+        <X className="text-red-text size-3.5" />
       </span>
     </Tooltip>
   );

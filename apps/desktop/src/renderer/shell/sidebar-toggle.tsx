@@ -39,7 +39,7 @@ export const TRAFFIC_LIGHT_RESERVE_CLS = "h-full w-[80px] shrink-0";
 export const COLLAPSED_CONTROLS_RESERVE_CLS = "h-full w-29 shrink-0";
 
 const TOGGLE_CLS =
-  "-translate-y-px h-7 w-7 shrink-0 rounded-md text-fg2 hover:bg-sidebar-bg-hover hover:text-fg1";
+  "-translate-y-px h-7 w-7 shrink-0 rounded-md text-fg2 hover:bg-bg1-raised-hover hover:text-fg1";
 
 export function SidebarToggleButton({ collapsed }: { collapsed: boolean }) {
   const label = collapsed ? "Show sidebar" : "Hide sidebar";

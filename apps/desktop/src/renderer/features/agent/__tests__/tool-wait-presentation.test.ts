@@ -76,13 +76,13 @@ describe("pending checks presentation", () => {
     const before = JSON.stringify(tool);
     const collapsed = row(tool, false);
     expect(collapsed).toContain(">Bash<");
-    expect(collapsed).not.toContain("text-red-primary");
+    expect(collapsed).not.toContain("text-red-text");
     expect(collapsed).not.toContain("Tool failed");
     expect(collapsed).toContain('aria-description="Checks are still running."');
     const expanded = row(tool);
     expect(expanded).toContain("Checks are still running.");
     expect(expanded).toContain("smoke");
-    expect(expanded).not.toContain("text-red-primary");
+    expect(expanded).not.toContain("text-red-text");
     expect(expanded).not.toContain("tool failed without an explanation");
     expect(JSON.stringify(tool)).toBe(before);
     const exported = formatTranscript([tool], "full").text;

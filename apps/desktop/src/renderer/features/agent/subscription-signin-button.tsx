@@ -14,7 +14,6 @@ export function SubscriptionSignInButton({
     <Button
       type="button"
       variant="secondary"
-      size="sm"
       onClick={onSignIn}
       disabled={phase === "success"}
       aria-label={

@@ -288,7 +288,7 @@ function SetupRow({
         <>
           {row.message}
           {typeof row.progress === "number" ? ` ${row.progress}%` : null}
-          {row.detail ? <span className="text-muted-fg block">{row.detail}</span> : null}
+          {row.detail ? <span className="text-fg3 block">{row.detail}</span> : null}
         </>
       }
     >
@@ -297,7 +297,6 @@ function SetupRow({
           {row.checkAgain ? (
             <Button
               variant="ghost"
-              size="sm"
               className="text-fg2"
               disabled={checking}
               aria-busy={checking || undefined}
@@ -309,7 +308,6 @@ function SetupRow({
           {action ? (
             <Button
               variant="secondary"
-              size="sm"
               onClick={() => void runSimulatorSetupAction(action)}
             >
               {action.label}

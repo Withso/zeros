@@ -166,7 +166,7 @@ export function DashboardToolbar({
               >
                 <UserRound />
                 <span className="max-w-32 truncate">{byLabel(by)}</span>
-                <ChevronDown className="text-muted-fg" />
+                <ChevronDown className="text-fg3" />
               </Button>
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end" className="max-h-80 min-w-44 overflow-y-auto">
@@ -202,7 +202,7 @@ export function DashboardToolbar({
                   )?.label
                 }
               </span>
-              <ChevronDown className="text-muted-fg" />
+              <ChevronDown className="text-fg3" />
             </Button>
           </DropdownMenuTrigger>
           <DropdownMenuContent align="end">
@@ -237,7 +237,7 @@ export function DashboardToolbar({
                   )?.label
                 }
               </span>
-              <ChevronDown className="text-muted-fg" />
+              <ChevronDown className="text-fg3" />
             </Button>
           </DropdownMenuTrigger>
           <DropdownMenuContent align="end">
@@ -260,7 +260,7 @@ export function DashboardToolbar({
             <Button variant="ghost" className="text-fg2">
               <SlidersHorizontal />
               <span>Display</span>
-              <ChevronDown className="text-muted-fg" />
+              <ChevronDown className="text-fg3" />
             </Button>
           </DropdownMenuTrigger>
           <DropdownMenuContent align="end" className="min-w-44">

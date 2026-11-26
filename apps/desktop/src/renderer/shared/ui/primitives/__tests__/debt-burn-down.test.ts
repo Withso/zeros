@@ -56,25 +56,6 @@ const cases = [
     },
   },
   {
-    file: "features/team/team-panel.tsx",
-    site: 109,
-    component: "ClassAlias",
-    tag: "div",
-    original:
-      "bg-bg2-hover text-fg1 flex shrink-0 items-center justify-center rounded-lg font-medium text-[10px]",
-    className:
-      "bg-bg2-hover text-fg1 flex shrink-0 items-center justify-center rounded-lg font-medium text-xxs",
-    literal: "text-xxs",
-    alias: {
-      before: "text-[10px]",
-      after: "text-xxs",
-    },
-    style: {
-      width: 20,
-      height: 20,
-    },
-  },
-  {
     file: "shell/workbench/tabs/review-changes.tsx",
     site: 231,
     component: "ClassAlias",
@@ -82,19 +63,6 @@ const cases = [
     original: "shrink-0 rounded-sm px-1.5 py-0.5 text-[10px] font-medium",
     className: "shrink-0 rounded-sm px-1.5 py-0.5 text-xxs font-medium",
     literal: "shrink-0 rounded-sm px-1.5 py-0.5 text-xxs font-medium",
-    alias: {
-      before: "text-[10px]",
-      after: "text-xxs",
-    },
-  },
-  {
-    file: "shell/workbench/tabs/review-shared-components.tsx",
-    site: 97,
-    component: "ClassAlias",
-    tag: "AvatarFallback",
-    original: "text-[10px] uppercase",
-    className: "text-xxs uppercase",
-    literal: "text-xxs uppercase",
     alias: {
       before: "text-[10px]",
       after: "text-xxs",
@@ -209,7 +177,7 @@ const cases = [
     // The Zeros Design ListRow: a bg1-hover hover, 28px, the keyboard ring,
     // pulled 8px into the gutter like every feed row.
     original:
-      "group/event-stripe hover:bg-bg1-hover focus-visible:inset-ring focus-visible:inset-ring-accent -ml-2 flex min-h-7 w-fit max-w-full min-w-0 items-center gap-2 rounded-md px-2 py-1 text-left transition-colors duration-120 ease-out focus-visible:outline-none",
+      "group/event-stripe hover:bg-bg1-hover focus-visible:inset-ring focus-visible:inset-ring-accent -ml-2 flex min-h-7 w-fit max-w-full min-w-0 items-center gap-2 rounded-md px-2 py-1 text-left transition-colors duration-fast ease-out focus-visible:outline-none",
     className: "group/event-stripe min-w-0 transition-colors",
     literal: "group/event-stripe min-w-0 transition-colors",
   },
@@ -310,7 +278,7 @@ describe("pixel-identical debt burn-down", () => {
     const previous = renderRecipe(
       c.tag,
       c.original,
-      "style" in c ? c.style : undefined,
+      undefined,
     );
     const current =
       c.component === "ListRow"
@@ -321,7 +289,7 @@ describe("pixel-identical debt burn-down", () => {
               "content",
             ),
           )
-        : renderRecipe(c.tag, c.className, "style" in c ? c.style : undefined);
+        : renderRecipe(c.tag, c.className, undefined);
     const normalized = new Set(
       [...classes(previous)].map((token) =>
         c.alias && token === c.alias.before ? c.alias.after : token,

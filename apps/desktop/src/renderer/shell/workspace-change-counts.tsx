@@ -45,8 +45,8 @@ export function WorkspaceChangeCounts({
   if (additions <= 0 && deletions <= 0) return null;
   // Undefined, not a token: an inactive pair inherits the wrapper's fg2 rather
   // than restating it on both halves.
-  const addedCls = active ? "text-green-primary" : undefined;
-  const removedCls = active ? "text-red-primary" : undefined;
+  const addedCls = active ? "text-green-text" : undefined;
+  const removedCls = active ? "text-red-text" : undefined;
   return (
     <span
       className="text-fg2 text-3xxs inline-flex shrink-0 gap-1 tabular-nums"

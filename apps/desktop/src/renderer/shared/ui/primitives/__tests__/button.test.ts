@@ -10,10 +10,9 @@ const classesFor = (props: Parameters<typeof buttonVariants>[0]) =>
   cn(buttonVariants(props)).split(/\s+/);
 
 describe("Button control sizes", () => {
-  it("keeps sm / default / lg as one standard 28px control", () => {
-    const standard = classesFor({ size: "default" });
-    expect(classesFor({ size: "sm" })).toEqual(standard);
-    expect(classesFor({ size: "lg" })).toEqual(standard);
+  it("has one standard 28px control by default, with no size aliases", () => {
+    const standard = classesFor({ size: "standard" });
+    expect(classesFor({})).toEqual(standard);
     // 13px text on an 18px line + 4px vertical padding + 1px border = 28px.
     expect(standard).toEqual(expect.arrayContaining(["text-xs", "leading-4.5", "py-1"]));
   });
@@ -38,10 +37,10 @@ describe("Button control sizes", () => {
     expect(compactIcon).not.toContain("[&_:where(svg:not([class*='size-']))]:size-3.5");
   });
 
-  it("hovers destructive fills with a solid token, never an alpha wash", () => {
+  it("hovers destructive fills by 90% opacity, never an alpha wash of the fill", () => {
     const destructive = classesFor({ variant: "destructive" }).join(" ");
-    expect(destructive).toContain("hover:bg-red-secondary-hover");
-    expect(destructive).not.toMatch(/bg-red-secondary\/\d+/);
+    expect(destructive).toContain("hover:opacity-90");
+    expect(destructive).not.toMatch(/bg-red-solid\/\d+/);
   });
 });
 
@@ -62,7 +61,7 @@ describe("Button states", () => {
   it("holds the hover look while a Ghost button's menu is open", () => {
     const ghost = classesFor({ variant: "ghost" });
     expect(ghost).toEqual(
-      expect.arrayContaining(["data-[state=open]:bg-bg2-highlight", "data-[state=open]:text-fg1"]),
+      expect.arrayContaining(["data-[state=open]:bg-selected-bg", "data-[state=open]:text-fg1"]),
     );
   });
 
@@ -92,7 +91,7 @@ describe("Button states", () => {
     );
     expect(markup).toContain('disabled=""');
     expect(markup).toContain('aria-busy="true"');
-    expect(markup).toMatch(/<button[^>]*><span[^>]*data-zeros-loader="logo"/);
+    expect(markup).toMatch(/<button[^>]*><span[^>]*data-zeros-loader="stream"/);
     expect(markup).toContain("Save</button>");
   });
 });
@@ -104,12 +103,24 @@ describe("Button asChild", () => {
     const html = renderToStaticMarkup(
       createElement(
         Button,
-        { asChild: true, variant: "secondary", size: "sm" },
+        { asChild: true, variant: "secondary" },
         createElement("a", { href: "#console" }, "Open console"),
       ),
     );
     expect(html).toMatch(/^<a [^>]*href="#console"/);
     expect(html).toContain("rounded-md");
     expect(html).toContain("Open console");
+  });
+});
+
+describe("Button inline size", () => {
+  it("is a 20px item with 12/16 text and 4px corners for inline floating groups", () => {
+    const inline = classesFor({ size: "inline", variant: "ghost" });
+    for (const cls of ["h-5", "rounded-sm", "text-3xxs", "leading-4", "px-1.5", "py-0"]) expect(inline, cls).toContain(cls);
+  });
+
+  it("gives every filled button one hover rule: 90% opacity", () => {
+    expect(classesFor({ variant: "primary" })).toContain("hover:opacity-90");
+    expect(classesFor({ variant: "destructive" })).toContain("hover:opacity-90");
   });
 });

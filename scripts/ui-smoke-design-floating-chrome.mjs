@@ -286,8 +286,8 @@ export async function runDesignFloatingChromeSmoke({ page, waitFor, check }) {
 
     await fold.click();
     check(
-      "closing the drawer leaves its 36px header and renders no tree",
-      near(await layers.evaluate((element) => element.getBoundingClientRect().height), 36) &&
+      "closing the drawer leaves its 40px header and renders no tree",
+      near(await layers.evaluate((element) => element.getBoundingClientRect().height), 40) &&
         (await fold.getAttribute("aria-expanded")) === "false" &&
         (await split.count()) === 0 &&
         (await layersViewport.count()) === 0,

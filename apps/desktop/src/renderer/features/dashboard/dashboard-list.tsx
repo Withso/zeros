@@ -37,7 +37,7 @@ import { pullRequestTarget } from "../../state/workspace-repositories";
 // Rows are plain: no card, fill or divider. 40px rows 2px apart; hover and
 // focus paint bg1-hover across the row's cells with 8px end corners.
 const ROW_CLS =
-  "h-10 cursor-pointer [&>td]:py-1 [&>td]:transition-colors [&>td]:duration-120 [&>td:first-child]:rounded-l-lg [&>td:first-child]:pl-2.5 [&>td:last-child]:rounded-r-lg [&>td:last-child]:pr-2 hover:[&>td]:bg-bg1-hover focus-within:[&>td]:bg-bg1-hover";
+  "h-10 cursor-pointer [&>td]:py-1 [&>td]:transition-colors [&>td]:duration-fast [&>td:first-child]:rounded-l-lg [&>td:first-child]:pl-2.5 [&>td:last-child]:rounded-r-lg [&>td:last-child]:pr-2 hover:[&>td]:bg-bg1-hover focus-within:[&>td]:bg-bg1-hover";
 // The title cell takes every free pixel and truncates; each option cell
 // shrinks to its content, right-aligned on the shared column.
 const TITLE_CELL_CLS = "w-full max-w-0";
@@ -309,14 +309,14 @@ export const DashboardListRow = forwardRef<
           <Tooltip label={status}>
             {/* The tag names its state once for assistive tech. */}
             <span
-              className={cn(TAG_CLS, "pr-2 pl-1.5", missing && "text-red-fg")}
+              className={cn(TAG_CLS, "pr-2 pl-1.5", missing && "text-red-text")}
               role="img"
               aria-label={status}
             >
               {archived ? (
-                <Archive className="text-muted-fg size-3.5 shrink-0" />
+                <Archive className="text-fg3 size-3.5 shrink-0" />
               ) : missing ? (
-                <FolderX className="text-red-primary size-3.5 shrink-0" />
+                <FolderX className="text-red-text size-3.5 shrink-0" />
               ) : folder ? (
                 <Folder className="text-fg2 size-3.5 shrink-0" />
               ) : (

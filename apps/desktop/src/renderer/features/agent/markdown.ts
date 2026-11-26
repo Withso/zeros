@@ -299,7 +299,7 @@ function renderMarkdownTokenSegments(tokens: TokensList, fileLink?: FileLink): M
 
 /** Rewrite file references into clickable chips so a path looks identical
  *  whether the agent wrote it as inline code or as a markdown link — and a file
- *  link never renders as a bare `--blue-primary` blue `<a>`. Two passes:
+ *  link never renders as a bare `--accent-text` blue `<a>`. Two passes:
  *
  *   1. `[name](path)` links whose href is a workspace file → chip (the original
  *      `<a>` is dropped). External / non-file links retain their anchors. Runs before DOMPurify's hook adds target=_blank.

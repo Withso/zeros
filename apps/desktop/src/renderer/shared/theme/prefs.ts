@@ -41,7 +41,7 @@
 //   which the store had frozen to the dark default for everyone —
 //   migrates via migrateLegacyCodeTheme on load.
 // 2026-08-08: Dark became structurally neutral. Most HSL lightness values
-//   stayed fixed; bg1, bg2, and sidebar-bg moved one point up. The former
+//   stayed fixed; bg1, bg2, and bg1-raised moved one point up. The former
 //   dark palette was preserved unchanged as an opt-in "orka-black" mode.
 // 2026-09-14: "orka-black" retired. Two themes only — Dark and Light (plus
 //   System). Saved "orka-black" prefs migrate to "dark" on load; the

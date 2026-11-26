@@ -31,7 +31,7 @@ export function DesignFrameLintBadge({ title, violations, onSelectLayer }: {
           title={label}
           className={cn(
             "text-2xxs h-4 shrink-0 gap-0.5 rounded-sm px-1 py-0 leading-4 tabular-nums",
-            errors ? "text-red-primary hover:text-red-primary" : "text-yellow-primary hover:text-yellow-primary",
+            errors ? "text-red-text hover:text-red-text" : "text-yellow-text hover:text-yellow-text",
           )}
           onPointerDown={stop}
           onDoubleClick={stop}
@@ -74,7 +74,7 @@ export function DesignFrameLintList({ violations, onSelectLayer }: {
         const hidden = rows.length - ROWS_PER_RULE;
         return (
           <section key={group.ruleId} data-design-frame-lint-group={group.ruleId} className="flex flex-col">
-            <h3 className="text-3xxs text-muted-fg flex items-center justify-between px-3 pt-2 pb-1 font-medium">
+            <h3 className="text-3xxs text-fg3 flex items-center justify-between px-3 pt-2 pb-1 font-medium">
               <span>{group.label}</span>
               <span className="tabular-nums">{group.count}</span>
             </h3>
@@ -82,12 +82,12 @@ export function DesignFrameLintList({ violations, onSelectLayer }: {
               const content = (
                 <>
                   <span className="min-w-0 flex-1 break-words">{violation.message}</span>
-                  <span className="text-muted-fg shrink-0 tabular-nums">Line {violation.line}</span>
+                  <span className="text-fg3 shrink-0 tabular-nums">Line {violation.line}</span>
                 </>
               );
               const className = cn(
-                "text-2xxs flex w-full items-start gap-2 px-3 py-1 text-left leading-4",
-                violation.severity === "error" ? "text-red-fg" : "text-fg2",
+                "text-3xxs flex w-full items-start gap-2 px-3 py-1 text-left leading-4",
+                violation.severity === "error" ? "text-red-text" : "text-fg2",
               );
               const oid = violation.oid;
               return oid ? (
@@ -107,7 +107,7 @@ export function DesignFrameLintList({ violations, onSelectLayer }: {
                 </div>
               );
             })}
-            {hidden > 0 ? <p className="text-3xxs text-muted-fg px-3 py-1">{hidden} more</p> : null}
+            {hidden > 0 ? <p className="text-3xxs text-fg3 px-3 py-1">{hidden} more</p> : null}
           </section>
         );
       })}

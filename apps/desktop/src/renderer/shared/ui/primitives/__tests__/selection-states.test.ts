@@ -9,14 +9,14 @@ const source = (file: string) =>
   readFileSync(`apps/desktop/src/renderer/shared/ui/primitives/${file}`, "utf8");
 
 // Hovered or selected rows step text up one tier, so
-// metadata (text-muted-fg) inside a highlighted menu row reads at fg3 — the
-// contrast contract only clears muted-fg on REST surfaces, not on bg3-hover.
+// metadata (text-fg3) inside a highlighted menu row reads at fg3 — the
+// contrast contract only clears fg3 on REST surfaces, not on bg3-hover.
 describe("selected menu rows step metadata up a tier", () => {
   it.each([
-    ["command.tsx", "data-[selected=true]:[&_.text-muted-fg]:text-fg3"],
-    ["dropdown-menu.tsx", "focus:[&_.text-muted-fg]:text-fg3"],
-    ["context-menu.tsx", "focus:[&_.text-muted-fg]:text-fg3"],
-    ["select.tsx", "focus:[&_.text-muted-fg]:text-fg3"],
+    ["command.tsx", "data-[selected=true]:[&_.text-fg3]:text-fg3"],
+    ["dropdown-menu.tsx", "focus:[&_.text-fg3]:text-fg3"],
+    ["context-menu.tsx", "focus:[&_.text-fg3]:text-fg3"],
+    ["select.tsx", "focus:[&_.text-fg3]:text-fg3"],
   ])("%s", (file, tierUp) => {
     expect(source(file)).toContain(tierUp);
   });

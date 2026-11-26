@@ -11,8 +11,8 @@ describe("PanelHeader markup equivalence", () => {
     original: string;
     props: PanelHeaderProps;
   }> = [
-    // Every migrated header on the shared geometry (window 12 / 6, panel 12 / 4;
-    // the browser chrome keeps 6px on both sides).
+    // Every migrated header on the shared 40px geometry (P7): 12px in, a 6px
+    // right inset (the browser chrome keeps 6px on both sides).
     {
       site: "design-inspector window header",
       tag: "div",
@@ -24,8 +24,8 @@ describe("PanelHeader markup equivalence", () => {
       site: "design-inspector error section",
       tag: "section",
       original:
-        "text-red-primary border-border1 flex h-9 items-center gap-2 border-b pr-1 pl-3",
-      props: { size: "panel", as: "section", className: "text-red-primary" },
+        "text-red-text border-border1 flex h-10 shrink-0 items-center gap-2 border-b pr-1.5 pl-3",
+      props: { size: "panel", as: "section", className: "text-red-text" },
     },
     {
       site: "pr-status-row window row",
@@ -39,21 +39,21 @@ describe("PanelHeader markup equivalence", () => {
         site,
         tag: "div",
         original:
-          "border-border1 bg-bg1 flex h-9 shrink-0 items-center gap-1 border-b px-1.5",
-        props: { size: "window" as const, className: "h-9 px-1.5" },
+          "border-border1 bg-bg1 flex h-10 shrink-0 items-center gap-1 border-b px-1.5",
+        props: { size: "window" as const, className: "px-1.5" },
       }),
     ),
     {
       site: "files-search-sidebar search",
       tag: "div",
       original:
-        "border-border1 flex h-9 shrink-0 items-center gap-2 border-b pr-1 pl-3",
+        "border-border1 flex h-10 shrink-0 items-center gap-2 border-b pr-1.5 pl-3",
       props: { size: "panel", className: "shrink-0" },
     },
     {
       site: "review-checks summary",
       tag: "div",
-      original: "border-border1 flex h-9 items-center gap-2 border-b pr-1 pl-3",
+      original: "border-border1 flex h-10 shrink-0 items-center gap-2 border-b pr-1.5 pl-3",
       props: { size: "panel" },
     },
   ];

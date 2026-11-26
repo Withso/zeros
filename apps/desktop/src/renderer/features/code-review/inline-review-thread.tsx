@@ -78,9 +78,9 @@ function SeverityIcon({ severity }: { severity: CodeReviewThreadItem["severity"]
       className={cn(
         "inline-flex size-5 shrink-0 items-center justify-center",
         severity === "failure"
-          ? "text-red-primary"
+          ? "text-red-text"
           : severity === "warning"
-            ? "text-yellow-primary"
+            ? "text-yellow-text"
             : "text-fg2",
       )}
     >
@@ -107,7 +107,7 @@ function AuthorAvatar({
     return (
       <span
         aria-hidden
-        className="bg-sidebar-bg ring-border2 inline-flex size-5 shrink-0 items-center justify-center rounded-md ring-1 ring-inset"
+        className="bg-bg1-raised ring-border2 inline-flex size-5 shrink-0 items-center justify-center rounded-md ring-1 ring-inset"
       >
         <AgentIcon
           agentId={provider}
@@ -268,7 +268,7 @@ export const InlineReviewThread = memo(function InlineReviewThread({
   const errorLine = error && (
     <p
       role="alert"
-      className="text-red-primary flex items-start gap-1.5 px-3 pb-3 text-3xxs leading-4 break-words"
+      className="text-red-text flex items-start gap-1.5 px-3 pb-3 text-3xxs leading-4 break-words"
     >
       <CircleX className="mt-px size-3.5 shrink-0" />
       <span className="min-w-0">{error}</span>
@@ -285,7 +285,7 @@ export const InlineReviewThread = memo(function InlineReviewThread({
           : comment.author.name}
       </span>
       {actorKind(thread, comment.author.kind) && (
-        <Badge className="bg-bg2-highlight h-4.5 px-1.5 text-2xxs">
+        <Badge className="bg-selected-bg h-4.5 px-1.5 text-2xxs">
           {actorKind(thread, comment.author.kind)}
         </Badge>
       )}
@@ -411,7 +411,7 @@ export const InlineReviewThread = memo(function InlineReviewThread({
         )}
         {open && state !== "current" && (
           <Badge
-            className="bg-bg2-highlight"
+            className="bg-selected-bg"
             title={
               state === "outdated" ? "Code changed since this comment" : undefined
             }
@@ -437,11 +437,11 @@ export const InlineReviewThread = memo(function InlineReviewThread({
         <div className="flex min-w-0 flex-col gap-4 px-3 py-3.5">
           {state !== "current" && thread.anchor.context && (
             <details className="group min-w-0">
-              <summary className="text-fg2 hover:bg-bg2-highlight hover:text-fg1 -ml-1.5 inline-flex h-6 cursor-default list-none items-center gap-1 rounded-md pr-2 pl-1 text-3xxs leading-4 font-medium [&::-webkit-details-marker]:hidden">
+              <summary className="text-fg2 hover:bg-selected-bg hover:text-fg1 -ml-1.5 inline-flex h-6 cursor-default list-none items-center gap-1 rounded-md pr-2 pl-1 text-3xxs leading-4 font-medium [&::-webkit-details-marker]:hidden">
                 <ChevronRight className="text-fg3 size-3 group-open:rotate-90" />
                 Original code
               </summary>
-              <div className="border-border1 bg-sidebar-bg mt-1.5 grid grid-cols-[auto_minmax(0,1fr)] overflow-hidden rounded-md border font-mono text-3xxs leading-5">
+              <div className="border-border1 bg-bg1-raised mt-1.5 grid grid-cols-[auto_minmax(0,1fr)] overflow-hidden rounded-md border font-mono text-3xxs leading-5">
                 {thread.anchor.context.split("\n").map((line, index) => (
                   <div key={index} className="contents">
                     <span className="text-fg3 py-px pr-2.5 pl-3 text-right tabular-nums select-none first:pt-1">
@@ -545,7 +545,7 @@ export const InlineReviewThread = memo(function InlineReviewThread({
             <Button
               aria-label="Reply"
               disabled={!active}
-              className="border-border2 bg-sidebar-bg text-fg3 hover:border-border3 hover:bg-sidebar-bg hover:text-fg2 h-8 w-full min-w-0 justify-start px-2.5 font-normal"
+              className="border-border2 bg-bg1-raised text-fg3 hover:border-border3 hover:bg-bg1-raised hover:text-fg2 h-8 w-full min-w-0 justify-start px-2.5 font-normal"
               onClick={() => {
                 drafts.requestFocus(draftKey);
                 setReplying(true);

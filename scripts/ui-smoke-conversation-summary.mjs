@@ -194,11 +194,11 @@ export async function runConversationSummarySmoke({
     async () => {
       await expect(trigger).toBeVisible();
       await expect(trigger).toHaveAttribute("aria-expanded", "true");
-      // 2026-11-09: sidebar-bg on a border1 edge.
+      // 2026-11-09: bg1-raised on a border1 edge.
       const appearance = await island.evaluate((node) => {
         const style = getComputedStyle(node);
         const probe = document.createElement("div");
-        probe.style.background = "var(--sidebar-bg)";
+        probe.style.background = "var(--bg1-raised)";
         probe.style.borderColor = "var(--border1)";
         node.append(probe);
         const expected = getComputedStyle(probe);
@@ -359,13 +359,13 @@ export async function runConversationSummarySmoke({
       await page.keyboard.press("Enter");
       await expect(popup).toBeVisible();
       await expect.poll(fitsColumn).toBe(true);
-      // 2026-11-09: the popover matches the docked island, sidebar-bg on a
+      // 2026-11-09: the popover matches the docked island, bg1-raised on a
       // border1 edge.
       expect(
         await popup.evaluate((node) => {
           const style = getComputedStyle(node);
           const probe = document.createElement("div");
-          probe.style.background = "var(--sidebar-bg)";
+          probe.style.background = "var(--bg1-raised)";
           probe.style.borderColor = "var(--border1)";
           node.append(probe);
           const expected = getComputedStyle(probe);
@@ -803,7 +803,7 @@ export async function runConversationSummarySmoke({
       const rowHover = await row.evaluate(node => getComputedStyle(node).backgroundColor);
       const actionHover = await action.evaluate(node => {
         const probe = document.createElement("span");
-        probe.style.backgroundColor = "var(--bg2-highlight)";
+        probe.style.backgroundColor = "var(--selected-bg)";
         node.append(probe);
         const background = getComputedStyle(probe).backgroundColor;
         probe.remove();

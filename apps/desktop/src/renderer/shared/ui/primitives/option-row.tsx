@@ -19,7 +19,7 @@ const FIELD = "relative w-0 min-w-0 flex-1 border-0 bg-transparent p-0 pr-1 text
 /** An instance's value that differs from what it inherits: a dot at the
  * row's corner (its variant's value, else the default). */
 function ChangedDot({ changed }: { changed?: boolean }) {
-  return changed ? <i aria-hidden="true" data-option-changed="" className="bg-blue-primary absolute top-0.75 left-0.75 size-1 rounded-full" /> : null;
+  return changed ? <i aria-hidden="true" data-option-changed="" className="bg-accent-text absolute top-0.75 left-0.75 size-1 rounded-full" /> : null;
 }
 
 interface RowProps extends Omit<React.HTMLAttributes<HTMLDivElement>, "children"> {
@@ -208,7 +208,7 @@ export function OptionRangeRow({ label, value, min, max, step, unit, disabled = 
         onCancel?.();
       }}
     >
-      <i aria-hidden="true" data-option-row-fill="" className="bg-bg2-highlight absolute inset-y-0 left-0" style={{ width: fill }} />
+      <i aria-hidden="true" data-option-row-fill="" className="bg-selected-bg absolute inset-y-0 left-0" style={{ width: fill }} />
       <ChangedDot changed={changed} />
       <b
         aria-hidden="true"
@@ -309,7 +309,7 @@ export function OptionSegmentedRow<T extends string>({ label, value, choices, di
               className={cn(
                 FOCUS,
                 "h-6 rounded-sm px-2 text-xs leading-4.5 disabled:opacity-50",
-                on ? "bg-bg2-highlight text-fg1" : "text-fg2 hover:text-fg1",
+                on ? "bg-selected-bg text-fg1" : "text-fg2 hover:text-fg1",
               )}
               onClick={() => {
                 if (!on) onCommit(choice.value);
@@ -432,7 +432,7 @@ export function OptionEntryRow({ label, inputLabel, placeholder, onSubmit, onCan
           }}
         />
       </div>
-      {problem ? <p role="alert" className="text-red-fg px-0.5 text-3xxs leading-4">{problem}</p> : null}
+      {problem ? <p role="alert" className="text-red-text px-0.5 text-3xxs leading-4">{problem}</p> : null}
     </div>
   );
 }

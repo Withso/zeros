@@ -2,20 +2,20 @@ import type { FileChangeStatus, StatusResult } from "@/renderer/platform/git";
 import { relativeWorkspaceFilePath } from "@/renderer/platform/workspace-file-path";
 
 export const FILE_STATUS_PRESENTATION = {
-  added: { letter: "A", label: "Added", className: "text-green-primary" },
+  added: { letter: "A", label: "Added", className: "text-green-text" },
   modified: {
     letter: "M",
     label: "Modified",
-    className: "text-yellow-primary",
+    className: "text-yellow-text",
   },
-  deleted: { letter: "D", label: "Deleted", className: "text-red-primary" },
-  renamed: { letter: "R", label: "Renamed", className: "text-blue-primary" },
+  deleted: { letter: "D", label: "Deleted", className: "text-red-text" },
+  renamed: { letter: "R", label: "Renamed", className: "text-accent-text" },
   untracked: {
     letter: "U",
     label: "Untracked",
-    className: "text-green-primary",
+    className: "text-green-text",
   },
-  conflicted: { letter: "!", label: "Unmerged", className: "text-red-primary" },
+  conflicted: { letter: "!", label: "Unmerged", className: "text-red-text" },
 } as const satisfies Record<
   FileChangeStatus,
   { letter: string; label: string; className: string }

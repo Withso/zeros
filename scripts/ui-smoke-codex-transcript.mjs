@@ -164,12 +164,12 @@ export async function runCodexTranscriptSmoke({ page, check, captureDirectory })
     const probe = document.createElement("span");
     element.appendChild(probe);
     probe.style.color = "var(--fg1)";
-    probe.style.backgroundColor = "var(--blue-bg)";
+    probe.style.backgroundColor = "var(--accent-bg)";
     const expected = getComputedStyle(probe);
     const matches =
       style.color === expected.color &&
       style.backgroundColor === expected.backgroundColor;
-    probe.style.color = "var(--blue-fg)";
+    probe.style.color = "var(--accent-on-bg)";
     const actionColor = getComputedStyle(probe).color;
     const actionsMatch = [
       ...element.querySelectorAll("button, button svg"),

@@ -24,11 +24,10 @@ describe("the docked summary island and the chat's scrollbar", () => {
     const summary = read("shell/conversation/conversation-summary.tsx");
     const island = component(summary, "ConversationSummaryIsland");
     expect(island).toContain(
-      '"conversation-summary-island bg-sidebar-bg border-border1 absolute top-3 right-4 z-2 max-h-[calc(100%-24px)] w-72 overflow-y-auto overscroll-contain border p-3"',
+      '"conversation-summary-island bg-bg1-raised border-border1 absolute top-3 right-4 z-2 max-h-[calc(100%-24px)] w-72 overflow-y-auto overscroll-contain border p-3"',
     );
     expect(island).not.toMatch(/\b(my-3|mr-4|self-start|shrink-0)\b/);
-    // 2026-11-09: the island fills sidebar-bg on a border1 edge.
-    expect(island).not.toContain("bg-bg1-bright");
+    // 2026-11-09: the island fills bg1-raised on a border1 edge.
     // w-72 plus the island's right-4 offset.
     expect(summary).toContain(
       'export const CHAT_ASIDE_INSET_HOST_CLS =\n  "has-[[data-summary-island]]:[--chat-aside-inset:calc(var(--spacing)*76)]";',
@@ -36,13 +35,12 @@ describe("the docked summary island and the chat's scrollbar", () => {
   });
 
   it("draws the Summary popover on the island's surface", () => {
-    // Opened from the header while the side column is open: sidebar-bg on
+    // Opened from the header while the side column is open: bg1-raised on
     // PopoverContent's own 1px edge in border1, like the docked island.
     const summary = read("shell/conversation/conversation-summary.tsx");
     const popover = /className="conversation-summary-popover ([^"]*)"/.exec(summary)?.[1]?.split(" ");
-    expect(popover).toEqual(expect.arrayContaining(["bg-sidebar-bg", "border-border1", "w-72", "p-3"]));
+    expect(popover).toEqual(expect.arrayContaining(["bg-bg1-raised", "border-border1", "w-72", "p-3"]));
     expect(popover).not.toContain("border-0");
-    expect(popover).not.toContain("bg-bg1-bright");
   });
 
   it("lets the pane body carry the inset to every layer portaled into it", () => {

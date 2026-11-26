@@ -6,13 +6,13 @@ export interface ListRowProps extends React.ButtonHTMLAttributes<HTMLButtonEleme
   /** `panel`: a full-width row flush with an inspector panel's edges, in the
    * panel's 11px type; `aria-pressed` fills it with `selected-bg`. */
   variant?: "inline" | "panel";
-  /** Panel rows only: `md` is the panel's 28px line with 12px lead, `sm` a
-   * 26px row inside a group, with 6px sides and 4px corners. */
+  /** Panel rows only: `md` is the panel's 28px line with 12px lead, `sm` the
+   * same 28px row inside a group (P7), with 6px sides and 4px corners. */
   size?: "md" | "sm";
 }
 
 const LIST_ROW_FOCUS =
-  "hover:bg-bg1-hover focus-visible:inset-ring focus-visible:inset-ring-accent text-left transition-colors duration-120 ease-out focus-visible:outline-none";
+  "hover:bg-bg1-hover focus-visible:inset-ring focus-visible:inset-ring-accent text-left transition-colors duration-fast ease-out focus-visible:outline-none";
 
 const LIST_ROW_SHAPES = {
   inline: "-ml-2 flex min-h-7 w-fit max-w-full items-center gap-2 rounded-md px-2 py-1",
@@ -22,7 +22,7 @@ const LIST_ROW_SHAPES = {
 
 const PANEL_ROW_SIZES = {
   md: "h-7 min-h-7 gap-1 rounded-none pr-2 pl-3",
-  sm: "h-6.5 min-h-0 gap-2 rounded-sm px-1.5",
+  sm: "h-7 min-h-0 gap-2 rounded-sm px-1.5",
 } as const;
 
 /** Compact tool disclosure/hover row: 28px, a bg1-hover hover (the canvas's
@@ -77,7 +77,7 @@ const ListRowGroup = React.forwardRef<HTMLDivElement, ListRowGroupProps>(
       {...props}
       ref={ref}
       className={cn(
-        "-ml-2 flex min-h-7 w-fit max-w-full min-w-0 items-center gap-2 rounded-md px-2 py-1 transition-colors duration-120 ease-out",
+        "-ml-2 flex min-h-7 w-fit max-w-full min-w-0 items-center gap-2 rounded-md px-2 py-1 transition-colors duration-fast ease-out",
         interactive && "hover:bg-bg1-hover cursor-pointer",
         interactive && GROUP_FOCUS,
         className,

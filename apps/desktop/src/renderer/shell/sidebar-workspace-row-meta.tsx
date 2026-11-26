@@ -1,8 +1,9 @@
 // The redesigned sidebar row's second line (and Compact's trailing marks):
-// where the workspace runs, the agent's status word, its pull requests and
-// when it was last updated. The status word never truncates at rest; PR marks
-// step from one mark per state, to one combined group, to one blue icon as the
-// row narrows, and Archive never covers this line, so hover moves nothing.
+// where the workspace runs, then the agent's status word or, with none, when it
+// was last updated, then its pull requests. The status word never truncates at
+// rest; PR marks step from one mark per state, to one combined group, to one
+// blue icon as the row narrows, and Archive never covers this line, so hover
+// moves nothing.
 import { Button } from "../shared/ui/primitives/button";
 import { useLayoutEffect, useRef, useState } from "react";
 import { Cloud, CloudOff, GitPullRequest, Laptop } from "lucide-react";
@@ -29,10 +30,10 @@ import {
 
 const PR_TONE_CLS: Record<PrMarkTone, string> = {
   draft: "text-fg3",
-  open: "text-green-primary",
-  conflicts: "text-yellow-primary",
-  merged: "text-violet-fg",
-  closed: "text-red-fg",
+  open: "text-green-text",
+  conflicts: "text-yellow-text",
+  merged: "text-violet-text",
+  closed: "text-red-text",
 };
 const PR_TONE_LABEL: Record<PrMarkTone, string> = {
   draft: "Draft",
@@ -45,17 +46,42 @@ const PR_TONE_LABEL: Record<PrMarkTone, string> = {
 export type SidebarRowStatusTone = "attention" | "done" | "failed" | "muted";
 export interface SidebarRowStatus { label: string; tone: SidebarRowStatusTone }
 
+// Status text sits on the sidebar surface, so it is each family's -text role
+// (the -on-bg roles are for text on a tinted -bg container). Done is violet,
+// the lifecycle's Done everywhere (StatusIcon, the workspace menu).
 const STATUS_TONE_CLS: Record<SidebarRowStatusTone, string> = {
-  attention: "text-yellow-fg",
-  done: "text-blue-fg",
-  failed: "text-red-fg",
+  attention: "text-yellow-text",
+  done: "text-violet-text",
+  failed: "text-red-text",
   muted: "text-fg3",
 };
+/** Compact rows' dots take the same colours as the words they stand for. */
 export const STATUS_DOT_CLS: Record<Exclude<SidebarRowStatusTone, "muted">, string> = {
-  attention: "bg-yellow-primary",
-  done: "bg-blue-primary",
-  failed: "bg-red-primary",
+  attention: "bg-yellow-text",
+  done: "bg-violet-text",
+  failed: "bg-red-text",
 };
+
+export type SidebarRowLead = "archiving" | "working" | "child" | "folder" | "design" | "logo";
+
+/** What the row's 16px leading slot shows: the project logo at rest, the logo
+ * loader while archiving, the agent loader while working, and a dot for a
+ * child in its parent's project. Folders and legacy Design workspaces keep
+ * their own mark. */
+export function sidebarRowLead(args: {
+  archiving: boolean;
+  working: boolean;
+  sameProjectChild: boolean;
+  folder: boolean;
+  design: boolean;
+}): SidebarRowLead {
+  if (args.archiving) return "archiving";
+  if (args.working) return "working";
+  if (args.sameProjectChild) return "child";
+  if (args.folder) return "folder";
+  if (args.design) return "design";
+  return "logo";
+}
 
 const CLOUD_ERROR = new Set(["error", "failed", "setup_failed", "unhealthy"]);
 
@@ -128,7 +154,7 @@ export function SidebarPrMarks({ groups, layout }: { groups: readonly PrMarkGrou
   const total = all.length;
   if (layout === "single") {
     return (
-      <PrMark pulls={all} label={`${total} pull requests`} className="text-blue-fg">
+      <PrMark pulls={all} label={`${total} pull requests`} className="text-accent-text">
         <GitPullRequest strokeWidth={1.5} className="size-3" />
         <span>{total}</span>
       </PrMark>
@@ -181,15 +207,17 @@ export function SidebarPlacementIcon({ cloud, cloudStatus }: { cloud: boolean; c
   if (!cloud) return <Laptop strokeWidth={1.5} className="size-3 shrink-0" aria-label="This Mac" role="img" />;
   const state = cloudMarkState(cloudStatus);
   if (state === "starting") return <ZerosSpinner size={12} label="Cloud workspace, starting" />;
+  if (cloudStatus && CLOUD_ERROR.has(cloudStatus)) {
+    return <CloudOff strokeWidth={1.5} className="text-red-text size-3 shrink-0" aria-label="Cloud workspace, error" role="img" data-cloud-mark="error" />;
+  }
   return state === "stopped"
     ? <CloudOff strokeWidth={1.5} className="size-3 shrink-0" aria-label="Cloud workspace, stopped" role="img" data-cloud-mark={state} />
     : <Cloud strokeWidth={1.5} className="size-3 shrink-0" aria-label="Cloud workspace" role="img" data-cloud-mark={state} />;
 }
 
 const STATUS_CHAR_PX = 6.5;
-const TIME_PX = 28;
 
-/** Line 2: placement, status word, PR marks, then the time at the end. */
+/** Line 2: placement, the status word or (with none) the time, then PR marks. */
 export function SidebarWorkspaceRowMeta({
   workspace,
   pulls,
@@ -207,8 +235,9 @@ export function SidebarWorkspaceRowMeta({
 }) {
   const [ref, width] = useWidth<HTMLSpanElement>();
   const groups = prMarkGroups(pulls);
-  const statusPx = status ? status.label.length * STATUS_CHAR_PX + 8 : 0;
-  const available = Math.max(0, width - 20 - statusPx - TIME_PX);
+  const time = formatCompactAge(updatedAt);
+  const statusPx = status ? status.label.length * STATUS_CHAR_PX + 8 : time.length * STATUS_CHAR_PX + 8;
+  const available = Math.max(0, width - 20 - statusPx);
   const layout = width === 0 ? "separate" : prMarkLayout(groups, available);
   const fits = width === 0 || prMarkWidth(groups, layout) <= available || layout === "single";
   return (
@@ -216,14 +245,15 @@ export function SidebarWorkspaceRowMeta({
       <span className="inline-flex size-3 shrink-0 items-center justify-center">
         <SidebarPlacementIcon cloud={cloud} cloudStatus={cloudStatus} />
       </span>
-      {status && <span className={cn("shrink-0 whitespace-nowrap", STATUS_TONE_CLS[status.tone])} data-sidebar-status-word>{status.label}</span>}
+      {status
+        ? <span className={cn("shrink-0 whitespace-nowrap", STATUS_TONE_CLS[status.tone])} data-sidebar-status-word>{status.label}</span>
+        : <span className="shrink-0 tabular-nums" data-sidebar-row-time>{time}</span>}
       {groups.length > 0 && fits && (
         <>
-          {status && <span aria-hidden="true">·</span>}
+          <span aria-hidden="true">·</span>
           <SidebarPrMarks groups={groups} layout={layout} />
         </>
       )}
-      <span className="ml-auto shrink-0 pl-1 tabular-nums">{formatCompactAge(updatedAt)}</span>
     </span>
   );
 }

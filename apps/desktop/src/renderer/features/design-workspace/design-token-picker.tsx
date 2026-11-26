@@ -222,7 +222,7 @@ export function DesignTokenRows({
         ) : (
           shown.map((group) => (
             <div key={group.key} role="group" aria-label={group.label} className="flex min-w-0 flex-col">
-              <div className="text-fg3 truncate px-1.5 pt-1 pb-0.5 text-2xxs font-medium">
+              <div className="text-fg3 truncate px-1.5 pt-1 pb-0.5 text-3xxs font-medium">
                 {group.label}
               </div>
               {group.rows.map((row) => {
@@ -236,7 +236,7 @@ export function DesignTokenRows({
                     aria-pressed={active}
                     data-design-token-option={row.name}
                     data-design-color-token={row.glyph && row.glyph !== "text" ? row.name : undefined}
-                    className="text-fg2 aria-pressed:bg-bg2-highlight h-auto min-h-10 w-full justify-start gap-2.5 py-1 font-normal"
+                    className="text-fg2 aria-pressed:bg-selected-bg h-auto min-h-10 w-full justify-start gap-2.5 py-1 font-normal"
                     onClick={() => onChoose(row.name)}
                   >
                     {row.glyph === "text" ? (

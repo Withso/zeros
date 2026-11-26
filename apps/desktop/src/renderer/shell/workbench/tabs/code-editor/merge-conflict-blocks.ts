@@ -255,7 +255,7 @@ const conflictTheme = EditorView.baseTheme({
   ".cm-line.cm-conflict-current-marker::after, .cm-line.cm-conflict-incoming-marker::after":
     {
       marginLeft: "8px",
-      color: "var(--fg3)",
+      color: "var(--fg2)",
       fontFamily: "var(--font-sans)",
       pointerEvents: "none",
     },
@@ -287,20 +287,20 @@ const conflictTheme = EditorView.baseTheme({
     outlineOffset: "1px",
   },
   ".cm-conflict-accept-current": {
-    backgroundColor: "var(--green-secondary)",
-    color: "var(--green-secondary-fg)",
+    backgroundColor: "var(--green-solid)",
+    color: "var(--green-solid-fg)",
   },
-  ".cm-conflict-accept-current:hover": { backgroundColor: "var(--green-secondary-hover)" },
+  ".cm-conflict-accept-current:hover": { opacity: "0.9" },
   ".cm-conflict-accept-incoming": {
-    backgroundColor: "var(--blue-secondary)",
-    color: "var(--blue-secondary-fg)",
+    backgroundColor: "var(--accent-solid)",
+    color: "var(--accent-solid-fg)",
   },
-  ".cm-conflict-accept-incoming:hover": { backgroundColor: "var(--blue-secondary-hover)" },
+  ".cm-conflict-accept-incoming:hover": { opacity: "0.9" },
   ".cm-conflict-accept-both": {
-    backgroundColor: "var(--neutral-secondary)",
-    color: "var(--neutral-secondary-fg)",
+    backgroundColor: "var(--neutral-solid)",
+    color: "var(--neutral-solid-fg)",
   },
-  ".cm-conflict-accept-both:hover": { backgroundColor: "var(--neutral-secondary-hover)" },
+  ".cm-conflict-accept-both:hover": { opacity: "0.9" },
 });
 
 /** Mark conflicts in place. `onStatus` hears the block count, the block at

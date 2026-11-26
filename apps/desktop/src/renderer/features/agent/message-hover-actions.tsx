@@ -57,14 +57,14 @@ export function MessageHoverActions({
     <div
       data-message-hover-actions=""
       className={cn(
-        "pointer-events-none absolute right-0 bottom-full z-2 pb-1 opacity-0 transition-opacity duration-150 ease-out",
+        "pointer-events-none absolute right-0 bottom-full z-2 pb-1 opacity-0 transition-opacity duration-base ease-out",
         revealClassName,
       )}
     >
-      <Toolbar aria-label="Message actions">
+      <Toolbar size="inline" aria-label="Message actions">
         {time && (
           <Tooltip label={`${timeLabel} ${new Date(createdAt!).toLocaleString()}`}>
-            <ToolbarText className="text-muted-fg tabular-nums select-none">{time}</ToolbarText>
+            <ToolbarText className="text-fg3 tabular-nums select-none">{time}</ToolbarText>
           </Tooltip>
         )}
         <Tooltip label={copied ? "Copied" : "Copy message"}>

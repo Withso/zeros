@@ -46,14 +46,14 @@ const NO_OWNER_IDS: readonly string[] = [];
 
 const ROW_INDENT_CLS = ["pl-2", "pl-6", "pl-8", "pl-10", "pl-12"] as const;
 
-const CRUMB_CLS = "text-fg1 min-w-0 max-w-60 gap-1.5 aria-expanded:bg-bg2-highlight";
+const CRUMB_CLS = "text-fg1 min-w-0 max-w-60 gap-1.5 aria-expanded:bg-selected-bg";
 
 /** Working, or the question/permission it waits on, across these sessions. */
 function SessionStatus({ ids }: { ids: readonly string[] }) {
   const activity = useAnyChatAgentActivity(ids);
   const awaiting = useAnyChatAwaitingKind(ids);
   if (awaiting) return <AgentAwaitingIcon kind={awaiting} className="size-3.5 shrink-0" strokeWidth={1.25} />;
-  if (activity === "running") return <RunStream size={12} className="text-blue-primary shrink-0" />;
+  if (activity === "running") return <RunStream size={12} className="text-accent-text shrink-0" />;
   return null;
 }
 
@@ -76,7 +76,7 @@ export function WorkspaceBadge({ folder }: { folder: string }) {
   const { workspaces } = useLiveWorkspaces();
   const { workspaces: archived } = useArchivedWorkspaces();
   return (
-    <span className="text-fg3 border-border1 shrink-0 rounded-sm border px-1 text-xxs leading-4" data-session-workspace="">
+    <span className="text-fg3 border-border1 shrink-0 rounded-sm border px-1 text-3xxs leading-4" data-session-workspace="">
       {workspaceBadgeLabel(folder, workspaces, archived)}
     </span>
   );
@@ -107,7 +107,7 @@ function SessionRow({ node, depth, folder, activeId, expanded, onToggle, onSelec
       aria-expanded={onToggle && hasChildren ? !!expanded : undefined}
       data-session-row={node.chat.id}
       aria-current={node.chat.id === activeId ? "true" : undefined}
-      className={`aria-[current=true]:bg-bg2-highlight ${ROW_INDENT_CLS[Math.min(depth, ROW_INDENT_CLS.length - 1)]}`}
+      className={`aria-[current=true]:bg-selected-bg ${ROW_INDENT_CLS[Math.min(depth, ROW_INDENT_CLS.length - 1)]}`}
     >
       {onToggle ? (
         <span
@@ -173,7 +173,7 @@ function NativeSubagentRows({ ownerId, depth, onSelect }: {
         >
           <Bot className="text-fg2 size-3.5 shrink-0" strokeWidth={1.5} aria-label="Agent" />
           <span className="min-w-0 flex-1 truncate">{agent.title}</span>
-          {agent.running && <RunStream size={12} className="text-blue-primary shrink-0" />}
+          {agent.running && <RunStream size={12} className="text-accent-text shrink-0" />}
         </DropdownMenuItem>
       ))}
     </>

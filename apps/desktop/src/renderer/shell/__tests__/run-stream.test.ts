@@ -20,10 +20,10 @@ describe("RunStream", () => {
   it("streams an irregular 4 × 4 square of ten tiles", () => {
     expect(RUN_STREAM_PATTERN).toHaveLength(4);
     expect(RUN_STREAM_PATTERN.flat().filter(Boolean)).toHaveLength(10);
-    const markup = render({ size: 12, className: "text-blue-primary" });
+    const markup = render({ size: 12, className: "text-accent-text" });
     expect(markup).toContain('data-run-stream=""');
     expect(markup).toContain('data-animated="true"');
-    expect(markup).toMatch(/class="[^"]*\btext-blue-primary\b/);
+    expect(markup).toMatch(/class="[^"]*\btext-accent-text\b/);
     expect(markup).toContain('fill="currentColor"');
     expect(markup.match(/<path/g)).toHaveLength(4);
   });

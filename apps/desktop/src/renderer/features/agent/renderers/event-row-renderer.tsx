@@ -168,10 +168,10 @@ export const EventRowRenderer: Renderer<AgentMessage> = memo(
           data-provider-usage-notice={usage ? "" : undefined}
           data-chrome-setup-notice={chromeSetup ? "" : undefined}>
           <AgentNoticeText message={message.message} />
-          {chromeSetup && ctx.openBrowserSettings ? <Button type="button" variant="ghost" size="sm" className="-mx-1.5 mt-1" onClick={ctx.openBrowserSettings}>
+          {chromeSetup && ctx.openBrowserSettings ? <Button type="button" variant="ghost" className="-mx-1.5 mt-1" onClick={ctx.openBrowserSettings}>
             <Settings className="size-3.5" aria-hidden="true" /> Open Settings
           </Button> : null}
-          {mcp.success && ctx.openMcpConnection && !ctx.transcriptReadOnly ? <Button type="button" variant="ghost" size="sm" className="-mx-1.5 mt-1"
+          {mcp.success && ctx.openMcpConnection && !ctx.transcriptReadOnly ? <Button type="button" variant="ghost" className="-mx-1.5 mt-1"
             onClick={() => ctx.openMcpConnection?.(mcp.data)}>
             {mcp.data.reason === "sign-in-required" || mcp.data.reason === "sign-in-refused" ? "Connect" : "Retry"}
           </Button> : null}
@@ -336,7 +336,6 @@ function SafetyReviewDetail({
       {review.status === "denied" && review.retryId ? (
         <Button
           type="button"
-          size="sm"
           variant="secondary"
           disabled={busy}
           onClick={() => void retry()}

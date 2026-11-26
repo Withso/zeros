@@ -61,7 +61,7 @@ import {
 import { Inline } from "@/renderer/shared/ui/layout/inline";
 
 // The dropdown itself wears the shared Select-trigger chrome (6px corners,
-// 13px text, 14px glyph, bg2-highlight hover) so it is indistinguishable from
+// 13px text, 14px glyph, selected-bg hover) so it is indistinguishable from
 // every other dropdown in the app — it just opens a Command popover instead
 // of a Select list, and shows ⇅ instead of ▾ because picking a base branch is
 // a search, not a flat choice. `min-w-0` lets it shrink (only when the row
@@ -171,7 +171,7 @@ function TargetBranchPopover({
 
   return (
     <Popover open={open} onOpenChange={onOpenChange}>
-      <Tooltip label={label} delayDuration={1500} disabled={open}>
+      <Tooltip label={label} disabled={open}>
         <PopoverTrigger asChild>{children}</PopoverTrigger>
       </Tooltip>
       <PopoverContent

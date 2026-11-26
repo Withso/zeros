@@ -96,7 +96,7 @@ export function ReviewAnnotationView({
                 selection.postToPr && !postComment ? (
                   <p
                     role="status"
-                    className="text-yellow-primary m-0 text-xs leading-4.5"
+                    className="text-yellow-text m-0 text-xs leading-4.5"
                   >
                     The PR diff changed. Your draft is kept; select the current
                     range before posting to PR.

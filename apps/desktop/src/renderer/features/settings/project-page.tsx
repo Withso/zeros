@@ -103,7 +103,7 @@ export function ProjectPage({
           ) : (
             <SettingsRow label={<PlaceLabel place="mac" />} hint="Not on this Mac">
               {project.github && onCloneToMac && (
-                <Button variant="secondary" size="sm" onClick={() => onCloneToMac(project.github!)}>Clone to this Mac</Button>
+                <Button variant="secondary" onClick={() => onCloneToMac(project.github!)}>Clone to this Mac</Button>
               )}
             </SettingsRow>
           )}
@@ -111,14 +111,14 @@ export function ProjectPage({
             <SettingsRow label={<PlaceLabel place="cloud" />} hint="On the Cloud Computer" />
           ) : project.github && cloudAvailable ? (
             <SettingsRow label={<PlaceLabel place="cloud" />} hint="Not in cloud">
-              <Button variant="secondary" size="sm" onClick={onAddToCloud}>Add to cloud</Button>
+              <Button variant="secondary" onClick={onAddToCloud}>Add to cloud</Button>
             </SettingsRow>
           ) : null}
           {cloud && sharing && (
             <SettingsRow label="Sharing" hint={sharing.level === "shared" ? `Shared with ${sharing.organizationName}` : "Only you"}>
               {/* A project kept for one member only says "Only you": nobody else can reach its repositories to share it. */}
               {sharing.level === "private" && sharing.canShare && (
-                <Button variant="secondary" size="sm" onClick={sharing.onShare}>Share with {sharing.organizationName}</Button>
+                <Button variant="secondary" onClick={sharing.onShare}>Share with {sharing.organizationName}</Button>
               )}
             </SettingsRow>
           )}
@@ -163,7 +163,7 @@ export function ProjectPage({
         {cloud && (
           <SettingsGroup>
             <SettingsRow label={both ? <PlaceLabel place="cloud" /> : "Cloud environment"} hint="Defaults for cloud workspaces you create.">
-              <Button variant="ghost" size="sm" onClick={onOpenEnvironment}>Edit</Button>
+              <Button variant="ghost" onClick={onOpenEnvironment}>Edit</Button>
             </SettingsRow>
           </SettingsGroup>
         )}

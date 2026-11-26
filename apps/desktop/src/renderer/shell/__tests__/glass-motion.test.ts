@@ -12,7 +12,7 @@ import {
   glassCircuitPattern,
   glassCircuitTrains,
   glassFlowPattern,
-  pickGlassMotion,
+  GLASS_DEFAULT_MOTION,
   type GlassMotion,
   type GlassMove,
 } from "../../shared/ui/loading/glass-motion";
@@ -68,11 +68,9 @@ function steps(flights: readonly Flight[]): Flight[][] {
 }
 
 describe("the glass square's motions", () => {
-  it("picks one of three at random", () => {
+  it("pins the weave for every square, keeping the other two for callers that name them", () => {
     expect(GLASS_MOTIONS).toEqual(["weave", "cascade", "circuit"]);
-    const random = mulberry32(1);
-    const picked = new Set(Array.from({ length: 200 }, () => pickGlassMotion(random)));
-    expect([...picked].sort()).toEqual([...GLASS_MOTIONS].sort());
+    expect(GLASS_DEFAULT_MOTION).toBe("weave");
   });
 
   it("start the weave and cascade from an airy square with every corner filled", () => {

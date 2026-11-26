@@ -1,4 +1,4 @@
-// Shared geometry for the square-tile loaders (the logo loader, the agent Puzzle and
+// Shared geometry for the square-tile loaders (Stream-run, the agent Puzzle and
 // the Run Stream). Every one draws a 4 × 4 grid of tiles inside a square box,
 // using 75% of the box for ink so a loader reads the same weight as the icon
 // it stands in for.

@@ -236,7 +236,6 @@ function LocalBrowserUsePanel() {
           <>
             <Button
               variant="ghost"
-              size="sm"
               className="text-fg2"
               aria-label="Install the Claude in Chrome extension"
               onClick={() => openClaudeChromeUrl(CLAUDE_CHROME_EXTENSION_URL)}
@@ -246,7 +245,6 @@ function LocalBrowserUsePanel() {
             </Button>
             <Button
               variant="ghost"
-              size="sm"
               className="text-fg2"
               aria-label="Open Claude Code Chrome documentation"
               onClick={() => openClaudeChromeUrl(CLAUDE_CHROME_DOCS_URL)}

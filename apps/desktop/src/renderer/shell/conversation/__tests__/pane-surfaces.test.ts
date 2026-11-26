@@ -76,8 +76,8 @@ describe("split pane surfaces", () => {
     // One fill for every pane: nothing overrides the bg1 window surface.
     expect(pane).toContain('"relative flex min-h-0 min-w-0 flex-1 flex-col bg-(--pane-bg) outline-none"');
     expect(pane).not.toContain("[--pane-bg:");
-    expect(pane).not.toContain("sidebar-bg");
-    expect(pane).toContain('split && "*:transition-opacity *:duration-120 *:ease-out motion-reduce:*:transition-none"');
+    expect(pane).not.toContain("bg1-raised");
+    expect(pane).toContain('split && "*:transition-opacity *:duration-fast *:ease-out motion-reduce:*:transition-none"');
     expect(pane).toContain('split && !isFocused && "*:opacity-80"');
     expect(pane).not.toMatch(/(?<!\*:)opacity-80/);
   });
@@ -118,7 +118,7 @@ describe("split pane surfaces", () => {
 
   it("shows a drop zone as a soft fill without a border", () => {
     const overlay = component(paneLayout(), "PaneDropOverlay");
-    expect(overlay).toContain('"bg-highlighted-bg/40 pointer-events-none absolute rounded-sm"');
+    expect(overlay).toContain('"bg-bg2/40 pointer-events-none absolute rounded-sm"');
     expect(overlay).not.toContain("border-highlighted-bright");
     expect(overlay).not.toMatch(/\bborder"/);
   });

@@ -375,6 +375,6 @@ describe("zeros computer and zeros browser shell rows", () => {
       ),
     );
     expect(failed).toContain("Error");
-    expect(failed).toContain("text-red-primary");
+    expect(failed).toContain("text-red-text");
   });
 });

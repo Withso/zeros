@@ -45,7 +45,7 @@ export function DashboardRepositoryIcon({
   return (
     <span
       className={cn(
-        "bg-bg2-hover text-fg2 text-xxs inline-flex shrink-0 items-center justify-center overflow-hidden leading-none font-medium",
+        "bg-bg2-hover text-fg2 text-2xxs inline-flex shrink-0 items-center justify-center overflow-hidden leading-none font-medium",
         round ? "size-4.5 rounded-full" : "size-5",
         !round && (pill ? "rounded-md" : "rounded-sm"),
       )}
@@ -109,7 +109,7 @@ export function DashboardLineChanges({
   );
   if (!totals)
     return (
-      <span className="text-muted-fg" aria-label="Line changes unavailable">
+      <span className="text-fg3" aria-label="Line changes unavailable">
         —
       </span>
     );
@@ -124,12 +124,12 @@ export function DashboardLineChanges({
         {/* Only the side that changed, in sans with one 4px gap — the same
             pair the sidebar and the hover card show. */}
         {(totals.additions > 0 || totals.deletions === 0) && (
-          <span className="text-green-primary">
+          <span className="text-green-text">
             +{countFormat.format(totals.additions)}
           </span>
         )}
         {totals.deletions > 0 && (
-          <span className="text-red-primary">
+          <span className="text-red-text">
             −{countFormat.format(totals.deletions)}
           </span>
         )}
@@ -143,7 +143,7 @@ export function DashboardCost() {
   // total. Missing billing data must never be presented as zero or a partial sum.
   return (
     <Tooltip label="Workspace cost unavailable">
-      <span className="text-muted-fg" aria-label="Cost unavailable">
+      <span className="text-fg3" aria-label="Cost unavailable">
         —
       </span>
     </Tooltip>

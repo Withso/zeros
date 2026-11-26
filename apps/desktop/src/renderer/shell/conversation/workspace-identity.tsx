@@ -52,7 +52,7 @@ export function WorkspaceIdentityTrigger({ name, title, placement, open }: {
           variant="ghost"
           // The Tooltip stamps its own data-state on this button, so the open
           // fill keys off aria-expanded, which only the popover sets.
-          className={`${IDENTITY_CLS} aria-expanded:bg-bg2-highlight aria-expanded:text-fg1`}
+          className={`${IDENTITY_CLS} aria-expanded:bg-selected-bg aria-expanded:text-fg1`}
           aria-label={`${name}${described ? `, ${described}` : ""}, ${placement === "cloud" ? "Cloud" : "Local"} workspace`}
           data-workspace-identity=""
         >

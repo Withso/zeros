@@ -103,8 +103,8 @@ export function SidebarWorkspaceHoverCard({
         </span>
         {(changeLines.additions > 0 || changeLines.deletions > 0) && (
           <span className="flex shrink-0 gap-1 font-mono tabular-nums" aria-label={`${changeLines.additions} lines added, ${changeLines.deletions} lines removed`}>
-            <span className="text-green-primary">+{changeLines.additions}</span>
-            <span className="text-red-primary">−{changeLines.deletions}</span>
+            <span className="text-green-text">+{changeLines.additions}</span>
+            <span className="text-red-text">−{changeLines.deletions}</span>
           </span>
         )}
         <span className="ml-auto flex min-w-0 items-center gap-1.5" title={repoName}>
@@ -119,7 +119,7 @@ export function SidebarWorkspaceHoverCard({
       </div>
       <div className="mt-2 flex min-w-0 flex-wrap items-center gap-2">
         {action === "archive" ? (
-          <Button onClick={onArchive} className="bg-violet-bg text-violet-fg hover:bg-violet-bg border-transparent">
+          <Button onClick={onArchive} className="bg-violet-bg text-violet-on-bg hover:bg-violet-bg border-transparent">
             <Archive />Archive
           </Button>
         ) : cloud || folder || !github || action === "recover" ? (

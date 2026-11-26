@@ -26,7 +26,7 @@ import {
 // quick second click at the end of the history would reach the title band and
 // zoom the window (use-custom-window-drag.ts).
 const HISTORY_BUTTON_CLS =
-  "h-7 w-7 shrink-0 rounded-md text-fg2 hover:bg-sidebar-bg-hover hover:text-fg1 aria-disabled:opacity-50 aria-disabled:hover:bg-transparent aria-disabled:hover:text-fg2";
+  "h-7 w-7 shrink-0 rounded-md text-fg2 hover:bg-bg1-raised-hover hover:text-fg1 aria-disabled:opacity-50 aria-disabled:hover:bg-transparent aria-disabled:hover:text-fg2";
 
 interface SidebarHistoryButtonsProps {
   scope: SidebarHistoryScope;

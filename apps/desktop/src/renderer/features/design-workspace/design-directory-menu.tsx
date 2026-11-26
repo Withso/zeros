@@ -82,7 +82,6 @@ export function DesignDirectoryMenu({
         <Button
           type="button"
           variant="ghost"
-          size="sm"
           disabled={!active || busy}
           className="zd-design-directory-trigger"
           aria-label="Choose Design directory"

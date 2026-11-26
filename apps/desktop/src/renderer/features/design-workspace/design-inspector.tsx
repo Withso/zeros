@@ -3731,7 +3731,6 @@ export const DesignInspector = React.memo(function DesignInspector({
         <Button
           type="button"
           variant="ghost"
-          size="sm"
           className="text-fg2 h-7 min-w-12 px-2 text-xs tabular-nums"
           disabled={!active || !workspaceId}
           aria-label={`Canvas zoom ${zoomPercentage}%`}
@@ -3765,7 +3764,7 @@ export const DesignInspector = React.memo(function DesignInspector({
         data-design-inspector-header=""
         data-design-selection-type={selectionName}
         data-design-component-of={componentHeader ? componentHeader.slot !== null ? "slot" : componentHeader.part ? "part" : "instance" : undefined}
-        className="flex h-9 min-w-0 items-center gap-2 pr-1.5 pl-3"
+        className="flex h-10 min-w-0 items-center gap-2 pr-1.5 pl-3"
       >
         {selectionName === "Page" && workspaceId && pages?.length ? (
           <DesignPagePicker workspaceId={workspaceId} directoryId={previewDirectoryId} pages={pages}
@@ -3773,12 +3772,12 @@ export const DesignInspector = React.memo(function DesignInspector({
         ) : <>
           {componentHeader || optionsTarget?.kind === "main" || missingComponent
             ? componentHeader
-              ? <Diamond className="text-violet-primary size-3.5 shrink-0" aria-hidden="true" />
-              : <ComponentGlyph className="text-violet-primary fill-current size-3.5 shrink-0" aria-hidden="true" />
+              ? <Diamond className="text-violet-text size-3.5 shrink-0" aria-hidden="true" />
+              : <ComponentGlyph className="text-violet-text fill-current size-3.5 shrink-0" aria-hidden="true" />
             : <SelectionGlyph className="text-fg2 size-3.5 shrink-0" aria-hidden="true" />}
           {componentHeader && headerInner ? (
             // The identity gives way first, so the layer's name always shows.
-            <span data-design-inspector-title="" className="text-violet-primary flex min-w-0 flex-1 gap-1 text-xs font-medium">
+            <span data-design-inspector-title="" className="text-violet-text flex min-w-0 flex-1 gap-1 text-xs font-medium">
               <span data-design-inspector-title-identity="" className="min-w-0 truncate">{componentHeader.identity}</span>
               <span data-design-inspector-title-layer="" className="max-w-1/2 shrink-0 truncate">
                 {/* A slot reads as Layers names it, not by its frame. */}
@@ -3788,7 +3787,7 @@ export const DesignInspector = React.memo(function DesignInspector({
           ) : (
             componentHeader && componentHeader.identity.lastIndexOf("/") > 0 ? (
               // The component's name gives way first, so its variant stays readable.
-              <span data-design-inspector-title="" className="text-violet-primary flex min-w-0 flex-1 text-xs font-medium">
+              <span data-design-inspector-title="" className="text-violet-text flex min-w-0 flex-1 text-xs font-medium">
                 <span data-design-inspector-title-identity="" className="min-w-0 truncate">
                   {componentHeader.identity.slice(0, componentHeader.identity.lastIndexOf("/"))}
                 </span>
@@ -3797,7 +3796,7 @@ export const DesignInspector = React.memo(function DesignInspector({
                 </span>
               </span>
             ) : (
-              <span data-design-inspector-title="" className={cn(componentHeader || optionsTarget?.kind === "main" ? "text-violet-primary" : "text-fg1", "min-w-0 flex-1 truncate text-xs font-medium")}>
+              <span data-design-inspector-title="" className={cn(componentHeader || optionsTarget?.kind === "main" ? "text-violet-text" : "text-fg1", "min-w-0 flex-1 truncate text-xs font-medium")}>
                 {componentHeader
                   ? componentHeader.identity
                   : optionsTarget?.kind === "main" ? componentIdentity : missingComponent ? `zd-${missingComponent}` : selectionTitle ?? selectionName}
@@ -4133,7 +4132,7 @@ export const DesignInspector = React.memo(function DesignInspector({
 
             {styleTargetNodeId && errors.length > 0 ? (
               <Tooltip label={`${firstBlockingReason}: ${errors[0]?.message}`}>
-                <section className="bg-red-bg text-red-fg flex min-h-9 shrink-0 items-center gap-2 px-3 py-1.5">
+                <section className="bg-red-bg text-red-on-bg flex min-h-9 shrink-0 items-center gap-2 px-3 py-1.5">
                   <AlertTriangle className="size-3.5 shrink-0" />
                   <span className="text-3xxs min-w-0 flex-1 truncate leading-4">
                     {firstBlockingReason}

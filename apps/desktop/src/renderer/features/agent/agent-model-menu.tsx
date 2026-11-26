@@ -469,7 +469,7 @@ export function AgentModelMenu({
         onOpenChange(nextOpen);
       }}
     >
-      <Tooltip label={triggerTooltip} delayDuration={1500} disabled={open}>
+      <Tooltip label={triggerTooltip} disabled={open}>
         <PopoverTrigger asChild>{children}</PopoverTrigger>
       </Tooltip>
       <PopoverContent

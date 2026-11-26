@@ -12,7 +12,7 @@ import { PROMPT_SURFACE_RADIUS } from "./composer-shell";
  *  them in layout, so the label aligns with the message text and the notice
  *  keeps even space above and below. */
 export const AGENT_NOTICE_ACTION =
-  "text-blue-fg hover:bg-transparent hover:text-(--agent-notice-action-hover) -mx-1.5 -mb-1";
+  "text-accent-on-bg hover:bg-transparent hover:text-(--agent-notice-action-hover) -mx-1.5 -mb-1";
 
 /** Provider prose is plain text; only explicit web URLs become links. */
 export function AgentNoticeText({ message }: { message: string }) {
@@ -28,7 +28,7 @@ export function AgentNoticeText({ message }: { message: string }) {
             href={part}
             target="_blank"
             rel="noopener noreferrer"
-            className="text-blue-primary underline underline-offset-2"
+            className="text-accent-text underline underline-offset-2"
           >
             {part}
             <ArrowUpRight className="ml-1 inline size-3.5" aria-hidden="true" />
@@ -57,7 +57,7 @@ export function AgentNotice({
       data-agent-notice
       {...props}
       className={cn(
-        "bg-blue-bg text-fg1 min-w-0 px-3 py-2 text-reading",
+        "bg-accent-bg text-fg1 min-w-0 px-3 py-2 text-reading",
         PROMPT_SURFACE_RADIUS,
         className,
       )}

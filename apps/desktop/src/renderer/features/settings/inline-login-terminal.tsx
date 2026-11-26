@@ -193,7 +193,7 @@ export function InlineLoginTerminal({
           />
         ) : (
           <div className="flex h-full items-center justify-center">
-            <ZerosSpinner size={16} />
+            <ZerosSpinner size={20} />
           </div>
         )}
       </div>

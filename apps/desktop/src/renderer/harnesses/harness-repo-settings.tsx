@@ -309,7 +309,6 @@ function Harness() {
                 <Button
                   key={candidate.id}
                   variant="ghost"
-                  size="sm"
                   onClick={() => openProject(candidate.id)}
                 >
                   {candidate.name}

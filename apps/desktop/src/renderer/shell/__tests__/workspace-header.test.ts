@@ -110,7 +110,7 @@ describe("workspace column header", () => {
       expect(classes.filter(cls => /^bg-/.test(cls))).toEqual([]);
       // A Tooltip around a popover trigger stamps its own data-state, so the
       // open fill keys off aria-expanded, which only the popover sets.
-      expect(classes).toEqual(expect.arrayContaining(["hover:bg-bg2-highlight", "aria-expanded:bg-bg2-highlight"]));
+      expect(classes).toEqual(expect.arrayContaining(["hover:bg-selected-bg", "aria-expanded:bg-selected-bg"]));
     },
   );
   it("names a numbered workspace w-<n>, with its title as the tooltip and in its name", () => {

@@ -21,7 +21,7 @@ function StartBannerButton({ icon: Icon, label, description, onClick }: StartBan
       className="group flex min-w-0 items-center gap-3 p-3"
     >
       <Icon
-        className="text-fg2 group-hover:text-fg1 size-5 shrink-0 transition-colors duration-120 ease-out"
+        className="text-fg2 group-hover:text-fg1 size-5 shrink-0 transition-colors duration-fast ease-out"
         strokeWidth={1.5}
       />
       <span className="flex min-w-0 flex-col gap-0.5">

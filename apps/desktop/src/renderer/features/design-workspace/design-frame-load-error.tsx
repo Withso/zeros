@@ -24,7 +24,7 @@ export function DesignFrameProblemMark({ kind = "load-error", message, className
       role="img"
       aria-label={kind === "load-error" && message ? `${LOAD_ERROR} ${message}` : message ?? fallback}
       title={message ?? fallback}
-      className={cn("text-red-primary inline-flex size-[11px] shrink-0", className)}
+      className={cn("text-red-text inline-flex size-[11px] shrink-0", className)}
     >
       <TriangleAlert className="size-[11px]" aria-hidden="true" />
     </span>
@@ -51,7 +51,7 @@ export function DesignFrameProblemLabel({ title, message, width }: {
     >
       <span
         title={`${title}: ${message ?? LOAD_ERROR}`}
-        className="text-2xxs text-muted-fg flex max-w-full min-w-0 items-center gap-1 overflow-hidden leading-4 font-medium whitespace-nowrap"
+        className="text-3xxs text-fg3 flex max-w-full min-w-0 items-center gap-1 overflow-hidden leading-4 font-medium whitespace-nowrap"
       >
         <DesignFrameProblemMark message={message} />
         <span className="block min-w-0 overflow-hidden text-ellipsis">{title}</span>
@@ -94,10 +94,9 @@ export function DesignFrameLoadError({
           transform: `scale(${DESIGN_CANVAS_INVERSE_ZOOM})`,
         } as CSSProperties}
       >
-        <div data-design-frame-problem-message="" className="text-muted-fg h-full flex-col items-center justify-center gap-2 text-xs">
+        <div data-design-frame-problem-message="" className="text-fg3 h-full flex-col items-center justify-center gap-2 text-xs">
           <span>{LOAD_ERROR}</span>
           <Button
-            size="sm"
             variant="secondary"
             data-design-frame-retry=""
             onClick={(event) => {

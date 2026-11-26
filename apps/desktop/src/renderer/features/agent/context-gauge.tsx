@@ -4,7 +4,7 @@
 //
 // One small ring beside Send, in every chat. It quietly fills as the
 // conversation grows and has EXACTLY TWO visual states: calm `fg2` chrome its
-// whole life, `red-primary` at ≥90% — the
+// whole life, `red-text` at ≥90% — the
 // "about to hit the wall" signal. No yellow, no green, no spinner; the
 // compaction progress lives in the transcript row (CompactionRecordCard),
 // not here. The arc animates on change so a post-compaction drop is
@@ -55,7 +55,7 @@ export function formatTokens(n: number): string {
 function ServerRow({ server }: { server: ContextGaugeServer }) {
   return (
     <div className="text-fg2 flex items-center justify-between gap-2 px-1.5 py-1 text-xs leading-4.5">
-      <Tooltip label={server.name} delayDuration={1500}>
+      <Tooltip label={server.name}>
         <span className="min-w-0 truncate">{server.name}</span>
       </Tooltip>
       <span className="shrink-0 font-mono tabular-nums">
@@ -156,8 +156,8 @@ function Ring({
           strokeLinecap="round"
           strokeDasharray={`${clamped * CIRCUMFERENCE} ${CIRCUMFERENCE}`}
           className={cn(
-            "transition-[stroke-dasharray] duration-200 ease-out",
-            critical ? "stroke-red-primary" : "stroke-fg2",
+            "transition-[stroke-dasharray] duration-slow ease-out",
+            critical ? "stroke-red-text" : "stroke-fg2",
           )}
         />
       )}
@@ -204,14 +204,14 @@ export const ContextGauge = memo(function ContextGauge({
 
   return (
     <Popover>
-      <Tooltip label={tooltip} delayDuration={1500}>
+      <Tooltip label={tooltip}>
         <PopoverTrigger asChild>
           <button
             type="button"
             aria-label={tooltip}
             className={cn(
-              "hover:bg-bg2-highlight text-fg2 hover:text-fg1 flex size-7 shrink-0 cursor-pointer items-center justify-center rounded-md border-0 bg-transparent p-0 transition-colors",
-              !data && "text-muted-fg",
+              "hover:bg-selected-bg text-fg2 hover:text-fg1 flex size-7 shrink-0 cursor-pointer items-center justify-center rounded-md border-0 bg-transparent p-0 transition-colors",
+              !data && "text-fg3",
             )}
           >
             <Ring fraction={fraction} disabled={!data} />
@@ -232,7 +232,7 @@ export const ContextGauge = memo(function ContextGauge({
             </div>
             <div className="bg-bg4 mt-2.5 h-1.5 overflow-hidden rounded-full">
               <div
-                className="bg-fg1 h-full rounded-full transition-[width] duration-200 ease-out"
+                className="bg-fg1 h-full rounded-full transition-[width] duration-slow ease-out"
                 style={{ width: `${Math.min(100, fraction * 100)}%` }}
               />
             </div>

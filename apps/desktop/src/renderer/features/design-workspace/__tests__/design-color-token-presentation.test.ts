@@ -129,7 +129,7 @@ describe("token pill", () => {
     expect(pill).toContain('aria-label="Corner radius: token radius-md"');
     expect(pill).toContain(">radius-md<");
     expect(pill).toContain('data-design-style-token="--radius-md"');
-    expect(pill).toContain("bg-bg2-highlight");
+    expect(pill).toContain("bg-selected-bg");
     const missing = render(
       createElement(DesignTokenPill, {
         label: "Corner radius",

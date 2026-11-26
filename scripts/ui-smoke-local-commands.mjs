@@ -137,12 +137,12 @@ export async function runLocalCommandsSmoke({ page, harnessBase, check }) {
     await open("view=sync&sync=off&old=1", theme);
     await expect(page.getByRole("switch", { name: "Sync to a local directory on Studio" })).toBeDisabled();
     await expect(page.getByRole("switch", { name: "Sync to a local directory on Alex's MacBook Pro" })).toBeEnabled();
-    for (const [state, label, dot] of [["syncing", "Syncing (12 files)", "--fg3"], ["in_sync", "In sync", "--green-primary"], ["paused", "Paused (workspace asleep)", "--fg3"], ["error", "Error (more than 5 GB)", "--red-primary"]]) {
+    for (const [state, label, dot] of [["syncing", "Syncing (12 files)", "--fg3"], ["in_sync", "In sync", "--green-text"], ["paused", "Paused (workspace asleep)", "--fg3"], ["error", "Error (more than 5 GB)", "--red-text"]]) {
       await open(`view=sync&sync=${state}`, theme);
       const group = page.getByRole("group", { name: "Sync on Alex's MacBook Pro" });
       const status = group.getByRole("status");
       await expect(status).toHaveText(label);
-      expect(await color(status, "color")).toBe(await token(state === "error" ? "--red-primary" : "--fg2"));
+      expect(await color(status, "color")).toBe(await token(state === "error" ? "--red-text" : "--fg2"));
       expect(await color(group.locator(`[data-sync-dot="${state}"]`), "backgroundColor")).toBe(await token(dot));
       await expect(group.locator("[data-sync-path]")).toContainText("~/zeros/cloud-sync/zeros/w-19");
       if (state === "in_sync") {

@@ -303,9 +303,9 @@ function RowAction({
         className={cn(
           "flex size-6 items-center justify-center rounded-sm transition-colors",
           disabled
-            ? "text-muted-fg cursor-default"
+            ? "text-fg3 cursor-default"
             : destructive
-              ? "text-fg2 hover:bg-bg1-hover hover:text-red-primary"
+              ? "text-fg2 hover:bg-bg1-hover hover:text-red-text"
               : "text-fg2 hover:bg-bg1-hover hover:text-fg1",
         )}
       >

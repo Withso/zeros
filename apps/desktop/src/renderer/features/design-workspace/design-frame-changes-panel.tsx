@@ -188,7 +188,7 @@ function DesignFrameInfo({
       data-design-frame-info={state}
       className="border-border1 text-fg1 flex shrink-0 items-center gap-2 border-t py-2 pr-2 pl-3 text-xs leading-4.5 font-medium"
     >
-      {state === "waiting" ? <span aria-hidden="true" className="bg-blue-primary size-1.25 shrink-0 rounded-full" /> : null}
+      {state === "waiting" ? <span aria-hidden="true" className="bg-accent-text size-1.25 shrink-0 rounded-full" /> : null}
       <Tooltip label={detail}>
         <span data-design-frame-info-title="" className="min-w-0 truncate">{title}</span>
       </Tooltip>

@@ -64,7 +64,7 @@ export function RunSessionButtons({
         <span className="inline-flex">
           <Button
             variant="secondary"
-            size={compact ? "icon-compact" : "icon-sm"}
+            size={compact ? "icon-compact" : "icon"}
             aria-label={`Open ${title} in Browser`}
             disabled={!previewUrl}
             onClick={onOpenPreview}
@@ -89,7 +89,7 @@ export function RunSessionButtons({
       <Tooltip label={`Stop ${title}`}>
         <Button
           variant="secondary"
-          size={compact ? "icon-compact" : "icon-sm"}
+          size={compact ? "icon-compact" : "icon"}
           aria-label={`Stop ${title}`}
           onClick={onStop}
           className={buttonClass}

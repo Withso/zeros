@@ -65,7 +65,6 @@ describe("workspace glyph", () => {
 
     rememberRestingSquare(seed, rested);
     expect(tiles(render({ seed }))).toEqual(rested);
-    expect(tiles(render({ seed, working: true }))).toEqual(rested);
     // Only seeded squares resume; the chat loaders stay random per mount.
     expect(restingSquare(workspaceGlyphSeed("zeros", "zeros/lima"))).toBeUndefined();
   });
@@ -78,26 +77,13 @@ describe("workspace glyph", () => {
     expect(restingSquare(`bound/${PUZZLE_RESTING_LIMIT - 1}`)).toEqual(cellsOf);
   });
 
-  it("rests quiet in fg3, works in fg2, and wears its PR colour in both", () => {
+  // 2026-11-25 (FndGlyphs): the glyph is a still fg3 square; PR and agent
+  // state read from the sidebar's marks and the chat tabs.
+  it("rests in fg3 and carries no PR or agent state", () => {
     const seed = workspaceGlyphSeed("zeros", "zeros/palembang");
-    expect(render({ seed })).toMatch(/class="[^"]*\btext-fg3\/25\b/);
+    expect(render({ seed })).toMatch(/class="[^"]*\btext-fg3\b/);
     expect(render({ seed })).not.toContain('data-active="true"');
-    expect(render({ seed, working: true })).toMatch(/class="[^"]*\btext-fg2\b/);
-    expect(render({ seed, working: true })).toContain('data-active="true"');
-    const tones = {
-      open: "text-green-primary",
-      ready: "text-green-primary",
-      merged: "text-violet-fg",
-      closed: "text-red-fg",
-      conflicts: "text-yellow-primary",
-    } as const;
-    for (const [pr, cls] of Object.entries(tones)) {
-      for (const working of [false, true]) {
-        expect(render({ seed, working, pr: pr as keyof typeof tones })).toMatch(
-          new RegExp(`class="[^"]*\\b${cls}\\b`),
-        );
-      }
-    }
+    expect(render({ seed })).not.toMatch(/text-(green|violet|red|yellow)-/);
   });
 
   it("maps PR state the way the former PR icons did", () => {
@@ -123,24 +109,24 @@ describe("sidebar workspace rows", () => {
   );
   const pending = ROW.slice(ROW.indexOf("export function PendingSidebarWorkspaceRow("));
 
-  it("lead with the workspace's square instead of Git branch or PR icons", () => {
-    expect(ROW).not.toMatch(/<GitBranch|<GitMerge|<GitPullRequest/);
-    expect(confirmed).toMatch(
-      /<WorkspaceGlyph\s+seed=\{workspaceGlyphSeed\(workspace\.repoSlug, workspace\.branch\)\}\s+working=\{working\}\s+pr=\{workspacePrTone\(workspace, islandKind\)\}/,
-    );
+  // Step 2 (v14 B01/B04): the leading slot is the project logo; PR state
+  // moved to line 2's marks, so the seeded PR-coloured square is gone.
+  it("lead with the project logo instead of the seeded square or Git icons", () => {
+    expect(ROW).not.toMatch(/<GitBranch|<GitMerge/);
+    expect(ROW).not.toContain("<WorkspaceGlyph");
+    expect(confirmed).toContain("sidebarRowLead(");
+    expect(confirmed).toContain(": <WorkspaceProjectIcon project={project} />;");
   });
 
-  it("keep one square across idle and working, so it resumes where it rested", () => {
-    // The glyph is the chain's final branch for both states: a working agent
-    // must not swap it for a separate loader element.
-    const leading = confirmed.slice(confirmed.indexOf("{archiving ? ("), confirmed.indexOf("{/* Only the name truncates"));
-    expect(leading).not.toMatch(/\) : working \? \(\s*<AgentActivityIndicator/);
-    expect(leading.match(/<WorkspaceGlyph/g)).toHaveLength(1);
+  it("show the agent loader in the leading slot while an agent works", () => {
+    expect(confirmed).toMatch(/lead === "working" \? <AgentActivityIndicator activity=\{activity\} \/>/);
+    expect(confirmed).toMatch(/lead === "archiving" \? <ZerosSpinner size=\{16\} label="Archiving workspace" \/>/);
   });
 
-  it("seed the optimistic row exactly like the row that replaces it", () => {
-    expect(pending).toMatch(/<WorkspaceGlyph\s+seed=\{workspaceGlyphSeed\(project\?\.repoSlug, branch \?\? label\)\}/);
-    expect(SIDEBAR).toMatch(/<PendingSidebarWorkspaceRow[\s\S]{0,120}?branch=\{item\.pending\.branch \?\? undefined\}/);
+  it("give the optimistic row the same logo and Creating… on line 2", () => {
+    expect(pending).toContain("<WorkspaceProjectIcon project={project} />");
+    expect(pending).toContain("Creating…");
+    expect(SIDEBAR).toMatch(/<PendingSidebarWorkspaceRow[\s\S]{0,400}?cloud=\{item\.pending\.placement === "cloud"\}/);
   });
 });
 
@@ -154,9 +140,9 @@ describe("workspace glyph depth", () => {
       return { cell: Number(y) * 4 + Number(x), opacity: opacity ? Number(opacity[1]) : 1 };
     });
 
-  it("shades its moving tiles in three close tones while it works", () => {
-    for (const pr of [null, "open", "ready", "merged", "closed"] as const) {
-      const tiles = tileShades(render({ seed, working: true, pr }));
+  it("shades a working square's moving tiles in three close tones", () => {
+    {
+      const tiles = tileShades(renderToStaticMarkup(createElement(PuzzleSquare, { seed, active: true, shaded: true })));
       expect(tiles).toHaveLength(10);
       const channel = tiles.filter((t) => !PUZZLE_CORNERS.includes(t.cell));
       const tones = new Set(channel.map((t) => t.opacity));
@@ -170,9 +156,7 @@ describe("workspace glyph depth", () => {
   });
 
   it("rests in one flat colour", () => {
-    for (const pr of [null, "open"] as const) {
-      expect(new Set(tileShades(render({ seed, pr })).map((t) => t.opacity))).toEqual(new Set([1]));
-    }
+    expect(new Set(tileShades(render({ seed })).map((t) => t.opacity))).toEqual(new Set([1]));
   });
 
   it("belongs to the workspace glyph alone, not the agent loader", () => {

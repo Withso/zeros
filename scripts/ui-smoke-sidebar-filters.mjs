@@ -115,7 +115,7 @@ export async function runSidebarWorkspaceFilters({ page, check, harnessBase }) {
     );
     const colors = await indicator.evaluate((node) => {
       const swatch = document.createElement("span");
-      swatch.style.backgroundColor = "var(--blue-primary)";
+      swatch.style.backgroundColor = "var(--accent-text)";
       document.body.append(swatch);
       const expected = getComputedStyle(swatch).backgroundColor;
       swatch.remove();

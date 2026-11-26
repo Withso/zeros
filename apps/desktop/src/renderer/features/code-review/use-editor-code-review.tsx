@@ -188,7 +188,7 @@ const reviewEditorTheme = EditorView.theme({
     padding: "0",
     border: "0",
     borderRadius: "var(--radius-sm)",
-    background: "var(--bg2-highlight)",
+    background: "var(--selected-bg)",
     color: "var(--fg1)",
     font: "inherit",
     cursor: "pointer",

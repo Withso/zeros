@@ -64,7 +64,7 @@ export function ProductPreview() {
 
 function TopBar() {
   return (
-    <header className="box-content flex h-10 w-full shrink-0 items-center overflow-hidden border-b border-border1 bg-sidebar-bg">
+    <header className="box-content flex h-10 w-full shrink-0 items-center overflow-hidden border-b border-border1 bg-bg1-raised">
       <div
         className="flex h-full w-[85px] shrink-0 items-center gap-2 border-r border-border1 px-3.5"
         aria-hidden
@@ -183,8 +183,8 @@ function StreamingTranscript() {
           targetFile="ProductPreview.tsx"
           trailingNode={
             <span className="shrink-0 text-xs tabular-nums">
-              <span className="text-green-primary">+81</span>
-              <span className="text-red-primary ml-1">−13</span>
+              <span className="text-green-text">+81</span>
+              <span className="text-red-text ml-1">−13</span>
             </span>
           }
         />
@@ -272,7 +272,7 @@ function FileTag({ name }: { name: string }) {
 function UserBubble({ children }: { children: ReactNode }) {
   return (
     <div className="flex justify-end">
-      <div className="w-fit max-w-[768px] rounded-sm border border-border1 bg-highlighted-bg px-3 py-2 text-sm leading-relaxed text-fg1">
+      <div className="w-fit max-w-[768px] rounded-sm border border-border1 bg-bg2 px-3 py-2 text-sm leading-relaxed text-fg1">
         {children}
       </div>
     </div>
@@ -296,7 +296,7 @@ function AgentWorking({ duration }: { duration: string }) {
             key={i}
             className="place-self-center size-[3px] rounded-full"
             style={{
-              background: lit.has(i) ? 'var(--fg2)' : 'var(--muted-fg)',
+              background: lit.has(i) ? 'var(--fg2)' : 'var(--fg3)',
               opacity: lit.has(i) ? 0.7 : 0.28,
             }}
           />
@@ -311,7 +311,7 @@ function Composer({ placeholder }: { placeholder: string }) {
   return (
     <div className="mx-auto w-full max-w-[1152px] shrink-0 pr-[300px] pb-3 pl-7">
       <div className="relative flex w-full min-w-0 flex-col rounded-lg border border-border1 bg-bg2 px-3.5 py-3">
-        <div className="min-h-[20px] text-sm leading-relaxed text-muted-fg">
+        <div className="min-h-[20px] text-sm leading-relaxed text-fg3">
           {placeholder}
         </div>
         <div className="flex min-w-0 items-center justify-between gap-1.5 pt-1 pr-0 pb-1 pl-0">
@@ -354,8 +354,8 @@ function FloatingInspector() {
           label="Changes"
           trailing={
             <span className="text-xs tabular-nums">
-              <span className="text-green-primary">+81</span>
-              <span className="text-red-primary ml-1">−13</span>
+              <span className="text-green-text">+81</span>
+              <span className="text-red-text ml-1">−13</span>
             </span>
           }
         />

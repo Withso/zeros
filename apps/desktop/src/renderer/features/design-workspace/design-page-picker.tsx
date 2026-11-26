@@ -250,7 +250,6 @@ export function DesignPagePicker({
             <Button
               ref={triggerRef}
               variant="ghost"
-              size="sm"
               className="h-7 min-w-0 flex-1 justify-start gap-2 px-0 text-xs"
               aria-label={`Page: ${page.title}`}
               disabled={!active || pending}
@@ -310,7 +309,7 @@ export function DesignPagePicker({
               Rename page…
             </DropdownMenuItem>
             <DropdownMenuItem
-              className="text-red-fg focus:text-red-fg h-7"
+              className="text-red-text focus:text-red-text h-7"
               disabled={pending || pages.length === 1}
               onSelect={requestDelete}
             >
@@ -342,7 +341,6 @@ export function DesignPagePicker({
           <DialogFooter>
             <Button
               variant="secondary"
-              size="sm"
               disabled={pending}
               onClick={() => setDeletion(null)}
             >
@@ -350,7 +348,6 @@ export function DesignPagePicker({
             </Button>
             <Button
               variant="destructive"
-              size="sm"
               disabled={pending}
               onClick={() => {
                 if (deletion) void remove(deletion);

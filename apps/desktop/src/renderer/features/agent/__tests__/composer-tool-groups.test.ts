@@ -38,7 +38,7 @@ describe("MCP sign-in rows", () => {
     expect(render("needs-auth")).toContain(">Authenticate<");
     expect(render("needs-auth", true, "linear")).toContain("Opening…");
     expect(render("connected", false)).toContain('aria-label="Connected"');
-    expect(render("connecting", false)).toContain("lucide-loader-circle");
+    expect(render("connecting", false)).toContain("data-run-stream");
     expect(render("error", false)).toContain('aria-label="Error"');
   });
   it("says why a server without a sign-in action failed", () => {
@@ -62,7 +62,7 @@ describe("MCP sign-in rows", () => {
     expect(html).toContain('aria-label="Not verified: Cursor does not report whether this server connected."');
     expect(html).toContain("lucide-circle-dashed");
     expect(html).not.toContain("lucide-x");
-    expect(html).not.toContain("text-red-primary");
+    expect(html).not.toContain("text-red-text");
   });
   it("does not apply an MCP attempt to a plugin or app with the same id", () => {
     const html = renderToStaticMarkup(createElement(ComposerToolGroups, {

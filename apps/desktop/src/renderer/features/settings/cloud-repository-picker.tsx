@@ -121,7 +121,7 @@ export function CloudRepositoryPicker({
             </Button>
           </div>
           {catalog.error && (
-            <p className="text-red-primary text-xs" role="alert">
+            <p className="text-red-text text-xs" role="alert">
               {catalog.error.message}
             </p>
           )}
@@ -218,7 +218,7 @@ function RepositoryPage({
       />
       {result.error && (
         <div className="flex flex-col gap-2">
-          <p className="text-red-primary text-xs" role="alert">
+          <p className="text-red-text text-xs" role="alert">
             {result.error.message}
           </p>
           <Button variant="ghost" onClick={result.refresh}>

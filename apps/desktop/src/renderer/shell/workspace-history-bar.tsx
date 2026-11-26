@@ -137,7 +137,7 @@ export function WorkspaceHistoryBar({
             </p>
           )}
         {(error || recovery.error) && (
-          <p role="alert" className="text-red-fg mt-1 text-xs">
+          <p role="alert" className="text-red-on-bg mt-1 text-xs">
             {error ?? "Couldn't check workspace recovery."}
           </p>
         )}
@@ -145,7 +145,6 @@ export function WorkspaceHistoryBar({
       actions={banner.action && (
         <Button
           variant="secondary"
-          size="sm"
           disabled={busy}
           onClick={() => void act()}
         >

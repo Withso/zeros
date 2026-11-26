@@ -156,9 +156,9 @@ const EMPTY_PENDING_ROWS: PendingWorkspaceCreate[] = [];
 const COLUMN_HEAD_CLS = "mb-3 flex shrink-0 items-center gap-2";
 const COLUMN_COUNT_CLS = "text-fg3 text-3xxs leading-4 tabular-nums";
 // A workspace card: 12px corners on bg2 with a border1 edge; hover lifts to
-// border3 + bg2-highlight. Content stacks 4 / 8 / 8 under the 20px top row.
+// border3 + selected-bg. Content stacks 4 / 8 / 8 under the 20px top row.
 const CARD_CLS =
-  "border-border1 bg-bg2 hover:border-border3 hover:bg-bg2-highlight focus-visible:outline-accent flex cursor-pointer flex-col rounded-[calc(var(--radius-lg)*1.5)] border p-3 text-left transition-colors duration-120 ease-out select-none focus-visible:outline-1 focus-visible:-outline-offset-2";
+  "border-border1 bg-bg2 hover:border-border3 hover:bg-selected-bg focus-visible:outline-accent flex cursor-pointer flex-col rounded-xl border p-3 text-left transition-colors duration-fast ease-out select-none focus-visible:outline-1 focus-visible:-outline-offset-2";
 const CARD_TOP_CLS = "flex h-5 items-center gap-2";
 const CARD_BRANCH_CLS = "text-fg2 min-w-0 flex-1 truncate text-xs leading-4.5";
 const CARD_TITLE_CLS = "text-fg1 mt-1 truncate text-xs leading-4.5 font-medium";
@@ -810,7 +810,7 @@ function ArchivedCard({
       {row.hidden && (
         <Tooltip label="Hidden workspace">
           <span
-            className="text-muted-fg inline-flex"
+            className="text-fg3 inline-flex"
             role="img"
             aria-label="Hidden workspace"
           >
@@ -1027,7 +1027,7 @@ function PendingDashboardCard({
 }) {
   return (
     <div
-      className="border-border1 bg-bg2 flex flex-col rounded-[calc(var(--radius-lg)*1.5)] border p-3 text-left opacity-80 select-none"
+      className="border-border1 bg-bg2 flex flex-col rounded-xl border p-3 text-left opacity-80 select-none"
       role="status"
       aria-live="polite"
     >
@@ -1252,7 +1252,7 @@ function DashboardCard({
             <Folder className="text-fg2 size-3.5" strokeWidth={1.5} />
           ) : missing ? (
             <FolderX
-              className="text-red-primary size-3.5"
+              className="text-red-text size-3.5"
               aria-label="Worktree missing"
             />
           ) : (
@@ -1261,7 +1261,7 @@ function DashboardCard({
         </div>
         <div className={CARD_TITLE_CLS}>{row.title}</div>
         {missing && (
-          <div className="text-red-primary mt-1 text-xs leading-4.5">Worktree missing</div>
+          <div className="text-red-text mt-1 text-xs leading-4.5">Worktree missing</div>
         )}
         <DashboardCardMetadata
           row={row}

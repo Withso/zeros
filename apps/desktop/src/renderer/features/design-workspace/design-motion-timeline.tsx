@@ -1889,7 +1889,7 @@ export const DesignMotionTimeline = React.memo(function DesignMotionTimeline({
           disabled={disabled}
           onValueChange={applyPreset}
         >
-          <Tooltip label="Motion preset" delayDuration={1500}>
+          <Tooltip label="Motion preset">
             <SelectTrigger
               size="sm"
               className="zd-field zd-motion-preset"
@@ -2090,7 +2090,6 @@ export const DesignMotionTimeline = React.memo(function DesignMotionTimeline({
             <Button
               type="button"
               variant={dirty ? "primary" : "ghost"}
-              size="sm"
               className="zd-motion-save"
               aria-label={saving ? "Saving…" : "Save"}
               disabled={
@@ -2225,7 +2224,7 @@ export const DesignMotionTimeline = React.memo(function DesignMotionTimeline({
               <span className="text-fg1 min-w-0 flex-1 truncate text-xs">
                 {details.name}
               </span>
-              <span className="text-muted-fg text-3xxs tabular-nums">
+              <span className="text-fg3 text-3xxs tabular-nums">
                 {properties.length}
               </span>
             </div>

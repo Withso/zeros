@@ -163,7 +163,7 @@ describe("tool presentation contract", () => {
     expect(html).toContain("lucide-bot");
     expect(html).not.toContain("lucide-circle-x");
     expect(html).toContain(">Agent<");
-    expect(html).toContain("text-red-primary");
+    expect(html).toContain("text-red-text");
   });
   it("keeps current streaming narration bright until the next activity", () => {
     // A sub-agent's own narration streams inside its feed (top-level

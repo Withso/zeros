@@ -86,7 +86,7 @@ const chrome = (dark: boolean, baseFg: string | null): Extension =>
       },
       ".cm-nonmatchingBracket": {
         backgroundColor:
-          "color-mix(in srgb, var(--red-primary) 25%, transparent)",
+          "color-mix(in srgb, var(--red-text) 25%, transparent)",
       },
       ".cm-searchMatch": {
         backgroundColor:

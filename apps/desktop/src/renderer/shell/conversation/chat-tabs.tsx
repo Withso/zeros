@@ -153,8 +153,8 @@ export const CHAT_STRIP_SHELL_CLS =
  * workspace (Code↔Design) and the whole column (expand Workbench), and they
  * only borrow a corner of one pane's strip because the column no longer has a
  * row of its own, so pane-level treatments must never dim them. (They were
- * lifted above the former bg0/30 inactive-window veil; inactive panes now
- * recede through their bg0 window fill alone, which keeps text at full
+ * lifted above the former bg1/30 inactive-window veil; inactive panes now
+ * recede through their bg1 window fill alone, which keeps text at full
  * contrast.) z-chrome (40) matches the drag drop overlay, a LATER sibling that
  * so still paints over the strip mid-drag. */
 export const CHAT_STRIP_LEADING_CLS =
@@ -867,7 +867,9 @@ function TabRow({
     >
       <IconButton
         type="button"
-        className="pointer-events-auto shrink-0"
+        // On the selected fill a selected-bg hover would vanish: the ✕ marks
+        // hover by brightening alone.
+        className="pointer-events-auto shrink-0 hover:bg-transparent"
         onClick={(e) => onClose(chat, e)}
         label="Close chat"
       >

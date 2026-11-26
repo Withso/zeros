@@ -72,10 +72,10 @@ const TREE_PADDING_INLINE = 10;
  *  inherit into the tree's shadow root. */
 const TREE_THEME_VARS = {
   // Folder column = workbench's --bg1 surface; a hovered row takes bg1-hover
-  // and the selected row fills bg2-highlight, the one selected-row fill.
+  // and the selected row fills selected-bg, the one selected-row fill.
   "--trees-bg-override": "var(--bg1)",
   "--trees-bg-muted-override": "var(--bg1-hover)", // hovered row
-  "--trees-selected-bg-override": "var(--bg2-highlight)", // selected row
+  "--trees-selected-bg-override": "var(--selected-bg)", // selected row
   // Symmetric 8px inset on both column edges. The lib's scroll container pads
   // `padding-inline − item-margin-x` on the left and subtracts the scrollbar
   // gutter again on the right, so the default (16 − 2 = 14px left, −6px gutter
@@ -85,10 +85,10 @@ const TREE_THEME_VARS = {
   "--trees-scrollbar-gutter-override": "0px",
   // Text: muted default so the selected row (bright) stands out.
   "--trees-fg-override": "var(--fg2)",
-  "--trees-fg-muted-override": "var(--muted-fg)",
+  "--trees-fg-muted-override": "var(--fg3)",
   "--trees-selected-fg-override": "var(--fg1)",
   // Ignored rows sit one step back with --fg3: ordinary rows already use --fg2,
-  // and --muted-fg is two steps back.
+  // and --fg3 is two steps back.
   "--trees-git-ignored-color-override": "var(--fg3)",
   // Filter matches (the `search` surfaces only): matched substrings render
   // brighter + bolder than the muted row text. Inert without a search bar.
@@ -228,10 +228,10 @@ const TREE_SHADOW_CSS = `
     padding-inline-start: 8px;
     font-weight: var(--weight-medium);
   }
-  [data-item-section='decoration'] > span:is([title='Added'], [title='Untracked']) { color: var(--green-primary); }
-  [data-item-section='decoration'] > span[title='Modified'] { color: var(--yellow-primary); }
-  [data-item-section='decoration'] > span:is([title='Deleted'], [title='Unmerged']) { color: var(--red-primary); }
-  [data-item-section='decoration'] > span[title='Renamed'] { color: var(--blue-primary); }
+  [data-item-section='decoration'] > span:is([title='Added'], [title='Untracked']) { color: var(--green-text); }
+  [data-item-section='decoration'] > span[title='Modified'] { color: var(--yellow-text); }
+  [data-item-section='decoration'] > span:is([title='Deleted'], [title='Unmerged']) { color: var(--red-text); }
+  [data-item-section='decoration'] > span[title='Renamed'] { color: var(--accent-text); }
   /* Filter input (the \`search\` surfaces only) = the tree column's header —
      breathing room so it doesn't sit cramped against the chrome above.
      Inert when the search bar is disabled. */

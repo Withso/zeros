@@ -20,7 +20,7 @@ const buttonVariants = cva(
   // `aria-disabled` is the disabled state that keeps hover, so a Tooltip can
   // say why the action is unavailable; the caller keeps the click a no-op.
   // A loading button's spinner takes the leading icon's place.
-  "inline-flex w-fit select-none items-center justify-center gap-1 whitespace-nowrap rounded-md border border-transparent px-1.5 py-1 text-xs leading-4.5 font-medium transition-colors focus-visible:border-accent focus-visible:outline-1 focus-visible:-outline-offset-1 focus-visible:outline-accent disabled:pointer-events-none disabled:opacity-50 aria-disabled:cursor-not-allowed aria-disabled:opacity-50 aria-busy:cursor-progress [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_:where(svg:not([class*='size-']))]:size-3.5 [&>[data-zeros-loader]+svg]:hidden",
+  "inline-flex w-fit select-none items-center justify-center gap-1 whitespace-nowrap rounded-md border border-transparent px-1.5 py-1 text-xs leading-4.5 font-medium transition-[background-color,border-color,color,opacity] duration-fast ease-out focus-visible:border-accent focus-visible:outline-1 focus-visible:-outline-offset-1 focus-visible:outline-accent disabled:pointer-events-none disabled:opacity-50 aria-disabled:cursor-not-allowed aria-disabled:opacity-50 aria-busy:cursor-progress [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_:where(svg:not([class*='size-']))]:size-3.5 [&>[data-zeros-loader]+svg]:hidden",
   {
     variants: {
       // Canonical set: Primary (the single main action), Secondary (the
@@ -30,51 +30,44 @@ const buttonVariants = cva(
         // PRIMARY — inverted fill (near-white on dark, near-black on light).
         // Reserve for the single main action on a view. Flat: no shadow.
         primary:
-          "bg-primary-button-bg text-primary-button-fg hover:bg-primary-button-hover",
+          "bg-primary-button-bg text-primary-button-fg hover:opacity-90",
         // SECONDARY — the everyday button, wearing the dropdown trigger's
         // exact chrome: TRANSPARENT fill so it blends with whatever surface it
-        // sits on (bg1 / bg2 / bg3 alike) + border3 → hover/open bg2-highlight
+        // sits on (bg1 / bg2 / bg3 alike) + border3 → hover/open selected-bg
         // + border4, so a secondary button and a Select are indistinguishable
         // at rest and on hover. Pressed (aria-pressed) is the selected fill:
         // selection never draws or changes an edge.
         secondary:
-          "border-border3 bg-transparent text-fg1 hover:border-border4 hover:bg-bg2-highlight data-[state=open]:border-border4 data-[state=open]:bg-bg2-highlight aria-pressed:bg-selected-bg aria-pressed:hover:bg-selected-bg",
+          "border-border3 bg-transparent text-fg1 hover:border-border4 hover:bg-selected-bg data-[state=open]:border-border4 data-[state=open]:bg-selected-bg aria-pressed:bg-selected-bg aria-pressed:hover:bg-selected-bg",
         // GHOST — transparent, no outline; toolbar and subtle text actions (a
         // dialog's Cancel). Its open menu holds the hover; pressed is the
         // selected fill with no edge.
         ghost:
-          "hover:bg-bg2-highlight hover:text-fg1 data-[state=open]:bg-bg2-highlight data-[state=open]:text-fg1 aria-pressed:bg-selected-bg aria-pressed:text-fg1 aria-pressed:hover:bg-selected-bg",
-        // DESTRUCTIVE (primary) — solid red fill (--red-secondary); text is the
-        // static --red-secondary-fg (white in both themes — fg1 would flip dark in light).
+          "hover:bg-selected-bg hover:text-fg1 data-[state=open]:bg-selected-bg data-[state=open]:text-fg1 aria-pressed:bg-selected-bg aria-pressed:text-fg1 aria-pressed:hover:bg-selected-bg",
+        // DESTRUCTIVE (primary) — solid red fill (--red-solid); text is the
+        // static --red-solid-fg (white in both themes — fg1 would flip dark in light).
         destructive:
-          "bg-red-secondary text-red-secondary-fg hover:bg-red-secondary-hover",
+          "bg-red-solid text-red-solid-fg hover:opacity-90",
         // DESTRUCTIVE (secondary) — same neutral surface as Secondary
-        // (transparent fill + border3 → hover bg2-highlight/border4);
-        // red-primary text carries the danger cue.
+        // (transparent fill + border3 → hover selected-bg/border4);
+        // red-text text carries the danger cue.
         "destructive-secondary":
-          "border-border3 bg-transparent text-red-primary hover:border-border4 hover:bg-bg2-highlight",
-        // LINK — an action inside a line of text (a meta row's chat name,
-        // View checks): fg2 text that brightens on hover, on the text's own
-        // 16px line box, with no fill, edge or padding.
-        link: "h-auto min-w-0 rounded-sm px-0 py-0 font-normal leading-4 text-fg2 hover:text-fg1",
+          "border-border3 bg-transparent text-red-text hover:border-border4 hover:bg-selected-bg",
       },
-      // Two control heights:
+      // Three control heights (P7):
       //   standard 28px — every button by default, identical to the Select
-      //     trigger. `sm` / `default` / `lg` are kept as names so call sites
-      //     don't churn, but they are the same 28px control (2026-09-15:
-      //     unified with the dropdown trigger).
-      //   compact 24px — dense rows: inline toolbars, tab/row trailing
-      //     actions, chips. 2px vertical padding on the same 18px line box;
-      //     unsized glyphs drop to 12px (text and icon-only alike).
-      // Never mix the two in one row; size the whole row with one of them.
+      //     trigger.
+      //   compact 24px — dense rows: tab/row trailing actions, chips. 2px
+      //     vertical padding on the same 18px line box; unsized glyphs drop
+      //     to 12px (text and icon-only alike).
+      //   inline 20px — an item in an inline floating group (Toolbar
+      //     size="inline"): 12/16 text, 14px icons, 4px corners.
+      // Never mix them in one row; size the whole row with one of them.
       size: {
-        sm: "",
-        default: "",
-        lg: "",
+        standard: "",
         compact: "py-0.5 [&_:where(svg:not([class*='size-']))]:size-3",
-        "icon-sm": "size-7 p-0",
+        inline: "h-5 rounded-sm px-1.5 py-0 text-3xxs leading-4",
         icon: "size-7 p-0",
-        "icon-lg": "size-7 p-0",
         "icon-compact":
           "size-6 p-0 [&_:where(svg:not([class*='size-']))]:size-3",
       },
@@ -83,7 +76,7 @@ const buttonVariants = cva(
       // Secondary is the everyday button, so it's the default when no variant
       // is passed. Primary (`variant="primary"`) is the rare main-CTA opt-in.
       variant: "secondary",
-      size: "default",
+      size: "standard",
     },
   },
 );

@@ -252,7 +252,7 @@ describe("canonical permission-card variants", () => {
     );
 
     // The dock card surface; context items sit in bg1 wells with border1.
-    expect(html).toContain("border-(--composer-border) bg-sidebar-bg");
+    expect(html).toContain("border-(--composer-border) bg-bg1-raised");
     expect(html).toContain("border-border1 bg-bg1");
     // Options are plain rows with 18px keycaps, not bordered buttons.
     expect(html).not.toContain("border-border3");
@@ -304,7 +304,7 @@ describe("canonical permission-card variants", () => {
     // Decline and Cancel are distinct rows but share one global rejection
     // shortcut. Only the row that Backspace/Delete actually selects may claim
     // the hint.
-    expect(html.match(/⌫/g)).toHaveLength(1);
+    expect(html.match(/data-key-glyph="⌫"/g)).toHaveLength(1);
   });
 
   it("shows the command as well as provider-authored permission context", () => {

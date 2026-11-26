@@ -90,7 +90,7 @@ export function DesignCheckoutPause({
       className="overflow-auto py-6"
       detail={
         <ul
-          className="border-border2 bg-sidebar-bg m-0 mt-1 w-full max-w-105 list-none overflow-y-auto rounded-lg border p-0 text-left max-h-72"
+          className="border-border2 bg-bg1-raised m-0 mt-1 w-full max-w-105 list-none overflow-y-auto rounded-lg border p-0 text-left max-h-72"
           data-design-conflict-files=""
         >
           {status.conflicts.map((file) => (
@@ -183,7 +183,7 @@ function ConflictFileRow({
       onPointerEnter={warm}
       onFocus={warm}
       onClick={() => openFilePill(path, file, "changes")}
-      className="hover:bg-sidebar-bg-hover text-fg1 h-9 w-full min-w-0 justify-start gap-2 rounded-none pr-2.5 pl-3 font-normal"
+      className="hover:bg-bg1-raised-hover text-fg1 h-9 w-full min-w-0 justify-start gap-2 rounded-none pr-2.5 pl-3 font-normal"
     >
       <File className="text-fg3 shrink-0" aria-hidden="true" />
       <span className="min-w-0 flex-1 truncate">

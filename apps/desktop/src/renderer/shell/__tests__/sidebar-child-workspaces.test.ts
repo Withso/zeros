@@ -22,6 +22,17 @@ describe("nestChildWorkspaces", () => {
     expect(ids(nestChildWorkspaces(rows, new Set(["a", "c1"])))).toEqual(["a:0:1", "c1:1:1", "g1:2:0", "b:0:0", "orphan:0:0"]);
   });
 
+  // Step 2: a child in its parent's project shows a dot in the leading slot;
+  // one in another project keeps that project's logo.
+  it("marks children that share their parent's project", () => {
+    const other = { id: "q", name: "docs", repoRoot: "/q" } as Project;
+    const nested = nestChildWorkspaces([item("a"), item("c1", "a"), { ...item("c2", "a"), project: other }], new Set(["a"]));
+    const same = (id: string) => nested.find((row) => row.kind === "workspace" && row.workspace.id === id);
+    expect(same("c1")).toMatchObject({ depth: 1, sameProjectAsParent: true });
+    expect(same("c2")).toMatchObject({ depth: 1, sameProjectAsParent: false });
+    expect(same("a")).not.toHaveProperty("sameProjectAsParent", true);
+  });
+
   it("leaves a list with no child workspaces unchanged", () => {
     const flat = [item("a"), item("b")];
     expect(nestChildWorkspaces(flat, new Set())).toEqual(flat);

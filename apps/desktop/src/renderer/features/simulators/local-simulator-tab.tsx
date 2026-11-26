@@ -8,7 +8,7 @@ import {
   type KeyboardEvent,
   type ReactNode,
 } from "react";
-import { ChevronDown, LoaderCircle } from "lucide-react";
+import { ChevronDown } from "lucide-react";
 import { agentControlName } from "@zeros/protocol/browser-tools";
 import {
   deviceControlDetail,
@@ -25,7 +25,6 @@ import { WorkbenchTabToolbar, useWorkbenchStatusSource } from "../../shell/workb
 import type { WorkbenchNotice } from "../../shell/workbench/tab-status-model";
 import { useWorkspaceDispatch, useWorkspaceStore } from "../../state/store";
 import { selectWorkbench } from "../../state/workspace-store";
-import { cn } from "../../shared/ui/cn";
 import { usePrefersReducedMotion } from "../../shared/ui/loading/use-prefers-reduced-motion";
 import { Button } from "../../shared/ui/primitives/button";
 import { DropdownMenu, DropdownMenuTrigger } from "../../shared/ui/primitives/dropdown-menu";
@@ -81,6 +80,7 @@ import {
   simulatorTabView,
   simulatorsShownElsewhere,
 } from "./simulator-tab-model";
+import { RunStream } from "@/renderer/shared/ui/loading/run-stream";
 
 const EMPTY_DEVICES: readonly SimulatorDevice[] = [];
 
@@ -98,10 +98,7 @@ function ScreenMessage({
   return (
     <div className="flex size-full flex-col items-center justify-center gap-3 p-4 text-center">
       {busy && (
-        <LoaderCircle
-          aria-hidden
-          className={cn("text-fg3 size-5", active && "motion-safe:animate-spin")}
-        />
+        <RunStream size={20} className="text-(--loader-active)" />
       )}
       <p aria-live={active ? "polite" : "off"} className="text-fg2 m-0 text-xs">
         {message}
@@ -191,10 +188,10 @@ function SimulatorPicker({
       <DropdownMenuTrigger asChild>
         <Button
           variant="ghost"
-          className="data-[state=open]:bg-bg2-highlight min-w-0 justify-start"
+          className="data-[state=open]:bg-selected-bg min-w-0 justify-start"
         >
           <span className="text-fg1 min-w-0 truncate">{device.name}</span>
-          <span className="text-muted-fg shrink-0 font-normal">
+          <span className="text-fg3 shrink-0 font-normal">
             {simulatorDeviceStatusLabel(device)}
           </span>
           <ChevronDown aria-hidden className="text-fg3" />

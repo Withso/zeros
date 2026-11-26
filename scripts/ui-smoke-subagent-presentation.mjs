@@ -175,12 +175,12 @@ export async function runSubagentPresentationSmoke({ page, check }) {
   const shell = errors.getByRole("button", { name: /^Check command access/ });
   const red = await color(shell.locator(".lucide-circle-x"));
   const preview = shell.locator("[data-tool-preview]");
-  // Text on the red fill is red-fg; the icon beside it keeps red-primary.
+  // Text on the red fill is red-on-bg; the icon beside it keeps red-text.
   const previewClass = await preview.getAttribute("class");
   check(
     "Collapsed failed commands use red foreground and background",
     (await color(preview)) !== bright &&
-      previewClass.includes("text-red-fg") &&
+      previewClass.includes("text-red-on-bg") &&
       previewClass.includes("bg-red-bg"),
   );
   await shell.click();

@@ -14,13 +14,13 @@ import { Button, IconButton, Tooltip } from "@/renderer/shared/ui/primitives";
 import { cn } from "@/renderer/shared/ui/cn";
 import type { PrIslandAction, PrIslandState } from "./pr-status";
 
-/** Review Overview's card: sidebar-bg on border2 with 8px corners. */
-export const STATUS_CARD = "border-border2 bg-sidebar-bg min-w-0 rounded-lg border";
+/** Review Overview's card: bg1-raised on border2 with 8px corners. */
+export const STATUS_CARD = "border-border2 bg-bg1-raised min-w-0 rounded-lg border";
 
 const TONE_ICON: Record<string, { icon: typeof CircleCheck; className: string }> = {
-  success: { icon: CircleCheck, className: "text-green-primary" },
-  warning: { icon: GitMerge, className: "text-yellow-icon" },
-  danger: { icon: GitMerge, className: "text-red-primary" },
+  success: { icon: CircleCheck, className: "text-green-text" },
+  warning: { icon: GitMerge, className: "text-yellow-text" },
+  danger: { icon: GitMerge, className: "text-red-text" },
   neutral: { icon: CircleDot, className: "text-fg3" },
 };
 

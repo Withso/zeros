@@ -36,7 +36,7 @@ export async function runCommandPaletteSmoke({ page, check }) {
     await composer.focus();
     await page.keyboard.press("Meta+k");
     await expect(input).toBeFocused();
-    await expect(dialog).toHaveCSS("border-radius", "14px");
+    await expect(dialog).toHaveCSS("border-radius", "12px");
     await expect(dialog.locator('[data-slot="dialog-body"]')).toHaveCSS(
       "padding",
       "0px",
@@ -340,7 +340,7 @@ export async function runCommandPaletteSmoke({ page, check }) {
   await navigate("alpha");
   await page.setViewportSize({ width: 360, height: 640 });
   await open();
-  await expect(dialog).toHaveCSS("border-radius", "14px");
+  await expect(dialog).toHaveCSS("border-radius", "12px");
   await expect
     .poll(() =>
       dialog.evaluate((element) => element.scrollWidth <= element.clientWidth),

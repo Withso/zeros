@@ -187,11 +187,11 @@ export function BrowserVariantFrame({
       data-zeros-browser-variant={variant.id}
     >
       <div
-        className="bg-bg1 ring-fg1/5 relative flex flex-col overflow-visible shadow-md ring-1"
+        className="bg-bg1 ring-fg1/5 relative flex flex-col overflow-visible shadow-[var(--shadow-dropdown)] ring-1"
         style={{ width, height }}
       >
         <div
-          className="border-border1 bg-bg2 text-xxs flex h-[34px] shrink-0 cursor-grab items-center gap-1 border-b px-2 select-none active:cursor-grabbing"
+          className="border-border1 bg-bg2 text-3xxs flex h-[34px] shrink-0 cursor-grab items-center gap-1 border-b px-2 select-none active:cursor-grabbing"
           data-zeros-canvas-chrome
           onPointerDown={startHeaderDrag}
         >
@@ -202,7 +202,7 @@ export function BrowserVariantFrame({
               onBlur={handleRename}
               onKeyDown={(e) => e.key === "Enter" && handleRename()}
               onPointerDown={(e) => e.stopPropagation()}
-              className="text-xxs h-6 min-w-0 flex-1 px-1.5"
+              className="text-3xxs h-6 min-w-0 flex-1 px-1.5"
               autoFocus
             />
           ) : (
@@ -231,7 +231,7 @@ export function BrowserVariantFrame({
               aria-label="Copy HTML and CSS"
             >
               {copied ? (
-                <Check className="text-green-primary size-3" />
+                <Check className="text-green-text size-3" />
               ) : (
                 <Copy className="size-3" />
               )}
