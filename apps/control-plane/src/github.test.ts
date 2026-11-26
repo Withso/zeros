@@ -685,7 +685,19 @@ dbDescribe("GitHub App OAuth handoff", () => {
   });
 
   it("lets two Zeros accounts authorize the same installed GitHub account with independent access", async () => {
-    const org = randomUUID(), remote = githubFetch([]);
+    const org = randomUUID(), calls: FetchCall[] = [], provider = githubFetch(calls);
+    const liveRefresh = new Set<string>();
+    let sequence = 0;
+    const remote: typeof fetch = async (input, init) => {
+      const reply = await provider(input, init);
+      if (!String(input).endsWith("/login/oauth/access_token")) return reply;
+      const form = new URLSearchParams(String(init?.body ?? ""));
+      if (form.has("refresh_token") && !liveRefresh.delete(form.get("refresh_token")!))
+        return Response.json({ error: "bad_refresh_token" });
+      const suffix = ++sequence;
+      liveRefresh.add(`refresh-${suffix}`);
+      return Response.json({ ...await reply.json(), access_token: `access-${suffix}`, refresh_token: `refresh-${suffix}` });
+    };
     const store = new CloudGithubConnectionStore(pool, { currentKeyVersion: 1, keys: { 1: Buffer.alloc(32, 7).toString("base64url") } });
     const cloudGithub = new CloudGithubConnections(store, githubConfig, remote);
     const users = await Promise.all(["owner", "member"].map(name => ensureUser(pool, {
@@ -715,13 +727,24 @@ dbDescribe("GitHub App OAuth handoff", () => {
     const grantA = await connect(first);
     expect((await store.status(second.scope)).selectedMethod).toBeNull();
     const grantB = await connect(second);
+    const rotate = async (app: Hono, grant: typeof grantA) => {
+      const rejectedTokenHash = createHash("sha256").update(grant.accessToken!).digest("hex");
+      const reply = await post(app, "refresh", { ...grant, rejectedTokenHash });
+      expect(reply.status).toBe(200);
+      return await reply.json() as typeof grantA;
+    };
+    expect(grantA.accessToken).not.toBe(grantB.accessToken);
+    expect((await rotate(first.app, grantA)).accessToken).toBe("access-3");
+    expect(liveRefresh.has("refresh-2")).toBe(true);
     expect((await store.selectedIdentity(first.scope))?.identity).toEqual((await store.selectedIdentity(second.scope))?.identity);
     const installation = await pool.query("SELECT owner_user_id FROM github_installations WHERE github_installation_id=987654 AND owner_user_id=ANY($1::uuid[])", [users.map(user => user.id)]);
     expect(installation.rows).toHaveLength(2);
     expect((await post(second.app, "refresh", grantA)).status).toBe(401);
     await store.disconnect(first.scope, await store.fingerprint(first.scope), "github-app");
     expect((await post(first.app, "revoke", grantA)).status).toBe(200);
-    expect((await post(second.app, "refresh", grantB)).status).toBe(200);
+    expect(calls.some(call => call.init?.method === "DELETE")).toBe(false);
+    expect((await rotate(second.app, grantB)).accessToken).toBe("access-4");
+    expect(liveRefresh.has("refresh-3")).toBe(true);
     await pool.query("DELETE FROM organization_members WHERE org_id=$1 AND user_id=$2", [org, second.scope.userId]);
     expect((await post(second.app, "refresh", grantB)).status).toBe(404);
   });
