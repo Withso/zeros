@@ -291,6 +291,14 @@ database("cloud GitHub connection ownership and rotation", () => {
     expect((await store.status(scope())).selectedMethod).toBe("github-app");
   });
 
+  it("allows a pending App exchange to save after a Mac-only PAT is removed", async () => {
+    const before = await store.status(scope());
+    expect(before.methods.pat.configured).toBe(false);
+    await store.disconnect(scope(), before.generation, "pat");
+    await store.save(scope(), before.generation, identity, app);
+    expect((await store.status(scope())).selectedMethod).toBe("github-app");
+  });
+
   it("preserves inactive methods while selecting the explicit connection", async () => {
     await store.save(
       scope(),

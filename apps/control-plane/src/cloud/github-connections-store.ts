@@ -359,6 +359,9 @@ export class CloudGithubConnectionStore {
     method: CloudGithubMethod,
   ): Promise<void> {
     await this.edit(scope, expected, async (tx, value) => {
+      // A Mac-only PAT removal confirms the empty slot under the lock. Preserve
+      // the generation for an unrelated App exchange waiting to commit.
+      if (method === "pat" && value.actor.selected_method !== "pat" && !value.rows.some(row => row.method === "pat")) return;
       await tx.query(
         "DELETE FROM cloud_github_credentials WHERE org_id=$1 AND owner_user_id=$2 AND method=$3",
         [scope.organizationId, scope.userId, method],

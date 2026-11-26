@@ -545,9 +545,9 @@ export function GitHubSection({
           await shared.change({ action: "disconnect", method });
         const result = await ghMethodDisconnect(method, accountId);
         ghAuthStatusCache.setData(authKey, result.snapshot);
-        setSetupMethod(null);
-        setTerminalOpen(false);
-        setAppWaiting(false);
+        setSetupMethod(current => current === method ? null : current);
+        if (method === "gh-cli") setTerminalOpen(false);
+        if (method === "github-app") setAppWaiting(false);
         if (method === "gh-cli") setAutoSetupDismissed(true);
         if (method === "github-app") {
           toast.info("GitHub App disconnected", {
