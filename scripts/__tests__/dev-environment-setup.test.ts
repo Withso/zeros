@@ -113,6 +113,14 @@ describe("secure portable Dev setup", () => {
     expect(f.git("ls-files", "--others", "--ignored", "--exclude-from", path.resolve(import.meta.dirname, "../../.worktreeinclude"))).toBe("");
   });
 
+  it("launches from a linked worktree with a checkout-only private Dev profile without copying it", () => {
+    const f = fixture(), worktree = path.join(f.home, "linked worktree");
+    f.git("worktree", "add", "-qb", "feature", worktree);
+    fs.writeFileSync(path.join(f.root, "zeros-dev-env.json"), JSON.stringify(f.profile), { mode: 0o600 });
+    expect(loadHostedProfile(worktree, { homeDir: f.home, env: {} })).toEqual(f.profile);
+    expect(fs.existsSync(path.join(worktree, "zeros-dev-env.json"))).toBe(false);
+  });
+
   it("validates without reading providers or changing permissions in check mode", () => {
     const f = fixture();
     expect(inspectDevelopmentProfile(f.source).issues).toEqual([]);

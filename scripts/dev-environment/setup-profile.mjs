@@ -4,7 +4,7 @@ import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { isDeepStrictEqual } from "node:util";
 import { portableProfileIssues } from "./profile.mjs";
-import { PROFILE_NAME, profileExists, assertIgnoredProfileDestination } from "./profile-path.mjs";
+import { PROFILE_NAME, profileExists, assertIgnoredProfileDestination, mainProfileCheckout } from "./profile-path.mjs";
 import { developmentHome, readPrivateJson, systemEnvironment, writePrivateFile } from "./state.mjs";
 
 // Transfers (AirDrop, encrypted vault downloads, etc.) may arrive mode 0644.
@@ -64,9 +64,7 @@ export function importDevelopmentProfile({ root, source, homeDir = os.homedir() 
   if (fs.realpathSync(git(checkout, ["rev-parse", "--show-toplevel"]).trimEnd()) !== checkout) {
     throw new Error("Run Dev setup from the repository root");
   }
-  const first = git(checkout, ["worktree", "list", "--porcelain", "-z"]).split("\0")[0];
-  if (!first.startsWith("worktree ")) throw new Error("Could not locate the main checkout for future workspace profiles");
-  const main = fs.realpathSync(first.slice("worktree ".length));
+  const main = mainProfileCheckout(checkout);
   const checkouts = [...new Set([main, checkout])];
   const directory = developmentHome(homeDir);
   const files = [path.join(directory, PROFILE_NAME), ...checkouts.map(p => path.join(p, PROFILE_NAME))];

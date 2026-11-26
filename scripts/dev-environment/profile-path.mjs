@@ -6,6 +6,15 @@ import { developmentHome, systemEnvironment } from "./state.mjs";
 
 export const PROFILE_NAME = "zeros-dev-env.json";
 
+export function mainProfileCheckout(root) {
+  const list = execFileSync("git", ["worktree", "list", "--porcelain", "-z"], {
+    cwd: root, env: systemEnvironment(), encoding: "utf8", stdio: "pipe",
+  });
+  const first = list.split("\0", 1)[0];
+  if (!first.startsWith("worktree ")) throw new Error("Could not locate the main Dev checkout");
+  return fs.realpathSync(first.slice("worktree ".length));
+}
+
 export function assertIgnoredProfileDestination(root) {
   const git = args => execFileSync("git", args, { cwd: root, env: systemEnvironment(), encoding: "utf8", stdio: "pipe" });
   try {
@@ -28,7 +37,16 @@ export function developmentProfilePath(root, { env = process.env, homeDir = os.h
     ...(root ? [path.join(root, PROFILE_NAME), path.join(root, ".env.zeros-dev.json")] : []),
     path.join(directory, PROFILE_NAME), path.join(directory, "development.json"),
   ];
-  const file = candidates.find(profileExists) ?? path.join(directory, PROFILE_NAME);
+  let file = candidates.find(profileExists);
+  if (!file && root && fs.lstatSync(path.join(root, ".git"), { throwIfNoEntry: false })?.isFile()) {
+    const main = mainProfileCheckout(root);
+    const source = path.join(main, PROFILE_NAME);
+    if (main !== fs.realpathSync(root) && profileExists(source)) {
+      assertIgnoredProfileDestination(main);
+      file = source;
+    }
+  }
+  file ??= path.join(directory, PROFILE_NAME);
   if (path.dirname(file) === directory && profileExists(file)) developmentHome(homeDir);
   return file;
 }
