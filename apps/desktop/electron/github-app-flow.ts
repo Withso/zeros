@@ -288,7 +288,7 @@ export async function beginGithubAppConnection(
   });
 }
 
-export function cancelGithubAppConnection(): void {
+export function cancelGithubAppConnection(): boolean {
   // Route through the controller so an in-flight begin() observes the cancel:
   // it reaches the control plane before persisting anything, so clearing state
   // alone would let it open the browser and stay redeemable after the user
@@ -296,9 +296,10 @@ export function cancelGithubAppConnection(): void {
   // is misconfigured, so fall back to the local cleanup the controller would
   // have done — there can be no in-flight begin() if constructing it throws.
   try {
-    githubAppController().cancel();
+    return githubAppController().cancel();
   } catch {
     clearPending();
+    return true;
   }
 }
 

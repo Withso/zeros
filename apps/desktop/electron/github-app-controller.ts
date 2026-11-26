@@ -237,6 +237,7 @@ export class GithubAppController {
    * anything to clear, so a cancel during those round trips has no persisted
    * state to remove — it has to be observed in memory instead. */
   private cancelEpoch = 0;
+  private committingSharedApp = false;
 
   constructor(private readonly deps: GithubAppControllerDependencies) {
     this.now = deps.now ?? Date.now;
@@ -249,7 +250,7 @@ export class GithubAppController {
     preserveSelectedMethod?: boolean;
     shared?: SharedGithubTarget;
   }): Promise<GithubAppFlowKind | null> {
-    this.cancel();
+    if (!this.cancel()) throw new GithubAppFlowError("The GitHub connection is finishing.", "oauth_failed");
     const epoch = this.cancelEpoch;
     const session = await this.deps.getSession();
     if (!session || (input.shared && session.sub !== input.shared.userId)) {
@@ -307,9 +308,11 @@ export class GithubAppController {
 
   /** Cancel only the desktop half of the browser flow. A callback that arrives
    * later is rejected as unsolicited and cannot replace the selected method. */
-  cancel(): void {
+  cancel(): boolean {
+    if (this.committingSharedApp) return false;
     this.cancelEpoch += 1;
     this.deps.clearPending();
+    return true;
   }
 
   async complete(input: {
@@ -334,9 +337,10 @@ export class GithubAppController {
       return;
     }
 
+    let committingSharedApp = false;
     try {
       const session = await this.deps.getSession();
-      if (!session || (consumed.ownerSub && consumed.ownerSub !== session.sub)) {
+      if (epoch !== this.cancelEpoch || !session || (consumed.ownerSub && consumed.ownerSub !== session.sub)) {
         throw new GithubAppFlowError(
           "Sign in to Zeros before finishing the GitHub connection.",
           "signed_out",
@@ -354,6 +358,11 @@ export class GithubAppController {
         const current=await this.deps.getSession();
         if(epoch===this.cancelEpoch&&current?.sub===session.sub)this.deps.emitConnected({login:result.login,installationCount:result.installationCount});
         return;
+      }
+      // Shared exchange commits in Cloud. Once dispatched, Cancel must let both sides finish.
+      if (consumed.shared) {
+        committingSharedApp = true;
+        this.committingSharedApp = true;
       }
       const result = await this.deps.client.exchange(
         session.accessToken,
@@ -429,6 +438,8 @@ export class GithubAppController {
       });
     } catch (error) {
       this.deps.emitError(mapClientError(error).reason);
+    } finally {
+      if (committingSharedApp) this.committingSharedApp = false;
     }
   }
 
@@ -663,7 +674,7 @@ export class GithubAppController {
   /** Best-effort remote revoke, then a CAS local removal. A transient control-plane
    *  outage never traps a user in a locally connected state. */
   async disconnect(owner?: string): Promise<boolean> {
-    this.cancel();
+    if (!this.cancel()) return false;
     if(this.deps.devReference)return this.deps.devReference.disconnect();
     return this.deps.withCredentialLock(async () => {
       const current = await this.deps.credentialStore.get("github-app");

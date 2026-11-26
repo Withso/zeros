@@ -257,6 +257,22 @@ describe("GitHub App desktop controller", () => {
     expect(h.events.some(event => event.name === "connected")).toBe(false);
   });
 
+  it("finishes both connections once a shared exchange has begun committing", async () => {
+    const h = harness();
+    const response = await h.client.exchange();
+    const reply = deferred<GithubAppTokenResult>();
+    h.client.exchange.mockImplementation(() => reply.promise);
+    await h.controller.begin({ scheme: "zeros-dev", installFlow: false, shared: {
+      userId: "account-one", organizationId: "org-one", expected: "a".repeat(64),
+    } });
+    const completing = h.controller.complete({ nonce: "n".repeat(43) });
+    await vi.waitFor(() => expect(h.client.exchange).toHaveBeenCalledTimes(2));
+    expect(h.controller.cancel()).toBe(false);
+    reply.resolve(response);
+    await completing;
+    expect(h.events.some(event => event.name === "connected")).toBe(true);
+  });
+
   it("disconnect cancels a browser attempt that has not produced a credential yet", async () => {
     const h = harness();
     await h.controller.begin({ scheme: "zeros-dev", installFlow: false });

@@ -501,10 +501,7 @@ export const ghAppConnect: CommandHandler = async (args) => {
   }
 };
 
-export const ghAppCancel: CommandHandler = () => {
-  cancelGithubAppConnection();
-  return null;
-};
+export const ghAppCancel: CommandHandler = () => cancelGithubAppConnection();
 
 /** Remove only the addressed method. Active App/PAT falls back to gh CLI. */
 export const ghMethodDisconnect: CommandHandler = async (args) => {

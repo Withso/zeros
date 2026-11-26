@@ -444,11 +444,15 @@ export function GitHubSection({
     }
   }, [snapshot.methods, owner, shared]);
 
-  const cancelApp = useCallback(() => {
+  const cancelApp = useCallback(async () => {
+    const attempt = appAttemptRef.current;
+    try {
+      if (!(await ghAppCancel()) || attempt !== appAttemptRef.current) return;
+    } catch (error) {
+      toast.error("Couldn’t cancel GitHub setup", { description: errorMessage(error) });
+      return;
+    }
     appAttemptRef.current += 1;
-    void ghAppCancel().catch(() => {
-      // Reset local UI even if cancelling the native handoff fails.
-    });
     trackGithubConnectCompleted({
       method: "github-app",
       outcome: "cancelled",

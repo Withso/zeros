@@ -1797,8 +1797,8 @@ export async function ghAppConnect(options?: {
   });
 }
 
-export async function ghAppCancel(): Promise<void> {
-  await nativeInvoke("gh_app_cancel", {});
+export async function ghAppCancel(): Promise<boolean> {
+  return (await nativeInvoke<boolean | null>("gh_app_cancel", {})) !== false;
 }
 
 export async function ghMethodDisconnect(method: GithubAuthMethod, userId?: string): Promise<{
