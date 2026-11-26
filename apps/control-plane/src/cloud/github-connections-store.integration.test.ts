@@ -272,7 +272,10 @@ database("cloud GitHub connection ownership and rotation", () => {
     await save();
     await store.save(scope(), await store.fingerprint(scope()), identity, app);
     const expected = await store.fingerprint(scope());
-    const github = vi.fn(async () => new Response(null, { status: 401 }));
+    const github = vi.fn(async (_url: unknown, init?: RequestInit) =>
+      new Headers(init?.headers).get("authorization") === `Bearer ${pat.accessToken}`
+        ? new Response(null, { status: 401 })
+        : Response.json({ id: Number(identity.id), login: identity.login }));
     const api = new Hono();
     api.use("*", async (c, next) => { c.set("user", { id: userId } as never); await next(); });
     api.onError((error, c) => error instanceof HttpError
