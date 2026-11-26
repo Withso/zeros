@@ -1913,7 +1913,6 @@ export const DesignInspector = React.memo(function DesignInspector({
   // A slot takes layers, not styles: its frame is the main's.
   const slotSelected = !!selectedNodeId && designComponentSlotOf(selectedNodeId) !== null;
   const editsDisabled = !active || slotSelected;
-  const styleEditsDisabled = editsDisabled || !elementDetails;
   const tabPreferencesRef = useRef(new Map<string, DesignInspectorTab>());
   const [tabPreference, setTabPreference] = useState<{ key: string; value: DesignInspectorTab } | null>(null);
   const tabKeyRef = useRef("");
@@ -2210,6 +2209,10 @@ export const DesignInspector = React.memo(function DesignInspector({
     ? designHandedSelectionPresentation(shownSubjectRef.current, selectionHandoff, selectionSubject)
     : null;
   const presentedElementDetails = elementDetails ?? confirmedStyleDetailsRef.current?.details ?? handed?.details ?? null;
+  // A handed-over panel already looks as it will once its target reads back:
+  // disabled controls would dim it for that moment. It is inert instead, and
+  // its edit contexts refuse writes.
+  const styleEditsDisabled = editsDisabled || (!elementDetails && !handed);
   const presentedTargetNodeId = styleTargetNodeId ?? (handed ? handed.details.oid : null);
   const frameStyleTarget =
     frameSelected && !selectedNodeId && presentedTargetNodeId !== null;
@@ -4147,7 +4150,7 @@ export const DesignInspector = React.memo(function DesignInspector({
         <InertTabsContent value="style" forceMount inert={stylePanel.inert ? "" : undefined} aria-hidden={stylePanel.ariaHidden}
           data-design-style-panel="" className="mt-0 min-h-0 flex-1 overflow-hidden data-[state=active]:flex data-[state=inactive]:!hidden">
           <ScrollArea className="min-h-0 flex-1">
-            <div className="flex flex-col pb-6">
+            <div className="flex flex-col pb-6" {...(handed ? ({ inert: "" } as React.HTMLAttributes<HTMLDivElement>) : null)}>
               {textLock?.kind === "option" ? (
               <p data-design-text-set-by="" className="border-border1 text-fg2 border-b px-3 py-2 text-3xxs leading-4">{textLock.message}</p>
             ) : null}

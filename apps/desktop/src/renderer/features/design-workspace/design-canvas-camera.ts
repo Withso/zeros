@@ -68,23 +68,38 @@ const writtenScales = new WeakMap<HTMLElement, { zoom: number; style: string | n
 const CHROME_SCALE_GESTURE_HOLD = 0.15;
 
 /** A frame's name and Play roots. At rest they take the exact camera scale.
- * A held scale grew and shrank the name and its gap by up to 15%, then
- * snapped; an exact scale per step restyled and re-laid out every visible
- * name, enough main-thread work to miss the display deadline. So a camera
- * gesture hides automatic chrome and leaves its scale untouched until rest. */
-const chromeRoots = new WeakMap<HTMLElement, { count: number; roots: HTMLElement[]; zoom?: number | null }>();
+ * Writing that scale restyles and re-lays out the name, so on every gesture
+ * step across all visible names it missed the display deadline. Hiding the
+ * names instead made every label blink out while zooming. Through a gesture
+ * an automatic name keeps its laid-out scale and a `scale` property, a
+ * compositor-only change, corrects it to the exact screen size; it re-lays
+ * out only past the same hold the frame scale uses. */
+const chromeRoots = new WeakMap<HTMLElement, { count: number; roots: HTMLElement[]; zoom?: number | null; scale?: number }>();
 
 /** Null leaves a root to inherit its frame's scale, as hidden chrome must. */
-function paintFrameChromeRoots(frame: HTMLElement, zoom: number | null): void {
+function paintFrameChromeRoots(frame: HTMLElement, zoom: number | null, gesture = false): void {
   let entry = chromeRoots.get(frame);
   if (!entry || entry.count !== frame.childElementCount || !entry.roots.every(root => root.parentElement === frame)) {
     entry = { count: frame.childElementCount, roots: [...frame.children].filter((child): child is HTMLElement =>
       child instanceof HTMLElement && child.hasAttribute("data-design-frame-chrome")) };
     chromeRoots.set(frame, entry);
   }
+  const laidOut = entry.zoom;
+  const held = gesture && zoom !== null && typeof laidOut === "number" &&
+    Math.abs(zoom / laidOut - 1) < CHROME_SCALE_GESTURE_HOLD;
+  const scale = held ? laidOut / zoom : 1;
+  if (entry.scale !== scale) {
+    entry.scale = scale;
+    for (const root of entry.roots) {
+      // A held frame has no selection, playback or focus, so its Play is clipped.
+      if (root.hasAttribute("data-design-frame-play-chrome")) continue;
+      if (scale === 1) root.style.removeProperty("scale");
+      else root.style.setProperty("scale", String(scale));
+    }
+  }
   // Most frames keep their chrome scale across a step: off-screen and
   // compact ones stay null. Skip them without reading any declaration.
-  if (entry.zoom === zoom) return;
+  if (held || entry.zoom === zoom) return;
   entry.zoom = zoom;
   for (const root of entry.roots) {
     for (const [name, value] of [["--design-canvas-zoom", zoom], ["--design-canvas-inverse-zoom", zoom === null ? null : 1 / zoom]] as const) {
@@ -193,9 +208,8 @@ export function paintDesignFrameVisibility(element: HTMLElement, context?: Chrom
   // size label must not drift either; its subtree is cheap to restyle.
   const gesture = !chromeProtected && !!(context ? context.gesture : world.hasAttribute("data-design-camera-gesture"));
   paintChromeScale(element, outside || compact ? 1 : viewport.zoom, gesture);
-  const gestureHidden = gesture && controls === "automatic" && focusedFrame !== element;
-  element.toggleAttribute("data-design-frame-gesture-hidden", gestureHidden);
-  if (!gestureHidden) paintFrameChromeRoots(element, outside || compactControls ? null : viewport.zoom);
+  paintFrameChromeRoots(element, outside || compactControls ? null : viewport.zoom,
+    gesture && controls === "automatic" && focusedFrame !== element);
   if (!paintingWorlds.has(world)) repaintDesignCanvasPixels(world);
 }
 

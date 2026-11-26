@@ -25,14 +25,16 @@ const hold = page => page.evaluate(() => window.__zerosHarnessDesignSurface.meas
 const release = page => page.evaluate(() => window.__zerosHarnessDesignSurface.measurement.release("design.transaction.apply"));
 const selection = page => page.evaluate(id => window.__zerosHarnessDesignSurface.ui.getState().byWorkspace[id].selectedNodeId, workspaceId);
 /** The Style panel at every display frame: an edit that selects what it made
- * hands the panel over without an empty, Page or Nothing selected state. */
+ * hands the panel over without an empty, Page or Nothing selected state, and
+ * without disabling (dimming) its fields while the result reads back. */
 const sampleInspector = page => page.evaluate(() => {
   const samples = [];
   const tick = () => {
     const header = document.querySelector("[data-design-inspector-header]");
     samples.push({ type: header?.getAttribute("data-design-selection-type") ?? null,
       title: header?.querySelector("[data-design-inspector-title]")?.textContent ?? null,
-      fields: document.querySelectorAll("[data-design-style-panel] [data-design-inspector-field]").length });
+      fields: document.querySelectorAll("[data-design-style-panel] [data-design-inspector-field]").length,
+      disabled: document.querySelectorAll("[data-design-style-panel] [data-design-inspector-field] :disabled").length });
     window.__zerosInspectorSampler = requestAnimationFrame(tick);
   };
   window.__zerosInspectorSamples = samples;
@@ -42,10 +44,12 @@ const inspectorSamples = page => page.evaluate(() => { cancelAnimationFrame(wind
 const fieldCount = page => page.locator("[data-design-style-panel] [data-design-inspector-field]").count();
 const inspectorGaps = samples => {
   const floor = Math.min(samples[0]?.fields ?? 0, samples.at(-1)?.fields ?? 0);
-  return samples.filter(sample => sample.type === "Page" || sample.type === "Nothing selected" || sample.fields < floor);
+  const disabled = Math.max(samples[0]?.disabled ?? 0, samples.at(-1)?.disabled ?? 0);
+  return samples.filter(sample => sample.type === "Page" || sample.type === "Nothing selected" || sample.fields < floor ||
+    sample.disabled > disabled);
 };
-const inspectorSequence = samples => samples.reduce((sequence, { type, title, fields }) => {
-  const key = `${type}|${title}|${fields}`;
+const inspectorSequence = samples => samples.reduce((sequence, { type, title, fields, disabled }) => {
+  const key = `${type}|${title}|${fields}|disabled ${disabled}`;
   return sequence.at(-1) === key ? sequence : [...sequence, key];
 }, []);
 const copies = frame => frame.locator('[data-oid^="home-hero-copy-"]').filter({ has: frame.locator('[data-oid$="-home-heading"]') });

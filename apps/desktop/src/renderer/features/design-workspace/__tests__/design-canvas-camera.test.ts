@@ -295,26 +295,31 @@ it("holds frame chrome scale through small steps of a live camera gesture and se
   } finally { await page.close(); }
 });
 
-it("hides automatic frame names and Play through a camera gesture without restyling them, and restores their exact size at rest", async () => {
-  // An exact scale per step re-laid out every visible name, enough work to
-  // miss the display deadline; a held scale grew and shrank names, then snapped.
+it("keeps automatic frame names visible at their exact screen size through a camera gesture without re-laying them out each step", async () => {
+  // Hiding names during a gesture made every label blink out while zooming.
+  // An exact layout scale per step re-laid out every visible name, enough
+  // work to miss the display deadline; a held one grew and shrank them.
   const page = await open();
   try {
     await page.locator('[data-design-frame="near"]').evaluate(frame => frame.setAttribute("data-design-frame-controls", "automatic"));
     await page.evaluate(() => (window as any).camera.paintDesignCanvasCamera(document.querySelector("#world"), { zoom: 2, panX: 0, panY: 0 }, false, { width: 500, height: 300 }));
     const chrome = page.locator('[data-design-frame="near"] > [data-design-frame-chrome]');
     const state = () => chrome.evaluate(root => ({ opacity: getComputedStyle(root).opacity,
-      pointer: getComputedStyle(root.querySelector("button")!).pointerEvents, style: root.getAttribute("style") }));
-    const rest = await state();
-    expect(rest).toMatchObject({ opacity: "1", pointer: "auto" });
+      pointer: getComputedStyle(root.querySelector("button")!).pointerEvents,
+      layout: Number(root.style.getPropertyValue("--design-canvas-inverse-zoom")),
+      height: Math.round(root.getBoundingClientRect().height * 1000) / 1000 }));
+    expect(await state()).toEqual({ opacity: "1", pointer: "auto", layout: .5, height: 28 });
     for (const zoom of [2.1, 2.2, 1.9, 1.75, 2.05]) {
       await paint(page, zoom);
-      expect(await state()).toEqual({ opacity: "0", pointer: "none", style: rest.style });
+      // The laid-out scale holds; only the compositor scale follows the camera.
+      expect(await state()).toEqual({ opacity: "1", pointer: "auto", layout: .5, height: 28 });
     }
-    await page.evaluate(() => (window as any).camera.paintDesignCanvasCamera(document.querySelector("#world"), { zoom: 2.05, panX: 0, panY: 0 }, false));
-    expect(await state()).toMatchObject({ opacity: "1", pointer: "auto" });
-    expect(await chrome.evaluate(root => root.getBoundingClientRect().height)).toBeCloseTo(28, 3);
-    expect(await chrome.evaluate(root => Number(root.style.getPropertyValue("--design-canvas-inverse-zoom")))).toBeCloseTo(1 / 2.05);
+    // Past the hold, the name is laid out again at the current scale.
+    await paint(page, 3);
+    expect(await state()).toEqual({ opacity: "1", pointer: "auto", layout: 1 / 3, height: 28 });
+    await page.evaluate(() => (window as any).camera.paintDesignCanvasCamera(document.querySelector("#world"), { zoom: 3.2, panX: 0, panY: 0 }, false));
+    expect(await state()).toEqual({ opacity: "1", pointer: "auto", layout: 1 / 3.2, height: 28 });
+    expect(await chrome.evaluate(root => root.style.getPropertyValue("scale"))).toBe("");
   } finally { await page.close(); }
 });
 
@@ -336,7 +341,6 @@ it("keeps expanded and focused frame names at their exact screen size through ev
         expect(frame.inverse).toBeCloseTo(.5);
       }
     }
-    expect(await page.locator("[data-design-frame-gesture-hidden]").count()).toBe(0);
   } finally { await page.close(); }
 });
 
@@ -348,9 +352,10 @@ it("paints a protected frame's whole chrome at the exact scale during a gesture"
     expect((await paint(page, 2.1))[0].inverse).toBeCloseTo(1 / 2.1);
   } finally { await page.close(); }
 });
-it("shows Play only for a frame with a selection, under the pointer, with keyboard focus or playing", async () => {
+it("shows Play only for a frame with a selection, with keyboard focus or playing, at rest and through a zoom", async () => {
   // The frame an empty selection leaves active kept Play visible after a
-  // click on empty canvas; a click's leftover focus must not hold it either.
+  // click on empty canvas, and so did the frame left under the pointer after
+  // a deselect, through every zoom; a click's leftover focus must not hold it.
   const page = await open();
   try {
     await page.mouse.move(600, 400);
@@ -378,10 +383,23 @@ it("shows Play only for a frame with a selection, under the pointer, with keyboa
     expect(await shown()).toBe(true);
     expect(await color()).toBe(blue);
     expect(await fill()).toBe(clear);
+    for (const zoom of [2.1, 2.3]) {
+      await paint(page, zoom);
+      expect(await shown()).toBe(true);
+    }
+    await paint(page, 2, 0, undefined, false);
     await frame.evaluate(element => element.removeAttribute("data-design-frame-selected"));
     expect(await shown()).toBe(false);
-    await page.mouse.move(80, 90);
-    expect(await shown()).toBe(true);
+    // Pointer intent as the canvas pointer marks it, and real hover.
+    await frame.evaluate(element => element.setAttribute("data-design-frame-pointer", ""));
+    await page.mouse.move(150, 200);
+    expect(await shown()).toBe(false);
+    for (const zoom of [2.1, 2.3]) {
+      await paint(page, zoom);
+      expect(await shown()).toBe(false);
+    }
+    await paint(page, 2, 0, undefined, false);
+    await frame.evaluate(element => element.removeAttribute("data-design-frame-pointer"));
     await page.mouse.move(600, 400);
     expect(await shown()).toBe(false);
     const play = frame.locator(".zd-frame-play");
@@ -451,8 +469,12 @@ it("keeps a small frame's name on an uncrowded page, hides only its Play control
       const row = element.querySelector("[data-design-frame-chrome]:not([data-design-frame-play-chrome])")!;
       return [getComputedStyle(row).pointerEvents, getComputedStyle(row.querySelector("button")!).pointerEvents];
     })).toEqual(["none", "auto"]);
+    // The pointer alone does not reveal Play; a selection does.
     await page.mouse.move(40, 40);
+    expect((await state()).control).toBe("rect(0px, 0px, 0px, 0px)");
+    await frame.evaluate(element => element.setAttribute("data-design-frame-selected", ""));
     expect((await state()).control).toBe("auto");
+    await frame.evaluate(element => element.removeAttribute("data-design-frame-selected"));
     await page.mouse.move(600, 400);
     // 18 px: too small for a name.
     await paint(page, .15, 0, undefined, false);

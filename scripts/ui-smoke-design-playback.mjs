@@ -66,7 +66,7 @@ export async function runDesignFramePlaybackSmoke({ page, check }) {
   check("a frame's name and Play are compact: 11px and 16px, 4px above the frame", true);
 
   // An empty selection keeps the last frame active for Layers; its Play
-  // must still hide, and appear again only for a selection or the pointer.
+  // must still hide, also under the pointer, and return only for a selection.
   const playShown = () =>
     play.evaluate((button) => getComputedStyle(button.parentElement).clip === "auto");
   const emptyCanvas = { x: frameRect.x + 20, y: frameRect.y + frameRect.height + 60 };
@@ -74,10 +74,14 @@ export async function runDesignFramePlaybackSmoke({ page, check }) {
   await expect.poll(playShown).toBe(false);
   await expect(frame).toHaveAttribute("data-design-frame-controls", "automatic");
   await page.mouse.move(frameRect.x + frameRect.width / 2, frameRect.y + frameRect.height / 2);
+  await expect.poll(() => frame.evaluate((node) => node.matches(":hover") || node.hasAttribute("data-design-frame-pointer"))).toBe(true);
+  await page.waitForTimeout(100);
+  expect(await playShown()).toBe(false);
+  await frame.locator("[data-design-frame-label]").click();
   await expect.poll(playShown).toBe(true);
-  await page.mouse.move(emptyCanvas.x, emptyCanvas.y);
+  await page.mouse.click(emptyCanvas.x, emptyCanvas.y);
   await expect.poll(playShown).toBe(false);
-  check("Play hides after an empty-canvas click and returns on hover", true);
+  check("Play hides after an empty-canvas click, stays hidden under the pointer and returns with a selection", true);
 
   await page.locator('[data-design-frame-row="home.html"]').click();
   await page.getByRole("button", { name: "Edit motion wash" }).click();

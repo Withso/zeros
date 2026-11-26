@@ -1130,26 +1130,17 @@
   pointer-events: none;
 }
 
-/* A moving camera hides automatic names and Play without a layout; the
- * camera painter restores their exact scale at rest. Opacity, unlike
- * visibility, keeps them focusable: focus reveals them in the same paint. */
-[data-design-frame-gesture-hidden] > [data-design-frame-chrome] {
-  opacity: 0;
-}
-[data-design-frame-gesture-hidden] > [data-design-frame-chrome],
-[data-design-frame-gesture-hidden] > [data-design-frame-chrome] * {
-  pointer-events: none !important;
-}
-
-/* Play appears only for a frame with a selection, under the pointer, playing,
- * or holding keyboard focus; a click's leftover focus keeps it hidden. The
- * hidden control drops its layer, and the name takes the room. */
-[data-design-frame]:not([data-design-frame-selected]):not([data-design-frame-playing]):not(:hover):not([data-design-frame-pointer]) > [data-design-frame-play-chrome]:not(:has(:focus-visible:not([data-zeros-focus-visible="false"]))) {
+/* Play appears only for a frame with a selection, playing, or holding
+ * keyboard focus. The pointer does not reveal it: after a deselect the frame
+ * left under the pointer kept showing Play, including through a zoom. A
+ * click's leftover focus keeps it hidden too. The hidden control drops its
+ * layer, and the name takes the room. */
+[data-design-frame]:not([data-design-frame-selected]):not([data-design-frame-playing]) > [data-design-frame-play-chrome]:not(:has(:focus-visible:not([data-zeros-focus-visible="false"]))) {
   clip: rect(0px, 0px, 0px, 0px);
   pointer-events: none;
   will-change: auto;
 }
-[data-design-frame]:not([data-design-frame-selected]):not([data-design-frame-playing]):not(:hover):not([data-design-frame-pointer]):not(:focus-within) > [data-design-frame-chrome]:not([data-design-frame-play-chrome]) {
+[data-design-frame]:not([data-design-frame-selected]):not([data-design-frame-playing]):not(:focus-within) > [data-design-frame-chrome]:not([data-design-frame-play-chrome]) {
   max-width: var(--design-frame-label-full-width, none) !important;
 }
 /* A small frame's name row can lie over the frame above it. Only the
