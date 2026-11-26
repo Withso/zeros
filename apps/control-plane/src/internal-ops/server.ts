@@ -14,6 +14,7 @@ export const policySchema = z
   .object({
     environment: z.enum(["development", "alpha", "production"]),
     organizationId: z.uuid(),
+    origin: z.url({ protocol: /^https$/ }).refine(value => new URL(value).origin === value),
     issuer: z.string().regex(/^https:\/\/[a-z0-9-]+\.cloudflareaccess\.com$/),
     audience: z.string().regex(/^[a-f0-9]{64}$/),
     principals: z
@@ -79,7 +80,7 @@ export function internalOpsServer(
     bodyLimit({ maxSize: limit, onError: (c) => c.body(null, 413) }),
     async (c) => {
       const origin = c.req.header("origin");
-      if (origin && origin !== new URL(c.req.url).origin)
+      if (origin !== undefined && origin !== policy.origin)
         return c.body(null, 403);
       const assertion =
         c.req.header("cf-access-jwt-assertion") ??

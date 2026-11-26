@@ -19,6 +19,7 @@ Supply `OPS_ACCESS_POLICY` as JSON in the gateway service configuration. Replace
 ```json
 {
   "environment": "alpha",
+  "origin": "https://ops-mcp.example.com",
   "organizationId": "11111111-1111-4111-8111-111111111111",
   "issuer": "https://example.cloudflareaccess.com",
   "audience": "0000000000000000000000000000000000000000000000000000000000000000",

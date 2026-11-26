@@ -9,6 +9,7 @@ const issuer = "https://ops-fixture.cloudflareaccess.com",
   audience = "a".repeat(64);
 const organizationId = "11111111-1111-4111-8111-111111111111";
 const policy = policySchema.parse({
+  origin: "https://ops.example",
   issuer,
   audience,
   environment: "alpha",
@@ -172,6 +173,7 @@ describe("private Ops MCP", () => {
       expect((await call(invoke("check_boat"), jwt)).status).toBe(401);
     }
     expect((await call(list, await token({ sub: "other" }))).status).toBe(403);
+    expect((await call(list, await token(), { origin: "https://ops.example" })).status).toBe(200);
     expect(
       (await call(list, await token(), { origin: "https://foreign.example" }))
         .status,
