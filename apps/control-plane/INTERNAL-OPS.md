@@ -6,7 +6,12 @@ Internal development uses one Streamable HTTP connection named `zeros-ops`. Plat
 
 In Devin's MCP integration, Conductor's underlying agent configuration or Zeros Settings → MCP, register a remote HTTP server with the HTTPS URL ending in `/mcp` supplied by the internal Ops owner. Register it once at the trusted platform or user level so new worktrees inherit the connection. Keep values in the platform's secret store.
 
-For unattended clients behind Cloudflare Access, set the two headers of **one** service identity, `CF-Access-Client-Id` and `CF-Access-Client-Secret`. The Access application must require that service identity and forward its signed assertion. For a task with an Access application JWT, use the Access-supported `cf-access-token` header at the edge, or `Authorization: Bearer <application JWT>` on a trusted private connection to the origin. Use an application policy that accepts the client's authentication method. The origin verifies the Access signature, issuer, audience, expiry and maximum age of one hour on each request.
+Use a separate Cloudflare Access service identity per unattended client. Attach a Service Auth policy for its exact token to the Access application. Access forwards a signed assertion to the origin, which verifies the issuer, audience, expiry and maximum age of one hour on each request.
+
+* In a client with two protected headers, configure `CF-Access-Client-Id` and `CF-Access-Client-Secret`.
+* For Devin or another single-header client, set the application's `read_service_tokens_from_header` to `Authorization`. Register one raw Authorization header whose protected value is a JSON object with the string keys `cf-access-client-id` and `cf-access-client-secret`. Choose raw header formatting. Store the entire object as a client secret.
+
+See [Cloudflare's service-token configuration](https://developers.cloudflare.com/cloudflare-one/access-controls/service-credentials/service-tokens/#authenticate-with-a-single-header).
 
 Use MCP initialization and tool discovery to check the connection. Calling any listed tool takes an empty object. `check_boat` verifies the wallet and start allowance. `check_cloudflare` reads zone status. `check_workos` verifies organization identity. `check_railway` reads the latest deployment status of a service. `check_planetscale` reads database state. Clients get projected fields. Operations, tools and provider target identifiers are controlled centrally.
 
