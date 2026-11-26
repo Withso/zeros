@@ -9,7 +9,7 @@ import { loadHostedProfile } from "../dev-environment/hosted-profile.mjs";
 const roots: string[] = [];
 afterEach(() => { for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true }); });
 function fixture() {
-  const home = fs.mkdtempSync(path.join(os.tmpdir(), "zeros-setup-")); roots.push(home);
+  const home = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "zeros-setup-"))); roots.push(home);
   const root = path.join(home, "main checkout"), source = path.join(home, "transfer.json");
   fs.mkdirSync(root, { mode: 0o700 });
   const git = (...args: string[]) => execFileSync("git", args, { cwd: root, encoding: "utf8", stdio: "pipe" });
