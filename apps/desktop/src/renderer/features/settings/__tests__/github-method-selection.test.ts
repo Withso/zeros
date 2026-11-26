@@ -21,6 +21,7 @@ vi.mock("../../../state/use-recovering-read", () => ({
     "gh-cli": { configured: false, method: "gh-cli", health: "unavailable" },
   } } }),
 }));
+vi.mock("../inline-login-terminal", () => ({ InlineLoginTerminal: () => "CLI sign-in terminal" }));
 vi.mock("../use-shared-github", () => ({
   useSharedGithub: () => ({ change: adapters.cloud, read: { data: {
     selectedMethod: null, methods: { pat: { configured: true, login: "octocat" }, "github-app": { configured: false } },
@@ -56,11 +57,16 @@ it("selects a working Cloud PAT when the Mac already selected its own PAT", asyn
     await act(async () => root.render(createElement(GitHubSection, {
       owner: { userId: "a", organizationId: "o", name: "Team" },
     })));
-    const label = [...container.querySelectorAll("button")].find(button => button.textContent?.includes("Personal Access Token"));
+    const button = (text: string) => [...container.querySelectorAll("button")].find(el => el.textContent?.includes(text))!;
+    await act(async () => button("gh CLI auth").click());
+    await act(async () => button("Run gh auth login").click());
+    expect(container.textContent).toContain("CLI sign-in terminal");
+    const label = button("Personal Access Token");
     expect(label).toBeDefined();
     await act(async () => label!.click());
     expect(adapters.cloud).toHaveBeenCalledWith({ action: "select", method: "pat" });
     expect(adapters.mac).not.toHaveBeenCalled();
+    expect(container.textContent).not.toContain("CLI sign-in terminal");
   } finally {
     act(() => root.unmount());
   }

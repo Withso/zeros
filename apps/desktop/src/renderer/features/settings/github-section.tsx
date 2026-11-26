@@ -286,6 +286,8 @@ export function GitHubSection({
         return;
       }
       setBusyMethod(method);
+      setTerminalOpen(false);
+      setSetupMethod(null);
       let changedOnMac = false;
       try {
         const changeCloud = owner && method !== "gh-cli" && shared.read.data?.selectedMethod !== method;
@@ -297,7 +299,6 @@ export function GitHubSection({
         if (changeCloud)
           await shared.change({ action: "select", method });
         if (!changedOnMac) return;
-        setSetupMethod(null);
         trackGithubMethodSelected({
           method,
           previousMethod: snapshot.selectedMethod,
