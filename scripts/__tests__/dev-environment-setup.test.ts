@@ -34,14 +34,19 @@ function fixture() {
   return { home, root, source, git, profile, writeSource };
 }
 
-function runAutomaticSetup(root: string, home: string, env: Record<string, string> = {}) {
+function runFixtureSetup(root: string, home: string, env: Record<string, string> = {}, manual = false) {
   const repository = path.resolve(import.meta.dirname, "../..");
   fs.cpSync(path.join(repository, "scripts/dev-environment"), path.join(root, "scripts/dev-environment"), { recursive: true });
   for (const file of ["dev-auth-profile.mjs", "dev-ports.mjs", "electron-local-process-group.mjs"]) fs.copyFileSync(path.join(repository, "scripts", file), path.join(root, "scripts", file));
   fs.writeFileSync(path.join(root, "qualified-node.cjs"), 'Object.defineProperty(process.versions, "node", {value: "22.18.0"});');
   fs.writeFileSync(path.join(root, "package.json"), JSON.stringify({ packageManager: "pnpm@10.0.0" }));
-  return execFileSync(process.execPath, ["-r", "./qualified-node.cjs", "scripts/dev-environment/setup.mjs", "--profile-only"], {
-    cwd: root, env: { PATH: process.env.PATH, HOME: home, ...env }, encoding: "utf8", stdio: "pipe",
+  fs.writeFileSync(path.join(root, "scripts/dev-environment/dependencies.mjs"),
+    'if (process.argv[2] !== "--install") process.exit(1); console.log("install requested");');
+  const bin = path.join(home, ".zeros-dev/tools/bin");
+  fs.mkdirSync(bin, { recursive: true, mode: 0o700 });
+  fs.symlinkSync(process.execPath, path.join(bin, "node"));
+  return execFileSync(manual ? process.execPath : "sh", manual ? ["scripts/dev-environment/setup.mjs", "--profile-only"] : ["scripts/dev-environment/hook.sh", "setup"], {
+    cwd: root, env: { PATH: process.env.PATH, HOME: home, NODE_OPTIONS: "--require ./qualified-node.cjs", ...env }, encoding: "utf8", stdio: "pipe",
   });
 }
 
@@ -64,7 +69,7 @@ describe("secure portable Dev setup", () => {
   it("imports the cloud setting through actual setup without printing credentials", () => {
     const f = fixture();
     const value = Buffer.from(JSON.stringify(f.profile)).toString("base64");
-    const output = runAutomaticSetup(f.root, f.home, { ZEROS_DEV_PROFILE_B64: value });
+    const output = runFixtureSetup(f.root, f.home, { ZEROS_DEV_PROFILE_B64: value });
     expect(JSON.parse(fs.readFileSync(path.join(f.root, "zeros-dev-env.json"), "utf8"))).toEqual(f.profile);
     expect(output).not.toContain(value); expect(output).not.toContain(f.profile.cloudflare.apiToken);
   });
@@ -122,7 +127,7 @@ describe("secure portable Dev setup", () => {
     const f = fixture(), worktree = path.join(f.home, "linked worktree");
     f.git("worktree", "add", "-qb", "feature", worktree);
     fs.writeFileSync(path.join(f.root, "zeros-dev-env.json"), JSON.stringify(f.profile), { mode: 0o600 });
-    runAutomaticSetup(worktree, f.home);
+    runFixtureSetup(worktree, f.home);
     expect(fs.existsSync(path.join(f.home, ".zeros-dev/zeros-dev-env.json"))).toBe(false);
     expect(loadHostedProfile(worktree, { homeDir: f.home, env: {} })).toEqual(f.profile);
     expect(fs.existsSync(path.join(worktree, "zeros-dev-env.json"))).toBe(false);
@@ -130,8 +135,16 @@ describe("secure portable Dev setup", () => {
 
   it("allows checkout setup for an Ops client without a private fixture profile", () => {
     const f = fixture();
-    expect(() => runAutomaticSetup(f.root, f.home)).not.toThrow();
+    expect(runFixtureSetup(f.root, f.home)).toContain("install requested");
     expect(fs.existsSync(path.join(f.root, "zeros-dev-env.json"))).toBe(false);
+  });
+
+  it("keeps manual profile-only imports distinct from profile-optional hook setup", () => {
+    const f = fixture();
+    expect(() => runFixtureSetup(f.root, f.home, {}, true)).toThrow();
+    const valid = fixture();
+    runFixtureSetup(valid.root, valid.home, { ZEROS_DEV_PROFILE_PATH: valid.source }, true);
+    expect(fs.readFileSync(path.join(valid.root, "zeros-dev-env.json"))).toEqual(fs.readFileSync(valid.source));
   });
 
   it("validates without reading providers or changing permissions in check mode", () => {

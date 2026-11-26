@@ -54,7 +54,7 @@ async function main() {
   const [major, minor] = process.versions.node.split(".").map(Number);
   const injected = !check && profileIndex < 0 && !process.env.ZEROS_DEV_PROFILE_PATH && !profileExists(source) && Boolean(process.env.ZEROS_DEV_PROFILE_B64);
   if (injected) source = hostedProfilePath(root);
-  const automatic = profileOnly && profileIndex < 0 && !check;
+  const automatic = args.length === 1 && args[0] === "--checkout";
   if (automatic && !profileExists(source) && !process.env.ZEROS_DEV_PROFILE_PATH) return;
   const issues = inspectDevelopmentProfile(source).issues;
   if (major !== 22 || minor < 18) {
