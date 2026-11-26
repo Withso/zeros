@@ -148,7 +148,7 @@ import {
   type DesignViewport,
   type DesignViewportInsets,
 } from "./design-canvas-math";
-import { createDesignDragPresentation } from "./design-drag-presentation";
+import { createDesignDragPresentation, createDesignFrameNudgeChrome, paintDesignFrameGestureChrome } from "./design-drag-presentation";
 import {
   formatDesignTransform,
   parseDesignTransform,
@@ -1217,6 +1217,8 @@ export const DesignCanvas = React.memo(function DesignCanvas({
     | null
   >(null);
   const nudgeLifetimeRef = useRef(0);
+  const [frameNudgeChrome] = useState(createDesignFrameNudgeChrome);
+  useEffect(() => frameNudgeChrome.release, [frameNudgeChrome]);
   const { session: savedEditingSession, state: savedEditingState, nativePixels } = useDesignSavedEditing();
   const canvasLifetimeRef = useRef(0);
   // Copy pixels shown while their save is pending belong to this canvas
@@ -2842,11 +2844,12 @@ export const DesignCanvas = React.memo(function DesignCanvas({
         member.element = frameElementsRef.current.get(member.file) ?? null;
         if (member.element) paintFrameGeometry(member.element, member.preview.geometry);
       }
+      frameNudgeChrome.hold(current.members.map((member) => member.element));
       nudgeGestureRef.current = current;
       refreshFrameResidency();
       return true;
     },
-    [canvasDocumentOwner, selectedFrame, workspaceId, refreshFrameResidency],
+    [canvasDocumentOwner, selectedFrame, workspaceId, refreshFrameResidency, frameNudgeChrome],
   );
 
   const nudgeSelectedNode = useCallback(
@@ -3039,7 +3042,10 @@ export const DesignCanvas = React.memo(function DesignCanvas({
   );
 
   const finishNodeNudge = useCallback((cancelled = false) => {
-    if (cancelled) queuedNudgeRef.current = null;
+    if (cancelled) {
+      queuedNudgeRef.current = null;
+      frameNudgeChrome.release();
+    }
     else if (queuedNudgeRef.current) queuedNudgeRef.current.released = true;
     const gesture = nudgeGestureRef.current;
     nudgeGestureRef.current = null;
@@ -3115,7 +3121,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
     });
     nudgeCommitRef.current = pending;
     savedEditingSession?.retain(pending);
-  }, [workspaceId, savedEditingSession, refreshFrameResidency]);
+  }, [workspaceId, savedEditingSession, refreshFrameResidency, frameNudgeChrome]);
 
   useEffect(() => {
     const queued = queuedNudgeRef.current;
@@ -3227,8 +3233,12 @@ export const DesignCanvas = React.memo(function DesignCanvas({
           box,
           grab,
         );
-        if (!moved && Math.hypot(delta.x, delta.y) < 3 / zoom) return;
-        moved = true;
+        if (!moved) {
+          if (Math.hypot(delta.x, delta.y) < 3 / zoom) return;
+          moved = true;
+          frameNudgeChrome.release();
+          for (const member of members) paintDesignFrameGestureChrome(member.element, "move");
+        }
         document.body.style.cursor = DESIGN_ARROW_CURSOR;
         const moving = { ...box, x: box.x + delta.x, y: box.y + delta.y };
         const snapped =
@@ -3239,6 +3249,9 @@ export const DesignCanvas = React.memo(function DesignCanvas({
         const position = clampDesignRectPosition(snapped.rect, DESIGN_FRAME_COORDINATE_LIMIT);
         offset = { x: Math.round(position.x - box.x), y: Math.round(position.y - box.y) };
         paint(offset);
+      };
+      const releaseChrome = () => {
+        for (const member of members) paintDesignFrameGestureChrome(member.element, null);
       };
       const restore = () => {
         for (const member of members) {
@@ -3251,11 +3264,13 @@ export const DesignCanvas = React.memo(function DesignCanvas({
       };
       const cancel = () => {
         paintGuides({});
+        releaseChrome();
         gestureCancelRef.current = null;
         restore();
       };
       const finish = () => {
         paintGuides({});
+        releaseChrome();
         gestureCancelRef.current = null;
         if (!ownerIsCurrent() || !moved || (offset.x === 0 && offset.y === 0)) {
           restore();
@@ -3309,6 +3324,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
       snapshot,
       workspaceId,
       refreshFrameResidency,
+      frameNudgeChrome,
     ],
   );
 
@@ -3595,8 +3611,12 @@ export const DesignCanvas = React.memo(function DesignCanvas({
         const delta = designMovementDelta({ x: pointerEvent.clientX, y: pointerEvent.clientY }, viewportBounds, wheelViewportRef.current ?? designWorkspaceView(workspaceId), start, grab);
         const dx = delta.x;
         const dy = delta.y;
-        if (!moved && Math.hypot(dx, dy) < 3 / zoom) return;
-        moved = true;
+        if (!moved) {
+          if (Math.hypot(dx, dy) < 3 / zoom) return;
+          moved = true;
+          frameNudgeChrome.release();
+          paintDesignFrameGestureChrome(element, mode === "move" ? "move" : "resize");
+        }
         if (mode === "move") document.body.style.cursor = DESIGN_ARROW_CURSOR;
         latest =
           mode === "move"
@@ -3685,6 +3705,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
 
       const finish = () => {
         paintGuides({});
+        paintDesignFrameGestureChrome(element, null);
         gestureCancelRef.current = null;
         const releasedNestTarget = nestTarget;
         const releasedNestPointer = nestPointer;
@@ -3873,6 +3894,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
 
       const cancel = () => {
         releaseNestTarget();
+        paintDesignFrameGestureChrome(element, null);
         if (frameGeometryPreviewsRef.current.get(previewKey) === preview) {
           if (ownerIsCurrent() && previousPreview && !previousPreview.settled)
             frameGeometryPreviewsRef.current.set(previewKey, previousPreview);
@@ -3926,6 +3948,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
       frameViews,
       startFrameGroupMove,
       workspaceId,
+      frameNudgeChrome,
     ],
   );
 

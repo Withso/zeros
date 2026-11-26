@@ -6,6 +6,7 @@ import {
   designSelectionLabelPlacement,
   designSelectionOverlayFrame,
 } from "./design-canvas-math";
+import { DESIGN_CANVAS_INVERSE_ZOOM, designCanvasScreenPixels } from "./design-canvas-camera";
 import { DESIGN_CANVAS_CHIP_CLS } from "./design-canvas-chip";
 import { designSizeBadgeText } from "./design-layout-tools";
 import { designRuntimeFrameState } from "./state/design-runtime-store";
@@ -14,6 +15,48 @@ import { designWorkspaceView } from "./state/design-workspace-ui";
 /** Device pixels in one capture; a whole large frame at 4× would otherwise
  * decode hundreds of megabytes for a temporary picture. */
 const MAX_CAPTURE_PIXELS = 4096 * 4096;
+
+/** What a frame shows while it is handled (design-workspace-ui.css): a moved
+ * or nudged frame keeps only its name, in the selection color; a resized one
+ * keeps its box and live size but drops Play; an Option-drag copy's source
+ * stays behind as an unselected frame. */
+export type DesignFrameGestureChrome = "move" | "resize" | "copy-source";
+
+export function paintDesignFrameGestureChrome(
+  article: Element | null | undefined,
+  gesture: DesignFrameGestureChrome | null,
+): void {
+  if (!article) return;
+  if (gesture) article.setAttribute("data-design-frame-gesture", gesture);
+  else article.removeAttribute("data-design-frame-gesture");
+}
+
+/** A keyboard nudge has no release to wait for, so its frames rest this long
+ * after the last step before their selection chrome returns. */
+export const DESIGN_FRAME_NUDGE_REST_MS = 1_000;
+
+export function createDesignFrameNudgeChrome(restMs = DESIGN_FRAME_NUDGE_REST_MS) {
+  const held = new Set<Element>();
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  const release = () => {
+    if (timer !== null) clearTimeout(timer);
+    timer = null;
+    for (const element of held) paintDesignFrameGestureChrome(element, null);
+    held.clear();
+  };
+  return {
+    hold(elements: Iterable<Element | null | undefined>) {
+      for (const element of elements) {
+        if (!element || held.has(element)) continue;
+        held.add(element);
+        paintDesignFrameGestureChrome(element, "move");
+      }
+      if (timer !== null) clearTimeout(timer);
+      timer = setTimeout(release, restMs);
+    },
+    release,
+  };
+}
 
 type DragNode = Pick<DesignRuntimeNodeDetails, "oid" | "rect"> &
   Partial<Pick<DesignRuntimeNodeDetails, "box" | "borderCoordinateSpace" | "styles">>;
@@ -32,6 +75,8 @@ export function createDesignDragPresentation(
     selection?: boolean;
     /** The live camera zoom, when the caller holds a newer one than the store. */
     zoom?: number;
+    /** A frame's name above the picture, as its own label draws it. */
+    name?: { text: string; component?: boolean };
   } = {},
 ) {
   const world = article.closest<HTMLElement>("[data-design-canvas-world]");
@@ -123,6 +168,18 @@ export function createDesignDragPresentation(
     });
     outline.appendChild(label);
     element.appendChild(outline);
+  }
+  if (options.name) {
+    const name = document.createElement("span");
+    name.dataset.designDragName = "";
+    name.className = `text-2xxs pointer-events-none absolute bottom-full left-0 block h-4 origin-bottom-left overflow-hidden leading-4 font-medium text-ellipsis whitespace-nowrap ${
+      options.name.component ? "text-violet-text" : "text-[var(--design-selection-stroke)]"}`;
+    name.textContent = options.name.text;
+    Object.assign(name.style, {
+      maxWidth: `calc(${details.rect.width}px * var(--design-canvas-zoom))`,
+      transform: `translateY(${designCanvasScreenPixels(-4)}) scale(${DESIGN_CANVAS_INVERSE_ZOOM})`,
+    });
+    element.appendChild(name);
   }
   const showPixels = (dataUrl: string, wholeFrame: boolean) => {
     const image = document.createElement("img");

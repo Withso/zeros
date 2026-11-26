@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { createDesignDragPresentation } from "../design-drag-presentation";
+import { createDesignDragPresentation, createDesignFrameNudgeChrome } from "../design-drag-presentation";
 
 const mocks = vi.hoisted(() => ({ runtimeState: null as any, zoom: 1 }));
 vi.mock("../state/design-runtime-store", () => ({ designRuntimeFrameState: () => mocks.runtimeState }));
@@ -85,5 +85,55 @@ describe("drag and copy pixels", () => {
     const presentation = createDesignDragPresentation("local", frame, root, article)!;
     presentation.adopt({ ...picture(4), nodeId: "root" });
     expect(shown()).toBe("blob:vector-source");
+  });
+
+  it("draws a moving frame copy's name above its pixels in the selection color, and a component's in its own", () => {
+    createDesignDragPresentation("local", frame, root, article, { name: { text: "Checkout" } });
+    const name = world.querySelector<HTMLElement>("[data-design-drag-name]")!;
+    expect(name.textContent).toBe("Checkout");
+    expect(name.className).toContain("text-[var(--design-selection-stroke)]");
+    expect(name.className).toContain("bottom-full");
+    expect(name.style.maxWidth).toBe("calc(100px * var(--design-canvas-zoom))");
+    name.parentElement!.remove();
+    createDesignDragPresentation("local", frame, root, article, { name: { text: "Card", component: true } });
+    expect(world.querySelector("[data-design-drag-name]")!.className).toContain("text-violet-text");
+  });
+
+  it("draws no name on a layer's drag picture", () => {
+    createDesignDragPresentation("local", frame, root, article, { selection: true });
+    expect(world.querySelector("[data-design-drag-name]")).toBeNull();
+  });
+});
+
+describe("frame chrome through keyboard nudges", () => {
+  afterEach(() => { vi.useRealTimers(); });
+
+  it("hides selection chrome on each nudge and brings it back once the frames rest", () => {
+    vi.useFakeTimers();
+    const chrome = createDesignFrameNudgeChrome(1_000);
+    const other = document.createElement("article");
+    chrome.hold([article, null]);
+    expect(article.getAttribute("data-design-frame-gesture")).toBe("move");
+    vi.advanceTimersByTime(900);
+    // A held key repeats: each step restarts the rest.
+    chrome.hold([article, other]);
+    vi.advanceTimersByTime(900);
+    expect(article.getAttribute("data-design-frame-gesture")).toBe("move");
+    expect(other.getAttribute("data-design-frame-gesture")).toBe("move");
+    vi.advanceTimersByTime(100);
+    expect(article.hasAttribute("data-design-frame-gesture")).toBe(false);
+    expect(other.hasAttribute("data-design-frame-gesture")).toBe(false);
+  });
+
+  it("brings the chrome back at once when the nudge is cancelled", () => {
+    vi.useFakeTimers();
+    const chrome = createDesignFrameNudgeChrome(1_000);
+    chrome.hold([article]);
+    chrome.release();
+    expect(article.hasAttribute("data-design-frame-gesture")).toBe(false);
+    // The cancelled rest does not fire later over a new gesture's chrome.
+    article.setAttribute("data-design-frame-gesture", "resize");
+    vi.advanceTimersByTime(2_000);
+    expect(article.getAttribute("data-design-frame-gesture")).toBe("resize");
   });
 });
