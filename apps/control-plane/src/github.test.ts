@@ -669,6 +669,14 @@ dbDescribe("GitHub App OAuth handoff", () => {
     const rotated = await post("refresh", { ...proof, rejectedTokenHash });
     expect(await rotated.json()).toMatchObject({ accessToken: "rotated-access-token", refreshToken: device.refreshToken });
     expect((await service.access(scope)).material.accessToken).toBe("rotated-access-token");
+    await pool.query("DELETE FROM account_entitlements WHERE user_id=$1", [user.id]);
+    await expect(service.access(scope)).rejects.toMatchObject({ status: 404 });
+    const afterDowngrade = await post("refresh", { ...proof,
+      rejectedTokenHash: createHash("sha256").update("rotated-access-token").digest("hex"),
+    });
+    expect(afterDowngrade.status).toBe(200);
+    await expect(service.access(scope)).rejects.toMatchObject({ status: 404 });
+    await grantTestPro(pool, user.id);
     await service.connectPat(scope, await store.fingerprint(scope), "synthetic-personal-access-token");
     expect(await (await post("refresh", proof)).json()).toMatchObject({ accessToken: "rotated-access-token" });
     await store.disconnect(scope, await store.fingerprint(scope), "github-app");

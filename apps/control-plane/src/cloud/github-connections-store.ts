@@ -18,6 +18,8 @@ export type CloudGithubConnectionScope = {
   userId: string;
 };
 export type CloudGithubAccount = { id: string; login: string; name?: string };
+const desktopAppRow = Symbol("desktopAppRow");
+type CredentialScope = CloudGithubConnectionScope & { [desktopAppRow]?: string };
 export interface CloudGithubCredentialSnapshot {
   material: CloudGithubCredential;
   identity: CloudGithubAccount;
@@ -120,7 +122,7 @@ export class CloudGithubConnectionStore {
 
   private async snapshot(
     tx: Tx,
-    scope: CloudGithubConnectionScope,
+    scope: CredentialScope,
   ): Promise<Snapshot> {
     const confirmed = (
       await tx.query<Actor & { organization_id: string; user_id: string }>(
@@ -128,8 +130,9 @@ export class CloudGithubConnectionStore {
       FROM organization_members m JOIN users u ON u.id=m.user_id JOIN organizations o ON o.id=m.org_id
       LEFT JOIN cloud_github_selections s ON s.org_id=m.org_id AND s.owner_user_id=m.user_id
       WHERE m.org_id=$1 AND m.user_id=$2 AND u.auth_status='active' AND u.deleted_at IS NULL
-        AND o.deleted_at IS NULL AND cloud_organization_enabled(o)`,
-        [scope.organizationId, scope.userId],
+        AND o.deleted_at IS NULL AND (cloud_organization_enabled(o)
+          OR ($3::boolean AND o.is_personal AND o.created_by=m.user_id))`,
+        [scope.organizationId, scope.userId, !!scope[desktopAppRow]],
       )
     ).rows[0];
     if (!confirmed)
@@ -461,20 +464,24 @@ export class CloudGithubConnectionStore {
       assertCurrent: () => this.assertCurrent(scope, value.generation) };
   }
 
+  /** A device proof can renew its owner's exact Personal App row after Pro ends. */
+  deviceAppCredential(scope: CloudGithubConnectionScope, id: string, refresh: RefreshCloudGithub, rejected?: string) {
+    return this.credential({ ...scope, [desktopAppRow]: id }, refresh, rejected);
+  }
+
   async credential(
-    scope: CloudGithubConnectionScope,
+    scope: CredentialScope,
     refresh?: RefreshCloudGithub,
     failedTokenSha256?: string,
-    deviceAppId?: string,
   ): Promise<CloudGithubCredentialSnapshot> {
-    const value = await this.read(scope), { row, material } = this.selectedCredential(value, deviceAppId);
+    const value = await this.read(scope), { row, material } = this.selectedCredential(value, scope[desktopAppRow]);
     if (failedTokenSha256 === createHash("sha256").update(material.accessToken).digest("hex")) {
       const marked = await this.edit(scope, value.generation, async tx => (await tx.query(
         "UPDATE cloud_github_credentials SET expires_at=LEAST(expires_at,now()),updated_at=now() WHERE id=$1 AND version=$2 RETURNING id",
         [row.id, row.version],
       )).rowCount);
       // A late report must not expire a concurrently rotated credential.
-      if (!marked) return this.credential(scope, refresh, undefined, deviceAppId);
+      if (!marked) return this.credential(scope, refresh);
       row.expires_at = new Date(0);
     }
     if (
@@ -490,7 +497,7 @@ export class CloudGithubConnectionStore {
         throw expired();
       await this.renew(scope, value.generation, row, material, refresh);
       await this.assertCurrent(scope, value.generation);
-      return this.credential(scope, undefined, undefined, deviceAppId);
+      return this.credential(scope);
     }
     await this.assertCurrent(scope, value.generation);
     return {

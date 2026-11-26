@@ -193,7 +193,7 @@ export class CloudGithubConnections {
   }
   /** Only an authenticated desktop holding the signed grant for this row can renew it. */
   async deviceAppCredential(scope: CloudGithubConnectionScope, credentialId: string, rejectedTokenHash?: string) {
-    const snapshot = await this.store.credential(scope, (material, account) => this.refresh(material, account), rejectedTokenHash, credentialId);
+    const snapshot = await this.store.deviceAppCredential(scope, credentialId, (material, account) => this.refresh(material, account), rejectedTokenHash);
     if (snapshot.material.method !== "github-app") throw changed();
     return snapshot.material;
   }
