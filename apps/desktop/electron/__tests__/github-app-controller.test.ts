@@ -122,10 +122,9 @@ function harness(options?: {
         return { status: "expired" };
       }
       if (pending.nonce !== nonce) return { status: "mismatch" };
-      const preserveSelectedMethod = pending.preserveSelectedMethod;
-      const ownerSub = pending.ownerSub;
+      const { preserveSelectedMethod, ownerSub, shared } = pending;
       pending = null;
-      return { status: "consumed", preserveSelectedMethod, ownerSub };
+      return { status: "consumed", preserveSelectedMethod, ownerSub, ...(shared ? { shared } : {}) };
     },
     discardPending: (nonce) => {
       if (pending?.nonce === nonce) pending = null;
@@ -156,6 +155,22 @@ function harness(options?: {
 }
 
 describe("GitHub App desktop controller", () => {
+  it("exchanges the shared target only for the Zeros account that opened the browser", async () => {
+    const h = harness();
+    const shared = { userId: "account-one", organizationId: "org-one", expected: "a".repeat(64) };
+    const options = { scheme: "zeros-alpha", installFlow: false, shared };
+    await h.controller.begin(options);
+    h.deps.getSession = async () => ({ accessToken: "zeros-two", sub: "account-two" });
+    await h.controller.complete({ nonce: "n".repeat(43) });
+    expect(h.client.exchange).not.toHaveBeenCalled();
+    await expect(h.controller.begin(options)).rejects.toThrow();
+
+    h.deps.getSession = async () => ({ accessToken: "zeros-one", sub: "account-one" });
+    await h.controller.begin(options);
+    await h.controller.complete({ nonce: "n".repeat(43) });
+    expect(h.client.exchange).toHaveBeenCalledWith("zeros-one", "n".repeat(43), shared);
+    expect(h.credential()?.ownerSub).toBe(shared.userId);
+  });
   it("stores only a Dev reference, never exchanges or refreshes the old rotating pair",async()=>{
     const h=harness(),result={reference:{mode:'dev-reference' as const,bindingId:'11111111-1111-4111-8111-111111111111',connectionId:'22222222-2222-4222-8222-222222222222',
       generationId:'33333333-3333-4333-8333-333333333333',issuer:'https://identity.example.test',subject:'account-one',organization:'org_dev',accountId:'1234',appScope:'42:client_dev',backendOrigin:'https://api.example.test'},

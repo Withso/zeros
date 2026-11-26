@@ -31,6 +31,8 @@ export type GithubCredential = GitHttpCredentialIdentity &
       method: "pat";
       accessToken: string;
       login?: string;
+      /** Absent on account-free and legacy device credentials. */
+      ownerSub?: string;
     }
   | {
       method: "github-app";
@@ -247,6 +249,10 @@ export function sanitizeGithubCredential(
     };
   }
 
+  if (input.method === "pat" && input.ownerSub !== undefined) {
+    if (typeof input.ownerSub !== "string" || !/^[0-9a-f-]{36}$/i.test(input.ownerSub)) return null;
+    return { method: "pat", accessToken, gitHost, gitHttpUsername, ownerSub: input.ownerSub, ...(login ? { login } : {}) };
+  }
   return {
     method: input.method,
     accessToken,

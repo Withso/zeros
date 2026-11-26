@@ -27,7 +27,7 @@ export function githubAppConnectOptions(
 ): { installFlow: boolean; forceInstall: boolean } {
   const confirmedEmpty = summary.configured && summary.installationCount === 0;
   return {
-    installFlow: forceInstallRequested || !summary.configured || confirmedEmpty,
+    installFlow: forceInstallRequested || confirmedEmpty,
     forceInstall: forceInstallRequested || confirmedEmpty,
   };
 }

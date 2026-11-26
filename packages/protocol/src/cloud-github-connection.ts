@@ -54,6 +54,7 @@ export const CloudGithubConnectionStatusSchema = z.object({
     pat: method(),
   }),
   appAvailable: z.boolean(),
+  sharedDesktopApp: z.boolean().optional(),
   installUrl: z.string().url().nullable(),
 });
 function method() {

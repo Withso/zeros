@@ -288,13 +288,15 @@ export class CloudGithubConnectionStore {
     expected: string,
     identity: CloudGithubAccount,
     material: CloudGithubCredential,
-  ): Promise<void> {
+    checkAuthority?: (tx: Tx) => Promise<void>,
+  ): Promise<string> {
     if (
       !/^[1-9][0-9]{0,15}$/.test(identity.id) ||
       !/^[A-Za-z0-9_.-]{1,100}$/.test(identity.login)
     )
       throw expired();
-    await this.edit(scope, expected, async (tx, value) => {
+    return this.edit(scope, expected, async (tx, value) => {
+      await checkAuthority?.(tx);
       const seal = {
         id: randomUUID(),
         generation: randomUUID(),
@@ -328,6 +330,7 @@ export class CloudGithubConnectionStore {
           material.expiresAt === null ? null : new Date(material.expiresAt),
         ],
       );
+      return seal.id;
     });
   }
   async select(
@@ -436,8 +439,10 @@ export class CloudGithubConnectionStore {
       );
     });
   }
-  private selectedCredential(value: Snapshot) {
-    const row = value.rows.find(row => row.method === value.actor.selected_method);
+  private selectedCredential(value: Snapshot, deviceAppId?: string) {
+    const row = value.rows.find(row => deviceAppId
+      ? row.id === deviceAppId && row.method === "github-app"
+      : row.method === value.actor.selected_method);
     if (!row) throw required();
     try {
       return { row, material: openGithubCredential(
@@ -460,15 +465,16 @@ export class CloudGithubConnectionStore {
     scope: CloudGithubConnectionScope,
     refresh?: RefreshCloudGithub,
     failedTokenSha256?: string,
+    deviceAppId?: string,
   ): Promise<CloudGithubCredentialSnapshot> {
-    const value = await this.read(scope), { row, material } = this.selectedCredential(value);
+    const value = await this.read(scope), { row, material } = this.selectedCredential(value, deviceAppId);
     if (failedTokenSha256 === createHash("sha256").update(material.accessToken).digest("hex")) {
       const marked = await this.edit(scope, value.generation, async tx => (await tx.query(
         "UPDATE cloud_github_credentials SET expires_at=LEAST(expires_at,now()),updated_at=now() WHERE id=$1 AND version=$2 RETURNING id",
         [row.id, row.version],
       )).rowCount);
       // A late report must not expire a concurrently rotated credential.
-      if (!marked) return this.credential(scope, refresh);
+      if (!marked) return this.credential(scope, refresh, undefined, deviceAppId);
       row.expires_at = new Date(0);
     }
     if (
@@ -484,7 +490,7 @@ export class CloudGithubConnectionStore {
         throw expired();
       await this.renew(scope, value.generation, row, material, refresh);
       await this.assertCurrent(scope, value.generation);
-      return this.credential(scope);
+      return this.credential(scope, undefined, undefined, deviceAppId);
     }
     await this.assertCurrent(scope, value.generation);
     return {

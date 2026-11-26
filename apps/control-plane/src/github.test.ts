@@ -1,4 +1,5 @@
 import {
+  createHash,
   createHmac,
   createPublicKey,
   generateKeyPairSync,
@@ -29,8 +30,12 @@ import {
   type GithubRouteDependencies,
 } from "./github.js";
 import { runMigrations } from "./migrate.js";
+import { CloudGithubConnectionStore } from "./cloud/github-connections-store.js";
+import { CloudGithubConnections } from "./cloud/github-connections.js";
 import { withSystemTx } from "./db.js";
 import { resetMigratedTestDatabase } from "./test-database.js";
+import { configureCloudPersonal } from "./db-context.js";
+import { grantTestPro } from "./test-pro.js";
 
 // An environment with no GitHub App registered used to get the router's generic
 // 404 "Not found", which the desktop surfaced as
@@ -628,6 +633,89 @@ dbDescribe("GitHub App OAuth handoff", () => {
       body: JSON.stringify({ nonce }),
     });
     expect(replayedHandoff.status).toBe(404);
+  });
+
+  it("shares the desktop App with Personal cloud after Pro and renews the same credential for both", async ({ onTestFinished }) => {
+    const user = await ensureUser(pool, {
+      provider: "workos", providerSubject: randomUUID(),
+      email: `shared-${randomUUID()}@example.test`, displayName: "Personal",
+    });
+    const personal = await pool.query<{ id: string }>(
+      "SELECT id FROM organizations WHERE created_by=$1 AND is_personal", [user.id],
+    );
+    const org = personal.rows[0]!.id;
+    const scope = { organizationId: org, userId: user.id };
+    configureCloudPersonal(pool, true);
+    onTestFinished(() => configureCloudPersonal(pool, false));
+    const store = new CloudGithubConnectionStore(pool, { currentKeyVersion: 1, keys: { 1: Buffer.alloc(32, 5).toString("base64url") } });
+    await expect(store.status(scope)).rejects.toMatchObject({ status: 404 });
+    await grantTestPro(pool, user.id);
+    const remote = githubFetch([]), service = new CloudGithubConnections(store, githubConfig, remote);
+    const app = testApp(pool, user, { fetch: remote, cloudGithub: service });
+    const post = (route: string, body: unknown) => app.request(`/v1/github/oauth/${route}`, {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body),
+    });
+    const nonce = "shared".repeat(8), started = await startFlow(app, nonce, false);
+    expect(new URL(started.authorizeUrl).pathname).toBe("/login/oauth/authorize");
+    expect((await callback(app, started.state)).status).toBe(302);
+    const exchange = await post("exchange", { nonce, shared: { organizationId: org, expected: await store.fingerprint(scope) } });
+    expect(exchange.status).toBe(200);
+    const device = await exchange.json() as Record<string, string>;
+    expect(device).toMatchObject({ shared: true, login: "octocat", accessToken: "initial-access-token" });
+    expect(device.refreshToken).not.toBe("initial-refresh-token");
+    expect((await service.access(scope)).material).toMatchObject({ method: "github-app", accessToken: device.accessToken });
+    const proof = { refreshToken: device.refreshToken, refreshBinding: device.refreshBinding };
+    const rejectedTokenHash = createHash("sha256").update("initial-access-token").digest("hex");
+    const rotated = await post("refresh", { ...proof, rejectedTokenHash });
+    expect(await rotated.json()).toMatchObject({ accessToken: "rotated-access-token", refreshToken: device.refreshToken });
+    expect((await service.access(scope)).material.accessToken).toBe("rotated-access-token");
+    await service.connectPat(scope, await store.fingerprint(scope), "synthetic-personal-access-token");
+    expect(await (await post("refresh", proof)).json()).toMatchObject({ accessToken: "rotated-access-token" });
+    await store.disconnect(scope, await store.fingerprint(scope), "github-app");
+    expect((await post("refresh", proof)).status).not.toBe(200);
+    expect((await store.status(scope)).selectedMethod).toBe("pat");
+  });
+
+  it("lets two Zeros accounts authorize the same installed GitHub account with independent access", async () => {
+    const org = randomUUID(), remote = githubFetch([]);
+    const store = new CloudGithubConnectionStore(pool, { currentKeyVersion: 1, keys: { 1: Buffer.alloc(32, 7).toString("base64url") } });
+    const cloudGithub = new CloudGithubConnections(store, githubConfig, remote);
+    const users = await Promise.all(["owner", "member"].map(name => ensureUser(pool, {
+      provider: "workos", providerSubject: randomUUID(), email: `${name}-${randomUUID()}@example.test`, displayName: name,
+    })));
+    const members = users.map(user => ({
+      app: testApp(pool, user, { fetch: remote, cloudGithub }), scope: { organizationId: org, userId: user.id },
+    }));
+    const [first, second] = members as [typeof members[number], typeof members[number]];
+    const post = (app: Hono, route: string, body: unknown) => app.request(`/v1/github/oauth/${route}`, {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body),
+    });
+    await pool.query("INSERT INTO organizations(id,slug,name,created_by,is_personal,cloud_workspaces_allowed) VALUES($1,$2,'Org',$3,false,true)",
+      [org, `same-github-${org}`, first.scope.userId]);
+    await pool.query("INSERT INTO organization_members(org_id,user_id,role) VALUES($1,$2,'owner')", [org, first.scope.userId]);
+    await expect(store.status(second.scope)).rejects.toMatchObject({ status: 404 });
+    await pool.query("INSERT INTO organization_members(org_id,user_id,role) VALUES($1,$2,'member')", [org, second.scope.userId]);
+    const connect = async ({ app, scope }: typeof first) => {
+      const nonce = randomUUID().repeat(2), started = await startFlow(app, nonce, false);
+      expect(new URL(started.authorizeUrl).pathname).toBe("/login/oauth/authorize");
+      expect((await callback(app, started.state)).status).toBe(302);
+      const res = await post(app, "exchange", { nonce, shared: { organizationId: org, expected: await store.fingerprint(scope) } });
+      expect(res.status).toBe(200);
+      const { accessToken, refreshToken, refreshBinding } = await res.json() as Record<string, string>;
+      return { accessToken, refreshToken, refreshBinding };
+    };
+    const grantA = await connect(first);
+    expect((await store.status(second.scope)).selectedMethod).toBeNull();
+    const grantB = await connect(second);
+    expect((await store.selectedIdentity(first.scope))?.identity).toEqual((await store.selectedIdentity(second.scope))?.identity);
+    const installation = await pool.query("SELECT owner_user_id FROM github_installations WHERE github_installation_id=987654 AND owner_user_id=ANY($1::uuid[])", [users.map(user => user.id)]);
+    expect(installation.rows).toHaveLength(2);
+    expect((await post(second.app, "refresh", grantA)).status).toBe(401);
+    await store.disconnect(first.scope, await store.fingerprint(first.scope), "github-app");
+    expect((await post(first.app, "revoke", grantA)).status).toBe(200);
+    expect((await post(second.app, "refresh", grantB)).status).toBe(200);
+    await pool.query("DELETE FROM organization_members WHERE org_id=$1 AND user_id=$2", [org, second.scope.userId]);
+    expect((await post(second.app, "refresh", grantB)).status).toBe(404);
   });
 
   it("binds the handoff to the Zeros account that started it", async () => {

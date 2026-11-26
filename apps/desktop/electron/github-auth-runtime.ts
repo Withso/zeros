@@ -56,6 +56,7 @@ function writeGithubSettings(patch: Record<string, unknown>): void {
 }
 
 export const githubCredentialStore = createGithubCredentialStore({
+  currentAccount: getProductAccountIdForMain,
   readSecret: getSecret,
   writeSecret: setSecret,
   deleteSecret,
@@ -199,6 +200,7 @@ export const githubSelectedTokenStore: TokenStore = {
     return replaceSecretIfUnchanged(account, raw, null);
   },
   async set(token) {
+    const owner = getProductAccountIdForMain();
     const method = await githubCredentialStore.getSelectedMethod();
     if (method === "gh-cli") return;
     const previous = await githubCredentialStore.get(method);
@@ -207,6 +209,7 @@ export const githubSelectedTokenStore: TokenStore = {
         ? {
             method,
             accessToken: token,
+            ...(owner ? { ownerSub: owner } : {}),
             gitHost: previous?.gitHost ?? GITHUB_GIT_HOST,
             gitHttpUsername:
               previous?.gitHttpUsername ?? GITHUB_GIT_HTTP_USERNAME,

@@ -11,6 +11,10 @@ export function githubCredentialForEngine(
   currentOwnerSub: string | null,
   nowMs = Date.now(),
 ): GithubCredential | null {
+  if (credential?.method === "pat") {
+    const { ownerSub, ...working } = credential;
+    return (ownerSub ?? null) === currentOwnerSub ? working : null;
+  }
   if (!credential || credential.method !== "github-app") return credential;
   if (
     !currentOwnerSub ||

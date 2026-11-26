@@ -7,6 +7,7 @@ import type { OrganizationSummary } from "../../team/control-plane";
 const state = vi.hoisted(() => ({
   githubLevels: null as null | { solo: boolean },
   unified: true,
+  sharedDesktopApp: true,
   organization: null as OrganizationSummary | null,
   saved: new Map<string, string>(),
   writes: [] as Array<[string, string, string]>,
@@ -71,9 +72,12 @@ vi.mock("../cloud-github-section", () => ({
   CloudGithubSection: ({ title }: { title?: unknown }) =>
     createElement("div", null, "cloud-github-fixture", title as never),
 }));
+vi.mock("../use-shared-github", () => ({
+  useSharedGithub: () => ({ read: { data: { sharedDesktopApp: state.sharedDesktopApp } } }),
+}));
 vi.mock("../github-section", () => ({
-  GitHubSection: ({ title }: { title?: unknown }) =>
-    createElement("div", null, "local-github-fixture", title as never),
+  GitHubSection: ({ title, owner }: { title?: unknown; owner?: { organizationId: string } }) =>
+    createElement("div", null, owner ? `shared-github-${owner.organizationId}` : "local-github-fixture", title as never),
 }));
 vi.mock("../providers-panel", () => ({
   ProvidersPanel: ({ unified }: { unified?: boolean }) =>
@@ -143,6 +147,7 @@ const activeEntry = () =>
   container.querySelector('nav [role="tab"][data-state="active"]')?.textContent;
 
 beforeEach(() => {
+  state.sharedDesktopApp = true;
   (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
   state.githubLevels = null;
   container = document.createElement("div");
@@ -318,14 +323,14 @@ describe("unified Settings rail", () => {
     ]);
   });
 
-  it("composes This Mac and cloud GitHub and passes unified to Agents and Environment", () => {
+  it("uses one GitHub panel scoped to the active organization and passes unified to Agents and Environment", () => {
     state.organization = ORGANIZATION;
     state.saved.set(`${ORGANIZATION_OWNER}:section`, "user:integrations");
     render();
     expect(heading()).toBe("GitHub");
-    expect(container.textContent).toContain("local-github-fixture");
-    expect(container.textContent).toContain("cloud-github-fixture");
-    expect(container.textContent).toContain("Cloud");
+    expect(container.textContent).toContain("shared-github-org-a");
+    expect(container.textContent).not.toContain("cloud-github-fixture");
+    expect(container.textContent).not.toContain("local-github-fixture");
     state.saved.set(`${ORGANIZATION_OWNER}:section`, "user:providers");
     render();
     expect(container.textContent).toContain("unified-agents-fixture");
@@ -340,6 +345,18 @@ describe("unified Settings rail", () => {
     render();
     expect(container.textContent).toContain("local-github-fixture");
     expect(container.textContent).not.toContain("cloud-github-fixture");
+  });
+
+  it("uses the shared connection on the legacy settings rail when the server supports it", () => {
+    state.organization = ORGANIZATION;
+    state.unified = false;
+    state.saved.set(`${ORGANIZATION_OWNER}:section`, "user:integrations");
+    render();
+    expect(container.textContent).toContain("shared-github-org-a");
+    state.sharedDesktopApp = false;
+    render();
+    expect(container.textContent).toContain("cloud-github-fixture");
+    expect(container.textContent).not.toContain("shared-github-org-a");
   });
 });
 

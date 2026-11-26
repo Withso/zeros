@@ -18,7 +18,7 @@ import {
   githubCredentialStore,
   replaceGithubAppCredentialIfCurrent,
 } from "./github-auth-runtime";
-import { GithubAppClient, type GithubAppFlowKind } from "./github-app-client";
+import { GithubAppClient, sharedGithubTarget, type SharedGithubTarget, type GithubAppFlowKind } from "./github-app-client";
 import {
   GithubAppController,
   GithubAppFlowError,
@@ -92,6 +92,7 @@ function readPending(): {
   expiresAtMs: number;
   preserveSelectedMethod: boolean;
   ownerSub?: string;
+  shared?: SharedGithubTarget;
 } | null {
   const raw = getSecret(PENDING_ACCOUNT);
   if (!raw) return null;
@@ -107,6 +108,7 @@ function readPending(): {
     return {
       raw,
       nonce: parsed.nonce,
+      ...(parsed.shared !== undefined ? { shared: sharedGithubTarget.parse(parsed.shared) } : {}),
       expiresAtMs: parsed.expiresAtMs,
       preserveSelectedMethod: parsed.preserveSelectedMethod === true,
       ...(typeof parsed.ownerSub === "string" ? { ownerSub: parsed.ownerSub } : {}),
@@ -126,7 +128,7 @@ function consumePending(nonce: string): PendingConsumeResult {
   }
   if (!sameNonce(pending.nonce, nonce)) return { status: "mismatch" };
   return replaceSecretIfUnchanged(PENDING_ACCOUNT, pending.raw, null)
-    ? { status: "consumed", preserveSelectedMethod: pending.preserveSelectedMethod, ownerSub: pending.ownerSub }
+    ? { status: "consumed", preserveSelectedMethod: pending.preserveSelectedMethod, ownerSub: pending.ownerSub, ...(pending.shared ? { shared: pending.shared } : {}) }
     : { status: "missing" };
 }
 
@@ -275,12 +277,14 @@ export async function beginGithubAppConnection(
   installFlow: boolean,
   forceInstall = false,
   preserveSelectedMethod = false,
+  shared?: SharedGithubTarget,
 ): Promise<GithubAppFlowKind | null> {
   return githubAppController().begin({
     scheme: schemeForChannel(channel()),
     installFlow,
     forceInstall,
     preserveSelectedMethod,
+    ...(shared ? { shared } : {}),
   });
 }
 
@@ -327,8 +331,8 @@ export async function recheckGithubAppInstallations(): Promise<GithubAppCredenti
   return githubAppController().refreshInstallations();
 }
 
-export async function disconnectGithubApp(): Promise<boolean> {
-  const removed = await githubAppController().disconnect();
+export async function disconnectGithubApp(owner?: string): Promise<boolean> {
+  const removed = await githubAppController().disconnect(owner);
   if (removed) {
     if (refreshTimer) clearTimeout(refreshTimer);
     refreshTimer = null;

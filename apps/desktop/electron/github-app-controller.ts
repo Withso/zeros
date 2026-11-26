@@ -1,4 +1,5 @@
 import type { DevGithubConnection } from "./dev-github-reference";
+import { createHash } from "node:crypto";
 // Main-process GitHub App state machine with all host dependencies injected.
 //
 // Keeping the orchestration pure makes the security contracts executable:
@@ -19,6 +20,7 @@ import {
   GithubAppClientError,
   type GithubAppClient,
   type GithubAppFlowKind,
+  type SharedGithubTarget,
 } from "./github-app-client";
 
 type GithubAppCredential = Extract<GithubCredential, { method: "github-app" }>;
@@ -53,7 +55,7 @@ export type GithubAppConnectionErrorReason =
   | "storage_failed";
 
 export type PendingConsumeResult =
-  | { status: "consumed"; preserveSelectedMethod?: boolean | undefined; ownerSub?: string | undefined }
+  | { status: "consumed"; preserveSelectedMethod?: boolean | undefined; ownerSub?: string | undefined; shared?: SharedGithubTarget }
   | {
       status: "missing" | "mismatch" | "expired";
     };
@@ -80,7 +82,7 @@ export interface GithubAppControllerDependencies {
     next: GithubAppCredential | null,
   ): Promise<boolean>;
   getSession(): Promise<{ accessToken: string; sub: string } | null>;
-  savePending(input: { nonce: string; expiresAtMs: number; preserveSelectedMethod?: boolean; ownerSub?: string }): void;
+  savePending(input: { nonce: string; expiresAtMs: number; preserveSelectedMethod?: boolean; ownerSub?: string; shared?: SharedGithubTarget }): void;
   consumePending(nonce: string): PendingConsumeResult;
   discardPending(nonce: string): void;
   clearPending(): void;
@@ -245,11 +247,12 @@ export class GithubAppController {
     installFlow: boolean;
     forceInstall?: boolean;
     preserveSelectedMethod?: boolean;
+    shared?: SharedGithubTarget;
   }): Promise<GithubAppFlowKind | null> {
     this.cancel();
     const epoch = this.cancelEpoch;
     const session = await this.deps.getSession();
-    if (!session) {
+    if (!session || (input.shared && session.sub !== input.shared.userId)) {
       throw new GithubAppFlowError(
         "Sign in to Zeros before connecting the GitHub App.",
         "signed_out",
@@ -285,6 +288,7 @@ export class GithubAppController {
       nonce,
       expiresAtMs: started.expiresAtMs,
       ownerSub: session.sub,
+      ...(input.shared ? { shared: input.shared } : {}),
       ...(input.preserveSelectedMethod ? { preserveSelectedMethod: true } : {}),
     });
     try {
@@ -339,6 +343,7 @@ export class GithubAppController {
         );
       }
       if(this.deps.devReference){
+        if (consumed.shared) throw new GithubAppFlowError("This Dev environment uses a hosted GitHub connection.", "not_configured");
         const result=await this.deps.devReference.exchange(session.accessToken,input.nonce);
         await this.deps.withCredentialLock(async()=>{
           const current=await this.deps.getSession();
@@ -353,6 +358,7 @@ export class GithubAppController {
       const result = await this.deps.client.exchange(
         session.accessToken,
         input.nonce,
+        ...(consumed.shared ? [consumed.shared] as const : []),
       );
       if (!result.login || !result.variantKey) {
         throw new GithubAppFlowError(
@@ -536,6 +542,7 @@ export class GithubAppController {
           session.accessToken,
           current.refreshToken,
           current.refreshBinding,
+          ...(force ? [createHash("sha256").update(current.accessToken).digest("hex")] as const : []),
         );
       } catch (error) {
         const mapped = mapClientError(error);
@@ -655,13 +662,14 @@ export class GithubAppController {
 
   /** Best-effort remote revoke, then a CAS local removal. A transient control-plane
    *  outage never traps a user in a locally connected state. */
-  async disconnect(): Promise<boolean> {
+  async disconnect(owner?: string): Promise<boolean> {
     this.cancel();
     if(this.deps.devReference)return this.deps.devReference.disconnect();
     return this.deps.withCredentialLock(async () => {
       const current = await this.deps.credentialStore.get("github-app");
       if (!current) return true;
       const session = await this.deps.getSession();
+      if (owner && (session?.sub !== owner || current.ownerSub !== owner)) return false;
       if (
         session &&
         current.ownerSub &&

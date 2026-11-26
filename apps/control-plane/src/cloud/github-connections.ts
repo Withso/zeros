@@ -1,5 +1,6 @@
 import { createHash, randomBytes } from "node:crypto";
 import { z } from "zod";
+import { devConnectionsEnabled } from "../dev-connections/config.js";
 import { HttpError } from "../authz.js";
 import type { GithubBackendConfig } from "../config.js";
 import type { Tx } from "../db.js";
@@ -189,6 +190,12 @@ export class CloudGithubConnections {
         fetch: this.fetchImpl,
       }),
     };
+  }
+  /** Only an authenticated desktop holding the signed grant for this row can renew it. */
+  async deviceAppCredential(scope: CloudGithubConnectionScope, credentialId: string, rejectedTokenHash?: string) {
+    const snapshot = await this.store.credential(scope, (material, account) => this.refresh(material, account), rejectedTokenHash, credentialId);
+    if (snapshot.material.method !== "github-app") throw changed();
+    return snapshot.material;
   }
   async gitIdentity(
     scope: CloudGithubConnectionScope,
@@ -403,6 +410,7 @@ export class CloudGithubConnections {
           : {}),
       },
       appAvailable: !!this.config,
+      sharedDesktopApp: !devConnectionsEnabled(process.env),
       installUrl: this.config
         ? `${this.config.webBaseUrl}/apps/${encodeURIComponent(this.config.appSlug)}/installations/new`
         : null,

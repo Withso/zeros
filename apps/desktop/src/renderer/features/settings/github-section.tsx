@@ -89,6 +89,8 @@ import {
   trackGithubMethodSelected,
 } from "../../platform/observability/analytics/github-events";
 import { RunStream } from "@/renderer/shared/ui/loading/run-stream";
+import { useSharedGithub, type GithubSettingsOwner } from "./use-shared-github";
+import { cloudGithubHealthCopy } from "./cloud-github-health";
 
 const METHODS = ["gh-cli", "github-app", "pat"] as const;
 
@@ -197,10 +199,17 @@ function HealthDetail({ summary }: { summary: GithubCredentialSummary }) {
 export function GitHubSection({
   surfaceActive = true,
   title = "GitHub",
+  owner,
+  accountId = owner?.userId,
 }: {
   surfaceActive?: boolean;
   title?: React.ReactNode;
+  owner?: GithubSettingsOwner;
+  accountId?: string;
 }) {
+  const shared = useSharedGithub(owner, surfaceActive);
+  const invalidateCloud = shared.invalidate;
+  const authKey = accountId ? `auth:${accountId}` : "auth";
   const [setupMethod, setSetupMethod] = useState<GithubAuthMethod | null>(null);
   const [terminalOpen, setTerminalOpen] = useState(false);
   const [pat, setPat] = useState("");
@@ -221,8 +230,8 @@ export function GitHubSection({
   const connected = useNativeRuntime().ready;
   const connection = useRecoveringRead(
     ghAuthStatusCache,
-    surfaceActive ? "auth" : null,
-    () => ghAuthSnapshot(),
+    surfaceActive ? authKey : null,
+    () => ghAuthSnapshot(accountId ? { userId: accountId } : undefined),
     { maxAgeMs: GITHUB_READ_MAX_AGE_MS, connected },
   );
   const hasConfirmedSnapshot = connection.data !== undefined;
@@ -234,9 +243,10 @@ export function GitHubSection({
       try {
         // Bypass deduplication so an explicit App refresh cannot join a probe that skipped inventory.
         const next = await ghAuthSnapshot({
+          ...(accountId ? { userId: accountId } : {}),
           refreshApp: method === "github-app",
         });
-        ghAuthStatusCache.setData("auth", next);
+        ghAuthStatusCache.setData(authKey, next);
         if (method) {
           const summary = next.methods[method];
           trackGithubHealthRefreshed({
@@ -249,10 +259,10 @@ export function GitHubSection({
         return next;
       } catch {
         if (method) {
-          const prior = ghAuthStatusCache.peekSnapshot("auth").data;
+          const prior = ghAuthStatusCache.peekSnapshot(authKey).data;
           if (prior) {
             ghAuthStatusCache.setData(
-              "auth",
+              authKey,
               githubRefreshFailureSnapshot(prior, method),
             );
           }
@@ -262,22 +272,25 @@ export function GitHubSection({
         if (method) setRefreshingMethod(null);
       }
     },
-    [],
+    [accountId, authKey],
   );
 
   const selectMethod = useCallback(
     async (method: GithubAuthMethod) => {
       const status = snapshot.methods[method];
-      if (status.configured && snapshot.selectedMethod === method) return;
-      if (!status.configured) {
+      const cloudMethod = owner && method !== "gh-cli" ? shared.read.data?.methods[method] : undefined;
+      if (!status.configured || (owner && method !== "gh-cli" && (!cloudMethod?.configured || cloudMethod.login !== status.login))) {
         setSetupMethod(method);
         setTerminalOpen(false);
         return;
       }
       setBusyMethod(method);
       try {
-        const next = await ghMethodSelect(method);
-        ghAuthStatusCache.setData("auth", next);
+        if (owner && method !== "gh-cli" && shared.read.data?.selectedMethod !== method)
+          await shared.change({ action: "select", method });
+        if (snapshot.selectedMethod === method) return;
+        const next = await ghMethodSelect(method, accountId);
+        ghAuthStatusCache.setData(authKey, next);
         setSetupMethod(null);
         trackGithubMethodSelected({
           method,
@@ -292,14 +305,14 @@ export function GitHubSection({
         setBusyMethod(null);
       }
     },
-    [snapshot],
+    [snapshot, owner, shared, authKey, accountId],
   );
 
   const finishCliTerminal = useCallback(async () => {
     setTerminalOpen(false);
     try {
-      const next = await ghMethodSelect("gh-cli");
-      ghAuthStatusCache.setData("auth", next);
+      const next = await ghMethodSelect("gh-cli", accountId);
+      ghAuthStatusCache.setData(authKey, next);
       setSetupMethod(null);
       trackGithubConnectCompleted({
         method: "gh-cli",
@@ -326,7 +339,7 @@ export function GitHubSection({
       // The login command may have changed auth before closing; re-probe even when cancelled.
       await refreshSnapshot();
     }
-  }, [refreshSnapshot, snapshot]);
+  }, [refreshSnapshot, snapshot, authKey, accountId]);
 
   const beginCliLogin = useCallback(() => {
     trackGithubConnectStarted({
@@ -345,13 +358,18 @@ export function GitHubSection({
       entryPoint: "settings",
     });
     setBusyMethod("pat");
+    let savedInCloud = false;
     try {
-      const result = await ghPatConnect(token);
+      if (owner) {
+        await shared.change({ action: "pat", token });
+        savedInCloud = true;
+      }
+      const result = await ghPatConnect(token, accountId);
       setPat("");
       setShowPat(false);
       setSetupMethod(null);
       // Use the post-write snapshot so a failed follow-up probe cannot hide a successful connection.
-      ghAuthStatusCache.setData("auth", result.snapshot);
+      ghAuthStatusCache.setData(authKey, result.snapshot);
       trackGithubConnectCompleted({ method: "pat", outcome: "ok" });
       if (snapshot.selectedMethod !== "pat") {
         trackGithubMethodSelected({
@@ -369,13 +387,13 @@ export function GitHubSection({
         outcome: "error",
         errorKind: githubConnectErrorKind(error),
       });
-      toast.error("Couldn’t save this Personal Access Token", {
+      toast.error(savedInCloud ? "Token saved in Cloud. Retry to connect this Mac." : "Couldn’t save this Personal Access Token", {
         description: errorMessage(error),
       });
     } finally {
       setBusyMethod(null);
     }
-  }, [busyMethod, pat, snapshot]);
+  }, [busyMethod, pat, snapshot, owner, shared, accountId, authKey]);
 
   const connectApp = useCallback(async (options?: {
     forceInstall?: boolean;
@@ -395,7 +413,7 @@ export function GitHubSection({
       entryPoint: "settings",
     });
     try {
-      const started = await ghAppConnect(connectOptions);
+      const started = await ghAppConnect({ ...connectOptions, ...(owner ? { shared: shared.target() } : {}) });
       if (attempt !== appAttemptRef.current || !started) return;
       if (started.flowKind === "install") {
         trackGithubInstallOpened({
@@ -423,7 +441,7 @@ export function GitHubSection({
     } finally {
       setBusyMethod(null);
     }
-  }, [snapshot.methods]);
+  }, [snapshot.methods, owner, shared]);
 
   const cancelApp = useCallback(() => {
     appAttemptRef.current += 1;
@@ -463,12 +481,14 @@ export function GitHubSection({
     const disposers: Array<() => void> = [];
     void Promise.all([
       onGithubAppConnected(() => {
+        invalidateCloud();
         setAppWaiting(false);
         setAppError(null);
         setSetupMethod(null);
         void refreshSnapshot();
       }),
       onGithubAppError(() => {
+        invalidateCloud();
         // GithubAppNotifications owns the error toast even when Settings is closed.
         setAppWaiting(false);
         void refreshSnapshot();
@@ -487,12 +507,12 @@ export function GitHubSection({
       closed = true;
       for (const dispose of disposers) dispose();
     };
-  }, [refreshSnapshot, surfaceActive]);
+  }, [refreshSnapshot, surfaceActive, invalidateCloud]);
 
   const restorePat = useCallback(async (undoId: string) => {
     try {
       const next = await ghPatRestore(undoId);
-      ghAuthStatusCache.setData("auth", next);
+      ghAuthStatusCache.setData(authKey, next);
       toast.success("Personal Access Token restored", {
         description: next.methods.pat.login
           ? `Connected as @${next.methods.pat.login}.`
@@ -503,14 +523,16 @@ export function GitHubSection({
         description: errorMessage(error),
       });
     }
-  }, []);
+  }, [authKey]);
 
   const removeMethod = useCallback(
     async (method: GithubAuthMethod) => {
       setBusyMethod(method);
       try {
-        const result = await ghMethodDisconnect(method);
-        ghAuthStatusCache.setData("auth", result.snapshot);
+        if (owner && method !== "gh-cli" && shared.read.data?.methods[method].configured)
+          await shared.change({ action: "disconnect", method });
+        const result = await ghMethodDisconnect(method, accountId);
+        ghAuthStatusCache.setData(authKey, result.snapshot);
         setSetupMethod(null);
         setTerminalOpen(false);
         setAppWaiting(false);
@@ -528,7 +550,7 @@ export function GitHubSection({
                   duration: Math.max(0, result.undoExpiresAtMs - Date.now()),
                 }
               : {}),
-            ...(result.undoId
+            ...(!owner && result.undoId
               ? {
                   action: {
                     label: "Undo",
@@ -551,7 +573,7 @@ export function GitHubSection({
         setDisconnectAppOpen(false);
       }
     },
-    [restorePat],
+    [restorePat, owner, shared, authKey, accountId],
   );
 
   const automaticSetup = useMemo(() => {
@@ -566,7 +588,7 @@ export function GitHubSection({
         <div>
           <h2 className="text-fg1 m-0 text-xs leading-4.5 font-medium">{title}</h2>
           <p className="text-fg2 mt-0.5 text-xs">
-            How Zeros signs in to GitHub on this Mac.
+            {owner ? `Connect GitHub for this Mac and cloud workspaces in ${owner.name}.` : "How Zeros signs in to GitHub on this Mac."}
           </p>
         </div>
 
@@ -580,6 +602,7 @@ export function GitHubSection({
           {METHODS.map((method) => {
             const summary = snapshot.methods[method];
             const selected = snapshot.selectedMethod === method;
+            const cloudMethod = method !== "gh-cli" && owner ? shared.read.data?.methods[method] : undefined;
             const settingUp = visibleSetup === method;
             const refreshing = refreshingMethod === method;
             const showTopRefresh = shouldShowGithubTopRefresh(
@@ -606,7 +629,7 @@ export function GitHubSection({
                   checked={selected}
                   aria-label={githubMethodLabel(method)}
                   onChange={() => void selectMethod(method)}
-                  disabled={busyMethod !== null || !hasConfirmedSnapshot}
+                  disabled={busyMethod !== null || !hasConfirmedSnapshot || (!!owner && method !== "gh-cli" && !shared.read.data)}
                 />
 
                 <button
@@ -615,11 +638,12 @@ export function GitHubSection({
                   tabIndex={-1}
                   className="min-w-0 cursor-pointer text-left"
                   onClick={() => void selectMethod(method)}
-                  disabled={busyMethod !== null || !hasConfirmedSnapshot}
+                  disabled={busyMethod !== null || !hasConfirmedSnapshot || (!!owner && method !== "gh-cli" && !shared.read.data)}
                 >
                   <span className="text-fg1 flex items-center gap-2 text-xs leading-4.5 font-medium">
                     <MethodIcon method={method} />
                     {githubMethodLabel(method)}
+                    {method === "gh-cli" && " · Local only"}
                   </span>
                   {summary.configured && summary.login ? (
                     <span className="mt-2 flex flex-wrap items-center gap-2">
@@ -636,6 +660,13 @@ export function GitHubSection({
                   )}
                 </button>
 
+                {cloudMethod && (
+                  <span className="text-fg2 col-start-2 row-start-2 text-xs">
+                    {cloudMethod.configured ? `Cloud · ${cloudMethod.login ?? "Connected"}${shared.read.data?.selectedMethod === method ? " · Selected" : ""}` : "Cloud · Disconnected"}
+                    {cloudMethod.configured && cloudMethod.health !== "connected" && ` · ${cloudGithubHealthCopy[cloudMethod.health]}`}
+                  </span>
+                )}
+
                 <div className="flex items-center gap-1">
                   {showTopRefresh ? (
                     <Button
@@ -649,7 +680,7 @@ export function GitHubSection({
                     </Button>
                   ) : null}
 
-                  {summary.configured ? (
+                  {summary.configured || cloudMethod?.configured ? (
                     <DropdownMenu>
                       <DropdownMenuTrigger asChild>
                         <IconButton
@@ -984,6 +1015,11 @@ export function GitHubSection({
           Switching keeps your other credentials.
         </p>
 
+        {shared.read.error && owner && (
+          <div className="text-fg2 text-xs" role="alert">
+            {shared.read.error.message} <Button variant="ghost" onClick={shared.read.refresh}>Refresh</Button>
+          </div>
+        )}
         {connection.error && !connection.data ? (
           <div className="bg-bg1-raised text-fg2 flex items-start gap-2.5 rounded-md px-3 py-2.5 text-xs">
             <TriangleAlert
@@ -1019,7 +1055,7 @@ export function GitHubSection({
           <DialogHeader>
             <DialogTitle>Disconnect GitHub App?</DialogTitle>
             <DialogDescription>
-              Zeros will use gh CLI instead. The app stays installed on GitHub.
+              {owner ? `Disconnect the GitHub App on this Mac and in ${owner.name}. ` : "Zeros will use gh CLI instead. "}The app stays installed on GitHub.
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>

@@ -40,7 +40,7 @@ export class GithubDevPendingHandoff {
     if (pending.expiresAtMs <= this.now()) { this.clear(); return { status: "expired" }; }
     if (pending.nonce !== nonce) return { status: "mismatch" };
     this.clear();
-    return { status: "consumed", preserveSelectedMethod: pending.preserveSelectedMethod, ownerSub: pending.ownerSub };
+    return { status: "consumed", preserveSelectedMethod: pending.preserveSelectedMethod, ownerSub: pending.ownerSub, ...(pending.shared ? { shared: pending.shared } : {}) };
   }
 
   discard(nonce: string): void {

@@ -428,7 +428,7 @@ export function createApp(
       inviteLinkBase: config.inviteLinkBase,
     }),
   );
-  if (config.github) app.route("/", createGithubRoutes(pool, config.github));
+  if (config.github) app.route("/", createGithubRoutes(pool, config.github, cloudGithub ? { cloudGithub } : {}));
 
   app.onError((err, c) => {
     if (err instanceof DatabaseAcquireTimeoutError) {

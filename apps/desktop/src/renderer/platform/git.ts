@@ -1735,6 +1735,7 @@ export async function ghRepositoryOwnerAvatar(
 
 export async function ghAuthSnapshot(options?: {
   refreshApp?: boolean;
+  userId?: string;
 }): Promise<GithubAuthSnapshot> {
   if (!isNativeRuntime()) {
     return {
@@ -1756,21 +1757,23 @@ export async function ghAuthSnapshot(options?: {
     };
   }
   return nativeInvoke<GithubAuthSnapshot>("gh_auth_snapshot", {
+    ...(options?.userId ? { userId: options.userId } : {}),
     refreshApp: options?.refreshApp === true,
   });
 }
 
 export async function ghMethodSelect(
   method: GithubAuthMethod,
+  userId?: string,
 ): Promise<GithubAuthSnapshot> {
-  return nativeInvoke("gh_method_select", { method });
+  return nativeInvoke("gh_method_select", { method, ...(userId ? { userId } : {}) });
 }
 
-export async function ghPatConnect(token: string): Promise<{
+export async function ghPatConnect(token: string, userId?: string): Promise<{
   login: string;
   snapshot: GithubAuthSnapshot;
 }> {
-  return nativeInvoke("gh_pat_connect", { token });
+  return nativeInvoke("gh_pat_connect", { token, ...(userId ? { userId } : {}) });
 }
 
 export async function ghPatRestore(
@@ -1784,11 +1787,13 @@ export async function ghAppConnect(options?: {
   installFlow?: boolean;
   forceInstall?: boolean;
   preserveSelectedMethod?: boolean;
+  shared?: { userId: string; organizationId: string; expected: string };
 }): Promise<{ flowKind: "oauth" | "install" } | null> {
   return nativeInvoke("gh_app_connect", {
     installFlow: options?.installFlow !== false,
     forceInstall: options?.forceInstall === true,
     ...(options?.preserveSelectedMethod ? { preserveSelectedMethod: true } : {}),
+    ...(options?.shared ? { shared: options.shared } : {}),
   });
 }
 
@@ -1796,12 +1801,12 @@ export async function ghAppCancel(): Promise<void> {
   await nativeInvoke("gh_app_cancel", {});
 }
 
-export async function ghMethodDisconnect(method: GithubAuthMethod): Promise<{
+export async function ghMethodDisconnect(method: GithubAuthMethod, userId?: string): Promise<{
   snapshot: GithubAuthSnapshot;
   undoId?: string;
   undoExpiresAtMs?: number;
 }> {
-  return nativeInvoke("gh_method_disconnect", { method });
+  return nativeInvoke("gh_method_disconnect", { method, ...(userId ? { userId } : {}) });
 }
 
 export interface GithubAppConnectedPayload {
