@@ -541,8 +541,7 @@ export function GitHubSection({
       setBusyMethod(method);
       try {
         // Even an empty App row may have a shared exchange in flight against this generation.
-        if (owner && (method === "github-app" ||
-          (method === "pat" && shared.read.data?.methods.pat.configured !== false)))
+        if (owner && method === "github-app")
           await shared.change({ action: "disconnect", method });
         const result = await ghMethodDisconnect(method, accountId);
         ghAuthStatusCache.setData(authKey, result.snapshot);
@@ -555,6 +554,16 @@ export function GitHubSection({
             description: "gh CLI auth is now selected.",
           });
         } else if (method === "pat") {
+          if (owner) {
+            try {
+              await shared.change({ action: "disconnect", method });
+            } catch (error) {
+              toast.error("Token removed from this Mac. Cloud removal is unconfirmed.", {
+                description: errorMessage(error),
+              });
+              return;
+            }
+          }
           toast.info("Personal Access Token removed", {
             description: "This token is no longer available to Zeros.",
             // Match the toast lifetime to the native undo deadline.

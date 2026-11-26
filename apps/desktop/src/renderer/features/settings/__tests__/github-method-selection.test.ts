@@ -3,9 +3,11 @@ import { act, createElement } from "react";
 import { createRoot } from "react-dom/client";
 import { beforeEach, expect, it, vi } from "vitest";
 import { GitHubSection } from "../github-section";
+import { toast } from "../../../shared/ui/primitives/elements";
 
 const adapters = vi.hoisted(() => ({
   cloudPatConfigured: true,
+  hasCloudSnapshot: true,
   cloud: vi.fn(async () => {}),
   mac: vi.fn(async () => { throw new Error("Mac PAT revoked"); }),
   remove: vi.fn(async () => ({})),
@@ -24,19 +26,26 @@ vi.mock("../../../state/use-recovering-read", () => ({
 }));
 vi.mock("../inline-login-terminal", () => ({ InlineLoginTerminal: () => "CLI sign-in terminal" }));
 vi.mock("../use-shared-github", () => ({
-  useSharedGithub: () => ({ change: adapters.cloud, read: { data: {
+  useSharedGithub: () => ({ change: adapters.cloud, read: { data: adapters.hasCloudSnapshot ? {
     selectedMethod: null, methods: { pat: { configured: adapters.cloudPatConfigured, login: "octocat" }, "github-app": { configured: false } },
-  } } }),
+  } : undefined } }),
 }));
 
 beforeEach(() => {
   vi.clearAllMocks();
   adapters.cloudPatConfigured = true;
+  adapters.hasCloudSnapshot = true;
 });
 
-it("removes a Mac-only PAT when Cloud is offline", async () => {
+it.each([
+  ["missing", false, "Refresh the cloud GitHub connection and try again."],
+  ["stale", true, "Your cloud GitHub connection changed."],
+] as const)("removes the Mac PAT and reports unconfirmed Cloud removal with a %s snapshot", async (_name, hasSnapshot, reason) => {
+  adapters.hasCloudSnapshot = hasSnapshot;
   adapters.cloudPatConfigured = false;
-  adapters.cloud.mockRejectedValueOnce(new Error("Cloud is offline"));
+  adapters.cloud.mockRejectedValueOnce(new Error(reason));
+  const error = vi.spyOn(toast, "error");
+  const info = vi.spyOn(toast, "info");
   const container = document.body.appendChild(document.createElement("div"));
   const root = createRoot(container);
   try {
@@ -48,11 +57,15 @@ it("removes a Mac-only PAT when Cloud is offline", async () => {
     const remove = [...document.querySelectorAll<HTMLElement>('[role="menuitem"]')].find(item => item.textContent === "Remove token")!;
     await act(async () => remove.click());
     expect(adapters.remove).toHaveBeenCalledWith("pat", "a");
-    expect(adapters.cloud).not.toHaveBeenCalled();
+    expect(adapters.cloud).toHaveBeenCalledWith({ action: "disconnect", method: "pat" });
+    expect(error).toHaveBeenCalledWith("Token removed from this Mac. Cloud removal is unconfirmed.", { description: reason });
+    expect(info).not.toHaveBeenCalled();
   } finally {
     act(() => root.unmount());
     container.remove();
     adapters.cloud.mockReset();
+    error.mockRestore();
+    info.mockRestore();
   }
 });
 
