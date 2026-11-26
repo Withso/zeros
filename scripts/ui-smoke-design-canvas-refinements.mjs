@@ -917,12 +917,12 @@ export async function runDesignWorldNudgeSmoke({ page, check }) {
   await label.click();
   const initialX = await confirmedX();
   await page.keyboard.press("Shift+ArrowRight");
-  await expect.poll(confirmedX).toBe(initialX + 8);
+  await expect.poll(confirmedX).toBe(initialX + 10);
   await page.keyboard.down("ArrowRight");
   await page.keyboard.down("ArrowRight");
   await page.keyboard.down("ArrowRight");
   await page.keyboard.up("ArrowRight");
-  await expect.poll(confirmedX).toBe(initialX + 11);
+  await expect.poll(confirmedX).toBe(initialX + 13);
   await page.evaluate(async () => {
     const { designFrameRuntime } =
       await import("/apps/desktop/src/renderer/platform/bridge/design-frame-runtime.ts");
@@ -967,7 +967,7 @@ export async function runDesignWorldNudgeSmoke({ page, check }) {
   const writes = await transactionWrites(page);
   await page.keyboard.press("Shift+ArrowRight");
   await expect
-    .poll(async () => Math.abs((await rect()).x - before.x - 8))
+    .poll(async () => Math.abs((await rect()).x - before.x - 10))
     .toBeLessThan(0.01);
   await expect.poll(() => transactionWrites(page)).toBe(writes + 1);
   expect(Math.abs((await rect()).y - before.y)).toBeLessThan(0.01);
@@ -981,7 +981,7 @@ export async function runDesignWorldNudgeSmoke({ page, check }) {
   await expect.poll(rect).toEqual(committed);
   expect(await transactionWrites(page)).toBe(writes + 1);
   check(
-    "scene and transformed-node arrows move one/eight world pixels; held-key cancellation restores the preview without writing",
+    "scene and transformed-node arrows move one/ten world pixels; held-key cancellation restores the preview without writing",
     true,
   );
 }
@@ -1297,7 +1297,7 @@ export async function runDesignRelativePinnedMovementSmoke({ page, check }) {
         const node = body.querySelector(`[data-oid="${id}"]`);
         return { x: node.getBoundingClientRect().x, right: parseFloat(getComputedStyle(node).right) };
       }), ids);
-      for (const [key, delta] of [["ArrowRight", 1], ["Shift+ArrowRight", 8]]) {
+      for (const [key, delta] of [["ArrowRight", 1], ["Shift+ArrowRight", 10]]) {
         const before = await read();
         const writes = await transactionWrites(page);
         await page.keyboard.press(key);

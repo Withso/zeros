@@ -35,6 +35,8 @@ export type WorkspaceDesignHistoryEntry =
       kind: "frame";
       before: DesignFrameRestorePoint | null;
       after: DesignFrameRestorePoint | null;
+      /** The frame a copy was made from: undoing the copy selects it again. */
+      source?: string;
       bytes: number;
     }
   | {
@@ -176,6 +178,7 @@ export function documentDesignHistoryEntry(
 export function frameDesignHistoryEntry(
   before: DesignFrameRestorePoint | null,
   after: DesignFrameRestorePoint | null,
+  source?: string,
 ): WorkspaceDesignHistoryEntry {
   const file = before?.file ?? after?.file;
   if (!file || (before && after && before.file !== after.file)) {
@@ -185,10 +188,11 @@ export function frameDesignHistoryEntry(
     kind: "frame",
     before,
     after,
+    ...(source ? { source } : {}),
     bytes:
       (before ? Buffer.byteLength(before.source, "utf8") : 0) +
       (after ? Buffer.byteLength(after.source, "utf8") : 0) +
-      file.length * 2 +
+      (file.length + (source?.length ?? 0)) * 2 +
       128,
   };
 }
