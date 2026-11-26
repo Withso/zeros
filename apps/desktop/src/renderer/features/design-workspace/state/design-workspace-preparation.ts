@@ -217,6 +217,21 @@ export const RUNTIME_AUDIT_RULE_IDS: ReadonlySet<string> = new Set([
   "layer-tree-limit",
 ]);
 
+/** A read without runtime audit rows for a frame (a navigation read carries
+ * none) keeps the confirmed ones while that frame's source is unchanged: the
+ * mounted runtime reports an unchanged audit only once, so they would not
+ * return. */
+export function withConfirmedRuntimeAudits(previous: DesignWorkspaceSnapshotWire | undefined,
+  next: DesignWorkspaceSnapshotWire): DesignWorkspaceSnapshotWire {
+  if (!previous || previous.directoryId !== next.directoryId || previous.lint.workspacePath !== next.lint.workspacePath) return next;
+  const before = new Map(previous.frames.map(frame => [frame.file, frame.sourceVersion]));
+  const unchanged = new Set(next.frames.filter(frame => before.get(frame.file) === frame.sourceVersion).map(frame => frame.file));
+  const audited = new Set(next.lint.violations.filter(row => RUNTIME_AUDIT_RULE_IDS.has(row.ruleId)).map(row => row.file));
+  const carried = previous.lint.violations.filter(row =>
+    RUNTIME_AUDIT_RULE_IDS.has(row.ruleId) && unchanged.has(row.file) && !audited.has(row.file));
+  return carried.length ? { ...next, lint: { ...next.lint, violations: [...next.lint.violations, ...carried] } } : next;
+}
+
 /** `linted` files take `rows` as their source lint rows; their runtime
  * audit rows and every other file's rows stay. */
 export function withSourceLintRows(lint: DesignWorkspaceSnapshotWire["lint"], linted: ReadonlySet<string>,

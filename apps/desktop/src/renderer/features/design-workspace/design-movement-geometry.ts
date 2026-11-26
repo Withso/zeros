@@ -23,7 +23,7 @@ export const DESIGN_MOVE_ACTIVATION_PIXELS = 3;
 export const DESIGN_REPARENT_HYSTERESIS_PIXELS = 8;
 
 export function designNudgeStep(shift: boolean): number {
-  return shift ? 8 : 1;
+  return shift ? 10 : 1;
 }
 
 export function designNodeMovementStyles(

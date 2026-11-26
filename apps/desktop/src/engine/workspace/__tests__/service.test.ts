@@ -1942,6 +1942,57 @@ describe("WorkspaceService", () => {
     }
   });
 
+  it("returns the selection to the original frame when a duplicate is undone", async () => {
+    execFileSync("git", ["config", "user.email", "t@t"], { cwd: dir });
+    execFileSync("git", ["config", "user.name", "t"], { cwd: dir });
+    execFileSync("git", ["add", "hello.txt"], { cwd: dir });
+    execFileSync("git", ["commit", "-q", "-m", "init"], { cwd: dir });
+    const design = await createWorkspace({
+      repoRoot: dir,
+      repoSlug: "design-duplicate-undo-selection",
+      kind: "design",
+    });
+    try {
+      const index = (await svc.handle("design.frame.create", {
+        workspaceId: design.workspaceId,
+        title: "Index",
+      })) as { frame: { file: string } };
+      const button = (await svc.handle("design.frame.create", {
+        workspaceId: design.workspaceId,
+        title: "Button",
+      })) as { frame: { file: string } };
+      const copy = (await svc.handle("design.frame.duplicate", {
+        workspaceId: design.workspaceId,
+        frame: button.frame.file,
+      })) as { frame: { file: string } };
+
+      const undone = (await svc.handle("design.history.undo", {
+        workspaceId: design.workspaceId,
+        frame: copy.frame.file,
+      })) as { historySelection?: string | null; snapshot: { frames: Array<{ file: string }> } };
+      expect(undone.snapshot.frames.map((frame) => frame.file)).toEqual([index.frame.file, button.frame.file]);
+      expect(undone.historySelection).toBe(button.frame.file);
+
+      const redone = (await svc.handle("design.history.redo", {
+        workspaceId: design.workspaceId,
+      })) as { historySelection?: string | null };
+      expect(redone.historySelection).toBe(copy.frame.file);
+      // A scoped reply prepares nothing for the removed copy; the original is
+      // known from the page catalog.
+      const scoped = (await svc.handle("design.history.undo", {
+        workspaceId: design.workspaceId,
+        snapshotMode: "scoped",
+      })) as { historySelection?: string | null; snapshot: { frames: Array<{ file: string }> } };
+      expect(scoped.snapshot.frames).toEqual([]);
+      expect(scoped.historySelection).toBe(button.frame.file);
+    } finally {
+      await svc.handle("workspace.delete", {
+        workspaceId: design.workspaceId,
+        includeBranch: true,
+      });
+    }
+  });
+
   it("keeps a registered main's named linked copy in one undo and redo step", async () => {
     execFileSync("git", ["config", "user.email", "t@t"], { cwd: dir });
     execFileSync("git", ["config", "user.name", "t"], { cwd: dir });
@@ -3086,7 +3137,7 @@ describe("WorkspaceService", () => {
         expect(reply.snapshot.mutationCatalog?.frames.map(frame => frame.source).sort(), op).toEqual([...catalog].sort());
         return reply;
       };
-      // Removing the copy prepares nothing and still selects the page's first frame.
+      // Removing the copy prepares nothing and selects the frame it was copied from.
       expect((await step("design.history.undo", [], all)).historySelection).toBe(edited.file);
       await step("design.history.undo", [edited.file], all);
       await step("design.history.undo", [edited.file], all);

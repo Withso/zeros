@@ -59,7 +59,7 @@ import type { DesignTransaction } from "@zeros/design-core";
 import type { DesignRuntimeGenerationPatch, DesignRuntimeNodeInsert } from "@zeros/protocol/design-runtime";
 import { KeyedAsyncCache } from "../../../shared/lib/keyed-async-cache";
 import { DesignFramePreparation, readDesignNavigation, projectDesignMutationSnapshot, RUNTIME_AUDIT_RULE_IDS,
-  withSourceLintRows } from "./design-workspace-preparation";
+  withConfirmedRuntimeAudits, withSourceLintRows } from "./design-workspace-preparation";
 import { preparedDesignSnapshot } from "./design-frame-view";
 import { onActiveBridgeConnected } from "../../../platform/bridge/active-bridge";
 import { isCloudWorkspace } from "../../../platform/bridge/cloud-workspace-key";
@@ -1630,9 +1630,10 @@ export async function fetchDesignWorkspaceSnapshot(
     mutation.deferredRefresh = true;
     return previous;
   }
+  const latest = designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data;
   const stabilized = stabilizeDesignWorkspaceSnapshot(
-    designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data,
-    applyRetainedRuntimeAuditViolations(workspaceId, next),
+    latest,
+    applyRetainedRuntimeAuditViolations(workspaceId, withConfirmedRuntimeAudits(latest, next)),
   );
   const stable = previous && stabilized === previous && isDesignWorkspaceBootPreview(previous)
     ? { ...stabilized }

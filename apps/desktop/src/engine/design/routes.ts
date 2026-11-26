@@ -870,15 +870,21 @@ export async function handleDesignWorkspaceRoute(
             throw error;
           }
           destination.push(entry);
+          // As in a design tool, undoing a copy selects the frame it was made from.
+          const copySource = !replacement && entry.source ? entry.source : undefined;
           const snapshot = await restoredSnapshot(replacement ? [replacement.file] : []);
           const pageId = (replacement ?? expected)?.pageId;
           const affectedPage = snapshot.pages?.find(page => page.id === pageId);
           const scopedPage = snapshot.pageCatalog?.pages.find(page => page.id === pageId);
+          const restoredSource = copySource && (affectedPage?.frameFiles.includes(copySource) ||
+            snapshot.frames.some(frame => frame.file === copySource) ||
+            (snapshot.mutationCatalog ?? snapshot.pageCatalog)?.frames.some(frame => frame.source === copySource))
+            ? copySource : undefined;
           return {
             result: null,
             snapshot,
             historySelection:
-              replacement?.file ?? (affectedPage ? affectedPage.frameFiles[0]
+              replacement?.file ?? restoredSource ?? (affectedPage ? affectedPage.frameFiles[0]
                 : scopedPage ? (snapshot.pageCatalog!.frames.find(frame => frame.pageId === pageId)?.source ?? null)
                 : (snapshot.mutationCatalog?.frames[0]?.source ?? snapshot.pageCatalog?.frames[0]?.source ?? snapshot.frames[0]?.file)) ?? null,
             historyFrame: (replacement ?? expected)!.file,
@@ -1583,6 +1589,7 @@ export async function handleDesignWorkspaceRoute(
         frameDesignHistoryEntry(
           null,
           await captureDesignFrameRestorePoint(workspace.path, frame.file),
+          reqStr(params, "frame"),
         ),
       );
       return {

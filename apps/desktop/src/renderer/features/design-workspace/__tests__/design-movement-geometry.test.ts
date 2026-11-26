@@ -145,9 +145,9 @@ describe("design movement coordinates", () => {
     expect(designSettledRelocation(preview, label, { ...card, relocationContext: undefined })).toBe(preview);
   });
 
-  it("uses one and eight world pixels, preserving fractional parent offsets and center pins", () => {
+  it("uses one and ten world pixels, preserving fractional parent offsets and center pins", () => {
     expect(designNudgeStep(false)).toBe(1);
-    expect(designNudgeStep(true)).toBe(8);
+    expect(designNudgeStep(true)).toBe(10);
     const node: DesignRuntimeNodeDetails = {
       sourceVersion: "a".repeat(24),
       oid: "child",

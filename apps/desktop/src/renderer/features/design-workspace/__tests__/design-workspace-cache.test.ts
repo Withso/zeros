@@ -3631,6 +3631,25 @@ describe("design workspace cache", () => {
     ).toEqual([]);
   });
 
+  it("keeps a frame's confirmed runtime audit through a navigation read while its source is unchanged", async () => {
+    // A navigation read carries no runtime audit rows, and the mounted runtime
+    // reports an unchanged audit only once, so dropping them loses the badge.
+    const workspaceId = "ws_navigation_runtime_audit";
+    const current = snapshot([{ file: "home.html" }, { file: "other.html" }]);
+    const [home, other] = current.frames;
+    const audit = (file: string) => ({ ruleId: "spacing-scale", severity: "warning" as const, file,
+      message: "Use a spacing token.", line: 2, column: 1, oid: "hero" });
+    const sourceRow = { ...audit(home!.file), ruleId: "unknown-token", message: "Unknown token." };
+    current.lint = { ...current.lint, violations: [audit(home!.file), audit(other!.file), sourceRow] };
+    designWorkspaceSnapshotCache.setData(workspaceId, current);
+    platformMocks.readNavigation.mockResolvedValue({ ...current,
+      frames: [home!, { ...other!, sourceVersion: "e".repeat(24) }],
+      lint: { ...current.lint, checkedFiles: [], violations: [] },
+      preparation: { revision: "c".repeat(64), epoch: 1, descriptions: [], current: [], errors: {} } });
+    const next = await fetchDesignWorkspaceSnapshot(workspaceId);
+    expect(next.lint.violations).toEqual([audit(home!.file)]);
+  });
+
   it("settles a prepared frame audit without scanning the rest of a lazy catalog", async () => {
     const workspaceId = "ws_lazy_audit";
     const current = snapshot();
