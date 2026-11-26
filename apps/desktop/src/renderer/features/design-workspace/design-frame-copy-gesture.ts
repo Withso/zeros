@@ -12,6 +12,7 @@ import { designWorkspaceSnapshotCache, duplicateDesignFrameCached } from "./stat
 import { captureDesignFrameComponentCopy } from "./state/design-component-variants";
 import { captureDesignPageOwner, designWorkspaceView, isCurrentDesignPageOwner } from "./state/design-workspace-ui";
 import { selectDesignFrame } from "./state/design-selection";
+import { handDesignSelectionPresentation } from "./state/design-selection-handoff";
 import { designBackgroundWork } from "./state/design-background-work";
 import { designRuntimeFrameState } from "./state/design-runtime-store";
 
@@ -246,6 +247,7 @@ export function startDesignFrameCopy(input: {
         const copy = result.snapshot.frames.find(candidate => candidate.file === result.frame.file);
         if (copy && current()) {
           // As with Cmd+D, the copy is the selection the person keeps working on.
+          if (!componentCopy) handDesignSelectionPresentation(workspaceId, { frame: frame.file, nodeId: null }, { frame: copy.file, nodeId: null });
           void selectDesignFrame(workspaceId, copy, { selected: true, reveal: true, owner }).catch(() => {});
           await presentation?.handoff(copy);
         }

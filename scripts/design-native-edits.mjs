@@ -69,7 +69,18 @@ export async function startNativeDesignEditObservation(page) {
       "data-design-source-version", "data-design-source-ready", "data-design-document-ready", "data-design-source-buffer", "data-design-document-buffer"] });
     observation.frameTimer = new PerformanceObserver(list => { for (const entry of list.getEntries()) observation.longFrames.push(entry.duration); });
     observation.frameTimer.observe({ type: "long-animation-frame" });
+    // What the Style panel showed at each display frame: an operation moves it
+    // from its subject to the result without passing through other states.
+    observation.inspector = [];
+    const inspect = () => {
+      if (globalThis.__designEdit !== observation) return;
+      const header = owner.querySelector("[data-design-inspector-header]");
+      const state = header ? `${header.getAttribute("data-design-selection-type") ?? ""}|${header.querySelector("[data-design-inspector-title]")?.textContent ?? ""}|${owner.querySelectorAll("[data-design-style-panel] [data-design-inspector-field]").length}` : "none";
+      if (observation.inspector.at(-1)?.state !== state) observation.inspector.push({ state, at: Math.round(performance.now() - observation.started) });
+      requestAnimationFrame(inspect);
+    };
     globalThis.__designEdit = observation;
+    requestAnimationFrame(inspect);
   });
 }
 
@@ -94,6 +105,7 @@ export async function finishNativeDesignEditObservation(page) {
       selected: { before: observation.selectedBefore, after: observation.selected() },
       blanked: sorted(observation.blanked), swapped: sorted(observation.swapped), restored: sorted(observation.restored), remounted: sorted(observation.remounted), moved: moved.sort(),
       touched: sorted(observation.touched.keys()), longFrames: observation.longFrames, elapsedMs: performance.now() - observation.started,
+      inspector: observation.inspector,
       counters: { before: observation.counters, after: designRendererResources().counters } };
   });
 }
@@ -117,7 +129,7 @@ export function summarizeNativeDesignEdit(raw, { name, subjects = [], visibleMs,
     if (delta) admitted[resource] = delta;
   }
   const longFrames = raw.longFrames ?? [];
-  return { name, added, removed, visibleMs, settledMs, uncoveredPeak, selected: raw.selected,
+  return { name, added, removed, visibleMs, settledMs, uncoveredPeak, selected: raw.selected, inspector: raw.inspector ?? [],
     others: Object.fromEntries(Object.entries(other).map(([kind, files]) => [kind, { count: files.length, frames: files.slice(0, 6) }])),
     admitted, mainThread: { longFrames: longFrames.length, totalMs: Math.round(longFrames.reduce((sum, ms) => sum + ms, 0)),
       maxMs: Math.round(Math.max(0, ...longFrames)) },

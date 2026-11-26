@@ -182,6 +182,7 @@ import {
 } from "./design-layer-tree";
 import { startDesignLayoutDrag } from "./design-layout-drag-gesture";
 import { designFrameCopyGeometry, presentDesignFrameCopy, startDesignFrameCopy } from "./design-frame-copy-gesture";
+import { handDesignSelectionPresentation } from "./state/design-selection-handoff";
 import { DESIGN_REPARENT_HYSTERESIS_PIXELS, designMovementDelta, designNodeMovementStyles, designNudgeStep } from "./design-movement-geometry";
 import { designSelectionMutationTargets } from "./design-selected-targets";
 import {
@@ -2579,7 +2580,12 @@ export const DesignCanvas = React.memo(function DesignCanvas({
         if (duplicate) provisional?.handoff(duplicate, (file) => frameElementsRef.current.get(file));
         else provisional?.retire();
         if (frameActionIntentRef.current !== intent || !isCurrentDesignPageOwner(owner) || designWorkspaceView(workspaceId).selectionEvent !== selected.selectionEvent) return;
-        if (duplicate) void selectDesignFrame(workspaceId, duplicate, { selected: true, reveal: true, owner }).catch(() => {});
+        if (duplicate) {
+          // A main's copy is an instance with its own panel; anything else
+          // shows what the original showed until the copy reads back.
+          if (!componentCopy) handDesignSelectionPresentation(workspaceId, { frame: frame.file, nodeId: null }, { frame: duplicate.file, nodeId: null });
+          void selectDesignFrame(workspaceId, duplicate, { selected: true, reveal: true, owner }).catch(() => {});
+        }
       } catch (error) {
         provisional?.retire();
         toast.error(duplicateMode === "copy" ? "Couldn't copy the frame" : "Couldn't duplicate the frame", { description: errorMessage(error) });
