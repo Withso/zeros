@@ -133,6 +133,7 @@ export class DesignSourceTiles {
   private jobs = new Map<string, Prefetch>();
   private task: AbortController | null = null;
   private timer: ReturnType<typeof setTimeout> | null = null;
+  private fencePoll: number | null = null;
   private uploadFence: WebGLSync | null = null;
   private readonly lost = new Set<() => void>();
   private outputOwner: object | null = null;
@@ -523,7 +524,7 @@ export class DesignSourceTiles {
   }
 
   private schedule() {
-    if (this.task || this.timer !== null || !this.jobs.size) return;
+    if (this.task || this.timer !== null || this.fencePoll !== null || !this.jobs.size) return;
     const work = () => {
       this.task = null; this.timer = null;
       const gl = this.gl;
@@ -536,7 +537,10 @@ export class DesignSourceTiles {
           const status = gl.clientWaitSync(this.uploadFence, 0, 0);
           if (status === gl.TIMEOUT_EXPIRED) {
             this.counts.uploadWaits++;
-            this.timer = setTimeout(work, 1);
+            // Uploads complete with display frames. A 1 ms retry ran hundreds
+            // of tasks per gesture between the camera's own frames; the next
+            // frame only queues the background check again.
+            this.fencePoll = requestAnimationFrame(() => { this.fencePoll = null; this.schedule(); });
             return;
           }
           this.retireUploadFence();
@@ -577,7 +581,8 @@ export class DesignSourceTiles {
     if (owner && this.outputOwner !== owner) return;
     this.jobs.clear(); this.predictedSources.clear(); this.prefetchCapacity = null; this.task?.abort(); this.task = null;
     if (this.timer !== null) clearTimeout(this.timer);
-    this.timer = null;
+    if (this.fencePoll !== null) cancelAnimationFrame(this.fencePoll);
+    this.timer = null; this.fencePoll = null;
     this.retireUploadFence();
   }
   forget(key: string) {
