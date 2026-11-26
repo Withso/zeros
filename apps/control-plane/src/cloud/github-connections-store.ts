@@ -340,7 +340,14 @@ export class CloudGithubConnectionStore {
     scope: CloudGithubConnectionScope,
     expected: string,
     method: CloudGithubMethod,
+    verifyPat: (token: string, githubUserId: string) => Promise<void>,
   ): Promise<void> {
+    if (method === "pat") {
+      const snapshot = await this.read(scope);
+      if (snapshot.generation !== expected) throw changed();
+      const { row, material } = this.selectedCredential(snapshot, undefined, method);
+      await verifyPat(material.accessToken, row.github_user_id);
+    }
     await this.edit(scope, expected, async (tx, value) => {
       if (!value.rows.some((row) => row.method === method)) throw required();
       await this.selection(tx, value.scope, method);
@@ -442,10 +449,10 @@ export class CloudGithubConnectionStore {
       );
     });
   }
-  private selectedCredential(value: Snapshot, deviceAppId?: string) {
+  private selectedCredential(value: Snapshot, deviceAppId?: string, method = value.actor.selected_method) {
     const row = value.rows.find(row => deviceAppId
       ? row.id === deviceAppId && row.method === "github-app"
-      : row.method === value.actor.selected_method);
+      : row.method === method);
     if (!row) throw required();
     try {
       return { row, material: openGithubCredential(

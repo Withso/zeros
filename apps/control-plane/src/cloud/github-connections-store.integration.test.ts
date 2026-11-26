@@ -265,6 +265,16 @@ database("cloud GitHub connection ownership and rotation", () => {
     await expect(reconnected!.assertCurrent()).rejects.toMatchObject({ code: "not_found" });
     await expect(store.selectedIdentity(scope())).rejects.toMatchObject({ code: "not_found" });
   });
+  it("keeps the working App selected when the saved PAT is revoked", async () => {
+    await save();
+    await store.save(scope(), await store.fingerprint(scope()), identity, app);
+    const expected = await store.fingerprint(scope());
+    const verify = vi.fn(async () => { throw new Error("revoked"); });
+    await expect(store.select(scope(), expected, "pat", verify)).rejects.toThrow("revoked");
+    expect(verify).toHaveBeenCalledWith(pat.accessToken, identity.id);
+    expect((await store.status(scope())).selectedMethod).toBe("github-app");
+  });
+
   it("preserves inactive methods while selecting the explicit connection", async () => {
     await store.save(
       scope(),
@@ -274,7 +284,7 @@ database("cloud GitHub connection ownership and rotation", () => {
     );
     await save();
     const status = await store.status(scope());
-    await store.select(scope(), status.generation, "github-app");
+    await store.select(scope(), status.generation, "github-app", vi.fn());
     const access = await store.credential(scope());
     expect(access.material.method).toBe("github-app");
     expect((await store.status(scope())).methods.pat.configured).toBe(true);
@@ -333,11 +343,13 @@ database("cloud GitHub connection ownership and rotation", () => {
       scope(),
       (await store.status(scope())).generation,
       "github-app",
+      vi.fn(),
     );
     await store.select(
       scope(),
       (await store.status(scope())).generation,
       "pat",
+      vi.fn(),
     );
     await expect(access.assertCurrent()).rejects.toMatchObject({
       code: "github_authorization_changed",

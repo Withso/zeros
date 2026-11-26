@@ -286,12 +286,15 @@ export function GitHubSection({
         return;
       }
       setBusyMethod(method);
+      let changedOnMac = false;
       try {
-        if (owner && method !== "gh-cli" && shared.read.data?.selectedMethod !== method)
-          await shared.change({ action: "select", method });
-        if (snapshot.selectedMethod === method) return;
+        const changeCloud = owner && method !== "gh-cli" && shared.read.data?.selectedMethod !== method;
+        if (snapshot.selectedMethod === method && !changeCloud) return;
         const next = await ghMethodSelect(method, accountId);
         ghAuthStatusCache.setData(authKey, next);
+        changedOnMac = snapshot.selectedMethod !== method;
+        if (changeCloud)
+          await shared.change({ action: "select", method });
         setSetupMethod(null);
         trackGithubMethodSelected({
           method,
@@ -299,7 +302,7 @@ export function GitHubSection({
           hadOtherCredential: hasOtherCredential(snapshot, method),
         });
       } catch (error) {
-        toast.error(`Couldn’t use ${githubMethodLabel(method)}`, {
+        toast.error(changedOnMac ? "Selected on this Mac. Cloud selection failed." : `Couldn’t use ${githubMethodLabel(method)}`, {
           description: errorMessage(error),
         });
       } finally {

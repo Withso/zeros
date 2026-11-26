@@ -66,7 +66,7 @@ export function createCloudGithubConnectionRoutes(
           await service.connectPat(scope, input.expected, input.token);
           break;
         case "select":
-          await service.store.select(scope, input.expected, input.method);
+          await service.select(scope, input.expected, input.method);
           break;
         case "disconnect":
           await service.store.disconnect(scope, input.expected, input.method);

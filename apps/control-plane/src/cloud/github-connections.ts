@@ -25,6 +25,7 @@ import {
 import {
   CloudGithubCredentialSchema,
   type CloudGithubCredential,
+  type CloudGithubMethod,
 } from "./github-credential-envelope.js";
 
 const changed = () =>
@@ -240,6 +241,13 @@ export class CloudGithubConnections {
     if (identity.id !== credential.identity.id) throw changed();
     return identity;
   }
+  select(scope: CloudGithubConnectionScope, expected: string, method: CloudGithubMethod) {
+    return this.store.select(scope, expected, method, async (token, id) => {
+      const account = await this.identity(token, () => this.store.assertCurrent(scope, expected));
+      if (account.id !== id) throw changed();
+    });
+  }
+
   async connectPat(
     scope: CloudGithubConnectionScope,
     expected: string,
