@@ -143,3 +143,40 @@ export function useDesignLayoutToolsLive(
     () => undefined,
   );
 }
+
+const emphases = new Map<string, { owner: object; properties: readonly string[] }>();
+const emphasisListeners = new Map<string, Set<() => void>>();
+
+/** The spaces a Style panel field edits, while it is hovered or focused: the
+ * canvas shows them as hovering them there would. One owner per layer; only
+ * that owner clears it. */
+export function emphasizeDesignLayoutTools(key: string, owner: object, properties: readonly string[] | null): void {
+  const current = emphases.get(key);
+  if (properties?.length) emphases.set(key, { owner, properties });
+  else if (current?.owner === owner) emphases.delete(key);
+  else return;
+  for (const listener of emphasisListeners.get(key) ?? []) listener();
+}
+
+export function useDesignLayoutToolsEmphasis(key: string): readonly string[] | undefined {
+  const subscribe = useCallback(
+    (listener: () => void) => {
+      let owners = emphasisListeners.get(key);
+      if (!owners) {
+        owners = new Set();
+        emphasisListeners.set(key, owners);
+      }
+      owners.add(listener);
+      return () => {
+        owners!.delete(listener);
+        if (owners!.size === 0) emphasisListeners.delete(key);
+      };
+    },
+    [key],
+  );
+  return useSyncExternalStore(
+    subscribe,
+    () => emphases.get(key)?.properties,
+    () => undefined,
+  );
+}

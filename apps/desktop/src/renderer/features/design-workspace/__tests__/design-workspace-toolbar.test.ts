@@ -127,7 +127,8 @@ describe("design workspace inspector toolbar", () => {
     expect(source).toContain("const styleTargetNodeId =");
     expect(source).toContain("const explicitFrameIdentityNodeId");
     expect(source).toContain("explicitFrameIdentityNodeId");
-    expect(source).toContain("nodeId: styleTargetNodeId");
+    expect(source).toContain("const presentedTargetNodeId = styleTargetNodeId ??");
+    expect(source).toContain("nodeId: presentedTargetNodeId");
     expect(source).toContain("frameStyleTarget");
   });
 

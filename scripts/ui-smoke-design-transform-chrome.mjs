@@ -155,6 +155,41 @@ export async function runDesignFrameResizeLayoutToolsSmoke({ page, check }) {
     tickSizes.length === 4 && tickSizes.every((size) => size === "14×4"),
     JSON.stringify(tickSizes),
   );
+  // Pointing at a padding or gap field in the Style panel shows that space on
+  // the canvas, as hovering it there would; leaving or blurring clears it.
+  const layout = page.locator("[data-design-layout-section]");
+  const activeSpaces = () =>
+    page.evaluate(() =>
+      [...document.querySelectorAll('[data-design-frame="home.html"] [data-design-frame-layout-owner] [data-active]')]
+        .map((node) => node.getAttribute("data-design-inline-padding-control") ?? node.getAttribute("data-design-inline-spacing"))
+        .sort()
+        .join(" "));
+  await expect.poll(activeSpaces).toBe("");
+  await layout.getByLabel("Horizontal", { exact: true }).hover();
+  await expect.poll(activeSpaces).toBe("padding-left padding-right");
+  const hovered = await activeSpaces();
+  await page.mouse.move(1000, 760);
+  await expect.poll(activeSpaces).toBe("");
+  const left = await activeSpaces();
+  await layout.getByLabel("Vertical", { exact: true }).focus();
+  await expect.poll(activeSpaces).toBe("padding-bottom padding-top");
+  const focused = await activeSpaces();
+  await layout.getByLabel("Vertical", { exact: true }).blur();
+  await expect.poll(activeSpaces).toBe("");
+  let gap = "no gap";
+  if (await frame.locator("[data-design-frame-layout-owner] [data-design-inline-gap-region]").count()) {
+    await layout.getByLabel("Gap", { exact: true }).hover();
+    await expect.poll(activeSpaces).not.toBe("");
+    gap = await activeSpaces();
+    await page.mouse.move(1000, 760);
+    await expect.poll(activeSpaces).toBe("");
+  }
+  check(
+    "a padding or gap field in the Style panel shows its space on the canvas while pointed at",
+    hovered === "padding-left padding-right" && left === "" && focused === "padding-bottom padding-top" &&
+      (gap === "no gap" || gap.split(" ").every((space) => space === "row-gap" || space === "column-gap")),
+    JSON.stringify({ hovered, left, focused, gap }),
+  );
   const ticksInside = () =>
     page.evaluate(() => {
       const article = document.querySelector('[data-design-frame="home.html"]');

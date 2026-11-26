@@ -213,6 +213,8 @@ import {
 } from "./state/design-live-preview";
 import { useShallow } from "zustand/react/shallow";
 import { useDesignRuntimeStore } from "./state/design-runtime-store";
+import { designHandedSelectionPresentation, useDesignSelectionHandoff, type DesignSelectionSubject } from "./state/design-selection-handoff";
+import { designLayoutToolsKey, emphasizeDesignLayoutTools } from "./state/design-layout-tools-live";
 import { DesignGesturePreview } from "./state/design-gesture-preview";
 import {
   beginDesignHistorySelection,
@@ -1397,6 +1399,26 @@ const InspectorStyleField = React.memo(function InspectorStyleField({
     () => (details && !options?.geometry && !options?.percentage ? designLengthBasis(details, property, displayedValue) : undefined),
     [details, displayedValue, options?.geometry, options?.percentage, property],
   );
+  // As in a design tool, pointing at a padding or gap field shows that space
+  // on the canvas; the field's own state is untouched.
+  const linkedKey = options?.linkedProperties?.join(" ") ?? "";
+  const spaces = useMemo(
+    () => [property, ...(linkedKey ? linkedKey.split(" ") : [])].filter((name) =>
+      name.startsWith("padding-") || name === "row-gap" || name === "column-gap"),
+    [linkedKey, property],
+  );
+  const emphasisKey = designLayoutToolsKey(workspaceId, frame, nodeId);
+  const [emphasisOwner] = useState(() => ({}));
+  const pointedRef = useRef({ hovered: false, focused: false });
+  const point = (change: Partial<{ hovered: boolean; focused: boolean }>) => {
+    Object.assign(pointedRef.current, change);
+    const { hovered, focused } = pointedRef.current;
+    emphasizeDesignLayoutTools(emphasisKey, emphasisOwner, active && (hovered || focused) ? spaces : null);
+  };
+  useEffect(() => () => emphasizeDesignLayoutTools(emphasisKey, emphasisOwner, null), [emphasisKey, emphasisOwner]);
+  useEffect(() => {
+    if (!active) emphasizeDesignLayoutTools(emphasisKey, emphasisOwner, null);
+  }, [active, emphasisKey, emphasisOwner]);
   const mixedSteps = options?.mixed && selection && selection.length > 1
     ? designMixedSteps({
         property,
@@ -1420,7 +1442,7 @@ const InspectorStyleField = React.memo(function InspectorStyleField({
           ),
       })
     : undefined;
-  return (
+  const field = (
     <InspectorEditField
       label={label}
       value={displayedValue}
@@ -1480,6 +1502,20 @@ const InspectorStyleField = React.memo(function InspectorStyleField({
       emptyCommits={Boolean(options?.geometry) && property !== "width" && property !== "height"}
       mixedSteps={mixedSteps}
     />
+  );
+  if (!spaces.length) return field;
+  return (
+    <div
+      className="contents"
+      onPointerEnter={() => point({ hovered: true })}
+      onPointerLeave={() => point({ hovered: false })}
+      onFocus={() => point({ focused: true })}
+      onBlur={(event) => {
+        if (!event.currentTarget.contains(event.relatedTarget as Node | null)) point({ focused: false });
+      }}
+    >
+      {field}
+    </div>
   );
 }, sameInspectorStyleFieldProps);
 
@@ -1840,8 +1876,6 @@ export const DesignInspector = React.memo(function DesignInspector({
     layoutRootId,
     details,
   });
-  const frameStyleTarget =
-    frameSelected && !selectedNodeId && styleTargetNodeId !== null;
   const elementDetails = styleTargetNodeId && details?.oid === styleTargetNodeId && currentReadback(details.sourceVersion)
     ? details
     : null;
@@ -2164,9 +2198,23 @@ export const DesignInspector = React.memo(function DesignInspector({
   if (confirmedStyleDetailsRef.current?.owner !== styleOwnerKey) confirmedStyleDetailsRef.current = null;
   if (elementDetails) confirmedStyleDetailsRef.current = { owner: styleOwnerKey, details: elementDetails };
   // Revalidation retains presentation only; edit contexts still require exact-source details.
-  const presentedElementDetails = elementDetails ?? confirmedStyleDetailsRef.current?.details ?? null;
+  // A copy or a moved layer is the layer it was made from until it reads
+  // back: the panel keeps that layer's values instead of emptying. Shown only;
+  // edits wait for the target's own details.
+  const shownSubjectRef = useRef<(DesignSelectionSubject & { details: DesignRuntimeNodeDetails; parents: DesignRuntimeNodeDetails[] }) | null>(null);
+  const selectionHandoff = useDesignSelectionHandoff(workspaceId);
+  const selectionSubject: DesignSelectionSubject | null = frame && selectedNodeIds.length <= 1 && (frameSelected || selectedNodeId)
+    ? { frame: frame.file, nodeId: frameSelected && !selectedNodeId ? null : selectedNodeId }
+    : null;
+  const handed = !elementDetails && !confirmedStyleDetailsRef.current
+    ? designHandedSelectionPresentation(shownSubjectRef.current, selectionHandoff, selectionSubject)
+    : null;
+  const presentedElementDetails = elementDetails ?? confirmedStyleDetailsRef.current?.details ?? handed?.details ?? null;
+  const presentedTargetNodeId = styleTargetNodeId ?? (handed ? handed.details.oid : null);
+  const frameStyleTarget =
+    frameSelected && !selectedNodeId && presentedTargetNodeId !== null;
   const layoutParents = useMemo(
-    () =>
+    () => handed ? handed.parents :
       styleNodeIds.flatMap((nodeId, index) => {
         const node =
           nodeId === presentedElementDetails?.oid
@@ -2176,8 +2224,12 @@ export const DesignInspector = React.memo(function DesignInspector({
           ? [node]
           : [];
       }),
-    [presentedElementDetails, styleNodeDetails, styleNodeIds],
+    [handed, presentedElementDetails, styleNodeDetails, styleNodeIds],
   );
+  if (elementDetails && selectionSubject && styleNodeIds.length === 1 && layoutParents.length === 1)
+    shownSubjectRef.current = { ...selectionSubject, details: elementDetails, parents: layoutParents };
+  /** Layers the panel shows: a handed-over subject's while its target reads back. */
+  const presentedNodeCount = handed ? handed.parents.length : styleNodeIds.length;
   // A main component showing one of its states: style edits write that
   // state's rule in the main, not the layers' own style.
   const shownState = useDesignShownComponentState(workspaceId ?? "", frame ?? null);
@@ -2188,7 +2240,7 @@ export const DesignInspector = React.memo(function DesignInspector({
   });
   const styleEditContextRef = useRef({
     active: active && Boolean(elementDetails),
-    editable: !editsDisabled && Boolean(presentedElementDetails),
+    editable: !editsDisabled && Boolean(presentedElementDetails) && !handed,
     pageId: activePageId ?? null,
     directoryKey: styleDirectoryKey,
     workspaceId,
@@ -2202,7 +2254,7 @@ export const DesignInspector = React.memo(function DesignInspector({
   });
   styleEditContextRef.current = {
     active: active && Boolean(elementDetails),
-    editable: !editsDisabled && Boolean(presentedElementDetails),
+    editable: !editsDisabled && Boolean(presentedElementDetails) && !handed,
     pageId: activePageId ?? null,
     directoryKey: styleDirectoryKey,
     workspaceId,
@@ -3307,8 +3359,8 @@ export const DesignInspector = React.memo(function DesignInspector({
   useLayoutEffect(() => { layoutShortcutRef.current = commitLayoutAction; }, [commitLayoutAction]);
 
   const styleContext =
-    workspaceId && folder && frame && styleTargetNodeId && presentedElementDetails
-      ? { workspaceId, folder, frame, nodeId: styleTargetNodeId }
+    workspaceId && folder && frame && presentedTargetNodeId && presentedElementDetails
+      ? { workspaceId, folder, frame, nodeId: presentedTargetNodeId }
       : null;
   const styleField = (
     label: string,
@@ -3490,7 +3542,7 @@ export const DesignInspector = React.memo(function DesignInspector({
     // when every selected layer names one token.
     const mixed =
       options?.mixed ||
-      designFieldMixed(shownParents, styleNodeIds.length, property, {
+      designFieldMixed(shownParents, presentedNodeCount, property, {
         geometry: options?.geometry,
         whole: options?.whole,
         linkedProperties: options?.linkedProperties,
@@ -3499,7 +3551,7 @@ export const DesignInspector = React.memo(function DesignInspector({
         shownParents.map(
           (node) => designStyleTokenDisplay(node, property, styleOriginLabel)?.name ?? "",
         ),
-        styleNodeIds.length,
+        presentedNodeCount,
       );
     return (
       <InspectorStyleField
@@ -3538,11 +3590,12 @@ export const DesignInspector = React.memo(function DesignInspector({
     );
   };
 
+  const namedDetails = elementDetails ?? handed?.details ?? null;
   const selectionName =
     styleNodeIds.length > 1
       ? `${styleNodeIds.length} layers`
-      : elementDetails
-        ? designRuntimeLayerLabel(elementDetails)
+      : namedDetails
+        ? designRuntimeLayerLabel(namedDetails)
         : frameSelected && frame
           ? designFrameLayerLabel(frame.kind)
           : selectedNodeId
@@ -3560,8 +3613,8 @@ export const DesignInspector = React.memo(function DesignInspector({
         ? designFrameDisplayName(frame)
         : selectedNode && selectedNodeId && selectedNode.oid === selectedNodeId
           ? designRuntimeLayerDisplayName(selectedNode)
-          : elementDetails
-            ? designRuntimeLayerDisplayName(elementDetails)
+          : namedDetails
+            ? designRuntimeLayerDisplayName(namedDetails)
             : null;
   // A frame whose file declares options is a component: its Controls section
   // mounts only while the frame itself is selected and the panel is shown.
@@ -3921,7 +3974,7 @@ export const DesignInspector = React.memo(function DesignInspector({
                     frameStyleTarget || details.oid === layoutRootId
                   }
                   layoutParents={shownParents}
-                  selectionCount={styleNodeIds.length}
+                  selectionCount={presentedNodeCount}
                   active={active && styleActive}
                   disabled={styleEditsDisabled || !styleActive}
                   onPreviewStyles={previewSelectedStyles}

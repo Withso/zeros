@@ -14,6 +14,7 @@ import {
 } from "./state/design-workspace-cache";
 import type { DesignComponentCopy } from "@zeros/protocol/design-relocation";
 import { selectDesignFrame, selectDesignNode } from "./state/design-selection";
+import { handDesignSelectionPresentation } from "./state/design-selection-handoff";
 import { designFrameViews, isPreparedDesignFrame, type DesignFrameView } from "./state/design-frame-view";
 import { designLayoutDrop } from "./design-layout-drag";
 import {
@@ -372,6 +373,14 @@ export async function transferDesignLayerOnCanvas(input: {
       current.frameSelected !== initialSelection.frameSelected
     )
       return;
+    // The moved layer is still the one the panel shows until it reads back
+    // in its new place; a main's copy is an instance with its own panel.
+    if (initialSelection.selectedFrame && !input.componentCopy)
+      handDesignSelectionPresentation(
+        workspaceId,
+        { frame: initialSelection.selectedFrame, nodeId: initialSelection.frameSelected && !initialSelection.selectedNodeId ? null : initialSelection.selectedNodeId },
+        { frame: reply.frame, nodeId: destination ? reply.nodeId : null },
+      );
     useDesignWorkspaceUiStore
       .getState()
       .setSelection(

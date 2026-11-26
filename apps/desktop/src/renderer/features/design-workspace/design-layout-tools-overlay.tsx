@@ -24,6 +24,7 @@ import {
 } from "./design-layout-tools";
 import {
   settleDesignLayoutToolsLive,
+  useDesignLayoutToolsEmphasis,
   useDesignLayoutToolsLive,
   type DesignLayoutToolsLiveChild,
 } from "./state/design-layout-tools-live";
@@ -196,6 +197,7 @@ export const DesignLayoutTools = React.memo(function DesignLayoutTools({
   onSpacingCommit,
 }: DesignLayoutToolsProps) {
   const live = useDesignLayoutToolsLive(ownerKey);
+  const emphasis = useDesignLayoutToolsEmphasis(ownerKey);
   // Confirmed details supersede any unpinned measurement taken before them.
   useEffect(() => {
     settleDesignLayoutToolsLive(ownerKey);
@@ -262,7 +264,9 @@ export const DesignLayoutTools = React.memo(function DesignLayoutTools({
     height: frame.height,
     zoom,
   });
-  if (!model || (!fits && !interaction && !entry)) return null;
+  // A Style panel field's spaces, while nothing on the canvas owns one.
+  const emphasized = new Set<string>(interaction || entry ? [] : (emphasis ?? []));
+  if (!model || (!fits && !interaction && !entry && emphasized.size === 0)) return null;
 
   const active = interaction?.active ?? entry?.key ?? hovered;
   const mirrored = new Set<string>(
@@ -431,7 +435,7 @@ export const DesignLayoutTools = React.memo(function DesignLayoutTools({
     const placed = paddingTicks.get(band.property);
     if (!placed) continue;
     const owned =
-      interaction?.active === band.property || entry?.key === band.property;
+      interaction?.active === band.property || entry?.key === band.property || emphasized.has(band.property);
     if (
       owned ||
       (coveredFraction(placed.target) <= 0.5 &&
@@ -659,7 +663,7 @@ export const DesignLayoutTools = React.memo(function DesignLayoutTools({
     <span
       data-design-inline-spacing-root=""
       data-design-layout-tools-key={ownerKey}
-      data-design-spacing-active={active ?? undefined}
+      data-design-spacing-active={active ?? (emphasized.size ? [...emphasized].join(" ") : undefined)}
       data-design-spacing-dragging={interaction ? "" : undefined}
       className="zd-design-layout-tools pointer-events-none absolute inset-0"
     >
@@ -678,7 +682,7 @@ export const DesignLayoutTools = React.memo(function DesignLayoutTools({
         const { tick } = placed;
         const control = bandControl(band);
         const bandActive =
-          active === band.property || mirrored.has(band.property);
+          active === band.property || mirrored.has(band.property) || emphasized.has(band.property);
         const value = liveValues[band.property] ?? band.value;
         const cursor = designLocalAxisCursor(band.axis, rotation);
         return (
@@ -848,8 +852,9 @@ export const DesignLayoutTools = React.memo(function DesignLayoutTools({
       {model.gaps.map((gap) => {
         const control = gapControl(gap);
         const primary = activeGapKey === gap.key;
-        const propertyActive =
-          interaction !== undefined && interaction.property === gap.property;
+        const propertyActive = interaction !== undefined
+          ? interaction.property === gap.property
+          : emphasized.has(gap.property);
         const value = liveValues[gap.key] ?? gap.value;
         const automatic = gap.automatic && liveValues[gap.key] === undefined;
         const tick = gapTicks.get(gap.key)!;

@@ -24,6 +24,30 @@ const settled = page => page.waitForFunction(id => !window.__zerosHarnessDesignS
 const hold = page => page.evaluate(() => window.__zerosHarnessDesignSurface.measurement.hold("design.transaction.apply"));
 const release = page => page.evaluate(() => window.__zerosHarnessDesignSurface.measurement.release("design.transaction.apply"));
 const selection = page => page.evaluate(id => window.__zerosHarnessDesignSurface.ui.getState().byWorkspace[id].selectedNodeId, workspaceId);
+/** The Style panel at every display frame: an edit that selects what it made
+ * hands the panel over without an empty, Page or Nothing selected state. */
+const sampleInspector = page => page.evaluate(() => {
+  const samples = [];
+  const tick = () => {
+    const header = document.querySelector("[data-design-inspector-header]");
+    samples.push({ type: header?.getAttribute("data-design-selection-type") ?? null,
+      title: header?.querySelector("[data-design-inspector-title]")?.textContent ?? null,
+      fields: document.querySelectorAll("[data-design-style-panel] [data-design-inspector-field]").length });
+    window.__zerosInspectorSampler = requestAnimationFrame(tick);
+  };
+  window.__zerosInspectorSamples = samples;
+  window.__zerosInspectorSampler = requestAnimationFrame(tick);
+});
+const inspectorSamples = page => page.evaluate(() => { cancelAnimationFrame(window.__zerosInspectorSampler); return window.__zerosInspectorSamples; });
+const fieldCount = page => page.locator("[data-design-style-panel] [data-design-inspector-field]").count();
+const inspectorGaps = samples => {
+  const floor = Math.min(samples[0]?.fields ?? 0, samples.at(-1)?.fields ?? 0);
+  return samples.filter(sample => sample.type === "Page" || sample.type === "Nothing selected" || sample.fields < floor);
+};
+const inspectorSequence = samples => samples.reduce((sequence, { type, title, fields }) => {
+  const key = `${type}|${title}|${fields}`;
+  return sequence.at(-1) === key ? sequence : [...sequence, key];
+}, []);
 const copies = frame => frame.locator('[data-oid^="home-hero-copy-"]').filter({ has: frame.locator('[data-oid$="-home-heading"]') });
 
 /** Held source writes exercise real shortcuts and pointer handling. These are
@@ -353,6 +377,8 @@ async function runDesignCopyChecks({ page, check }) {
     window.__zerosFrameCopySamples = samples;
     window.__zerosFrameCopySampler = requestAnimationFrame(tick);
   });
+  const sourceFields = await fieldCount(page);
+  await sampleInspector(page);
   await viewport.focus();
   await page.keyboard.press("Control+d");
   await page.waitForFunction(() => window.__zerosHarnessDesignSurface.measurement.requests.some(request => request.op === "design.frame.duplicate" && request.released === null));
@@ -382,6 +408,12 @@ async function runDesignCopyChecks({ page, check }) {
   const sameBox = Boolean(lastPreview && firstCopy) && ["x", "y", "width", "height"].every(key => Math.abs(lastPreview[key] - firstCopy[key]) <= 1);
   check("the provisional copy hands off to the saved frame without a gap or a jump", gaps === 0 && sameBox,
     JSON.stringify({ gaps, lastPreview, firstCopy }));
+  await expect.poll(() => page.evaluate(id => window.__zerosHarnessDesignSurface.ui.getState().byWorkspace[id].selectedFrame, workspaceId)).toBe("copy-1.html");
+  await expect.poll(() => fieldCount(page)).toBe(sourceFields);
+  await page.waitForTimeout(150);
+  const copyPanel = await inspectorSamples(page);
+  check("a keyboard frame copy hands the Style panel to the copy without emptying it", inspectorGaps(copyPanel).length === 0,
+    JSON.stringify(inspectorSequence(copyPanel)));
   await viewport.focus();
   await page.keyboard.press("Control+z");
   await expect(page.locator('[data-design-frame="copy-1.html"]')).toHaveCount(0);
@@ -429,4 +461,27 @@ async function runDesignCopyChecks({ page, check }) {
   await settled(page);
   await expect(page.locator("[data-design-frame-copy-preview]")).toHaveCount(0);
   check("leaving the page retires a pending keyboard frame copy's pixels", true);
+
+  // A layer moved into another frame stays the selection the panel shows:
+  // its values carry over until the destination reads it back.
+  frame = await load(page, "home-heading");
+  await page.evaluate(() => window.__zerosHarnessDesignSurface.ui.getState().setViewport("ws_design_harness", { zoom: 0.25, panX: 80, panY: 140 }));
+  const layer = await designFrameElementBox(page.locator(displayed), frame.locator('[data-oid="home-heading"]'));
+  const into = await page.locator('[data-design-frame="pricing.html"]').boundingBox();
+  await page.mouse.move(layer.x + layer.width / 2, layer.y + layer.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(into.x + into.width / 2, into.y + into.height / 3, { steps: 16 });
+  await sampleInspector(page);
+  await page.mouse.up();
+  await expect.poll(() => page.evaluate(id => window.__zerosHarnessDesignSurface.ui.getState().byWorkspace[id].selectedFrame, workspaceId)).toBe("pricing.html");
+  await settled(page);
+  await expect.poll(() => page.locator('[data-design-inspector-header]').getAttribute("data-design-selection-type")).not.toBe("Nothing selected");
+  await expect.poll(() => fieldCount(page)).toBeGreaterThan(0);
+  await page.waitForTimeout(150);
+  const movePanel = await inspectorSamples(page);
+  check("a layer moved into another frame keeps its Style panel through the move", inspectorGaps(movePanel).length === 0,
+    JSON.stringify(inspectorSequence(movePanel)));
+  await viewport.focus();
+  await page.keyboard.press("Control+z");
+  await settled(page);
 }
