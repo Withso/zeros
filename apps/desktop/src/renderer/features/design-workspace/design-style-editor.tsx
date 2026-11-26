@@ -7,7 +7,7 @@
 // USED IN: DesignInspector for the exact selected data-oid
 // ============================================
 
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import { Blend, Diamond, Minus, Plus } from "lucide-react";
 
 import type { DesignRuntimeNodeDetails } from "@zeros/protocol/design-runtime";
@@ -23,7 +23,7 @@ import {
   toast,
 } from "../../shared/ui/primitives";
 import { cn } from "../../shared/ui/cn";
-import { DesignColorField } from "./design-color-picker";
+import { DesignColorField, requestDesignPaintPicker } from "./design-color-picker";
 import {
   DesignEffectsSection,
   DesignTransformSection,
@@ -283,12 +283,19 @@ export function DesignStyleEditor({
 
   const fillProperty = textLayer ? "color" : "background-color";
   const fillToken = useDesignStyleToken(details, fillProperty);
-  const fillColor = styleValue(
+  const confirmedFillColor = styleValue(
     details,
     fillProperty,
     textLayer ? "currentColor" : "transparent",
   );
   const fillImage = styleValue(details, "background-image", "none");
+  // An added fill is a row at once, as in Figma, while its save lands.
+  const [addedFill, setAddedFill] = useState<string | null>(null);
+  const fillAdding = !textLayer && addedFill === details.oid && designFillIsEmpty(confirmedFillColor, fillImage);
+  useEffect(() => {
+    if (addedFill && (addedFill !== details.oid || !designFillIsEmpty(confirmedFillColor, fillImage))) setAddedFill(null);
+  }, [addedFill, confirmedFillColor, details.oid, fillImage]);
+  const fillColor = fillAdding ? NEW_FILL_COLOR : confirmedFillColor;
   const selection = layoutParents ?? [details];
   const fillMixed = designStyleMixed(
     selection,
@@ -299,6 +306,7 @@ export function DesignStyleEditor({
   // stays open); only an unauthored, fully transparent background is empty.
   // Differing fills are one Mixed row, even when the first layer has none.
   const fillEmpty =
+    !fillAdding &&
     !textLayer &&
     !fillMixed &&
     designFillIsEmpty(fillColor, fillImage) &&
@@ -565,15 +573,19 @@ export function DesignStyleEditor({
               <InspectorIconButton
                 label="Add fill"
                 disabled={disabled}
-                onClick={() =>
-                  commit(
+                onClick={() => {
+                  if (!textLayer) {
+                    requestDesignPaintPicker("background-color");
+                    setAddedFill(details.oid);
+                  }
+                  void commit(
                     {
                       "background-color": NEW_FILL_COLOR,
                       "background-image": "none",
                     },
                     "fill",
-                  )
-                }
+                  ).catch(() => setAddedFill(null));
+                }}
               >
                 <Plus />
               </InspectorIconButton>

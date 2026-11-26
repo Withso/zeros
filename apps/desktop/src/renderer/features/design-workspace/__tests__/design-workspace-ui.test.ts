@@ -24,6 +24,15 @@ describe("design workspace UI memory", () => {
     vi.restoreAllMocks();
   });
 
+  it("does not count the first frame admitted on an empty page as a competing selection", () => {
+    const page = { id: "page", title: "Page", folder: "page", frameFiles: [] };
+    bindDesignWorkspacePages("ws", "directory", [page]);
+    const before = designWorkspaceView("ws");
+    bindDesignWorkspacePages("ws", "directory", [{ ...page, frameFiles: ["page/frame.html"] }]);
+    expect(designWorkspaceView("ws").selectedFrame).toBe("page/frame.html");
+    expect(designSelectionUnchangedSince("ws", before)).toBe(true);
+  });
+
   it("treats any explicit selection made since a snapshot as a newer choice, even back to the same target", () => {
     // A deferred automatic selection (a newly created frame) must not override
     // what the person chose meanwhile, including choosing the same layer again.

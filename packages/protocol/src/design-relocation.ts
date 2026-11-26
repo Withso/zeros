@@ -131,8 +131,16 @@ function relocationPose([a, b, c, d]: DesignRelocation["matrix"]): string {
     : `matrix(${[a, b, c, d, 0, 0].join(",")})`;
 }
 
+export function designIntrinsicPlacementStyles(size?: { width?: string | null; height?: string | null }): Record<string, string> {
+  const styles: Record<string, string> = {};
+  if (size?.width && ["auto", "min-content", "max-content", "fit-content"].includes(size.width)) styles.width = size.width;
+  if (size?.height && ["auto", "min-content", "max-content", "fit-content"].includes(size.height)) styles.height = size.height;
+  return styles;
+}
+
 export function designRelocationStyles(
   relocation: DesignRelocation,
+  sizing?: Readonly<Record<string, string | null | undefined>>,
 ): Record<string, string> {
   const styles = {
     ...relocation.inheritedStyles,
@@ -141,6 +149,7 @@ export function designRelocationStyles(
     top: relocationPixels(relocation.matrix[5]),
     width: `${relocation.width}px`,
     height: `${relocation.height}px`,
+    ...designIntrinsicPlacementStyles(sizing),
     transform: relocationPose(relocation.matrix),
   };
   if (Object.keys(styles).length > DESIGN_RELOCATION_MAX_STYLES)
@@ -172,6 +181,7 @@ export function designRelocationFlowStyles(
     margin: "0",
     width: `${relocation.width}px`,
     height: `${relocation.height}px`,
+    ...designIntrinsicPlacementStyles(flow),
     "box-sizing": "border-box",
     "min-width": "0",
     "min-height": "0",

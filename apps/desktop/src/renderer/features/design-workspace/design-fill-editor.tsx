@@ -13,6 +13,7 @@ import {
   DesignColorPreviewScope,
   DesignColorValueInputs,
   DesignColorSwatch,
+  useDesignPaintPickerRequest,
   type DesignColorPanelHandle,
 } from "./design-color-picker";
 import {
@@ -248,6 +249,10 @@ function DesignFillPopover({
   const escapedRef = useRef(false);
   const skipBlurCommitRef = useRef(false);
   const { step: historyStep, revision: historyRevision } = useDesignHistoryHandBack();
+  useDesignPaintPickerRequest("background-color", () => {
+    historyStep.drop();
+    setOpen(true);
+  });
 
   const reset = () => {
     const nextType = classifyDesignFill(image);

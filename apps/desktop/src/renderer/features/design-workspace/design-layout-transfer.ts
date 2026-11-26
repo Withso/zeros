@@ -157,8 +157,10 @@ export async function transferDesignLayerOnCanvas(input: {
   pointer?: { x: number; y: number };
   /** The destination the gesture already highlighted, kept at release. */
   destination?: DesignFrameView;
+  pasteParentId?: string;
 }): Promise<boolean> {
-  const { workspaceId, folder, frame, origin } = input;
+  const { workspaceId, folder, frame } = input;
+  let origin = input.origin;
   const details = input.statePreview && input.componentCopy && input.details.relocationContext
     ? {
         ...input.details,
@@ -175,7 +177,7 @@ export async function transferDesignLayerOnCanvas(input: {
     designWorkspaceView(workspaceId).selectionEvent ===
       initialSelection.selectionEvent &&
     input.isCurrent?.() !== false;
-  const center = input.pointer ?? {
+  let center = input.pointer ?? {
     x: origin.x + details.rect.width / 2,
     y: origin.y + details.rect.height / 2,
   };
@@ -229,14 +231,29 @@ export async function transferDesignLayerOnCanvas(input: {
   if (!destinationIsCurrent()) throw stillLoading();
   // The moving layer is not in the destination's tree; its id must not
   // match one there (every frame's body shares the body id).
+  const pasteParent = input.pasteParentId ? targets.find(target => target.oid === input.pasteParentId) : undefined;
+  if (input.pasteParentId) {
+    if (!destination || !pasteParent || !input.duplicateNodeId) throw new Error("The paste destination is unavailable.");
+    // As in Figma: the copy keeps its place inside its parent when the
+    // destination has room for it there, and centers otherwise.
+    const at = details.layout && Number.isFinite(details.layout.x) && Number.isFinite(details.layout.y) &&
+      details.layout.x >= 0 && details.layout.y >= 0 &&
+      details.layout.x + details.rect.width <= pasteParent.rect.width &&
+      details.layout.y + details.rect.height <= pasteParent.rect.height
+      ? { x: details.layout.x, y: details.layout.y }
+      : { x: (pasteParent.rect.width - details.rect.width) / 2, y: (pasteParent.rect.height - details.rect.height) / 2 };
+    origin = { x: destination.x + pasteParent.rect.x + at.x, y: destination.y + pasteParent.rect.y + at.y };
+    center = { x: origin.x + details.rect.width / 2, y: origin.y + details.rect.height / 2 };
+  }
   const drop = destination
     ? designLayoutDrop(
         { ...details, oid: "\u0000moving-layer", layout: undefined },
-        targets,
+        pasteParent ? [pasteParent] : targets,
         { x: center.x - destination.x, y: center.y - destination.y },
         { x: origin.x - destination.x, y: origin.y - destination.y },
       )
     : null;
+  if (input.pasteParentId && drop?.parentId !== input.pasteParentId) throw new Error("Select a frame or container as the paste destination.");
   if (destination && !drop) return false;
   const sourceRuntime = designFrameRuntime(workspaceId, frame.file);
   if (input.requireRelocation && !details.relocationContext)
@@ -296,7 +313,7 @@ export async function transferDesignLayerOnCanvas(input: {
     destinationParent.styles.position === "static"
       ? { position: "relative" as const }
       : undefined;
-  if (relocation && sourceRuntime?.sourceVersion !== details.sourceVersion)
+  if (relocation && !(input.pasteParentId && !sourceRuntime) && sourceRuntime?.sourceVersion !== details.sourceVersion)
     throw new Error("The source frame changed before the layer move.");
   const transfer: Parameters<typeof transferDesignNodeCached>[1] = {
     frame: frame.file,
@@ -375,7 +392,7 @@ export async function transferDesignLayerOnCanvas(input: {
       return;
     // The moved layer is still the one the panel shows until it reads back
     // in its new place; a main's copy is an instance with its own panel.
-    if (initialSelection.selectedFrame && !input.componentCopy)
+    if (initialSelection.selectedFrame && !input.componentCopy && !input.pasteParentId)
       handDesignSelectionPresentation(
         workspaceId,
         { frame: initialSelection.selectedFrame, nodeId: initialSelection.frameSelected && !initialSelection.selectedNodeId ? null : initialSelection.selectedNodeId },

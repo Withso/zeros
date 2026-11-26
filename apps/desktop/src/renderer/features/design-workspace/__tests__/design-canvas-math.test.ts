@@ -1,4 +1,13 @@
 import { describe, expect, it, vi } from "vitest";
+import { designSelectionFitRects } from "../design-selected-targets";
+
+it("fits nested selections in world coordinates without including unselected frame bounds", () => {
+  const frames = [{ file: "a", x: 500, y: -40, width: 900, height: 700 }, { file: "b", x: 20, y: 60, width: 75, height: 90 }];
+  const targets = [{ frame: "a", nodeId: "button" }, { frame: "b" }];
+  expect(designSelectionFitRects(targets, frames, () => ({ x: 30, y: 80, width: 44, height: 24 })))
+    .toEqual([{ x: 530, y: 40, width: 44, height: 24 }, frames[1]]);
+  expect(designSelectionFitRects(targets, frames, () => undefined)).toEqual([]);
+});
 
 it("keeps all four affine corners and the pivot when the parent chain is skewed", () => {
   const box = designSelectionBox({

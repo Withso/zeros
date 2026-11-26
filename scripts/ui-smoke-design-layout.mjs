@@ -367,7 +367,11 @@ export async function runDesignLayoutSmoke({ page, waitFor, check }) {
       "layout-multiple-rotations",
     ),
   );
+  const header = page.locator("[data-design-inspector-header]");
+  const groupHeader = await header.innerText();
   await layers.locator('[data-design-layer-id="home-heading"]').click();
+  // The Style panel follows a new selection a frame after its outline.
+  await waitFor(async () => (await header.innerText()) !== groupHeader, "layout-single-selection-panel");
   // The rotation and flip buttons must still fit the narrowest supported panel.
   const widths = [];
   for (const width of [220, 280, 420]) {

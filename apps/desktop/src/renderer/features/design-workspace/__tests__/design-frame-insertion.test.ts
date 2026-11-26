@@ -1,8 +1,12 @@
 import { describe, expect, it } from "vitest";
-import type { DesignRuntimeNodeDetails } from "@zeros/protocol/design-runtime";
+import type { DesignRuntimeNodeDetails, DesignRuntimeTreeNode } from "@zeros/protocol/design-runtime";
 import {
   canInsertDesignFrame,
+  designWrapInFlow,
+  designShiftAConvertsInPlace,
+  designDrawnFrameWrapOperations,
   designFrameInsertionOperations,
+  designTreeChildIds,
 } from "../design-frame-insertion";
 
 const parent: DesignRuntimeNodeDetails = {
@@ -20,6 +24,57 @@ const parent: DesignRuntimeNodeDetails = {
 };
 
 describe("child frame insertion", () => {
+  it("lets Shift+A lay out one selected frame in place, as Figma does, and wraps anything else", () => {
+    const children: NonNullable<DesignRuntimeNodeDetails["childrenLayout"]> = { count: 2, nodeIds: ["a", "b"], x: "start", y: "start", truncated: false };
+    const frame: DesignRuntimeNodeDetails = { ...parent, childrenLayout: children };
+    expect(designShiftAConvertsInPlace([frame])).toBe(true);
+    // A frame that already flows, an empty frame, text, an image, or several
+    // layers are wrapped in a new flow instead.
+    expect(designShiftAConvertsInPlace([{ ...frame, styles: { ...frame.styles, display: "flex" } }])).toBe(false);
+    expect(designShiftAConvertsInPlace([{ ...frame, childrenLayout: { ...children, count: 0, nodeIds: [] } }])).toBe(false);
+    expect(designShiftAConvertsInPlace([{ ...frame, tag: "p", text: "Hello" }])).toBe(false);
+    expect(designShiftAConvertsInPlace([{ ...frame, tag: "img" }])).toBe(false);
+    expect(designShiftAConvertsInPlace([frame, { ...frame, oid: "other" }])).toBe(false);
+    expect(designShiftAConvertsInPlace([null])).toBe(false);
+  });
+  it("reads a layer's direct children, or the frame root's top level", () => {
+    const leaf = (oid: string, children: DesignRuntimeTreeNode[] = []): DesignRuntimeTreeNode =>
+      ({ oid, tag: "div", name: oid, text: null, visible: true, children });
+    const tree = [leaf("card", [leaf("title"), leaf("row", [leaf("deep")])]), leaf("footer")];
+    expect(designTreeChildIds(tree, "card", "body")).toEqual(["title", "row"]);
+    expect(designTreeChildIds(tree, "body", "body")).toEqual(["card", "footer"]);
+    expect(designTreeChildIds(tree, "missing", "body")).toEqual([]);
+    // A frame root the tree lists (a seeded <main>) is read like any layer.
+    expect(designTreeChildIds([leaf("main", [leaf("label")])], "main", "main")).toEqual(["label"]);
+  });
+  it("adopts free layers a drawn frame fully encloses, keeping their canvas place", () => {
+    const free = (oid: string, x: number, y: number, extra: Partial<DesignRuntimeNodeDetails["styles"]> = {}) => ({
+      ...parent, oid, styles: { ...parent.styles, position: "absolute", ...extra },
+      layout: { ...parent.layout!, parentId: parent.oid, x, y }, rect: { x, y, width: 61, height: 19 },
+    }) as DesignRuntimeNodeDetails;
+    const bounds = { x: 40, y: 30, width: 200, height: 80 };
+    const ops = designDrawnFrameWrapOperations(parent, "drawn", bounds, [
+      free("inside", 60, 40), free("overlapping", 200, 40), free("rotated", 60, 40, { transform: "rotate(10deg)" }),
+      { ...free("flow", 60, 40), styles: { ...parent.styles, position: "static" } }, null,
+    ]);
+    expect(ops).toEqual([
+      expect.objectContaining({ type: "node.move", nodeId: "inside", parentId: "drawn", beforeId: null }),
+      expect.objectContaining({ type: "node.set-styles", nodeId: "inside", styles: { left: "20px", top: "10px", right: "auto", bottom: "auto" } }),
+    ]);
+    expect(designDrawnFrameWrapOperations({ ...parent, styles: { ...parent.styles, display: "flex" } }, "drawn", bounds,
+      [free("inside", 60, 40)])).toEqual([]);
+  });
+  it("wraps siblings in spatial order, infers the gap and leaves a label content-sized", () => {
+    const item = (oid: string, x: number) => ({ ...parent, oid,
+      layout: { parentId: parent.oid, x, y: 20 }, rect: { x, y: 20, width: 61, height: 19 },
+      textSizing: { width: "max-content", height: "auto", availableWidth: 200 },
+    }) as DesignRuntimeNodeDetails;
+    const ops = designWrapInFlow(parent, [item("right", 84), item("left", 10)], "wrap");
+    expect(ops.find(op => op.type === "node.set-html")?.html).toContain("width:max-content;height:max-content;");
+    expect(ops.find(op => op.type === "node.set-html")?.html).toContain("flex-direction:row;gap:13px;");
+    expect(ops.flatMap(op => op.type === "node.move" && op.parentId === "wrap" ? [op.nodeId] : [])).toEqual(["left", "right"]);
+    expect(ops.find(op => op.type === "node.set-styles" && op.nodeId === "right")).toMatchObject({ styles: { width: "max-content", height: "auto" } });
+  });
   it("creates an opaque white frame with no auto layout", () => {
     const operation = designFrameInsertionOperations(parent, "child", {
       x: 10,

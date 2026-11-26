@@ -1031,7 +1031,7 @@ export async function transferDesignNode(
         "The source frame geometry changed before the layer move.",
       );
     const relocationStyles = input.relocation
-      ? designRelocationRootStyles(input.relocation)
+      ? designRelocationRootStyles(input.relocation, input.styles)
       : null;
     if (
       input.parentStyles !== undefined &&

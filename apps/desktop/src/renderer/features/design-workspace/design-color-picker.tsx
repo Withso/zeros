@@ -63,6 +63,34 @@ interface DesignColorPickerProps extends DesignColorCallbacks {
   tokenName?: string;
   /** False keeps only Custom, for a color inside a composed value. */
   tokenPicker?: boolean;
+  /** The property a just-added paint row requested to open on mount. */
+  openOnRequest?: string;
+}
+
+let requestedPaintPicker: { property: string; until: number } | null = null;
+
+/** Adding a paint opens the new row's picker as the row appears, as in
+ * Figma. The request is one-shot and lapses if the row never shows. */
+export function requestDesignPaintPicker(property: string): void {
+  requestedPaintPicker = { property, until: performance.now() + 2_000 };
+}
+
+function takeDesignPaintPicker(property: string | undefined): boolean {
+  const request = requestedPaintPicker;
+  if (!property || request?.property !== property) return false;
+  requestedPaintPicker = null;
+  return performance.now() <= request.until;
+}
+
+/** Opens a picker once when its row mounts for an added paint. */
+export function useDesignPaintPickerRequest(property: string | undefined, open: () => void): void {
+  const openRef = useRef(open);
+  openRef.current = open;
+  useLayoutEffect(() => {
+    if (takeDesignPaintPicker(property)) openRef.current();
+    // Only the mount of an added row consumes a request.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 }
 
 const FALLBACK_COLOR: DesignHsvaColor = { h: 0, s: 0, v: 0, a: 1 };
@@ -947,6 +975,7 @@ export function DesignColorPicker({
   className,
   tokenName,
   tokenPicker,
+  openOnRequest,
   onPreview,
   onCancelPreview,
   onCommit,
@@ -954,6 +983,7 @@ export function DesignColorPicker({
   const [open, setOpen] = useState(false);
   const panelRef = useRef<DesignColorPanelHandle | null>(null);
   const escapedRef = useRef(false);
+  useDesignPaintPickerRequest(openOnRequest, () => setOpen(true));
 
   return (
     <Popover
@@ -1405,6 +1435,7 @@ export function DesignColorField({
           }
           tokenName={tokenName}
           tokenPicker={tokenPicker}
+          openOnRequest={property}
           onPreview={onPreview}
           onCancelPreview={onCancelPreview}
           onCommit={onCommit}

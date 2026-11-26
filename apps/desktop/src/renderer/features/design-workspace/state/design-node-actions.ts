@@ -1,4 +1,5 @@
 import type { DesignOperation } from "@zeros/design-core";
+import type { DesignRuntimeNodeDetails } from "@zeros/protocol/design-runtime";
 import { designFrameRuntime } from "../../../platform/bridge/design-frame-runtime";
 import { designLayerTopLevelSelectionIds } from "../design-layer-tree";
 import { designFrameViews, isPreparedDesignFrame } from "./design-frame-view";
@@ -15,6 +16,29 @@ interface NodeCommandLane {
 }
 const commands = new Map<string, NodeCommandLane>();
 let sequence = 0;
+
+/** The last duplicate per workspace: its copies and where their originals
+ * stood, so duplicating a moved copy again repeats that move (Figma). */
+const duplicates = new Map<string, {
+  frame: string;
+  owner: ReturnType<typeof captureDesignPageOwner>;
+  copies: readonly string[];
+  sourcesAt: readonly ({ x: number; y: number } | null)[];
+}>();
+
+/** A free layer's next copy steps by the offset its copy moved from the
+ * original; an unmoved or in-flow copy duplicates in place. */
+export function designRepeatedDuplicatePlacement(
+  sourceAt: { x: number; y: number } | null,
+  copy: DesignRuntimeNodeDetails | undefined,
+): Record<string, string> | null {
+  if (!sourceAt || !copy?.layout || copy.styles.position !== "absolute") return null;
+  const dx = Math.round(copy.layout.x - sourceAt.x), dy = Math.round(copy.layout.y - sourceAt.y);
+  const left = Number.parseFloat(copy.styles.left ?? ""), top = Number.parseFloat(copy.styles.top ?? "");
+  if ((!dx && !dy) || !Number.isFinite(left) || !Number.isFinite(top) ||
+    !/px$/.test(copy.styles.left ?? "") || !/px$/.test(copy.styles.top ?? "")) return null;
+  return { left: `${Math.round(left + dx)}px`, top: `${Math.round(top + dy)}px`, right: "auto", bottom: "auto" };
+}
 
 /** A deletion a person is asked to confirm: the layers it would delete and
  * everything that must still stand for Delete to mean them. */
@@ -91,6 +115,22 @@ export async function applyDesignNodeAction(input: {
   const operations: DesignOperation[] = nodeIds.map((nodeId, index) => action === "duplicate"
     ? { operationId: crypto.randomUUID(), type: "node.duplicate", nodeId, duplicateNodeId: duplicateNodeIds[index]! }
     : { operationId: crypto.randomUUID(), type: "node.delete", nodeId });
+  // Duplicating the copies just made, after moving them, repeats the move.
+  const known = useDesignRuntimeStore.getState().byWorkspace[workspaceId]?.frames[frame.file]?.detailsByNode;
+  const fresh = (nodeId: string) => known?.[nodeId]?.sourceVersion === frame.sourceVersion ? known[nodeId] : undefined;
+  const last = duplicates.get(workspaceId);
+  const repeating = action === "duplicate" && last?.frame === frame.file && isCurrentDesignPageOwner(last.owner) &&
+    last.copies.length === nodeIds.length && last.copies.every((id, index) => id === nodeIds[index]);
+  const placements = new Map<string, Record<string, string>>();
+  if (repeating) nodeIds.forEach((nodeId, index) => {
+    const styles = designRepeatedDuplicatePlacement(last.sourcesAt[index] ?? null, fresh(nodeId));
+    if (styles) placements.set(duplicateNodeIds[index]!, styles);
+  });
+  for (const [nodeId, styles] of placements) operations.push({ operationId: crypto.randomUUID(), type: "node.set-styles", nodeId, styles,
+    scope: "inline", responsiveContext: "base", stateContext: "default" });
+  if (action === "duplicate" && !duplicates.has(workspaceId) && duplicates.size >= 32) duplicates.delete(duplicates.keys().next().value!);
+  if (action === "duplicate") duplicates.set(workspaceId, { frame: frame.file, owner, copies: duplicateNodeIds,
+    sourcesAt: nodeIds.map(nodeId => { const layout = fresh(nodeId)?.layout; return layout ? { x: layout.x, y: layout.y } : null; }) });
   // Retire deleted targets immediately. Another Delete cannot submit the same
   // vanished identity while persistence or runtime adoption is still pending.
   if (action === "delete") useDesignWorkspaceUiStore.getState().setSelection(workspaceId, frame.file, null, undefined, { owner });
@@ -106,6 +146,9 @@ export async function applyDesignNodeAction(input: {
   const preview = canPreview ? runtime.previewStructure!({ previewId: transactionId,
     operations: nodeIds.map((nodeId, index) => action === "duplicate" ? { type: "duplicate", nodeId, duplicateNodeId: duplicateNodeIds[index]! } : { type: "delete", nodeId }),
   }).catch(() => null) : null;
+  // The copy paints at its repeated offset at once, not after the save.
+  const placed = preview && placements.size ? preview.then(painted => painted && Promise.all([...placements].map(([nodeId, styles]) =>
+    runtime!.previewStyles(nodeId, styles).catch(() => null)))) : null;
   try {
     // Reserve the existing ordered mutation lane before any Foundation read.
     // Repeated commands queue here instead of disappearing behind a busy flag.
@@ -124,6 +167,7 @@ export async function applyDesignNodeAction(input: {
   } finally {
     // Named cleanup cannot remove a newer gesture's preview. The originating
     // port owns cleanup even if this frame is now mounted somewhere else.
+    if (placed) void placed.then(() => Promise.all([...placements.keys()].map(nodeId => runtime!.clearPreviewStyles(nodeId)))).catch(() => {});
     if (preview) void preview.then(() => runtime?.clearPreviewStructure?.(transactionId)).catch(() => {});
     lane.pending--;
     if (!lane.pending && commands.get(workspaceId) === lane) commands.delete(workspaceId);

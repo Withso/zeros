@@ -1,4 +1,6 @@
 import type React from "react";
+import { designIntrinsicPlacementStyles } from "@zeros/protocol/design-relocation";
+import { designIntrinsicSizing } from "./design-layout-values";
 import type {
   DesignRuntimeNodeDetails,
   DesignRuntimeNodeGeometry,
@@ -393,7 +395,11 @@ export function startDesignLayoutDrag(input: {
         runtime.getLayoutTargets(undefined, details.oid),
         positioned
           ? runtime.getNodeDetails(details.oid, undefined, { relocation: true })
-          : Promise.resolve(null),
+          // A flowing label reads its text sizing so a new parent keeps its
+          // hug; it still moves as a flow layer, never as a relocation.
+          : details.textEditable || details.textSizing
+            ? runtime.getNodeDetails(details.oid)
+            : Promise.resolve(null),
       ]);
       assertCurrent();
       targets = result;
@@ -609,6 +615,7 @@ export function startDesignLayoutDrag(input: {
             parentId: drop.parentId,
             beforeId: drop.beforeId,
             relocation,
+            styles: designIntrinsicPlacementStyles(designIntrinsicSizing(details)),
             movementGuard: { sourceVersion, geometry },
             x: frame.x,
             y: frame.y,

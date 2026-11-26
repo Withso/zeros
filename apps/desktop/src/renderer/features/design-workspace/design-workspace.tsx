@@ -358,6 +358,33 @@ export function DesignWorkspaceColumn({
     }
     return null;
   }, [selectedFrameTree, selectedNodeId]);
+  // A new selection's outline paints in its own frame; the Style panel follows
+  // in the next one instead of holding the outline back. Edits and readbacks
+  // of the same selection (a drag's live X/Y) stay immediate.
+  const liveInspectorSelection = useMemo(() => ({
+    frame: selectedFrame,
+    frameSelected,
+    details: presentedDetails,
+    selectedNode: selectedTreeNode,
+    selectedNodeId,
+    selectedNodeIds,
+  }), [selectedFrame, frameSelected, presentedDetails, selectedTreeNode, selectedNodeId, selectedNodeIds]);
+  const inspectorSelectionKey = `${selectedFrame?.file ?? ""}\u0000${frameSelected}\u0000${selectedNodeIds.join("\u0000")}`;
+  const [presentedInspectorSelectionKey, setPresentedInspectorSelectionKey] = useState(inspectorSelectionKey);
+  const heldInspectorSelection = useRef(liveInspectorSelection);
+  const inspectorSelectionPresented = presentedInspectorSelectionKey === inspectorSelectionKey;
+  if (inspectorSelectionPresented) heldInspectorSelection.current = liveInspectorSelection;
+  const inspectorSelection = inspectorSelectionPresented ? liveInspectorSelection : heldInspectorSelection.current;
+  useEffect(() => {
+    if (inspectorSelectionPresented) return;
+    // After the frame that paints the outline: a timer set in a frame
+    // callback runs once that frame is on screen.
+    let timer = 0;
+    const frame = requestAnimationFrame(() => {
+      timer = window.setTimeout(() => setPresentedInspectorSelectionKey(inspectorSelectionKey), 0);
+    });
+    return () => { cancelAnimationFrame(frame); window.clearTimeout(timer); };
+  }, [inspectorSelectionKey, inspectorSelectionPresented]);
 
   // A freshly provisioned design surface is ready when its first exact-key
   // snapshot either resolves or fails open; code-only settling UI must not
@@ -586,12 +613,12 @@ export function DesignWorkspaceColumn({
               activePageId={activePageId}
               pageFrames={pageFrameIdentities}
               folder={folder}
-              frame={selectedFrame}
-              frameSelected={frameSelected}
-              details={presentedDetails}
-              selectedNode={selectedTreeNode}
-              selectedNodeId={selectedNodeId}
-              selectedNodeIds={selectedNodeIds}
+              frame={inspectorSelection.frame}
+              frameSelected={inspectorSelection.frameSelected}
+              details={inspectorSelection.details}
+              selectedNode={inspectorSelection.selectedNode}
+              selectedNodeId={inspectorSelection.selectedNodeId}
+              selectedNodeIds={inspectorSelection.selectedNodeIds}
               lint={snapshot.data?.lint ?? null}
               active={surfaceActive}
               canvasBackground={canvasBackground}

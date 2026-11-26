@@ -79,6 +79,7 @@ import {
   registerDesignHistoryCommand,
 } from "./state/design-history-commands";
 import { useDesignHistoryStep } from "./use-design-history-step";
+import { designShiftAConvertsInPlace } from "./design-frame-insertion";
 import {
   designAutoLayoutFlow,
   designAutoLayoutUpdates,
@@ -2101,7 +2102,12 @@ export const DesignInspector = React.memo(function DesignInspector({
       const editableTarget = isNativeHistoryTarget(event.target);
       if (!isDesignTextEntryTarget(event.target) && event.shiftKey && !event.metaKey && !event.ctrlKey && !event.altKey &&
         event.key.toLowerCase() === "a") {
-        // Figma's Shift+A. The motion timeline is Shift+M.
+        // A selected frame, or one frame layer that holds layers, is laid out
+        // in place; the canvas wraps any other layer selection.
+        const view = designWorkspaceView(workspaceId);
+        const context = styleEditContextRef.current;
+        if (view.selectedNodeId && (view.selectedNodeIds.length > 1 || context.selectedNodeId !== view.selectedNodeId ||
+          !designShiftAConvertsInPlace([context.elementDetails]))) return;
         event.preventDefault();
         void layoutShortcutRef.current({ type: "auto-layout", flow: "column", infer: true }).catch((error: unknown) =>
           toast.error("Couldn't add auto layout", { description: errorMessage(error) }));
@@ -3285,6 +3291,10 @@ export const DesignInspector = React.memo(function DesignInspector({
               update.styles,
             ));
           }
+          // Shift+A paints in the frame now; the saved source replaces the
+          // preview, and a failed save restores every previewed layer.
+          if (action.type === "auto-layout")
+            for (const update of batch) void runtime.previewStyles(update.nodeId, update.styles).catch(() => null);
         }
         assertFrameCurrent();
         const proposedDetails = await runtime.measureLayout({

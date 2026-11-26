@@ -18,10 +18,29 @@ import {
   designLocalAxisDelta,
   designPaddingBandAtPoint,
   designPaddingBands,
+  designRadiusDragValue,
+  designRadiusHandleFits,
+  designPaddingCrowdsMoveTarget,
   designSizeBadgeText,
   designSpacingDragValue,
   designSpacingModifiers,
 } from "../design-layout-tools";
+
+it("keeps a center move target clear on small controls without hiding outer ticks", () => {
+  expect(designPaddingCrowdsMoveTarget({ x: 22, y: 10, width: 28, height: 16 }, 72, 32, 1)).toBe(true);
+  expect(designPaddingCrowdsMoveTarget({ x: 0, y: 6, width: 16, height: 20 }, 72, 32, 1)).toBe(false);
+});
+it("keeps the radius dot off a small button's move target", () => {
+  // A 38 × 31 button at 150% is 47 px tall on screen: a press there moves it.
+  expect(designRadiusHandleFits(38, 31, 1.5)).toBe(false);
+  expect(designRadiusHandleFits(220, 120, 1)).toBe(true);
+  expect(designRadiusHandleFits(220, 120, 0.5)).toBe(false);
+});
+it("drags corner radius in local layout pixels, clamped to half the short side", () => {
+  expect(designRadiusDragValue(4, { x: 40, y: 40 }, 220, 120)).toBe(44);
+  expect(designRadiusDragValue(4, { x: -10, y: -10 }, 220, 120)).toBe(0);
+  expect(designRadiusDragValue(4, { x: 90, y: 90 }, 220, 120)).toBe(60);
+});
 
 describe("affine constraint references", () => {
   it("projects each pin line through the parent's padding axes", () => {

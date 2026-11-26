@@ -10,6 +10,7 @@ import {
 const mocks = vi.hoisted(() => {
   const state = {
     transfer: vi.fn(),
+    drop: vi.fn(),
     selectNode: vi.fn(),
     selectFrame: vi.fn(),
     targets: [] as unknown[],
@@ -49,7 +50,7 @@ vi.mock("../../../platform/bridge/design-frame-runtime", () => ({
   waitForDesignFrameRuntime: mocks.waitForRuntime,
 }));
 vi.mock("../design-layout-drag", () => ({
-  designLayoutDrop: () => ({
+  designLayoutDrop: (...args: unknown[]) => (mocks.drop(...args), {
     parentId: "target-root",
     beforeId: null,
     styles: {},
@@ -118,6 +119,21 @@ beforeEach(() => {
 afterEach(() => vi.useRealTimers());
 
 describe("canvas transfer presentation", () => {
+  it("never substitutes a pointer hit for a missing explicit paste parent", async () => {
+    await expect(transferDesignLayerOnCanvas({ ...input, duplicateNodeId: "copy", destination, pasteParentId: "missing" }))
+      .rejects.toThrow(/paste destination/i);
+    expect(mocks.transfer).not.toHaveBeenCalled();
+  });
+  it("pastes at the copied layer's place in its parent when it fits, as Figma does, and centers otherwise", async () => {
+    const parent = { oid: "target-root", rect: { x: 0, y: 0, width: 393, height: 852 } };
+    mocks.targets = [parent];
+    const placed = { ...node, layout: { x: 58, y: 120 } } as DesignRuntimeNodeDetails;
+    await transferDesignLayerOnCanvas({ ...input, details: placed, duplicateNodeId: "copy", destination, pasteParentId: "target-root" }).catch(() => {});
+    expect(mocks.drop.mock.calls[0]?.[3]).toEqual({ x: 58, y: 120 });
+    const outside = { ...node, layout: { x: 380, y: 120 } } as DesignRuntimeNodeDetails;
+    await transferDesignLayerOnCanvas({ ...input, details: outside, duplicateNodeId: "copy", destination, pasteParentId: "target-root" }).catch(() => {});
+    expect(mocks.drop.mock.calls[1]?.[3]).toEqual({ x: 146.5, y: 386 });
+  });
   it("keeps the runtime root id for a nested linked frame copy", async () => {
     const runtimeRoot = { ...node, oid: "cc-root" };
     mocks.targets = [destination];

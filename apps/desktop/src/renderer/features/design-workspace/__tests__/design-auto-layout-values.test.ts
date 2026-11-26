@@ -101,6 +101,27 @@ describe("auto layout intent", () => {
     expect(updates.get("turned")).toMatchObject({ position: "relative", transform: "matrix(0,1,-1,0,0,0)" });
   });
 
+  it("keeps drawn spacing and hug text when Shift+A lays out a free frame", () => {
+    const parent = { ...node({ display: "block" }, "block"), oid: "parent" };
+    const label = (oid: string, y: number) => {
+      const text = { ...node({ position: "absolute", width: "78px", height: "19px" }, "block"), oid };
+      text.layout = { ...text.layout!, x: 58, y, widthValue: "max-content", heightValue: "auto" };
+      text.rect = { x: 58, y, width: 78, height: 19 };
+      return text;
+    };
+    const updates = designAutoLayoutUpdates([parent], [label("a", 120), label("b", 188), label("c", 256)], "column");
+    expect(updates.get("parent")).toMatchObject({ display: "flex", "flex-direction": "column", gap: "49px",
+      "padding-left": "58px", "padding-right": "58px", "padding-top": "120px", "padding-bottom": "120px" });
+    expect(updates.get("a")).toMatchObject({ position: "relative", width: "max-content" });
+    // Authored spacing stays as it is.
+    const spaced = { ...parent, styles: { ...parent.styles, gap: "8px", paddingLeft: "4px" } };
+    const kept = designAutoLayoutUpdates([spaced], [label("a", 120), label("b", 188)], "column").get("parent")!;
+    expect(kept).not.toHaveProperty("gap");
+    expect(kept).not.toHaveProperty("padding-left");
+    expect(kept).not.toHaveProperty("padding-right");
+    expect(kept).toMatchObject({ "padding-top": "120px", "padding-bottom": "120px" });
+  });
+
   it("reports a frame's own layer as clipping at the frame's edges, as the canvas draws it", () => {
     // A canvas frame is a document of its own: content past its edges is
     // never drawn, so "Clip content" must not read unchecked for it.

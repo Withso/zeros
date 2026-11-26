@@ -50,7 +50,7 @@ async function exercise({ page, check }) {
   const rail = await page.locator("[data-design-canvas-tools-rail] [role=toolbar] > button").evaluateAll((buttons) =>
     buttons.map((button) => button.getAttribute("aria-label")));
   check("Section, Note and Link card sit in the tool rail beside Text",
-    JSON.stringify(rail.slice(0, 6)) === JSON.stringify(["Select", "Frame tool", "Text tool", "Section tool", "Note tool", "Link card tool"]), JSON.stringify(rail));
+    JSON.stringify(rail.slice(0, 7)) === JSON.stringify(["Select", "Frame tool", "Rectangle tool", "Text tool", "Section tool", "Note tool", "Link card tool"]), JSON.stringify(rail));
   check("a page with no items mounts no item layer", (await page.locator("[data-design-canvas-items]").count()) === 0);
 
   // ── Create ──
