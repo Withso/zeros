@@ -264,10 +264,11 @@ export class CloudGithubConnections {
         "invalid_input",
         "Enter a valid GitHub personal access token.",
       );
+    const guard = await this.store.patSaveGuard(scope, expected);
     const identity = await this.identity(token, () =>
       this.store.assertCurrent(scope, expected),
     );
-    await this.store.save(scope, expected, identity, material.data);
+    await this.store.save(scope, expected, identity, material.data, guard);
   }
   private requireApp(): GithubBackendConfig {
     if (!this.config)

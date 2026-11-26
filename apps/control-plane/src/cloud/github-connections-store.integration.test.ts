@@ -299,6 +299,19 @@ database("cloud GitHub connection ownership and rotation", () => {
     expect((await store.status(scope())).selectedMethod).toBe("github-app");
   });
 
+  it("rejects a PAT that another replica was validating when an empty slot was disconnected", async () => {
+    const expected = await store.fingerprint(scope());
+    const otherReplica = new CloudGithubConnectionStore(pool, keys);
+    const github = vi.fn(async () => {
+      await otherReplica.disconnect(scope(), expected, "pat");
+      return Response.json({ id: Number(identity.id), login: identity.login });
+    });
+    const service = new CloudGithubConnections(store, null, github);
+    await expect(service.connectPat(scope(), expected, pat.accessToken)).rejects.toMatchObject({ code: "github_authorization_changed" });
+    expect(github).toHaveBeenCalledOnce();
+    expect((await store.status(scope())).methods.pat.configured).toBe(false);
+  });
+
   it("preserves inactive methods while selecting the explicit connection", async () => {
     await store.save(
       scope(),

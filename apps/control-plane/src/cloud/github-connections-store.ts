@@ -353,6 +353,16 @@ export class CloudGithubConnectionStore {
       await this.selection(tx, value.scope, method);
     });
   }
+  async patSaveGuard(scope: CloudGithubConnectionScope, expected: string) {
+    const readRevision = async (tx: Tx) => (await tx.query<{ revision: string }>(
+      "SELECT revision FROM cloud_github_pat_removals WHERE org_id=$1 AND owner_user_id=$2",
+      [scope.organizationId, scope.userId],
+    )).rows[0]?.revision;
+    const beforeValidation = await this.edit(scope, expected, readRevision);
+    return async (tx: Tx) => {
+      if (await readRevision(tx) !== beforeValidation) throw changed();
+    };
+  }
   async disconnect(
     scope: CloudGithubConnectionScope,
     expected: string,
@@ -361,7 +371,14 @@ export class CloudGithubConnectionStore {
     await this.edit(scope, expected, async (tx, value) => {
       // A Mac-only PAT removal confirms the empty slot under the lock. Preserve
       // the generation for an unrelated App exchange waiting to commit.
-      if (method === "pat" && value.actor.selected_method !== "pat" && !value.rows.some(row => row.method === "pat")) return;
+      if (method === "pat" && value.actor.selected_method !== "pat" && !value.rows.some(row => row.method === "pat")) {
+        await tx.query(
+          `INSERT INTO cloud_github_pat_removals(org_id, owner_user_id) VALUES ($1,$2)
+           ON CONFLICT (org_id, owner_user_id) DO UPDATE SET revision=EXCLUDED.revision`,
+          [scope.organizationId, scope.userId],
+        );
+        return;
+      }
       await tx.query(
         "DELETE FROM cloud_github_credentials WHERE org_id=$1 AND owner_user_id=$2 AND method=$3",
         [scope.organizationId, scope.userId, method],
