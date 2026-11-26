@@ -56,6 +56,12 @@ describe("GitHub auth intent prefetch", () => {
     expect(fetcher).toHaveBeenCalledTimes(1);
   });
 
+  it("warms only the signed-in account's Settings key", async () => {
+    prefetchGithubAuthSnapshot(async () => snapshot, "owner-a");
+    await vi.waitFor(() => expect(ghAuthStatusCache.peekSnapshot("auth:owner-a").data).toBe(snapshot));
+    expect(ghAuthStatusCache.keys()).toEqual(["auth:owner-a"]);
+  });
+
   it("retains a confirmed snapshot when intent revalidation fails", async () => {
     ghAuthStatusCache.setData("auth", snapshot);
     ghAuthStatusCache.invalidate("auth");

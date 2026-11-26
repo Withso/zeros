@@ -8,11 +8,14 @@ import {
   GITHUB_READ_MAX_AGE_MS,
 } from "../../state/read-caches";
 
+export const githubAuthSnapshotKey = (accountId?: string) => accountId ? `auth:${accountId}` : "auth";
+
 export function prefetchGithubAuthSnapshot(
-  fetcher: () => Promise<GithubAuthSnapshot> = () => ghAuthSnapshot(),
+  fetcher?: () => Promise<GithubAuthSnapshot>,
+  accountId?: string,
 ): void {
   void ghAuthStatusCache
-    .load("auth", fetcher, { maxAgeMs: GITHUB_READ_MAX_AGE_MS })
+    .load(githubAuthSnapshotKey(accountId), fetcher ?? (() => ghAuthSnapshot({ userId: accountId })), { maxAgeMs: GITHUB_READ_MAX_AGE_MS })
     .catch(() => {
       // The cache records the failure; do not reject into the intent handler.
     });

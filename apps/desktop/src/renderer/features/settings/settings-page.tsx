@@ -715,7 +715,7 @@ function ScopedSettingsPage({ owner }: { owner: string }) {
       onClick={() => setActive(userSelection(section.id))}
       onIntent={
         section.id === "integrations"
-          ? prefetchGithubAuthSnapshot
+          ? () => prefetchGithubAuthSnapshot(undefined, me?.user.id)
           : section.id === "local-storage"
             ? warmLocalStorage
           : section.id === "cloud-computer" && cloudOrganization && me

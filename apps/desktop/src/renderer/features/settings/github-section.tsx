@@ -89,6 +89,7 @@ import {
   trackGithubMethodSelected,
 } from "../../platform/observability/analytics/github-events";
 import { RunStream } from "@/renderer/shared/ui/loading/run-stream";
+import { githubAuthSnapshotKey } from "./github-auth-prefetch";
 import { useSharedGithub, type GithubSettingsOwner } from "./use-shared-github";
 import { cloudGithubHealthCopy } from "./cloud-github-health";
 
@@ -209,7 +210,7 @@ export function GitHubSection({
 }) {
   const shared = useSharedGithub(owner, surfaceActive);
   const invalidateCloud = shared.invalidate;
-  const authKey = accountId ? `auth:${accountId}` : "auth";
+  const authKey = githubAuthSnapshotKey(accountId);
   const [setupMethod, setSetupMethod] = useState<GithubAuthMethod | null>(null);
   const [terminalOpen, setTerminalOpen] = useState(false);
   const [pat, setPat] = useState("");
