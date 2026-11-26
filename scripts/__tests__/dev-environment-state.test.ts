@@ -95,7 +95,7 @@ describe("persistent development workspace ownership", () => {
     acquireWorkspaceLock(state)();
   });
 
-  it.each(["run.lock", "mutation.lock"])("retries %s when its owner releases it during acquisition", name => {
+  it.each(["run.lock", "mutation.lock", "seed.lock"])("retries %s when its owner releases it during acquisition", name => {
     const workspace = ensureWorkspace(fixture());
     const lock = path.join(workspace.directory, name);
     const release = acquireWorkspaceLock(workspace, name);
