@@ -1,5 +1,5 @@
 import { createHash, createHmac } from "node:crypto";
-import { bootstrapFixtureOrganization, fixtureIssues } from "./hosted-fixtures.mjs";
+import { assertFixtureStaffAccess, bootstrapFixtureOrganization, fixtureIssues } from "./hosted-fixtures.mjs";
 
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/;
 const fresh = value => Number.isFinite(value) && value <= Date.now() && Date.now() - value < 60_000;
@@ -106,14 +106,15 @@ export async function seedLocalFixture({ runtime, migration, withSystemTx, reque
       !["User", "Organization"].includes(github.accountType) || !["User", "Organization"].includes(github.targetType) ||
       typeof github.allRepositories !== "boolean" || !Number.isFinite(Date.parse(github.createdAt))) throw new Error("Invalid local fixture authority");
   if (!await bootstrapFixtureOrganization({ runtime, withSystemTx, fixture, proof })) return { seeded: false, needsSignIn: true };
-  const row = await withSystemTx(runtime, async tx => (await tx.query(`SELECT u.id AS user_id FROM users u
+  const row = await withSystemTx(runtime, async tx => (await tx.query(`SELECT u.id AS user_id, u.staff_role FROM users u
     JOIN user_identities i ON i.user_id=u.id AND i.provider='workos' AND i.provider_sub=$1 AND i.status='active' AND i.email_verified_at IS NOT NULL
     JOIN organization_members m ON m.user_id=u.id AND m.org_id=$2 AND m.role='owner'
     WHERE u.auth_status='active' AND u.deleted_at IS NULL AND lower(u.email::text)=$3`,
   [fixture.workosUserId, proof.externalId, fixture.expectedEmail.toLowerCase()])).rows[0]);
   if (!row) throw new Error("The local signed-in identity changed; seed stopped");
   const userId = row.user_id, organizationId = proof.externalId;
-  const staffRole = await grantLocalStaff(migration, request, userId, organizationId, staff);
+  assertFixtureStaffAccess(fixture, row);
+  const staffRole = fixture.staffAccess === false ? null : await grantLocalStaff(migration, request, userId, organizationId, staff);
   await grantLocalPro(migration, { userId, fixture, source: `cloud-local:${request.owner}:${request.instanceId}` });
   await withSystemTx(runtime, async tx => {
     const installation = await tx.query(`INSERT INTO github_installations(github_installation_id,app_variant,owner_user_id,

@@ -18,6 +18,7 @@ import { cloudSeedMessage, cloudSeedNeeded, recordCloudSeed } from "./cloud-loca
 import { REBOOT_RECOVERED, currentBoot, recoverLaunchAfterReboot } from "./reboot-recovery.mjs";
 import { resolveLocalRuntime } from "./cloud-local-runtime.mjs";
 import { prepareAlphaLaunch } from "../alpha-instance.mjs";
+import { bindFixture } from "./hosted-fixtures.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 // `backend` is the former headless action; Zeros Dev now always runs headless.
@@ -115,6 +116,9 @@ async function start(workspace, profile) {
     throw new Error("The previous launch has not confirmed shutdown; run pnpm electron:cloud --stop before starting again. Existing state was preserved.");
   const issues = profileIssues(profile, { cloud: Boolean(profile.cloud) });
   if (issues.length) throw new Error(issues.join("\n"));
+  if (workspace.state.fixture && (profile.fixture?.staffAccess === false || workspace.state.cloudSeed?.staffRole === null)) {
+    bindFixture(workspace.state, { ...profile.fixture, bootstrapOrganization: true });
+  }
   const release = acquireWorkspaceLock(workspace), processes = new DevelopmentProcesses();
   const env = systemEnvironment(), runId = randomUUID(), token = randomUUID();
   let postgres, server;
@@ -190,7 +194,7 @@ async function start(workspace, profile) {
     await enableWorkosWebhook(workspace, profile); signal.throwIfAborted();
     // A missing fixture input is guidance, not a reason to tear the stack down:
     // fix it, then run pnpm electron:cloud --seed against this running stack.
-    if (cloudSeedNeeded(workspace.state)) await seedCloud(workspace, profile, ports).catch(error =>
+    if (cloudSeedNeeded(workspace.state, profile.fixture)) await seedCloud(workspace, profile, ports).catch(error =>
       console.log(`[zeros-dev] Cloud test organization not seeded: ${error.message}. Fix it, then run pnpm electron:cloud --seed`));
     signal.throwIfAborted();
     console.log(`[zeros-dev] Ready: ${publicProfile.apiOrigin}`);

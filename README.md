@@ -65,6 +65,11 @@ existing Setup/Run commands and reporting Archive conflicts. Start with
 profile for the first time; transfer the filled private file between your own
 devices.
 
+For a headless automation account, set `fixture.staffAccess` to `false` in
+its private Dev profile. Seeding verifies that the account has no staff role.
+Profiles that omit the field keep their existing developer seed behavior.
+Start a fresh Dev generation when switching between these fixture roles.
+
 `pnpm dev:setup --check` checks local prerequisites and profile format.
 `pnpm electron:dev --reset` deletes this checkout's Zeros Dev VMs and data; the
 next launch starts fresh. Zeros Dev is headless on macOS and Linux; use

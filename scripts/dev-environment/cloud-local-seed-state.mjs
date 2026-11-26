@@ -2,14 +2,15 @@
 // organization, its Alpha GitHub connection and agent credentials. Only
 // non-secret identifiers are kept in the instance's private state.
 
-export function cloudSeedNeeded(state) {
-  return state.cloudSeed?.seeded !== true || !["developer", "platform_owner"].includes(state.cloudSeed.staffRole);
+export function cloudSeedNeeded(state, fixture) {
+  if (state.cloudSeed?.seeded !== true) return true;
+  return fixture?.staffAccess === false ? state.cloudSeed.staffRole !== null : !["developer", "platform_owner"].includes(state.cloudSeed.staffRole);
 }
 
 export function recordCloudSeed(state, result, now = new Date()) {
   if (result?.seeded === true && typeof result.organizationId === "string")
     state.cloudSeed = { seeded: true, organizationId: result.organizationId,
-      ...(["developer", "platform_owner"].includes(result.staffRole) ? { staffRole: result.staffRole } : {}), at: now.toISOString() };
+      ...([null, "developer", "platform_owner"].includes(result.staffRole) ? { staffRole: result.staffRole } : {}), at: now.toISOString() };
   return state;
 }
 
