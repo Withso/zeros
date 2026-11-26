@@ -5,7 +5,7 @@ import { parseEnv } from "node:util";
 import { bindFixture, verifyFixtureMembership } from "./hosted-fixtures.mjs";
 import { localFixtureCredentials, verifyLocalGithub } from "./local-fixtures.mjs";
 import { workosClient } from "./workos.mjs";
-import { saveWorkspace } from "./state.mjs";
+import { saveLocalSeed } from "./cloud-local-seed-state.mjs";
 import { databaseCommand } from "./postgres.mjs";
 import { cloudCredentialKeyring } from "./cloud-v2-keys.mjs";
 
@@ -17,7 +17,7 @@ export async function seedLocalEnvironment(workspace, profile, ports, repository
       !Number.isInteger(ports.api) || ports.api < 1024 || ports.api > 65535) throw new Error("Start this electron:cloud backend before seeding");
   const module = options.module ?? (name => import(pathToFileURL(path.join(repositoryRoot, "apps/control-plane/dist", name))));
   const request = options.fetch ?? fetch, database = options.database ?? databaseCommand;
-  const save = options.save ?? saveWorkspace;
+  const save = options.save ?? saveLocalSeed;
   const { gate0LocalIdentity, gate0SignIn } = await module("cloud/gate0-cli.js");
   const origin = `http://127.0.0.1:${ports.api}`;
   const json = async (url, headers = {}) => {

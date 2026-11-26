@@ -37,7 +37,8 @@ export function fixtureBindingDigest(state, fixture) {
 export function bindFixture(state, fixture) {
   const digest = fixtureBindingDigest(state, fixture);
   const now = Date.now();
-  state.fixture ??= { digest, startsAt: new Date(now).toISOString(), endsAt: new Date(now + 7 * 86400_000).toISOString() };
+  state.fixture ??= { digest, startsAt: new Date(now).toISOString(), endsAt: new Date(now + 7 * 86400_000).toISOString(),
+    ...(fixture.staffAccess === false ? { staffAccess: false } : {}) };
   if (Date.parse(state.fixture.endsAt) <= Date.now()) throw new Error("Dev fixture expired; archive and launch a fresh generation to reset it");
   return { ...fixture, ...state.fixture };
 }

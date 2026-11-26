@@ -7,6 +7,7 @@ import {
   saveWorkspace, systemEnvironment, writePrivateJson,
 } from "../dev-environment/state.mjs";
 
+import { readLocalSeed, saveLocalSeed } from "../dev-environment/cloud-local-seed-state.mjs";
 const roots: string[] = [];
 function fixture() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "zeros-development-"));
@@ -18,6 +19,16 @@ function fixture() {
 afterEach(() => { vi.restoreAllMocks(); for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true }); });
 
 describe("persistent development workspace ownership", () => {
+  it("keeps a manual seed's fixture binding and result when the original supervisor saves shutdown", () => {
+    const f = fixture(), supervisor = ensureWorkspace(f), manualSeed = ensureWorkspace(f);
+    manualSeed.state.fixture = { digest: "b".repeat(64), staffAccess: false };
+    manualSeed.state.cloudSeed = { seeded: true, staffRole: null, organizationId: "fixture" };
+    saveLocalSeed(manualSeed);
+    saveWorkspace(supervisor);
+    expect(readLocalSeed(ensureWorkspace(f))).toEqual({ fixture: manualSeed.state.fixture, cloudSeed: manualSeed.state.cloudSeed });
+    const other = { ...manualSeed, state: { ...manualSeed.state, instanceId: "11111111-1111-4111-8111-111111111111" } };
+    expect(() => readLocalSeed(other)).toThrow(/instance/);
+  });
   it("opens receipts without a retired provider key and preserves historical receipt fields", () => {
     const f = fixture(), workspace = ensureWorkspace(f);
     const receipt = readPrivateJson(workspace.file);
