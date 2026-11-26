@@ -34,6 +34,17 @@ function fixture() {
   return { home, root, source, git, profile, writeSource };
 }
 
+function runAutomaticSetup(root: string, home: string, env: Record<string, string> = {}) {
+  const repository = path.resolve(import.meta.dirname, "../..");
+  fs.cpSync(path.join(repository, "scripts/dev-environment"), path.join(root, "scripts/dev-environment"), { recursive: true });
+  for (const file of ["dev-auth-profile.mjs", "dev-ports.mjs", "electron-local-process-group.mjs"]) fs.copyFileSync(path.join(repository, "scripts", file), path.join(root, "scripts", file));
+  fs.writeFileSync(path.join(root, "qualified-node.cjs"), 'Object.defineProperty(process.versions, "node", {value: "22.18.0"});');
+  fs.writeFileSync(path.join(root, "package.json"), JSON.stringify({ packageManager: "pnpm@10.0.0" }));
+  return execFileSync(process.execPath, ["-r", "./qualified-node.cjs", "scripts/dev-environment/setup.mjs", "--profile-only"], {
+    cwd: root, env: { PATH: process.env.PATH, HOME: home, ...env }, encoding: "utf8", stdio: "pipe",
+  });
+}
+
 describe("secure portable Dev setup", () => {
   it("imports an injected cloud profile privately before backend/archive profile resolution", () => {
     const f = fixture(), destination = path.join(f.root, "zeros-dev-env.json");
@@ -51,15 +62,9 @@ describe("secure portable Dev setup", () => {
   });
 
   it("imports the cloud setting through actual setup without printing credentials", () => {
-    const f = fixture(), repository = path.resolve(import.meta.dirname, "../..");
-    fs.cpSync(path.join(repository, "scripts/dev-environment"), path.join(f.root, "scripts/dev-environment"), { recursive: true });
-    for (const file of ["dev-auth-profile.mjs", "dev-ports.mjs", "electron-local-process-group.mjs"]) fs.copyFileSync(path.join(repository, "scripts", file), path.join(f.root, "scripts", file));
-    fs.writeFileSync(path.join(f.root, "qualified-node.cjs"), 'Object.defineProperty(process.versions, "node", {value: "22.18.0"});');
-    fs.writeFileSync(path.join(f.root, "package.json"), JSON.stringify({ packageManager: "pnpm@10.0.0" }));
+    const f = fixture();
     const value = Buffer.from(JSON.stringify(f.profile)).toString("base64");
-    const output = execFileSync(process.execPath, ["-r", "./qualified-node.cjs", "scripts/dev-environment/setup.mjs", "--profile-only"], {
-      cwd: f.root, env: { PATH: process.env.PATH, HOME: f.home, ZEROS_DEV_PROFILE_B64: value }, encoding: "utf8", stdio: "pipe",
-    });
+    const output = runAutomaticSetup(f.root, f.home, { ZEROS_DEV_PROFILE_B64: value });
     expect(JSON.parse(fs.readFileSync(path.join(f.root, "zeros-dev-env.json"), "utf8"))).toEqual(f.profile);
     expect(output).not.toContain(value); expect(output).not.toContain(f.profile.cloudflare.apiToken);
   });
@@ -117,8 +122,16 @@ describe("secure portable Dev setup", () => {
     const f = fixture(), worktree = path.join(f.home, "linked worktree");
     f.git("worktree", "add", "-qb", "feature", worktree);
     fs.writeFileSync(path.join(f.root, "zeros-dev-env.json"), JSON.stringify(f.profile), { mode: 0o600 });
+    runAutomaticSetup(worktree, f.home);
+    expect(fs.existsSync(path.join(f.home, ".zeros-dev/zeros-dev-env.json"))).toBe(false);
     expect(loadHostedProfile(worktree, { homeDir: f.home, env: {} })).toEqual(f.profile);
     expect(fs.existsSync(path.join(worktree, "zeros-dev-env.json"))).toBe(false);
+  });
+
+  it("allows checkout setup for an Ops client without a private fixture profile", () => {
+    const f = fixture();
+    expect(() => runAutomaticSetup(f.root, f.home)).not.toThrow();
+    expect(fs.existsSync(path.join(f.root, "zeros-dev-env.json"))).toBe(false);
   });
 
   it("validates without reading providers or changing permissions in check mode", () => {
