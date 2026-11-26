@@ -68,11 +68,13 @@ devices.
 For a headless automation account, set `fixture.staffAccess` to `false` in
 its private Dev profile. Seeding verifies that the account has no staff role.
 Profiles that omit the field keep their existing developer seed behavior.
-Start a fresh Dev generation when switching between these fixture roles.
+To switch fixture roles, create a new worktree with its own workspace identity,
+select the matching private profile with `ZEROS_DEV_PROFILE_PATH`, and run
+`pnpm electron:cloud` there. Resetting the old checkout archives its generation.
 
 `pnpm dev:setup --check` checks local prerequisites and profile format.
 `pnpm electron:dev --reset` deletes this checkout's Zeros Dev VMs and data; the
-next launch starts fresh. Zeros Dev is headless on macOS and Linux; use
+next generation uses a fresh worktree. Zeros Dev is headless on macOS and Linux; use
 `pnpm electron:alpha` for the Mac app against Alpha, `pnpm alpha:probe` to
 measure Alpha, and `pnpm electron:local` for an account-free app without a
 backend. `pnpm storage:inventory` lists, read-only, the folders left by retired
