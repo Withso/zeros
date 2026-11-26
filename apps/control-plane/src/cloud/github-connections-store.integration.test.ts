@@ -1,5 +1,8 @@
 import { createHash, randomUUID } from "node:crypto";
 import pg from "pg";
+import { Hono } from "hono";
+import { CloudGithubConnections } from "./github-connections.js";
+import { createCloudGithubConnectionRoutes } from "./github-connection-routes.js";
 import {
   afterAll,
   beforeAll,
@@ -269,9 +272,19 @@ database("cloud GitHub connection ownership and rotation", () => {
     await save();
     await store.save(scope(), await store.fingerprint(scope()), identity, app);
     const expected = await store.fingerprint(scope());
-    const verify = vi.fn(async () => { throw new Error("revoked"); });
-    await expect(store.select(scope(), expected, "pat", verify)).rejects.toThrow("revoked");
-    expect(verify).toHaveBeenCalledWith(pat.accessToken, identity.id);
+    const github = vi.fn(async () => new Response(null, { status: 401 }));
+    const api = new Hono();
+    api.use("*", async (c, next) => { c.set("user", { id: userId } as never); await next(); });
+    api.onError((error, c) => error instanceof HttpError
+      ? c.json({ code: error.code }, error.status) : c.json({ code: "internal" }, 500));
+    api.route("/", createCloudGithubConnectionRoutes(new CloudGithubConnections(store, null, github)));
+    const response = await api.request("/v1/cloud-v2/github/connection", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ action: "select", method: "pat", organizationId, expected }),
+    });
+    expect(response.status).toBe(409);
+    expect(await response.json()).toEqual({ code: "github_authorization_expired" });
+    expect(github).toHaveBeenCalledTimes(1);
     expect((await store.status(scope())).selectedMethod).toBe("github-app");
   });
 

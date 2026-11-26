@@ -39,8 +39,8 @@ function fixture() {
       verifier: "secret-projection-canary",
     })),
     connectPat: vi.fn(async () => {}),
+    select: vi.fn(async () => {}),
     store: {
-      select: vi.fn(async () => {}),
       disconnect: vi.fn(async () => {}),
       cancelOauth: vi.fn(async () => {}),
     },
@@ -136,7 +136,7 @@ describe("cloud GitHub connection HTTP boundary", () => {
           generation,
         );
       else
-        expect(f.service.store[action]).toHaveBeenCalledExactlyOnceWith(
+        expect(action === "select" ? f.service.select : f.service.store.disconnect).toHaveBeenCalledExactlyOnceWith(
           f.scope,
           generation,
           "pat",
@@ -175,7 +175,7 @@ describe("cloud GitHub connection HTTP boundary", () => {
       ).status,
     ).toBe(413);
     expect(f.service.connectPat).not.toHaveBeenCalled();
-    expect(f.service.store.select).not.toHaveBeenCalled();
+    expect(f.service.select).not.toHaveBeenCalled();
     expect(f.service.begin).not.toHaveBeenCalled();
     for (const page of ["0", "101", "NaN"])
       expect(
