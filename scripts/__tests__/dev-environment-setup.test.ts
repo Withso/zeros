@@ -106,7 +106,7 @@ describe("secure portable Dev setup", () => {
 
   it("keeps gateway and provider credentials out of new agent worktrees", () => {
     const f = fixture();
-    for (const file of [".env.agent", ".env.local", "zeros-dev-env.json", ".mcp.json", "apps/control-plane/.env", "apps/web/.dev.vars"]) {
+    for (const file of [".env.agent", ".env.local", "zeros-dev-env.json", ".mcp.json", "apps/control-plane/.env", "apps/web/.dev.vars", ".conductor/settings.local.toml"]) {
       fs.mkdirSync(path.dirname(path.join(f.root, file)), { recursive: true });
       fs.writeFileSync(path.join(f.root, file), "private fixture");
     }

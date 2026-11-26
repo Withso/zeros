@@ -1,4 +1,2 @@
-# Zeros and Conductor seed this explicit list when creating a worktree.
-# Keep provider keys, Dev profiles and MCP credentials in their owning service
-# or client. A checkout receives its code, tracked setup and local script override.
-/.conductor/settings.local.toml
+# Intentionally empty. A new checkout receives its tracked setup. Even local
+# Conductor overrides can contain private Dev profiles and GitHub App keys.
