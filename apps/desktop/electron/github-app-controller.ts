@@ -310,9 +310,13 @@ export class GithubAppController {
    * later is rejected as unsolicited and cannot replace the selected method. */
   cancel(): boolean {
     if (this.committingSharedApp) return false;
+    this.discardAttempt();
+    return true;
+  }
+
+  private discardAttempt(): void {
     this.cancelEpoch += 1;
     this.deps.clearPending();
-    return true;
   }
 
   async complete(input: {
@@ -674,7 +678,9 @@ export class GithubAppController {
   /** Best-effort remote revoke, then a CAS local removal. A transient control-plane
    *  outage never traps a user in a locally connected state. */
   async disconnect(owner?: string): Promise<boolean> {
-    if (!this.cancel()) return false;
+    if (owner && (await this.deps.getSession())?.sub !== owner) return false;
+    // Disconnect removes a durable grant too. Discard any reconnect result before clearing the slot.
+    this.discardAttempt();
     if(this.deps.devReference)return this.deps.devReference.disconnect();
     return this.deps.withCredentialLock(async () => {
       const current = await this.deps.credentialStore.get("github-app");

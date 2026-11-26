@@ -273,6 +273,29 @@ describe("GitHub App desktop controller", () => {
     expect(h.events.some(event => event.name === "connected")).toBe(true);
   });
 
+  it("removes the old Mac connection when disconnect wins a shared reconnect", async () => {
+    const h = harness();
+    const options = { scheme: "zeros-dev", installFlow: false, shared: {
+      userId: "account-one", organizationId: "org-one", expected: "a".repeat(64),
+    } };
+    const callback = { nonce: "n".repeat(43) };
+    await h.controller.begin(options);
+    await h.controller.complete(callback);
+    const gate = deferred<void>();
+    h.client.exchange.mockImplementation(async () => {
+      await gate.promise;
+      throw new Error("Cloud selection changed during reconnect");
+    });
+    await h.controller.begin(options);
+    const reconnecting = h.controller.complete(callback);
+    await vi.waitFor(() => expect(h.client.exchange).toHaveBeenCalledTimes(2));
+    const removing = h.controller.disconnect("account-one");
+    gate.resolve();
+    await reconnecting;
+    expect(await removing).toBe(true);
+    expect(h.credential()).toBeNull();
+  });
+
   it("disconnect cancels a browser attempt that has not produced a credential yet", async () => {
     const h = harness();
     await h.controller.begin({ scheme: "zeros-dev", installFlow: false });
