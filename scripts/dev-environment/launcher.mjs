@@ -18,7 +18,7 @@ import { cloudSeedMessage, cloudSeedNeeded, recordCloudSeed } from "./cloud-loca
 import { REBOOT_RECOVERED, currentBoot, recoverLaunchAfterReboot } from "./reboot-recovery.mjs";
 import { resolveLocalRuntime } from "./cloud-local-runtime.mjs";
 import { prepareAlphaLaunch } from "../alpha-instance.mjs";
-import { bindFixture } from "./hosted-fixtures.mjs";
+import { fixtureBindingDigest } from "./hosted-fixtures.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 // `backend` is the former headless action; Zeros Dev now always runs headless.
@@ -117,7 +117,7 @@ async function start(workspace, profile) {
   const issues = profileIssues(profile, { cloud: Boolean(profile.cloud) });
   if (issues.length) throw new Error(issues.join("\n"));
   if (workspace.state.fixture && (profile.fixture?.staffAccess === false || workspace.state.cloudSeed?.staffRole === null)) {
-    bindFixture(workspace.state, { ...profile.fixture, bootstrapOrganization: true });
+    fixtureBindingDigest(workspace.state, { ...profile.fixture, bootstrapOrganization: true });
   }
   const release = acquireWorkspaceLock(workspace), processes = new DevelopmentProcesses();
   const env = systemEnvironment(), runId = randomUUID(), token = randomUUID();

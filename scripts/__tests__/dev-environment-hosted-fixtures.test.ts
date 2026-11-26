@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { fixtureIssues, bindFixture, seedHostedFixture, verifyFixtureMembership, bootstrapFixtureOrganization } from "../dev-environment/hosted-fixtures.mjs";
+import { fixtureIssues, bindFixture, fixtureBindingDigest, seedHostedFixture, verifyFixtureMembership, bootstrapFixtureOrganization } from "../dev-environment/hosted-fixtures.mjs";
 import { validateStaffRoleRequest } from "../../apps/control-plane/src/manage-staff";
 
 const fixture = { workosUserId: "user_test", workosOrganizationId: "org_test", expectedEmail: "dev@example.test",
@@ -61,6 +61,14 @@ describe("explicit hosted Dev fixture", () => {
       const value = bindFixture({}, fixture);
       expect(Date.parse(value.endsAt) - Date.parse(value.startsAt)).toBe(7 * 86400_000);
     } finally { clock.mockRestore(); }
+  });
+  it("can restart an expired automation generation without renewing or reseeding its budget", () => {
+    const selected = { ...fixture, staffAccess: false }, state: any = {};
+    bindFixture(state, selected);
+    state.fixture.endsAt = "2000-01-01T00:00:00.000Z";
+    expect(fixtureBindingDigest(state, selected)).toBe(state.fixture.digest);
+    expect(() => fixtureBindingDigest(state, fixture)).toThrow(/archive/);
+    expect(() => bindFixture(state, selected)).toThrow(/expired/);
   });
   it("does not fabricate identity, membership or paid authority before normal sign-in", async () => {
     const f = setup(); expect(await seedHostedFixture(f)).toEqual({ seeded: false, needsSignIn: true });

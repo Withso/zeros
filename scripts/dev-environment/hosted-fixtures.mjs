@@ -24,13 +24,18 @@ export function assertCurrentFixtureFunding(fixture) {
     'The retired organization compute credit conflicts with current Pro funding. Review the standard Pro monthly allowance, archive this generation, then replace computeCreditMicroUsd with computeAllowance: "pro-monthly" in the private profile. No budget was increased automatically.');
 }
 
-export function bindFixture(state, fixture) {
+export function fixtureBindingDigest(state, fixture) {
   if (!fixture || fixtureIssues(fixture).length) throw new Error("Configure an explicit test organization in the private profile's fixture section before dev:seed");
   const digest = sha256(JSON.stringify([fixture.workosUserId, fixture.workosOrganizationId,
     fixture.expectedEmail.toLowerCase(), fixture.expectedOrganizationSlug, fixture.computeAllowance ?? fixture.computeCreditMicroUsd,
     ...(fixture.bootstrapOrganization ? [true] : []),
     ...(fixture.staffAccess === false ? ["non-staff"] : [])]));
   if (state.fixture && state.fixture.digest !== digest) throw new Error("The Dev fixture changed; archive before selecting a different test authority or credit budget");
+  return digest;
+}
+
+export function bindFixture(state, fixture) {
+  const digest = fixtureBindingDigest(state, fixture);
   const now = Date.now();
   state.fixture ??= { digest, startsAt: new Date(now).toISOString(), endsAt: new Date(now + 7 * 86400_000).toISOString() };
   if (Date.parse(state.fixture.endsAt) <= Date.now()) throw new Error("Dev fixture expired; archive and launch a fresh generation to reset it");
