@@ -53,8 +53,8 @@ not prove its contents, and bypassing the wrapper remains a review concern.
 | [A23](../../AGENTS.md#renderer-invariants) Reuse aggregates and stable selector/collection references; avoid waterfalls. <!-- rule:AGENTS.md:9e374fa6d2469506 --> | `read-caches.test.ts`, `keyed-async-cache.test.ts` | Shared reads only; hot consumers and per-row request cost need review. |
 | [A24](../../AGENTS.md#renderer-invariants) Gate internal surfaces and hotkeys on staff authorization plus the feature flag. <!-- rule:AGENTS.md:ae49711cbb592f69 --> | `internal-features.test.ts` | Gate semantics; applying the gate to each surface and hotkey needs review. |
 | [A25](../../AGENTS.md#renderer-invariants) Trace the owning UI, Design, transcript and Local CLI sources. <!-- rule:AGENTS.md:0e37e7c191040182 --> | `design-system-docs.test.ts` | Generated guidance is checked; actually reading and applying it is judgment. |
-| [A26](../../AGENTS.md#agent-credentials) Use the private Alpha/test credential file and never add Production keys. <!-- rule:AGENTS.md:7dea1d62c8c9b689 --> | `agent:check`, `check:secrets` | Environment contract and repository secret patterns; account/channel choice is operator judgment. |
-| [A27](../../AGENTS.md#agent-credentials) Check credentials read-only and never expose their values. <!-- rule:AGENTS.md:d69b9b014b844ac8 --> | `agent:check`, `check:secrets`, `CI secret scan` | Repository/commit scanning cannot prove that arbitrary command output is secret-free. |
+| [A26](../../AGENTS.md#agent-credentials) Use internal Ops MCP for infrastructure checks. Keep operator fixture credentials private. <!-- rule:AGENTS.md:e5deca413d91e374 --> | `internal-ops/server.test.ts`, `dev-environment-setup.test.ts`, `check:secrets` | Gateway authorization, provider response projection and default file seeding. Live client configuration requires operator verification. |
+| [A27](../../AGENTS.md#agent-credentials) Check operator credentials read-only and never expose their values. <!-- rule:AGENTS.md:e55ebd06924ff8c9 --> | `agent:check`, `check:secrets`, `CI secret scan` | Repository/commit scanning cannot prove that arbitrary command output is secret-free. |
 | [A28](../../AGENTS.md#agent-credentials) Use workspace Git/GitHub identity and the agent Co-Authored-By trailer. <!-- rule:AGENTS.md:3035352f84448c60 --> | `agent:merge` | Immediate merge pins workspace identity; prior commit authors and trailers need review. |
 | [A29](../../AGENTS.md#agent-credentials) Use the merge wrapper (CI definitions included); no merge queue, several armed PRs, main-red issue. <!-- rule:AGENTS.md:f46d079418c78544 --> | `agent:merge` | Wrapper names CI-definition paths, refuses failed/cancelled required checks, incident and skip markers, and guards identity and immediate mode; noticing a red main is the Main red alert workflow; bypassing the wrapper is judgment. |
 | [A30](../../AGENTS.md#agent-credentials) Reserve the bot for release automation; keep its key outside the repository. <!-- rule:AGENTS.md:51158c096260e0bc --> | `check:secrets` | Key patterns only; deciding whether work is a person's work is judgment. |
@@ -171,6 +171,8 @@ a workflow job. CI lanes run only under the repository's existing scope policy.
 | `CI scope` | CI lane | `.github/workflows/ci.yml#scope` |
 | `CI secret scan` | CI lane | `.github/workflows/ci.yml#secret-scan` |
 | `agent:check` | script | `package.json#agent:check` |
+| `internal-ops/server.test.ts` | test | `apps/control-plane/src/internal-ops/server.test.ts` |
+| `dev-environment-setup.test.ts` | test | `scripts/__tests__/dev-environment-setup.test.ts` |
 | `agent:merge` | script | `package.json#agent:merge` |
 | `build:ui` | script | `package.json#build:ui` |
 | `check:actions` | script | `package.json#check:actions` |

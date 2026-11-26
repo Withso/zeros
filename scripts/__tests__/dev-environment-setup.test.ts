@@ -101,8 +101,16 @@ describe("secure portable Dev setup", () => {
       expect(fs.statSync(file).mode & 0o777).toBe(0o600);
     }
     expect(f.git("status", "--porcelain")).toBe("");
-    expect(f.git("ls-files", "--others", "--ignored", "--exclude-from", path.resolve(import.meta.dirname, "../../.worktreeinclude"))).toBe("zeros-dev-env.json\n");
     expect(importDevelopmentProfile({ root: worktree, homeDir: f.home, source: f.source }).files).toHaveLength(3);
+  });
+
+  it("keeps gateway and provider credentials out of new agent worktrees", () => {
+    const f = fixture();
+    for (const file of [".env.agent", ".env.local", "zeros-dev-env.json", ".mcp.json", "apps/control-plane/.env", "apps/web/.dev.vars"]) {
+      fs.mkdirSync(path.dirname(path.join(f.root, file)), { recursive: true });
+      fs.writeFileSync(path.join(f.root, file), "private fixture");
+    }
+    expect(f.git("ls-files", "--others", "--ignored", "--exclude-from", path.resolve(import.meta.dirname, "../../.worktreeinclude"))).toBe("");
   });
 
   it("validates without reading providers or changing permissions in check mode", () => {

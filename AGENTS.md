@@ -119,11 +119,11 @@ to the renderer. For `zeros local`, start with its shipped skill and CLI help.
 
 ## Agent credentials
 
-- Live checks use the gitignored `.env.agent` at the repository root; its
-  template is `.env.agent.example`, and Conductor copies it into new
-  workspaces. It holds Alpha and test credentials only: never add Production
-  keys.
-- Run `pnpm agent:check` to verify it read-only. Never print, log, commit or
+- Development agents inspect infrastructure through one internal Ops MCP
+  connection. See [internal Ops setup](apps/control-plane/INTERNAL-OPS.md).
+  Provider credentials stay with Ops. Trusted operator fixtures can use a
+  private `.env.agent` for Alpha and test credentials only. Never add Production keys.
+- Operators can run `pnpm agent:check` to verify that fixture read-only. Never print, log, commit or
   echo a credential value, including in command arguments and test output.
 - Commits and pull requests use the workspace's own Git and GitHub identity,
   so authorship stays with whoever is working; the `Co-Authored-By` trailer

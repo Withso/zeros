@@ -3,9 +3,8 @@
 // agent-env-check — prove the agent credentials work, read-only
 // ──────────────────────────────────────────────────────────
 //
-// Agents read non-production credentials from the gitignored `.env.agent` at
-// the repository root (template: `.env.agent.example`); Conductor copies that
-// file into every new workspace. This check makes read-only requests for each
+// Operators can verify non-production credentials from a private .env.agent
+// in a trusted checkout. This check makes read-only requests for each
 // configured provider and reports what the credential can reach: the Alpha
 // resources it should, whether Production is refused, and when it
 // expires. An unset key is reported as not set, never as a failure. Values
