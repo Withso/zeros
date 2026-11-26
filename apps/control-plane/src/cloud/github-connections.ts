@@ -1,5 +1,6 @@
 import { createHash, randomBytes } from "node:crypto";
 import { z } from "zod";
+import { devConnectionsEnabled } from "../dev-connections/config.js";
 import { HttpError } from "../authz.js";
 import type { GithubBackendConfig } from "../config.js";
 import type { Tx } from "../db.js";
@@ -24,6 +25,7 @@ import {
 import {
   CloudGithubCredentialSchema,
   type CloudGithubCredential,
+  type CloudGithubMethod,
 } from "./github-credential-envelope.js";
 
 const changed = () =>
@@ -190,6 +192,12 @@ export class CloudGithubConnections {
       }),
     };
   }
+  /** Only an authenticated desktop holding the signed grant for this row can renew it. */
+  async deviceAppCredential(scope: CloudGithubConnectionScope, credentialId: string, rejectedTokenHash?: string) {
+    const snapshot = await this.store.deviceAppCredential(scope, credentialId, (material, account) => this.refresh(material, account), rejectedTokenHash);
+    if (snapshot.material.method !== "github-app") throw changed();
+    return snapshot.material;
+  }
   async gitIdentity(
     scope: CloudGithubConnectionScope,
     pending = this.access(scope),
@@ -233,6 +241,13 @@ export class CloudGithubConnections {
     if (identity.id !== credential.identity.id) throw changed();
     return identity;
   }
+  select(scope: CloudGithubConnectionScope, expected: string, method: CloudGithubMethod) {
+    return this.store.select(scope, expected, method, async (token, id) => {
+      const account = await this.identity(token, () => this.store.assertCurrent(scope, expected));
+      if (account.id !== id) throw changed();
+    });
+  }
+
   async connectPat(
     scope: CloudGithubConnectionScope,
     expected: string,
@@ -249,10 +264,11 @@ export class CloudGithubConnections {
         "invalid_input",
         "Enter a valid GitHub personal access token.",
       );
+    const guard = await this.store.patSaveGuard(scope, expected);
     const identity = await this.identity(token, () =>
       this.store.assertCurrent(scope, expected),
     );
-    await this.store.save(scope, expected, identity, material.data);
+    await this.store.save(scope, expected, identity, material.data, guard);
   }
   private requireApp(): GithubBackendConfig {
     if (!this.config)
@@ -403,6 +419,7 @@ export class CloudGithubConnections {
           : {}),
       },
       appAvailable: !!this.config,
+      sharedDesktopApp: !devConnectionsEnabled(process.env),
       installUrl: this.config
         ? `${this.config.webBaseUrl}/apps/${encodeURIComponent(this.config.appSlug)}/installations/new`
         : null,

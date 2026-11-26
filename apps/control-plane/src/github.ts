@@ -22,6 +22,7 @@ import type { GithubBackendConfig } from "./config.js";
 import { withSystemTx, withUserTx, type Tx } from "./db.js";
 import { HttpError, requireOrganizationMembership } from "./authz.js";
 import { GithubCloudUserAccess } from "./github-user-access.js";
+import type { CloudGithubConnections } from "./cloud/github-connections.js";
 import { GithubRepositoryAuthority } from "./github-repository-authority.js";
 export { mintGithubInstallationToken } from "./github-installation-tokens.js";
 import { createGithubAppJwt } from "./github-app-jwt.js";
@@ -87,6 +88,7 @@ const CloudInstallationTokenBodySchema = z
 type FetchLike = typeof fetch;
 
 export interface GithubRouteDependencies {
+  cloudGithub?: CloudGithubConnections;
   fetch?: FetchLike;
   now?: () => number;
   random?: (bytes: number) => Buffer;
@@ -257,6 +259,7 @@ function openHandoffToken(nonce: string, sealed: Buffer): string {
 }
 
 interface RefreshBindingPayload {
+  sharedApp?: { organizationId: string; credentialId: string };
   v: 1;
   /** Signing key version. Inside the signed payload because shipped desktops
    *  accept only the three-part `zghrb_v1` envelope. Absent on bindings that
@@ -284,6 +287,7 @@ function createRefreshBinding(
     refreshToken: string;
     expiresAtMs: number;
     grantGeneration: string;
+    sharedApp?: RefreshBindingPayload["sharedApp"];
   },
 ): string {
   const payload: RefreshBindingPayload = {
@@ -292,6 +296,7 @@ function createRefreshBinding(
     ownerUserId: input.ownerUserId,
     appVariant: input.appVariant,
     refreshTokenHash: base64url(sha256(input.refreshToken)),
+    ...(input.sharedApp ? { sharedApp: input.sharedApp } : {}),
     grantGeneration: input.grantGeneration,
     expiresAtMs: input.expiresAtMs,
   };
@@ -852,11 +857,13 @@ async function persistAuthorization(
 async function assertLiveAuthorization(
   tx: Tx,
   input: { ownerUserId: string; appVariant: string; grantGeneration: string },
+  holdUntilCommit = false,
 ): Promise<void> {
   const live = await tx.query(
     `SELECT 1
      FROM github_authorizations
-     WHERE owner_user_id = $1 AND app_variant = $2 AND grant_generation = $3`,
+     WHERE owner_user_id = $1 AND app_variant = $2 AND grant_generation = $3
+     ${holdUntilCommit ? "FOR SHARE" : ""}`,
     [input.ownerUserId, input.appVariant, input.grantGeneration],
   );
   if (live.rowCount === 0) {
@@ -1398,6 +1405,7 @@ export function createGithubRoutes(
       >;
       const nonce = parse(NonceSchema, body.nonce);
       if(dev){
+        if (body.shared) throw new HttpError(409, "dev_reference_required", "This Dev environment uses hosted GitHub references.");
         const handoff=await withSystemTx(pool,async tx=>(await tx.query<{binding_id:string}>(`DELETE FROM dev_github_handoffs
           WHERE nonce_hash=$1 AND owner_user_id=$2 AND expires_at>clock_timestamp() RETURNING binding_id`,[sha256(nonce),user.id])).rows[0]);
         if(!handoff)throw new HttpError(404,'handoff_not_found','This Dev GitHub handoff expired or was already used');
@@ -1440,9 +1448,12 @@ export function createGithubRoutes(
         );
       }
       if (!row.grant_generation) throw new HttpError(401, "github_binding_invalid", "Reconnect GitHub to renew this authorization.");
-      await withUserTx(pool, user.id, tx => assertLiveAuthorization(tx, {
-        ownerUserId: user.id, appVariant: row.app_variant, grantGeneration: row.grant_generation!,
-      }));
+      const grant = {
+        ownerUserId: user.id,
+        appVariant: row.app_variant,
+        grantGeneration: row.grant_generation,
+      };
+      await withUserTx(pool, user.id, tx => assertLiveAuthorization(tx, grant));
       let accessToken: string;
       let refreshToken: string;
       try {
@@ -1465,9 +1476,31 @@ export function createGithubRoutes(
       const refreshTokenExpiresAtMs = new Date(
         row.refresh_token_expires_at,
       ).getTime();
+      const expiresAtMs = new Date(row.access_token_expires_at).getTime();
+      let sharedApp: RefreshBindingPayload["sharedApp"];
+      if (body.shared !== undefined) {
+        const shared = parse(z.object({ organizationId: z.string().uuid(), expected: z.string().regex(/^[a-f0-9]{64}$/) }).strict(), body.shared);
+        if (!dependencies.cloudGithub) throw new HttpError(503, "github_not_configured", "Cloud GitHub is unavailable.");
+        const identity = await githubUser(fetchImpl, config, accessToken);
+        const credentialId = await dependencies.cloudGithub.store.save(
+          { organizationId: shared.organizationId, userId: user.id },
+          shared.expected,
+          { id: identity.githubUserId, login: identity.login },
+          {
+            method: "github-app", accessToken, refreshToken,
+            expiresAt: expiresAtMs, refreshExpiresAt: refreshTokenExpiresAtMs,
+          },
+          tx => assertLiveAuthorization(tx, grant, true),
+        );
+        sharedApp = { organizationId: shared.organizationId, credentialId };
+        // The rotating GitHub refresh token has one writer. The Mac holds a random
+        // proof of possession bound to the saved row and the Zeros account.
+        refreshToken = base64url(random(32));
+      }
       return c.json({
         accessToken,
-        expiresAtMs: new Date(row.access_token_expires_at).getTime(),
+        expiresAtMs,
+        ...(sharedApp ? { shared: true } : {}),
         refreshToken,
         refreshTokenExpiresAtMs,
         refreshBinding: createRefreshBinding(config, {
@@ -1476,6 +1509,7 @@ export function createGithubRoutes(
           grantGeneration: row.grant_generation,
           refreshToken,
           expiresAtMs: refreshTokenExpiresAtMs,
+          sharedApp,
         }),
         login: row.login,
         variantKey: row.app_variant,
@@ -1513,6 +1547,17 @@ export function createGithubRoutes(
           grantGeneration: binding.grantGeneration,
         }),
       );
+      if (binding.sharedApp) {
+        if (!dependencies.cloudGithub) throw new HttpError(503, "github_not_configured", "Cloud GitHub is unavailable.");
+        const scope = { organizationId: binding.sharedApp.organizationId, userId: user.id };
+        const rejected = body.rejectedTokenHash === undefined ? undefined : parse(z.string().regex(/^[a-f0-9]{64}$/), body.rejectedTokenHash);
+        const app = await dependencies.cloudGithub.deviceAppCredential(scope, binding.sharedApp.credentialId, rejected);
+        await withUserTx(pool, user.id, tx => assertLiveAuthorization(tx, binding));
+        return c.json({ accessToken: app.accessToken, expiresAtMs: app.expiresAt, refreshToken,
+          refreshTokenExpiresAtMs: app.refreshExpiresAt, refreshBinding: createRefreshBinding(config, {
+            ...binding, refreshToken, expiresAtMs: app.refreshExpiresAt,
+          }) });
+      }
       const bundle = await exchangeGithubToken(
         fetchImpl,
         config,
@@ -1607,16 +1652,15 @@ export function createGithubRoutes(
 
       let remotelyRevoked = false;
       let remoteFailure: string | null = null;
-      try {
-        remotelyRevoked = await revokeGithubAccessToken(
-          fetchImpl,
-          config,
-          accessToken,
-        );
-        if (!remotelyRevoked) remoteFailure = "github_refused";
-      } catch (error) {
-        remoteFailure =
-          error instanceof HttpError ? error.code : "github_unreachable";
+      // The desktop proof and the organization's saved credential have separate
+      // lifetimes. Only revoke a provider token held exclusively by the desktop.
+      if (!binding.sharedApp) {
+        try {
+          remotelyRevoked = await revokeGithubAccessToken(fetchImpl, config, accessToken);
+          if (!remotelyRevoked) remoteFailure = "github_refused";
+        } catch (error) {
+          remoteFailure = error instanceof HttpError ? error.code : "github_unreachable";
+        }
       }
 
       // Local metadata describes the Zeros-side connection, so remove it even

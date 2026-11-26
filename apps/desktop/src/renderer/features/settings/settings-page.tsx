@@ -141,6 +141,7 @@ import {
 import { repoPageViewForSection } from "../repositories/repo-page";
 import { OpenSettingsFileButton } from "../../shared/ui/open-settings-file-button";
 import { GitHubSection } from "./github-section";
+import { useSharedGithub } from "./use-shared-github";
 import { prefetchGithubAuthSnapshot } from "./github-auth-prefetch";
 import { JoinTeamDialog } from "../team/join-team-dialog";
 import { OrganizationSwitcher } from "../team/organization-switcher";
@@ -714,7 +715,7 @@ function ScopedSettingsPage({ owner }: { owner: string }) {
       onClick={() => setActive(userSelection(section.id))}
       onIntent={
         section.id === "integrations"
-          ? prefetchGithubAuthSnapshot
+          ? () => prefetchGithubAuthSnapshot(undefined, me?.user.id)
           : section.id === "local-storage"
             ? warmLocalStorage
           : section.id === "cloud-computer" && cloudOrganization && me
@@ -1416,34 +1417,44 @@ function IntegrationsPanel({ surfaceActive = true, unified = false }: { surfaceA
   const organization = useActiveOrganization();
   const { me } = useTeams();
   // Personal's cloud GitHub is its own Personal cloud's, with Pro.
-  const organizationId = organization ? usableCloudOrganization(organization)?.id ?? null : getActiveOrganizationIdSnapshot();
+  const cloudOrganization = usableCloudOrganization(organization);
+  const organizationId = organization
+    ? (cloudOrganization?.workspaceCapabilities?.cloud ? cloudOrganization.id : null)
+    : getActiveOrganizationIdSnapshot();
   const cloud = !!organizationId && isFeatureEnabled("cloud-workspaces") && !!me;
   const levels = useGithubLevels(me?.user.id ?? "", organizationId ?? "", surfaceActive && unified && cloud);
-  if (unified) {
-    const canManage = organization?.role === "owner" || organization?.role === "admin";
-    return <div className="flex flex-col gap-8">
-      <GitHubSection surfaceActive={surfaceActive} title={<PlaceLabel place="mac" />} />
-      {cloud && <CloudGithubSection key={`${me!.user.id}:${organizationId}`} personal={!!organization?.isPersonal}
-        userId={me!.user.id} organizationId={organizationId!} surfaceActive={surfaceActive} title={<PlaceLabel place="cloud" />} />}
+  const githubOwner = cloud ? { userId: me!.user.id, organizationId: organizationId!, name: organization?.name ?? "this organization" } : undefined;
+  const github = useSharedGithub(githubOwner, surfaceActive);
+  // Older control planes and reference-only Dev retain their credential adapters.
+  const separate = !!github.read.data && github.read.data.sharedDesktopApp !== true;
+  const canManage = organization?.role === "owner" || organization?.role === "admin";
+  return <div className="flex flex-col gap-8">
+      {(unified || !cloud || !separate) && (
+        <GitHubSection
+          key={JSON.stringify([me?.user.id, organizationId, separate])}
+          surfaceActive={surfaceActive}
+          {...(me ? { accountId: me.user.id } : {})}
+          title={cloud && !separate ? "Authentication" : unified ? <PlaceLabel place="mac" /> : "GitHub"}
+          {...(githubOwner && !separate ? { owner: githubOwner } : {})}
+        />
+      )}
+      {githubOwner && separate && <CloudGithubSection key={organizationId} personal={!!organization?.isPersonal}
+        userId={githubOwner.userId} organizationId={githubOwner.organizationId} surfaceActive={surfaceActive}
+        title={unified ? <PlaceLabel place="cloud" /> : "GitHub"} />}
       {/* A one-person organization shows both GitHub levels here, as one page. */}
-      {cloud && levels.connections?.solo && (
+      {unified && cloud && levels.connections?.solo && (
         <GithubConnectionsSection userId={me!.user.id} organizationId={organizationId!} level="organization" canManage={canManage} active={surfaceActive}
           personal={!!organization?.isPersonal}
           title={organization?.isPersonal ? "Projects" : `Shared with ${organization?.name ?? "the organization"}`}
           description={organization?.isPersonal ? "Your cloud projects pick their repositories from these." : "Organization projects pick their repositories from these."} />
       )}
-      {cloud && levels.connections && (
+      {unified && cloud && levels.connections && (
         <GithubConnectionsSection userId={me!.user.id} organizationId={organizationId!} level="personal" canManage active={surfaceActive}
           personal={!!organization?.isPersonal}
           title="Only you" description={organization?.isPersonal ? "Your own GitHub accounts, for projects only you use."
             : "Your own GitHub accounts. Projects only you use pick from these; nobody else sees them, admins included."} />
       )}
     </div>;
-  }
-  return <div className="flex flex-col gap-8">
-    {organizationId && isFeatureEnabled("cloud-workspaces") ? me && <CloudGithubSection key={`${me.user.id}:${organizationId}`} userId={me.user.id} organizationId={organizationId} surfaceActive={surfaceActive} />
-      : <GitHubSection surfaceActive={surfaceActive} />}
-  </div>;
 }
 
 

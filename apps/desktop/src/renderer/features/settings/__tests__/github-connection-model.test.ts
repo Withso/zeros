@@ -51,7 +51,7 @@ describe("GitHub settings row helpers", () => {
           health: "not-connected",
         }),
       ),
-    ).toEqual({ installFlow: true, forceInstall: false });
+    ).toEqual({ installFlow: false, forceInstall: false });
   });
 
   it("does not expose sign-in setup before the first confirmed auth snapshot", () => {

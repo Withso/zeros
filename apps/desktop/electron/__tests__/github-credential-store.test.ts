@@ -8,6 +8,7 @@ import {
   GITHUB_APP_ACCOUNT,
   GITHUB_LEGACY_ACCOUNT,
   GITHUB_PAT_ACCOUNT,
+  isGithubCredentialAccount,
   createGithubCredentialStore,
   migrateLegacyGithubCredential,
 } from "../github-credential-store";
@@ -17,7 +18,13 @@ const gitIdentity = {
   gitHttpUsername: "x-access-token",
 } as const;
 
+it("observes shared-store writes to an account's PAT slot", () => {
+  expect(isGithubCredentialAccount("github.pat.0e10f07e-04cf-49b9-91cf-b18563e73969")).toBe(true);
+  expect(isGithubCredentialAccount("github-app:dev-callbacks")).toBe(false);
+});
+
 function harness(options?: {
+  currentAccount?: () => string | null;
   selected?: GithubAuthMethod | null;
   gh?: GithubCredential | null;
 }) {
@@ -26,6 +33,7 @@ function harness(options?: {
   let disconnectedAt: string | null = null;
   const writes: GithubAuthMethod[] = [];
   const store = createGithubCredentialStore({
+    ...(options?.currentAccount ? { currentAccount: options.currentAccount } : {}),
     readSecret: (account) => secrets.get(account) ?? null,
     writeSecret: (account, value) => secrets.set(account, value),
     deleteSecret: (account) => secrets.delete(account),
@@ -50,6 +58,41 @@ function harness(options?: {
 }
 
 describe("GitHub credential store", () => {
+  it("preserves existing device PATs without adopting them when a Zeros account signs in", async () => {
+    let current: string | null = null;
+    const { store, secrets } = harness({ currentAccount: () => current, selected: "pat" });
+    const devicePat = { ...gitIdentity, method: "pat", accessToken: "device-pat" } as const;
+    await store.set("pat", devicePat);
+    secrets.set(GITHUB_LEGACY_ACCOUNT, "device-legacy");
+
+    current = "member";
+    expect(await store.getSelectedCredential()).toBeNull();
+    expect(await migrateLegacyGithubCredential(store)).toBeNull();
+    await store.clear("pat");
+    await expect(store.set("pat", devicePat)).rejects.toThrow();
+
+    current = null;
+    expect(await store.getSelectedCredential()).toEqual(devicePat);
+    expect(store.readLegacyToken()).toBe("device-legacy");
+  });
+  it("restores each Zeros account's own PAT for the same GitHub login after a switch", async () => {
+    const a = "11111111-1111-4111-8111-111111111111", b = "22222222-2222-4222-8222-222222222222";
+    let current: string | null = a;
+    const { store } = harness({ currentAccount: () => current, selected: "pat" });
+    const pat = { ...gitIdentity, method: "pat", login: "octocat", accessToken: "synthetic-token-a", ownerSub: a } as const;
+    await store.set("pat", pat);
+    current = b;
+    expect(await store.getSelectedCredential()).toBeNull();
+    await expect(store.set("pat", pat)).rejects.toThrow();
+    await store.set("pat", { ...pat, accessToken: "synthetic-token-b", ownerSub: b });
+    current = a;
+    expect(await store.getSelectedCredential()).toEqual(pat);
+    await store.clear("pat");
+    current = b;
+    expect(await store.getSelectedCredential()).toMatchObject({ accessToken: "synthetic-token-b" });
+    current = null;
+    expect(await store.getSelectedCredential()).toBeNull();
+  });
   it("defaults to gh CLI and never persists its borrowed token", async () => {
     const gh = {
       ...gitIdentity,

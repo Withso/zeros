@@ -22,7 +22,7 @@ import {
   verifyGithubToken,
 } from "../../../src/engine/git";
 import { githubCredentialStore } from "../../github-auth-runtime";
-import { GithubAppClientError } from "../../github-app-client";
+import { GithubAppClientError, sharedGithubTarget } from "../../github-app-client";
 import { GithubAppFlowError } from "../../github-app-controller";
 import {
   beginGithubAppConnection,
@@ -228,7 +228,9 @@ async function storedMethodSummary(
 
 export async function getGithubAuthSnapshot(
   refreshAppInstallations = false,
+  expectedAccount?: unknown,
 ): Promise<GithubAuthSnapshot> {
+  assertAccount(expectedAccount);
   const selectedMethod = await githubCredentialStore.getSelectedMethod();
   const [cli, app, pat] = await Promise.all([
     detectGhCli().catch(() => ({
@@ -305,14 +307,16 @@ export async function getGithubAuthSnapshot(
       await pushGithubCredentialToEngine();
     }
   }
+  assertAccount(expectedAccount);
   return snapshot;
 }
 
-export const ghAuthSnapshot: CommandHandler = async (args) =>
-  getGithubAuthSnapshot(args.refreshApp === true);
+export const ghAuthSnapshot: CommandHandler = (args) =>
+  getGithubAuthSnapshot(args.refreshApp === true, args.userId);
 
 /** Switch to an already-configured method. Validation happens before commit. */
 export const ghMethodSelect: CommandHandler = async (args) => {
+  assertAccount(args.userId);
   const method = requireMethod(args, "gh_method_select");
   let credential =
     method === "gh-cli"
@@ -348,21 +352,31 @@ export const ghMethodSelect: CommandHandler = async (args) => {
     if (!credential) throw error;
     await verifyGithubToken(credential.accessToken);
   }
+  assertAccount(args.userId);
   await githubCredentialStore.setSelectedMethod(method);
   methodSelectionRevision += 1;
   if (method === "pat") rejectedPatToken = null;
   await pushGithubCredentialToEngine();
-  return getGithubAuthSnapshot();
+  return getGithubAuthSnapshot(false, args.userId);
 };
+
+function assertAccount(expected: unknown) {
+  if (expected !== undefined && expected !== getProductAccountIdForMain())
+    throw new Error("Your Zeros account changed. Reconnect GitHub to continue.");
+}
 
 /** Validate and atomically replace the PAT slot, then select it. */
 export const ghPatConnect: CommandHandler = async (args) => {
   const token = requireString(args, "token", "gh_pat_connect");
+  const owner = getProductAccountIdForMain();
   const previous = await githubCredentialStore.get("pat");
   const { login } = await verifyGithubToken(token);
+  assertAccount(owner);
+  assertAccount(args.userId);
   const next: GithubCredential = {
     method: "pat",
     accessToken: token,
+    ...(owner ? { ownerSub: owner } : {}),
     login,
     gitHost: GITHUB_GIT_HOST,
     gitHttpUsername: GITHUB_GIT_HTTP_USERNAME,
@@ -383,7 +397,7 @@ export const ghPatConnect: CommandHandler = async (args) => {
   // Return the post-write snapshot so Settings never has to re-probe to learn
   // about a write it just made — a failed follow-up probe used to leave the row
   // reading "not connected" underneath a success toast.
-  return { login, snapshot: await getGithubAuthSnapshot() };
+  return { login, snapshot: await getGithubAuthSnapshot(false, owner) };
 };
 
 /** Compact, secret-free account of what the control plane actually answered,
@@ -467,16 +481,15 @@ export function withNativeErrors(handler: CommandHandler): CommandHandler {
   };
 }
 
-/** Begin the control-plane-bound browser authorization. Release first connects
- * use the App install URL; reconnects use OAuth + S256 PKCE.
- * A completed empty inventory may explicitly force the install URL so an
- * authorization-only account can recover. */
+/** Settings uses OAuth first. A confirmed empty installation inventory can
+ * open the repository picker explicitly. Older callers keep their default. */
 export const ghAppConnect: CommandHandler = async (args) => {
   try {
     const flowKind = await beginGithubAppConnection(
       args.installFlow !== false,
       args.forceInstall === true,
       args.preserveSelectedMethod === true,
+      ...(args.shared === undefined ? [] : [sharedGithubTarget.parse(args.shared)] as const),
     );
     return flowKind ? { flowKind } : null;
   } catch (error) {
@@ -488,14 +501,12 @@ export const ghAppConnect: CommandHandler = async (args) => {
   }
 };
 
-export const ghAppCancel: CommandHandler = () => {
-  cancelGithubAppConnection();
-  return null;
-};
+export const ghAppCancel: CommandHandler = () => cancelGithubAppConnection();
 
 /** Remove only the addressed method. Active App/PAT falls back to gh CLI. */
 export const ghMethodDisconnect: CommandHandler = async (args) => {
   const method = requireMethod(args, "gh_method_disconnect");
+  assertAccount(args.userId);
   const selected = await githubCredentialStore.getSelectedMethod();
   let undo: { id: string; expiresAtMs: number } | undefined;
   let fallbackSelectionRevision: number | null = null;
@@ -512,7 +523,7 @@ export const ghMethodDisconnect: CommandHandler = async (args) => {
     }
     try {
       if (method === "github-app") {
-        const removed = await disconnectGithubApp().catch((error: unknown) =>
+        const removed = await disconnectGithubApp(typeof args.userId === "string" ? args.userId : undefined).catch((error: unknown) =>
           throwGithubAppCommandError(error, "gh_method_disconnect"),
         );
         if (!removed) {
@@ -522,6 +533,7 @@ export const ghMethodDisconnect: CommandHandler = async (args) => {
         }
       } else {
         const previous = await githubCredentialStore.get("pat");
+        assertAccount(args.userId);
         await githubCredentialStore.clear(method);
         rejectedPatToken = null;
         if (previous?.method === "pat") {
@@ -556,7 +568,7 @@ export const ghMethodDisconnect: CommandHandler = async (args) => {
   patUndoSelectionRevision = undo ? methodSelectionRevision : null;
   await pushGithubCredentialToEngine();
   return {
-    snapshot: await getGithubAuthSnapshot(),
+    snapshot: await getGithubAuthSnapshot(false, args.userId),
     ...(undo ? { undoId: undo.id, undoExpiresAtMs: undo.expiresAtMs } : {}),
   };
 };

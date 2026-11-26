@@ -238,7 +238,7 @@ export function CloudGithubSection({
                     }
                     onClick={() =>
                       method === "github-app"
-                        ? void run(() => begin(!summary?.configured))
+                        ? void run(() => begin(false))
                         : setPatOpen((value) => !value)
                     }
                   >

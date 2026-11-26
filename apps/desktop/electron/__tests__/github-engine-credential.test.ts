@@ -56,5 +56,10 @@ describe("host-to-engine GitHub credential projection", () => {
       gitHttpUsername: "x-access-token",
     } as const;
     expect(githubCredentialForEngine(pat, null, 1_000_000)).toEqual(pat);
+    expect(githubCredentialForEngine(pat, "account-owner")).toBeNull();
+    const scoped = { ...pat, ownerSub: "account-owner" };
+    expect(githubCredentialForEngine(scoped, "account-owner")).toEqual(pat);
+    expect(githubCredentialForEngine(scoped, "account-another")).toBeNull();
+    expect(githubCredentialForEngine(scoped, null)).toBeNull();
   });
 });

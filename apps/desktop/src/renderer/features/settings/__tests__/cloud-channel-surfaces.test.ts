@@ -34,7 +34,9 @@ vi.mock("../../team/join-team-dialog", () => ({ JoinTeamDialog: () => null }));
 vi.mock("../cloud-computer-panel", () => ({ CloudComputerPanel: () => { state.cloudPanel(); return "cloud-computer-fixture"; } }));
 vi.mock("../cloud-computer-store", () => ({ prefetchCloudComputer: () => {}, useCloudComputerRepositories: () => [] }));
 vi.mock("../cloud-github-section", () => ({ CloudGithubSection: () => { state.cloudPanel(); return "cloud-github-fixture"; } }));
-vi.mock("../github-section", () => ({ GitHubSection: () => { state.localPanel(); return "local-github-fixture"; } }));
+vi.mock("../github-section", () => ({ GitHubSection: ({ owner }: { owner?: unknown }) => {
+  state.localPanel(); return owner ? "shared-github-fixture" : "local-github-fixture";
+} }));
 vi.mock("../providers-panel", () => ({ ProvidersPanel: () => { state.localPanel(); return "agents-fixture"; } }));
 vi.mock("../../../shell/add-project-provider", () => ({
   useAddProject: () => ({ openProject: vi.fn(), openGithubProject: vi.fn(), quickStart: vi.fn() }),
@@ -52,7 +54,7 @@ function settings() {
 beforeEach(() => {
   vi.clearAllMocks();
   state.allowed = false;
-  state.organization = { id: "org-fixture", isPersonal: false } as OrganizationSummary;
+  state.organization = { id: "org-fixture", isPersonal: false, workspaceCapabilities: { local: true, cloud: true } } as OrganizationSummary;
   state.section = "user:cloud-computer";
 });
 afterEach(() => vi.unstubAllEnvs());
@@ -98,8 +100,8 @@ describe("paused cloud entry points", () => {
     state.allowed = true;
     expect(settings()).toContain("cloud-computer-fixture");
     state.section = "user:integrations";
-    expect(settings()).toContain("cloud-github-fixture");
-    expect(state.cloudPanel).toHaveBeenCalledTimes(2);
+    expect(settings()).toContain("shared-github-fixture");
+    expect(state.cloudPanel).toHaveBeenCalledTimes(1);
   });
 
   it("replaces organization creation with a pause notice, leaving Local creation available", () => {

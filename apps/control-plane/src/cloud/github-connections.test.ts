@@ -53,6 +53,7 @@ function fixture(method: "pat" | "github-app" = "pat") {
     selectedIdentity: vi.fn(async () => ({ identity, assertCurrent })),
     assertCurrent: vi.fn(async () => {}),
     save: vi.fn(async () => {}),
+    patSaveGuard: vi.fn(async () => async () => {}),
     fingerprint: vi.fn(async () => "g1"),
     status: vi.fn(),
     beginOauth: vi.fn(async () => "g2"),

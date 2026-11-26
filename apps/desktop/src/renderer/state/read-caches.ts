@@ -251,10 +251,8 @@ export function invalidateWorkingDirectoriesReadCache(
   }
 }
 
-/** Single-key ("auth") — GitHub auth probe (status + CLI detection) for the
- *  settings section. Auth changes only on explicit sign-in/out, which write
- *  through setData; the freshness window merely catches out-of-band changes. */
-export const ghAuthStatusCache = new KeyedAsyncCache<GithubAuthSnapshot>(1);
+/** Device probes use "auth"; signed-in Settings keeps a snapshot per Zeros account. */
+export const ghAuthStatusCache = new KeyedAsyncCache<GithubAuthSnapshot>(16);
 
 /** Single-key ("owners") — authed user + orgs for the publish dialog. */
 export const ghOwnersCache = new KeyedAsyncCache<GithubOwner[]>(1);

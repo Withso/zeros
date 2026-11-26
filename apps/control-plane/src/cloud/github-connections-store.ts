@@ -18,6 +18,8 @@ export type CloudGithubConnectionScope = {
   userId: string;
 };
 export type CloudGithubAccount = { id: string; login: string; name?: string };
+const desktopAppRow = Symbol("desktopAppRow");
+type CredentialScope = CloudGithubConnectionScope & { [desktopAppRow]?: string };
 export interface CloudGithubCredentialSnapshot {
   material: CloudGithubCredential;
   identity: CloudGithubAccount;
@@ -120,7 +122,7 @@ export class CloudGithubConnectionStore {
 
   private async snapshot(
     tx: Tx,
-    scope: CloudGithubConnectionScope,
+    scope: CredentialScope,
   ): Promise<Snapshot> {
     const confirmed = (
       await tx.query<Actor & { organization_id: string; user_id: string }>(
@@ -128,8 +130,9 @@ export class CloudGithubConnectionStore {
       FROM organization_members m JOIN users u ON u.id=m.user_id JOIN organizations o ON o.id=m.org_id
       LEFT JOIN cloud_github_selections s ON s.org_id=m.org_id AND s.owner_user_id=m.user_id
       WHERE m.org_id=$1 AND m.user_id=$2 AND u.auth_status='active' AND u.deleted_at IS NULL
-        AND o.deleted_at IS NULL AND cloud_organization_enabled(o)`,
-        [scope.organizationId, scope.userId],
+        AND o.deleted_at IS NULL AND (cloud_organization_enabled(o)
+          OR ($3::boolean AND o.is_personal AND o.created_by=m.user_id))`,
+        [scope.organizationId, scope.userId, !!scope[desktopAppRow]],
       )
     ).rows[0];
     if (!confirmed)
@@ -288,13 +291,15 @@ export class CloudGithubConnectionStore {
     expected: string,
     identity: CloudGithubAccount,
     material: CloudGithubCredential,
-  ): Promise<void> {
+    checkAuthority?: (tx: Tx) => Promise<void>,
+  ): Promise<string> {
     if (
       !/^[1-9][0-9]{0,15}$/.test(identity.id) ||
       !/^[A-Za-z0-9_.-]{1,100}$/.test(identity.login)
     )
       throw expired();
-    await this.edit(scope, expected, async (tx, value) => {
+    return this.edit(scope, expected, async (tx, value) => {
+      await checkAuthority?.(tx);
       const seal = {
         id: randomUUID(),
         generation: randomUUID(),
@@ -328,17 +333,35 @@ export class CloudGithubConnectionStore {
           material.expiresAt === null ? null : new Date(material.expiresAt),
         ],
       );
+      return seal.id;
     });
   }
   async select(
     scope: CloudGithubConnectionScope,
     expected: string,
     method: CloudGithubMethod,
+    verifyPat: (token: string, githubUserId: string) => Promise<void>,
   ): Promise<void> {
+    if (method === "pat") {
+      const snapshot = await this.read(scope);
+      if (snapshot.generation !== expected) throw changed();
+      const { row, material } = this.selectedCredential(snapshot, undefined, method);
+      await verifyPat(material.accessToken, row.github_user_id);
+    }
     await this.edit(scope, expected, async (tx, value) => {
       if (!value.rows.some((row) => row.method === method)) throw required();
       await this.selection(tx, value.scope, method);
     });
+  }
+  async patSaveGuard(scope: CloudGithubConnectionScope, expected: string) {
+    const readRevision = async (tx: Tx) => (await tx.query<{ revision: string }>(
+      "SELECT revision FROM cloud_github_pat_removals WHERE org_id=$1 AND owner_user_id=$2",
+      [scope.organizationId, scope.userId],
+    )).rows[0]?.revision;
+    const beforeValidation = await this.edit(scope, expected, readRevision);
+    return async (tx: Tx) => {
+      if (await readRevision(tx) !== beforeValidation) throw changed();
+    };
   }
   async disconnect(
     scope: CloudGithubConnectionScope,
@@ -346,6 +369,16 @@ export class CloudGithubConnectionStore {
     method: CloudGithubMethod,
   ): Promise<void> {
     await this.edit(scope, expected, async (tx, value) => {
+      // A Mac-only PAT removal confirms the empty slot under the lock. Preserve
+      // the generation for an unrelated App exchange waiting to commit.
+      if (method === "pat" && value.actor.selected_method !== "pat" && !value.rows.some(row => row.method === "pat")) {
+        await tx.query(
+          `INSERT INTO cloud_github_pat_removals(org_id, owner_user_id) VALUES ($1,$2)
+           ON CONFLICT (org_id, owner_user_id) DO UPDATE SET revision=EXCLUDED.revision`,
+          [scope.organizationId, scope.userId],
+        );
+        return;
+      }
       await tx.query(
         "DELETE FROM cloud_github_credentials WHERE org_id=$1 AND owner_user_id=$2 AND method=$3",
         [scope.organizationId, scope.userId, method],
@@ -436,8 +469,10 @@ export class CloudGithubConnectionStore {
       );
     });
   }
-  private selectedCredential(value: Snapshot) {
-    const row = value.rows.find(row => row.method === value.actor.selected_method);
+  private selectedCredential(value: Snapshot, deviceAppId?: string, method = value.actor.selected_method) {
+    const row = value.rows.find(row => deviceAppId
+      ? row.id === deviceAppId && row.method === "github-app"
+      : row.method === method);
     if (!row) throw required();
     try {
       return { row, material: openGithubCredential(
@@ -456,12 +491,17 @@ export class CloudGithubConnectionStore {
       assertCurrent: () => this.assertCurrent(scope, value.generation) };
   }
 
+  /** A device proof can renew its owner's exact Personal App row after Pro ends. */
+  deviceAppCredential(scope: CloudGithubConnectionScope, id: string, refresh: RefreshCloudGithub, rejected?: string) {
+    return this.credential({ ...scope, [desktopAppRow]: id }, refresh, rejected);
+  }
+
   async credential(
-    scope: CloudGithubConnectionScope,
+    scope: CredentialScope,
     refresh?: RefreshCloudGithub,
     failedTokenSha256?: string,
   ): Promise<CloudGithubCredentialSnapshot> {
-    const value = await this.read(scope), { row, material } = this.selectedCredential(value);
+    const value = await this.read(scope), { row, material } = this.selectedCredential(value, scope[desktopAppRow]);
     if (failedTokenSha256 === createHash("sha256").update(material.accessToken).digest("hex")) {
       const marked = await this.edit(scope, value.generation, async tx => (await tx.query(
         "UPDATE cloud_github_credentials SET expires_at=LEAST(expires_at,now()),updated_at=now() WHERE id=$1 AND version=$2 RETURNING id",

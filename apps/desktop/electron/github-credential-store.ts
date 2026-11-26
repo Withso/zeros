@@ -19,7 +19,13 @@ export const GITHUB_LEGACY_ACCOUNT = "github_oauth";
 export const GITHUB_PAT_ACCOUNT = "github.pat";
 export const GITHUB_APP_ACCOUNT = "github.app";
 
+export function isGithubCredentialAccount(account: string): boolean {
+  return account === GITHUB_APP_ACCOUNT || account === GITHUB_LEGACY_ACCOUNT ||
+    account === GITHUB_PAT_ACCOUNT || account.startsWith(`${GITHUB_PAT_ACCOUNT}.`);
+}
+
 export interface GithubCredentialStoreDependencies {
+  currentAccount?(): string | null;
   readSecret(account: string): string | null;
   writeSecret(account: string, value: string): void;
   deleteSecret(account: string): void;
@@ -58,6 +64,10 @@ function parseSlot(raw: string | null, method: GithubAuthMethod) {
 export function createGithubCredentialStore(
   deps: GithubCredentialStoreDependencies,
 ): HostGithubCredentialStore {
+  function currentSlot(method: "pat" | "github-app") {
+    const owner = method === "pat" && deps.currentAccount?.();
+    return owner ? `${GITHUB_PAT_ACCOUNT}.${owner}` : accountFor(method);
+  }
   const store: HostGithubCredentialStore = {
     async getSelectedMethod() {
       // Product default: gh CLI is the selected row on a fresh install.
@@ -86,7 +96,7 @@ export function createGithubCredentialStore(
         const credential = await deps.readGhCliCredential();
         return credential?.method === "gh-cli" ? credential : null;
       }
-      return parseSlot(deps.readSecret(accountFor(method)), method);
+      return parseSlot(deps.readSecret(currentSlot(method)), method);
     },
 
     async set(method, value) {
@@ -102,7 +112,10 @@ export function createGithubCredentialStore(
         return;
       }
 
-      const account = accountFor(method);
+      if (credential.method === "pat" && credential.ownerSub !== (deps.currentAccount?.() ?? undefined)) {
+        throw new Error("The Zeros account changed before the token was saved.");
+      }
+      const account = currentSlot(method);
       deps.writeSecret(account, JSON.stringify(credential));
 
       // A safeStorage encryption or whole-file write can fail. Confirm the
@@ -119,7 +132,7 @@ export function createGithubCredentialStore(
 
     async clear(method) {
       if (method === "gh-cli") return;
-      deps.deleteSecret(accountFor(method));
+      deps.deleteSecret(currentSlot(method));
     },
 
     async getSelectedCredential() {
@@ -151,7 +164,8 @@ export function createGithubCredentialStore(
     },
 
     readLegacyToken() {
-      return deps.readSecret(GITHUB_LEGACY_ACCOUNT);
+      // A pre-account token has no owner evidence. It belongs to device Local.
+      return deps.currentAccount?.() ? null : deps.readSecret(GITHUB_LEGACY_ACCOUNT);
     },
 
     deleteLegacyToken() {

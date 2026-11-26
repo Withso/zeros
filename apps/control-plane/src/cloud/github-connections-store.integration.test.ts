@@ -1,5 +1,8 @@
 import { createHash, randomUUID } from "node:crypto";
 import pg from "pg";
+import { Hono } from "hono";
+import { CloudGithubConnections } from "./github-connections.js";
+import { createCloudGithubConnectionRoutes } from "./github-connection-routes.js";
 import {
   afterAll,
   beforeAll,
@@ -265,6 +268,50 @@ database("cloud GitHub connection ownership and rotation", () => {
     await expect(reconnected!.assertCurrent()).rejects.toMatchObject({ code: "not_found" });
     await expect(store.selectedIdentity(scope())).rejects.toMatchObject({ code: "not_found" });
   });
+  it("keeps the working App selected when the saved PAT is revoked", async () => {
+    await save();
+    await store.save(scope(), await store.fingerprint(scope()), identity, app);
+    const expected = await store.fingerprint(scope());
+    const github = vi.fn(async (_url: unknown, init?: RequestInit) =>
+      new Headers(init?.headers).get("authorization") === `Bearer ${pat.accessToken}`
+        ? new Response(null, { status: 401 })
+        : Response.json({ id: Number(identity.id), login: identity.login }));
+    const api = new Hono();
+    api.use("*", async (c, next) => { c.set("user", { id: userId } as never); await next(); });
+    api.onError((error, c) => error instanceof HttpError
+      ? c.json({ code: error.code }, error.status) : c.json({ code: "internal" }, 500));
+    api.route("/", createCloudGithubConnectionRoutes(new CloudGithubConnections(store, null, github)));
+    const response = await api.request("/v1/cloud-v2/github/connection", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ action: "select", method: "pat", organizationId, expected }),
+    });
+    expect(response.status).toBe(409);
+    expect(await response.json()).toEqual({ code: "github_authorization_expired" });
+    expect(github).toHaveBeenCalledTimes(1);
+    expect((await store.status(scope())).selectedMethod).toBe("github-app");
+  });
+
+  it("allows a pending App exchange to save after a Mac-only PAT is removed", async () => {
+    const before = await store.status(scope());
+    expect(before.methods.pat.configured).toBe(false);
+    await store.disconnect(scope(), before.generation, "pat");
+    await store.save(scope(), before.generation, identity, app);
+    expect((await store.status(scope())).selectedMethod).toBe("github-app");
+  });
+
+  it("rejects a PAT that another replica was validating when an empty slot was disconnected", async () => {
+    const expected = await store.fingerprint(scope());
+    const otherReplica = new CloudGithubConnectionStore(pool, keys);
+    const github = vi.fn(async () => {
+      await otherReplica.disconnect(scope(), expected, "pat");
+      return Response.json({ id: Number(identity.id), login: identity.login });
+    });
+    const service = new CloudGithubConnections(store, null, github);
+    await expect(service.connectPat(scope(), expected, pat.accessToken)).rejects.toMatchObject({ code: "github_authorization_changed" });
+    expect(github).toHaveBeenCalledOnce();
+    expect((await store.status(scope())).methods.pat.configured).toBe(false);
+  });
+
   it("preserves inactive methods while selecting the explicit connection", async () => {
     await store.save(
       scope(),
@@ -274,7 +321,7 @@ database("cloud GitHub connection ownership and rotation", () => {
     );
     await save();
     const status = await store.status(scope());
-    await store.select(scope(), status.generation, "github-app");
+    await store.select(scope(), status.generation, "github-app", vi.fn());
     const access = await store.credential(scope());
     expect(access.material.method).toBe("github-app");
     expect((await store.status(scope())).methods.pat.configured).toBe(true);
@@ -333,11 +380,13 @@ database("cloud GitHub connection ownership and rotation", () => {
       scope(),
       (await store.status(scope())).generation,
       "github-app",
+      vi.fn(),
     );
     await store.select(
       scope(),
       (await store.status(scope())).generation,
       "pat",
+      vi.fn(),
     );
     await expect(access.assertCurrent()).rejects.toMatchObject({
       code: "github_authorization_changed",

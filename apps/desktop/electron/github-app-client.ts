@@ -7,6 +7,7 @@ import { DevGithubConnectionSchema } from "./dev-github-reference";
 // memory; renderer-facing code receives separate metadata-only events.
 
 import type { GithubCredential } from "@zeros/protocol/github-auth";
+import { z } from "zod";
 
 const REQUEST_TIMEOUT_MS = 15_000;
 const MAX_AUTHORIZATION_WINDOW_MS = 15 * 60_000;
@@ -21,6 +22,12 @@ type GithubAppCredential = Extract<
 >;
 
 export type GithubAppFlowKind = "oauth" | "install";
+export const sharedGithubTarget = z.object({
+  organizationId: z.string().uuid(),
+  userId: z.string().uuid(),
+  expected: z.string().regex(/^[a-f0-9]{64}$/),
+}).strict();
+export type SharedGithubTarget = z.infer<typeof sharedGithubTarget>;
 
 export interface GithubAppStartResult {
   authorizeUrl: string;
@@ -420,25 +427,25 @@ export class GithubAppClient {
   async exchange(
     accessToken: string,
     nonce: string,
+    shared?: SharedGithubTarget,
   ): Promise<GithubAppTokenResult> {
-    return parseTokenResult(
-      await this.request(accessToken, "/v1/github/oauth/exchange", {
-        nonce,
-      }),
-      true,
-      this.now(),
-    );
+    const value = await this.request(accessToken, "/v1/github/oauth/exchange", { nonce,
+      ...(shared ? { shared: { organizationId: shared.organizationId, expected: shared.expected } } : {}) });
+    if (shared && record(value).shared !== true) throw new Error("Update the control plane to connect GitHub for Local and Cloud.");
+    return parseTokenResult(value, true, this.now());
   }
 
   async refresh(
     accessToken: string,
     refreshToken: string,
     refreshBinding: string,
+    rejectedTokenHash?: string,
   ): Promise<GithubAppTokenResult> {
     return parseTokenResult(
       await this.request(accessToken, "/v1/github/oauth/refresh", {
         refreshToken,
         refreshBinding,
+        ...(rejectedTokenHash ? { rejectedTokenHash } : {}),
       }),
       false,
       this.now(),

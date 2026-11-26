@@ -1,4 +1,5 @@
 import type { DevGithubConnection } from "./dev-github-reference";
+import { createHash } from "node:crypto";
 // Main-process GitHub App state machine with all host dependencies injected.
 //
 // Keeping the orchestration pure makes the security contracts executable:
@@ -19,6 +20,7 @@ import {
   GithubAppClientError,
   type GithubAppClient,
   type GithubAppFlowKind,
+  type SharedGithubTarget,
 } from "./github-app-client";
 
 type GithubAppCredential = Extract<GithubCredential, { method: "github-app" }>;
@@ -53,7 +55,7 @@ export type GithubAppConnectionErrorReason =
   | "storage_failed";
 
 export type PendingConsumeResult =
-  | { status: "consumed"; preserveSelectedMethod?: boolean | undefined; ownerSub?: string | undefined }
+  | { status: "consumed"; preserveSelectedMethod?: boolean | undefined; ownerSub?: string | undefined; shared?: SharedGithubTarget }
   | {
       status: "missing" | "mismatch" | "expired";
     };
@@ -80,7 +82,7 @@ export interface GithubAppControllerDependencies {
     next: GithubAppCredential | null,
   ): Promise<boolean>;
   getSession(): Promise<{ accessToken: string; sub: string } | null>;
-  savePending(input: { nonce: string; expiresAtMs: number; preserveSelectedMethod?: boolean; ownerSub?: string }): void;
+  savePending(input: { nonce: string; expiresAtMs: number; preserveSelectedMethod?: boolean; ownerSub?: string; shared?: SharedGithubTarget }): void;
   consumePending(nonce: string): PendingConsumeResult;
   discardPending(nonce: string): void;
   clearPending(): void;
@@ -235,6 +237,7 @@ export class GithubAppController {
    * anything to clear, so a cancel during those round trips has no persisted
    * state to remove — it has to be observed in memory instead. */
   private cancelEpoch = 0;
+  private committingSharedApp = false;
 
   constructor(private readonly deps: GithubAppControllerDependencies) {
     this.now = deps.now ?? Date.now;
@@ -245,11 +248,12 @@ export class GithubAppController {
     installFlow: boolean;
     forceInstall?: boolean;
     preserveSelectedMethod?: boolean;
+    shared?: SharedGithubTarget;
   }): Promise<GithubAppFlowKind | null> {
-    this.cancel();
+    if (!this.cancel()) throw new GithubAppFlowError("The GitHub connection is finishing.", "oauth_failed");
     const epoch = this.cancelEpoch;
     const session = await this.deps.getSession();
-    if (!session) {
+    if (!session || (input.shared && session.sub !== input.shared.userId)) {
       throw new GithubAppFlowError(
         "Sign in to Zeros before connecting the GitHub App.",
         "signed_out",
@@ -285,6 +289,7 @@ export class GithubAppController {
       nonce,
       expiresAtMs: started.expiresAtMs,
       ownerSub: session.sub,
+      ...(input.shared ? { shared: input.shared } : {}),
       ...(input.preserveSelectedMethod ? { preserveSelectedMethod: true } : {}),
     });
     try {
@@ -303,7 +308,13 @@ export class GithubAppController {
 
   /** Cancel only the desktop half of the browser flow. A callback that arrives
    * later is rejected as unsolicited and cannot replace the selected method. */
-  cancel(): void {
+  cancel(): boolean {
+    if (this.committingSharedApp) return false;
+    this.discardAttempt();
+    return true;
+  }
+
+  private discardAttempt(): void {
     this.cancelEpoch += 1;
     this.deps.clearPending();
   }
@@ -330,15 +341,17 @@ export class GithubAppController {
       return;
     }
 
+    let committingSharedApp = false;
     try {
       const session = await this.deps.getSession();
-      if (!session || (consumed.ownerSub && consumed.ownerSub !== session.sub)) {
+      if (epoch !== this.cancelEpoch || !session || (consumed.ownerSub && consumed.ownerSub !== session.sub)) {
         throw new GithubAppFlowError(
           "Sign in to Zeros before finishing the GitHub connection.",
           "signed_out",
         );
       }
       if(this.deps.devReference){
+        if (consumed.shared) throw new GithubAppFlowError("This Dev environment uses a hosted GitHub connection.", "not_configured");
         const result=await this.deps.devReference.exchange(session.accessToken,input.nonce);
         await this.deps.withCredentialLock(async()=>{
           const current=await this.deps.getSession();
@@ -350,9 +363,15 @@ export class GithubAppController {
         if(epoch===this.cancelEpoch&&current?.sub===session.sub)this.deps.emitConnected({login:result.login,installationCount:result.installationCount});
         return;
       }
+      // Shared exchange commits in Cloud. Once dispatched, Cancel must let both sides finish.
+      if (consumed.shared) {
+        committingSharedApp = true;
+        this.committingSharedApp = true;
+      }
       const result = await this.deps.client.exchange(
         session.accessToken,
         input.nonce,
+        ...(consumed.shared ? [consumed.shared] as const : []),
       );
       if (!result.login || !result.variantKey) {
         throw new GithubAppFlowError(
@@ -423,6 +442,8 @@ export class GithubAppController {
       });
     } catch (error) {
       this.deps.emitError(mapClientError(error).reason);
+    } finally {
+      if (committingSharedApp) this.committingSharedApp = false;
     }
   }
 
@@ -536,6 +557,7 @@ export class GithubAppController {
           session.accessToken,
           current.refreshToken,
           current.refreshBinding,
+          ...(force ? [createHash("sha256").update(current.accessToken).digest("hex")] as const : []),
         );
       } catch (error) {
         const mapped = mapClientError(error);
@@ -655,13 +677,16 @@ export class GithubAppController {
 
   /** Best-effort remote revoke, then a CAS local removal. A transient control-plane
    *  outage never traps a user in a locally connected state. */
-  async disconnect(): Promise<boolean> {
-    this.cancel();
+  async disconnect(owner?: string): Promise<boolean> {
+    if (owner && (await this.deps.getSession())?.sub !== owner) return false;
+    // Disconnect removes a durable grant too. Discard any reconnect result before clearing the slot.
+    this.discardAttempt();
     if(this.deps.devReference)return this.deps.devReference.disconnect();
     return this.deps.withCredentialLock(async () => {
       const current = await this.deps.credentialStore.get("github-app");
       if (!current) return true;
       const session = await this.deps.getSession();
+      if (owner && (session?.sub !== owner || current.ownerSub !== owner)) return false;
       if (
         session &&
         current.ownerSub &&

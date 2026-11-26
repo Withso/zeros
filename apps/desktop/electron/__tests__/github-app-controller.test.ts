@@ -122,10 +122,9 @@ function harness(options?: {
         return { status: "expired" };
       }
       if (pending.nonce !== nonce) return { status: "mismatch" };
-      const preserveSelectedMethod = pending.preserveSelectedMethod;
-      const ownerSub = pending.ownerSub;
+      const { preserveSelectedMethod, ownerSub, shared } = pending;
       pending = null;
-      return { status: "consumed", preserveSelectedMethod, ownerSub };
+      return { status: "consumed", preserveSelectedMethod, ownerSub, ...(shared ? { shared } : {}) };
     },
     discardPending: (nonce) => {
       if (pending?.nonce === nonce) pending = null;
@@ -156,6 +155,22 @@ function harness(options?: {
 }
 
 describe("GitHub App desktop controller", () => {
+  it("exchanges the shared target only for the Zeros account that opened the browser", async () => {
+    const h = harness();
+    const shared = { userId: "account-one", organizationId: "org-one", expected: "a".repeat(64) };
+    const options = { scheme: "zeros-alpha", installFlow: false, shared };
+    await h.controller.begin(options);
+    h.deps.getSession = async () => ({ accessToken: "zeros-two", sub: "account-two" });
+    await h.controller.complete({ nonce: "n".repeat(43) });
+    expect(h.client.exchange).not.toHaveBeenCalled();
+    await expect(h.controller.begin(options)).rejects.toThrow();
+
+    h.deps.getSession = async () => ({ accessToken: "zeros-one", sub: "account-one" });
+    await h.controller.begin(options);
+    await h.controller.complete({ nonce: "n".repeat(43) });
+    expect(h.client.exchange).toHaveBeenCalledWith("zeros-one", "n".repeat(43), shared);
+    expect(h.credential()?.ownerSub).toBe(shared.userId);
+  });
   it("stores only a Dev reference, never exchanges or refreshes the old rotating pair",async()=>{
     const h=harness(),result={reference:{mode:'dev-reference' as const,bindingId:'11111111-1111-4111-8111-111111111111',connectionId:'22222222-2222-4222-8222-222222222222',
       generationId:'33333333-3333-4333-8333-333333333333',issuer:'https://identity.example.test',subject:'account-one',organization:'org_dev',accountId:'1234',appScope:'42:client_dev',backendOrigin:'https://api.example.test'},
@@ -240,6 +255,45 @@ describe("GitHub App desktop controller", () => {
     await completing;
     expect(h.credential()).toBeNull();
     expect(h.events.some(event => event.name === "connected")).toBe(false);
+  });
+
+  it("finishes both connections once a shared exchange has begun committing", async () => {
+    const h = harness();
+    const response = await h.client.exchange();
+    const reply = deferred<GithubAppTokenResult>();
+    h.client.exchange.mockImplementation(() => reply.promise);
+    await h.controller.begin({ scheme: "zeros-dev", installFlow: false, shared: {
+      userId: "account-one", organizationId: "org-one", expected: "a".repeat(64),
+    } });
+    const completing = h.controller.complete({ nonce: "n".repeat(43) });
+    await vi.waitFor(() => expect(h.client.exchange).toHaveBeenCalledTimes(2));
+    expect(h.controller.cancel()).toBe(false);
+    reply.resolve(response);
+    await completing;
+    expect(h.events.some(event => event.name === "connected")).toBe(true);
+  });
+
+  it("removes the old Mac connection when disconnect wins a shared reconnect", async () => {
+    const h = harness();
+    const options = { scheme: "zeros-dev", installFlow: false, shared: {
+      userId: "account-one", organizationId: "org-one", expected: "a".repeat(64),
+    } };
+    const callback = { nonce: "n".repeat(43) };
+    await h.controller.begin(options);
+    await h.controller.complete(callback);
+    const gate = deferred<void>();
+    h.client.exchange.mockImplementation(async () => {
+      await gate.promise;
+      throw new Error("Cloud selection changed during reconnect");
+    });
+    await h.controller.begin(options);
+    const reconnecting = h.controller.complete(callback);
+    await vi.waitFor(() => expect(h.client.exchange).toHaveBeenCalledTimes(2));
+    const removing = h.controller.disconnect("account-one");
+    gate.resolve();
+    await reconnecting;
+    expect(await removing).toBe(true);
+    expect(h.credential()).toBeNull();
   });
 
   it("disconnect cancels a browser attempt that has not produced a credential yet", async () => {
