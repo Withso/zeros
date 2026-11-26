@@ -1,3 +1,4 @@
+import { isGithubCredentialAccount } from "./github-credential-store";
 import { runQuitSteps } from "./quit-barrier";
 import {
   IS_DEV,
@@ -1865,14 +1866,7 @@ app.whenReady().then(async () => {
         void pushGithubCredentialToEngine();
         void scheduleGithubAppRefresh();
       }
-      if (
-        changedAccounts.some(
-          (account) =>
-            account === "github.app" ||
-            account === "github.pat" ||
-            account === "github_oauth",
-        )
-      ) {
+      if (changedAccounts.some(isGithubCredentialAccount)) {
         void handleSharedGithubCredentialChange();
       }
     });

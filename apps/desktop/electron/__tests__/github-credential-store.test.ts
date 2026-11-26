@@ -8,6 +8,7 @@ import {
   GITHUB_APP_ACCOUNT,
   GITHUB_LEGACY_ACCOUNT,
   GITHUB_PAT_ACCOUNT,
+  isGithubCredentialAccount,
   createGithubCredentialStore,
   migrateLegacyGithubCredential,
 } from "../github-credential-store";
@@ -16,6 +17,11 @@ const gitIdentity = {
   gitHost: "github.com",
   gitHttpUsername: "x-access-token",
 } as const;
+
+it("observes shared-store writes to an account's PAT slot", () => {
+  expect(isGithubCredentialAccount("github.pat.0e10f07e-04cf-49b9-91cf-b18563e73969")).toBe(true);
+  expect(isGithubCredentialAccount("github-app:dev-callbacks")).toBe(false);
+});
 
 function harness(options?: {
   currentAccount?: () => string | null;

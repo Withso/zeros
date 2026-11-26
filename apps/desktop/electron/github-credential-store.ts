@@ -19,6 +19,11 @@ export const GITHUB_LEGACY_ACCOUNT = "github_oauth";
 export const GITHUB_PAT_ACCOUNT = "github.pat";
 export const GITHUB_APP_ACCOUNT = "github.app";
 
+export function isGithubCredentialAccount(account: string): boolean {
+  return account === GITHUB_APP_ACCOUNT || account === GITHUB_LEGACY_ACCOUNT ||
+    account === GITHUB_PAT_ACCOUNT || account.startsWith(`${GITHUB_PAT_ACCOUNT}.`);
+}
+
 export interface GithubCredentialStoreDependencies {
   currentAccount?(): string | null;
   readSecret(account: string): string | null;
