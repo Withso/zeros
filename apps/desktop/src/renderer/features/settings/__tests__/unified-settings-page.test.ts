@@ -347,6 +347,14 @@ describe("unified Settings rail", () => {
     expect(container.textContent).not.toContain("cloud-github-fixture");
   });
 
+  it("keeps Mac GitHub available for an organization with Cloud disabled", () => {
+    state.organization = { ...ORGANIZATION, workspaceCapabilities: { local: true, cloud: false } };
+    state.saved.set(`${ORGANIZATION_OWNER}:section`, "user:integrations");
+    render();
+    expect(container.textContent).toContain("local-github-fixture");
+    expect(container.textContent).not.toContain("shared-github-org-a");
+  });
+
   it("uses the shared connection on the legacy settings rail when the server supports it", () => {
     state.organization = ORGANIZATION;
     state.unified = false;

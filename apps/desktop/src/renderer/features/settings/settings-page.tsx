@@ -1417,7 +1417,10 @@ function IntegrationsPanel({ surfaceActive = true, unified = false }: { surfaceA
   const organization = useActiveOrganization();
   const { me } = useTeams();
   // Personal's cloud GitHub is its own Personal cloud's, with Pro.
-  const organizationId = organization ? usableCloudOrganization(organization)?.id ?? null : getActiveOrganizationIdSnapshot();
+  const cloudOrganization = usableCloudOrganization(organization);
+  const organizationId = organization
+    ? (cloudOrganization?.workspaceCapabilities?.cloud ? cloudOrganization.id : null)
+    : getActiveOrganizationIdSnapshot();
   const cloud = !!organizationId && isFeatureEnabled("cloud-workspaces") && !!me;
   const levels = useGithubLevels(me?.user.id ?? "", organizationId ?? "", surfaceActive && unified && cloud);
   const githubOwner = cloud ? { userId: me!.user.id, organizationId: organizationId!, name: organization?.name ?? "this organization" } : undefined;

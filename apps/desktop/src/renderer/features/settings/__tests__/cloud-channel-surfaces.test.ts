@@ -54,7 +54,7 @@ function settings() {
 beforeEach(() => {
   vi.clearAllMocks();
   state.allowed = false;
-  state.organization = { id: "org-fixture", isPersonal: false } as OrganizationSummary;
+  state.organization = { id: "org-fixture", isPersonal: false, workspaceCapabilities: { local: true, cloud: true } } as OrganizationSummary;
   state.section = "user:cloud-computer";
 });
 afterEach(() => vi.unstubAllEnvs());
