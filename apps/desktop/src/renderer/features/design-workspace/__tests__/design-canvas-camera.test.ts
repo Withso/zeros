@@ -492,3 +492,67 @@ it("keeps a small frame's name on an uncrowded page, hides only its Play control
   } finally { await page.close(); }
 });
 
+it("shows only a moving frame's name, in the selection color, and leaves an Option-drag source unselected", async () => {
+  const page = await open();
+  try {
+    await page.mouse.move(600, 400);
+    // `.selected-name` stands in for the label's one-class color utility.
+    await page.addStyleTag({ content: ":root { --design-selection-stroke: blue; --fg3: gray; --border2: silver; } .selected-name { color: var(--design-selection-stroke); }" });
+    const token = (color: string) => page.evaluate(color => {
+      const probe = document.body.appendChild(document.createElement("i"));
+      probe.style.color = `var(${color})`;
+      const value = getComputedStyle(probe).color;
+      probe.remove();
+      return value;
+    }, color);
+    const blue = await token("--design-selection-stroke"), grey = await token("--fg3"), edge = await token("--border2");
+    const frame = page.locator('[data-design-frame="near"]');
+    await frame.evaluate(element => {
+      element.classList.add("zd-design-frame", "zd-design-stroke", "zd-design-selection-outline");
+      element.setAttribute("data-design-frame-selected", "");
+      element.querySelector("[data-design-frame-chrome] button")!.setAttribute("data-design-frame-label", "");
+      element.querySelector("[data-design-frame-chrome] button")!.classList.add("selected-name");
+      // Ready pixels reveal a frame's chrome.
+      element.insertAdjacentHTML("beforeend", [
+        "<div data-design-frame-pixels-ready></div>",
+        '<div data-design-frame-chrome data-design-frame-play-chrome style="position:absolute;right:0;bottom:100%;height:28px"><button style="height:28px">Play</button></div>',
+        '<span data-design-frame-size-badge>120 × 80</span>',
+        '<div data-design-frame-layout-owner></div>',
+        '<div data-design-resize-handles><button data-design-resize-handle="se"></button></div>',
+      ].join(""));
+    });
+    await paint(page, 2, 0, 500, false);
+    const state = () => frame.evaluate(element => {
+      const shown = (selector: string) => getComputedStyle(element.querySelector(selector)!).visibility === "visible";
+      return {
+        name: getComputedStyle(element.querySelector("[data-design-frame-label]")!).color,
+        nameShown: shown("[data-design-frame-label]"),
+        edge: getComputedStyle(element).boxShadow,
+        play: shown("[data-design-frame-play-chrome]"),
+        size: shown("[data-design-frame-size-badge]"),
+        spacing: shown("[data-design-frame-layout-owner]"),
+        handles: shown("[data-design-resize-handle]"),
+      };
+    });
+    const resting = await state();
+    expect(resting).toMatchObject({ name: blue, nameShown: true, play: true, size: true, spacing: true, handles: true });
+    expect(resting.edge).toContain(blue);
+    await frame.evaluate(element => element.setAttribute("data-design-frame-gesture", "move"));
+    const moving = await state();
+    expect(moving).toMatchObject({ name: blue, nameShown: true, play: false, size: false, spacing: false, handles: false });
+    expect(moving.edge).toContain(edge);
+    // A resize keeps its box and live size; only Play leaves.
+    await frame.evaluate(element => element.setAttribute("data-design-frame-gesture", "resize"));
+    expect(await state()).toMatchObject({ name: blue, play: false, size: true, spacing: true, handles: true });
+    await frame.evaluate(element => element.setAttribute("data-design-frame-gesture", "copy-source"));
+    const source = await state();
+    expect(source).toMatchObject({ name: grey, nameShown: true, play: false, size: false, spacing: false, handles: false });
+    expect(source.edge).toContain(edge);
+    // A component keeps its own color.
+    await frame.evaluate(element => element.setAttribute("data-design-frame-component", ""));
+    expect((await state()).name).toBe(blue);
+    await frame.evaluate(element => element.removeAttribute("data-design-frame-gesture"));
+    expect(await state()).toEqual(resting);
+  } finally { await page.close(); }
+});
+

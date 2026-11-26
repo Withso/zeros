@@ -1207,6 +1207,25 @@
     var(--design-stroke-color, var(--design-selection-stroke));
 }
 
+/* A frame on the move (dragged, nudged, or the copy an Option drag carries)
+ * keeps only its name, in the selection color. Its edge returns to the resting
+ * one and its handles, size, spacing tools and Play come back once it rests.
+ * The source of an Option drag stays behind as an unselected frame. */
+.zd-design-frame:is([data-design-frame-gesture="move"], [data-design-frame-gesture="copy-source"]) {
+  box-shadow: 0 0 0 calc(1px * var(--design-canvas-inverse-zoom)) var(--border2);
+}
+.zd-design-frame[data-design-frame-kind="text"]:is([data-design-frame-gesture="move"], [data-design-frame-gesture="copy-source"]) {
+  box-shadow: none;
+}
+.zd-design-frame:is([data-design-frame-gesture="move"], [data-design-frame-gesture="copy-source"])
+  > :is([data-design-frame-size-badge], [data-design-frame-layout-owner], [data-design-resize-handles]),
+.zd-design-frame[data-design-frame-gesture] > [data-design-frame-play-chrome] {
+  visibility: hidden;
+}
+.zd-design-frame[data-design-frame-gesture="copy-source"]:not([data-design-frame-component]) [data-design-frame-label] {
+  color: var(--fg3);
+}
+
 /* Dashed and dotted chrome draws its dashes as gradients for the same
  * reason; a dashed border is rounded like a solid one. */
 .zd-design-dashed-line {

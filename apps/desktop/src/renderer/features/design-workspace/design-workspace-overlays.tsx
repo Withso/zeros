@@ -621,7 +621,7 @@ export function DesignResizeHandles({
     x === "center" ? layout.endEdges : layout.sideEdges,
   );
   return (
-    <div className="pointer-events-none absolute inset-0 z-40">
+    <div data-design-resize-handles="" className="pointer-events-none absolute inset-0 z-40">
       {edges.map(({ handle, x, y, cursor }) => {
         const horizontal = x === "center";
         return (

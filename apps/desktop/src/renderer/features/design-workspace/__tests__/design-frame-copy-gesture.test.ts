@@ -16,7 +16,10 @@ vi.mock("../design-pointer-gesture", () => ({ beginDesignPointerGesture: (input:
   mocks.gesture = input;
   return input.onCancel;
 } }));
-vi.mock("../design-drag-presentation", () => ({ createDesignDragPresentation: () => mocks.presentation }));
+vi.mock("../design-drag-presentation", async (original) => ({
+  ...await original<typeof import("../design-drag-presentation")>(),
+  createDesignDragPresentation: vi.fn(() => mocks.presentation),
+}));
 vi.mock("../design-layout-transfer", () => ({ designCanvasFrameAt: () => mocks.destination, transferDesignLayerOnCanvas: mocks.transfer }));
 vi.mock("../state/design-workspace-cache", () => ({
   designWorkspaceSnapshotCache: { peekSnapshot: () => ({ data: { frames: [] } }) }, duplicateDesignFrameCached: mocks.duplicate,
@@ -37,8 +40,18 @@ vi.mock("../state/design-background-work", () => ({ designBackgroundWork: { paus
 
 const frame = { file: "page/home.html", frameId: "home", pageId: "page", title: "Home", x: 10, y: 20, width: 100, height: 80,
   z: 0, nodeCount: 1, modifiedAt: 1, sourceVersion: "a".repeat(24) };
-function start() {
-  const article = {} as HTMLElement;
+/** The source frame's article: its attributes and the name it shows. */
+function sourceArticle(name = "Home") {
+  const attributes = new Map<string, string>();
+  return {
+    attributes,
+    setAttribute: (key: string, value: string) => { attributes.set(key, value); },
+    removeAttribute: (key: string) => { attributes.delete(key); },
+    hasAttribute: (key: string) => attributes.has(key),
+    querySelector: (selector: string) => selector === "[data-design-frame-name]" ? { textContent: name } : null,
+  };
+}
+function start(article: object = sourceArticle()) {
   const event = { currentTarget: { closest: () => article }, clientX: 15, clientY: 25, pointerId: 1,
     preventDefault() {}, stopPropagation() {} } as unknown as React.PointerEvent<HTMLElement>;
   const input = { event, workspaceId: "local", folder: "/local", frame,
@@ -61,6 +74,47 @@ beforeEach(() => {
 });
 
 describe("canvas frame Option copy", () => {
+  it("carries the name on the moving copy and leaves the source unselected until the copy is saved", async () => {
+    let saved!: (value: unknown) => void;
+    mocks.duplicate.mockReturnValue(new Promise(resolve => { saved = resolve; }));
+    mocks.select.mockResolvedValue(undefined);
+    const create = vi.mocked((await import("../design-drag-presentation")).createDesignDragPresentation);
+    const article = sourceArticle("Checkout");
+    const { input } = start(article);
+    // A press alone changes nothing.
+    expect(article.attributes.has("data-design-frame-gesture")).toBe(false);
+    mocks.gesture!.onMove({ clientX: 65, clientY: 75 } as PointerEvent);
+    expect(article.attributes.get("data-design-frame-gesture")).toBe("copy-source");
+    expect(create.mock.calls.at(-1)?.[4]).toMatchObject({ name: { text: "Checkout", component: false } });
+    mocks.gesture!.onFinish();
+    // The copy is not on the canvas yet: the source must not take the selection back.
+    expect(article.attributes.get("data-design-frame-gesture")).toBe("copy-source");
+    const copy = { ...frame, file: "page/home-copy.html" };
+    saved({ frame: { file: copy.file }, snapshot: { frames: [copy] } });
+    await input.saving.mock.calls[0]?.[0];
+    await vi.waitFor(() => expect(article.attributes.has("data-design-frame-gesture")).toBe(false));
+    expect(mocks.select).toHaveBeenCalledWith("local", copy, expect.objectContaining({ selected: true }));
+  });
+
+  it("gives the source its selection back when the drag is cancelled", () => {
+    const article = sourceArticle();
+    const { cancel } = start(article);
+    mocks.gesture!.onMove({ clientX: 65, clientY: 75 } as PointerEvent);
+    expect(article.attributes.get("data-design-frame-gesture")).toBe("copy-source");
+    cancel();
+    expect(article.attributes.has("data-design-frame-gesture")).toBe(false);
+  });
+
+  it("gives the source its selection back when the copy fails", async () => {
+    mocks.duplicate.mockRejectedValue(new Error("disk full"));
+    const article = sourceArticle();
+    const { input } = start(article);
+    mocks.gesture!.onMove({ clientX: 65, clientY: 75 } as PointerEvent);
+    mocks.gesture!.onFinish();
+    await vi.waitFor(() => expect(input.failed).toHaveBeenCalledOnce());
+    await vi.waitFor(() => expect(article.attributes.has("data-design-frame-gesture")).toBe(false));
+  });
+
   it("keeps an Option-click free of editor readiness and capture work", () => {
     mocks.wait.mockResolvedValue(null);
     const { cancel } = start();
@@ -92,7 +146,7 @@ describe("canvas frame Option copy", () => {
     const copy = { ...frame, file: "page/home-copy.html", frameId: "copy" };
     mocks.duplicate.mockResolvedValue({ frame: { file: copy.file }, snapshot: { frames: [copy] } });
     mocks.select.mockResolvedValue(undefined);
-    const article = {} as HTMLElement;
+    const article = sourceArticle();
     const event = { currentTarget: { closest: () => article }, clientX: 15, clientY: 25, pointerId: 1,
       preventDefault() {}, stopPropagation() {} } as unknown as React.PointerEvent<HTMLElement>;
     // A zoomed camera maps screen pixels to fractional canvas positions.

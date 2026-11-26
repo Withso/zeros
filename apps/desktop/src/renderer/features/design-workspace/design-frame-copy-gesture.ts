@@ -4,7 +4,7 @@ import { DESIGN_FRAME_COORDINATE_LIMIT } from "@zeros/design-core";
 import { DESIGN_RUNTIME_DOCUMENT_BODY_ID } from "@zeros/protocol/design-runtime";
 import type { DesignCanvasFrameWire, DesignFrameGeometryWire } from "../../platform/git";
 import { designFrameRuntime, waitForDesignFrameRuntime } from "../../platform/bridge/design-frame-runtime";
-import { createDesignDragPresentation } from "./design-drag-presentation";
+import { createDesignDragPresentation, paintDesignFrameGestureChrome } from "./design-drag-presentation";
 import { beginDesignPointerGesture } from "./design-pointer-gesture";
 import { designCanvasFrameAt, transferDesignLayerOnCanvas } from "./design-layout-transfer";
 import { designFrameViews, type DesignFrameView } from "./state/design-frame-view";
@@ -194,6 +194,7 @@ export function startDesignFrameCopy(input: {
     captures.abort();
     cleanup();
     presentation?.remove();
+    paintDesignFrameGestureChrome(article, null);
     resume();
   };
   return beginDesignPointerGesture({ target: event.currentTarget, pointerId: event.pointerId, cursor: "copy",
@@ -204,9 +205,16 @@ export function startDesignFrameCopy(input: {
       pointer = input.point(event);
       // A copy lands on whole canvas pixels, like a moved frame.
       origin = { x: Math.round(pointer.x - grab.x), y: Math.round(pointer.y - grab.y) };
-      presentation ??= createDesignDragPresentation(workspaceId, frame, {
-        oid: rootId, rect: { x: 0, y: 0, width: frame.width, height: frame.height },
-      }, article, { zoom: input.zoom?.() });
+      if (!presentation) {
+        // As in a design tool, the copy is what moves: it carries the name,
+        // in the selection color, and the source stays behind unselected.
+        const name = article.querySelector("[data-design-frame-name]")?.textContent;
+        presentation = createDesignDragPresentation(workspaceId, frame, {
+          oid: rootId, rect: { x: 0, y: 0, width: frame.width, height: frame.height },
+        }, article, { zoom: input.zoom?.(), name: frame.kind === "text" ? undefined
+          : { text: name || frame.title, component: article.hasAttribute("data-design-frame-component") } });
+        paintDesignFrameGestureChrome(article, "copy-source");
+      }
       presentation?.paint({ x: origin.x - frame.x, y: origin.y - frame.y });
       const runtime = designFrameRuntime(workspaceId, frame.file);
       if (presentation && !presentation.sharp && !capturing && runtime?.sourceVersion === frame.sourceVersion) {
@@ -257,6 +265,7 @@ export function startDesignFrameCopy(input: {
         releasePresentation();
         captures.abort();
         presentation?.remove();
+        paintDesignFrameGestureChrome(article, null);
         input.nest(null);
         resume();
       });
