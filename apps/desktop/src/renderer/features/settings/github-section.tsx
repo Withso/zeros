@@ -289,12 +289,14 @@ export function GitHubSection({
       let changedOnMac = false;
       try {
         const changeCloud = owner && method !== "gh-cli" && shared.read.data?.selectedMethod !== method;
-        if (snapshot.selectedMethod === method && !changeCloud) return;
-        const next = await ghMethodSelect(method, accountId);
-        ghAuthStatusCache.setData(authKey, next);
-        changedOnMac = snapshot.selectedMethod !== method;
+        if (snapshot.selectedMethod !== method) {
+          const next = await ghMethodSelect(method, accountId);
+          ghAuthStatusCache.setData(authKey, next);
+          changedOnMac = true;
+        }
         if (changeCloud)
           await shared.change({ action: "select", method });
+        if (!changedOnMac) return;
         setSetupMethod(null);
         trackGithubMethodSelected({
           method,
