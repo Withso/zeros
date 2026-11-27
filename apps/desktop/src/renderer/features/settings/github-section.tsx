@@ -60,7 +60,6 @@ import {
   onGithubCredentialStoreChanged,
 } from "../../platform/git";
 import { clearGithubAppRestore, connectSettingsGithubApp, githubAppErrorCopy } from "../../platform/bridge/github-app-notifications";
-import { changeCloudGithubConnection } from "../../platform/cloud-github-connection";
 import { shellOpenUrl } from "../../platform/app";
 import {
   ghAuthStatusCache,
@@ -381,40 +380,18 @@ export function GitHubSection({
     });
     setBusyMethod("pat");
     let savedInCloud = false;
-    let restoreFailed = false;
-    const priorCloud = place === "local" ? confirmedCloudMethod : null;
-    const priorLocal = place === "cloud" && snapshot.methods[snapshot.selectedMethod].configured
-      ? snapshot.selectedMethod : null;
     try {
       let login: string | undefined;
-      // Both save operations select PAT. Only mirror into a workspace with a restorable selection.
-      if (owner && (place !== "local" || priorCloud)) {
+      if (owner && place !== "local") {
         const saved = await shared.change({ action: "pat", token });
         savedInCloud = true;
         login = saved.methods.pat.login;
-        if (priorCloud && priorCloud !== "pat") {
-          try {
-            await changeCloudGithubConnection(owner.userId, owner.organizationId, saved.generation, { action: "select", method: priorCloud });
-          } catch (error) {
-            restoreFailed = true;
-            toast.error("Token saved, but couldn’t restore the Cloud method", { description: errorMessage(error) });
-          }
-        }
       }
-      if (place !== "cloud" || priorLocal) {
+      if (place !== "cloud") {
         const result = await ghPatConnect(token, accountId);
         login = result.login;
-        // Publish the save even if restoring the previous method fails.
         ghAuthStatusCache.setData(authKey, result.snapshot);
-        if (priorLocal && priorLocal !== "pat") {
-          try {
-            const restored = await ghMethodSelect(priorLocal, accountId);
-            ghAuthStatusCache.setData(authKey, restored);
-          } catch (error) {
-            restoreFailed = true;
-            toast.error("Token saved, but couldn’t restore the Local method", { description: errorMessage(error) });
-          }
-        } else if (snapshot.selectedMethod !== "pat") {
+        if (snapshot.selectedMethod !== "pat") {
           trackGithubMethodSelected({
             method: "pat",
             previousMethod: snapshot.selectedMethod,
@@ -426,7 +403,7 @@ export function GitHubSection({
       setShowPat(false);
       setSetup(null);
       trackGithubConnectCompleted({ method: "pat", outcome: "ok" });
-      if (!restoreFailed) toast.success("Personal Access Token saved", {
+      toast.success("Personal Access Token saved", {
         description: login ? `Connected as @${login}.` : undefined,
       });
     } catch (error) {
@@ -441,7 +418,7 @@ export function GitHubSection({
     } finally {
       setBusyMethod(null);
     }
-  }, [busyMethod, pat, snapshot, owner, shared, accountId, authKey, place, confirmedCloudMethod]);
+  }, [busyMethod, pat, snapshot, owner, shared, accountId, authKey, place]);
 
   const connectApp = useCallback(async (options?: {
     forceInstall?: boolean;

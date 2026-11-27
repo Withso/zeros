@@ -273,39 +273,35 @@ it("offers a single first-run action before showing shared setup", async () => {
   } finally { page.close(); }
 });
 
-it.each([false, true])("restores the selected Local CLI after Cloud PAT setup (restore fails=%s)", async fails => {
-  adapters.cloudPatConfigured = false;
+it.each(["Local", "Cloud"])("saving a %s PAT leaves the peer credential bytes and selection unchanged", async target => {
+  const local = { token: "existing-local-token", selected: "gh-cli" };
+  const cloud = { token: "existing-cloud-token", selected: "github-app" };
+  const before = JSON.stringify(target === "Cloud" ? local : cloud);
+  adapters.cloudPatConfigured = target !== "Cloud";
+  adapters.localPat = target !== "Local";
   adapters.localMethod = "gh-cli";
   adapters.cliLogin = "cli-user";
-  const error = vi.spyOn(toast, "error");
-  if (!fails) adapters.mac.mockResolvedValueOnce({ selectedMethod: "gh-cli" } as never);
+  adapters.cloudMethod = "github-app";
+  adapters.patConnect.mockImplementation(async (...args: unknown[]) => {
+    local.token = String(args[0]);
+    local.selected = "pat";
+    return { login: "octocat", snapshot: { selectedMethod: "pat" } };
+  });
+  adapters.cloud.mockImplementation(async (...args: unknown[]) => {
+    const change = args[0] as { token: string };
+    cloud.token = change.token;
+    cloud.selected = "pat";
+    return { generation: "post-save", methods: { pat: { login: "octocat" } } };
+  });
   const page = await workspacePage(org, "a");
   try {
-    await page.pick("Cloud", "Personal access token");
+    await page.pick(target, "Personal access token");
     await savePat(page.container);
-    expect(adapters.patConnect).toHaveBeenCalledOnce();
-    expect(adapters.mac).toHaveBeenCalledExactlyOnceWith("gh-cli", "a");
-    expect(adapters.mac.mock.invocationCallOrder[0]).toBeGreaterThan(adapters.patConnect.mock.invocationCallOrder[0]);
-    if (fails) expect(error).toHaveBeenCalledWith(expect.stringContaining("couldn’t restore the Local method"), expect.anything());
-    else expect(error).not.toHaveBeenCalled();
-  } finally { page.close(); error.mockRestore(); }
-});
-
-it.each(["github-app", null] as const)("restores Cloud %s after a Local PAT save using the new generation", async prior => {
-  adapters.localPat = false;
-  adapters.localMethod = "gh-cli";
-  adapters.cloudMethod = prior;
-  const page = await workspacePage(org, "a");
-  try {
-    await page.pick("Local", "Personal access token");
-    await savePat(page.container);
-    expect(adapters.patConnect).toHaveBeenCalledOnce();
-    if (prior) expect(adapters.changeAfterSave).toHaveBeenCalledExactlyOnceWith("a", "o", "post-save", { action: "select", method: prior });
-    else {
-      expect(adapters.cloud).not.toHaveBeenCalled();
-      expect(adapters.changeAfterSave).not.toHaveBeenCalled();
-    }
-  } finally { page.close(); }
+    expect(JSON.stringify(target === "Cloud" ? local : cloud)).toBe(before);
+    expect(target === "Local" ? local : cloud).toEqual({ token: "fixture-token-value", selected: "pat" });
+    expect(adapters.mac).not.toHaveBeenCalled();
+    expect(adapters.changeAfterSave).not.toHaveBeenCalled();
+  } finally { page.close(); adapters.patConnect.mockReset(); adapters.cloud.mockReset(); }
 });
 
 it("saves the Cloud PAT without selecting a method on an empty Mac", async () => {
