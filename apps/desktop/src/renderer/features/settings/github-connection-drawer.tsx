@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import { ExternalLink } from "lucide-react";
 import { Button } from "../../shared/ui";
 import { MessageRow } from "../../shared/ui/primitives/message-row";
@@ -16,9 +16,9 @@ export const connectionRepositoriesCache = new KeyedAsyncCache<CloudGithubConnec
 export const connectionRepositoryPageKey = (userId: string, organizationId: string, connectionId: string, page: number, generation?: string) =>
   JSON.stringify([userId, organizationId, connectionId, page, generation]);
 
-export function GithubConnectionDrawer({ userId, organizationId, connection, canManage, personal, accountLogin, credentialGeneration, installUrl, onChanged, onClose }: {
+export function GithubConnectionDrawer({ userId, organizationId, connection, canManage, personal, accountLogin, credentialGeneration, installUrl, accessNotice, onChanged, onClose }: {
   userId: string; organizationId: string; connection: CloudGithubLevelConnection; canManage: boolean; personal: boolean;
-  accountLogin: string | undefined; credentialGeneration: string | undefined; installUrl: string | null | undefined; onChanged(): void; onClose(): void;
+  accessNotice: ReactNode; accountLogin: string | undefined; credentialGeneration: string | undefined; installUrl: string | null | undefined; onChanged(): void; onClose(): void;
 }) {
   const [tab, setTab] = useState("general");
   const [page, setPage] = useState(1);
@@ -28,7 +28,7 @@ export function GithubConnectionDrawer({ userId, organizationId, connection, can
   const readable = connection.installationId !== null && connection.state === "active";
   const read = useRecoveringRead(connectionRepositoriesCache, key,
     () => getCloudGithubConnectionRepositories(organizationId, connection.id, page),
-    { enabled: tab === "repositories" && readable, maxAgeMs: 15_000 });
+    { enabled: tab === "repositories" && readable && !accessNotice, maxAgeMs: 15_000 });
   // The placement (Only you or organization) is independent of the installation owner.
   const manageUrl = !connection.installationId ? installUrl
     : connection.accountLogin.toLowerCase() === accountLogin?.toLowerCase() ? `https://github.com/settings/installations/${connection.installationId}`
@@ -51,6 +51,7 @@ export function GithubConnectionDrawer({ userId, organizationId, connection, can
       <Tabs value={tab} onValueChange={setTab}>
         <TabsList aria-label="Connection details"><TabsTrigger value="general">General</TabsTrigger><TabsTrigger value="repositories">Repositories</TabsTrigger></TabsList>
         <TabsContent value="general">
+          {accessNotice}
           <SettingsGroup>
             <SettingsRow label="GitHub account" hint={`@${connection.accountLogin}`}>
               {canManage && manageUrl && <Button variant="secondary" onClick={() => void shellOpenUrl(manageUrl).catch(cause => setError(message(cause)))}>Manage on GitHub<ExternalLink aria-hidden /></Button>}
@@ -64,7 +65,7 @@ export function GithubConnectionDrawer({ userId, organizationId, connection, can
           </SettingsGroup>
         </TabsContent>
         <TabsContent value="repositories">
-          <SettingsGroup title="Repositories" description="Everything this connection can read. Nothing to add here: pick them when you create a project.">
+          {accessNotice ?? <SettingsGroup title="Repositories" description="Everything this connection can read. Nothing to add here: pick them when you create a project.">
             {!readable ? <SettingsRow label="Installation unavailable" /> : <>
               {read.loading && <MessageRow flush>Loading repositories…</MessageRow>}
               {read.error && <MessageRow tone="error" role="alert" flush>{message(read.error)}</MessageRow>}
@@ -78,7 +79,7 @@ export function GithubConnectionDrawer({ userId, organizationId, connection, can
                 <Button variant="ghost" onClick={read.refresh}>Refresh repositories</Button>
               </div>
             </>}
-          </SettingsGroup>
+          </SettingsGroup>}
         </TabsContent>
       </Tabs>
     </SheetContent>

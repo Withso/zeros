@@ -75,7 +75,7 @@ export function GithubConnectionGroups({ userId, organizationId, organizationNam
   const [sheet, setSheet] = useState<ConnectionSheet | null>(null);
   const [handoffError, setHandoffError] = useState<string | null>(null);
   const status = identity.read.data;
-  const app = status?.selectedMethod === "github-app" && !identity.read.readError;
+  const app = status?.selectedMethod === "github-app" && status.methods["github-app"].configured && !identity.read.readError;
   const visible = useVisibleInstallations(userId, organizationId, app ? status.generation : undefined, active);
   const connections = levels.connections;
   if (!connections) return null;
@@ -87,14 +87,35 @@ export function GithubConnectionGroups({ userId, organizationId, organizationNam
   const selected = sheet && sheet.kind !== "add"
     ? [...connections.organization, ...own].find(row => row.id === sheet.id) : undefined;
   const installUrl = status?.installUrl;
-  function needsLink(row: CloudGithubLevelConnection, editable: boolean) {
+  const appLogin = status?.methods["github-app"].login;
+  const visibleIds = visible.data && new Set(visible.data.map(item => item.installationId));
+  function accessHint(row: CloudGithubLevelConnection) {
+    if (row.state !== "active" || row.installationId === null || !app) return null;
+    if (visible.readError) return "Couldn’t verify GitHub access";
+    if (!visibleIds) return "Checking GitHub access…";
+    if (visibleIds.has(row.installationId)) return null;
+    return appLogin ? `No access as @${appLogin}` : "No access with this GitHub account";
+  }
+  function needsLink(row: CloudGithubLevelConnection) {
     if (row.state !== "active") return false;
-    if (!row.installationId) return editable;
-    if (identity.read.readError || !status) return false;
-    if (!app) return true;
-    return !!visible.data && !visible.readError && !visible.data.some(item => item.installationId === row.installationId);
+    if (row.installationId === null) return canManage && row.level === "organization";
+    return !!status && !identity.read.readError && !app;
   }
   const close = () => { setSheet(null); setHandoffError(null); };
+  const configureIdentity = () => { close(); onConfigureIdentity?.(); };
+  // Selecting a saved App completes sign-in. A bound connection then opens its ordinary details.
+  const showDetails = sheet?.kind === "view" || (sheet?.kind === "link" && selected?.installationId != null && app);
+  const selectedHint = selected && accessHint(selected);
+  const accessNotice = selectedHint && selected && <SettingsGroup title={selectedHint}>
+    {visible.readError ? <MessageRow tone="error" role="alert" flush>{message(visible.readError)}</MessageRow>
+      : visibleIds && <>
+        <SettingsRow label={`Get access to a repository owned by @${selected.accountLogin} on GitHub.`} />
+        <SettingsRow label="Switch to a GitHub account with access under Configure account identity.">
+          <Button variant="secondary" onClick={configureIdentity}>Configure account identity</Button>
+        </SettingsRow>
+      </>}
+    <Button variant="ghost" disabled={visible.refreshing || visible.loading} onClick={visible.refresh}>Refresh installations</Button>
+  </SettingsGroup>;
   const reinstall = async (row: CloudGithubLevelConnection) => {
     if (!installUrl) return;
     setHandoffError(null);
@@ -110,44 +131,42 @@ export function GithubConnectionGroups({ userId, organizationId, organizationNam
           <ListRow variant="panel" className="h-auto min-h-9 gap-2" aria-label={`View @${row.accountLogin}`} onClick={() => setSheet({ kind: "view", id: row.id })}>
             <span className="min-w-0 flex-1">
               <span className="block truncate">@{row.accountLogin}</span>
-              <span className="text-fg3 block text-3xxs">{connectionStateHint(row) ?? (group.editable ? "Connected" : "Managed by admins")}</span>
+              <span className="text-fg3 block text-3xxs">{connectionStateHint(row) ?? accessHint(row) ?? (group.editable ? "Connected" : "Managed by admins")}</span>
             </span>
             <ChevronRight aria-hidden />
           </ListRow>
           {group.editable && row.state === "uninstalled" && <Button variant="secondary" disabled={!installUrl}
             aria-label={`Reinstall @${row.accountLogin}`} onClick={() => void reinstall(row)}>Reinstall</Button>}
-          {needsLink(row, group.editable) && <Button variant="secondary"
+          {needsLink(row) && <Button variant="secondary"
             aria-label={`Link @${row.accountLogin}`} onClick={() => setSheet({ kind: "link", id: row.id })}>Link</Button>}
         </div>)}
       </SettingsGroup>)}
     </SettingsSection>
-    {active && sheet?.kind === "view" && selected && <GithubConnectionDrawer key={selected.id} userId={userId} organizationId={organizationId}
-      connection={selected} canManage={selected.level === "personal" || canManage} personal={personal} accountLogin={status?.methods["github-app"].login} credentialGeneration={status?.generation} installUrl={installUrl}
+    {active && showDetails && selected && <GithubConnectionDrawer key={selected.id} userId={userId} organizationId={organizationId}
+      connection={selected} canManage={selected.level === "personal" || canManage} personal={personal} accountLogin={appLogin} accessNotice={accessNotice} credentialGeneration={status?.generation} installUrl={installUrl}
       onChanged={levels.refresh} onClose={close} />}
-    {active && (sheet?.kind === "add" || ((sheet?.kind === "link" || sheet?.kind === "reinstall") && selected)) &&
+    {active && !showDetails && (sheet?.kind === "add" || ((sheet?.kind === "link" || sheet?.kind === "reinstall") && selected)) &&
       <AddConnection key={selected?.id ?? "add"} userId={userId} organizationId={organizationId} organizationName={organizationName}
-        canManage={canManage} connections={connections} target={selected} reinstalling={sheet.kind === "reinstall"} handoffError={handoffError} visible={visible} status={status} readError={identity.read.readError}
-        onRefreshConnections={levels.refresh} onRefreshIdentity={identity.read.refresh} onConfigureIdentity={() => { close(); onConfigureIdentity?.(); }}
+        canManage={canManage} connections={connections} target={selected} reinstalling={sheet.kind === "reinstall"} handoffError={handoffError} visible={visible} status={status} app={app} readError={identity.read.readError}
+        onRefreshConnections={levels.refresh} onRefreshIdentity={identity.read.refresh} onConfigureIdentity={configureIdentity}
         onClose={close} onConnected={() => { levels.refresh(); close(); }} />}
   </>;
 }
 
-function AddConnection({ userId, organizationId, organizationName, canManage, connections, target, status, visible, readError, reinstalling, handoffError, onRefreshConnections, onRefreshIdentity,
+function AddConnection({ userId, organizationId, organizationName, canManage, connections, target, status, app, visible, readError, reinstalling, handoffError, onRefreshConnections, onRefreshIdentity,
   onConfigureIdentity, onClose, onConnected }: {
   userId: string; organizationId: string; organizationName: string; canManage: boolean; connections: CloudGithubLevelConnections;
   target?: CloudGithubLevelConnection | undefined; status: ReturnType<typeof useSharedGithub>["read"]["data"]; readError: unknown;
-  visible: ReturnType<typeof useVisibleInstallations>; reinstalling: boolean; handoffError: string | null; onRefreshConnections(): void; onRefreshIdentity(): void; onConfigureIdentity(): void; onClose(): void; onConnected(): void;
+  app: boolean; visible: ReturnType<typeof useVisibleInstallations>; reinstalling: boolean; handoffError: string | null; onRefreshConnections(): void; onRefreshIdentity(): void; onConfigureIdentity(): void; onClose(): void; onConnected(): void;
 }) {
   const [level, setLevel] = useState<Level>(target?.level ?? "personal");
   const [busy, setBusy] = useState(false), [error, setError] = useState<string | null>(null);
-  const app = status?.selectedMethod === "github-app" && !readError;
   const connected = new Set([...connections.organization, ...connections.personal].map(row => row.installationId));
   const login = status?.methods["github-app"].login?.toLowerCase();
   const choices = (visible.data ?? []).filter(row => !row.suspended && !connected.has(row.installationId) &&
     (!target || target.accountLogin.toLowerCase() === row.accountLogin.toLowerCase()) &&
     (level !== "organization" || row.accountLogin.toLowerCase() !== login));
   const existing = target?.installationId != null && !reinstalling;
-  const found = visible.data?.some(row => row.installationId === target?.installationId && !row.suspended);
   const replacement = reinstalling && target && visible.data?.some(row => row.installationId !== target.installationId &&
     row.accountLogin.toLowerCase() === target.accountLogin.toLowerCase());
   async function save(action: () => Promise<unknown>, complete: () => void) {
@@ -171,7 +190,7 @@ function AddConnection({ userId, organizationId, organizationName, canManage, co
   return <Sheet open onOpenChange={open => { if (!open && !busy) onClose(); }}>
     <SheetContent className="overflow-y-auto p-6">
       <SheetHeader><SheetTitle>{reinstalling && target ? `Reinstall @${target.accountLogin}` : target ? `Link @${target.accountLogin}` : "Add connection"}</SheetTitle>
-        <SheetDescription>{target ? "Link the matching GitHub installation." : "Choose where this GitHub installation will be available."}</SheetDescription>
+        <SheetDescription>{existing ? "Sign in with GitHub App for Cloud to use this installation." : target ? "Link the matching GitHub installation." : "Choose where this GitHub installation will be available."}</SheetDescription>
       </SheetHeader>
       {canManage && !target ? <SettingsRow label="Connection for">
         <Button variant={level === "personal" ? "secondary" : "ghost"} aria-pressed={level === "personal"} disabled={busy} onClick={() => setLevel("personal")}>Only you</Button>
@@ -185,17 +204,14 @@ function AddConnection({ userId, organizationId, organizationName, canManage, co
             ? <Button disabled={busy} onClick={() => void save(() => changeCloudGithubConnection(userId, organizationId, status.generation,
               { action: "select", method: "github-app" }), onRefreshIdentity)}>Use GitHub App for Cloud</Button>
             : <Button onClick={onConfigureIdentity}>Configure account identity</Button>}</SettingsRow>
-        : <SettingsGroup title={reinstalling || existing ? "Installation status" : "Installed accounts"}>
+        : <SettingsGroup title={reinstalling ? "Installation status" : "Installed accounts"}>
           {reinstalling && <SettingsRow label={target?.state === "active" ? "Connected" : replacement
             ? "GitHub returned a different installation" : "Waiting for the installation"}
             hint={replacement ? "The existing connection still points to the old installation. Adding the new one creates a separate connection." : "Refresh after returning from GitHub."} />}
-          {existing && visible.data && !visible.readError && <SettingsRow
-            label={found ? "Your GitHub account can use this installation" : "Your GitHub account cannot see this installation"}
-            hint={found ? undefined : "Use an account with access to the installation, then refresh."} />}
           {visible.error && <MessageRow tone="error" role="alert" flush>{message(visible.error)}</MessageRow>}
           {visible.loading && <MessageRow flush>Loading installations…</MessageRow>}
-          {!existing && !reinstalling && visible.data && !visible.readError && !choices.length && <SettingsRow label="No available installations" />}
-          {!existing && !reinstalling && choices.map(row => <SettingsRow key={row.installationId} label={`@${row.accountLogin}`}>
+          {!reinstalling && visible.data && !visible.readError && !choices.length && <SettingsRow label="No available installations" />}
+          {!reinstalling && choices.map(row => <SettingsRow key={row.installationId} label={`@${row.accountLogin}`}>
             <Button aria-label={`Link @${row.accountLogin}`} disabled={busy || !!visible.readError} onClick={() => void connect(row.installationId)}>Link</Button>
           </SettingsRow>)}
           <div className="flex items-center gap-2">
