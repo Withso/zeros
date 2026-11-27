@@ -51,6 +51,7 @@ export async function resolveLocalRuntime(workspace, profile, root, options = {}
 
 /** Refresh cadence for a running checkout's runtime marker: well inside the week a runtime stays unmarked. */
 export const RUNTIME_USE_REFRESH_MS = 24 * 60 * 60_000;
+const checkout = workspace => ({ owner: workspace.state.owner, instance: workspace.state.instanceId });
 const controlPlane = (root, options) => options.module ?? (name => import(pathToFileURL(path.join(root, "apps/control-plane/dist/cloud", name)).href));
 
 async function withRuntimeStorage(profile, root, options, work) {
@@ -63,14 +64,14 @@ async function withRuntimeStorage(profile, root, options, work) {
 /** Marks the runtime this checkout runs, so other checkouts' cleanup keeps it. */
 export function markLocalRuntime(workspace, profile, root, sha256, options = {}) {
   return withRuntimeStorage(profile, root, options, (retention, client) =>
-    retention.recordRuntimeUse(client, profile.storage.bucket, sha256, workspace.state.instanceId));
+    retention.recordRuntimeUse(client, profile.storage.bucket, sha256, checkout(workspace)));
 }
 
 /** On start: mark this checkout's runtime, then plan (or, with ZEROS_DEV_RUNTIME_RETENTION=apply, run) Dev cleanup.
  * The plan is kept beside this checkout's state for review. */
 export function maintainLocalRuntimes(workspace, profile, root, sha256, options = {}) {
   return withRuntimeStorage(profile, root, options, async (retention, client) => {
-    await retention.recordRuntimeUse(client, profile.storage.bucket, sha256, workspace.state.instanceId);
+    await retention.recordRuntimeUse(client, profile.storage.bucket, sha256, checkout(workspace));
     const mode = retention.devRuntimeRetentionMode((options.env ?? process.env).ZEROS_DEV_RUNTIME_RETENTION);
     const plan = await retention.retainDevRuntimes(client, profile.storage.bucket, { current: sha256, mode });
     (options.write ?? writePrivateFile)(path.join(workspace.directory, "runtime-retention.json"), `${JSON.stringify(plan, null, 2)}\n`);

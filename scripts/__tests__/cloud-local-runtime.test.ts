@@ -62,13 +62,13 @@ describe("electron:cloud runtime use and cleanup", () => {
     const retention = { recordRuntimeUse: vi.fn(async () => {}), devRuntimeRetentionMode: vi.fn((value?: string) => value === "apply" ? "apply" : "dry-run"),
       retainDevRuntimes: vi.fn(async () => plan), removeRuntimeUses: vi.fn(async () => 2) };
     const module = vi.fn(async (name: string) => name === "runtime-retention.js" ? retention : { runtimeStorageClient: vi.fn(() => client) });
-    const workspace = { directory: "/fixture/state", state: { instanceId: instance } }, profile = { storage: { bucket: "zeros-dev-objects" } };
+    const workspace = { directory: "/fixture/state", state: { instanceId: instance, owner: "a".repeat(24) } }, profile = { storage: { bucket: "zeros-dev-objects" } };
     return { client, retention, module, workspace, profile, write: vi.fn() };
   }
   it("marks this checkout's runtime before planning cleanup, in dry-run unless applied, and keeps the plan for review", async () => {
     const f = fixture();
     await maintainLocalRuntimes(f.workspace, f.profile, "/fixture", sha, { module: f.module, env: {}, write: f.write });
-    expect(f.retention.recordRuntimeUse).toHaveBeenCalledWith(f.client, "zeros-dev-objects", sha, instance);
+    expect(f.retention.recordRuntimeUse).toHaveBeenCalledWith(f.client, "zeros-dev-objects", sha, { owner: "a".repeat(24), instance });
     expect(f.retention.retainDevRuntimes).toHaveBeenCalledWith(f.client, "zeros-dev-objects", { current: sha, mode: "dry-run" });
     expect(f.retention.recordRuntimeUse.mock.invocationCallOrder[0]).toBeLessThan(f.retention.retainDevRuntimes.mock.invocationCallOrder[0]!);
     expect(f.write).toHaveBeenCalledWith("/fixture/state/runtime-retention.json", expect.stringContaining('"status": "planned"'));
@@ -84,7 +84,7 @@ describe("electron:cloud runtime use and cleanup", () => {
   it("refreshes the marker and removes this checkout's markers on reset", async () => {
     const f = fixture();
     await markLocalRuntime(f.workspace, f.profile, "/fixture", sha, { module: f.module });
-    expect(f.retention.recordRuntimeUse).toHaveBeenCalledWith(f.client, "zeros-dev-objects", sha, instance);
+    expect(f.retention.recordRuntimeUse).toHaveBeenCalledWith(f.client, "zeros-dev-objects", sha, { owner: "a".repeat(24), instance });
     expect(await removeLocalRuntimeUses(f.workspace, f.profile, "/fixture", { module: f.module })).toBe(2);
     expect(f.retention.removeRuntimeUses).toHaveBeenCalledWith(f.client, "zeros-dev-objects", instance);
   });

@@ -93,7 +93,9 @@ async function indexTarget(client: Pick<S3Client, "send">, bucket: string, key: 
 export const DEV_RUNTIME_RETENTION = { unusedMs: 7 * 24 * 60 * 60_000 } as const;
 const USES = `${PREFIX}uses/`;
 const USES_SINCE = `${USES}since.json`;
-const USE = /^cloud-v2\/runtime\/uses\/([0-9a-f]{64})\/([0-9a-f-]{36})\.json$/;
+// uses/<runtime sha256>/<Dev owner>/<checkout instance>.json: the owner names the checkout's public hosts.
+const USE = /^cloud-v2\/runtime\/uses\/([0-9a-f]{64})\/([0-9a-f]{24})\/([0-9a-f-]{36})\.json$/;
+const OWNER = /^[0-9a-f]{24}$/;
 const INSTANCE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 export type DevRetentionMode = "dry-run" | "apply";
@@ -109,11 +111,12 @@ export type DevRuntimeRetentionPlan = {
 /** Only exactly "apply" deletes. */
 export const devRuntimeRetentionMode = (value: string | undefined): DevRetentionMode => value === "apply" ? "apply" : "dry-run";
 
+export type DevCheckout = { owner: string; instance: string };
 /** Marks `sha256` as used now by this checkout, and starts the marker clock once per bucket. */
-export async function recordRuntimeUse(client: Pick<S3Client, "send">, bucket: string, sha256: string, instance: string, now = Date.now()) {
-  if (!SHA.test(sha256) || !INSTANCE.test(instance)) throw new Error("Invalid runtime use");
+export async function recordRuntimeUse(client: Pick<S3Client, "send">, bucket: string, sha256: string, checkout: DevCheckout, now = Date.now()) {
+  if (!SHA.test(sha256) || !OWNER.test(checkout.owner) || !INSTANCE.test(checkout.instance)) throw new Error("Invalid runtime use");
   const at = new Date(now).toISOString();
-  await client.send(new PutObjectCommand({ Bucket: bucket, Key: `${USES}${sha256}/${instance}.json`,
+  await client.send(new PutObjectCommand({ Bucket: bucket, Key: `${USES}${sha256}/${checkout.owner}/${checkout.instance}.json`,
     Body: JSON.stringify({ version: 1, sha256, at }), ContentType: "application/json", CacheControl: "no-cache" }));
   try {
     await client.send(new PutObjectCommand({ Bucket: bucket, Key: USES_SINCE, Body: JSON.stringify({ version: 1, at }),
@@ -188,7 +191,7 @@ export async function retainDevRuntimes(client: Pick<S3Client, "send">, bucket: 
 /** `electron:cloud --reset`: this checkout no longer uses any runtime. */
 export async function removeRuntimeUses(client: Pick<S3Client, "send">, bucket: string, instance: string) {
   if (!INSTANCE.test(instance)) throw new Error("Invalid runtime use");
-  const keys = (await listRuntimeObjects(client, bucket, USES)).map(object => object.key).filter(key => key.match(USE)?.[2] === instance);
+  const keys = (await listRuntimeObjects(client, bucket, USES)).map(object => object.key).filter(key => key.match(USE)?.[3] === instance);
   await deleteKeys(client, bucket, keys);
   return keys.length;
 }

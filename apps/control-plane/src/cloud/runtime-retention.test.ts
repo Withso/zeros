@@ -96,7 +96,8 @@ it("retires digest-bound capabilities with their archive while preserving protec
 
 describe("headless Dev runtime retention", () => {
   const instance = "11111111-2222-4333-8444-555555555555", other = "66666666-7777-4888-9999-aaaaaaaaaaaa";
-  const use = (c: string, who: string, age: number): StoredObject => ({ key: `cloud-v2/runtime/uses/${sha(c)}/${who}.json`, lastModified: new Date(now - age), size: 60 });
+  const owners: Record<string, string> = { [instance]: "a".repeat(24), [other]: "b".repeat(24) };
+  const use = (c: string, who: string, age: number): StoredObject => ({ key: `cloud-v2/runtime/uses/${sha(c)}/${owners[who]}/${who}.json`, lastModified: new Date(now - age), size: 60 });
   const since = (age: number): StoredObject => ({ key: "cloud-v2/runtime/uses/since.json", lastModified: new Date(now - age), size: 40 });
   const capabilities = (c: string): StoredObject => ({ key: `cloud-v2/runtime/capabilities/${sha(c)}.json`, lastModified: new Date(now - 30 * day), size: 200 });
   // 1 is this checkout's current runtime (old, unmarked); 2 is marked by another checkout within the week; 3 was
@@ -146,11 +147,12 @@ describe("headless Dev runtime retention", () => {
 
   it("marks this checkout's runtime and starts the marker clock once", async () => {
     const fresh = bucket([]);
-    await recordRuntimeUse(fresh, "dev", sha("1"), instance, now);
-    expect(calls(fresh).map(([, input]) => input.Key)).toEqual([`cloud-v2/runtime/uses/${sha("1")}/${instance}.json`, "cloud-v2/runtime/uses/since.json"]);
+    await recordRuntimeUse(fresh, "dev", sha("1"), { owner: "a".repeat(24), instance }, now);
+    expect(calls(fresh).map(([, input]) => input.Key)).toEqual([`cloud-v2/runtime/uses/${sha("1")}/${"a".repeat(24)}/${instance}.json`, "cloud-v2/runtime/uses/since.json"]);
     expect(calls(fresh)[1]![1].IfNoneMatch).toBe("*");
-    await expect(recordRuntimeUse(bucket([since(day)]), "dev", sha("1"), instance, now)).resolves.toBeUndefined();
-    await expect(recordRuntimeUse(fresh, "dev", sha("1"), "../other", now)).rejects.toThrow();
+    await expect(recordRuntimeUse(bucket([since(day)]), "dev", sha("1"), { owner: "a".repeat(24), instance }, now)).resolves.toBeUndefined();
+    await expect(recordRuntimeUse(fresh, "dev", sha("1"), { owner: "a".repeat(24), instance: "../other" }, now)).rejects.toThrow();
+    await expect(recordRuntimeUse(fresh, "dev", sha("1"), { owner: "../owner", instance }, now)).rejects.toThrow();
   });
   it("deletes nothing in dry-run, and in apply deletes indices, then archives, then markers", async () => {
     const bodies = { [index("3", 0).key]: record("3"), [index("4", 0).key]: record("4") };
