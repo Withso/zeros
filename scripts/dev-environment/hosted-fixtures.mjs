@@ -14,6 +14,7 @@ export function fixtureIssues(fixture) {
     /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(fixture.expectedEmail ?? "") &&
     /^[a-z0-9][a-z0-9-]{0,62}$/.test(fixture.expectedOrganizationSlug ?? "") &&
     (fixture.bootstrapOrganization === undefined || typeof fixture.bootstrapOrganization === "boolean") &&
+    (fixture.staffAccess === undefined || typeof fixture.staffAccess === "boolean") &&
     funding
     ? [] : ['fixture: select one WorkOS user/Organization, expected email/slug, and computeAllowance "pro-monthly"; retired computeCreditMicroUsd profiles remain readable only for cleanup'];
 }
@@ -23,14 +24,21 @@ export function assertCurrentFixtureFunding(fixture) {
     'The retired organization compute credit conflicts with current Pro funding. Review the standard Pro monthly allowance, archive this generation, then replace computeCreditMicroUsd with computeAllowance: "pro-monthly" in the private profile. No budget was increased automatically.');
 }
 
-export function bindFixture(state, fixture) {
+export function fixtureBindingDigest(state, fixture) {
   if (!fixture || fixtureIssues(fixture).length) throw new Error("Configure an explicit test organization in the private profile's fixture section before dev:seed");
   const digest = sha256(JSON.stringify([fixture.workosUserId, fixture.workosOrganizationId,
     fixture.expectedEmail.toLowerCase(), fixture.expectedOrganizationSlug, fixture.computeAllowance ?? fixture.computeCreditMicroUsd,
-    ...(fixture.bootstrapOrganization ? [true] : [])]));
+    ...(fixture.bootstrapOrganization ? [true] : []),
+    ...(fixture.staffAccess === false ? ["non-staff"] : [])]));
   if (state.fixture && state.fixture.digest !== digest) throw new Error("The Dev fixture changed; archive before selecting a different test authority or credit budget");
+  return digest;
+}
+
+export function bindFixture(state, fixture) {
+  const digest = fixtureBindingDigest(state, fixture);
   const now = Date.now();
-  state.fixture ??= { digest, startsAt: new Date(now).toISOString(), endsAt: new Date(now + 7 * 86400_000).toISOString() };
+  state.fixture ??= { digest, startsAt: new Date(now).toISOString(), endsAt: new Date(now + 7 * 86400_000).toISOString(),
+    ...(fixture.staffAccess === false ? { staffAccess: false } : {}) };
   if (Date.parse(state.fixture.endsAt) <= Date.now()) throw new Error("Dev fixture expired; archive and launch a fresh generation to reset it");
   return { ...fixture, ...state.fixture };
 }
@@ -64,10 +72,11 @@ export async function bootstrapFixtureOrganization({ runtime, withSystemTx, fixt
       !Number.isFinite(Date.parse(proof.membershipUpdatedAt)) || !Number.isFinite(proof.verifiedAt) ||
       proof.verifiedAt > Date.now() || Date.now() - proof.verifiedAt > 60_000) throw new Error("Invalid or expired Dev organization proof");
   return withSystemTx(runtime, async tx => {
-    const users = await tx.query(`SELECT u.id AS user_id, u.email::text AS email FROM user_identities i JOIN users u ON u.id=i.user_id
+    const users = await tx.query(`SELECT u.id AS user_id, u.email::text AS email, u.staff_role FROM user_identities i JOIN users u ON u.id=i.user_id
       WHERE i.provider='workos' AND i.provider_sub=$1 AND i.status='active' AND u.auth_status='active' AND u.deleted_at IS NULL FOR UPDATE OF u`, [fixture.workosUserId]);
     if (!users.rows.length) return false;
     if (users.rows.length !== 1 || users.rows[0].email.toLowerCase() !== proof.email) throw new Error("The signed-in Dev account differs from the selected fixture");
+    assertFixtureStaffAccess(fixture, users.rows[0]);
     const userId = users.rows[0].user_id, orgId = proof.externalId;
     await tx.query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))", [`dev-fixture:${orgId}`]);
     const existing = await tx.query(`SELECT o.id, o.slug, o.created_by, o.is_personal, o.cloud_workspaces_allowed, o.deleted_at, o.lifecycle_status,
@@ -99,6 +108,11 @@ export async function bootstrapFixtureOrganization({ runtime, withSystemTx, fixt
   });
 }
 
+export function assertFixtureStaffAccess(fixture, user) {
+  if (fixture.staffAccess === false && user.staff_role !== null)
+    throw new Error("The non-staff fixture requires an account without a staff role");
+}
+
 export async function seedHostedFixture({ runtime, migration, withSystemTx, module, request }) {
   const fixture = request.fixture;
   assertCurrentFixtureFunding(fixture);
@@ -109,7 +123,7 @@ export async function seedHostedFixture({ runtime, migration, withSystemTx, modu
   if (fixture.bootstrapOrganization && !await bootstrapFixtureOrganization({ runtime, withSystemTx, fixture, proof: request.fixtureProof })) {
     return { seeded: false, needsSignIn: true };
   }
-  const rows = await withSystemTx(runtime, async tx => (await tx.query(`SELECT u.id AS user_id, u.email::text AS email,
+  const rows = await withSystemTx(runtime, async tx => (await tx.query(`SELECT u.id AS user_id, u.email::text AS email, u.staff_role,
       o.id AS organization_id, o.slug::text AS slug
     FROM user_identities i JOIN users u ON u.id=i.user_id
     JOIN organization_members member ON member.user_id=u.id
@@ -123,6 +137,8 @@ export async function seedHostedFixture({ runtime, migration, withSystemTx, modu
   if (!rows.length) return { seeded: false, needsSignIn: true };
   const row = rows[0];
   if (rows.length !== 1 || row.email.toLowerCase() !== fixture.expectedEmail.toLowerCase() || row.slug !== fixture.expectedOrganizationSlug) throw new Error("The Dev fixture identity or Organization differs from its explicit configuration");
+  assertFixtureStaffAccess(fixture, row);
+  if (fixture.staffAccess === false) return { seeded: true };
   const common = { databaseUrl: request.roles.migration.url, channel: "development", execute: false,
     actorUserId: row.user_id, organizationId: row.organization_id, expectedOrganizationSlug: row.slug,
     reason: `Disposable development fixture ${request.owner}/${request.generation}` };

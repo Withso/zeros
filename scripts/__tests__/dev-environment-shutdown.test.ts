@@ -6,6 +6,8 @@ import { execFileSync } from "node:child_process";
 import ts from "typescript";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { DevelopmentProcesses } from "../dev-environment/processes.mjs";
+import { readLocalSeed } from "../dev-environment/cloud-local-seed-state.mjs";
+import { fixtureBindingDigest } from "../dev-environment/hosted-fixtures.mjs";
 import { acquireWorkspaceLock, ensureWorkspace, readPrivateJson, saveWorkspace } from "../dev-environment/state.mjs";
 import { REBOOT_RECOVERED, recoverLaunchAfterReboot } from "../dev-environment/reboot-recovery.mjs";
 
@@ -129,7 +131,7 @@ function launcher({ boot = "this-boot" } = {}) {
   saveWorkspace(workspace);
   const fetch = vi.fn(async () => ({ ok: true }));
   const createServer = vi.fn(() => { throw new Error("A second supervisor must not start"); });
-  const context = vm.createContext({ fs, path, readPrivateJson, saveWorkspace, acquireWorkspaceLock, DevelopmentProcesses,
+  const context = vm.createContext({ fs, path, readPrivateJson, readLocalSeed, fixtureBindingDigest, saveWorkspace, acquireWorkspaceLock, DevelopmentProcesses,
     profileIssues: () => [], systemEnvironment: () => ({}), pauseWorkosWebhook: async () => {}, process, AbortController, globalThis: { AbortSignal },
     REBOOT_RECOVERED, currentBoot: () => "this-boot",
     recoverLaunchAfterReboot: (value: typeof workspace) => recoverLaunchAfterReboot(value, { boot: "this-boot" }),

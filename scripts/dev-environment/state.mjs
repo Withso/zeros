@@ -202,7 +202,7 @@ export function saveWorkspace(workspace) {
 /** Atomic publication avoids partially written lock records. Stale locks are
  * recovered only for an exited PID; malformed locks require manual inspection. */
 export function acquireWorkspaceLock(workspace, name = "run.lock") {
-  if (!["run.lock", "mutation.lock"].includes(name)) throw new Error("Invalid Dev lock name");
+  if (!["run.lock", "mutation.lock", "seed.lock"].includes(name)) throw new Error("Invalid Dev lock name");
   const file = path.join(workspace.directory, name);
   const token = randomUUID();
   const record = { pid: process.pid, token, owner: workspace.state.owner };

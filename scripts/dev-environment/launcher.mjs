@@ -14,10 +14,11 @@ import { ensureWorkosWebhook, enableWorkosWebhook, pauseWorkosWebhook, deleteWor
 import { startPostgres, pickServicePorts, migratePostgres, databaseCommand } from "./postgres.mjs";
 import { DevelopmentProcesses, run, waitForHttp, waitForDevSignIn } from "./processes.mjs";
 import { ensureDevAuthEnvironment } from "../dev-auth-profile.mjs";
-import { cloudSeedMessage, cloudSeedNeeded, recordCloudSeed } from "./cloud-local-seed-state.mjs";
+import { cloudSeedMessage, cloudSeedNeeded, readLocalSeed, recordCloudSeed, saveLocalSeed } from "./cloud-local-seed-state.mjs";
 import { REBOOT_RECOVERED, currentBoot, recoverLaunchAfterReboot } from "./reboot-recovery.mjs";
 import { resolveLocalRuntime } from "./cloud-local-runtime.mjs";
 import { prepareAlphaLaunch } from "../alpha-instance.mjs";
+import { fixtureBindingDigest } from "./hosted-fixtures.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 // `backend` is the former headless action; Zeros Dev now always runs headless.
@@ -37,10 +38,14 @@ async function verifyAlpha(profile) {
  * not a failure, so the stack stays up for the user to sign in. */
 async function seedCloud(workspace, profile, ports) {
   const { seedLocalEnvironment } = await import("./local-seed.mjs");
-  const result = await seedLocalEnvironment(workspace, profile, ports, root);
-  recordCloudSeed(workspace.state, result); saveWorkspace(workspace);
-  console.log(`[zeros-dev] ${cloudSeedMessage(result)}`);
-  return result;
+  const unlock = acquireWorkspaceLock(workspace, "seed.lock");
+  try {
+    const seed = { ...workspace, state: { ...workspace.state, ...readLocalSeed(workspace) } };
+    const result = await seedLocalEnvironment(seed, profile, ports, root);
+    recordCloudSeed(seed.state, result); saveLocalSeed(seed);
+    console.log(`[zeros-dev] ${cloudSeedMessage(result)}`);
+    return result;
+  } finally { unlock(); }
 }
 
 async function seedRunning(workspace, profile) {
@@ -115,6 +120,10 @@ async function start(workspace, profile) {
     throw new Error("The previous launch has not confirmed shutdown; run pnpm electron:cloud --stop before starting again. Existing state was preserved.");
   const issues = profileIssues(profile, { cloud: Boolean(profile.cloud) });
   if (issues.length) throw new Error(issues.join("\n"));
+  const seed = readLocalSeed(workspace);
+  if (seed.fixture && (profile.fixture?.staffAccess === false || seed.fixture.staffAccess === false || seed.cloudSeed?.staffRole === null)) {
+    fixtureBindingDigest(seed, { ...profile.fixture, bootstrapOrganization: true });
+  }
   const release = acquireWorkspaceLock(workspace), processes = new DevelopmentProcesses();
   const env = systemEnvironment(), runId = randomUUID(), token = randomUUID();
   let postgres, server;
@@ -190,7 +199,7 @@ async function start(workspace, profile) {
     await enableWorkosWebhook(workspace, profile); signal.throwIfAborted();
     // A missing fixture input is guidance, not a reason to tear the stack down:
     // fix it, then run pnpm electron:cloud --seed against this running stack.
-    if (cloudSeedNeeded(workspace.state)) await seedCloud(workspace, profile, ports).catch(error =>
+    if (cloudSeedNeeded(readLocalSeed(workspace), profile.fixture)) await seedCloud(workspace, profile, ports).catch(error =>
       console.log(`[zeros-dev] Cloud test organization not seeded: ${error.message}. Fix it, then run pnpm electron:cloud --seed`));
     signal.throwIfAborted();
     console.log(`[zeros-dev] Ready: ${publicProfile.apiOrigin}`);

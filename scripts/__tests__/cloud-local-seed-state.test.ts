@@ -18,6 +18,16 @@ describe("electron:cloud seed state", () => {
     expect(cloudSeedNeeded(state)).toBe(false);
   });
 
+  it("recognizes a verified non-staff receipt only for the selected non-staff profile", () => {
+    const state: any = {};
+    recordCloudSeed(state, { seeded: true, organizationId: "o", staffRole: null });
+    expect(state.cloudSeed.staffRole).toBeNull();
+    expect(cloudSeedNeeded(state, { staffAccess: false })).toBe(false);
+    expect(cloudSeedNeeded(state)).toBe(true);
+    state.cloudSeed.staffRole = "developer";
+    expect(cloudSeedNeeded(state, { staffAccess: false })).toBe(true);
+  });
+
   it("keeps a not-yet-seeded instance retryable and says what to do", () => {
     const state: any = {};
     recordCloudSeed(state, { seeded: false, needsSignIn: true });

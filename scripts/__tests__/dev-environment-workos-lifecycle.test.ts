@@ -7,6 +7,8 @@ import { randomUUID, timingSafeEqual } from "node:crypto";
 import ts from "typescript";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import * as workos from "../dev-environment/workos.mjs";
+import { readLocalSeed } from "../dev-environment/cloud-local-seed-state.mjs";
+import { fixtureBindingDigest } from "../dev-environment/hosted-fixtures.mjs";
 import {
   acquireWorkspaceLock, ensureWorkspace, privateDirectory, readPrivateJson,
   saveWorkspace, writePrivateFile,
@@ -158,7 +160,7 @@ function launcher({ startupFailure = false, cleanupFailure = false, cancelAtRead
   });
   const context = vm.createContext({
     fs, path, once, randomUUID, timingSafeEqual, privateDirectory, writePrivateFile,
-    saveWorkspace, readPrivateJson, acquireWorkspaceLock,
+    saveWorkspace, readPrivateJson, readLocalSeed, fixtureBindingDigest, acquireWorkspaceLock,
     root: f.root, action: "backend", watch: false, process: emitter, globalThis: { AbortSignal },
     systemEnvironment: () => ({}), currentBoot: () => "fixture-boot", recoverLaunchAfterReboot: () => false,
     profileIssues: () => [], loadProfile: () => f.profile, verifyAlpha: async () => {},

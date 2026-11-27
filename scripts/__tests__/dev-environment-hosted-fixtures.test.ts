@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { fixtureIssues, bindFixture, seedHostedFixture, verifyFixtureMembership, bootstrapFixtureOrganization } from "../dev-environment/hosted-fixtures.mjs";
+import { fixtureIssues, bindFixture, fixtureBindingDigest, seedHostedFixture, verifyFixtureMembership, bootstrapFixtureOrganization } from "../dev-environment/hosted-fixtures.mjs";
 import { validateStaffRoleRequest } from "../../apps/control-plane/src/manage-staff";
 
 const fixture = { workosUserId: "user_test", workosOrganizationId: "org_test", expectedEmail: "dev@example.test",
@@ -51,6 +51,9 @@ describe("explicit hosted Dev fixture", () => {
     expect(fixtureIssues({ ...fixture, computeCreditMicroUsd: 1_000_000 })).not.toEqual([]);
     expect(bindFixture(state, fixture)).toEqual(bindFixture(state, fixture));
     expect(() => bindFixture(state, { ...fixture, expectedOrganizationSlug: "different" })).toThrow(/archive/);
+    expect(fixtureIssues({ ...fixture, staffAccess: "false" })).not.toEqual([]);
+    expect(bindFixture(state, { ...fixture, staffAccess: true }).digest).toBe(state.fixture.digest);
+    expect(() => bindFixture(state, { ...fixture, staffAccess: false })).toThrow(/archive/);
   });
   it("uses one clock reading so the credit period never exceeds its seven-day limit", () => {
     const clock = vi.spyOn(Date, "now").mockReturnValue(Date.now() + 1000);
@@ -58,6 +61,14 @@ describe("explicit hosted Dev fixture", () => {
       const value = bindFixture({}, fixture);
       expect(Date.parse(value.endsAt) - Date.parse(value.startsAt)).toBe(7 * 86400_000);
     } finally { clock.mockRestore(); }
+  });
+  it("can restart an expired automation generation without renewing or reseeding its budget", () => {
+    const selected = { ...fixture, staffAccess: false }, state: any = {};
+    bindFixture(state, selected);
+    state.fixture.endsAt = "2000-01-01T00:00:00.000Z";
+    expect(fixtureBindingDigest(state, selected)).toBe(state.fixture.digest);
+    expect(() => fixtureBindingDigest(state, fixture)).toThrow(/archive/);
+    expect(() => bindFixture(state, selected)).toThrow(/expired/);
   });
   it("does not fabricate identity, membership or paid authority before normal sign-in", async () => {
     const f = setup(); expect(await seedHostedFixture(f)).toEqual({ seeded: false, needsSignIn: true });
@@ -76,6 +87,15 @@ describe("explicit hosted Dev fixture", () => {
     expect(f.manage.mock.calls.every(([pool, input]) => pool === f.migration && input.channel === "development")).toBe(true);
     expect(f.module).toHaveBeenCalledExactlyOnceWith("manage-staff.js");
 
+  });
+  it.each([null, "developer", "platform_owner"])("checks an automation fixture's existing staff role (%s) without promoting it", async staffRole => {
+    const f = setup([{ user_id: userId, organization_id: orgId, email: fixture.expectedEmail,
+      slug: fixture.expectedOrganizationSlug, staff_role: staffRole }]);
+    f.request.fixture = bindFixture({}, { ...fixture, staffAccess: false });
+    if (staffRole === null) await expect(seedHostedFixture(f)).resolves.toEqual({ seeded: true });
+    else await expect(seedHostedFixture(f)).rejects.toThrow(/non-staff/i);
+    expect(f.manage).not.toHaveBeenCalled();
+    expect(f.module).not.toHaveBeenCalled();
   });
   it("keeps legacy profiles readable for cleanup but requires explicit migration before seeding", async () => {
     const f = setup([{ user_id: userId, organization_id: orgId, email: fixture.expectedEmail, slug: fixture.expectedOrganizationSlug }]);

@@ -105,6 +105,17 @@ database("electron:cloud seed and confirmed resource drain", () => {
     expect((await vault.organizationConnections(user.id, organizationId)).connections.find(row => row.provider === "claude")?.credentialId).toBeNull();
   });
 
+  it("keeps a non-staff automation fixture outside staff operations across repeated seeds", async () => {
+    const user = await signIn(), request = seedRequest();
+    const automation = { ...request, fixture: { ...request.fixture, staffAccess: false } };
+    await expect(seed(automation)).resolves.toMatchObject({ seeded: true, staffRole: null });
+    await expect(seed(automation)).resolves.toMatchObject({ staffRole: null });
+    expect((await pool.query("SELECT staff_role FROM users WHERE id=$1", [user.id])).rows[0].staff_role).toBeNull();
+    expect((await pool.query("SELECT count(*)::int AS n FROM staff_role_changes WHERE subject_user_id=$1", [user.id])).rows[0].n).toBe(0);
+    await seed(request);
+    await expect(seed(automation)).rejects.toThrow(/non-staff/i);
+  });
+
   it("refuses staff seeding for a remote target or another instance and leaves other users unchanged", async () => {
     const user = await signIn();
     const other = await ensureUser(pool, { provider: "workos", providerSubject: "user_otherfixture", email: "other@example.test", displayName: "Other" });
