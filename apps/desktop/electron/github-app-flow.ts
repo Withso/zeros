@@ -91,7 +91,6 @@ function readPending(): {
   nonce: string;
   expiresAtMs: number;
   preserveSelectedMethod: boolean;
-  cloudOnly?: boolean;
   ownerSub?: string;
   shared?: SharedGithubTarget;
 } | null {
@@ -112,7 +111,6 @@ function readPending(): {
       ...(parsed.shared !== undefined ? { shared: sharedGithubTarget.parse(parsed.shared) } : {}),
       expiresAtMs: parsed.expiresAtMs,
       preserveSelectedMethod: parsed.preserveSelectedMethod === true,
-      ...(parsed.cloudOnly === true ? { cloudOnly: true } : {}),
       ...(typeof parsed.ownerSub === "string" ? { ownerSub: parsed.ownerSub } : {}),
     };
   } catch {
@@ -130,7 +128,7 @@ function consumePending(nonce: string): PendingConsumeResult {
   }
   if (!sameNonce(pending.nonce, nonce)) return { status: "mismatch" };
   return replaceSecretIfUnchanged(PENDING_ACCOUNT, pending.raw, null)
-    ? { status: "consumed", preserveSelectedMethod: pending.preserveSelectedMethod, ownerSub: pending.ownerSub, ...(pending.cloudOnly ? { cloudOnly: true } : {}), ...(pending.shared ? { shared: pending.shared } : {}) }
+    ? { status: "consumed", preserveSelectedMethod: pending.preserveSelectedMethod, ownerSub: pending.ownerSub, ...(pending.shared ? { shared: pending.shared } : {}) }
     : { status: "missing" };
 }
 
@@ -280,14 +278,12 @@ export async function beginGithubAppConnection(
   forceInstall = false,
   preserveSelectedMethod = false,
   shared?: SharedGithubTarget,
-  cloudOnly = false,
 ): Promise<GithubAppFlowKind | null> {
   return githubAppController().begin({
     scheme: schemeForChannel(channel()),
     installFlow,
     forceInstall,
     preserveSelectedMethod,
-    cloudOnly,
     ...(shared ? { shared } : {}),
   });
 }

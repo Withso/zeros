@@ -122,9 +122,9 @@ function harness(options?: {
         return { status: "expired" };
       }
       if (pending.nonce !== nonce) return { status: "mismatch" };
-      const { preserveSelectedMethod, ownerSub, shared, cloudOnly } = pending;
+      const { preserveSelectedMethod, ownerSub, shared } = pending;
       pending = null;
-      return { status: "consumed", preserveSelectedMethod, ownerSub, cloudOnly, ...(shared ? { shared } : {}) };
+      return { status: "consumed", preserveSelectedMethod, ownerSub, ...(shared ? { shared } : {}) };
     },
     discardPending: (nonce) => {
       if (pending?.nonce === nonce) pending = null;
@@ -303,31 +303,45 @@ describe("GitHub App desktop controller", () => {
     expect(h.pending()).toBeNull();
   });
 
-  it.each([true, false])("Cloud-only App setup preserves the Local credential bytes and selection (configured=%s)", async configured => {
-    const local: AppCredential = { ...gitIdentity, method: "github-app", accessToken: "previous", refreshToken: "previous-refresh", ownerSub: "account-one" };
-    const h = harness({ credential: configured ? local : null });
-    const shared = { userId: "account-one", organizationId: "org-one", expected: "b".repeat(64) };
-    const before = JSON.stringify([h.credential(), h.selected()]);
-    await h.controller.begin({ scheme: "zeros", installFlow: false, shared, cloudOnly: true });
-    await h.controller.complete({ nonce: "n".repeat(43) });
-    expect(h.client.exchange).toHaveBeenCalledWith("zeros-access", "n".repeat(43), shared);
-    expect(JSON.stringify([h.credential(), h.selected()])).toBe(before);
-    expect(h.after).not.toHaveBeenCalled();
-    expect(h.events).toContainEqual({ name: "connected", payload: { login: "octocat", installationCount: 1 } });
-  });
-
-  it("requires a scoped exchange target for Cloud-only App setup", async () => {
-    const h = harness();
-    await expect(h.controller.begin({ scheme: "zeros", installFlow: false, cloudOnly: true })).rejects.toThrow();
-    expect(h.client.start).not.toHaveBeenCalled();
-  });
-
   it("keeps Local's selected GitHub method when an organization connects the App", async () => {
     const h = harness();
     await h.controller.begin({ scheme: "zeros", installFlow: false, preserveSelectedMethod: true });
     await h.controller.complete({ nonce: "n".repeat(43) });
     expect(h.credential()?.method).toBe("github-app");
     expect(h.selected()).toBe("gh-cli");
+  });
+
+  it("refreshes the Local App with the current binding after Cloud-started setup", async () => {
+    const h = harness({
+      credential: {
+        ...gitIdentity,
+        method: "github-app",
+        accessToken: "app-access-old",
+        refreshToken: "app-refresh-old",
+        refreshBinding: binding("c"),
+        expiresAtMs: 9_000_000,
+        refreshTokenExpiresAtMs: 19_000_000,
+        ownerSub: "account-one",
+        login: "octocat",
+      },
+    });
+    const rotated = await h.client.refresh();
+    h.client.refresh.mockReset();
+    // The exchange rotates the server's grant generation, so only its binding refreshes.
+    h.client.refresh.mockImplementation(async (...args: unknown[]) => {
+      if (args[2] !== binding("a")) throw new Error("stale binding");
+      return rotated;
+    });
+    await h.controller.begin({
+      scheme: "zeros",
+      installFlow: false,
+      preserveSelectedMethod: true,
+      shared: { userId: "account-one", organizationId: "org-one", expected: "a".repeat(64) },
+    });
+    await h.controller.complete({ nonce: "n".repeat(43) });
+    expect(h.selected()).toBe("gh-cli");
+    await expect(h.controller.refresh({ force: true })).resolves.toMatchObject({ accessToken: "app-access-rotated" });
+    expect(h.credential()?.refreshBinding).toBe(binding("b"));
   });
 
   it("persists the pending nonce before opening the browser", async () => {
