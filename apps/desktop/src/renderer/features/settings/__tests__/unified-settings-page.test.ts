@@ -105,7 +105,8 @@ vi.mock("../migrate-legacy", () => ({ ensureSettingsTomlMigrated: vi.fn() }));
 vi.mock("../cloud-github-levels", () => ({
   useGithubLevels: () => ({ connections: state.githubLevels && { organization: [], personal: [], solo: state.githubLevels.solo },
     repositories: state.githubLevels && { shared: [], private: [], personalAllowed: true }, refresh: () => {} }),
-  GithubConnectionsSection: ({ title, level }: { title: string; level: string }) => `github-levels-fixture:${level}:${title}`,
+  GithubConnectionGroups: ({ organizationName, personal }: { organizationName: string; personal?: boolean }) =>
+    `github-levels-fixture:organization:${personal ? "Projects" : organizationName} github-levels-fixture:personal:Only you`,
   PersonalProjectsSetting: () => "personal-repositories-fixture",
 }));
 vi.mock("../project-page", async (original) => ({
@@ -304,21 +305,44 @@ describe("unified Settings rail", () => {
     state.githubLevels = { solo: false };
     state.saved.set(`${ORGANIZATION_OWNER}:section`, "user:integrations");
     render();
-    const githubEntries = () => rail().join(" ").split("GitHub").length - 1;
+    const githubEntries = () => rail().join(" ").split("Connections").length - 1;
     expect(githubEntries()).toBe(1);
-    expect(container.textContent).toContain("github-levels-fixture:personal:Only you");
+    expect(container.textContent).not.toContain("github-levels-fixture:personal:Only you");
     expect(container.textContent).not.toContain("github-levels-fixture:organization");
     state.saved.set(`${ORGANIZATION_OWNER}:section`, "user:org-github");
     render();
-    expect(container.textContent).toContain("github-levels-fixture:organization:Connections");
+    expect(container.textContent).toContain("github-levels-fixture:organization:Withso");
+    expect(container.textContent).toContain("github-levels-fixture:personal:Only you");
+    expect(container.textContent).not.toContain("personal-repositories-fixture");
+    const click = (label: string) => act(() => {
+      [...container.querySelectorAll<HTMLElement>("button")].find(el => el.textContent?.trim() === label)!.click();
+    });
+    click("Configure account identity");
+    expect(activeEntry()).toBe("Integrations");
+    expect(heading()).toBe("GitHub");
+    click("Connections");
+    expect(heading()).toBe("Connections");
+    act(() => container.querySelector<HTMLElement>('[aria-label="Open GitHub connections"]')!.click());
+    expect(heading()).toBe("GitHub");
+    click("Back to Connections");
+    expect(heading()).toBe("Connections");
+    state.organization = { ...ORGANIZATION, role: "admin" };
+    render();
     expect(container.textContent).toContain("personal-repositories-fixture");
     state.githubLevels = { solo: true };
     state.saved.set(`${ORGANIZATION_OWNER}:section`, "user:integrations");
     render();
     expect(githubEntries()).toBe(0);
-    expect(container.textContent).toContain("github-levels-fixture:organization:Shared with Withso");
+    expect(container.textContent).toContain("github-levels-fixture:organization:Withso");
     expect(container.textContent).toContain("github-levels-fixture:personal:Only you");
     state.githubLevels = null;
+  });
+
+  it("hides Connections under an organization-local owner even if levels were previously cached", () => {
+    state.organization = { ...ORGANIZATION, workspaceCapabilities: { local: true, cloud: false } };
+    state.githubLevels = { solo: false };
+    render();
+    expect(rail().join(" ")).not.toContain("Connections");
   });
 
   it("splits General: personal rows, then This Mac; organization rows on their own page", () => {
