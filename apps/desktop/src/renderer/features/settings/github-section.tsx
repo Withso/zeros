@@ -91,6 +91,8 @@ import {
 import { RunStream } from "@/renderer/shared/ui/loading/run-stream";
 import { githubAuthSnapshotKey } from "./github-auth-prefetch";
 import { useSharedGithub, type GithubSettingsOwner } from "./use-shared-github";
+import { SettingsGroup, SettingsList, SettingsRow } from "./settings-ui";
+import { GithubWorkspaceMethod, workspaceMethodNames, type GithubPlace } from "./github-workspace-method";
 import { cloudGithubHealthCopy } from "./cloud-github-health";
 
 const METHODS = ["gh-cli", "github-app", "pat"] as const;
@@ -200,18 +202,27 @@ function HealthDetail({ summary }: { summary: GithubCredentialSummary }) {
 export function GitHubSection({
   surfaceActive = true,
   title = "GitHub",
+  workspaceIdentity = false,
+  personalCloud = false,
   owner,
   accountId = owner?.userId,
 }: {
   surfaceActive?: boolean;
   title?: React.ReactNode;
+  workspaceIdentity?: boolean;
+  personalCloud?: boolean;
   owner?: GithubSettingsOwner;
   accountId?: string;
 }) {
   const shared = useSharedGithub(owner, surfaceActive);
   const invalidateCloud = shared.invalidate;
   const authKey = githubAuthSnapshotKey(accountId);
-  const [setupMethod, setSetupMethod] = useState<GithubAuthMethod | null>(null);
+  const [setup, setSetup] = useState<{
+    method: GithubAuthMethod;
+    place: GithubPlace | "shared";
+  } | null>(null);
+  const place = setup?.place ?? "shared";
+  const [onboarding, setOnboarding] = useState(false);
   const [terminalOpen, setTerminalOpen] = useState(false);
   const [pat, setPat] = useState("");
   const [showPat, setShowPat] = useState(false);
@@ -277,21 +288,24 @@ export function GitHubSection({
   );
 
   const selectMethod = useCallback(
-    async (method: GithubAuthMethod) => {
+    async (method: GithubAuthMethod, target: GithubPlace | "shared" = "shared") => {
       const status = snapshot.methods[method];
       const cloudMethod = owner && method !== "gh-cli" ? shared.read.data?.methods[method] : undefined;
-      if (!status.configured || (owner && method !== "gh-cli" && (!cloudMethod?.configured || cloudMethod.login !== status.login))) {
-        setSetupMethod(method);
+      const configured = target === "cloud" ? cloudMethod?.configured
+        : status.configured && (target === "local" || !owner || method === "gh-cli" ||
+          (cloudMethod?.configured && cloudMethod.login === status.login));
+      if (!configured) {
+        setSetup({ method, place: target });
         setTerminalOpen(false);
         return;
       }
       setBusyMethod(method);
       setTerminalOpen(false);
-      setSetupMethod(null);
+      setSetup(null);
       let changedOnMac = false;
       try {
-        const changeCloud = owner && method !== "gh-cli" && shared.read.data?.selectedMethod !== method;
-        if (snapshot.selectedMethod !== method) {
+        const changeCloud = target !== "local" && owner && method !== "gh-cli" && shared.read.data?.selectedMethod !== method;
+        if (target !== "cloud" && snapshot.selectedMethod !== method) {
           const next = await ghMethodSelect(method, accountId);
           ghAuthStatusCache.setData(authKey, next);
           changedOnMac = true;
@@ -320,7 +334,7 @@ export function GitHubSection({
     try {
       const next = await ghMethodSelect("gh-cli", accountId);
       ghAuthStatusCache.setData(authKey, next);
-      setSetupMethod(null);
+      setSetup(null);
       trackGithubConnectCompleted({
         method: "gh-cli",
         outcome: "ok",
@@ -374,7 +388,7 @@ export function GitHubSection({
       const result = await ghPatConnect(token, accountId);
       setPat("");
       setShowPat(false);
-      setSetupMethod(null);
+      setSetup(null);
       // Use the post-write snapshot so a failed follow-up probe cannot hide a successful connection.
       ghAuthStatusCache.setData(authKey, result.snapshot);
       trackGithubConnectCompleted({ method: "pat", outcome: "ok" });
@@ -407,7 +421,7 @@ export function GitHubSection({
   }) => {
     const attempt = appAttemptRef.current;
     // Open setup before the install request so start failures stay visible inline.
-    if (options?.forceInstall) setSetupMethod("github-app");
+    if (options?.forceInstall) setSetup({ method: "github-app", place: "shared" });
     setBusyMethod("github-app");
     setAppError(null);
     const app = snapshot.methods["github-app"];
@@ -420,7 +434,12 @@ export function GitHubSection({
       entryPoint: "settings",
     });
     try {
-      const started = await ghAppConnect({ ...connectOptions, ...(owner ? { shared: shared.target() } : {}) });
+      const target = options?.forceInstall ? "shared" : place;
+      const started = await ghAppConnect({
+        ...connectOptions,
+        ...(target === "cloud" ? { preserveSelectedMethod: true } : {}),
+        ...(owner ? { shared: shared.target() } : {}),
+      });
       if (attempt !== appAttemptRef.current || !started) return;
       if (started.flowKind === "install") {
         trackGithubInstallOpened({
@@ -448,7 +467,7 @@ export function GitHubSection({
     } finally {
       setBusyMethod(null);
     }
-  }, [snapshot.methods, owner, shared]);
+  }, [snapshot.methods, owner, shared, place]);
 
   const cancelApp = useCallback(async () => {
     const attempt = appAttemptRef.current;
@@ -465,7 +484,7 @@ export function GitHubSection({
     });
     setAppWaiting(false);
     setAppError(null);
-    setSetupMethod(null);
+    setSetup(null);
     // Release the chooser immediately; the cancelled request may still be pending.
     setBusyMethod(null);
   }, []);
@@ -477,12 +496,13 @@ export function GitHubSection({
     setTerminalOpen(false);
     setAppWaiting(false);
     setAppError(null);
-    setSetupMethod(null);
+    setSetup(null);
     // Reset visibility with the draft so the next pasted token starts masked.
     setPat("");
     setShowPat(false);
     setBusyMethod(null);
     setRefreshingMethod(null);
+    setOnboarding(false);
     setDisconnectAppOpen(false);
   }, [surfaceActive]);
 
@@ -495,7 +515,7 @@ export function GitHubSection({
         invalidateCloud();
         setAppWaiting(false);
         setAppError(null);
-        setSetupMethod(null);
+        setSetup(null);
         void refreshSnapshot();
       }),
       onGithubAppError(() => {
@@ -545,7 +565,7 @@ export function GitHubSection({
           await shared.change({ action: "disconnect", method });
         const result = await ghMethodDisconnect(method, accountId);
         ghAuthStatusCache.setData(authKey, result.snapshot);
-        setSetupMethod(current => current === method ? null : current);
+        setSetup(current => current?.method === method ? null : current);
         if (method === "gh-cli") setTerminalOpen(false);
         if (method === "github-app") setAppWaiting(false);
         if (method === "gh-cli") setAutoSetupDismissed(true);
@@ -602,26 +622,50 @@ export function GitHubSection({
     return githubAutomaticSetup(snapshot, hasConfirmedSnapshot);
   }, [hasConfirmedSnapshot, snapshot]);
   const visibleSetup =
-    setupMethod ?? (autoSetupDismissed ? null : automaticSetup);
+    setup?.method ?? (workspaceIdentity || autoSetupDismissed ? null : automaticSetup);
+  const localMethods = (["github-app", "pat", "gh-cli"] as const).filter(method => method !== "github-app" || accountId);
+  const local = snapshot.methods[snapshot.selectedMethod];
+  const cloud = shared.read.data;
+  const selectedCloud = cloud?.selectedMethod ? cloud.methods[cloud.selectedMethod] : null;
+  const firstRun = workspaceIdentity && hasConfirmedSnapshot && !METHODS.some(method => snapshot.methods[method].configured)
+    && (!owner || (cloud && !cloud.methods.pat.configured && !cloud.methods["github-app"].configured));
+  const List = workspaceIdentity ? SettingsList : "div";
 
   return (
     <>
-      <section className="flex flex-col gap-3">
-        <div>
+      {workspaceIdentity && !firstRun && (
+        <SettingsGroup title="Workspace identity">
+          <GithubWorkspaceMethod place="local" methods={localMethods}
+            method={local.configured && localMethods.includes(local.method) ? local.method : null}
+            hint={local.login ? `@${local.login}` : "On this Mac"} disabled={!hasConfirmedSnapshot || busyMethod !== null || appWaiting}
+            onChoose={method => void selectMethod(method, "local")} />
+          {owner && <GithubWorkspaceMethod place="cloud" organization={personalCloud ? undefined : owner.name}
+            methods={["github-app", "pat"]} method={cloud?.selectedMethod ?? null}
+            hint={selectedCloud?.login ? `@${selectedCloud.login}` : "No account in use"} disabled={!cloud || !!shared.read.readError || busyMethod !== null || appWaiting}
+            onChoose={method => void selectMethod(method, "cloud")} />}
+        </SettingsGroup>
+      )}
+      {firstRun && !onboarding ? (
+        <div><Button variant="primary" onClick={() => {
+          setOnboarding(true);
+          setSetup({ method: accountId ? "github-app" : "pat", place: "shared" });
+        }}><GithubIcon /> Connect GitHub</Button></div>
+      ) : <section className="flex flex-col gap-3">
+        {workspaceIdentity ? <h2 className="text-fg1 m-0 text-xs font-medium">Authentication methods</h2> : <div>
           <h2 className="text-fg1 m-0 text-xs leading-4.5 font-medium">{title}</h2>
           <p className="text-fg2 mt-0.5 text-xs">
             {owner ? `Connect GitHub for this Mac and cloud workspaces in ${owner.name}.` : "How Zeros signs in to GitHub on this Mac."}
           </p>
-        </div>
+        </div>}
 
         {/* Use a group so screen readers expose row buttons; named native radios keep arrow-key navigation. */}
-        <div
+        <List
           role="group"
           aria-label="GitHub authentication method"
           aria-busy={connection.loading || undefined}
-          className="flex flex-col gap-2"
+          className={workspaceIdentity ? undefined : "flex flex-col gap-2"}
         >
-          {METHODS.map((method) => {
+          {(workspaceIdentity ? localMethods : METHODS).map((method) => {
             const summary = snapshot.methods[method];
             const selected = snapshot.selectedMethod === method;
             const cloudMethod = method !== "gh-cli" && owner ? shared.read.data?.methods[method] : undefined;
@@ -631,65 +675,8 @@ export function GitHubSection({
               summary,
               selected,
             );
-            return (
-              <div
-                key={method}
-                className={cn(
-                  "border-border2 relative grid grid-cols-[20px_minmax(0,1fr)_auto] items-start gap-2.5 rounded-xl border p-3.5 transition-colors duration-fast ease-out",
-                  selected
-                    ? "bg-bg1-hover"
-                    : "bg-bg1 hover:border-border3 hover:bg-bg1-hover",
-                  githubHealthNeedsAttention(summary) &&
-                    "border-yellow-text/30",
-                )}
-              >
-                <input
-                  className="border-border4 hover:border-fg3 checked:border-inverted-bg checked:bg-inverted-fg focus-visible:border-accent mt-px size-4 appearance-none rounded-full border transition-[background-color,border-color,box-shadow] duration-fast ease-out checked:shadow-[inset_0_0_0_4px_var(--inverted-bg)] focus-visible:outline-none"
-                  type="radio"
-                  name="github-auth-method"
-                  value={method}
-                  checked={selected}
-                  aria-label={githubMethodLabel(method)}
-                  onChange={() => void selectMethod(method)}
-                  disabled={busyMethod !== null || !hasConfirmedSnapshot || (!!owner && method !== "gh-cli" && !shared.read.data)}
-                />
-
-                <button
-                  type="button"
-                  // Only the radio is a tab stop; keep the badge and description exposed to assistive tech.
-                  tabIndex={-1}
-                  className="min-w-0 cursor-pointer text-left"
-                  onClick={() => void selectMethod(method)}
-                  disabled={busyMethod !== null || !hasConfirmedSnapshot || (!!owner && method !== "gh-cli" && !shared.read.data)}
-                >
-                  <span className="text-fg1 flex items-center gap-2 text-xs leading-4.5 font-medium">
-                    <MethodIcon method={method} />
-                    {githubMethodLabel(method)}
-                    {method === "gh-cli" && " · Local only"}
-                  </span>
-                  {summary.configured && summary.login ? (
-                    <span className="mt-2 flex flex-wrap items-center gap-2">
-                      <IdentityBadge summary={summary} />
-                    </span>
-                  ) : (
-                    <span className="text-fg3 mt-0.5 block text-3xxs leading-4">
-                      {!hasConfirmedSnapshot
-                        ? githubMethodDescription(method)
-                        : method === "gh-cli" && summary.available
-                          ? "GitHub CLI is installed · sign-in required"
-                          : githubMethodDescription(method)}
-                    </span>
-                  )}
-                </button>
-
-                {cloudMethod && (
-                  <span className="text-fg2 col-start-2 row-start-2 text-xs">
-                    {cloudMethod.configured ? `Cloud · ${cloudMethod.login ?? "Connected"}${shared.read.data?.selectedMethod === method ? " · Selected" : ""}` : "Cloud · Disconnected"}
-                    {cloudMethod.configured && cloudMethod.health !== "connected" && ` · ${cloudGithubHealthCopy[cloudMethod.health]}`}
-                  </span>
-                )}
-
-                <div className="flex items-center gap-1">
+            const actions = (
+              <div className="flex items-center gap-1">
                   {showTopRefresh ? (
                     <Button
                       type="button"
@@ -744,7 +731,7 @@ export function GitHubSection({
                         ) : null}
                         <DropdownMenuItem
                           onSelect={() => {
-                            setSetupMethod(method);
+                            setSetup({ method, place: "shared" });
                             setTerminalOpen(method === "gh-cli");
                           }}
                         >
@@ -770,6 +757,8 @@ export function GitHubSection({
                         </DropdownMenuItem>
                       </DropdownMenuContent>
                     </DropdownMenu>
+                  ) : workspaceIdentity && !settingUp ? (
+                    <Button size="compact" disabled={!hasConfirmedSnapshot || busyMethod !== null || appWaiting} onClick={() => setSetup({ method, place: "shared" })}>Connect</Button>
                   ) : hasConfirmedSnapshot && method === "pat" && !settingUp ? (
                     <Button
                       type="button"
@@ -785,8 +774,8 @@ export function GitHubSection({
                     </Button>
                   ) : null}
                 </div>
-
-                {settingUp ? (
+            );
+            const detail = settingUp ? (
                   <div className="border-border1 col-[2/4] mt-2.5 flex min-w-0 flex-col gap-2.5 border-t pt-3">
                     {method === "gh-cli" ? (
                       terminalOpen ? (
@@ -828,7 +817,7 @@ export function GitHubSection({
                               type="button"
                               variant="ghost"
                               onClick={() => {
-                                setSetupMethod(null);
+                                setSetup(null);
                                 setAutoSetupDismissed(true);
                               }}
                             >
@@ -847,6 +836,8 @@ export function GitHubSection({
                         <p className="text-fg2 m-0 text-xs">
                           {appWaiting
                             ? "Finish on GitHub, then choose Open Zeros."
+                            : workspaceIdentity && owner && place !== "cloud"
+                            ? "Authorizing selects GitHub App for Local and Cloud. You can change either method afterwards."
                             : "Authorize Zeros in your browser."}
                         </p>
                         <div className="flex flex-wrap items-center gap-2">
@@ -916,7 +907,9 @@ export function GitHubSection({
                           </Button>
                         </div>
                         <p className="text-fg2 m-0 text-xs">
-                          Use a fine-grained token for your repositories.
+                          {workspaceIdentity && owner
+                            ? "Saving this token selects it for Local and Cloud. You can change either method afterwards."
+                            : "Use a fine-grained token for your repositories."}
                         </p>
                         <div className="flex items-center gap-2">
                           <div className="relative min-w-0 flex-1">
@@ -971,7 +964,7 @@ export function GitHubSection({
                               setPat("");
                               // Keep the next pasted token masked.
                               setShowPat(false);
-                              setSetupMethod(null);
+                              setSetup(null);
                             }}
                           >
                             Cancel
@@ -1027,11 +1020,84 @@ export function GitHubSection({
                       </>
                     )}
                   </div>
-                ) : null}
+                ) : null;
+            if (workspaceIdentity) {
+              const hint = method === "gh-cli" ? "Local only"
+                : summary.login ? `@${summary.login}` : cloudMethod?.login ? `@${cloudMethod.login}` : githubMethodDescription(method);
+              return <div key={method}>
+                <SettingsRow label={workspaceMethodNames[method]} hint={hint} leading={<MethodIcon method={method} />}>
+                  {actions}
+                </SettingsRow>
+                {cloudMethod?.configured && cloudMethod.health !== "connected" && (
+                  <p className="text-fg2 text-xs">Cloud · {cloudGithubHealthCopy[cloudMethod.health]}</p>
+                )}
+                {detail}
+              </div>;
+            }
+            return (
+              <div
+                key={method}
+                className={cn(
+                  "border-border2 relative grid grid-cols-[20px_minmax(0,1fr)_auto] items-start gap-2.5 rounded-xl border p-3.5 transition-colors duration-fast ease-out",
+                  selected
+                    ? "bg-bg1-hover"
+                    : "bg-bg1 hover:border-border3 hover:bg-bg1-hover",
+                  githubHealthNeedsAttention(summary) &&
+                    "border-yellow-text/30",
+                )}
+              >
+                <input
+                  className="border-border4 hover:border-fg3 checked:border-inverted-bg checked:bg-inverted-fg focus-visible:border-accent mt-px size-4 appearance-none rounded-full border transition-[background-color,border-color,box-shadow] duration-fast ease-out checked:shadow-[inset_0_0_0_4px_var(--inverted-bg)] focus-visible:outline-none"
+                  type="radio"
+                  name="github-auth-method"
+                  value={method}
+                  checked={selected}
+                  aria-label={githubMethodLabel(method)}
+                  onChange={() => void selectMethod(method)}
+                  disabled={busyMethod !== null || !hasConfirmedSnapshot || (!!owner && method !== "gh-cli" && !shared.read.data)}
+                />
+
+                <button
+                  type="button"
+                  // Only the radio is a tab stop; keep the badge and description exposed to assistive tech.
+                  tabIndex={-1}
+                  className="min-w-0 cursor-pointer text-left"
+                  onClick={() => void selectMethod(method)}
+                  disabled={busyMethod !== null || !hasConfirmedSnapshot || (!!owner && method !== "gh-cli" && !shared.read.data)}
+                >
+                  <span className="text-fg1 flex items-center gap-2 text-xs leading-4.5 font-medium">
+                    <MethodIcon method={method} />
+                    {githubMethodLabel(method)}
+                    {method === "gh-cli" && " · Local only"}
+                  </span>
+                  {summary.configured && summary.login ? (
+                    <span className="mt-2 flex flex-wrap items-center gap-2">
+                      <IdentityBadge summary={summary} />
+                    </span>
+                  ) : (
+                    <span className="text-fg3 mt-0.5 block text-3xxs leading-4">
+                      {!hasConfirmedSnapshot
+                        ? githubMethodDescription(method)
+                        : method === "gh-cli" && summary.available
+                          ? "GitHub CLI is installed · sign-in required"
+                          : githubMethodDescription(method)}
+                    </span>
+                  )}
+                </button>
+
+                {cloudMethod && (
+                  <span className="text-fg2 col-start-2 row-start-2 text-xs">
+                    {cloudMethod.configured ? `Cloud · ${cloudMethod.login ?? "Connected"}${shared.read.data?.selectedMethod === method ? " · Selected" : ""}` : "Cloud · Disconnected"}
+                    {cloudMethod.configured && cloudMethod.health !== "connected" && ` · ${cloudGithubHealthCopy[cloudMethod.health]}`}
+                  </span>
+                )}
+
+                {actions}
+                {detail}
               </div>
             );
           })}
-        </div>
+        </List>
 
         <p className="text-fg3 m-0 text-3xxs leading-4">
           Switching keeps your other credentials.
@@ -1060,7 +1126,7 @@ export function GitHubSection({
             </Button>
           </div>
         ) : null}
-      </section>
+      </section>}
 
       <Dialog open={disconnectAppOpen} onOpenChange={setDisconnectAppOpen}>
         <DialogContent

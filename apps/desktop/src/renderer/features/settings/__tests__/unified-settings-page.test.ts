@@ -138,7 +138,7 @@ function render() {
   act(() => root!.render(createElement(TooltipProvider, null, createElement(SettingsPage))));
   return container;
 }
-const heading = () => container.querySelector("h1")?.textContent;
+const heading = () => [...container.querySelectorAll("h1")].find(h => !h.closest('[aria-hidden="true"]'))?.textContent;
 const rail = () =>
   [...container.querySelectorAll('nav[aria-label="Settings sections"] > *')]
     .map((node) => node.textContent?.trim())
@@ -176,9 +176,9 @@ describe("unified Settings rail", () => {
     expect(groups).toContain("Projects");
     expect(groups).not.toContain("Withso");
     const text = container.querySelector("nav")!.textContent!;
-    for (const label of ["General", "Computer use", "Agents", "GitHub", "Environment", "Git & PR", "Profile"])
+    for (const label of ["General", "Computer use", "Agents", "Integrations", "Environment", "Git & PR", "Profile"])
       expect(text).toContain(label);
-    expect(text).not.toMatch(/Terminal Agents|Integrations|Cloud Computer/);
+    expect(text).not.toMatch(/Terminal Agents|Cloud Computer/);
     const project = [...container.querySelectorAll('nav [role="tab"]')].find(
       (node) => node.textContent === "Zeros",
     ) as HTMLElement;
@@ -187,6 +187,30 @@ describe("unified Settings rail", () => {
     expect(heading()).toBe("Zeros");
     expect(container.textContent).toContain("project-page-fixture:local:project-zeros");
     expect(state.saved.get("local:section")).toBe("project:local:project-zeros");
+  });
+
+  it("opens the provider directory from the rail and keeps the integrations selection on GitHub", () => {
+    render();
+    const tab = [...container.querySelectorAll<HTMLElement>("nav [role=tab]")]
+      .find(node => node.textContent === "Integrations")!;
+    act(() => tab.click());
+    expect(heading()).toBe("Integrations");
+    const provider = container.querySelector<HTMLButtonElement>('[aria-label="Open GitHub integration"]')!;
+    expect(provider).toBeTruthy();
+    act(() => provider.click());
+    expect(heading()).toBe("GitHub");
+    expect(state.saved.get("local:section")).toBe("user:integrations");
+    act(() => tab.click());
+    expect(heading()).toBe("Integrations");
+  });
+
+  it("keeps both existing adapters when Cloud omits the shared capability", () => {
+    state.organization = ORGANIZATION;
+    state.sharedDesktopApp = false;
+    state.saved.set(`${ORGANIZATION_OWNER}:section`, "user:integrations");
+    render();
+    expect(container.textContent).toContain("local-github-fixture");
+    expect(container.textContent).toContain("cloud-github-fixture");
   });
 
   it("adds the organization's group by name and its cloud repositories as Projects", () => {
@@ -267,7 +291,7 @@ describe("unified Settings rail", () => {
     state.saved.set(`${ORGANIZATION_OWNER}:section`, "user:integrations");
     render();
     const githubEntries = () => rail().join(" ").split("GitHub").length - 1;
-    expect(githubEntries()).toBe(2);
+    expect(githubEntries()).toBe(1);
     expect(container.textContent).toContain("github-levels-fixture:personal:Only you");
     expect(container.textContent).not.toContain("github-levels-fixture:organization");
     state.saved.set(`${ORGANIZATION_OWNER}:section`, "user:org-github");
@@ -277,7 +301,7 @@ describe("unified Settings rail", () => {
     state.githubLevels = { solo: true };
     state.saved.set(`${ORGANIZATION_OWNER}:section`, "user:integrations");
     render();
-    expect(githubEntries()).toBe(1);
+    expect(githubEntries()).toBe(0);
     expect(container.textContent).toContain("github-levels-fixture:organization:Shared with Withso");
     expect(container.textContent).toContain("github-levels-fixture:personal:Only you");
     state.githubLevels = null;

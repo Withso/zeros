@@ -7,6 +7,7 @@ import { toast } from "../../../shared/ui/primitives/elements";
 
 const adapters = vi.hoisted(() => ({
   cloudPatConfigured: true,
+  empty: false,
   hasCloudSnapshot: true,
   connectApp: vi.fn(async () => ({ flowKind: "oauth" })),
   cloud: vi.fn(async () => {}),
@@ -21,8 +22,8 @@ vi.mock("../../../platform/git", async original => ({
 }));
 vi.mock("../../../state/use-recovering-read", () => ({
   useRecoveringRead: () => ({ data: { selectedMethod: "pat", methods: {
-    pat: { configured: true, method: "pat", login: "octocat", health: "expired" },
-    "github-app": { configured: true, method: "github-app", health: "connected", login: "octocat" },
+    pat: { configured: !adapters.empty, method: "pat", login: "octocat", health: "expired" },
+    "github-app": { configured: !adapters.empty, method: "github-app", health: "connected", login: "octocat" },
     "gh-cli": { configured: false, method: "gh-cli", health: "unavailable" },
   } } }),
 }));
@@ -34,9 +35,11 @@ vi.mock("../use-shared-github", () => ({
 }));
 
 beforeEach(() => {
+  HTMLElement.prototype.scrollIntoView ??= vi.fn();
   vi.clearAllMocks();
   adapters.cloudPatConfigured = true;
   adapters.hasCloudSnapshot = true;
+  adapters.empty = false;
 });
 
 it.each([
@@ -145,4 +148,93 @@ it("selects a working Cloud PAT when the Mac already selected its own PAT", asyn
   } finally {
     act(() => root.unmount());
   }
+});
+
+const org = { userId: "a", organizationId: "o", name: "Team" };
+
+async function workspacePage(owner?: typeof org, accountId?: string, personalCloud = false) {
+  const container = document.body.appendChild(document.createElement("div"));
+  const root = createRoot(container);
+  await act(async () => root.render(createElement(GitHubSection, {
+    workspaceIdentity: true, owner, accountId, personalCloud,
+  })));
+  const pick = async (place: string, method: string) => {
+    const trigger = container.querySelector<HTMLElement>(`[aria-label="${place} method"]`)!;
+    await act(async () => trigger.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true })));
+    const option = [...document.querySelectorAll<HTMLElement>('[role="option"]')].find(item => item.textContent === method);
+    expect(option).toBeTruthy();
+    await act(async () => option!.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true })));
+  };
+  return { container, pick, close() { act(() => root.unmount()); container.remove(); } };
+}
+
+it.each([
+  [undefined, undefined, false, false],
+  [undefined, "a", false, false],
+  [org, "a", true, true],
+  [org, "a", false, true],
+] as const)("shows the exact workspace controls for owner %j and account %s, personal=%s", async (owner, account, personal, cloud) => {
+  const page = await workspacePage(owner, account, personal);
+  try {
+    expect(page.container.textContent).toContain("Workspace identity");
+    expect(page.container.textContent).toContain("Authentication methods");
+    expect(page.container.querySelector('[aria-label="Local method"]')).toBeTruthy();
+    expect(!!page.container.querySelector('[aria-label="Cloud method"]')).toBe(cloud);
+    expect(page.container.textContent?.includes("Cloud · Team")).toBe(cloud && !personal);
+    expect(page.container.textContent?.includes("GitHub App")).toBe(!!account);
+    expect(page.container.textContent).toContain("Local only");
+    expect(page.container.querySelector('[aria-label^="Disconnect Local"], [aria-label^="Disconnect Cloud"]')).toBeNull();
+  } finally { page.close(); }
+});
+
+it("selects a configured method only on the addressed workspace", async () => {
+  const page = await workspacePage(org, "a");
+  try {
+    await page.pick("Cloud", "Personal access token");
+    expect(adapters.cloud).toHaveBeenCalledWith({ action: "select", method: "pat" });
+    expect(adapters.mac).not.toHaveBeenCalled();
+    adapters.cloud.mockClear();
+    await page.pick("Local", "GitHub App");
+    expect(adapters.mac).toHaveBeenCalledWith("github-app", "a");
+    expect(adapters.cloud).not.toHaveBeenCalled();
+  } finally { page.close(); }
+});
+
+it("opens missing Cloud PAT setup inline without selecting either workspace", async () => {
+  adapters.cloudPatConfigured = false;
+  const page = await workspacePage(org, "a");
+  try {
+    await page.pick("Cloud", "Personal access token");
+    expect(page.container.querySelector('input[aria-label="Personal access token"]')).toBeTruthy();
+    expect(page.container.textContent).toContain("Saving this token selects it for Local and Cloud");
+    expect(adapters.mac).not.toHaveBeenCalled();
+    expect(adapters.cloud).not.toHaveBeenCalled();
+  } finally { page.close(); }
+});
+
+it("offers a single first-run action before showing shared setup", async () => {
+  adapters.empty = true;
+  adapters.cloudPatConfigured = false;
+  const page = await workspacePage(org, "a");
+  try {
+    const buttons = page.container.querySelectorAll("button");
+    expect([...buttons].map(button => button.textContent?.trim())).toEqual(["Connect GitHub"]);
+    await act(async () => buttons[0].click());
+    expect(page.container.textContent).toContain("Open GitHub");
+    expect(page.container.textContent).toContain("Personal access token");
+  } finally { page.close(); }
+});
+
+it("sets up a missing Cloud App through the shared exchange while preserving Local selection", async () => {
+  const page = await workspacePage(org, "a");
+  try {
+    await page.pick("Cloud", "GitHub App");
+    const open = [...page.container.querySelectorAll("button")].find(node => node.textContent?.trim() === "Open GitHub");
+    await act(async () => open!.click());
+    expect(adapters.connectApp).toHaveBeenCalledWith({
+      installFlow: false, forceInstall: false, preserveSelectedMethod: true,
+      shared: { userId: "a", organizationId: "o", expected: "c".repeat(64) },
+    });
+    expect(adapters.mac).not.toHaveBeenCalled();
+  } finally { page.close(); }
 });
