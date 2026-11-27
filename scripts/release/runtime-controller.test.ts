@@ -14,7 +14,12 @@ function fixture(action: "publish" | "promote" | "rollback" = "publish") {
     CLOUD_V2_RUNTIME_STORE_ENDPOINT: "https://target.example.test", CLOUD_V2_RUNTIME_STORE_BUCKET: "runtime-fixture", CLOUD_V2_RUNTIME_STORE_ACCESS_KEY_ID: "synthetic-access", CLOUD_V2_RUNTIME_STORE_SECRET_ACCESS_KEY: "synthetic-storage-secret",
     CLOUD_RUNTIME_ALPHA_STORE_ENDPOINT: "https://alpha.example.test", CLOUD_RUNTIME_ALPHA_STORE_BUCKET: "runtime-fixture", CLOUD_RUNTIME_ALPHA_STORE_ACCESS_KEY_ID: "synthetic-read-access", CLOUD_RUNTIME_ALPHA_STORE_SECRET_ACCESS_KEY: "synthetic-read-secret",
     PLANETSCALE_ORG: "fixture", PLANETSCALE_DATABASE: `zeros-control-plane-${channel}`, PLANETSCALE_BRANCH: "main", PLANETSCALE_SERVICE_TOKEN_ID: "synthetic-token-id", PLANETSCALE_SERVICE_TOKEN: "synthetic-private-token" };
-  const config = runtimeReleaseConfig(env), events: string[] = [];
+  const config = runtimeReleaseConfig(env), events: string[] = [], logs: string[] = [];
+  const month = new Date(Date.now() - 30 * 86_400_000);
+  // The confirmed pins ("a" before, "b" after), one referenced runtime ("e") and four old ones ("6".."9"); "9".."7" are the newest three.
+  const archives = ["a", "b", "e", "6", "7", "8", "9"].flatMap((c, i) => [`cloud-v2/runtime/${c.repeat(64)}.tar.gz`, `cloud-v2/runtime/releases/archives/${c.repeat(64)}.tar.gz`]
+    .map(key => ({ key, lastModified: new Date(month.getTime() + i * 60_000), size: 333e6 })));
+  const references = vi.fn(async () => { events.push("retention-references"); return ["e".repeat(64)]; });
   const manifest = { version: 1 as const, repository: config.repository, sourceSha: "2".repeat(40), sourceSha256: "c".repeat(64), sha256: "b".repeat(64), bytes: 123 };
   const prepared = prepareRuntimePublication({ ...config, channel: "alpha", action: "publish", branch: "main", sourceSha: manifest.sourceSha,
     runId: action === "promote" ? "100" : "123" }, manifest);
@@ -30,8 +35,10 @@ function fixture(action: "publish" | "promote" | "rollback" = "publish") {
   const target = { close: vi.fn(() => { events.push("store-close"); }), publish: vi.fn(async () => { events.push("publish"); return manifest; }),
     copy: vi.fn(async () => { events.push("copy"); return manifest; }), retain: vi.fn(async () => {}),
     qualification: vi.fn(async () => proof), saveQualification: vi.fn(async () => { events.push("qualification-save"); }),
-    saveReceipt: vi.fn(async () => { events.push("receipt-save"); }), saveEvent: vi.fn(async () => { events.push("event-save"); }) };
-  const alpha = { ...target, close: vi.fn(), qualification: vi.fn(async () => proof) };
+    saveReceipt: vi.fn(async () => { events.push("receipt-save"); }), saveEvent: vi.fn(async () => { events.push("event-save"); }),
+    listRuntimeObjects: vi.fn(async () => { events.push("retention-list"); return archives; }),
+    deleteRuntimeArchives: vi.fn(async (_keys: readonly string[]) => { events.push("retention-delete"); }) };
+  const alpha = { ...target, close: vi.fn(), qualification: vi.fn(async () => proof), listRuntimeObjects: vi.fn(async () => archives), deleteRuntimeArchives: vi.fn() };
   const provider = { current: vi.fn(async () => live), verifyDatabaseRoute: vi.fn(async () => { events.push("route"); }),
     stage: vi.fn(async () => { events.push("stage"); }), deploy: vi.fn(async () => { events.push("deploy"); return "deployment-fixture"; }),
     wait: vi.fn(async () => { events.push("ready"); }), recover: vi.fn(async () => ({ releaseDrain: true })) };
@@ -56,10 +63,10 @@ function fixture(action: "publish" | "promote" | "rollback" = "publish") {
       : { id: 100, run_attempt: 1, head_sha: config.workflowSha, head_branch: "main", path: ".github/workflows/runtime-release.yml", event: "workflow_dispatch", status: "completed", conclusion: "success",
         repository: { full_name: config.repository }, head_repository: { full_name: config.repository } }) };
   const services = { store: vi.fn(input => input.endpoint === "https://alpha.example.test" ? alpha : target), github: vi.fn(() => github), provider: vi.fn(() => provider),
-    database, drain: vi.fn(() => drain), qualify, read, write, planetScale: vi.fn(() => {}) };
+    database, drain: vi.fn(() => drain), qualify, read, write, planetScale: vi.fn(() => {}), references };
   const controller = new AbortController();
-  const execute = () => runRuntimeController(env, { root: "/synthetic/controller", signal: controller.signal, services: services as never });
-  return { env, config, live, events, target, alpha, provider, drain, services, github, database, read, write, qualify, controller, execute, failCleanup: () => { cleanupFails = true; } };
+  const execute = () => runRuntimeController(env, { root: "/synthetic/controller", signal: controller.signal, services: services as never, log: line => logs.push(line) });
+  return { logs, references, env, config, live, events, target, alpha, provider, drain, services, github, database, read, write, qualify, controller, execute, failCleanup: () => { cleanupFails = true; } };
 }
 
 describe("runtime controller production composition", () => {
@@ -125,6 +132,39 @@ describe("runtime controller production composition", () => {
   it("refuses a persistent runner before allocating any release authority", async () => {
     const f = fixture(); f.env.RUNNER_ENVIRONMENT = "self-hosted";
     await expect(f.execute()).rejects.toThrow(/GitHub-hosted/); expect(f.services.store).not.toHaveBeenCalled();
+  });
+  it("plans runtime cleanup after the receipt in dry-run by default, reading references while database authority is held", async () => {
+    const f = fixture(); await f.execute();
+    expect(f.events.indexOf("release")).toBeLessThan(f.events.indexOf("retention-references"));
+    expect(f.events.indexOf("retention-references")).toBeLessThan(f.events.indexOf("database-cleanup"));
+    expect(f.events.indexOf("qualification-save")).toBeLessThan(f.events.indexOf("retention-list"));
+    expect(f.references).toHaveBeenCalledWith({ query: "owned-pool-fixture" });
+    expect(f.target.deleteRuntimeArchives).not.toHaveBeenCalled();
+    const [, plan] = f.write.mock.calls.find(([path]) => String(path).endsWith("runtime-retention.json")) as unknown as [string, any];
+    expect(plan).toMatchObject({ mode: "dry-run", status: "planned", pins: { current: "b".repeat(64), previous: "a".repeat(64) }, references: ["e".repeat(64)] });
+    expect(plan.remove.map((item: any) => item.sha256)).toEqual(["6".repeat(64)]);
+    expect(f.logs).toEqual([expect.stringMatching(/^Runtime retention \(dry-run\) on alpha: would remove 1 runtimes \(2 objects, 0.7 GB/)]);
+  });
+  it("deletes both copies of unreferenced runtimes only when the environment applies retention", async () => {
+    const f = fixture("promote"); f.env.ZEROS_RUNTIME_RETENTION = "apply"; await f.execute();
+    expect(f.target.deleteRuntimeArchives).toHaveBeenCalledWith([`cloud-v2/runtime/${"6".repeat(64)}.tar.gz`, `cloud-v2/runtime/releases/archives/${"6".repeat(64)}.tar.gz`]);
+    expect(f.alpha.deleteRuntimeArchives).not.toHaveBeenCalled();
+    expect(f.logs[0]).toMatch(/\(apply\) on production: removed 1 runtimes/);
+  });
+  it("keeps the release successful but deletes nothing when references or the listing fail", async () => {
+    const f = fixture(); f.env.ZEROS_RUNTIME_RETENTION = "apply"; f.references.mockRejectedValue(new Error("synthetic-private-database"));
+    await expect(f.execute()).resolves.toMatchObject({ status: "success" });
+    expect(f.target.deleteRuntimeArchives).not.toHaveBeenCalled(); expect(f.target.listRuntimeObjects).not.toHaveBeenCalled();
+    expect(f.logs[0]).toMatch(/^::warning::Runtime retention refused \(references_unavailable\)/);
+    const g = fixture(); g.env.ZEROS_RUNTIME_RETENTION = "apply"; g.target.listRuntimeObjects.mockRejectedValue(new Error("synthetic-private-listing"));
+    await expect(g.execute()).resolves.toMatchObject({ status: "success" });
+    expect(g.target.deleteRuntimeArchives).not.toHaveBeenCalled();
+    expect(JSON.stringify([...f.logs, ...g.logs, ...g.write.mock.calls])).not.toContain("synthetic-private");
+  });
+  it("runs no cleanup when the release does not succeed", async () => {
+    const f = fixture(); f.env.ZEROS_RUNTIME_RETENTION = "apply"; f.provider.wait.mockRejectedValue(new Error("operation failed"));
+    await expect(f.execute()).rejects.toThrow();
+    expect(f.references).not.toHaveBeenCalled(); expect(f.target.listRuntimeObjects).not.toHaveBeenCalled(); expect(f.target.deleteRuntimeArchives).not.toHaveBeenCalled();
   });
   it("refuses a cancelled operation before database allocation", async () => {
     const f = fixture(); f.controller.abort(); await expect(f.execute()).rejects.toThrow(/cancelled/);

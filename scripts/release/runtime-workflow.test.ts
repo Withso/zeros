@@ -70,6 +70,8 @@ describe("runtime release workflow authority", () => {
     expect(release.if).toContain("(inputs.release_approved && needs.approve.result == 'skipped')");
     expect(workflow.on.workflow_call.inputs.release_approved).toEqual(expect.objectContaining({ type: "boolean", default: false }));
     expect(release.environment).toBe("${{ inputs.channel }}");
+    // Runtime cleanup is switched per environment, read from that environment's variables.
+    expect(release.env.ZEROS_RUNTIME_RETENTION).toBe("${{ vars.ZEROS_RUNTIME_RETENTION }}");
     expect(release.if).not.toContain("inputs.channel == 'beta'"); expect(text).not.toContain("beta-approval");
   });
   it("lets only release.yml stand its own approval in for the runner's", () => {
