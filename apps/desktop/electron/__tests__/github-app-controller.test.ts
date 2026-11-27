@@ -122,9 +122,9 @@ function harness(options?: {
         return { status: "expired" };
       }
       if (pending.nonce !== nonce) return { status: "mismatch" };
-      const { preserveSelectedMethod, ownerSub, shared } = pending;
+      const { preserveSelectedMethod, ownerSub, shared, cloudOnly } = pending;
       pending = null;
-      return { status: "consumed", preserveSelectedMethod, ownerSub, ...(shared ? { shared } : {}) };
+      return { status: "consumed", preserveSelectedMethod, ownerSub, cloudOnly, ...(shared ? { shared } : {}) };
     },
     discardPending: (nonce) => {
       if (pending?.nonce === nonce) pending = null;
@@ -301,6 +301,25 @@ describe("GitHub App desktop controller", () => {
     await h.controller.begin({ scheme: "zeros-dev", installFlow: false });
     await h.controller.disconnect();
     expect(h.pending()).toBeNull();
+  });
+
+  it.each([true, false])("Cloud-only App setup preserves the Local credential bytes and selection (configured=%s)", async configured => {
+    const local: AppCredential = { ...gitIdentity, method: "github-app", accessToken: "previous", refreshToken: "previous-refresh", ownerSub: "account-one" };
+    const h = harness({ credential: configured ? local : null });
+    const shared = { userId: "account-one", organizationId: "org-one", expected: "b".repeat(64) };
+    const before = JSON.stringify([h.credential(), h.selected()]);
+    await h.controller.begin({ scheme: "zeros", installFlow: false, shared, cloudOnly: true });
+    await h.controller.complete({ nonce: "n".repeat(43) });
+    expect(h.client.exchange).toHaveBeenCalledWith("zeros-access", "n".repeat(43), shared);
+    expect(JSON.stringify([h.credential(), h.selected()])).toBe(before);
+    expect(h.after).not.toHaveBeenCalled();
+    expect(h.events).toContainEqual({ name: "connected", payload: { login: "octocat", installationCount: 1 } });
+  });
+
+  it("requires a scoped exchange target for Cloud-only App setup", async () => {
+    const h = harness();
+    await expect(h.controller.begin({ scheme: "zeros", installFlow: false, cloudOnly: true })).rejects.toThrow();
+    expect(h.client.start).not.toHaveBeenCalled();
   });
 
   it("keeps Local's selected GitHub method when an organization connects the App", async () => {

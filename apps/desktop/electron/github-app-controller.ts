@@ -55,7 +55,7 @@ export type GithubAppConnectionErrorReason =
   | "storage_failed";
 
 export type PendingConsumeResult =
-  | { status: "consumed"; preserveSelectedMethod?: boolean | undefined; ownerSub?: string | undefined; shared?: SharedGithubTarget }
+  | { status: "consumed"; cloudOnly?: boolean | undefined; preserveSelectedMethod?: boolean | undefined; ownerSub?: string | undefined; shared?: SharedGithubTarget }
   | {
       status: "missing" | "mismatch" | "expired";
     };
@@ -82,7 +82,7 @@ export interface GithubAppControllerDependencies {
     next: GithubAppCredential | null,
   ): Promise<boolean>;
   getSession(): Promise<{ accessToken: string; sub: string } | null>;
-  savePending(input: { nonce: string; expiresAtMs: number; preserveSelectedMethod?: boolean; ownerSub?: string; shared?: SharedGithubTarget }): void;
+  savePending(input: { nonce: string; expiresAtMs: number; cloudOnly?: boolean; preserveSelectedMethod?: boolean; ownerSub?: string; shared?: SharedGithubTarget }): void;
   consumePending(nonce: string): PendingConsumeResult;
   discardPending(nonce: string): void;
   clearPending(): void;
@@ -248,8 +248,10 @@ export class GithubAppController {
     installFlow: boolean;
     forceInstall?: boolean;
     preserveSelectedMethod?: boolean;
+    cloudOnly?: boolean;
     shared?: SharedGithubTarget;
   }): Promise<GithubAppFlowKind | null> {
+    if (input.cloudOnly && !input.shared) throw new GithubAppFlowError("Cloud setup needs an organization target.", "not_configured");
     if (!this.cancel()) throw new GithubAppFlowError("The GitHub connection is finishing.", "oauth_failed");
     const epoch = this.cancelEpoch;
     const session = await this.deps.getSession();
@@ -290,6 +292,7 @@ export class GithubAppController {
       expiresAtMs: started.expiresAtMs,
       ownerSub: session.sub,
       ...(input.shared ? { shared: input.shared } : {}),
+      ...(input.cloudOnly ? { cloudOnly: true } : {}),
       ...(input.preserveSelectedMethod ? { preserveSelectedMethod: true } : {}),
     });
     try {
@@ -378,6 +381,14 @@ export class GithubAppController {
           "The GitHub handoff omitted account metadata.",
           "oauth_failed",
         );
+      }
+      if (consumed.cloudOnly) {
+        // The exchange has already committed to the targeted Cloud store.
+        const current = await this.deps.getSession();
+        if (epoch === this.cancelEpoch && current?.sub === session.sub) {
+          this.deps.emitConnected({ login: result.login, installationCount: result.installationCount ?? 0 });
+        }
+        return;
       }
       const next: GithubAppCredential = {
         method: "github-app",

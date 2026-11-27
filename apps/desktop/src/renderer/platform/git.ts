@@ -1787,11 +1787,13 @@ export async function ghAppConnect(options?: {
   installFlow?: boolean;
   forceInstall?: boolean;
   preserveSelectedMethod?: boolean;
+  cloudOnly?: boolean;
   shared?: { userId: string; organizationId: string; expected: string };
 }): Promise<{ flowKind: "oauth" | "install" } | null> {
   return nativeInvoke("gh_app_connect", {
     installFlow: options?.installFlow !== false,
     forceInstall: options?.forceInstall === true,
+    ...(options?.cloudOnly ? { cloudOnly: true } : {}),
     ...(options?.preserveSelectedMethod ? { preserveSelectedMethod: true } : {}),
     ...(options?.shared ? { shared: options.shared } : {}),
   });

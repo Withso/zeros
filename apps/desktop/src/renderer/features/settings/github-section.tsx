@@ -48,6 +48,7 @@ import { toast } from "../../shared/ui/primitives/elements";
 import { cn } from "@/renderer/shared/ui/cn";
 import {
   ghAppCancel,
+  ghAppConnect,
   ghAuthSnapshot,
   ghMethodDisconnect,
   ghMethodSelect,
@@ -59,7 +60,7 @@ import {
   onGithubAppError,
   onGithubCredentialStoreChanged,
 } from "../../platform/git";
-import { clearGithubAppRestore, connectSettingsGithubApp, githubAppErrorCopy } from "../../platform/bridge/github-app-notifications";
+import { githubAppErrorCopy } from "../../platform/bridge/github-app-notifications";
 import { shellOpenUrl } from "../../platform/app";
 import {
   ghAuthStatusCache,
@@ -247,7 +248,6 @@ export function GitHubSection({
   );
   const hasConfirmedSnapshot = connection.data !== undefined;
   const snapshot = connection.data ?? EMPTY_SNAPSHOT;
-  const confirmedCloudMethod = shared.read.readError ? null : shared.read.data?.selectedMethod;
 
   const refreshSnapshot = useCallback(
     async (method?: GithubAuthMethod): Promise<GithubAuthSnapshot | null> => {
@@ -439,11 +439,11 @@ export function GitHubSection({
     });
     try {
       const target = options?.forceInstall ? "shared" : place;
-      const started = await connectSettingsGithubApp({
+      const started = await ghAppConnect({
         ...connectOptions,
-        ...(target === "cloud" ? { preserveSelectedMethod: true } : {}),
-        ...(owner && (target !== "local" || confirmedCloudMethod) ? { shared: shared.target() } : {}),
-      }, target === "local" && confirmedCloudMethod === "pat");
+        ...(target === "cloud" ? { cloudOnly: true } : {}),
+        ...(owner && target !== "local" ? { shared: shared.target() } : {}),
+      });
       if (attempt !== appAttemptRef.current || !started) return;
       if (started.flowKind === "install") {
         trackGithubInstallOpened({
@@ -471,7 +471,7 @@ export function GitHubSection({
     } finally {
       setBusyMethod(null);
     }
-  }, [snapshot.methods, owner, shared, place, confirmedCloudMethod]);
+  }, [snapshot.methods, owner, shared, place]);
 
   const cancelApp = useCallback(async () => {
     const attempt = appAttemptRef.current;
@@ -482,7 +482,6 @@ export function GitHubSection({
       return;
     }
     appAttemptRef.current += 1;
-    clearGithubAppRestore();
     trackGithubConnectCompleted({
       method: "github-app",
       outcome: "cancelled",

@@ -92,7 +92,7 @@ describe("GitHub method disconnect commit order", () => {
       ghAppConnect({ installFlow: true, forceInstall: true }, {} as never),
     ).resolves.toEqual({ flowKind: "install" });
 
-    expect(mocks.beginApp).toHaveBeenCalledWith(true, true, false);
+    expect(mocks.beginApp).toHaveBeenCalledWith(true, true, false, undefined, undefined);
   });
 
   it.each(["dev", "alpha", "stable"])(
@@ -103,13 +103,19 @@ describe("GitHub method disconnect commit order", () => {
       vi.stubEnv("ZEROS_DEV_AUTH_PROFILE", "{}");
       vi.stubEnv("ZEROS_ISOLATE", "1");
       await ghAppConnect({ installFlow: true }, {} as never);
-      expect(mocks.beginApp).toHaveBeenCalledWith(true, false, false);
+      expect(mocks.beginApp).toHaveBeenCalledWith(true, false, false, undefined, undefined);
     },
   );
 
   it("keeps organization connection setup from selecting a Local GitHub method", async () => {
     await ghAppConnect({ installFlow: false, preserveSelectedMethod: true }, {} as never);
-    expect(mocks.beginApp).toHaveBeenCalledWith(false, false, true);
+    expect(mocks.beginApp).toHaveBeenCalledWith(false, false, true, undefined, undefined);
+  });
+
+  it("forwards Cloud-only handoffs through the existing native command", async () => {
+    const shared = { userId: "11111111-1111-4111-8111-111111111111", organizationId: "22222222-2222-4222-8222-222222222222", expected: "a".repeat(64) };
+    await ghAppConnect({ installFlow: false, shared, cloudOnly: true }, {} as never);
+    expect(mocks.beginApp).toHaveBeenCalledWith(false, false, false, shared, true);
   });
 
   it("keeps a selected PAT when its fallback preference cannot be stored", async () => {

@@ -3,7 +3,6 @@ import { act, createElement } from "react";
 import { createRoot } from "react-dom/client";
 import { beforeEach, expect, it, vi } from "vitest";
 import { GitHubSection } from "../github-section";
-import { GithubAppNotifications } from "../../../platform/bridge/github-app-notifications";
 import { toast } from "../../../shared/ui/primitives/elements";
 
 const adapters = vi.hoisted(() => ({
@@ -270,6 +269,10 @@ it("offers a single first-run action before showing shared setup", async () => {
     await act(async () => buttons[0].click());
     expect(page.container.textContent).toContain("Open GitHub");
     expect(page.container.textContent).toContain("Personal access token");
+    await act(async () => [...page.container.querySelectorAll("button")].find(b => b.textContent === "Open GitHub")!.click());
+    expect(adapters.connectApp).toHaveBeenCalledExactlyOnceWith({
+      installFlow: false, forceInstall: false, shared: { userId: "a", organizationId: "o", expected: "c".repeat(64) },
+    });
   } finally { page.close(); }
 });
 
@@ -334,29 +337,24 @@ it("opens a Local App handoff without changing an empty Cloud selection", async 
   } finally { page.close(); }
 });
 
-it.each([false, true])("restores Cloud PAT after leaving Settings and a stale callback (restore fails=%s)", async fails => {
+it("Local App setup keeps a configured Cloud credential and selection intact", async () => {
   adapters.localApp = false;
-  adapters.cloudMethod = "pat";
-  const error = vi.spyOn(toast, "error");
-  if (fails) adapters.changeAfterSave.mockRejectedValueOnce(new Error("Cloud token was revoked"));
-  const notifications = createRoot(document.createElement("div"));
-  await act(async () => notifications.render(createElement(GithubAppNotifications)));
+  adapters.cloudMethod = "github-app";
+  const cloud = { encrypted: "original-cloud-app", selected: adapters.cloudMethod };
+  const before = JSON.stringify(cloud);
+  adapters.connectApp.mockImplementationOnce(async (...args: unknown[]) => {
+    if ((args[0] as { shared?: object }).shared) cloud.encrypted = "replacement";
+    return { flowKind: "oauth" };
+  });
   const page = await workspacePage(org, "a");
   try {
     await page.pick("Local", "GitHub App");
     const open = [...page.container.querySelectorAll("button")].find(button => button.textContent === "Open GitHub")!;
     await act(async () => open.click());
-    expect(adapters.changeAfterSave).not.toHaveBeenCalled();
+    expect(adapters.connectApp).toHaveBeenCalledExactlyOnceWith({ installFlow: false, forceInstall: false });
+    expect(JSON.stringify(cloud)).toBe(before);
+    expect(adapters.cloud).not.toHaveBeenCalled();
   } finally { page.close(); }
-  try {
-    await act(async () => {
-      for (const onError of adapters.appErrors) onError({ reason: "nonce_mismatch" });
-      for (const connected of adapters.appConnected) connected({ login: "octocat", installationCount: 2 });
-    });
-    expect(adapters.readAfterExchange).toHaveBeenCalledWith("a", "o");
-    expect(adapters.changeAfterSave).toHaveBeenCalledExactlyOnceWith("a", "o", "post-exchange", { action: "select", method: "pat" });
-    if (fails) expect(error).toHaveBeenCalledWith(expect.stringContaining("couldn’t restore the Cloud method"), { description: "Cloud token was revoked" });
-  } finally { act(() => notifications.unmount()); error.mockRestore(); }
 });
 
 it.each([false, true])("disables only Cloud with an outstanding or failed connection read (error=%s)", async failed => {
@@ -402,7 +400,7 @@ it("sets up a missing Cloud App through the shared exchange while preserving Loc
     const open = [...page.container.querySelectorAll("button")].find(node => node.textContent?.trim() === "Open GitHub");
     await act(async () => open!.click());
     expect(adapters.connectApp).toHaveBeenCalledWith({
-      installFlow: false, forceInstall: false, preserveSelectedMethod: true,
+      installFlow: false, forceInstall: false, cloudOnly: true,
       shared: { userId: "a", organizationId: "o", expected: "c".repeat(64) },
     });
     expect(adapters.mac).not.toHaveBeenCalled();

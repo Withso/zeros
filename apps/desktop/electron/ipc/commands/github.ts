@@ -4,6 +4,7 @@
 // before their slot and active-method preference are committed, so a failed
 // setup never displaces a working method.
 
+import { z } from "zod";
 import type {
   GithubAuthMethod,
   GithubAuthSnapshot,
@@ -489,7 +490,8 @@ export const ghAppConnect: CommandHandler = async (args) => {
       args.installFlow !== false,
       args.forceInstall === true,
       args.preserveSelectedMethod === true,
-      ...(args.shared === undefined ? [] : [sharedGithubTarget.parse(args.shared)] as const),
+      sharedGithubTarget.optional().parse(args.shared),
+      z.boolean().optional().parse(args.cloudOnly),
     );
     return flowKind ? { flowKind } : null;
   } catch (error) {
