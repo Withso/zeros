@@ -5,17 +5,27 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const fixtures = vi.hoisted(() => ({
   connections: { organization: [] as unknown[], personal: [] as unknown[], solo: false },
+  visible: [{ installationId: 900, accountLogin: "acme", suspended: false }],
+  select: vi.fn(), appConfigured: false, connect: vi.fn(), open: vi.fn(), cloudMethod: "github-app",
   drawer: { repositories: [] as unknown[] },
 }));
 vi.mock("../../../platform/cloud-github-levels", async original => ({
   ...(await original<typeof import("../../../platform/cloud-github-levels")>()),
   getCloudGithubLevelConnections: vi.fn(async () => fixtures.connections),
+  connectCloudGithubInstallation: fixtures.connect,
   getCloudProjects: vi.fn(async () => ({ projects: [], personalAllowed: true, canCreateOrganization: true, limits: { personal: 20, repositories: 10 } })),
-  getCloudGithubVisibleInstallations: vi.fn(async () => [{ installationId: 900, accountLogin: "acme", suspended: false }]),
+  getCloudGithubVisibleInstallations: vi.fn(async () => fixtures.visible),
   getCloudGithubConnectionRepositories: vi.fn(async () => ({ connection: fixtures.connections.organization[0], nextPage: null, ...fixtures.drawer })),
 }));
 
-import { GithubConnectionsSection, PersonalProjectsSetting, connectionStateHint } from "../cloud-github-levels";
+vi.mock("../../../platform/app", () => ({ shellOpenUrl: fixtures.open.mockResolvedValue(undefined) }));
+vi.mock("../use-shared-github", () => ({ useSharedGithub: () => ({ read: { data: { generation: "gen1", selectedMethod: fixtures.cloudMethod, methods: { "github-app": { configured: fixtures.appConfigured, login: "octo" } }, installUrl: "https://github.com/apps/fixture/installations/new" } } }) }));
+
+vi.mock("../../../platform/cloud-github-connection", async original => ({
+  ...(await original<typeof import("../../../platform/cloud-github-connection")>()), changeCloudGithubConnection: fixtures.select,
+}));
+
+import { GithubConnectionGroups, PersonalProjectsSetting, connectionStateHint } from "../cloud-github-levels";
 import { projectForRepository, type CloudProjects } from "../../../platform/cloud-github-levels";
 
 const ORG = "11111111-1111-4111-8111-111111111111", USER = "22222222-2222-4222-8222-222222222222";
@@ -32,29 +42,107 @@ const render = async (element: Parameters<Root["render"]>[0]) => {
   await act(async () => { await new Promise(resolve => setTimeout(resolve, 0)); });
   return container.textContent ?? "";
 };
-const buttons = () => [...container.querySelectorAll("button")].map(node => node.textContent);
+const button = (name: string, scope: ParentNode = document.body) => [...scope.querySelectorAll("button")].find(node =>
+  (node.getAttribute("aria-label") ?? node.textContent?.trim()) === name);
+const click = async (name: string) => {
+  const target = button(name);
+  expect(target, name).toBeDefined();
+  await act(async () => target!.click());
+};
+const page = (userId: string, canManage: boolean) => render(createElement(GithubConnectionGroups, {
+  userId, organizationId: ORG, organizationName: "Withso", canManage, active: true, onConfigureIdentity: vi.fn(),
+}));
 
 describe("GitHub at two levels in Settings", () => {
-  it("lets owners and admins manage the organization's connections and shows members them read-only", async () => {
-    fixtures.connections = { organization: [connection("33333333-3333-4333-8333-333333333333", "withso", "organization")], personal: [], solo: false };
-    let text = await render(createElement(GithubConnectionsSection, { userId: USER, organizationId: ORG, level: "organization", canManage: true,
-      active: true, title: "Connections", description: "Shared." }));
-    expect(text).toContain("withso");
-    expect(buttons()).toEqual(expect.arrayContaining(["Repositories", "Remove", "Connect"]));
-    text = await render(createElement(GithubConnectionsSection, { userId: "44444444-4444-4444-8444-444444444444", organizationId: ORG, level: "organization",
-      canManage: false, active: true, title: "Connections", description: "Shared." }));
-    expect(text).toContain("Managed by admins");
-    expect(buttons()).not.toContain("Remove");
-    expect(buttons()).not.toContain("Connect");
+  it.each([false, true])("adds a visible installation at the chosen level (admin=%s)", async admin => {
+    fixtures.connections = { organization: [], personal: [], solo: false };
+    fixtures.connect.mockClear();
+    await page(admin ? "admin-add" : "member-add", admin);
+    await click("Add connection");
+    if (admin) await click("Withso");
+    else expect(button("Withso")).toBeUndefined();
+    await click("Link @acme");
+    expect(fixtures.connect).toHaveBeenCalledExactlyOnceWith(ORG, 900, admin ? "organization" : "personal");
   });
 
-  it("lists only the caller's own personal connections on Personal", async () => {
-    fixtures.connections = { organization: [connection("33333333-3333-4333-8333-333333333333", "withso", "organization")],
-      personal: [connection("55555555-5555-4555-8555-555555555555", "me-gh", "personal")], solo: false };
-    const text = await render(createElement(GithubConnectionsSection, { userId: "66666666-6666-4666-8666-666666666666", organizationId: ORG, level: "personal",
-      canManage: true, active: true, title: "Only you", description: "Yours." }));
-    expect(text).toContain("me-gh");
-    expect(text).not.toContain("withso");
+  it("links only the matching migrated organization account", async () => {
+    fixtures.connections = { organization: [connection(USER, "ACME", "organization", "active", null)], personal: [], solo: false };
+    fixtures.connect.mockClear();
+    await page("migrated", true);
+    await click("Link @ACME");
+    await click("Link @acme");
+    expect(fixtures.connect).toHaveBeenCalledExactlyOnceWith(ORG, 900, "organization");
+  });
+
+  it("offers the deployed Reinstall link only to the organization manager", async () => {
+    fixtures.connections = { organization: [connection(USER, "acme", "organization", "uninstalled")], personal: [], solo: false };
+    await page("reinstall-member", false);
+    expect(button("Reinstall @acme")).toBeUndefined();
+    await page("reinstall-admin", true);
+    await click("Reinstall @acme");
+    expect(fixtures.open).toHaveBeenCalledWith("https://github.com/apps/fixture/installations/new");
+    expect(document.querySelector('[role="dialog"]')?.textContent).toContain("GitHub returned a different installation");
+    expect(button("Link @acme", document.querySelector('[role="dialog"]')!)).toBeUndefined();
+  });
+
+  it("opens account identity for a member linking an active organization installation from PAT", async () => {
+    fixtures.cloudMethod = "pat";
+    fixtures.connect.mockClear();
+    fixtures.connections = { organization: [connection(USER, "acme", "organization")], personal: [], solo: false };
+    try {
+      await page("member-link", false);
+      await click("Link @acme");
+      expect(document.querySelector('[role="dialog"]')?.textContent).toContain("GitHub App sign-in");
+      await click("Configure account identity");
+      expect(fixtures.connect).not.toHaveBeenCalled();
+    } finally { fixtures.cloudMethod = "github-app"; }
+  });
+
+  it("explains the App sign-in when Cloud uses a PAT", async () => {
+    fixtures.cloudMethod = "pat";
+    try {
+      await page("cloud-pat", false);
+      await click("Add connection");
+      expect(document.body.textContent).toContain("GitHub App sign-in");
+      expect(button("Configure account identity")).toBeDefined();
+      expect(button("Link @acme", document.querySelector('[role="dialog"]')!)).toBeUndefined();
+    } finally { fixtures.cloudMethod = "github-app"; }
+  });
+
+  it("offers to select a saved Cloud App for discovery without changing Local", async () => {
+    fixtures.cloudMethod = "pat";
+    fixtures.appConfigured = true;
+    try {
+      await page(USER, false);
+      await click("Add connection");
+      await click("Use GitHub App for Cloud");
+      expect(fixtures.select).toHaveBeenCalledExactlyOnceWith(USER, ORG, "gen1", { action: "select", method: "github-app" });
+    } finally { fixtures.appConfigured = false; fixtures.cloudMethod = "github-app"; }
+  });
+
+  it("checks a member's existing installation against App visibility without writing an organization connection", async () => {
+    fixtures.connections = { organization: [connection(USER, "acme", "organization", "active", 501)], personal: [], solo: false };
+    fixtures.connect.mockClear();
+    await page("invisible-for-app", false);
+    await click("Link @acme");
+    expect(document.querySelector('[role="dialog"]')?.textContent).toContain("Your GitHub account cannot see this installation");
+    fixtures.visible.push({ installationId: 501, accountLogin: "acme", suspended: false });
+    try {
+      await click("Refresh installations");
+      expect(document.querySelector('[role="dialog"]')?.textContent).toContain("Your GitHub account can use this installation");
+      expect(fixtures.connect).not.toHaveBeenCalled();
+    } finally { fixtures.visible.pop(); }
+  });
+
+  it("keeps a member's personal connection editable and excludes other members' accounts", async () => {
+    fixtures.connections = { organization: [], personal: [connection(USER, "octo", "personal"),
+      { ...connection(ORG, "someone-else", "personal"), mine: false }], solo: false };
+    await page("personal-manager", false);
+    expect(document.body.textContent).not.toContain("someone-else");
+    await click("View @octo");
+    expect(button("Disconnect")).toBeDefined();
+    await click("Manage on GitHub");
+    expect(fixtures.open).toHaveBeenCalledWith("https://github.com/settings/installations/501");
   });
 
   it("names each GitHub edge state with one fix", () => {
@@ -69,21 +157,38 @@ describe("GitHub at two levels in Settings", () => {
     fixtures.drawer = { repositories: [{ id: "42", repository: "withso/zeros", defaultBranch: "main", private: true,
       projects: [{ id: "88888888-8888-4888-8888-888888888881", name: "zeros" }] },
       { id: "43", repository: "withso/web", defaultBranch: "main", private: false, projects: [] }] };
-    await render(createElement(GithubConnectionsSection, { userId: "88888888-8888-4888-8888-888888888888", organizationId: ORG, level: "organization", canManage: true,
-      active: true, title: "Connections", description: "Shared." }));
-    await act(async () => { [...container.querySelectorAll("button")].find(node => node.textContent === "Repositories")!.click(); });
-    await act(async () => { await new Promise(resolve => setTimeout(resolve, 0)); });
+    await page("drawer-member", false);
+    await click("View @withso");
+    expect([...document.querySelectorAll('[role="tab"]')].map(tab => tab.textContent)).toEqual(["General", "Repositories"]);
+    expect(button("Disconnect")).toBeUndefined();
+    const tab = document.querySelector<HTMLElement>('[role="tab"][value="repositories"]') ??
+      [...document.querySelectorAll<HTMLElement>('[role="tab"]')].find(node => node.textContent === "Repositories")!;
+    await act(async () => tab.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, button: 0 })));
     const drawer = document.body.textContent ?? "";
     // Said once: what the list is, and that nothing is added here.
     expect(drawer.match(/can read/g)).toHaveLength(1);
     expect(drawer).toContain("Everything this connection can read. Nothing to add here: pick them when you create a project.");
-    expect(drawer).toContain("Connected for the organization.");
+    expect(drawer).not.toContain("Manage access");
     expect(drawer).toContain("Private");
     expect(drawer).toContain("Public");
     expect(drawer).toContain("withso/zeros");
     expect(drawer).toContain("withso/web");
     expect(drawer).toContain("In zeros");
     expect([...document.body.querySelectorAll("button")].map(node => node.textContent)).not.toContain("Add to cloud");
+  });
+
+  it("reads repository inventory again for a different caller in the same organization", async () => {
+    fixtures.connections = { organization: [connection(USER, "acme", "organization")], personal: [], solo: false };
+    for (const who of ["alice", "bob"]) {
+      fixtures.drawer = { repositories: [{ id: "7", repository: "acme/" + who, projects: [], private: true }] };
+      await page(who, false);
+      await click("View @acme");
+      const tab = [...document.querySelectorAll<HTMLElement>('[role="tab"]')].find(el => el.textContent === "Repositories")!;
+      await act(async () => tab.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, button: 0 })));
+      expect(document.body.textContent).toContain("acme/" + who);
+      if (who === "bob") expect(document.body.textContent).not.toContain("acme/alice");
+      await click("Close");
+    }
   });
 
   it("explains what forbidding projects for one member does, read-only for members", async () => {

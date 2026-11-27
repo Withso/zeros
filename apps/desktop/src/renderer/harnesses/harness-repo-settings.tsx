@@ -32,7 +32,8 @@ import { SettingsPage } from "../features/settings/settings-page";
 import { AddProjectFixtureProvider, type AddProjectActions } from "../shell/add-project-provider";
 import { settingsOwnerKey, writeScopedSettingsSelection } from "../features/settings/settings-scope";
 import { computerKey, computers } from "../features/settings/cloud-computer-store";
-import { cloudProjects, connectionRepositoriesCache, githubLevelConnections, githubLevelsKey } from "../features/settings/cloud-github-levels";
+import { cloudProjects, githubLevelConnections, githubLevelsKey } from "../features/settings/cloud-github-levels";
+import { connectionRepositoriesCache, connectionRepositoryPageKey } from "../features/settings/github-connection-drawer";
 import { readyCopyCache } from "../features/settings/ready-copy-section";
 import { buildSecretNamesCache } from "../features/settings/build-secrets-section";
 import { readableRepositoriesCache } from "../features/settings/cloud-project-repository-picker";
@@ -163,7 +164,7 @@ function seedProjects(fixture: { connections: unknown; projects: unknown; readyC
   for (const [connection, rows] of Object.entries(fixture.readable)) {
     readableRepositoriesCache.setData(JSON.stringify([key, organization.id, connection]), rows as never);
     const all = fixture.connections as { organization: { id: string }[]; personal: { id: string }[] };
-    connectionRepositoriesCache.setData(JSON.stringify([organization.id, connection]), {
+    connectionRepositoriesCache.setData(connectionRepositoryPageKey(membership.user.id, organization.id, connection, 1), {
       connection: [...all.organization, ...all.personal].find(row => row.id === connection), repositories: rows, nextPage: null } as never);
   }
   if (fixture.computer) computers.setData(computerKey(membership.user.id, organization.id), fixture.computer as never);

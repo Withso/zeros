@@ -16,7 +16,7 @@ import { CloudComputerPanel } from "./cloud-computer-panel";
 import { prefetchCloudComputer, useCloudComputerRepositories } from "./cloud-computer-store";
 import { CLOUD_REPOSITORY_TABS, CloudRepositoryPanel, type CloudRepositoryTab } from "./cloud-repository-panel";
 import { CloudGithubSection } from "./cloud-github-section";
-import { GithubConnectionsSection, PersonalProjectsSetting, patchCloudProject, useGithubLevels } from "./cloud-github-levels";
+import { GithubConnectionGroups, PersonalProjectsSetting, patchCloudProject, useGithubLevels } from "./cloud-github-levels";
 import { projectForRepository, shareCloudProject, type CloudProject } from "../../platform/cloud-github-levels";
 import { EnvironmentPanel } from "./environment-panel";
 import { KeepAwakeSetting } from "./keep-awake-setting";
@@ -245,7 +245,7 @@ type SectionDef = {
   icon: NavIcon;
   unifiedIcon?: NavIcon;
   navClassName?: string;
-  Panel: ComponentType<{ surfaceActive?: boolean; unified?: boolean; openCloudRepository?(repository: string): void; onNewProject?(): void }>;
+  Panel: ComponentType<{ surfaceActive?: boolean; unified?: boolean; openCloudRepository?(repository: string): void; onNewProject?(): void; onConfigureIdentity?(): void }>;
 };
 
 function GithubNavIcon({ size }: { size?: number }) {
@@ -333,7 +333,7 @@ const SECTIONS: SectionDef[] = [
     Panel: ComputerUsePanel,
   },
   { id: "org-general", label: "General", icon: Building2, Panel: OrganizationGeneralPanel },
-  { id: "org-github", label: "GitHub", icon: GithubNavIcon, Panel: OrganizationGithubPanel },
+  { id: "org-github", label: "Connections", icon: GithubNavIcon, Panel: OrganizationGithubPanel },
   {
     id: "account",
     label: "Profile",
@@ -515,9 +515,9 @@ function ScopedSettingsPage({ owner }: { owner: string }) {
   const pageActive = useActivePage() === "settings";
   const { projects } = useOrganizationProjects();
   const [active, setActiveState] = useState<string>(() => loadInitialSection(owner, unified));
-  const [integrationDirectory, showIntegrationDirectory] = useState(false);
+  const [providerDirectory, showProviderDirectory] = useState<SectionId | null>(null);
   const setActive = useCallback((next: string) => {
-    showIntegrationDirectory(false);
+    showProviderDirectory(null);
     setActiveState(next);
     writeScopedSettingsSelection(owner, "section", next);
   }, [owner]);
@@ -529,7 +529,7 @@ function ScopedSettingsPage({ owner }: { owner: string }) {
     () =>
       subscribeUserSettingsSection((section) => {
         if (isStaticSection(section)) {
-          showIntegrationDirectory(false);
+          showProviderDirectory(null);
           setActiveState(userSelection(section));
         }
       }, owner),
@@ -602,10 +602,10 @@ function ScopedSettingsPage({ owner }: { owner: string }) {
   // The cloud owner of this settings scope: the organization, or Personal's own cloud with Pro.
   const cloudOrganization = usableCloudOrganization(organization);
   const personalCloud = local && !!cloudOrganization;
+  const levelsAvailable = cloudEnabled && !!cloudOrganization?.workspaceCapabilities?.cloud;
   const githubLevels = useGithubLevels(me?.user.id ?? "", cloudOrganization?.id ?? "",
-    pageActive && unified && (!local || personalCloud) && !!me && !!cloudOrganization);
-  const organizationGithub = !!githubLevels.connections && !githubLevels.connections.solo;
-  const canManageOrganization = organization?.role === "owner" || organization?.role === "admin";
+    pageActive && unified && levelsAvailable && (!local || personalCloud) && !!me);
+  const organizationGithub = !local && levelsAvailable && !!githubLevels.connections && !githubLevels.connections.solo;
   /** Projects: a repository's cloud settings are its one-repository project's, the organization's unless only the caller's. */
   // A project kept for one member says only "Only you"; "Share with" appears only where it can succeed.
   const projectSharing = (project: SettingsProject) => {
@@ -717,7 +717,7 @@ function ScopedSettingsPage({ owner }: { owner: string }) {
       }
       onClick={() => {
         setActive(userSelection(section.id));
-        if (unified && section.id === "integrations") showIntegrationDirectory(true);
+        if (unified && (section.id === "integrations" || section.id === "org-github")) showProviderDirectory(section.id);
       }}
       onIntent={
         section.id === "integrations"
@@ -890,7 +890,7 @@ function ScopedSettingsPage({ owner }: { owner: string }) {
                       return found && cloudOrganization ? { organizationId: cloudOrganization.id, projectId: found.id } : null;
                     })()}
                     onAddToCloud={() => setActive(userSelection(!githubLevels.connections ? "cloud-computer"
-                      : canManageOrganization && organizationGithub ? "org-github" : "integrations"))}
+                      : organizationGithub ? "org-github" : "integrations"))}
                     onOpenCloudComputer={() => setActive(userSelection("cloud-computer"))}
                     onOpenEnvironment={() => setActive(userSelection("environment"))} />
                 </div>
@@ -931,7 +931,8 @@ function ScopedSettingsPage({ owner }: { owner: string }) {
                   selection.scope === "user" &&
                   activeSection?.id === section.id;
                 const Panel = section.Panel;
-                const integrations = unified && section.id === "integrations";
+                const provider = unified && (section.id === "integrations" || section.id === "org-github");
+                const directory = providerDirectory === section.id;
                 const organizationPage = (UNIFIED_ORGANIZATION_SECTIONS as readonly string[]).includes(section.id);
                 const description =
                   (unified && section.id === "org-general" && organization?.name) ||
@@ -946,12 +947,12 @@ function ScopedSettingsPage({ owner }: { owner: string }) {
                   >
                     <header className="flex items-start justify-between gap-4">
                       <div className="flex min-w-0 flex-col gap-1">
-                        {integrations && !integrationDirectory && (
-                          <Button variant="ghost" size="compact" className="self-start" onClick={() => showIntegrationDirectory(true)}>
-                            <ArrowLeft aria-hidden /> Back to Integrations
+                        {provider && !directory && (
+                          <Button variant="ghost" size="compact" className="self-start" onClick={() => showProviderDirectory(section.id)}>
+                            <ArrowLeft aria-hidden /> Back to {section.label}
                           </Button>
                         )}
-                        <h1 className={PAGE_HEADING_CLS}>{integrations && !integrationDirectory ? "GitHub" : (unified && section.unifiedLabel) || section.label}</h1>
+                        <h1 className={PAGE_HEADING_CLS}>{provider && !directory ? "GitHub" : (unified && section.unifiedLabel) || section.label}</h1>
                         {description && (
                           <p className="text-fg2 m-0 text-xs leading-4.5">{description}</p>
                         )}
@@ -959,13 +960,14 @@ function ScopedSettingsPage({ owner }: { owner: string }) {
                       {!(unified && organizationPage) && fileScopeControls}
                     </header>
                     {!local && !cloudEnabled && <CloudWorkspacePausedNotice />}
-                    {integrations && integrationDirectory ? (
+                    {provider && directory ? (
                       <SettingsList>
-                        <ListRow variant="panel" aria-label="Open GitHub integration" onClick={() => showIntegrationDirectory(false)}>
+                        <ListRow variant="panel" aria-label={section.id === "integrations" ? "Open GitHub integration" : "Open GitHub connections"} onClick={() => showProviderDirectory(null)}>
                           <GithubIcon /><span className="flex-1">GitHub</span><ChevronRight aria-hidden />
                         </ListRow>
                       </SettingsList>
                     ) : <Panel surfaceActive={pageActive && isActive} unified={unified} openCloudRepository={openCloudRepository}
+                      onConfigureIdentity={() => setActive(userSelection("integrations"))}
                       onNewProject={canCreateProject ? () => setNewProject(true) : undefined} />}
                   </div>
                 );
@@ -1419,15 +1421,17 @@ function AnalyticsRow() {
 }
 
 /** The organization's GitHub: owners and admins manage its connections; members read them. */
-function OrganizationGithubPanel({ surfaceActive = true }: { surfaceActive?: boolean }) {
+function OrganizationGithubPanel({ surfaceActive = true, onConfigureIdentity }: { surfaceActive?: boolean; onConfigureIdentity?(): void }) {
   const organization = useActiveOrganization();
   const { me } = useTeams();
   if (!organization || organization.isPersonal || !me) return null;
   const canManage = organization.role === "owner" || organization.role === "admin";
   return <div className="flex flex-col gap-8">
-    <GithubConnectionsSection userId={me.user.id} organizationId={organization.id} level="organization" canManage={canManage} active={surfaceActive}
-      title="Connections" description={`Organization projects are built through these and pick their repositories from what these can read, for everyone in ${organization.name}.`} />
-    <PersonalProjectsSetting userId={me.user.id} organizationId={organization.id} canManage={canManage} active={surfaceActive} />
+    <GithubConnectionGroups key={JSON.stringify([me.user.id, organization.id, canManage])}
+      userId={me.user.id} organizationId={organization.id} organizationName={organization.name} canManage={canManage}
+      active={surfaceActive} onConfigureIdentity={onConfigureIdentity} />
+    {canManage && <PersonalProjectsSetting userId={me.user.id} organizationId={organization.id} canManage active={surfaceActive} />}
+    <Button className="self-start" variant="ghost" onClick={onConfigureIdentity}>Configure account identity</Button>
   </div>;
 }
 
@@ -1463,16 +1467,9 @@ function IntegrationsPanel({ surfaceActive = true, unified = false }: { surfaceA
         title={unified ? <PlaceLabel place="cloud" /> : "GitHub"} />}
       {/* A one-person organization shows both GitHub levels here, as one page. */}
       {unified && cloud && levels.connections?.solo && (
-        <GithubConnectionsSection userId={me!.user.id} organizationId={organizationId!} level="organization" canManage={canManage} active={surfaceActive}
-          personal={!!organization?.isPersonal}
-          title={organization?.isPersonal ? "Projects" : `Shared with ${organization?.name ?? "the organization"}`}
-          description={organization?.isPersonal ? "Your cloud projects pick their repositories from these." : "Organization projects pick their repositories from these."} />
-      )}
-      {unified && cloud && levels.connections && (
-        <GithubConnectionsSection userId={me!.user.id} organizationId={organizationId!} level="personal" canManage active={surfaceActive}
-          personal={!!organization?.isPersonal}
-          title="Only you" description={organization?.isPersonal ? "Your own GitHub accounts, for projects only you use."
-            : "Your own GitHub accounts. Projects only you use pick from these; nobody else sees them, admins included."} />
+        <GithubConnectionGroups key={JSON.stringify([me!.user.id, organizationId, canManage])} userId={me!.user.id} organizationId={organizationId!}
+          organizationName={organization?.name ?? "Organization"} personal={!!organization?.isPersonal}
+          canManage={canManage} active={surfaceActive} />
       )}
     </div>;
 }

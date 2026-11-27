@@ -640,12 +640,12 @@ function ActiveDispatcherPage({
     dispatch({ type: "SET_ACTIVE_PAGE", page: "settings" });
   };
   // Projects: repositories come from what GitHub connections can read, managed on the
-  // organization's page for owners and admins, Personal › GitHub for members and one-person organizations.
+  // organization's page for all members, Personal › GitHub for a one-person organization.
   const leveled = (cloud.computerRepositories ?? []).some(repository => repository.level);
   const githubLevels = useGithubLevels(me?.user.id ?? "", cloudOrganizationFor(activeOrganization)?.id ?? "",
     active && unified && leveled && !!me);
   const manageSection = !leveled ? "cloud-computer" as const
-    : cloud.canManageComputer && githubLevels.connections && !githubLevels.connections.solo ? "org-github" as const : "integrations" as const;
+    : githubLevels.connections && !githubLevels.connections.solo && !activeOrganization?.isPersonal ? "org-github" as const : "integrations" as const;
   const openManageRepositories = () => {
     requestUserSettingsSection(manageSection);
     dispatch({ type: "SET_ACTIVE_PAGE", page: "settings" });
