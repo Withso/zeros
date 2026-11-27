@@ -12,6 +12,7 @@ const adapters = vi.hoisted(() => ({
   localApp: true,
   cliLogin: "",
   cloudError: false,
+  localError: false,
   patConnect: vi.fn(async () => ({ login: "octocat", snapshot: { selectedMethod: "pat" } })),
   appConnected: new Set<(payload: { login: string; installationCount: number }) => void>(),
   appErrors: new Set<(payload: { reason: string }) => void>(),
@@ -48,7 +49,7 @@ vi.mock("../../../platform/cloud-github-connection", async original => ({
   changeCloudGithubConnection: adapters.changeAfterSave,
 }));
 vi.mock("../../../state/use-recovering-read", () => ({
-  useRecoveringRead: () => ({ data: { selectedMethod: adapters.localMethod, methods: {
+  useRecoveringRead: () => adapters.localError ? { data: undefined, readError: new Error("Local read failed") } : ({ data: { selectedMethod: adapters.localMethod, methods: {
     pat: { configured: !adapters.empty && adapters.localPat, method: "pat", login: adapters.empty ? undefined : "octocat", health: adapters.patHealth },
     "github-app": { configured: !adapters.empty && adapters.localApp, method: "github-app", health: adapters.empty ? "not-connected" : adapters.appHealth, login: adapters.empty ? undefined : "octocat" },
     "gh-cli": { configured: !!adapters.cliLogin, login: adapters.cliLogin, method: "gh-cli", health: adapters.cliLogin ? "connected" : adapters.empty ? "not-connected" : "unavailable" },
@@ -68,6 +69,7 @@ beforeEach(() => {
   adapters.hasCloudSnapshot = true;
   adapters.empty = false;
   adapters.cloudError = false;
+  adapters.localError = false;
   adapters.localMethod = "pat";
   adapters.cloudMethod = null;
   adapters.localApp = true;
@@ -354,6 +356,19 @@ it("Local App setup keeps a configured Cloud credential and selection intact", a
     expect(adapters.connectApp).toHaveBeenCalledExactlyOnceWith({ installFlow: false, forceInstall: false });
     expect(JSON.stringify(cloud)).toBe(before);
     expect(adapters.cloud).not.toHaveBeenCalled();
+  } finally { page.close(); }
+});
+
+it("selects a configured Cloud method while the Local snapshot is unavailable", async () => {
+  adapters.localError = true;
+  adapters.cloudMethod = "github-app";
+  const page = await workspacePage(org, "a");
+  try {
+    expect(page.container.querySelector<HTMLButtonElement>('[aria-label="Local method"]')!.disabled).toBe(true);
+    expect(page.container.querySelector<HTMLButtonElement>('[aria-label="Cloud method"]')!.disabled).toBe(false);
+    await page.pick("Cloud", "Personal access token");
+    expect(adapters.cloud).toHaveBeenCalledExactlyOnceWith({ action: "select", method: "pat" });
+    expect(adapters.mac).not.toHaveBeenCalled();
   } finally { page.close(); }
 });
 

@@ -648,7 +648,7 @@ export function GitHubSection({
           {owner && <GithubWorkspaceMethod place="cloud" organization={personalCloud ? undefined : owner.name}
             methods={["github-app", "pat"]} method={cloud?.selectedMethod ?? null}
             hint={selectedCloud?.login ? `@${selectedCloud.login}` : cloud ? "No account in use" : shared.read.readError ? "Cloud method unavailable" : "Loading Cloud method…"}
-            disabled={!hasConfirmedSnapshot || !cloud || !!shared.read.readError || busyMethod !== null || appWaiting}
+            disabled={!cloud || !!shared.read.readError || busyMethod !== null || appWaiting}
             onChoose={method => void selectMethod(method, "cloud")} />}
         </SettingsGroup>
       )}
