@@ -1,11 +1,14 @@
 import { useEffect } from "react";
 
 import {
+  ghAppConnect,
   onGithubAppConnected,
   onGithubAppError,
   onGithubCredentialStoreChanged,
   type GithubAppErrorReason,
 } from "../git";
+import { changeCloudGithubConnection, readCloudGithubConnection } from "../cloud-github-connection";
+import { getOrganizationStoreGeneration } from "../../features/team/team-store";
 import { toast } from "../../shared/ui/primitives/elements";
 import { ghAuthStatusCache } from "../../state/read-caches";
 import {
@@ -68,6 +71,50 @@ export function githubAppErrorCopy(reason: GithubAppErrorReason): {
   };
 }
 
+type AppConnectOptions = NonNullable<Parameters<typeof ghAppConnect>[0]>;
+
+// The native controller owns one browser handoff. Keep its scoped restore with
+// the app-wide callback so navigating away from Settings cannot drop it.
+let pendingRestore: { target: NonNullable<AppConnectOptions["shared"]>; accountGeneration: number } | null = null;
+
+export async function connectSettingsGithubApp(options: AppConnectOptions, restoreCloudPat: boolean) {
+  const restore = options.shared && restoreCloudPat
+    ? { target: options.shared, accountGeneration: getOrganizationStoreGeneration() }
+    : null;
+  pendingRestore = restore;
+  try {
+    const started = await ghAppConnect(options);
+    if (!started && pendingRestore === restore) pendingRestore = null;
+    return started;
+  } catch (error) {
+    if (pendingRestore === restore) pendingRestore = null;
+    throw error;
+  }
+}
+
+export function clearGithubAppRestore() {
+  pendingRestore = null;
+}
+
+async function restoreCloudPat(login: string) {
+  const restore = pendingRestore;
+  pendingRestore = null;
+  if (!restore || restore.accountGeneration !== getOrganizationStoreGeneration()) return;
+  const { userId, organizationId, expected } = restore.target;
+  try {
+    const current = await readCloudGithubConnection(userId, organizationId);
+    if (restore.accountGeneration !== getOrganizationStoreGeneration() || current.selectedMethod !== "github-app") return;
+    if (current.generation === expected || current.methods["github-app"].login !== login) {
+      throw new Error("The Cloud connection changed. Check its selected method in Settings.");
+    }
+    await changeCloudGithubConnection(userId, organizationId, current.generation, { action: "select", method: "pat" });
+  } catch (error) {
+    toast.error("GitHub App connected, but couldn’t restore the Cloud method", {
+      description: error instanceof Error ? error.message : "Choose the Cloud method again in Settings.",
+    });
+  }
+}
+
 /** Listen app-wide because the browser callback may arrive after Settings unmounts. */
 export function GithubAppNotifications() {
   useEffect(() => {
@@ -75,6 +122,7 @@ export function GithubAppNotifications() {
     const disposers: Array<() => void> = [];
     void Promise.all([
       onGithubAppConnected((payload) => {
+        void restoreCloudPat(payload.login);
         const previous = ghAuthStatusCache.peekSnapshot("auth").data;
         ghAuthStatusCache.invalidateAll();
         trackGithubConnectCompleted({
@@ -96,6 +144,8 @@ export function GithubAppNotifications() {
         });
       }),
       onGithubAppError(({ reason }) => {
+        // Native rejects unrelated callbacks without consuming the current handoff.
+        if (reason !== "invalid_callback" && reason !== "nonce_mismatch") clearGithubAppRestore();
         ghAuthStatusCache.invalidateAll();
         trackGithubConnectCompleted({
           method: "github-app",

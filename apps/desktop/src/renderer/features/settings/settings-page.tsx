@@ -37,6 +37,7 @@ import {
   Palette,
   Settings,
   ArrowLeft,
+  ChevronRight,
   Astroid,
   SquareTerminal,
   Blocks,
@@ -140,6 +141,7 @@ import {
 } from "../repositories/repositories-panel";
 import { repoPageViewForSection } from "../repositories/repo-page";
 import { OpenSettingsFileButton } from "../../shared/ui/open-settings-file-button";
+import { ListRow } from "../../shared/ui/primitives/list-row";
 import { GitHubSection } from "./github-section";
 import { useSharedGithub } from "./use-shared-github";
 import { prefetchGithubAuthSnapshot } from "./github-auth-prefetch";
@@ -320,9 +322,7 @@ const SECTIONS: SectionDef[] = [
   {
     id: "integrations",
     label: "Integrations",
-    unifiedLabel: "GitHub",
     icon: Blocks,
-    unifiedIcon: GithubNavIcon,
     Panel: IntegrationsPanel,
   },
   {
@@ -515,7 +515,9 @@ function ScopedSettingsPage({ owner }: { owner: string }) {
   const pageActive = useActivePage() === "settings";
   const { projects } = useOrganizationProjects();
   const [active, setActiveState] = useState<string>(() => loadInitialSection(owner, unified));
+  const [integrationDirectory, showIntegrationDirectory] = useState(false);
   const setActive = useCallback((next: string) => {
+    showIntegrationDirectory(false);
     setActiveState(next);
     writeScopedSettingsSelection(owner, "section", next);
   }, [owner]);
@@ -527,6 +529,7 @@ function ScopedSettingsPage({ owner }: { owner: string }) {
     () =>
       subscribeUserSettingsSection((section) => {
         if (isStaticSection(section)) {
+          showIntegrationDirectory(false);
           setActiveState(userSelection(section));
         }
       }, owner),
@@ -712,7 +715,10 @@ function ScopedSettingsPage({ owner }: { owner: string }) {
         selection.scope === "user" &&
         selection.section === section.id
       }
-      onClick={() => setActive(userSelection(section.id))}
+      onClick={() => {
+        setActive(userSelection(section.id));
+        if (unified && section.id === "integrations") showIntegrationDirectory(true);
+      }}
       onIntent={
         section.id === "integrations"
           ? () => prefetchGithubAuthSnapshot(undefined, me?.user.id)
@@ -925,6 +931,7 @@ function ScopedSettingsPage({ owner }: { owner: string }) {
                   selection.scope === "user" &&
                   activeSection?.id === section.id;
                 const Panel = section.Panel;
+                const integrations = unified && section.id === "integrations";
                 const organizationPage = (UNIFIED_ORGANIZATION_SECTIONS as readonly string[]).includes(section.id);
                 const description =
                   (unified && section.id === "org-general" && organization?.name) ||
@@ -939,7 +946,12 @@ function ScopedSettingsPage({ owner }: { owner: string }) {
                   >
                     <header className="flex items-start justify-between gap-4">
                       <div className="flex min-w-0 flex-col gap-1">
-                        <h1 className={PAGE_HEADING_CLS}>{(unified && section.unifiedLabel) || section.label}</h1>
+                        {integrations && !integrationDirectory && (
+                          <Button variant="ghost" size="compact" className="self-start" onClick={() => showIntegrationDirectory(true)}>
+                            <ArrowLeft aria-hidden /> Back to Integrations
+                          </Button>
+                        )}
+                        <h1 className={PAGE_HEADING_CLS}>{integrations && !integrationDirectory ? "GitHub" : (unified && section.unifiedLabel) || section.label}</h1>
                         {description && (
                           <p className="text-fg2 m-0 text-xs leading-4.5">{description}</p>
                         )}
@@ -947,8 +959,14 @@ function ScopedSettingsPage({ owner }: { owner: string }) {
                       {!(unified && organizationPage) && fileScopeControls}
                     </header>
                     {!local && !cloudEnabled && <CloudWorkspacePausedNotice />}
-                    <Panel surfaceActive={pageActive && isActive} unified={unified} openCloudRepository={openCloudRepository}
-                      onNewProject={canCreateProject ? () => setNewProject(true) : undefined} />
+                    {integrations && integrationDirectory ? (
+                      <SettingsList>
+                        <ListRow variant="panel" aria-label="Open GitHub integration" onClick={() => showIntegrationDirectory(false)}>
+                          <GithubIcon /><span className="flex-1">GitHub</span><ChevronRight aria-hidden />
+                        </ListRow>
+                      </SettingsList>
+                    ) : <Panel surfaceActive={pageActive && isActive} unified={unified} openCloudRepository={openCloudRepository}
+                      onNewProject={canCreateProject ? () => setNewProject(true) : undefined} />}
                   </div>
                 );
               })}
@@ -1433,6 +1451,8 @@ function IntegrationsPanel({ surfaceActive = true, unified = false }: { surfaceA
         <GitHubSection
           key={JSON.stringify([me?.user.id, organizationId, separate])}
           surfaceActive={surfaceActive}
+          workspaceIdentity={unified && !separate}
+          personalCloud={!!organization?.isPersonal}
           {...(me ? { accountId: me.user.id } : {})}
           title={cloud && !separate ? "Authentication" : unified ? <PlaceLabel place="mac" /> : "GitHub"}
           {...(githubOwner && !separate ? { owner: githubOwner } : {})}

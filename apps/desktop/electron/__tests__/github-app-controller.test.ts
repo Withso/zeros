@@ -311,6 +311,39 @@ describe("GitHub App desktop controller", () => {
     expect(h.selected()).toBe("gh-cli");
   });
 
+  it("refreshes the Local App with the current binding after Cloud-started setup", async () => {
+    const h = harness({
+      credential: {
+        ...gitIdentity,
+        method: "github-app",
+        accessToken: "app-access-old",
+        refreshToken: "app-refresh-old",
+        refreshBinding: binding("c"),
+        expiresAtMs: 9_000_000,
+        refreshTokenExpiresAtMs: 19_000_000,
+        ownerSub: "account-one",
+        login: "octocat",
+      },
+    });
+    const rotated = await h.client.refresh();
+    h.client.refresh.mockReset();
+    // The exchange rotates the server's grant generation, so only its binding refreshes.
+    h.client.refresh.mockImplementation(async (...args: unknown[]) => {
+      if (args[2] !== binding("a")) throw new Error("stale binding");
+      return rotated;
+    });
+    await h.controller.begin({
+      scheme: "zeros",
+      installFlow: false,
+      preserveSelectedMethod: true,
+      shared: { userId: "account-one", organizationId: "org-one", expected: "a".repeat(64) },
+    });
+    await h.controller.complete({ nonce: "n".repeat(43) });
+    expect(h.selected()).toBe("gh-cli");
+    await expect(h.controller.refresh({ force: true })).resolves.toMatchObject({ accessToken: "app-access-rotated" });
+    expect(h.credential()?.refreshBinding).toBe(binding("b"));
+  });
+
   it("persists the pending nonce before opening the browser", async () => {
     const h = harness();
     h.deps.openExternal = vi.fn(async () => {
