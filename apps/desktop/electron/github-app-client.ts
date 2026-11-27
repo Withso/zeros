@@ -52,6 +52,7 @@ export interface GithubAppInstallationAggregate {
 export interface GithubAppInstallationRefreshResult
   extends GithubAppInstallationAggregate {
   login: string;
+  githubUserId?: string;
   complete: boolean;
 }
 
@@ -487,6 +488,7 @@ export class GithubAppClient {
     }
     return {
       login,
+      ...(typeof body.githubUserId === "string" && /^[1-9][0-9]{0,15}$/.test(body.githubUserId) ? { githubUserId: body.githubUserId } : {}),
       complete: body.complete,
       ...aggregateGithubAppInstallations(body.installations),
     };

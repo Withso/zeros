@@ -639,10 +639,10 @@ export class GithubAppController {
     } catch (error) {
       throw mapClientError(error);
     }
-    if (
-      current.login &&
-      current.login.toLowerCase() !== refreshed.login.toLowerCase()
-    ) {
+    const sameAccount = current.githubUserId && refreshed.githubUserId
+      ? current.githubUserId === refreshed.githubUserId
+      : !current.login || current.login.toLowerCase() === refreshed.login.toLowerCase();
+    if (!sameAccount) {
       throw new GithubAppFlowError(
         "GitHub returned a different account for this connection.",
         "oauth_failed",
@@ -655,6 +655,7 @@ export class GithubAppController {
     const next: GithubAppCredential = {
       ...currentWithoutRepositoryCount,
       login: refreshed.login,
+      ...(refreshed.githubUserId ? { githubUserId: refreshed.githubUserId } : {}),
       installationCount: refreshed.installationCount,
       activeInstallationCount: refreshed.activeInstallationCount,
       ...(refreshed.repositoryCount !== undefined

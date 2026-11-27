@@ -84,6 +84,13 @@ const changed = () =>
     "github_authorization_changed",
     "Your cloud GitHub connection changed. Refresh before continuing.",
   );
+function assertMethodIdentity(value: Snapshot, method: CloudGithubMethod, identity: CloudGithubAccount): void {
+  const peer = value.rows.find(row => row.method !== method);
+  if (peer && peer.github_user_id !== identity.id) {
+    throw new HttpError(409, "github_account_mismatch",
+      `This credential belongs to @${identity.login}. Use a credential for @${peer.github_login}, or change accounts in Personal → Integrations → GitHub.`);
+  }
+}
 const required = () =>
   new HttpError(
     409,
@@ -300,6 +307,7 @@ export class CloudGithubConnectionStore {
       throw expired();
     return this.edit(scope, expected, async (tx, value) => {
       await checkAuthority?.(tx);
+      assertMethodIdentity(value, material.method, identity);
       const seal = {
         id: randomUUID(),
         generation: randomUUID(),
@@ -349,7 +357,9 @@ export class CloudGithubConnectionStore {
       await verifyPat(material.accessToken, row.github_user_id);
     }
     await this.edit(scope, expected, async (tx, value) => {
-      if (!value.rows.some((row) => row.method === method)) throw required();
+      const row = value.rows.find(row => row.method === method);
+      if (!row) throw required();
+      assertMethodIdentity(value, method, { id: row.github_user_id, login: row.github_login });
       await this.selection(tx, value.scope, method);
     });
   }
