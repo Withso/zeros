@@ -755,6 +755,21 @@ describe("GitHub App desktop controller", () => {
     expect(h.afterTransientRefreshFailure).toHaveBeenCalledTimes(1);
   });
 
+  it.each(["123", "456", undefined])("checks a renamed App by verified ID on install refresh (returned ID %s)", async githubUserId => {
+    const h = harness({ credential: {
+      ...gitIdentity, method: "github-app", accessToken: "old-access", expiresAtMs: 8_000_000,
+      ownerSub: "account-one", login: "old-name", githubUserId: "123",
+    } });
+    const inventory = await h.client.refreshInstallations();
+    h.client.refreshInstallations.mockResolvedValue({ ...inventory, login: "new-name", ...(githubUserId ? { githubUserId } : {}) });
+    if (githubUserId === "123") {
+      await expect(h.controller.refreshInstallations()).resolves.toMatchObject({ login: "new-name", githubUserId });
+    } else {
+      await expect(h.controller.refreshInstallations()).rejects.toThrow();
+      expect(h.credential()?.login).toBe("old-name");
+    }
+  });
+
   it("updates installation metadata only on an explicit re-check", async () => {
     const h = harness({
       credential: {

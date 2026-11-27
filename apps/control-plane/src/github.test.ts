@@ -877,10 +877,17 @@ dbDescribe("GitHub App OAuth handoff", () => {
       error: { code: "github_authorization_expired" },
     });
 
-    // A genuinely foreign GitHub account still reports a mismatch.
+    await pool.query("UPDATE github_authorizations SET github_login='old-name' WHERE owner_user_id=$1", [userA.id]);
+    const renamed = await appA.request("/v1/github/installations/refresh", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ accessToken: "current-access-token" }),
+    });
+    expect(renamed.status).toBe(200);
+    expect((await pool.query("SELECT github_login FROM github_authorizations WHERE owner_user_id=$1", [userA.id])).rows[0]?.github_login).toBe("octocat");
+
+    // Older rows without an ID still require login evidence before binding it.
     await pool.query(
-      `UPDATE github_authorizations SET github_login = 'someone-else'
-       WHERE owner_user_id = $1`,
+      "UPDATE github_authorizations SET github_login='someone-else', github_user_id=NULL WHERE owner_user_id=$1",
       [userA.id],
     );
     const wrongGithubAccount = await appA.request(
@@ -896,7 +903,7 @@ dbDescribe("GitHub App OAuth handoff", () => {
       error: { code: "github_account_mismatch" },
     });
     await pool.query(
-      `UPDATE github_authorizations SET github_login = 'octocat'
+      `UPDATE github_authorizations SET github_login = 'octocat', github_user_id = 1234
        WHERE owner_user_id = $1`,
       [userA.id],
     );

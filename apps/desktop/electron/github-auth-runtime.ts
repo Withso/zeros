@@ -17,12 +17,13 @@ import {
 } from "@zeros/protocol/github-auth";
 
 import { opSettingsResolve, opSettingsWrite } from "../src/engine/settings";
-import { readGhCliCredential, type TokenStore } from "../src/engine/git/github";
+import { readGhCliCredential, verifyGithubToken, type TokenStore } from "../src/engine/git/github";
 import {
   deleteSecret,
   getSecret,
   replaceSecretIfUnchanged,
   setSecret,
+  updateSecretValues,
 } from "./secret-store";
 import {
   GITHUB_APP_ACCOUNT,
@@ -58,7 +59,8 @@ function writeGithubSettings(patch: Record<string, unknown>): void {
 export const githubCredentialStore = createGithubCredentialStore({
   currentAccount: getProductAccountIdForMain,
   readSecret: getSecret,
-  writeSecret: setSecret,
+  updateSecrets: updateSecretValues,
+  verifyIdentity: verifyGithubToken,
   deleteSecret,
   readSelectedMethod,
   writeSelectedMethod(method) {
