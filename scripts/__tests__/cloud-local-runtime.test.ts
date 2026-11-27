@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
-import { maintainLocalRuntimes, markLocalRuntime, removeLocalRuntimeUses, resolveLocalRuntime, runtimeBuildMode,
-  runtimeRetentionSummary } from "../dev-environment/cloud-local-runtime.mjs";
+import { maintainLocalRuntimes, maintainLocalWebhooks, markLocalRuntime, removeLocalRuntimeUses, resolveLocalRuntime, runtimeBuildMode,
+  runtimeRetentionSummary, webhookCleanupSummary } from "../dev-environment/cloud-local-runtime.mjs";
 
 const source = { sourceSha256: "a".repeat(64), commit: "b".repeat(40), dirty: false };
 const record = { version: 1, ...source, sha256: "c".repeat(64) };
@@ -107,5 +107,51 @@ describe("electron:cloud runtime use and cleanup", () => {
     expect(runtimeRetentionSummary({ ...plan, status: "planned", mode: "dry-run" })).toMatch(/would remove 2 unused runtimes \(0.7 GB\); set ZEROS_DEV_RUNTIME_RETENTION=apply.* 2 never-marked runtimes are kept\.$/);
     expect(runtimeRetentionSummary({ ...plan, kept: [], status: "deleted", mode: "apply" })).toBe("Worker runtime cleanup removed 2 unused runtimes (0.7 GB).");
     expect(runtimeRetentionSummary({ ...plan, status: "managed", mode: "apply" })).toMatch(/release-managed/);
+  });
+});
+
+describe("electron:cloud abandoned WorkOS endpoint cleanup", () => {
+  const owner = "a".repeat(24), gone = "c".repeat(24), instance = "11111111-2222-4333-8444-555555555555", other = "66666666-7777-4888-9999-aaaaaaaaaaaa";
+  const week = 7 * 86_400_000;
+  function fixture({ reclaimed = null as string | null, since = new Date(Date.now() - 8 * 86_400_000).toISOString() } = {}) {
+    const client = { destroy: vi.fn() }, calls: string[] = [];
+    const retention = { webhookReclaimed: vi.fn(async () => reclaimed), clearWebhookReclaim: vi.fn(async () => { calls.push("clear"); }),
+      runtimeUseOwners: vi.fn(async () => ({ since, active: [] })), recordWebhookReclaim: vi.fn(async (_c: unknown, _b: string, _t: unknown, id: string) => { calls.push(`reclaim:${id}`); }) };
+    const module = vi.fn(async (name: string) => name === "runtime-retention.js" ? retention : { runtimeStorageClient: vi.fn(() => client) });
+    const inventory = [{ id: "we_mine", endpoint_url: `https://api-dev-${owner}.zeros.build/auth/workos-webhook?zeros_dev=${instance}`, secret: "synthetic-private-signing-secret" },
+      { id: "we_gone", endpoint_url: `https://api-dev-${gone}.zeros.build/auth/workos-webhook?zeros_dev=${other}`, secret: "synthetic-private-signing-secret", status: "enabled" }];
+    const request = vi.fn(async (route: string, init?: { method?: string }) => {
+      if (route.startsWith("/webhook_endpoints?")) return { data: inventory, list_metadata: {} };
+      calls.push(`${init?.method}:${route}`); return null;
+    });
+    const workspace: any = { directory: "/fixture/state", state: { owner, instanceId: instance, workosWebhook: { id: "we_mine", secret: "synthetic-private-signing-secret" } } };
+    const profile = { storage: { bucket: "zeros-dev-objects" }, cloudflare: { domain: "zeros.build" }, workos: { apiKey: "synthetic-private-key" } };
+    return { retention, module, request, workspace, profile, calls, client, write: vi.fn(), save: vi.fn() };
+  }
+  const run = (f: ReturnType<typeof fixture>, env: Record<string, string> = {}) =>
+    maintainLocalWebhooks(f.workspace, f.profile, "/fixture", { module: f.module, request: f.request, env, write: f.write, save: f.save });
+
+  it("plans in dry-run by default, never this checkout's endpoint, and keeps no secret in the written plan", async () => {
+    const f = fixture(), plan = await run(f);
+    expect(plan).toMatchObject({ status: "planned", mode: "dry-run", kept: 1, remove: [{ id: "we_gone", owner: gone }] });
+    expect(f.calls).toEqual([]);
+    expect(f.write).toHaveBeenCalledWith("/fixture/state/workos-webhook-cleanup.json", expect.any(String));
+    expect(JSON.stringify(f.write.mock.calls)).not.toContain("synthetic-private");
+    expect(webhookCleanupSummary(plan)).toMatch(/would remove 1 abandoned Dev WorkOS endpoint; set ZEROS_DEV_WEBHOOK_CLEANUP=apply/);
+    expect(f.client.destroy).toHaveBeenCalledOnce();
+  });
+  it("deletes abandoned endpoints only when applied, after recording the reclaim", async () => {
+    const f = fixture(); await run(f, { ZEROS_DEV_WEBHOOK_CLEANUP: "apply" });
+    expect(f.calls).toEqual(["reclaim:we_gone", "DELETE:/webhook_endpoints/we_gone"]);
+    expect(f.retention.recordWebhookReclaim).toHaveBeenCalledWith(f.client, "zeros-dev-objects", { owner: gone, instance: other }, "we_gone");
+    const waiting = fixture({ since: new Date(Date.now() - week + 60_000).toISOString() });
+    expect(await run(waiting, { ZEROS_DEV_WEBHOOK_CLEANUP: "apply" })).toMatchObject({ status: "waiting" });
+    expect(waiting.calls).toEqual([]);
+  });
+  it("forgets this checkout's receipt when another checkout removed its endpoint, then clears the record", async () => {
+    const f = fixture({ reclaimed: "we_mine" }), plan = await run(f);
+    expect(f.workspace.state.workosWebhook).toBeUndefined(); expect(f.save).toHaveBeenCalledOnce();
+    expect(f.calls[0]).toBe("clear");
+    expect(webhookCleanupSummary(plan)).toMatch(/a new one is created now/);
   });
 });

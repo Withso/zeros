@@ -140,3 +140,55 @@ export async function deleteWorkosWebhook(workspace, profile, request = workosCl
   }
   receipt.deleted = true; saveWorkspace(workspace);
 }
+
+const WEEK_MS = 7 * 24 * 60 * 60_000;
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+/** The Dev checkout an endpoint belongs to, only for the exact URL ensureWorkosWebhook creates; anything else
+ * (Alpha's own endpoint, a hosted Dev, another product) is never touched. */
+export function devWebhookCheckout(endpoint, domain) {
+  if (!/^we_[A-Za-z0-9]{1,64}$/.test(endpoint?.id ?? "") || typeof endpoint.endpoint_url !== "string") return null;
+  let url;
+  try { url = new URL(endpoint.endpoint_url); } catch { return null; }
+  const owner = url.hostname.endsWith(`.${domain}`) ? url.hostname.slice(0, -domain.length - 1).match(/^api-dev-([0-9a-f]{24})$/)?.[1] : undefined;
+  const instance = url.searchParams.get("zeros_dev");
+  if (!owner || url.protocol !== "https:" || url.port || url.username || url.password || url.hash || url.pathname !== "/auth/workos-webhook" ||
+      [...url.searchParams.keys()].join() !== "zeros_dev" || !UUID.test(instance ?? "") || endpoint.endpoint_url !== `https://${url.hostname}/auth/workos-webhook?zeros_dev=${instance}`) return null;
+  return { owner, instance };
+}
+
+/** Endpoints of Dev owners with no runtime use marker for a week, never this checkout's owner. Nothing is removable
+ * until markers have existed for a week, so an owner that started before markers existed has marked by then. */
+export function planAbandonedWebhooks(inventory, { domain, owner, activeOwners, usesSince, now = Date.now(), mode }) {
+  const active = new Set(activeOwners), deletesFrom = usesSince ? new Date(Date.parse(usesSince) + WEEK_MS).toISOString() : null;
+  const plan = { version: 1, mode, status: !usesSince || Date.parse(usesSince) > now - WEEK_MS ? "waiting" : "planned",
+    at: new Date(now).toISOString(), usesSince, deletesFrom, kept: 0, remove: [] };
+  for (const endpoint of inventory) {
+    const checkout = devWebhookCheckout(endpoint, domain);
+    if (!checkout) continue;
+    if (checkout.owner === owner || active.has(checkout.owner)) { plan.kept++; continue; }
+    // No signing secret or URL in the plan: it is kept on disk for review.
+    plan.remove.push({ id: endpoint.id, owner: checkout.owner, instance: checkout.instance, status: typeof endpoint.status === "string" ? endpoint.status : "unknown" });
+  }
+  return plan;
+}
+
+/** Records each reclaim before its delete; an endpoint already gone counts as removed. */
+export async function removeAbandonedWebhooks(plan, { request, reclaim }) {
+  if (plan.status !== "planned" || plan.mode !== "apply") return plan;
+  for (const endpoint of plan.remove) {
+    await reclaim({ owner: endpoint.owner, instance: endpoint.instance }, endpoint.id);
+    try { await request(`/webhook_endpoints/${endpoint.id}`, { method: "DELETE" }); }
+    catch (error) { if (!(error instanceof DevProviderError && error.status === 404)) throw error; }
+  }
+  return { ...plan, status: "deleted" };
+}
+
+/** Another checkout removed this one's endpoint while it was unused: forget the receipt so the next ensure creates a
+ * new endpoint (and signing key) instead of refusing a missing one. */
+export function forgetReclaimedWebhook(workspace, endpointId, save = saveWorkspace) {
+  const receipt = workspace.state.workosWebhook;
+  if (!receipt || receipt.deleted || receipt.id !== endpointId) return false;
+  delete workspace.state.workosWebhook; save(workspace);
+  return true;
+}

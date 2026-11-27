@@ -169,6 +169,7 @@ function launcher({ startupFailure = false, cleanupFailure = false, cancelAtRead
     // Runtime cleanup is best effort: a storage failure must not change the webhook lifecycle below.
     maintainLocalRuntimes: async () => { throw new Error("runtime storage unavailable"); }, markLocalRuntime: async () => {},
     runtimeRetentionSummary: () => "", RUNTIME_USE_REFRESH_MS: 86_400_000, setInterval, clearInterval,
+    maintainLocalWebhooks: async () => { throw new Error("runtime storage unavailable"); }, webhookCleanupSummary: () => "",
     pickServicePorts: async () => ({ api: 21001, database: 21002, web: 21003, tunnelMetrics: 21004 }),
     startPostgres: async () => ({ stop: async () => { f.steps.push("postgres:stop"); } }),
     migratePostgres: async () => {}, ensureTunnel: async () => ({ tokenFile: "/unused" }), configureTunnel: async () => {},

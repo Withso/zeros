@@ -3,6 +3,7 @@ import { pathToFileURL } from "node:url";
 import { runtimeSourceIdentity } from "../../apps/cloud-worker/scripts/package-runtime.mjs";
 import { run } from "./processes.mjs";
 import { saveWorkspace, systemEnvironment, writePrivateFile } from "./state.mjs";
+import { endpoints, forgetReclaimedWebhook, planAbandonedWebhooks, removeAbandonedWebhooks, workosClient } from "./workos.mjs";
 
 const SHA = /^[a-f0-9]{64}$/;
 const noDocker = "No matching worker runtime is published; start Docker or publish this checkout from Linux with pnpm --dir apps/control-plane cloud-v2:publish-runtime --local.";
@@ -97,4 +98,33 @@ export function runtimeRetentionSummary(plan) {
   const kept = unmarked ? ` ${unmarked} never-marked runtime${unmarked === 1 ? " is" : "s are"} kept.` : "";
   if (plan.status === "deleted") return `Worker runtime cleanup removed ${count}.${kept}`;
   return `Worker runtime cleanup (${plan.mode}) would remove ${count}${plan.mode === "dry-run" ? "; set ZEROS_DEV_RUNTIME_RETENTION=apply to remove them" : ""}.${kept}`;
+}
+
+/** On start, after this checkout's runtime is marked: recover this checkout's endpoint if another checkout removed it,
+ * then plan (or, with ZEROS_DEV_WEBHOOK_CLEANUP=apply, delete) WorkOS endpoints of Dev owners unused for a week. */
+export function maintainLocalWebhooks(workspace, profile, root, options = {}) {
+  return withRuntimeStorage(profile, root, options, async (retention, client) => {
+    const self = checkout(workspace), bucket = profile.storage.bucket;
+    const reclaimed = await retention.webhookReclaimed(client, bucket, self);
+    if (reclaimed) {
+      forgetReclaimedWebhook(workspace, reclaimed, options.save);
+      await retention.clearWebhookReclaim(client, bucket, self);
+    }
+    const uses = await retention.runtimeUseOwners(client, bucket), request = options.request ?? workosClient(profile);
+    const mode = (options.env ?? process.env).ZEROS_DEV_WEBHOOK_CLEANUP === "apply" ? "apply" : "dry-run";
+    const planned = planAbandonedWebhooks(await endpoints(request), { domain: profile.cloudflare.domain, owner: self.owner,
+      activeOwners: uses.active, usesSince: uses.since, mode });
+    const plan = await removeAbandonedWebhooks(planned, { request,
+      reclaim: (target, endpointId) => retention.recordWebhookReclaim(client, bucket, target, endpointId) });
+    (options.write ?? writePrivateFile)(path.join(workspace.directory, "workos-webhook-cleanup.json"), `${JSON.stringify(plan, null, 2)}\n`);
+    return { ...plan, recovered: Boolean(reclaimed) };
+  });
+}
+
+export function webhookCleanupSummary(plan) {
+  const count = `${plan.remove.length} abandoned Dev WorkOS endpoint${plan.remove.length === 1 ? "" : "s"}`;
+  const recovered = plan.recovered ? " This checkout's own endpoint had been removed while unused; a new one is created now." : "";
+  if (plan.status === "waiting") return `WorkOS endpoint cleanup waits for use markers until ${plan.deletesFrom ?? "a week after the first marker"}; it would remove ${count}.${recovered}`;
+  if (plan.status === "deleted") return `WorkOS endpoint cleanup removed ${count}.${recovered}`;
+  return `WorkOS endpoint cleanup (dry-run) would remove ${count}; set ZEROS_DEV_WEBHOOK_CLEANUP=apply to remove them.${recovered}`;
 }
