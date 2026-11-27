@@ -128,7 +128,8 @@ export function runtimeReleaseStore(storage: CloudV2RuntimeStore, repository: st
       features: read.features };
   }
   async function retainArchive(path: string, manifest: RuntimeManifest, features?: string[]) {
-    // The ordinary publisher prunes only its archive namespace; release retention must survive that sweep.
+    // Release branches cut before the served-copy fallback promote from this retained copy only; keep writing it until
+    // none of them can still reach Production.
     await immutableArchive(retainedKey(manifest.sha256), path, manifest);
     await immutableArchive(archiveKey(manifest.sha256), path, manifest);
     if (features) {

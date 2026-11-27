@@ -123,8 +123,10 @@ export async function runRuntimeController(env: NodeJS.ProcessEnv, options: {
 
 function retentionSummary(plan: RuntimeRetentionPlan): string {
   const { removeBytes, removeObjects, removeUsdPerMonth } = plan.totals, gb = (removeBytes / 1e9).toFixed(1);
-  if (plan.status === "refused" || plan.status === "failed")
-    return `::warning::Runtime retention ${plan.status} (${plan.reason}) on ${plan.channel}; nothing more was deleted. The plan is runtime-retention.json in the receipt artifact.`;
+  if (plan.status === "refused")
+    return `::warning::Runtime retention refused (${plan.reason}) on ${plan.channel}; nothing was deleted. The plan is runtime-retention.json in the receipt artifact.`;
+  if (plan.status === "failed")
+    return `::warning::Runtime retention failed (${plan.reason}) on ${plan.channel}; some planned archives may already be gone. The plan is runtime-retention.json in the receipt artifact.`;
   const verb = plan.status === "deleted" ? "removed" : "would remove";
   return `Runtime retention (${plan.mode}) on ${plan.channel}: ${verb} ${plan.remove.length} runtimes (${removeObjects} objects, ${gb} GB, about $${removeUsdPerMonth.toFixed(2)}/month);`
     + ` kept ${plan.kept.length}. The plan is runtime-retention.json in the receipt artifact.`;
