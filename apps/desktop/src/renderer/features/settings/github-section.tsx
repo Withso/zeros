@@ -48,7 +48,6 @@ import { toast } from "../../shared/ui/primitives/elements";
 import { cn } from "@/renderer/shared/ui/cn";
 import {
   ghAppCancel,
-  ghAppConnect,
   ghAuthSnapshot,
   ghMethodDisconnect,
   ghMethodSelect,
@@ -60,7 +59,8 @@ import {
   onGithubAppError,
   onGithubCredentialStoreChanged,
 } from "../../platform/git";
-import { githubAppErrorCopy } from "../../platform/bridge/github-app-notifications";
+import { clearGithubAppRestore, connectSettingsGithubApp, githubAppErrorCopy } from "../../platform/bridge/github-app-notifications";
+import { changeCloudGithubConnection } from "../../platform/cloud-github-connection";
 import { shellOpenUrl } from "../../platform/app";
 import {
   ghAuthStatusCache,
@@ -380,10 +380,22 @@ export function GitHubSection({
     });
     setBusyMethod("pat");
     let savedInCloud = false;
+    let restoreFailed = false;
+    const priorCloud = place === "local" ? shared.read.data?.selectedMethod : null;
+    const priorLocal = place === "cloud" && snapshot.methods[snapshot.selectedMethod].configured
+      ? snapshot.selectedMethod : null;
     try {
       if (owner) {
-        await shared.change({ action: "pat", token });
+        const saved = await shared.change({ action: "pat", token });
         savedInCloud = true;
+        if (priorCloud && priorCloud !== "pat") {
+          try {
+            await changeCloudGithubConnection(owner.userId, owner.organizationId, saved.generation, { action: "select", method: priorCloud });
+          } catch (error) {
+            restoreFailed = true;
+            toast.error("Token saved, but couldn’t restore the Cloud method", { description: errorMessage(error) });
+          }
+        }
       }
       const result = await ghPatConnect(token, accountId);
       setPat("");
@@ -392,14 +404,22 @@ export function GitHubSection({
       // Use the post-write snapshot so a failed follow-up probe cannot hide a successful connection.
       ghAuthStatusCache.setData(authKey, result.snapshot);
       trackGithubConnectCompleted({ method: "pat", outcome: "ok" });
-      if (snapshot.selectedMethod !== "pat") {
+      if (priorLocal && priorLocal !== "pat") {
+        try {
+          const restored = await ghMethodSelect(priorLocal, accountId);
+          ghAuthStatusCache.setData(authKey, restored);
+        } catch (error) {
+          restoreFailed = true;
+          toast.error("Token saved, but couldn’t restore the Local method", { description: errorMessage(error) });
+        }
+      } else if (snapshot.selectedMethod !== "pat") {
         trackGithubMethodSelected({
           method: "pat",
           previousMethod: snapshot.selectedMethod,
           hadOtherCredential: hasOtherCredential(snapshot, "pat"),
         });
       }
-      toast.success("Personal Access Token saved", {
+      if (!restoreFailed) toast.success("Personal Access Token saved", {
         description: `Connected as @${result.login}.`,
       });
     } catch (error) {
@@ -414,7 +434,7 @@ export function GitHubSection({
     } finally {
       setBusyMethod(null);
     }
-  }, [busyMethod, pat, snapshot, owner, shared, accountId, authKey]);
+  }, [busyMethod, pat, snapshot, owner, shared, accountId, authKey, place]);
 
   const connectApp = useCallback(async (options?: {
     forceInstall?: boolean;
@@ -435,11 +455,11 @@ export function GitHubSection({
     });
     try {
       const target = options?.forceInstall ? "shared" : place;
-      const started = await ghAppConnect({
+      const started = await connectSettingsGithubApp({
         ...connectOptions,
         ...(target === "cloud" ? { preserveSelectedMethod: true } : {}),
         ...(owner ? { shared: shared.target() } : {}),
-      });
+      }, target === "local" && shared.read.data?.selectedMethod === "pat");
       if (attempt !== appAttemptRef.current || !started) return;
       if (started.flowKind === "install") {
         trackGithubInstallOpened({
@@ -478,6 +498,7 @@ export function GitHubSection({
       return;
     }
     appAttemptRef.current += 1;
+    clearGithubAppRestore();
     trackGithubConnectCompleted({
       method: "github-app",
       outcome: "cancelled",
@@ -643,7 +664,8 @@ export function GitHubSection({
             onChoose={method => void selectMethod(method, "local")} />
           {owner && <GithubWorkspaceMethod place="cloud" organization={personalCloud ? undefined : owner.name}
             methods={["github-app", "pat"]} method={cloud?.selectedMethod ?? null}
-            hint={selectedCloud?.login ? `@${selectedCloud.login}` : "No account in use"} disabled={!cloud || !!shared.read.readError || busyMethod !== null || appWaiting}
+            hint={selectedCloud?.login ? `@${selectedCloud.login}` : cloud ? "No account in use" : shared.read.readError ? "Cloud method unavailable" : "Loading Cloud method…"}
+            disabled={!hasConfirmedSnapshot || !cloud || !!shared.read.readError || busyMethod !== null || appWaiting}
             onChoose={method => void selectMethod(method, "cloud")} />}
         </SettingsGroup>
       )}
@@ -837,7 +859,7 @@ export function GitHubSection({
                         <p className="text-fg2 m-0 text-xs">
                           {appWaiting
                             ? "Finish on GitHub, then choose Open Zeros."
-                            : workspaceIdentity && owner && place !== "cloud"
+                            : workspaceIdentity && owner && place === "shared"
                             ? "Authorizing selects GitHub App for Local and Cloud. You can change either method afterwards."
                             : "Authorize Zeros in your browser."}
                         </p>
@@ -908,7 +930,7 @@ export function GitHubSection({
                           </Button>
                         </div>
                         <p className="text-fg2 m-0 text-xs">
-                          {workspaceIdentity && owner
+                          {workspaceIdentity && owner && place === "shared"
                             ? "Saving this token selects it for Local and Cloud. You can change either method afterwards."
                             : "Use a fine-grained token for your repositories."}
                         </p>
@@ -1023,7 +1045,7 @@ export function GitHubSection({
                   </div>
                 ) : null;
             if (workspaceIdentity) {
-              const hint = method === "gh-cli" ? "Local only"
+              const hint = method === "gh-cli" ? (summary.login ? `@${summary.login} on this Mac` : "Local only")
                 : summary.login ? `@${summary.login}` : cloudMethod?.login ? `@${cloudMethod.login}` : githubMethodDescription(method);
               return <div key={method}>
                 <SettingsRow label={workspaceMethodNames[method]} hint={hint} leading={<MethodIcon method={method} />}>

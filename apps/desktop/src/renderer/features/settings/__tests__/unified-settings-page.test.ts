@@ -8,6 +8,7 @@ const state = vi.hoisted(() => ({
   githubLevels: null as null | { solo: boolean },
   unified: true,
   sharedDesktopApp: true,
+  cloudRead: "ready",
   organization: null as OrganizationSummary | null,
   saved: new Map<string, string>(),
   writes: [] as Array<[string, string, string]>,
@@ -73,11 +74,12 @@ vi.mock("../cloud-github-section", () => ({
     createElement("div", null, "cloud-github-fixture", title as never),
 }));
 vi.mock("../use-shared-github", () => ({
-  useSharedGithub: () => ({ read: { data: { sharedDesktopApp: state.sharedDesktopApp } } }),
+  useSharedGithub: () => ({ read: { data: state.cloudRead === "ready" ? { sharedDesktopApp: state.sharedDesktopApp } : undefined,
+    readError: state.cloudRead === "failed" ? new Error("offline") : null } }),
 }));
 vi.mock("../github-section", () => ({
-  GitHubSection: ({ title, owner }: { title?: unknown; owner?: { organizationId: string } }) =>
-    createElement("div", null, owner ? `shared-github-${owner.organizationId}` : "local-github-fixture", title as never),
+  GitHubSection: ({ title, owner, workspaceIdentity }: { title?: unknown; owner?: { organizationId: string }; workspaceIdentity?: boolean }) =>
+    createElement("div", { "data-workspace-identity": workspaceIdentity }, owner ? `shared-github-${owner.organizationId}` : "local-github-fixture", title as never),
 }));
 vi.mock("../providers-panel", () => ({
   ProvidersPanel: ({ unified }: { unified?: boolean }) =>
@@ -148,6 +150,7 @@ const activeEntry = () =>
 
 beforeEach(() => {
   state.sharedDesktopApp = true;
+  state.cloudRead = "ready";
   (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
   state.githubLevels = null;
   container = document.createElement("div");
@@ -200,8 +203,19 @@ describe("unified Settings rail", () => {
     act(() => provider.click());
     expect(heading()).toBe("GitHub");
     expect(state.saved.get("local:section")).toBe("user:integrations");
-    act(() => tab.click());
+    const back = [...container.querySelectorAll("button")].find(button => button.textContent?.trim() === "Back to Integrations");
+    expect(back).toBeDefined();
+    act(() => back!.click());
     expect(heading()).toBe("Integrations");
+  });
+
+  it.each(["loading", "failed"])("keeps workspace identity during a %s Cloud capability read", phase => {
+    state.organization = ORGANIZATION;
+    state.cloudRead = phase;
+    state.saved.set(`${ORGANIZATION_OWNER}:section`, "user:integrations");
+    render();
+    expect(container.querySelector('[data-workspace-identity="true"]')).toBeTruthy();
+    expect(container.textContent).not.toContain("cloud-github-fixture");
   });
 
   it("keeps both existing adapters when Cloud omits the shared capability", () => {

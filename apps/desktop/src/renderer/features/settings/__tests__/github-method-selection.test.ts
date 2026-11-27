@@ -3,9 +3,21 @@ import { act, createElement } from "react";
 import { createRoot } from "react-dom/client";
 import { beforeEach, expect, it, vi } from "vitest";
 import { GitHubSection } from "../github-section";
+import { GithubAppNotifications } from "../../../platform/bridge/github-app-notifications";
 import { toast } from "../../../shared/ui/primitives/elements";
 
 const adapters = vi.hoisted(() => ({
+  localMethod: "pat",
+  cloudMethod: null as "github-app" | "pat" | null,
+  localPat: true,
+  localApp: true,
+  cliLogin: "",
+  cloudError: false,
+  patConnect: vi.fn(async () => ({ login: "octocat", snapshot: { selectedMethod: "pat" } })),
+  appConnected: new Set<(payload: { login: string; installationCount: number }) => void>(),
+  appErrors: new Set<(payload: { reason: string }) => void>(),
+  readAfterExchange: vi.fn(async () => ({ selectedMethod: "github-app", generation: "post-exchange", methods: { "github-app": { login: "octocat" } } })),
+  changeAfterSave: vi.fn(async () => {}),
   cloudPatConfigured: true,
   empty: false,
   appHealth: "connected",
@@ -21,18 +33,32 @@ vi.mock("../../../platform/git", async original => ({
   ghMethodSelect: adapters.mac,
   ghMethodDisconnect: adapters.remove,
   ghAppConnect: adapters.connectApp,
+  ghPatConnect: adapters.patConnect,
+  onGithubAppConnected: async (callback: (payload: { login: string; installationCount: number }) => void) => {
+    adapters.appConnected.add(callback);
+    return () => adapters.appConnected.delete(callback);
+  },
+  onGithubAppError: async (callback: (payload: { reason: string }) => void) => {
+    adapters.appErrors.add(callback);
+    return () => adapters.appErrors.delete(callback);
+  },
+}));
+vi.mock("../../../platform/cloud-github-connection", async original => ({
+  ...(await original<typeof import("../../../platform/cloud-github-connection")>()),
+  readCloudGithubConnection: adapters.readAfterExchange,
+  changeCloudGithubConnection: adapters.changeAfterSave,
 }));
 vi.mock("../../../state/use-recovering-read", () => ({
-  useRecoveringRead: () => ({ data: { selectedMethod: "pat", methods: {
-    pat: { configured: !adapters.empty, method: "pat", login: adapters.empty ? undefined : "octocat", health: adapters.patHealth },
-    "github-app": { configured: !adapters.empty, method: "github-app", health: adapters.empty ? "not-connected" : adapters.appHealth, login: adapters.empty ? undefined : "octocat" },
-    "gh-cli": { configured: false, method: "gh-cli", health: adapters.empty ? "not-connected" : "unavailable" },
+  useRecoveringRead: () => ({ data: { selectedMethod: adapters.localMethod, methods: {
+    pat: { configured: !adapters.empty && adapters.localPat, method: "pat", login: adapters.empty ? undefined : "octocat", health: adapters.patHealth },
+    "github-app": { configured: !adapters.empty && adapters.localApp, method: "github-app", health: adapters.empty ? "not-connected" : adapters.appHealth, login: adapters.empty ? undefined : "octocat" },
+    "gh-cli": { configured: !!adapters.cliLogin, login: adapters.cliLogin, method: "gh-cli", health: adapters.cliLogin ? "connected" : adapters.empty ? "not-connected" : "unavailable" },
   } } }),
 }));
 vi.mock("../inline-login-terminal", () => ({ InlineLoginTerminal: () => "CLI sign-in terminal" }));
 vi.mock("../use-shared-github", () => ({
-  useSharedGithub: () => ({ change: adapters.cloud, target: () => ({ userId: "a", organizationId: "o", expected: "c".repeat(64) }), read: { data: adapters.hasCloudSnapshot ? {
-    selectedMethod: null, methods: { pat: { configured: adapters.cloudPatConfigured, login: "octocat" }, "github-app": { configured: false } },
+  useSharedGithub: () => ({ change: adapters.cloud, target: () => ({ userId: "a", organizationId: "o", expected: "c".repeat(64) }), read: { readError: adapters.cloudError, data: adapters.hasCloudSnapshot ? {
+    selectedMethod: adapters.cloudMethod, methods: { pat: { configured: adapters.cloudPatConfigured, login: "octocat" }, "github-app": { configured: adapters.cloudMethod === "github-app" } },
   } : undefined } }),
 }));
 
@@ -42,6 +68,12 @@ beforeEach(() => {
   adapters.cloudPatConfigured = true;
   adapters.hasCloudSnapshot = true;
   adapters.empty = false;
+  adapters.cloudError = false;
+  adapters.localMethod = "pat";
+  adapters.cloudMethod = null;
+  adapters.localApp = true;
+  adapters.localPat = true;
+  adapters.cliLogin = "";
   adapters.appHealth = "connected";
   adapters.patHealth = "invalid";
 });
@@ -156,6 +188,17 @@ it("selects a working Cloud PAT when the Mac already selected its own PAT", asyn
 
 const org = { userId: "a", organizationId: "o", name: "Team" };
 
+async function savePat(container: HTMLElement) {
+  const input = container.querySelector<HTMLInputElement>('input[aria-label="Personal access token"]')!;
+  await act(async () => {
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(input, "fixture-token-value");
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+  const save = [...container.querySelectorAll("button")].find(button => button.textContent === "Validate & save")!;
+  expect(save.disabled).toBe(false);
+  await act(async () => save.click());
+}
+
 async function workspacePage(owner?: typeof org, accountId?: string, personalCloud = false) {
   const container = document.body.appendChild(document.createElement("div"));
   const root = createRoot(container);
@@ -210,7 +253,7 @@ it("opens missing Cloud PAT setup inline without selecting either workspace", as
   try {
     await page.pick("Cloud", "Personal access token");
     expect(page.container.querySelector('input[aria-label="Personal access token"]')).toBeTruthy();
-    expect(page.container.textContent).toContain("Saving this token selects it for Local and Cloud");
+    expect(page.container.textContent).not.toContain("selects it for Local and Cloud");
     expect(adapters.mac).not.toHaveBeenCalled();
     expect(adapters.cloud).not.toHaveBeenCalled();
   } finally { page.close(); }
@@ -227,6 +270,82 @@ it("offers a single first-run action before showing shared setup", async () => {
     await act(async () => buttons[0].click());
     expect(page.container.textContent).toContain("Open GitHub");
     expect(page.container.textContent).toContain("Personal access token");
+  } finally { page.close(); }
+});
+
+it.each([false, true])("restores the selected Local CLI after Cloud PAT setup (restore fails=%s)", async fails => {
+  adapters.cloudPatConfigured = false;
+  adapters.localMethod = "gh-cli";
+  adapters.cliLogin = "cli-user";
+  const error = vi.spyOn(toast, "error");
+  if (!fails) adapters.mac.mockResolvedValueOnce({ selectedMethod: "gh-cli" } as never);
+  const page = await workspacePage(org, "a");
+  try {
+    await page.pick("Cloud", "Personal access token");
+    await savePat(page.container);
+    expect(adapters.patConnect).toHaveBeenCalledOnce();
+    expect(adapters.mac).toHaveBeenCalledExactlyOnceWith("gh-cli", "a");
+    expect(adapters.mac.mock.invocationCallOrder[0]).toBeGreaterThan(adapters.patConnect.mock.invocationCallOrder[0]);
+    if (fails) expect(error).toHaveBeenCalledWith(expect.stringContaining("couldn’t restore the Local method"), expect.anything());
+    else expect(error).not.toHaveBeenCalled();
+  } finally { page.close(); error.mockRestore(); }
+});
+
+it.each(["github-app", null] as const)("restores Cloud %s after a Local PAT save using the new generation", async prior => {
+  adapters.localPat = false;
+  adapters.localMethod = "gh-cli";
+  adapters.cloudMethod = prior;
+  adapters.cloud.mockResolvedValueOnce({ generation: "post-save" } as never);
+  const page = await workspacePage(org, "a");
+  try {
+    await page.pick("Local", "Personal access token");
+    await savePat(page.container);
+    expect(adapters.patConnect).toHaveBeenCalledOnce();
+    if (prior) expect(adapters.changeAfterSave).toHaveBeenCalledExactlyOnceWith("a", "o", "post-save", { action: "select", method: prior });
+    else expect(adapters.changeAfterSave).not.toHaveBeenCalled();
+  } finally { page.close(); }
+});
+
+it.each([false, true])("restores Cloud PAT after leaving Settings and a stale callback (restore fails=%s)", async fails => {
+  adapters.localApp = false;
+  adapters.cloudMethod = "pat";
+  const error = vi.spyOn(toast, "error");
+  if (fails) adapters.changeAfterSave.mockRejectedValueOnce(new Error("Cloud token was revoked"));
+  const notifications = createRoot(document.createElement("div"));
+  await act(async () => notifications.render(createElement(GithubAppNotifications)));
+  const page = await workspacePage(org, "a");
+  try {
+    await page.pick("Local", "GitHub App");
+    const open = [...page.container.querySelectorAll("button")].find(button => button.textContent === "Open GitHub")!;
+    await act(async () => open.click());
+    expect(adapters.changeAfterSave).not.toHaveBeenCalled();
+  } finally { page.close(); }
+  try {
+    await act(async () => {
+      for (const onError of adapters.appErrors) onError({ reason: "nonce_mismatch" });
+      for (const connected of adapters.appConnected) connected({ login: "octocat", installationCount: 2 });
+    });
+    expect(adapters.readAfterExchange).toHaveBeenCalledWith("a", "o");
+    expect(adapters.changeAfterSave).toHaveBeenCalledExactlyOnceWith("a", "o", "post-exchange", { action: "select", method: "pat" });
+    if (fails) expect(error).toHaveBeenCalledWith(expect.stringContaining("couldn’t restore the Cloud method"), { description: "Cloud token was revoked" });
+  } finally { act(() => notifications.unmount()); error.mockRestore(); }
+});
+
+it.each([false, true])("disables only Cloud with an outstanding or failed connection read (error=%s)", async failed => {
+  adapters.hasCloudSnapshot = false;
+  adapters.cloudError = failed;
+  const page = await workspacePage(org, "a");
+  try {
+    expect(page.container.querySelector<HTMLButtonElement>('[aria-label="Cloud method"]')!.disabled).toBe(true);
+    expect(page.container.querySelector<HTMLButtonElement>('[aria-label="Local method"]')!.disabled).toBe(false);
+  } finally { page.close(); }
+});
+
+it("shows the signed-in CLI account on its authentication row", async () => {
+  adapters.cliLogin = "octo-cli";
+  const page = await workspacePage(undefined, "a");
+  try {
+    expect(page.container.textContent).toContain("@octo-cli on this Mac");
   } finally { page.close(); }
 });
 

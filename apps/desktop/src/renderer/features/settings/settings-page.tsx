@@ -946,6 +946,11 @@ function ScopedSettingsPage({ owner }: { owner: string }) {
                   >
                     <header className="flex items-start justify-between gap-4">
                       <div className="flex min-w-0 flex-col gap-1">
+                        {integrations && !integrationDirectory && (
+                          <Button variant="ghost" size="compact" className="self-start" onClick={() => showIntegrationDirectory(true)}>
+                            <ArrowLeft aria-hidden /> Back to Integrations
+                          </Button>
+                        )}
                         <h1 className={PAGE_HEADING_CLS}>{integrations && !integrationDirectory ? "GitHub" : (unified && section.unifiedLabel) || section.label}</h1>
                         {description && (
                           <p className="text-fg2 m-0 text-xs leading-4.5">{description}</p>
@@ -956,8 +961,8 @@ function ScopedSettingsPage({ owner }: { owner: string }) {
                     {!local && !cloudEnabled && <CloudWorkspacePausedNotice />}
                     {integrations && integrationDirectory ? (
                       <SettingsList>
-                        <ListRow aria-label="Open GitHub integration" onClick={() => showIntegrationDirectory(false)}>
-                          <GithubIcon /><span>GitHub</span><ChevronRight aria-hidden />
+                        <ListRow variant="panel" aria-label="Open GitHub integration" onClick={() => showIntegrationDirectory(false)}>
+                          <GithubIcon /><span className="flex-1">GitHub</span><ChevronRight aria-hidden />
                         </ListRow>
                       </SettingsList>
                     ) : <Panel surfaceActive={pageActive && isActive} unified={unified} openCloudRepository={openCloudRepository}
@@ -1446,7 +1451,7 @@ function IntegrationsPanel({ surfaceActive = true, unified = false }: { surfaceA
         <GitHubSection
           key={JSON.stringify([me?.user.id, organizationId, separate])}
           surfaceActive={surfaceActive}
-          workspaceIdentity={unified && (!cloud || github.read.data?.sharedDesktopApp === true)}
+          workspaceIdentity={unified && !separate}
           personalCloud={!!organization?.isPersonal}
           {...(me ? { accountId: me.user.id } : {})}
           title={cloud && !separate ? "Authentication" : unified ? <PlaceLabel place="mac" /> : "GitHub"}
