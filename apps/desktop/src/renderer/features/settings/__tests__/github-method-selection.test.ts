@@ -24,7 +24,7 @@ const adapters = vi.hoisted(() => ({
   patHealth: "invalid",
   hasCloudSnapshot: true,
   connectApp: vi.fn(async () => ({ flowKind: "oauth" })),
-  cloud: vi.fn(async () => {}),
+  cloud: vi.fn(async () => ({ generation: "post-save", methods: { pat: { login: "octocat" } } })),
   mac: vi.fn(async () => { throw new Error("Mac PAT revoked"); }),
   remove: vi.fn(async () => ({})),
 }));
@@ -295,14 +295,46 @@ it.each(["github-app", null] as const)("restores Cloud %s after a Local PAT save
   adapters.localPat = false;
   adapters.localMethod = "gh-cli";
   adapters.cloudMethod = prior;
-  adapters.cloud.mockResolvedValueOnce({ generation: "post-save" } as never);
   const page = await workspacePage(org, "a");
   try {
     await page.pick("Local", "Personal access token");
     await savePat(page.container);
     expect(adapters.patConnect).toHaveBeenCalledOnce();
     if (prior) expect(adapters.changeAfterSave).toHaveBeenCalledExactlyOnceWith("a", "o", "post-save", { action: "select", method: prior });
-    else expect(adapters.changeAfterSave).not.toHaveBeenCalled();
+    else {
+      expect(adapters.cloud).not.toHaveBeenCalled();
+      expect(adapters.changeAfterSave).not.toHaveBeenCalled();
+    }
+  } finally { page.close(); }
+});
+
+it("saves the Cloud PAT without selecting a method on an empty Mac", async () => {
+  adapters.empty = true;
+  adapters.localMethod = "gh-cli";
+  adapters.patHealth = "not-connected";
+  adapters.cloudMethod = "github-app";
+  adapters.cloudPatConfigured = false;
+  adapters.cloud.mockResolvedValueOnce({ generation: "post-save", methods: { pat: { login: "cloud-only" } } });
+  const success = vi.spyOn(toast, "success");
+  const page = await workspacePage(org, "a");
+  try {
+    await page.pick("Cloud", "Personal access token");
+    await savePat(page.container);
+    expect(adapters.cloud).toHaveBeenCalledOnce();
+    expect(adapters.patConnect).not.toHaveBeenCalled();
+    expect(page.container.querySelector('[aria-label="Local method"]')?.textContent).toContain("Choose method");
+    expect(success).toHaveBeenCalledWith("Personal Access Token saved", { description: "Connected as @cloud-only." });
+  } finally { page.close(); success.mockRestore(); }
+});
+
+it("opens a Local App handoff without changing an empty Cloud selection", async () => {
+  adapters.localApp = false;
+  const page = await workspacePage(org, "a");
+  try {
+    await page.pick("Local", "GitHub App");
+    const open = [...page.container.querySelectorAll("button")].find(button => button.textContent === "Open GitHub")!;
+    await act(async () => open.click());
+    expect(adapters.connectApp).toHaveBeenCalledExactlyOnceWith({ installFlow: false, forceInstall: false });
   } finally { page.close(); }
 });
 

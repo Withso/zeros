@@ -248,6 +248,7 @@ export function GitHubSection({
   );
   const hasConfirmedSnapshot = connection.data !== undefined;
   const snapshot = connection.data ?? EMPTY_SNAPSHOT;
+  const confirmedCloudMethod = shared.read.readError ? null : shared.read.data?.selectedMethod;
 
   const refreshSnapshot = useCallback(
     async (method?: GithubAuthMethod): Promise<GithubAuthSnapshot | null> => {
@@ -381,13 +382,16 @@ export function GitHubSection({
     setBusyMethod("pat");
     let savedInCloud = false;
     let restoreFailed = false;
-    const priorCloud = place === "local" ? shared.read.data?.selectedMethod : null;
+    const priorCloud = place === "local" ? confirmedCloudMethod : null;
     const priorLocal = place === "cloud" && snapshot.methods[snapshot.selectedMethod].configured
       ? snapshot.selectedMethod : null;
     try {
-      if (owner) {
+      let login: string | undefined;
+      // Both save operations select PAT. Only mirror into a workspace with a restorable selection.
+      if (owner && (place !== "local" || priorCloud)) {
         const saved = await shared.change({ action: "pat", token });
         savedInCloud = true;
+        login = saved.methods.pat.login;
         if (priorCloud && priorCloud !== "pat") {
           try {
             await changeCloudGithubConnection(owner.userId, owner.organizationId, saved.generation, { action: "select", method: priorCloud });
@@ -397,30 +401,33 @@ export function GitHubSection({
           }
         }
       }
-      const result = await ghPatConnect(token, accountId);
+      if (place !== "cloud" || priorLocal) {
+        const result = await ghPatConnect(token, accountId);
+        login = result.login;
+        // Publish the save even if restoring the previous method fails.
+        ghAuthStatusCache.setData(authKey, result.snapshot);
+        if (priorLocal && priorLocal !== "pat") {
+          try {
+            const restored = await ghMethodSelect(priorLocal, accountId);
+            ghAuthStatusCache.setData(authKey, restored);
+          } catch (error) {
+            restoreFailed = true;
+            toast.error("Token saved, but couldn’t restore the Local method", { description: errorMessage(error) });
+          }
+        } else if (snapshot.selectedMethod !== "pat") {
+          trackGithubMethodSelected({
+            method: "pat",
+            previousMethod: snapshot.selectedMethod,
+            hadOtherCredential: hasOtherCredential(snapshot, "pat"),
+          });
+        }
+      }
       setPat("");
       setShowPat(false);
       setSetup(null);
-      // Use the post-write snapshot so a failed follow-up probe cannot hide a successful connection.
-      ghAuthStatusCache.setData(authKey, result.snapshot);
       trackGithubConnectCompleted({ method: "pat", outcome: "ok" });
-      if (priorLocal && priorLocal !== "pat") {
-        try {
-          const restored = await ghMethodSelect(priorLocal, accountId);
-          ghAuthStatusCache.setData(authKey, restored);
-        } catch (error) {
-          restoreFailed = true;
-          toast.error("Token saved, but couldn’t restore the Local method", { description: errorMessage(error) });
-        }
-      } else if (snapshot.selectedMethod !== "pat") {
-        trackGithubMethodSelected({
-          method: "pat",
-          previousMethod: snapshot.selectedMethod,
-          hadOtherCredential: hasOtherCredential(snapshot, "pat"),
-        });
-      }
       if (!restoreFailed) toast.success("Personal Access Token saved", {
-        description: `Connected as @${result.login}.`,
+        description: login ? `Connected as @${login}.` : undefined,
       });
     } catch (error) {
       trackGithubConnectCompleted({
@@ -434,7 +441,7 @@ export function GitHubSection({
     } finally {
       setBusyMethod(null);
     }
-  }, [busyMethod, pat, snapshot, owner, shared, accountId, authKey, place]);
+  }, [busyMethod, pat, snapshot, owner, shared, accountId, authKey, place, confirmedCloudMethod]);
 
   const connectApp = useCallback(async (options?: {
     forceInstall?: boolean;
@@ -458,8 +465,8 @@ export function GitHubSection({
       const started = await connectSettingsGithubApp({
         ...connectOptions,
         ...(target === "cloud" ? { preserveSelectedMethod: true } : {}),
-        ...(owner ? { shared: shared.target() } : {}),
-      }, target === "local" && shared.read.data?.selectedMethod === "pat");
+        ...(owner && (target !== "local" || confirmedCloudMethod) ? { shared: shared.target() } : {}),
+      }, target === "local" && confirmedCloudMethod === "pat");
       if (attempt !== appAttemptRef.current || !started) return;
       if (started.flowKind === "install") {
         trackGithubInstallOpened({
@@ -487,7 +494,7 @@ export function GitHubSection({
     } finally {
       setBusyMethod(null);
     }
-  }, [snapshot.methods, owner, shared, place]);
+  }, [snapshot.methods, owner, shared, place, confirmedCloudMethod]);
 
   const cancelApp = useCallback(async () => {
     const attempt = appAttemptRef.current;
