@@ -8,6 +8,8 @@ import { toast } from "../../../shared/ui/primitives/elements";
 const adapters = vi.hoisted(() => ({
   cloudPatConfigured: true,
   empty: false,
+  appHealth: "connected",
+  patHealth: "invalid",
   hasCloudSnapshot: true,
   connectApp: vi.fn(async () => ({ flowKind: "oauth" })),
   cloud: vi.fn(async () => {}),
@@ -22,9 +24,9 @@ vi.mock("../../../platform/git", async original => ({
 }));
 vi.mock("../../../state/use-recovering-read", () => ({
   useRecoveringRead: () => ({ data: { selectedMethod: "pat", methods: {
-    pat: { configured: !adapters.empty, method: "pat", login: "octocat", health: "expired" },
-    "github-app": { configured: !adapters.empty, method: "github-app", health: "connected", login: "octocat" },
-    "gh-cli": { configured: false, method: "gh-cli", health: "unavailable" },
+    pat: { configured: !adapters.empty, method: "pat", login: adapters.empty ? undefined : "octocat", health: adapters.patHealth },
+    "github-app": { configured: !adapters.empty, method: "github-app", health: adapters.empty ? "not-connected" : adapters.appHealth, login: adapters.empty ? undefined : "octocat" },
+    "gh-cli": { configured: false, method: "gh-cli", health: adapters.empty ? "not-connected" : "unavailable" },
   } } }),
 }));
 vi.mock("../inline-login-terminal", () => ({ InlineLoginTerminal: () => "CLI sign-in terminal" }));
@@ -40,6 +42,8 @@ beforeEach(() => {
   adapters.cloudPatConfigured = true;
   adapters.hasCloudSnapshot = true;
   adapters.empty = false;
+  adapters.appHealth = "connected";
+  adapters.patHealth = "invalid";
 });
 
 it.each([
@@ -214,6 +218,7 @@ it("opens missing Cloud PAT setup inline without selecting either workspace", as
 
 it("offers a single first-run action before showing shared setup", async () => {
   adapters.empty = true;
+  adapters.patHealth = "not-connected";
   adapters.cloudPatConfigured = false;
   const page = await workspacePage(org, "a");
   try {
@@ -222,6 +227,24 @@ it("offers a single first-run action before showing shared setup", async () => {
     await act(async () => buttons[0].click());
     expect(page.container.textContent).toContain("Open GitHub");
     expect(page.container.textContent).toContain("Personal access token");
+  } finally { page.close(); }
+});
+
+it("keeps a failed credential probe visible when no method is configured", async () => {
+  adapters.empty = true;
+  adapters.patHealth = "unavailable";
+  const page = await workspacePage(undefined, "a");
+  try {
+    expect(page.container.textContent).toContain("Couldn’t check this connection.");
+  } finally { page.close(); }
+});
+
+it("reports revoked Local credentials even when a different method is selected", async () => {
+  adapters.appHealth = "invalid";
+  adapters.patHealth = "connected";
+  const page = await workspacePage(org, "a");
+  try {
+    expect(page.container.textContent).toContain("GitHub revoked this connection.");
   } finally { page.close(); }
 });
 

@@ -627,8 +627,10 @@ export function GitHubSection({
   const local = snapshot.methods[snapshot.selectedMethod];
   const cloud = shared.read.data;
   const selectedCloud = cloud?.selectedMethod ? cloud.methods[cloud.selectedMethod] : null;
-  const firstRun = workspaceIdentity && hasConfirmedSnapshot && !METHODS.some(method => snapshot.methods[method].configured)
-    && (!owner || (cloud && !cloud.methods.pat.configured && !cloud.methods["github-app"].configured));
+  const firstRun = workspaceIdentity && hasConfirmedSnapshot && localMethods.every(method => {
+    const status = snapshot.methods[method];
+    return !status.configured && status.health === "not-connected";
+  }) && (!owner || (cloud && !cloud.methods.pat.configured && !cloud.methods["github-app"].configured));
   const List = workspaceIdentity ? SettingsList : "div";
 
   return (
@@ -658,7 +660,6 @@ export function GitHubSection({
           </p>
         </div>}
 
-        {/* Use a group so screen readers expose row buttons; named native radios keep arrow-key navigation. */}
         <List
           role="group"
           aria-label="GitHub authentication method"
@@ -1028,6 +1029,7 @@ export function GitHubSection({
                 <SettingsRow label={workspaceMethodNames[method]} hint={hint} leading={<MethodIcon method={method} />}>
                   {actions}
                 </SettingsRow>
+                {!selected && summary.health !== "not-connected" && <HealthDetail summary={summary} />}
                 {cloudMethod?.configured && cloudMethod.health !== "connected" && (
                   <p className="text-fg2 text-xs">Cloud · {cloudGithubHealthCopy[cloudMethod.health]}</p>
                 )}
