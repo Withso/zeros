@@ -135,8 +135,10 @@ export function columnChatIdForSideChat(
   chats: readonly ChatThread[],
   side: ChatThread,
   column: string | null,
+  // The column shows terminal chats too, so a terminal on screen is the target
+  // (and Add child session then refuses it) rather than some other chat.
   shown: (chat: ChatThread) => boolean = (chat) =>
-    chat.folder === side.folder && chat.kind !== "terminal" && !chat.archived && !isSideChat(chat),
+    chat.folder === side.folder && !chat.archived && !isSideChat(chat),
 ): string | null {
   const byId = new Map(chats.map((chat) => [chat.id, chat]));
   const pick = (id: string | null | undefined) => {

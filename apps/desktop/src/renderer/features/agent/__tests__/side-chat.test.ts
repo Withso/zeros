@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ChatThread } from "../../../state/store";
 import type { TranscriptSnapshot } from "../chat-transcript-attach";
 import { transcriptMessagesThroughMessage } from "../chat-transcript-attach";
-import { hasParentContext } from "../add-child-session";
+import { canAddChildSession, hasParentContext } from "../add-child-session";
 import { formatMessageTime } from "../message-hover-actions";
 import { createForkedChat } from "../fork-chat";
 import {
@@ -138,6 +138,17 @@ describe("sessionViewChatId", () => {
     expect(sessionViewChatId(chats, "s", "/repo")).toBe("b");
     // The pane resolves the same chat from the chats it can show.
     expect(columnChatIdForSideChat(chats, side, "a", (chat) => ["b", "older"].includes(chat.id))).toBe("b");
+  });
+});
+
+describe("a terminal in the chat column", () => {
+  it("stays the target while a side chat has focus, so ⌥⌘T and the menu don't act on another chat", () => {
+    const term = { ...local, id: "term", kind: "terminal" as const };
+    const side = { ...local, id: "side-t", kind: "side" as const, sourceChatId: "source" };
+    rememberColumnChat("/repo", "term");
+    const chats = [local, term, side];
+    expect(sessionViewChatId(chats, "side-t", "/repo")).toBe("term");
+    expect(canAddChildSession(chats.find((chat) => chat.id === sessionViewChatId(chats, "side-t", "/repo")))).toBe(false);
   });
 });
 
