@@ -29,12 +29,25 @@ export function designWrapInFlow(parent: DesignRuntimeNodeDetails, nodes: readon
   const gap = gaps.length ? Math.max(0, Math.round(gaps.reduce((a,b) => a+b, 0) / gaps.length)) : 0;
   const inFlow = ["flex", "inline-flex", "grid", "inline-grid"].includes(parent.styles.display ?? "") &&
     !nodes.every(n => n.styles.position === "absolute");
-  const placement = inFlow ? "position:relative;" : `position:absolute;left:${left}px;top:${top}px;`;
+  // A static parent is not the wrapper's containing block. Positioning it
+  // would re-anchor its other overlays, so the wrapper is placed in the
+  // ancestor space a free selected layer already uses.
+  const staticParent = !inFlow && parent.styles.position === "static" && parent.tag !== "body";
+  const anchored = staticParent ? nodes.find(n => n.styles.position === "absolute" && !n.layout!.isContainingBlock) : undefined;
+  const shift = (offset: string | undefined, margin: string | undefined, at: number) => {
+    const value = Number.parseFloat(offset ?? "");
+    return Number.isFinite(value) ? value + (Number.parseFloat(margin ?? "") || 0) - at : null;
+  };
+  const dx = anchored ? shift(anchored.styles.left, anchored.styles.marginLeft, anchored.layout!.x) : null;
+  const dy = anchored ? shift(anchored.styles.top, anchored.styles.marginTop, anchored.layout!.y) : null;
+  const reanchors = staticParent && (dx === null || dy === null);
+  const placement = inFlow ? "position:relative;"
+    : `position:absolute;left:${Math.round(left + (reanchors ? 0 : dx ?? 0))}px;top:${Math.round(top + (reanchors ? 0 : dy ?? 0))}px;`;
   const style = `${placement}display:flex;flex-direction:${column ? "column" : "row"};gap:${gap}px;align-items:flex-start;width:max-content;height:max-content;`;
   const ops: DesignOperation[] = [];
   const update = (nodeId: string, styles: Record<string, string>) => ops.push({ type: "node.set-styles", operationId: crypto.randomUUID(),
     nodeId, styles, scope: "inline", responsiveContext: "base", stateContext: "default" });
-  if (!inFlow && parent.styles.position === "static" && parent.tag !== "body") update(parent.oid, { position: "relative" });
+  if (reanchors) update(parent.oid, { position: "relative" });
   ops.push({ type: "node.set-html", operationId: crypto.randomUUID(), nodeId: parent.oid, mode: "append", html: `<div data-oid="${id}" style="${style}"></div>` },
     { type: "node.move", operationId: crypto.randomUUID(), nodeId: id, parentId: parent.oid, beforeId: nodes[0]!.oid });
   for (const { n, w, h } of pos) {
@@ -237,6 +250,13 @@ export function designDrawnFrameWrapOperations(
       ["transform", "rotate", "scale", "translate"].some(key => (child.styles[key] ?? "none") !== "none") ||
       !Number.isFinite(layout.x) || !Number.isFinite(layout.y)) continue;
     const width = borderSize(child, "x"), height = borderSize(child, "y");
+    // A percentage resolves against the containing block, which becomes the
+    // drawn frame: it keeps its measured size instead.
+    const percent = (value: string | undefined) => /%\s*$/.test(value ?? "");
+    const kept = {
+      ...(percent(layout.widthValue) ? { width: cssSize(child, "x", width) } : {}),
+      ...(percent(layout.heightValue) ? { height: cssSize(child, "y", height) } : {}),
+    };
     if (layout.x < bounds.x || layout.y < bounds.y ||
       layout.x + width > bounds.x + bounds.width || layout.y + height > bounds.y + bounds.height) continue;
     operations.push(
@@ -244,7 +264,7 @@ export function designDrawnFrameWrapOperations(
       { type: "node.set-styles", operationId: `wrap-place:${child.oid}`, nodeId: child.oid, scope: "inline",
         responsiveContext: "base", stateContext: "default",
         styles: { left: `${Math.round(layout.x - bounds.x - (Number.parseFloat(child.styles.marginLeft ?? "") || 0))}px`,
-          top: `${Math.round(layout.y - bounds.y - (Number.parseFloat(child.styles.marginTop ?? "") || 0))}px`, right: "auto", bottom: "auto" } },
+          top: `${Math.round(layout.y - bounds.y - (Number.parseFloat(child.styles.marginTop ?? "") || 0))}px`, right: "auto", bottom: "auto", ...kept } },
     );
   }
   return operations;

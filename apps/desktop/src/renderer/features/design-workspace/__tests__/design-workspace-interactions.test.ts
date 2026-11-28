@@ -98,7 +98,15 @@ describe("design workspace interaction wiring", () => {
     // Only a selection change waits, for one painted frame; a drag's live
     // readback of the same selection does not, and continuous updates cannot
     // starve it the way a deferred render can.
-    expect(workspace).toContain("const inspectorSelection = inspectorSelectionPresented ? liveInspectorSelection : heldInspectorSelection.current;");
+    expect(workspace).toContain("const inspectorSelection = inspectorSelectionPresented ? liveInspectorSelection : heldInspectorSelection.current.selection;");
+    // Another owner's selection is never held, and the held panel cannot
+    // write to the layer the user just left.
+    expect(workspace).toContain("const ownerChanged = heldInspectorSelection.current.owner !== inspectorOwnerKey;");
+    expect(workspace).toContain("presentedInspectorSelectionKey === inspectorSelectionKey || ownerChanged;");
+    expect(workspace).toContain("selectionSettling={!inspectorSelectionPresented}");
+    const inspector = readSection("design-inspector.tsx");
+    expect(inspector).toContain("active: active && !selectionSettling && Boolean(elementDetails),");
+    expect(inspector).toContain("editable: !editsDisabled && !selectionSettling && Boolean(presentedElementDetails) && !handed,");
     expect(workspace).toContain("timer = window.setTimeout(() => setPresentedInspectorSelectionKey(inspectorSelectionKey), 0);");
     expect(workspace).not.toContain("useDeferredValue");
     expect(workspace).toContain("details={inspectorSelection.details}");
@@ -943,6 +951,8 @@ describe("design workspace interaction wiring", () => {
     expect(inspector).toContain("layoutShortcutRef.current = commitLayoutAction;");
     // Only where there is no auto layout yet, in the children's own direction.
     expect(inspector).toContain("designInferredAutoLayoutFlow(liveChildren)");
+    // Only Shift+A turns drawn offsets into gap and padding.
+    expect(inspector).toContain("{ drawnSpacing: action.infer === true })");
     expect(source).toContain('aria-keyshortcuts="Shift+M"');
     expect(source).not.toContain('aria-keyshortcuts="Shift+A"');
     expect(source).toContain(`event.key.toLowerCase() === "m" &&

@@ -63,6 +63,24 @@ describe("child frame insertion", () => {
     ]);
     expect(designDrawnFrameWrapOperations({ ...parent, styles: { ...parent.styles, display: "flex" } }, "drawn", bounds,
       [free("inside", 60, 40)])).toEqual([]);
+    // A percentage size would resolve against the drawn frame; it keeps its measured pixels.
+    const percent = free("percent", 60, 40);
+    percent.layout = { ...percent.layout!, widthValue: "50%", heightValue: "auto" };
+    percent.styles = { ...percent.styles, width: "61px", boxSizing: "border-box" };
+    expect(designDrawnFrameWrapOperations(parent, "drawn", bounds, [percent])[1]).toMatchObject({
+      styles: { left: "20px", top: "10px", width: "61px" } });
+    expect(designDrawnFrameWrapOperations(parent, "drawn", bounds, [percent])[1]).not.toHaveProperty("styles.height");
+  });
+  it("wraps free layers of a static parent without re-anchoring the parent's other overlays", () => {
+    // The parent sits 200px inside its positioned ancestor; its free layers
+    // are anchored to that ancestor.
+    const free = (oid: string, x: number) => ({ ...parent, oid,
+      styles: { ...parent.styles, position: "absolute", left: `${x + 200}px`, top: "220px" },
+      layout: { parentId: parent.oid, x, y: 20, isContainingBlock: false }, rect: { x, y: 20, width: 61, height: 19 },
+    }) as unknown as DesignRuntimeNodeDetails;
+    const ops = designWrapInFlow(parent, [free("a", 10), free("b", 84)], "wrap");
+    expect(ops.some(op => op.type === "node.set-styles" && op.nodeId === parent.oid)).toBe(false);
+    expect(ops.find(op => op.type === "node.set-html")?.html).toContain("position:absolute;left:210px;top:220px;");
   });
   it("wraps siblings in spatial order, infers the gap and leaves a label content-sized", () => {
     const item = (oid: string, x: number) => ({ ...parent, oid,

@@ -125,6 +125,12 @@ export async function addDesignSection(page, title) {
  * default. Opens it (when it is not open already) and waits for the tree.
  * The click is dispatched on the element so neither the pointer nor focus
  * moves: smokes that open the drawer as setup still assert on both. */
+/** The Style panel follows a new selection one painted frame after its
+ * outline; read it only once it shows that selection. */
+export async function waitForDesignInspectorSelection(page) {
+  await page.locator("[data-design-inspector][data-design-selection-settling]").waitFor({ state: "detached" });
+}
+
 export async function openLayersDrawer(page) {
   const fold = page.locator("[data-design-layers-fold]:visible").first();
   await fold.waitFor({ state: "visible", timeout: 15_000 });

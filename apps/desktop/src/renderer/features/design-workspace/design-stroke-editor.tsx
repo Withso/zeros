@@ -389,8 +389,8 @@ function StrokeRows({
           mixed={mixed(colorProperty)}
           onPreview={(value) => onPreview?.({ [colorProperty]: value })}
           onCancelPreview={onCancelPreview}
-          onCommit={(value) => {
-            void onCommit({ [colorProperty]: value }, `${name} color`);
+          onCommit={async (value) => {
+            await onCommit({ [colorProperty]: value }, `${name} color`);
           }}
         />
       </div>

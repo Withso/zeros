@@ -104,6 +104,20 @@ describe("canvas node commands", () => {
     await applyDesignNodeAction({ workspaceId: "local", folder: "/design", action: "duplicate" });
     expect(mocks.edit.mock.calls[2]![2].operations).toHaveLength(1);
   });
+  it("keeps repeating from the moved copy after a refused duplicate", async () => {
+    know(layer("nested", 10, 10));
+    await applyDesignNodeAction({ workspaceId: "local", folder: "/design", action: "duplicate" });
+    const copyId = mocks.edit.mock.calls[0]![2].operations[0].duplicateNodeId;
+    know(layer(copyId, 60, 10));
+    useDesignWorkspaceUiStore.getState().setSelection("local", frame.file, copyId);
+    mocks.edit.mockRejectedValueOnce(new Error("conflict"));
+    await expect(applyDesignNodeAction({ workspaceId: "local", folder: "/design", action: "duplicate" })).rejects.toThrow("conflict");
+    await applyDesignNodeAction({ workspaceId: "local", folder: "/design", action: "duplicate" });
+    const [duplicate, placed] = mocks.edit.mock.calls[2]![2].operations;
+    expect(duplicate).toMatchObject({ type: "node.duplicate", nodeId: copyId });
+    expect(placed).toMatchObject({ type: "node.set-styles", styles: { left: "110px", top: "10px" } });
+  });
+
   it("uses the current semantic frame after a transfer, without a rendered-closure fallback", async () => {
     useDesignWorkspaceUiStore.getState().setSelection("local", other.file, "nested");
     await applyDesignNodeAction({ workspaceId: "local", folder: "/design", action: "delete" });

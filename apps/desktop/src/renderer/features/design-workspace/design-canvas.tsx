@@ -6425,7 +6425,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
         if (!pasted && current()) throw new Error("The paste destination changed.");
       })();
       savedEditingSession?.retain(save);
-      void save.catch(error => toast.error("Couldn't paste the selection", { description: errorMessage(error) }));
+      void save.catch(error => { if (current()) toast.error("Couldn't paste the selection", { description: errorMessage(error) }); });
     };
     window.addEventListener("copy", copy);
     window.addEventListener("paste", paste);
@@ -6528,7 +6528,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
           if (frame && current()) void selectDesignNode({ workspaceId, folder, frame, nodeId: id, owner }).catch(() => {});
         })();
         savedEditingSession?.retain(save);
-        void save.catch(error => toast.error("Couldn't wrap selection in flow", { description: errorMessage(error) }));
+        void save.catch(error => { if (current()) toast.error("Couldn't wrap selection in flow", { description: errorMessage(error) }); });
         return;
       }
       const selectionShortcut = resolveDesignSelectionShortcut(

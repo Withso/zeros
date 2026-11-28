@@ -1807,6 +1807,7 @@ export const DesignInspector = React.memo(function DesignInspector({
   zoomActionsRef,
   onAskAgent,
   panelVisible = true,
+  selectionSettling = false,
 }: DesignInspectorProps) {
   const styleOriginLabel = useDesignStyleOriginLabel(workspaceId);
   const tokenCatalog = useDesignFrameTokenCatalog(workspaceId, frame?.file);
@@ -2248,8 +2249,8 @@ export const DesignInspector = React.memo(function DesignInspector({
     return variant && designDeclaredVariants(frame.component).includes(variant) ? variant : null;
   });
   const styleEditContextRef = useRef({
-    active: active && Boolean(elementDetails),
-    editable: !editsDisabled && Boolean(presentedElementDetails) && !handed,
+    active: active && !selectionSettling && Boolean(elementDetails),
+    editable: !editsDisabled && !selectionSettling && Boolean(presentedElementDetails) && !handed,
     pageId: activePageId ?? null,
     directoryKey: styleDirectoryKey,
     workspaceId,
@@ -2262,8 +2263,8 @@ export const DesignInspector = React.memo(function DesignInspector({
     stateContext: shownState,
   });
   styleEditContextRef.current = {
-    active: active && Boolean(elementDetails),
-    editable: !editsDisabled && Boolean(presentedElementDetails) && !handed,
+    active: active && !selectionSettling && Boolean(elementDetails),
+    editable: !editsDisabled && !selectionSettling && Boolean(presentedElementDetails) && !handed,
     pageId: activePageId ?? null,
     directoryKey: styleDirectoryKey,
     workspaceId,
@@ -3125,7 +3126,8 @@ export const DesignInspector = React.memo(function DesignInspector({
           updates =
             action.type === "auto-layout"
               ? designAutoLayoutUpdates(details, liveChildren,
-                  action.infer ? designInferredAutoLayoutFlow(liveChildren) : action.flow)
+                  action.infer ? designInferredAutoLayoutFlow(liveChildren) : action.flow,
+                  { drawnSpacing: action.infer === true })
               : designLayoutChildUpdates(details, liveChildren, action);
         } else if (action.type === "sizing" && action.mode === "relative") {
           // A percentage resolves against the parent, so each layer reads its
@@ -4102,6 +4104,7 @@ export const DesignInspector = React.memo(function DesignInspector({
       data-design-inspector=""
       data-design-source-filter={fieldOrigins.filter ? "" : undefined}
       data-design-state-held={heldState ?? undefined}
+      data-design-selection-settling={selectionSettling ? "" : undefined}
       className="bg-bg1 relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden"
     >
       <Tabs value={activeTab} onValueChange={(value) => selectInspectorTab(value as DesignInspectorTab)} className="flex min-h-0 flex-1 flex-col">

@@ -129,8 +129,9 @@ export async function applyDesignNodeAction(input: {
   for (const [nodeId, styles] of placements) operations.push({ operationId: crypto.randomUUID(), type: "node.set-styles", nodeId, styles,
     scope: "inline", responsiveContext: "base", stateContext: "default" });
   if (action === "duplicate" && !duplicates.has(workspaceId) && duplicates.size >= 32) duplicates.delete(duplicates.keys().next().value!);
-  if (action === "duplicate") duplicates.set(workspaceId, { frame: frame.file, owner, copies: duplicateNodeIds,
-    sourcesAt: nodeIds.map(nodeId => { const layout = fresh(nodeId)?.layout; return layout ? { x: layout.x, y: layout.y } : null; }) });
+  const duplicateHistory = action === "duplicate" ? { frame: frame.file, owner, copies: duplicateNodeIds,
+    sourcesAt: nodeIds.map(nodeId => { const layout = fresh(nodeId)?.layout; return layout ? { x: layout.x, y: layout.y } : null; }) } : undefined;
+  if (duplicateHistory) duplicates.set(workspaceId, duplicateHistory);
   // Retire deleted targets immediately. Another Delete cannot submit the same
   // vanished identity while persistence or runtime adoption is still pending.
   if (action === "delete") useDesignWorkspaceUiStore.getState().setSelection(workspaceId, frame.file, null, undefined, { owner });
@@ -163,6 +164,12 @@ export async function applyDesignNodeAction(input: {
     else void selectDesignFrame(workspaceId, current, { owner }).catch(() => {});
   } catch (error) {
     if (action === "delete" && follows()) void selectDesignNodes({ workspaceId, folder, frame, nodeIds, owner }).catch(() => {});
+    // A refused copy never existed: the next duplicate repeats from the
+    // history before it, unless a newer duplicate already replaced it.
+    if (duplicateHistory && duplicates.get(workspaceId) === duplicateHistory) {
+      if (last) duplicates.set(workspaceId, last);
+      else duplicates.delete(workspaceId);
+    }
     throw error;
   } finally {
     // Named cleanup cannot remove a newer gesture's preview. The originating

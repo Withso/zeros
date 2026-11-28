@@ -17,7 +17,10 @@ const typeProperties = { fontFamily: "font-family", fontSize: "font-size", fontW
 export function designTextTypography(styles: Record<string, string>): Record<string, string> {
   return Object.fromEntries(Object.keys(typeProperties).flatMap(key => {
     const value = styles[key]?.trim();
-    return value && value.length <= 256 && /^[\p{L}\p{N} "'.,%_-]+$/u.test(value) ? [[key, value]] : [];
+    // A family name may carry "&" ("Rock & Roll One"); nothing may close the
+    // declaration or the attribute it is written into.
+    const allowed = key === "fontFamily" ? /^[\p{L}\p{N} "'.,%_&-]+$/u : /^[\p{L}\p{N} "'.,%_-]+$/u;
+    return value && value.length <= 256 && allowed.test(value) ? [[key, value]] : [];
   }));
 }
 
@@ -77,7 +80,7 @@ export function createDesignTextMarkup(
           finiteCoordinate(input.height ?? 1, "height"),
         )}px;`;
   const typography = Object.entries(designTextTypography(input.typography ?? {}))
-    .map(([key, value]) => `${typeProperties[key as keyof typeof typeProperties]}:${value.replace(/"/g, "&quot;")};`).join("");
+    .map(([key, value]) => `${typeProperties[key as keyof typeof typeProperties]}:${value.replace(/&/g, "&amp;").replace(/"/g, "&quot;")};`).join("");
   return `<div data-oid="${input.nodeId}" style="${placement}${size}margin:0;white-space:pre-wrap;overflow-wrap:anywhere;${typography}">${escapeDesignText(input.text)}</div>`;
 }
 

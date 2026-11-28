@@ -67,6 +67,32 @@ describe("an added paint row", () => {
     expect(document.querySelector("[data-design-stroke]")).toBeNull();
   });
 
+  it("puts the canvas back when a stroke color save is refused", async () => {
+    const details = { oid: "card", sourceVersion: "a".repeat(24), tag: "div", name: "Card", text: null, selector: "", visible: true,
+      breadcrumb: [], rect: { x: 0, y: 0, width: 80, height: 40 },
+      styles: { borderStyle: "solid", borderWidth: "1px", borderColor: "#000000", outlineStyle: "none", outlineWidth: "0px" } } as unknown as DesignRuntimeNodeDetails; // check:ui ignore-line -- authored paint fixture
+    const onCommit = vi.fn(async (styles: Record<string, string | null>) => {
+      if ("border-color" in styles) throw new Error("conflict");
+    });
+    const onCancelPreview = vi.fn();
+    await act(async () => root.render(createElement(DesignStrokeSection, {
+      details, renderField: (label: string) => createElement("span", { "data-field": label }), onCommit,
+      onPreview: async () => {}, onCancelPreview,
+    })));
+    const input = document.querySelector<HTMLInputElement>('[data-design-stroke="border"] [data-design-color-field] input')!;
+    const setValue = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!;
+    await act(async () => {
+      input.focus();
+      setValue.call(input, "FF0044");
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await act(async () => input.blur());
+    await act(async () => new Promise((resolve) => setTimeout(resolve, 0)));
+    expect(onCommit).toHaveBeenCalledWith(expect.objectContaining({ "border-color": expect.any(String) }), expect.any(String));
+    // The refusal reaches the field, which puts the canvas back.
+    expect(onCancelPreview).toHaveBeenCalledTimes(1);
+  });
+
   it("ignores a request whose row never appeared promptly", async () => {
     const now = vi.spyOn(performance, "now").mockReturnValue(1_000);
     requestDesignPaintPicker("background-color");

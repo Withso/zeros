@@ -236,13 +236,23 @@ export async function transferDesignLayerOnCanvas(input: {
     if (!destination || !pasteParent || !input.duplicateNodeId) throw new Error("The paste destination is unavailable.");
     // As in Figma: the copy keeps its place inside its parent when the
     // destination has room for it there, and centers otherwise.
-    const at = details.layout && Number.isFinite(details.layout.x) && Number.isFinite(details.layout.y) &&
-      details.layout.x >= 0 && details.layout.y >= 0 &&
-      details.layout.x + details.rect.width <= pasteParent.rect.width &&
-      details.layout.y + details.rect.height <= pasteParent.rect.height
-      ? { x: details.layout.x, y: details.layout.y }
-      : { x: (pasteParent.rect.width - details.rect.width) / 2, y: (pasteParent.rect.height - details.rect.height) / 2 };
-    origin = { x: destination.x + pasteParent.rect.x + at.x, y: destination.y + pasteParent.rect.y + at.y };
+    // The kept place is parent-local; the parent's matrix maps it into the
+    // frame, where the drop resolves it back.
+    const [a, b, c, d, e, f] = pasteParent.childCoordinateSpace ?? [1, 0, 0, 1, pasteParent.rect.x, pasteParent.rect.y];
+    const toFrame = (x: number, y: number) => ({ x: a * x + c * y + e, y: b * x + d * y + f });
+    const kept = details.layout && Number.isFinite(details.layout.x) && Number.isFinite(details.layout.y)
+      ? toFrame(details.layout.x, details.layout.y) : null;
+    const width = details.box?.width ?? details.rect.width, height = details.box?.height ?? details.rect.height;
+    const corners = kept ? [[0, 0], [width, 0], [0, height], [width, height]]
+      .map(([x, y]) => toFrame(details.layout!.x + x!, details.layout!.y + y!)) : [];
+    const fits = kept !== null && corners.every(point => Number.isFinite(point.x) && Number.isFinite(point.y) &&
+      point.x >= pasteParent.rect.x - 0.5 && point.y >= pasteParent.rect.y - 0.5 &&
+      point.x <= pasteParent.rect.x + pasteParent.rect.width + 0.5 && point.y <= pasteParent.rect.y + pasteParent.rect.height + 0.5);
+    const at = fits ? kept! : {
+      x: pasteParent.rect.x + (pasteParent.rect.width - details.rect.width) / 2,
+      y: pasteParent.rect.y + (pasteParent.rect.height - details.rect.height) / 2,
+    };
+    origin = { x: destination.x + at.x, y: destination.y + at.y };
     center = { x: origin.x + details.rect.width / 2, y: origin.y + details.rect.height / 2 };
   }
   const drop = destination

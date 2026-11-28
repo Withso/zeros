@@ -371,7 +371,8 @@ export async function runDesignLayoutSmoke({ page, waitFor, check }) {
   const groupHeader = await header.innerText();
   await layers.locator('[data-design-layer-id="home-heading"]').click();
   // The Style panel follows a new selection a frame after its outline.
-  await waitFor(async () => (await header.innerText()) !== groupHeader, "layout-single-selection-panel");
+  if (!(await waitFor(async () => (await header.innerText()) !== groupHeader, "layout-single-selection-panel")))
+    throw new Error("Style panel did not follow the single selection within the wait bound");
   // The rotation and flip buttons must still fit the narrowest supported panel.
   const widths = [];
   for (const width of [220, 280, 420]) {

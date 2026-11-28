@@ -128,11 +128,19 @@ describe("canvas transfer presentation", () => {
     const parent = { oid: "target-root", rect: { x: 0, y: 0, width: 393, height: 852 } };
     mocks.targets = [parent];
     const placed = { ...node, layout: { x: 58, y: 120 } } as DesignRuntimeNodeDetails;
-    await transferDesignLayerOnCanvas({ ...input, details: placed, duplicateNodeId: "copy", destination, pasteParentId: "target-root" }).catch(() => {});
+    await transferDesignLayerOnCanvas({ ...input, details: placed, duplicateNodeId: "copy", destination, pasteParentId: "target-root" });
     expect(mocks.drop.mock.calls[0]?.[3]).toEqual({ x: 58, y: 120 });
+    expect(mocks.transfer).toHaveBeenCalledTimes(1);
     const outside = { ...node, layout: { x: 380, y: 120 } } as DesignRuntimeNodeDetails;
-    await transferDesignLayerOnCanvas({ ...input, details: outside, duplicateNodeId: "copy", destination, pasteParentId: "target-root" }).catch(() => {});
+    await transferDesignLayerOnCanvas({ ...input, details: outside, duplicateNodeId: "copy", destination, pasteParentId: "target-root" });
     expect(mocks.drop.mock.calls[1]?.[3]).toEqual({ x: 146.5, y: 386 });
+    expect(mocks.transfer).toHaveBeenCalledTimes(2);
+  });
+  it("maps the kept place through a scaled parent's coordinates", async () => {
+    mocks.targets = [{ oid: "target-root", rect: { x: 100, y: 0, width: 600, height: 852 }, childCoordinateSpace: [2, 0, 0, 2, 100, 0] }];
+    const placed = { ...node, layout: { x: 58, y: 120 } } as DesignRuntimeNodeDetails;
+    await transferDesignLayerOnCanvas({ ...input, details: placed, duplicateNodeId: "copy", destination, pasteParentId: "target-root" });
+    expect(mocks.drop.mock.calls[0]?.[3]).toEqual({ x: 216, y: 240 });
   });
   it("keeps the runtime root id for a nested linked frame copy", async () => {
     const runtimeRoot = { ...node, oid: "cc-root" };

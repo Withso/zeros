@@ -176,11 +176,6 @@ revision in the same checkout and compare failing test names.
   point inside a frame with `page.mouse` at the element's `boundingBox()`.
 - A gesture painting inline sizes restores React's values, not `""`: React
   never reapplies an unchanged style prop.
-- To paint a Design selection outline before the Style panel, hold the panel's
-  selection one painted frame behind a selection change (rAF, then a task).
-  `useDeferredValue` starves while the canvas keeps updating, so the panel and
-  smoke waits never catch up. Smoke that reads the panel after a click must
-  wait for its header to change.
 
 ## Process, CI and delivery
 

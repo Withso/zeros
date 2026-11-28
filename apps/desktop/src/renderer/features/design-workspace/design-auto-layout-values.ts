@@ -13,7 +13,7 @@ import {
   type DesignLayoutAxis,
 } from "./design-layout-values";
 import { designIntrinsicPlacementStyles } from "@zeros/protocol/design-relocation";
-import { readDesignComputedStyle } from "./design-style-values";
+import { isDesignRuntimeStylePropertyAuthored, readDesignComputedStyle } from "./design-style-values";
 
 export type DesignAutoLayoutFlow = "none" | "row" | "column" | "grid";
 export type DesignSizingMode = "fixed" | "relative" | "hug" | "fill" | "custom";
@@ -356,7 +356,8 @@ export function designAutoLayoutFlowStyles(
 
 /** Free layers keep where they were drawn: the spacing between them becomes
  * the gap and their offset from the container becomes its padding, as Figma
- * does when auto layout is added. Authored spacing is never replaced. */
+ * does when auto layout is added. Authored spacing, including an authored
+ * zero, is never replaced. Margins stay in flow, so they are left out. */
 function designDrawnFlowSpacing(
   parent: DesignRuntimeNodeDetails,
   children: readonly DesignRuntimeNodeDetails[],
@@ -365,21 +366,31 @@ function designDrawnFlowSpacing(
   const placed = children.filter((child) => child.layout && Number.isFinite(child.layout.x) && Number.isFinite(child.layout.y));
   if (!placed.length) return {};
   const column = flow === "column";
-  const at = (child: DesignRuntimeNodeDetails) => (column ? child.layout!.y : child.layout!.x);
-  const size = (child: DesignRuntimeNodeDetails) => borderSize(child, column ? "y" : "x");
-  const sorted = [...placed].sort((a, b) => at(a) - at(b));
-  const gaps = sorted.slice(1).map((child, index) => at(child) - at(sorted[index]!) - size(sorted[index]!));
+  const margin = (child: DesignRuntimeNodeDetails, side: "left" | "right" | "top" | "bottom") =>
+    Number.parseFloat(style(child, `margin-${side}`)) || 0;
+  const start = (child: DesignRuntimeNodeDetails) =>
+    column ? child.layout!.y - margin(child, "top") : child.layout!.x - margin(child, "left");
+  const end = (child: DesignRuntimeNodeDetails) =>
+    (column ? child.layout!.y : child.layout!.x) + borderSize(child, column ? "y" : "x") +
+    margin(child, column ? "bottom" : "right");
+  const sorted = [...placed].sort((a, b) => start(a) - start(b));
+  const gaps = sorted.slice(1).map((child, index) => start(child) - end(sorted[index]!));
   const result: Styles = {};
-  const unset = (value: string) => !value || value === "normal" || Number.parseFloat(value) === 0;
+  const declared = (property: string) => {
+    const value = style(parent, property);
+    return parent.authoredStyleProperties
+      ? isDesignRuntimeStylePropertyAuthored(parent.authoredStyleProperties, property)
+      : Boolean(value) && value !== "normal" && Number.parseFloat(value) !== 0;
+  };
   const gap = gaps.length ? Math.max(0, Math.round(gaps.reduce((sum, value) => sum + value, 0) / gaps.length)) : 0;
-  if (gap > 0 && unset(style(parent, column ? "row-gap" : "column-gap")) && unset(style(parent, "gap"))) result.gap = `${gap}px`;
-  const left = Math.round(Math.min(...placed.map((child) => child.layout!.x)));
-  const top = Math.round(Math.min(...placed.map((child) => child.layout!.y)));
+  if (gap > 0 && !declared(column ? "row-gap" : "column-gap") && !declared("gap")) result.gap = `${gap}px`;
+  const left = Math.round(Math.min(...placed.map((child) => child.layout!.x - margin(child, "left"))));
+  const top = Math.round(Math.min(...placed.map((child) => child.layout!.y - margin(child, "top"))));
   // Each axis pads both its sides alike, so the Style panel reads one
   // Horizontal and one Vertical value as Figma's does.
-  if (left > 0 && unset(style(parent, "padding-left")) && unset(style(parent, "padding-right")))
+  if (left > 0 && !declared("padding-left") && !declared("padding-right"))
     Object.assign(result, { "padding-left": `${left}px`, "padding-right": `${left}px` });
-  if (top > 0 && unset(style(parent, "padding-top")) && unset(style(parent, "padding-bottom")))
+  if (top > 0 && !declared("padding-top") && !declared("padding-bottom"))
     Object.assign(result, { "padding-top": `${top}px`, "padding-bottom": `${top}px` });
   return result;
 }
@@ -388,6 +399,8 @@ export function designAutoLayoutUpdates(
   parents: readonly DesignRuntimeNodeDetails[],
   children: readonly DesignRuntimeNodeDetails[],
   flow: DesignAutoLayoutFlow,
+  /** Shift+A: drawn offsets become the new layout's gap and padding. */
+  options: { drawnSpacing?: boolean } = {},
 ): Map<string, Styles> {
   const result = new Map<string, Styles>();
   const childUpdates = new Map<string, Styles>();
@@ -499,7 +512,7 @@ export function designAutoLayoutUpdates(
         childUpdates.set(child.oid, { ...childUpdates.get(child.oid), ...sizing });
       }
     }
-    if (flow === "row" || flow === "column")
+    if (options.drawnSpacing && (flow === "row" || flow === "column"))
       result.set(parent.oid, { ...result.get(parent.oid), ...designDrawnFlowSpacing(parent, joined, flow) });
   }
   // A nested selection is both a container and a child. Parent preparation
