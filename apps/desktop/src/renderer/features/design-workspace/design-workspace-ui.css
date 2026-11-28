@@ -21,7 +21,8 @@
   background: var(--design-selection-handle-fill) padding-box;
   box-shadow: inset 0 0 0 1px var(--design-selection-stroke);
   cursor: nwse-resize;
-  pointer-events: auto;
+  /* Hidden, it never takes a press meant for the layer. */
+  pointer-events: none;
   /* Above the selection's spacing zones inside the transformed canvas. */
   z-index: var(--z-panel);
   opacity: 0;
@@ -29,6 +30,7 @@
 
 .zd-design-radius-handle:is([data-near], [data-value], :focus-visible) {
   opacity: 1;
+  pointer-events: auto;
 }
 
 /* The radius while dragging, a number only, in the selection's label style. */

@@ -530,11 +530,11 @@ const RADIUS_DOT_REVEAL_PX = 24;
 
 /** The radius dot shows only while the pointer is near it, as in Figma, so at
  * rest it never paints over the layer's content. */
-function DesignRadiusDot({ inset, style, ...props }: React.ComponentProps<"span"> & { inset: number }) {
+function DesignRadiusDot({ active, inset, style, ...props }: React.ComponentProps<"span"> & { active: boolean; inset: number }) {
   const ref = useRef<HTMLSpanElement>(null);
   useEffect(() => {
     const dot = ref.current;
-    if (!dot) return;
+    if (!dot || !active) return;
     const reveal = (event: PointerEvent) => {
       // A press elsewhere is a gesture that reflows the canvas every frame.
       if (event.buttons) return;
@@ -547,7 +547,7 @@ function DesignRadiusDot({ inset, style, ...props }: React.ComponentProps<"span"
     };
     window.addEventListener("pointermove", reveal, { passive: true });
     return () => window.removeEventListener("pointermove", reveal);
-  }, []);
+  }, [active]);
   return <span ref={ref} {...props}
     style={{ ...style, "--design-radius-inset": `${inset}px` } as React.CSSProperties} />;
 }
@@ -4961,8 +4961,11 @@ export const DesignCanvas = React.memo(function DesignCanvas({
       designRuntimeLayerLabel(details) === "Text" || designCanvasStyleToolsBlocked(frame, [details.oid])) return null;
     const base = designRadiusBase(details.styles.borderTopLeftRadius, box.width, box.height);
     const commit = (value: number) => commitInlineSpacing(frame, details, { "border-radius": `${value}px` });
-    const inset = (radius: number, zoom: number) => designRadiusHandleInset(radius, box.width, box.height, zoom);
-    return <DesignRadiusDot inset={inset(base, view.zoom)} role="slider" tabIndex={0} aria-label="Corner radius" aria-valuenow={base} aria-valuemin={0}
+    // The dot sits in the overlay, which carries the layer's scale.
+    const scale = Math.min(overlay.width / Math.max(box.width, 1), overlay.height / Math.max(box.height, 1));
+    const inset = (radius: number, zoom: number) =>
+      designRadiusHandleInset(radius * scale, overlay.width, overlay.height, zoom);
+    return <DesignRadiusDot active={active} inset={inset(base, view.zoom)} role="slider" tabIndex={0} aria-label="Corner radius" aria-valuenow={base} aria-valuemin={0}
       aria-valuemax={Math.max(base, Math.floor(Math.min(box.width, box.height) / 2))}
       data-design-controls="" data-design-radius-handle="" className="zd-design-radius-handle"
       onKeyDown={event => {

@@ -694,6 +694,8 @@ describe("design workspace interaction wiring", () => {
     expect(radiusHandle).not.toContain("var(--bg1)");
     expect(radiusHandle).toContain("var(--design-radius-inset)");
     expect(radiusHandle).toContain("opacity: 0");
+    expect(radiusHandle).toContain("pointer-events: none");
+    expect(uiSource).toMatch(/\.zd-design-radius-handle:is\(\[data-near\], \[data-value\], :focus-visible\) \{[^}]*pointer-events: auto/);
     expect(uiSource).toContain(".zd-design-radius-handle:is([data-near], [data-value], :focus-visible)");
     expect(source).toContain("target.dataset.value = String(value)");
     expect(source).not.toContain("`Radius ${value}`");

@@ -56,7 +56,8 @@ export function designRadiusBase(value: string | undefined, width: number, heigh
 /** How far in from the corner the radius dot sits, in layout pixels: at the
  * radius, as in Figma, at least 12 screen pixels in and never past the middle. */
 export function designRadiusHandleInset(radius: number, width: number, height: number, zoom: number): number {
-  return Math.min(Math.min(width, height) / 2, Math.max(12 / zoom, radius));
+  // Stops 12 screen px short of the middle, which stays the layer's move target.
+  return Math.min(Math.min(width, height) / 2 - 12 / zoom, Math.max(12 / zoom, radius));
 }
 
 export function designRadiusDragValue(base: number, delta: { x: number; y: number }, width: number, height: number): number {

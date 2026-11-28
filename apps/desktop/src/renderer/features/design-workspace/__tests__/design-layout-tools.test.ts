@@ -47,7 +47,8 @@ it("sets the radius dot in by the radius, at least 12 screen px and at most half
   expect(designRadiusHandleInset(37, 220, 120, 1)).toBe(37);
   expect(designRadiusHandleInset(0, 220, 120, 1)).toBe(12);
   expect(designRadiusHandleInset(0, 220, 120, 2)).toBe(6);
-  expect(designRadiusHandleInset(500, 220, 120, 1)).toBe(60);
+  expect(designRadiusHandleInset(500, 220, 120, 1)).toBe(48);
+    expect(designRadiusHandleInset(500, 220, 120, 2)).toBe(54);
 });
 it("starts the radius handle at a percentage corner's drawn size", () => {
   expect(designRadiusBase("50%", 220, 120)).toBe(60);
