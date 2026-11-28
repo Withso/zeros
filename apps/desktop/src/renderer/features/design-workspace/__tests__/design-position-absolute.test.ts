@@ -96,6 +96,7 @@ describe("Absolute position in Position", () => {
     const placed = layer("placed", "static");
     render(first, [first, second, placed]);
     expect(host!.querySelector<HTMLButtonElement>('button[aria-label="Align left"]')!.disabled).toBe(false);
+    expect(host!.querySelector<HTMLButtonElement>('button[aria-label="Distribute horizontally"]')).toBeNull();
   });
 
   it("ignores hidden layers when deciding whether arrangement is available", () => {

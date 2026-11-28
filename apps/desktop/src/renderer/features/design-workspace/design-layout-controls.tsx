@@ -287,7 +287,7 @@ export function DesignPositionSection({
           ))}
         </div>
       ) : null}
-      {(free || arrangementSelection.length >= 2) && selection.length >= 3 ? (
+      {(free ? selection.length >= 3 : arrangementSelection.length >= 3) ? (
         <div
           data-design-position-distribute=""
           className="grid grid-cols-2 gap-2"
