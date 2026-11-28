@@ -374,16 +374,18 @@ export async function runDesignFieldMouseFocusSmoke({ page, check }) {
     .click();
   const width = page.getByRole("textbox", { name: "W", exact: true });
   await expect(width).toHaveValue("100");
+  // "ring" is the exact inset accent edge; "none" is the field's rest.
   const ring = () =>
     width.evaluate((input) => {
       const probe = document.createElement("span");
-      probe.style.color = "var(--accent)";
+      probe.style.boxShadow = "inset 0 0 0 1px var(--accent)";
       input.closest("[data-design-inspector]").append(probe);
-      const accent = getComputedStyle(probe).color;
+      const edge = getComputedStyle(probe).boxShadow;
       probe.remove();
-      return getComputedStyle(input.closest(".zd-field")).boxShadow.includes(accent);
+      const shadow = getComputedStyle(input.closest(".zd-field")).boxShadow;
+      return shadow === edge ? "ring" : shadow;
     });
-  check("an inspector field shows no ring at rest", !(await ring()));
+  check("an inspector field shows no ring at rest", (await ring()) === "none");
   await width.click();
   await expect(width).toBeFocused();
   // The ring eases in, so wait for it to settle rather than read it once.
@@ -392,10 +394,10 @@ export async function runDesignFieldMouseFocusSmoke({ page, check }) {
       .poll(ring)
       .toBe(want)
       .then(() => true, () => false);
-  check("clicking an inspector field rings it in the accent edge", await settles(true));
+  check("clicking an inspector field rings it in the accent edge", await settles("ring"));
   await width.press("Escape");
   await width.blur();
-  check("the ring leaves with focus", await settles(false));
+  check("the ring leaves with focus", await settles("none"));
 }
 
 export async function runDesignInspectorEditsSmoke(context) {
