@@ -260,7 +260,9 @@ describe("design workspace interaction wiring", () => {
     expect(source).toContain(
       "activeElement.closest(DESIGN_SURFACE_SELECTOR)",
     );
-    expect(source).toContain('document.execCommand("copy")');
+    expect(source).toContain("keyboardCopyRef.current()");
+    expect(source).toContain("navigator.clipboard.writeText");
+    expect(source).not.toContain('document.execCommand("copy")');
     expect(source).toContain('window.addEventListener("paste", paste)');
     expect(source).toContain("void duplicateSelectedFrame()");
     expect(source).toContain("void duplicateSelectedNode()");
