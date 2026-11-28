@@ -7941,6 +7941,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
         const lightContainer = (details: DesignRuntimeNodeDetails | null) =>
           !!details && canInsertDesignFrame(details) && !details.shadow;
         const selectedContainer =
+          selectedFrame?.file === frame.file &&
           lightContainer(selectedNodeDetails) &&
           containsPoint(selectedNodeDetails)
             ? selectedNodeDetails
