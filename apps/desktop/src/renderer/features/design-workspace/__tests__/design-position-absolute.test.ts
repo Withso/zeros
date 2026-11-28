@@ -90,6 +90,14 @@ describe("Absolute position in Position", () => {
     expect(host!.querySelector<HTMLButtonElement>('button[aria-label="Distribute horizontally"]')!.disabled).toBe(true);
   });
 
+  it("keeps arrangement available for free siblings selected with an auto-layout child", () => {
+    const first = { ...layer("a", "absolute", "block") };
+    const second = { ...layer("b", "absolute", "block") };
+    const placed = layer("placed", "static");
+    render(first, [first, second, placed]);
+    expect(host!.querySelector<HTMLButtonElement>('button[aria-label="Align left"]')!.disabled).toBe(false);
+  });
+
   it("ignores hidden layers when deciding whether arrangement is available", () => {
     const first = { ...layer("a", "absolute", "block") };
     const second = { ...layer("b", "absolute", "block") };
