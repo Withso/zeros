@@ -110,6 +110,14 @@
   outline: 0;
 }
 
+/* Design inspector fields also ring on pointer focus, as in Figma. */
+[data-design-inspector]
+  .zd-field:not([aria-invalid="true"]):not(:has([aria-invalid="true"])):has(
+    :is(input, textarea):focus
+  ) {
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
+
 .zd-field[aria-invalid="true"],
 .zd-field:has([aria-invalid="true"]) {
   box-shadow: inset 0 0 0 1px var(--red-text);

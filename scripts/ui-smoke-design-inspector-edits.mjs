@@ -362,10 +362,47 @@ async function runDesignCanvasFocusReturnSmoke({ page, check }) {
   check("a pointer-clicked Layers row hands arrows to canvas nudging", true);
 }
 
+/** Design inspector fields ring on mouse focus too, as in Figma. */
+export async function runDesignFieldMouseFocusSmoke({ page, check }) {
+  await page.goto(
+    `${new URL(page.url()).origin}/apps/desktop/src/renderer/harnesses/harness-design-workspace.html?layoutGestures`,
+    { waitUntil: "networkidle" },
+  );
+  await openLayersDrawer(page);
+  await page
+    .locator('[data-design-sidebar-panel] [data-design-layer-id="home-heading"]')
+    .click();
+  const width = page.getByRole("textbox", { name: "W", exact: true });
+  await expect(width).toHaveValue("100");
+  const ring = () =>
+    width.evaluate((input) => {
+      const probe = document.createElement("span");
+      probe.style.color = "var(--accent)";
+      input.closest("[data-design-inspector]").append(probe);
+      const accent = getComputedStyle(probe).color;
+      probe.remove();
+      return getComputedStyle(input.closest(".zd-field")).boxShadow.includes(accent);
+    });
+  check("an inspector field shows no ring at rest", !(await ring()));
+  await width.click();
+  await expect(width).toBeFocused();
+  // The ring eases in, so wait for it to settle rather than read it once.
+  const settles = (want) =>
+    expect
+      .poll(ring)
+      .toBe(want)
+      .then(() => true, () => false);
+  check("clicking an inspector field rings it in the accent edge", await settles(true));
+  await width.press("Escape");
+  await width.blur();
+  check("the ring leaves with focus", await settles(false));
+}
+
 export async function runDesignInspectorEditsSmoke(context) {
   await runDesignCanvasFocusReturnSmoke(context);
   await runDesignTransformCommitSmoke(context);
   await runDesignFieldHistorySmoke(context);
+  await runDesignFieldMouseFocusSmoke(context);
   await runDesignFillHistorySmoke(context);
   await runDesignScrubLeadingPreviewSmoke(context);
   await runDesignColorInputRacesSmoke(context);
