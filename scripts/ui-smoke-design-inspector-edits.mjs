@@ -338,9 +338,20 @@ async function runDesignCanvasFocusReturnSmoke({ page, check }) {
   expect(await writes(page)).toBe(1);
   check("Escape reverts an inspector field and returns focus to the canvas", true);
 
+  await page.evaluate(() => {
+    window.__zerosHarnessDesignTransactionGate = new Promise((resolve) => {
+      window.__zerosReleaseFocusReturnNudge = () => {
+        delete window.__zerosHarnessDesignTransactionGate;
+        resolve();
+      };
+    });
+  });
   await page.keyboard.press("ArrowRight");
   await expect.poll(transactions).toBe(transactionBase + 1);
   await page.keyboard.press("ArrowRight");
+  await page.waitForTimeout(300);
+  expect(await transactions()).toBe(transactionBase + 1);
+  await page.evaluate(() => window.__zerosReleaseFocusReturnNudge());
   await expect.poll(transactions).toBe(transactionBase + 2);
   check("arrows nudge after an inspector commit, including while the prior move settles", true);
 
