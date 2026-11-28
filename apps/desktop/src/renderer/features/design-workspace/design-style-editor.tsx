@@ -327,6 +327,10 @@ export function DesignStyleEditor({
     designFillIsEmpty(fillColor, editableFillImage) &&
     !isAuthored("background-color") &&
     !isAuthored("background-image");
+  // Until fills are a true stack, Add appears only where it cannot replace
+  // an existing solid fill.
+  const fillCanAdd =
+    !fillTargetsText && designFillIsEmpty(backgroundFillColor, "none");
 
   const transitionDuration = styleValue(details, "transition-duration", "0s");
   const transitionActive =
@@ -574,7 +578,7 @@ export function DesignStyleEditor({
         empty={fillEmpty}
         data-design-fill-section=""
         actions={
-          !fillTargetsText ? (
+          fillCanAdd ? (
             <>
               <MotionPropertyAction
                 label="fill"
