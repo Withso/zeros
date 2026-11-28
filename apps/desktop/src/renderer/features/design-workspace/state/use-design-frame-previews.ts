@@ -39,9 +39,8 @@ import { createDesignPreviewEncoder } from "./design-preview-encoding";
 
 const previewEncoder = createDesignPreviewEncoder(typeof Worker === "undefined" ? null
   : () => new Worker(new URL("./design-preview-encode.worker.ts", import.meta.url), { type: "module" }),
-// Opening a large page encodes hundreds of pictures at once; one worker queued
-// them for ~0.5s each and held their render slots, so the engine got batches
-// of one or two frames. Half the cores, at most four, keep it fed.
+// Opening a page encodes hundreds of pictures together; each queued encode
+// holds its render slot, so a single worker starves the engine's batches.
 Math.min(4, Math.max(1, Math.floor((globalThis.navigator?.hardwareConcurrency ?? 2) / 2))));
 
 /** A cloud picture starts a capture browser on the VM the agents run on, so
