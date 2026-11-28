@@ -475,8 +475,12 @@ export class Agents {
             await client.send(createMessage({ type: "AGENT_MODE_CHANGED", source: "engine", requestId: message.id, agentId: route.agentId,
               sessionId: route.id, executionId: route.id, modeId: message.modeId }));
           }).catch((error: unknown) => {
-            if (route.modeRevision === revision && route.nativeRunning && route.activePermissionMode === undefined)
+            if (route.modeRevision === revision && route.nativeRunning && route.activePermissionMode === undefined) {
               route.activePermissionMode = runningMode;
+              // A follow-up that arrived while the switch was pending could not
+              // steer then; let it steer into the running turn now.
+              this.resumeOutbox(route.chatId);
+            }
             throw error;
           });
         }

@@ -596,6 +596,36 @@ it("keeps steering into the running turn after a mode switch managed policy refu
   driver.complete();
 });
 
+it("steers a follow-up that arrived while a refused mode switch was still pending", async () => {
+  const relay = new PullRelay(), first = delivery(), driver = new FakeDriver(), held = defer();
+  Object.assign(first.payload, { permissionMode: "bypass" }); relay.enqueue({ prompts: [first], stops: [] });
+  const apply = driver.setMode.bind(driver);
+  vi.spyOn(driver, "setMode").mockImplementation(async mode => {
+    if (mode !== "read-only") return apply(mode);
+    await held.promise;
+    throw new WorkspaceError("invalid-params", "Your organization's Codex policy does not allow the \"read-only\" permission mode.");
+  });
+  const f = await setup({ relay, driver, interactions: true });
+  await until(() => driver.prompts.length).toBe(1);
+  const executionId = (await persisted(f.directory))[0].executionId;
+  await relay.receive({ t: "open", clientId: CLIENT_A });
+  const mode = browserFrame("AGENT_SET_MODE", { agentId: "codex", chatId: "chat", executionId, sessionId: executionId, modeId: "read-only" });
+  const switching = relay.request(CLIENT_A, mode);
+  const second = delivery(randomUUID(), "chat", "0", "2");
+  Object.assign(second.payload, { mode: "steer", permissionMode: "bypass" });
+  relay.enqueue({ prompts: [second], stops: [] });
+  // The follow-up is admitted while the switch still holds the mode cleared.
+  await until(async () => ((await persisted(f.directory))[0].inbox ?? []).some((item: { userMessageId?: string; receipt?: { userMessageId?: string } }) =>
+    JSON.stringify(item).includes(second.receipt.userMessageId))).toBe(true);
+  await new Promise(resolve => setTimeout(resolve, 50));
+  expect(driver.steers).toHaveLength(0);
+  held.resolve();
+  await switching;
+  await until(() => driver.steers.length).toBe(1);
+  expect(driver.prompts).toHaveLength(1);
+  driver.complete();
+});
+
 it("refuses an explicit persisted Plan prompt when interactions were not negotiated", async () => {
   const relay = new PullRelay(), item = delivery();
   Object.assign(item.payload, { permissionMode: "plan" }); relay.enqueue({ prompts: [item], stops: [] });
