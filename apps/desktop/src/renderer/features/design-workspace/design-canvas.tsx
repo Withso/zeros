@@ -6601,7 +6601,8 @@ export const DesignCanvas = React.memo(function DesignCanvas({
             const group = nodes[0]!;
             const parent = group.layout?.parentId ? await runtime.getNodeDetails(group.layout.parentId) : null;
             if (!parent) throw new Error("Select a group inside a container.");
-            const childIds = designTreeChildIds(selectedRuntimeTree, group.oid);
+            const runtimeSnapshot = await runtime.getSnapshot();
+          const childIds = designTreeChildIds(runtimeSnapshot.tree, group.oid, runtimeSnapshot.frame.oid);
             if (childIds.length === 0) throw new Error("The group's layers are still preparing.");
             const children = await Promise.all(childIds.map(id => runtime.getNodeDetails(id)));
             if (children.some(node => !node)) throw new Error("The group's layers are still preparing.");
@@ -6614,7 +6615,14 @@ export const DesignCanvas = React.memo(function DesignCanvas({
             const parent = parentId ? await runtime.getNodeDetails(parentId) : null;
             if (!parent) throw new Error("Select layers inside a container.");
             const id = `selection-${kind}-${crypto.randomUUID()}`;
-            operations = designWrapSelectionOperations(parent, nodes as DesignRuntimeNodeDetails[], id, kind);
+            const runtimeSnapshot = await runtime.getSnapshot();
+            const siblingOrder = new Map(
+              designTreeChildIds(runtimeSnapshot.tree, parent.oid, runtimeSnapshot.frame.oid).map((nodeId, index) => [nodeId, index] as const),
+            );
+            const orderedNodes = [...(nodes as DesignRuntimeNodeDetails[])].sort(
+              (first, second) => (siblingOrder.get(first.oid) ?? 0) - (siblingOrder.get(second.oid) ?? 0),
+            );
+            operations = designWrapSelectionOperations(parent, orderedNodes, id, kind);
             selectId = id;
           }
           if (!current()) return;
