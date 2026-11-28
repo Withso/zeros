@@ -6743,8 +6743,20 @@ export const DesignCanvas = React.memo(function DesignCanvas({
         const parentId = isDesignComponentPartNodeId(view.selectedNodeId)
           ? designComponentPartHost(view.selectedNodeId)
           : designLayerParentId(selectedNavigationTree, view.selectedNodeId);
-        if (parentId) navigateToNode(parentId);
-        else {
+        if (parentId) {
+          navigateToNode(parentId);
+          if (keyboardTreeFocus) {
+            const focusParentRow = () => {
+              const row = document.querySelector<HTMLElement>(`[data-design-layer-id="${CSS.escape(parentId)}"]`);
+              row?.focus({ preventScroll: true });
+              return row !== null;
+            };
+            window.requestAnimationFrame(() => {
+              if (focusParentRow()) return;
+              window.requestAnimationFrame(() => focusParentRow());
+            });
+          }
+        } else {
           void selectDesignFrame(workspaceId!, selectedFrame, {
             selected: true,
             reveal: true,
