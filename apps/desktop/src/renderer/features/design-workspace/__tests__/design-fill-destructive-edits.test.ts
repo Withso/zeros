@@ -112,7 +112,7 @@ describe("destructive fill edits", () => {
       string | null
     >;
     expect(written["background-color"]).toBe("#FFFFFF"); // check:ui ignore-line -- authored CSS fixture
-    expect(written["background-image"] ?? existing).toBe(existing);
+    expect(written).not.toHaveProperty("background-image");
   });
 
   it("preserves var() gradient stops when only the angle changes", async () => {
@@ -184,6 +184,7 @@ describe("destructive fill edits", () => {
     expect(written).toHaveProperty("background-color");
     expect(written).not.toHaveProperty("color");
   });
+
   it("keeps fill edits on text colour when the text layer paints no background", async () => {
     const details = detailsFor(
       {
