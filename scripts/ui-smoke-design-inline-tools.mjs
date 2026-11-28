@@ -2548,4 +2548,41 @@ export async function runDesignInlineToolsSmoke({ page, waitFor, check }) {
       ],
     ],
   );
+
+  await run(40, "the radius dot sits at the corner radius and shows only near it", [
+    [
+      "hover, drag label and inset",
+      async () => {
+        const dot = frame.locator("[data-design-radius-handle]");
+        await dot.waitFor({ state: "attached", timeout: 3_000 });
+        const opacity = () => dot.evaluate((element) => getComputedStyle(element).opacity);
+        await verify(opacity, (value) => value === "0", "The dot is hidden with the pointer away");
+        const hero = await screenBox();
+        const offset = async () => {
+          const rect = await dot.boundingBox();
+          return Math.round(rect.x + rect.width / 2 - hero.x);
+        };
+        const radius = parseFloat(await style("border-top-left-radius"));
+        await verify(offset, (value) => near(value, Math.max(12, radius)), "The dot starts at the radius inset");
+        const start = center(await dot.boundingBox());
+        await page.mouse.move(start.x + 14, start.y + 10, { steps: 3 });
+        await verify(opacity, (value) => value === "1", "The dot shows with the pointer near it");
+        await page.mouse.move(start.x, start.y);
+        await page.mouse.down();
+        await page.mouse.move(start.x + 30, start.y + 30, { steps: 6 });
+        const label = await verify(
+          () => dot.getAttribute("data-value"),
+          (value) => /^\d+$/.test(value ?? ""),
+          "The drag label is the radius number only",
+        );
+        await verify(offset, (value) => near(value, Math.max(12, Number(label)), 2), "The dot follows the dragged radius");
+        await page.mouse.up();
+        await verify(
+          async () => (await saved()).text?.match(/border-radius:\s*(\d+)px/)?.[1] ?? null,
+          (value) => value === label,
+          "The dragged radius is saved",
+        );
+      },
+    ],
+  ]);
 }

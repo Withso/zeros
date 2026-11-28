@@ -21,6 +21,7 @@ import {
   designRadiusBase,
   designRadiusDragValue,
   designRadiusHandleFits,
+  designRadiusHandleInset,
   designPaddingCrowdsMoveTarget,
   designSizeBadgeText,
   designSpacingDragValue,
@@ -41,6 +42,12 @@ it("drags corner radius in local layout pixels, clamped to half the short side",
   expect(designRadiusDragValue(4, { x: 40, y: 40 }, 220, 120)).toBe(44);
   expect(designRadiusDragValue(4, { x: -10, y: -10 }, 220, 120)).toBe(0);
   expect(designRadiusDragValue(4, { x: 90, y: 90 }, 220, 120)).toBe(60);
+});
+it("sets the radius dot in by the radius, at least 12 screen px and at most half the short side", () => {
+  expect(designRadiusHandleInset(37, 220, 120, 1)).toBe(37);
+  expect(designRadiusHandleInset(0, 220, 120, 1)).toBe(12);
+  expect(designRadiusHandleInset(0, 220, 120, 2)).toBe(6);
+  expect(designRadiusHandleInset(500, 220, 120, 1)).toBe(60);
 });
 it("starts the radius handle at a percentage corner's drawn size", () => {
   expect(designRadiusBase("50%", 220, 120)).toBe(60);

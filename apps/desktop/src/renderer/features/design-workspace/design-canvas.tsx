@@ -210,6 +210,7 @@ import {
   designRadiusBase,
   designRadiusDragValue,
   designRadiusHandleFits,
+  designRadiusHandleInset,
 } from "./design-layout-tools";
 import {
   designCanvasFrameAt,
@@ -523,6 +524,32 @@ function measureDesignCanvasInsets(
     right: panel ? Math.max(0, bounds.right - panel.left) : 0,
     bottom: timeline ? Math.max(0, bounds.bottom - timeline.top) : 0,
   };
+}
+
+const RADIUS_DOT_REVEAL_PX = 24;
+
+/** The radius dot shows only while the pointer is near it, as in Figma, so at
+ * rest it never paints over the layer's content. */
+function DesignRadiusDot({ inset, style, ...props }: React.ComponentProps<"span"> & { inset: number }) {
+  const ref = useRef<HTMLSpanElement>(null);
+  useEffect(() => {
+    const dot = ref.current;
+    if (!dot) return;
+    const reveal = (event: PointerEvent) => {
+      // A press elsewhere is a gesture that reflows the canvas every frame.
+      if (event.buttons) return;
+      const rect = dot.getBoundingClientRect();
+      const near = Math.hypot(
+        event.clientX - (rect.left + rect.width / 2),
+        event.clientY - (rect.top + rect.height / 2),
+      ) <= RADIUS_DOT_REVEAL_PX;
+      if (near !== dot.hasAttribute("data-near")) dot.toggleAttribute("data-near", near);
+    };
+    window.addEventListener("pointermove", reveal, { passive: true });
+    return () => window.removeEventListener("pointermove", reveal);
+  }, []);
+  return <span ref={ref} {...props}
+    style={{ ...style, "--design-radius-inset": `${inset}px` } as React.CSSProperties} />;
 }
 
 function blocksDesignCanvasDoubleClick(target: EventTarget | null): boolean {
@@ -4934,7 +4961,8 @@ export const DesignCanvas = React.memo(function DesignCanvas({
       designRuntimeLayerLabel(details) === "Text" || designCanvasStyleToolsBlocked(frame, [details.oid])) return null;
     const base = designRadiusBase(details.styles.borderTopLeftRadius, box.width, box.height);
     const commit = (value: number) => commitInlineSpacing(frame, details, { "border-radius": `${value}px` });
-    return <span role="slider" tabIndex={0} aria-label="Corner radius" aria-valuenow={base} aria-valuemin={0}
+    const inset = (radius: number, zoom: number) => designRadiusHandleInset(radius, box.width, box.height, zoom);
+    return <DesignRadiusDot inset={inset(base, view.zoom)} role="slider" tabIndex={0} aria-label="Corner radius" aria-valuenow={base} aria-valuemin={0}
       aria-valuemax={Math.max(base, Math.floor(Math.min(box.width, box.height) / 2))}
       data-design-controls="" data-design-radius-handle="" className="zd-design-radius-handle"
       onKeyDown={event => {
@@ -4960,14 +4988,16 @@ export const DesignCanvas = React.memo(function DesignCanvas({
             if (latest === value) return;
             releaseDesignNodeStateOn(workspaceId, frame.file, details.oid);
             latest = value;
-            target.dataset.value = `Radius ${value}`;
+            target.dataset.value = String(value);
+            target.style.setProperty("--design-radius-inset", `${inset(value, z)}px`);
             const styles = { "border-radius": `${value}px` };
             publishDesignGestureLivePreview(workspaceId, frame.file, details.oid, styles);
             loop.author(styles);
           },
           onFinish: () => { loop.finish(); clean(); if (latest !== base) void commit(latest);
             else { clearDesignLivePreview(workspaceId, frame.file, details.oid); void clearDesignNodeStylePreviewTransient(args).catch(() => {}); } },
-          onCancel: () => { loop.stop(); clean(); clearDesignLivePreview(workspaceId, frame.file, details.oid);
+          onCancel: () => { loop.stop(); clean(); target.style.setProperty("--design-radius-inset", `${inset(base, liveDesignZoom())}px`);
+            clearDesignLivePreview(workspaceId, frame.file, details.oid);
             void clearDesignNodeStylePreviewTransient(args).catch(() => {}); },
         });
       }} />;
