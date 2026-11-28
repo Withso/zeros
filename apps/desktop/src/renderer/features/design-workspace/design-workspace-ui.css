@@ -2269,6 +2269,11 @@
   font-size: 12px;
 }
 
+[data-design-inspector] .zd-segment svg {
+  width: 12px;
+  height: 12px;
+}
+
 [data-design-inspector] .zd-icon-button[data-size="row"] {
   width: 24px;
   height: 24px;
