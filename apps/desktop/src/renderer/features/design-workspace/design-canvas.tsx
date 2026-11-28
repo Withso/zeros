@@ -6640,12 +6640,19 @@ export const DesignCanvas = React.memo(function DesignCanvas({
       const panelControlKeepsArrows =
         event.target instanceof Element &&
         event.target.closest('[data-design-panel-resize], [role="separator"]');
+      const keyboardTreeFocus =
+        activeElement instanceof HTMLElement &&
+        Boolean(activeElement.closest("[data-design-frame-row], [data-design-layer-id]")) &&
+        activeElement.dataset.designPointerFocus === undefined;
       // Panel controls keep focus for their rings and for Tab/Escape, while
       // canvas-owned tool and nudge keys still act without a click back.
+      // Keyboard-focused Layers rows keep every tree arrow, including edges
+      // the tree itself cannot move past.
       const panelShortcutFocus =
         designSurfaceFocused &&
         (arrowShortcut || toolShortcut) &&
-        !panelControlKeepsArrows;
+        !panelControlKeepsArrows &&
+        !(arrowShortcut && keyboardTreeFocus);
       if (!viewport.contains(document.activeElement) && !panelShortcutFocus) return;
       if (event.key === "Escape" && (nudgeGestureRef.current || queuedNudgeRef.current)) {
         event.preventDefault();

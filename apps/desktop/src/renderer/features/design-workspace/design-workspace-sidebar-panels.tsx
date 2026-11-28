@@ -16,6 +16,7 @@ import React, {
   useState,
 } from "react";
 import { IconButton } from "@/renderer/shared/ui/primitives/icon-button";
+import { getLastInputModality } from "@/renderer/shared/ui/overlay-focus";
 import {
   ChevronDown,
   ChevronRight,
@@ -302,15 +303,16 @@ function DesignLayerDisclosure({ open }: { open: boolean }) {
 }
 
 
-function focusDesignCanvasAfterRowClick(event: React.MouseEvent<HTMLElement>): void {
-  // Pointer selection belongs to the canvas next: arrows nudge the selected
-  // layer instead of trapped tree focus. Keyboard clicks (detail 0) keep the
-  // row focused for tree navigation.
-  if (event.detail === 0) return;
-  event.currentTarget
-    .closest("[data-design-workspace-surface]")
-    ?.querySelector<HTMLElement>("[data-design-canvas-viewport]")
-    ?.focus({ preventScroll: true });
+function markLayerRowFocusModality(event: React.FocusEvent<HTMLElement>): void {
+  // A pointer-clicked row keeps focus (and Tab's meaning), but arrows belong
+  // to the selected layer. Keyboard focus keeps the tree's own navigation.
+  if (getLastInputModality() === "pointer")
+    event.currentTarget.dataset.designPointerFocus = "";
+  else delete event.currentTarget.dataset.designPointerFocus;
+}
+
+function layerRowFocusIsPointerDriven(target: EventTarget): boolean {
+  return target instanceof HTMLElement && target.dataset.designPointerFocus !== undefined;
 }
 
 const DesignLayerFrameRow = React.memo(function DesignLayerFrameRow({
@@ -348,14 +350,16 @@ const DesignLayerFrameRow = React.memo(function DesignLayerFrameRow({
       aria-keyshortcuts="F2 Meta+C Control+C Meta+D Control+D Delete Backspace"
       onDoubleClick={(event) => actions.rowDoubleClick(event, row)}
       onPointerEnter={() => actions.frameIntent(frame.file)}
-      onFocus={() => actions.frameIntent(frame.file)}
+      onFocus={(event) => {
+        markLayerRowFocusModality(event);
+        actions.frameIntent(frame.file);
+      }}
       onClick={(event) => {
         if (row.discloses && (event.target as HTMLElement).closest("[data-layer-disclosure]")) {
           actions.toggleFrameTree(frame);
           return;
         }
         actions.chooseFrame(frame, event.shiftKey);
-        focusDesignCanvasAfterRowClick(event);
       }}
       onKeyDown={(event) => actions.rowKeyDown(event, rowIndex)}
     >
@@ -429,7 +433,8 @@ const DesignLayerNodeRow = React.memo(function DesignLayerNodeRow({
         aria-selected={selected}
         aria-expanded={layer.hasChildren ? row.expanded : undefined}
         aria-keyshortcuts="F2 Shift+H Meta+C Control+C Meta+D Control+D Delete Backspace"
-        onFocus={() => {
+        onFocus={(event) => {
+          markLayerRowFocusModality(event);
           actions.frameIntent(frame.file);
           actions.focusLayer(frame, layer.node.oid);
         }}
@@ -440,7 +445,6 @@ const DesignLayerNodeRow = React.memo(function DesignLayerNodeRow({
             return;
           }
           actions.chooseLayer(frame, layer, event.shiftKey);
-          focusDesignCanvasAfterRowClick(event);
         }}
         onKeyDown={(event) => actions.rowKeyDown(event, rowIndex)}
       >
@@ -1288,6 +1292,10 @@ function OwnedDesignWorkspaceSidebarPanels({
   ) => {
     const row = panelRows[index];
     if (!row) return;
+    if (
+      ["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"].includes(event.key) &&
+      layerRowFocusIsPointerDriven(event.currentTarget)
+    ) return;
     if (event.key === "F2") {
       event.preventDefault();
       beginRename(row);
