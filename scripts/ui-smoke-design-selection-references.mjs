@@ -19,9 +19,12 @@ export async function runDesignSelectionReferencesSmoke({ page, check }) {
       )
       .waitFor();
     const pill = page.locator("[data-composer-design-frame]");
+    const attachSelection = page.getByRole("button", { name: "Attach selection", exact: true });
     const row = (file) => page.locator(`[data-design-frame-row="${file}"]`);
     const layer = (id) => page.locator(`[data-design-layer-id="${id}"]`);
     await row("home.html").click();
+    await expect(pill).toHaveCount(0);
+    await attachSelection.click();
     await expect(pill).toHaveText("home.html");
     await page
       .getByRole("button", { name: "Attach notes", exact: true })
@@ -36,9 +39,13 @@ export async function runDesignSelectionReferencesSmoke({ page, check }) {
       "Earlier message: design-history.md",
     );
     await row("home.html").click();
+    await expect(pill).toHaveCount(0);
+    await attachSelection.click();
     await expect(pill).toHaveText("home.html");
     await pill.click();
     await row("home.html").click();
+    await expect(pill).toHaveCount(0);
+    await attachSelection.click();
     await expect(pill).toHaveText("home.html");
     check(
       "removing a canvas reference preserves editor focus and unrelated attachments, and same-target clicks reattach repeatedly",
@@ -50,6 +57,8 @@ export async function runDesignSelectionReferencesSmoke({ page, check }) {
     await layer("home-heading").click({ modifiers: ["Shift"] });
     await expect(page.locator('[data-design-element-overlay="home-heading"]')).toHaveCount(1);
     await row("pricing.html").click({ modifiers: ["Shift"] });
+    await expect(pill).toHaveText("home.html");
+    await attachSelection.click();
     await expect(pill).toHaveText("3 selected");
     await expect(pill).toHaveCount(1);
     await expect(layer("home-hero")).toHaveAttribute("aria-selected", "true");
@@ -111,6 +120,8 @@ export async function runDesignSelectionReferencesSmoke({ page, check }) {
     await pill.click();
     await expect(pill).toHaveCount(0);
     await row("home.html").click();
+    await expect(pill).toHaveCount(0);
+    await attachSelection.click();
     await expect(pill).toHaveText("home.html");
     await page
       .getByRole("button", { name: "Clear composer", exact: true })
@@ -118,11 +129,15 @@ export async function runDesignSelectionReferencesSmoke({ page, check }) {
     await expect(pill).toHaveCount(0);
     await row("home.html").click();
     await row("pricing.html").click({ modifiers: ["Shift"] });
+    await expect(pill).toHaveCount(0);
+    await attachSelection.click();
     await expect(pill).toHaveText("2 selected");
     await row("pricing.html").click({ modifiers: ["Shift"] });
+    await expect(pill).toHaveText("2 selected");
+    await attachSelection.click();
     await expect(pill).toHaveText("home.html");
     check(
-      "mixed ancestor/descendant/frame references share one counted pill, all survive capture and draft restoration, and deselection updates the group",
+      "mixed ancestor/descendant/frame references share one counted pill, all survive capture and draft restoration, and explicit reattach follows deselection",
       true,
     );
 
@@ -149,6 +164,8 @@ export async function runDesignSelectionReferencesSmoke({ page, check }) {
       steps: 12,
     });
     await page.mouse.up();
+    await expect(pill).toHaveText("home.html");
+    await attachSelection.click();
     await expect(pill).toHaveText("2 selected");
     check(
       "a real outer marquee selects every intersecting scene frame instead of only one",
@@ -192,6 +209,7 @@ export async function runDesignParkedReferenceRemovalSmoke({ page, check }) {
   await openLayersDrawer(page);
   const pill = page.locator("[data-composer-design-frame]");
   await page.locator('[data-design-frame-row="home.html"]').click();
+  await page.getByRole("button", { name: "Attach selection", exact: true }).click();
   await page.getByRole("button", { name: "Save reference draft", exact: true }).click();
   await page.locator('[data-design-frame-row="pricing.html"]').click();
   await page.getByRole("button", { name: "Restore reference draft", exact: true }).click();
@@ -246,10 +264,13 @@ export async function runDesignSelectedFrameDeletionSmoke({ page, check }) {
     await page.locator('[data-design-frame-row="home.html"]').click();
     const pricing = page.locator('[data-design-frame-row="pricing.html"]');
     await pricing.click({ modifiers: ["Shift"] });
+    await page.getByRole("button", { name: "Attach selection", exact: true }).click();
     await expect(page.locator("[data-composer-design-frame]")).toHaveText("2 selected");
     await pricing.press("Delete");
     await expect(page.locator('[data-design-frame="pricing.html"]')).toHaveCount(0);
     await expect(page.locator('[data-design-frame="home.html"]')).toHaveCount(1);
+    await expect(page.locator("[data-composer-design-frame]")).toHaveText("2 selected");
+    await page.getByRole("button", { name: "Attach selection", exact: true }).click();
     await expect(page.locator("[data-composer-design-frame]")).toHaveText("home.html");
     expect(await page.evaluate(async () => {
       const { designWorkspaceView } = await import("/apps/desktop/src/renderer/features/design-workspace/state/design-workspace-ui.ts");
@@ -287,6 +308,8 @@ export async function runDesignSelectionLimitSmoke({ page, check }) {
   await page.mouse.move(last.x + last.width + 12, last.y + last.height + 12, { steps: 12 });
   await page.mouse.up();
   const pill = page.locator("[data-composer-design-frame]");
+  await expect(pill).toHaveCount(0);
+  await page.getByRole("button", { name: "Attach selection", exact: true }).click();
   await expect(pill).toHaveText("32 selected");
   await expect(page.getByText("Selection limited to 32 targets", { exact: true })).toBeVisible();
   const outlined = await page.locator("[data-design-frame].zd-design-selection-outline").evaluateAll(nodes => nodes.map(node => node.dataset.designFrame));
@@ -309,6 +332,7 @@ export async function runDesignSelectionLimitSmoke({ page, check }) {
   await page.mouse.move(first.x - 10, first.y - 10, { steps: 12 });
   await page.mouse.up();
   await page.keyboard.up("Meta");
+  await page.getByRole("button", { name: "Attach selection", exact: true }).click();
   await expect(pill).toHaveText("32 selected");
   const targets = await page.evaluate(async () => (await import("/apps/desktop/src/renderer/features/design-workspace/state/design-workspace-ui.ts")).designWorkspaceView("ws_design_harness").selectedTargets);
   expect(targets[0]).toEqual({ frame: "probe-39.html", nodeId: "node-39" });

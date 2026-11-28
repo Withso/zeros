@@ -16,6 +16,7 @@ export function DesignSelectionReferenceFixture({ folder }: { folder: string }) 
     {composer.suggestionPopup}
     {context.selection && <ComposerDesignFrame selection={context.selection} onRemove={context.remove} onToggleScreenshot={context.toggleScreenshot} />}
     <div className="flex flex-wrap gap-2">
+      <Button onClick={() => context.attach()}>Attach selection</Button>
       <Button onClick={() => composer.insertTextAttachment({ sourceKey: "manual", name: "notes.txt", text: "An unrelated manual attachment." })}>Attach notes</Button>
       <Button onClick={() => setSaved(context.capture())}>Save reference draft</Button>
       <Button onClick={() => context.pin(saved)}>Restore reference draft</Button>

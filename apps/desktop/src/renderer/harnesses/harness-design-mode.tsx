@@ -93,8 +93,9 @@ function FrameContextFixture({ chatId, mode, concealed }: { chatId: string; mode
     <Button onClick={() => useDesignWorkspaceUiStore.getState().setSelection(chatId, "phone.html", null, [], { frameSelected: true })}>Select phone</Button>
     <Button onClick={() => useDesignWorkspaceUiStore.getState().setSelection(chatId, "tablet.html", null, [], { frameSelected: true })}>Select tablet</Button>
     <Button onClick={() => useDesignWorkspaceUiStore.getState().setSelection(chatId, "phone.html", null, [], { frameSelected: false })}>Deselect frame</Button>
+    <Button onClick={() => context.attach()}>Attach current frame</Button>
     <Button onClick={() => { const target = context.capture(); context.pin(target); setSubmitted(target); }}>Park frame send</Button>
-    <Button onClick={() => context.pin(undefined)}>Use current selection</Button>
+    <Button onClick={() => context.attach()}>Use current selection</Button>
     <output aria-label="Submitted frame target">{submitted ? JSON.stringify(submitted) : "No submitted frame"}</output>
   </div>;
 }
