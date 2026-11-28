@@ -61,6 +61,8 @@ import { useMyUserId, useSharingOrganization } from "../platform/team-sharing-st
 import { useSharingOwners, useSharingSections } from "../state/cloud-workspace-creators";
 import { pullRequestTarget } from "../state/workspace-repositories";
 import { sidebarGroupingId, sidebarProjectionArgs } from "./sidebar-projection";
+import { sidebarStatusAnnouncement } from "./sidebar-status-announcer";
+import { sidebarRowStatus } from "./sidebar-workspace-row-meta";
 import { getPrIslandKind, usePrIslandKindsVersion } from "./pr/pr-island-state-store";
 import { CONTROL_PLANE_URL } from "../features/team/control-plane";
 import { useArchiveWorkspace } from "../state/archive-actions";
@@ -619,6 +621,36 @@ export function AppSidebar({ hidden = false }: { hidden?: boolean }) {
     () => listedItems.flatMap(item => item.kind === "workspace" ? [item.workspace] : []),
     [listedItems],
   );
+  // Parent rows carry their loader or dot inside the child toggle; one
+  // list-level region speaks their status changes (sidebar-status-announcer).
+  const parentIds = useMemo(
+    () => new Set(realWorkspaces.flatMap(workspace => workspace.parentWorkspaceId ? [workspace.parentWorkspaceId] : [])),
+    [realWorkspaces],
+  );
+  const announcedStatusesRef = useRef(new Map<string, string | null>());
+  const [statusAnnouncement, setStatusAnnouncement] = useState<string | null>(null);
+  useEffect(() => {
+    if (hidden) {
+      announcedStatusesRef.current = new Map();
+      return;
+    }
+    const rows = navigableWorkspaces.flatMap(workspace => {
+      if (!parentIds.has(workspace.id)) return [];
+      const signal = signalOfWorkspace(workspace);
+      const status = sidebarRowStatus({
+        archiving: false,
+        setupFailed: !!signal.setupFailed,
+        cloudStatus: signal.cloudError ? "error" : null,
+        awaiting: signal.awaiting,
+        working: signal.working,
+        unread: signal.unread,
+      });
+      return [{ id: workspace.id, label: workspaceLabel(workspace), status: status?.label ?? null }];
+    });
+    const { next, message } = sidebarStatusAnnouncement(announcedStatusesRef.current, rows);
+    announcedStatusesRef.current = next;
+    if (message) setStatusAnnouncement(message);
+  }, [hidden, navigableWorkspaces, parentIds, signalOfWorkspace]);
   // Repository filtering also bounds Back/Forward destinations; collapse does
   // not remove a destination from history.
   // Child workspaces under a collapsed parent stay history destinations,
@@ -1194,6 +1226,9 @@ export function AppSidebar({ hidden = false }: { hidden?: boolean }) {
           aria-hidden="true"
         />
 
+        <div className="sr-only" role="status" aria-live="polite" data-sidebar-status-announcer="">
+          {statusAnnouncement}
+        </div>
         <div
           ref={listRef}
           className="min-h-0 flex-1 overflow-y-auto px-2 pt-1 pb-2"

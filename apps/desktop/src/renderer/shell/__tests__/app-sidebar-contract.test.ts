@@ -524,10 +524,10 @@ describe("sidebar row lead semantics", () => {
   // A parent's lead sits inside its child toggle, whose own label names the
   // toggle; the loader or dot it carries is announced beside it instead.
   it("announces a parent row's loader or dot outside its child toggle", () => {
-    expect(ROW).toContain("const leadAnnouncement =");
-    // The live region stays mounted with the toggle; only its text changes,
-    // so the change from idle to Working is announced.
-    expect(ROW).toContain('{parentToggle && <span className="sr-only" role="status">{leadAnnouncement}</span>}');
-    expect(ROW).not.toMatch(/parentToggle && leadAnnouncement &&/);
+    // One list-level region, always mounted, keyed by workspace id, so a row
+    // remounting in another Status sub-group cannot lose the announcement.
+    expect(ROW).not.toContain("leadAnnouncement");
+    expect(SIDEBAR).toContain('<div className="sr-only" role="status" aria-live="polite" data-sidebar-status-announcer="">');
+    expect(SIDEBAR).toContain("sidebarStatusAnnouncement(announcedStatusesRef.current, rows)");
   });
 });
