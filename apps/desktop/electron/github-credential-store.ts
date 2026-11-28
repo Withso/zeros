@@ -8,6 +8,7 @@ import { GITHUB_APP_ACCOUNT, GITHUB_APP_PARKED_ACCOUNT, githubAppSlotsForOwner }
 import {
   GITHUB_GIT_HOST,
   GITHUB_GIT_HTTP_USERNAME,
+  githubAccountMismatchMessage,
   githubCredentialToken,
   isGithubAuthMethod,
   sanitizeGithubCredential,
@@ -97,7 +98,7 @@ export function createGithubCredentialStore(
     const [next, other] = await Promise.all([verified(value), peer ? verified(peer) : null]);
     if (owner !== (deps.currentAccount?.() ?? null)) throw new Error("The Zeros account changed while verifying GitHub.");
     if (enforce && other?.githubUserId && next.githubUserId && other.githubUserId !== next.githubUserId) {
-      throw new Error(`This credential belongs to @${next.login}. Use a credential for @${other.login}, or change accounts in Personal → Integrations → GitHub.`);
+      throw new Error(githubAccountMismatchMessage(method, next.login, peerMethod, other.login));
     }
     if (candidate || next !== value || other !== peer) {
       deps.updateSecrets(keys, current => {
@@ -186,7 +187,8 @@ export function createGithubCredentialStore(
       let selected = await store.get(method);
       if (selected && selected.method !== "gh-cli" && !selected.githubUserId && Date.now() >= verifyAfterMs) {
         selected = await reconcile(selected.method, undefined, false).catch(() => null) ?? selected;
-        if (!selected.githubUserId) verifyAfterMs = Date.now() + 60_000;
+        // Unverifiable now (offline or a revoked token): try again later, not on every read.
+        if (!selected.githubUserId) verifyAfterMs = Date.now() + 10 * 60_000;
       }
       if (selected) return selected;
       // One-release downgrade/recovery bridge: use the legacy token until the

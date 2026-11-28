@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { selectGithubAppConnection } from "../github-app-accounts";
 
 import type {
   GithubAuthMethod,
@@ -76,7 +77,7 @@ describe("GitHub credential store", () => {
     await h.store.setSelectedMethod(method);
     const before = [...h.secrets];
     await expect(h.store.set(other, { ...gitIdentity, method: other, ownerSub, accessToken: "second", login: "second-account", githubUserId: "456" }))
-      .rejects.toThrow(/@second-account.*@first-account/);
+      .rejects.toThrow(/is for @second-account, but your .* is for @first-account\. Use one GitHub account for both, or disconnect/);
     expect([...h.secrets]).toEqual(before);
     expect(h.selected()).toBe(method);
     await h.store.set(other, { ...gitIdentity, method: other, ownerSub, accessToken: "second", login: "renamed", githubUserId: "123" });
@@ -113,6 +114,24 @@ describe("GitHub credential store", () => {
     expect(await mixed.store.getSelectedCredential()).toMatchObject({ accessToken: "pat", githubUserId: "123" });
     await expect(mixed.store.setSelectedMethod("github-app")).rejects.toThrow(/@app.*@pat/);
     expect(mixed.selected()).toBe("pat");
+  });
+
+  it("keeps another Zeros account's App parked when this account saves a token for a different GitHub user", async () => {
+    const ownerA = "11111111-1111-4111-8111-111111111111", ownerB = "22222222-2222-4222-8222-222222222222";
+    let current = ownerA;
+    const h = harness({ currentAccount: () => current });
+    await h.store.set("github-app", { ...gitIdentity, method: "github-app", ownerSub: ownerA, accessToken: "app-a", login: "alice", githubUserId: "111" });
+    current = ownerB;
+    // Bob's token is checked against Bob's credentials only, never Alice's App.
+    await h.store.set("pat", { ...gitIdentity, method: "pat", ownerSub: ownerB, accessToken: "pat-b", login: "bob", githubUserId: "222" });
+    expect(await h.store.get("pat")).toMatchObject({ login: "bob", githubUserId: "222" });
+    // The runtime restores an account's parked App when that account becomes current again.
+    current = ownerA;
+    selectGithubAppConnection({ update: (keys, edit) => {
+      const after = edit(Object.fromEntries(keys.map(key => [key, h.secrets.get(key) ?? null])));
+      for (const key of keys) { const value = after[key]; if (value == null) h.secrets.delete(key); else h.secrets.set(key, value); }
+    } }, ownerA);
+    expect(await h.store.get("github-app")).toMatchObject({ accessToken: "app-a", login: "alice", githubUserId: "111" });
   });
 
   it("rejects a competing identity that arrives during verification", async () => {

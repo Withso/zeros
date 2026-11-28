@@ -84,7 +84,7 @@ database("cloud GitHub connection ownership and rotation", () => {
     const stored = () => pool.query("SELECT * FROM cloud_github_credentials WHERE org_id=$1 AND owner_user_id=$2", [organizationId, userId]).then(result => result.rows);
     const bytes = await stored();
     await expect(store.save(scope(), before.generation, { id: "456", login: "different-user" }, second))
-      .rejects.toThrow(/@different-user.*@contributor/);
+      .rejects.toThrow(/is for @different-user, but your .* is for @contributor\. Use one GitHub account for both/);
     expect(await store.status(scope())).toEqual(before);
     expect(await stored()).toEqual(bytes);
     await store.save(scope(), before.generation, { ...identity, login: "renamed" }, second);

@@ -341,3 +341,15 @@ export function parseCloudGithubResponse(request: CloudGithubRequest, value: unk
     case "disconnect": return cloudGithubDisconnectedSchema.parse(value);
   }
 }
+
+const GITHUB_METHOD_NAMES = { "github-app": "GitHub App", pat: "personal access token" } as const;
+
+/** One GitHub account backs both App and token; this names both and the way out. */
+export function githubAccountMismatchMessage(
+  method: "github-app" | "pat", login: string | undefined,
+  peerMethod: "github-app" | "pat", peerLogin: string | undefined,
+): string {
+  const who = (value: string | undefined) => value ? `@${value}` : "another account";
+  return `This ${GITHUB_METHOD_NAMES[method]} is for ${who(login)}, but your ${GITHUB_METHOD_NAMES[peerMethod]} is for ${who(peerLogin)}. `
+    + `Use one GitHub account for both, or disconnect the ${GITHUB_METHOD_NAMES[peerMethod]} in Personal → Integrations → GitHub.`;
+}

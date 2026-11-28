@@ -906,7 +906,7 @@ async function assertAuthorizedGithubLogin(
     throw new HttpError(
       403,
       "github_account_mismatch",
-      `This credential belongs to @${input.login}. Use a credential for @${expectedLogin}, or change accounts in Personal → Integrations → GitHub.`,
+      `GitHub signed in as @${input.login}, but this Zeros account uses @${expectedLogin}. Sign in to GitHub as @${expectedLogin}, or disconnect the GitHub App in Personal → Integrations → GitHub first.`,
     );
   }
   await tx.query(
