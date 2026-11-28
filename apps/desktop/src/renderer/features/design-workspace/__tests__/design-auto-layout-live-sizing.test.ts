@@ -86,7 +86,7 @@ it("sizes a frame root written at 100% in px, since the canvas sets its size", (
   expect(fields).toContainEqual(["W", "270px"]);
 });
 
-it("keeps a main component root written at 100% relative, since that size is its own", () => {
+it("keeps a main component root written at 100% relative, since that size is its own", async () => {
   const host = document.createElement("div");
   document.body.append(host);
   root = createRoot(host);
@@ -108,4 +108,11 @@ it("keeps a main component root written at 100% relative, since that size is its
   const width = host.querySelector('[aria-label^="Width sizing: "]');
   expect(width?.getAttribute("aria-label")).toBe("Width sizing: Relative");
   expect(fields).toContainEqual(["W", "100%"]);
+  const down = new MouseEvent("pointerdown", { bubbles: true, cancelable: true, button: 0 });
+  Object.defineProperties(down, { pointerId: { value: 1 }, isPrimary: { value: true } });
+  await act(async () => { width!.dispatchEvent(down); });
+  const relative = [...document.querySelectorAll('[role="menuitemradio"]')]
+    .find(item => item.textContent === "Relative");
+  expect(relative?.getAttribute("aria-checked")).toBe("true");
+  expect(relative?.hasAttribute("data-disabled")).toBe(true);
 });
