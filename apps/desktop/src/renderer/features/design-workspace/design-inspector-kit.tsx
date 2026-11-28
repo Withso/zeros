@@ -346,7 +346,7 @@ export function InspectorCheckboxRow({
   return (
     <span
       title={title}
-      className={cn("flex h-6 w-fit items-center", disabled && title && "cursor-default")}
+      className={cn("flex h-7 w-fit items-center", disabled && title && "cursor-default")}
     >
       <Checkbox
         checked={mixed ? "indeterminate" : checked}
