@@ -53,6 +53,7 @@ import type {
   PrState,
 } from "./types";
 import { workspaceViewMode } from "./types";
+import { setManagedWorkspaceRootsForTesting } from "./workspace-ceiling";
 
 export const WORKSPACE_OWNERSHIP_META_KEY = "workspace.ownership.v1";
 
@@ -64,6 +65,9 @@ let rootOverride: string | null = null;
 export function setStateRootForTesting(root: string | null): void {
   rootOverride = root;
   setZerosDbPathForTesting(root ? path.join(root, "zeros.db") : null);
+  setManagedWorkspaceRootsForTesting(
+    root ? [worktreesRoot(), designWorktreesRoot()] : null,
+  );
   // App-data-derived paths (worktree recovery seeds, engine runtime dir) resolve
   // via zerosDataDir() → ZEROS_DATA_DIR. Isolate them under the test root too —
   // in a subdir DISTINCT from the worktrees root — so tests never write seeds

@@ -32,6 +32,7 @@ import {
 // Pure leaf module (node:path only) — no cycle back into git/.
 import { pruneLauncherScriptEnv } from "../env/launcher-env";
 import { gitProcessOptions } from "./git-process-options";
+import { withWorkspaceCeiling } from "./workspace-ceiling";
 import { hasLocalDevelopmentEnvironment, withoutLocalDevelopment } from "../env/local-development";
 import { currentGitReadLane, type GitReadLane } from "./git-read-lane";
 
@@ -74,7 +75,7 @@ export function runGitProbeSync(
 ): string {
   if (!cwd) throw new GitError({ code: "VALIDATION_FAILED", message: "Managed Git probe requires a checkout." });
   try {
-    const processOptions = gitProcessOptions({ ...process.env, GIT_OPTIONAL_LOCKS: "0" });
+    const processOptions = { env: withWorkspaceCeiling(gitProcessOptions({ ...process.env, GIT_OPTIONAL_LOCKS: "0" }).env, cwd, args) };
     return execFileSync(engineGitBinary(), ["-c", "core.fsmonitor=false", ...args], {
       cwd,
       encoding: "utf8",
@@ -192,7 +193,7 @@ export async function runFile(
     opts = { ...opts, env: withoutLocalDevelopment(childEnv) };
   }
   if (path.basename(command) === "git") {
-    const { env } = gitProcessOptions(opts.env);
+    const env = withWorkspaceCeiling(gitProcessOptions(opts.env).env, opts.cwd, args);
     if (command === "git") {
       // Resolve once per effective PATH, excluding broker scripts and aliases.
       // Explicit shim paths (shell/credential tests) keep their path.

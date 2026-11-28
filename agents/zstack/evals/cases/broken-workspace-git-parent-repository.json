@@ -1,0 +1,9 @@
+{
+  "id": "broken-workspace-git-parent-repository",
+  "kind": "replay",
+  "area": "desktop-git",
+  "fixedBy": "pr:1363",
+  "symptom": "A Zeros workspace folder whose .git link was lost let engine Git discover the repository enclosing the managed workspaces root, so status, stage, commit or push acted on that unrelated repository.",
+  "rule": "Engine Git spawns carry GIT_CEILING_DIRECTORIES for every managed workspace root (or its nearest listable ancestor), prepended to any inherited list; only archive/delete identity checks are not enough. See playbooks/bug-fix.md.",
+  "check": "pnpm exec vitest run --config vitest.config.ts apps/desktop/src/engine/git/__tests__/git-exec-workspace-ceiling.test.ts"
+}
