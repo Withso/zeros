@@ -157,8 +157,9 @@ describe("headless Dev runtime retention", () => {
   it("marks this checkout's runtime and starts the marker clock once", async () => {
     const fresh = bucket([]);
     await recordRuntimeUse(fresh, "dev", sha("1"), { owner: "a".repeat(24), instance }, now);
-    expect(calls(fresh).map(([, input]) => input.Key)).toEqual([`cloud-v2/runtime/uses/${sha("1")}/${"a".repeat(24)}/${instance}.json`, "cloud-v2/runtime/uses/since.json"]);
-    expect(calls(fresh)[1]![1].IfNoneMatch).toBe("*");
+    expect(calls(fresh).map(([, input]) => input.Key)).toEqual([`cloud-v2/runtime/uses/${sha("1")}/${"a".repeat(24)}/${instance}.json`,
+      `cloud-v2/runtime/uses/owners/${"a".repeat(24)}.json`, "cloud-v2/runtime/uses/since.json"]);
+    expect(calls(fresh)[2]![1].IfNoneMatch).toBe("*");
     await expect(recordRuntimeUse(bucket([since(day)]), "dev", sha("1"), { owner: "a".repeat(24), instance }, now)).resolves.toBeUndefined();
     await expect(recordRuntimeUse(fresh, "dev", sha("1"), { owner: "a".repeat(24), instance: "../other" }, now)).rejects.toThrow();
     await expect(recordRuntimeUse(fresh, "dev", sha("1"), { owner: "../owner", instance }, now)).rejects.toThrow();
@@ -198,8 +199,12 @@ describe("headless Dev runtime retention", () => {
     await expect(pruneRuntimes(client, "dev", { protect: [], now })).rejects.toThrow(/incomplete/);
   });
   it("names the owners that marked a runtime this week, and when markers began", async () => {
-    expect(await runtimeUseOwners(bucket(objects(8 * day)), "dev", now)).toEqual({ since: new Date(now - 8 * day).toISOString(), active: ["b".repeat(24)] });
-    expect(await runtimeUseOwners(bucket([]), "dev", now)).toEqual({ since: null, active: [] });
+    const ownerSeen = (owner: string, age: number): StoredObject => ({ key: `cloud-v2/runtime/uses/owners/${owner}.json`, lastModified: new Date(now - age), size: 40 });
+    // An owner record outlives the runtime markers Dev cleanup removes; the newest of both counts.
+    expect(await runtimeUseOwners(bucket([...objects(8 * day), ownerSeen("a".repeat(24), 2 * day), ownerSeen("c".repeat(24), 12 * day)]), "dev"))
+      .toEqual({ since: new Date(now - 8 * day).toISOString(), lastSeen: { ["a".repeat(24)]: new Date(now - 2 * day).toISOString(),
+        ["b".repeat(24)]: new Date(now - 6 * day).toISOString(), ["c".repeat(24)]: new Date(now - 12 * day).toISOString() } });
+    expect(await runtimeUseOwners(bucket([]), "dev")).toEqual({ since: null, lastSeen: {} });
   });
   it("records, reads and clears a WorkOS reclaim for one checkout, and treats a missing record as none", async () => {
     const stored = new Map<string, string>();

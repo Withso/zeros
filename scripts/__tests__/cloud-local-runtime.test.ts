@@ -113,10 +113,10 @@ describe("electron:cloud runtime use and cleanup", () => {
 describe("electron:cloud abandoned WorkOS endpoint cleanup", () => {
   const owner = "a".repeat(24), gone = "c".repeat(24), instance = "11111111-2222-4333-8444-555555555555", other = "66666666-7777-4888-9999-aaaaaaaaaaaa";
   const week = 7 * 86_400_000;
-  function fixture({ reclaimed = null as string | null, since = new Date(Date.now() - 8 * 86_400_000).toISOString() } = {}) {
+  function fixture({ reclaimed = null as string | null, since = new Date(Date.now() - 8 * 86_400_000).toISOString() as string | null } = {}) {
     const client = { destroy: vi.fn() }, calls: string[] = [];
     const retention = { webhookReclaimed: vi.fn(async () => reclaimed), clearWebhookReclaim: vi.fn(async () => { calls.push("clear"); }),
-      runtimeUseOwners: vi.fn(async () => ({ since, active: [] })), recordWebhookReclaim: vi.fn(async (_c: unknown, _b: string, _t: unknown, id: string) => { calls.push(`reclaim:${id}`); }) };
+      runtimeUseOwners: vi.fn(async () => ({ since, lastSeen: { [gone]: new Date(Date.now() - 8 * 86_400_000).toISOString() } as Record<string, string> })), recordWebhookReclaim: vi.fn(async (_c: unknown, _b: string, _t: unknown, id: string) => { calls.push(`reclaim:${id}`); }) };
     const module = vi.fn(async (name: string) => name === "runtime-retention.js" ? retention : { runtimeStorageClient: vi.fn(() => client) });
     const inventory = [{ id: "we_mine", endpoint_url: `https://api-dev-${owner}.zeros.build/auth/workos-webhook?zeros_dev=${instance}`, secret: "synthetic-private-signing-secret" },
       { id: "we_gone", endpoint_url: `https://api-dev-${gone}.zeros.build/auth/workos-webhook?zeros_dev=${other}`, secret: "synthetic-private-signing-secret", status: "enabled" }];
@@ -144,9 +144,15 @@ describe("electron:cloud abandoned WorkOS endpoint cleanup", () => {
     const f = fixture(); await run(f, { ZEROS_DEV_WEBHOOK_CLEANUP: "apply" });
     expect(f.calls).toEqual(["reclaim:we_gone", "DELETE:/webhook_endpoints/we_gone"]);
     expect(f.retention.recordWebhookReclaim).toHaveBeenCalledWith(f.client, "zeros-dev-objects", { owner: gone, instance: other }, "we_gone");
-    const waiting = fixture({ since: new Date(Date.now() - week + 60_000).toISOString() });
-    expect(await run(waiting, { ZEROS_DEV_WEBHOOK_CLEANUP: "apply" })).toMatchObject({ status: "waiting" });
-    expect(waiting.calls).toEqual([]);
+    const recent = fixture();
+    recent.retention.runtimeUseOwners.mockResolvedValue({ since: null, lastSeen: { [gone]: new Date(Date.now() - week + 60_000).toISOString() } });
+    expect(await run(recent, { ZEROS_DEV_WEBHOOK_CLEANUP: "apply" })).toMatchObject({ remove: [], kept: 2 });
+    const stranger = fixture();
+    stranger.retention.runtimeUseOwners.mockResolvedValue({ since: null, lastSeen: {} });
+    const plan = await run(stranger, { ZEROS_DEV_WEBHOOK_CLEANUP: "apply" });
+    expect(plan).toMatchObject({ remove: [], unknown: [{ id: "we_gone", reason: "unknown_owner" }] });
+    expect(webhookCleanupSummary(plan)).toMatch(/1 endpoint of an owner never seen in this bucket is kept/);
+    expect([...recent.calls, ...stranger.calls]).toEqual([]);
   });
   it("forgets this checkout's receipt when another checkout removed its endpoint, then clears the record", async () => {
     const f = fixture({ reclaimed: "we_mine" }), plan = await run(f);

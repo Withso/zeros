@@ -118,6 +118,8 @@ export async function recordRuntimeUse(client: Pick<S3Client, "send">, bucket: s
   const at = new Date(now).toISOString();
   await client.send(new PutObjectCommand({ Bucket: bucket, Key: `${USES}${sha256}/${checkout.owner}/${checkout.instance}.json`,
     Body: JSON.stringify({ version: 1, sha256, at }), ContentType: "application/json", CacheControl: "no-cache" }));
+  await client.send(new PutObjectCommand({ Bucket: bucket, Key: `${USES}owners/${checkout.owner}.json`,
+    Body: JSON.stringify({ version: 1, at }), ContentType: "application/json", CacheControl: "no-cache" }));
   try {
     await client.send(new PutObjectCommand({ Bucket: bucket, Key: USES_SINCE, Body: JSON.stringify({ version: 1, at }),
       ContentType: "application/json", IfNoneMatch: "*" }));
@@ -213,14 +215,18 @@ export async function removeRuntimeUses(client: Pick<S3Client, "send">, bucket: 
 }
 
 /** Dev owners with a use marker in the last week, and when markers began. */
-export async function runtimeUseOwners(client: Pick<S3Client, "send">, bucket: string, now = Date.now()) {
-  const objects = await listRuntimeObjects(client, bucket, USES), cutoff = now - DEV_RUNTIME_RETENTION.unusedMs;
-  const active = new Set(objects.flatMap(object => {
-    const owner = object.key.match(USE)?.[2];
-    return owner && object.lastModified.getTime() >= cutoff ? [owner] : [];
-  }));
-  return { since: objects.find(object => object.key === USES_SINCE)?.lastModified.toISOString() ?? null, active: [...active].sort() };
+/** When each Dev owner last marked a runtime in this bucket: the newest of its runtime markers and its owner record.
+ * The owner record outlives the markers Dev runtime cleanup removes with their runtimes. Owners absent here have never
+ * marked in this bucket (another bucket, or code without markers) and are not known to be gone. */
+export async function runtimeUseOwners(client: Pick<S3Client, "send">, bucket: string) {
+  const objects = await listRuntimeObjects(client, bucket, USES), lastSeen: Record<string, string> = {};
+  for (const object of objects) {
+    const owner = object.key.match(USE)?.[2] ?? object.key.match(OWNER_SEEN)?.[1];
+    if (owner && (lastSeen[owner] === undefined || Date.parse(lastSeen[owner]) < object.lastModified.getTime())) lastSeen[owner] = object.lastModified.toISOString();
+  }
+  return { since: objects.find(object => object.key === USES_SINCE)?.lastModified.toISOString() ?? null, lastSeen };
 }
+const OWNER_SEEN = /^cloud-v2\/runtime\/uses\/owners\/([0-9a-f]{24})\.json$/;
 
 // Another checkout's cleanup deleted this checkout's WorkOS endpoint: written before the delete, so a checkout that
 // comes back can drop its stale receipt and create a new endpoint instead of failing ownership verification.

@@ -113,7 +113,7 @@ export function maintainLocalWebhooks(workspace, profile, root, options = {}) {
     const uses = await retention.runtimeUseOwners(client, bucket), request = options.request ?? workosClient(profile);
     const mode = (options.env ?? process.env).ZEROS_DEV_WEBHOOK_CLEANUP === "apply" ? "apply" : "dry-run";
     const planned = planAbandonedWebhooks(await endpoints(request), { domain: profile.cloudflare.domain, owner: self.owner,
-      activeOwners: uses.active, usesSince: uses.since, mode });
+      lastSeen: uses.lastSeen, usesSince: uses.since, mode });
     const plan = await removeAbandonedWebhooks(planned, { request,
       reclaim: (target, endpointId) => retention.recordWebhookReclaim(client, bucket, target, endpointId) });
     (options.write ?? writePrivateFile)(path.join(workspace.directory, "workos-webhook-cleanup.json"), `${JSON.stringify(plan, null, 2)}\n`);
@@ -124,7 +124,7 @@ export function maintainLocalWebhooks(workspace, profile, root, options = {}) {
 export function webhookCleanupSummary(plan) {
   const count = `${plan.remove.length} abandoned Dev WorkOS endpoint${plan.remove.length === 1 ? "" : "s"}`;
   const recovered = plan.recovered ? " This checkout's own endpoint had been removed while unused; a new one is created now." : "";
-  if (plan.status === "waiting") return `WorkOS endpoint cleanup waits for use markers until ${plan.deletesFrom ?? "a week after the first marker"}; it would remove ${count}.${recovered}`;
-  if (plan.status === "deleted") return `WorkOS endpoint cleanup removed ${count}.${recovered}`;
-  return `WorkOS endpoint cleanup (dry-run) would remove ${count}; set ZEROS_DEV_WEBHOOK_CLEANUP=apply to remove them.${recovered}`;
+  const unknown = plan.unknown.length ? ` ${plan.unknown.length} endpoint${plan.unknown.length === 1 ? " of an owner" : "s of owners"} never seen in this bucket ${plan.unknown.length === 1 ? "is" : "are"} kept.` : "";
+  if (plan.status === "deleted") return `WorkOS endpoint cleanup removed ${count}.${unknown}${recovered}`;
+  return `WorkOS endpoint cleanup (dry-run) would remove ${count}; set ZEROS_DEV_WEBHOOK_CLEANUP=apply to remove them.${unknown}${recovered}`;
 }

@@ -21,25 +21,29 @@ describe("abandoned Dev WorkOS endpoints", () => {
     ]) expect(devWebhookCheckout({ id: "we_1", endpoint_url: url }, domain), url).toBeNull();
     expect(devWebhookCheckout({ ...endpoint("bad id", gone, "1") }, domain)).toBeNull();
   });
-  it("removes endpoints of owners with no marker for a week, never this checkout's owner, and keeps no secret in the plan", () => {
+  const seen = (days: number) => new Date(now - days * day).toISOString();
+  it("removes endpoints of owners last seen in this bucket over a week ago, never this checkout's owner, and keeps no secret in the plan", () => {
     const inventory = [endpoint("we_mine", me, "1"), endpoint("we_oldmine", me, "2"), endpoint("we_active", active, "3"),
       endpoint("we_gone", gone, "4"), endpoint("we_gonepaused", gone, "5", { status: "disabled" }), { id: "we_alpha", endpoint_url: "https://api-alpha.zeros.build/auth/workos-webhook" }];
-    const plan = planAbandonedWebhooks(inventory, { domain, owner: me, activeOwners: [active], usesSince: new Date(now - 8 * day).toISOString(), now, mode: "apply" });
-    expect(plan).toMatchObject({ status: "planned", kept: 3, deletesFrom: new Date(now - day).toISOString() });
-    expect(plan.remove).toEqual([{ id: "we_gone", owner: gone, instance: instance("4"), status: "enabled" },
-      { id: "we_gonepaused", owner: gone, instance: instance("5"), status: "disabled" }]);
+    const plan = planAbandonedWebhooks(inventory, { domain, owner: me, lastSeen: { [me]: seen(30), [active]: seen(6), [gone]: seen(8) }, now, mode: "apply" });
+    expect(plan).toMatchObject({ status: "planned", kept: 3, unknown: [] });
+    expect(plan.remove).toEqual([{ id: "we_gone", owner: gone, instance: instance("4"), status: "enabled", lastSeen: seen(8) },
+      { id: "we_gonepaused", owner: gone, instance: instance("5"), status: "disabled", lastSeen: seen(8) }]);
     expect(JSON.stringify(plan)).not.toMatch(/synthetic-private|https:/);
   });
-  it("waits until markers have existed for a week", () => {
-    for (const usesSince of [null, new Date(now - 6 * day).toISOString()])
-      expect(planAbandonedWebhooks([endpoint("we_gone", gone, "4")], { domain, owner: me, activeOwners: [], usesSince, now, mode: "apply" }).status).toBe("waiting");
+  it("never removes an endpoint whose owner has not marked in this bucket, and lists it as unknown_owner", () => {
+    const stranger = "d".repeat(24);
+    const plan = planAbandonedWebhooks([endpoint("we_elsewhere", stranger, "6"), endpoint("we_gone", gone, "4")],
+      { domain, owner: me, lastSeen: { [gone]: seen(9), constructor: seen(9) } as Record<string, string>, now, mode: "apply" });
+    expect(plan.unknown).toEqual([{ id: "we_elsewhere", owner: stranger, instance: instance("6"), status: "enabled", reason: "unknown_owner" }]);
+    expect(plan.remove.map(item => item.id)).toEqual(["we_gone"]);
+    expect(planAbandonedWebhooks([endpoint("we_elsewhere", stranger, "6")], { domain, owner: me, lastSeen: {}, now, mode: "apply" }).remove).toEqual([]);
   });
-  it("deletes nothing in dry-run or while waiting, and records each reclaim before its delete", async () => {
+  it("deletes nothing in dry-run, and records each reclaim before its delete", async () => {
     const base = planAbandonedWebhooks([endpoint("we_gone", gone, "4"), endpoint("we_gone2", gone, "5")],
-      { domain, owner: me, activeOwners: [], usesSince: new Date(now - 8 * day).toISOString(), now, mode: "dry-run" });
+      { domain, owner: me, lastSeen: { [gone]: new Date(now - 8 * day).toISOString() }, now, mode: "dry-run" });
     const request = vi.fn(async () => null), reclaim = vi.fn(async () => {});
     expect(await removeAbandonedWebhooks(base, { request, reclaim })).toMatchObject({ status: "planned" });
-    expect(await removeAbandonedWebhooks({ ...base, mode: "apply", status: "waiting" }, { request, reclaim })).toMatchObject({ status: "waiting" });
     expect(request).not.toHaveBeenCalled(); expect(reclaim).not.toHaveBeenCalled();
     const order: string[] = [];
     reclaim.mockImplementation(async (_checkout, id) => { order.push(`reclaim:${id}`); });

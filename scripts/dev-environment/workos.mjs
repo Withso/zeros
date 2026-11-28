@@ -157,18 +157,20 @@ export function devWebhookCheckout(endpoint, domain) {
   return { owner, instance };
 }
 
-/** Endpoints of Dev owners with no runtime use marker for a week, never this checkout's owner. Nothing is removable
- * until markers have existed for a week, so an owner that started before markers existed has marked by then. */
-export function planAbandonedWebhooks(inventory, { domain, owner, activeOwners, usesSince, now = Date.now(), mode }) {
-  const active = new Set(activeOwners), deletesFrom = usesSince ? new Date(Date.parse(usesSince) + WEEK_MS).toISOString() : null;
-  const plan = { version: 1, mode, status: !usesSince || Date.parse(usesSince) > now - WEEK_MS ? "waiting" : "planned",
-    at: new Date(now).toISOString(), usesSince, deletesFrom, kept: 0, remove: [] };
+/** Endpoints of Dev owners that marked a runtime in this bucket before and not in the last week; never this checkout's
+ * owner. An owner never seen here (another bucket, or code without markers) is not known to be gone: its endpoints
+ * stay, listed as unknown_owner. */
+export function planAbandonedWebhooks(inventory, { domain, owner, lastSeen, usesSince = null, now = Date.now(), mode }) {
+  const plan = { version: 1, mode, status: "planned", at: new Date(now).toISOString(), usesSince, kept: 0, remove: [], unknown: [] };
   for (const endpoint of inventory) {
     const checkout = devWebhookCheckout(endpoint, domain);
     if (!checkout) continue;
-    if (checkout.owner === owner || active.has(checkout.owner)) { plan.kept++; continue; }
+    const seen = Object.hasOwn(lastSeen, checkout.owner) ? Date.parse(lastSeen[checkout.owner]) : NaN;
     // No signing secret or URL in the plan: it is kept on disk for review.
-    plan.remove.push({ id: endpoint.id, owner: checkout.owner, instance: checkout.instance, status: typeof endpoint.status === "string" ? endpoint.status : "unknown" });
+    const item = { id: endpoint.id, owner: checkout.owner, instance: checkout.instance, status: typeof endpoint.status === "string" ? endpoint.status : "unknown" };
+    if (checkout.owner === owner || seen >= now - WEEK_MS) plan.kept++;
+    else if (Number.isNaN(seen)) plan.unknown.push({ ...item, reason: "unknown_owner" });
+    else plan.remove.push({ ...item, lastSeen: new Date(seen).toISOString() });
   }
   return plan;
 }
