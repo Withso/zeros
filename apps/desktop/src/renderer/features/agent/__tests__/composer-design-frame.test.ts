@@ -75,6 +75,11 @@ describe("parked composer frame ownership", () => {
     expect(mocks.useWorkspaces).toHaveBeenCalledWith(null);
   });
 
+  it("captures a pinned frame with the composer's current intent", () => {
+    const context = readContext({ ...options, initialFrame: target, intent: "design" });
+    expect(context.capture()).toMatchObject({ frame: "phone.html", intent: "design" });
+  });
+
   it.each([
     { workspaces: undefined },
     { workspaces: [] },
@@ -126,6 +131,8 @@ describe("parked composer frame ownership", () => {
     expect(source).toContain('label="Attach selected frame"');
     expect(source).toContain('aria-keyshortcuts="Meta+Shift+F Control+Shift+F"');
     expect(source).toContain('shortcut="⌘⇧F"');
+    expect(source).toContain('composerDockRef.current?.contains(event.target)');
+    expect(source).toContain('editingQueuedId');
   });
 
   it("captures all current targets and keeps the submitted group frozen", () => {
@@ -201,7 +208,7 @@ describe("parked composer frame ownership", () => {
     store.bindDirectory("workspace", "design_directory");
     store.setSelection("workspace", "phone.html", null, [], { frameSelected: true });
     const context = readContext({ ...options, active: true });
-    const submitted = context.capture();
+    const submitted = context.attach();
     store.setSelection("workspace", "phone.html", null, [], { frameSelected: true });
     context.consume(submitted);
     expect(designWorkspaceView("workspace").selectedTargets).toEqual([{ frame: "phone.html" }]);

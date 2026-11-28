@@ -61,7 +61,7 @@ async function prepareDesignFrameTargetAttachments(bridge: RuntimeClient, input:
       reference.frame !== target.frame || reference.nodeId !== target.nodeId ||
       (target.frameId && reference.frameId !== target.frameId) ||
       (target.revision && reference.revision !== target.revision)) {
-    throw new Error("The selected frame context changed. Select it again before sending.");
+    throw new Error("The selected frame context changed. Attach it again before sending.");
   }
   const inspection = await inspectDesignFrameContext(bridge, reference);
   if (inspection.status !== "ready") {
@@ -70,7 +70,7 @@ async function prepareDesignFrameTargetAttachments(bridge: RuntimeClient, input:
       : "The selected frame was removed or its directory changed. Select it again or remove the frame context.");
   }
   if (!sameReference(inspection.reference, reference))
-    throw new Error("The selected frame context changed while reading. Select it again before sending.");
+    throw new Error("The selected frame context changed while reading. Attach it again before sending.");
   const text = [
     "# Selected Design frame",
     `Default intent for this message: ${target.intent === "design" ? "edit Design source" : "implement application code using this frame as reference"}. The user's explicit request takes precedence.`,

@@ -919,18 +919,6 @@ function AgentChatBody({
   const designFrameAttachAvailable = Boolean(
     chatId && capabilitiesBridge && !isCloudWorkspace(chatThread?.folder ?? session.cwd),
   );
-  useEffect(() => {
-    if (!designFrameAttachAvailable || !surfaceActive || readOnly) return;
-    const handler = (event: KeyboardEvent) => {
-      if (!(event.metaKey || event.ctrlKey) || !event.shiftKey || event.altKey) return;
-      if (event.code !== "KeyF" || hasShortcutPriorityClaim()) return;
-      if (!designFrameContext.canAttach) return;
-      event.preventDefault();
-      attachDesignFrame();
-    };
-    window.addEventListener("keydown", handler, true);
-    return () => window.removeEventListener("keydown", handler, true);
-  }, [designFrameAttachAvailable, surfaceActive, readOnly, designFrameContext.canAttach, attachDesignFrame]);
   const preparationOwner = JSON.stringify([
     chatId,
     session.agentId ?? chatThread?.agentId,
@@ -1892,6 +1880,19 @@ function AgentChatBody({
    *  encoding awaits would double-apply the edit). */
   const queueSaveInFlightRef = useRef(false);
   const queueEditGenerationRef = useRef(0);
+  useEffect(() => {
+    if (!designFrameAttachAvailable || !surfaceActive || readOnly || editingQueuedId) return;
+    const handler = (event: KeyboardEvent) => {
+      if (!(event.metaKey || event.ctrlKey) || !event.shiftKey || event.altKey) return;
+      if (event.code !== "KeyF" || hasShortcutPriorityClaim()) return;
+      if (!designFrameContext.canAttach) return;
+      if (!(event.target instanceof Node) || !composerDockRef.current?.contains(event.target)) return;
+      event.preventDefault();
+      attachDesignFrame();
+    };
+    window.addEventListener("keydown", handler, true);
+    return () => window.removeEventListener("keydown", handler, true);
+  }, [designFrameAttachAvailable, surfaceActive, readOnly, editingQueuedId, designFrameContext.canAttach, attachDesignFrame]);
   const queueKeysRef = useRef({
     arrowUp: (): boolean => false,
     arrowDown: (): boolean => false,
@@ -5131,7 +5132,7 @@ function AgentChatBody({
                         onDesign={chatId && capabilitiesBridge && !isCloudWorkspace(chatThread?.folder ?? session.cwd) ? enterDesignMode : undefined}
                         designSelected={chatThread?.composerMode === "design"}
                       />
-                      {designFrameAttachAvailable && (
+                      {designFrameAttachAvailable && !editingQueuedId && (
                         <Tooltip label="Attach selected frame" shortcut="⌘⇧F">
                           <IconButton
                             type="button"

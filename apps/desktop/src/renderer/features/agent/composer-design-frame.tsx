@@ -125,8 +125,9 @@ export function useComposerDesignFrame(options: {
       throw new Error("The attached frame belongs to another workspace. Return to that workspace or remove the frame context before sending.");
     const view = designWorkspaceView(currentWorkspace.id);
     captureLink.current = { workspaceId: currentWorkspace.id, event: view.selectionEvent, revision: view.ownerRevision ?? 0 };
-    return Array.isArray(parked.target) ? targets : targets[0];
-  }, [options.cwd, project]);
+    const current = targets.map(target => ({ ...target, intent: options.intent }));
+    return Array.isArray(parked.target) ? current : current[0];
+  }, [options.cwd, options.intent, project]);
   const attach = useCallback((): DesignFrameAttachmentSelection | null => {
     const target = captureCurrentSelection();
     if (target) pin(target);
