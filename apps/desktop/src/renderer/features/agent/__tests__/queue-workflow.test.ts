@@ -9,7 +9,14 @@ import { isCloudWorkspace, parseCloudWorkspaceKey } from "../../../platform/brid
 import { hasBackgroundAgentWork } from "../background-task-state";
 import { queuedTranscriptPresentation } from "./helpers/queued-transcript-presentation";
 import { definitiveCloudStopFailure } from "../cloud-turn-presentation";
-import { createMemoryLocalQueueJournal, localQueuedPrompt, restoredLocalQueue, type LocalQueueJournal } from "../local-queue-journal";
+import type { LocalQueueJournal } from "../local-queue-journal";
+// Loaded lazily so this suite still runs (and fails on its assertions) on a
+// tree without the journal, which is how its zstack replay proves the bug.
+const journalModule = await import("../local-queue-journal").catch(() => undefined);
+const createMemoryLocalQueueJournal = (): LocalQueueJournal =>
+  journalModule?.createMemoryLocalQueueJournal() ?? { read: async () => [], write: async () => {} };
+const localQueuedPrompt = journalModule?.localQueuedPrompt;
+const restoredLocalQueue = journalModule?.restoredLocalQueue;
 
 // Exercise the actual provider callbacks with an in-memory bridge/store. This
 // keeps Stop/Send now races deterministic without mounting unrelated app UI.
