@@ -180,6 +180,20 @@ it("removes older runtimes from a deployment store once its live pin is known, i
   expect(stderr).toBe("");
 });
 
+it("never prunes a release-managed store: its release workflow owns runtime cleanup there", async () => {
+  const test = await fixture();
+  const old = "d".repeat(64), pin = "e".repeat(64), month = new Date(Date.now() - 30 * 86_400_000).toISOString();
+  test.listing.push({ key: `cloud-v2/runtime/${old}.tar.gz`, lastModified: month, size: 300e6 },
+    { key: `cloud-v2/runtime/${"c".repeat(64)}.tar.gz`, lastModified: month, size: 300e6 },
+    { key: `cloud-v2/runtime/${"9".repeat(64)}.tar.gz`, lastModified: month, size: 300e6 },
+    { key: `cloud-v2/runtime/releases/manifests/${old}.json`, lastModified: month, size: 300 });
+  test.env.CLOUD_V2_RUNTIME_SHA256 = pin;
+  const { stdout, stderr } = await test.publish();
+  expect(test.requests.filter(request => request.method === "POST")).toEqual([]);
+  expect(stdout).not.toContain("removed");
+  expect(stderr).toContain("release-managed");
+});
+
 it("skips retention with --no-prune and refuses an invalid --keep before contacting storage", async () => {
   const test = await fixture();
   await test.publish("--local", "--no-prune");

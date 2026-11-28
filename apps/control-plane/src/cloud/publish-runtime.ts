@@ -119,6 +119,7 @@ async function retain(storage: CloudV2RuntimeStore, local: boolean, published: s
   const client = runtimeStorageClient(storage);
   try {
     const plan = await pruneRuntimes(client, storage.bucket, { protect: [published, ...pins] });
+    if (plan.managed) { console.error("Runtime retention skipped: this store is release-managed, and its release workflow removes older runtimes."); return; }
     const count = plan.archives.length;
     console.log(count ? `removed ${count} older runtime${count === 1 ? "" : "s"} (${(plan.bytes / 1e6).toFixed(0)} MB); kept ${plan.kept.map(sha => sha.slice(0, 12)).join(", ")}`
       : "no older runtimes to remove");

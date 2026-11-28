@@ -145,6 +145,21 @@ describe("runtime release archive retention and copying", () => {
     expect(b.objects.get(`cloud-v2/runtime/${manifest.sha256}.tar.gz`)).toEqual(f.bytes);
     expect(JSON.parse(b.objects.get(runtimeCapabilitiesKey(manifest.sha256))!.toString()).features).toEqual(features);
   });
+  it("promotes, rolls back and retains from the served archive when no retained copy exists", async () => {
+    const f = await fixture(), a = storage(), b = storage(), manifest = await a.store.publish(f.archive, sourceSha, sourceSha256);
+    a.objects.delete(`cloud-v2/runtime/releases/archives/${manifest.sha256}.tar.gz`);
+    expect(await b.store.copy(manifest.sha256, a.store)).toEqual(manifest);
+    expect(b.objects.get(`cloud-v2/runtime/${manifest.sha256}.tar.gz`)).toEqual(f.bytes);
+    expect(await a.store.copy(manifest.sha256)).toEqual(manifest);
+    await a.store.retain({ sha256: manifest.sha256, release: null });
+    expect(a.objects.get(`cloud-v2/runtime/${manifest.sha256}.tar.gz`)).toEqual(f.bytes);
+  });
+  it("refuses a corrupt served archive when no retained copy exists", async () => {
+    const f = await fixture(), a = storage(), b = storage(), manifest = await a.store.publish(f.archive, sourceSha, sourceSha256);
+    a.objects.delete(`cloud-v2/runtime/releases/archives/${manifest.sha256}.tar.gz`);
+    a.objects.set(`cloud-v2/runtime/${manifest.sha256}.tar.gz`, Buffer.from("corrupt"));
+    await expect(b.store.copy(manifest.sha256, a.store)).rejects.toThrow(); expect(b.objects.size).toBe(0);
+  });
   it("refuses a corrupt retained archive rather than falling back to another object", async () => {
     const f = await fixture(), a = storage(), b = storage(), manifest = await a.store.publish(f.archive, sourceSha, sourceSha256);
     a.objects.set(`cloud-v2/runtime/releases/archives/${manifest.sha256}.tar.gz`, Buffer.from("corrupt"));
@@ -172,5 +187,40 @@ describe("runtime release archive retention and copying", () => {
     await expect(s.store.saveEvent({ ...records[0], detail: { ...records[0].detail, password: "synthetic-private-password" } } as never)).rejects.toThrow(/details withheld/);
     await expect(s.store.saveEvent({ ...records[0], at: "2000-01-01T00:00:00.000Z" })).rejects.toThrow("different bytes");
     expect([...s.objects.values()].some(value => value.includes("synthetic-private-password"))).toBe(false);
+  });
+});
+
+describe("runtime release archive listing and deletion", () => {
+  function client(pages: Array<Array<{ Key: string; LastModified: Date; Size: number }>>, errors = false) {
+    const calls: Array<{ name: string; input: Record<string, any> }> = [];
+    return { calls, destroy() {}, async send(value: unknown) {
+      const command = value as { constructor: { name: string }; input: Record<string, any> };
+      calls.push({ name: command.constructor.name, input: command.input });
+      if (command.constructor.name === "ListObjectsV2Command") {
+        const page = command.input.ContinuationToken ? Number(command.input.ContinuationToken) : 0;
+        return { Contents: pages[page], IsTruncated: page + 1 < pages.length, ...(page + 1 < pages.length ? { NextContinuationToken: String(page + 1) } : {}) };
+      }
+      if (command.constructor.name === "DeleteObjectsCommand") return errors ? { Errors: [{ Code: "AccessDenied" }] } : {};
+      throw new Error(`unexpected ${command.constructor.name}`);
+    } };
+  }
+  const config = { endpoint: "https://storage.example.test", bucket: "fixture", accessKeyId: "fixture", secretAccessKey: "fixture" };
+  const at = new Date("2026-11-27T00:00:00Z");
+  it("lists every page of the runtime prefix", async () => {
+    const c = client([[{ Key: `cloud-v2/runtime/${"a".repeat(64)}.tar.gz`, LastModified: at, Size: 1 }], [{ Key: "cloud-v2/runtime/sources/x.json", LastModified: at, Size: 2 }]]);
+    const objects = await runtimeReleaseStore(config, "example/project", { client: c }).listRuntimeObjects();
+    expect(objects.map(object => object.key)).toEqual([`cloud-v2/runtime/${"a".repeat(64)}.tar.gz`, "cloud-v2/runtime/sources/x.json"]);
+    expect(c.calls.map(call => call.input.Prefix)).toEqual(["cloud-v2/runtime/", "cloud-v2/runtime/"]);
+  });
+  it("deletes only runtime archive keys, in batches, and refuses a partial delete", async () => {
+    const keys = Array.from({ length: 1001 }, (_, i) => `cloud-v2/runtime/${i.toString(16).padStart(64, "0")}.tar.gz`);
+    const c = client([]); await runtimeReleaseStore(config, "example/project", { client: c }).deleteRuntimeArchives(keys);
+    expect(c.calls.map(call => call.input.Delete.Objects.length)).toEqual([1000, 1]);
+    for (const key of [`cloud-v2/runtime/releases/manifests/${"a".repeat(64)}.json`, `cloud-v2/runtime/capabilities/${"a".repeat(64)}.json`, "cloud-v2/runtime/other.tar.gz"]) {
+      const refused = client([]);
+      await expect(runtimeReleaseStore(config, "example/project", { client: refused }).deleteRuntimeArchives([keys[0]!, key])).rejects.toThrow(/only runtime archives/);
+      expect(refused.calls).toEqual([]);
+    }
+    await expect(runtimeReleaseStore(config, "example/project", { client: client([], true) }).deleteRuntimeArchives(keys.slice(0, 1))).rejects.toThrow(/every archive/);
   });
 });

@@ -14,14 +14,18 @@ import { RuntimeManifest, RuntimeQualification, type RuntimePin } from "./runtim
 import { runtimeJson } from "./runtime-proof";
 import type { RuntimeReleaseReceipt } from "./runtime-release";
 import { RuntimeEventSchema, type RuntimeEvent } from "./runtime-journal";
+import { runtimeArchiveDigest, type RuntimeArchiveStore, type RuntimeStoredObject } from "./runtime-archive-retention";
 
 const sdk = createRequire(new URL("../../apps/control-plane/package.json", import.meta.url))("@aws-sdk/client-s3") as {
   GetObjectCommand: new (input: unknown) => unknown;
   HeadObjectCommand: new (input: unknown) => unknown;
   PutObjectCommand: new (input: unknown) => unknown;
+  ListObjectsV2Command: new (input: unknown) => unknown;
+  DeleteObjectsCommand: new (input: unknown) => unknown;
 };
 type ObjectBody = AsyncIterable<Uint8Array>;
-type Client = { send(command: unknown): Promise<{ Body?: ObjectBody; ContentLength?: number }>; destroy(): void };
+type Listing = { Contents?: Array<{ Key?: string; LastModified?: Date; Size?: number }>; IsTruncated?: boolean; NextContinuationToken?: string };
+type Client = { send(command: unknown): Promise<{ Body?: ObjectBody; ContentLength?: number } & Listing & { Errors?: unknown[] }>; destroy(): void };
 const digest = z.string().regex(/^[a-f0-9]{64}$/);
 const archiveKey = (sha256: string) => `cloud-v2/runtime/${digest.parse(sha256)}.tar.gz`;
 const retainedKey = (sha256: string) => `cloud-v2/runtime/releases/archives/${digest.parse(sha256)}.tar.gz`;
@@ -52,7 +56,7 @@ async function readObject(client: Client, bucket: string, key: string, limit: nu
   return Buffer.concat(chunks);
 }
 
-export type RuntimeReleaseStore = {
+export type RuntimeReleaseStore = RuntimeArchiveStore & {
   storage: { endpoint: string; bucket: string };
   close(): void;
   publish(path: string, sourceSha: string, sourceSha256: string): Promise<RuntimeManifest>;
@@ -91,6 +95,12 @@ export function runtimeReleaseStore(storage: CloudV2RuntimeStore, repository: st
       requireCheck(length === value.ContentLength && hash.digest("hex") === expected, "Runtime archive does not match its digest");
     } finally { await file.close(); }
   }
+  // A runtime's served copy is the one VMs install; the retained copy may be absent (cleaned up, or never written).
+  // Only a confirmed absence falls back: a corrupt or unreadable retained copy still refuses.
+  async function downloadStored(sha256: string, destination: string): Promise<void> {
+    try { await download(retainedKey(sha256), destination, sha256); }
+    catch (error) { if (!runtimeObjectMissing(error)) throw error; await download(archiveKey(sha256), destination, sha256); }
+  }
   async function verifyArchive(key: string, manifest: RuntimeManifest) {
     const directory = await mkdtemp(join(tmpdir(), "zeros-runtime-verify-"));
     try { await download(key, join(directory, "archive.tar.gz"), manifest.sha256); }
@@ -118,7 +128,8 @@ export function runtimeReleaseStore(storage: CloudV2RuntimeStore, repository: st
       features: read.features };
   }
   async function retainArchive(path: string, manifest: RuntimeManifest, features?: string[]) {
-    // The ordinary publisher prunes only its archive namespace; release retention must survive that sweep.
+    // Release branches cut before the served-copy fallback promote from this retained copy only; keep writing it until
+    // none of them can still reach Production.
     await immutableArchive(retainedKey(manifest.sha256), path, manifest);
     await immutableArchive(archiveKey(manifest.sha256), path, manifest);
     if (features) {
@@ -131,10 +142,7 @@ export function runtimeReleaseStore(storage: CloudV2RuntimeStore, repository: st
     const directory = await mkdtemp(join(tmpdir(), "zeros-runtime-copy-")), copy = join(directory, "archive.tar.gz");
     try {
       if (source) await source.download(sha256, copy);
-      else {
-        try { await download(retainedKey(sha256), copy, sha256); }
-        catch (error) { if (!runtimeObjectMissing(error)) throw error; await download(archiveKey(sha256), copy, sha256); }
-      }
+      else await downloadStored(sha256, copy);
       const { manifest, features } = await checkedArchive(copy, capabilitiesRequired);
       requireCheck(manifest.sha256 === sha256, "Runtime archive digest changed while copying");
       await retainArchive(copy, manifest, features); return manifest;
@@ -164,7 +172,7 @@ export function runtimeReleaseStore(storage: CloudV2RuntimeStore, repository: st
       finally { await rm(directory, { recursive: true, force: true }); }
     },
     copy: copyArchive,
-    async download(sha256: string, path: string) { await download(retainedKey(sha256), path, sha256); },
+    async download(sha256: string, path: string) { await downloadStored(sha256, path); },
     async retain(pin: RuntimePin) { await copyArchive(pin.sha256, undefined, false); },
     async qualification(sha256: string, runId: string, attempt: number) { return RuntimeQualification.parse(await getJson(qualificationKey(sha256, runId, attempt))); },
     async saveQualification(record: RuntimeQualification) { await immutableJson(qualificationKey(record.manifest.sha256, record.receipt.runId, record.receipt.runAttempt), record); },
@@ -172,6 +180,28 @@ export function runtimeReleaseStore(storage: CloudV2RuntimeStore, repository: st
       requireCheck(["alpha", "production"].includes(receipt.channel) && /^[1-9][0-9]{0,19}$/.test(receipt.runId) &&
         Number.isSafeInteger(receipt.runAttempt) && receipt.runAttempt > 0 && receipt.runAttempt <= 10_000, "Runtime receipt identity is invalid");
       await immutableJson(`cloud-v2/runtime/releases/${receipt.channel}/${receipt.runId}/${receipt.runAttempt}.json`, receipt);
+    },
+    async listRuntimeObjects(): Promise<RuntimeStoredObject[]> {
+      const objects: RuntimeStoredObject[] = []; let token: string | undefined;
+      do {
+        const page = await client.send(new sdk.ListObjectsV2Command({ Bucket: storage.bucket, Prefix: "cloud-v2/runtime/", ...(token ? { ContinuationToken: token } : {}) }));
+        for (const object of page.Contents ?? []) {
+          requireCheck(typeof object.Key === "string" && object.LastModified instanceof Date && Number.isSafeInteger(object.Size), "Runtime listing is invalid");
+          objects.push({ key: object.Key!, lastModified: object.LastModified!, size: object.Size! });
+        }
+        requireCheck(!page.IsTruncated || !!page.NextContinuationToken, "Runtime listing is invalid");
+        token = page.IsTruncated ? page.NextContinuationToken : undefined;
+      } while (token);
+      return objects;
+    },
+    /** Deletes runtime archives only; any other key refuses the whole call before anything is sent. */
+    async deleteRuntimeArchives(keys: readonly string[]) {
+      requireCheck(keys.every(key => runtimeArchiveDigest(key)), "Runtime retention deletes only runtime archives");
+      for (let start = 0; start < keys.length; start += 1000) {
+        const reply = await client.send(new sdk.DeleteObjectsCommand({ Bucket: storage.bucket,
+          Delete: { Objects: keys.slice(start, start + 1000).map(Key => ({ Key })), Quiet: true } }));
+        requireCheck(!reply.Errors?.length, "Runtime retention could not delete every archive");
+      }
     },
     async saveEvent(value: RuntimeEvent) {
       const event = RuntimeEventSchema.safeParse(value);

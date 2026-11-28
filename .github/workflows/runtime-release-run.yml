@@ -132,6 +132,8 @@ jobs:
     env:
       ZEROS_RUNTIME_RELEASE: ${{ vars.ZEROS_RUNTIME_RELEASE }}
       ZEROS_HOSTED_PROMOTION: ${{ vars.ZEROS_HOSTED_PROMOTION }}
+      # Per environment: "apply" deletes runtime archives the release no longer needs; unset or anything else only plans.
+      ZEROS_RUNTIME_RETENTION: ${{ vars.ZEROS_RUNTIME_RETENTION }}
       RAILWAY_PROJECT_ID: ${{ vars.RAILWAY_PROJECT_ID }}
       RAILWAY_ENVIRONMENT_ID: ${{ vars.RAILWAY_ENVIRONMENT_ID }}
       RAILWAY_SERVICE_ID: ${{ vars.RAILWAY_SERVICE_ID }}

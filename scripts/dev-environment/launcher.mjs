@@ -16,7 +16,7 @@ import { DevelopmentProcesses, run, waitForHttp, waitForDevSignIn } from "./proc
 import { ensureDevAuthEnvironment } from "../dev-auth-profile.mjs";
 import { cloudSeedMessage, cloudSeedNeeded, readLocalSeed, recordCloudSeed, saveLocalSeed } from "./cloud-local-seed-state.mjs";
 import { REBOOT_RECOVERED, currentBoot, recoverLaunchAfterReboot } from "./reboot-recovery.mjs";
-import { resolveLocalRuntime } from "./cloud-local-runtime.mjs";
+import { maintainLocalRuntimes, markLocalRuntime, removeLocalRuntimeUses, resolveLocalRuntime, runtimeRetentionSummary, RUNTIME_USE_REFRESH_MS } from "./cloud-local-runtime.mjs";
 import { prepareAlphaLaunch } from "../alpha-instance.mjs";
 import { fixtureBindingDigest } from "./hosted-fixtures.mjs";
 
@@ -126,7 +126,7 @@ async function start(workspace, profile) {
   }
   const release = acquireWorkspaceLock(workspace), processes = new DevelopmentProcesses();
   const env = systemEnvironment(), runId = randomUUID(), token = randomUUID();
-  let postgres, server;
+  let postgres, server, runtimeUse;
   const abort = () => processes.controller.abort(new Error("Development shutdown requested"));
   for (const signal of ["SIGINT", "SIGTERM"]) process.on(signal, abort);
   const signal = processes.controller.signal;
@@ -152,6 +152,12 @@ async function start(workspace, profile) {
     await run("pnpm", ["--dir", "apps/control-plane", "build"], { cwd: root, env, signal, timeout: 180_000, label: "Control-plane build" });
     console.log("[zeros-dev] Selecting this checkout's worker runtime (build and publish if missing)");
     const runtime = await resolveLocalRuntime(workspace, profile, root, { signal });
+    // Best effort: a storage hiccup here must not stop Dev. A runtime nobody has marked is never removed.
+    const runtimeOptions = { previous: process.env.ZEROS_CLOUD_V2_RUNTIME_PREVIOUS_SHA256 };
+    await maintainLocalRuntimes(workspace, profile, root, runtime, runtimeOptions).then(plan => console.log(`[zeros-dev] ${runtimeRetentionSummary(plan)}`),
+      () => console.log("[zeros-dev] Worker runtime use was not recorded and cleanup was skipped; the next start retries."));
+    runtimeUse = setInterval(() => void markLocalRuntime(workspace, profile, root, runtime, runtimeOptions).catch(() => {}), RUNTIME_USE_REFRESH_MS);
+    runtimeUse.unref();
     await run("npm", ["--prefix", "apps/web", "run", "build"], { cwd: root, env, signal, timeout: 180_000, label: "Auth web build" });
     console.log("[zeros-dev] Starting isolated PostgreSQL and applying release migrations");
     postgres = await startPostgres(workspace, profile, ports, root); signal.throwIfAborted();
@@ -208,6 +214,7 @@ async function start(workspace, profile) {
     if (!signal.aborted) await new Promise(resolve => signal.addEventListener("abort", resolve, { once: true }));
     if (signal.reason?.message !== "Development shutdown requested") throw signal.reason;
   } finally {
+    if (runtimeUse) clearInterval(runtimeUse);
     let pauseFailed = false;
     try { await pauseWorkosWebhook(workspace, profile); }
     catch {
@@ -283,6 +290,8 @@ async function main() {
       if (drain?.complete !== true || drain.pending !== 0)
         throw new Error(`Cloud cleanup is not complete (${drain?.pending ?? "unknown"} pending); data, keys and tunnel were kept. Rerun pnpm electron:cloud --reset.`);
       await deleteWorkosWebhook(current, profile); await deleteTunnel(current, profile.cloudflare);
+      await removeLocalRuntimeUses(current, profile, root).catch(() =>
+        console.log("[zeros-dev] This checkout's worker runtime markers were not removed; they expire after a week without use."));
       await postgres.stop(); postgres = undefined;
       // `desktop` and `desktop-sign-in` remain from runs that still opened the Dev app.
       for (const name of ["postgres", "desktop", "desktop-sign-in", "web", "objects", "backups"]) {

@@ -14,14 +14,15 @@ import { runtimeJson, verifyRuntimeQualification, prepareRuntimePublication, com
 import { runtimeProvider } from "./runtime-provider";
 import { releaseRuntime, type RuntimeReleaseReceipt } from "./runtime-release";
 import { runtimeReleaseStore, runtimeStoreConfig } from "./runtime-storage";
+import { readRuntimeReferences, retainRuntimeArchives, runtimeRetentionMode, type RuntimeRetentionPlan } from "./runtime-archive-retention";
 
 export async function runRuntimeController(env: NodeJS.ProcessEnv, options: {
-  root?: string; signal?: AbortSignal; fetch?: typeof fetch;
+  root?: string; signal?: AbortSignal; fetch?: typeof fetch; log?: (line: string) => void;
   services?: {
     store?: typeof runtimeReleaseStore; github?: typeof runtimeGithub; provider?: typeof runtimeProvider;
     database?: typeof withRuntimeDatabase; drain?: typeof runtimeDrain;
     read?: typeof readRuntimeJson; write?: typeof writeRuntimeJson; pool?: typeof createMigrationPool; planetScale?: typeof planetScaleClient;
-    handoff?: typeof writeRuntimeHandoff;
+    handoff?: typeof writeRuntimeHandoff; references?: typeof readRuntimeReferences;
   };
 } = {}): Promise<RuntimeReleaseReceipt> {
   const config = runtimeReleaseConfig(env), services = options.services ?? {}, root = options.root ?? process.cwd();
@@ -51,7 +52,7 @@ export async function runRuntimeController(env: NodeJS.ProcessEnv, options: {
     inspectDrain: lease => { requireCheck(drain, "The runtime build drain is not available"); return drain.inspectDrain(lease); },
     record: async intent => { if (intent.kind !== "restore") checkActive(); await record(intent); if (intent.kind !== "restore") checkActive(); },
   });
-  let receipt: RuntimeReleaseReceipt | undefined;
+  let receipt: RuntimeReleaseReceipt | undefined, references: string[] | null = null;
   let publication: ReturnType<typeof prepareRuntimePublication> | undefined;
   try {
     await source(); await provider.current();
@@ -98,6 +99,9 @@ export async function runRuntimeController(env: NodeJS.ProcessEnv, options: {
         retain: pin => { checkActive(); return store.retain(pin); },
         record: async value => { checkActive(); receipt = value; },
       });
+      // Read while this release still holds database authority; cleanup runs after the receipt is saved. Rows created
+      // after this read name the pin this release confirmed, which cleanup keeps.
+      references = await (services.references ?? readRuntimeReferences)(pool).catch(() => null);
     });
     checkActive(); requireCheck(receipt, "Runtime release did not confirm a final receipt");
     await store.saveReceipt(receipt); await write(join(directory, "runtime-receipt.json"), receipt);
@@ -107,8 +111,23 @@ export async function runRuntimeController(env: NodeJS.ProcessEnv, options: {
       const proof = completeRuntimePublication(publication, receipt);
       await store.saveQualification(proof); await write(join(directory, "runtime-qualification.json"), proof);
     }
+    const retention = await retainRuntimeArchives({ channel: config.channel, mode: runtimeRetentionMode(env), current: receipt.runtime.sha256,
+      previous: receipt.previousRuntimeSha256, references, store, active: () => !options.signal?.aborted });
+    await write(join(directory, "runtime-retention.json"), retention).catch(() => {});
+    (options.log ?? console.log)(retentionSummary(retention));
     return receipt;
   } catch (error) {
     throw new PromotionError(error instanceof PromotionError ? error.message : "Runtime release failed; private diagnostics withheld. Reconcile its durable intent before retrying.");
   } finally { store.close(); fromAlpha?.close(); }
+}
+
+function retentionSummary(plan: RuntimeRetentionPlan): string {
+  const { removeBytes, removeObjects, removeUsdPerMonth } = plan.totals, gb = (removeBytes / 1e9).toFixed(1);
+  if (plan.status === "refused")
+    return `::warning::Runtime retention refused (${plan.reason}) on ${plan.channel}; nothing was deleted. The plan is runtime-retention.json in the receipt artifact.`;
+  if (plan.status === "failed")
+    return `::warning::Runtime retention failed (${plan.reason}) on ${plan.channel}; some planned archives may already be gone. The plan is runtime-retention.json in the receipt artifact.`;
+  const verb = plan.status === "deleted" ? "removed" : "would remove";
+  return `Runtime retention (${plan.mode}) on ${plan.channel}: ${verb} ${plan.remove.length} runtimes (${removeObjects} objects, ${gb} GB, about $${removeUsdPerMonth.toFixed(2)}/month);`
+    + ` kept ${plan.kept.length}. The plan is runtime-retention.json in the receipt artifact.`;
 }

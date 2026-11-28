@@ -2,7 +2,7 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { runtimeSourceIdentity } from "../../apps/cloud-worker/scripts/package-runtime.mjs";
 import { run } from "./processes.mjs";
-import { saveWorkspace, systemEnvironment } from "./state.mjs";
+import { saveWorkspace, systemEnvironment, writePrivateFile } from "./state.mjs";
 
 const SHA = /^[a-f0-9]{64}$/;
 const noDocker = "No matching worker runtime is published; start Docker or publish this checkout from Linux with pnpm --dir apps/control-plane cloud-v2:publish-runtime --local.";
@@ -47,4 +47,54 @@ export async function resolveLocalRuntime(workspace, profile, root, options = {}
   options.signal?.throwIfAborted();
   workspace.state.cloudRuntime = { sha256: record.sha256, sourceSha256: record.sourceSha256, commit: record.commit, at: new Date().toISOString() };
   save(workspace); return record.sha256;
+}
+
+/** Refresh cadence for a running checkout's runtime marker: well inside the week a runtime stays unmarked. */
+export const RUNTIME_USE_REFRESH_MS = 24 * 60 * 60_000;
+const checkout = workspace => ({ owner: workspace.state.owner, instance: workspace.state.instanceId });
+const controlPlane = (root, options) => options.module ?? (name => import(pathToFileURL(path.join(root, "apps/control-plane/dist/cloud", name)).href));
+
+async function withRuntimeStorage(profile, root, options, work) {
+  const module = controlPlane(root, options);
+  const [retention, source] = await Promise.all([module("runtime-retention.js"), module("runtime-source.js")]);
+  const client = source.runtimeStorageClient(profile.storage);
+  try { return await work(retention, client); } finally { client.destroy(); }
+}
+
+// The previous pin a wake may still start (ZEROS_CLOUD_V2_RUNTIME_PREVIOUS_SHA256) is in use too.
+const runtimesInUse = (sha256, previous) => [sha256, ...(SHA.test(previous ?? "") && previous !== sha256 ? [previous] : [])];
+
+/** Marks the runtimes this checkout runs, so other checkouts' cleanup keeps them. */
+export function markLocalRuntime(workspace, profile, root, sha256, options = {}) {
+  return withRuntimeStorage(profile, root, options, async (retention, client) => {
+    for (const runtime of runtimesInUse(sha256, options.previous)) await retention.recordRuntimeUse(client, profile.storage.bucket, runtime, checkout(workspace));
+  });
+}
+
+/** On start: mark this checkout's runtime, then plan (or, with ZEROS_DEV_RUNTIME_RETENTION=apply, run) Dev cleanup.
+ * The plan is kept beside this checkout's state for review. */
+export function maintainLocalRuntimes(workspace, profile, root, sha256, options = {}) {
+  return withRuntimeStorage(profile, root, options, async (retention, client) => {
+    const [current, previous = null] = runtimesInUse(sha256, options.previous);
+    for (const runtime of [current, ...(previous ? [previous] : [])]) await retention.recordRuntimeUse(client, profile.storage.bucket, runtime, checkout(workspace));
+    const mode = retention.devRuntimeRetentionMode((options.env ?? process.env).ZEROS_DEV_RUNTIME_RETENTION);
+    const plan = await retention.retainDevRuntimes(client, profile.storage.bucket, { current, previous, mode });
+    (options.write ?? writePrivateFile)(path.join(workspace.directory, "runtime-retention.json"), `${JSON.stringify(plan, null, 2)}\n`);
+    return plan;
+  });
+}
+
+/** `--reset`: this checkout stops marking any runtime; other checkouts' cleanup removes what nobody uses. */
+export function removeLocalRuntimeUses(workspace, profile, root, options = {}) {
+  return withRuntimeStorage(profile, root, options, (retention, client) =>
+    retention.removeRuntimeUses(client, profile.storage.bucket, workspace.state.instanceId));
+}
+
+export function runtimeRetentionSummary(plan) {
+  const gb = (plan.bytes / 1e9).toFixed(1), count = `${plan.remove.length} unused runtime${plan.remove.length === 1 ? "" : "s"} (${gb} GB)`;
+  if (plan.status === "managed") return "Worker runtime cleanup skipped: this store is release-managed.";
+  const unmarked = plan.kept.filter(item => item.reason === "unmarked").length;
+  const kept = unmarked ? ` ${unmarked} never-marked runtime${unmarked === 1 ? " is" : "s are"} kept.` : "";
+  if (plan.status === "deleted") return `Worker runtime cleanup removed ${count}.${kept}`;
+  return `Worker runtime cleanup (${plan.mode}) would remove ${count}${plan.mode === "dry-run" ? "; set ZEROS_DEV_RUNTIME_RETENTION=apply to remove them" : ""}.${kept}`;
 }

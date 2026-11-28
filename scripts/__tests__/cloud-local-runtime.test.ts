@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
-import { resolveLocalRuntime, runtimeBuildMode } from "../dev-environment/cloud-local-runtime.mjs";
+import { maintainLocalRuntimes, markLocalRuntime, removeLocalRuntimeUses, resolveLocalRuntime, runtimeBuildMode,
+  runtimeRetentionSummary } from "../dev-environment/cloud-local-runtime.mjs";
 
 const source = { sourceSha256: "a".repeat(64), commit: "b".repeat(40), dirty: false };
 const record = { version: 1, ...source, sha256: "c".repeat(64) };
@@ -51,5 +52,60 @@ describe("electron:cloud automatic runtime", () => {
     expect(await runtimeBuildMode({ platform: "darwin", arch: "arm64", node: "24.18.1", run })).toEqual({ docker: true });
     run.mockRejectedValueOnce(new Error("missing docker"));
     await expect(runtimeBuildMode({ platform: "darwin", arch: "arm64", node: "24", run })).rejects.toThrow(/start Docker or publish.*Linux.*--local/);
+  });
+});
+
+describe("electron:cloud runtime use and cleanup", () => {
+  const instance = "11111111-2222-4333-8444-555555555555", sha = "c".repeat(64);
+  function fixture(plan: Record<string, unknown> = { status: "planned", mode: "dry-run", remove: [], bytes: 0 }) {
+    const client = { destroy: vi.fn() };
+    const retention = { recordRuntimeUse: vi.fn(async () => {}), devRuntimeRetentionMode: vi.fn((value?: string) => value === "apply" ? "apply" : "dry-run"),
+      retainDevRuntimes: vi.fn(async () => plan), removeRuntimeUses: vi.fn(async () => 2) };
+    const module = vi.fn(async (name: string) => name === "runtime-retention.js" ? retention : { runtimeStorageClient: vi.fn(() => client) });
+    const workspace = { directory: "/fixture/state", state: { instanceId: instance, owner: "a".repeat(24) } }, profile = { storage: { bucket: "zeros-dev-objects" } };
+    return { client, retention, module, workspace, profile, write: vi.fn() };
+  }
+  it("marks this checkout's runtime before planning cleanup, in dry-run unless applied, and keeps the plan for review", async () => {
+    const f = fixture();
+    await maintainLocalRuntimes(f.workspace, f.profile, "/fixture", sha, { module: f.module, env: {}, write: f.write });
+    expect(f.retention.recordRuntimeUse).toHaveBeenCalledWith(f.client, "zeros-dev-objects", sha, { owner: "a".repeat(24), instance });
+    expect(f.retention.retainDevRuntimes).toHaveBeenCalledWith(f.client, "zeros-dev-objects", { current: sha, previous: null, mode: "dry-run" });
+    expect(f.retention.recordRuntimeUse.mock.invocationCallOrder[0]).toBeLessThan(f.retention.retainDevRuntimes.mock.invocationCallOrder[0]!);
+    expect(f.write).toHaveBeenCalledWith("/fixture/state/runtime-retention.json", expect.stringContaining('"status": "planned"'));
+    expect(f.client.destroy).toHaveBeenCalledOnce();
+    await maintainLocalRuntimes(f.workspace, f.profile, "/fixture", sha, { module: f.module, env: { ZEROS_DEV_RUNTIME_RETENTION: "apply" }, write: f.write });
+    expect(f.retention.retainDevRuntimes).toHaveBeenLastCalledWith(f.client, "zeros-dev-objects", { current: sha, previous: null, mode: "apply" });
+  });
+  it("marks and keeps the previous runtime a wake may still start, ignoring an invalid or repeated one", async () => {
+    const f = fixture(), previous = "d".repeat(64);
+    await maintainLocalRuntimes(f.workspace, f.profile, "/fixture", sha, { module: f.module, env: {}, write: f.write, previous });
+    expect(f.retention.recordRuntimeUse.mock.calls.map(call => call[2])).toEqual([sha, previous]);
+    expect(f.retention.retainDevRuntimes).toHaveBeenLastCalledWith(f.client, "zeros-dev-objects", { current: sha, previous, mode: "dry-run" });
+    for (const ignored of ["not-a-digest", sha]) {
+      const g = fixture();
+      await maintainLocalRuntimes(g.workspace, g.profile, "/fixture", sha, { module: g.module, env: {}, write: g.write, previous: ignored });
+      expect(g.retention.recordRuntimeUse.mock.calls.map(call => call[2])).toEqual([sha]);
+    }
+    const h = fixture();
+    await markLocalRuntime(h.workspace, h.profile, "/fixture", sha, { module: h.module, previous });
+    expect(h.retention.recordRuntimeUse.mock.calls.map(call => call[2])).toEqual([sha, previous]);
+  });
+  it("plans nothing when the marker cannot be written", async () => {
+    const f = fixture(); f.retention.recordRuntimeUse.mockRejectedValue(new Error("synthetic"));
+    await expect(maintainLocalRuntimes(f.workspace, f.profile, "/fixture", sha, { module: f.module, env: {}, write: f.write })).rejects.toThrow();
+    expect(f.retention.retainDevRuntimes).not.toHaveBeenCalled(); expect(f.client.destroy).toHaveBeenCalledOnce();
+  });
+  it("refreshes the marker and removes this checkout's markers on reset", async () => {
+    const f = fixture();
+    await markLocalRuntime(f.workspace, f.profile, "/fixture", sha, { module: f.module });
+    expect(f.retention.recordRuntimeUse).toHaveBeenCalledWith(f.client, "zeros-dev-objects", sha, { owner: "a".repeat(24), instance });
+    expect(await removeLocalRuntimeUses(f.workspace, f.profile, "/fixture", { module: f.module })).toBe(2);
+    expect(f.retention.removeRuntimeUses).toHaveBeenCalledWith(f.client, "zeros-dev-objects", instance);
+  });
+  it("summarizes each outcome in one line", () => {
+    const plan = { remove: [{}, {}], bytes: 666e6, kept: [{ reason: "current" }, { reason: "unmarked" }, { reason: "unmarked" }] };
+    expect(runtimeRetentionSummary({ ...plan, status: "planned", mode: "dry-run" })).toMatch(/would remove 2 unused runtimes \(0.7 GB\); set ZEROS_DEV_RUNTIME_RETENTION=apply.* 2 never-marked runtimes are kept\.$/);
+    expect(runtimeRetentionSummary({ ...plan, kept: [], status: "deleted", mode: "apply" })).toBe("Worker runtime cleanup removed 2 unused runtimes (0.7 GB).");
+    expect(runtimeRetentionSummary({ ...plan, status: "managed", mode: "apply" })).toMatch(/release-managed/);
   });
 });
