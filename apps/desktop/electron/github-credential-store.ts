@@ -190,7 +190,7 @@ export function createGithubCredentialStore(
         // account changed meanwhile, so read the current slot rather than the captured one.
         selected = await reconcile(selected.method, undefined, false).catch(() => null) ?? await store.get(method);
         // Unverifiable now (offline or a revoked token): try again later, not on every read.
-        if (selected && !selected.githubUserId) verifyAfterMs = Date.now() + 10 * 60_000;
+        if (selected && selected.method !== "gh-cli" && !selected.githubUserId) verifyAfterMs = Date.now() + 10 * 60_000;
       }
       if (selected) return selected;
       // One-release downgrade/recovery bridge: use the legacy token until the
