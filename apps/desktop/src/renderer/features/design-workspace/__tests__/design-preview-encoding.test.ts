@@ -14,6 +14,7 @@ function fakeWorker(answer: (request: DesignPreviewEncodeRequest) => DesignPrevi
     addEventListener(type: string, listener: (event: MessageEvent) => void) { listeners[type].push(listener); },
     terminate() { worker.terminated = true; },
     fail() { listeners.error.forEach(listener => listener({} as MessageEvent)); },
+    reply(data: DesignPreviewEncodeReply) { listeners.message.forEach(listener => listener({ data } as MessageEvent)); },
   };
   return worker;
 }
@@ -29,6 +30,43 @@ describe("design preview encoding", () => {
     expect(create).toHaveBeenCalledTimes(1);
     expect(worker.posted.map(request => request.op)).toEqual(["encode", "downscale"]);
     expect(worker.posted[1]).toMatchObject({ width: 16, height: 12, level: "mini" });
+  });
+
+  it("spreads a burst of pictures over a bounded pool, starting another worker only when all are busy", async () => {
+    const held: Array<() => void> = [];
+    const workers: Array<ReturnType<typeof fakeWorker>> = [];
+    const create = vi.fn(() => {
+      const worker = fakeWorker(request => {
+        held.push(() => worker.reply({ id: request.id, blob: new Blob([request.op]) }));
+        return null;
+      });
+      workers.push(worker);
+      return worker;
+    });
+    const encoder = createDesignPreviewEncoder(create, 3);
+    const first = encoder.encode(new Blob(["png"]), "thumbnail");
+    held.shift()!();
+    await first;
+    expect(create).toHaveBeenCalledTimes(1);
+    const burst = Array.from({ length: 6 }, () => encoder.encode(new Blob(["png"]), "thumbnail"));
+    expect(create).toHaveBeenCalledTimes(3);
+    expect(workers.map(worker => worker.posted.length)).toEqual([3, 2, 2]);
+    while (held.length) held.shift()!();
+    expect((await Promise.all(burst)).length).toBe(6);
+  });
+
+  it("finishes every pending picture on this thread when one pooled worker dies", async () => {
+    const workers: Array<ReturnType<typeof fakeWorker>> = [];
+    const encoder = createDesignPreviewEncoder(() => {
+      const worker = fakeWorker(() => null);
+      workers.push(worker);
+      return worker;
+    }, 2);
+    const png = new Blob(["png"]);
+    const pending = [encoder.encode(png, "thumbnail"), encoder.encode(png, "thumbnail")];
+    workers[1]!.fail();
+    expect(await Promise.all(pending)).toEqual([png, png]);
+    expect(workers.every(worker => worker.terminated)).toBe(true);
   });
 
   it("rejects a picture the worker could not encode", async () => {
