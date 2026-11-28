@@ -1010,6 +1010,20 @@ describe("design workspace interaction wiring", () => {
     expect(source).toContain("designResizeStyleAxes");
   });
 
+  it("previews drawn child insertion in the runtime before committing it", () => {
+    expect(source).toContain("queueLiveInsert");
+    expect(source).toContain("runtime.previewInsert");
+    expect(source).toContain("settleLiveInsert");
+    expect(source).toContain("prepared");
+  });
+
+  it("measures a flow text slot before opening the inline editor", () => {
+    expect(source).toContain("createDesignTextStyle");
+    expect(source).toContain("measured.details[0]?.rect");
+    expect(source).toContain("clearPreviewInserts([nodeId])");
+    expect(source).toContain("designPointInChildCoordinateSpace(parentDetails, point)");
+  });
+
   it("does not let invisible spacing hit regions swallow nested-text double clicks", () => {
     expect(source).toContain("blocksDesignCanvasDoubleClick(");
     expect(source).toContain(
