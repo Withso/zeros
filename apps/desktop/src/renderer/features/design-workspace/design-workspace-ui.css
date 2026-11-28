@@ -2246,3 +2246,56 @@
   width: 8px;
   height: 8px;
 }
+
+/* The Style inspector is the dense column: 24px controls, 12px values and a
+ * 32px section header, so more of a layer's properties fit without scrolling.
+ * Popovers, Motion and Theme keep the standard 28px geometry. */
+[data-design-inspector] .zd-field {
+  height: 24px;
+  font-size: 12px;
+}
+
+[data-design-inspector] .zd-field-label svg {
+  width: 12px;
+  height: 12px;
+}
+
+[data-design-inspector] .zd-segmented {
+  height: 24px;
+}
+
+[data-design-inspector] .zd-segment {
+  height: 20px;
+  font-size: 12px;
+}
+
+[data-design-inspector] .zd-icon-button[data-size="row"] {
+  width: 24px;
+  height: 24px;
+}
+
+[data-design-inspector] .zd-icon-button[data-size="row"] svg {
+  width: 12px;
+  height: 12px;
+}
+
+[data-design-inspector] .zd-section-header {
+  height: 32px;
+}
+
+[data-design-inspector] .zd-section-title {
+  font-size: 12px;
+}
+
+[data-design-inspector] .zd-section-body {
+  gap: 6px;
+  padding: 0 12px 10px;
+}
+
+[data-design-inspector] .zd-group {
+  gap: 4px;
+}
+
+[data-design-inspector] .zd-size-trigger {
+  top: 2px;
+}
