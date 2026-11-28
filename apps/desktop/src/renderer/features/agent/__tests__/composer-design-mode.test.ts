@@ -59,8 +59,8 @@ describe("composer Design mode entry", () => {
     expect(agentChat).toContain('label="Design mode"');
     expect(agentChat).toContain("activateComposerDesignMode({");
     expect(agentChat).toContain("onClick={activateDesignMode}");
-    expect(agentChat).toContain("designModeAvailable ? enterDesignMode : undefined");
-    expect(agentChat).toContain('designModeAvailable && chatThread?.composerMode !== "design" && (');
+    expect(agentChat).toContain("designEntryAvailable ? enterDesignMode : undefined");
+    expect(agentChat).toContain('designEntryAvailable && chatThread?.composerMode !== "design" && (');
     expect(attachmentMenu).toContain("<span>Design</span>");
   });
 });

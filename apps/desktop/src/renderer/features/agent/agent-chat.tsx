@@ -929,7 +929,7 @@ function AgentChatBody({
   const designFrameAttachAvailable = Boolean(
     chatId && capabilitiesBridge && !isCloudWorkspace(chatThread?.folder ?? session.cwd),
   );
-  const designModeAvailable = composerDesignModeAvailable({
+  const designEntryAvailable = composerDesignModeAvailable({
     chatId,
     bridge: capabilitiesBridge,
     workspaceId: chatThread?.folder ?? session.cwd,
@@ -5149,10 +5149,10 @@ function AgentChatBody({
                         onAttachTranscript={openTranscriptPicker}
                         onLinkWorkspace={openWorkspacePicker}
                         onIntent={warmTranscriptPicker}
-                        onDesign={designModeAvailable ? enterDesignMode : undefined}
+                        onDesign={designEntryAvailable ? enterDesignMode : undefined}
                         designSelected={chatThread?.composerMode === "design"}
                       />
-                      {designModeAvailable && chatThread?.composerMode !== "design" && (
+                      {designEntryAvailable && chatThread?.composerMode !== "design" && (
                         <Tooltip label="Design mode">
                           <IconButton
                             type="button"
