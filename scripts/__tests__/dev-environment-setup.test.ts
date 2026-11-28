@@ -174,9 +174,27 @@ describe("secure portable Dev setup", () => {
       fs.writeFileSync(path.join(f.worktree, ".env.agent"), `CLOUDFLARE_API_TOKEN=${secret}\n`, { mode: 0o600 });
       const output = failure(() => runFixtureSetup(f.worktree, f.home));
       expect(output).toContain("Zeros Internal MCP");
-      expect(output).toContain("agent-env.mjs import");
+      expect(output).toContain("rm .env.agent && sh scripts/dev-environment/hook.sh setup");
+      expect(output).toContain("node scripts/dev-environment/agent-env.mjs import .env.agent && sh scripts/dev-environment/hook.sh setup");
       expect(output).not.toContain("install requested");
       expect(output).not.toContain(secret);
+    });
+
+    it("continues after following either command the refusal names", () => {
+      const agent = linked();
+      fs.writeFileSync(path.join(agent.worktree, ".env.agent"), `CLOUDFLARE_API_TOKEN=${secret}\n`, { mode: 0o600 });
+      failure(() => runFixtureSetup(agent.worktree, agent.home));
+      fs.rmSync(path.join(agent.worktree, ".env.agent"));
+      expect(runFixtureSetup(agent.worktree, agent.home)).toContain("install requested");
+
+      const operator = linked(), file = path.join(operator.worktree, ".env.agent");
+      fs.writeFileSync(file, `ZEROS_DEV_PASSWORD=${secret}\n`, { mode: 0o644 });
+      failure(() => runFixtureSetup(operator.worktree, operator.home));
+      const output = importAgentEnv(operator.worktree, operator.home, ".env.agent");
+      expect(output).toContain("1 keys"); expect(output).not.toContain(secret);
+      expect(fs.readFileSync(file, "utf8")).toBe(`ZEROS_DEV_PASSWORD=${secret}\n`);
+      expect(fs.statSync(file).mode & 0o777).toBe(0o600);
+      expect(runFixtureSetup(operator.worktree, operator.home)).toContain("install requested");
     });
 
     it("refuses a copied .env.agent in a Conductor workspace clone", () => {

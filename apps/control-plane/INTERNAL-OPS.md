@@ -74,7 +74,12 @@ approval the tool requests. More Alpha write tools are being added.
 gate0, the Alpha rehearsal, local fixture seeding and the native Alpha check
 still read operator fixture fields from a private `.env.agent` in a trusted
 checkout (template: `.env.agent.example`). Workspace setup refuses a
-`.env.agent` copied into a new worktree or Conductor workspace. An operator
-imports one deliberately with
-`node scripts/dev-environment/agent-env.mjs import <file>`, and
+`.env.agent` copied into a new worktree or Conductor workspace, and its message
+names the exact commands:
+
+- Agents: `rm .env.agent && sh scripts/dev-environment/hook.sh setup`.
+- Operators who need the file there:
+  `node scripts/dev-environment/agent-env.mjs import .env.agent && sh scripts/dev-environment/hook.sh setup`.
+  Pass another path to import a file from outside the checkout.
+
 `pnpm agent:check` warns about any linked worktree that holds provider keys.
