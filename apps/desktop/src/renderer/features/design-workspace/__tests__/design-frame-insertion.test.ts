@@ -7,6 +7,7 @@ import {
   designDrawnFrameWrapOperations,
   designFrameInsertionOperations,
   designTreeChildIds,
+  designSizeInChildCoordinateSpace,
 } from "../design-frame-insertion";
 
 const parent: DesignRuntimeNodeDetails = {
@@ -121,6 +122,20 @@ describe("child frame insertion", () => {
     expect(operation?.html).toContain("display:block;");
     expect(operation?.html).toContain("background-color:#ffffff;opacity:1;"); // check:ui ignore-line -- authored canvas frame color, not editor chrome.
   });
+  it("converts a drawn size into a scaled parent's child coordinates", () => {
+    expect(
+      designSizeInChildCoordinateSpace(parent, { x: 40, y: 20 }),
+    ).toEqual({ x: 20, y: 10 });
+  });
+  it("keeps a square drawn size nonzero inside a rotated parent", () => {
+    const half = Math.SQRT1_2;
+    expect(
+      designSizeInChildCoordinateSpace(
+        { ...parent, childCoordinateSpace: [half, -half, half, half, 10, 20] },
+        { x: 40, y: 40 },
+      ),
+    ).toEqual({ x: 40, y: 40 });
+  });
   it("keeps the click-created default size inside a rotated and scaled parent", () => {
     const operations = designFrameInsertionOperations(
       { ...parent, childCoordinateSpace: [1, 1, -1, 1, 10, 20] },
@@ -164,8 +179,8 @@ describe("child frame insertion", () => {
     });
   });
 
-  it.each(["flex", "grid"])(
-    "adds a normal frame to %s without rewriting the parent's layout",
+  it.each(["flex", "inline-flex", "grid", "inline-grid"])(
+    "adds a drawn frame to the end of %s flow without rewriting the parent",
     (display) => {
       const operations = designFrameInsertionOperations(
         { ...parent, styles: { ...parent.styles, display } },
@@ -174,17 +189,34 @@ describe("child frame insertion", () => {
         { x: 210, y: 220 },
       );
       expect(operations).toHaveLength(1);
-      expect(operations[0]).toMatchObject({
-        type: "node.set-html",
-        nodeId: "parent",
-      });
       const insertion = operations[0];
       if (insertion?.type !== "node.set-html")
         throw new Error("Missing insertion");
+      expect(insertion).toMatchObject({ nodeId: "parent", mode: "append" });
       expect(insertion.html).toContain(
         "display:block;position:relative;width:100px;height:100px;",
       );
       expect(insertion.html).not.toContain("left:");
     },
   );
+
+  it("places a drawn frame absolutely inside an ordinary block parent", () => {
+    const operations = designFrameInsertionOperations(
+      parent,
+      "child",
+      { x: 10, y: 20 },
+      { x: 210, y: 220 },
+    );
+    expect(operations[0]).toMatchObject({
+      type: "node.set-styles",
+      nodeId: "parent",
+      styles: { position: "relative" },
+    });
+    const insertion = operations[1];
+    if (insertion?.type !== "node.set-html")
+      throw new Error("Missing insertion");
+    expect(insertion.html).toContain(
+      "display:block;position:absolute;left:0px;top:0px;width:100px;height:100px;",
+    );
+  });
 });
