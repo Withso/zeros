@@ -1164,6 +1164,22 @@ describe("permissionMenuItems (native permission modes shown in the '+' menu)", 
       ),
     ).toBe("accept-edits");
   });
+  it("omits Local modes the live session does not advertise (managed Codex policy)", () => {
+    const advertised = [
+      { id: "auto-edit", name: "Auto-Edit" },
+      { id: "read-only", name: "Read-Only" },
+    ];
+    expect(
+      permissionMenuItems("codex", "gpt-5.6-sol", null, undefined, advertised),
+    ).toEqual([{ modeId: "auto-edit", label: "Approve for me" }]);
+    expect(
+      coerceModeIdForModel("codex", "gpt-5.6-sol", "full-access", null, undefined, advertised),
+    ).toBe("auto-edit");
+    // Before bind the session advertises nothing; the static vocabulary stays.
+    expect(
+      permissionMenuItems("codex", "gpt-5.6-sol", null, undefined, []).map((i) => i.modeId),
+    ).toEqual(["ask", "auto-edit", "full-access"]);
+  });
   it("agentHasPermissionMenu is true for every native family, false otherwise", () => {
     expect(agentHasPermissionMenu("claude", "claude-haiku-4-5")).toBe(true);
     expect(agentHasPermissionMenu("codex", "gpt-5.5")).toBe(true);

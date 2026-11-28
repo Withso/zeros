@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { createRequire } from "node:module";
 import path, { dirname, join } from "node:path";
-import { codexModePolicy, codexQuestionFeatureArgs, mapCodexUserInputToQuestion, mapNativeQuestionAnswerToCodex, isCodexApprovalMethod,
+import { codexModeAllowed, codexModePolicy, codexPolicyBlockedMessage, resolveCodexMode, type CodexPolicyRequirements, codexQuestionFeatureArgs, mapCodexUserInputToQuestion, mapNativeQuestionAnswerToCodex, isCodexApprovalMethod,
   mapCodexApprovalToPermission, mapCodexPermissionResponse, defaultCodexApprovalResponse, codexFileChangePaths,
   type ContentBlock, type PromptResponse, type SessionNotification, type QuestionResponse, type RequestPermissionResponse } from "@zeros/protocol/agent-events";
 import type { SteerOutcome } from "@zeros/protocol/messages";
@@ -60,6 +60,7 @@ export class CodexDriver implements Driver {
   private nativeSessionId?: string;
   private model?: string;
   private modeId: "read-only" | "full-access" = "full-access";
+  private policyRequirements: CodexPolicyRequirements | null = null;
   private readonly lifetime = new AbortController();
   private readonly fileEditPathsByItemId = new Map<string, string[]>();
   private effort?: ReturnType<typeof codexEffort>;
@@ -117,6 +118,13 @@ export class CodexDriver implements Driver {
     try {
       await this.rpc.request("initialize", { clientInfo: { name: "zeros_cloud_worker", title: "Zeros", version: "0.0.0" }, capabilities: { experimentalApi: true } });
       this.rpc.notify("initialized", {});
+      // Managed policy (e.g. requirements.toml in the Cloud Computer) rejects a
+      // thread outside its allow-lists, so bound the mode before thread/start.
+      this.policyRequirements = await this.readPolicyRequirements();
+      const requestedMode = this.modeId;
+      const startMode = resolveCodexMode(requestedMode, this.policyRequirements, ["read-only", "full-access"]);
+      if (startMode !== "read-only" && startMode !== "full-access") throw new Error(codexPolicyBlockedMessage(this.policyRequirements));
+      this.modeId = startMode;
       const response = await this.rpc.request<{ thread: { id: string }; model?: string }>(input.nativeSessionId ? "thread/resume" : "thread/start", {
         ...(input.nativeSessionId ? { threadId: input.nativeSessionId, excludeTurns: true } : {}),
         cwd: input.cwd, ...(input.model ? { model: input.model } : {}),
@@ -131,6 +139,8 @@ export class CodexDriver implements Driver {
       this.model = response.model ?? input.model;
       this.mapper.handle("thread/started", { thread: { id: this.nativeSessionId } });
       this.state = "ready";
+      if (this.modeId !== requestedMode) for (const emit of this.listeners) emit({ sessionId: input.sessionId,
+        update: { sessionUpdate: "current_mode_update", currentModeId: this.modeId } });
       driverTiming(this.input, "process_ready");
       return { nativeSessionId: this.nativeSessionId };
     } catch (error) {
@@ -207,6 +217,7 @@ export class CodexDriver implements Driver {
   async setMode(modeId: string): Promise<void> {
     this.assertReady();
     if (modeId !== "read-only" && modeId !== "full-access") throw new Error("Invalid Codex mode.");
+    if (!codexModeAllowed(modeId, this.policyRequirements)) throw new Error(codexPolicyBlockedMessage(this.policyRequirements, modeId));
     this.modeId = modeId;
     for (const emit of this.listeners) emit({ sessionId: this.input!.sessionId,
       update: { sessionUpdate: "current_mode_update", currentModeId: modeId } });
@@ -388,6 +399,19 @@ export class CodexDriver implements Driver {
 
   private assertReady(): void {
     if (this.state !== "ready" || !this.rpc || !this.nativeSessionId) throw new Error("Codex driver is not ready.");
+  }
+  /** Older app-servers lack the method; a failed read means unrestricted. */
+  private async readPolicyRequirements(): Promise<CodexPolicyRequirements | null> {
+    try {
+      const response = await this.rpc!.request<{ requirements?: { allowedApprovalPolicies?: unknown; allowedSandboxModes?: unknown } | null }>(
+        "configRequirements/read", undefined, { fatalTimeout: false });
+      const requirements = response?.requirements;
+      if (!requirements || typeof requirements !== "object") return null;
+      return {
+        allowedApprovalPolicies: Array.isArray(requirements.allowedApprovalPolicies) ? requirements.allowedApprovalPolicies : null,
+        allowedSandboxModes: Array.isArray(requirements.allowedSandboxModes) ? requirements.allowedSandboxModes : null,
+      };
+    } catch { return null; }
   }
   private redact(message: string): string {
     return redactDriverMessage(message, this.input);

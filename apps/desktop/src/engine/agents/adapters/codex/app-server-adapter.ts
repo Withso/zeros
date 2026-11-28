@@ -1,6 +1,6 @@
 import { mapCodexApprovalToPermission, mapCodexPermissionResponse,
   defaultCodexApprovalResponse as defaultMethodResponse, codexFileChangePaths as fileChangePaths } from "@zeros/protocol/agent-events";
-import { codexModePolicy } from "@zeros/protocol/agent-events";
+import { codexModeAllowed, codexModePolicy, codexPolicyBlockedMessage, resolveCodexMode, type CodexPolicyRequirements } from "@zeros/protocol/agent-events";
 import { mapCodexUserInputToQuestion as mapUserInputToQuestion, mapNativeQuestionAnswerToCodex } from "@zeros/protocol/agent-events";
 import type { SteerOutcome } from "@zeros/protocol/messages";
 import { normalizeProviderError, providerErrorFailure } from "../shared/provider-error";
@@ -156,6 +156,7 @@ import type {
 } from "@zeros/protocol/agent-events";
 import type { AccountDetails } from "@zeros/protocol/messages";
 import type { GetAccountResponse } from "./generated/v2/GetAccountResponse";
+import type { ConfigRequirementsReadResponse } from "./generated/v2/ConfigRequirementsReadResponse";
 import type { GetAccountParams } from "./generated/v2/GetAccountParams";
 import type { GetAccountRateLimitsResponse } from "./generated/v2/GetAccountRateLimitsResponse";
 import type { RateLimitSnapshot } from "./generated/v2/RateLimitSnapshot";
@@ -289,6 +290,16 @@ const CODEX_MODES: SessionMode[] = [
 
 export type CodexModeId = "ask" | "auto-edit" | "full-access" | "read-only";
 
+/** The modes managed policy permits exactly. Every mode is offered when no
+ * requirements are configured or the app-server cannot report them. */
+export function codexAvailableModes(
+  requirements: CodexPolicyRequirements | null,
+): SessionMode[] {
+  return CODEX_MODES.filter((mode) =>
+    codexModeAllowed(mode.id as CodexModeId, requirements),
+  );
+}
+
 /** Resolve the renderer's persisted permission posture (plus legacy/native
  * spellings) before thread/start. AGENT_SET_MODE remains the live update path,
  * but seeding from env closes the create/resume window in which the first turn
@@ -370,6 +381,9 @@ export interface CodexSession {
   threadModel: string | null;
   /** Composite mode applied as turn/start overrides. */
   modeId: CodexModeId;
+  /** Approval/sandbox allow-lists from `configRequirements/read` at boot;
+   *  null when unrestricted or unreported. */
+  policyRequirements: CodexPolicyRequirements | null;
   /** Most recent in-flight turn id, for interruptTurn(). */
   activeTurnId: string | null;
   /** Settings belong to one prompt and runtime, including its pending ACK.
@@ -1162,7 +1176,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
         }),
         modes: {
           currentModeId: session.modeId,
-          availableModes: CODEX_MODES,
+          availableModes: codexAvailableModes(session.policyRequirements),
         },
       },
       initialize,
@@ -1225,7 +1239,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
       }),
       modes: {
         currentModeId: session.modeId,
-        availableModes: CODEX_MODES,
+        availableModes: codexAvailableModes(session.policyRequirements),
       },
       resumedFresh,
     };
@@ -2025,7 +2039,8 @@ export class CodexAppServerAdapter implements AgentAdapter {
     const rebooted = this.sessions.get(zerosSessionId);
     if (!rebooted) return;
     // The permission posture is session state, not part of the spawn env.
-    rebooted.modeId = modeId;
+    // The new connection's managed policy still bounds it.
+    rebooted.modeId = resolveCodexMode(modeId, rebooted.policyRequirements) ?? rebooted.modeId;
     rebooted.needsHistoryReplay = session.needsHistoryReplay || loaded.resumedFresh === true;
     if (loaded.providerBinding && rebooted.threadId !== threadId) {
       this.ctx.emit.onSessionUpdate(this.agentId, {
@@ -2048,6 +2063,14 @@ export class CodexAppServerAdapter implements AgentAdapter {
       opts.modeId === "full-access" ||
       opts.modeId === "read-only"
     ) {
+      if (!codexModeAllowed(opts.modeId, session.policyRequirements)) {
+        throw new AgentFailureError({
+          kind: "protocol-error",
+          stage: "setMode",
+          agentId: this.agentId,
+          message: codexPolicyBlockedMessage(session.policyRequirements, opts.modeId),
+        });
+      }
       session.modeId = opts.modeId;
       this.ctx.emit.onSessionUpdate(this.agentId, {
         sessionId: session.zerosSessionId,
@@ -2233,6 +2256,33 @@ export class CodexAppServerAdapter implements AgentAdapter {
     } finally {
       // Dispose whatever booted — even if the race above timed out waiting.
       void boot.then((h) => h.dispose()).catch(() => {});
+    }
+  }
+
+  /** Managed approval/sandbox allow-lists. Older app-servers lack the method
+   *  and a failed read must not block a chat, so both mean unrestricted. */
+  private async readPolicyRequirements(
+    runtime: CodexAppServerHandle,
+  ): Promise<CodexPolicyRequirements | null> {
+    try {
+      const resp = await runtime.requestTyped<
+        "configRequirements/read",
+        ConfigRequirementsReadResponse
+      >("configRequirements/read", undefined, { timeoutMs: 5_000 });
+      const requirements = resp?.requirements;
+      if (!requirements || typeof requirements !== "object") return null;
+      return {
+        allowedApprovalPolicies: Array.isArray(requirements.allowedApprovalPolicies) ? requirements.allowedApprovalPolicies : null,
+        allowedSandboxModes: Array.isArray(requirements.allowedSandboxModes) ? requirements.allowedSandboxModes : null,
+      };
+    } catch (error) {
+      this.ctx.emit.onAgentStderr(
+        this.agentId,
+        `[codex-app-server] Managed requirements unavailable; permission modes are unrestricted: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+      return null;
     }
   }
 
@@ -2439,6 +2489,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
       }
     };
     const runtime = await bootRuntime();
+    const policyRequirementsRead = this.readPolicyRequirements(runtime);
     // A new chat waits for the account's model catalog so its picker is right
     // at once. Ask now, alongside the MCP read and thread/start; the later
     // discovery joins this flight, and a fresh catalog makes this a no-op.
@@ -2499,6 +2550,21 @@ export class CodexAppServerAdapter implements AgentAdapter {
       throw error;
     }
 
+    // A thread/start or turn/start outside the managed allow-lists fails as a
+    // configuration error, so the mode is bounded before either is sent.
+    const policyRequirements = await policyRequirementsRead;
+    const startMode = resolveCodexMode(initialMode, policyRequirements);
+    if (!startMode) {
+      modelDiscovery.invalidate(modelState);
+      await runtime.dispose().catch(() => {});
+      await removeSessionDir(zerosSessionId).catch(() => {});
+      throw new AgentFailureError({
+        kind: "protocol-error",
+        stage: opts.kind === "resume" ? "loadSession" : "newSession",
+        agentId: this.agentId,
+        message: codexPolicyBlockedMessage(policyRequirements),
+      });
+    }
     // Resume can emit the restored cumulative snapshot before its RPC returns.
     // Capture it before constructing the transcript translator.
     let restoredUsage: unknown;
@@ -2559,7 +2625,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
             buildThreadStartParams(
               opts.cwd,
               opts.env,
-              initialMode,
+              startMode,
               opts.systemInstruction,
               nativeMcpConfig,
             ),
@@ -2574,7 +2640,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
           buildThreadStartParams(
             opts.cwd,
             opts.env,
-            initialMode,
+            startMode,
             opts.systemInstruction,
             nativeMcpConfig,
           ),
@@ -2693,7 +2759,8 @@ export class CodexAppServerAdapter implements AgentAdapter {
       threadId,
       providerSessionId,
       threadModel,
-      modeId: initialMode,
+      modeId: startMode,
+      policyRequirements,
       activeTurnId: null,
       activeTurns: new Map(),
       sawCollabTurns: false,

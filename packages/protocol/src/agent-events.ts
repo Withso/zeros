@@ -1355,7 +1355,8 @@ export interface InitializeResponse {
 
 export { buildClaudeQuestionRequest, buildAskUserQuestionOutput, claudeQuestionHookOutput, formatAnswerForClaude, mapCodexUserInputToQuestion, mapNativeQuestionAnswerToCodex } from "./agent-questions";
 
-export { cloudModeId, cloudPermissionMode, cloudSessionModes, claudePermissionMode, claudeRequiresExplicitApproval, codexModePolicy, codexQuestionFeatureArgs, cursorSdkMode, cursorAutoReview } from "./agent-modes";
+export { cloudModeId, cloudPermissionMode, cloudSessionModes, claudePermissionMode, claudeRequiresExplicitApproval, codexModePolicy, codexModeAllowed, resolveCodexMode, codexPolicyBlockedMessage, codexQuestionFeatureArgs, cursorSdkMode, cursorAutoReview } from "./agent-modes";
+export type { CodexPermissionModeId, CodexPolicyRequirements } from "./agent-modes";
 export type { CloudPermissionMode } from "./agent-modes";
 
 export { isCodexApprovalMethod, mapCodexApprovalToPermission, mapCodexPermissionResponse, defaultCodexApprovalResponse, codexFileChangePaths } from "./agent-approvals";

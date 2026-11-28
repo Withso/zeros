@@ -755,12 +755,15 @@ const PERMISSION_MODE_ORDER: Record<string, string[]> = {
 export type PermissionMenuItem = { modeId: string; label: string };
 
 /** The modes the permission toggle cycles for this agent and model, labelled,
- *  in display order; [] hides the toggle. */
+ *  in display order; [] hides the toggle. `advertisedModes` is the bound Local
+ *  session's list: a non-empty one drops static modes the provider refuses
+ *  (Codex managed policy) while keeping the static labels and order. */
 export function permissionMenuItems(
   agentId: string | null,
   model: string | null = null,
   boundary: ExecutionBoundaryStatus | null = null,
   availableModes?: readonly SessionMode[],
+  advertisedModes?: readonly SessionMode[],
 ): PermissionMenuItem[] {
   if (availableModes !== undefined) return availableModes.map(mode => ({ modeId: mode.id, label: mode.name }));
   const fam = agentFamily(agentId);
@@ -776,10 +779,15 @@ export function permissionMenuItems(
   const bypassDisabled =
     designProtected &&
     boundary.parity.restrictions.includes("provider-bypass-mode-disabled");
+  const advertised = advertisedModes?.length
+    ? new Set(advertisedModes.map((mode) => mode.id))
+    : null;
   return order
     .filter(
       (id) =>
-        !(dropAuto && id === "auto") && !(bypassDisabled && id === "bypass"),
+        !(dropAuto && id === "auto") &&
+        !(bypassDisabled && id === "bypass") &&
+        (!advertised || advertised.has(id)),
     )
     .map((id) => ({
       modeId: id,
@@ -792,8 +800,9 @@ export function agentHasPermissionMenu(
   agentId: string | null,
   model: string | null = null,
   availableModes?: readonly SessionMode[],
+  advertisedModes?: readonly SessionMode[],
 ): boolean {
-  return permissionMenuItems(agentId, model, null, availableModes).length > 0;
+  return permissionMenuItems(agentId, model, null, availableModes, advertisedModes).length > 0;
 }
 
 // Modes where the agent proposes instead of acting (Claude Plan, Codex Ask and
@@ -824,13 +833,14 @@ export function coerceModeIdForModel(
   modeId: string | null,
   boundary: ExecutionBoundaryStatus | null = null,
   availableModes?: readonly SessionMode[],
+  advertisedModes?: readonly SessionMode[],
 ): string | null {
   if (!modeId && availableModes !== undefined) {
     const defaultId = nativeModeIdForPosture(agentId, "danger");
     return availableModes.some(mode => mode.id === defaultId) ? defaultId : modeId;
   }
   if (!modeId) return modeId;
-  const items = permissionMenuItems(agentId, model, boundary, availableModes);
+  const items = permissionMenuItems(agentId, model, boundary, availableModes, advertisedModes);
   if (items.length === 0) return modeId;
   if (items.some((i) => i.modeId === modeId)) return modeId;
   if (availableModes !== undefined) {

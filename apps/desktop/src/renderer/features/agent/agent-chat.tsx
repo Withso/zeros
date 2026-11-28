@@ -1079,6 +1079,10 @@ function AgentChatBody({
   );
 
   const chatAgentId = chatThread?.agentId ?? session.agentId ?? null;
+  // A Local provider may advertise fewer modes than its static vocabulary
+  // (Codex under managed policy). Only the bound agent's own list applies.
+  const advertisedModes =
+    !cloudModes && session.agentId === chatAgentId ? session.availableModes : undefined;
 
   const planAgentModeId =
     effectiveModes.find((m) => PLAN_MODE_RX.test(m.id))?.id ?? "plan";
@@ -1201,6 +1205,7 @@ function AgentChatBody({
     }),
     session.boundary,
     cloudModes ? effectiveModes : undefined,
+    advertisedModes,
   );
 
   const permissionModes = permissionModesAvailable(chatThread?.folder ?? session.cwd, effectiveModes);
@@ -1208,6 +1213,7 @@ function AgentChatBody({
     chatAgentId,
     chatThread?.model ?? null,
     cloudModes ? effectiveModes : undefined,
+    advertisedModes,
   );
 
   // Dashed composer frame for the guarded "propose, don't act" modes — Claude
@@ -1558,6 +1564,7 @@ function AgentChatBody({
             model={chatThread.model}
             boundary={session.boundary}
             availableModes={cloudModes ? effectiveModes : undefined}
+            advertisedModes={advertisedModes}
             currentModeId={currentPermissionModeId}
             onSelectMode={selectNativeMode}
           />
@@ -1584,6 +1591,7 @@ function AgentChatBody({
     showPermissionToggle,
     cloudModes,
     effectiveModes,
+    advertisedModes,
     currentPermissionModeId,
     selectNativeMode,
     maybeShowCostBumpToast,
