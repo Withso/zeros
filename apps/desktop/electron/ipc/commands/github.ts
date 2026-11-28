@@ -370,7 +370,7 @@ export const ghPatConnect: CommandHandler = async (args) => {
   const token = requireString(args, "token", "gh_pat_connect");
   const owner = getProductAccountIdForMain();
   const previous = await githubCredentialStore.get("pat");
-  const { login } = await verifyGithubToken(token);
+  const { login, githubUserId } = await verifyGithubToken(token);
   assertAccount(owner);
   assertAccount(args.userId);
   const next: GithubCredential = {
@@ -378,6 +378,7 @@ export const ghPatConnect: CommandHandler = async (args) => {
     accessToken: token,
     ...(owner ? { ownerSub: owner } : {}),
     login,
+    githubUserId,
     gitHost: GITHUB_GIT_HOST,
     gitHttpUsername: GITHUB_GIT_HTTP_USERNAME,
   };

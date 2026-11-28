@@ -84,6 +84,19 @@ const changed = () =>
     "github_authorization_changed",
     "Your cloud GitHub connection changed. Refresh before continuing.",
   );
+// Mirrors githubAccountMismatchMessage in packages/protocol/src/github-auth.ts (the control plane stays standalone).
+const METHOD_NAMES = { "github-app": "GitHub App", pat: "personal access token" } as const;
+function githubAccountMismatchMessage(method: CloudGithubMethod, login: string, peerMethod: CloudGithubMethod, peerLogin: string): string {
+  return `This ${METHOD_NAMES[method]} is for @${login}, but your ${METHOD_NAMES[peerMethod]} is for @${peerLogin}. `
+    + `Use one GitHub account for both, or disconnect the ${METHOD_NAMES[peerMethod]} in Personal → Integrations → GitHub.`;
+}
+function assertMethodIdentity(value: Snapshot, method: CloudGithubMethod, identity: CloudGithubAccount): void {
+  const peer = value.rows.find(row => row.method !== method);
+  if (peer && peer.github_user_id !== identity.id) {
+    throw new HttpError(409, "github_account_mismatch",
+      githubAccountMismatchMessage(method, identity.login, peer.method, peer.github_login));
+  }
+}
 const required = () =>
   new HttpError(
     409,
@@ -300,6 +313,7 @@ export class CloudGithubConnectionStore {
       throw expired();
     return this.edit(scope, expected, async (tx, value) => {
       await checkAuthority?.(tx);
+      assertMethodIdentity(value, material.method, identity);
       const seal = {
         id: randomUUID(),
         generation: randomUUID(),
@@ -349,7 +363,9 @@ export class CloudGithubConnectionStore {
       await verifyPat(material.accessToken, row.github_user_id);
     }
     await this.edit(scope, expected, async (tx, value) => {
-      if (!value.rows.some((row) => row.method === method)) throw required();
+      const row = value.rows.find(row => row.method === method);
+      if (!row) throw required();
+      assertMethodIdentity(value, method, { id: row.github_user_id, login: row.github_login });
       await this.selection(tx, value.scope, method);
     });
   }

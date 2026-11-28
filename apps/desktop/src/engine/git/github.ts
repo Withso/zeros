@@ -560,7 +560,7 @@ export async function detectGhCli(): Promise<GhCliResult> {
 /** Validate a candidate token without mutating the selected credential. */
 export async function verifyGithubToken(
   token: string,
-): Promise<{ login: string }> {
+): Promise<{ login: string; githubUserId: string }> {
   const trimmed = typeof token === "string" ? token.trim() : "";
   if (!trimmed) {
     throw new GitError({
@@ -574,7 +574,10 @@ export async function verifyGithubToken(
     // No rememberLogin() here either: this validates a CANDIDATE token and
     // deliberately does not mutate the selected credential, so it is not
     // evidence about the active account.
-    return { login: data.login };
+    if (!Number.isSafeInteger(data.id) || data.id <= 0) {
+      throw new Error("GitHub did not return a valid account ID.");
+    }
+    return { login: data.login, githubUserId: String(data.id) };
   } catch (err) {
     throw wrapApiError(err, "GitHub rejected the token");
   }

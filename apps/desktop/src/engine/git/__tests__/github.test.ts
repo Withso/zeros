@@ -257,7 +257,7 @@ function makeOctokitMock() {
   return {
     octokit: fake,
     calls,
-    setUser(u: { login: string; avatar_url?: string | null }) {
+    setUser(u: { login: string; id?: number; avatar_url?: string | null }) {
       user = u;
     },
     setUserResponse(fn: (() => unknown) | null) {
@@ -537,9 +537,10 @@ describe("github", () => {
   describe("verifyGithubToken", () => {
     it("validates a candidate without replacing the active credential", async () => {
       store.setToken("existing-token");
-      mock.setUser({ login: "candidate-user" });
+      mock.setUser({ login: "candidate-user", id: 12345 });
 
       await expect(verifyGithubToken("candidate-token")).resolves.toEqual({
+        githubUserId: "12345",
         login: "candidate-user",
       });
       expect(await store.store.get()).toBe("existing-token");

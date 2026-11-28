@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { selectGithubAppConnection } from "../github-app-accounts";
 
 import type {
   GithubAuthMethod,
@@ -27,6 +28,7 @@ function harness(options?: {
   currentAccount?: () => string | null;
   selected?: GithubAuthMethod | null;
   gh?: GithubCredential | null;
+  verifyIdentity?: (token: string) => Promise<{ login: string; githubUserId: string }>;
 }) {
   const secrets = new Map<string, string>();
   let selected = options?.selected ?? null;
@@ -35,7 +37,16 @@ function harness(options?: {
   const store = createGithubCredentialStore({
     ...(options?.currentAccount ? { currentAccount: options.currentAccount } : {}),
     readSecret: (account) => secrets.get(account) ?? null,
-    writeSecret: (account, value) => secrets.set(account, value),
+    verifyIdentity: options?.verifyIdentity ?? (async token => ({ login: token.startsWith("pat") ? "pat-user" : "octocat", githubUserId: "123" })),
+    updateSecrets: (keys, edit) => {
+      const before = Object.fromEntries(keys.map(key => [key, secrets.get(key) ?? null]));
+      const after = edit(before);
+      for (const key of keys) {
+        const value = after[key];
+        if (value == null) secrets.delete(key);
+        else secrets.set(key, value);
+      }
+    },
     deleteSecret: (account) => secrets.delete(account),
     readSelectedMethod: () => selected,
     writeSelectedMethod: (method) => {
@@ -58,6 +69,95 @@ function harness(options?: {
 }
 
 describe("GitHub credential store", () => {
+  it.each(["pat", "github-app"] as const)("keeps credential bytes and selection after a mismatched second method (%s first)", async method => {
+    const other = method === "pat" ? "github-app" : "pat";
+    const ownerSub = "11111111-1111-4111-8111-111111111111";
+    const h = harness({ currentAccount: () => ownerSub });
+    await h.store.set(method, { ...gitIdentity, method, ownerSub, accessToken: "first", login: "first-account", githubUserId: "123" });
+    await h.store.setSelectedMethod(method);
+    const before = [...h.secrets];
+    await expect(h.store.set(other, { ...gitIdentity, method: other, ownerSub, accessToken: "second", login: "second-account", githubUserId: "456" }))
+      .rejects.toThrow(/is for @second-account, but your .* is for @first-account\. Use one GitHub account for both, or disconnect/);
+    expect([...h.secrets]).toEqual(before);
+    expect(h.selected()).toBe(method);
+    await h.store.set(other, { ...gitIdentity, method: other, ownerSub, accessToken: "second", login: "renamed", githubUserId: "123" });
+    expect(await h.store.get(other)).toMatchObject({ login: "renamed", githubUserId: "123" });
+  });
+
+  it("verifies a login-only Local record once and persists the ID and current login", async () => {
+    const verifyIdentity = vi.fn(async () => ({ login: "renamed", githubUserId: "123" }));
+    const h = harness({ selected: "pat", verifyIdentity });
+    h.secrets.set(GITHUB_PAT_ACCOUNT, JSON.stringify({ ...gitIdentity, method: "pat", accessToken: "old", login: "old-name" }));
+    expect(await h.store.getSelectedCredential()).toMatchObject({ login: "renamed", githubUserId: "123" });
+    expect(await h.store.getSelectedCredential()).toMatchObject({ githubUserId: "123" });
+    expect(JSON.parse(h.secrets.get(GITHUB_PAT_ACCOUNT)!)).toMatchObject({ login: "renamed", githubUserId: "123" });
+    expect(verifyIdentity).toHaveBeenCalledExactlyOnceWith("old");
+  });
+
+  it("keeps using a login-only record while GitHub is unreachable or its saved peer differs", async () => {
+    const verifyIdentity = vi.fn(async (token: string) => {
+      if (token === "offline") throw new Error("offline");
+      return { login: token, githubUserId: token === "app" ? "456" : "123" };
+    });
+    const h = harness({ selected: "pat", verifyIdentity });
+    const legacy = { ...gitIdentity, method: "pat", accessToken: "offline", login: "old-name" } as const;
+    h.secrets.set(GITHUB_PAT_ACCOUNT, JSON.stringify(legacy));
+    expect(await h.store.getSelectedCredential()).toEqual(legacy);
+    expect(await h.store.getSelectedCredential()).toEqual(legacy);
+    expect(verifyIdentity).toHaveBeenCalledOnce();
+    await h.store.set("github-app", { ...gitIdentity, method: "github-app", accessToken: "app", login: "app", githubUserId: "456" });
+    expect(await h.store.get("github-app")).toMatchObject({ githubUserId: "456" });
+
+    const mixed = harness({ selected: "pat", verifyIdentity });
+    mixed.secrets.set(GITHUB_PAT_ACCOUNT, JSON.stringify({ ...legacy, accessToken: "pat" }));
+    mixed.secrets.set(GITHUB_APP_ACCOUNT, JSON.stringify({ ...gitIdentity, method: "github-app", accessToken: "app", login: "app" }));
+    expect(await mixed.store.getSelectedCredential()).toMatchObject({ accessToken: "pat", githubUserId: "123" });
+    await expect(mixed.store.setSelectedMethod("github-app")).rejects.toThrow(/@app.*@pat/);
+    expect(mixed.selected()).toBe("pat");
+  });
+
+  it("keeps another Zeros account's App parked when this account saves a token for a different GitHub user", async () => {
+    const ownerA = "11111111-1111-4111-8111-111111111111", ownerB = "22222222-2222-4222-8222-222222222222";
+    let current = ownerA;
+    const h = harness({ currentAccount: () => current });
+    await h.store.set("github-app", { ...gitIdentity, method: "github-app", ownerSub: ownerA, accessToken: "app-a", login: "alice", githubUserId: "111" });
+    current = ownerB;
+    // Bob's token is checked against Bob's credentials only, never Alice's App.
+    await h.store.set("pat", { ...gitIdentity, method: "pat", ownerSub: ownerB, accessToken: "pat-b", login: "bob", githubUserId: "222" });
+    expect(await h.store.get("pat")).toMatchObject({ login: "bob", githubUserId: "222" });
+    // The runtime restores an account's parked App when that account becomes current again.
+    current = ownerA;
+    selectGithubAppConnection({ update: (keys, edit) => {
+      const after = edit(Object.fromEntries(keys.map(key => [key, h.secrets.get(key) ?? null])));
+      for (const key of keys) { const value = after[key]; if (value == null) h.secrets.delete(key); else h.secrets.set(key, value); }
+    } }, ownerA);
+    expect(await h.store.get("github-app")).toMatchObject({ accessToken: "app-a", login: "alice", githubUserId: "111" });
+  });
+
+  it("does not return a login-only token that was removed while it was being verified", async () => {
+    let resume!: (value: { githubUserId: string; login: string }) => void;
+    const verifyIdentity = vi.fn(() => new Promise<{ githubUserId: string; login: string }>(resolve => { resume = resolve; }));
+    const h = harness({ selected: "pat", verifyIdentity });
+    h.secrets.set(GITHUB_PAT_ACCOUNT, JSON.stringify({ ...gitIdentity, method: "pat", accessToken: "old", login: "old-name" }));
+    const read = h.store.getSelectedCredential();
+    await vi.waitFor(() => expect(verifyIdentity).toHaveBeenCalledOnce());
+    h.secrets.delete(GITHUB_PAT_ACCOUNT);
+    resume({ githubUserId: "123", login: "old-name" });
+    expect(await read).toBeNull();
+  });
+
+  it("rejects a competing identity that arrives during verification", async () => {
+    let resume!: (value: { githubUserId: string; login: string }) => void;
+    const verifyIdentity = vi.fn(() => new Promise<{ githubUserId: string; login: string }>(resolve => { resume = resolve; }));
+    const h = harness({ verifyIdentity });
+    const pending = h.store.set("pat", { ...gitIdentity, method: "pat", accessToken: "first", login: "first" });
+    await vi.waitFor(() => expect(verifyIdentity).toHaveBeenCalledOnce());
+    await h.store.set("github-app", { ...gitIdentity, method: "github-app", accessToken: "second", githubUserId: "456", login: "second" });
+    resume({ githubUserId: "123", login: "first" });
+    await expect(pending).rejects.toThrow();
+    expect(await h.store.get("pat")).toBeNull();
+  });
+
   it("preserves existing device PATs without adopting them when a Zeros account signs in", async () => {
     let current: string | null = null;
     const { store, secrets } = harness({ currentAccount: () => current, selected: "pat" });
@@ -72,7 +172,7 @@ describe("GitHub credential store", () => {
     await expect(store.set("pat", devicePat)).rejects.toThrow();
 
     current = null;
-    expect(await store.getSelectedCredential()).toEqual(devicePat);
+    expect(await store.getSelectedCredential()).toMatchObject(devicePat);
     expect(store.readLegacyToken()).toBe("device-legacy");
   });
   it("restores each Zeros account's own PAT for the same GitHub login after a switch", async () => {
@@ -86,7 +186,7 @@ describe("GitHub credential store", () => {
     await expect(store.set("pat", pat)).rejects.toThrow();
     await store.set("pat", { ...pat, accessToken: "synthetic-token-b", ownerSub: b });
     current = a;
-    expect(await store.getSelectedCredential()).toEqual(pat);
+    expect(await store.getSelectedCredential()).toEqual({ ...pat, githubUserId: "123" });
     await store.clear("pat");
     current = b;
     expect(await store.getSelectedCredential()).toMatchObject({ accessToken: "synthetic-token-b" });
@@ -231,7 +331,8 @@ describe("GitHub credential store", () => {
     const writeSelectedMethod = vi.fn();
     const broken = createGithubCredentialStore({
       readSecret: (account) => h.secrets.get(account) ?? null,
-      writeSecret: () => {
+      verifyIdentity: async () => ({ githubUserId: "123", login: "octocat" }),
+      updateSecrets: () => {
         throw new Error("keystore unavailable");
       },
       deleteSecret: vi.fn(),
@@ -350,7 +451,8 @@ describe("legacy GitHub credential migration", () => {
     h.secrets.set(GITHUB_LEGACY_ACCOUNT, "legacy-token");
     const broken = createGithubCredentialStore({
       readSecret: (account) => h.secrets.get(account) ?? null,
-      writeSecret: () => {
+      verifyIdentity: async () => ({ githubUserId: "123", login: "octocat" }),
+      updateSecrets: () => {
         throw new Error("disk full");
       },
       deleteSecret: (account) => h.secrets.delete(account),

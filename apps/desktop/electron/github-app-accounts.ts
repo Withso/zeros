@@ -7,7 +7,7 @@ import {
   sanitizeGithubCredential,
   type GithubCredential,
 } from "@zeros/protocol/github-auth";
-import { GITHUB_APP_ACCOUNT } from "./github-credential-store";
+export const GITHUB_APP_ACCOUNT = "github.app";
 
 export const GITHUB_APP_PARKED_ACCOUNT = "github.app.parked";
 const MAX_PARKED_CONNECTIONS = 12;
@@ -63,23 +63,30 @@ function serializeParked(parked: ReadonlyMap<string, GithubAppCredential>): stri
  */
 export function selectGithubAppConnection(store: GithubAppSlotStore, owner: string | null): boolean {
   let changed = false;
-  store.update([GITHUB_APP_ACCOUNT, GITHUB_APP_PARKED_ACCOUNT], (values) => {
-    const inUse = parseSlot(values[GITHUB_APP_ACCOUNT]);
-    if (!owner || (values[GITHUB_APP_ACCOUNT] && !inUse?.ownerSub) || inUse?.ownerSub === owner) {
-      return values;
-    }
-    const parked = parseParked(values[GITHUB_APP_PARKED_ACCOUNT]);
-    if (inUse?.ownerSub) {
-      parked.delete(inUse.ownerSub);
-      parked.set(inUse.ownerSub, inUse);
-    }
-    const restored = parked.get(owner) ?? null;
-    parked.delete(owner);
-    changed = Boolean(inUse || restored);
-    return {
-      [GITHUB_APP_ACCOUNT]: restored ? JSON.stringify(restored) : null,
-      [GITHUB_APP_PARKED_ACCOUNT]: serializeParked(parked),
-    };
+  store.update([GITHUB_APP_ACCOUNT, GITHUB_APP_PARKED_ACCOUNT], values => {
+    const next = githubAppSlotsForOwner(values, owner);
+    changed = next !== values;
+    return next;
   });
   return changed;
+}
+
+export function githubAppSlotsForOwner(values: Record<string, string | null>, owner: string | null) {
+  const inUse = parseSlot(values[GITHUB_APP_ACCOUNT]);
+  if (!owner || (values[GITHUB_APP_ACCOUNT] && !inUse?.ownerSub) || inUse?.ownerSub === owner) {
+    return values;
+  }
+  const parked = parseParked(values[GITHUB_APP_PARKED_ACCOUNT]);
+  if (inUse?.ownerSub) {
+    parked.delete(inUse.ownerSub);
+    parked.set(inUse.ownerSub, inUse);
+  }
+  const restored = parked.get(owner) ?? null;
+  parked.delete(owner);
+  if (!inUse && !restored) return values;
+  return {
+    ...values,
+    [GITHUB_APP_ACCOUNT]: restored ? JSON.stringify(restored) : null,
+    [GITHUB_APP_PARKED_ACCOUNT]: serializeParked(parked),
+  };
 }

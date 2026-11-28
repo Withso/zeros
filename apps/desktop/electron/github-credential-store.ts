@@ -4,9 +4,11 @@
 // is non-secret TOML state supplied through the dependency adapter. gh CLI is
 // intentionally borrowed on demand and is never copied into safeStorage.
 
+import { GITHUB_APP_ACCOUNT, GITHUB_APP_PARKED_ACCOUNT, githubAppSlotsForOwner } from "./github-app-accounts";
 import {
   GITHUB_GIT_HOST,
   GITHUB_GIT_HTTP_USERNAME,
+  githubAccountMismatchMessage,
   githubCredentialToken,
   isGithubAuthMethod,
   sanitizeGithubCredential,
@@ -17,7 +19,7 @@ import {
 
 export const GITHUB_LEGACY_ACCOUNT = "github_oauth";
 export const GITHUB_PAT_ACCOUNT = "github.pat";
-export const GITHUB_APP_ACCOUNT = "github.app";
+export { GITHUB_APP_ACCOUNT } from "./github-app-accounts";
 
 export function isGithubCredentialAccount(account: string): boolean {
   return account === GITHUB_APP_ACCOUNT || account === GITHUB_LEGACY_ACCOUNT ||
@@ -27,7 +29,8 @@ export function isGithubCredentialAccount(account: string): boolean {
 export interface GithubCredentialStoreDependencies {
   currentAccount?(): string | null;
   readSecret(account: string): string | null;
-  writeSecret(account: string, value: string): void;
+  updateSecrets(keys: readonly string[], edit: (values: Record<string, string | null>) => Record<string, string | null>): void;
+  verifyIdentity(token: string): Promise<{ login: string; githubUserId: string }>;
   deleteSecret(account: string): void;
   readSelectedMethod(): GithubAuthMethod | null;
   writeSelectedMethod(method: GithubAuthMethod): void;
@@ -68,6 +71,45 @@ export function createGithubCredentialStore(
     const owner = method === "pat" && deps.currentAccount?.();
     return owner ? `${GITHUB_PAT_ACCOUNT}.${owner}` : accountFor(method);
   }
+  type Stored = Exclude<GithubCredential, { method: "gh-cli" }>;
+  let verifyAfterMs = 0;
+  async function verified(credential: Stored): Promise<Stored> {
+    if (credential.githubUserId) return credential;
+    // An unreachable GitHub or a dead token leaves the identity unknown, not mismatched.
+    return deps.verifyIdentity(credential.accessToken).then(identity => ({ ...credential, ...identity }), () => credential);
+  }
+
+  // Check both slots before publishing a candidate or using a login-only record.
+  // The final compare-and-swap also fences saves from a second Mac process.
+  // Reads pass enforce=false: a pair saved before this rule keeps working.
+  async function reconcile(method: Stored["method"], candidate?: Stored, enforce = true): Promise<Stored | null> {
+    const owner = deps.currentAccount?.() ?? null;
+    const keys = [GITHUB_APP_ACCOUNT, GITHUB_APP_PARKED_ACCOUNT, currentSlot("pat")];
+    const before = Object.fromEntries(keys.map(key => [key, deps.readSecret(key)]));
+    const slots = githubAppSlotsForOwner(before, owner);
+    const stored = (kind: Stored["method"]) => {
+      const record = parseSlot(slots[currentSlot(kind)] ?? null, kind);
+      return record && record.method !== "gh-cli" && (record.ownerSub ?? null) === owner ? record : null;
+    };
+    const value = candidate ?? stored(method);
+    if (!value) return null;
+    const peerMethod = method === "pat" ? "github-app" : "pat";
+    const peer = stored(peerMethod);
+    const [next, other] = await Promise.all([verified(value), peer ? verified(peer) : null]);
+    if (owner !== (deps.currentAccount?.() ?? null)) throw new Error("The Zeros account changed while verifying GitHub.");
+    if (enforce && other?.githubUserId && next.githubUserId && other.githubUserId !== next.githubUserId) {
+      throw new Error(githubAccountMismatchMessage(method, next.login, peerMethod, other.login));
+    }
+    if (candidate || next !== value || other !== peer) {
+      deps.updateSecrets(keys, current => {
+        if (keys.some(key => current[key] !== before[key])) throw new Error("Your GitHub connection changed. Try again.");
+        const result = { ...slots, [currentSlot(method)]: JSON.stringify(next) };
+        if (other && other !== peer) result[currentSlot(peerMethod)] = JSON.stringify(other);
+        return result;
+      });
+    }
+    return next;
+  }
   const store: HostGithubCredentialStore = {
     async getSelectedMethod() {
       // Product default: gh CLI is the selected row on a fresh install.
@@ -78,6 +120,7 @@ export function createGithubCredentialStore(
       if (!isGithubAuthMethod(method)) {
         throw new Error(`Unknown GitHub authentication method: ${method}`);
       }
+      if (method !== "gh-cli") await reconcile(method);
       deps.writeSelectedMethod(method);
       // The marker suppresses only borrowed gh credentials. Switching between
       // PAT and App must not silently re-enable an inactive CLI row.
@@ -116,7 +159,8 @@ export function createGithubCredentialStore(
         throw new Error("The Zeros account changed before the token was saved.");
       }
       const account = currentSlot(method);
-      deps.writeSecret(account, JSON.stringify(credential));
+      if (credential.method === "gh-cli") return;
+      await reconcile(method, credential);
 
       // A safeStorage encryption or whole-file write can fail. Confirm the
       // exact token reached the destination before callers switch methods or a
@@ -140,7 +184,14 @@ export function createGithubCredentialStore(
       if (method === "gh-cli" && store.isExplicitlyDisconnected()) {
         return null;
       }
-      const selected = await store.get(method);
+      let selected = await store.get(method);
+      if (selected && selected.method !== "gh-cli" && !selected.githubUserId && Date.now() >= verifyAfterMs) {
+        // Verification already tolerates an offline GitHub; a failure here means the slot or
+        // account changed meanwhile, so read the current slot rather than the captured one.
+        selected = await reconcile(selected.method, undefined, false).catch(() => null) ?? await store.get(method);
+        // Unverifiable now (offline or a revoked token): try again later, not on every read.
+        if (selected && selected.method !== "gh-cli" && !selected.githubUserId) verifyAfterMs = Date.now() + 10 * 60_000;
+      }
       if (selected) return selected;
       // One-release downgrade/recovery bridge: use the legacy token until the
       // inferring migration successfully writes and verifies its destination.

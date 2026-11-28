@@ -76,6 +76,35 @@ database("cloud GitHub connection ownership and rotation", () => {
       material,
     );
   }
+  it.each(["pat", "github-app"] as const)("keeps %s and its selection intact on an identity mismatch", async first => {
+    const initial = first === "pat" ? pat : app;
+    const second = first === "pat" ? app : pat;
+    await store.save(scope(), await store.fingerprint(scope()), identity, initial);
+    const before = await store.status(scope());
+    const stored = () => pool.query("SELECT * FROM cloud_github_credentials WHERE org_id=$1 AND owner_user_id=$2", [organizationId, userId]).then(result => result.rows);
+    const bytes = await stored();
+    await expect(store.save(scope(), before.generation, { id: "456", login: "different-user" }, second))
+      .rejects.toThrow(/is for @different-user, but your .* is for @contributor\. Use one GitHub account for both/);
+    expect(await store.status(scope())).toEqual(before);
+    expect(await stored()).toEqual(bytes);
+    await store.save(scope(), before.generation, { ...identity, login: "renamed" }, second);
+    expect((await store.status(scope())).selectedMethod).toBe(second.method);
+
+    const other = { organizationId, userId: otherUserId };
+    await store.save(other, await store.fingerprint(other), { id: "456", login: "different-user" }, second);
+    expect((await store.status(other)).methods[second.method].login).toBe("different-user");
+  });
+
+  it("commits only one of two concurrent first credentials for different identities", async () => {
+    const expected = await store.fingerprint(scope());
+    const results = await Promise.allSettled([
+      store.save(scope(), expected, identity, app),
+      store.save(scope(), expected, { id: "456", login: "different-user" }, pat),
+    ]);
+    expect(results.filter(result => result.status === "fulfilled")).toHaveLength(1);
+    expect(Object.values((await store.status(scope())).methods).filter(method => method.configured)).toHaveLength(1);
+  });
+
   it("refreshes a rejected but unexpired App token once and ignores late reports for its replacement", async () => {
     await store.save(scope(), await store.fingerprint(scope()), identity, app);
     const failedTokenSha256 = createHash("sha256").update(app.accessToken).digest("hex");

@@ -901,19 +901,19 @@ async function assertAuthorizedGithubLogin(
       "The GitHub authorization was disconnected. Connect the GitHub App again.",
     );
   }
-  if (expectedLogin.toLowerCase() !== input.login.toLowerCase() ||
-      (expected.rows[0]?.github_user_id != null && expected.rows[0].github_user_id !== input.githubUserId)) {
+  const expectedId = expected.rows[0]?.github_user_id;
+  if (expectedId != null ? expectedId !== input.githubUserId : expectedLogin.toLowerCase() !== input.login.toLowerCase()) {
     throw new HttpError(
       403,
       "github_account_mismatch",
-      "This GitHub credential does not belong to the connected account.",
+      `GitHub signed in as @${input.login}, but this Zeros account uses @${expectedLogin}. Sign in to GitHub as @${expectedLogin}, or disconnect the GitHub App in Personal → Integrations → GitHub first.`,
     );
   }
   await tx.query(
     `UPDATE github_authorizations
-     SET github_user_id = $3, git_author_name = $4, last_verified_at = now(), updated_at = now()
+     SET github_user_id = $3, git_author_name = $4, github_login = $5, last_verified_at = now(), updated_at = now()
      WHERE owner_user_id = $1 AND app_variant = $2`,
-    [input.ownerUserId, input.appVariant, input.githubUserId, input.gitName],
+    [input.ownerUserId, input.appVariant, input.githubUserId, input.gitName, input.login],
   );
 }
 
@@ -1758,6 +1758,7 @@ export function createGithubRoutes(
       });
       return c.json({
         login,
+        githubUserId,
         installations: snapshot.installations,
         complete: snapshot.complete,
       });

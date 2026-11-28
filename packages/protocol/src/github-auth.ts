@@ -31,6 +31,7 @@ export type GithubCredential = GitHttpCredentialIdentity &
       method: "pat";
       accessToken: string;
       login?: string;
+      githubUserId?: string;
       /** Absent on account-free and legacy device credentials. */
       ownerSub?: string;
     }
@@ -42,6 +43,7 @@ export type GithubCredential = GitHttpCredentialIdentity &
        * Main-process only; it is never projected into the engine. */
       refreshBinding?: string;
       login?: string;
+      githubUserId?: string;
       /** Account subject that completed the backend-bound handoff. Main process
        *  refuses to serve this credential to a different signed-in account. */
       ownerSub?: string;
@@ -159,6 +161,9 @@ export function sanitizeGithubCredential(
     return null;
   }
 
+  const githubUserId = input.githubUserId;
+  if (githubUserId !== undefined && (typeof githubUserId !== "string" || !/^[1-9][0-9]{0,15}$/.test(githubUserId))) return null;
+  const identity = githubUserId && input.method !== "gh-cli" ? { githubUserId } : {};
   if (input.method === "github-app") {
     const refreshToken =
       typeof input.refreshToken === "string" &&
@@ -230,6 +235,7 @@ export function sanitizeGithubCredential(
         : undefined;
     return {
       method: "github-app",
+      ...identity,
       accessToken,
       gitHost,
       gitHttpUsername,
@@ -251,10 +257,11 @@ export function sanitizeGithubCredential(
 
   if (input.method === "pat" && input.ownerSub !== undefined) {
     if (typeof input.ownerSub !== "string" || !/^[0-9a-f-]{36}$/i.test(input.ownerSub)) return null;
-    return { method: "pat", accessToken, gitHost, gitHttpUsername, ownerSub: input.ownerSub, ...(login ? { login } : {}) };
+    return { method: "pat", ...identity, accessToken, gitHost, gitHttpUsername, ownerSub: input.ownerSub, ...(login ? { login } : {}) };
   }
   return {
     method: input.method,
+    ...identity,
     accessToken,
     gitHost,
     gitHttpUsername,
@@ -333,4 +340,16 @@ export function parseCloudGithubResponse(request: CloudGithubRequest, value: unk
     case "connect": return cloudGithubConnectedSchema.parse(value);
     case "disconnect": return cloudGithubDisconnectedSchema.parse(value);
   }
+}
+
+const GITHUB_METHOD_NAMES = { "github-app": "GitHub App", pat: "personal access token" } as const;
+
+/** One GitHub account backs both App and token; this names both and the way out. */
+export function githubAccountMismatchMessage(
+  method: "github-app" | "pat", login: string | undefined,
+  peerMethod: "github-app" | "pat", peerLogin: string | undefined,
+): string {
+  const who = (value: string | undefined) => value ? `@${value}` : "another account";
+  return `This ${GITHUB_METHOD_NAMES[method]} is for ${who(login)}, but your ${GITHUB_METHOD_NAMES[peerMethod]} is for ${who(peerLogin)}. `
+    + `Use one GitHub account for both, or disconnect the ${GITHUB_METHOD_NAMES[peerMethod]} in Personal → Integrations → GitHub.`;
 }
