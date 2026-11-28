@@ -1040,8 +1040,9 @@ export function InspectorEditField({
               event.preventDefault();
               const input = event.currentTarget;
               void commit();
-              // Fields inside a popover keep it open, like the unit menu beside them.
-              if (input.closest("[data-design-popover]")) input.blur();
+              // Fields inside a popover keep it open and keep focus, like Figma;
+              // Escape then closes it and returns to the canvas.
+              if (input.closest("[data-design-popover]")) input.select();
               else focusInspectorCanvasViewport(input);
             } else if ((event.key === "ArrowUp" || event.key === "ArrowDown") && mixed && mixedSteps) {
               event.preventDefault();
