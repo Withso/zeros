@@ -536,6 +536,94 @@ describe("an inspector field scrub", () => {
     expect(runtime.measureLayout).not.toHaveBeenCalled();
   });
 
+  it("previews numeric arrow stepping immediately and commits once on keyup", async () => {
+    const runtime = await showRuntime();
+    const input = fieldInput("opacity");
+    expect(input.value).toBe("50");
+    act(() => input.focus());
+    act(() => {
+      input.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowUp", bubbles: true, cancelable: true }));
+    });
+    await settle();
+    expect(input.value).toBe("51");
+    expect(runtime.previewStyles).toHaveBeenCalled();
+    expect(runtime.previewStyles.mock.calls.at(-1)?.[1]).toEqual({ opacity: "0.51" });
+    expect(writes()).toBe(0);
+    act(() => {
+      input.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowUp", shiftKey: true, bubbles: true, cancelable: true }));
+    });
+    await settle();
+    expect(input.value).toBe("61");
+    expect(runtime.previewStyles.mock.calls.at(-1)?.[1]).toEqual({ opacity: "0.61" });
+    expect(writes()).toBe(0);
+    act(() => {
+      input.dispatchEvent(new KeyboardEvent("keyup", { key: "ArrowUp", bubbles: true, cancelable: true }));
+    });
+    await settle();
+    expect(writes()).toBe(1);
+    expect(lastWrite()).toContain('"opacity":"0.61"');
+  });
+
+  it("reverts an arrow-stepping sequence on Escape without writing", async () => {
+    const runtime = await showRuntime();
+    const input = fieldInput("opacity");
+    act(() => input.focus());
+    for (const shiftKey of [false, true]) {
+      act(() => {
+        input.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowUp", shiftKey, bubbles: true, cancelable: true }));
+      });
+      await settle();
+    }
+    expect(input.value).toBe("61");
+    expect(runtime.previewStyles).toHaveBeenCalled();
+    act(() => {
+      input.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
+    });
+    await settle();
+    expect(input.value).toBe("50");
+    expect(runtime.clearPreviewStyles).toHaveBeenCalled();
+    expect(writes()).toBe(0);
+  });
+
+  it("commits once when focus leaves before the arrow key is released", async () => {
+    await showRuntime();
+    const input = fieldInput("opacity");
+    act(() => input.focus());
+    act(() => {
+      input.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowUp", bubbles: true, cancelable: true }));
+    });
+    await settle();
+    expect(input.value).toBe("51");
+    act(() => input.blur());
+    await settle();
+    expect(writes()).toBe(1);
+    expect(lastWrite()).toContain('"opacity":"0.51"');
+    act(() => {
+      input.dispatchEvent(new KeyboardEvent("keyup", { key: "ArrowUp", bubbles: true, cancelable: true }));
+    });
+    await settle();
+    expect(writes()).toBe(1);
+  });
+
+  it("commits separate arrow taps as separate edits", async () => {
+    await showRuntime();
+    const input = fieldInput("opacity");
+    act(() => input.focus());
+    for (let tap = 0; tap < 2; tap += 1) {
+      act(() => {
+        input.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowUp", bubbles: true, cancelable: true }));
+      });
+      await settle();
+      act(() => {
+        input.dispatchEvent(new KeyboardEvent("keyup", { key: "ArrowUp", bubbles: true, cancelable: true }));
+      });
+      await settle();
+    }
+    expect(input.value).toBe("52");
+    expect(writes()).toBe(2);
+    expect(lastWrite()).toContain('"opacity":"0.52"');
+  });
+
   it("does not measure confirmed layout during ordinary pointer position previews", async () => {
     const runtime = await showRuntime();
     await scrub("X");
