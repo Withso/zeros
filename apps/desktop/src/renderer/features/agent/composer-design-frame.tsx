@@ -140,7 +140,13 @@ export function useComposerDesignFrame(options: {
     if (!linked || linked.workspaceId !== targets[0]?.workspaceId ||
       (designWorkspaceView(linked.workspaceId).selectionEvent === linked.event &&
         (designWorkspaceView(linked.workspaceId).ownerRevision ?? 0) === linked.revision)) clearLinkedSelection(submitted, true);
-    if (pinnedRef.current.target === undefined || JSON.stringify(pinnedRef.current.target) === JSON.stringify(submitted)) pin(undefined);
+    const withoutIntent = (value: DesignFrameAttachmentSelection) => designFrameAttachmentTargets(value).map(target => {
+      const copy = { ...target, intent: undefined };
+      delete copy.intent;
+      return copy;
+    });
+    const pinnedTarget = pinnedRef.current.target;
+    if (pinnedTarget === undefined || (pinnedTarget !== null && JSON.stringify(withoutIntent(pinnedTarget)) === JSON.stringify(withoutIntent(submitted)))) pin(undefined);
   }, [pin]);
   const clear = useCallback(() => {
     if (selection) clearLinkedSelection(selection);
@@ -153,7 +159,7 @@ export function useComposerDesignFrame(options: {
       pin(Array.isArray(pinnedRef.current.target) ? targets : targets[0]);
     } else setIncludeScreenshot(value => !value);
   }, [pin]);
-  return { selection, canAttach: hasDesignFrameAttachmentSelection(liveSelection), hasContext: hasDesignFrameAttachmentSelection(selection || (!options.active && pinned.target)), remove, capture, attach, pin, consume, clear, toggleScreenshot };
+  return { selection, workspaceId, canAttach: hasDesignFrameAttachmentSelection(liveSelection), hasContext: hasDesignFrameAttachmentSelection(selection || (!options.active && pinned.target)), remove, capture, attach, pin, consume, clear, toggleScreenshot };
 }
 
 export function ComposerDesignFrame({ selection, onRemove, onToggleScreenshot }: {

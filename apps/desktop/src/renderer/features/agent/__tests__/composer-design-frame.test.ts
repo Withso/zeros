@@ -80,6 +80,14 @@ describe("parked composer frame ownership", () => {
     expect(context.capture()).toMatchObject({ frame: "phone.html", intent: "design" });
   });
 
+  it("clears a sent pinned frame after its intent follows a mode switch", () => {
+    const context = readContext({ ...options, active: true, initialFrame: target, intent: "design" });
+    const submitted = context.capture();
+    expect(submitted).toMatchObject({ intent: "design" });
+    context.consume(submitted);
+    expect(context.capture()).toBeNull();
+  });
+
   it.each([
     { workspaces: undefined },
     { workspaces: [] },
@@ -132,6 +140,7 @@ describe("parked composer frame ownership", () => {
     expect(source).toContain('aria-keyshortcuts="Meta+Shift+F Control+Shift+F"');
     expect(source).toContain('shortcut="⌘⇧F"');
     expect(source).toContain('composerDockRef.current?.contains(event.target)');
+    expect(source).toContain('data-design-workspace-id');
     expect(source).toContain('editingQueuedId');
   });
 

@@ -1886,13 +1886,17 @@ function AgentChatBody({
       if (!(event.metaKey || event.ctrlKey) || !event.shiftKey || event.altKey) return;
       if (event.code !== "KeyF" || hasShortcutPriorityClaim()) return;
       if (!designFrameContext.canAttach) return;
-      if (!(event.target instanceof Node) || !composerDockRef.current?.contains(event.target)) return;
+      if (!(event.target instanceof Element)) return;
+      const designSurface = event.target.closest("[data-design-workspace-surface]");
+      const inOwnDesignSurface = designSurface?.getAttribute("data-design-workspace-id") === designFrameContext.workspaceId;
+      if (inOwnDesignSurface && activeChatId !== chatId) return;
+      if (!composerDockRef.current?.contains(event.target) && !inOwnDesignSurface) return;
       event.preventDefault();
       attachDesignFrame();
     };
     window.addEventListener("keydown", handler, true);
     return () => window.removeEventListener("keydown", handler, true);
-  }, [designFrameAttachAvailable, surfaceActive, readOnly, editingQueuedId, designFrameContext.canAttach, attachDesignFrame]);
+  }, [designFrameAttachAvailable, surfaceActive, readOnly, editingQueuedId, designFrameContext.canAttach, designFrameContext.workspaceId, activeChatId, chatId, attachDesignFrame]);
   const queueKeysRef = useRef({
     arrowUp: (): boolean => false,
     arrowDown: (): boolean => false,
