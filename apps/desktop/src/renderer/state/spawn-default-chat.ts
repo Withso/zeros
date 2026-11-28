@@ -32,6 +32,7 @@ import { pickAgentForNewChat } from "../features/settings/default-agent";
 import { newChatBornDefaults } from "../features/agent/new-chat-defaults";
 import { newChatId } from "./chat-id";
 import type { ChatThread } from "./store";
+import { isSideChat } from "../features/agent/side-chat-seeds";
 import { useWorkspaceDispatch, useWorkspaceStore } from "./workspace-store";
 
 type Dispatch = ReturnType<typeof useWorkspaceDispatch>;
@@ -127,9 +128,12 @@ const inFlightFolders = new Set<string>();
  *  from stacking a second "Untitled" tab onto a workspace that gained a chat
  *  meanwhile (the "row of duplicate Untitled tabs" bug). */
 function liveChatAtFolder(folder: string): ChatThread | undefined {
+  // A side chat lives only in its Workbench tab, never in the chat column, so
+  // it cannot stand in for the column's chat: with only side chats open the
+  // column still needs one of its own.
   return useWorkspaceStore
     .getState()
-    .chats.find((c) => !c.archived && c.folder === folder);
+    .chats.find((c) => !c.archived && c.folder === folder && !isSideChat(c));
 }
 
 /** Resolve the default agent + dispatch ADD_CHAT for a freshly created
