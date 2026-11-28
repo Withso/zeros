@@ -277,6 +277,20 @@ function inferAuthoredStyleFromComputed(
   return initial !== undefined && value !== initial;
 }
 
+/** Exact authored longhand membership; a shorthand does not claim its parts. */
+export function isDesignRuntimeStylePropertyDirectlyAuthored(
+  properties: readonly string[] | undefined,
+  property: string,
+): boolean {
+  const inspectedProperty = cssStyleProperty(property);
+  return Boolean(
+    properties?.some(
+      (authoredProperty) =>
+        cssStyleProperty(authoredProperty) === inspectedProperty,
+    ),
+  );
+}
+
 export function isDesignRuntimeStylePropertyAuthored(
   properties: readonly string[] | undefined,
   property: string,
@@ -298,9 +312,11 @@ export function isDesignRuntimeStylePropertyAuthored(
 
 /** Removing paint clears actual authored declarations, including shorthands.
  * Older runtimes without provenance need explicit empty values instead.
- * Keep unrelated geometry (especially border radii) intact. */
+ * Keep unrelated geometry (especially border radii) intact. The background
+ * shorthand has no independently removable colour member, so background-color
+ * removal overrides it rather than dropping image layers with the shorthand. */
 export function designPaintRemovalStyles(
-  kind: "border" | "outline" | "fill",
+  kind: "border" | "outline" | "fill" | "background-color",
   authoredProperties: readonly string[] = [],
 ): Record<string, string | null> {
   const matches =
@@ -308,7 +324,9 @@ export function designPaintRemovalStyles(
       ? /^border(?:-(?:top|right|bottom|left|block(?:-start|-end)?|inline(?:-start|-end)?))?(?:-(?:width|style|color))?$/
       : kind === "outline"
         ? /^outline(?:-(?:width|style|color|offset))?$/
-        : /^background(?:-(?:color|image))?$/;
+        : kind === "background-color"
+          ? /^background-color$/
+          : /^background(?:-(?:color|image))?$/;
   const removed = Object.fromEntries(
     authoredProperties
       .map(cssStyleProperty)
@@ -316,9 +334,11 @@ export function designPaintRemovalStyles(
       .map((property) => [property, null]),
   );
   if (Object.keys(removed).length > 0) return removed;
-  return kind === "fill"
-    ? { "background-color": "transparent", "background-image": "none" }
-    : { [`${kind}-style`]: "none" };
+  if (kind === "fill") {
+    return { "background-color": "transparent", "background-image": "none" };
+  }
+  if (kind === "background-color") return { "background-color": "transparent" };
+  return { [`${kind}-style`]: "none" };
 }
 
 export function designStyleFieldValue(
