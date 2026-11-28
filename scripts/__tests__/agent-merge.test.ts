@@ -191,6 +191,28 @@ describe("agent merge decision", () => {
     }
   });
 
+  it.each([
+    "![shot](https://app.devin.ai/api/presigned_proxy?token=eyJhbGciOiJIUzI1NiJ9.e30.sig)",
+    "<img src=\"https://bucket.s3.amazonaws.com/a.png?X-Amz-Signature=abc\">",
+    "See https://example.test/file?access_token=abc",
+  ])("refuses a body whose squash would carry a signed link: %s", async (link) => {
+    const snapshot = fixture();
+    snapshot.pr.body = `${PR_BODY}\n\n${link}`;
+    expect(decideMerge(snapshot, { isCiDefinitionPath })).toMatchObject({ allowed: false, code: "signed-link" });
+    const gh = fakeGh(snapshot);
+    expect(await runAgentMerge(["123"], gh)).toBe(1);
+    expect(gh.calls.some((call) => call[1] === "merge")).toBe(false);
+    expect(JSON.stringify(gh.stderr.mock.calls)).not.toContain("presigned_proxy?token");
+  });
+
+  it("names a GitHub stack as the reason auto-merge was refused, without echoing gh output", async () => {
+    const gh = fakeGh();
+    gh.responses.set("pr merge 123", { status: 1, stdout: "", stderr: "GraphQL: Auto-merge is not supported for stacked pull requests. (enablePullRequestAutoMerge)" });
+    expect(await runAgentMerge(["123"], gh)).toBe(1);
+    expect(gh.stderr).toHaveBeenCalledWith(expect.stringContaining("GitHub stack"));
+    expect(JSON.stringify(gh.stderr.mock.calls)).not.toContain("enablePullRequestAutoMerge");
+  });
+
   it("lists every missing section in a dry-run without printing the body", async () => {
     const snapshot = fixture();
     snapshot.pr.body = "Private body fixture: Why, What changes, Tests, Rollout, Local workspace impact, Cloud workspace impact.";
