@@ -41,6 +41,7 @@ import {
 } from "./design-layout-controls";
 import { designLayoutChildrenSummary } from "./design-layout-children";
 import { designFillIsEmpty, DesignFillEditor } from "./design-fill-editor";
+import { parseDesignGradient } from "./design-fill-values";
 import {
   InspectorGlyph,
   InspectorGroup,
@@ -284,8 +285,7 @@ export function DesignStyleEditor({
   const fillImage = styleValue(details, "background-image", "none");
   const authoredFillImage = details.authoredStyles?.["background-image"]?.value;
   const editableFillImage =
-    authoredFillImage &&
-    /(?:linear|radial|conic)-gradient\(/i.test(authoredFillImage)
+    authoredFillImage && parseDesignGradient(authoredFillImage)
       ? authoredFillImage
       : fillImage;
   const backgroundFillColor = styleValue(
@@ -296,7 +296,10 @@ export function DesignStyleEditor({
   // Text without a painted background keeps Fill as its text colour. Once
   // the layer paints a background, that background is the fill being edited.
   const fillTargetsText =
-    textLayer && designFillIsEmpty(backgroundFillColor, editableFillImage);
+    textLayer &&
+    designFillIsEmpty(backgroundFillColor, editableFillImage) &&
+    !isAuthored("background-color") &&
+    !isAuthored("background-image");
   const fillProperty = fillTargetsText ? "color" : "background-color";
   const fillToken = useDesignStyleToken(details, fillProperty);
   const confirmedFillColor = styleValue(
@@ -327,10 +330,21 @@ export function DesignStyleEditor({
     designFillIsEmpty(fillColor, editableFillImage) &&
     !isAuthored("background-color") &&
     !isAuthored("background-image");
-  // Until fills are a true stack, Add appears only where it cannot replace
-  // an existing solid fill.
+  // Until fills are a true stack, Add appears only where the write cannot
+  // replace an authored or visible solid fill on any selected layer.
   const fillCanAdd =
-    !fillTargetsText && designFillIsEmpty(backgroundFillColor, "none");
+    !fillTargetsText &&
+    selection.every((node) => {
+      const color = styleValue(node, "background-color", "transparent");
+      return (
+        designFillIsEmpty(color, "none") &&
+        !isDesignRuntimeStylePropertyAuthored(
+          node.authoredStyleProperties,
+          "background-color",
+          color,
+        )
+      );
+    });
 
   const transitionDuration = styleValue(details, "transition-duration", "0s");
   const transitionActive =
@@ -597,13 +611,9 @@ export function DesignStyleEditor({
                     requestDesignPaintPicker("background-color");
                     setAddedFill(details.oid);
                   }
-                  const styles: Record<string, string> = {
-                    "background-color": NEW_FILL_COLOR,
-                  };
-                  if (!editableFillImage.trim() || editableFillImage.trim() === "none") {
-                    styles["background-image"] = "none";
-                  }
-                  void commit(styles, "fill").catch(() => setAddedFill(null));
+                  void commit({ "background-color": NEW_FILL_COLOR }, "fill").catch(() =>
+                    setAddedFill(null),
+                  );
                 }}
               >
                 <Plus />

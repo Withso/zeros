@@ -516,7 +516,7 @@ function DesignFillPopover({
                   key={stop}
                   value={gradient[stop]}
                   label={stop === "start" ? "Start stop" : "End stop"}
-                  disabled={disabled}
+                  disabled={disabled || !parseDesignColor(gradient[stop])}
                   panelRef={panelRef}
                   onPreview={(next) =>
                     void updateGradient({ [stop]: next }, false)

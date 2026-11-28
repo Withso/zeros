@@ -1,0 +1,9 @@
+{
+  "id": "design-text-fill-opacity-targets-background",
+  "kind": "replay",
+  "area": "desktop-design",
+  "fixedBy": "pr:1340",
+  "symptom": "Fill opacity on a text-containing layer with a painted background wrote the text colour alpha instead of the background alpha.",
+  "rule": "A text layer keeps Fill on lettering only while it has no authored painted background; an authored background remains the fill target even at zero opacity.",
+  "check": "pnpm exec vitest run apps/desktop/src/renderer/features/design-workspace/__tests__/design-fill-destructive-edits.test.ts -t 'writes fill opacity to the background of a text-containing layer, not its text color'"
+}

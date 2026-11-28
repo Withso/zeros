@@ -51,6 +51,7 @@ type CommitStyles = (styles: Record<string, string | null>) => Promise<void>;
 async function renderEditor(
   details: DesignRuntimeNodeDetails,
   onCommitStyles = vi.fn<CommitStyles>(async () => {}),
+  extraProps: Record<string, unknown> = {},
 ) {
   await act(async () =>
     root.render(
@@ -66,6 +67,7 @@ async function renderEditor(
           onCancelStylePreview: async () => {},
           onCommitStyles,
           onOpenMotionTimeline: () => {},
+          ...extraProps,
         }),
       ),
     ),
@@ -214,4 +216,61 @@ describe("destructive fill edits", () => {
     expect(written).toHaveProperty("color");
     expect(written).not.toHaveProperty("background-color");
   });
+
+  it("does not offer Add fill when another selected layer has a fill to overwrite", async () => {
+    const empty = detailsFor({ backgroundColor: "rgba(0, 0, 0, 0)", backgroundImage: "none" }); // check:ui ignore-line -- CSSOM fixture
+    const filled = detailsFor(
+      { backgroundColor: "#FF0000", backgroundImage: "none" }, // check:ui ignore-line -- authored CSS fixture
+      { oid: "filled", authoredStyleProperties: ["background-color"] },
+    );
+    await renderEditor(empty, undefined, { layoutParents: [empty, filled], selectionCount: 2 });
+    expect(document.querySelector('button[aria-label="Add fill"]')).toBeNull();
+  });
+
+  it("does not detach a dormant image token when adding a fill", async () => {
+    const details = detailsFor(
+      { backgroundColor: "rgba(0, 0, 0, 0)", backgroundImage: "none" }, // check:ui ignore-line -- CSSOM fixture
+      {
+        authoredStyleProperties: ["background-image"],
+        authoredStyles: { "background-image": { origin: "inline", value: "var(--image)" } },
+      },
+    );
+    const onCommit = await renderEditor(details);
+    await act(async () => document.querySelector<HTMLButtonElement>('button[aria-label="Add fill"]')!.click());
+    const written = onCommit.mock.calls.at(-1)?.[0] as Record<string, string | null>;
+    expect(written).not.toHaveProperty("background-image");
+  });
+
+  it("keeps an authored zero-opacity background as the fill target on text", async () => {
+    const details = detailsFor(
+      { backgroundColor: "rgba(0, 0, 0, 0)", backgroundImage: "none", color: "#FFFFFF" }, // check:ui ignore-line -- CSSOM fixture
+      { text: "Save changes", textEditable: true, authoredStyleProperties: ["background-color", "color"] },
+    );
+    const onCommit = await renderEditor(details);
+    const opacity = document.querySelector<HTMLInputElement>('input[aria-label="Fill opacity"]')!;
+    await act(async () => setInputValue(opacity, "40"));
+    await act(async () => opacity.blur());
+    const written = onCommit.mock.calls.at(-1)?.[0] as Record<string, string | null>;
+    expect(written).toHaveProperty("background-color");
+    expect(written).not.toHaveProperty("color");
+  });
+
+  it("disables colour editing for a var() gradient stop while angle editing stays available", async () => {
+    const authored = "linear-gradient(135deg, var(--accent), var(--success))";
+    const details = detailsFor(
+      {
+        backgroundColor: "rgba(0, 0, 0, 0)", // check:ui ignore-line -- CSSOM fixture
+        backgroundImage: "linear-gradient(135deg, rgb(81, 81, 204) 0%, rgb(20, 122, 76) 100%)", // check:ui ignore-line -- CSSOM fixture
+      },
+      {
+        authoredStyleProperties: ["background-image"],
+        authoredStyles: { "background-image": { origin: "inline", value: authored } },
+      },
+    );
+    await renderEditor(details);
+    await act(async () => document.querySelector<HTMLButtonElement>('button[aria-label="Edit fill"]')!.click());
+    expect(document.querySelector<HTMLInputElement>('input[aria-label="Start stop opacity value"]')?.disabled).toBe(true);
+    expect(document.querySelector<HTMLInputElement>('input[aria-label="Gradient angle value"]')?.disabled).toBe(false);
+  });
+
 });
