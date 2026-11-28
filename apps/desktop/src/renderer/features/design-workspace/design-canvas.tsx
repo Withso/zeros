@@ -162,7 +162,7 @@ import {
   designFrameInsertion,
   designPointInChildCoordinateSpace,
   designTreeChildIds,
-  designVectorInChildCoordinateSpace,
+  designSizeInChildCoordinateSpace,
   designWrapInFlow,
 } from "./design-frame-insertion";
 import {
@@ -7969,7 +7969,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
           size && parentDetails
             ? (() => {
                 try {
-                  const vector = designVectorInChildCoordinateSpace(parentDetails, {
+                  const vector = designSizeInChildCoordinateSpace(parentDetails, {
                     x: size.width,
                     y: size.height,
                   });
@@ -7982,10 +7982,11 @@ export const DesignCanvas = React.memo(function DesignCanvas({
                 }
               })()
             : null;
-        if (size && parentDetails && !insertionSize) {
+        if (size && parentDetails && !insertionSize && placement === "absolute") {
           toast.error("The frame's editable coordinates are unavailable");
           return;
         }
+        const committedSize = insertionSize ?? (placement === "flow" ? size : null);
         let editorPoint = point;
         if (placement === "flow") {
           const runtime = designFrameRuntime(workspaceId, frame.file);
@@ -8001,7 +8002,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
                 y: 0,
                 placement,
                 typography: newTypography,
-                ...(insertionSize ? insertionSize : {}),
+                ...(committedSize ? committedSize : {}),
               });
               const measured = await runtime.previewInsert({
                 inserts: [{ nodeId, parentId: parentNodeId, beforeId: null, tag: "div", style }],
@@ -8049,10 +8050,10 @@ export const DesignCanvas = React.memo(function DesignCanvas({
           x: parentPoint.x,
           y: parentPoint.y,
           ...(size ? size : {}),
-          ...(insertionSize
+          ...(committedSize
             ? {
-                insertionWidth: insertionSize.width,
-                insertionHeight: insertionSize.height,
+                insertionWidth: committedSize.width,
+                insertionHeight: committedSize.height,
               }
             : {}),
           placement,

@@ -162,15 +162,15 @@ export function designPointInChildCoordinateSpace(
   };
 }
 
-export function designVectorInChildCoordinateSpace(
+export function designSizeInChildCoordinateSpace(
   parent: DesignRuntimeNodeDetails,
-  vector: Point,
+  size: Point,
 ): Point {
   const { matrix, determinant } = designChildCoordinateSpaceInverse(parent);
   const [a, b, c, d] = matrix;
   return {
-    x: (d * vector.x - c * vector.y) / determinant,
-    y: (-b * vector.x + a * vector.y) / determinant,
+    x: size.x * Math.hypot(d / determinant, b / determinant),
+    y: size.y * Math.hypot(c / determinant, a / determinant),
   };
 }
 
