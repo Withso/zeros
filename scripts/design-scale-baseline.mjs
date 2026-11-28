@@ -391,6 +391,7 @@ try {
     const first = events.find(event => event.name === `${prefix}:start`);
     const last = events.find(event => event.name === `${prefix}:end`);
     assert(first && last && first.pid === last.pid, "Scale trace must include workload markers.");
+    const presentation = analyzeDesignPresentationTrace(events, { rendererPid: first.pid, startUs: first.ts, endUs: last.ts });
     return {
       fixture: fixture.id,
       name,
@@ -398,7 +399,8 @@ try {
       input,
       memory: summarizeMemory(afterMemory, beforeMemory, elapsedSeconds),
       cpuProfileTop: summarizeCpuProfile(cpuProfile),
-      ...analyzeDesignPresentationTrace(events, { rendererPid: first.pid, startUs: first.ts, endUs: last.ts }),
+      ...presentation,
+      effectiveFps: Math.round(presentation.presented / Math.max(1, input.durationMs / 1000) * 10) / 10,
     };
   }
 
@@ -469,6 +471,7 @@ try {
     row.fixture,
     row.name,
     row.presented,
+    row.effectiveFps,
     row.frameIntervalMs?.p95?.toFixed(2),
     row.frameIntervalMs?.p99?.toFixed(2),
     row.inputToPresentMs?.p95?.toFixed(2),
@@ -479,7 +482,7 @@ try {
     row.memory.gpu.cpuPercent.toFixed(1),
     row.memory.engine.cpuPercent.toFixed(1),
   ]);
-  const markdown = `# Zeros Design scale baseline\n\nRecorded: ${report.recordedAt}\n\n## Scale fixtures\n\n| Frames/page | Empty | Rich demo-derived | Open ms | First complete paint ms | Renderer RSS MiB | Renderer footprint MiB | Renderer CPU % | GPU RSS MiB | GPU footprint MiB | GPU CPU % | Engine RSS MiB | Engine CPU % | Mounted frames | Documents |\n|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n${width(report.measurements.map(row => [row.fixture, report.fixtures.find(f => f.id === row.fixture)?.empty, report.fixtures.find(f => f.id === row.fixture)?.rich, ...measurementRows.find(m => m[0] === row.fixture).slice(1)]))}\n\n## Pan/zoom presentation\n\n| Frames/page | Gesture | Presented | Frame p95 ms | Frame p99 ms | Input-present p95 ms | Dropped | Partial | Camera changes | Renderer CPU % | GPU CPU % | Engine CPU % |\n|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n${width(interactionRows)}\n\n## CPU profiled repeated gestures (top self-time frames)\n\n| Frames/page | Gesture | Frame | Samples | Estimated self ms |\n|---|---:|---|---:|---:|\n${width(report.profiles.flatMap(row => (row.top ?? []).slice(0, 5).map(frame => [row.fixture, row.name, frame.frame, frame.samples, frame.estimatedSelfMs])))}\n\n## Page switching\n\n| Fixture | From | To | Click to first complete paint ms | Wall ms |\n|---|---|---|---:|---:|\n${width(report.pageSwitches.map(row => [row.fixture, row.from, row.to, row.clickToFirstCompletePaintMs, row.wallMs]))}\n\n## Workspace switching\n\n| Fixture | Switch to first complete paint ms | Settled wall ms |\n|---|---:|---:|\n${width(report.workspaceSwitches.map(row => [row.fixture, row.actionToFirstCompletePaintMs, row.settledWallMs]))}\n\n## Method and caveats\n\n${report.method}\n\n${report.limitations.map(line => `- ${line}`).join("\n")}\n`;
+  const markdown = `# Zeros Design scale baseline\n\nRecorded: ${report.recordedAt}\n\n## Scale fixtures\n\n| Frames/page | Empty | Rich demo-derived | Open ms | First complete paint ms | Renderer RSS MiB | Renderer footprint MiB | Renderer CPU % | GPU RSS MiB | GPU footprint MiB | GPU CPU % | Engine RSS MiB | Engine CPU % | Mounted frames | Documents |\n|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n${width(report.measurements.map(row => [row.fixture, report.fixtures.find(f => f.id === row.fixture)?.empty, report.fixtures.find(f => f.id === row.fixture)?.rich, ...measurementRows.find(m => m[0] === row.fixture).slice(1)]))}\n\n## Pan/zoom presentation\n\n| Frames/page | Gesture | Presented | Effective FPS | Frame p95 ms | Frame p99 ms | Input-present p95 ms | Dropped | Partial | Camera changes | Renderer CPU % | GPU CPU % | Engine CPU % |\n|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n${width(interactionRows)}\n\n## CPU profiled repeated gestures (top self-time frames)\n\n| Frames/page | Gesture | Frame | Samples | Estimated self ms |\n|---|---:|---|---:|---:|\n${width(report.profiles.flatMap(row => (row.top ?? []).slice(0, 5).map(frame => [row.fixture, row.name, frame.frame, frame.samples, frame.estimatedSelfMs])))}\n\n## Page switching\n\n| Fixture | From | To | Click to first complete paint ms | Wall ms |\n|---|---|---|---:|---:|\n${width(report.pageSwitches.map(row => [row.fixture, row.from, row.to, row.clickToFirstCompletePaintMs, row.wallMs]))}\n\n## Workspace switching\n\n| Fixture | Switch to first complete paint ms | Settled wall ms |\n|---|---:|---:|\n${width(report.workspaceSwitches.map(row => [row.fixture, row.actionToFirstCompletePaintMs, row.settledWallMs]))}\n\n## Method and caveats\n\n${report.method}\n\n${report.limitations.map(line => `- ${line}`).join("\n")}\n`;
   await fs.writeFile(path.join(output, "report.md"), `${markdown}\n`);
   console.log(`SCALE_REPORT ${path.join(output, "report.md")}`);
 } catch (error) {
