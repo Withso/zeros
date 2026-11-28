@@ -1040,7 +1040,9 @@ export function InspectorEditField({
               event.preventDefault();
               const input = event.currentTarget;
               void commit();
-              focusInspectorCanvasViewport(input);
+              // Fields inside a popover keep it open, like the unit menu beside them.
+              if (input.closest("[data-design-popover]")) input.blur();
+              else focusInspectorCanvasViewport(input);
             } else if ((event.key === "ArrowUp" || event.key === "ArrowDown") && mixed && mixedSteps) {
               event.preventDefault();
               const current = mixedStepsRef.current ?? { steps: 0, fine: false };
