@@ -7922,11 +7922,6 @@ export const DesignCanvas = React.memo(function DesignCanvas({
           ];
         const tree = runtimeFrame?.snapshot?.tree ?? EMPTY_DESIGN_TREE;
         const rootNodeId = runtimeFrame?.snapshot?.frame.oid || tree[0]?.oid;
-        const layoutDisplay = (details: DesignRuntimeNodeDetails | null) =>
-          details &&
-          ["flex", "inline-flex", "grid", "inline-grid"].includes(
-            details.styles.display ?? "",
-          );
         const containsPoint = (details: DesignRuntimeNodeDetails | null) =>
           Boolean(
             details &&
@@ -7941,18 +7936,18 @@ export const DesignCanvas = React.memo(function DesignCanvas({
               ? runtimeFrame.snapshot.frame
               : null))
           : null;
-        // New text joins light content: a shadow root is restyled and
-        // retexted, never rebuilt.
-        const lightLayout = (details: DesignRuntimeNodeDetails | null) =>
-          layoutDisplay(details) && !details?.shadow;
-        const selectedLayout =
-          lightLayout(selectedNodeDetails) &&
+        // New text joins the nearest light drawable frame: a shadow root is
+        // restyled and retexted, never rebuilt.
+        const lightContainer = (details: DesignRuntimeNodeDetails | null) =>
+          !!details && canInsertDesignFrame(details) && !details.shadow;
+        const selectedContainer =
+          lightContainer(selectedNodeDetails) &&
           containsPoint(selectedNodeDetails)
             ? selectedNodeDetails
             : null;
         const parentDetails =
-          (lightLayout(hitDetails ?? null) ? hitDetails : null) ??
-          selectedLayout ??
+          (lightContainer(hitDetails ?? null) ? hitDetails : null) ??
+          selectedContainer ??
           rootDetails;
         const parentNodeId = parentDetails?.oid ?? rootNodeId;
         if (!parentNodeId) {
