@@ -49,7 +49,10 @@ function detailsFor(
 
 type CommitStyles = (styles: Record<string, string | null>) => Promise<void>;
 
-async function renderEditor(details: DesignRuntimeNodeDetails) {
+async function renderEditor(
+  details: DesignRuntimeNodeDetails,
+  props: Partial<React.ComponentProps<typeof DesignStyleEditor>> = {},
+) {
   const onCommit = vi.fn<CommitStyles>(async () => {});
   await act(async () =>
     root.render(
@@ -65,6 +68,7 @@ async function renderEditor(details: DesignRuntimeNodeDetails) {
           onCancelStylePreview: async () => {},
           onCommitStyles: onCommit,
           onOpenMotionTimeline: () => {},
+          ...props,
         }),
       ),
     ),
@@ -157,6 +161,43 @@ describe("leaf text background row", () => {
     expect(
       document.querySelector('input[aria-label="Background"]'),
     ).not.toBeNull();
+  });
+
+  it("stays hidden for text with child layers", async () => {
+    const parented = detailsFor(
+      {
+        backgroundColor: "#FF0000", // check:ui ignore-line -- authored CSS fixture
+        color: "#FFFFFF", // check:ui ignore-line -- authored CSS fixture
+      },
+      {
+        textEditable: false,
+        authoredStyleProperties: ["background-color", "color"],
+      },
+    );
+    await renderEditor(parented);
+    expect(document.querySelector('input[aria-label="Background"]')).toBeNull();
+  });
+
+  it("stays hidden for mixed selected backgrounds", async () => {
+    const first = detailsFor(
+      {
+        backgroundColor: "#FF0000", // check:ui ignore-line -- authored CSS fixture
+        color: "#FFFFFF", // check:ui ignore-line -- authored CSS fixture
+      },
+      { authoredStyleProperties: ["background-color", "color"] },
+    );
+    const second = detailsFor(
+      {
+        backgroundColor: "#00FF00", // check:ui ignore-line -- authored CSS fixture
+        color: "#FFFFFF", // check:ui ignore-line -- authored CSS fixture
+      },
+      { oid: "second", authoredStyleProperties: ["background-color", "color"] },
+    );
+    await renderEditor(first, {
+      layoutParents: [first, second],
+      selectionCount: 2,
+    });
+    expect(document.querySelector('input[aria-label="Background"]')).toBeNull();
   });
 
   it("keeps shorthand image layers when removing only the visible colour", async () => {

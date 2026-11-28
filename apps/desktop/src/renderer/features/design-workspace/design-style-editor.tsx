@@ -291,6 +291,12 @@ export function DesignStyleEditor({
       : fillImage;
   const fillProperty = textLayer ? "color" : "background-color";
   const fillToken = useDesignStyleToken(details, fillProperty);
+  const selection = layoutParents ?? [details];
+  const textBackgroundMixed = designStyleMixed(
+    selection,
+    selectionCount,
+    "background-color",
+  );
   const textBackgroundColor = styleValue(
     details,
     "background-color",
@@ -299,6 +305,8 @@ export function DesignStyleEditor({
   const textBackgroundToken = useDesignStyleToken(details, "background-color");
   const textBackgroundVisible =
     textLayer &&
+    details.textEditable === true &&
+    !textBackgroundMixed &&
     (details.authoredStyles?.["background-color"] !== undefined ||
       isDesignRuntimeStylePropertyDirectlyAuthored(
         details.authoredStyleProperties,
@@ -317,7 +325,6 @@ export function DesignStyleEditor({
     if (addedFill && (addedFill !== details.oid || !designFillIsEmpty(confirmedFillColor, editableFillImage))) setAddedFill(null);
   }, [addedFill, confirmedFillColor, details.oid, editableFillImage]);
   const fillColor = fillAdding ? NEW_FILL_COLOR : confirmedFillColor;
-  const selection = layoutParents ?? [details];
   const fillMixed = designStyleMixed(
     selection,
     selectionCount,
