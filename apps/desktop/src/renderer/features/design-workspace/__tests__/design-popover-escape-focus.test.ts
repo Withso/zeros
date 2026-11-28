@@ -51,7 +51,7 @@ it("Escape in a dirty popover field reverts, closes, focuses the trigger, then l
           createElement(PopoverTrigger, { asChild: true },
             createElement("button", { type: "button", "aria-label": "Type settings" }, "settings")),
           createElement(PopoverContent, {
-            "data-design-popover": "",
+            ...({ "data-design-popover": "" } as Record<string, string>),
             onEscapeKeyDown: keepDesignPopoverWhileEditing,
           }, createElement(InspectorEditField, {
             label: "Indent",
@@ -73,7 +73,7 @@ it("Escape in a dirty popover field reverts, closes, focuses the trigger, then l
     input!.dispatchEvent(new Event("input", { bubbles: true }));
   });
   await act(async () => {
-    input!.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    input!.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
   });
   await flush();
   expect(input!.isConnected).toBe(false);
@@ -83,7 +83,7 @@ it("Escape in a dirty popover field reverts, closes, focuses the trigger, then l
   const seen: string[] = [];
   const canvasScopeListener = (event: KeyboardEvent) => seen.push(event.key);
   window.addEventListener("keydown", canvasScopeListener);
-  trigger.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+  trigger.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
   window.removeEventListener("keydown", canvasScopeListener);
   expect(seen).toEqual(["Escape"]);
 });
