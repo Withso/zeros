@@ -47,6 +47,8 @@ assert.equal(process.platform, "darwin", "The native scale baseline requires mac
 const source = path.resolve(argument("--source") ?? path.join(repo, "..", "zeros-design-demo", "zeros-design-demo - Design"));
 const output = path.resolve(argument("--output") ?? path.join(repo, ".context", `design-scale-baseline-${new Date().toISOString().replace(/[:.]/g, "-")}`));
 const keepApp = process.argv.includes("--keep-app");
+if (await fs.stat(output).then(() => true, () => false) && (await fs.readdir(output)).length)
+  throw new Error(`Output directory is not empty: ${output}. Choose a new output directory so an existing baseline is preserved.`);
 await fs.mkdir(output, { recursive: true });
 
 const run = async (command, args, options = {}) => (await exec(command, args, { cwd: repo, timeout: 120_000, maxBuffer: 8 * 1024 * 1024, ...options })).stdout;
@@ -84,9 +86,11 @@ async function makeFixture(count) {
     width: Math.max(box.width, frame.x + frame.width),
     height: Math.max(box.height, frame.y + frame.height),
   }), { width: 1, height: 1 });
+  const frameBytes = (await Promise.all(htmlFrames.map(frame => fs.stat(path.join(designDirectory, frame.source)))))
+    .reduce((sum, stat) => sum + stat.size, 0);
   const branchName = (await run("git", ["-C", folder, "symbolic-ref", "--short", "HEAD"])).trim();
   return {
-    id: String(count), count, folder, branchName, bounds,
+    id: String(count), count, folder, branchName, bounds, frameBytes,
     rich: htmlFrames.length - empty, empty,
     pages: canvas.pages.map(page => ({ id: page.id, title: page.title, frames: page.frames.length, files: page.frames.map(id => canvas.frames[id]?.source).filter(Boolean) })),
     generator: JSON.parse(stdout.slice(stdout.indexOf("{"))),
@@ -173,7 +177,7 @@ try {
   for (const count of counts) {
     const fixture = await makeFixture(count);
     fixtures.push(fixture);
-    report.fixtures.push({ id: fixture.id, count, empty: fixture.empty, rich: fixture.rich, pages: fixture.pages, bytes: fixture.generator.frameBytes });
+    report.fixtures.push({ id: fixture.id, count, empty: fixture.empty, rich: fixture.rich, pages: fixture.pages, bytes: fixture.frameBytes });
     await save();
   }
 
@@ -288,6 +292,7 @@ try {
   const memoryRows = () => sampleNativeApplicationMemory({ app, enginePid });
   const sampleMemory = async seconds => {
     const before = await memoryRows();
+    assert(before.some(row => row.role === "GPU" && row.rssBytes !== null && row.physicalFootprintBytes !== null), "GPU memory evidence is required.");
     const started = performance.now();
     await delay(seconds * 1000);
     const elapsed = (performance.now() - started) / 1000;
@@ -354,6 +359,7 @@ try {
   }
 
   async function traceGesture(fixture, name, { profile = false } = {}) {
+    await open(fixture);
     await prepareNativeDesignView(page, fixture.workspace.workspaceId, { zoom: fixture.camera?.zoom ?? 0.05, panX: 32, panY: 96 });
     await delay(500);
     const events = [];
@@ -379,15 +385,15 @@ try {
       rateHz: 120,
     });
     const cameraChanges = await finishNativeDesignCameraObservation(page, prefix);
+    const elapsedSeconds = (performance.now() - memoryStarted) / 1000;
+    const afterMemory = await memoryRows();
     const cpuProfile = profile ? (await cdp.send("Profiler.stop")).profile : null;
     if (cpuProfile) await fs.writeFile(path.join(output, `${fixture.id}-${name}-cpu-profile.json`), JSON.stringify(cpuProfile));
     await delay(300);
     await cdp.send("Tracing.end");
     await complete;
     cdp.off("Tracing.dataCollected", collect);
-    const elapsedSeconds = (performance.now() - memoryStarted) / 1000;
-    const afterMemory = await memoryRows();
-    await fs.writeFile(path.join(output, `${fixture.id}-${name}-trace.json`), JSON.stringify({ traceEvents: events }));
+    await fs.writeFile(path.join(output, `${fixture.id}-${name}${profile ? "-profiled" : ""}-trace.json`), JSON.stringify({ traceEvents: events }));
     const first = events.find(event => event.name === `${prefix}:start`);
     const last = events.find(event => event.name === `${prefix}:end`);
     assert(first && last && first.pid === last.pid, "Scale trace must include workload markers.");
@@ -442,13 +448,15 @@ try {
 
   console.log("SCALE_STAGE workspace-switch");
   const first = fixtures[0], second = fixtures[Math.min(1, fixtures.length - 1)];
-  await open(first);
-  await open(second);
-  for (const fixture of [first, second, first]) {
-    const started = performance.now();
-    const opened = await open(fixture);
-    report.workspaceSwitches.push({ fixture: fixture.id, actionToFirstCompletePaintMs: milliseconds(opened.actionToCompleteMs), settledWallMs: milliseconds(performance.now() - started) });
-    await save();
+  if (second !== first) {
+    await open(first);
+    await open(second);
+    for (const fixture of [first, second, first]) {
+      const started = performance.now();
+      const opened = await open(fixture);
+      report.workspaceSwitches.push({ fixture: fixture.id, actionToFirstCompletePaintMs: milliseconds(opened.actionToCompleteMs), settledWallMs: milliseconds(performance.now() - started) });
+      await save();
+    }
   }
 
   const width = rows => rows.map(row => `| ${row.join(" | ")} |`).join("\n");
