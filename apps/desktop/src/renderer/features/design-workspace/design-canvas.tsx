@@ -8149,6 +8149,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
       hideCreationDraft,
       paintCreationDraft,
       selectedNodeDetails,
+      selectedFrame?.file,
       canvasPageOwner,
       view.zoom,
       workspaceId,
