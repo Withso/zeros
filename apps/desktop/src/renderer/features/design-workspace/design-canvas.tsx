@@ -6479,7 +6479,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
       const surfaceFocused =
         activeElement instanceof Element &&
         (activeElement.closest(DESIGN_SURFACE_SELECTOR) ||
-          activeElement === document.body);
+          (activeElement === document.body && designFocusOwnerRef.current));
       return !gestureCancelRef.current && !event.defaultPrevented &&
         !isEditableHotkeyTarget(event.target) && surfaceFocused &&
         !window.getSelection()?.toString();
@@ -6760,12 +6760,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
           return;
         }
         event.preventDefault();
-        if (selectionShortcut === "cut") {
-          if (keyboardCopyRef.current()) {
-            if (selectedNodeIsTarget) void deleteSelectedNode();
-            else if (shortcutFrame) void onDeleteFrame(shortcutFrame);
-          }
-        } else if (selectionShortcut === "delete") {
+        if (selectionShortcut === "delete") {
           if (selectedNodeIsTarget) void deleteSelectedNode();
           else if (shortcutFrame) void deleteSelectedFrame(shortcutFrame);
         } else {
