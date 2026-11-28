@@ -500,6 +500,12 @@ function initialPendingWorkspaceValidation(): string | null {
   return folder;
 }
 
+/** Bounded so a long session never grows it without limit. */
+function retireDraftChats(state: WorkspaceState, chatIds: readonly string[]): readonly string[] | undefined {
+  if (!chatIds.length) return state.retiredDraftChatIds;
+  return [...new Set([...(state.retiredDraftChatIds ?? []), ...chatIds])].slice(-500);
+}
+
 const initialState: WorkspaceState = {
   currentView: "workspace",
   project: null,
@@ -1298,6 +1304,10 @@ function reducer(state: WorkspaceState, action: Action): WorkspaceState {
       }
       return {
         ...next,
+        retiredDraftChatIds: retireDraftChats(state, [
+          ...state.chats.filter(chat => removed(chat.folder)).map(chat => chat.id),
+          ...Object.keys(state.chatComposerDrafts).filter(removedChat),
+        ]),
         chats: next.chats.filter(chat => !removed(chat.folder)),
         chatComposerDrafts: removeRecordKeysMatching(next.chatComposerDrafts, removedChat),
         editComposerDrafts: removeRecordKeysMatching(next.editComposerDrafts, key => removedChat(editDraftChatId(key))),
@@ -1471,6 +1481,7 @@ function reducer(state: WorkspaceState, action: Action): WorkspaceState {
       }
       return {
         ...state,
+        retiredDraftChatIds: retireDraftChats(state, [action.id]),
         chats: next,
         activeChatId: nextActiveId,
         // No replacement in that workspace: keep the chrome on it, as ARCHIVE_CHAT does.
@@ -1654,6 +1665,7 @@ function reducer(state: WorkspaceState, action: Action): WorkspaceState {
         ),
       };
     case "SET_CHAT_DRAFT":
+      if (state.retiredDraftChatIds?.includes(action.chatId)) return state;
       return {
         ...state,
         chatComposerDrafts: {
@@ -1668,6 +1680,7 @@ function reducer(state: WorkspaceState, action: Action): WorkspaceState {
       return { ...state, chatComposerDrafts: next };
     }
     case "SET_EDIT_DRAFT": {
+      if (state.retiredDraftChatIds?.includes(action.chatId)) return state;
       const key = `${action.chatId}:${action.messageId}`;
       return {
         ...state,

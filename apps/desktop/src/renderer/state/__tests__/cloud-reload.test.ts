@@ -133,3 +133,22 @@ it("a cloud-only hydrate keeps a Local boot destination pending until Local conf
   dispatch({ type: "HYDRATE_CHATS", chats: [local, remote], activeChatId: local.id, confirmedLocalChats: true, confirmedCloudWorkspaces: [folder] });
   expect(useWorkspaceStore.getState().pendingChatHydrationFolder).toBeNull();
 });
+
+it("ignores a draft a closing composer writes back after its chat was pruned or deleted", async () => {
+  const { useWorkspaceStore } = await import("../workspace-store");
+  const { dispatch } = useWorkspaceStore.getState();
+  dispatch({ type: "MERGE_CHATS", chats: [remote] });
+  dispatch({ type: "SET_CHAT_DRAFT", chatId: id, draft: { text: "unsent", attachments: [] } });
+  dispatch({ type: "PRUNE_CLOUD_WORKSPACES", folders: [folder] });
+  // Sign-out retired the chat; its composer unmounts afterwards and flushes.
+  dispatch({ type: "SET_CHAT_DRAFT", chatId: id, draft: { text: "unsent", attachments: [] } });
+  dispatch({ type: "SET_EDIT_DRAFT", chatId: id, messageId: "m1", stash: { text: "edit" } as never });
+  expect(useWorkspaceStore.getState().chatComposerDrafts[id]).toBeUndefined();
+  expect(Object.keys(useWorkspaceStore.getState().editComposerDrafts)).toEqual([]);
+  dispatch({ type: "DELETE_CHAT", id: local.id });
+  dispatch({ type: "SET_CHAT_DRAFT", chatId: local.id, draft: { text: "late", attachments: [] } });
+  expect(useWorkspaceStore.getState().chatComposerDrafts[local.id]).toBeUndefined();
+  // A brand-new chat's draft (written before ADD_CHAT) is unaffected.
+  dispatch({ type: "SET_CHAT_DRAFT", chatId: "fresh", draft: { text: "first prompt", attachments: [] } });
+  expect(useWorkspaceStore.getState().chatComposerDrafts.fresh).toMatchObject({ text: "first prompt" });
+});

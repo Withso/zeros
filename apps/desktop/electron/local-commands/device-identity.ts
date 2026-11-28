@@ -22,14 +22,12 @@ export function deviceIdFor(store: SettingStore, accountId: string): string {
 
 /** Always allow is one person's consent for their own agents, so another
  * account signed in on this Mac never inherits it. A pre-upgrade device-wide
- * value moves to the first account that reads it, then no longer exists. */
+ * value has no owner, so no account adopts it: it is discarded and each
+ * account is asked again once. */
 export function alwaysAllowFor(store: SettingStore, accountId: string): boolean {
-  const key = accountKey(LEGACY_ALWAYS_ALLOW_KEY, accountId), value = store.get(key);
-  if (value === "true" || value === "false") return value === "true";
-  const legacy = store.get(LEGACY_ALWAYS_ALLOW_KEY) === "true";
-  store.set(key, String(legacy));
-  store.set(LEGACY_ALWAYS_ALLOW_KEY, "");
-  return legacy;
+  const value = store.get(accountKey(LEGACY_ALWAYS_ALLOW_KEY, accountId));
+  if (store.get(LEGACY_ALWAYS_ALLOW_KEY)) store.set(LEGACY_ALWAYS_ALLOW_KEY, "");
+  return value === "true";
 }
 
 export function setAlwaysAllowFor(store: SettingStore, accountId: string, value: boolean): void {

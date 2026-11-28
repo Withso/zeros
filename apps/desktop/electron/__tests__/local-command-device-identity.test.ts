@@ -9,10 +9,11 @@ describe("local command device identity", () => {
     for (const key of values.keys()) expect(key).not.toContain("account");
   });
 
-  it("keeps Always allow per account, and hands a pre-upgrade device-wide consent only to the account that reads it first", () => {
+  it("keeps Always allow per account, and gives an ownerless pre-upgrade device-wide consent to no account", () => {
     const values = new Map<string, string>([["localCommandsAlwaysAllow", "true"]]);
     const store = { get: (key: string) => values.get(key) ?? "", set: (key: string, value: string) => { if (value) values.set(key, value); else values.delete(key); } };
-    expect(alwaysAllowFor(store, "account-a")).toBe(true);
+    // Nobody can tell which account granted it, so the first reader is asked again.
+    expect(alwaysAllowFor(store, "account-a")).toBe(false);
     expect(values.has("localCommandsAlwaysAllow")).toBe(false);
     expect(alwaysAllowFor(store, "account-b")).toBe(false);
     setAlwaysAllowFor(store, "account-b", true);
