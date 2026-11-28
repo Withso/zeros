@@ -87,25 +87,34 @@ describe("sidebar workspace row", () => {
     expect(row).not.toContain("useAnyChatAgentActivity(");
   });
 
-  it("never swaps the logo or the loader for the mark", () => {
+  it("keeps the logo and carries the loader or dot in the lead only for a dot lead", () => {
     expect(leading).not.toMatch(/awaiting|ClipboardList|MessageCircleQuestionMark/i);
     expect(leading.match(/<WorkspaceProjectIcon/g)).toHaveLength(1);
     expect(leading).toMatch(/lead === "working" \? <AgentActivityIndicator activity=\{activity\} \/>/);
+    expect(leading).toMatch(/lead === "status-dot" \? <span className=\{cn\(STATUS_DOT_BASE_CLS, statusDot\)\}/);
+    expect(leading).toMatch(/lead === "idle-dot" \? <span className=\{IDLE_DOT_CLS\}/);
+    expect(row).toContain("const dotLead = repositoryLead || (depth > 0 && sameProjectAsParent);");
+    expect(ROW).toContain('const IDLE_DOT_CLS = "size-1.5 rounded-full bg-(--sidebar-idle-dot)";');
   });
 
-  it("gives a Compact row's status a dot after the leading slot, never for Working", () => {
-    const dot = row.indexOf("{statusDot && !leadStatusDot && (");
-    expect(dot).toBeGreaterThan(row.indexOf("data-sidebar-lead={lead}"));
-    expect(dot).toBeLessThan(row.indexOf("{/* Only the name truncates"));
-    expect(row).toContain('const statusDot = compact && rowStatus && rowStatus.tone !== "muted" ? STATUS_DOT_CLS[rowStatus.tone] : null;');
+  it("puts the loader, else the status dot, at the right end of line 1 in every density", () => {
+    expect(row).toContain("const statusDot = archiving ? null : sidebarStatusDot(rowStatus);");
+    expect(row).toContain("const endMark = sidebarRowEndMark({ archiving, working, dotLead, statusDot: !!statusDot });");
+    const end = row.slice(row.indexOf('<span className={cn(SIDEBAR_WORKSPACE_TRAILING_CLS, "ml-auto")}>'));
+    expect(end).toMatch(/endMark === "loader" \? \([\s\S]*?<AgentActivityIndicator activity=\{activity\} \/>/);
+    expect(end).toMatch(/endMark === "dot" \? \([\s\S]*?role="img" aria-label=\{statusDotLabel\}/);
+    expect(end).toMatch(/compact && sidebarCompactShowsTime\(\{ working, statusDot: !!statusDot \}\)/);
+    expect(row).not.toContain("leadStatusDot");
     expect(ROW).toMatch(/const SIDEBAR_WORKSPACE_GROUPED_INSET_CLS = "pl-8";/);
     expect(ROW).not.toContain("SIDEBAR_WORKSPACE_GUTTER_CLS");
   });
 
-  it("gives a flat row's mark the pencil's slot, which it outranks", () => {
-    expect(row).toMatch(/const statusMark = archiving \? null : \(awaitingKind \?\? /);
-    expect(row).toMatch(/const trailingMark = twoLine && statusMark === "unread" \? "unread" : showDraft \? "draft" : null;/);
-    // Step 2: the loader lives in the leading slot on every row.
+  it("puts the unsent-draft pencil right after the name", () => {
+    const name = row.indexOf('<span className="text-fg1 min-w-0 truncate">{label}</span>');
+    const pencil = row.indexOf("{showDraft && (");
+    expect(pencil).toBeGreaterThan(name);
+    expect(pencil).toBeLessThan(row.indexOf("{placementMark && ("));
+    expect(row).not.toContain("trailingMark");
     expect(row).not.toContain("trailingAgentState");
   });
 });
@@ -114,9 +123,9 @@ describe("unread dot", () => {
   const DECK = source("apps/desktop/src/renderer/shell/conversation/chat-deck.tsx");
   const SHELL = source("apps/desktop/src/renderer/app-shell.tsx");
 
-  it("is a small accent dot, decorative because its surface names the state", () => {
+  it("is a small violet dot, decorative because its surface names the state", () => {
     const dot = renderToStaticMarkup(createElement(ChatUnreadDot));
-    expect(dot).toMatch(/<span class="[^"]*\bbg-accent\b[^"]*\brounded-full\b/);
+    expect(dot).toMatch(/<span class="[^"]*\bbg-violet-text\b[^"]*\brounded-full\b/);
     expect(dot).toContain('aria-hidden="true"');
     expect(dot).toContain("data-chat-unread");
   });
@@ -130,11 +139,9 @@ describe("unread dot", () => {
     expect(tabRow).toMatch(/unread && "unread"/);
   });
 
-  it("sits where a workspace row's plan or question mark goes, which outranks it", () => {
+  it("drives a workspace row's Done word and dot, which go once the chat is read", () => {
     expect(row).toContain("const unread = useAnyChatUnread(chatIds);");
-    expect(row).toMatch(/const statusMark = archiving \? null : \(awaitingKind \?\? \(unread \? "unread" : null\)\);/);
-    expect(row).toMatch(/trailingMark === "unread" \? \(\s*<ChatUnreadDot \/>/);
-    expect(row).toMatch(/const trailingMark = twoLine && statusMark === "unread" \? "unread" : showDraft \? "draft" : null;/);
+    expect(row).not.toContain("<ChatUnreadDot");
     expect(row).toMatch(/unread,\s*\}\)\}/);
   });
 

@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from "react";
-import { Archive, FolderX } from "lucide-react";
+import { FolderX } from "lucide-react";
+import { ArchiveIcon } from "../shared/ui/archive-icon";
 import { Button } from "../shared/ui/primitives";
 import { ComposerReplacementBar } from "./composer-replacement-bar";
 import {
@@ -121,7 +122,7 @@ export function WorkspaceHistoryBar({
       setBusy(false);
     }
   };
-  const Icon = workspace.archivedAt == null ? FolderX : Archive;
+  const Icon = workspace.archivedAt == null ? FolderX : ArchiveIcon;
   return (
     // It takes the composer's place, so it is a dock card like the ones above a live composer.
     <ComposerReplacementBar

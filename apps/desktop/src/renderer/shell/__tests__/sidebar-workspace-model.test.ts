@@ -13,6 +13,7 @@ import {
   sidebarWorkspaceListFilter,
   visibleRepositoryItems,
   type SidebarWorkspaceEntry,
+  type SidebarWorkspaceItem,
 } from "../sidebar-workspace-model";
 
 function project(slug: string, overrides: Partial<Project> = {}): Project {
@@ -72,15 +73,19 @@ function pending(
 /** A readable outline: `#repo` for a header, then its row keys. */
 function outline(entries: readonly SidebarWorkspaceEntry[]): string[] {
   return entries.flatMap((entry) =>
-    entry.kind === "status" ? [`#${entry.status.value}`, ...entry.items.map(sidebarItemSelectionKey)] : entry.kind === "repository"
+    entry.kind === "repository"
       ? [
           `#${entry.project.repoSlug}`,
-          ...entry.items.map(sidebarItemSelectionKey),
+          ...(entry.subgroups
+            ? entry.subgroups.flatMap(group => [`##${group.key}`, ...group.items.map(sidebarItemSelectionKey)])
+            : entry.items.map(sidebarItemSelectionKey)),
         ]
       : entry.kind === "folder"
         ? [entry.key]
         : entry.kind === "group"
-          ? entry.items.map(sidebarItemSelectionKey)
+          ? [`#${entry.groupKey}`, ...(entry.subgroups
+            ? entry.subgroups.flatMap(group => [`##${group.key}`, ...group.items.map(sidebarItemSelectionKey)])
+            : entry.items.map(sidebarItemSelectionKey))]
           : [sidebarItemSelectionKey(entry.item)],
   );
 }
@@ -119,15 +124,45 @@ describe("sidebar workspace list", () => {
     } finally { clearCloudWorkspaceCatalog(); }
   });
 
-  it("groups by Home's lifecycle statuses, including empty groups and pending creates", () => {
+  it("reads Status without its grouping callback as one list, never the lifecycle groups", () => {
     const entries = buildSidebarWorkspaceEntries({ filter: "status", projects: [alpha, beta, folder],
-      workspaces: [workspace("alpha", "done", 10, { status: "done" }),
-        workspace("beta", "review", 20, { status: "in-review" }),
-        workspace("alpha", "unknown", 30, { status: "future-status" as Workspace["status"] })],
+      workspaces: [workspace("alpha", "done", 10, { status: "done" }), workspace("beta", "review", 20, { status: "in-review" })],
       pending: [pending("beta", "creating", 40)],
     });
-    expect(outline(entries)).toEqual(["#backlog", "#in-progress", "creating", "unknown", "#in-review", "review", "#done", "done", "#cancelled", "project:project-folder"]);
-    expect(sidebarWorkspaceItems(entries).map(sidebarItemSelectionKey)).toEqual(["creating", "unknown", "review", "done"]);
+    expect(outline(entries)).toEqual(["creating", "review", "done", "project:project-folder"]);
+  });
+
+  const byRepo = (item: SidebarWorkspaceItem) => ({ key: item.project.id, label: item.project.name, order: item.project.id === "project-alpha" ? 0 : 1, project: item.project });
+  const byAge = (item: SidebarWorkspaceItem) => item.kind === "workspace" && item.workspace.createdAt >= 40
+    ? { key: "new", label: "New", order: 0 } : { key: "old", label: "Old", order: 1 };
+
+  it("splits each group into sub-groups whose rows keep the list's order and navigation", () => {
+    const entries = buildSidebarWorkspaceEntries({ filter: "ungrouped", projects, workspaces, pending: [], extraGroup: byAge, subGroup: byRepo });
+    expect(outline(entries)).toEqual(["#new", "##project-alpha", "a-new", "##project-beta", "b-new", "#old", "##project-alpha", "a-old", "##project-beta", "b-old", "##project-folder", "local:folder"]);
+    expect(sidebarWorkspaceItems(entries).map(sidebarItemSelectionKey)).toEqual(["a-new", "b-new", "a-old", "b-old", "local:folder"]);
+    const repositories = buildSidebarWorkspaceEntries({ filter: "grouped", projects: [alpha], workspaces, pending: [], subGroup: byAge });
+    expect(outline(repositories)).toEqual(["#alpha", "##new", "a-new", "##old", "a-old"]);
+  });
+
+  it("nests a child under its parent only within the same sub-group", () => {
+    const parent = workspace("alpha", "parent", 50);
+    const near = workspace("alpha", "near", 45, { parentWorkspaceId: "parent" });
+    const far = workspace("alpha", "far", 10, { parentWorkspaceId: "parent" });
+    const entries = buildSidebarWorkspaceEntries({ filter: "ungrouped", projects: [alpha], workspaces: [parent, near, far], pending: [],
+      expandedWorkspaceIds: new Set(["parent"]), extraGroup: () => ({ key: "all", label: "All", order: 0 }), subGroup: byAge });
+    expect(outline(entries)).toEqual(["#all", "##new", "parent", "near", "##old", "far"]);
+  });
+
+  it("orders first-level groups by the user's order and hides groups, keeping the open workspace", () => {
+    const ordered = buildSidebarWorkspaceEntries({ filter: "grouped", projects, workspaces, pending: [], groupOrder: ["project-beta"] });
+    expect(outline(ordered).filter(line => line.startsWith("#"))).toEqual(["#beta", "#alpha", "#empty"]);
+    const grouped = { filter: "ungrouped" as const, projects, workspaces, pending: [], extraGroup: byAge, groupOrder: ["old", "new"] };
+    expect(outline(buildSidebarWorkspaceEntries(grouped)).filter(line => line.startsWith("#"))).toEqual(["#old", "#new"]);
+    const hidden = buildSidebarWorkspaceEntries({ ...grouped, hiddenGroups: ["old"] });
+    expect(outline(hidden)).toEqual(["#new", "a-new", "b-new"]);
+    const kept = buildSidebarWorkspaceEntries({ ...grouped, hiddenGroups: ["old"], keepWorkspaceId: "b-old" });
+    expect(outline(kept)).toEqual(["#old", "b-old", "#new", "a-new", "b-new"]);
+    expect(kept[0]).toMatchObject({ kind: "group", concealed: true });
   });
 
   it.each(["grouped", "status", "ungrouped"] as const)("uses real activity in %s while preserving Created ordering", filter => {

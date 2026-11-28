@@ -39,7 +39,8 @@ import { localWorkShowsEverywhere } from "../team/organization-capabilities";
 import { projectGroupLookup } from "../../state/project-identity";
 import React, { useCallback, useLayoutEffect, useMemo, useRef } from "react";
 import { useWarmWorkspaceHistory } from "../../state/use-warm-workspace-history";
-import { Archive, Folder, FolderX } from "lucide-react";
+import { Folder, FolderX } from "lucide-react";
+import { ArchiveIcon } from "../../shared/ui/archive-icon";
 
 import { Switch } from "@/renderer/shared/ui/primitives";
 import { PrPill } from "../../shell/pr/pr-pill";
@@ -218,7 +219,7 @@ function RepoWorkspaceRow({
         w.archivedAt == null ? (
           <FolderX className="text-fg2 size-3.5 shrink-0" />
         ) : (
-          <Archive className="text-fg2 size-3.5 shrink-0" />
+          <ArchiveIcon className="text-fg2 size-3.5 shrink-0" />
         )
       ) : isLocalMainWorkspace(w) ? (
         <Folder className="text-fg2 size-3.5 shrink-0" strokeWidth={1.5} />

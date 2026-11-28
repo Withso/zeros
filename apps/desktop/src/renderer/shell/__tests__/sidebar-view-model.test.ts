@@ -3,12 +3,17 @@ import type { Workspace } from "../../platform/git";
 import { SIDEBAR_VIEW_DEFAULTS, type SidebarViewPreferences } from "../../state/sidebar-list-preferences";
 import {
   NO_SIGNAL,
+  agentStatusOf,
   changedSidebarView,
   extraGroupOf,
   filterSidebarWorkspaces,
   prMarkGroups,
   prMarkLayout,
+  orderSidebarGroups,
   recencyGroup,
+  sidebarDefaultGroups,
+  sidebarSignalKey,
+  sidebarSignalMovedOn,
   sidebarWorkspaceComparator,
   workspacePullRequests,
   workspaceUpdatedAt,
@@ -16,7 +21,15 @@ import {
 } from "../sidebar-view-model";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { SidebarPlacementIcon, sidebarRowLead, sidebarRowStatus, STATUS_DOT_CLS } from "../sidebar-workspace-row-meta";
+import {
+  SidebarPlacementIcon,
+  sidebarCompactShowsTime,
+  sidebarRowEndMark,
+  sidebarRowLead,
+  sidebarRowStatus,
+  STATUS_DOT_CLS,
+  STATUS_TONE_CLS,
+} from "../sidebar-workspace-row-meta";
 
 const ws = (id: string, extra: Partial<Workspace> = {}): Workspace =>
   ({ id, name: id, path: `/repo/${id}`, createdAt: 0, lastActiveAt: 0, ...extra }) as unknown as Workspace;
@@ -38,8 +51,9 @@ describe("sidebar view filters", () => {
 
   it("narrows by status, PR state, unread and draft, and combines them", () => {
     const ids = (v: SidebarViewPreferences) => filterSidebarWorkspaces(list, v, signal).map((w) => w.id);
-    expect(ids(view({ statuses: ["input"] }))).toEqual(["a"]);
-    expect(ids(view({ statuses: ["failed", "working"] }))).toEqual(["c", "d"]);
+    expect(ids(view({ statuses: ["needs-you"] }))).toEqual(["a", "b", "c"]);
+    expect(ids(view({ statuses: ["working"] }))).toEqual(["d"]);
+    expect(ids(view({ statuses: ["idle", "working"] }))).toEqual(["d"]);
     expect(ids(view({ prStates: ["merged"] }))).toEqual(["b"]);
     expect(ids(view({ prStates: ["none"] }))).toEqual(["c", "d"]);
     expect(ids(view({ unreadOnly: true }))).toEqual(["b"]);
@@ -130,18 +144,20 @@ describe("sidebar row status", () => {
   it("follows the agreed priority and colours", () => {
     expect(sidebarRowStatus(base)).toBeNull();
     expect(sidebarRowStatus({ ...base, unread: true })).toEqual({ label: "Done", tone: "done" });
-    expect(sidebarRowStatus({ ...base, working: true, unread: true })?.label).toBe("Working");
+    expect(sidebarRowStatus({ ...base, working: true, unread: true })).toEqual({ label: "Working", tone: "working" });
     expect(sidebarRowStatus({ ...base, working: true, awaiting: "input" })).toEqual({ label: "Needs input", tone: "attention" });
     expect(sidebarRowStatus({ ...base, awaiting: "plan" })).toEqual({ label: "Plan ready", tone: "attention" });
-    expect(sidebarRowStatus({ ...base, setupFailed: true, awaiting: "input" })).toEqual({ label: "Failed", tone: "failed" });
-    expect(sidebarRowStatus({ ...base, archiving: true, setupFailed: true })?.label).toBe("Archiving…");
+    expect(sidebarRowStatus({ ...base, setupFailed: true, awaiting: "input" })).toEqual({ label: "Setup failed", tone: "failed" });
+    expect(sidebarRowStatus({ ...base, archiving: true, setupFailed: true })).toEqual({ label: "Archiving", tone: "muted" });
+    expect(sidebarRowStatus({ ...base, cloudStatus: "starting" })).toEqual({ label: "Waking", tone: "muted" });
+    expect(sidebarRowStatus({ ...base, cloudStatus: "unhealthy", awaiting: "plan" })).toEqual({ label: "Cloud error", tone: "failed" });
   });
 });
 
 describe("applied view options", () => {
   it("marks only what differs from the defaults", () => {
     expect(changedSidebarView(view(), ["statuses", "compact", "direction"])).toEqual([]);
-    expect(changedSidebarView(view({ compact: true, statuses: ["input"] }), ["statuses", "compact", "direction"])).toEqual(["statuses", "compact"]);
+    expect(changedSidebarView(view({ compact: true, statuses: ["needs-you"] }), ["statuses", "compact", "direction"])).toEqual(["statuses", "compact"]);
   });
 });
 
@@ -175,28 +191,56 @@ describe("sidebar review regressions", () => {
   });
 });
 
-// Step 2 (v14 B01/B04): the leading slot is the project logo, the agent loader
-// while working, the logo loader while archiving and a dot for a same-project
-// child. The seeded PR-coloured square is gone.
+// The logo stays on the row; the loader and the status dot sit at the right
+// end of line 1. A child in its parent's project, and any row under a
+// repository header, carries them in the logo's place instead.
 describe("sidebar row leading slot", () => {
-  const base = { archiving: false, working: false, sameProjectChild: false, folder: false, design: false };
-  it("shows the project logo at rest", () => {
+  const base = { archiving: false, working: false, dotLead: false, statusDot: false, folder: false, design: false };
+  it("keeps the project logo, even while an agent works", () => {
     expect(sidebarRowLead(base)).toBe("logo");
+    expect(sidebarRowLead({ ...base, working: true })).toBe("logo");
+    expect(sidebarRowLead({ ...base, statusDot: true })).toBe("logo");
   });
-  it("puts archiving, then working, ahead of everything else", () => {
-    expect(sidebarRowLead({ ...base, archiving: true, working: true, sameProjectChild: true })).toBe("archiving");
-    expect(sidebarRowLead({ ...base, working: true, sameProjectChild: true, folder: true })).toBe("working");
+  it("puts archiving ahead of everything else", () => {
+    expect(sidebarRowLead({ ...base, archiving: true, working: true, dotLead: true })).toBe("archiving");
   });
-  it("gives a same-project child a dot and keeps folder and design marks", () => {
-    expect(sidebarRowLead({ ...base, sameProjectChild: true })).toBe("child");
+  it("carries the loader, the status dot or a faint idle dot in a dot lead", () => {
+    expect(sidebarRowLead({ ...base, dotLead: true, working: true, statusDot: true })).toBe("working");
+    expect(sidebarRowLead({ ...base, dotLead: true, statusDot: true })).toBe("status-dot");
+    expect(sidebarRowLead({ ...base, dotLead: true })).toBe("idle-dot");
+  });
+  it("keeps folder and design marks", () => {
     expect(sidebarRowLead({ ...base, folder: true })).toBe("folder");
     expect(sidebarRowLead({ ...base, design: true })).toBe("design");
+  });
+});
+
+describe("sidebar row end mark", () => {
+  const base = { archiving: false, working: false, dotLead: false, statusDot: false };
+  it("shows the loader, else the status dot, at the right end", () => {
+    expect(sidebarRowEndMark({ ...base, working: true, statusDot: true })).toBe("loader");
+    expect(sidebarRowEndMark({ ...base, statusDot: true })).toBe("dot");
+    expect(sidebarRowEndMark(base)).toBeNull();
+  });
+  it("leaves the right end empty when the lead carries the mark or the row archives", () => {
+    expect(sidebarRowEndMark({ ...base, dotLead: true, working: true })).toBeNull();
+    expect(sidebarRowEndMark({ ...base, dotLead: true, statusDot: true })).toBeNull();
+    expect(sidebarRowEndMark({ ...base, archiving: true, working: true })).toBeNull();
+  });
+  it("shows Compact's time only when no loader or dot speaks for the row", () => {
+    expect(sidebarCompactShowsTime({ working: false, statusDot: false })).toBe(true);
+    expect(sidebarCompactShowsTime({ working: true, statusDot: false })).toBe(false);
+    expect(sidebarCompactShowsTime({ working: false, statusDot: true })).toBe(false);
   });
 });
 
 describe("sidebar row status colours", () => {
   it("use the status families' -text roles, and violet for Done in word and dot", () => {
     expect(STATUS_DOT_CLS.done).toBe("bg-violet-text");
+    expect(STATUS_DOT_CLS.attention).toBe("bg-orange-text");
+    expect(STATUS_DOT_CLS.failed).toBe("bg-red-text");
+    expect(STATUS_TONE_CLS.attention).toBe("text-orange-text");
+    expect(STATUS_TONE_CLS.working).toContain("zeros-working-shimmer");
     expect(sidebarRowStatus({ archiving: false, setupFailed: false, cloudStatus: null, awaiting: null, working: false, unread: true })).toEqual({ label: "Done", tone: "done" });
   });
 });
@@ -208,5 +252,44 @@ describe("sidebar placement icon", () => {
     expect(icon("failed")).toContain("text-red-text");
     expect(icon("stopped")).toContain('data-cloud-mark="stopped"');
     expect(icon("stopped")).not.toContain("text-red-text");
+  });
+});
+
+describe("setup failure answered by a later status", () => {
+  const signal = (patch: Partial<SidebarWorkspaceSignal> = {}): SidebarWorkspaceSignal => ({ ...NO_SIGNAL, ...patch });
+  it("counts only a change seen after the failure", () => {
+    const idle = sidebarSignalKey(signal());
+    expect(sidebarSignalMovedOn(idle, signal())).toBe(false);
+    expect(sidebarSignalMovedOn(idle, signal({ working: true }))).toBe(true);
+    expect(sidebarSignalMovedOn(idle, signal({ awaiting: "plan" }))).toBe(true);
+    expect(sidebarSignalMovedOn(idle, signal({ unread: true }))).toBe(true);
+    const busy = sidebarSignalKey(signal({ working: true, awaiting: "input" }));
+    expect(sidebarSignalMovedOn(busy, signal({ working: true, awaiting: "input" }))).toBe(false);
+    expect(sidebarSignalMovedOn(busy, signal({ working: true, awaiting: "input", unread: true }))).toBe(true);
+    expect(sidebarSignalMovedOn(busy, signal({ awaiting: "plan" }))).toBe(true);
+  });
+});
+
+describe("Group and Filter by status", () => {
+  const status = (patch: Partial<SidebarWorkspaceSignal>, extra: Partial<Workspace> = {}) => agentStatusOf(ws("w", extra), { ...NO_SIGNAL, ...patch });
+  it("puts a failure, a question, a plan and an unread finish in Needs you", () => {
+    expect(status({ awaiting: "input" })).toBe("needs-you");
+    expect(status({ awaiting: "plan", working: true })).toBe("needs-you");
+    expect(status({ unread: true })).toBe("needs-you");
+    expect(status({ cloudError: true })).toBe("needs-you");
+    expect(status({}, { setupState: "failed" } as Partial<Workspace>)).toBe("needs-you");
+  });
+  it("lets an acknowledged setup failure and a working agent read as they are", () => {
+    expect(status({ setupFailed: false }, { setupState: "failed" } as Partial<Workspace>)).toBe("idle");
+    expect(status({ working: true, unread: true })).toBe("working");
+    expect(status({})).toBe("idle");
+  });
+  it("offers Needs you, Working, Idle and Archived, in that order, and the user's order first", () => {
+    expect(sidebarDefaultGroups("status").map((group) => group.label)).toEqual(["Needs you", "Working", "Idle", "Archived"]);
+    expect(sidebarDefaultGroups("placement").map((group) => group.key)).toEqual(["local", "cloud"]);
+    const keys = sidebarDefaultGroups("status").map((group) => group.key);
+    expect(orderSidebarGroups(keys, (key) => key, ["working", "archived"])).toEqual(["working", "archived", "needs-you", "idle"]);
+    expect(orderSidebarGroups(keys, (key) => key, undefined)).toEqual(keys);
+    expect(extraGroupOf("status", ws("w"), { signal: { ...NO_SIGNAL, working: true } })).toEqual({ key: "working", label: "Working", order: 1 });
   });
 });

@@ -66,6 +66,7 @@ import {
   useDocumentActive,
 } from "../../../state/use-document-active";
 import { isLocalMainWorkspace } from "../../../state/local-main-workspace";
+import { acknowledgeSetupFailure } from "../../../state/setup-failure-acknowledgements";
 import { useProjects } from "../../../state/use-projects";
 import { useBridge } from "../../../platform/bridge/use-bridge";
 import { repoPageViewForSection } from "../../../features/repositories/repo-page";
@@ -132,6 +133,11 @@ export const SetupView = forwardRef<
   const active = useDocumentActive(visible);
   // The Setup view is one of the workspace's workbench status sources.
   useWorkbenchStatusSource({ error: null, pending: false }, workspace?.id);
+  // On screen, a failed setup has been seen: the sidebar row stops saying so.
+  const failedWorkspaceId = active && workspace?.setupState === "failed" ? workspace.id : null;
+  useEffect(() => {
+    if (failedWorkspaceId) acknowledgeSetupFailure(failedWorkspaceId);
+  }, [failedWorkspaceId]);
   if (!workspace) return <SetupLoading />;
   return (
     <WorkspaceSetup

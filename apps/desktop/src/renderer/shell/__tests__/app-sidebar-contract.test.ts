@@ -19,6 +19,7 @@ const MODEL = source(
   "apps/desktop/src/renderer/shell/sidebar-workspace-model.ts",
 );
 const MENU = source("apps/desktop/src/renderer/shell/sidebar-workspace-menu.tsx");
+const GROUP_HEADER = source("apps/desktop/src/renderer/shell/sidebar-group-header.tsx");
 
 /** The literal class string assigned to a top-level `const NAME = "…"`. */
 function classConstant(src: string, name: string): string {
@@ -67,7 +68,7 @@ describe("app shell navigation", () => {
     const nav = between(
       SIDEBAR,
       "<OrganizationSwitcher",
-      'className="group/section',
+      "ref={listRef}",
     );
     const home = nav.indexOf("<House strokeWidth={1.5} />");
     const customize = nav.indexOf("Customize</span>");
@@ -138,11 +139,12 @@ describe("sidebar workspace list presentations", () => {
     expect(MODEL).toMatch(
       /SIDEBAR_WORKSPACE_LIST_FILTERS[^=]*=\s*\[\s*"grouped",\s*"status",\s*"ungrouped",?\s*\]/,
     );
-    expect(MENU).toContain('aria-label="Group"');
+    expect(MENU).toContain('aria-label="Group by"');
     expect(MENU).toContain('aria-label="Sort by"');
     // Step 2: the view menu has no search; every option is a checklist or switch.
     expect(MENU).not.toContain('type="search"');
-    for (const label of ["Then by", "Hide empty groups", "Needs you on top", "Unread only", "Has unsent draft", "Show archived", "Compact view", "Expand child workspaces"])
+    expect(MENU).not.toContain('"Then by"');
+    for (const label of ["Sub-group", "Hide empty groups", "Needs you on top", "Unread only", "Has unsent draft", "Show archived", "Compact view", "Expand child workspaces"])
       expect(MENU, label).toContain(label);
     expect(SIDEBAR).not.toContain("repositoryWorkspaceListFilter");
   });
@@ -208,7 +210,7 @@ describe("sidebar workspace rows", () => {
     expect(cls).toContain("has-[>button:focus-visible]:inset-ring-accent");
     expect(cls).not.toContain("has-[>button:focus-visible]:ring-[3px]");
     expect(SIDEBAR).toMatch(/<Surface\s+as="nav"\s+kind="sidebar"/);
-    expect(classConstant(HEADER, "REPOSITORY_HEADER_CLS")).toMatch(/\bh-8\b/);
+    expect(classConstant(HEADER, "REPOSITORY_HEADER_CLS")).toMatch(/\bh-7\b/);
     const surface = source(
       "apps/desktop/src/renderer/shared/ui/layout/surface.tsx",
     );
@@ -217,18 +219,17 @@ describe("sidebar workspace rows", () => {
     );
   });
 
-  it("keep the draft pencil at the row's end with Archive in its slot", () => {
+  it("keep the draft pencil after the name, with Archive (a tick) over the row's end", () => {
     const row = between(
       ROW,
       "export function SidebarWorkspaceRow(",
       "/** Placeholder row",
     );
-    // The slot holds the pencil, or a flat row's awaiting mark, which
-    // outranks it (awaiting-mark-placement.test.ts).
     expect(row).toMatch(
-      /<RunStream[\s\S]*?\{trailingMark && \([\s\S]*?<ComposerDraftIndicator \/>[\s\S]*?\{rowAction\}\s*<\/span>/,
+      /\{label\}<\/span>\s*\{showDraft && \([\s\S]*?<ComposerDraftIndicator \/>/,
     );
-    expect(row).toContain("{!trailingMark && rowAction}");
+    expect(row).toMatch(/\{rowAction\}\s*<\/div>/);
+    expect(row).toContain("icon: <ArchiveIcon ");
     expect(classConstant(ROW, "SIDEBAR_WORKSPACE_ACTION_OVERLAY_CLS")).toMatch(
       /group-hover\/workspace:opacity-100/,
     );
@@ -259,8 +260,8 @@ describe("sidebar workspace rows", () => {
     );
     expect(row).toContain("<WorkspaceContextMenu");
     for (const event of ["onPointerEnter", "onFocus"]) {
-      const handler = between(row, `${event}={() => {`, "}}");
-      expect(handler).toContain("if (!surfaceActive) return;");
+      const handler = between(row, `${event}={(event) => {`, "}}");
+      expect(handler).toContain("if (!surfaceActive || !eventInsideOwnDom(event)) return;");
       expect(handler).toContain("onPrefetch(workspace);");
     }
     expect(row).toContain('data-workspace-tab="true"');
@@ -360,36 +361,43 @@ describe("sidebar collapse and geometry", () => {
     for (const cls of ["h-8", "px-2", "gap-2", "border-0", "data-[state=active]:bg-selected-bg", "[&>svg]:text-fg3"]) {
       expect(entry.split(/\s+/), cls).toContain(cls);
     }
-    expect(classConstant(HEADER, "REPOSITORY_HEADER_CLS")).toMatch(
-      /\bh-8\b/,
-    );
+    // Every header (section, group, sub-group, repository) is one 28px row.
+    expect(classConstant(HEADER, "REPOSITORY_HEADER_CLS")).toMatch(/\bh-7\b/);
+    expect(classConstant(GROUP_HEADER, "SIDEBAR_GROUP_HEADER_CLS")).toMatch(/\bh-7\b/);
     expect(SIDEBAR).toContain('<div className="flex flex-col gap-0.5">');
     expect(SIDEBAR).toContain('className="flex flex-col gap-0.5 empty:hidden"');
     expect(SIDEBAR).toContain('{section.id === null ? "My workspaces" : section.label}');
     expect(SIDEBAR).toContain("setSidebarSectionCollapsed(id, !collapsed)");
-    const label = classConstant(SIDEBAR, "SECTION_LABEL_CLS").split(/\s+/);
-    for (const cls of ["text-3xxs", "leading-4", "font-medium", "text-fg3"]) expect(label, cls).toContain(cls);
+    expect(SIDEBAR).toContain('level="section"');
+    const header = classConstant(GROUP_HEADER, "SIDEBAR_GROUP_HEADER_CLS").split(/\s+/);
+    for (const cls of ["text-3xxs", "leading-4", "font-medium", "hover:bg-(--surface-hover)"]) expect(header, cls).toContain(cls);
+    expect(GROUP_HEADER).toContain('section: "pl-2 text-fg3"');
     // The scroller's 4px top inset keeps the first header's focus ring whole.
     expect(SIDEBAR).toContain('className="min-h-0 flex-1 overflow-y-auto px-2 pt-1 pb-2"');
   });
 });
 
 describe("sidebar typography and colour", () => {
-  it("sets every row label at 13px", () => {
+  it("sets every row label at 13px and every header at 12px", () => {
     for (const cls of [
       classConstant(SIDEBAR, "SIDEBAR_ENTRY_CLS"),
       classConstant(ROW, "SIDEBAR_WORKSPACE_ROW_CLS"),
-      classConstant(HEADER, "REPOSITORY_TOGGLE_CLS"),
     ]) {
       expect(cls).toMatch(/\btext-xs\b/);
       expect(cls).not.toMatch(/\btext-sm\b/);
     }
+    for (const cls of [
+      classConstant(HEADER, "REPOSITORY_HEADER_CLS"),
+      classConstant(GROUP_HEADER, "SIDEBAR_GROUP_HEADER_CLS"),
+    ]) expect(cls).toMatch(/\btext-3xxs\b/);
   });
 
   it("keeps repository names and workspace glyphs on fg2", () => {
     const header = classConstant(HEADER, "REPOSITORY_HEADER_CLS");
     expect(header).toMatch(/\btext-fg2\b/);
-    expect(header).not.toMatch(/\btext-fg1\b/);
+    // Hover lifts the name with the whole row's fill; at rest it is fg2.
+    expect(header.split(/\s+/)).toContain("hover:text-fg1");
+    expect(header.split(/\s+/)).not.toContain("text-fg1");
     expect(header).not.toContain("has-[:focus-visible]:bg-");
     // An open repository page fills its header like a selected row.
     expect(header.split(/\s+/)).toContain("data-[active=true]:bg-(--surface-hover)");
@@ -420,17 +428,18 @@ describe("sidebar typography and colour", () => {
 });
 
 describe("sidebar repository headers", () => {
-  it("swap the repository icon for the disclosure chevron on hover", () => {
-    expect(HEADER).toMatch(/group-hover\/repo:invisible/);
-    expect(HEADER).toMatch(
-      /group-hover\/repo:flex group-focus-visible\/toggle:flex/,
-    );
+  it("keep the logo and put the arrow at the right end, after the actions", () => {
+    expect(HEADER).not.toMatch(/group-hover\/repo:invisible/);
+    expect(HEADER).toContain("<RepositoryIcon project={project} className={REPOSITORY_ICON_CHIP_CLS} />");
+    const arrow = HEADER.indexOf("data-sidebar-header-arrow");
+    expect(arrow).toBeGreaterThan(HEADER.indexOf("aria-label={`Create workspace in ${project.name}`}"));
     expect(HEADER).toContain("<ChevronDown");
     expect(HEADER).toContain("<ChevronRight");
     expect(HEADER).toContain("aria-expanded={!collapsed}");
+    expect(HEADER).toContain('<span className="text-fg3 shrink-0 font-normal tabular-nums">{count}</span>');
   });
 
-  it("keep + visible and reveal settings and ⋯ over the name on hover or while the menu is open", () => {
+  it("reveal settings, ⋯ and + before the arrow on hover or while the menu is open", () => {
     // Overlaid on a fade instead of toggling display, so the name never
     // re-truncates under the pointer; the fade stays click-through.
     expect(classConstant(HEADER, "REPOSITORY_HOVER_ACTIONS_CLS")).toMatch(

@@ -59,4 +59,19 @@ describe("a sidebar workspace row's click", () => {
     );
     expect(row).toMatch(/onClick=\{\(event\) => \{\s*if \(!eventInsideOwnDom\(event\)\) return;/);
   });
+
+  // Moving over or focusing the logo menu's items reached the row through the
+  // portal and scheduled its hover card, which then opened after the menu had
+  // closed, over whatever the pointer went to next.
+  it("does not schedule the hover card from a portalled menu", () => {
+    const row = readFileSync(
+      resolve(process.cwd(), "apps/desktop/src/renderer/shell/sidebar-workspace-row.tsx"),
+      "utf8",
+    );
+    for (const handler of ["onPointerEnter", "onFocus"]) {
+      expect(row, handler).toMatch(
+        new RegExp(`${handler}=\\{\\(event\\) => \\{\\s*if \\(!surfaceActive \\|\\| !eventInsideOwnDom\\(event\\)\\) return;`),
+      );
+    }
+  });
 });

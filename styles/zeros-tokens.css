@@ -327,6 +327,7 @@
   --color-violet-text: var(--violet-text); /* #B093E5 — violet status words and icons (merged, done) on any plain surface */
   --color-violet-bg: var(--violet-bg); /* #2A2139 — done container surface */
   --color-violet-on-bg: var(--violet-on-bg); /* #D8C7F9 — text and icons inside a violet-bg container */
+  --color-orange-text: var(--orange-text); /* #E39A63 — orange status words and dots for work waiting on the user (needs input, plan ready) on any plain surface */
   --color-accent: var(--accent); /* #4489FF — the one accent fill: keyboard focus, checked controls, switch on, slider and progress */
   --color-accent-fg: var(--accent-fg); /* #FFFFFF — marks drawn on the accent fill */
   /* @generated tokens:utilities-red-text:end */
@@ -662,6 +663,7 @@
   --conflict-incoming-band: hsl(213.54 78.882% 68.431% / 0.34); /* #6FA7EE57 — merge conflict branch band (the >>>>>>> row) */
   --conflict-neutral: hsl(0 0% 94% / 0.05); /* #F0F0F00D — merge conflict separator, ancestor and accept rows */
   --violet-text: hsl(261.22 61.194% 73.725%); /* #B093E5 — violet status words and icons (merged, done) on any plain surface */
+  --orange-text: hsl(25.78 69.565% 63.922%); /* #E39A63 — orange status words and dots for work waiting on the user (needs input, plan ready) on any plain surface */
   --violet-bg: hsl(262.5 26.667% 17.647%); /* #2A2139 — done container surface */
   --violet-on-bg: hsl(260.4 80.645% 87.843%); /* #D8C7F9 — text and icons inside a violet-bg container */
   --accent: hsl(217.86 100% 63.33%); /* #4489FF — the one accent fill: keyboard focus, checked controls, switch on, slider and progress */
@@ -893,6 +895,7 @@
   --conflict-incoming-band: hsl(214.72 73.272% 42.549% / 0.26); /* #1D60BC42 — merge conflict branch band (the >>>>>>> row) */
   --conflict-neutral: hsl(30 10% 15.686% / 0.05); /* #2C28240D — merge conflict separator, ancestor and accept rows */
   --violet-text: hsl(265.38 42.276% 48.235%); /* #7347AF — violet status words and icons (merged, done) on any plain surface */
+  --orange-text: hsl(24.46 73.034% 34.902%); /* #9A4D18 — orange status words and dots for work waiting on the user (needs input, plan ready) on any plain surface */
   --violet-bg: hsl(260 81.818% 95.686%); /* #F1EBFD — done container surface */
   --violet-on-bg: hsl(265.89 44.601% 41.765%); /* #643B9A — text and icons inside a violet-bg container */
   --accent: hsl(219.57 82.46% 55.29%); /* #2F6FEB — the one accent fill: keyboard focus, checked controls, switch on, slider and progress */

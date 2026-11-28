@@ -2,31 +2,34 @@
 // COMPONENT: SidebarWorkspaceRow / PendingSidebarWorkspaceRow
 // PURPOSE: One workspace in the app sidebar (step 2): two lines, or one
 //          32px line in Compact view, keeping every behaviour of the former
-//          tab: the live Run stream, the unsent-draft pencil, hover Archive,
-//          the right-click status menu and pointer/focus warming.
+//          tab: the unsent-draft pencil, hover Archive, the right-click status
+//          menu and pointer/focus warming.
 // USED IN: AppSidebar (app-sidebar.tsx) and the draft-indicator harness
 // ============================================
 //
 // Row anatomy:
 //
-//   [lead] name…………………………… [run] [• | ✎]      line 1
+//   [lead] name ✎………………………………… [loader | •]   line 1
 //          [⌂] status word or time · PR marks     line 2 (sidebar-workspace-row-meta)
 //          project name                           optional line 3
 //
-// [lead] The project logo; the agent loader while an agent works; the logo
-//        loader while archiving; a dot for a child in its parent's project.
+// [lead] The project logo, which stays while an agent works; the logo loader
+//        while archiving. Under a repository header, or for a child in its
+//        parent's project, the logo would only repeat what is above the row,
+//        so the lead carries the loader, the status dot or a faint idle dot.
 //        On a parent, the arrow takes its place on hover and toggles the
 //        child workspaces. Folders and legacy Design workspaces keep a folder
 //        or a pen. (sidebarRowLead)
-// [•|✎]  The unread dot of an agent that finished off screen, or the draft
-//        pencil. Needs input and Plan ready are words on line 2; Compact
-//        shows every status as a dot after the leading slot.
+// ✎      The unsent-draft pencil, right after the name.
+// [loader | •] The agent loader, else the status dot (sidebarRowEndMark);
+//        Compact puts its PR marks before it and shows the time only when
+//        neither speaks for the row.
 // The ± line counts are not on the row; the hover card shows them.
 //
 // The open target is a full-size transparent Button under pointer-transparent
 // content, so Archive can sit beside the name without nesting buttons. Hover
-// shows Archive over line 1 only (or a plain folder's settings); a marked row
-// puts that action in the mark's own slot, so hovering never moves anything.
+// shows Archive over line 1's end only (or a plain folder's settings), so
+// hovering never moves anything.
 //
 // The row's font weight is declared ONCE on the container both variants share
 // (SIDEBAR_WORKSPACE_ROW_CLS): the optimistic row has no Button, and a weight
@@ -34,13 +37,13 @@
 
 import React, { useState } from "react";
 import {
-  Archive,
   ChevronRight,
   Folder,
   ImageIcon,
   PenTool,
   Settings,
 } from "lucide-react";
+import { ArchiveIcon } from "../shared/ui/archive-icon";
 
 import { type Workspace } from "../platform/git";
 import { isCloudWorkspace } from "../platform/bridge/cloud-workspace-key";
@@ -57,14 +60,14 @@ import {
   SidebarPlacementIcon,
   SidebarPrMarks,
   SidebarWorkspaceRowMeta,
-  STATUS_DOT_CLS,
+  sidebarCompactShowsTime,
+  sidebarRowEndMark,
   sidebarRowLead,
   sidebarRowStatus,
+  sidebarStatusDot,
 } from "./sidebar-workspace-row-meta";
 import { AgentActivityIndicator } from "../features/agent/agent-activity-indicator";
-import { AgentAwaitingIcon } from "../features/agent/agent-awaiting-indicator";
 import { useAnyChatUnread } from "../features/agent/chat-unread";
-import { ChatUnreadDot } from "../features/agent/chat-unread-dot";
 import { ComposerDraftIndicator } from "../features/agent/composer-draft-indicator";
 import {
   useAnyChatWorkingActivity,
@@ -73,6 +76,7 @@ import {
 import { DEFAULT_REPO_SETTINGS_VIEW } from "../features/repositories/repo-page";
 import { REPOSITORY_ICON_CHIP_CLS, RepositoryIcon } from "../features/repositories/repository-icon";
 import { useAnyChatHasDraft } from "../state/composer-draft-presence";
+import { setupFailureShown, useSetupFailureAcknowledged } from "../state/setup-failure-acknowledgements";
 import { isLocalMainWorkspace } from "../state/local-main-workspace";
 import {
   usePendingWorkspaceMode,
@@ -81,7 +85,7 @@ import {
 import type { Project } from "../state/projects-store";
 import { useWorkspaceDispatch } from "../state/store";
 import { cn } from "../shared/ui/cn";
-import { RunStream, ZerosSpinner } from "../shared/ui/loading";
+import { ZerosSpinner } from "../shared/ui/loading";
 import { Button } from "../shared/ui/primitives/button";
 import {
   ContextMenu,
@@ -129,24 +133,21 @@ const SIDEBAR_WORKSPACE_OPEN_BUTTON_CLS =
 const SIDEBAR_WORKSPACE_CONTENT_CLS =
   "pointer-events-none relative flex h-full min-w-0 flex-1 items-center gap-2 whitespace-nowrap text-inherit [&_svg]:shrink-0 [&_svg:not([data-draft-icon])]:size-3.5";
 const SIDEBAR_WORKSPACE_TRAILING_CLS = "flex shrink-0 items-center gap-1.5";
-// Every trailing mark (stream, draft, unread) takes the same 16px slot, so the
-// name's truncation point never moves with the state.
+// The loader and the status dot share one 16px slot, so the name's truncation
+// point never moves with the state.
 const TRAILING_SLOT_CLS =
   "relative inline-flex size-4 shrink-0 items-center justify-center";
 // Hover and focus reveal Archive at the row's end over a fade of the same
-// hover fill, so the trailing counts/stream slide under it instead of
-// reflowing. The 24px button ends 12px in, like the headers' row actions.
+// hover fill, so the right end's marks slide under it instead of reflowing. The 24px button ends 12px in, like the headers' row actions.
 const SIDEBAR_WORKSPACE_ACTION_OVERLAY_CLS =
   "pointer-events-none absolute inset-y-0 right-0 z-10 flex w-12 items-center justify-end rounded-r-md bg-gradient-to-l from-(--row-fill) from-50% to-transparent pr-1 opacity-0 transition-none group-hover/workspace:opacity-100 focus-within:opacity-100";
-// A drafted (or, in a flat row, awaiting) row's Archive covers that mark in
-// its own 16px slot, so it lands where the plain row's Archive does.
-const SIDEBAR_WORKSPACE_DRAFT_ACTION_OVERLAY_CLS =
-  "pointer-events-none absolute -inset-1 flex items-center justify-center rounded-md bg-(--row-fill) opacity-0 transition-none group-hover/workspace:opacity-100 focus-within:opacity-100";
 // The lead stays on fg2 in every state; the name is fg1 on every row.
 const GLYPH_BOX_CLS =
   "inline-flex size-4 shrink-0 items-center justify-center text-fg2";
-// A child in its parent's project: a 4px muted dot instead of the logo again.
-const CHILD_DOT_CLS = "size-1 rounded-full bg-fg3";
+const STATUS_DOT_BASE_CLS = "size-1.5 rounded-full";
+// Idle under a repository header or a same-project parent: deliberately faint,
+// so "nothing to report" never reads as a status.
+const IDLE_DOT_CLS = "size-1.5 rounded-full bg-(--sidebar-idle-dot)";
 // A parent's lead is a 16px toggle: its mark at rest, the arrow on hover or
 // keyboard focus.
 const PARENT_TOGGLE_CLS =
@@ -238,14 +239,17 @@ export interface SidebarWorkspaceRowProps {
   /** A legacy plain folder has no repository header, so its own row carries
    *  the folder's settings action in the slot Archive uses elsewhere. */
   onOpenSettings?: () => void;
-  /** One-line rows: a status dot after the leading slot, time at the end. */
+  /** One-line rows: the loader, the status dot or the time at the end. */
   compact?: boolean;
   /** Adds the project name as a third line (never in Compact). */
   showProjectName?: boolean;
   /** Child-workspace nesting depth (0 for a top-level row). */
   depth?: number;
-  /** A child of a workspace in the same project: its lead is a dot. */
+  /** A child of a workspace in the same project: its lead carries the loader or a dot. */
   sameProjectAsParent?: boolean;
+  /** Listed under its repository's header: its lead carries the loader or a
+   *  dot instead of repeating the header's logo. */
+  repositoryLead?: boolean;
   /** Child workspaces under this row; with `onToggleChildren` the lead toggles them. */
   childCount?: number;
   childrenExpanded?: boolean;
@@ -273,6 +277,7 @@ export function SidebarWorkspaceRow({
   showProjectName = false,
   depth = 0,
   sameProjectAsParent = false,
+  repositoryLead = false,
   childCount = 0,
   childrenExpanded = false,
   onToggleChildren,
@@ -303,18 +308,12 @@ export function SidebarWorkspaceRow({
   );
   // An agent finished while its chat wasn't on screen (chat-unread.ts).
   const unread = useAnyChatUnread(chatIds);
-  // The row's status mark: a plan or question waiting on the user outranks an
-  // unread finish.
-  const statusMark = archiving ? null : (awaitingKind ?? (unread ? "unread" : null));
-  // Line 2 spells the status out and Compact gives it a dot after the leading
-  // slot, so the trailing slot keeps only the unsent-draft pencil (and, on
-  // two-line rows, the unread dot beside the name).
-  const trailingMark = twoLine && statusMark === "unread" ? "unread" : showDraft ? "draft" : null;
+  const setupAcknowledged = useSetupFailureAcknowledged(workspace.id);
   const cloudRow = isCloudWorkspace(workspace.path);
   const cloudStatus = useCloudWorkspaceStatus(cloudRow ? workspace.path : null);
   const rowStatus = sidebarRowStatus({
     archiving,
-    setupFailed: workspace.setupState === "failed",
+    setupFailed: setupFailureShown(workspace, setupAcknowledged),
     cloudStatus,
     awaiting: archiving ? null : awaitingKind,
     working,
@@ -322,15 +321,18 @@ export function SidebarWorkspaceRow({
   });
   const pulls = workspacePullRequests(workspace, islandKind);
   const updatedAt = workspaceUpdatedAt(workspace, activeAt);
-  const statusDot = compact && rowStatus && rowStatus.tone !== "muted" ? STATUS_DOT_CLS[rowStatus.tone] : null;
-  const sameProjectChild = depth > 0 && sameProjectAsParent;
-  const lead = sidebarRowLead({ archiving, working, sameProjectChild, folder: localFolder, design: designWorkspace });
-  // Compact: on a same-project child the status dot takes the child dot's place.
-  const leadStatusDot = lead === "child" && statusDot;
+  const statusDot = archiving ? null : sidebarStatusDot(rowStatus);
+  // The lead carries the loader and dot when the logo would only repeat what
+  // is above the row: its repository header, or its parent in the same project.
+  const dotLead = repositoryLead || (depth > 0 && sameProjectAsParent);
+  const lead = sidebarRowLead({ archiving, working, dotLead, statusDot: !!statusDot, folder: localFolder, design: designWorkspace });
+  const endMark = sidebarRowEndMark({ archiving, working, dotLead, statusDot: !!statusDot });
+  const statusDotLabel = rowStatus && statusDot ? rowStatus.label : undefined;
   const leadMark =
     lead === "archiving" ? <ZerosSpinner size={16} label="Archiving workspace" />
     : lead === "working" ? <AgentActivityIndicator activity={activity} />
-    : lead === "child" ? <span className={leadStatusDot ? cn("size-1.5 rounded-full", statusDot) : CHILD_DOT_CLS} data-sidebar-child-dot />
+    : lead === "status-dot" ? <span className={cn(STATUS_DOT_BASE_CLS, statusDot)} data-sidebar-lead-dot="status" />
+    : lead === "idle-dot" ? <span className={IDLE_DOT_CLS} data-sidebar-lead-dot="idle" />
     : lead === "design" ? <PenTool className="size-3.5" strokeWidth={1.25} />
     : lead === "folder" || !project ? <Folder className="size-3.5" strokeWidth={1.25} />
     : <WorkspaceProjectIcon project={project} />;
@@ -348,7 +350,7 @@ export function SidebarWorkspaceRow({
         ? {
             tooltip: "Archive workspace",
             label: `Archive workspace ${label}`,
-            icon: <Archive className="size-3.5" strokeWidth={1.25} />,
+            icon: <ArchiveIcon className="size-3.5" strokeWidth={1.25} />,
             run: () => onArchive(workspace),
           }
         : onOpenSettings
@@ -360,13 +362,7 @@ export function SidebarWorkspaceRow({
             }
           : null;
   const rowAction = action && (
-    <span
-      className={
-        trailingMark
-          ? SIDEBAR_WORKSPACE_DRAFT_ACTION_OVERLAY_CLS
-          : cn(SIDEBAR_WORKSPACE_ACTION_OVERLAY_CLS, twoLine && SIDEBAR_WORKSPACE_TWO_LINE_ACTION_CLS)
-      }
-    >
+    <span className={cn(SIDEBAR_WORKSPACE_ACTION_OVERLAY_CLS, twoLine && SIDEBAR_WORKSPACE_TWO_LINE_ACTION_CLS)}>
       <Tooltip label={action.tooltip} side="right">
         <IconButton
           type="button"
@@ -402,14 +398,14 @@ export function SidebarWorkspaceRow({
       data-workspace-id={workspace.id}
       data-streaming={working || undefined}
       aria-busy={archiving || modeSwitching || undefined}
-      onPointerEnter={() => {
-        if (!surfaceActive) return;
+      onPointerEnter={(event) => {
+        if (!surfaceActive || !eventInsideOwnDom(event)) return;
         onPrefetch(workspace);
         preview.scheduleOpen();
       }}
       onPointerLeave={preview.scheduleClose}
-      onFocus={() => {
-        if (!surfaceActive) return;
+      onFocus={(event) => {
+        if (!surfaceActive || !eventInsideOwnDom(event)) return;
         onPrefetch(workspace);
         preview.scheduleOpen();
       }}
@@ -472,53 +468,41 @@ export function SidebarWorkspaceRow({
             </span>
           )}
         </ActivityScope.Provider>
-        {statusDot && !leadStatusDot && (
-          <span className="inline-flex size-2 shrink-0 items-center justify-center" aria-hidden="true" data-sidebar-status-dot>
-            <span className={cn("size-1.5 rounded-full", statusDot)} />
-          </span>
-        )}
         <span className={twoLine ? "flex min-w-0 flex-1 flex-col gap-0.5" : "contents"}>
         <span className={twoLine ? "flex h-4.5 min-w-0 items-center gap-2" : "contents"}>
         {/* Only the name truncates; everything after it is shrink-0. */}
         <span className="text-fg1 min-w-0 truncate">{label}</span>
+        {showDraft && (
+          <span className="text-fg2 inline-flex shrink-0" data-sidebar-draft-mark>
+            <ComposerDraftIndicator />
+          </span>
+        )}
         {placementMark && (
           <span className="text-fg3 inline-flex shrink-0">
             <SidebarPlacementIcon cloud={cloudRow} cloudStatus={cloudStatus} />
           </span>
         )}
-        {/* The Run stream, then the unread dot or the pencil; Compact adds
-            the PR marks and the time. A run genuinely still running keeps
-            saying so while the row archives. */}
+        {/* The right end: Compact's PR marks, then the agent loader, else the
+            status dot, else (Compact) the time. Hover covers it with Archive. */}
         <span className={cn(SIDEBAR_WORKSPACE_TRAILING_CLS, "ml-auto")}>
-          {runActionRunning && (
-            <span className={TRAILING_SLOT_CLS}>
-              <RunStream size={12} className="text-accent-text" />
-            </span>
-          )}
-          {trailingMark && (
-            <span className={cn(TRAILING_SLOT_CLS, "text-fg2")}>
-              {trailingMark === "draft" ? (
-                <ComposerDraftIndicator />
-              ) : trailingMark === "unread" ? (
-                <ChatUnreadDot />
-              ) : (
-                <AgentAwaitingIcon
-                  kind={trailingMark}
-                  className="size-3.5"
-                  strokeWidth={1.25}
-                />
-              )}
-              {rowAction}
-            </span>
-          )}
           {compact && pulls.length > 0 && (
             <span className="text-3xxs inline-flex shrink-0 items-center">
               <SidebarPrMarks groups={prMarkGroups(pulls)} layout={prMarkLayout(prMarkGroups(pulls), 0, true)} />
             </span>
           )}
-          {compact && !working && (
+          {endMark === "loader" ? (
+            <ActivityScope.Provider value={isCloudWorkspace(workspace.path) ? undefined : true}>
+              <span className={TRAILING_SLOT_CLS} data-sidebar-end-mark="loader">
+                <AgentActivityIndicator activity={activity} />
+              </span>
+            </ActivityScope.Provider>
+          ) : endMark === "dot" ? (
+            <span className={TRAILING_SLOT_CLS} role="img" aria-label={statusDotLabel} data-sidebar-end-mark="dot">
+              <span className={cn(STATUS_DOT_BASE_CLS, statusDot)} />
+            </span>
+          ) : compact && sidebarCompactShowsTime({ working, statusDot: !!statusDot }) ? (
             <span className="text-fg3 text-3xxs shrink-0 tabular-nums">{formatCompactAge(updatedAt)}</span>
-          )}
+          ) : null}
         </span>
         </span>
         {twoLine && (
@@ -536,7 +520,7 @@ export function SidebarWorkspaceRow({
         )}
         </span>
       </span>
-      {!trailingMark && rowAction}
+      {rowAction}
     </div>
   );
 

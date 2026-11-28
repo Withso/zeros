@@ -1,5 +1,5 @@
 import { expect } from "@playwright/test";
-import { selectSidebarGrouping } from "./ui-smoke/sidebar-menu.mjs";
+import { selectSidebarGrouping, selectSidebarSort } from "./ui-smoke/sidebar-menu.mjs";
 import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
 
@@ -33,11 +33,7 @@ export async function runWorkspaceShortcutsSmoke({ page, check, harnessBase, scr
   const selectGroup = async name => {
     await selectSidebarGrouping(page, name);
   };
-  const selectSort = async name => {
-    await page.getByRole("button", { name: "Filter workspaces", exact: true }).click();
-    await page.getByRole("menuitem", { name: /^Sort/ }).hover();
-    await page.getByRole("menuitemradio", { name, exact: true }).click();
-  };
+  const selectSort = name => selectSidebarSort(page, name);
   await expect(rows).toHaveCount(35);
   let ids = await order();
   await page.keyboard.press("Meta+Digit5");
