@@ -1010,10 +1010,11 @@ describe("design workspace interaction wiring", () => {
     expect(source).toContain("designResizeStyleAxes");
   });
 
-  it("does not let invisible spacing hit regions swallow nested-text double clicks", () => {
+  it("does not let spacing hit regions or the radius dot swallow nested double clicks", () => {
     expect(source).toContain("blocksDesignCanvasDoubleClick(");
     expect(source).toContain(
       'control.closest("[data-design-inline-spacing]") === null',
     );
+    expect(source).toContain('!control.hasAttribute("data-design-radius-handle")');
   });
 });

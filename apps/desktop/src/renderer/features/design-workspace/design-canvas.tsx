@@ -528,8 +528,12 @@ function measureDesignCanvasInsets(
 function blocksDesignCanvasDoubleClick(target: EventTarget | null): boolean {
   if (!(target instanceof Element)) return false;
   const control = target.closest("[data-design-controls]");
+  // Spacing zones and the radius dot cover the selected layer's content, so a
+  // double-click on them still enters it.
   return Boolean(
-    control && control.closest("[data-design-inline-spacing]") === null,
+    control &&
+      control.closest("[data-design-inline-spacing]") === null &&
+      !control.hasAttribute("data-design-radius-handle"),
   );
 }
 

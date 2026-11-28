@@ -170,6 +170,20 @@ export async function runDesignDescentHoverSmoke({ page, check }) {
     overParent.length === 0,
     JSON.stringify(overParent),
   );
+
+  // The radius dot sits inside the selected layer's corner, over its content;
+  // a double-click on it still enters the layer.
+  await page.locator('[data-design-sidebar-panel] [data-design-layer-id="home-hero"]').click();
+  const dot = page.locator("[data-design-radius-handle]");
+  await dot.waitFor();
+  const dotBox = await dot.boundingBox();
+  await page.mouse.dblclick(dotBox.x + dotBox.width / 2, dotBox.y + dotBox.height / 2);
+  await expect.poll(selection).not.toEqual(["home-hero"]);
+  check(
+    "double-clicking through the radius dot enters the selected layer",
+    !(await selection()).includes("home-hero"),
+    JSON.stringify(await selection()),
+  );
 }
 // Layer structure: a selection's parent is dotted, and ⌘/Ctrl-hover dots the
 // hovered layer's parent and direct children, with no edge stroked twice.
