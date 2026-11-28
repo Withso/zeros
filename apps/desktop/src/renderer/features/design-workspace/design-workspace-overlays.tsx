@@ -1171,7 +1171,7 @@ export function DesignSelectionMeasurements({
                 {componentKind === "main" ? (
                   <ComponentGlyph
                     data-design-component-mark="main"
-                    className="text-violet-text fill-current size-[11px] shrink-0"
+                    className="fill-current size-[11px] shrink-0"
                     aria-hidden="true"
                   />
                 ) : (

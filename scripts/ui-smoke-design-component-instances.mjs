@@ -332,6 +332,19 @@ export async function runDesignComponentInstancesSmoke({ page, check }) {
       /^800(?: Hug| Fill)? × \d+/.test((await sizeChip.locator("[data-design-selection-dimensions]").innerText()).trim()) &&
       (await sizeChip.getAttribute("data-design-selection-component")) === "",
     await sizeChip.innerText());
+  const badgeColors = await sizeChip.locator("[data-design-selection-identity]").evaluate((chip) => {
+    const probe = document.createElement("span");
+    probe.style.cssText = "background-color: var(--violet-solid); color: var(--violet-solid-fg)";
+    document.body.append(probe);
+    const want = getComputedStyle(probe);
+    const got = getComputedStyle(chip.closest(".zd-design-selection-label") ?? chip);
+    const result = { want: [want.backgroundColor, want.color], got: [got.backgroundColor, got.color] };
+    probe.remove();
+    return result;
+  });
+  check("a selected instance's badge is the solid violet fill with its label colour",
+    badgeColors.got[0] === badgeColors.want[0] && badgeColors.got[1] === badgeColors.want[1],
+    JSON.stringify(badgeColors));
   check("a component frame shows the mark beside its name",
     (await frameLabel("pricing.html").locator("[data-design-component-mark]").count()) === 1 &&
       (await frameLabel("pricing.html").getAttribute("title")) === "Chat composer/Default");
