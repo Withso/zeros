@@ -7,6 +7,7 @@ import { spawnSync } from "node:child_process";
 import { developmentProfilePath, profileExists } from "./profile-path.mjs";
 import { hostedProfilePath } from "./hosted-profile.mjs";
 import { importDevelopmentProfile, inspectDevelopmentProfile } from "./setup-profile.mjs";
+import { assertNoCopiedAgentEnv } from "./agent-env.mjs";
 import { developmentHome, privateDirectory, readPrivateJson, systemEnvironment, writePrivateFile } from "./state.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
@@ -55,6 +56,7 @@ async function main() {
   const injected = !check && profileIndex < 0 && !process.env.ZEROS_DEV_PROFILE_PATH && !profileExists(source) && Boolean(process.env.ZEROS_DEV_PROFILE_B64);
   if (injected) source = hostedProfilePath(root);
   const automatic = args.length === 1 && args[0] === "--checkout";
+  if (automatic) assertNoCopiedAgentEnv(root);
   if (automatic && !profileExists(source) && !process.env.ZEROS_DEV_PROFILE_PATH) return;
   const issues = inspectDevelopmentProfile(source).issues;
   if (major !== 22 || minor < 18) {

@@ -3,20 +3,23 @@
 // agent-env-check — prove the agent credentials work, read-only
 // ──────────────────────────────────────────────────────────
 //
-// Operators can verify non-production credentials from a private .env.agent
-// in a trusted checkout. This check makes read-only requests for each
-// configured provider and reports what the credential can reach: the Alpha
-// resources it should, whether Production is refused, and when it
-// expires. An unset key is reported as not set, never as a failure. Values
-// are never printed.
+// Development agents verify providers through the Zeros Internal MCP
+// (`whoami`, then the `check_*` tools); see apps/control-plane/INTERNAL-OPS.md.
+// Operators can verify non-production fixture credentials from a private
+// .env.agent in a trusted checkout. This check makes read-only requests for
+// each configured provider and reports what the credential can reach: the
+// Alpha resources it should, whether Production is refused, and when it
+// expires. An unset key is reported as not set, never as a failure. It also
+// warns when a linked worktree holds provider keys. Values are never printed.
 //
 // Run: `pnpm agent:check` (`--file <path>` for another file, `--json` for
 // machine output). Exit 1 when a configured credential fails or the file is
 // malformed.
 // ──────────────────────────────────────────────────────────
 
+import { execFileSync } from "node:child_process";
 import { createHash, createHmac, createPrivateKey, createSign } from "node:crypto";
-import { existsSync, readFileSync, statSync } from "node:fs";
+import { closeSync, constants, existsSync, fstatSync, openSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -89,6 +92,60 @@ export const KNOWN_KEYS = Object.freeze([
   "ZEROS_ALPHA_PROBE_REPOSITORY",
   "ZEROS_ALPHA_PROBE_VM_DOLLARS_PER_HOUR",
 ]);
+
+/** Infrastructure provider credentials. Development agents reach these
+ *  providers through the Zeros Internal MCP, so a linked worktree holding any
+ *  of them is reported. */
+export const PROVIDER_KEYS = Object.freeze([
+  "CLOUDFLARE_API_TOKEN",
+  "ZEROS_R2_ALPHA_ACCESS_KEY_ID",
+  "ZEROS_R2_ALPHA_SECRET_ACCESS_KEY",
+  "PLANETSCALE_SERVICE_TOKEN_ID",
+  "PLANETSCALE_SERVICE_TOKEN",
+  "BOAT_API_KEY",
+  "RAILWAY_ALPHA_PROJECT_TOKEN",
+  "WORKOS_ALPHA_API_KEY",
+  "ZEROS_GITHUB_ALPHA_APP_PRIVATE_KEY_B64",
+  "ZEROS_GITHUB_CI_TOKEN",
+  "ZEROS_DEV_ALPHA_READONLY_DATABASE_URL",
+]);
+
+/** The operator fixture fields `.env.agent.example` documents: gate0, the
+ *  Alpha rehearsal, local fixture seeding and the native Alpha check. Older
+ *  operator files may still hold the other KNOWN_KEYS; they are still checked. */
+export const OPERATOR_TEMPLATE_KEYS = Object.freeze([
+  "ZEROS_DEV_PASSWORD",
+  "ZEROS_DEV_WORKOS_SUBJECT",
+  "ZEROS_DEV_ACCOUNT_ID",
+  "ZEROS_DEV_EMAIL",
+  "ZEROS_DEV_ORGANIZATION_ID",
+  "ZEROS_DEV_REPOSITORY",
+  "ZEROS_DEV_REPOSITORY_ID",
+  "ZEROS_DEV_GITHUB_INSTALLATION_ID",
+  "ZEROS_ALPHA_PROBE_ORGANIZATION",
+  "ZEROS_ALPHA_PROBE_REPOSITORY",
+  "ZEROS_ALPHA_PROBE_VM_DOLLARS_PER_HOUR",
+  "ZEROS_REHEARSAL_CLAUDE_SETUP_TOKEN",
+  "ZEROS_REHEARSAL_CLAUDE_API_KEY",
+  "ZEROS_REHEARSAL_OPENAI_API_KEY",
+  "ZEROS_REHEARSAL_CURSOR_API_KEY",
+  "ZEROS_GITHUB_ALPHA_APP_ID",
+  "ZEROS_GITHUB_ALPHA_APP_PRIVATE_KEY_B64",
+  "PLANETSCALE_ORG",
+  "ZEROS_PLANETSCALE_ALPHA_DATABASE",
+  "PLANETSCALE_SERVICE_TOKEN_ID",
+  "PLANETSCALE_SERVICE_TOKEN",
+  "ZEROS_R2_ALPHA_BUCKET",
+  "ZEROS_R2_ALPHA_ENDPOINT",
+  "ZEROS_R2_ALPHA_ACCESS_KEY_ID",
+  "ZEROS_R2_ALPHA_SECRET_ACCESS_KEY",
+  "WORKOS_ALPHA_API_KEY",
+  "CLAUDE_CODE_OAUTH_TOKEN",
+  "CURSOR_API_KEY",
+  "OPENAI_API_KEY",
+]);
+
+export const MCP_GUIDANCE = "agents verify providers through the Zeros Internal MCP: call whoami, then the check_* tools (apps/control-plane/INTERNAL-OPS.md)";
 
 /** Parse a dotenv file. Lines that are neither comments nor `KEY=value` are
  *  reported by number only: a multi-line value pasted across lines is the
@@ -478,7 +535,10 @@ export const PROVIDER_CHECKS = Object.freeze([
 
 /** Structural findings about the file itself. */
 export function checkFile({ exists, mode, parsed }) {
-  if (!exists) return [{ id: "file", label: ".env.agent", status: "skip", detail: "no file; using the process environment" }];
+  if (!exists) return [
+    { id: "file", label: ".env.agent", status: "skip", detail: "no file; using the process environment" },
+    { id: "mcp", label: "Zeros Internal MCP", status: "skip", detail: MCP_GUIDANCE },
+  ];
   const results = [];
   if (parsed.malformedLines.length) {
     results.push({
@@ -498,6 +558,41 @@ export function checkFile({ exists, mode, parsed }) {
     results.push({ id: "file", label: ".env.agent", status: "ok", detail: `mode ${mode === null ? "unknown" : mode.toString(8)}, ${parsed.values.size} keys` });
   }
   return results;
+}
+
+/** Every checkout of this repository, main checkout first. */
+export function gitWorktrees(root) {
+  return execFileSync("git", ["worktree", "list", "--porcelain", "-z"], { cwd: root, encoding: "utf8", stdio: "pipe" })
+    .split("\0").filter((line) => line.startsWith("worktree ")).map((line) => line.slice("worktree ".length));
+}
+
+/** Read a small regular file through one descriptor; anything else is skipped. */
+function readSmallFile(file) {
+  const fd = openSync(file, constants.O_RDONLY | constants.O_NONBLOCK);
+  try {
+    const stat = fstatSync(fd);
+    if (!stat.isFile() || stat.size > 256 * 1024) throw new Error("not a small regular file");
+    return readFileSync(fd, "utf8");
+  } finally { closeSync(fd); }
+}
+
+/** Warn about linked worktrees whose .env.agent holds provider keys. Reports
+ *  each path and a count; never key values. */
+export function checkLinkedWorktrees(worktrees, read = readSmallFile) {
+  return worktrees.slice(1).flatMap((directory) => {
+    const file = path.join(directory, ".env.agent");
+    let text;
+    try { text = read(file); } catch { return []; }
+    const { values } = parseAgentEnv(text);
+    const count = PROVIDER_KEYS.filter((key) => values.get(key)).length;
+    if (!count) return [];
+    return [{
+      id: "worktree",
+      label: "Linked worktree",
+      status: "warn",
+      detail: `${file} holds ${count} provider key(s); ${MCP_GUIDANCE}. Remove it unless an operator imported it on purpose`,
+    }];
+  });
 }
 
 /** Run every provider check whose keys are set. */
@@ -590,9 +685,12 @@ async function main() {
     : { values: new Map(), malformedLines: [], duplicateKeys: [] };
   const mode = exists ? statSync(file).mode & 0o777 : null;
   const values = Object.fromEntries(KNOWN_KEYS.map((key) => [key, parsed.values.get(key) || process.env[key] || ""]));
+  let worktrees = [];
+  try { worktrees = gitWorktrees(ROOT); } catch { /* Not a Git checkout: nothing to compare. */ }
   const results = [
     ...checkFile({ exists, mode, parsed }),
     ...(await runProviderChecks(values, { fetch: globalThis.fetch, now: Date.now })),
+    ...checkLinkedWorktrees(worktrees),
   ];
   const output = args.includes("--json")
     ? JSON.stringify(results, null, 2)

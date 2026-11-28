@@ -34,17 +34,21 @@ function fixture() {
   return { home, root, source, git, profile, writeSource };
 }
 
-function runFixtureSetup(root: string, home: string, env: Record<string, string> = {}, manual = false) {
+function installFixtureScripts(root: string, home: string) {
   const repository = path.resolve(import.meta.dirname, "../..");
   fs.cpSync(path.join(repository, "scripts/dev-environment"), path.join(root, "scripts/dev-environment"), { recursive: true });
-  for (const file of ["dev-auth-profile.mjs", "dev-ports.mjs", "electron-local-process-group.mjs"]) fs.copyFileSync(path.join(repository, "scripts", file), path.join(root, "scripts", file));
+  for (const file of ["agent-env-check.mjs", "dev-auth-profile.mjs", "dev-ports.mjs", "electron-local-process-group.mjs"]) fs.copyFileSync(path.join(repository, "scripts", file), path.join(root, "scripts", file));
   fs.writeFileSync(path.join(root, "qualified-node.cjs"), 'Object.defineProperty(process.versions, "node", {value: "22.18.0"});');
   fs.writeFileSync(path.join(root, "package.json"), JSON.stringify({ packageManager: "pnpm@10.0.0" }));
   fs.writeFileSync(path.join(root, "scripts/dev-environment/dependencies.mjs"),
     'if (process.argv[2] !== "--install") process.exit(1); console.log("install requested");');
   const bin = path.join(home, ".zeros-dev/tools/bin");
   fs.mkdirSync(bin, { recursive: true, mode: 0o700 });
-  fs.symlinkSync(process.execPath, path.join(bin, "node"));
+  if (!fs.existsSync(path.join(bin, "node"))) fs.symlinkSync(process.execPath, path.join(bin, "node"));
+}
+
+function runFixtureSetup(root: string, home: string, env: Record<string, string> = {}, manual = false) {
+  installFixtureScripts(root, home);
   return execFileSync(manual ? process.execPath : "sh", manual ? ["scripts/dev-environment/setup.mjs", "--profile-only"] : ["scripts/dev-environment/hook.sh", "setup"], {
     cwd: root, env: { PATH: process.env.PATH, HOME: home, NODE_OPTIONS: "--require ./qualified-node.cjs", ...env }, encoding: "utf8", stdio: "pipe",
   });
@@ -145,6 +149,75 @@ describe("secure portable Dev setup", () => {
     const valid = fixture();
     runFixtureSetup(valid.root, valid.home, { ZEROS_DEV_PROFILE_PATH: valid.source }, true);
     expect(fs.readFileSync(path.join(valid.root, "zeros-dev-env.json"))).toEqual(fs.readFileSync(valid.source));
+  });
+
+  describe("operator .env.agent in new workspaces", () => {
+    const secret = "agent-env-private-sentinel";
+    const linked = () => {
+      const f = fixture(), worktree = path.join(f.home, "linked worktree");
+      f.git("worktree", "add", "-qb", "feature", worktree);
+      return { ...f, worktree };
+    };
+    const failure = (run: () => unknown) => {
+      try { run(); } catch (error) { const e = error as { stdout?: string; stderr?: string }; return `${e.stdout ?? ""}${e.stderr ?? ""}`; }
+      throw new Error("expected setup to refuse");
+    };
+    const importAgentEnv = (root: string, home: string, ...args: string[]) => {
+      installFixtureScripts(root, home);
+      return execFileSync(process.execPath, ["scripts/dev-environment/agent-env.mjs", "import", ...args], {
+        cwd: root, env: { PATH: process.env.PATH, HOME: home }, encoding: "utf8", stdio: "pipe",
+      });
+    };
+
+    it("refuses a copied .env.agent in a new linked worktree before installing dependencies", () => {
+      const f = linked();
+      fs.writeFileSync(path.join(f.worktree, ".env.agent"), `CLOUDFLARE_API_TOKEN=${secret}\n`, { mode: 0o600 });
+      const output = failure(() => runFixtureSetup(f.worktree, f.home));
+      expect(output).toContain("Zeros Internal MCP");
+      expect(output).toContain("agent-env.mjs import");
+      expect(output).not.toContain("install requested");
+      expect(output).not.toContain(secret);
+    });
+
+    it("refuses a copied .env.agent in a Conductor workspace clone", () => {
+      const f = fixture();
+      fs.writeFileSync(path.join(f.root, ".env.agent"), `CLOUDFLARE_API_TOKEN=${secret}\n`, { mode: 0o600 });
+      expect(failure(() => runFixtureSetup(f.root, f.home, { CONDUCTOR_WORKSPACE_PATH: f.root }))).toContain("Zeros Internal MCP");
+    });
+
+    it("never creates .env.agent and leaves a trusted main checkout's operator file alone", () => {
+      const f = linked();
+      expect(runFixtureSetup(f.worktree, f.home)).toContain("install requested");
+      expect(fs.existsSync(path.join(f.worktree, ".env.agent"))).toBe(false);
+      fs.writeFileSync(path.join(f.root, ".env.agent"), `ZEROS_DEV_PASSWORD=${secret}\n`, { mode: 0o600 });
+      expect(runFixtureSetup(f.root, f.home)).toContain("install requested");
+      expect(fs.readFileSync(path.join(f.root, ".env.agent"), "utf8")).toContain(secret);
+    });
+
+    it("keeps an explicit operator import that later setup accepts", () => {
+      const f = linked(), source = path.join(f.home, "operator.env");
+      fs.writeFileSync(source, `ZEROS_DEV_PASSWORD=${secret}\nZEROS_DEV_EMAIL=fixture@example.test\n`, { mode: 0o644 });
+      const output = importAgentEnv(f.worktree, f.home, source);
+      expect(output).toContain("2 keys");
+      expect(output).not.toContain(secret);
+      const destination = path.join(f.worktree, ".env.agent");
+      expect(fs.readFileSync(destination)).toEqual(fs.readFileSync(source));
+      expect(fs.statSync(destination).mode & 0o777).toBe(0o600);
+      expect(f.git("-C", f.worktree, "status", "--porcelain", "--", ".env.agent")).toBe("");
+      expect(failure(() => importAgentEnv(f.worktree, f.home, source))).toContain("--replace");
+      importAgentEnv(f.worktree, f.home, source, "--replace");
+      expect(runFixtureSetup(f.worktree, f.home)).toContain("install requested");
+    });
+
+    it("refuses malformed or missing import sources without echoing them", () => {
+      const f = linked(), source = path.join(f.home, "operator.env");
+      fs.writeFileSync(source, `ZEROS_DEV_PASSWORD=${secret}\n${secret}\n`, { mode: 0o600 });
+      const output = failure(() => importAgentEnv(f.worktree, f.home, source));
+      expect(output).toContain("line(s) 2");
+      expect(output).not.toContain(secret);
+      expect(failure(() => importAgentEnv(f.worktree, f.home))).toContain("usage");
+      expect(fs.existsSync(path.join(f.worktree, ".env.agent"))).toBe(false);
+    });
   });
 
   it("validates without reading providers or changing permissions in check mode", () => {
