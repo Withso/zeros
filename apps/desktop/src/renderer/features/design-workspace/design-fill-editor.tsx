@@ -30,6 +30,7 @@ import {
   formatDesignGradient,
   formatDesignImageUrl,
   parseDesignGradient,
+  parseEditableDesignGradient,
   readDesignImageUrl,
   type DesignFillType,
   type DesignGradientValue,
@@ -142,7 +143,7 @@ export function DesignFillEditor({
   // The declaration that paints the fill: the card and Reset speak to it.
   const painted = fillType === "solid" ? "background-color" : "background-image";
   const origin = useDesignFieldOrigin(painted, FILL_PROPERTIES);
-  const gradient = parseDesignGradient(editableImage);
+  const gradient = parseEditableDesignGradient(editableImage, image);
   const resolvedGradient = parseDesignGradient(image);
   const swatch = (
     <span className="relative block size-4 shrink-0 overflow-hidden rounded-sm">
@@ -164,6 +165,7 @@ export function DesignFillEditor({
       repeat={repeat}
       disabled={disabled}
       resolvedGradient={resolvedGradient}
+      resolvedImage={image}
       tokenName={tokenName}
       onPreview={onPreview}
       onCancelPreview={onCancelPreview}
@@ -223,6 +225,7 @@ export function DesignFillEditor({
 
 interface DesignFillPopoverProps extends DesignFillEditorProps {
   resolvedGradient: DesignGradientValue | null;
+  resolvedImage: string;
   trigger: React.ReactNode;
 }
 
@@ -234,6 +237,7 @@ function DesignFillPopover({
   repeat,
   disabled,
   resolvedGradient,
+  resolvedImage,
   tokenName,
   trigger,
   onPreview,
@@ -244,10 +248,13 @@ function DesignFillPopover({
   const [type, setType] = useState<DesignFillType>(() =>
     classifyDesignFill(image),
   );
+  const initialGradient = parseEditableDesignGradient(image, resolvedImage);
   const [gradient, setGradient] = useState<DesignGradientValue>(
-    () => parseDesignGradient(image) ?? { ...DEFAULT_DESIGN_GRADIENT },
+    () => initialGradient ?? { ...DEFAULT_DESIGN_GRADIENT },
   );
-  const [unsupportedGradient, setUnsupportedGradient] = useState(false);
+  const [unsupportedGradient, setUnsupportedGradient] = useState(
+    () => classifyDesignFill(image) === "gradient" && initialGradient === null,
+  );
   const [stop, setStop] = useState<"start" | "end">("start");
   const [imageUrl, setImageUrl] = useState(() => readDesignImageUrl(image));
   const [imagePosition, setImagePosition] = useState(position);
@@ -264,7 +271,7 @@ function DesignFillPopover({
 
   const reset = () => {
     const nextType = classifyDesignFill(image);
-    const parsedGradient = parseDesignGradient(image);
+    const parsedGradient = parseEditableDesignGradient(image, resolvedImage);
     setType(nextType);
     setGradient(parsedGradient ?? { ...DEFAULT_DESIGN_GRADIENT });
     setUnsupportedGradient(nextType === "gradient" && parsedGradient === null);
@@ -323,6 +330,26 @@ function DesignFillPopover({
     commit: boolean,
   ) => {
     const next = { ...gradient, ...patch };
+    // A direction token can mean `to right`, which linear accepts and conic
+    // does not. Cross-kind conversion uses the resolved numeric angle instead.
+    if (
+      patch.type &&
+      patch.type !== gradient.type &&
+      typeof next.angle === "string" &&
+      (typeof resolvedGradient?.angle === "number" ||
+        /^(?:repeating-)?linear-gradient\(\s*[-+]?(?:\d+(?:\.\d*)?|\.\d+)deg\s*,/i.test(
+          resolvedImage,
+        ))
+    ) {
+      next.angle =
+        typeof resolvedGradient?.angle === "number"
+          ? resolvedGradient.angle
+          : Number.parseFloat(
+              /^(?:repeating-)?linear-gradient\(\s*([-+]?(?:\d+(?:\.\d*)?|\.\d+))deg\s*,/i.exec(
+                resolvedImage,
+              )?.[1] ?? "0",
+            );
+    }
     edited();
     setGradient(next);
     const css = formatDesignGradient(next);
