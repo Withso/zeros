@@ -58,6 +58,7 @@ import { DesignStrokeSection } from "./design-stroke-editor";
 import {
   designPaintRemovalStyles,
   isDesignRuntimeStylePropertyAuthored,
+  isDesignRuntimeStylePropertyDirectlyAuthored,
   readDesignComputedStyle,
 } from "./design-style-values";
 import { DesignTypographySection } from "./design-typography-editor";
@@ -290,6 +291,28 @@ export function DesignStyleEditor({
       : fillImage;
   const fillProperty = textLayer ? "color" : "background-color";
   const fillToken = useDesignStyleToken(details, fillProperty);
+  const selection = layoutParents ?? [details];
+  const textBackgroundMixed = designStyleMixed(
+    selection,
+    selectionCount,
+    "background-color",
+  );
+  const textBackgroundColor = styleValue(
+    details,
+    "background-color",
+    "transparent",
+  );
+  const textBackgroundToken = useDesignStyleToken(details, "background-color");
+  const textBackgroundVisible =
+    textLayer &&
+    details.textEditable === true &&
+    !textBackgroundMixed &&
+    (details.authoredStyles?.["background-color"] !== undefined ||
+      isDesignRuntimeStylePropertyDirectlyAuthored(
+        details.authoredStyleProperties,
+        "background-color",
+      ) ||
+      !designFillIsEmpty(textBackgroundColor, "none"));
   const confirmedFillColor = styleValue(
     details,
     fillProperty,
@@ -302,7 +325,6 @@ export function DesignStyleEditor({
     if (addedFill && (addedFill !== details.oid || !designFillIsEmpty(confirmedFillColor, editableFillImage))) setAddedFill(null);
   }, [addedFill, confirmedFillColor, details.oid, editableFillImage]);
   const fillColor = fillAdding ? NEW_FILL_COLOR : confirmedFillColor;
-  const selection = layoutParents ?? [details];
   const fillMixed = designStyleMixed(
     selection,
     selectionCount,
@@ -675,6 +697,40 @@ export function DesignStyleEditor({
             ) : null}
           </div>
         </div>
+        {textBackgroundVisible ? (
+          <div className="grid min-w-0 grid-cols-[24px_minmax(0,1fr)_auto] items-center gap-1">
+            <span className="zd-field-label w-6" aria-hidden="true">
+              Bg
+            </span>
+            <DesignColorField
+              value={textBackgroundColor}
+              label="Background"
+              property="background-color"
+              disabled={disabled}
+              {...textBackgroundToken}
+              onPreview={(color) => preview({ "background-color": color })}
+              onCancelPreview={cancelPreview}
+              onCommit={(color) =>
+                commit({ "background-color": color }, "background")
+              }
+            />
+            <InspectorIconButton
+              label="Remove background"
+              disabled={disabled}
+              onClick={() =>
+                commit(
+                  designPaintRemovalStyles(
+                    "background-color",
+                    details.authoredStyleProperties,
+                  ),
+                  "background",
+                )
+              }
+            >
+              <Minus />
+            </InspectorIconButton>
+          </div>
+        ) : null}
         {!textLayer &&
         styleValue(details, "background-blend-mode", "normal") !== "normal" ? (
           <InspectorSelect
