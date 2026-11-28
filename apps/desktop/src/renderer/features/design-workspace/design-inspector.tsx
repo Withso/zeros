@@ -431,8 +431,7 @@ function focusInspectorCanvasViewport(from: Element): void {
   inspectorCanvasViewport(from)?.focus({ preventScroll: true });
 }
 
-/** Figma's zoom menu: an editable percentage, then zoom in/out, fit, the
- * selection and fixed steps. Shift+0/1/2 are handled on the canvas. */
+/** Shift+0/1/2 are handled on the canvas, not by this menu. */
 function DesignZoomMenu({
   zoom,
   disabled,
