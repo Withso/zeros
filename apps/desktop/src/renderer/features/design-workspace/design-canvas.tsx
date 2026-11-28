@@ -8045,15 +8045,27 @@ export const DesignCanvas = React.memo(function DesignCanvas({
         cleanup();
         if (moved) {
           const rect = designCanvasRectFromPoints(start, latest);
-          void openNewText(
-            { x: rect.x, y: rect.y },
-            {
-              width: Math.max(1, rect.width),
-              height: Math.max(1, rect.height),
-            },
-          ).catch((insertError) => {
-            toast.error("Couldn't start text editing", { description: errorMessage(insertError) });
-          });
+          void inspectDesignNodeAtLocation({
+            workspaceId,
+            frame,
+            x: start.x,
+            y: start.y,
+            mode: "deepest",
+          })
+            .then((details) => {
+              if (activeToolRef.current !== "text") return;
+              return openNewText(
+                { x: rect.x, y: rect.y },
+                {
+                  width: Math.max(1, rect.width),
+                  height: Math.max(1, rect.height),
+                },
+                details,
+              );
+            })
+            .catch((insertError) => {
+              toast.error("Couldn't start text editing", { description: errorMessage(insertError) });
+            });
           return;
         }
         void inspectDesignNodeAtLocation({
