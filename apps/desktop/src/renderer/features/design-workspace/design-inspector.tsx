@@ -499,6 +499,12 @@ function DesignZoomMenu({
               if (event.key === "Enter") {
                 event.preventDefault();
                 commitDraft();
+              } else if (event.key === "ArrowDown") {
+                event.preventDefault();
+                event.currentTarget
+                  .closest('[role="menu"]')
+                  ?.querySelector<HTMLElement>('[role="menuitem"]:not([data-disabled])')
+                  ?.focus();
               }
             }}
           />
