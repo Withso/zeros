@@ -7643,11 +7643,11 @@ export const DesignCanvas = React.memo(function DesignCanvas({
         cleanup(false);
         activateTool("select");
         if (owner) {
-          const prepared = liveInsert?.parent && liveInsert.runtime
-            ? { runtime: liveInsert.runtime, parent: liveInsert.parent, nodeId: liveInsert.nodeId }
-            : undefined;
           void (async () => {
             await settleLiveInsert();
+            const prepared = liveInsert?.parent && liveInsert.runtime
+              ? { runtime: liveInsert.runtime, parent: liveInsert.parent, nodeId: liveInsert.nodeId }
+              : undefined;
             await createChildFrame(
               owner,
               localStart,
