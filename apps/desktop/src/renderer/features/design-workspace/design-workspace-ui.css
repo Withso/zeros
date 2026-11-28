@@ -28,6 +28,14 @@
   opacity: 0;
 }
 
+.zd-design-radius-handle[data-design-radius-handle$="right"] {
+  left: calc(100% - var(--design-radius-inset) - 6px * var(--design-canvas-inverse-zoom));
+}
+
+.zd-design-radius-handle[data-design-radius-handle^="bottom"] {
+  top: calc(100% - var(--design-radius-inset) - 6px * var(--design-canvas-inverse-zoom));
+}
+
 .zd-design-radius-handle:is([data-near], [data-value], :focus-visible) {
   opacity: 1;
   pointer-events: auto;
@@ -47,6 +55,17 @@
   font: 500 var(--text-2xxs) / 16px var(--font-sans);
   font-variant-numeric: tabular-nums;
   pointer-events: none;
+}
+
+/* The value label stays inside the layer, toward its middle. */
+.zd-design-radius-handle[data-design-radius-handle$="right"][data-value]::after {
+  left: auto;
+  right: 12px;
+}
+
+.zd-design-radius-handle[data-design-radius-handle^="bottom"][data-value]::after {
+  top: auto;
+  bottom: 12px;
 }
 
 [data-design-workspace-surface],

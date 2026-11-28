@@ -2553,7 +2553,7 @@ export async function runDesignInlineToolsSmoke({ page, waitFor, check }) {
     [
       "hover, drag label and inset",
       async () => {
-        const dot = frame.locator("[data-design-radius-handle]");
+        const dot = frame.locator('[data-design-radius-handle="top-left"]');
         await dot.waitFor({ state: "attached", timeout: 3_000 });
         const opacity = () => dot.evaluate((element) => getComputedStyle(element).opacity);
         await verify(opacity, (value) => value === "0", "The dot is hidden with the pointer away");
@@ -2582,6 +2582,56 @@ export async function runDesignInlineToolsSmoke({ page, waitFor, check }) {
           (value) => value === label,
           "The dragged radius is saved",
         );
+      },
+    ],
+  ]);
+
+  await run(41, "each corner has a dot; Option drags one corner, a plain drag all four", [
+    [
+      "Option drag, plain drag and Escape",
+      async () => {
+        const dot = (corner) => frame.locator(`[data-design-radius-handle="${corner}"]`);
+        await dot("bottom-right").waitFor({ state: "attached", timeout: 3_000 });
+        assert((await frame.locator("[data-design-radius-handle]").count()) === 4, "Four radius dots");
+        const grab = async (corner, dx, dy, modifiers = []) => {
+          const point = center(await dot(corner).boundingBox());
+          await page.mouse.move(point.x - Math.sign(dx) * 8, point.y - Math.sign(dy) * 8, { steps: 3 });
+          await verify(
+            () => dot(corner).evaluate((element) => getComputedStyle(element).opacity),
+            (value) => value === "1",
+            `The ${corner} dot shows near the pointer`,
+          );
+          await beginDrag(dot(corner), dx, dy, modifiers);
+        };
+        const finish = async (modifiers = []) => {
+          await page.mouse.up();
+          for (const modifier of [...modifiers].reverse()) await page.keyboard.up(modifier);
+        };
+        const source = async () => (await saved()).text ?? "";
+        const before = await source();
+        await grab("bottom-right", -24, -24, ["Alt"]);
+        await finish(["Alt"]);
+        const radii = async () =>
+          Promise.all(["top-left", "top-right", "bottom-right", "bottom-left"].map((corner) => style(`border-${corner}-radius`)));
+        await verify(
+          radii,
+          ([tl, tr, br, bl]) => br !== tl && tl === tr && tr === bl,
+          "Option sets only the dragged corner",
+        );
+        await verify(source, (text) => text !== before, "The single corner is saved");
+        await grab("top-right", -20, 20);
+        await finish();
+        await verify(
+          source,
+          (text) => /border-radius:\s*\d+px;/.test(text) && !/border-(top|bottom)-(left|right)-radius/.test(text),
+          "A plain drag sets every corner through a one-value shorthand",
+        );
+        const committed = await source();
+        await grab("bottom-left", 24, -24);
+        await page.keyboard.press("Escape");
+        await finish();
+        await verify(source, (text) => text === committed, "Escape cancels the drag");
+        assert(before !== committed, "The drags were saved");
       },
     ],
   ]);

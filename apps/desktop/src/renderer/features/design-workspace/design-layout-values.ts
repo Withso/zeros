@@ -121,6 +121,9 @@ export interface DesignLayoutFieldOptions {
   tokenHidden?: boolean;
   /** Shown but not editable, such as X and Y of a layer auto layout places. */
   disabled?: boolean;
+  /** The four corners' radii, top-left first and clockwise, joined by "|".
+   * A radius field then writes the shorthand or the four corners, never both. */
+  radiusCorners?: string;
 }
 
 export function roundDesignLayoutValue(value: string): string {

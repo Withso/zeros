@@ -60,6 +60,33 @@ export function designRadiusHandleInset(radius: number, width: number, height: n
   return Math.min(Math.min(width, height) / 2 - 12 / zoom, Math.max(12 / zoom, radius));
 }
 
+export const DESIGN_RADIUS_CORNERS = ["top-left", "top-right", "bottom-right", "bottom-left"] as const;
+export type DesignRadiusCorner = (typeof DESIGN_RADIUS_CORNERS)[number];
+
+/** A drag in layout pixels, turned so moving toward the layer's middle from
+ * this corner grows its radius. */
+export function designRadiusCornerDelta(corner: DesignRadiusCorner, delta: { x: number; y: number }): { x: number; y: number } {
+  return {
+    x: corner.endsWith("left") ? delta.x : -delta.x,
+    y: corner.startsWith("top") ? delta.y : -delta.y,
+  };
+}
+
+/** One radius write: the `border-radius` shorthand while every corner
+ * matches, the four corners once they differ. The other form is removed, so
+ * an inline corner never sits over the shorthand. */
+export function designCornerRadiusStyles(
+  radii: Readonly<Record<DesignRadiusCorner, string>>,
+): Record<string, string | null> {
+  const same = DESIGN_RADIUS_CORNERS.every((corner) => radii[corner] === radii["top-left"]);
+  const corners = DESIGN_RADIUS_CORNERS.map((corner) => [`border-${corner}-radius`, same ? null : radii[corner]]);
+  // Removals come first: a preview applies entries in order, and removing a
+  // corner after setting the shorthand would undo that corner.
+  return same
+    ? { ...Object.fromEntries(corners), "border-radius": radii["top-left"] }
+    : { "border-radius": null, ...Object.fromEntries(corners) };
+}
+
 export function designRadiusDragValue(base: number, delta: { x: number; y: number }, width: number, height: number): number {
   return Math.max(0, Math.min(Math.floor(Math.min(width, height) / 2), Math.round(base + (delta.x + delta.y) / 2)));
 }

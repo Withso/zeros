@@ -208,7 +208,11 @@ import {
   type DesignGapProperty,
   type DesignSizeBadgeMode,
   designRadiusBase,
+  DESIGN_RADIUS_CORNERS,
+  designCornerRadiusStyles,
+  designRadiusCornerDelta,
   designRadiusDragValue,
+  type DesignRadiusCorner,
   designRadiusHandleFits,
   designRadiusHandleInset,
 } from "./design-layout-tools";
@@ -530,6 +534,13 @@ const RADIUS_DOT_REVEAL_PX = 24;
 
 /** The radius dot shows only while the pointer is near it, as in Figma, so at
  * rest it never paints over the layer's content. */
+const DESIGN_RADIUS_CORNER_STYLE = {
+  "top-left": "borderTopLeftRadius",
+  "top-right": "borderTopRightRadius",
+  "bottom-right": "borderBottomRightRadius",
+  "bottom-left": "borderBottomLeftRadius",
+} as const satisfies Record<DesignRadiusCorner, string>;
+
 function DesignRadiusDot({ active, inset, style, ...props }: React.ComponentProps<"span"> & { active: boolean; inset: number }) {
   const ref = useRef<HTMLSpanElement>(null);
   useEffect(() => {
@@ -4913,7 +4924,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
     (
       frame: DesignCanvasFrameWire,
       details: DesignRuntimeNodeDetails,
-      styles: Record<string, string>,
+      styles: Record<string, string | null>,
     ) => {
       if (!workspaceId || !active || isDesignComponentPartNodeId(details.oid)) return Promise.resolve();
       // Paint the value in this frame before the save round trip; the saved
@@ -4959,51 +4970,64 @@ export const DesignCanvas = React.memo(function DesignCanvas({
     const overlay = designSelectionOverlayFrame(box);
     if (!workspaceId || activeTool !== "select" || !designRadiusHandleFits(overlay.width, overlay.height, view.zoom) ||
       designRuntimeLayerLabel(details) === "Text" || designCanvasStyleToolsBlocked(frame, [details.oid])) return null;
-    const base = designRadiusBase(details.styles.borderTopLeftRadius, box.width, box.height);
-    const commit = (value: number) => commitInlineSpacing(frame, details, { "border-radius": `${value}px` });
+    const bases = Object.fromEntries(DESIGN_RADIUS_CORNERS.map((corner) => [corner,
+      designRadiusBase(details.styles[DESIGN_RADIUS_CORNER_STYLE[corner]], box.width, box.height)])) as Record<DesignRadiusCorner, number>;
+    // As in Figma, a corner's dot sets every corner; Option (Alt) sets only its own.
+    const radiusStyles = (corner: DesignRadiusCorner, value: number, single: boolean) =>
+      designCornerRadiusStyles(Object.fromEntries(DESIGN_RADIUS_CORNERS.map((other) =>
+        [other, `${!single || other === corner ? value : bases[other]}px`])) as Record<DesignRadiusCorner, string>);
     // The dot sits in the overlay, which carries the layer's scale.
     const scale = Math.min(overlay.width / Math.max(box.width, 1), overlay.height / Math.max(box.height, 1));
     const inset = (radius: number, zoom: number) =>
       designRadiusHandleInset(radius * scale, overlay.width, overlay.height, zoom);
-    return <DesignRadiusDot active={active} inset={inset(base, view.zoom)} role="slider" tabIndex={0} aria-label="Corner radius" aria-valuenow={base} aria-valuemin={0}
-      aria-valuemax={Math.max(base, Math.floor(Math.min(box.width, box.height) / 2))}
-      data-design-controls="" data-design-radius-handle="" className="zd-design-radius-handle"
-      onKeyDown={event => {
-        if (!["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"].includes(event.key)) return;
-        event.preventDefault(); event.stopPropagation();
-        const step = (event.shiftKey ? 10 : 1) * (["ArrowLeft", "ArrowDown"].includes(event.key) ? -1 : 1);
-        void commit(designRadiusDragValue(base, { x: step, y: step }, box.width, box.height));
-      }}
-      onPointerDown={event => {
-        if (!event.isPrimary || event.button !== 0 || spacePressedRef.current) return;
-        event.preventDefault(); event.stopPropagation();
-        gestureCancelRef.current?.();
-        const target = event.currentTarget, sx = event.clientX, sy = event.clientY;
-        const args = { workspaceId, frame: frame.file, sourceVersion: frame.sourceVersion, nodeId: details.oid };
-        const loop = createDesignGestureLoop({ request: styles => previewDesignNodeStylesTransient({ ...args, styles }) });
-        let latest = base;
-        const clean = () => { delete target.dataset.value; gestureCancelRef.current = null; };
-        gestureCancelRef.current = beginDesignPointerGesture({ target, pointerId: event.pointerId, cursor: "nwse-resize",
-          onMove: e => {
-            const z = liveDesignZoom();
-            const delta = designSelectionLocalDelta({ x: (e.clientX - sx) / z, y: (e.clientY - sy) / z }, box);
-            const value = designRadiusDragValue(base, delta, box.width, box.height);
-            if (latest === value) return;
-            releaseDesignNodeStateOn(workspaceId, frame.file, details.oid);
-            latest = value;
-            target.dataset.value = String(value);
-            target.style.setProperty("--design-radius-inset", `${inset(value, z)}px`);
-            const styles = { "border-radius": `${value}px` };
-            publishDesignGestureLivePreview(workspaceId, frame.file, details.oid, styles);
-            loop.author(styles);
-          },
-          onFinish: () => { loop.finish(); clean(); if (latest !== base) void commit(latest);
-            else { clearDesignLivePreview(workspaceId, frame.file, details.oid); void clearDesignNodeStylePreviewTransient(args).catch(() => {}); } },
-          onCancel: () => { loop.stop(); clean(); target.style.setProperty("--design-radius-inset", `${inset(base, liveDesignZoom())}px`);
-            clearDesignLivePreview(workspaceId, frame.file, details.oid);
-            void clearDesignNodeStylePreviewTransient(args).catch(() => {}); },
-        });
-      }} />;
+    const limit = Math.floor(Math.min(box.width, box.height) / 2);
+    return DESIGN_RADIUS_CORNERS.map((corner) => {
+      const base = bases[corner];
+      const commit = (value: number, single: boolean) => commitInlineSpacing(frame, details, radiusStyles(corner, value, single));
+      return <DesignRadiusDot key={corner} active={active} inset={inset(base, view.zoom)} role="slider" tabIndex={0}
+        aria-label={`Corner radius, ${corner.replace("-", " ")}`} aria-valuenow={base} aria-valuemin={0}
+        aria-valuemax={Math.max(base, limit)}
+        data-design-controls="" data-design-radius-handle={corner} className="zd-design-radius-handle"
+        onKeyDown={event => {
+          if (!["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"].includes(event.key)) return;
+          event.preventDefault(); event.stopPropagation();
+          const step = (event.shiftKey ? 10 : 1) * (["ArrowLeft", "ArrowDown"].includes(event.key) ? -1 : 1);
+          void commit(designRadiusDragValue(base, { x: step, y: step }, box.width, box.height), event.altKey);
+        }}
+        onPointerDown={event => {
+          if (!event.isPrimary || event.button !== 0 || spacePressedRef.current) return;
+          event.preventDefault(); event.stopPropagation();
+          gestureCancelRef.current?.();
+          const target = event.currentTarget, sx = event.clientX, sy = event.clientY;
+          const args = { workspaceId, frame: frame.file, sourceVersion: frame.sourceVersion, nodeId: details.oid };
+          const loop = createDesignGestureLoop({ request: styles => previewDesignNodeStylesTransient({ ...args, styles }) });
+          let latest = base, single = event.altKey;
+          const clean = () => { delete target.dataset.value; gestureCancelRef.current = null; };
+          gestureCancelRef.current = beginDesignPointerGesture({ target, pointerId: event.pointerId, cursor: "nwse-resize",
+            onMove: e => {
+              const z = liveDesignZoom();
+              const delta = designSelectionLocalDelta({ x: (e.clientX - sx) / z, y: (e.clientY - sy) / z }, box);
+              const value = designRadiusDragValue(base, designRadiusCornerDelta(corner, delta), box.width, box.height);
+              if (latest === value && single === e.altKey) return;
+              releaseDesignNodeStateOn(workspaceId, frame.file, details.oid);
+              latest = value;
+              single = e.altKey;
+              target.dataset.value = String(value);
+              target.style.setProperty("--design-radius-inset", `${inset(value, z)}px`);
+              // The preview only sets values; the later one wins over the shorthand.
+              const styles = Object.fromEntries(Object.entries(radiusStyles(corner, value, single))
+                .filter((entry): entry is [string, string] => entry[1] !== null));
+              publishDesignGestureLivePreview(workspaceId, frame.file, details.oid, styles);
+              loop.author(styles);
+            },
+            onFinish: () => { loop.finish(); clean(); if (latest !== base || single) void commit(latest, single);
+              else { clearDesignLivePreview(workspaceId, frame.file, details.oid); void clearDesignNodeStylePreviewTransient(args).catch(() => {}); } },
+            onCancel: () => { loop.stop(); clean(); target.style.setProperty("--design-radius-inset", `${inset(base, liveDesignZoom())}px`);
+              clearDesignLivePreview(workspaceId, frame.file, details.oid);
+              void clearDesignNodeStylePreviewTransient(args).catch(() => {}); },
+          });
+        }} />;
+    });
   };
 
   const startNodeGroupMove = useCallback(

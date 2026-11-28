@@ -18,7 +18,9 @@ import {
   designLocalAxisDelta,
   designPaddingBandAtPoint,
   designPaddingBands,
+  designCornerRadiusStyles,
   designRadiusBase,
+  designRadiusCornerDelta,
   designRadiusDragValue,
   designRadiusHandleFits,
   designRadiusHandleInset,
@@ -48,7 +50,32 @@ it("sets the radius dot in by the radius, at least 12 screen px and at most half
   expect(designRadiusHandleInset(0, 220, 120, 1)).toBe(12);
   expect(designRadiusHandleInset(0, 220, 120, 2)).toBe(6);
   expect(designRadiusHandleInset(500, 220, 120, 1)).toBe(48);
-    expect(designRadiusHandleInset(500, 220, 120, 2)).toBe(54);
+  expect(designRadiusHandleInset(500, 220, 120, 2)).toBe(54);
+});
+it("drags each corner's radius inward from its own corner", () => {
+  expect(designRadiusCornerDelta("top-left", { x: 10, y: 20 })).toEqual({ x: 10, y: 20 });
+  expect(designRadiusCornerDelta("top-right", { x: -10, y: 20 })).toEqual({ x: 10, y: 20 });
+  expect(designRadiusCornerDelta("bottom-right", { x: -10, y: -20 })).toEqual({ x: 10, y: 20 });
+  expect(designRadiusCornerDelta("bottom-left", { x: 10, y: -20 })).toEqual({ x: 10, y: 20 });
+});
+it("writes the radius shorthand when the corners match and the four corners when they differ", () => {
+  const corners = (tl: string, tr: string, br: string, bl: string) => ({
+    "top-left": tl, "top-right": tr, "bottom-right": br, "bottom-left": bl,
+  });
+  expect(designCornerRadiusStyles(corners("8px", "8px", "8px", "8px"))).toEqual({
+    "border-radius": "8px",
+    "border-top-left-radius": null,
+    "border-top-right-radius": null,
+    "border-bottom-right-radius": null,
+    "border-bottom-left-radius": null,
+  });
+  expect(designCornerRadiusStyles(corners("8px", "0px", "8px", "8px"))).toEqual({
+    "border-radius": null,
+    "border-top-left-radius": "8px",
+    "border-top-right-radius": "0px",
+    "border-bottom-right-radius": "8px",
+    "border-bottom-left-radius": "8px",
+  });
 });
 it("starts the radius handle at a percentage corner's drawn size", () => {
   expect(designRadiusBase("50%", 220, 120)).toBe(60);

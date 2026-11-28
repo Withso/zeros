@@ -876,6 +876,10 @@ describe("design workspace interaction wiring", () => {
     // transform properties lives in popovers instead of inline disclosures.
     expect(styleEditorSource).toContain('"border-top-left-radius"');
     expect(styleEditorSource).toContain('label="Independent corners"');
+    // Radius writes go through one helper, so the shorthand and the four
+    // corners never sit in the inline style together.
+    expect(styleEditorSource).toContain("designCornerRadiusStyles(");
+    expect(styleEditorSource).toContain("radiusCorners,");
     expect(typographySource).toContain('label="Type settings"');
     expect(typographySource).toContain('"overflow-wrap"');
     expect(effectSource).toContain('"perspective-origin"');
