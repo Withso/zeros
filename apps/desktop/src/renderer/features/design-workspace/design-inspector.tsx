@@ -1038,7 +1038,6 @@ export function InspectorEditField({
                 steps: current.steps + (event.key === "ArrowUp" ? 1 : -1) * (event.shiftKey ? 10 : 1),
                 fine: event.altKey,
               };
-              arrowSequenceRef.current ??= { start: baselineRef.current };
               mixedStepsRef.current = next;
               mixedSteps.preview(next.steps, next.fine);
             } else if (event.key === "ArrowUp" || event.key === "ArrowDown") {
