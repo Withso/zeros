@@ -336,9 +336,19 @@ function DesignFillPopover({
       patch.type &&
       patch.type !== gradient.type &&
       typeof next.angle === "string" &&
-      typeof resolvedGradient?.angle === "number"
+      (typeof resolvedGradient?.angle === "number" ||
+        /^(?:repeating-)?linear-gradient\(\s*[-+]?(?:\d+(?:\.\d*)?|\.\d+)deg\s*,/i.test(
+          resolvedImage,
+        ))
     ) {
-      next.angle = resolvedGradient.angle;
+      next.angle =
+        typeof resolvedGradient?.angle === "number"
+          ? resolvedGradient.angle
+          : Number.parseFloat(
+              /^(?:repeating-)?linear-gradient\(\s*([-+]?(?:\d+(?:\.\d*)?|\.\d+))deg\s*,/i.exec(
+                resolvedImage,
+              )?.[1] ?? "0",
+            );
     }
     edited();
     setGradient(next);

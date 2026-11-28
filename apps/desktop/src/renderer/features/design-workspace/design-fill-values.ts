@@ -232,6 +232,14 @@ export function parseEditableDesignGradient(
 ): DesignGradientValue | null {
   const parsed = parseDesignGradient(value);
   if (!parsed) return null;
+  const resolvedInput = gradientInput(resolvedValue);
+  const resolvedPrelude = resolvedInput?.parts?.[0] ?? "";
+  if (
+    typeof parsed.angle === "string" &&
+    (/\s+in\s+(?:oklab|oklch|lab|lch|hsl|hwb|xyz|srgb)/i.test(resolvedPrelude) ||
+      (parsed.type === "conic" && /\s+at\s+/i.test(resolvedPrelude)))
+  )
+    return null;
   const resolved = parseDesignGradient(resolvedValue);
   if (!resolved) {
     // A position token may itself be a range, which the resolved CSS expands
@@ -248,21 +256,26 @@ export function parseEditableDesignGradient(
       )
     )
       return null;
-    const input = gradientInput(resolvedValue);
     const start = parseDesignColor(parsed.start);
-    const firstStop = input?.parts
-      ?.slice(0, 2)
-      .map((part) => parseDesignColor(parseStop(part, "0%")?.color ?? ""))
-      .find(
-        (color) =>
-          color &&
-          start &&
-          color.r === start.r &&
-          color.g === start.g &&
-          color.b === start.b &&
-          color.a === start.a,
-      );
-    return firstStop ? parsed : null;
+    const parts = resolvedInput?.parts ?? [];
+    const firstIsPrelude = Boolean(
+      parts.length > 2 &&
+        ((parsed.type === "linear" && linearAngle(parts[0]!) !== null) ||
+          (parsed.type === "conic" && /^from\s+/i.test(parts[0]!)) ||
+          (parsed.type === "radial" && !parseDesignColor(parts[0]!))),
+    );
+    const firstStopPart = parts[firstIsPrelude ? 1 : 0];
+    const firstStop = parseDesignColor(
+      firstStopPart ? (parseStop(firstStopPart, "0%")?.color ?? "") : "",
+    );
+    return firstStop &&
+      start &&
+      firstStop.r === start.r &&
+      firstStop.g === start.g &&
+      firstStop.b === start.b &&
+      Math.abs(firstStop.a - start.a) < 0.01
+      ? parsed
+      : null;
   }
   for (const key of ["start", "end"] as const) {
     const position = parsed[`${key}Position`];
