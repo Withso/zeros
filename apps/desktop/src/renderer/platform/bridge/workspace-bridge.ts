@@ -248,10 +248,27 @@ export async function requestWorkspaceList(
   bridge: RuntimeClient,
 ): Promise<Workspace[]> {
   const result = (await workspaceOp(bridge, "workspace.list")) as
-    | { workspaces?: Workspace[] }
+    | { workspaces?: Workspace[]; confirmedLocalWorkspaces?: boolean }
     | undefined;
   // Code and Design still share the native checkout and agent cwd; keep both in host workspace lookups.
-  return result?.workspaces ?? [];
+  const workspaces = result?.workspaces ?? [];
+  if (result?.confirmedLocalWorkspaces !== false) return workspaces;
+  // A confirmed cloud catalog publishes before Local answers on launch. Id
+  // lookups need Local's own rows, or a Local folder resolves to its raw path
+  // and the engine rejects it as an unknown workspace.
+  const local = await requestLocalWorkspaceRows(bridge).catch(() => null);
+  if (!local) return workspaces;
+  const ids = new Set(local.map((row) => row.id));
+  return [...local, ...workspaces.filter((row) => !ids.has(row.id))];
+}
+
+async function requestLocalWorkspaceRows(bridge: RuntimeClient): Promise<Workspace[] | null> {
+  if (!(bridge instanceof WorkspaceRuntimeClient) || bridge.executionIdentity.kind !== "local") return null;
+  const response = await bridge.requestLocalMetadata("workspace.list");
+  const rows = response.type === "WORKSPACE_RESPONSE"
+    ? (response as unknown as { result?: { workspaces?: unknown } }).result?.workspaces
+    : undefined;
+  return Array.isArray(rows) ? (rows as Workspace[]) : null;
 }
 
 /** The engine prepends synthetic local-main for web clients; the desktop facade strips it. */
