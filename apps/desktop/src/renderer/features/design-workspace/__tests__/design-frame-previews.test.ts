@@ -546,6 +546,55 @@ it("holds the canvas-wide picture notice while a camera gesture is live", async 
   expect(notices).toBe(1);
 });
 
+it("holds changed picture demand until camera input rests", async () => {
+  let quiet = 0;
+  const { previews, renders, settle, advance, token } = harness({ quietMs: () => quiet });
+  previews.setDemand(token, demand(local, [["a.html", 1]]));
+  await settle();
+  expect(renders).toHaveLength(1);
+
+  quiet = 500;
+  previews.setDemand(token, demand(local, [["a.html", 1, "detail"]]));
+  await settle();
+  await advance(100);
+  expect(renders).toHaveLength(1);
+
+  quiet = 0;
+  await advance(400);
+  expect(renders).toHaveLength(2);
+  expect(renders[1].maxDimension).toBe(1280);
+});
+
+it("publishes deferred demand when quiet expires while it is scheduled", async () => {
+  const quietMs = vi.fn()
+    .mockReturnValueOnce(1)
+    .mockReturnValueOnce(0)
+    .mockReturnValue(0);
+  const { previews, renders, settle, advance, token } = harness({ quietMs });
+  previews.setDemand(token, demand(local, [["a.html", 1]]));
+  await settle();
+  expect(renders).toHaveLength(1);
+
+  previews.setDemand(token, demand(local, [["a.html", 1, "detail"]]));
+  await advance(500);
+  expect(renders).toHaveLength(2);
+});
+
+it("drops a deferred demand when its canvas clears it", async () => {
+  let quiet = 0;
+  const { previews, renders, settle, advance, token } = harness({ quietMs: () => quiet });
+  previews.setDemand(token, demand(local, [["a.html", 1]]));
+  await settle();
+  expect(renders).toHaveLength(1);
+
+  quiet = 500;
+  previews.setDemand(token, demand(local, [["a.html", 1, "detail"]]));
+  previews.setDemand(token, null);
+  quiet = 0;
+  await advance(500);
+  expect(renders).toHaveLength(1);
+});
+
 it("repaints a reopened canvas from disk without rendering anything", async () => {
   const store = memoryStore();
   const first = harness({ store });

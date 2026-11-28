@@ -1932,6 +1932,9 @@ export function selectLiveDesignFrameFiles(input: {
   pictured?: ReadonlySet<string>;
   sourceSurfaces?: ReadonlySet<string>;
   devicePixelRatio?: number;
+  /** False during a camera gesture: explicit demand still applies, but a
+   * passive frame waits for the rest instead of starting a document mid-zoom. */
+  admitPassive?: boolean;
 }): ReadonlySet<string> {
   const limit = Math.max(1, Math.floor(input.maxLive));
   const ratio = input.devicePixelRatio && input.devicePixelRatio > 0 ? input.devicePixelRatio : 1;
@@ -1947,7 +1950,7 @@ export function selectLiveDesignFrameFiles(input: {
   const centerY = worldTop + worldHeight / 2;
   const overscanX = worldWidth;
   const overscanY = worldHeight;
-  const ranked = input.frames
+  const ranked = input.admitPassive === false ? [] : input.frames
     .map((frame) => {
       const near =
         frame.x + frame.width >= worldLeft - overscanX &&

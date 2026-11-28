@@ -1456,7 +1456,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
     frameTheme,
     preparedFrames,
     active,
-    (wheelViewportRef.current?.zoom ?? view.zoom) * devicePixelRatio,
+    view.zoom * devicePixelRatio,
   );
   // A lower-resolution decoded cover is enough to hand off a live slot while
   // finer pixels arrive. Without any cover, keep the visible document painted.
@@ -1546,7 +1546,9 @@ export const DesignCanvas = React.memo(function DesignCanvas({
   useDesignFramePreparation(workspaceId,
     [...(selectedDescription ? [selectedDescription.file] : []), ...liveFrameFiles, ...preparationOrder],
     active, snapshot?.preparation?.epoch);
-  const admissionView = wheelViewportRef.current ?? view;
+  // Preview targets and demand follow the committed camera. The painted
+  // gesture camera is up to 80ms ahead; using it here retargets picture
+  // subscriptions in every necessary render before the gesture has rested.
   // Only admitted/nearby surfaces demand pictures. Distant metadata stays
   // cheap until navigation makes its content useful.
   const previewItems = useMemo(
@@ -1554,13 +1556,13 @@ export const DesignCanvas = React.memo(function DesignCanvas({
       snapshot && viewportSize.width > 0 && viewportSize.height > 0
         ? designPreviewDemandItems({
             frames: mountedFrames.filter(isPreparedDesignFrame).filter(frame => !sourceFrameFiles.has(frame.file)),
-            view: { zoom: admissionView.zoom, panX: admissionView.panX, panY: admissionView.panY },
+            view: { zoom: view.zoom, panX: view.panX, panY: view.panY },
             viewport: viewportSize,
             devicePixelRatio,
             live: liveFrameFiles,
           })
         : [],
-    [admissionView.panX, admissionView.panY, admissionView.zoom, devicePixelRatio, liveFrameFiles, mountedFrames, sourceFrameFiles, snapshot, viewportSize],
+    [view.panX, view.panY, view.zoom, devicePixelRatio, liveFrameFiles, mountedFrames, sourceFrameFiles, snapshot, viewportSize],
   );
   const previewLevels = useMemo(() => {
     const levels = new Map<string, DesignPreviewLevel>();
@@ -1571,8 +1573,8 @@ export const DesignCanvas = React.memo(function DesignCanvas({
   // app starts) paint their newest stored picture at once.
   const previewCovers = useMemo(
     () => designPreviewCovers({ frames: mountedFrames.filter(frame => !isPreparedDesignFrame(frame) && !frame.previous),
-      zoom: admissionView.zoom, devicePixelRatio }),
-    [admissionView.zoom, devicePixelRatio, mountedFrames],
+      zoom: view.zoom, devicePixelRatio }),
+    [view.zoom, devicePixelRatio, mountedFrames],
   );
   const coverLevels = useMemo(() => new Map(previewCovers.map(cover => [cover.file, cover.level])), [previewCovers]);
   const previewDemand = useMemo(
