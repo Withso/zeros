@@ -61,3 +61,27 @@ it("renders only W, H and their sizing menus when asked for Size alone", async (
   for (const other of ["[data-design-layout-section]", "[data-design-style-editor]"]) expect(host.querySelector(other)).toBeNull();
   expect(host.textContent).not.toMatch(/Fill|Typography|Position|Appearance|Flow/);
 });
+
+it("sizes a frame root written at 100% in px, since the canvas sets its size", () => {
+  const host = document.createElement("div");
+  document.body.append(host);
+  root = createRoot(host);
+  const frameRoot = {
+    ...details, oid: "main", tag: "main",
+    rect: { x: 0, y: 0, width: 270, height: 244 },
+    styles: { display: "block", width: "270px", height: "244px", position: "relative" },
+    layout: { parentId: null, parentDisplay: "", widthValue: "100%", heightValue: "100vh", x: 0, y: 0 },
+  } as unknown as DesignRuntimeNodeDetails;
+  const fields: Array<[string, string]> = [];
+  act(() => root!.render(React.createElement(TooltipProvider, null, React.createElement(DesignAutoLayoutControls, {
+    details: frameRoot,
+    frameSelected: true,
+    renderField: (label: string, _property: string, value: string) => { fields.push([label, value]); return null; },
+    onAction: () => {},
+    onCommit: () => {},
+  } as never))));
+  const width = host.querySelector('[aria-label^="Width sizing: "]');
+  expect(width?.getAttribute("aria-label")).toBe("Width sizing: Fixed");
+  expect(width?.textContent).toBe("px");
+  expect(fields).toContainEqual(["W", "270px"]);
+});

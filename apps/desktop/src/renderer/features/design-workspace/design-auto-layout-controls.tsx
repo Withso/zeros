@@ -313,8 +313,11 @@ export function DesignAutoLayoutControls({
   const resize = (axis: DesignLayoutAxis) => {
     const dimension = axis === "x" ? "width" : "height";
     const measuredMode = designSizingMode(details, axis);
+    // The canvas sizes a frame root, so a % or custom root size reads as px.
     const mode =
-      frameSelected && measuredMode === "custom" ? "fixed" : measuredMode;
+      frameSelected && (measuredMode === "custom" || measuredMode === "relative")
+        ? "fixed"
+        : measuredMode;
     // Differing modes check nothing in the menu and show no word for one.
     const modeMixed = designValuesMixed(
       (layoutParents ?? [details]).map((node) => designSizingMode(node, axis)),
