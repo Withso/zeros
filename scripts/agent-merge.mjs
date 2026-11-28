@@ -14,6 +14,11 @@ const ciDefinitionNote = (paths) =>
   `This PR changes CI definitions (${paths.join(", ")}); its own CI already ran them, so the normal merge guards apply.`;
 const USAGE =
   "usage: pnpm agent:merge <pr-number> [--immediate] [--dry-run]";
+// The squash commit carries the PR title and body into main, which is public.
+// A signed or token-bearing link there stays valid for whoever reads history.
+const SIGNED_LINK =
+  /https?:\/\/[^\s)>"']*(?:presigned|[?&](?:token|sig|signature|x-amz-signature|x-goog-signature|access_token)=)/i;
+const STACKED = /stacked pull requests/i;
 const SKIP_MARKER =
   /\[(?:skip\s+ci|ci\s+skip|no\s+ci|skip\s+actions|actions\s+skip)\]|skip-checks:\s*true\b/i;
 const PR_SECTIONS = [
@@ -217,6 +222,11 @@ export function decideMerge(
       `This PR body is missing required sections: ${missing.join(", ")}. Add Markdown headings before arming a human or agent PR.`,
     );
   }
+  if (SIGNED_LINK.test(String(pr.title ?? "")) || SIGNED_LINK.test(String(pr.body ?? "")))
+    return refuse(
+      "signed-link",
+      "The PR title or body contains a signed or token-bearing link, which the squash commit would carry into main; remove it before arming.",
+    );
   if (
     !Array.isArray(requiredChecks) ||
     requiredChecks.some(
@@ -452,6 +462,7 @@ export async function runAgentMerge(
     stderr(USAGE);
     return 2;
   }
+  const stackedError = new Error("Stacked pull request");
   const execute = (args, statuses = [0], command = "gh") => {
     const result = spawn(command, args, {
       encoding: "utf8",
@@ -460,8 +471,11 @@ export async function runAgentMerge(
       timeout: 30_000,
       maxBuffer: 16 * 1024 * 1024,
     });
-    if (result.error || result.signal || !statuses.includes(result.status))
+    if (result.error || result.signal || !statuses.includes(result.status)) {
+      // Matched, never echoed: gh output can contain credentials.
+      if (command === "gh" && STACKED.test(String(result.stderr ?? ""))) throw stackedError;
       throw new Error("GitHub CLI request failed");
+    }
     return result;
   };
   const json = (args, statuses) => JSON.parse(execute(args, statuses).stdout);
@@ -784,6 +798,8 @@ export async function runAgentMerge(
     stderr(
       immediateRequested
         ? "Unable to confirm the immediate merge result. Inspect the PR before retrying; no automatic retry, auto-merge or queue admission was requested."
+        : error === stackedError
+          ? "GitHub refuses auto-merge for a PR at the base of a GitHub stack. Unstack it (gh stack unstack <stack>) or merge the stack in order, then retry."
         : error === identityError
           ? "Immediate merge requires the same human workspace identity for REST and GraphQL; unable to bind the effective GitHub principal. No merge requested."
           : error === authorError
