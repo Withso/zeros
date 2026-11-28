@@ -1,0 +1,9 @@
+{
+  "id": "local-queued-follow-ups-survive-restart",
+  "kind": "replay",
+  "area": "renderer-agents",
+  "fixedBy": "pr:1364",
+  "symptom": "Local follow-ups queued behind a running turn lived only in renderer memory, so a reload, quit or crash discarded them silently; only the running message survived.",
+  "rule": "Local send-queue entries are journaled until they leave the queue for dispatch (a claim is not delivery) and return paused after hydrate; explicit close/reset discards the journal too. See playbooks/bug-fix.md.",
+  "check": "pnpm exec vitest run --config vitest.config.ts apps/desktop/src/renderer/features/agent/__tests__/queue-workflow.test.ts -t 'Local queued follow-ups across a restart'"
+}

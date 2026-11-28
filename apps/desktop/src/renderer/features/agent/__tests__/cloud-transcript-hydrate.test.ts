@@ -67,7 +67,7 @@ function harness(backgroundAllowed = true) {
     forgetEmptyLocalChat: vi.fn(), rememberEmptyLocalChat: vi.fn(), forgetLocalChatPrompt: vi.fn(), noteLocalChatPrompt: vi.fn(),
     ...Object.fromEntries(resetMaps.map(name => [name, { current: new Map() }])),
     conversationResetFlightsRef: { current: flights }, bumpCancelGeneration, clearPrebindGoalSnapshotsForChat, chatChangeTargets,
-    prebindBackgroundTasksRef: { current: { clearChat: vi.fn() } }, cloudPrompts: { refresh: vi.fn() },
+    prebindBackgroundTasksRef: { current: { clearChat: vi.fn() } }, cloudPrompts: { refresh: vi.fn() }, discardLocalQueueRef: { current: vi.fn() },
   };
   vm.runInNewContext(code, context);
   return { read, resolve: page.resolve, hydrate: context.hydrateChat as (id: string) => Promise<void>,
