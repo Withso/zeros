@@ -1450,7 +1450,15 @@ function IntegrationsPanel({ surfaceActive = true, unified = false }: { surfaceA
   // Older control planes and reference-only Dev retain their credential adapters.
   const separate = !!github.read.data && github.read.data.sharedDesktopApp !== true;
   const canManage = organization?.role === "owner" || organization?.role === "admin";
-  return <div className="flex flex-col gap-8">
+  const page = useRef<HTMLDivElement>(null);
+  // The identity controls are on this page: bring the Cloud method into view instead of navigating.
+  const configureIdentity = useCallback(() => {
+    // The separate adapter's method group isn't focusable itself; take its first enabled control.
+    const target = page.current?.querySelector<HTMLElement>('[aria-label="Cloud method"], [aria-label="Cloud GitHub authentication method"] button:not([disabled])');
+    target?.scrollIntoView({ block: "center" });
+    target?.focus({ preventScroll: true });
+  }, []);
+  return <div ref={page} className="flex flex-col gap-8">
       {(unified || !cloud || !separate) && (
         <GitHubSection
           key={JSON.stringify([me?.user.id, organizationId, separate])}
@@ -1469,7 +1477,7 @@ function IntegrationsPanel({ surfaceActive = true, unified = false }: { surfaceA
       {unified && cloud && levels.connections?.solo && (
         <GithubConnectionGroups key={JSON.stringify([me!.user.id, organizationId, canManage])} userId={me!.user.id} organizationId={organizationId!}
           organizationName={organization?.name ?? "Organization"} personal={!!organization?.isPersonal}
-          canManage={canManage} active={surfaceActive} />
+          canManage={canManage} active={surfaceActive} onConfigureIdentity={configureIdentity} />
       )}
     </div>;
 }

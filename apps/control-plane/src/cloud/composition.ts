@@ -209,7 +209,7 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
     return { repository: identity.repository.toLowerCase(), repositoryId: identity.repositoryId, defaultBranch: identity.defaultBranch, private: identity.private };
   };
   const InstallationsPage = z.object({ installations: z.array(z.object({ id: z.number().int().positive(), app_id: z.number().int(),
-    account: z.object({ login: z.string().max(100) }), suspended_at: z.string().nullable().optional() }).passthrough()).max(100) }).passthrough();
+    account: z.object({ login: z.string().max(100), type: z.string().max(40).optional() }), suspended_at: z.string().nullable().optional() }).passthrough()).max(100) }).passthrough();
   const InstallationRepositoriesPage = z.object({ repositories: z.array(z.object({ id: z.number().int().positive(), full_name: z.string().max(201),
     default_branch: z.string().max(512), private: z.boolean() }).passthrough()).max(100) }).passthrough();
   const projectRoutes = repositoryLevels && projects ? {
@@ -228,10 +228,11 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
       throw new HttpError(404, "github_installation_not_visible", "Your GitHub sign-in can't see this installation of the Zeros App.");
     },
     visibleInstallations: async (organizationId: string, userId: string) => {
-      const http = (await memberGithub(organizationId, userId)).api.http, found: { installationId: number; accountLogin: string; suspended: boolean }[] = [];
+      const http = (await memberGithub(organizationId, userId)).api.http, found: { installationId: number; accountLogin: string; accountType?: "User" | "Organization"; suspended: boolean }[] = [];
       for (let page = 1; page <= 10; page++) {
         const rows = (await http.json(`/user/installations?per_page=100&page=${page}`, InstallationsPage)).installations;
-        for (const row of rows) if (row.app_id === config.github?.appId) found.push({ installationId: row.id, accountLogin: row.account.login, suspended: !!row.suspended_at });
+        for (const row of rows) if (row.app_id === config.github?.appId) found.push({ installationId: row.id, accountLogin: row.account.login,
+          ...(row.account.type === "User" || row.account.type === "Organization" ? { accountType: row.account.type } : {}), suspended: !!row.suspended_at });
         if (rows.length < 100) break;
       }
       return found;
