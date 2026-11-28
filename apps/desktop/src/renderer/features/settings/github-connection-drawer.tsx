@@ -72,7 +72,8 @@ export function GithubConnectionDrawer({ userId, organizationId, connection, can
               {read.loading && <MessageRow flush>Loading repositories…</MessageRow>}
               {read.error && <MessageRow tone="error" role="alert" flush>{message(read.error)}</MessageRow>}
               {read.data && !read.data.repositories.length && <SettingsRow label="No visible repositories" />}
-              {read.data?.repositories.map(row => <SettingsRow key={row.id} label={row.repository} hint={row.private ? "Private" : "Public"}>
+              {read.data?.repositories.map(row => <SettingsRow key={row.id} label={row.repository}
+                hint={[row.private ? "Private" : "Public", row.access === "write" ? "Write access" : row.access === "read" ? "Read access" : null].filter(Boolean).join(" · ")}>
                 {row.projects.length > 0 && <span className="text-fg3 text-xs">{row.projects.length === 1 ? `In ${row.projects[0]!.name}` : `In ${row.projects.length} projects`}</span>}
               </SettingsRow>)}
               <div className="flex items-center gap-2">

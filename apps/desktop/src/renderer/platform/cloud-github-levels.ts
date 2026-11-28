@@ -43,7 +43,9 @@ const DrawerSchema = z.object({
   connection: CloudGithubLevelConnectionSchema,
   repositories: z.array(z.object({ id: z.string().max(20), repository: z.string().max(201), defaultBranch: z.string().max(512), private: z.boolean(),
     /** The caller's projects that use it: the organization's and their own. */
-    projects: z.array(z.object({ id: uuid, name: z.string().max(100) }).passthrough()).max(5000).catch([]) }).passthrough()).max(100),
+    projects: z.array(z.object({ id: uuid, name: z.string().max(100) }).passthrough()).max(5000).catch([]),
+    /** The caller's own access; older control planes omit it. Display only. */
+    access: z.enum(["write", "read", "unavailable"]).optional().catch(undefined) }).passthrough()).max(100),
   nextPage: z.number().int().nullable(),
 }).passthrough();
 export type CloudGithubConnectionRepositories = z.infer<typeof DrawerSchema>;
