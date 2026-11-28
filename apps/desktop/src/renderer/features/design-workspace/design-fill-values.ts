@@ -75,7 +75,7 @@ function splitTopLevel(value: string): string[] | null {
 }
 
 const STOP_POSITION =
-  /^(?:[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:%|px|r?em|vw|vh|vmin|vmax|ch|ex|cm|mm|in|pt|pc)?|(?:calc|min|max|clamp)\(.+\))$/i;
+  /^(?:[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:%|px|r?em|vw|vh|vmin|vmax|ch|ex|cm|mm|in|pt|pc)?|(?:calc|min|max|clamp|var)\(.+\))$/i;
 
 function lastTopLevelWhitespace(value: string): number {
   let depth = 0;
@@ -156,14 +156,23 @@ function linearAngle(value: string): number | string | null {
   return numericAngle(source);
 }
 
-/** Parse only gradients this two-stop editor can round-trip faithfully. */
-export function parseDesignGradient(value: string): DesignGradientValue | null {
+function gradientInput(value: string) {
   const match = /^(repeating-)?(linear|radial|conic)-gradient\((.*)\)$/is.exec(
     value.trim(),
   );
   if (!match?.[2] || match[3] === undefined) return null;
-  const type = match[2].toLocaleLowerCase() as DesignGradientValue["type"];
-  const parts = splitTopLevel(match[3]);
+  return {
+    type: match[2].toLocaleLowerCase() as DesignGradientValue["type"],
+    parts: splitTopLevel(match[3]),
+    repeating: Boolean(match[1]),
+  };
+}
+
+/** Parse only gradients this two-stop editor can round-trip faithfully. */
+export function parseDesignGradient(value: string): DesignGradientValue | null {
+  const input = gradientInput(value);
+  if (!input) return null;
+  const { type, parts } = input;
   if (!parts || parts.length < 2 || parts.length > 3) return null;
 
   let angle: number | string = type === "linear" ? 180 : 0;
@@ -177,7 +186,7 @@ export function parseDesignGradient(value: string): DesignGradientValue | null {
     } else if (type === "radial") {
       if (prelude.trim().toLocaleLowerCase() !== "circle") return null;
     } else {
-      const conic = /^from\s+(.+)$/i.exec(prelude.trim());
+      const conic = /^from\s+([\s\S]+)$/i.exec(prelude.trim());
       if (!conic?.[1]) return null;
       const parsed =
         angleToken(conic[1]) ?? numericAngle(conic[1].toLocaleLowerCase());
@@ -196,8 +205,24 @@ export function parseDesignGradient(value: string): DesignGradientValue | null {
     end: end.color,
     startPosition: start.position,
     endPosition: end.position,
-    repeating: Boolean(match[1]),
+    repeating: input.repeating,
   };
+}
+
+/** A var() first argument is ambiguous CSS: it can be the angle of a
+ * two-stop gradient or the first color of an unsupported three-stop gradient.
+ * The resolved paint tells those apart because the latter has three stops. */
+export function parseEditableDesignGradient(
+  value: string,
+  resolvedValue: string,
+): DesignGradientValue | null {
+  const parsed = parseDesignGradient(value);
+  if (!parsed) return null;
+  const input = gradientInput(value);
+  const ambiguous = Boolean(
+    input?.parts?.length === 3 && angleToken(input.parts[0]!),
+  );
+  return ambiguous && !parseDesignGradient(resolvedValue) ? null : parsed;
 }
 
 function number(value: number): string {

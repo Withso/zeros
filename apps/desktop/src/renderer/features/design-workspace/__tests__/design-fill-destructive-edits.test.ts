@@ -15,6 +15,7 @@ let root: Root;
 let host: HTMLDivElement;
 
 beforeEach(() => {
+  Element.prototype.scrollIntoView = () => {};
   host = document.createElement("div");
   document.body.append(host);
   root = createRoot(host);
@@ -193,6 +194,96 @@ describe("destructive fill edits", () => {
     >;
     expect(written["background-image"]).toBe(
       "linear-gradient(90deg, var(--accent) 0%, var(--success) 100%)",
+    );
+  });
+
+  it("preserves token stops when editing the other gradient stop", async () => {
+    const details = detailsFor(
+      {
+        backgroundColor: "rgba(0, 0, 0, 0)", // check:ui ignore-line -- CSSOM fixture
+        backgroundImage:
+          "linear-gradient(135deg, rgb(81, 81, 204) 0%, rgb(0, 0, 255) 100%)", // check:ui ignore-line -- CSSOM fixture
+      },
+      {
+        authoredStyleProperties: ["background-image"],
+        authoredStyles: {
+          "background-image": {
+            origin: "inline",
+            value:
+              "linear-gradient(var(--gradient-angle), var(--accent), blue)",
+          },
+        },
+      },
+    );
+    const onCommit = await renderEditor(details);
+
+    await act(async () =>
+      document
+        .querySelector<HTMLButtonElement>('button[aria-label="Edit fill"]')!
+        .click(),
+    );
+    await act(async () =>
+      document
+        .querySelector<HTMLButtonElement>('button[aria-label="End stop"]')!
+        .click(),
+    );
+    const end = document.querySelector<HTMLInputElement>(
+      'input[aria-label="End stop value"]',
+    );
+    expect(end?.disabled).toBe(false);
+    await act(async () => setInputValue(end!, "#FF0000")); // check:ui ignore-line -- authored CSS fixture
+    await act(async () => end!.blur());
+
+    const written = onCommit.mock.calls.at(-1)?.[0] as Record<
+      string,
+      string | null
+    >;
+    expect(written["background-image"]).toBe(
+      "linear-gradient(var(--gradient-angle), var(--accent) 0%, #FF0000 100%)", // check:ui ignore-line -- authored CSS fixture
+    );
+  });
+
+  it("uses the resolved angle when a direction-token linear becomes conic", async () => {
+    const details = detailsFor(
+      {
+        backgroundColor: "rgba(0, 0, 0, 0)", // check:ui ignore-line -- CSSOM fixture
+        backgroundImage:
+          "linear-gradient(90deg, rgb(255, 0, 0) 0%, rgb(0, 0, 255) 100%)", // check:ui ignore-line -- CSSOM fixture
+      },
+      {
+        authoredStyleProperties: ["background-image"],
+        authoredStyles: {
+          "background-image": {
+            origin: "inline",
+            value: "linear-gradient(var(--direction), red, blue)",
+          },
+        },
+      },
+    );
+    const onCommit = await renderEditor(details);
+
+    await act(async () =>
+      document
+        .querySelector<HTMLButtonElement>('button[aria-label="Edit fill"]')!
+        .click(),
+    );
+    await act(async () =>
+      document
+        .querySelector<HTMLButtonElement>('button[aria-label="Gradient type"]')!
+        .click(),
+    );
+    const conic = [...document.querySelectorAll<HTMLElement>('[role="option"]')].find(
+      (node) => node.textContent === "Conic",
+    );
+    expect(conic).toBeDefined();
+    await act(async () => conic!.click());
+
+    const written = onCommit.mock.calls.at(-1)?.[0] as Record<
+      string,
+      string | null
+    >;
+    expect(written["background-image"]).toBe(
+      "conic-gradient(from 90deg, red 0%, blue 100%)",
     );
   });
 

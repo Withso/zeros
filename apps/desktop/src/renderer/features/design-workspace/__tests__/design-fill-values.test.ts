@@ -4,6 +4,7 @@ import {
   classifyDesignFill,
   formatDesignGradient,
   parseDesignGradient,
+  parseEditableDesignGradient,
   readDesignImageUrl,
 } from "../design-fill-values";
 
@@ -88,6 +89,40 @@ describe("design fill values", () => {
     expect(formatDesignGradient({ ...parsed!, angle: 90 })).toBe(
       "linear-gradient(90deg, var(--accent) 0%, var(--success) 100%)",
     );
+  });
+
+  it("distinguishes a token angle from an unsupported third token stop", () => {
+    expect(
+      parseEditableDesignGradient(
+        "linear-gradient(var(--accent), red, blue)",
+        "linear-gradient(rgb(81, 81, 204) 0%, rgb(255, 0, 0) 50%, rgb(0, 0, 255) 100%)", // check:ui ignore-line -- CSSOM fixture
+      ),
+    ).toBeNull();
+    expect(
+      parseEditableDesignGradient(
+        "linear-gradient(var(--gradient-angle), var(--accent), var(--success))",
+        "linear-gradient(90deg, rgb(81, 81, 204) 0%, rgb(20, 122, 76) 100%)", // check:ui ignore-line -- CSSOM fixture
+      ),
+    ).toMatchObject({ angle: "var(--gradient-angle)" });
+  });
+
+  it("round-trips tokenized stop positions and multiline conic angles", () => {
+    const repeating = parseDesignGradient(
+      "repeating-linear-gradient(var(--gradient-angle), red 0px, blue var(--stop-end))",
+    );
+    expect(repeating).toMatchObject({
+      angle: "var(--gradient-angle)",
+      startPosition: "0px",
+      endPosition: "var(--stop-end)",
+    });
+    expect(formatDesignGradient(repeating!)).toBe(
+      "repeating-linear-gradient(var(--gradient-angle), red 0px, blue var(--stop-end))",
+    );
+
+    const conic = parseDesignGradient(
+      "conic-gradient(from var(--gradient-angle,\n 90deg), red, blue)",
+    );
+    expect(conic?.angle).toBe("var(--gradient-angle,\n 90deg)");
   });
 
   it("fails closed for gradients the two-stop editor cannot preserve", () => {
