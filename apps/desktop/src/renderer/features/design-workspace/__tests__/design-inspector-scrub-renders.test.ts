@@ -556,6 +556,7 @@ describe("an inspector field scrub", () => {
     expect(input.value).toBe("61");
     expect(runtime.previewStyles.mock.calls.at(-1)?.[1]).toEqual({ opacity: "0.61" });
     expect(writes()).toBe(0);
+    expect(input.getAttribute("data-design-draft")).toBe("dirty");
     act(() => {
       input.dispatchEvent(new KeyboardEvent("keyup", { key: "ArrowUp", bubbles: true, cancelable: true }));
     });
