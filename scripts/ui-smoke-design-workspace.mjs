@@ -1155,17 +1155,80 @@ export async function runDesignWorkspaceCanvasSmoke({ page, waitFor, check }) {
   );
   await styleZoomButton.click();
   const styleZoomMenu = page.getByRole("menu");
+  const zoomMenuItems = ["Zoom in", "Zoom out", "Zoom to fit", "Zoom to selection", "Zoom to 50%", "Zoom to 100%", "Zoom to 200%"];
+  const zoomPercentageField = styleZoomMenu.getByLabel("Zoom percentage");
+  await waitFor(
+    async () => (await zoomPercentageField.evaluate((field) => field === document.activeElement && field.selectionStart === 0 && field.selectionEnd === field.value.length).catch(() => false)),
+    "design-zoom-menu-percentage-selected",
+  );
   check(
-    "Style zoom menu contains only Zoom in and Zoom out",
-    (await styleZoomMenu.getByRole("menuitem").count()) === 2 &&
-      (await styleZoomMenu
-        .getByRole("menuitem", { name: "Zoom in", exact: true })
-        .count()) === 1 &&
-      (await styleZoomMenu
-        .getByRole("menuitem", { name: "Zoom out", exact: true })
-        .count()) === 1,
+    "Style zoom menu has Figma's percentage field, zoom in/out, fit, selection and 50/100/200% steps",
+    (await styleZoomMenu.getByRole("menuitem").count()) === zoomMenuItems.length &&
+      (await Promise.all(zoomMenuItems.map((name) => styleZoomMenu.getByRole("menuitem", { name, exact: true }).count()))).every((count) => count === 1),
+  );
+  await page.keyboard.type("150");
+  await page.keyboard.press("Enter");
+  await waitFor(async () => (await styleZoomButton.innerText()).trim() === "150%", "design-zoom-menu-typed-percentage");
+  check("typing a percentage and Enter zooms to it and closes the menu", (await styleZoomMenu.count()) === 0);
+  await styleZoomButton.click();
+  await styleZoomMenu.getByRole("menuitem", { name: "Zoom to 200%", exact: true }).click();
+  await waitFor(async () => (await styleZoomButton.innerText()).trim() === "200%", "design-zoom-menu-200");
+  const zoomLabel = async () => (await styleZoomButton.innerText()).trim();
+  // Each menu fit must land where its shortcut lands, from the same start.
+  const menuFitMatchesShortcut = async (item, shortcut) => {
+    await styleZoomButton.click();
+    await styleZoomMenu.getByRole("menuitem", { name: "Zoom to 200%", exact: true }).click();
+    await waitFor(async () => (await zoomLabel()) === "200%", `design-zoom-${shortcut}-start`);
+    await canvasViewport.focus();
+    await page.keyboard.press(shortcut);
+    await waitFor(async () => (await zoomLabel()) !== "200%", `design-zoom-${shortcut}`);
+    const fromShortcut = await settledCanvasTransform();
+    await styleZoomButton.click();
+    await styleZoomMenu.getByRole("menuitem", { name: "Zoom to 200%", exact: true }).click();
+    await waitFor(async () => (await zoomLabel()) === "200%", `design-zoom-${item}-start`);
+    await styleZoomButton.click();
+    await styleZoomMenu.getByRole("menuitem", { name: item, exact: true }).click();
+    await waitFor(async () => (await zoomLabel()) !== "200%", `design-zoom-${item}`);
+    const fromMenu = await settledCanvasTransform();
+    const same =
+      fromMenu !== null &&
+      fromShortcut !== null &&
+      Math.abs(fromMenu.zoom - fromShortcut.zoom) < 0.001 &&
+      Math.abs(fromMenu.panX - fromShortcut.panX) <= 1 &&
+      Math.abs(fromMenu.panY - fromShortcut.panY) <= 1;
+    return [same, `${JSON.stringify(fromMenu)} vs ${JSON.stringify(fromShortcut)}`, fromMenu];
+  };
+  const settledCanvasTransform = async () => {
+    let previous = null;
+    const settled = await waitFor(async () => {
+      const current = await readCanvasTransform();
+      const settled = previous !== null && JSON.stringify(current) === JSON.stringify(previous);
+      previous = current;
+      return settled;
+    }, "design-zoom-camera-settled");
+    return settled ? previous : null;
+  };
+  const [selectionMatches, selectionDetail] = await menuFitMatchesShortcut("Zoom to selection", "Shift+2");
+  check("Zoom to selection frames what Shift+2 frames", selectionMatches, selectionDetail);
+  const [fitMatches, fitDetail] = await menuFitMatchesShortcut("Zoom to fit", "Shift+1");
+  check("Zoom to fit frames what Shift+1 frames", fitMatches, fitDetail);
+  const fitZoom = await zoomLabel();
+  await canvasViewport.focus();
+  await page.keyboard.press("Shift+0");
+  await waitFor(async () => (await zoomLabel()) === "100%", "design-zoom-shift-0");
+  check("Shift+0 still returns to 100%", true);
+  await styleZoomButton.click();
+  await waitFor(async () => (await zoomPercentageField.evaluate((field) => field === document.activeElement).catch(() => false)), "design-zoom-field-focus");
+  await page.keyboard.press("ArrowDown");
+  check(
+    "Down from the zoom field moves to Zoom in",
+    await styleZoomMenu.getByRole("menuitem", { name: "Zoom in", exact: true }).evaluate((item) => item === document.activeElement),
   );
   await page.keyboard.press("Escape");
+  // The checks below expect the fitted camera the menu checks started from.
+  await canvasViewport.focus();
+  await page.keyboard.press("Shift+1");
+  await waitFor(async () => (await zoomLabel()) === fitZoom, "design-zoom-refit");
   const inspectorScrollViewport = inspector
     .locator("[data-radix-scroll-area-viewport]")
     .first();

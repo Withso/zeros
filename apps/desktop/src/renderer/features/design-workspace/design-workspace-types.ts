@@ -105,6 +105,11 @@ export interface DesignInspectorProps {
 export interface DesignCanvasZoomActions {
   zoomIn(): void;
   zoomOut(): void;
+  zoomTo(zoom: number): void;
+  /** Fit every frame on the page (Shift+1). */
+  zoomToFit(): void;
+  /** Fit the selection, or the selected frame (Shift+2). */
+  zoomToSelection(): void;
   /** Bring frames into view, switching to their page first. */
   revealFrames?(target: { files: readonly string[]; pageId?: string }): void;
 }

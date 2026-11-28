@@ -81,10 +81,14 @@ describe("design workspace inspector toolbar", () => {
     expect(inspector).toContain('<TabsTrigger value="css"');
     // The zoom is one menu: in the tab bar, or in the header row when there are no tabs.
     expect(inspector).toContain("{zoomMenu}");
-    const zoomMenu = source.match(/const zoomMenu = \([\s\S]*?\n {2}\);/)?.[0] ?? "";
+    expect(source.match(/const zoomMenu = \([\s\S]*?\n {2}\);/)?.[0]).toContain("<DesignZoomMenu");
+    const zoomMenu = source.match(/function DesignZoomMenu\([\s\S]*?\n\}\n/)?.[0] ?? "";
     expect(zoomMenu).toContain("<DropdownMenuTrigger asChild>");
-    expect(zoomMenu).toContain("Zoom in");
-    expect(zoomMenu).toContain("Zoom out");
+    for (const item of ["Zoom percentage", "Zoom in", "Zoom out", "Zoom to fit", "Zoom to selection"]) {
+      expect(zoomMenu).toContain(`aria-label="${item}"`);
+    }
+    expect(zoomMenu).toContain("zoomActionsRef.current?.zoomTo(value / 100)");
+    expect(source).toContain("const DESIGN_ZOOM_MENU_STEPS = [0.5, 1, 2] as const;");
     expect(source.match(/const inspectorSelectionHeader = \([\s\S]*?\n {2}\);/)?.[0]).toContain("zoomMenu");
     expect(inspector!.indexOf("data-design-style-panel-header")).toBeLessThan(
       inspector!.indexOf("<ScrollArea"),

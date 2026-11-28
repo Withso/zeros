@@ -54,6 +54,7 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuSeparator,
   DropdownMenuShortcut,
   DropdownMenuTrigger,
   Input,
@@ -264,7 +265,7 @@ import {
   paintDesignInspectorPreviewDetails,
   paintedDesignFrameGeometry,
 } from "./design-workspace-overlays";
-import { type DesignInspectorProps } from "./design-workspace-types";
+import { type DesignCanvasZoomActions, type DesignInspectorProps } from "./design-workspace-types";
 import { loadDesignComponentOptions } from "./design-component-options-loader";
 import { PanelHeader } from "@/renderer/shared/ui/primitives/panel-header";
 
@@ -429,6 +430,129 @@ function inspectorCanvasViewport(from: Element): HTMLElement | null {
 function focusInspectorCanvasViewport(from: Element): void {
   inspectorCanvasViewport(from)?.focus({ preventScroll: true });
 }
+
+/** Shift+0/1/2 are handled on the canvas, not by this menu. */
+function DesignZoomMenu({
+  zoom,
+  disabled,
+  historyOwner,
+  zoomActionsRef,
+}: {
+  zoom: number;
+  disabled: boolean;
+  historyOwner: string | undefined;
+  zoomActionsRef: React.MutableRefObject<DesignCanvasZoomActions | null>;
+}) {
+  const percentage = Math.round(zoom * 100);
+  const [open, setOpen] = useState(false);
+  const [draft, setDraft] = useState(String(percentage));
+  const inputRef = useRef<HTMLInputElement>(null);
+  // As in Figma, the menu opens with its percentage selected for typing; the
+  // menu focuses itself on mount, so the field takes focus a frame later.
+  useEffect(() => {
+    if (!open) return;
+    const frame = requestAnimationFrame(() => inputRef.current?.select());
+    return () => cancelAnimationFrame(frame);
+  }, [open]);
+  const commitDraft = () => {
+    const value = Number.parseFloat(draft.replace(",", "."));
+    if (Number.isFinite(value) && value > 0) zoomActionsRef.current?.zoomTo(value / 100);
+    setOpen(false);
+  };
+  return (
+    <DropdownMenu
+      open={open}
+      onOpenChange={(next) => {
+        if (next) setDraft(String(percentage));
+        setOpen(next);
+      }}
+    >
+      <DropdownMenuTrigger asChild>
+        <Button
+          type="button"
+          variant="ghost"
+          className="text-fg2 h-7 min-w-12 px-2 text-xs tabular-nums"
+          disabled={disabled}
+          aria-label={`Canvas zoom ${percentage}%`}
+        >
+          {percentage}%
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent
+        data-design-history-owner={historyOwner}
+        align="end"
+        className="w-48"
+      >
+        <div className="p-1">
+          <Input
+            ref={inputRef}
+            size="compact"
+            aria-label="Zoom percentage"
+            inputMode="decimal"
+            className="text-xs tabular-nums"
+            value={draft}
+            onChange={(event) => setDraft(event.target.value.replace(/%/g, ""))}
+            onKeyDown={(event) => {
+              // The menu's typeahead and arrow keys must not take the field's keys.
+              if (event.key !== "Escape") event.stopPropagation();
+              if (event.key === "Enter") {
+                event.preventDefault();
+                commitDraft();
+              } else if (
+                event.key === "ArrowDown" &&
+                !event.shiftKey && !event.altKey && !event.metaKey && !event.ctrlKey
+              ) {
+                event.preventDefault();
+                event.currentTarget
+                  .closest('[role="menu"]')
+                  ?.querySelector<HTMLElement>('[role="menuitem"]:not([data-disabled])')
+                  ?.focus();
+              }
+            }}
+          />
+        </div>
+        <DropdownMenuSeparator />
+        <DropdownMenuItem
+          disabled={zoom >= DESIGN_MAX_ZOOM}
+          aria-label="Zoom in"
+          onSelect={() => zoomActionsRef.current?.zoomIn()}
+        >
+          <span>Zoom in</span>
+          <DropdownMenuShortcut>+</DropdownMenuShortcut>
+        </DropdownMenuItem>
+        <DropdownMenuItem
+          disabled={zoom <= DESIGN_MIN_ZOOM}
+          aria-label="Zoom out"
+          onSelect={() => zoomActionsRef.current?.zoomOut()}
+        >
+          <span>Zoom out</span>
+          <DropdownMenuShortcut>−</DropdownMenuShortcut>
+        </DropdownMenuItem>
+        <DropdownMenuItem aria-label="Zoom to fit" onSelect={() => zoomActionsRef.current?.zoomToFit()}>
+          <span>Zoom to fit</span>
+          <DropdownMenuShortcut>⇧1</DropdownMenuShortcut>
+        </DropdownMenuItem>
+        <DropdownMenuItem aria-label="Zoom to selection" onSelect={() => zoomActionsRef.current?.zoomToSelection()}>
+          <span>Zoom to selection</span>
+          <DropdownMenuShortcut>⇧2</DropdownMenuShortcut>
+        </DropdownMenuItem>
+        <DropdownMenuSeparator />
+        {DESIGN_ZOOM_MENU_STEPS.map((step) => (
+          <DropdownMenuItem
+            key={step}
+            aria-label={`Zoom to ${step * 100}%`}
+            onSelect={() => zoomActionsRef.current?.zoomTo(step)}
+          >
+            <span>Zoom to {step * 100}%</span>
+            {step === 1 ? <DropdownMenuShortcut>⇧0</DropdownMenuShortcut> : null}
+          </DropdownMenuItem>
+        ))}
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+}
+
+const DESIGN_ZOOM_MENU_STEPS = [0.5, 1, 2] as const;
 
 export function InspectorEditField({
   numericValue,
@@ -1949,7 +2073,6 @@ export const DesignInspector = React.memo(function DesignInspector({
         DEFAULT_DESIGN_WORKSPACE_VIEW.zoom)
       : DEFAULT_DESIGN_WORKSPACE_VIEW.zoom,
   );
-  const zoomPercentage = Math.round(zoom * 100);
   const [frameAction, setFrameAction] = useState<"export" | null>(null);
   const [exportScale, setExportScale] = useState(1);
   // A slot takes layers, not styles: its frame is the main's.
@@ -3842,37 +3965,12 @@ export const DesignInspector = React.memo(function DesignInspector({
     });
   };
   const zoomMenu = (
-    <DropdownMenu>
-      <DropdownMenuTrigger asChild>
-        <Button
-          type="button"
-          variant="ghost"
-          className="text-fg2 h-7 min-w-12 px-2 text-xs tabular-nums"
-          disabled={!active || !workspaceId}
-          aria-label={`Canvas zoom ${zoomPercentage}%`}
-        >
-          {zoomPercentage}%
-        </Button>
-      </DropdownMenuTrigger>
-      <DropdownMenuContent data-design-history-owner={workspaceId ?? undefined} align="end" className="w-48">
-        <DropdownMenuItem
-          disabled={zoom >= DESIGN_MAX_ZOOM}
-          aria-label="Zoom in"
-          onSelect={() => zoomActionsRef.current?.zoomIn()}
-        >
-          <span>Zoom in</span>
-          <DropdownMenuShortcut>+</DropdownMenuShortcut>
-        </DropdownMenuItem>
-        <DropdownMenuItem
-          disabled={zoom <= DESIGN_MIN_ZOOM}
-          aria-label="Zoom out"
-          onSelect={() => zoomActionsRef.current?.zoomOut()}
-        >
-          <span>Zoom out</span>
-          <DropdownMenuShortcut>−</DropdownMenuShortcut>
-        </DropdownMenuItem>
-      </DropdownMenuContent>
-    </DropdownMenu>
+    <DesignZoomMenu
+      zoom={zoom}
+      disabled={!active || !workspaceId}
+      historyOwner={workspaceId ?? undefined}
+      zoomActionsRef={zoomActionsRef}
+    />
   );
   const inspectorSelectionHeader = (
     <section className="border-border1 shrink-0 border-b">

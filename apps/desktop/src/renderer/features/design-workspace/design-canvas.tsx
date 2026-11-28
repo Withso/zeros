@@ -1818,6 +1818,15 @@ export const DesignCanvas = React.memo(function DesignCanvas({
     [cancelPendingWheelGesture, setViewport, workspaceId, canvasPageOwner],
   );
 
+  const fitSelection = useCallback(() => {
+    if (!workspaceId || !selectedDescription) return;
+    const current = designWorkspaceView(workspaceId);
+    const targets = current.selectedTargets.length ? current.selectedTargets :
+      [{ frame: selectedDescription.file, nodeId: current.selectedNodeId ?? undefined }];
+    const runtimeFrames = useDesignRuntimeStore.getState().byWorkspace[workspaceId]?.frames;
+    fitFrames(designSelectionFitRects(targets, frameViews, (file, id) => runtimeFrames?.[file]?.detailsByNode[id]?.rect));
+  }, [fitFrames, frameViews, selectedDescription, workspaceId]);
+
   /** Zoom about a screen point so the content beneath it does not jump. */
   const zoomAt = useCallback(
     (
@@ -1999,13 +2008,16 @@ export const DesignCanvas = React.memo(function DesignCanvas({
     const actions: DesignCanvasZoomActions = {
       zoomIn: () => zoomAt((currentZoom) => currentZoom * 1.2),
       zoomOut: () => zoomAt((currentZoom) => currentZoom / 1.2),
+      zoomTo: (zoom) => zoomAt(zoom),
+      zoomToFit: () => fitFrames(frameViews),
+      zoomToSelection: fitSelection,
       revealFrames: ({ files, pageId }) => revealAgentTarget({ files: [...files], rects: [], pageId: pageId ?? null }),
     };
     zoomActionsRef.current = actions;
     return () => {
       if (zoomActionsRef.current === actions) zoomActionsRef.current = null;
     };
-  }, [active, revealAgentTarget, zoomActionsRef, zoomAt]);
+  }, [active, fitFrames, fitSelection, frameViews, revealAgentTarget, zoomActionsRef, zoomAt]);
 
   /** Frame creation returns the aggregate snapshot, avoiding a follow-up read.
    * Drawn geometry is authored in that same mutation, so no default-size frame
@@ -7019,10 +7031,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
         fitFrames(frameViews);
       } else if (event.code === "Digit2" && selectedDescription) {
         event.preventDefault();
-        const targets = shortcutView.selectedTargets.length ? shortcutView.selectedTargets :
-          [{ frame: selectedDescription.file, nodeId: shortcutView.selectedNodeId ?? undefined }];
-        const runtimeFrames = useDesignRuntimeStore.getState().byWorkspace[workspaceId!]?.frames;
-        fitFrames(designSelectionFitRects(targets, frameViews, (file, id) => runtimeFrames?.[file]?.detailsByNode[id]?.rect));
+        fitSelection();
       } else if (event.code === "Digit0") {
         event.preventDefault();
         zoomAt(1);
@@ -7084,6 +7093,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
     finishInlineTextTool,
     finishNodeNudge,
     fitFrames,
+    fitSelection,
     hitStackMenu,
     itemsWritable,
     stopFramePlayback,
