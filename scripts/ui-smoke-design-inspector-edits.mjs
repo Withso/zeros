@@ -362,10 +362,49 @@ async function runDesignCanvasFocusReturnSmoke({ page, check }) {
   check("a pointer-clicked Layers row hands arrows to canvas nudging", true);
 }
 
+/** Design inspector fields ring on mouse focus too, as in Figma. */
+export async function runDesignFieldMouseFocusSmoke({ page, check }) {
+  await page.goto(
+    `${new URL(page.url()).origin}/apps/desktop/src/renderer/harnesses/harness-design-workspace.html?layoutGestures`,
+    { waitUntil: "networkidle" },
+  );
+  await openLayersDrawer(page);
+  await page
+    .locator('[data-design-sidebar-panel] [data-design-layer-id="home-heading"]')
+    .click();
+  const width = page.getByRole("textbox", { name: "W", exact: true });
+  await expect(width).toHaveValue("100");
+  // "ring" is the exact inset accent edge; "none" is the field's rest.
+  const ring = () =>
+    width.evaluate((input) => {
+      const probe = document.createElement("span");
+      probe.style.boxShadow = "inset 0 0 0 1px var(--accent)";
+      input.closest("[data-design-inspector]").append(probe);
+      const edge = getComputedStyle(probe).boxShadow;
+      probe.remove();
+      const shadow = getComputedStyle(input.closest(".zd-field")).boxShadow;
+      return shadow === edge ? "ring" : shadow;
+    });
+  check("an inspector field shows no ring at rest", (await ring()) === "none");
+  await width.click();
+  await expect(width).toBeFocused();
+  // The ring eases in, so wait for it to settle rather than read it once.
+  const settles = (want) =>
+    expect
+      .poll(ring)
+      .toBe(want)
+      .then(() => true, () => false);
+  check("clicking an inspector field rings it in the accent edge", await settles("ring"));
+  await width.press("Escape");
+  await width.blur();
+  check("the ring leaves with focus", await settles("none"));
+}
+
 export async function runDesignInspectorEditsSmoke(context) {
   await runDesignCanvasFocusReturnSmoke(context);
   await runDesignTransformCommitSmoke(context);
   await runDesignFieldHistorySmoke(context);
+  await runDesignFieldMouseFocusSmoke(context);
   await runDesignFillHistorySmoke(context);
   await runDesignScrubLeadingPreviewSmoke(context);
   await runDesignColorInputRacesSmoke(context);
