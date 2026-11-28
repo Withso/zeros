@@ -329,7 +329,7 @@ export async function runDesignComponentInstancesSmoke({ page, check }) {
   await expect(sizeChip.locator("[data-design-component-mark]")).toHaveCount(1);
   check("a selected instance shows the mark and its component/variant name, then its size in its own chip",
     (await sizeChip.locator("[data-design-selection-identity]").innerText()).trim() === "Chat composer/Default" &&
-      /^\d+(?: Hug| Fill)? × \d+/.test((await sizeChip.locator("[data-design-selection-dimensions]").innerText()).trim()) &&
+      /^800(?: Hug| Fill)? × \d+/.test((await sizeChip.locator("[data-design-selection-dimensions]").innerText()).trim()) &&
       (await sizeChip.getAttribute("data-design-selection-component")) === "",
     await sizeChip.innerText());
   check("a component frame shows the mark beside its name",
@@ -385,6 +385,8 @@ export async function runDesignComponentInstancesSmoke({ page, check }) {
   const instanceHeight = inspectorPanel.getByLabel("H", { exact: true });
   const rootHeight = await rootBox.evaluate((element) => element.offsetHeight);
   check("the instance's height reads its root's", Math.abs(Number(await instanceHeight.inputValue()) - rootHeight) <= 1, `${await instanceHeight.inputValue()} root ${rootHeight}`);
+  const chipHeight = Number((await sizeChip.locator("[data-design-selection-dimensions]").innerText()).match(/× (\d+)/)?.[1]);
+  check("the instance's size chip reads its root's height", Math.abs(chipHeight - rootHeight) <= 1, `${chipHeight} root ${rootHeight}`);
   // Resizing writes the host's own size; it is checked on its own page below,
   // where an undo of it cannot reach the variants saved above.
 
