@@ -70,6 +70,7 @@ import {
   TabsTrigger,
   Tooltip,
   toast,
+  usePopoverOpenControl,
 } from "../../shared/ui/primitives";
 import {
   dispatchFocusedDesignHistory,
@@ -473,6 +474,7 @@ export function InspectorEditField({
   const [typingOverToken, setTypingOverToken] = useState(false);
   const tokensOffered = useDesignTokensFor(tokenAccepts);
   const overlays = useDesignFieldOverlays();
+  const setPopoverOpen = usePopoverOpenControl();
   const fieldRef = useRef<HTMLDivElement | null>(null);
   const inputRef = useRef<HTMLInputElement | null>(null);
   const pillRef = useRef<HTMLButtonElement | null>(null);
@@ -1100,6 +1102,10 @@ export function InspectorEditField({
                 mixedSteps?.cancel();
               }
               const input = event.currentTarget;
+              if (setPopoverOpen && input.closest("[data-design-popover]")) {
+                setPopoverOpen(false);
+                return;
+              }
               const viewport = inspectorCanvasViewport(input);
               input.blur();
               window.requestAnimationFrame(() => viewport?.focus({ preventScroll: true }));

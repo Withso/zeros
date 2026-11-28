@@ -44,6 +44,10 @@ function Popover({
   );
 }
 
+function usePopoverOpenControl(): ((open: boolean) => void) | null {
+  return React.useContext(PopoverOpenContext);
+}
+
 const PopoverTrigger = PopoverPrimitive.Trigger;
 
 const PopoverAnchor = PopoverPrimitive.Anchor;
@@ -168,4 +172,10 @@ const PopoverContent = React.forwardRef<
 );
 PopoverContent.displayName = PopoverPrimitive.Content.displayName;
 
-export { Popover, PopoverTrigger, PopoverContent, PopoverAnchor };
+export {
+  Popover,
+  PopoverTrigger,
+  PopoverContent,
+  PopoverAnchor,
+  usePopoverOpenControl,
+};
