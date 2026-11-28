@@ -6750,7 +6750,8 @@ export const DesignCanvas = React.memo(function DesignCanvas({
             reveal: true,
           });
         }
-        if (!viewport.contains(document.activeElement)) viewport.focus({ preventScroll: true });
+        if (!viewport.contains(document.activeElement) && !keyboardTreeFocus)
+          viewport.focus({ preventScroll: true });
         return;
       }
       if (event.key === "Escape" && view.frameSelected && selectedDescription) {
