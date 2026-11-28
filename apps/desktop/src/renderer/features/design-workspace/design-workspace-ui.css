@@ -10,13 +10,13 @@
   position: absolute;
   top: calc(12px * var(--design-canvas-inverse-zoom));
   left: calc(12px * var(--design-canvas-inverse-zoom));
-  width: 12px;
-  height: 12px;
+  width: 8px;
+  height: 8px;
   transform: scale(var(--design-canvas-inverse-zoom));
   transform-origin: top left;
-  border: 2px solid var(--design-selection-stroke);
+  border: 1px solid var(--design-selection-stroke);
   border-radius: 50%;
-  background: var(--bg1);
+  background: var(--design-selection-handle-fill);
   cursor: nwse-resize;
   pointer-events: auto;
   /* Above the selection's spacing zones inside the transformed canvas. */
@@ -1196,7 +1196,6 @@
 [data-design-frame-component][data-design-frame-root-selected] {
   --design-selection-stroke: var(--violet-text);
   --design-selection-soft: var(--violet-bg);
-  --design-selection-handle-fill: var(--violet-bg);
   --design-selection-label-bg: var(--violet-bg);
   --design-selection-label-fg: var(--violet-on-bg);
 }
