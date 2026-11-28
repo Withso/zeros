@@ -55,6 +55,27 @@ describe("design preview encoding", () => {
     expect((await Promise.all(burst)).length).toBe(6);
   });
 
+  it("matches out-of-order replies and reuses an idle worker before starting another", async () => {
+    const workers: Array<ReturnType<typeof fakeWorker>> = [];
+    const create = vi.fn(() => {
+      const worker = fakeWorker(() => null);
+      workers.push(worker);
+      return worker;
+    });
+    const encoder = createDesignPreviewEncoder(create, 3);
+    const png = new Blob(["png"]);
+    const first = encoder.encode(png, "thumbnail"), second = encoder.encode(png, "thumbnail");
+    const [a, b] = [workers[0]!.posted[0]!, workers[1]!.posted[0]!];
+    workers[1]!.reply({ id: b.id, blob: new Blob(["second"]) });
+    expect(await (await second).text()).toBe("second");
+    const third = encoder.encode(png, "thumbnail");
+    expect(create).toHaveBeenCalledTimes(2);
+    expect(workers.map(worker => worker.posted.length)).toEqual([1, 2]);
+    workers[1]!.reply({ id: workers[1]!.posted[1]!.id, blob: new Blob(["third"]) });
+    workers[0]!.reply({ id: a.id, blob: new Blob(["first"]) });
+    expect(await Promise.all([first, third].map(async picture => (await picture).text()))).toEqual(["first", "third"]);
+  });
+
   it("finishes every pending picture on this thread when one pooled worker dies", async () => {
     const workers: Array<ReturnType<typeof fakeWorker>> = [];
     const encoder = createDesignPreviewEncoder(() => {
