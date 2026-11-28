@@ -90,6 +90,36 @@ it("uses current resize geometry and viewport bounds without reading layout duri
   } finally { await page.close(); }
 });
 
+it("restores frame camera variables after a geometry-preserving inline style rewrite", async () => {
+  const page = await open();
+  try {
+    expect((await paint(page, 2, 0, 500))[0].inverse).toBe(.5);
+    await page.locator('[data-design-frame="near"]').evaluate(frame => {
+      (frame as HTMLElement).style.removeProperty("--design-canvas-zoom");
+      (frame as HTMLElement).style.removeProperty("--design-canvas-inverse-zoom");
+    });
+    expect((await paint(page, 2, 0, 500))[0].inverse).toBe(.5);
+  } finally { await page.close(); }
+});
+
+it("validates replacement chrome roots when a resize preserves frame outputs", async () => {
+  const page = await open();
+  try {
+    await paint(page, 2, 0, 500);
+    expect(await page.locator('[data-design-frame="near"] [data-design-frame-chrome]').evaluate(root =>
+      (root as HTMLElement).style.getPropertyValue("--design-canvas-inverse-zoom"))).toBe("0.5");
+    await page.locator('[data-design-frame="near"]').evaluate(frame => {
+      const replacement = document.createElement("div");
+      replacement.setAttribute("data-design-frame-chrome", "");
+      replacement.innerHTML = "<button>Replacement</button>";
+      frame.querySelector("[data-design-frame-chrome]")!.replaceWith(replacement);
+    });
+    await paint(page, 2, 0, 600);
+    expect(await page.locator('[data-design-frame="near"] [data-design-frame-chrome]').evaluate(root =>
+      (root as HTMLElement).style.getPropertyValue("--design-canvas-inverse-zoom"))).toBe("0.5");
+  } finally { await page.close(); }
+});
+
 it("keeps camera bounds scoped to each retained workspace and excludes pixels and screen-size chrome children from inheritance", async () => {
   const page = await open();
   try {
@@ -556,3 +586,25 @@ it("shows only a moving frame's name, in the selection color, and leaves an Opti
   } finally { await page.close(); }
 });
 
+it("does not rewrite frame chrome state when a pan leaves visibility unchanged", async () => {
+  const page = await open();
+  try {
+    await paint(page, 2, 0, 500);
+    const result = await page.evaluate(() => {
+      const world = document.querySelector<HTMLDivElement>("#world")!;
+      const api = (window as any).camera;
+      const original = Element.prototype.toggleAttribute;
+      let frameWrites = 0;
+      Element.prototype.toggleAttribute = function(name: string, force?: boolean) {
+        if (this.hasAttribute("data-design-frame")) frameWrites++;
+        return original.call(this, name, force as any);
+      };
+      try {
+        api.paintDesignCanvasCamera(world, { zoom: 2, panX: -10, panY: 0 }, true, { width: 500, height: 300 });
+      } finally { Element.prototype.toggleAttribute = original; }
+      return { frameWrites,
+        outside: [...world.querySelectorAll("[data-design-frame]")].map(frame => frame.hasAttribute("data-design-frame-chrome-outside")) };
+    });
+    expect(result).toEqual({ frameWrites: 0, outside: [false, true] });
+  } finally { await page.close(); }
+});
