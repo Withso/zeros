@@ -75,9 +75,17 @@ describe("decoded Design preview continuity", () => {
       lease.release();
     }
 
+    const entries = (previews as unknown as { entries: Map<string, unknown> }).entries;
+    const values = entries.values;
+    let scans = 0;
+    entries.values = function scanned() {
+      scans++;
+      return values.call(entries);
+    } as typeof entries.values;
     clock.mockClear();
     const returning = previews.acquire(inputs[0])!;
     expect(returning.ready).toBe(true);
+    expect(scans).toBe(0);
     expect(clock.mock.calls.length).toBeLessThanOrEqual(1);
     returning.release();
     previews.clearWarm();
