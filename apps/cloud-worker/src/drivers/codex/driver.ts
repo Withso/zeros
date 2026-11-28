@@ -216,10 +216,11 @@ export class CodexDriver implements Driver {
     this.model = model;
   }
 
-  /** False only for a mode managed policy blocks, so callers can keep the
-   * already bounded mode instead of failing a queued prompt. */
-  allowsMode(modeId: string): boolean {
-    return (modeId !== "read-only" && modeId !== "full-access") || codexModeAllowed(modeId, this.policyRequirements);
+  /** The mode a turn runs in when `modeId` is asked for: itself when allowed,
+   * else a stricter allowed one (never looser), else null. */
+  effectiveMode(modeId: string): string | null {
+    if (modeId !== "read-only" && modeId !== "full-access") return modeId;
+    return resolveCodexMode(modeId, this.policyRequirements, ["read-only", "full-access"]);
   }
 
   async setMode(modeId: string): Promise<void> {

@@ -543,14 +543,19 @@ it("preserves a frozen first-send Plan mode when selection changes during dispat
   } finally { begin.resolve({ dispatch: false, state: "cancelled" }); }
 });
 
-it("keeps the driver's bounded mode for a frozen mode managed Codex policy blocks, and refuses switching to it", async () => {
-  const relay = new PullRelay(), item = delivery(), driver = new FakeDriver();
-  Object.assign(item.payload, { permissionMode: "bypass" }); relay.enqueue({ prompts: [item], stops: [] });
-  Object.assign(driver, { allowsMode: (mode: string) => mode !== "full-access" });
+it("runs and records the bounded mode for frozen modes managed Codex policy blocks, and refuses switching to them", async () => {
+  const relay = new PullRelay(), first = delivery(), second = delivery(randomUUID(), "chat", "0", "2"), driver = new FakeDriver();
+  for (const item of [first, second]) Object.assign(item.payload, { permissionMode: "bypass" });
+  relay.enqueue({ prompts: [first, second], stops: [] });
+  Object.assign(driver, { effectiveMode: (mode: string) => mode === "full-access" ? "read-only" : mode });
   const f = await setup({ relay, driver, interactions: true });
+  // Both queued turns (the second reusing the same driver) run in the
+  // bounded mode and record it, instead of failing or saving Full access.
   await until(() => driver.prompts.length).toBe(1);
-  // The prompt runs instead of failing, and Full access is never applied.
-  expect(driver.modes).not.toContain("full-access");
+  driver.complete();
+  await until(() => driver.prompts.length).toBe(2);
+  expect(driver.modes).toEqual(["read-only", "read-only"]);
+  expect((await persisted(f.directory))[0].chat).toMatchObject({ permissionMode: "plan", lastModeId: "read-only" });
   driver.complete();
   const executionId = (await persisted(f.directory))[0].executionId;
   await relay.receive({ t: "open", clientId: CLIENT_A });

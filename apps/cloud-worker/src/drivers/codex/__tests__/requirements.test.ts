@@ -90,8 +90,8 @@ describe("cloud Codex managed requirements", () => {
   it("reports which modes managed policy blocks, so a queued prompt keeps the bounded mode", async () => {
     native.requirements = managed(["on-request"], ["read-only", "workspace-write"]);
     const { driver } = await open("full-access");
-    expect(driver.allowsMode("full-access")).toBe(false);
-    expect(driver.allowsMode("read-only")).toBe(true);
+    expect(driver.effectiveMode("full-access")).toBe("read-only");
+    expect(driver.effectiveMode("read-only")).toBe("read-only");
   });
 });
 

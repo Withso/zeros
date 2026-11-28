@@ -62,8 +62,10 @@ export interface Driver {
   steer(content: ContentBlock[]): Promise<SteerOutcome>;
   setModel(model: string): Promise<void>;
   setMode?(modeId: string): Promise<void>;
-  /** Optional managed-policy check; false means the provider would refuse this mode. */
-  allowsMode?(modeId: string): boolean;
+  /** Optional managed-policy bound: the mode a turn would actually run in when
+   *  this one is asked for (the mode itself, or a stricter allowed one), or
+   *  null when policy allows neither. */
+  effectiveMode?(modeId: string): string | null;
   /** Optional native live settings; credentials never enter this courier. */
   updateConfig?(config: { model?: string; effort?: string; fast: boolean }): Promise<void>;
   interrupt(): Promise<void>;

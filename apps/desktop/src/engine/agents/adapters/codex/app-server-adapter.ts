@@ -2031,7 +2031,9 @@ export class CodexAppServerAdapter implements AgentAdapter {
         scopeId: providerSessionId,
       }),
       cwd: session.cwd,
-      env,
+      // Start from the live mode, not the spawn-time one: the new account's
+      // managed policy must bound what the user has selected now.
+      env: { ...env, ZEROS_PERMISSION_MODE: modeId },
       ...(update.cliBinary ? { cliBinary: update.cliBinary } : {}),
       territory: session.territory,
       executionBoundary: session.executionBoundary,

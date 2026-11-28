@@ -451,7 +451,7 @@ export class Agents {
           const mode = cloudPermissionMode(route.agentId, message.modeId);
           if (!mode) throw new WorkspaceError("invalid-params", "Choose Plan or Full access for a cloud workspace.");
           // An open driver knows the managed policy even between turns.
-          if (route.driver?.allowsMode?.(message.modeId) === false)
+          if (route.driver?.effectiveMode && route.driver.effectiveMode(message.modeId) !== message.modeId)
             throw new WorkspaceError("invalid-params", "Your organization's Codex policy does not allow this permission mode. Choose another mode.");
           // Some providers apply modes on the next turn. A changed selection
           // invalidates the running turn's match instead of relabelling it.
@@ -1144,13 +1144,15 @@ export class Agents {
                   if (!route.closed && stopping === route.stopping && mode !== undefined) {
                     if (mode === "plan" && this.config.agentInteractions !== 1) throw new WorkspaceError("CLOUD_V2_UNSUPPORTED", "This cloud worker does not support Plan mode yet.");
                     if (!route.driver!.setMode) throw new WorkspaceError("CLOUD_V2_UNSUPPORTED", "This agent cannot change mode.");
-                    // A saved mode that managed policy now blocks keeps the
-                    // driver's bounded (never less restrictive) mode.
-                    if (route.driver!.allowsMode?.(cloudModeId(route.agentId, mode)) !== false) {
-                      await route.driver!.setMode(cloudModeId(route.agentId, mode));
-                      this.assertCurrent(route);
-                      await this.saveMode(route, mode);
-                    }
+                    // Managed policy may bound the frozen mode to a stricter one.
+                    // Apply and record the mode the turn really runs in, so
+                    // steering matches follow-ups against it.
+                    const requested = cloudModeId(route.agentId, mode);
+                    const effective = route.driver!.effectiveMode ? route.driver!.effectiveMode(requested) : requested;
+                    if (effective === null) throw new WorkspaceError("invalid-params", "Your organization's Codex policy does not allow this permission mode. Choose another mode.");
+                    await route.driver!.setMode(effective);
+                    this.assertCurrent(route);
+                    await this.saveMode(route, cloudPermissionMode(route.agentId, effective) ?? mode);
                   }
                   if (route.closed || stopping !== route.stopping) return { completion: Promise.resolve<PromptResponse>({ stopReason: "cancelled" }) };
                   route.nativeRunning = true; route.activePermissionMode = route.permissionMode ?? "bypass";
