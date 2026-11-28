@@ -70,6 +70,7 @@ import {
   TabsTrigger,
   Tooltip,
   toast,
+  usePopoverOpenControl,
 } from "../../shared/ui/primitives";
 import {
   dispatchFocusedDesignHistory,
@@ -420,6 +421,15 @@ export function designStyleTargetNodeId({
     (details && details.oid === layoutRootId ? details.oid : null);
 }
 
+function inspectorCanvasViewport(from: Element): HTMLElement | null {
+  return (from.closest("[data-design-workspace-surface]") ?? document.querySelector("[data-design-workspace-surface]:not([inert])"))
+    ?.querySelector<HTMLElement>("[data-design-canvas-viewport]") ?? null;
+}
+
+function focusInspectorCanvasViewport(from: Element): void {
+  inspectorCanvasViewport(from)?.focus({ preventScroll: true });
+}
+
 export function InspectorEditField({
   numericValue,
   icon,
@@ -465,6 +475,7 @@ export function InspectorEditField({
   const [typingOverToken, setTypingOverToken] = useState(false);
   const tokensOffered = useDesignTokensFor(tokenAccepts);
   const overlays = useDesignFieldOverlays();
+  const setPopoverOpen = usePopoverOpenControl();
   const fieldRef = useRef<HTMLDivElement | null>(null);
   const inputRef = useRef<HTMLInputElement | null>(null);
   const pillRef = useRef<HTMLButtonElement | null>(null);
@@ -487,6 +498,8 @@ export function InspectorEditField({
     distance: number;
     moved: boolean;
   } | null>(null);
+  const arrowSequenceRef = useRef<{ start: string } | null>(null);
+  const [arrowStepping, setArrowStepping] = useState(false);
   const previewFrameRef = useRef<number | null>(null);
   /** The newest value asked for while this frame's preview already left. */
   const pendingPreviewRef = useRef<string | null>(null);
@@ -678,6 +691,8 @@ export function InspectorEditField({
   };
 
   const commit = async (requestedDraft = draftRef.current) => {
+    arrowSequenceRef.current = null;
+    setArrowStepping(false);
     if (disabledRef.current) {
       if (revalidatingRef.current) {
         pendingCommitRef.current = requestedDraft;
@@ -965,7 +980,7 @@ export function InspectorEditField({
           ref={inputRef}
           id={id}
           aria-label={label}
-          data-design-draft={draft === String(value) ? "clean" : "dirty"}
+          data-design-draft={draft === String(value) && !arrowStepping ? "clean" : "dirty"}
           value={presentation.text}
           placeholder={placeholder}
           disabled={disabled && !(revalidating && focused)}
@@ -1028,7 +1043,11 @@ export function InspectorEditField({
           onKeyDown={(event) => {
             if (event.key === "Enter") {
               event.preventDefault();
-              event.currentTarget.blur();
+              const input = event.currentTarget;
+              void commit();
+              // Fields inside a popover keep it open, like the unit menu beside them.
+              if (input.closest("[data-design-popover]")) input.blur();
+              else focusInspectorCanvasViewport(input);
             } else if ((event.key === "ArrowUp" || event.key === "ArrowDown") && mixed && mixedSteps) {
               event.preventDefault();
               const current = mixedStepsRef.current ?? { steps: 0, fine: false };
@@ -1039,7 +1058,7 @@ export function InspectorEditField({
               mixedStepsRef.current = next;
               mixedSteps.preview(next.steps, next.fine);
             } else if (event.key === "ArrowUp" || event.key === "ArrowDown") {
-              const normalized = resolveDraft(draft, baselineRef.current);
+              const normalized = resolveDraft(draftRef.current, baselineRef.current);
               const direction = event.key === "ArrowUp" ? 1 : -1;
               const start = parseDesignStyleNumericParts(normalized)
                 ? normalized
@@ -1052,7 +1071,13 @@ export function InspectorEditField({
               );
               if (next !== null) {
                 event.preventDefault();
-                setPresentedDraft(withinRange(next));
+                arrowSequenceRef.current ??= { start: baselineRef.current };
+                const resolved = withinRange(next);
+                const moved = resolved !== arrowSequenceRef.current.start;
+                if (!moved) arrowSequenceRef.current = null;
+                setArrowStepping(moved);
+                setPresentedDraft(resolved);
+                preview(resolved);
               }
             } else if (
               event.key === "Backspace" &&
@@ -1074,6 +1099,9 @@ export function InspectorEditField({
             } else if (event.key === "Escape") {
               event.preventDefault();
               skipCommitRef.current = true;
+              const sequenceStart = arrowSequenceRef.current?.start;
+              arrowSequenceRef.current = null;
+              setArrowStepping(false);
               // A preceding commit can publish its authoritative computed
               // value while this input is focused. The synchronization effect
               // deliberately leaves an active draft alone, so the focus-time
@@ -1081,7 +1109,7 @@ export function InspectorEditField({
               // declaration). Escape must restore the latest exact-key value
               // from props; once we blur there may be no further value change
               // to trigger the effect again.
-              const restored = String(value);
+              const restored = sequenceStart ?? String(value);
               baselineRef.current = restored;
               setPresentedDraft(restored);
               cancelPreview();
@@ -1089,7 +1117,14 @@ export function InspectorEditField({
                 mixedStepsRef.current = null;
                 mixedSteps?.cancel();
               }
-              event.currentTarget.blur();
+              const input = event.currentTarget;
+              if (setPopoverOpen && input.closest("[data-design-popover]")) {
+                setPopoverOpen(false);
+                return;
+              }
+              const viewport = inspectorCanvasViewport(input);
+              input.blur();
+              window.requestAnimationFrame(() => viewport?.focus({ preventScroll: true }));
             }
           }}
         />
@@ -1171,7 +1206,7 @@ export function InspectorEditField({
             >
               <SelectValue />
             </SelectTrigger>
-            <SelectContent align="end" className="min-w-20">
+            <SelectContent align="end" data-design-popover="" className="min-w-20">
               {unitOptions.map((unit) => (
                 <SelectItem key={unit} value={unit}>
                   {unit}
@@ -1200,6 +1235,10 @@ export function InspectorEditField({
                     : `Animate ${label}`
                 }
                 onPointerDown={(event) => event.stopPropagation()}
+                onBlur={(event) => {
+                  if (fieldRef.current?.contains(event.relatedTarget)) return;
+                  void commit();
+                }}
                 onClick={motion.onAddKeyframe}
               >
                 <Diamond

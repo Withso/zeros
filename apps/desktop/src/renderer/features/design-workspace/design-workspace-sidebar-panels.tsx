@@ -16,6 +16,7 @@ import React, {
   useState,
 } from "react";
 import { IconButton } from "@/renderer/shared/ui/primitives/icon-button";
+import { getLastInputModality } from "@/renderer/shared/ui/overlay-focus";
 import {
   ChevronDown,
   ChevronRight,
@@ -301,6 +302,19 @@ function DesignLayerDisclosure({ open }: { open: boolean }) {
   );
 }
 
+
+function markLayerRowFocusModality(event: React.FocusEvent<HTMLElement>): void {
+  // A pointer-clicked row keeps focus (and Tab's meaning), but arrows belong
+  // to the selected layer. Keyboard focus keeps the tree's own navigation.
+  if (getLastInputModality() === "pointer")
+    event.currentTarget.dataset.designPointerFocus = "";
+  else delete event.currentTarget.dataset.designPointerFocus;
+}
+
+function layerRowFocusIsPointerDriven(target: EventTarget): boolean {
+  return target instanceof HTMLElement && target.dataset.designPointerFocus !== undefined;
+}
+
 const DesignLayerFrameRow = React.memo(function DesignLayerFrameRow({
   row, rowIndex, blockRadius, selected, tabbable, layoutKind, identity, identityKind, rename, actions,
 }: {
@@ -335,8 +349,14 @@ const DesignLayerFrameRow = React.memo(function DesignLayerFrameRow({
       aria-expanded={row.discloses ? row.expanded : undefined}
       aria-keyshortcuts="F2 Meta+C Control+C Meta+D Control+D Delete Backspace"
       onDoubleClick={(event) => actions.rowDoubleClick(event, row)}
+      onPointerDown={(event) => {
+        event.currentTarget.dataset.designPointerFocus = "";
+      }}
       onPointerEnter={() => actions.frameIntent(frame.file)}
-      onFocus={() => actions.frameIntent(frame.file)}
+      onFocus={(event) => {
+        markLayerRowFocusModality(event);
+        actions.frameIntent(frame.file);
+      }}
       onClick={(event) => {
         if (row.discloses && (event.target as HTMLElement).closest("[data-layer-disclosure]")) {
           actions.toggleFrameTree(frame);
@@ -416,11 +436,15 @@ const DesignLayerNodeRow = React.memo(function DesignLayerNodeRow({
         aria-selected={selected}
         aria-expanded={layer.hasChildren ? row.expanded : undefined}
         aria-keyshortcuts="F2 Shift+H Meta+C Control+C Meta+D Control+D Delete Backspace"
-        onFocus={() => {
+        onFocus={(event) => {
+          markLayerRowFocusModality(event);
           actions.frameIntent(frame.file);
           actions.focusLayer(frame, layer.node.oid);
         }}
         onDoubleClick={(event) => actions.rowDoubleClick(event, row)}
+        onPointerDown={(event) => {
+          event.currentTarget.dataset.designPointerFocus = "";
+        }}
         onClick={(event) => {
           if (layer.hasChildren && (event.target as HTMLElement).closest("[data-layer-disclosure]")) {
             actions.toggleExpanded(row);
@@ -1274,6 +1298,10 @@ function OwnedDesignWorkspaceSidebarPanels({
   ) => {
     const row = panelRows[index];
     if (!row) return;
+    if (
+      ["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"].includes(event.key) &&
+      layerRowFocusIsPointerDriven(event.currentTarget)
+    ) return;
     if (event.key === "F2") {
       event.preventDefault();
       beginRename(row);

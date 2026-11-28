@@ -34,7 +34,7 @@ import { settingsOwnerKey, writeScopedSettingsSelection } from "../features/sett
 import { computerKey, computers } from "../features/settings/cloud-computer-store";
 import { cloudProjects, githubLevelConnections, githubLevelsKey } from "../features/settings/cloud-github-levels";
 import { connectionRepositoriesCache, connectionRepositoryPageKey } from "../features/settings/github-connection-drawer";
-import { readyCopyCache } from "../features/settings/ready-copy-section";
+import { readyCopyCache, readyCopyKey } from "../features/settings/ready-copy-section";
 import { buildSecretNamesCache } from "../features/settings/build-secrets-section";
 import { readableRepositoriesCache } from "../features/settings/cloud-project-repository-picker";
 import {
@@ -158,7 +158,7 @@ function seedProjects(fixture: { connections: unknown; projects: unknown; readyC
   githubLevelConnections.setData(key, fixture.connections as never);
   cloudProjects.setData(key, fixture.projects as never);
   for (const project of (fixture.projects as { projects: { id: string }[] }).projects) {
-    readyCopyCache.setData(JSON.stringify([organization.id, project.id]), fixture.readyCopy as never);
+    readyCopyCache.setData(readyCopyKey(organization.id, project.id), fixture.readyCopy as never);
     buildSecretNamesCache.setData(JSON.stringify([key, project.id]), fixture.secrets);
   }
   for (const [connection, rows] of Object.entries(fixture.readable)) {
