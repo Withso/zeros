@@ -1182,19 +1182,35 @@ export async function runDesignWorkspaceCanvasSmoke({ page, waitFor, check }) {
     await canvasViewport.focus();
     await page.keyboard.press(shortcut);
     await waitFor(async () => (await zoomLabel()) !== "200%", `design-zoom-${shortcut}`);
-    const fromShortcut = await zoomLabel();
+    const fromShortcut = await settledCanvasTransform();
     await styleZoomButton.click();
     await styleZoomMenu.getByRole("menuitem", { name: "Zoom to 200%", exact: true }).click();
     await waitFor(async () => (await zoomLabel()) === "200%", `design-zoom-${item}-start`);
     await styleZoomButton.click();
     await styleZoomMenu.getByRole("menuitem", { name: item, exact: true }).click();
     await waitFor(async () => (await zoomLabel()) !== "200%", `design-zoom-${item}`);
-    return [await zoomLabel(), fromShortcut];
+    const fromMenu = await settledCanvasTransform();
+    const same =
+      Math.abs(fromMenu.zoom - fromShortcut.zoom) < 0.001 &&
+      Math.abs(fromMenu.panX - fromShortcut.panX) <= 1 &&
+      Math.abs(fromMenu.panY - fromShortcut.panY) <= 1;
+    return [same, `${JSON.stringify(fromMenu)} vs ${JSON.stringify(fromShortcut)}`, fromMenu];
   };
-  const [selectionZoom, shiftTwoZoom] = await menuFitMatchesShortcut("Zoom to selection", "Shift+2");
-  check("Zoom to selection frames what Shift+2 frames", selectionZoom === shiftTwoZoom, `${selectionZoom} vs ${shiftTwoZoom}`);
-  const [fitZoom, shiftOneZoom] = await menuFitMatchesShortcut("Zoom to fit", "Shift+1");
-  check("Zoom to fit frames what Shift+1 frames", fitZoom === shiftOneZoom, `${fitZoom} vs ${shiftOneZoom}`);
+  const settledCanvasTransform = async () => {
+    let previous = null;
+    await waitFor(async () => {
+      const current = await readCanvasTransform();
+      const settled = previous !== null && JSON.stringify(current) === JSON.stringify(previous);
+      previous = current;
+      return settled;
+    }, "design-zoom-camera-settled");
+    return previous;
+  };
+  const [selectionMatches, selectionDetail] = await menuFitMatchesShortcut("Zoom to selection", "Shift+2");
+  check("Zoom to selection frames what Shift+2 frames", selectionMatches, selectionDetail);
+  const [fitMatches, fitDetail] = await menuFitMatchesShortcut("Zoom to fit", "Shift+1");
+  check("Zoom to fit frames what Shift+1 frames", fitMatches, fitDetail);
+  const fitZoom = await zoomLabel();
   await canvasViewport.focus();
   await page.keyboard.press("Shift+0");
   await waitFor(async () => (await zoomLabel()) === "100%", "design-zoom-shift-0");
