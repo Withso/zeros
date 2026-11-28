@@ -332,6 +332,7 @@ export async function runDesignSelectionLimitSmoke({ page, check }) {
   await page.mouse.move(first.x - 10, first.y - 10, { steps: 12 });
   await page.mouse.up();
   await page.keyboard.up("Meta");
+  await expect.poll(async () => page.evaluate(async () => (await import("/apps/desktop/src/renderer/features/design-workspace/state/design-workspace-ui.ts")).designWorkspaceView("ws_design_harness").selectedTargets.length)).toBe(32);
   await page.getByRole("button", { name: "Attach selection", exact: true }).click();
   await expect(pill).toHaveText("32 selected");
   const targets = await page.evaluate(async () => (await import("/apps/desktop/src/renderer/features/design-workspace/state/design-workspace-ui.ts")).designWorkspaceView("ws_design_harness").selectedTargets);
