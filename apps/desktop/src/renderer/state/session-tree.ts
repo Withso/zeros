@@ -1,6 +1,7 @@
 // Parent and child sessions: the tree Local orchestration records
 // (`parentChatId`/`rootChatId`) projected onto one workspace's chats.
 
+import { isSideChat } from "../features/agent/side-chat-seeds";
 import type { ChatThread } from "./store";
 
 export interface SessionNode {
@@ -15,8 +16,10 @@ export interface SessionTree {
   byId: ReadonlyMap<string, SessionNode>;
 }
 
+/** Terminals and side chats are not sessions; side chats live only in their
+ *  Workbench tabs. */
 function isSession(chat: ChatThread, includeArchived: boolean): boolean {
-  return chat.kind !== "terminal" && (includeArchived || !chat.archived);
+  return chat.kind !== "terminal" && !isSideChat(chat) && (includeArchived || !chat.archived);
 }
 
 const byCreated = (a: SessionNode, b: SessionNode) =>

@@ -37,6 +37,18 @@ describe("buildSessionTree", () => {
     expect(sessionLineage(tree, "x5").map((c) => c.id)).toEqual(["x5"]);
   });
 
+  it("never lists a side chat: it is a Workbench tab, not a session", () => {
+    const tree = buildSessionTree([
+      ...chats,
+      chat("s9", { kind: "side", sourceChatId: "p1" }),
+      chat("s10", { kind: "side", parentChatId: "p1", rootChatId: "p1", sourceChatId: "p1" }),
+    ], "/ws/a", { includeArchived: true });
+    expect(tree.byId.has("s9")).toBe(false);
+    expect(tree.byId.has("s10")).toBe(false);
+    expect(tree.roots.map((n) => n.chat.id)).not.toContain("s9");
+    expect(sessionDescendantIds(tree.byId.get("p1")!)).toEqual(["c3", "g4", "x5"]);
+  });
+
   it("returns the lineage from the parent session", () => {
     const tree = buildSessionTree(chats, "/ws/a");
     expect(sessionLineage(tree, "g4").map((c) => c.id)).toEqual(["p1", "c3", "g4"]);

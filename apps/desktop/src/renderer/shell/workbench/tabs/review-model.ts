@@ -480,7 +480,7 @@ export function derivePrStatusView(args: {
 /** The chat whose composer takes Add to chat: the active one, unless it is
  *  a terminal tab, which mounts no composer and would swallow the handoff. */
 export function composerChatFor(
-  chats: readonly { id: string; kind?: "chat" | "terminal" }[],
+  chats: readonly { id: string; kind?: "chat" | "terminal" | "side" }[],
   activeChatId: string | null | undefined,
 ): string | null {
   const chat = activeChatId ? chats.find((item) => item.id === activeChatId) : undefined;

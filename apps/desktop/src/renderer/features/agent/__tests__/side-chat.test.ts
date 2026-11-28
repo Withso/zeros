@@ -5,14 +5,19 @@ import type { TranscriptSnapshot } from "../chat-transcript-attach";
 import { transcriptMessagesThroughMessage } from "../chat-transcript-attach";
 import { hasParentContext } from "../add-child-session";
 import { formatMessageTime } from "../message-hover-actions";
+import { createForkedChat } from "../fork-chat";
 import {
   boundSeeds,
   createSideChat,
   forgetSideChatSeed,
   getSideChatSeed,
+  isSideChat,
   markSideChatSeedSent,
   openSideChat,
+  rememberColumnChat,
   resetSideChatSeedsForTesting,
+  sessionViewChatId,
+  setSideChatSeed,
   sideChatContextPrefix,
   sideChatHandoffFor,
   sideChatQuote,
@@ -67,34 +72,62 @@ function deps() {
 }
 
 describe("createSideChat", () => {
-  it("nests a Local side chat under its source and keeps model and harness", () => {
+  it("marks a Local side chat as a side chat, never a child session, and keeps model and harness", () => {
     const chat = createSideChat(local, true, 5);
-    expect(chat).toMatchObject({ parentChatId: "source", rootChatId: "source", sourceChatId: "source", agentId: "codex", model: "gpt-5", title: "Side chat" });
+    expect(chat).toMatchObject({ kind: "side", sourceChatId: "source", agentId: "codex", model: "gpt-5", title: "Side chat" });
+    expect(chat.parentChatId).toBeUndefined();
+    expect(chat.rootChatId).toBeUndefined();
     expect(chat.sessionId).toBeUndefined();
     expect(chat.providerBinding).toBeUndefined();
+    expect(isSideChat(chat)).toBe(true);
   });
 
   it("does not claim parent context for a blank Local side chat", () => {
     const chat = createSideChat(local, false, 5);
-    expect(chat.parentChatId).toBe("source");
-    expect(chat.sourceChatId).toBeUndefined();
+    expect(chat.kind).toBe("side");
+    expect(chat.parentChatId).toBeUndefined();
     expect(hasParentContext(chat)).toBe(false);
   });
 
-  it("keeps cloud side chats as source-linked forks without a child link", () => {
+  it("marks cloud side chats the same way, with no child link", () => {
     const chat = createSideChat(cloud, true, 5);
+    expect(chat.kind).toBe("side");
     expect(chat.parentChatId).toBeUndefined();
     expect(chat.sourceChatId).toBe("source");
     expect(chat.folder).toBe(cloud.folder);
   });
+
+  it("forks of a side chat are ordinary chats", () => {
+    expect(createForkedChat({ ...local, kind: "side" }).kind).toBeUndefined();
+    expect(createForkedChat({ ...local, kind: "terminal" }).kind).toBe("terminal");
+  });
+
+  it("still recognizes side chats branched before the marker existed", () => {
+    setSideChatSeed("legacy", { sourceChatId: "source", sourceTitle: "Fix the parser", messageId: "m1", promptId: null, role: "agent", quote: "q", pending: false, createdAt: 1, sourceUpdatedAt: 1 });
+    expect(isSideChat({ ...local, id: "legacy" })).toBe(true);
+    expect(isSideChat(local)).toBe(false);
+  });
+});
+
+describe("sessionViewChatId", () => {
+  it("keeps the chat column's session while a side chat has focus", () => {
+    const side = { ...local, id: "side", kind: "side" as const, sourceChatId: "source" };
+    const chats = [local, side];
+    expect(sessionViewChatId(chats, "side", "/repo")).toBe("source");
+    rememberColumnChat("/repo", "other");
+    expect(sessionViewChatId([...chats, { ...local, id: "other" }], "side", "/repo")).toBe("other");
+    expect(sessionViewChatId(chats, "source", "/repo")).toBe("source");
+    expect(sessionViewChatId(chats, null, "/repo")).toBeNull();
+  });
 });
 
 describe("openSideChat", () => {
-  it("publishes the chat, records a pending seed and links Local children", () => {
+  it("publishes the chat and records a pending seed, without linking a child", () => {
     const d = deps();
     const chat = openSideChat(local, { messageId: "m2", promptId: "m1", role: "agent", text: "  The answer\n\n\n\nmore " }, d)!;
     expect(d.publishChat).toHaveBeenCalledWith(chat);
-    expect(d.createChild).toHaveBeenCalledWith(expect.objectContaining({ id: chat.id }), "source");
+    expect(d.createChild).not.toHaveBeenCalled();
+    expect(chat.kind).toBe("side");
     const seed = getSideChatSeed(chat.id)!;
     expect(seed).toMatchObject({ sourceChatId: "source", messageId: "m2", promptId: "m1", role: "agent", quote: "The answer\n\nmore", pending: true, sourceUpdatedAt: 2 });
     expect(d.warm).toHaveBeenCalledWith(seed, "/repo");

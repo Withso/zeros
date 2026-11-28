@@ -21,7 +21,7 @@ import {
   Copy,
   Check,
   GitFork,
-  MessageSquarePlus,
+  MessageCircle,
   MoreHorizontal,
   Play,
   RotateCcw,
@@ -787,7 +787,7 @@ export const TurnFooter = memo(function TurnFooter({
               label="Side chat from here"
               className="flex shrink-0"
             >
-              <MessageSquarePlus strokeWidth={2} />
+              <MessageCircle strokeWidth={2} />
             </IconButton>
           </Tooltip>
         )}

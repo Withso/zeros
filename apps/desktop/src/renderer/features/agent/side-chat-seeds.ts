@@ -117,6 +117,12 @@ function subscribe(listener: () => void): () => void {
   return () => { listeners.delete(listener); };
 }
 
+/** A side chat is a Workbench tab, never a session. Marked `kind: "side"`;
+ *  one branched before that marker existed is known by its seed. */
+export function isSideChat(chat: { id: string; kind?: string | null }): boolean {
+  return chat.kind === "side" || (chat.kind !== "terminal" && getSideChatSeed(chat.id) !== null);
+}
+
 export function useSideChatSeed(chatId: string | null | undefined): SideChatSeed | null {
   return useSyncExternalStore(subscribe, () => getSideChatSeed(chatId), () => null);
 }

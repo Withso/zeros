@@ -2,7 +2,7 @@ import { createElement, Fragment, type ReactNode } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const fixture = vi.hoisted(() => ({ nativeReady: true }));
+const fixture = vi.hoisted(() => ({ nativeReady: true, chats: [] as unknown[], activeChatId: null as string | null }));
 
 vi.mock("../../../platform/runtime", async (original) => ({
   ...(await original<typeof import("../../../platform/runtime")>()),
@@ -16,7 +16,8 @@ vi.mock("../../../state/chat-panes-store", () => ({
 }));
 vi.mock("../../../state/store", () => ({
   useWorkspaceDispatch: () => vi.fn(),
-  useWorkspaceStore: (select: (state: { chats: unknown[]; activeChatId: null }) => unknown) => select({ chats: [], activeChatId: null }),
+  useWorkspaceStore: (select: (state: { chats: unknown[]; activeChatId: string | null }) => unknown) =>
+    select({ chats: fixture.chats, activeChatId: fixture.activeChatId }),
 }));
 vi.mock("../../../shared/ui/primitives/dropdown-menu", () => {
   const passthrough = ({ children }: { children?: ReactNode }) => createElement(Fragment, null, children);
@@ -34,6 +35,24 @@ const render = (folder: string, readOnly = false) =>
 
 beforeEach(() => {
   fixture.nativeReady = true;
+  fixture.chats = [];
+  fixture.activeChatId = null;
+});
+
+describe("session actions while a side chat has focus", () => {
+  const folder = "/Users/fixture/personal";
+  const chat = (id: string, extra: Record<string, unknown> = {}) => ({
+    id, folder, title: id, agentId: "claude", agentName: null, model: null, effort: "high",
+    permissionMode: "auto", createdAt: 1, updatedAt: 1, ...extra,
+  });
+
+  it("acts on the chat column's session and never offers a side chat there", () => {
+    fixture.chats = [chat("column"), chat("side", { kind: "side", sourceChatId: "column" })];
+    fixture.activeChatId = "side";
+    const html = render(folder);
+    expect(html).toContain("Add child session");
+    expect(html).not.toContain("New side chat");
+  });
 });
 
 describe("session actions Open in", () => {

@@ -335,8 +335,8 @@ function rowToThread(r: ChatRowWire): ChatThread {
   const permissionMode = normalizeChatPermissionMode(r.permissionMode);
   // The wire widens `kind` to a nullable string so legacy rows round-trip;
   // anything else becomes undefined (== "chat").
-  const resolvedKind: "chat" | "terminal" | undefined =
-    r.kind === "terminal" || r.kind === "chat" ? r.kind : undefined;
+  const resolvedKind: ChatThread["kind"] =
+    r.kind === "terminal" || r.kind === "chat" || r.kind === "side" ? r.kind : undefined;
   const providerBinding =
     r.providerBinding?.providerId === r.agentId ? r.providerBinding : undefined;
   return {

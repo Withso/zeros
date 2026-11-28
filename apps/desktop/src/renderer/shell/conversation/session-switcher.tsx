@@ -1,5 +1,5 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
-import { Bot, ChevronRight, Cloud, Columns2, Ellipsis, GitBranchPlus, Laptop, MessageSquarePlus, PencilLine, Plus, Rows2, X } from "lucide-react";
+import { Bot, ChevronRight, Cloud, Columns2, Ellipsis, GitBranchPlus, Laptop, PencilLine, Plus, Rows2, X } from "lucide-react";
 import { leafIds } from "../../state/chat-panes";
 import { useChatPanesStore } from "../../state/chat-panes-store";
 import { IconButton } from "@/renderer/shared/ui/primitives/icon-button";
@@ -21,7 +21,7 @@ import {
   DropdownMenuTrigger,
 } from "../../shared/ui/primitives/dropdown-menu";
 import { addChildSession, canAddChildSession } from "../../features/agent/add-child-session";
-import { canOpenSideChat, openSideChat, publishSideChat } from "../../features/agent/side-chat";
+import { sessionViewChatId } from "../../features/agent/side-chat";
 import { spawnNewChatTab } from "../../state/spawn-default-chat";
 import { editChat } from "../../state/cloud-chat-edits";
 import { openSession } from "../../state/open-session";
@@ -334,7 +334,10 @@ export function SessionSwitcher({ folder, placement, showPlacement = true, fallb
   readOnly?: boolean;
 }) {
   const chats = useChats();
-  const activeId = useActiveChatId();
+  const focusedId = useActiveChatId();
+  // A focused side chat is a Workbench tab, not a session: the crumbs keep
+  // the chat column's own session.
+  const activeId = sessionViewChatId(chats, focusedId, folder);
   const dispatch = useWorkspaceDispatch();
   const sessions = useOptionalAgentSessions();
   const tree = useMemo(() => buildSessionTree(chats, folder, { includeArchived: true }), [chats, folder]);
@@ -393,7 +396,8 @@ export function SessionActionsMenu({ folder, readOnly = false }: { folder: strin
   });
   const dispatch = useWorkspaceDispatch();
   const parent = useWorkspaceStore((state) => {
-    const active = state.chats.find((chat) => chat.id === state.activeChatId);
+    const viewId = sessionViewChatId(state.chats, state.activeChatId, folder);
+    const active = state.chats.find((chat) => chat.id === viewId);
     return active?.folder === folder ? active : undefined;
   });
   // Same gate as the pane menu: host apps cannot open a cloud workspace.
@@ -417,16 +421,9 @@ export function SessionActionsMenu({ folder, readOnly = false }: { folder: strin
             <DropdownMenuShortcut>⌥⌘T</DropdownMenuShortcut>
           </DropdownMenuItem>
         )}
-        {canOpenSideChat(parent) && (
-          <DropdownMenuItem
-            data-session-side-chat=""
-            onSelect={() => openSideChat(parent, null, { publishChat: (chat) => publishSideChat(dispatch, chat) })}
-          >
-            <MessageSquarePlus className="size-4" strokeWidth={1.5} />
-            New side chat
-          </DropdownMenuItem>
-        )}
-        {(canAddChildSession(parent) || canOpenSideChat(parent)) && <DropdownMenuSeparator />}
+        {/* Side chats start from a message, a turn footer or the Workbench's
+            + menu; the chat column's menus hold sessions only. */}
+        {canAddChildSession(parent) && <DropdownMenuSeparator />}
         <DropdownMenuItem onSelect={() => requestFocusedPaneSplit("right")}>
           <Columns2 className="size-4" strokeWidth={1.5} />
           Split right

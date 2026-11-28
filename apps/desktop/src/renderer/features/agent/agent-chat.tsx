@@ -4766,6 +4766,10 @@ function AgentChatBody({
               session.messages.length === 0 && (
                 <p className={TRANSCRIPT_STATUS_ROW_CLS}>No chat history.</p>
               )}
+            {/* A side chat opens on its branch banner, above Add chat
+                transcripts; after the first send only the banner remains, as
+                the transcript's first item, so it scrolls away with it. */}
+            {sideChatSeed && <SideChatBranchBanner seed={sideChatSeed} />}
             {!readOnly &&
               emptyStateReady &&
               session.messages.length === 0 &&
@@ -4787,9 +4791,7 @@ function AgentChatBody({
                   />
                 </ChatProvenance>
               )}
-            {sideChatSeed ? (
-              <SideChatBranchBanner seed={sideChatSeed} />
-            ) : hasParentContext(chatThread) && (
+            {!sideChatSeed && hasParentContext(chatThread) && (
               <p className={TRANSCRIPT_STATUS_ROW_CLS} data-parent-context-banner="">
                 <GitBranch className="size-3.5 shrink-0" strokeWidth={1.5} aria-hidden="true" />
                 Includes context from parent

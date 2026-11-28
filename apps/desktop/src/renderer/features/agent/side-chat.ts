@@ -7,14 +7,11 @@ import { requestWorkbenchReveal } from "../../shell/workbench/workbench-visibili
 import { useWorkspaceStore } from "../../state/store";
 import { editChat } from "../../state/cloud-chat-edits";
 import { chatCloseConfirmation, type ChatCloseConfirmationCopy } from "../../shell/conversation/chat-close";
-import { threadToRow } from "../../state/chat-row-wire";
 import { toast } from "@/renderer/shared/ui/primitives/elements";
-import { dbCreateChildChat } from "./agent-history-client";
-import { canAddChildSession, createChildChat } from "./add-child-session";
 import { loadTranscriptSnapshot, transcriptPillLabel, type TranscriptSnapshot } from "./chat-transcript-attach";
 import { createForkedChat } from "./fork-chat";
 import { HANDOFF_CONTEXT_OPEN } from "./harness-switch";
-import { SIDE_CHAT_QUOTE_MAX, SIDE_CHAT_TITLE, getSideChatSeed, setSideChatSeed, type SideChatSeed } from "./side-chat-seeds";
+import { SIDE_CHAT_QUOTE_MAX, SIDE_CHAT_TITLE, getSideChatSeed, isSideChat, setSideChatSeed, type SideChatSeed } from "./side-chat-seeds";
 
 export * from "./side-chat-seeds";
 
@@ -88,11 +85,8 @@ export async function sideChatHandoffFor(
 export interface OpenSideChatDeps {
   /** Publish route and destination in one synchronous store transition. */
   publishChat(chat: ChatThread): void;
-  createChild?: typeof dbCreateChildChat;
-  chatExists?(id: string): boolean;
   warm?(seed: SideChatSeed, folder: string): void;
   now?: number;
-  onError?(message: string, error: unknown): void;
 }
 
 export function sideChatSeedFor(source: ChatThread, from: SideChatSource, now = Date.now()): SideChatSeed {
@@ -114,16 +108,11 @@ export function warmSideChat(source: ChatThread, from: SideChatSource): void {
   void loadSideChatTranscript(sideChatSeedFor(source, from), source.folder).catch(() => {});
 }
 
-/** Local side chats nest under their source as child sessions; cloud ones
- *  keep `sourceChatId` lineage, since cloud has no child links. A blank Local
- *  side chat drops `sourceChatId`: it carries no parent context, and
- *  hasParentContext must not claim it does. */
-export function createSideChat(source: ChatThread, branched: boolean, now = Date.now()): ChatThread {
-  if (!canAddChildSession(source)) {
-    return { ...createForkedChat(source, undefined, now), title: SIDE_CHAT_TITLE };
-  }
-  const { sourceChatId, ...child } = createChildChat(source, undefined, now);
-  return { ...(branched ? { ...child, sourceChatId } : child), title: SIDE_CHAT_TITLE };
+/** A side chat is never a child session, Local or cloud: `kind: "side"` keeps
+ *  it out of the session tree, and `sourceChatId` only records where it was
+ *  opened from. Whether it branched from a message lives in its seed. */
+export function createSideChat(source: ChatThread, _branched: boolean, now = Date.now()): ChatThread {
+  return { ...createForkedChat(source, undefined, now), kind: "side", title: SIDE_CHAT_TITLE };
 }
 
 const columnChatByFolder = new Map<string, string>();
@@ -135,6 +124,24 @@ export function rememberColumnChat(folder: string, chatId: string): void {
 
 export function columnChatFor(folder: string): string | null {
   return columnChatByFolder.get(folder) ?? null;
+}
+
+/** The session the chat column's chrome (breadcrumb, session menus, the
+ *  Agents tab's Viewing row) follows. While a side chat has focus that is the
+ *  column's own chat, else the chat the side chat was opened from. */
+export function sessionViewChatId(
+  chats: readonly ChatThread[],
+  activeId: string | null,
+  folder: string,
+): string | null {
+  if (!activeId) return null;
+  const active = chats.find((chat) => chat.id === activeId);
+  if (!active || !isSideChat(active)) return activeId;
+  const live = (id: string | null | undefined) =>
+    !!id && chats.some((chat) => chat.id === id && !chat.archived && !isSideChat(chat));
+  const column = columnChatFor(folder);
+  if (live(column)) return column;
+  return live(active.sourceChatId) ? active.sourceChatId! : null;
 }
 
 export function sideChatCloseConfirmation(
@@ -197,15 +204,7 @@ export function openSideChat(
 ): ChatThread | null {
   if (!canOpenSideChat(source)) return null;
   const now = deps.now ?? Date.now();
-  const {
-    createChild = dbCreateChildChat,
-    chatExists = (id) => useWorkspaceStore.getState().chats.some((chat) => chat.id === id),
-    warm = (seed, folder) => { void loadSideChatTranscript(seed, folder).catch(() => {}); },
-    onError = (message, error) => {
-      console.error(`[Zeros] ${message}`, error);
-      toast.error(message);
-    },
-  } = deps;
+  const { warm = (seed, folder) => { void loadSideChatTranscript(seed, folder).catch(() => {}); } } = deps;
   const chat = createSideChat(source, from !== null, now);
   if (from) {
     const seed = sideChatSeedFor(source, from, now);
@@ -213,10 +212,5 @@ export function openSideChat(
     warm(seed, source.folder);
   }
   deps.publishChat(chat);
-  if (chat.parentChatId) {
-    void createChild(threadToRow(chat), source.id).catch((error: unknown) => {
-      if (chatExists(chat.id)) onError("Couldn't link the side chat to its parent.", error);
-    });
-  }
   return chat;
 }

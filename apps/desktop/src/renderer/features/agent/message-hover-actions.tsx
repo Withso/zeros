@@ -1,5 +1,5 @@
 import { useCallback, useState } from "react";
-import { Check, Copy, MessageSquarePlus, Pencil } from "lucide-react";
+import { Check, Copy, MessageCircle, Pencil } from "lucide-react";
 import { cn } from "@/renderer/shared/ui/cn";
 import { Tooltip } from "@/renderer/shared/ui/primitives";
 import { IconButton } from "@/renderer/shared/ui/primitives/icon-button";
@@ -87,7 +87,7 @@ export function MessageHoverActions({
               onFocus={onSideChatIntent}
               label="Side chat from here"
             >
-              <MessageSquarePlus strokeWidth={2} />
+              <MessageCircle strokeWidth={2} />
             </IconButton>
           </Tooltip>
         )}

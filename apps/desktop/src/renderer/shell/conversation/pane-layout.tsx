@@ -59,7 +59,7 @@ import { ptyKill } from "../../platform/pty";
 import { useAgentSessions } from "../../features/agent/sessions-hooks";
 import { useSessionsStore } from "../../features/agent/sessions-store";
 import { getLiveChatDraft } from "../../features/agent/composer-live-drafts";
-import { columnChatFor, rememberColumnChat } from "../../features/agent/side-chat";
+import { columnChatFor, isSideChat, rememberColumnChat } from "../../features/agent/side-chat";
 import {
   MAX_PANES,
   type PaneLayout,
@@ -282,7 +282,8 @@ export function ConversationPaneLayout({
   // order). Visible = live tabs, history = archived (newest first).
   const layoutFolder =
     readOnly && workspace ? workspace.path : activeWorkspacePath;
-  // Side chats open as Workbench tabs, so their chat column never lists them.
+  // Side chats open as Workbench tabs, so their chat column never lists them,
+  // open or closed.
   const workbenchTabs = useWorkspaceStore((state) =>
     layoutFolder ? state.workbenchByScope[workbenchScopeForFolder(layoutFolder)]?.tabs : undefined);
   const hostedChatIds = useMemo(() => chatIdsHostedBy(workbenchTabs), [workbenchTabs]);
@@ -290,10 +291,10 @@ export function ConversationPaneLayout({
     if (!layoutFolder) return EMPTY_CHATS;
     return chats
       .filter((c) =>
-        readOnly && workspace
+        !isSideChat(c) && (readOnly && workspace
           ? c.kind !== "terminal" &&
             workspaceOwnsFolder(workspace, c.folder, projects)
-          : c.folder === layoutFolder && !hostedChatIds.has(c.id),
+          : c.folder === layoutFolder && !hostedChatIds.has(c.id)),
       )
       .sort((a, b) => a.createdAt - b.createdAt);
   }, [layoutFolder, chats, readOnly, workspace, projects, hostedChatIds]);
