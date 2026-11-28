@@ -240,6 +240,8 @@ export interface DesignTextFrameSeedWire {
   nodeId: string;
   text: string;
   fixedSize: boolean;
+  /** CSS typography properties written on the new text. */
+  typography?: Record<string, string>;
 }
 
 export interface DesignAssetWire {
@@ -1166,6 +1168,7 @@ export async function bridgeDesignCreateFrame(
           textNodeId: seed.nodeId,
           text: seed.text,
           textFixedSize: seed.fixedSize,
+          ...(seed.typography && Object.keys(seed.typography).length ? { textTypography: seed.typography } : {}),
         }
       : {}),
   })) as {

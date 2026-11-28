@@ -1533,6 +1533,7 @@ export async function handleDesignWorkspaceRoute(
                 nodeId: reqStr(params, "textNodeId"),
                 text: reqStr(params, "text"),
                 fixedSize: optBool(params, "textFixedSize") ?? false,
+                ...(params.textTypography === undefined ? {} : { typography: designMutationStyles(params.textTypography) }),
               },
             }
           : {}),

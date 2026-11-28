@@ -1807,7 +1807,7 @@ export const DesignInspector = React.memo(function DesignInspector({
   zoomActionsRef,
   onAskAgent,
   panelVisible = true,
-  selectionSettling = false,
+  selectionSettlingRef,
 }: DesignInspectorProps) {
   const styleOriginLabel = useDesignStyleOriginLabel(workspaceId);
   const tokenCatalog = useDesignFrameTokenCatalog(workspaceId, frame?.file);
@@ -2248,9 +2248,11 @@ export const DesignInspector = React.memo(function DesignInspector({
     const variant = state.byWorkspace[workspaceId]?.frames[frame.file];
     return variant && designDeclaredVariants(frame.component).includes(variant) ? variant : null;
   });
+  const styleActiveNow = active && Boolean(elementDetails);
+  const styleEditableNow = !editsDisabled && Boolean(presentedElementDetails) && !handed;
   const styleEditContextRef = useRef({
-    active: active && !selectionSettling && Boolean(elementDetails),
-    editable: !editsDisabled && !selectionSettling && Boolean(presentedElementDetails) && !handed,
+    get active() { return styleActiveNow && !selectionSettlingRef?.current; },
+    get editable() { return styleEditableNow && !selectionSettlingRef?.current; },
     pageId: activePageId ?? null,
     directoryKey: styleDirectoryKey,
     workspaceId,
@@ -2263,8 +2265,8 @@ export const DesignInspector = React.memo(function DesignInspector({
     stateContext: shownState,
   });
   styleEditContextRef.current = {
-    active: active && !selectionSettling && Boolean(elementDetails),
-    editable: !editsDisabled && !selectionSettling && Boolean(presentedElementDetails) && !handed,
+    get active() { return styleActiveNow && !selectionSettlingRef?.current; },
+    get editable() { return styleEditableNow && !selectionSettlingRef?.current; },
     pageId: activePageId ?? null,
     directoryKey: styleDirectoryKey,
     workspaceId,
@@ -4104,7 +4106,6 @@ export const DesignInspector = React.memo(function DesignInspector({
       data-design-inspector=""
       data-design-source-filter={fieldOrigins.filter ? "" : undefined}
       data-design-state-held={heldState ?? undefined}
-      data-design-selection-settling={selectionSettling ? "" : undefined}
       className="bg-bg1 relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden"
     >
       <Tabs value={activeTab} onValueChange={(value) => selectInspectorTab(value as DesignInspectorTab)} className="flex min-h-0 flex-1 flex-col">

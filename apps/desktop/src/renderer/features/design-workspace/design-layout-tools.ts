@@ -43,6 +43,16 @@ export function designRadiusHandleFits(width: number, height: number, zoom: numb
   return Math.min(width, height) * zoom >= 80;
 }
 
+/** Where the radius handle starts: a computed corner in pixels, with a
+ * percentage resolved against the box, as the corner is drawn. */
+export function designRadiusBase(value: string | undefined, width: number, height: number): number {
+  const [first] = (value ?? "").trim().split(/\s+/);
+  const percent = /^(\d*\.?\d+)%$/.exec(first ?? "");
+  const limit = Math.floor(Math.min(width, height) / 2);
+  if (percent?.[1]) return Math.min(limit, Math.round(Number(percent[1]) / 100 * Math.min(width, height)));
+  return Math.max(0, Math.round(designLayoutPixels(first) ?? 0));
+}
+
 export function designRadiusDragValue(base: number, delta: { x: number; y: number }, width: number, height: number): number {
   return Math.max(0, Math.min(Math.floor(Math.min(width, height) / 2), Math.round(base + (delta.x + delta.y) / 2)));
 }

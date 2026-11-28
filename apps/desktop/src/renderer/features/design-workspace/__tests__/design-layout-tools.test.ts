@@ -18,6 +18,7 @@ import {
   designLocalAxisDelta,
   designPaddingBandAtPoint,
   designPaddingBands,
+  designRadiusBase,
   designRadiusDragValue,
   designRadiusHandleFits,
   designPaddingCrowdsMoveTarget,
@@ -40,6 +41,13 @@ it("drags corner radius in local layout pixels, clamped to half the short side",
   expect(designRadiusDragValue(4, { x: 40, y: 40 }, 220, 120)).toBe(44);
   expect(designRadiusDragValue(4, { x: -10, y: -10 }, 220, 120)).toBe(0);
   expect(designRadiusDragValue(4, { x: 90, y: 90 }, 220, 120)).toBe(60);
+});
+it("starts the radius handle at a percentage corner's drawn size", () => {
+  expect(designRadiusBase("50%", 220, 120)).toBe(60);
+  expect(designRadiusBase("10%", 220, 120)).toBe(12);
+  expect(designRadiusBase("12px", 220, 120)).toBe(12);
+  expect(designRadiusBase("8px 4px", 220, 120)).toBe(8);
+  expect(designRadiusBase(undefined, 220, 120)).toBe(0);
 });
 
 describe("affine constraint references", () => {

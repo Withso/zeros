@@ -24,6 +24,12 @@ export function designTextTypography(styles: Record<string, string>): Record<str
   }));
 }
 
+/** The admitted typography as CSS properties, for a new text frame's seed. */
+export function designTextTypographyProperties(styles: Record<string, string>): Record<string, string> {
+  return Object.fromEntries(Object.entries(designTextTypography(styles))
+    .map(([key, value]) => [typeProperties[key as keyof typeof typeProperties], value]));
+}
+
 /** Browser fallback faces: a frame that never chose a font renders Times. */
 const UNSET_FONT = /^(?:"?times(?: new roman)?"?(?:\s*,\s*serif)?|serif)$/i;
 export const DESIGN_NEW_TEXT_FONT = "Inter, system-ui, sans-serif";

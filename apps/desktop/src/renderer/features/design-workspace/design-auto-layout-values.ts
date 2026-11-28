@@ -384,14 +384,21 @@ function designDrawnFlowSpacing(
   };
   const gap = gaps.length ? Math.max(0, Math.round(gaps.reduce((sum, value) => sum + value, 0) / gaps.length)) : 0;
   if (gap > 0 && !declared(column ? "row-gap" : "column-gap") && !declared("gap")) result.gap = `${gap}px`;
-  const left = Math.round(Math.min(...placed.map((child) => child.layout!.x - margin(child, "left"))));
-  const top = Math.round(Math.min(...placed.map((child) => child.layout!.y - margin(child, "top"))));
-  // Each axis pads both its sides alike, so the Style panel reads one
-  // Horizontal and one Vertical value as Figma's does.
-  if (left > 0 && !declared("padding-left") && !declared("padding-right"))
-    Object.assign(result, { "padding-left": `${left}px`, "padding-right": `${left}px` });
-  if (top > 0 && !declared("padding-top") && !declared("padding-bottom"))
-    Object.assign(result, { "padding-top": `${top}px`, "padding-bottom": `${top}px` });
+  // Each side keeps its own drawn inset, measured from the parent's padding
+  // box: mirroring one side would make padding outgrow a fixed-size frame.
+  const inner = (axis: "x" | "y") => borderSize(parent, axis) -
+    (Number.parseFloat(style(parent, axis === "x" ? "border-left-width" : "border-top-width")) || 0) -
+    (Number.parseFloat(style(parent, axis === "x" ? "border-right-width" : "border-bottom-width")) || 0);
+  const insets = {
+    left: Math.min(...placed.map((child) => child.layout!.x - margin(child, "left"))),
+    top: Math.min(...placed.map((child) => child.layout!.y - margin(child, "top"))),
+    right: inner("x") - Math.max(...placed.map((child) => child.layout!.x + borderSize(child, "x") + margin(child, "right"))),
+    bottom: inner("y") - Math.max(...placed.map((child) => child.layout!.y + borderSize(child, "y") + margin(child, "bottom"))),
+  };
+  for (const [side, value] of Object.entries(insets)) {
+    const inset = Math.round(value);
+    if (inset > 0 && !declared(`padding-${side}`)) result[`padding-${side}`] = `${inset}px`;
+  }
   return result;
 }
 

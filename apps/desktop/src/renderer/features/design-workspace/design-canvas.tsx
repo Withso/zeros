@@ -203,6 +203,7 @@ import {
   designSpacingModifiers,
   type DesignGapProperty,
   type DesignSizeBadgeMode,
+  designRadiusBase,
   designRadiusDragValue,
   designRadiusHandleFits,
 } from "./design-layout-tools";
@@ -230,8 +231,10 @@ import {
   createDesignTextMarkup,
   designNewTextTypography,
   designTextTypography,
+  designTextTypographyProperties,
   createDesignTextNodeId,
 } from "./design-text-editing";
+import { designClipboardFollowedFrame, designClipboardPasteAllowed } from "./design-clipboard";
 import { DesignThemeEditor } from "./design-theme-editor";
 import { captureDeferredFocus } from "../../shared/ui/deferred-focus";
 import { designThemeView, effectiveDesignTheme } from "./design-themes";
@@ -2201,6 +2204,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
                 nodeId: edit.nodeId,
                 text: draft,
                 fixedSize: edit.width !== undefined,
+                ...(edit.typography ? { typography: designTextTypographyProperties(edit.typography) } : {}),
               },
               canvasPageOwner?.pageId,
             );
@@ -2524,6 +2528,8 @@ export const DesignCanvas = React.memo(function DesignCanvas({
     async (duplicateMode: "copy" | "duplicate" | "independent" = "duplicate", target?: {
       frame: DesignFrameView;
       owner: ReturnType<typeof captureDesignPageOwner>;
+      /** A paste: the copy goes to the owner's page, wherever its frame is. */
+      anyPage?: boolean;
     }) => {
       if (!workspaceId) return;
       const selected = designWorkspaceView(workspaceId);
@@ -2549,7 +2555,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
         return;
       }
       const owner = target?.owner ?? captureDesignPageOwner(workspaceId);
-      if (!isCurrentDesignPageOwner(owner) || (target && frame.pageId !== owner.pageId)) {
+      if (!isCurrentDesignPageOwner(owner) || (target && !target.anyPage && frame.pageId !== owner.pageId)) {
         toast.error("The frame's page changed before it could be copied.");
         return;
       }
@@ -4865,7 +4871,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
     const overlay = designSelectionOverlayFrame(box);
     if (!workspaceId || activeTool !== "select" || !designRadiusHandleFits(overlay.width, overlay.height, view.zoom) ||
       designRuntimeLayerLabel(details) === "Text" || designCanvasStyleToolsBlocked(frame, [details.oid])) return null;
-    const base = designPixelValue(details.styles.borderTopLeftRadius);
+    const base = designRadiusBase(details.styles.borderTopLeftRadius, box.width, box.height);
     const commit = (value: number) => commitInlineSpacing(frame, details, { "border-radius": `${value}px` });
     return <span role="slider" tabIndex={0} aria-label="Corner radius" aria-valuenow={base} aria-valuemin={0}
       aria-valuemax={Math.max(base, Math.floor(Math.min(box.width, box.height) / 2))}
@@ -6355,6 +6361,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
   const clipboardRef = useRef<{
     token: string; frame: DesignCanvasFrameWire; nodeId: string | null;
     owner: ReturnType<typeof captureDesignPageOwner>;
+    directoryRevision: number | undefined;
     appearance: Promise<DesignRuntimeNodeDetails | null>;
     component: ReturnType<typeof captureDesignFrameComponentCopy>;
   } | null>(null);
@@ -6380,6 +6387,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
       const rootId = useDesignRuntimeStore.getState().byWorkspace[workspaceId]?.frames[frame.file]?.snapshot?.frame.oid;
       const token = crypto.randomUUID();
       clipboardRef.current = { token, frame, nodeId, component, owner: captureDesignPageOwner(workspaceId),
+        directoryRevision: view.directoryRevision,
         appearance: runtime?.sourceVersion === frame.sourceVersion
           ? runtime.getNodeDetails(nodeId ?? rootId ?? DESIGN_RUNTIME_DOCUMENT_BODY_ID, undefined, { relocation: true }).catch(() => null)
           : Promise.resolve(null) };
@@ -6389,7 +6397,10 @@ export const DesignCanvas = React.memo(function DesignCanvas({
     };
     const paste = (event: ClipboardEvent) => {
       const clip = clipboardRef.current;
-      if (!clip || !owns(event) || !isCurrentDesignPageOwner(clip.owner)) return;
+      if (!clip || !owns(event)) return;
+      const owner = captureDesignPageOwner(workspaceId);
+      if (!designClipboardPasteAllowed({ workspaceId: clip.owner.workspaceId, directoryId: clip.owner.directoryId, directoryRevision: clip.directoryRevision },
+        { workspaceId, directoryId: owner.directoryId, directoryRevision: designWorkspaceView(workspaceId).directoryRevision })) return;
       if (event.clipboardData?.getData(mime) !== clip.token &&
         event.clipboardData?.getData("text/plain") !== `Zeros Design selection: ${clip.token}`) return;
       event.preventDefault();
@@ -6400,10 +6411,10 @@ export const DesignCanvas = React.memo(function DesignCanvas({
       const destination = frames.find(item => item.file === destinationView.selectedFrame);
       if (!clip.nodeId && (!destination || (!destinationView.frameSelected && !destinationView.selectedNodeId) ||
         (destination.file === source.file && !destinationView.selectedNodeId))) {
-        void duplicateSelectedFrame("copy", { frame: source, owner: clip.owner }); return;
+        void duplicateSelectedFrame("copy", { frame: source, owner, anyPage: true }); return;
       }
       const lifetime = canvasLifetimeRef.current;
-      const current = () => lifetime === canvasLifetimeRef.current && isCurrentDesignPageOwner(clip.owner);
+      const current = () => lifetime === canvasLifetimeRef.current && isCurrentDesignPageOwner(owner);
       const save = (async () => {
         if (!destination || destination.kind === "text") throw new Error("Select a destination frame.");
         const appearance = await clip.appearance;
@@ -6423,6 +6434,15 @@ export const DesignCanvas = React.memo(function DesignCanvas({
           detach: false, requireRelocation: true, isCurrent: current,
           presented: async next => { await waitForDesignFrameRuntime(workspaceId, next.file, 2_000, { sourceVersion: next.sourceVersion }); } });
         if (!pasted && current()) throw new Error("The paste destination changed.");
+        const advanced = designClipboardFollowedFrame({ frame: clip.frame.file, nodeId: clip.nodeId }, destination.file, pasted,
+          designFrameViews(designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data));
+        if (advanced && isPreparedDesignFrame(advanced) && clipboardRef.current === clip) {
+          const nodeId = clip.nodeId!;
+          clipboardRef.current = { ...clip, frame: advanced,
+            appearance: waitForDesignFrameRuntime(workspaceId, advanced.file, 2_000, { sourceVersion: advanced.sourceVersion })
+              .then(runtime => runtime ? runtime.getNodeDetails(nodeId, undefined, { relocation: true }) : null)
+              .catch(() => null) };
+        }
       })();
       savedEditingSession?.retain(save);
       void save.catch(error => { if (current()) toast.error("Couldn't paste the selection", { description: errorMessage(error) }); });
@@ -7596,6 +7616,9 @@ export const DesignCanvas = React.memo(function DesignCanvas({
         const previousSelection = designWorkspaceView(workspaceId);
         const nodeId = createDesignTextNodeId();
         inlineTextDraftRef.current = "";
+        // Loose text starts in the last typography styled here, as in a frame.
+        const recent = recentType.current?.owner === canvasDocumentOwnerRef.current ? recentType.current.styles : undefined;
+        const typography = recent && Object.keys(recent).length ? recent : undefined;
         setInlineTextEdit({
           id: crypto.randomUUID(),
           kind: "new",
@@ -7614,6 +7637,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
           x: 0,
           y: 0,
           placement: "absolute",
+          typography,
           inheritedStyles: {
             color: DESIGN_CANVAS_DEFAULT_TEXT_COLOR,
             fontFamily: "ui-sans-serif, system-ui, sans-serif",
@@ -7622,6 +7646,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
             lineHeight: "24px",
             whiteSpace: "pre-wrap",
             overflowWrap: "anywhere",
+            ...typography,
           },
           ...(rect.width === undefined
             ? {}

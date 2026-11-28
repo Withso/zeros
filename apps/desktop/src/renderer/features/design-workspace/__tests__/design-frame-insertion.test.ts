@@ -70,6 +70,12 @@ describe("child frame insertion", () => {
     expect(designDrawnFrameWrapOperations(parent, "drawn", bounds, [percent])[1]).toMatchObject({
       styles: { left: "20px", top: "10px", width: "61px" } });
     expect(designDrawnFrameWrapOperations(parent, "drawn", bounds, [percent])[1]).not.toHaveProperty("styles.height");
+    // A layer stretched between both insets keeps its size on that axis.
+    const stretched = free("stretched", 60, 40, { left: "20px", right: "119px", width: "61px", boxSizing: "border-box" });
+    stretched.authoredStyleProperties = ["position", "left", "right", "top"];
+    const placed = designDrawnFrameWrapOperations(parent, "drawn", bounds, [stretched])[1];
+    expect(placed).toMatchObject({ styles: { left: "20px", right: "auto", width: "61px" } });
+    expect(placed).not.toHaveProperty("styles.height");
   });
   it("wraps free layers of a static parent without re-anchoring the parent's other overlays", () => {
     // The parent sits 200px inside its positioned ancestor; its free layers
@@ -81,6 +87,20 @@ describe("child frame insertion", () => {
     const ops = designWrapInFlow(parent, [free("a", 10), free("b", 84)], "wrap");
     expect(ops.some(op => op.type === "node.set-styles" && op.nodeId === parent.oid)).toBe(false);
     expect(ops.find(op => op.type === "node.set-html")?.html).toContain("position:absolute;left:210px;top:220px;");
+  });
+  it("keeps the slot block layers reserve when Shift+A wraps them", () => {
+    // Two stacked paragraphs of an auto-height card: the wrapper stays in
+    // flow where the first one stood, so the card keeps its height.
+    const paragraph = (oid: string, y: number) => ({ ...parent, oid, tag: "p", text: oid,
+      styles: { ...parent.styles, position: "static" },
+      layout: { parentId: parent.oid, x: 0, y }, rect: { x: 0, y, width: 180, height: 19 },
+    }) as unknown as DesignRuntimeNodeDetails;
+    const ops = designWrapInFlow(parent, [paragraph("second", 40), paragraph("first", 0)], "wrap");
+    const html = ops.find(op => op.type === "node.set-html")?.html ?? "";
+    expect(html).toContain("position:relative;display:flex;flex-direction:column;");
+    expect(html).not.toContain("left:");
+    expect(ops.find(op => op.type === "node.move" && op.nodeId === "wrap")).toMatchObject({ parentId: parent.oid, beforeId: "first" });
+    expect(ops.some(op => op.type === "node.set-styles" && op.nodeId === parent.oid)).toBe(false);
   });
   it("wraps siblings in spatial order, infers the gap and leaves a label content-sized", () => {
     const item = (oid: string, x: number) => ({ ...parent, oid,

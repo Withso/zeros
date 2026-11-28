@@ -102,11 +102,17 @@ describe("design workspace interaction wiring", () => {
     // Another owner's selection is never held, and the held panel cannot
     // write to the layer the user just left.
     expect(workspace).toContain("const ownerChanged = heldInspectorSelection.current.owner !== inspectorOwnerKey;");
+    // A first page or directory binding (the first frame) is not a switch.
+    expect(workspace).toContain("const inspectorOwnerKey = `${workspaceId ?? \"\"}\\u0000${folder ?? \"\"}\\u0000${ownerRevision}`;");
     expect(workspace).toContain("presentedInspectorSelectionKey === inspectorSelectionKey || ownerChanged;");
-    expect(workspace).toContain("selectionSettling={!inspectorSelectionPresented}");
+    // A ref read at edit time: the hold itself re-renders no panel, which
+    // would show a new frame before its details read back.
+    expect(workspace).toContain("inspectorSettlingRef.current = !inspectorSelectionPresented;");
+    expect(workspace).toContain("selectionSettlingRef={inspectorSettlingRef}");
+    expect(workspace).toContain('data-design-selection-settling={inspectorSelectionPresented ? undefined : ""}');
     const inspector = readSection("design-inspector.tsx");
-    expect(inspector).toContain("active: active && !selectionSettling && Boolean(elementDetails),");
-    expect(inspector).toContain("editable: !editsDisabled && !selectionSettling && Boolean(presentedElementDetails) && !handed,");
+    expect(inspector).toContain("get active() { return styleActiveNow && !selectionSettlingRef?.current; },");
+    expect(inspector).toContain("get editable() { return styleEditableNow && !selectionSettlingRef?.current; },");
     expect(workspace).toContain("timer = window.setTimeout(() => setPresentedInspectorSelectionKey(inspectorSelectionKey), 0);");
     expect(workspace).not.toContain("useDeferredValue");
     expect(workspace).toContain("details={inspectorSelection.details}");

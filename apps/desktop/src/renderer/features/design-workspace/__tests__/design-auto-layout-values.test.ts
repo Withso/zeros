@@ -102,7 +102,7 @@ describe("auto layout intent", () => {
   });
 
   it("keeps drawn spacing and hug text when Shift+A lays out a free frame", () => {
-    const parent = { ...node({ display: "block" }, "block"), oid: "parent" };
+    const parent = { ...node({ display: "block" }, "block"), oid: "parent", rect: { x: 0, y: 0, width: 400, height: 400 } };
     const label = (oid: string, y: number) => {
       const text = { ...node({ position: "absolute", width: "78px", height: "19px" }, "block"), oid };
       text.layout = { ...text.layout!, x: 58, y, widthValue: "max-content", heightValue: "auto" };
@@ -112,7 +112,7 @@ describe("auto layout intent", () => {
     const shiftA = { drawnSpacing: true };
     const updates = designAutoLayoutUpdates([parent], [label("a", 120), label("b", 188), label("c", 256)], "column", shiftA);
     expect(updates.get("parent")).toMatchObject({ display: "flex", "flex-direction": "column", gap: "49px",
-      "padding-left": "58px", "padding-right": "58px", "padding-top": "120px", "padding-bottom": "120px" });
+      "padding-left": "58px", "padding-right": "264px", "padding-top": "120px", "padding-bottom": "125px" });
     expect(updates.get("a")).toMatchObject({ position: "relative", width: "max-content" });
     // The panel's Auto layout buttons keep the container's own spacing.
     const panel = designAutoLayoutUpdates([parent], [label("a", 120), label("b", 188)], "column").get("parent")!;
@@ -123,14 +123,25 @@ describe("auto layout intent", () => {
     const kept = designAutoLayoutUpdates([spaced], [label("a", 120), label("b", 188)], "column", shiftA).get("parent")!;
     expect(kept).not.toHaveProperty("gap");
     expect(kept).not.toHaveProperty("padding-left");
-    expect(kept).not.toHaveProperty("padding-right");
-    expect(kept).toMatchObject({ "padding-top": "120px", "padding-bottom": "120px" });
+    expect(kept).toMatchObject({ "padding-right": "264px", "padding-top": "120px", "padding-bottom": "193px" });
     // An authored zero is authored spacing too.
     const zero = { ...parent, authoredStyleProperties: ["gap", "padding-left"], styles: { ...parent.styles, gap: "0px", paddingLeft: "0px" } };
     const zeroKept = designAutoLayoutUpdates([zero], [label("a", 120), label("b", 188)], "column", shiftA).get("parent")!;
     expect(zeroKept).not.toHaveProperty("gap");
     expect(zeroKept).not.toHaveProperty("padding-left");
     expect(zeroKept).toMatchObject({ "padding-top": "120px" });
+  });
+
+  it("measures each side's drawn inset, so Shift+A never outgrows a fixed frame", () => {
+    // A 400 × 200 frame with 2px borders; one layer sits near its right edge.
+    const parent = { ...node({ display: "block", width: "400px", height: "200px", borderLeftWidth: "2px", borderRightWidth: "2px",
+      borderTopWidth: "2px", borderBottomWidth: "2px", boxSizing: "border-box" }, "block"), oid: "parent",
+      rect: { x: 0, y: 0, width: 400, height: 200 } };
+    const layer = { ...node({ position: "absolute", width: "100px", height: "40px" }, "block"), oid: "layer" };
+    layer.layout = { ...layer.layout!, x: 276, y: 30 };
+    layer.rect = { x: 276, y: 30, width: 100, height: 40 };
+    expect(designAutoLayoutUpdates([parent], [layer], "row", { drawnSpacing: true }).get("parent")).toMatchObject({
+      "padding-left": "276px", "padding-right": "20px", "padding-top": "30px", "padding-bottom": "126px" });
   });
 
   it("leaves retained margins out of Shift+A's drawn spacing", () => {

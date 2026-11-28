@@ -1,7 +1,7 @@
 import type { DesignRuntimeNodeDetails, DesignRuntimeNodeInsert, DesignRuntimeTreeNode } from "@zeros/protocol/design-runtime";
 import type { DesignOperation } from "@zeros/design-core";
 import { designIntrinsicPlacementStyles } from "@zeros/protocol/design-relocation";
-import { borderSize, cssSize, designIntrinsicSizing, designLayoutMode } from "./design-layout-values";
+import { borderSize, cssSize, designIntrinsicSizing, designLayoutConstraint, designLayoutMode } from "./design-layout-values";
 import { designComponentPartOf, designComponentSlotOf } from "@zeros/protocol/design-runtime";
 import { designRuntimeLayerLabel } from "./design-layer-label";
 
@@ -27,8 +27,13 @@ export function designWrapInFlow(parent: DesignRuntimeNodeDetails, nodes: readon
   pos.sort((a, b) => column ? a.y - b.y : a.x - b.x);
   const gaps = pos.slice(1).map((v, i) => column ? v.y - pos[i]!.y - pos[i]!.h : v.x - pos[i]!.x - pos[i]!.w);
   const gap = gaps.length ? Math.max(0, Math.round(gaps.reduce((a,b) => a+b, 0) / gaps.length)) : 0;
-  const inFlow = ["flex", "inline-flex", "grid", "inline-grid"].includes(parent.styles.display ?? "") &&
-    !nodes.every(n => n.styles.position === "absolute");
+  // Layers that still reserve their space (block or flex flow alike) hand
+  // that slot to the wrapper; only an all-free selection stays free.
+  const inFlow = !nodes.every(n => n.styles.position === "absolute" || n.styles.position === "fixed");
+  const gridOrFlex = ["flex", "inline-flex", "grid", "inline-grid"].includes(parent.styles.display ?? "");
+  // Block flow stacks in source order, so the wrapper takes the slot of the
+  // layer drawn first; a flex or grid order may differ from what is drawn.
+  const slot = gridOrFlex ? nodes[0]! : pos[0]!.n;
   // A static parent is not the wrapper's containing block. Positioning it
   // would re-anchor its other overlays, so the wrapper is placed in the
   // ancestor space a free selected layer already uses.
@@ -49,7 +54,7 @@ export function designWrapInFlow(parent: DesignRuntimeNodeDetails, nodes: readon
     nodeId, styles, scope: "inline", responsiveContext: "base", stateContext: "default" });
   if (reanchors) update(parent.oid, { position: "relative" });
   ops.push({ type: "node.set-html", operationId: crypto.randomUUID(), nodeId: parent.oid, mode: "append", html: `<div data-oid="${id}" style="${style}"></div>` },
-    { type: "node.move", operationId: crypto.randomUUID(), nodeId: id, parentId: parent.oid, beforeId: nodes[0]!.oid });
+    { type: "node.move", operationId: crypto.randomUUID(), nodeId: id, parentId: parent.oid, beforeId: slot.oid });
   for (const { n, w, h } of pos) {
     ops.push({ type: "node.move", operationId: crypto.randomUUID(), nodeId: n.oid, parentId: id, beforeId: null });
     update(n.oid, { position: "relative", left: "auto", top: "auto", right: "auto", bottom: "auto", order: "0", flex: "0 0 auto",
@@ -251,11 +256,15 @@ export function designDrawnFrameWrapOperations(
       !Number.isFinite(layout.x) || !Number.isFinite(layout.y)) continue;
     const width = borderSize(child, "x"), height = borderSize(child, "y");
     // A percentage resolves against the containing block, which becomes the
-    // drawn frame: it keeps its measured size instead.
+    // drawn frame, and a stretched layer's size comes from the far inset this
+    // clears: either keeps its measured size instead.
     const percent = (value: string | undefined) => /%\s*$/.test(value ?? "");
+    const stretched = (axis: "x" | "y") => designLayoutConstraint(child, axis) === "stretch";
     const kept = {
-      ...(percent(layout.widthValue) ? { width: cssSize(child, "x", width) } : {}),
-      ...(percent(layout.heightValue) ? { height: cssSize(child, "y", height) } : {}),
+      ...(percent(layout.widthValue) || stretched("x") ? { width: cssSize(child, "x", width) } : {}),
+      ...(percent(layout.heightValue) || stretched("y") ? { height: cssSize(child, "y", height) } : {}),
+      ...(stretched("x") ? { "--zeros-layout-x": null } : {}),
+      ...(stretched("y") ? { "--zeros-layout-y": null } : {}),
     };
     if (layout.x < bounds.x || layout.y < bounds.y ||
       layout.x + width > bounds.x + bounds.width || layout.y + height > bounds.y + bounds.height) continue;

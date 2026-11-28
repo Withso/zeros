@@ -128,7 +128,7 @@ export async function addDesignSection(page, title) {
 /** The Style panel follows a new selection one painted frame after its
  * outline; read it only once it shows that selection. */
 export async function waitForDesignInspectorSelection(page) {
-  await page.locator("[data-design-inspector][data-design-selection-settling]").waitFor({ state: "detached" });
+  await page.locator("[data-design-selection-settling]").waitFor({ state: "detached" });
 }
 
 export async function openLayersDrawer(page) {

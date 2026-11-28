@@ -2,6 +2,7 @@ import type { DesignOperation } from "@zeros/design-core";
 import type { DesignRuntimeNodeDetails } from "@zeros/protocol/design-runtime";
 import { designFrameRuntime } from "../../../platform/bridge/design-frame-runtime";
 import { designLayerTopLevelSelectionIds } from "../design-layer-tree";
+import { designLayoutConstraint } from "../design-layout-values";
 import { designFrameViews, isPreparedDesignFrame } from "./design-frame-view";
 import { DesignComponentPartWriteError, isDesignComponentPartNodeId } from "./design-component-parts";
 import { useDesignRuntimeStore } from "./design-runtime-store";
@@ -27,17 +28,33 @@ const duplicates = new Map<string, {
 }>();
 
 /** A free layer's next copy steps by the offset its copy moved from the
- * original; an unmoved or in-flow copy duplicates in place. */
+ * original, keeping the edges it is pinned to; an unmoved or in-flow copy
+ * duplicates in place. */
 export function designRepeatedDuplicatePlacement(
   sourceAt: { x: number; y: number } | null,
   copy: DesignRuntimeNodeDetails | undefined,
 ): Record<string, string> | null {
   if (!sourceAt || !copy?.layout || copy.styles.position !== "absolute") return null;
   const dx = Math.round(copy.layout.x - sourceAt.x), dy = Math.round(copy.layout.y - sourceAt.y);
-  const left = Number.parseFloat(copy.styles.left ?? ""), top = Number.parseFloat(copy.styles.top ?? "");
-  if ((!dx && !dy) || !Number.isFinite(left) || !Number.isFinite(top) ||
-    !/px$/.test(copy.styles.left ?? "") || !/px$/.test(copy.styles.top ?? "")) return null;
-  return { left: `${Math.round(left + dx)}px`, top: `${Math.round(top + dy)}px`, right: "auto", bottom: "auto" };
+  if (!dx && !dy) return null;
+  // Positioned insets compute to used pixels even where authored `auto`.
+  const pixels = (value: string | undefined) => /px$/.test(value ?? "") ? Number.parseFloat(value!) : Number.NaN;
+  const styles: Record<string, string> = {};
+  for (const [axis, delta, start, end] of [["x", dx, "left", "right"], ["y", dy, "top", "bottom"]] as const) {
+    const constraint = designLayoutConstraint(copy, axis);
+    const from = pixels(copy.styles[start]), to = pixels(copy.styles[end]);
+    // A stretched copy moves both its edges; an end-pinned one only its far
+    // edge, so its size and its pin both hold.
+    if (constraint === "stretch" || constraint === "end") {
+      if (!Number.isFinite(to) || (constraint === "stretch" && !Number.isFinite(from))) return null;
+      if (constraint === "stretch") styles[start] = `${Math.round(from + delta)}px`;
+      styles[end] = `${Math.round(to - delta)}px`;
+    } else {
+      if (!Number.isFinite(from)) return null;
+      Object.assign(styles, { [start]: `${Math.round(from + delta)}px`, [end]: "auto" });
+    }
+  }
+  return styles;
 }
 
 /** A deletion a person is asked to confirm: the layers it would delete and

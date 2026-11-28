@@ -371,7 +371,9 @@ export function DesignWorkspaceColumn({
   }), [selectedFrame, frameSelected, presentedDetails, selectedTreeNode, selectedNodeId, selectedNodeIds]);
   // Another owner's selection is never held: a page, directory or workspace
   // switch shows its own selection at once.
-  const inspectorOwnerKey = `${workspaceId ?? ""}\u0000${folder ?? ""}\u0000${confirmedDirectoryId ?? ""}\u0000${activePageId ?? ""}\u0000${ownerRevision}`;
+  // `ownerRevision` advances on those switches only, not when a first page or
+  // directory binds.
+  const inspectorOwnerKey = `${workspaceId ?? ""}\u0000${folder ?? ""}\u0000${ownerRevision}`;
   const inspectorSelectionKey = `${inspectorOwnerKey}\u0000${selectedFrame?.file ?? ""}\u0000${frameSelected}\u0000${selectedNodeIds.join("\u0000")}`;
   const [presentedInspectorSelectionKey, setPresentedInspectorSelectionKey] = useState(inspectorSelectionKey);
   const heldInspectorSelection = useRef({ owner: inspectorOwnerKey, selection: liveInspectorSelection });
@@ -381,6 +383,8 @@ export function DesignWorkspaceColumn({
   const inspectorSelectionPresented = presentedInspectorSelectionKey === inspectorSelectionKey || ownerChanged;
   if (inspectorSelectionPresented) heldInspectorSelection.current = { owner: inspectorOwnerKey, selection: liveInspectorSelection };
   const inspectorSelection = inspectorSelectionPresented ? liveInspectorSelection : heldInspectorSelection.current.selection;
+  const inspectorSettlingRef = useRef(false);
+  inspectorSettlingRef.current = !inspectorSelectionPresented;
   useEffect(() => {
     if (inspectorSelectionPresented) return;
     // After the frame that paints the outline: a timer set in a frame
@@ -613,6 +617,8 @@ export function DesignWorkspaceColumn({
             />
           }
           inspector={
+            // Marks the hold for readers; the panel itself does not re-render.
+            <div className="contents" data-design-selection-settling={inspectorSelectionPresented ? undefined : ""}>
             <DesignInspector
               workspaceId={workspaceId}
               pages={pageSnapshot?.pages}
@@ -627,7 +633,7 @@ export function DesignWorkspaceColumn({
               selectedNodeIds={inspectorSelection.selectedNodeIds}
               lint={snapshot.data?.lint ?? null}
               active={surfaceActive}
-              selectionSettling={!inspectorSelectionPresented}
+              selectionSettlingRef={inspectorSettlingRef}
               canvasBackground={canvasBackground}
               onCanvasBackgroundChange={commitCanvasBackground}
               motionTimelineOpen={motionTimelineOpen}
@@ -637,6 +643,7 @@ export function DesignWorkspaceColumn({
               onAskAgent={askAgent}
               panelVisible={panelVisible}
             />
+            </div>
           }
         />
       </div>

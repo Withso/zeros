@@ -96,9 +96,10 @@ export interface DesignInspectorProps {
   onAskAgent?: (brief: DesignAgentBrief) => void;
   /** The side panel is shown; a hidden one mounts no Options rows. */
   panelVisible?: boolean;
-  /** The selection changed and the panel still shows the previous one; its
-   * edits must not write to a layer the user has left. */
-  selectionSettling?: boolean;
+  /** True while the selection changed and the panel still shows the previous
+   * one; its edits must not write to a layer the user has left. A ref, read
+   * at edit time, so the hold costs the panel no render. */
+  selectionSettlingRef?: { readonly current: boolean };
 }
 
 export interface DesignCanvasZoomActions {

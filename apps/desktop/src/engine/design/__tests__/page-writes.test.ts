@@ -139,6 +139,19 @@ describe("page-owned frame writes", () => {
       expect(read(frame.file)).toContain("Hello");
     }));
 
+  it("writes a text frame's chosen typography on its text, and refuses anything else", () =>
+    run(async () => {
+      const frame = await createDesignFrame(root, {
+        pageId: "empty",
+        title: "Styled",
+        seed: { kind: "text", nodeId: "text", text: "Hi", fixedSize: false,
+          typography: { "font-family": '"Rock & Roll One", sans-serif', "font-size": "28px", "font-weight": "700" } },
+      });
+      expect(read(frame.file)).toContain('<div data-oid="text" style="font-family:&quot;Rock &amp; Roll One&quot;, sans-serif;font-size:28px;font-weight:700;">Hi</div>');
+      for (const typography of [{ color: "red" }, { "font-size": "1px;color:red" }, { "font-size": "}" }] as Record<string, string>[])
+        await expect(createDesignFrame(root, { pageId: "empty", title: "Bad",
+          seed: { kind: "text", nodeId: "text", text: "Hi", fixedSize: false, typography } })).rejects.toThrow(/typography/);
+    }));
   it("duplicates into the requested page and preserves source-relative URL origins", () =>
     run(async () => {
       const copied = await duplicateDesignFrame(root, "page-1/home.html", {

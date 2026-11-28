@@ -84,6 +84,16 @@ describe("canvas node commands", () => {
     expect(designRepeatedDuplicatePlacement({ x: 10, y: 10 }, layer("copy", 10, 10))).toBeNull();
     expect(designRepeatedDuplicatePlacement({ x: 10, y: 10 }, layer("copy", 60, 10, "static"))).toBeNull();
     expect(designRepeatedDuplicatePlacement(null, layer("copy", 60, 10))).toBeNull();
+    // A copy stretched between both side insets keeps its width as it steps.
+    const stretched = { ...layer("copy", 60, 10), authoredStyleProperties: ["position", "left", "right", "top"] };
+    stretched.styles = { ...stretched.styles, right: "100px" };
+    expect(designRepeatedDuplicatePlacement({ x: 10, y: 10 }, stretched))
+      .toEqual({ left: "110px", right: "50px", top: "10px", bottom: "auto" });
+    // A bottom-pinned copy keeps its pin and steps only that edge.
+    const pinned = { ...layer("copy", 10, 40), authoredStyleProperties: ["position", "left", "bottom"] };
+    pinned.styles = { ...pinned.styles, bottom: "60px" };
+    expect(designRepeatedDuplicatePlacement({ x: 10, y: 10 }, pinned))
+      .toEqual({ left: "10px", right: "auto", bottom: "30px" });
   });
 
   it("duplicates in place, then repeats the offset after the copy moved", async () => {
