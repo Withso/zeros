@@ -680,6 +680,8 @@ export function InspectorEditField({
   };
 
   const commit = async (requestedDraft = draftRef.current) => {
+    arrowSequenceRef.current = null;
+    setArrowStepping(false);
     if (disabledRef.current) {
       if (revalidatingRef.current) {
         pendingCommitRef.current = requestedDraft;
@@ -1024,8 +1026,6 @@ export function InspectorEditField({
             ) {
               return;
             }
-            arrowSequenceRef.current = null;
-            setArrowStepping(false);
             void commit();
           }}
           aria-keyshortcuts={tokensOffered ? "Alt+ArrowDown" : undefined}
@@ -1057,8 +1057,8 @@ export function InspectorEditField({
               if (next !== null) {
                 event.preventDefault();
                 arrowSequenceRef.current ??= { start: baselineRef.current };
-                setArrowStepping(true);
                 const resolved = withinRange(next);
+                setArrowStepping(resolved !== arrowSequenceRef.current.start);
                 setPresentedDraft(resolved);
                 preview(resolved);
               }
@@ -1213,8 +1213,6 @@ export function InspectorEditField({
                 onPointerDown={(event) => event.stopPropagation()}
                 onBlur={(event) => {
                   if (fieldRef.current?.contains(event.relatedTarget)) return;
-                  arrowSequenceRef.current = null;
-                  setArrowStepping(false);
                   void commit();
                 }}
                 onClick={motion.onAddKeyframe}

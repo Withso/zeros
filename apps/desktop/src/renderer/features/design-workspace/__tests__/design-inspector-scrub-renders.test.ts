@@ -570,6 +570,22 @@ describe("an inspector field scrub", () => {
     expect(lastWrite()).toContain('"opacity":"0.61"');
   });
 
+  it("keeps a field clean for Design undo when an arrow step cannot move its value", async () => {
+    await showRuntime();
+    const input = fieldInput("opacity");
+    act(() => input.focus());
+    act(() => {
+      input.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true, cancelable: true }));
+    });
+    await settle();
+    act(() => {
+      input.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowUp", bubbles: true, cancelable: true }));
+    });
+    await settle();
+    expect(input.value).toBe("50");
+    expect(input.getAttribute("data-design-draft")).toBe("clean");
+  });
+
   it("reverts an arrow-stepping sequence on Escape without writing", async () => {
     const runtime = await showRuntime();
     const input = fieldInput("opacity");
