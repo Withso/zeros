@@ -115,7 +115,7 @@ import { turnGet } from "../../platform/turns";
 import { refreshChatTurnRows, turnRowCache, turnRowKey } from "../../state/read-caches";
 import { useCachedRead } from "../../state/use-cached-read";
 import { findProjectForFolder } from "../../state/workspace-resolution";
-import { Bot, Square, ArrowLeft, Check, Frame, GitBranch } from "lucide-react";
+import { Bot, Square, ArrowLeft, Check, Frame, GitBranch, PenTool } from "lucide-react";
 import {
   encodeAttachments,
   reportSkippedAttachments,
@@ -139,6 +139,7 @@ import { ComposerDesignFrame, useComposerDesignFrame } from "./composer-design-f
 import { prepareDesignFrameAttachments } from "./design-frame-attachment";
 import { hasDesignFrameAttachmentSelection } from "./design-frame-selection";
 import { setComposerMode } from "./composer-mode";
+import { composerDesignModeAvailable } from "./composer-design-mode";
 import { permissionModesAvailable, turnCheckpointsAvailable } from "./chat-feature-availability";
 import { trackCloudChatMutation } from "./cloud-chat-mutation";
 import {
@@ -919,6 +920,11 @@ function AgentChatBody({
   const designFrameAttachAvailable = Boolean(
     chatId && capabilitiesBridge && !isCloudWorkspace(chatThread?.folder ?? session.cwd),
   );
+  const designModeAvailable = composerDesignModeAvailable({
+    chatId,
+    bridge: capabilitiesBridge,
+    workspaceId: chatThread?.folder ?? session.cwd,
+  });
   const preparationOwner = JSON.stringify([
     chatId,
     session.agentId ?? chatThread?.agentId,
@@ -5133,9 +5139,22 @@ function AgentChatBody({
                         onAttachTranscript={openTranscriptPicker}
                         onLinkWorkspace={openWorkspacePicker}
                         onIntent={warmTranscriptPicker}
-                        onDesign={chatId && capabilitiesBridge && !isCloudWorkspace(chatThread?.folder ?? session.cwd) ? enterDesignMode : undefined}
+                        onDesign={designModeAvailable ? enterDesignMode : undefined}
                         designSelected={chatThread?.composerMode === "design"}
                       />
+                      {designModeAvailable && chatThread?.composerMode !== "design" && !editingQueuedId && (
+                        <Tooltip label="Design mode">
+                          <IconButton
+                            type="button"
+                            size="standard"
+                            label="Design mode"
+                            onClick={enterDesignMode}
+                            onMouseDown={event => event.preventDefault()}
+                          >
+                            <PenTool size={14} />
+                          </IconButton>
+                        </Tooltip>
+                      )}
                       {designFrameAttachAvailable && !editingQueuedId && (
                         <Tooltip label="Attach selected frame" shortcut="⌘⇧F">
                           <IconButton
