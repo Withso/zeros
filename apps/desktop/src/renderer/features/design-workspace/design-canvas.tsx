@@ -61,7 +61,6 @@ import {
   type DesignFrameGeometryWire,
 } from "../../platform/git";
 import { cn } from "../../shared/ui/cn";
-import { getLastInputModality } from "../../shared/ui/overlay-focus";
 import {
   DesignCanvasItemsLayer,
   DesignCanvasItemsLimitNotice,
@@ -588,8 +587,9 @@ const DesignPreparingFrame = React.forwardRef<HTMLElement, React.ComponentPropsW
   return <article {...props} ref={ref} />;
 });
 
-const DESIGN_KEYBOARD_SURFACE_SELECTOR =
-  "[data-design-workspace-surface], [data-design-popover]";
+const DESIGN_SURFACE_SELECTOR = "[data-design-workspace-surface]";
+const DESIGN_FOCUS_OWNER_SELECTOR =
+  `${DESIGN_SURFACE_SELECTOR}, [data-design-popover]`;
 
 export const DesignCanvas = React.memo(function DesignCanvas({
   workspaceId,
@@ -6383,21 +6383,17 @@ export const DesignCanvas = React.memo(function DesignCanvas({
   /** Whether focus was last owned inside this visible surface, and whether a
    * panel control gained that focus by pointer rather than keyboard. */
   const designFocusOwnerRef = useRef(false);
-  const pointerPanelFocusRef = useRef(false);
   useEffect(() => {
     if (!active) return;
     const pointerDown = (event: PointerEvent) => {
       if (!(event.target instanceof Element)) return;
-      const inSurface = Boolean(event.target.closest(DESIGN_KEYBOARD_SURFACE_SELECTOR));
+      const inSurface = Boolean(event.target.closest(DESIGN_FOCUS_OWNER_SELECTOR));
       designFocusOwnerRef.current = inSurface;
-      pointerPanelFocusRef.current = inSurface;
     };
     const focusIn = (event: FocusEvent) => {
       if (!(event.target instanceof Element) || event.target === document.body) return;
-      const inSurface = Boolean(event.target.closest(DESIGN_KEYBOARD_SURFACE_SELECTOR));
+      const inSurface = Boolean(event.target.closest(DESIGN_FOCUS_OWNER_SELECTOR));
       designFocusOwnerRef.current = inSurface;
-      pointerPanelFocusRef.current =
-        inSurface && getLastInputModality() === "pointer";
     };
     document.addEventListener("pointerdown", pointerDown, true);
     document.addEventListener("focusin", focusIn, true);
@@ -6413,7 +6409,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
       const activeElement = document.activeElement;
       const surfaceFocused =
         activeElement instanceof Element &&
-        (activeElement.closest(DESIGN_KEYBOARD_SURFACE_SELECTOR) ||
+        (activeElement.closest(DESIGN_SURFACE_SELECTOR) ||
           (activeElement === document.body && designFocusOwnerRef.current));
       return !gestureCancelRef.current && !event.defaultPrevented &&
         !isEditableHotkeyTarget(event.target) && surfaceFocused &&
@@ -6552,7 +6548,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
       // owner, the visible design surface still owns its canvas shortcuts.
       const designSurfaceFocused =
         activeElement instanceof Element &&
-        (Boolean(activeElement.closest(DESIGN_KEYBOARD_SURFACE_SELECTOR)) ||
+        (Boolean(activeElement.closest(DESIGN_SURFACE_SELECTOR)) ||
           (activeElement === document.body && designFocusOwnerRef.current));
       const shortcutView = designWorkspaceView(workspaceId);
       const shortcutFrame = workspaceId ? designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data?.frames.find(frame => frame.file === shortcutView.selectedFrame) : undefined;
@@ -6644,19 +6640,12 @@ export const DesignCanvas = React.memo(function DesignCanvas({
       const panelControlKeepsArrows =
         event.target instanceof Element &&
         event.target.closest('[data-design-panel-resize], [role="separator"]');
-      const keyboardTreeFocus =
-        activeElement instanceof Element &&
-        Boolean(activeElement.closest("[data-design-frame-row], [data-design-layer-id]")) &&
-        !pointerPanelFocusRef.current;
       // Panel controls keep focus for their rings and for Tab/Escape, while
       // canvas-owned tool and nudge keys still act without a click back.
-      // Keyboard focus in the Layers tree keeps that tree's arrow navigation;
-      // a pointer-clicked row hands arrows back to the selected layer.
       const panelShortcutFocus =
         designSurfaceFocused &&
         (arrowShortcut || toolShortcut) &&
-        !panelControlKeepsArrows &&
-        !(arrowShortcut && keyboardTreeFocus);
+        !panelControlKeepsArrows;
       if (!viewport.contains(document.activeElement) && !panelShortcutFocus) return;
       if (event.key === "Escape" && (nudgeGestureRef.current || queuedNudgeRef.current)) {
         event.preventDefault();

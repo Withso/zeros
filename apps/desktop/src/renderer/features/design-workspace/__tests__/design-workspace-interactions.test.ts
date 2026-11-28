@@ -248,7 +248,7 @@ describe("design workspace interaction wiring", () => {
   it("routes copy, duplicate, and delete through the active semantic selection", () => {
     expect(source).toContain("resolveDesignSelectionShortcut(");
     expect(source).toContain(
-      "activeElement.closest(DESIGN_KEYBOARD_SURFACE_SELECTOR)",
+      "activeElement.closest(DESIGN_SURFACE_SELECTOR)",
     );
     expect(source).toContain('document.execCommand("copy")');
     expect(source).toContain('window.addEventListener("paste", paste)');

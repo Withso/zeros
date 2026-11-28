@@ -244,7 +244,7 @@ export function InspectorSelect<T extends string>({
           <SelectValue placeholder={placeholder} />
         </span>
       </SelectTrigger>
-      <SelectContent className={cn("min-w-36", contentClassName)}>
+      <SelectContent data-design-popover="" className={cn("min-w-36", contentClassName)}>
         {choices.map((option) => (
           <SelectItem
             key={option.value}

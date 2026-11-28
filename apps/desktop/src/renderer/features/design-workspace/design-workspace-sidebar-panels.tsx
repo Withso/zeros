@@ -301,6 +301,18 @@ function DesignLayerDisclosure({ open }: { open: boolean }) {
   );
 }
 
+
+function focusDesignCanvasAfterRowClick(event: React.MouseEvent<HTMLElement>): void {
+  // Pointer selection belongs to the canvas next: arrows nudge the selected
+  // layer instead of trapped tree focus. Keyboard clicks (detail 0) keep the
+  // row focused for tree navigation.
+  if (event.detail === 0) return;
+  event.currentTarget
+    .closest("[data-design-workspace-surface]")
+    ?.querySelector<HTMLElement>("[data-design-canvas-viewport]")
+    ?.focus({ preventScroll: true });
+}
+
 const DesignLayerFrameRow = React.memo(function DesignLayerFrameRow({
   row, rowIndex, blockRadius, selected, tabbable, layoutKind, identity, identityKind, rename, actions,
 }: {
@@ -343,6 +355,7 @@ const DesignLayerFrameRow = React.memo(function DesignLayerFrameRow({
           return;
         }
         actions.chooseFrame(frame, event.shiftKey);
+        focusDesignCanvasAfterRowClick(event);
       }}
       onKeyDown={(event) => actions.rowKeyDown(event, rowIndex)}
     >
@@ -427,6 +440,7 @@ const DesignLayerNodeRow = React.memo(function DesignLayerNodeRow({
             return;
           }
           actions.chooseLayer(frame, layer, event.shiftKey);
+          focusDesignCanvasAfterRowClick(event);
         }}
         onKeyDown={(event) => actions.rowKeyDown(event, rowIndex)}
       >

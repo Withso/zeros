@@ -1170,7 +1170,7 @@ export function InspectorEditField({
             >
               <SelectValue />
             </SelectTrigger>
-            <SelectContent align="end" className="min-w-20">
+            <SelectContent align="end" data-design-popover="" className="min-w-20">
               {unitOptions.map((unit) => (
                 <SelectItem key={unit} value={unit}>
                   {unit}
