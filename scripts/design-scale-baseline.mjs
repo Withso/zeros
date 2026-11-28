@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Focused scale baseline for Zeros Local Design. Measurement-only: fixtures,
 // profiles, builds and traces are isolated under the output directory.
-// Usage: node scripts/design-scale-baseline.mjs --source "<zeros-design-demo Design dir>" [--counts 100,500,1000] [--output DIR]
+// Usage: node scripts/design-scale-baseline.mjs --source "<zeros-design-demo Design dir>" [--counts 100,500,1000] [--output DIR] [--reopen]
 import assert from "node:assert/strict";
 import { execFile, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
@@ -47,6 +47,7 @@ assert.equal(process.platform, "darwin", "The native scale baseline requires mac
 const source = path.resolve(argument("--source") ?? path.join(repo, "..", "zeros-design-demo", "zeros-design-demo - Design"));
 const output = path.resolve(argument("--output") ?? path.join(repo, ".context", `design-scale-baseline-${new Date().toISOString().replace(/[:.]/g, "-")}`));
 const keepApp = process.argv.includes("--keep-app");
+const reopen = process.argv.includes("--reopen");
 if (await fs.stat(output).then(() => true, () => false) && (await fs.readdir(output)).length)
   throw new Error(`Output directory is not empty: ${output}. Choose a new output directory so an existing baseline is preserved.`);
 await fs.mkdir(output, { recursive: true });
@@ -88,6 +89,8 @@ async function makeFixture(count) {
   }), { width: 1, height: 1 });
   const frameBytes = (await Promise.all(htmlFrames.map(frame => fs.stat(path.join(designDirectory, frame.source)))))
     .reduce((sum, stat) => sum + stat.size, 0);
+  await run("git", ["-C", folder, "add", "."]);
+  await run("git", ["-C", folder, "-c", "user.name=Scale Baseline", "-c", "user.email=scale-baseline@example.invalid", "commit", "-m", "Scale fixture"]);
   const branchName = (await run("git", ["-C", folder, "symbolic-ref", "--short", "HEAD"])).trim();
   return {
     id: String(count), count, folder, branchName, bounds, frameBytes,
@@ -140,6 +143,51 @@ function summarizeCpuProfile(profile) {
   }));
 }
 
+async function waitForProcessExit(pid, timeoutMs = 10_000) {
+  if (!pid) return;
+  const deadline = performance.now() + timeoutMs;
+  for (;;) {
+    try {
+      process.kill(pid, 0);
+    } catch {
+      return;
+    }
+    assert(performance.now() < deadline, `Process ${pid} must exit before the measured reopen.`);
+    await delay(100);
+  }
+}
+
+async function identifyEnginePid(mainPid) {
+  const processRows = (await run("ps", ["-axo", "pid=,ppid=,comm="])).trim().split("\n").map(row => row.trim().match(/^(\d+)\s+(\d+)\s+(.*)$/)).filter(Boolean);
+  const engines = processRows.filter(row => Number(row[2]) === mainPid && /(?:^|\/)bun$/.test(row[3]));
+  assert.equal(engines.length, 1, "Identify the isolated local engine before measuring it.");
+  return Number(engines[0][1]);
+}
+
+async function thumbnailFileStats() {
+  const root = path.join(output, "profile", "design-storage");
+  const rows = new Map();
+  const walk = async directory => {
+    for (const entry of await fs.readdir(directory, { withFileTypes: true }).catch(() => [])) {
+      const file = path.join(directory, entry.name);
+      if (entry.isDirectory()) await walk(file);
+      else if (entry.isFile() && entry.name.endsWith(".png")) {
+        const stat = await fs.stat(file);
+        rows.set(file, { mtimeMs: stat.mtimeMs, bytes: stat.size });
+      }
+    }
+  };
+  await walk(root);
+  return rows;
+}
+
+function changedThumbnailFiles(before, after) {
+  return [...after.entries()].filter(([file, row]) => {
+    const old = before.get(file);
+    return !old || old.bytes !== row.bytes || Math.abs(old.mtimeMs - row.mtimeMs) > 1;
+  }).map(([file]) => file);
+}
+
 let app, vite, viteLog, viteCache, page, enginePid;
 async function close() {
   await app?.close().catch(() => {});
@@ -150,6 +198,39 @@ async function close() {
   viteCache = undefined;
   await viteLog?.close().catch(() => {});
   viteLog = undefined;
+}
+
+async function bootNativeApp(stage, cdpPort, env, setupSettleMs = 3000) {
+  app = await launchNativeElectron({ args: [stage, `--remote-debugging-port=${cdpPort}`, "--remote-debugging-address=127.0.0.1"], cwd: fixtures[0].folder, env, timeout: 90_000 });
+  page = await app.firstWindow({ timeout: 60_000 });
+  page.setDefaultTimeout(30_000);
+  page.on("console", message => report.rendererConsole.push({ type: message.type(), text: message.text().slice(0, 500) }));
+  page.on("requestfailed", request => report.rendererConsole.push({ type: "requestfailed", text: `${request.url()} ${request.failure()?.errorText ?? ""}`.slice(0, 500) }));
+  await app.evaluate(({ BrowserWindow }) => {
+    const win = BrowserWindow.getAllWindows()[0];
+    win.setBounds({ x: 0, y: 40, width: 1440, height: 1000 });
+    win.setResizable(false); win.setMaximizable(false); win.setFullScreenable(false);
+    win.setIgnoreMouseEvents(true);
+    win.show();
+  });
+  await page.addInitScript(() => {
+    if (globalThis.window !== globalThis.window.top) return;
+    globalThis.localStorage.setItem("zeros.column2.ratio", "0.1");
+  });
+  await page.reload();
+  await page.waitForFunction(() => globalThis.window.__ZEROS_NATIVE__?.localDevelopment === true);
+  // A cold isolated Vite cache can reload once while dependencies optimize.
+  // Let that settle before trusted driver imports; this is setup, not measured work.
+  await delay(setupSettleMs);
+  report.probe = { url: page.url(), module: await page.evaluate(async () => {
+    const response = await fetch("/apps/desktop/src/renderer/platform/bridge/active-bridge.ts");
+    return { status: response.status, type: response.headers.get("content-type"), text: (await response.text()).slice(0, 80) };
+  }).catch(error => String(error?.message ?? error)) };
+  await waitForNativeRenderer(page, async () => (await import("/apps/desktop/src/renderer/platform/bridge/active-bridge.ts")).getActiveBridge()?.status === "connected");
+  const runtime = await app.evaluate(({ app }) => ({ electron: process.versions.electron, chromium: process.versions.chrome, mainPid: process.pid, userData: app.getPath("userData") }));
+  runtime.enginePid = await identifyEnginePid(runtime.mainPid);
+  enginePid = runtime.enginePid;
+  return runtime;
 }
 
 const report = {
@@ -210,49 +291,17 @@ try {
   }
 
   console.log("SCALE_STAGE launch");
-  app = await launchNativeElectron({ args: [stage, `--remote-debugging-port=${cdpPort}`, "--remote-debugging-address=127.0.0.1"], cwd: fixtures[0].folder, env, timeout: 90_000 });
-  page = await app.firstWindow({ timeout: 60_000 });
-  page.setDefaultTimeout(30_000);
-  page.on("console", message => report.rendererConsole.push({ type: message.type(), text: message.text().slice(0, 500) }));
-  page.on("requestfailed", request => report.rendererConsole.push({ type: "requestfailed", text: `${request.url()} ${request.failure()?.errorText ?? ""}`.slice(0, 500) }));
-  await app.evaluate(({ BrowserWindow }) => {
-    const win = BrowserWindow.getAllWindows()[0];
-    win.setBounds({ x: 0, y: 40, width: 1440, height: 1000 });
-    win.setResizable(false); win.setMaximizable(false); win.setFullScreenable(false);
-    win.setIgnoreMouseEvents(true);
-    win.show();
-  });
-  await page.addInitScript(() => {
-    if (globalThis.window !== globalThis.window.top) return;
-    globalThis.localStorage.setItem("zeros.column2.ratio", "0.1");
-  });
-  await page.reload();
-  await page.waitForFunction(() => globalThis.window.__ZEROS_NATIVE__?.localDevelopment === true);
-  // A cold isolated Vite cache can reload once while dependencies optimize.
-  // Let that settle before trusted driver imports; this is setup, not measured work.
-  await delay(3000);
-  report.probe = { url: page.url(), module: await page.evaluate(async () => {
-    const response = await fetch("/apps/desktop/src/renderer/platform/bridge/active-bridge.ts");
-    return { status: response.status, type: response.headers.get("content-type"), text: (await response.text()).slice(0, 80) };
-  }).catch(error => String(error?.message ?? error)) };
-  await waitForNativeRenderer(page, async () => (await import("/apps/desktop/src/renderer/platform/bridge/active-bridge.ts")).getActiveBridge()?.status === "connected");
-  report.runtime = await app.evaluate(({ app }) => ({ electron: process.versions.electron, chromium: process.versions.chrome, mainPid: process.pid, userData: app.getPath("userData") }));
-  const processRows = (await run("ps", ["-axo", "pid=,ppid=,comm="])).trim().split("\n").map(row => row.trim().match(/^(\d+)\s+(\d+)\s+(.*)$/)).filter(Boolean);
-  const engines = processRows.filter(row => Number(row[2]) === report.runtime.mainPid && /(?:^|\/)bun$/.test(row[3]));
-  assert.equal(engines.length, 1, "Identify the isolated local engine before measuring it.");
-  enginePid = Number(engines[0][1]);
-  report.runtime.enginePid = enginePid;
+  report.runtime = await bootNativeApp(stage, cdpPort, env);
 
   for (const fixture of fixtures) {
     fixture.workspace = await page.evaluate(async ({ folder, branchName, id }) => {
       const { upsertProject } = await import("/apps/desktop/src/renderer/state/projects-store.ts");
-      const { notifyProjectsChanged, notifyWorkspacesChanged } = await import("/apps/desktop/src/renderer/state/use-projects.ts");
-      const { workspaceAdoptExisting } = await import("/apps/desktop/src/renderer/platform/git.ts");
+      const { notifyProjectsChanged } = await import("/apps/desktop/src/renderer/state/use-projects.ts");
+      const { workspacePrepareCreate, workspaceCreate } = await import("/apps/desktop/src/renderer/platform/git.ts");
       const project = upsertProject({ repoRoot: folder, repoSlug: `design-scale-${id}`, isGitRepository: true });
       notifyProjectsChanged();
-      const workspace = await workspaceAdoptExisting({ repoRoot: folder, worktreePath: folder, branchName, repoSlug: project.repoSlug, organizationId: null });
-      notifyWorkspacesChanged(project.repoSlug);
-      return workspace;
+      const prepared = await workspacePrepareCreate({ repoRoot: folder, repoSlug: project.repoSlug });
+      return workspaceCreate({ repoRoot: folder, repoSlug: project.repoSlug, organizationId: null, preparedId: prepared.workspaceId, preparedBranch: prepared.branch });
     }, fixture);
   }
   await save();
@@ -306,11 +355,11 @@ try {
   let viewportRect;
   const open = async fixture => {
     const started = performance.now();
-    await runNativeRendererAction(page, async folder => {
+    await runNativeRendererAction(page, async ({ workspacePath, repoRoot }) => {
       const { useWorkspaceStore } = await import("/apps/desktop/src/renderer/state/workspace-store.ts");
-      useWorkspaceStore.getState().dispatch({ type: "OPEN_WORKSPACE", folder, repoRoot: folder, chatId: null });
-    }, fixture.folder);
-    await activateNativeWorkbenchTab(page, fixture.folder, "design");
+      useWorkspaceStore.getState().dispatch({ type: "OPEN_WORKSPACE", folder: workspacePath, repoRoot, chatId: null });
+    }, { workspacePath: fixture.workspace.path, repoRoot: fixture.folder });
+    await activateNativeWorkbenchTab(page, fixture.workspace.path, "design");
     const owner = page.locator(`[data-design-retained-workspace="${fixture.workspace.workspaceId}"][aria-hidden="false"]`);
     await owner.locator("[data-design-canvas-viewport]").waitFor();
     viewportRect ??= await owner.locator("[data-design-canvas-viewport]").boundingBox();
@@ -322,8 +371,9 @@ try {
     await prepareNativeDesignView(page, fixture.workspace.workspaceId, camera);
     const completeMs = await waitForCompletePaint(fixture);
     const actionToCompleteMs = performance.now() - started;
+    const completeAtMs = performance.now();
     await delay(2000);
-    return { elapsedMs: performance.now() - started, actionToCompleteMs, completeMs, camera };
+    return { elapsedMs: performance.now() - started, actionToCompleteMs, completeMs, completeAtMs, camera };
   };
 
   for (const fixture of fixtures) {
@@ -451,12 +501,146 @@ try {
   if (second !== first) {
     await open(first);
     await open(second);
-    for (const fixture of [first, second, first]) {
+    for (const fixture of [first, second, first, second]) {
       const started = performance.now();
-      const opened = await open(fixture);
-      report.workspaceSwitches.push({ fixture: fixture.id, actionToFirstCompletePaintMs: milliseconds(opened.actionToCompleteMs), settledWallMs: milliseconds(performance.now() - started) });
+      try {
+        const opened = await open(fixture);
+        report.workspaceSwitches.push({ fixture: fixture.id, actionToFirstCompletePaintMs: milliseconds(opened.actionToCompleteMs), settledWallMs: milliseconds(performance.now() - started) });
+      } catch (error) {
+        report.workspaceSwitches.push({ fixture: fixture.id, failed: true, error: String(error?.message ?? error).slice(0, 300), settledWallMs: milliseconds(performance.now() - started) });
+      }
       await save();
     }
+  }
+
+  if (reopen) {
+    const target = fixtures.find(fixture => fixture.count === 1000) ?? fixtures[fixtures.length - 1];
+    console.log(`SCALE_STAGE reopen-${target.id}`);
+    const usage = async () => page.evaluate(async () => (await import("/apps/desktop/src/renderer/features/design-workspace/state/use-design-frame-previews.ts")).designSourcePreviewUsage());
+    const indexedDbCount = async () => page.evaluate(async () => new Promise(resolve => {
+      const request = indexedDB.open("zeros:design-previews:v1");
+      request.onerror = () => resolve(null);
+      request.onsuccess = () => {
+        const db = request.result;
+        if (!db.objectStoreNames.contains("pictures")) { db.close(); resolve(null); return; }
+        const count = db.transaction("pictures", "readonly").objectStore("pictures").count();
+        count.onsuccess = () => { db.close(); resolve(count.result); };
+        count.onerror = () => { db.close(); resolve(null); };
+      };
+    }));
+    const completedPictures = async fixture => page.evaluate(({ workspaceId }) => {
+      const owner = globalThis.document.querySelector(`[data-design-retained-workspace="${workspaceId}"][aria-hidden="false"]`);
+      return [...(owner?.querySelectorAll("img[data-design-frame-picture],img[data-design-frame-screenshot],img[data-design-frame-transition-cover]") ?? [])]
+        .filter(image => image.complete && image.naturalWidth > 0 && globalThis.getComputedStyle(image).display !== "none" && globalThis.getComputedStyle(image).visibility === "visible").length;
+    }, { workspaceId: fixture.workspace.workspaceId });
+    const coldUsage = await usage();
+    const beforeIndexedDb = await indexedDbCount();
+    const beforeThumbnails = await thumbnailFileStats();
+    const coldPictures = await completedPictures(target);
+    const launchStarted = performance.now();
+    // Renderer reload keeps the engine alive while dropping renderer memory,
+    // object URLs and decoded pictures; persistent preview stores remain visible.
+    await page.reload();
+    await page.waitForFunction(() => globalThis.window.__ZEROS_NATIVE__?.localDevelopment === true);
+    await waitForNativeRenderer(page, async () => (await import("/apps/desktop/src/renderer/platform/bridge/active-bridge.ts")).getActiveBridge()?.status === "connected");
+    const runtime = report.runtime;
+    // Adopted fixture workspaces are runtime registrations rather than durable
+    // project rows in this isolated harness; restore the same registration as
+    // setup before timing the warm open itself.
+    const adoptStarted = performance.now();
+    await page.evaluate(async ({ folder, id }) => {
+      const { upsertProject } = await import("/apps/desktop/src/renderer/state/projects-store.ts");
+      const { notifyProjectsChanged, notifyWorkspacesChanged } = await import("/apps/desktop/src/renderer/state/use-projects.ts");
+      const project = upsertProject({ repoRoot: folder, repoSlug: `design-scale-${id}`, isGitRepository: true });
+      notifyProjectsChanged();
+      notifyWorkspacesChanged(project.repoSlug);
+    }, target);
+    const listArgs = () => ({ repoSlug: target.workspace.repoSlug ?? `design-scale-${target.id}`, workspaceId: target.workspace.workspaceId ?? target.workspace.id });
+    const workspaceListed = async () => page.evaluate(async ({ repoSlug, workspaceId }) => {
+      try {
+        const { workspaceListSnapshot, workspaceGet } = await import("/apps/desktop/src/renderer/platform/git.ts");
+        const rows = (await workspaceListSnapshot({ repoSlug, archived: false, includeDesign: true })).workspaces;
+        const all = (await workspaceListSnapshot({ archived: false, includeDesign: true })).workspaces;
+        const unfiltered = (await workspaceListSnapshot({ includeDesign: true })).workspaces;
+        let got = null, getError = null;
+        try { got = await workspaceGet(workspaceId); } catch (error) { getError = String(error?.message ?? error); }
+        return { ok: rows.some(workspace => workspace.id === workspaceId), rows: rows.map(workspace => ({ id: workspace.id, repoSlug: workspace.repoSlug })), all: all.map(workspace => ({ id: workspace.id, repoSlug: workspace.repoSlug })), unfiltered: unfiltered.map(workspace => ({ id: workspace.id, repoSlug: workspace.repoSlug, archivedAt: workspace.archivedAt })), got, getError };
+      } catch (error) {
+        return { ok: false, error: String(error?.message ?? error) };
+      }
+    }, listArgs());
+    const workspaceListing = await workspaceListed();
+    const adoptMs = performance.now() - adoptStarted;
+    const reopenCdp = await page.context().newCDPSession(page);
+    await reopenCdp.send("Profiler.enable");
+    await reopenCdp.send("Profiler.setSamplingInterval", { interval: 1000 });
+    await reopenCdp.send("Profiler.start");
+    const reopenStartUsage = await usage();
+    const opened = await open(target);
+    const profile = (await reopenCdp.send("Profiler.stop")).profile;
+    await fs.writeFile(path.join(output, "reopen-cpu-profile.json"), JSON.stringify(profile));
+    const completeAt = opened.completeAtMs;
+    const afterUsage = await usage();
+    const afterIndexedDb = await indexedDbCount();
+    const afterThumbnails = await thumbnailFileStats();
+    const rewritten = changedThumbnailFiles(beforeThumbnails, afterThumbnails);
+    const delta = key => Math.max(0, (afterUsage[key] ?? 0) - (reopenStartUsage[key] ?? 0));
+    const produced = delta("batched") + delta("vector") + delta("native");
+    const paintedPictures = await completedPictures(target);
+    report.reopen = {
+      fixture: target.id,
+      launchToFirstCompletePaintMs: milliseconds(completeAt - launchStarted),
+      openActionToFirstCompletePaintMs: milliseconds(opened.actionToCompleteMs),
+      paintAfterCameraMs: milliseconds(opened.completeMs),
+      coldCompletedPictures: coldPictures,
+      warmCompletedPictures: paintedPictures,
+      coldProductionTotals: coldUsage,
+      reopenStartProductionTotals: reopenStartUsage,
+      indexedDbRecordsBefore: beforeIndexedDb,
+      indexedDbRecordsAfter: afterIndexedDb,
+      engineThumbnailFilesBefore: beforeThumbnails.size,
+      engineThumbnailFilesAfter: afterThumbnails.size,
+      productionDelta: { batched: delta("batched"), vector: delta("vector"), native: delta("native"), fallbacks: delta("fallbacks") },
+      estimates: {
+        indexedDbPictures: Math.max(0, paintedPictures - produced),
+        engineStorePictures: Math.max(0, delta("batched") - rewritten.length),
+        freshEngineRenders: rewritten.length,
+        freshVectorOrNativeRenders: delta("vector") + delta("native"),
+      },
+      rewrittenEngineThumbnailFiles: rewritten.length,
+      workspaceListing,
+      adoptSetupMs: milliseconds(adoptMs),
+      runtime,
+      cpuProfileTop: summarizeCpuProfile(profile),
+    };
+
+    // Close the Design surface within the same renderer/workspace, then reopen it.
+    // This distinguishes in-memory retention from renderer-reload persistent-store hits.
+    await activateNativeWorkbenchTab(page, target.workspace.path, "changes");
+    await delay(500);
+    const tabStartUsage = await usage();
+    const tabBeforeThumbnails = await thumbnailFileStats();
+    const tabStarted = performance.now();
+    await activateNativeWorkbenchTab(page, target.workspace.path, "design");
+    const tabCompleteMs = await waitForCompletePaint(target, 60_000, tabStarted);
+    const tabAfterUsage = await usage();
+    const tabAfterThumbnails = await thumbnailFileStats();
+    const tabRewritten = changedThumbnailFiles(tabBeforeThumbnails, tabAfterThumbnails);
+    const tabDelta = key => Math.max(0, (tabAfterUsage[key] ?? 0) - (tabStartUsage[key] ?? 0));
+    const tabProduced = tabDelta("batched") + tabDelta("vector") + tabDelta("native");
+    const tabPainted = await completedPictures(target);
+    report.workspaceCloseReopen = {
+      fixture: target.id,
+      actionToFirstCompletePaintMs: milliseconds(tabCompleteMs),
+      paintedPictures: tabPainted,
+      productionDelta: { batched: tabDelta("batched"), vector: tabDelta("vector"), native: tabDelta("native"), fallbacks: tabDelta("fallbacks") },
+      rewrittenEngineThumbnailFiles: tabRewritten.length,
+      estimates: {
+        memoryOrIndexedDbPictures: Math.max(0, tabPainted - tabProduced),
+        freshEngineRenders: tabRewritten.length,
+      },
+    };
+    await save();
   }
 
   const width = rows => rows.map(row => `| ${row.join(" | ")} |`).join("\n");
@@ -490,7 +674,16 @@ try {
     row.memory.gpu.cpuPercent.toFixed(1),
     row.memory.engine.cpuPercent.toFixed(1),
   ]);
-  const markdown = `# Zeros Design scale baseline\n\nRecorded: ${report.recordedAt}\n\n## Scale fixtures\n\n| Frames/page | Empty | Rich demo-derived | Open ms | First complete paint ms | Renderer RSS MiB | Renderer footprint MiB | Renderer CPU % | GPU RSS MiB | GPU footprint MiB | GPU CPU % | Engine RSS MiB | Engine CPU % | Mounted frames | Documents |\n|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n${width(report.measurements.map(row => [row.fixture, report.fixtures.find(f => f.id === row.fixture)?.empty, report.fixtures.find(f => f.id === row.fixture)?.rich, ...measurementRows.find(m => m[0] === row.fixture).slice(1)]))}\n\n## Pan/zoom presentation\n\n| Frames/page | Gesture | Presented | Effective FPS | Frame p95 ms | Frame p99 ms | Input-present p95 ms | Dropped | Partial | Camera changes | Renderer CPU % | GPU CPU % | Engine CPU % |\n|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n${width(interactionRows)}\n\n## CPU profiled repeated gestures (top self-time frames)\n\n| Frames/page | Gesture | Frame | Samples | Estimated self ms |\n|---|---:|---|---:|---:|\n${width(report.profiles.flatMap(row => (row.top ?? []).slice(0, 5).map(frame => [row.fixture, row.name, frame.frame, frame.samples, frame.estimatedSelfMs])))}\n\n## Page switching\n\n| Fixture | From | To | Click to first complete paint ms | Wall ms |\n|---|---|---|---:|---:|\n${width(report.pageSwitches.map(row => [row.fixture, row.from, row.to, row.clickToFirstCompletePaintMs, row.wallMs]))}\n\n## Workspace switching\n\n| Fixture | Switch to first complete paint ms | Settled wall ms |\n|---|---:|---:|\n${width(report.workspaceSwitches.map(row => [row.fixture, row.actionToFirstCompletePaintMs, row.settledWallMs]))}\n\n## Method and caveats\n\n${report.method}\n\n${report.limitations.map(line => `- ${line}`).join("\n")}\n`;
+  const reopenMarkdown = report.reopen ? `## Warm reopen
+
+| Fixture | Launch to first complete paint ms | Open action to paint ms | Painted pictures | IndexedDB pictures est. | Engine-store pictures est. | Fresh engine renders est. | Fresh vector/native renders | IndexedDB records before/after | Engine thumbnails before/after |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+${width([[report.reopen.fixture, report.reopen.launchToFirstCompletePaintMs, report.reopen.openActionToFirstCompletePaintMs, report.reopen.warmCompletedPictures, report.reopen.estimates.indexedDbPictures, report.reopen.estimates.engineStorePictures, report.reopen.estimates.freshEngineRenders, report.reopen.estimates.freshVectorOrNativeRenders, `${report.reopen.indexedDbRecordsBefore}/${report.reopen.indexedDbRecordsAfter}`, `${report.reopen.engineThumbnailFilesBefore}/${report.reopen.engineThumbnailFilesAfter}`]])}
+
+Top reopen CPU self-time: ${report.reopen.cpuProfileTop.slice(0, 5).map(frame => `${frame.frame} (${frame.estimatedSelfMs} ms)`).join("; ") || "none"}
+
+` : "";
+  const markdown = `# Zeros Design scale baseline\n\nRecorded: ${report.recordedAt}\n\n## Scale fixtures\n\n| Frames/page | Empty | Rich demo-derived | Open ms | First complete paint ms | Renderer RSS MiB | Renderer footprint MiB | Renderer CPU % | GPU RSS MiB | GPU footprint MiB | GPU CPU % | Engine RSS MiB | Engine CPU % | Mounted frames | Documents |\n|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n${width(report.measurements.map(row => [row.fixture, report.fixtures.find(f => f.id === row.fixture)?.empty, report.fixtures.find(f => f.id === row.fixture)?.rich, ...measurementRows.find(m => m[0] === row.fixture).slice(1)]))}\n\n## Pan/zoom presentation\n\n| Frames/page | Gesture | Presented | Effective FPS | Frame p95 ms | Frame p99 ms | Input-present p95 ms | Dropped | Partial | Camera changes | Renderer CPU % | GPU CPU % | Engine CPU % |\n|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n${width(interactionRows)}\n\n## CPU profiled repeated gestures (top self-time frames)\n\n| Frames/page | Gesture | Frame | Samples | Estimated self ms |\n|---|---:|---|---:|---:|\n${width(report.profiles.flatMap(row => (row.top ?? []).slice(0, 5).map(frame => [row.fixture, row.name, frame.frame, frame.samples, frame.estimatedSelfMs])))}\n\n## Page switching\n\n| Fixture | From | To | Click to first complete paint ms | Wall ms |\n|---|---|---|---:|---:|\n${width(report.pageSwitches.map(row => [row.fixture, row.from, row.to, row.clickToFirstCompletePaintMs, row.wallMs]))}\n\n## Workspace switching\n\n| Fixture | Switch to first complete paint ms | Settled wall ms |\n|---|---:|---:|\n${width(report.workspaceSwitches.map(row => [row.fixture, row.actionToFirstCompletePaintMs, row.settledWallMs]))}\n\n${reopenMarkdown}## Method and caveats\n\n${report.method}\n\n${report.limitations.map(line => `- ${line}`).join("\n")}\n`;
   await fs.writeFile(path.join(output, "report.md"), `${markdown}\n`);
   console.log(`SCALE_REPORT ${path.join(output, "report.md")}`);
 } catch (error) {
