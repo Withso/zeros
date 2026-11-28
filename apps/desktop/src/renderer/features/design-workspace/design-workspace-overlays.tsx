@@ -667,6 +667,7 @@ export function DesignResizeHandles({
         <button
           key={handle}
           data-design-controls
+          data-design-resize-handle={handle}
           type="button"
           className="zd-design-selection-handle zd-design-screen-box pointer-events-auto absolute size-2 rounded-[1px]"
           style={{

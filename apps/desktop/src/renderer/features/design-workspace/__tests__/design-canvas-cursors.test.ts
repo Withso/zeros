@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 
 import {
   DESIGN_ARROW_CURSOR,
+  DESIGN_CROSSHAIR_CURSOR,
+  DESIGN_TEXT_CURSOR,
   designResizeCursor,
   designRotationCursor,
 } from "../design-canvas-cursors";
@@ -19,11 +21,18 @@ describe("canvas cursors", () => {
   it("keeps colors and references percent-encoded literals", () => {
     // A cursor image resolves no CSS variables, and a data URL cannot carry a
     // raw "#".
-    for (const cursor of [DESIGN_ARROW_CURSOR, designResizeCursor(0), designRotationCursor(0)]) {
+    for (const cursor of [DESIGN_ARROW_CURSOR, DESIGN_CROSSHAIR_CURSOR, DESIGN_TEXT_CURSOR, designResizeCursor(0), designRotationCursor(0)]) {
       expect(cursor).not.toContain("var(");
       expect(cursor.replace(/^url\("/, "").split('")')[0]).not.toContain("#");
       expect(cursor).toContain("filter='url(%23s)'");
     }
+  });
+
+  it("draws the drawing tools' crosshair and the text tool's I-beam centred on the pointer", () => {
+    expect(glyph(DESIGN_CROSSHAIR_CURSOR)).toBe("crosshair");
+    expect(DESIGN_CROSSHAIR_CURSOR.endsWith('") 16 16, crosshair')).toBe(true);
+    expect(glyph(DESIGN_TEXT_CURSOR)).toBe("text");
+    expect(DESIGN_TEXT_CURSOR.endsWith('") 16 16, text')).toBe(true);
   });
 
   it("turns the resize arrow in quantized steps along its axis", () => {

@@ -113,6 +113,41 @@ export async function runDesignCanvasCursorSmoke({ page, check }) {
     JSON.stringify(Object.fromEntries(strays.map((kind) => [kind, sweep[kind]]))),
   );
 
+  // The drawing tools show Figma's thin crosshair and the Text tool its
+  // I-beam, on the empty canvas and over a selection's body and handles.
+  const toolCursors = {};
+  for (const [key, tool] of [["r", "rectangle"], ["f", "frame"], ["t", "text"]]) {
+    await page.locator("[data-design-canvas-viewport]").focus();
+    await page.keyboard.press(key);
+    await expect(page.locator(`[data-design-canvas-viewport][data-design-active-tool="${tool}"]`)).toHaveCount(1);
+    toolCursors[tool] = {
+      empty: await cursorAt(empty),
+      body: await cursorAt(hero),
+      handle: await cursorOf(handle("nw")),
+    };
+    await page.keyboard.press("Escape");
+    await expect(page.locator('[data-design-canvas-viewport][data-design-active-tool="select"]')).toHaveCount(1);
+  }
+  const crosshair = { empty: "crosshair", body: "crosshair", handle: "crosshair" };
+  check(
+    "the Rectangle and Frame tools show the crosshair and the Text tool the I-beam",
+    JSON.stringify(toolCursors) === JSON.stringify({
+      rectangle: crosshair, frame: crosshair, text: { empty: "text", body: "text", handle: "text" },
+    }),
+    JSON.stringify(toolCursors),
+  );
+
+  // Space is the hand tool under a drawing tool too, over a selection as well.
+  await page.locator("[data-design-canvas-viewport]").focus();
+  await page.keyboard.press("r");
+  await page.keyboard.down("Space");
+  await settle();
+  const panning = await cursorAt(hero);
+  await page.keyboard.up("Space");
+  await page.keyboard.press("Escape");
+  await expect(page.locator('[data-design-canvas-viewport][data-design-active-tool="select"]')).toHaveCount(1);
+  check("holding Space with a drawing tool shows the hand over a selection", panning === "keyword:grab", panning);
+
   await page.mouse.down();
   await page.mouse.move(hero.x + 24, hero.y + 12, { steps: 4 });
   const dragging = cursorKind(await page.evaluate(() => document.body.style.cursor));
@@ -160,5 +195,27 @@ export async function runDesignCanvasCursorSmoke({ page, check }) {
     turned.length === 2 && turned[1].degrees > turned[0].degrees + 5 &&
       turned.every(({ cursor, degrees }) => cursor === `rotate-${Math.round((180 + degrees) / 15) * 15}`),
     JSON.stringify(turned),
+  );
+
+  // A drawing tool's crosshair over a group's handle means a press there
+  // never resizes the selected layers.
+  await page.locator('[data-design-sidebar-panel] [data-design-layer-id="home-panel"]').click({ modifiers: ["Shift"] });
+  const group = page.locator("[data-design-multi-selection]");
+  await expect(group).toHaveCount(1);
+  await page.locator("[data-design-canvas-viewport]").focus();
+  await page.keyboard.press("r");
+  const groupBefore = await group.boundingBox();
+  const corner = centre(await group.locator('.zd-design-selection-handle[aria-label$=" from se"]').boundingBox());
+  await page.mouse.move(corner.x, corner.y);
+  await page.mouse.down();
+  await page.mouse.move(corner.x + 40, corner.y + 40, { steps: 4 });
+  await page.mouse.up();
+  await settle();
+  const groupAfter = (await group.count()) ? await group.boundingBox() : null;
+  await page.keyboard.press("Escape");
+  check(
+    "a drawing tool's press on a group handle leaves the selected layers' size alone",
+    !!groupAfter && Math.abs(groupAfter.width - groupBefore.width) < 1 && Math.abs(groupAfter.height - groupBefore.height) < 1,
+    JSON.stringify({ groupBefore, groupAfter }),
   );
 }

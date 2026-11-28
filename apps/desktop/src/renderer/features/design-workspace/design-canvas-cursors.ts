@@ -45,6 +45,29 @@ export const DESIGN_ARROW_CURSOR = designSvgCursor(
   "default",
 );
 
+const CROSSHAIR = "M16 7V25M7 16H25";
+
+/** The Frame and Rectangle tools' crosshair: thin black arms in a white
+ * outline, hotspot on the centre. */
+export const DESIGN_CROSSHAIR_CURSOR = designSvgCursor(
+  "zd-cursor-crosshair",
+  `<path d='${CROSSHAIR}' stroke='%23fff' stroke-width='3' stroke-linecap='round'/>` +
+    `<path d='${CROSSHAIR}' stroke='%23000' stroke-width='1'/>`,
+  { x: 16, y: 16 },
+  "crosshair",
+);
+
+const I_BEAM = "M13 9.5H19M13 22.5H19M16 9.5V22.5";
+
+/** The Text tool's I-beam, hotspot on the middle of the stem. */
+export const DESIGN_TEXT_CURSOR = designSvgCursor(
+  "zd-cursor-text",
+  `<path d='${I_BEAM}' fill='none' stroke='%23fff' stroke-width='3' stroke-linecap='round'/>` +
+    `<path d='${I_BEAM}' fill='none' stroke='%23000' stroke-width='1'/>`,
+  { x: 16, y: 16 },
+  "text",
+);
+
 const RESIZE = "M7.3 16 12.3 11.4V14.7H19.7V11.4L24.7 16 19.7 20.6V17.3H12.3V20.6Z";
 const RESIZE_KEYWORDS = ["ew-resize", "nwse-resize", "ns-resize", "nesw-resize"] as const;
 

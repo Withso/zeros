@@ -97,7 +97,13 @@ import {
   designSizingMode,
   designSizingStyles,
 } from "./design-auto-layout-values";
-import { DESIGN_ARROW_CURSOR, designResizeCursor, designRotationCursor } from "./design-canvas-cursors";
+import {
+  DESIGN_ARROW_CURSOR,
+  DESIGN_CROSSHAIR_CURSOR,
+  DESIGN_TEXT_CURSOR,
+  designResizeCursor,
+  designRotationCursor,
+} from "./design-canvas-cursors";
 import {
   DESIGN_ROTATION_CORNERS,
   type DesignRotationCorner,
@@ -406,6 +412,13 @@ type FrameGeometryPreview = {
   commit?: Promise<DesignCanvasFrameWire | undefined>;
 };
 type DesignCanvasTool = "select" | "frame" | "rectangle" | "text" | DesignCanvasItemTool;
+
+const DESIGN_RADIUS_CURSOR = designResizeCursor(45);
+
+function designToolCursor(tool: DesignCanvasTool): string {
+  if (tool === "select") return DESIGN_ARROW_CURSOR;
+  return tool === "text" ? DESIGN_TEXT_CURSOR : DESIGN_CROSSHAIR_CURSOR;
+}
 
 interface CanvasHitStackMenu {
   frame: DesignCanvasFrameWire;
@@ -4952,7 +4965,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
         const loop = createDesignGestureLoop({ request: styles => previewDesignNodeStylesTransient({ ...args, styles }) });
         let latest = base;
         const clean = () => { delete target.dataset.value; gestureCancelRef.current = null; };
-        gestureCancelRef.current = beginDesignPointerGesture({ target, pointerId: event.pointerId, cursor: "nwse-resize",
+        gestureCancelRef.current = beginDesignPointerGesture({ target, pointerId: event.pointerId, cursor: DESIGN_RADIUS_CURSOR,
           onMove: e => {
             const z = liveDesignZoom();
             const delta = designSelectionLocalDelta({ x: (e.clientX - sx) / z, y: (e.clientY - sy) / z }, box);
@@ -5365,6 +5378,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
       if (
         !workspaceId ||
         !active ||
+        activeTool !== "select" ||
         !event.isPrimary ||
         event.button !== 0 ||
         nodes.length === 0 ||
@@ -5684,6 +5698,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
     },
     [
       active,
+      activeTool,
       canvasFoundation.data,
       liveDesignZoom,
       parentOutlineDetails,
@@ -7744,7 +7759,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
 
       gestureCancelRef.current?.();
       gestureCancelRef.current = cancel;
-      document.body.style.cursor = "crosshair";
+      document.body.style.cursor = DESIGN_CROSSHAIR_CURSOR;
       document.body.style.userSelect = "none";
       window.addEventListener("pointermove", move);
       window.addEventListener("pointerup", finish);
@@ -7888,7 +7903,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
 
       gestureCancelRef.current?.();
       gestureCancelRef.current = cancel;
-      document.body.style.cursor = "crosshair";
+      document.body.style.cursor = DESIGN_TEXT_CURSOR;
       document.body.style.userSelect = "none";
       window.addEventListener("pointermove", move);
       window.addEventListener("pointerup", finish);
@@ -8195,7 +8210,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
 
       gestureCancelRef.current?.();
       gestureCancelRef.current = cancel;
-      document.body.style.cursor = "crosshair";
+      document.body.style.cursor = DESIGN_TEXT_CURSOR;
       document.body.style.userSelect = "none";
       window.addEventListener("pointermove", move);
       window.addEventListener("pointerup", finish);
@@ -8713,15 +8728,15 @@ export const DesignCanvas = React.memo(function DesignCanvas({
         tabIndex={0}
         className={cn(
           "bg-bg2 relative size-full overflow-clip outline-none",
-          spacePressed
-            ? "cursor-grab"
-            : activeTool !== "select" && "cursor-crosshair",
+          spacePressed && "cursor-grab",
         )}
         style={{
           // Runtime user color is an intentional canvas boundary.
           backgroundColor: canvasBackground,
-          cursor: spacePressed || activeTool !== "select" ? undefined : DESIGN_ARROW_CURSOR,
-        }}
+          cursor: spacePressed ? undefined : designToolCursor(activeTool),
+          "--design-tool-cursor": spacePressed ? "grab" : designToolCursor(activeTool),
+          "--design-radius-cursor": DESIGN_RADIUS_CURSOR,
+        } as React.CSSProperties}
         onPointerDown={handleViewportPointerDown}
         // Pointer movement carries the authoritative modifier state, so a
         // keydown lost to another focus owner (or pressed before the window was
