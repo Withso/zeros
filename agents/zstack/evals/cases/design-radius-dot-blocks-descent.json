@@ -2,8 +2,8 @@
   "id": "design-radius-dot-blocks-descent",
   "kind": "replay",
   "area": "desktop-design",
-  "fixedBy": "pending",
+  "fixedBy": "pr:1362",
   "symptom": "With a Stack selected, double-clicking its Title where the corner radius dot covers it left the Stack selected; only Cmd+click reached the Title.",
   "rule": "Canvas chrome that covers a selected layer's content (spacing zones, the radius dot) must not block double-click descent. See playbooks/bug-fix.md.",
-  "check": "node scripts/ui-smoke-composer.mjs --scenario=design-selection"
+  "check": "pnpm exec vitest run apps/desktop/src/renderer/features/design-workspace/__tests__/design-workspace-interactions.test.ts"
 }

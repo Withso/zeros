@@ -178,10 +178,10 @@ export async function runDesignDescentHoverSmoke({ page, check }) {
   await dot.waitFor();
   const dotBox = await dot.boundingBox();
   await page.mouse.dblclick(dotBox.x + dotBox.width / 2, dotBox.y + dotBox.height / 2);
-  await expect.poll(selection).not.toEqual(["home-hero"]);
+  await expect.poll(selection).toEqual(["home-heading"]);
   check(
     "double-clicking through the radius dot enters the selected layer",
-    !(await selection()).includes("home-hero"),
+    JSON.stringify(await selection()) === JSON.stringify(["home-heading"]),
     JSON.stringify(await selection()),
   );
 }
