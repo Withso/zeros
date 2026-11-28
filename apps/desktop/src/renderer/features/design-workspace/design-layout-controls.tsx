@@ -197,6 +197,10 @@ export function DesignPositionSection({
   const selection = layoutParents?.length ? layoutParents : [details];
   const placed = !frameSelected && selection.some(designLayoutPlacedByParent);
   const free = !frameSelected && !placed && selection.every((node) => node.layout?.parentId);
+  const mixedParents =
+    selection.length > 1 &&
+    new Set(selection.map((node) => node.layout?.parentId)).size > 1;
+  const arrangementDisabled = disabled || mixedParents;
   const absolute = frameSelected ? null : designLayoutAbsolutePosition(selection);
   const field = (label: string, property: string, extra: DesignLayoutFieldOptions = {}) =>
     renderField(label, property, designLayoutFieldValue(details, property), {
@@ -264,7 +268,7 @@ export function DesignPositionSection({
                       type="button"
                       className="zd-segment"
                       aria-label={label}
-                      disabled={disabled}
+                      disabled={arrangementDisabled}
                       onClick={() =>
                         onAction({ type: "align", axis, value, target: "self" })
                       }
@@ -291,7 +295,7 @@ export function DesignPositionSection({
               key={label}
               label={label}
               tooltip={label}
-              disabled={disabled}
+              disabled={arrangementDisabled}
               onClick={() =>
                 onAction({ type: "distribute", axis, target: "self" })
               }

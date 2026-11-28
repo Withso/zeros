@@ -145,12 +145,12 @@ describe("designer layout values", () => {
   });
 
   it("does not position a static parent when aligning its layers", () => {
-    const first = node({ width: "40px" });
+    const first = node({ width: "40px", left: "210px" });
     first.oid = "first";
     first.layout = { ...first.layout!, x: 10, parentPosition: "static", isContainingBlock: false };
     first.box = { ...first.box!, width: 40 };
     first.rect = { ...first.rect, width: 40 };
-    const second = node({ width: "60px" });
+    const second = node({ width: "60px", left: "300px" });
     second.oid = "second";
     second.layout = { ...second.layout!, x: 100, parentPosition: "static", isContainingBlock: false };
     second.box = { ...second.box!, width: 60 };
@@ -162,7 +162,7 @@ describe("designer layout values", () => {
       target: "self",
     });
     expect(updates.has("parent")).toBe(false);
-    expect(updates.get("first")).toMatchObject({ left: "150px" });
+    expect(updates.get("first")).toMatchObject({ left: "320px" });
   });
 
   it("moves block-flow layers when a multi-selection is aligned", () => {

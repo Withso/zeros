@@ -79,6 +79,14 @@ describe("Absolute position in Position", () => {
     expect(onAction).toHaveBeenCalledWith({ type: "place-freely" });
   });
 
+  it("disables multi-selection arrangement when the layers have different parents", () => {
+    const first = { ...layer("a", "absolute", "block") };
+    const second = { ...layer("b", "absolute", "block") };
+    second.layout = { ...second.layout!, parentId: "other" };
+    render(first, [first, second]);
+    expect(host!.querySelector<HTMLButtonElement>('button[aria-label="Align left"]')!.disabled).toBe(true);
+  });
+
   it("is absent where the parent has no auto layout", () => {
     expect(render(layer("child", "absolute", "block")).box).toBeNull();
   });
