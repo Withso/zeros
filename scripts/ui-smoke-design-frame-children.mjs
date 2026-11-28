@@ -1,4 +1,4 @@
-import { designFrameElementBox, designLayoutMenuState, openLayersDrawer } from "./ui-smoke-design-helpers.mjs";
+import { designFrameElementBox, designLayoutMenuState, openLayersDrawer, waitForDesignInspectorSelection } from "./ui-smoke-design-helpers.mjs";
 
 // An empty authored frame exercises the real creation path, unlike the seeded
 // landing page. All source edits go through the harness's in-memory Design API.
@@ -233,6 +233,7 @@ export async function runDesignFrameChildrenSmoke({ page, waitFor, check }) {
       ),
   );
   await childRow.click();
+  await waitForDesignInspectorSelection(page);
   check(
     "the grid child exposes its child alignment pad",
     (await layout

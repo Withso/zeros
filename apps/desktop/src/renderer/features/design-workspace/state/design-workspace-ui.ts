@@ -586,9 +586,11 @@ export function designSelectionUnchangedSince(
   const current = designWorkspaceView(workspaceId);
   return (
     current.selectionEvent === before.selectionEvent &&
-    current.selectedFrame === before.selectedFrame &&
+    current.ownerRevision === before.ownerRevision &&
     current.selectedNodeId === before.selectedNodeId &&
-    current.frameSelected === before.frameSelected
+    current.frameSelected === before.frameSelected &&
+    (current.selectedFrame === before.selectedFrame ||
+      (before.selectedFrame === null && !current.selectedNodeId && !current.frameSelected))
   );
 }
 

@@ -47,8 +47,9 @@ function admittedRelocation(input: unknown) {
 
 export function designRelocationRootStyles(
   input: unknown,
+  sizing?: Readonly<Record<string, string | null | undefined>>,
 ): Record<string, string> {
-  return designRelocationStyles(admittedRelocation(input));
+  return designRelocationStyles(admittedRelocation(input), sizing);
 }
 
 /** The same admitted relocation joining a flex or grid drop slot. */

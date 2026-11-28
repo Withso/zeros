@@ -12,6 +12,7 @@ import {
   designLayoutPixels,
   designLayoutToolModel,
   designLayoutToolsFit,
+  designPaddingCrowdsMoveTarget,
   designLocalAxisCursor,
   designSpacingDraft,
   designSpacingLabel,
@@ -438,7 +439,7 @@ export const DesignLayoutTools = React.memo(function DesignLayoutTools({
       interaction?.active === band.property || entry?.key === band.property || emphasized.has(band.property);
     if (
       owned ||
-      (coveredFraction(placed.target) <= 0.5 &&
+      (!designPaddingCrowdsMoveTarget(placed.target, frame.width, frame.height, zoom) && coveredFraction(placed.target) <= 0.5 &&
         !shownTargets.some((rect) => overlaps(rect, placed.target)))
     ) {
       shownBands.add(band.property);
@@ -634,10 +635,12 @@ export const DesignLayoutTools = React.memo(function DesignLayoutTools({
             if (event.key === "Enter") {
               event.preventDefault();
               commitEntry(control);
+              if (entrySettledRef.current) event.currentTarget.closest<HTMLElement>("[data-design-canvas-viewport]")?.focus({ preventScroll: true });
             } else if (event.key === "Escape") {
               event.preventDefault();
               entrySettledRef.current = true;
               setEntry(null);
+              event.currentTarget.closest<HTMLElement>("[data-design-canvas-viewport]")?.focus({ preventScroll: true });
             } else if (event.key === "ArrowUp" || event.key === "ArrowDown") {
               event.preventDefault();
               const parsed = Number.parseFloat(entry.draft);
@@ -717,6 +720,7 @@ export const DesignLayoutTools = React.memo(function DesignLayoutTools({
                   // and moves whatever the canvas finds under it.
                   if (
                     !event.altKey ||
+                    Math.min(frame.width, frame.height) * zoom <= 64 ||
                     event.metaKey ||
                     event.ctrlKey ||
                     event.button !== 0 ||

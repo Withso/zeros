@@ -8,6 +8,41 @@ export interface DesignTextInsertionMarkup {
   /** Flow is the default inside flex/grid parents; absolute placement is an
    * explicit opt-out equivalent to Figma's Ignore auto layout. */
   placement?: "absolute" | "flow";
+  typography?: Record<string, string>;
+}
+
+const typeProperties = { fontFamily: "font-family", fontSize: "font-size", fontWeight: "font-weight",
+  fontStyle: "font-style", letterSpacing: "letter-spacing", lineHeight: "line-height" } as const;
+
+export function designTextTypography(styles: Record<string, string>): Record<string, string> {
+  return Object.fromEntries(Object.keys(typeProperties).flatMap(key => {
+    const value = styles[key]?.trim();
+    // A family name may carry "&" ("Rock & Roll One"); nothing may close the
+    // declaration or the attribute it is written into.
+    const allowed = key === "fontFamily" ? /^[\p{L}\p{N} "'.,%_&-]+$/u : /^[\p{L}\p{N} "'.,%_-]+$/u;
+    return value && value.length <= 256 && allowed.test(value) ? [[key, value]] : [];
+  }));
+}
+
+/** The admitted typography as CSS properties, for a new text frame's seed. */
+export function designTextTypographyProperties(styles: Record<string, string>): Record<string, string> {
+  return Object.fromEntries(Object.entries(designTextTypography(styles))
+    .map(([key, value]) => [typeProperties[key as keyof typeof typeProperties], value]));
+}
+
+/** Browser fallback faces: a frame that never chose a font renders Times. */
+const UNSET_FONT = /^(?:"?times(?: new roman)?"?(?:\s*,\s*serif)?|serif)$/i;
+export const DESIGN_NEW_TEXT_FONT = "Inter, system-ui, sans-serif";
+
+/** Typography for a new label: the last text the user styled, else a sans
+ * face when the destination only has the browser's serif fallback. */
+export function designNewTextTypography(
+  parentStyles: Record<string, string> | undefined,
+  recent: Record<string, string> | undefined,
+): Record<string, string> | undefined {
+  if (recent && Object.keys(recent).length) return recent;
+  const family = parentStyles?.fontFamily?.trim();
+  return !family || UNSET_FONT.test(family) ? { fontFamily: DESIGN_NEW_TEXT_FONT } : undefined;
 }
 
 const DESIGN_TEXT_NODE_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
@@ -50,7 +85,9 @@ export function createDesignTextMarkup(
           1,
           finiteCoordinate(input.height ?? 1, "height"),
         )}px;`;
-  return `<div data-oid="${input.nodeId}" style="${placement}${size}margin:0;white-space:pre-wrap;overflow-wrap:anywhere;">${escapeDesignText(input.text)}</div>`;
+  const typography = Object.entries(designTextTypography(input.typography ?? {}))
+    .map(([key, value]) => `${typeProperties[key as keyof typeof typeProperties]}:${value.replace(/&/g, "&amp;").replace(/"/g, "&quot;")};`).join("");
+  return `<div data-oid="${input.nodeId}" style="${placement}${size}margin:0;white-space:pre-wrap;overflow-wrap:anywhere;${typography}">${escapeDesignText(input.text)}</div>`;
 }
 
 export function createDesignTextNodeId(): string {

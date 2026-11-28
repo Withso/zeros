@@ -1,8 +1,27 @@
 import { describe, expect, it } from "vitest";
 
-import { createDesignTextMarkup } from "../design-text-editing";
+import { createDesignTextMarkup, DESIGN_NEW_TEXT_FONT, designNewTextTypography } from "../design-text-editing";
 
 describe("design text insertion", () => {
+  it("never starts a label in the browser's Times fallback", () => {
+    expect(designNewTextTypography({ fontFamily: "Times" }, undefined)).toEqual({ fontFamily: DESIGN_NEW_TEXT_FONT });
+    expect(designNewTextTypography({ fontFamily: '"Times New Roman"' }, undefined)).toEqual({ fontFamily: DESIGN_NEW_TEXT_FONT });
+    expect(designNewTextTypography(undefined, undefined)).toEqual({ fontFamily: DESIGN_NEW_TEXT_FONT });
+    expect(designNewTextTypography({ fontFamily: "Georgia, serif" }, undefined)).toBeUndefined();
+    expect(designNewTextTypography({ fontFamily: "Times" }, { fontSize: "32px" })).toEqual({ fontSize: "32px" });
+  });
+
+  it("retains authored typography on the next label without taking markup or box styles", () => {
+    const html = createDesignTextMarkup({ nodeId: "title", text: "Title", x: 0, y: 0,
+      typography: { fontFamily: '"Open Sans", sans-serif', fontSize: "32px", fontWeight: "700", width: "20px", fontStyle: "italic;background:red" } });
+    expect(html).toContain("font-family:&quot;Open Sans&quot;, sans-serif;font-size:32px;font-weight:700;");
+    expect(html).not.toContain("width:20px");
+    expect(html).not.toContain("background:red");
+    const ampersand = createDesignTextMarkup({ nodeId: "title", text: "Title", x: 0, y: 0,
+      typography: { fontFamily: '"Rock & Roll One", sans-serif', fontSize: "16px&x" } });
+    expect(ampersand).toContain("font-family:&quot;Rock &amp; Roll One&quot;, sans-serif;");
+    expect(ampersand).not.toContain("font-size");
+  });
   it("creates stable, escaped multiline text at exact canvas coordinates", () => {
     expect(
       createDesignTextMarkup({

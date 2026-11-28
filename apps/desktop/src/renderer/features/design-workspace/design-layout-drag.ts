@@ -3,7 +3,7 @@ import type {
   DesignRuntimeNodeMove,
 } from "@zeros/protocol/design-runtime";
 import { canInsertDesignFrame } from "./design-frame-insertion";
-import { borderSize, cssSize, designFlowTransformStyles, designLayoutMode } from "./design-layout-values";
+import { borderSize, cssSize, designFlowTransformStyles, designIntrinsicSizing, designLayoutMode } from "./design-layout-values";
 import {
   DESIGN_REPARENT_HYSTERESIS_PIXELS,
   designNodeRelocation,
@@ -12,6 +12,7 @@ import {
 } from "./design-movement-geometry";
 import {
   designRelocationStyles,
+  designIntrinsicPlacementStyles,
   type DesignRelocation,
 } from "@zeros/protocol/design-relocation";
 import {
@@ -244,6 +245,7 @@ export function createDesignLayoutDropResolver(
       Object.assign(styles, {
         width: cssSize(node, "x", borderSize(node, "x")),
         height: cssSize(node, "y", borderSize(node, "y")),
+        ...designIntrinsicPlacementStyles(designIntrinsicSizing(node)),
         "flex-grow": "0",
         "flex-shrink": "0",
         "flex-basis": "auto",
@@ -318,7 +320,7 @@ export function createDesignLayoutDropResolver(
           parentId: parent.oid,
           beforeId,
           relocation,
-          styles: designRelocationStyles(relocation),
+          styles: designRelocationStyles(relocation, styles),
         };
       }
       return { nodeId: node.oid, parentId: parent.oid, beforeId, styles };

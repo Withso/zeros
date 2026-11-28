@@ -6,7 +6,7 @@
 // USED IN: DesignStyleEditor
 // ============================================
 
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import { Ellipsis, Minus, Plus } from "lucide-react";
 
 import type { DesignRuntimeNodeDetails } from "@zeros/protocol/design-runtime";
@@ -16,7 +16,7 @@ import {
   PopoverContent,
   PopoverTrigger,
 } from "../../shared/ui/primitives";
-import { DesignColorField } from "./design-color-picker";
+import { DesignColorField, requestDesignPaintPicker } from "./design-color-picker";
 import { useDesignStyleToken } from "./design-style-provenance";
 import {
   InspectorIconButton,
@@ -56,7 +56,7 @@ interface DesignStrokeSectionProps {
   ) => React.ReactNode;
   onPreview?: (styles: Record<string, string | null>) => void;
   onCancelPreview?: () => void;
-  onCommit: (styles: Record<string, string | null>, label: string) => void;
+  onCommit: (styles: Record<string, string | null>, label: string) => void | Promise<unknown>;
 }
 
 const STROKE_STYLES = [
@@ -109,6 +109,17 @@ export function designStrokeSideStyles(
   );
 }
 
+/** What a just-added stroke reads as until its save lands: the runtime's
+ * camelCase computed keys, per side as a border reports them. */
+function addedStrokeStyles(kind: StrokeKind): Record<string, string> {
+  if (kind === "outline")
+    return { outlineWidth: "1px", outlineStyle: "solid", outlineColor: DEFAULT_STROKE_COLOR, outlineOffset: "0px" };
+  const styles: Record<string, string> = { borderWidth: "1px", borderStyle: "solid", borderColor: DEFAULT_STROKE_COLOR };
+  for (const side of ["Top", "Right", "Bottom", "Left"])
+    Object.assign(styles, { [`border${side}Width`]: "1px", [`border${side}Style`]: "solid", [`border${side}Color`]: DEFAULT_STROKE_COLOR });
+  return styles;
+}
+
 function style(details: DesignRuntimeNodeDetails, property: string): string {
   return readDesignComputedStyle(details.styles, property);
 }
@@ -154,10 +165,18 @@ export function DesignStrokeSection({
   onCancelPreview,
   onCommit,
 }: DesignStrokeSectionProps) {
-  const strokes: StrokeKind[] = [
+  const confirmed: StrokeKind[] = [
     ...(borderPresent(details) ? (["border"] as const) : []),
     ...(outlinePresent(details) ? (["outline"] as const) : []),
   ];
+  // An added stroke is a row at once, as in Figma, while its save lands.
+  const [adding, setAdding] = useState<{ nodeId: string; kind: StrokeKind } | null>(null);
+  const pending = adding?.nodeId === details.oid && !confirmed.includes(adding.kind) ? adding.kind : null;
+  useEffect(() => {
+    if (adding && !pending) setAdding(null);
+  }, [adding, pending]);
+  const strokes: StrokeKind[] = pending ? (["border", "outline"] as const).filter((kind) => kind === pending || confirmed.includes(kind)) : confirmed;
+  const shown = pending ? { ...details, styles: { ...details.styles, ...addedStrokeStyles(pending) } } : details;
   const clear = (kind: StrokeKind) =>
     designPaintRemovalStyles(kind, details.authoredStyleProperties);
 
@@ -165,8 +184,14 @@ export function DesignStrokeSection({
     onCommit(clear(kind), "stroke");
 
   const add = () => {
-    if (!strokes.includes("border")) {
-      onCommit(
+    const kind: StrokeKind = strokes.includes("border") ? "outline" : "border";
+    requestDesignPaintPicker(`${kind}-color`);
+    setAdding({ nodeId: details.oid, kind });
+    void Promise.resolve(addStroke(kind)).catch(() => setAdding(null));
+  };
+  const addStroke = (kind: StrokeKind) => {
+    if (kind === "border") {
+      return onCommit(
         {
           "border-width": "1px",
           "border-style": "solid",
@@ -174,9 +199,8 @@ export function DesignStrokeSection({
         },
         "stroke",
       );
-      return;
     }
-    onCommit(
+    return onCommit(
       {
         "outline-width": "1px",
         "outline-style": "solid",
@@ -236,7 +260,7 @@ export function DesignStrokeSection({
         <StrokeRows
           key={kind}
           kind={kind}
-          details={details}
+          details={shown}
           selection={selection}
           selectionCount={selectionCount}
           disabled={disabled}
@@ -365,9 +389,9 @@ function StrokeRows({
           mixed={mixed(colorProperty)}
           onPreview={(value) => onPreview?.({ [colorProperty]: value })}
           onCancelPreview={onCancelPreview}
-          onCommit={(value) =>
-            onCommit({ [colorProperty]: value }, `${name} color`)
-          }
+          onCommit={async (value) => {
+            await onCommit({ [colorProperty]: value }, `${name} color`);
+          }}
         />
       </div>
       <PopoverContent

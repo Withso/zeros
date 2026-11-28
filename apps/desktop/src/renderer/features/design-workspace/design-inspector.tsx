@@ -79,6 +79,7 @@ import {
   registerDesignHistoryCommand,
 } from "./state/design-history-commands";
 import { useDesignHistoryStep } from "./use-design-history-step";
+import { designShiftAConvertsInPlace } from "./design-frame-insertion";
 import {
   designAutoLayoutFlow,
   designAutoLayoutUpdates,
@@ -1806,6 +1807,7 @@ export const DesignInspector = React.memo(function DesignInspector({
   zoomActionsRef,
   onAskAgent,
   panelVisible = true,
+  selectionSettlingRef,
 }: DesignInspectorProps) {
   const styleOriginLabel = useDesignStyleOriginLabel(workspaceId);
   const tokenCatalog = useDesignFrameTokenCatalog(workspaceId, frame?.file);
@@ -2101,7 +2103,12 @@ export const DesignInspector = React.memo(function DesignInspector({
       const editableTarget = isNativeHistoryTarget(event.target);
       if (!isDesignTextEntryTarget(event.target) && event.shiftKey && !event.metaKey && !event.ctrlKey && !event.altKey &&
         event.key.toLowerCase() === "a") {
-        // Figma's Shift+A. The motion timeline is Shift+M.
+        // A selected frame, or one frame layer that holds layers, is laid out
+        // in place; the canvas wraps any other layer selection.
+        const view = designWorkspaceView(workspaceId);
+        const context = styleEditContextRef.current;
+        if (view.selectedNodeId && (view.selectedNodeIds.length > 1 || context.selectedNodeId !== view.selectedNodeId ||
+          !designShiftAConvertsInPlace([context.elementDetails]))) return;
         event.preventDefault();
         void layoutShortcutRef.current({ type: "auto-layout", flow: "column", infer: true }).catch((error: unknown) =>
           toast.error("Couldn't add auto layout", { description: errorMessage(error) }));
@@ -2241,9 +2248,11 @@ export const DesignInspector = React.memo(function DesignInspector({
     const variant = state.byWorkspace[workspaceId]?.frames[frame.file];
     return variant && designDeclaredVariants(frame.component).includes(variant) ? variant : null;
   });
+  const styleActiveNow = active && Boolean(elementDetails);
+  const styleEditableNow = !editsDisabled && Boolean(presentedElementDetails) && !handed;
   const styleEditContextRef = useRef({
-    active: active && Boolean(elementDetails),
-    editable: !editsDisabled && Boolean(presentedElementDetails) && !handed,
+    get active() { return styleActiveNow && !selectionSettlingRef?.current; },
+    get editable() { return styleEditableNow && !selectionSettlingRef?.current; },
     pageId: activePageId ?? null,
     directoryKey: styleDirectoryKey,
     workspaceId,
@@ -2256,8 +2265,8 @@ export const DesignInspector = React.memo(function DesignInspector({
     stateContext: shownState,
   });
   styleEditContextRef.current = {
-    active: active && Boolean(elementDetails),
-    editable: !editsDisabled && Boolean(presentedElementDetails) && !handed,
+    get active() { return styleActiveNow && !selectionSettlingRef?.current; },
+    get editable() { return styleEditableNow && !selectionSettlingRef?.current; },
     pageId: activePageId ?? null,
     directoryKey: styleDirectoryKey,
     workspaceId,
@@ -3119,7 +3128,8 @@ export const DesignInspector = React.memo(function DesignInspector({
           updates =
             action.type === "auto-layout"
               ? designAutoLayoutUpdates(details, liveChildren,
-                  action.infer ? designInferredAutoLayoutFlow(liveChildren) : action.flow)
+                  action.infer ? designInferredAutoLayoutFlow(liveChildren) : action.flow,
+                  { drawnSpacing: action.infer === true })
               : designLayoutChildUpdates(details, liveChildren, action);
         } else if (action.type === "sizing" && action.mode === "relative") {
           // A percentage resolves against the parent, so each layer reads its
@@ -3285,6 +3295,10 @@ export const DesignInspector = React.memo(function DesignInspector({
               update.styles,
             ));
           }
+          // Shift+A paints in the frame now; the saved source replaces the
+          // preview, and a failed save restores every previewed layer.
+          if (action.type === "auto-layout")
+            for (const update of batch) void runtime.previewStyles(update.nodeId, update.styles).catch(() => null);
         }
         assertFrameCurrent();
         const proposedDetails = await runtime.measureLayout({

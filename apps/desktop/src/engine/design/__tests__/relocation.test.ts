@@ -107,6 +107,35 @@ describe("bounded source-preserving relocation", () => {
     expect(await listDesignFrames(workspace)).toHaveLength(1);
   });
 
+  it("pastes a copy into an auto layout parent of its own frame in flow, not floating above it", async () => {
+    const { file, input } = await fixture();
+    const source = (await readFile(file, "utf8")).replace('<div data-oid="destination" style="position:relative"></div>',
+      '<section data-oid="stack" style="display:flex;gap:8px"><p data-oid="first">First</p></section>');
+    await writeFile(file, source);
+    const identity = await readDesignFrameRenderIdentity(workspace, input.frame);
+    const result = await transferDesignNode(workspace, { ...input, sourceVersion: identity.sourceVersion, duplicateNodeId: "copy",
+      destinationFrame: input.frame, destinationSourceVersion: identity.sourceVersion, parentId: "stack", beforeId: null,
+      styles: { position: "relative", left: "auto", top: "auto", right: "auto", bottom: "auto", "flex-grow": "0", "flex-shrink": "0", "flex-basis": "auto", order: "0" } });
+    const pasted = (await captureDesignFrameRestorePoint(workspace, input.frame)).source;
+    const style = /data-oid="copy"[^>]*style="([^"]*)"/.exec(pasted)?.[1] ?? "";
+    expect(result.nodeId).toBe("copy");
+    expect(style).toMatch(/position:\s*relative/);
+    expect(style).not.toMatch(/position:\s*absolute/);
+    expect(style).not.toMatch(/240px/);
+    expect(pasted).toMatch(/data-oid="child"[^>]*position:absolute/);
+  });
+
+  it("copies a layer holding a component instance within its own frame, where the definition stays", async () => {
+    const { file, input } = await fixture();
+    const source = (await readFile(file, "utf8")).replace('<img data-oid="image"', '<zd-card data-oid="card"></zd-card><img data-oid="image"');
+    await writeFile(file, source);
+    const identity = await readDesignFrameRenderIdentity(workspace, input.frame);
+    await transferDesignNode(workspace, { ...input, sourceVersion: identity.sourceVersion, duplicateNodeId: "copy",
+      destinationFrame: input.frame, destinationSourceVersion: identity.sourceVersion, parentId: "destination" });
+    const pasted = (await captureDesignFrameRestorePoint(workspace, input.frame)).source;
+    expect(pasted.match(/<zd-card /g)).toHaveLength(2);
+    expect(pasted).toContain('data-oid="copy"');
+  });
   it("refuses a component instance inside the moving layer without changing source or catalog", async () => {
     const { file, input } = await fixture();
     const source = (await readFile(file, "utf8")).replace('<img data-oid="image"', '<zd-card data-oid="card"></zd-card><img data-oid="image"');

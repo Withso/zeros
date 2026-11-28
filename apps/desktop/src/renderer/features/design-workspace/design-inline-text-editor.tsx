@@ -48,6 +48,7 @@ export interface NewInlineTextEdit extends InlineTextEditBase {
    * source yet. Canvas-owned text falls back to the same black system text the
    * generated document uses. */
   inheritedStyles: Record<string, string>;
+  typography?: Record<string, string>;
 }
 
 export type InlineTextEdit = ExistingInlineTextEdit | NewInlineTextEdit;

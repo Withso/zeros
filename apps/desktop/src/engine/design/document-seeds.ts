@@ -48,6 +48,8 @@ export const TEXT_FRAME_SEED = (
   _height: number,
   fixedSize: boolean,
   tokensHref = "./tokens.css",
+  /** Validated declarations, as `designTextSeedTypography` returns them. */
+  typography = "",
 ): string => `<!doctype html>
 <html>
   <head>
@@ -61,7 +63,7 @@ export const TEXT_FRAME_SEED = (
     </style>
   </head>
   <body>
-    <div data-oid="${escapeAttribute(nodeId)}">${escapeText(text)}</div>
+    <div data-oid="${escapeAttribute(nodeId)}"${typography ? ` style="${escapeAttribute(typography)}"` : ""}>${escapeText(text)}</div>
   </body>
 </html>
 `;

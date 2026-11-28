@@ -82,6 +82,7 @@ import {
 } from "../../shared/ui/primitives/context-menu";
 import {
   Input,
+  Button,
   Toolbar,
   toast,
 } from "../../shared/ui/primitives";
@@ -144,6 +145,7 @@ import {
   zoomDesignViewportAtPoint,
   DESIGN_VIEWPORT_NO_INSETS,
   type DesignHighResolutionViewportTile,
+  type DesignCanvasRect,
   type DesignResizeHandle,
   type DesignViewport,
   type DesignViewportInsets,
@@ -156,7 +158,10 @@ import {
 import {
   canInsertDesignFrame,
   designDrawParentAt,
+  designDrawnFrameWrapOperations,
   designFrameInsertion,
+  designTreeChildIds,
+  designWrapInFlow,
 } from "./design-frame-insertion";
 import {
   createDesignGestureLoop,
@@ -184,7 +189,7 @@ import { startDesignLayoutDrag } from "./design-layout-drag-gesture";
 import { designFrameCopyGeometry, presentDesignFrameCopy, startDesignFrameCopy } from "./design-frame-copy-gesture";
 import { handDesignSelectionPresentation } from "./state/design-selection-handoff";
 import { DESIGN_REPARENT_HYSTERESIS_PIXELS, designMovementDelta, designNodeMovementStyles, designNudgeStep } from "./design-movement-geometry";
-import { designSelectionMutationTargets } from "./design-selected-targets";
+import { designSelectionFitRects, designSelectionMutationTargets } from "./design-selected-targets";
 import {
   DESIGN_SPACING_DRAG_THRESHOLD,
   designConstraintGuidesApply,
@@ -198,6 +203,9 @@ import {
   designSpacingModifiers,
   type DesignGapProperty,
   type DesignSizeBadgeMode,
+  designRadiusBase,
+  designRadiusDragValue,
+  designRadiusHandleFits,
 } from "./design-layout-tools";
 import {
   designCanvasFrameAt,
@@ -221,8 +229,12 @@ import { resolveDesignSelectionShortcut } from "./design-selection-shortcuts";
 import { captureDesignFrameComponentCopy } from "./state/design-component-variants";
 import {
   createDesignTextMarkup,
+  designNewTextTypography,
+  designTextTypography,
+  designTextTypographyProperties,
   createDesignTextNodeId,
 } from "./design-text-editing";
+import { designClipboardFollowedFrame, designClipboardPasteAllowed } from "./design-clipboard";
 import { DesignThemeEditor } from "./design-theme-editor";
 import { captureDeferredFocus } from "../../shared/ui/deferred-focus";
 import { designThemeView, effectiveDesignTheme } from "./design-themes";
@@ -386,7 +398,7 @@ type FrameGeometryPreview = {
   settled: boolean;
   commit?: Promise<DesignCanvasFrameWire | undefined>;
 };
-type DesignCanvasTool = "select" | "frame" | "text" | DesignCanvasItemTool;
+type DesignCanvasTool = "select" | "frame" | "rectangle" | "text" | DesignCanvasItemTool;
 
 interface CanvasHitStackMenu {
   frame: DesignCanvasFrameWire;
@@ -649,6 +661,13 @@ export const DesignCanvas = React.memo(function DesignCanvas({
       ] ?? null
     );
   });
+  const recentType = useRef<{ owner: string; styles: Record<string, string> } | null>(null);
+  useEffect(() => {
+    if (active && selectedNodeDetails && canEditDesignNodeText(selectedNodeDetails) &&
+      selectedNodeDetails.authoredStyleProperties?.some(key => /^(font|letter-spacing|line-height)/.test(key))) {
+      recentType.current = { owner: canvasDocumentOwner, styles: designTextTypography(selectedNodeDetails.styles) };
+    }
+  }, [active, canvasDocumentOwner, selectedNodeDetails]);
   // A selected canvas frame edits its root: the seeded frame root element or
   // the document body. This is the same target the inspector resolves.
   const selectedFrameRootDetails = useDesignRuntimeStore((state) => {
@@ -1763,18 +1782,13 @@ export const DesignCanvas = React.memo(function DesignCanvas({
 
   /** Fit a stable frame set from current DOM bounds without awaiting data. */
   const fitFrames = useCallback(
-    (frames: readonly DesignFrameView[]) => {
+    (frames: readonly DesignCanvasRect[]) => {
       if (!workspaceId || frames.length === 0) return;
       if (canvasPageOwner && !isCurrentDesignPageOwner(canvasPageOwner)) return;
       const bounds = viewportRef.current?.getBoundingClientRect();
       if (!bounds) return;
       const next = fitDesignRects(
-        frames.map((frame) => ({
-          x: frame.x,
-          y: frame.y,
-          width: frame.width,
-          height: frame.height,
-        })),
+        frames,
         { width: bounds.width, height: bounds.height },
         undefined,
         measureDesignCanvasInsets(viewportRef.current),
@@ -1985,16 +1999,17 @@ export const DesignCanvas = React.memo(function DesignCanvas({
    * inspector moves straight to its full properties; the drawn rectangle
    * covers the canvas until the frame paints. */
   const createFrame = useCallback(
-    async (geometry?: DesignFrameGeometryWire) => {
+    async (geometry?: DesignFrameGeometryWire, title?: string, fitCreated = false) => {
       if (!workspaceId || creatingFrameRef.current) return null;
       creatingFrameRef.current = true;
       setCreatingFrame(true);
       const selectionBefore = designWorkspaceView(workspaceId);
+      const lifetime = canvasLifetimeRef.current;
       let created: DesignCanvasFrameWire | null = null;
       try {
         const result = await createDesignFrameAndRefresh(
           workspaceId,
-          undefined,
+          title,
           geometry,
           undefined,
           canvasPageOwner?.pageId,
@@ -2014,10 +2029,11 @@ export const DesignCanvas = React.memo(function DesignCanvas({
       }
       if (!created) return null;
       const frame = created;
-      if (!geometry) fitFrames([frame]);
+      if (canvasLifetimeRef.current !== lifetime || !designSelectionUnchangedSince(workspaceId, selectionBefore)) return frame;
+      if (!geometry || fitCreated) fitFrames([frame]);
       primeDesignFrameIntent(workspaceId, frame.file);
       void waitForDesignRuntimeFrame(workspaceId, frame.file, frame.sourceVersion, 1_000).then(() => {
-        if (canvasPageOwner && !isCurrentDesignPageOwner(canvasPageOwner)) return;
+        if (canvasLifetimeRef.current !== lifetime || (canvasPageOwner && !isCurrentDesignPageOwner(canvasPageOwner))) return;
         // Any selection the person made meanwhile wins over the creation's,
         // including choosing the same target again or clearing it.
         if (!designSelectionUnchangedSince(workspaceId, selectionBefore)) return;
@@ -2199,6 +2215,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
                 nodeId: edit.nodeId,
                 text: draft,
                 fixedSize: edit.width !== undefined,
+                ...(edit.typography ? { typography: designTextTypographyProperties(edit.typography) } : {}),
               },
               canvasPageOwner?.pageId,
             );
@@ -2240,6 +2257,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
               x: edit.x,
               y: edit.y,
               placement: edit.placement,
+              typography: edit.typography,
               ...(edit.width === undefined
                 ? {}
                 : { width: edit.width, height: edit.height }),
@@ -2521,6 +2539,8 @@ export const DesignCanvas = React.memo(function DesignCanvas({
     async (duplicateMode: "copy" | "duplicate" | "independent" = "duplicate", target?: {
       frame: DesignFrameView;
       owner: ReturnType<typeof captureDesignPageOwner>;
+      /** A paste: the copy goes to the owner's page, wherever its frame is. */
+      anyPage?: boolean;
     }) => {
       if (!workspaceId) return;
       const selected = designWorkspaceView(workspaceId);
@@ -2546,7 +2566,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
         return;
       }
       const owner = target?.owner ?? captureDesignPageOwner(workspaceId);
-      if (!isCurrentDesignPageOwner(owner) || (target && frame.pageId !== owner.pageId)) {
+      if (!isCurrentDesignPageOwner(owner) || (target && !target.anyPage && frame.pageId !== owner.pageId)) {
         toast.error("The frame's page changed before it could be copied.");
         return;
       }
@@ -4819,6 +4839,15 @@ export const DesignCanvas = React.memo(function DesignCanvas({
       styles: Record<string, string>,
     ) => {
       if (!workspaceId || !active || isDesignComponentPartNodeId(details.oid)) return Promise.resolve();
+      // Paint the value in this frame before the save round trip; the saved
+      // source replaces the preview.
+      void previewDesignNodeStylesTransient({
+        workspaceId,
+        frame: frame.file,
+        sourceVersion: frame.sourceVersion,
+        nodeId: details.oid,
+        styles,
+      }).catch(() => {});
       publishDesignGestureLivePreview(
         workspaceId,
         frame.file,
@@ -4847,6 +4876,52 @@ export const DesignCanvas = React.memo(function DesignCanvas({
     },
     [active, workspaceId],
   );
+
+  const radiusControl = (frame: DesignCanvasFrameWire, details: DesignRuntimeNodeDetails) => {
+    const box = designSelectionBox(details);
+    const overlay = designSelectionOverlayFrame(box);
+    if (!workspaceId || activeTool !== "select" || !designRadiusHandleFits(overlay.width, overlay.height, view.zoom) ||
+      designRuntimeLayerLabel(details) === "Text" || designCanvasStyleToolsBlocked(frame, [details.oid])) return null;
+    const base = designRadiusBase(details.styles.borderTopLeftRadius, box.width, box.height);
+    const commit = (value: number) => commitInlineSpacing(frame, details, { "border-radius": `${value}px` });
+    return <span role="slider" tabIndex={0} aria-label="Corner radius" aria-valuenow={base} aria-valuemin={0}
+      aria-valuemax={Math.max(base, Math.floor(Math.min(box.width, box.height) / 2))}
+      data-design-controls="" data-design-radius-handle="" className="zd-design-radius-handle"
+      onKeyDown={event => {
+        if (!["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"].includes(event.key)) return;
+        event.preventDefault(); event.stopPropagation();
+        const step = (event.shiftKey ? 10 : 1) * (["ArrowLeft", "ArrowDown"].includes(event.key) ? -1 : 1);
+        void commit(designRadiusDragValue(base, { x: step, y: step }, box.width, box.height));
+      }}
+      onPointerDown={event => {
+        if (!event.isPrimary || event.button !== 0 || spacePressedRef.current) return;
+        event.preventDefault(); event.stopPropagation();
+        gestureCancelRef.current?.();
+        const target = event.currentTarget, sx = event.clientX, sy = event.clientY;
+        const args = { workspaceId, frame: frame.file, sourceVersion: frame.sourceVersion, nodeId: details.oid };
+        const loop = createDesignGestureLoop({ request: styles => previewDesignNodeStylesTransient({ ...args, styles }) });
+        let latest = base;
+        const clean = () => { delete target.dataset.value; gestureCancelRef.current = null; };
+        gestureCancelRef.current = beginDesignPointerGesture({ target, pointerId: event.pointerId, cursor: "nwse-resize",
+          onMove: e => {
+            const z = liveDesignZoom();
+            const delta = designSelectionLocalDelta({ x: (e.clientX - sx) / z, y: (e.clientY - sy) / z }, box);
+            const value = designRadiusDragValue(base, delta, box.width, box.height);
+            if (latest === value) return;
+            releaseDesignNodeStateOn(workspaceId, frame.file, details.oid);
+            latest = value;
+            target.dataset.value = `Radius ${value}`;
+            const styles = { "border-radius": `${value}px` };
+            publishDesignGestureLivePreview(workspaceId, frame.file, details.oid, styles);
+            loop.author(styles);
+          },
+          onFinish: () => { loop.finish(); clean(); if (latest !== base) void commit(latest);
+            else { clearDesignLivePreview(workspaceId, frame.file, details.oid); void clearDesignNodeStylePreviewTransient(args).catch(() => {}); } },
+          onCancel: () => { loop.stop(); clean(); clearDesignLivePreview(workspaceId, frame.file, details.oid);
+            void clearDesignNodeStylePreviewTransient(args).catch(() => {}); },
+        });
+      }} />;
+  };
 
   const startNodeGroupMove = useCallback(
     (
@@ -6294,6 +6369,100 @@ export const DesignCanvas = React.memo(function DesignCanvas({
     ],
   );
 
+  const clipboardRef = useRef<{
+    token: string; frame: DesignCanvasFrameWire; nodeId: string | null;
+    owner: ReturnType<typeof captureDesignPageOwner>;
+    directoryRevision: number | undefined;
+    appearance: Promise<DesignRuntimeNodeDetails | null>;
+    component: ReturnType<typeof captureDesignFrameComponentCopy>;
+  } | null>(null);
+  useEffect(() => {
+    if (!active || !workspaceId || !folder) return;
+    const mime = "application/x-zeros-design-selection";
+    const owns = (event: ClipboardEvent) => !gestureCancelRef.current && !event.defaultPrevented &&
+      !isEditableHotkeyTarget(event.target) && document.activeElement?.closest("[data-design-workspace-surface]") &&
+      !window.getSelection()?.toString();
+    const copy = (event: ClipboardEvent) => {
+      if (!owns(event) || !event.clipboardData) return;
+      const view = designWorkspaceView(workspaceId);
+      const frame = designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data?.frames.find(item => item.file === view.selectedFrame);
+      if (!frame || (!view.frameSelected && !view.selectedNodeId)) return;
+      if (view.selectedTargets.length > 1 || view.selectedNodeIds.length > 1) {
+        toast.info("Copy one layer or frame at a time."); return;
+      }
+      const nodeId = frame.kind === "text" ? null : view.selectedNodeId;
+      if (nodeId && isDesignComponentPartNodeId(nodeId)) return;
+      const component = nodeId ? null : captureDesignFrameComponentCopy(workspaceId, frame);
+      if (component?.identityUnknown) { toast.error("This frame's component identity is unavailable."); return; }
+      const runtime = designFrameRuntime(workspaceId, frame.file);
+      const rootId = useDesignRuntimeStore.getState().byWorkspace[workspaceId]?.frames[frame.file]?.snapshot?.frame.oid;
+      const token = crypto.randomUUID();
+      clipboardRef.current = { token, frame, nodeId, component, owner: captureDesignPageOwner(workspaceId),
+        directoryRevision: view.directoryRevision,
+        appearance: runtime?.sourceVersion === frame.sourceVersion
+          ? runtime.getNodeDetails(nodeId ?? rootId ?? DESIGN_RUNTIME_DOCUMENT_BODY_ID, undefined, { relocation: true }).catch(() => null)
+          : Promise.resolve(null) };
+      event.clipboardData.setData(mime, token);
+      event.clipboardData.setData("text/plain", `Zeros Design selection: ${token}`);
+      event.preventDefault();
+    };
+    const paste = (event: ClipboardEvent) => {
+      const clip = clipboardRef.current;
+      if (!clip || !owns(event)) return;
+      const owner = captureDesignPageOwner(workspaceId);
+      if (!designClipboardPasteAllowed({ workspaceId: clip.owner.workspaceId, directoryId: clip.owner.directoryId, directoryRevision: clip.directoryRevision },
+        { workspaceId, directoryId: owner.directoryId, directoryRevision: designWorkspaceView(workspaceId).directoryRevision })) return;
+      if (event.clipboardData?.getData(mime) !== clip.token &&
+        event.clipboardData?.getData("text/plain") !== `Zeros Design selection: ${clip.token}`) return;
+      event.preventDefault();
+      const destinationView = designWorkspaceView(workspaceId);
+      const frames = designFrameViews(designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data);
+      const source = frames.find(item => item.file === clip.frame.file);
+      if (source?.sourceVersion !== clip.frame.sourceVersion) { toast.error("The copied source changed. Copy it again."); return; }
+      const destination = frames.find(item => item.file === destinationView.selectedFrame);
+      if (!clip.nodeId && (!destination || (!destinationView.frameSelected && !destinationView.selectedNodeId) ||
+        (destination.file === source.file && !destinationView.selectedNodeId))) {
+        void duplicateSelectedFrame("copy", { frame: source, owner, anyPage: true }); return;
+      }
+      const lifetime = canvasLifetimeRef.current;
+      const current = () => lifetime === canvasLifetimeRef.current && isCurrentDesignPageOwner(owner);
+      const save = (async () => {
+        if (!destination || destination.kind === "text") throw new Error("Select a destination frame.");
+        const appearance = await clip.appearance;
+        if (!current() || !designSelectionUnchangedSince(workspaceId, destinationView)) return;
+        if (!appearance) throw new Error("The copied layer was not ready. Copy it again.");
+        const runtime = designFrameRuntime(workspaceId, destination.file);
+        if (!runtime) throw new Error("The destination frame is still loading.");
+        const selected = destinationView.selectedNodeId;
+        const target = selected ? await runtime.getNodeDetails(selected) : (await runtime.getSnapshot()).frame;
+        if (!current() || !designSelectionUnchangedSince(workspaceId, destinationView)) return;
+        const same = source.file === destination.file && selected === clip.nodeId;
+        const parentId = target && (same || !(canInsertDesignFrame(target) || target.tag === "body") ? target.layout?.parentId : target.oid);
+        if (!parentId) throw new Error("Select a container to paste into.");
+        const pasted = await transferDesignLayerOnCanvas({ workspaceId, folder, frame: clip.frame, frames, details: appearance,
+          duplicateNodeId: `copy-${crypto.randomUUID()}`, componentCopy: clip.component?.componentCopy,
+          statePreview: clip.component?.statePreview, destination, pasteParentId: parentId, origin: destination,
+          detach: false, requireRelocation: true, isCurrent: current,
+          presented: async next => { await waitForDesignFrameRuntime(workspaceId, next.file, 2_000, { sourceVersion: next.sourceVersion }); } });
+        if (!pasted && current()) throw new Error("The paste destination changed.");
+        const advanced = designClipboardFollowedFrame({ frame: clip.frame.file, nodeId: clip.nodeId }, destination.file, pasted,
+          designFrameViews(designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data));
+        if (advanced && isPreparedDesignFrame(advanced) && clipboardRef.current === clip) {
+          const nodeId = clip.nodeId!;
+          clipboardRef.current = { ...clip, frame: advanced,
+            appearance: waitForDesignFrameRuntime(workspaceId, advanced.file, 2_000, { sourceVersion: advanced.sourceVersion })
+              .then(runtime => runtime ? runtime.getNodeDetails(nodeId, undefined, { relocation: true }) : null)
+              .catch(() => null) };
+        }
+      })();
+      savedEditingSession?.retain(save);
+      void save.catch(error => { if (current()) toast.error("Couldn't paste the selection", { description: errorMessage(error) }); });
+    };
+    window.addEventListener("copy", copy);
+    window.addEventListener("paste", paste);
+    return () => { window.removeEventListener("copy", copy); window.removeEventListener("paste", paste); };
+  }, [active, workspaceId, folder, duplicateSelectedFrame, savedEditingSession]);
+
   // Canvas shortcuts are focus-scoped and attach only while the visible design
   // surface is active, protecting other inputs and retained Home shells.
   useEffect(() => {
@@ -6349,23 +6518,73 @@ export const DesignCanvas = React.memo(function DesignCanvas({
       const shortcutFrame = workspaceId ? designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data?.frames.find(frame => frame.file === shortcutView.selectedFrame) : undefined;
       const selectedNodeIsTarget = Boolean(shortcutFrame && shortcutView.selectedNodeId);
       const selectedFrameIsTarget = Boolean(shortcutFrame && shortcutView.frameSelected);
+      if (designSurfaceFocused && !editableTarget && shortcutFrame && selectedNodeDetails && canEditDesignNodeText(selectedNodeDetails) &&
+        selectedNodeDetails.oid === shortcutView.selectedNodeId && shortcutView.selectedNodeIds.length === 1 &&
+        !designCanvasStyleToolsBlocked(shortcutFrame, [selectedNodeDetails.oid]) &&
+        (event.metaKey || event.ctrlKey) && !event.shiftKey && !event.altKey && event.code === "KeyB") {
+        event.preventDefault();
+        if (!event.repeat) {
+          const weight = selectedNodeDetails.styles.fontWeight;
+          void commitInlineSpacing(shortcutFrame, selectedNodeDetails, { "font-weight": weight === "bold" || Number(weight) >= 600 ? "400" : "700" });
+        }
+        return;
+      }
+      if (!editableTarget && designSurfaceFocused && shortcutFrame && shortcutView.selectedNodeId && workspaceId && folder &&
+        event.shiftKey && !event.metaKey && !event.ctrlKey && !event.altKey && event.code === "KeyA") {
+        event.preventDefault();
+        if (event.repeat) return;
+        const owner = captureDesignPageOwner(workspaceId);
+        const lifetime = canvasLifetimeRef.current;
+        const current = () => lifetime === canvasLifetimeRef.current && isCurrentDesignPageOwner(owner) &&
+          designSelectionUnchangedSince(workspaceId, shortcutView);
+        const save = (async () => {
+          if (shortcutView.selectedTargets.some(t => t.frame !== shortcutFrame.file)) throw new Error("Select layers in one frame.");
+          const ids = shortcutView.selectedNodeIds;
+          if (designCanvasStyleToolsBlocked(shortcutFrame, ids)) throw new Error("Wrap layers in their main component instead.");
+          const runtime = designFrameRuntime(workspaceId, shortcutFrame.file);
+          if (!runtime || runtime.sourceVersion !== shortcutFrame.sourceVersion) throw new Error("The frame is still preparing.");
+          const nodes = await Promise.all(ids.map(id => runtime.getNodeDetails(id)));
+          const parentId = nodes[0]?.layout?.parentId;
+          const parent = parentId ? await runtime.getNodeDetails(parentId) : null;
+          if (!parent || nodes.some(n => !n)) throw new Error("Select layers inside a container.");
+          if (!current()) return;
+          const id = `flow-${crypto.randomUUID()}`;
+          const operations = designWrapInFlow(parent, nodes as DesignRuntimeNodeDetails[], id);
+          const result = await applyDesignEditCached(workspaceId, shortcutFrame, { schemaVersion: 1, transactionId: `desktop:${crypto.randomUUID()}`,
+            actor: { kind: "human", id: "desktop" }, intent: "Wrap selection in flow", createdAt: Date.now(), operations },
+            { isCurrent: current, movementGuard: { sourceVersion: shortcutFrame.sourceVersion, geometry: frameGeometry(shortcutFrame) } });
+          const frame = result.snapshot?.frames.find(f => f.file === shortcutFrame.file);
+          // The saved wrapper reaches the runtime with the next source; its
+          // identity is selected now and its details follow.
+          if (frame && current()) void selectDesignNode({ workspaceId, folder, frame, nodeId: id, owner }).catch(() => {});
+        })();
+        savedEditingSession?.retain(save);
+        void save.catch(error => { if (current()) toast.error("Couldn't wrap selection in flow", { description: errorMessage(error) }); });
+        return;
+      }
       const selectionShortcut = resolveDesignSelectionShortcut(
         event,
         editableTarget,
         designSurfaceFocused && (selectedNodeIsTarget || selectedFrameIsTarget),
       );
       if (selectionShortcut) {
+        if (selectionShortcut === "copy") {
+          if (window.getSelection()?.toString()) return;
+          // Claim the chord before the shell's copy-worktree-path fallback,
+          // then dispatch the native copy event while user activation is live.
+          event.preventDefault();
+          document.execCommand("copy");
+          return;
+        }
         event.preventDefault();
         if (selectionShortcut === "delete") {
           if (selectedNodeIsTarget) void deleteSelectedNode();
           else if (shortcutFrame) void deleteSelectedFrame(shortcutFrame);
         } else {
-          const duplicateMode =
-            selectionShortcut === "copy" ? "copy" : "duplicate";
           if (shortcutFrame?.kind === "text" || !selectedNodeIsTarget) {
-            void duplicateSelectedFrame(duplicateMode);
+            void duplicateSelectedFrame();
           } else {
-            void duplicateSelectedNode(duplicateMode);
+            void duplicateSelectedNode();
           }
         }
         return;
@@ -6547,6 +6766,11 @@ export const DesignCanvas = React.memo(function DesignCanvas({
           activateTool("text");
           return;
         }
+        if (event.code === "KeyR") {
+          event.preventDefault();
+          activateTool("rectangle");
+          return;
+        }
         if (
           event.key.toLowerCase() === "f" ||
           event.key.toLowerCase() === "a"
@@ -6586,7 +6810,10 @@ export const DesignCanvas = React.memo(function DesignCanvas({
         fitFrames(frameViews);
       } else if (event.code === "Digit2" && selectedDescription) {
         event.preventDefault();
-        fitFrames([selectedDescription]);
+        const targets = shortcutView.selectedTargets.length ? shortcutView.selectedTargets :
+          [{ frame: selectedDescription.file, nodeId: shortcutView.selectedNodeId ?? undefined }];
+        const runtimeFrames = useDesignRuntimeStore.getState().byWorkspace[workspaceId!]?.frames;
+        fitFrames(designSelectionFitRects(targets, frameViews, (file, id) => runtimeFrames?.[file]?.detailsByNode[id]?.rect));
       } else if (event.code === "Digit0") {
         event.preventDefault();
         zoomAt(1);
@@ -6642,6 +6869,9 @@ export const DesignCanvas = React.memo(function DesignCanvas({
     deleteSelectedNode,
     duplicateSelectedFrame,
     duplicateSelectedNode,
+    commitInlineSpacing,
+    folder,
+    savedEditingSession,
     finishInlineTextTool,
     finishNodeNudge,
     fitFrames,
@@ -7041,13 +7271,24 @@ export const DesignCanvas = React.memo(function DesignCanvas({
         if (!parent || !canInsertDesignFrame(parent))
           throw new Error("Select a drawable frame for the new child.");
         const nodeId = `frame-${crypto.randomUUID()}`;
-        const { operations, insert, parentStyles } = designFrameInsertion(
+        const { operations: insertion, insert, parentStyles, bounds } = designFrameInsertion(
           parent,
           nodeId,
           start,
           end,
         );
+        // A drawn frame adopts the free layers it fully encloses, as in Figma.
+        const runtimeSnapshot = useDesignRuntimeStore.getState().byWorkspace[workspaceId]?.frames[owner.file]?.snapshot;
+        const childIds = end && runtimeSnapshot
+          ? designTreeChildIds(runtimeSnapshot.tree, parent.oid, runtimeSnapshot.frame.oid)
+          : [];
+        const wrapped = childIds.length && childIds.length <= 64
+          ? designDrawnFrameWrapOperations(parent, nodeId, bounds,
+            await Promise.all(childIds.map(id => runtime.getNodeDetails(id).catch(() => null))))
+          : [];
+        const operations = [...insertion, ...wrapped];
         if (
+          !wrapped.length &&
           runtime.supports("previewInsert") &&
           runtime.sourceVersion === owner.sourceVersion &&
           parent.sourceVersion === owner.sourceVersion
@@ -7098,7 +7339,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
             documentId: foundation.summary.documentId,
             baseRevision: foundation.summary.revision,
             actor: { kind: "human", id: "desktop" },
-            intent: "Create child frame",
+            intent: wrapped.length ? "Frame selection" : "Create child frame",
             createdAt: Date.now(),
             operations,
           },
@@ -7162,7 +7403,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
       if (
         !workspaceId ||
         !active ||
-        activeTool !== "frame" ||
+        (activeTool !== "frame" && activeTool !== "rectangle") ||
         creatingFrameRef.current ||
         !event.isPrimary ||
         event.button !== 0 ||
@@ -7277,7 +7518,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
           // The hand-off belongs to this canvas lifetime: a reply that lands
           // after the surface hid or changed owner only clears the draft.
           const canvasLifetime = canvasLifetimeRef.current;
-          void createFrame(geometry).then(
+          void createFrame(geometry, activeTool === "rectangle" ? "Rectangle" : undefined).then(
             (created) => created && canvasLifetimeRef.current === canvasLifetime
               ? hideCreationDraftWhenPainted(created.file) : hideCreationDraft(),
             hideCreationDraft,
@@ -7386,6 +7627,9 @@ export const DesignCanvas = React.memo(function DesignCanvas({
         const previousSelection = designWorkspaceView(workspaceId);
         const nodeId = createDesignTextNodeId();
         inlineTextDraftRef.current = "";
+        // Loose text starts in the last typography styled here, as in a frame.
+        const recent = recentType.current?.owner === canvasDocumentOwnerRef.current ? recentType.current.styles : undefined;
+        const typography = recent && Object.keys(recent).length ? recent : undefined;
         setInlineTextEdit({
           id: crypto.randomUUID(),
           kind: "new",
@@ -7404,6 +7648,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
           x: 0,
           y: 0,
           placement: "absolute",
+          typography,
           inheritedStyles: {
             color: DESIGN_CANVAS_DEFAULT_TEXT_COLOR,
             fontFamily: "ui-sans-serif, system-ui, sans-serif",
@@ -7412,6 +7657,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
             lineHeight: "24px",
             whiteSpace: "pre-wrap",
             overflowWrap: "anywhere",
+            ...typography,
           },
           ...(rect.width === undefined
             ? {}
@@ -7571,6 +7817,10 @@ export const DesignCanvas = React.memo(function DesignCanvas({
         };
         inlineTextDraftRef.current = "";
         const previousSelection = designWorkspaceView(workspaceId);
+        const newTypography = designNewTextTypography(
+          parentDetails?.styles,
+          recentType.current?.owner === canvasDocumentOwnerRef.current ? recentType.current.styles : undefined,
+        );
         useDesignWorkspaceUiStore
           .getState()
           .setSelection(workspaceId, frame.file, null, undefined, { owner: canvasPageOwner });
@@ -7593,7 +7843,8 @@ export const DesignCanvas = React.memo(function DesignCanvas({
           y: parentPoint.y,
           ...(size ? size : {}),
           placement,
-          inheritedStyles: parentDetails?.styles ?? {
+          typography: newTypography,
+          inheritedStyles: { ...(parentDetails?.styles ?? {
             color: DESIGN_CANVAS_DEFAULT_TEXT_COLOR,
             fontFamily: "ui-sans-serif, system-ui, sans-serif",
             fontSize: "16px",
@@ -7601,7 +7852,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
             lineHeight: "24px",
             whiteSpace: "pre-wrap",
             overflowWrap: "anywhere",
-          },
+          }), ...newTypography },
         });
         activateTool("select");
       };
@@ -9012,6 +9263,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
                       <DesignOverlayGeometrySync overlay={overlayFrame} />
                       {primarySelection && !editingThisElement && !partOutline ? (
                         <>
+                          {selectedElements.length === 1 ? radiusControl(frame, details) : null}
                           {spacingToolsAllowed ? (
                             <span
                               data-design-spacing-hover-zone=""
@@ -9240,6 +9492,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
                   </span>
                 ) : null}
 
+                {frameSelectedOnly && frameLayoutOwnerDetails ? radiusControl(frame, frameLayoutOwnerDetails) : null}
                 {frameSelectedOnly ? (
                   <DesignResizeHandles
                     label={frame.title}
@@ -9533,6 +9786,13 @@ export const DesignCanvas = React.memo(function DesignCanvas({
               <Frame />
             </DesignToolbarButton>
             <DesignToolbarButton
+              label="Rectangle tool" tooltip="Rectangle" shortcut="R" tooltipSide="right" tool
+              pressed={activeTool === "rectangle"} disabled={!workspaceId || creatingFrame} aria-keyshortcuts="R"
+              onClick={() => activateTool("rectangle")}
+            >
+              <Square />
+            </DesignToolbarButton>
+            <DesignToolbarButton
               label="Text tool"
               tooltip="Text"
               shortcut="T"
@@ -9614,6 +9874,17 @@ export const DesignCanvas = React.memo(function DesignCanvas({
               <Diamond />
             </DesignToolbarButton>
           </Toolbar>
+          {activeTool === "frame" ? (
+            <Toolbar aria-label="Frame presets" data-design-controls className="zd-design-floating-toolbar pointer-events-auto ml-2 flex-col">
+              {([["Desktop", 1440, 900], ["Tablet", 768, 1024], ["Phone", 393, 852]] as const).map(([name, w, h]) =>
+                <Button key={name} variant="ghost" disabled={creatingFrame} onClick={() => {
+                  activateTool("select");
+                  focusCanvas();
+                  void createFrame({ x: frameViews.length ? Math.max(...frameViews.map(f => f.x + f.width)) + 64 : 0,
+                    y: selectedDescription?.y ?? 0, w, h, z: Math.min(DESIGN_MAX_FRAMES_PER_PAGE, Math.max(0, ...frameViews.map(f => f.z + 1))) }, name, true);
+                }}>{name} · {w} × {h}</Button>)}
+            </Toolbar>
+          ) : null}
         </div>
 
         {workspaceId && snapshot ? (

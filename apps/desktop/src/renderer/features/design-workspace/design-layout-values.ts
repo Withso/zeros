@@ -214,6 +214,19 @@ export function borderSize(
   return Math.round(details.box?.[size] ?? details.rect[size]);
 }
 
+const INTRINSIC_SIZES = ["min-content", "max-content", "fit-content"];
+
+/** The content-driven (Hug) size a layer keeps when it changes parent: a
+ * label's own text sizing, or a frame authored to hug its content. Fixed
+ * text and pixel sizes are not intrinsic. */
+export function designIntrinsicSizing(details: DesignRuntimeNodeDetails): { width?: string; height?: string } {
+  const keyword = (value: string | undefined) => value && INTRINSIC_SIZES.includes(value) ? value : undefined;
+  return {
+    width: details.textSizing?.width ?? keyword(details.layout?.widthValue),
+    height: details.textSizing?.height ?? keyword(details.layout?.heightValue),
+  };
+}
+
 export function cssSize(
   details: DesignRuntimeNodeDetails,
   axis: DesignLayoutAxis,

@@ -1,9 +1,67 @@
-import type { DesignRuntimeNodeDetails, DesignRuntimeNodeInsert } from "@zeros/protocol/design-runtime";
+import type { DesignRuntimeNodeDetails, DesignRuntimeNodeInsert, DesignRuntimeTreeNode } from "@zeros/protocol/design-runtime";
 import type { DesignOperation } from "@zeros/design-core";
+import { designIntrinsicPlacementStyles } from "@zeros/protocol/design-relocation";
+import { borderSize, cssSize, designIntrinsicSizing, designLayoutConstraint, designLayoutMode } from "./design-layout-values";
 import { designComponentPartOf, designComponentSlotOf } from "@zeros/protocol/design-runtime";
 import { designRuntimeLayerLabel } from "./design-layer-label";
 
 type Point = { x: number; y: number };
+
+/** Shift+A on one frame that holds layers and does not flow yet lays that
+ * frame out in place, as Figma does; any other selection is wrapped in a new
+ * flow. */
+export function designShiftAConvertsInPlace(nodes: readonly (DesignRuntimeNodeDetails | null | undefined)[]): boolean {
+  const node = nodes.length === 1 ? nodes[0] : null;
+  return Boolean(node && (node.childrenLayout?.count ?? 0) > 0 && designLayoutMode(node.styles.display) === "none" &&
+    designRuntimeLayerLabel({ tag: node.tag, text: node.text, textEditable: node.textEditable }) === "Frame");
+}
+
+export function designWrapInFlow(parent: DesignRuntimeNodeDetails, nodes: readonly DesignRuntimeNodeDetails[], id: string): DesignOperation[] {
+  if (!nodes.length || !/^[A-Za-z0-9_-]{1,128}$/.test(id) ||
+    (!canInsertDesignFrame(parent) && parent.tag !== "body") || nodes.some(n => n.layout?.parentId !== parent.oid ||
+      !n.layout || !Number.isFinite(n.layout.x) || !Number.isFinite(n.layout.y) || designComponentPartOf(n.oid) || n.shadow))
+    throw new Error("Select editable layers with the same parent to wrap in flow.");
+  const pos = nodes.map(n => ({ n, x: n.layout!.x, y: n.layout!.y, w: borderSize(n, "x"), h: borderSize(n, "y") }));
+  const left = Math.min(...pos.map(n => n.x)), top = Math.min(...pos.map(n => n.y));
+  const column = Math.max(...pos.map(n => n.y)) - top > Math.max(...pos.map(n => n.x)) - left;
+  pos.sort((a, b) => column ? a.y - b.y : a.x - b.x);
+  const gaps = pos.slice(1).map((v, i) => column ? v.y - pos[i]!.y - pos[i]!.h : v.x - pos[i]!.x - pos[i]!.w);
+  const gap = gaps.length ? Math.max(0, Math.round(gaps.reduce((a,b) => a+b, 0) / gaps.length)) : 0;
+  // Layers that still reserve their space (block or flex flow alike) hand
+  // that slot to the wrapper; only an all-free selection stays free.
+  const inFlow = !nodes.every(n => n.styles.position === "absolute" || n.styles.position === "fixed");
+  const gridOrFlex = ["flex", "inline-flex", "grid", "inline-grid"].includes(parent.styles.display ?? "");
+  // Block flow stacks in source order, so the wrapper takes the slot of the
+  // layer drawn first; a flex or grid order may differ from what is drawn.
+  const slot = gridOrFlex ? nodes[0]! : pos[0]!.n;
+  // A static parent is not the wrapper's containing block. Positioning it
+  // would re-anchor its other overlays, so the wrapper is placed in the
+  // ancestor space a free selected layer already uses.
+  const staticParent = !inFlow && parent.styles.position === "static" && parent.tag !== "body";
+  const anchored = staticParent ? nodes.find(n => n.styles.position === "absolute" && !n.layout!.isContainingBlock) : undefined;
+  const shift = (offset: string | undefined, margin: string | undefined, at: number) => {
+    const value = Number.parseFloat(offset ?? "");
+    return Number.isFinite(value) ? value + (Number.parseFloat(margin ?? "") || 0) - at : null;
+  };
+  const dx = anchored ? shift(anchored.styles.left, anchored.styles.marginLeft, anchored.layout!.x) : null;
+  const dy = anchored ? shift(anchored.styles.top, anchored.styles.marginTop, anchored.layout!.y) : null;
+  const reanchors = staticParent && (dx === null || dy === null);
+  const placement = inFlow ? "position:relative;"
+    : `position:absolute;left:${Math.round(left + (reanchors ? 0 : dx ?? 0))}px;top:${Math.round(top + (reanchors ? 0 : dy ?? 0))}px;`;
+  const style = `${placement}display:flex;flex-direction:${column ? "column" : "row"};gap:${gap}px;align-items:flex-start;width:max-content;height:max-content;`;
+  const ops: DesignOperation[] = [];
+  const update = (nodeId: string, styles: Record<string, string>) => ops.push({ type: "node.set-styles", operationId: crypto.randomUUID(),
+    nodeId, styles, scope: "inline", responsiveContext: "base", stateContext: "default" });
+  if (reanchors) update(parent.oid, { position: "relative" });
+  ops.push({ type: "node.set-html", operationId: crypto.randomUUID(), nodeId: parent.oid, mode: "append", html: `<div data-oid="${id}" style="${style}"></div>` },
+    { type: "node.move", operationId: crypto.randomUUID(), nodeId: id, parentId: parent.oid, beforeId: slot.oid });
+  for (const { n, w, h } of pos) {
+    ops.push({ type: "node.move", operationId: crypto.randomUUID(), nodeId: n.oid, parentId: id, beforeId: null });
+    update(n.oid, { position: "relative", left: "auto", top: "auto", right: "auto", bottom: "auto", order: "0", flex: "0 0 auto",
+      width: cssSize(n, "x", w), height: cssSize(n, "y", h), ...designIntrinsicPlacementStyles(designIntrinsicSizing(n)) });
+  }
+  return ops;
+}
 
 const NON_FRAME_CONTAINERS = new Set([
   "area",
@@ -102,6 +160,8 @@ export function designFrameInsertion(
   operations: DesignOperation[];
   insert: DesignRuntimeNodeInsert;
   parentStyles: Record<string, string> | null;
+  /** The new frame's box in the parent's coordinates. */
+  bounds: { x: number; y: number; width: number; height: number };
 } {
   const matrix = parent.childCoordinateSpace;
   if (!matrix)
@@ -161,5 +221,60 @@ export function designFrameInsertion(
     operations,
     insert: { nodeId, parentId: parent.oid, beforeId: null, tag: "div", style },
     parentStyles,
+    bounds: { x, y, width, height },
   };
+}
+
+/** The direct children of a layer in a runtime tree. A frame root the tree
+ * does not list itself (the document body) owns the tree's top level. */
+export function designTreeChildIds(tree: readonly DesignRuntimeTreeNode[], parentId: string, rootId?: string | null): string[] {
+  const stack = [...tree];
+  for (let node = stack.pop(); node; node = stack.pop()) {
+    if (node.oid === parentId) return node.children.map(child => child.oid);
+    stack.push(...node.children);
+  }
+  return parentId === rootId ? tree.map(node => node.oid) : [];
+}
+
+/** Layers a drawn frame fully encloses become its children, as in Figma, each
+ * keeping its place on the canvas. Only free (absolute), untransformed layers
+ * of a parent without auto layout qualify; anything else stays where it is. */
+export function designDrawnFrameWrapOperations(
+  parent: DesignRuntimeNodeDetails,
+  nodeId: string,
+  bounds: { x: number; y: number; width: number; height: number },
+  children: readonly (DesignRuntimeNodeDetails | null)[],
+): DesignOperation[] {
+  if (designComponentSlotOf(parent.oid) !== null ||
+    ["flex", "inline-flex", "grid", "inline-grid"].includes(parent.styles.display ?? "")) return [];
+  const operations: DesignOperation[] = [];
+  for (const child of children) {
+    const layout = child?.layout;
+    if (!child || !layout || layout.parentId !== parent.oid || child.oid === nodeId || child.shadow ||
+      designComponentPartOf(child.oid) !== null || child.styles.position !== "absolute" ||
+      ["transform", "rotate", "scale", "translate"].some(key => (child.styles[key] ?? "none") !== "none") ||
+      !Number.isFinite(layout.x) || !Number.isFinite(layout.y)) continue;
+    const width = borderSize(child, "x"), height = borderSize(child, "y");
+    // A percentage resolves against the containing block, which becomes the
+    // drawn frame, and a stretched layer's size comes from the far inset this
+    // clears: either keeps its measured size instead.
+    const percent = (value: string | undefined) => /%\s*$/.test(value ?? "");
+    const stretched = (axis: "x" | "y") => designLayoutConstraint(child, axis) === "stretch";
+    const kept = {
+      ...(percent(layout.widthValue) || stretched("x") ? { width: cssSize(child, "x", width) } : {}),
+      ...(percent(layout.heightValue) || stretched("y") ? { height: cssSize(child, "y", height) } : {}),
+      ...(stretched("x") ? { "--zeros-layout-x": null } : {}),
+      ...(stretched("y") ? { "--zeros-layout-y": null } : {}),
+    };
+    if (layout.x < bounds.x || layout.y < bounds.y ||
+      layout.x + width > bounds.x + bounds.width || layout.y + height > bounds.y + bounds.height) continue;
+    operations.push(
+      { type: "node.move", operationId: `wrap-move:${child.oid}`, nodeId: child.oid, parentId: nodeId, beforeId: null },
+      { type: "node.set-styles", operationId: `wrap-place:${child.oid}`, nodeId: child.oid, scope: "inline",
+        responsiveContext: "base", stateContext: "default",
+        styles: { left: `${Math.round(layout.x - bounds.x - (Number.parseFloat(child.styles.marginLeft ?? "") || 0))}px`,
+          top: `${Math.round(layout.y - bounds.y - (Number.parseFloat(child.styles.marginTop ?? "") || 0))}px`, right: "auto", bottom: "auto", ...kept } },
+    );
+  }
+  return operations;
 }

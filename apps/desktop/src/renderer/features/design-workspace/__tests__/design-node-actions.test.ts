@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { designWorkspaceView, resetDesignWorkspaceUiForTests, useDesignWorkspaceUiStore } from "../state/design-workspace-ui";
-import { resetDesignRuntimeStoreForTests } from "../state/design-runtime-store";
+import { resetDesignRuntimeStoreForTests, useDesignRuntimeStore } from "../state/design-runtime-store";
 
 const mocks = vi.hoisted(() => ({ edit: vi.fn(), snapshots: new Map(), selectNodes: vi.fn(), selectFrame: vi.fn() }));
 vi.mock("../state/design-workspace-cache", () => ({
@@ -8,7 +8,8 @@ vi.mock("../state/design-workspace-cache", () => ({
   designWorkspaceSnapshotCache: { peekSnapshot: (id: string) => ({ data: mocks.snapshots.get(id) }) },
 }));
 vi.mock("../state/design-selection", () => ({ selectDesignNodes: mocks.selectNodes, selectDesignFrame: mocks.selectFrame }));
-import { applyDesignNodeAction, captureDesignPendingDeletion, designPendingDeletionCurrent, designPendingDeletionFor } from "../state/design-node-actions";
+import { applyDesignNodeAction, captureDesignPendingDeletion, designPendingDeletionCurrent, designPendingDeletionFor, designRepeatedDuplicatePlacement } from "../state/design-node-actions";
+import type { DesignRuntimeNodeDetails } from "@zeros/protocol/design-runtime";
 
 const frame = { file: "a.html", sourceVersion: "a".repeat(24), title: "A", x: 0, y: 0, width: 200, height: 100, z: 0, nodeCount: 2, modifiedAt: 1 };
 const other = { ...frame, file: "b.html" };
@@ -71,6 +72,62 @@ describe("a deletion a person confirms", () => {
 });
 
 describe("canvas node commands", () => {
+  const layer = (oid: string, x: number, y: number, position = "absolute") => ({ oid, sourceVersion: frame.sourceVersion,
+    tag: "div", name: oid, text: null, selector: "", visible: true, breadcrumb: [], rect: { x, y, width: 40, height: 20 },
+    styles: { position, left: `${x}px`, top: `${y}px` }, layout: { x, y, parentId: "root" } }) as unknown as DesignRuntimeNodeDetails;
+  const know = (...details: DesignRuntimeNodeDetails[]) => details.forEach(item =>
+    useDesignRuntimeStore.getState().publishNodeDetails("local", "/design", frame.file, item, frame.sourceVersion));
+
+  it("steps a free layer's copy by the move its previous copy made", () => {
+    expect(designRepeatedDuplicatePlacement({ x: 10, y: 10 }, layer("copy", 60, 10)))
+      .toEqual({ left: "110px", top: "10px", right: "auto", bottom: "auto" });
+    expect(designRepeatedDuplicatePlacement({ x: 10, y: 10 }, layer("copy", 10, 10))).toBeNull();
+    expect(designRepeatedDuplicatePlacement({ x: 10, y: 10 }, layer("copy", 60, 10, "static"))).toBeNull();
+    expect(designRepeatedDuplicatePlacement(null, layer("copy", 60, 10))).toBeNull();
+    // A copy stretched between both side insets keeps its width as it steps.
+    const stretched = { ...layer("copy", 60, 10), authoredStyleProperties: ["position", "left", "right", "top"] };
+    stretched.styles = { ...stretched.styles, right: "100px" };
+    expect(designRepeatedDuplicatePlacement({ x: 10, y: 10 }, stretched))
+      .toEqual({ left: "110px", right: "50px", top: "10px", bottom: "auto" });
+    // A bottom-pinned copy keeps its pin and steps only that edge.
+    const pinned = { ...layer("copy", 10, 40), authoredStyleProperties: ["position", "left", "bottom"] };
+    pinned.styles = { ...pinned.styles, bottom: "60px" };
+    expect(designRepeatedDuplicatePlacement({ x: 10, y: 10 }, pinned))
+      .toEqual({ left: "10px", right: "auto", bottom: "30px" });
+  });
+
+  it("duplicates in place, then repeats the offset after the copy moved", async () => {
+    know(layer("nested", 10, 10));
+    await applyDesignNodeAction({ workspaceId: "local", folder: "/design", action: "duplicate" });
+    const copyId = mocks.edit.mock.calls[0]![2].operations[0].duplicateNodeId;
+    expect(mocks.edit.mock.calls[0]![2].operations).toHaveLength(1);
+    know(layer(copyId, 60, 30));
+    useDesignWorkspaceUiStore.getState().setSelection("local", frame.file, copyId);
+    await applyDesignNodeAction({ workspaceId: "local", folder: "/design", action: "duplicate" });
+    const [duplicate, placed] = mocks.edit.mock.calls[1]![2].operations;
+    expect(duplicate).toMatchObject({ type: "node.duplicate", nodeId: copyId });
+    expect(placed).toMatchObject({ type: "node.set-styles", nodeId: duplicate.duplicateNodeId,
+      styles: { left: "110px", top: "50px", right: "auto", bottom: "auto" } });
+    // Another layer's duplicate starts over in place.
+    know(layer("elsewhere", 0, 0));
+    useDesignWorkspaceUiStore.getState().setSelection("local", frame.file, "elsewhere");
+    await applyDesignNodeAction({ workspaceId: "local", folder: "/design", action: "duplicate" });
+    expect(mocks.edit.mock.calls[2]![2].operations).toHaveLength(1);
+  });
+  it("keeps repeating from the moved copy after a refused duplicate", async () => {
+    know(layer("nested", 10, 10));
+    await applyDesignNodeAction({ workspaceId: "local", folder: "/design", action: "duplicate" });
+    const copyId = mocks.edit.mock.calls[0]![2].operations[0].duplicateNodeId;
+    know(layer(copyId, 60, 10));
+    useDesignWorkspaceUiStore.getState().setSelection("local", frame.file, copyId);
+    mocks.edit.mockRejectedValueOnce(new Error("conflict"));
+    await expect(applyDesignNodeAction({ workspaceId: "local", folder: "/design", action: "duplicate" })).rejects.toThrow("conflict");
+    await applyDesignNodeAction({ workspaceId: "local", folder: "/design", action: "duplicate" });
+    const [duplicate, placed] = mocks.edit.mock.calls[2]![2].operations;
+    expect(duplicate).toMatchObject({ type: "node.duplicate", nodeId: copyId });
+    expect(placed).toMatchObject({ type: "node.set-styles", styles: { left: "110px", top: "10px" } });
+  });
+
   it("uses the current semantic frame after a transfer, without a rendered-closure fallback", async () => {
     useDesignWorkspaceUiStore.getState().setSelection("local", other.file, "nested");
     await applyDesignNodeAction({ workspaceId: "local", folder: "/design", action: "delete" });

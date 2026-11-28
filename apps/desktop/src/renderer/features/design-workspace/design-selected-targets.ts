@@ -1,4 +1,5 @@
 import type { DesignRuntimeTreeNode } from "@zeros/protocol/design-runtime";
+import type { DesignCanvasRect } from "./design-canvas-math";
 
 export interface DesignSelectionTarget {
   readonly frame: string;
@@ -7,6 +8,25 @@ export interface DesignSelectionTarget {
 
 export function designSelectionTargetKey(target: DesignSelectionTarget): string {
   return JSON.stringify([target.frame, target.nodeId ?? null]);
+}
+
+export function designSelectionFitRects(
+  targets: readonly DesignSelectionTarget[],
+  frames: readonly (DesignCanvasRect & { file: string })[],
+  read: (file: string, nodeId: string) => DesignCanvasRect | undefined,
+): DesignCanvasRect[] {
+  const rects: DesignCanvasRect[] = [];
+  for (const target of targets) {
+    const frame = frames.find(item => item.file === target.frame);
+    if (!frame) return [];
+    if (!target.nodeId) rects.push(frame);
+    else {
+      const rect = read(frame.file, target.nodeId);
+      if (!rect) return [];
+      rects.push({ ...rect, x: rect.x + frame.x, y: rect.y + frame.y });
+    }
+  }
+  return rects;
 }
 
 export function designSelectionMutationTargets(

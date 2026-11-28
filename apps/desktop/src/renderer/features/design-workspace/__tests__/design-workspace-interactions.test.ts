@@ -93,6 +93,32 @@ const DESIGN_GAP_PINK = `#${"F531B3"}`;
 const DESIGN_WHITE = `#${"FFFFFF"}`;
 
 describe("design workspace interaction wiring", () => {
+  it("paints a new selection's outline before the Style panel re-renders", () => {
+    const workspace = readSection("design-workspace.tsx");
+    // Only a selection change waits, for one painted frame; a drag's live
+    // readback of the same selection does not, and continuous updates cannot
+    // starve it the way a deferred render can.
+    expect(workspace).toContain("const inspectorSelection = inspectorSelectionPresented ? liveInspectorSelection : heldInspectorSelection.current.selection;");
+    // Another owner's selection is never held, and the held panel cannot
+    // write to the layer the user just left.
+    expect(workspace).toContain("const ownerChanged = heldInspectorSelection.current.owner !== inspectorOwnerKey;");
+    // A first page or directory binding (the first frame) is not a switch.
+    expect(workspace).toContain("const inspectorOwnerKey = `${workspaceId ?? \"\"}\\u0000${folder ?? \"\"}\\u0000${ownerRevision}`;");
+    expect(workspace).toContain("presentedInspectorSelectionKey === inspectorSelectionKey || ownerChanged;");
+    // A ref read at edit time: the hold itself re-renders no panel, which
+    // would show a new frame before its details read back.
+    expect(workspace).toContain("inspectorSettlingRef.current = !inspectorSelectionPresented;");
+    expect(workspace).toContain("selectionSettlingRef={inspectorSettlingRef}");
+    expect(workspace).toContain('data-design-selection-settling={inspectorSelectionPresented ? undefined : ""}');
+    const inspector = readSection("design-inspector.tsx");
+    expect(inspector).toContain("get active() { return styleActiveNow && !selectionSettlingRef?.current; },");
+    expect(inspector).toContain("get editable() { return styleEditableNow && !selectionSettlingRef?.current; },");
+    expect(workspace).toContain("timer = window.setTimeout(() => setPresentedInspectorSelectionKey(inspectorSelectionKey), 0);");
+    expect(workspace).not.toContain("useDeferredValue");
+    expect(workspace).toContain("details={inspectorSelection.details}");
+    expect(workspace).toContain("selectedNodeId={inspectorSelection.selectedNodeId}");
+    expect(workspace).not.toContain("details={presentedDetails}");
+  });
   it("brings back the node selection of the state an undo or redo returns to", () => {
     const inspector = readSection("design-inspector.tsx");
     // Opened with the request, so the runtime snapshot that follows the
@@ -212,8 +238,10 @@ describe("design workspace interaction wiring", () => {
     expect(source).toContain(
       'activeElement.closest("[data-design-workspace-surface]")',
     );
-    expect(source).toContain("void duplicateSelectedFrame(duplicateMode)");
-    expect(source).toContain("void duplicateSelectedNode(duplicateMode)");
+    expect(source).toContain('document.execCommand("copy")');
+    expect(source).toContain('window.addEventListener("paste", paste)');
+    expect(source).toContain("void duplicateSelectedFrame()");
+    expect(source).toContain("void duplicateSelectedNode()");
     expect(source).toContain(
       "if (selectedNodeIsTarget) void deleteSelectedNode()",
     );
@@ -924,9 +952,13 @@ describe("design workspace interaction wiring", () => {
     expect(inspector).toContain(`if (!isDesignTextEntryTarget(event.target) && event.shiftKey && !event.metaKey && !event.ctrlKey && !event.altKey &&
         event.key.toLowerCase() === "a") {`);
     expect(inspector).toContain('layoutShortcutRef.current({ type: "auto-layout", flow: "column", infer: true })');
+    // One selected frame layer is laid out in place; the canvas wraps the rest.
+    expect(inspector).toContain("!designShiftAConvertsInPlace([context.elementDetails]))) return;");
     expect(inspector).toContain("layoutShortcutRef.current = commitLayoutAction;");
     // Only where there is no auto layout yet, in the children's own direction.
     expect(inspector).toContain("designInferredAutoLayoutFlow(liveChildren)");
+    // Only Shift+A turns drawn offsets into gap and padding.
+    expect(inspector).toContain("{ drawnSpacing: action.infer === true })");
     expect(source).toContain('aria-keyshortcuts="Shift+M"');
     expect(source).not.toContain('aria-keyshortcuts="Shift+A"');
     expect(source).toContain(`event.key.toLowerCase() === "m" &&
@@ -959,7 +991,7 @@ describe("design workspace interaction wiring", () => {
 
   it("supports Figma-style frame and text insertion without per-keystroke React state", () => {
     expect(source).toContain(
-      'type DesignCanvasTool = "select" | "frame" | "text"',
+      'type DesignCanvasTool = "select" | "frame" | "rectangle" | "text"',
     );
     expect(source).toContain("startFrameCreation");
     expect(source).toContain("startTextInsertion");

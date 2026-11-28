@@ -101,6 +101,62 @@ describe("auto layout intent", () => {
     expect(updates.get("turned")).toMatchObject({ position: "relative", transform: "matrix(0,1,-1,0,0,0)" });
   });
 
+  it("keeps drawn spacing and hug text when Shift+A lays out a free frame", () => {
+    const parent = { ...node({ display: "block" }, "block"), oid: "parent", rect: { x: 0, y: 0, width: 400, height: 400 } };
+    const label = (oid: string, y: number) => {
+      const text = { ...node({ position: "absolute", width: "78px", height: "19px" }, "block"), oid };
+      text.layout = { ...text.layout!, x: 58, y, widthValue: "max-content", heightValue: "auto" };
+      text.rect = { x: 58, y, width: 78, height: 19 };
+      return text;
+    };
+    const shiftA = { drawnSpacing: true };
+    const updates = designAutoLayoutUpdates([parent], [label("a", 120), label("b", 188), label("c", 256)], "column", shiftA);
+    expect(updates.get("parent")).toMatchObject({ display: "flex", "flex-direction": "column", gap: "49px",
+      "padding-left": "58px", "padding-right": "264px", "padding-top": "120px", "padding-bottom": "125px" });
+    expect(updates.get("a")).toMatchObject({ position: "relative", width: "max-content" });
+    // The panel's Auto layout buttons keep the container's own spacing.
+    const panel = designAutoLayoutUpdates([parent], [label("a", 120), label("b", 188)], "column").get("parent")!;
+    expect(panel).not.toHaveProperty("gap");
+    expect(panel).not.toHaveProperty("padding-left");
+    // Authored spacing stays as it is.
+    const spaced = { ...parent, styles: { ...parent.styles, gap: "8px", paddingLeft: "4px" } };
+    const kept = designAutoLayoutUpdates([spaced], [label("a", 120), label("b", 188)], "column", shiftA).get("parent")!;
+    expect(kept).not.toHaveProperty("gap");
+    expect(kept).not.toHaveProperty("padding-left");
+    expect(kept).toMatchObject({ "padding-right": "264px", "padding-top": "120px", "padding-bottom": "193px" });
+    // An authored zero is authored spacing too.
+    const zero = { ...parent, authoredStyleProperties: ["gap", "padding-left"], styles: { ...parent.styles, gap: "0px", paddingLeft: "0px" } };
+    const zeroKept = designAutoLayoutUpdates([zero], [label("a", 120), label("b", 188)], "column", shiftA).get("parent")!;
+    expect(zeroKept).not.toHaveProperty("gap");
+    expect(zeroKept).not.toHaveProperty("padding-left");
+    expect(zeroKept).toMatchObject({ "padding-top": "120px" });
+  });
+
+  it("measures each side's drawn inset, so Shift+A never outgrows a fixed frame", () => {
+    // A 400 × 200 frame with 2px borders; one layer sits near its right edge.
+    const parent = { ...node({ display: "block", width: "400px", height: "200px", borderLeftWidth: "2px", borderRightWidth: "2px",
+      borderTopWidth: "2px", borderBottomWidth: "2px", boxSizing: "border-box" }, "block"), oid: "parent",
+      rect: { x: 0, y: 0, width: 400, height: 200 } };
+    const layer = { ...node({ position: "absolute", width: "100px", height: "40px" }, "block"), oid: "layer" };
+    layer.layout = { ...layer.layout!, x: 276, y: 30 };
+    layer.rect = { x: 276, y: 30, width: 100, height: 40 };
+    expect(designAutoLayoutUpdates([parent], [layer], "row", { drawnSpacing: true }).get("parent")).toMatchObject({
+      "padding-left": "276px", "padding-right": "20px", "padding-top": "30px", "padding-bottom": "126px" });
+  });
+
+  it("leaves retained margins out of Shift+A's drawn spacing", () => {
+    const parent = { ...node({ display: "block" }, "block"), oid: "parent" };
+    const label = (oid: string, y: number) => {
+      const text = { ...node({ position: "absolute", width: "78px", height: "19px", marginLeft: "8px", marginTop: "4px", marginBottom: "6px" }, "block"), oid };
+      text.layout = { ...text.layout!, x: 58, y, widthValue: "max-content", heightValue: "auto" };
+      text.rect = { x: 58, y, width: 78, height: 19 };
+      return text;
+    };
+    // In flow each label sits at padding + its margin, so the drawn positions hold.
+    const parentStyles = designAutoLayoutUpdates([parent], [label("a", 120), label("b", 188)], "column", { drawnSpacing: true }).get("parent")!;
+    expect(parentStyles).toMatchObject({ gap: "39px", "padding-left": "50px", "padding-top": "116px" });
+  });
+
   it("reports a frame's own layer as clipping at the frame's edges, as the canvas draws it", () => {
     // A canvas frame is a document of its own: content past its edges is
     // never drawn, so "Clip content" must not read unchecked for it.

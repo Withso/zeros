@@ -1,5 +1,5 @@
 import { expect } from "@playwright/test";
-import { clickFramePlay, openLayersDrawer } from "./ui-smoke-design-helpers.mjs";
+import { clickFramePlay, openLayersDrawer, waitForDesignInspectorSelection } from "./ui-smoke-design-helpers.mjs";
 
 /** A CSS-authored background and flow content must survive actual inspector
  * actions, source transactions, layer rename, history and whole-frame Play. */
@@ -23,6 +23,7 @@ export async function runDesignLayeredLayoutSmoke({ page, check }) {
   const layout = page.locator("[data-design-layout-section]");
   await expect(root).toBeAttached();
   await frameRow.click();
+  await waitForDesignInspectorSelection(page);
   // Use the user's actual frame dimensions through the real geometry fields.
   for (const [label, value] of [
     ["W", "960"],

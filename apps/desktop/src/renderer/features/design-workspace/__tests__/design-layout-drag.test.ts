@@ -51,6 +51,25 @@ const a = node("a", "root", 0, 0);
 const b = node("b", "root", 110, 0);
 const c = node("c", "root", 220, 0);
 describe("canvas layout drop intent", () => {
+  it.each(["flex", "block"])("keeps an intrinsic label's axes when dropped into %s", display => {
+    const parent = node("container", null, 0, 0, 400, 200, display);
+    const child = { ...node("label", "previous", 500, 50, 61, 19), tag: "span",
+      textSizing: { width: "max-content", height: "auto", availableWidth: 400 } as const };
+    const drop = (label: DesignRuntimeNodeDetails) => designLayoutDrop(label, [parent, label], { x: 100, y: 80 }, { x: 70, y: 70 });
+    expect(drop(child)?.styles).toMatchObject({ width: "max-content", height: "auto" });
+    expect(drop({ ...child, textSizing: { ...child.textSizing, width: "fixed" } })?.styles)
+      .toMatchObject({ width: "61px", height: "auto" });
+  });
+  it("keeps a hugging frame hugging when it changes parent, and a fixed one fixed", () => {
+    const parent = node("container", null, 0, 0, 400, 200, "block");
+    const hug = (width: string, height: string) => {
+      const base = node("button", "previous", 500, 50, 61, 19, "flex");
+      return { ...base, layout: { ...base.layout!, widthValue: width, heightValue: height } };
+    };
+    const drop = (button: DesignRuntimeNodeDetails) => designLayoutDrop(button, [parent, button], { x: 100, y: 80 }, { x: 70, y: 70 });
+    expect(drop(hug("max-content", "fit-content"))?.styles).toMatchObject({ width: "max-content", height: "fit-content" });
+    expect(drop(hug("61px", "19px"))?.styles).toMatchObject({ width: "61px", height: "19px" });
+  });
   it("retains flow-origin intent when a flowing child becomes free and reenters its layout", () => {
     const outer = node("outer", null, 0, 0, 900, 700);
     const leaving = createDesignLayoutDropResolver(a, [outer, root, a, b, c], {

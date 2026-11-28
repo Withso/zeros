@@ -6,6 +6,36 @@
  * the control is focused. The classes are feature-prefixed because several
  * editors render their popovers through portals outside the workspace root. */
 
+.zd-design-radius-handle {
+  position: absolute;
+  top: calc(12px * var(--design-canvas-inverse-zoom));
+  left: calc(12px * var(--design-canvas-inverse-zoom));
+  width: 12px;
+  height: 12px;
+  transform: scale(var(--design-canvas-inverse-zoom));
+  transform-origin: top left;
+  border: 2px solid var(--design-selection-stroke);
+  border-radius: 50%;
+  background: var(--bg1);
+  cursor: nwse-resize;
+  pointer-events: auto;
+  /* Above the selection's spacing zones inside the transformed canvas. */
+  z-index: var(--z-panel);
+}
+
+.zd-design-radius-handle[data-value]::after {
+  content: attr(data-value);
+  position: absolute;
+  top: 12px;
+  left: 12px;
+  white-space: nowrap;
+  border-radius: var(--radius-sm);
+  background: var(--accent);
+  color: var(--accent-fg);
+  padding: 2px 4px;
+  pointer-events: none;
+}
+
 [data-design-workspace-surface],
 [data-design-theme-editor],
 [data-design-motion-settings],

@@ -1,6 +1,6 @@
 import { expect } from "@playwright/test";
 
-import { openLayersDrawer } from "./ui-smoke-design-helpers.mjs";
+import { openLayersDrawer, waitForDesignInspectorSelection } from "./ui-smoke-design-helpers.mjs";
 
 // The Controls section of a component frame (pricing.html as "Chat composer"
 // in the harness): present only for the frame itself, every row writes once
@@ -47,6 +47,7 @@ export async function runDesignComponentOptionsSmoke({ page, check }) {
   // Plain frames and layers show no Options.
   await frameRow("home.html").click();
   await expect(frameRow("home.html")).toHaveAttribute("aria-selected", "true");
+  await waitForDesignInspectorSelection(page);
   check("a frame that declares no options has no Options section", (await section.count()) === 0);
   await selectComponent();
   const header = await page.locator("[data-design-inspector-header]").innerText();
@@ -56,6 +57,7 @@ export async function runDesignComponentOptionsSmoke({ page, check }) {
   if (!(await layer("cc-prompt").count())) await layer("cc-root").locator("[data-layer-disclosure]").click();
   await layer("cc-prompt").click();
   await expect(page.locator('[data-design-layer-id="cc-prompt"]')).toHaveAttribute("aria-selected", "true");
+  await waitForDesignInspectorSelection(page);
   check("a layer inside the component has no Options section", (await section.count()) === 0);
   await selectComponent();
 

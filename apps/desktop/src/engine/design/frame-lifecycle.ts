@@ -118,7 +118,24 @@ export interface DesignFrameCreateInput {
     nodeId: string;
     text: string;
     fixedSize: boolean;
+    /** The last typography the user chose, as CSS properties. */
+    typography?: Readonly<Record<string, string | null>>;
   };
+}
+
+const TEXT_SEED_TYPOGRAPHY = new Set(["font-family", "font-size", "font-weight", "font-style", "letter-spacing", "line-height"]);
+
+/** Inline declarations for a text seed: typography only, each value a single
+ * CSS value that cannot close its declaration or attribute. */
+function designTextSeedTypography(typography: Readonly<Record<string, string | null>>): string {
+  const entries = Object.entries(typography);
+  if (entries.length > TEXT_SEED_TYPOGRAPHY.size) throw new Error("Design text typography is invalid.");
+  return entries.map(([property, value]) => {
+    if (!TEXT_SEED_TYPOGRAPHY.has(property) || typeof value !== "string" || !value.trim() || value.length > 256 || /[;{}<>\\]/.test(value))
+      throw new Error("Design text typography is invalid.");
+    validateDesignCssValue(property, value);
+    return `${property}:${value.trim()};`;
+  }).join("");
 }
 
 interface PendingFrameCreate {
@@ -220,6 +237,7 @@ async function createDesignFramesUnlocked(
             geometry.h,
             textSeed.fixedSize,
             folder ? "../tokens.css" : "./tokens.css",
+            textSeed.typography ? designTextSeedTypography(textSeed.typography) : "",
           )
         : FRAME_SEED(
             title,
@@ -1031,7 +1049,7 @@ export async function transferDesignNode(
         "The source frame geometry changed before the layer move.",
       );
     const relocationStyles = input.relocation
-      ? designRelocationRootStyles(input.relocation)
+      ? designRelocationRootStyles(input.relocation, input.styles)
       : null;
     if (
       input.parentStyles !== undefined &&
@@ -1094,7 +1112,8 @@ export async function transferDesignNode(
         !relocationStyles)
     )
       throw new Error("A whole frame can only be nested into another frame.");
-    if (relocationStyles && !wholeFrame && !semanticRootCopy)
+    // Within its own frame an instance keeps the definition it expands from.
+    if (relocationStyles && !wholeFrame && !semanticRootCopy && input.destinationFrame !== from.file)
       assertDesignRelocationSource(fromSource, input.nodeId);
     const record = wholeFrame
       ? undefined
@@ -1127,9 +1146,11 @@ export async function transferDesignNode(
         entryFile: from.file,
         files: { [from.file]: moved },
       });
+      // A flex or grid drop slot places the layer in that flow, as across frames.
+      const sameFrameFlowSlot = input.styles?.position === "relative" || input.styles?.position === "static";
       let source = mutateDesignNodeStyles(state, {
         nodeId,
-        styles: relocationStyles,
+        styles: sameFrameFlowSlot ? designRelocationFlowRootStyles(input.relocation, input.styles!) : relocationStyles,
         scope: "inline",
         appendInlineOverrides: true,
       }).files[from.file]!;
