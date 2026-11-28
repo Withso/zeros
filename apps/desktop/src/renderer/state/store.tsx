@@ -292,6 +292,10 @@ export type WorkspaceState = {
   // Edit drafts keyed `${chatId}:${messageId}`, so chat deletion cleans up with a
   // prefix scan.
   editComposerDrafts: Record<string, EditDraftStash>;
+  /** In memory only: chats just deleted or pruned with their workspace. A
+   *  composer that unmounts after the removal must not write their drafts
+   *  back. Chat ids are never reused. */
+  retiredDraftChatIds?: readonly string[];
 
   // Workbench tabs per worktree folder, persisted by tab-model.saveScopes and read
   // through selectWorkbench so tabs never leak across worktrees.

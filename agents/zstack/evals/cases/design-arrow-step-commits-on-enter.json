@@ -1,0 +1,9 @@
+{
+  "id": "design-arrow-step-commits-on-enter",
+  "kind": "replay",
+  "area": "desktop-design",
+  "fixedBy": "pr:1376",
+  "symptom": "Numeric inspector fields committed each arrow keyup, so one ArrowUp tap wrote immediately, Escape could not revert it, and the design-style-refinements smoke went red on main.",
+  "rule": "Arrow stepping in an inspector field previews only; it commits once on Enter or blur, Escape restores the value from before the sequence, and the field stays dirty for Save while a previewed step is pending.",
+  "check": "pnpm exec vitest run apps/desktop/src/renderer/features/design-workspace/__tests__/design-inspector-scrub-renders.test.ts -t 'previews numeric arrow stepping immediately and commits once on Enter'"
+}

@@ -10048,6 +10048,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
           data-motion-open={motionTimelineOpen ? "" : undefined}
           className="zd-design-tools-rail pointer-events-none absolute left-2 z-chrome flex items-center"
         >
+          <div className="relative">
           <Toolbar
             data-design-controls
             role="toolbar"
@@ -10170,7 +10171,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
             </DesignToolbarButton>
           </Toolbar>
           {activeTool === "frame" ? (
-            <Toolbar aria-label="Frame presets" data-design-controls className="zd-design-floating-toolbar pointer-events-auto ml-2 flex-col">
+            <Toolbar aria-label="Frame presets" data-design-controls className="zd-design-floating-toolbar zd-design-frame-presets pointer-events-auto flex-col">
               {([["Desktop", 1440, 900], ["Tablet", 768, 1024], ["Phone", 393, 852]] as const).map(([name, w, h]) =>
                 <Button key={name} variant="ghost" disabled={creatingFrame} onClick={() => {
                   activateTool("select");
@@ -10180,6 +10181,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
                 }}>{name} · {w} × {h}</Button>)}
             </Toolbar>
           ) : null}
+          </div>
         </div>
 
         {workspaceId && snapshot ? (

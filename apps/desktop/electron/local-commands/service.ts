@@ -17,7 +17,8 @@ export interface LocalCommandServiceDeps {
   journal(accountId: string): Promise<LocalCommandJournal>;
   run(input: { command: string; cwd?: string; timeoutMs: number }, signal: AbortSignal): Promise<LocalCommandMacResult>;
   identity: { deviceId(accountId: string): string; name(): Promise<string> };
-  settings: { alwaysAllow(): boolean; setAlwaysAllow(value: boolean): void };
+  /** Per signed-in account: one person's consent never covers another's agents. */
+  settings: { alwaysAllow(accountId: string): boolean; setAlwaysAllow(accountId: string, value: boolean): void };
   session(): Promise<{ accountId: string; sessionId: string } | null>;
   publish(approvals: LocalCommandApprovalView[]): void;
   notify(approval: LocalCommandApprovalView): void;
@@ -51,6 +52,7 @@ export class LocalCommandService {
   private device?: LocalCommandDevice;
   private presence: LocalCommandPresence = { presenceRequired: false, reachableUntil: null };
   private journal?: LocalCommandJournal;
+  private accountId?: string;
   private readonly pending = new Map<string, Pending>();
   private readonly running = new Map<string, AbortController>();
   private readonly chains = new Map<string, Promise<void>>();
@@ -73,6 +75,7 @@ export class LocalCommandService {
     const session = await this.deps.session();
     if (!session) return;
     const lifetime = this.lifetime = new AbortController();
+    this.accountId = session.accountId;
     this.journal = await this.deps.journal(session.accountId);
     this.loop = this.channel(session, lifetime.signal).catch(() => {});
   }
@@ -88,6 +91,7 @@ export class LocalCommandService {
     for (const pending of this.pending.values()) clearTimeout(pending.timer);
     this.pending.clear(); this.publish();
     this.device = undefined;
+    this.accountId = undefined;
     await this.loop?.catch(() => {});
     await Promise.allSettled([...this.chains.values()]);
   }
@@ -117,7 +121,7 @@ export class LocalCommandService {
     // The clock decides, not the timer: timers run late after the Mac sleeps.
     if (expired(pending.notice)) { this.log(`request decided id=${idPrefix(requestId)} decision=late`); return; }
     this.log(`request decided id=${idPrefix(requestId)} decision=${decision}`);
-    if (decision === "always") this.deps.settings.setAlwaysAllow(true);
+    if (decision === "always" && this.accountId) this.deps.settings.setAlwaysAllow(this.accountId, true);
     // Queued, not awaited: the command may run for minutes.
     void this.serial(requestId, () => this.execute(pending.notice, decision === "deny" ? "deny" : "approve"));
   }
@@ -274,8 +278,8 @@ export class LocalCommandService {
   }
 
   private async onNotice(notice: LocalCommandNotice): Promise<void> {
-    const device = this.device, journal = this.journal;
-    if (!device || !journal) return;
+    const device = this.device, journal = this.journal, accountId = this.accountId;
+    if (!device || !journal || !accountId) return;
     if (notice.state === "terminal") {
       this.log(`request finished id=${idPrefix(notice.requestId)} outcome=${notice.outcome}`);
       // Withdraw an approval, kill a running group, record the outcome, then acknowledge.
@@ -293,7 +297,7 @@ export class LocalCommandService {
     this.log(`request received id=${idPrefix(notice.requestId)} default_target=${notice.isDefaultTarget ? "yes" : "no"}`);
     // Past its deadline: never offered or run; the server's terminal notice settles the journal.
     if (expired(notice)) return;
-    if (this.deps.settings.alwaysAllow() && notice.isDefaultTarget) {
+    if (this.deps.settings.alwaysAllow(accountId) && notice.isDefaultTarget) {
       this.log(`request decided id=${idPrefix(notice.requestId)} decision=always_allow`);
       await this.execute(notice, "approve"); return;
     }

@@ -8,6 +8,8 @@ import { cloudScopedId, cloudWorkspaceKey, isCloudWorkspace, parseCloudScopedId 
 import { clearCloudGithub } from "../platform/cloud-github";
 import { useSessionsStore } from "../features/agent/sessions-store";
 import { selectActiveFolder, useWorkspaceStore } from "./store";
+import { editDraftChatId } from "./workspace-store";
+import { retireDashboardBy } from "../features/dashboard/preferences";
 import { workspaceListFilterProjectId } from "./workspace-list-filter";
 import { canReadCloudWorkspace, clearCloudWorkspaceCatalog, getCloudWorkspaceDocuments, restoreCloudWorkspaceCatalog, subscribeCloudWorkspaces, subscribeCloudWorkspaceRows } from "./cloud-workspace-catalog";
 import { clearCloudAgentRegistry } from "../features/agent/workspace-agent-registry";
@@ -50,10 +52,16 @@ export function installAccountPresentationIdentity(user: AuthUser | null): void 
     state.pendingWorkspaceValidationFolder,
     state.pendingChatHydrationFolder,
     selectActiveFolder(state),
+    // A draft can outlive its chat row; it still names the workspace it belongs to.
+    ...[...Object.keys(state.chatComposerDrafts), ...Object.keys(state.editComposerDrafts).map(editDraftChatId)].map(chatId => {
+      const scope = parseCloudScopedId(chatId);
+      return scope ? cloudWorkspaceKey(scope) : null;
+    }),
   ].filter((folder): folder is string => !!folder && isCloudWorkspace(folder)));
   for (const chat of state.chats) if (isCloudWorkspace(chat.folder)) useSessionsStore.getState().removeSession(chat.id);
   if (retire) {
     pruneOrganizationDestinations(destination => isCloudWorkspace(destination.folder));
+    retireDashboardBy();
     state.dispatch({ type: "PRUNE_CLOUD_WORKSPACES", folders: [...folders] });
     // Repository selection can outlive both its folder and the catalog on disk.
     const projectIds = new Set([

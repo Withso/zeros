@@ -8,7 +8,7 @@ import { setCommand } from "../ipc/router";
 import { IS_LOCAL_DEVELOPMENT } from "../runtime-mode";
 import { controlPlaneBaseUrl } from "../workos-desktop-account";
 import { DeviceControl, parseEventStream } from "./control";
-import { computerName, deviceIdFor } from "./device-identity";
+import { alwaysAllowFor, computerName, deviceIdFor, setAlwaysAllowFor } from "./device-identity";
 import { LocalCommandJournal } from "./journal";
 import { runLocalCommand } from "./runner";
 import { LocalCommandService, type LocalCommandApprovalView, type LocalCommandDecision } from "./service";
@@ -16,7 +16,6 @@ import { LocalCommandService, type LocalCommandApprovalView, type LocalCommandDe
 import type { NotifyUserEvent } from "@zeros/protocol/notify-user";
 import type { LocalCommandDevice } from "@zeros/protocol/local-commands";
 import { LOCAL_COMMAND_APPROVALS_EVENT, LOCAL_COMMAND_OPEN_EVENT } from "../../shared/local-commands";
-const ALWAYS_ALLOW_KEY = "localCommandsAlwaysAllow";
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /** Main owns every decision and execution; the renderer only shows approvals
@@ -30,6 +29,7 @@ export function installLocalCommands(options: { notifyUser?(event: NotifyUserEve
   const enabled = !IS_LOCAL_DEVELOPMENT && cloudWorkspaceDesktopCapabilityEnabled();
   const control = new DeviceControl({ fetch: controlPlaneFetch, baseUrl: controlPlaneBaseUrl, token: getValidAccessTokenForMain });
   const notifications = new Map<string, Notification>();
+  const appSettings = { get: getAppSetting, set: setAppSetting };
   const showApproval = (requestId: string) => {
     const window = getMainWindow();
     if (window && !window.isDestroyed()) { if (window.isMinimized()) window.restore(); window.show(); window.focus(); }
@@ -49,8 +49,8 @@ export function installLocalCommands(options: { notifyUser?(event: NotifyUserEve
     events: async function* (device, signal) { yield* parseEventStream(await control.events(device, signal)); },
     journal: accountId => LocalCommandJournal.open(app.getPath("userData"), accountId),
     run: (input, signal) => runLocalCommand(input, { signal }),
-    identity: { deviceId: accountId => deviceIdFor({ get: getAppSetting, set: setAppSetting }, accountId), name: () => computerName() },
-    settings: { alwaysAllow: () => getAppSetting(ALWAYS_ALLOW_KEY) === "true", setAlwaysAllow: value => setAppSetting(ALWAYS_ALLOW_KEY, String(value)) },
+    identity: { deviceId: accountId => deviceIdFor(appSettings, accountId), name: () => computerName() },
+    settings: { alwaysAllow: accountId => alwaysAllowFor(appSettings, accountId), setAlwaysAllow: (accountId, value) => setAlwaysAllowFor(appSettings, accountId, value) },
     session: async () => { const user = getSessionUserForMain(); return user ? { accountId: user.accountId, sessionId: user.sessionId } : null; },
     publish: approvals => {
       for (const [requestId, notification] of notifications) if (!approvals.some(approval => approval.requestId === requestId)) { notification.close(); notifications.delete(requestId); }
@@ -96,11 +96,17 @@ export function installLocalCommands(options: { notifyUser?(event: NotifyUserEve
     if (approval && !notifications.has(approval.requestId)) notify(approval);
     return true;
   });
-  setCommand("local_commands_always_get", (_args, event) => { requireMainFrame(event); return getAppSetting(ALWAYS_ALLOW_KEY) === "true"; });
+  setCommand("local_commands_always_get", (_args, event) => {
+    requireMainFrame(event);
+    const user = getSessionUserForMain();
+    return user ? alwaysAllowFor(appSettings, user.accountId) : false;
+  });
   setCommand("local_commands_always_set", (args, event) => {
     requireMainFrame(event);
     if (typeof args.enabled !== "boolean") throw new Error("Invalid local command setting.");
-    setAppSetting(ALWAYS_ALLOW_KEY, String(args.enabled));
+    const user = getSessionUserForMain();
+    if (!user) throw new Error("Sign in to change local command approvals.");
+    setAlwaysAllowFor(appSettings, user.accountId, args.enabled);
     return args.enabled;
   });
   setCommand("local_commands_device", (_args, event) => {
