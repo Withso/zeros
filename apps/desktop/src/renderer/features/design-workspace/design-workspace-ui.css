@@ -905,6 +905,15 @@
   content: "";
 }
 
+/* Frame presets open beside the Frame tool, outside the rail's flow, so the
+ * toolbar never shifts. */
+.zd-design-frame-presets {
+  position: absolute;
+  top: 30px;
+  left: calc(100% + 8px);
+  white-space: nowrap;
+}
+
 .zd-design-tools-rail[data-motion-open] {
   bottom: calc(var(--zeros-design-motion-height, 240px) + 16px);
 }

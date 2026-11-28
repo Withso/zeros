@@ -52,6 +52,22 @@ async function exercise({ page, check }) {
   check("Section, Note and Link card sit in the tool rail beside Text",
     JSON.stringify(rail.slice(0, 7)) === JSON.stringify(["Select", "Frame tool", "Rectangle tool", "Text tool", "Section tool", "Note tool", "Link card tool"]), JSON.stringify(rail));
   check("a page with no items mounts no item layer", (await page.locator("[data-design-canvas-items]").count()) === 0);
+  const canvasTools = page.getByRole("toolbar", { name: "Canvas tools" });
+  const toolsBefore = await canvasTools.boundingBox();
+  await viewport.focus();
+  await page.keyboard.press("f");
+  const presets = page.getByRole("toolbar", { name: "Frame presets" });
+  await expect(presets).toBeVisible();
+  const toolsOpen = await canvasTools.boundingBox();
+  const presetsBox = await presets.boundingBox();
+  const frameTool = await page.getByRole("button", { name: "Frame tool", exact: true }).boundingBox();
+  check("Frame presets open right of the Frame tool without moving the tool rail",
+    toolsOpen.x === toolsBefore.x && toolsOpen.y === toolsBefore.y &&
+      presetsBox.x >= toolsOpen.x + toolsOpen.width &&
+      Math.abs(presetsBox.y - frameTool.y) <= 8,
+    JSON.stringify({ toolsBefore, toolsOpen, presetsBox, frameTool }));
+  await page.keyboard.press("v");
+  await expect(presets).toHaveCount(0);
 
   // ── Create ──
   let writes = await itemWrites();
