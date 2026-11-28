@@ -61,6 +61,36 @@ describe("decoded Design preview continuity", () => {
     expect(budget.usage().decodedBytes).toBe(0);
   });
 
+  it("does not scan every decoded entry for a warm cache hit", async () => {
+    let time = 0;
+    const clock = vi.fn(() => time);
+    const { previews, seed, ready } = setup(512, 1024, clock);
+    const inputs = [target("a.html"), target("b.html"), target("c.html")];
+    for (const input of inputs) seed(input);
+    previews.setOwner({}, inputs[0]);
+    for (const [index, input] of inputs.entries()) {
+      const lease = previews.acquire(input)!;
+      await ready(index);
+      await lease.whenReady;
+      lease.release();
+    }
+
+    const entries = (previews as unknown as { entries: Map<string, unknown> }).entries;
+    const values = entries.values;
+    let scans = 0;
+    entries.values = function scanned() {
+      scans++;
+      return values.call(entries);
+    } as typeof entries.values;
+    clock.mockClear();
+    const returning = previews.acquire(inputs[0])!;
+    expect(returning.ready).toBe(true);
+    expect(scans).toBe(0);
+    expect(clock.mock.calls.length).toBeLessThanOrEqual(1);
+    returning.release();
+    previews.clearWarm();
+  });
+
   it("keeps completed fallback pixels across hidden and other-owner navigation without another decode", async () => {
     const { previews, calls, seed, ready, budget } = setup();
     const a = target(), b = target("b.html", "/organization/b");
