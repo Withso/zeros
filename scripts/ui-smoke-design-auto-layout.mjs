@@ -271,7 +271,7 @@ export async function runDesignAutoLayoutSmoke({ page, check }) {
       const input = element.querySelector("input");
       return (
         element.scrollWidth <= element.clientWidth &&
-        getComputedStyle(input).fontSize === "13px" &&
+        getComputedStyle(input).fontSize === "12px" &&
         !getComputedStyle(input).fontFamily.toLowerCase().includes("mono")
       );
     }),
