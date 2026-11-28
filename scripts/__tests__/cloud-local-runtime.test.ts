@@ -69,12 +69,26 @@ describe("electron:cloud runtime use and cleanup", () => {
     const f = fixture();
     await maintainLocalRuntimes(f.workspace, f.profile, "/fixture", sha, { module: f.module, env: {}, write: f.write });
     expect(f.retention.recordRuntimeUse).toHaveBeenCalledWith(f.client, "zeros-dev-objects", sha, { owner: "a".repeat(24), instance });
-    expect(f.retention.retainDevRuntimes).toHaveBeenCalledWith(f.client, "zeros-dev-objects", { current: sha, mode: "dry-run" });
+    expect(f.retention.retainDevRuntimes).toHaveBeenCalledWith(f.client, "zeros-dev-objects", { current: sha, previous: null, mode: "dry-run" });
     expect(f.retention.recordRuntimeUse.mock.invocationCallOrder[0]).toBeLessThan(f.retention.retainDevRuntimes.mock.invocationCallOrder[0]!);
     expect(f.write).toHaveBeenCalledWith("/fixture/state/runtime-retention.json", expect.stringContaining('"status": "planned"'));
     expect(f.client.destroy).toHaveBeenCalledOnce();
     await maintainLocalRuntimes(f.workspace, f.profile, "/fixture", sha, { module: f.module, env: { ZEROS_DEV_RUNTIME_RETENTION: "apply" }, write: f.write });
-    expect(f.retention.retainDevRuntimes).toHaveBeenLastCalledWith(f.client, "zeros-dev-objects", { current: sha, mode: "apply" });
+    expect(f.retention.retainDevRuntimes).toHaveBeenLastCalledWith(f.client, "zeros-dev-objects", { current: sha, previous: null, mode: "apply" });
+  });
+  it("marks and keeps the previous runtime a wake may still start, ignoring an invalid or repeated one", async () => {
+    const f = fixture(), previous = "d".repeat(64);
+    await maintainLocalRuntimes(f.workspace, f.profile, "/fixture", sha, { module: f.module, env: {}, write: f.write, previous });
+    expect(f.retention.recordRuntimeUse.mock.calls.map(call => call[2])).toEqual([sha, previous]);
+    expect(f.retention.retainDevRuntimes).toHaveBeenLastCalledWith(f.client, "zeros-dev-objects", { current: sha, previous, mode: "dry-run" });
+    for (const ignored of ["not-a-digest", sha]) {
+      const g = fixture();
+      await maintainLocalRuntimes(g.workspace, g.profile, "/fixture", sha, { module: g.module, env: {}, write: g.write, previous: ignored });
+      expect(g.retention.recordRuntimeUse.mock.calls.map(call => call[2])).toEqual([sha]);
+    }
+    const h = fixture();
+    await markLocalRuntime(h.workspace, h.profile, "/fixture", sha, { module: h.module, previous });
+    expect(h.retention.recordRuntimeUse.mock.calls.map(call => call[2])).toEqual([sha, previous]);
   });
   it("plans nothing when the marker cannot be written", async () => {
     const f = fixture(); f.retention.recordRuntimeUse.mockRejectedValue(new Error("synthetic"));
@@ -89,10 +103,9 @@ describe("electron:cloud runtime use and cleanup", () => {
     expect(f.retention.removeRuntimeUses).toHaveBeenCalledWith(f.client, "zeros-dev-objects", instance);
   });
   it("summarizes each outcome in one line", () => {
-    const plan = { remove: [{}, {}], bytes: 666e6, deletesFrom: "2026-12-04T00:00:00.000Z" };
-    expect(runtimeRetentionSummary({ ...plan, status: "planned", mode: "dry-run" })).toMatch(/would remove 2 unused runtimes \(0.7 GB\); set ZEROS_DEV_RUNTIME_RETENTION=apply/);
-    expect(runtimeRetentionSummary({ ...plan, status: "waiting", mode: "apply" })).toMatch(/waits for use markers until 2026-12-04/);
-    expect(runtimeRetentionSummary({ ...plan, status: "deleted", mode: "apply" })).toBe("Worker runtime cleanup removed 2 unused runtimes (0.7 GB).");
+    const plan = { remove: [{}, {}], bytes: 666e6, kept: [{ reason: "current" }, { reason: "unmarked" }, { reason: "unmarked" }] };
+    expect(runtimeRetentionSummary({ ...plan, status: "planned", mode: "dry-run" })).toMatch(/would remove 2 unused runtimes \(0.7 GB\); set ZEROS_DEV_RUNTIME_RETENTION=apply.* 2 never-marked runtimes are kept\.$/);
+    expect(runtimeRetentionSummary({ ...plan, kept: [], status: "deleted", mode: "apply" })).toBe("Worker runtime cleanup removed 2 unused runtimes (0.7 GB).");
     expect(runtimeRetentionSummary({ ...plan, status: "managed", mode: "apply" })).toMatch(/release-managed/);
   });
 });

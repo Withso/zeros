@@ -87,9 +87,9 @@ async function indexTarget(client: Pick<S3Client, "send">, bucket: string, key: 
 }
 
 // Headless Dev (`pnpm electron:cloud`): many checkouts share one bucket and select runtimes by source, so no pin says
-// what is still needed. Each launcher marks the runtime it runs, on start and daily while running; a runtime no
-// checkout has marked for a week is removed on a launcher start, never the starting checkout's own. Removal begins a
-// week after the first marker, so a checkout that started before markers existed has marked its runtime by then.
+// what is still needed. Each launcher marks the runtimes it runs (current and previous), on start and daily while
+// running. A runtime is removed on a launcher start only once it has been marked and its newest mark is over a week
+// old: an archive no checkout ever marked may belong to one running code from before markers, so it stays (`unmarked`).
 export const DEV_RUNTIME_RETENTION = { unusedMs: 7 * 24 * 60 * 60_000 } as const;
 const USES = `${PREFIX}uses/`;
 const USES_SINCE = `${USES}since.json`;
@@ -100,10 +100,10 @@ const INSTANCE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$
 
 export type DevRetentionMode = "dry-run" | "apply";
 export type DevRuntimeRetentionPlan = {
-  version: 1; mode: DevRetentionMode; status: "planned" | "waiting" | "deleted" | "managed"; at: string; current: string;
-  usesSince: string | null; deletesFrom: string | null;
-  kept: Array<{ sha256: string; reason: "current" | "used" | "recent" }>;
-  remove: Array<{ sha256: string; bytes: number; lastModified: string }>;
+  version: 1; mode: DevRetentionMode; status: "planned" | "deleted" | "managed"; at: string; current: string; previous: string | null;
+  usesSince: string | null;
+  kept: Array<{ sha256: string; reason: "current" | "previous" | "used" | "recent" | "unmarked" }>;
+  remove: Array<{ sha256: string; bytes: number; lastModified: string; lastUsed: string }>;
   keys: { indices: string[]; archives: string[]; uses: string[] };
   bytes: number;
 };
@@ -125,11 +125,11 @@ export async function recordRuntimeUse(client: Pick<S3Client, "send">, bucket: s
 }
 
 export function planDevRuntimeRetention(objects: readonly StoredObject[], targets: ReadonlyMap<string, string | null>,
-  options: { current: string; now: number; mode: DevRetentionMode }): DevRuntimeRetentionPlan {
-  if (!SHA.test(options.current)) throw new Error("Invalid current runtime");
-  const since = objects.find(object => object.key === USES_SINCE)?.lastModified ?? null;
+  options: { current: string; previous?: string | null; now: number; mode: DevRetentionMode }): DevRuntimeRetentionPlan {
+  const previous = options.previous ?? null;
+  if (!SHA.test(options.current) || (previous !== null && !SHA.test(previous))) throw new Error("Invalid current runtime");
   const plan: DevRuntimeRetentionPlan = { version: 1, mode: options.mode, status: "planned", at: new Date(options.now).toISOString(), current: options.current,
-    usesSince: since?.toISOString() ?? null, deletesFrom: since ? new Date(since.getTime() + DEV_RUNTIME_RETENTION.unusedMs).toISOString() : null,
+    previous, usesSince: objects.find(object => object.key === USES_SINCE)?.lastModified.toISOString() ?? null,
     kept: [], remove: [], keys: { indices: [], archives: [], uses: [] }, bytes: 0 };
   if (objects.some(object => RELEASE_MANAGED.test(object.key))) return { ...plan, status: "managed" };
   const cutoff = options.now - DEV_RUNTIME_RETENTION.unusedMs, used = new Map<string, number>();
@@ -141,10 +141,12 @@ export function planDevRuntimeRetention(objects: readonly StoredObject[], target
   for (const object of objects) {
     const sha256 = object.key.match(ARCHIVE)?.[1];
     if (!sha256) continue;
-    const reason = sha256 === options.current ? "current" : (used.get(sha256) ?? 0) >= cutoff ? "used" : object.lastModified.getTime() >= cutoff ? "recent" : null;
+    const lastUsed = used.get(sha256);
+    const reason = sha256 === options.current ? "current" : sha256 === previous ? "previous" : lastUsed === undefined ? "unmarked"
+      : lastUsed >= cutoff ? "used" : object.lastModified.getTime() >= cutoff ? "recent" : null;
     if (reason) { plan.kept.push({ sha256, reason }); continue; }
     removed.add(sha256);
-    plan.remove.push({ sha256, bytes: object.size, lastModified: object.lastModified.toISOString() });
+    plan.remove.push({ sha256, bytes: object.size, lastModified: object.lastModified.toISOString(), lastUsed: new Date(lastUsed!).toISOString() });
     plan.keys.archives.push(object.key); plan.bytes += object.size;
   }
   for (const object of objects) {
@@ -153,7 +155,6 @@ export function planDevRuntimeRetention(objects: readonly StoredObject[], target
     const use = object.key.match(USE)?.[1];
     if (use && removed.has(use)) plan.keys.uses.push(object.key);
   }
-  if (!since || since.getTime() > cutoff) plan.status = "waiting";
   return plan;
 }
 
@@ -164,6 +165,7 @@ async function listRuntimeObjects(client: Pick<S3Client, "send">, bucket: string
     const page = await client.send(new ListObjectsV2Command({ Bucket: bucket, Prefix: prefix, ...(token ? { ContinuationToken: token } : {}) }));
     for (const object of page.Contents ?? [])
       if (object.Key && object.LastModified) objects.push({ key: object.Key, lastModified: object.LastModified, size: object.Size ?? 0 });
+    if (page.IsTruncated && !page.NextContinuationToken) throw new Error("Runtime listing is incomplete");
     token = page.IsTruncated ? page.NextContinuationToken : undefined;
   } while (token);
   return objects;
@@ -177,16 +179,30 @@ async function deleteKeys(client: Pick<S3Client, "send">, bucket: string, keys: 
   }
 }
 
-/** Plans Dev cleanup and, in apply mode once markers have existed for a week, removes indices first, then archives,
- * then their markers: no index ever names an archive that is already gone. */
-export async function retainDevRuntimes(client: Pick<S3Client, "send">, bucket: string, options: { current: string; mode: DevRetentionMode; now?: number }) {
-  const objects = await listRuntimeObjects(client, bucket), targets = new Map<string, string | null>();
+/** Plans Dev cleanup and, in apply mode, removes indices first, then archives, then their markers: no index ever names
+ * an archive that is already gone. Each planned runtime's markers are read again just before deletion, so a checkout
+ * that marked it after the listing (and started on it) keeps it. */
+export async function retainDevRuntimes(client: Pick<S3Client, "send">, bucket: string,
+  options: { current: string; previous?: string | null; mode: DevRetentionMode; now?: number }) {
+  const now = options.now ?? Date.now(), objects = await listRuntimeObjects(client, bucket), targets = new Map<string, string | null>();
   for (const object of objects) if (INDEX.test(object.key)) targets.set(object.key, await indexTarget(client, bucket, object.key));
-  const plan = planDevRuntimeRetention(objects, targets, { ...options, now: options.now ?? Date.now() });
+  const plan = planDevRuntimeRetention(objects, targets, { ...options, now });
   if (plan.status !== "planned" || options.mode !== "apply" || !plan.remove.length) return plan;
-  for (const keys of [plan.keys.indices, plan.keys.archives, plan.keys.uses]) await deleteKeys(client, bucket, keys);
-  return { ...plan, status: "deleted" as const };
+  const planned = new Set(plan.remove.map(item => item.sha256)), fresh: StoredObject[] = [];
+  for (const sha256 of planned) fresh.push(...await listRuntimeObjects(client, bucket, `${USES}${sha256}/`));
+  const rechecked = planDevRuntimeRetention([...objects.filter(object => !planned.has(object.key.match(USE)?.[1] ?? "")), ...fresh], targets, { ...options, now });
+  // Only what both plans remove: a marker that disappeared meanwhile never adds a deletion.
+  const removed = new Set(rechecked.remove.map(item => item.sha256).filter(sha256 => planned.has(sha256)));
+  const final = { ...plan, remove: plan.remove.filter(item => removed.has(item.sha256)),
+    kept: [...plan.kept, ...plan.remove.filter(item => !removed.has(item.sha256)).map(item => ({ sha256: item.sha256, reason: "used" as const }))],
+    keys: { indices: rechecked.keys.indices.filter(key => removed.has(targetOf(key, targets) ?? "")),
+      archives: rechecked.keys.archives.filter(key => removed.has(key.match(ARCHIVE)?.[1] ?? "")),
+      uses: rechecked.keys.uses.filter(key => removed.has(key.match(USE)?.[1] ?? "")) } };
+  final.bytes = final.remove.reduce((sum, item) => sum + item.bytes, 0);
+  for (const keys of [final.keys.indices, final.keys.archives, final.keys.uses]) await deleteKeys(client, bucket, keys);
+  return { ...final, status: "deleted" as const };
 }
+const targetOf = (key: string, targets: ReadonlyMap<string, string | null>) => key.match(CAPABILITIES)?.[1] ?? targets.get(key) ?? undefined;
 
 /** `electron:cloud --reset`: this checkout no longer uses any runtime. */
 export async function removeRuntimeUses(client: Pick<S3Client, "send">, bucket: string, instance: string) {

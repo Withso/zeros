@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { SYSTEM_DATABASE_CONTEXT } from "../../apps/control-plane/src/db-context";
 import { planRuntimeArchiveRetention, readRuntimeReferences, retainRuntimeArchives, runtimeRetentionMode,
   type RuntimeStoredObject } from "./runtime-archive-retention";
 
@@ -81,6 +82,15 @@ describe("runtime archive retention run", () => {
     expect(await r.result).toMatchObject({ status: "refused", reason: "current_archive_not_listed" });
     expect(other.deleteRuntimeArchives).not.toHaveBeenCalled();
   });
+  it("deletes nothing when the store also holds another channel's release records", async () => {
+    for (const key of ["cloud-v2/runtime/releases/production/42/1.json", "cloud-v2/runtime/releases/intents/production/42/1/0001.json"]) {
+      const shared = store([...listing(), json(key)]), r = run({ mode: "apply", store: shared });
+      expect(await r.result).toMatchObject({ status: "refused", reason: "shared_store", remove: [] });
+      expect(shared.deleteRuntimeArchives).not.toHaveBeenCalled();
+    }
+    const own = store([...listing(), json("cloud-v2/runtime/releases/intents/alpha/42/1/0001.json")]);
+    expect(await run({ mode: "apply", store: own }).result).toMatchObject({ status: "deleted" });
+  });
   it("deletes nothing after cancellation and reports a failed delete without throwing", async () => {
     const cancelled = run({ mode: "apply", active: () => false });
     expect(await cancelled.result).toMatchObject({ status: "refused", reason: "cancelled" });
@@ -93,11 +103,11 @@ describe("runtime archive retention run", () => {
 });
 
 describe("runtime references", () => {
-  function pool(rows: unknown[], system = "on") {
+  function pool(rows: unknown[], system = "on", protocol = "1") {
     const calls: string[] = [], release = vi.fn();
     const client = { release, query: vi.fn(async (text: string) => {
       calls.push(text);
-      if (text.includes("current_setting")) return { rows: [{ system }] };
+      if (text.includes("current_setting")) return { rows: [{ system, protocol }] };
       if (text.includes("SELECT DISTINCT sha")) return { rows };
       return { rows: [] };
     }) };
@@ -106,16 +116,18 @@ describe("runtime references", () => {
   it("reads every live reference in one read-only system transaction", async () => {
     const p = pool([{ sha: sha("1") }, { sha: sha("2") }]);
     expect(await readRuntimeReferences(p.pool)).toEqual([sha("1"), sha("2")]);
-    expect(p.calls[0]).toMatch(/^BEGIN READ ONLY;.*set_config\('app.system','on',true\)$/);
+    expect(p.calls[0]).toMatch(/^BEGIN READ ONLY;/);
+    expect(p.calls[1]).toBe(SYSTEM_DATABASE_CONTEXT);
     expect(p.calls.at(-1)).toBe("COMMIT"); expect(p.release).toHaveBeenCalledOnce();
     for (const table of ["cloud_v2_runtime_canaries", "cloud_v2_execution_creations", "cloud_v2_execution_activations", "cloud_v2_recovery_attempts",
       "cloud_worker_runtime_handoffs", "cloud_v2_computer_builds", "cloud_v2_shared_bases", "cloud_runtime_build_drain", "worker_runtime_sha256"])
       expect(p.calls.find(text => text.includes("SELECT DISTINCT sha"))).toContain(table);
   });
   it("refuses when row security is not open or a row is not a digest, and rolls back", async () => {
-    const closed = pool([], "");
-    await expect(readRuntimeReferences(closed.pool)).rejects.toThrow(/system read policy/);
-    expect(closed.calls.at(-1)).toBe("ROLLBACK"); expect(closed.release).toHaveBeenCalledOnce();
+    for (const closed of [pool([], ""), pool([], "on", "")]) {
+      await expect(readRuntimeReferences(closed.pool)).rejects.toThrow(/system read policy/);
+      expect(closed.calls.at(-1)).toBe("ROLLBACK"); expect(closed.release).toHaveBeenCalledOnce();
+    }
     const invalid = pool([{ sha: "not-a-digest" }]);
     await expect(readRuntimeReferences(invalid.pool)).rejects.toThrow(/invalid/);
     expect(invalid.calls.at(-1)).toBe("ROLLBACK");

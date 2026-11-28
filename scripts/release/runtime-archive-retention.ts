@@ -2,6 +2,7 @@
 // release has saved its receipt, so the pins it keeps are the ones that release confirmed. Each runtime may have two
 // archive keys: the served copy VMs install and the older retained copy under releases/archives/. Both go together.
 // JSON (manifests, qualifications, receipts, intents, capabilities, source indices) is never deleted.
+import { SYSTEM_DATABASE_CONTEXT } from "../../apps/control-plane/src/db-context";
 import { DIGEST } from "./contracts";
 
 export const RUNTIME_ARCHIVE_RETENTION = { windowDays: 7, newest: 3 } as const;
@@ -11,6 +12,7 @@ const USD_PER_GB_MONTH = 0.015;
 const SERVED = /^cloud-v2\/runtime\/([a-f0-9]{64})\.tar\.gz$/;
 const RETAINED = /^cloud-v2\/runtime\/releases\/archives\/([a-f0-9]{64})\.tar\.gz$/;
 const MAX_OBJECTS = 100_000;
+const CHANNEL_RECORD = /^cloud-v2\/runtime\/releases\/(?:intents\/)?(alpha|production)\//;
 
 export type RuntimeStoredObject = { key: string; lastModified: Date; size: number };
 export type RuntimeRetentionMode = "dry-run" | "apply";
@@ -88,6 +90,10 @@ export async function retainRuntimeArchives(input: {
   let objects: RuntimeStoredObject[];
   try { objects = await input.store.listRuntimeObjects(); } catch { return refused("listing_failed"); }
   if (objects.length > MAX_OBJECTS) return refused("listing_too_large");
+  // Each channel has its own store. Another channel's receipts or intents here would mean a shared bucket, where this
+  // channel's pins and references say nothing about the other channel's runtimes.
+  if (objects.some(object => object.key.match(CHANNEL_RECORD)?.[1] !== undefined && object.key.match(CHANNEL_RECORD)![1] !== input.channel))
+    return refused("shared_store");
   let plan: RuntimeRetentionPlan;
   try { plan = planRuntimeArchiveRetention(objects, { ...input, references: input.references, now }); } catch { return refused("invalid_input"); }
   // The pin this release just confirmed must be in the listing; otherwise this is not the store the channel serves.
@@ -119,14 +125,18 @@ const REFERENCES = `SELECT DISTINCT sha FROM (
   UNION ALL SELECT d.prior_runtime_sha256 FROM cloud_runtime_build_drain d
 ) refs WHERE sha IS NOT NULL ORDER BY sha`;
 
-/** The runtimes live rows still name, read in one read-only transaction with row security opened for the system. */
+/** The runtimes live rows still name, read in one read-only transaction in the control plane's system context: row
+ * security opened for the system, and the execution protocol marker without which the restrictive
+ * cloud_execution_protocol policy (0240) hides workspaces in, or moving into, active execution. */
 export async function readRuntimeReferences(pool: { connect(): Promise<ReferenceClient> }): Promise<string[]> {
   const tx = await pool.connect();
   try {
-    await tx.query("BEGIN READ ONLY; SET LOCAL lock_timeout='5s'; SET LOCAL statement_timeout='30s'; SELECT set_config('app.system','on',true)");
+    await tx.query("BEGIN READ ONLY; SET LOCAL lock_timeout='5s'; SET LOCAL statement_timeout='30s'");
     try {
-      const opened = (await tx.query("SELECT current_setting('app.system', true) AS system")).rows[0] as { system?: unknown } | undefined;
-      if (opened?.system !== "on") throw new Error("Runtime references require the system read policy");
+      await tx.query(SYSTEM_DATABASE_CONTEXT);
+      const opened = (await tx.query("SELECT current_setting('app.system', true) AS system, current_setting('app.cloud_execution_protocol', true) AS protocol"))
+        .rows[0] as { system?: unknown; protocol?: unknown } | undefined;
+      if (opened?.system !== "on" || opened.protocol !== "1") throw new Error("Runtime references require the system read policy");
       const rows = (await tx.query(REFERENCES)).rows as Array<{ sha?: unknown }>;
       const references = rows.map(row => row.sha);
       if (!references.every((sha): sha is string => typeof sha === "string" && DIGEST.test(sha))) throw new Error("Runtime reference is invalid");

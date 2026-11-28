@@ -153,9 +153,10 @@ async function start(workspace, profile) {
     console.log("[zeros-dev] Selecting this checkout's worker runtime (build and publish if missing)");
     const runtime = await resolveLocalRuntime(workspace, profile, root, { signal });
     // Best effort: a storage hiccup here must not stop Dev. An unmarked runtime is still kept for a week after upload.
-    await maintainLocalRuntimes(workspace, profile, root, runtime).then(plan => console.log(`[zeros-dev] ${runtimeRetentionSummary(plan)}`),
+    const runtimeOptions = { previous: process.env.ZEROS_CLOUD_V2_RUNTIME_PREVIOUS_SHA256 };
+    await maintainLocalRuntimes(workspace, profile, root, runtime, runtimeOptions).then(plan => console.log(`[zeros-dev] ${runtimeRetentionSummary(plan)}`),
       () => console.log("[zeros-dev] Worker runtime use was not recorded and cleanup was skipped; the next start retries."));
-    runtimeUse = setInterval(() => void markLocalRuntime(workspace, profile, root, runtime).catch(() => {}), RUNTIME_USE_REFRESH_MS);
+    runtimeUse = setInterval(() => void markLocalRuntime(workspace, profile, root, runtime, runtimeOptions).catch(() => {}), RUNTIME_USE_REFRESH_MS);
     runtimeUse.unref();
     await run("npm", ["--prefix", "apps/web", "run", "build"], { cwd: root, env, signal, timeout: 180_000, label: "Auth web build" });
     console.log("[zeros-dev] Starting isolated PostgreSQL and applying release migrations");

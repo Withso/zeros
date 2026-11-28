@@ -100,27 +100,36 @@ describe("headless Dev runtime retention", () => {
   const use = (c: string, who: string, age: number): StoredObject => ({ key: `cloud-v2/runtime/uses/${sha(c)}/${owners[who]}/${who}.json`, lastModified: new Date(now - age), size: 60 });
   const since = (age: number): StoredObject => ({ key: "cloud-v2/runtime/uses/since.json", lastModified: new Date(now - age), size: 40 });
   const capabilities = (c: string): StoredObject => ({ key: `cloud-v2/runtime/capabilities/${sha(c)}.json`, lastModified: new Date(now - 30 * day), size: 200 });
-  // 1 is this checkout's current runtime (old, unmarked); 2 is marked by another checkout within the week; 3 was
-  // marked 8 days ago; 4 was never marked; 5 was published yesterday and not yet marked.
+  // 1 is this checkout's current runtime and 7 its previous one (both old); 2 is marked by another checkout within the
+  // week; 3 and 6 were last marked over a week ago; 4 was never marked; 5 was published yesterday and not yet marked.
   const objects = (markersFor: number) => [since(markersFor), archive("1", 30 * day), archive("2", 30 * day), archive("3", 30 * day), archive("4", 30 * day),
-    archive("5", day), use("2", other, 6 * day), use("3", other, 8 * day), use("3", instance, 9 * day), index("3", 30 * day), index("4", 30 * day), capabilities("4")];
+    archive("5", day), archive("6", 30 * day), archive("7", 30 * day), use("2", other, 6 * day), use("3", other, 8 * day), use("3", instance, 9 * day),
+    use("6", other, 10 * day), use("7", instance, 20 * day), index("3", 30 * day), index("4", 30 * day), capabilities("4"), capabilities("6")];
   const targets = new Map([[index("3", 0).key, sha("3")], [index("4", 0).key, sha("4")]]);
+  const options = { current: sha("1"), previous: sha("7"), now, mode: "apply" as const };
 
-  it("removes runtimes no checkout used for a week, never the current one, with their indices, capabilities and markers", () => {
-    const plan = planDevRuntimeRetention(objects(8 * day), targets, { current: sha("1"), now, mode: "apply" });
+  it("removes only runtimes whose newest mark is over a week old, with their indices, capabilities and markers", () => {
+    const plan = planDevRuntimeRetention(objects(30 * day), targets, options);
     expect(plan.status).toBe("planned");
-    expect(plan.kept).toEqual([{ sha256: sha("1"), reason: "current" }, { sha256: sha("2"), reason: "used" }, { sha256: sha("5"), reason: "recent" }]);
-    expect(plan.keys.archives).toEqual([archive("3", 0).key, archive("4", 0).key]);
-    expect(plan.keys.indices.sort()).toEqual([index("3", 0).key, index("4", 0).key, capabilities("4").key].sort());
-    expect(plan.keys.uses.sort()).toEqual([use("3", other, 0).key, use("3", instance, 0).key].sort());
+    expect(plan.kept).toEqual([{ sha256: sha("1"), reason: "current" }, { sha256: sha("2"), reason: "used" }, { sha256: sha("4"), reason: "unmarked" },
+      { sha256: sha("5"), reason: "unmarked" }, { sha256: sha("7"), reason: "previous" }]);
+    expect(plan.remove.map(item => [item.sha256, item.lastUsed])).toEqual([[sha("3"), new Date(now - 8 * day).toISOString()], [sha("6"), new Date(now - 10 * day).toISOString()]]);
+    expect(plan.keys.archives).toEqual([archive("3", 0).key, archive("6", 0).key]);
+    expect(plan.keys.indices.sort()).toEqual([index("3", 0).key, capabilities("6").key].sort());
+    expect(plan.keys.uses.sort()).toEqual([use("3", other, 0).key, use("3", instance, 0).key, use("6", other, 0).key].sort());
     expect(plan.bytes).toBe(2 * 300e6);
   });
-  it("waits until markers have existed for a week, and plans nothing on a release-managed store", () => {
-    expect(planDevRuntimeRetention(objects(6 * day), targets, { current: sha("1"), now, mode: "apply" })).toMatchObject({ status: "waiting",
-      deletesFrom: new Date(now + day).toISOString() });
-    expect(planDevRuntimeRetention(objects(8 * day).filter(o => !o.key.endsWith("since.json")), targets, { current: sha("1"), now, mode: "apply" }).status).toBe("waiting");
+  it("keeps a runtime uploaded this week even when its only mark is older", () => {
+    const plan = planDevRuntimeRetention([archive("1", 0), archive("9", 2 * day), use("9", other, 8 * day)], new Map(), { ...options, previous: null });
+    expect(plan.kept).toContainEqual({ sha256: sha("9"), reason: "recent" }); expect(plan.remove).toEqual([]);
+  });
+  it("never removes an archive no checkout ever marked, however old, and plans nothing on a release-managed store", () => {
+    const unmarked = planDevRuntimeRetention([since(60 * day), archive("1", 0), archive("4", 60 * day), archive("8", 90 * day)], new Map(), { ...options, previous: null });
+    expect(unmarked.remove).toEqual([]);
+    expect(unmarked.kept.filter(item => item.reason === "unmarked").map(item => item.sha256)).toEqual([sha("4"), sha("8")]);
     const managed = [...objects(30 * day), { key: "cloud-v2/runtime/releases/manifests/x.json", lastModified: new Date(now), size: 1 }];
-    expect(planDevRuntimeRetention(managed, targets, { current: sha("1"), now, mode: "apply" })).toMatchObject({ status: "managed", remove: [] });
+    expect(planDevRuntimeRetention(managed, targets, options)).toMatchObject({ status: "managed", remove: [] });
+    expect(() => planDevRuntimeRetention([], targets, { ...options, previous: "not-a-digest" })).toThrow();
   });
   it("applies only when the variable is exactly apply", () => {
     expect(devRuntimeRetentionMode("apply")).toBe("apply");
@@ -156,24 +165,42 @@ describe("headless Dev runtime retention", () => {
   });
   it("deletes nothing in dry-run, and in apply deletes indices, then archives, then markers", async () => {
     const bodies = { [index("3", 0).key]: record("3"), [index("4", 0).key]: record("4") };
-    const dry = bucket(objects(8 * day), bodies);
-    expect(await retainDevRuntimes(dry, "dev", { current: sha("1"), mode: "dry-run", now })).toMatchObject({ status: "planned", remove: [{ sha256: sha("3") }, { sha256: sha("4") }] });
+    const dry = bucket(objects(30 * day), bodies);
+    expect(await retainDevRuntimes(dry, "dev", { ...options, mode: "dry-run" })).toMatchObject({ status: "planned", remove: [{ sha256: sha("3") }, { sha256: sha("6") }] });
     expect(calls(dry).some(([name]) => name === "DeleteObjectsCommand")).toBe(false);
-    const live = bucket(objects(8 * day), bodies);
-    expect(await retainDevRuntimes(live, "dev", { current: sha("1"), mode: "apply", now })).toMatchObject({ status: "deleted" });
+    const live = bucket(objects(30 * day), bodies);
+    expect(await retainDevRuntimes(live, "dev", options)).toMatchObject({ status: "deleted" });
     const deletes = calls(live).filter(([name]) => name === "DeleteObjectsCommand").map(([, input]) => input.Delete.Objects.map((o: any) => o.Key));
     expect(deletes).toHaveLength(3);
-    expect(deletes[0].every((key: string) => key.includes("/sources/") || key.includes("/capabilities/"))).toBe(true);
-    expect(deletes[1]).toEqual([archive("3", 0).key, archive("4", 0).key]);
+    expect(deletes[0].sort()).toEqual([index("3", 0).key, capabilities("6").key].sort());
+    expect(deletes[1]).toEqual([archive("3", 0).key, archive("6", 0).key]);
     expect(deletes[2].every((key: string) => key.includes("/uses/"))).toBe(true);
-    const waiting = bucket(objects(day), bodies);
-    expect(await retainDevRuntimes(waiting, "dev", { current: sha("1"), mode: "apply", now })).toMatchObject({ status: "waiting" });
-    expect(calls(waiting).some(([name]) => name === "DeleteObjectsCommand")).toBe(false);
+  });
+  it("re-reads a planned runtime's markers just before deleting it, and keeps it if a checkout marked it meanwhile", async () => {
+    const listing = objects(30 * day), bodies = { [index("3", 0).key]: record("3") };
+    const client = bucket(listing, bodies), send = client.send.getMockImplementation()!;
+    // Another checkout starts on runtime 3 after the full listing: its new marker appears only in the per-runtime re-read.
+    client.send.mockImplementation(async (command: any) => {
+      if (command.constructor.name === "ListObjectsV2Command" && command.input.Prefix === `cloud-v2/runtime/uses/${sha("3")}/`)
+        return { Contents: [use("3", other, 0)].map(o => ({ Key: o.key, LastModified: o.lastModified, Size: o.size })), IsTruncated: false };
+      return send(command);
+    });
+    const plan = await retainDevRuntimes(client, "dev", options);
+    expect(plan.remove.map(item => item.sha256)).toEqual([sha("6")]);
+    expect(plan.kept).toContainEqual({ sha256: sha("3"), reason: "used" });
+    const deleted = calls(client).filter(([name]) => name === "DeleteObjectsCommand").flatMap(([, input]) => input.Delete.Objects.map((o: any) => o.Key));
+    expect(deleted.join()).not.toContain(sha("3"));
+    expect(deleted).toContain(archive("6", 0).key);
+  });
+  it("refuses a truncated listing without a continuation token", async () => {
+    const client = { send: vi.fn(async () => ({ Contents: [], IsTruncated: true })) };
+    await expect(retainDevRuntimes(client, "dev", options)).rejects.toThrow(/incomplete/);
+    await expect(pruneRuntimes(client, "dev", { protect: [], now })).rejects.toThrow(/incomplete/);
   });
   it("removes only this checkout's markers on reset", async () => {
     const client = bucket(objects(8 * day));
-    expect(await removeRuntimeUses(client, "dev", instance)).toBe(1);
+    expect(await removeRuntimeUses(client, "dev", instance)).toBe(2);
     const [deleted] = calls(client).filter(([name]) => name === "DeleteObjectsCommand");
-    expect(deleted![1].Delete.Objects).toEqual([{ Key: use("3", instance, 0).key }]);
+    expect(deleted![1].Delete.Objects).toEqual([{ Key: use("3", instance, 0).key }, { Key: use("7", instance, 0).key }]);
   });
 });

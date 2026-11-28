@@ -19,6 +19,23 @@ describe.skipIf(!process.env.TEST_DATABASE_URL)("runtime archive references agai
     return { query: client.query.bind(client), release: () => { void client.query("RESET ROLE").finally(() => client.release()); } };
   } };
 
+  it("keeps the runtimes of workspaces in active execution or an execution transition, which the protocol policy hides", async () => {
+    const user = randomUUID(), org = randomUUID();
+    await pool.query("INSERT INTO users(id,email,display_name) VALUES($1,$2,'Retention fixture')", [user, `${user}@example.test`]);
+    await grantTestPro(pool, user);
+    await pool.query("INSERT INTO organizations(id,slug,name,created_by,is_personal,cloud_workspaces_allowed) VALUES($1,$2,'Retention fixture',$3,false,true)", [org, `org-${org}`, user]);
+    await pool.query("INSERT INTO organization_members(org_id,user_id,role) VALUES($1,$2,'owner')", [org, user]);
+    const store = new CloudV2Store(pool), create = (branch: string) => store.createWorkspace({ id: randomUUID(), organizationId: org, creatorUserId: user,
+      name: "Fixture", repository: "fixture/repo", sourceRepositoryId: "42", branch, baseBranch: "main", computerBuildId: null });
+    const active = await create("workspace/active"), transitioning = await create("workspace/transition");
+    await pool.query("UPDATE cloud_v2_workspaces SET execution_mode='active', worker_runtime_sha256=$2 WHERE id=$1", [active.id, "d".repeat(64)]);
+    const activation = randomUUID();
+    await pool.query(`INSERT INTO cloud_v2_execution_activations(id,workspace_id,org_id,runtime_sha256,target_fingerprint,request_hash,reason_hash,prepared_snapshot)
+      VALUES($1,$2,$3,$4,$5,$6,$6,'{}')`, [activation, transitioning.id, org, "f".repeat(64), "0".repeat(16), Buffer.alloc(32)]);
+    await pool.query("UPDATE cloud_v2_workspaces SET execution_transition_id=$2 WHERE id=$1", [transitioning.id, activation]);
+    expect(await readRuntimeReferences(asApplication)).toEqual(["d".repeat(64), "f".repeat(64)]);
+  });
+
   it("reads live workspace, handoff and build references through row security, and drops a deleted workspace's", async () => {
     expect(await readRuntimeReferences(asApplication)).toEqual([]);
     const user = randomUUID(), org = randomUUID();
