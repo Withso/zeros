@@ -338,7 +338,10 @@ export function inspectorSegmentedArrowKeyDown(
   enabled: (index: number) => boolean,
   activate: (index: number) => void,
 ): void {
-  if (event.currentTarget.dataset.designPointerFocus !== undefined) return;
+  if (
+    event.currentTarget.dataset.designPointerFocus !== undefined ||
+    event.metaKey || event.ctrlKey || event.altKey || event.shiftKey
+  ) return;
   const direction = ["ArrowRight", "ArrowDown"].includes(event.key)
     ? 1
     : ["ArrowLeft", "ArrowUp"].includes(event.key)
