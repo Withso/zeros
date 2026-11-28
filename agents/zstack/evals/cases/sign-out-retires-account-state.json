@@ -5,5 +5,5 @@
   "fixedBy": "pr:1367",
   "symptom": "After signing out of account A and into B without a restart, B inherited A's state: device-wide 'Always allow' let B's cloud agents run local commands without asking, A's notifications opened A's chat targets, and A's dashboard filter and ready-copy cache carried over.",
   "rule": "Account-scoped consent and caches are keyed per account (no ownerless consent is adopted); sign-out/account switch retires notifications, filters and pruned chats' drafts, including late composer flushes. See playbooks/bug-fix.md.",
-  "check": "pnpm exec vitest run --config vitest.config.ts apps/desktop/src/renderer/state/__tests__/account-presentation.test.ts apps/desktop/electron/__tests__/local-command-device-identity.test.ts apps/desktop/electron/__tests__/notify-user-install.test.ts"
+  "check": "pnpm exec vitest run --config vitest.config.ts apps/desktop/src/renderer/state/__tests__/account-presentation.test.ts apps/desktop/electron/__tests__/local-command-device-identity.test.ts apps/desktop/electron/__tests__/notify-user-install.test.ts apps/desktop/src/renderer/state/__tests__/cloud-reload.test.ts"
 }
