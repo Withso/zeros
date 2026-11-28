@@ -173,8 +173,10 @@ export function createDesignFrameResidencyReader<T extends DesignSpatialFrame>()
       view: input.view, viewport: input.viewport,
       selectedFrame: input.selectedFrame, requiredFiles: [
         ...(input.protectedFiles ?? []), ...input.requiredFiles,
-        ...[...(prior?.live ?? [])].filter(file => visibleFiles.has(file) && !(input.covered ?? input.pictured).has(file) &&
-          !(sources.has(file) && input.sourceReady?.get(file) === (available.get(file) as T & { sourceVersion?: string })?.sourceVersion)),
+        // Mid-gesture no passive frame is admitted, so a running document
+        // stays rather than swapping to its picture and back at rest.
+        ...[...(prior?.live ?? [])].filter(file => visibleFiles.has(file) && (input.gesture || !(input.covered ?? input.pictured).has(file) &&
+          !(sources.has(file) && input.sourceReady?.get(file) === (available.get(file) as T & { sourceVersion?: string })?.sourceVersion))),
       ],
       pictured: input.pictured, devicePixelRatio: input.devicePixelRatio, admitPassive: !input.gesture,
       sourceSurfaces: input.vectorCovered ? new Set([...sources, ...input.vectorCovered]) : sources,
