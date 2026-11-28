@@ -288,27 +288,16 @@ export function DesignStyleEditor({
     authoredFillImage && parseDesignGradient(authoredFillImage)
       ? authoredFillImage
       : fillImage;
-  const backgroundFillColor = styleValue(
-    details,
-    "background-color",
-    "transparent",
-  );
-  // Text without a painted background keeps Fill as its text colour. Once
-  // the layer paints a background, that background is the fill being edited.
-  const fillTargetsText =
-    textLayer &&
-    designFillIsEmpty(backgroundFillColor, editableFillImage) &&
-    !isAuthored("background-color");
-  const fillProperty = fillTargetsText ? "color" : "background-color";
+  const fillProperty = textLayer ? "color" : "background-color";
   const fillToken = useDesignStyleToken(details, fillProperty);
   const confirmedFillColor = styleValue(
     details,
     fillProperty,
-    fillTargetsText ? "currentColor" : "transparent",
+    textLayer ? "currentColor" : "transparent",
   );
   // An added fill is a row at once, as in Figma, while its save lands.
   const [addedFill, setAddedFill] = useState<string | null>(null);
-  const fillAdding = !fillTargetsText && addedFill === details.oid && designFillIsEmpty(confirmedFillColor, editableFillImage);
+  const fillAdding = !textLayer && addedFill === details.oid && designFillIsEmpty(confirmedFillColor, editableFillImage);
   useEffect(() => {
     if (addedFill && (addedFill !== details.oid || !designFillIsEmpty(confirmedFillColor, editableFillImage))) setAddedFill(null);
   }, [addedFill, confirmedFillColor, details.oid, editableFillImage]);
@@ -317,14 +306,14 @@ export function DesignStyleEditor({
   const fillMixed = designStyleMixed(
     selection,
     selectionCount,
-    fillTargetsText ? ["color"] : ["background-color", "background-image"],
+    textLayer ? ["color"] : ["background-color", "background-image"],
   );
   // A fill the user authored stays a row even at 0% (so a popover editing it
   // stays open); only an unauthored, fully transparent background is empty.
   // Differing fills are one Mixed row, even when the first layer has none.
   const fillEmpty =
     !fillAdding &&
-    !fillTargetsText &&
+    !textLayer &&
     !fillMixed &&
     designFillIsEmpty(fillColor, editableFillImage) &&
     !isAuthored("background-color") &&
@@ -332,7 +321,7 @@ export function DesignStyleEditor({
   // Until fills are a true stack, Add appears only where the write cannot
   // replace an authored or visible solid fill on any selected layer.
   const fillCanAdd =
-    !fillTargetsText &&
+    !textLayer &&
     selection.every((node) => {
       const color = styleValue(node, "background-color", "transparent");
       return (
@@ -606,7 +595,7 @@ export function DesignStyleEditor({
                 label="Add fill"
                 disabled={disabled}
                 onClick={() => {
-                  if (designFillIsEmpty(confirmedFillColor, editableFillImage)) {
+                  if (fillEmpty) {
                     requestDesignPaintPicker("background-color");
                     setAddedFill(details.oid);
                   }
@@ -629,7 +618,7 @@ export function DesignStyleEditor({
               : "grid-cols-[minmax(0,1fr)_auto]",
           )}
         >
-          {fillTargetsText ? (
+          {textLayer ? (
             <DesignColorField
               value={fillColor}
               label="Fill"
@@ -667,7 +656,7 @@ export function DesignStyleEditor({
               disabled={disabled}
               onRequest={onOpenMotionTimeline}
             />
-            {!fillTargetsText ? (
+            {!textLayer ? (
               <InspectorIconButton
                 label="Remove fill"
                 disabled={disabled}
@@ -686,7 +675,7 @@ export function DesignStyleEditor({
             ) : null}
           </div>
         </div>
-        {!fillTargetsText &&
+        {!textLayer &&
         styleValue(details, "background-blend-mode", "normal") !== "normal" ? (
           <InspectorSelect
             label="Fill blend"
