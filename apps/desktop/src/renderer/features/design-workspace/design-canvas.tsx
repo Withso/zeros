@@ -162,6 +162,7 @@ import {
   designFrameInsertion,
   designPointInChildCoordinateSpace,
   designTreeChildIds,
+  designVectorInChildCoordinateSpace,
   designWrapInFlow,
 } from "./design-frame-insertion";
 import {
@@ -2258,9 +2259,9 @@ export const DesignCanvas = React.memo(function DesignCanvas({
             y: edit.y,
             placement: edit.placement,
             typography: edit.typography,
-            ...(edit.width === undefined
+            ...(edit.insertionWidth === undefined || edit.insertionHeight === undefined
               ? {}
-              : { width: edit.width, height: edit.height }),
+              : { width: edit.insertionWidth, height: edit.insertionHeight }),
           });
           const result = edit.parentNeedsPosition
             ? await (async () => {
@@ -7964,6 +7965,27 @@ export const DesignCanvas = React.memo(function DesignCanvas({
           parentDetails?.styles,
           recentType.current?.owner === canvasDocumentOwnerRef.current ? recentType.current.styles : undefined,
         );
+        const insertionSize =
+          size && parentDetails
+            ? (() => {
+                try {
+                  const vector = designVectorInChildCoordinateSpace(parentDetails, {
+                    x: size.width,
+                    y: size.height,
+                  });
+                  return {
+                    width: Math.max(1, Math.abs(vector.x)),
+                    height: Math.max(1, Math.abs(vector.y)),
+                  };
+                } catch {
+                  return null;
+                }
+              })()
+            : null;
+        if (size && parentDetails && !insertionSize) {
+          toast.error("The frame's editable coordinates are unavailable");
+          return;
+        }
         let editorPoint = point;
         if (placement === "flow") {
           const runtime = designFrameRuntime(workspaceId, frame.file);
@@ -7979,7 +8001,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
                 y: 0,
                 placement,
                 typography: newTypography,
-                ...(size ? size : {}),
+                ...(insertionSize ? insertionSize : {}),
               });
               const measured = await runtime.previewInsert({
                 inserts: [{ nodeId, parentId: parentNodeId, beforeId: null, tag: "div", style }],
@@ -8027,6 +8049,12 @@ export const DesignCanvas = React.memo(function DesignCanvas({
           x: parentPoint.x,
           y: parentPoint.y,
           ...(size ? size : {}),
+          ...(insertionSize
+            ? {
+                insertionWidth: insertionSize.width,
+                insertionHeight: insertionSize.height,
+              }
+            : {}),
           placement,
           parentNeedsPosition,
           typography: newTypography,

@@ -137,20 +137,40 @@ export async function designDrawParentAt(runtime: DesignDrawParentRuntime, point
   return parent;
 }
 
+function designChildCoordinateSpaceInverse(
+  parent: DesignRuntimeNodeDetails,
+): { matrix: [number, number, number, number, number, number]; determinant: number } {
+  const matrix = parent.childCoordinateSpace;
+  if (!matrix)
+    throw new Error("The frame's editable coordinates are unavailable.");
+  const [a, b, c, d] = matrix;
+  const determinant = a * d - b * c;
+  if (Math.abs(determinant) < 0.000001)
+    throw new Error("The frame has no drawable area.");
+  return { matrix: matrix as [number, number, number, number, number, number], determinant };
+}
+
 export function designPointInChildCoordinateSpace(
   parent: DesignRuntimeNodeDetails,
   point: Point,
 ): Point {
-  const matrix = parent.childCoordinateSpace;
-  if (!matrix)
-    throw new Error("The frame's editable coordinates are unavailable.");
+  const { matrix, determinant } = designChildCoordinateSpaceInverse(parent);
   const [a, b, c, d, e, f] = matrix;
-  const determinant = a * d - b * c;
-  if (Math.abs(determinant) < 0.000001)
-    throw new Error("The frame has no drawable area.");
   return {
     x: (d * (point.x - e) - c * (point.y - f)) / determinant,
     y: (-b * (point.x - e) + a * (point.y - f)) / determinant,
+  };
+}
+
+export function designVectorInChildCoordinateSpace(
+  parent: DesignRuntimeNodeDetails,
+  vector: Point,
+): Point {
+  const { matrix, determinant } = designChildCoordinateSpaceInverse(parent);
+  const [a, b, c, d] = matrix;
+  return {
+    x: (d * vector.x - c * vector.y) / determinant,
+    y: (-b * vector.x + a * vector.y) / determinant,
   };
 }
 

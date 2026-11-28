@@ -7,6 +7,7 @@ import {
   designDrawnFrameWrapOperations,
   designFrameInsertionOperations,
   designTreeChildIds,
+  designVectorInChildCoordinateSpace,
 } from "../design-frame-insertion";
 
 const parent: DesignRuntimeNodeDetails = {
@@ -120,6 +121,11 @@ describe("child frame insertion", () => {
     }).find((entry) => entry.type === "node.set-html");
     expect(operation?.html).toContain("display:block;");
     expect(operation?.html).toContain("background-color:#ffffff;opacity:1;"); // check:ui ignore-line -- authored canvas frame color, not editor chrome.
+  });
+  it("converts a drawn vector into a scaled parent's child coordinates", () => {
+    expect(
+      designVectorInChildCoordinateSpace(parent, { x: 40, y: 20 }),
+    ).toEqual({ x: 20, y: 10 });
   });
   it("keeps the click-created default size inside a rotated and scaled parent", () => {
     const operations = designFrameInsertionOperations(

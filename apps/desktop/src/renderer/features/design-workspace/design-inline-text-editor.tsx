@@ -43,6 +43,10 @@ export interface NewInlineTextEdit extends InlineTextEditBase {
   y: number;
   width?: number;
   height?: number;
+  /** Drag size converted into the destination parent's child coordinates.
+   * width/height remain canvas-sized for the overlay editor. */
+  insertionWidth?: number;
+  insertionHeight?: number;
   placement: "absolute" | "flow";
   parentNeedsPosition: boolean;
   /** Exact inherited runtime typography for an element that does not exist in
