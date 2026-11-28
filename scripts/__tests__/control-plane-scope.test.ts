@@ -101,7 +101,8 @@ describe("control-plane database scope inputs", () => {
       ...outside.flatMap(governingConfigs),
     ];
     expect(required.filter((file) => !isControlPlaneDatabaseInput(file))).toEqual([]);
-  });
+    // Bundling every control-plane source takes a few seconds alone and over 20 on a busy CI shard.
+  }, 90_000);
 
   it("covers every repository path the control-plane sources name", () => {
     const named = controlPlaneSources().flatMap((file) => [
