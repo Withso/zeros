@@ -1177,6 +1177,11 @@ describe("permissionMenuItems (native permission modes shown in the '+' menu)", 
     expect(
       coerceModeIdForModel("codex", "gpt-5.6-sol", "full-access", null, undefined, advertised),
     ).toBe("auto-edit");
+    // Nothing offered is as strict as Ask: the blocked choice stays visible
+    // instead of silently becoming a looser mode.
+    expect(
+      coerceModeIdForModel("codex", "gpt-5.6-sol", "ask", null, undefined, [{ id: "auto-edit", name: "Auto-Edit" }, { id: "full-access", name: "Full Access" }]),
+    ).toBe("ask");
     // Before bind the session advertises nothing; the static vocabulary stays.
     expect(
       permissionMenuItems("codex", "gpt-5.6-sol", null, undefined, []).map((i) => i.modeId),

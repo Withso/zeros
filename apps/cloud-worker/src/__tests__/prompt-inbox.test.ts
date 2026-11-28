@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { WorkspaceError } from "../workspace/scope";
 import { cp, mkdtemp, readFile, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -548,6 +549,12 @@ it("runs and records the bounded mode for frozen modes managed Codex policy bloc
   for (const item of [first, second]) Object.assign(item.payload, { permissionMode: "bypass" });
   relay.enqueue({ prompts: [first, second], stops: [] });
   Object.assign(driver, { effectiveMode: (mode: string) => mode === "full-access" ? "read-only" : mode });
+  // Like the Codex driver: a busy route's switch is refused by setMode itself.
+  const apply = driver.setMode.bind(driver);
+  vi.spyOn(driver, "setMode").mockImplementation(async mode => {
+    if (mode === "full-access") throw new WorkspaceError("invalid-params", "Your organization's Codex policy does not allow the \"full-access\" permission mode.");
+    return apply(mode);
+  });
   const f = await setup({ relay, driver, interactions: true });
   // Both queued turns (the second reusing the same driver) run in the
   // bounded mode and record it, instead of failing or saving Full access.

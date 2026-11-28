@@ -18,6 +18,7 @@ vi.mock("../../shared/json-rpc-process", () => ({
 }));
 
 import { CodexDriver } from "../driver";
+import { providerFailure } from "../../../provider-failure";
 
 const drivers: CodexDriver[] = [];
 const params = (method: string) => native.request.mock.calls.filter(([name]) => name === method).at(-1)?.[1];
@@ -92,6 +93,12 @@ describe("cloud Codex managed requirements", () => {
     const { driver } = await open("full-access");
     expect(driver.effectiveMode("full-access")).toBe("read-only");
     expect(driver.effectiveMode("read-only")).toBe("read-only");
+  });
+
+  it("keeps the organization-policy text when the worker maps the startup failure for the user", async () => {
+    native.requirements = managed(["never"], null);
+    const error = await open("read-only").catch((failure: unknown) => failure);
+    expect(providerFailure("codex", error, "prompt").message).toMatch(/does not allow the "read-only" permission mode/);
   });
 });
 

@@ -450,14 +450,16 @@ export class Agents {
           if (this.config.agentInteractions !== 1) throw new WorkspaceError("CLOUD_V2_UNSUPPORTED", "This cloud worker does not support Plan mode yet.");
           const mode = cloudPermissionMode(route.agentId, message.modeId);
           if (!mode) throw new WorkspaceError("invalid-params", "Choose Plan or Full access for a cloud workspace.");
-          // An open driver knows the managed policy even between turns.
-          if (route.driver?.effectiveMode && route.driver.effectiveMode(message.modeId) !== message.modeId)
+          // Between turns nothing else checks the choice, so an open driver's
+          // managed policy does. A busy route's ensured driver refuses in setMode.
+          if (this.idle(route) && route.driver?.effectiveMode && route.driver.effectiveMode(message.modeId) !== message.modeId)
             throw new WorkspaceError("invalid-params", "Your organization's Codex policy does not allow this permission mode. Choose another mode.");
           // Some providers apply modes on the next turn. A changed selection
           // invalidates the running turn's match instead of relabelling it.
           if (route.activePermissionMode !== mode) route.activePermissionMode = undefined;
           const revision = route.modeRevision = (route.modeRevision ?? 0) + 1;
-          return this.withModeChange(route, async () => {
+          // Awaited so a refused setMode reaches the AGENT_ERROR reply below.
+          return await this.withModeChange(route, async () => {
             if (!this.idle(route)) {
               await this.ensureDriver(route); this.assertCurrent(route);
               if (route.modeRevision !== revision) return;

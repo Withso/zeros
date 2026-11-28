@@ -862,8 +862,11 @@ export function coerceModeIdForModel(
     // restrictive than the one asked for.
     const rank = ["read-only", "ask", "auto-edit", "full-access"];
     const at = rank.indexOf(modeId);
-    const stricter = at < 0 ? undefined : rank.slice(0, at + 1).reverse().find((id) => items.some((i) => i.modeId === id));
-    if (stricter) return stricter;
+    if (at >= 0) {
+      // Nothing offered is as strict: keep the blocked choice visible rather
+      // than silently showing a looser one.
+      return rank.slice(0, at + 1).reverse().find((id) => items.some((i) => i.modeId === id)) ?? modeId;
+    }
   }
   return (items.find((i) => i.modeId === "accept-edits") ?? items[0]).modeId;
 }

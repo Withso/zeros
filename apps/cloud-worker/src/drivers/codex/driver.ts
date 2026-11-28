@@ -9,6 +9,7 @@ import { codexModelUnavailableMessage } from "@zeros/protocol/model-rejection";
 import { redactDriverMessage, redactDriverValue, type Driver, type DriverOpen } from "../driver";
 import { normalizeProviderError } from "../shared/provider-error";
 import { retainProviderFailure } from "../../provider-failure";
+import { WorkspaceError } from "../../workspace/scope";
 import { unsupportedInputNotice } from "../shared/unsupported-input";
 import { CLOUD_INPUT_TIMEOUT_MS, cleanInteraction, nativeInputResponse } from "../shared/native-input";
 import { driverTiming } from "../../agent-timings";
@@ -124,7 +125,8 @@ export class CodexDriver implements Driver {
       const requestedMode = this.modeId;
       const startMode = resolveCodexMode(requestedMode, this.policyRequirements, ["read-only", "full-access"]);
       if (startMode !== "read-only" && startMode !== "full-access")
-        throw new Error(codexPolicyBlockedMessage(this.policyRequirements,
+        // A WorkspaceError keeps the policy text through providerFailure.
+        throw new WorkspaceError("invalid-params", codexPolicyBlockedMessage(this.policyRequirements,
           codexAnyModeAllowed(this.policyRequirements, ["read-only", "full-access"]) && (requestedMode === "read-only" || requestedMode === "full-access") ? requestedMode : undefined));
       this.modeId = startMode;
       const response = await this.rpc.request<{ thread: { id: string }; model?: string }>(input.nativeSessionId ? "thread/resume" : "thread/start", {
@@ -146,7 +148,7 @@ export class CodexDriver implements Driver {
       driverTiming(this.input, "process_ready");
       return { nativeSessionId: this.nativeSessionId };
     } catch (error) {
-      const failure = this.error(error);
+      const failure = error instanceof WorkspaceError ? error : this.error(error);
       await this.dispose();
       throw failure;
     }
@@ -226,7 +228,7 @@ export class CodexDriver implements Driver {
   async setMode(modeId: string): Promise<void> {
     this.assertReady();
     if (modeId !== "read-only" && modeId !== "full-access") throw new Error("Invalid Codex mode.");
-    if (!codexModeAllowed(modeId, this.policyRequirements)) throw new Error(codexPolicyBlockedMessage(this.policyRequirements, modeId));
+    if (!codexModeAllowed(modeId, this.policyRequirements)) throw new WorkspaceError("invalid-params", codexPolicyBlockedMessage(this.policyRequirements, modeId));
     this.modeId = modeId;
     for (const emit of this.listeners) emit({ sessionId: this.input!.sessionId,
       update: { sessionUpdate: "current_mode_update", currentModeId: modeId } });
