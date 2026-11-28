@@ -265,6 +265,8 @@ export function paintDesignFrameVisibility(element: HTMLElement, context?: Chrom
     painted.childCount = worldChildCount; painted.frameChildCount = frameChildCount;
     painted.pointer = pointer; painted.tiled = tiled; painted.chromeProtected = chromeProtected;
     painted.nestTarget = nestTarget; painted.focused = focused; painted.hovered = hovered; painted.gesture = gestureInput;
+    // Child replacement is not synchronously observable here either.
+    paintFrameChromeRoots(element, painted.rootsZoom, painted.rootsGesture);
     return;
   }
   const next: PaintedFrameVisibility = { zoom: viewport.zoom,

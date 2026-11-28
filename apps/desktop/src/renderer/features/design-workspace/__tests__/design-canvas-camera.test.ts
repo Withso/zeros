@@ -102,6 +102,24 @@ it("restores frame camera variables after a geometry-preserving inline style rew
   } finally { await page.close(); }
 });
 
+it("validates replacement chrome roots when a resize preserves frame outputs", async () => {
+  const page = await open();
+  try {
+    await paint(page, 2, 0, 500);
+    expect(await page.locator('[data-design-frame="near"] [data-design-frame-chrome]').evaluate(root =>
+      (root as HTMLElement).style.getPropertyValue("--design-canvas-inverse-zoom"))).toBe("0.5");
+    await page.locator('[data-design-frame="near"]').evaluate(frame => {
+      const replacement = document.createElement("div");
+      replacement.setAttribute("data-design-frame-chrome", "");
+      replacement.innerHTML = "<button>Replacement</button>";
+      frame.querySelector("[data-design-frame-chrome]")!.replaceWith(replacement);
+    });
+    await paint(page, 2, 0, 600);
+    expect(await page.locator('[data-design-frame="near"] [data-design-frame-chrome]').evaluate(root =>
+      (root as HTMLElement).style.getPropertyValue("--design-canvas-inverse-zoom"))).toBe("0.5");
+  } finally { await page.close(); }
+});
+
 it("keeps camera bounds scoped to each retained workspace and excludes pixels and screen-size chrome children from inheritance", async () => {
   const page = await open();
   try {
