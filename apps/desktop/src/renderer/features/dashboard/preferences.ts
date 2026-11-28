@@ -77,6 +77,21 @@ export function readDashboardBy(organizationId: string): DashboardBy {
   bySnapshots.set(organizationId, value);
   return value;
 }
+/** By is one person's view of an organization, stored per organization only,
+ * so it retires with that person's account presentation. */
+export function retireDashboardBy(): void {
+  try {
+    const keys: string[] = [];
+    for (let index = 0; index < localStorage.length; index++) {
+      const key = localStorage.key(index);
+      if (key?.startsWith(BY_KEY(""))) keys.push(key);
+    }
+    for (const key of keys) localStorage.removeItem(key);
+  } catch { /* storage disabled */ }
+  if (bySnapshots.size === 0) return;
+  bySnapshots.clear();
+  for (const listener of byListeners) listener();
+}
 export function saveDashboardBy(organizationId: string, value: DashboardBy): void {
   if (readDashboardBy(organizationId) === value) return;
   try { if (value === "anyone") localStorage.removeItem(BY_KEY(organizationId)); else localStorage.setItem(BY_KEY(organizationId), value); }

@@ -40,6 +40,8 @@ beforeEach(() => {
     getItem: (key: string) => storage.get(key) ?? null,
     setItem: (key: string, value: string) => { storage.set(key, value); },
     removeItem: (key: string) => { storage.delete(key); },
+    get length() { return storage.size; },
+    key: (index: number) => [...storage.keys()][index] ?? null,
   });
   vi.stubGlobal("window", { setTimeout: () => 0, clearTimeout: () => {}, addEventListener: () => {}, removeEventListener: () => {}, dispatchEvent: () => true, localStorage });
 });
@@ -419,4 +421,32 @@ it("a relaunch exposes cached chats and files for the restored workspace before 
   await expect(loadWorkspaceFiles(folder)).rejects.toThrow("access changed");
   expect(localStorage.getItem("zeros-cloud-file-lists:v1")).not.toContain("fresh.ts");
   setActiveBridge(null);
+});
+
+it("signs in as A, signs out, signs in as B without restart, and shows B nothing of A's", async () => {
+  const m = await seed();
+  const [dashboard, readyCopy] = await Promise.all([
+    import("../../features/dashboard/preferences"), import("../../features/settings/ready-copy-section"),
+  ]);
+  const project = "77777777-1111-4111-8111-111111111111";
+  const draft = (text: string) => ({ text, attachments: [] });
+  const store = () => m.workspace.useWorkspaceStore.getState();
+  // A's per-person view of the shared organization, server state only A may
+  // see, and A's unsent words in A's cloud chat — beside a Local chat draft.
+  dashboard.saveDashboardBy(target.organizationId, "none");
+  readyCopy.readyCopyCache.setData(readyCopy.readyCopyKey(target.organizationId, project), { status: "ready" } as never);
+  store().dispatch({ type: "SET_CHAT_DRAFT", chatId: id, draft: draft("A's cloud secret") });
+  store().dispatch({ type: "SET_EDIT_DRAFT", chatId: id, messageId: "m1", stash: { ...draft("A's edit"), newAttachments: [], keptOriginals: [] } });
+  store().dispatch({ type: "SET_CHAT_DRAFT", chatId: "local", draft: draft("Device Local draft") });
+
+  m.identity.installAccountPresentationIdentity(null);
+  m.identity.installAccountPresentationIdentity({ ...user, sub: "account-b", email: "b@example.test", sessionId: "sign-in-b" });
+  m.team.acceptOrganizationSnapshot({ ...me, user: { ...me.user, id: "account-b", email: "b@example.test" } });
+
+  expect(dashboard.readDashboardBy(target.organizationId)).toBe("anyone");
+  expect([...storage.keys()].some(key => key.startsWith("zeros:dashboard-by:v1:"))).toBe(false);
+  expect(readyCopy.readyCopyCache.getSnapshot(readyCopy.readyCopyKey(target.organizationId, project)).data).toBeUndefined();
+  expect(Object.keys(store().chatComposerDrafts)).toEqual(["local"]);
+  expect(Object.keys(store().editComposerDrafts)).toEqual([]);
+  expect(store().chats.map(chat => chat.id)).toEqual(["local"]);
 });

@@ -221,7 +221,9 @@ describe("design workspace interaction wiring", () => {
     // Before the focus gate: a drag is as often started from a Layers
     // selection, which leaves focus outside the canvas viewport entirely.
     expect(guard).toBeLessThan(
-      source.indexOf("if (!viewport.contains(document.activeElement)) return;"),
+      source.indexOf(
+        "if (!viewport.contains(document.activeElement) && !panelShortcutFocus) return;",
+      ),
     );
     expect(guard).toBeLessThan(
       source.indexOf(
@@ -233,10 +235,30 @@ describe("design workspace interaction wiring", () => {
     expect(source).not.toContain('if (keyboardEvent.key !== "Escape") return;');
   });
 
+  it("scopes tool and nudge shortcuts to the visible design surface", () => {
+    expect(source).toContain("activeElement === document.body");
+    expect(source).toContain("const arrowShortcut =");
+    expect(source).toContain("const toolShortcut =");
+    expect(source).toContain("!panelControlKeepsArrows");
+    expect(layersSource).toContain('event.currentTarget.dataset.designPointerFocus = "";');
+    expect(layersSource).toContain("layerRowFocusIsPointerDriven(event.currentTarget)");
+    expect(source).toContain("const keyboardSegmentFocus =");
+    expect(readFileSync(resolve(process.cwd(), "apps/desktop/src/renderer/features/design-workspace/design-inspector-kit.tsx"), "utf8"))
+      .toContain("event.metaKey || event.ctrlKey || event.altKey || event.shiftKey");
+    expect(source).toContain("keyboardSegmentFocus && !event.shiftKey");
+    expect(source).toContain("!viewport.contains(document.activeElement) && !keyboardTreeFocus");
+    expect(source).toContain("const escapeShortcut = event.key === \"Escape\";");
+    expect(source).toContain("confirmed.sourceVersion !== queued.sourceVersion");
+    expect(source).toContain("if (selectedFrame.sourceVersion !== queued.sourceVersion) return;");
+    expect(source).toContain(
+      "if (!viewport.contains(document.activeElement) && !panelShortcutFocus) return;",
+    );
+  });
+
   it("routes copy, duplicate, and delete through the active semantic selection", () => {
     expect(source).toContain("resolveDesignSelectionShortcut(");
     expect(source).toContain(
-      'activeElement.closest("[data-design-workspace-surface]")',
+      "activeElement.closest(DESIGN_SURFACE_SELECTOR)",
     );
     expect(source).toContain('document.execCommand("copy")');
     expect(source).toContain('window.addEventListener("paste", paste)');
@@ -689,6 +711,13 @@ describe("design workspace interaction wiring", () => {
       `--design-spacing-line-border: ${DESIGN_WHITE}`,
     );
     expect(semanticTokensSource).toContain("--design-selection-handle-fill:");
+    const radiusHandle = /\.zd-design-radius-handle \{([^}]*)\}/.exec(uiSource)?.[1] ?? "";
+    expect(radiusHandle).toContain("background: var(--design-selection-handle-fill)");
+    expect(radiusHandle).not.toContain("var(--bg1)");
+    const componentSelection = /\[data-design-frame-component\]\[data-design-frame-root-selected\] \{([^}]*)\}/
+      .exec(uiSource)?.[1] ?? "";
+    expect(componentSelection).toContain("--design-selection-stroke:");
+    expect(componentSelection).not.toContain("--design-selection-handle-fill:");
     expect(uiSource).toContain(".zd-design-selection-outline");
     expect(uiSource).toContain(".zd-design-selection-handle");
     expect(uiSource).toContain("var(--design-padding-stroke)");
