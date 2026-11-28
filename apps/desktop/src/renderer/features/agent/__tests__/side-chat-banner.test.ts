@@ -26,10 +26,10 @@ afterEach(() => {
   store.chats = [];
 });
 
-function render(value: SideChatSeed) {
+function render(value: SideChatSeed, active = true) {
   const node = document.body.appendChild(document.createElement("div"));
   root = createRoot(node);
-  act(() => root!.render(createElement(SideChatBranchBanner, { seed: value })));
+  act(() => root!.render(createElement(SideChatBranchBanner, { seed: value, active })));
   return node;
 }
 
@@ -48,6 +48,15 @@ describe("SideChatBranchBanner", () => {
   it("follows a renamed source chat", () => {
     store.chats = [{ id: "source", title: "Return to the right page" }];
     expect(render(seed()).querySelector("[data-side-chat-source]")!.textContent).toBe("Branched from Return to the right page");
+  });
+
+  it("measures the quote only while its chat is on screen", () => {
+    const createRange = vi.spyOn(document, "createRange");
+    render(seed(), false);
+    expect(createRange).not.toHaveBeenCalled();
+    act(() => root!.render(createElement(SideChatBranchBanner, { seed: seed(), active: true })));
+    expect(createRange).toHaveBeenCalled();
+    createRange.mockRestore();
   });
 
   it("shows the fork mark and the quote", () => {

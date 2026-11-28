@@ -20,11 +20,13 @@ export function firstLineEnd(length: number, topOf: (index: number) => number): 
 }
 
 /** Where the quote wraps at the banner's width. Measured with a Range over the
- *  full-width text, again whenever the width changes. */
-function useQuoteBreak(text: string) {
+ *  full-width text, again whenever the width changes, and only while the chat
+ *  is on screen: a retained hidden chat neither measures nor observes. */
+function useQuoteBreak(text: string, active: boolean) {
   const ref = useRef<HTMLSpanElement | null>(null);
   const [cut, setCut] = useState<number | null>(null);
   useLayoutEffect(() => {
+    if (!active) return;
     const node = ref.current;
     const textNode = node?.firstChild;
     if (!node || !textNode || textNode.nodeType !== Node.TEXT_NODE || typeof document.createRange !== "function") return;
@@ -51,7 +53,7 @@ function useQuoteBreak(text: string) {
     });
     observer.observe(node);
     return () => observer.disconnect();
-  }, [text]);
+  }, [text, active]);
   return { ref, cut };
 }
 
@@ -59,11 +61,11 @@ function useQuoteBreak(text: string) {
  *  source chat's name, then at most two lines of the branched-from message on
  *  a blue rule, the second line stopping at half width. It is the
  *  transcript's first item, so it scrolls away with it. */
-export function SideChatBranchBanner({ seed }: { seed: SideChatSeed }) {
+export function SideChatBranchBanner({ seed, active = true }: { seed: SideChatSeed; active?: boolean }) {
   const liveTitle = useWorkspaceStore((state) => state.chats.find((chat) => chat.id === seed.sourceChatId)?.title);
   const name = liveTitle?.trim() || seed.sourceTitle || "a chat";
   const quote = seed.quote.replace(/\s+/g, " ").trim();
-  const { ref, cut } = useQuoteBreak(quote);
+  const { ref, cut } = useQuoteBreak(quote, active);
   return (
     <div data-side-chat-banner="" className="flex w-full max-w-(--chat-lane) min-w-0 items-start gap-3 self-center">
       <span

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { agentsGroupOf, agentsRowPlace, agentsRowStatus, groupAgentsRows } from "../tabs/agents-tab-model";
+import { agentsChildCloudError, agentsGroupOf, agentsRowPlace, agentsRowStatus, groupAgentsRows } from "../tabs/agents-tab-model";
 
 describe("Agents tab groups", () => {
   it("follows the sidebar's Needs you, Working, Idle and Archived", () => {
@@ -53,5 +53,23 @@ describe("where a child runs", () => {
   it("falls back to the folder when a workspace is unknown", () => {
     expect(agentsRowPlace({ folder: "/other" }, { folder: "/ws/a", current: null, child: null, cloud: false }).separate).toBe(true);
     expect(agentsRowPlace({ folder: "/ws/a" }, { folder: "/ws/a", current: null, child: null, cloud: false }).separate).toBe(false);
+  });
+});
+
+describe("a child's cloud error", () => {
+  const errors = new Set(["cloud://o/w2"]);
+
+  it("needs you even before the live workspace list has the child", () => {
+    // No workspace record: the place comes from the folder alone, as the row's label does.
+    const place = agentsRowPlace({ folder: "cloud://o/w2" }, { folder: "/ws/a", current: null, child: null, cloud: true });
+    const cloudError = agentsChildCloudError(place, "cloud://o/w2", errors);
+    expect(cloudError).toBe(true);
+    expect(agentsGroupOf({ status: "running", unread: false, cloudError })).toBe("needs-you");
+  });
+
+  it("ignores a child in this workspace and a Local child", () => {
+    expect(agentsChildCloudError({ separate: false, cloud: false, project: null }, "cloud://o/w2", errors)).toBe(false);
+    expect(agentsChildCloudError({ separate: true, cloud: false, project: null }, "cloud://o/w2", errors)).toBe(false);
+    expect(agentsChildCloudError({ separate: true, cloud: true, project: null }, "cloud://o/w3", errors)).toBe(false);
   });
 });

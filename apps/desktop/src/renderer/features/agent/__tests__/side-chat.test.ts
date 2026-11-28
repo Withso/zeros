@@ -8,12 +8,14 @@ import { formatMessageTime } from "../message-hover-actions";
 import { createForkedChat } from "../fork-chat";
 import {
   boundSeeds,
+  columnChatIdForSideChat,
   createSideChat,
   forgetSideChatSeed,
   getSideChatSeed,
   isSideChat,
   markSideChatSeedSent,
   openSideChat,
+  publishReplacementChat,
   rememberColumnChat,
   resetSideChatSeedsForTesting,
   sessionViewChatId,
@@ -115,6 +117,48 @@ describe("sessionViewChatId", () => {
     expect(sessionViewChatId([...chats, { ...local, id: "other" }], "side", "/repo")).toBe("other");
     expect(sessionViewChatId(chats, "source", "/repo")).toBe("source");
     expect(sessionViewChatId(chats, null, "/repo")).toBeNull();
+  });
+
+  it("follows a side chat opened from another side chat back to its session, with no column yet", () => {
+    const first = { ...local, id: "first", kind: "side" as const, sourceChatId: "source" };
+    const nested = { ...local, id: "nested", kind: "side" as const, sourceChatId: "first" };
+    expect(sessionViewChatId([local, first, nested], "nested", "/fresh-after-relaunch")).toBe("source");
+    const loopA = { ...local, id: "loop-a", kind: "side" as const, sourceChatId: "loop-b" };
+    const loopB = { ...local, id: "loop-b", kind: "side" as const, sourceChatId: "loop-a" };
+    expect(sessionViewChatId([loopA, loopB], "loop-a", "/nowhere")).toBeNull();
+  });
+
+  it("targets the chat the column falls back to when its chat and the source are closed", () => {
+    rememberColumnChat("/repo", "a");
+    const a = { ...local, id: "a", archived: true, createdAt: 3 };
+    const b = { ...local, id: "b", createdAt: 2 };
+    const older = { ...local, id: "older", createdAt: 1 };
+    const side = { ...local, id: "s", kind: "side" as const, sourceChatId: "a", createdAt: 9 };
+    const chats = [{ ...local, archived: true }, a, b, older, side];
+    expect(sessionViewChatId(chats, "s", "/repo")).toBe("b");
+    // The pane resolves the same chat from the chats it can show.
+    expect(columnChatIdForSideChat(chats, side, "a", (chat) => ["b", "older"].includes(chat.id))).toBe("b");
+  });
+});
+
+describe("publishReplacementChat", () => {
+  it("keeps a side chat's /clear or model switch a side chat, in the same tab", () => {
+    const dispatch = vi.fn();
+    const side = { ...local, id: "side", kind: "side" as const, sourceChatId: "source" };
+    publishReplacementChat(dispatch, side, { ...local, id: "fresh", kind: "side", title: "Untitled" });
+    expect(dispatch).toHaveBeenCalledWith({
+      type: "OPEN_SIDE_CHAT",
+      chat: expect.objectContaining({ id: "fresh", kind: "side", title: "Side chat", sourceChatId: "source" }),
+      replaceChatId: "side",
+      recordWorkspaceActivity: true,
+    });
+  });
+
+  it("adds an ordinary chat's replacement to the chat column", () => {
+    const dispatch = vi.fn();
+    const fresh = { ...local, id: "fresh" };
+    publishReplacementChat(dispatch, local, fresh);
+    expect(dispatch).toHaveBeenCalledWith({ type: "ADD_CHAT", chat: fresh, recordWorkspaceActivity: true });
   });
 });
 

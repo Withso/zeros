@@ -121,10 +121,17 @@ export function NewTabSideChatMenu({
   );
 }
 
+export function sideChatListLabel(count: number, hydrating: boolean): string {
+  if (count) return `In this workspace · ${count}`;
+  return hydrating ? "Loading side chats…" : "No side chats yet";
+}
+
 function SideChatItems({ scope, folder, onDone }: { scope: string; folder: string; onDone(): void }) {
   const dispatch = useWorkspaceDispatch();
   const chats = useWorkspaceStore((state) => state.chats);
   const tabs = useWorkspaceStore((state) => state.workbenchByScope[scope]?.tabs);
+  // While the folder's chats are being confirmed the list is unknown, not empty.
+  const hydrating = useWorkspaceStore((state) => state.pendingChatHydrationFolder === folder);
   const source = useWorkspaceStore((state) => {
     const id = sessionViewChatId(state.chats, state.activeChatId, folder);
     return state.chats.find((chat) => chat.id === id && workbenchScopeForFolder(chat.folder) === scope) ?? null;
@@ -156,7 +163,7 @@ function SideChatItems({ scope, folder, onDone }: { scope: string; folder: strin
       </DropdownMenuItem>
       <DropdownMenuSeparator />
       <DropdownMenuLabel className="text-fg3 text-3xxs font-medium">
-        {entries.length ? `In this workspace · ${entries.length}` : "No side chats yet"}
+        {sideChatListLabel(entries.length, hydrating)}
       </DropdownMenuLabel>
       {entries.map(({ chat, from, open }) => (
         <DropdownMenuItem key={chat.id} onSelect={() => reopen(chat)} className="items-start" data-side-chat-entry={chat.id}>

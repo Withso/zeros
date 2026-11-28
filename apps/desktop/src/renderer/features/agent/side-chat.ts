@@ -126,9 +126,39 @@ export function columnChatFor(folder: string): string | null {
   return columnChatByFolder.get(folder) ?? null;
 }
 
+/** The chat the chat column shows while side chat `side` has focus: the
+ *  column's remembered chat, else the chat the side chat branched from
+ *  (following side chats back to an ordinary one), else the newest chat the
+ *  column can show. The pane and the column's chrome both resolve it here, so
+ *  the breadcrumb, session menus and ⌥⌘T act on the chat that is on screen. */
+export function columnChatIdForSideChat(
+  chats: readonly ChatThread[],
+  side: ChatThread,
+  column: string | null,
+  shown: (chat: ChatThread) => boolean = (chat) =>
+    chat.folder === side.folder && chat.kind !== "terminal" && !chat.archived && !isSideChat(chat),
+): string | null {
+  const byId = new Map(chats.map((chat) => [chat.id, chat]));
+  const pick = (id: string | null | undefined) => {
+    const chat = id ? byId.get(id) : undefined;
+    return chat && shown(chat) ? chat.id : null;
+  };
+  const remembered = pick(column);
+  if (remembered) return remembered;
+  const seen = new Set<string>();
+  for (let at: ChatThread | undefined = side; at && !seen.has(at.id); at = byId.get(at.sourceChatId ?? at.parentChatId ?? "")) {
+    seen.add(at.id);
+    const source = pick(at.sourceChatId) ?? pick(at.parentChatId);
+    if (source) return source;
+  }
+  let newest: ChatThread | null = null;
+  for (const chat of chats) if (shown(chat) && (!newest || chat.createdAt >= newest.createdAt)) newest = chat;
+  return newest?.id ?? null;
+}
+
 /** The session the chat column's chrome (breadcrumb, session menus, the
- *  Agents tab's Viewing row) follows. While a side chat has focus that is the
- *  column's own chat, else the chat the side chat was opened from. */
+ *  Agents tab's Viewing row) follows: the focused chat, or while a side chat
+ *  has focus, the chat the column shows. */
 export function sessionViewChatId(
   chats: readonly ChatThread[],
   activeId: string | null,
@@ -137,11 +167,7 @@ export function sessionViewChatId(
   if (!activeId) return null;
   const active = chats.find((chat) => chat.id === activeId);
   if (!active || !isSideChat(active)) return activeId;
-  const live = (id: string | null | undefined) =>
-    !!id && chats.some((chat) => chat.id === id && !chat.archived && !isSideChat(chat));
-  const column = columnChatFor(folder);
-  if (live(column)) return column;
-  return live(active.sourceChatId) ? active.sourceChatId! : null;
+  return columnChatIdForSideChat(chats, active, columnChatFor(folder));
 }
 
 export function sideChatCloseConfirmation(
@@ -190,6 +216,32 @@ export function closeSideChat(
 /** Open a side chat as a focused tab in its workspace's Workbench. */
 export function publishSideChat(dispatch: (action: Action) => void, chat: ChatThread): void {
   dispatch({ type: "OPEN_SIDE_CHAT", chat });
+  requestWorkbenchReveal();
+}
+
+/** Publish the fresh chat that replaces `previous` (/clear, a model switch).
+ *  A side chat's replacement stays a side chat, branched from the same chat,
+ *  in the same Workbench tab; any other chat opens in the chat column. */
+export function publishReplacementChat(
+  dispatch: (action: Action) => void,
+  previous: ChatThread,
+  fresh: ChatThread,
+): void {
+  if (!isSideChat(previous)) {
+    dispatch({ type: "ADD_CHAT", chat: fresh, recordWorkspaceActivity: true });
+    return;
+  }
+  dispatch({
+    type: "OPEN_SIDE_CHAT",
+    chat: {
+      ...fresh,
+      kind: "side",
+      title: SIDE_CHAT_TITLE,
+      ...(previous.sourceChatId ? { sourceChatId: previous.sourceChatId } : {}),
+    },
+    replaceChatId: previous.id,
+    recordWorkspaceActivity: true,
+  });
   requestWorkbenchReveal();
 }
 

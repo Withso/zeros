@@ -166,7 +166,7 @@ import {
 } from "./composer-text-attachment-delivery";
 import { registerLiveChatFileStager } from "./composer-file-attachment-delivery";
 import { buildForkTranscriptAttachment, createForkedChat } from "./fork-chat";
-import { markSideChatSeedSent, openSideChat as openSideChatFrom, publishSideChat, sideChatHandoffFor, useSideChatSeed, warmSideChat as warmSideChatFrom, type SideChatSource } from "./side-chat";
+import { markSideChatSeedSent, openSideChat as openSideChatFrom, publishReplacementChat, publishSideChat, sideChatHandoffFor, useSideChatSeed, warmSideChat as warmSideChatFrom, type SideChatSource } from "./side-chat";
 import { SideChatBranchBanner } from "./side-chat-banner";
 import { hasParentContext } from "./add-child-session";
 import { resolveComposerPlaceholder } from "./composer-placeholder";
@@ -1335,11 +1335,7 @@ function AgentChatBody({
       if (draft) {
         dispatch({ type: "SET_CHAT_DRAFT", chatId: fresh.id, draft });
       }
-      dispatch({
-        type: "ADD_CHAT",
-        chat: fresh,
-        recordWorkspaceActivity: true,
-      });
+      publishReplacementChat(dispatch, chatThread, fresh);
     },
     [chatThread, chatId, dispatch, agentSessions, updateChatSettings],
   );
@@ -1769,7 +1765,7 @@ function AgentChatBody({
             const state = useWorkspaceStore.getState(), current = state.chats.find((row) => row.id === chatId);
             if (!current || current.archived || current.folder !== chatThread.folder || current.agentId !== chatThread.agentId) return;
             if (!deferred || state.navigationVersion === navigationVersion && state.activeChatId === activeChatId)
-              dispatch({ type: "ADD_CHAT", chat: fresh, recordWorkspaceActivity: true });
+              publishReplacementChat(dispatch, chatThread, fresh);
             editChat(dispatch, chatId, { archived: true });
           };
           const closing = agentSessions.closeSession(chatId);
@@ -4769,7 +4765,7 @@ function AgentChatBody({
             {/* A side chat opens on its branch banner, above Add chat
                 transcripts; after the first send only the banner remains, as
                 the transcript's first item, so it scrolls away with it. */}
-            {sideChatSeed && <SideChatBranchBanner seed={sideChatSeed} />}
+            {sideChatSeed && <SideChatBranchBanner seed={sideChatSeed} active={surfaceActive} />}
             {!readOnly &&
               emptyStateReady &&
               session.messages.length === 0 &&

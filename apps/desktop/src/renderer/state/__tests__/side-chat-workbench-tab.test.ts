@@ -70,6 +70,26 @@ describe("OPEN_SIDE_CHAT", () => {
     expect(scope.tabs.filter((tab) => tab.chatId === side.id)).toHaveLength(1);
   });
 
+  it("shows a replacement side chat (/clear, a model switch) in the tab it replaces", () => {
+    const folder = "/repo/side-chat-replace";
+    dispatch({ type: "ADD_CHAT", chat: thread("source-replace", folder) });
+    dispatch({ type: "OPEN_SIDE_CHAT", chat: thread("side-old", folder, { kind: "side", title: "Side chat" }) });
+    const before = useWorkspaceStore.getState().workbenchByScope[workbenchScopeForFolder(folder)]!;
+    const oldTab = before.tabs.find((tab) => tab.chatId === "side-old")!;
+    dispatch({
+      type: "OPEN_SIDE_CHAT",
+      chat: thread("side-new", folder, { kind: "side", title: "Side chat" }),
+      replaceChatId: "side-old",
+      recordWorkspaceActivity: true,
+    });
+    const state = useWorkspaceStore.getState();
+    const scope = state.workbenchByScope[workbenchScopeForFolder(folder)]!;
+    expect(scope.tabs).toHaveLength(before.tabs.length);
+    expect(scope.tabs.find((tab) => tab.id === oldTab.id)).toMatchObject({ chatId: "side-new" });
+    expect(scope.activeId).toBe(oldTab.id);
+    expect(state.activeChatId).toBe("side-new");
+  });
+
   it("closes the tab when its chat is deleted", () => {
     const folder = "/repo/side-chat-delete";
     dispatch({ type: "ADD_CHAT", chat: thread("source-delete", folder) });

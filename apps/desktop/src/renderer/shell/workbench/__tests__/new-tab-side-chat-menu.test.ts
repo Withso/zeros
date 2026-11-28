@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { ChatThread } from "../../../state/store";
 import { resetSideChatSeedsForTesting, setSideChatSeed } from "../../../features/agent/side-chat-seeds";
 import { workbenchScopeForFolder } from "../../../state/workspace-store";
-import { sideChatEntries } from "../new-tab-side-chat-menu";
+import { sideChatEntries, sideChatListLabel } from "../new-tab-side-chat-menu";
 
 class MemoryStorage {
   map = new Map<string, string>();
@@ -41,5 +41,13 @@ describe("sideChatEntries", () => {
     const entries = sideChatEntries([chat("legacy")], workbenchScopeForFolder("/repo"), new Set());
     expect(entries).toHaveLength(1);
     expect(entries[0]!.from).toBe("Old chat");
+  });
+});
+
+describe("sideChatListLabel", () => {
+  it("never calls a list empty while the workspace's chats are still loading", () => {
+    expect(sideChatListLabel(0, true)).toBe("Loading side chats…");
+    expect(sideChatListLabel(0, false)).toBe("No side chats yet");
+    expect(sideChatListLabel(2, true)).toBe("In this workspace · 2");
   });
 });

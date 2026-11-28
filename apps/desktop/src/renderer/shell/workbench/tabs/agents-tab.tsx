@@ -35,6 +35,7 @@ import { SidebarPlacementIcon, SidebarPrMarks, STATUS_TONE_CLS, sidebarStatusDot
 import type { WorkbenchTab } from "../tab-model";
 import { useWorkbenchStatusSource } from "../tab-status";
 import {
+  agentsChildCloudError,
   agentsGroupOf,
   agentsRowPlace,
   agentsRowStatus,
@@ -68,7 +69,7 @@ function useUnreadIds(ids: readonly string[]): ReadonlySet<string> {
 }
 
 const NO_IDS: readonly string[] = [];
-const NO_WORKSPACES: readonly Workspace[] = [];
+const NO_CLOUD_FOLDERS: readonly { id: string; path: string }[] = [];
 const NO_PLACE: AgentsRowPlace = { separate: false, cloud: false, project: null };
 
 function descendants(node: SessionNode): ChatThread[] {
@@ -146,20 +147,25 @@ export function AgentsTab({ active, scope }: { tab: WorkbenchTab; active: boolea
     }
     return out;
   }, [active, allChildIds, tree, live, folder, currentWorkspace]);
-  const childWorkspaces = useMemo(() => {
-    const seen = new Map<string, Workspace>();
-    for (const { own } of places.values()) if (own) seen.set(own.id, own);
-    return seen.size ? [...seen.values()] : NO_WORKSPACES;
-  }, [places]);
-  const cloudErrors = useCloudErrorWorkspaceIds(childWorkspaces);
+  // A child in its own cloud workspace reads that machine's state by its
+  // folder, as its row's label does, whether or not the live list has it yet.
+  const childCloudFolders = useMemo(() => {
+    const seen = new Set<string>();
+    for (const [id, { place }] of places) {
+      const chat = place.separate && place.cloud ? tree.byId.get(id)?.chat : undefined;
+      if (chat) seen.add(chat.folder);
+    }
+    return seen.size ? [...seen].map((path) => ({ id: path, path })) : NO_CLOUD_FOLDERS;
+  }, [places, tree]);
+  const cloudErrors = useCloudErrorWorkspaceIds(childCloudFolders);
   const signalOf = useCallback((chat: ChatThread): AgentsRowSignal => {
-    const own = places.get(chat.id)?.own ?? null;
+    const { place, own } = places.get(chat.id) ?? { place: NO_PLACE, own: null };
     return {
       status: statusOf.get(chat.id) ?? "idle",
       unread: unread.has(chat.id),
       archived: !!chat.archived,
       setupFailed: !!own && setupFailureShown(own, acknowledged.has(own.id)),
-      cloudError: !!own && cloudErrors.has(own.id),
+      cloudError: agentsChildCloudError(place, chat.folder, cloudErrors),
     };
   }, [places, statusOf, unread, acknowledged, cloudErrors]);
   // Stored chats stay browsable while a cloud runtime sleeps.

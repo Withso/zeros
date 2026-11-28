@@ -80,3 +80,14 @@ export function groupAgentsRows<T extends { group: AgentsGroupId }>(rows: readon
   return AGENTS_GROUPS.map((group) => ({ ...group, rows: rows.filter((row) => row.group === group.id) }))
     .filter((group) => group.rows.length > 0);
 }
+
+/** Whether a child's own cloud machine reports an error. Read by the child's
+ *  folder, as its row's label is, so the label, its group and its parent's
+ *  Needs you dot agree even before the live workspace list includes it. */
+export function agentsChildCloudError(
+  place: AgentsRowPlace,
+  folder: string,
+  errorFolders: ReadonlySet<string>,
+): boolean {
+  return place.separate && place.cloud && errorFolders.has(folder);
+}
