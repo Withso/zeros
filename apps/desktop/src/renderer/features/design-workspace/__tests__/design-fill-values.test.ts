@@ -155,6 +155,18 @@ describe("design fill values", () => {
     ).toBeNull();
   });
 
+  it("keeps range-valued position tokens editable", () => {
+    expect(
+      parseEditableDesignGradient(
+        "linear-gradient(var(--gradient-angle), #FF0000 var(--start-range), blue)", // check:ui ignore-line -- authored CSS fixture
+        "linear-gradient(90deg, rgb(255, 0, 0) 0%, rgb(255, 0, 0) 30%, rgb(0, 0, 255) 100%)", // check:ui ignore-line -- CSSOM fixture
+      ),
+    ).toMatchObject({
+      angle: "var(--gradient-angle)",
+      startPosition: "var(--start-range)",
+    });
+  });
+
   it("fails closed for gradients the two-stop editor cannot preserve", () => {
     expect(
       parseDesignGradient("linear-gradient(red, yellow 50%, blue)"),

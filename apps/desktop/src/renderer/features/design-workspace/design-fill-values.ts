@@ -1,3 +1,4 @@
+import { parseDesignColor } from "./design-color-values";
 export type DesignFillType = "solid" | "gradient" | "image";
 
 export interface DesignGradientValue {
@@ -232,7 +233,37 @@ export function parseEditableDesignGradient(
   const parsed = parseDesignGradient(value);
   if (!parsed) return null;
   const resolved = parseDesignGradient(resolvedValue);
-  if (!resolved) return null;
+  if (!resolved) {
+    // A position token may itself be a range, which the resolved CSS expands
+    // into extra stops. That shape round-trips through the token, so only
+    // hidden color-stop data or hidden conic geometry remains unsafe.
+    if (
+      parsed.type === "conic" &&
+      /^conic-gradient\(\s*from\s+[^,]+\s+at\s+/i.test(resolvedValue.trim())
+    )
+      return null;
+    if (
+      [parsed.start, parsed.end].some((color) =>
+        color.toLocaleLowerCase().includes("var("),
+      )
+    )
+      return null;
+    const input = gradientInput(resolvedValue);
+    const start = parseDesignColor(parsed.start);
+    const firstStop = input?.parts
+      ?.slice(0, 2)
+      .map((part) => parseDesignColor(parseStop(part, "0%")?.color ?? ""))
+      .find(
+        (color) =>
+          color &&
+          start &&
+          color.r === start.r &&
+          color.g === start.g &&
+          color.b === start.b &&
+          color.a === start.a,
+      );
+    return firstStop ? parsed : null;
+  }
   for (const key of ["start", "end"] as const) {
     const position = parsed[`${key}Position`];
     const tokenColor = parsed[key].toLocaleLowerCase().includes("var(");
