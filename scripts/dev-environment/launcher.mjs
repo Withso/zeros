@@ -16,7 +16,8 @@ import { DevelopmentProcesses, run, waitForHttp, waitForDevSignIn } from "./proc
 import { ensureDevAuthEnvironment } from "../dev-auth-profile.mjs";
 import { cloudSeedMessage, cloudSeedNeeded, readLocalSeed, recordCloudSeed, saveLocalSeed } from "./cloud-local-seed-state.mjs";
 import { REBOOT_RECOVERED, currentBoot, recoverLaunchAfterReboot } from "./reboot-recovery.mjs";
-import { maintainLocalRuntimes, markLocalRuntime, removeLocalRuntimeUses, resolveLocalRuntime, runtimeRetentionSummary, RUNTIME_USE_REFRESH_MS } from "./cloud-local-runtime.mjs";
+import { maintainLocalRuntimes, maintainLocalWebhooks, markLocalRuntime, removeLocalRuntimeUses, resolveLocalRuntime, runtimeRetentionSummary,
+  RUNTIME_USE_REFRESH_MS, webhookCleanupSummary } from "./cloud-local-runtime.mjs";
 import { prepareAlphaLaunch } from "../alpha-instance.mjs";
 import { fixtureBindingDigest } from "./hosted-fixtures.mjs";
 
@@ -156,6 +157,9 @@ async function start(workspace, profile) {
     const runtimeOptions = { previous: process.env.ZEROS_CLOUD_V2_RUNTIME_PREVIOUS_SHA256 };
     await maintainLocalRuntimes(workspace, profile, root, runtime, runtimeOptions).then(plan => console.log(`[zeros-dev] ${runtimeRetentionSummary(plan)}`),
       () => console.log("[zeros-dev] Worker runtime use was not recorded and cleanup was skipped; the next start retries."));
+    // Before ensureWorkosWebhook, so a checkout whose endpoint another checkout removed creates a new one.
+    await maintainLocalWebhooks(workspace, profile, root).then(plan => console.log(`[zeros-dev] ${webhookCleanupSummary(plan)}`),
+      () => console.log("[zeros-dev] Abandoned WorkOS endpoint cleanup was skipped; the next start retries."));
     runtimeUse = setInterval(() => void markLocalRuntime(workspace, profile, root, runtime, runtimeOptions).catch(() => {}), RUNTIME_USE_REFRESH_MS);
     runtimeUse.unref();
     await run("npm", ["--prefix", "apps/web", "run", "build"], { cwd: root, env, signal, timeout: 180_000, label: "Auth web build" });

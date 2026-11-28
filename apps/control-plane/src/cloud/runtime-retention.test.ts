@@ -1,7 +1,7 @@
 import { Readable } from "node:stream";
 import { describe, expect, it, vi } from "vitest";
-import { devRuntimeRetentionMode, planDevRuntimeRetention, planRuntimeRetention, pruneRuntimes, recordRuntimeUse, removeRuntimeUses, retainDevRuntimes,
-  type StoredObject } from "./runtime-retention.js";
+import { clearWebhookReclaim, devRuntimeRetentionMode, planDevRuntimeRetention, planRuntimeRetention, pruneRuntimes, recordRuntimeUse, recordWebhookReclaim,
+  removeRuntimeUses, retainDevRuntimes, runtimeUseOwners, webhookReclaimed, type StoredObject } from "./runtime-retention.js";
 
 const now = Date.parse("2026-10-27T12:00:00Z"), hour = 60 * 60_000, day = 24 * hour;
 const sha = (c: string) => c.repeat(64), source = (c: string) => `${c}${"0".repeat(63)}`;
@@ -157,8 +157,9 @@ describe("headless Dev runtime retention", () => {
   it("marks this checkout's runtime and starts the marker clock once", async () => {
     const fresh = bucket([]);
     await recordRuntimeUse(fresh, "dev", sha("1"), { owner: "a".repeat(24), instance }, now);
-    expect(calls(fresh).map(([, input]) => input.Key)).toEqual([`cloud-v2/runtime/uses/${sha("1")}/${"a".repeat(24)}/${instance}.json`, "cloud-v2/runtime/uses/since.json"]);
-    expect(calls(fresh)[1]![1].IfNoneMatch).toBe("*");
+    expect(calls(fresh).map(([, input]) => input.Key)).toEqual([`cloud-v2/runtime/uses/${sha("1")}/${"a".repeat(24)}/${instance}.json`,
+      `cloud-v2/runtime/uses/owners/${"a".repeat(24)}.json`, "cloud-v2/runtime/uses/since.json"]);
+    expect(calls(fresh)[2]![1].IfNoneMatch).toBe("*");
     await expect(recordRuntimeUse(bucket([since(day)]), "dev", sha("1"), { owner: "a".repeat(24), instance }, now)).resolves.toBeUndefined();
     await expect(recordRuntimeUse(fresh, "dev", sha("1"), { owner: "a".repeat(24), instance: "../other" }, now)).rejects.toThrow();
     await expect(recordRuntimeUse(fresh, "dev", sha("1"), { owner: "../owner", instance }, now)).rejects.toThrow();
@@ -196,6 +197,40 @@ describe("headless Dev runtime retention", () => {
     const client = { send: vi.fn(async () => ({ Contents: [], IsTruncated: true })) };
     await expect(retainDevRuntimes(client, "dev", options)).rejects.toThrow(/incomplete/);
     await expect(pruneRuntimes(client, "dev", { protect: [], now })).rejects.toThrow(/incomplete/);
+  });
+  it("names the owners that marked a runtime this week, and when markers began", async () => {
+    const ownerSeen = (owner: string, age: number): StoredObject => ({ key: `cloud-v2/runtime/uses/owners/${owner}.json`, lastModified: new Date(now - age), size: 40 });
+    // An owner record outlives the runtime markers Dev cleanup removes; the newest of both counts.
+    expect(await runtimeUseOwners(bucket([...objects(8 * day), ownerSeen("a".repeat(24), 2 * day), ownerSeen("c".repeat(24), 12 * day)]), "dev"))
+      .toEqual({ since: new Date(now - 8 * day).toISOString(), lastSeen: { ["a".repeat(24)]: new Date(now - 2 * day).toISOString(),
+        ["b".repeat(24)]: new Date(now - 6 * day).toISOString(), ["c".repeat(24)]: new Date(now - 12 * day).toISOString() } });
+    expect(await runtimeUseOwners(bucket([]), "dev")).toEqual({ since: null, lastSeen: {} });
+  });
+  it("records, reads and clears a WorkOS reclaim for one checkout, and treats a missing record as none", async () => {
+    const stored = new Map<string, string>();
+    const client = { send: vi.fn(async (command: any) => {
+      const name = command.constructor.name, input = command.input;
+      if (name === "PutObjectCommand") { stored.set(input.Key, input.Body); return {}; }
+      if (name === "GetObjectCommand") {
+        const body = stored.get(input.Key); if (body === undefined) throw { $metadata: { httpStatusCode: 404 } };
+        return { ContentLength: body.length, Body: Readable.from([Buffer.from(body)]) };
+      }
+      if (name === "DeleteObjectsCommand") { for (const o of input.Delete.Objects) stored.delete(o.Key); return {}; }
+      throw new Error(`unexpected ${name}`);
+    }) };
+    const me = { owner: "a".repeat(24), instance };
+    expect(await webhookReclaimed(client, "dev", me)).toBeNull();
+    await recordWebhookReclaim(client, "dev", me, "we_123", now);
+    expect([...stored.keys()]).toEqual([`cloud-v2/runtime/uses/webhooks/${"a".repeat(24)}/${instance}.json`]);
+    expect(await webhookReclaimed(client, "dev", me)).toBe("we_123");
+    await clearWebhookReclaim(client, "dev", me);
+    expect(await webhookReclaimed(client, "dev", me)).toBeNull();
+    await expect(recordWebhookReclaim(client, "dev", me, "../x", now)).rejects.toThrow();
+    await expect(webhookReclaimed(client, "dev", { owner: "../x", instance })).rejects.toThrow();
+    // Reclaim records are not runtime markers: Dev runtime cleanup neither keeps nor removes runtimes for them.
+    const plan = planDevRuntimeRetention([...objects(8 * day), { key: `cloud-v2/runtime/uses/webhooks/${"a".repeat(24)}/${instance}.json`, lastModified: new Date(now), size: 50 }],
+      new Map(), { current: sha("1"), now, mode: "apply" });
+    expect(plan.keys.uses.some(key => key.includes("/webhooks/"))).toBe(false);
   });
   it("removes only this checkout's markers on reset", async () => {
     const client = bucket(objects(8 * day));

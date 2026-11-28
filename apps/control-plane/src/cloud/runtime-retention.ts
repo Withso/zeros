@@ -118,6 +118,8 @@ export async function recordRuntimeUse(client: Pick<S3Client, "send">, bucket: s
   const at = new Date(now).toISOString();
   await client.send(new PutObjectCommand({ Bucket: bucket, Key: `${USES}${sha256}/${checkout.owner}/${checkout.instance}.json`,
     Body: JSON.stringify({ version: 1, sha256, at }), ContentType: "application/json", CacheControl: "no-cache" }));
+  await client.send(new PutObjectCommand({ Bucket: bucket, Key: `${USES}owners/${checkout.owner}.json`,
+    Body: JSON.stringify({ version: 1, at }), ContentType: "application/json", CacheControl: "no-cache" }));
   try {
     await client.send(new PutObjectCommand({ Bucket: bucket, Key: USES_SINCE, Body: JSON.stringify({ version: 1, at }),
       ContentType: "application/json", IfNoneMatch: "*" }));
@@ -210,4 +212,46 @@ export async function removeRuntimeUses(client: Pick<S3Client, "send">, bucket: 
   const keys = (await listRuntimeObjects(client, bucket, USES)).map(object => object.key).filter(key => key.match(USE)?.[3] === instance);
   await deleteKeys(client, bucket, keys);
   return keys.length;
+}
+
+/** Dev owners with a use marker in the last week, and when markers began. */
+/** When each Dev owner last marked a runtime in this bucket: the newest of its runtime markers and its owner record.
+ * The owner record outlives the markers Dev runtime cleanup removes with their runtimes. Owners absent here have never
+ * marked in this bucket (another bucket, or code without markers) and are not known to be gone. */
+export async function runtimeUseOwners(client: Pick<S3Client, "send">, bucket: string) {
+  const objects = await listRuntimeObjects(client, bucket, USES), lastSeen: Record<string, string> = {};
+  for (const object of objects) {
+    const owner = object.key.match(USE)?.[2] ?? object.key.match(OWNER_SEEN)?.[1];
+    if (owner && (lastSeen[owner] === undefined || Date.parse(lastSeen[owner]) < object.lastModified.getTime())) lastSeen[owner] = object.lastModified.toISOString();
+  }
+  return { since: objects.find(object => object.key === USES_SINCE)?.lastModified.toISOString() ?? null, lastSeen };
+}
+const OWNER_SEEN = /^cloud-v2\/runtime\/uses\/owners\/([0-9a-f]{24})\.json$/;
+
+// Another checkout's cleanup deleted this checkout's WorkOS endpoint: written before the delete, so a checkout that
+// comes back can drop its stale receipt and create a new endpoint instead of failing ownership verification.
+const reclaimKey = (checkout: DevCheckout) => {
+  if (!OWNER.test(checkout.owner) || !INSTANCE.test(checkout.instance)) throw new Error("Invalid Dev checkout");
+  return `${USES}webhooks/${checkout.owner}/${checkout.instance}.json`;
+};
+const ENDPOINT_ID = /^we_[A-Za-z0-9]{1,64}$/;
+export async function recordWebhookReclaim(client: Pick<S3Client, "send">, bucket: string, checkout: DevCheckout, endpointId: string, now = Date.now()) {
+  if (!ENDPOINT_ID.test(endpointId)) throw new Error("Invalid WorkOS endpoint");
+  await client.send(new PutObjectCommand({ Bucket: bucket, Key: reclaimKey(checkout), ContentType: "application/json",
+    Body: JSON.stringify({ version: 1, endpointId, at: new Date(now).toISOString() }) }));
+}
+/** The endpoint another checkout deleted for this one, or null. */
+export async function webhookReclaimed(client: Pick<S3Client, "send">, bucket: string, checkout: DevCheckout): Promise<string | null> {
+  let object;
+  try { object = await client.send(new GetObjectCommand({ Bucket: bucket, Key: reclaimKey(checkout) })); }
+  catch (error) { if ((error as { $metadata?: { httpStatusCode?: number } })?.$metadata?.httpStatusCode === 404) return null; throw error; }
+  if (!object.Body || (object.ContentLength ?? 0) > 1024) throw new Error("Invalid WorkOS reclaim record");
+  const parts: Buffer[] = [];
+  for await (const chunk of object.Body as AsyncIterable<Uint8Array>) parts.push(Buffer.from(chunk));
+  const endpointId = (JSON.parse(Buffer.concat(parts).toString("utf8")) as { endpointId?: unknown }).endpointId;
+  if (typeof endpointId !== "string" || !ENDPOINT_ID.test(endpointId)) throw new Error("Invalid WorkOS reclaim record");
+  return endpointId;
+}
+export async function clearWebhookReclaim(client: Pick<S3Client, "send">, bucket: string, checkout: DevCheckout) {
+  await deleteKeys(client, bucket, [reclaimKey(checkout)]);
 }
