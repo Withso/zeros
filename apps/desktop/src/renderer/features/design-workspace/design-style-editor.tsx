@@ -50,6 +50,7 @@ import {
   InspectorSelect,
 } from "./design-inspector-kit";
 import { designRuntimeLayerLabel } from "./design-layer-label";
+import { DESIGN_RADIUS_CORNERS, designCornerRadiusStyles } from "./design-layout-tools";
 import {
   type DesignLayoutAction,
   type DesignLayoutFieldOptions,
@@ -281,6 +282,9 @@ export function DesignStyleEditor({
   const [cornersOpen, setCornersOpen] = useState(false);
   const cornersDiffer = radii.some((radius) => radius !== radii[0]);
   const independentCorners = cornersOpen || cornersDiffer;
+  const radiusCorners = DESIGN_RADIUS_CORNERS.map((corner) =>
+    styleValue(details, `border-${corner}-radius`, "0px"),
+  ).join("|");
   const blendMode = styleValue(details, "mix-blend-mode", "normal");
 
   const fillImage = styleValue(details, "background-image", "none");
@@ -539,6 +543,7 @@ export function DesignStyleEditor({
                     icon: "radius",
                     whole: true,
                     placeholder: cornersDiffer ? "Mixed" : undefined,
+                    radiusCorners,
                   },
                 )}
                 <InspectorIconButton
@@ -549,7 +554,16 @@ export function DesignStyleEditor({
                   disabled={disabled}
                   onClick={() => {
                     if (cornersDiffer) {
-                      commit({ "border-radius": radii[0] ?? "0px" }, "radius");
+                      const radius = radii[0] ?? "0px";
+                      commit(
+                        designCornerRadiusStyles({
+                          "top-left": radius,
+                          "top-right": radius,
+                          "bottom-right": radius,
+                          "bottom-left": radius,
+                        }),
+                        "radius",
+                      );
                       setCornersOpen(false);
                       return;
                     }
@@ -574,6 +588,7 @@ export function DesignStyleEditor({
                     compact: true,
                     whole: true,
                     icon: glyph,
+                    radiusCorners,
                   },
                 )}
               </React.Fragment>
@@ -588,6 +603,7 @@ export function DesignStyleEditor({
                     compact: true,
                     whole: true,
                     icon: glyph,
+                    radiusCorners,
                   },
                 )}
               </React.Fragment>

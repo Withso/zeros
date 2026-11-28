@@ -174,6 +174,7 @@ import {
   type DesignLayoutFieldOptions,
 } from "./design-layout-values";
 import { blockingDesignLintReason, frameBlockingDesignLintErrors } from "./design-lint-summary";
+import { DESIGN_RADIUS_CORNERS, designCornerRadiusStyles } from "./design-layout-tools";
 import { beginDesignPointerGesture } from "./design-pointer-gesture";
 import { DesignStyleEditor } from "./design-style-editor";
 import { DesignColorRevalidatingContext } from "./design-color-picker";
@@ -1403,6 +1404,17 @@ const InspectorStyleField = React.memo(function InspectorStyleField({
             Math.max(DESIGN_PERCENTAGE_RANGE.min, Math.min(DESIGN_PERCENTAGE_RANGE.max, Number.parseFloat(next))) / 100,
           )
         : next || null;
+    const radii = options?.radiusCorners?.split("|");
+    if (value && radii?.length === 4) {
+      return designCornerRadiusStyles(
+        Object.fromEntries(
+          DESIGN_RADIUS_CORNERS.map((corner, index) => [
+            corner,
+            property === "border-radius" || property === `border-${corner}-radius` ? value : radii[index]!,
+          ]),
+        ) as Record<(typeof DESIGN_RADIUS_CORNERS)[number], string>,
+      );
+    }
     return Object.fromEntries(
       [property, ...(options?.linkedProperties ?? [])].map((key) => [
         key,
